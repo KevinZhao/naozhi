@@ -407,6 +407,9 @@ func (s *Server) registerDashboard() {
 	// P1 cron-run-history: per-job execution history.
 	s.mux.HandleFunc("GET /api/cron/runs", auth(s.cronH.handleRunsList))
 	s.mux.HandleFunc("GET /api/cron/runs/{run_id}", auth(s.cronH.handleRunDetail))
+	// cron-dashboard-redesign P2a §4.4.3 — transcript endpoint. Path
+	// param mirrors handleRunDetail; same per-IP rate limit applies.
+	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/transcript", auth(s.cronH.handleRunTranscript))
 	// system-session daemons (docs/rfc/system-session.md §9.2/§9.3)
 	s.mux.HandleFunc("GET /api/system/daemons", auth(s.handleSystemDaemons))
 	s.mux.HandleFunc("POST /api/system/labels/clear-origin", auth(s.handleClearLabelOrigin))

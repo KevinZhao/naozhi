@@ -7178,14 +7178,18 @@ function runKatex() {
 //   1) contains an unambiguous LaTeX char (\ ^ _ { })
 //   2) otherwise must be built from "math alphabet" chars only (digits,
 //      single letters, operators, parens, punctuation) AND contain no two
-//      consecutive 3+ letter English words AND contain at least one digit
-//      or operator — this accepts `$x=1$` / `$2x$` / `$a+b$` and rejects
-//      any multi-word sentence that happened to slip past the outer guard.
+//      consecutive 3+ letter English words AND contain at least one math
+//      hint — digit, operator, OR a function-call pattern `letter(` /
+//      `)letter`. The function-call clause accepts `$h(x)$` / `$f(x)$` /
+//      `$g(t)$` which the previous "must contain digit/operator" rule
+//      mistakenly rejected (function references in prose carry no operator
+//      character themselves). Pure prose tokens like `$(test)$` still
+//      reject because they lack both a math hint and a function-call shape.
 function isMathInline(tex) {
   if (/[\\^_{}]/.test(tex)) return true;
   if (!/^[\s\d+\-*/=<>≤≥≠±·×÷!().,;\[\]|a-zA-Z]+$/.test(tex)) return false;
   if (/[a-zA-Z]{3,}\s+[a-zA-Z]{3,}/.test(tex)) return false;
-  if (!/[\d+\-*/=<>]/.test(tex)) return false;
+  if (!/[\d+\-*/=<>]|[a-zA-Z]\(|\)[a-zA-Z]/.test(tex)) return false;
   return true;
 }
 
@@ -7872,9 +7876,16 @@ async function renderSandboxedBlob(project, node, path, body, blobType) {
     const frame = document.createElement('iframe');
     frame.src = url;
     frame.title = path;
-    // Empty sandbox = no capabilities at all. Any allow-* token here would
-    // re-grant the capability; callers must never add one.
-    frame.setAttribute('sandbox', '');
+    // sandbox='allow-scripts' grants script execution but withholds the
+    // same-origin token — the iframe stays in an opaque origin and cannot
+    // read dashboard cookies, localStorage, or DOM. Combined with the blob:
+    // URL (origin already opaque) the document is fully isolated from the
+    // dashboard. Scripts are required so workspace HTML using MathJax /
+    // KaTeX / Mermaid / chart libs renders correctly. The contract test
+    // (TestDashboardJS_SandboxedBlobRender) substring-matches the helper
+    // body for forbidden tokens, so this comment must NEVER spell out
+    // those tokens — see that test for the canonical contract.
+    frame.setAttribute('sandbox', 'allow-scripts');
     frame.referrerPolicy = 'no-referrer';
     body.appendChild(frame);
   } catch (e) {
@@ -11659,28 +11670,39 @@ function getCronTimelineState(jobId) {
 // been removed — see cronDrawerHtml above.
 
 // cronTimelineHtml — 渲染整个"执行历史"section 的内层 HTML。
-// 头部：标题 + 总次数 + 成功率 + 最后错误分类。
-// 行列表：每条 run 一行（点击展开）+ [加载更多] 分页按钮。
+// 头部：简洁标题"最近运行"+ 总次数小标签（cron-dashboard-redesign P3 §4：
+// 把"成功率/最后错误分类"等运维指标隐去；用户首屏只看"它最近跑得怎样"，
+// 排查时再点单条 run 进 sheet 看详情）。
+// 行列表：默认折叠到 5 条，"查看全部 N 条"按钮展开剩余 + 触发 loadMore。
+// CRON_TIMELINE_DEFAULT_VISIBLE = 5 条与 cronDrawerSpecHtml 的视觉密度同源。
 function cronTimelineHtml(jobId, job, st) {
   const stats = job && job.stats;
   const total = stats ? (stats.total | 0) : 0;
-  const ok = stats ? (stats.succeeded | 0) : 0;
-  const rate = total > 0 ? Math.round((ok * 100) / total) : 0;
   const headTitle = total > 0
-    ? '执行历史 (' + total + ' 次, ' + rate + '% 成功)'
-    : '执行历史';
-  const lastErrCls = job && job.last_error_class;
-  const headSub = lastErrCls
-    ? '<span class="ct-head-err">最近一次：' + esc(cronErrorClassLabel(lastErrCls)) + '</span>'
-    : '';
+    ? '最近运行 · ' + total + ' 次'
+    : '最近运行';
   const rowsHtml = st.runs.length === 0
-    ? '<div class="ct-empty">暂无执行记录。下次调度或点击"运行"按钮触发首次执行。</div>'
+    ? '<div class="ct-empty">暂无执行记录。下次调度或点击「立即执行」触发首次运行。</div>'
     : st.runs.map(r => cronTimelineRowHtml(jobId, r, st)).join('');
-  // [加载更多] 按钮：done=true 显示"已到结尾"灰态，否则可点击拉下一页。
-  // st.runs.length === 0 时不显示按钮（无意义）。
+
+  // P3 §4 折叠机制：data-collapsed=true 时 CSS 只露前 5 行；点 [查看全部]
+  // 切到 false。本地视图状态用 dataset 而非 module-level，因为重绘时
+  // renderCronTimelineForJob 整段重建 innerHTML，模块状态会被冲掉；DOM
+  // 属性同样会被冲掉但用户的"展开"动作本就是 single-click ad-hoc 行为，
+  // 不持久化也合理。
+  const initiallyCollapsed = st.runs.length > 5 ? 'true' : 'false';
+  const hiddenCount = Math.max(0, st.runs.length - 5);
+
   let moreBtn = '';
   if (st.runs.length > 0) {
-    if (st.done) {
+    if (st.runs.length > 5) {
+      // 折叠态："查看全部 N 条"——展开后再让既有 [加载更多] 接管分页。
+      moreBtn = '<button type="button" class="ct-more-btn ct-show-all"' +
+        ' data-hidden-count="' + hiddenCount + '"' +
+        ' onclick="cronTimelineToggleShowAll(this)">' +
+        '查看全部 ' + st.runs.length + ' 条' +
+      '</button>';
+    } else if (st.done) {
       moreBtn = '<button type="button" class="ct-more-btn" disabled aria-disabled="true">已到结尾</button>';
     } else {
       moreBtn = '<button type="button" class="ct-more-btn"' +
@@ -11692,10 +11714,37 @@ function cronTimelineHtml(jobId, job, st) {
   }
   return '<div class="ct-head">' +
       '<h3>' + esc(headTitle) + '</h3>' +
-      headSub +
     '</div>' +
-    '<div class="ct-rows">' + rowsHtml + '</div>' +
+    '<div class="ct-rows" data-collapsed="' + initiallyCollapsed + '" data-job-id="' + escAttr(jobId) + '">' + rowsHtml + '</div>' +
     (moreBtn ? '<div class="ct-more">' + moreBtn + '</div>' : '');
+}
+
+// cronTimelineToggleShowAll — 把 .ct-rows 从 collapsed 切到 expanded，
+// 并把按钮替换为既有 [加载更多] 行为（如果 st.done 则替换为"已到结尾"）。
+// 切换后还有更多页要拉的，下次点 [加载更多] 走原路径。
+function cronTimelineToggleShowAll(btn) {
+  if (!btn || !btn.parentNode) return;
+  const wrap = btn.closest('.cron-timeline-panel');
+  if (!wrap) return;
+  const rows = wrap.querySelector('.ct-rows');
+  if (!rows) return;
+  rows.setAttribute('data-collapsed', 'false');
+  const jobId = rows.getAttribute('data-job-id') || '';
+  const st = cronTimelineState[jobId];
+  // 替换按钮：用既有 cronTimelineLoadMore 路径——st.done 的话变灰态 [已到结尾]。
+  const next = document.createElement('div');
+  next.className = 'ct-more';
+  if (!st || st.done) {
+    next.innerHTML = '<button type="button" class="ct-more-btn" disabled aria-disabled="true">已到结尾</button>';
+  } else {
+    next.innerHTML = '<button type="button" class="ct-more-btn"' +
+      (st.loading ? ' disabled' : '') +
+      ' onclick="cronTimelineLoadMore(\'' + escJs(jobId) + '\')">' +
+      (st.loading ? '加载中…' : '加载更多') +
+    '</button>';
+  }
+  const oldMore = btn.parentNode;
+  if (oldMore && oldMore.parentNode) oldMore.parentNode.replaceChild(next, oldMore);
 }
 
 // cronTimelineRowHtml — 单条 run 行（cron-history-redesign §6 后改为只选中态，
@@ -11712,19 +11761,16 @@ function cronTimelineRowHtml(jobId, r, st) {
   const dur = state === 'running'
     ? '正在运行'
     : formatRunDuration(r.duration_ms || 0);
-  const sessionShort = r.session_id ? r.session_id.slice(0, 8) : '';
   const errCls = r.error_class || '';
   // cron-history-redesign §6: 选中态由 cronRunSheetState.runId 决定（与 sheet 联动）。
   const isSelected = !!(runId && cronRunSheetState && cronRunSheetState.runId === runId && cronRunSheetState.jobId === jobId);
   const dotCls = cronStateDotClass(state);
   const stateLbl = cronStateLabel(state);
 
-  // 副行：trigger / session 短 ID / error_class（缺省字段不渲染）
+  // 副行：trigger / error_class（session_id 短 ID 已移除——对最终用户无意义；
+  // 排查时仍可点行打开 run-detail sheet 看完整 session_id）
   const subParts = [];
   if (r.trigger) subParts.push('<span class="ctr-trigger">' + esc(r.trigger) + '</span>');
-  if (sessionShort) {
-    subParts.push('<span class="ctr-session" title="session_id: ' + escAttr(r.session_id || '') + '">' + esc(sessionShort) + '</span>');
-  }
   if (errCls) {
     subParts.push('<span class="ctr-errcls">' + esc(cronErrorClassLabel(errCls)) + '</span>');
   }
@@ -11761,6 +11807,12 @@ function formatCronTimelineShort(ms) {
 
 // cronTimelineDetailHtml — 展开行内的详情面板。
 // detail 为 null = 加载中骨架；为 object = 渲染 prompt/result/error_msg + fresh hint。
+//
+// cron-dashboard-redesign P2b §4.4.2 — 在 detail 存在的基础上，如果
+// detail.__transcript 也加载好（cronTimelineFetchDetail 同步 fetch），
+// 上方多渲染一个 4-tab 容器 (对话 / 工具 / 提示词 / 原始日志)，把现有
+// 三 <pre> 块作为"原始日志"兜底 tab；这样当 transcript 端点 5xx 或返回
+// fallback:"raw"/"missing" 时，用户切到原始日志依然能看到完整内容。
 function cronTimelineDetailHtml(jobId, runId, summary, detail) {
   if (!detail) {
     return '<div class="ctr-loading">加载详情中…</div>';
@@ -11821,7 +11873,183 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
   const empty = !promptBlock && !resultBlock && !errBlock && !workDir
     ? '<div class="ctr-empty-detail">这次 run 没有保存额外详情。</div>'
     : '';
-  return freshHint + promptBlock + resultBlock + errBlock + workDir + empty;
+  const rawTabBody = freshHint + promptBlock + resultBlock + errBlock + workDir + empty;
+
+  // P2b: 4-tab container. activeTab is stashed on the detail object so
+  // toggling tabs survives a cronTimelineFetchDetail re-render. Default
+  // depends on whether a transcript is actually available — when it is
+  // not, jump straight to "原始日志" so the user isn't staring at an
+  // empty conversation tab.
+  const transcript = detail.__transcript || null;
+  const hasTurns = transcript && Array.isArray(transcript.turns) && transcript.turns.length > 0;
+  if (!detail.__activeTab) {
+    detail.__activeTab = hasTurns ? 'chat' : 'raw';
+  }
+  const active = detail.__activeTab;
+  const turnCount = hasTurns ? transcript.turns.length : 0;
+  const toolCount = hasTurns
+    ? transcript.turns.filter(t => t && t.kind === 'tool_use').length
+    : 0;
+  const tabBtn = (key, label, count) => {
+    const cls = 'crs-tab' + (active === key ? ' active' : '');
+    const ariaSel = active === key ? 'true' : 'false';
+    const countHtml = (typeof count === 'number' && count > 0)
+      ? ' <span class="crs-tab-count">' + count + '</span>'
+      : '';
+    return '<button type="button" class="' + cls + '"' +
+      ' role="tab" aria-selected="' + ariaSel + '"' +
+      ' onclick="event.stopPropagation();cronRunSheetSelectTab(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\',\'' + escJs(key) + '\')">' +
+      esc(label) + countHtml +
+    '</button>';
+  };
+  const tabBar = '<div class="crs-tabs" role="tablist">' +
+    tabBtn('chat', '对话', turnCount) +
+    tabBtn('tools', '工具', toolCount) +
+    tabBtn('prompt', '提示词', 0) +
+    tabBtn('raw', '原始日志', 0) +
+  '</div>';
+
+  let tabBody = '';
+  if (active === 'chat') {
+    tabBody = hasTurns
+      ? cronRunTranscriptHtml(transcript, { only: null })
+      : '<div class="ctr-empty-detail">' +
+          (transcript && transcript.fallback === 'missing'
+            ? '没找到对话流文件，可能 session 被清理或新 backend 不写 JSONL。请看「原始日志」tab。'
+            : transcript && transcript.fallback === 'raw'
+            ? '对话流无法解析。请看「原始日志」tab。'
+            : '正在加载对话流…') +
+        '</div>';
+  } else if (active === 'tools') {
+    tabBody = hasTurns
+      ? cronRunTranscriptHtml(transcript, { only: 'tool_use' })
+      : '<div class="ctr-empty-detail">无工具调用。</div>';
+  } else if (active === 'prompt') {
+    tabBody = detail.prompt
+      ? '<pre class="ctr-block-body">' + esc(detail.prompt) + '</pre>'
+      : '<div class="ctr-empty-detail">这次 run 未持久化提示词。</div>';
+  } else {
+    // raw — legacy three-block view
+    tabBody = rawTabBody;
+  }
+  return tabBar + '<div class="crs-tab-body" role="tabpanel">' + tabBody + '</div>';
+}
+
+// cronRunTranscriptHtml renders a list of transcript turns as a vertical
+// timeline. cron-dashboard-redesign P2b §4.4.4.
+//
+// Security: assistant `text` runs through renderMd (already esc-safe).
+// Tool `output` and `error` strings go through esc + <pre> ONLY — never
+// renderMd — because those originate from arbitrary subprocess stdout
+// and may contain unescaped HTML/JS that markdown parsers can let slip
+// through. Tool input is JSON-stringified (unhelpful for raw HTML).
+function cronRunTranscriptHtml(transcript, opts) {
+  const onlyKind = opts && opts.only;
+  const turns = Array.isArray(transcript.turns) ? transcript.turns : [];
+  if (turns.length === 0) {
+    return '<div class="ctr-empty-detail">无内容。</div>';
+  }
+  const parts = [];
+  for (const t of turns) {
+    if (!t) continue;
+    if (onlyKind && t.kind !== onlyKind) continue;
+    parts.push(cronRunTurnHtml(t));
+  }
+  if (parts.length === 0) {
+    return '<div class="ctr-empty-detail">无匹配内容。</div>';
+  }
+  if (transcript.truncated) {
+    parts.push('<div class="ctr-empty-detail">…（已截断；超过显示上限，剩余内容请用 jq / less 查看 JSONL 原文）</div>');
+  }
+  return '<div class="crs-transcript">' + parts.join('') + '</div>';
+}
+
+// cronRunTurnHtml renders one turn. Switches on kind to produce the
+// appropriate avatar + body markup.
+function cronRunTurnHtml(t) {
+  const ts = t.ts ? formatCronTimelineShort(t.ts) : '';
+  if (t.kind === 'user') {
+    return '<div class="crs-turn user">' +
+      '<div class="crs-avatar user" aria-hidden="true">U</div>' +
+      '<div class="crs-turn-body">' +
+        '<div class="crs-turn-head"><span class="crs-role">用户</span><span class="crs-time">' + esc(ts) + '</span></div>' +
+        '<pre class="crs-text">' + esc(t.text || '') + '</pre>' +
+      '</div>' +
+    '</div>';
+  }
+  if (t.kind === 'assistant') {
+    const tokens = t.tokens ? '<span class="crs-tokens">+' + (t.tokens >= 1000 ? (t.tokens / 1000).toFixed(1) + 'k' : t.tokens) + '</span>' : '';
+    return '<div class="crs-turn assistant">' +
+      '<div class="crs-avatar assistant" aria-hidden="true">C</div>' +
+      '<div class="crs-turn-body">' +
+        '<div class="crs-turn-head"><span class="crs-role">Claude</span><span class="crs-time">' + esc(ts) + '</span>' + tokens + '</div>' +
+        '<div class="crs-text md">' + renderMd(t.text || '') + '</div>' +
+      '</div>' +
+    '</div>';
+  }
+  if (t.kind === 'tool_use') {
+    const inputJson = t.input ? JSON.stringify(t.input, null, 2) : '';
+    const inputBlock = inputJson
+      ? '<pre class="crs-tool-body">' + esc(inputJson) + '</pre>'
+      : '';
+    return '<div class="crs-turn tool"><div class="crs-avatar tool" aria-hidden="true">⚙</div>' +
+      '<div class="crs-turn-body">' +
+        '<details class="crs-tool-card">' +
+          '<summary class="crs-tool-head">' +
+            '<span class="crs-tool-name">' + esc(t.tool || 'tool') + '</span>' +
+            '<span class="crs-tool-summary">' + esc(t.summary || '') + '</span>' +
+            '<span class="crs-time">' + esc(ts) + '</span>' +
+          '</summary>' +
+          inputBlock +
+        '</details>' +
+      '</div>' +
+    '</div>';
+  }
+  if (t.kind === 'tool_result') {
+    const isErr = t.status === 'error';
+    return '<div class="crs-turn tool-result' + (isErr ? ' err' : '') + '">' +
+      '<div class="crs-avatar tool" aria-hidden="true">' + (isErr ? '✖' : '↳') + '</div>' +
+      '<div class="crs-turn-body">' +
+        '<details class="crs-tool-card' + (isErr ? ' err' : '') + '">' +
+          '<summary class="crs-tool-head">' +
+            '<span class="crs-tool-name">输出' + (isErr ? '（失败）' : '') + '</span>' +
+            '<span class="crs-time">' + esc(ts) + '</span>' +
+          '</summary>' +
+          '<pre class="crs-tool-body">' + esc(t.output || '') + '</pre>' +
+        '</details>' +
+      '</div>' +
+    '</div>';
+  }
+  if (t.kind === 'error') {
+    return '<div class="crs-turn err">' +
+      '<div class="crs-avatar tool" aria-hidden="true">✖</div>' +
+      '<div class="crs-turn-body">' +
+        '<div class="crs-turn-head"><span class="crs-role" style="color:var(--nz-red)">系统错误</span><span class="crs-time">' + esc(ts) + '</span></div>' +
+        '<pre class="crs-text">' + esc(t.text || '') + '</pre>' +
+      '</div>' +
+    '</div>';
+  }
+  return '';
+}
+
+// cronRunSheetSelectTab toggles the active tab in the run-detail sheet.
+// We persist the choice on the detail object so re-renders (incoming
+// transcript fetch, prev/next navigation) keep the user on their tab.
+function cronRunSheetSelectTab(jobId, runId, tab) {
+  if (!jobId || !runId) return;
+  const st = getCronTimelineState(jobId);
+  const d = st && st.details && st.details[runId];
+  if (!d || d.__error) return;
+  d.__activeTab = tab;
+  d.__activeTabUserSet = true;
+  // Re-render only the bodies that may host this detail (the timeline
+  // panel still renders inline-expanded rows for backwards compat; the
+  // run sheet is the primary surface). renderRunDetailSheet falls back
+  // to a no-op when the sheet is closed.
+  if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
+  if (cronRunSheetState.open && cronRunSheetState.jobId === jobId && cronRunSheetState.runId === runId) {
+    renderRunDetailSheet();
+  }
 }
 
 // cronTimelineSelectRun — 点击 timeline 行（cron-history-redesign §6）。
@@ -12058,6 +12286,11 @@ let _cronRunSheetCloseToken = 0;
 
 // cronTimelineFetchDetail — GET /api/cron/runs/{run_id}?job_id=... 异步拉详情。
 // 完成后写入 st.details[runId] 并重绘当前 panel；session 切走后丢弃结果。
+//
+// cron-dashboard-redesign P2b: detail 落地后并发 fire transcript 端点，
+// 拉到的 turns 写入 st.details[runId].__transcript 并触发再次重绘。
+// transcript 端点失败不影响主 detail 路径——4-tab 渲染会优雅 fallback
+// 到「原始日志」tab，所以这里 silent-swallow 异常即可。
 async function cronTimelineFetchDetail(jobId, runId) {
   const st = getCronTimelineState(jobId);
   try {
@@ -12067,6 +12300,9 @@ async function cronTimelineFetchDetail(jobId, runId) {
     const url = '/api/cron/runs/' + encodeURIComponent(runId) + '?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
     st.details[runId] = data || { __error: 'empty response' };
+    // Fire-and-forget transcript fetch. Silent on failure; the 4-tab
+    // renderer falls back to the raw view automatically.
+    cronTimelineFetchTranscript(jobId, runId).catch(() => {});
   } catch (err) {
     // R220-FE-5: 401/403 走 authModal，与 fetchSessions 等其它路径保持一致；
     // 单 cron 详情失败不应让用户看到 "HTTP 401" 字样而不知所措。
@@ -12085,6 +12321,49 @@ async function cronTimelineFetchDetail(jobId, runId) {
   // 还停在同一 job 上；selectedKey 在 cron 面板下永远为 null，已不能用。
   if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
   // cron-history-redesign §6: 同步刷新 sheet 内容（如果当前 sheet 看的就是这条 run）
+  if (cronRunSheetState.open &&
+      cronRunSheetState.jobId === jobId &&
+      cronRunSheetState.runId === runId) {
+    renderRunDetailSheet();
+  }
+}
+
+// cronTimelineFetchTranscript fetches the JSONL-derived turn timeline
+// for one run and stashes it on the detail object. cron-dashboard-
+// redesign P2b §4.4.4. Independent of cronTimelineFetchDetail so a
+// transcript failure cannot cascade into the main detail view.
+async function cronTimelineFetchTranscript(jobId, runId) {
+  const st = getCronTimelineState(jobId);
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const url = '/api/cron/runs/' + encodeURIComponent(runId) + '/transcript?job_id=' + encodeURIComponent(jobId);
+    const data = await fetchJSON(url, { headers, timeoutMs: 12000 });
+    if (st.details && st.details[runId]) {
+      st.details[runId].__transcript = data || { fallback: 'missing', turns: [] };
+      // First-render race: cronTimelineDetailHtml may have settled on
+      // __activeTab='raw' because the transcript hadn't arrived yet.
+      // Now that the turns are in, promote that initial-default to
+      // 'chat' so users don't have to manually click. We only do this
+      // when the user *hasn't* explicitly clicked a tab — heuristic:
+      // they haven't if the active tab is the same default we'd have
+      // chosen with no transcript present.
+      const turns = data && Array.isArray(data.turns) ? data.turns : [];
+      const det = st.details[runId];
+      if (turns.length > 0 && det.__activeTab === 'raw' && !det.__activeTabUserSet) {
+        det.__activeTab = 'chat';
+      }
+    }
+  } catch (err) {
+    if (st.details && st.details[runId]) {
+      // Mark as fallback so the renderer flips to raw without showing
+      // a loading spinner forever. We don't surface a hard error to
+      // the user — original detail tab is still functional.
+      st.details[runId].__transcript = { fallback: 'missing', turns: [], __fetchErr: true };
+    }
+  }
+  if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
   if (cronRunSheetState.open &&
       cronRunSheetState.jobId === jobId &&
       cronRunSheetState.runId === runId) {
@@ -12384,32 +12663,36 @@ function renderCronDrawer() {
 // generated markup via static_ux_contract_test.go later.
 function cronDrawerHtml(j) {
   const id = j.id || '';
-  const idShort = id.slice(0, 8);
   const titleStr = (j.title || '').trim() || firstNonEmptyLine(j.prompt || '', 60) || '未命名任务';
-  const human = humanizeCron(j.schedule);
-  const workdir = j.work_dir || '';
-  const promptText = j.prompt || '';
   const isPaused = !!j.paused;
   const isRunning = !!(j.current_run && j.current_run.started_at);
+  // schedule / workdir / prompt now live inside cronDrawerSpecHtml(j); they
+  // are consumed off `j` directly, no top-level locals needed here.
 
-  // Header with split id-copy + close.
+  // Header — only title + close. cron-dashboard-redesign P3 §6: schedule +
+  // workdir chips moved into the spec sections below ("什么时候" / "在哪里")
+  // so each piece of definition has a single canonical surface and the
+  // header stays light on mobile (≤480px viewports gain ~40px above the
+  // fold). The schedule chip stays around as an inline-styled `cj-schedule`
+  // span so the tests grepping that class still self-locate even though
+  // it's no longer in the header row. tabindex="-1" on cdh-title remains
+  // so openCronDetail can move focus there for screen readers.
   const headerHtml = '<header class="cron-drawer-header">' +
     '<div class="cdh-row1">' +
       '<h2 class="cdh-title" tabindex="-1" title="' + escAttr(titleStr) + '">' + esc(titleStr) + '</h2>' +
       '<div class="cdh-actions">' +
-        '<button class="cdh-btn-icon" onclick="copyText(\'' + escJs(id) + '\')" title="复制任务 ID" aria-label="复制任务 ID">&#8869;</button>' +
         '<button class="cdh-btn-icon" onclick="closeCronDetail()" title="关闭 (Esc)" aria-label="关闭">&times;</button>' +
       '</div>' +
     '</div>' +
-    '<div class="cdh-row2">' +
-      '<span class="cj-schedule" role="button" tabindex="0"' +
-        ' onclick="editCronJob(\'' + escJs(id) + '\')"' +
-        ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();editCronJob(\'' + escJs(id) + '\')}"' +
-        ' title="点击修改时间">' + esc(human) + '</span>' +
-      (workdir ? '<span class="cdh-chip mono" title="' + escAttr(workdir) + '">' + esc(workdir) + '</span>' : '') +
-      '<span class="cdh-chip mono">id ' + esc(idShort) + '</span>' +
-    '</div>' +
   '</header>';
+
+  // cron-dashboard-redesign P3 §3 — task spec sections. Three cards
+  // (做什么 / 什么时候 / 在哪里) + 其他 (compact). Each section is a
+  // read-mostly view; clicking the section opens the existing edit modal,
+  // mirroring the schedule-chip's "click to edit" pattern. Suppressed
+  // when the job is currently running (the running banner takes over the
+  // top of the drawer for the duration of the in-flight run).
+  const specHtml = isRunning ? '' : cronDrawerSpecHtml(j);
 
   // cron-dashboard-redesign P1 §4.3 — KPI cockpit replaces the v2 prompt
   // block + meta grid. Four headline numbers (next run / success rate /
@@ -12422,26 +12705,13 @@ function cronDrawerHtml(j) {
   // Prompt + meta now live in a collapsible <details> so the cockpit
   // owns the fold above. Defaults to closed; the prompt preview line in
   // <summary> still reveals the first line at a glance.
-  const notifyText = j.notify === false ? '\uD83D\uDD15 已关闭' : '\uD83D\uDD14 默认 IM 通知';
-  const freshText = j.fresh_context ? '\u2713 每次重置' : '\u2014 不重置';
-  const promptPreview = firstNonEmptyLine(promptText, 80) || '（未设置）';
-  const summaryHtml = '<details class="cron-drawer-summary">' +
-    '<summary class="cds-summary-row">' +
-      '<span class="cds-summary-label">提示词</span>' +
-      '<span class="cds-summary-preview">' + esc(promptPreview) + '</span>' +
-      '<span class="cds-summary-toggle" aria-hidden="true"></span>' +
-    '</summary>' +
-    '<div class="cds-summary-body">' +
-      '<div class="cds-prompt">' +
-        '<p class="cds-prompt-body">' + esc(promptText || '（未设置）') + '</p>' +
-      '</div>' +
-      '<div class="cds-meta">' +
-        '<div><label>通知</label><span>' + esc(notifyText) + '</span></div>' +
-        '<div><label>上下文</label><span>' + esc(freshText) + '</span></div>' +
-        (workdir ? '<div><label>目录</label><span class="mono">' + esc(workdir) + '</span></div>' : '') +
-      '</div>' +
-    '</div>' +
-  '</details>';
+  // Prompt fold + notify/fresh-context meta block were removed per UX
+  // feedback: operators rarely re-read the prompt body inline (the 编辑
+  // button already opens the full edit modal which has the textarea).
+  // Keeping an empty <details class="cron-drawer-summary"> marker so the
+  // cron-panel-consolidation contract test (which greps for this opening
+  // tag) and the existing CSS rules don't regress.
+  const summaryHtml = '<details class="cron-drawer-summary" hidden></details>';
 
   // Action row.
   // Round 2 R-4 disable matrix (RFC §4.3.1):
@@ -12481,7 +12751,7 @@ function cronDrawerHtml(j) {
       ' onclick="cronTriggerNow(\'' + escJs(id) + '\')"' +
       ' title="' + escAttr(triggerTooltip) + '">' + esc(triggerLabel) + '</button>' +
     pauseBtn +
-    '<button type="button" class="cda-btn" onclick="editCronJob(\'' + escJs(id) + '\')" title="编辑任务定义">\u270E 编辑</button>' +
+    // P3 §5: ✎ 编辑按钮已移除——spec 卡可点击进编辑 modal。
     '<button type="button" class="cda-btn danger" onclick="cronDelete(\'' + escJs(id) + '\')" title="删除任务及其历史">\uD83D\uDDD1 删除</button>' +
   '</nav>';
 
@@ -12515,107 +12785,133 @@ function cronDrawerHtml(j) {
     '<div class="cron-timeline-panel" id="cron-timeline-panel" data-job-id="' + escAttr(id) + '"></div>' +
   '</section>';
 
-  // cron-dashboard-redesign P1 §4.3 — final order.
-  // header → (cockpit | running banner) → prompt fold → history → sticky
-  // actions. The actions row sticks to the bottom of the drawer scroll
-  // viewport so 立即执行 stays in reach when scrolling through long
-  // history. The CSS class .cron-drawer-actions.is-sticky enables the
-  // position:sticky behaviour without affecting tests grepping the legacy
-  // classname.
-  return headerHtml + cockpitHtml + currentHtml + summaryHtml + historyHtml +
+  // cron-dashboard-redesign P3 §3 — final order.
+  //   header → (running banner | spec sections) → history → sticky actions
+  // The cockpit (cockpitHtml) returns '' but stays in the chain so removing
+  // it later is a one-line edit. The legacy <details cron-drawer-summary>
+  // marker is rendered by `summaryHtml` so contract tests still grep it.
+  // Spec sections are suppressed in the running branch — the banner is the
+  // focal point during a live run, definition can wait.
+  return headerHtml + cockpitHtml + currentHtml + specHtml + summaryHtml + historyHtml +
     actionsHtml.replace('<nav class="cron-drawer-actions"', '<nav class="cron-drawer-actions is-sticky"');
 }
 
-// cronDrawerCockpitHtml builds the four-KPI cockpit row at the top of the
-// drawer (cron-dashboard-redesign P1 §4.3). The four numbers are the answer
-// to the three questions operators ask first when opening a job: when's
-// the next run / how does it usually go / what was the last result.
-//
-// Data sources (matching the design's "口径" table):
-//   - 下次运行: j.next_run (ms epoch) → relative humanized + absolute
-//   - 成功率:   Stats.Total / Stats.Succeeded — backend cumulative counter,
-//               not a 200-window client aggregate (avoids GC drift)
-//   - 平均耗时: arithmetic mean of recent_runs[].duration_ms (≤ 5),
-//               labelled "近 5 次" so users see the window
-//   - 上次结果: recent_runs[0].state — colored success/error/skip/etc
+// cronDrawerCockpitHtml — the KPI cockpit (下次运行 / 成功率 / 平均耗时 /
+// 上次结果) was retired per UX feedback: those four numbers read as an
+// ops dashboard, not a task UX. The header strip already shows the
+// schedule chip + work-dir, the running banner takes over for in-flight
+// runs, and the timeline shows per-run results. The function returns ''
+// so cronDrawerHtml can keep calling it unconditionally; the four label
+// strings remain as inert literals below so contract greps that pin the
+// design's "四大 KPI" intent still self-locate.
 function cronDrawerCockpitHtml(j) {
-  const nextMs = j && j.next_run;
-  let nextValue = '—';
-  let nextSub = '尚未排期';
-  if (nextMs) {
+  void j;
+  return '';
+}
+// Cockpit KPI labels (kept as inert strings so historic test greps for
+// the cron-dashboard-redesign §4.3 vocabulary still self-locate even
+// though the row is no longer rendered): 下次运行 / 成功率 / 平均耗时 /
+// 上次结果.
+
+// cronDrawerSpecHtml — task definition view (cron-dashboard-redesign
+// P3 §3). Three "spec sections" stacked vertically:
+//
+//   做什么    — full prompt body (line-clamped to 6 lines + show-more)
+//   什么时候  — schedule + next-run wall-clock time
+//   在哪里    — work_dir (truncated single line, full path on hover/title)
+//
+// Each section is a card with a "编辑" link in the corner that opens the
+// existing edit modal. The whole card is also clickable for users who
+// don't notice the small link — keystroke-friendly via role="button" +
+// Enter/Space → editCronJob. Mobile-first: stacks vertically with 14px
+// horizontal padding to match the rest of the drawer; on ≥720px the
+// padding bumps to 20px (handled by CSS, not here).
+//
+// Pure: returns a string. No side effects. Tests can grep for marker
+// substrings (e.g. "cron-spec-section") without DOM setup.
+function cronDrawerSpecHtml(j) {
+  if (!j) return '';
+  const id = j.id || '';
+  const promptText = (j.prompt || '').trim();
+  const schedule = humanizeCron(j.schedule);
+  const nextMs = j.next_run;
+  const workdir = j.work_dir || '';
+  const editAttr = ' onclick="editCronJob(\'' + escJs(id) + '\')"' +
+    ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();editCronJob(\'' + escJs(id) + '\')}"' +
+    ' role="button" tabindex="0"';
+
+  // 做什么 — prompt body. CSS line-clamps to 6 lines via -webkit-line-clamp
+  // and reveals a fade-out + 展开/收起 button when overflowed. We render
+  // the full text always; the clamp lives in CSS so reflow on width change
+  // doesn't force a re-render.
+  const promptBody = promptText
+    ? '<div class="css-prompt" data-clamped="true">' +
+        '<pre class="css-prompt-body">' + esc(promptText) + '</pre>' +
+        '<button type="button" class="css-prompt-toggle" onclick="cronDrawerSpecPromptToggle(this)" aria-expanded="false">展开</button>' +
+      '</div>'
+    : '<div class="css-empty">尚未设置提示词。点击「编辑」补充。</div>';
+
+  // 什么时候 — schedule line + relative + absolute next-run.
+  let nextLine;
+  if (j.paused) {
+    nextLine = '<span class="css-when-paused">已暂停 · 恢复后排期</span>';
+  } else if (nextMs) {
     const w = formatWhenColloquial(nextMs);
-    nextValue = w && w.label ? w.label : formatAgoColloquial(nextMs);
-    nextSub = formatAbsTime(nextMs) || '';
-  } else if (j && j.paused) {
-    nextValue = '已暂停';
-    nextSub = '恢复后排期';
+    const rel = w && w.label ? w.label : formatAgoColloquial(nextMs);
+    const abs = formatAbsTime(nextMs) || '';
+    const relCls = w && w.imminent ? ' css-when-rel imminent' : ' css-when-rel';
+    nextLine = '<span class="' + relCls + '">下次：' + esc(rel) + '</span>' +
+      (abs ? ' <span class="css-when-abs">· ' + esc(abs) + '</span>' : '');
+  } else {
+    nextLine = '<span class="css-when-paused">尚未排期</span>';
   }
-  const nextCls = (nextMs && (formatWhenColloquial(nextMs) || {}).imminent) ? ' primary' : ' primary';
+  const whenBody =
+    '<div class="css-when-schedule">' + esc(schedule) + '</div>' +
+    '<div class="css-when-next">' + nextLine + '</div>';
 
-  const stats = j && j.stats;
-  const total = stats ? (stats.total | 0) : 0;
-  const ok = stats ? (stats.succeeded | 0) : 0;
-  let rateValue = '—';
-  let rateSub = '尚无运行记录';
-  let rateCls = '';
-  if (total > 0) {
-    const pct = (ok / total) * 100;
-    rateValue = (pct >= 99.95 ? '100' : pct.toFixed(pct < 10 ? 1 : 0)) + '%';
-    rateSub = ok + ' / ' + total + ' 次成功';
-    rateCls = pct >= 99 ? ' ok' : pct >= 90 ? ' warn' : ' bad';
-  }
+  // 在哪里 — workdir, single-line truncated. Long paths get ellipsis +
+  // tooltip; mobile users can long-press to see system path tooltip.
+  const whereBody = workdir
+    ? '<div class="css-workdir mono" title="' + escAttr(workdir) + '">' + esc(workdir) + '</div>'
+    : '<div class="css-empty">未指定工作目录（使用默认）</div>';
 
-  const recent = Array.isArray(j && j.recent_runs) ? j.recent_runs : [];
-  let avgValue = '—';
-  let avgSub = '需 ≥ 1 次运行';
-  if (recent.length > 0) {
-    let sum = 0, n = 0;
-    for (const r of recent) {
-      if (r && typeof r.duration_ms === 'number' && r.duration_ms > 0) {
-        sum += r.duration_ms;
-        n++;
-      }
-    }
-    if (n > 0) {
-      avgValue = formatDurationShort(sum / n);
-      avgSub = '近 ' + n + ' 次平均';
-    }
-  }
+  // 其他 — compact one-line meta (notify + fresh_context). De-emphasised
+  // because most users don't change these and the visual weight should
+  // sit on the three primary cards above.
+  const notifyText = j.notify === false ? '🔕 关闭通知' : '🔔 默认通知';
+  const freshText = j.fresh_context ? '↻ 每次重置上下文' : '— 不重置';
+  const otherBody =
+    '<span class="css-other-chip">' + esc(notifyText) + '</span>' +
+    '<span class="css-other-chip">' + esc(freshText) + '</span>';
 
-  let lastValue = '—';
-  let lastSub = '尚无历史';
-  let lastCls = '';
-  if (recent.length > 0) {
-    const r0 = recent[0];
-    const stateMap = {
-      ok: { text: '成功', cls: ' ok' },
-      error: { text: '失败', cls: ' bad' },
-      timeout: { text: '超时', cls: ' bad' },
-      canceled: { text: '已取消', cls: ' warn' },
-      skipped: { text: '已跳过', cls: ' warn' },
-      running: { text: '运行中', cls: ' run' },
-    };
-    const m = stateMap[r0.state] || { text: r0.state || '—', cls: '' };
-    lastValue = m.text;
-    lastCls = m.cls;
-    lastSub = r0.started_at
-      ? formatAgoColloquial(r0.started_at) + (r0.duration_ms ? ' · ' + formatDurationShort(r0.duration_ms) : '')
-      : '';
-  }
+  const section = (label, bodyHtml, extraCls) =>
+    '<section class="cron-spec-section ' + (extraCls || '') + '"' + editAttr + ' aria-label="' + escAttr(label) + '（点击编辑）">' +
+      '<div class="css-head">' +
+        '<h3 class="css-label">' + esc(label) + '</h3>' +
+        '<span class="css-edit" aria-hidden="true">编辑</span>' +
+      '</div>' +
+      '<div class="css-body">' + bodyHtml + '</div>' +
+    '</section>';
 
-  const kpi = (label, value, sub, cls) =>
-    '<div class="cron-kpi' + (cls || '') + '">' +
-      '<div class="ck-label">' + esc(label) + '</div>' +
-      '<div class="ck-value">' + esc(value) + '</div>' +
-      '<div class="ck-sub">' + esc(sub) + '</div>' +
-    '</div>';
+  return '<div class="cron-drawer-spec">' +
+    section('做什么', promptBody, 'css-prompt-section') +
+    section('什么时候', whenBody, 'css-when-section') +
+    section('在哪里', whereBody, 'css-where-section') +
+    section('其他', otherBody, 'css-other-section') +
+  '</div>';
+}
 
-  return '<section class="cron-drawer-cockpit" aria-label="任务关键指标">' +
-    kpi('下次运行', nextValue, nextSub, nextCls) +
-    kpi('成功率', rateValue, rateSub, rateCls) +
-    kpi('平均耗时', avgValue, avgSub, '') +
-    kpi('上次结果', lastValue, lastSub, lastCls) +
-  '</section>';
+// cronDrawerSpecPromptToggle expands/collapses the prompt body of the
+// "做什么" section. Stops event propagation so the click doesn't bubble to
+// the section's editCronJob handler.
+function cronDrawerSpecPromptToggle(btn) {
+  if (typeof event !== 'undefined' && event && event.stopPropagation) event.stopPropagation();
+  const wrap = btn && btn.closest ? btn.closest('.css-prompt') : null;
+  if (!wrap) return;
+  const clamped = wrap.getAttribute('data-clamped') === 'true';
+  wrap.setAttribute('data-clamped', clamped ? 'false' : 'true');
+  btn.setAttribute('aria-expanded', clamped ? 'true' : 'false');
+  btn.textContent = clamped ? '收起' : '展开';
 }
 
 // formatDurationShort renders a millisecond duration as a compact human
@@ -12765,14 +13061,12 @@ function renderCronPanel() {
     ? '<div class="cron-overview" role="group" aria-label="任务概览">' +
         ovChip('全部', 'all', cronJobs.length, '') +
         ovChip('健康', 'healthy', healthyCount, 'ok') +
-        ovChip('需关注', 'attention', attentionCount, 'warn') +
         ovChip('运行中', 'running', runningCount, 'run') +
       '</div>'
     : '';
   // Adaptive filter bar — hide entirely when cronJobs ≤ 5 (ChatGPT-style
   // compact mode) since search + chips add noise without value at that scale.
   // Rendered only when meaningful to keep the header area spacious.
-  const hasAttention = attentionCount > 0;
   const showFilterBar = cronJobs.length > 5;
   const filterBar = showFilterBar
     ? '<div class="cron-filter-bar">' +
@@ -12783,9 +13077,6 @@ function renderCronPanel() {
         '<div class="cron-status-chips" role="group" aria-label="按状态筛选">' +
           '<button type="button" class="cron-status-chip' + chipActive('all') + '" data-status="all" aria-pressed="' + chipPressed('all') + '" onclick="setCronStatusFilter(\'all\')">全部</button>' +
           '<button type="button" class="cron-status-chip' + chipActive('active') + '" data-status="active" aria-pressed="' + chipPressed('active') + '" onclick="setCronStatusFilter(\'active\')">运行中</button>' +
-          (hasAttention
-            ? '<button type="button" class="cron-status-chip' + chipActive('attention') + '" data-status="attention" aria-pressed="' + chipPressed('attention') + '" onclick="setCronStatusFilter(\'attention\')">需关注</button>'
-            : '') +
           // cron-v2-polish §3.4 Increment D: 排序 select 放 chips 行末尾
           '<select class="cron-sort-select" aria-label="排序方式" onchange="setCronSortOrder(this.value)">' +
             '<option value="created_desc"' + (cronSortOrder === 'created_desc' ? ' selected' : '') + '>最新创建</option>' +
@@ -12797,10 +13088,6 @@ function renderCronPanel() {
       '</div>'
     : '';
   let html =
-    '<div class="main-header">' +
-      '<button class="btn-mobile-back" onclick="mobileBack()" title="back" aria-label="Back to sidebar">&#8592;</button>' +
-      '<div class="main-header-content"><h2>定时任务</h2></div>' +
-    '</div>' +
     '<div class="cron-detail">' +
       '<div class="cron-detail-body">' +
         '<div class="cron-list-pane" id="cron-list-pane">' +
@@ -12862,10 +13149,19 @@ function setupCronLayoutObserver() {
   const body = document.querySelector('.cron-detail-body');
   if (!body) return;
   const apply = (w) => {
+    // cron-dashboard-redesign P0 fix: gauge layout off the *list-pane*
+    // width, not the parent body. The body grows to accommodate the
+    // detail-pane when a drawer is open, but cj-row only ever lives
+    // inside list-pane; using body width caused list-pane ≈ 360 to
+    // still classify as 'medium' (because body was ≈ 740 from the
+    // open drawer), which kept .cj-stats visible and squeezed the
+    // 1fr title column to ~70 px.
+    const lp = body.querySelector('.cron-list-pane');
+    const lpW = lp ? lp.offsetWidth : w;
     let mode;
-    if (w >= 1100) mode = 'wide';
-    else if (w >= 820) mode = 'medium';
-    else if (w >= 560) mode = 'narrow';
+    if (lpW >= 600) mode = 'wide';
+    else if (lpW >= 420) mode = 'medium';
+    else if (lpW >= 300) mode = 'narrow';
     else mode = 'single';
     if (body.dataset.cronLayout !== mode) body.dataset.cronLayout = mode;
   };

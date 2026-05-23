@@ -2814,10 +2814,15 @@ func TestDashboardJS_R110P2_CronPanelFilter(t *testing.T) {
 	if !strings.Contains(js, "function setCronStatusFilter(status)") {
 		t.Error("dashboard.js missing setCronStatusFilter handler")
 	}
+	// Cron panel surfaces 'all' + 'active' chips on the visible status row;
+	// the 'attention' status remains a valid filter target (settable via
+	// setCronStatusFilter, used by the missed-banner click handler) but is
+	// no longer rendered as a dedicated chip — the count was redundant with
+	// the header cron-badge and competed for attention with the chips that
+	// actually drive day-to-day filtering.
 	for _, chip := range []string{
 		`data-status="all"`,
 		`data-status="active"`,
-		`data-status="attention"`,
 	} {
 		if !strings.Contains(js, chip) {
 			t.Errorf("dashboard.js missing cron status chip %s", chip)
@@ -5111,8 +5116,12 @@ func TestDashboardJS_LoadEarlierFallbackWhenAllInternal(t *testing.T) {
 // Four invariants must all hold, or workspace HTML/SVG can escape to same-
 // origin execution in the dashboard:
 //
-//  1. The iframe MUST be created with sandbox=” — any allow-* token
-//     re-grants a capability.
+//  1. The iframe sandbox MUST be exactly 'allow-scripts'. allow-scripts is
+//     required so workspace HTML using MathJax / KaTeX / Mermaid / chart libs
+//     renders. Origin isolation comes from the blob URL (opaque origin) +
+//     withholding allow-same-origin: the iframe stays in an opaque origin and
+//     cannot read dashboard cookies, localStorage, or DOM. Adding any other
+//     allow-* token (especially allow-same-origin) collapses isolation.
 //  2. The bytes must arrive via fetch → Blob({type:...}) → blob URL, NOT
 //     via iframe.src = fileApiUrl(...render). The server returns
 //     application/octet-stream specifically so a direct URL hit downloads;
@@ -5146,14 +5155,18 @@ func TestDashboardJS_SandboxedBlobRender(t *testing.T) {
 	}
 	helper := js[helperIdx:end]
 
-	// Invariant 1: sandbox attribute is set with an empty string value.
-	sandboxRe := regexp.MustCompile(`setAttribute\(\s*['"]sandbox['"]\s*,\s*['"]\s*['"]\s*\)`)
+	// Invariant 1: sandbox attribute is set to exactly 'allow-scripts'.
+	// allow-scripts unlocks MathJax/KaTeX/Mermaid/chart libs in workspace
+	// HTML. Origin isolation comes from the blob URL (opaque origin), NOT
+	// from withholding scripts. allow-same-origin would collapse that
+	// isolation by giving the iframe dashboard origin — strictly forbidden.
+	sandboxRe := regexp.MustCompile(`setAttribute\(\s*['"]sandbox['"]\s*,\s*['"]allow-scripts['"]\s*\)`)
 	if !sandboxRe.MatchString(helper) {
-		t.Error("renderSandboxedBlob must call setAttribute('sandbox', '') — empty string grants zero capabilities; any other value weakens the iframe")
+		t.Error("renderSandboxedBlob must call setAttribute('sandbox', 'allow-scripts') — required for math/diagram libs; opaque-origin blob URL retains isolation")
 	}
-	for _, forbidden := range []string{"allow-scripts", "allow-same-origin", "allow-forms", "allow-top-navigation", "allow-popups"} {
+	for _, forbidden := range []string{"allow-same-origin", "allow-forms", "allow-top-navigation", "allow-popups"} {
 		if strings.Contains(helper, forbidden) {
-			t.Errorf("renderSandboxedBlob must not include sandbox token %q — re-opens the escape it exists to prevent", forbidden)
+			t.Errorf("renderSandboxedBlob must not include sandbox token %q — collapses opaque-origin isolation that allow-scripts depends on", forbidden)
 		}
 	}
 
@@ -6179,6 +6192,71 @@ func TestDashboardHTML_CronCockpitAndStickyActionsCSS(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_TranscriptTabs pins cron-dashboard-redesign P2b §4.4.2:
+// the run-detail sheet renders a 4-tab container (chat / tools / prompt /
+// raw), the chat tab uses cronRunTranscriptHtml on detail.__transcript,
+// and the tool output is rendered through esc + <pre> only — never
+// renderMd — to keep arbitrary subprocess stdout from injecting HTML.
+func TestDashboardJS_TranscriptTabs(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+	for _, want := range []string{
+		"function cronRunTranscriptHtml(",
+		"function cronRunTurnHtml(",
+		"function cronRunSheetSelectTab(",
+		"function cronTimelineFetchTranscript(",
+		`'/api/cron/runs/' + encodeURIComponent(runId) + '/transcript?job_id='`,
+		`tabBtn('chat'`,
+		`tabBtn('tools'`,
+		`tabBtn('prompt'`,
+		`tabBtn('raw'`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("dashboard.js missing P2b transcript marker %q", want)
+		}
+	}
+	// Tool output XSS guard: turn-renderer for kind === 'tool_use' OR
+	// 'tool_result' must wrap the body with esc(...) inside <pre>, never
+	// pass raw fields through renderMd. The simple grep below confirms
+	// renderMd is NOT applied to t.output / t.input.
+	if strings.Contains(js, "renderMd(t.output") || strings.Contains(js, "renderMd(t.input") {
+		t.Error("tool output / input MUST NOT go through renderMd — XSS hazard from arbitrary subprocess stdout")
+	}
+	// kind === 'tool_result' branch: content must escape body.
+	if !strings.Contains(js, "<pre class=\"crs-tool-body\">' + esc(t.output") {
+		t.Error("tool_result body must use <pre> + esc(t.output) — never raw or renderMd")
+	}
+}
+
+// TestDashboardHTML_TranscriptTabsCSS pins the styling side of P2b: tab
+// bar + transcript turn cards have stylesheet entries.
+func TestDashboardHTML_TranscriptTabsCSS(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		".crs-tabs{",
+		".crs-tab{",
+		".crs-tab.active{",
+		".crs-transcript{",
+		".crs-turn{",
+		".crs-tool-card{",
+		".crs-tool-card.err{",
+		".crs-avatar.assistant{",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("dashboard.html missing P2b CSS marker %q", want)
+		}
+	}
+}
+
 // TestStaticAssetETags_Computed verifies serveStaticWithETag wires up
 // precomputed ETags for the three embedded assets and the 304 fast-path is
 // available. cron-dashboard-redesign P0 §6 — combined with no-cache must-
@@ -6198,5 +6276,33 @@ func TestStaticAssetETags_Computed(t *testing.T) {
 		if len(tag) != 34 {
 			t.Errorf("ETag for %q wrong length: got %d, want 34", key, len(tag))
 		}
+	}
+}
+
+// TestDashboardJS_InlineMathAcceptsFunctionRefs pins the regression where
+// inline `$h(x)$` / `$f(x)$` / `$g(t)$` — bare function references with no
+// digit/operator inside — slipped through isMathInline's prose guard and
+// stayed visible as raw `$h(x)$` text in chat bubbles instead of being
+// rendered by KaTeX. The previous heuristic required a digit or operator
+// hint; we now also accept the function-call shape `letter(` / `)letter`
+// so single-letter function references render the same as the rest of
+// the formula they belong to.
+func TestDashboardJS_InlineMathAcceptsFunctionRefs(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+	// The hint regex must include the function-call alternatives; the bare
+	// `[\d+\-*/=<>]` form would re-introduce the bug.
+	want := "if (!/[\\d+\\-*/=<>]|[a-zA-Z]\\(|\\)[a-zA-Z]/.test(tex)) return false;"
+	if !strings.Contains(js, want) {
+		t.Errorf("isMathInline must accept function-call shape (letter( / )letter) so $h(x)$ / $f(x)$ render via KaTeX; missing line %q", want)
+	}
+	// The original digit/operator-only form must NOT be present anymore.
+	stale := "if (!/[\\d+\\-*/=<>]/.test(tex)) return false;"
+	if strings.Contains(js, stale) {
+		t.Errorf("isMathInline still uses the old digit/operator-only hint regex %q — function-call references like $h(x)$ would not render", stale)
 	}
 }
