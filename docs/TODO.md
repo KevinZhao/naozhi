@@ -1131,7 +1131,7 @@
   - 方案：按职责拆 `tokenManager` / `reactionCache` / `cardBuilder` 子文件/子类型。
   - 涉及：`internal/platform/feishu/feishu.go`
 
-- [ ] **R214-PERF-1 — PersistSink 单 entry 版本避免 1-slot slice alloc**: `cli/eventlog.go:627` 每个 Append 事件分配 `[]EventEntry{e}` 1-slot slice 传给 `invokePersistSink`；250 alloc/s 基线。
+- [~] **R214-PERF-1 — PersistSink 单 entry 版本避免 1-slot slice alloc**: `cli/eventlog.go:627` 每个 Append 事件分配 `[]EventEntry{e}` 1-slot slice 传给 `invokePersistSink`；250 alloc/s 基线。 — 评估关闭（2026-05-23 R234 复核）：同根因 R215-PERF-P2-1 / R219-PERF-4 / R228-PERF-7 / R229-PERF-5 / R230C-PERF-2，统一收敛到 R230C-PERF-2。`internal/cli/eventlog.go:812-820` archive anchor 已加 R214-PERF-1 cross-ref；PersistSink 契约允许 sink retain slice 跨 return，故 `[1]EventEntry` stack scratch 仍 escape；sync.Pool 只是把 alloc 换成 Get/Put（48B payload 收益不显）。生产热路径已被 R230-PERF-1 sink-nil 早返回覆盖。本批 PR。
   - 方案：新增单 entry API 或传 `[1]EventEntry` 数组按地址。
   - 涉及：`internal/cli/eventlog.go::PersistSink` 契约 + `internal/session/eventlog_bridge.go`
 

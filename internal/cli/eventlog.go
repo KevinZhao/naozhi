@@ -809,7 +809,7 @@ func (l *EventLog) Append(e EventEntry) {
 	// them in the no-sink case saves one alloc per event in the hot
 	// stdout path. Mirrors AppendBatch's pre-loop sinkAttached gate.
 	//
-	// R215-PERF-P2-1 / R219-PERF-4 / R228-PERF-7 archive anchor:
+	// R214-PERF-1 / R215-PERF-P2-1 / R219-PERF-4 / R228-PERF-7 archive anchor:
 	// the remaining `[]EventEntry{e}` literal allocation on the
 	// sink-attached branch is structurally required by PersistSink's
 	// retention contract — the sink may keep the slice past return,
