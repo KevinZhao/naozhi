@@ -171,11 +171,35 @@ func detectVersionCtx(parent context.Context, cliPath string) string {
 	return parseVersionOutput(string(out))
 }
 
+// defaultBinaryByBackend maps a backend ID to the bare binary name probed
+// when `cli.path` is unset and exec.LookPath fails. Kept here (rather than
+// reaching into internal/cli/backend.Profile.DefaultBinary) to avoid an
+// import cycle: cli/backend imports cli, so cli must stay a leaf w.r.t.
+// backend metadata. This is the single sentinel table that detectCLI and
+// any future detect-helpers consult; adding a new backend means appending
+// one row here AND a Profile entry in cli/backend — the cli/backend test
+// suite cross-checks DefaultBinary, so a missed row here surfaces in CI
+// rather than silently falling back to "claude". R225-CR-2 anchor.
+var defaultBinaryByBackend = map[string]string{
+	"claude": "claude",
+	"kiro":   "kiro-cli",
+}
+
 // detectCLI finds the CLI binary by checking known install paths then PATH.
+//
+// Returns the bare binary name when neither candidatePaths nor exec.LookPath
+// resolve a match, mirroring the historical "best effort" contract: callers
+// (detectVersionCtx, Wrapper.Spawn) handle the ENOENT path themselves so
+// detectCLI can stay synchronous and side-effect free.
 func detectCLI(backend string) string {
-	name := "claude"
-	if backend == "kiro" {
-		name = "kiro-cli"
+	name, ok := defaultBinaryByBackend[backend]
+	if !ok {
+		// Unknown backend ID: fall back to the claude binary so a
+		// stale config token does not strand the user with no CLI at
+		// all. The startup config validator rejects unknown IDs in
+		// production paths (cmd/naozhi/main.go), so reaching this
+		// branch implies a test fixture or operator override.
+		name = defaultBinaryByBackend["claude"]
 	}
 
 	for _, p := range candidatePaths(name) {

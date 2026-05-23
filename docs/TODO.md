@@ -678,7 +678,7 @@
 ### 代码质量 — 本轮新发现
 
 - [ ] **R225-CR-1 — `cli/detect.knownBackends` 与 `backend.Profile` 注册表双轨（P1）**: detect.go:43-46 静态硬编码 Protocol 字符串；与 `Profile.Capabilities().StreamJSON` 不同步会导致 dashboard 误判。方案：`DetectBackendsCtx` 从 `backend.All()` 派生，删 knownBackends。Breaking：否。
-- [ ] **R225-CR-2 — `cli.detectCLI` 仍硬编码 `if backend == "kiro"`（P1）**: wrapper.go:157 与 `Profile.DefaultBinary` 重复。方案：detectCLI 调 `backend.Get(backend).DefaultBinary`，删除内联 switch。Breaking：否。
+- [x] **R225-CR-2 — `cli.detectCLI` 仍硬编码 `if backend == "kiro"`（P1）** [已部分缓解 2026-05-23]: 内联 `if backend == "kiro"` switch 替换为 `defaultBinaryByBackend` 表 + godoc 锚点（wrapper.go）。无法直接调 `backend.Get`（cli/backend 反向 import cli，会成环），表保持 cli 为叶子。新增 backend 时仍需同时更新 sentinel 表 + cli/backend Profile，现有 backend test 跨检查 DefaultBinary 可在 CI 暴露漏写。完整下沉到 backend.Get 需打破环（移走 cli.Protocol 类型）才能做。
 - [ ] **R225-CR-5 — `backendDisplayName / normalizeBackendID` 与 `backend.Profile.DisplayName/ID` 重复（P2 R224-ARCH-1 同源）**: cli/wrapper.go:75-95；新加 backend 改四处。方案：合并到 `backend.Get` 的 DisplayName/ID 字段。
 
 ### 协议正确性 — 本轮新发现（与 fix/claude-model-from-init-v2 分支强相关）
