@@ -1202,7 +1202,7 @@
   - 方案: 至少抽 `executeSend` + `executeGetSession`，每个函数守一 ctx 派生点。
   - 涉及: `internal/cron/scheduler.go:1248-1458`
 
-- [ ] **RNEW-008 — `connector.handleRequest` ctx 语义不清导致未来 goroutine 泄漏**: `upstream/connector.go:454,538-541,651,771` 两个 ctx（appCtx / connCtx）混用，不同 RPC 分支对"ctx 断则 goroutine 退出"的承诺不一致。send 走 connCtx 正确，takeover 走 appCtx 是意图 —— 但无注释锁定，未来新 RPC 分支容易误用 appCtx 导致 reconnect 后 orphan。
+- [x] **RNEW-008 — `connector.handleRequest` ctx 语义不清导致未来 goroutine 泄漏**: `upstream/connector.go:454,538-541,651,771` 两个 ctx（appCtx / connCtx）混用，不同 RPC 分支对"ctx 断则 goroutine 退出"的承诺不一致。send 走 connCtx 正确，takeover 走 appCtx 是意图 —— 但无注释锁定，未来新 RPC 分支容易误用 appCtx 导致 reconnect 后 orphan。 — 已修复（2026-05-23 复核 internal/upstream/connector_rpc.go:32-50 已落 godoc 规则矩阵：connCtx 默认 / appCtx 仅 takeover/discovery；新增 RPC 分支必须显式注释 cross-reconnect 持久化原因。RNEW-008 锚点），本批 PR
   - 方案: 在 `handleRequest` 参数 godoc 列出规则矩阵（appCtx = "跨 reconnect 留存"，connCtx = "随 WS 断"），send 分支加 `-race` 验证 connCtx 取消在 drain budget 内。
   - 涉及: `internal/upstream/connector.go:454,538-541,651,771`
 
@@ -1762,7 +1762,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [~] **R230C-PERF-4 — handleSubscribe per-key 限额线性扫描全部连接（误报关闭 2026-05-23）**: 实地复核：内层 `for other := range h.clients` 在 `count >= maxSubscribersPerKey` 时已 break early（wshub.go:615-617），单次 subscribe 最坏 O(maxSubscribersPerKey)（20）而非 O(connections=500）。"O(1) subscriberCounts map" 优化要在每条 disconnect / closeClient 路径维护第二份计数表，bookkeeping 成本超过收益。godoc 已补充原地说明。本批 PR
 - [~] **R230C-PERF-6 — completeSubscribe 调两次 Snapshot()（误报关闭 2026-05-23）**: 实地复核：两个 `sess.Snapshot()` 调用分别在 `!sess.HasProcess()` early-return 分支（wshub.go:674）和正常分支（wshub.go:741），互斥执行不会同请求两次。TODO 描述的"复用同一 snap"前提不成立。本批 PR
 - [~] **R230C-PERF-7 — handleList 每次重建 projectList slice（归档 2026-05-23）**: 缓存 + 失效 hooks 要覆盖 project Add/Remove/SetFavorite/git-detect/node-cache merge 多条改写路径，invariant 成本超过它救下的分配。realistic 规模 ≤50 projects × ≤20 tabs ≈ 50 rebuilds/s × ≤4 KB ≈ 几百 KB/s GC churn，远低于 dashboard 自身 JSON encode 的分配。godoc 已就地说明。本批 PR
-- [ ] **R230C-PERF-8 — resubscribeEvents 每轮 h.mu.RLock + map read 检查 subGen（P2）**: `internal/server/wshub.go:1159` 12 iter × N 客户端瞬间死亡触发并发。方案：用已传入的 gen 参数局部变量比较，免锁。Breaking：否（内部函数）。
+- [~] **R230C-PERF-8 — resubscribeEvents 每轮 h.mu.RLock + map read 检查 subGen（误报关闭 2026-05-23）**: 实地复核 wshub.go:1216-1235 — 建议方案"用已传入 gen 参数本地比较"基于误读：`gen` 参数是 subscribe 时的快照，loop 必须读 *current* c.subGen[key] 才能检测并行 handleSubscribe takeover。c.subGen 是非 atomic map（subscribe/unsubscribe/sweep 三路径都在 h.mu 下改写），RLock+map read 是最小正确性契约。godoc 已就地说明 12 iter × ~30ns/RLock 成本 ~400ns / 60s 窗口，远低于优化收益门槛。本批 PR。
 - [x] **R230C-PERF-10 — connector_subscribe 双取 eventlog.mu（已修复 2026-05-23）**: 由 R230C-PERF-1 同批解决 — connector_subscribe.go 已切到 sess.State() / sess.DeathReason()（不进 eventlog.mu）；只剩 EventEntriesSince 一次锁取，加上 lastState 缓存跳过无变化的 session_state 写。本批 PR 归档。
 - [x] **R230C-PERF-12 — EventLog.Subscribe map 不收缩、无初始容量（P3）**: `internal/cli/eventlog.go:911-912` CloseSubscribers nil 后下次 Subscribe 1→2→4 growth rounding。方案：const subscribersMapInitCap=4 显式预分配；与 R229-PERF-12 联合实现 sync.Pool。Breaking：否。 — 已修复（Subscribe lazy-init 加初始容量 4，覆盖典型 dashboard 重连 4-6 个 session 订阅的常见场景一次分配；map 仍可自然增长）。R229-PERF-12 sync.Pool 是独立优化方向，留 open。本批 PR
 
