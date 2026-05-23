@@ -1,3 +1,29 @@
+// Package session test utilities for cross-package consumers.
+//
+// IMPORTANT (R226-CR-14 / R227-CR-2 / R230-CQ-5 / R232-ARCH-4): this file
+// is named testutil.go (not testutil_test.go) on purpose — Go only
+// compiles *_test.go files when the *enclosing* package is being tested,
+// so types/functions defined there are NOT visible to other packages'
+// tests. This package's TestProcess + Router.InjectSession are consumed
+// by internal/server/*_test.go and internal/upstream/*_test.go, which
+// forces the cross-package-visible "testutil.go" naming.
+//
+// Side effect: this file ships in the production binary. The TestProcess
+// type and NewTestProcess constructor are dead code at runtime — nothing
+// reachable from cmd/naozhi/main.go calls them — so the cost is binary
+// size, not behaviour. Router.InjectSession is the one risky export: a
+// crafted plugin that imports session and calls it could plant a fake
+// process. naozhi has no plugin system, so the attack surface is empty
+// in practice; if one is ever added, gate this file with a build tag
+// and split the cross-package fake into internal/session/sessiontest.
+//
+// Migration note: a follow-up subpackage carve-out is the canonical fix.
+// The blocker is `Router.InjectSession`, which touches r.mu / r.sessions
+// / r.attachHistorySource (all unexported). A clean split would either
+// export a narrow seam (e.g. `Router.injectForTest(processIface)` +
+// matching helper in sessiontest) or move the InjectSession glue here
+// and ship TestProcess from the subpackage. Defer until a build-tag
+// boundary is needed for unrelated reasons.
 package session
 
 import (

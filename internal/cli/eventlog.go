@@ -956,7 +956,14 @@ func (l *EventLog) Subscribe() (<-chan struct{}, func()) {
 		return sub.ch, func() {}
 	}
 	if l.subscribers == nil {
-		l.subscribers = make(map[*subscriber]struct{})
+		// R230C-PERF-12: pre-size the map. CloseSubscribers nils out the
+		// pointer so each Subscribe after a teardown allocates a fresh
+		// map; without a hint Go would grow 1 → 2 → 4 → 8 across a typical
+		// dashboard reconnect spurt (one tab subscribes 4–6 sessions back-
+		// to-back). 4 covers the common case in a single allocation; the
+		// map can still grow naturally when the per-session subscriber count
+		// climbs (multi-tab dashboards, agent_tailer fan-in).
+		l.subscribers = make(map[*subscriber]struct{}, 4)
 	}
 	l.subscribers[sub] = struct{}{}
 	// Add/sub counter pattern rather than re-deriving from len(map) — avoids

@@ -1695,9 +1695,15 @@ func (s *Scheduler) jobInflight(id string) *runInflight {
 // for the next tick rather than racing the in-flight result. The shape
 // mirrors the original inline reads — no fields added/removed.
 type jobSnapshot struct {
-	prompt     string
-	workDir    string
-	jobID      string
+	prompt  string
+	workDir string
+	jobID   string
+	// label is the human-readable title for IM notice prefixes (R233B-CR-4 /
+	// R233B-CR-5). Computed via jobTitleOrFallback under s.mu so a
+	// concurrent SetJobPrompt cannot tear Title vs Prompt-derived fallback.
+	// Empty when both Title and Prompt are blank — deliverNotice falls back
+	// to jobID in that case so the IM prefix never collapses to "[Cron ]".
+	label      string
 	platName   string
 	chatID     string
 	notifyPlat string
@@ -1706,6 +1712,16 @@ type jobSnapshot struct {
 	fresh      bool
 	schedule   string
 	backend    string // "" = router default
+}
+
+// labelOrID returns the IM-notice display label: snap.label when populated,
+// jobID otherwise. R233B-CR-5: keeps the "[Cron <X>] …" prefix readable
+// without crashing on Title-empty + Prompt-empty edge cases.
+func (s jobSnapshot) labelOrID() string {
+	if s.label != "" {
+		return s.label
+	}
+	return s.jobID
 }
 
 // snapshotJob reads j under s.mu so a concurrent SetJobPrompt /
@@ -1723,6 +1739,7 @@ func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
 		prompt:     j.Prompt,
 		workDir:    j.WorkDir,
 		jobID:      j.ID,
+		label:      jobTitleOrFallback(j),
 		platName:   j.Platform,
 		chatID:     j.ChatID,
 		notifyPlat: j.NotifyPlatform,
@@ -1805,7 +1822,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 			errMsg: "work_dir unreachable",
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(args.notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.jobID))
+		s.deliverNotice(args.notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.labelOrID()))
 		return noopRefresh, false
 	}
 	s.router.Reset(args.key)
@@ -2101,7 +2118,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("session error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", snap.jobID))
+		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", snap.labelOrID()))
 		stubRefresh()
 		return
 	}
@@ -2179,7 +2196,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("send error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", snap.jobID))
+		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", snap.labelOrID()))
 		stubRefresh()
 		return
 	}
@@ -2213,7 +2230,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 	})
 
-	replyText := fmt.Sprintf("[Cron %s] %s", snap.jobID, result.Text)
+	replyText := fmt.Sprintf("[Cron %s] %s", snap.labelOrID(), result.Text)
 	s.deliverNotice(notifyTo, replyText)
 }
 
