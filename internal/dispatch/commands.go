@@ -78,6 +78,32 @@ func normalizeSlashCommand(trimmed string) string {
 
 // dispatchCommand handles slash commands (/help, /new, /clear, /cron, /cd, /pwd, /project).
 // Returns true if the message was a command and was handled.
+//
+// R218-CR-1 anchor: a previous review proposed converting this switch to
+// a `map[string]commandHandler` table-driven dispatcher to "compile-time
+// verify all commands are tested". After evaluation we keep the switch:
+//
+//   - Each case carries case-specific guards that don't compose into a
+//     uniform handler signature: /cron skips on nil scheduler, /cd
+//     consults projectMgr for the bound-project gate, /pwd reads the
+//     router workspace inline, /new and /clear share the SAME handler
+//     under different verbs, /urgent splits "no-arg help" vs "with-arg
+//     dispatch" inside one logical command.
+//   - Match patterns mix exact-equal with HasPrefix(... + " "), and the
+//     order is deliberately non-alphabetic — /cron must match before any
+//     potential /c-prefix collision; /urgent's two arms must keep their
+//     relative order so the no-arg help case is reachable. A table
+//     loses that ordering signal.
+//   - Coverage of slash commands is enforced by the dispatch_command_*
+//     test suite walking each verb explicitly; a table doesn't add
+//     compile-time verification beyond what `go test ./...` already
+//     gives, and the readability cost (introducing a commandHandler
+//     interface plus per-command struct adapters for the inline guard
+//     bodies above) is real.
+//
+// If a future change adds 5+ verbs with uniform handler signature, that
+// is the moment to revisit. Today's 8 verbs with mixed shapes don't
+// clear the bar.
 func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) bool {
 	trimmed = normalizeSlashCommand(trimmed)
 	switch {
