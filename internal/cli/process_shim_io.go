@@ -104,6 +104,32 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 }
 
 // shimClientMsg is the outgoing message format to the shim.
+//
+// R226-PERF-10 / R225-PERF-8 archive anchor (doc-and-accept):
+//
+//	The shimWriter.Write fast path above performs `string(data[:n-1])` to
+//	convert the trimmed CLI-stdin line into the Line field, which forces a
+//	byte→string copy on every stdin write (5–50 lines/s × N sessions).
+//	Reviewers proposed switching Line to `[]byte` / `json.RawMessage` to
+//	share the caller's backing array. That alternative was evaluated and
+//	rejected: shimClientMsg is the wire format for the parent⇄shim NDJSON
+//	protocol (see shimSendEnc / shimSend below) and shim peers must
+//	json-Marshal each message into a single newline-terminated JSON record.
+//	json.RawMessage requires its bytes to already be a *valid JSON value*,
+//	but `data` here is arbitrary CLI stdin (a stream-json client message
+//	from the dashboard / channel adapter) which may contain unescaped
+//	quotes, backslashes, control bytes, and multi-byte UTF-8. The Marshaler
+//	must still escape the payload into a JSON string literal — that escape
+//	pass walks the bytes once and copies them into the encoder buffer,
+//	producing the exact same one-shot allocation we already pay via
+//	`string(data[:n-1])` plus the standard `json.Marshal(string)` fast
+//	path. Net: switching the field type would not eliminate the copy, would
+//	require a custom Marshaler to avoid double-escape, and would push the
+//	allocation cost into a less observable layer. The fast path already
+//	short-circuits the multi-line slow path via bytes.IndexByte(...,'\n')
+//	== -1, so the unavoidable copy is only paid for one-line writes that
+//	are about to be JSON-encoded anyway. Status: doc-and-accept,
+//	tracked in docs/TODO.md R226-PERF-10 + R225-PERF-8.
 type shimClientMsg struct {
 	Type  string `json:"type"`
 	Line  string `json:"line,omitempty"`
