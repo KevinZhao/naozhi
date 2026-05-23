@@ -584,7 +584,15 @@ func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 }
 
 // NewScheduler creates a scheduler. Call Start() to begin.
-func NewScheduler(cfg SchedulerConfig) *Scheduler {
+// applyDefaults fills in zero-valued fields with their package-level
+// defaults and clamps oversized values. R232-ARCH-14: extracted from
+// NewScheduler so callers (especially tests that build SchedulerConfig
+// directly) can see the full default set in one place rather than tracing
+// through the constructor body. Returns the same struct by value so the
+// caller can decide whether to use the resolved or original config.
+//
+// Idempotent — calling it on an already-defaulted config is a no-op.
+func (cfg SchedulerConfig) applyDefaults() SchedulerConfig {
 	if cfg.MaxJobs <= 0 {
 		cfg.MaxJobs = defaultMaxJobs
 	}
@@ -592,15 +600,23 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		slog.Warn("cron max_jobs exceeds hard cap, clamping", "requested", cfg.MaxJobs, "cap", maxJobsHardCap)
 		cfg.MaxJobs = maxJobsHardCap
 	}
-	// Resolve per-chat cap at construction: <= 0 maps to the default so a
-	// zero struct field cannot silently disable the cap. R208-BL2.
-	maxPerChat := cfg.MaxJobsPerChat
-	if maxPerChat <= 0 {
-		maxPerChat = DefaultMaxJobsPerChat
+	// Resolve per-chat cap: <= 0 maps to the default so a zero struct
+	// field cannot silently disable the cap. R208-BL2.
+	if cfg.MaxJobsPerChat <= 0 {
+		cfg.MaxJobsPerChat = DefaultMaxJobsPerChat
 	}
 	if cfg.ExecTimeout <= 0 {
 		cfg.ExecTimeout = defaultExecTimeout
 	}
+	if cfg.Location == nil {
+		cfg.Location = time.Local
+	}
+	return cfg
+}
+
+func NewScheduler(cfg SchedulerConfig) *Scheduler {
+	cfg = cfg.applyDefaults()
+	maxPerChat := cfg.MaxJobsPerChat
 	parent := cfg.ParentCtx
 	if parent == nil {
 		parent = context.Background()
@@ -616,10 +632,8 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		}
 	}
 	cronLogger := robfigcron.PrintfLogger(slogPrintfLogger{})
+	// applyDefaults guarantees Location is non-nil (defaults to time.Local).
 	loc := cfg.Location
-	if loc == nil {
-		loc = time.Local
-	}
 	// R232-CR-4: surface "general" fallback being absent. ResolveAgent returns
 	// "general" when the prompt has no slash-prefix; if that agent isn't
 	// configured, executeOpt reads a zero AgentOpts (empty Backend / Model /

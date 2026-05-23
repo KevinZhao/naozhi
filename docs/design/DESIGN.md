@@ -218,6 +218,23 @@ claude CLI 子进程的状态机：
 >
 > 这些标签可正交组合（如 exempt + stub），底层进程仍走上面的 4 态机。
 
+### 三层状态机对比（R230B-ARCH-27）
+
+naozhi 同时管理三个层次的"状态"，常被混淆，这里列出权威拆分：
+
+| 层 | 类型/字段 | 状态枚举 | 转换触发 | 文件位置 |
+|----|----------|----------|----------|----------|
+| **Process** | `cli.ProcessState` | Spawning / Ready / Running / Dead | init 事件 / stdin 写入 / result / kill / 超时 | `internal/cli/process.go::ProcessState` |
+| **ManagedSession** | 多个语义标签（非枚举） | Exempt / Stub / Scratch / Paused | 由 `process==nil` + `key` 前缀 + `AgentOpts.Exempt` 推导 | `internal/session/managed.go` |
+| **Chat** | 隐式（无单独类型） | Active / Idle / Removed | 用户/IM 入口产生消息 / TTL / `/new` 命令 | 由 `Router.sessions` map 存在性 + `lastActive` 表达 |
+
+关键不变量：
+- **Process** 是底层物理进程的状态机；ManagedSession 持 `process atomic.Pointer[processBox]` 引用它
+- **ManagedSession** 是 router 一级的 wrapper；它的"语义标签"可正交组合（Exempt + Stub 同时存在）
+- **Chat** 没有单独的 type — 它是 ManagedSession 的聚合视图（同一 chat 可能有多个 ManagedSession，每 agent 一个）
+
+下游修改注意：改 ProcessState 枚举要同步 `process_test.go` + Watchdog；改语义标签需考虑 dashboard 渲染 + saveStore 持久化；改 chat 隐式状态机需考虑 Reset 调用面 + sessions.json schema。R230B-ARCH-27 跟踪建立独立状态图为后续 RFC 工作。
+
 Watchdog 机制：
 - `no_output_timeout`（默认 2min）：若连续无输出事件，杀死进程
 - `total_timeout`（默认 5min）：本轮总耗时超限，杀死进程

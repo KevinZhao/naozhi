@@ -185,6 +185,19 @@ type Hub struct {
 	// multiple Hubs don't share state; Shutdown clears the map so the
 	// Linker pointers can be GC'd (previously they were leaked in a
 	// package-level map for the process lifetime). R201-CRIT-2.
+	//
+	// R230-CQ-1 / R231-ARCH-6 / R233B-ARCH-3: the map key is a concrete
+	// *cli.SubagentLinker pointer — server should arguably consume an
+	// `AgentLinker` interface from session/agentlink instead, both to
+	// keep server's coupling to internal/cli minimal and to allow
+	// future ACP / Gemini backends without a cli.SubagentLinker
+	// concept to plug a noop implementation here. Tracked under
+	// R231-ARCH-6 (Breaking — touches every dashboard agent-team UI
+	// caller); the pointer-keyed map is acceptable today because (a)
+	// the cli package is the only producer, (b) Linker objects are
+	// allocated 1:1 with cli.Process and have process lifetime, so
+	// pointer identity is a stable dedup key, and (c) Shutdown drops
+	// the map so the legacy package-level-leak was the actual hazard.
 	wiredLinkersMu sync.Mutex
 	wiredLinkers   map[*cli.SubagentLinker]struct{}
 }

@@ -1091,11 +1091,28 @@ func (r *Router) DefaultWorkspace() string {
 	return r.workspace
 }
 
-// Version returns a monotonic counter incremented on every session mutation.
-// Used by the dashboard for efficient change detection without full JSON
-// comparison. storeGen is atomic so this is lock-free — the dashboard polls
-// Version() from the /api/sessions hot path next to a separate ListSessions
-// RLock, and the previous implementation doubled that lock traffic.
+// Version returns a monotonic counter incremented on every session
+// mutation. The dashboard polls it from the /api/sessions hot path
+// to skip full JSON comparison when nothing changed. storeGen is
+// atomic so this is lock-free.
+//
+// R230C-ARCH-18 / R229-ARCH-20: Version() is read by two distinct
+// audiences and the same uint64 has been ambiguously serving both:
+//
+//  1. **Data version** — "session map content changed, persistence layer
+//     should re-save and any consumer caching the result must invalidate."
+//     Bumped on add/remove/rename/reset/snapshot mutations under r.mu.
+//  2. **Render version** — "UI must re-fetch even though the session map
+//     didn't change." Bumped via BumpVersion() from non-session mutations
+//     (project favorite toggle, agent registry changes, etc.).
+//
+// Today both audiences read storeGen.Load() so a render-only bump still
+// makes the persistence layer think the session map mutated. The cost
+// is one redundant saveStore (debounced, IO-cheap) and is acceptable
+// for the audiences we have. Splitting into two counters is tracked
+// under R229-ARCH-20; until it lands callers must be aware that a
+// Version() change does NOT necessarily mean ListSessions() returns
+// new data — it may be a render-only signal.
 func (r *Router) Version() uint64 {
 	return r.storeGen.Load()
 }
@@ -1107,6 +1124,11 @@ func (r *Router) Version() uint64 {
 // short-circuits the re-render; without the notifyChange, the live
 // WebSocket `sessions_update` push is skipped and the UI only refreshes
 // on the next 5s poll tick.
+//
+// R230C-ARCH-18: BumpVersion is the "Render version" half of the
+// Version() ambiguity. It does NOT set storeDirty (so persistence layer
+// won't enqueue a save), but it DOES advance storeGen so cache-keyed
+// consumers downstream of Version() invalidate as if data changed.
 //
 // BumpVersion does NOT set storeDirty. It is a UI-refresh signal only and
 // must not be used when session state needs to be persisted to disk.
@@ -1165,6 +1187,17 @@ var listRefsPool = sync.Pool{
 // ListSessions returns a snapshot of all sessions for the dashboard.
 // Collects references under r.mu, then releases before snapshotting
 // to avoid blocking the router while getSessionID() waits on sendMu.
+//
+// R229-PERF-10: the SessionSnapshot slice itself is freshly allocated
+// each call (not pooled). Pooling here is unsafe because the slice
+// escapes to caller (handleList etc.) which JSON-marshals it across
+// goroutine boundaries; a sync.Pool entry could be returned to the pool
+// while a previous caller's handler is still in flight, leaking
+// snapshot fields into a different request's response. The
+// listRefsPool above only holds *ManagedSession pointers (caller never
+// retains the slice — we clear it before Put), and that's the
+// correct boundary for pooling. ~50 sessions × ~280 B SessionSnapshot
+// = ~14 KB / call; 1 Hz × N tabs is acceptable.
 func (r *Router) ListSessions() []SessionSnapshot {
 	refsPtr := listRefsPool.Get().(*[]*ManagedSession)
 	refs := (*refsPtr)[:0]
