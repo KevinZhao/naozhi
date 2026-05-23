@@ -73,6 +73,12 @@ type DaemonRuntimeConfig struct {
 const (
 	defaultTickTimeout = 30 * time.Second
 
+	// defaultDaemonTickInterval is the fallback tick cadence when a daemon
+	// runtime config leaves Tick zero/negative. Distinct from
+	// defaultTickTimeout (per-Tick context budget) — this one drives how
+	// often runOnce gets scheduled.
+	defaultDaemonTickInterval = 30 * time.Second
+
 	// consecutiveCLIFailureLimit is the breaker threshold (RFC §7.4).
 	// Hit this many CLI/panic failures in a row and Manager stops the
 	// daemon until process restart.  Validation/timeout failures DO NOT
@@ -218,7 +224,7 @@ func NewManager(cfg Config) (*Manager, error) {
 		}
 		tick := runtime.Tick
 		if tick <= 0 {
-			tick = 30 * time.Second // ultimate default
+			tick = defaultDaemonTickInterval
 		}
 		m.daemons = append(m.daemons, &daemonRecord{
 			daemon:           d,
