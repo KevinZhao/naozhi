@@ -1,0 +1,342 @@
+package server
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"golang.org/x/time/rate"
+)
+
+// memoryTestHandler builds a handler with a temp projects dir + permissive
+// limiter so tests don't false-positive on rate limits.
+func memoryTestHandler(t *testing.T, projectsDir, currentProject string) *MemoryHandler {
+	t.Helper()
+	return &MemoryHandler{
+		projectsDir:    projectsDir,
+		currentProject: currentProject,
+		limiter:        newIPLimiterWithProxy(rate.Inf, 1, false),
+	}
+}
+
+// writeMemoryFile drops a memory file under <projectsDir>/<project>/memory/<slug>.md.
+func writeMemoryFile(t *testing.T, projectsDir, project, slug, content string) {
+	t.Helper()
+	dir := filepath.Join(projectsDir, project, "memory")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, slug+".md"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+}
+
+// callMemoryHandler runs the handler against an httptest recorder using
+// http.ServeMux so PathValue("slug") populates correctly.
+func callMemoryHandler(t *testing.T, h *MemoryHandler, slug string) (*httptest.ResponseRecorder, memoryResponse, map[string]string) {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/memory/{slug}", h.handleGet)
+	req := httptest.NewRequest(http.MethodGet, "/api/memory/"+slug, nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code == http.StatusOK {
+		var resp memoryResponse
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode resp: %v", err)
+		}
+		return w, resp, nil
+	}
+	var errBody map[string]string
+	_ = json.NewDecoder(w.Body).Decode(&errBody)
+	return w, memoryResponse{}, errBody
+}
+
+func TestMemoryHandler_HitCurrentProject(t *testing.T) {
+	dir := t.TempDir()
+	writeMemoryFile(t, dir, "-cur", "feedback_foo", `---
+name: feedback-foo
+description: example feedback
+metadata:
+  type: feedback
+---
+
+Body **markdown** here.
+`)
+	h := memoryTestHandler(t, dir, "-cur")
+
+	w, resp, _ := callMemoryHandler(t, h, "feedback_foo")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if !resp.Found || resp.Scope != "current" {
+		t.Errorf("resp = %+v, want found=true scope=current", resp)
+	}
+	if resp.Description != "example feedback" {
+		t.Errorf("description = %q", resp.Description)
+	}
+	if resp.Type != "feedback" {
+		t.Errorf("type = %q", resp.Type)
+	}
+	if resp.Body != "Body **markdown** here.\n" {
+		t.Errorf("body = %q", resp.Body)
+	}
+	if resp.Project != "" {
+		t.Errorf("project should be empty for current scope, got %q", resp.Project)
+	}
+}
+
+func TestMemoryHandler_FallsBackToExternalProject(t *testing.T) {
+	dir := t.TempDir()
+	// only the external project has the slug
+	writeMemoryFile(t, dir, "-other-proj", "shared_slug", `---
+name: shared-slug
+description: lives in other proj
+---
+content
+`)
+	// current project exists but has no matching slug
+	writeMemoryFile(t, dir, "-cur", "unrelated", "x")
+	h := memoryTestHandler(t, dir, "-cur")
+
+	w, resp, _ := callMemoryHandler(t, h, "shared_slug")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	if !resp.Found || resp.Scope != "external" || resp.Project != "-other-proj" {
+		t.Errorf("resp = %+v, want external/-other-proj", resp)
+	}
+}
+
+func TestMemoryHandler_NotFound(t *testing.T) {
+	dir := t.TempDir()
+	// create the projects dir but no memories
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := memoryTestHandler(t, dir, "")
+
+	w, resp, _ := callMemoryHandler(t, h, "nope")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 with found=false", w.Code)
+	}
+	if resp.Found {
+		t.Errorf("resp.Found = true, want false")
+	}
+	if resp.Slug != "nope" {
+		t.Errorf("slug echo = %q", resp.Slug)
+	}
+}
+
+func TestMemoryHandler_RejectsInvalidSlug(t *testing.T) {
+	dir := t.TempDir()
+	h := memoryTestHandler(t, dir, "")
+
+	cases := []string{
+		"with.dot",               // dot
+		"with/slash",             // slash
+		"with..slash",            // dot dot
+		"a b",                    // space — although mux %20-decodes this anyway
+		string(make([]byte, 65)), // length over limit
+	}
+	for _, slug := range cases {
+		t.Run(slug, func(t *testing.T) {
+			// mux strips empty path values so we cannot hit handleGet
+			// directly via mux for these — invoke handler with a manual
+			// request that already has the PathValue set.
+			req := httptest.NewRequest(http.MethodGet, "/api/memory/x", nil)
+			req.SetPathValue("slug", slug)
+			w := httptest.NewRecorder()
+			h.handleGet(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("slug %q: status = %d, want 400 (body=%s)",
+					slug, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestMemoryHandler_PathEscapeBlockedAtRegex(t *testing.T) {
+	dir := t.TempDir()
+	// drop a sentinel file outside the projects dir
+	outside := filepath.Join(filepath.Dir(dir), "secret.md")
+	if err := os.WriteFile(outside, []byte("SECRET"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(outside)
+	h := memoryTestHandler(t, dir, "")
+
+	// Slugs containing path traversal are rejected by the regex and never
+	// reach the filesystem read. We assert 400 + invalid_slug.
+	req := httptest.NewRequest(http.MethodGet, "/api/memory/x", nil)
+	req.SetPathValue("slug", "../secret")
+	w := httptest.NewRecorder()
+	h.handleGet(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid_slug") {
+		t.Errorf("body = %s, want invalid_slug error", w.Body.String())
+	}
+}
+
+// TestMemoryHandler_PathEscapeBlockedAtTryRead verifies the second-line
+// defence: if the slug regex were ever loosened to admit "." or "/", the
+// HasPrefix gate inside tryRead must still reject the read.
+func TestMemoryHandler_PathEscapeBlockedAtTryRead(t *testing.T) {
+	dir := t.TempDir()
+	h := memoryTestHandler(t, dir, "")
+
+	// Manually call tryRead with a project name that contains "..". The
+	// regex normally guards the slug, but tryRead is what the second-line
+	// defence covers, so we feed a clean slug + crafted projectDir.
+	_, err := h.tryRead("../..", "anything")
+	if err == nil {
+		t.Fatalf("expected errMemoryPathEscape")
+	}
+	if !errorsIs(err, errMemoryPathEscape) {
+		t.Errorf("err = %v, want errMemoryPathEscape", err)
+	}
+}
+
+func TestParseMemoryFrontmatter_Variants(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		wantName string
+		wantDesc string
+		wantType string
+		wantBody string
+	}{
+		{
+			name: "full frontmatter",
+			input: `---
+name: foo
+description: bar baz
+metadata:
+  type: feedback
+---
+
+body line 1
+body line 2
+`,
+			wantName: "foo",
+			wantDesc: "bar baz",
+			wantType: "feedback",
+			wantBody: "body line 1\nbody line 2\n",
+		},
+		{
+			name: "quoted values",
+			input: `---
+name: "foo"
+description: 'with: colon'
+---
+body
+`,
+			wantName: "foo",
+			wantDesc: "with: colon",
+			wantBody: "body\n",
+		},
+		{
+			name: "no frontmatter",
+			input: `# Heading
+
+content
+`,
+			wantBody: "# Heading\n\ncontent\n",
+		},
+		{
+			name: "frontmatter only",
+			input: `---
+name: only
+---
+`,
+			wantName: "only",
+			wantBody: "",
+		},
+		{
+			name: "malformed frontmatter (no closing fence)",
+			input: `---
+name: hanging
+body never closed
+`,
+			wantBody: "---\nname: hanging\nbody never closed\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			meta, body := parseMemoryFrontmatter([]byte(tc.input))
+			if meta.name != tc.wantName {
+				t.Errorf("name = %q, want %q", meta.name, tc.wantName)
+			}
+			if meta.description != tc.wantDesc {
+				t.Errorf("desc = %q, want %q", meta.description, tc.wantDesc)
+			}
+			if meta.typ != tc.wantType {
+				t.Errorf("type = %q, want %q", meta.typ, tc.wantType)
+			}
+			if body != tc.wantBody {
+				t.Errorf("body = %q, want %q", body, tc.wantBody)
+			}
+		})
+	}
+}
+
+func TestParseMemoryFrontmatter_BOMStripped(t *testing.T) {
+	bom := []byte{0xEF, 0xBB, 0xBF}
+	input := append(bom, []byte("---\nname: bom\n---\nbody\n")...)
+	meta, body := parseMemoryFrontmatter(input)
+	if meta.name != "bom" {
+		t.Errorf("name = %q, want bom", meta.name)
+	}
+	if body != "body\n" {
+		t.Errorf("body = %q", body)
+	}
+}
+
+func TestEncodeCurrentProjectDir_Roundtrip(t *testing.T) {
+	dir := t.TempDir()
+	pwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded := "-" + filepath.Clean(pwd)
+	encoded = "-" + filepath.ToSlash(pwd)[1:] // mirror the encoder
+	// strip slashes
+	for i := 0; i < len(encoded); i++ {
+		if encoded[i] == '/' {
+			encoded = encoded[:i] + "-" + encoded[i+1:]
+		}
+	}
+
+	// create the memory dir for that encoded name
+	if err := os.MkdirAll(filepath.Join(dir, encoded, "memory"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got := encodeCurrentProjectDir(dir)
+	if got != encoded {
+		t.Errorf("encodeCurrentProjectDir(%q) = %q, want %q", dir, got, encoded)
+	}
+}
+
+// errorsIs is a tiny shim used to keep the test file's import surface
+// minimal (errors.Is would also work; both are fine).
+func errorsIs(err, target error) bool {
+	for err != nil {
+		if err == target {
+			return true
+		}
+		type unwrapper interface{ Unwrap() error }
+		u, ok := err.(unwrapper)
+		if !ok {
+			return false
+		}
+		err = u.Unwrap()
+	}
+	return false
+}

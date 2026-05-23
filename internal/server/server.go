@@ -84,6 +84,7 @@ type Server struct {
 	sendH        *SendHandler
 	cliH         *CLIBackendsHandler
 	scratchH     *ScratchHandler
+	memoryH      *MemoryHandler
 	agentEventsH *AgentEventsHandlers
 
 	// scratchPool manages ephemeral "aside" sessions backing the dashboard
