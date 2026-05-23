@@ -955,6 +955,16 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 // stream-json event, so shaving one lock per assistant turn matters when
 // N sessions run unattended. R65-PERF-M-1 upgraded from Mutex to RWMutex so
 // concurrent notify calls from different sessions no longer serialise.
+//
+// R230B-PERF-8 (P3, archived 2026-05-23): considered a count==1 fast path
+// taking the single subscriber via len-check + break instead of map range.
+// Go runtime's mapiterinit+mapiternext for a 1-bucket map is ~tens of ns;
+// RLock/RUnlock cost dominates and is paid either way. The proposed
+// "slice 存储 for count<=4" is breaking (Subscribe/Unsubscribe contract +
+// closeOnce ordering) and would invalidate the existing RWMutex coverage
+// proof. Net gain on hot path is sub-percent at current N. If 5000+ session
+// dashboards become hot, swap the map for a ring buffer of *subscriber
+// rather than micro-branching here.
 func (l *EventLog) notifySubscribers() {
 	if l.subCount.Load() == 0 {
 		return
