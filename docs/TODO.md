@@ -126,7 +126,7 @@
 - [ ] **R233-PERF-5 — flattenJSONLEvent 每行 unmarshal 到 map[string]any（P2）**: 整 JSON 反射，只用首个 key。方案：改 transcriptContentBlock 6 字段 struct。Breaking：否。
 - [ ] **R233-PERF-6 — readRun 每个 .json 文件 os.ReadFile cold path（P2）**: 100 文件 × open+stat+alloc+read+close。方案：diskListNewestFirst 仅返回 mtime+runID summary，defer body 到 Get。Breaking：否。
 - [ ] **R233-PERF-7 — agentTailer 200ms ticker buffered 超 500 时 append([]EventEntry(nil), …) 复制 500 条（P3）**: 每 poll 150KB 内存 copy。方案：ring buffer。Breaking：否。
-- [ ] **R233-PERF-8 — sysession.Manager hookMu RWMutex 改 atomic.Pointer 收益评估（P3）**: 每 tick 两次 RLock 对单写多读场景边际收益小。RWMutex Go 1.21+ 已无锁化常见路径。可选优化，先标记。Breaking：否。
+- [~] **R233-PERF-8 — sysession.Manager hookMu RWMutex 改 atomic.Pointer 收益评估（P3）**: 每 tick 两次 RLock 对单写多读场景边际收益小。RWMutex Go 1.21+ 已无锁化常见路径。可选优化，先标记。Breaking：否。 — 评估关闭（已归档 2026-05-23 复核）：godoc 已落地决策——`internal/sysession/manager.go:150-155` hookMu 段落显式说明 RWMutex 选择理由：reads 每 Tick 两次（run start + run end）+ writes 仅 SetCallbacks 一次；RWMutex 让并发 Tick 并行 RLock 无锁竞争。改 atomic.Pointer[func] 需双字段（onRunStarted + onRunEnded），增加一次 atomic.Pointer.Store 协调成本，且 Go 1.21+ RWMutex 在 RLock 路径已是 atomic CAS（src/sync/rwmutex.go），benchmark 收益可忽略。本批 PR。
 
 ### 代码质量 — 本轮新发现
 
@@ -325,8 +325,8 @@
 
 ### Go 正确性 — 本轮新发现
 
-- [ ] **R231-GO-1 — managed.go old.storeProcess(nil) 在 r.mu 内未持 historyMu（P2）**: storeProcess(nil) 与并发 InjectHistory 读 loadProcess() 组成 (proc=old) vs (proc=nil) 逻辑分裂窗口。方案：改 `old.adoptProcessAlreadySeeded(nil)` 或 nil 特化路径明确文档化。
-- [ ] **R231-GO-2 — RenameSession 中 fresh 在 adopt 前发布的危险窗口（P2）**: persistedSeededLen=0 期间若并发 InjectHistory 看到 fresh 会 reseed。当前 r.mu 持有保护，但应文档说明 fresh 仅在 adoptProcessAlreadySeeded 后才可安全发布。
+- [x] **R231-GO-1 — managed.go old.storeProcess(nil) 在 r.mu 内未持 historyMu（P2）**: storeProcess(nil) 与并发 InjectHistory 读 loadProcess() 组成 (proc=old) vs (proc=nil) 逻辑分裂窗口。方案：改 `old.adoptProcessAlreadySeeded(nil)` 或 nil 特化路径明确文档化。 — 已修复（已归档 2026-05-23 复核）：`attachProcessAndSnapshotPersisted(nil)` 在 `historyMu` 内串行化 `storeProcess(nil) + persistedSeededLen=0`，`internal/session/managed.go:541-574`；godoc R231-CQ-2 (line 543-559) 显式记录 detach 语义与 re-seed 不变量。本批 PR。
+- [x] **R231-GO-2 — RenameSession 中 fresh 在 adopt 前发布的危险窗口（P2）**: persistedSeededLen=0 期间若并发 InjectHistory 看到 fresh 会 reseed。当前 r.mu 持有保护，但应文档说明 fresh 仅在 adoptProcessAlreadySeeded 后才可安全发布。 — 已修复（已归档 2026-05-23 复核）：`internal/session/router_lifecycle.go:1259-1369` RenameSession 在 r.mu 内顺序执行 `fresh := &ManagedSession{...}` → `fresh.adoptProcessAlreadySeeded(proc)` → `old.storeProcess(nil)` → `r.sessions[newKey] = fresh`，fresh 永远在 adopt 之后才发布到 sessions map；godoc (line 1259-1279) 明确记录 caller 须保证 oldKey 无 in-flight Send。本批 PR。
 - [x] **R231-GO-3 — sysession.Runner sweep `os.IsNotExist` → `errors.Is(fs.ErrNotExist)` 同类（P3）**: 已修。 — 已修复，本批 PR #218
 
 ## Round 219 — 5-agent 并行 review 第 33 轮（2026-05-17）NEEDS-DESIGN
@@ -538,9 +538,9 @@
 - [ ] **R229-PERF-1 — Protocol.ReadEvent string→[]byte 双 copy（P1）**: 每个 stream 事件分配 1 个 []byte（line size，50 B–200 KB）。方案：Protocol.ReadEvent 签名改 []byte，shimMsg.Line 改 json.RawMessage 同步消除中间 string 拷贝。Breaking：是（Protocol 接口变更，所有实现 + fakes 更新）。
 - [~] **R229-PERF-5 — EventLog.Append 单 entry 路径每次分配 1-slot 切片（归档 2026-05-23）**: 同 R215-PERF-P2-1 / R217-PERF-4 / R219-PERF-4 / R222-PERF-8 / R226-PERF-5 / R227-PERF-9 / R228-PERF-7 / R230C-PERF-2 同根因（PersistSink 契约允许 retain slice）。生产热路径已由 R230-PERF-1 sink-nil 早返回覆盖。统一收敛到 R230C-PERF-2，本批 PR 归档。
 - [ ] **R229-PERF-6 — discovery.Scan 每次 O(N) os.ReadDir 调用（P2）**: 已有 promptCache/summaryCache，但 listJSONLsByMtime 未缓存。方案：(claudeDir, cwd) → mtime invalidated 缓存。Breaking：否。
-- [ ] **R229-PERF-7 — SetAgentInternalID 写锁覆盖 ring buffer 反向扫描（P2）**: 8 个 sub-agent 并发 resolve 时 Append 串行化。方案：扫描阶段 RLock，需变更时升级写锁。Breaking：否。
+- [~] **R229-PERF-7 — SetAgentInternalID 写锁覆盖 ring buffer 反向扫描（P2）**: 8 个 sub-agent 并发 resolve 时 Append 串行化。方案：扫描阶段 RLock，需变更时升级写锁。Breaking：否。 — 评估关闭（已归档 2026-05-23 复核）：R225-PERF-13 已落地缓解——`internal/cli/eventlog.go:677-714` SetAgentInternalID 已 cap scan 在 `setAgentInternalIDMaxScan = 50`（line 21）+ 双 found 标志早 break，写锁持锁时间收敛到至多扫描 50 个 ring slot。Go RWMutex 不支持 read→write upgrade（reader/writer 之间需先 RUnlock 再 Lock），中途升级会引入 ABA：scan 阶段读到的 entry 在 RUnlock 与 Lock 间被 Append 覆盖，写入到错误 slot。当前持续写锁是正确性最优方案，cap=50 + early break 已把锁竞争降到可接受窗口。本批 PR。
 - [~] **R229-PERF-9 — extractLastPromptUncached 大文件 fallback 全文扫两次（误报关闭 2026-05-23）**: 复核 discovery/scanner.go:587-594 现状：extractLastPrompt 已对所有 result 调 setCachedPrompt（line 593），无论 result 为 "" 还是非空——负面结果 mtime keyed cache 已落地。条目描述过时，归档关闭，本批 PR
-- [ ] **R229-PERF-10 — ListSessions 每次 make([]SessionSnapshot)（P3）**: 1 Hz × N 客户端持续分配 ~20 KB。方案：sync.Pool 池化 slice 或流式 JSON 编码。Breaking：否。
+- [x] **R229-PERF-10 — ListSessions 每次 make([]SessionSnapshot)（P3）**: 1 Hz × N 客户端持续分配 ~20 KB。方案：sync.Pool 池化 slice 或流式 JSON 编码。Breaking：否。 — 已修复（已归档 2026-05-23 复核）：`internal/session/router_core.go:1201-1228` 已用 `listRefsPool` sync.Pool 池化 `*[]*ManagedSession` refs slice，r.mu RLock 持锁时间收敛到只 collect refs；snapshots slice 无法池化（caller-owned 跨 handler 边界，复用风险盖过收益），godoc line 1191-1200 已记录该决策。本批 PR。
 - [x] **R229-PERF-12 — Subscribe 每次 alloc subscriber+buffered chan（P3）**: 反复 tab reload 持续微分配。方案：sync.Pool 池化 subscriber。Breaking：否。 — 已修复（采用 godoc 拒绝方案：subscriber struct 加 R229-PERF-12 段落显式说明池化不可行——closed channel 不能 reuse（unsub 走 close(sub.ch)）+ sync.Once 不能 reset 到 pristine 状态，所以 make(chan, 1) + sync.Once{} 每次 Subscribe 是不可避免的最小开销；tab reload 是人类 cadence，pool 收益 ~2 alloc/sub），本批 PR
 
 ### Code 质量（剩余）
@@ -571,7 +571,7 @@
 - [ ] **R229-ARCH-17 — KnownIDs/SessionIDToKey/Sessions/Workspace/Backend Overrides 5 个 map 同步维护（P3）**: 方案：抽 SessionIndexes struct + 一锁。Breaking：否。
 - [ ] **R229-ARCH-18 — discovery/history/eventlog 三套读历史路径（P3）**: 方案：抽 HistoryService 单一入口归一化。Breaking：否。
 - [ ] **R229-ARCH-19 — feishu MentionMe 仍 loose 实现（P3）**: 方案：platform 协议 MentionMatch 强制精确 self-id 匹配。Breaking：是（feishu 行为变化，需 release note）。
-- [ ] **R229-ARCH-20 — BumpVersion 双语义（DataVersion 与 RenderVersion 混用）（P3）**: 方案：拆两计数器。Breaking：否（dashboard 加新字段，老前端忽略）。
+- [~] **R229-ARCH-20 — BumpVersion 双语义（DataVersion 与 RenderVersion 混用）（P3）**: 方案：拆两计数器。Breaking：否（dashboard 加新字段，老前端忽略）。 — 评估关闭（已归档 2026-05-23 复核）：godoc 已落地（`internal/session/router_core.go:1099-1116` Version() 段落 + R230C-ARCH-18 锚点；line 1120-1138 BumpVersion godoc 显式说明它是 Render version 半边，不 set storeDirty 但 advance storeGen）。代价分析：拆两计数器需 dashboard JS + Go 端双向 schema 迁移，而当前重叠成本仅是 BumpVersion 时一次 debounced saveStore（IO-cheap），ROI 不足。godoc 锁定语义后未来若 BumpVersion 写频率显著提升再拆。本批 PR。
 - [x] **R229-ARCH-21 — DESIGN.md 与实际架构 LOC 严重偏离（P3）（已修复 2026-05-23）**: 方案：DESIGN.md 增加"实际架构"章节 + 当前包间依赖图。Breaking：否。 — DESIGN.md "项目结构" 节后追加 "实际架构（截至 2026-05）" 子节：列出 internal/ 各子包当前职责（cli/session/server/platform/dispatch/cron/sysession/upstream/shim/discovery 等）+ 包间主要依赖（自上而下不回环）+ 实际 LOC 对比预估说明 + 新增能力清单（cron/多 backend/upstream/shim/sysession 不在 v1）。本批 PR。
 
 ## Round 226 — 5-agent 并行 review 第 38 轮（2026-05-19 第三批）NEEDS-DESIGN
@@ -888,7 +888,7 @@
 - [ ] **R217-GO-4 — `spliceLog` 每 record `json.Unmarshal` 取已知 seq**: 重新解码 record body 只为读 seq；可由 idxEntries 索引位置直接拿。改动需谨慎（保证 seq 不被外部恶意改）。
 - [ ] **R217-GO-5 — `cron.Stop()` deadline 后泄漏 triggerWG goroutine（R44 重申）**: 单 shot 设计可接受；测试 -count=N 污染。长期需重构 triggerWG/Stop 协议。
 - [~] **R217-GO-6 — cron `sendCtx` 派生自 Background()（归档 2026-05-23）**: 同 R216-GO-7 / R230B-GO-1 同根因（重复登记）。统一收敛到 R230B-GO-1 跟踪，本批 PR
-- [ ] **R217-GO-7 — `storeStringAtomic` fast-path 可能 silently no-op `deathReason` 清空**: managed.go:254 注释自承"逻辑 race"。需用 `Store(new(string))` 强制材料化清空，或加专用 `clearDeathReason` 方法。
+- [~] **R217-GO-7 — `storeStringAtomic` fast-path 可能 silently no-op `deathReason` 清空**: managed.go:254 注释自承"逻辑 race"。需用 `Store(new(string))` 强制材料化清空，或加专用 `clearDeathReason` 方法。 — 评估关闭（已归档 2026-05-23 复核）：`internal/textutil/atomic_string.go:32-46` StoreAtomicString godoc R219-CR-1 详细论证 fast-path 安全性——last-writer-wins 语义下，若我们的 s 与已观察值相等，写入与不写入产生相同可见状态；deathReason "" 清空路径在 cli.EventLog 上下文持 l.mu 串行化，跨包路径靠 atomic.Pointer 单写者保证。configure with `internal/textutil/atomic_string_test.go:62-90` TestStoreAtomicString_ConcurrentWriters 已锁定 last-writer-wins 契约。逻辑 race 注释指的是"两个不同写者并发写不同值，最终值不确定"——这是 atomic 设计本身的语义而非 bug。本批 PR。
 
 ### 性能 — 协议接口变更或需 benchmark
 
@@ -1652,9 +1652,9 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R227-PERF-6 — `Cleanup` + `saveIfDirty` 每次写锁内 map clone 3 份（P2）**: 50 session × 30s 间隔每分钟 2 次 O(n) clone。方案：传 []*ManagedSession 切片，配合 listRefsPool。
 - [x] **R227-PERF-7 — `ACPProtocol.WriteMessage` 每次 prompt 用 map[string]any（P2）（已修复 2026-05-23 复核）**: 3-5 个 map + RPCRequest 分配 + marshal。方案：定义具名 struct。 — 复核：protocol_acp.go:300-306 `acpPromptParams` 已定义具名 struct 并在 WriteMessage line 344 `Params: acpPromptParams{...}` 直接构造，replaces map[string]any；与 R230-PERF-1 acpInitParams/acpSessionLoadParams/acpSessionNewParams 形成完整命名 struct 体系。
 - [ ] **R227-PERF-8 — `BroadcastSessionsUpdate` time.AfterFunc 每次 alloc（P2）**: 高频 notify 下每次 timer + WG 开销。方案：Hub 持久 *Timer + Reset。
-- [ ] **R227-PERF-9 — `EventLog.Append` invokePersistSink 单条 slice 逃逸（P2）**: 5-50/s × N session 热路径。方案：EventLog 内置 [1]EventEntry scratch + sync.Pool。涉及 `internal/cli/eventlog.go:660`。
+- [~] **R227-PERF-9 — `EventLog.Append` invokePersistSink 单条 slice 逃逸（P2）**: 5-50/s × N session 热路径。方案：EventLog 内置 [1]EventEntry scratch + sync.Pool。涉及 `internal/cli/eventlog.go:660`。 — 评估关闭（已归档 2026-05-23 复核）：同根因 R215-PERF-P2-1 / R217-PERF-4 / R219-PERF-4 / R222-PERF-8 / R226-PERF-5 / R228-PERF-7 / R229-PERF-5 / R230C-PERF-2，已统一收敛到 R230C-PERF-2。`internal/cli/eventlog.go:803-811` godoc 显式锚定 PersistSink 契约——sink 可保留 slice 跨 return，所以 [1]EventEntry stack scratch 无可避免地通过 atomic.Pointer-loaded fn ptr escape；sync.Pool 只是把 alloc 换成 Get/Put 开销（48B payload 收益不显）。生产热路径已被 R230-PERF-1 sink-nil 早返回覆盖。本批 PR。
 - [~] **R227-PERF-11 — `EventLog.Append` storeAtomicString 每次 *string alloc（评估关闭 2026-05-20）**: 条目自标"降级仅观察"。复核 textutil.StoreAtomicString 已用 atomic.Pointer.Load + 字符串相等短路（同值不重新 Store *string），命中率 ~99%（lastActivitySummary 在同 tool_use 持续时不变）。sync.Pool[string] 在 textutil 是叶子包做不到 lock-free 复用，且分支预测器对短路命中早已优化。本批 PR #168 关闭归档。
-- [ ] **R227-PERF-12 — `ACPProtocol.parseSessionUpdate` tool_call/tool_call_update 分支双 alloc（P2）**: AssistantMessage ptr + ContentBlock slice。方案：tool name 直接存 ToolCall.Title；ContentBlock 改 [1]ContentBlock + count。
+- [~] **R227-PERF-12 — `ACPProtocol.parseSessionUpdate` tool_call/tool_call_update 分支双 alloc（P2）**: AssistantMessage ptr + ContentBlock slice。方案：tool name 直接存 ToolCall.Title；ContentBlock 改 [1]ContentBlock + count。 — 评估关闭（已归档 2026-05-23 复核）：Message.Content 被多处读（`internal/cli/askquestion_test.go:51` `internal/dispatch/status_test.go` 等通过 `Content[0].Name` 提取 tool_use name），删除 Message 字段需跨包重写消费者；[1]ContentBlock 改 fixed array 失去 slice header 灵活性，与 [`*AssistantMessage` 含 nil 表示空] 契约冲突。tool_call 分支频率为每 turn 几十次（远低于 stdout 热路径），单次 alloc 成本被 ACP RPC 序列化掩盖。godoc 已通过 `event.go:78-79` 锚定 ToolUseID 优于 Message.Content[].Name 的提取方式。本批 PR。
 - [~] **R227-PERF-16 — `EventEntriesSince` dead-session 分支全量扫描+stable sort（误报关闭 2026-05-20）**: 条目自标"500 entry stable sort < 1µs，可接受"——dead-session 重订阅是低频路径（tab reload），微秒级开销远低于其他热路径。InjectHistory 端排序也会让 replay 与 live append 之间的语义需要重新定义。本批 PR #187 关闭归档。
 - [ ] **R227-PERF-17 — `shim.ServerMsg.MarshalLine` 每次 json.Marshal alloc（P3）**: shim binary 独立。方案：sync.Pool[bufEnc]。**降级**：shim 独立 binary，不影响主进程，单独 PR 处理。
 - [ ] **R227-PERF-18 — `eventPushLoop` EventEntriesSince per-goroutine 独立 slice（P3）**: 50 订阅 tab × 同 session 各自分配。方案：扩展 EntriesSinceInto(dst) 接口接受 caller-owned buffer。Breaking。
