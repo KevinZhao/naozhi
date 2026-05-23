@@ -309,6 +309,53 @@ func (p *Process) Close()
 func (p *Process) Kill()
 ```
 
+#### Backend Extension Points
+
+新增一个 backend（例如 Gemini CLI）只需要在四处显式注册，其它消费方都通过
+`backend.Profile` 注册表读取，禁止 `switch backend.ID`：
+
+1. **`backend.Profile`** (`internal/cli/backend/profile.go`)
+   单一注册表，承载 backend 的所有元数据与构造钩子：
+
+   - `ID` / `DisplayName` / `DefaultBinary` / `DefaultTag` / `ChipColor`
+   - `NewProtocol(deps) cli.Protocol` —— 每次 spawn 构造新协议实例
+   - `DetectInProc(cmdline)` —— 进程发现时按命令行匹配归类
+   - `RequiredNodeCaps` —— 反向 node 路由的能力门（如 `["acp"]`）
+   - `HistoryDir` —— 转写文件根目录（`~/...` 形式）
+   - `CostUnit` —— dashboard cost cell 单位（`USD` / `credits` / 空）
+   - `Features` —— UI 能力位（`askuser` / `passthrough` / `embedded_context` /
+     `image_input` / `audio_input` / `mcp_http` / `mcp_sse`）
+
+   注册流程：在 `internal/cli/backend/profile_<id>.go` 写一个返回 `Profile`
+   的工厂，`RegisterDefaults` 调用 `Register(<id>Profile())`。
+
+2. **`cli.Protocol`** (`internal/cli/protocol.go`)
+   `Profile.NewProtocol` 返回的具体协议实现，负责 NDJSON / JSON-RPC 等
+   线协议。每个新 backend 通常对应一个 `protocol_<id>.go`，声明
+   `Capabilities() cli.Caps` 显式标注 `Replay` / `Priority` /
+   `SoftInterrupt` / `StreamJSON` 等能力位（不要再依赖 `Name()` 反推默认）。
+   遇到不支持中断的协议返回 `cli.ErrInterruptUnsupported`。
+
+3. **`history.Source`** (`internal/history/`)
+   Backend 私有的转写读取器。在 `internal/history/<id>jsonl/` 实现：
+
+   - `Source.LoadHistory(ctx, dir, sid)` 把磁盘转写翻成 `cli.EventEntry` 流
+   - `Source.ListSessions(ctx, dir)` 让 dashboard 历史面板枚举可恢复 session
+   - 在子包 `init()` 里调 `cli.RegisterHistoryFactory(<id>, factory)`
+     —— `cli.Wrapper.NewWrapper` 在 spawn 时按 BackendID 取工厂；未注册的
+     backend fallback 到 `NoopHistorySource`（dashboard 显示空磁盘层）。
+
+4. **shim hint**（可选，仅在 backend 需要 reverse-node 路由时）
+   `Profile.RequiredNodeCaps` 在 `internal/server/select_node_for_backend.go`
+   中作为 capability gate：候选 node 的 `cli.backend.<id>.capabilities`
+   配置必须覆盖该列表才能承接此 backend 的 session。`StartShimWithBackend`
+   把 backend ID 透传到 shim binary，shim 据此选 CLI 路径与启动 argv。
+
+> 历史与展望：System Session daemon (`internal/sysession`) 与 Cron Dashboard
+> 都在 backend.Profile 之外（它们消费 session，不增加 backend）；
+> Gemini CLI 集成在 [`docs/rfc/multi-backend.md`](../rfc/multi-backend.md)
+> 中作为下一个候选，预期只动上述四点。
+
 ### 2. Session Router (~300 行)
 
 管理 session key 到长生命周期 claude 进程的映射。
