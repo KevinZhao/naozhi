@@ -2109,7 +2109,8 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	inflight.setPhase(PhaseSpawning)
 	sess, _, err := s.router.GetOrCreate(ctx, key, opts)
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
+		state, errClass, canceled := classifyExecError(err, ErrClassSessionError)
+		if canceled {
 			// Parent ctx cancelled mid-flight (graceful shutdown or job
 			// deletion overlapping execute). The job will either be re-run
 			// on the next tick or is intentionally gone; either way an IM
@@ -2118,19 +2119,15 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			lg.Info("cron session cancelled", "err", err)
 			s.finishRun(finishArgs{
 				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
+				state: state, errClass: errClass, errMsg: err.Error(),
 				skipPersist: true, // 与 historical recordResult skip 一致
 				prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 			})
 			stubRefresh()
 			return
 		}
-		state := RunStateFailed
-		errClass := ErrClassSessionError
-		if errors.Is(err, context.DeadlineExceeded) {
+		if state == RunStateTimedOut {
 			lg.Info("cron session deadline exceeded", "err", err)
-			state = RunStateTimedOut
-			errClass = ErrClassDeadlineExceeded
 		} else {
 			lg.Error("cron session error", "err", err)
 		}
@@ -2175,7 +2172,8 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	sendCancel()
 	abort := <-abortCh
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
+		state, errClass, canceled := classifyExecError(err, ErrClassSendError)
+		if canceled {
 			// Same rationale as the session-error branch above: suppress
 			// the operator-facing notice so shutdown races don't look like
 			// real failures. abort.fired can still be true here when a
@@ -2188,18 +2186,14 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 				"abort_outcome", abort.outcome)
 			s.finishRun(finishArgs{
 				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
+				state: state, errClass: errClass, errMsg: err.Error(),
 				skipPersist: true,
 				prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 			})
 			stubRefresh()
 			return
 		}
-		state := RunStateFailed
-		errClass := ErrClassSendError
-		if errors.Is(err, context.DeadlineExceeded) {
-			state = RunStateTimedOut
-			errClass = ErrClassDeadlineExceeded
+		if state == RunStateTimedOut {
 			// Log alongside the watchdog outcome so operators see both the
 			// deadline AND whether the CLI was successfully interrupted in
 			// the same line. ACP backends report "unsupported" here — we
@@ -2407,6 +2401,33 @@ const truncatedSuffix = "…[truncated]"
 func sanitiseRunErrMsg(s string) string {
 	s = redactPathsInCronError(s)
 	return osutil.SanitizeForLog(s, maxCronErrMsgRunes)
+}
+
+// classifyExecError maps a Send / GetOrCreate error to the (state, errClass)
+// terminal-state pair that finishRun consumes. Non-deadline / non-cancel
+// errors fall through to (RunStateFailed, defaultErrClass) so callers can
+// distinguish "session_error" (GetOrCreate) from "send_error" (Send) at
+// their own call site without adding a second helper.
+//
+// R230C-CR-7: prior code inlined this mapping in every executeOpt error
+// branch (4 finishRun call sites), which drifted in the past whenever a
+// new error class was added. Centralising it gives a single place to
+// extend (e.g. add "permission_denied" classification later).
+//
+// canceled is a separate boolean instead of a sentinel ErrorClass because
+// the canceled path drives skipPersist=true + Info-level logging while
+// other classes drive Error-level logging — the caller has unique branch
+// behaviour past the classification, so returning the boolean keeps the
+// callers' if-tree readable.
+func classifyExecError(err error, defaultErrClass ErrorClass) (state RunState, errClass ErrorClass, canceled bool) {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return RunStateCanceled, ErrClassCanceled, true
+	case errors.Is(err, context.DeadlineExceeded):
+		return RunStateTimedOut, ErrClassDeadlineExceeded, false
+	default:
+		return RunStateFailed, defaultErrClass, false
+	}
 }
 
 // bumpRunStateMetrics increments the per-state counter for the terminal

@@ -532,6 +532,59 @@ func (s *Server) Start() error {
 }
 ```
 
+> **实际 vs 理想**（R230C-ARCH-1）：上文是 v1 时的目标形态，描述的"Server
+> 只注册 /health"已严重失真。现状（2026-05）：`internal/server/` 含 90+
+> 文件、60+ 路由（dashboard / WebSocket / 节点 RPC / cron CRUD / 上传 /
+> 静态资源 / 系统会话），Server 持有 17+ handler 子结构体（CronHandlers /
+> AuthHandlers / SystemHandlers ...），与 webhook 入口共享 mux。
+> 拆分计划见 `docs/design/server-split-design.md` 与 R231-ARCH-5 /
+> R229-ARCH-1（拆 internal/wshub + internal/api 子包）。本节保留作为
+> 历史目标，重构对照见上述 RFC。
+
+## Backend Extension Points
+
+> R230C-ARCH-17：本节列出新增 CLI backend / 子系统时需要触达的 4 个稳定
+> 接口/扩展点。除此之外（CLI 子进程外的 RFC）的扩展见 `docs/rfc/`。
+
+### 1. backend.Profile（必做）
+
+新增 backend 写一个 `internal/cli/backend/profile_<id>.go` 文件，构造
+`backend.Profile{ID, DisplayName, DefaultBinary, NewProtocol, DetectInProc,
+HistoryDir, CostUnit, Features, ChipColor, RequiredNodeCaps}` 并在
+`backend.RegisterDefaults()` 调用 `Register`。
+
+Profile 是 dashboard 显示元数据 + Protocol 工厂 + 进程发现谓词的单一事实
+源——加新 backend 只需写 profile，不再需要改 wrapper.go / detect.go /
+session/cost helpers 的 switch（参见 `cli/backend/profile.go` 包注释）。
+
+### 2. cli.Protocol（必做）
+
+每个 backend 提供一份 stream-json 或 ACP 实现。Protocol 接口定义：BuildArgs
+（spawn 参数）、ReadEvent（行→事件解析）、WriteMessage / WriteUserMessageLocked
+（用户消息编码）、Init（握手）、Capabilities（能力上报）。Profile 的
+NewProtocol 字段返回 Protocol 实例，session 包对 Protocol 类型不可见
+(R231-ARCH-8 跟踪 Protocol 接口窄化方向)。
+
+### 3. history.Source（可选）
+
+如果 backend 持久化对话到磁盘 JSONL，注册一个 history factory 让
+dashboard sidebar 显示历史会话：`history.Register(backendID,
+func(opts history.Options) history.Source)` 在 backend 包的 init() 调用。
+session 包通过 `cli.NewHistorySource(backendID)` 取实例，缺失则
+fallback 到 NoopHistorySource。
+
+### 4. shim hint（可选）
+
+进程启动通过 shim 时，shim 的 spawn 配置由 cli/wrapper.go 的
+`SpawnOptions` 控制。新增 backend 如果需要 ACP 走 socket 而非 stdio，
+RequiredNodeCaps 字段已包含 cap 协商（"acp" 串），shim 端的协商参见
+`internal/shim/protocol.go` 的 ProtocolVersion / MinSupportedProtocolVersion
+（R230B-ARCH-22）。
+
+参考实现：
+- claude：`profile_claude.go` + `protocol_claude.go` + history/claudejsonl
+- kiro：`profile_kiro.go` + `protocol_acp.go` + history/kirojsonl
+
 ## 项目结构
 
 ```
