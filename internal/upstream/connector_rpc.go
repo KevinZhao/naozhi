@@ -228,7 +228,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			return nil, errInvalidSessionIDFormat
 		}
 		if p.ProcStartTime == 0 {
-			return nil, fmt.Errorf("proc_start_time is required")
+			return nil, errProcStartTimeRequired
 		}
 		actual, err := discovery.ProcStartTime(p.PID)
 		if err != nil {
@@ -318,7 +318,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			return nil, fmt.Errorf("pid is required")
 		}
 		if p.ProcStartTime == 0 {
-			return nil, fmt.Errorf("proc_start_time is required")
+			return nil, errProcStartTimeRequired
 		}
 		if p.SessionID != "" && !discovery.IsValidSessionID(p.SessionID) {
 			return nil, errInvalidSessionIDFormat

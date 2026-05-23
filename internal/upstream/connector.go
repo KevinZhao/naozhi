@@ -77,6 +77,18 @@ const reasonSessionReset = "session_reset"
 // value compares equal across goroutines without allocation.
 var errInvalidSessionIDFormat = errors.New("invalid session_id format")
 
+// errProcStartTimeRequired is shared by takeover + close_discovered for
+// the missing-proc_start_time path. Same rationale as
+// errInvalidSessionIDFormat: two RPC handlers previously held divergent
+// fmt.Errorf copies, and the value is now a static sentinel so a primary
+// can errors.Is against it (or its mirror on the dispatch side) without
+// reaching for string compare. discovery.ProcStartTime intrinsically
+// requires a non-zero start time to do its identity check; rejecting
+// zero up front saves one /proc syscall on the hot path and keeps the
+// error attributable to "client forgot the field" instead of "we tried
+// and the kernel said no".
+var errProcStartTimeRequired = errors.New("proc_start_time is required")
+
 // Connector dials a primary naozhi and serves it as a reverse-connected node.
 // Run on machines behind NAT that cannot be reached by the primary directly.
 type Connector struct {
