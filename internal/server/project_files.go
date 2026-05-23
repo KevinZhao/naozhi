@@ -641,6 +641,23 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// R230-SEC-5: defence-in-depth re-check that resolved still sits under
+	// the project root. resolveProjectFile already verified this once, but a
+	// concurrent rename(2) between EvalSymlinks (inside resolveProjectFile)
+	// and Lstat above could move the file's containing dir to a path outside
+	// the workspace; the inode-stable Lstat then succeeds on a path that no
+	// longer satisfies the prefix invariant. Re-evaluate the project root
+	// once more so symlink-free escapes are caught on the same axis as the
+	// symlink check above. The added EvalSymlinks call is bounded by a few
+	// syscalls, well below the IO cost of the file body that follows.
+	rootResolved, rrErr := filepath.EvalSymlinks(rootPath)
+	if rrErr != nil ||
+		(resolved != rootResolved &&
+			!strings.HasPrefix(resolved, rootResolved+string(filepath.Separator))) {
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
 	// ETag hashes (size, mtime-ns) so the header does not leak exact byte
 	// count or nanosecond modification timestamp to authenticated clients.
 	// Matches the attachment endpoint convention — see handleAttachment.
