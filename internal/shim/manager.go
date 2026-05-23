@@ -833,19 +833,41 @@ func (h *ShimHandle) DrainReplay() ([]ServerMsg, error) {
 	}
 }
 
-// Close closes the shim connection and signals done.
+// Close closes the shim connection and signals done. Idempotent: only
+// the first Close() actually closes ClientDone via closeOnce; subsequent
+// calls still call Conn.Close() (cheap and net.Conn.Close is documented
+// as safe to call multiple times). Callers that race a Detach/Shutdown
+// path with a Reconnect-induced Close on the same handle therefore do
+// not double-close the channel — readers blocked on h.ClientDone observe
+// exactly one wakeup. R234-DOC-03.
 func (h *ShimHandle) Close() {
 	h.closeOnce.Do(func() { close(h.ClientDone) })
 	h.Conn.Close()
 }
 
-// Detach sends a detach message and closes the connection.
+// Detach sends a detach message and closes the connection. Used when
+// naozhi gracefully hands a shim back to its idle/watchdog regime
+// (typical at session reconnect / handle replacement). The shim sees
+// "detach" and re-arms the disconnect watchdog so it terminates after
+// the configured idle timeout — distinct from Shutdown which forces an
+// immediate exit.
+//
+// SendMsg's error is intentionally swallowed: the only failure mode is a
+// half-closed conn, in which case the immediately-following Close
+// already provides the desired teardown semantics. R234-DOC-03.
 func (h *ShimHandle) Detach() {
 	h.SendMsg(ClientMsg{Type: "detach"}) //nolint:errcheck
 	h.Close()
 }
 
-// Shutdown sends a shutdown message and closes the connection.
+// Shutdown sends a shutdown message and closes the connection. Used when
+// naozhi tears down the shim permanently (e.g. session.Remove, naozhi
+// graceful StopAll). The shim's "shutdown" handler exits its process;
+// Detach by contrast leaves the shim alive on its idle clock.
+//
+// SendMsg's error is intentionally swallowed for the same reason as
+// Detach — a half-closed conn means Close() will tear down whatever
+// remains anyway. R234-DOC-03.
 func (h *ShimHandle) Shutdown() {
 	h.SendMsg(ClientMsg{Type: "shutdown"}) //nolint:errcheck
 	h.Close()
