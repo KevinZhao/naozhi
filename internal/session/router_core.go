@@ -550,6 +550,17 @@ func (r *Router) indexDel(key string) {
 }
 
 // RouterConfig holds configuration for the session router.
+//
+// Lifecycle: every field below is read at NewRouter construction time
+// (or via legacy fallback paths that snapshot the value once). After
+// NewRouter returns the receiver should treat the struct as
+// immutable — fields like Wrapper / Wrappers / Workspace / StorePath
+// / ClaudeDir are sampled into r.* state and never re-read. R230-ARCH-8:
+// changing any of these at runtime requires `systemctl restart naozhi`
+// (with the deliberate exception of `~/.claude/settings.json` which
+// the per-spawn RefreshSettings hook re-loads each turn). Operators
+// editing config.yaml should expect the changes to take effect only on
+// the next process start; see docs/ops/naozhi-deploy-skill.md.
 type RouterConfig struct {
 	// Wrapper is the legacy single-backend field. If Wrappers is nil/empty
 	// this wrapper is used for every session.

@@ -180,6 +180,18 @@ var _ Runner = (*runnerImpl)(nil)
 // Pointer-receiver Write is intentional:  cmd.Stderr stores an
 // io.Writer interface value, and a value-receiver Write would let
 // every call see a fresh n=0 copy of the struct, defeating the cap.
+//
+// io.Writer CONTRACT VIOLATION (R232-GO-4): Write always returns
+// (len(p), nil) — including the discard-after-cap path AND the inner
+// writer error path. Returning (n<len(p), err) is what io.Writer
+// formally requires, but exec.Cmd's stderr pump (and io.Copy in
+// general) treats short writes as "retry forever", which would either
+// loop on the cap or cascade an inner-writer fault into a stderr
+// pump that never finishes. Callers of limitedWriter MUST be aware
+// they will never see write errors and MUST NOT chain it into pipes
+// that demand the standard contract. Currently only used as
+// cmd.Stderr / cmd.Stdout for the sysession one-shot Run path; do
+// NOT expose it beyond the package without revisiting this trade-off.
 type limitedWriter struct {
 	w   io.Writer
 	max int
