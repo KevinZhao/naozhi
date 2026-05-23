@@ -426,6 +426,23 @@ func (s *Scheduler) GetRun(jobID, runID string) (*CronRun, error) {
 // rotations may briefly resurface in history until their JSONL ages out.
 const knownSessionIDsRecentCap = 200
 
+// IsExcluded reports whether the given Claude sessionID belongs to a
+// cron-spawned run. Implements session.SessionIDExcluder so the
+// auto-workspace-chain feature can reject cron sessionIDs from the
+// candidate pool when filling user sessions' prev_session_ids
+// (docs/rfc/auto-workspace-chain.md §4.3 Arch-B2). Builds a transient
+// map by delegating to KnownSessionIDs — auto-chain calls this once
+// per spawn at most, so the cost is amortised against the spawn itself.
+//
+// Safe to call on a nil Scheduler (returns false).
+func (s *Scheduler) IsExcluded(sessionID string) bool {
+	if s == nil || sessionID == "" {
+		return false
+	}
+	// KnownSessionIDs returns a fresh map; the lookup is O(1) once built.
+	return s.KnownSessionIDs()[sessionID]
+}
+
 // KnownSessionIDs returns the set of Claude session IDs (UUID-style)
 // that have been spawned by cron jobs known to this Scheduler.  The
 // dashboard history panel uses this as a session-ID blacklist so

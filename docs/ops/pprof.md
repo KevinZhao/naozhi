@@ -144,6 +144,14 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_cron_run_skipped_total` | skipped 终态计数（overlap_skipped / paused_concurrent） | 持续涨 = 上一轮没跑完下一轮就来了；调长 schedule 或缩 prompt |
 | `naozhi_cron_run_timed_out_total` | timed_out 终态计数（DeadlineExceeded） | 涨 = 接近 jobTimeout 边界；对比 cron_execution_slow_total 看是否同因 |
 | `naozhi_cron_run_canceled_total` | canceled 终态计数（context.Canceled，shutdown / job 删除中途） | 重启高峰短时涨正常；稳态非零 = job 频繁被删/recreate |
+| `naozhi_auto_chain_spawn_attach_total` | 新建 session 路径自动接 chain 的次数（docs/rfc/auto-workspace-chain.md） | 上线初期会随每次新会话上涨；稳态后跟随用户开新会话节奏 |
+| `naozhi_auto_chain_backfill_attach_total` | 启动一次性回填给 prev 为空的 session 接 chain 的次数 | 仅在进程启动后短时涨；持续非零 = backfill 被错误重入 |
+| `naozhi_auto_chain_backfill_skipped_no_workspace_total` | 回填阶段因 workspace 字段为空跳过的 session 数 | 高 = sessions.json 大量 legacy 条目缺 workspace；考虑迁移 |
+| `naozhi_auto_chain_backfill_skipped_no_candidates_total` | 回填阶段 pickWorkspaceChain 返回空的 session 数 | 高 = window/exclusion 太严，调整 `session.auto_chain.window_hours` |
+| `naozhi_auto_chain_backfill_skipped_toctou_drop_total` | 回填 Phase 3 二次校验把候选全部丢光的 session 数 | 高 = cron / sys 启动期高频抢 sessionID；查 cron job 配置 |
+| `naozhi_auto_chain_backfill_skipped_already_filled_total` | Phase 3 lock 下发现 prev 已被并发路径填了 | 稳态 0；非零 = 与 cron stub 注册路径同时启动 |
+| `naozhi_auto_chain_toctou_collision_total` | 两次 lock 间隙发现冲突丢弃的 sessionID 累计数（spawn + backfill 合计） | 稳态接近 0；持续涨 = cron / sys session 注册节奏与 spawn 高度并发 |
+| `naozhi_auto_chain_origins_length_mismatch_total` | `prev_session_origins` 与 `prev_session_ids` 长度漂移检测命中（自动兜底重建） | **必须稳态 0**；非零 = 某写路径违反 prev_session_ids append-only 不变量（RFC §4.6） |
 
 这个表的"完整性"由 `internal/metrics/metrics_doc_sync_test.go` 锁定：metrics.go 新增 counter 但未同步文档会在 CI 红。
 

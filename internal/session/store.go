@@ -55,11 +55,17 @@ type storeEntry struct {
 	Key            string   `json:"key"`
 	SessionID      string   `json:"session_id"`
 	PrevSessionIDs []string `json:"prev_session_ids,omitempty"` // oldest → newest
-	TotalCost      float64  `json:"total_cost,omitempty"`
-	Workspace      string   `json:"workspace,omitempty"`
-	Backend        string   `json:"backend,omitempty"`     // "claude" | "kiro" | ...
-	LastActive     int64    `json:"last_active,omitempty"` // unix nano
-	UserLabel      string   `json:"user_label,omitempty"`  // operator-set display name override
+	// PrevSessionOrigins is parallel to PrevSessionIDs and records who
+	// added each chain entry: "manual" / "auto-spawn" / "auto-backfill"
+	// / "resume". Empty / shorter-than-PrevSessionIDs is forward-compatible
+	// with pre-feature stores (loadStore materialises the missing tail as
+	// "manual"). See docs/rfc/auto-workspace-chain.md §4.6.
+	PrevSessionOrigins []string `json:"prev_session_origins,omitempty"`
+	TotalCost          float64  `json:"total_cost,omitempty"`
+	Workspace          string   `json:"workspace,omitempty"`
+	Backend            string   `json:"backend,omitempty"`     // "claude" | "kiro" | ...
+	LastActive         int64    `json:"last_active,omitempty"` // unix nano
+	UserLabel          string   `json:"user_label,omitempty"`  // operator-set display name override
 	// LabelOrigin records who set UserLabel: "" / "user" (human-set) or
 	// "auto" (sysession daemon-set). See ManagedSession.LabelOrigin and
 	// docs/rfc/system-session.md §7.3. Empty is forward-compatible with
@@ -159,25 +165,35 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 			} else {
 				cost = loadTotalCost(&s.totalCost)
 			}
-			// Clone PrevSessionIDs so the persistence path does not share
-			// the backing array with live session mutations (spawnSession
-			// reassigns s.prevSessionIDs but callers could in theory hold
-			// the original slice; clone is cheap and forward-safe).
+			// Clone PrevSessionIDs / PrevSessionOrigins under historyMu so
+			// the persistence path does not share the backing array with
+			// live session mutations (spawnSession reassigns s.prevSessionIDs
+			// but callers could in theory hold the original slice; clone is
+			// cheap and forward-safe). Both slices are read in the same
+			// critical section so a concurrent SetPrevSessionOrigins cannot
+			// publish a half-mutated pair.
 			var prevIDs []string
+			var prevOrigins []string
+			s.historyMu.RLock()
 			if len(s.prevSessionIDs) > 0 {
 				prevIDs = slices.Clone(s.prevSessionIDs)
 			}
+			if len(s.prevSessionOrigins) > 0 {
+				prevOrigins = slices.Clone(s.prevSessionOrigins)
+			}
+			s.historyMu.RUnlock()
 			entries = append(entries, storeEntry{
-				Key:            s.key,
-				SessionID:      sid,
-				PrevSessionIDs: prevIDs,
-				TotalCost:      cost,
-				Workspace:      s.Workspace(),
-				Backend:        s.Backend(),
-				LastActive:     s.lastActive.Load(),
-				UserLabel:      s.UserLabel(),
-				LabelOrigin:    s.LabelOrigin(),
-				Model:          s.Model(),
+				Key:                s.key,
+				SessionID:          sid,
+				PrevSessionIDs:     prevIDs,
+				PrevSessionOrigins: prevOrigins,
+				TotalCost:          cost,
+				Workspace:          s.Workspace(),
+				Backend:            s.Backend(),
+				LastActive:         s.lastActive.Load(),
+				UserLabel:          s.UserLabel(),
+				LabelOrigin:        s.LabelOrigin(),
+				Model:              s.Model(),
 			})
 		}
 	}

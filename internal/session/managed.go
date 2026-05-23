@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/history"
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -231,6 +232,22 @@ type ManagedSession struct {
 	// from the retained tail which carries the most recent context.
 	prevSessionIDs []string
 
+	// prevSessionOrigins is parallel to prevSessionIDs and records who
+	// added each entry: "manual" (default for legacy / /clear / chain
+	// rotation), "auto-spawn" (auto-workspace-chain feature, new spawn
+	// path), "auto-backfill" (auto-workspace-chain startup backfill),
+	// or "resume" (RegisterForResume). Read/written under historyMu in
+	// lockstep with prevSessionIDs.
+	//
+	// Length contract: len(prevSessionOrigins) <= len(prevSessionIDs).
+	// Missing tail entries default to "manual" on read. The append-only
+	// invariant on prevSessionIDs (auto-workspace-chain RFC §4.6) lets
+	// SetPrevSessionOrigins extend the slice in lockstep without
+	// re-deriving positions across the whole chain. A length drift is
+	// detected, metric'd, and bounce-rebuilt to all-"manual" rather than
+	// allowed to silently misalign origin labels with their session IDs.
+	prevSessionOrigins []string
+
 	// exempt marks this session as exempt from TTL cleanup, eviction, and activeCount.
 	// Used for planner sessions that should persist indefinitely.
 	exempt bool
@@ -424,6 +441,96 @@ func (s *ManagedSession) SnapshotChainIDs() []string {
 	out = append(out, s.prevSessionIDs...)
 	if cur != "" {
 		out = append(out, cur)
+	}
+	return out
+}
+
+// SetPrevSessionOrigins records the origin label for the most-recently
+// appended chain segment (the trailing len(ids) entries of prevSessionIDs).
+// Older origin entries are preserved with their existing value, defaulting
+// to "manual" for any prefix that was set before origins tracking arrived.
+//
+// origin is one of: "manual" / "auto-spawn" / "auto-backfill" / "resume".
+// Empty origin is rejected as a no-op (caller bug protection).
+//
+// Invariant (RFC v3 Arch-MINOR-1): prev_session_ids is append-only — every
+// production write path (spawn chain rotation, auto-chain attach,
+// RegisterCronStubWithChain replace, store restore) only grows the slice
+// or replaces it wholesale. SetPrevSessionOrigins detects drift (origins
+// longer than ids, or "ids" tail position negative) and rebuilds origins
+// to all-"manual" rather than allowing a misaligned label to persist.
+// The drift is metric-counted so a regression in a future writer is
+// visible in production telemetry.
+func (s *ManagedSession) SetPrevSessionOrigins(ids []string, origin string) {
+	if origin == "" || len(ids) == 0 {
+		return
+	}
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+
+	// Drift detection. start := len(ids in chain) - len(this batch).
+	// Negative means the batch is longer than the chain — the batch
+	// was not appended to the tail. Origins longer than IDs means a
+	// past write left dangling labels. Both rebuild the parallel
+	// slice from scratch with "manual" defaults so origin↔id never
+	// misaligns silently.
+	start := len(s.prevSessionIDs) - len(ids)
+	driftLonger := len(s.prevSessionOrigins) > len(s.prevSessionIDs)
+	if start < 0 || driftLonger {
+		metrics.AutoChainOriginsLengthMismatch.Add(1)
+		slog.Warn("auto-chain: prev_session_origins length drift; rebuilding to manual",
+			"key", s.key,
+			"prev_ids_len", len(s.prevSessionIDs),
+			"prev_origins_len", len(s.prevSessionOrigins),
+			"incoming_len", len(ids))
+		rebuilt := make([]string, len(s.prevSessionIDs))
+		for i := range rebuilt {
+			rebuilt[i] = "manual"
+		}
+		s.prevSessionOrigins = rebuilt
+		// Re-derive start with the now-clean baseline; if start was
+		// negative the batch is meaningless against this chain — bail.
+		if start < 0 {
+			return
+		}
+	}
+
+	// Grow origins to match the chain length, defaulting any older
+	// untracked prefix to "manual" so the resulting slice is fully
+	// populated.
+	if len(s.prevSessionOrigins) < len(s.prevSessionIDs) {
+		grown := make([]string, len(s.prevSessionIDs))
+		copy(grown, s.prevSessionOrigins)
+		for i := len(s.prevSessionOrigins); i < len(grown); i++ {
+			grown[i] = "manual"
+		}
+		s.prevSessionOrigins = grown
+	}
+
+	// Stamp the trailing len(ids) entries with the supplied origin.
+	for i := range ids {
+		s.prevSessionOrigins[start+i] = origin
+	}
+}
+
+// SnapshotPrevSessionOrigins returns a defensive copy of the parallel
+// origins slice. Callers (storeStateLocked / dashboard introspection)
+// must not mutate the result. Length is exactly len(prevSessionIDs);
+// any unset entry is materialised as "manual" so consumers can always
+// align positionally without nil-checks.
+func (s *ManagedSession) SnapshotPrevSessionOrigins() []string {
+	s.historyMu.RLock()
+	defer s.historyMu.RUnlock()
+	if len(s.prevSessionIDs) == 0 {
+		return nil
+	}
+	out := make([]string, len(s.prevSessionIDs))
+	for i := range out {
+		if i < len(s.prevSessionOrigins) && s.prevSessionOrigins[i] != "" {
+			out[i] = s.prevSessionOrigins[i]
+		} else {
+			out[i] = "manual"
+		}
 	}
 	return out
 }
