@@ -7,6 +7,34 @@ import (
 	"strings"
 )
 
+// Why these helpers live in package cli (R228-ARCH-5 archive anchor):
+//
+// ExtractImagePaths/MimeFromPath/safeImageDirs look generic enough to belong
+// in internal/imageutil or internal/osutil, but they are tightly coupled to
+// cli's CLI-output threat model:
+//
+//   - ExtractImagePaths is invoked on stdout produced by claude/kiro and
+//     must reject every path the CLI did not actually read from disk
+//     (prompt-injection defence — §4 Security in DESIGN.md). Moving it to
+//     a util package would split the threat-model invariant from its only
+//     caller.
+//
+//   - safeImageDirs is hardcoded to "/tmp/" because that's the only
+//     directory both backends are configured to write into during a turn.
+//     A different caller (e.g. a future planner) would need a different
+//     allowlist, so the constant is intentionally scoped to cli's caller
+//     contract rather than promoted to package-osutil.
+//
+//   - MimeFromPath (path → MIME) is the inverse of platform.ImageExt
+//     (MIME → ext). Keeping them in the layer that produces each
+//     direction's input avoids a circular import (platform depends on
+//     cli's event payloads via dispatch).
+//
+// If a third backend ever needs the same allowlist outside the cli stdout
+// hot path, lift the constant + helpers to internal/imageutil and have
+// cli re-export type aliases — but until then the present split keeps
+// the security review surface in one file.
+
 const maxImageFileSize = 10 * 1024 * 1024 // 10MB
 
 // safeImageDirs are the only directory prefixes from which image files may be read.
