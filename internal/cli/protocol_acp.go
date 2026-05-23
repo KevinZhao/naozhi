@@ -926,16 +926,28 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 		err error
 	}
 	ch := make(chan readResult, 1)
-	done := make(chan struct{})
+	// done is an atomic.Bool instead of chan struct{} to skip one chan
+	// allocation + one goroutine-handshake select per ACP handshake
+	// (initialize/authenticate/newSession = 3× per session ≈ 6× chan alloc
+	// saved). atomic.Bool.Store(true) is idempotent and provides the same
+	// happens-before semantics that close(done) did. R232-PERF-5 / R231-PERF-7.
+	var done atomic.Bool
 	// send forwards a final result to the caller; if the caller has already
-	// timed out (close(done)) we drop it instead of blocking forever on ch
-	// (cap 1, no reader). Without this, a slow ACP peer that emits one final
-	// frame after handshake timeout pinned the goroutine until the pipe
-	// closed, sometimes minutes later when the process itself was killed.
+	// timed out (done.Store(true)) we drop it instead of blocking forever on
+	// ch (cap 1, no reader). Without this, a slow ACP peer that emits one
+	// final frame after handshake timeout pinned the goroutine until the
+	// pipe closed, sometimes minutes later when the process itself was killed.
 	send := func(r readResult) {
+		if done.Load() {
+			return
+		}
+		// ch has cap 1 and the caller is the only reader; if the slot is
+		// already full or the caller has left, drop the result rather than
+		// blocking. Combined with the done.Load() check above this preserves
+		// the original "deliver-or-drop" semantics without a select-on-chan.
 		select {
 		case ch <- r:
-		case <-done:
+		default:
 		}
 	}
 	go func() {
@@ -974,10 +986,8 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 			}
 			// Check if caller gave up (timeout). The goroutine will be fully
 			// freed when the process pipe closes; this just avoids useless work.
-			select {
-			case <-done:
+			if done.Load() {
 				return
-			default:
 			}
 		}
 	}()
@@ -986,10 +996,10 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 	defer timer.Stop()
 	select {
 	case r := <-ch:
-		close(done)
+		done.Store(true)
 		return r.msg, r.err
 	case <-timer.C:
-		close(done)
+		done.Store(true)
 		// R184-CONCUR-H1: `done` is only polled between ReadLine calls; a
 		// reader parked inside the underlying bufio.ReadBytes syscall never
 		// observes it. If the goroutine has a shim-backed reader, poke the
