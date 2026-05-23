@@ -1095,6 +1095,29 @@ func (l *EventLog) LastN(n int) []EventEntry {
 // hot streaming path (k = 1-5 new events per notify) the constant savings are
 // small but the code path is simpler and avoids the arithmetic error surface
 // of two separate modular indexing expressions.
+//
+// R220-PERF-3 anchor: the original review flagged a 500-entry × 512 B copy
+// under l.mu RLock for the initial subscriber catch-up after Subscribe.
+// The current implementation removes that worst-case from the hot path two
+// ways:
+//
+//  1. Backward scan with early break (line 1107-1111): we stop at the first
+//     entry with Time <= afterMS, so a subscriber that was caught up moments
+//     ago and re-checks does O(k) work, not O(count). Only a fresh
+//     subscriber with afterMS=0 walks the full ring.
+//  2. Lazy allocation (line 1112-1122): the rev slice is allocated only
+//     when we find a match, capped at 16 entries initially — sessions with
+//     hundreds of buffered events do not allocate the full backing array
+//     before learning whether any entries qualify.
+//
+// The remaining true catch-up case (subscriber with afterMS=0 and a full
+// ring of 500 entries) does still copy under RLock; that path is taken
+// once per dashboard tab open. Promoting it to a snapshot-then-copy outside
+// RLock would require widening EventLog's mutation contract (head/count
+// would need their own atomic snapshot), which is tracked separately. The
+// current ceiling is bounded by ringBuf.maxSize (typically 500) and
+// concurrent Appends only serialise during the actual copy, not the
+// linear scan that finds the first qualifying index.
 func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()

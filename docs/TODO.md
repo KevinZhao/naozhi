@@ -829,7 +829,7 @@
 ### 性能 — 协议接口变更或需 benchmark
 
 - [ ] **R220-PERF-1 — `countActive()` evictOldest/Takeover/spawnSession 路径全 map scan（P1）**: 4 个 caller 各自 `r.mu.Lock()` 下做完整 map 扫描，500 session 量级会显著增加锁内 CPU；Cleanup 已用 `newActive` 增量，evict/takeover 没接。方案：传 `delta int` 给热路径做原子加，countActive 仅在 Cleanup 全量重算。涉及：`internal/session/router.go:2126,2400,2472,4067`。
-- [ ] **R220-PERF-3 — `EventLog.EntriesSince` 初始 catch-up 在 RLock 下复制 500 entry × 512B（P2）**: 反向扫描+复制全在 l.mu RLock 内，subscriber 初始订阅时阻塞 Append 一段时间。方案：先 snapshot ring 索引（head/count），release RLock，再在临时 slice 内拷贝。涉及：`internal/cli/eventlog.go:869`。
+- [ ] **R220-PERF-3 — `EventLog.EntriesSince` 初始 catch-up 在 RLock 下复制 500 entry × 512B（P2）** [godoc 锚点 2026-05-23]: hot-path（k=1-5）已无回归——单次反向扫描 + 早退 + 懒分配 (eventlog.go EntriesSince)。剩余 worst-case 是 dashboard tab 首次订阅 afterMS=0 + 满 ring，每次开 tab 一次。完整 snapshot-outside-RLock 方案需要 head/count 各自 atomic（破坏 mu 互斥契约），单独跟踪。已加 R220-PERF-3 anchor godoc 解释当前优化与剩余边界。
 - [ ] **R220-PERF-4 — `Cleanup` pass2 对 candidate 做 proc.Alive + proc.IsRunning 二次锁获取（P2）**: pass1 在 r.mu RLock 下收集 candidate proc 指针，pass2 又对每个 candidate 取 `proc.mu.RLock` 跑 IsRunning，与热 Send 路径锁竞争。方案：pass1 同时 capture proc.GetState() 一次，pass2 直接读 state。涉及：`internal/session/router.go:2920-2946`。
 - [~] **R220-PERF-5 — `hub.debounceMu` 高频锁获取无 atomic 短路（归档 2026-05-23）**: BroadcastSessionsUpdate 函数体内 4 个互斥状态分支（debounceClosed / 已 timer 在跑 / 超 maxDelay / 全新 timer），都需 debounceMu 保 timer 重入与 clientWG.Add 配对；纯 atomic.Bool 不能取代 4-way 决策。300/s acquire 远不是性能瓶颈。本批 PR 归档。
 
