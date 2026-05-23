@@ -586,6 +586,14 @@ func (s *runStore) readRun(path string) (*CronRun, error) {
 // Scheduler.DeleteJobByID/DeleteJob. Idempotent: missing dir is a no-op.
 // Does NOT delete ~/.claude/projects/<cwd>/<session_id>.jsonl files —
 // those are user-facing claude session logs (RFC §2.3).
+//
+// R235-CR: cache invalidation MUST happen before os.RemoveAll. cacheGet's
+// warm-fast-path holds only entry.mu — not jobLock — so a concurrent reader
+// observing warm=true between RemoveAll and cacheInvalidate would return
+// summaries pointing at run files that no longer exist on disk. Inverting
+// the order closes that window: after Delete, the next cacheGet allocates
+// a fresh entry and warmCache reads the (now empty) directory under the
+// same jobLock we still hold below.
 func (s *runStore) DeleteJob(jobID string) {
 	if s == nil || s.disabled || jobID == "" {
 		return
@@ -596,11 +604,11 @@ func (s *runStore) DeleteJob(jobID string) {
 	lock := s.jobLock(jobID)
 	lock.Lock()
 	defer lock.Unlock()
+	s.cacheInvalidate(jobID)
 	dir := filepath.Join(s.root, jobID)
 	if err := os.RemoveAll(dir); err != nil {
 		slog.Warn("cron run: delete job runs subtree failed", "dir", dir, "err", err)
 	}
-	s.cacheInvalidate(jobID)
 }
 
 // trimJobLocked enforces the per-job retention policy. Caller must hold
