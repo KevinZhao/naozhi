@@ -2230,13 +2230,47 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		stubRefresh()
 		return
 	}
-	if result.SessionID != "" {
-		inflight.setSessionID(result.SessionID)
+	s.recordSuccess(recordSuccessArgs{
+		job: j, snap: snap, runID: runID, startedAt: startedAt, trigger: trigger,
+		inflight:        inflight,
+		resultSessionID: result.SessionID, resultText: result.Text,
+		lg: lg, notifyTo: notifyTo,
+	})
+}
+
+// recordSuccessArgs bundles the inputs of recordSuccess so the call site
+// reads as a struct literal — mirrors finishArgs/preflightArgs to keep
+// executeOpt's terminal branches uniform. resultSessionID/resultText are
+// flattened from cli.SendResult so this file does not need to import the
+// cli package just to refer to the result type. R222-CR-4.
+type recordSuccessArgs struct {
+	job             *Job
+	snap            jobSnapshot
+	runID           string
+	startedAt       time.Time
+	trigger         TriggerKind
+	inflight        *runInflight
+	resultSessionID string
+	resultText      string
+	lg              *slog.Logger
+	notifyTo        NotifyTarget
+}
+
+// recordSuccess captures the success tail of executeOpt: persist the Claude
+// session_id onto the inflight view, log slow-execution warnings, drive the
+// terminal finishRun, and deliver the IM notice. Extracted so executeOpt
+// itself stays focused on the spawn/send orchestration; all six error
+// branches above already funnel through finishRun + deliverNotice in two
+// lines, while the success path was sprawled across ~30 lines of metrics +
+// session_id bookkeeping. R222-CR-4.
+func (s *Scheduler) recordSuccess(a recordSuccessArgs) {
+	if a.resultSessionID != "" {
+		a.inflight.setSessionID(a.resultSessionID)
 	}
 
-	elapsed := time.Since(startedAt)
-	lg.Info("cron job completed",
-		"result_len", len(result.Text),
+	elapsed := time.Since(a.startedAt)
+	a.lg.Info("cron job completed",
+		"result_len", len(a.resultText),
 		"elapsed_ms", elapsed.Milliseconds())
 	if elapsed > cronSlowThreshold {
 		// R208-OBS1: poor-man's histogram — a single counter that fires
@@ -2244,8 +2278,8 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		// Wired here (not in finishRun) so only success-path latency
 		// counts; error paths already surface via metrics state counters.
 		metrics.CronExecutionSlowTotal.Add(1)
-		lg.Warn("cron execution slow",
-			"job_id", snap.jobID,
+		a.lg.Warn("cron execution slow",
+			"job_id", a.snap.jobID,
 			"elapsed_ms", elapsed.Milliseconds(),
 			"threshold_ms", cronSlowThreshold.Milliseconds())
 	}
@@ -2255,13 +2289,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// Send 路径的 result 帧总会带 SessionID（process.go 成功分支会填），
 	// 传空只会出现在错误路径，finishRun 的 "" 分支自行短路。
 	s.finishRun(finishArgs{
-		job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-		state: RunStateSucceeded, sessionID: result.SessionID, result: result.Text,
-		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+		job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
+		state: RunStateSucceeded, sessionID: a.resultSessionID, result: a.resultText,
+		prompt: a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
 	})
 
-	replyText := fmt.Sprintf("[Cron %s] %s", snap.labelOrID(), result.Text)
-	s.deliverNotice(notifyTo, replyText)
+	replyText := fmt.Sprintf("[Cron %s] %s", a.snap.labelOrID(), a.resultText)
+	s.deliverNotice(a.notifyTo, replyText)
 }
 
 // finishArgs bundles the parameters of finishRun so each call site reads
