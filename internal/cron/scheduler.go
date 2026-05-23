@@ -484,6 +484,22 @@ func (s *Scheduler) KnownSessionIDs() map[string]bool {
 // scale, but higher values tend to indicate a config mistake.
 const maxJobsHardCap = 500
 
+// defaultMaxJobs is the fallback for SchedulerConfig.MaxJobs when the operator
+// leaves it zero/negative. Sized for typical single-tenant deployments; the
+// hard cap above protects against runaway configs.
+const defaultMaxJobs = 50
+
+// defaultExecTimeout bounds a single job execution when the operator leaves
+// SchedulerConfig.ExecTimeout zero. 5 min covers nearly all CLI turn budgets
+// without leaving runaway jobs holding the per-job overlap gate forever.
+const defaultExecTimeout = 5 * time.Minute
+
+// cronNotifyTimeout is the per-target send budget for cron-driven IM replies.
+// Distinct from dispatch.platformReplyTimeout (15s) because cron flushes can
+// chunk large outputs across multiple ReplyWithRetry calls under cron.Stop's
+// 30s in-flight budget — see notifyTarget call site for the shutdown contract.
+const cronNotifyTimeout = 30 * time.Second
+
 // DefaultMaxJobsPerChat bounds how many cron jobs a single chat (platform+
 // chat_id pair) may own. Prevents one loud group from consuming the
 // global MaxJobs quota. Exported so tests and docs can reference the
@@ -570,7 +586,7 @@ func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 // NewScheduler creates a scheduler. Call Start() to begin.
 func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	if cfg.MaxJobs <= 0 {
-		cfg.MaxJobs = 50
+		cfg.MaxJobs = defaultMaxJobs
 	}
 	if cfg.MaxJobs > maxJobsHardCap {
 		slog.Warn("cron max_jobs exceeds hard cap, clamping", "requested", cfg.MaxJobs, "cap", maxJobsHardCap)
@@ -583,7 +599,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		maxPerChat = DefaultMaxJobsPerChat
 	}
 	if cfg.ExecTimeout <= 0 {
-		cfg.ExecTimeout = 5 * time.Minute
+		cfg.ExecTimeout = defaultExecTimeout
 	}
 	parent := cfg.ParentCtx
 	if parent == nil {
@@ -964,9 +980,19 @@ func (s *Scheduler) addJobLocked(j *Job) (func(), error) {
 	}
 
 	j.ID = generateID()
-	// Retry on unlikely ID collision.
-	for _, exists := s.jobs[j.ID]; exists; _, exists = s.jobs[j.ID] {
+	// Retry on unlikely ID collision. Bound the loop so a hypothetical
+	// degenerate generateID (e.g., a test that injects a deterministic mock
+	// or a /dev/urandom failure path) cannot spin AddJob under s.mu and
+	// stall the whole scheduler. 10 attempts of 8-byte hex IDs is well
+	// beyond any realistic collision rate for maxJobsHardCap=500.
+	for i := 0; i < 10; i++ {
+		if _, exists := s.jobs[j.ID]; !exists {
+			break
+		}
 		j.ID = generateID()
+	}
+	if _, exists := s.jobs[j.ID]; exists {
+		return nil, fmt.Errorf("cron: failed to generate unique job ID after 10 attempts")
 	}
 	j.CreatedAt = time.Now()
 
@@ -2699,7 +2725,7 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	// Use Background parent: during shutdown stopCtx is cancelled first, then
 	// cron.Stop() waits for in-flight jobs — those must still be able to deliver
 	// their IM replies within the 30s bound rather than fail instantly.
-	replyCtx, replyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	replyCtx, replyCancel := context.WithTimeout(context.Background(), cronNotifyTimeout)
 	defer replyCancel()
 	maxLen := p.MaxReplyLength()
 	if maxLen <= 0 {
