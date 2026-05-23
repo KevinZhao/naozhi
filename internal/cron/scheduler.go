@@ -932,18 +932,18 @@ func (s *Scheduler) AddJob(j *Job) error {
 		return fmt.Errorf("title too long: %d runes > %d cap", n, MaxCronTitleLen)
 	}
 
-	// addJobLocked runs under s.mu (defer Unlock). Splitting the locked
+	// addJobAcquiringLock runs under s.mu (defer Unlock). Splitting the locked
 	// section into a helper means every early-return path goes through
 	// defer and removes the prior pattern of 4 manual s.mu.Unlock() calls
 	// (R228-GO-2): adding a new validation step inside the locked section
 	// no longer risks leaking a held mutex on the new error path.
-	save, perr := s.addJobLocked(j)
+	save, perr := s.addJobAcquiringLock(j)
 	if perr != nil {
-		// addJobLocked may surface either a pre-mutation error (capacity
+		// addJobAcquiringLock may surface either a pre-mutation error (capacity
 		// rejection — no save returned) or a post-mutation persist error
 		// (in-memory insertion already happened). The caller cannot tell
 		// the two apart from the error alone, but in either case there
-		// is no save() to invoke — addJobLocked returns nil for save in
+		// is no save() to invoke — addJobAcquiringLock returns nil for save in
 		// both branches.
 		return perr
 	}
@@ -952,11 +952,15 @@ func (s *Scheduler) AddJob(j *Job) error {
 	return nil
 }
 
-// addJobLocked performs the AddJob mutation under s.mu. Returns the
-// post-unlock save closure (nil on error) and any error. Split from
-// AddJob so a single defer handles unlock across all early-return
-// paths. R228-GO-2.
-func (s *Scheduler) addJobLocked(j *Job) (func(), error) {
+// addJobAcquiringLock performs the AddJob mutation. Unlike the
+// pause/resume/deleteJobLocked siblings (caller-holds-lock convention),
+// this helper owns the lifecycle of s.mu — it acquires the lock at entry
+// and defers Unlock so every early-return path goes through one place.
+// Renamed from addJobLocked (R230C-CR-3 / R228-GO-2): the *Locked suffix in
+// this package denotes "caller already holds s.mu", which AddJob's helper
+// does not satisfy. The new name keeps the contract obvious at the
+// call-site.
+func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1196,9 +1200,15 @@ type JobUpdate struct {
 	Prompt   *string
 	WorkDir  *string
 	// Notify sets Job.Notify when non-nil. nil leaves the field unchanged;
-	// pointer-to-true/false writes the explicit tri-state. There's no API
-	// to reset back to legacy-default (nil) once a value is set — callers
-	// typically toggle between true and false instead.
+	// pointer-to-true/false writes the explicit tri-state.
+	//
+	// R227-CONFIG-1: there's no API to reset Job.Notify back to legacy-default
+	// (nil) once a value has been set. Callers wanting that effect must
+	// either (a) toggle between true and false explicitly (the typical UX
+	// path), or (b) edit cron_jobs.json off-line and restart. Promoting
+	// JobUpdate.Notify to a tri-state-with-reset enum is a deferred design
+	// decision — the wire format would have to grow a fourth state ("clear")
+	// and several /api/cron consumers would need migration.
 	Notify *bool
 	// NotifyPlatform / NotifyChatID behave like Prompt / WorkDir: nil keeps
 	// the existing value, a pointer to "" clears it.

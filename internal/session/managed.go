@@ -488,6 +488,15 @@ func (s *ManagedSession) ReattachProcessNoCallback(proc processIface, sessionID 
 // and already has the matching entries in its ring; we must NOT re-inject
 // (would duplicate every bubble) but we DO need persistedSeededLen aligned
 // so the next InjectHistory tail still forwards.
+//
+// R231-CQ-5: the verb pair "adopt … AlreadySeeded" vs
+// "attach … AndSnapshotPersisted" intentionally diverges to encode the two
+// distinct semantics — adopt = "treat persistedHistory as if proc has it
+// already, do not return a snapshot"; attach = "publish proc + return the
+// persistedHistory slice so the caller can re-seed". A blanket rename to
+// match the styles would lose that signal at the call site, so this godoc
+// pins the contrast instead. See attachProcessAndSnapshotPersisted's godoc
+// for the symmetric path.
 func (s *ManagedSession) adoptProcessAlreadySeeded(proc processIface) {
 	s.historyMu.Lock()
 	s.storeProcess(proc)
@@ -508,6 +517,12 @@ func (s *ManagedSession) adoptProcessAlreadySeeded(proc processIface) {
 // Returns a defensive copy because proc.InjectHistory consumes the slice and
 // runs after we release historyMu — handing it the live persistedHistory
 // backing array would race with subsequent appends.
+//
+// R231-CQ-5: the verb pair "attach … AndSnapshotPersisted" vs
+// "adopt … AlreadySeeded" intentionally diverges — attach returns the
+// persistedHistory slice so the caller re-seeds; adopt treats the slice as
+// already in proc.EventLog and returns nothing. See adoptProcessAlreadySeeded
+// for the symmetric path.
 func (s *ManagedSession) attachProcessAndSnapshotPersisted(proc processIface) []cli.EventEntry {
 	s.historyMu.Lock()
 	if proc == nil {

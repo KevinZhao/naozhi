@@ -2,9 +2,6 @@ package cli
 
 // process_turn.go — turn-boundary coordination helpers.
 //
-// Moved from process.go (Phase 4 of docs/rfc/process-split.md).
-// Zero semantic change; pure file move.
-//
 // This file owns:
 //   - findResultSince: EventLog fallback scanner used by Send when
 //     eventCh drops or closes before a result is delivered; also used
@@ -17,6 +14,9 @@ package cli
 //   - sanitizeStderrLine + maxStderrLogLineBytes: ANSI / log-injection
 //     scrubber for CLI stderr, only referenced from readLoop but kept
 //     here to keep the turn-file's "log hygiene" job on one surface.
+//
+// R227-ARCH-19: dropped the "Phase 4 of process-split / zero semantic
+// change" preamble; refactor is complete, history lives in git log.
 
 import (
 	"context"

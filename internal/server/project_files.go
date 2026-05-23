@@ -134,9 +134,19 @@ var previewableByExt = map[string]string{
 	".proto":         "text/x-protobuf",
 	".graphql":       "text/plain",
 	".gql":           "text/plain",
-	".conf":          "text/plain",
-	".cfg":           "text/plain",
-	".ini":           "text/plain",
+	// R230B-SEC-4 / R232-SEC-1 / R233-SEC-5: .conf / .cfg / .ini are
+	// deliberately previewable. Authenticated dashboard users have full
+	// read access to the workspace already (download mode + raw mode +
+	// Read tool from inside the CLI), so refusing preview only inflates
+	// click-through cost without raising the security bar. Operators
+	// must not store unencrypted secrets under allowed_root — that's the
+	// invariant; we do NOT lower it to "secrets are OK if you store
+	// them in .conf". Naming-pattern blocking (secret*.conf,
+	// credentials.cfg, …) belongs in sensitiveDownloadNames /
+	// sensitiveDownloadExts, not here.
+	".conf": "text/plain",
+	".cfg":  "text/plain",
+	".ini":  "text/plain",
 }
 
 // rawPreviewMimes identifies file types the browser can render inline via <img>
@@ -994,7 +1004,15 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 	// text/xml is equivalent to application/xml for XHTML purposes.
 	if strings.HasPrefix(mime, "text/html") || strings.HasPrefix(mime, "image/svg+xml") ||
 		strings.HasPrefix(mime, "application/xhtml") ||
-		strings.HasPrefix(mime, "application/xml") || strings.HasPrefix(mime, "text/xml") {
+		strings.HasPrefix(mime, "application/xml") || strings.HasPrefix(mime, "text/xml") ||
+		// R232-SEC-6: text/markdown does not get HTML-rendered by mainstream
+		// browsers, but a UA that does (or a future MIME sniffer that maps
+		// it to text/html) would face the same same-origin top-level
+		// navigation risk as text/html / xhtml. Force the download guard
+		// so the dashboard's preview button only ever streams markdown
+		// through the sanitised renderer (servePreview / dashboard.js
+		// renderMd) and never as a direct opaque inline doc.
+		strings.HasPrefix(mime, "text/markdown") {
 		writeJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "inline preview disabled for this type; use download mode"})
 		return
 	}

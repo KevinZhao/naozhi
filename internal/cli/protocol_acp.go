@@ -247,20 +247,16 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, err
 		}
 		p.storeSessionID(resumeID)
 	} else {
-		newID := p.allocID()
 		newReq := RPCRequest{
-			JSONRPC: "2.0", ID: newID, Method: "session/new",
+			JSONRPC: "2.0", ID: p.allocID(), Method: "session/new",
 			Params: acpSessionNewParams{Cwd: cwd, McpServers: []any{}},
 		}
-		data, err := json.Marshal(newReq)
-		if err != nil {
-			return "", err
-		}
-		if err := rw.WriteLine(data); err != nil {
-			return "", err
-		}
-		// Read responses/notifications until we get the matching response
-		resp, err := p.readUntilResponse(rw, newID)
+		// R232-CR-15: route session/new through the shared helper so the
+		// metric emission and readUntilResponse contract stay in lockstep
+		// with initialize / session/load (the previous hand-written
+		// Marshal+WriteLine+readUntilResponse triple skipped the
+		// RecordProtocolRPCError call site).
+		resp, err := p.sendAndWaitResponseMsg(rw, newReq)
 		if err != nil {
 			return "", fmt.Errorf("acp session/new: %w", err)
 		}
@@ -789,14 +785,27 @@ func (p *ACPProtocol) allocID() int {
 }
 
 func (p *ACPProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) error {
+	_, err := p.sendAndWaitResponseMsg(rw, req)
+	return err
+}
+
+// sendAndWaitResponseMsg writes req then blocks until a matching response
+// arrives, returning the parsed RPCMessage on success. The Init flow uses
+// this for session/new where the SessionID must be parsed from result.models;
+// callers that don't need the response payload should use sendAndWaitResponse
+// (which discards the message and only surfaces the error). R232-CR-15
+// collapses the previously hand-written Marshal+WriteLine+readUntilResponse
+// triple in Init's session/new branch onto this single helper so all three
+// handshake RPCs go through the same metric-emitting code path.
+func (p *ACPProtocol) sendAndWaitResponseMsg(rw *JSONRW, req RPCRequest) (*RPCMessage, error) {
 	data, err := json.Marshal(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := rw.WriteLine(data); err != nil {
-		return err
+		return nil, err
 	}
-	_, err = p.readUntilResponse(rw, req.ID)
+	resp, err := p.readUntilResponse(rw, req.ID)
 	if err != nil {
 		// Multi-Backend RFC §10 (Sprint 6a): record handshake / RPC errors
 		// at the call site since we know req.Method here. We always pass
@@ -812,7 +821,7 @@ func (p *ACPProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) error {
 		// into the message), pass that here as the code label.
 		metrics.RecordProtocolRPCError(p.BackendID, req.Method, "")
 	}
-	return err
+	return resp, err
 }
 
 // normalizeContextUsage maps kiro's contextUsagePercentage onto a 0-100

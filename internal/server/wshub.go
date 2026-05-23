@@ -98,9 +98,18 @@ type Hub struct {
 	// resolver centralises session key → opts derivation; used by
 	// sessionOptsFor / buildSessionOpts. Nil keeps legacy fallback
 	// wiring for tests that don't construct a resolver.
-	resolver    *session.KeyResolver
-	scheduler   *cron.Scheduler // optional, for cron prompt auto-save
-	uploadStore *uploadStore    // optional, for resolving WS-sent file_ids
+	resolver *session.KeyResolver
+	// scheduler is the optional cron-side hook the Hub needs for two
+	// things: (a) reviving a dismissed cron stub when a dashboard tab
+	// re-subscribes (handleSubscribe → EnsureStub) and (b) auto-saving
+	// the user's first prompt as the cron job's permanent prompt
+	// (sessionSend → SetJobPrompt). R232-ARCH-7: typed as the narrow
+	// cronHubOps interface (defined in this file) instead of
+	// *cron.Scheduler, so server's coupling to cron is the 2 methods
+	// it actually uses, not the full 60+ method scheduler surface.
+	// *cron.Scheduler satisfies cronHubOps implicitly.
+	scheduler   cronHubOps
+	uploadStore *uploadStore // optional, for resolving WS-sent file_ids
 	// scratchPool lets sessionOptsFor resolve the inherited AgentOpts for an
 	// ephemeral "scratch" key without touching the persistent agent registry.
 	// Nil when the scratch feature is disabled (tests, headless mode).
@@ -288,7 +297,20 @@ func NewHub(opts HubOptions) *Hub {
 	return h
 }
 
+// cronHubOps is the narrow consumer interface the Hub needs from
+// *cron.Scheduler. Defined here (and not in cron) so server's coupling
+// to the scheduler stays at the two methods we actually call, and tests
+// can inject a fake without depending on the full Scheduler. R232-ARCH-7
+// extension of the cronStubChecker pattern from R228-ARCH-17.
+type cronHubOps interface {
+	EnsureStub(key string) bool
+	SetJobPrompt(jobID, prompt string) error
+}
+
 // SetScheduler sets the cron scheduler for auto-saving prompts on first send.
+// Accepts the concrete *cron.Scheduler (production wiring) — the field type
+// is the narrower cronHubOps interface so the Hub never sees the rest of the
+// scheduler API.
 func (h *Hub) SetScheduler(s *cron.Scheduler) { h.scheduler = s }
 
 // SetUploadStore wires the upload store used by WS sends to resolve file_ids
