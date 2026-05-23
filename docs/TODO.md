@@ -1580,7 +1580,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：`cli.Wrapper.HistorySource(s)` 方法由各 backend 实现；RouterConfig.ClaudeDir 迁到 ClaudeProtocol。
   - 涉及: `internal/session/router.go:22-25, attachHistorySource:1031-1058`
 
-- [ ] **R215-ARCH-P2-1 — Server 启动后 `SetScheduler/SetUploadStore/SetScratchPool` 三处无锁 set**: 裸指针写无 atomic.Pointer；`s.hub != nil` guard 扩散 8 处，本质是对象半构造状态漏出。
+- [~] **R215-ARCH-P2-1 — Server 启动后 `SetScheduler/SetUploadStore/SetScratchPool` 三处无锁 set（部分修复 2026-05-23 / godoc 锚点）**: 已在 wshub.go SetScheduler godoc 加 CONCURRENCY CONTRACT 段落，明确这三个 setter MUST 在 NewHub 后 / Server.Start 前的单线程构造期调用；s.hub != nil guard 扩散到 dashboard.go 8 处的语义建立在"this happens while server-construction goroutine is sole writer"前提；任何未来 runtime 热重载需要升 atomic.Pointer。SetUploadStore / SetScratchPool godoc cross-ref 同 anchor。完整 atomic.Pointer 改造作为长期 HubOptions 一次性注入 RFC（与 R230C-ARCH-10 合并）跟踪。本批 PR。
   - 方案：短期升 atomic.Pointer；长期 HubOptions 一次性注入 + null-object。
   - 涉及: `internal/server/wshub.go:239-248`, `internal/server/dashboard.go:238,249,263`
 

@@ -324,15 +324,33 @@ type cronHubOps interface {
 // Accepts the concrete *cron.Scheduler (production wiring) — the field type
 // is the narrower cronHubOps interface so the Hub never sees the rest of the
 // scheduler API.
+//
+// CONCURRENCY CONTRACT (R215-ARCH-P2-1): SetScheduler / SetUploadStore /
+// SetScratchPool MUST be called during single-threaded server construction,
+// after NewHub returns and before Server.Start (which is what kicks off
+// readPump / writePump / eventPushLoop goroutines). Their lack of locking
+// is intentional — the Hub is not yet shared across goroutines at this
+// point — but introducing a runtime mutation path (e.g. a future hot-
+// reload of the scheduler) MUST upgrade these fields to atomic.Pointer
+// or wrap each setter in h.mu.Lock; the s.hub != nil checks scattered
+// through dashboard.go (R215-ARCH-P2-1's "8 处" warning) implicitly
+// assume the assignment happens while the goroutine that constructed
+// Server is the only writer. Tests that intentionally call these after
+// goroutines start should also use a lock or pre-construct via
+// HubOptions in NewHub.
 func (h *Hub) SetScheduler(s *cron.Scheduler) { h.scheduler = s }
 
 // SetUploadStore wires the upload store used by WS sends to resolve file_ids
 // that were pre-uploaded via POST /api/sessions/upload.
+//
+// See SetScheduler for the construction-time-only concurrency contract.
 func (h *Hub) SetUploadStore(s *uploadStore) { h.uploadStore = s }
 
 // SetScratchPool wires the ephemeral-session pool so sessionOptsFor can
 // resolve AgentOpts for scratch keys without touching the sidebar-visible
 // router state.
+//
+// See SetScheduler for the construction-time-only concurrency contract.
 func (h *Hub) SetScratchPool(p *session.ScratchPool) { h.scratchPool = p }
 
 // HandleUpgrade upgrades an HTTP connection to WebSocket.
