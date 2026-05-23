@@ -80,12 +80,16 @@ type Hub struct {
 	// satisfies this interface implicitly; kept as an interface so
 	// tests can inject a fake and a future Router sub-aggregation
 	// can swap implementations without touching Hub internals.
-	router        HubRouter
-	agents        map[string]session.AgentOpts
-	agentCmds     map[string]string
-	dashToken     string
-	dashTokenHash [32]byte // sha256(dashToken), precomputed; empty when dashToken==""
-	cookieMAC     string   // HMAC-derived cookie value (different from dashToken)
+	router    HubRouter
+	agents    map[string]session.AgentOpts
+	agentCmds map[string]string
+	dashToken string
+	// dashTokenHash is sha256(dashToken), precomputed at NewHub for
+	// constant-time auth comparison. Immutable after construction:
+	// hot-reloading dashToken at runtime is not supported and would
+	// silently leave this hash stale — restart naozhi to rotate.
+	dashTokenHash [32]byte
+	cookieMAC     string // HMAC-derived cookie value (different from dashToken)
 	guard         *session.Guard
 	queue         *dispatch.MessageQueue // per-key FIFO queue for dashboard sends
 	nodes         map[string]node.Conn

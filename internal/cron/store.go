@@ -90,6 +90,20 @@ func loadJobs(path string) (map[string]*Job, error) {
 		return nil, nil
 	}
 
+	// Defensive cap: even if the file fits within maxCronStoreBytes, an
+	// attacker / corrupted shrinker could craft an array with hundreds of
+	// thousands of zero-byte stub entries. The scheduler enforces
+	// maxJobsHardCap at AddJob time but loadJobs runs before the scheduler
+	// rejects them, so we'd allocate the map and walk every entry first.
+	// Refuse to load anything beyond the hard cap rather than partially
+	// loading and letting the scheduler silently truncate.
+	if len(entries) > maxJobsHardCap {
+		slog.Warn("cron store exceeds job count cap",
+			"path", path, "count", len(entries), "cap", maxJobsHardCap)
+		return nil, fmt.Errorf("cron store contains %d jobs (cap=%d); refusing to load — inspect the file or trim it before restarting",
+			len(entries), maxJobsHardCap)
+	}
+
 	m := make(map[string]*Job, len(entries))
 	for _, j := range entries {
 		if j.ID != "" {
