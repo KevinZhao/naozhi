@@ -830,6 +830,24 @@ func (s *ManagedSession) InterruptViaControl() InterruptOutcome {
 }
 
 // getSessionID returns the session ID lock-free via atomic.Pointer[string].
+//
+// R230C-CR-5: there are three SessionID-shaped accessors across two
+// packages — keep them in mind so future refactors don't accidentally
+// drop one or introduce a fourth:
+//
+//   - ManagedSession.getSessionID — package-private; canonical lock-free
+//     read of the session-level atomic. Used internally inside this file.
+//   - ManagedSession.SessionID — public alias of getSessionID; satisfies
+//     the cli.HistorySessionView interface (Wrapper.NewHistorySource
+//     factory wiring) and is the right entry point for cross-package
+//     callers in internal/server / internal/dispatch.
+//   - cli.Process.GetSessionID — different layer entirely. Reads the CLI
+//     subprocess's most-recently-observed session ID off the live event
+//     stream. The two layers may briefly disagree during a /resume
+//     handshake or first-Send capture; callers picking between them
+//     should choose by intent: "what does naozhi remember for this chat
+//     key" → ManagedSession.SessionID; "what does the CLI think the
+//     active session is right now" → Process.GetSessionID.
 func (s *ManagedSession) getSessionID() string {
 	return loadAtomicString(&s.sessionID)
 }
@@ -837,7 +855,9 @@ func (s *ManagedSession) getSessionID() string {
 // SessionID returns the current CLI session ID, lock-free. Public alias
 // for getSessionID used by the cli.HistorySessionView interface
 // (Sprint 1a, Wrapper.NewHistorySource factory wiring) and any future
-// caller that needs the current ID without taking r.mu.
+// caller that needs the current ID without taking r.mu. See
+// getSessionID's godoc for the relationship with cli.Process.GetSessionID
+// (R230C-CR-5).
 func (s *ManagedSession) SessionID() string { return s.getSessionID() }
 
 // setSessionID stores the session ID atomically.

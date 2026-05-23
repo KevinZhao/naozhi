@@ -628,3 +628,128 @@ func TestRunStore_RecentReturnsNewestFirst(t *testing.T) {
 		}
 	}
 }
+
+// TestRunStore_SkipAppendTrim_Conditions covers the four return branches of
+// runStore.skipAppendTrim, the optimisation introduced by R232-PERF-8 that
+// lets Append skip the per-call ReadDir when the cache shows we're well
+// under keepCount and keepWindow. R233B-CR-7 flagged these branches as
+// untested; this table-driven test pins them explicitly so a future tweak
+// to the heuristic cannot silently regress.
+//
+// Each case constructs a minimal *runStore + recentCacheEntry directly (no
+// disk I/O) and asserts the boolean result, then verifies the
+// appendsSinceTrim bookkeeping side effect that drives the periodic
+// "force one trim every appendTrimBatch" forcing condition.
+func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
+	now := time.Now()
+
+	// "happy" entry: cache warm, comfortably under keepCount, oldest row is
+	// inside keepWindow (newer than cutoff). All three skip conditions pass.
+	makeHappyEntry := func() *recentCacheEntry {
+		return &recentCacheEntry{
+			warm: true,
+			runs: []CronRunSummary{
+				{RunID: "a", EndedAt: now.Add(-1 * time.Minute)},
+				{RunID: "b", EndedAt: now.Add(-2 * time.Minute)},
+			},
+			appendsSinceTrim: 0,
+		}
+	}
+
+	cases := []struct {
+		name        string
+		entry       *recentCacheEntry
+		notWarm     bool
+		keepCount   int
+		keepWindow  time.Duration
+		wantSkip    bool
+		wantCounter int // appendsSinceTrim after the call
+	}{
+		{
+			name:        "cold cache forces full trim",
+			entry:       &recentCacheEntry{warm: false},
+			keepCount:   100,
+			keepWindow:  24 * time.Hour,
+			wantSkip:    false,
+			wantCounter: 0, // not warm: counter untouched
+		},
+		{
+			name:        "warm + headroom + within window: skip",
+			entry:       makeHappyEntry(),
+			keepCount:   100,
+			keepWindow:  24 * time.Hour,
+			wantSkip:    true,
+			wantCounter: 1, // counter advanced toward batch trigger
+		},
+		{
+			name: "near keepCount cap: do not skip",
+			entry: &recentCacheEntry{
+				warm: true,
+				// keepCount=15 + appendTrimBatch(=10) → 15-10+1 = 6 rows triggers gate
+				runs: func() []CronRunSummary {
+					r := make([]CronRunSummary, 6)
+					for i := range r {
+						r[i] = CronRunSummary{EndedAt: now.Add(-time.Duration(i) * time.Minute)}
+					}
+					return r
+				}(),
+				appendsSinceTrim: 0,
+			},
+			keepCount:   15,
+			keepWindow:  24 * time.Hour,
+			wantSkip:    false,
+			wantCounter: 0, // forced trim resets counter
+		},
+		{
+			name: "oldest row beyond keepWindow: do not skip",
+			entry: &recentCacheEntry{
+				warm: true,
+				runs: []CronRunSummary{
+					{RunID: "a", EndedAt: now.Add(-30 * time.Second)},
+					{RunID: "b", EndedAt: now.Add(-2 * time.Hour)}, // older than keepWindow
+				},
+				appendsSinceTrim: 0,
+			},
+			keepCount:   100,
+			keepWindow:  1 * time.Hour, // cutoff = now-1h, oldest at now-2h is older
+			wantSkip:    false,
+			wantCounter: 0,
+		},
+		{
+			name:        "appendTrimBatch reached: force trim",
+			entry:       &recentCacheEntry{warm: true, runs: []CronRunSummary{{EndedAt: now}}, appendsSinceTrim: appendTrimBatch - 1},
+			keepCount:   100,
+			keepWindow:  24 * time.Hour,
+			wantSkip:    false,
+			wantCounter: 0, // batch trigger resets counter
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &runStore{
+				keepCount:  tc.keepCount,
+				keepWindow: tc.keepWindow,
+			}
+			s.recentCache.Store("job", tc.entry)
+			got := s.skipAppendTrim("job")
+			if got != tc.wantSkip {
+				t.Errorf("skipAppendTrim = %v, want %v", got, tc.wantSkip)
+			}
+			if tc.entry.appendsSinceTrim != tc.wantCounter {
+				t.Errorf("appendsSinceTrim = %d, want %d",
+					tc.entry.appendsSinceTrim, tc.wantCounter)
+			}
+		})
+	}
+}
+
+// TestRunStore_SkipAppendTrim_MissingEntry asserts the missing-jobID branch:
+// when the cache has no entry for the given job, skipAppendTrim must return
+// false (forcing a full trim) and not panic on the nil load.
+func TestRunStore_SkipAppendTrim_MissingEntry(t *testing.T) {
+	s := &runStore{keepCount: 100, keepWindow: 24 * time.Hour}
+	if s.skipAppendTrim("never-seen") {
+		t.Error("expected false for unknown jobID")
+	}
+}
