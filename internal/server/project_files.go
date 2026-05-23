@@ -1037,6 +1037,21 @@ var sensitiveDownloadNames = map[string]struct{}{
 	"id_ed25519":      {},
 	"authorized_keys": {},
 	"credentials":     {}, // ~/.aws/credentials, docker credentials helpers, etc.
+	// R232-SEC-4: cloud service-account and generic secrets files. These
+	// match canonical filenames produced by GCP / AWS / Azure tooling
+	// (e.g. `gcloud iam service-accounts keys create > service-account.json`,
+	// `gcloud auth application-default login`'s well-known credentials path)
+	// and ad-hoc operator habits ("secrets.yaml", "gcp-key.json"). Falling
+	// through the .json extension allowlist (which is broad and useful for
+	// previews) would otherwise let these be exfiltrated wholesale.
+	"secrets.yaml":                         {},
+	"secrets.yml":                          {},
+	"secrets.json":                         {},
+	"service-account.json":                 {},
+	"service_account.json":                 {},
+	"gcp-key.json":                         {},
+	"gcp_key.json":                         {},
+	"application_default_credentials.json": {},
 }
 
 // sensitiveDownloadExts lists extensions that strongly imply key material.

@@ -192,6 +192,38 @@ func TestPreviewableByExt_DoesNotIncludeDotEnv(t *testing.T) {
 	}
 }
 
+// TestIsSensitiveDownloadName_CloudCredentialFiles locks R232-SEC-4: cloud
+// service-account JSONs and operator-conventional secrets files must be
+// blocked even though the .json / .yaml / .yml extension allowlist treats
+// them as previewable. Without this guard, dashboard download mode would
+// happily exfiltrate the contents.
+func TestIsSensitiveDownloadName_CloudCredentialFiles(t *testing.T) {
+	cases := []string{
+		"secrets.yaml",
+		"secrets.yml",
+		"secrets.json",
+		"service-account.json",
+		"service_account.json",
+		"gcp-key.json",
+		"gcp_key.json",
+		"application_default_credentials.json",
+		// case-insensitive
+		"Secrets.YAML",
+		"Service-Account.JSON",
+	}
+	for _, name := range cases {
+		if !isSensitiveDownloadName(name) {
+			t.Errorf("isSensitiveDownloadName(%q) = false, want true (R232-SEC-4)", name)
+		}
+	}
+	// Negative controls: ordinary JSON/YAML files must still be downloadable.
+	for _, name := range []string{"config.json", "package.json", "data.yaml"} {
+		if isSensitiveDownloadName(name) {
+			t.Errorf("isSensitiveDownloadName(%q) = true, want false", name)
+		}
+	}
+}
+
 func TestIsTextMime(t *testing.T) {
 	if !isTextMime("text/plain; charset=utf-8") {
 		t.Error("text/plain should be text")
