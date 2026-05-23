@@ -12,6 +12,21 @@ import (
 	"time"
 )
 
+// slotBailGrace is the headroom added on top of Process.totalTimeout
+// (or DefaultTotalTimeout when unset) before SendPassthrough fires the
+// defensive ErrOrphanedSlot bail. Sized to comfortably exceed:
+//   - shim's own watchdog cycle (heartbeat + 1× retry, ≈10s),
+//   - readLoop's last-event drain after cli_exited,
+//   - any clock skew between Process.totalTimeout and the CLI's own
+//     internal turn cap.
+//
+// 30s was the original empirical pick (R162 era) and has not produced
+// false positives in production since; pinning it as a named constant
+// surfaces the knob without changing behaviour and prevents accidental
+// drift if a future patch re-tunes only one of the two call sites.
+// ErrOrphanedSlot is the matching error sentinel.
+const slotBailGrace = 30 * time.Second
+
 // newSlotUUID returns a 128-bit random hex string suitable for the Claude
 // CLI's uuid field. We don't need RFC4122 formatting — CLI treats it as an
 // opaque round-trippable blob. Using crypto/rand avoids a new dep (google/uuid)
@@ -133,8 +148,8 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Ima
 
 	// Defensive bail timer. Passthrough does not have a per-turn watchdog
 	// (CLI 本身和 shim 的 heartbeat 负责探测进程级死锁；slot 级超时由 bail
-	// 兜底)。Set to totalTimeout + 30s so in the rare case where readLoop
-	// and shim heartbeat both miss, the Send caller still unblocks.
+	// 兜底)。Set to totalTimeout + slotBailGrace so in the rare case where
+	// readLoop and shim heartbeat both miss, the Send caller still unblocks.
 	//
 	// Phase A.8 reflection: v2.2 RFC specified a process-level watchdog
 	// keyed to turnStartedAt. In practice the CLI's heartbeat + cli_exited
@@ -146,7 +161,7 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Ima
 	if total <= 0 {
 		total = DefaultTotalTimeout
 	}
-	bail := time.NewTimer(total + 30*time.Second)
+	bail := time.NewTimer(total + slotBailGrace)
 	defer bail.Stop()
 
 	select {
