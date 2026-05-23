@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -57,6 +58,24 @@ var circuitBreakerBackoff = 5 * time.Minute
 // downstream consumers (reverseconn.go, dashboard.js) have one literal to
 // match on, not a scatter of stringly-typed tokens. RNEW-005.
 const reasonSessionReset = "session_reset"
+
+// errInvalidSessionIDFormat is the canonical error surfaced by every
+// reverse-RPC handler that validates a primary-supplied session ID
+// against discovery.IsValidSessionID. Three call sites
+// (fetch_discovered_preview, takeover, close_discovered) previously
+// repeated `fmt.Errorf("invalid session_id format")` verbatim — extracted
+// into one sentinel so:
+//
+//   - the wire string stays consistent if a future change wants to
+//     enrich the message (e.g. hint at the expected UUID shape),
+//   - call sites can errors.Is against this if the dispatch layer ever
+//     wants to map invalid-ID errors to a specific JSON-RPC code, and
+//   - typos / drift between sites surface as a build error instead of
+//     a silent diff between handlers.
+//
+// Defined as a static error (errors.New) rather than a fmt.Errorf so the
+// value compares equal across goroutines without allocation.
+var errInvalidSessionIDFormat = errors.New("invalid session_id format")
 
 // Connector dials a primary naozhi and serves it as a reverse-connected node.
 // Run on machines behind NAT that cannot be reached by the primary directly.

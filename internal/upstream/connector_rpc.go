@@ -79,7 +79,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		// `{".."}` / path-traversal inputs from a compromised primary.
 		// R65-SEC-M-1.
 		if p.SessionID != "" && !discovery.IsValidSessionID(p.SessionID) {
-			return nil, fmt.Errorf("invalid session_id format")
+			return nil, errInvalidSessionIDFormat
 		}
 		if c.previewFunc != nil {
 			return c.previewFunc(p.SessionID)
@@ -225,7 +225,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			return nil, fmt.Errorf("pid and session_id are required")
 		}
 		if !discovery.IsValidSessionID(p.SessionID) {
-			return nil, fmt.Errorf("invalid session_id format")
+			return nil, errInvalidSessionIDFormat
 		}
 		if p.ProcStartTime == 0 {
 			return nil, fmt.Errorf("proc_start_time is required")
@@ -321,7 +321,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			return nil, fmt.Errorf("proc_start_time is required")
 		}
 		if p.SessionID != "" && !discovery.IsValidSessionID(p.SessionID) {
-			return nil, fmt.Errorf("invalid session_id format")
+			return nil, errInvalidSessionIDFormat
 		}
 		// CWD flows into discovery.WaitAndCleanup which builds a lockDir path
 		// and os.RemoveAll it (protected by filepath.Rel sandbox, but we still
