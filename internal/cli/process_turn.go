@@ -2,9 +2,6 @@ package cli
 
 // process_turn.go — turn-boundary coordination helpers.
 //
-// Moved from process.go (Phase 4 of docs/rfc/process-split.md).
-// Zero semantic change; pure file move.
-//
 // This file owns:
 //   - findResultSince: EventLog fallback scanner used by Send when
 //     eventCh drops or closes before a result is delivered; also used
@@ -17,6 +14,9 @@ package cli
 //   - sanitizeStderrLine + maxStderrLogLineBytes: ANSI / log-injection
 //     scrubber for CLI stderr, only referenced from readLoop but kept
 //     here to keep the turn-file's "log hygiene" job on one surface.
+//
+// R227-ARCH-19: dropped the "Phase 4 of process-split / zero semantic
+// change" preamble; refactor is complete, history lives in git log.
 
 import (
 	"context"
@@ -95,9 +95,14 @@ func (p *Process) drainStaleEvents(ctx context.Context) error {
 						// new turn. Try to put it back (buffered channel may
 						// have room); if the channel is already full we fall
 						// back to findResultSince which reads from EventLog.
+						// Mirror the warn in the post-drain holdback re-enqueue
+						// (line 179) so operators see both drop sites symmetrically
+						// — without it the interrupted-settle drop is silent.
 						select {
 						case p.eventCh <- ev:
 						default:
+							slog.Warn("drainStaleEvents: eventCh full during interrupted-settle, dropped fresh event",
+								"type", ev.Type, "session", ev.SessionID)
 						}
 						goto drain
 					}

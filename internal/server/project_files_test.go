@@ -120,6 +120,10 @@ func TestDetectMime_SourceCodeExtensions(t *testing.T) {
 		{"a.json", `{"a":1}`, "application/json"},
 		{"Dockerfile", "FROM debian", "text/plain"}, // http default
 		{"a.txt", "hello", "text/plain"},
+		// R232-SEC-8: dotfile-as-ext paths (filepath.Ext(".makefile") returns
+		// ".makefile") used to fall through to application/octet-stream.
+		{".makefile", "all:\n\techo hi\n", "text/x-makefile"},
+		{"sub/.makefile", "all:\n\techo hi\n", "text/x-makefile"},
 	}
 	for _, tc := range cases {
 		got := detectMime(tc.path, []byte(tc.head))
@@ -183,6 +187,84 @@ func TestMimeFromExtOnly(t *testing.T) {
 func TestPreviewableByExt_DoesNotIncludeDotEnv(t *testing.T) {
 	if mime, ok := previewableByExt[".env"]; ok {
 		t.Errorf("previewableByExt[%q] = %q, must NOT be in allowlist (R225-SEC-5)", ".env", mime)
+	}
+}
+
+// TestIsSensitiveDownloadName_CloudCredentialFiles locks R232-SEC-4 补遗:
+// cloud service-account JSONs and operator-conventional secrets files must
+// be blocked even though .json/.yaml/.yml are previewable extensions.
+func TestIsSensitiveDownloadName_CloudCredentialFiles(t *testing.T) {
+	cases := []string{
+		"secrets.yaml",
+		"secrets.yml",
+		"secrets.json",
+		"service-account.json",
+		"service_account.json",
+		"gcp-key.json",
+		"gcp_key.json",
+		"application_default_credentials.json",
+		"Secrets.YAML",
+		"Service-Account.JSON",
+	}
+	for _, name := range cases {
+		if !isSensitiveDownloadName(name) {
+			t.Errorf("isSensitiveDownloadName(%q) = false, want true (R232-SEC-4)", name)
+		}
+	}
+	for _, name := range []string{"config.json", "package.json", "data.yaml"} {
+		if isSensitiveDownloadName(name) {
+			t.Errorf("isSensitiveDownloadName(%q) = true, want false", name)
+		}
+	}
+}
+
+// TestIsSensitiveDownloadName_OpsConventional locks R233B-SEC-5: ops-laden
+// credential filenames (database.yml, api-keys.*) must be blocked, plus
+// archive-suffix patterns (.env.backup, .env.bak, …) that an attacker
+// would otherwise lift via path-mode download to bypass the .env exact match.
+func TestIsSensitiveDownloadName_OpsConventional(t *testing.T) {
+	blocked := []string{
+		"database.yml",
+		"database.yaml",
+		"credentials.yml",
+		"credentials.yaml",
+		"credentials.json",
+		"api-keys.json",
+		"api_keys.yaml",
+		"rds.yml",
+		"pg.yaml",
+		"mysql.yml",
+		// Suffix scan path:
+		".env.backup",
+		".env.bak",
+		".env.old",
+		".env.orig",
+		".env.save",
+		"prod.env.backup", // prefix + suffix
+		"app.env.bak",     // prefix + suffix
+		"DATABASE.YML",    // case-insensitive
+		"APP.ENV.BACKUP",  // case-insensitive suffix
+	}
+	for _, name := range blocked {
+		if !isSensitiveDownloadName(name) {
+			t.Errorf("isSensitiveDownloadName(%q) = false, want true (R233B-SEC-5)", name)
+		}
+	}
+	// Pin negative cases so the suffix scan doesn't over-block legitimate
+	// developer workspace files. ".envoy.yaml" looks like ".env" but is
+	// envoy proxy config; "envrc" / "env.example" are doc/template files.
+	allowed := []string{
+		"data.yml",
+		"deployment.yaml",
+		"package.json",
+		".envoy.yaml",
+		"env.example",
+		"envrc",
+	}
+	for _, name := range allowed {
+		if isSensitiveDownloadName(name) {
+			t.Errorf("isSensitiveDownloadName(%q) = true, want false", name)
+		}
 	}
 }
 
@@ -380,6 +462,156 @@ func TestHandleFilesExists_InvalidJSON(t *testing.T) {
 	h.handleFilesExists(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+// TestHandleFilesExists_PublicTmp covers the __public_tmp__ pseudo-project
+// fallback: chat-mentioned /tmp/... paths can be resolved without first
+// registering /tmp as a real project. Symlink-escape and path-traversal
+// guards from resolveProjectFileWithRoot must still apply.
+func TestHandleFilesExists_PublicTmp(t *testing.T) {
+	h, _, _ := newProjectHandlersForTest(t, nil)
+
+	// Drop a unique-named file directly under /tmp. Pin the dir explicitly
+	// because os.TempDir() on macOS returns /var/folders/..., which
+	// filepath.Rel("/tmp", ...) would express as a traversal that
+	// resolveProjectFileWithRoot correctly rejects.
+	tmpFile, err := os.CreateTemp("/tmp", "naozhi-public-tmp-*.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tmpFile.WriteString("hello"); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+	t.Cleanup(func() { _ = os.Remove(tmpFile.Name()) })
+
+	rel, err := filepath.Rel("/tmp", tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(existsReq{
+		Project: publicTmpProject,
+		Paths: []string{
+			rel,
+			"missing-" + rel,
+			"../etc/passwd", // traversal must still be rejected
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.handleFilesExists(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Results map[string]existsEntry `json:"results"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp.Results[rel].Exists {
+		t.Errorf("/tmp/%s should exist", rel)
+	}
+	if resp.Results["missing-"+rel].Exists {
+		t.Error("missing path should NOT exist")
+	}
+	if resp.Results["../etc/passwd"].Exists {
+		t.Error("traversal must be rejected even under __public_tmp__")
+	}
+}
+
+// TestHandleFileGet_PublicTmpPreview pins the read path: a /tmp/*.log file
+// previews as text via the __public_tmp__ pseudo-project.
+func TestHandleFileGet_PublicTmpPreview(t *testing.T) {
+	h, _, _ := newProjectHandlersForTest(t, nil)
+
+	// Pin /tmp explicitly: see TestHandleFilesExists_PublicTmp for the
+	// macOS os.TempDir() rationale.
+	tmpFile, err := os.CreateTemp("/tmp", "naozhi-public-tmp-preview-*.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tmpFile.WriteString("preview-me\n"); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+	t.Cleanup(func() { _ = os.Remove(tmpFile.Name()) })
+
+	rel, err := filepath.Rel("/tmp", tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=preview", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["content"] != "preview-me\n" {
+		t.Errorf("content = %v", resp["content"])
+	}
+}
+
+// TestHandleFileGet_PublicTmpRejectsTraversal pins the symlink/traversal
+// guards under the pseudo-project.
+func TestHandleFileGet_PublicTmpRejectsTraversal(t *testing.T) {
+	h, _, _ := newProjectHandlersForTest(t, nil)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+publicTmpProject+"&path=../etc/passwd&mode=preview", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for traversal", w.Code)
+	}
+}
+
+// TestHandleFileGet_PublicTmpRejectsCredential pins the credential-name
+// allowlist still applies under the pseudo-project: a malicious /tmp/.env
+// must not be downloadable.
+func TestHandleFileGet_PublicTmpRejectsCredential(t *testing.T) {
+	h, _, _ := newProjectHandlersForTest(t, nil)
+
+	credPath := filepath.Join("/tmp", ".env.naozhi-test")
+	if err := os.WriteFile(credPath, []byte("SECRET=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(credPath) })
+
+	// Rename to .env exactly to trip isSensitiveDownloadName. We can't drop a
+	// file literally named ".env" under /tmp without trampling other tests, so
+	// stage one in a sub-directory we own. Pin /tmp explicitly: see
+	// TestHandleFilesExists_PublicTmp for the macOS os.TempDir() rationale.
+	subDir, err := os.MkdirTemp("/tmp", "naozhi-cred-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(subDir) })
+	envPath := filepath.Join(subDir, ".env")
+	if err := os.WriteFile(envPath, []byte("SECRET=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rel, err := filepath.Rel("/tmp", envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=download", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for credential download", w.Code)
 	}
 }
 

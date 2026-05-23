@@ -2,21 +2,19 @@ package cli
 
 // process_send.go — user-message outbound path and CLI-level interrupts.
 //
-// Moved from process.go (Phase 3 of docs/rfc/process-split.md).
-// Zero semantic change; pure file move. See the RFC for full mapping.
-//
 // This file owns:
-//   - EventCallback type (note: it is a cross-package public type
-//     consumed by cli.SendPassthrough, session.managed.Send/Send
-//     Passthrough, session.testutil.TestProcess, dispatch, server;
-//     changing its signature is a breaking change across 4 packages).
-//   - buildUserEntry (also called by cli.passthrough.go:117).
+//   - EventCallback type (cross-package public; consumed by
+//     cli.SendPassthrough, session.managed.Send/SendPassthrough,
+//     session.testutil.TestProcess, dispatch, server — changing its
+//     signature is breaking across 4 packages).
+//   - buildUserEntry (also called by cli.passthrough.go).
 //   - Send — legacy non-passthrough outbound.
 //   - Interrupt / InterruptViaControl — turn-abort primitives.
 //
-// `findResultSince` (Send's result-fallback scanner) and
-// drainStaleEvents (called by Send before every turn) move to
-// process_turn.go in Phase 4.
+// findResultSince and drainStaleEvents live in process_turn.go.
+//
+// R227-ARCH-19: dropped the "Phase 3 of process-split / zero semantic
+// change" preamble; refactor is complete, history lives in git log.
 
 import (
 	"context"

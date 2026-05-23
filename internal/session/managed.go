@@ -488,6 +488,15 @@ func (s *ManagedSession) ReattachProcessNoCallback(proc processIface, sessionID 
 // and already has the matching entries in its ring; we must NOT re-inject
 // (would duplicate every bubble) but we DO need persistedSeededLen aligned
 // so the next InjectHistory tail still forwards.
+//
+// R231-CQ-5: the verb pair "adopt … AlreadySeeded" vs
+// "attach … AndSnapshotPersisted" intentionally diverges to encode the two
+// distinct semantics — adopt = "treat persistedHistory as if proc has it
+// already, do not return a snapshot"; attach = "publish proc + return the
+// persistedHistory slice so the caller can re-seed". A blanket rename to
+// match the styles would lose that signal at the call site, so this godoc
+// pins the contrast instead. See attachProcessAndSnapshotPersisted's godoc
+// for the symmetric path.
 func (s *ManagedSession) adoptProcessAlreadySeeded(proc processIface) {
 	s.historyMu.Lock()
 	s.storeProcess(proc)
@@ -508,9 +517,31 @@ func (s *ManagedSession) adoptProcessAlreadySeeded(proc processIface) {
 // Returns a defensive copy because proc.InjectHistory consumes the slice and
 // runs after we release historyMu — handing it the live persistedHistory
 // backing array would race with subsequent appends.
+//
+// R231-CQ-5: the verb pair "attach … AndSnapshotPersisted" vs
+// "adopt … AlreadySeeded" intentionally diverges — attach returns the
+// persistedHistory slice so the caller re-seeds; adopt treats the slice as
+// already in proc.EventLog and returns nothing. See adoptProcessAlreadySeeded
+// for the symmetric path.
 func (s *ManagedSession) attachProcessAndSnapshotPersisted(proc processIface) []cli.EventEntry {
 	s.historyMu.Lock()
 	if proc == nil {
+		// R231-CQ-2: nil parameter = "session is now process-less" (detach
+		// path used by ResetAndRecreate / Cleanup / Remove). The decision to
+		// also reset persistedSeededLen=0 is deliberate: when a fresh process
+		// later attaches via this same function, it MUST be re-seeded with
+		// the full persistedHistory snapshot, otherwise the dashboard
+		// renders empty until new live events arrive. Leaving seededLen at
+		// its prior non-zero value would make the next attach skip the
+		// snapshot and the new proc's EventLog would start blank against
+		// the persisted history that the session still remembers.
+		//
+		// persistedHistory itself is NOT cleared — the chat key + workspace
+		// stay the same across the detach/reattach pair, so its content is
+		// still valid. Only the "what proc has been seeded with" pointer
+		// resets. Mirrors adoptProcessAlreadySeeded's symmetric contract:
+		// adopt = "proc already has the events"; attach(nil) = "no proc,
+		// next attach must re-seed from scratch".
 		s.storeProcess(nil)
 		s.persistedSeededLen = 0
 		s.historyMu.Unlock()
@@ -815,6 +846,24 @@ func (s *ManagedSession) InterruptViaControl() InterruptOutcome {
 }
 
 // getSessionID returns the session ID lock-free via atomic.Pointer[string].
+//
+// R230C-CR-5: there are three SessionID-shaped accessors across two
+// packages — keep them in mind so future refactors don't accidentally
+// drop one or introduce a fourth:
+//
+//   - ManagedSession.getSessionID — package-private; canonical lock-free
+//     read of the session-level atomic. Used internally inside this file.
+//   - ManagedSession.SessionID — public alias of getSessionID; satisfies
+//     the cli.HistorySessionView interface (Wrapper.NewHistorySource
+//     factory wiring) and is the right entry point for cross-package
+//     callers in internal/server / internal/dispatch.
+//   - cli.Process.GetSessionID — different layer entirely. Reads the CLI
+//     subprocess's most-recently-observed session ID off the live event
+//     stream. The two layers may briefly disagree during a /resume
+//     handshake or first-Send capture; callers picking between them
+//     should choose by intent: "what does naozhi remember for this chat
+//     key" → ManagedSession.SessionID; "what does the CLI think the
+//     active session is right now" → Process.GetSessionID.
 func (s *ManagedSession) getSessionID() string {
 	return loadAtomicString(&s.sessionID)
 }
@@ -822,7 +871,9 @@ func (s *ManagedSession) getSessionID() string {
 // SessionID returns the current CLI session ID, lock-free. Public alias
 // for getSessionID used by the cli.HistorySessionView interface
 // (Sprint 1a, Wrapper.NewHistorySource factory wiring) and any future
-// caller that needs the current ID without taking r.mu.
+// caller that needs the current ID without taking r.mu. See
+// getSessionID's godoc for the relationship with cli.Process.GetSessionID
+// (R230C-CR-5).
 func (s *ManagedSession) SessionID() string { return s.getSessionID() }
 
 // setSessionID stores the session ID atomically.

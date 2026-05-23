@@ -70,15 +70,15 @@ var ErrPersistFailed = errors.New("cron: persist jobs failed")
 // makes accidental surface-area growth a compile error instead of a silent
 // regression.
 type SessionRouter interface {
-	// RegisterCronStub creates (or refreshes) a suspended exempt session
-	// entry so the cron job shows up in the dashboard sidebar before its
-	// first run. Key is always "cron:<jobID>".
-	RegisterCronStub(key, workspace, lastPrompt string)
-	// RegisterCronStubWithChain 在 RegisterCronStub 的基础上额外注入
-	// 一个 session-ID 链，赋给 stub 的 prevSessionIDs。这样 fresh_context
-	// cron 每次 Reset 后新建的 stub 仍然能通过 historySource 查到上一次
-	// 成功运行留下的 JSONL 历史（~/.claude/projects/<cwd>/<id>.jsonl）。
-	// chainIDs 为空 / nil 时等同于 RegisterCronStub。
+	// RegisterCronStubWithChain creates (or refreshes) a suspended exempt
+	// session entry so the cron job shows up in the dashboard sidebar before
+	// its first run. Key is always "cron:<jobID>".
+	//
+	// chainIDs 注入一组 session-ID 链给 stub 的 prevSessionIDs，让
+	// fresh_context cron 每次 Reset 后新建的 stub 仍能通过 historySource
+	// 查到上一次成功运行留下的 JSONL 历史
+	// （~/.claude/projects/<cwd>/<id>.jsonl）。chainIDs 为空 / nil 时
+	// 等同于无链 stub 注册。
 	RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string)
 	// Reset discards the session for the given key (used by fresh-mode
 	// cron jobs and by Delete/Rename flows).
@@ -484,6 +484,22 @@ func (s *Scheduler) KnownSessionIDs() map[string]bool {
 // scale, but higher values tend to indicate a config mistake.
 const maxJobsHardCap = 500
 
+// defaultMaxJobs is the fallback for SchedulerConfig.MaxJobs when the operator
+// leaves it zero/negative. Sized for typical single-tenant deployments; the
+// hard cap above protects against runaway configs.
+const defaultMaxJobs = 50
+
+// defaultExecTimeout bounds a single job execution when the operator leaves
+// SchedulerConfig.ExecTimeout zero. 5 min covers nearly all CLI turn budgets
+// without leaving runaway jobs holding the per-job overlap gate forever.
+const defaultExecTimeout = 5 * time.Minute
+
+// cronNotifyTimeout is the per-target send budget for cron-driven IM replies.
+// Distinct from dispatch.platformReplyTimeout (15s) because cron flushes can
+// chunk large outputs across multiple ReplyWithRetry calls under cron.Stop's
+// 30s in-flight budget — see notifyTarget call site for the shutdown contract.
+const cronNotifyTimeout = 30 * time.Second
+
 // DefaultMaxJobsPerChat bounds how many cron jobs a single chat (platform+
 // chat_id pair) may own. Prevents one loud group from consuming the
 // global MaxJobs quota. Exported so tests and docs can reference the
@@ -492,7 +508,7 @@ const maxJobsHardCap = 500
 // default — no way to "disable" the cap without rebuilding).
 //
 // Relationship to exempt pool (BL2 acknowledged design):
-// Every cron job calls session.Router.RegisterCronStub at scheduler
+// Every cron job calls session.Router.RegisterCronStubWithChain at scheduler
 // Start / AddJob time and consumes 1 slot from session.maxExemptSessions
 // (currently 20). At DefaultMaxJobsPerChat=10 × 2 busy chats, the exempt
 // pool is fully consumed and planner/scratch exempt sessions may be
@@ -570,7 +586,7 @@ func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 // NewScheduler creates a scheduler. Call Start() to begin.
 func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	if cfg.MaxJobs <= 0 {
-		cfg.MaxJobs = 50
+		cfg.MaxJobs = defaultMaxJobs
 	}
 	if cfg.MaxJobs > maxJobsHardCap {
 		slog.Warn("cron max_jobs exceeds hard cap, clamping", "requested", cfg.MaxJobs, "cap", maxJobsHardCap)
@@ -583,7 +599,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		maxPerChat = DefaultMaxJobsPerChat
 	}
 	if cfg.ExecTimeout <= 0 {
-		cfg.ExecTimeout = 5 * time.Minute
+		cfg.ExecTimeout = defaultExecTimeout
 	}
 	parent := cfg.ParentCtx
 	if parent == nil {
@@ -916,18 +932,18 @@ func (s *Scheduler) AddJob(j *Job) error {
 		return fmt.Errorf("title too long: %d runes > %d cap", n, MaxCronTitleLen)
 	}
 
-	// addJobLocked runs under s.mu (defer Unlock). Splitting the locked
+	// addJobAcquiringLock runs under s.mu (defer Unlock). Splitting the locked
 	// section into a helper means every early-return path goes through
 	// defer and removes the prior pattern of 4 manual s.mu.Unlock() calls
 	// (R228-GO-2): adding a new validation step inside the locked section
 	// no longer risks leaking a held mutex on the new error path.
-	save, perr := s.addJobLocked(j)
+	save, perr := s.addJobAcquiringLock(j)
 	if perr != nil {
-		// addJobLocked may surface either a pre-mutation error (capacity
+		// addJobAcquiringLock may surface either a pre-mutation error (capacity
 		// rejection — no save returned) or a post-mutation persist error
 		// (in-memory insertion already happened). The caller cannot tell
 		// the two apart from the error alone, but in either case there
-		// is no save() to invoke — addJobLocked returns nil for save in
+		// is no save() to invoke — addJobAcquiringLock returns nil for save in
 		// both branches.
 		return perr
 	}
@@ -936,11 +952,15 @@ func (s *Scheduler) AddJob(j *Job) error {
 	return nil
 }
 
-// addJobLocked performs the AddJob mutation under s.mu. Returns the
-// post-unlock save closure (nil on error) and any error. Split from
-// AddJob so a single defer handles unlock across all early-return
-// paths. R228-GO-2.
-func (s *Scheduler) addJobLocked(j *Job) (func(), error) {
+// addJobAcquiringLock performs the AddJob mutation. Unlike the
+// pause/resume/deleteJobLocked siblings (caller-holds-lock convention),
+// this helper owns the lifecycle of s.mu — it acquires the lock at entry
+// and defers Unlock so every early-return path goes through one place.
+// Renamed from addJobLocked (R230C-CR-3 / R228-GO-2): the *Locked suffix in
+// this package denotes "caller already holds s.mu", which AddJob's helper
+// does not satisfy. The new name keeps the contract obvious at the
+// call-site.
+func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -964,9 +984,19 @@ func (s *Scheduler) addJobLocked(j *Job) (func(), error) {
 	}
 
 	j.ID = generateID()
-	// Retry on unlikely ID collision.
-	for _, exists := s.jobs[j.ID]; exists; _, exists = s.jobs[j.ID] {
+	// Retry on unlikely ID collision. Bound the loop so a hypothetical
+	// degenerate generateID (e.g., a test that injects a deterministic mock
+	// or a /dev/urandom failure path) cannot spin AddJob under s.mu and
+	// stall the whole scheduler. 10 attempts of 8-byte hex IDs is well
+	// beyond any realistic collision rate for maxJobsHardCap=500.
+	for i := 0; i < 10; i++ {
+		if _, exists := s.jobs[j.ID]; !exists {
+			break
+		}
 		j.ID = generateID()
+	}
+	if _, exists := s.jobs[j.ID]; exists {
+		return nil, fmt.Errorf("cron: failed to generate unique job ID after 10 attempts")
 	}
 	j.CreatedAt = time.Now()
 
@@ -1170,9 +1200,15 @@ type JobUpdate struct {
 	Prompt   *string
 	WorkDir  *string
 	// Notify sets Job.Notify when non-nil. nil leaves the field unchanged;
-	// pointer-to-true/false writes the explicit tri-state. There's no API
-	// to reset back to legacy-default (nil) once a value is set — callers
-	// typically toggle between true and false instead.
+	// pointer-to-true/false writes the explicit tri-state.
+	//
+	// R227-CONFIG-1: there's no API to reset Job.Notify back to legacy-default
+	// (nil) once a value has been set. Callers wanting that effect must
+	// either (a) toggle between true and false explicitly (the typical UX
+	// path), or (b) edit cron_jobs.json off-line and restart. Promoting
+	// JobUpdate.Notify to a tri-state-with-reset enum is a deferred design
+	// decision — the wire format would have to grow a fourth state ("clear")
+	// and several /api/cron consumers would need migration.
 	Notify *bool
 	// NotifyPlatform / NotifyChatID behave like Prompt / WorkDir: nil keeps
 	// the existing value, a pointer to "" clears it.
@@ -1659,9 +1695,15 @@ func (s *Scheduler) jobInflight(id string) *runInflight {
 // for the next tick rather than racing the in-flight result. The shape
 // mirrors the original inline reads — no fields added/removed.
 type jobSnapshot struct {
-	prompt     string
-	workDir    string
-	jobID      string
+	prompt  string
+	workDir string
+	jobID   string
+	// label is the human-readable title for IM notice prefixes (R233B-CR-4 /
+	// R233B-CR-5). Computed via jobTitleOrFallback under s.mu so a
+	// concurrent SetJobPrompt cannot tear Title vs Prompt-derived fallback.
+	// Empty when both Title and Prompt are blank — deliverNotice falls back
+	// to jobID in that case so the IM prefix never collapses to "[Cron ]".
+	label      string
 	platName   string
 	chatID     string
 	notifyPlat string
@@ -1670,6 +1712,16 @@ type jobSnapshot struct {
 	fresh      bool
 	schedule   string
 	backend    string // "" = router default
+}
+
+// labelOrID returns the IM-notice display label: snap.label when populated,
+// jobID otherwise. R233B-CR-5: keeps the "[Cron <X>] …" prefix readable
+// without crashing on Title-empty + Prompt-empty edge cases.
+func (s jobSnapshot) labelOrID() string {
+	if s.label != "" {
+		return s.label
+	}
+	return s.jobID
 }
 
 // snapshotJob reads j under s.mu so a concurrent SetJobPrompt /
@@ -1687,6 +1739,7 @@ func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
 		prompt:     j.Prompt,
 		workDir:    j.WorkDir,
 		jobID:      j.ID,
+		label:      jobTitleOrFallback(j),
 		platName:   j.Platform,
 		chatID:     j.ChatID,
 		notifyPlat: j.NotifyPlatform,
@@ -1769,7 +1822,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 			errMsg: "work_dir unreachable",
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(args.notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.jobID))
+		s.deliverNotice(args.notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.labelOrID()))
 		return noopRefresh, false
 	}
 	s.router.Reset(args.key)
@@ -1969,7 +2022,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// Per-job timeout is always s.execTimeout (period scaling was removed —
 	// see computeJobTimeout's godoc for why robfig/cron's SkipIfStillRunning
 	// chain wrapper handles long-running tasks correctly).
-	jobTimeout := computeJobTimeout(snap.schedule, s.execTimeout)
+	jobTimeout := computeJobTimeout(s.execTimeout)
 	ctx, cancel := context.WithTimeout(s.stopCtx, jobTimeout)
 	defer cancel()
 
@@ -2065,7 +2118,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("session error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", snap.jobID))
+		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", snap.labelOrID()))
 		stubRefresh()
 		return
 	}
@@ -2143,7 +2196,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("send error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", snap.jobID))
+		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", snap.labelOrID()))
 		stubRefresh()
 		return
 	}
@@ -2177,7 +2230,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 	})
 
-	replyText := fmt.Sprintf("[Cron %s] %s", snap.jobID, result.Text)
+	replyText := fmt.Sprintf("[Cron %s] %s", snap.labelOrID(), result.Text)
 	s.deliverNotice(notifyTo, replyText)
 }
 
@@ -2352,11 +2405,22 @@ func (s *Scheduler) bumpRunStateMetrics(state RunState) {
 	}
 }
 
-// emitOverlapSkipped is the synthetic terminal event for the CAS-rejected
-// path. The CAS gate trips before any inflight metadata is populated, so
-// we synthesise a RunID + StartedAt locally and emit started→ended back-to-
-// back so the dashboard timeline still shows the skip. State counter +
-// ended counter both bump.
+// emitOverlapSkipped runs the full RunStarted→finishRun lifecycle for a
+// CAS-rejected execution attempt. Despite the "Skipped" terminology, this
+// function emits BOTH a RunStarted event AND drives finishRun (which emits
+// RunEnded), so subscribers see the same started→ended pair as a normal
+// run; the state field carries RunStateSkipped + ErrClassOverlapSkipped so
+// dashboards can render it as a no-op pill instead of a real run timeline.
+// CronRunStartedTotal + the per-state metric (via finishRun) both bump.
+//
+// This dual-event emission is intentional: it keeps the runs/<id> dashboard
+// drawer renderable and prevents subscriber state machines from missing
+// the "started" anchor when a manual TriggerNow collides with an
+// in-flight run. R233B-CR-2.
+//
+// The CAS gate trips before any inflight metadata is populated, so we
+// synthesise a RunID + StartedAt locally — finishRun's skipPersist=true
+// short-circuit avoids writing the synthetic run to disk.
 func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 	runID := generateRunID()
 	startedAt := time.Now()
@@ -2630,8 +2694,12 @@ func redactPathsInCronError(s string) string {
 	if s == "" {
 		return s
 	}
+	// Byte-level cap, but split on a rune boundary — naked s[:maxRedactErrLen]
+	// can fall mid-codepoint for multibyte runes (CJK error messages from the
+	// CLI), producing invalid UTF-8 that then poisons cron_jobs.json.
 	if len(s) > maxRedactErrLen {
-		s = s[:maxRedactErrLen] + "…"
+		n := textutil.TruncateAtRuneBoundary(s, maxRedactErrLen)
+		s = s[:n] + "…"
 	}
 	// Fast path: if the string contains no POSIX slash and no Windows
 	// backslash, there is nothing path-shaped to redact — skip the Builder
@@ -2695,7 +2763,7 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	// Use Background parent: during shutdown stopCtx is cancelled first, then
 	// cron.Stop() waits for in-flight jobs — those must still be able to deliver
 	// their IM replies within the 30s bound rather than fail instantly.
-	replyCtx, replyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	replyCtx, replyCancel := context.WithTimeout(context.Background(), cronNotifyTimeout)
 	defer replyCancel()
 	maxLen := p.MaxReplyLength()
 	if maxLen <= 0 {

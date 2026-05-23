@@ -42,6 +42,26 @@ const (
 	fileStatTimeout  = 2 * time.Second
 )
 
+// publicTmpProject is a reserved pseudo-project name that maps onto /tmp,
+// letting the dashboard preview/download chat-mentioned absolute paths under
+// /tmp without first registering /tmp as a real project.
+//
+// Trade-off: any authenticated dashboard user can read non-credential files
+// anywhere under /tmp, including artefacts other users / processes left
+// behind. Acceptable for naozhi's single-operator dashboard model; not safe
+// in multi-tenant deployments. Symlinks that resolve outside /tmp are still
+// rejected by resolveProjectFileWithRoot's prefix check, and the credential
+// allowlist (.env, id_rsa, *.pem, etc.) still applies, so a malicious file
+// dropped under /tmp cannot exfiltrate /etc/passwd or the operator's
+// keystore.
+//
+// The handler intercepts this name before the projectMgr lookup so a real
+// project named "__public_tmp__" on disk cannot accidentally shadow it.
+const (
+	publicTmpProject = "__public_tmp__"
+	publicTmpRoot    = "/tmp"
+)
+
 // textMimePrefixes identifies MIME types safe to return as UTF-8 text in
 // preview mode. http.DetectContentType tags source code as "text/plain" which
 // covers most cases; JSON/YAML/XML/JS are also safe even when the detector
@@ -114,9 +134,19 @@ var previewableByExt = map[string]string{
 	".proto":         "text/x-protobuf",
 	".graphql":       "text/plain",
 	".gql":           "text/plain",
-	".conf":          "text/plain",
-	".cfg":           "text/plain",
-	".ini":           "text/plain",
+	// R230B-SEC-4 / R232-SEC-1 / R233-SEC-5: .conf / .cfg / .ini are
+	// deliberately previewable. Authenticated dashboard users have full
+	// read access to the workspace already (download mode + raw mode +
+	// Read tool from inside the CLI), so refusing preview only inflates
+	// click-through cost without raising the security bar. Operators
+	// must not store unencrypted secrets under allowed_root — that's the
+	// invariant; we do NOT lower it to "secrets are OK if you store
+	// them in .conf". Naming-pattern blocking (secret*.conf,
+	// credentials.cfg, …) belongs in sensitiveDownloadNames /
+	// sensitiveDownloadExts, not here.
+	".conf": "text/plain",
+	".cfg":  "text/plain",
+	".ini":  "text/plain",
 }
 
 // rawPreviewMimes identifies file types the browser can render inline via <img>
@@ -239,9 +269,18 @@ func detectMime(resolved string, head []byte) string {
 		return "image/svg+xml"
 	}
 	// Base name override for extensionless files like Dockerfile / Makefile.
+	// R232-SEC-8: paths whose basename starts with a dot (e.g. ".makefile",
+	// ".gitignore") have filepath.Ext == basename, so this branch was
+	// unreachable for them — and the previous "."+base concatenation produced
+	// "..makefile" which never matched previewableByExt. Look up by basename
+	// directly when ext is non-empty but Base starts with a dot.
 	if ext == "" {
 		base := strings.ToLower(filepath.Base(resolved))
 		if v, ok := previewableByExt["."+base]; ok {
+			return v
+		}
+	} else if base := strings.ToLower(filepath.Base(resolved)); strings.HasPrefix(base, ".") && base == ext {
+		if v, ok := previewableByExt[base]; ok {
 			return v
 		}
 	}
@@ -386,14 +425,24 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project is required"})
 		return
 	}
-	// R183-SEC-M2: every other /api/projects path gates on validateProjectName
-	// before touching projectMgr; handleFilesExists previously passed raw
-	// req.Project straight into the map lookup. The miss path is currently
-	// silent, but one future slog.Debug("project not found", ...) is enough
-	// to open a log-injection hole. Enforce the trust-boundary policy up front.
-	if err := validateProjectName(req.Project); err != nil {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
-		return
+	// __public_tmp__ pseudo-project routes /tmp/... preview without a real
+	// project registration. Skip validateProjectName + projectMgr.Get for
+	// this reserved name and pin rootPath to /tmp; everything else flows
+	// through the same resolveProjectFileWithRoot guard so symlink escape /
+	// path-traversal / credential-name rejection still apply.
+	rootPath := ""
+	if req.Project == publicTmpProject {
+		rootPath = publicTmpRoot
+	} else {
+		// R183-SEC-M2: every other /api/projects path gates on validateProjectName
+		// before touching projectMgr; handleFilesExists previously passed raw
+		// req.Project straight into the map lookup. The miss path is currently
+		// silent, but one future slog.Debug("project not found", ...) is enough
+		// to open a log-injection hole. Enforce the trust-boundary policy up front.
+		if err := validateProjectName(req.Project); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
+			return
+		}
 	}
 	if len(req.Paths) == 0 {
 		writeJSON(w, map[string]any{"results": map[string]existsEntry{}})
@@ -404,10 +453,13 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	p := h.projectMgr.Get(req.Project)
-	if p == nil {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
-		return
+	if rootPath == "" {
+		p := h.projectMgr.Get(req.Project)
+		if p == nil {
+			writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+			return
+		}
+		rootPath = p.Path
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), fileStatTimeout)
@@ -423,11 +475,11 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 	// Check empty BEFORE EvalSymlinks: EvalSymlinks("") returns (".", nil)
 	// on Linux which would bind path resolution to the process CWD.
 	// R61-GO-1.
-	if p.Path == "" {
+	if rootPath == "" {
 		writeJSON(w, map[string]any{"results": map[string]existsEntry{}})
 		return
 	}
-	rootResolved, err := filepath.EvalSymlinks(p.Path)
+	rootResolved, err := filepath.EvalSymlinks(rootPath)
 	if err != nil {
 		// Treat an unresolvable project root as "nothing exists" so the
 		// frontend renders plain text fallback. Matching the existing
@@ -567,19 +619,28 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project and path are required"})
 		return
 	}
-	// R183-SEC-M2: same trust-boundary gate as handleFilesExists above.
-	if err := validateProjectName(project); err != nil {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
-		return
+	// __public_tmp__ pseudo-project: see publicTmpProject godoc. Resolve
+	// against /tmp instead of looking up a real project, but keep the same
+	// path-traversal / symlink-escape / credential-name guards downstream.
+	rootPath := ""
+	if project == publicTmpProject {
+		rootPath = publicTmpRoot
+	} else {
+		// R183-SEC-M2: same trust-boundary gate as handleFilesExists above.
+		if err := validateProjectName(project); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
+			return
+		}
+
+		p := h.projectMgr.Get(project)
+		if p == nil {
+			writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+			return
+		}
+		rootPath = p.Path
 	}
 
-	p := h.projectMgr.Get(project)
-	if p == nil {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
-		return
-	}
-
-	resolved, err := resolveProjectFile(p.Path, path)
+	resolved, err := resolveProjectFile(rootPath, path)
 	if err != nil {
 		// os.ErrNotExist (valid but missing) vs outside-workspace collapse to
 		// 404 — an attacker probing paths gets the same signal either way.
@@ -595,6 +656,23 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	// Reject as 404 to match the rest of the not-found / escape contract.
 	info, err := os.Lstat(resolved)
 	if err != nil || info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	// R230-SEC-5: defence-in-depth re-check that resolved still sits under
+	// the project root. resolveProjectFile already verified this once, but a
+	// concurrent rename(2) between EvalSymlinks (inside resolveProjectFile)
+	// and Lstat above could move the file's containing dir to a path outside
+	// the workspace; the inode-stable Lstat then succeeds on a path that no
+	// longer satisfies the prefix invariant. Re-evaluate the project root
+	// once more so symlink-free escapes are caught on the same axis as the
+	// symlink check above. The added EvalSymlinks call is bounded by a few
+	// syscalls, well below the IO cost of the file body that follows.
+	rootResolved, rrErr := filepath.EvalSymlinks(rootPath)
+	if rrErr != nil ||
+		(resolved != rootResolved &&
+			!strings.HasPrefix(resolved, rootResolved+string(filepath.Separator))) {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
@@ -926,7 +1004,15 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 	// text/xml is equivalent to application/xml for XHTML purposes.
 	if strings.HasPrefix(mime, "text/html") || strings.HasPrefix(mime, "image/svg+xml") ||
 		strings.HasPrefix(mime, "application/xhtml") ||
-		strings.HasPrefix(mime, "application/xml") || strings.HasPrefix(mime, "text/xml") {
+		strings.HasPrefix(mime, "application/xml") || strings.HasPrefix(mime, "text/xml") ||
+		// R232-SEC-6: text/markdown does not get HTML-rendered by mainstream
+		// browsers, but a UA that does (or a future MIME sniffer that maps
+		// it to text/html) would face the same same-origin top-level
+		// navigation risk as text/html / xhtml. Force the download guard
+		// so the dashboard's preview button only ever streams markdown
+		// through the sanitised renderer (servePreview / dashboard.js
+		// renderMd) and never as a direct opaque inline doc.
+		strings.HasPrefix(mime, "text/markdown") {
 		writeJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "inline preview disabled for this type; use download mode"})
 		return
 	}
@@ -1025,6 +1111,61 @@ var sensitiveDownloadNames = map[string]struct{}{
 	"id_ed25519":      {},
 	"authorized_keys": {},
 	"credentials":     {}, // ~/.aws/credentials, docker credentials helpers, etc.
+	// Cloud-native credential filenames (GCP / Kubernetes / Firebase / generic
+	// secrets) that show up in workspaces under allowed_root. The .json /
+	// .yaml extensions are too broad for the extension allowlist (would block
+	// legitimate config files), so match them here by full filename.
+	// R232-SEC-4 + R230-SEC-? consolidated.
+	"service-account.json":                 {},
+	"serviceaccount.json":                  {},
+	"service_account.json":                 {},
+	"secrets.yaml":                         {},
+	"secrets.yml":                          {},
+	"secrets.json":                         {},
+	"secret.yaml":                          {},
+	"secret.yml":                           {},
+	"gcp-key.json":                         {},
+	"gcp_key.json":                         {},
+	"gcloud-key.json":                      {},
+	"firebase-adminsdk.json":               {},
+	"application_default_credentials.json": {},
+	"kubeconfig":                           {}, // legacy short name, also picked up via path
+	// R233B-SEC-5: ops-conventional credential-laden filenames missed by the
+	// .env / secret(s) anchors above. database.yml is Rails canonical; rds.yml
+	// / pg.yml are common for PG/MySQL DSN bundles; credentials.yml +
+	// credentials.yaml are Capistrano/Ansible style; api-keys.* covers the
+	// ad-hoc convention. Listed as exact matches (not ext-only) so a
+	// developer's legitimate "data.yml" / "config.yml" still preview/download.
+	"database.yml":     {},
+	"database.yaml":    {},
+	"credentials.yml":  {},
+	"credentials.yaml": {},
+	"credentials.json": {},
+	"api-keys.json":    {},
+	"api-keys.yml":     {},
+	"api-keys.yaml":    {},
+	"api_keys.json":    {},
+	"api_keys.yml":     {},
+	"api_keys.yaml":    {},
+	"rds.yml":          {},
+	"rds.yaml":         {},
+	"pg.yml":           {},
+	"pg.yaml":          {},
+	"mysql.yml":        {},
+	"mysql.yaml":       {},
+}
+
+// sensitiveBaseSuffixes lists filename suffixes that identify backups /
+// archives of credential files (e.g. ".env.backup", ".env.bak", ".env.old").
+// R233B-SEC-5: an attacker who can exfil "secrets.json" can equally exfil
+// "secrets.json.bak"; suffix matching closes that obvious flank without
+// growing the exact-match table to combinatorial size.
+var sensitiveBaseSuffixes = []string{
+	".env.backup",
+	".env.bak",
+	".env.old",
+	".env.orig",
+	".env.save",
 }
 
 // sensitiveDownloadExts lists extensions that strongly imply key material.
@@ -1048,6 +1189,13 @@ func isSensitiveDownloadName(base string) bool {
 	}
 	if ext := filepath.Ext(low); ext != "" {
 		if _, ok := sensitiveDownloadExts[ext]; ok {
+			return true
+		}
+	}
+	// R233B-SEC-5: suffix scan catches ".env.backup" / ".env.bak" style
+	// archive names that the exact-name + ext scans miss.
+	for _, suffix := range sensitiveBaseSuffixes {
+		if strings.HasSuffix(low, suffix) {
 			return true
 		}
 	}

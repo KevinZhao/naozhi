@@ -171,13 +171,6 @@ func validateCronScheduleChars(schedule string) error {
 	return validateStringField(schedule, stringFieldPolicy{name: "schedule", collapseErrors: true})
 }
 
-// maxCronBackendLen aliases the package-level maxBackendIDLen
-// (select_node_for_backend.go) so cron validation, send handler, and
-// remote-send WS path share one source of truth for the per-request
-// backend length cap. The 32-byte cap is the server-edge bound; the
-// session router's validateBackend allows 64 as the protocol-edge bound.
-const maxCronBackendLen = maxBackendIDLen
-
 // cronRunSummaryView is the JSON shape for a single cron run summary.
 // Shared between handleList (recent-run preview embedded in the cron
 // dashboard list) and handleRunsList (per-job paginated history).
@@ -194,11 +187,128 @@ type cronRunSummaryView struct {
 	ErrorClass string `json:"error_class,omitempty"`
 }
 
-// validateCronBackend enforces the same shape contract as send.go for the
+// cronSummaryToView projects a cron.CronRunSummary into the wire shape used
+// by handleList's recent_runs preview and handleRunsList's paginated history.
+// R233-CR-3: the two callers had identical conversion blocks and would
+// silently diverge if a future field were added in only one place.
+func cronSummaryToView(r cron.CronRunSummary) cronRunSummaryView {
+	row := cronRunSummaryView{
+		RunID:      r.RunID,
+		State:      string(r.State),
+		Trigger:    string(r.Trigger),
+		StartedAt:  r.StartedAt.UnixMilli(),
+		DurationMS: r.DurationMS,
+		SessionID:  r.SessionID,
+		ErrorClass: string(r.ErrorClass),
+	}
+	if !r.EndedAt.IsZero() {
+		row.EndedAt = r.EndedAt.UnixMilli()
+	}
+	return row
+}
+
+// cronListResp is the wire shape returned by GET /api/cron — the dashboard
+// list view. R230B-CR-3 swapped the previous map[string]any literal for
+// this named struct so the JSON encoder can cache the type's reflect
+// descriptor across the 1-Hz dashboard polls instead of paying the
+// per-call map iteration + interface boxing each request.
+type cronListResp struct {
+	Jobs          []cronJobView          `json:"jobs"`
+	Timezone      string                 `json:"timezone"`
+	TimezoneLabel string                 `json:"timezone_label"`
+	TimezoneAbbr  string                 `json:"timezone_abbr"`
+	NotifyDefault *cronNotifyDefaultView `json:"notify_default,omitempty"`
+}
+
+// cronCurrentRunView is the inline running-run summary embedded in
+// cronJobView. Only set when the scheduler reports an in-flight run for
+// the corresponding job at list time.
+type cronCurrentRunView struct {
+	RunID     string `json:"run_id"`
+	StartedAt int64  `json:"started_at"`
+	Phase     string `json:"phase,omitempty"`
+	Trigger   string `json:"trigger,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
+// cronRunCountersView mirrors cron.RunCounters for the dashboard. Field
+// order tracks RunCounters so JSON wire keys cannot diverge silently.
+type cronRunCountersView struct {
+	Total     int64 `json:"total,omitempty"`
+	Succeeded int64 `json:"succeeded,omitempty"`
+	Failed    int64 `json:"failed,omitempty"`
+	Skipped   int64 `json:"skipped,omitempty"`
+	TimedOut  int64 `json:"timed_out,omitempty"`
+	Canceled  int64 `json:"canceled,omitempty"`
+}
+
+// cronJobView is the per-job element inside cronListResp.Jobs. Promoted to
+// package-level (R230B-CR-3) so cronListResp can reference it; the previous
+// inline-typed declaration kept it locked inside handleList.
+type cronJobView struct {
+	ID             string `json:"id"`
+	Schedule       string `json:"schedule"`
+	Prompt         string `json:"prompt"`
+	Title          string `json:"title,omitempty"`
+	Platform       string `json:"platform"`
+	ChatID         string `json:"chat_id"`
+	CreatedBy      string `json:"created_by,omitempty"`
+	CreatedAt      int64  `json:"created_at"`
+	Paused         bool   `json:"paused"`
+	WorkDir        string `json:"work_dir,omitempty"`
+	NotifyPlatform string `json:"notify_platform,omitempty"`
+	NotifyChatID   string `json:"notify_chat_id,omitempty"`
+	LastResult     string `json:"last_result,omitempty"`
+	LastRunAt      int64  `json:"last_run_at,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
+	// LastErrorClass 是 P0 cron-run-history 的机器可读错误分类。前端用它
+	// 选图标/色板而非 substring-grep LastError。空 = 无错误 / 旧 job。
+	LastErrorClass string `json:"last_error_class,omitempty"`
+	NextRun        int64  `json:"next_run,omitempty"`
+	// Notify is a pointer so the view preserves the tri-state (nil vs
+	// explicit true/false). nil renders as "legacy default" on the client.
+	Notify       *bool `json:"notify,omitempty"`
+	FreshContext bool  `json:"fresh_context,omitempty"`
+	// Missed / MissedSince: cron-v2-polish §3.3 Increment C.
+	// missed=true 表示进程休眠 / 重启空窗期该 job 错过了至少一次调度。
+	// MissedSince 是"按 schedule 算上一次应跑的毫秒时刻"，UI 可以用来
+	// 显示 "上次应跑于 …"。未 missed 时两个字段都省略。
+	Missed      bool  `json:"missed,omitempty"`
+	MissedSince int64 `json:"missed_since,omitempty"`
+	// CurrentRun: P0 — 仅 job 正在执行时存在，前端据此显示"运行中 Xs"。
+	CurrentRun *cronCurrentRunView `json:"current_run,omitempty"`
+	// Stats: P0 — 累计执行计数；P1 引入 avg_ms / p95_ms 时不动 wire shape。
+	Stats *cronRunCountersView `json:"stats,omitempty"`
+	// RecentRuns: P1 cron-run-history — newest-first 摘要数组；只在卡片
+	// 折叠态做 hover-tooltip 状态气泡。空 = 此 job 尚无持久化历史
+	// （新建 / 历史已被 GC 清空 / StorePath 为空）。
+	RecentRuns []cronRunSummaryView `json:"recent_runs,omitempty"`
+	// Backend: per docs/rfc/multi-backend.md §9 cron RPC contract. ""
+	// 表示跟随 router default；前端编辑器据此回填 backend 下拉选项。
+	Backend string `json:"backend,omitempty"`
+}
+
+// cronNotifyDefaultView mirrors the {platform, chat_id} pair previously
+// rendered as a nested map[string]string. Pointer-typed in cronListResp so
+// the omitempty actually drops the key when no default is configured.
+type cronNotifyDefaultView struct {
+	Platform string `json:"platform"`
+	ChatID   string `json:"chat_id"`
+}
+
+// cronRunsListResp is the wire shape returned by GET /api/cron/runs —
+// per-job paginated history. NextBefore is omitted when the page is
+// partial, matching the previous map[string]any behaviour.
+type cronRunsListResp struct {
+	Runs       []cronRunSummaryView `json:"runs"`
+	NextBefore int64                `json:"next_before,omitempty"`
+}
+
+// validateCronBackend enforces the shared shape contract for the
 // dashboard-picked backend override on cron jobs:
 //   - empty is OK (router default fallback at execute time);
 //   - length <= maxBackendIDLen bytes;
-//   - charset [a-z0-9_-] only.
+//   - charset matches isValidBackendID (R233-SEC-9 unification).
 //
 // Unknown backend IDs are NOT rejected here — the session router's
 // wrapperFor clamps unknowns to the configured default so the cron job
@@ -206,10 +316,12 @@ type cronRunSummaryView struct {
 // removed a backend from config.yaml. This handler-edge gate stops only
 // shape-invalid input that would otherwise pollute logs / persisted JSON.
 //
-// NOTE: charset here is intentionally tighter than isValidBackendID
-// (which the WS path uses and additionally allows uppercase + '.').
-// Tracked as NEEDS-DESIGN; the cron path keeps the older [a-z0-9_-]
-// rule until the cross-path policy is unified.
+// R233-SEC-9: previously used a tighter [a-z0-9_-] subset, leaving
+// uppercase / '.' allowed by the WS isValidBackendID path and rejected
+// here. Now both paths share isValidBackendID + maxBackendIDLen so a
+// caller cannot confuse the two surfaces. The relaxation is forward-
+// compatible: any backend ID validated under the older subset still
+// satisfies isValidBackendID's superset.
 func validateCronBackend(backend string) error {
 	if backend == "" {
 		return nil
@@ -217,11 +329,11 @@ func validateCronBackend(backend string) error {
 	if len(backend) > maxBackendIDLen {
 		return fmt.Errorf("backend exceeds %d-byte limit", maxBackendIDLen)
 	}
-	for i := 0; i < len(backend); i++ {
-		c := backend[i]
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
-			return fmt.Errorf("invalid backend character")
-		}
+	if !isValidBackendID(backend) {
+		// R230-CQ-12: error string aligned with send.handleSend's
+		// dashboard-side gate so dashboard JS / external API consumers
+		// see one message regardless of which surface rejected.
+		return fmt.Errorf("invalid backend identifier")
 	}
 	return nil
 }
@@ -321,68 +433,14 @@ type CronHandlers struct {
 // GET /api/cron — list all cron jobs (unscoped, admin view).
 func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	if h.scheduler == nil {
-		writeJSON(w, map[string]any{"jobs": []any{}})
+		// R230B-CR-3: keep wire shape `{"jobs":[]}` byte-equal to the prior
+		// map[string]any{"jobs": []any{}} fast path. Explicit empty slice
+		// (not nil) so json.Marshal emits `[]` rather than `null`.
+		writeJSON(w, cronListResp{Jobs: []cronJobView{}})
 		return
 	}
 
 	jobs := h.scheduler.ListAllJobsWithNextRun()
-	type currentRunView struct {
-		RunID     string `json:"run_id"`
-		StartedAt int64  `json:"started_at"`
-		Phase     string `json:"phase,omitempty"`
-		Trigger   string `json:"trigger,omitempty"`
-		SessionID string `json:"session_id,omitempty"`
-	}
-	type runCountersView struct {
-		Total     int64 `json:"total,omitempty"`
-		Succeeded int64 `json:"succeeded,omitempty"`
-		Failed    int64 `json:"failed,omitempty"`
-		Skipped   int64 `json:"skipped,omitempty"`
-		TimedOut  int64 `json:"timed_out,omitempty"`
-		Canceled  int64 `json:"canceled,omitempty"`
-	}
-	type cronJobView struct {
-		ID             string `json:"id"`
-		Schedule       string `json:"schedule"`
-		Prompt         string `json:"prompt"`
-		Title          string `json:"title,omitempty"`
-		Platform       string `json:"platform"`
-		ChatID         string `json:"chat_id"`
-		CreatedBy      string `json:"created_by,omitempty"`
-		CreatedAt      int64  `json:"created_at"`
-		Paused         bool   `json:"paused"`
-		WorkDir        string `json:"work_dir,omitempty"`
-		NotifyPlatform string `json:"notify_platform,omitempty"`
-		NotifyChatID   string `json:"notify_chat_id,omitempty"`
-		LastResult     string `json:"last_result,omitempty"`
-		LastRunAt      int64  `json:"last_run_at,omitempty"`
-		LastError      string `json:"last_error,omitempty"`
-		// LastErrorClass 是 P0 cron-run-history 的机器可读错误分类。前端用它
-		// 选图标/色板而非 substring-grep LastError。空 = 无错误 / 旧 job。
-		LastErrorClass string `json:"last_error_class,omitempty"`
-		NextRun        int64  `json:"next_run,omitempty"`
-		// Notify is a pointer so the view preserves the tri-state (nil vs
-		// explicit true/false). nil renders as "legacy default" on the client.
-		Notify       *bool `json:"notify,omitempty"`
-		FreshContext bool  `json:"fresh_context,omitempty"`
-		// Missed / MissedSince: cron-v2-polish §3.3 Increment C。
-		// missed=true 表示进程休眠 / 重启空窗期该 job 错过了至少一次调度。
-		// MissedSince 是"按 schedule 算上一次应跑的毫秒时刻"，UI 可以用来
-		// 显示 "上次应跑于 …"。未 missed 时两个字段都省略。
-		Missed      bool  `json:"missed,omitempty"`
-		MissedSince int64 `json:"missed_since,omitempty"`
-		// CurrentRun: P0 — 仅 job 正在执行时存在，前端据此显示"运行中 Xs"。
-		CurrentRun *currentRunView `json:"current_run,omitempty"`
-		// Stats: P0 — 累计执行计数；P1 引入 avg_ms / p95_ms 时不动 wire shape。
-		Stats *runCountersView `json:"stats,omitempty"`
-		// RecentRuns: P1 cron-run-history — newest-first 摘要数组；只在卡片
-		// 折叠态做 hover-tooltip 状态气泡。空 = 此 job 尚无持久化历史
-		// （新建 / 历史已被 GC 清空 / StorePath 为空）。
-		RecentRuns []cronRunSummaryView `json:"recent_runs,omitempty"`
-		// Backend: per docs/rfc/multi-backend.md §9 cron RPC contract. ""
-		// 表示跟随 router default；前端编辑器据此回填 backend 下拉选项。
-		Backend string `json:"backend,omitempty"`
-	}
 	views := make([]cronJobView, 0, len(jobs))
 	for _, entry := range jobs {
 		j := entry.Job
@@ -428,7 +486,7 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		// CurrentRun & Stats — P0 cron-run-history。CurrentRun 只在 job 正
 		// 在执行时返回；空 stats 也省略以减少线上 noise。
 		if cur, ok := h.scheduler.CurrentRun(j.ID); ok {
-			v.CurrentRun = &currentRunView{
+			v.CurrentRun = &cronCurrentRunView{
 				RunID:     cur.RunID,
 				StartedAt: cur.StartedAt.UnixMilli(),
 				Phase:     cur.Phase,
@@ -437,7 +495,7 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if c := j.RunCounters; c.Total > 0 {
-			v.Stats = &runCountersView{
+			v.Stats = &cronRunCountersView{
 				Total:     c.Total,
 				Succeeded: c.Succeeded,
 				Failed:    c.Failed,
@@ -452,19 +510,7 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		if recent := h.scheduler.RecentRuns(j.ID, 5); len(recent) > 0 {
 			rv := make([]cronRunSummaryView, 0, len(recent))
 			for _, r := range recent {
-				row := cronRunSummaryView{
-					RunID:      r.RunID,
-					State:      string(r.State),
-					Trigger:    string(r.Trigger),
-					StartedAt:  r.StartedAt.UnixMilli(),
-					DurationMS: r.DurationMS,
-					SessionID:  r.SessionID,
-					ErrorClass: string(r.ErrorClass),
-				}
-				if !r.EndedAt.IsZero() {
-					row.EndedAt = r.EndedAt.UnixMilli()
-				}
-				rv = append(rv, row)
+				rv = append(rv, cronSummaryToView(r))
 			}
 			v.RecentRuns = rv
 		}
@@ -476,20 +522,23 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	locName := loc.String()
 	tzLabel := formatTZOffset(locName, offset)
 
-	resp := map[string]any{
-		"jobs":           views,
-		"timezone":       locName,
-		"timezone_label": tzLabel,
-		"timezone_abbr":  name,
+	// R230B-CR-3: named struct in place of map[string]any keeps the json
+	// encoder on the cached reflect path (one-time alloc) and lets the wire
+	// shape be grepped directly from the type definition.
+	resp := cronListResp{
+		Jobs:          views,
+		Timezone:      locName,
+		TimezoneLabel: tzLabel,
+		TimezoneAbbr:  name,
 	}
 	if def := h.scheduler.NotifyDefault(); def.IsSet() {
 		// Expose the configured default so the UI can render helpful copy
 		// like "notifications go to feishu (oc_xxx)" instead of just a
 		// blank toggle. chat_id is already considered semi-public (appears
 		// in message metadata) so surfacing it here is not a leak.
-		resp["notify_default"] = map[string]string{
-			"platform": def.Platform,
-			"chat_id":  def.ChatID,
+		resp.NotifyDefault = &cronNotifyDefaultView{
+			Platform: def.Platform,
+			ChatID:   def.ChatID,
 		}
 	}
 	writeJSON(w, resp)
@@ -1077,7 +1126,10 @@ func (h *CronHandlers) handleRunsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.scheduler == nil {
-		writeJSON(w, map[string]any{"runs": []any{}})
+		// R230B-CR-3: same byte shape as the map[string]any fast path —
+		// `{"runs":[]}`. Explicit empty slice keeps json.Marshal off the
+		// nil → "null" rendering branch.
+		writeJSON(w, cronRunsListResp{Runs: []cronRunSummaryView{}})
 		return
 	}
 	jobID := r.URL.Query().Get("job_id")
@@ -1126,27 +1178,18 @@ func (h *CronHandlers) handleRunsList(w http.ResponseWriter, r *http.Request) {
 	rows := h.scheduler.ListRuns(jobID, limit, before)
 	out := make([]cronRunSummaryView, 0, len(rows))
 	for _, r := range rows {
-		row := cronRunSummaryView{
-			RunID:      r.RunID,
-			State:      string(r.State),
-			Trigger:    string(r.Trigger),
-			StartedAt:  r.StartedAt.UnixMilli(),
-			DurationMS: r.DurationMS,
-			SessionID:  r.SessionID,
-			ErrorClass: string(r.ErrorClass),
-		}
-		if !r.EndedAt.IsZero() {
-			row.EndedAt = r.EndedAt.UnixMilli()
-		}
-		out = append(out, row)
+		out = append(out, cronSummaryToView(r))
 	}
-	resp := map[string]any{"runs": out}
+	// R230B-CR-3: named struct in place of map[string]any keeps this 1Hz-poll
+	// endpoint on the cached reflect path (one-time alloc) instead of paying
+	// the per-call map iteration + interface boxing each request.
+	resp := cronRunsListResp{Runs: out}
 	// next_before: emit only when this page was full (caller may have more).
 	// Conservative: a partial page can still indicate "no more" because runs
 	// older than this batch may have been GC'd; we let the dashboard treat
 	// next_before as "fetch older than this" hint.
 	if len(out) == limit && len(out) > 0 {
-		resp["next_before"] = out[len(out)-1].StartedAt
+		resp.NextBefore = out[len(out)-1].StartedAt
 	}
 	writeJSON(w, resp)
 }

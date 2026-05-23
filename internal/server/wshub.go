@@ -80,12 +80,16 @@ type Hub struct {
 	// satisfies this interface implicitly; kept as an interface so
 	// tests can inject a fake and a future Router sub-aggregation
 	// can swap implementations without touching Hub internals.
-	router        HubRouter
-	agents        map[string]session.AgentOpts
-	agentCmds     map[string]string
-	dashToken     string
-	dashTokenHash [32]byte // sha256(dashToken), precomputed; empty when dashToken==""
-	cookieMAC     string   // HMAC-derived cookie value (different from dashToken)
+	router    HubRouter
+	agents    map[string]session.AgentOpts
+	agentCmds map[string]string
+	dashToken string
+	// dashTokenHash is sha256(dashToken), precomputed at NewHub for
+	// constant-time auth comparison. Immutable after construction:
+	// hot-reloading dashToken at runtime is not supported and would
+	// silently leave this hash stale — restart naozhi to rotate.
+	dashTokenHash [32]byte
+	cookieMAC     string // HMAC-derived cookie value (different from dashToken)
 	guard         *session.Guard
 	queue         *dispatch.MessageQueue // per-key FIFO queue for dashboard sends
 	nodes         map[string]node.Conn
@@ -94,9 +98,18 @@ type Hub struct {
 	// resolver centralises session key → opts derivation; used by
 	// sessionOptsFor / buildSessionOpts. Nil keeps legacy fallback
 	// wiring for tests that don't construct a resolver.
-	resolver    *session.KeyResolver
-	scheduler   *cron.Scheduler // optional, for cron prompt auto-save
-	uploadStore *uploadStore    // optional, for resolving WS-sent file_ids
+	resolver *session.KeyResolver
+	// scheduler is the optional cron-side hook the Hub needs for two
+	// things: (a) reviving a dismissed cron stub when a dashboard tab
+	// re-subscribes (handleSubscribe → EnsureStub) and (b) auto-saving
+	// the user's first prompt as the cron job's permanent prompt
+	// (sessionSend → SetJobPrompt). R232-ARCH-7: typed as the narrow
+	// cronHubOps interface (defined in this file) instead of
+	// *cron.Scheduler, so server's coupling to cron is the 2 methods
+	// it actually uses, not the full 60+ method scheduler surface.
+	// *cron.Scheduler satisfies cronHubOps implicitly.
+	scheduler   cronHubOps
+	uploadStore *uploadStore // optional, for resolving WS-sent file_ids
 	// scratchPool lets sessionOptsFor resolve the inherited AgentOpts for an
 	// ephemeral "scratch" key without touching the persistent agent registry.
 	// Nil when the scratch feature is disabled (tests, headless mode).
@@ -284,7 +297,20 @@ func NewHub(opts HubOptions) *Hub {
 	return h
 }
 
+// cronHubOps is the narrow consumer interface the Hub needs from
+// *cron.Scheduler. Defined here (and not in cron) so server's coupling
+// to the scheduler stays at the two methods we actually call, and tests
+// can inject a fake without depending on the full Scheduler. R232-ARCH-7
+// extension of the cronStubChecker pattern from R228-ARCH-17.
+type cronHubOps interface {
+	EnsureStub(key string) bool
+	SetJobPrompt(jobID, prompt string) error
+}
+
 // SetScheduler sets the cron scheduler for auto-saving prompts on first send.
+// Accepts the concrete *cron.Scheduler (production wiring) — the field type
+// is the narrower cronHubOps interface so the Hub never sees the rest of the
+// scheduler API.
 func (h *Hub) SetScheduler(s *cron.Scheduler) { h.scheduler = s }
 
 // SetUploadStore wires the upload store used by WS sends to resolve file_ids
@@ -363,11 +389,17 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		// capped at maxHistoryPushEntries in eventPushLoop (≤~50 × ~200 B =
 		// ~10 KB per frame), so 256 slots × ~10 KB = ~2.5 MB worst-case
 		// per-client. R68-PERF-H1.
-		send:             make(chan []byte, 256),
-		hub:              h,
-		remoteIP:         ip,
-		sendLimiter:      rate.NewLimiter(rate.Every(time.Second), 5), // 5 sends/s burst, 1/s sustained
-		interruptLimiter: rate.NewLimiter(rate.Every(200*time.Millisecond), 3),
+		send:        make(chan []byte, 256),
+		hub:         h,
+		remoteIP:    ip,
+		sendLimiter: rate.NewLimiter(rate.Every(time.Second), 5), // 5 sends/s burst, 1/s sustained
+		// Interrupt budget intentionally tighter than send: a human pressing
+		// "stop" never needs more than once per second, but an attacker who
+		// can spam interrupts can DoS a session by aborting every turn it
+		// starts. ~0.5/s sustained, burst 2 covers double-clicks. Was 5/s
+		// burst 3 (more permissive than sends), which let auth'd clients
+		// override the send budget on the interrupt path.
+		interruptLimiter: rate.NewLimiter(rate.Every(2*time.Second), 2),
 		subscriptions:    make(map[string]func()),
 		subGen:           make(map[string]uint64),
 		done:             make(chan struct{}),

@@ -188,13 +188,13 @@ func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []I
 	// dominant cost — typical user messages are 100B-4KB). The pool returns a
 	// pointer so the slice header stays heap-stable; reset to len 0 on Get to
 	// reuse capacity, return on Put.
-	cap := captureWriterPool.Get().(*captureWriter)
-	cap.bytes = cap.bytes[:0]
-	defer captureWriterPool.Put(cap)
-	if err := p.protocol.WriteUserMessageLocked(cap, uuidStr, text, images, priority); err != nil {
+	cw := captureWriterPool.Get().(*captureWriter)
+	cw.bytes = cw.bytes[:0]
+	defer captureWriterPool.Put(cw)
+	if err := p.protocol.WriteUserMessageLocked(cw, uuidStr, text, images, priority); err != nil {
 		return err
 	}
-	line := cap.bytes
+	line := cw.bytes
 	// Strip trailing newline — shimSendLocked re-adds its own framing via the
 	// shim's "write" frame structure.
 	if n := len(line); n > 0 && line[n-1] == '\n' {

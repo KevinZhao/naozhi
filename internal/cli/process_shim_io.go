@@ -2,20 +2,24 @@ package cli
 
 // process_shim_io.go — shim protocol outbound write path.
 //
-// Moved from process.go (Phase 1 of docs/rfc/process-split.md).
-// Zero semantic change; pure file move. See the RFC for the full
-// mapping and why pool lifetime primitives (encodeShimMsg /
-// returnShimSendEnc) MUST live in the same file.
+// Owns: shimWriter (the high-level outbound pump) plus the encoder pool
+// primitives (encodeShimMsg / returnShimSendEnc) — pool lifetime MUST
+// share this file with shimWriter or buffers escape past their owner's
+// scope.
 //
-// Related constants still in process.go:
-//   - maxStdinLineBytes (shares const block with readloop constants;
-//     kept there to minimise Phase 1 diff; reference is package-private
-//     so remains accessible here).
+// Related constants still in process.go: maxStdinLineBytes, grouped with
+// the readloop timing knobs because they share a budget category, not
+// because of file-locality.
 //
-// Lock ordering invariant preserved:
-//   shimWriter.mu -> Process.shimWMu
+// Lock ordering invariant:
+//
+//	shimWriter.mu -> Process.shimWMu
+//
 // Callers that already hold p.shimWMu must NOT go through
 // shimWriter.Write — use shimSendLocked instead.
+//
+// R227-ARCH-19: dropped the "Phase 1 of process-split / zero semantic
+// change" preamble; refactor is complete, history lives in git log.
 
 import (
 	"bytes"

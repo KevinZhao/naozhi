@@ -14,15 +14,14 @@ import (
 
 // fakeRouter is a minimal SessionRouter that returns a configurable error
 // from GetOrCreate so executeOpt's failure branches can be exercised
-// without spinning up a real CLI. RegisterCronStub* are no-ops; Reset
-// captures the key for assertions.
+// without spinning up a real CLI. RegisterCronStubWithChain is a no-op;
+// Reset captures the key for assertions.
 type fakeRouter struct {
 	mu       sync.Mutex
 	getErr   error
 	resetKey string
 }
 
-func (f *fakeRouter) RegisterCronStub(key, workspace, lastPrompt string) {}
 func (f *fakeRouter) RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string) {
 }
 func (f *fakeRouter) Reset(key string) {

@@ -3,12 +3,13 @@ package cli
 // process_event_format.go — Event → EventEntry conversion and tool
 // input formatting.
 //
-// Moved from process.go (Phase 5 of docs/rfc/process-split.md).
-// Zero semantic change; pure file move.
+// Owns pure conversion helpers + logEventAt (the only non-pure entry,
+// pairing conversion with EventLog.AppendBatch and the result-cost
+// atomic update).
 //
-// Almost all functions here are pure: the only non-pure one is
-// logEventAt, which pairs conversion with an EventLog.AppendBatch
-// side effect and a result-cost atomic update.
+// R227-ARCH-19: dropped the "Phase 5 of process-split / zero semantic
+// change" preamble — process-split landed in 2026-05 and the file is
+// no longer in flux; the historical context is preserved in git log.
 
 import (
 	"encoding/json"

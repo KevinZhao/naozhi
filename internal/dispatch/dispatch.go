@@ -221,6 +221,15 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 	if d.takeoverFn == nil {
 		d.takeoverFn = func(context.Context, string, string, session.AgentOpts) bool { return false }
 	}
+	// Same rationale for the watchdog kill counters: production wiring sets
+	// them, but tests routinely build a Dispatcher without these fields. The
+	// watchdog hot path calls .Add(1) unconditionally; nil here would panic.
+	if d.watchdogNoOutputKills == nil {
+		d.watchdogNoOutputKills = new(atomic.Int64)
+	}
+	if d.watchdogTotalKills == nil {
+		d.watchdogTotalKills = new(atomic.Int64)
+	}
 	return d
 }
 
@@ -265,7 +274,7 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		// session-key component sanitization (strips C0/bidi/zero-width,
 		// replaces colons, bounds length) so the logger's attr view matches
 		// the session-key view in the log. R60-GO-H1.
-		log := slog.With(
+		lg := slog.With(
 			"platform", session.SanitizeLogAttr(msg.Platform),
 			"user", session.SanitizeLogAttr(msg.UserID),
 			"chat", session.SanitizeLogAttr(msg.ChatID),
@@ -273,7 +282,7 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		trimmed := strings.TrimSpace(msg.Text)
 
 		// Dispatch slash commands (/help, /new, /cron, /cd, /pwd, /project)
-		if d.dispatchCommand(ctx, msg, trimmed, log) {
+		if d.dispatchCommand(ctx, msg, trimmed, lg) {
 			return
 		}
 
@@ -281,7 +290,7 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		agentID, cleanText := session.ResolveAgent(trimmed, d.agentCommands)
 		if cleanText == "" && len(msg.Images) == 0 {
 			if agentID != "general" {
-				d.replyText(ctx, msg, "请在指令后输入内容。", log)
+				d.replyText(ctx, msg, "请在指令后输入内容。", lg)
 			}
 			return
 		}
@@ -294,7 +303,7 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 				cmd = cleanText[:idx]
 			}
 			if !strings.Contains(cmd[1:], "/") {
-				d.replyText(ctx, msg, "未知命令: "+cmd+"\n输入 /help 查看可用命令，或直接发送消息。", log)
+				d.replyText(ctx, msg, "未知命令: "+cmd+"\n输入 /help 查看可用命令，或直接发送消息。", lg)
 				return
 			}
 		}
@@ -326,17 +335,17 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		// the passthrough merge optimization but preserves correctness: each
 		// of N concurrent goroutines blocks on sendMu in arrival order.
 		if d.queue != nil && d.queue.Mode() == ModePassthrough {
-			log.Info("message received (passthrough)", "agent", agentID, "text_len", len(cleanText), "images", len(images))
+			lg.Info("message received (passthrough)", "agent", agentID, "text_len", len(cleanText), "images", len(images))
 			// Detach from the platform handler ctx: webhook handlers return
 			// in seconds while LLM turns take minutes. If we keep the caller
 			// ctx, handler-return cancels it and SendPassthrough bails early,
 			// leaking slots into the 5.5-min bail timer. Use WithoutCancel
 			// to preserve values (log fields, auth) without the cancellation.
 			sendCtx := context.WithoutCancel(ctx)
-			go d.sendAndReply(WithPassthrough(sendCtx), key, cleanText, images, agentID, opts, msg, log, true)
+			go d.sendAndReply(WithPassthrough(sendCtx), key, cleanText, images, agentID, opts, msg, lg, true)
 			// Ack arrival so the IM user sees a reaction/receipt. This is
 			// cheap and does not depend on the turn completing.
-			d.ackQueuedWithReaction(ctx, msg, log)
+			d.ackQueuedWithReaction(ctx, msg, lg)
 			return
 		}
 
@@ -360,24 +369,24 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 				if shouldInterrupt {
 					switch outcome := d.router.InterruptSessionViaControl(key); outcome {
 					case session.InterruptSent:
-						log.Info("interrupt mode: aborted active turn to process follow-up",
+						lg.Info("interrupt mode: aborted active turn to process follow-up",
 							"key", key)
 					case session.InterruptNoTurn:
 						// Session is spawning or idle — the turn isn't active yet,
 						// so nothing to interrupt. The follow-up will be drained
 						// by the owner loop after the first turn completes.
-						log.Debug("interrupt mode: session idle or spawning, will process follow-up after current turn",
+						lg.Debug("interrupt mode: session idle or spawning, will process follow-up after current turn",
 							"key", key)
 					case session.InterruptNoSession:
-						log.Debug("interrupt mode: session not found, falling back to collect",
+						lg.Debug("interrupt mode: session not found, falling back to collect",
 							"key", key)
 					case session.InterruptUnsupported:
-						log.Debug("interrupt mode: protocol does not support stdin interrupt, falling back to collect",
+						lg.Debug("interrupt mode: protocol does not support stdin interrupt, falling back to collect",
 							"key", key)
 					case session.InterruptError:
 						// Warn already emitted inside ManagedSession.InterruptViaControl;
 						// keep a paired trace here to anchor the dispatch side.
-						log.Warn("interrupt mode: transport error, falling back to collect",
+						lg.Warn("interrupt mode: transport error, falling back to collect",
 							"key", key)
 					}
 				}
@@ -387,37 +396,37 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 					// the text notice if the platform isn't Reactor-capable,
 					// has no inbound MessageID, or the reaction call fails —
 					// ShouldNotify still rate-limits the fallback.
-					if !d.ackQueuedWithReaction(ctx, msg, log) {
+					if !d.ackQueuedWithReaction(ctx, msg, lg) {
 						if d.queue.ShouldNotify(key) {
-							d.replyText(ctx, msg, "消息已收到，待当前回复完成后一并处理。", log)
+							d.replyText(ctx, msg, "消息已收到，待当前回复完成后一并处理。", lg)
 						}
 					}
 				} else {
 					// Queue disabled (maxDepth<=0) — degrade to old drop behavior.
 					if d.queue.ShouldNotify(key) {
-						d.replyText(ctx, msg, "正在处理上一条消息，请稍候...", log)
+						d.replyText(ctx, msg, "正在处理上一条消息，请稍候...", lg)
 					}
 				}
 				return
 			}
 			// I am the owner — enter the process-and-drain loop.
-			log.Info("message received", "agent", agentID, "text_len", len(cleanText), "images", len(images))
-			d.ownerLoop(ctx, key, gen, qm, agentID, opts, msg, log)
+			lg.Info("message received", "agent", agentID, "text_len", len(cleanText), "images", len(images))
+			d.ownerLoop(ctx, key, gen, qm, agentID, opts, msg, lg)
 			return
 		}
 
 		// Fallback: Guard-based path (no queue configured).
 		if !d.guard.TryAcquire(key) {
 			if d.guard.ShouldSendWait(key) {
-				d.replyText(ctx, msg, "正在处理上一条消息，请稍候...", log)
+				d.replyText(ctx, msg, "正在处理上一条消息，请稍候...", lg)
 			}
 			return
 		}
 		defer d.guard.Release(key)
 		defer d.router.NotifyIdle()
 
-		log.Info("message received", "agent", agentID, "text_len", len(cleanText), "images", len(images))
-		d.sendAndReply(ctx, key, cleanText, images, agentID, opts, msg, log, true)
+		lg.Info("message received", "agent", agentID, "text_len", len(cleanText), "images", len(images))
+		d.sendAndReply(ctx, key, cleanText, images, agentID, opts, msg, lg, true)
 	}
 }
 
@@ -454,24 +463,29 @@ func (d *Dispatcher) ownerLoop(
 	agentID string,
 	opts session.AgentOpts,
 	msg platform.IncomingMessage,
-	log *slog.Logger,
+	lg *slog.Logger,
 ) {
-	defer func() {
-		if r := recover(); r != nil {
-			d.handleOwnerLoopPanic(key, msg, r)
-		}
-	}()
-	defer d.router.NotifyIdle()
-
 	// Enrich the logger once for the whole ownerLoop lifetime. Previously
 	// sendAndReply re-did this `log.With` on every drained turn — a coalesced
 	// burst of 5 follow-ups meant 5 identical handler-chain allocs. Lifting
 	// it here costs exactly one alloc per ownerLoop regardless of drain
 	// depth. R61-PERF-12.
-	log = log.With("key", key, "agent", agentID)
+	lg = lg.With("key", key, "agent", agentID)
+	defer func() {
+		if r := recover(); r != nil {
+			// R230-CQ-11: pass the enriched ownerLoop logger so the panic
+			// path inherits the same key/agent/platform attrs as the rest
+			// of this turn's log lines. The recover trigger means the
+			// loop's normal `log.Info("message replied", ...)` already
+			// fired this turn or never will — operators grepping by key
+			// see the panic stitched into the same context window.
+			d.handleOwnerLoopPanic(key, msg, r, lg)
+		}
+	}()
+	defer d.router.NotifyIdle()
 
 	// Process first message.
-	d.sendAndReply(ctx, key, first.Text, first.Images, agentID, opts, msg, log, true)
+	d.sendAndReply(ctx, key, first.Text, first.Images, agentID, opts, msg, lg, true)
 
 	// Drain loop: after each turn, wait collectDelay then drain.
 	collectTimer := time.NewTimer(d.queue.CollectDelay())
@@ -490,22 +504,13 @@ func (d *Dispatcher) ownerLoop(
 		}
 
 		text, images := CoalesceMessages(queued)
-		log.Info("processing queued messages", "count", len(queued), "merged_len", len(text))
-		d.sendAndReply(ctx, key, text, images, agentID, opts, msg, log, false)
+		lg.Info("processing queued messages", "count", len(queued), "merged_len", len(text))
+		d.sendAndReply(ctx, key, text, images, agentID, opts, msg, lg, false)
 		// Drained queued messages were acknowledged with a queue reaction
 		// when they arrived; clear those reactions now that their content
 		// was processed. Best-effort — errors only log.
-		d.clearQueuedReactions(ctx, msg.Platform, queued, log)
-		// Defensive Stop+drain before Reset: if a future refactor changes the
-		// loop shape so the <-collectTimer.C arm can be skipped (e.g. an
-		// early-continue branch), Reset without drain would let a stale tick
-		// fire immediately on the next iteration.
-		if !collectTimer.Stop() {
-			select {
-			case <-collectTimer.C:
-			default:
-			}
-		}
+		d.clearQueuedReactions(ctx, msg.Platform, queued, lg)
+		// Go 1.23+: Reset on a Timer whose channel was just consumed by the case arm above is race-free; no Stop+drain needed.
 		collectTimer.Reset(d.queue.CollectDelay())
 	}
 }
@@ -524,16 +529,24 @@ func (d *Dispatcher) ownerLoop(
 // A nested recover around the reply call absorbs a cascading panic (e.g.,
 // platform SDK panicking on a nil chat handle) so the outer defer always
 // completes and the process can drain other owners cleanly.
-func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessage, r any) {
+//
+// R230-CQ-11: lg carries the ownerLoop's enriched key/agent attrs so the
+// panic and reply-panic log lines share context with the rest of the turn.
+// nil is tolerated for callers that don't have an ownerLoop logger handy
+// (e.g. unit tests) — falls back to the package-level slog.
+func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessage, r any, lg *slog.Logger) {
 	metrics.PanicRecoveredTotal.Add(1)
-	slog.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
+	if lg == nil {
+		lg = slog.Default()
+	}
+	lg.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
 	if d.queue != nil {
 		d.queue.Discard(key)
 	}
 	func() {
 		defer func() {
 			if rr := recover(); rr != nil {
-				slog.Error("ownerLoop reply panic recovered", "key", key, "panic", rr)
+				lg.Error("ownerLoop reply panic recovered", "key", key, "panic", rr)
 			}
 		}()
 		notifyCtx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
@@ -552,7 +565,7 @@ func (d *Dispatcher) sendAndReply(
 	agentID string,
 	opts session.AgentOpts,
 	msg platform.IncomingMessage,
-	log *slog.Logger,
+	lg *slog.Logger,
 	isFirst bool,
 ) {
 	// Session-key + agent attrs are attached once in ownerLoop (R61-PERF-12)
@@ -580,9 +593,9 @@ func (d *Dispatcher) sendAndReply(
 		// downgrade to Info so ops dashboards don't light up on every
 		// restart. Unexpected failures stay at Error.
 		if errors.Is(err, context.Canceled) {
-			log.Info("get session cancelled during shutdown", "err", err)
+			lg.Info("get session cancelled during shutdown", "err", err)
 		} else {
-			log.Error("get session", "err", err)
+			lg.Error("get session", "err", err)
 		}
 		var errMsg string
 		replyCtx := ctx
@@ -612,20 +625,20 @@ func (d *Dispatcher) sendAndReply(
 		default:
 			errMsg = "会话创建失败，请发送 /new 重置后重试。"
 		}
-		d.replyText(replyCtx, msg, errMsg, log)
+		d.replyText(replyCtx, msg, errMsg, lg)
 		return
 	}
 
 	p := d.platforms[msg.Platform]
 	if p == nil {
-		log.Error("unknown platform")
+		lg.Error("unknown platform")
 		return
 	}
 
 	// Session lifecycle notifications only on first message.
 	if isFirst {
 		if sessStatus == session.SessionNew && platform.SupportsInterimMessages(p) {
-			d.replyText(ctx, msg, "新会话已创建（之前的上下文已失效）。", log)
+			d.replyText(ctx, msg, "新会话已创建（之前的上下文已失效）。", lg)
 		}
 	}
 
@@ -635,7 +648,7 @@ func (d *Dispatcher) sendAndReply(
 	result, err := d.sendFn(ctx, key, sess, text, images, tracker.onEvent)
 	if err != nil {
 		d.replyErrorCount.Add(1)
-		log.Error("send to claude", "err", err)
+		lg.Error("send to claude", "err", err)
 		// IM path keeps two timeout-aware specialisations (the configured
 		// no-output / total durations rendered in Chinese) before falling
 		// back to the shared sentinel→message helper. Dashboard send path
@@ -660,12 +673,12 @@ func (d *Dispatcher) sendAndReply(
 		}
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, 3); err != nil {
 			d.sendFailCount.Add(1)
-			log.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
+			lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
 		}
 		return
 	}
 
-	log.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD,
+	lg.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD,
 		"merged_count", result.MergedCount, "merged_with_head", result.MergedWithHead)
 
 	// Passthrough merge fan-out: follower slots get MergedCount>1 and an
@@ -673,7 +686,7 @@ func (d *Dispatcher) sendAndReply(
 	// reply on its own bubble; followers should surface a short "合并" hint
 	// on the user's original message instead of echoing the same text again.
 	if result.MergedCount > 1 && result.Text == "" {
-		d.ackMergedFollower(ctx, msg, result.MergedCount, log)
+		d.ackMergedFollower(ctx, msg, result.MergedCount, lg)
 		d.markReplySuccess()
 		return
 	}
@@ -747,7 +760,7 @@ func (d *Dispatcher) sendAndReply(
 				slog.Debug("ask_question: banner edit failed", "err", err)
 			}
 		}
-		log.Info("ask_question suppressed redundant reply", "result_len", len(result.Text))
+		lg.Info("ask_question suppressed redundant reply", "result_len", len(result.Text))
 	} else if replyText != "" {
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, replyText); err != nil {

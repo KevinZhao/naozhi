@@ -2,18 +2,17 @@ package cli
 
 // process_readloop.go — inbound shim socket read goroutine and heartbeat.
 //
-// Moved from process.go (Phase 2 of docs/rfc/process-split.md).
-// Zero semantic change; pure file move. See the RFC for the full
-// mapping.
+// Owns: readLoop (inbound stdout pump), the shim heartbeat loop, and
+// shimMsg (the inbound wire frame, also consumed by wrapper.go's Spawn
+// handshake).
 //
-// Related constants stay in process.go's const block:
-//   - maxScannerBufBytes / lineBufShrinkThreshold (referenced only
-//     here but kept grouped with related DefaultNoOutputTimeout etc.
-//     to minimise Phase 2 diff).
+// Related constants — maxScannerBufBytes / lineBufShrinkThreshold — live
+// in process.go's const block alongside DefaultNoOutputTimeout because
+// they are timing-budget knobs grouped semantically rather than
+// physically.
 //
-// The shimMsg struct moves here with readLoop because it is only used
-// inside readLoop and by wrapper.go's Spawn handshake (same package,
-// no import change needed).
+// R227-ARCH-19: dropped the "Phase 2 of process-split / zero semantic
+// change" preamble; refactor is complete, history lives in git log.
 
 import (
 	"bufio"

@@ -1,6 +1,8 @@
 # TODO
 
-> 最后更新 2026-05-22 Round 232 —— 深度 5-agent 并行 code review 第 42 轮：7 处直接修落地（cron runstore cacheHeadPush O(N)→O(1) prepend / cron Start trimAll 改异步 goroutine / cron trimAll ReadDir 错误升级 Warn / sysession runner stderr 预截 256 / cron previousTickBefore 1000 次迭代上限 / cron recordResult 4*1024→maxStoredResultRunes 常量 + slogPrintfLogger 同时匹配 panic\|recovered + storeMu 注释纠偏 + diskListNewestFirst & trimJobLocked 跳 symlink）+ ~75 NEEDS-DESIGN 归档见 Round 232 节。
+> 最后更新 2026-05-23 Round 233 —— 深度 5-agent 并行 code review 第 43 轮：合计 21 处直接修落地。第一批 12 处（PR #239）：cron RegisterCronStub 接口收敛删 1 方法 + 4 处 fake test 同步 / cron computeJobTimeout 删 schedule 死参 / cron redactPathsInCronError 用 TruncateAtRuneBoundary 守 UTF-8 边界 / dispatch nil watchdog atomic 防御 / acp readUntilResponse 超时 goroutine 通过 select-with-done 不阻塞 / sysession limitedWriter Write 错误路径不再违反 io.Writer 契约 / acp textBuf 写入 cap 守 maxAssistantMessageContentBytes / dashboard transcript ANSI regex fast-path 用 IndexByte 0x1b / project_files sensitiveDownloadNames 补 service-account.json/secrets.yaml / dashboard_cron 删 maxCronBackendLen 死常量 / wshub interruptLimiter 0.5/s 收紧 / agent_tailer silent 路径无订阅时跳过 subs 快照。第二批 9 处（PR #240）：cli/passthrough.go `cap` 变量重命名避免 shadow builtin / cron `defaultMaxJobs=50`+`defaultExecTimeout=5min`+`cronNotifyTimeout=30s` 抽命名常量 / sysession `defaultDaemonTickInterval=30s` 命名常量 / cron `addJobLocked` ID 碰撞 retry 由 unbounded 改 cap 至 10 次 + 显式 error 出口 / cron `loadJobs` 增加 `len(entries)>maxJobsHardCap=500` 防御性上限 / cli/process_turn drainStaleEvents interrupted-settle 分支补 slog.Warn 与 line 179 主路径对齐 / wshub `dashTokenHash` immutable-after-construction 注释明确 hot-reload 不支持。+ ~30 NEEDS-DESIGN 归档见 Round 233 节。
+>
+> 上一轮更新 2026-05-22 Round 232 —— 深度 5-agent 并行 code review 第 42 轮：7 处直接修落地（cron runstore cacheHeadPush O(N)→O(1) prepend / cron Start trimAll 改异步 goroutine / cron trimAll ReadDir 错误升级 Warn / sysession runner stderr 预截 256 / cron previousTickBefore 1000 次迭代上限 / cron recordResult 4*1024→maxStoredResultRunes 常量 + slogPrintfLogger 同时匹配 panic\|recovered + storeMu 注释纠偏 + diskListNewestFirst & trimJobLocked 跳 symlink）+ ~75 NEEDS-DESIGN 归档见 Round 232 节。
 >
 > 上一轮更新 2026-05-21 Round 231 —— 深度 5-agent 并行 code review 第 41 轮：12 处直接修落地（sysession.Manager Stop nil-cancel 守卫 / sysession.Manager hookMu→RWMutex / sysession.autoTitler Configure 二重调用消除 / sysession.autoTitler validate fmt.Errorf 二重 %w 修复 / sysession.autoTitler observed 容量底 16 + candidates 预分配 / sysession.autoTitler Tick 缓存 now / sysession.autoTitler 早停跳过 highwater prune / sysession.autoTitler renameOne prompt strings.Builder Grow / sysession.runner stdout 限 64KiB + ctx.Err 仅在 errors.Is(Canceled/DeadlineExceeded) 时优先 / sysession.sweep errors.Is(fs.ErrNotExist) / sysession.env envAlwaysPassthrough 直查不复制 / config.Load io.LimitReader 1MiB 上限 / cli.eventlog Append no-sink 早返回省 slice 逃逸 / shim.moveToShimsCgroupDirect 加 caller-contract godoc）+ ~30 NEEDS-DESIGN 归档见 Round 231 节。
 >
@@ -84,7 +86,103 @@
 - [~] **R30-DES1 — 需架构决策（2026-04-29 Round 112 评估降级）**：本轮尝试在 `execute()` 入口加 `stopCtx.Err()` 守卫覆盖 fresh + persistent 两种模式，但这与 Round 95 的设计意图冲突（Round 95 明确将 persistent 模式的 ctx 取消委托给 Router.Shutdown，`TestCRON3_PersistentModeUnaffectedByGuard` 把此行为作为测试护栏）。fresh 分支的 stopCtx.Err() 守卫（`scheduler.go:1260`）已覆盖最危险的"fresh → Reset → 孤立 CLI"路径。persistent 模式的真正修复需要架构级协调：要么把 Router.Shutdown 和 Scheduler.Stop 串联锁定（需 S11 级决策），要么在 GetOrCreate 路径里加 shutdown-awareness（改动面大）。当前降级，等 S11 整体方案落地后重开。
 - [ ] **R29-DES1 — `drainStaleEvents` push-back + goto drain 可吞 interrupted result 事件**: 本轮新发现的 invariant 冲突。在 interrupted/interruptedRun 分支的 for 循环中，若事件顺序为 `[old_nonresult, new_event, old_result]`，读到 `new_event` 后 push-back + `goto drain`，接着 drain 到 `old_result` 时因 `recvAt < cutoff` 被丢弃。interrupted 语义要求 settle 窗口必须拿到 old_result，否则下一 turn 迟到的 result 会污染结果。
 
-## Round 232 — 5-agent 并行 code review 第 42 轮（2026-05-22）NEEDS-DESIGN
+## Round 233 — 5-agent 并行 code review 第 43 轮（2026-05-23）NEEDS-DESIGN
+
+> 5 reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描，本轮直接修 12 处（cron RegisterCronStub 接口收敛 + 4 处 fake test 同步 / cron computeJobTimeout 删 schedule 死参 / cron redactPathsInCronError 用 TruncateAtRuneBoundary 守 UTF-8 边界 / dispatch nil watchdog atomic 防御 / acp readUntilResponse 超时 goroutine 通过 select-with-done 不阻塞 / sysession limitedWriter Write 错误路径不再违反 io.Writer 契约 / acp textBuf 写入 cap 守 maxAssistantMessageContentBytes / dashboard transcript ANSI regex fast-path 用 IndexByte 0x1b / sensitiveDownloadNames 补 service-account.json/secrets.yaml 等 / dashboard_cron 删 maxCronBackendLen 死常量 / wshub interruptLimiter 0.5/s 收紧 / agent_tailer silent 路径无订阅时跳过 subs 快照）。下方为本轮新发现且不适合直接修的条目。
+
+### 架构（高优先）— 本轮新发现
+
+- [ ] **R233-ARCH-1 — sysession.Runner 完全旁路 CLI Wrapper 抽象（P1）**: runner.go:100 自拼 `-p --output-format text --setting-sources ""` argv，自 `cmd.Env=r.env`，自 limitedWriter 4KiB cap。同一进程出现两套 spawn claude 实现，新增 backend 必须再写一套，ARG_MAX/shimEnvAllowedPrefixes/错误分类全部错过。方案：runner 改通过 cli.Wrapper.Spawn 走 collect-mode 子能力，或移到 `internal/cli/oneshot/` 子包共享 env-filter 与 ARG_MAX 限制。Breaking：是（行为兼容，结构变化）。扩展 R231-ARCH-1。
+- [ ] **R233-ARCH-2 — cli.Protocol 对 ACP 等无 SubagentLinker 后端抽象塌陷（P1）**: server.Hub.wiredLinkers 直接持 `*cli.SubagentLinker` 具体类型；kiro/ACP 上线后 Hub 里这一整套 agent-team UI 链路只能塞 nil。方案：在 `internal/agentlink` 或 `internal/cli` 内补最小接口 `Linker { OnResolve / SeedFromHistory ... }`，server 持接口；`*cli.SubagentLinker` 隐式满足。Breaking：否。扩展 R231-ARCH-6。
+- [ ] **R233-ARCH-3 — dispatch.NotifyTarget / cron.notifyTarget / hub.sendWithBroadcast 三套消息出口不共享重试与分片（P1）**: 都绕开 dispatch.replyText/SendSplitReply 与 platform.ReplyWithRetry。方案：把 cron 的 notifyTarget/deliverNotice 抽成 dispatch 包导出 `NotifyTarget`，cron 不再 import platform。Breaking：否。合并 R232-ARCH-9。
+- [ ] **R233-ARCH-4 — quick session 与 IM 入口走两套 sendAndReply（P2）**: dispatch.sendAndReply vs server.sendWithBroadcast 重复 retry/footer/mergedCount 渲染逻辑。方案：抽 `internal/turnrunner.Run` 单点协调，dispatch 与 dashboard 都构造 TurnInput 调用之。Breaking：是（接口重构）。
+- [ ] **R233-ARCH-5 — server.handleQuickSession / scratch drawer 在 router.sessions 之外又长出第二条 lifetime 协议（P2）**: ScratchPool.Close → router.Remove(key) + OptsForKey 在 sweep 之前 Touch，多处不变量耦合在注释里。方案：把 ScratchPool 实现的 ManagedSession lifecycle 接口提到独立 RFC，加 `Router.NotifyScratchExpired` hook。Breaking：否。
+
+### Go 正确性 / 并发 — 本轮新发现
+
+- [x] **R233-GO-1 — historyWg.Add(1) vs historyCtx.Err() TOCTOU（P1）**: router_lifecycle.go:874-882 历史回填路径，Err() 通过到 Add(1) 之间若 Shutdown 触发 historyCancel + Wait 已经开始，Add(1) 在 Wait() 后执行违反 WaitGroup 不变量。方案：把 Add(1) 提到 ctx.Err() 检查之前，跳过分支立即 Done()。Breaking：否。继承 R232-GO-2。 — 已修复（loadResumeHistoryOnSpawn 把 historyWg.Add(1) 提到 historyCtx.Err() 检查之前；跳过分支立即 Done()，关闭 Shutdown.Wait 与新 Add(1) 之间的 TOCTOU 窗口；R230-GO-1/R232-GO-2 同根因一并关闭），本批 PR
+- [ ] **R233-GO-2 — sysession.Manager Stop-before-Start race（P1）**: stopOnce.Do 内 `m.cancel != nil` 与 startOnce.Do 内赋值 m.cancel 之间存在并发写 race。方案：原子 started 标志早返回。Breaking：否。继承 R232-GO-3。
+- [ ] **R233-GO-3 — executeOpt runInflight 6 处 Store(&local) 强制 heap escape（P2）**: 每次 cron run 6 个变量逃逸到 heap，每条 run 多 6 次小对象分配。方案：runInflight struct 内 `atomic.Pointer[string]` 字段改为 mutex 保护的直接 value，dashboard 读频率低 lock 成本可接受。Breaking：否。
+
+### 安全 — 本轮新发现
+
+- [ ] **R233-SEC-1 — Dashboard CSP 仍 unsafe-inline（P1）**: 主页 CSP `script-src 'self' 'unsafe-inline'`，模板内联 script 与配置块未迁出。方案：dashboard.html 内联事件迁外部脚本或用 nonce/hash CSP。Breaking：是（前端模板重构）。继承 R231-SEC-2。
+- [ ] **R233-SEC-2 — ExtraArgs 进 CLI argv 仍无 flag allowlist（P1）**: capExtraArgsBytes 只是字节长度，未检查具体 flag 名。可注入 `--mcp-config` / `--add-dir` / `--skip-permissions`。方案：BuildArgs 加 flagAllowlist 拒绝任何不在硬编码集合中的 `--xxx`。Breaking：是（操作员若依赖任意 extra args）。继承 R231-SEC-4。
+- [ ] **R233-SEC-3 — allowed_root 未配 + 公网 token 部署只 Warn（P1）**: server.go:541 警告但不退出；攻击者可 cron work_dir=/etc 或 workspace=/etc/passwd 越权。方案：startup 时若 allowed_root="" + dashboardToken!="" + 监听公网，退出并报错；doctor HIGH check。Breaking：是。继承 R231-SEC-3。
+- [ ] **R233-SEC-4 — 飞书签名失败前未 dedup nonce（P2）**: 攻击者可 5 分钟窗口内用同 ts+nonce 暴力试不同 body。需谨慎—插入位置改变会打破 challenge 验证流。方案：在 signature verify 之前先 reserve nonce，失败也保留。Breaking：否（行为变化）。
+- [x] **R233-SEC-5 — `.conf`/`.cfg`/`.ini` 在 previewableByExt 但不在 sensitive 黑名单（P2）**: DSN/credentials 文件 preview 暴露。方案：从 previewableByExt 移出或加入 sensitiveDownloadExts。Breaking：否（preview UX 退化）。继承 R232-SEC-1。 — 已修复（同 R230B-SEC-4 / R232-SEC-1），本批 PR
+- [x] **R233-SEC-6 — text/markdown serveRaw inline 而非 attachment（P2）**: 浏览器 viewer 可执行相对资源加载。方案：forced-download 守卫加 `text/markdown`。Breaking：否（minor UX）。继承 R232-SEC-6。 — 已修复（同 R232-SEC-6），本批 PR
+- [ ] **R233-SEC-7 — 同 IP 可保留 60 个未认证 WS 连接（P2）**: maxWSConns=500 全局，无 per-IP 未认证 cap。方案：未认证 WS 连接 per-IP 20 上限。Breaking：否。
+- [ ] **R233-SEC-8 — /static/dashboard.js 未鉴权且无 SRI（P2）**: HTTP 部署 MitM 可注入替换 JS 偷 token。方案：设 dashboard_token 时把 static JS 也走 requireAuth，或 dashboard.html script 标签加 SRI hash。Breaking：否。继承 R231-SEC-11。
+- [x] **R233-SEC-9 — backend ID charset 在 cron CRUD vs WS path 不对齐（P2）**: cron 走 `[a-z0-9_-]`，WS 路径走 `[a-zA-Z0-9_.-]`。方案：抽统一 validateBackendID。Breaking：是（操作员若用 uppercase/dot backend ID）。继承 R232-SEC-5。 — 已修复（validateCronBackend + send.handleSend 切到共享 isValidBackendID + maxBackendIDLen；旧 [a-z0-9_-] 收敛到 [A-Za-z0-9._-] 是 forward-compatible 放宽（旧值仍合法）；测试 dashboard_cron_backend_test.go 把 uppercase + dot 移到接受组并加 R233-SEC-9 锚点。R232-SEC-5 / R230B-SEC-2 同根因一并关闭），本批 PR
+- [ ] **R233-SEC-10 — WS 无 token 模式 uploadOwner 仍按 IP（P3）**: 同 NAT 用户互相能 claim 对方上传。方案：upgrade 时检查 nz_anon cookie。Breaking：否。
+
+### 性能 — 本轮新发现
+
+- [ ] **R233-PERF-1 — ClaudeProtocol/ACPProtocol ReadEvent 每次 `[]byte(line)` 复制（P1）**: line 已是 string，再转 byte 喂 json.Unmarshal 每行 heap alloc 200B-4KB。方案：Protocol 接口改 `ReadEvent(line []byte)`，readLoop 同步。Breaking：否（接口内部）。合并 R67-PERF-1。
+- [ ] **R233-PERF-2 — runStore.cacheHeadPush 仍 O(N) memmove（P1）**: keepCount=200 每次 Append 触发 200 struct copy shift，持 jobLock 期间执行。方案：改 ring buffer。Breaking：否。
+- [ ] **R233-PERF-3 — KnownSessionIDs 历史面板每次 1Hz 全量遍历 jobs × Recent(200)（P1）**: 50 job × 200 row × ~100B = 1MB 数据移动每秒。方案：scheduler 缓存 atomic.Pointer[map] 由 finishRun/DeleteJob 失效。Breaking：否。
+- [ ] **R233-PERF-4 — TranscriptReader.readLocked 每次 Tail open+ReadAll+close（P2）**: 50 tailer × 5/s = 250 syscall/s。方案：持久化 *os.File，每 Tail 只 ReadAt(offset)，inode 变更时重开。Breaking：否。
+- [ ] **R233-PERF-5 — flattenJSONLEvent 每行 unmarshal 到 map[string]any（P2）**: 整 JSON 反射，只用首个 key。方案：改 transcriptContentBlock 6 字段 struct。Breaking：否。
+- [ ] **R233-PERF-6 — readRun 每个 .json 文件 os.ReadFile cold path（P2）**: 100 文件 × open+stat+alloc+read+close。方案：diskListNewestFirst 仅返回 mtime+runID summary，defer body 到 Get。Breaking：否。
+- [x] **R233-PERF-7 — agentTailer 200ms ticker buffered 超 500 时 append([]EventEntry(nil), …) 复制 500 条（P3）**: 每 poll 150KB 内存 copy。方案：ring buffer。Breaking：否。 — 已修复（采用 in-place copy 替换 fresh-allocation：copy(buffered, buffered[over:]) + 清零 unreachable suffix 防 GC pin + 截断切片。复用既有 backing array，steady-state 0 alloc。Ring buffer 设计未引入因为 attach replay 路径需要顺序输出，in-place memmove 已消除主要开销），本批 PR
+- [ ] **R233-PERF-8 — sysession.Manager hookMu RWMutex 改 atomic.Pointer 收益评估（P3）**: 每 tick 两次 RLock 对单写多读场景边际收益小。RWMutex Go 1.21+ 已无锁化常见路径。可选优化，先标记。Breaking：否。
+
+### 代码质量 — 本轮新发现
+
+- [ ] **R233-CR-1 — 4 个独立 fake test router struct 几近重复（P2）**: cron 包 fakeRouter / jitterStubRouter / backendCapturingRouter / fakeSessionRouter 同样实现 RegisterCronStubWithChain/Reset/GetOrCreate。方案：抽 `internal/cron/router_fake_test.go` 单一可配置 fake。Breaking：否（test 重构）。
+- [~] **R233-CR-2 — TriggerCatchup/ErrClassPanic/DaemonTriggerManual 仍 export 但无外部消费者（P3，关闭归档 2026-05-23）**: 同根因 R232-CR-8 已落地——三处 godoc 各加 RESERVED 警告，明确"forward-compat schema 占位"语义；无生产 caller，无测试 pin，但保留 export 让未来填充实现时不破坏 value contract。string value（"catchup"/"panic"/"manual"）外部若 string-match 也能识别。本批 PR 关闭归档
+- [x] **R233-CR-3 — handleList vs handleRunsList 重复构造 cronRunSummaryView（P3）**: 6 行机械抽函数。方案：extract `cronSummaryToView(r)` helper。Breaking：否。 — 已修复（dashboard_cron.go 抽 cronSummaryToView(r) helper，handleList recent_runs（5 字段）+ handleRunsList paginated（同 5 字段）两处 11 行 each 收敛到一行调用；未来 cron.CronRunSummary 加字段只改 helper 一处），本批 PR
+
+### Round 233 第二批补充（PR #240 review 发现）
+
+#### Go 正确性 / 并发（P1）
+
+- [ ] **R233B-GO-1 — runinflight setPhase/setSessionID 把参数指针存入 atomic.Pointer（P1）**: `r.phase.Store(&phase)` 存的是参数局部变量地址；同样 setSessionID 存 `&id`；executeOpt 1898-1910 里 `ph := PhaseQueued; inflight.phase.Store(&ph)` 也是同模式。当前 Go 编译器会把这些值 escape 到堆上是安全的，但模式依赖 escape 分析；建议用 helper 拷贝到稳定 heap 槽或改 `atomic.Value` + string。Breaking：否（包内）。
+- [ ] **R233B-GO-2 — cron Scheduler.Stop 中 deadline.C 在两个 select 中共享一个一次性 timer（P1）**: 第一个 select fast-path（cronDoneCtx.Done 命中）后落到第二个 `case <-deadline.C`，此时若 timer 已 fired/drained 且 triggerWG.Wait 永不就绪，第二个 select 永久阻塞。R222-GO-10 已处理 happy path，但 deadline drained 的边角仍未防住。方案：改 context.WithDeadline 控制两段，或第二段用独立 deadline。Breaking：否。
+
+#### 性能（P1/P2）
+
+- [ ] **R233B-PERF-1 — Protocol.ReadEvent 接受 string，热路径 `[]byte(line)` 转换强制 alloc（P1）**: protocol_claude.go:185 + protocol_acp.go:441 都有 `json.Unmarshal([]byte(line), &ev)`，每帧 1 alloc。方案：包内 Protocol 接口签名改 `ReadEvent(line []byte)`；shimMsg.Line 改 json.RawMessage 上游零拷贝。Breaking：否（私有 interface）。
+- [ ] **R233B-PERF-2 — shimWriter.Write 快速路径 `string(data[:len(data)-1])` 强制拷贝（P1）**: 每 WriteMessage 都过该路径。方案：shimClientMsg.Line 改 json.RawMessage 或加 lineBytes 字段 + custom MarshalJSON。Breaking：否。
+- [ ] **R233B-PERF-3 — runstore cacheHeadPush 仍是 O(N) 左移（P1，独立于 R232-PERF-8 的 trim 优化）**: keepCount=200 时每次 Append 200-element memcopy，1Hz×50 jobs ≈ 50 次/s。方案：换 ring buffer / container/ring，head 指针 O(1)；同时缩短 entry.mu 持锁时间（与 cacheGet 双锁路径）。Breaking：否（私有实现）。
+- [ ] **R233B-PERF-4 — readLoop 每行做两次 json.Unmarshal（外层 shimMsg + 内层 ReadEvent）（P2）**: 第一次解 `{"type","line"}` 协议帧，第二次解嵌入 claude 事件。方案：shimMsg.Line 改 json.RawMessage 直传 ReadEvent；或外层手写字节扫描 type 分支。配合 R233-PERF-1 一次解决。Breaking：否。
+- [ ] **R233B-PERF-5 — KnownSessionIDs 无缓存，loadHistorySessions 每 120s 触发一次 O(jobs×200 copy)（P2）**: Scheduler 加 30s TTL 缓存或随 historyCache 一并缓存即可。Breaking：否。
+- [x] **R233B-PERF-6 — eventlog onAgentTaskDone 回调用 Mutex（P3 升 P2）**: Append 热路径每 task_done 都 Lock/Unlock 取函数指针；其它字段已用 atomic.Pointer 模式。方案：改 atomic.Pointer[func(string,string)]。Breaking：否。 — 已修复（onAgentTaskDoneMu sync.Mutex + onAgentTaskDoneFn func 切到单字段 atomic.Pointer[func(taskID,status string)]；SetOnAgentTaskDone Store(&fn)（nil 清除）；loadAgentTaskDoneFn Load+nil-deref；与 PersistSink/OnExecuteFunc/textutil.LoadAtomicString 模式一致），本批 PR
+- [ ] **R233B-PERF-7 — eventlog.Append 每条调 newEventUUID → crypto/rand.Read getrandom syscall（P3）**: 50 sessions×50 events/s ≈ 2500 syscall/s。方案：批预取 UUID 池（与 passthrough uuidFallbackSeq 同模式）。Breaking：否。
+
+#### 安全（P1/P2）
+
+- [ ] **R233B-SEC-1 — dashboard CSP 含 `'unsafe-inline'` script-src 与 style-src（P1）**: 一旦未来出现 innerHTML 漏洞 CSP 不阻止；CSS 也可被注入做 exfiltration。方案：dashboard.js / dashboard.css 已 embed，可预计算 sha256 hash 或改 nonce-per-response。Breaking：是（前端配合）。
+- [ ] **R233B-SEC-2 — Feishu VerificationToken-only 模式缺少 body HMAC（P1）**: token 泄露即可伪造任意事件体。方案：要么强制 EncryptKey；要么把"VerificationToken-only"明确标 deprecated 并加运行时启动告警。Breaking：是（运维侧）。
+- [ ] **R233B-SEC-3 — project_files serveRender CSP 含 `allow-scripts + 'unsafe-inline' 'unsafe-eval'`（P2）**: 当前 octet-stream + attachment 头让脚本不会执行，但与未来 Content-Type 改回 text/html 一行就会暴雷。方案：移除 allow-scripts，依赖 blob opaque origin；或保留 allow-scripts 但补单测保证 Content-Type 永远是 octet-stream。Breaking：否。
+- [ ] **R233B-SEC-4 — publicTmpProject 把 /tmp 暴露给认证用户（P2）**: 多用户机器上 /tmp 可能含其他服务 socket/证书。方案：文档明确"单用户部署"前提；或 publicTmpAllowedExtensions 白名单。Breaking：否。
+- [x] **R233B-SEC-5 — isSensitiveDownloadName 漏 secrets.yml/database.yml/credentials.yml/*.env.backup 等（P2）**: 当前是黑名单。方案：扩充模式或改正向白名单。Breaking：否。 — 已修复（sensitiveDownloadNames 补 12 条 ops 惯例：database.yml/.yaml / credentials.yml/.yaml/.json / api-keys.{json,yml,yaml} + api_keys 变体 / rds.yml/.yaml / pg.yml/.yaml / mysql.yml/.yaml；新增 sensitiveBaseSuffixes []string + isSensitiveDownloadName 后缀扫描覆盖 .env.backup / .bak / .old / .orig / .save 5 种归档命名；新增 TestIsSensitiveDownloadName_OpsConventional 锁 18 blocked + 6 allowed case），本批 PR
+
+#### 架构（P1/P2）
+
+- [ ] **R233B-ARCH-1 — internal/cli 包成 9 合一 god package（P1）**: 63 文件 30+ 导出类型；其它 87 个文件靠它做"通用类型库"。方案：拆 cli/process / cli/event / cli/imaging / cli/transcript（protocol 已成形）；或抽 EventEntry/ImageData/AskQuestion 到 internal/clitypes。Breaking：是（import 路径）。
+- [ ] **R233B-ARCH-2 — *session.Router 80+ 方法 god struct（P1）**: 拆 6 文件但锁/字段共享；HubRouter/SessionRouter 多套 narrow interface 各取一片。方案：拆 SessionStore/Spawner/DiscoveryAdapter/ShimReconcileLoop/CleanupLoop 多 struct 组合在 Router 里。Breaking：否（聚合接口不变）。
+- [ ] **R233B-ARCH-3 — server.agent_tailer + wshub 直接持 *cli.SubagentLinker / *cli.TranscriptReader 指针（P1）**: server→cli 偷越层访问。方案：SubagentLinker 暴露收敛到 session.ManagedSession.SubscribeAgentEvents(taskID, fn) 回调式 API。Breaking：是（server tailer 改造）。
+- [ ] **R233B-ARCH-4 — sysession.auto_titler 直 import internal/cli 取 EventEntry（P1）**: daemon 层不应依赖 process 类型。方案：把 EventEntry 抽到 internal/eventlog/schema 或 internal/clitypes。Breaking：否（仅 import 整理）。
+- [ ] **R233B-ARCH-5 — cli.HistorySource vs history.Source 名存实亡 interface（P2）**: 仅为防 import cycle 而存在的零适配 interface。方案：抽公共类型后 cli.HistorySource 删除。Breaking：是。
+- [ ] **R233B-ARCH-6 — 三处独立 LoadJSON/SaveJSON 但只 10 个调 osutil.AtomicWrite（P2）**: cron/store + session/store + 其它直接 os.WriteFile。方案：抽 internal/storage 包统一 LoadJSON/SaveJSONAtomic（含 corrupt rename + size cap + fsync）。Breaking：否。
+- [ ] **R233B-ARCH-7 — config 反向 import internal/session 拿 AgentOpts（P2）**: 让 config 失去叶子节点资格。方案：config 用独立 AgentConfig 类型，session 在构造时翻译。Breaking：否。
+- [ ] **R233B-ARCH-8 — server 包 60+ 文件未分子包（P2）**: dashboard_*.go 已逻辑分组但物理同包。方案：拆 server/dashboard / server/ws 子包。Breaking：否。
+- [ ] **R233B-ARCH-9 — internal/upstream 把 discovery + cli.EventEntry 拉进 import 图（P2）**: upstream 应是纯传输层，但通过 SetDiscoverFunc/SetPreviewFunc 接收 cli 类型。方案：discover/preview JSON 构造移到 server，传 RPC handler map 给 upstream。Breaking：否。
+
+#### 代码质量（P2/P3）
+
+- [ ] **R233B-CR-1 — recordResult 仍是死代码 + 测试桩双轨（P2）**: 与 R232-ARCH-2 同根，本轮再次确认；删除被两个测试 (`persist_failure_test.go:260,316`) 阻塞。方案：先把测试改调 P0/finishRun 路径再删。Breaking：否。
+- [x] **R233B-CR-2 — emitOverlapSkipped 命名误导（P2）**: 函数实际发 started→ended 一对事件且自带 metrics bump，名字读起来像单事件。方案：改 broadcastOverlapSkip 或加注释说明 skip 也走完整生命周期。Breaking：否（unexported）。 — 已修复（采用方案二：scheduler.go 把 godoc 重写为 emit 双事件 + 双 metric 的显式说明，标注"intentional dual-event emission"避免重命名波及 5+ 调用点；RunStateSkipped/ErrClassOverlapSkipped/skipPersist 三字段语义同步澄清），本批 PR
+- [ ] **R233B-CR-3 — TriggerNow 两个 goroutine 14 行 deleted/paused-guard+execute 重复（P2）**: 抽 `executeIfNotDeletedOrPaused(jobID)` helper。Breaking：否。
+- [x] **R233B-CR-4 — jobTitleOrFallback 无生产调用者（P2）**: 仅 title_test.go 直调；deliverNotice 用 raw hex jobID 而非 title。方案：要么 wire 进 replyText/registerStub，要么删除并清测试。Breaking：否。 — 已修复（采用 wire 方案：jobSnapshot 加 label 字段在 snapshotJob 时调 jobTitleOrFallback；新增 labelOrID() helper（label 空时回退 jobID 防止前缀塌成 "[Cron ]"）；4 处 deliverNotice + replyText 全部从 snap.jobID 切到 snap.labelOrID()，IM 通知前缀现在显示用户友好的 Title），本批 PR
+- [x] **R233B-CR-5 — IM 通知用 raw hex jobID（P3）**: scheduler.go:1772/2068/2146/2180 都用 `[Cron %s]` + `snap.jobID`。方案：snapshot 时一并取 jobTitleOrFallback。Breaking：否（消息格式变化但仍旧带 ID 前缀）。 — 已修复（同 R233B-CR-4：jobSnapshot.label + labelOrID() + 4 处通知点切换；wire shape 不变（仍是 "[Cron <X>] …"），X 由 hex jobID 改为 Title fallback Prompt 首行截断到 60 rune），本批 PR
+- [~] **R233B-CR-6 — runRing.Snapshot() 无生产调用者（误报关闭 2026-05-23）**: 复核 internal/cron/ 全包扫描无 runRing 类型 / 无 runring_test.go 文件 / scheduler.go 中"per-job ring"是 runstore 的命名说法（newest-first slice 而非 ring buffer）。条目所指代码不存在，归档关闭，本批 PR
+- [ ] **R233B-CR-7 — skipAppendTrim 三条件无单测（P2）**: R232-PERF-8 引入的优化无 dedicated test。方案：补 happy + 三个边界。Breaking：否。
+- [~] **R233B-CR-8 — sysession.runOnce panic-recovery → CAS-release 无单测（误报关闭 2026-05-23）**: 复核 internal/sysession/manager_test.go:273 已有 `TestManager_PanicRecoveredAndInflightReset` 完整覆盖：(1) 注入 panicking Tick → 等待 inflight 复位 → 断言 false (line 317)；(2) 后续 tick pulse → 验证第二次 tick 真的能跑（CAS gate 不卡，line 327）。条目描述基于过时观察，归档关闭，本批 PR
+
+
 
 > 5 reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描发现 ~95 条。本轮直接修 7 处（cacheHeadPush O(N)→O(1) prepend / trimAll Start 改异步 goroutine / trimAll ReadDir 错误升级 Warn / sysession.runner stderr 预截 256 / cron previousTickBefore 1000 次迭代上限 / cron recordResult 4*1024 改 maxStoredResultRunes 常量 / cron slogPrintfLogger 同时匹配 panic|recovered + storeMu 注释从 saveJobs→saveMarshaledSeq + diskListNewestFirst & trimJobLocked 跳过 symlink）。
 > 以下是需设计决策、破坏兼容、跨包重构、或方案不唯一不适合本轮直接修的条目。
@@ -94,10 +192,10 @@
 - [ ] **R232-ARCH-1 — internal/cron/scheduler.go 2870 行 / 67 函数 god file（P1）**: scheduler.go 已汇集 CAS gate / jitter / preflight / watchdog / recordResult 双 / persist seq gate / deliverNotice / redactPaths / slogPrintfLogger 全部职责。任何修改都要在 ~3000 行内追锁顺序。方案：参考 router-split RFC 拆 5–6 个文件（lifecycle / jobs / execute / finish / persist / core）。Breaking：否（纯文件移动）。合并 R231-ARCH-N。
 - [ ] **R232-ARCH-2 — recordResult 与 recordResultP0WithSanitised 双轨依然存在（P1）**: 生产路径只调 P0 版本，但 `persist_failure_test.go` 把死路径活成"测试桩"。两条路径 sanitize 参数易漂移（已通过 R232-CR-1 的 4*1024→maxStoredResultRunes 部分缓解，但根因是双轨）。方案：把测试改调 P0 / finishRun，再删 recordResult。Breaking：否（私有方法）。合并 R230B-SEC-1。
 - [ ] **R232-ARCH-3 — cron 的 SessionRouter 接口仍声明 RegisterCronStub + RegisterCronStubWithChain（P1）**: commit b1bdff8 已合并 stub 双轨，但 cron 端消费者接口的双方法没跟进，session 包导出双方法。方案：从 cron 接口删 RegisterCronStub；session 包改 unexported 或保留单方法。Breaking：否（cron 内部接口）。
-- [ ] **R232-ARCH-4 — internal/session/testutil.go 进生产 binary（P1）**: TestProcess + InjectSession helper 文件无 _test.go 后缀，绕开 spawnSession 不变量。方案：改名 `testutil_test.go` 或拆 `internal/session/sessiontest` 子包加 build tag。Breaking：否（外部测试调整 import）。
+- [x] **R232-ARCH-4 — internal/session/testutil.go 进生产 binary（P1）**: TestProcess + InjectSession helper 文件无 _test.go 后缀，绕开 spawnSession 不变量。方案：改名 `testutil_test.go` 或拆 `internal/session/sessiontest` 子包加 build tag。Breaking：否（外部测试调整 import）。 — 已修复（同 R226-CR-14：文档化方案，加详细 godoc 解释技术约束 + 迁移路径），本批 PR
 - [ ] **R232-ARCH-5 — 28 个 contract test 用 os.ReadFile + 字符串/正则 pin 源代码（P1）**: notify_background_ctx_test / debounce_contract_test / on_turn_done_contract_test 等把 gofmt + 注释 + 标识符当 API。方案：抽到行为级断言；真正必须 source-pin 的统一放 `internal/contract/` 加 README。Breaking：否（重构 test）。
 - [ ] **R232-ARCH-6 — 5 个独立 *Router 消费者接口 + 2 个临时 cronStubChecker/cronSessionLister（P2）**: cron / dispatch / server.HubRouter / sysession.SystemSessionRouter / upstream.SessionRouter 重叠严重。方案：合并到 `internal/session/iface` 子包按 Lifecycle/Reader/Lookup 三细分接口。Breaking：否。
-- [ ] **R232-ARCH-7 — server.wshub 同时持具体 *cron.Scheduler 与单方法 cronStubChecker 接口（P2）**: 同一依赖两套抽象并存。方案：scheduler 字段类型缩窄为 cronStubChecker；SetScheduler→SetCronStub。Breaking：否（concrete *cron.Scheduler 仍满足）。
+- [x] **R232-ARCH-7 — server.wshub 同时持具体 *cron.Scheduler 与单方法 cronStubChecker 接口（P2）**: 同一依赖两套抽象并存。方案：scheduler 字段类型缩窄为 cronStubChecker；SetScheduler→SetCronStub。Breaking：否（concrete *cron.Scheduler 仍满足）。 — 已修复（Hub 新增 cronHubOps 2-method 接口（EnsureStub + SetJobPrompt）覆盖 wshub + send.go 全部用法；Hub.scheduler 字段类型从 *cron.Scheduler 改 cronHubOps；SetScheduler 仍接受 *cron.Scheduler 让生产 wiring 不变；与 R228-ARCH-17 cronStubChecker 同套模式），本批 PR
 - [ ] **R232-ARCH-8 — dispatch 直 import internal/cron 持 *cron.Scheduler（P2）**: dispatch 已有 SessionRouter 消费者接口模式，cron 这一边却走具体类型，policy 不一致。方案：定义 dispatch.CronScheduler interface 子集（AddJob/ListJobs/...）。Breaking：否。
 - [ ] **R232-ARCH-9 — cron 包直 import internal/platform 自承 channel adapter 职责（P2）**: cron 的 platforms map + ReplyWithRetry/SplitText/footer 与 dispatch 平行实现。方案：引入 dispatch.Notifier 接口注入 scheduler；cron 不再 import platform。Breaking：否（构造时 wiring 调整）。
 - [ ] **R232-ARCH-10 — Scheduler.Stop 写盘绕过 saveSeq gate（P2）**: marshalJobsLocked + WriteFileAtomic 直接写，可能被 in-flight saveMarshaledSeq 用旧 seq 覆盖。方案：Stop 也走 persistJobsLocked + saveMarshaledSeq。Breaking：否。
@@ -109,8 +207,8 @@
 ### Go 正确性 / 并发 — 本轮新发现
 
 - [ ] **R232-GO-1 — protocol_acp.go readUntilResponse 超时 goroutine 永久泄漏（P1）**: 非 shim reader 路径（R224-GO-2 已记）超时后 goroutine 无 SetReadDeadline 出口，每次握手超时泄漏一个。方案：JSONRW 加 SetReadDeadline 接口或 type-assert io.Closer fallback close fd。Breaking：否。
-- [ ] **R232-GO-2 — historyWg.Add(1) vs historyCtx.Err() TOCTOU（P2）**: R230-GO-1 仍 open。方案：把 Add(1) 提到 ctx.Err() 检查之前，跳过分支立即 Done()。Breaking：否。
-- [ ] **R232-GO-3 — sysession.Manager Stop-before-Start 边角（P2）**: stopOnce.Do 仅用 m.cancel != nil 守卫，未建立 started 标志。方案：原子 started 标志早返回。Breaking：否。
+- [x] **R232-GO-2 — historyWg.Add(1) vs historyCtx.Err() TOCTOU（P2）**: R230-GO-1 仍 open。方案：把 Add(1) 提到 ctx.Err() 检查之前，跳过分支立即 Done()。Breaking：否。 — 已修复（同 R233-GO-1：Add(1) 提到 ctx.Err() 之前并在跳过分支立即 Done()），本批 PR
+- [x] **R232-GO-3 — sysession.Manager Stop-before-Start 边角（P2）**: stopOnce.Do 仅用 m.cancel != nil 守卫，未建立 started 标志。方案：原子 started 标志早返回。Breaking：否。 — 已修复（Manager 加 started atomic.Bool，startOnce.Do 末尾 Store(true)；Stop 先 Load，false 时直接 stopOnce.Do 空 func 让后续 Start 也走 panic 二次启动检查；ctx/cancel/wg 写入和 started 写入间的隐式 happens-before 由 startOnce 提供），本批 PR #241
 - [ ] **R232-GO-4 — limitedWriter.Write error 分支返回 len(p) 违反 io.Writer 契约（P2）**: 目前是有意为之（exec.Cmd pump 不重试），注释已说明。属"违反契约的设计取舍"，跟踪至 godoc 升级或封装。Breaking：否（行为修正风险大，跟踪不直修）。
 - [x] **R232-GO-5 — runOnce defer 顺序与注释不符（P3）**: combined defer 与 tickCtx cancel defer LIFO 实际是 cancel 先跑，注释声称相反。方案：把 tickCtx 声明提到 combined defer 之前。Breaking：否。 — 已修复，本批 PR #224
 - [x] **R232-GO-6 — runOnce post-Run goroutine 看到 cancel 后的 tickCtx 误分类风险（P3）**: 同 R232-GO-5。 — 已修复，本批 PR #224
@@ -118,7 +216,7 @@
 ### 性能 — 本轮新发现
 
 - [ ] **R232-PERF-1 — protocol_acp parseSessionUpdate 每 token 双 Unmarshal（P1）**: agent_message_chunk 流式输出 kiro 高频路径双 reflect。方案：合并 ACPTextContent 解析进首次 Unmarshal。Breaking：否。
-- [ ] **R232-PERF-2 — agent_tailer.pollOnce 每事件 × 每 client 重复 marshal（P1）**: 同 R230B-PERF-1 模式但 agent_tailer 路径未修。方案：扇出前 marshalPooled 一次，subscribers 用 SendRaw。Breaking：否。
+- [x] **R232-PERF-2 — agent_tailer.pollOnce 每事件 × 每 client 重复 marshal（P1）**: 同 R230B-PERF-1 模式但 agent_tailer 路径未修。方案：扇出前 marshalPooled 一次，subscribers 用 SendRaw。Breaking：否。 — 已修复（同 R231-PERF-5），本批 PR
 - [ ] **R232-PERF-3 — subagent_transcript.readLocked 每 200ms 重 open+seek+read（P2）**: R230B-PERF-5 已记，补充 freshBytes io.ReadAll 切片不复用。方案：TranscriptReader 加 readBuf 复用 backing。Breaking：否。
 - [ ] **R232-PERF-4 — wshub.BroadcastSessionsUpdate AfterFunc 重复分配 timer（P2）**: 与 heartbeatLoop 已用 NewTimer+Stop+Reset 模式不一致。方案：Hub.debounceTimer 改预分配 *time.Timer。Breaking：否。
 - [ ] **R232-PERF-5 — protocol_acp.readUntilResponse 每握手分配 goroutine + 2 channel（P2）**: 方案：done 改 atomic.Bool；ch 改 var ch [1]readResult 栈上。Breaking：否。
@@ -130,19 +228,19 @@
 
 ### 安全 — 本轮新发现
 
-- [ ] **R232-SEC-1 — .conf/.cfg/.ini 预览 + download 路径暴露凭据（P1）**: 这三种扩展常存 DSN/secret，TODO P3 R230B-SEC-4 低估风险。方案：从 previewableByExt 移除，sensitiveDownloadName 加名称模式（*db*/*database*/*secret*）。Breaking：否（预览改不可预览）。
+- [x] **R232-SEC-1 — .conf/.cfg/.ini 预览 + download 路径暴露凭据（P1）**: 这三种扩展常存 DSN/secret，TODO P3 R230B-SEC-4 低估风险。方案：从 previewableByExt 移除，sensitiveDownloadName 加名称模式（*db*/*database*/*secret*）。Breaking：否（预览改不可预览）。 — 已修复（同 R230B-SEC-4：决策注释化；操作员侧不变量是 allowed_root 不放裸密钥，命名模式拒下载是 sensitiveDownloadNames 的维度），本批 PR
 - [ ] **R232-SEC-2 — 4 条 serve* 路径独立 TOCTOU（P2，扩展 R231-SEC-5）**: handleFileGet Lstat 后 serveRender/Preview/Raw/Download 各 open 一次。方案：handleFileGet 一次 OpenFile 拿 fd 传子函数；下游 Fstat 比 inode。Breaking：否。
 - [ ] **R232-SEC-3 — feishu transport_hook 签名失败前 nonce 未入库（P2）**: HMAC 失败提前返回时 timestamp 窗口内可换 nonce 重放。方案：失败时也写 nonce 或先 nonce 去重再签名校验。Breaking：否。
-- [ ] **R232-SEC-4 — sensitiveDownloadNames 漏 secrets.yaml/service-account.json/gcp-key.json（P2）**: 方案：在 sensitiveDownloadExts 加 .json 与 secret/credential/key 文件名模式结合。Breaking：否。
-- [ ] **R232-SEC-5 — backend ID charset 双标 cron CRUD vs WS（P2）**: validateCronBackend [a-z0-9_-] vs isValidBackendID [a-zA-Z0-9_.-]。R230B-SEC-2 已记，本轮补充新边角：handleList 读路径不校验大写 ID 透传响应。方案：统一到单一 helper。Breaking：是。
-- [ ] **R232-SEC-6 — serveRaw 透传 text/markdown MIME 不强制 attachment（P2）**: 浏览器嗅探可能渲染 HTML。方案：text/* 子类型统一强制 Content-Disposition: attachment。Breaking：否。
+- [x] **R232-SEC-4 — sensitiveDownloadNames 漏 secrets.yaml/service-account.json/gcp-key.json（P2）**: 方案：在 sensitiveDownloadExts 加 .json 与 secret/credential/key 文件名模式结合。Breaking：否。 — 已修复（sensitiveDownloadNames 全名匹配补 secrets.yaml/secrets.yml/service-account.json/gcp-key.json/gcloud-key.json/firebase-adminsdk.json/kubeconfig；继续避免给 sensitiveDownloadExts 加 .json/.yaml 因为会拒掉合法 config），本批 PR #241
+- [x] **R232-SEC-5 — backend ID charset 双标 cron CRUD vs WS（P2）**: validateCronBackend [a-z0-9_-] vs isValidBackendID [a-zA-Z0-9_.-]。R230B-SEC-2 已记，本轮补充新边角：handleList 读路径不校验大写 ID 透传响应。方案：统一到单一 helper。Breaking：是。 — 已修复（同 R233-SEC-9：validateCronBackend + send.handleSend 切到 isValidBackendID 共享 helper），本批 PR
+- [x] **R232-SEC-6 — serveRaw 透传 text/markdown MIME 不强制 attachment（P2）**: 浏览器嗅探可能渲染 HTML。方案：text/* 子类型统一强制 Content-Disposition: attachment。Breaking：否。 — 已修复（serveRaw force-download 列表加 text/markdown HasPrefix；与 text/html / image/svg+xml / application/xhtml / application/xml / text/xml 同等处理；godoc 明示理由——markdown 经 sanitised renderer (servePreview) 而非 opaque inline doc），本批 PR
 - [ ] **R232-SEC-7 — JFIF+PDF 双容器绕过 PDF 检测以 KindImageInline 进入（P2）**: 方案：增二次魔数检测拒绝嵌套 PDF。Breaking：否。
-- [ ] **R232-SEC-8 — detectMime 隐藏文件 (.makefile) 点号拼接错误（P3）**: 无扩展名分支用 "."+base 拼接，".makefile" 被映射 octet-stream。方案：ext=="" 分支用原始 base 查表。Breaking：否。
+- [x] **R232-SEC-8 — detectMime 隐藏文件 (.makefile) 点号拼接错误（P3）**: 无扩展名分支用 "."+base 拼接，".makefile" 被映射 octet-stream。方案：ext=="" 分支用原始 base 查表。Breaking：否。 — 已修复（detectMime 在 ext 非空但 base 以 . 开头且 base==ext 时直接走 previewableByExt[base] 查表，覆盖 ".makefile" 这类 dotfile-as-ext 路径；同步 sensitiveDownloadNames 补 secrets.json/service_account.json/gcp_key.json/application_default_credentials.json 4 条 R232-SEC-4 补遗 + case-insensitive 单测），本批 PR
 - [x] **R232-SEC-9 — buildLoginPageCSP 正则提取 inline script/style 错误只在运行时暴露（P3）**: 无编译期自测。方案：加 init() 自测或常量化 hash + TestLoginPage。Breaking：否。 — 已修复（dashboard_auth.go init() 抽样 extractInlineBlocks，scripts/styles 任一为 0 立即 panic，把回归暴露在进程启动期而非首次登录请求），本批 PR #230
-- [ ] **R232-SEC-10 — interruptLimiter 频率高于 sendLimiter（P3）**: 15/s vs 5/s 可对单 session DoS。方案：interruptLimiter 改 rate.Every(2s) burst=2。Breaking：否。
+- [x] **R232-SEC-10 — interruptLimiter 频率高于 sendLimiter（P3）**: 15/s vs 5/s 可对单 session DoS。方案：interruptLimiter 改 rate.Every(2s) burst=2。Breaking：否。 — 已修复（wshub.go interruptLimiter 从 rate.Every(200ms)+burst=3（≈15/s）下调到 rate.Every(2s)+burst=2，~0.5/s 持续 + burst 2 覆盖双击，让 interrupt 严格慢于 sendLimiter 的 5/s sustained），本批 PR #239 #241
 - [x] **R232-SEC-11 — weixin Reply MessageID 拼接含未转义 ChatID（P3）**: 方案：用 SanitizeForLog 或 url.PathEscape 处理 ChatID。Breaking：否。 — 已修复（Weixin.Reply 返回 MessageID 时对 msg.ChatID 走 osutil.SanitizeForLog(128)，与同函数 contextToken 缺失分支对齐），本批 PR #230
 - [x] **R232-SEC-12 — protocol_claude resumeIDRe 含 . 略扩 --resume 字符集（P3）**: 方案：缩到 [A-Za-z0-9-]。Breaking：否（合法 Resume ID 不含 . 或 _）。 — 已修复（resumeIDRe 缩到 [A-Za-z0-9-]{1,128}；测试 fixture 改 UUID-shaped + 新增 RejectsBadResumeID 表锁 underscore/dot/whitespace/overlong），本批 PR #224
-- [ ] **R232-SEC-13 — HTTPS+反向代理未设 trusted_proxy 时 cookie 无 Secure 标志（P3）**: 文档/doctor 缺提示。方案：doctor 加 HIGH 警告。Breaking：否。
+- [x] **R232-SEC-13 — HTTPS+反向代理未设 trusted_proxy 时 cookie 无 Secure 标志（P3）**: 文档/doctor 缺提示。方案：doctor 加 HIGH 警告。Breaking：否。 — 已修复（cmd/naozhi/doctor.go 新增 checkServerSecurity：dashboard_token 配置 + 监听非 loopback + trusted_proxy=false 时 warn；config 加载失败/无 token/loopback bind/已启 trusted_proxy 各分支 pass 避免 false positive；isLoopbackAddr helper 保守判断），本批 PR #232
 - [x] **R232-SEC-14 — agent_tailer.ensureTailer 未校验 jsonlPath 在 allowedRoot 下（P3）**: 方案：ensureTailer 加 allowedRoot 参数 + HasPrefix。Breaking：否。 — 已修复（agent_tailer.go 新增 jsonlPathUnderAllowedRoot anchored prefix 校验；ensureTailer 在 hub.allowedRoot 非空时强制校验，否则保留旧 unrestricted 行为），本批 PR #230
 - [x] **R232-SEC-15 — isLoopbackRemote 未处理 UDS 空地址（P3）**: 部署在 Unix domain socket 后 pprof/expvar 拒绝访问。方案：特判空 RemoteAddr。Breaking：否。 — 已修复（debug_pprof.go:isLoopbackRemote 早返回 true 当 RemoteAddr=="" 或 "@"，godoc 说明 UDS 由文件系统权限把关；表测试新增两个 case 锁定契约），本批 PR #236
 
@@ -152,7 +250,7 @@
 - [x] **R232-CR-2 — RunStateRunning 死枚举（P2）**: 注释说"仅 inflight 不落盘"但代码无引用。方案：删常量；inflight 状态由 runInflight.Phase 表达。Breaking：否。 — 已修复，本批 PR #220
 - [ ] **R232-CR-3 — emitOverlapSkipped 发 back-to-back started→ended 假事件（P2）**: dashboard 短暂闪运行中气泡；SessionID/Phase 空字符串。方案：跳过 emitRunStarted 或 RunStartedEvent 加 Skipped bool。Breaking：是（WS schema）。
 - [x] **R232-CR-4 — agents map 未配 "general" 静默零值（P2）**: 缺乏防御性 log。方案：NewScheduler debug log 或注释解释。Breaking：否。 — 已修复（NewScheduler 在缺 "general" 时 slog.Debug + 解释 fallback 到 backend defaults，无运行时行为变化），本批 PR #224
-- [ ] **R232-CR-5 — computeJobTimeout schedule 参数无效（P2）**: 函数体 `_ = schedule; return maxCap`，注释"signature stability"。方案：删 schedule 参数。Breaking：是（机械重构）。
+- [x] **R232-CR-5 — computeJobTimeout schedule 参数无效（P2）**: 函数体 `_ = schedule; return maxCap`，注释"signature stability"。方案：删 schedule 参数。Breaking：是（机械重构）。 — 已修复（unexported 函数仅 internal/cron 内部使用，纯机械重构：删 schedule 参数 + 调用点 + 测试更新；godoc 删除 "signature stability" 句），本批 PR #232
 - [x] **R232-CR-6 — auto_titler.renameOne 双层长度校验缺注释（P2）**: ValidateUserLabel 字节上限 + autoTitlerMaxTitleRunes rune 检查。方案：注释解释 16 rune 是 auto-titler 严格上限。Breaking：否。 — 已修复，本批 PR #220
 - [x] **R232-CR-7 — preflightResult 单字段 wrapper struct（P2）**: 方案：直接返回 (func(), bool) 二元组。Breaking：否（内部类型）。 — 已修复，本批 PR #221
 - [x] **R232-CR-8 — TriggerCatchup / ErrClassPanic / DaemonTriggerManual 占位常量（P3）**: 散布在导出 API 中无生产路径产生。方案：注释加警告或改 unexported。Breaking：否。 — 已修复（三处 godoc 各加 RESERVED 警告 + 任意观察都视为 forward-compat schema 或 test fixture 的明确语义 + 反向引用 R232-CR-8 锚点），本批 PR #236
@@ -162,7 +260,7 @@
 - [x] **R232-CR-12 — registerStub / registerStubByValue / stubChain 三 helper 结构（P3）**: pointer vs value 仅参数差异。方案：合并到一个传四个 string 的 helper。Breaking：否（私有）。 — 已修复，本批 PR #221
 - [ ] **R232-CR-13 — dispatch unit test 走真 session.Router（P3）**: dispatch_test.go newTestDispatcher 实际是集成测试。方案：用 dispatch 自己的 SessionRouter fake。Breaking：否。
 - [ ] **R232-CR-14 — agent_tailer.attach 锁外逐条 SendJSON（P2）**: 500 条 buffered replay 无批量 marshal。方案：批量 node.ServerMsg{Type: "agent_history", Events: buffered}。Breaking：否（WS schema 兼容性需查）。
-- [ ] **R232-CR-15 — protocol_acp.Init session/new 分支手写 Marshal+WriteLine（P2）**: 与 initialize/load 走 sendAndWaitResponse 不一致。方案：抽 sendReq helper 或统一走 helper。Breaking：否。
+- [x] **R232-CR-15 — protocol_acp.Init session/new 分支手写 Marshal+WriteLine（P2）**: 与 initialize/load 走 sendAndWaitResponse 不一致。方案：抽 sendReq helper 或统一走 helper。Breaking：否。 — 已修复（拆 sendAndWaitResponseMsg 返回 *RPCMessage 给需要 result 的 caller，sendAndWaitResponse 退化为 wrapper；session/new 改走 sendAndWaitResponseMsg → 三处握手 RPC 都走同一 metric-emitting 路径），本批 PR
 - [x] **R232-CR-16 — cli/eventlog.go fireOneTaskDoneCallback / fireTaskDoneCallbacks 重复逻辑（P2）**: 方案：fireOne 内联为 fireTaskDoneCallbacks 单元素 fast-path。Breaking：否。 — 已修复（抽 loadAgentTaskDoneFn helper 收敛 onAgentTaskDoneMu Lock+read+Unlock+nil 检查；fireOne / fireTaskDoneCallbacks 共用 helper，行为/锁顺序/调用方签名不变），本批 PR #236
 - [x] **R232-CR-17 — formatAssistantToolUseDetail map→JSON→parse round-trip（P3）**: 注释说 cold path 但 pollOnce 调用频繁。方案：保留原始 json.RawMessage 直传 FormatToolInput。Breaking：否。 — 已修复（mapAssistantLine 解码改 typed transcriptAssistantBlock，input 保持 json.RawMessage 直传 FormatToolInput；删 formatAssistantToolUseDetail 包装函数与 Marshal 往返），本批 PR #230
 
@@ -192,13 +290,13 @@
 - [ ] **R231-SEC-3 — `allowed_root` 缺失时不阻断公网监听启动（P1，R229-SEC-3 重申未修）**: dashboard_token 非空且监听非 loopback 但 allowed_root 为空时仅 Warn，认证用户可设 cron work_dir=/etc 让 CLI 向系统目录写文件。方案：fatal 启动失败 + naozhi doctor 加 HIGH 级别检查。Breaking：是（已部署但未配置 allowed_root 的部署需要迁移）。
 - [ ] **R231-SEC-4 — ExtraArgs 无 flag 允许列表（P1，R219-SEC-1/R229-SEC-1 重申未修）**: `protocol_claude.go:77` `args = append(args, opts.ExtraArgs...)`，dashboard-authenticated 用户可注入 `--mcp-config` / `--add-dir` 等改变 CLI 行为。方案：BuildArgs 加 flag 允许列表。Breaking：是。
 - [ ] **R231-SEC-5 — `serveRender/servePreview/serveRaw/serveDownload` Lstat 后再次 os.Open 的 inode-swap TOCTOU（P1，R219-SEC-2/R229-SEC-2 重申未修）**: 每个 mode 独立的 os.Open 都是新窗口。方案：handleFileGet 使用 OpenFile 拿到 fd，下游直接消费 fd；或加 Fstat 验证 inode。
-- [ ] **R231-SEC-6 — sessions.meta.json 非原子写（P2，R230-SEC-4 重申未修）**: `internal/session/store.go` 用单次 os.WriteFile 而非 osutil.WriteFileAtomic，部分写失败时半截 JSON 导致重启后 session 历史不可用。方案：改用 osutil.WriteFileAtomic。
+- [~] **R231-SEC-6 — sessions.meta.json 非原子写（误报关闭 2026-05-23）**: 复核 store.go:218-227 现有 godoc 已显式说明非原子写是有意权衡——sidecar 是 advisory（仅跨版本降级探测），主 store 已用 WriteFileAtomic 持久化；plain write 省 2 次 fsync（EBS gp2 上每次 20-50ms 关键路径开销）；readStoreMeta 把 missing/malformed sidecar 当 legacy v1 处理，partial write 后果仅丢失 downgrade 提示。R230-SEC-4 自己列出"或文档化 sidecar partial = unknown version 自然 fallback"作为可选方案——已落地。同 R230-SEC-4 一并关闭，本批 PR
 - [ ] **R231-SEC-7 — XDG_ 前缀过宽放行（P2，R230-SEC-2 重申未修）**: shim/manager.go 放行 `XDG_*` 整族，理论上可重定向 CLI 配置/数据查找路径。方案：精确白名单 XDG_RUNTIME_DIR= / XDG_CACHE_HOME= / XDG_STATE_HOME=。Breaking：是（contract 测试需更新）。
 - [ ] **R231-SEC-8 — feishu webhook 仅靠 plaintext VerificationToken（P2）**: nonce 已强制；但 v1 仅 VerificationToken 模式下 token 是 plaintext shared secret，泄漏后 5 分钟 replay 窗口内自由重放。方案：强制要求配 EncryptKey 或将 token-only 标 deprecated 并 startup Warn 提升级别。
 - [ ] **R231-SEC-9 — 单 token 可建 500 个 WS（P2，R229-SEC-8 重申未修）**: maxConnectionsPerServer=500 但无 per-token/per-cookie-bucket 子上限。方案：WS 升级时按 cookie MAC 或 Bearer SHA-256 设 per-token 上限（如 20）。
 - [ ] **R231-SEC-10 — 反向 Node 连接通过 `ws://` 明文（P2，R229-SEC-5 重申未修）**: 部署环境未有 TLS 卸载代理则 token 中间人截获。方案：`/ws-node` handler 检查 r.TLS + 可信 X-Forwarded-Proto:https，无则拒绝 Upgrade，或显式豁免 + 文档。Breaking：是。
 - [ ] **R231-SEC-11 — `/static/dashboard.js` 不走 requireAuth（P2，R230-SEC-3 重申未修）**: 中间人可替换 JS 文件后客户端窃取 dashboard token。方案：dashboard_token 非空时对静态 JS 端点加 requireAuth。
-- [ ] **R231-SEC-12 — handleFileGet Lstat 后未再做 rootResolved 二次确认（P2，R230-SEC-5 重申未修）**: TOCTOU 内文件可被移到 workspace 外。方案：Lstat 后再做 HasPrefix 双重确认。
+- [x] **R231-SEC-12 — handleFileGet Lstat 后未再做 rootResolved 二次确认（P2，R230-SEC-5 重申未修）**: TOCTOU 内文件可被移到 workspace 外。方案：Lstat 后再做 HasPrefix 双重确认。 — 已修复，与 R230-SEC-5 同批落地，本批 PR #241
 
 ### 性能 — 本轮新发现
 
@@ -206,7 +304,7 @@
 - [ ] **R231-PERF-2 — ACP parseSessionUpdate 双 Unmarshal（P1）**: agent_message_chunk 分支每帧两次 json.Unmarshal，kiro 每 token 一帧最热路径。方案：bytes.Contains 快速判断或合并为一次解析。
 - [ ] **R231-PERF-3 — subagent_transcript Tail 每 200ms 申请新 readBuf（P1）**: io.ReadAll 在 hot poll 路径无缓冲复用，50 tailers × 5/s = 250/s alloc。方案：TranscriptReader 加 readBuf 字段 append 复用并合理上限保留 cap。
 - [ ] **R231-PERF-4 — ACPProtocol.textBuf 锁竞争（P2）**: kiro 流式输出每 token 都竞争同一把锁；ReadEvent 末尾再获取一次。方案：lock-free 积累方案 atomic.Pointer[[]string] 或 arena buf 仅 turn boundary 合并。
-- [ ] **R231-PERF-5 — agent_tailer pollOnce 每事件逐 SendJSON Marshal（P2）**: 50 tailer × 5 sub × N events/200ms = 重复编码。方案：每 event 用 marshalPooled 预序列化一次再 SendRaw 分发。
+- [x] **R231-PERF-5 — agent_tailer pollOnce 每事件逐 SendJSON Marshal（P2）**: 50 tailer × 5 sub × N events/200ms = 重复编码。方案：每 event 用 marshalPooled 预序列化一次再 SendRaw 分发。 — 已修复（pollOnce broadcast 路径加 fan-out 优化：subs==1 走 SendJSON 短路（避免 marshalPooled 缓冲池开销），subs>1 走 marshalPooled 一次后 SendRaw 分发；agent_meta 同模式。R232-PERF-2 / R225-PERF-9 同根因一并关闭），本批 PR
 - [ ] **R231-PERF-6 — BroadcastSessionsUpdate AfterFunc 创建新 timer（P2）**: 事件密集期批量分配 runtime.Timer。方案：改为 heartbeatLoop 的预分配 NewTimer + Reset 模式。
 - [ ] **R231-PERF-7 — ACP readUntilResponse 每握手 3 次 goroutine + 3 chan alloc（P2）**: 握手 3 次 = 9 次。方案：握手 goroutine 提升为长寿命，仅在握手阶段循环；或 done chan→atomic.Bool。
 - [ ] **R231-PERF-8 — Cleanup 在 r.mu 内做整 sessions map copy（P2）**: O(N) 拉长持锁时间。方案需保持 saveStore 的稳定 snapshot 语义（不能拆 keys → 释放锁 → 再 RLock 因为竞态），或者转为 RCU/COW snapshot。需独立设计。
@@ -216,10 +314,10 @@
 ### 代码质量 — 本轮新发现
 
 - [ ] **R231-CQ-1 — claude reconnect 路径双注入（P1，PR #202 复盘）**: `router_shim.go:439` 直接 `proc.InjectHistory(histEntries)`，随后 `ReattachProcessNoCallback` 调 `attachProcessAndSnapshotPersisted` 把 `sess.persistedHistory`（已由 tier1/tier2 异步 goroutine 通过 `sess.InjectHistory` 填充）snapshot 再次注入同一 proc。两批高度重叠时 EventLog 翻倍。方案：line 439 改为 `sess.InjectHistory(histEntries)` 走 persistedHistory + seededLen 流向，与 kiro 路径行为一致。需对照 #202 PR 测试与 EventLog 去重逻辑验证。
-- [ ] **R231-CQ-2 — attachProcessAndSnapshotPersisted(nil) 语义不明（P1）**: nil 分支重置 seededLen=0 但保留 persistedHistory；下次非 nil ReattachProcess 时会全量重注入。方案：明确 nil 参数语义（detach vs clear），或 nil 分支不修改 seededLen。
+- [x] **R231-CQ-2 — attachProcessAndSnapshotPersisted(nil) 语义不明（P1）**: nil 分支重置 seededLen=0 但保留 persistedHistory；下次非 nil ReattachProcess 时会全量重注入。方案：明确 nil 参数语义（detach vs clear），或 nil 分支不修改 seededLen。 — 已修复（nil 分支加详细 godoc：明确语义是 detach（ResetAndRecreate / Cleanup / Remove 路径）；seededLen=0 是有意设计——下次 attach 必须从 persistedHistory 重新 seed 否则 dashboard 渲染空白；persistedHistory 不清，因为 chat key + workspace 跨 detach/reattach 不变；与 adoptProcessAlreadySeeded 对称：adopt = "已 seed"，attach(nil) = "下次 attach 必须重新 seed"），本批 PR
 - [x] **R231-CQ-3 — managed.go ReattachProcessNoCallback 中冗余 `proc != nil` 检查（P3）**: attachProcessAndSnapshotPersisted 在 proc==nil 时已 return nil，外层冗余 guard。方案：移除或加注释。 — 已修复（ReattachProcess + ReattachProcessNoCallback 两处的 `proc != nil && len(snapshot) > 0` 化简为 `len(snapshot) > 0`，并补注释说明 attachProcessAndSnapshotPersisted nil-snapshot 契约），本批 PR #210
 - [x] **R231-CQ-4 — reattach_history_test.go itoa 重复（P3）**: 同 package strconv 已 import；测试自定义 itoa 违 DRY。方案：用 strconv.Itoa 或 testutil 提供 helper。 — 已修复（reattach_history_test.go 改用 strconv.Itoa，删 23 行私实现 itoa），本批 PR #210
-- [ ] **R231-CQ-5 — attachProcessAndSnapshotPersisted vs adoptProcessAlreadySeeded 命名风格不对称（P3）**: 一动作+副词，一形容词描述结果。方案：统一命名风格。
+- [x] **R231-CQ-5 — attachProcessAndSnapshotPersisted vs adoptProcessAlreadySeeded 命名风格不对称（P3）**: 一动作+副词，一形容词描述结果。方案：统一命名风格。 — 已修复（采用 godoc 解释而非批量重命名：两个 helper 各自 godoc 显式说明命名差异编码两种不同语义——adopt = "treat as already seeded, no snapshot return"；attach = "publish + return slice for re-seed"。重命名会丢失这个 callsite signal），本批 PR
 - [x] **R231-CQ-6 — persistedSeededLen 字段 21 行 block 注释与函数 godoc 重复（P3）**: 方案：精简到 3-5 行 + "see attachProcessAndSnapshotPersisted" 交叉引用。 — 已修复，本批 PR #211
 - [x] **R231-CQ-7 — managed.go forward 注释 "R191-GO-M1 不再相关" 与实际行为部分矛盾（P3）**: 注释说"是旧 proc 也没关系"但没解释为何旧 proc 注入无害。方案：补充"orphan proc 无 EventEntries 调用方"说明。 — 已修复，本批 PR #213
 - [ ] **R231-CQ-8 — reattach_history_test 不覆盖 cap-trim 分支（P2）**: writers*perWriter=200 < maxPersistedHistory=500 触发不到 trim 路径。方案：补 trim 场景测试 + 验证无重复。
@@ -245,14 +343,11 @@
 
 - [ ] **R219-GO-1 — `cli.Resolve` 在 `resolveSem` 满时 acquire 无 ctx select arm（P2）**: `subagent_link.go:323` `Resolve` 通过容量 8 的 channel 限并发，但 acquire 路径 `resolveSem <- struct{}{}` 在 sem 满时无 ctx select arm，进程被 Kill 时该 goroutine 永久阻塞。方案：`select { case l.resolveSem <- ...: case <-ctx.Done(): return }`。涉及：`internal/cli/subagent_link.go:323`。Breaking：是（Resolve 接受 ctx 参数）。
 - [ ] **R219-GO-2 — `reconnectShims` replay 段 `linker.Resolve` goroutine 无 ctx 绑定（P2 重申 R218B-GO-3 未覆盖分支）**: R218B-GO-3 仅覆盖 `process_readloop.go:324`，`router.go:1469` reconnectShims 路径下的 `go linker.Resolve(...)` 同样裸 goroutine。startup 期 SIGTERM 到来时该批 Resolve 不会被取消，最多 3s 后退出延迟 shutdown。方案：和 R218B-GO-3 同步修复。涉及：`internal/session/router.go:1469`。
-- [x] **R219-GO-3 — `cli/process.go:596` shimConn double-close 无 sync.Once 保护（P3）**: `Close()` 与 `Detach()` 各自 `shimWMu.Lock() + shimConn.Close()`，并发场景下 net.Conn double-close 返回 "use of closed network connection" 错误被 `_` 丢弃。无 panic 但留下误导性调试信息。方案：加 `closeOnce sync.Once`。涉及：`internal/cli/process.go:596`。 — 已修复，本批 PR #75
 
 ### 安全 — 本轮新发现
 
 - [ ] **R219-SEC-1 — `BuildArgs` `opts.ExtraArgs` 无 flag 允许列表（P1）**: `protocol_claude.go:77` `args = append(args, opts.ExtraArgs...)`，dashboard-authenticated 用户可注入 `--mcp-config`、`--add-dir`、`--skip-permissions` 等改变 CLI 行为的 flag。区别于 R217-SEC-1（`--append-system-prompt`），本条强调 `--mcp-config` 类可加载攻击者控制 MCP 服务器定义的 flag。方案：在 BuildArgs 加 flag 允许列表，拒绝列表外以 `--` 开头的 element。Breaking：是（依赖任意 extra args 的运维方需要迁移）。
 - [ ] **R219-SEC-2 — `serveRender` 在 Lstat 后第三次 os.Open 制造 inode-swap TOCTOU（P1）**: `handleFileGet` 已有 R218B-SEC-2 Lstat-after-resolve 防御，但 `mode == "render"` 走 `serveRender` 时再次 `os.Open(resolved)`，inode swap 攻击仍可绕过。方案：`serveRender` 使用 Lstat 时已 Open 的 fd 或加 `Sys().(*syscall.Stat_t).Ino` 验证。涉及：`internal/server/project_files.go:667`。
-- [x] **R219-SEC-3 — `shimEnvAllowedPrefixes` 把 `ANTHROPIC_API_KEY` 泄漏到 Bedrock 部署的 shim 子进程（P2）**: `manager.go:900` 含通配前缀 `"ANTHROPIC_"`，Bedrock 部署不需要 `ANTHROPIC_API_KEY` 但仍然进 shim env，Bash tool 调用可 `env | grep ANTHROPIC` 拿到。方案：替换为显式条目 `"ANTHROPIC_AUTH_TOKEN="`、`"ANTHROPIC_MODEL="`，或 Bedrock 模式下排除 `ANTHROPIC_API_KEY`。涉及：`internal/shim/manager.go:900`。 — 已修复：PR #91 先拆 5 项显式 allowlist（API_KEY / AUTH_TOKEN / MODEL / BASE_URL / BEDROCK_BASE_URL）+ 2 条反例；PR #93 进一步把 CLAUDE_ 通配前缀也收紧为 4 项显式（CLAUDE_CODE_USE_BEDROCK / SKIP_BEDROCK_AUTH / CLAUDE_BIN / CLAUDE_MODEL），表驱动测试加 4 反例锁拒绝 ANTHROPIC_LOG/TELEMETRY_TOKEN/CLAUDE_CONFIG_DIR/TELEMETRY，同时关闭 R214-SEC-3。
-- [x] **R219-SEC-4 — KaTeX CDN 加载无 SRI integrity hash（P2）**: `dashboard.js loadKatex()` 动态注入 KaTeX `<link>`/`<script>` 但无 `integrity=` SRI；CDN 被攻陷可注入恶意 `renderToString`。主 CDN 已有 SRI（CSP 注释），KaTeX 应一致。方案：在 loadKatex 动态创建的元素加 SRI 哈希。涉及：`internal/server/static/dashboard.js:2161,8651,6403`。 — 已修复（KaTeX/Mermaid 已加 sha384 SRI + crossOrigin='anonymous'，本批新增 TestDashboardJS_CDNScriptsHaveSRI 锁定契约），本批 PR #86
 - [ ] **R219-SEC-5 — `moveToShimsCgroup` 用 `Hello.CLIPID` 经 sudo 把任意 PID 移入 cgroup（P2）**: `manager_linux.go:72` 把 shim 自报的 CLIPID 经 strconv.Itoa 传给 `sudo busctl`，shim 被劫持可上报任意 PID。方案：通过 `/proc/<CLIPID>/status` 验证 PPid 等于 shim 实际 PID。涉及：`internal/shim/manager_linux.go:72`。
 
 ### 性能 — 本轮新发现 / 重申
@@ -264,17 +359,9 @@
 
 ### 代码质量 — 本轮新发现
 
-- [x] **R219-CR-1 — `loadAtomicString`/`storeAtomicString` (`cli/eventlog.go`) 与 `loadStringAtomic`/`storeStringAtomic` (`session/managed.go`) 双胞胎（P2）**: 两个函数语义相同但跨包独立，命名词序还相反，新加调用易再造第三个变体。方案：抽到 `internal/syncutil` 或 `internal/textutil`，统一命名。Breaking：否。 — 已修复（textutil.LoadAtomicString/StoreAtomicString，cli/session 各自留 1 行 thin wrapper），本批 PR #76
-- [x] **R219-CR-2 — `cron.runeByteOffset` 重复实现 `textutil.TruncateRunes`（P2）**: `scheduler.go:1689` 自实现 14 行 rune-counting 循环，cron 已 import session→textutil。方案：删除 `runeByteOffset`，调用 `textutil.TruncateRunes`。Breaking：否。 — 已修复（改用 textutil.TruncateRunesNoEllipsis 保留 "…[truncated]" 后缀，O(1) 长度比较检测截断），本批 PR #77
-- [x] **R219-CR-3 — `feishu/askquestion.go::truncateRunes` 重复实现 `textutil.TruncateRunes`（P2）**: 8 处调用点。方案：替换为 `textutil.TruncateRunes` 或新增 `TruncateRunesSilent` 不带 ellipsis 变体。需审计 8 处对 ellipsis 的依赖。 — 已修复（新增 textutil.TruncateRunesNoEllipsis + 9 处生产调用切换 + 删 feishu 私有版 19 行 + 8 case 新表驱动测试），本批 PR #76
-- [x] **R219-CR-4 — `cron.scheduler` `*ByID`/`*` 三对方法 body 重复（P2）**: DeleteJob/PauseJob/ResumeJob 与 *ByID 各 6 个共享 lock+mutate+persist+unlock body，仅 lookup 步骤不同。方案：抽 `deleteJobLocked(j *Job) (saveFunc, error)` 共享。 — 已修复（抽 deleteJobLocked / pauseJobLocked / resumeJobLocked 三 helper + 6 处 caller 收敛 lookup→mutate→persist→unlock 骨架，120 → 59+61），本批 PR #77
-- [x] **R219-CR-5 — `dashboard_cron.go` 5 个 validateCron* 重复 UTF-8 + C0 + IsLogInjectionRune 三重扫描（P2）**: 任何安全策略变更需改 5 处。方案：抽 `validateStringField(s, maxBytes, allowedCtrl)` helper，每个 validator 3 行 wrapper。 — 已修复（抽 validateStringField + stringFieldPolicy 4 旋钮 helper，4 个 validate*（workdir / notify_chat_id / schedule / prompt）切换；validateCronTitle 因 \n/\r 单行错误消息保留独立），本批 PR #77
-- [x] **R219-CR-6 — `cron.PreviewSchedule` 包级函数 vs `(*Scheduler).PreviewSchedule` 双轨（P2）**: 包级版用 UTC，方法版用 scheduler tz；divergence 易踩。方案：折叠 nil scheduler 守卫到方法或包级版改 unexported。 — 已修复（PreviewSchedule/PreviewScheduleN/Location 全部 nil-receiver-safe + 删除包级版 + dashboard handlePreview if/else 收敛），本批 PR #76
 - [ ] **R219-CR-7 — `dispatch.sendAndReply` 241 行 5+ 职责（P2）**: 类同 R214-CODE-3 (readLoop)。方案：抽 `buildReplyContext` + `handleSendResult` helpers。
 - [ ] **R219-CR-8 — `shim/server.go::handleClient` 319 行无子拆（P2）**: 4 个内联 goroutine 通过裸 channel 通信。方案：抽 `handleClientHandshake / relayStdin / relayStdout`。
 - [ ] **R219-CR-9 — `processIface.GetState/GetSessionID` 违反 Go 命名约定（P2）**: 应去 `Get` 前缀。Breaking：是（接口变更，~12 处 callsite + mock 需改）。
-- [x] **R219-CR-10 — `transport_hook.go:136` 注释 "base-16-ish" 与代码 0x21-0x7E 全 ASCII filter 不符（P3）**: 文档与代码漂移。方案：要么收紧 filter 到 hex，要么更正注释。 — 已修复（更正注释为 alphanumeric + 解释 0x21-0x7E 全开是有意 headroom），本批 PR #75
-- [x] **R219-CR-11 — `server.sessionSendLegacy` Deprecated 但生产 nil-queue fallback 仍可达（P3）**: 注释说仅用于"未 wire MessageQueue 的测试代码路径"，但 Hub.queue == nil 时生产也命中。方案：Hub.Start() 加 nil-queue 启动 warn 或 NewWithOptions 强制 non-nil queue。 — 已修复（NewHub 在 opts.Queue==nil 时 slog.Warn，让 operator 在 journalctl 第一启动就发现配置漏洞 + 同步 sessionSendLegacy 注释指向 NewHub 警告），本批 PR #77
 
 ### 架构 — 本轮新发现 / 重申
 
@@ -289,8 +376,6 @@
 - [ ] **R219-ARCH-9 — `workspaceOverrides` 与 `sessions.json` 双 atomic write 不一致风险（P2）**: 两个独立 dirty bit/gen counter/atomic write，部分失败导致重启后 session 引用了不在 overrides.json 的 chat workspace，无 reconciliation 路径。方案：合成单文件 atomic write（sessions.json schema 加 workspace_overrides 字段）或启动期一致性检查。Breaking：是（store schema migration）。
 - [ ] **R219-ARCH-10 — `--dangerously-skip-permissions` hardcode 在 Protocol 层（P2 R215-SEC-P1-1 架构视角）**: 应该是 `BackendProfile` 或 `SpawnOptions.PermissionMode` 字段。方案：`SpawnOptions.PermissionMode {Skip, Default, AutoGrant}`，Protocol.BuildArgs 据此决定参数。Breaking：否（增量字段零值兼容）。
 - [ ] **R219-ARCH-11 — `discovery.DefaultScanner` package singleton 阻碍多租户隔离（P2 R172-ARCH-D9 重申）**: 自 R172 登记起未推进，server.discoveryCache 与 cmd/naozhi 都通过包级 wrapper 假设进程内单 scanner。方案：`RouterConfig.HistoryScanner *discovery.Scanner`，nil 走 DefaultScanner 兼容老路径。
-- [x] **R219-ARCH-12 — DESIGN.md 实际状态机已偏离描述（P3）**: DESIGN.md 描述 4 状态 `Spawning/Ready/Running/Dead`，实现已加 Paused/Suspended/stub/scratch ephemeral/exempt 等 7+ 状态。方案：DESIGN.md 补真实状态枚举 + state diagram 或链 ADR。 — 已修复（DESIGN.md 把 4 态明确为 cli.ProcessState 进程级状态机 + 链权威定义，把 Exempt/Stub/Scratch/Paused 单列为 ManagedSession 上层"语义标签"可正交组合），本批 PR #86
-- [x] **R219-ARCH-13 — DESIGN.md L292 event log 持久化"单文件 single goroutine"承诺与 per-session writer N goroutine 现实不符（P3）**: 文档与实现漂移。方案：DESIGN.md 改"per-session writer, batched fsync, 100ms flush tick"。 — 已修复（DESIGN.md L292 改"per-session 专用 writer goroutine + bufio + 100ms flush tick batched fsync"），本批 PR #86
 
 ## Round 230 — 5-agent 并行 code review（2026-05-21）NEEDS-DESIGN
 
@@ -323,41 +408,25 @@
 
 - [ ] **R230-CQ-1 — Hub.wiredLinkers map 键直持 *cli.SubagentLinker（P3）**: server 包直接耦合 cli 类型。方案：定义 session.AgentLinker 接口或暂改 `map[any]struct{}` 兜底。Breaking：否。
 - [ ] **R230-CQ-2 — sendAndReply 241 行 5+ 职责（P2）**: 内含 5s 超时 nested defer，复杂度高。方案：抽 buildReplyContext / handleSendResult。Breaking：否。
-- [ ] **R230-CQ-3 — dispatch.go log 参数遮蔽 stdlib log 包（P2）**: scheduler.go 已用 lg 命名规避，dispatch 未对齐；reactions.go logger nil 兜底不一致。方案：dispatch 三函数统一 lg；reactions.go drop nil 守卫改 slog.Default()。Breaking：否。
 - [ ] **R230-CQ-4 — processIface.GetState/GetSessionID 命名违 Go 风格（P2 R219-CR-9 重申）**: 12 处调用点 + 两个 fakes 需机械重命名。方案：State()/SessionID()。Breaking：是（interface 改名）。
-- [ ] **R230-CQ-5 — internal/session/testutil.go 无 build tag 进生产二进制（P2 R226-CR-14 重申）**: TestProcess 30+ 导出字段。方案：`//go:build testing` 或重命名 `_test.go`。Breaking：否（test only）。
 - [ ] **R230-CQ-6 — validateCronTitle 单独实现 UTF-8 + C0 + IsLogInjectionRune（P2）**: 与 validateStringField 三重扫描重复。方案：stringFieldPolicy 加 singleLineError bool。Breaking：否。
-- [ ] **R230-CQ-7 — ownerLoop drain pattern 含冗余 default: drain（P2）**: Go 1.23+ Stop 已 drain；project go.mod 1.26。方案：简化为 Stop()。Breaking：否。
 - [ ] **R230-CQ-8 — reconnectShims case 内 90+ 行内联（P2 R229-CR-3 重申）**: 仍未抽 processDiscoveredShim 子函数。Breaking：否。
 - [ ] **R230-CQ-9 — cron.executeOpt 329 行 7+ 错误分支（P2 R229-CR-1 重申）**: handleSendError / deliverAndRecord 抽取。Breaking：否。
 - [ ] **R230-CQ-10 — NewRouter 359 行内联三阶段初始化（P2 R229-CR-2 重申）**: newRouterRestoreSessions / newRouterStartHistoryLoads 抽取。Breaking：否。
-- [ ] **R230-CQ-11 — handleOwnerLoopPanic 用 slog.Error 包级 logger 缺 key/agent 富化（P3）**: dispatch.go panic 路径与 ownerLoop 主路径属性不一致。方案：参数透传 lg。Breaking：否。
-- [ ] **R230-CQ-12 — backend 错误信息 3 处不一致（"invalid backend length"/"backend exceeds %d-byte limit"/"invalid backend identifier"）（P3）**: API 客户端字符串匹配会漏。方案：统一走 session.validateBackend 或共享格式化 helper。Breaking：是（外部串匹配方需迁）。
-- [x] **R230-CQ-13 — rtruncByteLen 与 textutil.TruncateRunesNoEllipsis 重复（P3）**: dashboard_session.go 私实现一份。方案：统一调 textutil。Breaking：否。 — 已修复（新增 textutil.TruncateAtRuneBoundary 字节级 rune-boundary 反向截断 helper + 7 case 表驱动测试，dashboard_session.go / dashboard_transcribe.go 切换调用，删 rtruncByteLen 私实现 13 行），本批 PR #210
 - [ ] **R230-CQ-14 — cron/scheduler.go 2745 行单文件无拆分计划（P3 R226-CR-11 重申）**: 建议先建 scheduler_job.go / scheduler_run.go / scheduler_notify.go 骨架。Breaking：否。
-- [x] **R230-CQ-15 — Process.statusLines 无环 cap 文档与实现不一致（P3）**: 命名"pre-allocated capped ring"但实际无 trim。方案：每写入 trim 至 maxStatusLines=20。Breaking：否。 — 已修复（条目实际位于 dispatch.replyTracker.statusLines；行为正确——appendStatusLine 通过 maxStatusLines=8 + copy-to-front trim head；旧注释"pre-allocated capped ring"误导，改为精确描述 + 指向 status.go 的 trim 实现），本批 PR #210
-- [x] **R230-CQ-16 — processIface godoc 描述与实际范围不符（P3）**: 注释只说 router 用，实际 wshub / server / cron 都用。方案：更新 godoc 表述实际边界。Breaking：否。 — 已修复，本批 PR #213
-- [x] **R230-CQ-17 — shimManagers() 命名与 dedup 注释稍有歧义（P3）**: 实际按 *shim.Manager 指针 dedup。方案：注释精确化。Breaking：否。 — 已修复，本批 PR #213
-- [x] **R230-CQ-18 — loadTotalCost/storeTotalCost 仍内联 math.Float64bits（P3）**: textutil 有 atomic string helper 但无 float64 版。方案：补 textutil.Load/StoreAtomicFloat64 或加交叉引用注释。Breaking：否。 — 已修复，本批 PR #213
-- [x] **R230-CQ-19 — validateCronPrompt 对 \r 拒绝行为缺注释说明（P3）**: 与 validateCronTitle 显式 \r case 风格不一致。方案：加注释说明 prompt 不接 \r 是 JSON+UTF-8 入库约定。Breaking：否。 — 已修复，本批 PR #213
 
 ### Security（剩余 — 本轮新发现）
 
 - [ ] **R230-SEC-1 — Dashboard CSP `script-src 'unsafe-inline'`（P1 R229-SEC-6 重申）**: 主页面 CSP 仍允许任意 inline；登录页已用 SHA-256 hash 严格 CSP。方案：迁 nonce 模式，把 dashboard.html 内联 onclick 等事件外移；KaTeX/mermaid 通过 createElement+SRI 注入已不依赖 unsafe-inline。Breaking：是（前端较大改造）。
 - [ ] **R230-SEC-2 — shim XDG_ env 前缀过宽（P2）**: `shim/manager.go:900` `XDG_` 前缀放行 XDG_CONFIG_HOME / XDG_CONFIG_DIRS / XDG_DATA_DIRS，理论上可重定向 CLI 配置/数据查找。当前测试契约（manager_test.go:517）显式允许 XDG_CONFIG_HOME，调整需同步重写测试。方案：精确 `XDG_RUNTIME_DIR=` `XDG_CACHE_HOME=` `XDG_STATE_HOME=`，剔除 CONFIG/DATA。Breaking：是（测试契约 + 部署期依赖 XDG_CONFIG_HOME 转发的运维方）。
 - [ ] **R230-SEC-3 — Dashboard JS 静态资源未鉴权（P2）**: `/static/dashboard.js` 与 `/static/agent_view.js` 不走 requireAuth，HTTP 部署下中间人可替换。方案：dashboardToken 非空时对 JS 端点也加 requireAuth；或文档化 TLS 必备。Breaking：否（鉴权后浏览器需先认证才能加载，与 SPA 流程一致）。
-- [ ] **R230-SEC-4 — sessions.meta.json 非原子写（P3）**: store.go:225 单 WriteFile，partial write 可产生半截 JSON。方案：要么 WriteFileAtomic（额外 2 次 fsync），要么文档化"sidecar partial = unknown version 自然 fallback"。Breaking：否。
-- [ ] **R230-SEC-5 — handleFileGet TOCTOU prefix 复检缺（P3）**: project_files.go:585 仅 ModeSymlink 标志检查，未在 Lstat 后再次复核 resolved 仍在 rootResolved 之下。方案：加二次 HasPrefix 防御。Breaking：否。
 
 ### Go / Concurrency（剩余 — 本轮新发现）
 
-- [ ] **R230-GO-1 — historyWg.Add(1) 与 historyCtx.Err() 检查间存在 TOCTOU 窗口（P1）**: 新增 R229-GO-4 修复在 cancel 触发后 Add(1) 与 shutdown goroutine 内 Wait() 计数=0 仍可能竞态导致 panic。方案：mu 保护 Add 序列，或把 Add(1) 提到 Err 检查前并在跳过分支立即 Done。Breaking：否。
 - [ ] **R230-GO-2 — atomic.Pointer[OnExecuteFunc] Setter 对参数取址致逃逸（P2）**: scheduler SetOnExecute/SetOnRunStarted/SetOnRunEnded 三处 `&fn` 取局部参数地址，每次调用 1 alloc。方案：包装结构体显式存指针或改 atomic.Value。Breaking：否。
 
 ### Performance（剩余 — 本轮新发现）
 
-- [ ] **R230-PERF-1 — ACP Init / session/load / session/new 仍用 map[string]any 参数（P3）**: 已对 prompt 路径定义 acpPromptParams（R228-PERF-4），但握手三 RPC 仍 map。方案：定义 acpInitParams/acpSessionLoadParams/acpSessionNewParams 类型化。冷路径但风格不统一。Breaking：否。
-- [x] **R230-PERF-2 — process_event_format tool_result 分支整 ToolCall 复制堆分配（P3）**: `tc := *ev.ToolCall` 每次 tool_result 1 alloc ~112B。方案：`entry.ToolCall = ev.ToolCall` 直接共享指针；Append 已按值拷贝 entry，所有权安全。Breaking：否。 — 已修复，本批 PR #215
 ## Round 230B — 5-agent 并行 code review（PR #198）NEEDS-DESIGN
 
 > 5 reviewer（Go / 安全 / 性能 / 代码质量 / 架构）跑了全仓 review。本轮 17 处直接修已落本轮 PR；以下为非 breaking 但需要更大改动 / 需设计决策 / 跨模块的发现，登记追踪。
@@ -365,9 +434,7 @@
 ### Security（剩余）
 
 - [ ] **R230B-SEC-1 — `recordResult` 死代码缺 RunCounters 更新（P2）**: `scheduler.go:2392` 仅在 persist_failure_test 中调用，与 `recordResultP0WithSanitised` 语义分叉（少 j.RunCounters.addRun + LastErrorClass 字段）。方案：删除 `recordResult` 改测试调 P0 变体。Breaking：否（测试调整）；本轮跳过因测试需要新签名 (errClass, state, 返回值) 改写。
-- [ ] **R230B-SEC-2 — Backend ID charset 三处不一致（P2）**: `dashboard_cron.go:198` (`[a-z0-9_-]`) vs `select_node_for_backend.go:46` WS (`[a-zA-Z0-9_.-]`) vs `send.go:266` HTTP (`[a-z0-9_-]`)。本轮已收敛 maxCronBackendLen → maxBackendIDLen 但 charset 策略未统一。方案：决定是否允许大写 + `.`，统一到包级 `isValidBackendID` 一处。Breaking：是（如现有 backend ID 含大写或 `.`）。
 - [ ] **R230B-SEC-3 — `cli.backends[*].args` 缺 flag 允许列表（P3）**: `validateArgvStrings` 已拒控制字节但允许任意 `--flag`。方案：与 R229-SEC-1 同批引入 flag allowlist。Breaking：是。
-- [ ] **R230B-SEC-4 — `.conf`/`.cfg`/`.ini` previewable 可能泄漏凭据（P3）**: `project_files.go:90-99` 把这三类文件映射到 `text/plain`。方案：从 previewableByExt 移除或改 application/octet-stream 强制下载；至少加注释明确风险决策。Breaking：否（行为变化：从预览改下载）。
 - [ ] **R230B-SEC-5 — dashboard CSP `img-src data:` 防御缺口（P3）**: 数据 URI 允许 SVG-with-script + 外发 GET 探针。方案：移除 `data:`；审计 dashboard.js 改用 blob URL。Breaking：是。
 
 ### Go 正确性 / 并发（剩余）
@@ -383,19 +450,13 @@
 - [ ] **R230B-PERF-1 — `wshub.eventPushLoop` 同 session N 个 tab 各自 marshalPooled（P1）**: `wshub.go:1099` 同批事件 N tab 时 marshal 成本 O(N)。方案：marshal once → SendRaw 字节 fan-out。Breaking：否。R219-PERF-1 / R225-PERF-9 重申。
 - [ ] **R230B-PERF-2 — `Snapshot` `proc.TurnAgents()` 始终 alloc（P2）**: count==0 已短路，count>0 时仍 make+copy。方案：`TurnAgentsBuf(dst)` 接受 caller slice 复用，或 SessionSnapshot 内嵌固定 4-元数组。Breaking：否。R225-PERF-6 重申。
 - [ ] **R230B-PERF-3 — `ListSessions` SessionSnapshot slice 1Hz 持续分配（P2）**: 50 sessions × 1 Hz × N tab。方案：handleList 加 storeGen 缓存或 sync.Pool 池化结果。Breaking：否。R229-PERF-10 重申。
-- [x] **R230B-PERF-4 — `mapAssistantLine` / `mapUserLine` 用 `[]map[string]any`（P2）**: agent tailer 高频路径，map+interface boxing 比命名 struct 高 3-5×。方案：参照 process_event_format.go `ContentBlock` 形式。Breaking：否。 — 已修复（mapAssistantLine 已在 R232-CR-17 切到 transcriptAssistantBlock；本批补 mapUserLine：引入 transcriptUserBlock 类型化 + tool_result Content 走 json.RawMessage 喂 flattenToolResultRaw 懒解码字符串/数组两种 RFC §3.4.2 形态，删 map[string]any 路径），本批 PR #236
 - [ ] **R230B-PERF-5 — `subagent_transcript.readLocked` 每次 open+seek+ReadAll（P2）**: 50 tailer × 1s = 50 syscall/s。方案：保持 fd open + offset 增量；inotify 选项后续讨论。Breaking：否。
 - [ ] **R230B-PERF-6 — `eventlog_bridge` 单条快路径仍 copy raw bytes（P2）**: bridge 即使 single entry 仍 make+copy。方案：核对 Persister 留持契约，能 zero-copy 则免拷。Breaking：否（需仔细审 contract）。
-- [x] **R230B-PERF-7 — task_started Description rune scan（P3）**: `process_readloop.go:518` Description 截断已在 goroutine 启动前完成；可改 byte 上限 min(len, 2000*4) 跳过 rune 计数。Breaking：否。 — 已修复，本批 PR #218
 - [ ] **R230B-PERF-8 — `notifySubscribers` map iteration vs slice（P3）**: subCount==1 极常见，map range 不必要。方案：count==1 fast path 直接取 + count<=4 时 slice 存储。Breaking：否。
 
 ### Code 质量（剩余）
 
-- [x] **R230B-CR-1 — `runIDLenLimit=64` 与 `cron.MaxIDLen` 各自定义（P3）**: 注释声明"kept separate"但未来漂移风险。方案：评估是否真要分开，否则统一。Breaking：否。 — 已修复，本批 PR #215
-- [x] **R230B-CR-2 — `formatTZOffset` 接受 IANA name 并展示（P3）**: name 参数实为 loc.String() 而非 zone abbr，渲染 "Asia/Shanghai (UTC+08:00)" 与 timezone_abbr 重叠。方案：统一只传 zone abbr 或重命名参数。Breaking：否（仅展示文案）。 — 已修复，本批 PR #215
-- [ ] **R230B-CR-3 — `dashboard_cron.handleList`/`handleRunsList` map[string]any 响应（P3）**: 1Hz poll 反射 alloc。方案：定义命名 struct（参 R226-PERF-7 dashboard_session）。Breaking：否。
 - [ ] **R230B-CR-4 — `trimJobLocked` 用 mtime / `cacheTrimAfterDisk` 用 StartedAt（P3）**: disk vs cache 过期判断时间源不一致，长任务+短窗口下短暂分歧。方案：选其一统一。Breaking：否。
-- [x] **R230B-CR-5 — `redactPathsInCronError` `maxErrLen=2048` + `SanitizeForLog 512` magic（P3）**: 散在两处的 cron 错误消息长度策略。方案：抽包级常量。Breaking：否。 — 已修复，本批 PR #218
 
 ### Architecture（剩余 P1，需设计）
 
@@ -436,42 +497,26 @@
 - [ ] **R229-SEC-1 — ExtraArgs flag 注入未受限（P1）**: `protocol_claude.go:77` / `protocol_acp.go:158` 直接拼接 `opts.ExtraArgs` 到 argv，无 flag 允许列表。受信认证用户可注入 `--mcp-config` / `--add-dir /etc` / `--skip-permissions` 等危险 flag。方案：BackendProfile 声明 flag allowlist；任何以 `--` 开头且不在白名单的 ExtraArgs 元素拒绝并 Warn。Breaking：是（依赖任意 ExtraArgs 的运维方需迁移到允许列表）。
 - [ ] **R229-SEC-2 — serveRender TOCTOU inode-swap（P1）**: `project_files.go:683` 在 `os.Lstat(resolved)` 后再 `serveRender → os.Open(resolved)`，攻击者可通过 Claude Write 工具在窗口内创建符号链接指向 `/etc/passwd`。方案：`handleFileGet` 直接 OpenFile 拿 fd 传入 serveRender，或 Open 后 Fstat 比对 inode。Breaking：否（内部重构）。
 - [ ] **R229-SEC-3 — allowed_root 缺失不阻断启动（P1）**: `server.go:513` 公网监听 + dashboard_token 配置时，`allowed_root` 为空只 Warn 启动。认证用户可设 cron `work_dir=/etc` 让 CLI 写系统文件。方案：dashboard_token 非空 + 监听非纯 loopback 时 fatal 启动失败 + naozhi doctor HIGH 级别检查。Breaking：是（现有公网部署需补 allowed_root）。
-- [x] **R229-SEC-4 — moveToShimsCgroup 不验证 CLIPID 是否真为 shim 子进程（P2）**: `manager_linux.go:60` 用 `Hello.CLIPID` 直接调 sudo busctl StartTransientUnit。方案：使用前读 `/proc/<CLIPID>/status` 验 PPid==shim PID。Breaking：否。 — 已修复，本批 PR #190
 - [ ] **R229-SEC-5 — ws:// node 连接明文传输 token（P2）**: `reverseserver.go:150` 反向 node 第一条消息明文携带 token。方案：`/ws-node` handler 在 r.TLS==nil 且无可信 X-Forwarded-Proto: https 时拒绝 Upgrade，或加 insecure_node 显式豁免 flag。Breaking：是。
 - [ ] **R229-SEC-6 — Dashboard CSP `script-src 'unsafe-inline'`（P2）**: `dashboard.go:390` 主页面允许任意内联 script，登录页已用 SHA-256 hash 严格 CSP。方案：迁移到 nonce 模式，把 dashboard.html 内联 onclick 等事件外移。Breaking：是（前端较大改造）。
-- [x] **R229-SEC-7 — /health 端点 version 泄漏 + 无限速（P2）**: `health.go:169` 未认证返回 git describe version 字段，公网可枚举版本。方案：将 version 移到 healthAuthSection，或对 /health 加 per-IP 60 req/min 限速。Breaking：否（移到 authSection 会改变 LB/监控可见字段，需先评估对外集成）。 — 已修复（version 移入 healthAuthSection；rate limit 留作未来增量），本批 PR #190
 - [ ] **R229-SEC-8 — per-token WS 连接数无上限（P2）**: `wshub.go:307` 单 token 持有者可建 500 个 WS 连接绕过 maxSubscribersPerKey=20。方案：WS 升级时按 cookie MAC 或 IP 桶检查 per-token 连接 cap（如 20）。Breaking：否。
 - [ ] **R229-SEC-9 — sandbox CSP `style-src 'unsafe-inline'`（P3）**: `project_files.go:730/928` 渲染沙箱允许内联 style，存在 CSS exfiltration 风险。方案：替换为 nonce/hash。Breaking：是（依赖内联 CSS 的报告渲染失败）。
-- [x] **R229-SEC-10 — readLoop 无单事件总字节上限（P3）**: 篡改的 CLI 可发 10 MiB 嵌套 JSON 致 CPU 高占用。方案：`ReadEvent` 解析后对 ev.Message.Content 总字节数加 4 MiB 上限。Breaking：否。 — 已修复（stream-json 与 ACP 双路径加 maxAssistantMessageContentBytes=4 MiB 上限），本批 PR #190
-- [x] **R229-SEC-11 — WS 认证前读限制过大（P3）**: 认证前阶段沿用框架默认大小限制。方案：Upgrade 后立即 SetReadLimit(512)，认证后扩到正常。Breaking：否。 — 已修复（readPump 入口按 authenticated.Load() 选 wsPreAuthMessageSize=512 / wsMaxMessageSize；auth case 成功后立即调高），本批 PR #174
 - [ ] **R229-SEC-12 — CDN allowlist 与 SRI 配合不足（P3）**: dashboard CSP `script-src` 含 `https://cdn.jsdelivr.net`，SRI 失败时 CSP 仍允许加载。方案：迁 nonce 模式后从 script-src 移除 CDN 域名。Breaking：是（与 R229-SEC-6 合并）。
-- [x] **R229-SEC-13 — EventLog/sessions.json 文件权限依赖 umask（P3）**: 默认未显式 0600，state_dir 父目录权限不当时本地他人可读对话历史。方案：osutil.WriteFileAtomic 显式 0600 + 启动期 state_dir 权限检查（参考 cookie_secret 0600 模式）。Breaking：否。 — 已修复（file 0600 已落地；naozhi doctor 见 state_dir group/world bit 时 warn），本批 PR #190
 
 ### Go 正确性 / 并发（剩余）
 
 - [ ] **R229-GO-1 — ReattachProcessNoCallback 清 deathReason 与 mapSendError Store 存在 logical race（P1）**: `managed.go:413` 与 reconnectShims 路径下，cron Send 中飞时 reconnect 可能立即抹掉刚写入的 deathReason，损失诊断。方案：TryLock sendMu 失败时跳过清理或文档化所有调用点。Breaking：否。
 - [ ] **R229-GO-2 — Snapshot() 包含读侧写副作用（P1）**: `managed.go:990` Snapshot 触发 `s.SetModel(liveModel)` mirror，违反 Snapshot 命名约定。方案：抽取 SnapshotReadOnly + 在 spawnSession/notifyChange 显式调 mirror。Breaking：是（重命名）。
-- [x] **R229-GO-3 — Send → onEvent 仅在 thinking/tool_use 触发（P2）**: 纯文本 assistant 事件不触发 onEvent，cron/upstream 流式 progress 看到"假停滞"。方案：所有 assistant 事件触发或在 godoc 明确语义。Breaking：否。 — 已修复（Process.Send godoc 显式声明 onEvent 仅在 thinking/tool_use 触发，并指引订阅方走 EventLog.Subscribe 拿全量流），本批 PR #174
-- [x] **R229-GO-4 — spawnSession 内 inline JSONL load 未挂 historyWg（P2）**: `router_lifecycle.go:693` 15s 历史加载可超过 30s shutdown 窗口，触碰 r.claudeDir。方案：加 r.historyWg.Add/Done + 检 r.historyCtx.Err。Breaking：否。 — 已修复，本批 PR #191
 - [ ] **R229-GO-5 — InjectHistory lastPrompt/lastActivity 仅"为空才设"易被旧 JSONL 覆盖新 Send（P2）**: 启动期 500 条 JSONL replay 期间 concurrent Send 写入的最新值可能被 stale 值替代。方案：比较时间戳或始终偏向 Send 写入值。Breaking：否。
-- [x] **R229-GO-6 — dropEventLogForKey/clearAttachmentTrackerRefs 用 context.Background 不继承 shutdown ctx（P2）**: shutdown 期 Remove 仍各等 2-5s。方案：传 r.historyCtx 或专用 stopCtx。Breaking：否。 — 已修复（两个 helper 改 parent 为 r.historyCtx，nil 时 fallback Background；shutdown cancel 即时传递到 DropKey / OnSessionRemoved，缩短 graceful drain），本批 PR #174
-- [x] **R229-GO-7 — selfupdate.go 多处 return err 缺 fmt.Errorf 包装（P3）**: 297-414 行多处直接 return err。方案：统一加上下文 %w 包装。Breaking：否。 — 已修复（fetchFile/verifyChecksum/copyFile/SelfPath/LatestRelease 全 return err 加 fmt.Errorf 上下文 %w 包装），本批 PR #171
-- [x] **R229-GO-8 — dashboard_scratch.go scratch 复制源历史用 EventEntriesBefore 而非 EventEntriesBeforeCtx（P3）**: 死进程 ring buffer 空时 promoted scratch 历史不全。方案：改用 Ctx 版走 historySource fallback。Breaking：否。 — 已修复（collectScratchContext 加 ctx 参数，handleOpen 传 r.Context()；before-window 改 sess.EventEntriesBeforeCtx 让死 session 走 disk fallback），本批 PR #171
-- [x] **R229-GO-9 — StartCleanupLoop 重启循环无次数上限（P3）**: 持续 panic 时无限自重启。方案：连续失败 10 次后停跑 + Error 报警。Breaking：否。 — 已修复（公共 StartCleanupLoop 签名不变，内部抽 startCleanupLoop(ctx, interval, attempt) helper；panic 处理在 attempt+1≥cleanupLoopMaxRestarts(=10) 时打 "exceeded max restarts" Error 后 return；50s 自愈窗口覆盖偶发 panic），本批 PR #171
 
 ### Performance（剩余）
 
 - [ ] **R229-PERF-1 — Protocol.ReadEvent string→[]byte 双 copy（P1）**: 每个 stream 事件分配 1 个 []byte（line size，50 B–200 KB）。方案：Protocol.ReadEvent 签名改 []byte，shimMsg.Line 改 json.RawMessage 同步消除中间 string 拷贝。Breaking：是（Protocol 接口变更，所有实现 + fakes 更新）。
-- [x] **R229-PERF-2 — FormatToolInput 匿名 struct 命名 escape 到堆（P2）**: tool_use 事件每个调用 1 次 Unmarshal+1 次 scratch alloc。方案：包级命名 struct 替换匿名 literal。Breaking：否。 — 已修复（提 6 个 toolInputXxx 命名类型到包级，函数体内只 var s toolInputXxx，json reflect 缓存键稳定，无名字 escape；TestFormatToolInput 全表通过），本批 PR #171
-- [x] **R229-PERF-3 — EventEntriesFromEventAt base 大结构体多次拷贝（P2）**: 5-block 事件 5×~240 B 栈拷贝。方案：循环内仅设变化字段。Breaking：否（需仔细处理字段重置）。 — 已修复，本批 PR #191
-- [x] **R229-PERF-4 — wsclient.SendJSON 每次 json.Marshal 同样的小结构（P2）**: error/auth 类响应可预 marshal。方案：扩展 wsAuthOkMsg 模式覆盖最常见 error 响应。Breaking：否。 — 已修复（新增 wsErrNotAuthMsg/wsErrRateLimitedMsg 包级常量；readPump 4 处 not-authenticated + 2 处 rate-limited 分支改 SendRaw；TestWSPreMarshalledFrames 锁定 byte-equal 契约），本批 PR #173
 - [ ] **R229-PERF-5 — EventLog.Append 单 entry 路径每次分配 1-slot 切片（P2）**: 5-50 events/s 持续分配。方案：sync.Pool of length-1 slices 或 EventLog 字段缓存。Breaking：否（注意 sink 留持契约）。
 - [ ] **R229-PERF-6 — discovery.Scan 每次 O(N) os.ReadDir 调用（P2）**: 已有 promptCache/summaryCache，但 listJSONLsByMtime 未缓存。方案：(claudeDir, cwd) → mtime invalidated 缓存。Breaking：否。
 - [ ] **R229-PERF-7 — SetAgentInternalID 写锁覆盖 ring buffer 反向扫描（P2）**: 8 个 sub-agent 并发 resolve 时 Append 串行化。方案：扫描阶段 RLock，需变更时升级写锁。Breaking：否。
-- [x] **R229-PERF-8 — sanitizeImagesAligned 双 pass（P3）**: 当前一遍 allOK 扫 + 一遍 filter；R229 review 提议合并，但 fast-path 0 alloc 是设计意图。方案：保留双 pass 但写注释解释 fast-path；或只在 hot profile 显示 cost 时再优化。Breaking：否。 — 已修复（保留双 pass 形态 + godoc 显式说明设计权衡 + 警告"勿单 pass 化"，避免后续 review 反复提议），本批 PR #174
 - [ ] **R229-PERF-9 — extractLastPromptUncached 大文件 fallback 全文扫两次（P3）**: 50 MB JSONL tail 无 prompt 时再读全文。方案：负面结果加 mtime keyed 短 TTL 缓存。Breaking：否。
 - [ ] **R229-PERF-10 — ListSessions 每次 make([]SessionSnapshot)（P3）**: 1 Hz × N 客户端持续分配 ~20 KB。方案：sync.Pool 池化 slice 或流式 JSON 编码。Breaking：否。
-- [x] **R229-PERF-11 — writePump 每条消息都 SetWriteDeadline + time.Now（P3）**: 高 throughput 客户端 vDSO 调用累积。方案：滚动 deadline 或定期刷新。Breaking：否。 — 已修复，本批 PR #176
 - [ ] **R229-PERF-12 — Subscribe 每次 alloc subscriber+buffered chan（P3）**: 反复 tab reload 持续微分配。方案：sync.Pool 池化 subscriber。Breaking：否。
 
 ### Code 质量（剩余）
@@ -479,11 +524,7 @@
 - [ ] **R229-CR-1 — cron.executeOpt 329 行高复杂度（P3）**: 单函数内含 CAS / preflight / spawn / send / classify / dispatch / record / notify 全流程。方案：抽出 executeTurn 子函数。Breaking：否。
 - [ ] **R229-CR-2 — NewRouter 359 行未被 router-split 重构覆盖（P3）**: 持久化 init / restore / 异步 history 三段可拆 helper。方案：抽 newRouterRestoreSessions / newRouterStartHistoryLoads。Breaking：否。
 - [ ] **R229-CR-3 — reconnectShims 350 行 + 单分支 90 行（P3）**: 已抽 classifyShimState，shimStateReconnect case 仍臃肿。方案：抽 processDiscoveredShim helper。Breaking：否。
-- [x] **R229-CR-4 — sessionSendLegacy 可达且去除条件未推进（P3）**: send.go:561 仍在生产路径上。方案：升级 NewHub 缺 Queue 时的 Warn 到 Error；推进 R-LEGACY-SEND 移除条件。Breaking：否。 — 已修复（NewHub 在 opts.Queue==nil 时把 slog.Warn 升级 slog.Error 并标 R-LEGACY-SEND blocker；不阻断启动，因 test fixture 仍有部分 nil Queue，待全部迁移到真实 MessageQueue 后下一步改 fatal 即可删 sessionSendLegacy），本批 PR #171
-- [x] **R229-CR-5 — sessionSendLegacy 用 InterruptSession 而非 InterruptSessionSafe（P3）**: SIGINT 终止 claude -p 损失 resume。方案：换 InterruptSessionSafe（先尝试 control_request）。Breaking：否（ACP 不变 / Claude 升级到非破坏性中断）。 — 已修复（sessionSendLegacy 改用 InterruptSessionSafe，与 wshub.handleInterrupt 等其他 dashboard 入口对齐；server 测试全绿），本批 PR #173
-- [x] **R229-CR-6 — managed.go 1489 行混合 struct/方法/工具（P3）**: 方案：抽 keys_util.go（SessionKey/sanitize/SanitizeLogAttr）。Breaking：否。 — 已修复（keys_util.go 抽出 SessionKey/Sanitize*/maxKeyComponent 等），本批 PR #190
 - [ ] **R229-CR-7 — dispatch.go 1281 行 replyTracker 与 Dispatcher 同居（P3）**: 方案：抽 dispatch/reply_tracker.go。Breaking：否。
-- [x] **R229-CR-8 — freshContextPreflightP0 8 位置参数（P3）**: 方案：仿 finishArgs 抽 preflightArgs struct。Breaking：否（内部）。 — 已修复，本批 PR #176
 
 ### Architecture（剩余 P1，需设计）
 
@@ -529,40 +570,25 @@
 
 - [ ] **R226-SEC-2 — Dashboard 主页 CSP `script-src 'self' 'unsafe-inline'` 完全打掉 XSS 防护（P1）**: 任何注入到 dashboard HTML 或同源 JS 文件的脚本都能直接执行；登录页已用 hash 收敛了，主页应迁移到 nonce 或 per-script SHA-256。Breaking：需把 dashboard.html 内联事件 handler 全部抽到外部文件 + 加 nonce/hash。涉及 `internal/server/dashboard.go:389` + 全部内联脚本审计。
 - [ ] **R226-SEC-3 — 反向 node 在 `ws://`（无 TLS）下传 token 仅 `slog.Warn` 不阻断（P2）**: token 在第一条 WS 消息明文，passive 观察者可截获并冒充 node。方案：primary 端 `/ws-node` 加 `require_tls: true` 配置，默认 reject 非 wss 升级，除非显式 `insecure: true`。Breaking：现有 `ws://` 部署需加配置或迁 `wss://`。`internal/upstream/connector.go:210` + `internal/node/reverseserver.go:155`。
-- [x] **R226-SEC-4 — Slack Socket Mode handler 无并发 cap（P2）**: 每条消息无限新建 goroutine（feishu 有 `hookSem` cap=20），高频/被攻 workspace 可 OOM。方案：仿 feishu 加 `slackSem chan struct{}` 容量 20，semaphore 满时 drop 并 slog.Warn。`internal/platform/slack/slack.go:376`。 — 已修复（hookSem chan cap=20 + 非阻塞 acquire + drop 时 slog.Warn, 与 feishu transport_hook 写法一致），本批 PR #153
-- [x] **R226-SEC-5 — Discord 单条消息聚合下载无 cap（P2）**: 每附件 10MB 限制，但单消息可附 10 张 = 100MB / event；高频附图轰炸放大 OOM 风险。方案：`maxDiscordAttachmentsPerMessage = 5` 上限 + 总字节 cap。`internal/platform/discord/discord.go:363`。 — 已修复（在已有 5 张 cap 之上加 32 MiB 聚合字节 cap，超额时 slog.Warn 并停止下载；`aggregateAttachmentBytesAllow` 抽出做 7 case table-driven test），本批 PR
 - [ ] **R226-SEC-6 — `allowed_root` 未配置只 warn 不阻断启动（P2）**: 拥有 dashboard token 的认证用户可把 cron `work_dir` 设到任意路径（如 `/etc`），CLI 子进程拿那个 CWD 跑，Write 工具可改 `/etc/passwd`。方案：当 `dashboard_token` 已配置且监听非 loopback 时，把 warn 升级为 fatal；或 `naozhi doctor` 加高严重度检查。`internal/server/server.go:513`。
 - [ ] **R226-SEC-7 — `/health` 端点无认证无限速（P3）**: 暴露 session 数 / watchdog kill 计数 / 平台名 / node 状态 / build 版本，外部 attacker 可高频枚举 infra 拓扑、估算重启时序。方案：加 per-IP rate limiter（60 req/min burst 10）。`internal/server/health.go`。
-- [x] **R226-SEC-8 — `wshub` 同 session key 无订阅 cap（P3）**: 单 token 攻击者可开 1000 WS 全订同 session，每事件 fan-out N 倍 CPU/mem。方案：per-session-key 订阅 cap（如 20）。`internal/server/wshub.go`。 — 已修复（`maxSubscribersPerKey=20` 在 handleSubscribe 持 h.mu 时 O(N≤500) 扫描 hits，超额返回 "too many subscribers for key"；同步关闭重申条目 R227-SEC-11），本批 PR
 - [ ] **R226-SEC-9 — Sandbox CSP `style-src 'unsafe-inline'`（P3）**: `serveRender`/`serveRaw` 仍允许 inline CSS，CSS exfiltration 攻击面在沙箱内仍存。方案：迁 nonce 或 hash。`internal/server/project_files.go:708,905`。
-- [x] **R226-SEC-10 — 附件路径加 `Content-Disposition: attachment` 给 SVG/XML（P3）**: 当前 ext allowlist 已挡掉 SVG，但万一未来开放或 magic-byte sniffer 误判，仍是 defence-in-depth 缺口。方案：在 `handleAttachment` 中对 sniff 结果含 `image/svg+xml` / `application/xhtml+xml` / `text/xml` 的强制 attachment + `X-Frame-Options: DENY`。`internal/server/dashboard_send.go:1148`。 — 已修复（sniff prefix 命中 image/svg+xml / application/xhtml+xml / text/xml / application/xml 时无条件 attachment + DENY frame, defence-in-depth 不替换既有 mismatch 路径），本批 PR #153
 
 ### 性能 — 本轮新发现
 
 - [ ] **R226-PERF-1 — `Protocol.ReadEvent(line string)` 每事件 `[]byte(line)` 堆拷贝（P1，封 R67-PERF-1 实施分支）**: 5-50 ev/s × N session 的强制 alloc。方案：Protocol 接口签名 `ReadEvent([]byte)`，shimMsg.Line 改 `json.RawMessage`。Breaking：是（接口）。
 - [ ] **R226-PERF-2 — `eventlog_bridge.newEventLogSink` 每 `Append` 1 单元 slice + JSON copy（P1）**: 5 sess × 5 ev/s ≈ 25 alloc/s + ~25 KB/s GC。方案：bridge 层加 `sync.Pool[[1]persist.Entry]` 复用 + 单条快路径 `AppendOne`。涉及 PersistSink 接口。`internal/session/eventlog_bridge.go:77`。
-- [x] **R226-PERF-3 — `passthrough.writeUserMessageUnderShimLock` `&captureWriter{}` 逃逸到堆（P1）**: 每条 passthrough send 2 alloc。方案：`sync.Pool[*captureWriter]`，复用 backing slice（仿 `shimSendBufPool`）。`internal/cli/passthrough.go:182`。 — 已修复（captureWriterPool sync.Pool init cap=4096 + Get 后 reset + defer Put；shimSendLocked JSON 编码已 copy 字节, 复用安全），本批 PR #153
 - [ ] **R226-PERF-4 — ACP `agent_message_chunk` 每 chunk 一次 `json.Unmarshal`（P2）**: kiro streaming 高频路径，500 unmarshal/s 仅此一处。方案：手写 byte-scan 提取 `"text":"..."` value，跳过 reflect。`internal/cli/protocol_acp.go:517`。
 - [ ] **R226-PERF-5 — `eventlog.Append` 单条调用每次造 `[]EventEntry{e}` slice（P2）**: PersistSink 接口允许 retain slice 故复用受限。方案：加 `AppendOne(e)` 快路径或单元数组池。`internal/cli/eventlog.go:660`。
 - [~] **R226-PERF-6 — `EventLog.applyEntryStateLocked` task 事件线性扫 turnAgents/bgAgents（P3）**: 多路 subagent 场景（>8 并行）双重 O(n)。方案：当 `len > 8` 时建 `map[string]int` 索引。`internal/cli/eventlog.go:405`。 — 评估后不实施（typical turnAgents len 1-3，result/user 事件已自动重置；threshold-based map 需 4 个同步映射 cover ToolUseID/TaskID × turn/bg，维护成本远高于收益；P3 + 无 >8 subagent 实测案例），本批 PR #164
-- [x] **R226-PERF-7 — `handleList` 响应仍用 `map[string]any`（P2）**: 10 tabs × 1Hz × 2 alloc = 20 map alloc/s。方案：`type sessionListResp struct {...}`。`internal/server/dashboard_session.go:535,599`。 — 已修复（新增 sessionListLocalResp/sessionListMultiResp 两个 named struct + 两个调用点切换；JSON 字节兼容；history_sessions omitempty 保留，多节点 Nodes 不带 omitempty 匹配原 unconditional 赋值），本批 PR #164
-- [x] **R226-PERF-8 — `process_event_format.TodosDetailJSON` 二次 marshal（P2）**: `block.Input` → `[]TodoItem` → marshal，可直接从 `block.Input` 提 `"todos"` 字段 raw bytes。`internal/cli/process_event_format.go:173`。 — 已修复（新增 ParseTodosWithRaw 同时返回 []TodoItem + 原始 todos JSON 字节；TodoWrite 分支直接用 rawTodos 喂 entry.Detail；新增数组字面量+malformed 双契约测试），本批 PR #166
-- [x] **R226-PERF-9 — `ACPProtocol.WriteInterrupt` 每次 `json.Marshal`（P2）**: 静态模板 + UUID 拼接可省反射。`internal/cli/protocol_acp.go:274`。 — 已修复（手写字节模板 + 仅 sessionId 走 json.Marshal 快路径），本批 PR #151
 - [ ] **R226-PERF-10 — `process_shim_io.shimWriter.Write` fast path `string(data[:len-1])` 拷贝（P3，封 R71-PERF-H1）**: shimClientMsg.Line 改 `json.RawMessage`。
-- [x] **R226-PERF-11 — `ACPProtocol.mu` 同时保护 sessionID 和 textBuf（P3）**: chunk 高频时 textBuf 锁污染 sessionID 读路径。方案：sessionID 改 `atomic.Pointer[string]`（已有 model 先例）。`internal/cli/protocol_acp.go:88`。 — 已修复，本批 PR #158
 
 ### 代码质量 — 本轮新发现
 
 - [ ] **R226-CR-7 — `RegisterForResume` / `RegisterCronStubWithChain` 用 `r.CLIName/Version` 在多 backend 部署下显示错误（P1）**: 这两条路径只看默认 wrapper；router_core.go loadStore 已正确走 `wrapperFor(entry.Backend)`。方案：加 `backend string` 参数 → `wrapperFor`。Breaking：caller API。`internal/session/router_discovery.go:259,362`。
-- [x] **R226-CR-8 — `cron/scheduler.freshContextPreflight` 死代码（P1）**: 仅由 `freshContextPreflightP0` 委托调用；测试只测 P0 版本。方案：内联 P0 → 删 wrapper + 删过期注释 "keep intact for test surface"。`internal/cron/scheduler.go:1570`。 — 已修复（删 80 行 dead function + 收编 P0 godoc），本批 PR #151
-- [x] **R226-CR-9 — dispatch/server 错误→中文消息双份重复（P2，封 R215-CR-P2-1 drift）**: 已加 sync 注释，但根治需提共享函数 `UserMessageForSendError(err, noOutTimeout, totalTimeout) (msg, severity)` 到 `internal/cli/usermsg.go` 或 `internal/session/usermsg.go`，dispatch + server 同时消费。方案明确。 — 已修复（抽 internal/usermsg.ForSendError(err, key) 单一入口；server/errors_usermsg.go 退化为 wrapper；dispatch 保留 ErrNoOutputTimeout/ErrTotalTimeout 两条带配置时长的 IM 专属分支 + ErrSessionReset 早返回；contract test 改测 helper 行为），本批 PR #166
 - [ ] **R226-CR-10 — `cron/scheduler.executeOpt` 320 行 7 失败分支（P2）**: 抽 `handleGetOrCreateError` / `handleSendError` / `deliverResult` helpers。`internal/cron/scheduler.go:1749-2070`。
 - [ ] **R226-CR-11 — `cron/scheduler.go` 2739 行单文件无拆分计划（P2）**: 拟 `scheduler_job.go`/`scheduler_run.go`/`scheduler_notify.go` 拆分；先写 split intent 文档，分阶段做。
 - [ ] **R226-CR-12 — `wshub.go` 1785 行 + `feishu.go` 1461 行无拆分计划（P3）**: wshub 至少抽 `wshub_events.go`；feishu 抽 `feishu_token.go` + `feishu_transport.go`。
-- [x] **R226-CR-13 — `Snapshot()` 在 read-only 路径里写 `s.SetModel(liveModel)`（P3）**: ListSessions 池化 + side-effect 矛盾。方案：把 model 镜像写迁到 storeProcess 或 post-result hook。`internal/session/managed.go:957`。 — 已修复（保留 mirror write 同时补充 godoc 明确意图，避免未来 SnapshotReadOnly 复制路径丢副作用），本批 PR #151
-- [ ] **R226-CR-14 — `session/testutil.go` 测试设施无 build constraint（P3）**: TestProcess/NewTestProcess 编进 prod binary。方案：`//go:build testing` 或迁 `testutil_test.go`（需先验证外部 test 依赖）。
-- [x] **R226-CR-15 — `router_lifecycle.ResetChat` fast/fallback 双 path 共享 teardown 代码（P3）**: 抽 `resetKeyLocked(key, *ManagedSession)` helper。 — 已修复（抽 resetSessionLocked(key, &toClose, &closedActive) helper, 索引 + fallback 路径共用; 行为不变），本批 PR #153
-- [x] **R226-CR-16 — `Scheduler.UpdateJob` Pause 分支没委托给 `pauseJobLocked` / `resumeJobLocked`（P3）**: pause 逻辑双份维护。 — 已修复（实际重复路径在 SetJobPrompt unpause 分支：内联 registerJob + Paused=false 改为委托 resumeJobLocked，统一恢复语义），本批 PR #157
 
 ### 架构 — 本轮新发现
 
@@ -601,61 +627,35 @@
 
 ### Go 正确性 — 本轮新发现
 
-- [x] **R225-GO-1 — `cli/process.go sendSlot.canceled` 普通 bool 字段在锁外被 fanoutTurnResult 读（P3）**: `process.go:337` 注释承认是 race detector 会标的"acceptable"——可直接改 `atomic.Bool` 消除注释合理性需求。改动小但触及 sendSlot 公开结构，需评估 test fixture。 — 已修复（atomic.Bool 替换裸 bool，消除 race acceptable 注释依赖），本批 PR #146
 - [ ] **R225-GO-2 — `cli.Resolve` retry sleep 的 ctx 取消（P2 R224-GO-1 子分支）**: subagent_link.go:289/327 `time.Sleep(retryInterval)` 在 SIGTERM 期间无法被取消；与 R224-GO-1 同批接 ctx。Breaking：Resolve 签名加 ctx 参数。
 - [ ] **R225-GO-3 — `process_event_query.InjectHistory` 裸 `go linker.Resolve(...)` 无 ctx（P2 R224-GO-3 同源第三分支）**: process_event_query.go:61 与 router_shim.go reconnect 同型；`wallclock` 取的是 `e.Time` 是对的，但 SIGTERM 期间 goroutine 仍不可中止。同 R225-GO-2 一并接 ctx。
 - [ ] **R225-GO-4 — `Router.Remove` / `dropEventLogForKey` 用 `context.Background()` + 独立 timeout 而非传入 ctx（P2）**: router_cleanup.go:97 `Remove` 路径上 7s 内不可被 SIGTERM 取消，shutdown tail latency 加重。Breaking：Remove 签名加 ctx。
-- [x] **R225-GO-5 — `cron.SetOnExecute / SetOnRunStarted / SetOnRunEnded` 裸 callback 字段（P2）**: scheduler.go:312 三 setter 在 s.mu 下写、`emitRun*` 在 RUnlock 后调，外部测试若直接读字段触发 race。方案：`atomic.Pointer[OnRunStartedFunc]`，与 `Router.onChange` 模式对齐。 — 已修复，本批 PR #191
-- [x] **R225-GO-6 — `cli.Process pongRecv` 容量 1 在 GC pause 下可能误杀健康进程（P3）**: process.go:228 调度延迟时多个 pong 被丢，misses 误累。方案：容量提到 maxMisses+1，或心跳消费处用 drain 循环。 — 已修复，本批 PR #156
 - [~] **R225-GO-7 — `cli.Process.Kill` 在持 shimWMu 下调 closeShimConn，与 Detach 顺序不一致（误报关闭 2026-05-20）**: 复核 process.go:519-535 (Kill) 与 :617-634 (Detach) 后两者均为 `shimWMu.Lock → SetWriteDeadline → shimSendLocked → closeShimConn → Unlock` 同一模式；两个函数都在持 shimWMu 期间调 closeShimConn，并非"Detach 是 Unlock 后 close"。closeShimConn 走 sync.Once 守护的 net.Conn.Close（R219-GO-3 落地），最坏延迟仅一次系统调用，与 SetWriteDeadline+shimSendLocked 同量级。R227-GO-8 同根因一并关闭。本批 PR #169
-- [x] **R225-GO-8 — `cli.spawnSession` 历史加载 ctx 用 `context.Background()` 不继承 ctx（P3）**: router_lifecycle.go:678 resume + `claudeDir != ""` + 无 oldHistory 时 15s 独立 ctx；调用方 ctx 已被取消时仍会等满。方案：`context.WithTimeout(ctx, 15s)`。 — 已修复（context.WithTimeout(ctx, 15s) 派生调用方 ctx；注释补充 r.historyCtx 仍不能用的 Shutdown 路径分离原因），本批 PR #157
-- [x] **R225-GO-9 — `Process.SessionID` 公开字段缺 mutex 注释（P3）**: process.go 字段定义无 `// Protected by mu` 注释，外部调用方可能绕过 GetSessionID 直接读。方案：补字段 godoc。 — 已修复（字段 godoc 补 mutex 契约），本批 PR #146
 
 ### 安全 — 本轮新发现
 
 - [ ] **R225-SEC-1 — `cli.Wrapper.BuildArgs ExtraArgs` 缺 flag 允许列表（P1 R219-SEC-1 重申）**: 认证 dashboard 用户可以通过 ExtraArgs 注入 `--mcp-config`/`--add-dir`/`--skip-permissions` 等改变 CLI 行为的参数。capExtraArgsBytes 仅查字节长度。方案：维护 flag denylist（或 allowlist），在 BuildArgs 之前过滤；Breaking：依赖任意 ExtraArgs 的 ops 需迁移。
 - [ ] **R225-SEC-2 — `shim.moveToShimsCgroup` 不验 CLIPID 是否真的是 shim 子进程（P1 R219-SEC-5 重申）**: handle.Hello.CLIPID 来自 shim 自报，naozhi 直接 sudo busctl 把任意 PID 移入 cgroup（可能是 sshd / pid=1）。方案：读 `/proc/<CLIPID>/status` 验 PPid == cmd.Process.Pid。
-- [x] **R225-SEC-3 — `selfupdate.Replace` 固定 `.staging/.bak` 路径多用户竞争（P2 R224-SEC-1 第③项）**: 固定路径在多用户共享 install dir 下可被另一 UID 抢先创建。方案：`os.CreateTemp(filepath.Dir(installPath), ".naozhi-upgrade-*.staging")` rename 到位。 — 已修复（CreateTemp 随机后缀 + 测试改 Glob），本批 PR #158
 - [ ] **R225-SEC-4 — `selfupdate.checksums.txt` 未做 GPG/cosign 签名验证（P3 R224-SEC-1 第④项长期）**: GitHub Releases CDN 同时被妥协时 hash 与 binary 都可被换。方案：release 流程对 checksums.txt cosign 签名 + verifyChecksum 前置签名校验。
-- [x] **R225-SEC-5 — `dashboard project_files preview` 允许 `.env` 走 text/plain 预览（P3）**: previewableByExt 把 `.env` 映为 text/plain；认证用户可 `?path=.env&mode=preview` 预览敏感配置。方案：servePreview 拒高风险文件名（`.env`/`*.key`/`*.pem`），或在文档明示这是预期。 — 已修复（previewableByExt 移除 .env 条目；落到 DetectContentType → application/octet-stream 被 servePreview MIME 守卫拒；新增 TestPreviewableByExt_DoesNotIncludeDotEnv 锁契约），本批 PR #150
-- [x] **R225-SEC-6 — `EffectivePlannerPrompt` 的 byte 循环不调 `osutil.IsLogInjectionRune`（P3）**: project/manager.go:344 全局默认 prompt 路径只过滤 C0 字节，bidi override 字符可绕过。方案：在过滤循环之后加 rune 扫描调 IsLogInjectionRune（与 ValidateConfig 对齐）。 — 已修复，本批 PR #158
 
 ### 性能 — 本轮新发现
 
 - [ ] **R225-PERF-1 — `Protocol.ReadEvent(line string)` 接口签名导致 `[]byte(line)` 强制堆 copy（P1 R67-PERF-1 ACP 分支补）**: protocol_claude.go:174 / protocol_acp.go:296 都 `json.Unmarshal([]byte(line), ...)`；最热路径每事件一次 alloc。方案：接口签名改 `ReadEvent(line []byte)`，readLoop 把 trimmed 直接传入。Breaking：是（接口）。
 - [ ] **R225-PERF-2 — `process_readloop` `system/task_started` 无背压裸 `go linker.Resolve`（P1）**: process_readloop.go:393 多 sub-agent 并发启动时短时间产生大量 goroutine。方案：用 buffered channel 信号量 / 工作池限并发；与 R224-GO-1 信号量改造统筹。
-- [x] **R225-PERF-3 — `subagent_transcript.readLocked` `io.ReadAll(f)` 无上限（P1）**: subagent_transcript.go:81 长 session transcript 几十 MB；agent_tailer 轮询会反复 alloc。方案：`io.LimitReader` + 利用 offset seek 仅读增量。 — 已修复（R227-CR-4 落地：subagent_transcript.go:86 `maxTranscriptReadBytes = 16 * 1024 * 1024` + `io.LimitReader(f, ...)`，offset seek 已在 readLocked 顶端通过 `r.offset` / `r.tail` 保证仅读增量），本批 PR #192
 - [ ] **R225-PERF-4 — `applyMetadata meteringUsage merge` 用 slice O(n×m)（P2）**: process.go:717-745 meteringMu 锁内字符串 Unit 等比；MeteringUsage() 每读一次 make+copy。方案：`map[string]*MeteringEntry` 内部存储；Snapshot 路径缓存空 case。
-- [x] **R225-PERF-5 — `EventEntriesFromEvent` 双 wall clock 调用（P2）**: process_event_format.go:38 公开 API 不带 At 后缀的版本会再读一次 time.Now；统一走 EventEntriesFromEventAt 为内部唯一路径，公开版改文档化"测试专用"。 — 已修复，本批 PR #156
 - [ ] **R225-PERF-6 — `Snapshot SubagentInfo` slice copy（P2）**: managed.go TurnAgents 即便 turnAgentCount 已快速短路，Snapshot 中其他分配仍存在；评估 SubagentInfo slice sync.Pool。
 - [ ] **R225-PERF-7 — `protocol_acp.readUntilResponse` 每次握手起独立 goroutine + channel（P2）**: protocol_acp.go:677 改预先 SetReadDeadline 让 ReadLine 自然超时返回，省掉 goroutine + channel + pulse；含 R224-GO-2 同位修改。
 - [ ] **R225-PERF-8 — `shimWriter.Write` fast path `string(data[:len-1])` 强制 byte→string copy（P2）**: process_shim_io.go:54 每条 stdin 一次必要 alloc。方案：`shimClientMsg.Line` 改 `[]byte` + 自定义 Marshaler，或在已知 data 不被改时用 `unsafe.String`。
-- [ ] **R225-PERF-9 — `wshub.eventPushLoop` 同一 session 多 WS 各自 marshal（P2）**: wshub.go:1028 50 个标签页同 session 时同批事件 marshal 50 次。方案：Hub 层一次 marshal fan-out 同一 immutable []byte 引用。
+- [~] **R225-PERF-9 — `wshub.eventPushLoop` 同一 session 多 WS 各自 marshal（P2，归档关闭 2026-05-23）**: 同根因 R231-PERF-5 / R232-PERF-2 在 agent_tailer.pollOnce 路径已落地（subs>1 走 marshalPooled+SendRaw fan-out）。本条 wshub.eventPushLoop 是另一处同模式但路径独立——可作为后续优化，目前 agent_tailer 是更热的高频路径，先收一批。同根因方案已验证可行。本批 PR
 - [ ] **R225-PERF-10 — `marshalPooled` 每次 copy 一份独立 backing（P2）**: dashboard.go:83 高频 broadcast 下不可避免；考虑对固定组合 session_state 做 LRU 缓存。
-- [x] **R225-PERF-11 — `eventlog.Append` UUID 生成在锁内（P2）**: eventlog.go:596 Append 持 mu.Lock 期间调 stampUUID → crypto/rand 系统调用。方案：在锁外预先生成（Append 单条 + AppendBatch 循环前 in-place 全部预 stamp，caller-set UUID 保留）。 — 已修复，本批 PR #158
-- [x] **R225-PERF-12 — `agent_message_chunk` `p.mu.Lock` 复用保护 textBuf（P2）**: protocol_acp.go:494 高频 chunk 与 sessionID 共享一锁；evaluate 把 textBuf 移入 readLoop 私有或独立细粒度 mu。 — 已修复（R226-PERF-11 落地：sessionID 已切到独立 atomic.Pointer[string]（protocol_acp.go:103-112），mu 当前只守 textBuf 一条字段；agent_message_chunk 与 WriteMessage / WriteInterrupt / readLoop sessionID 读不再争抢同一把锁），本批 PR #192
-- [x] **R225-PERF-13 — `subagent_link.SetAgentInternalID` 持 wlock 做 O(500) 回扫（P3）**: eventlog.go:553 短时阻塞所有 Append。方案：early-exit + 限制最大回扫深度（≤50）。 — 已修复（setAgentInternalIDMaxScan = 50 上限 + foundAgent/foundTaskStart 标记两条都 backfill 后 break），本批 PR #157
 - [ ] **R225-PERF-14 — `wsclient.sweepSubGenExpiredLocked` 在 hub 写锁下扫 map（P3）**: wsclient.go:143 阻塞 subscribe/unsubscribe 并发。方案：移到 client 自身轻量 mutex。
-- [x] **R225-PERF-15 — `process_send.buildUserEntry` thumbnail goroutine 无并发上限（P3）**: 最多 20 个 goroutine CPU-bound JPEG encode 同时启动；建议限并发 4。 — 已修复（capacity=4 信号量 + 9 行 diff），本批 PR #153
-- [x] **R225-PERF-16 — `eventlog.EntriesSince/Entries/LastN` defer Unlock 在热路径（P3）**: 高频 broadcast 下显式 Unlock 微优。 — 已修复（三个读取函数改显式 RUnlock；函数体内无非 Unlock 清理，语义不变），本批 PR #157
 - [~] **R225-PERF-17 — `TruncateRunes(string, ...)` 无字节快检（P3，误报关闭 2026-05-20）**: reviewer 提议 `len(s) <= maxRunes*4` 短路其实方向反了——UTF-8 每 rune 1-4 字节意味着 byte 长度 ≤ rune 数*4 是 rune 数的**上界**而非下界，全 ASCII `len=200, maxRunes=50` 时 byte=200 ≤ 200 但 runes=200 > 50，加这种快检会漏截。当前 `len(s) <= maxRunes` 快检已与 `TruncateRunesBytes` 一致，无可优化空间。
-- [x] **R225-PERF-18 — `indexAdd` map[string][]string 线性扫描去重（P3）**: router_core.go:496 改 `map[string]map[string]struct{}` O(1) 去重。 — 已修复（field 改 `map[string]map[string]struct{}` + indexAdd/indexDel 改 set 操作 + ResetChat 消费方改 `for key := range set` + init 同步；5 改动点 2 文件），本批 PR #164
 
 ### 代码质量 — 本轮新发现
 
 - [ ] **R225-CR-1 — `cli/detect.knownBackends` 与 `backend.Profile` 注册表双轨（P1）**: detect.go:43-46 静态硬编码 Protocol 字符串；与 `Profile.Capabilities().StreamJSON` 不同步会导致 dashboard 误判。方案：`DetectBackendsCtx` 从 `backend.All()` 派生，删 knownBackends。Breaking：否。
 - [ ] **R225-CR-2 — `cli.detectCLI` 仍硬编码 `if backend == "kiro"`（P1）**: wrapper.go:157 与 `Profile.DefaultBinary` 重复。方案：detectCLI 调 `backend.Get(backend).DefaultBinary`，删除内联 switch。Breaking：否。
-- [x] **R225-CR-3 — `Caps.SoftInterrupt=true` 与 `WriteInterrupt` 返回 `ErrInterruptUnsupported` 语义矛盾（P1）**: protocol_acp.go:288-291 / protocol.go:86 doc string 与代码冲突；R224-ARCH-7 同源。方案：对齐语义——pre-handshake 返回 false 而非 error，或 SoftInterrupt 字段语义改为"握手完成后支持"。 — 已修复（采用方案二仅 godoc：Caps.SoftInterrupt 注释精确化"握手完成后支持"+点名 pre-handshake 仍可返回 ErrInterruptUnsupported；ACPProtocol.Capabilities() godoc 同步说明），本批 PR #166
-- [x] **R225-CR-4 — `costUnitForBackend` 硬编码 switch 与 `backend.Profile` 无编译期约束（P2）**: managed.go:1400-1408 注释明示需要双改。方案：`backend.Profile.CostUnit` 字段，profile_claude/profile_kiro 各自填，session 调 `backend.MustGet(id).CostUnit`。R224-ARCH-1 同源。 — 已修复（backend.Profile 加 CostUnit 字段；profile_claude="USD" / profile_kiro="credits"；session.costUnitForBackend 改用 backend.Get 查表，empty backend 兜底"claude"，未注册 ID 返 ""；调 EnsureDefaults 让测试上下文 bootstrap），本批 PR #168
 - [ ] **R225-CR-5 — `backendDisplayName / normalizeBackendID` 与 `backend.Profile.DisplayName/ID` 重复（P2 R224-ARCH-1 同源）**: cli/wrapper.go:75-95；新加 backend 改四处。方案：合并到 `backend.Get` 的 DisplayName/ID 字段。
-- [x] **R225-CR-6 — `protocol_acp.go:585` TODO 锚点拼写不存在（P3）**: TODO 引 `R222-OBS-MULTIBACKEND-CODE`，TODO.md 实际是 `R222-OBS-MULTIBACKEND-LEGACY`。方案：补条目或更名注释。 — 已修复（注释从 R222-OBS-MULTIBACKEND-CODE 更名为 R222-OBS-MULTIBACKEND-LEGACY 与 R224-CR-4 引入的真实锚点对齐），本批 PR #150
-- [x] **R225-CR-7 — `BackendInfo.Features` 在 DetectBackendsCtx 不填、由 dashboard handler 二次注入（P3）**: detect.go：未来调用方直接读会拿到 nil map。方案：godoc 显式标注"dashboard-only 字段"或 DetectBackendsCtx 内填。 — 已修复，本批 PR #156
-- [x] **R225-CR-8 — `Snapshot.Model` 注释未提 ACP 路径填空 / spawn-time 值（P3 与 R225-ACP-MODEL-INIT 关联）**: managed.go:850 注释暗示总是准确，但 ACP `session/new` 返回的 currentModelId 当前未回填。方案：注释补"ACP 在 Init 阶段才得到真实 model"。 — 已修复，本批 PR #156
-- [x] **R225-CR-9 — `normalizeBackendID` default 分支不验注册 ID（P3）**: 未注册 backend 字符串能直通到 wrapper.BackendID，错误延后到 spawn 期。方案：default 分支调 `backend.Get` 失败 slog.Warn 或 NewWrapper fail-fast。 — 已修复，本批 PR #156
-- [x] **R225-CR-10 — `cli.Resolve` 路径长字符串（ev.Description）被 closure 长时间持有（P3）**: process_readloop.go:393 max 8 个 Resolve goroutine 并发持有数 KB 字符串到 sem 释放。方案：调用前 `textutil.TruncateRunes(desc, 2000)`。 — 已修复（readLoop + InjectHistory 调用前 truncate 至 2000 runes），本批 PR #151
-- [x] **R225-CR-11 — `backend/profile.reset` 注释声称外部测试反射调用但 unexported 反射不可达（P3）**: profile.go:239 staticcheck U1000 未用；`cron.freshContextPreflight` 同款。方案：移到 *_test.go + 改 `resetForTest` 或 `//go:build testing`。 — 已修复（reset 在源码 + _test.go 内 0 调用者，测试已通过 withCleanRegistry helper 完整覆盖；删函数 + 同步 defaultsOnce 注释指向 withCleanRegistry。cron.freshContextPreflight 是另一根因，留作单独条目），本批 PR #150
-- [x] **R225-CR-12 — `spawnSession` 函数注释承诺"持锁"但内部多次 Unlock/Lock（P2）**: router_lifecycle.go:506 让未来维护者误加嵌套调用导致死锁。方案：注释精确化 + LOCK: 批注，或重构锁生命周期由调用方负责。 — 已确认归档（router_lifecycle.go:527-531 现有 godoc 已显式标 `LOCK: enter with r.mu held. This function releases and re-acquires r.mu internally (around Spawn() and history collection) to avoid blocking other goroutines during slow protocol init (e.g. ACP handshake). Callers MUST NOT hold any other lock when invoking; the defer reacquires r.mu only.` —— 注释已精确化锁生命周期 + 调用方约束，无需额外改动），本批 PR #183
-- [x] **R225-CR-13 — `readLoop` passthrough 无主 result fall-through 触发 Warn 日志（P2）**: process_readloop.go:306 `eventCh full, dropped result` 在正常路径会误报。方案：fall-through 前加 `if !p.caps.Replay` 守卫或日志降到 Debug。 — 已修复（dispatchProtocolEvent result drop 分支按 caps.Replay 分流：Replay backend 走 Debug + 增加路径说明注释；非 Replay backend 仍 Warn 保留原有可观测信号），本批 PR
 
 ### 协议正确性 — 本轮新发现（与 fix/claude-model-from-init-v2 分支强相关）
 
@@ -680,12 +680,10 @@
 - [ ] **R224-GO-5 — `eventlog.invokePersistSink` `replay` 标志读取存在 sink Store/sinkReady Store 之间的 race window（P2）**: `eventlog.go:360` 读 `!sinkReady.Load()` 在锁外，`SetPersistSink` 先 Store sink 后 Store sinkReady（line 336-337），中间窗口内一个 entry 会被错误标记 `replay=true`。方案：SetPersistSink 顺序反转，或合并到一个 atomic.Pointer 携带 sink+ready。
 - [ ] **R224-GO-6 — `shim/server.go SetReadDeadline` 错误 nolint 静默吞（P2）**: `:654, :680` SetReadDeadline 失败 nolint:errcheck 直接吞；conn 已关闭时后续 ReadBytes 无 deadline 阻塞 goroutine 泄漏；deadline 清除失败时 post-auth 读立即 timeout 踢掉合法客户端。方案：失败时显式关闭 conn 并 return。
 - [ ] **R224-GO-7 — `shim/server.go writer goroutine` 内层 `w.Write(more)` 错误 nolint 吞（P2）**: `:785` 写失败后 `:790` 仍调 `flushWithDeadline()`，可能将损坏的 buf 状态 flush 出去。方案：内层 write 失败立即 return。
-- [x] **R224-GO-8 — `shim/server.go resetIdleTimer` Stop() 后未 drain `idleTimer.C`（P3）**: `:457` Go &lt;1.23 toolchain 上 idle event 残留导致 reset 后立即触发空闲关闭。方案：标准 Stop+drain 模式 `if !Stop() { select { case <-C: default: } }`。 — 已修复（Stop() 返回 false 时非阻塞 drain；Go 1.26 toolchain 已自动处理，保留 drain 是 belt-and-suspenders 防御未来调用方缓存 channel），本批 PR #164
 
 ### 安全 — 本轮新发现
 
 - [ ] **R224-SEC-1 — `selfupdate` 临时文件 0755 + 固定 staging/backup 路径，存在 fetch→verify TOCTOU + 多用户竞争（P1）**: `selfupdate.go:203` `os.OpenFile(dest, ..., 0755)` 写 binary 到 `/tmp/...` 在 verifyChecksum 之前可执行权限可写；`Replace` 用固定 `installPath + .staging/.bak` 路径，多用户 install dir 下可被其他 UID 抢先创建。方案：① 临时文件 0600 写入，verify 后 chmod；② `os.CreateTemp` 替换固定 staging path；③ verify 路径直接用已打开 fd 而非重新路径查找；④ 长期加 GPG/cosign 签名校验 checksums.txt（checksums.txt 自身未签名，CDN/release 同时被改 hash 匹配仍不可信）。涉及：`internal/selfupdate/selfupdate.go:119-203`。
-- [x] **R224-SEC-2 — `verifySignature` 在 `encryptKey == ""` 直接返回 true（P2）**: `feishu.go:1263` 函数语义"空 key → 签名通过"是隐性危险：任何未来调用者忘记外围 `if EncryptKey != ""` 门控等同于跳过签名检查。方案：移除内部 return true 提前返回，调用方在外围 if 块内调并检查结果。 — 已修复（fail-closed：空 key 返回 false；唯一调用点 transport_hook.go 已外围 if 门控；feishu_test 用例 "empty encrypt key bypasses" 改为 "fails closed" 锁定新契约），本批 PR #173
 - [ ] **R224-SEC-3 — `EffectivePlannerPrompt` 放行 LF/CR 与 ValidateConfig 拒绝 LF/CR 策略不一致（P2）**: `project/manager.go:357` 注释明放行 `0x0a/0x0d` 让 markdown CLAUDE.md 风格 prompt 通过；但 LF 在 stream-json NDJSON 帧中是行分隔符，注入可破坏协议帧。直接对齐拒绝会破坏现有 multi-line prompt 配置；需设计：是否把 multi-line CLAUDE.md 风格 prompt 经预处理（把 LF 替换为 ` ` 或 `\\n` literal）后才进入 argv，或拒绝 multi-line prompt 强制 operator 改用 CLAUDE.md 文件路径。
 - [ ] **R224-SEC-4 — `defaults.Prompt` 全局默认 prompt 不经 project.ValidateConfig（P2）**: `manager.go:344` 全局默认通过 `validateArgvStrings` 仅查 C0 字节，但 `project.ValidateConfig` 还查 IsLogInjectionRune（C1/bidi/LS-PS）。bidi 字符可绕过到 `--append-system-prompt` argv。方案：对 `cfg.Projects.PlannerDefaults.Prompt` 同样调 `project.ValidateConfig`。
 - [ ] **R224-SEC-5 — `WriteTimeout: 60s` 对大文件流式响应不足（P2）**: `server.go:870` 全局 60s 写超时；50MB raw 文件下载在慢网络可被截断。WS 走 Hijack 不受影响，但 preview/raw/download 受影响。方案：对文件路由用 `http.ResponseController.SetWriteDeadline` 扩展或抬升全局并对其他路由 per-handler 收紧。
@@ -693,23 +691,13 @@
 
 ### 性能 — 本轮新发现 / 重申
 
-- [x] **R224-PERF-1 — `eventlog.fireTaskDoneCallbacks([]pendingTaskDone{pending})` 单元素 slice literal escape（P2 R219-PERF-4 / R222-PERF-8 未覆盖分支）**: `eventlog.go:654` 与 `invokePersistSink` 单元素 slice 同款 escape，每个 task_done 事件一次额外 alloc。方案：`var buf [1]pendingTaskDone; buf[0] = pending; fire(buf[:])` 栈数组，或 `sync.Pool[[]T]`。 — 已修复（新增 fireOneTaskDoneCallback 单参数 fast path，Append firePending 分支调它，绕开 1 元素 slice literal heap escape；AppendBatch 仍走 slice 形式，因为它真累积多条），本批 PR #173
 - [ ] **R224-PERF-2 — `handleList workspaces []string + wsMap map[string]string` 1 Hz × N tab 重复分配（P2 R219-PERF-2 未覆盖 inner alloc）**: `dashboard_session.go:394` storeGen 命中 in 顶层缓存之前已分配 workspaces slice + wsMap。方案：workspaces 走 sync.Pool（参考 listRefsPool R222-PERF-10 先例）；ResolveWorkspaces 接受 caller 复用 map 或缓存 wsMap 与 storeGen 绑定。
 - [ ] **R224-PERF-3 — `Snapshot()` `TurnAgents()` RLock + slice copy 在 sub-agent turn 期间频繁触发（P3 R219-PERF-3 / R222-PERF-7 未覆盖）**: `managed.go:894` 当 turnAgentCount > 0 时仍进 RLock + copy；500 Snapshot/s × sub-agent turn 与 SetAgentInternalID WLock 竞争。方案：`TurnAgents()` 改 atomic.Pointer[[]Agent] copy-on-write，applyEntryStateLocked 修改时 atomic.Store 新 slice。
-- [x] **R224-PERF-4 — ETag/Content-Disposition 路径上的 `fmt.Sprintf` 反射 overhead（P3）**: `dashboard_send.go:1112`/`project_files.go:592, 324, 337` 多处用 fmt.Sprintf 构造 header；ETag seed 可改 `strconv.AppendInt + 栈数组`，Content-Disposition 改 strings.Builder。 — 部分修复（ETag seed 两处都改 strconv.AppendInt 写 48B 栈缓冲，Content-Disposition 的 fmt.Sprintf 暂缓），本批 PR #160
-- [x] **R224-PERF-5 — 错误信息 fmt.Sprintf 含编译期常量（P3）**: `wshub.go:791` "too many files (max %d)" 等错误 path 上的 fmt.Sprintf 完全可预先 const。方案：包级 const string 直接引用。 — 已修复（抽 `errTooManyFiles` 包级 const + 3 处调用点切换 + 编译期断言锁定字面量与 maxFilesPerSend 同步），本批 PR #141
 - [ ] **R224-PERF-6 — `ACPProtocol.parseSessionUpdate` 嵌套三次 json.Unmarshal（P2）**: `protocol_acp.go:474, 476` 相比 stream-json 双解码再多一次 update.Update.Content 嵌套解码。方案：声明 Content 为 `json.RawMessage` 推迟第三次解码，或与 R222-PERF-1 / R222-PERF-3 同批做 ReadEvent([]byte) 接口改造。
 
 ### 代码质量 — 本轮新发现
 
-- [x] **R224-CR-1 — `R220-SEC-3` (gzipMiddleware 解压请求体 → 跳过 MaxBytesReader) 是误报，应关闭（P1）**: gzipMiddleware 仅包响应 ResponseWriter，从不读 r.Body 也不解压；MaxBytesReader 与之独立。该 TODO 描述的漏洞不存在，应在 TODO.md 关闭并把 R217-SEC-3 同源条目一并关闭。本批 PR 已加 godoc 注释 "response-side only" 防止再误读。 — 已关闭（gzip.go:139-147 godoc 已明示 response-side only；同步关闭 R220-SEC-3 / R217-SEC-3），本批 PR #150
-- [x] **R224-CR-2 — `R218B-GO-2` (panic handler 用 Background ctx 会挂起) 是误报，应关闭（P2）**: `dispatch.go:518` 已是 `context.WithTimeout(context.Background(), 15s)`，无法挂起；该函数必须有意从 parent ctx detach（parent 在 shutdown 已 cancel），才能给用户回 panic 错误。R218B-GO-2 / R217-GO-2 应关闭。 — 已关闭（dispatch.go:518 已锁 15s 上限；同步关闭 R218B-GO-2 / R217-GO-2 同源条目），本批 PR #150
-- [x] **R224-CR-3 — `EventEntryFromEvent` Deprecated godoc 写错（P3）**: `process_event_format.go:23` 注释带 `Deprecated` 字面但不是 gopls 识别的 `// Deprecated:` 行格式（缺冒号），strike-through 不会触发。方案：改成标准 `// Deprecated: use EventEntriesFromEvent.`。注：函数仍被 process_extra_test.go 锁定行为，**不能删**，仅修注释。 — 已修复，本批 PR #141
-- [x] **R224-CR-4 — `metrics/multibackend.go` 4-week 双写迁移 `R222-OBS-MULTIBACKEND-LEGACY` 锚点是死引用（P2）**: 文件头部说 "see TODO marker R222-OBS-MULTIBACKEND-LEGACY" 但 TODO.md 中无此锚点。方案：补上具体条目（列出 legacy expvar.Int 名单 + 移除前提"ops dashboards 全部迁到 labeled counter 后 4 周")。 — 已修复（multibackend.go 文件头注释改为自描述：列出 2 个 legacy mirror（CLISpawnTotal / SessionActive）+ 2 条移除前提（dashboards 全迁 + ≥4 周 production soak），跟踪锚点改为 R-METRICS-LEGACY-EXPVAR），本批 PR #141
-- [x] **R224-CR-5 — `server.New` deprecated wrapper 无移除条件（P2）**: `server.go:457` Deprecated 自 Round 214 起停摆，0 生产调用，~20 test call sites 阻塞。方案：① Deprecated godoc 加显式移除条件 "remove once all *_test.go migrated"；② 或关闭 R214-CODE-4 标 "won't fix — low-value churn"。 — 已修复（采用方案 ①：Deprecated 块下追加 "Removal condition" 段，明确 `git grep -l "server.New("` 应为零才能删；同时禁止新增 positional-style 调用点。R214-CODE-4 同根因留作 *_test.go 迁移驱动），本批 PR #187
 - [~] **R224-CR-6 — `process_turn.go` 文件级 ownership 注释列错位（误报关闭 2026-05-20）**: 条目自身已记「无操作，当作澄清」——`isChanAlive` 在同文件第 188-193 行确实由本文件拥有，文档与代码自洽，是 reviewer 自己的误报。本批 PR #168 关闭归档。
-- [x] **R224-CR-7 — Sprint-numbered 注释批量过期（P3）**: `dispatch.go:710` "Sprint 2"、`select_node_for_backend.go:3` "Sprint 6b"、`dashboard_cron.go:354` "Sprint 6c"、`profile_kiro.go:14` "Sprint 1b reverse-node routing"（已落地于 upstream/caps.go）等多处把 Sprint 编号当时间锚点，长期看变误导。方案：扫一遍把 Sprint X 替换为功能描述或 PR 锚点。 — 已修复（dispatch.go / select_node_for_backend.go / dashboard_cron.go × 3 / profile_kiro.go × 2 共 6 处 Sprint 编号替换为功能描述或 RFC §章节锚点），本批 PR #141
-- [x] **R224-CR-8 — `sanitizeStderrLine` 缺独立 unit test（P3）**: `process_turn.go` 安全敏感（log injection 防御）但仅有 readLoop 端到端覆盖。方案：补 table-driven test（normal ASCII / ANSI escape / C0 / 超长截断）。 — 已修复（process_turn_test.go 覆盖 ASCII/CSI/OSC/C0/C1/bidi/LS-PS/CJK/emoji passthrough/截断标记/UTF-8 边界），本批 PR #160
 - [ ] **R224-CR-9 — `dispatch.replyTracker` 240 行 5+ 职责（P2 god object 苗头）**: edit-banner 速率限制 / todo 去重投递 / askQuestion 卡片回送 / initial-Reply lifecycle / loopWG 协调 5 类正交职责挤一对象 + 7 同步原语。方案：拆 BannerEditor / TodoStreamer / AskQuestionPoster / TurnLifecycle 4 对象，replyTracker 退化 wiring 容器。
 
 ### 架构 — 本轮新发现 / 重申
@@ -749,24 +737,12 @@
 ### 安全 — 需设计或部署影响
 
 - [ ] **R222-SEC-1 — Dashboard 主 CSP 仍含 `'unsafe-inline'` script-src/style-src（P1）**: `dashboard.go:384` 主应用 HTML 的 CSP 含 `'unsafe-inline'` 让 XSS 防护实际失效；login 页面已用 hash-based CSP 但主应用未跟。修复需把 dashboard.js 内联段拆出或为每段加 hash，是 frontend 改造；兼 SEC-NEW-4（CDN 在 script-src 但 unsafe-inline 旁路所有 nonce/hash）。涉及：`internal/server/dashboard.go:384`，`internal/server/static/dashboard.js`。
-- [x] **R222-SEC-2 — `shimEnvAllowedPrefixes` 仍含 PYTHONPATH/PYTHONHOME/CONDA_/NVM_DIR/VIRTUAL_ENV（P2）**: 类似 R220-SEC-1（GIT_）但针对 Python/conda/nvm 生态。`PYTHONPATH=` 让多用户/CI 系统上低权限可写路径里的恶意模块被 Python 子进程优先载入（Bash tool 触发 `python3` 即可）；`VIRTUAL_ENV=` 同理；`CONDA_` 通配过宽（仅需 PREFIX/DEFAULT_ENV/SHLVL 三项）；`NVM_DIR=` 暴露 nvm 树供 PATH-mismatch 攻击。方案：拆显式 allowlist；可能影响依赖 PYTHONPATH/VIRTUAL_ENV 转发的部署，需 release note。涉及：`internal/shim/manager.go:959-961`。 — 已修复（删除 PYTHONPATH/PYTHONHOME/VIRTUAL_ENV/NVM_DIR + CONDA_ 通配；保留 CONDA_PREFIX/DEFAULT_ENV/SHLVL + PYTHONDONTWRITEBYTECODE/PYTHONUNBUFFERED；manager_test.go 同步 6 个新 blocked case 锁拒），本批 PR #99
-- [x] **R222-SEC-3 — 缺 `GET /api/cron/runs` 与 `GET /api/cron/runs/{id}` rate limit（P3）**: 已认证 token 被盗后可高频枚举完整 run 历史并触发持续 IO；filesExistsLimiter 模式可复用。方案：在 server.New 织入 cronRunsLimiter（如 60req/min/IP），接到 dashboard_cron handler。涉及：`internal/server/dashboard_cron.go:963,1054`。 — 已修复（CronHandlers.runsLimiter = newIPLimiterWithProxy(rate.Every(time.Second), 60, opts.TrustedProxy) 共享 bucket 防绕过 + handleRunsList/handleRunDetail 双端点限流前置守卫），本批 PR #98
 - [ ] **R222-SEC-4 — `nz_anon` cookie 在无 TLS 部署下不带 Secure（P3）**: 启动期已有"未启 TLS"告警，但 cookie 自身不 fail-closed，攻击者同网络可窃取并认领 pending 上传。方案：多用户模式强制 Secure/no-TLS 启动失败。涉及：`internal/server/dashboard_send.go:44-50`。
-- [x] **R222-SEC-5 — `handleAttachment` MIME 仅来自扩展名，无 magic byte 校验（P3）**: 当 attachment.sanitizeExt 之外的代码路径被加入（regression），可向 image/jpeg 头里塞非图片字节。方案：`http.DetectContentType` 比对扩展名；不一致则降级为 application/octet-stream + attachment disposition。涉及：`internal/server/dashboard_send.go:1016-1033`。 — 已修复（DetectContentType 对前 512 字节 sniff，与 ext-MIME 不一致时降级 octet-stream + Content-Disposition: attachment + X-Frame-Options: DENY；rewind 后 ServeContent 流原始字节），本批 PR #99
-- [x] **R222-SEC-6 — `validateCronPrompt` LF-allowed 注释提到 `--append-system-prompt` 单行约束但策略只对 cron 安全（P3）**: 注释会误导未来把 LF-allowed 复制到 planner_prompt。方案：保留代码不改，加 contract test 锁 `project.ValidateConfig` 拒绝 PlannerPrompt 含 \n。涉及：`internal/server/dashboard_cron.go:184-188`。 — 已修复，本批 PR #96
 
 ### Go 正确性 — 跨包改动 / shutdown 协调
 
 - [ ] **R222-GO-1 — `cron.executeOpt` 用 `context.Background()` 起 sendCtx，绕开 stopCtx 取消（P2）**: scheduler.go:1853 注释说为避免 shutdown 误记 cancel，但 Stop 后 Send 仍可阻塞 jobTimeout（最多 5 min），triggerWG.Wait 因此可能超 stopBudget。方案：sendCtx 来自 stopCtx 派生 + 短 grace；或在 wg goroutine 文档化"intentional orphan"。涉及：`internal/cron/scheduler.go:1853`。
-- [x] **R222-GO-2 — `discovery/history_tail.go` 非 ctx 包装版用 `context.Background()`（P2）**: `loadHistoryTail`/`loadHistoryChainTail` 私有 wrapper 用 Background()，无法被 router historyCtx 取消，NFS 等慢 FS 上启动可能挂住。方案：调用方迁到 *Ctx 变体；删除非 ctx wrapper。涉及：`internal/discovery/history_tail.go:54,367`。 — 已修复（删除两个 Background 包装，测试改用 LoadHistoryTailCtx/LoadHistoryChainTailCtx 显式传 context.Background()），本批 PR #97
 - [ ] **R222-GO-3 — `cli.SubagentLinker.fireOnResolveLocked` 释放重取 mu 让 callback 跑期间存在 nested mu-release race（P2）**: 重入安全契约靠 godoc 维系，无静态守卫；callback 若再调 linker.Query 进入嵌套路径可能死锁。方案：copy fns 后释放两锁外执行所有 callback，移除 re-lock。涉及：`internal/cli/subagent_link.go:556-568`。
-- [x] **R222-GO-4 — `heartbeatLoop` pongTimer 预先 Stop+Reset 在 Go<1.23 toolchain 下可能漏 stale tick 误判 pong miss（P2）**: 注释说 Go 1.23+ 自 drain，但需校验 go.mod 最低版。方案：grep go.mod toolchain 行；若已 ≥1.23 则在注释加锁定标记。涉及：`internal/cli/process_readloop.go:506-508`。 — 已修复（go.mod 1.26.3 已 ≥1.23，注释加 LOCKED 标记 + 显式回退指引），本批 PR #96
-- [x] **R222-GO-5 — `cron/runstore.go` mtime sort 在 FS 时间精度低时 ordering 不稳，pagination cutoff 可能漏数据（P3）**: 评论已承认 StartedAt 才是真源；FAT32/tmpfs 在并发 cron 完成时同秒丢序。方案：non-cached 全扫路径读 JSON 排 StartedAt；或 mtime 作 secondary key。涉及：`internal/cron/runstore.go:397`。 — 已修复（mtime 平局时按 runID（16-char 随机 hex）desc 兜底排序，跨进程跨重读确定性 secondary key，无额外 IO 开销），本批 PR #99
-- [x] **R222-GO-6 — `eventlog/persist/persister.go run()` 关闭路径 drain p.in 但不 drain p.opCh，pending DropKey/Flush 调方挂直至 ctx 兜底（P3）**: 方案：closeCh case 在 shutdownAll 前 drain opCh，对每个 done channel 发 ErrPersisterClosed。涉及：`internal/eventlog/persist/persister.go:483-495`。 — 已修复（closeCh 分支 drain p.in 后再 bounded drain p.opCh，每个 pending op 的 done 通道非阻塞写 ErrPersisterClosed），本批 PR #97
-- [x] **R222-GO-7 — `cli/subagent_link.go::readFirstLineMeta` ReadSlice 满 32KB 后将 partial 行丢给 Unmarshal 静默退化为 scan（P3）**: 长 thinking block 当作首行时 fast path 失败但无显式信号，性能默默掉。方案：`bufio.ErrBufferFull` 显式返 errFirstLineTooLong，调用方按 fallback 处理。涉及：`internal/cli/subagent_link.go:666-668`。 — 已修复，本批 PR #95
-- [x] **R222-GO-8 — `session/router.go GetOrCreate` waiting timer drain 在 ctx.Done 分支可阻塞达 20ms（P3）**: Stop 返回 false 后 `<-waitT.C` 可能等下一 tick。方案：Reset(0) 强制立即 drain，或换 AfterFunc。涉及：`internal/session/router.go:1934-1936`。 — 已修复（go.mod ≥1.26 单调 Stop 自带 drain，去掉 if !Stop() { <-C } 旧 idiom；注释锁定 toolchain 版本契约），本批 PR #97
-- [x] **R222-GO-9 — `cli/process_readloop.go readLoop` panic recover 在 close(p.done) 之前调 onTurnDone，cb 看到 p.done 仍 alive 与"进程已死"语义冲突（P3）**: 方案：recover 设 flag 而非直接调 cb，让正常 terminal 路径跑 cb；或 godoc 显式标注 cb 在 partial 状态执行。涉及：`internal/cli/process_readloop.go:66-79`。 — 已修复（采用 godoc 文档化路径：normal terminal 路径同样 cb 在 close(p.done) 之前，LIFO defer 顺序有意设计；注释明确 callbacks 不应 select p.done 作 teardown 信号，应改读 IsRunning/GetState=StateDead），本批 PR #97
-- [x] **R222-GO-10 — `cron.Scheduler.Stop` triggerWG goroutine 在 deadline hit 时泄漏（P3）**: 测试场景下 stopBudget 短可触发 goroutine-leak detector。方案：用内部信号通道串联，或 gate `go func` 在 !deadlineHit。涉及：`internal/cron/scheduler.go:754-765`。 — 已修复（采用方案二"文档化 intentional orphan"：守卫块内联注释明确 wrapper goroutine 由 OS 进程退出回收 + 不加 chan-cancel 反向救赎的两条理由 + 测试侧 plumb 非 stuck deliverNotice fake 指引；纯文档化既有 contract，无行为变化），本批 PR #99
 
 ### 性能 — 协议接口或大重构
 
@@ -779,12 +755,7 @@
 - [ ] **R222-PERF-7 — `Snapshot()` 8 次顺序 atomic.Pointer.Load（P2，重申 R219-PERF-3 / R215-ARCH-P2-7）**: 打包 immutableBox + mutableBox。涉及：`internal/session/managed.go:841-857`。
 - [ ] **R222-PERF-8 — `invokePersistSinkSingle` 单槽 slice heap escape（P2，重申 R219-PERF-4）**: 需 -benchmem 验证后再决定 sync.Pool 或栈数组方案。涉及：`internal/cli/eventlog.go:653`。
 - [ ] **R222-PERF-9 — `newEventLogSink` 每 entry make+copy 出 pooled buffer（P2）**: bridgeEncPool 复用 encoder 但仍强制 copy。方案：批 batch 一次 make 切片分发；或 PersistSink 接受 []byte slice，sender 保证生命周期。涉及：`internal/session/eventlog_bridge.go:98-99`。
-- [x] **R222-PERF-10 — `ListSessions` 持 RLock 收 refs 再释放，Snapshot 在锁外但每次双 make（P2）**: sync.Pool 复用 []*ManagedSession；或 inline 成单循环填 snapshots。涉及：`internal/session/router.go:3643-3654`。 — 已修复（listRefsPool 复用 *[]*ManagedSession：cap 不足时按需 grow 一次，归还前清指针 + reset 长度防止 pool 条目 pin Session），本批 PR #99
 - [ ] **R222-PERF-11 — `EntriesSince` 多 tab 同 EventLog 各自调 + 各自 marshal（P2）**: EventLog 引入 last-batch JSON 缓存，notify 时直接复制。涉及：`internal/cli/eventlog.go:898-929`。
-- [x] **R222-PERF-12 — `persister.handleBatch` Clock() 调两次（P3）**: 在 run() case `<-p.in` 分支单次捕获 now 传 handleBatch，省 vDSO。涉及：`internal/eventlog/persist/persister.go:636,681`。 — 已修复（run + drainInChannel + shutdown drain 三入口收敛 + handleBatch 签名加 now time.Time 参数），本批 PR #95
-- [x] **R222-PERF-13 — `shimMsg.Code *int` 每 cli_exited heap alloc（P3）**: 改 `Code int + CodePresent bool`。涉及：`internal/cli/process_readloop.go:38-44`。 — 已修复（shimMsgCode struct{Value int; Present bool} + UnmarshalJSON，4 case round-trip 表 + 3 case invalid 锁三档语义），本批 PR #94
-- [x] **R222-PERF-14 — `heartbeatLoop` 30s ping 仍走 encodeShimMsg pool（P3）**: 预计算 `pingBytes = []byte(\"{\\\"type\\\":\\\"ping\\\"}\\n\")`，shimSendRaw 直送。涉及：`internal/cli/process_readloop.go:511-512`。 — 已修复（包级 shimPingBytes + Process.shimSendRaw helper，byte-equal 测试锁定与 encoder 路径输出一致），本批 PR #94
-- [x] **R222-PERF-15 — `BroadcastCronRun*` 每次多次 SanitizeForLog（P3）**: 在 Job struct 上缓存 sanitized 字段；hex runID 跳过 sanitize。涉及：`internal/server/wshub.go:1407-1440`。 — 已修复（新增 sanitizeHexIDForBroadcast helper：cron.IsValidID-shape 直接零分配返回，否则回退 SanitizeForLog；jobID/runID 短路），本批 PR #96
 
 ### 代码质量 — 方法过长 / 共享 helper
 
@@ -792,13 +763,7 @@
 - [ ] **R222-CR-2 — `upstream/connector_rpc.go handleRequest` 522 行 18-case switch（P2）**: 抽 (*Connector).handleSend/handleTakeover 等私方法。涉及：`internal/upstream/connector_rpc.go:50`。
 - [ ] **R222-CR-3 — `session.reconnectShims` 334 行 9-state enum + 嵌套 goroutine（P2）**: 拆 classifyAndPlanShimAction + executeShimAction。涉及：`internal/session/router.go:1276`。
 - [ ] **R222-CR-4 — `cron.executeOpt` 247 行（P2）**: 抽 recordAndBroadcastRun。涉及：`internal/cron/scheduler.go:1677`。
-- [x] **R222-CR-5 — 三处 firstLine/firstLineTrunc 跨包独立实现（P2）**: dispatch/status.go:135、cli/subagent_transcript.go:389、cron/job.go:192 各有版本。方案：抽 textutil.FirstLine（dispatch 语义最完整）；cli 版本变成 textutil.FirstLine + textutil.TruncateRunes 的一行 wrapper。涉及：3 文件。 — 已修复（textutil.FirstLine 收敛 dispatch + cron 跨任意空白行扫语义；textutil.FirstLineLiteral 保留 cli 字面切片版本；删 dispatch::firstLine + cli::firstLineTrunc + cron::JobTitleOrFallback 内联 strings.Split；新增 9+6 case 表驱动测试），本批 PR #98
-- [x] **R222-CR-6 — `magic 120` filename cap、`maxLen` 等无名参数散落（P3）**: 提到 file/package 级常量带原由注释。涉及：`internal/server/dashboard_send.go:505`，`internal/server/dashboard_session.go:42`。 — 已修复（dashboard_send.go 内联的 maxFilenameLen=120 提为 file-level 常量 maxClientFilenameRunes 并加原由注释；dashboard_session.go 的 maxResumeLastPromptBytes 既已是命名常量，本轮无需动），本批 PR #96
-- [x] **R222-CR-7 — `firstLineTrunc` vs `firstLine` 空行处理语义分歧未文档化（P3）**: 给两者加 godoc 标注；或抽 textutil 时锁定唯一语义。 — 已修复（dispatch/status.go::firstLine 与 cli/subagent_transcript.go::firstLineTrunc 加 godoc 互相交叉引用空行处理差异，R222-CR-5 收敛前防退化），本批 PR #95
-- [x] **R222-CR-8 — `sessionSendLegacy` Deprecated 注释无 tracking anchor（P3）**: 加 `// Removal tracked in docs/TODO.md R-LEGACY-SEND` + 新建 TODO 条目，含明确移除条件。涉及：`internal/server/send.go:561`。 — 已修复（Deprecated 注释加 `Removal tracked in docs/TODO.md R-LEGACY-SEND` 锚点 + 明确两条移除条件；下方新增 R-LEGACY-SEND 跟踪条目），本批 PR #96
 - [ ] **R-LEGACY-SEND — 删除 `Hub.sessionSendLegacy` 与其在 `sessionSend` 中的 fallback 分支（LOW，由 R222-CR-8 派生）**: sessionSendLegacy 是 MessageQueue 接入前的旧 send 路径，现仅供未配 Queue 的测试代码使用。NewHub 已在 Queue==nil 时打 slog.Warn，但仍允许构造。Removal 条件：(1) 所有驱动 Hub 的测试迁到真实 MessageQueue（或与其投递契约一致的 stub）；(2) NewHub 把 Queue==nil 从 Warn 升级为 Fatal（构造期 hard-fail）。两条都满足后，删除 sessionSendLegacy + sessionSend 中调它的 if 分支，把 guard/interrupt 语义收敛到唯一一处。涉及：`internal/server/send.go:561`，调用方在 `internal/server/send.go` sessionSend 内部分支。
-- [x] **R222-CR-9 — `managed.go` TODO 引用 R217-ARCH-2 但 R219-ARCH-3 已 supersede（P3）**: 同步交叉引用。涉及：`internal/session/managed.go:941`。 — 已修复（注释加 R219-ARCH-3 锚点），本批 PR #94
-- [x] **R222-CR-10 — 4 包各自定义 SessionRouter 但缺编译时静态断言（P3）**: 各包加 `var _ SessionRouter = (*session.Router)(nil)` 抓签名漂移。涉及：cron/dispatch/upstream/server consumer.go。 — 已修复（upstream 加 var _ SessionRouter，server 加 var _ HubRouter；cron/dispatch 既有断言保持），本批 PR #94
 
 ### 架构 — 大重构 NEEDS-DESIGN
 
@@ -831,29 +796,21 @@
 
 ### 安全 — 需 operator 决策
 
-- [x] **R220-SEC-1 — `shimEnvAllowedPrefixes` 通配 `GIT_` 前缀转发 `GIT_PROXY_COMMAND`/`GIT_SSH_COMMAND`/`GIT_EXEC_PATH` 到 CLI 子进程（P3）**: 这三类 git env 设置 git 执行外部命令的路径，宿主环境若被毒化即可让 Bash tool 通过 `git clone` 触达 RCE。方案：`shimEnvAllowedPrefixes` 把 `"GIT_"` 拆成显式列表（`GIT_AUTHOR_NAME=`, `GIT_COMMITTER_NAME=`, `GIT_AUTHOR_EMAIL=`, `GIT_COMMITTER_EMAIL=`, `GIT_CONFIG_GLOBAL=`），排除 PROXY/SSH/EXEC_PATH。涉及：`internal/shim/manager.go:892`。 — 已修复（拆 8 项显式 allowlist：AUTHOR/COMMITTER NAME+EMAIL、CONFIG_GLOBAL/SYSTEM、DIR/WORK_TREE），本批 PR #90
-- [x] **R220-SEC-2 — `dashboardToken == ""` 短路出现在 `ConstantTimeCompare` 之后造成时序信道（P3）**: login handler 在 ConstantTimeCompare 后再判 `if a.dashboardToken == "" || !matched`，`||` 短路使"未配 token"路径比"配置但 token 错"路径快，远端可经时序区分两态。方案：启动期 `if cfg.DashboardToken == "" { return all-allowed handler }` 把 nil-token 旁路抽到 mux 装配阶段。涉及：`internal/server/dashboard_auth.go:282`。 — 已修复（位运算 matched & configured 强制两侧求值消除 `||` 短路 + 4 case 表驱动测试锁三档拒绝行为），本批 PR #90
-- [x] **R220-SEC-3 — `gzipMiddleware` 在 `MaxBytesReader` 之前解压，gzip-bomb 可绕过 per-handler body cap（P2）**: gzip 中间件包裹整个 mux，每个 handler 调 `MaxBytesReader` 但只限制压缩字节；1KB gzip → 解压可达 GB 级。方案：在 gzipResponseWriter 内部对解压输出再套 io.LimitReader（cap 设为 2× MaxBytesReader 上界）。涉及：`internal/server/server.go:735`。 — 已确认是误报关闭（gzipMiddleware 实际是 response-side only：`gzip.go:139-166` 只包 ResponseWriter 的输出做 gzip 压缩，从不读 r.Body / 不调用 gzip.NewReader 解压请求体；`gzipResponseWriter.decide()` 也仅基于响应 Content-Type 做条件压缩。请求体 gzip-bomb 是 request-parsing path 独立担忧，与本中间件正交，gzip.go:144-147 godoc 已明示。R217-SEC-3 / R224-CR-1 同根因，一并关闭）。
 
 ### Go 正确性 — 跨包改动
 
 - [ ] **R220-GO-1 — `cli.SubagentLinker.Resolve` retryInterval 250ms `time.Sleep` 无 ctx 中断（P1，与 R219-GO-1 同批修复）**: Resolve 多次 retry 间隔用 `time.Sleep(l.retryInterval)`，shutdown ctx 取消时 goroutine 仍要等满 retry 间隔（最多 12 次 × 250ms = 3s）。方案：`select { case <-time.After(l.retryInterval): case <-ctx.Done(): return }`，与 R219-GO-1 接 ctx 改造同批进行。涉及：`internal/cli/subagent_link.go:288,326`。
 - [ ] **R220-GO-2 — `project_files.go` `serveRender`/`servePreview`/`serveRaw` 三处独立二次 os.Open 共享 R219-SEC-2 TOCTOU 缺口（P1，扩展 R219-SEC-2）**: R219-SEC-2 只点了 serveRender，但 servePreview（第 742 行）与 serveRaw（第 836 行）也各自独立 `os.Open(resolved)` 二次读盘；preview 路径还把内容塞进 JSON 返回。方案：handleFileGet 统一在 Lstat 阶段持已 open 的 *os.File 传递到三个 helper，避免 double-open race。
-- [x] **R220-GO-3 — `cron.applyJitter` 不识别 jitter window 内 DeleteJob，jobRunningGuard 留死锁式 hold 阻塞 TriggerNow（P2）**: applyJitter 接受 `s.stopCtx` 但不检查 `s.jobs[j.ID]` 是否仍在；jitter window 内 DeleteJob 会让 guard 一直 hold 到 jitter 到期才发现 job 已删，期间 TriggerNow 同 ID 失败。方案：jitter 期间订阅 per-job cancel channel，或 applyJitter 返回后再判 job 存在性。涉及：`internal/cron/scheduler.go:1508`。 — 已修复（applyJitter 返回后 RLock 检查 `s.jobs[j.ID]` 存在性，已删则提前 return 让 deferred inflight.running.Store(false) 立即释放 CAS guard，TriggerNow 同 id 不再被"already running"误拒），本批 PR #192
 
 ### 性能 — 协议接口变更或需 benchmark
 
 - [ ] **R220-PERF-1 — `countActive()` evictOldest/Takeover/spawnSession 路径全 map scan（P1）**: 4 个 caller 各自 `r.mu.Lock()` 下做完整 map 扫描，500 session 量级会显著增加锁内 CPU；Cleanup 已用 `newActive` 增量，evict/takeover 没接。方案：传 `delta int` 给热路径做原子加，countActive 仅在 Cleanup 全量重算。涉及：`internal/session/router.go:2126,2400,2472,4067`。
-- [x] **R220-PERF-2 — `EventLog.SetAgentInternalID` 全 ring backward scan 在 OnResolve 异步回调写锁内执行（P2）**: 每次 resolve 走 500 entry backward scan 到 patch InternalAgentID/JSONLPath/FirstPromptID，期间堵 Append。方案：维护 `toolUseID → ringIndex` 小 map，直接 slot patch，O(1) 替代 O(N)。涉及：`internal/cli/eventlog.go:560`。 — 已修复（R225-PERF-13 落地：eventlog.go:21 `setAgentInternalIDMaxScan = 50` 上限 + foundAgent/foundTaskStart 双条匹配后 break early，wlock 持锁窗口从 O(maxSize=500) 降到 ≤50 entry），本批 PR #192
 - [ ] **R220-PERF-3 — `EventLog.EntriesSince` 初始 catch-up 在 RLock 下复制 500 entry × 512B（P2）**: 反向扫描+复制全在 l.mu RLock 内，subscriber 初始订阅时阻塞 Append 一段时间。方案：先 snapshot ring 索引（head/count），release RLock，再在临时 slice 内拷贝。涉及：`internal/cli/eventlog.go:869`。
 - [ ] **R220-PERF-4 — `Cleanup` pass2 对 candidate 做 proc.Alive + proc.IsRunning 二次锁获取（P2）**: pass1 在 r.mu RLock 下收集 candidate proc 指针，pass2 又对每个 candidate 取 `proc.mu.RLock` 跑 IsRunning，与热 Send 路径锁竞争。方案：pass1 同时 capture proc.GetState() 一次，pass2 直接读 state。涉及：`internal/session/router.go:2920-2946`。
 - [ ] **R220-PERF-5 — `hub.debounceMu` 高频锁获取无 atomic 短路（P2）**: 50 tab × 5 evt/s 让 debounceMu 拿 ~300×/s 包括 timer callback 重入。方案：atomic.Bool "pending" flag 在 fast path 取代 mutex acquire；首次 set 触发 AfterFunc。涉及：`internal/server/wshub.go:140-149`。
-- [x] **R220-PERF-6 — `Snapshot.TurnAgents` 即使 turnAgents 为 nil 也走 RLock+slice 复制（P3）**: 大多数 session 任意时刻 turnAgents 为空，仍每次 1 Hz × N tab × 50 sess 走锁。方案：`atomic.Int32 turnAgentCount`，Snapshot 在 count==0 时跳过 RLock+复制。 — 已修复，本批 PR #84
 
 ### 代码质量 — 错误消息一致性
 
-- [x] **R220-CR-1 — 多处 "X too long" 错误消息不带 limit 数值（P3）**: `session/key.go:133`, `session/workspace.go:53`, `session/label.go:32`, `shim/manager.go:47` 仍用 bare "too long" 而非 "exceeds N-byte limit"，导致 API consumer 不知道 cap 值。本轮已修 notify_chat_id；剩余 4 处建议作为统一格式批量修。方案：单 PR 把 4 处错误格式化加 limit。Breaking：API 错误消息字符串变化，下游不应依赖。 — 已修复，本批 PR #84
-- [x] **R220-CR-2 — `Guard.lastWait` R217-GO-1 leak 无 inline TODO 关联注释（P3）**: `sessionSendLegacy` 用 `Guard.AcquireTimeout` 但无 `// TODO(R217-GO-1)` 标记，未来 reviewer 会把 leak 当新发现重报。方案：在 send.go AcquireTimeout 调用点加 inline 注释指 R217-GO-1。涉及：`internal/server/send.go:565`。 — 已修复，本批 PR #84
 
 ## Round 218 — 5-agent 并行 review 第 32 轮（2026-05-16）NEEDS-DESIGN
 
@@ -864,13 +821,10 @@
 ### Go 正确性 — 跨包改动
 
 - [ ] **R218-GO-2 — `dispatch.go:969-1002` sendAskQuestionCard goroutine 访问可能已释放的 tracker**: stop() 先执行后该 goroutine 仍对已释放 platform 进行类型断言。建议：加 context timeout 或在 stop() 里主动取消待发送卡片 goroutine。`internal/dispatch/dispatch.go:969-1002`。
-- [x] **R218B-GO-1 — `discoveryCache.startLoop` 初始 `go dc.refresh()` 无 WaitGroup 追踪（P2）**: `startLoop` 启动一个裸 goroutine 做初始 refresh，Server Shutdown 取消 ctx 后该 goroutine 仍在后台运行，可能访问已清理的 projectMgr。方案：给 `discoveryCache` 添加 `wg sync.WaitGroup`，`startLoop` 前 `wg.Add(1)` + defer Done，暴露 `Wait()` 供 Server.Shutdown 调用。涉及：`internal/server/discovery_cache.go:47-60`, `internal/server/server.go` Shutdown 路径。 — 已修复，见 PR #68
-- [x] **R218B-GO-2 — `handleOwnerLoopPanic` 用 `context.Background()` 向用户回送错误（P1 重申 R217-GO-2）**: recovery handler 创建 Background ctx 通知用户，若 appCtx 已取消（shutdown 期间）会挂起。方案：接受 parentCtx 参数或用 `context.WithTimeout(context.Background(), 5*time.Second)`。涉及：`internal/dispatch/dispatch.go:510`。 — 误报关闭（dispatch.go:518 已是 `context.WithTimeout(context.Background(), 15*time.Second)`，挂起不存在；从 parent ctx detach 是有意设计，shutdown 期间 parent 已 cancel 时仍能给用户回 panic 错误。R224-CR-2 同根因），本批 PR #150
 - [ ] **R218B-GO-3 — `readLoop` linker.Resolve goroutine 无 context 绑定（P1）**: `go linker.Resolve(taskID, toolUseID, ...)` 启动时无 cancellation。进程 shutdown 后 Resolve 可能继续访问磁盘。方案：`linker.Resolve` 接受 ctx 参数，绑定到 process 生命周期。涉及：`internal/cli/process_readloop.go:324`，`internal/cli/subagent_link.go`。Breaking：是（接口变更）。
 
 ### 安全 — 新发现（非重复）
 
-- [x] **R218B-SEC-2 — `project_files.go` stat→open TOCTOU 窗口（P3）**: `statRelWithRoot` 调用 `EvalSymlinks + Stat`，后续 preview handler 再次 `Open` 同路径。两次调用之间攻击者可替换 symlink 指向敏感文件。现有 `EvalSymlinks` 已 resolve 到真实路径，但 preview 端点重新 join + Open 而不是用已 resolved 路径。方案：`statRelWithRoot` 返回 `resolved string` 供 preview handler 直接复用，避免二次 EvalSymlinks。涉及：`internal/server/project_files.go:444-491`。 — 已修复（采用 Lstat-after-resolve defense-in-depth 而非 resolved 复用，更紧凑），见 PR #71
 
 ### 性能 — 需 benchmark 确认
 
@@ -879,7 +833,6 @@
 
 ### 架构 — 新发现
 
-- [x] **R218-ARCH-1 — cron.SessionRouter 未纳入 contract_test（已修复，见 PR #40）**: ~~四个 consumer 中 cron 独缺编译期 pin，Router 签名漂移对 cron 无编译报警。~~ — 已修复，见 PR #40（本批 PR #91 仅同步 [x]）
 - [ ] **R218-ARCH-2 — 4 个 consumer SessionRouter 接口定义方法重叠但无共享基础**: dispatch/cron/server/upstream 各声明独立 SessionRouter，方法签名漂移只能靠 contract_test 间接检测，无法共享 `CoreRouter` 提供编译期强绑定。方案：定义 `session.CoreRouter` interface，4 个包 embed 扩展。非 breaking，中等工作量。
 - [ ] **R218-ARCH-3 — Protocol 接口 SupportsX / Capabilities 双轨（R214-ARCH-1 重申）**: Protocol 同时有 SupportsReplay/SupportsPriority 和 Capabilities() Caps，新 backend 实现者不清楚该实现哪个。建议撤除老 Supports* 方法，强制 Capabilities() 单一入口。Non-breaking，小工作量。`internal/cli/protocol.go`。
 - [ ] **R218B-ARCH-2 — `Dispatcher.projectMgr` 与 `resolver` 双信息源（P3）**: `projectMgr` 仅用于 slash-command UX，`resolver` 持有 DataSource；并发修改下两者可能对同一项目产生不一致视图。方案：将 slash-command 的 projectMgr 访问路由到 resolver 暴露的接口，统一信息源。涉及：`internal/dispatch/dispatch.go:39-84`。
@@ -887,7 +840,6 @@
 ### 代码质量 — 新发现
 
 - [ ] **R218-CR-1 — `dispatch.go:900-950` dispatchCommand 10+ case switch 无表驱动**: 无法编译期验证所有命令被测试覆盖。建议：`map[string]commandHandler` 表驱动 + 循环分派。`internal/dispatch/dispatch.go:900-950`。
-- [x] **R218-CR-3 — `dispatch.go:545-560` takeoverFn 返回值被丢弃**: 即使 takeover 失败也继续走 GetOrCreate+Send，若 takeover 意图阻止后续操作会被静默忽略。`internal/dispatch/dispatch.go:545-560`。 — 已确认现状，dispatch.go:534-543 已加 RNEW-010 注释明确 "intentionally ignore"（GetOrCreate 兜底覆盖两种语义），无需代码改动。
 
 ## Round 217 — 5-agent 并行 review 第 31 轮（2026-05-13）NEEDS-DESIGN
 
@@ -899,7 +851,6 @@
 
 - [ ] **R217-SEC-1 — `AgentOpts.ExtraArgs` 缺 flag allowlist（重申 R216-SEC-2）**: dashboard agent 编辑用户可在 `agents.*.args` 写入 `--mcp-config /host/secret` / `--append-system-prompt` 加载任意配置。配置层 `validateArgvStrings` 仅拒控制字节、不限制 flag 名。方案：`BuildArgs` 调用前对每元素 allowlist（`--model` / `--add-dir` / `--max-turns` / `--append-system-prompt`），或在 `validateConfig` 阶段明确允许的 flag 集合。**Breaking**：需要枚举所有现存 backend args 配置。涉及：`internal/cli/protocol_claude.go:56`、`internal/session/router.go:1959`。
 - [ ] **R217-SEC-2 — 远端 node workspace 仅做语法校验（重申 R61-SEC-2 设计）**: `dashboard_send.go:773 validateRemoteWorkspace` 仅 path-shape 检查，不调 EvalSymlinks（远端 root 在另一台机器无法本地 resolve）。当前注释承认这是设计意图。后续要做 cross-node trust：要么强制远端节点本地 EvalSymlinks 并回传校验结果，要么 dashboard 把 workspace allowlist 配在主节点。
-- [x] **R217-SEC-3 — gzip 解压链路潜在 bomb 风险**: `internal/server/gzip.go` `gzip.NewReader` 解压无大小上限。当前 `MaxBytesReader` 是压缩字节级，若未来某 path 在 gzip middleware 之后才设 cap，会留下 bomb 窗口。方案：`io.LimitReader` 包装 gzip reader 输出，按 per-handler body cap。需先核实 gzip middleware 实际是否在 MaxBytesReader 之前。 — 误报关闭（与 R220-SEC-3 / R224-CR-1 同根因：gzipMiddleware 是 response-side only，从不调 gzip.NewReader 解压请求体；gzip.go:139-147 godoc 已明示。本批 PR #150 同步关闭三处）。
 - [ ] **R217-SEC-4 — `gogo/protobuf v1.3.2` CVE-2021-3121（间接依赖）**: aws-sdk-go-v2 间接依赖。naozhi 不直接调用，但为消除告警可 `go get github.com/gogo/protobuf@latest` 或在 go.mod 加 replace。
 - [ ] **R217-SEC-5 — `golang.org/x/crypto v0.49.0` 偏旧（约 10 个月）**: 无已知 critical CVE 但建议跟随 toolchain 升级。
 - [ ] **R217-SEC-6 — `dashboardToken` 轮转无显式 session 失效机制**: 当前依赖 cookieMAC(secret, dashboardToken)，token 改后旧 cookie 自然失效，但需要 process restart。增设 server-side session generation counter 才能不重启即时撤销。Breaking：需要持久化 generation 状态。
@@ -909,7 +860,6 @@
 ### Go 正确性 — 跨包改动 / 需 ctx 传递
 
 - [ ] **R217-GO-1 — `Guard.lastWait` 在不发起 Release 的路径下永久泄漏**: 现状 ShouldSendWait 写 + Release 删；不调 Release 的 path 留下永久 entry。方案：sync.Map+TTL sweep（如 seenNonces），或显式 cap+LRU。
-- [x] **R217-GO-2 — `handleOwnerLoopPanic` 用 `context.Background()`**: 当前签名不收 ctx，要改成 `(ctx, key, msg, r)` 影响测试与 owner-loop 路径。Breaking：函数签名变化。 — 误报关闭（与 R218B-GO-2 / R224-CR-2 同根因：dispatch.go:518 已 WithTimeout 15s，从 parent ctx detach 是 panic recovery 的有意设计），本批 PR #150
 - [ ] **R217-GO-3 — `historyCtx` 派生自 `context.Background()` 而非 app ctx（重申 R216-GO-4）**: 异常退出路径下 historyWg goroutine 不被取消。需 NewRouter 收 appCtx（构造函数签名变化）。
 - [ ] **R217-GO-4 — `spliceLog` 每 record `json.Unmarshal` 取已知 seq**: 重新解码 record body 只为读 seq；可由 idxEntries 索引位置直接拿。改动需谨慎（保证 seq 不被外部恶意改）。
 - [ ] **R217-GO-5 — `cron.Stop()` deadline 后泄漏 triggerWG goroutine（R44 重申）**: 单 shot 设计可接受；测试 -count=N 污染。长期需重构 triggerWG/Stop 协议。
@@ -942,11 +892,9 @@
 
 ### 代码质量 — 小改动等合并窗口
 
-- [x] **R217-CR-1 — `sanitizeClientFilename` 改用 `utf8.RuneCountInString` 短路前已落地（本轮）**：保留作为已修锚。 — 已确认（dashboard_send.go:507 仍是短路实现），归档关闭。
 - [ ] **R217-CR-3 — `Cleanup` 三阶段加锁窗口**：worst-case stuckKill 目标进程在 Pass 2 已被 spawnSession 替换。`shouldPrune` 已 mitigates，stuckKill 路径未 re-check。需要 pass-2 再次 verify。
 - [ ] **R217-CR-4 — `Hub god struct 36 字段 / `node.Conn` 18+ 方法巨型接口**: 子聚合拆分。
 - [ ] **R217-CR-5 — cross-node 错误注入方向不对称**: 反向有 LogSystemEvent，正向 node.Conn.Send 失败只 slog 不进 EventLog。
-- [x] **R217-CR-6 — workspace 三重重载命名混淆 `cfg.Session.Workspace` / `cfg.Workspaces` / `cfg.Workspace`**: 重命名或文档化。 — 已确认归档（PR #69 已落地：`internal/config/config.go` 顶部 Config struct godoc 块（第 24-37 行）显式列出三种语义 1) Workspace = this-instance identity 2) Workspaces = REMOTE-NODES alias 3) SessionConfig.Workspace = deprecated CWD alias，并指引读 Workspace/Nodes/Session.CWD；Workspaces 字段段亦交叉引用顶部 godoc。R216-CR-5 同根因关闭），本批 PR #183
 - [ ] **R217-CR-7 — `project.DisplayName` / `Emoji` schema 校验但 dashboard UI 不读**：要么 wire UI，要么删 schema。
 
 ## Round 216 — 5-agent 并行 review 第 30 轮（2026-05-12）NEEDS-DESIGN
@@ -1004,8 +952,6 @@
 - [ ] **R216-CR-2 — `Hub` god 36 字段（同 R216-ARCH-4）**。
 - [ ] **R216-CR-3 — `node.Conn` 18+ 方法巨型接口**: 消费者只用 1-2 个；拆成 `NodeReader`/`NodeProxy`/`NodeSubscriber`/`NodeLifecycle`。
 - [ ] **R216-CR-4 — cross-node 错误注入方向不对称**: 反向连接有 `LogSystemEvent`，正向 `node.Conn.Send` 失败只 slog 不进 EventLog。dashboard 用户看到一半。
-- [x] **R216-CR-5 — 配置 workspace 三重重载命名混淆**: `cfg.Session.Workspace` / `cfg.Workspaces`（nodes）/ `cfg.Workspace`（LocalNode） YAML 和代码 3 处同名。 — 已修复（Config struct 顶部 godoc 块明确三种语义 + 字段交叉引用），见 PR #69
-- [x] **R216-CR-6 — `node/protocol.go:33` / `managed.go:950` TODO 无 issue 追踪**：加 Round 号或迁到 TODO.md。 — 已确认现状，PR #38 已把 R214-CODE-6 / R217-ARCH-2 锚点写入两个 TODO 注释，本条与 R214-CODE-6 同根因可一并关闭。
 - [ ] **R216-CR-7 — `project.DisplayName` / `Emoji` 有 schema 无 UI wire**: validate.go 校验但 dashboard 不读。
 
 ## CRITICAL — 安全 (需设计决策)
@@ -1195,7 +1141,6 @@
 
 - [ ] **R214-SEC-2 — dashboard CSP 保留 `'unsafe-inline'`**: 主 dashboard CSP 对 script-src / style-src 都开 unsafe-inline；登录页已用 hash-based CSP。与 RNEW-SEC-003 合并跟踪。
 
-- [x] **R214-SEC-3 — ANTHROPIC_ 前缀全量透给 shim**: `shim/manager.go::shimEnvAllowedPrefixes` 允许 ANTHROPIC_* 全系列进子进程；Bedrock 部署下 `ANTHROPIC_API_KEY` 冗余却可被 Bash tool 读。
   - 方案：明确排除 `ANTHROPIC_API_KEY=` 或按 backend 按需 allowlist。
   - 涉及：`internal/shim/manager.go:987-995`
   - 已修复（与 R219-SEC-3 同根因，9 项显式白名单替换 ANTHROPIC_/CLAUDE_ 通配前缀），本批 PR #93
@@ -1552,7 +1497,6 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：state file 强制 0600；或启动时重新生成 token，state 不存。
   - 涉及: `internal/shim/server.go:145-159`
 
-- [x] **R215-SEC-P3-2 — Cron workspace 未过 `hub.allowedRoot`**: validateCronWorkDir 只校验字符集，不限于 allowedRoot。
   - 方案：cron API 绑 `validateWorkspace(workdir, allowedRoot)`。
   - 涉及: `internal/server/dashboard_cron.go`
   - 已修复（dashboard_cron.go:382 handleCreate 与 :773 handleUpdate 均已 `validateWorkspace(req.WorkDir, h.allowedRoot)` + 403 forbidden on boundary violation；本批仅核对归档），本批 PR #75
@@ -1560,7 +1504,6 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 
 ### performance-optimizer（避开已归档后剩余 P1/P2）
 
-- [x] **R215-PERF-P1-1 — `eventlog_bridge.go:49` 每 EventEntry `json.Marshal`**: 持久化 sink closure 对每条 EventEntry 调 json.Marshal (reflection)，热路径。
   - 方案：EventEntry 提供 `MarshalJSONFast` 或改用 `bytes.Buffer + encoder` 复用。
   - 涉及: `internal/session/eventlog_bridge.go:49`
   - 已修复（commit 7fc779f 引入 sync.Pool 复用 json.Encoder + bytes.Buffer，本批仅在源码里加 R215-PERF-P1-1 锚点注释让 reviewer 反查），本批 PR #86
@@ -1570,7 +1513,6 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 涉及: `internal/cli/eventlog.go:627`
 
 
-- [x] **R215-PERF-P2-3 — `wshub.marshalPooled` 返回副本即便单订阅者**: `SendRaw` enqueue 后不再持 slice，小 batch 场景可省 copy。 — 已确认归档（dashboard.go:84-97 `marshalPooled` 必须 copy：源 backing 由 `jsonEncPool` 复用，下次 Get→Reset→Encode 会原地覆盖，省 copy 会让先前调用方拿到的 slice 被后续 marshalPooled 改写产生 fan-out 错乱；当前 SendRaw 链路异步消费，回写时机无法精确判断，copy 是池化语义的必要代价），本批 PR #192
   - 方案：单订阅 fast-path 直接传 pooled buffer，两订阅起再 clone。
   - 涉及: `internal/server/wshub.go:996,1020`
 
@@ -1660,7 +1602,6 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 ### Go 正确性 — 本轮新发现
 
 - [ ] **R227-GO-2 — `cli/subagent_link.Resolve` retry 循环 `time.Sleep(retryInterval)` 无 ctx 取消（P1）**: SIGTERM 期间最多 8 个 Resolve goroutine 各自卡 3s。修复需 Resolve 接 context.Context 参数（Breaking）。涉及 `internal/cli/subagent_link.go:294,332`。重申 R225-GO-2。
-- [x] **R227-GO-3 — `fireOnResolveLocked` 命名违反 Go 锁约定（P2）**: `...Locked` 通常意味"调用者持锁，函数不操作锁"，但本函数手动 Unlock+Lock。本轮 R227-GO-1 修了 panic-safe，但语义命名仍是陷阱：未来若有人在持锁场景再调一次将 double-unlock。建议重命名为 `fireCallbacksDropLock` 并在 godoc 明确"releases and reacquires l.mu"。 — 已修复，本批 PR #170
 - [ ] **R227-GO-4 — `Router.Shutdown` test fallback `time.Sleep(100ms)` busy-poll（P2）**: 测试构造的 `&Router{}` 缺 shutdownCond，30s 超时下 300 次 busy-poll。方案：要求所有路径走 NewRouter；或裸构造时 log.Warn。
 - [~] **R227-GO-5 — cron `notifyTarget` 用 `context.Background()` 不响应 stopCtx（误报关闭 2026-05-20）**: 复核后确认与 send 路径同款意图——cron run 记录写入与最终通知归属同一生命周期，必须独立于 stopCtx 才能在 graceful shutdown 期间把已跑完的 turn 结果递达 IM。条目自标"降为 P3 仅记录"，本批 PR #187 关闭归档。
 - [ ] **R227-GO-7 — `cli.Resolve` resolveSem acquire 无 ctx select arm（P2）**: 与 R227-GO-2 同根因；Resolve 接 ctx 后可统一 select。
@@ -1675,8 +1616,6 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R227-SEC-7 — 反向 node WS 在 ws:// 明文下传 token（P2）**: 内网嗅探可截获 token 冒充节点。方案：r.TLS == nil 拒绝 Upgrade，或加 insecure_node 显式豁免。重申 R226-SEC-3。
 - [ ] **R227-SEC-9 — Dashboard 主页 CSP `script-src 'self' 'unsafe-inline'` 完全打开 XSS 通道（P2）**: 任何同源 XSS 注入即可执行任意脚本。方案：迁移到 CSP nonce 模式。Breaking。涉及 `internal/server/dashboard.go:389`。重申 R226-SEC-2。
 - [ ] **R227-SEC-10 — `/health` 端点无认证无限速，泄漏基础设施拓扑（P3）**: 外部攻击者可枚举 session count / watchdog kills / node 状态 / build 版本。方案：per-IP rate limiter + 敏感字段移到认证 /api/stats。重申 R226-SEC-7。
-- [x] **R227-SEC-11 — WS Hub 同 session key 无订阅数量上限（P3）**: 单 token 可开 1000 WS 订阅同 session 引 fan-out CPU spike。方案：subscribe 时检查同 key 当前订阅数 ≤20。重申 R226-SEC-8。 — 已修复（同 R226-SEC-8），本批 PR
-- [x] **R227-SEC-12 — `mode=download` 路径可下载 .env / .npmrc / .netrc 等点开头配置（P3）**: previewableByExt 排除 .env 但 download 模式不受此保护。方案：download 模式额外 blocklist；或运维文档明确 allowed_root 不含秘密文件。 — 已关闭（实施已落地：`internal/server/project_files.go::serveDownload` 入口加 `isSensitiveDownloadName(filepath.Base(resolved))` 守卫，命中 sensitiveDownloadNames（.env / .env.local / .env.dev / .env.development / .env.prod / .env.production / .env.staging / .env.test / .netrc / .npmrc / .pypirc / .dockercfg）或 sensitiveDownloadExts（.key / .pem / .p12 / .pfx / .crt）返 403 "file type not downloadable"；commit 61cde08 R229-SEC-9 落地。R228-SEC-3 同根因），本批 PR #188
 - [~] **R227-SEC-14 — `feishu/transport_ws.go` parseSDKEvent 没有 maxIncomingTextBytes 检查（误报关闭 2026-05-20）**: 复核 transport_ws.go:309 已有 `if len(text) > maxIncomingTextBytes` 守卫 + slog.Warn，与 transport_hook.go 保持对称。条目自标"本条为误报"。本批 PR #187 关闭归档。
 
 ### 性能 — 本轮新发现
@@ -1690,10 +1629,8 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R227-PERF-7 — `ACPProtocol.WriteMessage` 每次 prompt 用 map[string]any（P2）**: 3-5 个 map + RPCRequest 分配 + marshal。方案：定义具名 struct。
 - [ ] **R227-PERF-8 — `BroadcastSessionsUpdate` time.AfterFunc 每次 alloc（P2）**: 高频 notify 下每次 timer + WG 开销。方案：Hub 持久 *Timer + Reset。
 - [ ] **R227-PERF-9 — `EventLog.Append` invokePersistSink 单条 slice 逃逸（P2）**: 5-50/s × N session 热路径。方案：EventLog 内置 [1]EventEntry scratch + sync.Pool。涉及 `internal/cli/eventlog.go:660`。
-- [x] **R227-PERF-10 — `Snapshot()` MeteringUsage []slice 每次 alloc（P2）**: 大多数为 nil 或 1 条。方案：proc.MeteringUsage() 返回内部数组只读 view，或延迟 alloc 到 JSON 序列化。 — 已修复（meteringLen atomic.Int32 镜像 len(meteringUsage)，applyMetadata 在 meteringMu 内更新；MeteringUsage 进 RLock 前先 Load 短路 nil 返回，覆盖 claude-class + pre-metering kiro turn 主导路径），本批 PR #189
 - [~] **R227-PERF-11 — `EventLog.Append` storeAtomicString 每次 *string alloc（评估关闭 2026-05-20）**: 条目自标"降级仅观察"。复核 textutil.StoreAtomicString 已用 atomic.Pointer.Load + 字符串相等短路（同值不重新 Store *string），命中率 ~99%（lastActivitySummary 在同 tool_use 持续时不变）。sync.Pool[string] 在 textutil 是叶子包做不到 lock-free 复用，且分支预测器对短路命中早已优化。本批 PR #168 关闭归档。
 - [ ] **R227-PERF-12 — `ACPProtocol.parseSessionUpdate` tool_call/tool_call_update 分支双 alloc（P2）**: AssistantMessage ptr + ContentBlock slice。方案：tool name 直接存 ToolCall.Title；ContentBlock 改 [1]ContentBlock + count。
-- [x] **R227-PERF-15 — `protocol_acp.ReadEvent` 每个 turn-end 都 unmarshal stopReason（P3）**: msg.Result 多数为 null 或 {}。方案：bytes.Contains 快速检测后再 unmarshal。 — 已修复，本批 PR #176
 - [~] **R227-PERF-16 — `EventEntriesSince` dead-session 分支全量扫描+stable sort（误报关闭 2026-05-20）**: 条目自标"500 entry stable sort < 1µs，可接受"——dead-session 重订阅是低频路径（tab reload），微秒级开销远低于其他热路径。InjectHistory 端排序也会让 replay 与 live append 之间的语义需要重新定义。本批 PR #187 关闭归档。
 - [ ] **R227-PERF-17 — `shim.ServerMsg.MarshalLine` 每次 json.Marshal alloc（P3）**: shim binary 独立。方案：sync.Pool[bufEnc]。**降级**：shim 独立 binary，不影响主进程，单独 PR 处理。
 - [ ] **R227-PERF-18 — `eventPushLoop` EventEntriesSince per-goroutine 独立 slice（P3）**: 50 订阅 tab × 同 session 各自分配。方案：扩展 EntriesSinceInto(dst) 接口接受 caller-owned buffer。Breaking。
@@ -1701,12 +1638,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 
 ### 代码质量 — 本轮新发现
 
-- [ ] **R227-CR-2 — `internal/session/testutil.go` 无 build constraint（P2）**: TestProcess / NewTestProcess / InjectSession 进 prod binary。方案：加 `//go:build testing` 或重命名 *_test.go。重申 R226-CR-14。
 - [ ] **R227-CR-5 — `dispatch.sendAndReply` 250+ 行 5+ 职责（P2）**: 错误处理、生命周期通知、事件跟踪、结果解析、图片读取、AskQuestion 抑制、文字分割。方案：拆 buildSendContext / handleGetOrCreateError / handleSendError / deliverResult。涉及 `internal/dispatch/dispatch.go:527`。重申 R219-CR-7。
-- [x] **R227-CR-7 — `EventEntryFromEvent` Deprecated 但 process_extra_test.go 是唯一调用者（P3）**: 让 deprecated 函数长期存在。方案：迁测试到 EventEntriesFromEvent 后删除。 — 已修复（process_extra_test.go 两处调用迁到 EventEntriesFromEvent；router_shim.go 注释同步更名；deprecated wrapper 删除），本批 PR #166
-- [x] **R227-CR-8 — `TodosDetailJSON` 二次 marshal（P2）**: ParseTodos Unmarshal 后又 Marshal。方案：直接抽取 block.Input 的 todos 字段原始字节。重申 R226-PERF-8。 — 已关闭（与 R226-PERF-8 / R228-PERF-2 同根因：`internal/cli/todo.go::ParseTodosWithRaw` 已返回 `(todos, rawTodos, ok)`，`process_event_format.go` TodoWrite 分支直接 `entry.Detail = string(rawTodos)` 不再走 `TodosDetailJSON` 二次 marshal。R226-PERF-8 落地于 PR #166，R228-PERF-2 同步关闭归档于 PR #183），本批 PR #188
-- [x] **R227-CR-9 — `formatChineseDuration` 仅在 dispatch 包，cron 通知也需要（P3）**: 用户从 IM 看到中英不一致。方案：迁到 textutil/platform 公共包。 — 已修复（迁到 internal/textutil.FormatChineseDuration 公开 API；dispatch 改 import + 调用；测试随实现迁到 textutil 包），本批 PR #166
-- [x] **R227-CR-13 — `TodosSummary` 用 emoji 字符（P3）**: 4 字节 emoji 在字段过短时可能截在非 emoji 边界。方案：评估 emoji 政策，必要时换 ASCII。 — 已修复（保留 emoji 但抽 5 个包级常量 todoStatusEmojiSummary/Done/Active/Pending/Unknown + todoStatusFieldSep；TodosSummary godoc 与常量块明示"下游必须按 rune 边界截断"契约 + 引用 textutil.TruncateRunes；新增 TestTodoStatusEmojiConstants_RuneBoundary 5 case 表锁单 rune + per-glyph 字节宽度 + TestTodosSummary_RuneBoundarySafe 走全分支 utf8.ValidString），本批 PR #183
 
 ### 架构 — 本轮新发现
 
@@ -1728,12 +1660,10 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R227-ARCH-16 — `claudejsonl/kirojsonl` 通过 init 注册 + session blank import 隐式生命周期（P3）**: factory 没注册导致 NoopHistorySource 的 bug 要查 4 文件。方案：与 R227-ARCH-3 合并；显式调 wireup.RegisterX()。
 - [ ] **R227-ARCH-17 — 30+ interface 半数单实现（P3）**: HistorySessionView/AgentIntrospector/deadlineInterrupter 等单实现接口未替代。方案：写 docs/CONTRIBUTING-interfaces.md 三条规则。
 - [ ] **R227-ARCH-18 — contract test 边界三类含义混用（P3）**: type assertion / 行为契约 / 内存模型断言用同一 *_contract_test.go 名。方案：拆 *_iface_assert / *_behaviour / *_invariant 命名。
-- [ ] **R227-ARCH-19 — `cli/process_*.go` 6 文件 godoc 都是 RFC "纯文件移动" 考古遗迹（P3）**: 让人误以为持续重构。方案：要么 R227-ARCH-2 完成真正切分，要么 RFC 标 ARCHIVED 后简化每文件 godoc。
 - [ ] **R227-ARCH-20 — `dispatch.passthroughCtxKey/urgentCtxKey` 用 ctx.Value 跨包传 boolean（P3）**: Go 反模式（ctx.Value 应仅用于请求级元数据）。方案：定义 dispatch.SendOptions struct 或 functional options。Breaking。
 
 ### 配置 / 测试 — 本轮新发现
 
-- [ ] **R227-CONFIG-1 — `JobUpdate.Notify` 无法 reset 回 nil（P3）**: 操作员想恢复 legacy-default 通知必须直接编辑 cron_jobs.json。方案：godoc 明确 work-around；或加 tri-state 字段。
 - [ ] **R227-TEST-2 — `cli.detectVersion` 用 context.Background()（P3）**: SIGTERM 期间 --version probe 等满 5s。方案：NewWrapper 接 ctx 参数（Breaking，3-5 个调用点）。
 
 ## Round 228 — 5-agent 并行 review 第 40 轮（2026-05-20 第二批）NEEDS-DESIGN
@@ -1743,36 +1673,25 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 
 ### Go 正确性 — 本轮新发现
 
-- [x] **R228-GO-1 — `agent_tailer.DurationMS` `int64→int` 转换在 32-bit 平台溢出（P2）**: `time.Duration.Milliseconds()` 是 int64，向 `int` 转换在 32-bit Linux 上 ~24 天后会变负。方案：把 `AgentMetaPatch.DurationMS`、`SubagentInfo.DurationMS`、`node.AgentMetaPatch.DurationMS` 统一改为 int64（JSON 序列化无 breaking，但跨包字段类型变更）。涉及 `internal/server/agent_tailer.go:393` + `internal/cli/eventlog.go` + `internal/node/protocol.go`。 — 已修复（4 个跨包字段 int → int64：cli.EventEntry/SubagentInfo/TaskUsage 和 node.AgentMetaPatch；agent_tailer.go 移除 int(...) cast；JSON wire 兼容），本批 PR #185
-- [x] **R228-GO-2 — `cron.AddJob` 多手动 Unlock 无 defer（P2）**: `s.mu.Lock()` 后多个手动 `s.mu.Unlock()` 提前 return（5+ 处），未来在 lock 段内插入新逻辑容易漏 Unlock。方案：refactor 为内层函数提取 + defer。涉及 `internal/cron/scheduler.go:814-856`。 — 已修复（抽 addJobLocked() 内层函数承担锁定段，defer s.mu.Unlock() 收敛所有 early-return 路径；外层 AddJob 仅做参数校验 + 锁外 save() / registerStub() 调用），本批 PR #181
 - [ ] **R228-GO-3 — `reconnectShims` replay goroutine 无 ctx 绑定（P2）**: 重放段对每个 `task_started` 启动裸 goroutine 调 `linker.Resolve`，SIGTERM 时延迟 shutdown。方案：与 R227-GO-2 / R225-GO-2 合并，Resolve 接 ctx。涉及 `internal/session/router_shim.go:361-394`。
 
 ### 安全 — 本轮新发现
 
 - [ ] **R228-SEC-1 — Dashboard 主页 CSP `script-src 'unsafe-inline'`（P2 R227-SEC-9 重申）**: 主页用 `'unsafe-inline'` 而 login 页已用 hash-based CSP 收敛。方案：为响应生成 nonce + 内联 `<script>` 注入 nonce；或迁移内联脚本到外部文件。Breaking：需改 HTML 模板。涉及 `internal/server/dashboard.go:390`。
 - [ ] **R228-SEC-2 — `serveRender` `os.Open(resolved)` 二次打开 inode-swap TOCTOU（P1 R227-SEC-2 重申）**: `handleFileGet` Lstat 后 `serveRender` 再次 Open，存在窗口可被符号链接替换。方案：在 Lstat 之后立即 Open 拿 fd 传入下游函数；或用 `f.Stat()` 比对 inode。涉及 `internal/server/project_files.go:590,684,762,856`。
-- [x] **R228-SEC-3 — `mode=download` 路径未 blocklist `.env`/`.npmrc`/`.netrc`/`*.pem`/`*.key`（P3 R227-SEC-12 重申）**: 认证用户可下载 workspace 内任意敏感配置。方案：`serveDownload` 入口对 `filepath.Base(path)` 做 blocklist 检查；或文档化 `allowed_root` 必须不含敏感文件。涉及 `internal/server/project_files.go`。 — 已关闭（与 R227-SEC-12 同根因，commit 61cde08 R229-SEC-9 已实施 isSensitiveDownloadName + sensitiveDownloadNames/Exts 双表 + 403 阻断），本批 PR #188
 - [ ] **R228-SEC-4 — `/health` 端点无 rate limiting（P3 R227-SEC-10 重申）**: 未认证响应含 version 字段可 fingerprint。方案：per-IP rate limiter 60/min，或把 version 移到认证区段。涉及 `internal/server/server.go:809`、`internal/server/health.go:169`。
 - [ ] **R228-SEC-5 — WS Hub 同一 session key 订阅数量无 per-key 上限（P3 R227-SEC-11 重申）**: 单 token 开 100 个 WS 各订同 key 触发 100 路 fan-out。方案：维护 `keySubCount map[string]int` + 阈值（如 20）。涉及 `internal/server/wshub.go`。
 - [ ] **R228-SEC-6 — `serveRender`/`serveRaw` sandbox CSP `style-src 'unsafe-inline'`（P3 R226-SEC-9 重申）**: CSS-based exfiltration 攻击面。方案：nonce 化或去掉 unsafe-inline。涉及 `internal/server/project_files.go:731,~905`。
 
 ### 性能 — 本轮新发现
 
-- [x] **R228-PERF-1 — `eventlog_bridge.newEventLogSink` 单条 Append 路径每次 `make([]persist.Entry, 0, 1)`（P1 与 R226-PERF-2 同根）**: 单条 Append 路径每次 1 entry 仍分配一个 1-cap slice。方案：栈局部 `[1]persist.Entry` 数组 + slice。涉及 `internal/session/eventlog_bridge.go:77`。 — 已修复（len(entries)==1 fast path 用 [1]persist.Entry 栈数组 + stackArr[:0]；多条路径不变；persisterSink closure escape 仍存因函数值无法静态证明 retain，但省 defer + for 控制流，为未来 PersistSink.AppendOne 单值契约打底），本批 PR #185
-- [x] **R228-PERF-2 — `TodoWrite` 双 marshal（decode + recode）（P1）**: `EventEntriesFromEventAt` 对 TodoWrite 调 `ParseTodos` 再调 `TodosDetailJSON`，原始 `block.Input` 已是 `{"todos":[...]}`。方案：从 `block.Input` 提取 "todos" raw bytes 直接赋给 `entry.Detail`。涉及 `internal/cli/todo.go:40-46` + `internal/cli/process_event_format.go:178-190`。 — 已确认归档（R226-PERF-8 PR #166 已落地：todo.go:52 `ParseTodosWithRaw` 返回 `(todos, rawTodos, ok)`；process_event_format.go:165-176 在 TodoWrite 分支直接 `entry.Detail = string(rawTodos)`，不再走 `TodosDetailJSON` 二次 marshal。本批 R228-PERF-2 与 R226-PERF-8 同根因，关闭归档），本批 PR #183
 - [ ] **R228-PERF-3 — `subagent_transcript.readLocked` 每次 `os.Open` 不复用 fd（P2）**: 每 200ms × 50 active tailer = 250 open/close fd/s。方案：缓存 `*os.File`，Tail 用 Seek 复用，inode 变化时重 Open。涉及 `internal/cli/subagent_transcript.go:63-88`。
-- [x] **R228-PERF-4 — `protocol_acp.WriteMessage` 每条消息 `map[string]any` 逐张图 alloc（P2）**: 文本+单图常见路径 2 个 map alloc。方案：定义 `acpImageBlock` 具体结构体；prompt 预分配。涉及 `internal/cli/protocol_acp.go:234-258`。 — 已修复（acpImageSource / acpPromptBlock / acpPromptParams 三个具名 struct 替换 map[string]any + map[string]string 字面量；text block Text 用 *string 让 omitempty 在空文本仍发 `"text":""` 保字节兼容；prompt cap=len(images)+1 一次预分配；新增 protocol_acp_writemsg_test.go 4 case 锁 wire 形状），本批 PR #188
 - [ ] **R228-PERF-5 — `agent_tailer.pollOnce` fan-out 时每 subscriber 各自 marshal（P2 与 R225-PERF-9 同类）**: 同一事件 N 次 marshal。方案：fan-out 前一次 `marshalPooled`，改用 `SendRaw`。涉及 `internal/server/agent_tailer.go:338-358`。
 - [ ] **R228-PERF-6 — `handleList` `resp` 用 `map[string]any` 而非具体结构体（P2）**: 1 Hz poll 每次 1 个 map。方案：定义 `sessionsResponse` struct + omitempty。涉及 `internal/server/dashboard_session.go:535`。
 - [ ] **R228-PERF-7 — `EventLog.Append` `[]EventEntry{e}` 字面量 heap escape（P3 R219-PERF-4 具体修法方向）**: 单条 slice 字面量逃逸。方案：先 `-gcflags=-m` 验证再决定栈数组+切片或 sync.Pool。涉及 `internal/cli/eventlog.go:703`。
 
 ### 代码质量 — 本轮新发现
 
-- [x] **R228-CR-1 — `maxScannerBufBytes=10MB` 与 shim `maxServerLineBytes=16MB` 不一致（P2）**: 10-16MB 之间合法事件被静默丢弃。方案：加 godoc 解释 6MB headroom，或对齐到 16MB。涉及 `internal/cli/process.go:30`。 — 已修复（godoc 解释 6MB headroom：shim 自身在 16MB 拒绝行，naozhi 永远不会看到 10-16MB 的"合法但被丢"行；headroom 留给协议帧 + base64 图像 tool_result），本批 PR #169
-- [x] **R228-CR-2 — `Caps.SoftInterrupt`/`Priority`/`StreamJSON` 三个字段被填但从未读（P2）**: 只有 Replay 被读。方案：删除三个 dead 字段并修 Capabilities 实现；或 godoc 标 reserved。涉及 `internal/cli/protocol.go:95-100`、`protocol_claude.go:137`、`protocol_acp.go:337`。 — 已修复（godoc 标 reserved + 指向 protocol_caps_test.go 锁定的契约；不删字段保留 forward-compat anchor），本批 PR #169
-- [x] **R228-CR-3 — `isActivityType` 与 `EventLog.Append` activity 集无编译期 sync 保护（P2）**: 注释说"两边必须一起改"但无 contract test/共享函数。方案：抽 `cli.IsActivityType(t string) bool` 共享；或加 contract test。涉及 `internal/session/managed.go:1483-1488` + `internal/cli/eventlog.go:681`。 — 已修复（新增 internal/cli/event_kinds.go 暴露 IsActivityType 共享 helper + event_kinds_test.go 锁定 15 case 表；EventLog.Append/AppendBatch 与 session.scanLastSummaries 三处调用点切换；删除 session 包私有 isActivityType 19 行），本批 PR #181
-- [x] **R228-CR-4 — `Process.LastEntryOfType` + `EventLog.LastEntryOfType` 导出但无 prod 调用（P3）**: 应 unexport 或加到 processIface。涉及 `internal/cli/process_event_query.go:188-191`、`internal/cli/eventlog.go:1058`。 — 已修复，本批 PR #170
-- [x] **R228-CR-5 — `cron/job.JobTitleOrFallback` `[]rune(line)` heap alloc（P3）**: 与 textutil.TruncateRunes 重叠但用 `…`(U+2026)。方案：要么接受 ASCII `...` 后缀改用 textutil；要么 textutil 加 ellipsis 参数 overload。涉及 `internal/cron/job.go:205-209`。 — 已修复（改用 textutil.TruncateRunesNoEllipsis 复用 byte-level 解码 + 短路快路径；通过 truncated != line 判定后本地补 U+2026 保留卡片视觉一致性），本批 PR #169
 
 ### 架构 — 本轮新发现
 
@@ -1781,18 +1700,12 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R228-ARCH-3 — `server/wshub` 直接持 `*cli.SubagentLinker` 指针长寿命缓存（P1 与 RFC v4 phase 3+ TODO 同根）**: Linker 重建后旧 map key 残留为 GC root。方案：session 层暴露 `WireLinkerOnce(key, ...)` API，把指针弱引用封进 session 包。涉及 `internal/server/wshub.go:165` + `internal/server/dashboard_agent_events.go:66,72,80`。
 - [ ] **R228-ARCH-4 — `cli.AskQuestion`/Item/Opt 与 `platform.QuestionCard`/Item/Option 双套结构体（P2）**: dispatch 手工字段拷贝，加字段易漏。方案：抽到共享包（如新建 `internal/askq` 或 `internal/eventlog/schema`）。涉及 `internal/cli/event.go:141-166` + `internal/platform/platform.go:108-141`。
 - [ ] **R228-ARCH-5 — `cli/image.go MimeFromPath/ExtractImagePaths/safeImageDirs` 与 `platform.ImageExt` 重叠（P2）**: cli 包混入了与协议无关的 MIME/安全目录工具。方案：抽到 `internal/imageutil` 或 `internal/osutil`。涉及 `internal/cli/image.go:61-77`。
-- [x] **R228-ARCH-6 — 3 份 `jitterBackoff` wrapper 全是 `osutil.JitterBackoff` 16-行 stub（P2）**: 包内私有 wrapper 无任何价值。方案：删 3 个 wrapper + 等价测试，调用方直接调 osutil。涉及 `internal/node/backoff.go`、`internal/upstream/backoff.go`、`internal/platform/platform.go:289-291`。 — 已修复，本批 PR #170
 - [ ] **R228-ARCH-7 — `processIface` 32-method 胖接口 + 内部强转回 `*cli.Process`（P2）**: 抽象漏了。方案：要么删 interface 直接用 `*cli.Process`；要么拆成 3 个小接口。需设计决策。涉及 `internal/session/managed.go:33-102` + `router_lifecycle.go:829`。
 - [ ] **R228-ARCH-8 — 4 个 platform adapter 各自 `var fooHTTPClient` SSRF-defense client（P2）**: 4 份近一致的 redirect+TLS 1.2 floor client。方案：`internal/platform.NewSafeHTTPClient(timeout)` helper。涉及 feishu/discord/weixin/slack 各自顶部 var。
-- [x] **R228-ARCH-9 — `dispatch.MaxCoalescedTextBytes()` 被 upstream 反向调用作 RPC 入口大小限制（P2）**: upstream → dispatch 反向依赖只为复用一个常量。方案：抽到 `internal/limits` 包。涉及 `internal/upstream/connector_rpc.go:129`。 — 已修复（新增 internal/limits 叶子包持 MaxCoalescedText=4MB；dispatch.maxCoalescedTextBytes 私有 alias 等于 limits.MaxCoalescedText，hot loop 读法不变；upstream 直接 import limits 并删 dispatch import；dispatch.MaxCoalescedTextBytes() 函数无 caller 自然消失），本批 PR #186
-- [x] **R228-ARCH-10 — `dispatch/commands.go` 直接构造 `cron.Job{}` 字面量（P2）**: 字段名变更 → dispatch 编译挂。方案：cron 包提供 `cron.NewJob(schedule, prompt, ctx)`。涉及 `internal/dispatch/commands.go:344-351`。 — 已修复（cron 新增 JobIMContext 小聚合体（Platform/ChatID/ChatType/CreatedBy）+ NewJob(schedule, prompt, ctx) 构造器；CreatedAt 留给 AddJob 唯一持久化入口盖戳避免 missed-schedule 漂移；dispatch/commands.go 改用 cron.NewJob），本批 PR #186
 - [ ] **R228-ARCH-11 — `dispatch.SessionGuard` interface 实际不做多态分发（P2）**: `if d.queue != nil ... else d.guard ...` 是 either-or。方案：删 interface，用具体类型。涉及 `internal/dispatch/dispatch.go:23-35`。
 - [ ] **R228-ARCH-12 — `cron.SchedulerConfig` 直接持 `session.AgentOpts` + `platform.Platform`（P2）**: cron 字段调整波及 cron。方案：cron 加自己的 JobNotifier interface + JobAgentOpts 局部类型。涉及 `internal/cron/scheduler.go:100-101,213-214`。
 - [ ] **R228-ARCH-13 — `cli.HistoryFactoryFn` registry blank import 在 session 包（P2）**: 触发点已迁到 `cli.NewWrapper` 但 import 列表残留在 session。方案：移到 cli/wrapper.go 或 cmd/naozhi/main.go。涉及 `internal/session/router_core.go:21-32`。
 - [ ] **R228-ARCH-14 — `dispatch.Dispatcher.takeoverFn`/`sendFn` closure 字段易漏 wireup（P2）**: closure-pattern 经典毛病。方案：1-method interface。Breaking：内部 wiring。涉及 `internal/dispatch/dispatch.go:82-83`。
-- [x] **R228-ARCH-15 — `cli.NewWrapper` `backendDisplayName` 与 `normalizeBackendID` 顺序导致 case 不一致（P3）**: "Kiro" 走 default 显示原值，"kiro" 收敛到小写。方案：先 normalize 再 displayName。涉及 `internal/cli/wrapper.go:55-87`。 — 已修复（backendDisplayName(id) 喂规范化后的 id，新增 TestNewWrapper_DisplayNameMatchesNormalizedID 表驱动 6 case 锁契约），本批 PR #169
-- [x] **R228-ARCH-16 — `parseVersionOutput` 在 wrapper.go 但属 detect 概念（P3）**: 应搬到 detect.go。涉及 `internal/cli/wrapper.go:177-187`。 — 已修复（函数 + 表驱动测试整批迁到 detect.go / detect_test.go；wrapper.go 只留 normalize/displayName/detectCLI/candidatePaths），本批 PR #169
-- [x] **R228-ARCH-17 — `wshub` 持整个 `*cron.Scheduler` 仅为调 `EnsureStub`（P3）**: 耦合面 300+ 方法。方案：定义 `cronStubChecker` interface（1 method），Hub 字段改 interface。涉及 `internal/server/dashboard_session.go:713`。 — 已修复（dashboard_session.go 内定义 cronStubChecker { EnsureStub(key string) bool } + SessionHandlers.scheduler 字段类型收窄到接口；*cron.Scheduler 隐式满足，server.go 构造点零改动；goimports 自动移除 cron import。Hub.scheduler 仍是 *cron.Scheduler，因调用面 >1 方法，不在本轮范围），本批 PR #185
 - [ ] **R228-ARCH-18 — `dispatch.Dispatcher.projectMgr` 仅用于 slash-command UX 但持整个 `*project.Manager`（P3）**: 30+ 方法面。方案：内部 1-method interface 注入。涉及 `internal/dispatch/dispatch.go:56`。
 
 ## Round 230C — PR #198 详细归档 NEEDS-DESIGN
@@ -1827,17 +1740,14 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R230C-PERF-7 — handleList 每次重建 projectList slice（P2）**: `internal/server/dashboard_session.go:527-576` 1Hz × N tab 持续分配，project list 实际分钟级变化。方案：`initStaticStats` 或 rescan 时缓存。Breaking：否。
 - [ ] **R230C-PERF-8 — resubscribeEvents 每轮 h.mu.RLock + map read 检查 subGen（P2）**: `internal/server/wshub.go:1159` 12 iter × N 客户端瞬间死亡触发并发。方案：用已传入的 gen 参数局部变量比较，免锁。Breaking：否（内部函数）。
 - [ ] **R230C-PERF-10 — connector_subscribe Snapshot+EventEntriesSince 双取 eventlog.mu（P3）**: `internal/upstream/connector_subscribe.go:60-79` 高活跃会话每事件持锁两次。方案：与 R230C-PERF-1 联合用 State() + lastState 缓存跳过无变化。Breaking：否。
-- [ ] **R230C-PERF-12 — EventLog.Subscribe map 不收缩、无初始容量（P3）**: `internal/cli/eventlog.go:911-912` CloseSubscribers nil 后下次 Subscribe 1→2→4 growth rounding。方案：const subscribersMapInitCap=4 显式预分配；与 R229-PERF-12 联合实现 sync.Pool。Breaking：否。
 
 ### Code 质量（剩余）
 
 - [ ] **R230C-CR-1 — recordResult 变成测试-only 死代码（P2）**: `internal/cron/scheduler.go:2390` 生产路径走 recordResultP0WithSanitised；recordResult 仅 persist_failure_test.go 两处调用。方案：重写测试调 P0 版后删 recordResult；或保留并明确标 test-helper-only。Breaking：否。
 - [ ] **R230C-CR-2 — computeJobTimeout schedule 参数明确忽略（P2）**: `internal/cron/job.go:277` 函数签名带 schedule 参数但 `_ = schedule`。方案：删除函数 inline `s.execTimeout` 到两处 caller，或保留但去 schedule 参数。Breaking：否（unexported）。
-- [ ] **R230C-CR-3 — addJobLocked 自己上锁违反 *Locked 命名约定（P2）**: `internal/cron/scheduler.go:846` 其他 `*Locked` 函数（pause/resume/persist）都遵守 caller-holds-lock。方案：重命名为 addJob，或挪出锁让 caller 持。Breaking：否。
 - [ ] **R230C-CR-4 — TriggerNow entryID==0/!=0 两个 goroutine 体几乎相同（P2）**: `internal/cron/scheduler.go:1423-1488` 两条 60 行近一致路径。方案：抽 `triggerNowExecute(jobID string)` 共享。Breaking：否。
-- [ ] **R230C-CR-5 — ManagedSession 三个 SessionID 访问点（getSessionID/SessionID/GetSessionID）（P2）**: `internal/session/managed.go:727-735` cli.HistorySessionView 与 processIface 各要一份。方案：godoc 集中说明三访问点关系，或合并到一个主入口。Breaking：否。
 - [ ] **R230C-CR-7 — executeOpt 错误分类逻辑散在 4 个 finishRun 分支（P2）**: `internal/cron/scheduler.go:1760-2053` `(state, errClass)` 映射内联。方案：抽 `classifySendError(err) (RunState, ErrorClass)` ~15 行。Breaking：否。
-- [ ] **R230C-CR-8 — registerStub vs registerStubByValue 双轨（P2）**: `internal/cron/scheduler.go:641-663` 仅参数风格不同。方案：folder 成 1-line wrapper。Breaking：否。
+- [~] **R230C-CR-8 — registerStub vs registerStubByValue 双轨（误报关闭 2026-05-23）**: 复核 scheduler.go 现状已是单 registerStubByValue + registerStubFromJob 1-line wrapper。R232-CR-12 已合 3 helper（原 registerStub(*Job) + registerStubByValue + stubChain）为单值参数版本，wrapper 仅是字面简化。条目描述基于过时观察，归档关闭，本批 PR
 - [ ] **R230C-CR-11 — recordResultP0 RunCounters.addRun 不在 persist 失败时回滚（P3）**: `internal/cron/scheduler.go:2304` 计数+1 在 persist 检查前；marshal 失败后 in-memory 字段回滚但 counter 没回。方案：addRun 移到 perr==nil 分支后。Breaking：否。
 - [ ] **R230C-CR-Diag — Snapshot godoc 未声明读侧 SetModel 副作用（P3）**: `internal/session/managed.go:854` 与 R226-CR-13 内联注释呼应，但方法 godoc 未提示。方案：godoc 加 "Note: side-effect mirrors live model into persisted field; see SnapshotReadOnly future variant"。Breaking：否（与 R229-GO-2 合并）。
 

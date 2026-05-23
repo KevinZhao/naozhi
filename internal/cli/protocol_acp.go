@@ -166,18 +166,63 @@ func (p *ACPProtocol) BuildArgs(opts SpawnOptions) []string {
 	return args
 }
 
+// acpInitParams matches the parameters of the ACP "initialize" RPC.
+// Mirrors the spec subset naozhi sends: protocolVersion + clientCapabilities
+// + clientInfo. Defined as a named struct so json marshaling skips the
+// reflect-on-map-of-interface code path used by map[string]any. Cold path
+// (one call per spawn) but keeps the style consistent with acpPromptParams
+// (R228-PERF-4) so future readers don't have to reason about why one RPC
+// uses map and another uses struct. R230-PERF-1.
+type acpInitParams struct {
+	ProtocolVersion    int                   `json:"protocolVersion"`
+	ClientCapabilities acpClientCapabilities `json:"clientCapabilities"`
+	ClientInfo         acpClientInfo         `json:"clientInfo"`
+}
+
+type acpClientCapabilities struct {
+	FS       acpFSCapability `json:"fs"`
+	Terminal bool            `json:"terminal"`
+}
+
+type acpFSCapability struct {
+	ReadTextFile  bool `json:"readTextFile"`
+	WriteTextFile bool `json:"writeTextFile"`
+}
+
+type acpClientInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// acpSessionLoadParams matches the parameters of the ACP "session/load" RPC.
+// R230-PERF-1.
+type acpSessionLoadParams struct {
+	SessionID string `json:"sessionId"`
+	Cwd       string `json:"cwd"`
+}
+
+// acpSessionNewParams matches the parameters of the ACP "session/new" RPC.
+// MCPServers is currently always empty (naozhi does not register MCP servers
+// at session-new time); kept as []any to preserve wire shape if upstream
+// kiro starts requiring an explicit empty array versus omitting the field.
+// R230-PERF-1.
+type acpSessionNewParams struct {
+	Cwd        string `json:"cwd"`
+	McpServers []any  `json:"mcpServers"`
+}
+
 func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, error) {
 	// Step 1: initialize handshake
 	initID := p.allocID()
 	initReq := RPCRequest{
 		JSONRPC: "2.0", ID: initID, Method: "initialize",
-		Params: map[string]any{
-			"protocolVersion": 1,
-			"clientCapabilities": map[string]any{
-				"fs":       map[string]bool{"readTextFile": true, "writeTextFile": true},
-				"terminal": true,
+		Params: acpInitParams{
+			ProtocolVersion: 1,
+			ClientCapabilities: acpClientCapabilities{
+				FS:       acpFSCapability{ReadTextFile: true, WriteTextFile: true},
+				Terminal: true,
 			},
-			"clientInfo": map[string]any{"name": "naozhi", "version": "1.0.0"},
+			ClientInfo: acpClientInfo{Name: "naozhi", Version: "1.0.0"},
 		},
 	}
 	if err := p.sendAndWaitResponse(rw, initReq); err != nil {
@@ -195,27 +240,23 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, err
 		loadID := p.allocID()
 		loadReq := RPCRequest{
 			JSONRPC: "2.0", ID: loadID, Method: "session/load",
-			Params: map[string]any{"sessionId": resumeID, "cwd": cwd},
+			Params: acpSessionLoadParams{SessionID: resumeID, Cwd: cwd},
 		}
 		if err := p.sendAndWaitResponse(rw, loadReq); err != nil {
 			return "", fmt.Errorf("acp session/load: %w", err)
 		}
 		p.storeSessionID(resumeID)
 	} else {
-		newID := p.allocID()
 		newReq := RPCRequest{
-			JSONRPC: "2.0", ID: newID, Method: "session/new",
-			Params: map[string]any{"cwd": cwd, "mcpServers": []any{}},
+			JSONRPC: "2.0", ID: p.allocID(), Method: "session/new",
+			Params: acpSessionNewParams{Cwd: cwd, McpServers: []any{}},
 		}
-		data, err := json.Marshal(newReq)
-		if err != nil {
-			return "", err
-		}
-		if err := rw.WriteLine(data); err != nil {
-			return "", err
-		}
-		// Read responses/notifications until we get the matching response
-		resp, err := p.readUntilResponse(rw, newID)
+		// R232-CR-15: route session/new through the shared helper so the
+		// metric emission and readUntilResponse contract stay in lockstep
+		// with initialize / session/load (the previous hand-written
+		// Marshal+WriteLine+readUntilResponse triple skipped the
+		// RecordProtocolRPCError call site).
+		resp, err := p.sendAndWaitResponseMsg(rw, newReq)
 		if err != nil {
 			return "", fmt.Errorf("acp session/new: %w", err)
 		}
@@ -659,7 +700,24 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 				"raw_len", len(update.Update.Content))
 		} else if content.Text != "" {
 			p.mu.Lock()
-			p.textBuf.WriteString(content.Text)
+			// Cap the streaming buffer at the same ceiling we apply to
+			// finalised assistant messages. Without this, a malicious /
+			// runaway ACP peer can stream chunks indefinitely before the
+			// turn-complete event runs the contentBytes check, OOM-ing
+			// the process. We silently truncate at the boundary; the
+			// downstream contentBytes guard will surface the size to logs.
+			if room := maxAssistantMessageContentBytes - p.textBuf.Len(); room > 0 {
+				if len(content.Text) <= room {
+					p.textBuf.WriteString(content.Text)
+				} else {
+					// Split on a rune boundary so a CJK / emoji codepoint
+					// straddling room does not leave invalid UTF-8 in the
+					// buffer (assistant message bytes are forwarded verbatim
+					// to the IM/dashboard renderers).
+					n := textutil.TruncateAtRuneBoundary(content.Text, room)
+					p.textBuf.WriteString(content.Text[:n])
+				}
+			}
 			p.mu.Unlock()
 		}
 		return Event{Type: "assistant", SessionID: update.SessionID}, false, nil
@@ -727,14 +785,27 @@ func (p *ACPProtocol) allocID() int {
 }
 
 func (p *ACPProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) error {
+	_, err := p.sendAndWaitResponseMsg(rw, req)
+	return err
+}
+
+// sendAndWaitResponseMsg writes req then blocks until a matching response
+// arrives, returning the parsed RPCMessage on success. The Init flow uses
+// this for session/new where the SessionID must be parsed from result.models;
+// callers that don't need the response payload should use sendAndWaitResponse
+// (which discards the message and only surfaces the error). R232-CR-15
+// collapses the previously hand-written Marshal+WriteLine+readUntilResponse
+// triple in Init's session/new branch onto this single helper so all three
+// handshake RPCs go through the same metric-emitting code path.
+func (p *ACPProtocol) sendAndWaitResponseMsg(rw *JSONRW, req RPCRequest) (*RPCMessage, error) {
 	data, err := json.Marshal(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := rw.WriteLine(data); err != nil {
-		return err
+		return nil, err
 	}
-	_, err = p.readUntilResponse(rw, req.ID)
+	resp, err := p.readUntilResponse(rw, req.ID)
 	if err != nil {
 		// Multi-Backend RFC §10 (Sprint 6a): record handshake / RPC errors
 		// at the call site since we know req.Method here. We always pass
@@ -750,7 +821,7 @@ func (p *ACPProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) error {
 		// into the message), pass that here as the code label.
 		metrics.RecordProtocolRPCError(p.BackendID, req.Method, "")
 	}
-	return err
+	return resp, err
 }
 
 // normalizeContextUsage maps kiro's contextUsagePercentage onto a 0-100
@@ -856,15 +927,26 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 	}
 	ch := make(chan readResult, 1)
 	done := make(chan struct{})
+	// send forwards a final result to the caller; if the caller has already
+	// timed out (close(done)) we drop it instead of blocking forever on ch
+	// (cap 1, no reader). Without this, a slow ACP peer that emits one final
+	// frame after handshake timeout pinned the goroutine until the pipe
+	// closed, sometimes minutes later when the process itself was killed.
+	send := func(r readResult) {
+		select {
+		case ch <- r:
+		case <-done:
+		}
+	}
 	go func() {
 		for {
 			line, eof, err := rw.R.ReadLine()
 			if err != nil {
-				ch <- readResult{nil, fmt.Errorf("read ACP response: %w", err)}
+				send(readResult{nil, fmt.Errorf("read ACP response: %w", err)})
 				return
 			}
 			if eof {
-				ch <- readResult{nil, fmt.Errorf("unexpected EOF during ACP init")}
+				send(readResult{nil, fmt.Errorf("unexpected EOF during ACP init")})
 				return
 			}
 			if len(line) == 0 {
@@ -883,11 +965,11 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 				if msg.Error != nil {
 					// R184-SEC-M1: sanitize RPC error text before it bubbles
 					// up through caller slog attrs. See ReadEvent above.
-					ch <- readResult{nil, fmt.Errorf("%w %d: %s", ErrACPRPC,
-						msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))}
+					send(readResult{nil, fmt.Errorf("%w %d: %s", ErrACPRPC,
+						msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))})
 					return
 				}
-				ch <- readResult{&msg, nil}
+				send(readResult{&msg, nil})
 				return
 			}
 			// Check if caller gave up (timeout). The goroutine will be fully
