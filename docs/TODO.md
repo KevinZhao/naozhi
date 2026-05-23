@@ -142,7 +142,7 @@
 - [ ] **R234-ARCH-2 — `cli.wrapper` 反向 import `internal/shim`（P1）**：cli 是协议+子进程层，shim 是 cgroup 边车；当前 cli→shim 的导入让 cli 无法在没有 shim 的环境编译/单测，shim 协议演进绑死 cli 协议。建议把 shim 抽象为 `cli.LauncherSpawner` interface，具体 `shim.Launcher` 在 session 层注入。需 R231-ARCH-1（runner 旁路 wrapper）落地之后再做以避免改两次签名。
 - [ ] **R234-ARCH-3 — `sysession` 与 `cron` 各自定义 RouterView，DTO 散在两包（P1）**：cron `SessionRouter` interface (scheduler.go:72) + sysession `SystemSessionRouter` (router.go:25) 形成两套 router 适配器，都把 cli.EventEntry 当公共契约。建议在 `internal/session/api`（新子包，无 cli 依赖）放统一 `RouterView` + DTO，cron/sysession/scratchPool/quick session 共用。改动 ~10 文件，长期收益大。
 - [ ] **R234-ARCH-4 — `internal/session/contract_test.go` 反向 import dispatch+server+cron+upstream（P1）**：即使 _test.go 文件，contract test 引用 dispatch/server/cron/upstream 让 session 包成为依赖图根+叶。建议把 contract_test 移到 `internal/integration/session_contract_test` 独立包。
-- [ ] **R234-ARCH-5 — server.send / dashboard_send / dispatch.SendSplitReply 三套发送路径无 SendOrchestrator（P1）**：归到 R230-ARCH-2 主条目，本轮发现 server.send 是第三条独立发送路径（reverse-node + WS push）。
+- [~] **R234-ARCH-5 — server.send / dashboard_send / dispatch.SendSplitReply 三套发送路径（归档 2026-05-23）**：明确归到 R230-ARCH-2 SendOrchestrator 主条目；本轮仅记录 server.send 是第三条独立发送路径（reverse-node + WS push）作为未来 SendOrchestrator 设计输入。本批 PR 关闭子症状条目。
 - [ ] **R234-ARCH-6 — Shutdown 顺序无形式化合约（P1）**：cron.Scheduler.Stop / sysessionMgr.Stop / router.Shutdown 在 server.Shutdown 序列里位置不明。建议写 ADR `docs/rfc/shutdown-order.md` + 各组件导出 `WaitForExit(ctx) error`，由 server 串行 wait。
 - [ ] **R234-ARCH-7 — `cron.SessionRouter.GetOrCreate` 暴露完整 *ManagedSession（P2）**：调度器只需 Send，但接口暴露 50+ 方法的 ManagedSession，cli 接口塌陷同款。建议进一步收敛为 `Sender` 接口。
 - [ ] **R234-ARCH-8 — `server.Hub` 直 import dispatch+cron+cli+project+session（P2）**：典型 god hub。建议拆 `WSTransport`（仅 conn lifecycle）+ `WSCoordinator`（业务），需独立 RFC。
@@ -152,11 +152,11 @@
 - [ ] **R234-ARCH-12 — Protocol/Sink/Tailer 三大事件接口契约未文档化（P2）**：建议新建 `docs/rfc/event-pipeline-contracts.md` + `internal/cli/protocoltest` 共享测试套件（类似 fstest.MapFS）。
 - [ ] **R234-ARCH-13 — server/agent_tailer 直 import cli，IO 路径绕过 router（P2）**：建议 tailer 走 `router.Tail(key) <-chan EventDTO`，router 内部决定从哪源取（persisted vs live）。
 - [ ] **R234-ARCH-14 — buildServer 初始化顺序 fragile（P2）**：建议抽 `serverDeps` struct + `buildCore`/`buildHandlers`/`buildHub`/`wire` 分步。
-- [ ] **R234-ARCH-15 — sysession.runner 旁路 cli wrapper 但 auto_titler 仍要读 cli.EventEntry（P2）**：归到 R234-ARCH-3 的统一 RouterView 方案下解决。
+- [~] **R234-ARCH-15 — sysession.runner 旁路 cli wrapper 但 auto_titler 仍要读 cli.EventEntry（归档 2026-05-23）**：明确归到 R234-ARCH-3 的统一 RouterView 方案；待 R234-ARCH-3 落地时一并解决，子症状条目本批 PR 关闭。
 - [ ] **R234-ARCH-16 — server/discovery_cache.go 越层依赖 project + cli（P3）**：建议 router 暴露 `ExcludedSessionIDs() iter.Seq[string]`，discovery 自治。~30 行。
 - [ ] **R234-ARCH-17 — dispatch.consumer.go 引用 *session.ManagedSession 而非更窄 SessionHandle（P3）**：建议 `dispatch.SessionHandle interface { Send(...); Key() string }`。
 - [ ] **R234-ARCH-18 — internal/session/testutil.go 不带 _test 后缀 + 无 build tag（P3）**：可能被生产二进制 link。建议 rename 为 testutil_test.go 或加 `//go:build testing`。
-- [ ] **R234-ARCH-19 — internal/dispatch/dispatch_test.go 单文件 import cli/cron/platform/session 4 个生产包（P3）**：R234-ARCH-4 子症状。
+- [~] **R234-ARCH-19 — internal/dispatch/dispatch_test.go 单文件 import cli/cron/platform/session 4 个生产包（归档 2026-05-23）**：R234-ARCH-4 子症状；与 contract_test 重定位方案一起处理，本批 PR 关闭子条目。
 - [ ] **R234-ARCH-20 — wshub_agent.go 仅依赖 session 但被并入 server 包导致编译图污染（P3）**：建议挪到 `internal/server/wshub` 子包。
 - [ ] **R234-ARCH-21 — 跨包共享 limits 常量风格不一（cron/limits.go vs server/server.go vs dispatch/dispatch.go）（P3）**：建议集中到 `internal/limits`。
 - [ ] **R234-ARCH-22 — `internal/cli/backend` 同时被 server 与 session 直接 import（P3）**：建议拆 `backend.Profile`（值类型）vs `backend.Launcher`（行为，仅 cli 用）。
@@ -174,9 +174,9 @@
 - [x] **R234-GO-6 — scheduler.executeOpt inflight 初始化 6 次 atomic.Pointer.Store(&localVar) escape（P2）**：6 个局部变量各自 heap 分配。建议 `strHeap` / `timeHeap` helpers 或 mutex-protected 直接 value 字段。 — 已修复（commit e9b0640 同步修复，与 R234-GO-2 共享 helper，本批 PR）
 - [ ] **R234-GO-8 — runstore.diskListNewestFirst 不区分 mtime-only 与 full-parse 路径（P2）**：warmCache 走也会 ReadFile 全部文件。建议拆 `diskListMtime`（只 ReadDir+stat+sort）和 `diskReadSummaries`（batch ReadFile）。
 - [ ] **R234-GO-10 — runstore.trimJobLocked sort 用 cmp.Compare(UnixNano) 而非 time.Compare（P3）**：边界精度 + 风格。建议 `slices.SortFunc(items, func(a,b) int { return b.mtime.Compare(a.mtime) })`。
-- [ ] **R234-GO-11 — sysession.Manager.startOnce.Do 内 m.started.Store(true) 时序（P3）**：start.Store 应在 daemon goroutine 启动之前以匹配"Store 完成 ≡ goroutines running"语义。
-- [ ] **R234-GO-12 — Scheduler 锁层级文档（s.mu vs runStore.jobLock）未注释（P3）**：建议 Scheduler 结构体注释加 `s.mu > runStore.jobLock(jobID) > recentCacheEntry.mu`。
-- [ ] **R234-GO-15 — trimAll goroutine 无 ctx 传播 Stop 无法中断（P3）**：归 R234-GO-3 同主条目。
+- [x] **R234-GO-11 — sysession.Manager.startOnce.Do 内 m.started.Store(true) 时序（P3）**：start.Store 应在 daemon goroutine 启动之前以匹配"Store 完成 ≡ goroutines running"语义。 — 已修复（manager.go:Start 把现有注释升级为正式 R232-GO-3/R234-GO-11 godoc 锚点：明确我们选择的不变量是"started=true ⇒ m.cancel!=nil ∧ m.wg 已 Add"以服务 Stop；指出 pre-go Store 编码的"goroutines 正在运行"不变量在 Go 中不可原子实现 — `go` 语句只是排程而非执行。设计决策记录而非行为变更），本批 PR
+- [x] **R234-GO-12 — Scheduler 锁层级文档（s.mu vs runStore.jobLock）未注释（P3）**：建议 Scheduler 结构体注释加 `s.mu > runStore.jobLock(jobID) > recentCacheEntry.mu`。✅ 已修：scheduler.go Scheduler 结构体头加 godoc 锚点写出完整层级 `s.mu > runStore.jobLock(jobID) > recentCacheEntry.mu` + storeMu 独立性 + lock-free 字段说明。
+- [~] **R234-GO-15 — trimAll goroutine 无 ctx 传播 Stop 无法中断（归档 2026-05-23）**：归 R234-GO-3 同主条目跟踪（gcWG.Wait + ctx.Err 一起做），本批 PR 关闭子条目。
 
 ### 安全 — 本轮新发现
 
@@ -186,18 +186,18 @@
 - [ ] **R234-SEC-6 — `handleList` 返回所有 job 的 LastResult/Prompt 全量轮询带宽放大（P2）**：50 jobs × (8KB prompt + 4KB result + 5×summary) ≈ 1MB/req × 1Hz = 1MB/s。建议 list 返回截断 prompt（1KB），detail 接口返回全量；或加 server-side `?search=`。**dashboard JS fuzzy-search 需迁移**。
 - [ ] **R234-SEC-7 — `Job.LastResult` 落盘无 secret-pattern 过滤（P2）**：claude 输出可能含明文 sk-ant-/ghp_/AKIA token。建议 `recordResultP0WithSanitised` 增加可配置黑名单 + 类似 `isSensitiveDownloadName` 的后处理。
 - [ ] **R234-SEC-8 — `flattenJSONLEvent` tool_use.Input 字段无大小守卫（P3）**：500 turns × 256KB/line = 128MB 序列化输出。建议 `len(b.Input) > maxToolInputBytes`（64KB）截断为 `[truncated]` 或置空。
-- [ ] **R234-SEC-11 — `handlePreview` 端点无速率限制（P3）**：`cronParser.Parse + sched.Next×count` 可被 1000 req/s 持续消耗 CPU。建议轻量 `previewLimiter`（`rate.Every(100ms), burst=20`）。
-- [x] **R234-SEC-12 — `loadJobs` 不对 Prompt 跑 validateCronPrompt（P3）**：cron_jobs.json 被 operator 直接编辑后，含控制字符的 prompt 会流入 CronRun。建议 loadJobs 后对每个 j.Prompt 做 utf8.ValidString + validateCronPrompt 检查。 — 已修复（commit 3a63759，loadJobs 防御性丢弃含无效 UTF-8 / C0 控制字节的 prompt，本批 PR）
+- [x] **R234-SEC-11 — `handlePreview` 端点无速率限制（P3）**：`cronParser.Parse + sched.Next×count` 可被 1000 req/s 持续消耗 CPU。建议轻量 `previewLimiter`（`rate.Every(100ms), burst=20`）。 — 已修复（CronHandlers.previewLimiter（rate.Every(100ms), burst=20）+ handlePreview 入口 gate；server.New 注入），本批 PR
+- [x] **R234-SEC-12 — `loadJobs` 不对 Prompt 跑 validateCronPrompt（P3）**：cron_jobs.json 被 operator 直接编辑后，含控制字符的 prompt 会流入 CronRun。建议 loadJobs 后对每个 j.Prompt 做 utf8.ValidString + validateCronPrompt 检查。 — 已修复（commit 3a63759，loadJobs 防御性丢弃含无效 UTF-8 / C0 控制字节的 prompt），本批 PR
 
 ### 性能 — 本轮新发现
 
-- [ ] **R234-PERF-1 — runstore.cacheHeadPush O(N) memmove（P1）**：归 R234-GO-1 同主条目。
-- [ ] **R234-PERF-2 — shimWriter.Write fast-path string(data[:len-1]) heap-copy（P1）**：每次 stdin write 把 4KB payload 拷贝到 string 仅为 shimClientMsg.Line string 字段。建议加 `LineRaw json.RawMessage` 字段并改自定义 MarshalJSON；需 shim 协议 compat 评估，归 R71-PERF-H1 主条目。
-- [ ] **R234-PERF-3 — protocol_claude.ReadEvent json.Unmarshal([]byte(line),...)（P1）**：阻塞在 shim 协议 bump，归 R231-PERF-1 主条目。
-- [ ] **R234-PERF-4 — KnownSessionIDs 无 TTL 缓存（P2）**：50 jobs × Recent(200) = 10000 row copy/dashboard poll。建议 `atomic.Pointer[knownSessionIDsCache]` 30s TTL + finishRun/DeleteJob 失效。归 R233-PERF-3 同主条目。
-- [ ] **R234-PERF-5 — TranscriptReader.readLocked 每 200ms 重 open/seek/read/close（P2）**：50 tailer × 5/s = 250 syscalls/s。建议 keep `*os.File`，`Seek+ReadAt`，仅 inode 变更（log rotation）才重开。归 R233-PERF-4 主条目。
-- [ ] **R234-PERF-7 — wsclient.Send 无 encoder pool（P2）**：每事件 fresh json.Marshal。建议 `sync.Pool` of `*bytes.Buffer + *json.Encoder`（同 shimSendBufPool 模式）。
-- [ ] **R234-PERF-9 — runstore.skipAppendTrim time.Now 在 fast-exit 之前（P2，**已核实为误报**）**：实际 line 254 已先做 `len(entry.runs) > 0` 守卫，time.Now 在 fast-path 之后。归档关闭。
+- [~] **R234-PERF-1 — runstore.cacheHeadPush O(N) memmove（归档 2026-05-23）**：归 R234-GO-1 / R233-PERF-2 同主条目（ring buffer 改造），本批 PR 关闭子条目。
+- [~] **R234-PERF-2 — shimWriter.Write fast-path string(data[:len-1]) heap-copy（归档 2026-05-23）**：每次 stdin write 把 4KB payload 拷贝到 string 仅为 shimClientMsg.Line string 字段；归 R71-PERF-H1 主条目跟踪（需 shim 协议 compat 评估），本批 PR 关闭子条目。
+- [~] **R234-PERF-3 — protocol_claude.ReadEvent json.Unmarshal([]byte(line),...)（归档 2026-05-23）**：阻塞在 shim 协议 bump，归 R231-PERF-1 主条目跟踪，本批 PR 关闭子条目。
+- [~] **R234-PERF-4 — KnownSessionIDs 无 TTL 缓存（归档 2026-05-23）**：归 R233-PERF-3 同主条目跟踪（atomic.Pointer[knownSessionIDsCache] 30s TTL + finishRun/DeleteJob 失效），本批 PR 关闭子条目。
+- [~] **R234-PERF-5 — TranscriptReader.readLocked 每 200ms 重 open/seek/read/close（归档 2026-05-23）**：归 R233-PERF-4 主条目跟踪（keep *os.File + Seek/ReadAt + inode 变更才重开），本批 PR 关闭子条目。
+- [x] **R234-PERF-7 — wsclient.Send 无 encoder pool（P2）**：每事件 fresh json.Marshal。建议 `sync.Pool` of `*bytes.Buffer + *json.Encoder`（同 shimSendBufPool 模式）。 → 评估：拒绝。SendJSON 把 buffer 移交给 send channel 必须 outlive return，pool 强制 make+copy 抵消所有省 alloc 收益；stdlib json.Marshal 内部已 pool encodeState。fan-out 热路径在 agent_tailer 已用 marshalPooled。godoc 锚点已落地（wsclient.go:184-200）。
+- [~] **R234-PERF-9 — runstore.skipAppendTrim time.Now 在 fast-exit 之前（归档 2026-05-23，已核实为误报）**：实际 line 254 已先做 `len(entry.runs) > 0` 守卫，time.Now 在 fast-path 之后；review 误读控制流。本批 PR 关闭。
 - [ ] **R234-PERF-10 — parseTranscriptTime 每行 RFC3339Nano 解析 ~300ns（P2）**：250 line/s × 300ns = 75µs/s。建议 hand-parse 整数字段或 ParseInLocation+UTC 缓存。
 - [ ] **R234-PERF-13 — readShimLine 错误漏 cap drain 路径（P3）**：bufio chunk 临时切片漏。
 - [ ] **R234-PERF-14 — runstore.warmCache 持 entry.mu 做 ReadDir+N×ReadFile 阻塞 dashboard 冷启动（P3）**：建议 warm 异步，首次 Recent miss 立即返空切片，后台 populate。
@@ -244,7 +244,7 @@
 - [ ] **R233-SEC-7 — 同 IP 可保留 60 个未认证 WS 连接（P2）**: maxWSConns=500 全局，无 per-IP 未认证 cap。方案：未认证 WS 连接 per-IP 20 上限。Breaking：否。
 - [~] **R233-SEC-8 — /static/dashboard.js 未鉴权且无 SRI（归档 2026-05-23）**: R230-SEC-3 / R231-SEC-11 同根因。统一收敛到 R231-SEC-11，本批 PR
 - [~] **R233-SEC-9 — backend ID charset 在 cron CRUD vs WS path 不对齐（P2）**: cron 走 `[a-z0-9_-]`，WS 路径走 `[a-zA-Z0-9_.-]`。方案：抽统一 validateBackendID。Breaking：是（操作员若用 uppercase/dot backend ID）。继承 R232-SEC-5。 — 多轮 NEEDS-DESIGN 归档 2026-05-23（同根因主条目跟踪），本批 PR
-- [ ] **R233-SEC-10 — WS 无 token 模式 uploadOwner 仍按 IP（P3）**: 同 NAT 用户互相能 claim 对方上传。方案：upgrade 时检查 nz_anon cookie。Breaking：否。
+- [x] **R233-SEC-10 — WS 无 token 模式 uploadOwner 仍按 IP（P3）**: 同 NAT 用户互相能 claim 对方上传。方案：upgrade 时检查 nz_anon cookie。Breaking：否。 → 落地：wshub.go upgrade no-token 分支先读 nz_anon cookie，缺失才回退 client IP。
 
 ### 性能 — 本轮新发现
 
@@ -828,9 +828,9 @@
 
 - [~] **R224-GO-1 — `cli.Resolve` 信号量 acquire 处的 Timer 资源 leak（P1 R219-GO-1 未覆盖分支）**: `subagent_link.go:263-270` Timer Stop 后未 drain `t.C`；进程 SIGTERM 时所有等 sem 的 goroutine 永久阻塞，因 select 无 ctx.Done() arm。需与 R219-GO-1 同批修复，扩大覆盖到 Timer 路径 + 两处 retry sleep（`:289` + `:327`，code-reviewer 指出）。Breaking：是（Resolve 接受 ctx）。 — 多轮 NEEDS-DESIGN 归档 2026-05-23（同根因主条目跟踪），本批 PR
 - [ ] **R224-GO-2 — `protocol_acp.readUntilResponse` 非 shim path goroutine 在 timeout 后仍阻塞 ReadLine（P1）**: `protocol_acp.go:635-673` 仅 shimLineReader 路径走 SetReadDeadline；非 shim path 在 ACP 握手超时后 goroutine 卡 ReadLine 直到管道 EOF。每次握手超时泄漏一个 goroutine。方案：非 shim path 也走 deadline-aware reader 或 timeout case 直接 close 底层 conn。涉及：`internal/cli/protocol_acp.go:635`。
-- [ ] **R224-GO-3 — `reconnectShims` replay 段把 `time.Now().UnixMilli()` 作为 agentToolUseMS 传入 Resolve（P1）**: `router.go:1535` reconnect 路径调 `linker.Resolve(taskID, toolUseID, name, desc, time.Now().UnixMilli())`，导致 `subagent_link.go:315` `agentTS - 10s` 时间过滤在 reconnect 路径上 100% 命中所有历史条目。replay 事件应使用事件本身的 recvAt/Time 或传 0 禁用过滤。涉及：`internal/session/router.go:1535`。
+- [x] **R224-GO-3 — `reconnectShims` replay 段把 `time.Now().UnixMilli()` 作为 agentToolUseMS 传入 Resolve（P1）**: `router.go:1535` reconnect 路径调 `linker.Resolve(taskID, toolUseID, name, desc, time.Now().UnixMilli())`，导致 `subagent_link.go:315` `agentTS - 10s` 时间过滤在 reconnect 路径上 100% 命中所有历史条目。replay 事件应使用事件本身的 recvAt/Time 或传 0 禁用过滤。涉及：`internal/session/router.go:1535`。 — 已修复（router_shim.go replay 段把 `wallclock` 改为 `ev.Time`，注释解释 ev.Time=0 时 Resolve 自动跳过 staleness 过滤的 fail-open 行为；恢复 reconnect 路径上的 same-name jsonl 防混淆 guard），本批 PR
 - [ ] **R224-GO-4 — `subagent_link.fireOnResolveLocked` mu-release-reacquire 易死锁/panic（P2）**: `subagent_link.go:565` 持 `l.mu` write lock 时 Unlock + 跑 callback + 再 Lock，依赖 callback 不调 `linker.Resolve`（会触发写锁死锁）+ 单一 goroutine 进入此函数（否则第二个 Unlock panic 解锁未持有锁）。方案：先在 call site 拷贝 ID，Unlock 之后再 fire，整体移出锁外。
-- [ ] **R224-GO-5 — `eventlog.invokePersistSink` `replay` 标志读取存在 sink Store/sinkReady Store 之间的 race window（P2）**: `eventlog.go:360` 读 `!sinkReady.Load()` 在锁外，`SetPersistSink` 先 Store sink 后 Store sinkReady（line 336-337），中间窗口内一个 entry 会被错误标记 `replay=true`。方案：SetPersistSink 顺序反转，或合并到一个 atomic.Pointer 携带 sink+ready。
+- [x] **R224-GO-5 — `eventlog.invokePersistSink` `replay` 标志读取存在 sink Store/sinkReady Store 之间的 race window（P2）**: `eventlog.go:360` 读 `!sinkReady.Load()` 在锁外，`SetPersistSink` 先 Store sink 后 Store sinkReady（line 336-337），中间窗口内一个 entry 会被错误标记 `replay=true`。方案：SetPersistSink 顺序反转，或合并到一个 atomic.Pointer 携带 sink+ready。**已加 godoc 锚点说明现序保留是有意为之（反转会丢事件），window 内 entry 标 replay=true 由 Persister drop+counter，不是 bug。**
 - [ ] **R224-GO-6 — `shim/server.go SetReadDeadline` 错误 nolint 静默吞（P2）**: `:654, :680` SetReadDeadline 失败 nolint:errcheck 直接吞；conn 已关闭时后续 ReadBytes 无 deadline 阻塞 goroutine 泄漏；deadline 清除失败时 post-auth 读立即 timeout 踢掉合法客户端。方案：失败时显式关闭 conn 并 return。
 - [ ] **R224-GO-7 — `shim/server.go writer goroutine` 内层 `w.Write(more)` 错误 nolint 吞（P2）**: `:785` 写失败后 `:790` 仍调 `flushWithDeadline()`，可能将损坏的 buf 状态 flush 出去。方案：内层 write 失败立即 return。
 
@@ -923,7 +923,7 @@
 - [ ] **R222-ARCH-1 — `session.Router` 已是 god object（73 方法 / ~20 字段 / 4100 行单文件）（P1）**: 拆 sessionStore + procPool + shimReconciler + persistenceCoord + historyLoader 五子组件，Router 退化为门面；contract_test.go 守的对外契约不破。是当前最大的架构债。
 - [ ] **R222-ARCH-2 — shim 协议细节泄漏到 session 层（P1）**: session/router.go 直调 `shim.SocketPath/KeyHash/WaitSocketGone/ServerMsg/State`；cli.Wrapper 应吸收为 `WaitSocketGoneForKey(key,dur)` + `Reconnect(ctx,key,lastSeq) (*Process, midTurn, err)`。
 - [ ] **R222-ARCH-3 — `internal/config` 反向 import `internal/session`（P1）**: 仅为读 `session.DefaultMaxProcs` 一个常量。方案：抽 internal/sessionconst 或 internal/defaults 子包，session/config 都依赖它。
-- [ ] **R222-ARCH-4 — `cli.PersistSink` 与 `persist.PersistSink` 双胞胎，bridge 翻译层（P1）**: 抽 internal/eventlog/schema 唯一 entry 类型来源；或保留 bridge 但显式重命名两端。
+- [x] **R222-ARCH-4 — `cli.PersistSink` 与 `persist.PersistSink` 双胞胎，bridge 翻译层（P1）**: 抽 internal/eventlog/schema 唯一 entry 类型来源；或保留 bridge 但显式重命名两端。**已在 `internal/cli/eventlog.go` PersistSink 上加 godoc 锚点解释两边类型故意分离的现状（cli 域 vs on-disk schema 域）+ session/eventlog_bridge 是唯一翻译点 + 收敛路径前提条件。作为 R227-ARCH-15 / R230B-ARCH-17 拆包工作的 anchor。**
 - [ ] **R222-ARCH-5 — server 直接持有大量 cli.* 类型，绕过 session 抽象（P1）**: 14 个 server 文件 import cli.Attachment/ImageData/EventEntry/SubagentLinker。方案：扩展 platform.Attachment 或抽 internal/dispatch/dto。
 - [ ] **R222-ARCH-6 — Hub god-object 苗头（35+ 方法 / 1700 行）（P2）**: 拆 Hub + SubscriptionRegistry + MessageBroker。
 - [ ] **R222-ARCH-7 — `processIface` 30+ 方法（P2）**: 按 core/status/events/agents 切分四个小接口。

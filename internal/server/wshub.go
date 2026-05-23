@@ -419,7 +419,20 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.dashToken == "" {
 		c.authenticated.Store(true)
-		c.uploadOwner = ip // unauthenticated: owner = client IP (matches uploadOwner fallback)
+		// R233-SEC-10: prefer the per-browser nz_anon cookie over raw
+		// client IP so co-NAT users don't share an uploadOwner bucket and
+		// claim each other's TakeAll uploads. The HTTP path mints the
+		// cookie via uploadOwner→mintAnonCookie before any WS upgrade
+		// (dashboard JS hits /api/health → triggers uploadOwner derive in
+		// that flow); when the cookie is absent we fall back to client IP
+		// to preserve the prior contract — IP-fallback only loses
+		// disambiguation between co-NAT clients that have never made an
+		// HTTP request first, which is rare in practice.
+		if cookie, err := r.Cookie(anonCookieName); err == nil && cookie.Value != "" {
+			c.uploadOwner = ownerKeyFromCookie(cookie.Value)
+		} else {
+			c.uploadOwner = ip
+		}
 	} else if cookie, err := r.Cookie(authCookieName); err == nil {
 		if h.cookieMAC != "" && subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(h.cookieMAC)) == 1 {
 			c.authenticated.Store(true)

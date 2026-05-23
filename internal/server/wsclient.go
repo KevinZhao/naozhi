@@ -187,6 +187,16 @@ func (c *wsClient) SendJSON(v any) {
 	// previous encoder-pool path required a make+copy to isolate the send
 	// channel from the returned pool buffer, making it strictly more
 	// expensive than plain Marshal for this single-producer hot path.
+	//
+	// R234-PERF-7 (archive 2026-05-23): re-proposed introducing a
+	// sync.Pool[*bytes.Buffer + *json.Encoder] mirroring shimSendBufPool;
+	// rejected because (a) the send-channel hand-off requires the buffer
+	// to outlive the SendJSON return — pooling forces a make+copy that
+	// erases the saved alloc, and (b) stdlib already pools encodeState
+	// inside json.Marshal so the per-call alloc is already amortised.
+	// The fan-out hot path (multi-subscriber broadcast in agent_tailer)
+	// uses marshalPooled exactly once per event before fan-out; that's
+	// where the pooling pays off, not here.
 	data, err := json.Marshal(v)
 	if err != nil {
 		slog.Debug("ws SendJSON encode", "err", err)

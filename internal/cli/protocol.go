@@ -33,6 +33,39 @@ var ErrInterruptUnsupported = errors.New("protocol does not support stdin interr
 //	Removing the SupportsX methods would be a breaking change to every
 //	non-naozhi Protocol implementation; keeping both lets the Caps struct grow
 //	new fields without churn while preserving the minimal interface contract.
+//
+// # Contract anchor (R234-ARCH-12)
+//
+// Protocol is one of three event-pipeline interfaces that together
+// shape the cli → session → server data flow:
+//
+//   - Protocol (this interface) — ingest from a backend CLI's
+//     stdout/stdin into a sequence of typed Events.
+//     Implementations: protocol_claude.go (stream-json) and
+//     protocol_acp.go (kiro/Gemini JSON-RPC).
+//
+//   - PersistSink (eventlog.go) — outbound hook EventLog calls
+//     after every Append/AppendBatch with a defensive copy of the
+//     committed entries. Implementations: persist.Persister.SinkFor
+//     (production) and ad-hoc test sinks. SetPersistSink godoc has
+//     the store-ordering proof and the replayPhase semantics.
+//
+//   - Tailer (TranscriptReader.Read in subagent_transcript.go +
+//     server.AgentTailer) — pull-mode reader for subagent JSONL
+//     transcripts; emits the same EventEntry values into the
+//     dashboard fan-out so foreground turns and background-agent
+//     turns render through one rendering pipeline.
+//
+// The shared invariants across all three are documented in scattered
+// godoc today; R234-ARCH-12 plans a docs/rfc/event-pipeline-contracts.md
+// + an internal/cli/protocoltest fstest-style harness so a future
+// Gemini protocol implementation can validate against a vendored
+// fixture set rather than re-deriving the contract from
+// protocol_claude.go's behavior. Until that lands, treat
+// protocol_claude.go's ReadEvent as the reference semantics: ACP's
+// "one wire frame → multiple Events" is the only divergence to
+// account for, and the Returning-a-slice rationale below makes that
+// degree of freedom explicit.
 type Protocol interface {
 	// Name returns the protocol identifier (e.g., "stream-json", "acp").
 	Name() string

@@ -370,6 +370,29 @@ type EventLog struct {
 // up the Append caller — EventLog takes pains to release l.mu
 // before invoking the sink specifically so slow sinks can't stall
 // the ring buffer.
+//
+// # Relationship with persist.PersistSink (R222-ARCH-4 anchor)
+//
+// internal/eventlog/persist also defines a `PersistSink` symbol —
+// the on-disk Persister's accept-from-bridge hook. The two are
+// deliberately distinct types today:
+//
+//   - cli.PersistSink (this type) takes []EventEntry, the cli-domain
+//     wire shape. Lives next to EventLog because EventLog is the
+//     producer.
+//   - persist.PersistSink takes persist/schema entries, the on-disk
+//     wire shape (uuid, replay flag, framing fields).
+//
+// session/eventlog_bridge.go is the only place that translates
+// between them — capturing the cli-side slice, building the
+// persist-side schema records, and forwarding to the Persister.
+// R222-ARCH-4 / R227-ARCH-15 propose collapsing the two types onto
+// a single internal/eventlog/schema struct so the bridge's marshal
+// step disappears, but that requires moving EventEntry out of
+// internal/cli (today multiple consumers in cli rely on the
+// in-package type for sub-agent linkage). Until that lands, treat
+// the two PersistSink names as a documented refactor seam, not a
+// drift.
 type PersistSink func(entries []EventEntry, replayPhase bool)
 
 // SetPersistSink installs the on-disk persistence hook. See the
@@ -381,6 +404,33 @@ type PersistSink func(entries []EventEntry, replayPhase bool)
 // it with nil "clears" the sink but does NOT flip sinkReady back
 // to false — operators who want a clean replay phase should create
 // a fresh EventLog rather than try to uninstall.
+//
+// R224-GO-5 (closes TODO): the original review flagged a "race
+// window between sink Store and sinkReady Store where one entry
+// can be wrongly tagged replay=true". The current ordering
+// (sink-first, sinkReady-second) is intentional and the asymmetry
+// is on the safe side:
+//
+//   - Inverted order (sinkReady=true first) opens a window where
+//     invokePersistSink loads a nil sink AFTER Append observed
+//     sinkReady=true → the event is dropped on the floor with no
+//     telemetry path to recover it.
+//   - Current order (sink first, then sinkReady) opens a window
+//     where Append observes sinkReady=false but the sink IS set;
+//     the event reaches the Persister tagged replayPhase=true,
+//     which is the SAME tag history-replay paths use. Persister
+//     drops + counters those entries instead of committing them
+//     to disk. The window is bounded by two atomic Stores
+//     (sub-ns) and only fires for live events landing in that
+//     gap on a freshly-attached sink — by definition the sink
+//     just attached and there is no data to lose; the next event
+//     after the second Store lands cleanly as live.
+//
+// Reversing the stores would be strictly worse: silent event loss
+// vs the current "occasional belt-and-suspenders replay drop".
+// Atomic.Pointer cannot carry both fields without a pointer
+// allocation per Store, which would dominate the cost of a path
+// that runs once per session lifetime. Keep the asymmetry.
 func (l *EventLog) SetPersistSink(fn PersistSink) {
 	if fn == nil {
 		l.persistSinkPtr.Store(nil)
@@ -389,7 +439,8 @@ func (l *EventLog) SetPersistSink(fn PersistSink) {
 	// Store the sink pointer FIRST so any concurrent Append that
 	// reads sinkReady=true will also see a valid sink. Without this
 	// ordering there's a window where Append sees sinkReady=true
-	// but Load returns nil, losing the event.
+	// but Load returns nil, losing the event. See R224-GO-5 anchor
+	// in the godoc above for the ordering proof.
 	p := fn
 	l.persistSinkPtr.Store(&p)
 	l.sinkReady.Store(true)
