@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"time"
+	"unicode/utf8"
 )
 
 // maxCronStoreBytes caps the size of cron_jobs.json during Load. The realistic
@@ -106,12 +107,47 @@ func loadJobs(path string) (map[string]*Job, error) {
 
 	m := make(map[string]*Job, len(entries))
 	for _, j := range entries {
-		if j.ID != "" {
-			m[j.ID] = j
+		if j.ID == "" {
+			continue
 		}
+		// R234-SEC-12: defensive prompt validation. AddJob / dashboard PATCH
+		// already enforce validateCronPrompt (UTF-8 + no C0 controls except
+		// \t/\n/\r), but cron_jobs.json can be edited directly by an
+		// operator. An invalid-UTF-8 prompt would corrupt every later
+		// json.Marshal (round-trip writes U+FFFD silently); a control-byte
+		// payload would smuggle ANSI / log-injection sequences into every
+		// CronRun.Result and dashboard broadcast. Drop offenders rather
+		// than aborting the whole load — losing a single tampered job is
+		// strictly safer than refusing to start the scheduler.
+		if !utf8.ValidString(j.Prompt) || containsCronC0(j.Prompt) {
+			slog.Warn("cron store: dropping job with invalid prompt bytes",
+				"path", path, "cron_id", j.ID, "prompt_bytes", len(j.Prompt))
+			continue
+		}
+		m[j.ID] = j
 	}
 	slog.Info("loaded cron store", "count", len(m), "path", path)
 	return m, nil
+}
+
+// containsCronC0 reports whether s contains any C0 control byte that
+// validateCronPrompt rejects on the IM / dashboard write paths. \t (0x09),
+// \n (0x0A), \r (0x0D) are explicitly allowed; everything else in 0x00-0x1F
+// plus 0x7F (DEL) trips the guard. Inlined byte scan rather than the
+// textutil regex helper because loadJobs runs once at startup over a small
+// file and importing textutil would pull in regexp init cost on every
+// scheduler boot. R234-SEC-12.
+func containsCronC0(s string) bool {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b == '\t' || b == '\n' || b == '\r' {
+			continue
+		}
+		if b < 0x20 || b == 0x7F {
+			return true
+		}
+	}
+	return false
 }
 
 // randomNonce returns a short hex-encoded random string for distinguishing
