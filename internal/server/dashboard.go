@@ -427,6 +427,13 @@ func (s *Server) registerDashboard() {
 		s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(s.scratchH.handlePromote))
 		s.mux.HandleFunc("DELETE /api/scratch/{id}", auth(s.scratchH.handleDelete))
 	}
+	// memory link preview (docs/rfc/memory-link-rendering.md): exposes
+	// ~/.claude/projects/<scope>/memory/<slug>.md to the dashboard inlineMd
+	// renderer so [[slug]] tokens become hover-previewable cards.
+	if s.memoryH == nil {
+		s.memoryH = NewMemoryHandler(s.auth.trustedProxy)
+	}
+	s.mux.HandleFunc("GET /api/memory/{slug}", auth(s.memoryH.handleGet))
 
 	// Unauthenticated routes (login, static assets, WebSocket with own auth)
 	s.mux.HandleFunc("POST /api/auth/login", s.auth.handleLogin)
