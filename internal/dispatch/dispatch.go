@@ -899,6 +899,12 @@ type replyTracker struct {
 	askQuestionFired atomic.Bool
 }
 
+// releaseInitialReplySlot drops the loopWG reservation held for the
+// initial-Reply goroutine that onEvent's sent.Do spawns lazily. Idempotent
+// via sync.Once so the two release sites — the spawned goroutine's defer
+// (success path) and stop()'s teardown (turn aborted before sent.Do fires)
+// — can both call this without double-decrementing the WaitGroup. No-op
+// when supportsInterim is false (no slot was reserved at construction).
 func (t *replyTracker) releaseInitialReplySlot() {
 	if !t.initialReplyReservationOn {
 		return
@@ -916,6 +922,22 @@ func (t *replyTracker) getThinkingMsgID() string {
 	return ""
 }
 
+// newIMEventTracker builds a replyTracker bound to ctx + the destination
+// (platform, chatID) and starts the per-tracker goroutines (editLoop,
+// todoLoop) when the platform supports interim messages.
+//
+// Lifecycle invariants:
+//   - On supportsInterim platforms, two loopWG slots are reserved at
+//     construction (editLoop + initial-Reply); todoLoop adds a third
+//     unconditionally. stop() waits all three before declaring teardown
+//     complete so the IM channel never sees a post-stop edit/todo.
+//   - On platforms without interim support (Weixin, plain Discord), only
+//     todoLoop runs — msgIDReady is closed eagerly so any waitReady caller
+//     proceeds without blocking on a thinking-msg ID that will never arrive.
+//
+// Callers MUST pair every newIMEventTracker with a stop() in defer; missing
+// it leaks the started goroutines. dispatch.sendAndReply is the sole call
+// site as of R230.
 func newIMEventTracker(ctx context.Context, p platform.Platform, chatID string) *replyTracker {
 	supportsInterim := platform.SupportsInterimMessages(p)
 	t := &replyTracker{
