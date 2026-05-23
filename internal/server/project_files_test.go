@@ -120,6 +120,10 @@ func TestDetectMime_SourceCodeExtensions(t *testing.T) {
 		{"a.json", `{"a":1}`, "application/json"},
 		{"Dockerfile", "FROM debian", "text/plain"}, // http default
 		{"a.txt", "hello", "text/plain"},
+		// R232-SEC-8: dotfile-as-ext paths (filepath.Ext(".makefile") returns
+		// ".makefile") used to fall through to application/octet-stream.
+		{".makefile", "all:\n\techo hi\n", "text/x-makefile"},
+		{"sub/.makefile", "all:\n\techo hi\n", "text/x-makefile"},
 	}
 	for _, tc := range cases {
 		got := detectMime(tc.path, []byte(tc.head))
@@ -183,6 +187,34 @@ func TestMimeFromExtOnly(t *testing.T) {
 func TestPreviewableByExt_DoesNotIncludeDotEnv(t *testing.T) {
 	if mime, ok := previewableByExt[".env"]; ok {
 		t.Errorf("previewableByExt[%q] = %q, must NOT be in allowlist (R225-SEC-5)", ".env", mime)
+	}
+}
+
+// TestIsSensitiveDownloadName_CloudCredentialFiles locks R232-SEC-4 补遗:
+// cloud service-account JSONs and operator-conventional secrets files must
+// be blocked even though .json/.yaml/.yml are previewable extensions.
+func TestIsSensitiveDownloadName_CloudCredentialFiles(t *testing.T) {
+	cases := []string{
+		"secrets.yaml",
+		"secrets.yml",
+		"secrets.json",
+		"service-account.json",
+		"service_account.json",
+		"gcp-key.json",
+		"gcp_key.json",
+		"application_default_credentials.json",
+		"Secrets.YAML",
+		"Service-Account.JSON",
+	}
+	for _, name := range cases {
+		if !isSensitiveDownloadName(name) {
+			t.Errorf("isSensitiveDownloadName(%q) = false, want true (R232-SEC-4)", name)
+		}
+	}
+	for _, name := range []string{"config.json", "package.json", "data.yaml"} {
+		if isSensitiveDownloadName(name) {
+			t.Errorf("isSensitiveDownloadName(%q) = true, want false", name)
+		}
 	}
 }
 
