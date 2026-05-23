@@ -152,7 +152,7 @@
 - [ ] **R234-PERF-3 — protocol_claude.ReadEvent json.Unmarshal([]byte(line),...)（P1）**：阻塞在 shim 协议 bump，归 R231-PERF-1 主条目。
 - [ ] **R234-PERF-4 — KnownSessionIDs 无 TTL 缓存（P2）**：50 jobs × Recent(200) = 10000 row copy/dashboard poll。建议 `atomic.Pointer[knownSessionIDsCache]` 30s TTL + finishRun/DeleteJob 失效。归 R233-PERF-3 同主条目。
 - [ ] **R234-PERF-5 — TranscriptReader.readLocked 每 200ms 重 open/seek/read/close（P2）**：50 tailer × 5/s = 250 syscalls/s。建议 keep `*os.File`，`Seek+ReadAt`，仅 inode 变更（log rotation）才重开。归 R233-PERF-4 主条目。
-- [ ] **R234-PERF-7 — wsclient.Send 无 encoder pool（P2）**：每事件 fresh json.Marshal。建议 `sync.Pool` of `*bytes.Buffer + *json.Encoder`（同 shimSendBufPool 模式）。
+- [x] **R234-PERF-7 — wsclient.Send 无 encoder pool（P2）**：每事件 fresh json.Marshal。建议 `sync.Pool` of `*bytes.Buffer + *json.Encoder`（同 shimSendBufPool 模式）。 → 评估：拒绝。SendJSON 把 buffer 移交给 send channel 必须 outlive return，pool 强制 make+copy 抵消所有省 alloc 收益；stdlib json.Marshal 内部已 pool encodeState。fan-out 热路径在 agent_tailer 已用 marshalPooled。godoc 锚点已落地（wsclient.go:184-200）。
 - [ ] **R234-PERF-9 — runstore.skipAppendTrim time.Now 在 fast-exit 之前（P2，**已核实为误报**）**：实际 line 254 已先做 `len(entry.runs) > 0` 守卫，time.Now 在 fast-path 之后。归档关闭。
 - [ ] **R234-PERF-10 — parseTranscriptTime 每行 RFC3339Nano 解析 ~300ns（P2）**：250 line/s × 300ns = 75µs/s。建议 hand-parse 整数字段或 ParseInLocation+UTC 缓存。
 - [ ] **R234-PERF-13 — readShimLine 错误漏 cap drain 路径（P3）**：bufio chunk 临时切片漏。
