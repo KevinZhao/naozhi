@@ -258,7 +258,7 @@ type Scheduler struct {
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 	// R225-GO-5: callback fields accessed via atomic.Pointer so external
-	// readers (emit{Started,Ended} / recordResult variants) don't need to
+	// readers (emit{Started,Ended} / recordResultP0WithSanitised) don't need to
 	// hold s.mu, and tests that read fields directly cannot race the setters
 	// that previously took s.mu only during write.
 	onExecute    atomic.Pointer[OnExecuteFunc]
@@ -317,6 +317,15 @@ type Scheduler struct {
 }
 
 // SetOnExecute registers a callback invoked after each cron job execution.
+//
+// R230-GO-2: the `s.onExecute.Store(&fn)` pattern takes the address of the
+// parameter, which forces fn to escape to heap (1 alloc per call). This is
+// deliberately accepted: SetOn* are only invoked at startup wiring (1 call
+// per scheduler instance per process lifetime), so the per-call allocation
+// is invisible. The alternative — atomic.Value with a wrapper struct, or a
+// dedicated holder struct — would either lose the typed Load() ergonomics
+// callers rely on (Load returns *OnExecuteFunc directly) or balloon the
+// API surface. Document-and-accept rather than pessimize the read path.
 func (s *Scheduler) SetOnExecute(fn OnExecuteFunc) {
 	if fn == nil {
 		s.onExecute.Store(nil)
@@ -918,20 +927,22 @@ func (s *Scheduler) Stop() {
 		}
 	}
 
+	// R232-ARCH-10: route shutdown save through persistJobsLocked so it
+	// participates in the saveSeq monotonic gate. Without this, a queued
+	// in-flight saveMarshaledSeq from a mutator that committed just before
+	// Stop could acquire storeMu *after* Stop's bare WriteFileAtomic and
+	// overwrite the freshest snapshot with stale data — Stop's bare write
+	// did not bump lastSavedSeq, so the staleness check would let the
+	// older write through.
 	s.mu.Lock()
-	data, err := s.marshalJobsLocked()
+	save, err := s.persistJobsLocked()
 	s.mu.Unlock()
 	if err != nil {
 		slog.Error("marshal cron store on shutdown", "err", err)
 		return
 	}
-	s.storeMu.Lock()
-	defer s.storeMu.Unlock()
-	if s.storePath == "" {
-		return
-	}
-	if err := osutil.WriteFileAtomic(s.storePath, data, 0600); err != nil {
-		slog.Error("save cron store on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
+	if save != nil {
+		save()
 	}
 }
 
@@ -1057,7 +1068,7 @@ type JobWithNextRun struct {
 // Lock strategy: snapshot (*Job, entryID) under s.mu.RLock, release s.mu, then
 // call s.cron.Entry() without holding s.mu. Calling cron.Entry inside s.mu
 // would invert the lock order taken by the cron dispatcher path
-// (cron-internal → execute → recordResult → s.mu.Lock), risking a deadlock.
+// (cron-internal → execute → recordResultP0WithSanitised → s.mu.Lock), risking a deadlock.
 func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 	s.mu.RLock()
 	type pair struct {
@@ -1972,7 +1983,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		inflight.freshSnap.Store(j.FreshContext)
 	}
 	metrics.CronRunInflight.Add(1)
-	metrics.CronRunStartedTotal.Add(1)
+	// CronRunStartedTotal bumps inside emitRunStarted (R230C-GO-15).
 
 	// Apply jitter after CAS, before snapshot. After-CAS so concurrent overlap
 	// triggers are rejected immediately. Before-snapshot so an UpdateJob that
@@ -2421,7 +2432,8 @@ func (s *Scheduler) bumpRunStateMetrics(state RunState) {
 // RunEnded), so subscribers see the same started→ended pair as a normal
 // run; the state field carries RunStateSkipped + ErrClassOverlapSkipped so
 // dashboards can render it as a no-op pill instead of a real run timeline.
-// CronRunStartedTotal + the per-state metric (via finishRun) both bump.
+// CronRunStartedTotal (via emitRunStarted) + the per-state metric (via
+// finishRun) both bump.
 //
 // This dual-event emission is intentional: it keeps the runs/<id> dashboard
 // drawer renderable and prevents subscriber state machines from missing
@@ -2444,7 +2456,6 @@ func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 		StartedAt: startedAt,
 		Trigger:   trigger,
 	})
-	metrics.CronRunStartedTotal.Add(1)
 	s.finishRun(finishArgs{
 		job: j, runID: runID, startedAt: startedAt, trigger: trigger,
 		state: RunStateSkipped, errClass: ErrClassOverlapSkipped,
@@ -2455,7 +2466,14 @@ func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 // emitRunStarted invokes the registered server-side hook outside s.mu so
 // hub locks may be acquired by the handler without inversion risk. nil
 // hook = no broadcast (used by tests / no-WS deployments).
+//
+// R230C-GO-15: CronRunStartedTotal bumps here, not at the call sites, so
+// the counter cannot drift from the broadcast event count when a new emit
+// path lands. Metric advancement is independent of subscriber wiring (the
+// nil-hook fast path still bumps), matching the prior contract where both
+// executeOpt's normal path and emitOverlapSkipped each manually bumped.
 func (s *Scheduler) emitRunStarted(ev RunStartedEvent) {
+	metrics.CronRunStartedTotal.Add(1)
 	if fn := s.onRunStarted.Load(); fn != nil {
 		(*fn)(ev)
 	}
@@ -2595,98 +2613,6 @@ func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
 	s.notifyTarget(target.Platform, target.ChatID, text)
 }
 
-// recordResult persists the last execution result on the job and invokes the onExecute callback.
-//
-// sessionID 是本次执行从 CLI 拿到的 Claude session_id。成功路径传非空值，
-// 错误路径（work_dir/session/send error）传空串：空值分支不会触碰
-// j.LastSessionID，保留上一次成功执行留下的 ID，这样 dashboard 点击
-// cron 侧边栏仍然能按历史 ID 拉到 JSONL 内容而不是空白面板。
-func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
-	// textutil.TruncateRunesNoEllipsis avoids the two O(n) rune-slice
-	// allocations that `string([]rune(result)[:maxStoredResultRunes])`
-	// performs and keeps the cron-specific "…[truncated]" suffix
-	// (TruncateRunes appends "..." which is not what dashboard rendering
-	// expects). Length compare is the O(1) truncation detector:
-	// TruncateRunesNoEllipsis returns either the input unchanged or a
-	// strictly shorter byte-length prefix, so any length drop signals
-	// truncation actually happened. R219-CR-2.
-	if shaped := textutil.TruncateRunesNoEllipsis(result, maxStoredResultRunes); len(shaped) < len(result) {
-		result = shaped + truncatedSuffix
-	}
-	// Redact absolute filesystem paths from errMsg before persisting to
-	// cron_jobs.json and broadcasting to all authenticated dashboard
-	// clients. session.GetOrCreate / session.Send surface workspace-bearing
-	// errors that would otherwise enumerate operator filesystem layout on
-	// disk (at 0600) and in every connected browser's event stream. Keep
-	// the structural prefix ("session error: …" / "send error: …") so the
-	// error class remains obvious. R61-SEC-8.
-	errMsg = redactPathsInCronError(errMsg)
-	// R177-SEC-1: AI-authored result text and error strings may contain C1
-	// controls, bidi overrides, LS/PS, or embedded newlines (especially
-	// when the user prompt tricks the agent into echoing attacker-supplied
-	// strings). Those flow into (a) cron_jobs.json on disk, (b) the
-	// cronResultMsg WS broadcast to every authenticated dashboard client,
-	// and (c) any future slog attr that logs j.LastResult — each is a
-	// log-injection / stored-UI-spoofing vector. Apply the same
-	// SanitizeForLog gate used on remote workspace / feishu nonce paths.
-	// The length caps below double up with the rune truncation above;
-	// SanitizeForLog's cap is byte-counted, so extend the result cap by
-	// the suffix length so an already-truncated result keeps the
-	// "…[truncated]" marker intact instead of having it byte-clipped.
-	// R232-PERF-9.
-	result = osutil.SanitizeForLog(result, maxStoredResultRunes+len(truncatedSuffix))
-	errMsg = osutil.SanitizeForLog(errMsg, maxCronErrMsgRunes)
-	s.mu.Lock()
-	// If the job was deleted between execute()'s snapshot and recordResult's
-	// write-back, skip both the persist and the onExecute callback: broadcasting
-	// a "completed" result for an already-deleted job can flash a stale row in
-	// the dashboard (Round 49 HIGH-4) and persists nothing useful since the job
-	// is already gone from s.jobs.
-	if _, ok := s.jobs[j.ID]; !ok {
-		s.mu.Unlock()
-		return
-	}
-	// RNEW-011: snapshot the four fields we're about to overwrite so marshal
-	// failure can roll back in-memory state. Without rollback the live WS
-	// broadcast and the on-disk snapshot diverge: dashboard shows "succeeded
-	// at T" while cron_jobs.json still points at the previous run, and a
-	// restart replays the stale result as authoritative. We keep the rollback
-	// inside s.mu so the broadcast (fn, fired after Unlock) always sees either
-	// the fully-applied new values (persist OK) or the fully-restored old ones
-	// (persist failed) — never a half-applied mix.
-	prevLastRunAt := j.LastRunAt
-	prevLastResult := j.LastResult
-	prevLastError := j.LastError
-	prevLastSessionID := j.LastSessionID
-
-	j.LastRunAt = time.Now()
-	j.LastResult = result
-	j.LastError = errMsg
-	if sessionID != "" {
-		j.LastSessionID = sessionID
-	}
-	save, perr := s.persistJobsLocked()
-	if perr != nil {
-		// Marshal failed: revert the four fields so in-memory and disk agree.
-		// slog was already emitted by persistJobsLocked; add one more line so
-		// operators can correlate rollback with broadcast suppression.
-		j.LastRunAt = prevLastRunAt
-		j.LastResult = prevLastResult
-		j.LastError = prevLastError
-		j.LastSessionID = prevLastSessionID
-		s.mu.Unlock()
-		slog.Warn("cron: recordResult persist failed; in-memory result reverted",
-			"job_id", j.ID, "err", perr)
-		return
-	}
-	s.mu.Unlock()
-
-	save()
-	if fn := s.onExecute.Load(); fn != nil {
-		(*fn)(j.ID, result, errMsg)
-	}
-}
-
 // redactPathsInCronError strips absolute filesystem paths from a cron
 // execution error message before persistence. session.GetOrCreate and
 // session.Send produce errors like "session error: workspace …/repo/x:
@@ -2698,8 +2624,9 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
 // tokens aren't paths. R61-SEC-8.
 //
 // The implementation is a token-wise scan rather than a regex to avoid
-// pulling a regex compile onto every cron run: recordResult is invoked on
-// every execution and the regex cost would dominate the redaction budget.
+// pulling a regex compile onto every cron run: recordResultP0WithSanitised
+// is invoked on every execution and the regex cost would dominate the
+// redaction budget.
 func redactPathsInCronError(s string) string {
 	if s == "" {
 		return s

@@ -214,8 +214,9 @@ func TestPersistFailure_SetJobPrompt(t *testing.T) {
 }
 
 // TestPersistFailure_RecordResultRollsBack verifies RNEW-011: when
-// persistJobsLocked fails inside recordResult, the four in-memory fields
-// (LastRunAt / LastResult / LastError / LastSessionID) must revert to their
+// persistJobsLocked fails inside recordResultP0WithSanitised, the
+// in-memory fields (LastRunAt / LastResult / LastError / LastSessionID
+// / LastErrorClass / RunCounters) must revert to their
 // pre-mutation values so the live WS broadcast and the on-disk snapshot stay
 // in sync. Before the fix, the fields were overwritten and kept even when
 // disk write failed, causing dashboard → JSONL divergence across restarts.
@@ -257,7 +258,11 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 
 	withFailingMarshal(t)
 
-	s.recordResult(j, "new-result", "new-error", "new-sess")
+	// R230C-CR-1 / R232-ARCH-2: tests now exercise the production path
+	// (recordResultP0WithSanitised) directly. The discriminating fields
+	// (LastErrorClass, RunCounters) get rolled back the same way as the
+	// four LastRunAt/LastResult/LastError/LastSessionID fields.
+	_, _, _ = s.recordResultP0WithSanitised(j, "new-result", "new-error", "new-sess", ErrClassSessionError, RunStateFailed)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -280,7 +285,7 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 }
 
 // TestPersistFailure_RecordResultHappyPathBroadcasts is the positive
-// counterpart: when persistJobsLocked succeeds, recordResult must apply the
+// counterpart: when persistJobsLocked succeeds, recordResultP0WithSanitised must apply the
 // new values AND invoke onExecute so dashboard clients see the live update.
 // Without this counterpart a regression that accidentally always rolls back
 // (e.g. inverted error check) would pass the rollback test above.
@@ -312,8 +317,11 @@ func TestPersistFailure_RecordResultHappyPathBroadcasts(t *testing.T) {
 	s.jobs[j.ID] = j
 	s.mu.Unlock()
 
-	// Real marshaler — persist succeeds.
-	s.recordResult(j, "fresh-result", "", "sess-1")
+	// Real marshaler — persist succeeds. R230C-CR-1: exercises the
+	// production path directly so a future change to recordResultP0
+	// can't silently rot a happy-path test that exercises a separate
+	// helper.
+	_, _, _ = s.recordResultP0WithSanitised(j, "fresh-result", "", "sess-1", ErrClassNone, RunStateSucceeded)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

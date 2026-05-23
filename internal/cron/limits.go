@@ -30,7 +30,7 @@ const (
 	// MaxRunRecordBytes (32 KB) downstream, but trimming early avoids
 	// the cost of carrying multi-KB strings through SanitizeForLog and
 	// JSON marshal. Three call sites (sanitiseRunResult /
-	// recordResultP0WithSanitised / recordResult) previously each
+	// recordResultP0WithSanitised) previously each
 	// declared this as a function-local const, drifting in lockstep
 	// only by convention.
 	maxStoredResultRunes = 4 * 1024
