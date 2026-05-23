@@ -1,8 +1,6 @@
 package session
 
 import (
-	"time"
-
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 )
 
@@ -80,10 +78,6 @@ func (r *Router) EventLogWriterHealthy() bool {
 	s := r.EventLogStats()
 	return !s.Enabled || s.WriterAlive
 }
-
-// _ ensures the `time` import remains live; refactors sometimes
-// leave imports stranded when stats fields migrate.
-var _ = time.Nanosecond
 
 // AttachmentTrackerHealth is the /health.attachment_tracker
 // sub-object shape. Callers must not mutate; the Router re-builds
