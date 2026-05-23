@@ -60,6 +60,16 @@ const DefaultScratchTTL = 10 * time.Minute
 // value that leaves room for main sessions. 20 mirrors maxExemptSessions.
 const DefaultScratchMax = 20
 
+// MinScratchSweepInterval is the floor StartSweeper applies to its sweep
+// cadence. Sweep cadence defaults to ttl/2 so any ttl < 60s would otherwise
+// run the sweeper sub-30s, which is wasteful — a sub-minute scratch TTL is
+// already an outlier (DefaultScratchTTL is 10 minutes), and at sub-30s
+// cadence the sweeper's per-tick map walk + router.Remove churn outpaces the
+// realistic rate at which scratches actually expire. The floor keeps the
+// cost predictable without affecting correctness: a scratch will still be
+// reaped within MinScratchSweepInterval of its TTL deadline.
+const MinScratchSweepInterval = 30 * time.Second
+
 // Errors surfaced by ScratchPool callers. Kept as sentinels so HTTP handlers
 // can translate them into 4xx / 429 responses without string matching.
 var (
@@ -172,8 +182,8 @@ func (p *ScratchPool) StartSweeper() {
 	go func() {
 		defer p.sweepWG.Done()
 		tick := p.ttl / 2
-		if tick < 30*time.Second {
-			tick = 30 * time.Second
+		if tick < MinScratchSweepInterval {
+			tick = MinScratchSweepInterval
 		}
 		t := time.NewTicker(tick)
 		defer t.Stop()
