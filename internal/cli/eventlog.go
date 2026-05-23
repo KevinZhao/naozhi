@@ -29,6 +29,17 @@ const defaultEventLogSize = 500
 // is the correctness-preserving optimum.
 const setAgentInternalIDMaxScan = 50
 
+// entriesSinceInitialCap caps the lazily-allocated reverse-buffer initial
+// capacity used by EntriesSince. The streaming-tail use case (dashboard
+// poller, agent_tailer) calls EntriesSince per Append-notify so the typical
+// match count is 1-5. A small cap keeps sessions with a fully-populated
+// 500-slot ring from allocating a 500-entry backing array on every notify;
+// `append` still grows organically when a slow consumer catches up on a
+// burst. 16 covers ~99% of streaming notifies without spilling — empirical
+// EventLog batch sizes during multi-tool turns rarely exceed 8 events
+// between subscriber reads.
+const entriesSinceInitialCap = 16
+
 // imageDataURIPrefix is the required leading substring for every entry in
 // EventEntry.Images. Today the only producer is MakeThumbnail (process.go:853),
 // which always returns "data:image/jpeg;base64,..." or "". Future refactors
@@ -1110,13 +1121,13 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 			break
 		}
 		if rev == nil {
-			// Typical streaming match count is 1-5; cap at a small constant
-			// so sessions with hundreds of buffered entries don't allocate
-			// a giant backing array on every notify. `append` will grow
-			// organically if the match count exceeds this hint.
+			// Typical streaming match count is 1-5; cap at entriesSinceInitialCap
+			// so sessions with hundreds of buffered entries don't allocate a
+			// giant backing array on every notify. `append` will grow organically
+			// if the match count exceeds this hint.
 			initialCap := l.count - i
-			if initialCap > 16 {
-				initialCap = 16
+			if initialCap > entriesSinceInitialCap {
+				initialCap = entriesSinceInitialCap
 			}
 			rev = make([]EventEntry, 0, initialCap)
 		}
