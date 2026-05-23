@@ -58,10 +58,10 @@ func TestComputeJobTimeout(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := computeJobTimeout(tc.schedule, tc.cap)
+			got := computeJobTimeout(tc.cap)
 			if got != tc.want {
-				t.Fatalf("computeJobTimeout(%q, %v) = %v, want %v",
-					tc.schedule, tc.cap, got, tc.want)
+				t.Fatalf("computeJobTimeout(%v) = %v, want %v (schedule=%q)",
+					tc.cap, got, tc.want, tc.schedule)
 			}
 		})
 	}

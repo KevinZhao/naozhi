@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -141,6 +142,7 @@ func (d *doctor) run() {
 	d.checkExpvar()
 	d.checkStateDir()
 	d.checkZeroDowntimeScopes()
+	d.checkServerSecurity()
 	d.render()
 	// Backends section runs after the standard findings render so its
 	// section-header layout doesn't interleave with the per-finding ✓/✗
@@ -428,6 +430,68 @@ func (d *doctor) checkZeroDowntimeScopes() {
 		return
 	}
 	d.add("zero-downtime", "pass", fmt.Sprintf("%d shim scope(s) active (sudoers hardening is working)", count))
+}
+
+// checkServerSecurity warns when the deployment is likely behind a TLS-
+// terminating reverse proxy (ALB / CloudFront / Nginx) but trusted_proxy
+// is not enabled. In that mode the dashboard cookie is minted without
+// the Secure flag because r.TLS == nil reaches the cookie writer, and
+// X-Forwarded-Proto is not consulted unless trusted_proxy is set. The
+// resulting cookie can leak over a downgrade attack on the proxy hop.
+//
+// Heuristic: dashboard_token configured (so the binary intends to serve
+// authenticated traffic) + listen addr is non-loopback (so external
+// peers can reach it). False positives are possible (single-host
+// loopback-only with token, or no proxy at all) — but a "warn"-level
+// finding pointed at config.yaml is cheap to dismiss after a one-time
+// review and catches the genuinely dangerous case loudly.
+//
+// Doctor's contract is to use FAIL only for "broken now"; this is
+// "broken on next request" so warn is the right level. R232-SEC-13.
+func (d *doctor) checkServerSecurity() {
+	cfg, err := config.Load(d.configPath)
+	if err != nil || cfg == nil {
+		// Already surfaced by other checks; don't duplicate noise.
+		d.add("server security", "pass", "skipped (config not loaded)")
+		return
+	}
+	if cfg.Server.DashboardToken == "" {
+		d.add("server security", "pass", "no dashboard token configured (open mode)")
+		return
+	}
+	if isLoopbackAddr(cfg.Server.Addr) {
+		d.add("server security", "pass", "loopback bind — TLS-terminating proxy unlikely")
+		return
+	}
+	if cfg.Server.TrustedProxy {
+		d.add("server security", "pass", "trusted_proxy=true — Secure cookie flag honours X-Forwarded-Proto")
+		return
+	}
+	d.add("server security", "warn",
+		"dashboard_token set + non-loopback addr ("+cfg.Server.Addr+") + trusted_proxy=false: "+
+			"if you front naozhi with HTTPS termination (ALB/CloudFront/nginx), set server.trusted_proxy: true so dashboard cookies get Secure flag")
+}
+
+// isLoopbackAddr returns true when addr clearly binds to localhost only.
+// Conservative — when in doubt return false (so checkServerSecurity warns
+// rather than silently passing). Recognises empty addr, ":port" (which
+// binds 0.0.0.0), and explicit loopback hosts. Anything else is treated
+// as potentially externally reachable.
+func isLoopbackAddr(addr string) bool {
+	if addr == "" {
+		return false // empty effectively binds to default which may be 0.0.0.0
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// No port — could be just a host or a path. Treat unparseable as
+		// non-loopback to err on the side of warning.
+		host = addr
+	}
+	switch host {
+	case "127.0.0.1", "::1", "localhost":
+		return true
+	}
+	return false
 }
 
 // runOutput runs cmd with a 3s hard deadline and returns combined
