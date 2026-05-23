@@ -304,11 +304,11 @@ type cronRunsListResp struct {
 	NextBefore int64                `json:"next_before,omitempty"`
 }
 
-// validateCronBackend enforces the same shape contract as send.go for the
+// validateCronBackend enforces the shared shape contract for the
 // dashboard-picked backend override on cron jobs:
 //   - empty is OK (router default fallback at execute time);
 //   - length <= maxBackendIDLen bytes;
-//   - charset [a-z0-9_-] only.
+//   - charset matches isValidBackendID (R233-SEC-9 unification).
 //
 // Unknown backend IDs are NOT rejected here — the session router's
 // wrapperFor clamps unknowns to the configured default so the cron job
@@ -316,10 +316,12 @@ type cronRunsListResp struct {
 // removed a backend from config.yaml. This handler-edge gate stops only
 // shape-invalid input that would otherwise pollute logs / persisted JSON.
 //
-// NOTE: charset here is intentionally tighter than isValidBackendID
-// (which the WS path uses and additionally allows uppercase + '.').
-// Tracked as NEEDS-DESIGN; the cron path keeps the older [a-z0-9_-]
-// rule until the cross-path policy is unified.
+// R233-SEC-9: previously used a tighter [a-z0-9_-] subset, leaving
+// uppercase / '.' allowed by the WS isValidBackendID path and rejected
+// here. Now both paths share isValidBackendID + maxBackendIDLen so a
+// caller cannot confuse the two surfaces. The relaxation is forward-
+// compatible: any backend ID validated under the older subset still
+// satisfies isValidBackendID's superset.
 func validateCronBackend(backend string) error {
 	if backend == "" {
 		return nil
@@ -327,14 +329,11 @@ func validateCronBackend(backend string) error {
 	if len(backend) > maxBackendIDLen {
 		return fmt.Errorf("backend exceeds %d-byte limit", maxBackendIDLen)
 	}
-	for i := 0; i < len(backend); i++ {
-		c := backend[i]
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
-			// R230-CQ-12: error string aligned with send.handleSend's
-			// dashboard-side gate so dashboard JS / external API consumers
-			// see one message regardless of which surface rejected.
-			return fmt.Errorf("invalid backend identifier")
-		}
+	if !isValidBackendID(backend) {
+		// R230-CQ-12: error string aligned with send.handleSend's
+		// dashboard-side gate so dashboard JS / external API consumers
+		// see one message regardless of which surface rejected.
+		return fmt.Errorf("invalid backend identifier")
 	}
 	return nil
 }

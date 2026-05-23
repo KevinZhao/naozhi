@@ -1130,6 +1130,42 @@ var sensitiveDownloadNames = map[string]struct{}{
 	"firebase-adminsdk.json":               {},
 	"application_default_credentials.json": {},
 	"kubeconfig":                           {}, // legacy short name, also picked up via path
+	// R233B-SEC-5: ops-conventional credential-laden filenames missed by the
+	// .env / secret(s) anchors above. database.yml is Rails canonical; rds.yml
+	// / pg.yml are common for PG/MySQL DSN bundles; credentials.yml +
+	// credentials.yaml are Capistrano/Ansible style; api-keys.* covers the
+	// ad-hoc convention. Listed as exact matches (not ext-only) so a
+	// developer's legitimate "data.yml" / "config.yml" still preview/download.
+	"database.yml":     {},
+	"database.yaml":    {},
+	"credentials.yml":  {},
+	"credentials.yaml": {},
+	"credentials.json": {},
+	"api-keys.json":    {},
+	"api-keys.yml":     {},
+	"api-keys.yaml":    {},
+	"api_keys.json":    {},
+	"api_keys.yml":     {},
+	"api_keys.yaml":    {},
+	"rds.yml":          {},
+	"rds.yaml":         {},
+	"pg.yml":           {},
+	"pg.yaml":          {},
+	"mysql.yml":        {},
+	"mysql.yaml":       {},
+}
+
+// sensitiveBaseSuffixes lists filename suffixes that identify backups /
+// archives of credential files (e.g. ".env.backup", ".env.bak", ".env.old").
+// R233B-SEC-5: an attacker who can exfil "secrets.json" can equally exfil
+// "secrets.json.bak"; suffix matching closes that obvious flank without
+// growing the exact-match table to combinatorial size.
+var sensitiveBaseSuffixes = []string{
+	".env.backup",
+	".env.bak",
+	".env.old",
+	".env.orig",
+	".env.save",
 }
 
 // sensitiveDownloadExts lists extensions that strongly imply key material.
@@ -1153,6 +1189,13 @@ func isSensitiveDownloadName(base string) bool {
 	}
 	if ext := filepath.Ext(low); ext != "" {
 		if _, ok := sensitiveDownloadExts[ext]; ok {
+			return true
+		}
+	}
+	// R233B-SEC-5: suffix scan catches ".env.backup" / ".env.bak" style
+	// archive names that the exact-name + ext scans miss.
+	for _, suffix := range sensitiveBaseSuffixes {
+		if strings.HasSuffix(low, suffix) {
 			return true
 		}
 	}

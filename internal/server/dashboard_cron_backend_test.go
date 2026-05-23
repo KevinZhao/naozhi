@@ -28,10 +28,15 @@ func TestValidateCronBackend_Standalone(t *testing.T) {
 		{"with_hyphen", "long-name-1", false},
 		{"max_len_32", strings.Repeat("a", 32), false},
 		{"over_max_len", strings.Repeat("a", 33), true},
-		// Send.go's gate matches [a-z0-9_-]; everything else is hostile.
-		{"uppercase_rejected", "Claude", true},
+		// R233-SEC-9: charset unified onto isValidBackendID
+		// ([a-zA-Z0-9._-]) shared by HTTP send / WS dispatch / cron CRUD.
+		// Uppercase + dot are now ACCEPTED here to match the WS path; the
+		// older [a-z0-9_-] subset was only enforced on cron / send and led
+		// to "valid on one surface, rejected on another" asymmetry.
+		{"uppercase_ok_R233_SEC_9", "Claude", false},
+		{"dot_ok_R233_SEC_9", "claude.v2", false},
+		// Anything outside isValidBackendID's superset still rejected.
 		{"space_rejected", "claude ", true},
-		{"dot_rejected", "claude.v2", true},
 		{"slash_rejected", "claude/v2", true},
 		{"newline_rejected", "claude\n", true},
 		{"control_byte_rejected", "claude\x00", true},
@@ -111,18 +116,22 @@ func TestCronCreate_AcceptsValidBackend(t *testing.T) {
 }
 
 // TestCronCreate_RejectsInvalidBackendChars covers the regex-style
-// boundary validator: any byte outside [a-z0-9_-] must be rejected at
-// the dashboard edge with 400 so a multi-KB hostile `backend=` cannot
-// land in slog or in cron_jobs.json. The cases mirror send.go's gate to
-// keep the two surfaces in sync.
+// boundary validator: any byte outside isValidBackendID's superset
+// ([a-zA-Z0-9._-]) must be rejected at the dashboard edge with 400 so
+// a multi-KB hostile `backend=` cannot land in slog or in cron_jobs.json.
+// Cases mirror send.go's gate to keep the surfaces in sync (R233-SEC-9).
+//
+// Uppercase + dot are NOT in this list anymore: R233-SEC-9 unified the
+// cron / send / WS charsets onto isValidBackendID, which accepts
+// [A-Za-z0-9._-]. The previous tighter [a-z0-9_-] cron-only rule rejected
+// uppercase + dot — see TestValidateCronBackend_Standalone for the
+// positive-case coverage of that relaxation.
 func TestCronCreate_RejectsInvalidBackendChars(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
 		val  string
 	}{
-		{"uppercase", "Claude"},
-		{"dot", "claude.v2"},
 		{"slash", "claude/v2"},
 		{"space", "claude v2"},
 		{"newline", "claude\n"},
