@@ -401,19 +401,31 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 					}
 					taskID, toolUseID := ev.TaskID, ev.ToolUseID
 					desc := ev.Description
-					// R224-GO-3: pass the event's own Time as agentToolUseMS
-					// instead of time.Now(). subagent_link.Resolve uses this
-					// timestamp to filter out subagent jsonl files whose first
-					// row is older than agentTS-10s ("same-name reuse"
-					// guard). On the reconnect/replay path the events are
-					// historical, so time.Now() always passes the guard
-					// (every replayed task looks "older than 10s") which
-					// effectively disables the staleness filter and lets
-					// stale jsonl files match. ev.Time may be 0 for very old
-					// replay frames that lack a recorded timestamp; Resolve
-					// treats agentToolUseMS<=0 as "skip the time filter",
-					// which is the correct fail-open for those rare cases.
-					wallclock := ev.Time
+					// R224-GO-3: pass 0 instead of time.Now().UnixMilli().
+					// subagent_link.Resolve uses agentToolUseMS to filter
+					// out subagent jsonl files whose first row predates
+					// agentTS-10s ("same-name reuse" staleness guard).
+					// Replay frames in this branch have no preserved
+					// per-event timestamp (cli.Event.recvAt is unexported
+					// and only stamped at live readLoop time), so any
+					// time.Now()-derived value here is fiction relative
+					// to the historical task — and a fiction that's
+					// always *newer* than the real task, which means
+					// every candidate jsonl passes the guard and the
+					// filter is effectively disabled with a misleading
+					// non-zero argument. Resolve treats
+					// agentToolUseMS<=0 as "skip the time filter"
+					// (subagent_link.go:328), which is the honest
+					// fail-open for the replay path: we're consciously
+					// declining to enforce staleness because we lack
+					// the data to do so. Same-name reuse on replay is
+					// extremely rare (would require a parent agent
+					// finishing an old task, the exact sub-task name
+					// being reused after >10s, and the shim restart
+					// surfacing both in one DrainReplay), and Resolve's
+					// other guards (sessionID match, toolUseID dedup,
+					// per-jsonl modtime ordering) still apply.
+					wallclock := int64(0)
 					go linker.Resolve(taskID, toolUseID, name, desc, wallclock)
 				}
 			}
