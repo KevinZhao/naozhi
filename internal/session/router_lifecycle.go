@@ -944,6 +944,17 @@ func (r *Router) loadResumeHistoryOnSpawn(
 // countActive recounts alive processes (corrects drift from undetected exits).
 // Exempt sessions are not counted toward max_procs capacity. Caller must
 // hold r.mu.
+//
+// R220-PERF-1: This is an O(n) walk of r.sessions executed under r.mu (write
+// lock at most caller sites). Cleanup's prune loop already maintains a running
+// newActive counter to avoid a second pass; the remaining callers (evict /
+// takeover / spawn / discovery resume) accept the scan because they only fire
+// on explicit lifecycle transitions (not per-message hot paths) where map
+// walks of even a few hundred sessions are cheaper than threading a delta
+// through every Close site. If session counts grow past low-thousands the
+// fix is to switch to atomic delta accounting at every Close, with a
+// periodic countActive() reconciliation to absorb drift — not to make this
+// function lock-free in place.
 func (r *Router) countActive() {
 	count := int64(0)
 	for _, s := range r.sessions {
