@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/session"
+	"golang.org/x/time/rate"
 )
 
 // HealthHandler serves the /health endpoint with system status information.
@@ -44,6 +45,30 @@ type HealthHandler struct {
 	// Injected after Start() wires the Dispatcher; nil-safe. last_reply_success
 	// is zero-valued until the first successful user-visible reply.
 	dispatcherMetrics func() (int64, int64, int64, time.Time)
+	// unauthLimiter throttles unauthenticated /health probes per source IP so
+	// scanners cannot poll high-frequency to fingerprint uptime / restart
+	// timing. Authenticated probes (with a valid Bearer/cookie) bypass this
+	// bucket — Prometheus and the dashboard status bar are expected to send
+	// credentials. Nil means "limiter not wired" (older test fixtures); in
+	// that case no throttle is applied. R226-SEC-7.
+	unauthLimiter *ipLimiter
+}
+
+// healthUnauthRate is the per-IP sustained rate for anonymous /health
+// requests; healthUnauthBurst is the leaky-bucket burst. 60 req/min with
+// burst 10 matches the TODO R226-SEC-7 prescription — generous for a load
+// balancer's liveness probe (typically 1/s), tight enough to make
+// fingerprinting via uptime drift uneconomical for a scanner.
+const (
+	healthUnauthRate  = rate.Limit(1) // 60 req/min sustained
+	healthUnauthBurst = 10
+)
+
+// newHealthUnauthLimiter constructs the per-IP limiter used to throttle
+// unauthenticated /health requests. Extracted so server.go's wiring stays
+// declarative and tests can swap in a tighter bucket. R226-SEC-7.
+func newHealthUnauthLimiter(trustedProxy bool) *ipLimiter {
+	return newIPLimiterWithProxy(healthUnauthRate, healthUnauthBurst, trustedProxy)
 }
 
 // healthWatchdogStats is the /health "watchdog" sub-object. Stack-allocated
@@ -174,6 +199,14 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Uptime: time.Since(h.startedAt).Round(time.Second).String(),
 	}
 	if !h.auth.isAuthenticated(r) {
+		// R226-SEC-7: rate-limit anonymous probes per source IP. Authenticated
+		// callers (Prometheus, dashboard status bar) bypass the limiter via
+		// the early return below — they identify themselves and are trusted.
+		if h.unauthLimiter != nil && !h.unauthLimiter.AllowRequest(r) {
+			w.Header().Set("Retry-After", "60")
+			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
 		writeJSON(w, resp)
 		return
 	}

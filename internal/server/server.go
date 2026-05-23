@@ -737,6 +737,11 @@ func buildServer(opts ServerOptions) *Server {
 		watchdogTotal:      &s.watchdogTotalKills,
 		nodeAccess:         s.nodeAccess,
 		platforms:          platNames,
+		// R226-SEC-7: per-IP throttle for unauthenticated /health probes.
+		// Authenticated callers (Prometheus / dashboard status bar) bypass
+		// this bucket. trustedProxy honours X-Forwarded-For so deployments
+		// behind ALB rate-limit the real client IP rather than the proxy's.
+		unauthLimiter: newHealthUnauthLimiter(opts.TrustedProxy),
 		hubDropped: func() int64 {
 			if s.hub == nil {
 				return 0
