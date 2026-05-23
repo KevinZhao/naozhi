@@ -260,22 +260,20 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 	// router default inside wrapperFor, but we reject obviously hostile
 	// input early so a 4 KB `backend=<payload>` cannot land in logs.
 	if p.Backend != "" {
-		// R230-CQ-12: error string aligned with dashboard_cron's
-		// validateCronBackend so external API consumers (and the dashboard
-		// JS that does substring matching for friendlier UI copy) see the
-		// same message regardless of which entry point rejected the value.
-		// The character whitelist intentionally stays stricter than the
-		// router-side validateBackend (no uppercase, no dots) — see
-		// R230B-SEC-2 / R232-SEC-5 for the convergence plan; collapsing
-		// the rule today would broaden the input set per surface.
+		// R230-CQ-12 / R233-SEC-9: route both length cap and charset through
+		// the shared isValidBackendID + maxBackendIDLen primitives. Previously
+		// the HTTP send path inlined a tighter [a-z0-9_-] subset while WS
+		// dispatch and node selection used isValidBackendID's superset
+		// ([a-zA-Z0-9._-]); the asymmetry meant a backend ID accepted on one
+		// surface was rejected on another. Error messages stay aligned with
+		// dashboard_cron.validateCronBackend so substring matching in
+		// dashboard JS / external API consumers continues to work regardless
+		// of which surface rejected.
 		if len(p.Backend) > maxBackendIDLen {
 			return false, "", fmt.Errorf("backend exceeds %d-byte limit", maxBackendIDLen)
 		}
-		for i := 0; i < len(p.Backend); i++ {
-			c := p.Backend[i]
-			if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
-				return false, "", fmt.Errorf("invalid backend identifier")
-			}
+		if !isValidBackendID(p.Backend) {
+			return false, "", fmt.Errorf("invalid backend identifier")
 		}
 		h.router.SetSessionBackend(key, p.Backend)
 	}

@@ -218,6 +218,56 @@ func TestIsSensitiveDownloadName_CloudCredentialFiles(t *testing.T) {
 	}
 }
 
+// TestIsSensitiveDownloadName_OpsConventional locks R233B-SEC-5: ops-laden
+// credential filenames (database.yml, api-keys.*) must be blocked, plus
+// archive-suffix patterns (.env.backup, .env.bak, …) that an attacker
+// would otherwise lift via path-mode download to bypass the .env exact match.
+func TestIsSensitiveDownloadName_OpsConventional(t *testing.T) {
+	blocked := []string{
+		"database.yml",
+		"database.yaml",
+		"credentials.yml",
+		"credentials.yaml",
+		"credentials.json",
+		"api-keys.json",
+		"api_keys.yaml",
+		"rds.yml",
+		"pg.yaml",
+		"mysql.yml",
+		// Suffix scan path:
+		".env.backup",
+		".env.bak",
+		".env.old",
+		".env.orig",
+		".env.save",
+		"prod.env.backup", // prefix + suffix
+		"app.env.bak",     // prefix + suffix
+		"DATABASE.YML",    // case-insensitive
+		"APP.ENV.BACKUP",  // case-insensitive suffix
+	}
+	for _, name := range blocked {
+		if !isSensitiveDownloadName(name) {
+			t.Errorf("isSensitiveDownloadName(%q) = false, want true (R233B-SEC-5)", name)
+		}
+	}
+	// Pin negative cases so the suffix scan doesn't over-block legitimate
+	// developer workspace files. ".envoy.yaml" looks like ".env" but is
+	// envoy proxy config; "envrc" / "env.example" are doc/template files.
+	allowed := []string{
+		"data.yml",
+		"deployment.yaml",
+		"package.json",
+		".envoy.yaml",
+		"env.example",
+		"envrc",
+	}
+	for _, name := range allowed {
+		if isSensitiveDownloadName(name) {
+			t.Errorf("isSensitiveDownloadName(%q) = true, want false", name)
+		}
+	}
+}
+
 func TestIsTextMime(t *testing.T) {
 	if !isTextMime("text/plain; charset=utf-8") {
 		t.Error("text/plain should be text")

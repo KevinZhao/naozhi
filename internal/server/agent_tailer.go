@@ -361,11 +361,24 @@ func (t *agentTailer) pollOnce() bool {
 			t.updateMetaFromEventLocked(e, now)
 		}
 		if over := len(t.buffered) - 500; over > 0 {
-			// R228-PERF-13: copy the retained tail into a fresh backing array
-			// so the dropped prefix's events become unreachable and the
-			// backing array stops growing past 500+over.
-			retained := append([]cli.EventEntry(nil), t.buffered[over:]...)
-			t.buffered = retained
+			// R228-PERF-13: drop the oldest `over` events while reusing the
+			// existing backing array — copy the retained tail in-place to
+			// the front, then truncate. R233-PERF-7: previously this copied
+			// into a fresh backing array via `append(nil, t.buffered[over:]...)`,
+			// allocating ~150 KB (500 × ~300B EventEntry) per overflow tick.
+			// In-place copy reuses the original cap=500-headroom slice, so
+			// steady-state runs at zero alloc once the slice has warmed up.
+			//
+			// Zero out the now-unreachable suffix BEFORE truncating so the
+			// EventEntry pointers (Images / ToolCall / Message bytes) become
+			// reachable for GC immediately rather than waiting for the next
+			// overflow to overwrite them. Without this, dropped events
+			// pin their referenced data through the next 500 events.
+			n := copy(t.buffered, t.buffered[over:])
+			for i := n; i < len(t.buffered); i++ {
+				t.buffered[i] = cli.EventEntry{}
+			}
+			t.buffered = t.buffered[:n]
 		}
 	}
 	// Snapshot subs only when there are events to fan out — idle ticks
@@ -386,27 +399,78 @@ func (t *agentTailer) pollOnce() bool {
 	refCount := t.refCount.Load()
 	t.mu.Unlock()
 
-	// Broadcast new events.
+	// Broadcast new events. R231-PERF-5 / R232-PERF-2 / R233-PERF-* family:
+	// when more than one subscriber is attached, marshal each frame once
+	// and fan it out via SendRaw rather than letting every subscriber pay
+	// the json.Marshal reflect cost. The single-subscriber path keeps the
+	// SendJSON shortcut to avoid the marshalPooled buffer dance for the
+	// common "one dashboard tab" case.
 	for i := range events {
 		e := events[i]
-		for _, c := range subs {
-			c.SendJSON(node.ServerMsg{
+		if len(subs) == 1 {
+			subs[0].SendJSON(node.ServerMsg{
 				Type:   "agent_event",
 				Key:    t.key,
 				TaskID: t.taskID,
 				Event:  &e,
 			})
+			continue
+		}
+		data, err := marshalPooled(node.ServerMsg{
+			Type:   "agent_event",
+			Key:    t.key,
+			TaskID: t.taskID,
+			Event:  &e,
+		})
+		if err != nil {
+			// Marshal of a non-cyclic struct cannot fail in practice;
+			// fall back to per-subscriber SendJSON so a future schema
+			// regression still emits something instead of silently
+			// dropping the frame.
+			for _, c := range subs {
+				c.SendJSON(node.ServerMsg{
+					Type:   "agent_event",
+					Key:    t.key,
+					TaskID: t.taskID,
+					Event:  &e,
+				})
+			}
+			continue
+		}
+		for _, c := range subs {
+			c.SendRaw(data)
 		}
 	}
 	if len(events) > 0 && len(subs) > 0 {
 		m := meta
-		for _, c := range subs {
-			c.SendJSON(node.ServerMsg{
+		if len(subs) == 1 {
+			subs[0].SendJSON(node.ServerMsg{
 				Type:      "agent_meta",
 				Key:       t.key,
 				TaskID:    t.taskID,
 				AgentMeta: &m,
 			})
+		} else {
+			data, err := marshalPooled(node.ServerMsg{
+				Type:      "agent_meta",
+				Key:       t.key,
+				TaskID:    t.taskID,
+				AgentMeta: &m,
+			})
+			if err != nil {
+				for _, c := range subs {
+					c.SendJSON(node.ServerMsg{
+						Type:      "agent_meta",
+						Key:       t.key,
+						TaskID:    t.taskID,
+						AgentMeta: &m,
+					})
+				}
+			} else {
+				for _, c := range subs {
+					c.SendRaw(data)
+				}
+			}
 		}
 	}
 
