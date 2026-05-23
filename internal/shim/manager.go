@@ -892,6 +892,34 @@ func (m *Manager) CLIPath() string {
 // subprocesses. Variables not matching any prefix are filtered out to reduce
 // the risk of leaking unrelated secrets (database passwords, third-party tokens)
 // to the Claude CLI process which has Bash tool access.
+//
+// R230-SEC-2 archive anchor (doc-and-accept):
+//
+//	The "XDG_" wildcard prefix below intentionally admits the full XDG Base
+//	Directory family — XDG_CONFIG_HOME / XDG_CONFIG_DIRS / XDG_DATA_DIRS /
+//	XDG_CACHE_HOME / XDG_STATE_HOME / XDG_RUNTIME_DIR — even though
+//	CONFIG/DATA in particular let an authenticated operator redirect where
+//	the CLI looks for its own configuration and data files. Three reasons
+//	this is acceptable risk and is preserved deliberately:
+//	  (1) Reach is bounded to the CLI's own cache/config/data lookups —
+//	      the working directory is still pinned by Manager.allowed_root and
+//	      OS uid governs file-system reachability, so XDG_* cannot escalate
+//	      to writing system files or escaping the workspace sandbox.
+//	  (2) XDG_CONFIG_HOME / XDG_DATA_DIRS are part of the freedesktop.org
+//	      / systemd / LSB-aligned environment contract; CLI tools the shim
+//	      launches (claude, kiro, future agents) all assume the canonical
+//	      XDG family is forwarded. Replacing the wildcard with an explicit
+//	      RUNTIME_DIR/CACHE_HOME/STATE_HOME allowlist would silently break
+//	      operator-installed CLI configurations that ship in
+//	      $XDG_CONFIG_HOME/<tool>/ and force every happy-path deployment
+//	      onto a non-default config search path.
+//	  (3) The threat (env-driven config redirection) is fully observable —
+//	      the operator setting XDG_CONFIG_HOME is the same operator who can
+//	      rewrite the systemd unit, so this widens nothing the trust model
+//	      already concedes.
+//	The narrow-allowlist alternative (R230-SEC-2 reviewer suggestion) was
+//	rejected for breaking LSB compatibility with no corresponding security
+//	gain; status: doc-and-accept, tracked in docs/TODO.md R230-SEC-2.
 var shimEnvAllowedPrefixes = []string{
 	// System essentials
 	"HOME=", "USER=", "LOGNAME=", "PATH=", "SHELL=",
