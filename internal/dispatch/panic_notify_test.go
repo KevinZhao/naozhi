@@ -40,7 +40,7 @@ func TestHandleOwnerLoopPanic_SendsReplyToUser(t *testing.T) {
 	msg := testIncomingMsg()
 
 	// Invoke the recover helper with a synthetic panic value.
-	d.handleOwnerLoopPanic(key, msg, "synthetic test panic")
+	d.handleOwnerLoopPanic(key, msg, "synthetic test panic", nil)
 
 	if fp.replyCount() != 1 {
 		t.Fatalf("reply count = %d, want 1 (panic notify must reach user)", fp.replyCount())
@@ -64,7 +64,7 @@ func TestHandleOwnerLoopPanic_DiscardsQueue(t *testing.T) {
 		t.Fatalf("setup: expected nonzero depth, got %d", depth)
 	}
 
-	d.handleOwnerLoopPanic(key, testIncomingMsg(), "synthetic test panic")
+	d.handleOwnerLoopPanic(key, testIncomingMsg(), "synthetic test panic", nil)
 
 	if depth := d.queue.Depth(key); depth != 0 {
 		t.Errorf("queue depth after panic recover = %d, want 0 (Discard not invoked)", depth)
@@ -78,7 +78,7 @@ func TestHandleOwnerLoopPanic_NilQueueNoCrash(t *testing.T) {
 	d.queue = nil // Guard-based deployments leave queue unset.
 
 	// Must not panic on nil queue. The reply still goes out.
-	d.handleOwnerLoopPanic("any-key", testIncomingMsg(), "synthetic test panic")
+	d.handleOwnerLoopPanic("any-key", testIncomingMsg(), "synthetic test panic", nil)
 
 	if fp.replyCount() != 1 {
 		t.Errorf("reply count = %d, want 1 even with nil queue", fp.replyCount())
@@ -102,7 +102,7 @@ func TestHandleOwnerLoopPanic_ReplyPanicAbsorbed(t *testing.T) {
 			t.Fatalf("nested panic escaped handleOwnerLoopPanic: %v", r)
 		}
 	}()
-	d.handleOwnerLoopPanic("any-key", testIncomingMsg(), "synthetic test panic")
+	d.handleOwnerLoopPanic("any-key", testIncomingMsg(), "synthetic test panic", nil)
 	if !fp.called {
 		t.Errorf("panic-notifying Reply was not attempted")
 	}

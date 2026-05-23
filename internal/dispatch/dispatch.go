@@ -465,19 +465,24 @@ func (d *Dispatcher) ownerLoop(
 	msg platform.IncomingMessage,
 	log *slog.Logger,
 ) {
-	defer func() {
-		if r := recover(); r != nil {
-			d.handleOwnerLoopPanic(key, msg, r)
-		}
-	}()
-	defer d.router.NotifyIdle()
-
 	// Enrich the logger once for the whole ownerLoop lifetime. Previously
 	// sendAndReply re-did this `log.With` on every drained turn — a coalesced
 	// burst of 5 follow-ups meant 5 identical handler-chain allocs. Lifting
 	// it here costs exactly one alloc per ownerLoop regardless of drain
 	// depth. R61-PERF-12.
 	log = log.With("key", key, "agent", agentID)
+	defer func() {
+		if r := recover(); r != nil {
+			// R230-CQ-11: pass the enriched ownerLoop logger so the panic
+			// path inherits the same key/agent/platform attrs as the rest
+			// of this turn's log lines. The recover trigger means the
+			// loop's normal `log.Info("message replied", ...)` already
+			// fired this turn or never will — operators grepping by key
+			// see the panic stitched into the same context window.
+			d.handleOwnerLoopPanic(key, msg, r, log)
+		}
+	}()
+	defer d.router.NotifyIdle()
 
 	// Process first message.
 	d.sendAndReply(ctx, key, first.Text, first.Images, agentID, opts, msg, log, true)
@@ -524,16 +529,24 @@ func (d *Dispatcher) ownerLoop(
 // A nested recover around the reply call absorbs a cascading panic (e.g.,
 // platform SDK panicking on a nil chat handle) so the outer defer always
 // completes and the process can drain other owners cleanly.
-func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessage, r any) {
+//
+// R230-CQ-11: lg carries the ownerLoop's enriched key/agent attrs so the
+// panic and reply-panic log lines share context with the rest of the turn.
+// nil is tolerated for callers that don't have an ownerLoop logger handy
+// (e.g. unit tests) — falls back to the package-level slog.
+func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessage, r any, lg *slog.Logger) {
 	metrics.PanicRecoveredTotal.Add(1)
-	slog.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
+	if lg == nil {
+		lg = slog.Default()
+	}
+	lg.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
 	if d.queue != nil {
 		d.queue.Discard(key)
 	}
 	func() {
 		defer func() {
 			if rr := recover(); rr != nil {
-				slog.Error("ownerLoop reply panic recovered", "key", key, "panic", rr)
+				lg.Error("ownerLoop reply panic recovered", "key", key, "panic", rr)
 			}
 		}()
 		notifyCtx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
