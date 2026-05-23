@@ -96,14 +96,19 @@ const (
 var ErrCorruptRun = errors.New("cron run: corrupt or oversize record")
 
 // IsValidID reports whether s matches the lowercase-hex shape produced
-// by generateRunID / generateID (currently 16 hex chars; upper bound 64
-// reserved for a future schema bump). Imposed at parse time so a stray
-// non-run file in runs/<jobID>/ cannot poison List output, and exposed
-// so HTTP handlers can fail-fast at the boundary instead of forwarding
-// non-hex IDs that the store would silently swallow as an empty result.
-// R221-FIX-P1-2.
+// by generateRunID / generateID (currently 16 hex chars; upper bound
+// MaxIDLen reserved for a future schema bump). Imposed at parse time so
+// a stray non-run file in runs/<jobID>/ cannot poison List output, and
+// exposed so HTTP handlers can fail-fast at the boundary instead of
+// forwarding non-hex IDs that the store would silently swallow as an
+// empty result. R221-FIX-P1-2.
+//
+// The cap deliberately reuses limits.MaxIDLen so the runstore acceptance
+// shape stays in lockstep with the IM-command and dashboard /cron HTTP
+// boundaries; a future widening of IDs only has to bump that single
+// constant rather than chase a magic 64 across three files.
 func IsValidID(s string) bool {
-	if len(s) == 0 || len(s) > 64 {
+	if len(s) == 0 || len(s) > MaxIDLen {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
