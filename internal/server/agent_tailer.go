@@ -17,6 +17,25 @@ import (
 // to wsClient connections; the parsing side (cli.TranscriptReader) stays
 // backend-agnostic.
 //
+// Architecture note (R234-ARCH-13): this file imports internal/cli for
+// TranscriptReader and EventEntry, bypassing internal/session.Router for
+// the read path. That is intentional today because:
+//
+//   - the on-disk JSONL transcript is the source of truth even for sessions
+//     that have already exited (router.GetSession would return nil);
+//   - tailers must replay buffered events to late subscribers, which the
+//     current Router event-bus does not retain; and
+//   - cli.TranscriptReader's incremental Tail semantics (mtime/inode-aware
+//     reopen on log rotation) are file-IO-specific and would not survive a
+//     pure router event-channel abstraction without leaking the same fields
+//     back through it.
+//
+// The long-term plan is `router.Tail(key) <-chan EventDTO` with router
+// internally choosing between persisted (cold) and live (warm) sources;
+// until that DTO layer lands the cli import is the lesser evil compared
+// with a duplicate transcript parser. Do not add new cli surface usage to
+// this file without first revisiting the DTO RFC.
+//
 // Lifecycle (RFC v4 agent-team-ui §3.5.4):
 //
 //   Linker.OnResolve(taskID, toolUseID, hex) →  registry.ensureTailer()
