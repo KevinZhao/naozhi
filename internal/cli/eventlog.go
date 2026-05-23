@@ -423,10 +423,19 @@ func (l *EventLog) invokePersistSink(entries []EventEntry) {
 // paths using textutil.DeriveLegacyUUID for determinism) keep their
 // value; everything else gets a fresh newEventUUID.
 //
-// Called from Append / AppendBatch inside the l.mu write-lock so
-// the ring buffer always stores the definitive UUID downstream
-// readers (Entries, EntriesSince, EntriesBefore, invokePersistSink)
-// see.
+// Called from Append / AppendBatch *before* taking l.mu so the
+// crypto/rand.Read getrandom syscall (inside newEventUUID) does not
+// run under the write-lock and serialise concurrent Append calls
+// behind the kernel entropy pool. Pure function: no shared state is
+// touched, so no synchronisation is required for stampUUID itself —
+// the e *EventEntry pointer is owned by the caller (a value-typed
+// EventEntry on the stack for Append, a per-index slot of the input
+// slice for AppendBatch). The l.mu acquisition that follows is what
+// makes the *ring-buffer* write visible to readers; UUID stamping
+// only mutates the caller's transient copy. Documented contract
+// pinned by R225-PERF-11; do NOT move stampUUID back inside l.mu
+// without re-running the bench in eventlog_test (the lock-hold time
+// regression was the original motivator).
 func stampUUID(e *EventEntry) {
 	if e.UUID == "" {
 		e.UUID = newEventUUID()
