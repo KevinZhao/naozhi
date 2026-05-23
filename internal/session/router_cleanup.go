@@ -191,6 +191,16 @@ func (r *Router) Cleanup() {
 	stuckThreshold := 2 * totalTimeout
 
 	// ── Pass 2: classify outside the lock (may perform PID syscalls) ─
+	//
+	// R220-PERF-4 anchor: each candidate triggers two separate proc.mu
+	// RLock acquisitions (Alive + IsRunning) which compete with hot Send
+	// path's RLock. Folding them into a single "snapshot proc state once"
+	// helper would drop the lock pressure roughly 2x but requires
+	// extending the processIface contract with a struct-returning
+	// GetState() that exposes both flags atomically. Until the iface
+	// surgery lands, the two-call shape is intentional: it keeps the
+	// processIface contract minimal and matches the Alive/IsRunning
+	// semantics every other caller in the package uses.
 	var expired []expiredEntry
 	var stuckKill []expiredEntry
 	now := time.Now()
