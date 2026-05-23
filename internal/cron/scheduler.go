@@ -2312,7 +2312,6 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	if durationMS < 0 {
 		durationMS = 0 // monotonic clock skew safety
 	}
-	s.bumpRunStateMetrics(a.state)
 
 	// Persist (LastRunAt/LastResult/LastError/Counters) for terminal paths
 	// that historically updated state. Canceled / shutdown paths skipPersist
@@ -2345,6 +2344,19 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	} else {
 		persistedResult = sanitiseRunResult(persistedResult)
 		persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
+	}
+
+	// R230C-GO-8: bump per-state metric AFTER persistence settles. Previous
+	// ordering bumped pre-persist, so a marshal-failure rollback still left
+	// CronRunSucceededTotal +1 even though Job state had been reverted, with
+	// dashboards over-reporting throughput vs durable runs.
+	//
+	// Skip-persist paths (canceled / shutdown / overlap-skipped) still bump
+	// because by definition no Job rollback is possible — the metric is the
+	// only durable record those runs leave. Persist-attempted paths bump
+	// only when jobPersistOK == true.
+	if a.skipPersist || jobPersistOK {
+		s.bumpRunStateMetrics(a.state)
 	}
 
 	// CronRun history (P1). Conditions:
