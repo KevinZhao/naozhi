@@ -1084,16 +1084,21 @@ var sensitiveDownloadNames = map[string]struct{}{
 	"id_ed25519":      {},
 	"authorized_keys": {},
 	"credentials":     {}, // ~/.aws/credentials, docker credentials helpers, etc.
-	// Cloud-native credential filenames that show up in workspaces under
-	// allowed_root often enough to deserve an explicit block. The extension
-	// allowlist alone is not sufficient — these are .json / .yaml files that
-	// would otherwise pass as harmless config.
-	"service-account.json": {},
-	"serviceaccount.json":  {},
-	"secrets.yaml":         {},
-	"secrets.yml":          {},
-	"secret.yaml":          {},
-	"secret.yml":           {},
+	// Cloud-native credential filenames (GCP / Kubernetes / Firebase / generic
+	// secrets) that show up in workspaces under allowed_root. The .json /
+	// .yaml extensions are too broad for the extension allowlist (would block
+	// legitimate config files), so match them here by full filename.
+	// R232-SEC-4 + R230-SEC-? consolidated.
+	"service-account.json":   {},
+	"serviceaccount.json":    {},
+	"secrets.yaml":           {},
+	"secrets.yml":            {},
+	"secret.yaml":            {},
+	"secret.yml":             {},
+	"gcp-key.json":           {},
+	"gcloud-key.json":        {},
+	"firebase-adminsdk.json": {},
+	"kubeconfig":             {}, // legacy short name, also picked up via path
 }
 
 // sensitiveDownloadExts lists extensions that strongly imply key material.
