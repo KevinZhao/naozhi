@@ -911,6 +911,15 @@ func (r *Router) loadResumeHistoryOnSpawn(
 // countActive recounts alive processes (corrects drift from undetected exits).
 // Exempt sessions are not counted toward max_procs capacity. Caller must
 // hold r.mu.
+//
+// R220-PERF-1 anchor: this is intentionally an O(n) full scan over r.sessions.
+// The hot Send / Cleanup / GetOrCreate paths now maintain r.activeCount
+// incrementally (Reset/Remove/evictOldest/Cleanup decrement, spawnSession
+// increments) and read it lock-free via Stats(); they MUST NOT call
+// countActive() in the steady state. countActive remains for the rare
+// drift-recovery paths (bulk teardown, post-load reconcile, post-evict
+// double-check) where the O(n) cost is acceptable to re-anchor the
+// counter against r.sessions ground truth.
 func (r *Router) countActive() {
 	count := int64(0)
 	for _, s := range r.sessions {
