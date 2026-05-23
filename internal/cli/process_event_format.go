@@ -227,14 +227,19 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 		if ev.AskQuestion != nil {
 			entry := base
 			entry.Type = "ask_question"
-			entry.Tool = "AskUserQuestion"
+			// Use the shared askUserQuestionToolName constant (defined in
+			// protocol_claude.go) so the per-block matcher, ReadEvent's
+			// short-circuit predicate, and the synthesised entry's Tool
+			// field cannot drift apart when CC renames the tool. R234-PERF-16
+			// follow-up: same anchor for the rendered EventEntry.
+			entry.Tool = askUserQuestionToolName
 			entry.ToolUseID = ev.AskQuestion.ToolUseID
 			// Summary is a one-line digest used for sidebar preview;
 			// AskQuestion field carries the full card payload.
 			if len(ev.AskQuestion.Items) > 0 {
 				entry.Summary = textutil.TruncateRunes(ev.AskQuestion.Items[0].Question, 120)
 			} else {
-				entry.Summary = "AskUserQuestion"
+				entry.Summary = askUserQuestionToolName
 			}
 			entry.AskQuestion = ev.AskQuestion
 			out = append(out, entry)
