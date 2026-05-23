@@ -1093,6 +1093,17 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 // via the `before=` path. R68-PERF-H1.
 const maxHistoryPushEntries = 50
 
+// capHistoryBatch returns the trailing window of at most
+// maxHistoryPushEntries (the most recent entries) so the initial-subscribe
+// history push never balloons into hundreds of MB of marshal work fanned
+// out across 500 WS clients.
+//
+// Caller-side contract: clients that need more history walk backwards via
+// /api/sessions/events?before=<time> — the slice returned here is
+// intentionally a tail, not a head, so the dashboard's "most recent first"
+// rendering shows fresh content immediately and lets the user scroll up
+// for older turns. Returning a sub-slice (no copy) is safe because the
+// caller's downstream JSON marshal does not retain the slice past send.
 func capHistoryBatch(entries []cli.EventEntry) []cli.EventEntry {
 	if len(entries) <= maxHistoryPushEntries {
 		return entries
