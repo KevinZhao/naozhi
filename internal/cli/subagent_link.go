@@ -311,6 +311,14 @@ func (l *SubagentLinker) Resolve(taskID, toolUseID, name, description string, ag
 			if attempt == l.retryLimit {
 				break
 			}
+			// R220-GO-1 / R219-GO-1 anchor: time.Sleep here is intentional —
+			// piping ctx through Resolve is a Breaking change (signature
+			// includes a new parameter, every test helper must follow) and
+			// is queued in those lanes as a single atomic refactor with the
+			// resolveSem acquire path. Bounded by retryLimit*retryInterval
+			// (~3s default), and on shutdown the parent process is already
+			// torn down before this goroutine matters — Resolve's worst-case
+			// orphan window is the same 3s budget it already promises.
 			time.Sleep(l.retryInterval)
 			continue
 		}
@@ -350,6 +358,9 @@ func (l *SubagentLinker) Resolve(taskID, toolUseID, name, description string, ag
 			if attempt == l.retryLimit {
 				break
 			}
+			// Same R220-GO-1 / R219-GO-1 anchor as the candidates==0 sleep
+			// above — Resolve does not yet take ctx, so cancellation arms
+			// are deferred to the breaking refactor in those lanes.
 			time.Sleep(l.retryInterval)
 			continue
 		}
