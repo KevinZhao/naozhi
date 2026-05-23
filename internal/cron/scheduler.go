@@ -195,6 +195,27 @@ type (
 )
 
 // Scheduler manages cron jobs and executes them on schedule.
+//
+// Lock hierarchy (always acquire in this order; never up the chain):
+//
+//	s.mu  >  runStore.jobLock(jobID)  >  recentCacheEntry.mu
+//
+// Concretely:
+//   - s.mu guards the in-memory jobs map and persistJobsLocked save callback.
+//     persistJobsLocked returns a save func that the caller MUST invoke after
+//     releasing s.mu (see R58 / RES2 design notes); never call save() while
+//     holding s.mu — atomic file writes can stall on slow disks and would
+//     freeze every mutator.
+//   - runStore.jobLock(jobID) is per-job and serialises Append / trimJobLocked
+//     for one job's runs/ directory; never reach back up to s.mu while holding
+//     a jobLock. Cron execute() finishes its s.mu critical section before
+//     calling runStore.Append, which preserves this ordering.
+//   - recentCacheEntry.mu is the innermost cache-shard lock and is released
+//     before any disk IO (warmCache obeys this by snapshotting under entry.mu,
+//     dropping it, and re-acquiring after ReadDir).
+//
+// Test fakes that violate this order will deadlock under -race in
+// scheduler_backend_test / runstore_test contention scenarios. R234-GO-12.
 type Scheduler struct {
 	cron *robfigcron.Cron
 	mu   sync.RWMutex
