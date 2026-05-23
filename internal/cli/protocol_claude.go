@@ -180,6 +180,23 @@ func (p *ClaudeProtocol) WriteInterrupt(w io.Writer, requestID string) error {
 	return nil
 }
 
+// ReadEvent parses a single CLI stream-json line into zero or more Events.
+//
+// R67-PERF-1 / R71-PERF-H1 / R227-PERF-1 archive anchor: the `line string`
+// signature forces a `[]byte(line)` copy on every event for json.Unmarshal,
+// which at 5-50 events/s × N active sessions is real heap churn. A breaking
+// change to `ReadEvent(line []byte)` would eliminate the copy by letting
+// readLoop hand the unparked bufio.Reader slice straight in — but the same
+// readLoop today derives `line` as a string from the shim envelope's
+// `shimClientMsg.Line string` field on the cross-process boundary
+// (`internal/shim/protocol.go`), so a pure []byte signature only pays off
+// once the shim wire format also switches its Line field to
+// json.RawMessage. The two changes need to ship together to avoid a
+// regression where readLoop just allocates the []byte one frame earlier.
+// Re-evaluate when the shim protocol revision bump is on the table; until
+// then the per-event `[]byte(line)` copy is the dominant survivor and is
+// accepted (~200 B-4 KiB per event, dwarfed by the json.Unmarshal value
+// graph it feeds).
 func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	var ev Event
 	if err := json.Unmarshal([]byte(line), &ev); err != nil {
