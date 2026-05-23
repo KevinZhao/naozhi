@@ -36,6 +36,20 @@ const platformReplyTimeout = 15 * time.Second
 // than going through this interface.
 //
 // Keep the method set minimal: any future guard variant has to fit.
+//
+// R228-ARCH-11 (archive 2026-05-23): the ticket framed this as "1 method
+// interface that's actually either-or — delete it, use the concrete type".
+// That misreads the consumer surface. Three implementations live behind
+// SessionGuard today: MessageQueue (prod IM path), session.Guard (prod
+// Dashboard/WS via msgqueue.go SessionGuard-compat methods), and the
+// dispatch_test.go::fakeGuard test seam. Collapsing to a concrete type
+// would force test wiring through MessageQueue's full enqueue/drain
+// machinery just to exercise busy-flag transitions — losing the unit-
+// level isolation that fakeGuard delivers in ~10 LOC. The "either-or"
+// branch in dispatch.go is a runtime selector between queue-mode and
+// guard-mode wiring (NewDispatcher's d.queue != nil vs d.guard fallback),
+// not a structural redundancy. Keep the interface; the cost is one extra
+// indirection on a path already dominated by queue.Enqueue / Release.
 type SessionGuard interface {
 	TryAcquire(key string) bool
 	ShouldSendWait(key string) bool

@@ -2167,6 +2167,21 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// reason; make Send consistent. Shutdown latency is bounded by
 	// Router.Shutdown's drain timeout (ShutdownTimeout, 30s in
 	// internal/session) + cron.Stop()'s own cron.Stop() chain drain.
+	//
+	// R230B-GO-1 / R222-GO-1 (worst-case wall clock): the spawn ctx above
+	// (line ~2062, derived from s.stopCtx with WithTimeout(jobTimeout)) and
+	// this sendCtx do NOT share a budget — a slow GetOrCreate that consumes
+	// most of jobTimeout still hands a fresh jobTimeout to Send below. A
+	// pathological run can therefore last ~2*jobTimeout + a brief scheduling
+	// gap before finishRun stamps a terminal state. This is intentional:
+	// clamping sendCtx to (jobTimeout - time.Since(startedAt)) would amplify
+	// flaky/cold-start spawns (~10s spawn → ~290s send budget on a 5min
+	// job), turning a transient session-spawn slowdown into a user-visible
+	// "send timed out" without the operator having any signal. The
+	// scheduler-level overlap guard (robfig SkipIfStillRunning chain
+	// wrapper, computeJobTimeout godoc) already prevents two concurrent
+	// runs of the same job from stacking budgets, so the doubled wall
+	// clock affects only the CURRENT run's recorded duration, not throughput.
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), jobTimeout)
 	defer sendCancel()
 	inflight.setPhase(PhaseSending)
@@ -2524,11 +2539,17 @@ func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
 //     CronRun) don't diverge — they'd otherwise show contradictory state
 //     for the same run. R220-ARCH-2.
 //
-// R220-GO-1: previously a thin recordResultP0 wrapper existed for tests
-// pinning the (j, result, errMsg, sessionID, errClass, state) signature.
-// No production caller used it; finishRun goes direct. The wrapper was
-// dead code and has been removed; tests assert on outcomes (Job fields,
-// CronRun summary), not wrapper presence.
+// R220-GO-1 / R230B-SEC-1 / R232-ARCH-2: previously a thin recordResultP0
+// wrapper existed for tests pinning the (j, result, errMsg, sessionID,
+// errClass, state) signature. No production caller used it; finishRun goes
+// direct. The wrapper was dead code and has been removed; tests assert on
+// outcomes (Job fields, CronRun summary), not wrapper presence. The
+// "double-track recordResult vs recordResultP0WithSanitised" smell flagged
+// by R230B-SEC-1 (missing RunCounters.addRun + LastErrorClass on the dead
+// path) and R232-ARCH-2 (sanitize-arg drift across the two paths) is
+// therefore moot — only this single P0 path remains, and persist_failure_test
+// (the last "test stub" caller) already invokes this function directly.
+// Do NOT reintroduce a thinner wrapper without first checking those TODOs.
 func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState) (string, string, bool) {
 	if trimmed := textutil.TruncateRunesNoEllipsis(result, maxStoredResultRunes); len(trimmed) < len(result) {
 		result = trimmed + truncatedSuffix
