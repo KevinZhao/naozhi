@@ -108,17 +108,18 @@ const (
 var ErrCorruptRun = errors.New("cron run: corrupt or oversize record")
 
 // IsValidID reports whether s is a valid cron / cron-run identifier:
-// a non-empty lowercase hex string of at most 64 bytes. Currently job
-// and run IDs are generated as 16 hex chars; the 64-byte upper bound
+// a non-empty lowercase hex string of at most MaxIDLen bytes. Currently
+// job and run IDs are generated as 16 hex chars; the MaxIDLen upper bound
 // is held in reserve for a future schema bump.
 //
 // 在 store 入口（parse / list / append / detail handler）做边界校验，
 // 防止 runs/<jobID>/ 下意外文件名（temp file、备份）污染 List 输出，
 // 也允许 HTTP 层在请求入口直接拒绝非法 ID 而不必下沉到磁盘 IO。
 // R221-FIX-P1-2 + R234-CR-10（godoc 改写为输入形态描述，不再引用
-// 私有的 generateRunID / generateID）。
+// 私有的 generateRunID / generateID）+ R232-DOC-1（魔术值 64 改用
+// limits.go 已声明的 MaxIDLen，避免未来加宽 ID 时两处不同步）。
 func IsValidID(s string) bool {
-	if len(s) == 0 || len(s) > 64 {
+	if len(s) == 0 || len(s) > MaxIDLen {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
