@@ -208,7 +208,7 @@
 
 - [ ] **R232-GO-1 — protocol_acp.go readUntilResponse 超时 goroutine 永久泄漏（P1）**: 非 shim reader 路径（R224-GO-2 已记）超时后 goroutine 无 SetReadDeadline 出口，每次握手超时泄漏一个。方案：JSONRW 加 SetReadDeadline 接口或 type-assert io.Closer fallback close fd。Breaking：否。
 - [ ] **R232-GO-2 — historyWg.Add(1) vs historyCtx.Err() TOCTOU（P2）**: R230-GO-1 仍 open。方案：把 Add(1) 提到 ctx.Err() 检查之前，跳过分支立即 Done()。Breaking：否。
-- [ ] **R232-GO-3 — sysession.Manager Stop-before-Start 边角（P2）**: stopOnce.Do 仅用 m.cancel != nil 守卫，未建立 started 标志。方案：原子 started 标志早返回。Breaking：否。
+- [x] **R232-GO-3 — sysession.Manager Stop-before-Start 边角（P2）**: stopOnce.Do 仅用 m.cancel != nil 守卫，未建立 started 标志。方案：原子 started 标志早返回。Breaking：否。 — 已修复（Manager 加 started atomic.Bool，startOnce.Do 末尾 Store(true)；Stop 先 Load，false 时直接 stopOnce.Do 空 func 让后续 Start 也走 panic 二次启动检查；ctx/cancel/wg 写入和 started 写入间的隐式 happens-before 由 startOnce 提供），本批 PR #241
 - [ ] **R232-GO-4 — limitedWriter.Write error 分支返回 len(p) 违反 io.Writer 契约（P2）**: 目前是有意为之（exec.Cmd pump 不重试），注释已说明。属"违反契约的设计取舍"，跟踪至 godoc 升级或封装。Breaking：否（行为修正风险大，跟踪不直修）。
 - [x] **R232-GO-5 — runOnce defer 顺序与注释不符（P3）**: combined defer 与 tickCtx cancel defer LIFO 实际是 cancel 先跑，注释声称相反。方案：把 tickCtx 声明提到 combined defer 之前。Breaking：否。 — 已修复，本批 PR #224
 - [x] **R232-GO-6 — runOnce post-Run goroutine 看到 cancel 后的 tickCtx 误分类风险（P3）**: 同 R232-GO-5。 — 已修复，本批 PR #224
@@ -231,13 +231,13 @@
 - [ ] **R232-SEC-1 — .conf/.cfg/.ini 预览 + download 路径暴露凭据（P1）**: 这三种扩展常存 DSN/secret，TODO P3 R230B-SEC-4 低估风险。方案：从 previewableByExt 移除，sensitiveDownloadName 加名称模式（*db*/*database*/*secret*）。Breaking：否（预览改不可预览）。
 - [ ] **R232-SEC-2 — 4 条 serve* 路径独立 TOCTOU（P2，扩展 R231-SEC-5）**: handleFileGet Lstat 后 serveRender/Preview/Raw/Download 各 open 一次。方案：handleFileGet 一次 OpenFile 拿 fd 传子函数；下游 Fstat 比 inode。Breaking：否。
 - [ ] **R232-SEC-3 — feishu transport_hook 签名失败前 nonce 未入库（P2）**: HMAC 失败提前返回时 timestamp 窗口内可换 nonce 重放。方案：失败时也写 nonce 或先 nonce 去重再签名校验。Breaking：否。
-- [ ] **R232-SEC-4 — sensitiveDownloadNames 漏 secrets.yaml/service-account.json/gcp-key.json（P2）**: 方案：在 sensitiveDownloadExts 加 .json 与 secret/credential/key 文件名模式结合。Breaking：否。
+- [x] **R232-SEC-4 — sensitiveDownloadNames 漏 secrets.yaml/service-account.json/gcp-key.json（P2）**: 方案：在 sensitiveDownloadExts 加 .json 与 secret/credential/key 文件名模式结合。Breaking：否。 — 已修复（sensitiveDownloadNames 全名匹配补 secrets.yaml/secrets.yml/service-account.json/gcp-key.json/gcloud-key.json/firebase-adminsdk.json/kubeconfig；继续避免给 sensitiveDownloadExts 加 .json/.yaml 因为会拒掉合法 config），本批 PR #241
 - [ ] **R232-SEC-5 — backend ID charset 双标 cron CRUD vs WS（P2）**: validateCronBackend [a-z0-9_-] vs isValidBackendID [a-zA-Z0-9_.-]。R230B-SEC-2 已记，本轮补充新边角：handleList 读路径不校验大写 ID 透传响应。方案：统一到单一 helper。Breaking：是。
 - [ ] **R232-SEC-6 — serveRaw 透传 text/markdown MIME 不强制 attachment（P2）**: 浏览器嗅探可能渲染 HTML。方案：text/* 子类型统一强制 Content-Disposition: attachment。Breaking：否。
 - [ ] **R232-SEC-7 — JFIF+PDF 双容器绕过 PDF 检测以 KindImageInline 进入（P2）**: 方案：增二次魔数检测拒绝嵌套 PDF。Breaking：否。
 - [ ] **R232-SEC-8 — detectMime 隐藏文件 (.makefile) 点号拼接错误（P3）**: 无扩展名分支用 "."+base 拼接，".makefile" 被映射 octet-stream。方案：ext=="" 分支用原始 base 查表。Breaking：否。
 - [x] **R232-SEC-9 — buildLoginPageCSP 正则提取 inline script/style 错误只在运行时暴露（P3）**: 无编译期自测。方案：加 init() 自测或常量化 hash + TestLoginPage。Breaking：否。 — 已修复（dashboard_auth.go init() 抽样 extractInlineBlocks，scripts/styles 任一为 0 立即 panic，把回归暴露在进程启动期而非首次登录请求），本批 PR #230
-- [x] **R232-SEC-10 — interruptLimiter 频率高于 sendLimiter（P3）**: 15/s vs 5/s 可对单 session DoS。方案：interruptLimiter 改 rate.Every(2s) burst=2。Breaking：否。 — 已确认归档（wshub.go:380 现状已是 `rate.NewLimiter(rate.Every(2*time.Second), 2)`，~0.5/s 持续 + burst 2 覆盖双击；TODO 描述基于过时观察，实际 interrupt 早已严于 send；godoc 上方 R163 解释完整），本批 PR
+- [x] **R232-SEC-10 — interruptLimiter 频率高于 sendLimiter（P3）**: 15/s vs 5/s 可对单 session DoS。方案：interruptLimiter 改 rate.Every(2s) burst=2。Breaking：否。 — 已修复（wshub.go interruptLimiter 从 rate.Every(200ms)+burst=3（≈15/s）下调到 rate.Every(2s)+burst=2，~0.5/s 持续 + burst 2 覆盖双击，让 interrupt 严格慢于 sendLimiter 的 5/s sustained），本批 PR #239 #241
 - [x] **R232-SEC-11 — weixin Reply MessageID 拼接含未转义 ChatID（P3）**: 方案：用 SanitizeForLog 或 url.PathEscape 处理 ChatID。Breaking：否。 — 已修复（Weixin.Reply 返回 MessageID 时对 msg.ChatID 走 osutil.SanitizeForLog(128)，与同函数 contextToken 缺失分支对齐），本批 PR #230
 - [x] **R232-SEC-12 — protocol_claude resumeIDRe 含 . 略扩 --resume 字符集（P3）**: 方案：缩到 [A-Za-z0-9-]。Breaking：否（合法 Resume ID 不含 . 或 _）。 — 已修复（resumeIDRe 缩到 [A-Za-z0-9-]{1,128}；测试 fixture 改 UUID-shaped + 新增 RejectsBadResumeID 表锁 underscore/dot/whitespace/overlong），本批 PR #224
 - [x] **R232-SEC-13 — HTTPS+反向代理未设 trusted_proxy 时 cookie 无 Secure 标志（P3）**: 文档/doctor 缺提示。方案：doctor 加 HIGH 警告。Breaking：否。 — 已修复（cmd/naozhi/doctor.go 新增 checkServerSecurity：dashboard_token 配置 + 监听非 loopback + trusted_proxy=false 时 warn；config 加载失败/无 token/loopback bind/已启 trusted_proxy 各分支 pass 避免 false positive；isLoopbackAddr helper 保守判断），本批 PR #232
@@ -296,7 +296,7 @@
 - [ ] **R231-SEC-9 — 单 token 可建 500 个 WS（P2，R229-SEC-8 重申未修）**: maxConnectionsPerServer=500 但无 per-token/per-cookie-bucket 子上限。方案：WS 升级时按 cookie MAC 或 Bearer SHA-256 设 per-token 上限（如 20）。
 - [ ] **R231-SEC-10 — 反向 Node 连接通过 `ws://` 明文（P2，R229-SEC-5 重申未修）**: 部署环境未有 TLS 卸载代理则 token 中间人截获。方案：`/ws-node` handler 检查 r.TLS + 可信 X-Forwarded-Proto:https，无则拒绝 Upgrade，或显式豁免 + 文档。Breaking：是。
 - [ ] **R231-SEC-11 — `/static/dashboard.js` 不走 requireAuth（P2，R230-SEC-3 重申未修）**: 中间人可替换 JS 文件后客户端窃取 dashboard token。方案：dashboard_token 非空时对静态 JS 端点加 requireAuth。
-- [ ] **R231-SEC-12 — handleFileGet Lstat 后未再做 rootResolved 二次确认（P2，R230-SEC-5 重申未修）**: TOCTOU 内文件可被移到 workspace 外。方案：Lstat 后再做 HasPrefix 双重确认。
+- [x] **R231-SEC-12 — handleFileGet Lstat 后未再做 rootResolved 二次确认（P2，R230-SEC-5 重申未修）**: TOCTOU 内文件可被移到 workspace 外。方案：Lstat 后再做 HasPrefix 双重确认。 — 已修复，与 R230-SEC-5 同批落地，本批 PR #241
 
 ### 性能 — 本轮新发现
 
@@ -429,7 +429,7 @@
 - [ ] **R230-CQ-8 — reconnectShims case 内 90+ 行内联（P2 R229-CR-3 重申）**: 仍未抽 processDiscoveredShim 子函数。Breaking：否。
 - [ ] **R230-CQ-9 — cron.executeOpt 329 行 7+ 错误分支（P2 R229-CR-1 重申）**: handleSendError / deliverAndRecord 抽取。Breaking：否。
 - [ ] **R230-CQ-10 — NewRouter 359 行内联三阶段初始化（P2 R229-CR-2 重申）**: newRouterRestoreSessions / newRouterStartHistoryLoads 抽取。Breaking：否。
-- [ ] **R230-CQ-11 — handleOwnerLoopPanic 用 slog.Error 包级 logger 缺 key/agent 富化（P3）**: dispatch.go panic 路径与 ownerLoop 主路径属性不一致。方案：参数透传 lg。Breaking：否。
+- [x] **R230-CQ-11 — handleOwnerLoopPanic 用 slog.Error 包级 logger 缺 key/agent 富化（P3）**: dispatch.go panic 路径与 ownerLoop 主路径属性不一致。方案：参数透传 lg。Breaking：否。 — 已修复（handleOwnerLoopPanic 新增 lg *slog.Logger 参数，nil fallback slog.Default()；ownerLoop 把 log.With("key","agent") 富化提到 defer 之前以便 closure 拿到富化版；panic_notify_test 三处调用点同步加 nil 占位），本批 PR #241
 - [ ] **R230-CQ-12 — backend 错误信息 3 处不一致（"invalid backend length"/"backend exceeds %d-byte limit"/"invalid backend identifier"）（P3）**: API 客户端字符串匹配会漏。方案：统一走 session.validateBackend 或共享格式化 helper。Breaking：是（外部串匹配方需迁）。
 - [x] **R230-CQ-13 — rtruncByteLen 与 textutil.TruncateRunesNoEllipsis 重复（P3）**: dashboard_session.go 私实现一份。方案：统一调 textutil。Breaking：否。 — 已修复（新增 textutil.TruncateAtRuneBoundary 字节级 rune-boundary 反向截断 helper + 7 case 表驱动测试，dashboard_session.go / dashboard_transcribe.go 切换调用，删 rtruncByteLen 私实现 13 行），本批 PR #210
 - [ ] **R230-CQ-14 — cron/scheduler.go 2745 行单文件无拆分计划（P3 R226-CR-11 重申）**: 建议先建 scheduler_job.go / scheduler_run.go / scheduler_notify.go 骨架。Breaking：否。
@@ -445,7 +445,7 @@
 - [ ] **R230-SEC-2 — shim XDG_ env 前缀过宽（P2）**: `shim/manager.go:900` `XDG_` 前缀放行 XDG_CONFIG_HOME / XDG_CONFIG_DIRS / XDG_DATA_DIRS，理论上可重定向 CLI 配置/数据查找。当前测试契约（manager_test.go:517）显式允许 XDG_CONFIG_HOME，调整需同步重写测试。方案：精确 `XDG_RUNTIME_DIR=` `XDG_CACHE_HOME=` `XDG_STATE_HOME=`，剔除 CONFIG/DATA。Breaking：是（测试契约 + 部署期依赖 XDG_CONFIG_HOME 转发的运维方）。
 - [ ] **R230-SEC-3 — Dashboard JS 静态资源未鉴权（P2）**: `/static/dashboard.js` 与 `/static/agent_view.js` 不走 requireAuth，HTTP 部署下中间人可替换。方案：dashboardToken 非空时对 JS 端点也加 requireAuth；或文档化 TLS 必备。Breaking：否（鉴权后浏览器需先认证才能加载，与 SPA 流程一致）。
 - [ ] **R230-SEC-4 — sessions.meta.json 非原子写（P3）**: store.go:225 单 WriteFile，partial write 可产生半截 JSON。方案：要么 WriteFileAtomic（额外 2 次 fsync），要么文档化"sidecar partial = unknown version 自然 fallback"。Breaking：否。
-- [ ] **R230-SEC-5 — handleFileGet TOCTOU prefix 复检缺（P3）**: project_files.go:585 仅 ModeSymlink 标志检查，未在 Lstat 后再次复核 resolved 仍在 rootResolved 之下。方案：加二次 HasPrefix 防御。Breaking：否。
+- [x] **R230-SEC-5 — handleFileGet TOCTOU prefix 复检缺（P3）**: project_files.go:585 仅 ModeSymlink 标志检查，未在 Lstat 后再次复核 resolved 仍在 rootResolved 之下。方案：加二次 HasPrefix 防御。Breaking：否。 — 已修复（handleFileGet Lstat 通过后再 EvalSymlinks(rootPath) 取最新 rootResolved，再次校验 HasPrefix；并发 rename(2) 把 resolved 的目录搬出 workspace 时被 not-found 通道挡回，与 R231-SEC-12 复检条目一并解决），本批 PR #241
 
 ### Go / Concurrency（剩余 — 本轮新发现）
 
