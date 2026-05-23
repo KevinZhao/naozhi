@@ -376,7 +376,12 @@ func verifyChecksum(binPath, sumPath, asset string) error {
 		return fmt.Errorf("read checksums: %w", err)
 	}
 
-	// Each line: "<hash>  <filename>"
+	// Each line: "<hash>  <filename>".
+	// strings.Fields collapses any unicode whitespace, including the
+	// trailing \r left behind by CRLF line endings (Windows-built CI
+	// runners), so this loop is correct against either LF or CRLF
+	// checksums.txt without an extra TrimRight. R235-SEC-7 reviewer
+	// misread; documented to deflect the same finding next round.
 	expected := ""
 	for _, line := range strings.Split(string(sums), "\n") {
 		fields := strings.Fields(line)
