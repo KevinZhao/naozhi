@@ -1,6 +1,8 @@
 # TODO
 
-> 最后更新 2026-05-23 Round 233 —— 深度 5-agent 并行 code review 第 43 轮：合计 21 处直接修落地。第一批 12 处（PR #239）：cron RegisterCronStub 接口收敛删 1 方法 + 4 处 fake test 同步 / cron computeJobTimeout 删 schedule 死参 / cron redactPathsInCronError 用 TruncateAtRuneBoundary 守 UTF-8 边界 / dispatch nil watchdog atomic 防御 / acp readUntilResponse 超时 goroutine 通过 select-with-done 不阻塞 / sysession limitedWriter Write 错误路径不再违反 io.Writer 契约 / acp textBuf 写入 cap 守 maxAssistantMessageContentBytes / dashboard transcript ANSI regex fast-path 用 IndexByte 0x1b / project_files sensitiveDownloadNames 补 service-account.json/secrets.yaml / dashboard_cron 删 maxCronBackendLen 死常量 / wshub interruptLimiter 0.5/s 收紧 / agent_tailer silent 路径无订阅时跳过 subs 快照。第二批 9 处（PR #240）：cli/passthrough.go `cap` 变量重命名避免 shadow builtin / cron `defaultMaxJobs=50`+`defaultExecTimeout=5min`+`cronNotifyTimeout=30s` 抽命名常量 / sysession `defaultDaemonTickInterval=30s` 命名常量 / cron `addJobLocked` ID 碰撞 retry 由 unbounded 改 cap 至 10 次 + 显式 error 出口 / cron `loadJobs` 增加 `len(entries)>maxJobsHardCap=500` 防御性上限 / cli/process_turn drainStaleEvents interrupted-settle 分支补 slog.Warn 与 line 179 主路径对齐 / wshub `dashTokenHash` immutable-after-construction 注释明确 hot-reload 不支持。+ ~30 NEEDS-DESIGN 归档见 Round 233 节。
+> 最后更新 2026-05-23 Round 234 —— 深度 5-agent 并行 code review 第 44 轮：11 处直接修落地（cron scheduler.deliverNotice 改用 sanitiseRunResult 防 IM-injection [R234-SEC-1] / cron runstore.trimAll 跳 symlink 与 diskListNewestFirst 对齐 [R234-SEC-10] / cron runstore.newRunStore 主动 MkdirAll runs/ 0o700 防 jobID 枚举 [R234-SEC-4] / cron redactPathsInCronError 增加 ~/ 形态识别 + fast-path 同步 [R234-SEC-9] / cli process_readloop 提前 isSystemInit 复用去重双 string 比较 [R234-PERF-12] / cron runstore.truncateForRetry 引用 truncatedSuffix 常量 + 抽 maxRetryFieldRunes=256 [R234-CR-9] / cron IsValidID godoc 改写为输入形态描述不再引用私有 generateID [R234-CR-10] / cron workDirReachable 加 root-containment 不强制注释 [R234-CR-11] / sysession runRing invariant godoc 0<=head<runRingCap [R234-GO-14] / cron runStore.keepCount immutable-after-construction 注释 [R234-GO-13] / cron runStore 锁层级 godoc s.mu>jobLock>entry.mu [R234-GO-7]）+ 本轮 NEEDS-DESIGN 归档见 Round 234 节。
+>
+> 上一轮更新 2026-05-23 Round 233 —— 深度 5-agent 并行 code review 第 43 轮：合计 21 处直接修落地。第一批 12 处（PR #239）：cron RegisterCronStub 接口收敛删 1 方法 + 4 处 fake test 同步 / cron computeJobTimeout 删 schedule 死参 / cron redactPathsInCronError 用 TruncateAtRuneBoundary 守 UTF-8 边界 / dispatch nil watchdog atomic 防御 / acp readUntilResponse 超时 goroutine 通过 select-with-done 不阻塞 / sysession limitedWriter Write 错误路径不再违反 io.Writer 契约 / acp textBuf 写入 cap 守 maxAssistantMessageContentBytes / dashboard transcript ANSI regex fast-path 用 IndexByte 0x1b / project_files sensitiveDownloadNames 补 service-account.json/secrets.yaml / dashboard_cron 删 maxCronBackendLen 死常量 / wshub interruptLimiter 0.5/s 收紧 / agent_tailer silent 路径无订阅时跳过 subs 快照。第二批 9 处（PR #240）：cli/passthrough.go `cap` 变量重命名避免 shadow builtin / cron `defaultMaxJobs=50`+`defaultExecTimeout=5min`+`cronNotifyTimeout=30s` 抽命名常量 / sysession `defaultDaemonTickInterval=30s` 命名常量 / cron `addJobLocked` ID 碰撞 retry 由 unbounded 改 cap 至 10 次 + 显式 error 出口 / cron `loadJobs` 增加 `len(entries)>maxJobsHardCap=500` 防御性上限 / cli/process_turn drainStaleEvents interrupted-settle 分支补 slog.Warn 与 line 179 主路径对齐 / wshub `dashTokenHash` immutable-after-construction 注释明确 hot-reload 不支持。+ ~30 NEEDS-DESIGN 归档见 Round 233 节。
 >
 > 上一轮更新 2026-05-22 Round 232 —— 深度 5-agent 并行 code review 第 42 轮：7 处直接修落地（cron runstore cacheHeadPush O(N)→O(1) prepend / cron Start trimAll 改异步 goroutine / cron trimAll ReadDir 错误升级 Warn / sysession runner stderr 预截 256 / cron previousTickBefore 1000 次迭代上限 / cron recordResult 4*1024→maxStoredResultRunes 常量 + slogPrintfLogger 同时匹配 panic\|recovered + storeMu 注释纠偏 + diskListNewestFirst & trimJobLocked 跳 symlink）+ ~75 NEEDS-DESIGN 归档见 Round 232 节。
 >
@@ -86,7 +88,90 @@
 - [~] **R30-DES1 — 需架构决策（2026-04-29 Round 112 评估降级）**：本轮尝试在 `execute()` 入口加 `stopCtx.Err()` 守卫覆盖 fresh + persistent 两种模式，但这与 Round 95 的设计意图冲突（Round 95 明确将 persistent 模式的 ctx 取消委托给 Router.Shutdown，`TestCRON3_PersistentModeUnaffectedByGuard` 把此行为作为测试护栏）。fresh 分支的 stopCtx.Err() 守卫（`scheduler.go:1260`）已覆盖最危险的"fresh → Reset → 孤立 CLI"路径。persistent 模式的真正修复需要架构级协调：要么把 Router.Shutdown 和 Scheduler.Stop 串联锁定（需 S11 级决策），要么在 GetOrCreate 路径里加 shutdown-awareness（改动面大）。当前降级，等 S11 整体方案落地后重开。
 - [ ] **R29-DES1 — `drainStaleEvents` push-back + goto drain 可吞 interrupted result 事件**: 本轮新发现的 invariant 冲突。在 interrupted/interruptedRun 分支的 for 循环中，若事件顺序为 `[old_nonresult, new_event, old_result]`，读到 `new_event` 后 push-back + `goto drain`，接着 drain 到 `old_result` 时因 `recvAt < cutoff` 被丢弃。interrupted 语义要求 settle 窗口必须拿到 old_result，否则下一 turn 迟到的 result 会污染结果。
 
-## Round 233 — 5-agent 并行 code review 第 43 轮（2026-05-23）NEEDS-DESIGN
+## Round 234 — 5-agent 并行 code review 第 44 轮（2026-05-23）NEEDS-DESIGN
+
+> 5 reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描，本轮直接修 11 处（见顶部摘要 R234-SEC-1/-4/-9/-10、R234-PERF-12、R234-CR-9/-10/-11、R234-GO-7/-13/-14）。下方为本轮新发现且不适合直接修的条目（破坏兼容 / 跨包重构 / 需 RFC / 方案不唯一）。
+
+### 架构（高优先）— 本轮新发现
+
+- [ ] **R234-ARCH-1 — `dispatch` 同时直依 `cli` + `cron` + `session` + `project`（P1）**：dispatch 既是 IM↔session 中间层又把 cli.EventCallback / ImageData / SendResult 当裸类型在签名中传，commands.go 反向调 cron.Scheduler。建议在 dispatch 内定义 `SendResult` / `Event` / `Image` 最小 DTO，由 session 层做 cli↔dispatch 翻译；commands 的 cron 操作走 `CronAdmin` interface 注入。改动 ~6 文件 ~150 行，无运行时 breaking。
+- [ ] **R234-ARCH-2 — `cli.wrapper` 反向 import `internal/shim`（P1）**：cli 是协议+子进程层，shim 是 cgroup 边车；当前 cli→shim 的导入让 cli 无法在没有 shim 的环境编译/单测，shim 协议演进绑死 cli 协议。建议把 shim 抽象为 `cli.LauncherSpawner` interface，具体 `shim.Launcher` 在 session 层注入。需 R231-ARCH-1（runner 旁路 wrapper）落地之后再做以避免改两次签名。
+- [ ] **R234-ARCH-3 — `sysession` 与 `cron` 各自定义 RouterView，DTO 散在两包（P1）**：cron `SessionRouter` interface (scheduler.go:72) + sysession `SystemSessionRouter` (router.go:25) 形成两套 router 适配器，都把 cli.EventEntry 当公共契约。建议在 `internal/session/api`（新子包，无 cli 依赖）放统一 `RouterView` + DTO，cron/sysession/scratchPool/quick session 共用。改动 ~10 文件，长期收益大。
+- [ ] **R234-ARCH-4 — `internal/session/contract_test.go` 反向 import dispatch+server+cron+upstream（P1）**：即使 _test.go 文件，contract test 引用 dispatch/server/cron/upstream 让 session 包成为依赖图根+叶。建议把 contract_test 移到 `internal/integration/session_contract_test` 独立包。
+- [ ] **R234-ARCH-5 — server.send / dashboard_send / dispatch.SendSplitReply 三套发送路径无 SendOrchestrator（P1）**：归到 R230-ARCH-2 主条目，本轮发现 server.send 是第三条独立发送路径（reverse-node + WS push）。
+- [ ] **R234-ARCH-6 — Shutdown 顺序无形式化合约（P1）**：cron.Scheduler.Stop / sysessionMgr.Stop / router.Shutdown 在 server.Shutdown 序列里位置不明。建议写 ADR `docs/rfc/shutdown-order.md` + 各组件导出 `WaitForExit(ctx) error`，由 server 串行 wait。
+- [ ] **R234-ARCH-7 — `cron.SessionRouter.GetOrCreate` 暴露完整 *ManagedSession（P2）**：调度器只需 Send，但接口暴露 50+ 方法的 ManagedSession，cli 接口塌陷同款。建议进一步收敛为 `Sender` 接口。
+- [ ] **R234-ARCH-8 — `server.Hub` 直 import dispatch+cron+cli+project+session（P2）**：典型 god hub。建议拆 `WSTransport`（仅 conn lifecycle）+ `WSCoordinator`（业务），需独立 RFC。
+- [ ] **R234-ARCH-9 — Channel adapter 越权读 router 状态：dashboard_session.go / dashboard_discovered.go 直 import cli+session（P2）**：缺 wire DTO 一层，cli.EventEntry 字段改名会自动 break dashboard JSON shape。建议 `internal/server/api/dto` 定义 SessionDTO/EventDTO，~20 文件。
+- [ ] **R234-ARCH-10 — dispatch ↔ platform 双向：platform webhook 回调 leak dispatch.IncomingMessage / Reply 内部类型（P2）**：建议在 `internal/platform` 定义最小 wire types，dispatch 提供 `From(IncomingMessage)` 适配。
+- [ ] **R234-ARCH-11 — 命名空间策略碎片化：sys: / cron: / scratch: / kiro: / chatKeyPrefix 5 类前缀无中央注册表（P2）**：建议 `internal/session/namespace.go` 集中 `NamespacePrefix` enum + `ParseKey(s)`，CI 加 grep test 拒绝裸字符串。前置 R233-ARCH-5。
+- [ ] **R234-ARCH-12 — Protocol/Sink/Tailer 三大事件接口契约未文档化（P2）**：建议新建 `docs/rfc/event-pipeline-contracts.md` + `internal/cli/protocoltest` 共享测试套件（类似 fstest.MapFS）。
+- [ ] **R234-ARCH-13 — server/agent_tailer 直 import cli，IO 路径绕过 router（P2）**：建议 tailer 走 `router.Tail(key) <-chan EventDTO`，router 内部决定从哪源取（persisted vs live）。
+- [ ] **R234-ARCH-14 — buildServer 初始化顺序 fragile（P2）**：建议抽 `serverDeps` struct + `buildCore`/`buildHandlers`/`buildHub`/`wire` 分步。
+- [ ] **R234-ARCH-15 — sysession.runner 旁路 cli wrapper 但 auto_titler 仍要读 cli.EventEntry（P2）**：归到 R234-ARCH-3 的统一 RouterView 方案下解决。
+- [ ] **R234-ARCH-16 — server/discovery_cache.go 越层依赖 project + cli（P3）**：建议 router 暴露 `ExcludedSessionIDs() iter.Seq[string]`，discovery 自治。~30 行。
+- [ ] **R234-ARCH-17 — dispatch.consumer.go 引用 *session.ManagedSession 而非更窄 SessionHandle（P3）**：建议 `dispatch.SessionHandle interface { Send(...); Key() string }`。
+- [ ] **R234-ARCH-18 — internal/session/testutil.go 不带 _test 后缀 + 无 build tag（P3）**：可能被生产二进制 link。建议 rename 为 testutil_test.go 或加 `//go:build testing`。
+- [ ] **R234-ARCH-19 — internal/dispatch/dispatch_test.go 单文件 import cli/cron/platform/session 4 个生产包（P3）**：R234-ARCH-4 子症状。
+- [ ] **R234-ARCH-20 — wshub_agent.go 仅依赖 session 但被并入 server 包导致编译图污染（P3）**：建议挪到 `internal/server/wshub` 子包。
+- [ ] **R234-ARCH-21 — 跨包共享 limits 常量风格不一（cron/limits.go vs server/server.go vs dispatch/dispatch.go）（P3）**：建议集中到 `internal/limits`。
+- [ ] **R234-ARCH-22 — `internal/cli/backend` 同时被 server 与 session 直接 import（P3）**：建议拆 `backend.Profile`（值类型）vs `backend.Launcher`（行为，仅 cli 用）。
+- [ ] **R234-ARCH-23 — cron 走 router 而 quick session 走 dispatch.SendSplitReply 路径不一致（P3）**：建议 ADR `docs/rfc/cron-vs-dispatch-paths.md` 或归 R230-ARCH-2 SendOrchestrator。
+- [ ] **R234-ARCH-24 — server/upload_store.go import cli 仅为 cli.ImageData（P3）**：建议 upload_store 输出自身 `Blob struct{Data []byte; MIME string}`，dashboard_send 转 cli.ImageData。
+- [ ] **R234-ARCH-25 — session/eventlog_bridge.go 是事实上的 fan-out hub 但命名 bridge（P3）**：建议 rename 为 event_pipeline.go + 引入 `EventPipeline` + `[]EventSink`。
+
+### Go 正确性 / 并发 — 本轮新发现
+
+- [ ] **R234-GO-1 — runstore.cacheHeadPush O(N) memmove 仍未修（P1）**：`append+copy` 对 keepCount=200 slice 触发 200-element memmove 持 entry.mu 期间执行；1Hz×50 jobs = 250 次/s cache-line 污染。建议 `recentCacheEntry` 改 ring buffer（head int + buf [keepCount]CronRunSummary），head/tail O(1) prepend。同根因主条目 R233-PERF-2。
+- [ ] **R234-GO-2 — `atomic.Pointer[string]` 存局部变量地址 escape-analysis 暗契约（P1）**：runinflight.go:107 + scheduler.go:2008 `setPhase`/`executeOpt` 两处 `Store(&localVar)` 模式依赖编译器隐式 escape。建议引入包级 `func strHeap(s string) *string { v := s; return &v }` helper 或改 `atomic.Value` 存 string。R233B-GO-1 同根因。
+- [ ] **R234-GO-3 — scheduler.go:778 `go trimAll` goroutine 无 WaitGroup（P1）**：Stop 不等待此 goroutine 退出，半删 runs 目录残留 / 重启并发 trimAll 可能与 per-job lock 之外的 ReadDir+Remove 出现窗口。建议给 `trimAll` 加 `s.gcWG sync.WaitGroup`，Stop 先 gcWG.Wait()（带短超时）+ 传 ctx 让 trimAll 内每个 jobID 循环检查 `ctx.Err()`。
+- [ ] **R234-GO-4 — runstore.cacheGet 双锁窗口（P2）**：第一次释放 entry.mu 后 warmCache 在 entry.mu.Lock 前另一 Append 已 cacheHeadPush no-op + trimJobLocked 触发 cacheTrimAfterDisk no-op，warmCache 再读磁盘可能漏掉刚 Append 条目。建议在 warmCache 内 entry.mu.Lock 前先 jobLock.Lock（已有此模式）。
+- [ ] **R234-GO-5 — sysession.Manager.Stop wg.Wait goroutine 无 WG 跟踪（P2）**：osExit(2) 兜底当前安全（进程死亡），但若测试替换 osExit 为 panic-recovery，goroutine 永久阻塞。建议加注释 `// goroutine intentionally abandoned — osExit terminates the process` 或改为外层 select 不再包 goroutine。
+- [ ] **R234-GO-6 — scheduler.executeOpt inflight 初始化 6 次 atomic.Pointer.Store(&localVar) escape（P2）**：6 个局部变量各自 heap 分配。建议 `strHeap` / `timeHeap` helpers 或 mutex-protected 直接 value 字段。
+- [ ] **R234-GO-8 — runstore.diskListNewestFirst 不区分 mtime-only 与 full-parse 路径（P2）**：warmCache 走也会 ReadFile 全部文件。建议拆 `diskListMtime`（只 ReadDir+stat+sort）和 `diskReadSummaries`（batch ReadFile）。
+- [ ] **R234-GO-10 — runstore.trimJobLocked sort 用 cmp.Compare(UnixNano) 而非 time.Compare（P3）**：边界精度 + 风格。建议 `slices.SortFunc(items, func(a,b) int { return b.mtime.Compare(a.mtime) })`。
+- [ ] **R234-GO-11 — sysession.Manager.startOnce.Do 内 m.started.Store(true) 时序（P3）**：start.Store 应在 daemon goroutine 启动之前以匹配"Store 完成 ≡ goroutines running"语义。
+- [ ] **R234-GO-12 — Scheduler 锁层级文档（s.mu vs runStore.jobLock）未注释（P3）**：建议 Scheduler 结构体注释加 `s.mu > runStore.jobLock(jobID) > recentCacheEntry.mu`。
+- [ ] **R234-GO-15 — trimAll goroutine 无 ctx 传播 Stop 无法中断（P3）**：归 R234-GO-3 同主条目。
+
+### 安全 — 本轮新发现
+
+- [ ] **R234-SEC-2 — `handleTrigger` 无 per-IP 速率限制（P1）**：`POST /api/cron/trigger` 每次触发 `session.GetOrCreate + sess.Send`，无任何限流；持有 token 的脚本可在秒级把 maxJobs=500 全部触发耗尽 shim/cgroup 资源。建议新增 `triggerLimiter *ipLimiter`（如 `rate.Every(2s), burst=3`）。
+- [ ] **R234-SEC-3 — `runsLimiter` 共享 list/detail/transcript 三端点 IO 代价 100x 不对称（P2）**：transcript 走 8MB JSONL+Scanner，list 走 cache。建议 transcript 单独 `transcriptLimiter`（`rate.Every(5s), burst=5`）。
+- [ ] **R234-SEC-5 — transcriptResponse Input json.RawMessage 透传未脱敏（P2）**：tool_use.input 含 Bash 命令明文，可能含 API 密钥/DSN。建议对 command/file_path/url 做 200 字符截断，或移除 Input 仅留 Summary。**dashboard JS breaking**。
+- [ ] **R234-SEC-6 — `handleList` 返回所有 job 的 LastResult/Prompt 全量轮询带宽放大（P2）**：50 jobs × (8KB prompt + 4KB result + 5×summary) ≈ 1MB/req × 1Hz = 1MB/s。建议 list 返回截断 prompt（1KB），detail 接口返回全量；或加 server-side `?search=`。**dashboard JS fuzzy-search 需迁移**。
+- [ ] **R234-SEC-7 — `Job.LastResult` 落盘无 secret-pattern 过滤（P2）**：claude 输出可能含明文 sk-ant-/ghp_/AKIA token。建议 `recordResultP0WithSanitised` 增加可配置黑名单 + 类似 `isSensitiveDownloadName` 的后处理。
+- [ ] **R234-SEC-8 — `flattenJSONLEvent` tool_use.Input 字段无大小守卫（P3）**：500 turns × 256KB/line = 128MB 序列化输出。建议 `len(b.Input) > maxToolInputBytes`（64KB）截断为 `[truncated]` 或置空。
+- [ ] **R234-SEC-11 — `handlePreview` 端点无速率限制（P3）**：`cronParser.Parse + sched.Next×count` 可被 1000 req/s 持续消耗 CPU。建议轻量 `previewLimiter`（`rate.Every(100ms), burst=20`）。
+- [ ] **R234-SEC-12 — `loadJobs` 不对 Prompt 跑 validateCronPrompt（P3）**：cron_jobs.json 被 operator 直接编辑后，含控制字符的 prompt 会流入 CronRun。建议 loadJobs 后对每个 j.Prompt 做 utf8.ValidString + validateCronPrompt 检查。
+
+### 性能 — 本轮新发现
+
+- [ ] **R234-PERF-1 — runstore.cacheHeadPush O(N) memmove（P1）**：归 R234-GO-1 同主条目。
+- [ ] **R234-PERF-2 — shimWriter.Write fast-path string(data[:len-1]) heap-copy（P1）**：每次 stdin write 把 4KB payload 拷贝到 string 仅为 shimClientMsg.Line string 字段。建议加 `LineRaw json.RawMessage` 字段并改自定义 MarshalJSON；需 shim 协议 compat 评估，归 R71-PERF-H1 主条目。
+- [ ] **R234-PERF-3 — protocol_claude.ReadEvent json.Unmarshal([]byte(line),...)（P1）**：阻塞在 shim 协议 bump，归 R231-PERF-1 主条目。
+- [ ] **R234-PERF-4 — KnownSessionIDs 无 TTL 缓存（P2）**：50 jobs × Recent(200) = 10000 row copy/dashboard poll。建议 `atomic.Pointer[knownSessionIDsCache]` 30s TTL + finishRun/DeleteJob 失效。归 R233-PERF-3 同主条目。
+- [ ] **R234-PERF-5 — TranscriptReader.readLocked 每 200ms 重 open/seek/read/close（P2）**：50 tailer × 5/s = 250 syscalls/s。建议 keep `*os.File`，`Seek+ReadAt`，仅 inode 变更（log rotation）才重开。归 R233-PERF-4 主条目。
+- [ ] **R234-PERF-7 — wsclient.Send 无 encoder pool（P2）**：每事件 fresh json.Marshal。建议 `sync.Pool` of `*bytes.Buffer + *json.Encoder`（同 shimSendBufPool 模式）。
+- [ ] **R234-PERF-9 — runstore.skipAppendTrim time.Now 在 fast-exit 之前（P2，**已核实为误报**）**：实际 line 254 已先做 `len(entry.runs) > 0` 守卫，time.Now 在 fast-path 之后。归档关闭。
+- [ ] **R234-PERF-10 — parseTranscriptTime 每行 RFC3339Nano 解析 ~300ns（P2）**：250 line/s × 300ns = 75µs/s。建议 hand-parse 整数字段或 ParseInLocation+UTC 缓存。
+- [ ] **R234-PERF-13 — readShimLine 错误漏 cap drain 路径（P3）**：bufio chunk 临时切片漏。
+- [ ] **R234-PERF-14 — runstore.warmCache 持 entry.mu 做 ReadDir+N×ReadFile 阻塞 dashboard 冷启动（P3）**：建议 warm 异步，首次 Recent miss 立即返空切片，后台 populate。
+- [ ] **R234-PERF-15 — agent_tailer pollOnce 200ms ticker 对 refCount==0 silent tailer 仍 open/close（P3）**：建议 silent + size-unchanged 时 backoff 到 2s。
+- [ ] **R234-PERF-16 — protocol_claude.extractAskQuestion 每 assistant 事件全 block 扫描（P3）**：建议 `strings.Contains(rawContent, "AskUserQuestion")` 早 short circuit。
+
+### 代码质量 — 本轮新发现
+
+- [ ] **R234-CR-1 — runstore.truncateForRetry 与 scheduler.sanitiseRunResult 共享 truncate-with-suffix 但分散两文件（P2）**：本轮已修 truncatedSuffix 字面量统一（R234-CR-9 直接修）；后续可将 truncate-with-suffix helper 移到 limits.go 单点共享，让两个 caller 都引用。
+- [ ] **R234-CR-2 — workDirUnderRoot/workDirReachable 在 cron + server 各一份（P2）**：建议移到 `internal/osutil` 或新 `internal/fsutil` 共享。本轮已为 workDirReachable 加 root-containment 不强制注释（R234-CR-11）。
+- [ ] **R234-CR-3 — generateID/generateRunID 都委派 generateHexID 三个名字一个函数（P2）**：建议要么收敛为单一 generateID 要么明确分歧意图。
+- [ ] **R234-CR-4 — DeleteJob/PauseJob/ResumeJob ByPrefix vs ByID 6 方法 lock/persist/save 模板重复（P2）**：建议 `mutateJob(id string, fn func(*Job) error)` helper 内置生命周期。
+- [ ] **R234-CR-5 — `var stopBudget` package-level mutable global 仅为测试注入（P2）**：建议移到 `SchedulerConfig.StopBudget` field + applyDefaults。
+- [ ] **R234-CR-6 — finishRun 双 sanitise 层级不透明（P3）**：建议 recordResultP0WithSanitised 加注释说明哪些 caller 已 pre-sanitise；或拆 `WithSanitised` / `Raw` 两变体。
+- [ ] **R234-CR-7 — maxJobsHardCap/defaultMaxJobs vs DefaultMaxJobsPerChat 命名不一致（P3）**：建议统一 Default 前缀 + 文档说明哪些必须导出。
+- [ ] **R234-CR-8 — preflightArgs/finishArgs 字段无 godoc（P3）**：建议至少为 viaTriggerNow / sessionID / runID 加一行注释。
+
+
 
 > 5 reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描，本轮直接修 12 处（cron RegisterCronStub 接口收敛 + 4 处 fake test 同步 / cron computeJobTimeout 删 schedule 死参 / cron redactPathsInCronError 用 TruncateAtRuneBoundary 守 UTF-8 边界 / dispatch nil watchdog atomic 防御 / acp readUntilResponse 超时 goroutine 通过 select-with-done 不阻塞 / sysession limitedWriter Write 错误路径不再违反 io.Writer 契约 / acp textBuf 写入 cap 守 maxAssistantMessageContentBytes / dashboard transcript ANSI regex fast-path 用 IndexByte 0x1b / sensitiveDownloadNames 补 service-account.json/secrets.yaml 等 / dashboard_cron 删 maxCronBackendLen 死常量 / wshub interruptLimiter 0.5/s 收紧 / agent_tailer silent 路径无订阅时跳过 subs 快照）。下方为本轮新发现且不适合直接修的条目。
 
