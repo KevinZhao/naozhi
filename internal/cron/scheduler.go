@@ -1552,6 +1552,7 @@ func (s *Scheduler) TriggerNow(id string) error {
 		return fmt.Errorf("%w: id %q", ErrJobNoPrompt, id)
 	}
 	entryID := j.entryID
+	jobID := j.ID
 	// Register the trigger goroutine with triggerWG before releasing s.mu.
 	// This prevents a Stop() on another goroutine from observing triggerWG as
 	// empty and returning before our goroutine starts. We pair Add(1) here
@@ -1581,51 +1582,46 @@ func (s *Scheduler) TriggerNow(id string) error {
 				slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "id", id, "entry_id", entryID)
 			}()
 		} else {
-			jobID := j.ID
 			go func() {
 				defer s.triggerWG.Done()
-				s.mu.RLock()
-				cur, ok := s.jobs[jobID]
-				paused := ok && cur.Paused
-				s.mu.RUnlock()
-				if !ok {
-					slog.Debug("TriggerNow: job deleted before execute, skipping", "id", jobID)
-					return
-				}
-				if paused {
-					slog.Debug("TriggerNow: job paused concurrently, skipping", "id", jobID)
-					return
-				}
-				s.executeOpt(cur, true)
+				s.executeIfNotDeletedOrPaused(jobID)
 			}()
 		}
 	} else {
-		// Resolve the job by ID inside the goroutine so the freshest pointer
-		// is used (matches the cron-tick path in registerJob). If the job was
-		// concurrently deleted, skip execution — recordResult would then write
-		// to an orphan pointer whose updates are not visible in the snapshot.
-		jobID := j.ID
 		go func() {
 			defer s.triggerWG.Done()
-			s.mu.RLock()
-			cur, ok := s.jobs[jobID]
-			paused := ok && cur.Paused
-			s.mu.RUnlock()
-			if !ok {
-				slog.Debug("TriggerNow: job deleted before execute, skipping", "id", jobID)
-				return
-			}
-			// Honor a Pause that landed between the TriggerNow snapshot and the
-			// goroutine starting: the operator's "stop now" intent outranks the
-			// in-flight trigger click.
-			if paused {
-				slog.Debug("TriggerNow: job paused concurrently, skipping", "id", jobID)
-				return
-			}
-			s.executeOpt(cur, true)
+			s.executeIfNotDeletedOrPaused(jobID)
 		}()
 	}
 	return nil
+}
+
+// executeIfNotDeletedOrPaused looks up the latest *Job pointer under
+// s.mu.RLock and dispatches executeOpt only when the job is still present
+// AND not paused. R233B-CR-3: extracted from TriggerNow's two goroutine
+// bodies so the deleted/paused guard + executeOpt(..., true) call lives in
+// one place — adding new pre-execute checks (e.g. quota / circuit breaker)
+// no longer requires touching both branches.
+//
+// jobID is captured by the goroutine spawning this; the snapshot pattern
+// matches registerJob's tick path so the freshest pointer wins, including
+// after an UpdateJob swap. Concurrent deletes / pauses both surface as
+// silent skips with a Debug log — operators see the intent acked but
+// no run record bumps.
+func (s *Scheduler) executeIfNotDeletedOrPaused(jobID string) {
+	s.mu.RLock()
+	cur, ok := s.jobs[jobID]
+	paused := ok && cur.Paused
+	s.mu.RUnlock()
+	if !ok {
+		slog.Debug("TriggerNow: job deleted before execute, skipping", "id", jobID)
+		return
+	}
+	if paused {
+		slog.Debug("TriggerNow: job paused concurrently, skipping", "id", jobID)
+		return
+	}
+	s.executeOpt(cur, true)
 }
 
 // registerJob registers a job with the robfig/cron scheduler.

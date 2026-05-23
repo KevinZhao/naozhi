@@ -220,3 +220,72 @@ func TestEventEntries_DefaultEndpoint_ReturnsFullHistoryAfterReattach(t *testing
 		t.Errorf("last entry=%q want post-restart turn", got[len(got)-1].Summary)
 	}
 }
+
+// TestReattachProcess_PersistedHistoryCapTrim covers R231-CQ-8: previous
+// reattach tests hand in 200 entries, well below maxPersistedHistory=500,
+// so the cap-trim branch in InjectHistory was never exercised. Push past
+// the cap and assert (a) persistedHistory does not grow past the limit,
+// (b) FIFO eviction keeps the most-recent tail entries, and (c) a
+// follow-up tail injection neither duplicates the seeded prefix nor
+// overshoots the cap.
+func TestReattachProcess_PersistedHistoryCapTrim(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+
+	const total = maxPersistedHistory + 250
+	batch := make([]cli.EventEntry, total)
+	for i := range batch {
+		batch[i] = cli.EventEntry{
+			Time:    int64(i + 1),
+			Type:    "user",
+			Summary: "seq-" + strconv.Itoa(i),
+		}
+	}
+	s.InjectHistory(batch)
+
+	s.historyMu.RLock()
+	persisted := len(s.persistedHistory)
+	s.historyMu.RUnlock()
+	if persisted != maxPersistedHistory {
+		t.Fatalf("persistedHistory=%d want cap=%d after over-fill", persisted, maxPersistedHistory)
+	}
+
+	proc := NewTestProcess()
+	s.ReattachProcessNoCallback(proc, "uuid-cap-trim")
+
+	got := s.EventEntries()
+	if len(got) != maxPersistedHistory {
+		t.Fatalf("EventEntries() len=%d want %d (cap-trimmed window)", len(got), maxPersistedHistory)
+	}
+	wantFirst := "seq-" + strconv.Itoa(total-maxPersistedHistory)
+	wantLast := "seq-" + strconv.Itoa(total-1)
+	if got[0].Summary != wantFirst {
+		t.Errorf("first entry=%q want %q (oldest after FIFO trim)", got[0].Summary, wantFirst)
+	}
+	if got[len(got)-1].Summary != wantLast {
+		t.Errorf("last entry=%q want %q", got[len(got)-1].Summary, wantLast)
+	}
+
+	tail := []cli.EventEntry{
+		{Time: int64(total + 1), Type: "user", Summary: "post-cap-1"},
+		{Time: int64(total + 2), Type: "user", Summary: "post-cap-2"},
+	}
+	s.InjectHistory(tail)
+
+	got = s.EventEntries()
+	if len(got) > maxPersistedHistory {
+		t.Fatalf("after second inject len=%d exceeds cap=%d", len(got), maxPersistedHistory)
+	}
+	if got[len(got)-1].Summary != "post-cap-2" {
+		t.Errorf("last entry after second inject=%q want post-cap-2", got[len(got)-1].Summary)
+	}
+	seen := make(map[string]int, len(got))
+	for _, e := range got {
+		seen[e.Summary]++
+	}
+	for sum, n := range seen {
+		if n != 1 {
+			t.Errorf("summary %q appeared %d times; cap-trim must not duplicate", sum, n)
+		}
+	}
+}
