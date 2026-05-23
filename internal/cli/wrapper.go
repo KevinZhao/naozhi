@@ -115,16 +115,31 @@ func isKnownBackendID(id string) bool {
 	return false
 }
 
+// displayNameByBackend mirrors defaultBinaryByBackend's pattern: a single
+// sentinel table keyed by canonical backend ID returning the user-facing
+// label rendered in dashboard chips and structured logs. Adding a new
+// backend means adding one row here AND a Profile entry in cli/backend
+// (whose tests cross-check DisplayName against the sentinel). The empty
+// key ("") collapses to claude — matches normalizeBackendID's behaviour
+// for legacy configs that omit cli.backend. R231-ARCH-10 anchor.
+var displayNameByBackend = map[string]string{
+	"":       "claude-code",
+	"claude": "claude-code",
+	"kiro":   "kiro",
+}
+
 // backendDisplayName maps a backend config value to its user-facing name.
+//
+// Unknown ids are returned verbatim so a typo in cli.backend surfaces in
+// the log line / dashboard chip rather than getting silently rewritten —
+// startup config validation rejects unknown ids in production paths
+// (cmd/naozhi/main.go), so reaching the fallback implies a test fixture
+// or operator override.
 func backendDisplayName(backend string) string {
-	switch backend {
-	case "kiro":
-		return "kiro"
-	case "", "claude":
-		return "claude-code"
-	default:
-		return backend
+	if name, ok := displayNameByBackend[backend]; ok {
+		return name
 	}
+	return backend
 }
 
 // normalizeBackendID collapses empty/legacy aliases to the canonical ID.
