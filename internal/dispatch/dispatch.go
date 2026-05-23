@@ -81,6 +81,14 @@ type Dispatcher struct {
 	// legacy duplicate-routing branches that R-key-resolver collapsed
 	// will quietly come back.  Any new ProjectForChat / EffectivePlanner*
 	// read on the hot path should fail review.
+	//
+	// R228-ARCH-18 / R218B-ARCH-2: dispatch only needs 5 methods on the
+	// 30+ method *project.Manager surface — ProjectForChat, BindChat,
+	// UnbindAllChat, All, Get. The minimal consumer interface is captured
+	// in projectManagerSurface (commands.go) so the next refactor that
+	// switches projectMgr to that interface stays mechanical and the
+	// hot-path-vs-slash-command boundary above stays enforceable. Tracked
+	// by R228-ARCH-18.
 	projectMgr *project.Manager
 	// resolver centralises (key, opts) derivation for the IM and slash-
 	// command paths. NewDispatcher guarantees this field is non-nil — when

@@ -26,6 +26,39 @@ func trimUnicodeSpace(s string) string {
 	return strings.TrimFunc(s, unicode.IsSpace)
 }
 
+// projectManagerSurface captures the 5-method subset of *project.Manager
+// that dispatch's slash-command handlers actually use. Documented here as
+// the consumer interface for R228-ARCH-18 / R218B-ARCH-2: today
+// Dispatcher.projectMgr is *project.Manager (~30+ method surface), but
+// dispatch only ever calls these 5 — ProjectForChat (read), Get (read),
+// All (read), BindChat (write), UnbindAllChat (write).
+//
+// Switching the field to this interface is mechanical (struct typing
+// satisfies it) and the *only* dispatch consumers are in this file +
+// dispatch.go's projectMgr godoc. The interface is declared but not yet
+// substituted for the concrete pointer because the conversion would
+// touch DispatcherConfig.ProjectMgr's type and ~6 tests in one go;
+// captured here so the next dispatch refactor pass can flip it without
+// re-deriving the method set.
+//
+// IMPORTANT: do NOT add more methods here without re-confirming they
+// belong in slash-command UX. Routing decisions on the IM hot path
+// must continue to flow through KeyResolver (see dispatch.go projectMgr
+// godoc).
+type projectManagerSurface interface {
+	ProjectForChat(platform, chatType, chatID string) *project.Project
+	Get(name string) *project.Project
+	All() []*project.Project
+	BindChat(projectName, platform, chatType, chatID string) error
+	UnbindAllChat(platform, chatType, chatID string) error
+}
+
+// Compile-time pin: *project.Manager must satisfy projectManagerSurface,
+// so a future Manager method-rename or signature drift breaks the build
+// here instead of silently changing behaviour at the slash-command call
+// sites.
+var _ projectManagerSurface = (*project.Manager)(nil)
+
 // replyText sends a text reply to msg.ChatID via the matching platform, logging
 // but not returning errors. Resolves d.platforms[msg.Platform] internally and
 // is a no-op if that platform is not registered. Returns true if the reply was
