@@ -171,11 +171,41 @@ func detectVersionCtx(parent context.Context, cliPath string) string {
 	return parseVersionOutput(string(out))
 }
 
+// detectCLIBinaryName maps a normalised backend ID to the binary name that
+// detectCLI / candidatePaths probes for. Kept package-level so the test fake
+// (wrapper_test.go) and detectCLI itself stay in lock-step — a divergent
+// switch in either place would silently make probes target the wrong file.
+//
+// R231-ARCH-10 archive anchor: a fully-data-driven version that reads the
+// binary name out of backend.Profile.DefaultBinary is tracked in TODO.md.
+// That requires breaking the cli → backend import direction (today backend
+// imports cli, not the other way around) and is a larger refactor than this
+// helper warrants. Until then, adding a new backend means appending one case
+// here AND registering its Profile in internal/cli/backend/profile_*.go;
+// failure to do both surfaces as "available=false" at the dashboard.
+//
+// Empty/unknown backends fall through to the claude default — historically
+// `cli.backend` was implicit and config files predating multi-backend never
+// set it, so silently picking claude keeps those installs working without a
+// migration step. R227-CR-6 normalised the empty-string alias upstream so by
+// the time we land here, "" already means "claude" canonically.
+const (
+	detectCLIBinaryClaude = "claude"
+	detectCLIBinaryKiro   = "kiro-cli"
+)
+
 // detectCLI finds the CLI binary by checking known install paths then PATH.
+//
+// Returns the bare binary name when neither a candidate path nor PATH hits;
+// callers (DetectBackendsCtx) treat that case as "not installed" by stat'ing
+// the result. The fallback exists so a misconfigured operator who passes the
+// bare name into Wrapper still gets a deterministic command line that fails
+// at spawn-time with a clear "no such file" rather than a panic.
 func detectCLI(backend string) string {
-	name := "claude"
-	if backend == "kiro" {
-		name = "kiro-cli"
+	name := detectCLIBinaryClaude
+	switch backend {
+	case "kiro":
+		name = detectCLIBinaryKiro
 	}
 
 	for _, p := range candidatePaths(name) {
