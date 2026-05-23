@@ -1277,6 +1277,20 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 // scratch → sidebar promote path invokes this, so that race is not reachable.
 // If a future caller chains renames on the same session, rebuild onSessionID
 // inside the destination struct or switch it to read s.key lazily.
+//
+// Publish ordering for `fresh` (R231-GO-2): the fresh ManagedSession is
+// constructed locally, then `adoptProcessAlreadySeeded(proc)` runs to set
+// fresh.process AND seed fresh.persistedSeededLen = len(fresh.persistedHistory)
+// atomically under fresh.historyMu. Only AFTER that adopt step is fresh
+// published into r.sessions / r.sessionIDToKey. The whole sequence runs
+// while r.mu is held, so no other goroutine can resolve `fresh` via the
+// router maps before persistedSeededLen is set; a concurrent InjectHistory
+// arriving on `old` continues to target the old struct (which we then
+// orphan via storeProcess(nil)). Without this ordering an InjectHistory
+// racing against rename could see fresh with persistedSeededLen=0 and
+// reseed every entry, double-feeding the EventLog. If you ever move the
+// `r.sessions[newKey] = fresh` assignment above adoptProcessAlreadySeeded,
+// fresh becomes resolvable while still un-seeded — do not.
 func (r *Router) RenameSession(oldKey, newKey string) bool {
 	if oldKey == newKey {
 		return false

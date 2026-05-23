@@ -2312,7 +2312,6 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	if durationMS < 0 {
 		durationMS = 0 // monotonic clock skew safety
 	}
-	s.bumpRunStateMetrics(a.state)
 
 	// Persist (LastRunAt/LastResult/LastError/Counters) for terminal paths
 	// that historically updated state. Canceled / shutdown paths skipPersist
@@ -2345,6 +2344,22 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	} else {
 		persistedResult = sanitiseRunResult(persistedResult)
 		persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
+	}
+
+	// R230C-GO-8: bump per-state counters AFTER persist so we don't drift
+	// when persist fails. Two legal paths:
+	//   - skipPersist=true (canceled / shutdown): in-memory Job fields are
+	//     intentionally untouched; the terminal state (typically
+	//     RunStateCanceled) is authoritative and must increment its
+	//     counter so dashboards see the cancel.
+	//   - skipPersist=false && jobPersistOK=true: Job fields + cron_jobs.json
+	//     reflect the new state; counter and Job state stay in lockstep.
+	// Skipping the bump on (!skipPersist && !jobPersistOK) prevents
+	// CronRunSucceededTotal etc. from incrementing while the in-memory Job
+	// fields were rolled back by recordResultP0WithSanitised — the previous
+	// pre-persist bump caused counter ↔ Job state divergence.
+	if a.skipPersist || jobPersistOK {
+		s.bumpRunStateMetrics(a.state)
 	}
 
 	// CronRun history (P1). Conditions:
@@ -2420,6 +2435,19 @@ func sanitiseRunErrMsg(s string) string {
 
 // bumpRunStateMetrics increments the per-state counter for the terminal
 // transition. Mirrored in metrics.go and pinned by counter_wiring_contract_test.
+//
+// Contract (R230C-GO-8): callers MUST invoke this AFTER the persist phase
+// so the counter only bumps when the terminal state is actually durable.
+// Concretely, finishRun calls bumpRunStateMetrics on two paths only:
+//   - skipPersist=true (canceled / shutdown — in-memory Job fields are
+//     intentionally untouched, the cancel is the authoritative terminal).
+//   - skipPersist=false && jobPersistOK=true (Job fields + cron_jobs.json
+//     successfully reflect the new state).
+//
+// Skipping the bump when (!skipPersist && !jobPersistOK) keeps counters in
+// lockstep with Job state after recordResultP0WithSanitised rolled the
+// in-memory fields back; otherwise CronRunSucceededTotal etc. would drift
+// past the visible Job.LastResult.
 func (s *Scheduler) bumpRunStateMetrics(state RunState) {
 	switch state {
 	case RunStateSucceeded:

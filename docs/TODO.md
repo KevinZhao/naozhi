@@ -326,7 +326,7 @@
 ### Go 正确性 — 本轮新发现
 
 - [ ] **R231-GO-1 — managed.go old.storeProcess(nil) 在 r.mu 内未持 historyMu（P2）**: storeProcess(nil) 与并发 InjectHistory 读 loadProcess() 组成 (proc=old) vs (proc=nil) 逻辑分裂窗口。方案：改 `old.adoptProcessAlreadySeeded(nil)` 或 nil 特化路径明确文档化。
-- [ ] **R231-GO-2 — RenameSession 中 fresh 在 adopt 前发布的危险窗口（P2）**: persistedSeededLen=0 期间若并发 InjectHistory 看到 fresh 会 reseed。当前 r.mu 持有保护，但应文档说明 fresh 仅在 adoptProcessAlreadySeeded 后才可安全发布。
+- [x] **R231-GO-2 — RenameSession 中 fresh 在 adopt 前发布的危险窗口（已修复 2026-05-23）**: RenameSession godoc 加了 publish-ordering 段（内联 R231-GO-2 标记）：fresh 在 r.mu 内先经 adoptProcessAlreadySeeded 设置 process + persistedSeededLen，才被写入 r.sessions / r.sessionIDToKey；并发 InjectHistory 通过路由 map 不可能在 seed 前看到 fresh，避免 persistedSeededLen=0 期间 reseed double-feed。函数实际位于 router_lifecycle.go（不在 managed.go），已就近修改。本批 PR。
 - [x] **R231-GO-3 — sysession.Runner sweep `os.IsNotExist` → `errors.Is(fs.ErrNotExist)` 同类（P3）**: 已修。 — 已修复，本批 PR #218
 
 ## Round 219 — 5-agent 并行 review 第 33 轮（2026-05-17）NEEDS-DESIGN
@@ -1749,7 +1749,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [x] **R230C-GO-1 — SnapshotChainIDs `historyMu` 实际不保护 prevSessionIDs（已修复 2026-05-23）**: SnapshotChainIDs godoc 现明确 lock contract："writers hold r.mu; readers either hold r.mu or accept a stale-but-not-torn snapshot"，与 router_discovery.go:452 的 registerStub 注释对齐；historyMu.RLock 是针对 InjectHistory persistedHistory append 路径的真正同步，对 prevSessionIDs 是无害冗余防御。本批 PR。
 - [~] **R230C-GO-4 — spawnSession inline history load 同步 IIFE 包了 historyWg（误报关闭 2026-05-23）**: 实地复核 loadResumeHistoryOnSpawn godoc 已明确意图："Synchronous — runs on the spawnSession caller goroutine. The historyWg Add/Done dance still tracks the call so Shutdown.Wait can drain in-flight loads"。historyWg 是独立 WaitGroup（非 sessionsWg），让 Shutdown 等历史加载完成。归档关闭，本批 PR。
 - [ ] **R230C-GO-7 — executeOpt sendCtx 用 context.Background 让 5h 任务无法 shutdown 期取消（P2）**: `internal/cron/scheduler.go:1955` 5h execTimeout 的 cron 任务 stopCtx fire 后仍跑满。方案：deadline watchdog 扩展为 stopCtx 触发也调 InterruptViaControl，或 sendCtx 改用 `context.WithTimeout(s.stopCtx, jobTimeout+grace)`。Breaking：否。
-- [ ] **R230C-GO-8 — finishRun bumpRunStateMetrics 在 persist 回滚前已计数（P2）**: `internal/cron/scheduler.go:2103` persist 失败时 in-memory job 字段回滚但 CronRunSucceededTotal 已 +1。方案：bumpRunStateMetrics 移到 recordResultP0WithSanitised 返回 ok 之后。Breaking：否。
+- [x] **R230C-GO-8 — finishRun bumpRunStateMetrics 在 persist 回滚前已计数（已修复 2026-05-23）**: bumpRunStateMetrics 移到 persist 阶段之后；skipPersist 路径仍 bump（canceled/shutdown 是合法终态），非 skipPersist + jobPersistOK=false 不 bump，避免 in-memory 回滚后 counter 漂移。godoc 上加了 contract 说明 + R230C-GO-8 标记。本批 PR。
 - [x] **R230C-GO-10 — spawnSession 用 caller ctx 而非 r.historyCtx（已修复 2026-05-23 复核）**: 实地复核 router_lifecycle.go loadResumeHistoryOnSpawn — 已落地 `parent := r.historyCtx; histCtx, histCancel := context.WithTimeout(parent, 15*time.Second)`，caller ctx 通过 context.AfterFunc 旁挂取消。HTTP 短超时不再截断历史加载。本批 PR 归档。
 - [~] **R230C-GO-13 — runstore cacheHeadPush O(N) copy（归档 2026-05-23）**: R233-PERF-2 / R233B-PERF-3 同根因 — keepCount=200 prepend 每次 200-element memmove。统一收敛到 R233-PERF-2 主条目跟踪（ring buffer / container/ring 改造）。当前 grow-in-place + copy + 索引赋值已经省了 backing array 拷贝（runstore.go:295-297）。归档关闭，本批 PR
 - [x] **R230C-GO-15 — emitOverlapSkipped CronRunStartedTotal 与正常路径计数顺序不一致（P3）**: 已把 metric 收敛到 emitRunStarted 函数内一处，executeOpt 与 emitOverlapSkipped 不再各自手动 Add；nil-hook 路径仍然计数（保持兼容），本批 PR。
