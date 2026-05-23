@@ -533,6 +533,25 @@ const DefaultMaxJobsPerChat = 10
 // workflow inspection. R208-OBS1.
 const cronSlowThreshold = 30 * time.Second
 
+// cronNoticeFormat is the single source of truth for the "[Cron <label>] …"
+// IM-notice prefix used by every executeOpt branch (success / send-failure /
+// session-failure / workdir-unreachable). Centralising the literal avoids
+// the prior pattern of four sibling fmt.Sprintf("[Cron %s] …") call sites
+// drifting in punctuation/space when one branch was edited (e.g. dropping
+// the trailing space, switching to fullwidth brackets) — every change now
+// lands at one location and the user sees a uniform prefix. See
+// formatCronNotice for the helper that wraps it.
+const cronNoticeFormat = "[Cron %s] %s"
+
+// formatCronNotice renders the standard "[Cron <label>] <body>" IM-notice
+// string. Returning a single string (vs. exposing the format to call sites)
+// keeps the prefix opaque so future label policy changes (e.g. truncation,
+// emoji injection, locale-aware bracket choice) localise here without
+// touching every executeOpt branch.
+func formatCronNotice(label, body string) string {
+	return fmt.Sprintf(cronNoticeFormat, label, body)
+}
+
 // workDirReachable reports whether workDir exists and resolves to a
 // directory right now. Used before fresh-mode Reset so a job whose
 // workspace has been deleted by an operator does not destroy the
@@ -1843,7 +1862,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 			errMsg: "work_dir unreachable",
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(args.notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.labelOrID()))
+		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(), "工作目录不可达，本次执行已跳过。"))
 		return noopRefresh, false
 	}
 	s.router.Reset(args.key)
@@ -2151,7 +2170,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("session error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", snap.labelOrID()))
+		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行跳过，请稍后重试。"))
 		stubRefresh()
 		return
 	}
@@ -2226,7 +2245,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("send error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", snap.labelOrID()))
+		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行失败，请稍后重试。"))
 		stubRefresh()
 		return
 	}
@@ -2260,8 +2279,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 	})
 
-	replyText := fmt.Sprintf("[Cron %s] %s", snap.labelOrID(), result.Text)
-	s.deliverNotice(notifyTo, replyText)
+	s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), result.Text))
 }
 
 // finishArgs bundles the parameters of finishRun so each call site reads
