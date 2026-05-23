@@ -8211,6 +8211,16 @@ function inlineMd(s) {
     });
   }
   s = esc(s);
+  // Memory wiki-link `[[slug]]`: Claude's auto-memory cross-reference syntax
+  // occasionally leaks into chat output. Substitute before `[link](url)` runs
+  // so the [[…]] form cannot collide with the markdown link grammar
+  // (`[label](url)`); slug charset is locked to [a-zA-Z0-9_-]{1,64} which
+  // also makes path-traversal in the data-slug attribute impossible by
+  // construction. The popover handler below attaches lazily on hover/click.
+  // See docs/rfc/memory-link-rendering.md.
+  s = s.replace(/\[\[([a-zA-Z0-9_\-]{1,64})\]\]/g, function(_, slug) {
+    return '<span class="md-memlink" data-slug="' + escAttr(slug) + '" tabindex="0">[[' + slug + ']]</span>';
+  });
   // Use function-form replacements to prevent JS's special $-sequences
   // ($&, $', $`, $n) from expanding inside the replacement string. Those
   // sequences survive esc() (they aren't HTML entities) and would let an
@@ -14678,4 +14688,240 @@ initSidebarSearch();
   drawer.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { e.preventDefault(); closeScratch(true); }
   });
+})();
+
+// ─── Memory wiki-link popover ────────────────────────────────────────────
+// Lazy hover/click preview for [[slug]] markers emitted by inlineMd.
+// Single popover element (#mem-popover, declared in dashboard.html); event
+// delegation watches the whole document so the popover works for messages
+// rendered after page load (live WS updates, scratch drawer, agent-view).
+//
+// Lifecycle:
+//   mouseenter span → 300ms debounce → fetch + show (anchored)
+//   mouseleave span → 200ms grace → hide if not pinned
+//   click span      → fetch + show + pin (sticks until ESC / outside click)
+//   ESC / outside click on pinned popover → unpin + hide
+//
+// Cache: module-level Map<slug, response>. Cleared on full page reload.
+// 404 results poison the slug span with .md-memlink-broken so subsequent
+// hovers skip the network.
+//
+// docs/rfc/memory-link-rendering.md
+(function () {
+  const memCache = new Map();
+  const NOT_FOUND = Symbol('memory-not-found');
+  let pop = null;
+  let popContent = null;
+  let popClose = null;
+  let pinned = false;
+  let currentSlug = null;
+  let hoverTimer = 0;
+  let leaveTimer = 0;
+
+  function ensurePopover() {
+    if (pop) return true;
+    pop = document.getElementById('mem-popover');
+    popContent = document.getElementById('mem-pop-content');
+    popClose = document.getElementById('mem-pop-close');
+    if (!pop || !popContent) return false;
+    if (popClose) {
+      popClose.addEventListener('click', (e) => {
+        e.stopPropagation();
+        hidePopover();
+      });
+    }
+    pop.addEventListener('mouseenter', () => {
+      if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = 0; }
+    });
+    pop.addEventListener('mouseleave', () => {
+      if (!pinned) scheduleHide();
+    });
+    return true;
+  }
+
+  function showPopover(anchor) {
+    if (!ensurePopover()) return;
+    pop.classList.add('show');
+    pop.setAttribute('aria-hidden', 'false');
+    positionPopover(anchor);
+  }
+
+  function hidePopover() {
+    if (!pop) return;
+    pop.classList.remove('show', 'pinned');
+    pop.setAttribute('aria-hidden', 'true');
+    pinned = false;
+    currentSlug = null;
+  }
+
+  function scheduleHide() {
+    if (leaveTimer) clearTimeout(leaveTimer);
+    leaveTimer = setTimeout(() => {
+      if (!pinned) hidePopover();
+    }, 200);
+  }
+
+  function positionPopover(anchor) {
+    const rect = anchor.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    let top = rect.bottom + 6;
+    let left = rect.left;
+    const popW = pop.offsetWidth || 400;
+    const popH = pop.offsetHeight || 200;
+    if (left + popW > vw - 12) left = Math.max(12, vw - popW - 12);
+    if (top + popH > vh - 12) {
+      const above = rect.top - 6 - popH;
+      top = above > 12 ? above : 12;
+    }
+    pop.style.top = top + 'px';
+    pop.style.left = left + 'px';
+  }
+
+  function renderLoading() {
+    popContent.innerHTML = '<div class="mem-pop-error">加载中…</div>';
+  }
+  function renderError(msg) {
+    popContent.innerHTML = '<div class="mem-pop-error">' + esc(msg) + '</div>';
+  }
+  function renderResponse(data) {
+    if (!data || !data.found) {
+      popContent.innerHTML = '<div class="mem-pop-error">未找到该记忆</div>';
+      return;
+    }
+    const parts = [];
+    const headerBits = [];
+    if (data.type) {
+      headerBits.push('<span class="mem-pop-type" data-type="' + escAttr(data.type) + '">' + esc(data.type) + '</span>');
+    }
+    if (data.scope === 'external' && data.project) {
+      const projLabel = String(data.project).split('-').filter(Boolean).pop() || data.project;
+      headerBits.push('<span class="mem-pop-scope">来自 ' + esc(projLabel) + ' 项目</span>');
+    }
+    if (headerBits.length > 0) {
+      parts.push('<div class="mem-pop-header">' + headerBits.join('') + '</div>');
+    }
+    parts.push('<div class="mem-pop-slug">' + esc(data.slug || '') + '</div>');
+    if (data.description) {
+      parts.push('<div class="mem-pop-desc">' + esc(data.description) + '</div>');
+    }
+    if (data.body) {
+      parts.push('<div class="mem-pop-body">' + renderMd(data.body) + '</div>');
+    }
+    popContent.innerHTML = parts.join('');
+  }
+
+  function markBroken(slug) {
+    document.querySelectorAll('.md-memlink[data-slug="' + slug.replace(/"/g, '\\"') + '"]')
+      .forEach((el) => el.classList.add('md-memlink-broken'));
+  }
+
+  async function fetchMemory(slug) {
+    const cached = memCache.get(slug);
+    if (cached === NOT_FOUND) return null;
+    if (cached) return cached;
+    try {
+      const r = await fetch('/api/memory/' + encodeURIComponent(slug), {
+        headers: typeof authHeaders === 'function' ? authHeaders() : {},
+      });
+      if (r.status === 404 || r.status === 400) {
+        memCache.set(slug, NOT_FOUND);
+        markBroken(slug);
+        return null;
+      }
+      if (!r.ok) {
+        return undefined;
+      }
+      const data = await r.json();
+      if (!data.found) {
+        memCache.set(slug, NOT_FOUND);
+        markBroken(slug);
+        return null;
+      }
+      memCache.set(slug, data);
+      return data;
+    } catch (e) {
+      return undefined;
+    }
+  }
+
+  async function loadAndShow(slug, anchor, pin) {
+    if (!ensurePopover()) return;
+    currentSlug = slug;
+    if (pin) {
+      pinned = true;
+      pop.classList.add('pinned');
+    }
+    const cached = memCache.get(slug);
+    if (cached === NOT_FOUND) {
+      renderResponse(null);
+    } else if (cached) {
+      renderResponse(cached);
+    } else {
+      renderLoading();
+    }
+    showPopover(anchor);
+
+    if (cached === NOT_FOUND || cached) return;
+    const data = await fetchMemory(slug);
+    if (currentSlug !== slug) return;
+    if (data === undefined) {
+      renderError('加载失败');
+      return;
+    }
+    renderResponse(data);
+    positionPopover(anchor);
+  }
+
+  function onEnter(e) {
+    const span = e.target.closest && e.target.closest('.md-memlink');
+    if (!span) return;
+    if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = 0; }
+    if (pinned) return;
+    const slug = span.getAttribute('data-slug');
+    if (!slug) return;
+    if (memCache.get(slug) === NOT_FOUND) return;
+    if (hoverTimer) clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(() => {
+      hoverTimer = 0;
+      loadAndShow(slug, span, false);
+    }, 300);
+  }
+
+  function onLeave(e) {
+    const span = e.target.closest && e.target.closest('.md-memlink');
+    if (!span) return;
+    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = 0; }
+    if (!pinned) scheduleHide();
+  }
+
+  function onClick(e) {
+    const span = e.target.closest && e.target.closest('.md-memlink');
+    if (!span) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const slug = span.getAttribute('data-slug');
+    if (!slug) return;
+    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = 0; }
+    loadAndShow(slug, span, true);
+  }
+
+  function onDocClick(e) {
+    if (!pop || !pinned) return;
+    if (pop.contains(e.target)) return;
+    if (e.target.closest && e.target.closest('.md-memlink')) return;
+    hidePopover();
+  }
+
+  function onKeyDown(e) {
+    if (e.key === 'Escape' && pinned) {
+      hidePopover();
+    }
+  }
+
+  document.addEventListener('mouseover', onEnter, true);
+  document.addEventListener('mouseout', onLeave, true);
+  document.addEventListener('click', onClick, true);
+  document.addEventListener('mousedown', onDocClick, true);
+  document.addEventListener('keydown', onKeyDown);
 })();
