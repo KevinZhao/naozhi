@@ -23,6 +23,37 @@ import (
 // traversal corner cases (Windows short names, symlink prefix collapse).
 var agentHexRe = regexp.MustCompile(`^[A-Za-z0-9]{8,64}$`)
 
+// AgentIntrospector is the read-side surface the server-layer Hub and
+// dashboard tailers need from a subagent linker. Defining this interface
+// alongside *SubagentLinker (which implements it implicitly) lets future
+// server packages depend on the narrow contract instead of holding a
+// concrete *cli.SubagentLinker pointer (R230B-ARCH-9 / R217-ARCH-2 anchor).
+//
+// The interface deliberately omits mutation surfaces (OnResolve, Resolve,
+// SeedFromHistory, ConfigureForTest, SetContext): those are wired by the
+// owning Process during Spawn and are not part of the read-side contract.
+// Adding a new query helper means appending one method here AND on
+// *SubagentLinker; the wshub_agent / dashboard_agent_events tests will
+// catch a missed implementation at compile time once they migrate to
+// taking AgentIntrospector instead of *SubagentLinker.
+//
+// Migration is incremental: this anchor lands the interface and lets new
+// call sites adopt it; existing *SubagentLinker references are left in
+// place to avoid the cross-package churn the full move requires.
+type AgentIntrospector interface {
+	// Query returns the LinkInfo for taskID and whether a (resolved or
+	// tombstone) entry exists. Used by dashboard agent rows and the
+	// agent_tailer registry to materialise jsonl paths.
+	Query(taskID string) (LinkInfo, bool)
+	// ProjectSessionDir returns the on-disk subagents/ directory the
+	// dashboard renders agent rows against. Empty until SetContext fires.
+	ProjectSessionDir() string
+}
+
+// Compile-time assertion: *SubagentLinker satisfies AgentIntrospector.
+// Lets `go vet` flag a future signature drift before it reaches CI.
+var _ AgentIntrospector = (*SubagentLinker)(nil)
+
 // SubagentLinker maps agent task_ids (and their originating Agent tool_use_ids)
 // to the on-disk transcript jsonl Claude CLI writes under
 // <projectDir>/<sessionID>/subagents/agent-<hex>.jsonl. The dashboard uses

@@ -492,7 +492,7 @@
 - [~] **R230B-ARCH-6 — `sessions.json` + `workspace-overrides.json` 双 atomic write 不一致（P1）**: 部分失败下重启出现孤立 override。方案：合并 schema 单文件原子写或启动期一致性扫描。Breaking：是（schema migration）。立即可落：启动期扫描 ~30 行。 — 多轮 NEEDS-DESIGN 归档 2026-05-23（同根因主条目跟踪），本批 PR
 - [ ] **R230B-ARCH-7 — `server` 包 backend fan-out 失控（P1）**: server.go 单文件 import 10 个 internal 包，是"god 包"伪装。方案：抽 internal/app 装配包，server 还原为纯 HTTP handler。Breaking：否（内部）。
 - [~] **R230B-ARCH-8 — `cli.Wrapper` 持 `*shim.Manager` 单例假设破裂（P1）**: multi-backend 部署每 Wrapper 一份 ShimManager 副本可能撞同一系统资源。方案：BackendProfile + 共享 ShimManager 注入。Breaking：是。 — 多轮 NEEDS-DESIGN 归档 2026-05-23（同根因主条目跟踪），本批 PR
-- [ ] **R230B-ARCH-9 — Hub 持 `*cli.SubagentLinker` 内部对象指针（P1）**: 跨包内部对象暴露。方案：定义 AgentIntrospector interface。立即可落地（~50 行）。Breaking：否。
+- [ ] **R230B-ARCH-9 — Hub 持 `*cli.SubagentLinker` 内部对象指针（P1）** [接口已落地 2026-05-23]: cli 包内已新增 `cli.AgentIntrospector` 接口（Query + ProjectSessionDir）+ 编译期断言 `*SubagentLinker` 实现该接口（subagent_link.go）。Hub / wshub_agent / dashboard_agent_events 渐进迁移到 AgentIntrospector 仍待做（涉及 server 文件域，跨 lane）。新签名稳定即可让后续 server 改造收敛到这个接口。
 - [ ] **R230B-ARCH-10 — server / dispatch / cron 三处持 `map[string]platform.Platform`（P1）**: 每加新平台改 3 处。方案：抽 `platform.Registry` 类型聚合 nil 守卫 + fallback 文案。Breaking：否。立即可落地（~80 行）。
 - [ ] **R230B-ARCH-11 — `cli` 包内 7 子领域并存（P2）**: ShimManager / SubagentLinker / EventLog / Wrapper / Protocol / passthrough / Process。方案：拆 cli/{process,protocol,eventlog,passthrough,subagent} 子包。Breaking：否。
 - [ ] **R230B-ARCH-12 — `ScratchPool` 应是 server 关注（P2）**: 实现在 session 包但唯一 caller 在 server。方案：搬到 server 或让 session.Router 自管 ephemeral 池。Breaking：是。
