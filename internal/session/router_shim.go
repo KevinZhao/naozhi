@@ -401,8 +401,15 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 					}
 					taskID, toolUseID := ev.TaskID, ev.ToolUseID
 					desc := ev.Description
-					wallclock := time.Now().UnixMilli()
-					go linker.Resolve(taskID, toolUseID, name, desc, wallclock)
+					// R224-GO-3: pass 0 (disable agentTS-10s filter) instead of
+					// time.Now(). Replay events are historical task_started
+					// markers from the shim ring buffer with no reliable
+					// per-event timestamp; using wallclock would treat every
+					// historical jsonl as "stale" (firstTS < now-10s) and
+					// silently reject all candidates. Resolve treats
+					// agentToolUseMS == 0 as "skip the time filter" — see
+					// internal/cli/subagent_link.go:328.
+					go linker.Resolve(taskID, toolUseID, name, desc, 0)
 				}
 			}
 		}
