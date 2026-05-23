@@ -426,6 +426,17 @@ func (s *Scheduler) GetRun(jobID, runID string) (*CronRun, error) {
 // rotations may briefly resurface in history until their JSONL ages out.
 const knownSessionIDsRecentCap = 200
 
+// Compile-time guard that *Scheduler keeps satisfying
+// session.SessionIDExcluder. The auto-workspace-chain wireup in
+// cmd/naozhi calls session.AsExcluder(scheduler), but that adapter
+// accepts discovery.RecentSessionsFilter; pickWorkspaceChain ultimately
+// expects the SessionIDExcluder shape. Without this assertion a
+// signature drift on either side (e.g. adding a ctx parameter) would
+// only surface at runtime when a fresh session tries to auto-chain and
+// silently falls back to no exclusion — exactly the failure mode the
+// RFC §4.3 Arch-B2 fix was meant to close.
+var _ session.SessionIDExcluder = (*Scheduler)(nil)
+
 // IsExcluded reports whether the given Claude sessionID belongs to a
 // cron-spawned run. Implements session.SessionIDExcluder so the
 // auto-workspace-chain feature can reject cron sessionIDs from the
