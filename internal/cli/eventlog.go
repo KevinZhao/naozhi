@@ -1100,6 +1100,32 @@ func (l *EventLog) LastN(n int) []EventEntry {
 // hot streaming path (k = 1-5 new events per notify) the constant savings are
 // small but the code path is simpler and avoids the arithmetic error surface
 // of two separate modular indexing expressions.
+//
+// R220-PERF-3 anchor: the entire reverse-scan + slice copy runs under
+// l.mu.RLock. A subscriber's *initial* catch-up may match the full ring
+// (up to maxSize=500 entries, ~512B each = 256KB copy under RLock).
+// Append is a writer (Lock), so initial-catch-up subscribers can briefly
+// block one concurrent Append.
+//
+// Why we keep this shape instead of "snapshot ring indices, release
+// RLock, copy without lock":
+//
+//   - The entries themselves live in the ring slice; releasing RLock
+//     before copying lets a concurrent Append overwrite slots the
+//     loop is still reading. Correctness requires either (a) holding
+//     the read lock or (b) double-buffering the whole ring on every
+//     write. (a) is what we do.
+//   - The copy is cap'd at maxSize (default 500). At 5-50 events/s
+//     the copy is amortised single-digit μs; subscriber initial
+//     catch-up is a once-per-tab event, not a steady-state path.
+//   - The hot path (k = 1-5 new entries per notify) breaks out of
+//     the loop almost immediately, so RLock hold time is dominated
+//     by the rare full-catch-up case and even then is bounded.
+//
+// If the subscriber count grows past dozens-per-session and the
+// full-catch-up path becomes hot, revisit by adding a copy-on-write
+// snapshot inside SubscribeWithSince. Until then, the simpler shape
+// stays.
 func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
