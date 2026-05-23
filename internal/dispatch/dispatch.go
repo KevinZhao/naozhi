@@ -221,6 +221,15 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 	if d.takeoverFn == nil {
 		d.takeoverFn = func(context.Context, string, string, session.AgentOpts) bool { return false }
 	}
+	// Same rationale for the watchdog kill counters: production wiring sets
+	// them, but tests routinely build a Dispatcher without these fields. The
+	// watchdog hot path calls .Add(1) unconditionally; nil here would panic.
+	if d.watchdogNoOutputKills == nil {
+		d.watchdogNoOutputKills = new(atomic.Int64)
+	}
+	if d.watchdogTotalKills == nil {
+		d.watchdogTotalKills = new(atomic.Int64)
+	}
 	return d
 }
 

@@ -704,7 +704,24 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 				"raw_len", len(update.Update.Content))
 		} else if content.Text != "" {
 			p.mu.Lock()
-			p.textBuf.WriteString(content.Text)
+			// Cap the streaming buffer at the same ceiling we apply to
+			// finalised assistant messages. Without this, a malicious /
+			// runaway ACP peer can stream chunks indefinitely before the
+			// turn-complete event runs the contentBytes check, OOM-ing
+			// the process. We silently truncate at the boundary; the
+			// downstream contentBytes guard will surface the size to logs.
+			if room := maxAssistantMessageContentBytes - p.textBuf.Len(); room > 0 {
+				if len(content.Text) <= room {
+					p.textBuf.WriteString(content.Text)
+				} else {
+					// Split on a rune boundary so a CJK / emoji codepoint
+					// straddling room does not leave invalid UTF-8 in the
+					// buffer (assistant message bytes are forwarded verbatim
+					// to the IM/dashboard renderers).
+					n := textutil.TruncateAtRuneBoundary(content.Text, room)
+					p.textBuf.WriteString(content.Text[:n])
+				}
+			}
 			p.mu.Unlock()
 		}
 		return Event{Type: "assistant", SessionID: update.SessionID}, false, nil
@@ -901,15 +918,26 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 	}
 	ch := make(chan readResult, 1)
 	done := make(chan struct{})
+	// send forwards a final result to the caller; if the caller has already
+	// timed out (close(done)) we drop it instead of blocking forever on ch
+	// (cap 1, no reader). Without this, a slow ACP peer that emits one final
+	// frame after handshake timeout pinned the goroutine until the pipe
+	// closed, sometimes minutes later when the process itself was killed.
+	send := func(r readResult) {
+		select {
+		case ch <- r:
+		case <-done:
+		}
+	}
 	go func() {
 		for {
 			line, eof, err := rw.R.ReadLine()
 			if err != nil {
-				ch <- readResult{nil, fmt.Errorf("read ACP response: %w", err)}
+				send(readResult{nil, fmt.Errorf("read ACP response: %w", err)})
 				return
 			}
 			if eof {
-				ch <- readResult{nil, fmt.Errorf("unexpected EOF during ACP init")}
+				send(readResult{nil, fmt.Errorf("unexpected EOF during ACP init")})
 				return
 			}
 			if len(line) == 0 {
@@ -928,11 +956,11 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 				if msg.Error != nil {
 					// R184-SEC-M1: sanitize RPC error text before it bubbles
 					// up through caller slog attrs. See ReadEvent above.
-					ch <- readResult{nil, fmt.Errorf("%w %d: %s", ErrACPRPC,
-						msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))}
+					send(readResult{nil, fmt.Errorf("%w %d: %s", ErrACPRPC,
+						msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))})
 					return
 				}
-				ch <- readResult{&msg, nil}
+				send(readResult{&msg, nil})
 				return
 			}
 			// Check if caller gave up (timeout). The goroutine will be fully

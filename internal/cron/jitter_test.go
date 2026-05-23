@@ -174,9 +174,6 @@ type jitterStubRouter struct {
 	calls int64
 }
 
-func (r *jitterStubRouter) RegisterCronStub(key, workspace, lastPrompt string) {
-	_, _, _ = key, workspace, lastPrompt
-}
 func (r *jitterStubRouter) RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string) {
 	_, _, _, _ = key, workspace, lastPrompt, chainIDs
 }

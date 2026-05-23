@@ -1067,6 +1067,16 @@ var sensitiveDownloadNames = map[string]struct{}{
 	"id_ed25519":      {},
 	"authorized_keys": {},
 	"credentials":     {}, // ~/.aws/credentials, docker credentials helpers, etc.
+	// Cloud-native credential filenames that show up in workspaces under
+	// allowed_root often enough to deserve an explicit block. The extension
+	// allowlist alone is not sufficient — these are .json / .yaml files that
+	// would otherwise pass as harmless config.
+	"service-account.json": {},
+	"serviceaccount.json":  {},
+	"secrets.yaml":         {},
+	"secrets.yml":          {},
+	"secret.yaml":          {},
+	"secret.yml":           {},
 }
 
 // sensitiveDownloadExts lists extensions that strongly imply key material.
