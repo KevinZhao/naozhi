@@ -93,13 +93,15 @@ func readPPidFromProcStatus(pid int) (int, error) {
 // naozhi.service lifecycle. Falls back to direct cgroup move if
 // busctl is not available.
 //
-// R229-SEC-4: cliPID is taken from the shim's self-reported Hello.CLIPID
-// frame. A compromised or buggy shim could put any PID (sshd, pid 1) on
-// the wire and trick naozhi into adopting an arbitrary process via the
-// privileged sudo busctl call. Validate that /proc/<cliPID>/status reports
-// PPid == shimPID before passing the value through; on mismatch drop the
-// CLI PID from the scope (the shim PID alone is still adopted via its own
-// cmd.Process.Pid which was not attacker-supplied).
+// R229-SEC-4 / R219-SEC-5: cliPID is taken from the shim's self-reported
+// Hello.CLIPID frame. A compromised or buggy shim could put any PID
+// (sshd, pid 1) on the wire and trick naozhi into adopting an arbitrary
+// process via the privileged sudo busctl call. Validate that
+// /proc/<cliPID>/status reports PPid == shimPID before passing the value
+// through; on mismatch drop the CLI PID from the scope (the shim PID
+// alone is still adopted via its own cmd.Process.Pid which was not
+// attacker-supplied). R219-SEC-5 is the original anchor that asked for
+// PPid validation; R229-SEC-4 is the implementation lane.
 func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int) {
 	scopeName := fmt.Sprintf("naozhi-shim-%d.scope", shimPID)
 

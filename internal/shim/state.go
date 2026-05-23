@@ -59,6 +59,14 @@ const stateVersion = 1
 const maxSupportedSchemaVersion = 1
 
 // WriteStateFile atomically writes the state to path with mode 0600.
+//
+// R215-SEC-P3-1 archive anchor: AuthToken is stored in plaintext under a
+// 0700 directory + 0600 file. The shim already enforces same-UID at the
+// AF_UNIX layer via SO_PEERCRED (peeruid_linux.go), so a same-UID attacker
+// who can read the state file can also dial the socket directly; encrypting
+// the token at rest would not raise the bar. Per-user threat model is "OS
+// accounts are trust boundaries" — encryption would only obfuscate, not
+// secure. Tracked as accepted risk.
 func WriteStateFile(path string, state State) error {
 	state.Version = stateVersion
 	data, err := json.MarshalIndent(state, "", "    ")
