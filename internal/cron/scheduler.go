@@ -2513,21 +2513,15 @@ func (s *Scheduler) finishRun(a finishArgs) {
 // pipeline that recordResultP0WithSanitised uses, factored out so the
 // skipPersist path of finishRun can reach the same byte-output without
 // touching s.mu / persistJobsLocked. Idempotent w.r.t. clean strings.
+//
+// truncateWithSuffix (limits.go) handles the rune trim + suffix; we extend
+// SanitizeForLog's byte cap by len(truncatedSuffix) so a 4K-rune input that
+// just got "…[truncated]" appended doesn't have its suffix byte-clipped on
+// the way out. R232-PERF-9 / R234-CR-1.
 func sanitiseRunResult(s string) string {
-	if trimmed := textutil.TruncateRunesNoEllipsis(s, maxStoredResultRunes); len(trimmed) < len(s) {
-		s = trimmed + truncatedSuffix
-	}
-	// SanitizeForLog's maxLen is byte-counted, so extend the cap by the
-	// suffix length so a 4K-rune input that just got the "…[truncated]"
-	// marker appended doesn't have its suffix byte-clipped on the way
-	// out. R232-PERF-9.
+	s = truncateWithSuffix(s, maxStoredResultRunes)
 	return osutil.SanitizeForLog(s, maxStoredResultRunes+len(truncatedSuffix))
 }
-
-// truncatedSuffix marks where sanitiseRunResult / recordResultP0WithSanitised
-// cut a result that exceeded maxStoredResultRunes. Centralised so the
-// downstream SanitizeForLog cap can compensate for its byte length.
-const truncatedSuffix = "…[truncated]"
 
 // sanitiseRunErrMsg applies the cron error-redaction + log-injection
 // scrub used by recordResultP0WithSanitised, for skipPersist branches
@@ -2644,9 +2638,12 @@ func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
 // (the last "test stub" caller) already invokes this function directly.
 // Do NOT reintroduce a thinner wrapper without first checking those TODOs.
 func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState) (string, string, bool) {
-	if trimmed := textutil.TruncateRunesNoEllipsis(result, maxStoredResultRunes); len(trimmed) < len(result) {
-		result = trimmed + truncatedSuffix
-	}
+	// truncateWithSuffix (limits.go) is the single source of truth for the
+	// rune-trim + …[truncated] suffix; both this path and sanitiseRunResult
+	// must produce byte-identical output so the skipPersist branch of
+	// finishRun and the disk record never disagree on visible content.
+	// R234-CR-1 consolidated three open-coded copies into the helper.
+	result = truncateWithSuffix(result, maxStoredResultRunes)
 	errMsg = redactPathsInCronError(errMsg)
 	// Extend SanitizeForLog's byte cap by the suffix length so an
 	// already-truncated result keeps the trailing marker intact;

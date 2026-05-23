@@ -149,7 +149,7 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 			case "thinking":
 				entry.Type = "thinking"
 				entry.Summary = textutil.TruncateRunes(block.Text, 120)
-				entry.Detail = textutil.TruncateRunes(block.Text, 2000)
+				entry.Detail = textutil.TruncateRunes(block.Text, eventDetailMaxRunes)
 			case "tool_use":
 				entry.Type = "tool_use"
 				entry.Summary = block.Name

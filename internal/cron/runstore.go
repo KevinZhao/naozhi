@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
-	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // runStore persists CronRun records to disk. Layout (rooted at runsRoot,
@@ -414,14 +413,14 @@ func (s *runStore) cacheInvalidate(jobID string) {
 // json.Marshal silently re-encodes as U+FFFD; in the worst case the
 // second marshal still exceeds maxRunBytes and the run record is never
 // persisted. Rune-aware truncation closes that hole. R221-FIX-P0-1.
+//
+// R234-CR-1: delegates to truncateWithSuffix in limits.go so the suffix
+// literal stays in one place. Wrapper retained because the retry path's
+// rune budget (maxRetryFieldRunes) is logically distinct from the
+// over-cap result budget — keeping the named entry point makes call
+// sites self-documenting.
 func truncateForRetry(s string, maxRunes int) string {
-	shrunk := textutil.TruncateRunesNoEllipsis(s, maxRunes)
-	if shrunk == s {
-		return s
-	}
-	// R234-CR-9: 用 truncatedSuffix 常量统一裁剪标记，避免 sanitiseRunResult
-	// 用 const 而 truncateForRetry 用字面量导致两处可能漂移（grep 不到）。
-	return shrunk + truncatedSuffix
+	return truncateWithSuffix(s, maxRunes)
 }
 
 // maxRetryFieldRunes 是 over-cap retry 路径每个字段（Result/Prompt/ErrorMsg）
