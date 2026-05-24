@@ -570,6 +570,16 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	if err := ValidatePromptStrict(prompt); err != nil {
 		return err
 	}
+	// R246-SEC-10: bound prompt size on this dashboard write path. The
+	// dashboard handler runs validateCronPrompt (which enforces
+	// maxCronPromptBytesDashboard == cron.MaxPromptBytes) before reaching
+	// here, but SetJobPrompt is also exposed via Scheduler so any future
+	// caller (or a code path that bypasses validateCronPrompt) would write
+	// an unbounded prompt to disk and amplify it across LastResult records.
+	// Mirror the same cap as cron run prompts.
+	if len(prompt) > MaxPromptBytes {
+		return fmt.Errorf("prompt too large: %d bytes (cap %d)", len(prompt), MaxPromptBytes)
+	}
 
 	s.mu.Lock()
 
