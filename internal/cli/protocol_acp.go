@@ -26,6 +26,44 @@ import (
 // skips the reflect+alloc cost on the streaming hot path. R227-PERF-15.
 var acpStopReasonKey = []byte(`"stopReason"`)
 
+// acpEncBuf bundles a *bytes.Buffer + *json.Encoder into a single pooled
+// pair so the WriteMessage / permissionResponse hot paths skip the per-call
+// json.Marshal allocator. Mirrors process_shim_io.go's shimSendBufPool
+// pattern — see R247-PERF-12.
+type acpEncBuf struct {
+	buf *bytes.Buffer
+	enc *json.Encoder
+}
+
+// acpEncPool reuses encoder/buffer pairs across ACP send calls. ACP turn
+// frames carry potentially-large image payloads (up to ~400KB base64 per
+// pasted screenshot); the encoder writes via the buffer pointer so a single
+// Reset between uses is safe.
+var acpEncPool = sync.Pool{
+	New: func() any {
+		buf := new(bytes.Buffer)
+		enc := json.NewEncoder(buf)
+		// JSON-RPC frames are NDJSON; the agent CLI sees user prompts /
+		// permission selections that may legitimately contain '<', '>',
+		// '&'. The default HTML escaping would corrupt those payloads.
+		// Mirrors shimSendBufPool's SetEscapeHTML(false).
+		enc.SetEscapeHTML(false)
+		return &acpEncBuf{buf: buf, enc: enc}
+	},
+}
+
+// acpEncBufMaxCap caps the pool entry capacity. Image-bearing prompts can
+// inflate a buffer to >256KB; oversized entries are dropped on Put so the
+// pool does not retain multi-MB backing arrays past their useful life.
+const acpEncBufMaxCap = 64 * 1024
+
+func putACPEncBuf(e *acpEncBuf) {
+	if e.buf.Cap() > acpEncBufMaxCap {
+		return
+	}
+	acpEncPool.Put(e)
+}
+
 // toolJSONMaxRunes caps the rune count of tool_call input/output payloads
 // stuffed into Event.ToolCall before they are forwarded to dashboard / IM
 // renderers. 16 KiB runes is generous enough to hold a typical Read /
@@ -346,12 +384,16 @@ func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData)
 			Prompt:    prompt,
 		},
 	}
-	data, err := json.Marshal(req)
-	if err != nil {
+	// R247-PERF-12: pooled encoder/buffer pair. json.Encoder.Encode appends
+	// its own trailing '\n' per NDJSON framing, so no manual append is
+	// required (matches the prior `data = append(data, '\n')` semantics).
+	eb := acpEncPool.Get().(*acpEncBuf)
+	defer putACPEncBuf(eb)
+	eb.buf.Reset()
+	if err := eb.enc.Encode(req); err != nil {
 		return err
 	}
-	data = append(data, '\n')
-	_, err = w.Write(data)
+	_, err := w.Write(eb.buf.Bytes())
 	return err
 }
 
@@ -672,13 +714,15 @@ func (p *ACPProtocol) HandleEvent(w io.Writer, ev Event) bool {
 			Outcome: permissionOutcome{Outcome: "selected", OptionID: chosen},
 		},
 	}
-	data, err := json.Marshal(resp)
-	if err != nil {
+	// R247-PERF-12: pooled encoder/buffer pair shared with WriteMessage.
+	eb := acpEncPool.Get().(*acpEncBuf)
+	defer putACPEncBuf(eb)
+	eb.buf.Reset()
+	if err := eb.enc.Encode(resp); err != nil {
 		slog.Warn("acp: failed to marshal permission response", "err", err)
 		return true
 	}
-	data = append(data, '\n')
-	if _, err := w.Write(data); err != nil {
+	if _, err := w.Write(eb.buf.Bytes()); err != nil {
 		slog.Warn("acp: failed to send permission response", "err", err)
 	}
 	return true

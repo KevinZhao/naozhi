@@ -172,7 +172,7 @@
 - [ ] **R247-PERF-9 — diskListNewestFirst 串行 readRun（P2）** [REPEAT-3]: `internal/cron/runstore.go:617-631` 与 R246-PERF-2 同根因。方案：recentCacheEntry 缓存 sorted slice + 8 worker pool 并行解码。
 - [ ] **R247-PERF-10 — Append jobLock 期间 MkdirAll+Marshal+WriteFileAtomic（P2）** [REPEAT-2]: `internal/cron/runstore.go:282-339` 每条 syscall。方案：json.Marshal pool + sync.Once-per-jobID MkdirAll。
 - [ ] **R247-PERF-11 — marshalJobsLocked 每次 mutation 全表 sort+Marshal（P2）** [REPEAT-2]: `internal/cron/scheduler_persist.go:45-58` 50 jobs ≈ 100KB write × 每 finishRun。方案：Encoder + bytes.Buffer pool。
-- [~] **R247-PERF-12 — protocol_acp WriteMessage Marshal 无 pool（P2）** [REFACTOR]: `internal/cli/protocol_acp.go:308-356,675-680` ACP turn / permissionResponse 高频。方案：镜像 shimSendBufPool。
+- [x] **R247-PERF-12 — protocol_acp WriteMessage Marshal 无 pool（P2）** [REFACTOR]: `internal/cli/protocol_acp.go:308-356,675-680` ACP turn / permissionResponse 高频。方案：镜像 shimSendBufPool。 — 解决 2026-05-24：新增 acpEncPool（*bytes.Buffer + *json.Encoder pair），SetEscapeHTML(false) 与 shim 路径对齐；WriteMessage 与 permissionResponse 双热路径共用池；putACPEncBuf 在 cap > 64KB 时丢弃防止 image-payload 钉占；Encoder 自带 NDJSON \n 故移除 manual append。
 - [x] **R247-PERF-13 — eventlog Entries 全 ring 拷贝 ~140KB/call（P2）** [REPEAT-3]: `internal/cli/eventlog.go:1217-1245` dashboard subscribe 路径。方案：LastN 上限或 sync.Pool slice 复用。 — 解决 2026-05-24：sync.Pool[*[]EventEntry] cap=defaultEventLogSize；新增 ReleaseEntriesSlice 公共 API；Entries/LastN 改走 getEntriesSlice 池路径；池容量 cap 512 防止 outlier 钉占；clear 释放避免 string/slice/pointer 字段 leak；contract 文档化（slice 在 Release 前不得跨 goroutine 共享）。所有 cli 测试通过。
 - [ ] **R247-PERF-14 — eventlog Subscribe 每次 alloc subscriber（P2）** [REFACTOR]: `internal/cli/eventlog.go:1141-1166` dashboard 高频 reconnect 形成分配峰。方案：close-once 限制改 broadcast cond。
 - [ ] **R247-PERF-15 — handleList projectList 每次 1Hz 全量 alloc（P2）** [REPEAT-3]: `internal/server/dashboard_session.go:554-572` R230C-PERF-7 已知。方案：atomic.Pointer + projectMgr 版本号失效。
@@ -207,7 +207,7 @@
 - [ ] **R247-CR-15 — recordResultP0WithSanitised P0 后缀历史 noise（P2）** [REFACTOR]: `internal/cron/scheduler_finish.go:301-329`。方案：与 R247-CR-14 一并改名。
 - [ ] **R247-CR-16 — jobSnapshot struct 字段顺序非最优（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:96-121` 64-bit 平台 padding 浪费 ~8B。方案：size DESC 重排。
 - [ ] **R247-CR-17 — hexIDBytes=8 命名误导（P3）** [REFACTOR]: `internal/cron/job.go:202` godoc 说 "16-char hex"。方案：改名 hexIDEntropyBytes。
-- [ ] **R247-CR-18 — gcWaitBudget 包级 mutable var 测试 racy（P3）** [REPEAT-3]: `internal/cron/scheduler.go:655,661` 与 R246-CR-012 同根因。方案：const + WithStopBudget(d) helper。
+- [~] **R247-CR-18 — gcWaitBudget 包级 mutable var 测试 racy（P3）** [REPEAT-3]: `internal/cron/scheduler.go:655,661` 与 R246-CR-012 同根因。方案：const + WithStopBudget(d) helper。
 - [ ] **R247-CR-19 — marshalJobs atomic.Pointer test seam 通过 init() 装载（P3）** [REFACTOR]: `internal/cron/scheduler_persist.go:32-37` 与 R242-CR-5 同根因。方案：build tag testonly 或字段 DI。
 - [ ] **R247-CR-20 — runs 限额 magic number 推导散落（P3）** [REFACTOR]: `internal/cron/runstore.go:170-187`。方案：集中注释块 + 推导公式。
 - [ ] **R247-CR-21 — emitOverlapSkipped godoc 否定式叙述（P3）** [REFACTOR]: `internal/cron/scheduler_finish.go:269-279`。方案：改正向 "Emits start→end pair with state=Skipped"。
@@ -218,7 +218,7 @@
 - [ ] **R247-CR-26 — containsCronC0 函数名误导（P3）** [REFACTOR]: `internal/cron/store.go:241-266` 实际还查 bidi/LS/PS。方案：改名 containsCronUnsafe。
 - [ ] **R247-CR-27 — Append truncate 三字段注释不对称（P3）** [REFACTOR]: `internal/cron/runstore.go:280-339`。方案：抽 shrinkOversizeRun helper。
 - [ ] **R247-CR-28 — spawn budget 警告 magic factor 0.5（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:606-613`。方案：const spawnElapsedWarnRatio + godoc。
-- [~] **R247-CR-29 — TriggerNow 60 行 + 3 goroutine 分支（P3）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:780-833`。方案：合并单 goroutine + 内部 if。
+- [ ] **R247-CR-29 — TriggerNow 60 行 + 3 goroutine 分支（P3）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:780-833`。方案：合并单 goroutine + 内部 if。注意：trigger_now_wg_done_test.go 的 CRON4 结构契约硬性要求"3 个 go func() + 3 个 defer Done"；要落地本 TODO 必须先调整该 test 表达新契约（"恰好 1 个 go func() 且包含 defer Done"），是 BREAKING-LOCAL 跨 test+impl，不适合 hourly pick。
 - [ ] **R247-CR-30 — IsExcluded godoc 与实现 cost 不一致（P3）** [REFACTOR]: `internal/cron/scheduler_session.go:40-46`。方案：godoc 标注 O(jobs × recentCap) + 推 KnownSessionIDs cache。
 
 ### 架构（剩余）
