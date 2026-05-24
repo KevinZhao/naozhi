@@ -978,7 +978,15 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		// Parallel audit entry with the local-path slog.Info below so an
 		// operator grepping journalctl sees every label change regardless of
 		// which node owns the session. R64-GO-M3.
-		slog.Info("session label updated", "node", req.Node, "key", req.Key, "label_len", len(label))
+		// R246-SEC-14: even though ValidateSessionKey already rejected C0/
+		// bidi/zero-width on this path, the audit log must use the same
+		// SanitizeLogAttr-funnelled shape that dispatch.commands.go enforces
+		// for the IM path. A future change that loosens validation (e.g. to
+		// accept legacy keys for read-only ops) would then leave THIS slog
+		// site as the only un-sanitized sink — fixing it pre-emptively means
+		// the audit trail can never split-line / inject ANSI even after
+		// such a change.
+		slog.Info("session label updated", "node", session.SanitizeLogAttr(req.Node), "key", session.SanitizeLogAttr(req.Key), "label_len", len(label))
 		// Don't echo label — it is attacker-influenced text. Validation already
 		// ensured it is safe in storage, but reflecting user input in an HTTP
 		// body is a latent reflected-XSS vector if any future caller renders
@@ -993,7 +1001,12 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	slog.Info("session label updated", "node", "local", "key", req.Key, "label_len", len(label))
+	// R246-SEC-14: SanitizeLogAttr funnels req.Key through the same C0/bidi/
+	// zero-width filter dispatch.commands.go uses on the IM side, so the
+	// audit attr cannot split a journalctl line even if a future change
+	// loosens ValidateSessionKey or a downstream Router internal-set path
+	// produces a key without the validate gate.
+	slog.Info("session label updated", "node", "local", "key", session.SanitizeLogAttr(req.Key), "label_len", len(label))
 	// Don't echo label — reflected-XSS precaution matches the remote-path
 	// above. Client patches its cache from its own optimistic value.
 	writeOK(w)
