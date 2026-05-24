@@ -56,6 +56,13 @@ const (
 	shimAuthReadDeadline    = 30 * time.Second
 )
 
+// postExitReattachWindow caps how long Run() waits for a fresh naozhi client
+// to reconnect after the inner CLI has exited (or watchdog killed it). The
+// same value bounds both the pre-reconnect "exitTimer" wait and the
+// post-reconnect grace window, matching naozhi's reconnectShims cadence so
+// a hot-restart catches in-flight state before shim self-terminates. R237-CR-7.
+const postExitReattachWindow = 60 * time.Second
+
 // Config holds shim process configuration passed via CLI flags.
 type Config struct {
 	Key             string
@@ -299,24 +306,24 @@ func Run(cfg Config) error {
 		case <-cli.exited:
 			slog.Info("CLI exited", "code", cli.exitCode)
 			s.saveStateCLIDead()
-			exitTimer := time.NewTimer(60 * time.Second)
+			exitTimer := time.NewTimer(postExitReattachWindow)
 			select {
 			case conn := <-acceptCh:
 				exitTimer.Stop()
 				spawnClient(conn)
-				reconnectTimer := time.NewTimer(60 * time.Second)
+				reconnectTimer := time.NewTimer(postExitReattachWindow)
 				select {
 				case <-s.done:
 					reconnectTimer.Stop()
 					slog.Info("exiting: done after cli exit + reconnect")
 				case <-reconnectTimer.C:
-					slog.Info("exiting: 60s timeout after cli exit + reconnect")
+					slog.Info("exiting: post-exit reattach window expired after cli exit + reconnect")
 				}
 			case <-s.done:
 				exitTimer.Stop()
 				slog.Info("exiting: done after cli exit")
 			case <-exitTimer.C:
-				slog.Info("exiting: 60s timeout after cli exit")
+				slog.Info("exiting: post-exit reattach window expired after cli exit")
 			}
 			return nil
 
@@ -335,24 +342,24 @@ func Run(cfg Config) error {
 		case <-s.watchdog.Fired():
 			slog.Warn("watchdog fired, CLI killed")
 			s.saveStateCLIDead()
-			wdTimer := time.NewTimer(60 * time.Second)
+			wdTimer := time.NewTimer(postExitReattachWindow)
 			select {
 			case conn := <-acceptCh:
 				wdTimer.Stop()
 				spawnClient(conn)
-				wdReconnectTimer := time.NewTimer(60 * time.Second)
+				wdReconnectTimer := time.NewTimer(postExitReattachWindow)
 				select {
 				case <-s.done:
 					wdReconnectTimer.Stop()
 					slog.Info("exiting: done after watchdog + reconnect")
 				case <-wdReconnectTimer.C:
-					slog.Info("exiting: 60s timeout after watchdog + reconnect")
+					slog.Info("exiting: post-exit reattach window expired after watchdog + reconnect")
 				}
 			case <-s.done:
 				wdTimer.Stop()
 				slog.Info("exiting: done after watchdog")
 			case <-wdTimer.C:
-				slog.Info("exiting: 60s timeout after watchdog")
+				slog.Info("exiting: post-exit reattach window expired after watchdog")
 			}
 			return nil
 
