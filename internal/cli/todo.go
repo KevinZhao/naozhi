@@ -13,15 +13,11 @@ type TodoItem struct {
 	ActiveForm string `json:"activeForm,omitempty"`
 }
 
-type todoWriteInput struct {
-	Todos []TodoItem `json:"todos"`
-}
-
-// todoWriteInputRaw mirrors todoWriteInput but keeps the inner todos array
-// as its original JSON bytes so callers that need both the parsed slice
-// (for summary counts) and the on-wire array string (for dashboard
-// rendering) can avoid the extra Marshal+copy that the old TodosDetailJSON
-// helper paid on every TodoWrite event. R226-PERF-8.
+// todoWriteInputRaw mirrors a TodoWrite tool input but keeps the inner todos
+// array as its original JSON bytes so callers that need both the parsed slice
+// (for summary counts) and the on-wire array string (for dashboard rendering)
+// can avoid the extra Marshal+copy that the old TodosDetailJSON helper paid
+// on every TodoWrite event. R226-PERF-8.
 type todoWriteInputRaw struct {
 	Todos json.RawMessage `json:"todos"`
 }
