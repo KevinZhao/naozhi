@@ -429,6 +429,15 @@ type CronHandlers struct {
 	// hand-rolled CronHandlers instances) skip the gate; wiring lives in
 	// server.New.
 	runsLimiter *ipLimiter
+	// previewLimiter caps how often a single authenticated caller can hit
+	// `/api/cron/preview`. The handler runs robfig/cron's parser + multiple
+	// next-tick computations on each call; without a per-IP gate a stolen
+	// dashboard token can spin up parser CPU at the request rate. Distinct
+	// from runsLimiter so heavy preview probing does not exhaust the runs
+	// budget for the same IP. R238-SEC-15.
+	//
+	// Nil-guarded; wiring lives in server.New.
+	previewLimiter *ipLimiter
 }
 
 // GET /api/cron — list all cron jobs (unscoped, admin view).
@@ -844,6 +853,13 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 // the next N run times. count defaults to 1 and is clamped to [1, 10] so the
 // UI can show a multi-run preview without giving callers an unbounded knob.
 func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
+	// R238-SEC-15: gate per-IP before the cron parser / preview math so a
+	// stolen dashboard token cannot burn parser CPU at unbounded rate.
+	// Nil-guarded for hand-built tests.
+	if h.previewLimiter != nil && !h.previewLimiter.AllowRequest(r) {
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron preview rate limit exceeded"})
+		return
+	}
 	schedule := r.URL.Query().Get("schedule")
 	if schedule == "" {
 		http.Error(w, "schedule is required", http.StatusBadRequest)

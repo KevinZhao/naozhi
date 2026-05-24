@@ -618,6 +618,11 @@ func buildServer(opts ServerOptions) *Server {
 			// run history at unbounded rate, both burning IO and exposing
 			// per-job activity timing.
 			runsLimiter: newIPLimiterWithProxy(rate.Every(time.Second), 60, opts.TrustedProxy),
+			// R238-SEC-15: per-IP limiter for /api/cron/preview. 30 req/min/IP
+			// with burst 10 fits dashboard editor cadence (live preview as the
+			// user types a schedule) while blocking unbounded parser CPU spin
+			// from a stolen token.
+			previewLimiter: newIPLimiterWithProxy(rate.Every(2*time.Second), 10, opts.TrustedProxy),
 		},
 		transcribeH: &TranscribeHandler{
 			transcriber:       opts.Transcriber,
