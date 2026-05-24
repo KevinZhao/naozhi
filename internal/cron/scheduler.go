@@ -3085,7 +3085,7 @@ func (s *Scheduler) persistJobsLocked() (func(), error) {
 	data, err := s.marshalJobsLocked()
 	if err != nil {
 		slog.Error("marshal cron store", "err", err)
-		return nil, fmt.Errorf("%w: %v", ErrPersistFailed, err)
+		return nil, fmt.Errorf("%w: %w", ErrPersistFailed, err)
 	}
 	// Capture a monotonic sequence number under s.mu so it totals-orders all
 	// marshals with the snapshot state they represent. saveMarshaled skips
