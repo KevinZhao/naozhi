@@ -1,3 +1,5 @@
+//go:build !release
+
 // Package session test utilities for cross-package consumers.
 //
 // IMPORTANT (R226-CR-14 / R227-CR-2 / R230-CQ-5 / R232-ARCH-4): this file
@@ -8,22 +10,30 @@
 // by internal/server/*_test.go and internal/upstream/*_test.go, which
 // forces the cross-package-visible "testutil.go" naming.
 //
-// Side effect: this file ships in the production binary. The TestProcess
-// type and NewTestProcess constructor are dead code at runtime — nothing
-// reachable from cmd/naozhi/main.go calls them — so the cost is binary
-// size, not behaviour. Router.InjectSession is the one risky export: a
-// crafted plugin that imports session and calls it could plant a fake
-// process. naozhi has no plugin system, so the attack surface is empty
-// in practice; if one is ever added, gate this file with a build tag
-// and split the cross-package fake into internal/session/sessiontest.
+// Side effect: this file would otherwise ship in the production binary.
+// The `//go:build !release` constraint at the top of this file excludes
+// it whenever a release binary is built with `-tags release`, addressing
+// R246-ARCH-8 / R234-ARCH-18 / R239-ARCH-O without splitting the file
+// into a subpackage.
+//
+//   - go build / go test                  → compiled (default)
+//   - go build -tags release ./cmd/naozhi → excluded (production)
+//
+// The constraint is a no-op for current callers (no Makefile target sets
+// `-tags release` today), but lets ops opt in to a release build that
+// strips the test stub when paranoid about a future plugin system. The
+// TestProcess type, NewTestProcess constructor, and Router.InjectSession
+// method are all defined in this file, so a release build will fail-fast
+// at link time if anything reachable from cmd/naozhi/main.go ever
+// reaches for them.
 //
 // Migration note: a follow-up subpackage carve-out is the canonical fix.
 // The blocker is `Router.InjectSession`, which touches r.mu / r.sessions
 // / r.attachHistorySource (all unexported). A clean split would either
 // export a narrow seam (e.g. `Router.injectForTest(processIface)` +
 // matching helper in sessiontest) or move the InjectSession glue here
-// and ship TestProcess from the subpackage. Defer until a build-tag
-// boundary is needed for unrelated reasons.
+// and ship TestProcess from the subpackage. Defer until a release-build
+// matrix actually exercises the `-tags release` path.
 package session
 
 import (
