@@ -586,7 +586,7 @@
 ### 性能（剩余）
 
 - [ ] **R236-PERF-02 — KnownSessionIDs 每次调用全量扫 200 runs/job 无缓存（P1）**: `internal/cron/scheduler.go:472-511` cold 状态下 50 jobs × 200 runs = 10k ReadFile 在单 HTTP 请求路径，O(hundreds ms) latency spike。方案：atomic.Pointer 缓存 + recordResult/deleteJob 主动失效；或 IsExcluded 改查 LastSessionID + inflight 跳过历史。Breaking：否。
-- [ ] **R236-PERF-04 — eventlog Append 单条路径每次分配 `[]EventEntry{e}`（P2）**: `internal/cli/eventlog.go:790-888`，PersistSink 签名要求 slice。同根因 R230C-PERF-2 主条目跟踪。Breaking：是（接口签名变化）。
+- [~] **R236-PERF-04 — eventlog Append 单条路径每次分配 `[]EventEntry{e}`（P2）**: `internal/cli/eventlog.go:790-888`，PersistSink 签名要求 slice。同根因 R230C-PERF-2 主条目跟踪。Breaking：是（接口签名变化）。 — NEEDS-DESIGN 状态收敛 2026-05-24（cron-fix-F1 复核）：与 R219-PERF-4 / R222-PERF-8 / R228-PERF-7 / R227-PERF-9 / R240-PERF-7 同根因。R230-PERF-1 sink-nil 早返回已覆盖 production hot path（无 sink 时零 alloc）；sink-attached 路径的 slice literal 结构性必需（contract: sink 可保留 slice 跨 return）。godoc 锚点已在 eventlog.go:909-917；本批仅文档同步关闭主条目跟踪。
 - [ ] **R236-PERF-06 — handleSubscribe 每次扫 maxWSConns 个 client 计 per-key 订阅数（P2）**: `internal/server/wshub.go:621-656` 在 h.mu.Lock 下，subscribe 阻塞所有广播 RLock。方案：subscriberCounts map 维护 O(1) 计数。同根因 R230C-PERF-4，但可重新评估。Breaking：否。
 - [ ] **R236-PERF-07 — diskListNewestFirst pagination 路径全量 ReadFile bypass 缓存（P2）**: `internal/cron/runstore.go:468-545` 200 runs × ReadFile = 6.4MB syscall。方案：mtime 排序后 binary search before cutoff，跳过不需要的 ReadFile。Breaking：否。
 - [ ] **R236-PERF-08 — handleList 50 jobs 串行调 RecentRuns 各持 entry.mu（P2）**: `internal/server/dashboard_cron.go:510`。方案：BatchRecentRuns(jobIDs, n) 单次遍历或 bounded goroutine 并发。Breaking：否（新 API）。
