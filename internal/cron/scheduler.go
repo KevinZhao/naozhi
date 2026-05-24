@@ -683,10 +683,10 @@ func (cfg SchedulerConfig) applyDefaults() SchedulerConfig {
 
 func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	before := cfg.MaxJobs
-	cfg = cfg.applyDefaults()
-	if cfg.MaxJobs != before && before > maxJobsHardCap {
+	if before > maxJobsHardCap {
 		slog.Warn("cron max_jobs exceeds hard cap, clamping", "requested", before, "cap", maxJobsHardCap)
 	}
+	cfg = cfg.applyDefaults()
 	maxPerChat := cfg.MaxJobsPerChat
 	parent := cfg.ParentCtx
 	if parent == nil {
