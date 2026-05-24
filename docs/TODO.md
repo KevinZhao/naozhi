@@ -167,7 +167,7 @@
 
 ### 性能（剩余）
 
-- [ ] **R247-PERF-2 — flattenAssistantEvent O(N) 前插 + 整 slice reindex（P1）** [REFACTOR]: `internal/server/dashboard_cron_transcript.go:665-676` 500 行 transcript 每 assistant event 都触发。方案：先 emit assistant 再 emit tool_use 或 prealloc + shift 一次。
+- [x] **R247-PERF-2 — flattenAssistantEvent O(N) 前插 + 整 slice reindex（P1）** [REFACTOR]: `internal/server/dashboard_cron_transcript.go:665-676` 500 行 transcript 每 assistant event 都触发。方案：先 emit assistant 再 emit tool_use 或 prealloc + shift 一次。 → 改 two-pass：第一遍 aggregate textBuf + count tool_use 预算 cap，第二遍 emit。assistant 在前 tool_use 在后顺序+ index 由首写就位，消除 `append([]T{a}, out...)` 整 slice copy + reindex 循环。同时按精确 totalTurns prealloc 收口 R247-PERF-18 同函数 make([]T,0,2) 每行 alloc（双修一锅）。go test ./internal/server/ -run "Cron|Transcript" 通过。
 - [ ] **R247-PERF-3 — KnownSessionIDs 每次重建 jobs×200 map（P1）** [REPEAT-2]: `internal/cron/scheduler_session.go:68-108` 与 R245-PERF-2/R242-PERF-7 同根因仍未消除。方案：atomic.Pointer[snapshot] + 30s TTL，finishRun/DeleteJob 主动失效。
 - [ ] **R247-PERF-4 — ListAllJobsWithNextRun 每次 4 个 slice/map alloc（P1）** [REFACTOR]: `internal/cron/scheduler_jobs.go:184-213` dashboard 1Hz poll。方案：sync.Pool 复用 pairs/result，maps.Clear+复用 nextByID。
 - [ ] **R247-PERF-5 — proc_linux fmt.Sprintf("/proc/%d/...") + strings.Fields（P1）** [REFACTOR]: `internal/discovery/proc_linux.go:27,39,56` 每 PID 反射拼接 + 整 string copy。方案：strconv.Itoa builder + byte-level scan。
@@ -183,7 +183,7 @@
 - [x] **R247-PERF-15 — handleList projectList 每次 1Hz 全量 alloc（P2）** [REPEAT-3]: `internal/server/dashboard_session.go:554-572` R230C-PERF-7 已知。方案：atomic.Pointer + projectMgr 版本号失效。 *(已实施：projectListCache atomic.Pointer 1s-bucket cache + projectListLocalAt helper；remote-node 合并路径 copy + grow 先复制再 append，保证 cached read-only header 不被 mutate。1s 分辨率人类操作不可感知，省去 Manager.Version() 跨包 hook。R247-PERF-15 [REPEAT-3]。)*
 - [ ] **R247-PERF-16 — RecentSessions 无 prealloc（P2）** [REFACTOR]: `internal/discovery/recent.go:84-178` 7day×多 project 规模可观。方案：make 估上限。
 - [ ] **R247-PERF-17 — protocol_acp base64.EncodeToString 全 alloc（P2）** [REFACTOR]: `internal/cli/protocol_acp.go:322-339` 多图 turn 浪费。方案：base64.StdEncoding.AppendEncode 写 pre-grown buffer。
-- [ ] **R247-PERF-18 — flattenAssistantEvent make([]T,0,2) 每行（P2）** [REPEAT-2]: `internal/server/dashboard_cron_transcript.go:625-679` 500 行 = 500 alloc。方案：caller-provided scratch slice。
+- [x] **R247-PERF-18 — flattenAssistantEvent make([]T,0,2) 每行（P2）** [REPEAT-2]: `internal/server/dashboard_cron_transcript.go:625-679` 500 行 = 500 alloc。方案：caller-provided scratch slice。 → 与 R247-PERF-2 同根因合并修复：精确 totalTurns 预算（toolUseCount + 1 if hasText），消除 `make([]T, 0, 2)` underallocate-then-grow 双 alloc，单点 make 收口。
 - [ ] **R247-PERF-19 — recentFromParsedIndex jsonlMtimes map 重建（P2）** [REFACTOR]: `internal/discovery/recent.go:329-356` 已 sorted slice 可二分。方案：sort.Search 替 map。
 - [~] **R247-PERF-20 — Tick highwater 全量拷贝（P2）** [REFACTOR]: `internal/sysession/auto_titler.go:181-194` 多数 key 当 tick 不访问。方案：atomic.Pointer[map] CoW。
 - [ ] **R247-PERF-21 — buildUserEntry 每图 spawn goroutine（P3）** [REFACTOR]: `internal/cli/process_send.go:51-76` cap 4 sem 但仍 8KB stack × N。方案：worker pool。
