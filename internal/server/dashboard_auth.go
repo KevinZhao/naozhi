@@ -173,7 +173,7 @@ func (a *AuthHandlers) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (a *AuthHandlers) serveLoginPage(w http.ResponseWriter) {
+func (a *AuthHandlers) serveLoginPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// CSP uses hash-based allowlist for the single inline <script>/<style>
 	// blocks baked into loginPageHTML. `unsafe-inline` would neutralise any
@@ -185,7 +185,13 @@ func (a *AuthHandlers) serveLoginPage(w http.ResponseWriter) {
 	// notices during manual review, rather than silently broadening the
 	// policy.
 	w.Header().Set("Content-Security-Policy", loginPageCSP)
-	w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+	// R241-SEC-1: only send HSTS on TLS connections. Sending it over plain
+	// HTTP (loopback or LAN deployments) pollutes the browser's HSTS cache
+	// for 31536000 s and breaks future HTTP access on the same origin.
+	// Mirrors the isSecure gate used by handleLogin's cookie Secure flag.
+	if a.isSecure(r) {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+	}
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")

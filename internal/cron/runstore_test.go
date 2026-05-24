@@ -187,7 +187,7 @@ func TestRunStore_OversizePayloadShrinksAndPersists(t *testing.T) {
 		}
 		t.Fatalf("prompt did not get truncated marker; len=%d suffix=%q", len(got.Prompt), got.Prompt[start:])
 	}
-	// truncateForRetry keeps the first 256 runes + sentinel; for ASCII
+	// truncateWithSuffix keeps the first 256 runes + sentinel; for ASCII
 	// input that's 256 bytes + sentinel byte length.
 	wantLen := 256 + len("…[truncated]")
 	if len([]byte(got.Prompt)) != wantLen {

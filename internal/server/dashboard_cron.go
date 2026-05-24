@@ -441,6 +441,11 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jobs := h.scheduler.ListAllJobsWithNextRun()
+	// R241-PERF-1: capture once outside the loop; each non-paused job called
+	// time.Now() and h.scheduler.StartedAt() (an atomic load) independently,
+	// yielding O(n) syscalls/atomics for an effectively-constant value.
+	now := time.Now()
+	startedAt := h.scheduler.StartedAt()
 	views := make([]cronJobView, 0, len(jobs))
 	for _, entry := range jobs {
 		j := entry.Job
@@ -478,7 +483,7 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		// 只对非 paused 的 job 判定——paused 的任务用户主动停了，错过
 		// 是预期行为不应告警。
 		if !j.Paused {
-			if missed, prevAt := cron.HasMissedSchedule(&j, time.Now(), h.scheduler.StartedAt()); missed {
+			if missed, prevAt := cron.HasMissedSchedule(&j, now, startedAt); missed {
 				v.Missed = true
 				v.MissedSince = prevAt.UnixMilli()
 			}

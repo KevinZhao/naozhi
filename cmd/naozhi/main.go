@@ -107,9 +107,11 @@ func readJSONWithRetry(ctx context.Context, path string, attempts int, sleep tim
 		}
 		lastParseErr = fmt.Errorf("invalid JSON (attempt %d/%d, %d bytes)", i+1, attempts, len(data))
 		if i < attempts-1 {
+			t := time.NewTimer(sleep)
 			select {
-			case <-time.After(sleep):
+			case <-t.C:
 			case <-ctx.Done():
+				t.Stop()
 				return nil, ctx.Err()
 			}
 		}
