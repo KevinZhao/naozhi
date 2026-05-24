@@ -981,6 +981,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
   .event.text+.event.user{margin-top:16px}
   /* Cron detail: reduce padding to match mobile layout */
   .cron-detail{padding:12px}
+  /* Mobile cron drawer: force single-column. ResizeObserver classifies
+     list-pane by width and may pick wide/medium/narrow when a drawer is
+     open, squeezing the drawer to <200px where labels render vertically.
+     On phone viewports we always want has-drawer = full-screen detail;
+     user closes it via the existing × to get back to the list. The
+     base rules at line ~1698 only set `flex` widths, so display:none
+     here wins regardless of [data-cron-layout] value. */
+  .cron-detail-body.has-drawer > .cron-list-pane{display:none}
+  .cron-detail-body .cron-detail-pane.is-open{flex:1 1 auto;border-left:none}
   /* History popover: constrain to viewport */
   .history-popover{min-width:0;max-width:calc(100vw - 32px);left:auto;right:0}
   .session-card[data-key]{touch-action:pan-y}
