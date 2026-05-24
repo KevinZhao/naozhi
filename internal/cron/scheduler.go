@@ -2001,7 +2001,7 @@ type preflightArgs struct {
 	// 「[Cron …] 工作目录不可达」中文提示的目标；其它失败分支不通知，
 	// 因为「shutdown / Reset 失败」对终端用户没有可操作信号。
 	notifyTo NotifyTarget
-	// runID 是 caller 已生成的 8-char hex 运行 ID。失败分支转给
+	// runID 是 caller 已生成的 16-char hex 运行 ID。失败分支转给
 	// finishRun，使 cron_run_ended 与 cron_run_started 配对（emitOverlapSkipped
 	// 同样模式）。
 	runID string
