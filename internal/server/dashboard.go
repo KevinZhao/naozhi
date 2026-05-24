@@ -461,7 +461,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
 			return
 		}
-		s.auth.serveLoginPage(w)
+		s.auth.serveLoginPage(w, r)
 		return
 	}
 	data, err := dashboardHTML.ReadFile("static/dashboard.html")
