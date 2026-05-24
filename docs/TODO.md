@@ -248,7 +248,7 @@
 - [~] **R240-CR-4 — `internal/server/wshub.go:622` per-client 订阅上限 50 magic number [REFACTOR]（P2）**：与 maxWSConns/maxSubscribersPerKey 同包但未命名。方案：抽 const maxSubscriptionsPerClient = 50。Breaking：否。
 - [~] **R240-CR-5 — `internal/dispatch/dispatch.go:742,869` ReplyWithRetry 重试次数 3 magic number [REFACTOR]（P2）**：两处独立修改易飘。方案：抽 const platformReplyMaxAttempts = 3。Breaking：否。
 - [~] **R240-CR-6 — `internal/server/wshub.go:1217` resubscribeEvents `for i := range 12` + 5s magic numbers [REFACTOR]（P2）**：60s 总窗口未注释。方案：抽 const resubscribeMaxAttempts/resubscribeInterval。Breaking：否。
-- [~] **R240-CR-7 — `internal/session/managed.go:538,545,553,1114` loadProcess/storeProcess/isAlive/HasProcess 缺 godoc [REFACTOR]（P2）**：HasProcess 是导出方法。方案：补 godoc 说明 atomic.Pointer[processBox] 双层包装契约。Breaking：否。
+- [x] **R240-CR-7 — `internal/session/managed.go:538,545,553,1114` loadProcess/storeProcess/isAlive/HasProcess 缺 godoc [REFACTOR]（P2）**：HasProcess 是导出方法。方案：补 godoc 说明 atomic.Pointer[processBox] 双层包装契约。Breaking：否。已修 2026-05-24（cron-fix-F4）：四方法均补完整 godoc，说明 processBox 包装动机、原子契约、与 sendMu 的协作约束、双 nil+Alive 检查必要性。
 - [ ] **R240-CR-8 — `internal/dispatch/dispatch.go:956,973,1164,1317` replyTracker 4 方法缺 godoc [REFACTOR]（P2）**：onEvent 是 IM 流式核心。方案：补 godoc 标注线程约束 + 超时契约。Breaking：否。
 - [ ] **R240-CR-9 — `internal/server/wshub.go:461,467,514,587,820,866,992,1031,1476,1821,1844,1861` 12 个 Hub 方法缺 godoc [REFACTOR]（P2）**：方案：至少补 handleAuth/handleSubscribe/doBroadcastSessionsUpdate/capHistoryBatch。Breaking：否。
 - [ ] **R240-CR-10 — `internal/config/config.go:477,551,584,1092` applyDefaults/parseDurations/validateConfig/containsEnvPlaceholder 缺 godoc [REFACTOR]（P2）**：方案：补流水线契约说明（first-error vs errors.Join）。Breaking：否。
@@ -287,7 +287,7 @@
 - [ ] **R240-ARCH-25 — `internal/server/server.go:76-88` handler 不可独立测试 [REFACTOR]（P3）**：构造方法私有且含跨 handler 依赖。方案：每 handler 公开 Deps struct。Breaking：否。
 - [ ] **R240-ARCH-26 — `internal/server/wshub.go:179` tailers + wshub_agent 子能力嵌在 god-object [REFACTOR]（P3）**：方案：抽 AgentBroadcaster 子组件。Breaking：否。
 - [ ] **R240-ARCH-27 — `internal/cron/scheduler.go:65-91` SessionRouter consumer 接口写在 scheduler.go 顶部不在 consumer.go [REFACTOR]（P3）**：与 dispatch/server/sysession/upstream 约定不一致。方案：移到 internal/cron/consumer.go。Breaking：否。
-- [ ] **R240-ARCH-28 — `internal/cli/wrapper.go:62` historyFactory 字段在构造时一次取值 [REFACTOR]（P3）**：register-after-NewWrapper 无效。方案：每次 NewHistorySource 查 registry 或显式参数。Breaking：否。
+- [~] **R240-ARCH-28 — `internal/cli/wrapper.go:62` historyFactory 字段在构造时一次取值 [REFACTOR]（P3）**：register-after-NewWrapper 无效。方案：每次 NewHistorySource 查 registry 或显式参数。Breaking：否。
 - [ ] **R240-ARCH-29 — `internal/server/dashboard.go:299,341` Server.Start 后置 wiring 两阶段构造 [REFACTOR]（P3）**：方案：把 callback wiring 全移进 NewWithOptions/buildServer。Breaking：否。
 - [ ] **R240-ARCH-30 — `internal/dispatch/dispatch.go:71` Dispatcher 持具体 *cron.Scheduler [REFACTOR]（P3）**：方案：抽 dispatch.CronOps consumer 接口。Breaking：否。
 

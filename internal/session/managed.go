@@ -535,6 +535,16 @@ func (s *ManagedSession) SnapshotPrevSessionOrigins() []string {
 	return out
 }
 
+// loadProcess returns the currently attached processIface, or nil when
+// the session is detached (paused, reclaimed, or never spawned).
+//
+// Implementation note: s.process is an atomic.Pointer[processBox] — we
+// wrap the iface in a one-field struct because Go's atomic.Pointer is
+// generic over a concrete type and requires non-nil iface assertions to
+// store directly. The "load box, dereference" indirection is the cost
+// of getting lock-free read/write semantics for an interface value.
+// Callers that only need liveness should prefer isAlive() over
+// loadProcess() != nil to also catch dead-but-attached processes.
 func (s *ManagedSession) loadProcess() processIface {
 	if box := s.process.Load(); box != nil {
 		return box.p
@@ -542,6 +552,12 @@ func (s *ManagedSession) loadProcess() processIface {
 	return nil
 }
 
+// storeProcess atomically replaces the attached process. Passing nil
+// detaches; passing a non-nil iface re-wraps in a fresh processBox so
+// concurrent loadProcess callers see a consistent (box, p) pair without
+// torn reads. Must be paired with sendMu / spawnMu by the caller — this
+// function only handles the atomic publication, not the lifecycle
+// invariant that only one process is attached at a time.
 func (s *ManagedSession) storeProcess(p processIface) {
 	if p == nil {
 		s.process.Store(nil)
@@ -550,6 +566,11 @@ func (s *ManagedSession) storeProcess(p processIface) {
 	}
 }
 
+// isAlive returns true only when a process is attached AND its Alive()
+// reports the underlying handle has not exited. Lock-free; uses
+// loadProcess() so it is safe to call from any goroutine. The dual
+// nil + Alive check is required because the readLoop transitions
+// process state to dead before storeProcess(nil) detaches.
 func (s *ManagedSession) isAlive() bool {
 	p := s.loadProcess()
 	return p != nil && p.Alive()
@@ -1111,6 +1132,12 @@ type SessionSnapshot struct {
 	MeteringUsage []cli.MeteringEntry `json:"metering_usage,omitempty"`
 }
 
+// HasProcess reports whether a process is currently attached to this
+// session, regardless of liveness. Returns true even for processes
+// that have exited but not yet been detached by the readLoop cleanup.
+// Callers needing liveness should use isAlive() (private) or check
+// State() == "ready"/"busy" via the Snapshot path. Lock-free read of
+// the atomic.Pointer[processBox] backing field.
 func (s *ManagedSession) HasProcess() bool {
 	return s.loadProcess() != nil
 }
