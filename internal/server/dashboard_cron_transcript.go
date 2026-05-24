@@ -373,7 +373,14 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	// buffer caps single-line bytes. Together they enforce the
 	// design's three-tier size budget without ever calling
 	// os.ReadFile on the underlying file.
-	lr := io.LimitReader(f, maxTranscriptBytes)
+	//
+	// io.LimitReader always returns *io.LimitedReader; we keep the
+	// concrete type so the post-scan check below can read N directly
+	// without type assertion. Using f.Seek to detect cap-hit would be
+	// wrong: bufio.Scanner pre-fills a 256 KB buffer, so the underlying
+	// file offset can advance well past the LimitReader's logical
+	// budget even when the scanner only consumed the first line.
+	lr := &io.LimitedReader{R: f, N: maxTranscriptBytes}
 	scanner := bufio.NewScanner(lr)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxTranscriptLineBytes)
 
@@ -427,11 +434,12 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	}
 
 	// LimitReader hit means we read maxTranscriptBytes worth without
-	// seeing EOF. Mark truncated too.
-	if pos, sErr := f.Seek(0, io.SeekCurrent); sErr != nil {
-		slog.Warn("cron transcript: seek failed; assuming truncated", "path", resolved, "err", sErr)
-		truncated = true
-	} else if pos >= maxTranscriptBytes {
+	// seeing EOF. Mark truncated too. Read lr.N directly: bufio's
+	// 256 KB read-ahead can advance the underlying *os.File offset
+	// past maxTranscriptBytes even on a small file, so f.Seek would
+	// false-positive truncation. lr.N tracks the *logical* remaining
+	// budget the LimitedReader will hand out.
+	if lr.N <= 0 {
 		truncated = true
 	}
 
@@ -598,12 +606,19 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 			Subtype string `json:"subtype"`
 			Message string `json:"message"`
 		}
-		if err := json.Unmarshal(ev.Message, &sys); err != nil {
-			// Don't change downgrade behavior — sys stays zero-valued
-			// so the error-turn branch below is skipped naturally. Just
-			// surface the parse failure for ops visibility.
-			slog.Debug("cron transcript: system event unmarshal failed; skipping",
-				"err", err)
+		// Many system events ship without a "message" field (init,
+		// queue-op, etc.); json.Unmarshal(nil, &sys) would always fail
+		// with "unexpected end of JSON input" and flood Debug logs.
+		// Skip the unmarshal entirely when there is nothing to parse —
+		// sys stays zero-valued so the error-turn branch is naturally
+		// skipped, matching the existing downgrade behavior.
+		if len(ev.Message) > 0 {
+			if err := json.Unmarshal(ev.Message, &sys); err != nil {
+				// Surface real parse failures (malformed JSON in
+				// "message") for ops visibility.
+				slog.Debug("cron transcript: system event unmarshal failed; skipping",
+					"err", err)
+			}
 		}
 		if sys.Subtype == "error" && sys.Message != "" {
 			out = append(out, transcriptTurn{
@@ -674,16 +689,17 @@ func summariseToolInput(name string, input json.RawMessage) string {
 // parseISO8601MS converts an RFC 3339 / ISO 8601 timestamp into unix ms.
 // Returns 0 when the input is empty or unparseable so callers can use
 // it as a fall-through "skip filter" sentinel.
+//
+// time.RFC3339Nano is a strict superset of time.RFC3339 — any timestamp
+// the latter accepts is also accepted by the former — so the previous
+// RFC3339 fallback was dead code and is now removed (R243-CR-P3-6).
 func parseISO8601MS(s string) int64 {
 	if s == "" {
 		return 0
 	}
 	t, err := time.Parse(time.RFC3339Nano, s)
 	if err != nil {
-		t, err = time.Parse(time.RFC3339, s)
-		if err != nil {
-			return 0
-		}
+		return 0
 	}
 	return t.UnixMilli()
 }
