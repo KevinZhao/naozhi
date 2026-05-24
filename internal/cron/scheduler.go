@@ -1638,7 +1638,7 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 		if waspaused && !j.Paused {
 			if rbErr := s.pauseJobLocked(j); rbErr != nil && !errors.Is(rbErr, ErrJobAlreadyPaused) {
 				slog.Warn("cron rollback after persist failure also failed",
-					"job_id", j.ID, "rollback_err", rbErr, "orig_err", perr)
+					"job_id", j.ID, "rollback_err", rbErr, "persist_err", perr)
 			}
 		}
 		s.mu.Unlock()

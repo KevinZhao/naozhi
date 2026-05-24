@@ -107,6 +107,66 @@
 - [~] **R30-DES1 — 需架构决策（2026-04-29 Round 112 评估降级）**：本轮尝试在 `execute()` 入口加 `stopCtx.Err()` 守卫覆盖 fresh + persistent 两种模式，但这与 Round 95 的设计意图冲突（Round 95 明确将 persistent 模式的 ctx 取消委托给 Router.Shutdown，`TestCRON3_PersistentModeUnaffectedByGuard` 把此行为作为测试护栏）。fresh 分支的 stopCtx.Err() 守卫（`scheduler.go:1260`）已覆盖最危险的"fresh → Reset → 孤立 CLI"路径。persistent 模式的真正修复需要架构级协调：要么把 Router.Shutdown 和 Scheduler.Stop 串联锁定（需 S11 级决策），要么在 GetOrCreate 路径里加 shutdown-awareness（改动面大）。当前降级，等 S11 整体方案落地后重开。
 - [ ] **R29-DES1 — `drainStaleEvents` push-back + goto drain 可吞 interrupted result 事件**: 本轮新发现的 invariant 冲突。在 interrupted/interruptedRun 分支的 for 循环中，若事件顺序为 `[old_nonresult, new_event, old_result]`，读到 `new_event` 后 push-back + `goto drain`，接着 drain 到 `old_result` 时因 `recvAt < cutoff` 被丢弃。interrupted 语义要求 settle 窗口必须拿到 old_result，否则下一 turn 迟到的 result 会污染结果。
 
+## Round 244 — 5-agent 并行 code review 第 54 轮（2026-05-24，紧随 Round 243）NEEDS-DESIGN
+
+> 紧随 Round 243 的第 54 轮 5-reviewer 并行扫描（Go / 安全 / 性能 / 代码质量 / 架构）；in-flight PR=0；REPEAT 提示 ARCH-3 REPEAT-24 / ARCH-2 REPEAT-21 / ARCH-1 REPEAT-19 / ARCH-4 REPEAT-16 / ARCH-10~25 REPEAT-4~9 已避开。
+>
+> 本轮直接修 3 项落地（PERF：osutil SanitizeForLog 截断 O(n²)→O(1) 改用 utf8.RuneStart [R244-GO-P3] / CR：cron rollback warn 字段 orig_err→persist_err [R244-CR-P3] / TEST：osutil loginject_test 边界断言加 content equality [R244-CR-P2]）。
+>
+> grep-verify 命中**多处 false positive**当场归档不进 fix queue：dashboard.go 已有 X-Frame-Options/Referrer-Policy/Permissions-Policy（SEC P1 误报）/ NotifyChatID 已有 maxNotifyChatIDLen=256 + validateStringField 验证（SEC P3 误报）/ SanitizeForLog 已 rune-aware 字节截断后回退到 valid UTF-8（SEC P3 误报）/ anonCookie 已 HttpOnly+SameSite=Strict（SEC P3 误报）/ workDirUnderRoot 已在 executeOpt 二次校验防 symlink TOCTOU（scheduler.go:2380，SEC P1 误报）/ scheduler.go storeDirOnce MkdirAll 0700 + WriteFileAtomic 0600 已收紧权限（SEC P3 误报）。
+
+### Security（剩余 — 非误报）
+
+- [ ] **R244-SEC-P1-1 — dashboard CSP `script-src 'unsafe-inline'` 中和 XSS 防御 [BREAKING-LOCAL]**: `internal/server/dashboard.go:488` 主 dashboard CSP 含 `'unsafe-inline'`（login page 已无），任何到达 innerHTML sink 的 stored XSS 都不被 CSP 阻断。方案：login page 同款 per-script SHA-256 hash 注入或 nonce-based CSP；需逐个内联脚本 hash 化。Breaking：是（≤2 包：dashboard.go + dashboard.html 内联脚本规整）。
+- [ ] **R244-SEC-P1-2 — dashboard.js 多个 innerHTML sink 数据来自 server 字段 esc() 应用不一致 [REPEAT-3]**: `internal/server/static/dashboard.js:566/1024/2178/3591/3638/5073/5532/6833/9469` 渲染 sc-prompt/title/label 等字段。validateSessionKey 仅拒 C0/C1/bidi，不拒 `<>"` 等 HTML 元字符。方案：审计每个 innerHTML 模板字符串内插字段，强制 esc() 包装；引入 lint 规则。
+- [ ] **R244-SEC-P1-3 — feishu verification_token-only 模式无 HMAC 防 replay [BREAKING-LOCAL]**: `internal/platform/feishu/feishu.go:483` 当 encrypt_key 未配置时仅校验静态 token，无内容签名；攻击者获取 token 即可重放任意 payload。方案：startup doctor 在 production 强制要求 encrypt_key；或文档化威胁模型并显式 fail-fast。Breaking：是（影响只配 token 的现有部署）。
+- [ ] **R244-SEC-P1-4 — slack webhook signing secret 验证路径需审计 [BREAKING-LOCAL]**: `internal/platform/slack/slack.go` 需验证 `signingSecret == ""` 路径是否硬拒；若沿用 feishu fallback 模式则同样 replay。方案：grep + 加单元测试 pin 空 secret = reject。Breaking：是（与现有部署兼容性）。
+- [ ] **R244-SEC-P1-5 — serveRender CSP `unsafe-inline` + `unsafe-eval` 双开 [BREAKING-LOCAL]**: `internal/server/project_files.go:823` serveRender 路由 CSP 含 `unsafe-eval`；当前依赖 attachment Content-Disposition + opaque blob origin 隔离。`unsafe-eval` 可去除（无需 eval/Function）。方案：移除 `unsafe-eval`；保留 `unsafe-inline`（已有威胁模型 doc）；加 iframe sandbox 回归测试。Breaking：低风险局部。
+- [ ] **R244-SEC-P2-1 — upload_store 文件 MIME 验证依赖客户端 Content-Type [BREAKING-LOCAL]**: 上传文件 MIME 校验需为 byte-sniff（http.DetectContentType）覆盖客户端声明。方案：上传后立即 sniff；MIME 不在 allowlist（png/jpeg/gif/webp/pdf）则 reject。Breaking：是。
+- [ ] **R244-SEC-P2-2 — project_files.previewableByExt 含 `.html`/`.htm` [BREAKING-LOCAL]**: `internal/server/project_files.go:114-115` 含 .html → text/html。servePreview 已挡，但未来回归易回归。方案：从 previewableByExt 移除 html/htm；让其走 byte-sniff。Breaking：低。
+- [ ] **R244-SEC-P2-3 — wsclient sendLimiter per-conn 不是 per-user [BREAKING-LOCAL]**: send rate 5/burst 1/s 应用于每连接；同一 user 开 N 连接 burst capacity 倍增。方案：按 uploadOwner 聚合 limiter。Breaking：是。
+- [ ] **R244-SEC-P2-4 — cdn.jsdelivr.net 资源无 SRI 整合度校验 [REPEAT-3]**: KaTeX/Mermaid 动态 script 注入未带 integrity。方案：自托管或动态注入时附 sha256 integrity。
+- [ ] **R244-SEC-P2-5 — Scheduler.SetJobPrompt 不限 prompt 字节上限 [BREAKING-LOCAL]**: dashboard 用户可写多 MB prompt 落盘。方案：加 `len(prompt)>maxCronPromptBytes` guard。Breaking：是。
+- [ ] **R244-SEC-P3-1 — pprof/expvar 端点对认证用户暴露 goroutine 栈包含路径 [REPEAT-3]**: 方案：`debug_mode` flag 控制注册。
+- [ ] **R244-SEC-P3-2 — `__public_tmp__` pseudo-project 默认 enabled 暴露全 /tmp [BREAKING-LOCAL]**: 方案：operator opt-in flag。Breaking：是。
+- [ ] **R244-SEC-P3-3 — ip_limiter unknownIPKey 共享一桶导致 trustedProxy 配错时全用户共桶 [REPEAT-3]**: 方案：trustedProxy=true 且 X-Forwarded-For 缺失时 400。
+- [ ] **R244-SEC-P3-4 — git remote URL 显示 / openExternal 缺 scheme allowlist [REPEAT-3]**: 方案：window.open 前显式 startsWith 校验。
+- [ ] **R244-SEC-P3-5 — weixin SHA1 token 验证无 HMAC 同 feishu replay 风险 [REPEAT-3]**: 方案：文档化 production 威胁模型。
+- [ ] **R244-SEC-P3-6 — esc() 用共享 `_escEl` DOM 元素并发不安全 [BREAKING-LOCAL]**: 方案：纯字符串 replace 链替代。Breaking：低。
+
+### Go（剩余 — 非误报）
+
+- [ ] **R244-GO-P1-1 — dashboard_cron_transcript LimitedReader.N 截断检测注释精度问题**: `internal/server/dashboard_cron_transcript.go:442` 注释说 lr.N 跟踪 logical remaining，实际跟踪 reader-level read。方案：注释明确"lr.N≤0 表示 LimitedReader 已无字节供 scanner.Read"。
+- [ ] **R244-GO-P2-1 — SetJobPrompt 5 处手动 Unlock 散点不与项目其余 mutator 对齐 [BREAKING-LOCAL]**: `internal/cron/scheduler.go:1607` 不同于 UpdateJob/DeleteJobByID 用 IIFE+defer 解锁。方案：IIFE 闭包统一 defer Unlock 模式。Breaking：低。
+- [ ] **R244-GO-P2-2 — dashboard_cron_transcript.summariseToolInput fallback 重 marshal 浪费 alloc**: line 669 unmarshal 后仅做 key 探测；fallback 分支 line 683 `json.Marshal(obj)` 可直接 `string(input)` 给 SanitizeForLog。方案：fallback 直传 `string(input)`。
+- [ ] **R244-GO-P2-3 — io.LimitedReader 直接构造 bypass io.LimitReader 类型契约**: dashboard_cron_transcript.go:383 直接 &io.LimitedReader{N: maxTranscriptBytes} 类型必须保证 int64 安全。方案：显式 int64 cast。
+- [ ] **R244-GO-P2-4 — TestSanitizeForLog_EnforcesMaxLen 顶部 flat 断言 vs 子测试 t.Run 风格混用**: 方案：全部改 t.Run 统一 table-driven。
+- [ ] **R244-GO-P3-1 — `fmt.Errorf("%w: %w", ...)` 多 wrap 模式 godoc 缺说明**: `internal/cron/scheduler.go:3200`。方案：godoc 注一行说明 errors.Is 与 As 路径。
+- [ ] **R244-GO-P3-2 — parseISO8601MS godoc 关于 RFC3339Nano 与 RFC3339 关系需引用**: dashboard_cron_transcript.go:696。方案：补 `// (Go time.Parse treats .999... fragment as optional)`。
+- [ ] **R244-CR-P3-1 — static_cron_history_redesign_test magic constant 4000/2500 字节窗口**: 函数超出窗口时 silent 跳过 assertion。方案：用 strings.Index 定位 `}\n` 函数末尾代替固定窗口。
+
+### Architecture（剩余）
+
+- [ ] **R244-ARCH-1 — 缺统一 LifecycleManager 抽象 [REFACTOR]**: cron + sysession + 未来 cron-skill-binding/planner-auto-start/system-session 各 stopCtx + budget + leak 策略。当前 shutdown ordering 仅在 main.go 隐式编码。方案：抽 `internal/lifecycle.Component { Start; Stop; Drain }` + 显式依赖图。
+- [ ] **R244-ARCH-2 — eventlog PersistSink 闭包绕过 metrics/tracing；caller 不知背压状况 [REFACTOR]**: persister.go:243-274 OnDrop fire-and-forget。方案：升 PersistSink 为 interface 暴露 Pressure() float64 / accept bool。
+- [ ] **R244-ARCH-3 — 配置验证双源不一致 + 无 startup fail-fast hook [REFACTOR]**: cron applyDefaults vs sysession inline if。方案：`internal/config/validator.Validate(cfg) []ValidationIssue` 单一入口。
+- [ ] **R244-ARCH-4 — wireup history-only blank import 不覆盖 cron daemons / platforms / backends 的 plug-in 注册 [REFACTOR]**: 方案：统一 `Registry[T]` 模式。
+- [ ] **R244-ARCH-5 — 三套独立 keyed persistence 抽象（runs/events/jsonl/attachments）反复 reinvent atomic write/trim/cache [REFACTOR]**: 方案：抽 `internal/persistence.KeyedStore[K,V]` 模板。
+- [ ] **R244-ARCH-6 — SessionRouter interface 缺 stub-removed 反向通知导致字符串 prefix coupling [BREAKING-LOCAL]**: scheduler.go:72-90 cron→session 通过 `cron:` 字符串 prefix 隐式约定。方案：CronKey/IsCronKey 移到 cron 包导出 + KeyKind enum。Breaking：是。
+- [ ] **R244-ARCH-7 — sysession Stop osExit(2) vs cron budget+leak policy divergence 缺架构决策机制 [REFACTOR]**: 方案：lifecycle.LeakPolicy enum {ForceExit, BudgetThenLeak, BlockForever}。
+- [ ] **R244-ARCH-8 — 三种 callback 注册风格 + cron godoc startup-only 无强制 [REFACTOR]**: 方案：抽 `internal/eventbus.Subscribe[E](handler) Unsubscribe`。
+- [ ] **R244-ARCH-9 — 三套独立持久化 Run record schema 无 SchemaVersion + 无 migration 钩子 [REFACTOR]**: 方案：所有 persisted struct 加 SchemaVersion uint16 + migrate(v, raw) 钩子。
+- [ ] **R244-ARCH-10 — cron 排除逻辑（KnownSessionIDs IsExcluded）未抽象到通用 sessionfilter [REFACTOR]**: 方案：`ExcluderRegistry { Register(name, fn); Lookup(sessionID) []ExcludeReason }`。
+- [ ] **R244-ARCH-11 — cron SetOnExecute/RunStarted/RunEnded single-channel callback 反模式 [REFACTOR]**: 方案：`chan Event` + 多订阅者 fanout / OpenTelemetry Event。
+- [ ] **R244-ARCH-12 — eventlog WriterAlive 健康协议 ad-hoc 各组件自定义 [REFACTOR]**: 方案：`internal/health.Probe` 各子系统注册 + /health 端点 fanout。
+- [ ] **R244-ARCH-13 — cron 同时存在 ID-based / plat+chat-based 双套 mutator API 重复 5 阶段 [REFACTOR]**: 方案：`JobMutator interface { Apply(j *Job) error }` 单 runMutation 封装。
+- [ ] **R244-ARCH-14 — executeOpt 单函数 344 行同时承担 8 个职责 [REFACTOR]**: 方案：`type runStep func(*runCtx) error` + pipeline 切分 ≤30 行/步。
+- [ ] **R244-ARCH-15 — 锁层级仅 godoc 描述无运行时检测 [REFACTOR]**: 方案：`internal/lockorder.Acquire(name)` goroutine-local stack。
+- [ ] **R244-ARCH-16 — 超时常量散落 var 顶部不可统一调优/查阅 [REFACTOR]**: 方案：`internal/timeouts` 统一注册表 + startup 打印 + dashboard 显示。
+- [ ] **R244-ARCH-17 — Scheduler struct 32 字段 god-object 趋势 [REFACTOR]**: 方案：拆 Scheduler{registry, persister, history, notifier, lifecycle}。
+- [ ] **R244-ARCH-18 — sysession registry slice 字面量与 history blank import 风格不统一 [REFACTOR]**: 方案：第二个 daemon 落地前先统一 Registry pattern。
+- [ ] **R244-ARCH-19 — addJobAcquiringLock → registerStubFromJob 锁外副作用模式无 helper 强制 [REFACTOR]**: 方案：`withRouterCallback(mutate, postUnlock)` 模板 + lint 阻断违反。
+
 ## Round 243 — 5-agent 并行 code review 第 53 轮（2026-05-24，紧随 Round 242）NEEDS-DESIGN
 
 > 紧随 Round 242 的第 53 轮 5-reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描；in-flight PR=0；REPEAT 提示 ARCH-3 已 23 次 / ARCH-2 20 次 / PERF-1 25 次 / GO-1 19 次 / SEC-1 18 次，本批避开。
