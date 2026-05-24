@@ -287,8 +287,22 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	allowedRoot := filepath.Join(h.claudeDir, "projects")
 	resolvedRoot, rrErr := filepath.EvalSymlinks(allowedRoot)
 	if rrErr != nil {
-		// Fall back to the raw root if EvalSymlinks fails (root may not
-		// exist yet on a fresh setup); the strict check still applies.
+		// R240-SEC-3: only fall back on the "fresh install / dir not yet
+		// materialised" case. Any *other* EvalSymlinks failure (permission
+		// denied, broken symlink chain, IO error) means we cannot trust the
+		// raw root for the prefix comparison below — if allowedRoot is itself
+		// a symlink we don't know where it points, so an attacker-controlled
+		// symlink target could pass the lexical HasPrefix check against the
+		// raw path. Return the same "missing" downgrade the dashboard already
+		// renders for absent transcripts; the operator-visible signal is the
+		// slog.Warn line below.
+		if !errors.Is(rrErr, fs.ErrNotExist) {
+			slog.Warn("cron transcript: allowedRoot evalsymlinks failed",
+				"root", allowedRoot, "err", rrErr)
+			resp.Fallback = "missing"
+			writeJSON(w, resp)
+			return
+		}
 		resolvedRoot = allowedRoot
 	}
 	// R236-SEC-05: align with the validateWorkspace / workDirUnderRoot

@@ -190,6 +190,106 @@
 - 无新增独立 anchor。所有 CR/ARCH 项均落在历史 ARCH-1~ARCH-19 / R235-R238 / Round 239 同根因簇，本批按 v4 规则不重复登记新 ID，[REPEAT-N] 计数将在下轮统计中递增。
 
 ---
+## Round 240 — 5-agent 并行 code review 第 50 轮（2026-05-24）NEEDS-DESIGN
+
+> 5-reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描。本批直接修 6 处见上方 commits（cmd godoc 错位 [R240-CR-2] / dashboard_memory 加 EvalSymlinks 抗 symlink 穿越 [R240-SEC-1+2] / cron transcript resolvedRoot 仅 not-exist 时 fallback [R240-SEC-3] / scheduler slog 标签统一 job_id [R240-CR-1] / preflightArgs.runID 注释 8→16-char [R240-CR-3] / serveLoginPage HSTS 仅 TLS 设置 [R240-SEC-14]）。selfupdate fetchFile 强制 https 入口校验 [R240-SEC-4] 因现存 httptest 用 http:// 失败 abort，登记 NEEDS-DESIGN（需先迁 httptest 至 TLS）。下方为本轮新发现且不适合直接修的 NEEDS-DESIGN 条目（保留 v4 二级分类标签）。
+>
+> P1-SEC ×3（CSP / CSRF / nz_anon HMAC）本轮再次确认未修复，同 R236-SEC-02/03/06 主条目，标 [REPEAT-N] 不重复登记主条目。
+
+### 安全（NEEDS-DESIGN）
+
+- [ ] **R240-SEC-4 — `internal/selfupdate/selfupdate.go:313` fetchFile 入口未强制 https [REFACTOR]（P2）**：CheckRedirect 已校验后续 hop，但首次请求 URL 未校验。当前调用方均 hardcode https，但未来路径若传 http:// 则首段不受保护。本轮尝试加 `strings.HasPrefix(... "https://")` guard，但现存 selfupdate_test 用 httptest.NewServer (http://127.0.0.1) 失败。方向：先改 test 用 NewTLSServer + InsecureSkipVerify，再加入口 guard。Breaking：否（生产代码无变化，仅 test）。
+- [ ] **R240-SEC-5 — `internal/server/dashboard_cron.go:247-249` cronJobView 在 GET /api/cron 列表全量返回 NotifyChatID / NotifyPlatform [REFACTOR]（P2）**：单 operator 假设下可接受，未来 multi-tenant 即 IM chat ID 泄漏到所有已认证 token。方案：明确文档化 single-operator 假设或在 multi-user 配置下 redact。Breaking：否。
+- [ ] **R240-SEC-6 — `internal/server/dashboard_cron.go:448` GET /api/cron 1Hz 返回完整 prompt [REPEAT-N]**：同 R236-SEC-08 / R239-SEC-6 主条目（dashboard.js 客户端 fuzzy-search 依赖完整 prompt）。
+- [ ] **R240-SEC-7 — `internal/server/dashboard_auth.go:338` naozhi_auth cookie 缺 Partitioned 属性 + 默认 Domain [REFACTOR]（P2）**：CHIPS 兼容前瞻；当前未设 Domain 假设 naozhi 独占 origin。方案：文档化此假设，必要时显式 `Path: "/"` 与 `Partitioned`。Breaking：否。
+- [ ] **R240-SEC-8 — `internal/server/dashboard_cron_transcript.go:410` Scanner.Err 后 ErrTooLong vs IO 错误均坍塌为 truncated=true [REFACTOR]（P2）**：取证侧无法区分长行 vs 磁盘错误。方案：errors.Is(err, bufio.ErrTooLong) 分支改为 fallback="line_too_long"。Breaking：否。
+- [ ] **R240-SEC-9 — `internal/transcribe/convert.go:26` lookupFFmpeg 在 sync.Once 缓存进程级 [REFACTOR]（P2）**：首次 PATH 注入即固化。方案：从 config 接 ffmpeg 绝对路径不依赖 PATH。Breaking：否（config 字段新增）。
+- [ ] **R240-SEC-10 — `internal/server/dashboard.go:488` CSP unsafe-inline [REPEAT-N]**：同 R236-SEC-02 / R239-SEC-CSP 主条目。
+- [ ] **R240-SEC-11 — `internal/server/dashboard_memory.go:160-187` tryRead 无尺寸上限 [REFACTOR]（P2）**：os.ReadFile 无 cap；超大 .md 重复 hover 触发 read+JSON serialize。方案：`maxMemoryFileBytes=256KB`，超出 truncated=true。Breaking：否。
+- [ ] **R240-SEC-12 — `internal/server/dashboard_cron_transcript.go:83` ANSI 0x1b 检测依赖 json.Unmarshal 解码  隐式行为 [REFACTOR]（P3）**：方案：注释明确依赖。Breaking：否。
+- [ ] **R240-SEC-13 — `internal/server/dashboard_cron.go:436-437` GET /api/cron 无 per-IP rate limit [REFACTOR]（P3）**：dashboard 1Hz polling，token 泄漏可枚举全量配置。方案：加 ipLimiter 与 runsLimiter 一致。Breaking：否。
+- [ ] **R240-SEC-15 — `internal/server/dashboard_cron_transcript.go:397-409` 无 timestamp 事件 fresh=false 模式跨 run 泄漏 [REFACTOR]（P3）**：方案：drop 或按位置归属。Breaking：否。
+- [ ] **R240-SEC-16 — `internal/config/config.go:1079-1090` expandEnvVars 无 env name 白名单 [REFACTOR]（P3）**：误填 ${ANTHROPIC_API_KEY} 等可能展开后被日志/API 反射。方案：限制 NAOZHI_ 前缀或对所有 string 字段加 containsEnvPlaceholder 检查。Breaking：否。
+
+### Go 正确性（NEEDS-DESIGN）
+
+- [ ] **R240-GO-1 — `internal/cron/scheduler.go:1233-1241` deleteJobLocked 持 s.mu 期间调 router.Reset 锁序倒置风险 [BREAKING-LOCAL]（P1）**：router.Reset 内回调可能尝试 s.mu 写锁递归即死锁；EnsureStub godoc 已明确 must-not-hold-s.mu 与本函数自相矛盾。方案：deleteJobLocked 只做内存清理，router.Reset 移到调用方释放 s.mu 后调用。Breaking：本地（deleteJobLocked + 两 caller）。
+- [ ] **R240-GO-2 — `internal/cron/scheduler.go:2069-2071` deadlineInterrupter.InterruptViaControl 返回 InterruptOutcome 与 processIface 同名方法返回 error 不一致 [REPEAT-N，与 R239-GO-2 同根因]**：跨 cli/session/cron 三包签名分裂；测试 stub 须各维护一套。方案：统一签名。Breaking：跨三包。
+- [ ] **R240-GO-3 — `internal/cron/scheduler.go:1413-1494` UpdateJob 多 return 路径显式 Unlock 无 defer [REPEAT-N，与 R239-GO-4 同根因]**：当前 4 处 Unlock 正确，未来加 early-return 易遗漏。方案：defer s.mu.Unlock() + persistJobsLocked 移 lock-外。Breaking：否。
+- [ ] **R240-GO-4 — `internal/cron/runstore.go:268-309` skipAppendTrim appendsSinceTrim 增量在条件检查之前 [REFACTOR]（P2）**：batch counter 与 count-cap/window-cutoff 分支顺序混乱时计数失真。方案：++ 移到所有短路 return 之后；reset 统一在末尾。Breaking：否。
+- [ ] **R240-GO-5 — `internal/cron/scheduler.go:952-963` Stop gcWG wrapper 与 triggerWG wrapper 同等泄漏注释缺失（P2）**：Stop 契约注释只覆盖 triggerWG。方案：gcWG wrapper 处补 "intentional orphan on timeout, same rationale as triggerWG"。Breaking：否（仅注释）。
+- [ ] **R240-GO-6 — `internal/cron/runstore.go:395-410` warmCache + cacheGet 双锁路径在空目录下 warm=true && len(runs)==0 与 cache miss 不可区分（P2）**：caller 看到空 slice 而非 false，跳过 disk fallback。方案：cacheGet 在 warm && empty 时仍尝试 disk 或文档化"空 warm 是已知行为"。Breaking：否。
+
+### 性能（NEEDS-DESIGN）
+
+- [ ] **R240-PERF-1 — `internal/cron/runinflight.go:85-91` runInflight.reset 触发 6 次 atomic.Pointer.Store 堆分配 [REFACTOR]（P1）**：1Hz × N jobs 每次 run 终态 5 个 strHeap("")/timeHeap(zero) 分配纯噪声。方案：reset 改 Store(nil) + snapshot 把 nil 解读为零值；或省略部分字段清零（running=false 已阻 snapshot）。Breaking：否。
+- [ ] **R240-PERF-2 — `internal/cron/scheduler.go:2225` slog.With(...) 每 executeOpt 入口 alloc 新 *slog.Logger [REPEAT-N，与 R238-PERF-2 同根因]**：1Hz × 50 jobs = 50/s logger alloc。方案：先判 effective level 或改 slog.Info 展平调用。Breaking：否。
+- [ ] **R240-PERF-3 — `internal/cron/runstore.go:321-344` cacheHeadPush O(N) shift [REPEAT-N，与 R233-PERF-2 / R239-PERF-3 同根因]**：keepCount=200 ring buffer 方向已多轮登记。
+- [ ] **R240-PERF-4 — `internal/cron/scheduler.go:508-515` KnownSessionIDs 每 job O(200) cache 拷贝 [REPEAT-N，与 R233-PERF-3 / R239-PERF-4 同根因]**：方案：runStore 暴露 AllKnownSessionIDs 聚合接口或维护 sessionIDSet 无拷贝 lookup。Breaking：否。
+- [ ] **R240-PERF-5 — `internal/cron/runstore.go:662-706` trimJobLocked 每次 Append 接 ReadDir [REFACTOR]（P1）**：appendTrimBatch=10 阈值低；FUSE/NFS 下成本不可预测。方案：提高阈值或 trim 移后台 ticker。Breaking：否。
+- [ ] **R240-PERF-6 — `internal/cron/runstore.go:221,235` json.Marshal 无 buffer pool [REFACTOR]（P2）**：每次 Append 分配 encodeState ~2KB。方案：sync.Pool + bytes.Buffer + json.NewEncoder（dashboard.go 已有此模式）。Breaking：否。
+- [ ] **R240-PERF-7 — `internal/cli/eventlog.go:884` []EventEntry{e} 字面量逃逸 [REPEAT-N，与 R230C-PERF/R236-PERF-04/R239-PERF-14 同根因]**：方案需放宽 PersistSink 合同（不可 retain），改栈数组。Breaking：sink 合约（[BREAKING-LOCAL]）。
+- [ ] **R240-PERF-8 — `internal/server/wshub.go:640-656` handleSubscribe O(N clients) 扫描 [REPEAT-N，与 R236-PERF-06/R239-PERF-16 同根因]**：方案：subscriberCounts +1/-1。Breaking：否。
+- [ ] **R240-PERF-9 — `internal/cron/scheduler.go:1085-1095` addJobAcquiringLock per-chat O(jobs) 扫描 [REFACTOR]（P2）**：方案：jobsByChat 索引镜像 sessionsByChat 模式。Breaking：否。
+- [ ] **R240-PERF-10 — `internal/cron/runstore.go:487-563` diskListNewestFirst 每 .json 调 e.Info() Stat [REFACTOR]（P2）**：FUSE/NFS 下额外 syscall。方案：改 runID lex 排序消除 Info()。Breaking：否（sort 顺序变化）。
+- [ ] **R240-PERF-11 — `internal/cron/scheduler.go:2153,2673` generateRunID crypto/rand.Read syscall [REFACTOR]（P2）**：1Hz × N jobs 热路径每 run ~200ns syscall。方案：math/rand/v2 + 时间戳混合，runID 非 crypto 凭证。Breaking：否。
+- [ ] **R240-PERF-12 — `internal/session/managed.go:1151-1275` Snapshot SetModel 每 1Hz tab × 50 sessions [REPEAT-N，与 R236-PERF-13/R239-PERF-7 同根因]**：方案：model 同步移 readLoop。Breaking：否。
+- [ ] **R240-PERF-13 — `internal/session/managed.go:1418-1426` EventEntriesSince dead-session 路径每次 sortEntriesByTimeStable [REFACTOR]（P2）**：1Hz push 调用。方案：InjectHistory 保证有序或 backward binary search。Breaking：否。
+- [ ] **R240-PERF-14 — `internal/cron/scheduler.go:2802-2810` recordResultP0WithSanitised inline anonymous struct snapshot [REFACTOR]（P3）**：方案：jSnapshot := *j 一次 value copy。Breaking：否。
+- [ ] **R240-PERF-15 — `internal/server/wshub.go:1363-1398` broadcastToAuthenticated dashToken=="" 时 atomic Load 全 true 浪费 [REFACTOR]（P3）**：方案：no-token 模式 fast path 跳过 Load。Breaking：否。
+- [ ] **R240-PERF-16 — `internal/cron/scheduler.go:1196-1218` ListAllJobsWithNextRun 三次 alloc [REFACTOR]（P3）**：方案：sync.Pool 复用 nextByID map（Go 1.21 maps.Clear）。Breaking：否。
+- [ ] **R240-PERF-17 — `internal/cron/runstore.go:268-308` skipAppendTrim 每 Append entry.mu Lock 即使条件不满足 [REFACTOR]（P3）**：方案：appendsSinceTrim 改 atomic.Int32 减少锁频。Breaking：否。
+- [ ] **R240-PERF-18 — `internal/cron/scheduler.go:478-518` KnownSessionIDs 返回 map[string]bool 浪费 8B/entry [BREAKING-LOCAL]（P3）**：10 万 entry × 8B 显著 GC scan 代价。方案：map[string]struct{}。Breaking：本地（KnownSessionIDs 签名 + IsExcluded caller）。
+- [ ] **R240-PERF-19 — `internal/server/wshub.go:638-656` handleSubscribe Lock 而非 RLock 扫描 [REPEAT-N]**：与 R240-PERF-8/R236-PERF-06 同主条目；额外指出"Lock vs RLock"角度。方案：RLock 扫描 + Lock 写。Breaking：否。
+- [ ] **R240-PERF-20 — `internal/cron/runstore.go:395-411` warmCache 持 jobLock 同步读 N 文件 [REFACTOR]（P3）**：cold start 200 jobs × 200 文件串行；用户首次 List 阻塞。方案：Start 时后台并发 warm。Breaking：否。
+
+### 代码质量（NEEDS-DESIGN）
+
+- [ ] **R240-CR-4 — `internal/server/wshub.go:622` per-client 订阅上限 50 magic number [REFACTOR]（P2）**：与 maxWSConns/maxSubscribersPerKey 同包但未命名。方案：抽 const maxSubscriptionsPerClient = 50。Breaking：否。
+- [ ] **R240-CR-5 — `internal/dispatch/dispatch.go:742,869` ReplyWithRetry 重试次数 3 magic number [REFACTOR]（P2）**：两处独立修改易飘。方案：抽 const platformReplyMaxAttempts = 3。Breaking：否。
+- [ ] **R240-CR-6 — `internal/server/wshub.go:1217` resubscribeEvents `for i := range 12` + 5s magic numbers [REFACTOR]（P2）**：60s 总窗口未注释。方案：抽 const resubscribeMaxAttempts/resubscribeInterval。Breaking：否。
+- [ ] **R240-CR-7 — `internal/session/managed.go:538,545,553,1114` loadProcess/storeProcess/isAlive/HasProcess 缺 godoc [REFACTOR]（P2）**：HasProcess 是导出方法。方案：补 godoc 说明 atomic.Pointer[processBox] 双层包装契约。Breaking：否。
+- [ ] **R240-CR-8 — `internal/dispatch/dispatch.go:956,973,1164,1317` replyTracker 4 方法缺 godoc [REFACTOR]（P2）**：onEvent 是 IM 流式核心。方案：补 godoc 标注线程约束 + 超时契约。Breaking：否。
+- [ ] **R240-CR-9 — `internal/server/wshub.go:461,467,514,587,820,866,992,1031,1476,1821,1844,1861` 12 个 Hub 方法缺 godoc [REFACTOR]（P2）**：方案：至少补 handleAuth/handleSubscribe/doBroadcastSessionsUpdate/capHistoryBatch。Breaking：否。
+- [ ] **R240-CR-10 — `internal/config/config.go:477,551,584,1092` applyDefaults/parseDurations/validateConfig/containsEnvPlaceholder 缺 godoc [REFACTOR]（P2）**：方案：补流水线契约说明（first-error vs errors.Join）。Breaking：否。
+- [ ] **R240-CR-11 — `internal/session/managed.go:1577` slog 消息 "InjectHistory:" 大写函数前缀风格不一致 [REFACTOR]（P3）**：与 router_cleanup/router_discovery 类似 ~3 处。方案：统一小写。Breaking：否。
+- [ ] **R240-CR-12 — `internal/cron/scheduler.go:2943` notifyTarget vs NotifyTarget vs deliverNotice 三层命名混淆 [REFACTOR]（P3）**：方案：私有方法重命名为 sendNoticeToChat 或 sendViaPlatform。Breaking：否。
+- [ ] **R240-CR-13 — `internal/cli/wrapper.go:451` shimLineReader.ReadLine 缺 godoc [REFACTOR]（P3）**：实现含非显然 shim 协议解包。方案：补协议契约。Breaking：否。
+- [ ] **R240-CR-14 — `internal/server/dashboard_send.go|dashboard_session.go|dashboard_cron.go` 3 文件超 800 行 [REFACTOR]（P3）**：方案：按 endpoint 拆子文件。Breaking：否。
+- [ ] **R240-CR-15 — `internal/cron/runstore.go` 856 行超上限 [REFACTOR]（P3）**：方案：拆 runstore_gc.go + runstore_cache.go。Breaking：否。
+
+### 架构（NEEDS-DESIGN）
+
+- [ ] **R240-ARCH-1 — `internal/server/server.go:55-100` god-object Server 30+ 异质字段 [REFACTOR]（P1）**：12 handler + router + dedup + 各 cache + watchdog。方案：抽 serverDeps + handlerSet。Breaking：否（内部）。
+- [ ] **R240-ARCH-2 — `internal/server/wshub.go:59-203` Hub god-object 30+ 字段 5 WG 4 mu [REFACTOR]（P1）**：5 broadcast taxonomy + cron/sysession 钩子 + tailers + linkers。方案：拆 Hub + BroadcastDispatcher。Breaking：否。
+- [ ] **R240-ARCH-3 — `internal/server/server.go:55` Server 持具体 *cron.Scheduler [REPEAT-N，与 R239-ARCH-M 同根因]**：四份 Scheduler subset 接口（cronHubOps/cronStubChecker/cronSessionLister/具体）。方案：单一 cron.Surface 接口收口。Breaking：否。
+- [ ] **R240-ARCH-4 — `internal/cron/scheduler.go:198-329` Scheduler 35+ 字段 god-object [REFACTOR]（P1）**：jobs/router/persist/notifier 全混。方案：拆 Scheduler + Persister + Notifier。Breaking：否。
+- [ ] **R240-ARCH-5 — `internal/server/dashboard.go:299,341` cron/sysession 钩子两步 wiring [REFACTOR]（P1）**：SetScheduler + SetOnRunStarted/Ended 分散。方案：cron.RegisterBroadcaster(b CronBroadcaster) 接口；同模式套 sysession。Breaking：否。
+- [ ] **R240-ARCH-6 — `internal/cli/wrapper.go:43` ShimManager 公开可变 *shim.Manager [REPEAT-N，与 R239-ARCH-A 同根因]**：方向同前主条目。
+- [ ] **R240-ARCH-7 — `internal/server/dashboard_session.go:280` server 三个 cron 接口 cronStubChecker/cronSessionLister/cronHubOps [REFACTOR]（P2）**：方案：与 ARCH-3 合并到 cron.ServerSurface。Breaking：否。
+- [ ] **R240-ARCH-8 — `internal/cli/eventlog.go` vs `internal/eventlog/persist+schema` 双 eventlog 物理包 [REFACTOR]（P2）**：方案：rename in-mem ring 到 cli.EventBuffer 或 internal/eventbuffer。Breaking：否（rename）。
+- [ ] **R240-ARCH-9 — `internal/sysession/manager.go:138` Manager + Scheduler + Router 三个 lifecycle 形状不一 [REFACTOR]（P2）**：方案：抽 internal/lifecycle.Daemon + RunReporter。Breaking：否。
+- [ ] **R240-ARCH-10 — `internal/cron/scheduler.go:3010` package-level init() 注册 marshalJobs atomic.Pointer [REFACTOR]（P2）**：隐藏全局；测试可见。方案：cfg.MarshalFn 字段 default json.Marshal。Breaking：否。
+- [ ] **R240-ARCH-11 — `internal/dispatch/dispatch.go:208,229` sendFn / takeoverFn 长签名 func 字段 [REFACTOR]（P2）**：takeoverFn 已加 fallback，sendFn 没有不对称。方案：DispatcherSendOps 接口 + SendFnAdapter 测试包装。Breaking：否。
+- [ ] **R240-ARCH-12 — `cmd/naozhi/main.go:735-789` cron + sysession wiring 命令式 60 行 blob [REFACTOR]（P2）**：顺序约束仅在 main.go 里。方案：抽 internal/wireup.WireSchedulers。Breaking：否。
+- [ ] **R240-ARCH-13 — `internal/session/managed.go:47-114` processIface 35 方法 god-interface [REPEAT-N，与 R239-ARCH-C 同根因]**：方向：拆 ProcessLifecycle/ProcessSender/EventSource/ProcessIntrospect。
+- [ ] **R240-ARCH-14 — `internal/server/server.go:76-88` 12 handler 字段全具体类型 [REFACTOR]（P2）**：handler 间互依赖（SendHandler↔Hub↔ScratchHandler）。方案：抽 httpHandlerSet 接口 + 自注册。Breaking：否。
+- [ ] **R240-ARCH-15 — `internal/upstream/connector.go:69` 等 5 个 "subset of session.Router" 接口 [REFACTOR]（P2）**：HubRouter 14 / dispatch 8 / cron 3 / sysession 4 / upstream 各一份；签名飘移风险。方案：internal/sessioniface 包提供 RouterReader/Mutator/Dispatcher mixin。Breaking：否。
+- [ ] **R240-ARCH-16 — `internal/session/router_core.go:29-31` blank-import history backend [REPEAT-N，与 R239-ARCH-B 同根因]**：方向：internal/history/wireup 显式 RegisterDefaults()。
+- [ ] **R240-ARCH-17 — `internal/cli/history.go:122` RegisterHistoryFactory + cli/wrapper pickHistoryFactory 反向依赖 [REFACTOR]（P3）**：内部 cli 持 history 全局 map。方案：HistoryFactoryFn 注册迁到 internal/history。Breaking：是 (NewWrapper 签名)。
+- [ ] **R240-ARCH-18 — `internal/cli/wrapper.go:120-128` backendDisplayName switch 硬编码 [REPEAT-N，与 R239-ARCH-K 同根因]**：方向同前主条目。
+- [ ] **R240-ARCH-19 — `internal/server/wshub.go:202` wiredLinkers map 用 *cli.SubagentLinker 具体指针 [REPEAT-N，与 R239-ARCH-I 同根因]**。
+- [ ] **R240-ARCH-20 — `internal/cli/backend/profile.go:22` cli/backend 反向依赖 cli (Profile.NewProtocol returns cli.Protocol) [REFACTOR]（P3）**：cli 不能 import cli/backend 即 cycle。方案：rename 到 internal/backend 顶层。Breaking：是 (import paths)。
+- [ ] **R240-ARCH-21 — `internal/cron/scheduler.go:1086,1090` per-chat job 计数 O(N) 扫描 [REFACTOR]（P3）**：方案：jobsByChat 索引镜像 sessionsByChat。Breaking：否。
+- [ ] **R240-ARCH-22 — `internal/sysession/manager.go:17,353` osExit = os.Exit 包级可变 + force-exit [REFACTOR]（P3）**：sysession 不可嵌入。方案：cfg.OnHardFail 回调，default os.Exit(2)。Breaking：否。
+- [ ] **R240-ARCH-23 — `cmd/naozhi/main.go:46-72` env policy 三份散落 [REPEAT-N，与 R239-ARCH-E 同根因]**：方向：抽 internal/envpolicy。
+- [ ] **R240-ARCH-24 — `internal/cron/scheduler.go:163-187` cron RunStartedEvent vs sysession DaemonRunStartedEvent 平行复制 [REFACTOR]（P3）**：方案：抽 internal/lifecycle/RunEvent + Hub 单 BroadcastRunEvent(category, ev)。Breaking：否（wire 兼容）。
+- [ ] **R240-ARCH-25 — `internal/server/server.go:76-88` handler 不可独立测试 [REFACTOR]（P3）**：构造方法私有且含跨 handler 依赖。方案：每 handler 公开 Deps struct。Breaking：否。
+- [ ] **R240-ARCH-26 — `internal/server/wshub.go:179` tailers + wshub_agent 子能力嵌在 god-object [REFACTOR]（P3）**：方案：抽 AgentBroadcaster 子组件。Breaking：否。
+- [ ] **R240-ARCH-27 — `internal/cron/scheduler.go:65-91` SessionRouter consumer 接口写在 scheduler.go 顶部不在 consumer.go [REFACTOR]（P3）**：与 dispatch/server/sysession/upstream 约定不一致。方案：移到 internal/cron/consumer.go。Breaking：否。
+- [ ] **R240-ARCH-28 — `internal/cli/wrapper.go:62` historyFactory 字段在构造时一次取值 [REFACTOR]（P3）**：register-after-NewWrapper 无效。方案：每次 NewHistorySource 查 registry 或显式参数。Breaking：否。
+- [ ] **R240-ARCH-29 — `internal/server/dashboard.go:299,341` Server.Start 后置 wiring 两阶段构造 [REFACTOR]（P3）**：方案：把 callback wiring 全移进 NewWithOptions/buildServer。Breaking：否。
+- [ ] **R240-ARCH-30 — `internal/dispatch/dispatch.go:71` Dispatcher 持具体 *cron.Scheduler [REFACTOR]（P3）**：方案：抽 dispatch.CronOps consumer 接口。Breaking：否。
 
 ## Round 239 — 5-agent 并行 code review 第 49 轮（2026-05-24，与 PR #299 Round 238 并发批）NEEDS-DESIGN
 

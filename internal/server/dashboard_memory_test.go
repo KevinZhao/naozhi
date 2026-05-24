@@ -14,8 +14,23 @@ import (
 
 // memoryTestHandler builds a handler with a temp projects dir + permissive
 // limiter so tests don't false-positive on rate limits.
+//
+// projectsDir is canonicalised the same way NewMemoryHandler does it — without
+// this, on macOS t.TempDir() returns /var/folders/... which is a symlink to
+// /private/var/folders/...; tryRead's EvalSymlinks resolves the leaf to the
+// /private/var/... form, and the prefix check (which compares against the
+// unresolved root) rejects every legitimate read.
 func memoryTestHandler(t *testing.T, projectsDir, currentProject string) *MemoryHandler {
 	t.Helper()
+	if projectsDir != "" {
+		if r, err := filepath.EvalSymlinks(projectsDir); err == nil {
+			projectsDir = r
+		}
+		if abs, err := filepath.Abs(projectsDir); err == nil {
+			projectsDir = abs
+		}
+		projectsDir = filepath.Clean(projectsDir)
+	}
 	return &MemoryHandler{
 		projectsDir:    projectsDir,
 		currentProject: currentProject,

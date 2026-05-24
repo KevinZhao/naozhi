@@ -790,7 +790,7 @@ func (s *Scheduler) Start() error {
 		// creation. When allowedRoot is empty (tests), this is a no-op.
 		if s.allowedRoot != "" && j.WorkDir != "" && !workDirUnderRoot(j.WorkDir, s.allowedRoot, s.allowedRootResolved) {
 			slog.Warn("cron job work_dir outside allowed_root; skipping",
-				"id", j.ID, "work_dir", j.WorkDir)
+				"job_id", j.ID, "work_dir", j.WorkDir)
 			continue
 		}
 		if j.Paused {
@@ -799,7 +799,7 @@ func (s *Scheduler) Start() error {
 			continue
 		}
 		if err := s.registerJob(j); err != nil {
-			slog.Warn("skip invalid cron job", "id", j.ID, "schedule", j.Schedule, "err", err)
+			slog.Warn("skip invalid cron job", "job_id", j.ID, "schedule", j.Schedule, "err", err)
 			continue
 		}
 		s.jobs[j.ID] = j
@@ -1115,7 +1115,7 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 		// "failed to generate unique job ID" error; logging each collision lets
 		// operators see the pattern (same ID repeating) before users hit
 		// AddJob errors.
-		slog.Warn("cron: job ID collision, retrying", "attempt", i+1, "cron_id", j.ID)
+		slog.Warn("cron: job ID collision, retrying", "attempt", i+1, "job_id", j.ID)
 		j.ID = generateID()
 	}
 	if _, exists := s.jobs[j.ID]; exists {
@@ -1536,7 +1536,7 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	// Pass the snapshotted value (via result) to registerStub so a concurrent
 	// SetJobPrompt cannot tear the Prompt/WorkDir pointers we read.
 	s.registerStubFromJob(&result)
-	slog.Info("cron job updated", "id", id,
+	slog.Info("cron job updated", "job_id", id,
 		"schedule_changed", upd.Schedule != nil,
 		"prompt_changed", upd.Prompt != nil,
 		"workdir_changed", upd.WorkDir != nil,
@@ -1588,7 +1588,7 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	}
 	s.mu.Unlock()
 	save()
-	slog.Info("cron job prompt set", "id", id, "prompt_len", len(prompt))
+	slog.Info("cron job prompt set", "job_id", id, "prompt_len", len(prompt))
 	return nil
 }
 
@@ -1795,7 +1795,7 @@ func (s *Scheduler) TriggerNow(id string) error {
 		if entry.WrappedJob == nil {
 			go func() {
 				defer s.triggerWG.Done()
-				slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "id", id, "entry_id", entryID)
+				slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "job_id", id, "entry_id", entryID)
 			}()
 		} else {
 			go func() {
@@ -1830,11 +1830,11 @@ func (s *Scheduler) executeIfNotDeletedOrPaused(jobID string) {
 	paused := ok && cur.Paused
 	s.mu.RUnlock()
 	if !ok {
-		slog.Debug("TriggerNow: job deleted before execute, skipping", "id", jobID)
+		slog.Debug("TriggerNow: job deleted before execute, skipping", "job_id", jobID)
 		return
 	}
 	if paused {
-		slog.Debug("TriggerNow: job paused concurrently, skipping", "id", jobID)
+		slog.Debug("TriggerNow: job paused concurrently, skipping", "job_id", jobID)
 		return
 	}
 	s.executeOpt(cur, true)
@@ -1855,7 +1855,7 @@ func (s *Scheduler) registerJob(j *Job) error {
 		paused := ok && cur.Paused
 		s.mu.RUnlock()
 		if !ok {
-			slog.Debug("cron: scheduled job no longer registered, skipping", "id", jobID)
+			slog.Debug("cron: scheduled job no longer registered, skipping", "job_id", jobID)
 			return
 		}
 		// A Pause that lands between cron-tick dispatch and our re-lock should
@@ -1864,7 +1864,7 @@ func (s *Scheduler) registerJob(j *Job) error {
 		// tick wouldn't fire — but robfig/cron may already be mid-dispatch when
 		// Remove runs, yielding exactly this race.
 		if paused {
-			slog.Debug("cron: tick fired for job paused concurrently, skipping", "id", jobID)
+			slog.Debug("cron: tick fired for job paused concurrently, skipping", "job_id", jobID)
 			return
 		}
 		s.executeOpt(cur, false)
@@ -2001,7 +2001,7 @@ type preflightArgs struct {
 	// 「[Cron …] 工作目录不可达」中文提示的目标；其它失败分支不通知，
 	// 因为「shutdown / Reset 失败」对终端用户没有可操作信号。
 	notifyTo NotifyTarget
-	// runID 是 caller 已生成的 8-char hex 运行 ID。失败分支转给
+	// runID 是 caller 已生成的 16-char hex 运行 ID。失败分支转给
 	// finishRun，使 cron_run_ended 与 cron_run_started 配对（emitOverlapSkipped
 	// 同样模式）。
 	runID string
@@ -2187,7 +2187,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// metadata to the list API.
 	inflight := s.jobInflight(j.ID)
 	if !inflight.running.CompareAndSwap(false, true) {
-		slog.Info("cron: job already running, skipping overlap", "cron_id", j.ID)
+		slog.Info("cron: job already running, skipping overlap", "job_id", j.ID)
 		// Overlap is a skipped state (no LastRunAt update). Counters /
 		// broadcast still fire so dashboards can surface the skip.
 		s.emitOverlapSkipped(j, viaTriggerNow)
@@ -2248,7 +2248,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		s.mu.RUnlock()
 		if !stillRegistered {
 			slog.Debug("cron: job deleted during jitter window, aborting run",
-				"cron_id", j.ID, "run_id", runID)
+				"job_id", j.ID, "run_id", runID)
 			return
 		}
 	}
@@ -2277,7 +2277,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 
 	// `lg` instead of `log` to avoid shadowing the standard `log` package
 	// imported at the top of the file (R60-GO-M2).
-	lg := slog.With("cron_id", snap.jobID, "platform", snap.platName, "chat", snap.chatID, "run_id", runID)
+	lg := slog.With("job_id", snap.jobID, "platform", snap.platName, "chat", snap.chatID, "run_id", runID)
 	lg.Info("cron job executing", "prompt_len", len(snap.prompt))
 
 	// Per-job timeout is always s.execTimeout (period scaling was removed —

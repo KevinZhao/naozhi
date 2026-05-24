@@ -49,6 +49,23 @@ func NewMemoryHandler(trustedProxy bool) *MemoryHandler {
 			dir = filepath.Join(home, ".claude", "projects")
 		}
 	}
+	// R240-SEC-1: canonicalise projectsDir at construction. If the dir is itself
+	// reachable via a symlinked component (Docker bind-mount, AMI-customised
+	// layout, ~/.claude → /var/data/.claude on macOS), the prefix check inside
+	// tryRead would compare a resolved file path against an unresolved root and
+	// reject every legitimate read. EvalSymlinks here aligns the root with the
+	// resolved leaf path used by the symmetric check below. Best-effort: if the
+	// dir does not exist yet (fresh install) we keep the cleaned raw path; the
+	// check still applies once the dir materialises.
+	if dir != "" {
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			dir = r
+		}
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
+		dir = filepath.Clean(dir)
+	}
 	cur := encodeCurrentProjectDir(dir)
 	return &MemoryHandler{
 		projectsDir:    dir,
@@ -164,11 +181,32 @@ func (h *MemoryHandler) tryRead(projectDir, slug string) (*memoryResponse, error
 	// Defence in depth: even though slug is regex-locked, re-verify the
 	// resolved path stays inside projectsDir.
 	prefix := strings.TrimRight(filepath.Clean(h.projectsDir), string(filepath.Separator)) + string(filepath.Separator)
+	prefixNoSep := strings.TrimRight(filepath.Clean(h.projectsDir), string(filepath.Separator))
 	if !strings.HasPrefix(clean, prefix) {
 		return nil, errMemoryPathEscape
 	}
 
-	raw, err := os.ReadFile(clean)
+	// R240-SEC-2: resolve symlinks before reading. The clean-prefix check above
+	// catches lexical traversal, but a symlink at <projectsDir>/<proj>/memory or
+	// at the slug file itself could redirect the read to /etc/shadow without
+	// changing the lexical path. EvalSymlinks plus a re-check of the resolved
+	// path's prefix closes that gap. Non-existent files return (nil, nil) just
+	// like the ReadFile path below, so callers see them as "slug not found"
+	// rather than an error. A resolved path that escapes the projects dir is
+	// treated as a miss too — defence in depth, and avoids leaking any signal
+	// about whether the symlink target exists.
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !strings.HasPrefix(resolved, prefix) && resolved != prefixNoSep {
+		return nil, nil
+	}
+
+	raw, err := os.ReadFile(resolved)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
