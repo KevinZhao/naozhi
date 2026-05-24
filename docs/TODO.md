@@ -222,7 +222,7 @@
 
 ### 性能（NEEDS-DESIGN）
 
-- [~] **R240-PERF-1 — `internal/cron/runinflight.go:85-91` runInflight.reset 触发 6 次 atomic.Pointer.Store 堆分配 [REFACTOR]（P1）**：1Hz × N jobs 每次 run 终态 5 个 strHeap("")/timeHeap(zero) 分配纯噪声。方案：reset 改 Store(nil) + snapshot 把 nil 解读为零值；或省略部分字段清零（running=false 已阻 snapshot）。Breaking：否。
+- [x] **R240-PERF-1 — `internal/cron/runinflight.go:85-91` runInflight.reset 触发 6 次 atomic.Pointer.Store 堆分配 [REFACTOR]（P1）**：1Hz × N jobs 每次 run 终态 5 个 strHeap("")/timeHeap(zero) 分配纯噪声。方案：reset 改 Store(nil) + snapshot 把 nil 解读为零值；或省略部分字段清零（running=false 已阻 snapshot）。已修 2026-05-24（cron-fix F2）：reset 改 Store(nil)；snapshot 现有 nil-guard 接住，零观察语义不变。
 - [ ] **R240-PERF-2 — `internal/cron/scheduler.go:2225` slog.With(...) 每 executeOpt 入口 alloc 新 *slog.Logger [REPEAT-N，与 R238-PERF-2 同根因]**：1Hz × 50 jobs = 50/s logger alloc。方案：先判 effective level 或改 slog.Info 展平调用。Breaking：否。
 - [ ] **R240-PERF-3 — `internal/cron/runstore.go:321-344` cacheHeadPush O(N) shift [REPEAT-N，与 R233-PERF-2 / R239-PERF-3 同根因]**：keepCount=200 ring buffer 方向已多轮登记。
 - [ ] **R240-PERF-4 — `internal/cron/scheduler.go:508-515` KnownSessionIDs 每 job O(200) cache 拷贝 [REPEAT-N，与 R233-PERF-3 / R239-PERF-4 同根因]**：方案：runStore 暴露 AllKnownSessionIDs 聚合接口或维护 sessionIDSet 无拷贝 lookup。Breaking：否。
