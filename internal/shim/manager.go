@@ -852,6 +852,15 @@ func (h *ShimHandle) Shutdown() {
 }
 
 // StopAll sends shutdown to all known shims concurrently.
+//
+// ctx is honoured as an upper bound on how long the caller is willing
+// to block waiting for the per-shim Shutdown goroutines to drain. On
+// ctx expiry StopAll returns early and logs the count of in-flight
+// shutdowns; the goroutines themselves continue running until their
+// respective h.Shutdown() returns (Shutdown is a single SendMsg +
+// Close on a TCP handle and is bounded by the OS socket buffer). This
+// matches Manager.Stop semantics elsewhere — abandon-the-tail rather
+// than block the systemd shutdown watchdog. Closes R237-GO-9.
 func (m *Manager) StopAll(ctx context.Context) {
 	m.mu.Lock()
 	handles := make(map[string]*ShimHandle, len(m.shims))
@@ -869,7 +878,19 @@ func (m *Manager) StopAll(ctx context.Context) {
 			h.Shutdown()
 		}(key, h)
 	}
-	wg.Wait()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		slog.Warn("shim.Manager.StopAll: ctx expired before drain",
+			"err", ctx.Err(),
+			"pending_shims", len(handles))
+	}
 }
 
 // DetachAll sends detach to all known shims concurrently (used during graceful shutdown).
