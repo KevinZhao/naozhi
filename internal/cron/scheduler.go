@@ -1634,7 +1634,10 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 		// live view never reflects an un-persisted mutation.
 		j.Prompt = ""
 		if waspaused && !j.Paused {
-			_ = s.pauseJobLocked(j) // restore Paused=true; ignore ErrJobAlreadyPaused
+			if rbErr := s.pauseJobLocked(j); rbErr != nil && !errors.Is(rbErr, ErrJobAlreadyPaused) {
+				slog.Warn("cron rollback after persist failure also failed",
+					"job_id", j.ID, "rollback_err", rbErr)
+			}
 		}
 		s.mu.Unlock()
 		return perr
