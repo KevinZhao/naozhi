@@ -89,7 +89,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			// check that ConstantTimeCompare does internally when operand sizes
 			// differ.
 			if token == "" || !constantTimeEqualString(token, f.cfg.VerificationToken) {
-				slog.Warn("feishu token mismatch")
+				slog.Warn("feishu token mismatch", "remote", r.RemoteAddr)
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
@@ -100,7 +100,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		// benefit from timestamp freshness checks as a defense-in-depth measure.
 		if ts := r.Header.Get("X-Lark-Request-Timestamp"); ts == "" {
 			if f.cfg.EncryptKey != "" || f.cfg.VerificationToken != "" {
-				slog.Warn("feishu request missing timestamp header")
+				slog.Warn("feishu request missing timestamp header", "remote", r.RemoteAddr)
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
@@ -116,7 +116,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			nonce := r.Header.Get("X-Lark-Request-Nonce")
 			sig := r.Header.Get("X-Lark-Signature")
 			if !verifySignature(timestamp, nonce, f.cfg.EncryptKey, body, sig) {
-				slog.Warn("feishu signature verification failed")
+				slog.Warn("feishu signature verification failed", "remote", r.RemoteAddr)
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
