@@ -868,7 +868,10 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, resolved string, i
 	// the JSON `content` field. The download path's credential allowlist
 	// must apply here too, otherwise an attacker can preview-read what
 	// they cannot download.
-	if isSensitiveDownloadName(filepath.Base(resolved)) {
+	// R247-SEC-10: now scans every path segment so subtree-style stashes
+	// like `secrets/db.yaml` or `.ssh/known_hosts` no longer slip past the
+	// basename-only check.
+	if isSensitiveDownloadPath(resolved) {
 		writeJSON(w, map[string]any{
 			"content":   "",
 			"size":      info.Size(),
@@ -980,7 +983,9 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 	// serveDownload. A file like .env / id_rsa / .npmrc sniffs to text/plain
 	// and would otherwise pass the isTextMime check below, exposing
 	// credentials inline despite preview/download already refusing them.
-	if isSensitiveDownloadName(filepath.Base(resolved)) {
+	// R247-SEC-10: full-path scan so e.g. `.ssh/foo` is rejected even when
+	// the basename is innocuous.
+	if isSensitiveDownloadPath(resolved) {
 		writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": "preview blocked for sensitive file name"})
 		return
 	}
@@ -1091,7 +1096,8 @@ func (h *ProjectHandlers) serveDownload(w http.ResponseWriter, r *http.Request, 
 	// path. servePreview already excludes .env via previewableByExt + the
 	// MIME guard, but download had no equivalent stop, letting authenticated
 	// users pull .env / .netrc / *.pem out of any workspace.
-	if isSensitiveDownloadName(filepath.Base(resolved)) {
+	// R247-SEC-10: full-path scan blocks `secrets/db.yaml`, `.ssh/foo` etc.
+	if isSensitiveDownloadPath(resolved) {
 		writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": "file type not downloadable"})
 		return
 	}
@@ -1203,6 +1209,56 @@ var sensitiveDownloadExts = map[string]struct{}{
 	".pfx": {},
 	".crt": {}, // certs are usually fine, but combined with adjacent .key files
 	".p8":  {}, // Apple/AWS/JWT private keys
+}
+
+// sensitivePathSegments lists directory names that — anywhere in the path —
+// imply the entire subtree is credential-bearing. Basename-only matching let
+// callers exfiltrate files like `secrets/db.yaml` or `.ssh/known_hosts`
+// because the basename was an innocent `db.yaml` / `known_hosts`. Each entry
+// is matched case-insensitively against any path segment.
+//
+// R247-SEC-10 [BREAKING-LOCAL]: callers used to pass filepath.Base(resolved)
+// to isSensitiveDownloadName. The three production sites (servePreview,
+// serveRaw, serveDownload) now pass the full resolved path to
+// isSensitiveDownloadPath instead, which scans every segment with this
+// allowlist *and* runs the legacy basename rule. Tests still call
+// isSensitiveDownloadName directly so the basename contract is preserved.
+var sensitivePathSegments = map[string]struct{}{
+	".ssh":         {},
+	".aws":         {},
+	".gnupg":       {},
+	".gpg":         {},
+	".kube":        {},
+	".docker":      {},
+	".gcloud":      {},
+	".azure":       {},
+	"secrets":      {},
+	"credentials":  {},
+	"private-keys": {},
+}
+
+// isSensitiveDownloadPath reports whether any segment of relPath looks
+// credential-bearing — either by the segment-level allowlist
+// (sensitivePathSegments) or by the basename rule (isSensitiveDownloadName).
+// relPath is interpreted as a filesystem path; both `/` and the OS separator
+// are honoured so callers passing filepath.Clean output stay correct.
+func isSensitiveDownloadPath(relPath string) bool {
+	if relPath == "" {
+		return false
+	}
+	// Split on both separators so a Windows-style path that leaks into the
+	// resolver doesn't bypass the segment scan.
+	norm := strings.ReplaceAll(relPath, "\\", "/")
+	for _, seg := range strings.Split(norm, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			continue
+		}
+		low := strings.ToLower(seg)
+		if _, ok := sensitivePathSegments[low]; ok {
+			return true
+		}
+	}
+	return isSensitiveDownloadName(filepath.Base(relPath))
 }
 
 // isSensitiveDownloadName reports whether base (no path component) names a
