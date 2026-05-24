@@ -172,8 +172,8 @@
 - [ ] **R247-PERF-9 — diskListNewestFirst 串行 readRun（P2）** [REPEAT-3]: `internal/cron/runstore.go:617-631` 与 R246-PERF-2 同根因。方案：recentCacheEntry 缓存 sorted slice + 8 worker pool 并行解码。
 - [ ] **R247-PERF-10 — Append jobLock 期间 MkdirAll+Marshal+WriteFileAtomic（P2）** [REPEAT-2]: `internal/cron/runstore.go:282-339` 每条 syscall。方案：json.Marshal pool + sync.Once-per-jobID MkdirAll。
 - [ ] **R247-PERF-11 — marshalJobsLocked 每次 mutation 全表 sort+Marshal（P2）** [REPEAT-2]: `internal/cron/scheduler_persist.go:45-58` 50 jobs ≈ 100KB write × 每 finishRun。方案：Encoder + bytes.Buffer pool。
-- [ ] **R247-PERF-12 — protocol_acp WriteMessage Marshal 无 pool（P2）** [REFACTOR]: `internal/cli/protocol_acp.go:308-356,675-680` ACP turn / permissionResponse 高频。方案：镜像 shimSendBufPool。
-- [ ] **R247-PERF-13 — eventlog Entries 全 ring 拷贝 ~140KB/call（P2）** [REPEAT-3]: `internal/cli/eventlog.go:1217-1245` dashboard subscribe 路径。方案：LastN 上限或 sync.Pool slice 复用。
+- [~] **R247-PERF-12 — protocol_acp WriteMessage Marshal 无 pool（P2）** [REFACTOR]: `internal/cli/protocol_acp.go:308-356,675-680` ACP turn / permissionResponse 高频。方案：镜像 shimSendBufPool。
+- [~] **R247-PERF-13 — eventlog Entries 全 ring 拷贝 ~140KB/call（P2）** [REPEAT-3]: `internal/cli/eventlog.go:1217-1245` dashboard subscribe 路径。方案：LastN 上限或 sync.Pool slice 复用。
 - [ ] **R247-PERF-14 — eventlog Subscribe 每次 alloc subscriber（P2）** [REFACTOR]: `internal/cli/eventlog.go:1141-1166` dashboard 高频 reconnect 形成分配峰。方案：close-once 限制改 broadcast cond。
 - [ ] **R247-PERF-15 — handleList projectList 每次 1Hz 全量 alloc（P2）** [REPEAT-3]: `internal/server/dashboard_session.go:554-572` R230C-PERF-7 已知。方案：atomic.Pointer + projectMgr 版本号失效。
 - [ ] **R247-PERF-16 — RecentSessions 无 prealloc（P2）** [REFACTOR]: `internal/discovery/recent.go:84-178` 7day×多 project 规模可观。方案：make 估上限。
@@ -182,7 +182,7 @@
 - [ ] **R247-PERF-19 — recentFromParsedIndex jsonlMtimes map 重建（P2）** [REFACTOR]: `internal/discovery/recent.go:329-356` 已 sorted slice 可二分。方案：sort.Search 替 map。
 - [ ] **R247-PERF-20 — Tick highwater 全量拷贝（P2）** [REFACTOR]: `internal/sysession/auto_titler.go:181-194` 多数 key 当 tick 不访问。方案：atomic.Pointer[map] CoW。
 - [ ] **R247-PERF-21 — buildUserEntry 每图 spawn goroutine（P3）** [REFACTOR]: `internal/cli/process_send.go:51-76` cap 4 sem 但仍 8KB stack × N。方案：worker pool。
-- [ ] **R247-PERF-22 — HandleEvent permissionResponse Atoi+Itoa 来回（P3）** [REFACTOR]: `internal/cli/protocol_acp.go:660-666`。方案：直接 json.RawMessage 写。
+- [~] **R247-PERF-22 — HandleEvent permissionResponse Atoi+Itoa 来回（P3）** [REFACTOR]: `internal/cli/protocol_acp.go:660-666`。方案：直接 json.RawMessage 写。
 - [ ] **R247-PERF-23 — Enqueue 队列满 O(N) memmove（P3）** [REPEAT-2]: `internal/dispatch/msgqueue.go:184-208` MaxDepth=16 拷贝 15。方案：环形 buffer。
 - [ ] **R247-PERF-24 — workDirUnderRoot 每 execute EvalSymlinks（P3）** [REFACTOR]: `internal/cron/scheduler.go:177-189` 长寿命下重复 syscall。方案：TTL 缓存。
 - [ ] **R247-PERF-25 — agent_tailer Shutdown 重新 alloc map（P3）** [REFACTOR]: `internal/server/agent_tailer.go:565-578`。方案：clear(r.byTask) (go1.21+)。
@@ -586,7 +586,7 @@
 - [~] **R242-GO-8 [REPEAT-3]** `internal/cron/runstore.go:335` `cacheHeadPush` O(N=200) shift；与 R233-PERF-2 / R235-PERF-3 同根因，第 3 次。
 - [ ] **R242-GO-9 [REFACTOR]** `internal/cron/scheduler.go:3062` `findByPrefix` 持 `s.mu.Lock()` 期间全量遍历 jobs map；加 `idPrefixIndex map[string]string` 缩短持锁时间。
 - [ ] **R242-GO-10 [REFACTOR]** `internal/server/wshub.go:198` `Hub` 直接持 `*dispatch.MessageQueue` 具体类型而其他依赖走接口；抽 `MessageEnqueuer` 接口对齐风格。
-- [ ] **R242-GO-11 [BREAKING-LOCAL]** `internal/eventlog/persist/persister.go:255` DevMode panic 路径不可见但靠注释保证；改 `slog.Error + return` 或 `os.Exit(1)`。
+- [~] **R242-GO-11 [BREAKING-LOCAL]** `internal/eventlog/persist/persister.go:255` DevMode panic 路径不可见但靠注释保证；改 `slog.Error + return` 或 `os.Exit(1)`。
 - [~] **R242-GO-12 [REPEAT-5]** `internal/session/managed.go:47` processIface 30+ 方法 god-interface；与 R215/R219/R224/R230C-ARCH-4 同根因。
 - [ ] **R242-GO-13 [REFACTOR]** `internal/cron/scheduler.go:2067` `freshContextPreflightP0` 错误分支 `deliverNotice` 同步调用拖延 finishRun；改 async goroutine。
 - [ ] **R242-GO-14 [REFACTOR]** `internal/cron/scheduler.go:2919` `deliverNotice` 同步调用 + 独立 ctx 但被 cron tick goroutine drain 隐式约束；文档化关系。
