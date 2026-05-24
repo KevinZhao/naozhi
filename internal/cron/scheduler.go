@@ -694,7 +694,14 @@ var stopBudget = 30 * time.Second
 // than stopBudget because trimAll's IO is short-lived (ReadDir + N Removes);
 // a wedge here means a stuck filesystem and we'd rather skip the wait than
 // pin systemd TimeoutStopSec.
-var gcWaitBudget = 5 * time.Second
+//
+// R247-CR-18 (R246-CR-012 same-root): kept as const — no test or production
+// site swaps this value, so the package-level mutable var pattern (still
+// applied to stopBudget below for fast shutdown tests) was unwarranted here
+// and only invited racy parallel-test reads. If a future test ever needs to
+// shorten this, prefer threading it through SchedulerConfig.GCWaitBudget so
+// the scoping remains per-instance instead of package-global.
+const gcWaitBudget = 5 * time.Second
 
 // Stop halts the scheduler and saves state. It waits for both scheduled jobs
 // (drained by s.cron.Stop) and any TriggerNow-spawned goroutines before
