@@ -1990,7 +1990,8 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 			errMsg: "work_dir unreachable",
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(args.notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.labelOrID()))
+		// R238-PERF-3: 直接拼接（消反射 + 临时 buf alloc）。
+		s.deliverNotice(args.notifyTo, "[Cron "+snap.labelOrID()+"] 工作目录不可达，本次执行已跳过。")
 		return noopRefresh, false
 	}
 	s.router.Reset(args.key)
@@ -2297,7 +2298,8 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("session error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", snap.labelOrID()))
+		// R238-PERF-3: 直接拼接，避免每次错误回执都走 fmt 反射。
+		s.deliverNotice(notifyTo, "[Cron "+snap.labelOrID()+"] 执行跳过，请稍后重试。")
 		stubRefresh()
 		return
 	}
@@ -2387,7 +2389,8 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("send error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", snap.labelOrID()))
+		// R238-PERF-3: 直接拼接，避免每次错误回执都走 fmt 反射。
+		s.deliverNotice(notifyTo, "[Cron "+snap.labelOrID()+"] 执行失败，请稍后重试。")
 		stubRefresh()
 		return
 	}
@@ -2425,7 +2428,8 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// 否则未截断 / 未脱敏的 claude 输出会绕过所有保护落到 IM 渠道
 	// （prompt-injection / IM 富文本指令 / 巨量响应耗尽队列）。
 	// finishRun 在持久化路径已做过同样处理，这里复用相同管线。
-	replyText := fmt.Sprintf("[Cron %s] %s", snap.labelOrID(), sanitiseRunResult(result.Text))
+	// R238-PERF-3: 直接拼接热路径回复消息，避免 fmt 反射开销。
+	replyText := "[Cron " + snap.labelOrID() + "] " + sanitiseRunResult(result.Text)
 	s.deliverNotice(notifyTo, replyText)
 }
 
