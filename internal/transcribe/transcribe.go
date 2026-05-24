@@ -108,6 +108,14 @@ func (s *awsService) streamFromBuffer(ctx context.Context, data []byte, mimeType
 				Value: types.AudioEvent{AudioChunk: data[i:end]},
 			}); err != nil {
 				slog.Debug("transcribe send chunk failed", "err", err)
+				// R242-GO-15: break → fall-through to Writer.Close()
+				// below is intentional. Even on send error we still
+				// need to close the writer so the AWS SDK signals EOF
+				// to the service and collectTranscripts' Reader.Err
+				// surfaces a server-side error (otherwise the events
+				// channel hangs until ctx cancellation). Do NOT swap
+				// `break` for `return` — Writer.Close must run on
+				// every exit path of this goroutine.
 				break
 			}
 		}
