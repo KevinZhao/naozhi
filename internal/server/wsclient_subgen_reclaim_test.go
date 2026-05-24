@@ -214,9 +214,11 @@ func TestSubGenReclaim_NilMapsSafe(t *testing.T) {
 // test trips immediately when the anchor goes missing.
 func TestSubGenReclaim_SourceAnchor(t *testing.T) {
 	t.Parallel()
-	src, err := os.ReadFile("wshub.go")
+	// R243-ARCH-2 split: handleUnsubscribe and completeSubscribe moved to
+	// wshub_subscribe.go alongside the other subscribe handlers.
+	src, err := os.ReadFile("wshub_subscribe.go")
 	if err != nil {
-		t.Fatalf("read wshub.go: %v", err)
+		t.Fatalf("read wshub_subscribe.go: %v", err)
 	}
 
 	// handleUnsubscribe body must contain markSubGenReleasable + sweep.

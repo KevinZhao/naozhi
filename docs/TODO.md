@@ -1,6 +1,8 @@
 # TODO
 
-> 最后更新 2026-05-24（夜间）—— PR #309 (commit c13fa47) scheduler.go god-object split 归档：标 [x] 7 条同根因条目（R243-ARCH-1 主条目 REPEAT-19 + R244-ARCH-17 / R240-ARCH-4 / R239-CR-1 / R235-CR-8 / R235-ARCH-24 / R232-ARCH-1）。scheduler.go 3317→852 行，拆出 7 个职责文件（_jobs 942 / _run 827 / _finish 493 / _persist 146 / _callbacks 127 / _notify 115 / _session 108）。注：行号引用过时的 R242/R243 ARCH 条目（如 R242-ARCH-1 引用 line 2287）保留不动 — 代码本身在新文件里仍存在，只是行号变；后续 fix 时按函数名 grep 即可。
+> 最后更新 2026-05-24（夜间）—— **wshub.go god-object 拆分**（R243-ARCH-2，REPEAT-21 主条目 + R243-ARCH-17 / R240-ARCH-2 一并归档）：wshub.go 2028→525 行 (-74%)，拆出 5 个职责文件 _broadcast (368) / _send (379) / _subscribe (373) / _eventpush (274) / _upgrade (232)。Hub struct 不动保持锁不变量；source-anchor 测试 4 处指向新文件。
+>
+> 同日早些时候 —— PR #309 (commit c13fa47) **scheduler.go god-object split** 归档：标 [x] 7 条同根因条目（R243-ARCH-1 主条目 REPEAT-19 + R244-ARCH-17 / R240-ARCH-4 / R239-CR-1 / R235-CR-8 / R235-ARCH-24 / R232-ARCH-1）。scheduler.go 3317→852 行，拆出 7 个职责文件（_jobs 942 / _run 827 / _finish 493 / _persist 146 / _callbacks 127 / _notify 115 / _session 108）。注：行号引用过时的 R242/R243 ARCH 条目保留不动 — 代码本身在新文件里仍存在，按函数名 grep 即可。
 >
 > 上一轮更新 2026-05-24 —— TODO 大清理 v2（主题级合并）：在 v1 基础上跨 Round 按"同根因主题"再折叠 43 条派生：
 >   - cacheHeadPush ring buffer（主 R233-PERF-2）：删 7 条
@@ -593,7 +595,7 @@
 ### 架构 (ecc:architect 第 53 轮)
 
 - [x] **R243-ARCH-1 [REFACTOR][REPEAT-19]** `internal/cron/scheduler.go:198-332` Scheduler God Object 30+ 公开方法 / 3315 行 / 35+ 字段；拆 cron/scheduler + cron/runtime + cron/notify。 *(已实施 PR #309 commit c13fa47 6-stage split：scheduler.go 3317→852 行；拆出 _jobs (942) / _run (827) / _finish (493) / _persist (146) / _callbacks (127) / _notify (115) / _session (108)。Scheduler 方法 57→分散在 8 文件。同根因派生 R244-ARCH-17 / R240-ARCH-4 / R239-CR-1 / R235-CR-8 / R235-ARCH-24 / R232-ARCH-1 一并归档。)*
-- [ ] **R243-ARCH-2 [REFACTOR][REPEAT-21]** `internal/server/wshub.go:59-203` Hub God Object 144 行字段 + 14+ sync 字段；拆 broadcaster / tailers / scratchPool / scheduler 子服务。
+- [x] **R243-ARCH-2 [REFACTOR][REPEAT-21]** `internal/server/wshub.go:59-203` Hub God Object 144 行字段 + 14+ sync 字段；拆 broadcaster / tailers / scratchPool / scheduler 子服务。 *(已实施 6-stage split：wshub.go 2028→525 行 (-74%)；拆出 _broadcast (368) / _send (379) / _subscribe (373) / _eventpush (274) / _upgrade (232)。Hub struct 不动（保持锁不变量），方法按职责分散到 5 文件；source-anchor 测试 4 处更新指向新文件。同根因派生 R243-ARCH-17 / R240-ARCH-2 一并归档。)*
 - [ ] **R243-ARCH-3 [BREAKING-LOCAL][REPEAT-24]** `internal/cron/scheduler.go:200 (s.mu)` 单 mutex 全局序列化所有 mutation 路径；改 per-job sharding `sync.Map[string]*jobShard`。
 - [ ] **R243-ARCH-4 [REFACTOR][REPEAT-16]** `internal/session/router_lifecycle.go:255-345` `spawningKeys` 自旋 + 20ms timer poll；改 `map[string]chan struct{}` 由 spawn 完成 close(ch)。
 - [ ] **R243-ARCH-5 [REFACTOR][REPEAT-15]** `internal/session/managed.go:47-114` processIface 35+ 方法 god-interface；拆 ProcessLifecycle / EventSource / ProcessSender 三 facet。
@@ -608,7 +610,7 @@
 - [ ] **R243-ARCH-14 [BREAKING-LOCAL][REPEAT-4]** `sysession.Config / SchedulerConfig / RouterConfig` 无 schemaVersion；HotReload 无路径；引入 `config/v1/` migration 入口。
 - [ ] **R243-ARCH-15 [REFACTOR][REPEAT-3]** wshub broadcast / agentTailer / scratch/cron-run-ended 三条独立 fan-out；抽 `broadcaster` topic 包，6 topic 集中订阅。
 - [ ] **R243-ARCH-16 [REFACTOR][REPEAT-4]** scheduler.platforms / agents / agentCommands 等 6+ 处运行时不可变 map 仅靠 godoc；用 atomic.Pointer[map] swap-on-write 编译期固化。
-- [ ] **R243-ARCH-17 [REFACTOR][REPEAT-7]** `internal/server/wshub.go` 单文件 2017 行未拆；按 router_*.go 同型 split rule 拆 wshub_core/wshub_subscribe/wshub_broadcast/wshub_node_relay。
+- [x] **R243-ARCH-17 [REFACTOR][REPEAT-7]** `internal/server/wshub.go` 单文件 2017 行未拆；按 router_*.go 同型 split rule 拆 wshub_core/wshub_subscribe/wshub_broadcast/wshub_node_relay。 *(R243-ARCH-2 同根因派生，已实施：wshub.go 2028→525 行 + 5 职责文件 _broadcast/_send/_subscribe/_eventpush/_upgrade。)*
 - [ ] **R243-ARCH-18 [REFACTOR][REPEAT-5]** `cron recordResultP0WithSanitised + dispatch redact` 错误 sanitize/redact 散在 5+ 包；提到 errors 子包 SafeErr struct。
 - [ ] **R243-ARCH-19 [REFACTOR][REPEAT-3]** cron / session / server 锁层级仅靠 godoc 维持；dev-only 引入 lockorder build tag CI 校验。
 - [ ] **R243-ARCH-20 [REFACTOR][REPEAT-3]** 整 codebase 缺集成/E2E 测试（rg `^func TestFull|TestIntegration|TestE2E` 0 命中）；增 `tests/integration/` + testcontainers smoke。
@@ -868,7 +870,7 @@
 ### 架构（NEEDS-DESIGN）
 
 - [ ] **R240-ARCH-1 — `internal/server/server.go:55-100` god-object Server 30+ 异质字段 [REFACTOR]（P1）**：12 handler + router + dedup + 各 cache + watchdog。方案：抽 serverDeps + handlerSet。Breaking：否（内部）。
-- [ ] **R240-ARCH-2 — `internal/server/wshub.go:59-203` Hub god-object 30+ 字段 5 WG 4 mu [REFACTOR]（P1）**：5 broadcast taxonomy + cron/sysession 钩子 + tailers + linkers。方案：拆 Hub + BroadcastDispatcher。Breaking：否。
+- [x] **R240-ARCH-2 — `internal/server/wshub.go:59-203` Hub god-object 30+ 字段 5 WG 4 mu [REFACTOR]（P1）**：5 broadcast taxonomy + cron/sysession 钩子 + tailers + linkers。方案：拆 Hub + BroadcastDispatcher。Breaking：否。 *(R243-ARCH-2 同根因派生，已实施 6-stage split。Hub struct 字段保留集中（锁不变量约束），方法分散到 5 文件。)*
 - [x] **R240-ARCH-4 — `internal/cron/scheduler.go:198-329` Scheduler 35+ 字段 god-object [REFACTOR]（P1）**：jobs/router/persist/notifier 全混。方案：拆 Scheduler + Persister + Notifier。Breaking：否。 *(R243-ARCH-1 同根因派生，PR #309 已实施 6-stage split。)*
 - [ ] **R240-ARCH-5 — `internal/server/dashboard.go:299,341` cron/sysession 钩子两步 wiring [REFACTOR]（P1）**：SetScheduler + SetOnRunStarted/Ended 分散。方案：cron.RegisterBroadcaster(b CronBroadcaster) 接口；同模式套 sysession。Breaking：否。
 - [ ] **R240-ARCH-7 — `internal/server/dashboard_session.go:280` server 三个 cron 接口 cronStubChecker/cronSessionLister/cronHubOps [REFACTOR]（P2）**：方案：与 ARCH-3 合并到 cron.ServerSurface。Breaking：否。

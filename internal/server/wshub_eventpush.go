@@ -1,0 +1,274 @@
+package server
+
+import (
+	"time"
+
+	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/session"
+)
+
+// File: wshub_eventpush.go
+//
+// Per-subscription event-push loop and resubscribe helpers extracted from
+// wshub.go (R243-ARCH-2 split). Owns:
+//   - maxHistoryPushEntries / capHistoryBatch (history batching cap)
+//   - eventPushLoop: long-lived goroutine that fans EventLog updates to a
+//     subscribed wsClient, with generation gating + flap-aware resubscribe
+//   - resubscribeEvents: re-attach to the post-flap EventLog without
+//     dropping the WS subscription
+//   - resubscribeMaxAttempts / resubscribeInterval: wait budget constants
+//
+// All Hub state used by these helpers stays on *Hub. Pure code-relocation.
+
+// resubscribeMaxAttempts and resubscribeInterval together set the wait
+// budget for resubscribeEvents — used when a session process flapped and
+// the WS client wants to pick up the freshly attached EventLog without
+// dropping the dashboard subscription.
+//
+// Total window = resubscribeMaxAttempts × resubscribeInterval = 12 × 5s = 60s.
+// 60s comfortably covers the cold-start budget for a `claude` CLI subprocess
+// (typical first-init: 5-15s; worst case with model warmup + remote git fetch:
+// 30-45s). Beyond 60s we declare flap permanent and drop the WS subscription;
+// the client's exponential-backoff reconnect loop takes over.
+//
+// The two constants are split (not a single 60s timer) so the per-iteration
+// loop body — generation check, ctx fan-out, client-disconnect detection —
+// runs at a 5s heartbeat instead of blocking the whole window. R240-CR-6.
+const (
+	resubscribeMaxAttempts = 12
+	resubscribeInterval    = 5 * time.Second
+)
+
+// maxHistoryPushEntries caps a single WS "history" push. EventEntriesSince
+// on an initial catch-up (lastTime=0) or after a notify backlog can return
+// the full ring buffer (maxPersistedHistory=500 entries). At ~200 B per
+// entry JSON-encoded, a 500-entry batch balloons to ~100 KB per push; with
+// 500 active WS connections that is 50 MB of simultaneous marshal work
+// blocking the hub. 50 entries matches the dashboard's paginated
+// /api/sessions/events tail fetch, so older entries are still reachable
+// via the `before=` path. R68-PERF-H1.
+const maxHistoryPushEntries = 50
+
+func capHistoryBatch(entries []cli.EventEntry) []cli.EventEntry {
+	if len(entries) <= maxHistoryPushEntries {
+		return entries
+	}
+	return entries[len(entries)-maxHistoryPushEntries:]
+}
+
+// eventPushLoop is the per-subscription pump that reads EventLog notifications
+// and streams entries to the WS client. It owns exactly one clientWG slot for
+// its entire lifetime (Add happens in completeSubscribe before go; Done runs
+// in the goroutine's defer).
+//
+// CLIENTWG CONTRACT (R49-CONCUR-RESUBSCRIBE-CLIENTWG): when resubscribeEvents
+// transparently swaps `sess` for a new process's session (the `!ok` arm
+// below), the loop keeps running in the same goroutine — we do NOT Add(1)
+// for the new subscription. This is correct because:
+//
+//  1. The lifetime being tracked is "this pushLoop goroutine", not "this
+//     particular EventLog subscription". A single Add/Done pair covers
+//     every successful resubscribe within the goroutine.
+//  2. resubscribeEvents installs the new `unsub` into c.subscriptions[key]
+//     under h.mu, replacing the stale one — so Hub.Shutdown walking
+//     c.subscriptions sees the current generation's unsub without any
+//     additional bookkeeping.
+//  3. The unsub → notify closure ensures resubscribeEvents returns ok=false
+//     on Shutdown (h.ctx.Done is checked), so the goroutine exits and
+//     the single deferred Done balances the single Add.
+//
+// If you ever split the resubscribe path into a new goroutine (e.g. to
+// parallelise multi-session fan-in), you MUST Add(1) for the new goroutine
+// and Done from its own defer — otherwise Shutdown's clientWG.Wait either
+// hangs (Add without Done) or panics with negative counter (Done without
+// Add). The guarantee is enforced by code shape, not by assertion; a
+// review that simply notes "+1 goroutine here" is insufficient without
+// also updating the WG pairing.
+func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan struct{}, sess *session.ManagedSession, lastTime int64) {
+	for {
+		select {
+		case _, ok := <-notify:
+			if !ok {
+				ok, newSess := h.resubscribeEvents(c, key, gen, &notify)
+				if !ok {
+					return
+				}
+				sess = newSess
+				// Catch up on events we missed during the transition.
+				// resubscribeEvents may consume one pending notification while
+				// probing newNotify (ok=true path) — if we didn't catch-up
+				// unconditionally here, those events would only surface on the
+				// next Append, which in an idle session may be seconds or more.
+				entries := sess.EventEntriesSince(lastTime)
+				if len(entries) > 0 {
+					entries = capHistoryBatch(entries)
+					data, err := marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
+					if err == nil {
+						c.SendRaw(data)
+					}
+					lastTime = entries[len(entries)-1].Time
+				}
+				continue
+			}
+			entries := sess.EventEntriesSince(lastTime)
+			if len(entries) == 0 {
+				continue
+			}
+			select {
+			case <-c.done:
+				return
+			default:
+			}
+			// Batch events into a single "history" message to reduce
+			// per-event JSON marshaling and WebSocket frame overhead.
+			// Cap the batch so a slow client that built up a long backlog
+			// doesn't see a single multi-MB push frame that starves the
+			// WS send channel — the dashboard already backfills older
+			// events via /api/sessions/events?before=. R68-PERF-H1.
+			entries = capHistoryBatch(entries)
+			data, err := marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
+			if err != nil {
+				continue
+			}
+			c.SendRaw(data)
+			lastTime = entries[len(entries)-1].Time
+		case <-c.done:
+			return
+		case <-h.ctx.Done():
+			// Hub shutdown: exit even if the client hasn't closed and the
+			// subscribed notify channel is stalled. Without this arm, a
+			// notify source that stops firing could park this goroutine
+			// past Shutdown, with no escape until conn.Close propagates
+			// through readPump — which may not happen if the socket is
+			// half-open.
+			return
+		}
+	}
+}
+
+// resubscribeEvents waits for a new process to be attached to the session and
+// re-subscribes to its EventLog. Returns (ok, currentSession). ok is false if
+// the client disconnects, the wait times out (resubscribeMaxAttempts ×
+// resubscribeInterval = 60s), or a newer subscription has taken over this
+// key (generation mismatch).
+func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-chan struct{}) (bool, *session.ManagedSession) {
+	// Timer.Reset reuses a single timer allocation across the iterations
+	// instead of allocating a Ticker and its runtime goroutine; resubscribe
+	// is a cold-ish path but client flap can trigger N simultaneous calls.
+	// resubscribeMaxAttempts × resubscribeInterval = 60s total window —
+	// see const godoc for the budget rationale.
+	timer := time.NewTimer(resubscribeInterval)
+	defer timer.Stop()
+
+	for i := range resubscribeMaxAttempts {
+		if i > 0 {
+			timer.Reset(resubscribeInterval)
+		}
+		select {
+		case <-c.done:
+			return false, nil
+		case <-h.ctx.Done():
+			return false, nil
+		case <-timer.C:
+		}
+
+		// Check if a newer subscription (from handleSubscribe) has taken over.
+		//
+		// R230C-PERF-8 (archive 2026-05-23): the ticket proposed dropping this
+		// h.mu.RLock and "comparing against the local gen parameter directly".
+		// That misreads the invariant — `gen` is the generation captured when
+		// resubscribeEvents started, and `c.subGen[key]` is the *current* per-
+		// client generation written by handleSubscribe under h.mu.Lock when a
+		// fresh subscribe takes over the same key. The lock is the visibility
+		// barrier that lets this stale-resubscribe goroutine observe the new
+		// generation and bail out; without it Go memory model gives no read
+		// guarantee on the map slot. Only ~12 RLock probes per resubscribe and
+		// the contention is bounded by the per-client subscription map, so the
+		// "免锁" optimisation would buy nothing and forfeit the supersede
+		// signal that lets stale loops self-terminate. Keep as-is.
+		h.mu.RLock()
+		currentGen := c.subGen[key]
+		h.mu.RUnlock()
+		if currentGen != gen {
+			return false, nil
+		}
+
+		// Re-check the router for the current session — spawnSession may have
+		// created a new ManagedSession, replacing the old one in the map.
+		currentSess := h.router.GetSession(key)
+		if currentSess == nil {
+			continue
+		}
+
+		newNotify, unsub := currentSess.SubscribeEvents()
+		// Check if the channel is immediately closed (process still nil).
+		select {
+		case _, ok := <-newNotify:
+			if !ok {
+				// Process still nil — clean up subscriber slot and keep waiting.
+				unsub()
+				continue
+			}
+			// Process is back and has events.
+		default:
+			// Channel is alive (not closed) — process is back.
+		}
+
+		// Update the subscription registration for this client.
+		//
+		// H8 (Round 163): capture the old unsub while holding h.mu but call
+		// it *after* releasing the lock. The current lock order is
+		// h.mu → EventLog.subMu (enforced by Hub.Shutdown's contract and the
+		// shutdown_lock_order_test.go tripwire), so calling oldUnsub() under
+		// h.mu is technically safe today. Releasing h.mu first removes a
+		// latent hazard: if oldUnsub() were ever extended to take additional
+		// locks (e.g. a future per-client audit mutex or a sub-layer WG
+		// protected by h.mu), calling it under h.mu would reintroduce a
+		// reverse acquisition order. Swap is a rare path (resubscribe
+		// collision), so the extra unlock/relock has no measurable cost.
+		h.mu.Lock()
+		if c.subscriptions == nil {
+			// Client was removed during Shutdown.
+			h.mu.Unlock()
+			unsub()
+			return false, nil
+		}
+		// Final generation check under write lock to prevent TOCTOU.
+		if c.subGen[key] != gen {
+			h.mu.Unlock()
+			unsub()
+			return false, nil
+		}
+		oldUnsub := c.subscriptions[key]
+		c.subscriptions[key] = unsub
+		h.mu.Unlock()
+		if oldUnsub != nil {
+			oldUnsub()
+		}
+
+		*notify = newNotify
+		return true, currentSess
+	}
+	// Timed out waiting for new process — notify client so the dashboard
+	// can surface a "subscription expired" indicator instead of silently
+	// showing stale state. Clean up the dead subscription slot so it doesn't
+	// count toward the per-connection cap.
+	//
+	// H8 (Round 163): same lock-order precaution — snapshot oldUnsub
+	// under h.mu, release the lock, then invoke it.
+	h.mu.Lock()
+	var staleUnsub func()
+	if c.subscriptions != nil {
+		if u, exists := c.subscriptions[key]; exists {
+			staleUnsub = u
+			delete(c.subscriptions, key)
+		}
+	}
+	h.mu.Unlock()
+	if staleUnsub != nil {
+		staleUnsub()
+	}
+	c.SendJSON(node.ServerMsg{Type: "session_state", Key: key, State: "ready", Reason: "subscription_timeout"})
+	return false, nil
+}

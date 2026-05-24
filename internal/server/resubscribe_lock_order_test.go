@@ -25,9 +25,11 @@ import (
 // "simplification" that moves oldUnsub() back under the lock fails
 // the build.
 func TestResubscribeEvents_OldUnsubReleasedOutsideMu(t *testing.T) {
-	src, err := os.ReadFile("wshub.go")
+	// R243-ARCH-2 split: resubscribeEvents and the H8 anchor comment moved
+	// to wshub_eventpush.go alongside eventPushLoop. Read that file.
+	src, err := os.ReadFile("wshub_eventpush.go")
 	if err != nil {
-		t.Fatalf("read wshub.go: %v", err)
+		t.Fatalf("read wshub_eventpush.go: %v", err)
 	}
 	text := string(src)
 
@@ -72,6 +74,6 @@ func TestResubscribeEvents_OldUnsubReleasedOutsideMu(t *testing.T) {
 	// Round number so future readers can locate this test.
 	if !regexp.MustCompile(`H8 \(Round 163\)`).MatchString(text) {
 		t.Error("H8 anchor comment missing. Keep `H8 (Round 163)` searchable " +
-			"in wshub.go so future reviewers land on this contract.")
+			"in wshub_eventpush.go so future reviewers land on this contract.")
 	}
 }
