@@ -584,9 +584,22 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 			}
 		}
 	} else {
-		// Guard against unbounded exempt session growth (e.g., many projects)
-		exemptCount := r.countExempt()
-		if exemptCount >= maxExemptSessions {
+		// Guard against unbounded exempt session growth (e.g., many projects).
+		//
+		// R242-ARCH-2 hard isolation: the per-namespace sub-quota check
+		// runs FIRST so a noisy cron chat (DefaultMaxJobsPerChat × N
+		// chats) can no longer push planner / sys stubs out of the
+		// shared pool. Only after the sub-quota passes do we apply the
+		// global maxExemptSessions ceiling as a relief valve for a
+		// future namespace added without explicit sub-quota wiring.
+		kind := exemptKind(key)
+		if kind != "" {
+			if perKind := r.countExemptByKind(kind); perKind >= exemptCapFor(kind) {
+				r.mu.Unlock()
+				return nil, fmt.Errorf("%w: %s namespace (%d)", ErrMaxExemptSessions, kind, exemptCapFor(kind))
+			}
+		}
+		if r.countExempt() >= maxExemptSessions {
 			r.mu.Unlock()
 			return nil, fmt.Errorf("%w (%d)", ErrMaxExemptSessions, maxExemptSessions)
 		}
@@ -1025,12 +1038,42 @@ func (r *Router) reconcileSessionActiveByBackendLocked() {
 	}
 }
 
-// countExempt returns the number of alive exempt (planner) sessions.
-// Caller must hold r.mu.
+// countExempt returns the total number of alive exempt sessions across
+// all namespaces. Caller must hold r.mu.
+//
+// R242-ARCH-2: kept for the global-cap relief-valve check in spawn.
+// Per-namespace gating goes through countExemptByKind so cron / planner
+// / sys quotas are isolated.
 func (r *Router) countExempt() int {
 	count := 0
 	for _, s := range r.sessions {
 		if s.exempt && s.isAlive() {
+			count++
+		}
+	}
+	return count
+}
+
+// countExemptByKind returns the alive exempt-session count for a single
+// namespace ("cron" / "project" / "sys"). Caller must hold r.mu. R242-
+// ARCH-2: the per-kind walk is O(N) like countExempt but typed against
+// the prefix family so a noisy cron chat (DefaultMaxJobsPerChat × N
+// chats) can no longer push planner / sys stubs out of the global pool.
+//
+// "" kind returns 0 (defensive; an exempt session whose key matches no
+// known prefix is a misconfiguration that countExempt also misses; a
+// future audit hook should panic on encountering one but the current
+// "log+continue" stance avoids a startup crash on operator misconfig).
+func (r *Router) countExemptByKind(kind string) int {
+	if kind == "" {
+		return 0
+	}
+	count := 0
+	for k, s := range r.sessions {
+		if !s.exempt || !s.isAlive() {
+			continue
+		}
+		if exemptKind(k) == kind {
 			count++
 		}
 	}

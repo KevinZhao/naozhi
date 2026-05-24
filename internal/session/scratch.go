@@ -57,7 +57,8 @@ const DefaultScratchTTL = 10 * time.Minute
 
 // DefaultScratchMax is the global concurrent-scratch cap. Each scratch owns
 // a real CLI process, so the pool shares Router.MaxProcs headroom — pick a
-// value that leaves room for main sessions. 20 mirrors maxExemptSessions.
+// value that leaves room for main sessions. 20 mirrors maxExemptSessions
+// (the global exempt ceiling; sub-quotas live in router_core.go now).
 const DefaultScratchMax = 20
 
 // Errors surfaced by ScratchPool callers. Kept as sentinels so HTTP handlers

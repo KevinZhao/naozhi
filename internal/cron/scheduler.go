@@ -306,14 +306,14 @@ const defaultExecTimeout = 5 * time.Minute
 // SchedulerConfig.MaxJobsPerChat (zero / unset falls back to this
 // default — no way to "disable" the cap without rebuilding).
 //
-// Relationship to exempt pool (BL2 acknowledged design):
+// Relationship to exempt pool:
 // Every cron job calls session.Router.RegisterCronStubWithChain at scheduler
-// Start / AddJob time and consumes 1 slot from session.maxExemptSessions
-// (currently 20). At DefaultMaxJobsPerChat=10 × 2 busy chats, the exempt
-// pool is fully consumed and planner/scratch exempt sessions may be
-// starved. This is an acknowledged trade-off: a separate
-// maxCronExemptSessions reserve or per-chat fair-share eviction is the
-// escape hatch if pressure materialises.
+// Start / AddJob time and consumes 1 slot from session.maxCronExempt — a
+// dedicated cron-only sub-quota inside the global maxExemptSessions pool
+// (R242-ARCH-2). Planner and sys daemon stubs have their own sub-quotas
+// (maxProjectExempt / maxSysExempt) and can no longer be starved by a
+// noisy cron chat. DefaultMaxJobsPerChat still bounds per-chat usage so
+// one loud group cannot saturate the cron quota by itself.
 const DefaultMaxJobsPerChat = 10
 
 // workDirReachable reports whether workDir exists and resolves to a
