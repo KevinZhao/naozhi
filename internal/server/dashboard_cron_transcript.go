@@ -606,12 +606,19 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 			Subtype string `json:"subtype"`
 			Message string `json:"message"`
 		}
-		if err := json.Unmarshal(ev.Message, &sys); err != nil {
-			// Don't change downgrade behavior — sys stays zero-valued
-			// so the error-turn branch below is skipped naturally. Just
-			// surface the parse failure for ops visibility.
-			slog.Debug("cron transcript: system event unmarshal failed; skipping",
-				"err", err)
+		// Many system events ship without a "message" field (init,
+		// queue-op, etc.); json.Unmarshal(nil, &sys) would always fail
+		// with "unexpected end of JSON input" and flood Debug logs.
+		// Skip the unmarshal entirely when there is nothing to parse —
+		// sys stays zero-valued so the error-turn branch is naturally
+		// skipped, matching the existing downgrade behavior.
+		if len(ev.Message) > 0 {
+			if err := json.Unmarshal(ev.Message, &sys); err != nil {
+				// Surface real parse failures (malformed JSON in
+				// "message") for ops visibility.
+				slog.Debug("cron transcript: system event unmarshal failed; skipping",
+					"err", err)
+			}
 		}
 		if sys.Subtype == "error" && sys.Message != "" {
 			out = append(out, transcriptTurn{
