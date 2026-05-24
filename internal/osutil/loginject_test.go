@@ -199,11 +199,10 @@ func TestSanitizeForLog_EnforcesMaxLen(t *testing.T) {
 		t.Parallel()
 		in := strings.Repeat("a", 64)
 		got := SanitizeForLog(in, 64)
+		// Single equality check: got==in implies both content and length;
+		// the prior duplicate len check was redundant. R244-CR-P2.
 		if got != in {
 			t.Errorf("SanitizeForLog(64×'a', cap=64) = %q (len=%d), want unchanged input (len=64)", got, len(got))
-		}
-		if len(got) != 64 {
-			t.Errorf("SanitizeForLog(64×'a', cap=64) len = %d, want 64", len(got))
 		}
 	})
 
@@ -211,8 +210,12 @@ func TestSanitizeForLog_EnforcesMaxLen(t *testing.T) {
 		t.Parallel()
 		in := strings.Repeat("a", 65)
 		got := SanitizeForLog(in, 64)
-		if len(got) != 64 {
-			t.Errorf("SanitizeForLog(65×'a', cap=64) len = %d, want 64", len(got))
+		// Assert both length AND content: a future bug returning 64 bytes
+		// of garbage (reversed buffer, swapped pool entry) would pass a
+		// len-only check but fail this equality. R244-CR-P2.
+		want := strings.Repeat("a", 64)
+		if got != want {
+			t.Errorf("SanitizeForLog(65×'a', cap=64) = %q (len=%d), want %q (len=64)", got, len(got), want)
 		}
 	})
 }
