@@ -76,40 +76,6 @@ func normalizeSlashCommand(trimmed string) string {
 	return strings.TrimRightFunc(strings.ToLower(trimmed[:sp])+trimmed[sp:], unicode.IsSpace)
 }
 
-// knownSlashCommands lists every slash command the dispatcher recognises.
-// Kept in source order matching dispatchCommand's switch arms below so a
-// future table-driven refactor (R218-CR-1) has a single source-of-truth
-// to iterate over. Tests can range over this set to assert every command
-// has at least one coverage probe rather than relying on grep over the
-// switch body.
-//
-// Note: this is a sentinel set, not a function-pointer table. Each
-// command's switch arm has unique pre-handler logic (project guard for
-// /cd, args-vs-bare split for /urgent, scheduler-nil short-circuit for
-// /cron) that doesn't fit a uniform handler signature. Lifting those
-// branches into the table would obscure the per-command preconditions
-// rather than centralise them.
-var knownSlashCommands = []string{
-	"/cron", "/help", "/cd", "/pwd",
-	"/project", "/new", "/clear", "/stop", "/urgent",
-}
-
-// slashCommandName returns the canonical leading-token of trimmed (the
-// part before the first ASCII space) lower-cased, or the empty string if
-// trimmed does not start with "/". Callers use this to bucket commands
-// without re-implementing the prefix/equality test pattern in each case.
-// Pure helper, kept small so it can be unit-tested independently of the
-// dispatcher state machine.
-func slashCommandName(trimmed string) string {
-	if !strings.HasPrefix(trimmed, "/") {
-		return ""
-	}
-	if sp := strings.IndexByte(trimmed, ' '); sp >= 0 {
-		return strings.ToLower(trimmed[:sp])
-	}
-	return strings.ToLower(trimmed)
-}
-
 // dispatchCommand handles slash commands (/help, /new, /clear, /cron, /cd, /pwd, /project).
 // Returns true if the message was a command and was handled.
 //
@@ -118,10 +84,8 @@ func slashCommandName(trimmed string) string {
 // dispatching, /urgent splits empty-args (usage hint) from /urgent <text>,
 // /cron short-circuits when scheduler is nil — that don't compress into a
 // uniform `func(ctx, msg, args)` signature without losing the pre-handler
-// guards inline. The sentinel set knownSlashCommands above keeps
-// "is this string a recognised command?" testable without forcing a
-// premature handler-table abstraction. If a future command grows to >12
-// arms or the per-arm preconditions become uniform, revisit the table.
+// guards inline. If a future command grows to >12 arms or the per-arm
+// preconditions become uniform, revisit the table-driven refactor.
 func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) bool {
 	trimmed = normalizeSlashCommand(trimmed)
 	switch {
