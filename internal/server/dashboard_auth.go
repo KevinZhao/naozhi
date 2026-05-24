@@ -21,6 +21,27 @@ import (
 type AuthHandlers struct {
 	dashboardToken string
 	cookieSecret   []byte
+	// cookieGen is an opaque per-construction generation marker mixed into
+	// the cookieMAC HMAC input. Two roles:
+	//
+	//   1. Per-process restart rotation: cookieSecret is regenerated on
+	//      each fresh stateDir, but operators that share stateDir across
+	//      restarts (the common case) keep the same secret — meaning a
+	//      pre-restart MAC would still verify after restart. Mixing
+	//      cookieGen ensures every (process, secret, token) triple yields
+	//      a distinct MAC even when the first two are stable.
+	//
+	//   2. Future hot-reload of dashboardToken: the rotation handler can
+	//      bump cookieGen to immediately invalidate every outstanding
+	//      cookie without rotating cookieSecret (which would also kick
+	//      every other authenticated surface). Today this field is set
+	//      once at construction; the bump path is left for the eventual
+	//      rotation RFC.
+	//
+	// R247-SEC-17 / R245-SEC-2 / R243-SEC-13 / R242-SEC-5 — same root
+	// cause across four review rounds: HMAC(secret, token) lacked any
+	// freshness input.
+	cookieGen string
 	// loginLimiter is an O(1) LRU-backed per-IP limiter. At 10k attacking IPs
 	// the previous two-pass O(n) scan was done under a single mutex and could
 	// block legitimate logins; the ratelimit package does insertion, LRU
@@ -122,12 +143,21 @@ func (a *AuthHandlers) unauthDashAllow(ip string) bool {
 // today, but the residual MAC was a regression-bait. Returning "" makes
 // the no-token contract explicit at the source so future callers cannot
 // accidentally accept a cookie value that "matches" the empty MAC.
+//
+// R247-SEC-17: HMAC input now includes cookieGen so the MAC rotates on
+// every process restart (and any future hot-reload that bumps cookieGen)
+// even when stateDir / cookieSecret are stable. The serialised input uses
+// a length-prefixed framing (`token || \x00 || cookieGen`) so a malicious
+// (token, gen) split that concatenates to the same bytes cannot collide
+// with a legitimate split.
 func (a *AuthHandlers) cookieMAC() string {
 	if a.dashboardToken == "" {
 		return ""
 	}
 	mac := hmac.New(sha256.New, a.cookieSecret)
 	mac.Write([]byte(a.dashboardToken))
+	mac.Write([]byte{0}) // domain separator: token || \x00 || cookieGen
+	mac.Write([]byte(a.cookieGen))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 

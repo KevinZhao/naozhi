@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -584,6 +585,15 @@ func buildServer(opts ServerOptions) *Server {
 	}
 
 	cookieSecret := loadOrCreateCookieSecret(opts.StateDir)
+	// R247-SEC-17: cookieGen is mixed into the auth-cookie HMAC alongside
+	// the dashboard token so every restart produces a fresh MAC even when
+	// stateDir is shared (the common operator setup). nanoseconds are
+	// unique within the process and cheap to produce — we don't need
+	// crypto-grade entropy because cookieSecret already supplies that;
+	// cookieGen exists only to break MAC equivalence across (re)starts
+	// and future hot-reloads. Future rotation handler can bump this field
+	// at runtime to invalidate every outstanding cookie atomically.
+	cookieGen := strconv.FormatInt(time.Now().UnixNano(), 10)
 
 	// Construct KeyResolver once and share across dispatcher (wired in
 	// Start), hub, and ProjectHandlers. project.NewDataSource returns
@@ -627,6 +637,7 @@ func buildServer(opts ServerOptions) *Server {
 		auth: &AuthHandlers{
 			dashboardToken:    opts.DashboardToken,
 			cookieSecret:      cookieSecret,
+			cookieGen:         cookieGen,
 			loginLimiter:      newLoginLimiter(),
 			wsUpgradeLimiter:  newWSUpgradeLimiter(),
 			unauthDashLimiter: newWSUpgradeLimiter(), // same bucket shape: 60/min sustained, 20 burst — fits human refresh cadence, blocks scanners. R230C-SEC-12.
