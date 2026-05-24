@@ -10,7 +10,7 @@ const truncatedSuffix = "…[truncated]"
 
 // truncateWithSuffix returns s rune-truncated to maxRunes, appending
 // truncatedSuffix only when the input was actually shrunk. R234-CR-1:
-// previously sanitiseRunResult / recordResultP0WithSanitised / truncateForRetry
+// previously sanitiseRunResult / recordResultP0WithSanitised
 // each open-coded the same `if shrunk < s { s = trimmed + truncatedSuffix }`
 // pattern, so adding a "…[shortened]" variant or changing the trim-on-equal
 // rule required hunting three sites. Centralised here so future tweaks are
