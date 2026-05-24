@@ -507,9 +507,17 @@ func (s *Scheduler) Start() error {
 	if err != nil {
 		// R241-ARCH-2: on load failure, release the idempotency latch so
 		// the operator can retry Start() after fixing the store file.
-		// startedAtNanos already follows the same retry contract (see
-		// comment above its Store).
+		// R246-CR-246: also reset startedAtNanos. The original comment
+		// above the Store claimed "下次重试会覆盖" but that only holds if
+		// the next Start() actually succeeds quickly. If retry is delayed,
+		// the stale startedAtNanos timestamp would feed HasMissedSchedule's
+		// startup-suppression window (currently NOT yet running because
+		// started=false but exposed via StartedAt() to callers like
+		// dashboard / metrics) and report a false "running since N min ago"
+		// state. Clearing it keeps StartedAt() == zero until a Start() that
+		// actually hands off to cron runner.
 		s.started.Store(false)
+		s.startedAtNanos.Store(0)
 		return fmt.Errorf("load cron store: %w", err)
 	}
 
