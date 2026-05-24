@@ -187,7 +187,8 @@ const (
 	ErrClassWorkDirUnreachable ErrorClass = "workdir_unreachable"
 	ErrClassWorkDirOutsideRoot ErrorClass = "workdir_outside_root"
 	ErrClassOverlapSkipped     ErrorClass = "overlap_skipped"
-	ErrClassPausedConcurrent   ErrorClass = "paused_concurrent"
+	// reserved; not yet emitted by any execute path
+	ErrClassPausedConcurrent ErrorClass = "paused_concurrent"
 	// ErrClassPanic is reserved for the future panic-recovery path
 	// (P3, not yet implemented); finishRun does not emit it today.
 	ErrClassPanic ErrorClass = "panic"
