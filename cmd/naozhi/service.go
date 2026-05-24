@@ -93,7 +93,10 @@ func runInstall(args []string) {
 	if err != nil {
 		fatalf("find binary path: %v", err)
 	}
-	binary, _ = filepath.EvalSymlinks(binary)
+	// EvalSymlinks 失败时回退到原始路径（典型场景：binary 通过非符号链接路径运行）
+	if resolved, err := filepath.EvalSymlinks(binary); err == nil {
+		binary = resolved
+	}
 
 	switch runtime.GOOS {
 	case "linux":
