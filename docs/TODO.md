@@ -124,7 +124,7 @@
 - [ ] **R241-PERF-2 [SIMPLE]** `internal/cron/runstore.go:339-344` — `cacheHeadPush` 每次 O(N) shift（append+copy），keepCount=200 在每次 cron 落盘触发；R235-PERF-3 跟踪 ring buffer 但未实施。建议 ring buffer 把 Append 热路径降 O(1)。
 - [ ] **R241-PERF-3 [SIMPLE]** `internal/server/dashboard_cron.go:443-544` — `handleList` 1Hz 轮询路径里对每个非 paused job 都跑 `cron.HasMissedSchedule`，内部含 `cronParser.Parse`（regexp NFA）+ 2 次 `sched.Next`；50 jobs/s 重复 Parse。建议 `JobWithNextRun` 预解析 schedule 或缓存到 Job 字段。
 - [ ] **R241-PERF-4 [SIMPLE]** `internal/cron/runstore.go:463-539` — `diskListNewestFirst` 在 before 非零分页查询时对每条进入 readRun 做完整 JSON Unmarshal；建议在 summary 层持久化 StartedAt 或在 mtime cutoff 前过滤候选。
-- [ ] **R241-PERF-5 [SIMPLE]** `internal/cli/process_readloop.go:572` — `dispatchProtocolEvent` task_started 分支为每事件 `go linker.Resolve(...)` 并拷 8KB Description；resolveSem 限流但仍裸 goroutine 调度。建议改 worker pool。
+- [~] **R241-PERF-5 [SIMPLE]** `internal/cli/process_readloop.go:572` — `dispatchProtocolEvent` task_started 分支为每事件 `go linker.Resolve(...)` 并拷 8KB Description；resolveSem 限流但仍裸 goroutine 调度。建议改 worker pool。
 - [ ] **R241-PERF-6 [SIMPLE]** `internal/cron/runstore.go:770-784` — `cacheTrimAfterDisk` 每次新分配 keep slice，热路径每次堆分配。建议复用底层数组（`runs[:0]` + append），仅 cap 缩减时 make。
 - [ ] **R241-PERF-7 [SIMPLE]** `internal/server/dashboard_cron_transcript.go:479` — `flattenJSONLEvent` 每行 `make([]transcriptTurn, 0, 2)`；500 行 cron 日志 = 500 次堆分配。建议改 caller-provided scratch slice append。
 - [ ] **R241-PERF-8 [REFACTOR]** `internal/session/store.go:117-213` — `saveStore` 在 map 迭代中串行多 atomic load；建议抽 `sessionToStoreEntry` helper，逻辑不变但可独立 benchmark + 后续并行化（跨 ≥3 文件 + DI）。
@@ -173,7 +173,7 @@
 
 ### 性能 — 本批新发现
 
-- [ ] **R240-PERF-2 — `cli/eventlog.go:513-654 applyEntryStateLocked` O(N) 扫描 turnAgents/bgAgents（P2）**：`task_start`/`task_progress`/`task_done` 每事件均 `range` 切片定位 toolUseID；TeamCreate fan-out 50 subagent 时单轮 N×50 事件触发 O(N²)，eventlog 锁内 O(N²) 扫描在订阅者多时阻塞 broadcast。建议维护 `toolUseID→index` map：append agent 时更新，result/user 时整体清空。改动局限 eventlog 包但触及 turnAgents/bgAgents 字段语义。`[BREAKING-LOCAL]`
+- [~] **R240-PERF-2 — `cli/eventlog.go:513-654 applyEntryStateLocked` O(N) 扫描 turnAgents/bgAgents（P2）**：`task_start`/`task_progress`/`task_done` 每事件均 `range` 切片定位 toolUseID；TeamCreate fan-out 50 subagent 时单轮 N×50 事件触发 O(N²)，eventlog 锁内 O(N²) 扫描在订阅者多时阻塞 broadcast。建议维护 `toolUseID→index` map：append agent 时更新，result/user 时整体清空。改动局限 eventlog 包但触及 turnAgents/bgAgents 字段语义。`[BREAKING-LOCAL]`
 - [~] **R240-PERF-3 — `cli/eventlog.go:898-1010 AppendBatch` 历史重放路径 agent 状态更新无意义（P2）**：InjectHistory 一次 500 条 batch 在写锁内逐条调 `applyEntryStateLocked`，但历史重放不会触发 `task_done` 回调，agent state 更新对 replay 无观测价值；500 次 switch + agent 扫描在锁内放大 R240-PERF-2 的 O(N²) 问题。建议为 replay batch 加 `isReplay bool` 参数跳过 agent state 更新；或仅对 task_*/result/user 类型才调 applyEntryStateLocked。`[REFACTOR]`
 - [ ] **R240-PERF-4 — `session/eventlog_bridge.go:83-113` 单条 entry fast path 仍 alloc（P2）**：~~pooled encoder 已避免 json.Marshal alloc，但 `make([]byte, len(raw)) + copy` 每条 entry 仍分配；`[1]persist.Entry` stack 数组配合 append 是否真的避免逃逸需 `-gcflags=-m` 验证。建议引入 byte slice pool 减 GC 压力，或确认逃逸再决定是否值得复杂化。~~ 已验证逃逸 2026-05-24（cron-fix-F4，eventlog_bridge.go:78-94 godoc 锁定 `-gcflags=-m` 结论）：`make([]byte, len(raw))` 和 `append(stackArr[:0], ...)` 都因 persisterSink 文档化「retain entries」契约逃逸到 heap，stack array 把戏失败。Pool 改造需 PersistSink 改 copy-on-take 契约 — 真正的 [BREAKING-LOCAL]，跨包重写所有 sink 实现，留作 P1 设计而不是 P2 直修。降优先级：剩余动作为 PersistSink RFC 设计而非"小步铺路"。`[BREAKING-LOCAL]` `[NEEDS-DESIGN]`
 - [~] **R240-PERF-5 — `dispatch/status.go:79-122 formatToolUse` 重复 json.Unmarshal（P3）**：Read/Edit/Write 三个 case 各自声明同形 `filePathInput {FilePath string}` struct 重复解码三次。建议提前一次性 Unmarshal 到 filePathInput，case 内只做格式化。`[REFACTOR]` 可下轮直接修
@@ -254,7 +254,7 @@
 - [ ] **R240-CR-10 — `internal/config/config.go:477,551,584,1092` applyDefaults/parseDurations/validateConfig/containsEnvPlaceholder 缺 godoc [REFACTOR]（P2）**：方案：补流水线契约说明（first-error vs errors.Join）。Breaking：否。
 - [~] **R240-CR-11 — `internal/session/managed.go:1577` slog 消息 "InjectHistory:" 大写函数前缀风格不一致 [REFACTOR]（P3）**：与 router_cleanup/router_discovery 类似 ~3 处。方案：统一小写。Breaking：否。
 - [ ] **R240-CR-12 — `internal/cron/scheduler.go:2943` notifyTarget vs NotifyTarget vs deliverNotice 三层命名混淆 [REFACTOR]（P3）**：方案：私有方法重命名为 sendNoticeToChat 或 sendViaPlatform。Breaking：否。
-- [ ] **R240-CR-13 — `internal/cli/wrapper.go:451` shimLineReader.ReadLine 缺 godoc [REFACTOR]（P3）**：实现含非显然 shim 协议解包。方案：补协议契约。Breaking：否。
+- [~] **R240-CR-13 — `internal/cli/wrapper.go:451` shimLineReader.ReadLine 缺 godoc [REFACTOR]（P3）**：实现含非显然 shim 协议解包。方案：补协议契约。Breaking：否。
 - [ ] **R240-CR-14 — `internal/server/dashboard_send.go|dashboard_session.go|dashboard_cron.go` 3 文件超 800 行 [REFACTOR]（P3）**：方案：按 endpoint 拆子文件。Breaking：否。
 - [ ] **R240-CR-15 — `internal/cron/runstore.go` 856 行超上限 [REFACTOR]（P3）**：方案：拆 runstore_gc.go + runstore_cache.go。Breaking：否。
 

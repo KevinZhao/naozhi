@@ -1278,6 +1278,7 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	var save func()
 	var j *Job
+	var found bool
 	var perr error
 	func() {
 		s.mu.Lock()
@@ -1288,11 +1289,15 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 			return
 		}
+		found = true
 		s.deleteJobLocked(j)
 		save, perr = s.persistJobsLocked()
 	}()
 
-	if j == nil {
+	// R241-GO-2: explicit `found` separates the not-found sentinel from
+	// any future caller path that might legitimately set j=nil while the
+	// lookup succeeded; relying on j==nil conflated those two cases.
+	if !found {
 		return nil, perr
 	}
 	// R238-GO-3: deleteJobLocked already mutated in-memory state + router stub.
@@ -1317,11 +1322,11 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 	var save func()
 	var j *Job
+	var ok bool
 	var perr error
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		var ok bool
 		j, ok = s.jobs[id]
 		if !ok {
 			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
@@ -1329,13 +1334,16 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 		}
 		if err := s.pauseJobLocked(j); err != nil {
 			perr = err
+			ok = false
 			j = nil
 			return
 		}
 		save, perr = s.persistJobsLocked()
 	}()
 
-	if j == nil {
+	// R241-GO-3: explicit `ok` mirrors the lookup result; j==nil is no
+	// longer overloaded as the not-found sentinel.
+	if !ok {
 		return nil, perr
 	}
 	if perr != nil {
@@ -1349,11 +1357,11 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 	var save func()
 	var j *Job
+	var ok bool
 	var perr error
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		var ok bool
 		j, ok = s.jobs[id]
 		if !ok {
 			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
@@ -1361,13 +1369,16 @@ func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 		}
 		if err := s.resumeJobLocked(j); err != nil {
 			perr = err
+			ok = false
 			j = nil
 			return
 		}
 		save, perr = s.persistJobsLocked()
 	}()
 
-	if j == nil {
+	// R241-GO-3: explicit `ok` mirrors the lookup result; j==nil is no
+	// longer overloaded as the not-found sentinel.
+	if !ok {
 		return nil, perr
 	}
 	if perr != nil {
