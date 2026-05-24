@@ -122,7 +122,7 @@
 - [ ] **R237-GO-5 — `cli.dispatchProtocolEvent` 241 行（P2）**：metadata / passthrough hooks / linker / EventLog / reconnect / killCh 6 关注点。建议提取 `notifyLinker(ev, nowMS)` 与 `deliverEvent(ev, now, log) bool`。Non-breaking。
 - [ ] **R237-GO-6 — `cli.shimLineReader.ReadLine` 无 ctx 检查（P2）**：shim 连续发非 stdout/cli_exited 消息时无法在 proto.Init 超时场景提前退出。建议加 `ctx context.Context` 字段。Breaking: 是（接口变更）。
 - [ ] **R237-GO-7 — `cmd/naozhi/main.go:96` `readJSONWithRetry` 阻塞 main goroutine（P2）**：`time.Sleep(sleep)` 重试不响应 ctx 取消。建议加 ctx 参数 + select 替换 Sleep。Breaking: 是（调用点更新）。
-- [ ] **R237-GO-8 — `dispatch.ownerLoop` defer 顺序与 panic 路径耦合（P2）**：`defer NotifyIdle()` 在 `defer recover()` 之后注册，panic 路径下 NotifyIdle 在 handleOwnerLoopPanic 之后调用。建议把 NotifyIdle defer 移到 recover defer 之前。Non-breaking。
+- [~] **R237-GO-8 — `dispatch.ownerLoop` defer 顺序与 panic 路径耦合（P2）**：`defer NotifyIdle()` 在 `defer recover()` 之后注册，panic 路径下 NotifyIdle 在 handleOwnerLoopPanic 之后调用。建议把 NotifyIdle defer 移到 recover defer 之前。Non-breaking。
 - [ ] **R237-GO-9 — `shim.Manager.StopAll(ctx)` 接收 ctx 但从不使用（P3）**：误导调用方。建议移除 ctx 参数或实现 ctx-aware drain。Breaking: 是（移参数）。
 - [~] **R237-GO-10 — `process.go:411` `setDeathReason` upgrade-path 死代码（P3）**：注释 "not taken today" 自陈死代码。建议删除 upgrade-path（425-428 行）。Non-breaking。
 - [~] **R237-GO-11 — `cli.captureWriterPool` 大 payload 污染 sync.Pool（P3）**：11MB 图片消息后 backing array 留在 pool。建议 Put 前检查 cap > 64KiB 跳过。Non-breaking。
@@ -159,10 +159,10 @@
 
 - [ ] **R237-CR-3 — `shim.handleClient` 327 行 / `shim.Run` 286 行 / `upstream.handleRequest` 525 行 14-case switch（P1）**：超长函数。建议 handleClient 拆 authenticateClient/replayHistory/runCommandLoop；Run 提取 waitAfterExit；handleRequest 按 case 拆 handle&lt;Method&gt;。Non-breaking。
 - [ ] **R237-CR-4 — package-level mutable var `handleConnDrainBudget` / `circuitBreakerThreshold` / `circuitBreakerBackoff` / `maxWriteLineBytes` 测试直接赋值（P1）**：`-race` 下 data race。建议 atomic.Int64/Value 或通过 ConnectorConfig 传入。Breaking: 否（atomic）/ 是（config）。
-- [ ] **R237-CR-5 — shim cli_exited / watchdog.Fired 两段 select 结构完全相同（P2）**：60s exitTimer + 嵌套 reconnectTimer 逻辑逐字相同。建议提取 `waitForReattach(acceptCh, idleTimeout, reason)`。Non-breaking。
+- [~] **R237-CR-5 — shim cli_exited / watchdog.Fired 两段 select 结构完全相同（P2）**：60s exitTimer + 嵌套 reconnectTimer 逻辑逐字相同。建议提取 `waitForReattach(acceptCh, idleTimeout, reason)`。Non-breaking。
 - [ ] **R237-CR-6 — upstream send/takeover/close_discovered workspace 路径验证三处重复（P2）**：EvalSymlinks + Clean + IsAbs + HasPrefix(allowedRoot)。建议 `sanitizeWorkspacePath(raw, defaultWorkspace)` 共用。Non-breaking。
-- [ ] **R237-CR-7 — shim.Run 内 `60 * time.Second` 裸字面量重复 4 次（P2）**：建议 `const postExitReatachWindow = 60 * time.Second`。Non-breaking。
-- [ ] **R237-CR-8 — shim.shimLogFilePtr package-level atomic（P2）**：同进程多 shim（测试）互覆。建议改 Run 局部变量 + closure。Non-breaking。
+- [~] **R237-CR-7 — shim.Run 内 `60 * time.Second` 裸字面量重复 4 次（P2）**：建议 `const postExitReatachWindow = 60 * time.Second`。Non-breaking。
+- [~] **R237-CR-8 — shim.shimLogFilePtr package-level atomic（P2）**：同进程多 shim（测试）互覆。建议改 Run 局部变量 + closure。Non-breaking。
 - [ ] **R237-CR-9 — project.UnbindAllChat slice 就地复用底层数组（P2）**：单次调用无害但模式不一致。建议改 `make([]ChatBinding, 0, len(...))` 或 slices.DeleteFunc。Non-breaking。
 - [ ] **R237-CR-10 — TODO `node/protocol.go:33` R214-CODE-6 状态需确认（P2）**：核实是否仍 open；若已归档则删除注释。Non-breaking。
 - [ ] **R237-CR-11 — `shim.StartShimWithBackend` 208 行（P2）**：key 校验/slot 预留/argv 构造/socket 预检/进程启动/ready 解析/token 解码/连接/cgroup/map 更新 多阶段。建议提取 `buildShimArgs` + `waitForShimReady`。Non-breaking。
@@ -187,7 +187,7 @@
 - [ ] **R236-SEC-07 — cron prompt 持久化路径未拦截 bidi 字符（P2）**: `internal/cron/scheduler.go:2143-2144` 调 ResolveAgent 后，cleanText 经 sanitiseRunResult 写入 IM 通知，bidi（U+202A-202E/2066-2069）可翻转 IM 渲染。方案：loadJobs 的 containsCronC0 加 bidi/LS/PS 检查。Breaking：否。
 - [ ] **R236-SEC-08 — handleList 1Hz 全量返回完整 prompt（P2）**: `internal/server/dashboard_cron.go:446-454` 50 jobs × 8 KiB = 每秒 400 KiB，token 泄漏后单次 GET 即拉走所有 prompt。方案：列表截断 256 字节，详情走 GET /api/cron/{id}；前端搜索改服务端。Breaking：是（前端需调整）。
 - [ ] **R236-SEC-10 — cookie_secret WriteFile 失败仅 slog.Warn 静默降级（P2）**: `internal/server/server.go:295-354` MkdirAll/WriteFile 失败 fallthrough 用内存 secret，导致每次重启所有会话失效。方案：升级为 slog.Error 或返回 fatal error。Breaking：是（启动行为）。
-- [ ] **R236-SEC-11 — moveToShimsCgroup busctl args 缺 scope 名字符集校验（P3）**: `internal/shim/manager_linux.go:106-130` shimPID 当前来源安全，但 buildBusctlArgs 缺 scope 名正则验证，未来重构有注入隐患。方案：scope name 正则 `[a-zA-Z0-9\-.]` 验证。Breaking：否。
+- [~] **R236-SEC-11 — moveToShimsCgroup busctl args 缺 scope 名字符集校验（P3）**: `internal/shim/manager_linux.go:106-130` shimPID 当前来源安全，但 buildBusctlArgs 缺 scope 名正则验证，未来重构有注入隐患。方案：scope name 正则 `[a-zA-Z0-9\-.]` 验证。Breaking：否。
 - [ ] **R236-SEC-13 — handleRunTranscript run.WorkDir 未做 C0/bidi 验证（P3）**: `internal/server/dashboard_cron_transcript.go:239` ClaudeProjectSlug(run.WorkDir) 编码若不完全转义路径分隔符可能产生 ../。方案：调 ClaudeProjectSlug 前对 WorkDir 加 utf8.ValidString + IsLogInjectionRune 检查。Breaking：否。
 - [ ] **R236-SEC-14 — 主 dashboard CSP `img-src` 含 `data:`（P3）**: `internal/server/dashboard.go:486` 在 R236-SEC-02 unsafe-inline 存在前提下，data: URI 可被用作 XSS 数据外泄通道。方案：与 R236-SEC-02 一并升级 CSP 时收紧 img-src 为 `'self' blob:`。Breaking：否（需确认前端无合法 data: 图片）。
 - [ ] **R236-SEC-15 — notifyTarget chunk × retry 复合超时可能超 30s 预算（P3）**: `internal/cron/scheduler.go:2845-2879` ReplyWithRetry 内部超时未必使用 replyCtx 剩余时间。方案：限制最大 chunk 数（如 5）+ 确认 ReplyWithRetry 使用传入 ctx。Breaking：否。
@@ -219,7 +219,7 @@
 ### 代码质量 / 架构（剩余，挑选高价值）
 
 - [ ] **R236-QA-03 — UpdateJob 在 s.mu.Lock 下调 cron.Add/Remove 可能锁顺序倒置（P1）**: `internal/cron/scheduler.go:1383-1397` 与 ListAllJobsWithNextRun 注释揭示的锁顺序冲突。pauseJobLocked/resumeJobLocked 同样存在。方案：研究 robfig/cron v3 锁语义；不安全则参照 ListAllJobsWithNextRun 模式释锁后操作 cron。Breaking：否。
-- [ ] **R236-QA-05 — sysession DaemonRun ErrorClass 缺 Canceled 枚举（P2）**: `internal/sysession/run.go:152` State=canceled 但 ErrorClass="" 与成功无法区分。方案：新增 DaemonErrorClassCanceled 枚举值。Breaking：否（wire format）。
+- [~] **R236-QA-05 — sysession DaemonRun ErrorClass 缺 Canceled 枚举（P2）**: `internal/sysession/run.go:152` State=canceled 但 ErrorClass="" 与成功无法区分。方案：新增 DaemonErrorClassCanceled 枚举值。Breaking：否（wire format）。
 - [ ] **R236-QA-09 — auto_titler 手写 insertion sort 维护风险（P2）**: `internal/sysession/auto_titler.go:280-284` `>=` 一改即死循环。方案：slices.SortFunc + batchPerTick ≤100 上限。Breaking：否。
 - [ ] **R236-QA-13 — readJSONWithRetry 不区分 file-missing vs JSON-invalid（P2）**: `cmd/naozhi/main.go:97-112` 损坏 settings.json 仅 Warn。方案：errors.Is(fs.ErrNotExist) 走 Warn 其余走 Error 提示运维。Breaking：否。
 - [~] **R236-QA-16 — loadJobs 缺 Schedule/WorkDir 字段验证（P3）**: `internal/cron/store.go:109-153` 仅校 ID/Prompt/Title/Backend；超长 Schedule + 非 UTF-8 WorkDir 进 slog 可 log-injection。方案：与现有 prompt/title 验证对齐加 len + utf8.ValidString。Breaking：否。

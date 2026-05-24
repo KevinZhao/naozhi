@@ -526,6 +526,13 @@ func (d *Dispatcher) ownerLoop(
 	// it here costs exactly one alloc per ownerLoop regardless of drain
 	// depth. R61-PERF-12.
 	lg = lg.With("key", key, "agent", agentID)
+	// Defer order matters: defers run LIFO. We want NotifyIdle to fire
+	// AFTER handleOwnerLoopPanic on the panic path so the router's idle
+	// transition observes a quiesced (post-recovery) state — if NotifyIdle
+	// ran first, sysession watchers could see "idle" while the panic-reply
+	// goroutine inside handleOwnerLoopPanic is still attempting platform
+	// I/O. Register NotifyIdle FIRST (so it runs LAST). R237-GO-8.
+	defer d.router.NotifyIdle()
 	defer func() {
 		if r := recover(); r != nil {
 			// R230-CQ-11: pass the enriched ownerLoop logger so the panic
@@ -537,7 +544,6 @@ func (d *Dispatcher) ownerLoop(
 			d.handleOwnerLoopPanic(key, msg, r, lg)
 		}
 	}()
-	defer d.router.NotifyIdle()
 
 	// Process first message.
 	d.sendAndReply(ctx, key, first.Text, first.Images, agentID, opts, msg, lg, true)
