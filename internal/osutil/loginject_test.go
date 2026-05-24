@@ -188,6 +188,33 @@ func TestSanitizeForLog_EnforcesMaxLen(t *testing.T) {
 	if strings.ContainsAny(got, "\n\r") {
 		t.Errorf("SanitizeForLog(hostile, cap=64) still contains newlines: %q", got)
 	}
+
+	// R243-CR-P3-5: boundary at exactly maxLen and maxLen+1. The cap is an
+	// inclusive upper bound — len(s) == maxLen is a clean fast-path return,
+	// len(s) == maxLen+1 must be truncated to exactly maxLen. Locking these
+	// two boundaries prevents an off-by-one regression in the
+	// `len(s) > maxLen` check that would either truncate equal-length strings
+	// (over-eager) or overshoot by one byte (under-eager).
+	t.Run("boundary_len_eq_maxLen_no_truncate", func(t *testing.T) {
+		t.Parallel()
+		in := strings.Repeat("a", 64)
+		got := SanitizeForLog(in, 64)
+		if got != in {
+			t.Errorf("SanitizeForLog(64×'a', cap=64) = %q (len=%d), want unchanged input (len=64)", got, len(got))
+		}
+		if len(got) != 64 {
+			t.Errorf("SanitizeForLog(64×'a', cap=64) len = %d, want 64", len(got))
+		}
+	})
+
+	t.Run("boundary_len_eq_maxLen_plus_one_truncates", func(t *testing.T) {
+		t.Parallel()
+		in := strings.Repeat("a", 65)
+		got := SanitizeForLog(in, 64)
+		if len(got) != 64 {
+			t.Errorf("SanitizeForLog(65×'a', cap=64) len = %d, want 64", len(got))
+		}
+	})
 }
 
 // TestSanitizeForLog_EmptyInput locks the empty-string short-circuit so
