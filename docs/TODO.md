@@ -93,9 +93,98 @@
 - [~] **R30-DES1 — 需架构决策（2026-04-29 Round 112 评估降级）**：本轮尝试在 `execute()` 入口加 `stopCtx.Err()` 守卫覆盖 fresh + persistent 两种模式，但这与 Round 95 的设计意图冲突（Round 95 明确将 persistent 模式的 ctx 取消委托给 Router.Shutdown，`TestCRON3_PersistentModeUnaffectedByGuard` 把此行为作为测试护栏）。fresh 分支的 stopCtx.Err() 守卫（`scheduler.go:1260`）已覆盖最危险的"fresh → Reset → 孤立 CLI"路径。persistent 模式的真正修复需要架构级协调：要么把 Router.Shutdown 和 Scheduler.Stop 串联锁定（需 S11 级决策），要么在 GetOrCreate 路径里加 shutdown-awareness（改动面大）。当前降级，等 S11 整体方案落地后重开。
 - [ ] **R29-DES1 — `drainStaleEvents` push-back + goto drain 可吞 interrupted result 事件**: 本轮新发现的 invariant 冲突。在 interrupted/interruptedRun 分支的 for 循环中，若事件顺序为 `[old_nonresult, new_event, old_result]`，读到 `new_event` 后 push-back + `goto drain`，接着 drain 到 `old_result` 时因 `recvAt < cutoff` 被丢弃。interrupted 语义要求 settle 窗口必须拿到 old_result，否则下一 turn 迟到的 result 会污染结果。
 
-## Round 237 — 5-agent 并行 code review 第 47 轮（2026-05-24，与 Round 236 并发批）NEEDS-DESIGN
+## Round 238 — 5-agent 并行 code review 第 48 轮（2026-05-24）NEEDS-DESIGN
 
-> 与同日 #290 Round 236 并发触发的另一批 5-reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描。本批直接修 8 处见上方 commits（commit anchors 仍写 [R236-*]，因落地时 #290 尚未合并；文档归类用 R237 与 #290 隔开）。下方为本轮新发现且不适合直接修的条目。
+> 5-reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描共 94 项发现。本批直接修 8 处见上方 commits（R238-CR-4/-GO-2/-SEC-4/-PERF-3/-CR-2/-CR-1/-CR-10/-SEC-15）。下方为本轮新发现且不适合直接修的条目（约 86 项）。一些项与已登记的 R234~R237 重复但维度新或粒度更细，注释中标出关联编号。
+
+### 架构（高优先）— 本轮新发现
+
+- [ ] **R238-ARCH-1 — session.Router 跨 consumer 接口反转无 contract test pin（P1, breaking）**：cron 走 3 方法 `cron.SessionRouter`、dispatch 走 8 方法 `dispatch.SessionRouter`、upstream 走 RPC wrapper、sysession 走 `SystemSessionRouter`，4 个接口分别 nil-typed-interface fallback。建议 `internal/session/contract` 包集中暴露 `RouterFor<Consumer>()` 类型别名 + 跨 consumer 的 contract test。
+- [ ] **R238-ARCH-2 — platform 注册散落 4 处（P1, non-breaking）**：cron / dispatch / server / sysession 各持 `map[string]platform.Platform` + 重复 fallback 模式。建议 `platform.Registry` 接口集中。
+- [ ] **R238-ARCH-3 — runStore.recentCache 与 Scheduler.runningJobs 缺统一 JobScope 抽象（P1, NEEDS-DESIGN）**：两个独立 sync.Map 跨 lifecycle 不共享，DeleteJobByID 注释显式说明"为何不动 runningJobs"——暗示需要统一抽象。建议 `cron.JobScope` 合并 inflight + recentCache + jobLock 按 jobID 索引。
+- [ ] **R238-ARCH-4 — robfig/cron 暴露在 Job.entryID 字段（P2, breaking）**：调度引擎漏抽象，未来替换需重写 30+ 调用。建议 `cron/engine.go` 接口 + robfig 是其实现 1。
+- [ ] **R238-ARCH-5 — cron.SetOnX 三 setter vs sysession.SetCallbacks 单 setter 不对称（P2）**：建议 `OperationalEventSink` 接口收敛。
+- [ ] **R238-ARCH-6 — server.discoveryCache 未提升到通用 cache 包**：upstream connector 也想要"discovered sessions cache"但用不到此私有类型。建议提到 `internal/cache`。
+- [ ] **R238-ARCH-7 — 4 处独立的 cron-edge 字符串验证函数**：containsCronC0 / validate.go / validateDaemonName 各一份"略变形"实现。建议提到 `internal/inputvalidate` 统一。
+- [ ] **R238-ARCH-8 — 4 个 cron 测试中 fakeRouter 重复实现**：建议 `internal/cron/testutil/fake_router.go` 集中。
+- [ ] **R238-ARCH-9 — 消息脱敏+截断流水线分散在 3 个包（redactPathsInCronError / SanitizeForLog / TruncateAtRuneBoundary 等）**：调用路径自定义流水线顺序。建议 `internal/sanitize` Pipeline 链式 API。
+- [ ] **R238-ARCH-10 — cron.IsValidID 与 router 校验 contract drift**：cron 内部要求严格 hex，router 内部接受任何 ASCII。建议 router 在 cron-prefix key 上 dispatch 到 `cron.IsValidID`。
+- [ ] **R238-ARCH-11 — sysession.Manager.Stop osExit(2) 与 hub.Shutdown 缺生命周期协调（P1）**：sysession 强制退出后 hub goroutine 直接被杀，inflight WS 写丢失。建议 `internal/lifecycle.Component` 接口 + 注册顺序逆序自动 Stop。
+- [ ] **R238-ARCH-12 — Stop/Shutdown 命名不统一 + once 守卫 4 种**：建议统一 `Component.Close(ctx) error`（breaking）。
+- [ ] **R238-ARCH-13 — cron 10 个并发原语缺运行时锁层级校验**：注释自陈"s.mu > jobLock(jobID) > recentCacheEntry.mu"但无 debug build 断言。
+- [ ] **R238-ARCH-14 — cron OnExecute / OnRunStarted / OnRunEnded 三回调对同一 run 触发 3 次广播（P2, breaking）**：OnExecute 注释自陈"backward compat"已是 vestige。建议删 SetOnExecute + BroadcastCronResult，dashboard JS 迁移到 cron_run_ended。
+- [ ] **R238-ARCH-15 — RunStartedEvent vs DaemonRunStartedEvent 字段集 70% 重叠但命名不对齐**：JobID vs Name。建议提取 RunEvent 接口/泛型。
+- [ ] **R238-ARCH-16 — config 默认值散在 3 处不同模式（applyDefaults / NewManager 主体 / NewDispatcher if-block）**：建议 `internal/configdefault.Apply[T]` + `Defaults()` 方法。
+- [ ] **R238-ARCH-17 — SchedulerConfig.ParentCtx 等 context-in-struct 反模式**：建议 `WithContext(ctx)` builder 把构造与运行时 ctx 分离。
+- [ ] **R238-ARCH-18 — testutil 散落（60+ ad-hoc fake）**：建议 `internal/testharness` 通用化。
+- [ ] **R238-ARCH-19 — session.processIface god-interface 32 方法**：与 R215-ARCH-P1-3 重复但本轮再次确认 13 方法仅 testutil 用到。建议拆 ProcessLifecycle/EventSource/ProcessSender。
+- [ ] **R238-ARCH-20 — RegisterCronStubWithChain 命名暗示扩展焦虑**：每加新参数变 RegisterCronStubWithChainAndOpts。建议立刻改 options 模式。
+- [ ] **R238-ARCH-21 — cli.EventEntry 跨 5 处 consumer 仅 1 处有 contract test**：cron / server / history 缺。建议每 consumer 加 contract test。
+- [ ] **R238-ARCH-22 — CronRun vs CronRunSummary 字段加新字段需改 3 处**：建议 CronRun embed CronRunSummary。
+- [ ] **R238-ARCH-23 — rate limit 散落（IPLimiter / platformReplyTimeout / cronNotifyTimeout / shim reqSem / hookSem...）**：无统一 quota 框架。建议 `internal/quota.Pool`。
+- [ ] **R238-ARCH-24 — 前端 dashboard.js 硬编码假设后端 cronParser 配置**：注释自陈"backend cronParser explicitly omits Second"。建议 `cron.SupportedFields() []string` + 前端 query。
+- [ ] **R238-ARCH-25 — state 子目录散落 4 处 filepath.Dir(storePath) 派生**：建议 `internal/statepath.Tree(stateDir)`。
+- [ ] **R238-ARCH-26 — cron.ErrorClass / session.InterruptOutcome / cli sentinel error 三套独立分类系统**：建议 `internal/errorclass` 包统一映射 + i18n。
+- [ ] **R238-ARCH-27 — cron sentinel errors 散在 scheduler.go 与 runstore.go 两处**：建议集中到 `cron/errors.go`。
+- [ ] **R238-ARCH-28 — NotifyTarget 在 cron 包定义但 dashboard handler 拆解为 notify_platform/notify_chat_id 两字段**：建议提到 `internal/imnotify` 包共享 wire shape。
+- [ ] **R238-ARCH-29 — cron.maxJobsHardCap=500 unexported 但已是用户可见行为契约**：dashboard 提示引这个数。建议要么导出要么 docstring 明示。
+- [ ] **R238-ARCH-30 — cron.Job 22 字段无 builder pattern**：dashboard 直接结构体字面 ~20 行赋值，每加字段改 5 处 callsite。建议 JobBuilder 链式 API。
+
+### Go 正确性（剩余）
+
+- [ ] **R238-GO-1 — Scheduler.Stop wrapper goroutine 在 budget 超时后留 orphan**：注释自陈是 intentional-orphan path（goroutine 自然短命）。本轮再次确认建议加 sync.Once / chan-cancel reclaim 路径供 goroutine-leak detector 测试用。
+- [ ] **R238-GO-3 — runinflight.snapshot 多字段非原子读**：running.Load() 与五个字段 Load 之间 reset() 可发生，导致 dashboard 显示 StartedAt=time.Time{}。建议 `atomic.Pointer[snapshotState]` 整体读写。
+- [ ] **R238-GO-4 — sysession.limitedWriter.Write 吞内层错误**：注释自陈是 io.Writer 契约修复（ exec.Cmd stderr 泵 retry 死循环）。本轮再次确认建议加 once-only slog.Warn 而非完全静默。
+- [ ] **R238-GO-5 — UpdateJob 13 处手写 Unlock 缺 defer**：panic 内部 registerJob 留死锁。建议改 deferred unlock + 命名返回值。
+- [ ] **R238-GO-6 — sendCtx 来自 context.Background 不被 Stop 可中断**：worst-case Stop 时阻塞 2×jobTimeout。建议从 stopCtx 派生。
+- [ ] **R238-GO-7 — executeOpt 327 行 7 阶段 4 层嵌套**：建议拆为多 helper（executeSpawn / executeSend / executeFinish）。
+- [ ] **R238-GO-8 — cacheHeadPush O(N) shift（与 R235-PERF-3 重复但本轮量化为 50 jobs × 200 keep = 10000 element move/Append）**：建议环形缓冲。
+- [ ] **R238-GO-9 — KnownSessionIDs runningJobs.Range 在 s.mu 释放后调用，原因未文档化**：建议加 callsite comment。
+- [ ] **R238-GO-10 — auto_titler 30s tick 全 highwater map copy + prune 同 mu 全扫**：建议增量数据结构（堆 + 时间戳排序）。
+- [ ] **R238-GO-11 — runStore.DeleteJob 在 s.mu 外调，narrow race 写已删 jobID**：建议显式 invariant 注释 + 防御性 mtime 检查。
+- [ ] **R238-GO-12 — spawn-phase 与 send-phase DeadlineExceeded 同分类**：dashboard 不能区分。建议 `ErrClassSpawnTimedOut` / `ErrClassSendTimedOut`。
+- [ ] **R238-GO-13 — sysession.Manager.Stop osExit(2) 跳过 caller defer**：与 R238-ARCH-11 同根因。
+- [ ] **R238-GO-14 — Scheduler.platforms/agents/agentCommands 无锁读靠 convention**：建议 `atomic.Pointer[map[...]]` 编译期保证 immutable。
+- [ ] **R238-GO-15 — diskListNewestFirst mtime tie-breaker random**：runID DESC tie-break 已加（R235-GO-7），但 mtime 相等时 cross-process restart 排序不稳定。建议次级 tie-break 用 runID。
+- [ ] **R238-GO-16 — ErrJobPaused vs ErrJobAlreadyPaused 命名歧义**：errors.Is 风险。建议合并或改前者为 ErrJobIsPaused。
+- [ ] **R238-GO-17 — runStore.warmCache TOCTOU guard 注释缺**：cacheGet 调用方未来可能误删。建议加 callsite comment。
+- [ ] **R238-GO-18 — Stop time.After(5s) 计时器泄漏**：建议改 NewTimer + defer Stop（与 stopBudget 处对齐）。
+
+### 安全（剩余）
+
+- [ ] **R238-SEC-1 — snap.labelOrID() 进入 IM API 未剥 mention markup（P1）**：飞书 `<at user_id="all">`、Slack `<!channel>`、Discord `@everyone`。stolen-token 攻击者触发 mass mention。建议 cron 入口（dashboard handler）+ IM 出口（dispatch.platform 调用前）双层 sanitize。
+- [ ] **R238-SEC-2 — dashboard CSP 含 'unsafe-inline'（P1）**：完全消解 XSS 防御。建议改 nonce 或 hash-based CSP（breaking: 所有内联 script 要标 nonce）。
+- [ ] **R238-SEC-3 — serveRender CSP 含 'unsafe-eval' 不必要（P1）**：注释说 MathJax 需 eval；KaTeX 已有 noeval 模式。建议切换 KaTeX + 关闭 unsafe-eval。
+- [ ] **R238-SEC-5 — 会话 cookie MaxAge 硬编码 86400s 无 idle timeout（CWE-613）**：建议加 absolute + idle 双重过期 + 配置项。
+- [ ] **R238-SEC-6 — slog 调用泄漏 runs/<jobID>/ 绝对路径（CWE-209）**：建议路径 redact 或仅记录相对路径。
+- [ ] **R238-SEC-7 — publicTmpProject 授权读所有 /tmp（CWE-284）**：含非常名密钥。建议白名单或拒绝非 .md/.txt。
+- [ ] **R238-SEC-8 — handleRunTranscript 无 StartedAt 合理范围校验（CWE-20）**：未来日期永久空 transcript。建议 reject if > now+1m。
+- [ ] **R238-SEC-9 — validateCronTitle/validateCronPrompt 允许 < > 字符**：合配 SEC-1 — 允许飞书 mention markup 通过。建议 deny `<at ` `<users>` 子串。
+- [ ] **R238-SEC-10 — runs/ 0o700 不强制（CWE-732）**：MkdirAll 在已存目录上不改 perm。建议 newRunStore 后显式 os.Chmod 0o700（与 R234-SEC-4 部分重复但 chmod 步骤未加）。
+- [ ] **R238-SEC-11 — limitedWriter 静默吞写错（CWE-390）**：与 R238-GO-4 同根因，建议 once-only slog.Warn。
+- [ ] **R238-SEC-12 — handleRunDetail 不验 disk WorkDir 为绝对路径（CWE-22）**：建议 readRun 后 reject !filepath.IsAbs(run.WorkDir)。
+- [ ] **R238-SEC-13 — sysession.runnerImpl BinPath 默认 "claude" 受 $PATH 影响（CWE-426）**：建议构造时 exec.LookPath 解析为绝对路径。
+- [ ] **R238-SEC-14 — 无服务端 session 撤销机制（CWE-320）**：cookie 泄漏后只能等 MaxAge。建议 session ID 表 + revoke 接口。
+
+### 性能（剩余）
+
+- [ ] **R238-PERF-1 — KnownSessionIDs O(50 jobs × CronRunSummary copy) 无缓存**：建议 runStore.CollectSessionIDs 合并接口 + 30s atomic cache。
+- [ ] **R238-PERF-2 — cacheHeadPush O(200) prepend shift（与 R235-PERF-3 / R238-GO-8 同根因，本轮再次量化）**：建议环形缓冲。
+- [ ] **R238-PERF-4 — ValidateRemoteWorkspacePath 用 strings.Split 分配 []string**：建议 IndexByte 手动迭代。
+- [ ] **R238-PERF-5 ~ R238-PERF-9 — diskListNewestFirst before 路径绕过 cache、auto_titler.go observed/highwater 30s 全扫、其他 perf 细节**：详细见 reviewer 输出，单条改动 <20 行但累加风险。
+- [ ] **R238-PERF-10 ~ R238-PERF-20 — 其他小性能项**：alloc 热点、sync.Pool 复用机会、bufio 漏配等，按 P3 处理。
+
+### 代码质量（剩余）
+
+- [ ] **R238-CR-3 — HasMissedSchedule 重复调用 schedulePeriod**：1Hz × 500 jobs 路径有可量化冗余。建议 schedulePeriod 调用方传入 cached period。
+- [ ] **R238-CR-5 — handleRunsList / handleRunDetail 无 httptest 单测**：游标逻辑 + 错误分支无覆盖。建议加表驱动 test。
+- [ ] **R238-CR-6 — connector_conn.go 三魔数（worker cap=16/ping=30s/write=10s）**：建议命名常量 connectorWorkerCap / connectorPingInterval / connectorWriteDeadline。
+- [ ] **R238-CR-7 — runstore.go ring-buffer TODO 内联在运行时注释**：建议提到 TODO.md 跟踪。
+- [ ] **R238-CR-8 — auto_titler earlyStop prune 注释措辞略误导**：建议改写"... 暂不清理过期 highwater"避免"defeating gate"措辞。
+- [ ] **R238-CR-9 — Scheduler.Stop 两处 spawn goroutine + select 重复模式**：建议提包内 helper waitWGOrTimeout(wg, timer)。
+- [ ] **R238-CR-11 — auto_titler prompt 变量名与 seed 参数概念混淆**：建议改 fullPrompt / titlerInput。
+
+
 
 ### 架构（高优先）— 本轮新发现
 
