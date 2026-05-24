@@ -1442,91 +1442,95 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		}
 	}
 
-	s.mu.Lock()
-	j, ok := s.jobs[id]
-	if !ok {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
-	}
+	// R239-GO-4: critical section uses defer Unlock so any future return
+	// path added inside this block stays correctly unlocked. The closure
+	// returns (resultSnapshot, persistCallback, error); save() runs
+	// post-unlock to keep the global s.mu off the disk write path.
+	result, save, err := func() (Job, func(), error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	if upd.Prompt != nil {
-		j.Prompt = *upd.Prompt
-	}
-	if upd.WorkDir != nil {
-		// WorkDir 一换 LastSessionID 就失效：claude JSONL 按 cwd 归档，
-		// 用老 workspace 的 session_id 去新 cwd 下查 history 只会 Stat 落空。
-		// 清零后下次执行写入的新 SessionID 会自然属于新 workspace。
-		//
-		// 对比靠原生字符串相等，依赖 dashboard / AddJob 路径已对 WorkDir 做
-		// 归一化（filepath.Clean / validateWorkspace）。如果将来有新 caller
-		// 绕过归一化直接塞相对路径，会导致清零误判：合法但路径写法不同的
-		// 相同 workspace 会被判定为变更而清零，后果是用户需要重跑一次才
-		// 能恢复 chain，不致数据损坏。
-		if *upd.WorkDir != j.WorkDir {
-			j.LastSessionID = ""
+		j, ok := s.jobs[id]
+		if !ok {
+			return Job{}, nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 		}
-		j.WorkDir = *upd.WorkDir
-	}
-	if upd.Notify != nil {
-		v := *upd.Notify
-		j.Notify = &v
-	}
-	if upd.NotifyPlatform != nil {
-		j.NotifyPlatform = *upd.NotifyPlatform
-	}
-	if upd.NotifyChatID != nil {
-		j.NotifyChatID = *upd.NotifyChatID
-	}
-	if upd.FreshContext != nil {
-		j.FreshContext = *upd.FreshContext
-	}
-	if upd.Title != nil {
-		j.Title = *upd.Title
-	}
-	if upd.Backend != nil {
-		j.Backend = *upd.Backend
-	}
 
-	if upd.Schedule != nil && *upd.Schedule != j.Schedule {
-		// R236-QA-08: snapshot the old schedule so we can roll back the
-		// in-memory field if registerJob fails. Without this, a failed
-		// re-register left j.Schedule mutated to the new value but with
-		// j.entryID=0, so the API returned an error to the client while the
-		// job had silently disappeared from the cron scheduler. The client
-		// would assume the request was a no-op and retry, but the persisted
-		// state file (loaded next start) keeps showing the old schedule
-		// because persistJobsLocked never ran for this branch — diverging
-		// in-memory state from disk.
-		oldSchedule := j.Schedule
-		j.Schedule = *upd.Schedule
-		// Re-register with the new schedule unless paused (paused jobs have
-		// no live entry; ResumeJob will register with the new schedule).
-		if !j.Paused {
-			if j.entryID != 0 {
-				s.cron.Remove(j.entryID)
-				j.entryID = 0
+		if upd.Prompt != nil {
+			j.Prompt = *upd.Prompt
+		}
+		if upd.WorkDir != nil {
+			// WorkDir 一换 LastSessionID 就失效：claude JSONL 按 cwd 归档，
+			// 用老 workspace 的 session_id 去新 cwd 下查 history 只会 Stat 落空。
+			// 清零后下次执行写入的新 SessionID 会自然属于新 workspace。
+			//
+			// 对比靠原生字符串相等，依赖 dashboard / AddJob 路径已对 WorkDir 做
+			// 归一化（filepath.Clean / validateWorkspace）。如果将来有新 caller
+			// 绕过归一化直接塞相对路径，会导致清零误判：合法但路径写法不同的
+			// 相同 workspace 会被判定为变更而清零，后果是用户需要重跑一次才
+			// 能恢复 chain，不致数据损坏。
+			if *upd.WorkDir != j.WorkDir {
+				j.LastSessionID = ""
 			}
-			if err := s.registerJob(j); err != nil {
-				// Roll back the in-memory schedule field so subsequent
-				// reads (List, persistJobsLocked on a later mutator) keep
-				// showing the original schedule. j.entryID stays 0 since
-				// cron.Remove is irreversible — the next ResumeJob /
-				// successful UpdateJob will register a fresh entry.
-				j.Schedule = oldSchedule
-				s.mu.Unlock()
-				return nil, fmt.Errorf("re-register cron: %w", err)
+			j.WorkDir = *upd.WorkDir
+		}
+		if upd.Notify != nil {
+			v := *upd.Notify
+			j.Notify = &v
+		}
+		if upd.NotifyPlatform != nil {
+			j.NotifyPlatform = *upd.NotifyPlatform
+		}
+		if upd.NotifyChatID != nil {
+			j.NotifyChatID = *upd.NotifyChatID
+		}
+		if upd.FreshContext != nil {
+			j.FreshContext = *upd.FreshContext
+		}
+		if upd.Title != nil {
+			j.Title = *upd.Title
+		}
+		if upd.Backend != nil {
+			j.Backend = *upd.Backend
+		}
+
+		if upd.Schedule != nil && *upd.Schedule != j.Schedule {
+			// R236-QA-08: snapshot the old schedule so we can roll back the
+			// in-memory field if registerJob fails. Without this, a failed
+			// re-register left j.Schedule mutated to the new value but with
+			// j.entryID=0, so the API returned an error to the client while the
+			// job had silently disappeared from the cron scheduler. The client
+			// would assume the request was a no-op and retry, but the persisted
+			// state file (loaded next start) keeps showing the old schedule
+			// because persistJobsLocked never ran for this branch — diverging
+			// in-memory state from disk.
+			oldSchedule := j.Schedule
+			j.Schedule = *upd.Schedule
+			// Re-register with the new schedule unless paused (paused jobs have
+			// no live entry; ResumeJob will register with the new schedule).
+			if !j.Paused {
+				if j.entryID != 0 {
+					s.cron.Remove(j.entryID)
+					j.entryID = 0
+				}
+				if err := s.registerJob(j); err != nil {
+					// Roll back the in-memory schedule field so subsequent
+					// reads (List, persistJobsLocked on a later mutator) keep
+					// showing the original schedule. j.entryID stays 0 since
+					// cron.Remove is irreversible — the next ResumeJob /
+					// successful UpdateJob will register a fresh entry.
+					j.Schedule = oldSchedule
+					return Job{}, nil, fmt.Errorf("re-register cron: %w", err)
+				}
 			}
 		}
-	}
 
-	save, perr := s.persistJobsLocked()
-	// Value-copy while still under lock so the caller sees a stable result
-	// even if another goroutine mutates the job right after we unlock.
-	result := *j
-	s.mu.Unlock()
-
-	if perr != nil {
-		return nil, perr
+		save, perr := s.persistJobsLocked()
+		// Value-copy while still under lock so the caller sees a stable result
+		// even if another goroutine mutates the job right after we unlock.
+		return *j, save, perr
+	}()
+	if err != nil {
+		return nil, err
 	}
 	save()
 	// Pass the snapshotted value (via result) to registerStub so a concurrent
