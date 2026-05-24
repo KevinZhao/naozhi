@@ -1039,7 +1039,7 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 			// R179-SEC-1: sanitize the workspace before it lands in slog attrs
 			// — authenticated callers can slip bidi/C1/newline bytes past the
 			// structural path check. Mirrors the send.go (R175-SEC-P1) gate.
-			slog.Warn("resume workspace validation failed", "err", err, "workspace", osutil.SanitizeForLog(workspace, 1024))
+			slog.Warn("resume workspace validation failed", "err", err, "workspace", osutil.SanitizeForLog(workspace, 256))
 			writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": "invalid workspace"})
 			return
 		}
@@ -1343,7 +1343,6 @@ func (h *SessionHandlers) lookupSummariesCached(snapshots []session.SessionSnaps
 	}
 	return nil
 }
-
 
 // RecordRetired stamps the retirement instant for sessionID into the
 // retired-store and invalidates the history cache so the new ordering

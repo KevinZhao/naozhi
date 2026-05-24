@@ -275,7 +275,7 @@
 - [ ] **R246-SEC-9 [P3] [BREAKING-LOCAL] — `internal/server/dashboard_send.go:172` parseAttachmentFile 信任 client Content-Type 选择 size 上限**: 32MB vs 10MB 由声明决定，magic-byte 复核在 fh.Open 后。建议：magic byte 决定 size cap，或 PDF 上传走专属端点。
 - [ ] **R246-SEC-10 [P3] [REPEAT-2] — `internal/server/dashboard.go:503` CSP 含 cdn.jsdelivr.net 但缺 SRI 兜底**: 若 CDN 被劫持，CSP 仍允许加载。建议：CSP 加 `require-sri-for script style`（实验性 Chrome 79+），或迁移到本地 vendored 资产。
 - [ ] **R246-SEC-11 [P3] [REPEAT-2] — `internal/server/health.go:189` /health 未认证响应未限速**: Status + Uptime 可作 fingerprint。建议：未认证分支套上 unauthDashLimiter，或把 uptime 下推到 auth-only section。
-- [ ] **R246-SEC-12 [P3] [BREAKING-LOCAL] — `internal/server/dashboard_session.go:1042` slog 输出 1024-byte workspace**: 长度上限可被 log-flood 放大。建议：256 / 与 cron maxCronWorkDirBytesDashboard 对齐。
+- [x] **R246-SEC-12 [P3] [BREAKING-LOCAL] — `internal/server/dashboard_session.go:1042` slog 输出 1024-byte workspace**: 长度上限可被 log-flood 放大。建议：256 / 与 cron maxCronWorkDirBytesDashboard 对齐。
 - [x] **R246-SEC-13 [P3] [BREAKING-LOCAL] — `internal/server/dashboard_send.go:1158` ETag SHA-256 截 16 hex (64 bit)**: 攻击者主动构造 birthday-bound ~2^32。建议：截 12 字节（96-bit）或保完整 32 字节。
 - [ ] **R246-SEC-14 [P3] [REPEAT-2] — `internal/server/dashboard_session.go:983` slog Info "session label updated" key 字段未二次 sanitize**: 仅过 ValidateSessionKey 校 C0/UTF8，bidi 漏网取决于实现。建议：log 处统一 session.SanitizeLogAttr 与 dispatch.commands.go:51 一致。
 
