@@ -65,6 +65,11 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 				go func(i int, data []byte) {
 					defer wg.Done()
 					defer func() { <-sem }()
+					defer func() {
+						if rv := recover(); rv != nil {
+							slog.Error("thumbnail panic recovered", "img_index", i, "panic", rv)
+						}
+					}()
 					thumbs[i] = MakeThumbnail(data, 600)
 				}(i, img.Data)
 			}
