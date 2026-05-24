@@ -78,15 +78,21 @@ func timeHeap(t time.Time) *time.Time {
 // （见 scheduler.go runningJobs 注释——历史 entry 不清，避免 ID 复用 split
 // CAS gate）。reset 仅清掉可观察元数据，避免 list API 把已删 job 的旧
 // inflight 残影显示给前端。
+//
+// R240-PERF-1: Store(nil) on each *string / *time.Time avoids the 5
+// strHeap("") + 1 timeHeap(zero) heap allocations per finishRun (1Hz × N
+// jobs accumulates). snapshot already treats Load() == nil as the zero
+// value (see the `if p := r.X.Load(); p != nil` guards), so callers
+// observe identical zero semantics.
 func (r *runInflight) reset() {
 	if r == nil {
 		return
 	}
-	r.runID.Store(strHeap(""))
-	r.phase.Store(strHeap(""))
-	r.trigger.Store(strHeap(""))
-	r.sessionID.Store(strHeap(""))
-	r.startedAt.Store(timeHeap(time.Time{}))
+	r.runID.Store(nil)
+	r.phase.Store(nil)
+	r.trigger.Store(nil)
+	r.sessionID.Store(nil)
+	r.startedAt.Store(nil)
 	r.freshSnap.Store(false)
 }
 

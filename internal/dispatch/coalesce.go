@@ -1,7 +1,7 @@
 package dispatch
 
 import (
-	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -114,7 +114,16 @@ func CoalesceMessages(msgs []QueuedMsg) (string, []cli.ImageData) {
 		b.WriteByte('\n')
 	}
 	if truncated > 0 {
-		fmt.Fprintf(&b, "\n[系统] 已省略 %d 条后续消息（合并超出长度上限）。\n", truncated)
+		// R241-CR-7: avoid fmt's reflection path on the (cold but not free)
+		// truncation tail so the whole CoalesceMessages function reads as a
+		// single allocation-light WriteString chain. The "\n[系统] 已省略 "
+		// / " 条后续消息（合并超出长度上限）。\n" split tracks the original
+		// fmt template byte-for-byte; strconv.AppendInt writes truncated as
+		// decimal directly into b's backing array (no intermediate string).
+		b.WriteString("\n[系统] 已省略 ")
+		buf := strconv.AppendInt(nil, int64(truncated), 10)
+		b.Write(buf)
+		b.WriteString(" 条后续消息（合并超出长度上限）。\n")
 	}
 
 	return b.String(), allImages

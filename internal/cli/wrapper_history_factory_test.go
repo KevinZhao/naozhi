@@ -53,9 +53,13 @@ func TestNewHistorySource_NilWrapperReturnsNoop(t *testing.T) {
 // Wrapper with an unregistered BackendID must still produce a usable
 // source; the dashboard should see "no fallback history" rather than
 // a nil-pointer crash.
+//
+// R240-ARCH-28: factory is now looked up at NewHistorySource call time
+// from pickHistoryFactory(BackendID), so this test only needs to choose
+// an id that no other test registers.
 func TestNewHistorySource_NilFactoryReturnsNoop(t *testing.T) {
 	t.Parallel()
-	w := &Wrapper{BackendID: "no-such-backend", historyFactory: nil}
+	w := &Wrapper{BackendID: "no-such-backend-cli-test-arch28"}
 	src := w.NewHistorySource(&fakeHistorySession{}, HistoryWiring{})
 	if src == nil {
 		t.Fatal("nil factory must yield a non-nil noop source")
@@ -75,14 +79,16 @@ func TestNewHistorySource_NilFactoryReturnsNoop(t *testing.T) {
 // the caller. Wrapper.NewHistorySource is responsible for upgrading
 // the nil to NoopHistorySource so attachHistorySource never has to
 // nil-check.
+//
+// R240-ARCH-28: register the test factory first, then Wrapper picks it
+// up via pickHistoryFactory at NewHistorySource time.
 func TestNewHistorySource_FactoryReturningNilUpgradesToNoop(t *testing.T) {
 	t.Parallel()
-	w := &Wrapper{
-		BackendID: "test",
-		historyFactory: func(s HistorySessionView, deps HistoryWiring) HistorySource {
-			return nil
-		},
-	}
+	const id = "cli-test-arch28-nil-factory"
+	RegisterHistoryFactory(id, func(s HistorySessionView, deps HistoryWiring) HistorySource {
+		return nil
+	})
+	w := &Wrapper{BackendID: id}
 	src := w.NewHistorySource(&fakeHistorySession{}, HistoryWiring{})
 	if src == nil {
 		t.Fatal("factory-returns-nil must be upgraded to non-nil noop")
@@ -111,10 +117,11 @@ func TestNewHistorySource_ClaudeWithEmptyDirReturnsNoop(t *testing.T) {
 		return nil
 	})
 	w := NewWrapper("/bin/false", &ClaudeProtocol{}, "cli-test-claude-empty")
-	// Sanity: factory registered before NewWrapper, so wrapper
-	// must have picked it up.
-	if w.historyFactory == nil {
-		t.Fatal("wrapper.historyFactory not bound after registration")
+	// Sanity: factory was registered before NewWrapper.
+	// R240-ARCH-28: lookup happens at NewHistorySource call time, so we
+	// confirm the registry side rather than a Wrapper field.
+	if pickHistoryFactory(w.BackendID) == nil {
+		t.Fatal("registry did not bind cli-test-claude-empty factory")
 	}
 
 	src := w.NewHistorySource(&fakeHistorySession{
@@ -156,8 +163,10 @@ func TestNewHistorySource_DepsRoundTrip(t *testing.T) {
 	})
 
 	w := NewWrapper("/bin/false", &ClaudeProtocol{}, "cli-test-deps-rt")
-	if w.historyFactory == nil {
-		t.Fatal("factory not bound")
+	// R240-ARCH-28: registry lookup at NewHistorySource time replaces
+	// the previous w.historyFactory cache. Confirm the registry binding.
+	if pickHistoryFactory(w.BackendID) == nil {
+		t.Fatal("factory not registered for cli-test-deps-rt")
 	}
 
 	want := HistoryWiring{

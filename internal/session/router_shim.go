@@ -550,7 +550,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 // but the shim and CLI process are still alive.
 func (r *Router) StartShimReconcileLoop(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
-		slog.Warn("StartShimReconcileLoop: non-positive interval, reconcile disabled",
+		slog.Warn("start shim reconcile loop: non-positive interval, reconcile disabled",
 			"interval", interval)
 		return
 	}

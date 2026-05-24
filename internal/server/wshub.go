@@ -619,7 +619,7 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	// writes SOME value or sends an error back to the client without
 	// returning early between here and completeSubscribe.
 	h.mu.Lock()
-	if _, alreadySub := c.subscriptions[key]; !alreadySub && len(c.subscriptions) >= 50 {
+	if _, alreadySub := c.subscriptions[key]; !alreadySub && len(c.subscriptions) >= maxSubscriptionsPerClient {
 		h.mu.Unlock()
 		c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "too many subscriptions"})
 		return
@@ -1205,18 +1205,21 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 
 // resubscribeEvents waits for a new process to be attached to the session and
 // re-subscribes to its EventLog. Returns (ok, currentSession). ok is false if
-// the client disconnects, the wait times out (60s), or a newer subscription
-// has taken over this key (generation mismatch).
+// the client disconnects, the wait times out (resubscribeMaxAttempts ×
+// resubscribeInterval = 60s), or a newer subscription has taken over this
+// key (generation mismatch).
 func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-chan struct{}) (bool, *session.ManagedSession) {
-	// Timer.Reset reuses a single timer allocation across the 12 iterations
+	// Timer.Reset reuses a single timer allocation across the iterations
 	// instead of allocating a Ticker and its runtime goroutine; resubscribe
 	// is a cold-ish path but client flap can trigger N simultaneous calls.
-	timer := time.NewTimer(5 * time.Second)
+	// resubscribeMaxAttempts × resubscribeInterval = 60s total window —
+	// see const godoc for the budget rationale.
+	timer := time.NewTimer(resubscribeInterval)
 	defer timer.Stop()
 
-	for i := range 12 {
+	for i := range resubscribeMaxAttempts {
 		if i > 0 {
-			timer.Reset(5 * time.Second)
+			timer.Reset(resubscribeInterval)
 		}
 		select {
 		case <-c.done:
@@ -1338,6 +1341,34 @@ const maxWSConns = 500
 // every event broadcast's fan-out cost by N. 20 is comfortably above the
 // realistic multi-tab / multi-device working set (R226-SEC-8).
 const maxSubscribersPerKey = 20
+
+// maxSubscriptionsPerClient caps the number of distinct session keys a single
+// WS connection may subscribe to simultaneously. Bounds per-client memory
+// (subscriptions map + per-key generation/snapshot bookkeeping) and limits
+// fan-out cost when a single misbehaving client tries to enumerate sessions.
+// 50 covers the realistic dashboard working set (active session + recent
+// history + a few cron stubs) with comfortable headroom; clients that hit
+// this should re-architect rather than have the cap raised. R240-CR-4.
+const maxSubscriptionsPerClient = 50
+
+// resubscribeMaxAttempts and resubscribeInterval together set the wait
+// budget for resubscribeEvents — used when a session process flapped and
+// the WS client wants to pick up the freshly attached EventLog without
+// dropping the dashboard subscription.
+//
+// Total window = resubscribeMaxAttempts × resubscribeInterval = 12 × 5s = 60s.
+// 60s comfortably covers the cold-start budget for a `claude` CLI subprocess
+// (typical first-init: 5-15s; worst case with model warmup + remote git fetch:
+// 30-45s). Beyond 60s we declare flap permanent and drop the WS subscription;
+// the client's exponential-backoff reconnect loop takes over.
+//
+// The two constants are split (not a single 60s timer) so the per-iteration
+// loop body — generation check, ctx fan-out, client-disconnect detection —
+// runs at a 5s heartbeat instead of blocking the whole window. R240-CR-6.
+const (
+	resubscribeMaxAttempts = 12
+	resubscribeInterval    = 5 * time.Second
+)
 
 // broadcastClientSnapPool reuses the []*wsClient backing array across
 // broadcasts so high-frequency session_state / sessions_update traffic does

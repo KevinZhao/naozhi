@@ -19,15 +19,13 @@ import (
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 
-	// Blank imports: trigger init() registration of per-backend
-	// history-source factories with cli.RegisterHistoryFactory.
-	// Sprint 1a moved the dispatch out of attachHistorySource into the
-	// cli wrapper layer; the imports survive here only as side-effect
-	// triggers so existing deployments keep getting the right factory.
-	// Sprint 1b will consolidate side-effect imports into a single
-	// wireup package.
-	_ "github.com/naozhi/naozhi/internal/history/claudejsonl"
-	_ "github.com/naozhi/naozhi/internal/history/kirojsonl"
+	// Note: blank-imports for claudejsonl / kirojsonl history backends
+	// have moved to internal/wireup (R239-ARCH-B). cmd/naozhi imports
+	// internal/wireup at startup so cli.RegisterHistoryFactory is
+	// populated before any Router is constructed; tests that need a
+	// specific backend import its package directly. internal/session
+	// is now backend-agnostic at the import graph level — adding a
+	// new backend only requires editing internal/wireup.
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
 	"github.com/naozhi/naozhi/internal/metrics"
 )

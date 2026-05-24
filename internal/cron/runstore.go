@@ -389,6 +389,12 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 	// transitions from false to true exactly once thanks to the per-job
 	// lock guard), so the second caller sees warm=true on its own
 	// re-acquire and returns the populated slice.
+	//
+	// R241-CR-6: warmCache always sets warm=true (even when ReadDir
+	// fails or the directory is empty — diskListNewestFirst returns nil
+	// and we cache the absence). The post-warm check below is therefore
+	// a defensive guard against a future warmCache change rather than a
+	// real disk-error fallback path.
 	s.warmCache(jobID)
 	entry.mu.Lock()
 	defer entry.mu.Unlock()

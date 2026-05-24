@@ -250,6 +250,9 @@ type Scheduler struct {
 	// 启动后立刻 poll StartedAt() 会被探测为竞态。改成 atomic.Int64 (UnixNano)
 	// 后写读都走 atomic Load/Store。R216-GO-3。
 	startedAtNanos atomic.Int64
+	// started 用 CAS 保证 Start() 幂等。重复调用直接返回 nil 而不再 reset
+	// startedAtNanos / 二次 spawn cold-start GC / 二次 cron.Start。R241-ARCH-2。
+	started atomic.Bool
 	// stopCtx is the scheduler's lifecycle context. Storing context in a
 	// struct is usually an anti-pattern, but here execute() is invoked via
 	// a callback from robfig/cron whose signature has no ctx parameter, so
@@ -758,7 +761,17 @@ func (s *Scheduler) StartedAt() time.Time {
 }
 
 // Start loads persisted jobs and starts the cron scheduler.
+//
+// Idempotency (R241-ARCH-2): a second Start() returns nil immediately
+// without re-loading jobs, re-spawning the cold-start GC pass, or
+// re-invoking robfig/cron's Start (which would panic on a running
+// runner). The CAS guard runs *before* startedAtNanos.Store so a
+// double-Start does not reshape the missed-schedule suppression
+// window mid-flight.
 func (s *Scheduler) Start() error {
+	if !s.started.CompareAndSwap(false, true) {
+		return nil
+	}
 	// 记录启动时刻，missed-schedule 检测靠它做启动抑制窗口（见
 	// HasMissedSchedule）。写在 loadJobs 之前保证即使 loadJobs 失败 StartedAt
 	// 也不被污染——失败时 Start 提前返回，下次重试会覆盖。
@@ -771,6 +784,11 @@ func (s *Scheduler) Start() error {
 	// losing data that is still recoverable from the preserved file.
 	restored, err := loadJobs(s.storePath)
 	if err != nil {
+		// R241-ARCH-2: on load failure, release the idempotency latch so
+		// the operator can retry Start() after fixing the store file.
+		// startedAtNanos already follows the same retry contract (see
+		// comment above its Store).
+		s.started.Store(false)
 		return fmt.Errorf("load cron store: %w", err)
 	}
 
@@ -1137,16 +1155,23 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 		// nothing — every tick logs "job not found" then never cleans
 		// up because the cron entry stays registered (the dispatcher's
 		// debug log path doesn't call s.cron.Remove). Rolling back
-		// via deleteJobLocked unwinds the cron entry, router stub,
-		// and map entry under the still-held s.mu, so the persistence
-		// gap surfaces as a clean failure to the caller and a fresh
-		// AddJob on the same ID is safe. Earlier review note worried
-		// about another goroutine observing the entry between
-		// registerJob and persist; that window is enclosed by s.mu
-		// (the cron dispatcher's tick fans out via runningJobs CAS
-		// without re-entering s.mu for lookup, but execute()'s
-		// s.jobs[j.ID] read does take s.mu — see executeJob). So the
-		// rollback is observationally consistent.
+		// via deleteJobLocked unwinds the cron entry and map entry
+		// under the still-held s.mu, so the persistence gap surfaces
+		// as a clean failure to the caller and a fresh AddJob on the
+		// same ID is safe. Earlier review note worried about another
+		// goroutine observing the entry between registerJob and
+		// persist; that window is enclosed by s.mu (the cron
+		// dispatcher's tick fans out via runningJobs CAS without
+		// re-entering s.mu for lookup, but execute()'s s.jobs[j.ID]
+		// read does take s.mu — see executeJob). So the rollback is
+		// observationally consistent.
+		//
+		// R240-GO-1: deleteJobLocked no longer touches the router
+		// stub; in this rollback path the stub was never registered
+		// (registerStubFromJob runs in AddJob *after* this helper
+		// returns and after a successful save), so no router-side
+		// cleanup is needed. resetRouterStub on a never-registered
+		// key would be a no-op anyway.
 		s.deleteJobLocked(j)
 		return nil, perr
 	}
@@ -1221,9 +1246,7 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 }
 
 // deleteJobLocked performs the in-memory side effects of removing a job:
-// stop the cron entry, reset the bound session (also evicts the cron
-// session from the router so the dashboard sidebar stub is removed),
-// and drop the map entry.
+// stop the cron entry and drop the map entry.
 //
 // Caller must hold s.mu.Lock() and pass a non-nil job that exists in
 // s.jobs. Intentionally does NOT delete from s.runningJobs: a concurrent
@@ -1233,14 +1256,29 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 // here could split the CAS gate between two goroutines and permit double
 // execution. Retaining the entry is bounded by maxJobsHardCap (one
 // *atomic.Bool per historical job) — cheap vs a correctness gap. R219-CR-4.
+//
+// R240-GO-1: router.Reset MUST NOT be called from inside this function
+// because router.Reset → notifyChange callbacks may attempt to acquire
+// s.mu, leading to lock-order inversion / recursive write-lock deadlock.
+// Callers are responsible for calling resetRouterStub(j.ID) AFTER they
+// release s.mu. EnsureStub's godoc already documents the same
+// "must-not-hold-s.mu" contract; this function now respects it.
 func (s *Scheduler) deleteJobLocked(j *Job) {
 	if j.entryID != 0 {
 		s.cron.Remove(j.entryID)
 	}
-	if s.router != nil {
-		s.router.Reset(session.CronKey(j.ID))
-	}
 	delete(s.jobs, j.ID)
+}
+
+// resetRouterStub is the deferred router-side cleanup that pairs with
+// deleteJobLocked. Caller MUST NOT hold s.mu — router.Reset re-enters
+// router state and its notifyChange callback may take s.mu. Safe on a
+// nil router (tests). R240-GO-1.
+func (s *Scheduler) resetRouterStub(jobID string) {
+	if s.router == nil {
+		return
+	}
+	s.router.Reset(session.CronKey(jobID))
 }
 
 // pauseJobLocked transitions a job to Paused state under s.mu. Returns
@@ -1278,6 +1316,7 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	var save func()
 	var j *Job
+	var found bool
 	var perr error
 	func() {
 		s.mu.Lock()
@@ -1288,15 +1327,23 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 			return
 		}
+		found = true
 		s.deleteJobLocked(j)
 		save, perr = s.persistJobsLocked()
 	}()
 
-	if j == nil {
+	// R241-GO-2: explicit `found` separates the not-found sentinel from
+	// any future caller path that might legitimately set j=nil while the
+	// lookup succeeded; relying on j==nil conflated those two cases.
+	if !found {
 		return nil, perr
 	}
-	// R238-GO-3: deleteJobLocked already mutated in-memory state + router stub.
-	// The runStore must be cleaned even when persist fails, otherwise the
+	// R240-GO-1: router.Reset moved out of deleteJobLocked to avoid
+	// holding s.mu across router callbacks (notifyChange may try to
+	// re-take s.mu, deadlocking the scheduler).
+	s.resetRouterStub(j.ID)
+	// R238-GO-3: deleteJobLocked already mutated in-memory state. The
+	// runStore must be cleaned even when persist fails, otherwise the
 	// runs/<jobID>/ subtree leaks on disk while the in-memory job is gone.
 	// P1 cron-run-history: drop the runs/<jobID>/ subtree alongside the
 	// job entry. Does NOT touch ~/.claude/projects/<cwd>/<session_id>.jsonl
@@ -1317,11 +1364,11 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 	var save func()
 	var j *Job
+	var ok bool
 	var perr error
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		var ok bool
 		j, ok = s.jobs[id]
 		if !ok {
 			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
@@ -1329,13 +1376,16 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 		}
 		if err := s.pauseJobLocked(j); err != nil {
 			perr = err
+			ok = false
 			j = nil
 			return
 		}
 		save, perr = s.persistJobsLocked()
 	}()
 
-	if j == nil {
+	// R241-GO-3: explicit `ok` mirrors the lookup result; j==nil is no
+	// longer overloaded as the not-found sentinel.
+	if !ok {
 		return nil, perr
 	}
 	if perr != nil {
@@ -1349,11 +1399,11 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 	var save func()
 	var j *Job
+	var ok bool
 	var perr error
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		var ok bool
 		j, ok = s.jobs[id]
 		if !ok {
 			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
@@ -1361,13 +1411,16 @@ func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 		}
 		if err := s.resumeJobLocked(j); err != nil {
 			perr = err
+			ok = false
 			j = nil
 			return
 		}
 		save, perr = s.persistJobsLocked()
 	}()
 
-	if j == nil {
+	// R241-GO-3: explicit `ok` mirrors the lookup result; j==nil is no
+	// longer overloaded as the not-found sentinel.
+	if !ok {
 		return nil, perr
 	}
 	if perr != nil {
@@ -1681,8 +1734,12 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
-	// R238-GO-3: deleteJobLocked already mutated in-memory state + router stub.
-	// The runStore must be cleaned even when persist fails, otherwise the
+	// R240-GO-1: router.Reset moved out of deleteJobLocked to avoid
+	// holding s.mu across router callbacks (notifyChange may try to
+	// re-take s.mu, deadlocking the scheduler).
+	s.resetRouterStub(j.ID)
+	// R238-GO-3: deleteJobLocked already mutated in-memory state. The
+	// runStore must be cleaned even when persist fails, otherwise the
 	// runs/<jobID>/ subtree leaks on disk while the in-memory job is gone.
 	if s.runStore != nil {
 		s.runStore.DeleteJob(j.ID)
