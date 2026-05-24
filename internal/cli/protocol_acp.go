@@ -696,11 +696,19 @@ func (p *ACPProtocol) HandleEvent(w io.Writer, ev Event) bool {
 	// id may be empty when the original request had no id (a malformed
 	// request from the agent). Echo back json null so the JSON-RPC spec is
 	// at least syntactically honored.
+	//
+	// R247-PERF-22: Atoi-then-Itoa round-trip dropped — if the original
+	// wire value parsed cleanly as an integer, the source string is already
+	// a valid JSON number literal (Atoi tolerates a strict subset of
+	// strconv.ParseInt with no leading whitespace, no underscores, no
+	// scientific notation, no surrounding quotes). Reusing the source
+	// string avoids one alloc per permission response. The non-integer
+	// branch keeps json.Marshal so escape-sensitive characters in a
+	// string-typed id stay correctly quoted.
 	idRaw := json.RawMessage(`null`)
 	if ev.RPCRequestID != "" {
-		// Try int first to mirror the wire shape; fall back to string.
-		if n, err := strconv.Atoi(ev.RPCRequestID); err == nil {
-			idRaw = json.RawMessage(strconv.Itoa(n))
+		if _, err := strconv.Atoi(ev.RPCRequestID); err == nil {
+			idRaw = json.RawMessage(ev.RPCRequestID)
 		} else {
 			b, _ := json.Marshal(ev.RPCRequestID)
 			idRaw = b

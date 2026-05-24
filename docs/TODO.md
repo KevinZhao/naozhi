@@ -182,7 +182,7 @@
 - [ ] **R247-PERF-19 — recentFromParsedIndex jsonlMtimes map 重建（P2）** [REFACTOR]: `internal/discovery/recent.go:329-356` 已 sorted slice 可二分。方案：sort.Search 替 map。
 - [~] **R247-PERF-20 — Tick highwater 全量拷贝（P2）** [REFACTOR]: `internal/sysession/auto_titler.go:181-194` 多数 key 当 tick 不访问。方案：atomic.Pointer[map] CoW。
 - [ ] **R247-PERF-21 — buildUserEntry 每图 spawn goroutine（P3）** [REFACTOR]: `internal/cli/process_send.go:51-76` cap 4 sem 但仍 8KB stack × N。方案：worker pool。
-- [~] **R247-PERF-22 — HandleEvent permissionResponse Atoi+Itoa 来回（P3）** [REFACTOR]: `internal/cli/protocol_acp.go:660-666`。方案：直接 json.RawMessage 写。
+- [x] **R247-PERF-22 — HandleEvent permissionResponse Atoi+Itoa 来回（P3）** [REFACTOR]: `internal/cli/protocol_acp.go:660-666`。方案：直接 json.RawMessage 写。 — 解决 2026-05-24：Atoi 仅用作 validation，原始 ev.RPCRequestID 字符串复用为 RawMessage（已是合法 JSON 数字字面量），省 1 alloc/permission；string-id 路径维持 json.Marshal 以保留 escape 处理。
 - [ ] **R247-PERF-23 — Enqueue 队列满 O(N) memmove（P3）** [REPEAT-2]: `internal/dispatch/msgqueue.go:184-208` MaxDepth=16 拷贝 15。方案：环形 buffer。
 - [ ] **R247-PERF-24 — workDirUnderRoot 每 execute EvalSymlinks（P3）** [REFACTOR]: `internal/cron/scheduler.go:177-189` 长寿命下重复 syscall。方案：TTL 缓存。
 - [~] **R247-PERF-25 — agent_tailer Shutdown 重新 alloc map（P3）** [REFACTOR]: `internal/server/agent_tailer.go:565-578`。方案：clear(r.byTask) (go1.21+)。
