@@ -1246,11 +1246,28 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 	}
+	wasPaused := j.Paused
 	s.deleteJobLocked(j)
 	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
 	if perr != nil {
+		// R238-GO-2: persist failed *after* deleteJobLocked unwound the cron
+		// entry, router stub, and map entry. Without rollback the in-memory
+		// state diverges from disk: subsequent process restart reloads the
+		// job from disk and "resurrects" what the caller observed as
+		// deleted. Mirror the addJobAcquiringLock rollback by re-inserting
+		// the map entry and re-registering the cron entry (skipped for
+		// paused jobs to match the original state) under s.mu.
+		s.mu.Lock()
+		s.jobs[j.ID] = j
+		if !wasPaused {
+			if rerr := s.registerJob(j); rerr != nil {
+				slog.Error("cron: rollback registerJob failed after persist error",
+					"job", j.ID, "err", rerr)
+			}
+		}
+		s.mu.Unlock()
 		return nil, perr
 	}
 	save()
