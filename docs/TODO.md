@@ -135,7 +135,7 @@
 - [~] **R247-GO-11 — resetRouterStub 缺 nil-receiver 防御（P2）** [BREAKING-LOCAL]: `internal/cron/scheduler.go:783-788` 与 sibling StartedAt/KnownSessionIDs 不一致；测试构造部分 Scheduler 调 DeleteJobByID 会 NPE。方案：开头 `if s == nil { return }`。
 - [ ] **R247-GO-12 — runDeadlineWatchdog 每 tick spawn goroutine（P2）** [REFACTOR]: `internal/cron/scheduler_run.go:621-630` 50 jobs × 1Hz = 50 goroutine/秒 启停，99% case 无效。方案：高 jobTimeout 跳过 watchdog 或共享 watchdog goroutine。
 - [ ] **R247-GO-13 — AddJob 10 collision retry 日志 flood（P3）** [BREAKING-LOCAL]: `internal/cron/scheduler_jobs.go:88-109` mock generator 死循环时刷 10 行 log。方案：仅 i==0 记 Warn 或检测确定性 generator 提前 bail。
-- [ ] **R247-GO-14 — Stop() 文档实际 wall-clock 35s（P3）** [BREAKING-LOCAL]: `internal/cron/scheduler.go:684-777` godoc 说 "bounded by stopBudget(30s)"，实测 + gcWaitBudget(5s) = 35s。方案：godoc 修正或共享 budget。
+- [x] **R247-GO-14 — Stop() 文档实际 wall-clock 35s（P3）** [BREAKING-LOCAL]: `internal/cron/scheduler.go:684-777` godoc 说 "bounded by stopBudget(30s)"，实测 + gcWaitBudget(5s) = 35s。方案：godoc 修正或共享 budget。 — F2 cron-fix 2026-05-24: godoc 改"gcWaitBudget + stopBudget = 35s default; both independent timers"，明示组合上限并交叉引用 With*Budget helper（见 R247-CR-18）。文案修正路线（不 share budget），无 caller 改动。
 - [ ] **R247-GO-15 — saveMarshaledSeq 失败时 lastSavedSeq 未更新注释缺失（P3）** [BREAKING-LOCAL]: `internal/cron/scheduler_persist.go:101-135` 当前正确但缺 godoc 解释。方案：注释解释为何不 bump。
 - [ ] **R247-GO-16 — spawn budget 警告阈值 jobTimeout/2 噪音（P3）** [BREAKING-LOCAL]: `internal/cron/scheduler_run.go:606-613` cold-start fresh-context preflight 触发误报。方案：阈值 → jobTimeout 或区分 fresh vs hot。
 - [ ] **R247-GO-17 — cacheGet R241-CR-6 注释失效（P3）** [REPEAT-2]: `internal/cron/runstore.go:449-489` 注释说 "always sets warm=true" 但 R247-GO-6 race 后不成立。方案：与 R247-GO-6 一并修或更新注释。
