@@ -43,6 +43,11 @@ func (r *Router) Remove(key string) bool {
 	// and the workspace lookup would fail.
 	workspaceSnapshot := s.Workspace()
 	backend := s.Backend()
+	// Snapshot the session UUID before unregister for the same reason
+	// — by the time notifyKeyRetired runs r.sessions[key] is gone, and
+	// the history-drawer subscriber needs the UUID to stamp retired_at
+	// on the corresponding RecentSession.
+	retiredSessionID := s.SessionID()
 	r.unregisterSessionLocked(key, s, false)
 	if wasActive {
 		if r.activeCount.Add(-1) < 0 {
@@ -83,7 +88,7 @@ func (r *Router) Remove(key string) bool {
 	}
 
 	slog.Info("session removed", "key", key)
-	r.notifyKeyRetired(key)
+	r.notifyKeyRetired(key, retiredSessionID)
 	r.notifyChange()
 	return true
 }

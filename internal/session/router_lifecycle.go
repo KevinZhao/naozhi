@@ -1121,15 +1121,21 @@ func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBack
 // ResetAndDiscardOverride. Caller must run the finishResetUnlocked
 // sequence after releasing the lock.
 //
+// Returns the live process (for Close after lock release), the session
+// UUID captured before teardown (for the retired-session notification —
+// r.sessions[key] is unregistered here, so callers cannot recover the
+// UUID after the lock drops), and the success flag.
+//
 // LOCK: caller must hold r.mu for writing.
-func (r *Router) resetLocked(key string) (processIface, bool) {
+func (r *Router) resetLocked(key string) (processIface, string, bool) {
 	s, ok := r.sessions[key]
 	if !ok {
-		return nil, false
+		return nil, "", false
 	}
 	proc := s.loadProcess()
 	wasActive := !s.exempt && proc != nil && proc.Alive()
 	backend := s.Backend()
+	sessionID := s.SessionID()
 	r.unregisterSessionLocked(key, s, false)
 	if wasActive {
 		if r.activeCount.Add(-1) < 0 {
@@ -1142,18 +1148,18 @@ func (r *Router) resetLocked(key string) (processIface, bool) {
 	}
 	r.storeDirty = true
 	r.storeGen.Add(1)
-	return proc, true
+	return proc, sessionID, true
 }
 
 // Reset discards the session for the given key (user sent /new).
 func (r *Router) Reset(key string) {
 	r.mu.Lock()
-	proc, ok := r.resetLocked(key)
+	proc, sessionID, ok := r.resetLocked(key)
 	r.mu.Unlock()
 	if !ok {
 		return
 	}
-	r.finishResetUnlocked(key, proc)
+	r.finishResetUnlocked(key, sessionID, proc)
 }
 
 // ResetAndDiscardOverride atomically resets the session AND deletes the
@@ -1162,7 +1168,7 @@ func (r *Router) Reset(key string) {
 // into the next session (Round-207 SM1).
 func (r *Router) ResetAndDiscardOverride(key string) {
 	r.mu.Lock()
-	proc, hadSession := r.resetLocked(key)
+	proc, sessionID, hadSession := r.resetLocked(key)
 	if _, existed := r.workspaceOverrides[key]; existed {
 		delete(r.workspaceOverrides, key)
 		r.wsOverridesDirty = true
@@ -1172,12 +1178,15 @@ func (r *Router) ResetAndDiscardOverride(key string) {
 	if !hadSession {
 		return
 	}
-	r.finishResetUnlocked(key, proc)
+	r.finishResetUnlocked(key, sessionID, proc)
 }
 
 // finishResetUnlocked runs the post-unlock teardown shared by Reset and
-// ResetAndDiscardOverride. Must be called without r.mu held.
-func (r *Router) finishResetUnlocked(key string, proc processIface) {
+// ResetAndDiscardOverride. Must be called without r.mu held. sessionID
+// is the UUID captured by resetLocked before unregister cleared
+// r.sessions[key]; pass through as-is to notifyKeyRetired so the
+// dashboard history-sort hook can stamp retired_at.
+func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 	if proc != nil && proc.Alive() {
 		proc.Close()
 	}
@@ -1199,7 +1208,7 @@ func (r *Router) finishResetUnlocked(key string, proc processIface) {
 	}
 
 	slog.Info("session reset", "key", key)
-	r.notifyKeyRetired(key)
+	r.notifyKeyRetired(key, sessionID)
 	r.notifyChange()
 }
 

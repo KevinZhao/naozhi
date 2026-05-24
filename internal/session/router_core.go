@@ -352,6 +352,13 @@ type Router struct {
 	// 读写: core (SetOnKeyRetired/notifyKeyRetired), lifecycle (Reset), cleanup (Remove)
 	onKeyRetired atomic.Pointer[onKeyRetiredHolder]
 
+	// onSessionRetired mirrors onKeyRetired but exposes the session UUID
+	// captured before teardown cleared r.sessions[key]. Used by the
+	// dashboard history-sort path; see SetOnSessionRetired godoc for why
+	// it is split from onKeyRetired.
+	// 读写: core (SetOnSessionRetired/notifyKeyRetired), lifecycle (Reset), cleanup (Remove)
+	onSessionRetired atomic.Pointer[onSessionRetiredHolder]
+
 	// historyWg tracks startup history-loading goroutines so Shutdown waits for them.
 	// 读写: core (init Add/Done), cleanup (Shutdown Wait)
 	historyWg sync.WaitGroup
@@ -1119,6 +1126,12 @@ func (r *Router) notifyChange() {
 // onKeyRetiredHolder mirrors onChangeHolder for the key-retirement hook.
 type onKeyRetiredHolder struct{ fn func(key string) }
 
+// onSessionRetiredHolder mirrors onKeyRetiredHolder but carries the
+// session's UUID alongside the routing key. Wired separately so the
+// sessionID-keyed RetiredStore path doesn't have to reverse-lookup
+// the UUID after teardown has already cleared r.sessions[key].
+type onSessionRetiredHolder struct{ fn func(key, sessionID string) }
+
 // SetOnKeyRetired registers a callback fired from Reset/Remove AFTER the
 // session teardown completes. Typical wiring: dispatch.MessageQueue.Cleanup
 // so it does not accumulate empty entries Discard retains for gen-monotonicity.
@@ -1130,10 +1143,35 @@ func (r *Router) SetOnKeyRetired(fn func(key string)) {
 	r.onKeyRetired.Store(&onKeyRetiredHolder{fn: fn})
 }
 
-// notifyKeyRetired invokes the onKeyRetired callback if set. Call outside r.mu.
-func (r *Router) notifyKeyRetired(key string) {
+// SetOnSessionRetired registers a callback fired from Reset/Remove AFTER
+// the session teardown completes, receiving both the routing key and the
+// session UUID captured before teardown cleared r.sessions[key]. Used by
+// the dashboard history-drawer sort path to stamp a retired_at timestamp
+// onto the corresponding RecentSession entry. sessionID may be empty when
+// the session was retired before the CLI ever returned a UUID; callbacks
+// must tolerate that and skip recording.
+//
+// Independent of SetOnKeyRetired so the existing FIFO-cleanup wiring in
+// dispatch.MessageQueue.Cleanup is not disturbed; both fire on the same
+// teardown event.
+func (r *Router) SetOnSessionRetired(fn func(key, sessionID string)) {
+	if fn == nil {
+		r.onSessionRetired.Store(nil)
+		return
+	}
+	r.onSessionRetired.Store(&onSessionRetiredHolder{fn: fn})
+}
+
+// notifyKeyRetired invokes both the onKeyRetired and onSessionRetired
+// callbacks (when set). Call outside r.mu. sessionID is captured from
+// the session before its teardown ran, so it remains valid even though
+// r.sessions[key] is already gone by the time we reach this hook.
+func (r *Router) notifyKeyRetired(key, sessionID string) {
 	if h := r.onKeyRetired.Load(); h != nil {
 		h.fn(key)
+	}
+	if h := r.onSessionRetired.Load(); h != nil {
+		h.fn(key, sessionID)
 	}
 }
 
