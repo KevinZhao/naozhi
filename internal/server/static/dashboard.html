@@ -979,8 +979,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
   .event{padding:4px max(12px,env(safe-area-inset-right)) 4px max(12px,env(safe-area-inset-left));max-width:100%}
   .event.user .event-content{max-width:85%}
   .event.text+.event.user{margin-top:16px}
-  /* Cron detail: reduce padding to match mobile layout */
-  .cron-detail{padding:12px}
+  /* Cron detail: tight mobile layout — sit flush against the screen edges
+     and reclaim vertical real estate. Outer .cron-detail keeps no padding;
+     list-pane uses safe-area-aware horizontal padding (4-8px) so cards span
+     edge-to-edge, plus a smaller vertical padding to bring content closer
+     to the header. cron-list-head / overview / filter margins also shrink. */
+  .cron-detail{padding:0}
+  .cron-detail-body > .cron-list-pane{padding:6px max(4px,env(safe-area-inset-right)) 8px max(4px,env(safe-area-inset-left))}
+  .cron-list-head{margin-bottom:6px;gap:8px}
+  .cron-list-head h3{font-size:15px}
+  .cron-overview{margin-bottom:6px}
+  .cron-filter-bar{margin-bottom:6px}
   /* Mobile cron drawer: force single-column. ResizeObserver classifies
      list-pane by width and may pick wide/medium/narrow when a drawer is
      open, squeezing the drawer to <200px where labels render vertically.
