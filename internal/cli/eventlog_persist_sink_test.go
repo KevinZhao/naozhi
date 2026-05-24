@@ -258,6 +258,54 @@ func TestEventLog_SinkReceivesDefensiveCopy(t *testing.T) {
 	}
 }
 
+// TestEventLog_ReplayInvokeTotal_PreSinkAttach confirms R242-ARCH-20:
+// any invokePersistSink that fires while sinkReady is still false must
+// bump the diagnostic counter so /health (and tests) can detect a
+// SetPersistSink-after-InjectHistory ordering violation in production.
+//
+// The setup runs SetPersistSink AFTER an Append + AppendBatch — i.e.
+// the broken ordering. Both pre-attach calls observe sinkReady=false
+// (the field starts zero). Post-attach calls see sinkReady=true and
+// must NOT bump the counter further.
+func TestEventLog_ReplayInvokeTotal_PreSinkAttach(t *testing.T) {
+	l := NewEventLog(16)
+	c := &captureSink{}
+
+	// Stage 1: pre-attach calls. invokePersistSink early-returns when
+	// the sink pointer is nil, so these do NOT count — the counter is
+	// scoped to the window where a sink IS attached but sinkReady is
+	// still false (which only happens via the
+	// persistSinkPtr.Store-then-sinkReady.Store window inside
+	// SetPersistSink itself, normally too tight to observe in tests).
+	l.Append(EventEntry{Type: "user", Summary: "pre1"})
+	l.AppendBatch([]EventEntry{{Type: "user", Summary: "pre2"}})
+
+	if got := l.ReplayInvokeTotal(); got != 0 {
+		t.Errorf("counter bumped without an attached sink: %d", got)
+	}
+
+	// Stage 2: install the sink and verify post-attach Appends DO NOT
+	// count — sinkReady flipped to true atomically with the pointer
+	// Store, so replay=false on every subsequent invocation.
+	l.SetPersistSink(c.asSink())
+	l.Append(EventEntry{Type: "user", Summary: "post1"})
+	l.AppendBatch([]EventEntry{{Type: "user", Summary: "post2"}})
+
+	if got := l.ReplayInvokeTotal(); got != 0 {
+		t.Errorf("counter bumped on live-phase batch: %d", got)
+	}
+
+	// Verify the sink received exactly 2 batches with replay=false.
+	if c.batchCount() != 2 {
+		t.Fatalf("sink received %d batches, want 2", c.batchCount())
+	}
+	for i, replay := range c.replays {
+		if replay {
+			t.Errorf("batch %d carried replay=true post-attach", i)
+		}
+	}
+}
+
 // TestEventLog_SinkConcurrent runs Appends under -race alongside
 // sink-replacing SetPersistSink calls. Racey access to the atomic
 // pointer would show up here.

@@ -11,41 +11,6 @@ import (
 	"github.com/naozhi/naozhi/internal/eventlog/schema"
 )
 
-// framedBodyPool reuses the read-buffer for ReadFramedBody so that
-// recovery (which reads thousands of frames at startup) does not pay
-// per-frame heap allocations. R242-PERF-1 / R218-PERF-10. Only frames
-// up to maxPooledFrameSize are pooled; larger ones fall back to a fresh
-// make so the pool ceiling is bounded. Callers MUST call
-// ReleaseFramedBody on the slice returned by ReadFramedBody once they
-// are finished reading from it.
-const maxPooledFrameSize = 64 * 1024
-
-var framedBodyPool = sync.Pool{
-	New: func() any {
-		// Use a pointer to avoid the "non-pointer in pool" allocation
-		// noise lint complaint and to make Put cheap.
-		buf := make([]byte, maxPooledFrameSize)
-		return &buf
-	},
-}
-
-// ReleaseFramedBody returns a buffer obtained from ReadFramedBody to
-// the pool. Safe with nil / large-frame slices that were not pooled.
-// Callers MUST NOT retain references to the slice after Release.
-func ReleaseFramedBody(body []byte) {
-	if body == nil {
-		return
-	}
-	// Recover the underlying array via cap. Only return to the pool if
-	// the original allocation was the pooled size — large-frame paths
-	// allocated a one-shot buffer that will GC.
-	full := body[:cap(body)]
-	if cap(full) != maxPooledFrameSize {
-		return
-	}
-	framedBodyPool.Put(&full)
-}
-
 // Framing layout (see RFC §3.1.1):
 //
 //	<decimal-length>\n<json-record-of-length-bytes>\n
@@ -205,23 +170,101 @@ func ReadRecord(br *bufio.Reader) (*schema.Record, error) {
 	if err != nil {
 		return nil, err
 	}
-	// schema.UnmarshalRecord copies primitive fields and JSON-decodes
-	// nested objects into freshly allocated structs, so it does not
-	// retain `body` past return. Safe to release.
-	defer ReleaseFramedBody(body)
+	// UnmarshalRecord copies into Record fields (json.RawMessage's
+	// UnmarshalJSON appends to a fresh slice), so the body buffer can
+	// be returned to the pool on both success and failure paths.
 	rec, err := schema.UnmarshalRecord(body)
+	ReleaseFramedBody(body)
 	if err != nil {
 		return nil, err
 	}
 	return rec, nil
 }
 
+// framedBodyPool reuses the body+trailing-newline buffer that
+// ReadFramedBody allocates per frame. Recovery startup walks every
+// record on disk (potentially thousands of frames) and the previous
+// implementation paid `make([]byte, n+1)` per frame regardless of how
+// short-lived the slice was. R242-PERF-1 (REPEAT-3 with R218-PERF-10).
+//
+// The pool stores `*[]byte` rather than `[]byte` so the value put back
+// is a stable pointer (sync.Pool's New returns interface{}, and a bare
+// []byte boxes into a fresh interface allocation on every Put — the
+// pointer indirection sidesteps that).
+//
+// Callers MUST hand the slice back via ReleaseFramedBody once they're
+// done extracting / copying / decoding. UnmarshalRecord copies via
+// json.RawMessage.UnmarshalJSON so the returned record does NOT retain
+// the input slice; callers like ReadRecord and rotate.spliceLog are
+// safe to release immediately after the consume step.
+var framedBodyPool = sync.Pool{
+	New: func() any {
+		// Default capacity sized for the common case: most records are
+		// 1-2 KiB, large image entries can hit 30-80 KiB. 4 KiB matches
+		// the bufio default buffer size and amortises over typical
+		// recovery runs without tying up huge backing arrays for runs
+		// that never see large frames. Pool grows backing arrays via
+		// the n+1 grow path below when a single record exceeds cap.
+		b := make([]byte, 0, 4096)
+		return &b
+	},
+}
+
+// acquireFramedBuf fetches a buffer from the pool sized to hold n+1
+// bytes (n body + 1 trailing newline). When the pooled buffer's cap is
+// too small, we replace it with a freshly grown one — Get returns
+// whatever was previously Put, which may have been undersized for the
+// next frame.
+func acquireFramedBuf(n int) []byte {
+	bp := framedBodyPool.Get().(*[]byte)
+	want := n + 1
+	if cap(*bp) < want {
+		*bp = make([]byte, want)
+	} else {
+		*bp = (*bp)[:want]
+	}
+	return *bp
+}
+
+// ReleaseFramedBody returns a slice obtained from ReadFramedBody to
+// the internal pool. Callers must call this exactly once per
+// ReadFramedBody success and must not retain the slice or any subslice
+// after the call (the next reader gets the same backing array).
+//
+// Passing nil or a slice whose backing array exceeds the pool's
+// reasonable max (1 MiB) is silently ignored: huge one-off records
+// from a giant image upload shouldn't pin big backing arrays in the
+// pool indefinitely.
+func ReleaseFramedBody(body []byte) {
+	if body == nil {
+		return
+	}
+	// Cap returned buffers at 1 MiB. Beyond this we'd be hoarding
+	// memory across the entire process lifetime for a single
+	// outlier; let GC reclaim it instead.
+	if cap(body) > 1<<20 {
+		return
+	}
+	full := body[:cap(body)]
+	framedBodyPool.Put(&full)
+}
+
 // ReadFramedBody returns the raw record JSON bytes plus the total
 // frame byte length consumed from br. Exposed so the rotate path can
 // splice records from old → new file without re-marshalling.
 //
-// The returned byte slice is a fresh copy (the bufio.Reader's buffer
-// may get overwritten on the next read).
+// The returned byte slice is borrowed from an internal sync.Pool. The
+// caller MUST call ReleaseFramedBody on the returned slice once it has
+// finished consuming the bytes (decoded into a record, written to
+// another file, etc.). Failing to release simply forfeits the alloc
+// savings; passing the same slice twice will not corrupt anything but
+// risks two readers handing back overlapping buffers and clobbering
+// each other on a future frame.
+//
+// Callers that intend to retain the body bytes past the next frame
+// MUST copy them out — the pool may hand the same backing array to the
+// next ReadFramedBody call. Today both production callers (ReadRecord
+// and rotate.spliceLog) consume the body synchronously and release.
 func ReadFramedBody(br *bufio.Reader) ([]byte, int, error) {
 	// Read length prefix. ReadSlice is fast (no allocation on hit)
 	// but its buffer is invalidated by subsequent reads — we copy the
@@ -270,22 +313,13 @@ func ReadFramedBody(br *bufio.Reader) ([]byte, int, error) {
 	// returns ErrUnexpectedEOF on short read, which maps to "partial
 	// tail" here — the writer didn't finish emitting this record.
 	//
-	// R242-PERF-1: pool the read buffer for typical frame sizes to
-	// avoid per-frame heap allocations during recovery (thousands of
-	// frames). Frames larger than maxPooledFrameSize fall back to a
-	// one-shot make. Callers must invoke ReleaseFramedBody on the
-	// returned slice once consumed.
-	need := n + 1
-	var body []byte
-	if need <= maxPooledFrameSize {
-		bufp := framedBodyPool.Get().(*[]byte)
-		body = (*bufp)[:need]
-	} else {
-		body = make([]byte, need)
-	}
+	// The buffer is borrowed from framedBodyPool. On every error path
+	// below we return it eagerly so a malformed-frame storm (e.g. log
+	// recovery on a corrupted file) doesn't drain the pool. The success
+	// path hands ownership to the caller; ReleaseFramedBody is the
+	// matching free.
+	body := acquireFramedBuf(n)
 	if _, err := io.ReadFull(br, body); err != nil {
-		// Return the pooled buffer on the error path so we don't leak
-		// it. ReleaseFramedBody is a no-op for non-pooled allocations.
 		ReleaseFramedBody(body)
 		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 			return nil, 0, ErrPartialTail
@@ -293,6 +327,7 @@ func ReadFramedBody(br *bufio.Reader) ([]byte, int, error) {
 		return nil, 0, fmt.Errorf("read body: %w", err)
 	}
 	if body[n] != '\n' {
+		ReleaseFramedBody(body)
 		// Missing trailing newline means the next record's framing is
 		// unreachable — we can't recover, treat the whole file as
 		// truncated at this point.

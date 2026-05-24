@@ -69,18 +69,102 @@ type runStore struct {
 	recentCache sync.Map // jobID -> *recentCacheEntry
 }
 
-// recentCacheEntry is the cached newest-first snapshot for one job. capLen
-// is the populated portion; the underlying slice may be over-allocated to
-// `keepCount` so head-pushes don't reallocate.
+// recentCacheEntry is the cached newest-first snapshot for one job.
+//
+// R242-GO-8 / R235-PERF-3 / R233-PERF-2: storage is a fixed-capacity ring
+// buffer (cap = runStore.keepCount, typically 200). cacheHeadPush is the
+// hot path — every Append calls it, so pre-historical implementations
+// that did `append + copy` shifted up to keepCount-1 entries per push
+// (O(N) per Append). The ring lets us land each push in O(1) by
+// rotating `head` backwards instead of moving data.
+//
+// Logical view: newest-first slice of length `count`, where index 0 is
+// the newest entry. Physically: `ring[head]` is the newest, `ring[(head
+// + count - 1) % cap(ring)]` is the oldest. ringRead / ringSnapshot
+// translate logical → physical for all consumers.
 type recentCacheEntry struct {
-	mu   sync.Mutex
-	runs []CronRunSummary // newest-first
-	warm bool             // false until first warm() pass; List/Recent will lazy-warm
+	mu sync.Mutex
+	// ring is the fixed-capacity backing array. cap(ring) == runStore.keepCount
+	// after the first warm pass; nil before warm.
+	ring []CronRunSummary
+	// head is the ring index of the newest entry. Undefined when count == 0.
+	head int
+	// count is the populated length (0 ≤ count ≤ cap(ring)).
+	count int
+	warm  bool // false until first warm() pass; List/Recent will lazy-warm
 	// appendsSinceTrim counts Append calls since the last full trimJobLocked
 	// pass. Used by skipAppendTrim to batch ReadDir-driven trims when the
 	// cache shows we're well under keepCount. Reset to 0 by Append after
 	// calling trimJobLocked. R232-PERF-8.
 	appendsSinceTrim int
+}
+
+// ringRead returns the i-th newest entry (0 = newest). Caller holds entry.mu
+// and must ensure 0 ≤ i < entry.count.
+func (e *recentCacheEntry) ringRead(i int) CronRunSummary {
+	return e.ring[(e.head+i)%cap(e.ring)]
+}
+
+// ringSnapshot returns a fresh newest-first slice of up to limit entries.
+// Caller holds entry.mu. limit ≤ 0 or limit > count returns count entries.
+func (e *recentCacheEntry) ringSnapshot(limit int) []CronRunSummary {
+	if limit <= 0 || limit > e.count {
+		limit = e.count
+	}
+	out := make([]CronRunSummary, limit)
+	c := cap(e.ring)
+	// Two contiguous segments: head..min(head+limit, c) and 0..wrap.
+	first := limit
+	if e.head+first > c {
+		first = c - e.head
+	}
+	copy(out, e.ring[e.head:e.head+first])
+	if first < limit {
+		copy(out[first:], e.ring[:limit-first])
+	}
+	return out
+}
+
+// ringPushHead inserts summary at the newest end in O(1). Caller holds
+// entry.mu and entry.ring is allocated (cap > 0).
+func (e *recentCacheEntry) ringPushHead(summary CronRunSummary) {
+	c := cap(e.ring)
+	// Move head one slot backwards, wrapping around. After this, the
+	// freshly written summary is the newest entry.
+	e.head = (e.head - 1 + c) % c
+	if e.count == 0 {
+		// First push into an empty ring: ensure ring length covers head.
+		// We keep len(ring) == cap(ring) so plain index assignment works
+		// regardless of count.
+		e.ring = e.ring[:c]
+	}
+	e.ring[e.head] = summary
+	if e.count < c {
+		e.count++
+	}
+}
+
+// ringSeed populates the ring from a newest-first source slice. Caller
+// holds entry.mu. Used by warmCache and cacheTrimAfterDisk to install a
+// fresh snapshot. cap is set to keepCount so future pushes never realloc.
+func (e *recentCacheEntry) ringSeed(rows []CronRunSummary, keepCount int) {
+	if cap(e.ring) != keepCount {
+		e.ring = make([]CronRunSummary, keepCount)
+	} else {
+		e.ring = e.ring[:keepCount]
+		// Zero out trailing slots so old entries beyond count don't pin
+		// strings / sub-slices (avoid leaking RAM through a smaller seed).
+		for i := len(rows); i < keepCount; i++ {
+			e.ring[i] = CronRunSummary{}
+		}
+	}
+	n := len(rows)
+	if n > keepCount {
+		n = keepCount
+	}
+	copy(e.ring[:n], rows[:n])
+	e.head = 0
+	e.count = n
 }
 
 const (
@@ -298,17 +382,17 @@ func (s *runStore) skipAppendTrim(jobID string) bool {
 		return false
 	}
 	// Plenty of headroom under count cap?  Cache reflects the on-disk
-	// newest-first slice (capped to keepCount), so len(runs) is a safe
+	// newest-first ring (capped to keepCount), so entry.count is a safe
 	// upper bound on disk rows that survived the last trim.
-	if len(entry.runs)+appendTrimBatch >= s.keepCount {
+	if entry.count+appendTrimBatch >= s.keepCount {
 		entry.appendsSinceTrim = 0
 		return false
 	}
 	// Oldest cached row still inside keepWindow?  Use EndedAt to mirror
 	// trimJobLocked's mtime-based cutoff (cacheTrimAfterDisk also approximates
 	// mtime via EndedAt — keep these two paths consistent).
-	if len(entry.runs) > 0 {
-		oldest := entry.runs[len(entry.runs)-1]
+	if entry.count > 0 {
+		oldest := entry.ringRead(entry.count - 1)
 		ts := oldest.EndedAt
 		if ts.IsZero() {
 			ts = oldest.StartedAt
@@ -328,10 +412,16 @@ func (s *runStore) skipAppendTrim(jobID string) bool {
 // 10 s.
 const appendTrimBatch = 10
 
-// cacheHeadPush prepends summary to the recentCache slice for jobID. The
+// cacheHeadPush prepends summary to the recentCache for jobID. The
 // caller must hold jobLock(jobID) so the push is serialised against
 // concurrent Recent / List reads. No-op when the cache entry is not yet
 // warm (List/Recent will populate from disk on first miss).
+//
+// R242-GO-8 / R235-PERF-3 / R233-PERF-2: ring-buffer push in O(1).
+// The pre-ring implementation did `append([]T{x}, slice...)` (later
+// `append + copy + index`) which shifted up to keepCount-1 entries on
+// every Append — at keepCount=200 that was 200× the per-push work the
+// 1Hz cron + dashboard poll path actually needs.
 func (s *runStore) cacheHeadPush(jobID string, summary CronRunSummary) {
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
@@ -343,19 +433,13 @@ func (s *runStore) cacheHeadPush(jobID string, summary CronRunSummary) {
 	if !entry.warm {
 		return
 	}
-	// Newest-first: prepend. Cap to keepCount to bound memory; entries
-	// beyond cap are trimmed by trimJobLocked at the same time.
-	// 用 grow-in-place + copy + 索引赋值替代 append([]T{x}, slice...)，
-	// 节省每次调用的一次性短命 1-元素切片头分配；shift 仍然是 O(N)。
-	// 注：当 len(entry.runs) == cap(entry.runs) 时 append 仍会扩容，此时
-	// 并不省底层数组拷贝；只在 len < cap（trim 之后的常态）时纯靠 copy。
-	// R235-CR-11 / R235-PERF-3 跟踪未来改 ring buffer 的方向。
-	entry.runs = append(entry.runs, CronRunSummary{})
-	copy(entry.runs[1:], entry.runs[:len(entry.runs)-1])
-	entry.runs[0] = summary
-	if len(entry.runs) > s.keepCount {
-		entry.runs = entry.runs[:s.keepCount]
+	// Defensive: a warm cache must always own a cap=keepCount ring (warmCache
+	// guarantees this via ringSeed). Re-allocate if a future caller bypasses
+	// ringSeed; cheap and avoids index-out-of-range under unexpected input.
+	if cap(entry.ring) != s.keepCount {
+		entry.ringSeed(nil, s.keepCount)
 	}
+	entry.ringPushHead(summary)
 }
 
 // cacheGet returns a defensive copy of up to limit newest summaries for
@@ -373,14 +457,14 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 	entry := v.(*recentCacheEntry)
 	entry.mu.Lock()
 	if entry.warm {
-		out := s.copySummariesLocked(entry.runs, limit)
+		out := entry.ringSnapshot(limit)
 		entry.mu.Unlock()
 		return out, true
 	}
 	entry.mu.Unlock()
 
 	// Cold cache: warm from disk under jobLock so concurrent Append's
-	// cacheHeadPush observes the freshly-warmed slice (and would no-op
+	// cacheHeadPush observes the freshly-warmed ring (and would no-op
 	// before, but warm is now true).
 	//
 	// Double-lock note: between the unlock above and the re-lock below
@@ -388,7 +472,7 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 	// warmCache concurrently. warmCache is idempotent (entry.warm
 	// transitions from false to true exactly once thanks to the per-job
 	// lock guard), so the second caller sees warm=true on its own
-	// re-acquire and returns the populated slice.
+	// re-acquire and returns the populated ring.
 	//
 	// R241-CR-6: warmCache always sets warm=true (even when ReadDir
 	// fails or the directory is empty — diskListNewestFirst returns nil
@@ -401,7 +485,7 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 	if !entry.warm {
 		return nil, false
 	}
-	return s.copySummariesLocked(entry.runs, limit), true
+	return entry.ringSnapshot(limit), true
 }
 
 // warmCache populates the recentCache for jobID by reading the on-disk
@@ -420,19 +504,8 @@ func (s *runStore) warmCache(jobID string) {
 		return // another goroutine warmed it during our wait
 	}
 	rows := s.diskListNewestFirst(jobID, s.keepCount, time.Time{})
-	entry.runs = rows
+	entry.ringSeed(rows, s.keepCount)
 	entry.warm = true
-}
-
-// copySummariesLocked returns a defensive copy of up to limit entries
-// from the cache slice. Caller holds entry.mu.
-func (s *runStore) copySummariesLocked(src []CronRunSummary, limit int) []CronRunSummary {
-	if limit <= 0 || limit > len(src) {
-		limit = len(src)
-	}
-	out := make([]CronRunSummary, limit)
-	copy(out, src[:limit])
-	return out
 }
 
 // cacheInvalidate forgets the cache entry for jobID. Used by DeleteJob.
@@ -584,16 +657,14 @@ func (s *runStore) Get(jobID, runID string) (*CronRun, error) {
 // readRun parses a single run file. Returns ErrCorruptRun on parse
 // failure or oversize; fs.ErrNotExist propagates unchanged.
 //
-// R235-SEC-5 / R242-GO-17: Lstat intentionally used (not Stat) — Lstat
-// reports the symlink itself rather than following it, so the
-// !li.Mode().IsRegular() check below rejects symlinks before ReadFile
-// is allowed to dereference and exfiltrate the linked target. This
-// guards against an attacker (with write access to runs/<jobID>/)
-// replacing a legitimate .json with a symlink to /etc/passwd or
-// another sensitive file. diskListNewestFirst / trimJobLocked already
-// skip symlinks during their directory scans, but Get() arrives here
-// directly with a constructed path. DO NOT change Lstat to Stat: that
-// would silently follow the symlink and bypass the regular-file gate.
+// R235-SEC-5 / R242-GO-17: Lstat is intentionally used here (not Stat).
+// Stat would follow symlinks, which an attacker with write access to
+// runs/<jobID>/ could exploit by replacing a legitimate .json with a
+// symlink to /etc/passwd or another sensitive file. Lstat reports the
+// link itself, so the IsRegular() check below rejects the symlink before
+// ReadFile dereferences it. diskListNewestFirst / trimJobLocked already
+// skip symlinks during directory scans, but Get() arrives here directly
+// with a constructed path so this guard is the only barrier.
 func (s *runStore) readRun(path string) (*CronRun, error) {
 	li, err := os.Lstat(path)
 	if err != nil {
@@ -762,7 +833,8 @@ func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
 		return
 	}
 	// Drop entries beyond keepCount; drop entries older than cutoff. The
-	// cache slice is newest-first, so iterate and stop at first old.
+	// ring is logically newest-first, so iterate via ringRead and stop at
+	// the first row older than cutoff.
 	//
 	// The cutoff is mtime-based (matches trimJobLocked which uses ModTime
 	// from os.DirEntry.Info). For long-running jobs StartedAt can predate
@@ -788,15 +860,18 @@ func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
 	// Neither cost is justified for the observed divergence; godoc-only
 	// resolution stands until profile data shows otherwise.
 	//
-	// Allocate a fresh backing array — `entry.runs[:0]` would alias and
-	// any caller that retains the slice (Recent's defensive copy is in
-	// place today, but a future code path might not) would observe the
-	// trim. R221-FIX-P0-2.
-	keep := make([]CronRunSummary, 0, len(entry.runs))
-	for i, r := range entry.runs {
-		if i >= s.keepCount {
-			break
-		}
+	// R221-FIX-P0-2 historical: pre-ring this rebuilt a fresh slice every
+	// trim because reusing entry.runs[:0] would alias snapshots taken by
+	// concurrent List/Recent callers. With the ring, snapshots are made
+	// via ringSnapshot which already returns fresh slices, so we trim in
+	// place by counting how many rows survive the cutoff and writing back.
+	limit := s.keepCount
+	if limit > entry.count {
+		limit = entry.count
+	}
+	survive := 0
+	for i := 0; i < limit; i++ {
+		r := entry.ringRead(i)
 		ts := r.EndedAt
 		if ts.IsZero() {
 			ts = r.StartedAt
@@ -804,9 +879,19 @@ func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
 		if ts.Before(cutoff) {
 			break
 		}
-		keep = append(keep, r)
+		survive++
 	}
-	entry.runs = keep
+	// Zero out the dropped slots to release any retained string fields.
+	c := cap(entry.ring)
+	if c > 0 {
+		for i := survive; i < entry.count; i++ {
+			entry.ring[(entry.head+i)%c] = CronRunSummary{}
+		}
+	}
+	entry.count = survive
+	if entry.count == 0 {
+		entry.head = 0
+	}
 }
 
 // trimAll runs trimJobLocked for every jobID directory under root.

@@ -31,6 +31,59 @@ const (
 	maxPrevSessionIDs = 32
 )
 
+// ProcessSender is the send-path facet of processIface — the first
+// incremental split of the long-flagged god-interface (R215-ARCH-P1-3 /
+// R219-ARCH-7 / R224-ARCH-5 / R230C-ARCH-4 / R242-GO-12 [REPEAT-5]). It
+// covers Send / SendPassthrough / Interrupt / passthrough lifecycle —
+// the methods a caller needs to deliver one user turn and unwind it on
+// abort. Lifecycle (Alive/Close/Kill) and event/introspection methods
+// stay on the wider processIface for now and will be split into
+// ProcessLifecycle / EventSource / Introspection facets in subsequent
+// rounds. Defined as an exported type-level contract so downstream
+// callers (cron, dispatch, upstream) can declare a narrower dependency
+// over time without forcing a single-cut refactor.
+//
+// processIface embeds ProcessSender, so any concrete implementation of
+// processIface (only *cli.Process in production; testutil.TestProcess
+// in tests) automatically satisfies ProcessSender — no additional
+// adapter required.
+//
+// Cross-ref: R242-ARCH-4 catalogues the planned full split into
+// ProcessLifecycle / EventSource / ProcessSender / Introspection.
+type ProcessSender interface {
+	// Send delivers a user turn and streams events through onEvent
+	// until the result entry arrives. Single-shot; serialised by
+	// caller-side mutex (sendMu in ManagedSession).
+	Send(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+	// SendPassthrough is the passthrough-mode Send. Callers must
+	// ensure the underlying protocol reports SupportsReplay()==true;
+	// otherwise this returns an error. Unlike Send, multiple
+	// goroutines may call this concurrently on the same process —
+	// ordering is handled by the CLI's internal commandQueue plus a
+	// naozhi-side sendSlot FIFO.
+	SendPassthrough(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback, priority string) (*cli.SendResult, error)
+	// SupportsPassthrough reports whether this process's protocol
+	// can operate in passthrough mode (i.e. Protocol.SupportsReplay()).
+	// Dispatch uses this to fall back to legacy Send when the protocol
+	// can't provide the replay events passthrough matching relies on.
+	SupportsPassthrough() bool
+	// PassthroughDepth returns the current pending-slot count for
+	// dashboard / status display.
+	PassthroughDepth() int
+	// DiscardPassthroughPending cancels all in-flight passthrough
+	// sends and fires the given error to each caller. Used on /new,
+	// /clear, or forced session reset.
+	DiscardPassthroughPending(reason error)
+	// Interrupt requests OS-signal-style abort of the active turn.
+	// Best-effort: protocol may not honour SIGINT.
+	Interrupt()
+	// InterruptViaControl asks the CLI to abort the active turn via
+	// an in-band stream-json control_request (no SIGINT, no process
+	// kill). Returns cli.ErrInterruptUnsupported for protocols
+	// without this primitive.
+	InterruptViaControl() error
+}
+
 // processIface abstracts the CLI process lifecycle methods used across the
 // session-aware code paths. Despite the package name, callers extend beyond
 // internal/session itself: internal/server (Hub broadcast + dashboard
@@ -41,38 +94,24 @@ const (
 // (R215-ARCH-P1-3 / R219-ARCH-7 / R224-ARCH-5) pending a future split into
 // ProcessLifecycle / EventSource / ProcessSender facets.
 //
+// First facet split landed in R242-GO-12: ProcessSender covers the
+// send-path subset (Send / SendPassthrough / Interrupt / passthrough
+// lifecycle). processIface embeds it so existing call sites keep working
+// untouched while new narrow consumers can depend on ProcessSender alone.
+//
 // *cli.Process is the only production implementation; testutil.TestProcess is
 // the test fake.
 // R230-CQ-16.
 type processIface interface {
+	// Send / SendPassthrough / Interrupt / InterruptViaControl /
+	// PassthroughDepth / SupportsPassthrough / DiscardPassthroughPending
+	// live on ProcessSender (R242-GO-12, first facet split). Embed it
+	// rather than duplicate.
+	ProcessSender
 	Alive() bool
 	IsRunning() bool
 	Close()
 	Kill()
-	Interrupt()
-	// InterruptViaControl asks the CLI to abort the active turn via an
-	// in-band stream-json control_request (no SIGINT, no process kill).
-	// Returns cli.ErrInterruptUnsupported for protocols without this primitive.
-	InterruptViaControl() error
-	Send(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
-	// SendPassthrough is the passthrough-mode Send. Callers must ensure the
-	// underlying protocol reports SupportsReplay()==true; otherwise this
-	// returns an error. Unlike Send, multiple goroutines may call this
-	// concurrently on the same process — ordering is handled by the CLI's
-	// internal commandQueue plus a naozhi-side sendSlot FIFO.
-	SendPassthrough(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback, priority string) (*cli.SendResult, error)
-	// DiscardPassthroughPending cancels all in-flight passthrough sends and
-	// fires the given error to each caller. Used on /new, /clear, or forced
-	// session reset.
-	DiscardPassthroughPending(reason error)
-	// PassthroughDepth returns the current pending-slot count for dashboard/
-	// status display.
-	PassthroughDepth() int
-	// SupportsPassthrough reports whether this process's protocol can operate
-	// in passthrough mode (i.e. Protocol.SupportsReplay()). Dispatch uses
-	// this to fall back to legacy Send when the protocol can't provide the
-	// replay events passthrough matching relies on.
-	SupportsPassthrough() bool
 	// Dashboard introspection
 	GetSessionID() string
 	GetState() cli.ProcessState
@@ -113,23 +152,31 @@ type processIface interface {
 	Model() string
 }
 
-// processBox wraps processIface for use with atomic.Pointer (which requires a
-// concrete type — interfaces can't be stored directly, and atomic.Value would
-// panic on type-mismatch instead of giving compile-time safety).
+// processBox wraps processIface for use with atomic.Pointer (which
+// requires a concrete type).
 //
-// R242-ARCH-30: storeProcess allocates a fresh *processBox on every non-nil
-// store. The alloc cost was flagged as a refactor candidate (sync.Pool /
-// atomic.Value), but the call sites are cold:
+// R242-ARCH-30 considered replacing the per-storeProcess alloc with
+// either atomic.Value or a sync.Pool. Both options were rejected after
+// analysis:
 //
-//   - spawnSession: once per session creation (router bottleneck, not hot)
-//   - ReattachProcess: once per shim reconnect (~30s reconcile interval)
-//   - storeProcess(nil) on Close: once per session teardown
+//   - atomic.Value rejects a Store of a different dynamic type than the
+//     first non-nil Store (panic on inconsistent type). Production has
+//     a single dynamic type (*cli.Process), but tests inject several
+//     fakes (TestProcess, hookCloseProc, fakeProcess). atomic.Value
+//     would force every test to use the production concrete type, an
+//     unreasonable test-fake constraint.
 //
-// At ~hundreds of sessions / hour the per-box ~16-byte alloc is sub-µs of
-// total GC pressure; pooling would add complexity (Put-on-detach, defensive
-// nil-out of the inner pointer to prevent leaks of the closed processIface)
-// without measurable benefit. Leave the inline alloc; revisit only if a
-// future profiler trace surfaces this in the top-N. Tracked as not-worth-fixing.
+//   - sync.Pool would let storeProcess re-use boxes, but loadProcess
+//     handlers may retain the *processBox pointer across goroutine
+//     boundaries (Hub broadcast, dispatch turn coalescing, cron Send).
+//     Putting the box back to the pool while a reader still holds it
+//     would be a use-after-free racing the next Get + Store. Tracking
+//     the readers' lifetimes requires reference counting we don't have.
+//
+// storeProcess is only called on cold paths (spawn, attach, kill, /new,
+// /clear) — typically once per minute per active session — so the
+// 16-byte alloc per call is dwarfed by the surrounding goroutine and
+// process-lifecycle work. The wrapper stays.
 type processBox struct{ p processIface }
 
 // ManagedSession wraps a claude CLI process with session metadata.
