@@ -626,13 +626,20 @@ func buildServer(opts ServerOptions) *Server {
 		},
 	}
 
-	// Q1: wire router's terminal-removal hook to msgQueue.Cleanup so the
-	// per-session FIFO map entry is truly deleted when the user resets or
-	// removes a session (/new, dashboard delete). Without this the entry
-	// is retained forever for gen-monotonicity — fine under LRU eviction
-	// (the session might return) but a slow leak when the key is never
-	// reused. Router.Reset and Router.Remove both fire this callback; LRU
-	// evictOldest deliberately does NOT.
+	// Q1: wire router's terminal-removal hook. Router.Reset/Remove both
+	// fire this callback (LRU evictOldest deliberately does NOT) and we
+	// fan out to two cleanup riders:
+	//
+	//   1. msgQueue.Cleanup so the per-session FIFO map entry is truly
+	//      deleted when the user resets or removes a session (/new,
+	//      dashboard delete). Without this the entry is retained forever
+	//      for gen-monotonicity — fine under LRU eviction (the session
+	//      might return) but a slow leak when the key is never reused.
+	//   2. sessionH.InvalidateHistoryCache so the history popover sees
+	//      the just-retired session within one /api/sessions poll
+	//      instead of being hidden by the 120s TTL. The hook is replayed
+	//      below right after s.sessionH is constructed — at this point
+	//      sessionH is still nil.
 	router.SetOnKeyRetired(s.msgQueue.Cleanup)
 
 	s.nodeAccess = newNodeAccessor(&s.nodesMu, s.nodes, s.knownNodes)
@@ -712,6 +719,17 @@ func buildServer(opts ServerOptions) *Server {
 	}
 	s.sessionH.initStaticStats()
 	s.sessionH.WarmHistoryCache()
+	// Replay SetOnKeyRetired now that sessionH exists, fanning out to both
+	// msgQueue.Cleanup and InvalidateHistoryCache. See the rationale at the
+	// initial SetOnKeyRetired call earlier in New().
+	{
+		msgCleanup := s.msgQueue.Cleanup
+		sessionH := s.sessionH
+		router.SetOnKeyRetired(func(key string) {
+			msgCleanup(key)
+			sessionH.InvalidateHistoryCache()
+		})
+	}
 	s.agentEventsH = &AgentEventsHandlers{
 		router:     router,
 		nodeAccess: s.nodeAccess,
