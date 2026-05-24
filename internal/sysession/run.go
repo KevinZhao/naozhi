@@ -40,6 +40,20 @@ const (
 	DaemonErrorClassUpstream   DaemonErrorClass = "upstream"
 	DaemonErrorClassTimeout    DaemonErrorClass = "timeout"
 	DaemonErrorClassPanic      DaemonErrorClass = "panic"
+	// DaemonErrorClassCanceled tags runs that returned context.Canceled
+	// (e.g. naozhi shutting down mid-tick or operator-driven Stop).
+	// Distinct from DaemonErrorClassNone so dashboards / log analytics
+	// can tell "successful tick" apart from "tick aborted by ctx" — the
+	// State field already differentiates them (DaemonRunCanceled vs
+	// DaemonRunSucceeded), but ErrorClass shipped over the WS wire used
+	// to collapse to "" in both cases. Closes R236-QA-05.
+	//
+	// Like Timeout, Canceled does NOT trip the circuit breaker:  a
+	// daemon returning ctx.Canceled because operator hit Stop is not a
+	// daemon bug. recordRun's switch keeps it on the "no counter
+	// change" branch (default case) so we don't reset success counters
+	// either.
+	DaemonErrorClassCanceled DaemonErrorClass = "canceled"
 )
 
 // DaemonTriggerKind distinguishes scheduled ticks from manual triggers.
@@ -149,7 +163,7 @@ func classifyError(err error, isPanic bool) (DaemonRunState, DaemonErrorClass) {
 		return DaemonRunTimedOut, DaemonErrorClassTimeout
 	}
 	if errors.Is(err, context.Canceled) {
-		return DaemonRunCanceled, DaemonErrorClassNone
+		return DaemonRunCanceled, DaemonErrorClassCanceled
 	}
 	// validation vs upstream is decided by the daemon (it embeds a
 	// sentinel error or wraps with errValidation).  Default to upstream

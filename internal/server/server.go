@@ -340,14 +340,25 @@ func loadOrCreateCookieSecret(stateDir string) []byte {
 		if _, err := rand.Read(b); err != nil {
 			panic("crypto/rand unavailable: " + err.Error())
 		}
-		if err := os.MkdirAll(stateDir, 0700); err == nil {
+		// R236-SEC-10: persistence is best-effort, but failure must surface
+		// at Error level (not Warn). When the secret cannot be persisted the
+		// process keeps running with an in-memory secret — the side effect
+		// is that every restart silently invalidates every browser session,
+		// which operators will mistake for a token expiry bug rather than a
+		// disk / permissions misconfiguration. Error-level lines + an
+		// explicit reason make the failure mode greppable in logs.
+		if err := os.MkdirAll(stateDir, 0700); err != nil {
+			slog.Error("cookie_secret stateDir mkdir failed; session secret is ephemeral, all sessions will be invalidated on restart",
+				"state_dir", stateDir, "err", err, "reason", "mkdir_failed")
+		} else {
 			// Write atomically (tmp + rename) so a concurrent reader never
 			// sees a partial secret during rotation. os.WriteFile opens with
 			// O_TRUNC and the crypto/rand bytes land in small chunks — a
 			// parallel open+read could pick up N bytes of zeros if we were
 			// mid-Write. WriteFileAtomic also fsyncs the file + parent dir.
 			if err := osutil.WriteFileAtomic(path, b, 0600); err != nil {
-				slog.Warn("cookie_secret atomic write failed; session secret is ephemeral", "err", err)
+				slog.Error("cookie_secret atomic write failed; session secret is ephemeral, all sessions will be invalidated on restart",
+					"path", path, "err", err, "reason", "write_failed")
 			}
 		}
 		return b

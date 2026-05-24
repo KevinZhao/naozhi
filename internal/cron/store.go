@@ -171,6 +171,29 @@ func loadJobs(path string) (map[string]*Job, error) {
 				"path", path, "cron_id", j.ID, "backend_bytes", len(j.Backend))
 			continue
 		}
+		// R236-QA-16: defensive Schedule / WorkDir validation. AddJob /
+		// dashboard PATCH already validate Schedule via robfig/cron + the
+		// minCronInterval floor, and reject WorkDir paths that escape the
+		// configured root, but cron_jobs.json can be hand-edited offline.
+		// A non-UTF-8 or control-byte WorkDir would smuggle ANSI / log-
+		// injection sequences into every "could not chdir" slog line; an
+		// over-long Schedule would propagate into dashboard responses and
+		// metrics labels. Length caps mirror MaxScheduleBytes (256) and
+		// the per-Job WorkDir budget below — runtime semantics are not
+		// affected because Scheduler.registerJob re-validates the schedule
+		// before adding it to robfig/cron.
+		if len(j.Schedule) > MaxScheduleBytes || !utf8.ValidString(j.Schedule) || containsCronC0(j.Schedule) {
+			slog.Warn("cron store: dropping job with invalid schedule bytes",
+				"path", path, "cron_id", j.ID, "schedule_bytes", len(j.Schedule))
+			continue
+		}
+		// 4 KiB matches the de-facto Linux PATH_MAX × small slack; longer
+		// values cannot legitimately reach a real filesystem.
+		if len(j.WorkDir) > 4096 || !utf8.ValidString(j.WorkDir) || containsCronC0(j.WorkDir) {
+			slog.Warn("cron store: dropping job with invalid work_dir bytes",
+				"path", path, "cron_id", j.ID, "work_dir_bytes", len(j.WorkDir))
+			continue
+		}
 		m[j.ID] = j
 	}
 	slog.Info("loaded cron store", "count", len(m), "path", path)
@@ -178,12 +201,27 @@ func loadJobs(path string) (map[string]*Job, error) {
 }
 
 // containsCronC0 reports whether s contains any C0 control byte that
-// validateCronPrompt rejects on the IM / dashboard write paths. \t (0x09),
-// \n (0x0A), \r (0x0D) are explicitly allowed; everything else in 0x00-0x1F
-// plus 0x7F (DEL) trips the guard. Inlined byte scan rather than the
-// textutil regex helper because loadJobs runs once at startup over a small
-// file and importing textutil would pull in regexp init cost on every
-// scheduler boot. R234-SEC-12.
+// validateCronPrompt rejects on the IM / dashboard write paths, or any
+// Unicode bidi / line-/paragraph-separator codepoint that would let a
+// hand-edited cron_jobs.json smuggle direction-flipping or line-break
+// characters into IM notifications and dashboard responses.
+//
+// C0 policy: \t (0x09), \n (0x0A), \r (0x0D) are explicitly allowed;
+// everything else in 0x00-0x1F plus 0x7F (DEL) trips the guard.
+//
+// Bidi policy (R236-SEC-07): U+202A..U+202E (LRE/RLE/PDF/LRO/RLO) and
+// U+2066..U+2069 (LRI/RLI/FSI/PDI) can visually reorder surrounding
+// glyphs in any IM / browser renderer, so a tampered prompt could swap
+// "rm -rf /tmp/safe" into "rm -rf /etc/passwd" at display time without
+// changing the bytes on the wire. U+2028 (LS) and U+2029 (PS) introduce
+// hard line breaks the prompt sanitiser otherwise accepts. All eight
+// codepoints encode as 3-byte UTF-8 sequences in the E2 80 prefix range,
+// so we only decode when the first two bytes match — keeps the common
+// ASCII-only path branchless.
+//
+// Inlined byte scan rather than the textutil regex helper because
+// loadJobs runs once at startup over a small file and importing textutil
+// would pull in regexp init cost on every scheduler boot. R234-SEC-12.
 func containsCronC0(s string) bool {
 	for i := 0; i < len(s); i++ {
 		b := s[i]
@@ -192,6 +230,20 @@ func containsCronC0(s string) bool {
 		}
 		if b < 0x20 || b == 0x7F {
 			return true
+		}
+		// Detect bidi / LS / PS via direct UTF-8 byte inspection. The
+		// guarded codepoints all live in U+2028..U+2029 and
+		// U+202A..U+202E (E2 80 A8..AE) and U+2066..U+2069
+		// (E2 81 A6..A9), so peek when we see the E2 80 / E2 81 prefix.
+		if b == 0xE2 && i+2 < len(s) {
+			b1 := s[i+1]
+			b2 := s[i+2]
+			if b1 == 0x80 && b2 >= 0xA8 && b2 <= 0xAE {
+				return true
+			}
+			if b1 == 0x81 && b2 >= 0xA6 && b2 <= 0xA9 {
+				return true
+			}
 		}
 	}
 	return false

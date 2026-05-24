@@ -19,7 +19,7 @@ func TestClassifyError(t *testing.T) {
 		{"nil error → success", nil, false, DaemonRunSucceeded, DaemonErrorClassNone},
 		{"panic", fmt.Errorf("panicked: x"), true, DaemonRunFailed, DaemonErrorClassPanic},
 		{"deadline → timeout", fmt.Errorf("wrap: %w", context.DeadlineExceeded), false, DaemonRunTimedOut, DaemonErrorClassTimeout},
-		{"canceled → canceled", fmt.Errorf("wrap: %w", context.Canceled), false, DaemonRunCanceled, DaemonErrorClassNone},
+		{"canceled → canceled", fmt.Errorf("wrap: %w", context.Canceled), false, DaemonRunCanceled, DaemonErrorClassCanceled},
 		{"validation sentinel → validation", fmt.Errorf("title rejected: %w", ErrValidation), false, DaemonRunFailed, DaemonErrorClassValidation},
 		{"random error → upstream", errors.New("kaboom"), false, DaemonRunFailed, DaemonErrorClassUpstream},
 	}

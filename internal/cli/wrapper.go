@@ -172,10 +172,15 @@ func detectVersionCtx(parent context.Context, cliPath string) string {
 }
 
 // detectCLI finds the CLI binary by checking known install paths then PATH.
+//
+// The backend → binary mapping is sourced from knownBackendBinaries (see
+// detect.go) rather than an inline switch so adding a future backend (e.g.
+// gemini-cli) is a single registry edit. Unknown backend ids fall back to
+// "claude" for the historical default-launcher behaviour. R225-CR-2.
 func detectCLI(backend string) string {
-	name := "claude"
-	if backend == "kiro" {
-		name = "kiro-cli"
+	name, ok := knownBackendBinaries[backend]
+	if !ok {
+		name = "claude"
 	}
 
 	for _, p := range candidatePaths(name) {
