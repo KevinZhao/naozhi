@@ -306,7 +306,7 @@
 
 #### 性能（PERF，16 项）
 
-- [ ] **R246-PERF-1 [P1] [REPEAT-2] — `internal/dispatch/coalesce.go:111` time.Time.Format("15:04") 每条 queued 消息 alloc**: stdlib 始终新建 5-byte string + builder buffer，MaxDepth 默认 16 一次 burst 最多 16 alloc。建议：`b.Write(m.EnqueueAt.AppendFormat(buf[:0], "15:04"))` 栈上零分配；预期 GC↓ 3-5%。
+- [~] **R246-PERF-1 [P1] [REPEAT-2] — `internal/dispatch/coalesce.go:111` time.Time.Format("15:04") 每条 queued 消息 alloc**: stdlib 始终新建 5-byte string + builder buffer，MaxDepth 默认 16 一次 burst 最多 16 alloc。建议：`b.Write(m.EnqueueAt.AppendFormat(buf[:0], "15:04"))` 栈上零分配；预期 GC↓ 3-5%。
 - [ ] **R246-PERF-2 [P1] [REFACTOR] — `internal/cron/runstore.go:556-633` diskListNewestFirst 排序后顺序 readRun 触发 N×(Lstat+ReadFile)**: 冷启动 GC + 第一次 dashboard 1Hz poll 串行 2×200 syscall+unmarshal。建议：先 mtime 过滤再 readRun，并以 8 worker 并行解码；预期 lat↓ 5-10× cold cache。
 - [ ] **R246-PERF-3 [P2] [REFACTOR] — `internal/cli/process_send.go:262-281` time.NewTicker 每次 Send 启动**: 每条用户消息一次，比 NewTimer+Reset 多 runtime goroutine + chan。建议：单一 deadline timer + select default 短轮询，或共享 watchdog goroutine。
 - [ ] **R246-PERF-4 [P2] [REFACTOR] — `internal/server/wshub.go:643-661` 锁内 O(connections × subscriptions) per-key 计数扫描**: 500 conn × 50 subs/conn = 25K map 查找一次锁内。建议：增量 subscriberCounts map[string]int 在 sub/unsub path 维护，subscribe 锁内 O(1)；预期 lat↓ 20×。

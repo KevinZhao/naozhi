@@ -103,12 +103,16 @@ func CoalesceMessages(msgs []QueuedMsg) (string, []cli.ImageData) {
 			truncated++
 			continue
 		}
-		// R228-PERF-19: direct WriteString avoids fmt's reflection path on
-		// the per-message hot loop. Format("15:04") still allocates a
-		// small string but that's unavoidable with time.Time.
+		// R228-PERF-19 + R246-PERF-1: direct WriteString avoids fmt's
+		// reflection path; AppendFormat into a 5-byte stack scratch then
+		// b.Write avoids the small-string heap alloc that Format("15:04")
+		// previously paid on every queued message (16-burst worst case
+		// landed 16 of these on the GC). The 5-byte stack array exactly
+		// fits "HH:MM" so AppendFormat never grows the buffer.
 		b.WriteByte('\n')
 		b.WriteByte('[')
-		b.WriteString(m.EnqueueAt.Format("15:04"))
+		var hhmmBuf [5]byte
+		b.Write(m.EnqueueAt.AppendFormat(hhmmBuf[:0], "15:04"))
 		b.WriteString("] ")
 		b.WriteString(m.Text)
 		b.WriteByte('\n')
