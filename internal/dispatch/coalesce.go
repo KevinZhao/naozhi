@@ -8,6 +8,17 @@ import (
 	"github.com/naozhi/naozhi/internal/limits"
 )
 
+// coalescePrefix is the header injected before the burst-coalesced messages to
+// inform Claude that what follows is a set of follow-up messages sent while it
+// was processing the previous one.  Declared as a typed const so the compiler
+// evaluates len(coalescePrefix) at compile time (coalescePrefixLen) rather
+// than re-computing the byte count on every hot-path call.
+const coalescePrefix = "[以下是用户在你处理上一条消息期间追加发送的内容]\n"
+
+// coalescePrefixLen is the compile-time byte length of coalescePrefix.
+// Go spec §Constant expressions: len of a constant string is a constant.
+const coalescePrefixLen = len(coalescePrefix)
+
 // maxCoalescedTextBytes is a *soft* cap on the merged prompt size. The
 // coalesce loop checks `b.Len() >= cap` *before* appending the current
 // message, so the final length can exceed the cap by at most one
@@ -62,7 +73,7 @@ func CoalesceMessages(msgs []QueuedMsg) (string, []cli.ImageData) {
 	// to prevent the exponential-growth pattern (1M→2M→4M→8M with reallocs).
 	// R-coalesce-adaptive-grow (was R68-PERF-M6).
 	const framingOverheadPerMsg = 64 // "[HH:MM] " + "\n" + markers
-	estimate := len("[以下是用户在你处理上一条消息期间追加发送的内容]\n") + 128
+	estimate := coalescePrefixLen + 128
 	for _, m := range msgs {
 		estimate += len(m.Text) + framingOverheadPerMsg
 	}
@@ -70,7 +81,7 @@ func CoalesceMessages(msgs []QueuedMsg) (string, []cli.ImageData) {
 		estimate = maxCoalescedTextBytes
 	}
 	b.Grow(estimate)
-	b.WriteString("[以下是用户在你处理上一条消息期间追加发送的内容]\n")
+	b.WriteString(coalescePrefix)
 
 	// Let allImages grow via append's exponential policy instead of
 	// pre-counting. Most queued messages carry zero images, so the
