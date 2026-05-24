@@ -313,13 +313,21 @@ type EventLog struct {
 	onAgentTaskDoneFn atomic.Pointer[func(taskID, status string)]
 
 	// subMu is an RWMutex because the hot path notifySubscribers only reads
-	// the subscribers map (iterate + non-blocking channel send, which is
-	// goroutine-safe). Subscribe/Unsubscribe/CloseSubscribers mutate the map
+	// the subscribers slice (iterate + non-blocking channel send, which is
+	// goroutine-safe). Subscribe/Unsubscribe/CloseSubscribers mutate the slice
 	// and take the write lock. RLock lets many concurrent Appends proceed
 	// against different sessions in parallel without serialising through a
 	// single Mutex. R65-PERF-M-1.
+	//
+	// R239-PERF-9: storage is `[]*subscriber` rather than `map[*subscriber]struct{}`.
+	// notifySubscribers runs at ~25K calls/s in 500-session deployments —
+	// mapiterinit + mapiternext on a 1-2 element map adds ~tens of ns per
+	// call vs a slice loop. Unsubscribe stays O(N) via swap-to-end + truncate
+	// under subMu.Lock; the closeOnce guard on subscriber preserves the
+	// "channel closed exactly once" invariant regardless of unsubscribe
+	// vs CloseSubscribers race ordering.
 	subMu       sync.RWMutex
-	subscribers map[*subscriber]struct{}
+	subscribers []*subscriber
 	subsClosed  bool         // CloseSubscribers has been called; no new subscribers accepted
 	subCount    atomic.Int32 // mirrors len(subscribers); lets notifySubscribers skip the lock when zero
 
@@ -1061,21 +1069,20 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 // N sessions run unattended. R65-PERF-M-1 upgraded from Mutex to RWMutex so
 // concurrent notify calls from different sessions no longer serialise.
 //
-// R230B-PERF-8 (P3, archived 2026-05-23): considered a count==1 fast path
-// taking the single subscriber via len-check + break instead of map range.
-// Go runtime's mapiterinit+mapiternext for a 1-bucket map is ~tens of ns;
-// RLock/RUnlock cost dominates and is paid either way. The proposed
-// "slice 存储 for count<=4" is breaking (Subscribe/Unsubscribe contract +
-// closeOnce ordering) and would invalidate the existing RWMutex coverage
-// proof. Net gain on hot path is sub-percent at current N. If 5000+ session
-// dashboards become hot, swap the map for a ring buffer of *subscriber
-// rather than micro-branching here.
+// R239-PERF-9 (2026-05-24): subscribers storage migrated from
+// map[*subscriber]struct{} to []*subscriber. The hot iter dropped
+// mapiterinit/mapiternext (~tens of ns/call × 25K calls/s = measurable
+// in 500-session deployments) for a tight slice range. Unsubscribe is
+// the cold path (one alloc/subscribe per session lifetime) and pays
+// an O(N) scan to find + swap-to-end the leaving subscriber. closeOnce
+// on subscriber.ch keeps the "close exactly once" invariant safe across
+// the unsub-vs-CloseSubscribers race.
 func (l *EventLog) notifySubscribers() {
 	if l.subCount.Load() == 0 {
 		return
 	}
 	l.subMu.RLock()
-	for sub := range l.subscribers {
+	for _, sub := range l.subscribers {
 		select {
 		case sub.ch <- struct{}{}:
 		default:
@@ -1102,16 +1109,17 @@ func (l *EventLog) Subscribe() (<-chan struct{}, func()) {
 		return sub.ch, func() {}
 	}
 	if l.subscribers == nil {
-		// R230C-PERF-12: pre-size the map. CloseSubscribers nils out the
-		// pointer so each Subscribe after a teardown allocates a fresh
-		// map; without a hint Go would grow 1 → 2 → 4 → 8 across a typical
-		// dashboard reconnect spurt (one tab subscribes 4–6 sessions back-
-		// to-back). 4 covers the common case in a single allocation; the
-		// map can still grow naturally when the per-session subscriber count
-		// climbs (multi-tab dashboards, agent_tailer fan-in).
-		l.subscribers = make(map[*subscriber]struct{}, 4)
+		// R230C-PERF-12 / R239-PERF-9: pre-size the slice. CloseSubscribers
+		// nils out the slice so each Subscribe after a teardown allocates
+		// a fresh backing array; without a cap hint Go would grow
+		// 1 → 2 → 4 → 8 across a typical dashboard reconnect spurt (one
+		// tab subscribes 4–6 sessions back-to-back). 4 covers the common
+		// case in a single allocation; the slice still grows naturally
+		// when the per-session subscriber count climbs (multi-tab
+		// dashboards, agent_tailer fan-in).
+		l.subscribers = make([]*subscriber, 0, 4)
 	}
-	l.subscribers[sub] = struct{}{}
+	l.subscribers = append(l.subscribers, sub)
 	// Add/sub counter pattern rather than re-deriving from len(map) — avoids
 	// the map-header read on each mutation and makes the reader/writer
 	// asymmetry explicit (Load is on the hot notify path, Add is rare).
@@ -1121,9 +1129,23 @@ func (l *EventLog) Subscribe() (<-chan struct{}, func()) {
 
 	unsub := func() {
 		l.subMu.Lock()
-		if _, ok := l.subscribers[sub]; ok {
-			delete(l.subscribers, sub)
-			l.subCount.Add(-1)
+		// Linear scan + swap-to-end + truncate. Subscribers count is
+		// typically 1-10 (one per dashboard tab subscribed to this
+		// session), so this is O(N) on the cold unsubscribe path. The
+		// hot notifySubscribers path benefits in exchange. R239-PERF-9.
+		for i, s := range l.subscribers {
+			if s == sub {
+				last := len(l.subscribers) - 1
+				l.subscribers[i] = l.subscribers[last]
+				// Clear the trailing slot so the removed *subscriber
+				// is not retained by the backing array; otherwise a
+				// long-lived EventLog holds onto closed subscriber
+				// objects past their useful life.
+				l.subscribers[last] = nil
+				l.subscribers = l.subscribers[:last]
+				l.subCount.Add(-1)
+				break
+			}
 		}
 		l.subMu.Unlock()
 		sub.closeOnce.Do(func() { close(sub.ch) })
@@ -1140,7 +1162,7 @@ func (l *EventLog) CloseSubscribers() {
 	}
 	l.subMu.Lock()
 	defer l.subMu.Unlock()
-	for sub := range l.subscribers {
+	for _, sub := range l.subscribers {
 		sub.closeOnce.Do(func() { close(sub.ch) })
 	}
 	l.subscribers = nil
