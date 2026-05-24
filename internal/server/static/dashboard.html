@@ -2058,19 +2058,37 @@ body.kbd-open .sidebar-footer{display:none}
 .ask-q-text{font-size:14px;line-height:1.5;color:var(--nz-text);margin-bottom:6px}
 .ask-q-hint{font-size:11px;color:var(--nz-text-faint);margin-bottom:8px;font-style:italic}
 .ask-opts{display:flex;flex-direction:column;gap:6px}
-.ask-opt{text-align:left;display:flex;flex-direction:column;gap:2px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:6px;padding:8px 10px;cursor:pointer;color:var(--nz-text);font:inherit;transition:border-color .15s,background .15s,color .15s}
+.ask-opt{text-align:left;display:flex;flex-direction:column;gap:2px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:6px;padding:8px 10px;cursor:pointer;color:var(--nz-text);font:inherit;transition:border-color .15s,background .15s,color .15s;width:100%;box-sizing:border-box;min-width:0;white-space:normal;word-break:break-word;overflow-wrap:anywhere}
 .ask-opt:hover:not([disabled]){border-color:var(--nz-accent);background:var(--nz-bg-2)}
 .ask-opt.selected{border-color:var(--nz-accent);background:var(--nz-bg-2);color:var(--nz-accent)}
 .ask-opt[disabled]{opacity:.55;cursor:not-allowed}
-.ask-opt-label{font-size:14px;font-weight:500}
-.ask-opt-desc{font-size:12px;color:var(--nz-text-faint);line-height:1.45}
+.ask-opt-label{font-size:14px;font-weight:500;word-break:break-word;overflow-wrap:anywhere}
+.ask-opt-desc{font-size:12px;color:var(--nz-text-faint);line-height:1.45;word-break:break-word;overflow-wrap:anywhere}
 .ask-submit-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--nz-bg-2);display:flex;justify-content:flex-end}
 .ask-submit{background:var(--nz-accent);color:var(--nz-bg-0);border:none;border-radius:6px;padding:8px 18px;font-size:13px;font-weight:500;cursor:pointer;font:inherit;transition:opacity .15s}
 .ask-submit[disabled]{opacity:.4;cursor:not-allowed}
-.ask-status{margin-top:10px;font-size:12px;color:var(--nz-text-faint);padding-top:8px;border-top:1px dashed var(--nz-bg-2)}
+.ask-status{margin-top:10px;font-size:12px;color:var(--nz-text-faint);padding-top:8px;border-top:1px dashed var(--nz-bg-2);word-break:break-word;overflow-wrap:anywhere}
 @media (pointer: coarse){
   .ask-opt{padding:10px 12px}
   .ask-submit{min-height:36px;padding:8px 16px}
+}
+/* AskUserQuestion 卡片在手机上的紧凑布局：
+   1) 卡片 padding 收紧，把横向空间还给选项
+   2) 提交按钮全宽（手机上拇指难以精准命中右下角小按钮）
+   3) degraded 卡同样收紧，避免左侧 border + 内边距双重缩水可读区
+   4) 防止长 label / 选项文本撑破 .ask-card 触发横向滚动 */
+@media(max-width:768px){
+  .event.ask_question .ask-card{padding:10px 12px}
+  .ask-q-group + .ask-q-group{margin-top:12px;padding-top:10px}
+  .ask-submit-row{justify-content:stretch}
+  .ask-submit{width:100%;padding:10px 16px;font-size:14px}
+  .ask-degraded .ask-degraded-q{padding:6px 8px}
+}
+@media(max-width:480px){
+  .event.ask_question .ask-card{padding:8px 10px}
+  .ask-q-text{font-size:13px;line-height:1.45}
+  .ask-opt-label{font-size:13px}
+  .ask-opt-desc{font-size:11px}
 }
 
 /* Memory wiki-link [[slug]] inline marker + hover/click popover.
