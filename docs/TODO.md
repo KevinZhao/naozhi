@@ -177,12 +177,12 @@
 
 ### Go (ecc:go-reviewer 第 53 轮)
 
-- [~] **R243-GO-1 [BREAKING-LOCAL]** `internal/cli/process_send.go:68-72` thumbnail goroutine 外层 `recover` 是死代码——`MakeThumbnail` 内部已 recover (`thumbnail.go:41-45`)，外层 `slog.Error` 永远不会触发。建议删除外层 recover 或在内层 recover 增加 slog.Error 让监控生效。
-- [~] **R243-GO-2 [REPEAT-3]** `internal/cron/scheduler.go:1316-1361/1363-1396` `DeleteJobByID/PauseJobByID` IIFE 锁外仍解引用 `j *Job`，仅读 `j.ID` 当前安全但合约不显式；与 R242-GO-3 同根因第 3 次。
-- [~] **R243-GO-3 [REPEAT-3]** `internal/cli/process_send.go:64-65` `wg.Add(1)` + `sem <- struct{}{}` 阻塞 + goroutine 启动三段式 anti-pattern；与 R242-GO-8 同根因第 3 次。
+- [x] **R243-GO-1 [BREAKING-LOCAL]** `internal/cli/process_send.go:68-72` thumbnail goroutine 外层 `recover` 是死代码——`MakeThumbnail` 内部已 recover (`thumbnail.go:41-45`)，外层 `slog.Error` 永远不会触发。建议删除外层 recover 或在内层 recover 增加 slog.Error 让监控生效。 → 已删除外层 recover（死代码），thumbnail.go:41 内层 recover 仍兜底。
+- [x] **R243-GO-2 [REPEAT-3]** `internal/cron/scheduler.go:1316-1361/1363-1396` `DeleteJobByID/PauseJobByID` IIFE 锁外仍解引用 `j *Job`，仅读 `j.ID` 当前安全但合约不显式；与 R242-GO-3 同根因第 3 次。 → IIFE 内捕获 jobID := j.ID 给锁外使用；DeleteJobByID/PauseJobByID 加 LOCKING CONTRACT godoc。
+- [x] **R243-GO-3 [REPEAT-3]** `internal/cli/process_send.go:64-65` `wg.Add(1)` + `sem <- struct{}{}` 阻塞 + goroutine 启动三段式 anti-pattern；与 R242-GO-8 同根因第 3 次。 → sem 改在 goroutine 内首行获取，wg.Add 仍在外；解 spawn 阻塞。
 - [ ] **R243-GO-7 [REPEAT-3]** `internal/cron/scheduler.go:2240-2584` `executeOpt` 单函数 344 行（与 R242-GO-1 同根因），本轮新增 `CronSendBudgetDoubledTotal` 又叠职责。
 - [~] **R243-GO-8 [REPEAT-3]** `internal/server/dashboard_cron_transcript.go:495` `flattenJSONLEvent` 每次 `make([]transcriptTurn, 0, 2)` per-line alloc；改 caller 传入复用 buffer。
-- [~] **R243-GO-9 [REPEAT-3]** `internal/osutil/loginject.go:94-102` `clean=false` 仅因超长时仍走 `strings.Map` 全串遍历；ASCII-clean 超长可走 `s[:maxLen]` 快路径。
+- [x] **R243-GO-9 [REPEAT-3]** `internal/osutil/loginject.go:94-102` `clean=false` 仅因超长时仍走 `strings.Map` 全串遍历；ASCII-clean 超长可走 `s[:maxLen]` 快路径。 → ASCII-clean 超长直接 s[:maxLen] 切片不走 strings.Map。
 
 ### 安全 (ecc:security-reviewer 第 53 轮)
 
@@ -190,7 +190,7 @@
 - [ ] **R243-SEC-2 [REPEAT-1]** `internal/server/static/dashboard.js:11878,11944` `lastAssistant.text` / `t.text`（JSONL transcript 文本）同上路径，`handleRunTranscript` 路径未 SanitizeForLog。
 - [ ] **R243-SEC-3 [REPEAT-2]** `internal/server/dashboard.go:488` CSP `script-src 'unsafe-inline'` 让任何 innerHTML XSS 直升 RCE；与 R242-SEC-1 同根因第 2 次。
 - [ ] **R243-SEC-4 [REPEAT-3]** `internal/server/static/dashboard.js:7084` mermaid SRI 在场但 KaTeX/CDN 路径未启 require-sri-for；与 R242-SEC-2 同根因第 3 次。
-- [~] **R243-SEC-5 [REPEAT-4]** `internal/server/dashboard_cron_transcript.go:408` JSONL `turn.Text/Output/Summary` 未走 SanitizeForLog 即编 wire；`handleRunDetail` 路径有但 `handleRunTranscript` 路径没补齐。
+- [x] **R243-SEC-5 [REPEAT-4]** `internal/server/dashboard_cron_transcript.go:408` JSONL `turn.Text/Output/Summary` 未走 SanitizeForLog 即编 wire；`handleRunDetail` 路径有但 `handleRunTranscript` 路径没补齐。 → handleRunTranscript 路径补齐 SanitizeForLog 三字段。
 - [ ] **R243-SEC-6 [REFACTOR]** `internal/server/dashboard_cron_transcript.go:525-527` ANSI strip 仅覆盖 CSI（`\x1b[`），OSC 序列（`\x1b]8;;url\x1b\\` hyperlink）未覆盖；当前 `<pre>+esc()` 兜底但需 defence-in-depth。
 - [ ] **R243-SEC-7 [REPEAT-10]** `internal/server/dashboard_cron.go:570-579` `notify_default.ChatID` 在 list response 中暴露给所有认证 dashboard 用户；多 operator 部署的 cross-tenant data leak。
 - [ ] **R243-SEC-8 [REPEAT-5]** `internal/cron/scheduler.go (SetJobPrompt path)` IM 路径调 `SetJobPrompt` 时未走 `validateCronPrompt`（仅 `prompt != ""`）；dashboard 路径有完整校验。
@@ -216,7 +216,7 @@
 - [ ] **R243-PERF-10 [REFACTOR]** `internal/eventlog/persist/persister.go:853-1004` `flush` stride<=1 路径 `kept` 与 `pendingIdx` 共享底层 array；`AppendBatch` 必须同步消费的不变量需文档化或防御性 copy。
 - [ ] **R243-PERF-11 [REFACTOR]** `internal/cron/runstore.go:592-612` `readRun` 双 syscall（Lstat + ReadFile），`diskListNewestFirst` 已通过 `e.Info()` 拿过 stat；提供 `readRunNoLstat` 快路径。
 - [ ] **R243-PERF-12 [REPEAT-13]** `internal/server/static/dashboard.js:11694-11735` `cronTimelineHtml` 每次全 200 行重渲；加 identity check + data-run-id key diff。
-- [~] **R243-PERF-13 [REPEAT-8]** `internal/cron/scheduler.go:3035-3082` `redactPathsInCronError` slow-path Builder + SanitizeForLog 双 alloc；sync.Pool 复用 Builder。
+- [x] **R243-PERF-13 [REPEAT-8]** `internal/cron/scheduler.go:3035-3082` `redactPathsInCronError` slow-path Builder + SanitizeForLog 双 alloc；sync.Pool 复用 Builder。 → 包级 sync.Pool[*strings.Builder] + defer Pool.Put；输入预 truncate 限制 retained capacity；fast-path 短路保留。
 - [ ] **R243-PERF-14 [REFACTOR]** `internal/cron/scheduler.go:3120-3141` `findByPrefix` O(N) 持 `s.mu.Lock()`；`maxJobsHardCap=500` 时累积；前缀索引 map 或注释说明。
 
 ### 代码质量 (ecc:code-reviewer 第 53 轮)
@@ -279,11 +279,11 @@
 - [ ] **R242-GO-12 [REPEAT-5]** `internal/session/managed.go:47` processIface 30+ 方法 god-interface；与 R215/R219/R224/R230C-ARCH-4 同根因。
 - [ ] **R242-GO-13 [REFACTOR]** `internal/cron/scheduler.go:2067` `freshContextPreflightP0` 错误分支 `deliverNotice` 同步调用拖延 finishRun；改 async goroutine。
 - [ ] **R242-GO-14 [REFACTOR]** `internal/cron/scheduler.go:2919` `deliverNotice` 同步调用 + 独立 ctx 但被 cron tick goroutine drain 隐式约束；文档化关系。
-- [~] **R242-GO-15 [BREAKING-LOCAL]** `internal/transcribe/transcribe.go:107` `streamFromBuffer` sender break 后 fall-through 到 Writer.Close 是意图设计但无注释；加 `// break → Writer.Close handles cleanup`。
+- [x] **R242-GO-15 [BREAKING-LOCAL]** `internal/transcribe/transcribe.go:107` `streamFromBuffer` sender break 后 fall-through 到 Writer.Close 是意图设计但无注释；加 `// break → Writer.Close handles cleanup`。 → 注释补齐 + pin against drift to return。
 - [x] **R242-GO-16 [BREAKING-LOCAL]** `internal/sysession/manager.go:338` NewManager 直接赋 `m.onRunStarted` 不走 SetCallbacks；统一通过 SetCallbacks 写路径。 — 已修：NewManager 改 m.SetCallbacks(cfg.OnRunStarted, cfg.OnRunEnded) 走 hookMu-guarded 写路径。
 - [ ] **R242-GO-17 [BREAKING-LOCAL]** `internal/cron/runstore.go:586` `readRun` Lstat-as-symlink-defense 注释不明确；改 "Lstat intentionally used (not Stat)"。
 - [ ] **R242-GO-18 [BREAKING-LOCAL]** `internal/dispatch/dispatch.go:100` `Dispatcher.agents/agentCommands` immutable-after-construction 缺注释；与 `Scheduler.agents` 文档化对齐。
-- [~] **R242-GO-19 [BREAKING-LOCAL]** `internal/server/discovery_cache.go:52` 初始 refresh goroutine 不接 ctx；ticker goroutine 早退而 initial 跑完 Scan。
+- [x] **R242-GO-19 [BREAKING-LOCAL]** `internal/server/discovery_cache.go:52` 初始 refresh goroutine 不接 ctx；ticker goroutine 早退而 initial 跑完 Scan。 → startLoop 初始 refresh 接 ctx 参数，提前退出避免 Shutdown 后仍跑 Scan。
 - [ ] **R242-GO-20 [REFACTOR]** `internal/cron/scheduler.go:478` `KnownSessionIDs` 在 `s.mu.RUnlock` 后用 jobIDs slice 遍历 runStore；race window 与 DeleteJobByID 并发存在但 acceptable，需注释说明。
 
 ### 安全 (ecc:security-reviewer 第 52 轮)
@@ -296,7 +296,7 @@
 - [ ] **R242-SEC-6 [BREAKING-LOCAL]** `internal/server/project_files.go:47-63` `__public_tmp__` 让认证用户读 `/tmp` 任意文件；多租户场景需 explicit `allow_tmp_browse` config flag。
 - [ ] **R242-SEC-7 [REFACTOR]** `internal/server/dashboard_memory.go:183-186` `tryRead` prefix 检查与 `EvalSymlinks` 用不同 base，潜在 race；统一用构造期已 EvalSymlinks 的 `h.projectsDir`。
 - [ ] **R242-SEC-8 [REFACTOR]** `internal/server/dashboard_cron.go:445-453` `runsLimiter` 用默认 `MaxKeys=1000` 未显式设置；DDoS 时 LRU 驱逐让被 rate-limit IP 重新拿 token。
-- [~] **R242-SEC-9 [BREAKING-LOCAL]** `internal/server/project_files.go:281-283` `.env.example` 不在 `sensitiveDownloadNames`，detectMime 走 magic-byte sniff 可能 preview；加 `strings.HasPrefix(low, ".env")` 检查。
+- [x] **R242-SEC-9 [BREAKING-LOCAL]** `internal/server/project_files.go:281-283` `.env.example` 不在 `sensitiveDownloadNames`，detectMime 走 magic-byte sniff 可能 preview；加 `strings.HasPrefix(low, ".env")` 检查。 → 加 .env-prefix 拦截 + 回归测试 pin 正反 case（.env.example 拒；.envoy.yaml 放行）。
 - [ ] **R242-SEC-10 [BREAKING-LOCAL]** `internal/cron/scheduler.go:2329` `filepath.Clean(snap.workDir)` 不解 symlink；用 `workDirReachable` 返回的 EvalSymlinks 路径作 `opts.Workspace`。
 - [ ] **R242-SEC-11 [REFACTOR]** `internal/server/dashboard_cron.go:656-661` `notify=true` 部分 field 检查用 `&&`，单边设置漏过 `validateNotifyTarget`；改 `||` 或前置完整校验。
 - [ ] **R242-SEC-12 [REFACTOR]** `internal/server/dashboard_cron_transcript.go:393-426` shared-JSONL fresh=false 用秒级 ts 边界过滤，相邻 run 可能渗透；加 per-run UUID。
