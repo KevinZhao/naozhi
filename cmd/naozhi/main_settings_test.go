@@ -326,6 +326,44 @@ func TestWriteClaudeSettingsOverride_isCalledPerSpawn(t *testing.T) {
 	}
 }
 
+// TestReadJSONWithRetry_ctxCancelAbortsRetry verifies that cancelling the context
+// during a retry sleep returns ctx.Err() promptly — well before all retry sleeps
+// would have elapsed — and does not block until the timer fires.
+func TestReadJSONWithRetry_ctxCancelAbortsRetry(t *testing.T) {
+	// Write invalid JSON so every read attempt fails and the retry sleep is entered.
+	path := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(path, []byte(`{"truncated":`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	const attempts = 5
+	const sleep = 500 * time.Millisecond // long enough to make timing visible
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Cancel the context shortly after the first attempt fails and enters sleep.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := readJSONWithRetry(ctx, path, attempts, sleep)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	// Without early abort, attempts×sleep = 2500ms. Allow a generous 300ms
+	// to keep the test robust on slow CI while still proving early exit.
+	if elapsed >= 300*time.Millisecond {
+		t.Fatalf("ctx cancel should abort retry sleep early, took %v (want < 300ms)", elapsed)
+	}
+}
+
 func TestWriteClaudeSettingsOverride_filtersNaozhiHooks(t *testing.T) {
 	seedClaudeHome(t, `{
   "hooks": {
