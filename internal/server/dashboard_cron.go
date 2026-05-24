@@ -381,7 +381,7 @@ func validateCronTitle(title string) error {
 		if r == '\n' || r == '\r' {
 			return fmt.Errorf("title must be a single line")
 		}
-		if r == 0 || (r < 0x20 && r != '\t') || r == 0x7f {
+		if (r < 0x20 && r != '\t') || r == 0x7f {
 			return fmt.Errorf("title contains invalid control characters")
 		}
 		if osutil.IsLogInjectionRune(r) {
