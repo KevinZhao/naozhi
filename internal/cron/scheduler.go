@@ -1560,6 +1560,7 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	}
 
 	j.Prompt = prompt
+	waspaused := j.Paused
 	if j.Paused {
 		// Delegate unpause to the shared helper so the registerJob + Paused
 		// flag transition stays consistent with PauseJob/ResumeJob/UpdateJob
@@ -1571,11 +1572,17 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 		}
 	}
 	save, perr := s.persistJobsLocked()
-	s.mu.Unlock()
-
 	if perr != nil {
+		// Rollback in-memory state before releasing the lock so the
+		// live view never reflects an un-persisted mutation.
+		j.Prompt = ""
+		if waspaused && !j.Paused {
+			_ = s.pauseJobLocked(j) // restore Paused=true; ignore ErrJobAlreadyPaused
+		}
+		s.mu.Unlock()
 		return perr
 	}
+	s.mu.Unlock()
 	save()
 	slog.Info("cron job prompt set", "id", id, "prompt_len", len(prompt))
 	return nil
