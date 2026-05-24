@@ -56,6 +56,32 @@ const (
 	shimAuthReadDeadline    = 30 * time.Second
 )
 
+// postExitReattachWindow is the grace period the shim keeps listening
+// for a re-attaching naozhi client after the upstream CLI process has
+// exited (cleanly or via watchdog). Within this window the shim
+// preserves its socket so the operator's reconnect / fresh_context
+// cron / dashboard auto-reattach can deliver the dead-CLI signal to
+// the naozhi side; once exceeded the shim exits and naozhi schedules
+// a fresh Spawn. Reused after a client has reattached so the second
+// timer covers the post-handshake "now you should re-establish a CLI"
+// window before the shim forfeits its slot.
+//
+// Closes R237-CR-7. Previously hard-coded as "60 * time.Second" four
+// times in Run(); changing the value here updates every grace path
+// uniformly. Do NOT confuse with shimShutdownGracePeriod (post-SIGTERM
+// attach grace) or the freshShimShutdownGuard window (boot-handshake
+// guard, see line ~975).
+const postExitReattachWindow = 60 * time.Second
+
+// freshShimShutdownGuard is the window after shim startup during
+// which an *unauthenticated* "shutdown" command is ignored when the
+// CLI is still alive — protects against handshake-glitch shutdowns
+// before client buffers are primed. See the long comment on the
+// refusal path for the full UCCLEP-2026-04-26 rationale. Mirrors the
+// `const window = 60 * time.Second` used in
+// TestShutdownGuard_EvaluationMatrix; bump both together.
+const freshShimShutdownGuard = 60 * time.Second
+
 // Config holds shim process configuration passed via CLI flags.
 type Config struct {
 	Key             string
@@ -299,24 +325,26 @@ func Run(cfg Config) error {
 		case <-cli.exited:
 			slog.Info("CLI exited", "code", cli.exitCode)
 			s.saveStateCLIDead()
-			exitTimer := time.NewTimer(60 * time.Second)
+			exitTimer := time.NewTimer(postExitReattachWindow)
 			select {
 			case conn := <-acceptCh:
 				exitTimer.Stop()
 				spawnClient(conn)
-				reconnectTimer := time.NewTimer(60 * time.Second)
+				reconnectTimer := time.NewTimer(postExitReattachWindow)
 				select {
 				case <-s.done:
 					reconnectTimer.Stop()
 					slog.Info("exiting: done after cli exit + reconnect")
 				case <-reconnectTimer.C:
-					slog.Info("exiting: 60s timeout after cli exit + reconnect")
+					slog.Info("exiting: post-exit reattach window expired after cli exit + reconnect",
+						"window", postExitReattachWindow)
 				}
 			case <-s.done:
 				exitTimer.Stop()
 				slog.Info("exiting: done after cli exit")
 			case <-exitTimer.C:
-				slog.Info("exiting: 60s timeout after cli exit")
+				slog.Info("exiting: post-exit reattach window expired after cli exit",
+					"window", postExitReattachWindow)
 			}
 			return nil
 
@@ -335,24 +363,26 @@ func Run(cfg Config) error {
 		case <-s.watchdog.Fired():
 			slog.Warn("watchdog fired, CLI killed")
 			s.saveStateCLIDead()
-			wdTimer := time.NewTimer(60 * time.Second)
+			wdTimer := time.NewTimer(postExitReattachWindow)
 			select {
 			case conn := <-acceptCh:
 				wdTimer.Stop()
 				spawnClient(conn)
-				wdReconnectTimer := time.NewTimer(60 * time.Second)
+				wdReconnectTimer := time.NewTimer(postExitReattachWindow)
 				select {
 				case <-s.done:
 					wdReconnectTimer.Stop()
 					slog.Info("exiting: done after watchdog + reconnect")
 				case <-wdReconnectTimer.C:
-					slog.Info("exiting: 60s timeout after watchdog + reconnect")
+					slog.Info("exiting: post-exit reattach window expired after watchdog + reconnect",
+						"window", postExitReattachWindow)
 				}
 			case <-s.done:
 				wdTimer.Stop()
 				slog.Info("exiting: done after watchdog")
 			case <-wdTimer.C:
-				slog.Info("exiting: 60s timeout after watchdog")
+				slog.Info("exiting: post-exit reattach window expired after watchdog",
+					"window", postExitReattachWindow)
 			}
 			return nil
 
@@ -975,7 +1005,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 				s.mu.Lock()
 				hasClient := s.clientConn != nil
 				s.mu.Unlock()
-				if !hasClient && s.cli.alive() && time.Since(s.startedAt) < 60*time.Second {
+				if !hasClient && s.cli.alive() && time.Since(s.startedAt) < freshShimShutdownGuard {
 					slog.Warn("ignoring shutdown: CLI alive, shim recently started, no authed client",
 						"age", time.Since(s.startedAt).Round(time.Millisecond))
 					return
