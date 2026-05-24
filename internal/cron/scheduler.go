@@ -250,6 +250,9 @@ type Scheduler struct {
 	// 启动后立刻 poll StartedAt() 会被探测为竞态。改成 atomic.Int64 (UnixNano)
 	// 后写读都走 atomic Load/Store。R216-GO-3。
 	startedAtNanos atomic.Int64
+	// started 用 CAS 保证 Start() 幂等。重复调用直接返回 nil 而不再 reset
+	// startedAtNanos / 二次 spawn cold-start GC / 二次 cron.Start。R241-ARCH-2。
+	started atomic.Bool
 	// stopCtx is the scheduler's lifecycle context. Storing context in a
 	// struct is usually an anti-pattern, but here execute() is invoked via
 	// a callback from robfig/cron whose signature has no ctx parameter, so
@@ -758,7 +761,17 @@ func (s *Scheduler) StartedAt() time.Time {
 }
 
 // Start loads persisted jobs and starts the cron scheduler.
+//
+// Idempotency (R241-ARCH-2): a second Start() returns nil immediately
+// without re-loading jobs, re-spawning the cold-start GC pass, or
+// re-invoking robfig/cron's Start (which would panic on a running
+// runner). The CAS guard runs *before* startedAtNanos.Store so a
+// double-Start does not reshape the missed-schedule suppression
+// window mid-flight.
 func (s *Scheduler) Start() error {
+	if !s.started.CompareAndSwap(false, true) {
+		return nil
+	}
 	// 记录启动时刻，missed-schedule 检测靠它做启动抑制窗口（见
 	// HasMissedSchedule）。写在 loadJobs 之前保证即使 loadJobs 失败 StartedAt
 	// 也不被污染——失败时 Start 提前返回，下次重试会覆盖。
@@ -771,6 +784,11 @@ func (s *Scheduler) Start() error {
 	// losing data that is still recoverable from the preserved file.
 	restored, err := loadJobs(s.storePath)
 	if err != nil {
+		// R241-ARCH-2: on load failure, release the idempotency latch so
+		// the operator can retry Start() after fixing the store file.
+		// startedAtNanos already follows the same retry contract (see
+		// comment above its Store).
+		s.started.Store(false)
 		return fmt.Errorf("load cron store: %w", err)
 	}
 

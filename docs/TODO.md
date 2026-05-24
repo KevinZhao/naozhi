@@ -142,7 +142,7 @@
 ### 架构（ARCH）
 
 - [ ] **R241-ARCH-1 [SIMPLE]** `internal/cli/wrapper.go:151-172` — `NewWrapper` 构造期同步执行 `detectVersion(cliPath)` 启 5s subprocess；纯字段赋值构造函数变成阻塞 IO。建议提到 `Probe(ctx)` 或 `LazyVersion()`。
-- [~] **R241-ARCH-2 [SIMPLE]** `internal/cron/scheduler.go:761-833` — `Start()` 无 idempotency guard，二次调用会 reset startedAtNanos / 再 spawn cold-start GC / 再 cron.Start。建议 `started atomic.Bool` CAS。
+- [x] **R241-ARCH-2 [SIMPLE]** `internal/cron/scheduler.go:761-833` — `Start()` 无 idempotency guard，二次调用会 reset startedAtNanos / 再 spawn cold-start GC / 再 cron.Start。建议 `started atomic.Bool` CAS。已修 2026-05-24（cron-fix F2）：started atomic.Bool CAS 守门，loadJobs 失败回滚 latch 让 retry 可用。
 - [ ] **R241-ARCH-3 [SIMPLE]** `internal/cron/scheduler.go:204-213` — `platforms`/`agents`/`agentCommands` map godoc 说 "immutable after NewScheduler" 但 caller 持原引用可改底层 map → cron 包内 lock-free 读会 race。建议构造时 `maps.Clone` 切断引用。
 - [ ] **R241-ARCH-4 [SIMPLE]** `internal/cron/scheduler.go:331-368` — `SetOnExecute / SetOnRunStarted / SetOnRunEnded` 三个独立 setter；加事件类型必改 struct + 增 setter。建议抽 `SchedulerListener` 单接口。
 - [ ] **R241-ARCH-5 [BREAKING-LOCAL]** `internal/cron/scheduler.go:402-426` — runStore 半 facade：facade 方法只覆盖 List/Recent/Get，scheduler.go 多处直接访问 `s.runStore.{Append,trimAll,cacheInvalidate}`；要么 facade 闭合要么提升为 `internal/cron/runs` 子包。
