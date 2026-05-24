@@ -619,7 +619,7 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	// writes SOME value or sends an error back to the client without
 	// returning early between here and completeSubscribe.
 	h.mu.Lock()
-	if _, alreadySub := c.subscriptions[key]; !alreadySub && len(c.subscriptions) >= 50 {
+	if _, alreadySub := c.subscriptions[key]; !alreadySub && len(c.subscriptions) >= maxSubscriptionsPerClient {
 		h.mu.Unlock()
 		c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "too many subscriptions"})
 		return
@@ -1338,6 +1338,15 @@ const maxWSConns = 500
 // every event broadcast's fan-out cost by N. 20 is comfortably above the
 // realistic multi-tab / multi-device working set (R226-SEC-8).
 const maxSubscribersPerKey = 20
+
+// maxSubscriptionsPerClient caps the number of distinct session keys a single
+// WS connection may subscribe to simultaneously. Bounds per-client memory
+// (subscriptions map + per-key generation/snapshot bookkeeping) and limits
+// fan-out cost when a single misbehaving client tries to enumerate sessions.
+// 50 covers the realistic dashboard working set (active session + recent
+// history + a few cron stubs) with comfortable headroom; clients that hit
+// this should re-architect rather than have the cap raised. R240-CR-4.
+const maxSubscriptionsPerClient = 50
 
 // broadcastClientSnapPool reuses the []*wsClient backing array across
 // broadcasts so high-frequency session_state / sessions_update traffic does
