@@ -235,7 +235,7 @@
 ### Go（剩余 — 非误报）
 
 - [ ] **R244-GO-P1-1 — dashboard_cron_transcript LimitedReader.N 截断检测注释精度问题**: `internal/server/dashboard_cron_transcript.go:442` 注释说 lr.N 跟踪 logical remaining，实际跟踪 reader-level read。方案：注释明确"lr.N≤0 表示 LimitedReader 已无字节供 scanner.Read"。
-- [ ] **R244-GO-P2-1 — SetJobPrompt 5 处手动 Unlock 散点不与项目其余 mutator 对齐 [BREAKING-LOCAL]**: `internal/cron/scheduler.go:1607` 不同于 UpdateJob/DeleteJobByID 用 IIFE+defer 解锁。方案：IIFE 闭包统一 defer Unlock 模式。Breaking：低。
+- [x] **R244-GO-P2-1 — SetJobPrompt 5 处手动 Unlock 散点不与项目其余 mutator 对齐 [BREAKING-LOCAL]**: `internal/cron/scheduler.go:1607` 不同于 UpdateJob/DeleteJobByID 用 IIFE+defer 解锁。方案：IIFE 闭包统一 defer Unlock 模式。Breaking：低。 → 已改 IIFE+defer s.mu.Unlock，闭包返回 (save, noop, err)；rollback path 与 R243-GO-5 兼容；TestPersistFailure_SetJobPrompt 通过。
 - [ ] **R244-GO-P2-2 — dashboard_cron_transcript.summariseToolInput fallback 重 marshal 浪费 alloc**: line 669 unmarshal 后仅做 key 探测；fallback 分支 line 683 `json.Marshal(obj)` 可直接 `string(input)` 给 SanitizeForLog。方案：fallback 直传 `string(input)`。
 - [ ] **R244-GO-P2-3 — io.LimitedReader 直接构造 bypass io.LimitReader 类型契约**: dashboard_cron_transcript.go:383 直接 &io.LimitedReader{N: maxTranscriptBytes} 类型必须保证 int64 安全。方案：显式 int64 cast。
 - [ ] **R244-GO-P2-4 — TestSanitizeForLog_EnforcesMaxLen 顶部 flat 断言 vs 子测试 t.Run 风格混用**: 方案：全部改 t.Run 统一 table-driven。
@@ -275,12 +275,12 @@
 
 ### Go (ecc:go-reviewer 第 53 轮)
 
-- [ ] **R243-GO-1 [BREAKING-LOCAL]** `internal/cli/process_send.go:68-72` thumbnail goroutine 外层 `recover` 是死代码——`MakeThumbnail` 内部已 recover (`thumbnail.go:41-45`)，外层 `slog.Error` 永远不会触发。建议删除外层 recover 或在内层 recover 增加 slog.Error 让监控生效。
-- [ ] **R243-GO-2 [REPEAT-3]** `internal/cron/scheduler.go:1316-1361/1363-1396` `DeleteJobByID/PauseJobByID` IIFE 锁外仍解引用 `j *Job`，仅读 `j.ID` 当前安全但合约不显式；与 R242-GO-3 同根因第 3 次。
-- [ ] **R243-GO-3 [REPEAT-3]** `internal/cli/process_send.go:64-65` `wg.Add(1)` + `sem <- struct{}{}` 阻塞 + goroutine 启动三段式 anti-pattern；与 R242-GO-8 同根因第 3 次。
+- [x] **R243-GO-1 [BREAKING-LOCAL]** `internal/cli/process_send.go:68-72` thumbnail goroutine 外层 `recover` 是死代码——`MakeThumbnail` 内部已 recover (`thumbnail.go:41-45`)，外层 `slog.Error` 永远不会触发。建议删除外层 recover 或在内层 recover 增加 slog.Error 让监控生效。 → 已删除外层 recover（死代码），thumbnail.go:41 内层 recover 仍兜底。
+- [x] **R243-GO-2 [REPEAT-3]** `internal/cron/scheduler.go:1316-1361/1363-1396` `DeleteJobByID/PauseJobByID` IIFE 锁外仍解引用 `j *Job`，仅读 `j.ID` 当前安全但合约不显式；与 R242-GO-3 同根因第 3 次。 → IIFE 内捕获 jobID := j.ID 给锁外使用；DeleteJobByID/PauseJobByID 加 LOCKING CONTRACT godoc。
+- [x] **R243-GO-3 [REPEAT-3]** `internal/cli/process_send.go:64-65` `wg.Add(1)` + `sem <- struct{}{}` 阻塞 + goroutine 启动三段式 anti-pattern；与 R242-GO-8 同根因第 3 次。 → sem 改在 goroutine 内首行获取，wg.Add 仍在外；解 spawn 阻塞。
 - [ ] **R243-GO-7 [REPEAT-3]** `internal/cron/scheduler.go:2240-2584` `executeOpt` 单函数 344 行（与 R242-GO-1 同根因），本轮新增 `CronSendBudgetDoubledTotal` 又叠职责。
-- [ ] **R243-GO-8 [REPEAT-3]** `internal/server/dashboard_cron_transcript.go:495` `flattenJSONLEvent` 每次 `make([]transcriptTurn, 0, 2)` per-line alloc；改 caller 传入复用 buffer。
-- [ ] **R243-GO-9 [REPEAT-3]** `internal/osutil/loginject.go:94-102` `clean=false` 仅因超长时仍走 `strings.Map` 全串遍历；ASCII-clean 超长可走 `s[:maxLen]` 快路径。
+- [~] **R243-GO-8 [REPEAT-3]** `internal/server/dashboard_cron_transcript.go:495` `flattenJSONLEvent` 每次 `make([]transcriptTurn, 0, 2)` per-line alloc；改 caller 传入复用 buffer。
+- [x] **R243-GO-9 [REPEAT-3]** `internal/osutil/loginject.go:94-102` `clean=false` 仅因超长时仍走 `strings.Map` 全串遍历；ASCII-clean 超长可走 `s[:maxLen]` 快路径。 → ASCII-clean 超长直接 s[:maxLen] 切片不走 strings.Map。
 
 ### 安全 (ecc:security-reviewer 第 53 轮)
 
@@ -288,11 +288,11 @@
 - [ ] **R243-SEC-2 [REPEAT-1]** `internal/server/static/dashboard.js:11878,11944` `lastAssistant.text` / `t.text`（JSONL transcript 文本）同上路径，`handleRunTranscript` 路径未 SanitizeForLog。
 - [ ] **R243-SEC-3 [REPEAT-2]** `internal/server/dashboard.go:488` CSP `script-src 'unsafe-inline'` 让任何 innerHTML XSS 直升 RCE；与 R242-SEC-1 同根因第 2 次。
 - [ ] **R243-SEC-4 [REPEAT-3]** `internal/server/static/dashboard.js:7084` mermaid SRI 在场但 KaTeX/CDN 路径未启 require-sri-for；与 R242-SEC-2 同根因第 3 次。
-- [ ] **R243-SEC-5 [REPEAT-4]** `internal/server/dashboard_cron_transcript.go:408` JSONL `turn.Text/Output/Summary` 未走 SanitizeForLog 即编 wire；`handleRunDetail` 路径有但 `handleRunTranscript` 路径没补齐。
+- [x] **R243-SEC-5 [REPEAT-4]** `internal/server/dashboard_cron_transcript.go:408` JSONL `turn.Text/Output/Summary` 未走 SanitizeForLog 即编 wire；`handleRunDetail` 路径有但 `handleRunTranscript` 路径没补齐。 → handleRunTranscript 路径补齐 SanitizeForLog 三字段。
 - [ ] **R243-SEC-6 [REFACTOR]** `internal/server/dashboard_cron_transcript.go:525-527` ANSI strip 仅覆盖 CSI（`\x1b[`），OSC 序列（`\x1b]8;;url\x1b\\` hyperlink）未覆盖；当前 `<pre>+esc()` 兜底但需 defence-in-depth。
 - [ ] **R243-SEC-7 [REPEAT-10]** `internal/server/dashboard_cron.go:570-579` `notify_default.ChatID` 在 list response 中暴露给所有认证 dashboard 用户；多 operator 部署的 cross-tenant data leak。
 - [ ] **R243-SEC-8 [REPEAT-5]** `internal/cron/scheduler.go (SetJobPrompt path)` IM 路径调 `SetJobPrompt` 时未走 `validateCronPrompt`（仅 `prompt != ""`）；dashboard 路径有完整校验。
-- [ ] **R243-SEC-9 [REPEAT-7]** `internal/cron/scheduler.go:628-654` `workDirUnderRoot` 当 `EvalSymlinks` + `allowedRootResolved` 缓存均失败时退化到 raw string prefix 比较；TOCTOU/symlink escape。
+- [x] **R243-SEC-9 [REPEAT-7]** `internal/cron/scheduler.go:628-654` `workDirUnderRoot` 当 `EvalSymlinks` + `allowedRootResolved` 缓存均失败时退化到 raw string prefix 比较；TOCTOU/symlink escape。 → 已 reject：`allowedRootResolved == ""` 直接 `return false`，不再 fall back 到 raw allowedRoot 字符串前缀比较；保留 cached resolution 作为唯一 fallback（cache 是真实 EvalSymlinks 输出而非用户字符串）。失败语义与现有 EvalSymlinks(workDir) 失败分支一致。
 - [ ] **R243-SEC-10 [REPEAT-8]** `internal/server/dashboard.go:107` `SetEscapeHTML(false)` 池化 encoder 无编译期约束，109 处 innerHTML 都得手工守。
 - [ ] **R243-SEC-11 [REFACTOR]** `internal/server/static/dashboard.js:8241-8244` 自动链接正则未剥 `>`/`]`/`"` 尾标点；`escAttr` 当前兜得住，仅信息性。
 - [ ] **R243-SEC-12 [REFACTOR]** `internal/server/dashboard_cron_transcript.go:46-74` 256 KB scanner buffer × 并发请求数；single-operator 可接受，多 operator 需 token bucket。
@@ -314,7 +314,7 @@
 - [ ] **R243-PERF-10 [REFACTOR]** `internal/eventlog/persist/persister.go:853-1004` `flush` stride<=1 路径 `kept` 与 `pendingIdx` 共享底层 array；`AppendBatch` 必须同步消费的不变量需文档化或防御性 copy。
 - [ ] **R243-PERF-11 [REFACTOR]** `internal/cron/runstore.go:592-612` `readRun` 双 syscall（Lstat + ReadFile），`diskListNewestFirst` 已通过 `e.Info()` 拿过 stat；提供 `readRunNoLstat` 快路径。
 - [ ] **R243-PERF-12 [REPEAT-13]** `internal/server/static/dashboard.js:11694-11735` `cronTimelineHtml` 每次全 200 行重渲；加 identity check + data-run-id key diff。
-- [ ] **R243-PERF-13 [REPEAT-8]** `internal/cron/scheduler.go:3035-3082` `redactPathsInCronError` slow-path Builder + SanitizeForLog 双 alloc；sync.Pool 复用 Builder。
+- [x] **R243-PERF-13 [REPEAT-8]** `internal/cron/scheduler.go:3035-3082` `redactPathsInCronError` slow-path Builder + SanitizeForLog 双 alloc；sync.Pool 复用 Builder。 → 包级 sync.Pool[*strings.Builder] + defer Pool.Put；输入预 truncate 限制 retained capacity；fast-path 短路保留。
 - [ ] **R243-PERF-14 [REFACTOR]** `internal/cron/scheduler.go:3120-3141` `findByPrefix` O(N) 持 `s.mu.Lock()`；`maxJobsHardCap=500` 时累积；前缀索引 map 或注释说明。
 
 ### 代码质量 (ecc:code-reviewer 第 53 轮)
@@ -336,10 +336,10 @@
 - [ ] **R243-ARCH-6 [REFACTOR][REPEAT-12]** `internal/cron/scheduler.go:2649-2742` finishRun 三写隐式 Saga（cron_jobs.json + runStore.Append + emitRunEnded）；引入轻量 Outbox 单 goroutine 串行化。
 - [ ] **R243-ARCH-7 [REFACTOR][REPEAT-11]** `internal/server/server.go + wshub.go + dispatch.go` watchdogNoOutputKills/TotalKills 三处共享指针 + onChange/onKeyRetired/onSessionRetired atomic.Pointer holder 手写散布；抽 `metrics/observability` 子包统一 DI。
 - [ ] **R243-ARCH-8 [BREAKING-LOCAL][REPEAT-10]** `cron Stop / router Shutdown / wshub Shutdown` 三组超时各自常量、main.go 顺序耦合；引入 `lifecycle.Manager` topo-sort + 共享 budget。
-- [ ] **R243-ARCH-9 [REFACTOR][REPEAT-9]** `internal/{upstream,dispatch,cron,server}/consumer.go` 4 个 consumer-side SessionRouter 接口（9/8/3/14 方法）并存；抽 `internal/session/api/` 细粒度接口子包。
+- [~] **R243-ARCH-9 [REFACTOR][REPEAT-9]** `internal/{upstream,dispatch,cron,server}/consumer.go` 4 个 consumer-side SessionRouter 接口（9/8/3/14 方法）并存；抽 `internal/session/api/` 细粒度接口子包。 — upstream/consumer.go 加 NEEDS-DESIGN godoc + 拆 SessionLookup/SessionLifecycle/SessionMutator 三窄接口预备未来抽 internal/session/api/；4 包统一仍待跨包评审。
 - [ ] **R243-ARCH-10 [REFACTOR][REPEAT-8]** Dispatcher.sendFn / takeoverFn / replyFooterFn 等 4 处 closure-as-DI + 各自 nil 兜底；统一 narrow Capability interface 注入。
-- [ ] **R243-ARCH-11 [REFACTOR][REPEAT-7]** `internal/cron/scheduler.go:2470-2486` cron sendCtx 走 `Background()` 不挂 stopCtx 链；改 `WithoutCancel(spawnCtx)` 仅取消 deadline 不取消 cancel。
-- [ ] **R243-ARCH-12 [REFACTOR][REPEAT-5]** `cli.EventLog ring + persist.Persister spool + naozhilog.Source replay` 三层 eventlog 重影 + 4 backend 责任不清；抽 `EventStore interface{Append/Read/Subscribe}` + 中央 registry。
+- [x] **R243-ARCH-11 [REFACTOR][REPEAT-7]** `internal/cron/scheduler.go:2470-2486` cron sendCtx 走 `Background()` 不挂 stopCtx 链；改 `WithoutCancel(spawnCtx)` 仅取消 deadline 不取消 cancel。 → 已改 `context.WithoutCancel(ctx)`（spawn ctx），WithTimeout 包一层保留独立 jobTimeout；slog/tracer Values 现在跨 spawn→send 连续，stopCtx cancel 仍不传播（保留 R191-ARCH-M5 SIGTERM 不丢 result 契约）；同时关闭 R242-CR-6（同 hot spot）。
+- [~] **R243-ARCH-12 [REFACTOR][REPEAT-5]** `cli.EventLog ring + persist.Persister spool + naozhilog.Source replay` 三层 eventlog 重影 + 4 backend 责任不清；抽 `EventStore interface{Append/Read/Subscribe}` + 中央 registry。 — internal/session/eventlog_bridge.go 顶部加 NEEDS-DESIGN 包级 godoc 描述 EventStore interface + 中央 registry 计划 + 各 backend 已积累的 perf 热路径迁移成本；跨包抽 api/ 仍待评审。
 - [ ] **R243-ARCH-13 [REFACTOR][REPEAT-6]** `internal/cron/scheduler.go` metrics.CronRun*Total 11 处直调 + slog 33 处散布；用 internal/metrics/labeled + slog.With helper。
 - [ ] **R243-ARCH-14 [BREAKING-LOCAL][REPEAT-4]** `sysession.Config / SchedulerConfig / RouterConfig` 无 schemaVersion；HotReload 无路径；引入 `config/v1/` migration 入口。
 - [ ] **R243-ARCH-15 [REFACTOR][REPEAT-3]** wshub broadcast / agentTailer / scratch/cron-run-ended 三条独立 fan-out；抽 `broadcaster` topic 包，6 topic 集中订阅。
@@ -377,11 +377,11 @@
 - [ ] **R242-GO-12 [REPEAT-5]** `internal/session/managed.go:47` processIface 30+ 方法 god-interface；与 R215/R219/R224/R230C-ARCH-4 同根因。
 - [ ] **R242-GO-13 [REFACTOR]** `internal/cron/scheduler.go:2067` `freshContextPreflightP0` 错误分支 `deliverNotice` 同步调用拖延 finishRun；改 async goroutine。
 - [ ] **R242-GO-14 [REFACTOR]** `internal/cron/scheduler.go:2919` `deliverNotice` 同步调用 + 独立 ctx 但被 cron tick goroutine drain 隐式约束；文档化关系。
-- [ ] **R242-GO-15 [BREAKING-LOCAL]** `internal/transcribe/transcribe.go:107` `streamFromBuffer` sender break 后 fall-through 到 Writer.Close 是意图设计但无注释；加 `// break → Writer.Close handles cleanup`。
-- [ ] **R242-GO-16 [BREAKING-LOCAL]** `internal/sysession/manager.go:338` NewManager 直接赋 `m.onRunStarted` 不走 SetCallbacks；统一通过 SetCallbacks 写路径。
+- [x] **R242-GO-15 [BREAKING-LOCAL]** `internal/transcribe/transcribe.go:107` `streamFromBuffer` sender break 后 fall-through 到 Writer.Close 是意图设计但无注释；加 `// break → Writer.Close handles cleanup`。 → 注释补齐 + pin against drift to return。
+- [x] **R242-GO-16 [BREAKING-LOCAL]** `internal/sysession/manager.go:338` NewManager 直接赋 `m.onRunStarted` 不走 SetCallbacks；统一通过 SetCallbacks 写路径。 — 已修：NewManager 改 m.SetCallbacks(cfg.OnRunStarted, cfg.OnRunEnded) 走 hookMu-guarded 写路径。
 - [ ] **R242-GO-17 [BREAKING-LOCAL]** `internal/cron/runstore.go:586` `readRun` Lstat-as-symlink-defense 注释不明确；改 "Lstat intentionally used (not Stat)"。
 - [ ] **R242-GO-18 [BREAKING-LOCAL]** `internal/dispatch/dispatch.go:100` `Dispatcher.agents/agentCommands` immutable-after-construction 缺注释；与 `Scheduler.agents` 文档化对齐。
-- [ ] **R242-GO-19 [BREAKING-LOCAL]** `internal/server/discovery_cache.go:52` 初始 refresh goroutine 不接 ctx；ticker goroutine 早退而 initial 跑完 Scan。
+- [x] **R242-GO-19 [BREAKING-LOCAL]** `internal/server/discovery_cache.go:52` 初始 refresh goroutine 不接 ctx；ticker goroutine 早退而 initial 跑完 Scan。 → startLoop 初始 refresh 接 ctx 参数，提前退出避免 Shutdown 后仍跑 Scan。
 - [ ] **R242-GO-20 [REFACTOR]** `internal/cron/scheduler.go:478` `KnownSessionIDs` 在 `s.mu.RUnlock` 后用 jobIDs slice 遍历 runStore；race window 与 DeleteJobByID 并发存在但 acceptable，需注释说明。
 
 ### 安全 (ecc:security-reviewer 第 52 轮)
@@ -394,7 +394,7 @@
 - [ ] **R242-SEC-6 [BREAKING-LOCAL]** `internal/server/project_files.go:47-63` `__public_tmp__` 让认证用户读 `/tmp` 任意文件；多租户场景需 explicit `allow_tmp_browse` config flag。
 - [ ] **R242-SEC-7 [REFACTOR]** `internal/server/dashboard_memory.go:183-186` `tryRead` prefix 检查与 `EvalSymlinks` 用不同 base，潜在 race；统一用构造期已 EvalSymlinks 的 `h.projectsDir`。
 - [ ] **R242-SEC-8 [REFACTOR]** `internal/server/dashboard_cron.go:445-453` `runsLimiter` 用默认 `MaxKeys=1000` 未显式设置；DDoS 时 LRU 驱逐让被 rate-limit IP 重新拿 token。
-- [ ] **R242-SEC-9 [BREAKING-LOCAL]** `internal/server/project_files.go:281-283` `.env.example` 不在 `sensitiveDownloadNames`，detectMime 走 magic-byte sniff 可能 preview；加 `strings.HasPrefix(low, ".env")` 检查。
+- [x] **R242-SEC-9 [BREAKING-LOCAL]** `internal/server/project_files.go:281-283` `.env.example` 不在 `sensitiveDownloadNames`，detectMime 走 magic-byte sniff 可能 preview；加 `strings.HasPrefix(low, ".env")` 检查。 → 加 .env-prefix 拦截 + 回归测试 pin 正反 case（.env.example 拒；.envoy.yaml 放行）。
 - [ ] **R242-SEC-10 [BREAKING-LOCAL]** `internal/cron/scheduler.go:2329` `filepath.Clean(snap.workDir)` 不解 symlink；用 `workDirReachable` 返回的 EvalSymlinks 路径作 `opts.Workspace`。
 - [ ] **R242-SEC-11 [REFACTOR]** `internal/server/dashboard_cron.go:656-661` `notify=true` 部分 field 检查用 `&&`，单边设置漏过 `validateNotifyTarget`；改 `||` 或前置完整校验。
 - [ ] **R242-SEC-12 [REFACTOR]** `internal/server/dashboard_cron_transcript.go:393-426` shared-JSONL fresh=false 用秒级 ts 边界过滤，相邻 run 可能渗透；加 per-run UUID。
@@ -423,7 +423,7 @@
 
 - [ ] **R242-CR-3 [REFACTOR]** `internal/server/dashboard_cron.go:456-571` `GET /api/cron`（1 Hz poll）无 rate limiter 而 runs 有；DOS 风险；与 runsLimiter 同模式应用。
 - [ ] **R242-CR-5 [REFACTOR]** `internal/cron/scheduler.go:3091-3096` `var marshalJobs atomic.Pointer` package-level mutable via init() + 测试 mutate；改 Scheduler 构造期 DI 字段。
-- [ ] **R242-CR-6 [BREAKING-LOCAL]** `internal/cron/scheduler.go:2411` `sendCtx` 来自 `Background()` 不参与 stopCtx 链；SIGTERM 后 Send 仍跑 5min。改 `WithTimeout(s.stopCtx, jobTimeout)` 或显式从 Stop() 取消。
+- [x] **R242-CR-6 [BREAKING-LOCAL]** `internal/cron/scheduler.go:2411` `sendCtx` 来自 `Background()` 不参与 stopCtx 链；SIGTERM 后 Send 仍跑 5min。改 `WithTimeout(s.stopCtx, jobTimeout)` 或显式从 Stop() 取消。 → R243-ARCH-11 收口（同一 hot spot）：改 `context.WithoutCancel(ctx)` 而非走 stopCtx 链——保留 R191-ARCH-M5 不被 SIGTERM 取消的契约（避免 in-flight Send result 丢失），同时继承 ctx Values 让 slog/trace 跨 spawn→send 阶段连续。
 - [ ] **R242-CR-7 [REFACTOR]** `internal/cron/runstore.go:192` `assertJobLockHeld` 用 `panic` + `TryLock` 在生产路径加锁竞争 + crash 风险；移到 `_test.go` 或 build tag。
 - [ ] **R242-CR-8 [REFACTOR]** `internal/server/dashboard_cron_transcript.go:639-664` `summariseToolInput` `map[string]any` decode-and-hunt 反射成本；用目标 struct 或 byte-scan。
 - [ ] **R242-CR-11 [BREAKING-LOCAL]** `internal/cron/runstore.go:277-323` `skipAppendTrim` panic 路径会跨过 `entry.mu` 获取，defer 不执行 → 锁泄漏；assertJobLockHeld 改 bool 返回。
@@ -456,7 +456,7 @@
 - [ ] **R242-ARCH-21 [REFACTOR]** `cmd/naozhi/main.go:919-937` 关闭顺序 sysMgr → scheduler → router 仅注释；抽 `lifecycle.Coordinator` 显式依赖图。
 - [ ] **R242-ARCH-22 [REFACTOR]** `internal/cron/scheduler.go:2270-2276` emitRunStarted 在 GetOrCreate 之前发，SessionID="" 让 KnownSessionIDs 漏；推迟到 setSessionID 后。
 - [ ] **R242-ARCH-23 [REFACTOR]** `internal/cron/scheduler.go:450` cron.IsExcluded 每次新建 jobs×200 map 在 spawn 路径；暴露 `LookupKnownSessionID(id) bool` 直查 set。
-- [ ] **R242-ARCH-24 [REFACTOR]** `internal/sysession/router.go:25-61` `EventEntriesForKey` 返回 `[]cli.EventEntry` 强依赖 cli pkg；定义本地 SystemEventEntry 镜像。
+- [~] **R242-ARCH-24 [REFACTOR]** `internal/sysession/router.go:25-61` `EventEntriesForKey` 返回 `[]cli.EventEntry` 强依赖 cli pkg；定义本地 SystemEventEntry 镜像。 — sysession/router.go EventEntriesForKey godoc 加 NEEDS-DESIGN 描述：mirror 改造延后到 R243-ARCH-12 EventStore 抽象落地后从中央派生，避免双重 churn。
 - [ ] **R242-ARCH-25 [REFACTOR]** `internal/session/router_lifecycle.go:135-199` ResetChat shutdownCond.Broadcast 一处持锁一处释锁分裂；统一持锁广播。
 - [ ] **R242-ARCH-26 [REFACTOR]** `internal/cron/scheduler.go:78-89` `RegisterCronStubWithChain chainIDs []string` 调用方一律传单元素；接口收敛或重命名。
 - [ ] **R242-ARCH-27 [REFACTOR]** `internal/cli/process_turn.go:36` interruptedSettleWindow 500ms 与 runDeadlineWatchdog 并发未协同；化为 process 级配置 + watchdog settle 完成再清 inflight。

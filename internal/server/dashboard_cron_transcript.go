@@ -387,6 +387,11 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	turns := make([]transcriptTurn, 0, 32)
 	truncated := false
 	parsedAny := false
+	// R243-GO-8: per-line scratch buffer reused across flattenJSONLEvent
+	// calls to eliminate per-line `make([]transcriptTurn, 0, 2)` alloc.
+	// Cap=4 covers the common shapes (user+tool_result pair, assistant
+	// text+tool_use pair); flatten resizes via append as needed.
+	turnsScratch := make([]transcriptTurn, 0, 4)
 
 	for scanner.Scan() {
 		if len(turns) >= maxTranscriptTurns {
@@ -412,7 +417,10 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 				continue
 			}
 		}
-		newTurns, addedTokens, addedToolCalls, isParsed := flattenJSONLEvent(&ev, ts, len(turns))
+		newTurns, addedTokens, addedToolCalls, isParsed := flattenJSONLEvent(&ev, ts, len(turns), turnsScratch[:0])
+		// Re-bind scratch to whatever flattenJSONLEvent grew the buffer
+		// to so the next iteration starts from the largest array seen.
+		turnsScratch = newTurns
 		if isParsed {
 			parsedAny = true
 		}
@@ -494,13 +502,56 @@ func parseRunPathParams(w http.ResponseWriter, r *http.Request) (runID, jobID st
 	return runID, jobID, true
 }
 
+// sanitizeWireText drops bidi / C1 / LS-PS runes (the IsLogInjectionRune
+// class) before transcript turn fields reach the JSON wire. Preserves
+// \t / \n / \r so multi-line tool_result rendering survives — calling
+// SanitizeForLog directly would map those to '_' and destroy formatting
+// in the dashboard's <pre> sink.
+//
+// R243-SEC-5: handleRunDetail runs Prompt/WorkDir through the strict
+// SanitizeForLog before wire-encode; the JSONL transcript path skipped
+// sanitisation entirely, so a JSONL file with bidi overrides could reach
+// the dashboard verbatim and corrupt visual ordering despite esc()-then-
+// <pre>. Defence-in-depth.
+func sanitizeWireText(s string) string {
+	if s == "" {
+		return s
+	}
+	// Fast path: every IsLogInjectionRune codepoint encodes with leading
+	// byte ≥ 0x80 in UTF-8 (C1 0x80..9F → 0xC2..; bidi 0x202A..2069 →
+	// 0xE2..). Pure ASCII proves nothing to drop, so return s without
+	// allocating. Keeps tab/newline/CR which are < 0x20 ASCII.
+	hasNonASCII := false
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			hasNonASCII = true
+			break
+		}
+	}
+	if !hasNonASCII {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if osutil.IsLogInjectionRune(r) {
+			return -1 // drop
+		}
+		return r
+	}, s)
+}
+
 // flattenJSONLEvent decodes one JSONL line into 0..N transcript turns.
 // Returns (turns, token deltas, tool-call delta, parsedAny).
 //
 // parsedAny is true when the event maps to at least one recognised turn
 // shape — used by the caller to decide whether to set fallback:"raw".
-func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
-	out := make([]transcriptTurn, 0, 2)
+//
+// R243-GO-8: callers pass a reusable `buf` slice (any cap, any length —
+// it is reset to len=0 internally) so the per-line hot path avoids
+// `make([]transcriptTurn, 0, 2)` per call. A 5000-line transcript drops
+// from 5000 backing-array allocs to ~1. Pass `nil` for ad-hoc / test
+// callers; append handles nil naturally.
+func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, buf []transcriptTurn) ([]transcriptTurn, transcriptTokens, int, bool) {
+	out := buf[:0]
 	tok := transcriptTokens{}
 	toolCalls := 0
 	parsed := false
@@ -520,7 +571,8 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 				Index: nextIdx + len(out),
 				Kind:  "user",
 				TS:    ts,
-				Text:  truncateRunes(text, maxAssistantTextBytes),
+				// R243-SEC-5: strip bidi / C1 / LS-PS before wire encode.
+				Text: sanitizeWireText(truncateRunes(text, maxAssistantTextBytes)),
 			})
 		}
 		for _, b := range blocks {
@@ -533,7 +585,8 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 				if strings.IndexByte(outStr, 0x1b) >= 0 {
 					outStr = ansiEscRe.ReplaceAllString(outStr, "")
 				}
-				outStr = truncateRunes(outStr, maxToolOutputBytes)
+				// R243-SEC-5: same wire-sanitisation as user.Text.
+				outStr = sanitizeWireText(truncateRunes(outStr, maxToolOutputBytes))
 				status := "ok"
 				if b.IsError {
 					status = "error"
@@ -571,7 +624,10 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 				textBuf.WriteString(b.Text)
 			case "tool_use":
 				toolCalls++
-				summary := summariseToolInput(b.Name, b.Input)
+				// R243-SEC-5: belt-and-braces; summariseToolInput already
+				// runs SanitizeForLog on chosen field but explicit wrap
+				// is no-op for ASCII and survives future regressions.
+				summary := sanitizeWireText(summariseToolInput(b.Name, b.Input))
 				out = append(out, transcriptTurn{
 					Index:     nextIdx + len(out),
 					Kind:      "tool_use",
@@ -586,13 +642,20 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 		}
 		if textBuf.Len() > 0 {
 			text := textBuf.String()
-			out = append([]transcriptTurn{{
-				Index:  nextIdx,
-				Kind:   "assistant",
-				TS:     ts,
-				Text:   truncateRunes(text, maxAssistantTextBytes),
+			// R243-GO-8: prepend assistant turn in-place rather than
+			// `append([]transcriptTurn{...}, out...)` which would alloc
+			// a fresh backing array and defeat caller-side buffer reuse.
+			// Grow by 1, shift right, write head.
+			out = append(out, transcriptTurn{})
+			copy(out[1:], out[:len(out)-1])
+			out[0] = transcriptTurn{
+				Index: nextIdx,
+				Kind:  "assistant",
+				TS:    ts,
+				// R243-SEC-5: same wire-sanitisation as user/tool_result.
+				Text:   sanitizeWireText(truncateRunes(text, maxAssistantTextBytes)),
 				Tokens: tok.Output,
-			}}, out...)
+			}
 			// re-number subsequent turns
 			for i := range out {
 				out[i].Index = nextIdx + i
@@ -625,7 +688,8 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 				Index: nextIdx,
 				Kind:  "error",
 				TS:    ts,
-				Text:  truncateRunes(sys.Message, maxAssistantTextBytes),
+				// R243-SEC-5: error text from claude system events; strip.
+				Text: sanitizeWireText(truncateRunes(sys.Message, maxAssistantTextBytes)),
 			})
 			parsed = true
 		}

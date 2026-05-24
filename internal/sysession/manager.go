@@ -207,12 +207,20 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 
 	m := &Manager{
-		enabled:      cfg.Enabled,
-		cfg:          cfg,
-		tickFn:       cfg.NewTicker,
-		onRunStarted: cfg.OnRunStarted,
-		onRunEnded:   cfg.OnRunEnded,
+		enabled: cfg.Enabled,
+		cfg:     cfg,
+		tickFn:  cfg.NewTicker,
 	}
+	// R242-GO-16: route the initial callbacks through SetCallbacks so
+	// every write of {onRunStarted, onRunEnded} goes through the same
+	// hookMu-guarded path. Previously NewManager bypassed the lock and
+	// assigned the fields directly — safe today because main.go calls
+	// SetCallbacks only after construction returns and there are no
+	// concurrent ticks yet, but the divergence made the "all writes
+	// hold hookMu" invariant impossible to grep for. Routing through
+	// SetCallbacks at init is free (no contention before Start) and
+	// makes the invariant a one-line claim.
+	m.SetCallbacks(cfg.OnRunStarted, cfg.OnRunEnded)
 	if !cfg.Enabled {
 		// Build nothing; Start is a no-op.
 		return m, nil

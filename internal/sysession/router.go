@@ -57,5 +57,16 @@ type SystemSessionRouter interface {
 	// than just the most recent prompt cached on SessionSnapshot.
 	// Returns the live process's EventLog when the session is alive,
 	// otherwise the persisted history slice.
+	//
+	// NEEDS-DESIGN (R242-ARCH-24): the []cli.EventEntry return type is
+	// the only thing forcing this consumer-side interface to import
+	// internal/cli. AutoTitler uses ≤4 fields per entry (Type, Text,
+	// IsUser, Created) so a sysession-local SystemEventEntry mirror
+	// + adapter at SystemSessionRouter.EventEntriesForKey would let
+	// sysession drop the cli import entirely. Deferred until R243-
+	// ARCH-12 (EventStore interface unification) lands so the mirror
+	// shape can be derived from the central EventStore type rather
+	// than coined ad-hoc here. Doing it twice (once now, once when
+	// EventStore lands) would only churn AutoTitler tests.
 	EventEntriesForKey(key string) []cli.EventEntry
 }

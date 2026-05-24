@@ -1187,6 +1187,22 @@ func isSensitiveDownloadName(base string) bool {
 	if _, ok := sensitiveDownloadNames[low]; ok {
 		return true
 	}
+	// R242-SEC-9: catch every dotenv variant in one rule rather than
+	// growing sensitiveDownloadNames to N enumerated cases. .env.example
+	// in particular previously slipped through the exact-match table —
+	// detectMime would magic-byte sniff its `KEY=value` plaintext as
+	// text/plain and the preview path would render it inline. .env files
+	// shipped as templates routinely carry placeholder secrets that
+	// accidentally become real ones (developers fill them in and forget
+	// to delete the example). The match is `.env` followed by either
+	// end-of-string or a `.` separator so legitimate names like
+	// `.envoy.yaml` (envoy proxy config — pinned in
+	// TestIsSensitiveDownloadName_OpsConventional allowed list) keep
+	// previewing. Covers .env, .env.local, .env.production, .env.example,
+	// .env.<anything>.
+	if low == ".env" || strings.HasPrefix(low, ".env.") {
+		return true
+	}
 	if ext := filepath.Ext(low); ext != "" {
 		if _, ok := sensitiveDownloadExts[ext]; ok {
 			return true

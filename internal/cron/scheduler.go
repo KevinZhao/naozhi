@@ -619,11 +619,29 @@ func workDirReachable(workDir string) bool {
 // workspace binding AND the separate window where allowedRoot itself (if a
 // symlink) could be retargeted after construction. Both arguments must be
 // absolute; relative workDir is rejected. allowedRootResolved, when
-// non-empty, is a best-effort prior resolution of allowedRoot that is used
-// as a fallback only if the per-call EvalSymlinks on allowedRoot itself
-// fails (e.g. the path was temporarily unmounted). This preserves the
-// security contract while still avoiding most of the syscall cost of a
-// cold re-resolution on the happy path.
+// non-empty, is a best-effort prior resolution of allowedRoot captured at
+// scheduler construction time and used as a fallback only when the
+// per-call EvalSymlinks on allowedRoot fails (e.g. the path was
+// temporarily unmounted). This preserves the security contract while
+// still avoiding most of the syscall cost of a cold re-resolution on the
+// happy path.
+//
+// R243-SEC-9 (REPEAT-7): when BOTH the per-call EvalSymlinks AND the
+// cached allowedRootResolved are unavailable, this function previously
+// fell back to a raw-string prefix comparison against the user-supplied
+// allowedRoot. That fallback re-introduced the TOCTOU/symlink-escape
+// window the rest of the function exists to close: an attacker who
+// could (a) make EvalSymlinks fail (e.g. by transiently unmounting a
+// component) AND (b) point allowedRoot at a directory that string-
+// prefix-matched a symlink-redirected resolved workDir would slip past
+// the gate. We now refuse to execute when both resolution sources are
+// unavailable rather than fall back. The cost is a transient
+// "scheduler refused to run job because allowedRoot resolution was
+// unavailable" — the operator-visible recovery is identical to the
+// existing "EvalSymlinks(workDir) failed" branch above. The cache is
+// populated once at NewScheduler so the only realistic way to hit
+// this reject path is during a system-level filesystem failure, where
+// refusing is the safer default.
 func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 	if workDir == "" || allowedRoot == "" {
 		return true // empty WorkDir uses router default; empty root = disabled
@@ -639,14 +657,16 @@ func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 	}
 	rootResolved, err := filepath.EvalSymlinks(allowedRoot)
 	if err != nil {
-		// Fall back to the cached resolution (captured at construction) or
-		// the raw path if no cache exists. Either way the fallback chain
-		// preserves the historical behaviour when EvalSymlinks fails.
-		if allowedRootResolved != "" {
-			rootResolved = allowedRootResolved
-		} else {
-			rootResolved = allowedRoot
+		// Cached resolution captured at construction time is still a
+		// genuine EvalSymlinks output (just stale w.r.t. live filesystem
+		// state), so it preserves the symlink-escape contract. Falling
+		// back to the raw user-supplied allowedRoot string would NOT,
+		// because string-prefix matching against an un-resolved path
+		// can match a sibling symlink target. R243-SEC-9.
+		if allowedRootResolved == "" {
+			return false
 		}
+		rootResolved = allowedRootResolved
 	}
 	if resolved == rootResolved {
 		return true
@@ -1313,9 +1333,19 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 }
 
 // DeleteJobByID removes a job by exact ID (unscoped, for dashboard use).
+//
+// LOCKING CONTRACT (R243-GO-2): the IIFE captures `j *Job` under s.mu but
+// the post-IIFE block must NOT dereference any mutable Job field without
+// re-acquiring the lock. To make that contract explicit at every read
+// site, the immutable identifier is captured into a local `jobID` while
+// still holding s.mu and consumed afterwards. j itself remains in scope
+// only as the return value (callers receive the *Job snapshot taken from
+// s.jobs at deletion time; subsequent reads are caller-side and out of
+// our concurrency contract).
 func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	var save func()
 	var j *Job
+	var jobID string // R243-GO-2: immutable ID captured under s.mu for explicit post-lock use.
 	var found bool
 	var perr error
 	func() {
@@ -1328,6 +1358,7 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 			return
 		}
 		found = true
+		jobID = j.ID
 		s.deleteJobLocked(j)
 		save, perr = s.persistJobsLocked()
 	}()
@@ -1341,7 +1372,9 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	// R240-GO-1: router.Reset moved out of deleteJobLocked to avoid
 	// holding s.mu across router callbacks (notifyChange may try to
 	// re-take s.mu, deadlocking the scheduler).
-	s.resetRouterStub(j.ID)
+	// R243-GO-2: pass the locally captured jobID so the call site is
+	// audit-clean (no mutable-field access through j outside the lock).
+	s.resetRouterStub(jobID)
 	// R238-GO-3: deleteJobLocked already mutated in-memory state. The
 	// runStore must be cleaned even when persist fails, otherwise the
 	// runs/<jobID>/ subtree leaks on disk while the in-memory job is gone.
@@ -1351,7 +1384,7 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	// logs, deletable only via session.Router or the user's own claude
 	// commands.
 	if s.runStore != nil {
-		s.runStore.DeleteJob(j.ID)
+		s.runStore.DeleteJob(jobID)
 	}
 	if perr != nil {
 		return nil, perr
@@ -1361,6 +1394,15 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 }
 
 // PauseJobByID pauses a job by exact ID (unscoped, for dashboard use).
+//
+// LOCKING CONTRACT (R243-GO-2): unlike DeleteJobByID this function does not
+// dereference any Job field after releasing s.mu — j flows directly to the
+// return value. Callers that read mutable fields (Title/Prompt/Schedule)
+// from the returned snapshot are out of this scheduler's concurrency
+// contract; the dashboard handler reads these immediately on the same
+// goroutine before any further mutation can race in. Future edits that
+// add post-IIFE field reads here MUST capture them into local copies
+// inside the IIFE (mirror DeleteJobByID's `jobID := j.ID` pattern).
 func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 	var save func()
 	var j *Job
@@ -1599,52 +1641,71 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 
 // SetJobPrompt updates a job's prompt. If the job was paused with an empty
 // prompt (created from dashboard), it also unpauses and registers the schedule.
+//
+// LOCKING (R244-GO-P2-1): the critical section is wrapped in an IIFE with
+// `defer s.mu.Unlock()` so every early-return path drops the mutex
+// uniformly — previously the function had 5 hand-rolled `s.mu.Unlock();
+// return …` sites that drifted from the IIFE+defer pattern used by
+// UpdateJob / DeleteJobByID / PauseJobByID / ResumeJobByID. The IIFE
+// returns (save func, noop bool, err) so the post-lock save() and
+// slog.Info still run outside the critical section, matching the project
+// convention that disk fsync and logging happen lock-free.
 func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	if prompt == "" {
 		return fmt.Errorf("prompt must not be empty")
 	}
 
-	s.mu.Lock()
+	var save func()
+	var noop bool
+	err := func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	j, ok := s.jobs[id]
-	if !ok {
-		s.mu.Unlock()
-		return fmt.Errorf("%w: id %q", ErrJobNotFound, id)
-	}
-	if j.Prompt != "" {
-		s.mu.Unlock()
-		return nil // already has a prompt, no-op
-	}
-
-	j.Prompt = prompt
-	waspaused := j.Paused
-	if j.Paused {
-		// Delegate unpause to the shared helper so the registerJob + Paused
-		// flag transition stays consistent with PauseJob/ResumeJob/UpdateJob
-		// paths. R226-CR-16.
-		if err := s.resumeJobLocked(j); err != nil {
-			j.Prompt = "" // rollback: Prompt was empty before this call
-			s.mu.Unlock()
-			return err
+		j, ok := s.jobs[id]
+		if !ok {
+			return fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 		}
-	}
-	save, perr := s.persistJobsLocked()
-	if perr != nil {
-		// Rollback in-memory state before releasing the lock so the
-		// live view never reflects an un-persisted mutation.
-		// pauseJobLocked failure here is best-effort: only logged, never
-		// suppresses the original perr returned to the caller. R243-GO-5.
-		j.Prompt = ""
-		if waspaused && !j.Paused {
-			if rbErr := s.pauseJobLocked(j); rbErr != nil && !errors.Is(rbErr, ErrJobAlreadyPaused) {
-				slog.Warn("cron rollback after persist failure also failed",
-					"job_id", j.ID, "rollback_err", rbErr, "persist_err", perr)
+		if j.Prompt != "" {
+			noop = true
+			return nil // already has a prompt, no-op
+		}
+
+		j.Prompt = prompt
+		waspaused := j.Paused
+		if j.Paused {
+			// Delegate unpause to the shared helper so the registerJob +
+			// Paused flag transition stays consistent with
+			// PauseJob/ResumeJob/UpdateJob paths. R226-CR-16.
+			if rerr := s.resumeJobLocked(j); rerr != nil {
+				j.Prompt = "" // rollback: Prompt was empty before this call
+				return rerr
 			}
 		}
-		s.mu.Unlock()
-		return perr
+		var perr error
+		save, perr = s.persistJobsLocked()
+		if perr != nil {
+			// Rollback in-memory state before releasing the lock so the
+			// live view never reflects an un-persisted mutation.
+			// pauseJobLocked failure here is best-effort: only logged, never
+			// suppresses the original perr returned to the caller. R243-GO-5.
+			j.Prompt = ""
+			if waspaused && !j.Paused {
+				if rbErr := s.pauseJobLocked(j); rbErr != nil && !errors.Is(rbErr, ErrJobAlreadyPaused) {
+					slog.Warn("cron rollback after persist failure also failed",
+						"job_id", j.ID, "rollback_err", rbErr, "persist_err", perr)
+				}
+			}
+			save = nil
+			return perr
+		}
+		return nil
+	}()
+	if err != nil {
+		return err
 	}
-	s.mu.Unlock()
+	if noop {
+		return nil
+	}
 	save()
 	slog.Info("cron job prompt set", "job_id", id, "prompt_len", len(prompt))
 	return nil
@@ -2444,33 +2505,44 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		return
 	}
 
-	// R191-ARCH-M5: Send uses a ctx derived from Background, not stopCtx.
-	// Rationale: once GetOrCreate has handed us a live session we should
-	// either record a result or a real error. If we piggy-back on stopCtx
-	// here, Scheduler.Stop()'s first act (stopCancel) cancels this ctx and
-	// the in-flight Send's result is silently dropped — the job records no
+	// R191-ARCH-M5: Send must NOT inherit stopCtx cancellation. Once
+	// GetOrCreate has handed us a live session we should either record a
+	// result or a real error. If we piggy-back on stopCtx here,
+	// Scheduler.Stop()'s first act (stopCancel) cancels this ctx and the
+	// in-flight Send's result is silently dropped — the job records no
 	// LastRunAt, is re-run on the next start, and "cron send cancelled"
 	// logs make shutdown look like a failure. notifyTarget (this file)
-	// already uses Background for delivery after shutdown for the same
-	// reason; make Send consistent. Shutdown latency is bounded by
-	// Router.Shutdown's drain timeout (ShutdownTimeout, 30s in
-	// internal/session) + cron.Stop()'s own cron.Stop() chain drain.
+	// uses the same uncancelled-parent pattern for delivery after
+	// shutdown. Shutdown latency is bounded by Router.Shutdown's drain
+	// timeout (ShutdownTimeout, 30s in internal/session) + cron.Stop()'s
+	// own cron.Stop() chain drain.
 	//
-	// R230B-GO-1 / R222-GO-1 (worst-case wall clock): the spawn ctx above
-	// (line ~2062, derived from s.stopCtx with WithTimeout(jobTimeout)) and
-	// this sendCtx do NOT share a budget — a slow GetOrCreate that consumes
-	// most of jobTimeout still hands a fresh jobTimeout to Send below. A
-	// pathological run can therefore last ~2*jobTimeout + a brief scheduling
-	// gap before finishRun stamps a terminal state. This is intentional:
-	// clamping sendCtx to (jobTimeout - time.Since(startedAt)) would amplify
-	// flaky/cold-start spawns (~10s spawn → ~290s send budget on a 5min
-	// job), turning a transient session-spawn slowdown into a user-visible
-	// "send timed out" without the operator having any signal. The
-	// scheduler-level overlap guard (robfig SkipIfStillRunning chain
-	// wrapper) already prevents two concurrent
-	// runs of the same job from stacking budgets, so the doubled wall
-	// clock affects only the CURRENT run's recorded duration, not throughput.
-	sendCtx, sendCancel := context.WithTimeout(context.Background(), jobTimeout)
+	// R243-ARCH-11: parent is now context.WithoutCancel(ctx) rather than
+	// context.Background(). WithoutCancel inherits Values (slog group keys,
+	// any tracer baggage, future request-scoped data) from the spawn ctx
+	// while explicitly discarding both Done() and Err() — so the
+	// no-cancel-on-shutdown contract above is preserved AND log
+	// correlation across spawn → send phases survives. Background()
+	// dropped both, so prior to this change a future tracer attaching to
+	// the spawn ctx would have lost its trace context exactly at the
+	// phase transition that operators most care about.
+	//
+	// R230B-GO-1 / R222-GO-1 (worst-case wall clock): the spawn ctx
+	// above (line ~2372, derived from s.stopCtx with WithTimeout(
+	// jobTimeout)) and this sendCtx do NOT share a budget — a slow
+	// GetOrCreate that consumes most of jobTimeout still hands a fresh
+	// jobTimeout to Send below. A pathological run can therefore last
+	// ~2*jobTimeout + a brief scheduling gap before finishRun stamps a
+	// terminal state. This is intentional: clamping sendCtx to
+	// (jobTimeout - time.Since(startedAt)) would amplify flaky/cold-start
+	// spawns (~10s spawn → ~290s send budget on a 5min job), turning a
+	// transient session-spawn slowdown into a user-visible "send timed
+	// out" without the operator having any signal. The scheduler-level
+	// overlap guard (robfig SkipIfStillRunning chain wrapper) already
+	// prevents two concurrent runs of the same job from stacking
+	// budgets, so the doubled wall clock affects only the CURRENT run's
+	// recorded duration, not throughput.
+	sendCtx, sendCancel := context.WithTimeout(context.WithoutCancel(ctx), jobTimeout)
 	defer sendCancel()
 	// R240-GO-4: emit an explicit signal when entering sendCtx after the
 	// spawn phase already consumed >50% of jobTimeout. The wall-clock
@@ -2985,6 +3057,20 @@ func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
 	s.notifyTarget(target.Platform, target.ChatID, text)
 }
 
+// redactBuilderPool reuses the slow-path strings.Builder in
+// redactPathsInCronError so each cron run with a path-bearing error
+// avoids a fresh backing []byte allocation. R243-PERF-13.
+//
+// Capacity is bounded by maxRedactErrLen (2KB) because the input is
+// pre-truncated to that size at the top of redactPathsInCronError, so
+// retained Builders cannot grow past O(maxRedactErrLen). String() copies
+// the buffer into a fresh string before we return, making it safe to
+// Reset+Put the Builder synchronously via defer (no caller-visible
+// reference into the Builder's backing array).
+var redactBuilderPool = sync.Pool{
+	New: func() any { return new(strings.Builder) },
+}
+
 // redactPathsInCronError strips absolute filesystem paths from a cron
 // execution error message before persistence. session.GetOrCreate and
 // session.Send produce errors like "session error: workspace …/repo/x:
@@ -3034,8 +3120,19 @@ func redactPathsInCronError(s string) string {
 	if strings.IndexByte(s, '/') < 0 && strings.IndexByte(s, '\\') < 0 && strings.IndexByte(s, '~') < 0 {
 		return s
 	}
-	var b strings.Builder
+	// R243-PERF-13: pool the Builder so the slow path doesn't allocate a
+	// fresh backing []byte per cron run. recordResult fires on every
+	// execution and the path-bearing branch happens whenever the CLI
+	// surfaces a workspace-related error (a common failure mode), so the
+	// pool's hit rate is high in steady state. Each pooled Builder keeps
+	// its grown buffer; small inputs (~256B common case) reuse last
+	// allocation, large inputs (~maxRedactErrLen=2KB max) bound the
+	// retained capacity. We must Reset before Put because String()
+	// copies internally — the Builder's buffer is reusable after Reset.
+	b := redactBuilderPool.Get().(*strings.Builder)
+	b.Reset()
 	b.Grow(len(s))
+	defer redactBuilderPool.Put(b)
 	i := 0
 	for i < len(s) {
 		c := s[i]

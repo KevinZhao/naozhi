@@ -60,16 +60,25 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 			sem := make(chan struct{}, thumbnailConcurrency)
 			var wg sync.WaitGroup
 			for i, img := range images {
+				// R243-GO-3: sem acquire moves INTO the goroutine first
+				// line so wg.Add + spawn aren't serialized behind a
+				// blocked send when the pool is saturated. wg.Add stays
+				// outside (the standard Go contract — Add must complete
+				// before any matching Wait could start, which is the
+				// caller's wg.Wait() below).
 				wg.Add(1)
-				sem <- struct{}{}
 				go func(i int, data []byte) {
 					defer wg.Done()
+					sem <- struct{}{}
 					defer func() { <-sem }()
-					defer func() {
-						if rv := recover(); rv != nil {
-							slog.Error("thumbnail panic recovered", "img_index", i, "panic", rv)
-						}
-					}()
+					// R243-GO-1: outer `recover` was dead code —
+					// MakeThumbnail's own defer (thumbnail.go:41) already
+					// recovers decoder panics from x/image and returns "".
+					// The outer slog.Error never fired; drop it. If a
+					// future panic source is added inside MakeThumbnail
+					// that the inner recover misses, prefer wiring it
+					// there (single recover point) over re-adding a layer
+					// here.
 					thumbs[i] = MakeThumbnail(data, 600)
 				}(i, img.Data)
 			}
