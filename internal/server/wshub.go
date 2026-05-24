@@ -91,10 +91,12 @@ type Hub struct {
 	dashTokenHash [32]byte
 	cookieMAC     string // HMAC-derived cookie value (different from dashToken)
 	guard         *session.Guard
-	queue         *dispatch.MessageQueue // per-key FIFO queue for dashboard sends
-	nodes         map[string]node.Conn
-	nodesMu       *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
-	projectMgr    *project.Manager
+	// NEEDS-DESIGN R242-GO-10: 与其他 Hub 依赖一致改抽 MessageEnqueuer interface；
+	// 当前直接耦合 *dispatch.MessageQueue 具体类型。
+	queue      *dispatch.MessageQueue // per-key FIFO queue for dashboard sends
+	nodes      map[string]node.Conn
+	nodesMu    *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
+	projectMgr *project.Manager
 	// resolver centralises session key → opts derivation; used by
 	// sessionOptsFor / buildSessionOpts. Nil keeps legacy fallback
 	// wiring for tests that don't construct a resolver.
