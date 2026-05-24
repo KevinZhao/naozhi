@@ -187,7 +187,7 @@
 - [ ] **R246-CR-004 [P2] [REFACTOR] — `internal/server/server.go:517` buildServer 358 行**: 每加 dashboard handler 都要在 buildServer 多塞 30 行。建议：按 handler 域 (sessions/cron/projects/system/cli) 拆 wire 函数，每个返回 sub-mux。
 - [ ] **R246-CR-005 [P2] [REFACTOR] — `internal/shim/manager.go:216` StartShimWithBackend 247 行**: 串 slot 预留→exec.Command→ready scan→token decode→connect→cgroup move→handle 替换 7 步，killAndUnblock+slotReleased 双 cleanup 标志。建议：awaitReady(ctx, stdout, deadline) + reserveSlot defer 闭包。
 - [ ] **R246-CR-006 [P2] [REFACTOR] — `internal/server/wshub.go:1215` resubscribeEvents 183 行**: 连接状态机+key 校验+gen 比较+ManagedSession 拉取+event backfill+broadcast，cyclomatic > 25。建议：backfill+initial-state 段独立 backfillSubscriberEvents(c, sess)。
-- [ ] **R246-CR-007 [P3] [REPEAT-N] — `internal/shim/manager.go:256-257` fmt.Sprintf("%d", x) 两处**: bufferSize/maxBufBytes 整型转字符串走 fmt 反射。建议：换成 strconv.Itoa(m.bufferSize) 与 strconv.FormatInt(m.maxBufBytes, 10)。
+- [~] **R246-CR-007 [P3] [REPEAT-N] — `internal/shim/manager.go:256-257` fmt.Sprintf("%d", x) 两处**: bufferSize/maxBufBytes 整型转字符串走 fmt 反射。建议：换成 strconv.Itoa(m.bufferSize) 与 strconv.FormatInt(m.maxBufBytes, 10)。
 - [ ] **R246-CR-008 [P2] [REFACTOR] — `internal/cron/runstore.go:526-633` diskListNewestFirst pagination 语义不一致**: items 按 mtime 排序但 before cutoff 比 run.StartedAt（行 627），跨进程/重启 mtime 与 StartedAt 可能不单调。建议：cutoff 比 it.mtime；或 sort key 与 pagination key 都用 mtime。
 - [ ] **R246-CR-009 [P3] [REPEAT-N] — `internal/cron/job.go:378,393` HasMissedSchedule 中 magic factor `5*period` / `period*3/2`**: 启动抑制窗口与"上次错过"裕量都是裸数字。建议：抽 missedScheduleSuppressFactor=5 与 missedScheduleSlackFactor=3,/2 命名常量。
 - [ ] **R246-CR-010 [P3] [REFACTOR] — `internal/cron/scheduler.go:138-142` 类型块仅声明回调类型却放在 var/const 旁**: R245 已新建 scheduler_callbacks.go。建议：把 OnRunStartedFunc/OnRunEndedFunc/OnExecuteFunc 类型也搬到 scheduler_callbacks.go。
@@ -252,7 +252,7 @@
 - [~] **R245-SEC-8 [BREAKING-LOCAL] — `internal/cron/store.go:56-58` Lstat 非 ErrNotExist 错误未拒绝**: EACCES/ELOOP 时 fall through 到 os.Open 跟随 symlink。建议：除 ErrNotExist 外所有 Lstat 错误均直接返回。
 - [ ] **R245-SEC-9 [BREAKING-LOCAL] — `internal/server/dashboard_auth.go:117-121` token 为空时仍走 MAC cookie 路径**: dashboardToken="" 时 isAuthenticated 已无条件 true，但 cookieMAC 仍计算空字符串 deterministic MAC，逻辑残留可被未来回归利用。建议：token 空时跳过 cookie 流程整段。
 - [ ] **R245-SEC-10 [BREAKING-LOCAL] — `internal/server/project_files.go:808-824` serveRender CSP img-src 'self' 残留**: sandbox 下 'self' 让 rendered blob 可向 dashboard origin 发图片请求。建议：img-src 改为 `data: blob:`。
-- [ ] **R245-SEC-11 [BREAKING-LOCAL] — `internal/sysession/runner.go:147-150` BinPath 相对名 + PATH 时序竞态**: NewRunner 抓 r.env 后若 parent PATH 被并发 os.Setenv 改动则发生分叉。建议：NewRunner 用 exec.LookPath 在 r.env 的 PATH 下解析为绝对路径并固化到 BinPath。
+- [~] **R245-SEC-11 [BREAKING-LOCAL] — `internal/sysession/runner.go:147-150` BinPath 相对名 + PATH 时序竞态**: NewRunner 抓 r.env 后若 parent PATH 被并发 os.Setenv 改动则发生分叉。建议：NewRunner 用 exec.LookPath 在 r.env 的 PATH 下解析为绝对路径并固化到 BinPath。
 - [ ] **R245-SEC-13 [REPEAT-2] — dashboard_cron Prompt 全量回 SetEscapeHTML(false) 风险**: 同 R243-SEC 群。建议：静态测试断言 SetEscapeHTML(false) 仅用于 API JSON，不用于 HTML 模板。
 - [ ] **R245-SEC-14 [BREAKING-LOCAL] — `cmd/naozhi/service.go:47` SUDO_USER 未长度/字符校验**: argv 安全（无 shell），但攻击者可控 env 填长字串。建议：≤256 字节 + printable ASCII 校验。
 - [ ] **R245-SEC-15 [REPEAT-2] — `internal/cli/wrapper.go:158` cliPath 来自 ExpandHome 未确认 IsAbs/regular file**: 建议：filepath.IsAbs 断言 + os.Lstat mode 校验（必须 regular + executable）。
@@ -293,7 +293,7 @@
 - [ ] **R245-CR-002 [REFACTOR] — `cmd/naozhi/service.go:92` EvalSymlinks 静默丢错**: 建议：if resolved, err := EvalSymlinks; err == nil { binary = resolved } + 注释 fallback 语义。
 - [ ] **R245-CR-004 [REFACTOR] — `internal/usermsg/usermsg.go` 无单测**: ForSendError 是规范 error→user 文本映射；新 sentinel 漏 case 静默 fall-through。建议：表驱动 contract test 仿 internal/dispatch/error_mapping_contract_test.go。
 - [ ] **R245-CR-006 [REFACTOR] — `cmd/naozhi/service.go:73` fs.Parse 错误丢弃**: ExitOnError 模式下 err 永不返回，但模式改后会静默；setup.go:102 同问题。建议：err 显式处理或加 //nolint:errcheck 注释。
-- [ ] **R245-CR-008 [REFACTOR] — `internal/session/managed.go:1342` 孤儿 TODO 引用 R239-CR-11 不在 TODO.md**: 建议：要么补登记，要么删 TODO 注释。
+- [~] **R245-CR-008 [REFACTOR] — `internal/session/managed.go:1342` 孤儿 TODO 引用 R239-CR-11 不在 TODO.md**: 建议：要么补登记，要么删 TODO 注释。
 
 #### 架构（ARCH，25 项 — 全 [REFACTOR]，本轮新维度）
 
@@ -529,7 +529,7 @@
 - [ ] **R242-PERF-5 [REFACTOR]** `internal/cron/scheduler.go:478-543` `handleList` 每 job × `RecentRuns(5)` 50 次 sync.Map.Load + entry.mu.Lock；批量 ListAllJobsWithRecent。
 - [ ] **R242-PERF-6 [REFACTOR]** `internal/cron/scheduler.go:484` `handleList` 每 job × `CurrentRun` 50 次 sync.Map.Load；与 PERF-5 折叠批量快照。
 - [ ] **R242-PERF-7 [REPEAT-2]** `internal/server/dashboard_session.go:1390` `KnownSessionIDs` 每 1Hz tab 全量重建 jobs×200 map；30s TTL cache。同 review_perf_2026_04_20.md handleList Stat 缓存项。
-- [ ] **R242-PERF-8 [REFACTOR]** `internal/cli/eventlog.go:982-1001` `AppendBatch` replay phase `sinkReady=false` 仍 allocate sinkCopy slice；早退跳过分配。
+- [~] **R242-PERF-8 [REFACTOR]** `internal/cli/eventlog.go:982-1001` `AppendBatch` replay phase `sinkReady=false` 仍 allocate sinkCopy slice；早退跳过分配。
 - [ ] **R242-PERF-9 [REFACTOR]** `internal/cron/runstore.go:477-553` `diskListNewestFirst` before-cutoff pagination 无 cache；缓存 sorted items slice 在 recentCacheEntry。
 - [ ] **R242-PERF-10 [REFACTOR]** `internal/cron/runstore.go:652-736` `trimJobLocked` 不利用 cache 快路径；warm cache 时直接根据 cache 长度判断。
 - [ ] **R242-PERF-11 [REFACTOR]** `internal/cron/scheduler.go:547-549` `handleList` 重复 `time.Now().In(loc)`；用已捕获的 `now`。
