@@ -133,16 +133,16 @@
 
 ### 代码质量（CR / GO）
 
-- [ ] **R241-CR-6 [SIMPLE]** `internal/cron/runstore.go:375-378` — warmCache 注释提到"warm=false on disk error"，但 R239-CR-6 之后 `warm` 总置 true，注释 stale。建议同步注释。
-- [ ] **R241-GO-2 [SIMPLE]** `internal/cron/scheduler.go:1278-1313` — `DeleteJobByID` IIFE 用 `j == nil` 当 not-found 哨兵；当前正确但与"j 是 *Job 可为 nil"潜在用途冲突。建议加 `found bool` 显式区分。
+- [~] **R241-CR-6 [SIMPLE]** `internal/cron/runstore.go:375-378` — warmCache 注释提到"warm=false on disk error"，但 R239-CR-6 之后 `warm` 总置 true，注释 stale。建议同步注释。
+- [~] **R241-GO-2 [SIMPLE]** `internal/cron/scheduler.go:1278-1313` — `DeleteJobByID` IIFE 用 `j == nil` 当 not-found 哨兵；当前正确但与"j 是 *Job 可为 nil"潜在用途冲突。建议加 `found bool` 显式区分。
 - [ ] **R241-GO-3 [SIMPLE]** `internal/cron/scheduler.go:1317-1346` — `PauseJobByID` 同上 nil-sentinel 模式。同 R241-GO-2 修复。
 - [ ] **R241-GO-4 [SIMPLE]** `cmd/naozhi/main.go:536-538` — `RefreshSettings` 在 ctx cancel 后 mid-retry 静默返回空 settings path，operator 无 log signal。建议在 `writeClaudeSettingsOverride` 加 `ctx.Err()` 时 Warn。
-- [ ] **R241-CR-7 [SIMPLE]** `internal/dispatch/coalesce.go:117` — 截断 marker 用 `fmt.Fprintf` 而紧邻的 fast path 已用 WriteString 避反射。建议要么补统一注释要么改 strconv.AppendInt。
+- [~] **R241-CR-7 [SIMPLE]** `internal/dispatch/coalesce.go:117` — 截断 marker 用 `fmt.Fprintf` 而紧邻的 fast path 已用 WriteString 避反射。建议要么补统一注释要么改 strconv.AppendInt。
 
 ### 架构（ARCH）
 
 - [ ] **R241-ARCH-1 [SIMPLE]** `internal/cli/wrapper.go:151-172` — `NewWrapper` 构造期同步执行 `detectVersion(cliPath)` 启 5s subprocess；纯字段赋值构造函数变成阻塞 IO。建议提到 `Probe(ctx)` 或 `LazyVersion()`。
-- [ ] **R241-ARCH-2 [SIMPLE]** `internal/cron/scheduler.go:761-833` — `Start()` 无 idempotency guard，二次调用会 reset startedAtNanos / 再 spawn cold-start GC / 再 cron.Start。建议 `started atomic.Bool` CAS。
+- [~] **R241-ARCH-2 [SIMPLE]** `internal/cron/scheduler.go:761-833` — `Start()` 无 idempotency guard，二次调用会 reset startedAtNanos / 再 spawn cold-start GC / 再 cron.Start。建议 `started atomic.Bool` CAS。
 - [ ] **R241-ARCH-3 [SIMPLE]** `internal/cron/scheduler.go:204-213` — `platforms`/`agents`/`agentCommands` map godoc 说 "immutable after NewScheduler" 但 caller 持原引用可改底层 map → cron 包内 lock-free 读会 race。建议构造时 `maps.Clone` 切断引用。
 - [ ] **R241-ARCH-4 [SIMPLE]** `internal/cron/scheduler.go:331-368` — `SetOnExecute / SetOnRunStarted / SetOnRunEnded` 三个独立 setter；加事件类型必改 struct + 增 setter。建议抽 `SchedulerListener` 单接口。
 - [ ] **R241-ARCH-5 [BREAKING-LOCAL]** `internal/cron/scheduler.go:402-426` — runStore 半 facade：facade 方法只覆盖 List/Recent/Get，scheduler.go 多处直接访问 `s.runStore.{Append,trimAll,cacheInvalidate}`；要么 facade 闭合要么提升为 `internal/cron/runs` 子包。
@@ -213,7 +213,7 @@
 
 ### Go 正确性（NEEDS-DESIGN）
 
-- [ ] **R240-GO-1 — `internal/cron/scheduler.go:1233-1241` deleteJobLocked 持 s.mu 期间调 router.Reset 锁序倒置风险 [BREAKING-LOCAL]（P1）**：router.Reset 内回调可能尝试 s.mu 写锁递归即死锁；EnsureStub godoc 已明确 must-not-hold-s.mu 与本函数自相矛盾。方案：deleteJobLocked 只做内存清理，router.Reset 移到调用方释放 s.mu 后调用。Breaking：本地（deleteJobLocked + 两 caller）。
+- [~] **R240-GO-1 — `internal/cron/scheduler.go:1233-1241` deleteJobLocked 持 s.mu 期间调 router.Reset 锁序倒置风险 [BREAKING-LOCAL]（P1）**：router.Reset 内回调可能尝试 s.mu 写锁递归即死锁；EnsureStub godoc 已明确 must-not-hold-s.mu 与本函数自相矛盾。方案：deleteJobLocked 只做内存清理，router.Reset 移到调用方释放 s.mu 后调用。Breaking：本地（deleteJobLocked + 两 caller）。
 - [ ] **R240-GO-2 — `internal/cron/scheduler.go:2069-2071` deadlineInterrupter.InterruptViaControl 返回 InterruptOutcome 与 processIface 同名方法返回 error 不一致 [REPEAT-N，与 R239-GO-2 同根因]**：跨 cli/session/cron 三包签名分裂；测试 stub 须各维护一套。方案：统一签名。Breaking：跨三包。
 - [ ] **R240-GO-3 — `internal/cron/scheduler.go:1413-1494` UpdateJob 多 return 路径显式 Unlock 无 defer [REPEAT-N，与 R239-GO-4 同根因]**：当前 4 处 Unlock 正确，未来加 early-return 易遗漏。方案：defer s.mu.Unlock() + persistJobsLocked 移 lock-外。Breaking：否。
 - [ ] **R240-GO-4 — `internal/cron/runstore.go:268-309` skipAppendTrim appendsSinceTrim 增量在条件检查之前 [REFACTOR]（P2）**：batch counter 与 count-cap/window-cutoff 分支顺序混乱时计数失真。方案：++ 移到所有短路 return 之后；reset 统一在末尾。Breaking：否。
@@ -222,7 +222,7 @@
 
 ### 性能（NEEDS-DESIGN）
 
-- [ ] **R240-PERF-1 — `internal/cron/runinflight.go:85-91` runInflight.reset 触发 6 次 atomic.Pointer.Store 堆分配 [REFACTOR]（P1）**：1Hz × N jobs 每次 run 终态 5 个 strHeap("")/timeHeap(zero) 分配纯噪声。方案：reset 改 Store(nil) + snapshot 把 nil 解读为零值；或省略部分字段清零（running=false 已阻 snapshot）。Breaking：否。
+- [~] **R240-PERF-1 — `internal/cron/runinflight.go:85-91` runInflight.reset 触发 6 次 atomic.Pointer.Store 堆分配 [REFACTOR]（P1）**：1Hz × N jobs 每次 run 终态 5 个 strHeap("")/timeHeap(zero) 分配纯噪声。方案：reset 改 Store(nil) + snapshot 把 nil 解读为零值；或省略部分字段清零（running=false 已阻 snapshot）。Breaking：否。
 - [ ] **R240-PERF-2 — `internal/cron/scheduler.go:2225` slog.With(...) 每 executeOpt 入口 alloc 新 *slog.Logger [REPEAT-N，与 R238-PERF-2 同根因]**：1Hz × 50 jobs = 50/s logger alloc。方案：先判 effective level 或改 slog.Info 展平调用。Breaking：否。
 - [ ] **R240-PERF-3 — `internal/cron/runstore.go:321-344` cacheHeadPush O(N) shift [REPEAT-N，与 R233-PERF-2 / R239-PERF-3 同根因]**：keepCount=200 ring buffer 方向已多轮登记。
 - [ ] **R240-PERF-4 — `internal/cron/scheduler.go:508-515` KnownSessionIDs 每 job O(200) cache 拷贝 [REPEAT-N，与 R233-PERF-3 / R239-PERF-4 同根因]**：方案：runStore 暴露 AllKnownSessionIDs 聚合接口或维护 sessionIDSet 无拷贝 lookup。Breaking：否。
@@ -359,7 +359,7 @@
 ### 架构（剩余 — 大量与历史 ARCH-* 同根因，多数已被同日 R238-ARCH-1/2/3/4 / R237-ARCH 系列覆盖）
 
 - [ ] **R239-ARCH-A — `internal/cli/wrapper.go:43` ShimManager 是公开可变 *shim.Manager 把 protocol+transport 压成同一抽象（P1）[REFACTOR]**：同 R235-ARCH-4 / R237-ARCH-1。方向：抽 cli.Transport 接口，shim 是其一实现；cli 不再 import internal/shim。
-- [ ] **R239-ARCH-B — `internal/session/router_core.go:29-31` blank-import 三 backend 包触发 init() 注入（P1）[REPEAT-3]**：session 包从此非 backend-agnostic。方向：抽 internal/wireup 由 cmd/naozhi 显式注册。
+- [~] **R239-ARCH-B — `internal/session/router_core.go:29-31` blank-import 三 backend 包触发 init() 注入（P1）[REPEAT-3]**：session 包从此非 backend-agnostic。方向：抽 internal/wireup 由 cmd/naozhi 显式注册。
 - [ ] **R239-ARCH-C — `internal/session/managed.go:47` processIface 27 方法 god-interface（P1）[REFACTOR]**：同 R215-ARCH-P1-3 / R219-ARCH-7 / R224-ARCH-5 / R237-ARCH-3。方向：拆 ProcessSender / ProcessLifecycle / EventSource。
 - [ ] **R239-ARCH-D — `internal/session/managed.go:1731-1733` ManagedSession 内回调 backend.RegisterDefaults() 触发全局注册（P1）[REFACTOR]**：业务对象懒触发全局注册，违反 main 显式 wire。方向：构造路径要求 caller 已注册。
 - [ ] **R239-ARCH-E — Claude env 白/黑名单常量散落 main.go + internal/shim/manager.go:925 + internal/sysession/run.go EnvAllowlist 三份不同政策（P1）[REFACTOR]**：方向：内聚 internal/envpolicy 包。

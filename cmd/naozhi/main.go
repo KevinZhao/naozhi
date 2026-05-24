@@ -37,6 +37,13 @@ import (
 	"github.com/naozhi/naozhi/internal/sysession"
 	"github.com/naozhi/naozhi/internal/transcribe"
 	"github.com/naozhi/naozhi/internal/upstream"
+
+	// R239-ARCH-B: side-effect import for history-source factory
+	// registration. Replaces the blank-imports that previously lived
+	// inside internal/session/router_core.go; importing wireup here
+	// keeps internal/session backend-agnostic and centralizes the
+	// per-backend init() trigger list in one explicit place.
+	_ "github.com/naozhi/naozhi/internal/wireup"
 )
 
 var version = "dev"
