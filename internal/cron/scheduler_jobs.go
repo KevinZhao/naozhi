@@ -915,6 +915,6 @@ func (s *Scheduler) findByPrefix(idPrefix, plat, chatID string) (*Job, error) {
 		for i, m := range matches {
 			ids[i] = m.ID
 		}
-		return nil, fmt.Errorf("ambiguous prefix %q, matches: %s", idPrefix, strings.Join(ids, ", "))
+		return nil, fmt.Errorf("%w: prefix %q matches %s", ErrAmbiguousPrefix, idPrefix, strings.Join(ids, ", "))
 	}
 }
