@@ -1,3 +1,45 @@
+// Package session — eventlog_bridge.go
+//
+// NEEDS-DESIGN (R243-ARCH-12, REPEAT-5): three eventlog tiers shadow
+// each other today.
+//
+//   - cli.EventLog.ring — in-memory bounded ring shared with the WS
+//     subscriber tier. Pure RAM, lossy on process exit.
+//   - persist.Persister.spool — per-key durable spool that lands on
+//     disk via this bridge's PersistSink. Authoritative on restart.
+//   - naozhilog.Source.replay — read-side replay that re-hydrates the
+//     ring from the spool when sessions reattach (history panel,
+//     dashboard rewind).
+//
+// Each tier owns its own append/read/subscribe primitives; the four
+// concrete backends (memory ring, persist spool, naozhilog source,
+// scratch event store) each expose a slightly different API even
+// though their conceptual contract is identical: "append, read by
+// range, subscribe to tail."
+//
+// The unification plan tracked under R243-ARCH-12 is to publish a
+// single `EventStore` interface in (likely) internal/eventlog/api/:
+//
+//	type EventStore interface {
+//	    Append(ctx, []EventEntry) error
+//	    Read(ctx, ReadRange) ([]EventEntry, error)
+//	    Subscribe(ctx, SubFilter) (<-chan EventEntry, error)
+//	}
+//
+// plus a central registry that the four backends register with. This
+// bridge stays in place — its job is exactly the EventEntry⇄persist
+// .Entry hop — but the cli/persist/naozhilog import edges collapse to
+// "everyone implements EventStore" and the session layer can swap the
+// backend (e.g. for a tests-only no-disk mode) without re-plumbing
+// the spawnSession site. The migration is staged because each tier
+// has accumulated its own performance hot path (see R215-PERF-P1-1
+// pooling below, R228-PERF-1 single-entry fast path, R240-PERF-4
+// escape analysis); a naive interface-everywhere refactor would
+// regress those without an evals pass.
+//
+// Until the api/ subpackage lands, the bridge contract here is the
+// only place EventEntry → persist.Entry conversion lives. Adding new
+// backends should follow the registry path, not bolt on alongside.
 package session
 
 import (
