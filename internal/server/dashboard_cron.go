@@ -955,6 +955,15 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 // the next N run times. count defaults to 1 and is clamped to [1, 10] so the
 // UI can show a multi-run preview without giving callers an unbounded knob.
 func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
+	// [R247-SEC-3] Per-IP rate limit. Although preview is read-only and
+	// cheaper than trigger, it is not a heartbeat endpoint — each call
+	// runs the cron parser plus N=1..10 next-run computations, so an
+	// unbounded loop from a stolen token still burns CPU. Share the cron
+	// write/control bucket to keep the per-IP control surface uniform.
+	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
+		return
+	}
 	schedule := r.URL.Query().Get("schedule")
 	if schedule == "" {
 		http.Error(w, "schedule is required", http.StatusBadRequest)
