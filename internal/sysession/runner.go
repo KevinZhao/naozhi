@@ -115,8 +115,31 @@ const runnerStderrCapBytes = 4096
 // the cap (see limitedWriter godoc).
 const runnerStdoutCapBytes = 64 * 1024
 
+// runnerImplBaseArgs is the fixed argv prefix for every "claude -p"
+// invocation issued by sysession daemons (AutoTitler etc.).
+//
+// Closes R236-QA-17. These flags MUST stay in sync with the host
+// session protocol contract that internal/cli/wrapper.go assumes:
+//
+//   - "-p"                  one-shot prompt mode (no stream-json).
+//   - "--output-format text" parsed by Run() as a plain UTF-8 string;
+//     switching to json/stream-json silently breaks every daemon.
+//   - "--setting-sources \"\"" disables host hooks so naozhi's own
+//     learning hooks do not re-enter on the daemon's CLI invocation
+//     (would dead-loop the AutoTitler with the host's own hooks —
+//     see Runner godoc and DESIGN.md §6.5).
+//
+// Any change here is a contract change for sysession + auto_titler.
+// Verify against internal/cli/wrapper.go's spawn argv before editing.
+var runnerImplBaseArgs = []string{"-p", "--output-format", "text", "--setting-sources", ""}
+
 func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
-	args := []string{"-p", "--output-format", "text", "--setting-sources", ""}
+	// Copy the package-level prefix so per-call --model append cannot
+	// race with another concurrent Run mutating the shared backing
+	// array. Cap the slice exactly at len(runnerImplBaseArgs) so the
+	// first append always allocates fresh storage (defence-in-depth
+	// against a future len/cap drift).
+	args := append([]string(nil), runnerImplBaseArgs...)
 	if r.cfg.Model != "" {
 		args = append(args, "--model", r.cfg.Model)
 	}
