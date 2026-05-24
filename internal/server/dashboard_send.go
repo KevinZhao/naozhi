@@ -144,7 +144,21 @@ func uploadOwner(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, tru
 		}
 		slog.Warn("uploadOwner: mintAnonCookie failed, falling back to client IP", "err", err)
 	}
-	return clientIP(r, trustedProxy)
+	// R246-SEC-8: route the IP fallback through ownerKeyFromCookie so the
+	// resulting key is the same SHA-256 hex shape the auth-cookie / Bearer /
+	// nz_anon paths produce. Previously a mintAnonCookie failure (crypto/rand
+	// exhausted) emitted a raw IPv4/IPv6 string that polluted ownerCounts
+	// alongside SHA-256 hex keys, breaking per-owner accounting and TakeAll
+	// scoping for the unlucky few requests that hit the fallback. Hashing also
+	// keeps raw IP literals out of the in-memory key set.
+	ip := clientIP(r, trustedProxy)
+	if ip == "" {
+		// Empty owner keys collide across all unauthenticated callers; mirror
+		// ip_limiter's _unknown_ sentinel so we still produce a stable
+		// (hashed) bucket rather than the empty string.
+		ip = "_unknown_"
+	}
+	return ownerKeyFromCookie(ip)
 }
 
 // parseAttachmentFile reads and validates a single multipart file. Images
