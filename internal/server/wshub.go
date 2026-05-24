@@ -11,12 +11,12 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
 
 // Pre-encoded WS frames for messages whose body never varies. SendJSON would
@@ -172,7 +172,7 @@ type Hub struct {
 	// check. Shutdown tears it down alongside other background loops.
 	tailers *tailerRegistry
 
-	// wiredLinkersMu + wiredLinkers track the *cli.SubagentLinker pointers
+	// wiredLinkersMu + wiredLinkers track the AgentLinker instances
 	// we've already attached the server-side OnResolve+task_done callbacks
 	// to, so repeat completeSubscribe calls (re-subscribe on reconnect)
 	// don't register duplicate callbacks. Kept per-Hub so tests that build
@@ -180,20 +180,17 @@ type Hub struct {
 	// Linker pointers can be GC'd (previously they were leaked in a
 	// package-level map for the process lifetime). R201-CRIT-2.
 	//
-	// R230-CQ-1 / R231-ARCH-6 / R233B-ARCH-3: the map key is a concrete
-	// *cli.SubagentLinker pointer — server should arguably consume an
-	// `AgentLinker` interface from session/agentlink instead, both to
-	// keep server's coupling to internal/cli minimal and to allow
-	// future ACP / Gemini backends without a cli.SubagentLinker
-	// concept to plug a noop implementation here. Tracked under
-	// R231-ARCH-6 (Breaking — touches every dashboard agent-team UI
-	// caller); the pointer-keyed map is acceptable today because (a)
-	// the cli package is the only producer, (b) Linker objects are
-	// allocated 1:1 with cli.Process and have process lifetime, so
-	// pointer identity is a stable dedup key, and (c) Shutdown drops
-	// the map so the legacy package-level-leak was the actual hazard.
+	// R239-ARCH-I (was R230-CQ-1 / R231-ARCH-6 / R233B-ARCH-3): the map
+	// key is the agentlink.AgentLinker interface — server's coupling to
+	// internal/cli is now mediated through the interface so future ACP /
+	// Gemini backends without a *cli.SubagentLinker concept can plug a
+	// noop implementation here. Interface map keys dedup on (dynamic
+	// type, pointer value); the *cli.SubagentLinker producer keeps a 1:1
+	// pointer identity per cli.Process, so the dedup semantics are
+	// equivalent to the prior pointer-keyed map. Shutdown still drops the
+	// map so the legacy package-level-leak hazard does not return.
 	wiredLinkersMu sync.Mutex
-	wiredLinkers   map[*cli.SubagentLinker]struct{}
+	wiredLinkers   map[agentlink.AgentLinker]struct{}
 }
 
 // HubOptions holds configuration for a Hub.
@@ -280,7 +277,7 @@ func NewHub(opts HubOptions) *Hub {
 		h.dashTokenHash = sha256.Sum256([]byte(opts.DashToken))
 	}
 	h.tailers = newTailerRegistry(h)
-	h.wiredLinkers = make(map[*cli.SubagentLinker]struct{})
+	h.wiredLinkers = make(map[agentlink.AgentLinker]struct{})
 	// R219-CR-11 / R229-CR-4: a nil queue makes every WS send fall through to
 	// sessionSendLegacy (the deprecated guard path). Test harnesses and
 	// headless tools deliberately wire a nil Queue, but a production Hub
@@ -483,7 +480,7 @@ func (h *Hub) Shutdown() {
 	if h.tailers != nil {
 		h.tailers.Shutdown()
 	}
-	// Release wiredLinkers so *SubagentLinker pointers can be GC'd —
+	// Release wiredLinkers so the underlying linker objects can be GC'd —
 	// previously this was a process-lifetime package-level leak.
 	h.wiredLinkersMu.Lock()
 	h.wiredLinkers = nil

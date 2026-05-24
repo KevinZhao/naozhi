@@ -5,6 +5,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
 
 // enrichSnapshot overlays tailer-local aggregator metrics onto each
@@ -51,16 +52,31 @@ func (h *Hub) enrichSnapshot(snap *session.SessionSnapshot) {
 }
 
 // maybeWireLinkerTailer installs the server-side OnResolve handler onto
-// sess's linker exactly once per (*SubagentLinker), and registers a
-// task_done hook on the event log so tailers close promptly when the
-// parent stream signals completion. The handler kicks off a silent
-// agentTailer on successful resolution so parallel-stream events start
-// buffering immediately, even before any client subscribes.
+// sess's linker exactly once per AgentLinker, and registers a task_done
+// hook on the event log so tailers close promptly when the parent stream
+// signals completion. The handler kicks off a silent agentTailer on
+// successful resolution so parallel-stream events start buffering
+// immediately, even before any client subscribes.
+//
+// The linker is consumed via the agentlink.AgentLinker interface (R239-
+// ARCH-I) so server stays decoupled from the *cli.SubagentLinker concrete
+// type. *cli.SubagentLinker satisfies the interface implicitly; future
+// ACP / Gemini backends that lack a subagent-linking concept can plug a
+// noop AgentLinker without server-side branching.
 func (h *Hub) maybeWireLinkerTailer(key string, sess *session.ManagedSession) {
-	linker := sess.SubagentLinker()
-	if linker == nil || h.tailers == nil {
+	// Capture the concrete return for the nil check first — a typed nil
+	// *cli.SubagentLinker promoted to an interface value is non-nil at
+	// the interface layer, so we must guard against `nil` while still in
+	// the concrete return type to match the pre-R239-ARCH-I behaviour.
+	concrete := sess.SubagentLinker()
+	if concrete == nil || h.tailers == nil {
 		return
 	}
+	// Promote to interface for storage and downstream calls. Map dedup
+	// runs against (dynamic type, pointer value); behaviour is equivalent
+	// to the prior pointer-keyed map for the cli backend but admits other
+	// AgentLinker implementations without churn.
+	var linker agentlink.AgentLinker = concrete
 	h.wiredLinkersMu.Lock()
 	if h.wiredLinkers == nil {
 		// Hub shutting down — skip.

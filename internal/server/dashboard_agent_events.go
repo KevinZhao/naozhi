@@ -12,6 +12,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
 
 // Agent-team dashboard endpoints (RFC v4 agent-team-ui §3.5).
@@ -60,16 +61,21 @@ const (
 // *cli.Process type assertion. Tests can return a hand-rolled
 // *cli.SubagentLinker seeded via SeedFromHistory and skip the process layer
 // entirely.
+//
+// The injection point is typed as agentlink.AgentLinker (R239-ARCH-I) so
+// future backends without a *cli.SubagentLinker can supply a noop without
+// inventing a fake concrete pointer. *cli.SubagentLinker satisfies the
+// interface implicitly; existing tests pass it directly.
 type AgentEventsHandlers struct {
 	router     *session.Router
 	nodeAccess NodeAccessor
-	linkerFor  func(key string) *cli.SubagentLinker
+	linkerFor  func(key string) agentlink.AgentLinker
 }
 
 // linkerForSession is the default lookup — ManagedSession → *cli.Process
 // → SubagentLinker. Returns nil when the session is missing, dead, or
 // backed by a non-claude process type.
-func (h *AgentEventsHandlers) linkerForSession(key string) *cli.SubagentLinker {
+func (h *AgentEventsHandlers) linkerForSession(key string) agentlink.AgentLinker {
 	if h.linkerFor != nil {
 		return h.linkerFor(key)
 	}
@@ -77,7 +83,15 @@ func (h *AgentEventsHandlers) linkerForSession(key string) *cli.SubagentLinker {
 	if sess == nil {
 		return nil
 	}
-	return sess.SubagentLinker()
+	// Promote the concrete *cli.SubagentLinker to the AgentLinker
+	// interface. A typed-nil concrete return becomes a non-nil interface
+	// value, so guard the underlying pointer first to keep the existing
+	// "no live linker → 404" contract intact.
+	concrete := sess.SubagentLinker()
+	if concrete == nil {
+		return nil
+	}
+	return concrete
 }
 
 func (h *AgentEventsHandlers) handleAgentEvents(w http.ResponseWriter, r *http.Request) {

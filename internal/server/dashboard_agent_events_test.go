@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
 
 // These tests exercise the four response shapes RFC v4 §3.5.1 specifies:
@@ -82,7 +83,7 @@ func TestAgentEvents_Happy(t *testing.T) {
 	}})
 
 	h := &AgentEventsHandlers{
-		linkerFor: func(k string) *cli.SubagentLinker {
+		linkerFor: func(k string) agentlink.AgentLinker {
 			if k != testAgentEventsKey {
 				return nil
 			}
@@ -108,7 +109,7 @@ func TestAgentEvents_Pending_WhenLinkerUnaware(t *testing.T) {
 	t.Parallel()
 	linker := cli.NewSubagentLinker()
 	h := &AgentEventsHandlers{
-		linkerFor: func(k string) *cli.SubagentLinker { return linker },
+		linkerFor: func(k string) agentlink.AgentLinker { return linker },
 	}
 	w := httptest.NewRecorder()
 	h.handleAgentEvents(w, agentEventsReq(testAgentEventsKey, "tunknown", "", ""))
@@ -138,7 +139,7 @@ func TestAgentEvents_Tombstone_404(t *testing.T) {
 	}
 
 	h := &AgentEventsHandlers{
-		linkerFor: func(k string) *cli.SubagentLinker { return linker },
+		linkerFor: func(k string) agentlink.AgentLinker { return linker },
 	}
 	w := httptest.NewRecorder()
 	h.handleAgentEvents(w, agentEventsReq(testAgentEventsKey, "tmissing", "", ""))
@@ -150,7 +151,7 @@ func TestAgentEvents_Tombstone_404(t *testing.T) {
 func TestAgentEvents_InvalidKey_400(t *testing.T) {
 	t.Parallel()
 	h := &AgentEventsHandlers{
-		linkerFor: func(k string) *cli.SubagentLinker { return cli.NewSubagentLinker() },
+		linkerFor: func(k string) agentlink.AgentLinker { return cli.NewSubagentLinker() },
 	}
 	w := httptest.NewRecorder()
 	h.handleAgentEvents(w, agentEventsReq("", "t1", "", ""))
@@ -162,7 +163,7 @@ func TestAgentEvents_InvalidKey_400(t *testing.T) {
 func TestAgentEvents_InvalidTaskID_400(t *testing.T) {
 	t.Parallel()
 	h := &AgentEventsHandlers{
-		linkerFor: func(k string) *cli.SubagentLinker { return cli.NewSubagentLinker() },
+		linkerFor: func(k string) agentlink.AgentLinker { return cli.NewSubagentLinker() },
 	}
 	w := httptest.NewRecorder()
 	h.handleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t/../escape", "", ""))
@@ -188,7 +189,7 @@ func TestAgentEvents_AfterFilter(t *testing.T) {
 	}})
 
 	h := &AgentEventsHandlers{
-		linkerFor: func(k string) *cli.SubagentLinker { return linker },
+		linkerFor: func(k string) agentlink.AgentLinker { return linker },
 	}
 	// after=2026-05-10T10:00:03Z → only line2 should remain. Parse as ms.
 	// 2026-05-10T10:00:03Z = 1778407203000
@@ -222,7 +223,7 @@ func TestToolResult_Happy(t *testing.T) {
 	linker.SetContext(filepath.Dir(projectSession), filepath.Base(projectSession))
 
 	h := &AgentEventsHandlers{
-		linkerFor: func(k string) *cli.SubagentLinker { return linker },
+		linkerFor: func(k string) agentlink.AgentLinker { return linker },
 	}
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/sessions/tool_result?key="+testAgentEventsKey+"&path=tool-results/abc12.txt", nil)
@@ -240,7 +241,7 @@ func TestToolResult_Happy(t *testing.T) {
 func TestToolResult_PathTraversal_400(t *testing.T) {
 	t.Parallel()
 	h := &AgentEventsHandlers{
-		linkerFor: func(k string) *cli.SubagentLinker { return cli.NewSubagentLinker() },
+		linkerFor: func(k string) agentlink.AgentLinker { return cli.NewSubagentLinker() },
 	}
 	for _, p := range []string{
 		"../../etc/passwd",
@@ -266,7 +267,7 @@ func TestToolResult_PathTraversal_400(t *testing.T) {
 func TestToolResult_NoLinker_404(t *testing.T) {
 	t.Parallel()
 	h := &AgentEventsHandlers{
-		linkerFor: func(k string) *cli.SubagentLinker { return nil },
+		linkerFor: func(k string) agentlink.AgentLinker { return nil },
 	}
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/sessions/tool_result?key="+testAgentEventsKey+"&path=tool-results/abc12.txt", nil)
@@ -297,7 +298,7 @@ func TestToolResult_Oversize_413(t *testing.T) {
 	linker := cli.NewSubagentLinker()
 	linker.SetContext(filepath.Dir(projectSession), filepath.Base(projectSession))
 	h := &AgentEventsHandlers{
-		linkerFor: func(k string) *cli.SubagentLinker { return linker },
+		linkerFor: func(k string) agentlink.AgentLinker { return linker },
 	}
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/sessions/tool_result?key="+testAgentEventsKey+"&path=tool-results/big.txt", nil)
