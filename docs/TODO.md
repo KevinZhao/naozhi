@@ -667,7 +667,8 @@
 - [ ] **R242-ARCH-21 [REFACTOR]** `cmd/naozhi/main.go:919-937` 关闭顺序 sysMgr → scheduler → router 仅注释；抽 `lifecycle.Coordinator` 显式依赖图。
 - [ ] **R242-ARCH-22 [REFACTOR]** `internal/cron/scheduler.go:2270-2276` emitRunStarted 在 GetOrCreate 之前发，SessionID="" 让 KnownSessionIDs 漏；推迟到 setSessionID 后。
 - [ ] **R242-ARCH-23 [REFACTOR]** `internal/cron/scheduler.go:450` cron.IsExcluded 每次新建 jobs×200 map 在 spawn 路径；暴露 `LookupKnownSessionID(id) bool` 直查 set。
-- [ ] **R242-ARCH-24 [REFACTOR]** `internal/sysession/router.go:25-61` `EventEntriesForKey` 返回 `[]cli.EventEntry` 强依赖 cli pkg；定义本地 SystemEventEntry 镜像。
+- [~] **R242-ARCH-24 [REFACTOR]** `internal/sysession/router.go:25-61` `EventEntriesForKey` 返回 `[]cli.EventEntry` 强依赖 cli pkg；定义本地 SystemEventEntry 镜像。 — godoc NEEDS-DESIGN 锚点已就位（router.go:61-71）：方向定义，但 deferred to R243-ARCH-12 (EventStore interface unification) 落地后再做，避免 mirror 类型短期内重写两次让 AutoTitler 测试 churn。
+- [x] **R242-ARCH-25 [REFACTOR]** `internal/session/router_lifecycle.go:135-199` ResetChat shutdownCond.Broadcast 一处持锁一处释锁分裂；统一持锁广播。已加 godoc 锁定 not-mergeable：Close()必须在锁外（防 shim teardown pin Router），但 Broadcast 必须在 Close 之后（否则 IsRunning 谓词未翻转 → missed wakeup）。两段持锁是必需而非疏漏，与 evictOldest 同型。
 - [ ] **R242-ARCH-26 [REFACTOR]** `internal/cron/scheduler.go:78-89` `RegisterCronStubWithChain chainIDs []string` 调用方一律传单元素；接口收敛或重命名。
 - [ ] **R242-ARCH-27 [REFACTOR]** `internal/cli/process_turn.go:36` interruptedSettleWindow 500ms 与 runDeadlineWatchdog 并发未协同；化为 process 级配置 + watchdog settle 完成再清 inflight。
 - [ ] **R242-ARCH-28 [REFACTOR]** `internal/server/wshub.go:108-111` `cronHubOps.EnsureStub func(string) bool` false 三义；改 `(ok bool, reason string)`。
