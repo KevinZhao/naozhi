@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -111,18 +110,18 @@ type transcriptTokens struct {
 // the *response*, not the original JSONL line — the dashboard uses it
 // for stable React-style keys when diffing live updates.
 type transcriptTurn struct {
-	Index      int    `json:"index"`
-	Kind       string `json:"kind"` // "user" | "assistant" | "tool_use" | "tool_result" | "error"
-	TS         int64  `json:"ts,omitempty"`
-	Text       string `json:"text,omitempty"`        // user / assistant / error
-	Tokens     int    `json:"tokens,omitempty"`      // assistant only (output token delta)
-	Tool       string `json:"tool,omitempty"`        // tool_use
-	ToolUseID  string `json:"tool_use_id,omitempty"` // tool_use / tool_result link
-	Summary    string `json:"summary,omitempty"`     // tool_use one-liner derived from input
-	Input      any    `json:"input,omitempty"`       // tool_use raw input (object)
-	Output     string `json:"output,omitempty"`      // tool_result content
-	Status     string `json:"status,omitempty"`      // tool_result: "ok" | "error"
-	DurationMS int64  `json:"duration_ms,omitempty"` // tool_result duration if available
+	Index      int             `json:"index"`
+	Kind       string          `json:"kind"` // "user" | "assistant" | "tool_use" | "tool_result" | "error"
+	TS         int64           `json:"ts,omitempty"`
+	Text       string          `json:"text,omitempty"`        // user / assistant / error
+	Tokens     int             `json:"tokens,omitempty"`      // assistant only (output token delta)
+	Tool       string          `json:"tool,omitempty"`        // tool_use
+	ToolUseID  string          `json:"tool_use_id,omitempty"` // tool_use / tool_result link
+	Summary    string          `json:"summary,omitempty"`     // tool_use one-liner derived from input
+	Input      json.RawMessage `json:"input,omitempty"`       // tool_use raw input (object)
+	Output     string          `json:"output,omitempty"`      // tool_result content
+	Status     string          `json:"status,omitempty"`      // tool_result: "ok" | "error"
+	DurationMS int64           `json:"duration_ms,omitempty"` // tool_result duration if available
 }
 
 // claudeJSONLEvent is the partial schema we care about. Fields we don't
@@ -429,7 +428,10 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 
 	// LimitReader hit means we read maxTranscriptBytes worth without
 	// seeing EOF. Mark truncated too.
-	if pos, _ := f.Seek(0, io.SeekCurrent); pos >= maxTranscriptBytes {
+	if pos, sErr := f.Seek(0, io.SeekCurrent); sErr != nil {
+		slog.Warn("cron transcript: seek failed; assuming truncated", "path", resolved, "err", sErr)
+		truncated = true
+	} else if pos >= maxTranscriptBytes {
 		truncated = true
 	}
 
@@ -569,7 +571,7 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 					Tool:      b.Name,
 					ToolUseID: b.ID,
 					Summary:   summary,
-					Input:     json.RawMessage(b.Input),
+					Input:     b.Input,
 				})
 				parsed = true
 			}
@@ -596,7 +598,13 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 			Subtype string `json:"subtype"`
 			Message string `json:"message"`
 		}
-		_ = json.Unmarshal(ev.Message, &sys)
+		if err := json.Unmarshal(ev.Message, &sys); err != nil {
+			// Don't change downgrade behavior — sys stays zero-valued
+			// so the error-turn branch below is skipped naturally. Just
+			// surface the parse failure for ops visibility.
+			slog.Debug("cron transcript: system event unmarshal failed; skipping",
+				"err", err)
+		}
 		if sys.Subtype == "error" && sys.Message != "" {
 			out = append(out, transcriptTurn{
 				Index: nextIdx,
@@ -719,6 +727,3 @@ func truncateRunes(s string, maxBytes int) string {
 	}
 	return s[:cut] + ellipsis
 }
-
-// _ keeps strconv imported for future tweaks (line index in errors).
-var _ = strconv.Itoa
