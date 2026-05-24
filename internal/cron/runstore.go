@@ -685,7 +685,13 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	// equal-mtime record to drop, leaving a window where a record visible
 	// in the list could be removed by trim. R235-GO-7.
 	slices.SortFunc(items, func(a, b item) int {
-		if c := cmp.Compare(b.mtime.UnixNano(), a.mtime.UnixNano()); c != 0 {
+		// R236-QA-01: use time.Time.Compare to mirror diskListNewestFirst
+		// exactly. UnixNano() can disagree with Time.Compare across wall
+		// clock jumps / monotonic-clock resets (e.g. ntp step) and would
+		// break the trim-cutoff / list-cutoff equality invariant noted
+		// above, leaving a record visible in the list that trim deletes
+		// (or vice versa). Time.Compare is the canonical total order.
+		if c := b.mtime.Compare(a.mtime); c != 0 {
 			return c
 		}
 		return cmp.Compare(b.runID, a.runID)

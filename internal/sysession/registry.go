@@ -2,28 +2,27 @@ package sysession
 
 import (
 	"fmt"
-	"regexp"
 )
 
-// daemonNameRE locks the kebab-case naming convention RFC §3.2:
+// validateDaemonName enforces the kebab-case naming convention RFC §3.2:
 //
 //	^[a-z][a-z0-9-]{1,30}$
 //
-// Lower-case ASCII only, leading letter, length 2..32.  No dots so we
-// can grow nested namespaces (sys:foo.bar) later without retroactively
-// allowing them today.  No leading digit so a future numeric daemon
-// version (auto-titler-2) doesn't collide with a "2-something" name.
-var daemonNameRE = regexp.MustCompile(`^[a-z][a-z0-9-]{1,30}$`)
-
-// validateDaemonName returns an error when name violates the kebab-case
-// naming rule.  Called from NewManager at startup; a single bad name
-// halts process start (panic) rather than producing a half-functional
-// Manager — this is exactly the kind of misconfiguration that should be
-// a build-blocker, not a runtime degradation.
+// Lower-case ASCII only, leading letter, total length 2..31 (1 leading
+// + 1..30 trailing chars). R236-PERF-3: hand-written check avoids a
+// regexp.MustCompile at package init for the cold-path NewManager call.
 func validateDaemonName(name string) error {
-	if !daemonNameRE.MatchString(name) {
-		return fmt.Errorf("sysession: daemon name %q must match %s",
-			name, daemonNameRE.String())
+	if len(name) < 2 || len(name) > 31 {
+		return fmt.Errorf("sysession: daemon name %q must be 2..31 chars (kebab-case)", name)
+	}
+	if c := name[0]; c < 'a' || c > 'z' {
+		return fmt.Errorf("sysession: daemon name %q must start with a lowercase letter", name)
+	}
+	for i := 1; i < len(name); i++ {
+		c := name[i]
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+			return fmt.Errorf("sysession: daemon name %q must match [a-z][a-z0-9-]{1,30}", name)
+		}
 	}
 	return nil
 }
