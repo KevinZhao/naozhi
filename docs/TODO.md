@@ -194,7 +194,7 @@
 - [ ] **R243-SEC-6 [REFACTOR]** `internal/server/dashboard_cron_transcript.go:525-527` ANSI strip 仅覆盖 CSI（`\x1b[`），OSC 序列（`\x1b]8;;url\x1b\\` hyperlink）未覆盖；当前 `<pre>+esc()` 兜底但需 defence-in-depth。
 - [ ] **R243-SEC-7 [REPEAT-10]** `internal/server/dashboard_cron.go:570-579` `notify_default.ChatID` 在 list response 中暴露给所有认证 dashboard 用户；多 operator 部署的 cross-tenant data leak。
 - [ ] **R243-SEC-8 [REPEAT-5]** `internal/cron/scheduler.go (SetJobPrompt path)` IM 路径调 `SetJobPrompt` 时未走 `validateCronPrompt`（仅 `prompt != ""`）；dashboard 路径有完整校验。
-- [~] **R243-SEC-9 [REPEAT-7]** `internal/cron/scheduler.go:628-654` `workDirUnderRoot` 当 `EvalSymlinks` + `allowedRootResolved` 缓存均失败时退化到 raw string prefix 比较；TOCTOU/symlink escape。
+- [x] **R243-SEC-9 [REPEAT-7]** `internal/cron/scheduler.go:628-654` `workDirUnderRoot` 当 `EvalSymlinks` + `allowedRootResolved` 缓存均失败时退化到 raw string prefix 比较；TOCTOU/symlink escape。 → 已 reject：`allowedRootResolved == ""` 直接 `return false`，不再 fall back 到 raw allowedRoot 字符串前缀比较；保留 cached resolution 作为唯一 fallback（cache 是真实 EvalSymlinks 输出而非用户字符串）。失败语义与现有 EvalSymlinks(workDir) 失败分支一致。
 - [ ] **R243-SEC-10 [REPEAT-8]** `internal/server/dashboard.go:107` `SetEscapeHTML(false)` 池化 encoder 无编译期约束，109 处 innerHTML 都得手工守。
 - [ ] **R243-SEC-11 [REFACTOR]** `internal/server/static/dashboard.js:8241-8244` 自动链接正则未剥 `>`/`]`/`"` 尾标点；`escAttr` 当前兜得住，仅信息性。
 - [ ] **R243-SEC-12 [REFACTOR]** `internal/server/dashboard_cron_transcript.go:46-74` 256 KB scanner buffer × 并发请求数；single-operator 可接受，多 operator 需 token bucket。

@@ -619,11 +619,29 @@ func workDirReachable(workDir string) bool {
 // workspace binding AND the separate window where allowedRoot itself (if a
 // symlink) could be retargeted after construction. Both arguments must be
 // absolute; relative workDir is rejected. allowedRootResolved, when
-// non-empty, is a best-effort prior resolution of allowedRoot that is used
-// as a fallback only if the per-call EvalSymlinks on allowedRoot itself
-// fails (e.g. the path was temporarily unmounted). This preserves the
-// security contract while still avoiding most of the syscall cost of a
-// cold re-resolution on the happy path.
+// non-empty, is a best-effort prior resolution of allowedRoot captured at
+// scheduler construction time and used as a fallback only when the
+// per-call EvalSymlinks on allowedRoot fails (e.g. the path was
+// temporarily unmounted). This preserves the security contract while
+// still avoiding most of the syscall cost of a cold re-resolution on the
+// happy path.
+//
+// R243-SEC-9 (REPEAT-7): when BOTH the per-call EvalSymlinks AND the
+// cached allowedRootResolved are unavailable, this function previously
+// fell back to a raw-string prefix comparison against the user-supplied
+// allowedRoot. That fallback re-introduced the TOCTOU/symlink-escape
+// window the rest of the function exists to close: an attacker who
+// could (a) make EvalSymlinks fail (e.g. by transiently unmounting a
+// component) AND (b) point allowedRoot at a directory that string-
+// prefix-matched a symlink-redirected resolved workDir would slip past
+// the gate. We now refuse to execute when both resolution sources are
+// unavailable rather than fall back. The cost is a transient
+// "scheduler refused to run job because allowedRoot resolution was
+// unavailable" — the operator-visible recovery is identical to the
+// existing "EvalSymlinks(workDir) failed" branch above. The cache is
+// populated once at NewScheduler so the only realistic way to hit
+// this reject path is during a system-level filesystem failure, where
+// refusing is the safer default.
 func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 	if workDir == "" || allowedRoot == "" {
 		return true // empty WorkDir uses router default; empty root = disabled
@@ -639,14 +657,16 @@ func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 	}
 	rootResolved, err := filepath.EvalSymlinks(allowedRoot)
 	if err != nil {
-		// Fall back to the cached resolution (captured at construction) or
-		// the raw path if no cache exists. Either way the fallback chain
-		// preserves the historical behaviour when EvalSymlinks fails.
-		if allowedRootResolved != "" {
-			rootResolved = allowedRootResolved
-		} else {
-			rootResolved = allowedRoot
+		// Cached resolution captured at construction time is still a
+		// genuine EvalSymlinks output (just stale w.r.t. live filesystem
+		// state), so it preserves the symlink-escape contract. Falling
+		// back to the raw user-supplied allowedRoot string would NOT,
+		// because string-prefix matching against an un-resolved path
+		// can match a sibling symlink target. R243-SEC-9.
+		if allowedRootResolved == "" {
+			return false
 		}
+		rootResolved = allowedRootResolved
 	}
 	if resolved == rootResolved {
 		return true
