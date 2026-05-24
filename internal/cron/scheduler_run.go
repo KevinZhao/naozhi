@@ -742,6 +742,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 //
 // 用 math/rand/v2（per-goroutine 安全且无全局锁），安全性不敏感：
 // 这里的随机只影响启动时刻分布，不是密码学用途。
+//
+// R246-GO-22: NewTimer/defer Stop 在每次 tick 都分配 *time.Timer，
+// 当前规模（~100 timer/min @ 100 jobs * 1Hz）成本可忽略，无需优化。
+// 未来若 job 数突破 ~5000/min（≈ 80 alloc/s）再考虑 sync.Pool[*time.Timer]
+// 或退化到 runtime.timeSleep 直接路径；提前优化只会让控制流更晦涩。
+// time.After(d) 同样会 alloc *Timer 但不能被 Stop()，ctx 取消时会泄漏到
+// 触发点为止，不适合此处。
 func applyJitter(ctx context.Context, schedule string, jitterMax time.Duration) {
 	if jitterMax <= 0 {
 		return
