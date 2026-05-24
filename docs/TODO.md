@@ -114,7 +114,7 @@
 - [~] **R240-PERF-4 — `session/eventlog_bridge.go:83-113` 单条 entry fast path 仍 alloc（P2）**：pooled encoder 已避免 json.Marshal alloc，但 `make([]byte, len(raw)) + copy` 每条 entry 仍分配；`[1]persist.Entry` stack 数组配合 append 是否真的避免逃逸需 `-gcflags=-m` 验证。建议引入 byte slice pool 减 GC 压力，或确认逃逸再决定是否值得复杂化。改动局限 eventlog_bridge.go 但需 PersistSink 契约层面理解（sink 是否 retain raw bytes）。`[BREAKING-LOCAL]`
 - [~] **R240-PERF-5 — `dispatch/status.go:79-122 formatToolUse` 重复 json.Unmarshal（P3）**：Read/Edit/Write 三个 case 各自声明同形 `filePathInput {FilePath string}` struct 重复解码三次。建议提前一次性 Unmarshal 到 filePathInput，case 内只做格式化。`[REFACTOR]` 可下轮直接修
 - [~] **R240-PERF-6 — `eventlog/persist/persister.go:967-998 selectForIdx` 单条 batch 走 stride 路径仍构造 kept slice（P3）**：`stride>1` 且 `len(pending)==1` 时仍走 estCap=2 + scratch reuse 路径，单条必然同时是 first 和 last，可直接 return pending。建议 `if len(pending) == 1 { return pending }` 早返回。`[REFACTOR]` 可下轮直接修
-- [~] **R240-PERF-7 — `session/eventlog_bridge.go:119-156` 多条 entry 路径 defer 开销（P3）**：每轮 5-20 条 entry 的热路径用 defer 决定是否 Put 回 pool，~10ns/call frame 开销。建议 return 前显式 `if eb.buf.Cap() <= bridgeEncMaxCap { bridgeEncPool.Put(eb) }`，去 defer。`[REFACTOR]` 可下轮直接修
+- [x] **R240-PERF-7 — `session/eventlog_bridge.go:119-156` 多条 entry 路径 defer 开销（P3）**：~~每轮 5-20 条 entry 的热路径用 defer 决定是否 Put 回 pool，~10ns/call frame 开销。建议 return 前显式 `if eb.buf.Cap() <= bridgeEncMaxCap { bridgeEncPool.Put(eb) }`，去 defer。~~ 已修复 2026-05-24（cron-fix-F4）：去 defer，循环结束后显式 Put-with-cap-guard；Encode err 路径仅 continue 不 return，无 panic-path defer 兜底需求。`[REFACTOR]`
 - [ ] **R240-PERF-8 — `dispatch/dispatch.go:331-336 BuildHandler` 每条 IM 消息 alloc 新 slog Logger（P3）**：`slog.With(platform, user, chat)` 在 `log/slog` 中分配 handler chain + attrs slice；高频群聊每条消息均付。建议 `lg` 移到 group chat dispatch gate 之后才构造，或缓存 per-platform logger 作为 ctx value。`[REFACTOR]` 可下轮直接修
 
 ### 安全 — 本批新发现
@@ -173,7 +173,7 @@
 - [ ] **R239-PERF-11 — `internal/cron/scheduler.go:936-955` Stop GC drain 用临时 channel + wrapper goroutine 等待 gcWG（P3）**：本轮 PR #299 GO-1 已把 timer 改 NewTimer 收紧；但 wrapper goroutine 与临时 channel 仍 alloc，可改 ctx 派生模式。方案：gcWG 改 ctx-aware 或维持现状（每次 Stop 仅 1 次，影响微小）。Breaking：否。
 - [ ] **R239-PERF-12 — `internal/cron/runstore.go:249-290` skipAppendTrim 在 entry.mu 下独立调 time.Now（P3）**：Append 路径已有 now，可统一传入。方案：skipAppendTrim 接 now 参数避免持锁路径重复 vDSO。Breaking：否。
 - [~] **R239-PERF-13 — `internal/cron/scheduler.go:1975-1995` freshContextPreflightP0 refresh 闭包每次 s.mu.RLock 重读同一 job（P3）**：snap 已含 workDir/prompt 固化值，可直接调 registerStubByValue。方案：refresh 不再读 s.jobs map。Breaking：否。
-- [~] **R239-PERF-14 — `internal/cli/eventlog.go:884` Append sink-attached 分支 `[]EventEntry{e}` 字面量逃逸 [REPEAT-N]**：同 R230C-PERF-2 / R236-PERF-04 主条目，因 PersistSink 接口签名未改而未关闭。本条仅确认现状。
+- [ ] **R239-PERF-14 — `internal/cli/eventlog.go:884` Append sink-attached 分支 `[]EventEntry{e}` 字面量逃逸 [REPEAT-N]**：同 R230C-PERF-2 / R236-PERF-04 主条目，因 PersistSink 接口签名未改而未关闭。本条仅确认现状。
 - [ ] **R239-PERF-15 — `internal/cron/scheduler.go:1864-1885` snapshotJob 内 jobTitleOrFallback → textutil.FirstLine + Truncate 在 RLock 下重复计算（P3）**：高频短周期 job 累积调用。方案：Job 加非持久化 labelCache 字段，AddJob/UpdateJob/SetJobPrompt 失效。Breaking：否。
 - [ ] **R239-PERF-16 — `internal/server/wshub.go:638-656` handleSubscribe 持 h.mu.Lock 线性扫 clients 计 per-key 订阅者数，阻塞同期 broadcast RLock [REPEAT-N]**：同 R236-PERF-06。方案：subscriberCounts map[string]int32 在 subscribe/unregister 路径 ±1。Breaking：否。
 

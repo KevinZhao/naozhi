@@ -116,11 +116,10 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 
 		out := make([]persist.Entry, 0, len(entries))
 		eb := bridgeEncPool.Get().(*bridgeEncBuf)
-		defer func() {
-			if eb.buf.Cap() <= bridgeEncMaxCap {
-				bridgeEncPool.Put(eb)
-			}
-		}()
+		// R240-PERF-7: explicit Put before each return path avoids the
+		// ~10ns/call defer frame setup cost on the multi-entry hot path
+		// (5-20 entries × N sessions × ≥5/s). The pool-cap guard is the
+		// same as the single-entry fast path above.
 		for _, e := range entries {
 			eb.buf.Reset()
 			if err := eb.enc.Encode(e); err != nil {
@@ -148,6 +147,9 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 			if !replayPhase && attachTracker != nil && keyhash != "" && len(e.ImagePaths) > 0 {
 				attachTracker.OnPersistedEntry(keyhash, e.ImagePaths, e.Time)
 			}
+		}
+		if eb.buf.Cap() <= bridgeEncMaxCap {
+			bridgeEncPool.Put(eb)
 		}
 		if len(out) == 0 {
 			return
