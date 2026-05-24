@@ -349,10 +349,6 @@ func filterHooks(hooksRaw json.RawMessage, serverPort string) json.RawMessage {
 	return out
 }
 
-// isNaozhiCallbackHook reports whether a hook command appears to call back into
-// naozhi's HTTP server (which would cause an infinite loop).
-// It matches: any mention of "naozhi", or an HTTP call to localhost/127.0.0.1 on
-// naozhi's listen port.
 // sanitizeLogCmd scrubs control characters from a hook command string so
 // attacker-controlled content in ~/.claude/settings.json cannot inject fake
 // log lines (newlines, ANSI escapes) when log.format is text. Also truncates
@@ -369,6 +365,10 @@ func sanitizeLogCmd(cmd string) string {
 	}, cmd)
 }
 
+// isNaozhiCallbackHook reports whether a hook command appears to call back into
+// naozhi's HTTP server (which would cause an infinite loop).
+// It matches: any mention of "naozhi", or an HTTP call to localhost/127.0.0.1 on
+// naozhi's listen port.
 func isNaozhiCallbackHook(cmd, port string) bool {
 	if cmd == "" {
 		return false
