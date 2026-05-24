@@ -100,6 +100,17 @@ type jsonEncBuf struct {
 	enc *json.Encoder
 }
 
+// jsonEncPool produces encoders with SetEscapeHTML(false) baked in. R243-SEC-10:
+// json.Encoder does not expose the escape-html bit at the type level, so there
+// is no compile-time guard preventing a future caller from doing
+// `e.enc.SetEscapeHTML(true)` on a borrowed encoder and silently breaking the
+// CLIENT-SIDE CONTRACT documented above writeJSON. The contract is pinned at
+// test time by TestJSONEncPool_HTMLEscapingDisabled, which encodes `<>&` and
+// asserts the literal bytes (not `<`/`>`/`&`) appear in both the
+// writeJSON and marshalPooled wire formats. If you add a new code path that
+// borrows from this pool, do NOT mutate `e.enc` configuration — make a fresh
+// encoder if you need different settings, or extend the contract test to cover
+// the new mode explicitly.
 var jsonEncPool = sync.Pool{
 	New: func() any {
 		buf := new(bytes.Buffer)
@@ -113,6 +124,10 @@ var jsonEncPool = sync.Pool{
 // response (e.g. 2MB sessions snapshot) does not permanently pin that capacity.
 const jsonEncBufMaxCap = 256 * 1024
 
+// getJSONEnc returns a pooled encoder. The returned encoder always has HTML
+// escaping disabled; callers MUST NOT mutate its configuration (see
+// jsonEncPool godoc for the invariant pinned by
+// TestJSONEncPool_HTMLEscapingDisabled). R243-SEC-10.
 func getJSONEnc() *jsonEncBuf {
 	e := jsonEncPool.Get().(*jsonEncBuf)
 	e.buf.Reset()

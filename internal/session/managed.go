@@ -113,7 +113,23 @@ type processIface interface {
 	Model() string
 }
 
-// processBox wraps processIface for use with atomic.Pointer (which requires a concrete type).
+// processBox wraps processIface for use with atomic.Pointer (which requires a
+// concrete type — interfaces can't be stored directly, and atomic.Value would
+// panic on type-mismatch instead of giving compile-time safety).
+//
+// R242-ARCH-30: storeProcess allocates a fresh *processBox on every non-nil
+// store. The alloc cost was flagged as a refactor candidate (sync.Pool /
+// atomic.Value), but the call sites are cold:
+//
+//   - spawnSession: once per session creation (router bottleneck, not hot)
+//   - ReattachProcess: once per shim reconnect (~30s reconcile interval)
+//   - storeProcess(nil) on Close: once per session teardown
+//
+// At ~hundreds of sessions / hour the per-box ~16-byte alloc is sub-µs of
+// total GC pressure; pooling would add complexity (Put-on-detach, defensive
+// nil-out of the inner pointer to prevent leaks of the closed processIface)
+// without measurable benefit. Leave the inline alloc; revisit only if a
+// future profiler trace surfaces this in the top-N. Tracked as not-worth-fixing.
 type processBox struct{ p processIface }
 
 // ManagedSession wraps a claude CLI process with session metadata.

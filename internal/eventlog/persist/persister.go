@@ -101,9 +101,12 @@ type Options struct {
 	// picks up time.Now.
 	Clock func() time.Time
 
-	// DevMode panics when a batch arrives with replayPhase=true. Used
-	// in dev builds + CI so any broken SetPersistSink ordering surfaces
-	// immediately. Production sets this false.
+	// DevMode tags slog.Error logs with `dev_mode=true` when a batch
+	// arrives with replayPhase=true. Used in dev builds + CI so any
+	// broken SetPersistSink ordering surfaces immediately in logs.
+	// Tests should assert on Observer.OnReplayLeak / replayLeakCnt
+	// rather than expecting a panic — see R242-GO-11. Production
+	// sets this false.
 	DevMode bool
 
 	// Observer receives Persister counter increments. nil → noop.
@@ -249,13 +252,16 @@ func (p *Persister) SinkFor(key string) PersistSink {
 		if replayPhase {
 			p.replayLeakCnt.Add(int64(len(entries)))
 			p.opts.Observer.OnReplayLeak(len(entries))
+			// R242-GO-11: previously this branch panic'd in DevMode to make
+			// sink-ordering bugs explode loudly during tests; the panic was a
+			// goroutine-context crash that took down the whole process and
+			// could not be observed cleanly by callers. We now log at Error
+			// level with a `dev_mode=true` attribute and rely on the
+			// `replayLeakCnt` counter + `OnReplayLeak` Observer hook (both
+			// already in place above) for test assertions and prod alerting.
 			slog.Error("event log persist: replay-phase entries reached sink",
-				"key", key, "count", len(entries))
-			if p.opts.DevMode {
-				panic(fmt.Sprintf(
-					"persist: replay-phase batch leaked for key=%q (DevMode)",
-					key))
-			}
+				"key", key, "count", len(entries),
+				"dev_mode", p.opts.DevMode)
 			return
 		}
 		if len(entries) == 0 {

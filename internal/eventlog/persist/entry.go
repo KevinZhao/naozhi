@@ -45,6 +45,7 @@ type Entry struct {
 //   - replayPhase=true indicates the batch is a replay from historical
 //     storage (InjectHistory, shim reconnect). The sink discards such
 //     batches to avoid the self-amplification loop described in
-//     RFC §3.3. In DevMode this path panics so tests catch any new
-//     caller site that forgot the SetPersistSink ordering contract.
+//     RFC §3.3 and signals the contract violation via slog.Error +
+//     Observer.OnReplayLeak + replayLeakCnt. In DevMode the log is
+//     tagged `dev_mode=true` for grep visibility (R242-GO-11).
 type PersistSink func(entries []Entry, replayPhase bool)

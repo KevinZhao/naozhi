@@ -1334,18 +1334,19 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 
 // DeleteJobByID removes a job by exact ID (unscoped, for dashboard use).
 //
-// LOCKING CONTRACT (R243-GO-2): the IIFE captures `j *Job` under s.mu but
-// the post-IIFE block must NOT dereference any mutable Job field without
-// re-acquiring the lock. To make that contract explicit at every read
-// site, the immutable identifier is captured into a local `jobID` while
-// still holding s.mu and consumed afterwards. j itself remains in scope
-// only as the return value (callers receive the *Job snapshot taken from
-// s.jobs at deletion time; subsequent reads are caller-side and out of
-// our concurrency contract).
+// LOCKING CONTRACT (R243-GO-2): the IIFE captures `j *Job` for return-value
+// plumbing, but post-IIFE we deliberately do NOT touch any *mutable* field
+// on `*j` outside s.mu. The single deref `j.ID` is safe because Job.ID is
+// effectively immutable after registerJob (set once at construction, never
+// reassigned). Any future code added below the IIFE that needs to read
+// other Job fields MUST either re-acquire s.mu or hoist the value into a
+// local before the IIFE returns. R242-GO-3 / R243-GO-2 are the same
+// root-cause repeat — keeping the contract spelled out here so reviewers
+// catch new violations on sight.
 func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	var save func()
 	var j *Job
-	var jobID string // R243-GO-2: immutable ID captured under s.mu for explicit post-lock use.
+	var jobID string // hoisted out of the IIFE; safe to use post-unlock
 	var found bool
 	var perr error
 	func() {
@@ -1357,6 +1358,7 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 			return
 		}
+		jobID = j.ID
 		found = true
 		jobID = j.ID
 		s.deleteJobLocked(j)
@@ -1372,8 +1374,6 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	// R240-GO-1: router.Reset moved out of deleteJobLocked to avoid
 	// holding s.mu across router callbacks (notifyChange may try to
 	// re-take s.mu, deadlocking the scheduler).
-	// R243-GO-2: pass the locally captured jobID so the call site is
-	// audit-clean (no mutable-field access through j outside the lock).
 	s.resetRouterStub(jobID)
 	// R238-GO-3: deleteJobLocked already mutated in-memory state. The
 	// runStore must be cleaned even when persist fails, otherwise the
@@ -1395,14 +1395,11 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 
 // PauseJobByID pauses a job by exact ID (unscoped, for dashboard use).
 //
-// LOCKING CONTRACT (R243-GO-2): unlike DeleteJobByID this function does not
-// dereference any Job field after releasing s.mu — j flows directly to the
-// return value. Callers that read mutable fields (Title/Prompt/Schedule)
-// from the returned snapshot are out of this scheduler's concurrency
-// contract; the dashboard handler reads these immediately on the same
-// goroutine before any further mutation can race in. Future edits that
-// add post-IIFE field reads here MUST capture them into local copies
-// inside the IIFE (mirror DeleteJobByID's `jobID := j.ID` pattern).
+// LOCKING CONTRACT (R243-GO-2): the returned *Job is shared with the
+// scheduler's in-memory map; callers must treat it as read-only and only
+// rely on immutable fields (ID, Schedule, etc. — fields set once at
+// construction). Mutable fields like Paused / NextRun race with
+// concurrent scheduler mutations. Same constraint as DeleteJobByID.
 func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 	var save func()
 	var j *Job
@@ -1438,6 +1435,10 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 }
 
 // ResumeJobByID resumes a paused job by exact ID (unscoped, for dashboard use).
+//
+// LOCKING CONTRACT (R243-GO-2): same as PauseJobByID — the returned *Job
+// shares storage with the scheduler map; callers must treat mutable
+// fields as racy.
 func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 	var save func()
 	var j *Job
@@ -3086,6 +3087,12 @@ var redactBuilderPool = sync.Pool{
 // is invoked on every execution and the regex cost would dominate the
 // redaction budget.
 //
+// redactBuilderMaxRetained caps the underlying-buffer capacity that
+// returns to the pool, so a one-off pathological error doesn't pin
+// memory. 8 KiB is well above maxRedactErrLen (2048) plus the worst-
+// case "<path>" expansion of every byte.
+const redactBuilderMaxRetained = 8 * 1024
+
 // SCOPE — UNC paths are out of scope. R239-GO-9.
 // Detection covers three forms: POSIX `/abs`, Windows drive `C:\…` /
 // `C:/…`, and home-relative `~/`. Microsoft UNC paths (`\\server\share`
@@ -3120,16 +3127,22 @@ func redactPathsInCronError(s string) string {
 	if strings.IndexByte(s, '/') < 0 && strings.IndexByte(s, '\\') < 0 && strings.IndexByte(s, '~') < 0 {
 		return s
 	}
-	// R243-PERF-13: pool the Builder so the slow path doesn't allocate a
-	// fresh backing []byte per cron run. recordResult fires on every
-	// execution and the path-bearing branch happens whenever the CLI
-	// surfaces a workspace-related error (a common failure mode), so the
-	// pool's hit rate is high in steady state. Each pooled Builder keeps
-	// its grown buffer; small inputs (~256B common case) reuse last
-	// allocation, large inputs (~maxRedactErrLen=2KB max) bound the
-	// retained capacity. We must Reset before Put because String()
-	// copies internally — the Builder's buffer is reusable after Reset.
+	// R243-PERF-13: pool the Builder so the slow-path allocation doesn't
+	// hit the heap on every cron run that surfaces a path-shaped error.
+	// recordResultP0WithSanitised invokes this on every execution; under
+	// burst (50 jobs × Hz) the Builder churn shows up in heap profiles.
+	// Reset() before use keeps the underlying buffer; Grow only realloc's
+	// when len(s) exceeds the pooled cap. Retained capacity is bounded at
+	// redactBuilderMaxRetained (well above maxRedactErrLen=2048 plus
+	// "<path>" expansion overhead) so one-off huge errors don't pin a
+	// pathological buffer in the pool.
 	b := redactBuilderPool.Get().(*strings.Builder)
+	defer func() {
+		if b.Cap() <= redactBuilderMaxRetained {
+			b.Reset()
+			redactBuilderPool.Put(b)
+		}
+	}()
 	b.Reset()
 	b.Grow(len(s))
 	defer redactBuilderPool.Put(b)

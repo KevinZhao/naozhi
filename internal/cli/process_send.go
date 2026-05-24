@@ -51,13 +51,13 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 		if len(images) == 1 {
 			thumbs[0] = MakeThumbnail(images[0].Data, 600)
 		} else {
-			// R225-PERF-15: cap concurrent JPEG-encode goroutines so a single
-			// 20-image upload cannot saturate every CPU at once and starve
-			// other sessions' Send paths. 4 keeps small-batch latency near
-			// the unbounded baseline (image/jpeg encode is ~10-30 ms each)
-			// while bounding worst-case CPU use.
-			const thumbnailConcurrency = 4
-			sem := make(chan struct{}, thumbnailConcurrency)
+			// R225-PERF-15: concurrent JPEG-encode is gated by the package-level
+			// `thumbSem` (cap=4) inside MakeThumbnail (thumbnail.go:55-57); a
+			// previous outer semaphore here was the same cap and never the
+			// bottleneck (R243-CR-P2-1 dedup). MakeThumbnail also already has
+			// an internal `defer recover()` (thumbnail.go:41-45) that maps
+			// decoder panics to "" return — the previous outer recover here
+			// (R243-GO-1) was dead code that could never fire.
 			var wg sync.WaitGroup
 			for i, img := range images {
 				// R243-GO-3: sem acquire moves INTO the goroutine first
@@ -69,16 +69,6 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 				wg.Add(1)
 				go func(i int, data []byte) {
 					defer wg.Done()
-					sem <- struct{}{}
-					defer func() { <-sem }()
-					// R243-GO-1: outer `recover` was dead code —
-					// MakeThumbnail's own defer (thumbnail.go:41) already
-					// recovers decoder panics from x/image and returns "".
-					// The outer slog.Error never fired; drop it. If a
-					// future panic source is added inside MakeThumbnail
-					// that the inner recover misses, prefer wiring it
-					// there (single recover point) over re-adding a layer
-					// here.
 					thumbs[i] = MakeThumbnail(data, 600)
 				}(i, img.Data)
 			}

@@ -271,8 +271,13 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 			return 0, nil, fmt.Errorf("read src frame: %w", err)
 		}
 		if _, err := WriteRecordRaw(dst, body); err != nil {
+			ReleaseFramedBody(body)
 			return 0, nil, fmt.Errorf("write tmp frame: %w", err)
 		}
+		// Release before continuing the loop. WriteRecordRaw has
+		// already copied body bytes into dst's bufio buffer (see
+		// frameWrite contract), so reuse via pool is safe.
+		ReleaseFramedBody(body)
 
 		// Advance idx if the record we just spliced lines up with the
 		// next expected idx entry. Sparse idx: not every record has

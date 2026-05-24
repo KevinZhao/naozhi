@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -185,31 +184,26 @@ func TestEventLogIntegration_RestartLoadsLatest(t *testing.T) {
 	}
 }
 
-// TestEventLogIntegration_ReplayLeakPanics_DevMode ensures the
-// DevMode panic guard is effective when a caller violates the
-// "SetPersistSink after InjectHistory" ordering. Production (DevMode=false)
-// is tested separately via TestEventLogIntegration_DirectSinkWorks.
-func TestEventLogIntegration_ReplayLeakPanics_DevMode(t *testing.T) {
+// TestEventLogIntegration_ReplayLeakObservable ensures a caller
+// violating the "SetPersistSink after InjectHistory" ordering is
+// observable via the persister's ReplayLeak counter (Stats). R242-GO-11
+// replaced the DevMode-only panic with a slog.Error + counter signal
+// so the bug is visible without taking down the process. Production
+// (DevMode=false) is tested separately via TestEventLogIntegration_DirectSinkWorks.
+func TestEventLogIntegration_ReplayLeakObservable(t *testing.T) {
 	r, _ := newEventLogRouter(t, true)
 	sink := newEventLogSink(r.eventLogPersister.SinkFor("k"), nil, "")
 
 	defer func() {
-		if r := recover(); r == nil {
-			t.Errorf("DevMode replay did not panic")
-		} else {
-			msg := ""
-			switch v := r.(type) {
-			case string:
-				msg = v
-			case error:
-				msg = v.Error()
-			}
-			if !strings.Contains(msg, "replay") {
-				t.Errorf("panic message lacked 'replay': %v", r)
-			}
+		if rec := recover(); rec != nil {
+			t.Errorf("DevMode replay should not panic post-R242-GO-11, got: %v", rec)
 		}
 	}()
 	sink([]cli.EventEntry{{UUID: "aa", Time: 1, Type: "user"}}, true)
+
+	if got := r.eventLogPersister.Stats().ReplayLeak; got == 0 {
+		t.Errorf("Stats().ReplayLeak=%d want >0", got)
+	}
 }
 
 // TestEventLogIntegration_DisabledByEmptyDir ensures the opt-out
