@@ -584,7 +584,11 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	loc := h.scheduler.Location()
-	name, offset := time.Now().In(loc).Zone()
+	// R246-PERF-17: reuse the `now` captured before the job loop so the
+	// timezone label is computed at the same moment as the missed-schedule
+	// check above. Calling time.Now() a second time here also wasted a
+	// syscall on every list request.
+	name, offset := now.In(loc).Zone()
 	locName := loc.String()
 	tzLabel := formatTZOffset(locName, offset)
 
