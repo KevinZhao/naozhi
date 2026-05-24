@@ -211,6 +211,17 @@ func TestPersistFailure_SetJobPrompt(t *testing.T) {
 	if !errors.Is(err, ErrPersistFailed) {
 		t.Fatalf("SetJobPrompt err = %v, want ErrPersistFailed", err)
 	}
+
+	// Rollback assertions: in-memory state must revert to the pre-call values
+	// so that a process restart does not see a partially-applied mutation.
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if j.Prompt != "" {
+		t.Errorf("rollback: j.Prompt = %q, want empty string", j.Prompt)
+	}
+	if !j.Paused {
+		t.Errorf("rollback: j.Paused = false, want true (initial state)")
+	}
 }
 
 // TestPersistFailure_RecordResultRollsBack verifies RNEW-011: when
