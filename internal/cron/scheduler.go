@@ -912,6 +912,12 @@ func (s *Scheduler) EnsureStub(key string) bool {
 // R49-REL-CRON-STOP-BUDGET.
 var stopBudget = 30 * time.Second
 
+// gcWaitBudget bounds the cold-start GC goroutine wait in Stop(). Smaller
+// than stopBudget because trimAll's IO is short-lived (ReadDir + N Removes);
+// a wedge here means a stuck filesystem and we'd rather skip the wait than
+// pin systemd TimeoutStopSec.
+var gcWaitBudget = 5 * time.Second
+
 // Stop halts the scheduler and saves state. It waits for both scheduled jobs
 // (drained by s.cron.Stop) and any TriggerNow-spawned goroutines before
 // returning, so callers can safely tear down the router afterwards.
@@ -948,10 +954,12 @@ func (s *Scheduler) Stop() {
 		s.gcWG.Wait()
 		close(gcDone)
 	}()
+	gcTimer := time.NewTimer(gcWaitBudget)
+	defer gcTimer.Stop()
 	select {
 	case <-gcDone:
-	case <-time.After(5 * time.Second):
-		slog.Warn("cron: gc goroutine wait timeout")
+	case <-gcTimer.C:
+		slog.Warn("cron: gc goroutine wait timeout", "budget", gcWaitBudget)
 	}
 
 	cronDoneCtx := s.cron.Stop()
