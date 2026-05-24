@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -569,20 +571,33 @@ func (s *runStore) Get(jobID, runID string) (*CronRun, error) {
 // readRun parses a single run file. Returns ErrCorruptRun on parse
 // failure or oversize; fs.ErrNotExist propagates unchanged.
 //
-// R235-SEC-5: Lstat-then-ReadFile guards against an attacker (with write
-// access to runs/<jobID>/) replacing a legitimate .json with a symlink to
-// /etc/passwd or another sensitive file — diskListNewestFirst /
-// trimJobLocked already skip symlinks during their directory scans, but
-// Get() arrives here directly with a constructed path.
+// R235-SEC-5 / R238-SEC-4 (CWE-367): the original Lstat-then-ReadFile pair
+// has a TOCTOU window — an attacker with write access to runs/<jobID>/
+// can swap a legitimate .json for a symlink (e.g. → /etc/passwd) between
+// the Lstat regular-file check and the ReadFile call. Switch to
+// OpenFile(O_NOFOLLOW) + f.Stat(): O_NOFOLLOW fails with ELOOP if the
+// final path component is a symlink, and f.Stat() is fstat(2) on the
+// already-open fd whose inode is locked, so any subsequent rename/swap
+// can't redirect the read. diskListNewestFirst / trimJobLocked still skip
+// symlinks during dir scans; Get() arrives here directly with a
+// constructed path so this layer is the only TOCTOU-safe gate.
 func (s *runStore) readRun(path string) (*CronRun, error) {
-	li, err := os.Lstat(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
-	if !li.Mode().IsRegular() {
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%w: not a regular file", ErrCorruptRun)
 	}
-	data, err := os.ReadFile(path)
+	if fi.Size() > s.maxRunBytes {
+		return nil, fmt.Errorf("%w: %d bytes > %d cap", ErrCorruptRun, fi.Size(), s.maxRunBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, s.maxRunBytes+1))
 	if err != nil {
 		return nil, err
 	}
