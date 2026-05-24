@@ -162,7 +162,7 @@
 - [~] **R247-SEC-21 — cliAvailable os.Stat 暴露二进制路径（P3）** [REFACTOR]: `internal/server/health.go:283-289` 认证后 token 窃取者可探主机布局。方案：返常量 boolean 不区分 IO 类型。
 - [ ] **R247-SEC-22 — reverseUpgrader.CheckOrigin 仅靠 Origin 缺失判 m2m（P3）** [REPEAT-3]: `internal/node/reverseserver.go:69-73` 反代剥 Origin 场景下 browser-XSS 端可凑无 Origin 请求。方案：r.TLS != nil 强制或 explicit insecure_node 配置。
 - [ ] **R247-SEC-23 — CSP font-src https://cdn.jsdelivr.net 无 SRI（P3）** [REPEAT-3]: `internal/server/dashboard.go:503` 与 R246-SEC-10 同根因；KaTeX woff2 走同信任链。方案：vendored //go:embed 或 require-sri-for font。
-- [ ] **R247-SEC-24 — resume key var rb [8]byte 64-bit 熵（P3）** [REPEAT-2]: `internal/server/dashboard_session.go:1052` 与 R246-SEC-5 同根因不同 site。方案：16 字节。
+- [~] **R247-SEC-24 — resume key var rb [8]byte 64-bit 熵（P3）** [REPEAT-2]: `internal/server/dashboard_session.go:1052` 与 R246-SEC-5 同根因不同 site。方案：16 字节。
 - [ ] **R247-SEC-25 — netutil clientIP trustedProxy XFF 缺失回退 RemoteAddr（P3）** [REPEAT-3]: `internal/netutil/clientip.go:25-46` 所有 client 折一桶。方案：trustedProxy=true 且 XFF 空时返 400。
 
 ### 性能（剩余）

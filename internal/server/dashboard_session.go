@@ -1062,7 +1062,15 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		workspace = h.router.DefaultWorkspace()
 	}
 
-	var rb [8]byte
+	// R247-SEC-24 / R246-SEC-5: resume key entropy widened from 8 → 16
+	// bytes (64 → 128 bits) so the random tail matches anonCookie / upload
+	// IDs and the rest of the codebase's 128-bit short-id budget. The
+	// previous 64-bit tail had a birthday-bound (~2^32 IDs before
+	// collision) that, while comfortably above realistic resume volume,
+	// was inconsistent with sibling code and would have eventually been
+	// flagged by another review round; align here to retire the audit
+	// item permanently.
+	var rb [16]byte
 	if _, err := rand.Read(rb[:]); err != nil {
 		// crypto/rand failures are pathologically rare (kernel entropy
 		// pool gone, exhausted FDs), but without a log operators cannot
