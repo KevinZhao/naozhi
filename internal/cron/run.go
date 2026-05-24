@@ -42,7 +42,7 @@ type CronRun struct {
 	State      RunState    `json:"state"`
 	Trigger    TriggerKind `json:"trigger,omitempty"`
 	StartedAt  time.Time   `json:"started_at"`
-	EndedAt    time.Time   `json:"ended_at,omitempty"`
+	EndedAt    time.Time   `json:"ended_at"` // omitempty has no effect on time.Time; use IsZero to test emptiness
 	DurationMS int64       `json:"duration_ms,omitempty"`
 
 	// SessionID 在 fresh=true 路径下每条 run 独有，用来定位 ~/.claude/
@@ -70,7 +70,7 @@ type CronRunSummary struct {
 	State      RunState    `json:"state"`
 	Trigger    TriggerKind `json:"trigger,omitempty"`
 	StartedAt  time.Time   `json:"started_at"`
-	EndedAt    time.Time   `json:"ended_at,omitempty"`
+	EndedAt    time.Time   `json:"ended_at"` // omitempty has no effect on time.Time; use IsZero to test emptiness
 	DurationMS int64       `json:"duration_ms,omitempty"`
 	SessionID  string      `json:"session_id,omitempty"`
 	ErrorClass ErrorClass  `json:"error_class,omitempty"`
