@@ -46,6 +46,17 @@ type cappedBuffer struct {
 
 const ffmpegStderrCap = 64 * 1024
 
+// ffmpegMaxDecodeSeconds caps the wall-clock decode duration ffmpeg will
+// emit to stdout. Without this argv flag a crafted/malicious audio file can
+// keep ffmpeg busy producing PCM for arbitrarily long, holding one of the
+// transcribeSemCap=3 concurrency slots and starving legitimate transcribe
+// requests. The outer ctx provides a fallback (DialOptions / handler ctx
+// deadline) but is not always set tight enough — argv-side `-t` is the
+// process-local backstop. 600s = 10 minutes is well above any IM voice
+// message in the field (typical ≤ 60s, hard upstream cap is 300s on
+// Feishu) so this is a pure abuse mitigation. R247-SEC-6.
+const ffmpegMaxDecodeSeconds = "600"
+
 func (c *cappedBuffer) Write(p []byte) (int, error) {
 	remain := ffmpegStderrCap - c.buf.Len()
 	if remain <= 0 {
@@ -103,6 +114,7 @@ func startPCMStream(ctx context.Context, data []byte) (*pcmStream, error) {
 
 	cmd := exec.CommandContext(ctx, path,
 		"-i", "pipe:0",
+		"-t", ffmpegMaxDecodeSeconds, // R247-SEC-6: argv-side wall-clock cap
 		"-ar", "16000",
 		"-ac", "1",
 		"-f", "s16le",
