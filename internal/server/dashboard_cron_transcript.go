@@ -502,6 +502,43 @@ func parseRunPathParams(w http.ResponseWriter, r *http.Request) (runID, jobID st
 	return runID, jobID, true
 }
 
+// sanitizeWireText drops bidi / C1 / LS-PS runes (the IsLogInjectionRune
+// class) before transcript turn fields reach the JSON wire. Preserves
+// \t / \n / \r so multi-line tool_result rendering survives — calling
+// SanitizeForLog directly would map those to '_' and destroy formatting
+// in the dashboard's <pre> sink.
+//
+// R243-SEC-5: handleRunDetail runs Prompt/WorkDir through the strict
+// SanitizeForLog before wire-encode; the JSONL transcript path skipped
+// sanitisation entirely, so a JSONL file with bidi overrides could reach
+// the dashboard verbatim and corrupt visual ordering despite esc()-then-
+// <pre>. Defence-in-depth.
+func sanitizeWireText(s string) string {
+	if s == "" {
+		return s
+	}
+	// Fast path: every IsLogInjectionRune codepoint encodes with leading
+	// byte ≥ 0x80 in UTF-8 (C1 0x80..9F → 0xC2..; bidi 0x202A..2069 →
+	// 0xE2..). Pure ASCII proves nothing to drop, so return s without
+	// allocating. Keeps tab/newline/CR which are < 0x20 ASCII.
+	hasNonASCII := false
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			hasNonASCII = true
+			break
+		}
+	}
+	if !hasNonASCII {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if osutil.IsLogInjectionRune(r) {
+			return -1 // drop
+		}
+		return r
+	}, s)
+}
+
 // flattenJSONLEvent decodes one JSONL line into 0..N transcript turns.
 // Returns (turns, token deltas, tool-call delta, parsedAny).
 //
@@ -534,7 +571,8 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, buf []transc
 				Index: nextIdx + len(out),
 				Kind:  "user",
 				TS:    ts,
-				Text:  truncateRunes(text, maxAssistantTextBytes),
+				// R243-SEC-5: strip bidi / C1 / LS-PS before wire encode.
+				Text: sanitizeWireText(truncateRunes(text, maxAssistantTextBytes)),
 			})
 		}
 		for _, b := range blocks {
@@ -547,7 +585,8 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, buf []transc
 				if strings.IndexByte(outStr, 0x1b) >= 0 {
 					outStr = ansiEscRe.ReplaceAllString(outStr, "")
 				}
-				outStr = truncateRunes(outStr, maxToolOutputBytes)
+				// R243-SEC-5: same wire-sanitisation as user.Text.
+				outStr = sanitizeWireText(truncateRunes(outStr, maxToolOutputBytes))
 				status := "ok"
 				if b.IsError {
 					status = "error"
@@ -585,7 +624,10 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, buf []transc
 				textBuf.WriteString(b.Text)
 			case "tool_use":
 				toolCalls++
-				summary := summariseToolInput(b.Name, b.Input)
+				// R243-SEC-5: belt-and-braces; summariseToolInput already
+				// runs SanitizeForLog on chosen field but explicit wrap
+				// is no-op for ASCII and survives future regressions.
+				summary := sanitizeWireText(summariseToolInput(b.Name, b.Input))
 				out = append(out, transcriptTurn{
 					Index:     nextIdx + len(out),
 					Kind:      "tool_use",
@@ -607,10 +649,11 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, buf []transc
 			out = append(out, transcriptTurn{})
 			copy(out[1:], out[:len(out)-1])
 			out[0] = transcriptTurn{
-				Index:  nextIdx,
-				Kind:   "assistant",
-				TS:     ts,
-				Text:   truncateRunes(text, maxAssistantTextBytes),
+				Index: nextIdx,
+				Kind:  "assistant",
+				TS:    ts,
+				// R243-SEC-5: same wire-sanitisation as user/tool_result.
+				Text:   sanitizeWireText(truncateRunes(text, maxAssistantTextBytes)),
 				Tokens: tok.Output,
 			}
 			// re-number subsequent turns
@@ -645,7 +688,8 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, buf []transc
 				Index: nextIdx,
 				Kind:  "error",
 				TS:    ts,
-				Text:  truncateRunes(sys.Message, maxAssistantTextBytes),
+				// R243-SEC-5: error text from claude system events; strip.
+				Text: sanitizeWireText(truncateRunes(sys.Message, maxAssistantTextBytes)),
 			})
 			parsed = true
 		}
