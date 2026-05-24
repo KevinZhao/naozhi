@@ -62,11 +62,6 @@ const maxEmojiRunes = 8
 // avoids silent drift between dashboard PUT and the YAML reload path.
 const MaxPlannerPromptBytes = 8 * 1024
 
-// maxPlannerPromptBytes is the unexported alias retained for in-package
-// references; both names resolve to the same value. New external callers
-// should use MaxPlannerPromptBytes.
-const maxPlannerPromptBytes = MaxPlannerPromptBytes
-
 // maxPlannerModelBytes is the hard cap on PlannerModel length.
 const maxPlannerModelBytes = 256
 
@@ -84,7 +79,7 @@ var ErrInvalidConfig = errors.New("invalid project config")
 // of ingress path (HTTP dashboard PUT vs reverse-RPC update_config from a
 // primary node). Both paths must reject:
 //
-//   - PlannerPrompt over maxPlannerPromptBytes
+//   - PlannerPrompt over MaxPlannerPromptBytes
 //   - PlannerPrompt containing C0 control bytes other than tab, or DEL.
 //     Null bytes silently truncate argv on execve; raw \n / \r corrupt
 //     NDJSON protocol framing at the shim boundary.
@@ -95,8 +90,8 @@ var ErrInvalidConfig = errors.New("invalid project config")
 // the public error stable while still surfacing the specific field for
 // operator logs. R68-SEC-H2.
 func ValidateConfig(cfg ProjectConfig) error {
-	if len(cfg.PlannerPrompt) > maxPlannerPromptBytes {
-		return fmt.Errorf("%w: planner_prompt exceeds %d-byte limit", ErrInvalidConfig, maxPlannerPromptBytes)
+	if len(cfg.PlannerPrompt) > MaxPlannerPromptBytes {
+		return fmt.Errorf("%w: planner_prompt exceeds %d-byte limit", ErrInvalidConfig, MaxPlannerPromptBytes)
 	}
 	for i := 0; i < len(cfg.PlannerPrompt); i++ {
 		c := cfg.PlannerPrompt[i]
