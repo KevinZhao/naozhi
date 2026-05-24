@@ -212,6 +212,16 @@ func (s *Scanner) evictSummaryCache() {
 // narrow window (e.g. 5s) causes ready->running oscillation on every scan.
 const runningThreshold = 30 * time.Second
 
+// noJSONLGrace is the window we give a freshly-started CLI process to
+// write its first JSONL line before we treat the absence of a conversation
+// file as a signal that the process is an idle wrapper rather than a real
+// user session. VS Code's Claude extension keeps an extra `claude` child
+// alive for the lifetime of the editor without ever issuing --resume or
+// receiving a user prompt, so its sessionID never gets a JSONL — surfacing
+// it as a discovered session produces a duplicate sidebar entry alongside
+// the actual resumed process the user is talking to.
+const noJSONLGrace = 5 * time.Second
+
 // MaxSafeJSONInt mirrors JavaScript's Number.MAX_SAFE_INTEGER (2^53 - 1).
 // Any uint64 field that crosses a JSON boundary and may be consumed by a JS
 // front-end (dashboard.js) or a reverse-RPC peer that proxies values into
@@ -348,6 +358,23 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 
 		if !processAlive(sf.PID) {
 			continue
+		}
+
+		// Filter out idle CLI wrappers that never got a JSONL written. The
+		// VS Code Claude extension launches one --resume <id> child for the
+		// active conversation plus a second sessionless wrapper that lingers
+		// for the editor's lifetime; both publish a sessions/<pid>.json file
+		// but only the first ever produces a JSONL under projects/. Without
+		// this gate the dashboard sidebar shows two cards for one VS Code
+		// window, which is the bug this guard fixes. The grace window keeps
+		// genuinely-fresh CLI starts (claude /, sdk-cli) visible during the
+		// 1-2 s before they flush their first message to disk.
+		jsonlPath := findJSONLPath(claudeDir, sf.CWD, sf.SessionID)
+		if jsonlPath == "" {
+			startedAt := time.UnixMilli(sf.StartedAt)
+			if !startedAt.IsZero() && time.Since(startedAt) > noJSONLGrace {
+				continue
+			}
 		}
 
 		la := jsonlMtime(claudeDir, sf.CWD, sf.SessionID, sf.StartedAt)

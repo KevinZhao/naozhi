@@ -4,6 +4,7 @@ package discovery
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -387,6 +388,119 @@ func TestScan_IncludesCLISession(t *testing.T) {
 	if !found {
 		t.Logf("all sessions found: %+v", sessions)
 		t.Errorf("expected session %q with PID %d in scan results", sessionID, pid)
+	}
+}
+
+// TestScan_SkipsIdleVSCodeWrapper covers the VS Code Claude extension
+// scenario: the editor launches one --resume <id> child for the active
+// conversation plus a second sessionless wrapper. Both publish a
+// sessions/<pid>.json file but only the first ever produces a JSONL under
+// projects/. Without filtering, the dashboard sidebar showed two cards for
+// one VS Code window. Sessions older than the noJSONLGrace window with no
+// JSONL must be filtered out; sessions younger than the grace window must
+// stay visible so a freshly-started CLI doesn't disappear during the
+// 1-2 s before its first message lands on disk.
+func TestScan_SkipsIdleVSCodeWrapper(t *testing.T) {
+	resetCaches(t)
+	claudeDir := makeClaudeDir(t)
+	sessDir := filepath.Join(claudeDir, "sessions")
+
+	pid := os.Getpid()
+	cwd := "/tmp/scan-vscode-dedupe"
+
+	// Wrapper 1 — has JSONL on disk: real conversation, must appear.
+	activeSession := "aaaaaaaa-1234-1234-1234-000000000010"
+	makeSessionFile(t, sessDir, sessionFile{
+		PID:        pid,
+		SessionID:  activeSession,
+		CWD:        cwd,
+		StartedAt:  time.Now().Add(-1 * time.Hour).UnixMilli(),
+		Kind:       "interactive",
+		Entrypoint: "claude-vscode",
+	})
+	dirName := projDirName(cwd)
+	projDir := filepath.Join(claudeDir, "projects", dirName)
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeJSONLWithUserPrompts(t,
+		filepath.Join(projDir, activeSession+".jsonl"),
+		[]string{"hello from vscode"})
+
+	// Wrapper 2 — older than the grace window, no JSONL: idle wrapper that
+	// must be filtered out. Reuses the same PID for processAlive reasons; in
+	// production the two wrappers are sibling PIDs but the filter rule keys
+	// off (sessionID, JSONL existence), not PID identity.
+	idleSession := "aaaaaaaa-1234-1234-1234-000000000011"
+	idleSessFile := filepath.Join(sessDir, "999999.json") // distinct filename
+	idleData, _ := json.Marshal(sessionFile{
+		PID:        pid,
+		SessionID:  idleSession,
+		CWD:        cwd,
+		StartedAt:  time.Now().Add(-1 * time.Hour).UnixMilli(),
+		Kind:       "interactive",
+		Entrypoint: "claude-vscode",
+	})
+	if err := os.WriteFile(idleSessFile, idleData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, err := Scan(claudeDir, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	for _, s := range sessions {
+		if s.SessionID == idleSession {
+			t.Errorf("idle wrapper without JSONL should have been skipped, got %+v", s)
+		}
+	}
+
+	// The active session must still surface.
+	foundActive := false
+	for _, s := range sessions {
+		if s.SessionID == activeSession {
+			foundActive = true
+			break
+		}
+	}
+	if !foundActive {
+		t.Errorf("active session %q with JSONL should appear; sessions=%+v", activeSession, sessions)
+	}
+}
+
+// TestScan_KeepsFreshSessionWithoutJSONL guards the grace window: a CLI
+// process that started moments ago has not had a chance to flush its first
+// JSONL line, so it must remain visible until noJSONLGrace elapses.
+func TestScan_KeepsFreshSessionWithoutJSONL(t *testing.T) {
+	resetCaches(t)
+	claudeDir := makeClaudeDir(t)
+	sessDir := filepath.Join(claudeDir, "sessions")
+
+	pid := os.Getpid()
+	freshSession := "aaaaaaaa-1234-1234-1234-000000000012"
+	makeSessionFile(t, sessDir, sessionFile{
+		PID:        pid,
+		SessionID:  freshSession,
+		CWD:        "/tmp/scan-fresh-no-jsonl",
+		StartedAt:  time.Now().UnixMilli(), // just now
+		Kind:       "interactive",
+		Entrypoint: "cli",
+	})
+
+	sessions, err := Scan(claudeDir, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	found := false
+	for _, s := range sessions {
+		if s.SessionID == freshSession {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("fresh session within grace window should be kept, sessions=%+v", sessions)
 	}
 }
 
