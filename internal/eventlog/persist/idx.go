@@ -25,6 +25,17 @@ const DefaultIdxStride = 32
 // callers batch at the Persister layer and Sync() on fsync boundaries.
 type IdxWriter struct {
 	f *os.File
+
+	// batchBuf is a scratch slice reused across AppendBatch calls so the
+	// flush hot path (~200ms cadence × N sessions) does not allocate a
+	// fresh `make([]byte, IdxEntrySize*len(entries))` per flush. The
+	// slice is owned exclusively by the Persister's single writer
+	// goroutine — every call to AppendBatch resets it via [:0] and
+	// re-appends. Capacity grows monotonically toward the largest
+	// observed batch and persists for the writer's lifetime, which is
+	// fine: each entry is 28 B and a typical idx batch is ≤32 entries
+	// (DefaultIdxStride window) ≈ 896 B. R237-PERF-11.
+	batchBuf []byte
 }
 
 // NewIdxWriter opens idx at the given path in append mode. Callers
@@ -58,15 +69,24 @@ func (w *IdxWriter) Append(e schema.IdxEntry) error {
 // AppendBatch writes many entries in one syscall. Used by rotate's
 // reindex path where we write ~1000 entries back-to-back. Saves 999
 // syscalls vs Append per-entry.
+//
+// The marshal scratch (`w.batchBuf`) is reused across calls — a single
+// Persister writer goroutine owns this writer, so no synchronisation
+// is required. R237-PERF-11.
 func (w *IdxWriter) AppendBatch(entries []schema.IdxEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	buf := make([]byte, schema.IdxEntrySize*len(entries))
-	for i, e := range entries {
-		schema.MarshalIdxEntry(buf[i*schema.IdxEntrySize:], e)
+	need := schema.IdxEntrySize * len(entries)
+	if cap(w.batchBuf) < need {
+		w.batchBuf = make([]byte, need)
+	} else {
+		w.batchBuf = w.batchBuf[:need]
 	}
-	if _, err := w.f.Write(buf); err != nil {
+	for i, e := range entries {
+		schema.MarshalIdxEntry(w.batchBuf[i*schema.IdxEntrySize:], e)
+	}
+	if _, err := w.f.Write(w.batchBuf); err != nil {
 		return fmt.Errorf("write idx batch (%d entries): %w", len(entries), err)
 	}
 	return nil

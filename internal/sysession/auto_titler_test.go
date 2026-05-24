@@ -456,3 +456,51 @@ func (c *capturingRunner) Run(_ context.Context, prompt string) (string, error) 
 	}
 	return c.resp, nil
 }
+
+// TestAutoTitler_BatchPerTickClamp asserts that Configure clamps a
+// pathologically large `batch_per_tick` cfg to autoTitlerMaxBatchPerTick
+// (R236-QA-09). The candidate slice pre-allocates batchPerTick*4, so an
+// unbounded value would also blow visit memory; serialised Phase 2
+// rename calls plus typical 3 s/rename latency means 100/tick already
+// implies ~5 min stall and is the practical operational ceiling.
+func TestAutoTitler_BatchPerTickClamp(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		cfg  int
+		want int
+	}{
+		{name: "small value passes through", cfg: 5, want: 5},
+		{name: "boundary value passes through", cfg: autoTitlerMaxBatchPerTick, want: autoTitlerMaxBatchPerTick},
+		{name: "oversized value clamped", cfg: 10_000, want: autoTitlerMaxBatchPerTick},
+		{name: "just-over-cap clamped", cfg: autoTitlerMaxBatchPerTick + 1, want: autoTitlerMaxBatchPerTick},
+		{name: "zero ignored (default kept)", cfg: 0, want: autoTitlerDefaultBatchPerTick},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, err := newAutoTitler(DaemonDeps{
+				Router: newFakeRouter(),
+				Runner: &capturingRunner{},
+			})
+			if err != nil {
+				t.Fatalf("newAutoTitler: %v", err)
+			}
+			a, ok := d.(*autoTitler)
+			if !ok {
+				t.Fatalf("newAutoTitler returned %T, want *autoTitler", d)
+			}
+			cfg := DaemonConfig{}
+			if tc.cfg > 0 {
+				cfg["batch_per_tick"] = tc.cfg
+			}
+			if err := a.Configure(cfg); err != nil {
+				t.Fatalf("Configure: %v", err)
+			}
+			if a.batchPerTick != tc.want {
+				t.Fatalf("batchPerTick = %d, want %d", a.batchPerTick, tc.want)
+			}
+		})
+	}
+}

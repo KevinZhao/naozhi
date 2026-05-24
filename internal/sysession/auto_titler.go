@@ -58,6 +58,13 @@ const (
 	autoTitlerDefaultMinRenameInterval = 5 * time.Minute
 	autoTitlerDefaultBatchPerTick      = 1
 
+	// autoTitlerMaxBatchPerTick caps user-supplied batch_per_tick so a
+	// misconfigured cfg value (e.g. 10000) cannot let a single Tick
+	// monopolise the shared Runner — Phase 2 walks the candidate slice
+	// serially, and 100 LLM-rename calls per tick already implies a
+	// ~5 min stall under typical 3 s/rename latency. R236-QA-09.
+	autoTitlerMaxBatchPerTick = 100
+
 	// autoTitlerMaxTitleRunes is the hard rune-count ceiling enforced
 	// after ValidateUserLabel.  Mirrors the system-prompt ≤16 char
 	// instruction so a non-compliant model can't write an over-long
@@ -132,6 +139,14 @@ func (a *autoTitler) Configure(cfg DaemonConfig) error {
 		a.minRenameInterval = v
 	}
 	if v, ok := cfg["batch_per_tick"].(int); ok && v > 0 {
+		// R236-QA-09: clamp to autoTitlerMaxBatchPerTick so a
+		// misconfigured cfg cannot let a single Tick monopolise the
+		// shared Runner. The slice still pre-allocates batchPerTick*4
+		// for candidate collection, so an unbounded value would also
+		// blow the visit memory budget.
+		if v > autoTitlerMaxBatchPerTick {
+			v = autoTitlerMaxBatchPerTick
+		}
 		a.batchPerTick = v
 	}
 	if v, ok := cfg["include_group_chat"].(bool); ok {

@@ -27,6 +27,16 @@ import (
 // platform tuning lands in one place. R228-ARCH-12.
 const platformReplyTimeout = 15 * time.Second
 
+// shutdownReplyTimeout caps platform.Reply attempts on the shutdown /
+// context.Canceled fallback path. Deliberately shorter than
+// platformReplyTimeout (15s): the surrounding ctx is already Done because
+// the dispatcher / session subsystem is tearing down, so we want a fast
+// best-effort notice ("系统正在重启，请稍后重试。") rather than blocking
+// the shutdown sequence on a slow IM API. 5s matches the conservative end
+// of platform retry budgets so the message still has a realistic chance of
+// landing before systemctl SIGKILLs the process. R239-CR-5.
+const shutdownReplyTimeout = 5 * time.Second
+
 // SessionGuard prevents multiple concurrent messages to the same session.
 // MessageQueue is the production implementation; the IM path injects a
 // MessageQueue here so queue-mode gates and the guard contract stay
@@ -687,7 +697,7 @@ func (d *Dispatcher) sendAndReply(
 			// the platform layer. Match the handleOwnerLoopPanic recovery
 			// pattern and use a fresh Background ctx with short timeout so the
 			// user actually sees the "restart, retry" message.
-			notifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			notifyCtx, cancel := context.WithTimeout(context.Background(), shutdownReplyTimeout)
 			defer cancel()
 			replyCtx = notifyCtx
 		default:

@@ -80,6 +80,16 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 		// array keeps the backing array on the stack; slicing it to [:0]
 		// lets the compiler prove the escape is bounded to this frame.
 		// marshal/copy/refcount semantics are identical to the loop below.
+		//
+		// R240-PERF-4 (validated 2026-05-24, cron-fix-F4): `go build
+		// -gcflags=-m` confirms `make([]byte, len(raw))` (line 102) and
+		// `append(stackArr[:0], ...)` (line 108) DO escape — persisterSink
+		// is documented to retain entries (it pumps them into the per-key
+		// persist tier's batch buffer), so neither the bytes nor the slice
+		// header can stay on the stack. A byte-slice sync.Pool would only
+		// pay off if PersistSink were re-contracted to copy-on-take; that
+		// breaks every existing sink implementation. Logged here so a
+		// future re-evaluator does not repeat the -gcflags walk.
 		if len(entries) == 1 {
 			eb := bridgeEncPool.Get().(*bridgeEncBuf)
 			eb.buf.Reset()
@@ -116,11 +126,10 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 
 		out := make([]persist.Entry, 0, len(entries))
 		eb := bridgeEncPool.Get().(*bridgeEncBuf)
-		defer func() {
-			if eb.buf.Cap() <= bridgeEncMaxCap {
-				bridgeEncPool.Put(eb)
-			}
-		}()
+		// R240-PERF-7: explicit Put before each return path avoids the
+		// ~10ns/call defer frame setup cost on the multi-entry hot path
+		// (5-20 entries × N sessions × ≥5/s). The pool-cap guard is the
+		// same as the single-entry fast path above.
 		for _, e := range entries {
 			eb.buf.Reset()
 			if err := eb.enc.Encode(e); err != nil {
@@ -148,6 +157,9 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 			if !replayPhase && attachTracker != nil && keyhash != "" && len(e.ImagePaths) > 0 {
 				attachTracker.OnPersistedEntry(keyhash, e.ImagePaths, e.Time)
 			}
+		}
+		if eb.buf.Cap() <= bridgeEncMaxCap {
+			bridgeEncPool.Put(eb)
 		}
 		if len(out) == 0 {
 			return

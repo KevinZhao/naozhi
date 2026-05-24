@@ -77,20 +77,22 @@ type agentInput struct {
 // to the generic "🔧 TodoWrite" marker below, which is a fine placeholder.
 
 func formatToolUse(name string, input json.RawMessage) string {
+	// R240-PERF-5: Read/Edit/Write share the filePathInput shape, so decode
+	// once at the head of the dispatch and let the case arms format the
+	// already-parsed value. Saves two duplicate json.Unmarshal calls per
+	// status banner update on the most common tool_use types.
 	switch name {
-	case "Read":
+	case "Read", "Edit", "Write":
 		var s filePathInput
-		if json.Unmarshal(input, &s) == nil && s.FilePath != "" {
+		if json.Unmarshal(input, &s) != nil || s.FilePath == "" {
+			break
+		}
+		switch name {
+		case "Read":
 			return "📖 " + shortenPath(s.FilePath)
-		}
-	case "Edit":
-		var s filePathInput
-		if json.Unmarshal(input, &s) == nil && s.FilePath != "" {
+		case "Edit":
 			return "✏️ " + shortenPath(s.FilePath)
-		}
-	case "Write":
-		var s filePathInput
-		if json.Unmarshal(input, &s) == nil && s.FilePath != "" {
+		case "Write":
 			return "📝 " + shortenPath(s.FilePath)
 		}
 	case "Bash":

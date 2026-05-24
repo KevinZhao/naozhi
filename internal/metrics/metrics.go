@@ -241,6 +241,20 @@ var (
 	// alert without schema churn.
 	CronExecutionSlowTotal = expvar.NewInt("naozhi_cron_execution_slow_total")
 
+	// CronSendBudgetDoubledTotal counts cron run completions where the
+	// sendCtx (Send-phase WithTimeout(jobTimeout)) was entered after the
+	// spawn phase had already burned more than half of jobTimeout. The
+	// scheduler intentionally splits the budget — spawn ctx and sendCtx do
+	// NOT share a clock — so a slow GetOrCreate followed by a long-running
+	// Send can stretch a single cron run to ~2×jobTimeout wall clock
+	// (R230B-GO-1 / R222-GO-1 rationale; see scheduler.executeOpt). That
+	// design is intentional, but operators of long-budget jobs (300s+)
+	// historically had no signal when this branch fired. This counter pairs
+	// with a slog.Warn ("cron send budget exceeds job/2") so a runbook can
+	// alert on either rising delta or grep journalctl for the specific job.
+	// R240-GO-4.
+	CronSendBudgetDoubledTotal = expvar.NewInt("naozhi_cron_send_budget_doubled_total")
+
 	// CronRunStartedTotal counts cron run starts (after CAS gate, before
 	// IM notify). Pairs with CronRunEndedTotal — the difference (modulo
 	// inflight) approximates "runs interrupted by panic / process crash".

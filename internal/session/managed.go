@@ -1312,19 +1312,9 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 // unit tests in internal/cli/subagent_link_test.go are the canonical spot
 // for that coverage.
 //
-// TODO(RFC v4 phase 3+, tracked in docs/TODO.md R214-CODE-6 / R217-ARCH-2 /
-// R219-ARCH-3): if a second backend needs internal agent-view support
-// (e.g. ACP / Kiro),
-// abstract via:
-//
-//	type AgentIntrospector interface {
-//	    Linker() *cli.SubagentLinker
-//	    EventLog() *cli.EventLog
-//	}
-//
-// and have *cli.Process implement it, then switch this to a type-safe
-// assertion. Today only stream-json-backed Claude writes the on-disk
-// transcript, so the cost of the abstraction is not warranted yet.
+// TODO: introduce AgentIntrospector interface when a second backend needs
+// agent-view support. Tracked in docs/TODO.md (R214-CODE-6 / R217-ARCH-2 /
+// R219-ARCH-3 / R239-CR-11).
 func (s *ManagedSession) SubagentLinker() *cli.SubagentLinker {
 	if real := s.loadCliProcess(); real != nil {
 		return real.Linker()

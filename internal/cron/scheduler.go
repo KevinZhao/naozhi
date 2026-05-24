@@ -1442,91 +1442,95 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		}
 	}
 
-	s.mu.Lock()
-	j, ok := s.jobs[id]
-	if !ok {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
-	}
+	// R239-GO-4: critical section uses defer Unlock so any future return
+	// path added inside this block stays correctly unlocked. The closure
+	// returns (resultSnapshot, persistCallback, error); save() runs
+	// post-unlock to keep the global s.mu off the disk write path.
+	result, save, err := func() (Job, func(), error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	if upd.Prompt != nil {
-		j.Prompt = *upd.Prompt
-	}
-	if upd.WorkDir != nil {
-		// WorkDir 一换 LastSessionID 就失效：claude JSONL 按 cwd 归档，
-		// 用老 workspace 的 session_id 去新 cwd 下查 history 只会 Stat 落空。
-		// 清零后下次执行写入的新 SessionID 会自然属于新 workspace。
-		//
-		// 对比靠原生字符串相等，依赖 dashboard / AddJob 路径已对 WorkDir 做
-		// 归一化（filepath.Clean / validateWorkspace）。如果将来有新 caller
-		// 绕过归一化直接塞相对路径，会导致清零误判：合法但路径写法不同的
-		// 相同 workspace 会被判定为变更而清零，后果是用户需要重跑一次才
-		// 能恢复 chain，不致数据损坏。
-		if *upd.WorkDir != j.WorkDir {
-			j.LastSessionID = ""
+		j, ok := s.jobs[id]
+		if !ok {
+			return Job{}, nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 		}
-		j.WorkDir = *upd.WorkDir
-	}
-	if upd.Notify != nil {
-		v := *upd.Notify
-		j.Notify = &v
-	}
-	if upd.NotifyPlatform != nil {
-		j.NotifyPlatform = *upd.NotifyPlatform
-	}
-	if upd.NotifyChatID != nil {
-		j.NotifyChatID = *upd.NotifyChatID
-	}
-	if upd.FreshContext != nil {
-		j.FreshContext = *upd.FreshContext
-	}
-	if upd.Title != nil {
-		j.Title = *upd.Title
-	}
-	if upd.Backend != nil {
-		j.Backend = *upd.Backend
-	}
 
-	if upd.Schedule != nil && *upd.Schedule != j.Schedule {
-		// R236-QA-08: snapshot the old schedule so we can roll back the
-		// in-memory field if registerJob fails. Without this, a failed
-		// re-register left j.Schedule mutated to the new value but with
-		// j.entryID=0, so the API returned an error to the client while the
-		// job had silently disappeared from the cron scheduler. The client
-		// would assume the request was a no-op and retry, but the persisted
-		// state file (loaded next start) keeps showing the old schedule
-		// because persistJobsLocked never ran for this branch — diverging
-		// in-memory state from disk.
-		oldSchedule := j.Schedule
-		j.Schedule = *upd.Schedule
-		// Re-register with the new schedule unless paused (paused jobs have
-		// no live entry; ResumeJob will register with the new schedule).
-		if !j.Paused {
-			if j.entryID != 0 {
-				s.cron.Remove(j.entryID)
-				j.entryID = 0
+		if upd.Prompt != nil {
+			j.Prompt = *upd.Prompt
+		}
+		if upd.WorkDir != nil {
+			// WorkDir 一换 LastSessionID 就失效：claude JSONL 按 cwd 归档，
+			// 用老 workspace 的 session_id 去新 cwd 下查 history 只会 Stat 落空。
+			// 清零后下次执行写入的新 SessionID 会自然属于新 workspace。
+			//
+			// 对比靠原生字符串相等，依赖 dashboard / AddJob 路径已对 WorkDir 做
+			// 归一化（filepath.Clean / validateWorkspace）。如果将来有新 caller
+			// 绕过归一化直接塞相对路径，会导致清零误判：合法但路径写法不同的
+			// 相同 workspace 会被判定为变更而清零，后果是用户需要重跑一次才
+			// 能恢复 chain，不致数据损坏。
+			if *upd.WorkDir != j.WorkDir {
+				j.LastSessionID = ""
 			}
-			if err := s.registerJob(j); err != nil {
-				// Roll back the in-memory schedule field so subsequent
-				// reads (List, persistJobsLocked on a later mutator) keep
-				// showing the original schedule. j.entryID stays 0 since
-				// cron.Remove is irreversible — the next ResumeJob /
-				// successful UpdateJob will register a fresh entry.
-				j.Schedule = oldSchedule
-				s.mu.Unlock()
-				return nil, fmt.Errorf("re-register cron: %w", err)
+			j.WorkDir = *upd.WorkDir
+		}
+		if upd.Notify != nil {
+			v := *upd.Notify
+			j.Notify = &v
+		}
+		if upd.NotifyPlatform != nil {
+			j.NotifyPlatform = *upd.NotifyPlatform
+		}
+		if upd.NotifyChatID != nil {
+			j.NotifyChatID = *upd.NotifyChatID
+		}
+		if upd.FreshContext != nil {
+			j.FreshContext = *upd.FreshContext
+		}
+		if upd.Title != nil {
+			j.Title = *upd.Title
+		}
+		if upd.Backend != nil {
+			j.Backend = *upd.Backend
+		}
+
+		if upd.Schedule != nil && *upd.Schedule != j.Schedule {
+			// R236-QA-08: snapshot the old schedule so we can roll back the
+			// in-memory field if registerJob fails. Without this, a failed
+			// re-register left j.Schedule mutated to the new value but with
+			// j.entryID=0, so the API returned an error to the client while the
+			// job had silently disappeared from the cron scheduler. The client
+			// would assume the request was a no-op and retry, but the persisted
+			// state file (loaded next start) keeps showing the old schedule
+			// because persistJobsLocked never ran for this branch — diverging
+			// in-memory state from disk.
+			oldSchedule := j.Schedule
+			j.Schedule = *upd.Schedule
+			// Re-register with the new schedule unless paused (paused jobs have
+			// no live entry; ResumeJob will register with the new schedule).
+			if !j.Paused {
+				if j.entryID != 0 {
+					s.cron.Remove(j.entryID)
+					j.entryID = 0
+				}
+				if err := s.registerJob(j); err != nil {
+					// Roll back the in-memory schedule field so subsequent
+					// reads (List, persistJobsLocked on a later mutator) keep
+					// showing the original schedule. j.entryID stays 0 since
+					// cron.Remove is irreversible — the next ResumeJob /
+					// successful UpdateJob will register a fresh entry.
+					j.Schedule = oldSchedule
+					return Job{}, nil, fmt.Errorf("re-register cron: %w", err)
+				}
 			}
 		}
-	}
 
-	save, perr := s.persistJobsLocked()
-	// Value-copy while still under lock so the caller sees a stable result
-	// even if another goroutine mutates the job right after we unlock.
-	result := *j
-	s.mu.Unlock()
-
-	if perr != nil {
-		return nil, perr
+		save, perr := s.persistJobsLocked()
+		// Value-copy while still under lock so the caller sees a stable result
+		// even if another goroutine mutates the job right after we unlock.
+		return *j, save, perr
+	}()
+	if err != nil {
+		return nil, err
 	}
 	save()
 	// Pass the snapshotted value (via result) to registerStub so a concurrent
@@ -1920,6 +1924,13 @@ type jobSnapshot struct {
 	fresh      bool
 	schedule   string
 	backend    string // "" = router default
+	// lastSessionID 是 snapshot 时刻 Job.LastSessionID 的拷贝，供 fresh-
+	// preflight 的 stub-refresh 闭包使用。R239-PERF-13: 闭包以前在每次
+	// 失败回调时再开 s.mu.RLock 读 s.jobs[jobID].LastSessionID，新增本字段
+	// 后 refresh 可直接调 registerStubByValue 不再触锁。语义保留——失败路径
+	// 用 snap-time chain anchor（与本次 attempt 起点一致），后续新成功 run
+	// 由其 finishRun 路径再覆写。
+	lastSessionID string
 }
 
 // labelOrID returns the IM-notice display label: snap.label when populated,
@@ -1944,17 +1955,18 @@ func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	snap := jobSnapshot{
-		prompt:     j.Prompt,
-		workDir:    j.WorkDir,
-		jobID:      j.ID,
-		label:      jobTitleOrFallback(j),
-		platName:   j.Platform,
-		chatID:     j.ChatID,
-		notifyPlat: j.NotifyPlatform,
-		notifyChat: j.NotifyChatID,
-		fresh:      j.FreshContext,
-		schedule:   j.Schedule,
-		backend:    j.Backend,
+		prompt:        j.Prompt,
+		workDir:       j.WorkDir,
+		jobID:         j.ID,
+		label:         jobTitleOrFallback(j),
+		platName:      j.Platform,
+		chatID:        j.ChatID,
+		notifyPlat:    j.NotifyPlatform,
+		notifyChat:    j.NotifyChatID,
+		fresh:         j.FreshContext,
+		schedule:      j.Schedule,
+		backend:       j.Backend,
+		lastSessionID: j.LastSessionID,
 	}
 	if j.Notify != nil {
 		v := *j.Notify
@@ -2057,16 +2069,19 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 	}
 	s.router.Reset(args.key)
 	lg.Info("cron fresh context: session reset before run")
+	// R239-PERF-13: refresh 闭包改用 snap 固化值直接调 registerStubByValue，
+	// 不再每次失败回调时重开 s.mu.RLock 读 s.jobs[jobID]。snap 由
+	// snapshotJob 在 RLock 下一次性拷贝（包括 LastSessionID），失败路径
+	// 用这份 snap-time chain anchor 即可，后续新成功 run 由其 finishRun
+	// 写新 LastSessionID 并由下一轮 snap 自然带入；闭包路径只是兜底让
+	// sidebar 在失败后仍能渲染。仍需走 stillExists 校验：job 可能在
+	// Reset 与本回调间隔内被 DeleteJob 删掉，那种情况下 stub 不应再注册。
 	refresh := func() {
 		s.mu.RLock()
-		jobCopy, exists := s.jobs[snap.jobID]
-		var j2 Job
-		if exists {
-			j2 = *jobCopy
-		}
+		_, exists := s.jobs[snap.jobID]
 		s.mu.RUnlock()
 		if exists {
-			s.registerStubFromJob(&j2)
+			s.registerStubByValue(snap.jobID, snap.workDir, snap.prompt, snap.lastSessionID)
 		}
 	}
 	s.mu.RLock()
@@ -2395,6 +2410,20 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// clock affects only the CURRENT run's recorded duration, not throughput.
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), jobTimeout)
 	defer sendCancel()
+	// R240-GO-4: emit an explicit signal when entering sendCtx after the
+	// spawn phase already consumed >50% of jobTimeout. The wall-clock
+	// doubling described above is intentional but historically silent;
+	// operators of 300s+ jobs need a structured event to drive runbook
+	// alerts. Counter + slog pair (mirrors CronExecutionSlowTotal +
+	// "cron execution slow" lower in this same function).
+	if spawnElapsed := time.Since(startedAt); spawnElapsed > jobTimeout/2 {
+		metrics.CronSendBudgetDoubledTotal.Add(1)
+		lg.Warn("cron send budget exceeds job/2",
+			"job_id", snap.jobID,
+			"spawn_elapsed_ms", spawnElapsed.Milliseconds(),
+			"job_timeout_ms", jobTimeout.Milliseconds(),
+			"send_budget_ms", jobTimeout.Milliseconds())
+	}
 	inflight.setPhase(PhaseSending)
 
 	// Watchdog: deadline-fired interrupt of the in-flight CLI turn. See
@@ -2908,6 +2937,20 @@ func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
 // pulling a regex compile onto every cron run: recordResultP0WithSanitised
 // is invoked on every execution and the regex cost would dominate the
 // redaction budget.
+//
+// SCOPE — UNC paths are out of scope. R239-GO-9.
+// Detection covers three forms: POSIX `/abs`, Windows drive `C:\…` /
+// `C:/…`, and home-relative `~/`. Microsoft UNC paths (`\\server\share`
+// and the rare `//server/share` POSIX-style equivalent that some Windows
+// tools emit) are intentionally NOT matched: the leading `\\` would
+// require a peek-ahead second byte (`s[i+1]=='\\'`) which the current
+// isWin / isPosix branches don't gate, and a leading `//` looks
+// indistinguishable from an empty POSIX path token. naozhi runs on
+// Linux containers in production — UNC paths cannot appear in the
+// underlying CLI's error messages there. WSL or Windows-mount
+// deployments may surface UNC strings unredacted; redaction of those
+// forms is a future enhancement (would require a new branch matching
+// `\\` / `//` followed by a non-`/` non-`\` host segment).
 func redactPathsInCronError(s string) string {
 	if s == "" {
 		return s

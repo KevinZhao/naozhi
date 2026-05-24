@@ -10,12 +10,23 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// scopeNameRe is the character-set assertion for the scopeName operand
+// passed to buildBusctlArgs. systemd unit names accept the lower 7-bit
+// ASCII set [a-zA-Z0-9:-_.@] and we narrow further to the literal shape
+// `naozhi-shim-<int>.scope` we actually emit. Any drift trips the
+// assertion below — protects future call paths that might funnel
+// attacker-derived scope names into the busctl argv (R236-SEC-11 /
+// R239-SEC-7). Today the sole producer is fmt.Sprintf with %d on
+// cmd.Process.Pid, so the regex never rejects a legitimate value.
+var scopeNameRe = regexp.MustCompile(`^naozhi-shim-[0-9]+\.scope$`)
 
 // cgroupProcsPath is the fixed fallback cgroup file naozhi writes to via
 // `sudo tee` when busctl is unavailable. Exposed as a package-level const
@@ -37,7 +48,19 @@ const cgroupProcsPath = "/sys/fs/cgroup/naozhi-shims/cgroup.procs"
 // lengths are permitted but are not covered by the shipped sudoers
 // policy — callers that change the expected range must update both
 // this function's contract test and the Cmnd_Alias set in the policy.
+//
+// scopeName is asserted against scopeNameRe (R236-SEC-11 / R239-SEC-7) —
+// today the producer is always fmt.Sprintf("naozhi-shim-%d.scope", PID)
+// where PID is exec.Cmd.Process.Pid (validated int), so the assertion
+// is pure defense-in-depth for future call paths. A mismatch returns
+// nil so moveToShimsCgroup degrades to moveToShimsCgroupDirect rather
+// than handing a malformed argv to sudo + busctl.
 func buildBusctlArgs(scopeName string, pids []int) []string {
+	if !scopeNameRe.MatchString(scopeName) {
+		slog.Error("buildBusctlArgs: scope name fails character-set assertion, refusing to build argv",
+			"scope", osutil.SanitizeForLog(scopeName, 128))
+		return nil
+	}
 	args := []string{"-n", "busctl", "call",
 		"org.freedesktop.systemd1",
 		"/org/freedesktop/systemd1",
@@ -124,6 +147,16 @@ func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int) {
 	}
 
 	args := buildBusctlArgs(scopeName, pids)
+	if args == nil {
+		// scopeName failed assertion (R236-SEC-11 / R239-SEC-7). Fall back
+		// to direct cgroup move using the same already-validated PID set.
+		slog.Warn("moveToShimsCgroup: scope name rejected by assertion, falling back to direct cgroup",
+			"shim_pid", shimPID)
+		for _, pid := range pids {
+			moveToShimsCgroupDirect(parentCtx, pid)
+		}
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(parentCtx, 3*time.Second)
 	defer cancel()
