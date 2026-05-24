@@ -8,6 +8,7 @@ import (
 	_ "image/gif"
 	"image/jpeg"
 	_ "image/png"
+	"log/slog"
 
 	// Register decoders for additional inbound image formats. The dashboard
 	// (dashboard_send.go) and Discord adapter already accept webp/bmp uploads;
@@ -37,9 +38,17 @@ var thumbSem = make(chan struct{}, 4)
 // Treat decoder panics as decode-failures and return the empty string so
 // the caller renders the message without a thumbnail rather than killing
 // the server.
+//
+// R243-GO-1 [BREAKING-LOCAL]: log via slog.Error so panics are observable.
+// The previous silent recover meant the outer recover wrapper in
+// process_send.go's thumbnail goroutine was dead code (panic was already
+// swallowed here before reaching the goroutine boundary), AND every
+// crafted-malformed image was a hidden monitoring blind spot.
 func MakeThumbnail(data []byte, maxDim int) (result string) {
 	defer func() {
 		if r := recover(); r != nil {
+			slog.Error("thumbnail decode panic recovered",
+				"panic", r, "data_len", len(data))
 			result = ""
 		}
 	}()
