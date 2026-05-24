@@ -25,6 +25,8 @@ type CLIBackendsHandler struct {
 // handler can respond in O(enabled backends) time without spawning
 // subprocesses on each request. Uses context.Background() for the probe —
 // prefer NewCLIBackendsHandlerCtx when the caller has a shutdown context.
+//
+// Deprecated: prefer NewCLIBackendsHandlerCtx.
 func NewCLIBackendsHandler(router *session.Router) *CLIBackendsHandler {
 	return NewCLIBackendsHandlerCtx(context.Background(), router)
 }
