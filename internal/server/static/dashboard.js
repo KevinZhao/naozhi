@@ -13112,7 +13112,10 @@ function renderCronPanel() {
       '<div class="cron-detail-body">' +
         '<div class="cron-list-pane" id="cron-list-pane">' +
           '<div class="cron-list-head">' +
-            '<h3>定时任务' + summaryChip + '</h3>' +
+            '<div class="cron-list-head-title">' +
+              '<button class="btn-mobile-back" onclick="mobileBack()" title="返回会话列表" aria-label="返回会话列表">&#8592;</button>' +
+              '<h3>定时任务' + summaryChip + '</h3>' +
+            '</div>' +
             '<button type="button" class="cron-new-btn" onclick="createNewCronJob()" aria-label="新建定时任务">' +
               '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>' +
               ' 新建' +
