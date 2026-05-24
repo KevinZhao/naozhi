@@ -870,6 +870,7 @@ func (w *perKeyWriter) flush(p *Persister) error {
 
 	// Phase 2: write all pending idx entries (already buffered —
 	// no work to serialise bytes) and fsync idx.
+	idxAppended := false
 	if len(w.pendingIdx) > 0 {
 		// Apply stride: the first entry of every N is sparse-written,
 		// plus header (seq=0) and the last entry of the batch (so
@@ -887,6 +888,7 @@ func (w *perKeyWriter) flush(p *Persister) error {
 		if err := w.idxWriter.AppendBatch(kept); err != nil {
 			return fmt.Errorf("append idx batch: %w", err)
 		}
+		idxAppended = true
 		// entriesSinceIdxWrite is a cursor into the stride cycle —
 		// reset modulo stride so successive batches stay aligned.
 		w.entriesSinceIdxWrite = (w.entriesSinceIdxWrite + len(w.pendingIdx)) % p.opts.IdxStride
@@ -901,11 +903,18 @@ func (w *perKeyWriter) flush(p *Persister) error {
 			w.pendingIdx = w.pendingIdx[:0]
 		}
 	}
-	if err := w.idxWriter.Sync(); err != nil {
-		return fmt.Errorf("sync idx: %w", err)
+	// Skip the fsync entirely when this flush did not append any idx
+	// bytes — under high session count + short FlushInterval the idx
+	// fsync runs every tick whether or not new data landed, doubling
+	// disk fsync pressure for nothing. Recovery is unaffected: idx is
+	// only valid up to a previously-fsynced suffix anyway.
+	if idxAppended {
+		if err := w.idxWriter.Sync(); err != nil {
+			return fmt.Errorf("sync idx: %w", err)
+		}
+		p.fsyncCnt.Add(1)
+		p.opts.Observer.OnFsync()
 	}
-	p.fsyncCnt.Add(1)
-	p.opts.Observer.OnFsync()
 
 	w.dirty = false
 	return nil

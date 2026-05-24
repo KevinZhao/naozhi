@@ -21,7 +21,7 @@ func validateDaemonName(name string) error {
 	for i := 1; i < len(name); i++ {
 		c := name[i]
 		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
-			return fmt.Errorf("sysession: daemon name %q must match [a-z][a-z0-9-]{1,30}", name)
+			return fmt.Errorf("sysession: daemon name %q must contain only lowercase letters, digits, and hyphens, start with a letter, total length 2..31", name)
 		}
 	}
 	return nil
