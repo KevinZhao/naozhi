@@ -18,6 +18,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -653,6 +654,22 @@ func buildServer(opts ServerOptions) *Server {
 	//      sessionH is still nil.
 	router.SetOnKeyRetired(s.msgQueue.Cleanup)
 
+	// Construct the retired-store eagerly so the SessionHandlers below
+	// can hold a non-nil pointer; the actual file load is best-effort
+	// and a parse error here just means the store starts empty. The
+	// store is only persisted when StateDir is configured — in-memory
+	// only otherwise (tests, ephemeral deployments).
+	var retiredStore *discovery.RetiredStore
+	if opts.StateDir != "" {
+		var err error
+		retiredStore, err = discovery.NewRetiredStore(filepath.Join(opts.StateDir, "history-retired.json"))
+		if err != nil {
+			slog.Warn("retired store load failed (degrades to last_active sort)", "err", err)
+		}
+	} else {
+		retiredStore, _ = discovery.NewRetiredStore("")
+	}
+
 	s.nodeAccess = newNodeAccessor(&s.nodesMu, s.nodes, s.knownNodes)
 
 	s.nodeCache = node.NewCacheManager(
@@ -727,6 +744,7 @@ func buildServer(opts ServerOptions) *Server {
 		versionTag:    opts.Version,
 		watchdogNoOut: &s.watchdogNoOutputKills,
 		watchdogTotal: &s.watchdogTotalKills,
+		retiredStore:  retiredStore,
 	}
 	s.sessionH.initStaticStats()
 	s.sessionH.WarmHistoryCache()
@@ -741,6 +759,14 @@ func buildServer(opts ServerOptions) *Server {
 			sessionH.InvalidateHistoryCache()
 		})
 	}
+
+	// Wire the session-retired hook independently of msgQueue.Cleanup
+	// (which uses SetOnKeyRetired). Capturing s.sessionH in the closure
+	// keeps the call zero-allocation in the steady state — atomic load
+	// + 1 method call + 1 mutex op inside the store.
+	router.SetOnSessionRetired(func(_ string, sessionID string) {
+		s.sessionH.RecordRetired(sessionID)
+	})
 	s.agentEventsH = &AgentEventsHandlers{
 		router:     router,
 		nodeAccess: s.nodeAccess,
@@ -968,6 +994,17 @@ func (s *Server) Start(ctx context.Context) error {
 		s.onReady()
 	}
 
+	// Periodic flush + prune for the retired-store. 30 s is a balance
+	// between "lose at most ~30 s of marks on a SIGKILL" and keeping
+	// fsync churn modest under burst close-many sessions UX. Prune
+	// drops entries older than 14 days (= 2× the 7-day history window)
+	// so the cap pressure described in NewRetiredStoreWithCap rarely
+	// matters on a normal operator. Stops via ctx.Done in the shutdown
+	// goroutine below.
+	if s.sessionH != nil && s.sessionH.retiredStore != nil {
+		go s.runRetiredStoreFlusher(ctx)
+	}
+
 	shutdownComplete := make(chan struct{})
 	go func() {
 		<-ctx.Done()
@@ -991,6 +1028,11 @@ func (s *Server) Start(ctx context.Context) error {
 		// R64-GO-M1.
 		if s.sessionH != nil {
 			s.sessionH.WaitWarmHistory()
+			// Flush the retired-store one final time so the most recent
+			// retirement event survives a restart. The periodic flusher
+			// below writes every 30s; a clean shutdown that landed
+			// between ticks would otherwise lose a few entries.
+			s.sessionH.FlushRetiredStore()
 		}
 
 		// Wait for the initial discovery refresh goroutine (R218-GO-1).
@@ -1031,6 +1073,46 @@ func (s *Server) Start(ctx context.Context) error {
 		<-shutdownComplete
 	}
 	return err
+}
+
+// retiredStoreFlushInterval is how often runRetiredStoreFlusher writes
+// the in-memory retired-store map to disk. 30 s loses at most a single
+// burst of retirements on a hard kill while keeping fsync churn modest
+// when an operator closes many sessions in a row.
+const retiredStoreFlushInterval = 30 * time.Second
+
+// retiredStorePruneInterval governs how often runRetiredStoreFlusher
+// drops entries that fall outside the 7-day history window. A 14-day
+// cutoff (= 2× the window) avoids racing the dashboard on entries that
+// just dropped off the popover; the cap inside RetiredStore.Prune
+// handles the pathological "operator closed thousands of sessions in
+// the cutoff window" case.
+const (
+	retiredStorePruneInterval = 6 * time.Hour
+	retiredStorePruneCutoff   = 14 * 24 * time.Hour
+)
+
+// runRetiredStoreFlusher writes the retired-store to disk every
+// retiredStoreFlushInterval and prunes stale entries every
+// retiredStorePruneInterval. Stops on ctx.Done; the shutdown goroutine
+// invokes a final FlushRetiredStore so the most recent retirement event
+// survives a clean shutdown.
+func (s *Server) runRetiredStoreFlusher(ctx context.Context) {
+	flushTicker := time.NewTicker(retiredStoreFlushInterval)
+	defer flushTicker.Stop()
+	pruneTicker := time.NewTicker(retiredStorePruneInterval)
+	defer pruneTicker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-flushTicker.C:
+			s.sessionH.FlushRetiredStore()
+		case <-pruneTicker.C:
+			cutoffMs := time.Now().Add(-retiredStorePruneCutoff).UnixMilli()
+			s.sessionH.retiredStore.Prune(cutoffMs)
+		}
+	}
 }
 
 // noTokenOpenWarning is the message logged when the API accepts any caller

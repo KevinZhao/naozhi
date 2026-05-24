@@ -380,6 +380,15 @@ type SessionHandlers struct {
 	// this could saturate disk IO. Mirrors the historyFlight pattern.
 	// R60-PERF-5.
 	summaryFlight singleflight.Group
+
+	// retiredStore stamps the unix-ms instant a session left the live
+	// sidebar (Router.Reset / Router.Remove) so loadHistorySessions can
+	// emit retired_at on each RecentSession. The dashboard then sorts the
+	// history popover by retired_at || last_active, putting the most
+	// recently closed panel on top regardless of when its JSONL was last
+	// written. nil disables the feature; the response degrades to
+	// last_active-only ordering. See discovery.RetiredStore godoc.
+	retiredStore *discovery.RetiredStore
 }
 
 // GET /api/sessions
@@ -1335,6 +1344,35 @@ func (h *SessionHandlers) lookupSummariesCached(snapshots []session.SessionSnaps
 	return nil
 }
 
+
+// RecordRetired stamps the retirement instant for sessionID into the
+// retired-store and invalidates the history cache so the new ordering
+// shows up on the next dashboard poll. No-op when the store is not
+// configured (tests, deployments without StateDir). sessionID may be
+// empty when the session was retired before the CLI returned a UUID;
+// the store ignores empty IDs internally.
+func (h *SessionHandlers) RecordRetired(sessionID string) {
+	if h.retiredStore == nil || sessionID == "" {
+		return
+	}
+	h.retiredStore.MarkRetired(sessionID, time.Now())
+	h.InvalidateHistoryCache()
+}
+
+// FlushRetiredStore writes any pending retired-at marks to disk. Called
+// from server shutdown so the final retirement event survives a restart.
+// No-op when the store is not configured. Errors surface via slog inside
+// the store's Save path; this method swallows them so shutdown does not
+// fail the parent.
+func (h *SessionHandlers) FlushRetiredStore() {
+	if h.retiredStore == nil {
+		return
+	}
+	if err := h.retiredStore.Save(); err != nil {
+		slog.Warn("flush retired store failed", "err", err)
+	}
+}
+
 func (h *SessionHandlers) loadHistorySessions() []discovery.RecentSession {
 	excludeIDs := h.router.DiscoveryExcludeIDs()
 
@@ -1362,6 +1400,22 @@ func (h *SessionHandlers) loadHistorySessions() []discovery.RecentSession {
 		wsMap := h.projectMgr.ResolveWorkspaces(workspaces)
 		for i := range all {
 			all[i].Project = wsMap[all[i].Workspace]
+		}
+	}
+
+	// Stamp retired_at from the in-memory store for sessions whose
+	// retirement instant we recorded (Router.Reset / Router.Remove).
+	// Snapshot once and look each entry up so the inner loop is O(N)
+	// against an already-sorted slice instead of N retiredStore.Get
+	// mutex acquires.
+	if h.retiredStore != nil && len(all) > 0 {
+		retiredMap := h.retiredStore.Snapshot()
+		if len(retiredMap) > 0 {
+			for i := range all {
+				if ts := retiredMap[all[i].SessionID]; ts > 0 {
+					all[i].RetiredAt = ts
+				}
+			}
 		}
 	}
 

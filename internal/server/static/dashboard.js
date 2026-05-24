@@ -906,10 +906,19 @@ function toggleHistory() {
     .map(r => ({
       key: '_history:' + r.session_id, node: 'local', source: 'recent',
       session_id: r.session_id, last_active: r.last_active || 0,
+      // retired_at is the unix-ms instant the session left the live sidebar
+      // (Router.Reset / Router.Remove). When present it overrides last_active
+      // for sort ordering so the most recently closed panel sits on top —
+      // last_active reflects the JSONL's last-message timestamp, which can
+      // be days older than when the operator actually closed the session.
+      retired_at: r.retired_at || 0,
       prompt: r.last_prompt || r.summary || '',
       project: r.project || matchProject(r.workspace), tool: '',
     }));
-  merged.sort((a, b) => b.last_active - a.last_active);
+  // Sort key: retired_at when known, else last_active (back-compat for
+  // sessions retired before this naozhi process started — their UUID is
+  // not in the in-memory store and last_active is the only signal we have).
+  merged.sort((a, b) => (b.retired_at || b.last_active) - (a.retired_at || a.last_active));
 
   const popover = document.createElement('div');
   popover.className = isMobile() ? 'history-sheet' : 'history-popover';
