@@ -448,6 +448,38 @@ type shimLineReader struct {
 	proc *Process
 }
 
+// ReadLine returns the next CLI stdout line received over the shim
+// transport, blocking until either a stdout frame arrives or the shim
+// signals CLI exit.
+//
+// Protocol contract (R240-CR-13):
+//
+//   - Each newline-terminated frame on the shim socket is a JSON
+//     `shimMsg` envelope (see `internal/shim/protocol.go`). The shim
+//     never forwards raw CLI bytes — every byte the CLI writes to its
+//     stdout reaches us re-wrapped under `{"type":"stdout","line":...}`.
+//   - `stdout` frames carry one logical CLI line in `line`; the
+//     trailing `\n` is stripped by the shim, so callers downstream
+//     (Protocol.Init) treat the returned []byte as a complete event
+//     payload without further splitting.
+//   - `cli_exited` is a terminal control frame. Returning a non-nil
+//     error here triggers Init failure paths in the caller; we use a
+//     descriptive message so an EOF mid-handshake is distinguishable
+//     from a transport-level read error in logs.
+//   - Anything else (`stderr`, `pong`, future control types) is
+//     swallowed silently — Init only consumes stdout, and other types
+//     are routed via different shim mechanisms once readLoop owns the
+//     stream. The loop continues until the next stdout/cli_exited
+//     frame, mirroring readLoop's discrimination.
+//   - JSON parse failure on a frame is non-fatal: corrupt or partial
+//     control frames from a misbehaving shim are skipped rather than
+//     killing handshake. Read errors (transport-level) are returned
+//     with eof=true so Init can retry or surface the failure.
+//
+// The (data, eof, err) signature matches the LineReader interface
+// consumed by Protocol.Init; eof==true means "no more lines will ever
+// arrive on this connection" and is mutually exclusive with a non-nil
+// data return.
 func (r *shimLineReader) ReadLine() ([]byte, bool, error) {
 	// During Init, we need to read lines that come through the shim stdout wrapper.
 	// The shim sends {"type":"stdout","line":"..."} — we need to unwrap.
