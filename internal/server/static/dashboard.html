@@ -980,12 +980,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
   .event.user .event-content{max-width:85%}
   .event.text+.event.user{margin-top:16px}
   /* Cron detail: tight mobile layout — sit flush against the screen edges
-     and reclaim vertical real estate. Outer .cron-detail keeps no padding;
-     list-pane uses safe-area-aware horizontal padding (4-8px) so cards span
-     edge-to-edge, plus a smaller vertical padding to bring content closer
-     to the header. cron-list-head / overview / filter margins also shrink. */
+     and reclaim vertical real estate. Outer .cron-detail keeps no padding.
+     list-pane padding is overridden further down at line ~1796 (its own
+     mobile media query, source-ordered after the desktop default at
+     ~1478 so the override actually takes effect). */
   .cron-detail{padding:0}
-  .cron-detail-body > .cron-list-pane{padding:6px max(4px,env(safe-area-inset-right)) 8px max(4px,env(safe-area-inset-left))}
   .cron-list-head{margin-bottom:6px;gap:8px}
   .cron-list-head h3{font-size:15px}
   .cron-overview{margin-bottom:6px}
@@ -1793,7 +1792,16 @@ body.kbd-open .input-hints{display:none}
 
 /* Mobile polish for Cron cards + modal */
 @media(max-width:768px){
-  .cron-detail-body{padding:12px}
+  /* cron-detail-body is the flex shell holding list-pane + drawer-pane;
+     padding here pushes both inward and creates the visible left/right
+     margin around the list cards. Mobile fix sets padding:0 and lets
+     list-pane control its own (safe-area-aware) padding below. */
+  .cron-detail-body{padding:0}
+  /* Tight horizontal padding so cards span edge-to-edge; vertical padding
+     trimmed so the list starts closer to the header. Placed here (after
+     the line ~1478 default) so source order wins the same-specificity
+     rule. */
+  .cron-detail-body > .cron-list-pane{padding:6px max(4px,env(safe-area-inset-right)) 8px max(4px,env(safe-area-inset-left))}
   .cron-new-btn{min-height:40px}
   /* Bottom-sheet modal: cap height so textarea/lists stay scrollable above keyboard */
   .modal{max-height:85dvh;display:flex;flex-direction:column}
