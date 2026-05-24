@@ -229,9 +229,9 @@ func (s *runStore) Append(run *CronRun) {
 		// 退化路径：把 Result 砍到极短，重新 marshal。Prompt 亦同。
 		// 这里不返回 — 一定要落盘一条记录，UI 才能看到 "曾有这么一条 run"。
 		shrunk := *run
-		shrunk.Result = truncateForRetry(shrunk.Result, maxRetryFieldRunes)
-		shrunk.Prompt = truncateForRetry(shrunk.Prompt, maxRetryFieldRunes)
-		shrunk.ErrorMsg = truncateForRetry(shrunk.ErrorMsg, maxRetryFieldRunes)
+		shrunk.Result = truncateWithSuffix(shrunk.Result, maxRetryFieldRunes)
+		shrunk.Prompt = truncateWithSuffix(shrunk.Prompt, maxRetryFieldRunes)
+		shrunk.ErrorMsg = truncateWithSuffix(shrunk.ErrorMsg, maxRetryFieldRunes)
 		if data2, err2 := json.Marshal(&shrunk); err2 == nil && int64(len(data2)) <= s.maxRunBytes {
 			data = data2
 		} else {
@@ -424,24 +424,6 @@ func (s *runStore) copySummariesLocked(src []CronRunSummary, limit int) []CronRu
 // cacheInvalidate forgets the cache entry for jobID. Used by DeleteJob.
 func (s *runStore) cacheInvalidate(jobID string) {
 	s.recentCache.Delete(jobID)
-}
-
-// truncateForRetry shrinks a string for the over-cap retry path. Keeps
-// the prefix + "…[truncated]" sentinel so the UI can still indicate
-// data was lost without forcing a code change. maxRunes counts runes,
-// not bytes — a byte-level slice would split multi-byte UTF-8 (Chinese
-// prompts/results are common here) and produce a malformed string that
-// json.Marshal silently re-encodes as U+FFFD; in the worst case the
-// second marshal still exceeds maxRunBytes and the run record is never
-// persisted. Rune-aware truncation closes that hole. R221-FIX-P0-1.
-//
-// R234-CR-1: delegates to truncateWithSuffix in limits.go so the suffix
-// literal stays in one place. Wrapper retained because the retry path's
-// rune budget (maxRetryFieldRunes) is logically distinct from the
-// over-cap result budget — keeping the named entry point makes call
-// sites self-documenting.
-func truncateForRetry(s string, maxRunes int) string {
-	return truncateWithSuffix(s, maxRunes)
 }
 
 // maxRetryFieldRunes 是 over-cap retry 路径每个字段（Result/Prompt/ErrorMsg）
