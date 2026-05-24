@@ -114,6 +114,99 @@ func storeMetaPath(storePath string) string {
 	return filepath.Join(filepath.Dir(storePath), stem+".meta"+ext)
 }
 
+// sessionToStoreEntry converts a ManagedSession to its on-disk storeEntry
+// representation, returning (_, false) when the session is intentionally
+// skipped from persistence (scratch / sys daemon stub / no SessionID yet).
+//
+// Pulled out of saveStore (R241-PERF-8) so:
+//   - the per-session conversion logic is independently unit-testable
+//     and benchmarkable;
+//   - a future parallel saveStore can fan-out N entries to a worker
+//     pool (the only mutable shared state was `entries` in the caller —
+//     pure read on the ManagedSession side except for atomic loads);
+//   - the saveStore body shrinks to its actual job (gather + marshal +
+//     atomic write + meta sidecar).
+//
+// CONTRACT: callers MUST hold no Router-level lock here. sessionToStoreEntry
+// takes ManagedSession.historyMu RLock for the prevSession* read (race-safe
+// with SetPrevSessionOrigins) and reads all other fields via accessor methods
+// (Workspace / UserLabel / etc.) which each take their own per-field atomic
+// or mutex. Holding r.mu during this call would invert the documented
+// (r.mu → s.historyMu) order from auto_chain_router.go.
+func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
+	// Scratch (ephemeral aside) sessions are deliberately volatile: they
+	// must not persist across restarts, or loadStore would resurrect a
+	// zombie scratch whose quoted-context --append-system-prompt is long
+	// gone and whose dashboard tab has been closed. Skip them here — the
+	// pool TTL sweeper handles live cleanup; persistence simply never
+	// records them.
+	if IsScratchKey(s.key) {
+		return storeEntry{}, false
+	}
+	// System daemon stubs (sys:{name}) are register-on-startup (see
+	// docs/rfc/system-session.md §3.4). Skipping persistence here is an
+	// independent guard from isExemptKey (which only governs TTL/LRU);
+	// a future stub-using daemon would otherwise leave dangling entries
+	// in sessions.json that the next naozhi binary may not know how to
+	// resurrect — and persisting them would broaden the attack surface
+	// for sessions.json tampering (RFC §14).
+	if IsSysKey(s.key) {
+		return storeEntry{}, false
+	}
+	// Use getSessionID to avoid data race with concurrent Send.
+	// Fallback to process's SessionID which is set earlier (on system/init),
+	// before Send() completes and propagates it to ManagedSession.
+	// Snapshot loadProcess() once — calling it twice (once for sid,
+	// again for cost) can observe different processes across a
+	// concurrent spawnSession, where the second call hits a fresh
+	// process whose TotalCost() is 0 and silently clobbers the real
+	// historical cost that should have been persisted.
+	proc := s.loadProcess()
+	sid := s.getSessionID()
+	if sid == "" && proc != nil {
+		sid = proc.GetSessionID()
+	}
+	if sid == "" {
+		return storeEntry{}, false
+	}
+	var cost float64
+	if proc != nil {
+		cost = proc.TotalCost()
+	} else {
+		cost = loadTotalCost(&s.totalCost)
+	}
+	// Clone PrevSessionIDs / PrevSessionOrigins under historyMu so
+	// the persistence path does not share the backing array with
+	// live session mutations (spawnSession reassigns s.prevSessionIDs
+	// but callers could in theory hold the original slice; clone is
+	// cheap and forward-safe). Both slices are read in the same
+	// critical section so a concurrent SetPrevSessionOrigins cannot
+	// publish a half-mutated pair.
+	var prevIDs []string
+	var prevOrigins []string
+	s.historyMu.RLock()
+	if len(s.prevSessionIDs) > 0 {
+		prevIDs = slices.Clone(s.prevSessionIDs)
+	}
+	if len(s.prevSessionOrigins) > 0 {
+		prevOrigins = slices.Clone(s.prevSessionOrigins)
+	}
+	s.historyMu.RUnlock()
+	return storeEntry{
+		Key:                s.key,
+		SessionID:          sid,
+		PrevSessionIDs:     prevIDs,
+		PrevSessionOrigins: prevOrigins,
+		TotalCost:          cost,
+		Workspace:          s.Workspace(),
+		Backend:            s.Backend(),
+		LastActive:         s.lastActive.Load(),
+		UserLabel:          s.UserLabel(),
+		LabelOrigin:        s.LabelOrigin(),
+		Model:              s.Model(),
+	}, true
+}
+
 func saveStore(path string, sessions map[string]*ManagedSession) error {
 	if path == "" {
 		return nil
@@ -126,76 +219,11 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 
 	entries := make([]storeEntry, 0, len(sessions))
 	for _, s := range sessions {
-		// Scratch (ephemeral aside) sessions are deliberately volatile: they
-		// must not persist across restarts, or loadStore would resurrect a
-		// zombie scratch whose quoted-context --append-system-prompt is long
-		// gone and whose dashboard tab has been closed. Skip them here — the
-		// pool TTL sweeper handles live cleanup; persistence simply never
-		// records them.
-		if IsScratchKey(s.key) {
+		entry, ok := sessionToStoreEntry(s)
+		if !ok {
 			continue
 		}
-		// System daemon stubs (sys:{name}) are register-on-startup (see
-		// docs/rfc/system-session.md §3.4). Skipping persistence here is an
-		// independent guard from isExemptKey (which only governs TTL/LRU);
-		// a future stub-using daemon would otherwise leave dangling entries
-		// in sessions.json that the next naozhi binary may not know how to
-		// resurrect — and persisting them would broaden the attack surface
-		// for sessions.json tampering (RFC §14).
-		if IsSysKey(s.key) {
-			continue
-		}
-		// Use getSessionID to avoid data race with concurrent Send.
-		// Fallback to process's SessionID which is set earlier (on system/init),
-		// before Send() completes and propagates it to ManagedSession.
-		// Snapshot loadProcess() once — calling it twice (once for sid,
-		// again for cost) can observe different processes across a
-		// concurrent spawnSession, where the second call hits a fresh
-		// process whose TotalCost() is 0 and silently clobbers the real
-		// historical cost that should have been persisted.
-		proc := s.loadProcess()
-		sid := s.getSessionID()
-		if sid == "" && proc != nil {
-			sid = proc.GetSessionID()
-		}
-		if sid != "" {
-			var cost float64
-			if proc != nil {
-				cost = proc.TotalCost()
-			} else {
-				cost = loadTotalCost(&s.totalCost)
-			}
-			// Clone PrevSessionIDs / PrevSessionOrigins under historyMu so
-			// the persistence path does not share the backing array with
-			// live session mutations (spawnSession reassigns s.prevSessionIDs
-			// but callers could in theory hold the original slice; clone is
-			// cheap and forward-safe). Both slices are read in the same
-			// critical section so a concurrent SetPrevSessionOrigins cannot
-			// publish a half-mutated pair.
-			var prevIDs []string
-			var prevOrigins []string
-			s.historyMu.RLock()
-			if len(s.prevSessionIDs) > 0 {
-				prevIDs = slices.Clone(s.prevSessionIDs)
-			}
-			if len(s.prevSessionOrigins) > 0 {
-				prevOrigins = slices.Clone(s.prevSessionOrigins)
-			}
-			s.historyMu.RUnlock()
-			entries = append(entries, storeEntry{
-				Key:                s.key,
-				SessionID:          sid,
-				PrevSessionIDs:     prevIDs,
-				PrevSessionOrigins: prevOrigins,
-				TotalCost:          cost,
-				Workspace:          s.Workspace(),
-				Backend:            s.Backend(),
-				LastActive:         s.lastActive.Load(),
-				UserLabel:          s.UserLabel(),
-				LabelOrigin:        s.LabelOrigin(),
-				Model:              s.Model(),
-			})
-		}
+		entries = append(entries, entry)
 	}
 
 	data, err := json.Marshal(entries)
