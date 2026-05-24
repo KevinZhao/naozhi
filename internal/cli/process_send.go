@@ -71,11 +71,14 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 					defer wg.Done()
 					sem <- struct{}{}
 					defer func() { <-sem }()
-					defer func() {
-						if rv := recover(); rv != nil {
-							slog.Error("thumbnail panic recovered", "img_index", i, "panic", rv)
-						}
-					}()
+					// R243-GO-1: outer `recover` was dead code —
+					// MakeThumbnail's own defer (thumbnail.go:41) already
+					// recovers decoder panics from x/image and returns "".
+					// The outer slog.Error never fired; drop it. If a
+					// future panic source is added inside MakeThumbnail
+					// that the inner recover misses, prefer wiring it
+					// there (single recover point) over re-adding a layer
+					// here.
 					thumbs[i] = MakeThumbnail(data, 600)
 				}(i, img.Data)
 			}
