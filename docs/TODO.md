@@ -140,7 +140,7 @@
 - [ ] **R246-GO-1 [P1] [BREAKING-LOCAL] — `internal/cron/scheduler_jobs.go:782-832` TriggerNow.entryID 读在 unlock 之后**: s.cron.Entry(entryID) 在 s.mu.Unlock 后调，并发 UpdateJob 改 j.entryID 后 Remove 旧 ID 致正常 schedule 误判 entry gone。建议：把 cron.Entry(entryID) 提到 unlock 前；或在 executeIfNotDeletedOrPaused 重新解析最新 entryID。
 - [ ] **R246-GO-2 [P1] [REPEAT-25] — `internal/cron/scheduler_jobs.go:587-608` SetJobPrompt rollback 不复位 entryID**: rollback 顺序问题 + ErrJobAlreadyPaused 被 errors.Is 忽略导致未真正回滚 + 临时 fire 一次。建议：先 cron.Remove(j.entryID); j.entryID=0; j.Paused=waspaused; j.Prompt="" 顺序正确。
 - [ ] **R246-GO-3 [P1] [BREAKING-LOCAL] — `internal/cron/scheduler_run.go:367-411` finishRun 失败时 inflight 元数据延迟清理**: defer 顺序导致 CurrentRun(jobID) 仍能 Load runInflightView{Phase:Spawning} 与 cron_run_ended 并行出现。建议：finishRun 第一行 inflight.reset() 让 broadcast 与 inflight view 一致。
-- [ ] **R246-GO-4 [P2] [REPEAT-34] — `internal/cron/runstore.go:282-339` Append 每次 os.MkdirAll 在热路径**: 长寿 job 每次写盘多 lstat+mkdir syscall。建议：sync.Map[jobID]struct{} 记录已确保过目录，与 storeDirOnce 思路一致。
+- [~] **R246-GO-4 [P2] [REPEAT-34] — `internal/cron/runstore.go:282-339` Append 每次 os.MkdirAll 在热路径**: 长寿 job 每次写盘多 lstat+mkdir syscall。建议：sync.Map[jobID]struct{} 记录已确保过目录，与 storeDirOnce 思路一致。
 - [ ] **R246-GO-5 [P2] [REFACTOR] — `internal/cron/scheduler.go:684-777` Stop 路径 saveJobs 失败留下"假成功"语义**: marshal 失败 return 不 save，但 stopCancel/cron.Stop 已发生，调用方拿到 void Stop() 不知数据丢失。建议：Stop() 改返回 error；或至少 slog.Error 加 "persist": "FAILED_DURING_SHUTDOWN" 增加 alert key。
 - [ ] **R246-GO-6 [P1] [BREAKING-LOCAL] — `internal/cron/scheduler_run.go:629-633` abortCh 阻塞读不带 timeout**: sess.InterruptViaControl 可能阻塞，cron Stop 路径上突破 stopBudget。建议：select { case abort = <-abortCh: case <-time.After(2s): abort = abortResult{} }。
 - [ ] **R246-GO-7 [P2] [REPEAT-19] — `internal/cron/scheduler_run.go:431-440` jitter 后只 re-check job 在 map，未 re-check Paused**: jitter 窗口内若 PauseJobByID 被调用，scheduled tick 仍执行违反 "Paused job must not run" 不变量。建议：jitter 后那段 RLock 同时读 paused，paused 时直接 return。
@@ -153,12 +153,12 @@
 - [ ] **R246-GO-14 [P2] [REPEAT-19] — `internal/dispatch/dispatch.go:1041-1055` todoLoop 终止时未 drain pendingTodo**: tracker 引用通过 pendingTodo *string 间接持住到下次 GC。建议：stop() 把 pendingTodo.Store(nil) 显式清。
 - [ ] **R246-GO-15 [P3] [REPEAT-25] — `internal/cron/runinflight.go:64-73` strHeap/timeHeap 每次 Store 都 alloc**: setPhase 在 fast-path Load 比较虽避免重复 store 但 phase 值实际每次都不同。建议：phase 改用 atomic.Int32 枚举（PhaseQueued..Sending），string version 留 export 时 lookup。
 - [ ] **R246-GO-16 [P2] [REPEAT-37] — `internal/cron/scheduler_jobs.go:870-890` findByPrefix 在持 s.mu.Lock 下做 O(N) scan**: 500 job 全 scan + strings.HasPrefix 写锁下，并发 dashboard 列表读直接被阻塞。建议：findByPrefix 自己拿 RLock；或维护 prefix→[]ID 小 trie。
-- [ ] **R246-GO-17 [P3] [REPEAT-40] — `internal/cron/scheduler_run.go:486-500` ExtraArgs clip 但 AgentOpts 其他 slice/map 未 clone**: 当前没看到下游 append 但 hardening 不全。建议：cloneAgentOpts(opts) 工具函数复制所有 slice/map。
+- [~] **R246-GO-17 [P3] [REPEAT-40] — `internal/cron/scheduler_run.go:486-500` ExtraArgs clip 但 AgentOpts 其他 slice/map 未 clone**: 当前没看到下游 append 但 hardening 不全。建议：cloneAgentOpts(opts) 工具函数复制所有 slice/map。
 - [ ] **R246-GO-18 [P2] [REPEAT-19] — `internal/cron/scheduler_run.go:339-350` runDeadlineWatchdog success 路径未 drain ch**: 当前 OK 但未来加 abort 逻辑会丢信息。建议：success 路径也显式 _ = <-abortCh 与 error 分支一致。
 - [ ] **R246-GO-19 [P3] [REPEAT-25] — `internal/cron/scheduler_callbacks.go:61-67` SetOnExecute 注释承认"参数地址"导致 fn escape**: SetOnRunStarted/Ended 闭包用 atomic.Pointer 解 *fn 后再调；每次 emit 多一次 deref。建议：直接 atomic.Pointer[OnExecuteFunc] 改 holder struct（与 router_core.go onChangeHolder 模式一致）。
 - [ ] **R246-GO-20 [P2] [BREAKING-LOCAL] — `internal/cron/runstore.go:733-819` trimJobLocked sort+remove 在持 jobLock 阻塞 Append**: 200 entries × keepCount sort + N×Remove syscall 在 jobLock 下，并发 Append 排队。建议：Remove 阶段释放 jobLock。
-- [ ] **R246-GO-21 [P3] [REPEAT-40] — `internal/cron/scheduler.go:387-406` applyDefaults 每次复制 cfg.SchedulerConfig**: ~280 字节复制。建议：applyDefaults pointer receiver in-place。
-- [ ] **R246-GO-22 [P3] [REPEAT-34] — `internal/cron/scheduler_run.go:721-747` applyJitter NewTimer/Stop 频繁**: 当前 100 timer/min 成本可忽略，未来 5000 jobs 再优化。建议：保持现状但加注释；或 sync.Pool of *time.Timer。
+- [~] **R246-GO-21 [P3] [REPEAT-40] — `internal/cron/scheduler.go:387-406` applyDefaults 每次复制 cfg.SchedulerConfig**: ~280 字节复制。建议：applyDefaults pointer receiver in-place。
+- [~] **R246-GO-22 [P3] [REPEAT-34] — `internal/cron/scheduler_run.go:721-747` applyJitter NewTimer/Stop 频繁**: 当前 100 timer/min 成本可忽略，未来 5000 jobs 再优化。建议：保持现状但加注释；或 sync.Pool of *time.Timer。
 
 #### 性能（PERF，16 项）
 
@@ -249,7 +249,7 @@
 - [ ] **R245-SEC-2 [REFACTOR] — `internal/server/dashboard_auth.go:344` token rotation 不立即作废现存 cookie**: cookieMAC = HMAC(cookieSecret, dashboardToken)；hot-reload 改 token 后旧 cookie 仍有效 ≤24h。建议：MAC 输入加 cookie-gen timestamp + freshness window；或在 stateDir 维护 nonce 计数 token rotation 时递增。
 - [ ] **R245-SEC-5 [BREAKING-LOCAL] — `internal/platform/feishu/transport_hook.go:101-110` token-only 模式无 replay 保护**: timestamp 头空 + EncryptKey="" + token 非空时跳过 timestamp 校验，nonce 也跳。建议：任何 auth 凭据存在时强制要求 X-Lark-Request-Timestamp + Nonce + dedup。
 - [ ] **R245-SEC-7 [BREAKING-LOCAL] — `internal/server/project_files.go:48-63` __public_tmp__ 多用户场景泄漏**: 任意 auth 用户可读 /tmp 下他用户 0600 文件。建议：加 server.allow_tmp_preview 配置项默认 false，或拒绝 mode 0600 owned-by-other-uid。
-- [ ] **R245-SEC-8 [BREAKING-LOCAL] — `internal/cron/store.go:56-58` Lstat 非 ErrNotExist 错误未拒绝**: EACCES/ELOOP 时 fall through 到 os.Open 跟随 symlink。建议：除 ErrNotExist 外所有 Lstat 错误均直接返回。
+- [~] **R245-SEC-8 [BREAKING-LOCAL] — `internal/cron/store.go:56-58` Lstat 非 ErrNotExist 错误未拒绝**: EACCES/ELOOP 时 fall through 到 os.Open 跟随 symlink。建议：除 ErrNotExist 外所有 Lstat 错误均直接返回。
 - [ ] **R245-SEC-9 [BREAKING-LOCAL] — `internal/server/dashboard_auth.go:117-121` token 为空时仍走 MAC cookie 路径**: dashboardToken="" 时 isAuthenticated 已无条件 true，但 cookieMAC 仍计算空字符串 deterministic MAC，逻辑残留可被未来回归利用。建议：token 空时跳过 cookie 流程整段。
 - [ ] **R245-SEC-10 [BREAKING-LOCAL] — `internal/server/project_files.go:808-824` serveRender CSP img-src 'self' 残留**: sandbox 下 'self' 让 rendered blob 可向 dashboard origin 发图片请求。建议：img-src 改为 `data: blob:`。
 - [ ] **R245-SEC-11 [BREAKING-LOCAL] — `internal/sysession/runner.go:147-150` BinPath 相对名 + PATH 时序竞态**: NewRunner 抓 r.env 后若 parent PATH 被并发 os.Setenv 改动则发生分叉。建议：NewRunner 用 exec.LookPath 在 r.env 的 PATH 下解析为绝对路径并固化到 BinPath。
