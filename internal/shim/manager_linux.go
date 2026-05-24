@@ -10,12 +10,21 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// validScopeName matches a systemd transient unit scope name we are willing
+// to pass as the first positional `busctl call StartTransientUnit` argument.
+// Matches systemd's own valid_unit_name predicate (subset): ASCII letters,
+// digits, hyphen, underscore, and period only. R236-SEC-11: defense-in-depth
+// against future refactors that derive scopeName from less-trusted input
+// than today's `fmt.Sprintf("naozhi-shim-%d.scope", shimPID)`.
+var validScopeName = regexp.MustCompile(`^[a-zA-Z0-9._-]+\.scope$`)
 
 // cgroupProcsPath is the fixed fallback cgroup file naozhi writes to via
 // `sudo tee` when busctl is unavailable. Exposed as a package-level const
@@ -37,7 +46,19 @@ const cgroupProcsPath = "/sys/fs/cgroup/naozhi-shims/cgroup.procs"
 // lengths are permitted but are not covered by the shipped sudoers
 // policy — callers that change the expected range must update both
 // this function's contract test and the Cmnd_Alias set in the policy.
+//
+// R236-SEC-11: the caller is responsible for vetting scopeName via
+// validScopeName before invoking this builder. Today's only producer is
+// `moveToShimsCgroup` which derives scopeName from a Go-typed shimPID via
+// fmt.Sprintf, so the runtime value can never carry shell-meta or D-Bus-
+// meta characters; the regex is defensive against future refactors that
+// surface a less-trusted source. Returning an empty slice on rejection
+// is intentional — callers must check for it and fall back to the
+// direct cgroup write rather than hand argv to sudo.
 func buildBusctlArgs(scopeName string, pids []int) []string {
+	if !validScopeName.MatchString(scopeName) {
+		return nil
+	}
 	args := []string{"-n", "busctl", "call",
 		"org.freedesktop.systemd1",
 		"/org/freedesktop/systemd1",
@@ -124,6 +145,17 @@ func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int) {
 	}
 
 	args := buildBusctlArgs(scopeName, pids)
+	if len(args) == 0 {
+		// scopeName failed validScopeName — should be impossible given our
+		// fmt.Sprintf source, but if it ever happens we'd rather fall back
+		// to the direct cgroup write than launch sudo with malformed argv.
+		slog.Warn("moveToShimsCgroup: scope name rejected by validation, falling back to direct cgroup",
+			"scope", scopeName, "pid", shimPID)
+		for _, pid := range pids {
+			moveToShimsCgroupDirect(parentCtx, pid)
+		}
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(parentCtx, 3*time.Second)
 	defer cancel()

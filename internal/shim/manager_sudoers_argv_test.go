@@ -76,6 +76,36 @@ func TestBuildBusctlArgs_ShapeMatchesSudoersPolicy(t *testing.T) {
 	}
 }
 
+// TestBuildBusctlArgs_RejectsBadScopeName guards R236-SEC-11. The scope name
+// passed into the StartTransientUnit busctl call is the only argv operand
+// derived from a runtime value (a PID-formatted Sprintf today, but future
+// refactors could surface a less-trusted source). Reject anything that
+// doesn't match `[a-zA-Z0-9._-]+\.scope` so a fast-fail at the builder
+// layer prevents shell-meta or D-Bus-meta payloads from reaching sudo.
+func TestBuildBusctlArgs_RejectsBadScopeName(t *testing.T) {
+	t.Parallel()
+	bad := []string{
+		"",                              // empty
+		"naozhi-shim-1.scope; rm -rf /", // shell-meta injection
+		"naozhi shim 1.scope",           // whitespace
+		"../../etc/passwd",              // path traversal
+		"naozhi-shim-1.service",         // wrong suffix
+		"naozhi-shim-1",                 // missing suffix
+		"naozhi/shim/1.scope",           // path separator
+		"naozhi-shim-\x001.scope",       // NUL byte
+	}
+	for _, name := range bad {
+		got := buildBusctlArgs(name, []int{1})
+		if got != nil {
+			t.Errorf("buildBusctlArgs(%q) = %v, want nil", name, got)
+		}
+	}
+	// Sanity: known-good shapes still produce argv.
+	if got := buildBusctlArgs("naozhi-shim-12345.scope", []int{12345}); got == nil {
+		t.Error("buildBusctlArgs rejected a valid scope name")
+	}
+}
+
 // TestCgroupProcsPath_MatchesSudoersPolicy pins the procs file the
 // fallback `sudo tee` writes to. The same literal is hard-coded in
 // deploy/naozhi-sudoers.example's NAOZHI_TEE_CGROUP Cmnd_Alias — this
