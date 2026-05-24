@@ -390,7 +390,8 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	// wrong: bufio.Scanner pre-fills a 256 KB buffer, so the underlying
 	// file offset can advance well past the LimitReader's logical
 	// budget even when the scanner only consumed the first line.
-	lr := &io.LimitedReader{R: f, N: maxTranscriptBytes}
+	// 显式 int64 cast 防止 maxTranscriptBytes 类型变更后静默截断（当前已是 int64）。
+	lr := &io.LimitedReader{R: f, N: int64(maxTranscriptBytes)}
 	scanner := bufio.NewScanner(lr)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxTranscriptLineBytes)
 
@@ -755,12 +756,9 @@ func summariseToolInput(name string, input json.RawMessage) string {
 			}
 		}
 	}
-	// Fallback: marshal back, trim to 200 runes.
-	b, err := json.Marshal(obj)
-	if err != nil {
-		return ""
-	}
-	return osutil.SanitizeForLog(string(b), 200)
+	// Fallback: 沿用原已校验过的 input bytes（json.Unmarshal 不改写源 bytes，
+	// obj 只用于 key 探测，无需再 Marshal 一次浪费 alloc）。R244-GO-P2-2.
+	return osutil.SanitizeForLog(string(input), 200)
 }
 
 // parseISO8601MS converts an RFC 3339 / ISO 8601 timestamp into unix ms.
@@ -770,6 +768,7 @@ func summariseToolInput(name string, input json.RawMessage) string {
 // time.RFC3339Nano is a strict superset of time.RFC3339 — any timestamp
 // the latter accepts is also accepted by the former — so the previous
 // RFC3339 fallback was dead code and is now removed (R243-CR-P3-6).
+// (Go time.Parse treats .999... fragment as optional, so RFC3339Nano layout accepts both fractional and non-fractional inputs.)
 func parseISO8601MS(s string) int64 {
 	if s == "" {
 		return 0

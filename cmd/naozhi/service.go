@@ -74,7 +74,9 @@ func runInstall(args []string) {
 	// re-run daemon-reload + restart after a binary swap with no unit
 	// churn. Orthogonal to -dry-run (the pair prints the forced plan).
 	force := fs.Bool("force", false, "rewrite unit file and restart even if nothing changed (systemd only)")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		fatalf("parse install args: %v", err)
+	}
 
 	if *configPath == "" {
 		_, home := serviceUser()
@@ -93,7 +95,10 @@ func runInstall(args []string) {
 	if err != nil {
 		fatalf("find binary path: %v", err)
 	}
-	binary, _ = filepath.EvalSymlinks(binary)
+	// EvalSymlinks 失败时回退到原始路径（典型场景：binary 通过非符号链接路径运行）
+	if resolved, err := filepath.EvalSymlinks(binary); err == nil {
+		binary = resolved
+	}
 
 	switch runtime.GOOS {
 	case "linux":
