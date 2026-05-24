@@ -49,10 +49,28 @@ func newDiscoveryCache(claudeDir string, getExclude func() (map[int]bool, map[st
 // refresh and the ticker loop are tracked by dc.wg so Server.Shutdown can
 // Wait() on them after cancelling ctx — otherwise a tick fired between
 // ctx-cancel and projectMgr cleanup would race on disposed state. R218B-GO-1.
+//
+// R242-GO-19: the initial refresh goroutine previously ignored ctx
+// entirely — Server.Shutdown could cancel before refresh()'s blocking
+// discovery.Scan finished, leaving Wait() blocked on a goroutine no one
+// could interrupt. Tick-loop already short-circuits on ctx.Done; gate
+// the initial call the same way so a SIGTERM during boot doesn't burn
+// the full Scan budget on a server about to die anyway.
 func (dc *discoveryCache) startLoop(ctx context.Context) {
 	dc.wg.Add(1)
 	go func() {
 		defer dc.wg.Done()
+		// Quick pre-scan ctx check so a SIGTERM caught before this
+		// goroutine is scheduled (or while still parked) skips the
+		// expensive Scan entirely. Scan itself doesn't take ctx, so
+		// this is the only point we can pre-empt without invasive
+		// surgery to discovery.Scan; an in-flight Scan still runs to
+		// completion (≤O(few hundred ms) for a typical claude dir).
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		dc.refresh()
 	}()
 	dc.wg.Add(1)
