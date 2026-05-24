@@ -150,11 +150,11 @@
 - [ ] **R247-SEC-14 — attachment store MkdirAll 0700 同 mode 漏修（P2）** [REFACTOR]: `internal/attachment/store.go:232` workspace 共享场景下他 UID 可预创建。
 - [ ] **R247-SEC-15 — mintAnonCookie 30d MaxAge 永不轮换（P2）** [BREAKING-LOCAL]: `internal/server/dashboard_send.go:39-52` token 模式切换 / 服务重启不清。方案：缩到 7d 或登录态变化时强制 expire。
 - [ ] **R247-SEC-16 — ownerKeyFromCookie sha256[:8] 64-bit 熵（P2）** [BREAKING-LOCAL]: `internal/server/dashboard_send.go:114-120` 同 BroadcastCronResult/ETag short-hash。方案：sha256[:16]（128-bit）。
-- [ ] **R247-SEC-17 — cookieMAC 缺 cookie-rotation（P2）** [REPEAT-3]: `internal/server/dashboard_auth.go:117-121` 与 R243-SEC-13/R245-SEC-2/R242-SEC-5 同根因；HMAC 输入未含 ts/nonce。方案：MAC 输入加 cookie-gen ts。
+- [~] **R247-SEC-17 — cookieMAC 缺 cookie-rotation（P2）** [REPEAT-3]: `internal/server/dashboard_auth.go:117-121` 与 R243-SEC-13/R245-SEC-2/R242-SEC-5 同根因；HMAC 输入未含 ts/nonce。方案：MAC 输入加 cookie-gen ts。
 - [ ] **R247-SEC-18 — collectTranscripts 直拼 alternative.Transcript（P3）** [REFACTOR]: `internal/transcribe/transcribe.go:194` 未过 SanitizeForLog/IsLogInjectionRune。方案：与 cron sanitiseRunResult 对齐过滤 bidi/C1。
-- [ ] **R247-SEC-19 — sysession runner BinPath 未 LookPath 校验（P3）** [REPEAT-2]: `internal/sysession/runner.go:79` 与 R245-SEC-15 同根因不同位置。方案：NewRunner 时 exec.LookPath + os.Lstat regular file。
+- [~] **R247-SEC-19 — sysession runner BinPath 未 LookPath 校验（P3）** [REPEAT-2]: `internal/sysession/runner.go:79` 与 R245-SEC-15 同根因不同位置。方案：NewRunner 时 exec.LookPath + os.Lstat regular file。
 - [ ] **R247-SEC-20 — uploadStore.Put crypto/rand 失败 panic（P3）** [REFACTOR]: `internal/server/upload_store.go:122` 让 HTTP server 倒塌。方案：返 errUploadStoreFull + slog.Error。
-- [ ] **R247-SEC-21 — cliAvailable os.Stat 暴露二进制路径（P3）** [REFACTOR]: `internal/server/health.go:283-289` 认证后 token 窃取者可探主机布局。方案：返常量 boolean 不区分 IO 类型。
+- [~] **R247-SEC-21 — cliAvailable os.Stat 暴露二进制路径（P3）** [REFACTOR]: `internal/server/health.go:283-289` 认证后 token 窃取者可探主机布局。方案：返常量 boolean 不区分 IO 类型。
 - [ ] **R247-SEC-22 — reverseUpgrader.CheckOrigin 仅靠 Origin 缺失判 m2m（P3）** [REPEAT-3]: `internal/node/reverseserver.go:69-73` 反代剥 Origin 场景下 browser-XSS 端可凑无 Origin 请求。方案：r.TLS != nil 强制或 explicit insecure_node 配置。
 - [ ] **R247-SEC-23 — CSP font-src https://cdn.jsdelivr.net 无 SRI（P3）** [REPEAT-3]: `internal/server/dashboard.go:503` 与 R246-SEC-10 同根因；KaTeX woff2 走同信任链。方案：vendored //go:embed 或 require-sri-for font。
 - [ ] **R247-SEC-24 — resume key var rb [8]byte 64-bit 熵（P3）** [REPEAT-2]: `internal/server/dashboard_session.go:1052` 与 R246-SEC-5 同根因不同 site。方案：16 字节。
@@ -180,7 +180,7 @@
 - [ ] **R247-PERF-17 — protocol_acp base64.EncodeToString 全 alloc（P2）** [REFACTOR]: `internal/cli/protocol_acp.go:322-339` 多图 turn 浪费。方案：base64.StdEncoding.AppendEncode 写 pre-grown buffer。
 - [ ] **R247-PERF-18 — flattenAssistantEvent make([]T,0,2) 每行（P2）** [REPEAT-2]: `internal/server/dashboard_cron_transcript.go:625-679` 500 行 = 500 alloc。方案：caller-provided scratch slice。
 - [ ] **R247-PERF-19 — recentFromParsedIndex jsonlMtimes map 重建（P2）** [REFACTOR]: `internal/discovery/recent.go:329-356` 已 sorted slice 可二分。方案：sort.Search 替 map。
-- [ ] **R247-PERF-20 — Tick highwater 全量拷贝（P2）** [REFACTOR]: `internal/sysession/auto_titler.go:181-194` 多数 key 当 tick 不访问。方案：atomic.Pointer[map] CoW。
+- [~] **R247-PERF-20 — Tick highwater 全量拷贝（P2）** [REFACTOR]: `internal/sysession/auto_titler.go:181-194` 多数 key 当 tick 不访问。方案：atomic.Pointer[map] CoW。
 - [ ] **R247-PERF-21 — buildUserEntry 每图 spawn goroutine（P3）** [REFACTOR]: `internal/cli/process_send.go:51-76` cap 4 sem 但仍 8KB stack × N。方案：worker pool。
 - [~] **R247-PERF-22 — HandleEvent permissionResponse Atoi+Itoa 来回（P3）** [REFACTOR]: `internal/cli/protocol_acp.go:660-666`。方案：直接 json.RawMessage 写。
 - [ ] **R247-PERF-23 — Enqueue 队列满 O(N) memmove（P3）** [REPEAT-2]: `internal/dispatch/msgqueue.go:184-208` MaxDepth=16 拷贝 15。方案：环形 buffer。
@@ -298,7 +298,7 @@
 - [ ] **R246-PERF-6 [P2] [REFACTOR] — `internal/cron/runstore.go:301-339` Append 每次 os.MkdirAll syscall**: 长寿系统每条都浪费一次 stat+mkdir。建议：per-jobID sync.Once 或 dirsCreated sync.Map；预期 syscall↓ 50%。
 - [ ] **R246-PERF-8 [P2] [REPEAT-2] — `internal/cron/runstore.go:606-615` slices.SortFunc 每次 List/Recent + Trim 全量**: dashboard 1Hz poll 已加 cache，但 trim 路径每次 Append 仍可能触发。建议：当 mtime 已有序时跳过 sort（probe + linear scan）；预期 CPU↓ 30%。
 - [ ] **R246-PERF-9 [P2] [REFACTOR] — `internal/server/wshub.go:1463-1509` BroadcastSessionsUpdate debounce timer + clientWG.Add(1)**: 频繁 session mutate 下高频 timer 创建。建议：复用单一长寿命 timer（Reset），减少 AfterFunc 闭包分配。
-- [ ] **R246-PERF-10 [P2] [REFACTOR] — `internal/upstream/connector.go:331-333` marshalResult(v any) 走 reflect path 无 pool**: connector 频繁交互每次新分配 encodeState scratch。建议：getJSONEnc/putJSONEnc 同模式；预期 alloc↓ ~1 buf/call。
+- [~] **R246-PERF-10 [P2] [REFACTOR] — `internal/upstream/connector.go:331-333` marshalResult(v any) 走 reflect path 无 pool**: connector 频繁交互每次新分配 encodeState scratch。建议：getJSONEnc/putJSONEnc 同模式；预期 alloc↓ ~1 buf/call。
 - [ ] **R246-PERF-11 [P3] [REFACTOR] — `internal/cron/scheduler_persist.go:46-58` marshalJobsLocked per-mutation 全量 marshal + sort**: 50 jobs × 2KB = 100KB write。建议：lazy/debounce 持久化或 WAL 后批量 snapshot；预期 lat↓ 5-10ms/mutation。
 - [ ] **R246-PERF-12 [P3] [REFACTOR] — `internal/cli/eventlog.go:1118-1130` subCount.Load short-circuit 后仍 RLock**: sub > 0 时仍每次 RLock + range。建议：subCount==1 时存 atomic.Pointer 单 subscriber 直接 send；或者 subscribers atomic.Pointer CoW 让 hot path 完全免锁。
 - [ ] **R246-PERF-13 [P3] [REFACTOR] — `internal/dispatch/msgqueue.go:185-208` Enqueue 队列满 copy + 零槽 + slice shrink 是 O(N)**: MaxDepth 默认 16 但每次 evict memmove 15 个 QueuedMsg。建议：环形 buffer（head/tail 索引）O(1) 入队/出队。
@@ -642,7 +642,7 @@
 ### 架构 (ecc:architect 第 52 轮)
 
 - [ ] **R242-ARCH-1 [REFACTOR]** `internal/cron/scheduler.go:2287-2426` send/spawn budget 双倍 wall-clock + sendCtx 脱 stopCtx 链；引入 `sendDeadline := startedAt.Add(2*jobTimeout)` 显式封顶 + `context.AfterFunc(stopCtx, sendCancel)`。
-- [ ] **R242-ARCH-2 [BREAKING-LOCAL]** `internal/session/router_core.go:80` + `internal/cron/scheduler.go:580` exempt 池一桶共享 cron stub + planner + sysession，maxExemptSessions=20 易耗尽；三个子配额硬隔离或对 cron stub 走 LRU 覆盖。
+- [~] **R242-ARCH-2 [BREAKING-LOCAL]** `internal/session/router_core.go:80` + `internal/cron/scheduler.go:580` exempt 池一桶共享 cron stub + planner + sysession，maxExemptSessions=20 易耗尽；三个子配额硬隔离或对 cron stub 走 LRU 覆盖。
 - [ ] **R242-ARCH-3 [REFACTOR][REPEAT-2]** `internal/cli/wrapper.go:43` `Wrapper.ShimManager` 公开可变字段 + Protocol/Transport 耦合；引入 `cli.Transport` interface，ShimManager 改 unexported 构造期注入。
 - [ ] **R242-ARCH-4 [REFACTOR]** `internal/session/managed.go:47-114` `processIface` 14 方法 god-interface；分裂为 ProcessLifecycle / EventSource / ProcessSender / Introspection 四个 facet。
 - [ ] **R242-ARCH-5 [REFACTOR]** `internal/cron/scheduler.go:264-368` 三个独立 SetOn* + emitRun* 副作用；抽 `SchedulerListener` 单接口 + finishRun 集中终态分发。
