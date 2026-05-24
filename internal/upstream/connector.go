@@ -49,6 +49,18 @@ var circuitBreakerThreshold = 6
 // primary restart, cert rollover) still auto-recover without operator
 // intervention, but long enough to cut log noise dramatically versus the
 // 30s ceiling.
+//
+// NEEDS-DESIGN (R246-ARCH-4): handleConnDrainBudget /
+// circuitBreakerThreshold / circuitBreakerBackoff are package-level
+// `var` only so existing tests can shorten them without wall-clock
+// waits, but the drift cost is that production code path reads
+// global mutable state. Plan: migrate all three into UpstreamConfig
+// fields (default values via config defaults pass), and expose a
+// testutil.WithUpstreamThresholds(t, ...) shim that swaps in a
+// reduced-budget *Config for the test-local Connector. Deferred
+// until UpstreamConfig overhaul (separate RFC) — flipping these
+// now requires touching every test that depends on the package-
+// level shortcut, plus a rebuild of the connector's New() signature.
 var circuitBreakerBackoff = 5 * time.Minute
 
 // reasonSessionReset is the Reason value emitted for the terminal
