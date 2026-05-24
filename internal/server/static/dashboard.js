@@ -869,7 +869,18 @@ function showGitRemote(url) {
   // because ssh URLs can include embedded credentials (user:pass@host) that
   // a toast would leak to anyone peering at the screen, and window.open on
   // ssh:// does nothing useful in a browser.
-  const safe = /^(https?:\/\/|git:\/\/)/i.test(url);
+  //
+  // R244-SEC-P3-4: explicit positive startsWith allowlist (lowercased) instead
+  // of a /^(https?|git):\/\// regex so a future copy-paste cannot accidentally
+  // drop the leading anchor and accept "javascript:foo http://" or similar
+  // mixed-scheme strings. The lowercased prefix check matches scheme parsing
+  // semantics (RFC 3986 §3.1: schemes are case-insensitive).
+  const lower = String(url).toLowerCase();
+  const allowed = ['https://', 'http://', 'git://'];
+  let safe = false;
+  for (const scheme of allowed) {
+    if (lower.startsWith(scheme)) { safe = true; break; }
+  }
   if (safe) {
     window.open(url, '_blank', 'noopener,noreferrer');
     return;

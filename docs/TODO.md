@@ -255,7 +255,7 @@
 - [~] **R245-SEC-11 [BREAKING-LOCAL] — `internal/sysession/runner.go:147-150` BinPath 相对名 + PATH 时序竞态**: NewRunner 抓 r.env 后若 parent PATH 被并发 os.Setenv 改动则发生分叉。建议：NewRunner 用 exec.LookPath 在 r.env 的 PATH 下解析为绝对路径并固化到 BinPath。
 - [ ] **R245-SEC-13 [REPEAT-2] — dashboard_cron Prompt 全量回 SetEscapeHTML(false) 风险**: 同 R243-SEC 群。建议：静态测试断言 SetEscapeHTML(false) 仅用于 API JSON，不用于 HTML 模板。
 - [ ] **R245-SEC-14 [BREAKING-LOCAL] — `cmd/naozhi/service.go:47` SUDO_USER 未长度/字符校验**: argv 安全（无 shell），但攻击者可控 env 填长字串。建议：≤256 字节 + printable ASCII 校验。
-- [ ] **R245-SEC-15 [REPEAT-2] — `internal/cli/wrapper.go:158` cliPath 来自 ExpandHome 未确认 IsAbs/regular file**: 建议：filepath.IsAbs 断言 + os.Lstat mode 校验（必须 regular + executable）。
+- [~] **R245-SEC-15 [REPEAT-2] — `internal/cli/wrapper.go:158` cliPath 来自 ExpandHome 未确认 IsAbs/regular file**: 建议：filepath.IsAbs 断言 + os.Lstat mode 校验（必须 regular + executable）。
 
 #### Go 语言（GO，6 项）
 
