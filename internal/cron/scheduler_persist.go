@@ -109,6 +109,31 @@ func (s *Scheduler) persistJobsLocked() (func(), error) {
 // CAS — storeMu serialises both the staleness check and the disk write so a
 // later seq can never race past us between Load and Store. Closes R48-REL-
 // PERSIST-ORDERING-RACE. R232-CR-11.
+//
+// Failure semantics (R247-GO-15): the WriteFileAtomic error path returns
+// WITHOUT bumping lastSavedSeq. This is intentional and load-bearing for
+// the staleness gate above:
+//
+//   - A failed write means our payload (carrying state up to seq N) never
+//     reached disk. If we still bumped lastSavedSeq=N, a strictly later
+//     mutation that already raced into storeMu with seq M (M > N) and is
+//     now waiting on s.storeMu would be the next one to persist — fine in
+//     isolation — BUT if that later writer ALSO fails, the gate would
+//     reject any retry path of seq N+1..M-1 even though disk is now
+//     stale relative to in-memory state. Keeping lastSavedSeq pinned at
+//     the last *successful* write means a subsequent Append-driven save
+//     (or Stop-time save) carrying any seq > lastSavedSeq is always
+//     allowed to attempt a fresh write.
+//
+//   - The MkdirAll branch logs and falls through (does NOT return), so a
+//     transient directory error still gets a WriteFileAtomic attempt —
+//     that's the only "fail-but-bump" path we'd accept and it doesn't
+//     reach the lastSavedSeq.Store line either way.
+//
+// Disk-full is a special case worth calling out: osutil.IsDiskFull(err)
+// is logged so operators can correlate with cron persist gaps; once the
+// disk recovers the next mutation's save will land naturally because the
+// gate is still pinned to the pre-disk-full seq.
 func (s *Scheduler) saveMarshaledSeq(data []byte, seq uint64) {
 	s.storeMu.Lock()
 	defer s.storeMu.Unlock()
@@ -139,6 +164,10 @@ func (s *Scheduler) saveMarshaledSeq(data []byte, seq uint64) {
 		}
 	})
 	if err := osutil.WriteFileAtomic(s.storePath, data, 0600); err != nil {
+		// R247-GO-15: do NOT Store(seq) on failure — see godoc above.
+		// Pinning lastSavedSeq at the last successful write keeps the
+		// staleness gate permissive enough that a retry from any later
+		// mutation can still attempt to land a fresh snapshot.
 		slog.Error("save cron store", "err", err, "disk_full", osutil.IsDiskFull(err))
 		return
 	}
