@@ -1139,7 +1139,7 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 	if _, exists := s.jobs[j.ID]; exists {
 		return nil, fmt.Errorf("cron: failed to generate unique job ID after 10 attempts")
 	}
-	j.CreatedAt = time.Now()
+	j.CreatedAt = time.Now().UTC()
 
 	if !j.Paused {
 		if err := s.registerJob(j); err != nil {
