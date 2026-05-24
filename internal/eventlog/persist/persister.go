@@ -2,6 +2,7 @@ package persist
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,42 @@ import (
 	"github.com/naozhi/naozhi/internal/eventlog/schema"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// recordBufPool reuses the bytes.Buffer that schema.MarshalRecordInto
+// writes into so handleBatch's hot path avoids the encodeState alloc
+// json.Marshal performs per call.
+//
+// R245-PERF-12 [REFACTOR R242-PERF-13]: mirrors the bridgeEncPool
+// idiom in internal/session/eventlog_bridge.go. The buffer is borrowed
+// for one record at a time; we Reset before Put so the pooled state is
+// always clean and we cap with recordBufMaxCap so a one-off oversize
+// EventEntry does not pin a multi-MB buffer in the pool.
+var recordBufPool = sync.Pool{
+	New: func() any {
+		// 4 KiB matches typical EventEntry JSON sizes (small assistant
+		// content blocks land well under). The buffer grows naturally
+		// for larger records and is capped on return.
+		buf := bytes.NewBuffer(make([]byte, 0, 4*1024))
+		return buf
+	},
+}
+
+// recordBufMaxCap caps buffer reuse so a one-off oversize record does
+// not permanently pin a large heap allocation in the pool.
+const recordBufMaxCap = 64 * 1024
+
+// putRecordBuf returns buf to the pool, dropping it if it grew past
+// the cap (the next Get will allocate fresh).
+func putRecordBuf(buf *bytes.Buffer) {
+	if buf == nil {
+		return
+	}
+	if buf.Cap() > recordBufMaxCap {
+		return
+	}
+	buf.Reset()
+	recordBufPool.Put(buf)
+}
 
 // logWriteBufSize is the capacity of the bufio.Writer wrapped around
 // each perKeyWriter.logFile. 64 KiB matches ReadFramedBody's reader
