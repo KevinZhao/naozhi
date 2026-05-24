@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -88,6 +89,14 @@ type autoTitlerHighwater struct {
 //
 // State per ManagedSession is held in-memory in highwater; nothing is
 // persisted across restart by design (RFC §5).
+//
+// highwater is stored behind an atomic.Pointer so the Tick visitor can
+// snapshot the map with a single Load (no full-map copy) and read it
+// lock-free under r.mu's RLock without nesting writeMu inside (Sec-MEDIUM-2
+// avoidance). All mutations go through CoW: writeMu serialises writers
+// (today only Tick writes from a single goroutine, but the lock is the
+// belt-and-braces guard against a future second writer racing the
+// clone-Store window). R247-PERF-20.
 type autoTitler struct {
 	router SystemSessionRouter
 	runner Runner
@@ -98,8 +107,14 @@ type autoTitler struct {
 	batchPerTick      int
 	includeGroupChat  bool
 
-	mu        sync.Mutex
-	highwater map[string]autoTitlerHighwater
+	// writeMu serialises CoW Store calls into highwater. It is NEVER held
+	// by readers — Tick reads via highwater.Load() directly. See type
+	// godoc for the lock-ordering rationale.
+	writeMu sync.Mutex
+	// highwater maps session key → last-rename bookkeeping. The pointed-to
+	// map is read-only after Store; readers MUST NOT mutate it. New writes
+	// clone-then-Store under writeMu.
+	highwater atomic.Pointer[map[string]autoTitlerHighwater]
 }
 
 func newAutoTitler(deps DaemonDeps) (Daemon, error) {
@@ -116,8 +131,11 @@ func newAutoTitler(deps DaemonDeps) (Daemon, error) {
 		minRenameInterval: autoTitlerDefaultMinRenameInterval,
 		batchPerTick:      autoTitlerDefaultBatchPerTick,
 		includeGroupChat:  false,
-		highwater:         make(map[string]autoTitlerHighwater),
 	}
+	// Seed an empty map so highwater.Load() never returns nil; the Tick
+	// visitor and renameOne dereference the pointer without nil-checking.
+	empty := make(map[string]autoTitlerHighwater)
+	a.highwater.Store(&empty)
 	// Manager.NewManager invokes Configure(runtime.Specific) once
 	// after Build through the Configurable interface; we don't repeat
 	// it here so per-knob side effects (counters, validation) only
@@ -173,26 +191,24 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 		report.Skipped[reason]++
 	}
 
-	// Snapshot the entire highwater map BEFORE entering VisitSessions
-	// so the per-session lookup inside the visitor doesn't acquire
-	// a.mu under r.mu's RLock — that nesting would create a fragile
-	// lock-order constraint (Sec-MEDIUM-2).
-	a.mu.Lock()
-	hwCopy := make(map[string]autoTitlerHighwater, len(a.highwater))
-	for k, v := range a.highwater {
-		hwCopy[k] = v
-	}
+	// Snapshot the entire highwater map BEFORE entering VisitSessions so
+	// the per-session lookup inside the visitor doesn't acquire writeMu
+	// under r.mu's RLock — that nesting would create a fragile lock-order
+	// constraint (Sec-MEDIUM-2). With the atomic.Pointer-CoW layout (R247-
+	// PERF-20) the snapshot is a single Load: the pointed-to map is
+	// immutable after Store, so the visitor reads it directly without
+	// copying any entries into a per-tick scratch.
+	hwSnap := *a.highwater.Load()
 	// Track which keys we observe this tick so we can prune dead
 	// entries from the highwater map at the end (also Sec-MEDIUM-2:
 	// prevents unbounded growth as sessions come and go). Floor at 16
 	// so the first few ticks (highwater empty) don't pay for repeated
 	// rehashing as VisitSessions streams hundreds of keys in.
-	observedHint := len(a.highwater)
+	observedHint := len(hwSnap)
 	if observedHint < 16 {
 		observedHint = 16
 	}
 	observed := make(map[string]struct{}, observedHint)
-	a.mu.Unlock()
 
 	// Capture wall-clock once per tick so the per-snapshot
 	// time.Since() check inside the visitor doesn't fan out into one
@@ -247,8 +263,8 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 			return true
 		}
 		// 5. Min-rename-interval and high-water gate.  Reads from
-		//    the pre-snapshotted hwCopy — no a.mu under r.mu.RLock.
-		hw := hwCopy[snap.Key]
+		//    the pre-snapshotted hwSnap — no writeMu under r.mu.RLock.
+		hw := hwSnap[snap.Key]
 		if !hw.lastRenamedAt.IsZero() && now.Sub(hw.lastRenamedAt) < a.minRenameInterval {
 			bumpSkip("min_rename_interval")
 			return true
@@ -276,21 +292,6 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 		return true
 	})
 
-	// Sec-MEDIUM-2 part 2:  prune highwater entries for sessions that
-	// no longer appear in the router (dismissed / restarted / TTL'd).
-	// Bounded by the live session count rather than naozhi's lifetime.
-	// Skipped on early-stop because `observed` is a partial view —
-	// next tick will run a complete pass.
-	if !earlyStop {
-		a.mu.Lock()
-		for k := range a.highwater {
-			if _, ok := observed[k]; !ok {
-				delete(a.highwater, k)
-			}
-		}
-		a.mu.Unlock()
-	}
-
 	// Pick the top N by lastActive (most recent first) so a busy session
 	// doesn't get starved by a stale one with the same turn count.
 	// R236-PERF-2: slices.SortFunc N log N + 内联高效；插入排序对 N=4×batchPerTick
@@ -313,23 +314,69 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 	// the min-user-turns gate), the seed will be empty and renameOne
 	// will fail validation — counted as ErrValidation, not a Runner
 	// error, so the breaker stays clean.
+	//
+	// R247-PERF-20: collect highwater bumps into a local map and apply
+	// them with a single CoW Store at the end of the tick (alongside
+	// dead-key prune). Avoids paying O(N_live_sessions) for each rename.
+	pendingWrites := make(map[string]autoTitlerHighwater, len(candidates))
 	var firstErr error
 	for _, c := range candidates {
 		if err := ctx.Err(); err != nil {
 			// ctx cancelled mid-batch — stop, return what we have.
+			a.commitHighwater(pendingWrites, observed, earlyStop)
 			return report, err
 		}
 		entries := a.router.EventEntriesForKey(c.key)
 		seed := buildExcerptFromHistory(entries)
-		if err := a.renameOne(ctx, c.key, seed, c.userTurnCount); err != nil {
+		if hw, err := a.renameOne(ctx, c.key, seed, c.userTurnCount); err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
+		} else {
+			pendingWrites[c.key] = hw
+			report.Acted++
 		}
-		report.Acted++
 	}
+	a.commitHighwater(pendingWrites, observed, earlyStop)
 	return report, firstErr
+}
+
+// commitHighwater is the single CoW Store applied at the end of Tick.
+// It performs both the dead-key prune (when the visitor saw the entire
+// session list) and the renamed-key update with one allocation per
+// non-trivial tick. R247-PERF-20.
+//
+// Skip-fast path: when there are no pending writes AND we early-stopped
+// (so prune is unsafe), the existing pointer is left untouched and no
+// allocation occurs at all.
+func (a *autoTitler) commitHighwater(writes map[string]autoTitlerHighwater, observed map[string]struct{}, earlyStop bool) {
+	if len(writes) == 0 && earlyStop {
+		return
+	}
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	old := *a.highwater.Load()
+	if len(writes) == 0 && len(old) == 0 {
+		return
+	}
+	// Pre-size for the new map: at most len(old)+len(writes) entries
+	// (writes may overlap old keys), minus pruned dead-key count.
+	next := make(map[string]autoTitlerHighwater, len(old)+len(writes))
+	for k, v := range old {
+		if !earlyStop {
+			// Sec-MEDIUM-2: drop entries for sessions the visitor did
+			// not observe this tick. Bounded by live session count.
+			if _, ok := observed[k]; !ok {
+				continue
+			}
+		}
+		next[k] = v
+	}
+	for k, v := range writes {
+		next[k] = v
+	}
+	a.highwater.Store(&next)
 }
 
 // buildExcerptFromHistory walks the full event log and concatenates
@@ -364,13 +411,18 @@ func buildExcerptFromHistory(entries []cli.EventEntry) string {
 }
 
 // renameOne handles a single session:  build prompt → call Runner →
-// validate → write label → bump highwater.  Errors here count toward
-// the Tick error classification; validation failures use ErrValidation
-// so the breaker doesn't trip on them.
-func (a *autoTitler) renameOne(ctx context.Context, key, seed string, turnCount int64) error {
+// validate → write label → return the new highwater entry. Errors here
+// count toward the Tick error classification; validation failures use
+// ErrValidation so the breaker doesn't trip on them.
+//
+// R247-PERF-20: returns the bumped highwater rather than mutating it
+// directly so the caller batches all per-tick writes into a single
+// CoW Store via commitHighwater. The zero autoTitlerHighwater is
+// returned on the error path; callers MUST check err first.
+func (a *autoTitler) renameOne(ctx context.Context, key, seed string, turnCount int64) (autoTitlerHighwater, error) {
 	excerpt := buildExcerpt(seed)
 	if excerpt == "" {
-		return fmt.Errorf("empty excerpt for %s: %w", key, ErrValidation)
+		return autoTitlerHighwater{}, fmt.Errorf("empty excerpt for %s: %w", key, ErrValidation)
 	}
 	// Single-allocation builder: 5 fixed strings + 2 newlines around
 	// excerpt. Pre-grown to the exact byte count so no internal
@@ -390,14 +442,14 @@ func (a *autoTitler) renameOne(ctx context.Context, key, seed string, turnCount 
 
 	out, err := a.runner.Run(ctx, prompt)
 	if err != nil {
-		return err // Runner already wraps; classifyError handles ctx errors.
+		return autoTitlerHighwater{}, err // Runner already wraps; classifyError handles ctx errors.
 	}
 	title, err := session.ValidateUserLabel(strings.TrimSpace(out))
 	if err != nil {
-		return fmt.Errorf("%w: validate output: %v", ErrValidation, err)
+		return autoTitlerHighwater{}, fmt.Errorf("%w: validate output: %v", ErrValidation, err)
 	}
 	if title == "" {
-		return fmt.Errorf("runner returned empty title: %w", ErrValidation)
+		return autoTitlerHighwater{}, fmt.Errorf("runner returned empty title: %w", ErrValidation)
 	}
 	// Two-tier length gate is intentional: ValidateUserLabel enforces a
 	// general byte cap shared with user-typed labels, while
@@ -406,21 +458,18 @@ func (a *autoTitler) renameOne(ctx context.Context, key, seed string, turnCount 
 	// model that ignores the prompt's "≤16 chars" still gets clipped
 	// here before the label is published. R232-CR-6.
 	if utf8.RuneCountInString(title) > autoTitlerMaxTitleRunes {
-		return fmt.Errorf("%w: title exceeds %d runes", ErrValidation, autoTitlerMaxTitleRunes)
+		return autoTitlerHighwater{}, fmt.Errorf("%w: title exceeds %d runes", ErrValidation, autoTitlerMaxTitleRunes)
 	}
 	if !a.router.SetUserLabelWithOrigin(key, title, "auto") {
 		// Race-window close fired:  user changed origin to "user" while
 		// our LLM call was in flight.  Not an error per se — the daemon
 		// did the right thing by deferring.
-		return fmt.Errorf("user took ownership during Tick: %w", ErrValidation)
+		return autoTitlerHighwater{}, fmt.Errorf("user took ownership during Tick: %w", ErrValidation)
 	}
-	a.mu.Lock()
-	a.highwater[key] = autoTitlerHighwater{
+	return autoTitlerHighwater{
 		lastRenamedAt:    time.Now(),
 		lastRenameAtTurn: turnCount,
-	}
-	a.mu.Unlock()
-	return nil
+	}, nil
 }
 
 // excerptBeginMarker / excerptEndMarker are also stripped from the
