@@ -252,7 +252,7 @@
 - [ ] **R240-CR-8 — `internal/dispatch/dispatch.go:956,973,1164,1317` replyTracker 4 方法缺 godoc [REFACTOR]（P2）**：onEvent 是 IM 流式核心。方案：补 godoc 标注线程约束 + 超时契约。Breaking：否。
 - [ ] **R240-CR-9 — `internal/server/wshub.go:461,467,514,587,820,866,992,1031,1476,1821,1844,1861` 12 个 Hub 方法缺 godoc [REFACTOR]（P2）**：方案：至少补 handleAuth/handleSubscribe/doBroadcastSessionsUpdate/capHistoryBatch。Breaking：否。
 - [ ] **R240-CR-10 — `internal/config/config.go:477,551,584,1092` applyDefaults/parseDurations/validateConfig/containsEnvPlaceholder 缺 godoc [REFACTOR]（P2）**：方案：补流水线契约说明（first-error vs errors.Join）。Breaking：否。
-- [~] **R240-CR-11 — `internal/session/managed.go:1577` slog 消息 "InjectHistory:" 大写函数前缀风格不一致 [REFACTOR]（P3）**：与 router_cleanup/router_discovery 类似 ~3 处。方案：统一小写。Breaking：否。
+- [x] **R240-CR-11 — `internal/session/managed.go:1577` slog 消息 "InjectHistory:" 大写函数前缀风格不一致 [REFACTOR]（P3）**：与 router_cleanup/router_discovery 类似 ~3 处。方案：统一小写。Breaking：否。已修 2026-05-24（cron-fix-F4）：5 处全部小写化（managed.go InjectHistory、router_cleanup.go StartCleanupLoop、router_discovery.go InterruptSessionSafe、router_lifecycle.go RenameSession、router_shim.go StartShimReconcileLoop）；与 slog 惯例一致。
 - [ ] **R240-CR-12 — `internal/cron/scheduler.go:2943` notifyTarget vs NotifyTarget vs deliverNotice 三层命名混淆 [REFACTOR]（P3）**：方案：私有方法重命名为 sendNoticeToChat 或 sendViaPlatform。Breaking：否。
 - [~] **R240-CR-13 — `internal/cli/wrapper.go:451` shimLineReader.ReadLine 缺 godoc [REFACTOR]（P3）**：实现含非显然 shim 协议解包。方案：补协议契约。Breaking：否。
 - [ ] **R240-CR-14 — `internal/server/dashboard_send.go|dashboard_session.go|dashboard_cron.go` 3 文件超 800 行 [REFACTOR]（P3）**：方案：按 endpoint 拆子文件。Breaking：否。

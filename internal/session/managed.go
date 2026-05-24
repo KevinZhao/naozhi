@@ -1591,7 +1591,7 @@ func (s *ManagedSession) LogSystemEvent(summary string) {
 // Entries are saved to persistedHistory so they survive process restarts.
 func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	if len(entries) > maxPersistedHistory {
-		slog.Debug("InjectHistory: batch exceeds cap, truncating oldest",
+		slog.Debug("inject history: batch exceeds cap, truncating oldest",
 			"key", s.key,
 			"batch_len", len(entries),
 			"cap", maxPersistedHistory,

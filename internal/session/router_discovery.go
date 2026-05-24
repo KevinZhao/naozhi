@@ -238,7 +238,7 @@ func (r *Router) InterruptSessionSafe(key string) InterruptOutcome {
 		// Log once and map to InterruptNoSession so the dashboard shows
 		// "not_running" rather than silently passing through an outcome the
 		// HTTP layer doesn't know how to render. R65-GO-L-3.
-		slog.Warn("InterruptSessionSafe: unhandled interrupt outcome", "outcome", outcome, "key", key)
+		slog.Warn("interrupt session safe: unhandled interrupt outcome", "outcome", outcome, "key", key)
 		return InterruptNoSession
 	}
 }

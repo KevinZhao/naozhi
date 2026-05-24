@@ -1324,7 +1324,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		return false
 	}
 	if err := ValidateSessionKey(newKey); err != nil {
-		slog.Warn("RenameSession: invalid new key", "err", err)
+		slog.Warn("rename session: invalid new key", "err", err)
 		return false
 	}
 	r.mu.Lock()

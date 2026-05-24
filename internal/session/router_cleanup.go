@@ -424,7 +424,7 @@ func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, a
 	// the same NewTicker call, producing an unbounded retry chain. Reject the
 	// misconfiguration up front.
 	if interval <= 0 {
-		slog.Warn("StartCleanupLoop: non-positive interval, cleanup disabled",
+		slog.Warn("start cleanup loop: non-positive interval, cleanup disabled",
 			"interval", interval)
 		return
 	}
