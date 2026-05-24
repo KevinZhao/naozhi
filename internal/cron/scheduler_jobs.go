@@ -151,7 +151,10 @@ func (s *Scheduler) ListJobs(plat, chatID string) []Job {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var result []Job
+	// R247-GO-3: pre-allocate so an empty result marshals as `[]` instead of
+	// `null` — keeps the JSON wire-format consistent with ListAllJobsWithNextRun
+	// and frontend `.length` defenders unaffected. [BREAKING-LOCAL]
+	result := make([]Job, 0, len(s.jobs))
 	for _, j := range s.jobs {
 		if j.Platform == plat && j.ChatID == chatID {
 			result = append(result, *j)
