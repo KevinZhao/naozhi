@@ -971,6 +971,12 @@ func selectForIdx(pending []schema.IdxEntry, stride, cursor int, scratch []schem
 	if len(pending) == 0 {
 		return nil
 	}
+	// Single-entry batch: that lone entry is simultaneously the first and the
+	// last entry of the batch, so the kept-policy below would always retain
+	// it. Skip the scratch slice + loop allocation. R240-PERF-6.
+	if len(pending) == 1 {
+		return pending
+	}
 	estCap := len(pending)/stride + 2
 	var kept []schema.IdxEntry
 	if cap(scratch) >= estCap {
