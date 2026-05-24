@@ -2282,7 +2282,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	inflight.startedAt.Store(timeHeap(startedAt))
 	inflight.phase.Store(strHeap(PhaseQueued))
 	inflight.trigger.Store(strHeap(string(trigger)))
-	inflight.sessionID.Store(strHeap(""))
+	inflight.sessionID.Store(nil)
 	inflight.freshSnap.Store(j.FreshContext)
 	metrics.CronRunInflight.Add(1)
 	// CronRunStartedTotal bumps inside emitRunStarted (R230C-GO-15).
