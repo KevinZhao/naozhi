@@ -586,7 +586,7 @@ func (s *runStore) readRun(path string) (*CronRun, error) {
 	}
 	var run CronRun
 	if err := json.Unmarshal(data, &run); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrCorruptRun, err)
+		return nil, fmt.Errorf("%w: %w", ErrCorruptRun, err)
 	}
 	return &run, nil
 }
