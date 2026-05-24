@@ -516,6 +516,16 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 			// state file (loaded next start) keeps showing the old schedule
 			// because persistJobsLocked never ran for this branch — diverging
 			// in-memory state from disk.
+			//
+			// R246-GO-10: extend the rollback to also re-register the OLD
+			// schedule on failure so j.entryID is non-zero and the dashboard
+			// keeps showing the correct NextRun. Without this, a failed update
+			// (rare — robfig/cron rejects unparseable spec, which the API
+			// typically pre-validates) silently leaves the job dormant in the
+			// scheduler until the next successful UpdateJob / ResumeJob /
+			// process restart, even though j.Schedule is restored. The retry
+			// uses the original schedule string which we just removed from the
+			// cron, so AddFunc accepts it (it parsed previously).
 			oldSchedule := j.Schedule
 			j.Schedule = *upd.Schedule
 			// Re-register with the new schedule unless paused (paused jobs have
@@ -528,10 +538,19 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 				if err := s.registerJob(j); err != nil {
 					// Roll back the in-memory schedule field so subsequent
 					// reads (List, persistJobsLocked on a later mutator) keep
-					// showing the original schedule. j.entryID stays 0 since
-					// cron.Remove is irreversible — the next ResumeJob /
-					// successful UpdateJob will register a fresh entry.
+					// showing the original schedule.
 					j.Schedule = oldSchedule
+					// Best-effort re-register the old schedule so NextRun
+					// stays populated. If THIS also fails (extremely unlikely
+					// — same string just round-tripped through cron.Remove),
+					// j.entryID stays 0 and the next ResumeJob / successful
+					// UpdateJob will register a fresh entry; we still return
+					// the original error so the caller knows the update was
+					// rejected.
+					if reErr := s.registerJob(j); reErr != nil {
+						slog.Error("cron: failed to restore previous schedule after UpdateJob rollback",
+							"job_id", j.ID, "schedule", oldSchedule, "err", reErr)
+					}
 					return Job{}, nil, fmt.Errorf("re-register cron: %w", err)
 				}
 			}
