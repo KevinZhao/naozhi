@@ -349,7 +349,9 @@ func normalizeClaudeUUID(u string) string {
 	if u == "" {
 		return ""
 	}
-	var b []byte
+	// R236-PERF-1: stack [32]byte avoids per-row alloc on JSONL replay.
+	var b [32]byte
+	n := 0
 	for i := 0; i < len(u); i++ {
 		c := u[i]
 		if c == '-' {
@@ -358,16 +360,20 @@ func normalizeClaudeUUID(u string) string {
 		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
 			return ""
 		}
+		if n >= 32 {
+			return ""
+		}
 		// Lowercase ASCII hex.
 		if c >= 'A' && c <= 'F' {
 			c = c + 32
 		}
-		b = append(b, c)
+		b[n] = c
+		n++
 	}
-	if len(b) != 32 {
+	if n != 32 {
 		return ""
 	}
-	return string(b)
+	return string(b[:])
 }
 
 // intToA is a minimal int-to-string without pulling strconv just
