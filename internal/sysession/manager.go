@@ -211,15 +211,22 @@ func NewManager(cfg Config) (*Manager, error) {
 		cfg:     cfg,
 		tickFn:  cfg.NewTicker,
 	}
-	// R242-GO-16: route the initial callbacks through SetCallbacks so
-	// every write of {onRunStarted, onRunEnded} goes through the same
-	// hookMu-guarded path. Previously NewManager bypassed the lock and
-	// assigned the fields directly — safe today because main.go calls
-	// SetCallbacks only after construction returns and there are no
-	// concurrent ticks yet, but the divergence made the "all writes
-	// hold hookMu" invariant impossible to grep for. Routing through
-	// SetCallbacks at init is free (no contention before Start) and
-	// makes the invariant a one-line claim.
+	// R242-GO-16: route the constructor-time callbacks through the same
+	// SetCallbacks path the late-wiring caller (cmd/naozhi/main.go after
+	// the WS hub is built) uses. Two motivations:
+	//
+	//  1. Single write path keeps the hookMu invariant explicit — there
+	//     is now exactly one place that mutates onRunStarted/onRunEnded,
+	//     so future readers cannot infer "writes only happen pre-Start
+	//     so we can skip the lock" from the constructor branch and miss
+	//     the post-Start SetCallbacks branch.
+	//  2. NewManager is called by tests that pass cfg.OnRunStarted /
+	//     cfg.OnRunEnded directly without ever calling SetCallbacks; the
+	//     unified path means those tests still observe the callbacks via
+	//     loadOnRunStarted's RLock-protected read.
+	//
+	// hookMu is uncontended here (no goroutines yet) but going through
+	// SetCallbacks costs one Lock/Unlock pair — negligible at construction.
 	m.SetCallbacks(cfg.OnRunStarted, cfg.OnRunEnded)
 	if !cfg.Enabled {
 		// Build nothing; Start is a no-op.

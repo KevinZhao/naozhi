@@ -584,11 +584,16 @@ func (s *runStore) Get(jobID, runID string) (*CronRun, error) {
 // readRun parses a single run file. Returns ErrCorruptRun on parse
 // failure or oversize; fs.ErrNotExist propagates unchanged.
 //
-// R235-SEC-5: Lstat-then-ReadFile guards against an attacker (with write
-// access to runs/<jobID>/) replacing a legitimate .json with a symlink to
-// /etc/passwd or another sensitive file — diskListNewestFirst /
-// trimJobLocked already skip symlinks during their directory scans, but
-// Get() arrives here directly with a constructed path.
+// R235-SEC-5 / R242-GO-17: Lstat intentionally used (not Stat) — Lstat
+// reports the symlink itself rather than following it, so the
+// !li.Mode().IsRegular() check below rejects symlinks before ReadFile
+// is allowed to dereference and exfiltrate the linked target. This
+// guards against an attacker (with write access to runs/<jobID>/)
+// replacing a legitimate .json with a symlink to /etc/passwd or
+// another sensitive file. diskListNewestFirst / trimJobLocked already
+// skip symlinks during their directory scans, but Get() arrives here
+// directly with a constructed path. DO NOT change Lstat to Stat: that
+// would silently follow the symlink and bypass the regular-file gate.
 func (s *runStore) readRun(path string) (*CronRun, error) {
 	li, err := os.Lstat(path)
 	if err != nil {

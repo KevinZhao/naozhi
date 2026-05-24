@@ -189,6 +189,18 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 		proc.Close()
 	}
 	// R191-CONC-H1-e: Broadcast under r.mu (see evictOldest comment).
+	//
+	// R242-ARCH-25: this is two distinct locked sections by design — the
+	// first (above) commits the routing-table mutations, then we drop the
+	// lock so proc.Close() (which can block on shim socket teardown,
+	// goroutine joins, etc.) does not pin every other Router caller. Only
+	// AFTER Close() flips IsRunning() to false is it safe to wake
+	// shutdownCond waiters: they re-evaluate the predicate
+	// `loadProcess().IsRunning() == false`, so broadcasting before Close
+	// returns is a missed-wakeup window (waiter sees true, sleeps again,
+	// never re-woken). The same Unlock→Close→relock-Broadcast pattern is
+	// used by evictOldest (line ~1075) and resetSessionLocked-style
+	// callers — keep the shape consistent so reviewers can pattern-match.
 	if r.shutdownCond != nil {
 		r.mu.Lock()
 		r.shutdownCond.Broadcast()

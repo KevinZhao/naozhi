@@ -387,11 +387,12 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	turns := make([]transcriptTurn, 0, 32)
 	truncated := false
 	parsedAny := false
-	// R243-GO-8: per-line scratch buffer reused across flattenJSONLEvent
-	// calls to eliminate per-line `make([]transcriptTurn, 0, 2)` alloc.
-	// Cap=4 covers the common shapes (user+tool_result pair, assistant
-	// text+tool_use pair); flatten resizes via append as needed.
-	turnsScratch := make([]transcriptTurn, 0, 4)
+	// scratchTurns is the per-event scratch buffer reused across every
+	// JSONL line. flattenJSONLEvent appends into it and we hand the
+	// (possibly grown) backing array back on the next iteration so the
+	// inner make([]transcriptTurn, 0, 2) is a one-time cost rather than
+	// per-line. R243-GO-8.
+	scratchTurns := make([]transcriptTurn, 0, 4)
 
 	for scanner.Scan() {
 		if len(turns) >= maxTranscriptTurns {
@@ -417,10 +418,13 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 				continue
 			}
 		}
-		newTurns, addedTokens, addedToolCalls, isParsed := flattenJSONLEvent(&ev, ts, len(turns), turnsScratch[:0])
-		// Re-bind scratch to whatever flattenJSONLEvent grew the buffer
-		// to so the next iteration starts from the largest array seen.
-		turnsScratch = newTurns
+		// scratchTurns is a per-loop reusable buffer fed back into
+		// flattenJSONLEvent every iteration so the per-line make([]transcriptTurn,
+		// 0, 2) shows up zero times in the alloc profile (R243-GO-8).
+		scratchTurns = scratchTurns[:0]
+		newTurns, addedTokens, addedToolCalls, isParsed := flattenJSONLEvent(&ev, ts, len(turns), scratchTurns)
+		// Persist the (possibly grown) backing array for the next iteration.
+		scratchTurns = newTurns[:0]
 		if isParsed {
 			parsedAny = true
 		}
@@ -545,13 +549,12 @@ func sanitizeWireText(s string) string {
 // parsedAny is true when the event maps to at least one recognised turn
 // shape — used by the caller to decide whether to set fallback:"raw".
 //
-// R243-GO-8: callers pass a reusable `buf` slice (any cap, any length —
-// it is reset to len=0 internally) so the per-line hot path avoids
-// `make([]transcriptTurn, 0, 2)` per call. A 5000-line transcript drops
-// from 5000 backing-array allocs to ~1. Pass `nil` for ad-hoc / test
-// callers; append handles nil naturally.
-func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, buf []transcriptTurn) ([]transcriptTurn, transcriptTokens, int, bool) {
-	out := buf[:0]
+// scratch is a caller-owned reusable slice (length must be 0; capacity is
+// preserved). The returned slice shares the same backing array when capacity
+// permits, so the JSONL scan loop avoids a per-line `make([]transcriptTurn,
+// 0, 2)` allocation. Pass `scratch=nil` when allocation is fine. R243-GO-8.
+func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, scratch []transcriptTurn) ([]transcriptTurn, transcriptTokens, int, bool) {
+	out := scratch[:0]
 	tok := transcriptTokens{}
 	toolCalls := 0
 	parsed := false
@@ -571,8 +574,8 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, buf []transc
 				Index: nextIdx + len(out),
 				Kind:  "user",
 				TS:    ts,
-				// R243-SEC-5: strip bidi / C1 / LS-PS before wire encode.
-				Text: sanitizeWireText(truncateRunes(text, maxAssistantTextBytes)),
+				// R243-SEC-5: drop bidi / C1 / LS-PS before encoding to wire.
+				Text: sanitizeTranscriptDisplay(truncateRunes(text, maxAssistantTextBytes)),
 			})
 		}
 		for _, b := range blocks {
@@ -585,8 +588,11 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, buf []transc
 				if strings.IndexByte(outStr, 0x1b) >= 0 {
 					outStr = ansiEscRe.ReplaceAllString(outStr, "")
 				}
-				// R243-SEC-5: same wire-sanitisation as user.Text.
-				outStr = sanitizeWireText(truncateRunes(outStr, maxToolOutputBytes))
+				outStr = truncateRunes(outStr, maxToolOutputBytes)
+				// R243-SEC-5: tool_result bodies are arbitrary CLI output —
+				// any process the agent invoked could embed bidi or LS/PS
+				// runes that flip log/terminal rendering.
+				outStr = sanitizeTranscriptDisplay(outStr)
 				status := "ok"
 				if b.IsError {
 					status = "error"
@@ -614,7 +620,13 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, buf []transc
 		// Aggregate text blocks into one assistant turn (multiple text
 		// blocks in a single message are common for streamed responses
 		// and split awkwardly when shown as separate timeline entries).
+		// Two passes: first scan to materialise the text buffer so the
+		// assistant turn — which logically precedes any tool_use turns
+		// in the same message — can be appended first. Avoids the
+		// prepend-via-fresh-slice allocation the previous one-pass
+		// implementation used. R243-GO-8.
 		var textBuf strings.Builder
+		hasToolUse := false
 		for _, b := range blocks {
 			switch b.Type {
 			case "text":
@@ -623,6 +635,27 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, buf []transc
 				}
 				textBuf.WriteString(b.Text)
 			case "tool_use":
+				hasToolUse = true
+			}
+		}
+		if textBuf.Len() > 0 {
+			text := textBuf.String()
+			out = append(out, transcriptTurn{
+				Index: nextIdx + len(out),
+				Kind:  "assistant",
+				TS:    ts,
+				// R243-SEC-5: assistant text travels back from upstream and
+				// can echo attacker content; strip bidi / LS-PS before wire.
+				Text:   sanitizeTranscriptDisplay(truncateRunes(text, maxAssistantTextBytes)),
+				Tokens: tok.Output,
+			})
+			parsed = true
+		}
+		if hasToolUse {
+			for _, b := range blocks {
+				if b.Type != "tool_use" {
+					continue
+				}
 				toolCalls++
 				// R243-SEC-5: belt-and-braces; summariseToolInput already
 				// runs SanitizeForLog on chosen field but explicit wrap
@@ -639,28 +672,6 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, buf []transc
 				})
 				parsed = true
 			}
-		}
-		if textBuf.Len() > 0 {
-			text := textBuf.String()
-			// R243-GO-8: prepend assistant turn in-place rather than
-			// `append([]transcriptTurn{...}, out...)` which would alloc
-			// a fresh backing array and defeat caller-side buffer reuse.
-			// Grow by 1, shift right, write head.
-			out = append(out, transcriptTurn{})
-			copy(out[1:], out[:len(out)-1])
-			out[0] = transcriptTurn{
-				Index: nextIdx,
-				Kind:  "assistant",
-				TS:    ts,
-				// R243-SEC-5: same wire-sanitisation as user/tool_result.
-				Text:   sanitizeWireText(truncateRunes(text, maxAssistantTextBytes)),
-				Tokens: tok.Output,
-			}
-			// re-number subsequent turns
-			for i := range out {
-				out[i].Index = nextIdx + i
-			}
-			parsed = true
 		}
 	case "system":
 		// system events (init, error from claude) — surface errors
@@ -688,8 +699,9 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, buf []transc
 				Index: nextIdx,
 				Kind:  "error",
 				TS:    ts,
-				// R243-SEC-5: error text from claude system events; strip.
-				Text: sanitizeWireText(truncateRunes(sys.Message, maxAssistantTextBytes)),
+				// R243-SEC-5: system error message originates from the CLI
+				// but may include propagated stderr — sanitize for wire.
+				Text: sanitizeTranscriptDisplay(truncateRunes(sys.Message, maxAssistantTextBytes)),
 			})
 			parsed = true
 		}
@@ -766,6 +778,58 @@ func parseISO8601MS(s string) int64 {
 		return 0
 	}
 	return t.UnixMilli()
+}
+
+// sanitizeTranscriptDisplay strips Unicode runes that would corrupt the JSON
+// wire / dashboard rendering when a JSONL transcript carries adversarial
+// content (e.g. an attacker-controlled tool_result or a chat user paste).
+//
+// Specifically removes:
+//   - C1 controls (U+0080..U+009F)
+//   - Bidi override / embedding (U+202A..U+202E)
+//   - Bidi isolate (U+2066..U+2069)
+//   - Line/Paragraph separators (U+2028 / U+2029) — JSON passes these through
+//     literally, but some downstream consumers (legacy log shippers, terminal
+//     emulators) interpret them as record separators.
+//   - DEL (0x7f)
+//
+// Crucially, this PRESERVES standard whitespace (\n / \t / \r) so multi-line
+// transcripts and code-block indentation render correctly. That is the key
+// difference from osutil.SanitizeForLog which targets slog/EventLog attrs and
+// rewrites every byte < 0x20 to '_'. The handleRunDetail surface (Prompt /
+// WorkDir / ErrorMsg / Result) does use SanitizeForLog because those fields
+// are inherently single-line, but transcript bodies cannot afford to lose
+// formatting. R243-SEC-5.
+//
+// Fast path: when the input is ASCII-only (no high bit set, no DEL) the
+// function returns s unchanged — every rune in the danger class above is
+// either >= U+0080 (high-bit) or DEL (0x7f), so any all-ASCII string skips
+// the rewrite entirely.
+func sanitizeTranscriptDisplay(s string) string {
+	// Fast scan: if no byte triggers DEL or the high-bit, the string contains
+	// no rune from the danger class.
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == 0x7f || c >= 0x80 {
+			return sanitizeTranscriptDisplaySlow(s)
+		}
+	}
+	return s
+}
+
+// sanitizeTranscriptDisplaySlow walks the input rune-by-rune and rewrites any
+// member of the danger class to '_'. Tabs / newlines / carriage returns are
+// passed through. Split out so the fast path inlines.
+func sanitizeTranscriptDisplaySlow(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == 0x7f {
+			return '_'
+		}
+		if osutil.IsLogInjectionRune(r) {
+			return '_'
+		}
+		return r
+	}, s)
 }
 
 // truncateRunes caps a string to maxBytes by rune boundary, appending

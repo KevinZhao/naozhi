@@ -143,26 +143,39 @@ func TestPersister_DropsReplayPhase(t *testing.T) {
 	}
 }
 
-// TestPersister_DevMode_PanicOnReplayPhase guarantees dev builds
-// surface the sink-ordering bug immediately. Run with recover() so
-// the test itself doesn't fail with a panic but asserts one occurred.
-func TestPersister_DevMode_PanicOnReplayPhase(t *testing.T) {
-	p, _ := newTestPersister(t, func(o *Options) { o.DevMode = true })
+// TestPersister_DevMode_ReplayLeakObserved guarantees that in DevMode
+// (and in prod) a replay-phase batch leaking into the sink is observable
+// via the OnReplayLeak Observer hook + replayLeakCnt counter, not via a
+// goroutine-context panic. R242-GO-11: dropped the DevMode-only panic
+// in favour of a slog.Error + counter signal so tests/alerting can
+// observe the bug without taking down the process.
+func TestPersister_DevMode_ReplayLeakObserved(t *testing.T) {
+	leakObs := &replayLeakObserver{}
+	p, _ := newTestPersister(t, func(o *Options) {
+		o.DevMode = true
+		o.Observer = leakObs
+	})
 	sink := p.SinkFor("dashboard:direct:alice:general")
 
-	panicked := false
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				panicked = true
-			}
-		}()
-		sink([]Entry{entry(t, 1, "u")}, true /* replay */)
-	}()
-	if !panicked {
-		t.Errorf("DevMode replay sink did not panic")
+	// Must not panic; must increment the leak counter.
+	sink([]Entry{entry(t, 1, "u"), entry(t, 2, "u")}, true /* replay */)
+
+	if leakObs.count != 2 {
+		t.Errorf("OnReplayLeak observed=%d want=2", leakObs.count)
+	}
+	if got := p.replayLeakCnt.Load(); got != 2 {
+		t.Errorf("replayLeakCnt=%d want=2", got)
 	}
 }
+
+// replayLeakObserver counts OnReplayLeak invocations; other Observer
+// methods are no-ops via embedded noopObserver.
+type replayLeakObserver struct {
+	noopObserver
+	count int
+}
+
+func (o *replayLeakObserver) OnReplayLeak(n int) { o.count += n }
 
 // TestPersister_FullChannel_Drops exercises the non-blocking drop
 // path. We use a tiny buffer and don't drain — the second send should
