@@ -129,8 +129,11 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			// the threshold compare (or in the wrong function) would
 			// either over-count every run or under-count by landing in an
 			// error branch.
+			//
+			// executeOpt moved from scheduler.go to scheduler_run.go in the
+			// 2026-05 cron-package refactor; counter wiring travelled with it.
 			name:    "CronExecutionSlowTotal fires after cron execution exceeds threshold",
-			path:    "../cron/scheduler.go",
+			path:    "../cron/scheduler_run.go",
 			pattern: `metrics\.CronExecutionSlowTotal\.Add\(1\)`,
 		},
 	}
