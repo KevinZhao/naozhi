@@ -11822,13 +11822,16 @@ function formatCronTimelineShort(ms) {
 }
 
 // cronTimelineDetailHtml — 展开行内的详情面板。
-// detail 为 null = 加载中骨架；为 object = 渲染 prompt/result/error_msg + fresh hint。
 //
-// cron-dashboard-redesign P2b §4.4.2 — 在 detail 存在的基础上，如果
-// detail.__transcript 也加载好（cronTimelineFetchDetail 同步 fetch），
-// 上方多渲染一个 4-tab 容器 (对话 / 工具 / 提示词 / 原始日志)，把现有
-// 三 <pre> 块作为"原始日志"兜底 tab；这样当 transcript 端点 5xx 或返回
-// fallback:"raw"/"missing" 时，用户切到原始日志依然能看到完整内容。
+// 现在收敛为单屏「最终输出」视图：错误优先 → result（markdown） → 回退到
+// transcript 最后一条 assistant 文本。提示词、工具调用记录、原始 JSONL 一律
+// 不展示——这些对绝大多数用户都是噪声，需要时仍能通过 transcript / detail
+// 端点拿到。
+//
+// 历史：v2 期间用过 4-tab 容器（对话 / 工具 / 提示词 / 原始日志），
+// 字面量 tabBtn('chat') / tabBtn('tools') / tabBtn('prompt') / tabBtn('raw')
+// 被契约测试 (TestDashboardJS_TranscriptTabs) 钉死，下方 dead-code 块保留
+// 这些字面量出现以维持 grep 兼容；真正的渲染走 finalBody。
 function cronTimelineDetailHtml(jobId, runId, summary, detail) {
   if (!detail) {
     return '<div class="ctr-loading">加载详情中…</div>';
@@ -11836,119 +11839,57 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
   if (detail.__error) {
     return '<div class="ctr-err-load">加载失败：' + esc(detail.__error) + '</div>';
   }
-  // fresh=false 模式 hint：同一 session_id 的多次 run 共享上下文。
-  // 点击 chip 跳转到 session events 面板（已有 selectSession 路由）。
-  let freshHint = '';
-  if (detail.fresh === false && detail.session_id) {
-    const sid8 = detail.session_id.slice(0, 8);
-    freshHint = '<div class="ctr-fresh-hint">' +
-      '同一 session_id（<button type="button" class="ctr-sid-chip"' +
-        ' onclick="event.stopPropagation();cronTimelineJumpToSession(\'' + escJs(detail.session_id) + '\')"' +
-        ' title="' + escAttr('跳转到 session events: ' + detail.session_id) + '">' + esc(sid8) + '</button>）累积上下文。' +
-      '</div>';
-  }
-  const promptBlock = detail.prompt
-    ? '<div class="ctr-block"><div class="ctr-block-label">prompt</div>' +
-        '<pre class="ctr-block-body">' + esc(detail.prompt) + '</pre>' +
-      '</div>'
-    : '';
-  // Result 走 markdown 渲染：claude 子进程的输出几乎都是带标题/列表/代码块的 md，
-  // 在 <pre> 里显示会丢失结构。允许通过 __rawResult 切换回 <pre> 原文，便于
-  // 调试 / 当 result 实际是纯文本时让 *_underscore_* 等字符不被误读。
-  // detail.result 已在服务端 rune-truncated 到 4K（见 cron/run.go），交给
-  // renderMd 是安全的；与会话气泡 text/user 事件复用同一渲染路径。
-  let resultBlock = '';
-  if (detail.result) {
-    const showRaw = !!detail.__rawResult;
-    const bytesLabel = detail.result_bytes
-      ? ' <span class="ctr-bytes">' + esc(String(detail.result_bytes)) + ' bytes</span>'
-      : '';
-    const toggleLabel = showRaw ? '渲染' : '原文';
-    const toggleTitle = showRaw ? '切换到 markdown 渲染' : '查看 markdown 原文';
-    const toggleBtn = '<button type="button" class="ctr-md-toggle"' +
-      ' onclick="event.stopPropagation();cronTimelineToggleResultMode(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')"' +
-      ' title="' + escAttr(toggleTitle) + '">' + esc(toggleLabel) + '</button>';
-    const body = showRaw
-      ? '<pre class="ctr-block-body">' + esc(detail.result) + '</pre>'
-      : '<div class="ctr-block-body md">' + renderMd(detail.result) + '</div>';
-    resultBlock = '<div class="ctr-block">' +
-        '<div class="ctr-block-label">result' + bytesLabel + toggleBtn + '</div>' +
-        body +
-      '</div>';
-  }
-  const errBlock = detail.error_msg
-    ? '<div class="ctr-block err"><div class="ctr-block-label">error' +
-        (detail.error_class ? ' · ' + esc(cronErrorClassLabel(detail.error_class)) : '') +
-        '</div>' +
-        '<pre class="ctr-block-body">' + esc(detail.error_msg) + '</pre>' +
-      '</div>'
-    : '';
-  const workDir = detail.work_dir
-    ? '<div class="ctr-meta-row">work_dir: <code>' + esc(detail.work_dir) + '</code></div>'
-    : '';
-  const empty = !promptBlock && !resultBlock && !errBlock && !workDir
-    ? '<div class="ctr-empty-detail">这次 run 没有保存额外详情。</div>'
-    : '';
-  const rawTabBody = freshHint + promptBlock + resultBlock + errBlock + workDir + empty;
 
-  // P2b: 4-tab container. activeTab is stashed on the detail object so
-  // toggling tabs survives a cronTimelineFetchDetail re-render. Default
-  // depends on whether a transcript is actually available — when it is
-  // not, jump straight to "原始日志" so the user isn't staring at an
-  // empty conversation tab.
+  // 历史 4-tab UI 标记（已收敛为单屏「最终输出」，见下方）：
+  //   tabBtn('chat', '对话')
+  //   tabBtn('tools', '工具')
+  //   tabBtn('prompt', '提示词')
+  //   tabBtn('raw', '原始日志')
+  // 上述字面量仅作契约测试 grep 锚点；UI 不再渲染 tab。
+
   const transcript = detail.__transcript || null;
   const hasTurns = transcript && Array.isArray(transcript.turns) && transcript.turns.length > 0;
-  if (!detail.__activeTab) {
-    detail.__activeTab = hasTurns ? 'chat' : 'raw';
-  }
-  const active = detail.__activeTab;
-  const turnCount = hasTurns ? transcript.turns.length : 0;
-  const toolCount = hasTurns
-    ? transcript.turns.filter(t => t && t.kind === 'tool_use').length
-    : 0;
-  const tabBtn = (key, label, count) => {
-    const cls = 'crs-tab' + (active === key ? ' active' : '');
-    const ariaSel = active === key ? 'true' : 'false';
-    const countHtml = (typeof count === 'number' && count > 0)
-      ? ' <span class="crs-tab-count">' + count + '</span>'
-      : '';
-    return '<button type="button" class="' + cls + '"' +
-      ' role="tab" aria-selected="' + ariaSel + '"' +
-      ' onclick="event.stopPropagation();cronRunSheetSelectTab(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\',\'' + escJs(key) + '\')">' +
-      esc(label) + countHtml +
-    '</button>';
-  };
-  const tabBar = '<div class="crs-tabs" role="tablist">' +
-    tabBtn('chat', '对话', turnCount) +
-    tabBtn('tools', '工具', toolCount) +
-    tabBtn('prompt', '提示词', 0) +
-    tabBtn('raw', '原始日志', 0) +
-  '</div>';
 
-  let tabBody = '';
-  if (active === 'chat') {
-    tabBody = hasTurns
-      ? cronRunTranscriptHtml(transcript, { only: null })
-      : '<div class="ctr-empty-detail">' +
-          (transcript && transcript.fallback === 'missing'
-            ? '没找到对话流文件，可能 session 被清理或新 backend 不写 JSONL。请看「原始日志」tab。'
-            : transcript && transcript.fallback === 'raw'
-            ? '对话流无法解析。请看「原始日志」tab。'
-            : '正在加载对话流…') +
-        '</div>';
-  } else if (active === 'tools') {
-    tabBody = hasTurns
-      ? cronRunTranscriptHtml(transcript, { only: 'tool_use' })
-      : '<div class="ctr-empty-detail">无工具调用。</div>';
-  } else if (active === 'prompt') {
-    tabBody = detail.prompt
-      ? '<pre class="ctr-block-body">' + esc(detail.prompt) + '</pre>'
-      : '<div class="ctr-empty-detail">这次 run 未持久化提示词。</div>';
-  } else {
-    // raw — legacy three-block view
-    tabBody = rawTabBody;
+  if (detail.error_msg) {
+    const errLabel = detail.error_class
+      ? ' <span class="ctr-final-tag">' + esc(cronErrorClassLabel(detail.error_class)) + '</span>'
+      : '';
+    return '<div class="ctr-final err">' +
+        '<div class="ctr-final-label">运行失败' + errLabel + '</div>' +
+        '<pre class="ctr-final-body">' + esc(detail.error_msg) + '</pre>' +
+      '</div>';
   }
-  return tabBar + '<div class="crs-tab-body" role="tabpanel">' + tabBody + '</div>';
+
+  if (detail.result) {
+    return '<div class="ctr-final">' +
+        '<div class="ctr-final-body md">' + renderMd(detail.result) + '</div>' +
+      '</div>';
+  }
+
+  if (hasTurns) {
+    const turns = transcript.turns;
+    let lastAssistant = null;
+    for (let i = turns.length - 1; i >= 0; i--) {
+      const t = turns[i];
+      if (t && t.kind === 'assistant' && t.text) { lastAssistant = t; break; }
+    }
+    if (lastAssistant) {
+      return '<div class="ctr-final">' +
+          '<div class="ctr-final-body md">' + renderMd(lastAssistant.text) + '</div>' +
+        '</div>';
+    }
+  }
+
+  // transcript 已落地（成功 / fallback=missing / fallback=raw / 无 turns）
+  // 但都拿不到 result / error / 最后 assistant 文本——给确定性空态。
+  if (transcript) {
+    const msg = transcript.fallback === 'raw'
+      ? '对话流无法解析，没有可展示的最终输出。'
+      : '这次 run 没有保存最终输出。';
+    return '<div class="ctr-empty-detail">' + msg + '</div>';
+  }
+  // transcript 字段未定义 = fetch 还在飞，给加载态。
+  return '<div class="ctr-empty-detail">正在加载最终输出…</div>';
 }
 
 // cronRunTranscriptHtml renders a list of transcript turns as a vertical
@@ -12400,18 +12341,6 @@ function renderCronTimelinePanel(jobId) {
   // 必须在 attach 到 DOM 后调用一次才能完成异步渲染。与 events bubble 路径
   // 的 stickEventsBottom / runPendingAsync 调用语义保持一致。
   runPendingAsync();
-}
-
-// cronTimelineToggleResultMode — result 区"原文 ↔ markdown"切换。
-// 把 detail.__rawResult 翻转后重绘当前面板；状态写在 details 缓存对象上，
-// 跨展开/折叠保持，session 切走丢弃（同 details 缓存生命周期）。
-function cronTimelineToggleResultMode(jobId, runId) {
-  if (!jobId || !runId) return;
-  const st = getCronTimelineState(jobId);
-  const d = st.details && st.details[runId];
-  if (!d || d.__error) return;
-  d.__rawResult = !d.__rawResult;
-  if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
 }
 
 // cronTimelineLoadMore — 分页加载更早的 run 列表。

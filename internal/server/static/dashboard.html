@@ -1444,6 +1444,22 @@ body.kbd-open .input-hints{display:none}
 .crs-body .ctr-sid-chip:hover{background:rgba(31,111,235,.12);border-color:var(--nz-accent)}
 .crs-body .ctr-meta-row{font-size:11px;color:var(--nz-text-mute);margin-top:4px}
 .crs-body .ctr-meta-row code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:3px;padding:0 4px}
+/* 最终输出单屏视图：取代 4-tab 结构，只展示 result / 错误 / 兜底文本 */
+.crs-body .ctr-final{padding:2px 0}
+.crs-body .ctr-final-label{font-size:11px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.crs-body .ctr-final.err .ctr-final-label{color:var(--nz-red)}
+.crs-body .ctr-final-tag{text-transform:none;font-size:10px;color:var(--nz-red);background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.35);border-radius:3px;padding:1px 6px}
+.crs-body .ctr-final-body{margin:0;font-size:13px;color:var(--nz-text);line-height:1.6;word-break:break-word;overflow-wrap:anywhere}
+.crs-body .ctr-final-body.md{font-family:inherit;white-space:normal}
+.crs-body .ctr-final-body:not(.md){font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;padding:10px 12px;white-space:pre-wrap;line-height:1.55}
+.crs-body .ctr-final.err .ctr-final-body{color:var(--nz-red);background:rgba(248,81,73,.06);border-color:rgba(248,81,73,.3)}
+.crs-body .ctr-final-body.md p{margin:0 0 10px}
+.crs-body .ctr-final-body.md p:last-child{margin-bottom:0}
+.crs-body .ctr-final-body.md > :first-child{margin-top:0}
+.crs-body .ctr-final-body.md > :last-child{margin-bottom:0}
+.crs-body .ctr-final-body.md pre{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;padding:10px 12px;overflow-x:auto}
+.crs-body .ctr-final-body.md code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+.crs-body .ctr-final-body.md p code,.crs-body .ctr-final-body.md li code{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:3px;padding:0 4px}
 
 /* 桌面：sheet 浮在 detail-pane 右半（Q1 决议：列表常驻可见 + timeline 半数行
  * 也常驻可见，让"同行二次点击关 sheet"这条 toggle 路径可达）。
