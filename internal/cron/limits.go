@@ -48,6 +48,15 @@ const (
 	// beyond this is almost certainly abuse.
 	MaxScheduleBytes = 256
 
+	// maxWorkDirBytes caps the persisted WorkDir field at load time.
+	// 4096 matches Linux PATH_MAX so legitimate absolute paths fit, but
+	// hand-edited cron_jobs.json injecting megabytes of "../" or null
+	// padding gets dropped before reaching slog / dashboard broadcasts.
+	// AddJob / dashboard PATCH already enforce workDirUnderRoot which
+	// pre-resolves the path; this bound is a load-time defence in depth.
+	// R236-QA-16.
+	maxWorkDirBytes = 4096
+
 	// maxStoredResultRunes bounds CronRun.Result + Job.LastResult after
 	// rune-safe truncation; the persisted record is hard-capped at
 	// MaxRunRecordBytes (32 KB) downstream, but trimming early avoids

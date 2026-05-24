@@ -162,6 +162,22 @@ func loadJobs(path string) (map[string]*Job, error) {
 				"path", path, "cron_id", j.ID, "backend_bytes", len(j.Backend))
 			continue
 		}
+		// R236-QA-16: 与 prompt/title 同等防御 — Schedule 与 WorkDir 也是
+		// 启动期 slog 字段，AddJob/dashboard PATCH 已校验，但持久化文件
+		// 可被运维直接编辑。超长 Schedule（robfig/cron 实际表达式 < 64 B）
+		// 或非 UTF-8 / 控制字符的 WorkDir 进 slog 会污染日志（log injection）
+		// 并在 broadcast 时跨终端跑空。len 阈值参照 MaxScheduleBytes 与
+		// 4096（PATH_MAX 兼容值）。
+		if len(j.Schedule) > MaxScheduleBytes || !utf8.ValidString(j.Schedule) || containsCronC0(j.Schedule) {
+			slog.Warn("cron store: dropping job with invalid schedule bytes",
+				"path", path, "cron_id", j.ID, "schedule_bytes", len(j.Schedule))
+			continue
+		}
+		if len(j.WorkDir) > maxWorkDirBytes || !utf8.ValidString(j.WorkDir) || containsCronC0(j.WorkDir) {
+			slog.Warn("cron store: dropping job with invalid work_dir bytes",
+				"path", path, "cron_id", j.ID, "work_dir_bytes", len(j.WorkDir))
+			continue
+		}
 		m[j.ID] = j
 	}
 	slog.Info("loaded cron store", "count", len(m), "path", path)
