@@ -188,6 +188,18 @@ const (
 // Reviewers MUST block PRs that add a new field without this annotation —
 // the annotation is the only mechanism that keeps fields-vs-methods coupling
 // visible after the file split. See docs/design/router-split-design.md.
+//
+// NEEDS-DESIGN (R245-ARCH-48): the `// 读写:` annotation is human-
+// maintained and silently rots when a field's actual access set
+// drifts from the comment (e.g., a refactor pulls a getter into a
+// new router_*.go file but forgets to update the comment). Plan:
+// add tools/check-router-fields.go that parses each field's
+// annotation, greps the listed files for the field name, and
+// fails CI when any router_*.go reads/writes a field without
+// being listed (or vice versa). Deferred until the router-split
+// refactor stabilises (multiple in-flight changes still moving
+// fields between files would generate false positives until
+// quiescent).
 type Router struct {
 	// 读写: core (lock primitive itself), all router_*.go (acquired by methods)
 	mu sync.RWMutex
