@@ -976,6 +976,14 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, resolved string, i
 }
 
 func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resolved string, info os.FileInfo) {
+	// R246-SEC-2: enforce the same sensitive-name guard as servePreview /
+	// serveDownload. A file like .env / id_rsa / .npmrc sniffs to text/plain
+	// and would otherwise pass the isTextMime check below, exposing
+	// credentials inline despite preview/download already refusing them.
+	if isSensitiveDownloadName(filepath.Base(resolved)) {
+		writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": "preview blocked for sensitive file name"})
+		return
+	}
 	if info.Size() > maxRawBytes {
 		writeJSONStatus(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "file too large for inline preview; use download mode"})
 		return
