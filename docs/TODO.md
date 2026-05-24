@@ -240,7 +240,7 @@
 - [ ] **R243-ARCH-8 [BREAKING-LOCAL][REPEAT-10]** `cron Stop / router Shutdown / wshub Shutdown` 三组超时各自常量、main.go 顺序耦合；引入 `lifecycle.Manager` topo-sort + 共享 budget。
 - [~] **R243-ARCH-9 [REFACTOR][REPEAT-9]** `internal/{upstream,dispatch,cron,server}/consumer.go` 4 个 consumer-side SessionRouter 接口（9/8/3/14 方法）并存；抽 `internal/session/api/` 细粒度接口子包。 — upstream/consumer.go 加 NEEDS-DESIGN godoc + 拆 SessionLookup/SessionLifecycle/SessionMutator 三窄接口预备未来抽 internal/session/api/；4 包统一仍待跨包评审。
 - [ ] **R243-ARCH-10 [REFACTOR][REPEAT-8]** Dispatcher.sendFn / takeoverFn / replyFooterFn 等 4 处 closure-as-DI + 各自 nil 兜底；统一 narrow Capability interface 注入。
-- [~] **R243-ARCH-11 [REFACTOR][REPEAT-7]** `internal/cron/scheduler.go:2470-2486` cron sendCtx 走 `Background()` 不挂 stopCtx 链；改 `WithoutCancel(spawnCtx)` 仅取消 deadline 不取消 cancel。
+- [x] **R243-ARCH-11 [REFACTOR][REPEAT-7]** `internal/cron/scheduler.go:2470-2486` cron sendCtx 走 `Background()` 不挂 stopCtx 链；改 `WithoutCancel(spawnCtx)` 仅取消 deadline 不取消 cancel。 → 已改 `context.WithoutCancel(ctx)`（spawn ctx），WithTimeout 包一层保留独立 jobTimeout；slog/tracer Values 现在跨 spawn→send 连续，stopCtx cancel 仍不传播（保留 R191-ARCH-M5 SIGTERM 不丢 result 契约）；同时关闭 R242-CR-6（同 hot spot）。
 - [~] **R243-ARCH-12 [REFACTOR][REPEAT-5]** `cli.EventLog ring + persist.Persister spool + naozhilog.Source replay` 三层 eventlog 重影 + 4 backend 责任不清；抽 `EventStore interface{Append/Read/Subscribe}` + 中央 registry。 — internal/session/eventlog_bridge.go 顶部加 NEEDS-DESIGN 包级 godoc 描述 EventStore interface + 中央 registry 计划 + 各 backend 已积累的 perf 热路径迁移成本；跨包抽 api/ 仍待评审。
 - [ ] **R243-ARCH-13 [REFACTOR][REPEAT-6]** `internal/cron/scheduler.go` metrics.CronRun*Total 11 处直调 + slog 33 处散布；用 internal/metrics/labeled + slog.With helper。
 - [ ] **R243-ARCH-14 [BREAKING-LOCAL][REPEAT-4]** `sysession.Config / SchedulerConfig / RouterConfig` 无 schemaVersion；HotReload 无路径；引入 `config/v1/` migration 入口。
@@ -325,7 +325,7 @@
 
 - [ ] **R242-CR-3 [REFACTOR]** `internal/server/dashboard_cron.go:456-571` `GET /api/cron`（1 Hz poll）无 rate limiter 而 runs 有；DOS 风险；与 runsLimiter 同模式应用。
 - [ ] **R242-CR-5 [REFACTOR]** `internal/cron/scheduler.go:3091-3096` `var marshalJobs atomic.Pointer` package-level mutable via init() + 测试 mutate；改 Scheduler 构造期 DI 字段。
-- [ ] **R242-CR-6 [BREAKING-LOCAL]** `internal/cron/scheduler.go:2411` `sendCtx` 来自 `Background()` 不参与 stopCtx 链；SIGTERM 后 Send 仍跑 5min。改 `WithTimeout(s.stopCtx, jobTimeout)` 或显式从 Stop() 取消。
+- [x] **R242-CR-6 [BREAKING-LOCAL]** `internal/cron/scheduler.go:2411` `sendCtx` 来自 `Background()` 不参与 stopCtx 链；SIGTERM 后 Send 仍跑 5min。改 `WithTimeout(s.stopCtx, jobTimeout)` 或显式从 Stop() 取消。 → R243-ARCH-11 收口（同一 hot spot）：改 `context.WithoutCancel(ctx)` 而非走 stopCtx 链——保留 R191-ARCH-M5 不被 SIGTERM 取消的契约（避免 in-flight Send result 丢失），同时继承 ctx Values 让 slog/trace 跨 spawn→send 阶段连续。
 - [ ] **R242-CR-7 [REFACTOR]** `internal/cron/runstore.go:192` `assertJobLockHeld` 用 `panic` + `TryLock` 在生产路径加锁竞争 + crash 风险；移到 `_test.go` 或 build tag。
 - [ ] **R242-CR-8 [REFACTOR]** `internal/server/dashboard_cron_transcript.go:639-664` `summariseToolInput` `map[string]any` decode-and-hunt 反射成本；用目标 struct 或 byte-scan。
 - [ ] **R242-CR-11 [BREAKING-LOCAL]** `internal/cron/runstore.go:277-323` `skipAppendTrim` panic 路径会跨过 `entry.mu` 获取，defer 不执行 → 锁泄漏；assertJobLockHeld 改 bool 返回。

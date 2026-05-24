@@ -2466,33 +2466,44 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		return
 	}
 
-	// R191-ARCH-M5: Send uses a ctx derived from Background, not stopCtx.
-	// Rationale: once GetOrCreate has handed us a live session we should
-	// either record a result or a real error. If we piggy-back on stopCtx
-	// here, Scheduler.Stop()'s first act (stopCancel) cancels this ctx and
-	// the in-flight Send's result is silently dropped — the job records no
+	// R191-ARCH-M5: Send must NOT inherit stopCtx cancellation. Once
+	// GetOrCreate has handed us a live session we should either record a
+	// result or a real error. If we piggy-back on stopCtx here,
+	// Scheduler.Stop()'s first act (stopCancel) cancels this ctx and the
+	// in-flight Send's result is silently dropped — the job records no
 	// LastRunAt, is re-run on the next start, and "cron send cancelled"
 	// logs make shutdown look like a failure. notifyTarget (this file)
-	// already uses Background for delivery after shutdown for the same
-	// reason; make Send consistent. Shutdown latency is bounded by
-	// Router.Shutdown's drain timeout (ShutdownTimeout, 30s in
-	// internal/session) + cron.Stop()'s own cron.Stop() chain drain.
+	// uses the same uncancelled-parent pattern for delivery after
+	// shutdown. Shutdown latency is bounded by Router.Shutdown's drain
+	// timeout (ShutdownTimeout, 30s in internal/session) + cron.Stop()'s
+	// own cron.Stop() chain drain.
 	//
-	// R230B-GO-1 / R222-GO-1 (worst-case wall clock): the spawn ctx above
-	// (line ~2062, derived from s.stopCtx with WithTimeout(jobTimeout)) and
-	// this sendCtx do NOT share a budget — a slow GetOrCreate that consumes
-	// most of jobTimeout still hands a fresh jobTimeout to Send below. A
-	// pathological run can therefore last ~2*jobTimeout + a brief scheduling
-	// gap before finishRun stamps a terminal state. This is intentional:
-	// clamping sendCtx to (jobTimeout - time.Since(startedAt)) would amplify
-	// flaky/cold-start spawns (~10s spawn → ~290s send budget on a 5min
-	// job), turning a transient session-spawn slowdown into a user-visible
-	// "send timed out" without the operator having any signal. The
-	// scheduler-level overlap guard (robfig SkipIfStillRunning chain
-	// wrapper) already prevents two concurrent
-	// runs of the same job from stacking budgets, so the doubled wall
-	// clock affects only the CURRENT run's recorded duration, not throughput.
-	sendCtx, sendCancel := context.WithTimeout(context.Background(), jobTimeout)
+	// R243-ARCH-11: parent is now context.WithoutCancel(ctx) rather than
+	// context.Background(). WithoutCancel inherits Values (slog group keys,
+	// any tracer baggage, future request-scoped data) from the spawn ctx
+	// while explicitly discarding both Done() and Err() — so the
+	// no-cancel-on-shutdown contract above is preserved AND log
+	// correlation across spawn → send phases survives. Background()
+	// dropped both, so prior to this change a future tracer attaching to
+	// the spawn ctx would have lost its trace context exactly at the
+	// phase transition that operators most care about.
+	//
+	// R230B-GO-1 / R222-GO-1 (worst-case wall clock): the spawn ctx
+	// above (line ~2372, derived from s.stopCtx with WithTimeout(
+	// jobTimeout)) and this sendCtx do NOT share a budget — a slow
+	// GetOrCreate that consumes most of jobTimeout still hands a fresh
+	// jobTimeout to Send below. A pathological run can therefore last
+	// ~2*jobTimeout + a brief scheduling gap before finishRun stamps a
+	// terminal state. This is intentional: clamping sendCtx to
+	// (jobTimeout - time.Since(startedAt)) would amplify flaky/cold-start
+	// spawns (~10s spawn → ~290s send budget on a 5min job), turning a
+	// transient session-spawn slowdown into a user-visible "send timed
+	// out" without the operator having any signal. The scheduler-level
+	// overlap guard (robfig SkipIfStillRunning chain wrapper) already
+	// prevents two concurrent runs of the same job from stacking
+	// budgets, so the doubled wall clock affects only the CURRENT run's
+	// recorded duration, not throughput.
+	sendCtx, sendCancel := context.WithTimeout(context.WithoutCancel(ctx), jobTimeout)
 	defer sendCancel()
 	// R240-GO-4: emit an explicit signal when entering sendCtx after the
 	// spawn phase already consumed >50% of jobTimeout. The wall-clock
