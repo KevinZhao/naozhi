@@ -435,7 +435,7 @@
 
 - [ ] **R236-QA-03 — UpdateJob 在 s.mu.Lock 下调 cron.Add/Remove 可能锁顺序倒置（P1）**: `internal/cron/scheduler.go:1383-1397` 与 ListAllJobsWithNextRun 注释揭示的锁顺序冲突。pauseJobLocked/resumeJobLocked 同样存在。方案：研究 robfig/cron v3 锁语义；不安全则参照 ListAllJobsWithNextRun 模式释锁后操作 cron。Breaking：否。
 - [x] **R236-QA-05 — sysession DaemonRun ErrorClass 缺 Canceled 枚举（P2）**: `internal/sysession/run.go:152` State=canceled 但 ErrorClass="" 与成功无法区分。方案：新增 DaemonErrorClassCanceled 枚举值。Breaking：否（wire format）。
-- [ ] **R236-QA-09 — auto_titler 手写 insertion sort 维护风险（P2）**: `internal/sysession/auto_titler.go:280-284` `>=` 一改即死循环。方案：slices.SortFunc + batchPerTick ≤100 上限。Breaking：否。
+- [x] **R236-QA-09 — auto_titler 手写 insertion sort 维护风险（P2）**: ~~`internal/sysession/auto_titler.go:280-284` `>=` 一改即死循环。方案：slices.SortFunc + batchPerTick ≤100 上限。~~ 已修复 2026-05-24（cron-fix-F4）：sort 部分 R236-PERF-2 已落地 `slices.SortFunc`；本次补 batchPerTick 上限——`autoTitlerMaxBatchPerTick = 100` 包级常量，Configure 把超出值 clamp 到 100；新增 TestAutoTitler_BatchPerTickClamp 5-case table。Breaking：否。
 - [ ] **R236-QA-13 — readJSONWithRetry 不区分 file-missing vs JSON-invalid（P2）**: `cmd/naozhi/main.go:97-112` 损坏 settings.json 仅 Warn。方案：errors.Is(fs.ErrNotExist) 走 Warn 其余走 Error 提示运维。Breaking：否。
 - [x] **R236-QA-16 — loadJobs 缺 Schedule/WorkDir 字段验证（P3）**: `internal/cron/store.go:109-153` 仅校 ID/Prompt/Title/Backend；超长 Schedule + 非 UTF-8 WorkDir 进 slog 可 log-injection。方案：与现有 prompt/title 验证对齐加 len + utf8.ValidString。Breaking：否。
 - [x] **R236-QA-17 — sysession runner argv 硬编 "-p --output-format text --setting-sources" 与 cli 包参数集脱钩（P3）**: `internal/sysession/runner.go:119-131`。方案：抽 runnerImplBaseArgs 包级常量 + 注释同步责任。Breaking：否。
