@@ -276,7 +276,7 @@
 - [ ] **R246-SEC-10 [P3] [REPEAT-2] — `internal/server/dashboard.go:503` CSP 含 cdn.jsdelivr.net 但缺 SRI 兜底**: 若 CDN 被劫持，CSP 仍允许加载。建议：CSP 加 `require-sri-for script style`（实验性 Chrome 79+），或迁移到本地 vendored 资产。
 - [ ] **R246-SEC-11 [P3] [REPEAT-2] — `internal/server/health.go:189` /health 未认证响应未限速**: Status + Uptime 可作 fingerprint。建议：未认证分支套上 unauthDashLimiter，或把 uptime 下推到 auth-only section。
 - [ ] **R246-SEC-12 [P3] [BREAKING-LOCAL] — `internal/server/dashboard_session.go:1042` slog 输出 1024-byte workspace**: 长度上限可被 log-flood 放大。建议：256 / 与 cron maxCronWorkDirBytesDashboard 对齐。
-- [~] **R246-SEC-13 [P3] [BREAKING-LOCAL] — `internal/server/dashboard_send.go:1158` ETag SHA-256 截 16 hex (64 bit)**: 攻击者主动构造 birthday-bound ~2^32。建议：截 12 字节（96-bit）或保完整 32 字节。
+- [x] **R246-SEC-13 [P3] [BREAKING-LOCAL] — `internal/server/dashboard_send.go:1158` ETag SHA-256 截 16 hex (64 bit)**: 攻击者主动构造 birthday-bound ~2^32。建议：截 12 字节（96-bit）或保完整 32 字节。
 - [ ] **R246-SEC-14 [P3] [REPEAT-2] — `internal/server/dashboard_session.go:983` slog Info "session label updated" key 字段未二次 sanitize**: 仅过 ValidateSessionKey 校 C0/UTF8，bidi 漏网取决于实现。建议：log 处统一 session.SanitizeLogAttr 与 dispatch.commands.go:51 一致。
 
 #### Go 语言（GO，22 项）
@@ -290,11 +290,11 @@
 - [ ] **R246-GO-7 [P2] [REPEAT-19] — `internal/cron/scheduler_run.go:431-440` jitter 后只 re-check job 在 map，未 re-check Paused**: jitter 窗口内若 PauseJobByID 被调用，scheduled tick 仍执行违反 "Paused job must not run" 不变量。建议：jitter 后那段 RLock 同时读 paused，paused 时直接 return。
 - [ ] **R246-GO-8 [P2] [REPEAT-25] — `internal/cron/scheduler_jobs.go:281-318` DeleteJobByID lock-order 未文档但实际依赖**: scheduler.go EnsureStub 文档"must-not-hold-s.mu"但无 contract test 阻止新 callers 绕过。建议：debug-only TryRLock assert，或 contract test assert 调用栈。
 - [ ] **R246-GO-9 [P2] [BREAKING-LOCAL] — `internal/cron/runstore.go:425-443` cacheHeadPush 静默 no-op 时数据已 fsync 上盘**: warm=false 时 no-op，下次 cacheGet 走 warmCache 重读盘；cache miss 频率高。建议：Append 末尾若 cache 不 warm 主动 LoadOrStore 空 entry + 刚 Append 的 summary 作种子。
-- [~] **R246-GO-10 [P2] [REPEAT-40] — `internal/cron/scheduler_jobs.go:506-535` UpdateJob schedule 失败回滚不完整**: registerJob 失败 → j.Schedule 回滚但 j.entryID=0 + cron 中老 entry 已删，dashboard 显示老 schedule 但 NextRun 永远空。建议：在 cron.Remove 之前保存 oldEntryID，失败后用 oldSchedule 重建。
+- [x] **R246-GO-10 [P2] [REPEAT-40] — `internal/cron/scheduler_jobs.go:506-535` UpdateJob schedule 失败回滚不完整**: registerJob 失败 → j.Schedule 回滚但 j.entryID=0 + cron 中老 entry 已删，dashboard 显示老 schedule 但 NextRun 永远空。建议：在 cron.Remove 之前保存 oldEntryID，失败后用 oldSchedule 重建。
 - [ ] **R246-GO-11 [P2] [REPEAT-34] — `internal/cron/scheduler_session.go:68-108` KnownSessionIDs 文档说"30秒 cached" 但代码没缓存**: 每次调用都触发完整扫描，500 jobs × 200 runs = 100k map ops。建议：runStore.globalKnownSet atomic.Pointer 增量；或 KnownSessionIDsCached sync.Map+TTL 真做 30s 缓存。
-- [~] **R246-GO-12 [P3] [REPEAT-37] — `internal/cron/scheduler_run.go:474-516` allowedRoot 检查 EvalSymlinks 带 TOCTOU**: snap.workDir copy 与最终 cli wrapper open 不一致。建议：把 EvalSymlinks 后 resolved 路径回写 opts.Workspace（替代 filepath.Clean(snap.workDir)）。
+- [x] **R246-GO-12 [P3] [REPEAT-37] — `internal/cron/scheduler_run.go:474-516` allowedRoot 检查 EvalSymlinks 带 TOCTOU**: snap.workDir copy 与最终 cli wrapper open 不一致。建议：把 EvalSymlinks 后 resolved 路径回写 opts.Workspace（替代 filepath.Clean(snap.workDir)）。
 - [ ] **R246-GO-13 [P2] [BREAKING-LOCAL] — `internal/cron/scheduler.go:683-758` Stop deadline timer 复用陷阱**: 第一次 select 命中 cronDoneCtx 后第二段 select 与 deadline.C 共用同一 timer，依赖 NewTimer 复用陷阱不保证 Go 语义。建议：第二段 select 用 time.After(stopBudget - elapsed)。
-- [~] **R246-GO-14 [P2] [REPEAT-19] — `internal/dispatch/dispatch.go:1041-1055` todoLoop 终止时未 drain pendingTodo**: tracker 引用通过 pendingTodo *string 间接持住到下次 GC。建议：stop() 把 pendingTodo.Store(nil) 显式清。
+- [x] **R246-GO-14 [P2] [REPEAT-19] — `internal/dispatch/dispatch.go:1041-1055` todoLoop 终止时未 drain pendingTodo**: tracker 引用通过 pendingTodo *string 间接持住到下次 GC。建议：stop() 把 pendingTodo.Store(nil) 显式清。
 - [ ] **R246-GO-15 [P3] [REPEAT-25] — `internal/cron/runinflight.go:64-73` strHeap/timeHeap 每次 Store 都 alloc**: setPhase 在 fast-path Load 比较虽避免重复 store 但 phase 值实际每次都不同。建议：phase 改用 atomic.Int32 枚举（PhaseQueued..Sending），string version 留 export 时 lookup。
 - [ ] **R246-GO-16 [P2] [REPEAT-37] — `internal/cron/scheduler_jobs.go:870-890` findByPrefix 在持 s.mu.Lock 下做 O(N) scan**: 500 job 全 scan + strings.HasPrefix 写锁下，并发 dashboard 列表读直接被阻塞。建议：findByPrefix 自己拿 RLock；或维护 prefix→[]ID 小 trie。
 - [~] **R246-GO-17 [P3] [REPEAT-40] — `internal/cron/scheduler_run.go:486-500` ExtraArgs clip 但 AgentOpts 其他 slice/map 未 clone**: 当前没看到下游 append 但 hardening 不全。建议：cloneAgentOpts(opts) 工具函数复制所有 slice/map。
@@ -306,13 +306,13 @@
 
 #### 性能（PERF，16 项）
 
-- [~] **R246-PERF-1 [P1] [REPEAT-2] — `internal/dispatch/coalesce.go:111` time.Time.Format("15:04") 每条 queued 消息 alloc**: stdlib 始终新建 5-byte string + builder buffer，MaxDepth 默认 16 一次 burst 最多 16 alloc。建议：`b.Write(m.EnqueueAt.AppendFormat(buf[:0], "15:04"))` 栈上零分配；预期 GC↓ 3-5%。
+- [x] **R246-PERF-1 [P1] [REPEAT-2] — `internal/dispatch/coalesce.go:111` time.Time.Format("15:04") 每条 queued 消息 alloc**: stdlib 始终新建 5-byte string + builder buffer，MaxDepth 默认 16 一次 burst 最多 16 alloc。建议：`b.Write(m.EnqueueAt.AppendFormat(buf[:0], "15:04"))` 栈上零分配；预期 GC↓ 3-5%。
 - [ ] **R246-PERF-2 [P1] [REFACTOR] — `internal/cron/runstore.go:556-633` diskListNewestFirst 排序后顺序 readRun 触发 N×(Lstat+ReadFile)**: 冷启动 GC + 第一次 dashboard 1Hz poll 串行 2×200 syscall+unmarshal。建议：先 mtime 过滤再 readRun，并以 8 worker 并行解码；预期 lat↓ 5-10× cold cache。
 - [ ] **R246-PERF-3 [P2] [REFACTOR] — `internal/cli/process_send.go:262-281` time.NewTicker 每次 Send 启动**: 每条用户消息一次，比 NewTimer+Reset 多 runtime goroutine + chan。建议：单一 deadline timer + select default 短轮询，或共享 watchdog goroutine。
 - [ ] **R246-PERF-4 [P2] [REFACTOR] — `internal/server/wshub.go:643-661` 锁内 O(connections × subscriptions) per-key 计数扫描**: 500 conn × 50 subs/conn = 25K map 查找一次锁内。建议：增量 subscriberCounts map[string]int 在 sub/unsub path 维护，subscribe 锁内 O(1)；预期 lat↓ 20×。
 - [ ] **R246-PERF-5 [P2] [REFACTOR] — `internal/cli/eventlog.go:1118-1130` notifySubscribers RLock + slice scan per-Append**: 4-50 events/s × N session = 25K 调用/s。建议：subscribers 切到 atomic.Pointer[[]*subscriber] CoW 替换指针，读者完全免锁；预期 CPU↓ 5-10%。
 - [ ] **R246-PERF-6 [P2] [REFACTOR] — `internal/cron/runstore.go:301-339` Append 每次 os.MkdirAll syscall**: 长寿系统每条都浪费一次 stat+mkdir。建议：per-jobID sync.Once 或 dirsCreated sync.Map；预期 syscall↓ 50%。
-- [ ] **R246-PERF-7 [P2] [REPEAT-3] — `internal/server/agent_tailer.go:325-338` 每个 tailer 一个 200ms NewTicker goroutine**: agentTailerMax=50 → 50 goroutine 长期 spin。建议：单一中央 ticker 在 registry fan-out；预期 goroutine↓ 50→1。
+- [x] **R246-PERF-7 [P2] [REPEAT-3] — `internal/server/agent_tailer.go:325-338` 每个 tailer 一个 200ms NewTicker goroutine**: agentTailerMax=50 → 50 goroutine 长期 spin。建议：单一中央 ticker 在 registry fan-out；预期 goroutine↓ 50→1。
 - [ ] **R246-PERF-8 [P2] [REPEAT-2] — `internal/cron/runstore.go:606-615` slices.SortFunc 每次 List/Recent + Trim 全量**: dashboard 1Hz poll 已加 cache，但 trim 路径每次 Append 仍可能触发。建议：当 mtime 已有序时跳过 sort（probe + linear scan）；预期 CPU↓ 30%。
 - [ ] **R246-PERF-9 [P2] [REFACTOR] — `internal/server/wshub.go:1463-1509` BroadcastSessionsUpdate debounce timer + clientWG.Add(1)**: 频繁 session mutate 下高频 timer 创建。建议：复用单一长寿命 timer（Reset），减少 AfterFunc 闭包分配。
 - [ ] **R246-PERF-10 [P2] [REFACTOR] — `internal/upstream/connector.go:331-333` marshalResult(v any) 走 reflect path 无 pool**: connector 频繁交互每次新分配 encodeState scratch。建议：getJSONEnc/putJSONEnc 同模式；预期 alloc↓ ~1 buf/call。
@@ -349,7 +349,7 @@
 - [ ] **R246-ARCH-1 [P2] [REFACTOR] — `internal/cli/history.go:84` + `internal/history/source.go:43` 双重 HistorySource 接口**: 维护两份签名，加新方法立即产生方法漂移而无编译失败。建议：在 history/types.go 移出 EventEntry（或 cli 内放定义但 history 包仅 type-alias），合并为单一 interface；当前 cycle 因 cli 持有 EventEntry，可用 type HistorySource = history.Source 别名做无破坏迁移。
 - [ ] **R246-ARCH-2 [P2] [REFACTOR] — `internal/cron/scheduler.go:84-136` SchedulerConfig 25 字段 + 重新构造而非 functional options**: 测试新增字段必须改三处，Location nil → time.Local 隐含逻辑不在类型层暴露。建议：functional options cron.WithJitter(d)/WithMaxJobs(n)。RouterConfig（30+ 字段）与 ServerOptions（25+ 字段）同症。
 - [ ] **R246-ARCH-3 [P2] [REFACTOR] — `internal/server/wshub.go:1463` BroadcastSessionsUpdate 散布 9+ 调用点**: 多 producer 直接调 Hub 内部方法 = 业务事件流向不清晰。建议：抽 session.SessionsBus（subscribe + publish），Hub 实现 subscriber 一处；其它包只 publish。
-- [ ] **R246-ARCH-4 [P3] [REFACTOR] — `internal/upstream/connector.go:32,45,52` 3 个全局可变 var 假装 const**: handleConnDrainBudget/circuitBreakerThreshold/circuitBreakerBackoff 让测试缩短但暴露成包级可变全局态。建议：移入 UpstreamConfig，testutil 提供 WithTestThresholds(t)；包级改 const 默认。
+- [x] **R246-ARCH-4 [P3] [REFACTOR] — `internal/upstream/connector.go:32,45,52` 3 个全局可变 var 假装 const**: handleConnDrainBudget/circuitBreakerThreshold/circuitBreakerBackoff 让测试缩短但暴露成包级可变全局态。建议：移入 UpstreamConfig，testutil 提供 WithTestThresholds(t)；包级改 const 默认。
 - [ ] **R246-ARCH-5 [P2] [REFACTOR] — `internal/cron/scheduler_callbacks.go:18` + `internal/sysession/manager.go:418` + `internal/server/server.go:684` callback 注册三模式不统一**: 同抽象三套实现 + 三套加锁 + 三种 nil-fallback。建议：统一为构造时只接受可空 fn 字段；运行时切换用 eventbus.Hook[T] 包级 helper。
 - [ ] **R246-ARCH-6 [P2] [REFACTOR] — `internal/upstream/connector.go:122,130` SetDiscoverFunc/SetPreviewFunc 启动时 race-prone 设值**: connector.go:114 注释自承"plain 字段 (no atomic / mutex) — 并发 SetX 与 handleRequest 是 data race"，依赖 main 单线程顺序。建议：upstream.New(..., Hooks{Discover, Preview}) 构造参数，或 atomic.Pointer。
 - [ ] **R246-ARCH-7 [P3] [REFACTOR] — `internal/server/server.go` HTTP 中间件链未抽象 MaxBytesReader 在 13+ handler 内手写**: dashboard_cron.go 5 处 r.Body = http.MaxBytesReader、dashboard_send.go 4 处不同上限，新加 handler 漏 limiter 不会被编译捕获。建议：middleware.Chain{authM, maxBytes(N), gzip}.Then(handler) 或表驱动。
@@ -463,7 +463,7 @@
 - [ ] **R245-ARCH-45 [REFACTOR] — dispatch SendFn/TakeoverFn 闭包注入**: 建议：补 SessionFlow interface 把 GetOrCreate+SendFn+TakeoverFn 三事打包，测试 mock 单 interface 比三 closure 更稳。
 - [ ] **R245-ARCH-46 [REFACTOR] — Router NewRouter 内执行 runOrphanSweep/startAttachmentTracker/runAutoChainBackfillOnce 副作用**: 建议：构造仅构造，新增 Router.Start(ctx) 显式触发 lifecycle。
 - [ ] **R245-ARCH-47 [REFACTOR] — 跨模块错误传播缺口: dispatch 与 session 各自硬编码错误→中文文案 switch**: 建议：统一 internal/usermsg/registry.go 表驱动 map[error]usermsgEntry{i18nKey, severity}；dispatch 调 usermsg.For(err)。
-- [ ] **R245-ARCH-48 [REFACTOR] — `internal/session/router_core.go:191` `// 读写: <files>` 注释式架构契约依赖人工维护**: 建议：tools/check-router-fields.go 解析注释 vs grep 调用点 CI 校验。
+- [x] **R245-ARCH-48 [REFACTOR] — `internal/session/router_core.go:191` `// 读写: <files>` 注释式架构契约依赖人工维护**: 建议：tools/check-router-fields.go 解析注释 vs grep 调用点 CI 校验。
 - [ ] **R245-ARCH-49 [REFACTOR] — Observability 盲区 #3: replyTracker editLoop/todoLoop/sendAskQuestionCard 三 goroutine 无 in-flight gauge**: 建议：naozhi_replytracker_inflight_loops expvar.Int Add(+1)/Add(-1)。
 - [ ] **R245-ARCH-50 [REFACTOR] — `internal/dispatch/dispatch.go:249-308` NewDispatcher 60 行配置正常化**: 建议：抽 (*DispatcherConfig).normalize()。
 
