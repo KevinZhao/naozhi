@@ -388,7 +388,13 @@ func validateSchedule(schedule string) error {
 	now := time.Now()
 	first := sched.Next(now)
 	second := sched.Next(first)
-	if interval := second.Sub(first); interval > 0 && interval < minCronInterval {
+	// R236-QA-07: drop the `interval > 0` guard. Previously a degenerate
+	// schedule whose second tick equaled (or preceded) the first — interval
+	// == 0 or negative — slipped past the floor and would fire as fast as
+	// the dispatcher could observe the tick. minCronInterval is a positive
+	// constant (5m) so `interval < minCronInterval` correctly rejects 0,
+	// negatives, and anything below the floor in one expression.
+	if interval := second.Sub(first); interval < minCronInterval {
 		return fmt.Errorf("interval %v is too short, minimum is %v", interval, minCronInterval)
 	}
 	return nil

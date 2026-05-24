@@ -271,6 +271,12 @@ type Scheduler struct {
 	// cron scheduler's purview.
 	triggerWG sync.WaitGroup
 
+	// gcWG tracks the cold-start GC goroutine spawned by Start() so Stop()
+	// waits for it to finish before persisting state. Without this, Stop's
+	// final saveJobs / Append paths can race with trimAll's filesystem
+	// mutations on the runs/ tree (R236-GO-01).
+	gcWG sync.WaitGroup
+
 	// runningJobs serializes execute(j) calls per job ID so a manual
 	// TriggerNow cannot overlap a scheduled tick for the same job (the cron
 	// chain's SkipIfStillRunning only protects the scheduled path). Entries
@@ -811,7 +817,9 @@ func (s *Scheduler) Start() error {
 	// down. 异步执行避免在 jobs 多/历史目录大时阻塞 Start 返回（每个 job
 	// 一次 ReadDir + N 次 Remove）。
 	if s.runStore != nil {
+		s.gcWG.Add(1)
 		go func() {
+			defer s.gcWG.Done()
 			slog.Info("cron run history: cold-start GC starting")
 			s.runStore.trimAll(time.Now())
 			slog.Info("cron run history: cold-start GC done")
@@ -927,6 +935,25 @@ var stopBudget = 30 * time.Second
 // TRIGGER-GOROUTINE.
 func (s *Scheduler) Stop() {
 	s.stopCancel()
+
+	// R236-GO-01: wait for the cold-start GC goroutine spawned in Start()
+	// before draining the cron scheduler. Without this, trimAll's filesystem
+	// mutations on the runs/ tree race with Stop's final persist path and
+	// any in-flight Append from a TriggerNow draining via triggerWG.Wait.
+	// Bounded by a 5s timer so a wedged trimAll cannot pin Stop past
+	// stopBudget — the goroutine is naturally short-lived (ReadDir + N
+	// Removes), so any timeout here indicates a stuck filesystem.
+	gcDone := make(chan struct{})
+	go func() {
+		s.gcWG.Wait()
+		close(gcDone)
+	}()
+	select {
+	case <-gcDone:
+	case <-time.After(5 * time.Second):
+		slog.Warn("cron: gc goroutine wait timeout")
+	}
+
 	cronDoneCtx := s.cron.Stop()
 
 	// Single overall deadline shared across both waits. If cron.Stop drains
@@ -1086,11 +1113,23 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 	s.jobs[j.ID] = j
 	save, perr := s.persistJobsLocked()
 	if perr != nil {
-		// In-memory insertion + cron scheduling already happened; we
-		// cannot roll those back safely (another goroutine may have
-		// observed the registered entry). Surface the error so the
-		// HTTP layer returns a 500 and the operator sees the
-		// persistence gap.
+		// R236-GO-10: persist failed *after* registerJob + map insertion.
+		// Without rollback, the in-memory state holds an orphan: cron
+		// scheduler has the entry, s.jobs has the *Job, but disk has
+		// nothing — every tick logs "job not found" then never cleans
+		// up because the cron entry stays registered (the dispatcher's
+		// debug log path doesn't call s.cron.Remove). Rolling back
+		// via deleteJobLocked unwinds the cron entry, router stub,
+		// and map entry under the still-held s.mu, so the persistence
+		// gap surfaces as a clean failure to the caller and a fresh
+		// AddJob on the same ID is safe. Earlier review note worried
+		// about another goroutine observing the entry between
+		// registerJob and persist; that window is enclosed by s.mu
+		// (the cron dispatcher's tick fans out via runningJobs CAS
+		// without re-entering s.mu for lookup, but execute()'s
+		// s.jobs[j.ID] read does take s.mu — see executeJob). So the
+		// rollback is observationally consistent.
+		s.deleteJobLocked(j)
 		return nil, perr
 	}
 	return save, nil
@@ -1381,6 +1420,16 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	}
 
 	if upd.Schedule != nil && *upd.Schedule != j.Schedule {
+		// R236-QA-08: snapshot the old schedule so we can roll back the
+		// in-memory field if registerJob fails. Without this, a failed
+		// re-register left j.Schedule mutated to the new value but with
+		// j.entryID=0, so the API returned an error to the client while the
+		// job had silently disappeared from the cron scheduler. The client
+		// would assume the request was a no-op and retry, but the persisted
+		// state file (loaded next start) keeps showing the old schedule
+		// because persistJobsLocked never ran for this branch — diverging
+		// in-memory state from disk.
+		oldSchedule := j.Schedule
 		j.Schedule = *upd.Schedule
 		// Re-register with the new schedule unless paused (paused jobs have
 		// no live entry; ResumeJob will register with the new schedule).
@@ -1390,6 +1439,12 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 				j.entryID = 0
 			}
 			if err := s.registerJob(j); err != nil {
+				// Roll back the in-memory schedule field so subsequent
+				// reads (List, persistJobsLocked on a later mutator) keep
+				// showing the original schedule. j.entryID stays 0 since
+				// cron.Remove is irreversible — the next ResumeJob /
+				// successful UpdateJob will register a fresh entry.
+				j.Schedule = oldSchedule
 				s.mu.Unlock()
 				return nil, fmt.Errorf("re-register cron: %w", err)
 			}

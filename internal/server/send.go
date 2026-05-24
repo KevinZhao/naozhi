@@ -60,8 +60,10 @@ func (h *Hub) sendWithBroadcastPriority(
 	onEvent cli.EventCallback,
 	priority string,
 ) (*cli.SendResult, error) {
+	// R236-PERF-01: only broadcast the running-state transition here; the
+	// post-send BroadcastSessionsUpdate below covers the sessions snapshot
+	// (and is already debounced), making a pre-send full-fanout redundant.
 	h.BroadcastSessionReady(key)
-	h.BroadcastSessionsUpdate()
 
 	if priority == "" && dispatch.IsUrgent(ctx) {
 		priority = "now"

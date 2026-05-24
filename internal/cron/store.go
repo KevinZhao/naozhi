@@ -41,6 +41,18 @@ func loadJobs(path string) (map[string]*Job, error) {
 	if path == "" {
 		return nil, nil
 	}
+	// R236-SEC-01 (CWE-59): refuse to follow a symlink at the cron store
+	// path. A local attacker who can write the data dir could otherwise
+	// replace cron_jobs.json with a symlink to a sensitive file (whose
+	// contents would be parsed and any parse failure would rename the
+	// linked file out of place via the corrupt-rename branch). os.Lstat
+	// inspects the link itself rather than the target.
+	if fi, lerr := os.Lstat(path); lerr == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			slog.Warn("cron store path is a symlink; refusing to follow", "path", path)
+			return nil, fmt.Errorf("cron store path is a symlink, refusing to follow")
+		}
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
