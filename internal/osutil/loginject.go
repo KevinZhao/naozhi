@@ -106,8 +106,14 @@ func SanitizeForLog(s string, maxLen int) string {
 		// (which would emit an invalid-UTF-8 sequence into structured
 		// log sinks).  The cap itself is a defense against oversized
 		// attack strings.
+		// Walk back to the nearest rune-start byte instead of calling
+		// utf8.ValidString in a loop — utf8.ValidString is O(n) per call,
+		// turning the truncation into O(n²) for adversarial multi-byte
+		// suffixes. utf8.RuneStart(b) ↔ b&0xC0 != 0x80 identifies a UTF-8
+		// continuation byte; at most 3 continuation bytes precede a rune
+		// start, so this loop is O(1)…O(4). R244-GO-P3.
 		mapped = mapped[:maxLen]
-		for len(mapped) > 0 && !utf8.ValidString(mapped) {
+		for len(mapped) > 0 && !utf8.RuneStart(mapped[len(mapped)-1]) {
 			mapped = mapped[:len(mapped)-1]
 		}
 	}
