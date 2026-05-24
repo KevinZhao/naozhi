@@ -2,7 +2,9 @@ package cron
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -39,16 +41,25 @@ import (
 // Round 98 stopBudget shutdown timeline before passing this test.
 func TestNotifyTarget_UsesBackgroundCtxContract(t *testing.T) {
 	t.Parallel()
-	src, err := os.ReadFile("scheduler.go")
+	// notifyTarget moved out of scheduler.go into scheduler_notify.go in the
+	// 2026-05 cron-package refactor. Test reads the new location while keeping
+	// the contract intact.
+	//
+	// Use runtime.Caller to anchor the path so the test is resilient to
+	// `go test` being invoked from any working directory (matches the pattern
+	// used by trigger_now_wg_done_test.go).
+	_, thisFile, _, _ := runtime.Caller(0)
+	target := filepath.Join(filepath.Dir(thisFile), "scheduler_notify.go")
+	src, err := os.ReadFile(target)
 	if err != nil {
-		t.Fatalf("read scheduler.go: %v", err)
+		t.Fatalf("read scheduler_notify.go: %v", err)
 	}
 	body := string(src)
 
 	// Locate the notifyTarget body.
 	startIdx := strings.Index(body, "func (s *Scheduler) notifyTarget(")
 	if startIdx < 0 {
-		t.Fatal("notifyTarget is no longer defined in scheduler.go. " +
+		t.Fatal("notifyTarget is no longer defined in scheduler_notify.go. " +
 			"If it was renamed, update this contract test; if removed, " +
 			"R38-REL3 trivially closes but the replacement path must " +
 			"document its own ctx-ancestry decision.")

@@ -64,28 +64,32 @@ func TestTriggerNow_BothBranchesReleaseWGInGoroutine(t *testing.T) {
 	}
 }
 
-// readTriggerNowBody locates the TriggerNow method in scheduler.go and
+// readTriggerNowBody locates the TriggerNow method in scheduler_jobs.go and
 // returns its body text (between the function header and the matching
 // closing brace). Intentionally keeps the lexer simple — brace counting
 // in Go source is adequate because TriggerNow is a small top-level method
 // without string literals containing unpaired braces.
+//
+// TriggerNow moved from scheduler.go to scheduler_jobs.go in the 2026-05
+// cron-package refactor. Test reads the new location while keeping the
+// CRON4 regression contract intact.
 func readTriggerNowBody(t *testing.T) string {
 	t.Helper()
 
-	// Locate scheduler.go relative to this test file so the test is
+	// Locate scheduler_jobs.go relative to this test file so the test is
 	// resilient to `go test` being invoked from any working directory.
 	_, thisFile, _, _ := runtime.Caller(0)
-	schedulerPath := filepath.Join(filepath.Dir(thisFile), "scheduler.go")
+	schedulerPath := filepath.Join(filepath.Dir(thisFile), "scheduler_jobs.go")
 	data, err := os.ReadFile(schedulerPath)
 	if err != nil {
-		t.Fatalf("read scheduler.go: %v", err)
+		t.Fatalf("read scheduler_jobs.go: %v", err)
 	}
 	src := string(data)
 
 	header := "func (s *Scheduler) TriggerNow(id string) error {"
 	idx := strings.Index(src, header)
 	if idx < 0 {
-		t.Fatalf("could not find TriggerNow method signature in scheduler.go")
+		t.Fatalf("could not find TriggerNow method signature in scheduler_jobs.go")
 	}
 	// Find the matching closing brace via depth counting.
 	start := idx + len(header)
