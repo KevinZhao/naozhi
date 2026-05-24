@@ -1305,14 +1305,6 @@ function sessionCardHtml(s) {
   // auto-derived title so the rename is visible immediately across refreshes.
   const prompt = s.user_label || s.summary || s.last_prompt || (isNew ? '新会话' : '未命名');
   const icon = cliIcon(s.cli_name || 'cli');
-  // System-session AutoTitler badge: when label_origin === "auto" the
-  // sidebar title was written by the bot.  Operators see a small robot
-  // chip inline; clicking it calls /api/system/labels/clear-origin so
-  // the bot can take a different name on the next tick.  Origin "user"
-  // / "" / undefined means human-set or legacy — no chip.
-  const autoLabelBadge = (s.label_origin === 'auto')
-    ? ' <button type="button" class="sc-auto-label" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();clearAutoLabel(this.dataset.key,this.dataset.node)" title="由 AutoTitler 自动命名 · 点击恢复自动选题" aria-label="restore auto naming">\u{1F916}</button>'
-    : '';
 
   // Line 2: status dot + meta. Dead sessions are presented as "ready" to
   // operators — the underlying state is retained in sessionsData for the
@@ -1360,7 +1352,7 @@ function sessionCardHtml(s) {
     icon +
     '<div class="sc-body">' +
       '<div class="sc-header">' +
-        '<div class="sc-prompt" title="' + escAttr(prompt) + '">' + esc(prompt) + autoLabelBadge + '</div>' +
+        '<div class="sc-prompt" title="' + escAttr(prompt) + '">' + esc(prompt) + '</div>' +
         unreadBadge +
         (ago ? '<span class="sc-time"' + (absTime ? ' title="' + escAttr(absTime) + '"' : '') + '>' + ago + '</span>' : '') +
       '</div>' +
@@ -1938,38 +1930,6 @@ async function renameSession() {
   debouncedFetchSessions();
   if (typeof renderMainShell === 'function') renderMainShell();
   showToast(next ? '已重命名' : '已恢复默认标题');
-}
-
-// clearAutoLabel resets a session's label_origin so the AutoTitler
-// daemon can take a fresh swing at naming it on the next tick.  The
-// server-side handler also clears UserLabel itself (RFC v2.1 §7.3) so
-// the legacy "empty origin = user-set" rule stays unambiguous.
-async function clearAutoLabel(key, sNode) {
-  if (!key) return;
-  const headers = {'Content-Type': 'application/json'};
-  const token = getToken();
-  if (token) headers['Authorization'] = 'Bearer ' + token;
-  try {
-    await fetchJSON('/api/system/labels/clear-origin', {
-      timeoutMs: 10000,
-      method: 'POST',
-      headers,
-      body: JSON.stringify({key}),
-    });
-  } catch (err) {
-    if (err && err.status) showAPIError('恢复自动命名', err.status, err.message || '');
-    else showNetworkError('恢复自动命名', err);
-    return;
-  }
-  // Patch local cache so the badge disappears before the next poll lands.
-  const cacheKey = sid(key, sNode);
-  if (sessionsData[cacheKey]) {
-    sessionsData[cacheKey].label_origin = '';
-    sessionsData[cacheKey].user_label = '';
-  }
-  lastVersion = 0;
-  debouncedFetchSessions();
-  showToast('已恢复自动命名');
 }
 
 // --- Markdown export (UX P2) ---
