@@ -1,6 +1,8 @@
 # TODO
 
-> 最后更新 2026-05-24 Round 236 —— 深度 5-agent 并行 code review 第 46 轮：8 处直接修落地（cron Stop 等 GC goroutine 退出 [R236-GO-01] / cron addJobAcquiringLock persist 失败回滚 entry [R236-GO-10] / cron UpdateJob 注册失败回滚 schedule 字段 [R236-QA-08] / cron loadJobs Lstat 拒绝符号链接 CWE-59 [R236-SEC-01] / cron trimJobLocked sort 与 diskListNewestFirst 对齐 [R236-QA-01] / cron validateSchedule 拒绝 interval<=0 [R236-QA-07] / server send.go 删除入口冗余 BroadcastSessionsUpdate 全量扇出 [R236-PERF-01]，加 R236-SEC-12 经核对已在 c337d68 修复故关闭）+ 本轮 NEEDS-DESIGN 归档 ~30 项见 Round 236 节。
+> 最后更新 2026-05-24 Round 237 —— 深度 5-agent 并行 code review 第 47 轮（与同日 #290 Round 236 并发触发的另一批）：8 处直接修落地（discovery normalizeClaudeUUID 栈上 [32]byte 消 alloc [R237-PERF-1] / weixin pollLoop hookSem cap=20 与 feishu/slack/discord 对齐 [R237-SEC-1] / dashboard CSP 加 frame-ancestors 'none' 强化 clickjacking 防御 [R237-SEC-2] / dispatch sendTodoMessage 改 context.Background 防 turn 末尾被截断 [R237-GO-1] / project validate.go 删 maxPlannerPromptBytes 重复别名 [R237-CR-1] / upstream connector_conn.go 删尾部孤立 handleRequest godoc 防止误读 [R237-CR-2] / sysession auto_titler.go candidates 排序改 slices.SortFunc [R237-PERF-2] / sysession registry.go validateDaemonName 改手写 ASCII 检查省 regexp [R237-PERF-3]）+ 本轮 NEEDS-DESIGN 归档见 Round 237 节。注：commits 落地 anchor 仍用 [R236-X]（提交时 #290 尚未合并），文档归类用 R237 与 #290 区分。
+>
+> 上一轮更新 2026-05-24 Round 236 —— 深度 5-agent 并行 code review 第 46 轮：8 处直接修落地（cron Stop 等 GC goroutine 退出 [R236-GO-01] / cron addJobAcquiringLock persist 失败回滚 entry [R236-GO-10] / cron UpdateJob 注册失败回滚 schedule 字段 [R236-QA-08] / cron loadJobs Lstat 拒绝符号链接 CWE-59 [R236-SEC-01] / cron trimJobLocked sort 与 diskListNewestFirst 对齐 [R236-QA-01] / cron validateSchedule 拒绝 interval<=0 [R236-QA-07] / server send.go 删除入口冗余 BroadcastSessionsUpdate 全量扇出 [R236-PERF-01]，加 R236-SEC-12 经核对已在 c337d68 修复故关闭）+ 本轮 NEEDS-DESIGN 归档 ~30 项见 Round 236 节。
 >
 > 上一轮更新 2026-05-23 Round 235 —— 深度 5-agent 并行 code review 第 45 轮：18 处直接修落地（cron computeJobTimeout 删除空壳 + 测试 [R235-CR-1] / cron finishArgs.job 注释 Label→ID 修正 [R235-CR-2] / cron loadJobs 校验 ID/Title/Backend 防手编 cron_jobs.json 注入 [R235-CR-5/12] / cron executeOpt errMsg 统一 "outside allowed root" [R235-CR-6] / cron TriggerCatchup godoc 标注 do-not-emit [R235-CR-13] / cron previousTickMaxIter 抽常量 + 量化推导 [R235-CR-10] / cron cacheHeadPush 注释纠偏（cap-full 不省拷贝）[R235-CR-11] / cron readRun Lstat 防 symlink path-traversal [R235-SEC-5] / cron 父目录 0700 与 runs/ 对齐 [R235-SEC-6] / cron diskListNewestFirst 改 time.Compare 单调用 [R235-PERF-17] / cron trimJobLocked 加 runID DESC tiebreak 与 list 对齐 [R235-GO-7] / cron recordResultP0WithSanitised 快照 jobID 防 unlock 后访问 [R235-GO-1] / cron notifyTarget ctx.Err 短路防越 cronNotifyTimeout [R235-GO-5] / discord 加 hookSem cap=20 与 feishu/slack 对齐 [R235-SEC-3] / weixin Start 强制 https + maxWeixinMsgsPerPoll=100 防 relay 注入 [R235-SEC-1/8] / feishu nonceCleanupInterval = nonceTTL/2 [R235-SEC-9] / dashboard truncateRunes 重写消 off-by-one [R235-SEC-4] / acp ReadEvent stopReason 长度快路径 [R235-PERF-20] / selfupdate verifyChecksum CRLF 注释挡 reviewer 误判 [R235-SEC-7]）+ 本轮 NEEDS-DESIGN 归档见 Round 235 节。
 >
@@ -91,6 +93,86 @@
 - [~] **R30-DES1 — 需架构决策（2026-04-29 Round 112 评估降级）**：本轮尝试在 `execute()` 入口加 `stopCtx.Err()` 守卫覆盖 fresh + persistent 两种模式，但这与 Round 95 的设计意图冲突（Round 95 明确将 persistent 模式的 ctx 取消委托给 Router.Shutdown，`TestCRON3_PersistentModeUnaffectedByGuard` 把此行为作为测试护栏）。fresh 分支的 stopCtx.Err() 守卫（`scheduler.go:1260`）已覆盖最危险的"fresh → Reset → 孤立 CLI"路径。persistent 模式的真正修复需要架构级协调：要么把 Router.Shutdown 和 Scheduler.Stop 串联锁定（需 S11 级决策），要么在 GetOrCreate 路径里加 shutdown-awareness（改动面大）。当前降级，等 S11 整体方案落地后重开。
 - [ ] **R29-DES1 — `drainStaleEvents` push-back + goto drain 可吞 interrupted result 事件**: 本轮新发现的 invariant 冲突。在 interrupted/interruptedRun 分支的 for 循环中，若事件顺序为 `[old_nonresult, new_event, old_result]`，读到 `new_event` 后 push-back + `goto drain`，接着 drain 到 `old_result` 时因 `recvAt < cutoff` 被丢弃。interrupted 语义要求 settle 窗口必须拿到 old_result，否则下一 turn 迟到的 result 会污染结果。
 
+## Round 237 — 5-agent 并行 code review 第 47 轮（2026-05-24，与 Round 236 并发批）NEEDS-DESIGN
+
+> 与同日 #290 Round 236 并发触发的另一批 5-reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描。本批直接修 8 处见上方 commits（commit anchors 仍写 [R236-*]，因落地时 #290 尚未合并；文档归类用 R237 与 #290 隔开）。下方为本轮新发现且不适合直接修的条目。
+
+### 架构（高优先）— 本轮新发现
+
+- [ ] **R237-ARCH-1 — `cli.Wrapper.ShimManager` 是导出可变 `*shim.Manager`，protocol/transport 未拆分（P1）**：与 R235-ARCH-4 同根因，本轮 architect 再次点出。建议引入 `cli.Transport` 接口（Spawn / Reconnect），shim 是其一个实现；cli 包不再 import `internal/shim`。Breaking: 是。归 R235-ARCH-4 主条目跟踪。
+- [ ] **R237-ARCH-2 — `internal/server.Server` god object 持 19 个 handler/dep 字段 + `registerDashboard` 60+ HandleFunc（P1）**：每加 handler 改两处。建议拆 `Lifecycle` / `Routes` / `Container` 三层；或采用 module 模式（auth.Module() / cron.Module() …）。Breaking: 内部组装大改，外部 API 不变。
+- [ ] **R237-ARCH-3 — `session.processIface` 32 方法 god-interface（P1）**：`*cli.Process` 是唯一生产实现，接口因 testutil.TestProcess 撑大。建议拆 ProcessSender / ProcessLifecycle / EventSource 三 facet。Breaking: 是。归 R215-ARCH-P1-3 / R219-ARCH-7 / R224-ARCH-5 主条目。
+- [ ] **R237-ARCH-4 — discovery vs sysession 职责重叠（P1）**：项目 brief 与 R234-ARCH-3 已点出。建议设计单一 session catalog 抽象：discovery 只产出 DiscoveredSession（外部 CLI 进程）；sysession 消费 router + catalog。Breaking: 是（影响 RFC 接口）。
+- [ ] **R237-ARCH-5 — metrics 反向依赖（P1）**：`internal/metrics` 是叶子包但被 7+ 核心包直接 import 写 expvar。建议改 Observer 接口注入：cli.Wrapper / shim.Manager / cron.Scheduler 收 Observer 字段，main.go 装配。Breaking: 业务包公共构造函数加参数。
+- [ ] **R237-ARCH-6 — sysession.Manager.Stop 超时调 osExit(2) 让 systemd 重启进程（P1）**：单个 daemon 卡死 → 整个 naozhi 不可用。建议替换为：超时只 detach 该 daemon record，不再 broadcast；Stop 返回让上层决策。需 RFC 评估错误传播策略。
+- [ ] **R237-ARCH-7 — `dispatch.Dispatcher` 闭包注入 vs 接口双标（P1）**：sendFn / takeoverFn / ReplyFooterFn 是 func 字段，Router/Guard/Queue 是接口；Scheduler 是具体类型。建议收口为 `DispatcherDeps` 接口。Breaking: Dispatcher 公共 API 变。
+- [ ] **R237-ARCH-8 — main.go 622 行 wiring + 业务逻辑（P1）**：subcommand dispatch / settings.json filtering / Bedrock env / shim manager / wrapper × N / router / sysession / 5 platform / cron / upstream / 4 webhook / shutdown 顺序全在 main()。建议抽 `internal/bootstrap` 包：`func Run(ctx, cfg) error`。Breaking: 否（内部重组）。
+- [ ] **R237-ARCH-9 — `Router` struct 字段 40+（P2）**：core/lifecycle/cleanup/discovery/shim/backend 5 文件共享同一大 struct。建议拆 SessionStore + KnownIDs + WorkspaceOverrides + BackendOverrides + AutoChainResolver。Breaking: 公共方法签名不变但锁顺序需重证。
+- [ ] **R237-ARCH-10 — server.Hub 持 22+ 字段（P2）**：WS 连接管理 + 业务路由 + 子 agent 跟踪 + cron 集成都在一起。建议拆 ConnPool / Broadcaster / SendPath / AgentLinker。
+- [ ] **R237-ARCH-11 — Shutdown 顺序 3 处分散表达（P2）**：main.go runShutdown / server.go ctx.Done goroutine / router shutdownOnce 三处都说"必须 X 在 Y 之前"。建议 `internal/lifecycle`：Lifecycle.Register(component)，按注册逆序关闭。归 R234-ARCH-6 主条目。
+- [ ] **R237-ARCH-12 — `session.KeyResolver` 在 4 处共享但无 singleton 协调（P2）**：main.go upstream + buildServer + Dispatcher.cfg.Resolver + Hub.opts.Resolver 各持一个，agents 表配置变更不同步。建议 `*session.Router.Resolver()` 方法或 main.go 注入 singleton。
+- [ ] **R237-ARCH-13 — eventlog 跨包语义同名但行为分裂（P2）**：cli/eventlog.go (in-mem) vs eventlog/persist (disk) vs history/naozhilog (replay) 三者命名相同。建议拆 `internal/eventlog/{ring,persist,replay}`。
+- [ ] **R237-ARCH-14 — server.New() vs NewWithOptions() 双构造函数（P2）**：~20 个 test call sites 暂未迁移，留两个构造函数让 API 稳定性退化。建议一次性改完所有 test 站点或把 New 改为 internal/test-only 别名。Breaking: 删 New 是 breaking。
+
+### Go 正确性 / 风格 — 本轮新发现
+
+- [ ] **R237-GO-2 — `cli.Process.SessionID` 和 `State` 字段导出但访问需走 getter（P2）**：注释要求用 `GetSessionID()` / `GetState()` 但字段本身导出，外部包可绕过锁。建议改未导出 + 强制 method 访问。Breaking: 是（包外直接读写需更新）。
+- [ ] **R237-GO-3 — `cli.Process.Send()` 160 行函数（P2）**：state 管理 / 事件日志 / stale drain / watchdog ticker 多关注点混合。建议提取 `handleWatchdog(now, lastOutput, turnStart, noOutputDur, totalDur) error`。Non-breaking。
+- [ ] **R237-GO-4 — `dispatch.sendAndReply()` 223 行（P2）**：takeover / GetOrCreate / 错误映射 / tracker / result / image 多职责。建议提取 `handleGetOrCreateError` 等子函数。Non-breaking。
+- [ ] **R237-GO-5 — `cli.dispatchProtocolEvent` 241 行（P2）**：metadata / passthrough hooks / linker / EventLog / reconnect / killCh 6 关注点。建议提取 `notifyLinker(ev, nowMS)` 与 `deliverEvent(ev, now, log) bool`。Non-breaking。
+- [ ] **R237-GO-6 — `cli.shimLineReader.ReadLine` 无 ctx 检查（P2）**：shim 连续发非 stdout/cli_exited 消息时无法在 proto.Init 超时场景提前退出。建议加 `ctx context.Context` 字段。Breaking: 是（接口变更）。
+- [ ] **R237-GO-7 — `cmd/naozhi/main.go:96` `readJSONWithRetry` 阻塞 main goroutine（P2）**：`time.Sleep(sleep)` 重试不响应 ctx 取消。建议加 ctx 参数 + select 替换 Sleep。Breaking: 是（调用点更新）。
+- [ ] **R237-GO-8 — `dispatch.ownerLoop` defer 顺序与 panic 路径耦合（P2）**：`defer NotifyIdle()` 在 `defer recover()` 之后注册，panic 路径下 NotifyIdle 在 handleOwnerLoopPanic 之后调用。建议把 NotifyIdle defer 移到 recover defer 之前。Non-breaking。
+- [ ] **R237-GO-9 — `shim.Manager.StopAll(ctx)` 接收 ctx 但从不使用（P3）**：误导调用方。建议移除 ctx 参数或实现 ctx-aware drain。Breaking: 是（移参数）。
+- [ ] **R237-GO-10 — `process.go:411` `setDeathReason` upgrade-path 死代码（P3）**：注释 "not taken today" 自陈死代码。建议删除 upgrade-path（425-428 行）。Non-breaking。
+- [ ] **R237-GO-11 — `cli.captureWriterPool` 大 payload 污染 sync.Pool（P3）**：11MB 图片消息后 backing array 留在 pool。建议 Put 前检查 cap > 64KiB 跳过。Non-breaking。
+- [ ] **R237-GO-12 — `dispatch.BuildHandler` 中 `d.dedup` 为 nil 时 Seen 会 panic（P3）**：与 takeoverFn 不一致。建议 NewDispatcher 加 noop fallback：`if d.dedup == nil { d.dedup = platform.NewDedup(0) }`。Non-breaking。
+- [ ] **R237-GO-13 — `cli.process_send.go:60` `buildUserEntry` 信号量错位（P3）**：`sem <- struct{}{}` 在主 goroutine 中阻塞，应在 worker goroutine 中。建议挪到 goroutine 启动后。Non-breaking。
+
+### 安全 — 本轮新发现
+
+- [ ] **R237-SEC-3 — dashboard CSP 包含 `'unsafe-inline'`（P2）**：内联脚本可执行任意代码，'unsafe-inline' 让 script-src 防护降级。建议改 nonce 或 SHA-256 哈希；内联逻辑移入 dashboard.js。Non-breaking。与 #290 的 R236-SEC-02 同根因。
+- [ ] **R237-SEC-4 — `expandEnvVars` 环境变量展开后内容注入 YAML（P2）**：env 值含换行符 + 新 key 可注入任意配置。建议展开前对每个变量值做 YAML 字符串转义或单引号包裹。Breaking: 仅对含 YAML 特殊字符的现有 env 值有影响。
+- [ ] **R237-SEC-5 — `publicTmpProject` 允许已认证用户读 /tmp 全量（P2）**：注释自陈"any authenticated user can read non-credential files anywhere under /tmp"。建议加 config 显式开关（默认关闭）或限制路径到 attachment 子目录。Breaking: 加配置项。
+- [ ] **R237-SEC-6 — `selfupdate` exec.Command("systemctl") 用 PATH 查找（P2）**：PATH 污染场景下可能执行恶意替代。建议改绝对路径 `/usr/bin/systemctl` 或 `exec.LookPath` 缓存。Non-breaking。
+- [ ] **R237-SEC-7 — auth cookie 无 Partitioned (CHIPS) 属性（P3）**：未来兼容性加固。Non-breaking。
+- [ ] **R237-SEC-8 — `config.go` fd-stat 权限检查与 Lstat 不一致（P3）**：Lstat 拒绝 0o077，fd-stat 仅拒绝 0o044，对 0o650 等罕见权限存在 TOCTOU 缝隙。建议 fd-stat 同样用 0o077。Non-breaking。
+- [ ] **R237-SEC-9 — `allowed_root` 为空时仅 Warn 不拒绝启动（P3）**：已认证用户可设置 cron WorkDir 为 /etc。建议升级为 `slog.Error` 或 `naozhi doctor` 强制检查。Non-breaking。
+
+### 性能 — 本轮新发现
+
+- [ ] **R237-PERF-4 — `runstore.cacheHeadPush` O(N) memmove（P1）**：keepCount=200 头插每次 200 元素 copy。建议 ring buffer（head/tail 索引 + 固定数组）→ O(1)。归 R235-PERF-3 / R234-GO-1 主条目跟踪。
+- [ ] **R237-PERF-5 — `cron.Scheduler.addJobAcquiringLock` per-chat 限制全量 O(N) 扫描（P1）**：持 s.mu.Lock() 期间扫 maxJobs=500 个 *Job 阻塞 TriggerNow / emitRunStarted。建议维护 `chatJobCount map[chatKey]int` 同步更新。Non-breaking。
+- [ ] **R237-PERF-6 — `session.InjectHistory` 在 historyMu.Lock 持锁期间做 trim+make+copy（P1）**：启动历史回放路径 10 goroutine 并发批量 lock 与 dashboard 1Hz RLock 争用。建议 trim 移出锁外或用 sync.Pool。Non-breaking。
+- [ ] **R237-PERF-7 — `discovery.scanner.Scan` 双 syscall 模式（P2）**：DirEntry.Info() + os.ReadFile() 两次 stat。建议合并为单次 OpenFile + io.LimitReader。Non-breaking。
+- [ ] **R237-PERF-8 — `runstore.diskListNewestFirst` 无 mtime 预过滤（P2）**：分页查询时全量解析 JSON 再丢弃靠前的条目。建议 before 非零时先 mtime 预过滤。Non-breaking。
+- [ ] **R237-PERF-9 — `Router.knownIDsOrder` 无上限（P2）**：无 cap 持续 append，过期 ID 占内存。建议设 maxKnownIDsOrder = 10000 + FIFO 截断。Non-breaking。
+- [ ] **R237-PERF-10 — `cron.KnownSessionIDs` 高频调用无 memoize（P2）**：归 R235-PERF-4 / R235-PERF-11 主条目。
+- [ ] **R237-PERF-11 — `eventlog/persist/idx.AppendBatch` 每次分配新 buf（P2）**：默认 200ms 间隔每批 28-896 字节短命对象给 GC 增压。建议 buf 改 IdxWriter 字段复用或栈分配。Non-breaking。
+- [ ] **R237-PERF-12 — `session.EventEntriesSince` dead-session 全量 sort（P2）**：1Hz × N tabs × M dead sessions。建议 persistedHistory 维护按 Time 排序的不变式 + 二分查找。Non-breaking。
+- [ ] **R237-PERF-13 — discovery extractText 单 block 路径多余 alloc（P3）**：blocks 长度 1 时仍走 strings.Join。建议早返。Non-breaking。
+- [ ] **R237-PERF-14 — runstore.skipAppendTrim 高频 sync.Map lookup + entry.mu lock（P3）**：建议改 jobAppendCount sync.Map[*atomic.Int32] 无锁。Non-breaking。
+- [ ] **R237-PERF-15 — session.storeMetaPath 重复 filepath 计算（P3）**：建议 Router 字段缓存。Non-breaking。
+- [ ] **R237-PERF-16 — metrics labelKey Pool overhead 单 label 场景（P3）**：建议 len==1 时直接返回 clipLabelSegment。Non-breaking。
+
+### 代码质量 — 本轮新发现
+
+- [ ] **R237-CR-3 — `shim.handleClient` 327 行 / `shim.Run` 286 行 / `upstream.handleRequest` 525 行 14-case switch（P1）**：超长函数。建议 handleClient 拆 authenticateClient/replayHistory/runCommandLoop；Run 提取 waitAfterExit；handleRequest 按 case 拆 handle&lt;Method&gt;。Non-breaking。
+- [ ] **R237-CR-4 — package-level mutable var `handleConnDrainBudget` / `circuitBreakerThreshold` / `circuitBreakerBackoff` / `maxWriteLineBytes` 测试直接赋值（P1）**：`-race` 下 data race。建议 atomic.Int64/Value 或通过 ConnectorConfig 传入。Breaking: 否（atomic）/ 是（config）。
+- [ ] **R237-CR-5 — shim cli_exited / watchdog.Fired 两段 select 结构完全相同（P2）**：60s exitTimer + 嵌套 reconnectTimer 逻辑逐字相同。建议提取 `waitForReattach(acceptCh, idleTimeout, reason)`。Non-breaking。
+- [ ] **R237-CR-6 — upstream send/takeover/close_discovered workspace 路径验证三处重复（P2）**：EvalSymlinks + Clean + IsAbs + HasPrefix(allowedRoot)。建议 `sanitizeWorkspacePath(raw, defaultWorkspace)` 共用。Non-breaking。
+- [ ] **R237-CR-7 — shim.Run 内 `60 * time.Second` 裸字面量重复 4 次（P2）**：建议 `const postExitReatachWindow = 60 * time.Second`。Non-breaking。
+- [ ] **R237-CR-8 — shim.shimLogFilePtr package-level atomic（P2）**：同进程多 shim（测试）互覆。建议改 Run 局部变量 + closure。Non-breaking。
+- [ ] **R237-CR-9 — project.UnbindAllChat slice 就地复用底层数组（P2）**：单次调用无害但模式不一致。建议改 `make([]ChatBinding, 0, len(...))` 或 slices.DeleteFunc。Non-breaking。
+- [ ] **R237-CR-10 — TODO `node/protocol.go:33` R214-CODE-6 状态需确认（P2）**：核实是否仍 open；若已归档则删除注释。Non-breaking。
+- [ ] **R237-CR-11 — `shim.StartShimWithBackend` 208 行（P2）**：key 校验/slot 预留/argv 构造/socket 预检/进程启动/ready 解析/token 解码/连接/cgroup/map 更新 多阶段。建议提取 `buildShimArgs` + `waitForShimReady`。Non-breaking。
+- [ ] **R237-CR-12 — `validateKeyForShim` 与 `session.ValidateSessionKey` 重复且靠注释同步（P3）**：建议提取到 session 包共用函数 + contract test。Non-breaking。
+- [ ] **R237-CR-13 — `RingBuffer.defaultRingMaxLines` 与 ManagerConfig.BufferSize 默认值靠注释同步（P3）**：建议 manager.go 直接引用 buffer.go 常量。Non-breaking。
+- [ ] **R237-CR-14 — `Project.snapshotLight` ChatBindings=nil 无注释（P3）**：建议 godoc 明确"返回 Project 不含 ChatBindings"。Non-breaking。
+- [ ] **R237-CR-15 — `osutil.SyncDir` 静默吞 fs.ErrPermission（P3）**：权限错误是真实配置问题。建议返回 err 或至少 slog.Debug。Non-breaking（行为变化）。
+- [ ] **R237-CR-16 — `connector_conn.go` reqSem 容量 16 裸字面量（P3）**：与 maxInflightClients 相同字面但无关联。建议 `const connectorReqSemCapacity = 16`。Non-breaking。
+- [ ] **R237-CR-17 — `cli.editLoop` rateTimer 时序边界注释（P3）**：当前 1s rate-limit 实际正确（Reset(1s) 后必须读 timer.C），但代码可读性可改进。注释加"EditMessage 耗时不抵消 rate window"。Non-breaking。
+
 ## Round 236 — 5-agent 并行 code review 第 46 轮（2026-05-24）NEEDS-DESIGN
 
 > 5 reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描，共 88 项发现。本轮直接修 8 处（cron Stop 等 GC goroutine 退出 [R236-GO-01] / cron addJobAcquiringLock persist 失败回滚 entry [R236-GO-10] / cron UpdateJob 注册失败回滚 schedule 字段 [R236-QA-08] / cron loadJobs Lstat 拒绝符号链接 CWE-59 [R236-SEC-01] / cron trimJobLocked sort 与 diskListNewestFirst 对齐 [R236-QA-01] / cron validateSchedule 拒绝 interval<=0 [R236-QA-07] / server send.go 删除入口冗余 BroadcastSessionsUpdate 全量扇出 [R236-PERF-01]，外加 R236-SEC-12 在 c337d68 已修复故关闭）。下方为本轮新发现且不适合直接修的 NEEDS-DESIGN 条目。
@@ -147,6 +229,7 @@
 - [ ] **R236-ARCH-07 — cron.scheduler 直 import platform 绕过 dispatch 中文化/replyError 计数（P1）**: `internal/cron/scheduler.go:25` 第三条出口管线。本条提供窄方案：dispatch.Notifier interface 注入到 scheduler 替代 platforms map（比 SendOrchestrator RFC 改动面小 90%）。同根因 R230C-ARCH-3 主条目跟踪。
 - [ ] **R236-ARCH-12 — Dispatcher closure-pattern sendFn/takeoverFn 缺编译期非 nil 保证（P2, is_localized=true）**: `internal/dispatch/dispatch.go:125-209`。方案：抽 SessionSender interface（与 takeoverFn 同类）+ NewDispatcher 必填字段。Breaking：是（dispatchConfig 字段类型）。
 - [ ] **R236-ARCH-19 — jobSnapshot 字段集靠注释手工维护，无 contract test（P3, is_localized=true）**: `internal/cron/scheduler.go:1801-1830` 新加 Job 字段不会自动同步进 snapshot，executeOpt 路径有读 *Job 风险。方案：grep contract test 锁定 executeOpt 不读 *Job 字段；或函数内 shadow `_ = (*Job)(nil)`。Breaking：否。
+
 
 ## Round 235 — 5-agent 并行 code review 第 45 轮（2026-05-23）NEEDS-DESIGN
 
