@@ -74,7 +74,9 @@ func runInstall(args []string) {
 	// re-run daemon-reload + restart after a binary swap with no unit
 	// churn. Orthogonal to -dry-run (the pair prints the forced plan).
 	force := fs.Bool("force", false, "rewrite unit file and restart even if nothing changed (systemd only)")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		fatalf("parse install args: %v", err)
+	}
 
 	if *configPath == "" {
 		_, home := serviceUser()
