@@ -2035,10 +2035,31 @@ type deadlineInterrupter interface {
 // fired the interrupt (i.e. the ctx ended via DeadlineExceeded, not via
 // success-path Cancel) and what the InterruptViaControl outcome was when
 // it did. The fired flag is the discriminator the caller logs.
+//
+// R236-GO-09: timedOut signals that the watchdog gave up waiting on
+// InterruptViaControl after watchdogInterruptTimeout. The interrupt
+// goroutine may still be running in the background; this flag tells
+// the caller to log "interrupt did not return in time" so operators
+// can spot wedged sessions. outcome is the zero value when timedOut
+// is true.
 type abortResult struct {
-	outcome session.InterruptOutcome
-	fired   bool
+	outcome  session.InterruptOutcome
+	fired    bool
+	timedOut bool
 }
+
+// watchdogInterruptTimeout bounds runDeadlineWatchdog's wait on
+// sess.InterruptViaControl. The interrupt path writes a control_request
+// frame onto a buffered channel and waits for an ack; pathological
+// deadlock in the protocol layer (e.g. peer goroutine blocked on a
+// mutex held by the same Send goroutine that just timed out) would
+// otherwise stall the watchdog forever — and because executeOpt blocks
+// on `<-abortCh` after sendCancel, the entire cron run would hang with
+// inflight.running=true, dropping every subsequent tick of the same
+// job. 3s is the same budget Send/Reset use elsewhere for control
+// channel writes; if the interrupt didn't land in 3s, the next tick
+// has more value than the abort. R236-GO-09.
+const watchdogInterruptTimeout = 3 * time.Second
 
 // runDeadlineWatchdog spawns a goroutine that waits on ctx and fires
 // sess.InterruptViaControl exactly when ctx ends with DeadlineExceeded.
@@ -2055,15 +2076,37 @@ type abortResult struct {
 // On the success / non-deadline error path the caller cancels ctx
 // explicitly; the watchdog observes ctx.Err()==Canceled, skips
 // InterruptViaControl, and returns abortResult{fired:false}.
+//
+// R236-GO-09: InterruptViaControl is wrapped in a timeout. If the
+// session is wedged (e.g. control_request channel blocked) the call
+// can hang forever. Without a timeout, executeOpt's `<-abortCh` would
+// block indefinitely and inflight.running would never reset → the job
+// would silently skip every future tick. On timeout we surface the
+// abort with a sentinel outcome so operators see why the interrupt
+// didn't complete.
 func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan abortResult {
 	ch := make(chan abortResult, 1)
 	go func() {
 		<-ctx.Done()
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			ch <- abortResult{outcome: sess.InterruptViaControl(), fired: true}
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			ch <- abortResult{}
 			return
 		}
-		ch <- abortResult{}
+		// Run InterruptViaControl on its own goroutine so we can bound
+		// it independently. The buffered channel + select means a
+		// hung session never wedges the watchdog — worst case the
+		// interrupt goroutine outlives this scope, but it can only
+		// write once and the buffered send is non-blocking.
+		outcomeCh := make(chan session.InterruptOutcome, 1)
+		go func() { outcomeCh <- sess.InterruptViaControl() }()
+		t := time.NewTimer(watchdogInterruptTimeout)
+		defer t.Stop()
+		select {
+		case oc := <-outcomeCh:
+			ch <- abortResult{outcome: oc, fired: true}
+		case <-t.C:
+			ch <- abortResult{fired: true, timedOut: true}
+		}
 	}()
 	return ch
 }
@@ -2341,7 +2384,8 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			lg.Info("cron send cancelled",
 				"err", err,
 				"abort_fired", abort.fired,
-				"abort_outcome", abort.outcome)
+				"abort_outcome", abort.outcome,
+				"abort_timed_out", abort.timedOut)
 			s.finishRun(finishArgs{
 				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
 				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
@@ -2361,7 +2405,8 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			lg.Info("cron send deadline exceeded",
 				"err", err,
 				"abort_fired", abort.fired,
-				"abort_outcome", abort.outcome)
+				"abort_outcome", abort.outcome,
+				"abort_timed_out", abort.timedOut)
 		} else {
 			lg.Error("cron send error", "err", err)
 		}
