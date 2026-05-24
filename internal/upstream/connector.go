@@ -46,11 +46,24 @@ var handleConnDrainBudget = 15 * time.Second
 // are clearly broken.
 var circuitBreakerThreshold = 6
 
+// reconnectBackoffCeiling is the upper bound for the doubling
+// reconnect backoff (1s → 2s → 4s → 8s → 16s → 30s, all jittered).
+// Was a hard-coded 30*time.Second literal at the doubling site, which
+// made the relationship between this ceiling and circuitBreakerBackoff
+// invisible at a glance — the breaker is what kicks in *past* this
+// ceiling, so they need to stay readable as a pair. R230C-CR-cleanup
+// adjacency: extracted as a const to anchor the godoc that
+// circuitBreakerBackoff references ("the 30s ceiling"). Pinned as a
+// package-level var (not const) so existing tests can shorten the
+// ceiling in the same idiom that handleConnDrainBudget /
+// circuitBreakerBackoff already use without wall-clock waits.
+var reconnectBackoffCeiling = 30 * time.Second
+
 // circuitBreakerBackoff is the backoff floor applied once the breaker
 // trips. 5 minutes is short enough that transient outages (DNS hiccup,
 // primary restart, cert rollover) still auto-recover without operator
 // intervention, but long enough to cut log noise dramatically versus the
-// 30s ceiling.
+// reconnectBackoffCeiling (30s) ceiling.
 //
 // NEEDS-DESIGN (R246-ARCH-4): handleConnDrainBudget /
 // circuitBreakerThreshold / circuitBreakerBackoff are package-level
@@ -202,8 +215,9 @@ func (c *Connector) loadPreviewFunc() previewFn {
 // Run connects to the primary and serves requests. Reconnects on disconnect.
 // Blocks until ctx is cancelled.
 //
-// Reconnect schedule: 1s → 2s → 4s → 8s → 16s → 30s (ceiling), all jittered
-// in [0.75x, 1.25x). Any successful session resets backoff to 1s.
+// Reconnect schedule: 1s → 2s → 4s → 8s → 16s → reconnectBackoffCeiling
+// (30s by default), all jittered in [0.75x, 1.25x). Any successful session
+// resets backoff to 1s.
 //
 // ARCH-D6 (Round 177) circuit breaker: once runOnce fails consecutively
 // circuitBreakerThreshold times with no intervening success, the backoff
@@ -267,7 +281,7 @@ func (c *Connector) Run(ctx context.Context) {
 			// circuitBreakerBackoff until the next successful connect
 			// clears it.
 			if backoff < circuitBreakerBackoff {
-				backoff = min(backoff*2, 30*time.Second)
+				backoff = min(backoff*2, reconnectBackoffCeiling)
 			}
 		}
 	}
