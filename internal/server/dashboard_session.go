@@ -1258,6 +1258,18 @@ func (h *SessionHandlers) WaitWarmHistory() {
 	h.warmHistoryWg.Wait()
 }
 
+// InvalidateHistoryCache forces the next /api/sessions poll to repopulate
+// historyCache from disk instead of serving the up-to-120s cached slice.
+// Wired into Router.SetOnKeyRetired so a Reset/Remove that just retired a
+// session-key surfaces the underlying jsonl in the history popover within
+// one poll, instead of being hidden for up to two minutes by the TTL.
+func (h *SessionHandlers) InvalidateHistoryCache() {
+	h.historyCacheMu.Lock()
+	h.historyCache = nil
+	h.historyCacheTime = time.Time{}
+	h.historyCacheMu.Unlock()
+}
+
 // lookupSummariesCached returns sessionID→summary with a 30s TTL cache.
 // The cache key set (sessionID subset) may vary between calls; we store the
 // full lookup result and serve cached entries that overlap with the current

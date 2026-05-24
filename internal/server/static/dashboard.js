@@ -106,6 +106,26 @@ const sessionOptimisticRunning = {};
 const sessionLastSent = {};
 let historySessionsData = []; // from API history_sessions (all filesystem sessions)
 
+// collectWorkspaceSessionIDs returns the set of Claude session UUIDs that the
+// sidebar already represents — current session_id PLUS any prev_session_ids
+// from auto-chain history. Used to deduplicate the history popover/badge so
+// links in an active chain aren't surfaced twice (once in workspace, once in
+// history). Skips empty strings defensively in case the API ever returns
+// nulls inside prev_session_ids.
+function collectWorkspaceSessionIDs(sessions) {
+  const ids = new Set();
+  for (const s of sessions || []) {
+    if (s && s.session_id) ids.add(s.session_id);
+    const prev = s && s.prev_session_ids;
+    if (Array.isArray(prev)) {
+      for (const p of prev) {
+        if (p) ids.add(p);
+      }
+    }
+  }
+  return ids;
+}
+
 // RNEW-UX-004: unified localStorage helper. Use these for NEW keys only —
 // legacy 'nz_' / 'naozhi_' call sites are intentionally left alone to
 // preserve persisted user state across upgrades. LS_SCHEMA is reserved for
@@ -558,7 +578,7 @@ function renderSidebar(data) {
   // Update history badge (filesystem history sessions, deduplicated against workspace)
   const hBadge = document.getElementById('history-badge');
   if (hBadge) {
-    const workspaceIDs = new Set(allSessionsCache.filter(s => s.session_id).map(s => s.session_id));
+    const workspaceIDs = collectWorkspaceSessionIDs(allSessionsCache);
     const historyCount = historySessionsData.filter(r => !workspaceIDs.has(r.session_id)).length;
     hBadge.textContent = historyCount > 0 ? historyCount : '';
     hBadge.style.display = historyCount > 0 ? '' : 'none';
@@ -878,9 +898,9 @@ function toggleHistory() {
   if (activePopover) { closeHistoryPopover(); return; }
 
   // Show all filesystem history sessions, deduplicated against workspace.
-  const workspaceIDs = new Set(
-    allSessionsCache.filter(s => s.session_id).map(s => s.session_id)
-  );
+  // Includes prev_session_ids so that earlier links in a resumed-chain
+  // session don't appear twice (once in the sidebar, once in history).
+  const workspaceIDs = collectWorkspaceSessionIDs(allSessionsCache);
   const merged = historySessionsData
     .filter(r => !workspaceIDs.has(r.session_id))
     .map(r => ({
