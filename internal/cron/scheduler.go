@@ -1158,9 +1158,16 @@ type JobWithNextRun struct {
 
 // ListAllJobsWithNextRun returns every job plus its next scheduled run.
 // Lock strategy: snapshot (*Job, entryID) under s.mu.RLock, release s.mu, then
-// call s.cron.Entry() without holding s.mu. Calling cron.Entry inside s.mu
+// call s.cron.Entries() without holding s.mu. Calling cron.Entry inside s.mu
 // would invert the lock order taken by the cron dispatcher path
 // (cron-internal → execute → recordResultP0WithSanitised → s.mu.Lock), risking a deadlock.
+//
+// R236-PERF-11: Previously called s.cron.Entry(p.entryID) once per job,
+// each acquiring robfig/cron's internal mutex. Dashboard polls this 1Hz
+// with up to maxJobs=500 entries → up to 500 lock acquires per second
+// contending with the cron dispatcher's tick goroutine. Now we fetch
+// all entries in a single Entries() call (one lock acquire) and look up
+// each Next via a local map.
 func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 	s.mu.RLock()
 	type pair struct {
@@ -1173,11 +1180,22 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 	}
 	s.mu.RUnlock()
 
+	// Single Entries() call replaces N Entry(id) lookups. Build a
+	// map from entryID → Next so the per-job loop stays O(1) per
+	// lookup. Empty map (Entries() returned nil after Stop()) is
+	// fine — every lookup will miss and the job's NextRun will
+	// stay zero-valued, matching the prior Entry(0)-skip behaviour.
+	entries := s.cron.Entries()
+	nextByID := make(map[robfigcron.EntryID]time.Time, len(entries))
+	for _, e := range entries {
+		nextByID[e.ID] = e.Next
+	}
+
 	result := make([]JobWithNextRun, 0, len(pairs))
 	for _, p := range pairs {
 		var next time.Time
 		if p.entryID != 0 {
-			next = s.cron.Entry(p.entryID).Next
+			next = nextByID[p.entryID]
 		}
 		result = append(result, JobWithNextRun{Job: p.job, NextRun: next})
 	}
