@@ -319,7 +319,22 @@ func (s *runStore) Append(run *CronRun) {
 		if data2, err2 := json.Marshal(&shrunk); err2 == nil && int64(len(data2)) <= s.maxRunBytes {
 			data = data2
 		} else {
-			// 再失败就放弃；已经写日志，下次 GC 会保持现状。
+			// R246-CR-250: previously this branch swallowed the failure
+			// silently — operators had no signal that a run record was
+			// actually dropped. Emit a warn so the loss is auditable.
+			// err2 may be nil when the truncated payload still exceeds
+			// maxRunBytes (rare; means metadata alone is over cap), so
+			// log both err2 and the post-truncate size to disambiguate.
+			retryBytes := -1
+			if err2 == nil {
+				retryBytes = len(data2)
+			}
+			slog.Warn("cron run: retry marshal also exceeded cap; run record dropped",
+				"job_id", run.JobID,
+				"run_id", run.RunID,
+				"retry_err", err2,
+				"retry_bytes", retryBytes,
+				"cap", s.maxRunBytes)
 			return
 		}
 	}
