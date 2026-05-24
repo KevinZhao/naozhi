@@ -12,7 +12,17 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/transcribestreaming"
 	"github.com/aws/aws-sdk-go-v2/service/transcribestreaming/types"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// maxTranscriptBytes caps the byte length of a returned transcript. AWS
+// Transcribe streaming sessions are bounded to 4hr but per-message IM voice
+// is ≤ 5min; 16KB is well above any plausible Mandarin/English transcription
+// at that duration (≈ 200 chars/sec spoken × 5min × 4 byte/rune ≈ 240KB
+// upper bound, real-world is sub-KB). Bound the field so a runaway server
+// stream cannot fan out unbounded text into IM message buffers. R247-SEC-18.
+const maxTranscriptBytes = 16 * 1024
 
 // Service transcribes audio bytes to text.
 type Service interface {
@@ -185,6 +195,14 @@ func (s *awsService) streamFromFFmpeg(ctx context.Context, data []byte) (string,
 }
 
 // collectTranscripts reads final transcript results from the stream.
+//
+// R247-SEC-18: AWS Transcribe responses flow into IM message paths and slog
+// attributes. A crafted/exploited upstream could embed bidi (U+202A..E /
+// U+2066..9), LS/PS (U+2028/9), or C0/C1 control runes that flip log
+// rendering or split slog lines. Pipe the joined transcript through
+// osutil.SanitizeForLog (same scrub used by cron sanitiseRunResult) before
+// returning. SanitizeForLog preserves CJK / emoji / valid printable
+// codepoints — only the documented injection-class runes become "_".
 func collectTranscripts(stream *transcribestreaming.StartStreamTranscriptionEventStream) (string, error) {
 	var parts []string
 	for event := range stream.Reader.Events() {
@@ -200,7 +218,8 @@ func collectTranscripts(stream *transcribestreaming.StartStreamTranscriptionEven
 		return "", fmt.Errorf("stream read: %w", err)
 	}
 
-	return strings.TrimSpace(strings.Join(parts, " ")), nil
+	joined := strings.TrimSpace(strings.Join(parts, " "))
+	return osutil.SanitizeForLog(joined, maxTranscriptBytes), nil
 }
 
 // isMultiLang returns true when the config specifies multiple languages.
