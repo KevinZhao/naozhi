@@ -48,19 +48,37 @@ const cronSlowThreshold = 30 * time.Second
 // silent skips with a Debug log — operators see the intent acked but
 // no run record bumps.
 func (s *Scheduler) executeIfNotDeletedOrPaused(jobID string) {
+	s.executeIfReadyOpt(jobID, true)
+}
+
+// executeIfReadyOpt is the parameterised dispatch shared between TriggerNow
+// (manual=true, skips robfig chain wrappers) and registerJob's scheduled
+// tick closure (manual=false). R247-CR-10: registerJob's closure used to
+// hand-build the same {RLock → check exists/paused → executeOpt} sequence;
+// folding it through one entry point keeps quota / circuit-breaker insertions
+// to a single edit.
+//
+// The Debug-log "scope" string ("TriggerNow:" vs "cron:") is the only
+// behavioural difference and is preserved so log analysers that distinguish
+// scheduled-tick races from manual-trigger races stay green.
+func (s *Scheduler) executeIfReadyOpt(jobID string, manual bool) {
+	scope := "cron"
+	if manual {
+		scope = "TriggerNow"
+	}
 	s.mu.RLock()
 	cur, ok := s.jobs[jobID]
 	paused := ok && cur.Paused
 	s.mu.RUnlock()
 	if !ok {
-		slog.Debug("TriggerNow: job deleted before execute, skipping", "job_id", jobID)
+		slog.Debug(scope+": job deleted before execute, skipping", "job_id", jobID)
 		return
 	}
 	if paused {
-		slog.Debug("TriggerNow: job paused concurrently, skipping", "job_id", jobID)
+		slog.Debug(scope+": job paused concurrently, skipping", "job_id", jobID)
 		return
 	}
-	s.executeOpt(cur, true)
+	s.executeOpt(cur, manual)
 }
 
 // jobInflight returns a lazily created *runInflight per job ID. The
