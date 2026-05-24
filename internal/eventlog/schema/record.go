@@ -1,9 +1,11 @@
 package schema
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // WireVersion is the current schema version for Record envelopes and
@@ -82,6 +84,21 @@ type FileHeader struct {
 	Generator string `json:"gen,omitempty"`
 }
 
+// marshalRecordBufPool reuses bytes.Buffer instances so MarshalRecord
+// avoids the per-call backing-array alloc that json.Marshal performs
+// internally. Persister.handleBatch is the hot caller (~50 sess × 50
+// evt/s ≈ 2500 marshal/s in 500-session deployments). R245-PERF-12.
+var marshalRecordBufPool = sync.Pool{
+	New: func() any {
+		return bytes.NewBuffer(make([]byte, 0, 4*1024))
+	},
+}
+
+// marshalRecordPoolMaxCap drops oversized buffers from the pool so a
+// one-off MaxRecordBytes record does not pin memory across the
+// process lifetime.
+const marshalRecordPoolMaxCap = 64 * 1024
+
 // MarshalRecord serializes r to JSON and validates invariants before
 // writing. Callers (the persist package) must pair this with the
 // length-prefix framing in persist.
@@ -89,19 +106,42 @@ type FileHeader struct {
 // Returns ErrRecordTooLarge when the encoded bytes exceed MaxRecordBytes
 // — the persist layer will drop the batch and counter the loss rather
 // than block.
+//
+// The encoded JSON is built via a pooled bytes.Buffer + json.Encoder
+// (R245-PERF-12) to avoid the per-call backing-array alloc that
+// json.Marshal performs internally. The returned []byte is a fresh
+// copy (independent of the pooled buffer) so the caller may retain
+// it past the end of MarshalRecord — the buffer is reset and re-filed
+// before return.
 func MarshalRecord(r *Record) ([]byte, error) {
 	if err := r.Validate(); err != nil {
 		return nil, err
 	}
-	buf, err := json.Marshal(r)
-	if err != nil {
+	buf := marshalRecordBufPool.Get().(*bytes.Buffer)
+	defer func() {
+		if buf.Cap() > marshalRecordPoolMaxCap {
+			return
+		}
+		buf.Reset()
+		marshalRecordBufPool.Put(buf)
+	}()
+	buf.Reset()
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(r); err != nil {
 		return nil, fmt.Errorf("marshal record: %w", err)
 	}
-	if len(buf) > MaxRecordBytes {
-		return nil, fmt.Errorf("record seq=%d size=%d: %w",
-			r.Seq, len(buf), ErrRecordTooLarge)
+	body := buf.Bytes()
+	if n := len(body); n > 0 && body[n-1] == '\n' {
+		body = body[:n-1]
 	}
-	return buf, nil
+	if len(body) > MaxRecordBytes {
+		return nil, fmt.Errorf("record seq=%d size=%d: %w",
+			r.Seq, len(body), ErrRecordTooLarge)
+	}
+	out := make([]byte, len(body))
+	copy(out, body)
+	return out, nil
 }
 
 // UnmarshalRecord parses a single JSON-encoded record. Returns
