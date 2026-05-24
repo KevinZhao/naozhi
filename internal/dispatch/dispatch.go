@@ -275,6 +275,15 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 	if d.watchdogTotalKills == nil {
 		d.watchdogTotalKills = new(atomic.Int64)
 	}
+	// BuildHandler's hot path calls d.dedup.Seen(...) unconditionally. The
+	// takeoverFn / watchdog counters above already noop-fallback for headless
+	// and test wiring; the same convention applies here. Without this, a
+	// constructor missing cfg.Dedup would crash on the very first incoming
+	// message (nil-pointer deref inside Seen). Default capacity matches
+	// platform.NewDedup's own zero-cap fallback (10000). (R237-GO-12)
+	if d.dedup == nil {
+		d.dedup = platform.NewDedup(0)
+	}
 	return d
 }
 
