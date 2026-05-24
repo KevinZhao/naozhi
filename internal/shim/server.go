@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -78,25 +77,27 @@ type Config struct {
 	CWD             string
 }
 
-// shimLogFilePtr keeps the log file open for the shim's lifetime
-// (prevents GC). atomic.Pointer instead of a plain `*os.File` so the
-// deferred panic handler reads through a memory barrier when other
-// goroutines (signal handler, panic recover) might observe Run()'s
-// initialization concurrently. R216-GO-2.
-var shimLogFilePtr atomic.Pointer[os.File]
-
 // Run is the main entry point for the shim process.
 func Run(cfg Config) error {
+	// shimLogFile keeps the log file open for the shim's lifetime
+	// (prevents GC). Run-local rather than package-global so concurrent
+	// Run() invocations in the same test binary don't clobber each other's
+	// handles. The deferred panic handler captures it via closure, which
+	// runs in the same goroutine as Run() — no cross-goroutine read of
+	// the *os.File occurs (signal handlers in ignoreHupPipe / notifyTerminate
+	// never touch this file). R237-CR-8 (relaxes R216-GO-2's atomic
+	// guard now that the global is gone).
+	var shimLogFile *os.File
 	// Redirect slog to a persistent log file so shim logs survive parent restart.
 	logPath := filepath.Join(filepath.Dir(cfg.StateFile), fmt.Sprintf("shim-%d.log", os.Getpid()))
 	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
-		shimLogFilePtr.Store(f)
+		shimLogFile = f
 		slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		os.Stderr = f
 	}
 	slog.Info("shim starting", "pid", os.Getpid(), "key", cfg.Key)
 	defer func() {
-		f := shimLogFilePtr.Load()
+		f := shimLogFile
 		if r := recover(); r != nil {
 			if f != nil {
 				fmt.Fprintf(f, "PANIC: %v\n", r)
