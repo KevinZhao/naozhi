@@ -1313,9 +1313,19 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 }
 
 // DeleteJobByID removes a job by exact ID (unscoped, for dashboard use).
+//
+// LOCKING CONTRACT (R243-GO-2): the IIFE captures `j *Job` under s.mu but
+// the post-IIFE block must NOT dereference any mutable Job field without
+// re-acquiring the lock. To make that contract explicit at every read
+// site, the immutable identifier is captured into a local `jobID` while
+// still holding s.mu and consumed afterwards. j itself remains in scope
+// only as the return value (callers receive the *Job snapshot taken from
+// s.jobs at deletion time; subsequent reads are caller-side and out of
+// our concurrency contract).
 func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	var save func()
 	var j *Job
+	var jobID string // R243-GO-2: immutable ID captured under s.mu for explicit post-lock use.
 	var found bool
 	var perr error
 	func() {
@@ -1328,6 +1338,7 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 			return
 		}
 		found = true
+		jobID = j.ID
 		s.deleteJobLocked(j)
 		save, perr = s.persistJobsLocked()
 	}()
@@ -1341,7 +1352,9 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	// R240-GO-1: router.Reset moved out of deleteJobLocked to avoid
 	// holding s.mu across router callbacks (notifyChange may try to
 	// re-take s.mu, deadlocking the scheduler).
-	s.resetRouterStub(j.ID)
+	// R243-GO-2: pass the locally captured jobID so the call site is
+	// audit-clean (no mutable-field access through j outside the lock).
+	s.resetRouterStub(jobID)
 	// R238-GO-3: deleteJobLocked already mutated in-memory state. The
 	// runStore must be cleaned even when persist fails, otherwise the
 	// runs/<jobID>/ subtree leaks on disk while the in-memory job is gone.
@@ -1351,7 +1364,7 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	// logs, deletable only via session.Router or the user's own claude
 	// commands.
 	if s.runStore != nil {
-		s.runStore.DeleteJob(j.ID)
+		s.runStore.DeleteJob(jobID)
 	}
 	if perr != nil {
 		return nil, perr
@@ -1361,6 +1374,15 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 }
 
 // PauseJobByID pauses a job by exact ID (unscoped, for dashboard use).
+//
+// LOCKING CONTRACT (R243-GO-2): unlike DeleteJobByID this function does not
+// dereference any Job field after releasing s.mu — j flows directly to the
+// return value. Callers that read mutable fields (Title/Prompt/Schedule)
+// from the returned snapshot are out of this scheduler's concurrency
+// contract; the dashboard handler reads these immediately on the same
+// goroutine before any further mutation can race in. Future edits that
+// add post-IIFE field reads here MUST capture them into local copies
+// inside the IIFE (mirror DeleteJobByID's `jobID := j.ID` pattern).
 func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 	var save func()
 	var j *Job
