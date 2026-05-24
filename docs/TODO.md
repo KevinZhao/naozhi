@@ -245,9 +245,9 @@
 
 ### 代码质量（NEEDS-DESIGN）
 
-- [ ] **R240-CR-4 — `internal/server/wshub.go:622` per-client 订阅上限 50 magic number [REFACTOR]（P2）**：与 maxWSConns/maxSubscribersPerKey 同包但未命名。方案：抽 const maxSubscriptionsPerClient = 50。Breaking：否。
-- [ ] **R240-CR-5 — `internal/dispatch/dispatch.go:742,869` ReplyWithRetry 重试次数 3 magic number [REFACTOR]（P2）**：两处独立修改易飘。方案：抽 const platformReplyMaxAttempts = 3。Breaking：否。
-- [ ] **R240-CR-6 — `internal/server/wshub.go:1217` resubscribeEvents `for i := range 12` + 5s magic numbers [REFACTOR]（P2）**：60s 总窗口未注释。方案：抽 const resubscribeMaxAttempts/resubscribeInterval。Breaking：否。
+- [~] **R240-CR-4 — `internal/server/wshub.go:622` per-client 订阅上限 50 magic number [REFACTOR]（P2）**：与 maxWSConns/maxSubscribersPerKey 同包但未命名。方案：抽 const maxSubscriptionsPerClient = 50。Breaking：否。
+- [~] **R240-CR-5 — `internal/dispatch/dispatch.go:742,869` ReplyWithRetry 重试次数 3 magic number [REFACTOR]（P2）**：两处独立修改易飘。方案：抽 const platformReplyMaxAttempts = 3。Breaking：否。
+- [~] **R240-CR-6 — `internal/server/wshub.go:1217` resubscribeEvents `for i := range 12` + 5s magic numbers [REFACTOR]（P2）**：60s 总窗口未注释。方案：抽 const resubscribeMaxAttempts/resubscribeInterval。Breaking：否。
 - [ ] **R240-CR-7 — `internal/session/managed.go:538,545,553,1114` loadProcess/storeProcess/isAlive/HasProcess 缺 godoc [REFACTOR]（P2）**：HasProcess 是导出方法。方案：补 godoc 说明 atomic.Pointer[processBox] 双层包装契约。Breaking：否。
 - [ ] **R240-CR-8 — `internal/dispatch/dispatch.go:956,973,1164,1317` replyTracker 4 方法缺 godoc [REFACTOR]（P2）**：onEvent 是 IM 流式核心。方案：补 godoc 标注线程约束 + 超时契约。Breaking：否。
 - [ ] **R240-CR-9 — `internal/server/wshub.go:461,467,514,587,820,866,992,1031,1476,1821,1844,1861` 12 个 Hub 方法缺 godoc [REFACTOR]（P2）**：方案：至少补 handleAuth/handleSubscribe/doBroadcastSessionsUpdate/capHistoryBatch。Breaking：否。
@@ -366,7 +366,7 @@
 - [ ] **R239-ARCH-F — `internal/cli/backend/profile.go:155-163` backend.Register 重复 ID 直接 panic 无运行时刷新（P1）[REFACTOR]**：多租户/测试隔离需 withCleanRegistry 黑魔法。方向：注入式 ProfileRegistry 由 main 持有。
 - [ ] **R239-ARCH-G — `internal/session/key.go:145-160` plannerKeyFor "project:{name}:planner" 与 internal/project.PlannerKeyFor 双方硬编码字面量靠双向测试断言保持一致（P1）[REFACTOR]**：方向：抽 internal/keyspec 零依赖共享包。
 - [ ] **R239-ARCH-H — `internal/platform/platform.go:134` Reactor / QuestionCardSender / RunnablePlatform 三个 capability interface 散在包根（P2）[REFACTOR]**：加新 capability 须改多处 AsX()。方向：Capability 注册表或 typed-nil discriminator。
-- [ ] **R239-ARCH-I — `internal/server/wshub.go:202` Hub.wiredLinkers 用 *cli.SubagentLinker 具体指针做 map key [REPEAT-7]**：server 直接绑定 cli 内部类型；godoc 自承应抽 AgentLinker 接口。方向：sessions/agentlink 共享接口。
+- [~] **R239-ARCH-I — `internal/server/wshub.go:202` Hub.wiredLinkers 用 *cli.SubagentLinker 具体指针做 map key [REPEAT-7]**：server 直接绑定 cli 内部类型；godoc 自承应抽 AgentLinker 接口。方向：sessions/agentlink 共享接口。
 - [ ] **R239-ARCH-J — `internal/session/router_core.go:193-431` Router struct 含 40+ 字段（P2）[REFACTOR]**：已 split 但仍是 god-object。方向：拆 RouterStore / RouterPolicy / RouterLifecycle 子结构。
 - [ ] **R239-ARCH-K — `internal/cli/wrapper.go:120-128,176-180` backendDisplayName / detectCLI 仍 switch 硬编码 [REFACTOR]**：本轮 fix agent 因 import cycle 跳过；新 master [R225-CR-2] 已通过 knownBackendBinaries map 部分缓解 detectCLI 路径但未解决核心 cycle。方向：先抽 backendreg 子包消除 cycle，再让 wrapper 调 backend.Get(id).DisplayName/DefaultBinary。
 - [ ] **R239-ARCH-L — `internal/session/router_core.go:80` exemptKeyPrefixes 与 `internal/session/key.go:58` reservedKeyPrefixes 两个 prefix 列表（P2）[REFACTOR]**：同根概念两套。方向：单一 KeySpec 表。
