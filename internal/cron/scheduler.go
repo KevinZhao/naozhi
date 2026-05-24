@@ -1106,6 +1106,13 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 		if _, exists := s.jobs[j.ID]; !exists {
 			break
 		}
+		// R238-CR-15: surface every retry rather than only the final failure.
+		// A degenerate generateID (mock injection or /dev/urandom stall) would
+		// otherwise stay silent until attempt 10 produces the
+		// "failed to generate unique job ID" error; logging each collision lets
+		// operators see the pattern (same ID repeating) before users hit
+		// AddJob errors.
+		slog.Warn("cron: job ID collision, retrying", "attempt", i+1, "cron_id", j.ID)
 		j.ID = generateID()
 	}
 	if _, exists := s.jobs[j.ID]; exists {
