@@ -126,7 +126,7 @@
 - [ ] **R237-GO-9 — `shim.Manager.StopAll(ctx)` 接收 ctx 但从不使用（P3）**：误导调用方。建议移除 ctx 参数或实现 ctx-aware drain。Breaking: 是（移参数）。
 - [~] **R237-GO-10 — `process.go:411` `setDeathReason` upgrade-path 死代码（P3）**：注释 "not taken today" 自陈死代码。建议删除 upgrade-path（425-428 行）。Non-breaking。
 - [~] **R237-GO-11 — `cli.captureWriterPool` 大 payload 污染 sync.Pool（P3）**：11MB 图片消息后 backing array 留在 pool。建议 Put 前检查 cap > 64KiB 跳过。Non-breaking。
-- [ ] **R237-GO-12 — `dispatch.BuildHandler` 中 `d.dedup` 为 nil 时 Seen 会 panic（P3）**：与 takeoverFn 不一致。建议 NewDispatcher 加 noop fallback：`if d.dedup == nil { d.dedup = platform.NewDedup(0) }`。Non-breaking。
+- [~] **R237-GO-12 — `dispatch.BuildHandler` 中 `d.dedup` 为 nil 时 Seen 会 panic（P3）**：与 takeoverFn 不一致。建议 NewDispatcher 加 noop fallback：`if d.dedup == nil { d.dedup = platform.NewDedup(0) }`。Non-breaking。
 - [ ] **R237-GO-13 — `cli.process_send.go:60` `buildUserEntry` 信号量错位（P3）**：`sem <- struct{}{}` 在主 goroutine 中阻塞，应在 worker goroutine 中。建议挪到 goroutine 启动后。Non-breaking。
 
 ### 安全 — 本轮新发现
@@ -151,7 +151,7 @@
 - [~] **R237-PERF-11 — `eventlog/persist/idx.AppendBatch` 每次分配新 buf（P2）**：默认 200ms 间隔每批 28-896 字节短命对象给 GC 增压。建议 buf 改 IdxWriter 字段复用或栈分配。Non-breaking。
 - [ ] **R237-PERF-12 — `session.EventEntriesSince` dead-session 全量 sort（P2）**：1Hz × N tabs × M dead sessions。建议 persistedHistory 维护按 Time 排序的不变式 + 二分查找。Non-breaking。
 - [ ] **R237-PERF-13 — discovery extractText 单 block 路径多余 alloc（P3）**：blocks 长度 1 时仍走 strings.Join。建议早返。Non-breaking。
-- [ ] **R237-PERF-14 — runstore.skipAppendTrim 高频 sync.Map lookup + entry.mu lock（P3）**：建议改 jobAppendCount sync.Map[*atomic.Int32] 无锁。Non-breaking。
+- [~] **R237-PERF-14 — runstore.skipAppendTrim 高频 sync.Map lookup + entry.mu lock（P3）**：建议改 jobAppendCount sync.Map[*atomic.Int32] 无锁。Non-breaking。
 - [ ] **R237-PERF-15 — session.storeMetaPath 重复 filepath 计算（P3）**：建议 Router 字段缓存。Non-breaking。
 - [ ] **R237-PERF-16 — metrics labelKey Pool overhead 单 label 场景（P3）**：建议 len==1 时直接返回 clipLabelSegment。Non-breaking。
 
@@ -200,7 +200,7 @@
 - [ ] **R236-GO-05 — Stop deadline 命中后 triggerWG.Wait goroutine 永久泄漏（P2）**: `internal/cron/scheduler.go:971-980` 注释自陈"intentional orphan"。方案：scheduler 加 stopCh + TriggerNow goroutine select stopCh 短路。Breaking：否。
 - [ ] **R236-GO-07 — sendCtx 使用 context.Background 让 Send 不被 stopCtx 取消（P2）**: `internal/cron/scheduler.go:2259` Stop 返回后 cron job Send 可继续 jobTimeout（默认 5min），可能持已被 Router.Shutdown 回收的 session。方案：sendCtx 父 ctx 改 stopCtx + 增加 execWG.Wait。Breaking：否。
 - [ ] **R236-GO-08 — Append jobLock 持锁期间 trimJobLocked 做磁盘 I/O 阻塞并发 Recent（P2）**: `internal/cron/runstore.go:228-235` 慢盘上 200ms+ 阻塞。方案：trimJobLocked 拆两阶段（锁内决名单，锁外 Remove）。Breaking：否。
-- [ ] **R236-GO-09 — runDeadlineWatchdog InterruptViaControl 阻塞导致 finishRun 永不调用（P2）**: `internal/cron/scheduler.go:2003-2013` 后续触发因 inflight.running=true 全跳过。方案：watchdog 内 InterruptViaControl 加 3s 超时。Breaking：否。
+- [~] **R236-GO-09 — runDeadlineWatchdog InterruptViaControl 阻塞导致 finishRun 永不调用（P2）**: `internal/cron/scheduler.go:2003-2013` 后续触发因 inflight.running=true 全跳过。方案：watchdog 内 InterruptViaControl 加 3s 超时。Breaking：否。
 - [ ] **R236-GO-11 — cacheHeadPush O(N) memmove 在 entry.mu 下阻塞 cacheGet（P2）**: `internal/cron/runstore.go:302-325`。方案：改 ring buffer (固定数组 + head 指针) O(1) 头插尾删（与 R230C-GO-13/R233-PERF-2 同根因，主条目跟踪）。Breaking：否。
 
 ### 性能（剩余）
@@ -212,7 +212,7 @@
 - [ ] **R236-PERF-08 — handleList 50 jobs 串行调 RecentRuns 各持 entry.mu（P2）**: `internal/server/dashboard_cron.go:510`。方案：BatchRecentRuns(jobIDs, n) 单次遍历或 bounded goroutine 并发。Breaking：否（新 API）。
 - [ ] **R236-PERF-09 — warmCache jobLock 持锁期间 200×ReadFile + Unmarshal（P2）**: `internal/cron/runstore.go:376-392` 多 job warm 起手时 50 个 I/O 重 goroutine 占用线程。方案：先 meta scan 列文件名（短锁）+ 锁外 ReadFile + 二次锁写 entry.runs。Breaking：否。
 - [ ] **R236-PERF-10 — eventlog notifySubscribers map iter vs slice（P2）**: `internal/cli/eventlog.go:1039-1051` 500 sessions × 5 events/s = 2500 RLock+map iter/s。方案：改 `[]*subscriber` slice + swap-and-shrink unsub。Breaking：否。
-- [ ] **R236-PERF-11 — ListAllJobsWithNextRun 每 entry 独立 robfig.Entry() 锁（P2）**: `internal/cron/scheduler.go:1125-1146`。方案：一次 cron.Entries() + entryID→Next map。Breaking：否。
+- [~] **R236-PERF-11 — ListAllJobsWithNextRun 每 entry 独立 robfig.Entry() 锁（P2）**: `internal/cron/scheduler.go:1125-1146`。方案：一次 cron.Entries() + entryID→Next map。Breaking：否。
 - [ ] **R236-PERF-12 — trimJobLocked 重复 ReadDir+Sort 与 diskListNewestFirst 不复用（P2）**: `internal/cron/runstore.go:628-707`。方案：cache.warm 时直接用 cache 算"是否需要 trim"，绝大多数情况跳过 ReadDir。Breaking：否。
 - [ ] **R236-PERF-13 — Snapshot 含 SetModel 写副作用（P2）**: `internal/session/managed.go:1151-1275` 每次 dashboard 1Hz × N tabs 触发 atomic store。方案：model 同步移到 readLoop / Send 结束，Snapshot 改纯读。Breaking：否。
 
@@ -222,13 +222,13 @@
 - [ ] **R236-QA-05 — sysession DaemonRun ErrorClass 缺 Canceled 枚举（P2）**: `internal/sysession/run.go:152` State=canceled 但 ErrorClass="" 与成功无法区分。方案：新增 DaemonErrorClassCanceled 枚举值。Breaking：否（wire format）。
 - [ ] **R236-QA-09 — auto_titler 手写 insertion sort 维护风险（P2）**: `internal/sysession/auto_titler.go:280-284` `>=` 一改即死循环。方案：slices.SortFunc + batchPerTick ≤100 上限。Breaking：否。
 - [ ] **R236-QA-13 — readJSONWithRetry 不区分 file-missing vs JSON-invalid（P2）**: `cmd/naozhi/main.go:97-112` 损坏 settings.json 仅 Warn。方案：errors.Is(fs.ErrNotExist) 走 Warn 其余走 Error 提示运维。Breaking：否。
-- [ ] **R236-QA-16 — loadJobs 缺 Schedule/WorkDir 字段验证（P3）**: `internal/cron/store.go:109-153` 仅校 ID/Prompt/Title/Backend；超长 Schedule + 非 UTF-8 WorkDir 进 slog 可 log-injection。方案：与现有 prompt/title 验证对齐加 len + utf8.ValidString。Breaking：否。
+- [~] **R236-QA-16 — loadJobs 缺 Schedule/WorkDir 字段验证（P3）**: `internal/cron/store.go:109-153` 仅校 ID/Prompt/Title/Backend；超长 Schedule + 非 UTF-8 WorkDir 进 slog 可 log-injection。方案：与现有 prompt/title 验证对齐加 len + utf8.ValidString。Breaking：否。
 - [ ] **R236-QA-17 — sysession runner argv 硬编 "-p --output-format text --setting-sources" 与 cli 包参数集脱钩（P3）**: `internal/sysession/runner.go:119-131`。方案：抽 runnerImplBaseArgs 包级常量 + 注释同步责任。Breaking：否。
 - [ ] **R236-QA-20 — isNaozhiCallbackHook 用 strings.Contains "127." 误报合法 URL（P3）**: `cmd/naozhi/main.go:364-384`。方案：正则匹配 IP 前缀或确认 host:port token 格式。Breaking：否。
 - [ ] **R236-ARCH-06 — dispatch.Dispatcher 仍持具体 *cron.Scheduler 而非 interface（P1, is_localized=true）**: `internal/dispatch/dispatch.go:67-71` 与 R235-ARCH-3 同根因，本条提供具体方案：`internal/dispatch/cron_consumer.go` 定义 ~8 method CronScheduler interface + contract test。Breaking：否（接口断言迁移）。
 - [ ] **R236-ARCH-07 — cron.scheduler 直 import platform 绕过 dispatch 中文化/replyError 计数（P1）**: `internal/cron/scheduler.go:25` 第三条出口管线。本条提供窄方案：dispatch.Notifier interface 注入到 scheduler 替代 platforms map（比 SendOrchestrator RFC 改动面小 90%）。同根因 R230C-ARCH-3 主条目跟踪。
 - [ ] **R236-ARCH-12 — Dispatcher closure-pattern sendFn/takeoverFn 缺编译期非 nil 保证（P2, is_localized=true）**: `internal/dispatch/dispatch.go:125-209`。方案：抽 SessionSender interface（与 takeoverFn 同类）+ NewDispatcher 必填字段。Breaking：是（dispatchConfig 字段类型）。
-- [ ] **R236-ARCH-19 — jobSnapshot 字段集靠注释手工维护，无 contract test（P3, is_localized=true）**: `internal/cron/scheduler.go:1801-1830` 新加 Job 字段不会自动同步进 snapshot，executeOpt 路径有读 *Job 风险。方案：grep contract test 锁定 executeOpt 不读 *Job 字段；或函数内 shadow `_ = (*Job)(nil)`。Breaking：否。
+- [~] **R236-ARCH-19 — jobSnapshot 字段集靠注释手工维护，无 contract test（P3, is_localized=true）**: `internal/cron/scheduler.go:1801-1830` 新加 Job 字段不会自动同步进 snapshot，executeOpt 路径有读 *Job 风险。方案：grep contract test 锁定 executeOpt 不读 *Job 字段；或函数内 shadow `_ = (*Job)(nil)`。Breaking：否。
 
 
 ## Round 235 — 5-agent 并行 code review 第 45 轮（2026-05-23）NEEDS-DESIGN

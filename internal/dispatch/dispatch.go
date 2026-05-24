@@ -275,6 +275,16 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 	if d.watchdogTotalKills == nil {
 		d.watchdogTotalKills = new(atomic.Int64)
 	}
+	// BuildHandler's hot path calls d.dedup.Seen unconditionally on every
+	// inbound IM message; production wiring (cmd/naozhi.main) always passes
+	// a Dedup instance, but headless / test wirings leave the field nil. A
+	// nil-deref panic at the platform webhook handler would mask the real
+	// constructor-misconfiguration bug, so install a default tracker rather
+	// than nil-guarding inside BuildHandler. Mirrors the takeoverFn /
+	// watchdog counter fallbacks above. (R237-GO-12)
+	if d.dedup == nil {
+		d.dedup = platform.NewDedup(0)
+	}
 	return d
 }
 
