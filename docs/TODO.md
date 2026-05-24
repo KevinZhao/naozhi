@@ -137,7 +137,7 @@
 ### Go（剩余 — 非误报）
 
 - [ ] **R244-GO-P1-1 — dashboard_cron_transcript LimitedReader.N 截断检测注释精度问题**: `internal/server/dashboard_cron_transcript.go:442` 注释说 lr.N 跟踪 logical remaining，实际跟踪 reader-level read。方案：注释明确"lr.N≤0 表示 LimitedReader 已无字节供 scanner.Read"。
-- [~] **R244-GO-P2-1 — SetJobPrompt 5 处手动 Unlock 散点不与项目其余 mutator 对齐 [BREAKING-LOCAL]**: `internal/cron/scheduler.go:1607` 不同于 UpdateJob/DeleteJobByID 用 IIFE+defer 解锁。方案：IIFE 闭包统一 defer Unlock 模式。Breaking：低。
+- [x] **R244-GO-P2-1 — SetJobPrompt 5 处手动 Unlock 散点不与项目其余 mutator 对齐 [BREAKING-LOCAL]**: `internal/cron/scheduler.go:1607` 不同于 UpdateJob/DeleteJobByID 用 IIFE+defer 解锁。方案：IIFE 闭包统一 defer Unlock 模式。Breaking：低。 → 已改 IIFE+defer s.mu.Unlock，闭包返回 (save, noop, err)；rollback path 与 R243-GO-5 兼容；TestPersistFailure_SetJobPrompt 通过。
 - [ ] **R244-GO-P2-2 — dashboard_cron_transcript.summariseToolInput fallback 重 marshal 浪费 alloc**: line 669 unmarshal 后仅做 key 探测；fallback 分支 line 683 `json.Marshal(obj)` 可直接 `string(input)` 给 SanitizeForLog。方案：fallback 直传 `string(input)`。
 - [ ] **R244-GO-P2-3 — io.LimitedReader 直接构造 bypass io.LimitReader 类型契约**: dashboard_cron_transcript.go:383 直接 &io.LimitedReader{N: maxTranscriptBytes} 类型必须保证 int64 安全。方案：显式 int64 cast。
 - [ ] **R244-GO-P2-4 — TestSanitizeForLog_EnforcesMaxLen 顶部 flat 断言 vs 子测试 t.Run 风格混用**: 方案：全部改 t.Run 统一 table-driven。

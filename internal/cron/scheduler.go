@@ -1621,52 +1621,71 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 
 // SetJobPrompt updates a job's prompt. If the job was paused with an empty
 // prompt (created from dashboard), it also unpauses and registers the schedule.
+//
+// LOCKING (R244-GO-P2-1): the critical section is wrapped in an IIFE with
+// `defer s.mu.Unlock()` so every early-return path drops the mutex
+// uniformly — previously the function had 5 hand-rolled `s.mu.Unlock();
+// return …` sites that drifted from the IIFE+defer pattern used by
+// UpdateJob / DeleteJobByID / PauseJobByID / ResumeJobByID. The IIFE
+// returns (save func, noop bool, err) so the post-lock save() and
+// slog.Info still run outside the critical section, matching the project
+// convention that disk fsync and logging happen lock-free.
 func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	if prompt == "" {
 		return fmt.Errorf("prompt must not be empty")
 	}
 
-	s.mu.Lock()
+	var save func()
+	var noop bool
+	err := func() error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	j, ok := s.jobs[id]
-	if !ok {
-		s.mu.Unlock()
-		return fmt.Errorf("%w: id %q", ErrJobNotFound, id)
-	}
-	if j.Prompt != "" {
-		s.mu.Unlock()
-		return nil // already has a prompt, no-op
-	}
-
-	j.Prompt = prompt
-	waspaused := j.Paused
-	if j.Paused {
-		// Delegate unpause to the shared helper so the registerJob + Paused
-		// flag transition stays consistent with PauseJob/ResumeJob/UpdateJob
-		// paths. R226-CR-16.
-		if err := s.resumeJobLocked(j); err != nil {
-			j.Prompt = "" // rollback: Prompt was empty before this call
-			s.mu.Unlock()
-			return err
+		j, ok := s.jobs[id]
+		if !ok {
+			return fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 		}
-	}
-	save, perr := s.persistJobsLocked()
-	if perr != nil {
-		// Rollback in-memory state before releasing the lock so the
-		// live view never reflects an un-persisted mutation.
-		// pauseJobLocked failure here is best-effort: only logged, never
-		// suppresses the original perr returned to the caller. R243-GO-5.
-		j.Prompt = ""
-		if waspaused && !j.Paused {
-			if rbErr := s.pauseJobLocked(j); rbErr != nil && !errors.Is(rbErr, ErrJobAlreadyPaused) {
-				slog.Warn("cron rollback after persist failure also failed",
-					"job_id", j.ID, "rollback_err", rbErr, "persist_err", perr)
+		if j.Prompt != "" {
+			noop = true
+			return nil // already has a prompt, no-op
+		}
+
+		j.Prompt = prompt
+		waspaused := j.Paused
+		if j.Paused {
+			// Delegate unpause to the shared helper so the registerJob +
+			// Paused flag transition stays consistent with
+			// PauseJob/ResumeJob/UpdateJob paths. R226-CR-16.
+			if rerr := s.resumeJobLocked(j); rerr != nil {
+				j.Prompt = "" // rollback: Prompt was empty before this call
+				return rerr
 			}
 		}
-		s.mu.Unlock()
-		return perr
+		var perr error
+		save, perr = s.persistJobsLocked()
+		if perr != nil {
+			// Rollback in-memory state before releasing the lock so the
+			// live view never reflects an un-persisted mutation.
+			// pauseJobLocked failure here is best-effort: only logged, never
+			// suppresses the original perr returned to the caller. R243-GO-5.
+			j.Prompt = ""
+			if waspaused && !j.Paused {
+				if rbErr := s.pauseJobLocked(j); rbErr != nil && !errors.Is(rbErr, ErrJobAlreadyPaused) {
+					slog.Warn("cron rollback after persist failure also failed",
+						"job_id", j.ID, "rollback_err", rbErr, "persist_err", perr)
+				}
+			}
+			save = nil
+			return perr
+		}
+		return nil
+	}()
+	if err != nil {
+		return err
 	}
-	s.mu.Unlock()
+	if noop {
+		return nil
+	}
 	save()
 	slog.Info("cron job prompt set", "job_id", id, "prompt_len", len(prompt))
 	return nil
