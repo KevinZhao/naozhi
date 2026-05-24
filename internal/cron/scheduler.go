@@ -837,14 +837,28 @@ func (s *Scheduler) resetRouterStub(jobID string) {
 // visible without silently demoting them.
 type slogPrintfLogger struct{}
 
+// cronPanicMarker / cronRecoveredMarker are the substrings whose presence in
+// a robfig/cron Printf line indicate a recovered-panic event (vs. a generic
+// schedule warning). Named here rather than inlined as string literals so:
+//
+//   - the positive-intent meaning ("this line came from chain.go's Recoverer")
+//     is encoded in the identifier, not the negative scan reading;
+//   - upstream library wording shifts only require updating the const list;
+//   - tests can assert the same vocabulary the matcher uses.
+//
+// "panic" matches the current chain.go:30 "cron: panic running job:" prefix;
+// "recovered" is the stable fallback marker if upstream rewords (e.g. moves
+// to "cron: recovered from panic"). Both are case-sensitive, matching the
+// upstream string literal exactly. R247-CR-23 (R246-CR-016 follow-up).
+const (
+	cronPanicMarker     = "panic"
+	cronRecoveredMarker = "recovered"
+)
+
 func (slogPrintfLogger) Printf(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	msg = strings.TrimRight(msg, "\n")
-	// 同时匹配 "panic" 和 "recovered"：robfig/cron 的 recover chain 把
-	// recovery 消息固定包含 "panic"（chain.go:30 "cron: panic running job:
-	// %v\n%s"），但 upstream 措辞调整时 "recovered" 是更稳定的兜底标记，
-	// 避免静默降级为 Warn 漏报真实故障。
-	if strings.Contains(msg, "panic") || strings.Contains(msg, "recovered") {
+	if strings.Contains(msg, cronPanicMarker) || strings.Contains(msg, cronRecoveredMarker) {
 		slog.Error("cron logger", "msg", msg)
 		return
 	}
