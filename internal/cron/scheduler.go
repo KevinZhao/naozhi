@@ -2588,7 +2588,7 @@ func (s *Scheduler) finishRun(a finishArgs) {
 			WorkDir:     a.workDir,
 			Fresh:       a.fresh,
 			Result:      persistedResult,
-			ResultBytes: len(a.result),
+			ResultBytes: len(persistedResult),
 			ErrorClass:  a.errClass,
 			ErrorMsg:    persistedErrMsg,
 		})
