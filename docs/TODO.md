@@ -358,7 +358,7 @@
 - [ ] **R242-ARCH-21 [REFACTOR]** `cmd/naozhi/main.go:919-937` 关闭顺序 sysMgr → scheduler → router 仅注释；抽 `lifecycle.Coordinator` 显式依赖图。
 - [ ] **R242-ARCH-22 [REFACTOR]** `internal/cron/scheduler.go:2270-2276` emitRunStarted 在 GetOrCreate 之前发，SessionID="" 让 KnownSessionIDs 漏；推迟到 setSessionID 后。
 - [ ] **R242-ARCH-23 [REFACTOR]** `internal/cron/scheduler.go:450` cron.IsExcluded 每次新建 jobs×200 map 在 spawn 路径；暴露 `LookupKnownSessionID(id) bool` 直查 set。
-- [ ] **R242-ARCH-24 [REFACTOR]** `internal/sysession/router.go:25-61` `EventEntriesForKey` 返回 `[]cli.EventEntry` 强依赖 cli pkg；定义本地 SystemEventEntry 镜像。
+- [~] **R242-ARCH-24 [REFACTOR]** `internal/sysession/router.go:25-61` `EventEntriesForKey` 返回 `[]cli.EventEntry` 强依赖 cli pkg；定义本地 SystemEventEntry 镜像。 — sysession/router.go EventEntriesForKey godoc 加 NEEDS-DESIGN 描述：mirror 改造延后到 R243-ARCH-12 EventStore 抽象落地后从中央派生，避免双重 churn。
 - [ ] **R242-ARCH-25 [REFACTOR]** `internal/session/router_lifecycle.go:135-199` ResetChat shutdownCond.Broadcast 一处持锁一处释锁分裂；统一持锁广播。
 - [ ] **R242-ARCH-26 [REFACTOR]** `internal/cron/scheduler.go:78-89` `RegisterCronStubWithChain chainIDs []string` 调用方一律传单元素；接口收敛或重命名。
 - [ ] **R242-ARCH-27 [REFACTOR]** `internal/cli/process_turn.go:36` interruptedSettleWindow 500ms 与 runDeadlineWatchdog 并发未协同；化为 process 级配置 + watchdog settle 完成再清 inflight。
