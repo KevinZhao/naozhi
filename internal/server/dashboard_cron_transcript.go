@@ -770,6 +770,7 @@ func summariseToolInput(name string, input json.RawMessage) string {
 // time.RFC3339Nano is a strict superset of time.RFC3339 — any timestamp
 // the latter accepts is also accepted by the former — so the previous
 // RFC3339 fallback was dead code and is now removed (R243-CR-P3-6).
+// (Go time.Parse treats .999... fragment as optional, so RFC3339Nano layout accepts both fractional and non-fractional inputs.)
 func parseISO8601MS(s string) int64 {
 	if s == "" {
 		return 0
