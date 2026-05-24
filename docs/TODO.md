@@ -248,11 +248,11 @@
 - [~] **R240-CR-4 — `internal/server/wshub.go:622` per-client 订阅上限 50 magic number [REFACTOR]（P2）**：与 maxWSConns/maxSubscribersPerKey 同包但未命名。方案：抽 const maxSubscriptionsPerClient = 50。Breaking：否。
 - [~] **R240-CR-5 — `internal/dispatch/dispatch.go:742,869` ReplyWithRetry 重试次数 3 magic number [REFACTOR]（P2）**：两处独立修改易飘。方案：抽 const platformReplyMaxAttempts = 3。Breaking：否。
 - [~] **R240-CR-6 — `internal/server/wshub.go:1217` resubscribeEvents `for i := range 12` + 5s magic numbers [REFACTOR]（P2）**：60s 总窗口未注释。方案：抽 const resubscribeMaxAttempts/resubscribeInterval。Breaking：否。
-- [ ] **R240-CR-7 — `internal/session/managed.go:538,545,553,1114` loadProcess/storeProcess/isAlive/HasProcess 缺 godoc [REFACTOR]（P2）**：HasProcess 是导出方法。方案：补 godoc 说明 atomic.Pointer[processBox] 双层包装契约。Breaking：否。
+- [~] **R240-CR-7 — `internal/session/managed.go:538,545,553,1114` loadProcess/storeProcess/isAlive/HasProcess 缺 godoc [REFACTOR]（P2）**：HasProcess 是导出方法。方案：补 godoc 说明 atomic.Pointer[processBox] 双层包装契约。Breaking：否。
 - [ ] **R240-CR-8 — `internal/dispatch/dispatch.go:956,973,1164,1317` replyTracker 4 方法缺 godoc [REFACTOR]（P2）**：onEvent 是 IM 流式核心。方案：补 godoc 标注线程约束 + 超时契约。Breaking：否。
 - [ ] **R240-CR-9 — `internal/server/wshub.go:461,467,514,587,820,866,992,1031,1476,1821,1844,1861` 12 个 Hub 方法缺 godoc [REFACTOR]（P2）**：方案：至少补 handleAuth/handleSubscribe/doBroadcastSessionsUpdate/capHistoryBatch。Breaking：否。
 - [ ] **R240-CR-10 — `internal/config/config.go:477,551,584,1092` applyDefaults/parseDurations/validateConfig/containsEnvPlaceholder 缺 godoc [REFACTOR]（P2）**：方案：补流水线契约说明（first-error vs errors.Join）。Breaking：否。
-- [ ] **R240-CR-11 — `internal/session/managed.go:1577` slog 消息 "InjectHistory:" 大写函数前缀风格不一致 [REFACTOR]（P3）**：与 router_cleanup/router_discovery 类似 ~3 处。方案：统一小写。Breaking：否。
+- [~] **R240-CR-11 — `internal/session/managed.go:1577` slog 消息 "InjectHistory:" 大写函数前缀风格不一致 [REFACTOR]（P3）**：与 router_cleanup/router_discovery 类似 ~3 处。方案：统一小写。Breaking：否。
 - [ ] **R240-CR-12 — `internal/cron/scheduler.go:2943` notifyTarget vs NotifyTarget vs deliverNotice 三层命名混淆 [REFACTOR]（P3）**：方案：私有方法重命名为 sendNoticeToChat 或 sendViaPlatform。Breaking：否。
 - [ ] **R240-CR-13 — `internal/cli/wrapper.go:451` shimLineReader.ReadLine 缺 godoc [REFACTOR]（P3）**：实现含非显然 shim 协议解包。方案：补协议契约。Breaking：否。
 - [ ] **R240-CR-14 — `internal/server/dashboard_send.go|dashboard_session.go|dashboard_cron.go` 3 文件超 800 行 [REFACTOR]（P3）**：方案：按 endpoint 拆子文件。Breaking：否。
@@ -275,13 +275,13 @@
 - [ ] **R240-ARCH-13 — `internal/session/managed.go:47-114` processIface 35 方法 god-interface [REPEAT-N，与 R239-ARCH-C 同根因]**：方向：拆 ProcessLifecycle/ProcessSender/EventSource/ProcessIntrospect。
 - [ ] **R240-ARCH-14 — `internal/server/server.go:76-88` 12 handler 字段全具体类型 [REFACTOR]（P2）**：handler 间互依赖（SendHandler↔Hub↔ScratchHandler）。方案：抽 httpHandlerSet 接口 + 自注册。Breaking：否。
 - [ ] **R240-ARCH-15 — `internal/upstream/connector.go:69` 等 5 个 "subset of session.Router" 接口 [REFACTOR]（P2）**：HubRouter 14 / dispatch 8 / cron 3 / sysession 4 / upstream 各一份；签名飘移风险。方案：internal/sessioniface 包提供 RouterReader/Mutator/Dispatcher mixin。Breaking：否。
-- [ ] **R240-ARCH-16 — `internal/session/router_core.go:29-31` blank-import history backend [REPEAT-N，与 R239-ARCH-B 同根因]**：方向：internal/history/wireup 显式 RegisterDefaults()。
+- [~] **R240-ARCH-16 — `internal/session/router_core.go:29-31` blank-import history backend [REPEAT-N，与 R239-ARCH-B 同根因]**：方向：internal/history/wireup 显式 RegisterDefaults()。
 - [ ] **R240-ARCH-17 — `internal/cli/history.go:122` RegisterHistoryFactory + cli/wrapper pickHistoryFactory 反向依赖 [REFACTOR]（P3）**：内部 cli 持 history 全局 map。方案：HistoryFactoryFn 注册迁到 internal/history。Breaking：是 (NewWrapper 签名)。
 - [ ] **R240-ARCH-18 — `internal/cli/wrapper.go:120-128` backendDisplayName switch 硬编码 [REPEAT-N，与 R239-ARCH-K 同根因]**：方向同前主条目。
 - [ ] **R240-ARCH-19 — `internal/server/wshub.go:202` wiredLinkers map 用 *cli.SubagentLinker 具体指针 [REPEAT-N，与 R239-ARCH-I 同根因]**。
 - [ ] **R240-ARCH-20 — `internal/cli/backend/profile.go:22` cli/backend 反向依赖 cli (Profile.NewProtocol returns cli.Protocol) [REFACTOR]（P3）**：cli 不能 import cli/backend 即 cycle。方案：rename 到 internal/backend 顶层。Breaking：是 (import paths)。
 - [ ] **R240-ARCH-21 — `internal/cron/scheduler.go:1086,1090` per-chat job 计数 O(N) 扫描 [REFACTOR]（P3）**：方案：jobsByChat 索引镜像 sessionsByChat。Breaking：否。
-- [ ] **R240-ARCH-22 — `internal/sysession/manager.go:17,353` osExit = os.Exit 包级可变 + force-exit [REFACTOR]（P3）**：sysession 不可嵌入。方案：cfg.OnHardFail 回调，default os.Exit(2)。Breaking：否。
+- [~] **R240-ARCH-22 — `internal/sysession/manager.go:17,353` osExit = os.Exit 包级可变 + force-exit [REFACTOR]（P3）**：sysession 不可嵌入。方案：cfg.OnHardFail 回调，default os.Exit(2)。Breaking：否。
 - [ ] **R240-ARCH-23 — `cmd/naozhi/main.go:46-72` env policy 三份散落 [REPEAT-N，与 R239-ARCH-E 同根因]**：方向：抽 internal/envpolicy。
 - [ ] **R240-ARCH-24 — `internal/cron/scheduler.go:163-187` cron RunStartedEvent vs sysession DaemonRunStartedEvent 平行复制 [REFACTOR]（P3）**：方案：抽 internal/lifecycle/RunEvent + Hub 单 BroadcastRunEvent(category, ev)。Breaking：否（wire 兼容）。
 - [ ] **R240-ARCH-25 — `internal/server/server.go:76-88` handler 不可独立测试 [REFACTOR]（P3）**：构造方法私有且含跨 handler 依赖。方案：每 handler 公开 Deps struct。Breaking：否。
