@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -336,9 +337,9 @@ func uuidFromClaudeBlock(hl historyLine, blockIndex int, ts int64, typ, summary,
 		if blockIndex == 0 {
 			return u
 		}
-		return textutil.DeriveLegacyUUID(ts, typ, u+"#"+intToA(blockIndex), detail)
+		return textutil.DeriveLegacyUUID(ts, typ, u+"#"+strconv.Itoa(blockIndex), detail)
 	}
-	return textutil.DeriveLegacyUUID(ts, typ, summary+"#"+intToA(blockIndex), detail)
+	return textutil.DeriveLegacyUUID(ts, typ, summary+"#"+strconv.Itoa(blockIndex), detail)
 }
 
 // normalizeClaudeUUID strips dashes from a Claude-style UUID so its
@@ -374,27 +375,6 @@ func normalizeClaudeUUID(u string) string {
 		return ""
 	}
 	return string(b[:])
-}
-
-// intToA is a minimal int-to-string without pulling strconv just
-// for the block-index formatter. Values here are small (< 10).
-func intToA(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var out []byte
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		out = append([]byte{byte('0' + n%10)}, out...)
-		n /= 10
-	}
-	if neg {
-		out = append([]byte{'-'}, out...)
-	}
-	return string(out)
 }
 
 // extractText handles content that is either a plain string or []block.
