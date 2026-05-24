@@ -44,4 +44,28 @@
 //
 // See recovery.go for the exact truncation algorithm and persister.go
 // for the debounce + drop-on-full policy.
+//
+// # "eventlog" is three packages, not one (R237-ARCH-13)
+//
+// The token "eventlog" appears in three distinct positions of the
+// data flow; package boundaries make the split explicit:
+//
+//   - cli.EventLog (internal/cli/eventlog.go) — IN-MEMORY ring
+//     buffer + PersistSink contract. Producer of every event.
+//   - internal/eventlog/persist (this package) — ON-DISK writer
+//     consuming from cli.EventLog via the PersistSink closure.
+//   - internal/eventlog/schema — wire format types shared by
+//     persist + future replay readers. Strictly upstream of cli.
+//   - internal/history/naozhilog — REPLAY reader for files persist
+//     wrote.
+//
+// persist.PersistSink (in entry.go) and cli.PersistSink (in
+// internal/cli/eventlog.go) are deliberately distinct types — the
+// former takes persist.Entry (post-marshal schema record), the
+// latter takes []cli.EventEntry (pre-marshal in-memory shape). The
+// bridge in internal/session/eventlog_bridge.go is the only place
+// that translates between them. R237-ARCH-13 proposes the rename
+// to internal/eventlog/{ring, persist, replay} so package names
+// match data-flow positions; until that lands, reviewers must not
+// collapse the two PersistSink references.
 package persist

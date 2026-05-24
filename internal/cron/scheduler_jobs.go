@@ -556,9 +556,19 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 
 // SetJobPrompt updates a job's prompt. If the job was paused with an empty
 // prompt (created from dashboard), it also unpauses and registers the schedule.
+//
+// Both IM (Hub.runTurn / runTurnPassthrough) and dashboard wshub paths land
+// here. The dashboard already validates via server.validateCronPrompt at the
+// HTTP edge, but the IM path historically only rejected the empty string —
+// so a crafted IM payload could persist multi-MB / bidi / log-injection
+// bytes into cron_jobs.json. Centralising the policy in
+// ValidatePromptStrict keeps IM and dashboard surfaces in lockstep
+// (R243-SEC-8 REPEAT-5). Callers should errors.Is(err, ErrInvalidPrompt)
+// to distinguish input-validation failures from ErrJobNotFound /
+// ErrPersistFailed.
 func (s *Scheduler) SetJobPrompt(id, prompt string) error {
-	if prompt == "" {
-		return fmt.Errorf("prompt must not be empty")
+	if err := ValidatePromptStrict(prompt); err != nil {
+		return err
 	}
 
 	s.mu.Lock()

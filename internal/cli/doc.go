@@ -35,6 +35,41 @@
 //     the in-memory layer to internal/eventlog so the schema
 //     types are not anchored to a CLI-specific package.
 //
+//     # "eventlog" is three packages, not one (R237-ARCH-13)
+//
+//     The token "eventlog" appears in three distinct positions
+//     of the data flow; misreading them as one package causes
+//     diff confusion in reviews. Disambiguation:
+//
+//   - cli.EventLog (this package, eventlog.go) — IN-MEMORY
+//     ring buffer + PersistSink contract. Producer of every
+//     event. Owns EventEntry / SubagentInfo / PersistSink.
+//
+//   - internal/eventlog/persist — ON-DISK writer (per-key
+//     <stem>.log + <stem>.idx + framing + rotate). Consumes
+//     from cli.EventLog via the PersistSink closure. Owns
+//     Persister / Recover / IdxWriter.
+//
+//   - internal/eventlog/schema — wire format types
+//     (Record / FileHeader / IdxEntry) shared by persist
+//
+//   - future replay readers. NEVER imports cli.
+//
+//   - internal/history/naozhilog — REPLAY reader. Mounts
+//     the on-disk files persist wrote and exposes them to
+//     the history merge layer.
+//
+//     R237-ARCH-13 proposes the long-term rename to
+//     internal/eventlog/{ring, persist, replay} so the package
+//     names match the data-flow positions. Until that lands,
+//     reviewers MUST NOT collapse references — a "PersistSink"
+//     in cli (cli.PersistSink takes []EventEntry) and a
+//     "PersistSink" in persist (persist.PersistSink takes
+//     persist.Entry) are deliberately distinct types; the
+//     bridge in session/eventlog_bridge.go translates between
+//     them. See PersistSink godoc in eventlog.go for the
+//     full ARCH-4 anchor.
+//
 //   - SubagentLinker — subagent_link.go +
 //     subagent_transcript.go: resolves "internal_agent_id" for
 //     Task tool invocations by tailing ~/.claude project JSONLs

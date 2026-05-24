@@ -327,10 +327,15 @@ func ReadFramedBody(br *bufio.Reader) ([]byte, int, error) {
 		return nil, 0, fmt.Errorf("read body: %w", err)
 	}
 	if body[n] != '\n' {
-		ReleaseFramedBody(body)
 		// Missing trailing newline means the next record's framing is
 		// unreachable — we can't recover, treat the whole file as
 		// truncated at this point.
+		//
+		// R245-PERF-8 follow-up: ReleaseFramedBody is invoked exactly once.
+		// An earlier refactor accidentally double-released the same buffer,
+		// which violates the pool invariant ("the next reader gets the same
+		// backing array") and could hand the same slice to two concurrent
+		// ReadFramedBody callers — clobbering each other on the next frame.
 		ReleaseFramedBody(body)
 		return nil, 0, ErrMalformedFrame
 	}

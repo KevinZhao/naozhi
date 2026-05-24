@@ -448,8 +448,18 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	// seeing EOF. Mark truncated too. Read lr.N directly: bufio's
 	// 256 KB read-ahead can advance the underlying *os.File offset
 	// past maxTranscriptBytes even on a small file, so f.Seek would
-	// false-positive truncation. lr.N tracks the *logical* remaining
-	// budget the LimitedReader will hand out.
+	// false-positive truncation.
+	//
+	// R244-GO-P1-1: lr.N is the number of bytes the LimitedReader will
+	// still hand out to its consumer (bufio.Scanner) on subsequent Read
+	// calls. It is decremented by each successful Read on lr by the
+	// number of bytes returned, so `lr.N <= 0` means the LimitedReader
+	// has no bytes left to give bufio.Scanner — equivalently, the scan
+	// loop above either consumed exactly maxTranscriptBytes or stopped
+	// before that point with no remaining budget. It does NOT track
+	// "logical bytes still queued in the parser" — bufio.Scanner's
+	// internal 256 KB buffer may still hold partly-parsed data, but
+	// the LimitedReader will refuse to top it up further.
 	if lr.N <= 0 {
 		truncated = true
 	}

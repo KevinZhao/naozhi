@@ -47,12 +47,19 @@ const wsAuthRetryAfterSeconds = 60
 // cost on connections that get throttled. Frame strings must stay byte-for-
 // byte identical to `node.ServerMsg{Type: "error", Error: "..."}` JSON
 // output (no field reordering: ServerMsg defines Type before Error).
-var (
-	wsAuthOkMsg          = []byte(`{"type":"auth_ok"}`)
-	wsPongMsg            = []byte(`{"type":"pong"}`)
-	wsAuthFailInvalidMsg = []byte(`{"type":"auth_fail","error":"invalid token"}`)
-	wsErrNotAuthMsg      = []byte(`{"type":"error","error":"not authenticated"}`)
-	wsErrRateLimitedMsg  = []byte(`{"type":"error","error":"rate limited"}`)
+//
+// R241-SEC-13 [SIMPLE]: store as immutable string constants and convert to
+// []byte at each send site so a future code path that calls `append` on the
+// shared buffer cannot race with concurrent send goroutines reading the same
+// underlying array. The per-send `[]byte(...)` conversion is a simple memcpy
+// of a 20-50 byte payload — negligible against the WebSocket write itself,
+// and never returns the package-level frame to a caller that could mutate it.
+const (
+	wsAuthOkMsg          = `{"type":"auth_ok"}`
+	wsPongMsg            = `{"type":"pong"}`
+	wsAuthFailInvalidMsg = `{"type":"auth_fail","error":"invalid token"}`
+	wsErrNotAuthMsg      = `{"type":"error","error":"not authenticated"}`
+	wsErrRateLimitedMsg  = `{"type":"error","error":"rate limited"}`
 )
 
 // Hub manages WebSocket client connections and event subscriptions.
@@ -542,7 +549,7 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 	// do not touch msg.Token or run the ConstantTimeCompare so the
 	// cookie-authed and token-authed paths are cleanly separated.
 	if c.authenticated.Load() {
-		c.SendRaw(wsAuthOkMsg)
+		c.SendRaw([]byte(wsAuthOkMsg))
 		return
 	}
 	// Pre-hash both sides to normalize length — subtle.ConstantTimeCompare
@@ -575,9 +582,9 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 			sum := sha256.Sum256([]byte(msg.Token))
 			c.uploadOwner = hex.EncodeToString(sum[:8])
 		}
-		c.SendRaw(wsAuthOkMsg)
+		c.SendRaw([]byte(wsAuthOkMsg))
 	} else {
-		c.SendRaw(wsAuthFailInvalidMsg)
+		c.SendRaw([]byte(wsAuthFailInvalidMsg))
 		// R172-ARCH-D10: also bump the dedicated "invalid-token" split so
 		// operators can distinguish credential spray (this counter rising)
 		// from throttling storms (*RateLimitedTotal rising).

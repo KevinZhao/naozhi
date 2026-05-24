@@ -75,6 +75,17 @@ func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
 //
 // R51-QUAL-001: previously this returned a no-op func on marshal failure,
 // so every mutation appeared to succeed even when nothing reached disk.
+//
+// R244-GO-P3-1: the marshal-failure return uses Go 1.20+ multi-%w
+// (`fmt.Errorf("%w: %w", ErrPersistFailed, err)`) so callers can
+// `errors.Is(retErr, ErrPersistFailed)` (sentinel match — preferred for
+// HTTP 500 mapping) AND `errors.Is(retErr, &json.UnsupportedTypeError{})`
+// or other underlying-cause sentinel match in the same chain. Equivalently
+// `errors.As` walks both wrapped errors and binds the first matching
+// target; ordering puts ErrPersistFailed first so a generic "is the
+// mutation persisted?" check short-circuits before walking into the
+// json/encoding error chain. See std `errors` package docs §"Wrapping
+// multiple errors".
 func (s *Scheduler) persistJobsLocked() (func(), error) {
 	data, err := s.marshalJobsLocked()
 	if err != nil {

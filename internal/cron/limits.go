@@ -1,6 +1,65 @@
 package cron
 
-import "github.com/naozhi/naozhi/internal/textutil"
+import (
+	"errors"
+	"fmt"
+	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/textutil"
+)
+
+// ErrInvalidPrompt is returned by ValidatePromptStrict when a prompt fails
+// the shared cron-prompt safety policy (size cap / UTF-8 / C0 / DEL / C1 /
+// bidi / LS / PS). Sentinel form so IM dispatch and Scheduler.SetJobPrompt
+// can errors.Is and surface a stable user message instead of string-matching.
+var ErrInvalidPrompt = errors.New("cron: invalid prompt")
+
+// ValidatePromptStrict enforces the same size + character policy that
+// dashboard's validateCronPrompt applies on the HTTP edge, so the IM
+// `/cron …` path (Hub.runTurn / runTurnPassthrough → SetJobPrompt) cannot
+// smuggle log-injection / bidi / oversized prompts onto cron_jobs.json by
+// going around the dashboard validators. R243-SEC-8 (REPEAT-5):
+// previously SetJobPrompt only rejected the empty string, so an IM-side
+// caller could persist arbitrary bytes that the dashboard rejects.
+//
+// Policy (must stay in lockstep with server.validateCronPrompt):
+//   - len ≤ MaxPromptBytes
+//   - utf8.ValidString
+//   - no C0 controls except \t \n \r; no DEL (0x7f)
+//   - no rune flagged by osutil.IsLogInjectionRune (C1 / bidi / LS / PS)
+//
+// Returns a wrapped ErrInvalidPrompt so callers can distinguish from
+// not-found / persist-failure errors. Empty prompt is rejected here as
+// well so SetJobPrompt's pre-existing "must not be empty" guard becomes
+// a single ValidatePromptStrict call.
+func ValidatePromptStrict(prompt string) error {
+	if prompt == "" {
+		return fmt.Errorf("%w: must not be empty", ErrInvalidPrompt)
+	}
+	if len(prompt) > MaxPromptBytes {
+		return fmt.Errorf("%w: exceeds %d-byte limit", ErrInvalidPrompt, MaxPromptBytes)
+	}
+	if !utf8.ValidString(prompt) {
+		return fmt.Errorf("%w: contains invalid UTF-8", ErrInvalidPrompt)
+	}
+	for i := 0; i < len(prompt); i++ {
+		c := prompt[i]
+		if c >= 0x20 && c != 0x7f {
+			continue
+		}
+		if c == '\t' || c == '\n' || c == '\r' {
+			continue
+		}
+		return fmt.Errorf("%w: contains control characters", ErrInvalidPrompt)
+	}
+	for _, r := range prompt {
+		if osutil.IsLogInjectionRune(r) {
+			return fmt.Errorf("%w: contains unicode control characters", ErrInvalidPrompt)
+		}
+	}
+	return nil
+}
 
 // truncatedSuffix marks where truncateWithSuffix cut a string that exceeded
 // the rune budget. Centralised so any downstream byte-cap can compensate for
