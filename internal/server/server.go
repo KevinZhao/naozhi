@@ -904,31 +904,19 @@ func (s *Server) Start(ctx context.Context) error {
 	// dispatch / hub / project-api surfaces. docs/rfc/key-resolver.md
 	// Phase 4.
 	d := dispatch.NewDispatcher(dispatch.DispatcherConfig{
-		Router:        s.router,
-		Platforms:     s.platforms,
-		Agents:        s.agents,
-		AgentCommands: s.agentCommands,
-		Scheduler:     s.scheduler,
-		ProjectMgr:    s.projectMgr,
-		Resolver:      s.resolver,
-		Guard:         s.sessionGuard,
-		Queue:         s.msgQueue,
-		Dedup:         s.dedup,
-		AllowedRoot:   s.allowedRoot,
-		ClaudeDir:     s.claudeDir,
-		ReplyFooterFn: func(backendID string) string {
-			// session.Backend() is empty for legacy / pre-multi-backend
-			// sessions; fall back to the router's configured default
-			// backend. replyTagForBackend handles unknown ids by
-			// returning "" so dispatch will skip the footer rather than
-			// emit a garbled tag.
-			if backendID == "" {
-				backendID = s.router.DefaultBackend()
-			}
-			return replyTagForBackend(backendID)
-		},
-		SendFn:                s.sendWithBroadcast,
-		TakeoverFn:            s.tryAutoTakeover,
+		Router:                s.router,
+		Platforms:             s.platforms,
+		Agents:                s.agents,
+		AgentCommands:         s.agentCommands,
+		Scheduler:             s.scheduler,
+		ProjectMgr:            s.projectMgr,
+		Resolver:              s.resolver,
+		Guard:                 s.sessionGuard,
+		Queue:                 s.msgQueue,
+		Dedup:                 s.dedup,
+		AllowedRoot:           s.allowedRoot,
+		ClaudeDir:             s.claudeDir,
+		Capabilities:          dispatchCapabilities{s: s},
 		NoOutputTimeout:       s.noOutputTimeout,
 		TotalTimeout:          s.totalTimeout,
 		WatchdogNoOutputKills: &s.watchdogNoOutputKills,

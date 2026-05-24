@@ -107,13 +107,12 @@ type Dispatcher struct {
 	// callers don't supply a resolver the constructor fabricates a project-
 	// less fallback so call sites can dereference unconditionally.
 	// See docs/rfc/key-resolver.md Phase 2.
-	resolver      *session.KeyResolver
-	guard         SessionGuard // used by Dashboard/WS path
-	queue         *MessageQueue
-	dedup         *platform.Dedup
-	allowedRoot   string
-	claudeDir     string
-	replyFooterFn func(backendID string) string
+	resolver    *session.KeyResolver
+	guard       SessionGuard // used by Dashboard/WS path
+	queue       *MessageQueue
+	dedup       *platform.Dedup
+	allowedRoot string
+	claudeDir   string
 
 	noOutputTimeout       time.Duration
 	totalTimeout          time.Duration
@@ -123,43 +122,31 @@ type Dispatcher struct {
 	// Operational counters exposed via /health for triaging. Incremented
 	// atomically and never reset (monotonic since process start).
 	messageCount       atomic.Int64 // all non-slash-command IM messages accepted
-	replyErrorCount    atomic.Int64 // errors returned by sendFn (includes timeouts)
+	replyErrorCount    atomic.Int64 // errors returned by Capabilities.Send (includes timeouts)
 	sendFailCount      atomic.Int64 // user-visible reply failures (platform send errors)
 	lastReplySuccessNs atomic.Int64 // UnixNano of most recent successful user-visible reply; 0 until first success
 
-	// sendFn forwards a turn payload to the session router after guard /
-	// queue gating has succeeded. Production wires Server.sendWithBroadcast
-	// (server.go:814); tests inject closures that emit canned events.
+	// caps groups the host-supplied hooks (Send / Takeover / ReplyFooter)
+	// that Dispatcher needs to reach back into the surrounding Server.
+	// Always non-nil after NewDispatcher: callers either set
+	// DispatcherConfig.Capabilities directly or supply legacy *Fn closures
+	// (which the constructor wraps in a closureCapabilities adapter); when
+	// neither is provided, NoopCapabilities{} is installed so the hot path
+	// can call methods unconditionally.
 	//
 	// Wireup contract:
-	//   - Required (non-nil) before BuildHandler / sendAndReply runs. The
-	//     hot path dereferences this unconditionally.
-	//   - NewDispatcher does NOT install a noop fallback (unlike takeoverFn
-	//     below) because a missing send path is a constructor bug — silent
-	//     drop here would surface as "messages accepted but no reply" in
-	//     production, which is harder to triage than a nil-deref panic at
-	//     boot.
-	//   - Tests that exercise non-send code paths (e.g. dispatch_test.go
-	//     fakeGuard scenarios) MUST still install a stub SendFn — see the
-	//     R228-ARCH-14 docstring for the closure-vs-interface tradeoff.
-	sendFn func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
-
-	// takeoverFn is the optional auto-takeover hook invoked on the first
-	// message of every chat. Production wires Server.tryAutoTakeover
-	// (server.go:815). When unset the constructor installs a noop returning
-	// false so the dispatch hot path can call it unconditionally without
-	// nil-guards (see NewDispatcher below).
+	//   - Capabilities.Send is required for production. NoopCapabilities.Send
+	//     panics, mirroring the legacy "no fallback for SendFn" contract:
+	//     missing wireup surfaces as a constructor-time panic, not a silent
+	//     drop in production.
+	//   - Capabilities.Takeover defaults to false (no external session).
+	//   - Capabilities.ReplyFooter defaults to "" (no footer).
 	//
-	// R228-ARCH-14 tradeoff: the closure-pattern fields here are easy to
-	// miss in DispatcherConfig wireup, but lifting them to a 1-method
-	// interface (DispatcherDeps with Send/Takeover methods) would force
-	// every test seam to grow stub structs where today a function literal
-	// suffices. The risk is mitigated by:
-	//   1. NewDispatcher's noop fallback for takeoverFn (panic-safe);
-	//   2. sendFn deliberately having no fallback so missing wireup
-	//      surfaces as a constructor-time panic, not a silent drop;
-	//   3. dispatch_test.go covering both nil and stub paths.
-	takeoverFn func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
+	// See internal/dispatch/capabilities.go for the interface and the
+	// NoopCapabilities default. R243-ARCH-10 collapsed three closure
+	// fields (sendFn / takeoverFn / replyFooterFn) into this single
+	// interface to make wireup harder to forget.
+	caps Capabilities
 }
 
 // keyForChat returns the routed session key for the given chat coordinates
@@ -210,6 +197,20 @@ type DispatcherConfig struct {
 	Dedup       *platform.Dedup
 	AllowedRoot string
 	ClaudeDir   string
+
+	// Capabilities groups the host-supplied hooks (Send / Takeover /
+	// ReplyFooter) that Dispatcher needs to reach back into the surrounding
+	// Server. Preferred over the legacy SendFn / TakeoverFn / ReplyFooterFn
+	// closures below — when both are set, Capabilities wins.
+	//
+	// nil is allowed: NewDispatcher falls back to the legacy *Fn closures
+	// (wrapped in an internal closureCapabilities adapter) and finally to
+	// NoopCapabilities{} if those are nil too. NoopCapabilities.Send panics
+	// to mirror the legacy "no fallback" contract for the send path.
+	//
+	// Tracked under R243-ARCH-10. See capabilities.go for the interface.
+	Capabilities Capabilities
+
 	// ReplyFooterFn returns the per-session reply tag (e.g. "cc" / "kiro")
 	// given the session's backend ID. The IM reply path appends "\n\n— <tag>"
 	// to outbound messages so users can see which backend produced the reply.
@@ -218,6 +219,12 @@ type DispatcherConfig struct {
 	//
 	// nil means "no footer", same as the legacy ReplyFooter="" default.
 	// docs/rfc/multi-backend.md §7 (per-session ReplyTag).
+	//
+	// Deprecated: prefer DispatcherConfig.Capabilities. R243-ARCH-10 collapsed
+	// the three closure fields into Capabilities so wireup is harder to forget
+	// and future hooks add an interface method instead of a new closure +
+	// nil-fallback line. This field is still honoured for backward
+	// compatibility but new code should set Capabilities directly.
 	ReplyFooterFn func(backendID string) string
 
 	NoOutputTimeout       time.Duration
@@ -225,7 +232,15 @@ type DispatcherConfig struct {
 	WatchdogNoOutputKills *atomic.Int64
 	WatchdogTotalKills    *atomic.Int64
 
-	SendFn     func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+	// SendFn forwards a turn payload to the session router after guard /
+	// queue gating has succeeded. Production wires Server.sendWithBroadcast.
+	//
+	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn.
+	SendFn func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+	// TakeoverFn is the optional auto-takeover hook invoked on the first
+	// message of every chat. nil is treated as "return false".
+	//
+	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn.
 	TakeoverFn func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
 }
 
@@ -259,6 +274,27 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		}
 		resolver = session.NewKeyResolver(cfg.Agents, data)
 	}
+	// Resolve Capabilities precedence:
+	//   1. cfg.Capabilities wins when set (preferred path);
+	//   2. otherwise, if any legacy *Fn closure is non-nil, wrap them in a
+	//      closureCapabilities adapter (preserves the historical wireup so
+	//      existing test seams keep building);
+	//   3. otherwise, NoopCapabilities{} so the hot path always has a
+	//      non-nil receiver. NoopCapabilities.Send panics — mirroring the
+	//      legacy "no fallback for SendFn" contract — while Takeover and
+	//      ReplyFooter return their documented defaults (false / "").
+	caps := cfg.Capabilities
+	if caps == nil {
+		if cfg.SendFn != nil || cfg.TakeoverFn != nil || cfg.ReplyFooterFn != nil {
+			caps = closureCapabilities{
+				send:        cfg.SendFn,
+				takeover:    cfg.TakeoverFn,
+				replyFooter: cfg.ReplyFooterFn,
+			}
+		} else {
+			caps = NoopCapabilities{}
+		}
+	}
 	d := &Dispatcher{
 		router:                router,
 		platforms:             cfg.Platforms,
@@ -272,23 +308,16 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		dedup:                 cfg.Dedup,
 		allowedRoot:           cfg.AllowedRoot,
 		claudeDir:             cfg.ClaudeDir,
-		replyFooterFn:         cfg.ReplyFooterFn,
 		noOutputTimeout:       cfg.NoOutputTimeout,
 		totalTimeout:          cfg.TotalTimeout,
 		watchdogNoOutputKills: cfg.WatchdogNoOutputKills,
 		watchdogTotalKills:    cfg.WatchdogTotalKills,
-		sendFn:                cfg.SendFn,
-		takeoverFn:            cfg.TakeoverFn,
+		caps:                  caps,
 	}
-	// Headless / test wirings may leave TakeoverFn nil. The dispatch hot
-	// path calls takeoverFn unconditionally on first message, so install
-	// a noop fallback rather than scattering nil guards. (R227-CR-12)
-	if d.takeoverFn == nil {
-		d.takeoverFn = func(context.Context, string, string, session.AgentOpts) bool { return false }
-	}
-	// Same rationale for the watchdog kill counters: production wiring sets
-	// them, but tests routinely build a Dispatcher without these fields. The
-	// watchdog hot path calls .Add(1) unconditionally; nil here would panic.
+	// Headless / test wirings may also leave the watchdog kill counters
+	// unset. Production wiring sets them, but tests routinely build a
+	// Dispatcher without these fields. The watchdog hot path calls
+	// .Add(1) unconditionally; nil here would panic. (R227-CR-12)
 	if d.watchdogNoOutputKills == nil {
 		d.watchdogNoOutputKills = new(atomic.Int64)
 	}
@@ -296,7 +325,7 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		d.watchdogTotalKills = new(atomic.Int64)
 	}
 	// BuildHandler's hot path calls d.dedup.Seen(...) unconditionally. The
-	// takeoverFn / watchdog counters above already noop-fallback for headless
+	// caps / watchdog counters above already noop-fallback for headless
 	// and test wiring; the same convention applies here. Without this, a
 	// constructor missing cfg.Dedup would crash on the very first incoming
 	// message (nil-pointer deref inside Seen). Default capacity matches
@@ -672,7 +701,7 @@ func (d *Dispatcher) sendAndReply(
 	// to spawn a fresh one. Either way the caller behaviour is identical,
 	// so we discard explicitly rather than branch on it.
 	if isFirst {
-		_ = d.takeoverFn(ctx, session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID), key, opts)
+		_ = d.caps.Takeover(ctx, session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID), key, opts)
 	}
 
 	sess, sessStatus, err := d.router.GetOrCreate(ctx, key, opts)
@@ -733,7 +762,7 @@ func (d *Dispatcher) sendAndReply(
 	tracker := newIMEventTracker(ctx, p, msg.ChatID)
 	defer tracker.stop()
 
-	result, err := d.sendFn(ctx, key, sess, text, images, tracker.onEvent)
+	result, err := d.caps.Send(ctx, key, sess, text, images, tracker.onEvent)
 	if err != nil {
 		d.replyErrorCount.Add(1)
 		lg.Error("send to claude", "err", err)
@@ -794,14 +823,16 @@ func (d *Dispatcher) sendAndReply(
 	}
 	// Per-session ReplyFooter: when sess is non-nil we resolve the tag from
 	// sess.Backend(); when nil (cron edge case where the session has been
-	// pruned but the reply path still fires) the fn receives "" and the
-	// implementation falls back to the router default.
-	if d.replyFooterFn != nil {
+	// pruned but the reply path still fires) Capabilities.ReplyFooter
+	// receives "" and the implementation falls back to the router default.
+	// NoopCapabilities returns "" so an unwired host yields no footer (same
+	// as the legacy nil-closure behaviour).
+	{
 		var backendID string
 		if sess != nil {
 			backendID = sess.Backend()
 		}
-		if footer := d.replyFooterFn(backendID); footer != "" {
+		if footer := d.caps.ReplyFooter(backendID); footer != "" {
 			replyText += "\n\n— " + footer
 		}
 	}
