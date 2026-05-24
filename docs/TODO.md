@@ -255,7 +255,7 @@
 - [~] **R245-SEC-11 [BREAKING-LOCAL] — `internal/sysession/runner.go:147-150` BinPath 相对名 + PATH 时序竞态**: NewRunner 抓 r.env 后若 parent PATH 被并发 os.Setenv 改动则发生分叉。建议：NewRunner 用 exec.LookPath 在 r.env 的 PATH 下解析为绝对路径并固化到 BinPath。
 - [ ] **R245-SEC-13 [REPEAT-2] — dashboard_cron Prompt 全量回 SetEscapeHTML(false) 风险**: 同 R243-SEC 群。建议：静态测试断言 SetEscapeHTML(false) 仅用于 API JSON，不用于 HTML 模板。
 - [ ] **R245-SEC-14 [BREAKING-LOCAL] — `cmd/naozhi/service.go:47` SUDO_USER 未长度/字符校验**: argv 安全（无 shell），但攻击者可控 env 填长字串。建议：≤256 字节 + printable ASCII 校验。
-- [~] **R245-SEC-15 [REPEAT-2] — `internal/cli/wrapper.go:158` cliPath 来自 ExpandHome 未确认 IsAbs/regular file**: 建议：filepath.IsAbs 断言 + os.Lstat mode 校验（必须 regular + executable）。
+- [x] **R245-SEC-15 [REPEAT-2] — `internal/cli/wrapper.go:158` cliPath 来自 ExpandHome 未确认 IsAbs/regular file**: 建议：filepath.IsAbs 断言 + os.Lstat mode 校验（必须 regular + executable）。已修：抽 validateCLIPath helper 在 NewWrapper 调，warn-only（保 ENOENT 静默给未装 CLI 的 operator + 测试 fixture）。
 
 #### Go 语言（GO，6 项）
 
@@ -529,7 +529,7 @@
 - [ ] **R242-PERF-5 [REFACTOR]** `internal/cron/scheduler.go:478-543` `handleList` 每 job × `RecentRuns(5)` 50 次 sync.Map.Load + entry.mu.Lock；批量 ListAllJobsWithRecent。
 - [ ] **R242-PERF-6 [REFACTOR]** `internal/cron/scheduler.go:484` `handleList` 每 job × `CurrentRun` 50 次 sync.Map.Load；与 PERF-5 折叠批量快照。
 - [ ] **R242-PERF-7 [REPEAT-2]** `internal/server/dashboard_session.go:1390` `KnownSessionIDs` 每 1Hz tab 全量重建 jobs×200 map；30s TTL cache。同 review_perf_2026_04_20.md handleList Stat 缓存项。
-- [~] **R242-PERF-8 [REFACTOR]** `internal/cli/eventlog.go:982-1001` `AppendBatch` replay phase `sinkReady=false` 仍 allocate sinkCopy slice；早退跳过分配。
+- [x] **R242-PERF-8 [REFACTOR]** `internal/cli/eventlog.go:982-1001` `AppendBatch` replay phase `sinkReady=false` 仍 allocate sinkCopy slice；早退跳过分配。已修：captureForSink = sinkAttached && sinkReady.Load() 同步 gate alloc 与 in-loop append；invokePersistSink(nil) 保 replayInvokeTotal 诊断行为。
 - [ ] **R242-PERF-9 [REFACTOR]** `internal/cron/runstore.go:477-553` `diskListNewestFirst` before-cutoff pagination 无 cache；缓存 sorted items slice 在 recentCacheEntry。
 - [ ] **R242-PERF-10 [REFACTOR]** `internal/cron/runstore.go:652-736` `trimJobLocked` 不利用 cache 快路径；warm cache 时直接根据 cache 长度判断。
 - [ ] **R242-PERF-11 [REFACTOR]** `internal/cron/scheduler.go:547-549` `handleList` 重复 `time.Now().In(loc)`；用已捕获的 `now`。
