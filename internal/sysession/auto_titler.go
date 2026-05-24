@@ -1,8 +1,10 @@
 package sysession
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -274,14 +276,13 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 		a.mu.Unlock()
 	}
 
-	// Pick the top N by lastActive (most recent first) so a busy
-	// session doesn't get starved by a stale one with the same turn
-	// count.  Simple insertion sort — N is tiny (≤ 4×batchPerTick).
-	for i := 1; i < len(candidates); i++ {
-		for j := i; j > 0 && candidates[j].lastActive > candidates[j-1].lastActive; j-- {
-			candidates[j], candidates[j-1] = candidates[j-1], candidates[j]
-		}
-	}
+	// Pick the top N by lastActive (most recent first) so a busy session
+	// doesn't get starved by a stale one with the same turn count.
+	// R236-PERF-2: slices.SortFunc N log N + 内联高效；插入排序对 N=4×batchPerTick
+	// 没有优势，且代码可读性差。
+	slices.SortFunc(candidates, func(a, b candidate) int {
+		return cmp.Compare(b.lastActive, a.lastActive)
+	})
 	if len(candidates) > a.batchPerTick {
 		candidates = candidates[:a.batchPerTick]
 	}
