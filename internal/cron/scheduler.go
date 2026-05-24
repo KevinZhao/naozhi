@@ -2388,6 +2388,20 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// clock affects only the CURRENT run's recorded duration, not throughput.
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), jobTimeout)
 	defer sendCancel()
+	// R240-GO-4: emit an explicit signal when entering sendCtx after the
+	// spawn phase already consumed >50% of jobTimeout. The wall-clock
+	// doubling described above is intentional but historically silent;
+	// operators of 300s+ jobs need a structured event to drive runbook
+	// alerts. Counter + slog pair (mirrors CronExecutionSlowTotal +
+	// "cron execution slow" lower in this same function).
+	if spawnElapsed := time.Since(startedAt); spawnElapsed > jobTimeout/2 {
+		metrics.CronSendBudgetDoubledTotal.Add(1)
+		lg.Warn("cron send budget exceeds job/2",
+			"job_id", snap.jobID,
+			"spawn_elapsed_ms", spawnElapsed.Milliseconds(),
+			"job_timeout_ms", jobTimeout.Milliseconds(),
+			"send_budget_ms", jobTimeout.Milliseconds())
+	}
 	inflight.setPhase(PhaseSending)
 
 	// Watchdog: deadline-fired interrupt of the in-flight CLI turn. See
