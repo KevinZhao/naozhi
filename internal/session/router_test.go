@@ -1670,9 +1670,10 @@ func TestSpawningKeys_ObservableDuringSpawn(t *testing.T) {
 	// writes the marker, releases the lock for the Spawn() call.
 	r.mu.Lock()
 	if r.spawningKeys == nil {
-		r.spawningKeys = make(map[string]struct{})
+		r.spawningKeys = make(map[string]chan struct{})
 	}
-	r.spawningKeys["cron:abc"] = struct{}{}
+	doneCh := make(chan struct{})
+	r.spawningKeys["cron:abc"] = doneCh
 	r.mu.Unlock()
 
 	// Reconcile's view: lock, snapshot, unlock.
@@ -1683,8 +1684,10 @@ func TestSpawningKeys_ObservableDuringSpawn(t *testing.T) {
 		t.Fatal("reconcile should see spawningKeys marker and skip orphan check")
 	}
 
-	// After spawnSession's defer fires, the marker disappears.
+	// After spawnSession's defer fires, the marker disappears (close +
+	// delete mirror the production defer order in spawnSession).
 	r.mu.Lock()
+	close(doneCh)
 	delete(r.spawningKeys, "cron:abc")
 	r.mu.Unlock()
 

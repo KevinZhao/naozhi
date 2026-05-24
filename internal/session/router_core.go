@@ -156,13 +156,6 @@ const (
 	// + a read-lock check, no FS I/O.
 	shimReconnectGraceDelay = 5 * time.Second
 
-	// spawningKeyPollInterval is how long GetOrCreate yields before
-	// re-checking r.spawningKeys when another goroutine is mid-spawn for
-	// the same key. Kept tiny so perceived latency stays flat — a
-	// typical shim spawn takes 100-300 ms, so two-three polls cover the
-	// happy path without burning CPU.
-	spawningKeyPollInterval = 20 * time.Millisecond
-
 	// knownIDsSaveInterval throttles knownIDs fsync to limit disk I/O.
 	// A crash losing up to this much session-ID tracking costs one
 	// discovery rescan cycle. Shared between Cleanup and saveIfDirty.
@@ -293,8 +286,15 @@ type Router struct {
 	// have written its state file after we dropped r.mu for wrapper.Spawn() but
 	// before the new ManagedSession is installed, and without this set a
 	// concurrent reconcile would shut the fresh shim down as an orphan.
-	// 读写: core (init), lifecycle (spawnSession write), shim (reconnect read)
-	spawningKeys map[string]struct{}
+	//
+	// The map value is a per-spawn done-channel that spawnSession close()s
+	// from its defer. GetOrCreate's wait loop selects on this channel
+	// instead of polling, so the second caller wakes the instant the
+	// winner finishes (success or failure) rather than after the next
+	// 20ms tick. ReconnectShims still reads only the key set, so its
+	// presence check is unaffected by the value type. R243-ARCH-4.
+	// 读写: core (init), lifecycle (spawnSession write/close), shim (reconnect read)
+	spawningKeys map[string]chan struct{}
 
 	// 读写: core (init), cleanup (saveIfDirty)
 	storePath string
@@ -766,7 +766,7 @@ func NewRouter(cfg RouterConfig) *Router {
 		storePath:          cfg.StorePath,
 		knownIDs:           make(map[string]bool),
 		sessionIDToKey:     make(map[string]string),
-		spawningKeys:       make(map[string]struct{}),
+		spawningKeys:       make(map[string]chan struct{}),
 		noOutputTimeout:    cfg.NoOutputTimeout,
 		totalTimeout:       cfg.TotalTimeout,
 		eventLogDir:        cfg.EventLogDir,

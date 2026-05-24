@@ -289,16 +289,12 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	// Drop and retry while spawnSession for this key is in flight so the late
 	// callers just pick up the session the winner creates.
 	//
-	// Reuse a single timer across iterations. NewTimer+Stop inside the loop
-	// already fixes the time.After leak, but at N concurrent waiters each
-	// iteration still allocates a *time.Timer + registers a new runtime
-	// timer; Reset lets the runtime re-queue the same entry.
-	var waitT *time.Timer
-	defer func() {
-		if waitT != nil {
-			waitT.Stop()
-		}
-	}()
+	// R243-ARCH-4: wait via the per-spawn done-channel that spawnSession
+	// closes from its defer instead of a 20ms tick poll. Late callers wake
+	// the instant the winner finishes (success or failure) rather than after
+	// the next tick — typical shim spawn is 100-300ms, so removing the poll
+	// drops the late caller's wakeup latency from ~10-20ms (half a tick) to
+	// near-zero. Also frees one *time.Timer alloc per waiter.
 	for {
 		if s, ok := r.sessions[key]; ok {
 			if s.isAlive() {
@@ -313,32 +309,21 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 			}
 			return s, SessionResumed, nil
 		}
-		if _, inflight := r.spawningKeys[key]; !inflight {
+		ch, inflight := r.spawningKeys[key]
+		if !inflight {
 			break
 		}
 		// Someone else is spawning this key right now. Release the router
-		// mutex, yield briefly, and retry — the winner will either fill
-		// r.sessions[key] (we pick SessionExisting) or fail (we retry our
-		// own spawn). Keep the sleep tiny so perceived latency stays flat;
-		// a typical shim spawn takes 100-300 ms.
+		// mutex and wait for them to finish; spawnSession's defer closes
+		// `ch` after deleting the map entry, so the next loop iteration
+		// either picks up the freshly installed r.sessions[key]
+		// (SessionExisting / SessionResumed) or — on spawn failure — falls
+		// through to spawn its own.
 		r.mu.Unlock()
-		if waitT == nil {
-			waitT = time.NewTimer(spawningKeyPollInterval)
-		} else {
-			waitT.Reset(spawningKeyPollInterval)
-		}
 		select {
 		case <-ctx.Done():
-			// R222-GO-8: Go 1.23+ Stop drains the timer channel even when it
-			// reports false (timer already fired). The legacy
-			// `if !Stop() { <-C }` idiom would block forever on a drained
-			// channel, and previously could also wait the full next tick if
-			// Stop was called between fire and receive. go.mod requires
-			// go 1.26+, so a bare Stop is sufficient and pendingTimer-leak
-			// safe; if go.mod is ever lowered below 1.23, restore the drain.
-			waitT.Stop()
 			return nil, 0, ctx.Err()
-		case <-waitT.C:
+		case <-ch:
 		}
 		r.mu.Lock()
 	}
@@ -552,12 +537,23 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// started shim's state file for an orphan. Every return path below leaves
 	// r.mu unlocked, so the defer reacquires it to delete the marker. Lazy
 	// init tolerates test-only Routers constructed with &Router{...}.
+	//
+	// R243-ARCH-4: the map value is a per-spawn done-channel rather than a
+	// presence-only struct{}. close(ch) wakes any GetOrCreate caller parked
+	// on the same key in O(1) regardless of waiter count, replacing the
+	// previous 20ms tick poll. Order matters: close BEFORE delete so a
+	// caller dispatched between "lock acquired" and "delete returned"
+	// observes the closed channel from the still-present map entry, not a
+	// fresh nil from a re-arrived spawnSession that read the map after we
+	// finished. Both operations run under r.mu.
 	if r.spawningKeys == nil {
-		r.spawningKeys = make(map[string]struct{})
+		r.spawningKeys = make(map[string]chan struct{})
 	}
-	r.spawningKeys[key] = struct{}{}
+	doneCh := make(chan struct{})
+	r.spawningKeys[key] = doneCh
 	defer func() {
 		r.mu.Lock()
+		close(doneCh)
 		delete(r.spawningKeys, key)
 		r.mu.Unlock()
 	}()
