@@ -23,8 +23,15 @@ const DefaultIdxStride = 32
 // IdxWriter is a thin append-only writer on top of os.File. Each
 // AppendEntry call writes exactly IdxEntrySize bytes. No buffering —
 // callers batch at the Persister layer and Sync() on fsync boundaries.
+//
+// batchBuf is a reusable scratch buffer for AppendBatch's serialise
+// step. The Persister flush goroutine is the sole caller and runs
+// single-threaded, so reusing one buffer per writer is safe and
+// sheds 250ms-cadence GC pressure from short-lived `make([]byte, N)`
+// allocations. R237-PERF-11.
 type IdxWriter struct {
-	f *os.File
+	f        *os.File
+	batchBuf []byte
 }
 
 // NewIdxWriter opens idx at the given path in append mode. Callers
@@ -56,18 +63,39 @@ func (w *IdxWriter) Append(e schema.IdxEntry) error {
 }
 
 // AppendBatch writes many entries in one syscall. Used by rotate's
-// reindex path where we write ~1000 entries back-to-back. Saves 999
-// syscalls vs Append per-entry.
+// reindex path where we write ~1000 entries back-to-back, and by the
+// flush goroutine for the steady-state 200ms cadence (1-32 entries
+// per batch). Saves 999 syscalls vs Append per-entry.
+//
+// R237-PERF-11: the serialise scratch buffer lives on the writer so
+// 200ms-cadence flushes (28-896 B short-lived allocs) no longer
+// pressure the GC. Single-writer invariant lets us reuse safely.
+// The buffer can grow on a one-off rotate-reindex path; we shrink it
+// back if it has bloated far past the steady-state size to avoid
+// permanently retaining the peak capacity.
 func (w *IdxWriter) AppendBatch(entries []schema.IdxEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	buf := make([]byte, schema.IdxEntrySize*len(entries))
-	for i, e := range entries {
-		schema.MarshalIdxEntry(buf[i*schema.IdxEntrySize:], e)
+	need := schema.IdxEntrySize * len(entries)
+	if cap(w.batchBuf) < need {
+		w.batchBuf = make([]byte, need)
+	} else {
+		w.batchBuf = w.batchBuf[:need]
 	}
-	if _, err := w.f.Write(buf); err != nil {
+	for i, e := range entries {
+		schema.MarshalIdxEntry(w.batchBuf[i*schema.IdxEntrySize:], e)
+	}
+	if _, err := w.f.Write(w.batchBuf); err != nil {
 		return fmt.Errorf("write idx batch (%d entries): %w", len(entries), err)
+	}
+	// Shrink an over-grown buffer (e.g. after a 1000-entry rotate replay)
+	// back to a steady-state cap so a one-off bulk path can't pin a
+	// large array forever. 4 KiB ≈ 146 idx entries — comfortably above
+	// IdxStride*2 typical batches.
+	const idxBatchBufShrinkThreshold = 4 * 1024
+	if cap(w.batchBuf) > idxBatchBufShrinkThreshold {
+		w.batchBuf = nil
 	}
 	return nil
 }
