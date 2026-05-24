@@ -554,10 +554,12 @@ func (m *Manager) recordRun(rec *daemonRecord, runID string, trigger DaemonTrigg
 				"consecutive_failures", failures,
 				"last_error", err)
 		}
-	case DaemonErrorClassTimeout:
-		// Intentionally do nothing — see comment above.  Timeouts
-		// surface via the run record (state=DaemonRunTimedOut) without
-		// touching counters.
+	case DaemonErrorClassTimeout, DaemonErrorClassCanceled:
+		// Intentionally do nothing.  Timeouts surface via state=
+		// DaemonRunTimedOut for observability without touching counters
+		// (a slow LLM call shouldn't trip the breaker).  Canceled is
+		// shutdown / manager.Stop and counting it would mask real
+		// failures across restarts (R236-QA-05).
 	}
 
 	if cb := m.loadOnRunEnded(); cb != nil {

@@ -30,6 +30,13 @@ const (
 //   - Timeout errors are surfaced for observability but do NOT trip the
 //     breaker either — slow LLM calls happen and a transient run of
 //     timeouts shouldn't shut the daemon down for hours.
+//   - Canceled (DaemonRunCanceled, ctx.Canceled) are observability-only
+//     and do NOT trip the breaker — manager Stop / shutdown is the
+//     intended cause and counting it would mask real failures across
+//     restarts. Distinct from None so dashboard can differentiate
+//     "succeeded with state=canceled" (impossible by construction) from
+//     "ctx canceled mid-run" without consulting State; before R236-QA-05
+//     both classified as DaemonErrorClassNone.
 //   - Panic always trips the breaker after the same limit; a daemon
 //     that panics deterministically is broken.
 type DaemonErrorClass string
@@ -39,6 +46,7 @@ const (
 	DaemonErrorClassValidation DaemonErrorClass = "validation"
 	DaemonErrorClassUpstream   DaemonErrorClass = "upstream"
 	DaemonErrorClassTimeout    DaemonErrorClass = "timeout"
+	DaemonErrorClassCanceled   DaemonErrorClass = "canceled"
 	DaemonErrorClassPanic      DaemonErrorClass = "panic"
 )
 
@@ -149,7 +157,10 @@ func classifyError(err error, isPanic bool) (DaemonRunState, DaemonErrorClass) {
 		return DaemonRunTimedOut, DaemonErrorClassTimeout
 	}
 	if errors.Is(err, context.Canceled) {
-		return DaemonRunCanceled, DaemonErrorClassNone
+		// R236-QA-05: distinguish canceled from success (None) via dedicated
+		// enum so dashboard / WS subscribers can render "manager stopping"
+		// vs "ran clean" without consulting State.
+		return DaemonRunCanceled, DaemonErrorClassCanceled
 	}
 	// validation vs upstream is decided by the daemon (it embeds a
 	// sentinel error or wraps with errValidation).  Default to upstream
