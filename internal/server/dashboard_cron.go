@@ -235,6 +235,14 @@ type cronListResp struct {
 	NotifyDefault *cronNotifyDefaultView `json:"notify_default,omitempty"`
 }
 
+// cronCreateResp is the wire shape returned by POST /api/cron — just the
+// new job ID. R242-CR-10 promoted this from an inline map[string]any so
+// the JSON encoder can cache the reflect descriptor and the field name
+// is enforced at compile time.
+type cronCreateResp struct {
+	ID string `json:"id"`
+}
+
 // cronCurrentRunView is the inline running-run summary embedded in
 // cronJobView. Only set when the scheduler reports an in-flight run for
 // the corresponding job at list time.
@@ -695,7 +703,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job created via dashboard", "id", job.ID, "schedule", job.Schedule)
-	writeJSON(w, map[string]any{"id": job.ID})
+	writeJSON(w, cronCreateResp{ID: job.ID})
 }
 
 // DELETE /api/cron?id=xxx — delete a cron job by exact ID.
