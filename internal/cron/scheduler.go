@@ -1306,7 +1306,7 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 		return fmt.Errorf("%w: id %q", ErrJobNotPaused, j.ID)
 	}
 	if err := s.registerJob(j); err != nil {
-		return err
+		return fmt.Errorf("re-register cron: %w", err)
 	}
 	j.Paused = false
 	return nil
