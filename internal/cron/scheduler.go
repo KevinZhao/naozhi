@@ -1258,10 +1258,9 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
-	if perr != nil {
-		return nil, perr
-	}
-	save()
+	// R238-GO-3: deleteJobLocked already mutated in-memory state + router stub.
+	// The runStore must be cleaned even when persist fails, otherwise the
+	// runs/<jobID>/ subtree leaks on disk while the in-memory job is gone.
 	// P1 cron-run-history: drop the runs/<jobID>/ subtree alongside the
 	// job entry. Does NOT touch ~/.claude/projects/<cwd>/<session_id>.jsonl
 	// (RFC §2.3 / §4.4): those JSONL files are user-facing claude session
@@ -1270,6 +1269,10 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	if s.runStore != nil {
 		s.runStore.DeleteJob(j.ID)
 	}
+	if perr != nil {
+		return nil, perr
+	}
+	save()
 	return j, nil
 }
 
@@ -1609,13 +1612,16 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
+	// R238-GO-3: deleteJobLocked already mutated in-memory state + router stub.
+	// The runStore must be cleaned even when persist fails, otherwise the
+	// runs/<jobID>/ subtree leaks on disk while the in-memory job is gone.
+	if s.runStore != nil {
+		s.runStore.DeleteJob(j.ID)
+	}
 	if perr != nil {
 		return nil, perr
 	}
 	save()
-	if s.runStore != nil {
-		s.runStore.DeleteJob(j.ID)
-	}
 	return j, nil
 }
 
