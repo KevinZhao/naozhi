@@ -373,7 +373,14 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	// buffer caps single-line bytes. Together they enforce the
 	// design's three-tier size budget without ever calling
 	// os.ReadFile on the underlying file.
-	lr := io.LimitReader(f, maxTranscriptBytes)
+	//
+	// io.LimitReader always returns *io.LimitedReader; we keep the
+	// concrete type so the post-scan check below can read N directly
+	// without type assertion. Using f.Seek to detect cap-hit would be
+	// wrong: bufio.Scanner pre-fills a 256 KB buffer, so the underlying
+	// file offset can advance well past the LimitReader's logical
+	// budget even when the scanner only consumed the first line.
+	lr := &io.LimitedReader{R: f, N: maxTranscriptBytes}
 	scanner := bufio.NewScanner(lr)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxTranscriptLineBytes)
 
@@ -427,11 +434,12 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	}
 
 	// LimitReader hit means we read maxTranscriptBytes worth without
-	// seeing EOF. Mark truncated too.
-	if pos, sErr := f.Seek(0, io.SeekCurrent); sErr != nil {
-		slog.Warn("cron transcript: seek failed; assuming truncated", "path", resolved, "err", sErr)
-		truncated = true
-	} else if pos >= maxTranscriptBytes {
+	// seeing EOF. Mark truncated too. Read lr.N directly: bufio's
+	// 256 KB read-ahead can advance the underlying *os.File offset
+	// past maxTranscriptBytes even on a small file, so f.Seek would
+	// false-positive truncation. lr.N tracks the *logical* remaining
+	// budget the LimitedReader will hand out.
+	if lr.N <= 0 {
 		truncated = true
 	}
 
