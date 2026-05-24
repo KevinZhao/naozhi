@@ -519,18 +519,35 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		// Re-check allowedRoot at execute time to close the symlink-swap
 		// race: validateWorkspace at creation resolved symlinks once, but
 		// the target could have been retargeted since.
-		if s.allowedRoot != "" && !workDirUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved) {
-			lg.Warn("cron job work_dir outside allowed root; aborting run",
-				"work_dir", snap.workDir)
-			s.finishRun(finishArgs{
-				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-				state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
-				errMsg: "work_dir outside allowed root",
-				prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-			})
-			return
+		//
+		// R246-GO-12: when allowedRoot is set, hand the symlink-resolved
+		// path to the cli wrapper rather than the raw snap.workDir. The
+		// resolved path was just validated by EvalSymlinks; using it here
+		// makes the validation view match the open view and forecloses a
+		// final TOCTOU window between this check and the CLI's own open.
+		// When allowedRoot is unset (sandbox disabled), keep the historical
+		// filepath.Clean(snap.workDir) — workDirResolveUnderRoot's empty-
+		// root short-circuit deliberately returns "" so we'd lose the
+		// caller's workspace string.
+		var workDirForCLI string
+		if s.allowedRoot != "" {
+			resolved, ok := workDirResolveUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved)
+			if !ok {
+				lg.Warn("cron job work_dir outside allowed root; aborting run",
+					"work_dir", snap.workDir)
+				s.finishRun(finishArgs{
+					job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+					state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
+					errMsg: "work_dir outside allowed root",
+					prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+				})
+				return
+			}
+			workDirForCLI = resolved
+		} else {
+			workDirForCLI = filepath.Clean(snap.workDir)
 		}
-		opts.Workspace = filepath.Clean(snap.workDir)
+		opts.Workspace = workDirForCLI
 	}
 	key := session.CronKey(snap.jobID)
 

@@ -352,17 +352,34 @@ func workDirReachable(workDir string) bool {
 // security contract while still avoiding most of the syscall cost of a
 // cold re-resolution on the happy path.
 func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
+	_, ok := workDirResolveUnderRoot(workDir, allowedRoot, allowedRootResolved)
+	return ok
+}
+
+// workDirResolveUnderRoot is the variant of workDirUnderRoot that also
+// returns the symlink-resolved workDir on success. R246-GO-12: callers
+// that subsequently hand workDir to a CLI (cli wrapper / claude spawn)
+// should use the resolved path so the open-time view matches the
+// validation-time view. Without this the workDir we just validated may
+// resolve differently when the CLI re-runs EvalSymlinks (TOCTOU window),
+// re-introducing the symlink-swap escape that EvalSymlinks-on-validate
+// was meant to close.
+//
+// Returned path is filepath.Clean'd (EvalSymlinks already does that).
+// On the empty-workDir / empty-root short-circuit returns ("", true)
+// so the caller leaves opts.Workspace untouched (router default applies).
+func workDirResolveUnderRoot(workDir, allowedRoot, allowedRootResolved string) (string, bool) {
 	if workDir == "" || allowedRoot == "" {
-		return true // empty WorkDir uses router default; empty root = disabled
+		return "", true // empty WorkDir uses router default; empty root = disabled
 	}
 	if !filepath.IsAbs(workDir) {
-		return false
+		return "", false
 	}
 	resolved, err := filepath.EvalSymlinks(workDir)
 	if err != nil {
 		// Missing directory / permission denied — refuse to execute rather
 		// than silently re-create the sandbox escape.
-		return false
+		return "", false
 	}
 	rootResolved, err := filepath.EvalSymlinks(allowedRoot)
 	if err != nil {
@@ -376,9 +393,12 @@ func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 		}
 	}
 	if resolved == rootResolved {
-		return true
+		return resolved, true
 	}
-	return strings.HasPrefix(resolved, rootResolved+string(filepath.Separator))
+	if strings.HasPrefix(resolved, rootResolved+string(filepath.Separator)) {
+		return resolved, true
+	}
+	return "", false
 }
 
 // NewScheduler creates a scheduler. Call Start() to begin.
