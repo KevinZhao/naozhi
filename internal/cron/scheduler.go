@@ -1562,6 +1562,7 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 		// flag transition stays consistent with PauseJob/ResumeJob/UpdateJob
 		// paths. R226-CR-16.
 		if err := s.resumeJobLocked(j); err != nil {
+			j.Prompt = "" // rollback: Prompt was empty before this call
 			s.mu.Unlock()
 			return err
 		}
