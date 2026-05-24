@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -253,8 +254,11 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 		"--key", key,
 		"--socket", socketPath,
 		"--state-file", stateFile,
-		"--buffer-size", fmt.Sprintf("%d", m.bufferSize),
-		"--max-buffer-bytes", fmt.Sprintf("%d", m.maxBufBytes),
+		// R246-CR-007: integer→string via strconv avoids the fmt reflect
+		// path in StartShimWithBackend (called once per shim spawn).
+		// bufferSize is int; maxBufBytes is int64 (see fields above).
+		"--buffer-size", strconv.Itoa(m.bufferSize),
+		"--max-buffer-bytes", strconv.FormatInt(m.maxBufBytes, 10),
 		"--idle-timeout", m.idleTimeout.String(),
 		"--watchdog-timeout", m.watchdogTimeout.String(),
 		"--cli-path", cliPath,
