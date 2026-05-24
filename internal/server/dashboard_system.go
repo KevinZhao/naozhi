@@ -15,7 +15,6 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -28,37 +27,24 @@ import (
 // an empty array (not 404) when sysession is disabled so dashboard JS
 // can rely on the response shape.
 //
-// Encoding goes through a bytes.Buffer first so a marshal error produces
-// a clean 500 rather than the ResponseWriter footgun where Encode has
-// already streamed bytes (header sent, status frozen at 200) before the
-// error path tries to upgrade the response.
-//
-// R246-SEC-3 [BREAKING-LOCAL]: route success bodies through
-// writeJSONBytes so the X-Content-Type-Options / Cache-Control headers
-// match the rest of /api/*.  Without nosniff a legacy browser MIME-
-// sniffing path could re-interpret the JSON as HTML; without
-// no-store a shared proxy would cache another operator's daemon
-// snapshot. The breaking surface is purely additive (extra response
-// headers); same wire body.
+// R246-SEC-3 [BREAKING-LOCAL]: routes the response through writeJSON so
+// every reply (empty + populated) carries the same X-Content-Type-Options
+// nosniff + Cache-Control no-store headers the rest of /api/* uses. The
+// previous direct w.Write([]byte("[]")) bypassed both, leaving the empty
+// path subject to MIME-sniffing on legacy browsers and to shared-proxy
+// caching of authenticated state.
 func (s *Server) handleSystemDaemons(w http.ResponseWriter, _ *http.Request) {
 	if s.sysessionMgr == nil {
 		// Empty array preserves the "GET always returns JSON array"
 		// contract for the dashboard polling loop.
-		writeJSONBytes(w, []byte("[]"))
+		writeJSON(w, []sysession.DaemonStatus{})
 		return
 	}
 	statuses := s.sysessionMgr.Inspector()
 	if statuses == nil {
 		statuses = []sysession.DaemonStatus{}
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(statuses); err != nil {
-		http.Error(w, "encode daemon list", http.StatusInternalServerError)
-		return
-	}
-	writeJSONBytes(w, buf.Bytes())
+	writeJSON(w, statuses)
 }
 
 // clearLabelOriginRequest is the POST body for /api/system/labels/clear-origin.
@@ -105,10 +91,11 @@ func (s *Server) handleClearLabelOrigin(w http.ResponseWriter, r *http.Request) 
 		http.NotFound(w, r)
 		return
 	}
-	// R246-SEC-3 [BREAKING-LOCAL]: writeJSONBytes routes through the same
-	// header set (nosniff + no-store) used by every other /api/* mutation
-	// success path. The body shape `{"ok":true}` differs from writeOK's
-	// `{"status":"ok"}` so we keep the bytes literal here rather than
-	// switching to writeOK, which would change the wire contract.
-	writeJSONBytes(w, []byte(`{"ok":true}`))
+	// R246-SEC-3 [BREAKING-LOCAL]: writeOK matches the {"status":"ok"} body
+	// every other dashboard mutation endpoint emits AND adds the
+	// X-Content-Type-Options + Cache-Control headers the bare w.Write
+	// previously omitted. The wire-shape change ({"ok":true} → {"status":"ok"})
+	// matches the rest of /api/* and the dashboard JS doesn't read the body
+	// on success today, so this is a clean alignment.
+	writeOK(w)
 }

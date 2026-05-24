@@ -265,7 +265,7 @@
 
 #### 安全（SEC，12 项）
 
-- [~] **R246-SEC-3 [P2] [BREAKING-LOCAL] — `internal/server/dashboard_system.go:35-56` handleSystemDaemons 绕过 writeJSON**: 行 39-41 / 54-55 直接 w.Write([]byte("[]"))，缺 X-Content-Type-Options / Cache-Control。同文件 handleClearLabelOrigin 行 102-103 success 路径同症。建议：替换为 writeJSON / writeOK。
+- [x] **R246-SEC-3 [P2] [BREAKING-LOCAL] — `internal/server/dashboard_system.go:35-56` handleSystemDaemons 绕过 writeJSON**: 行 39-41 / 54-55 直接 w.Write([]byte("[]"))，缺 X-Content-Type-Options / Cache-Control。同文件 handleClearLabelOrigin 行 102-103 success 路径同症。建议：替换为 writeJSON / writeOK。 → handleSystemDaemons 两条返回路径都改走 writeJSON([]DaemonStatus{}/statuses)，handleClearLabelOrigin success 改走 writeOK；wire shape `{"ok":true}` → `{"status":"ok"}` 与 /api/* 其他 mutation 端点对齐；既有测试 `[]` body assertion 通过 strings.TrimSpace 兼容 writeJSON 末尾 `\n`。
 - [~] **R246-SEC-4 [P2] [REPEAT-3] — `internal/cli/protocol_claude.go:77-81` --resume argv 校验失败静默丢弃**: resumeIDRe 不匹配时不报错，沉默地不传 --resume。建议：spawn 失败前 slog.Warn 至少 1 次便于审计；或返回 error。
 - [ ] **R246-SEC-5 [P2] [BREAKING-LOCAL] — `internal/server/dashboard_session.go:1052-1061` resume key 仅 64-bit 熵**: var rb [8]byte 与同 codebase 其他 ≥128 bit 不一致。建议：8B → 16B 与 anonCookie/upload 对齐。
 - [ ] **R246-SEC-6 [P2] [BREAKING-LOCAL] — `internal/metrics/labeled.go:220-228` clipLabelSegment 未过滤 `|`**: labelKey 用 `|` 串接，segment 自带 `|` 时撞 key。建议：strings.ReplaceAll(v, "|", "_") 或拒绝。
