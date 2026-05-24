@@ -344,12 +344,21 @@ func isValidScratchID(id string) bool {
 	return true
 }
 
-// shortPromoteSuffix returns an 8-char lowercase hex string for use as the
-// "aside-<x>" tail on promoted session keys. 32 bits of entropy is enough
-// because collisions only need to be avoided within a single chat's agent
-// namespace (RenameSession rejects collisions anyway).
+// shortPromoteSuffix returns a 16-char lowercase hex string for use as the
+// "aside-<x>" tail on promoted session keys. R247-SEC-9 [BREAKING-LOCAL]:
+// raised from 4 → 8 random bytes (32 → 64 bits of entropy) so the suffix
+// matches the entropy budget of anonCookieName / upload-id (16 bytes / 128
+// bits). The original 32-bit width's birthday-bound (~2^16) was already
+// "fine within a single chat's namespace" but inconsistent with the rest of
+// the codebase's short-id generation; aligning here removes a per-call-site
+// audit burden and makes future security review uniform.
+//
+// BREAKING-LOCAL footprint: the returned string changes length 8 → 16. The
+// only caller is internal (RenameSession ➝ promoteScratch) so no external
+// API or persisted format is affected; the suffix is generated and stored
+// in-process per session and never exposed in stable URLs or storage keys.
 func shortPromoteSuffix() (string, error) {
-	var buf [4]byte
+	var buf [8]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", err
 	}

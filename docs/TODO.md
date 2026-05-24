@@ -147,7 +147,7 @@
 - [ ] **R247-SEC-6 — transcribe ffmpeg 无 wall-clock 上限（P2）** [BREAKING-LOCAL]: `internal/transcribe/convert.go:104` 仅靠外层 ctx；构造 audio 可长时间占 transcribeSemCap=3 槽。方案：argv 加 `-t 600` 解码上限。
 - [ ] **R247-SEC-7 — handleConfigPut 缺 per-IP rate limit（P2）** [REFACTOR]: `internal/server/project_api.go:159` 写盘 + WS 广播无频次墙。方案：加 ipLimiter 或 projectMgr.UpdateConfig 5/sec gate。
 - [ ] **R247-SEC-8 — uploadOwner crypto/rand 失败回退 clientIP（P2）** [REPEAT-2]: `internal/server/dashboard_send.go:140-148` 与 R246-SEC-8 同根因不同 site。方案：失败返 503。
-- [ ] **R247-SEC-9 — shortPromoteSuffix 32-bit 熵（P2）** [BREAKING-LOCAL]: `internal/server/dashboard_scratch.go:351` birthday-bound ~2^16；与 anonCookie/upload 16 byte 不齐。方案：8 字节（64-bit）。
+- [~] **R247-SEC-9 — shortPromoteSuffix 32-bit 熵（P2）** [BREAKING-LOCAL]: `internal/server/dashboard_scratch.go:351` birthday-bound ~2^16；与 anonCookie/upload 16 byte 不齐。方案：8 字节（64-bit）。
 - [ ] **R247-SEC-10 — isSensitiveDownloadName 不卡父目录段（P2）** [BREAKING-LOCAL]: `internal/server/project_files.go:1212` `secrets/db.yaml` `.ssh/foo` 不命中 basename。方案：sensitivePathSegments allowlist。
 - [ ] **R247-SEC-11 — parseAttachmentFile 用 declared Content-Type 决定 size cap（P2）** [REPEAT-2]: `internal/server/dashboard_send.go:172` 与 R246-SEC-9 同根因不同 fork；io.ReadAll 在 magic-byte 复核前已 buffer 32MB。方案：magic-byte 优先读 head 决定 cap。
 - [ ] **R247-SEC-12 — eventlog persister MkdirAll 0700 不修复 existing dir mode（P2）** [REFACTOR]: `internal/eventlog/persist/persister.go:202` 攻击者预创建 0755/0777 父目录可绕过 0700 contract。方案：MkdirAll 后 os.Chmod 校正或 Lstat 检查 mode != 0700 拒启。
