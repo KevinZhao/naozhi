@@ -501,13 +501,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// reading them without s.mu is safe. If a future SetAgents API is
 	// introduced both reads must move under s.mu.
 	agentID, cleanText := session.ResolveAgent(snap.prompt, s.agentCommands)
-	opts := s.agents[agentID]
-	// R228-GO-P3-8: clip ExtraArgs to its own length so any subsequent append
-	// downstream allocates a fresh backing array instead of mutating the
-	// shared map value. Mirrors session/routing.go's slices.Clone defence.
-	if len(opts.ExtraArgs) > 0 {
-		opts.ExtraArgs = opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)]
-	}
+	opts := cloneAgentOpts(s.agents[agentID])
 	opts.Exempt = true // cron sessions must not count toward maxProcs or evict user sessions
 	// Sprint 6c (docs/rfc/multi-backend.md §9): per-job backend override.
 	// Empty snap.backend leaves opts.Backend untouched ("" already routes
@@ -742,6 +736,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 //
 // 用 math/rand/v2（per-goroutine 安全且无全局锁），安全性不敏感：
 // 这里的随机只影响启动时刻分布，不是密码学用途。
+//
+// R246-GO-22: NewTimer/defer Stop 在每次 tick 都分配 *time.Timer，
+// 当前规模（~100 timer/min @ 100 jobs * 1Hz）成本可忽略，无需优化。
+// 未来若 job 数突破 ~5000/min（≈ 80 alloc/s）再考虑 sync.Pool[*time.Timer]
+// 或退化到 runtime.timeSleep 直接路径；提前优化只会让控制流更晦涩。
+// time.After(d) 同样会 alloc *Timer 但不能被 Stop()，ctx 取消时会泄漏到
+// 触发点为止，不适合此处。
 func applyJitter(ctx context.Context, schedule string, jitterMax time.Duration) {
 	if jitterMax <= 0 {
 		return
@@ -765,4 +766,27 @@ func applyJitter(ctx context.Context, schedule string, jitterMax time.Duration) 
 	case <-t.C:
 	case <-ctx.Done():
 	}
+}
+
+// cloneAgentOpts returns a shallow copy of opts with all reference-typed
+// fields (slices / maps) defensively cloned so downstream `append` /
+// in-place writes cannot mutate the entry stored in Scheduler.agents.
+//
+// R246-GO-17 / R228-GO-P3-8: previous code only clipped ExtraArgs.
+// Today AgentOpts only carries one slice field (ExtraArgs) — plus
+// strings/bool — so clipping was sufficient. This helper centralises the
+// clone so any future field added to session.AgentOpts (e.g. an Env map
+// or HookConfigs slice) gets defensive copy automatically rather than
+// leaking shared state into the per-run mutated copy. Keep this pure /
+// allocation-light: it sits on the cron run hot path.
+func cloneAgentOpts(opts session.AgentOpts) session.AgentOpts {
+	if len(opts.ExtraArgs) > 0 {
+		// Slice-clone (full copy) rather than three-index clip because the
+		// caller may overwrite individual indices, not just append. Cost
+		// dominated by the typical 0–3 args; negligible vs spawn syscalls.
+		out := make([]string, len(opts.ExtraArgs))
+		copy(out, opts.ExtraArgs)
+		opts.ExtraArgs = out
+	}
+	return opts
 }

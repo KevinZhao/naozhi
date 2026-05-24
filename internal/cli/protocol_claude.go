@@ -74,10 +74,30 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
-	if opts.ResumeID != "" && resumeIDRe.MatchString(opts.ResumeID) {
-		// Silently drop malformed IDs rather than erroring: the caller may
-		// have passed a user-facing label; we still want a fresh session.
-		args = append(args, "--resume", opts.ResumeID)
+	if opts.ResumeID != "" {
+		if resumeIDRe.MatchString(opts.ResumeID) {
+			args = append(args, "--resume", opts.ResumeID)
+		} else {
+			// Drop malformed IDs rather than erroring: the caller may
+			// have passed a user-facing label and we still want a fresh
+			// session. Log at Warn so audit / forensic review can catch
+			// argv-injection probes (e.g. ResumeID starting with `-`)
+			// instead of silently sliding through. R246-SEC-4 (REPEAT-3
+			// with R232-SEC-12 / R245 round): the original "silent drop"
+			// behaviour kept getting flagged for lack of an audit trail.
+			//
+			// Log only the length + a 16-rune prefix so an attacker can't
+			// pivot the warning into a log-flooding amplifier (resume IDs
+			// are bounded by SpawnOptions but the warn line shouldn't pin
+			// arbitrarily-large strings into operator log retention).
+			preview := opts.ResumeID
+			if len(preview) > 16 {
+				preview = preview[:16]
+			}
+			slog.Warn("cli: --resume rejected by argv validator, spawning fresh session",
+				"len", len(opts.ResumeID),
+				"prefix", preview)
+		}
 	}
 	args = append(args, capExtraArgsBytes(opts.ExtraArgs)...)
 	return args

@@ -380,11 +380,14 @@ func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 // defaults and clamps oversized values. R232-ARCH-14: extracted from
 // NewScheduler so callers (especially tests that build SchedulerConfig
 // directly) can see the full default set in one place rather than tracing
-// through the constructor body. Returns the same struct by value so the
-// caller can decide whether to use the resolved or original config.
+// through the constructor body.
 //
 // Idempotent — calling it on an already-defaulted config is a no-op.
-func (cfg SchedulerConfig) applyDefaults() SchedulerConfig {
+//
+// R246-GO-21: pointer receiver mutates in place to avoid copying ~280 bytes
+// of SchedulerConfig on every call. Callers that need to preserve the
+// original should copy before invoking.
+func (cfg *SchedulerConfig) applyDefaults() {
 	if cfg.MaxJobs <= 0 {
 		cfg.MaxJobs = defaultMaxJobs
 	}
@@ -402,7 +405,6 @@ func (cfg SchedulerConfig) applyDefaults() SchedulerConfig {
 	if cfg.Location == nil {
 		cfg.Location = time.Local
 	}
-	return cfg
 }
 
 func NewScheduler(cfg SchedulerConfig) *Scheduler {
@@ -410,7 +412,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	if before > maxJobsHardCap {
 		slog.Warn("cron max_jobs exceeds hard cap, clamping", "requested", before, "cap", maxJobsHardCap)
 	}
-	cfg = cfg.applyDefaults()
+	cfg.applyDefaults()
 	maxPerChat := cfg.MaxJobsPerChat
 	parent := cfg.ParentCtx
 	if parent == nil {

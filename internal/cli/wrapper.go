@@ -119,6 +119,18 @@ func newWrapperCommon(cliPath string, proto Protocol, backend string) *Wrapper {
 		cliPath = detectCLI(backend)
 	}
 	cliPath = osutil.ExpandHome(cliPath)
+	// R245-SEC-15 (REPEAT-2 with R236 / R241 round): defense-in-depth
+	// argv hygiene check. cliPath is fed straight to exec.Command so a
+	// relative path or special-file (FIFO / device) cliPath would be a
+	// silent argv-injection / environment-confusion risk if config
+	// validation upstream ever regresses. We log + carry on rather than
+	// fail-fast: the empty-binary-yet-installable case (operator runs
+	// naozhi before installing the CLI) and the test-fixture case (a
+	// fakeBinary path that doesn't exist yet) both rely on construction
+	// succeeding even when the file isn't there. detectVersion below
+	// already handles missing files gracefully (returns ""), so the
+	// spawn-time error is what surfaces operator-visible.
+	validateCLIPath(cliPath)
 	id := normalizeBackendID(backend)
 	// R225-CR-9: surface unrecognised backend ids early. normalizeBackendID
 	// passes through anything that is not empty/"claude" verbatim, so an
@@ -188,6 +200,58 @@ func normalizeBackendID(backend string) string {
 		return "claude"
 	default:
 		return backend
+	}
+}
+
+// validateCLIPath emits a Warn for any cliPath that fails defense-in-depth
+// argv hygiene (non-absolute path, or non-regular / non-executable when
+// the file exists). Empty-path and ENOENT are intentionally NOT warnings:
+// the operator may not have installed the CLI yet, and the spawn-time
+// error is what surfaces those cases. R245-SEC-15.
+//
+// Why warn-only: NewWrapper is invoked at process startup before any IM
+// channel can deliver a request, and the existing detectVersion path
+// already swallows missing-file errors. Failing here would block startup
+// for legitimate test fixtures and uninstalled-CLI deployments. The
+// security value is in the audit trail, not in fail-fast.
+func validateCLIPath(cliPath string) {
+	if cliPath == "" {
+		return
+	}
+	if !filepath.IsAbs(cliPath) {
+		slog.Warn("cli: cliPath is not absolute; argv hygiene risk",
+			"path", osutil.SanitizeForLog(cliPath, 256))
+		return
+	}
+	fi, err := os.Lstat(cliPath)
+	if err != nil {
+		// ENOENT is fine (operator hasn't installed yet); other errors
+		// are real surface to operators — symlink loops, permission
+		// denied on the directory, etc.
+		if !os.IsNotExist(err) {
+			slog.Warn("cli: cliPath Lstat failed",
+				"path", osutil.SanitizeForLog(cliPath, 256),
+				"err", err)
+		}
+		return
+	}
+	mode := fi.Mode()
+	// Regular file or symlink (which we'd resolve at exec time).
+	// Reject FIFOs, devices, sockets — argv-injection vectors when the
+	// kernel re-interprets the file type.
+	if !mode.IsRegular() && mode&os.ModeSymlink == 0 {
+		slog.Warn("cli: cliPath is not a regular file or symlink",
+			"path", osutil.SanitizeForLog(cliPath, 256),
+			"mode", mode.String())
+		return
+	}
+	// Executable bit on at least one of user/group/other. Symlinks
+	// don't carry the bit reliably, so skip the check for those —
+	// exec.Command will surface the error if the target isn't exec.
+	if mode.IsRegular() && mode.Perm()&0o111 == 0 {
+		slog.Warn("cli: cliPath has no executable bit set",
+			"path", osutil.SanitizeForLog(cliPath, 256),
+			"mode", mode.String())
 	}
 }
 
