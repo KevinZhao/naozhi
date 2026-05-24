@@ -1273,16 +1273,25 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 
 // DeleteJobByID removes a job by exact ID (unscoped, for dashboard use).
 func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
-	s.mu.Lock()
-	j, ok := s.jobs[id]
-	if !ok {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
-	}
-	s.deleteJobLocked(j)
-	save, perr := s.persistJobsLocked()
-	s.mu.Unlock()
+	var save func()
+	var j *Job
+	var perr error
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		var ok bool
+		j, ok = s.jobs[id]
+		if !ok {
+			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
+			return
+		}
+		s.deleteJobLocked(j)
+		save, perr = s.persistJobsLocked()
+	}()
 
+	if j == nil {
+		return nil, perr
+	}
 	// R238-GO-3: deleteJobLocked already mutated in-memory state + router stub.
 	// The runStore must be cleaned even when persist fails, otherwise the
 	// runs/<jobID>/ subtree leaks on disk while the in-memory job is gone.
@@ -1303,19 +1312,29 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 
 // PauseJobByID pauses a job by exact ID (unscoped, for dashboard use).
 func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
-	s.mu.Lock()
-	j, ok := s.jobs[id]
-	if !ok {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
-	}
-	if err := s.pauseJobLocked(j); err != nil {
-		s.mu.Unlock()
-		return nil, err
-	}
-	save, perr := s.persistJobsLocked()
-	s.mu.Unlock()
+	var save func()
+	var j *Job
+	var perr error
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		var ok bool
+		j, ok = s.jobs[id]
+		if !ok {
+			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
+			return
+		}
+		if err := s.pauseJobLocked(j); err != nil {
+			perr = err
+			j = nil
+			return
+		}
+		save, perr = s.persistJobsLocked()
+	}()
 
+	if j == nil {
+		return nil, perr
+	}
 	if perr != nil {
 		return nil, perr
 	}
@@ -1325,19 +1344,29 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 
 // ResumeJobByID resumes a paused job by exact ID (unscoped, for dashboard use).
 func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
-	s.mu.Lock()
-	j, ok := s.jobs[id]
-	if !ok {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
-	}
-	if err := s.resumeJobLocked(j); err != nil {
-		s.mu.Unlock()
-		return nil, err
-	}
-	save, perr := s.persistJobsLocked()
-	s.mu.Unlock()
+	var save func()
+	var j *Job
+	var perr error
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		var ok bool
+		j, ok = s.jobs[id]
+		if !ok {
+			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
+			return
+		}
+		if err := s.resumeJobLocked(j); err != nil {
+			perr = err
+			j = nil
+			return
+		}
+		save, perr = s.persistJobsLocked()
+	}()
 
+	if j == nil {
+		return nil, perr
+	}
 	if perr != nil {
 		return nil, perr
 	}
