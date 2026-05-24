@@ -59,6 +59,15 @@ type Config struct {
 	//   }
 	//   // poke ch to drive runOnce
 	NewTicker tickerFactory
+
+	// OnHardFail is invoked from Stop when stopCtx expires before
+	// daemons drain. Defaults to func(code int) { osExit(code) }.
+	// Embedders that wrap sysession in a larger process (tests,
+	// future supervisor that hosts cron + sysession + server in one
+	// binary) can override this to shut down cleanly without taking
+	// the whole process down. Signature mirrors os.Exit so the
+	// default is a one-line wrapper. R240-ARCH-22.
+	OnHardFail func(code int)
 }
 
 // DaemonRuntimeConfig is the common-shape per-daemon runtime knobs
@@ -188,6 +197,13 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 	if cfg.TickTimeout <= 0 {
 		cfg.TickTimeout = defaultTickTimeout
+	}
+	// R240-ARCH-22: caller-overridable hard-fail hook. Default routes
+	// through the package-level osExit var (still test-injectable for
+	// the existing osExit-swap test pattern), but embedders can supply
+	// their own without touching package globals.
+	if cfg.OnHardFail == nil {
+		cfg.OnHardFail = func(code int) { osExit(code) }
 	}
 
 	m := &Manager{
@@ -350,7 +366,11 @@ func (m *Manager) Stop(stopCtx context.Context) {
 		case <-stopCtx.Done():
 			slog.Error("sysession: Stop deadline exceeded; daemons did not honour ctx — this is a daemon bug, not a transient error",
 				"hint", "force-exit so leaking goroutines don't write to a torn-down router")
-			osExit(2)
+			// R240-ARCH-22: dispatch through the configurable hook so
+			// embedders aren't forced to swap a package-level var to
+			// avoid taking the host process down. Default hook still
+			// calls osExit(2) — semantics unchanged for naozhi binary.
+			m.cfg.OnHardFail(2)
 		}
 	})
 }

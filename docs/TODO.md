@@ -281,7 +281,7 @@
 - [ ] **R240-ARCH-19 — `internal/server/wshub.go:202` wiredLinkers map 用 *cli.SubagentLinker 具体指针 [REPEAT-N，与 R239-ARCH-I 同根因]**。
 - [ ] **R240-ARCH-20 — `internal/cli/backend/profile.go:22` cli/backend 反向依赖 cli (Profile.NewProtocol returns cli.Protocol) [REFACTOR]（P3）**：cli 不能 import cli/backend 即 cycle。方案：rename 到 internal/backend 顶层。Breaking：是 (import paths)。
 - [ ] **R240-ARCH-21 — `internal/cron/scheduler.go:1086,1090` per-chat job 计数 O(N) 扫描 [REFACTOR]（P3）**：方案：jobsByChat 索引镜像 sessionsByChat。Breaking：否。
-- [~] **R240-ARCH-22 — `internal/sysession/manager.go:17,353` osExit = os.Exit 包级可变 + force-exit [REFACTOR]（P3）**：sysession 不可嵌入。方案：cfg.OnHardFail 回调，default os.Exit(2)。Breaking：否。
+- [x] **R240-ARCH-22 — `internal/sysession/manager.go:17,353` osExit = os.Exit 包级可变 + force-exit [REFACTOR]（P3）**：sysession 不可嵌入。方案：cfg.OnHardFail 回调，default os.Exit(2)。Breaking：否。已修 2026-05-24（cron-fix-F4）：Config 加 `OnHardFail func(code int)` 字段，NewManager 默认 `func(code int){ osExit(code) }`，Stop 调 `m.cfg.OnHardFail(2)` 替代直接 osExit。osExit 包级 var 保留作 default fallback，不破坏既有测试 swap 模式。
 - [ ] **R240-ARCH-23 — `cmd/naozhi/main.go:46-72` env policy 三份散落 [REPEAT-N，与 R239-ARCH-E 同根因]**：方向：抽 internal/envpolicy。
 - [ ] **R240-ARCH-24 — `internal/cron/scheduler.go:163-187` cron RunStartedEvent vs sysession DaemonRunStartedEvent 平行复制 [REFACTOR]（P3）**：方案：抽 internal/lifecycle/RunEvent + Hub 单 BroadcastRunEvent(category, ev)。Breaking：否（wire 兼容）。
 - [ ] **R240-ARCH-25 — `internal/server/server.go:76-88` handler 不可独立测试 [REFACTOR]（P3）**：构造方法私有且含跨 handler 依赖。方案：每 handler 公开 Deps struct。Breaking：否。
