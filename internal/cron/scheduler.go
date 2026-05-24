@@ -2919,6 +2919,20 @@ func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
 // pulling a regex compile onto every cron run: recordResultP0WithSanitised
 // is invoked on every execution and the regex cost would dominate the
 // redaction budget.
+//
+// SCOPE — UNC paths are out of scope. R239-GO-9.
+// Detection covers three forms: POSIX `/abs`, Windows drive `C:\…` /
+// `C:/…`, and home-relative `~/`. Microsoft UNC paths (`\\server\share`
+// and the rare `//server/share` POSIX-style equivalent that some Windows
+// tools emit) are intentionally NOT matched: the leading `\\` would
+// require a peek-ahead second byte (`s[i+1]=='\\'`) which the current
+// isWin / isPosix branches don't gate, and a leading `//` looks
+// indistinguishable from an empty POSIX path token. naozhi runs on
+// Linux containers in production — UNC paths cannot appear in the
+// underlying CLI's error messages there. WSL or Windows-mount
+// deployments may surface UNC strings unredacted; redaction of those
+// forms is a future enhancement (would require a new branch matching
+// `\\` / `//` followed by a non-`/` non-`\` host segment).
 func redactPathsInCronError(s string) string {
 	if s == "" {
 		return s
