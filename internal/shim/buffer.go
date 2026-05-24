@@ -26,15 +26,18 @@ type bufLine struct {
 // defaultRingMaxLines is the fallback line-count cap when NewRingBuffer
 // is called with maxLines<=0. 10k lines covers a typical Claude turn's
 // stdout (a few hundred lines of streaming) with margin for replay on
-// reconnect. Mirrors the ManagerConfig.BufferSize default — keep these
-// in sync; a divergence here is silent and only surfaces as confused
-// behaviour when the manager defaults its config but the ring builder
-// receives those defaults verbatim.
+// reconnect.
+//
+// Single source of truth: ManagerConfig.BufferSize (manager.go) defaults
+// to this constant directly — the previous "keep these in sync" caveat
+// from R237-CR-13 is closed by the shared reference, so a future bump
+// only needs to land here.
 const defaultRingMaxLines = 10000
 
 // defaultRingMaxBytes is the fallback byte cap (50 MiB). Whichever cap
-// (lines or bytes) trips first drives eviction. Mirrors
-// ManagerConfig.MaxBufBytes default; same sync-warning applies.
+// (lines or bytes) trips first drives eviction. Single source of truth
+// shared with ManagerConfig.MaxBufBytes (manager.go) — see
+// defaultRingMaxLines for the closed-sync rationale.
 const defaultRingMaxBytes int64 = 50 * 1024 * 1024
 
 // NewRingBuffer creates a ring buffer with the given limits. Non-positive
