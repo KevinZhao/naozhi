@@ -60,6 +60,14 @@ type stringFieldPolicy struct {
 	// allowLF whitelists 0x0a in the byte scan (cron prompt only — cron
 	// schedules and absolute paths cannot legally contain a newline).
 	allowLF bool
+	// disallowLF reports LF / CR as "<name> must be a single line" instead
+	// of folding them into the generic "invalid control characters" branch.
+	// Used by single-line fields (Job.Title) where the UI specifically
+	// requires "no embedded newline" and benefits from a distinct error
+	// message rather than a generic control-character class. Mutually
+	// exclusive with allowLF — setting both is a programmer error and
+	// allowLF wins (LF is whitelisted, disallowLF cannot fire). R239-CR-4.
+	disallowLF bool
 	// collapseErrors maps every failure class onto "<name> contains invalid
 	// characters" instead of the WorkDir/Prompt-style three-tier messages.
 	// True for notify_chat_id and schedule (where API consumers historically
@@ -94,6 +102,13 @@ func validateStringField(s string, p stringFieldPolicy) error {
 		}
 		if c == '\n' && p.allowLF {
 			continue
+		}
+		// R239-CR-4: surface single-line violations (LF / CR) with a
+		// distinct error message when disallowLF is set, instead of
+		// folding them into the generic control-character class. UI
+		// fields like Job.Title surface this directly to the operator.
+		if p.disallowLF && (c == '\n' || c == '\r') {
+			return fmt.Errorf("%s must be a single line", p.name)
 		}
 		if p.collapseErrors {
 			return fmt.Errorf("%s contains invalid characters", p.name)
@@ -384,11 +399,9 @@ func validateCronBackend(backend string) error {
 // （允许用户不填，UI 自动 fallback 到 Prompt 首行）。
 // 与 validateCronPrompt 一致的清洗集，只多禁换行。
 //
-// 不接入 R219-CR-5 抽出的 validateStringField 是因为它把单行约束（\n/\r 即
-// 报"title must be a single line"，与"contains invalid control characters"
-// 含义不同）和 rune-级长度计量 (utf8.RuneCountInString) 一起做，stringFieldPolicy
-// 当前只覆盖 Tab/LF allow-list 与 byte-级长度，不覆盖单行专用错误消息分支；
-// 强行接入会反向把 4 个 cron 验证器都污染成"如果支持单行就额外提示"的样板。
+// R239-CR-4: 通过 stringFieldPolicy{disallowLF: true} 复用 validateStringField
+// 共享的 25 行 C0+IsLogInjectionRune 扫描，不再维护独立 loop。Tab 仍 allow，
+// 长度仍按 rune 计（与 validateStringField 的 byte 长度独立处理在外层）。
 func validateCronTitle(title string) error {
 	if title == "" {
 		return nil
@@ -396,21 +409,7 @@ func validateCronTitle(title string) error {
 	if n := utf8.RuneCountInString(title); n > cron.MaxCronTitleLen {
 		return fmt.Errorf("title exceeds %d-rune limit", cron.MaxCronTitleLen)
 	}
-	if !utf8.ValidString(title) {
-		return fmt.Errorf("title contains invalid characters")
-	}
-	for _, r := range title {
-		if r == '\n' || r == '\r' {
-			return fmt.Errorf("title must be a single line")
-		}
-		if r == 0 || (r < 0x20 && r != '\t') || r == 0x7f {
-			return fmt.Errorf("title contains invalid control characters")
-		}
-		if osutil.IsLogInjectionRune(r) {
-			return fmt.Errorf("title contains invalid unicode control characters")
-		}
-	}
-	return nil
+	return validateStringField(title, stringFieldPolicy{name: "title", allowTab: true, disallowLF: true})
 }
 
 // validateCronPrompt allows Tab and LF (multi-paragraph playbooks) but

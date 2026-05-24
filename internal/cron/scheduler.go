@@ -1917,6 +1917,13 @@ type jobSnapshot struct {
 	fresh      bool
 	schedule   string
 	backend    string // "" = router default
+	// lastSessionID 是 snapshot 时刻 Job.LastSessionID 的拷贝，供 fresh-
+	// preflight 的 stub-refresh 闭包使用。R239-PERF-13: 闭包以前在每次
+	// 失败回调时再开 s.mu.RLock 读 s.jobs[jobID].LastSessionID，新增本字段
+	// 后 refresh 可直接调 registerStubByValue 不再触锁。语义保留——失败路径
+	// 用 snap-time chain anchor（与本次 attempt 起点一致），后续新成功 run
+	// 由其 finishRun 路径再覆写。
+	lastSessionID string
 }
 
 // labelOrID returns the IM-notice display label: snap.label when populated,
@@ -1941,17 +1948,18 @@ func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	snap := jobSnapshot{
-		prompt:     j.Prompt,
-		workDir:    j.WorkDir,
-		jobID:      j.ID,
-		label:      jobTitleOrFallback(j),
-		platName:   j.Platform,
-		chatID:     j.ChatID,
-		notifyPlat: j.NotifyPlatform,
-		notifyChat: j.NotifyChatID,
-		fresh:      j.FreshContext,
-		schedule:   j.Schedule,
-		backend:    j.Backend,
+		prompt:        j.Prompt,
+		workDir:       j.WorkDir,
+		jobID:         j.ID,
+		label:         jobTitleOrFallback(j),
+		platName:      j.Platform,
+		chatID:        j.ChatID,
+		notifyPlat:    j.NotifyPlatform,
+		notifyChat:    j.NotifyChatID,
+		fresh:         j.FreshContext,
+		schedule:      j.Schedule,
+		backend:       j.Backend,
+		lastSessionID: j.LastSessionID,
 	}
 	if j.Notify != nil {
 		v := *j.Notify
@@ -2054,16 +2062,19 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 	}
 	s.router.Reset(args.key)
 	lg.Info("cron fresh context: session reset before run")
+	// R239-PERF-13: refresh 闭包改用 snap 固化值直接调 registerStubByValue，
+	// 不再每次失败回调时重开 s.mu.RLock 读 s.jobs[jobID]。snap 由
+	// snapshotJob 在 RLock 下一次性拷贝（包括 LastSessionID），失败路径
+	// 用这份 snap-time chain anchor 即可，后续新成功 run 由其 finishRun
+	// 写新 LastSessionID 并由下一轮 snap 自然带入；闭包路径只是兜底让
+	// sidebar 在失败后仍能渲染。仍需走 stillExists 校验：job 可能在
+	// Reset 与本回调间隔内被 DeleteJob 删掉，那种情况下 stub 不应再注册。
 	refresh := func() {
 		s.mu.RLock()
-		jobCopy, exists := s.jobs[snap.jobID]
-		var j2 Job
-		if exists {
-			j2 = *jobCopy
-		}
+		_, exists := s.jobs[snap.jobID]
 		s.mu.RUnlock()
 		if exists {
-			s.registerStubFromJob(&j2)
+			s.registerStubByValue(snap.jobID, snap.workDir, snap.prompt, snap.lastSessionID)
 		}
 	}
 	s.mu.RLock()
