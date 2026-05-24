@@ -242,6 +242,29 @@ type cronRunCountersView struct {
 	Canceled  int64 `json:"canceled,omitempty"`
 }
 
+// cronRunDetailView is the JSON shape returned by GET /api/cron/{job}/runs/{run}.
+// Promoted from a handler-body anonymous struct (R239-CR-9) for parity with
+// cronRunSummaryView / cronJobView / cronRunCountersView — a package-level
+// type can be referenced from tests and any future helper that constructs
+// the same payload, instead of being trapped inside the handler closure.
+type cronRunDetailView struct {
+	RunID       string `json:"run_id"`
+	JobID       string `json:"job_id"`
+	State       string `json:"state"`
+	Trigger     string `json:"trigger,omitempty"`
+	StartedAt   int64  `json:"started_at"`
+	EndedAt     int64  `json:"ended_at,omitempty"`
+	DurationMS  int64  `json:"duration_ms,omitempty"`
+	SessionID   string `json:"session_id,omitempty"`
+	Prompt      string `json:"prompt,omitempty"`
+	WorkDir     string `json:"work_dir,omitempty"`
+	Fresh       bool   `json:"fresh,omitempty"`
+	Result      string `json:"result,omitempty"`
+	ResultBytes int    `json:"result_bytes,omitempty"`
+	ErrorClass  string `json:"error_class,omitempty"`
+	ErrorMsg    string `json:"error_msg,omitempty"`
+}
+
 // cronJobView is the per-job element inside cronListResp.Jobs. Promoted to
 // package-level (R230B-CR-3) so cronListResp can reference it; the previous
 // inline-typed declaration kept it locked inside handleList.
@@ -1254,30 +1277,13 @@ func (h *CronHandlers) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "run not found", http.StatusNotFound)
 		return
 	}
-	type runDetailView struct {
-		RunID       string `json:"run_id"`
-		JobID       string `json:"job_id"`
-		State       string `json:"state"`
-		Trigger     string `json:"trigger,omitempty"`
-		StartedAt   int64  `json:"started_at"`
-		EndedAt     int64  `json:"ended_at,omitempty"`
-		DurationMS  int64  `json:"duration_ms,omitempty"`
-		SessionID   string `json:"session_id,omitempty"`
-		Prompt      string `json:"prompt,omitempty"`
-		WorkDir     string `json:"work_dir,omitempty"`
-		Fresh       bool   `json:"fresh,omitempty"`
-		Result      string `json:"result,omitempty"`
-		ResultBytes int    `json:"result_bytes,omitempty"`
-		ErrorClass  string `json:"error_class,omitempty"`
-		ErrorMsg    string `json:"error_msg,omitempty"`
-	}
 	// SanitizeForLog the Prompt + WorkDir fields read off disk: dashboard
 	// validate* gates already strip control / bidi characters at the write
 	// edge, but a CronRun persisted before the policy was tightened (or
 	// hand-edited on disk) can carry runes that would render dangerously
 	// in the dashboard. Result/ErrorMsg are already sanitised inside
 	// recordResultP0WithSanitised before persistence.
-	out := runDetailView{
+	out := cronRunDetailView{
 		RunID:       run.RunID,
 		JobID:       run.JobID,
 		State:       string(run.State),
