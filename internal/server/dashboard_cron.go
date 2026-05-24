@@ -239,6 +239,9 @@ type cronListResp struct {
 // new job ID. R242-CR-10 promoted this from an inline map[string]any so
 // the JSON encoder can cache the reflect descriptor and the field name
 // is enforced at compile time.
+//
+// Wire-only consumer: dashboard.js cronCreateJob reads only resp.id;
+// adding fields requires updating the JS reader as well.
 type cronCreateResp struct {
 	ID string `json:"id"`
 }
