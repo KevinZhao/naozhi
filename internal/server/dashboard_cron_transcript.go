@@ -756,12 +756,9 @@ func summariseToolInput(name string, input json.RawMessage) string {
 			}
 		}
 	}
-	// Fallback: marshal back, trim to 200 runes.
-	b, err := json.Marshal(obj)
-	if err != nil {
-		return ""
-	}
-	return osutil.SanitizeForLog(string(b), 200)
+	// Fallback: 沿用原已校验过的 input bytes（json.Unmarshal 不改写源 bytes，
+	// obj 只用于 key 探测，无需再 Marshal 一次浪费 alloc）。R244-GO-P2-2.
+	return osutil.SanitizeForLog(string(input), 200)
 }
 
 // parseISO8601MS converts an RFC 3339 / ISO 8601 timestamp into unix ms.
