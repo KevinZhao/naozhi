@@ -114,7 +114,18 @@ func (a *AuthHandlers) unauthDashAllow(ip string) bool {
 
 // cookieMAC returns an HMAC-derived value used as the auth cookie value.
 // This prevents the raw dashboard token from appearing in cookies.
+//
+// R245-SEC-9 [BREAKING-LOCAL]: returns "" when dashboardToken is empty
+// rather than HMAC(secret, ""). The previous form computed a deterministic
+// MAC over the empty string that any caller could replay; isAuthenticated
+// already short-circuits to true on empty token so the value was unused
+// today, but the residual MAC was a regression-bait. Returning "" makes
+// the no-token contract explicit at the source so future callers cannot
+// accidentally accept a cookie value that "matches" the empty MAC.
 func (a *AuthHandlers) cookieMAC() string {
+	if a.dashboardToken == "" {
+		return ""
+	}
 	mac := hmac.New(sha256.New, a.cookieSecret)
 	mac.Write([]byte(a.dashboardToken))
 	return hex.EncodeToString(mac.Sum(nil))
@@ -139,9 +150,16 @@ func (a *AuthHandlers) isAuthenticated(r *http.Request) bool {
 			return true
 		}
 	}
-	// Cookie fallback — value is HMAC-derived, not the raw token
+	// Cookie fallback — value is HMAC-derived, not the raw token.
+	// R245-SEC-9: defence in depth — bail when expected is empty (token=""
+	// path). The early-return at the top already covers the single-call
+	// production path; this check ensures any future call site that
+	// reorders the no-token short-circuit cannot accept a forged "" cookie.
 	if c, err := r.Cookie(authCookieName); err == nil {
 		expected := a.cookieMAC()
+		if expected == "" {
+			return false
+		}
 		return subtle.ConstantTimeCompare([]byte(c.Value), []byte(expected)) == 1
 	}
 	return false

@@ -138,11 +138,11 @@ type ManagerConfig struct {
 	// long (e.g. multi-hour code analyses).
 	WatchdogTimeout time.Duration
 	// BufferSize is the line capacity of the shim's stdout ring buffer.
-	// Defaults to 10000 lines. The ring serves replay on reconnect.
+	// Defaults to defaultRingMaxLines. The ring serves replay on reconnect.
 	BufferSize int
 	// MaxBufBytes is the byte capacity of the shim's stdout ring buffer.
-	// Defaults to 50 MiB. Whichever cap (lines or bytes) trips first
-	// drives eviction.
+	// Defaults to defaultRingMaxBytes. Whichever cap (lines or bytes)
+	// trips first drives eviction.
 	MaxBufBytes int64
 	// MaxShims caps concurrent live shim processes. Defaults to 50.
 	// StartShim returns ErrMaxShims when at the cap; Reconnect bypasses
@@ -163,11 +163,16 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if cfg.MaxShims <= 0 {
 		cfg.MaxShims = 50
 	}
+	// R237-CR-13: reference the buffer-side constants directly so the
+	// "manager default" and "ring builder default" cannot drift.
+	// NewRingBuffer also falls back to these when handed maxLines<=0 /
+	// maxBytes<=0, but apply them here too so cfg.BufferSize /
+	// cfg.MaxBufBytes (read by other manager code) hold the same value.
 	if cfg.BufferSize <= 0 {
-		cfg.BufferSize = 10000
+		cfg.BufferSize = defaultRingMaxLines
 	}
 	if cfg.MaxBufBytes <= 0 {
-		cfg.MaxBufBytes = 50 * 1024 * 1024
+		cfg.MaxBufBytes = defaultRingMaxBytes
 	}
 	if cfg.IdleTimeout <= 0 {
 		cfg.IdleTimeout = 4 * time.Hour

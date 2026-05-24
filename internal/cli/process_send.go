@@ -51,22 +51,20 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 		if len(images) == 1 {
 			thumbs[0] = MakeThumbnail(images[0].Data, 600)
 		} else {
-			// R225-PERF-15: concurrent JPEG-encode is gated by the package-level
-			// `thumbSem` (cap=4) inside MakeThumbnail (thumbnail.go:55-57); a
-			// previous outer semaphore here was the same cap and never the
-			// bottleneck (R243-CR-P2-1 dedup). MakeThumbnail also already has
-			// an internal `defer recover()` (thumbnail.go:41-45) that maps
-			// decoder panics to "" return — the previous outer recover here
-			// (R243-GO-1) was dead code that could never fire.
+			// R243-GO-3 [REPEAT-3] / R243-CR-P2-1: drop the outer cap=4 sem.
+			// MakeThumbnail's internal thumbSem (thumbnail.go:27) is already
+			// cap=4 covering the actual heavy work (image.Decode + jpeg.Encode);
+			// the outer sem was a redundant gate. Concurrency cap is enforced
+			// by thumbSem alone, every goroutine starts immediately.
+			//
+			// R243-GO-1 [BREAKING-LOCAL]: outer recover wrapper removed —
+			// MakeThumbnail's internal recover (thumbnail.go:41) catches all
+			// decoder panics before they ever propagate up, so the outer
+			// wrapper was always dead code. The inner recover now logs via
+			// slog.Error so panic events are no longer silent.
 			var wg sync.WaitGroup
+			wg.Add(len(images))
 			for i, img := range images {
-				// R243-GO-3: sem acquire moves INTO the goroutine first
-				// line so wg.Add + spawn aren't serialized behind a
-				// blocked send when the pool is saturated. wg.Add stays
-				// outside (the standard Go contract — Add must complete
-				// before any matching Wait could start, which is the
-				// caller's wg.Wait() below).
-				wg.Add(1)
 				go func(i int, data []byte) {
 					defer wg.Done()
 					thumbs[i] = MakeThumbnail(data, 600)

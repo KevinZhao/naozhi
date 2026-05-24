@@ -671,10 +671,26 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			// the same line. ACP backends report "unsupported" here — we
 			// accept the silent no-op since ACP cron jobs are rare and a
 			// SIGINT fallback would couple two different abort semantics.
-			lg.Info("cron send deadline exceeded",
-				"err", err,
-				"abort_fired", abort.fired,
-				"abort_outcome", abort.outcome)
+			//
+			// R242-GO-7: when the watchdog fired but the interrupt did not
+			// reach the CLI (outcome != InterruptSent and != InterruptUnsupported
+			// for ACP), surface as Warn — the in-flight turn may still be
+			// burning Send budget on the next tick, and operators need a
+			// signal to investigate transport-level breakage. The
+			// InterruptUnsupported tag is excluded by design: ACP jobs
+			// always report unsupported and would otherwise spam Warn.
+			if abort.fired && abort.outcome != session.InterruptSent &&
+				abort.outcome != session.InterruptUnsupported {
+				lg.Warn("cron send deadline exceeded; interrupt did not land",
+					"err", err,
+					"abort_fired", abort.fired,
+					"abort_outcome", abort.outcome)
+			} else {
+				lg.Info("cron send deadline exceeded",
+					"err", err,
+					"abort_fired", abort.fired,
+					"abort_outcome", abort.outcome)
+			}
 		} else {
 			lg.Error("cron send error", "err", err)
 		}
