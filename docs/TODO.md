@@ -93,6 +93,40 @@
 - [~] **R30-DES1 — 需架构决策（2026-04-29 Round 112 评估降级）**：本轮尝试在 `execute()` 入口加 `stopCtx.Err()` 守卫覆盖 fresh + persistent 两种模式，但这与 Round 95 的设计意图冲突（Round 95 明确将 persistent 模式的 ctx 取消委托给 Router.Shutdown，`TestCRON3_PersistentModeUnaffectedByGuard` 把此行为作为测试护栏）。fresh 分支的 stopCtx.Err() 守卫（`scheduler.go:1260`）已覆盖最危险的"fresh → Reset → 孤立 CLI"路径。persistent 模式的真正修复需要架构级协调：要么把 Router.Shutdown 和 Scheduler.Stop 串联锁定（需 S11 级决策），要么在 GetOrCreate 路径里加 shutdown-awareness（改动面大）。当前降级，等 S11 整体方案落地后重开。
 - [ ] **R29-DES1 — `drainStaleEvents` push-back + goto drain 可吞 interrupted result 事件**: 本轮新发现的 invariant 冲突。在 interrupted/interruptedRun 分支的 for 循环中，若事件顺序为 `[old_nonresult, new_event, old_result]`，读到 `new_event` 后 push-back + `goto drain`，接着 drain 到 `old_result` 时因 `recvAt < cutoff` 被丢弃。interrupted 语义要求 settle 窗口必须拿到 old_result，否则下一 turn 迟到的 result 会污染结果。
 
+## Round 240 — 5-agent 并行 code review 第 50 轮（2026-05-24，与同日 Round 239 / PR #299 Round 238 并发触发）NEEDS-DESIGN
+
+> 与同日 Round 239（下方章节）/ PR #299 Round 238 并发触发的第三批 5-reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描，覆盖 540 .go 文件。**注意 commit anchor 仍用 R239-X**（提交时 master Round 239 尚未 merge，与 master Round 239 / #299 同名但落地目标不同 — 本批改 cron/scheduler.go 三处 unlock 模式 + applyDefaults 副作用 + 错误链双%w + dispatch coalescePrefix 常量化等 11 处可立即修），文档归类用 Round 240 与 master Round 239 隔开避免双轨。
+>
+> 本批直接修 11 处见上方 commits（cron ResultBytes 与 Result 一致用 persistedResult 长度 [R239-CR-1] / cron DeleteJobByID/PauseJobByID/ResumeJobByID 改 defer Unlock 模式 [R239-CR-2] / cron SetJobPrompt resume 失败时回滚 Prompt 字段 [R239-CR-3] / cron applyDefaults 去除副作用 Warn 移至 NewScheduler [R239-CR-4] / cron inline truncateForRetry 一行 wrapper [R239-CR-5] / cron warmCache 删除恒 nil error 返回 [R239-CR-6] / cron ErrClassPausedConcurrent 加 reserved 注释 [R239-CR-7] / cron persistJobsLocked 错误链改双 %w 让 inner 可 introspect [R239-GO-1] / cron readRun 错误链改双 %w [R239-GO-2] / cmd readJSONWithRetry 接受 ctx 响应取消 [R239-GO-3] / dispatch coalescePrefix 常量化避免运行时 len 重算 [R239-PERF-1]）。
+>
+> Reviewer 自查：本批 P1-SEC 无新增（webhook 签名 / CSP / secret / SSRF / TLS / 反序列化攻击面均已闭合，CSP unsafe-inline / X-Forwarded-Host CSRF / nz_anon HMAC 等已在下方 Round 239 节再次确认未修复，本批不重复登记）。BREAKING-LOCAL 限额 ≤2，本批选 0（候选 R239-CR-2 改用 inner closure 完成 ≤1 包，未占 BREAKING-LOCAL slot）。约 50 项 [REPEAT-N] 见下方 Round 239 / R238 / R237 / 历史 ARCH-1~19 章节，本批不重复登记 anchor。下列为本批新发现且不适合直接修的 NEEDS-DESIGN 条目（保留 v4 二级分类标签）。
+
+### Go 正确性 / 可观测性 — 本批新发现
+
+- [ ] **R240-GO-4 — `cron.Scheduler.executeOpt` `sendCtx` 双倍预算缺乏可观测性（P2）**：scheduler.go:~2349 `sendCtx` 派生自 `context.Background()`（与 R238-GO-4 同根因留 [REPEAT-N R238-GO-4]），budget 为 `jobTimeout` 独立计时；R230B-GO-1 注释承认 worst-case wall clock ~`2×jobTimeout`，但当 spawn ctx 已消耗 >50% 后再进 sendCtx 时无任何 slog 信号；运营 300s 任务的 operator 看不到这一类"翻倍执行"事件。建议在 `time.Since(startedAt) > jobTimeout/2` 时打 `slog.Warn("cron send budget exceeds job/2", ...)`，并补 expvar `cron_send_budget_doubled` counter。`[BREAKING-LOCAL]`
+- [ ] **R240-GO-5 — `cron.scheduler.go:~2864 redactPathsInCronError` 无单测覆盖（P3）**：手写 70 行 byte scanner，覆盖 POSIX/Win drive/tilde-home 三种 path 形态，每个分支条件（`:` followed by space、tilde+`/`、isWin 分支）均无独立 unit table。当前依赖端到端 review。建议抽 `redactPath(in []byte) []byte` 私有函数 + table-driven test，`isWin` 分支在 Linux 部署上其实是死代码可加 `//go:build !windows` 收紧。`[REFACTOR]`
+- [ ] **R240-GO-6 — `cron.scheduler.go:~3153 slogPrintfLogger.Printf` 用 strings.Contains("panic"|"recovered") 决定 log level（P3）**：依赖格式化后字符串 substring 决定 Warn vs Error，间接且无结构化字段；后续 robfig/cron 改提示文案会让等级误判。建议加 structured `"source":"robfig/cron"` 字段，level 固定 Error（生产路径只剩 recovered 才会进来）；或改用 `slog.Handler` 自定义 attrgroup。`[REFACTOR]`
+
+### 性能 — 本批新发现
+
+- [ ] **R240-PERF-2 — `cli/eventlog.go:513-654 applyEntryStateLocked` O(N) 扫描 turnAgents/bgAgents（P2）**：`task_start`/`task_progress`/`task_done` 每事件均 `range` 切片定位 toolUseID；TeamCreate fan-out 50 subagent 时单轮 N×50 事件触发 O(N²)，eventlog 锁内 O(N²) 扫描在订阅者多时阻塞 broadcast。建议维护 `toolUseID→index` map：append agent 时更新，result/user 时整体清空。改动局限 eventlog 包但触及 turnAgents/bgAgents 字段语义。`[BREAKING-LOCAL]`
+- [ ] **R240-PERF-3 — `cli/eventlog.go:898-1010 AppendBatch` 历史重放路径 agent 状态更新无意义（P2）**：InjectHistory 一次 500 条 batch 在写锁内逐条调 `applyEntryStateLocked`，但历史重放不会触发 `task_done` 回调，agent state 更新对 replay 无观测价值；500 次 switch + agent 扫描在锁内放大 R240-PERF-2 的 O(N²) 问题。建议为 replay batch 加 `isReplay bool` 参数跳过 agent state 更新；或仅对 task_*/result/user 类型才调 applyEntryStateLocked。`[REFACTOR]`
+- [ ] **R240-PERF-4 — `session/eventlog_bridge.go:83-113` 单条 entry fast path 仍 alloc（P2）**：pooled encoder 已避免 json.Marshal alloc，但 `make([]byte, len(raw)) + copy` 每条 entry 仍分配；`[1]persist.Entry` stack 数组配合 append 是否真的避免逃逸需 `-gcflags=-m` 验证。建议引入 byte slice pool 减 GC 压力，或确认逃逸再决定是否值得复杂化。改动局限 eventlog_bridge.go 但需 PersistSink 契约层面理解（sink 是否 retain raw bytes）。`[BREAKING-LOCAL]`
+- [ ] **R240-PERF-5 — `dispatch/status.go:79-122 formatToolUse` 重复 json.Unmarshal（P3）**：Read/Edit/Write 三个 case 各自声明同形 `filePathInput {FilePath string}` struct 重复解码三次。建议提前一次性 Unmarshal 到 filePathInput，case 内只做格式化。`[REFACTOR]` 可下轮直接修
+- [ ] **R240-PERF-6 — `eventlog/persist/persister.go:967-998 selectForIdx` 单条 batch 走 stride 路径仍构造 kept slice（P3）**：`stride>1` 且 `len(pending)==1` 时仍走 estCap=2 + scratch reuse 路径，单条必然同时是 first 和 last，可直接 return pending。建议 `if len(pending) == 1 { return pending }` 早返回。`[REFACTOR]` 可下轮直接修
+- [ ] **R240-PERF-7 — `session/eventlog_bridge.go:119-156` 多条 entry 路径 defer 开销（P3）**：每轮 5-20 条 entry 的热路径用 defer 决定是否 Put 回 pool，~10ns/call frame 开销。建议 return 前显式 `if eb.buf.Cap() <= bridgeEncMaxCap { bridgeEncPool.Put(eb) }`，去 defer。`[REFACTOR]` 可下轮直接修
+- [ ] **R240-PERF-8 — `dispatch/dispatch.go:331-336 BuildHandler` 每条 IM 消息 alloc 新 slog Logger（P3）**：`slog.With(platform, user, chat)` 在 `log/slog` 中分配 handler chain + attrs slice；高频群聊每条消息均付。建议 `lg` 移到 group chat dispatch gate 之后才构造，或缓存 per-platform logger 作为 ctx value。`[REFACTOR]` 可下轮直接修
+
+### 安全 — 本批新发现
+
+- 无（R235-R238 已闭合 webhook 签名 / CSP / secret / SSRF / TLS / 反序列化主要攻击面；P1-SEC ×3 X-Forwarded-Host / nz_anon HMAC / dashboard CSP 在下方 Round 239 节再次登记，本批不重复）。
+
+### 代码质量 / 架构 — 本批新发现
+
+- 无新增独立 anchor。所有 CR/ARCH 项均落在历史 ARCH-1~ARCH-19 / R235-R238 / Round 239 同根因簇，本批按 v4 规则不重复登记新 ID，[REPEAT-N] 计数将在下轮统计中递增。
+
+---
+
 ## Round 239 — 5-agent 并行 code review 第 49 轮（2026-05-24，与 PR #299 Round 238 并发批）NEEDS-DESIGN
 
 > 与同日 PR #299 Round 238 并发触发的另一批 5-reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描。本批直接修 3 处见上方 commits（cron loadJobs 校验 NotifyChatID/NotifyPlatform [R238-CR-2 anchor]，与 #299 [R238-CR-2] commit anchor 同名但目标字段不同 — #299 改的是 Lstat 错误升级，本 PR 加 NotifyChatID/NotifyPlatform 校验，二者非冲突 / cron AddJob ID 碰撞重试 slog.Warn [R238-CR-15] / cron HasMissedSchedule 单次 Parse 复用 sched 减少 dashboard 1Hz × N jobs 重复正则 [R238-PERF-2]）。文档归类用 R239 与 #299 隔开避免双轨；下方为本轮新发现且不适合直接修的 NEEDS-DESIGN 条目（保留 v4 二级分类标签）。
