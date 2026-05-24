@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"regexp"
+	"strings"
 )
 
 // resumeIDRe accepts only characters that can legally appear in a Claude
@@ -233,8 +234,16 @@ func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	// AskQuestion field rides on the same assistant event so the existing
 	// tool_use EventLog entry still flows through unchanged.
 	if ev.Type == "assistant" && ev.Message != nil {
-		if aq := extractAskQuestion(ev.Message.Content); aq != nil {
-			ev.AskQuestion = aq
+		// R234-PERF-16: AskUserQuestion tool_use is rare (only the few
+		// dedicated turns that surface an interactive card). Skip the
+		// per-block scan when the raw line definitely doesn't mention
+		// it — strings.Contains over the JSON line is O(N) byte-scan
+		// without alloc, much cheaper than walking the unmarshaled
+		// ContentBlock slice for every assistant event.
+		if strings.Contains(line, "AskUserQuestion") {
+			if aq := extractAskQuestion(ev.Message.Content); aq != nil {
+				ev.AskQuestion = aq
+			}
 		}
 	}
 	return []Event{ev}, ev.Type == "result", nil
