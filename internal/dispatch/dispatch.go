@@ -525,6 +525,21 @@ func (d *Dispatcher) ownerLoop(
 	// it here costs exactly one alloc per ownerLoop regardless of drain
 	// depth. R61-PERF-12.
 	lg = lg.With("key", key, "agent", agentID)
+	// Defer order matters here. Go runs deferred funcs LIFO, so the LAST
+	// registered defer runs FIRST. We want this exit order on every path
+	// (clean return AND panic):
+	//   1. recover() runs first  — catches a panic from sendAndReply,
+	//      logs it via handleOwnerLoopPanic, and stops it propagating.
+	//   2. NotifyIdle runs second — marks the session idle only after
+	//      panic recovery has logged context, so an external watcher
+	//      reading "idle" never sees a state where a panic is still
+	//      mid-flight. (R237-GO-8)
+	//
+	// This means NotifyIdle must be registered BEFORE the recover defer
+	// (so it runs after, by LIFO). Reversing this ordering would let
+	// NotifyIdle run while the panic is still propagating, which races
+	// with anyone observing the idle signal as "turn complete".
+	defer d.router.NotifyIdle()
 	defer func() {
 		if r := recover(); r != nil {
 			// R230-CQ-11: pass the enriched ownerLoop logger so the panic
@@ -536,7 +551,6 @@ func (d *Dispatcher) ownerLoop(
 			d.handleOwnerLoopPanic(key, msg, r, lg)
 		}
 	}()
-	defer d.router.NotifyIdle()
 
 	// Process first message.
 	d.sendAndReply(ctx, key, first.Text, first.Images, agentID, opts, msg, lg, true)
