@@ -285,9 +285,7 @@ func schedulePeriod(schedule string, now time.Time) time.Duration {
 	if err != nil {
 		return 0
 	}
-	first := sched.Next(now)
-	second := sched.Next(first)
-	return second.Sub(first)
+	return schedulePeriodFromSched(sched, now)
 }
 
 // previousTickBefore 算给定 schedule 在 now 之前最近一次应该触发的时刻。
@@ -311,16 +309,28 @@ func previousTickBefore(schedule string, now time.Time) time.Time {
 	if period <= 0 {
 		return time.Time{}
 	}
-	// 回推起点；加一个安全系数 3 应对月份/DST 的非等距触发
+	return previousTickBeforeFromSched(sched, period, now)
+}
+
+// schedulePeriodFromSched 同 schedulePeriod，但接受已解析的 robfigcron.Schedule，
+// 避免在 HasMissedSchedule 路径上重复 Parse。schedulePeriod 是公开签名（其他包
+// 测试有用），保留不动。R238-PERF-2。
+func schedulePeriodFromSched(sched robfigcron.Schedule, now time.Time) time.Duration {
+	first := sched.Next(now)
+	second := sched.Next(first)
+	return second.Sub(first)
+}
+
+// previousTickBeforeFromSched 同 previousTickBefore，但接受已解析的 sched +
+// 已知 period，避免在 HasMissedSchedule 路径上重复 Parse / 重复估算 period。
+// 上限守卫与 previousTickBefore 保持一致：previousTickMaxIter（1000）足以覆盖
+// 任何合法 cron schedule 在 3×period 窗口内的迭代次数。R238-PERF-2。
+func previousTickBeforeFromSched(sched robfigcron.Schedule, period time.Duration, now time.Time) time.Time {
+	if period <= 0 {
+		return time.Time{}
+	}
 	start := now.Add(-3 * period)
 	prev := time.Time{}
-	// 上限守卫：极端 DST/月底场景下若 sched.Next 进展极慢，避免
-	// 在 dashboard 1Hz 轮询路径短暂阻塞。previousTickMaxIter（1000）
-	// 足以覆盖任何合法 cron schedule 在 3×period 窗口内的迭代次数：
-	//   - 最密集合法 schedule period == minCronInterval (5min) →
-	//     3×period / period == 3 次迭代。
-	//   - 月度 schedule period ≈ 31d → 3×period / 1d ≈ 93 次。
-	//   - DST/闰月最坏 ~365 次。1000 留 ~3× 安全裕量。
 	for i := 0; i < previousTickMaxIter; i++ {
 		next := sched.Next(start)
 		if !next.Before(now) {
@@ -346,12 +356,19 @@ func previousTickBefore(schedule string, now time.Time) time.Time {
 //  4. 跑过：若 prevExpectedAt - LastRunAt > period × 1.5 则判 missed
 //     （允许 50% 裕量应对 jitter + 轻微延迟）。
 //
+// 性能：单次 cronParser.Parse + 1×schedulePeriodFromSched + 1×previousTickBeforeFromSched，
+// 比走公开 schedulePeriod / previousTickBefore 路径少 2 次正则 Parse。R238-PERF-2。
+//
 // 关联：docs/rfc/cron-v2-polish.md §3.3 Increment C。
 func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
 	if j == nil {
 		return false, time.Time{}
 	}
-	period := schedulePeriod(j.Schedule, now)
+	sched, err := cronParser.Parse(j.Schedule)
+	if err != nil {
+		return false, time.Time{}
+	}
+	period := schedulePeriodFromSched(sched, now)
 	if period <= 0 {
 		return false, time.Time{}
 	}
@@ -360,7 +377,7 @@ func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
 	if !startedAt.IsZero() && now.Sub(startedAt) < 5*period {
 		return false, time.Time{}
 	}
-	prev := previousTickBefore(j.Schedule, now)
+	prev := previousTickBeforeFromSched(sched, period, now)
 	if prev.IsZero() {
 		return false, time.Time{}
 	}
