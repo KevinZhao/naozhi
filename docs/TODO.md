@@ -287,7 +287,7 @@
 - [ ] **R240-ARCH-25 — `internal/server/server.go:76-88` handler 不可独立测试 [REFACTOR]（P3）**：构造方法私有且含跨 handler 依赖。方案：每 handler 公开 Deps struct。Breaking：否。
 - [ ] **R240-ARCH-26 — `internal/server/wshub.go:179` tailers + wshub_agent 子能力嵌在 god-object [REFACTOR]（P3）**：方案：抽 AgentBroadcaster 子组件。Breaking：否。
 - [ ] **R240-ARCH-27 — `internal/cron/scheduler.go:65-91` SessionRouter consumer 接口写在 scheduler.go 顶部不在 consumer.go [REFACTOR]（P3）**：与 dispatch/server/sysession/upstream 约定不一致。方案：移到 internal/cron/consumer.go。Breaking：否。
-- [~] **R240-ARCH-28 — `internal/cli/wrapper.go:62` historyFactory 字段在构造时一次取值 [REFACTOR]（P3）**：register-after-NewWrapper 无效。方案：每次 NewHistorySource 查 registry 或显式参数。Breaking：否。
+- [x] **R240-ARCH-28 — `internal/cli/wrapper.go:62` historyFactory 字段在构造时一次取值 [REFACTOR]（P3）**：register-after-NewWrapper 无效。方案：每次 NewHistorySource 查 registry 或显式参数。Breaking：否。已修 2026-05-24（cron-fix-F1）：删除 Wrapper.historyFactory 字段，NewHistorySource 改为每次调 pickHistoryFactory(BackendID) 走 registry RWMutex；测试同步改用 registry assertion；register-after-NewWrapper 顺序现在生效。
 - [ ] **R240-ARCH-29 — `internal/server/dashboard.go:299,341` Server.Start 后置 wiring 两阶段构造 [REFACTOR]（P3）**：方案：把 callback wiring 全移进 NewWithOptions/buildServer。Breaking：否。
 - [ ] **R240-ARCH-30 — `internal/dispatch/dispatch.go:71` Dispatcher 持具体 *cron.Scheduler [REFACTOR]（P3）**：方案：抽 dispatch.CronOps consumer 接口。Breaking：否。
 
