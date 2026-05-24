@@ -912,6 +912,12 @@ func (s *Scheduler) EnsureStub(key string) bool {
 // R49-REL-CRON-STOP-BUDGET.
 var stopBudget = 30 * time.Second
 
+// gcWaitBudget bounds the cold-start GC goroutine wait in Stop(). Smaller
+// than stopBudget because trimAll's IO is short-lived (ReadDir + N Removes);
+// a wedge here means a stuck filesystem and we'd rather skip the wait than
+// pin systemd TimeoutStopSec.
+var gcWaitBudget = 5 * time.Second
+
 // Stop halts the scheduler and saves state. It waits for both scheduled jobs
 // (drained by s.cron.Stop) and any TriggerNow-spawned goroutines before
 // returning, so callers can safely tear down the router afterwards.
@@ -948,10 +954,12 @@ func (s *Scheduler) Stop() {
 		s.gcWG.Wait()
 		close(gcDone)
 	}()
+	gcTimer := time.NewTimer(gcWaitBudget)
+	defer gcTimer.Stop()
 	select {
 	case <-gcDone:
-	case <-time.After(5 * time.Second):
-		slog.Warn("cron: gc goroutine wait timeout")
+	case <-gcTimer.C:
+		slog.Warn("cron: gc goroutine wait timeout", "budget", gcWaitBudget)
 	}
 
 	cronDoneCtx := s.cron.Stop()
@@ -1250,10 +1258,9 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
-	if perr != nil {
-		return nil, perr
-	}
-	save()
+	// R238-GO-3: deleteJobLocked already mutated in-memory state + router stub.
+	// The runStore must be cleaned even when persist fails, otherwise the
+	// runs/<jobID>/ subtree leaks on disk while the in-memory job is gone.
 	// P1 cron-run-history: drop the runs/<jobID>/ subtree alongside the
 	// job entry. Does NOT touch ~/.claude/projects/<cwd>/<session_id>.jsonl
 	// (RFC §2.3 / §4.4): those JSONL files are user-facing claude session
@@ -1262,6 +1269,10 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	if s.runStore != nil {
 		s.runStore.DeleteJob(j.ID)
 	}
+	if perr != nil {
+		return nil, perr
+	}
+	save()
 	return j, nil
 }
 
@@ -1601,13 +1612,16 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
+	// R238-GO-3: deleteJobLocked already mutated in-memory state + router stub.
+	// The runStore must be cleaned even when persist fails, otherwise the
+	// runs/<jobID>/ subtree leaks on disk while the in-memory job is gone.
+	if s.runStore != nil {
+		s.runStore.DeleteJob(j.ID)
+	}
 	if perr != nil {
 		return nil, perr
 	}
 	save()
-	if s.runStore != nil {
-		s.runStore.DeleteJob(j.ID)
-	}
 	return j, nil
 }
 
@@ -2100,8 +2114,11 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		return
 	}
 	defer func() {
-		inflight.running.Store(false)
+		// Reset metadata BEFORE releasing the CAS gate; otherwise a TriggerNow
+		// that wins the next CompareAndSwap can have its freshly-populated
+		// RunID/StartedAt clobbered by this deferred reset. R238-GO-2.
 		inflight.reset()
+		inflight.running.Store(false)
 		metrics.CronRunInflight.Add(-1)
 	}()
 

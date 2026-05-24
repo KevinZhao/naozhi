@@ -8206,6 +8206,13 @@ function inlineMd(s) {
   // sequences survive esc() (they aren't HTML entities) and would let an
   // attacker-controlled LLM snippet splice unescaped characters into the
   // emitted HTML by embedding `$&` inside a backtick/bold region.
+  //
+  // SECURITY CONTRACT: bold/italic regex must run AFTER esc(s) (line ~8193)
+  // AND AFTER code/wiki-link injection passes. The bold .+? capture can
+  // span injected <span>/<code> HTML; this is safe ONLY because the inner
+  // text was already esc()'d. Do NOT reorder these passes without first
+  // adding a unit test asserting the bold output never contains a raw
+  // '<' character.
   s = s.replace(/\*\*(.+?)\*\*/g, (_, c) => '<strong>' + c + '</strong>');
   s = s.replace(/\*(.+?)\*/g, (_, c) => '<em>' + c + '</em>');
   s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, text, url) {
@@ -11978,7 +11985,8 @@ function cronRunTurnHtml(t) {
     '</div>';
   }
   if (t.kind === 'assistant') {
-    const tokens = t.tokens ? '<span class="crs-tokens">+' + (t.tokens >= 1000 ? (t.tokens / 1000).toFixed(1) + 'k' : t.tokens) + '</span>' : '';
+    const _tk = Number(t.tokens) | 0;
+    const tokens = _tk ? '<span class="crs-tokens">+' + (_tk >= 1000 ? (_tk / 1000).toFixed(1) + 'k' : _tk) + '</span>' : '';
     return '<div class="crs-turn assistant">' +
       '<div class="crs-avatar assistant" aria-hidden="true">C</div>' +
       '<div class="crs-turn-body">' +
