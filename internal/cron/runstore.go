@@ -374,13 +374,8 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 	// warmCache concurrently. warmCache is idempotent (entry.warm
 	// transitions from false to true exactly once thanks to the per-job
 	// lock guard), so the second caller sees warm=true on its own
-	// re-acquire and returns the populated slice. Either caller may
-	// observe warm=false on re-acquire if warmCache returned a disk
-	// error; both then fall back to the direct read path below.
-	if err := s.warmCache(jobID); err != nil {
-		// Disk error — caller falls back to direct disk read.
-		return nil, false
-	}
+	// re-acquire and returns the populated slice.
+	s.warmCache(jobID)
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if !entry.warm {
@@ -392,7 +387,7 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 // warmCache populates the recentCache for jobID by reading the on-disk
 // runs/<jobID>/ directory and parsing each .json file. Holds the per-job
 // disk lock so a concurrent Append can't race the warm pass.
-func (s *runStore) warmCache(jobID string) error {
+func (s *runStore) warmCache(jobID string) {
 	lock := s.jobLock(jobID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -402,12 +397,11 @@ func (s *runStore) warmCache(jobID string) error {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if entry.warm {
-		return nil // another goroutine warmed it during our wait
+		return // another goroutine warmed it during our wait
 	}
 	rows := s.diskListNewestFirst(jobID, s.keepCount, time.Time{})
 	entry.runs = rows
 	entry.warm = true
-	return nil
 }
 
 // copySummariesLocked returns a defensive copy of up to limit entries
