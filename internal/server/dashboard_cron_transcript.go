@@ -429,7 +429,10 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 
 	// LimitReader hit means we read maxTranscriptBytes worth without
 	// seeing EOF. Mark truncated too.
-	if pos, _ := f.Seek(0, io.SeekCurrent); pos >= maxTranscriptBytes {
+	if pos, sErr := f.Seek(0, io.SeekCurrent); sErr != nil {
+		slog.Warn("cron transcript: seek failed; assuming truncated", "path", resolved, "err", sErr)
+		truncated = true
+	} else if pos >= maxTranscriptBytes {
 		truncated = true
 	}
 
