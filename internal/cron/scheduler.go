@@ -1113,11 +1113,23 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 	s.jobs[j.ID] = j
 	save, perr := s.persistJobsLocked()
 	if perr != nil {
-		// In-memory insertion + cron scheduling already happened; we
-		// cannot roll those back safely (another goroutine may have
-		// observed the registered entry). Surface the error so the
-		// HTTP layer returns a 500 and the operator sees the
-		// persistence gap.
+		// R236-GO-10: persist failed *after* registerJob + map insertion.
+		// Without rollback, the in-memory state holds an orphan: cron
+		// scheduler has the entry, s.jobs has the *Job, but disk has
+		// nothing — every tick logs "job not found" then never cleans
+		// up because the cron entry stays registered (the dispatcher's
+		// debug log path doesn't call s.cron.Remove). Rolling back
+		// via deleteJobLocked unwinds the cron entry, router stub,
+		// and map entry under the still-held s.mu, so the persistence
+		// gap surfaces as a clean failure to the caller and a fresh
+		// AddJob on the same ID is safe. Earlier review note worried
+		// about another goroutine observing the entry between
+		// registerJob and persist; that window is enclosed by s.mu
+		// (the cron dispatcher's tick fans out via runningJobs CAS
+		// without re-entering s.mu for lookup, but execute()'s
+		// s.jobs[j.ID] read does take s.mu — see executeJob). So the
+		// rollback is observationally consistent.
+		s.deleteJobLocked(j)
 		return nil, perr
 	}
 	return save, nil
