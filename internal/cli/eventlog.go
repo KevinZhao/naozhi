@@ -510,6 +510,24 @@ type pendingTaskDone struct {
 // Returns (true, pending) when the entry is a "task_done" event that warrants
 // an external callback dispatch; callers should accumulate pending patches
 // and fire them after releasing l.mu via fireTaskDoneCallbacks.
+// entryAffectsAgentState reports whether an entry's Type causes
+// applyEntryStateLocked to perform any work. The hot path is dominated
+// by `assistant_text` / `tool_use` / `tool_result` / `system` events
+// which fall through the switch's default arm with zero work; gating
+// the call site on this predicate avoids the O(N) turnAgents/bgAgents
+// scans that the default arm would still trigger inside the switch
+// dispatch when called per-entry under l.mu (R240-PERF-3 / R240-PERF-2
+// — the AppendBatch replay path runs 500-entry InjectHistory bursts
+// where typically <5% are agent-state events). The predicate must
+// stay in lockstep with applyEntryStateLocked's case labels.
+func entryAffectsAgentState(t string) bool {
+	switch t {
+	case "agent", "task_start", "task_progress", "task_done", "result", "user":
+		return true
+	}
+	return false
+}
+
 func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendingTaskDone) {
 	switch e.Type {
 	case "agent":
@@ -824,7 +842,16 @@ func (l *EventLog) Append(e EventEntry) {
 		l.count++
 	}
 
-	firePending, pending := l.applyEntryStateLocked(e)
+	// Skip the switch dispatch + per-call frame for entry types that
+	// fall through applyEntryStateLocked's default arm with zero work
+	// (assistant_text, tool_use, tool_result, system, …). R240-PERF-3.
+	var (
+		firePending bool
+		pending     pendingTaskDone
+	)
+	if entryAffectsAgentState(e.Type) {
+		firePending, pending = l.applyEntryStateLocked(e)
+	}
 
 	// Atomic summary stores are issued *inside* l.mu so that AppendBatch,
 	// which holds l.mu for its full duration, cannot have its later Store
@@ -965,8 +992,15 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 			sinkCopy = append(sinkCopy, e)
 		}
 
-		if fire, p := l.applyEntryStateLocked(e); fire {
-			pendingDone = append(pendingDone, p)
+		// Skip applyEntryStateLocked for entries whose Type is not one of
+		// the 6 cases the function actually handles. InjectHistory's
+		// 500-entry replay is dominated by assistant_text/tool_use rows
+		// which previously paid switch-dispatch + return overhead inside
+		// the write lock. R240-PERF-3.
+		if entryAffectsAgentState(e.Type) {
+			if fire, p := l.applyEntryStateLocked(e); fire {
+				pendingDone = append(pendingDone, p)
+			}
 		}
 
 		// Track last-of-kind summaries so a single Store (below, still
