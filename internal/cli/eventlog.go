@@ -1003,9 +1003,28 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 	// the late-attached sink will pick up subsequent batches and the
 	// missed ones are bounded by the same replayPhase contract that
 	// already gates the early append phase.
+	// R242-PERF-8: skip the sinkCopy allocation entirely when the sink
+	// observes !sinkReady (replay phase). The persister sink unconditionally
+	// drops replay-phase batches (see Persister.SinkFor → replayLeakCnt path),
+	// so capturing entries we know will be discarded just burns heap on every
+	// InjectHistory's 500-entry replay round-trip.
+	//
+	// Read order: ptr first, then sinkReady. If a SetPersistSink races between
+	// our two loads we'll observe (ptr=non-nil, ready=false) → still skip;
+	// the batch is genuinely replayPhase from the contract's POV because
+	// SetPersistSink writes ptr first and ready second. The next batch after
+	// SetPersistSink completes will see ready=true and allocate normally.
+	//
+	// `sinkAttached` covers the historical fast-path (no sink wired at all,
+	// e.g. test harnesses); `captureForSink` is the per-batch decision used
+	// to gate both the allocation above and the in-loop append below — they
+	// must agree, otherwise the loop would append into a nil slice or the
+	// post-unlock dispatch would receive an empty copy from a non-replay
+	// batch.
 	sinkAttached := l.persistSinkPtr.Load() != nil
+	captureForSink := sinkAttached && l.sinkReady.Load()
 	var sinkCopy []EventEntry
-	if sinkAttached {
+	if captureForSink {
 		sinkCopy = make([]EventEntry, 0, len(entries))
 	}
 	// R225-PERF-11: stamp UUIDs in-place *before* l.mu so the N
@@ -1034,7 +1053,7 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 			l.count++
 		}
 
-		if sinkAttached {
+		if captureForSink {
 			sinkCopy = append(sinkCopy, e)
 		}
 
