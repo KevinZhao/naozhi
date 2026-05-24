@@ -302,11 +302,17 @@ func schedulePeriod(schedule string, now time.Time) time.Duration {
 // 在 2 月可能 "跳 31 天"），给足裕量。每次 Next 是 O(1)，循环最多跑
 // 3-5 次，开销可忽略。无法解析的 schedule 返回零值 time。
 func previousTickBefore(schedule string, now time.Time) time.Time {
+	// R246-PERF-4: previously this called schedulePeriod(schedule, now)
+	// which re-Parses the same expression we already parsed above.
+	// cronParser.Parse is the dominant cost in this hot path
+	// (HasMissedSchedule fans out across all jobs on every dashboard
+	// list / metrics tick); folding the two calls into one Parse + a
+	// FromSched helper is a free win.
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {
 		return time.Time{}
 	}
-	period := schedulePeriod(schedule, now)
+	period := schedulePeriodFromSched(sched, now)
 	if period <= 0 {
 		return time.Time{}
 	}
