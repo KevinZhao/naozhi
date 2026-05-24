@@ -275,7 +275,7 @@
 - [ ] **R240-ARCH-13 — `internal/session/managed.go:47-114` processIface 35 方法 god-interface [REPEAT-N，与 R239-ARCH-C 同根因]**：方向：拆 ProcessLifecycle/ProcessSender/EventSource/ProcessIntrospect。
 - [ ] **R240-ARCH-14 — `internal/server/server.go:76-88` 12 handler 字段全具体类型 [REFACTOR]（P2）**：handler 间互依赖（SendHandler↔Hub↔ScratchHandler）。方案：抽 httpHandlerSet 接口 + 自注册。Breaking：否。
 - [ ] **R240-ARCH-15 — `internal/upstream/connector.go:69` 等 5 个 "subset of session.Router" 接口 [REFACTOR]（P2）**：HubRouter 14 / dispatch 8 / cron 3 / sysession 4 / upstream 各一份；签名飘移风险。方案：internal/sessioniface 包提供 RouterReader/Mutator/Dispatcher mixin。Breaking：否。
-- [~] **R240-ARCH-16 — `internal/session/router_core.go:29-31` blank-import history backend [REPEAT-N，与 R239-ARCH-B 同根因]**：方向：internal/history/wireup 显式 RegisterDefaults()。
+- [x] **R240-ARCH-16 — `internal/session/router_core.go:29-31` blank-import history backend [REPEAT-N，与 R239-ARCH-B 同根因]**：方向：internal/history/wireup 显式 RegisterDefaults()。已修 2026-05-24（cron-fix-F4）：随同 R239-ARCH-B 一并修复 — `internal/wireup` 子包承担 side-effect import，cmd/naozhi 显式 `_ import`，session 包不再 import 具体 backend。
 - [ ] **R240-ARCH-17 — `internal/cli/history.go:122` RegisterHistoryFactory + cli/wrapper pickHistoryFactory 反向依赖 [REFACTOR]（P3）**：内部 cli 持 history 全局 map。方案：HistoryFactoryFn 注册迁到 internal/history。Breaking：是 (NewWrapper 签名)。
 - [ ] **R240-ARCH-18 — `internal/cli/wrapper.go:120-128` backendDisplayName switch 硬编码 [REPEAT-N，与 R239-ARCH-K 同根因]**：方向同前主条目。
 - [ ] **R240-ARCH-19 — `internal/server/wshub.go:202` wiredLinkers map 用 *cli.SubagentLinker 具体指针 [REPEAT-N，与 R239-ARCH-I 同根因]**。
@@ -359,7 +359,7 @@
 ### 架构（剩余 — 大量与历史 ARCH-* 同根因，多数已被同日 R238-ARCH-1/2/3/4 / R237-ARCH 系列覆盖）
 
 - [ ] **R239-ARCH-A — `internal/cli/wrapper.go:43` ShimManager 是公开可变 *shim.Manager 把 protocol+transport 压成同一抽象（P1）[REFACTOR]**：同 R235-ARCH-4 / R237-ARCH-1。方向：抽 cli.Transport 接口，shim 是其一实现；cli 不再 import internal/shim。
-- [~] **R239-ARCH-B — `internal/session/router_core.go:29-31` blank-import 三 backend 包触发 init() 注入（P1）[REPEAT-3]**：session 包从此非 backend-agnostic。方向：抽 internal/wireup 由 cmd/naozhi 显式注册。
+- [x] **R239-ARCH-B — `internal/session/router_core.go:29-31` blank-import 三 backend 包触发 init() 注入（P1）[REPEAT-3]**：session 包从此非 backend-agnostic。方向：抽 internal/wireup 由 cmd/naozhi 显式注册。已修 2026-05-24（cron-fix-F4）：抽 `internal/wireup` 子包承担 side-effect import；`cmd/naozhi/main.go` 显式 `_ import internal/wireup` 触发；session 不再 import claudejsonl/kirojsonl，恢复 backend-agnostic。naozhilog 是命名 import 不算 blank-import，留在原处。
 - [ ] **R239-ARCH-C — `internal/session/managed.go:47` processIface 27 方法 god-interface（P1）[REFACTOR]**：同 R215-ARCH-P1-3 / R219-ARCH-7 / R224-ARCH-5 / R237-ARCH-3。方向：拆 ProcessSender / ProcessLifecycle / EventSource。
 - [ ] **R239-ARCH-D — `internal/session/managed.go:1731-1733` ManagedSession 内回调 backend.RegisterDefaults() 触发全局注册（P1）[REFACTOR]**：业务对象懒触发全局注册，违反 main 显式 wire。方向：构造路径要求 caller 已注册。
 - [ ] **R239-ARCH-E — Claude env 白/黑名单常量散落 main.go + internal/shim/manager.go:925 + internal/sysession/run.go EnvAllowlist 三份不同政策（P1）[REFACTOR]**：方向：内聚 internal/envpolicy 包。

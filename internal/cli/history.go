@@ -141,15 +141,29 @@ func pickHistoryFactory(backendID string) HistoryFactoryFn {
 }
 
 // NewHistorySource constructs a HistorySource for the supplied session
-// using the wrapper's bound backend factory. Always returns a non-nil
-// source: a nil receiver, an unregistered backend, or a factory that
-// returns nil all degrade to NoopHistorySource so call sites can treat
-// the return value as never-nil.
+// using the latest factory registered for the wrapper's BackendID. Always
+// returns a non-nil source: a nil receiver, an unregistered backend, or a
+// factory that returns nil all degrade to NoopHistorySource so call sites
+// can treat the return value as never-nil.
+//
+// R240-ARCH-28: looks up the factory from the package registry on every
+// call rather than caching it at NewWrapper time. Caching at construction
+// time silently dropped any RegisterHistoryFactory call that landed after
+// NewWrapper — a real hazard in tests that register backends per-t.Run
+// after constructing a Wrapper, and in any future ordering where a
+// backend init() runs lazily (e.g. blank-imported via wireup). The
+// registry's RWMutex makes the read cheap (~30 ns) and turns
+// "factory binding" into a runtime question rather than a construction
+// snapshot.
 func (w *Wrapper) NewHistorySource(s HistorySessionView, deps HistoryWiring) HistorySource {
-	if w == nil || w.historyFactory == nil {
+	if w == nil {
 		return NoopHistorySource{}
 	}
-	src := w.historyFactory(s, deps)
+	fn := pickHistoryFactory(w.BackendID)
+	if fn == nil {
+		return NoopHistorySource{}
+	}
+	src := fn(s, deps)
 	if src == nil {
 		return NoopHistorySource{}
 	}

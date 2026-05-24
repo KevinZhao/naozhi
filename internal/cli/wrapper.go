@@ -48,17 +48,14 @@ type Wrapper struct {
 	Protocol    Protocol
 	ShimManager *shim.Manager
 
-	// historyFactory produces backend-specific history.Source instances
-	// for sessions whose Backend() matches this wrapper's BackendID.
-	// Bound at NewWrapper time via the package-level registry so adding
-	// a new backend's history reader is a single new init() call in the
-	// backend package — not a session-package edit.
-	//
-	// nil is fine: NewHistorySource degrades to NoopHistorySource so
-	// pre-registration spawns and unknown backends both behave
-	// uniformly (the dashboard sees an empty disk tier rather than a
-	// nil panic).
-	historyFactory HistoryFactoryFn
+	// History factories are looked up by BackendID via
+	// pickHistoryFactory(BackendID) inside NewHistorySource on every call,
+	// rather than cached on the Wrapper at construction time. R240-ARCH-28:
+	// caching let backend init() registrations that landed after a
+	// NewWrapper silently no-op for that wrapper — a real hazard in tests
+	// that register replacement factories per-t.Run and any future
+	// blank-import / wireup-staged init ordering. The registry RWMutex
+	// makes the per-call lookup cheap.
 }
 
 // NewWrapper creates a Wrapper with the given CLI path and protocol.
@@ -95,10 +92,9 @@ func NewWrapper(cliPath string, proto Protocol, backend string) *Wrapper {
 		Protocol: proto,
 	}
 	w.CLIVersion = detectVersion(cliPath)
-	// Bind the history-source factory for this backend, if one has been
-	// registered (history backend packages register from their init()).
-	// nil is OK: NewHistorySource handles missing registrations.
-	w.historyFactory = pickHistoryFactory(w.BackendID)
+	// History factories are resolved at NewHistorySource call time via
+	// pickHistoryFactory(BackendID) — see Wrapper struct godoc for
+	// rationale (R240-ARCH-28). No binding happens here.
 	return w
 }
 
