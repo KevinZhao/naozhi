@@ -271,6 +271,12 @@ type Scheduler struct {
 	// cron scheduler's purview.
 	triggerWG sync.WaitGroup
 
+	// gcWG tracks the cold-start GC goroutine spawned by Start() so Stop()
+	// waits for it to finish before persisting state. Without this, Stop's
+	// final saveJobs / Append paths can race with trimAll's filesystem
+	// mutations on the runs/ tree (R236-GO-01).
+	gcWG sync.WaitGroup
+
 	// runningJobs serializes execute(j) calls per job ID so a manual
 	// TriggerNow cannot overlap a scheduled tick for the same job (the cron
 	// chain's SkipIfStillRunning only protects the scheduled path). Entries
@@ -811,7 +817,9 @@ func (s *Scheduler) Start() error {
 	// down. 异步执行避免在 jobs 多/历史目录大时阻塞 Start 返回（每个 job
 	// 一次 ReadDir + N 次 Remove）。
 	if s.runStore != nil {
+		s.gcWG.Add(1)
 		go func() {
+			defer s.gcWG.Done()
 			slog.Info("cron run history: cold-start GC starting")
 			s.runStore.trimAll(time.Now())
 			slog.Info("cron run history: cold-start GC done")
@@ -927,6 +935,25 @@ var stopBudget = 30 * time.Second
 // TRIGGER-GOROUTINE.
 func (s *Scheduler) Stop() {
 	s.stopCancel()
+
+	// R236-GO-01: wait for the cold-start GC goroutine spawned in Start()
+	// before draining the cron scheduler. Without this, trimAll's filesystem
+	// mutations on the runs/ tree race with Stop's final persist path and
+	// any in-flight Append from a TriggerNow draining via triggerWG.Wait.
+	// Bounded by a 5s timer so a wedged trimAll cannot pin Stop past
+	// stopBudget — the goroutine is naturally short-lived (ReadDir + N
+	// Removes), so any timeout here indicates a stuck filesystem.
+	gcDone := make(chan struct{})
+	go func() {
+		s.gcWG.Wait()
+		close(gcDone)
+	}()
+	select {
+	case <-gcDone:
+	case <-time.After(5 * time.Second):
+		slog.Warn("cron: gc goroutine wait timeout")
+	}
+
 	cronDoneCtx := s.cron.Stop()
 
 	// Single overall deadline shared across both waits. If cron.Stop drains
