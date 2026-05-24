@@ -1408,6 +1408,16 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	}
 
 	if upd.Schedule != nil && *upd.Schedule != j.Schedule {
+		// R236-QA-08: snapshot the old schedule so we can roll back the
+		// in-memory field if registerJob fails. Without this, a failed
+		// re-register left j.Schedule mutated to the new value but with
+		// j.entryID=0, so the API returned an error to the client while the
+		// job had silently disappeared from the cron scheduler. The client
+		// would assume the request was a no-op and retry, but the persisted
+		// state file (loaded next start) keeps showing the old schedule
+		// because persistJobsLocked never ran for this branch — diverging
+		// in-memory state from disk.
+		oldSchedule := j.Schedule
 		j.Schedule = *upd.Schedule
 		// Re-register with the new schedule unless paused (paused jobs have
 		// no live entry; ResumeJob will register with the new schedule).
@@ -1417,6 +1427,12 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 				j.entryID = 0
 			}
 			if err := s.registerJob(j); err != nil {
+				// Roll back the in-memory schedule field so subsequent
+				// reads (List, persistJobsLocked on a later mutator) keep
+				// showing the original schedule. j.entryID stays 0 since
+				// cron.Remove is irreversible — the next ResumeJob /
+				// successful UpdateJob will register a fresh entry.
+				j.Schedule = oldSchedule
 				s.mu.Unlock()
 				return nil, fmt.Errorf("re-register cron: %w", err)
 			}
