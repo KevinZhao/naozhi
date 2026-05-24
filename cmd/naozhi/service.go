@@ -56,7 +56,11 @@ func serviceUser() (user, home string) {
 		return
 	}
 	user = os.Getenv("USER")
-	home, _ = os.UserHomeDir()
+	var err error
+	home, err = os.UserHomeDir()
+	if err != nil || home == "" {
+		fatalf("UserHomeDir: %v (home=%q); set $HOME or run without sudo", err, home)
+	}
 	return
 }
 

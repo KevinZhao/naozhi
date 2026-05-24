@@ -1159,7 +1159,7 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 	if _, exists := s.jobs[j.ID]; exists {
 		return nil, fmt.Errorf("cron: failed to generate unique job ID after 10 attempts")
 	}
-	j.CreatedAt = time.Now()
+	j.CreatedAt = time.Now().UTC()
 
 	if !j.Paused {
 		if err := s.registerJob(j); err != nil {
@@ -1326,7 +1326,7 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 		return fmt.Errorf("%w: id %q", ErrJobNotPaused, j.ID)
 	}
 	if err := s.registerJob(j); err != nil {
-		return err
+		return fmt.Errorf("re-register cron: %w", err)
 	}
 	j.Paused = false
 	return nil
@@ -2343,7 +2343,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	inflight.startedAt.Store(timeHeap(startedAt))
 	inflight.phase.Store(strHeap(PhaseQueued))
 	inflight.trigger.Store(strHeap(string(trigger)))
-	inflight.sessionID.Store(strHeap(""))
+	inflight.sessionID.Store(nil)
 	inflight.freshSnap.Store(j.FreshContext)
 	metrics.CronRunInflight.Add(1)
 	// CronRunStartedTotal bumps inside emitRunStarted (R230C-GO-15).
