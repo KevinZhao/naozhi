@@ -61,9 +61,11 @@ func TestRequestHost(t *testing.T) {
 // "null" opaque origins, and trustedProxy X-Forwarded-Host pass-through.
 //
 // This is a regression test for R26-SEC1 / R31-SEC1 / R58-SEC-001 /
-// R60-SEC-001: SameSite=Strict cookies do not block a sibling-subdomain
-// attacker (evil.naozhi-host.example → naozhi-host.example), so we close
-// that gap at the HTTP layer and lock the behavior here.
+// R60-SEC-001 / R247-SEC-1: SameSite=Strict cookies do not block a
+// sibling-subdomain attacker (evil.naozhi-host.example → naozhi-host.example),
+// so we close that gap at the HTTP layer and lock the behavior here. The
+// scheme-match cases lock the [R247-SEC-1] downgrade gate: an HTTPS
+// request must reject `Origin: http://host` and vice versa.
 func TestSameOriginOK(t *testing.T) {
 	const host = "naozhi.example:8180"
 	cases := []struct {
@@ -72,23 +74,33 @@ func TestSameOriginOK(t *testing.T) {
 		referer      string
 		host         string
 		fwdHost      string
+		fwdProto     string // X-Forwarded-Proto, only honored when trustedProxy
 		trustedProxy bool
 		want         bool
 	}{
-		{"same_origin_match", "http://" + host, "", host, "", false, true},
-		{"same_origin_https", "https://" + host, "", host, "", false, true},
-		{"cross_origin_sibling_subdomain", "http://evil." + host, "", host, "", false, false},
-		{"cross_origin_different_port", "http://naozhi.example:9999", "", host, "", false, false},
-		{"opaque_null_origin_rejected", "null", "", host, "", false, false},
-		{"missing_origin_and_referer_allowed", "", "", host, "", false, true},
-		{"referer_fallback_same_host", "", "http://" + host + "/dashboard", host, "", false, true},
-		{"referer_fallback_cross_host", "", "http://evil.example/evil.html", host, "", false, false},
-		{"referer_malformed_rejected", "", "::not-a-url::", host, "", false, false},
-		{"origin_malformed_rejected", "::not-a-url::", "", host, "", false, false},
-		{"empty_host_refuses", "http://foo", "", "", "", false, false},
-		{"trusted_proxy_forwarded_host_match", "https://naozhi.example", "", "internal:8180", "naozhi.example", true, true},
-		{"trusted_proxy_forwarded_host_mismatch", "https://evil.example", "", "internal:8180", "naozhi.example", true, false},
-		{"untrusted_proxy_ignores_forwarded_host", "https://naozhi.example", "", "internal:8180", "naozhi.example", false, false},
+		{"same_origin_http_match", "http://" + host, "", host, "", "", false, true},
+		// [R247-SEC-1] http request paired with https origin is now rejected
+		// (mixed-content / downgrade defense).
+		{"scheme_mismatch_https_origin_on_http_req", "https://" + host, "", host, "", "", false, false},
+		{"cross_origin_sibling_subdomain", "http://evil." + host, "", host, "", "", false, false},
+		{"cross_origin_different_port", "http://naozhi.example:9999", "", host, "", "", false, false},
+		{"opaque_null_origin_rejected", "null", "", host, "", "", false, false},
+		{"missing_origin_and_referer_allowed", "", "", host, "", "", false, true},
+		{"referer_fallback_same_host", "", "http://" + host + "/dashboard", host, "", "", false, true},
+		// [R247-SEC-1] Referer scheme must also match.
+		{"referer_scheme_mismatch_https_on_http_req", "", "https://" + host + "/dashboard", host, "", "", false, false},
+		{"referer_fallback_cross_host", "", "http://evil.example/evil.html", host, "", "", false, false},
+		{"referer_malformed_rejected", "", "::not-a-url::", host, "", "", false, false},
+		{"origin_malformed_rejected", "::not-a-url::", "", host, "", "", false, false},
+		{"empty_host_refuses", "http://foo", "", "", "", "", false, false},
+		// [R247-SEC-1] trusted-proxy https path: X-Forwarded-Proto=https
+		// makes the request scheme https, so https origin matches.
+		{"trusted_proxy_forwarded_host_match", "https://naozhi.example", "", "internal:8180", "naozhi.example", "https", true, true},
+		{"trusted_proxy_forwarded_host_mismatch", "https://evil.example", "", "internal:8180", "naozhi.example", "https", true, false},
+		// [R247-SEC-1] trusted-proxy with no X-Forwarded-Proto stays http,
+		// so https origin is rejected (downgrade scenario).
+		{"trusted_proxy_no_xfp_rejects_https_origin", "https://naozhi.example", "", "internal:8180", "naozhi.example", "", true, false},
+		{"untrusted_proxy_ignores_forwarded_host", "https://naozhi.example", "", "internal:8180", "naozhi.example", "https", false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -103,9 +115,12 @@ func TestSameOriginOK(t *testing.T) {
 			if tc.fwdHost != "" {
 				r.Header.Set("X-Forwarded-Host", tc.fwdHost)
 			}
+			if tc.fwdProto != "" {
+				r.Header.Set("X-Forwarded-Proto", tc.fwdProto)
+			}
 			if got := sameOriginOK(r, tc.trustedProxy); got != tc.want {
-				t.Errorf("sameOriginOK = %v, want %v (origin=%q referer=%q host=%q fwd=%q proxy=%v)",
-					got, tc.want, tc.origin, tc.referer, tc.host, tc.fwdHost, tc.trustedProxy)
+				t.Errorf("sameOriginOK = %v, want %v (origin=%q referer=%q host=%q fwd=%q proto=%q proxy=%v)",
+					got, tc.want, tc.origin, tc.referer, tc.host, tc.fwdHost, tc.fwdProto, tc.trustedProxy)
 			}
 		})
 	}
