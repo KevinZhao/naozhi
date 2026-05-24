@@ -429,14 +429,18 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /api/system/daemons", auth(s.handleSystemDaemons))
 	s.mux.HandleFunc("POST /api/system/labels/clear-origin", auth(s.handleClearLabelOrigin))
 	s.mux.HandleFunc("POST /api/auth/logout", auth(s.auth.handleLogout))
-	// pprof debug endpoints: auth-gated + loopback-only. Registered via
-	// a package-local helper that wraps the stdlib net/http/pprof
-	// handlers. See internal/server/debug_pprof.go + docs/ops/pprof.md.
-	s.registerPprof()
-	// expvar /debug/vars: same auth + loopback posture as pprof. Exposes
-	// the five naozhi_* counters from internal/metrics plus stdlib
-	// cmdline/memstats. OBS2.
-	s.registerExpvar()
+	// pprof / expvar debug endpoints: auth-gated + loopback-only AND
+	// gated behind server.debug_mode (default false) so a leaked dashboard
+	// token cannot enumerate goroutine stacks (which embed file paths +
+	// queue contents) or expvar counters at all. Operators flip
+	// debug_mode=true via config.yaml only while capturing a profile, then
+	// flip it back. R244-SEC-P3-1 [REPEAT-3]. See internal/server/
+	// debug_pprof.go + docs/ops/pprof.md for the runbook (operators must
+	// also restart with debug_mode=true).
+	if s.debugMode {
+		s.registerPprof()
+		s.registerExpvar()
+	}
 	if s.scratchH != nil {
 		s.mux.HandleFunc("POST /api/scratch/open", auth(s.scratchH.handleOpen))
 		s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(s.scratchH.handlePromote))

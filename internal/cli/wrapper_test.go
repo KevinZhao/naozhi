@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -170,5 +171,42 @@ func TestNewWrapper_UnavailableBinaryLeavesVersionEmpty(t *testing.T) {
 	}
 	if w.CLIName != "claude-code" {
 		t.Errorf("CLIName = %q, want %q", w.CLIName, "claude-code")
+	}
+}
+
+// TestNewWrapperLazy_NoEagerProbe pins the lazy contract: NewWrapperLazy
+// MUST NOT run `<cli> --version` synchronously, and CLIVersion remains
+// "" until Probe(ctx) is invoked. R241-ARCH-1.
+func TestNewWrapperLazy_NoEagerProbe(t *testing.T) {
+	t.Parallel()
+	// Even with a path that would fail-fast, the eager constructor pays
+	// process startup + immediate ENOENT (~1ms). The lazy constructor must
+	// not hit exec.Command at all — assertion is structural: CLIVersion
+	// stays empty and BackendID/CLIName are populated as in the eager path.
+	w := NewWrapperLazy("/definitely/not/a/real/path/claude-xyz", &ClaudeProtocol{}, "claude")
+	if w.CLIVersion != "" {
+		t.Errorf("lazy NewWrapperLazy must not eagerly probe; got CLIVersion=%q", w.CLIVersion)
+	}
+	if w.BackendID != "claude" || w.CLIName != "claude-code" {
+		t.Errorf("lazy constructor lost backend metadata: backend=%q name=%q",
+			w.BackendID, w.CLIName)
+	}
+}
+
+// TestWrapper_Probe_CtxCancelled pins that Probe respects an
+// already-cancelled context: the underlying exec.CommandContext fails
+// immediately, CLIVersion is set to "" (unchanged from zero), and
+// the call returns "" rather than blocking 5s. R241-ARCH-1.
+func TestWrapper_Probe_CtxCancelled(t *testing.T) {
+	t.Parallel()
+	w := NewWrapperLazy("/definitely/not/a/real/path/claude-xyz", &ClaudeProtocol{}, "claude")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel
+	v := w.Probe(ctx)
+	if v != "" {
+		t.Errorf("Probe with cancelled ctx must return empty, got %q", v)
+	}
+	if w.CLIVersion != "" {
+		t.Errorf("Probe with cancelled ctx must not populate CLIVersion, got %q", w.CLIVersion)
 	}
 }

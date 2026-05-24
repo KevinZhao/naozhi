@@ -108,7 +108,7 @@ func TestWSPreMarshalledFrames(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
-		got  []byte
+		got  string // R241-SEC-13: now a const string; SendRaw call sites convert via []byte(...)
 		msg  node.ServerMsg
 	}{
 		{"not authenticated", wsErrNotAuthMsg, node.ServerMsg{Type: "error", Error: "not authenticated"}},
@@ -120,7 +120,7 @@ func TestWSPreMarshalledFrames(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			if string(tc.got) != string(want) {
+			if tc.got != string(want) {
 				t.Fatalf("pre-marshalled frame drift\n  got=%s\n want=%s", tc.got, want)
 			}
 		})

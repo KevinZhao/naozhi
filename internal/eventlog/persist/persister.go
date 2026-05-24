@@ -252,13 +252,15 @@ func (p *Persister) SinkFor(key string) PersistSink {
 		if replayPhase {
 			p.replayLeakCnt.Add(int64(len(entries)))
 			p.opts.Observer.OnReplayLeak(len(entries))
-			// R242-GO-11: previously this branch panic'd in DevMode to make
-			// sink-ordering bugs explode loudly during tests; the panic was a
-			// goroutine-context crash that took down the whole process and
-			// could not be observed cleanly by callers. We now log at Error
-			// level with a `dev_mode=true` attribute and rely on the
-			// `replayLeakCnt` counter + `OnReplayLeak` Observer hook (both
-			// already in place above) for test assertions and prod alerting.
+			// R242-GO-11 [BREAKING-LOCAL] (closed): previously this branch
+			// panic'd in DevMode to make sink-ordering bugs explode loudly
+			// during tests; the panic was a goroutine-context crash that
+			// took down the whole process and could not be observed cleanly
+			// by callers. We now log at Error level with a `dev_mode=...`
+			// attribute and rely on the `replayLeakCnt` counter +
+			// `OnReplayLeak` Observer hook (both already in place above)
+			// for test assertions and prod alerting. See
+			// TestPersister_DevMode_ReplayLeakObserved for the contract pin.
 			slog.Error("event log persist: replay-phase entries reached sink",
 				"key", key, "count", len(entries),
 				"dev_mode", p.opts.DevMode)

@@ -43,20 +43,25 @@ const (
 
 // Server is the HTTP entry point for Naozhi.
 type Server struct {
-	addr              string
-	mux               *http.ServeMux
-	platforms         map[string]platform.Platform
-	router            *session.Router
-	dedup             *platform.Dedup
-	sessionGuard      *session.Guard
-	msgQueue          *dispatch.MessageQueue
-	startedAt         time.Time
-	agents            map[string]session.AgentOpts
-	agentCommands     map[string]string
-	scheduler         *cron.Scheduler
-	backendTag        string // e.g., "cc" or "kiro", appended to replies
-	dashboardToken    string // optional bearer token for dashboard API
-	hub               *Hub   // WebSocket hub
+	addr           string
+	mux            *http.ServeMux
+	platforms      map[string]platform.Platform
+	router         *session.Router
+	dedup          *platform.Dedup
+	sessionGuard   *session.Guard
+	msgQueue       *dispatch.MessageQueue
+	startedAt      time.Time
+	agents         map[string]session.AgentOpts
+	agentCommands  map[string]string
+	scheduler      *cron.Scheduler
+	backendTag     string // e.g., "cc" or "kiro", appended to replies
+	dashboardToken string // optional bearer token for dashboard API
+	// debugMode gates /api/debug/pprof and /api/debug/vars; both 404 when
+	// false. Default off so a stolen token cannot pull goroutine stacks or
+	// memstats fingerprints. Operators set server.debug_mode=true only
+	// during a profiling session. R244-SEC-P3-1 [REPEAT-3].
+	debugMode         bool
+	hub               *Hub // WebSocket hub
 	nodes             map[string]node.Conn
 	reverseNodeServer *node.ReverseServer
 	nodesMu           sync.RWMutex
@@ -440,6 +445,15 @@ type ServerOptions struct {
 	// legacy wire shape.
 	Version string
 
+	// DebugMode gates registration of /api/debug/pprof and /api/debug/vars.
+	// Default false — both endpoints become 404 even for loopback+auth callers,
+	// closing the residual surface where a leaked dashboard token plus host
+	// access could enumerate goroutine stacks (which embed file paths +
+	// queue contents) and expvar counters. Operators flip this to true via
+	// `server.debug_mode: true` in config.yaml when they need to capture a
+	// profile, then flip it back. R244-SEC-P3-1 [REPEAT-3].
+	DebugMode bool
+
 	// === Core dependencies (previously positional args of New) ===
 	//
 	// These fields were originally positional parameters on New(); they
@@ -601,6 +615,7 @@ func buildServer(opts ServerOptions) *Server {
 		noOutputTimeout: opts.NoOutputTimeout,
 		totalTimeout:    opts.TotalTimeout,
 		dashboardToken:  opts.DashboardToken,
+		debugMode:       opts.DebugMode,
 		onReady:         opts.OnReady,
 		projectMgr:      opts.ProjectManager,
 		resolver:        resolver,

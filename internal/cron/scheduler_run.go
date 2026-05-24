@@ -349,17 +349,38 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 	return ch
 }
 
-// classifyExecError maps a non-canceled error from GetOrCreate or Send to
-// (RunState, ErrorClass) for finishRun. context.Canceled is a separate
-// branch upstream (different skipPersist semantics + different log line)
-// and is intentionally NOT handled here. defaultClass distinguishes the
+// classifyExecError maps an error from GetOrCreate or Send to
+// (RunState, ErrorClass) for finishRun. defaultClass distinguishes the
 // session-spawn path (ErrClassSessionError) from the send path
-// (ErrClassSendError); when err is context.DeadlineExceeded the
-// classification flips to (RunStateTimedOut, ErrClassDeadlineExceeded)
-// regardless of which call path produced it. R230C-CR-7.
+// (ErrClassSendError); the helper unconditionally remaps the two
+// context-derived sentinels:
+//
+//   - context.DeadlineExceeded → (RunStateTimedOut, ErrClassDeadlineExceeded)
+//   - context.Canceled         → (RunStateCanceled, ErrClassCanceled)
+//
+// R241-ARCH-7: Canceled was historically handled by the caller via a
+// dedicated `if errors.Is(err, context.Canceled)` branch ahead of this
+// helper, so the state mapping was split across this site (DeadlineExceeded
+// only) and the two caller blocks (Canceled / default). Folding Canceled
+// into the helper keeps all (err → state, errClass) decisions in one
+// place. Callers still own the side-effects that DIFFER per class
+// (skipPersist=true for Canceled, operator-facing notice suppressed for
+// Canceled, abort.fired logging on the send path) — see executeOpt's
+// switch on errClass below for those policy choices.
+//
+// errors.Is order matters: context.Canceled wraps both genuine
+// cancellation AND the "parent ctx cancelled mid-DeadlineExceeded" race
+// where Send returns context.Canceled even though the deadline ticked
+// first. Checking DeadlineExceeded first preserves the historical
+// classification (deadline-exceeded WINS) so jobs that hit jobTimeout
+// during a graceful shutdown still record RunStateTimedOut rather than
+// RunStateCanceled. R230C-CR-7 (original) + R241-ARCH-7 (Canceled fold).
 func classifyExecError(err error, defaultClass ErrorClass) (RunState, ErrorClass) {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return RunStateTimedOut, ErrClassDeadlineExceeded
+	}
+	if errors.Is(err, context.Canceled) {
+		return RunStateCanceled, ErrClassCanceled
 	}
 	return RunStateFailed, defaultClass
 }

@@ -36,6 +36,10 @@ func launchdPlistPath() string {
 // Under sudo, it returns the original invoking user.
 func serviceUser() (user, home string) {
 	if su := os.Getenv("SUDO_USER"); su != "" {
+		// POSIX login.defs LOGIN_NAME_MAX is 256; reject longer to bound argv/env growth.
+		if len(su) > 256 {
+			fatalf("SUDO_USER too long: %d bytes", len(su))
+		}
 		// Validate username format to prevent injection into systemd unit files.
 		for _, c := range su {
 			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {

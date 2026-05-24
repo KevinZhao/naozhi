@@ -60,7 +60,61 @@ type Wrapper struct {
 
 // NewWrapper creates a Wrapper with the given CLI path and protocol.
 // If path is empty, auto-detects from known install locations and PATH.
+//
+// R241-ARCH-1: NewWrapper synchronously runs `<cli> --version` with a 5s
+// hard timeout (detectVersion → context.Background derived). This makes
+// construction blocking-IO instead of pure field assignment. Callers
+// that need a true zero-IO constructor (tests / probes from a context
+// already plumbed for shutdown) should use NewWrapperLazy + Probe(ctx)
+// instead — Probe lets a Background-derived ctx be replaced with the
+// caller's stopCtx so SIGTERM during startup does not block for the
+// full 5 seconds. cmd/naozhi.main may migrate to the lazy variant once
+// it threads ctx into its wrapper construction step (currently every
+// wrapper read of CLIVersion happens AFTER construction, so the lazy
+// + Probe pattern is wire-compatible).
 func NewWrapper(cliPath string, proto Protocol, backend string) *Wrapper {
+	w := newWrapperCommon(cliPath, proto, backend)
+	// Eager probe — blocks up to 5s. Acceptable on the legacy startup
+	// path where main.go expects CLIVersion populated before it logs
+	// the "backend X version Y" banner. NewWrapperLazy skips this.
+	w.CLIVersion = detectVersion(w.CLIPath)
+	return w
+}
+
+// NewWrapperLazy is the non-blocking counterpart of NewWrapper:
+// constructs the Wrapper without running `<cli> --version`. CLIVersion
+// stays "" until the caller invokes Probe(ctx). Suitable for startup
+// paths that already hold a stopCtx and want to bound the probe by
+// it, and for tests that exercise wrapper construction without
+// touching the filesystem. R241-ARCH-1.
+func NewWrapperLazy(cliPath string, proto Protocol, backend string) *Wrapper {
+	return newWrapperCommon(cliPath, proto, backend)
+}
+
+// Probe runs `<cli> --version` under the caller's context and stores
+// the parsed result on the receiver. Safe to call multiple times; each
+// call overwrites the cached version. Intended for callers that built
+// the Wrapper via NewWrapperLazy and want to populate CLIVersion later
+// (typically once during startup, after a stopCtx is available).
+//
+// The 5s subprocess timeout is still applied internally so a hung
+// `<cli> --version` cannot pin the caller longer than the shorter of
+// "ctx cancelled" and "5 seconds". Returns the version string for
+// convenience; the same value is also written to w.CLIVersion. R241-ARCH-1.
+func (w *Wrapper) Probe(ctx context.Context) string {
+	if w == nil || w.CLIPath == "" {
+		return ""
+	}
+	v := detectVersionCtx(ctx, w.CLIPath)
+	w.CLIVersion = v
+	return v
+}
+
+// newWrapperCommon is the shared constructor body for NewWrapper and
+// NewWrapperLazy. Encapsulates the path expansion + backend
+// normalisation + display-name lookup that BOTH eager and lazy
+// constructors run identically.
+func newWrapperCommon(cliPath string, proto Protocol, backend string) *Wrapper {
 	if cliPath == "" {
 		cliPath = detectCLI(backend)
 	}
@@ -81,7 +135,7 @@ func NewWrapper(cliPath string, proto Protocol, backend string) *Wrapper {
 			"backend", osutil.SanitizeForLog(id, 64),
 			"raw", osutil.SanitizeForLog(backend, 64))
 	}
-	w := &Wrapper{
+	return &Wrapper{
 		BackendID: id,
 		CLIPath:   cliPath,
 		// R228-ARCH-15: feed the canonical id (post-normalize) into
@@ -91,11 +145,9 @@ func NewWrapper(cliPath string, proto Protocol, backend string) *Wrapper {
 		CLIName:  backendDisplayName(id),
 		Protocol: proto,
 	}
-	w.CLIVersion = detectVersion(cliPath)
 	// History factories are resolved at NewHistorySource call time via
 	// pickHistoryFactory(BackendID) — see Wrapper struct godoc for
 	// rationale (R240-ARCH-28). No binding happens here.
-	return w
 }
 
 // isKnownBackendID reports whether id is a backend the cli package knows
