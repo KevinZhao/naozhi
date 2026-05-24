@@ -174,6 +174,25 @@ func (s *runStore) jobLock(jobID string) *sync.Mutex {
 	return actual.(*sync.Mutex)
 }
 
+// assertJobLockHeld panics when jobLock(jobID) is currently free, which
+// — outside concurrent tests — is the unambiguous signature of a caller
+// that violated the *Locked-suffix contract (forgot to acquire). Use
+// from helpers whose godoc says "caller must hold jobLock".
+//
+// The check is best-effort: TryLock+Unlock is cheap (uncontended fast
+// path) and the panic message includes the jobID so failures point
+// straight at the offending caller. False negatives — another goroutine
+// holds the lock, our caller doesn't, TryLock fails so we miss the bug
+// — are accepted in exchange for catching the dominant "single-flight
+// test caller forgot to lock" failure mode reliably. R236-GO-03.
+func (s *runStore) assertJobLockHeld(jobID string) {
+	lock := s.jobLock(jobID)
+	if lock.TryLock() {
+		lock.Unlock()
+		panic("cron runstore: jobLock(" + jobID + ") not held by caller; *Locked-suffix contract violated")
+	}
+}
+
 // Append writes one run record to disk and trims the per-job ring.
 // Errors are logged, never returned: cron must not block history failure.
 func (s *runStore) Append(run *CronRun) {
@@ -618,14 +637,29 @@ func (s *runStore) DeleteJob(jobID string) {
 }
 
 // trimJobLocked enforces the per-job retention policy. Caller must hold
-// jobLock(jobID). now is passed in so tests can inject deterministic
-// "current time" without touching time.Now().
+// jobLock(jobID) — the "Locked" suffix encodes the lock-already-held
+// contract. now is passed in so tests can inject deterministic "current
+// time" without touching time.Now().
+//
+// LOCKING (R236-GO-03): the contract used to live only in the comment
+// above. The function performs ReadDir + os.Remove on the per-job runs
+// directory and pushes the trimmed slice into the recentCache entry,
+// which races concurrent Append (also holding jobLock) and concurrent
+// cacheGet (holds entry.mu only) without serialisation if the caller
+// failed to acquire jobLock. assertJobLockHeld below is a best-effort
+// runtime guard: a successful TryLock means no goroutine — including
+// the caller — was holding the lock, which is exactly the contract
+// violation we want to catch in tests. False negatives are possible
+// (another goroutine may hold it instead of the caller), but the most
+// likely failure mode is "caller forgot to acquire" and that surfaces
+// reliably in single-flight test scenarios.
 //
 // Policy: keep ALL runs satisfying BOTH (rank ≤ keepCount) AND
 // (age ≤ keepWindow). Either condition violated → delete. AND-vs-OR
 // is the user-confirmed choice in the RFC chat (§4.3): high-frequency
 // jobs get capped by count; low-frequency jobs by window.
 func (s *runStore) trimJobLocked(jobID string, now time.Time) {
+	s.assertJobLockHeld(jobID)
 	dir := filepath.Join(s.root, jobID)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
