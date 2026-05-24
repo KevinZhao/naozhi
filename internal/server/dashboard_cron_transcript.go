@@ -689,16 +689,17 @@ func summariseToolInput(name string, input json.RawMessage) string {
 // parseISO8601MS converts an RFC 3339 / ISO 8601 timestamp into unix ms.
 // Returns 0 when the input is empty or unparseable so callers can use
 // it as a fall-through "skip filter" sentinel.
+//
+// time.RFC3339Nano is a strict superset of time.RFC3339 — any timestamp
+// the latter accepts is also accepted by the former — so the previous
+// RFC3339 fallback was dead code and is now removed (R243-CR-P3-6).
 func parseISO8601MS(s string) int64 {
 	if s == "" {
 		return 0
 	}
 	t, err := time.Parse(time.RFC3339Nano, s)
 	if err != nil {
-		t, err = time.Parse(time.RFC3339, s)
-		if err != nil {
-			return 0
-		}
+		return 0
 	}
 	return t.UnixMilli()
 }
