@@ -267,8 +267,14 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		// exist yet on a fresh setup); the strict check still applies.
 		resolvedRoot = allowedRoot
 	}
-	resolvedRoot += string(os.PathSeparator)
-	if !strings.HasPrefix(resolved+string(os.PathSeparator), resolvedRoot) {
+	// R236-SEC-05: align with the validateWorkspace / workDirUnderRoot
+	// pattern (`resolved != root && !HasPrefix(resolved, root+sep)`) so a
+	// future refactor can grep for one shape across server/cron. The old
+	// "double-append separator" form was correct but easy to misread as
+	// "if I forget the trailing sep on one side, the check is now wrong",
+	// which is the failure mode the unified pattern eliminates.
+	if resolved != resolvedRoot &&
+		!strings.HasPrefix(resolved, resolvedRoot+string(os.PathSeparator)) {
 		slog.Warn("cron transcript: path escape attempt", "raw", jsonlPath, "resolved", resolved, "claudeDir", h.claudeDir, "allowedRoot", resolvedRoot)
 		resp.Fallback = "missing"
 		writeJSON(w, resp)
