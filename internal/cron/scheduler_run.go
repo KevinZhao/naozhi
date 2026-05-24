@@ -429,7 +429,9 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	inflight.phase.Store(strHeap(PhaseQueued))
 	inflight.trigger.Store(strHeap(string(trigger)))
 	inflight.sessionID.Store(strHeap(""))
-	inflight.freshSnap.Store(j.FreshContext)
+	// R247-GO-1: freshSnap is set authoritatively from snap.fresh after
+	// snapshotJob runs under s.mu (line ~447); writing j.FreshContext here
+	// without the lock was redundant and -race-suspect.
 	metrics.CronRunInflight.Add(1)
 	// CronRunStartedTotal bumps inside emitRunStarted (R230C-GO-15).
 

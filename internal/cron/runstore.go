@@ -115,12 +115,24 @@ type recentCacheEntry struct {
 // ringRead returns the i-th newest entry (0 = newest). Caller holds entry.mu
 // and must ensure 0 ≤ i < entry.count.
 func (e *recentCacheEntry) ringRead(i int) CronRunSummary {
+	// R247-GO-4: defensive against cap(ring)==0 with count>0 — same self-heal
+	// philosophy as cacheHeadPush's `cap(entry.ring) != s.keepCount` reseed.
+	// Avoids integer divide-by-zero panic on a regression path that bypasses
+	// ringSeed (e.g. an unwarmed entry mutated by future code). [BREAKING-LOCAL]
+	if cap(e.ring) == 0 {
+		return CronRunSummary{}
+	}
 	return e.ring[(e.head+i)%cap(e.ring)]
 }
 
 // ringSnapshot returns a fresh newest-first slice of up to limit entries.
 // Caller holds entry.mu. limit ≤ 0 or limit > count returns count entries.
 func (e *recentCacheEntry) ringSnapshot(limit int) []CronRunSummary {
+	// R247-GO-4: see ringRead — guard cap=0 + count>0 regression and the
+	// degenerate count==0 fast path (no allocation needed). [BREAKING-LOCAL]
+	if cap(e.ring) == 0 || e.count == 0 {
+		return nil
+	}
 	if limit <= 0 || limit > e.count {
 		limit = e.count
 	}

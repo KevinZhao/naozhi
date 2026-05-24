@@ -654,6 +654,12 @@ func buildServer(opts ServerOptions) *Server {
 			// refresh bursts (tab switch + filter change) while capping
 			// a stolen token's steady-state poll rate.
 			listLimiter: newIPLimiterWithProxy(rate.Every(500*time.Millisecond), 30, opts.TrustedProxy),
+			// [R247-SEC-2 / R247-SEC-3] per-IP limiter shared by the
+			// cron write / control endpoints (trigger, preview). 30 req/min
+			// sustained with burst 6 — legitimate UI form-edit loops hit
+			// preview a handful of times per minute, while a stolen token
+			// is capped at one trigger every 2 s steady-state.
+			writeLimiter: newIPLimiterWithProxy(rate.Every(2*time.Second), 6, opts.TrustedProxy),
 		},
 		transcribeH: &TranscribeHandler{
 			transcriber:       opts.Transcriber,
@@ -880,6 +886,12 @@ func buildServer(opts ServerOptions) *Server {
 		}
 		if s.cronH.listLimiter == nil {
 			panic("server: listLimiter must be non-nil when scheduler is wired")
+		}
+		// [R247-SEC-2 / R247-SEC-3] writeLimiter gates trigger + preview;
+		// silent unlimited-rate downgrade would expose CLI-spawn /
+		// IM-notify amplification, so fail-fast at construction.
+		if s.cronH.writeLimiter == nil {
+			panic("server: writeLimiter must be non-nil when scheduler is wired")
 		}
 	}
 

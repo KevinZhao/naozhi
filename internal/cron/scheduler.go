@@ -22,6 +22,12 @@ import (
 // Callers should use errors.Is(err, cron.ErrJobNotFound) instead of string matching.
 var ErrJobNotFound = errors.New("cron: job not found")
 
+// ErrAmbiguousPrefix is returned by findByPrefix when an ID prefix matches more
+// than one job in the same chat scope. Callers (CLI/HTTP) should use
+// errors.Is(err, cron.ErrAmbiguousPrefix) to surface a "please disambiguate"
+// hint instead of treating it as a generic not-found. [R247-GO-2]
+var ErrAmbiguousPrefix = errors.New("cron: ambiguous job prefix")
+
 // ErrJobAlreadyPaused is returned by PauseJob when the target job is already
 // paused. Callers (especially HTTP handlers) should map this to 409 Conflict
 // rather than 400, since the request was well-formed but the target state is

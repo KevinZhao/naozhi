@@ -331,12 +331,12 @@ func ReadFramedBody(br *bufio.Reader) ([]byte, int, error) {
 		// unreachable — we can't recover, treat the whole file as
 		// truncated at this point.
 		//
-		// R245-PERF-8 follow-up: ReleaseFramedBody is invoked exactly once.
-		// An earlier refactor accidentally double-released the same buffer,
-		// which violates the pool invariant ("the next reader gets the same
-		// backing array") and could hand the same slice to two concurrent
-		// ReadFramedBody callers — clobbering each other on the next frame.
-		ReleaseFramedBody(body)
+		// R245-PERF-8 follow-up / R247-PERF-1: ReleaseFramedBody is NOT
+		// called here — the body buffer is owned by the pool and must be
+		// returned exactly once on the success path. Releasing on this
+		// error path would risk a double-free if a caller upstream also
+		// returned an already-released buffer to the pool, violating the
+		// invariant ("the next reader gets the same backing array").
 		return nil, 0, ErrMalformedFrame
 	}
 

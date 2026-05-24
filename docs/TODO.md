@@ -107,6 +107,150 @@
 - [~] **R30-DES1 — 需架构决策（2026-04-29 Round 112 评估降级）**：本轮尝试在 `execute()` 入口加 `stopCtx.Err()` 守卫覆盖 fresh + persistent 两种模式，但这与 Round 95 的设计意图冲突（Round 95 明确将 persistent 模式的 ctx 取消委托给 Router.Shutdown，`TestCRON3_PersistentModeUnaffectedByGuard` 把此行为作为测试护栏）。fresh 分支的 stopCtx.Err() 守卫（`scheduler.go:1260`）已覆盖最危险的"fresh → Reset → 孤立 CLI"路径。persistent 模式的真正修复需要架构级协调：要么把 Router.Shutdown 和 Scheduler.Stop 串联锁定（需 S11 级决策），要么在 GetOrCreate 路径里加 shutdown-awareness（改动面大）。当前降级，等 S11 整体方案落地后重开。
 - [ ] **R29-DES1 — `drainStaleEvents` push-back + goto drain 可吞 interrupted result 事件**: 本轮新发现的 invariant 冲突。在 interrupted/interruptedRun 分支的 for 循环中，若事件顺序为 `[old_nonresult, new_event, old_result]`，读到 `new_event` 后 push-back + `goto drain`，接着 drain 到 `old_result` 时因 `recvAt < cutoff` 被丢弃。interrupted 语义要求 settle 窗口必须拿到 old_result，否则下一 turn 迟到的 result 会污染结果。
 
+## Round 247 — 5-agent 并行 code review 第 57 轮（2026-05-24，紧随 Round 246）NEEDS-DESIGN
+
+> 紧随 Round 246 的第 57 轮 5-reviewer 并行扫描（Go / 安全 / 性能 / 代码质量 / 架构）。基线 0336c19。in-flight PR=0；REPEAT 提示 ARCH-1/2/10/11 REPEAT-7~20 / 多处 PERF/SEC REPEAT-2~3 已避开（本轮专注：framing.go 双 free / freshSnap pre-snapshot store / cron findByPrefix sentinel / ListJobs nil slice / ringRead cap=0 panic / csrf scheme 不匹配 / dashboard cron trigger+preview rate limit / MkdirAll 0700 不修复 existing dir / agent_view onclick 模板 / errclass 三套并行）。
+>
+> 本轮直接修 8 项落地（v4 三段限额：P1-SEC 无上限×1 + 非安全简单 ≤6 共 5 + BREAKING-LOCAL ≤2 共 2）：
+> - [R247-PERF-1] eventlog/persist/framing.go 删 missing-newline 路径双 ReleaseFramedBody（pool 双 free 引发后续帧 reader race）
+> - [R247-GO-1] cron/scheduler_run.go 删 line 411 redundant `inflight.freshSnap.Store(j.FreshContext)` pre-snapshot 写（snap.fresh 是权威值，且 j.FreshContext 无锁读会触 -race）
+> - [R247-GO-2] cron 引入 `ErrAmbiguousPrefix` sentinel + `findByPrefix` ambiguous 分支 `%w` 包装，让 dashboard handler 能 errors.Is 区分 not-found vs ambiguous
+> - [R247-GO-3] (BREAKING-LOCAL) cron/scheduler_jobs.go `ListJobs` nil slice 改 make([]Job, 0, len)；空 list JSON 从 null → []
+> - [R247-GO-4] (BREAKING-LOCAL) cron/runstore.go ringRead/ringSnapshot 加 cap(ring)==0 守卫防 integer divide-by-zero panic
+> - [R247-SEC-1] (BREAKING-LOCAL) server/csrf.go sameOriginOK 加 scheme 比对（HTTPS 请求拒绝 `Origin: http://host`）+ `requestScheme(r, trustedProxy)` helper
+> - [R247-SEC-2] server/dashboard_cron.go handleTrigger 加 per-IP rate limit（30 req/min，burst 6，统一 `writeLimiter` 桶）
+> - [R247-SEC-3] server/dashboard_cron.go handlePreview 复用同 `writeLimiter` 桶
+>
+> 其余 ~80 项全登记 NEEDS-DESIGN，按 v4 分类标签 [REFACTOR]/[BREAKING-LOCAL]/[REPEAT-N]。
+
+### Go（剩余）
+
+- [ ] **R247-GO-5 — runDeadlineWatchdog goroutine ctx 缺 hard timeout（P1）** [BREAKING-LOCAL]: `internal/cron/scheduler_run.go:339-350` watchdog 内调 `sess.InterruptViaControl()` 若 shim 写 wedge 可阻塞，导致 wrapper goroutine 持 abortCh 槽位超过 stopBudget。方案：select{<-abortCh} 配 hard timeout 或 sendCtx-like 传入 InterruptViaControl。
+- [ ] **R247-GO-6 — runstore warmCache LoadOrStore 与 cacheGet 不同 entry 实例 race（P1）** [BREAKING-LOCAL]: `internal/cron/runstore.go:494-509` 若 cacheInvalidate(DeleteJob) 在两次 LoadOrStore 之间执行，cacheGet 的 OLD entry 永远 warm=false → 返回 (nil,false) 静默 miss。方案：把 entry 指针从 cacheGet 透传给 warmCache，或 cacheGet 在 warmCache 后再 Load() 切到当前 entry。
+- [ ] **R247-GO-7 — Stop() gcWG.Wait wrapper goroutine 漏写 contract（P1）** [REPEAT-2]: `internal/cron/scheduler.go:694-705` 与 triggerWG 同 leak 模式但 CONTRACT 块只覆盖 triggerWG。方案：扩展同一 CONTRACT 注释或让 trimAll 观测 stopCtx。
+- [ ] **R247-GO-8 — Append path-traversal 防御深度（P2）** [BREAKING-LOCAL]: `internal/cron/runstore.go:282-339` IsValidID 已防 hex-only 输入，但写路径无 filepath.Rel 校验。方案：MkdirAll 前 `filepath.Rel(s.root, dir)` 校验，与 readRun Lstat 对齐。
+- [ ] **R247-GO-9 — NextRun s.cron.Entry 在 RUnlock 后读（P2）** [REPEAT-2]: `internal/cron/scheduler_jobs.go:761-770` 与 R246-GO-1 同模式不同 site；UpdateJob 的 Remove+AddFunc 可在窗口内返回 Entry{}。方案：Entry() 移到 RLock 内或 godoc 标注 best-effort。
+- [ ] **R247-GO-10 — EnsureStub 总返 true 不反映 register 失败（P2）** [REFACTOR]: `internal/cron/scheduler.go:617-643` registerStubByValue 不返 error，调用方误以为 stub 已注册。方案：让 RegisterCronStubWithChain 返 error 一路上抛。
+- [ ] **R247-GO-11 — resetRouterStub 缺 nil-receiver 防御（P2）** [BREAKING-LOCAL]: `internal/cron/scheduler.go:783-788` 与 sibling StartedAt/KnownSessionIDs 不一致；测试构造部分 Scheduler 调 DeleteJobByID 会 NPE。方案：开头 `if s == nil { return }`。
+- [ ] **R247-GO-12 — runDeadlineWatchdog 每 tick spawn goroutine（P2）** [REFACTOR]: `internal/cron/scheduler_run.go:621-630` 50 jobs × 1Hz = 50 goroutine/秒 启停，99% case 无效。方案：高 jobTimeout 跳过 watchdog 或共享 watchdog goroutine。
+- [ ] **R247-GO-13 — AddJob 10 collision retry 日志 flood（P3）** [BREAKING-LOCAL]: `internal/cron/scheduler_jobs.go:88-109` mock generator 死循环时刷 10 行 log。方案：仅 i==0 记 Warn 或检测确定性 generator 提前 bail。
+- [ ] **R247-GO-14 — Stop() 文档实际 wall-clock 35s（P3）** [BREAKING-LOCAL]: `internal/cron/scheduler.go:684-777` godoc 说 "bounded by stopBudget(30s)"，实测 + gcWaitBudget(5s) = 35s。方案：godoc 修正或共享 budget。
+- [ ] **R247-GO-15 — saveMarshaledSeq 失败时 lastSavedSeq 未更新注释缺失（P3）** [BREAKING-LOCAL]: `internal/cron/scheduler_persist.go:101-135` 当前正确但缺 godoc 解释。方案：注释解释为何不 bump。
+- [ ] **R247-GO-16 — spawn budget 警告阈值 jobTimeout/2 噪音（P3）** [BREAKING-LOCAL]: `internal/cron/scheduler_run.go:606-613` cold-start fresh-context preflight 触发误报。方案：阈值 → jobTimeout 或区分 fresh vs hot。
+- [ ] **R247-GO-17 — cacheGet R241-CR-6 注释失效（P3）** [REPEAT-2]: `internal/cron/runstore.go:449-489` 注释说 "always sets warm=true" 但 R247-GO-6 race 后不成立。方案：与 R247-GO-6 一并修或更新注释。
+
+### 安全（剩余）
+
+- [ ] **R247-SEC-4 — agent_view.js inline onclick attr 嵌 escAttr（P1）** [REFACTOR]: `internal/server/static/agent_view.js:69` `onclick="...switchTo(\\'" + escAttr(a.taskId) + "\\')"` —— escAttr 仅 HTML-escape 不处理 JS string；当前 a.taskId 由 server `agentTaskIDRe ^[a-z0-9]{1,32}$` 兜底但 sink 错误层。方案：addEventListener + dataset，移除 inline onclick。
+- [ ] **R247-SEC-5 — selfupdate.fetchFile 初始 URL 无显式 https 断言（P2）** [REFACTOR]: `internal/selfupdate/selfupdate.go:313` 仅 CheckRedirect 内卡 https。方案：req.URL.Scheme!="https" 早拒，与 redirect 路径对齐。
+- [ ] **R247-SEC-6 — transcribe ffmpeg 无 wall-clock 上限（P2）** [BREAKING-LOCAL]: `internal/transcribe/convert.go:104` 仅靠外层 ctx；构造 audio 可长时间占 transcribeSemCap=3 槽。方案：argv 加 `-t 600` 解码上限。
+- [ ] **R247-SEC-7 — handleConfigPut 缺 per-IP rate limit（P2）** [REFACTOR]: `internal/server/project_api.go:159` 写盘 + WS 广播无频次墙。方案：加 ipLimiter 或 projectMgr.UpdateConfig 5/sec gate。
+- [ ] **R247-SEC-8 — uploadOwner crypto/rand 失败回退 clientIP（P2）** [REPEAT-2]: `internal/server/dashboard_send.go:140-148` 与 R246-SEC-8 同根因不同 site。方案：失败返 503。
+- [ ] **R247-SEC-9 — shortPromoteSuffix 32-bit 熵（P2）** [BREAKING-LOCAL]: `internal/server/dashboard_scratch.go:351` birthday-bound ~2^16；与 anonCookie/upload 16 byte 不齐。方案：8 字节（64-bit）。
+- [ ] **R247-SEC-10 — isSensitiveDownloadName 不卡父目录段（P2）** [BREAKING-LOCAL]: `internal/server/project_files.go:1212` `secrets/db.yaml` `.ssh/foo` 不命中 basename。方案：sensitivePathSegments allowlist。
+- [ ] **R247-SEC-11 — parseAttachmentFile 用 declared Content-Type 决定 size cap（P2）** [REPEAT-2]: `internal/server/dashboard_send.go:172` 与 R246-SEC-9 同根因不同 fork；io.ReadAll 在 magic-byte 复核前已 buffer 32MB。方案：magic-byte 优先读 head 决定 cap。
+- [ ] **R247-SEC-12 — eventlog persister MkdirAll 0700 不修复 existing dir mode（P2）** [REFACTOR]: `internal/eventlog/persist/persister.go:202` 攻击者预创建 0755/0777 父目录可绕过 0700 contract。方案：MkdirAll 后 os.Chmod 校正或 Lstat 检查 mode != 0700 拒启。
+- [ ] **R247-SEC-13 — cron runstore MkdirAll 0700 同 mode 漏修（P2）** [REFACTOR]: `internal/cron/runstore.go:236-301` 同上。
+- [ ] **R247-SEC-14 — attachment store MkdirAll 0700 同 mode 漏修（P2）** [REFACTOR]: `internal/attachment/store.go:232` workspace 共享场景下他 UID 可预创建。
+- [ ] **R247-SEC-15 — mintAnonCookie 30d MaxAge 永不轮换（P2）** [BREAKING-LOCAL]: `internal/server/dashboard_send.go:39-52` token 模式切换 / 服务重启不清。方案：缩到 7d 或登录态变化时强制 expire。
+- [ ] **R247-SEC-16 — ownerKeyFromCookie sha256[:8] 64-bit 熵（P2）** [BREAKING-LOCAL]: `internal/server/dashboard_send.go:114-120` 同 BroadcastCronResult/ETag short-hash。方案：sha256[:16]（128-bit）。
+- [ ] **R247-SEC-17 — cookieMAC 缺 cookie-rotation（P2）** [REPEAT-3]: `internal/server/dashboard_auth.go:117-121` 与 R243-SEC-13/R245-SEC-2/R242-SEC-5 同根因；HMAC 输入未含 ts/nonce。方案：MAC 输入加 cookie-gen ts。
+- [ ] **R247-SEC-18 — collectTranscripts 直拼 alternative.Transcript（P3）** [REFACTOR]: `internal/transcribe/transcribe.go:194` 未过 SanitizeForLog/IsLogInjectionRune。方案：与 cron sanitiseRunResult 对齐过滤 bidi/C1。
+- [ ] **R247-SEC-19 — sysession runner BinPath 未 LookPath 校验（P3）** [REPEAT-2]: `internal/sysession/runner.go:79` 与 R245-SEC-15 同根因不同位置。方案：NewRunner 时 exec.LookPath + os.Lstat regular file。
+- [ ] **R247-SEC-20 — uploadStore.Put crypto/rand 失败 panic（P3）** [REFACTOR]: `internal/server/upload_store.go:122` 让 HTTP server 倒塌。方案：返 errUploadStoreFull + slog.Error。
+- [ ] **R247-SEC-21 — cliAvailable os.Stat 暴露二进制路径（P3）** [REFACTOR]: `internal/server/health.go:283-289` 认证后 token 窃取者可探主机布局。方案：返常量 boolean 不区分 IO 类型。
+- [ ] **R247-SEC-22 — reverseUpgrader.CheckOrigin 仅靠 Origin 缺失判 m2m（P3）** [REPEAT-3]: `internal/node/reverseserver.go:69-73` 反代剥 Origin 场景下 browser-XSS 端可凑无 Origin 请求。方案：r.TLS != nil 强制或 explicit insecure_node 配置。
+- [ ] **R247-SEC-23 — CSP font-src https://cdn.jsdelivr.net 无 SRI（P3）** [REPEAT-3]: `internal/server/dashboard.go:503` 与 R246-SEC-10 同根因；KaTeX woff2 走同信任链。方案：vendored //go:embed 或 require-sri-for font。
+- [ ] **R247-SEC-24 — resume key var rb [8]byte 64-bit 熵（P3）** [REPEAT-2]: `internal/server/dashboard_session.go:1052` 与 R246-SEC-5 同根因不同 site。方案：16 字节。
+- [ ] **R247-SEC-25 — netutil clientIP trustedProxy XFF 缺失回退 RemoteAddr（P3）** [REPEAT-3]: `internal/netutil/clientip.go:25-46` 所有 client 折一桶。方案：trustedProxy=true 且 XFF 空时返 400。
+
+### 性能（剩余）
+
+- [ ] **R247-PERF-2 — flattenAssistantEvent O(N) 前插 + 整 slice reindex（P1）** [REFACTOR]: `internal/server/dashboard_cron_transcript.go:665-676` 500 行 transcript 每 assistant event 都触发。方案：先 emit assistant 再 emit tool_use 或 prealloc + shift 一次。
+- [ ] **R247-PERF-3 — KnownSessionIDs 每次重建 jobs×200 map（P1）** [REPEAT-2]: `internal/cron/scheduler_session.go:68-108` 与 R245-PERF-2/R242-PERF-7 同根因仍未消除。方案：atomic.Pointer[snapshot] + 30s TTL，finishRun/DeleteJob 主动失效。
+- [ ] **R247-PERF-4 — ListAllJobsWithNextRun 每次 4 个 slice/map alloc（P1）** [REFACTOR]: `internal/cron/scheduler_jobs.go:184-213` dashboard 1Hz poll。方案：sync.Pool 复用 pairs/result，maps.Clear+复用 nextByID。
+- [ ] **R247-PERF-5 — proc_linux fmt.Sprintf("/proc/%d/...") + strings.Fields（P1）** [REFACTOR]: `internal/discovery/proc_linux.go:27,39,56` 每 PID 反射拼接 + 整 string copy。方案：strconv.Itoa builder + byte-level scan。
+- [ ] **R247-PERF-6 — handleList 每个 project alloc map[string]any 8 字段（P1）** [REFACTOR]: `internal/server/project_api.go:89-134` dashboard 多 tab。方案：命名 struct 化，redactGitRemoteURL 缓存到 *Project 字段。
+- [ ] **R247-PERF-7 — replyText fmt.Sprintf "[Cron %s] %s"（P2）** [REFACTOR]: `internal/cron/scheduler_run.go:709` 已大字符串再拼 reflect format。方案：strings.Builder。
+- [ ] **R247-PERF-8 — deliverNotice "[Cron %s]" 三处 fmt.Sprintf（P2）** [REFACTOR]: `internal/cron/scheduler_run.go:254,567,671`。方案：抽 helper + Builder。
+- [ ] **R247-PERF-9 — diskListNewestFirst 串行 readRun（P2）** [REPEAT-3]: `internal/cron/runstore.go:617-631` 与 R246-PERF-2 同根因。方案：recentCacheEntry 缓存 sorted slice + 8 worker pool 并行解码。
+- [ ] **R247-PERF-10 — Append jobLock 期间 MkdirAll+Marshal+WriteFileAtomic（P2）** [REPEAT-2]: `internal/cron/runstore.go:282-339` 每条 syscall。方案：json.Marshal pool + sync.Once-per-jobID MkdirAll。
+- [ ] **R247-PERF-11 — marshalJobsLocked 每次 mutation 全表 sort+Marshal（P2）** [REPEAT-2]: `internal/cron/scheduler_persist.go:45-58` 50 jobs ≈ 100KB write × 每 finishRun。方案：Encoder + bytes.Buffer pool。
+- [ ] **R247-PERF-12 — protocol_acp WriteMessage Marshal 无 pool（P2）** [REFACTOR]: `internal/cli/protocol_acp.go:308-356,675-680` ACP turn / permissionResponse 高频。方案：镜像 shimSendBufPool。
+- [ ] **R247-PERF-13 — eventlog Entries 全 ring 拷贝 ~140KB/call（P2）** [REPEAT-3]: `internal/cli/eventlog.go:1217-1245` dashboard subscribe 路径。方案：LastN 上限或 sync.Pool slice 复用。
+- [ ] **R247-PERF-14 — eventlog Subscribe 每次 alloc subscriber（P2）** [REFACTOR]: `internal/cli/eventlog.go:1141-1166` dashboard 高频 reconnect 形成分配峰。方案：close-once 限制改 broadcast cond。
+- [ ] **R247-PERF-15 — handleList projectList 每次 1Hz 全量 alloc（P2）** [REPEAT-3]: `internal/server/dashboard_session.go:554-572` R230C-PERF-7 已知。方案：atomic.Pointer + projectMgr 版本号失效。
+- [ ] **R247-PERF-16 — RecentSessions 无 prealloc（P2）** [REFACTOR]: `internal/discovery/recent.go:84-178` 7day×多 project 规模可观。方案：make 估上限。
+- [ ] **R247-PERF-17 — protocol_acp base64.EncodeToString 全 alloc（P2）** [REFACTOR]: `internal/cli/protocol_acp.go:322-339` 多图 turn 浪费。方案：base64.StdEncoding.AppendEncode 写 pre-grown buffer。
+- [ ] **R247-PERF-18 — flattenAssistantEvent make([]T,0,2) 每行（P2）** [REPEAT-2]: `internal/server/dashboard_cron_transcript.go:625-679` 500 行 = 500 alloc。方案：caller-provided scratch slice。
+- [ ] **R247-PERF-19 — recentFromParsedIndex jsonlMtimes map 重建（P2）** [REFACTOR]: `internal/discovery/recent.go:329-356` 已 sorted slice 可二分。方案：sort.Search 替 map。
+- [ ] **R247-PERF-20 — Tick highwater 全量拷贝（P2）** [REFACTOR]: `internal/sysession/auto_titler.go:181-194` 多数 key 当 tick 不访问。方案：atomic.Pointer[map] CoW。
+- [ ] **R247-PERF-21 — buildUserEntry 每图 spawn goroutine（P3）** [REFACTOR]: `internal/cli/process_send.go:51-76` cap 4 sem 但仍 8KB stack × N。方案：worker pool。
+- [ ] **R247-PERF-22 — HandleEvent permissionResponse Atoi+Itoa 来回（P3）** [REFACTOR]: `internal/cli/protocol_acp.go:660-666`。方案：直接 json.RawMessage 写。
+- [ ] **R247-PERF-23 — Enqueue 队列满 O(N) memmove（P3）** [REPEAT-2]: `internal/dispatch/msgqueue.go:184-208` MaxDepth=16 拷贝 15。方案：环形 buffer。
+- [ ] **R247-PERF-24 — workDirUnderRoot 每 execute EvalSymlinks（P3）** [REFACTOR]: `internal/cron/scheduler.go:177-189` 长寿命下重复 syscall。方案：TTL 缓存。
+- [ ] **R247-PERF-25 — agent_tailer Shutdown 重新 alloc map（P3）** [REFACTOR]: `internal/server/agent_tailer.go:565-578`。方案：clear(r.byTask) (go1.21+)。
+- [ ] **R247-PERF-26 — eventlog persister tickFlush 无序 map iter（P3）** [REFACTOR]: `internal/eventlog/persist/persister.go:629-657` 高 N session 抖动。方案：sorted dirty heap。
+
+### 代码质量（剩余）
+
+- [ ] **R247-CR-1 — DeleteJobByID/PauseJobByID/ResumeJobByID 三 dashboard 入口同构（P1）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:273-388` ~120 行重复 closure + lock + persist 框架。方案：抽 `withJobByID(id, op, postCleanup)` helper。
+- [ ] **R247-CR-2 — DeleteJob/PauseJob/ResumeJob (prefix) 与 *ByID 第二组同构（P1）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:687-758` ~150 行重复。方案：lookup 抽 helper，lockedOp+持久化共用。
+- [ ] **R247-CR-3 — executeOpt 仍 345 行 cyclomatic >30（P1）** [REPEAT-3]: `internal/cron/scheduler_run.go:367-711` 与 R246-CR-001 同根因仍 open；本轮新增 sendCtx 双预算 warn / abort 通道收发 / classifyExecError 进一步推高复杂度。方案：runSpawn/runSend/runFinish 切分。
+- [ ] **R247-CR-4 — Scheduler.Stop() 95 行 mini-state-machine（P2）** [REFACTOR]: `internal/cron/scheduler.go:684-777`。方案：抽 waitGCDrain/waitCronStop/waitTriggerWG/persistOnShutdown 四 helper。
+- [ ] **R247-CR-5 — `[Cron %s]` 中文文案 3 处 hardcode（P2）** [REPEAT-3]: `internal/cron/scheduler_run.go:567,671,709`。方案：抽 const + helper formatCronNotice(label, kind, body)。
+- [ ] **R247-CR-6 — opts.ExtraArgs 三参数 slice 表达式纯防御性（P2）** [REFACTOR]: `internal/cron/scheduler_run.go:485-489` cron 后续从不 append。方案：slices.Clone 或注释 "future-proof"。
+- [ ] **R247-CR-7 — SetOnExecute/SetOnRunStarted/SetOnRunEnded 三 setter 同构（P2）** [REPEAT-3]: `internal/cron/scheduler_callbacks.go:61-88`。方案：泛型 setCallback[T] helper。
+- [ ] **R247-CR-8 — *ByID 三入口注释暗示对称但 Pause/Resume 不删 runs（P2）** [REFACTOR]: `internal/cron/scheduler_jobs.go:273-388`。方案：godoc 显式区分或 helper 接 cleanup 钩子。
+- [ ] **R247-CR-9 — NotifyDefault 缺 godoc 行为契约（P2）** [REFACTOR]: `internal/cron/scheduler.go:472-482` 与 Location 不一致。方案：补 godoc。
+- [ ] **R247-CR-10 — registerJob AddFunc closure 与 executeIfNotDeletedOrPaused 同源（P2）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:843-862`。方案：closure 直调 executeIfNotDeletedOrPaused。
+- [ ] **R247-CR-11 — strHeap/timeHeap helper reset 路径反成噪音（P2）** [REFACTOR]: `internal/cron/runinflight.go:64-74,91-95` 与 R246-CR-011 同根因；本轮新发现 reset 不分配。方案：删 helper 或 cross-reference。
+- [ ] **R247-CR-12 — runs 限额 const 散落（P2）** [REFACTOR]: `internal/cron/runstore.go:170-187` 大小写不统一。方案：集中到 limits.go。
+- [ ] **R247-CR-13 — emitOverlapSkipped godoc 引用已归档 review（P2）** [REFACTOR]: `internal/cron/scheduler_finish.go:281-299`。方案：简化 godoc 删历史引用。
+- [ ] **R247-CR-14 — recordResultP0WithSanitised 64 行 P0 命名已无意义（P2）** [REFACTOR]: `internal/cron/scheduler_finish.go:330-394`。方案：改名 recordTerminalResult；rollback 抽 prevSnapshot struct。
+- [ ] **R247-CR-15 — recordResultP0WithSanitised P0 后缀历史 noise（P2）** [REFACTOR]: `internal/cron/scheduler_finish.go:301-329`。方案：与 R247-CR-14 一并改名。
+- [ ] **R247-CR-16 — jobSnapshot struct 字段顺序非最优（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:96-121` 64-bit 平台 padding 浪费 ~8B。方案：size DESC 重排。
+- [ ] **R247-CR-17 — hexIDBytes=8 命名误导（P3）** [REFACTOR]: `internal/cron/job.go:202` godoc 说 "16-char hex"。方案：改名 hexIDEntropyBytes。
+- [ ] **R247-CR-18 — gcWaitBudget 包级 mutable var 测试 racy（P3）** [REPEAT-3]: `internal/cron/scheduler.go:655,661` 与 R246-CR-012 同根因。方案：const + WithStopBudget(d) helper。
+- [ ] **R247-CR-19 — marshalJobs atomic.Pointer test seam 通过 init() 装载（P3）** [REFACTOR]: `internal/cron/scheduler_persist.go:32-37` 与 R242-CR-5 同根因。方案：build tag testonly 或字段 DI。
+- [ ] **R247-CR-20 — runs 限额 magic number 推导散落（P3）** [REFACTOR]: `internal/cron/runstore.go:170-187`。方案：集中注释块 + 推导公式。
+- [ ] **R247-CR-21 — emitOverlapSkipped godoc 否定式叙述（P3）** [REFACTOR]: `internal/cron/scheduler_finish.go:269-279`。方案：改正向 "Emits start→end pair with state=Skipped"。
+- [ ] **R247-CR-22 — maxJobsHardCap=500 等 const 缺 benchmark 引用（P3）** [REFACTOR]: `internal/cron/scheduler.go:283-294`。方案：链到 cron-v2-polish.md。
+- [ ] **R247-CR-23 — slogPrintfLogger panic/recovered 字符串扫描负面陈述（P3）** [REPEAT-3]: `internal/cron/scheduler.go:807-815` 与 R246-CR-016 同根因。方案：抽命名常量 + godoc。
+- [ ] **R247-CR-24 — executeIfNotDeletedOrPaused godoc 历史 review 引用（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:38-49`。方案：去 review code 仅留行为说明。
+- [ ] **R247-CR-25 — 历史 review 编号注释累计 40+ 处（P3）** [REFACTOR]: `internal/cron/scheduler_run.go,scheduler.go` 多处。方案：归档时同步删除注释或加 docs/COMMENT_CONVENTIONS.md。
+- [ ] **R247-CR-26 — containsCronC0 函数名误导（P3）** [REFACTOR]: `internal/cron/store.go:241-266` 实际还查 bidi/LS/PS。方案：改名 containsCronUnsafe。
+- [ ] **R247-CR-27 — Append truncate 三字段注释不对称（P3）** [REFACTOR]: `internal/cron/runstore.go:280-339`。方案：抽 shrinkOversizeRun helper。
+- [ ] **R247-CR-28 — spawn budget 警告 magic factor 0.5（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:606-613`。方案：const spawnElapsedWarnRatio + godoc。
+- [ ] **R247-CR-29 — TriggerNow 60 行 + 3 goroutine 分支（P3）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:780-833`。方案：合并单 goroutine + 内部 if。
+- [ ] **R247-CR-30 — IsExcluded godoc 与实现 cost 不一致（P3）** [REFACTOR]: `internal/cron/scheduler_session.go:40-46`。方案：godoc 标注 O(jobs × recentCap) + 推 KnownSessionIDs cache。
+
+### 架构（剩余）
+
+- [ ] **R247-ARCH-1 — /health 同时承担 liveness+readiness+stats（P1）** [REFACTOR]: `internal/server/health.go:189` + `cmd/naozhi/main.go:442`。方案：拆 /livez /readyz /health；startup_phase metrics 设 readiness gate。
+- [ ] **R247-ARCH-2 — 三套并行错误分类碎片（P1）** [REFACTOR]: cron.ErrorClass / sysession.DaemonErrorClass / session.mapSendError 各自演化无共享词汇；NotifyDefault 决策、metrics label、IM 文案分类只能终端 site 重复。方案：抽 internal/errclass.Class enum + Classify(err) Class 统一表。
+- [ ] **R247-ARCH-3 — dashboard 错误响应 http.Error vs writeJSONStatus 混用（P1）** [BREAKING-LOCAL]: `internal/server/dashboard.go` 216 处 text/plain vs 110 处 JSON envelope。方案：errResp(w,r,httpStatus,code,msg) 统一含 trace_id+retry_after。
+- [ ] **R247-ARCH-4 — slog.SetDefault 全局耦合 47 处直读（P1）** [REFACTOR]: `cmd/naozhi/main.go:444-460`；测试 SetDefault swap 阻塞 t.Parallel。方案：每包 New(...) 接 *slog.Logger 派生 + slog.With("component",...)；为 trace_id propagation 做底。
+- [ ] **R247-ARCH-5 — WriteFileAtomic 4 处独立 reimplement（P1）** [REFACTOR]: shim/state.go:80-119 / eventlog/persist/rotate.go:90-120 / cron/store.go:90-110 / discovery/retired_store.go:200-230，尽管 osutil/atomicfile.go 已存在。方案：全部改用 osutil.WriteFileAtomic。
+- [ ] **R247-ARCH-6 — metrics 命名约定打架（P2）** [REFACTOR]: `internal/metrics/metrics.go:54-380` _total/_inflight/_ms 用同 NewInt 类型；8 套子前缀；无 Prom 注册路径。方案：metrics.New(subsystem, name, kind) 强制后缀+前缀；切 Prom 用。
+- [ ] **R247-ARCH-7 — 110/305 测试无 t.Parallel root cause（P2）** [REFACTOR]: slog.Default 全局 + time.Now 全局 + 0 testdata + SetDefault swap 锁线程。方案：禁 SetDefault 改 logger DI；testfx.NewProcess(t)/NewLogger(t) 隔离；110 测试加 lint allowlist。
+- [ ] **R247-ARCH-8 — 配置验证/defaults 三源分裂（P2）** [REFACTOR]: Config.Validate / cron.applyDefaults inline / main.go parseDurationOrDefault。方案：抽 internal/config/validator.Pipeline 单入口 LoadAndValidate。
+- [ ] **R247-ARCH-9 — 用户文案散布 17 文件 141 处中文字面（P2）** [REFACTOR]: dispatch/commands.go 62 处 / usermsg.go 16 等。方案：抽 internal/i18n/catalog + zh.toml 中央化。
+- [ ] **R247-ARCH-10 — dispatch SendCtx detached ctx 模板 5+ 处（P2）** [REFACTOR][REPEAT-2]: 与 R244-ARCH-2 / R246-ARCH-17 同根因；R243-ARCH-11 修了一处仍未集中。方案：dispatch.NotifyCtx(parent, kind, timeout) factory。
+- [ ] **R247-ARCH-11 — 0 处 Clock 抽象 172 处 time.Now（P2）** [REFACTOR]: testdata 时间相关只能 sleep。方案：clock.Clock interface 注 cron/sysession/shim 三个生命周期管理者。
+- [ ] **R247-ARCH-12 — 健康探针无统一 interface（P2）** [REFACTOR]: handleHealth 手动展开 RouterStats/AttachmentTracker/EventLog。方案：health.Probe interface + Stats() ProbeStats registry fanout。
+- [ ] **R247-ARCH-13 — flag/env/yaml 三层无统一优先级（P2）** [REFACTOR]: 1 个 -config flag + 17 处 os.Getenv 散布。方案：config.Layered{File,Env(prefix=NAOZHI_),Flag} + Resolve；doctor 输出生效来源。
+- [ ] **R247-ARCH-14 — errors.As 仅 6 处 vs 227 处 fmt.Errorf 不带 %w（P2）** [REFACTOR]: 上层只能按 error.Error() 字符串匹配回退。方案：与 R247-ARCH-2 errclass 一并 + 关键域 typed error。
+- [ ] **R247-ARCH-15 — server.ctxFunc closure-as-DI 反模式（P2）** [REFACTOR]: `internal/server/server.go:718` 5+ handler 持 ctxFunc 而非 ctx。方案：*Server 显式 baseCtx 字段 + r.Context() with timeout。
+- [ ] **R247-ARCH-16 — eventcore types-only 子包阻碍反向 import（P3）** [REFACTOR]: 已登记 R246-ARCH-13 但本轮新角度：cli pkg 1.4k 行 eventlog.go 阻碍 history/persist 反向引用 EventEntry。方案：抽 internal/eventcore（types only）三家共享。
+- [ ] **R247-ARCH-17 — 4+ 套独立"插件式注册表"（P3）** [REFACTOR][REPEAT-2]: sysession.builtinDaemons / cli/backend.Profile / history blank import / wireup 显式。方案：抽 internal/registry.Typed[T]；ban 包级 init() 注册。
+- [ ] **R247-ARCH-18 — "看 const 实际 var" 80+ 处散落 14 包（P3）** [REFACTOR][REPEAT-2]: 与 R244-ARCH-16 同方向但本轮强调具体规模。方案：internal/timeouts.Defaults() + Override(t,key,d) 自动 cleanup。
+- [ ] **R247-ARCH-19 — feishu transport 中文文案 hardcode（P3）** [REFACTOR]: `internal/platform/feishu/transport_ws.go:191,201` `[语音消息下载失败...]` 落 platform 包不能集中 dispatch/i18n。方案：platform.Reply 接 dispatch.UserMsg{Class,Args}。
+- [ ] **R247-ARCH-20 — 0 处 trace_id propagation（P3）** [REFACTOR]: HTTP→cli→reply 三段无法关联日志，postmortem 只能 grep timestamp。方案：ctxutil.WithTraceID 中间件 + slog.With logger 派生。
+- [ ] **R247-ARCH-21 — init() 写包级状态 4+ 处混合三类（P3）** [REFACTOR][REPEAT-2]: cron persist / claudejsonl source / kirojsonl source / dashboard_auth CSP 自检。方案：plugin → registry.Register；test seam → 字段+构造参数；启动自检 → main.go step。
+- [ ] **R247-ARCH-22 — 31 处 sync.WaitGroup 各自跟踪 goroutine（P3）** [REFACTOR]: 单元测试无法验证 leak。方案：引 go.uber.org/goleak（test-only）+ cron/sysession/router 主测包 leak check。
+- [ ] **R247-ARCH-23 — Config struct 装 yaml 输入+解析后 cached* 双语义（P3）** [BREAKING-LOCAL]: `internal/config/config.go:39-78` 30+ 字段含 7 cached*。方案：拆 RawConfig → Resolve() (*ResolvedConfig)。
+
 ## Round 246 — 5-agent 并行 code review 第 56 轮（2026-05-24，紧随 Round 245）NEEDS-DESIGN
 
 > 紧随 Round 245 的第 56 轮 5-reviewer 并行扫描（Go / 安全 / 性能 / 代码质量 / 架构）。基线 c13fa47。in-flight PR=0；REPEAT 提示 ARCH-1/2/3/4 REPEAT-19~21 / SEC-1/2 REPEAT-37~46 / GO-1/2/3 REPEAT-25~40 / PERF-1/2/3/4 REPEAT-34~69 已避开（本轮在新维度：transcript sanitize 死代码 / serveRaw 凭据守卫漏 / coalesce.go time.Format alloc / preflightArgs struct alignment 等）。
