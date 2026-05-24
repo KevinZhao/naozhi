@@ -244,6 +244,14 @@ func TestIsSensitiveDownloadName_OpsConventional(t *testing.T) {
 		"app.env.bak",     // prefix + suffix
 		"DATABASE.YML",    // case-insensitive
 		"APP.ENV.BACKUP",  // case-insensitive suffix
+		// R242-SEC-9: .env-prefix rule — every dotenv variant blocked,
+		// including the templates/examples that the exact-match table
+		// previously missed.
+		".env.example",
+		".env.sample",
+		".env.template",
+		".env.staging.local",
+		".ENV.EXAMPLE", // case-insensitive
 	}
 	for _, name := range blocked {
 		if !isSensitiveDownloadName(name) {
