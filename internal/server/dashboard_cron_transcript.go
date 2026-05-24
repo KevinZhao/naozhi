@@ -267,8 +267,14 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		// exist yet on a fresh setup); the strict check still applies.
 		resolvedRoot = allowedRoot
 	}
-	resolvedRoot += string(os.PathSeparator)
-	if !strings.HasPrefix(resolved+string(os.PathSeparator), resolvedRoot) {
+	// Use the symmetric "prefix(root+sep) OR equal(root)" pattern shared
+	// with validateWorkspace / workDirUnderRoot (R236-SEC-05). The earlier
+	// `resolved+sep` vs `root+sep` form was correct but visually deviated
+	// from the project's other path-containment checks; aligning the form
+	// reduces the risk of a future refactor accidentally widening the
+	// allowlist (e.g. dropping the trailing sep on one side only).
+	rootWithSep := resolvedRoot + string(os.PathSeparator)
+	if !strings.HasPrefix(resolved, rootWithSep) && resolved != resolvedRoot {
 		slog.Warn("cron transcript: path escape attempt", "raw", jsonlPath, "resolved", resolved, "claudeDir", h.claudeDir, "allowedRoot", resolvedRoot)
 		resp.Fallback = "missing"
 		writeJSON(w, resp)
