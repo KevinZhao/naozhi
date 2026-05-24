@@ -665,7 +665,6 @@ func (cfg SchedulerConfig) applyDefaults() SchedulerConfig {
 		cfg.MaxJobs = defaultMaxJobs
 	}
 	if cfg.MaxJobs > maxJobsHardCap {
-		slog.Warn("cron max_jobs exceeds hard cap, clamping", "requested", cfg.MaxJobs, "cap", maxJobsHardCap)
 		cfg.MaxJobs = maxJobsHardCap
 	}
 	// Resolve per-chat cap: <= 0 maps to the default so a zero struct
@@ -683,7 +682,11 @@ func (cfg SchedulerConfig) applyDefaults() SchedulerConfig {
 }
 
 func NewScheduler(cfg SchedulerConfig) *Scheduler {
+	before := cfg.MaxJobs
 	cfg = cfg.applyDefaults()
+	if cfg.MaxJobs != before && before > maxJobsHardCap {
+		slog.Warn("cron max_jobs exceeds hard cap, clamping", "requested", before, "cap", maxJobsHardCap)
+	}
 	maxPerChat := cfg.MaxJobsPerChat
 	parent := cfg.ParentCtx
 	if parent == nil {
@@ -1273,16 +1276,25 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 
 // DeleteJobByID removes a job by exact ID (unscoped, for dashboard use).
 func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
-	s.mu.Lock()
-	j, ok := s.jobs[id]
-	if !ok {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
-	}
-	s.deleteJobLocked(j)
-	save, perr := s.persistJobsLocked()
-	s.mu.Unlock()
+	var save func()
+	var j *Job
+	var perr error
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		var ok bool
+		j, ok = s.jobs[id]
+		if !ok {
+			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
+			return
+		}
+		s.deleteJobLocked(j)
+		save, perr = s.persistJobsLocked()
+	}()
 
+	if j == nil {
+		return nil, perr
+	}
 	// R238-GO-3: deleteJobLocked already mutated in-memory state + router stub.
 	// The runStore must be cleaned even when persist fails, otherwise the
 	// runs/<jobID>/ subtree leaks on disk while the in-memory job is gone.
@@ -1303,19 +1315,29 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 
 // PauseJobByID pauses a job by exact ID (unscoped, for dashboard use).
 func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
-	s.mu.Lock()
-	j, ok := s.jobs[id]
-	if !ok {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
-	}
-	if err := s.pauseJobLocked(j); err != nil {
-		s.mu.Unlock()
-		return nil, err
-	}
-	save, perr := s.persistJobsLocked()
-	s.mu.Unlock()
+	var save func()
+	var j *Job
+	var perr error
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		var ok bool
+		j, ok = s.jobs[id]
+		if !ok {
+			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
+			return
+		}
+		if err := s.pauseJobLocked(j); err != nil {
+			perr = err
+			j = nil
+			return
+		}
+		save, perr = s.persistJobsLocked()
+	}()
 
+	if j == nil {
+		return nil, perr
+	}
 	if perr != nil {
 		return nil, perr
 	}
@@ -1325,19 +1347,29 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 
 // ResumeJobByID resumes a paused job by exact ID (unscoped, for dashboard use).
 func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
-	s.mu.Lock()
-	j, ok := s.jobs[id]
-	if !ok {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
-	}
-	if err := s.resumeJobLocked(j); err != nil {
-		s.mu.Unlock()
-		return nil, err
-	}
-	save, perr := s.persistJobsLocked()
-	s.mu.Unlock()
+	var save func()
+	var j *Job
+	var perr error
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		var ok bool
+		j, ok = s.jobs[id]
+		if !ok {
+			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
+			return
+		}
+		if err := s.resumeJobLocked(j); err != nil {
+			perr = err
+			j = nil
+			return
+		}
+		save, perr = s.persistJobsLocked()
+	}()
 
+	if j == nil {
+		return nil, perr
+	}
 	if perr != nil {
 		return nil, perr
 	}
@@ -1533,6 +1565,7 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 		// flag transition stays consistent with PauseJob/ResumeJob/UpdateJob
 		// paths. R226-CR-16.
 		if err := s.resumeJobLocked(j); err != nil {
+			j.Prompt = "" // rollback: Prompt was empty before this call
 			s.mu.Unlock()
 			return err
 		}
@@ -2588,7 +2621,7 @@ func (s *Scheduler) finishRun(a finishArgs) {
 			WorkDir:     a.workDir,
 			Fresh:       a.fresh,
 			Result:      persistedResult,
-			ResultBytes: len(a.result),
+			ResultBytes: len(persistedResult),
 			ErrorClass:  a.errClass,
 			ErrorMsg:    persistedErrMsg,
 		})
@@ -3052,7 +3085,7 @@ func (s *Scheduler) persistJobsLocked() (func(), error) {
 	data, err := s.marshalJobsLocked()
 	if err != nil {
 		slog.Error("marshal cron store", "err", err)
-		return nil, fmt.Errorf("%w: %v", ErrPersistFailed, err)
+		return nil, fmt.Errorf("%w: %w", ErrPersistFailed, err)
 	}
 	// Capture a monotonic sequence number under s.mu so it totals-orders all
 	// marshals with the snapshot state they represent. saveMarshaled skips

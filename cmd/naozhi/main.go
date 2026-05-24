@@ -80,20 +80,22 @@ var awsEnvDenyList = map[string]bool{
 // Returns (data, nil) on success. Returns a non-nil error if the file cannot be
 // read, or if every retry yielded invalid JSON — callers must treat the error
 // as "could not determine a trustworthy settings snapshot", NOT as "file is empty".
-func readClaudeSettingsRaw() ([]byte, error) {
+func readClaudeSettingsRaw(ctx context.Context) ([]byte, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("user home: %w", err)
 	}
 	path := filepath.Join(home, ".claude", "settings.json")
-	return readJSONWithRetry(path, 3, 100*time.Millisecond)
+	return readJSONWithRetry(ctx, path, 3, 100*time.Millisecond)
 }
 
 // readJSONWithRetry reads path and verifies the content is valid JSON. If the
 // read succeeds but parsing fails, retries up to attempts-1 more times with the
 // given sleep in between. If the file doesn't exist, returns the os.Open error
 // immediately (no retry — missing is a different failure mode than truncated).
-func readJSONWithRetry(path string, attempts int, sleep time.Duration) ([]byte, error) {
+// The ctx parameter allows callers to abort a retry sleep early on shutdown or
+// timeout; ctx.Err() is returned when the context is cancelled mid-sleep.
+func readJSONWithRetry(ctx context.Context, path string, attempts int, sleep time.Duration) ([]byte, error) {
 	var lastParseErr error
 	for i := 0; i < attempts; i++ {
 		data, err := os.ReadFile(path)
@@ -105,7 +107,11 @@ func readJSONWithRetry(path string, attempts int, sleep time.Duration) ([]byte, 
 		}
 		lastParseErr = fmt.Errorf("invalid JSON (attempt %d/%d, %d bytes)", i+1, attempts, len(data))
 		if i < attempts-1 {
-			time.Sleep(sleep)
+			select {
+			case <-time.After(sleep):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
 		}
 	}
 	return nil, lastParseErr
@@ -155,8 +161,8 @@ func filterClaudeEnv(in map[string]string) map[string]string {
 // Returns an error when the settings file cannot be read or parsed so callers
 // can surface the failure. A nil return with zero env applied (e.g. no `env`
 // section or all keys filtered) is NOT treated as an error.
-func applyClaudeEnvSettings() error {
-	data, err := readClaudeSettingsRaw()
+func applyClaudeEnvSettings(ctx context.Context) error {
+	data, err := readClaudeSettingsRaw(ctx)
 	if err != nil {
 		return err
 	}
@@ -202,7 +208,7 @@ func matchesAnyPrefix(s string, prefixes []string) bool {
 // ~/.naozhi/claude-settings.json from a prior successful run instead of overwriting
 // it with `{}` — that empty file would strip the `env` block and break Bedrock auth
 // for every spawned CLI process (the whole reason for --setting-sources "").
-func writeClaudeSettingsOverride(serverAddr string) string {
+func writeClaudeSettingsOverride(ctx context.Context, serverAddr string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
@@ -210,7 +216,7 @@ func writeClaudeSettingsOverride(serverAddr string) string {
 	dir := filepath.Join(home, ".naozhi")
 	path := filepath.Join(dir, "claude-settings.json")
 
-	data, err := readClaudeSettingsRaw()
+	data, err := readClaudeSettingsRaw(ctx)
 	if err != nil {
 		// Read/parse failed. Do NOT overwrite an existing override — the last
 		// known-good copy still lets Claude CLI authenticate. Report via logs so
@@ -444,14 +450,20 @@ func main() {
 	}
 	slog.SetDefault(slog.New(handler))
 
+	// Context with cancellation for graceful shutdown. Created here (before
+	// applyClaudeEnvSettings) so retry sleeps in readJSONWithRetry respond to
+	// ctx.Done() from the very first use of the settings file.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// CLI Protocol + Wrapper
-	if err := applyClaudeEnvSettings(); err != nil {
+	if err := applyClaudeEnvSettings(ctx); err != nil {
 		// Non-fatal: Bedrock / Anthropic env may already be set via systemd
 		// EnvironmentFile or exported by the shell. Warn so operators notice
 		// if the only source was settings.json and that read failed.
 		slog.Warn("apply ~/.claude/settings.json env failed", "err", err)
 	}
-	settingsFile := writeClaudeSettingsOverride(cfg.Server.Addr)
+	settingsFile := writeClaudeSettingsOverride(ctx, cfg.Server.Addr)
 
 	// Register the cli/backend.Profile registry with the built-in profiles
 	// (claude + kiro) before any consumer (discovery, main, server) looks
@@ -523,7 +535,7 @@ func main() {
 		}
 		proto = profile.NewProtocol(backend.ProtocolDeps{
 			SettingsFile:    settingsFile,
-			RefreshSettings: func() string { return writeClaudeSettingsOverride(serverAddr) },
+			RefreshSettings: func() string { return writeClaudeSettingsOverride(ctx, serverAddr) },
 		})
 		w := cli.NewWrapper(b.Path, proto, b.ID)
 		w.ShimManager = shimMgr
@@ -629,13 +641,6 @@ func main() {
 		AutoChainPolicy:   autoChainPolicy,
 	})
 	metrics.StartupPhaseRouterMs.Set(time.Since(t0).Milliseconds())
-
-	// Context with cancellation for graceful shutdown. Created before
-	// ReconnectShimsCtx so a SIGTERM arriving during a long shim handshake
-	// (10+ shims × 15s each = 150s worst case) can abort promptly instead
-	// of running systemd's TimeoutStartSec out.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// Reconnect to surviving shim processes from previous naozhi run
 	router.ReconnectShimsCtx(ctx)
