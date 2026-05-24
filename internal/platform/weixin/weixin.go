@@ -34,6 +34,10 @@ type Weixin struct {
 	handlerWg sync.WaitGroup // tracks in-flight message handler goroutines
 	cleanupWg sync.WaitGroup // tracks the token cleanup goroutine
 
+	// hookSem caps concurrent inbound message-handler goroutines.
+	// Mirrors feishu/slack/discord hookSem (20). R236-SEC-1.
+	hookSem chan struct{}
+
 	// contextTokens caches the latest context_token per user for reply.
 	// Value is *tokenEntry (token + last-updated unix seconds) so we can
 	// drop entries whose tokens have gone stale — otherwise users who
@@ -70,6 +74,10 @@ const maxIncomingTextBytes = platform.DefaultMaxIncomingBytes
 // R235-SEC-8.
 const maxWeixinMsgsPerPoll = 100
 
+// weixinHookConcurrency caps concurrent message handlers per Weixin adapter.
+// Mirrors feishu.hookSem / slack.slackHookConcurrency / discord.discordHookConcurrency.
+const weixinHookConcurrency = 20
+
 // validateBaseURLScheme enforces that the operator-supplied iLink base URL
 // uses HTTPS. Any loopback host (localhost, 127.0.0.0/8, ::1, IPv6 zone IDs,
 // etc.) is exempt so developers can wire local mock servers. R235-SEC-1.
@@ -103,8 +111,9 @@ func New(cfg Config) *Weixin {
 		cfg.MaxReplyLen = platform.DefaultMaxReplyLen
 	}
 	return &Weixin{
-		cfg: cfg,
-		api: newAPIClient(cfg.BaseURL, cfg.Token),
+		cfg:     cfg,
+		api:     newAPIClient(cfg.BaseURL, cfg.Token),
+		hookSem: make(chan struct{}, weixinHookConcurrency),
 	}
 }
 
@@ -360,9 +369,20 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 				MentionMe: true, // direct messages always mention the bot
 			}
 
+			// R236-SEC-1: cap concurrent handler goroutines (mirrors feishu/slack/discord).
+			// Non-blocking acquire — when saturated, drop the message + slog.Warn so a
+			// burst cannot spawn unbounded goroutines.
+			select {
+			case w.hookSem <- struct{}{}:
+			default:
+				slog.Warn("weixin: handler semaphore full, dropping message",
+					"user", from)
+				continue
+			}
 			w.handlerWg.Add(1)
 			go func() {
 				defer w.handlerWg.Done()
+				defer func() { <-w.hookSem }()
 				defer platform.RecoverHandler("weixin")
 				w.handler(ctx, incoming)
 			}()

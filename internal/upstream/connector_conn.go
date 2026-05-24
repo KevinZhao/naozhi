@@ -286,22 +286,3 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 		}
 	}
 }
-
-// handleRequest dispatches a reverse-RPC request received from the primary.
-//
-// Context selection matrix (RNEW-008):
-//
-//   - connCtx ("connection-scoped"): cancelled when handleConn returns
-//     (WebSocket drop, ping timeout, graceful shutdown). Use for any work
-//     whose result is meaningless after this connection ends, so
-//     reconnects do not leak goroutines. Examples: `send` stream waits,
-//     synchronous `fetch_events`, `router.GetOrCreate` called on the
-//     RPC's behalf.
-//
-//   - appCtx ("app-scoped"): cancelled only when the Connector shuts
-//     down entirely. Use when the work MUST outlive the current WS
-//     connection — typically takeover / discovery waits where the
-//     CLI child process is expected to survive reconnects.
-//
-// New RPC branches: default to connCtx. Only switch to appCtx when you
-// can justify in a comment why cross-reconnect persistence is required.

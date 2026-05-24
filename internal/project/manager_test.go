@@ -204,7 +204,7 @@ func TestScan_SkipsSemanticallyInvalidConfig(t *testing.T) {
 			yaml: "chat_bindings:\n  - platform: \"feishu\"\n    chat_type: \"group\"\n    chat_id: \"oc:bad\"\n",
 		},
 		{
-			// Oversized PlannerPrompt — past maxPlannerPromptBytes
+			// Oversized PlannerPrompt — past MaxPlannerPromptBytes
 			// would inflate exec.Command argv past ARG_MAX. Exercises
 			// the length cap branch of ValidateConfig.
 			name: "prompt_oversized",

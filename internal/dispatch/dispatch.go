@@ -1113,7 +1113,8 @@ func (t *replyTracker) sendTodoMessage(text string) {
 	}
 	t.lastTodoText = text
 
-	rctx, cancel := context.WithTimeout(t.ctx, platformReplyTimeout)
+	// R236-GO-1: detach from t.ctx so a near-deadline turn can still finish writing TodoWrite.
+	rctx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
 	defer cancel()
 	if _, err := t.p.Reply(rctx, platform.OutgoingMessage{ChatID: t.chatID, Text: text}); err != nil {
 		slog.Debug("todo reply failed", "chat_id", t.chatID, "err", err)
