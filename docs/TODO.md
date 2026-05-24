@@ -1,6 +1,8 @@
 # TODO
 
-> 最后更新 2026-05-24 —— TODO 大清理 v2（主题级合并）：在 v1 基础上跨 Round 按"同根因主题"再折叠 43 条派生：
+> 最后更新 2026-05-24（夜间）—— PR #309 (commit c13fa47) scheduler.go god-object split 归档：标 [x] 7 条同根因条目（R243-ARCH-1 主条目 REPEAT-19 + R244-ARCH-17 / R240-ARCH-4 / R239-CR-1 / R235-CR-8 / R235-ARCH-24 / R232-ARCH-1）。scheduler.go 3317→852 行，拆出 7 个职责文件（_jobs 942 / _run 827 / _finish 493 / _persist 146 / _callbacks 127 / _notify 115 / _session 108）。注：行号引用过时的 R242/R243 ARCH 条目（如 R242-ARCH-1 引用 line 2287）保留不动 — 代码本身在新文件里仍存在，只是行号变；后续 fix 时按函数名 grep 即可。
+>
+> 上一轮更新 2026-05-24 —— TODO 大清理 v2（主题级合并）：在 v1 基础上跨 Round 按"同根因主题"再折叠 43 条派生：
 >   - cacheHeadPush ring buffer（主 R233-PERF-2）：删 7 条
 >   - KnownSessionIDs cache（主 R233-PERF-3）：删 6 条
 >   - dashboard CSP unsafe-inline（主 R236-SEC-02）：删 11 条（跨 R172-R241）
@@ -523,7 +525,7 @@
 - [ ] **R244-ARCH-14 — executeOpt 单函数 344 行同时承担 8 个职责 [REFACTOR]**: 方案：`type runStep func(*runCtx) error` + pipeline 切分 ≤30 行/步。
 - [ ] **R244-ARCH-15 — 锁层级仅 godoc 描述无运行时检测 [REFACTOR]**: 方案：`internal/lockorder.Acquire(name)` goroutine-local stack。
 - [ ] **R244-ARCH-16 — 超时常量散落 var 顶部不可统一调优/查阅 [REFACTOR]**: 方案：`internal/timeouts` 统一注册表 + startup 打印 + dashboard 显示。
-- [ ] **R244-ARCH-17 — Scheduler struct 32 字段 god-object 趋势 [REFACTOR]**: 方案：拆 Scheduler{registry, persister, history, notifier, lifecycle}。
+- [x] **R244-ARCH-17 — Scheduler struct 32 字段 god-object 趋势 [REFACTOR]**: 方案：拆 Scheduler{registry, persister, history, notifier, lifecycle}。 *(R243-ARCH-1 同根因派生，PR #309 已 6-stage split：scheduler.go 3317→852 行 + 7 个职责文件。Scheduler struct 字段保留集中（生命周期 + sync 字段必要），但方法已散到 _jobs / _run / _finish / _persist / _callbacks / _notify / _session。)*
 - [ ] **R244-ARCH-18 — sysession registry slice 字面量与 history blank import 风格不统一 [REFACTOR]**: 方案：第二个 daemon 落地前先统一 Registry pattern。
 - [ ] **R244-ARCH-19 — addJobAcquiringLock → registerStubFromJob 锁外副作用模式无 helper 强制 [REFACTOR]**: 方案：`withRouterCallback(mutate, postUnlock)` 模板 + lint 阻断违反。
 
@@ -590,7 +592,7 @@
 
 ### 架构 (ecc:architect 第 53 轮)
 
-- [ ] **R243-ARCH-1 [REFACTOR][REPEAT-19]** `internal/cron/scheduler.go:198-332` Scheduler God Object 30+ 公开方法 / 3315 行 / 35+ 字段；拆 cron/scheduler + cron/runtime + cron/notify。
+- [x] **R243-ARCH-1 [REFACTOR][REPEAT-19]** `internal/cron/scheduler.go:198-332` Scheduler God Object 30+ 公开方法 / 3315 行 / 35+ 字段；拆 cron/scheduler + cron/runtime + cron/notify。 *(已实施 PR #309 commit c13fa47 6-stage split：scheduler.go 3317→852 行；拆出 _jobs (942) / _run (827) / _finish (493) / _persist (146) / _callbacks (127) / _notify (115) / _session (108)。Scheduler 方法 57→分散在 8 文件。同根因派生 R244-ARCH-17 / R240-ARCH-4 / R239-CR-1 / R235-CR-8 / R235-ARCH-24 / R232-ARCH-1 一并归档。)*
 - [ ] **R243-ARCH-2 [REFACTOR][REPEAT-21]** `internal/server/wshub.go:59-203` Hub God Object 144 行字段 + 14+ sync 字段；拆 broadcaster / tailers / scratchPool / scheduler 子服务。
 - [ ] **R243-ARCH-3 [BREAKING-LOCAL][REPEAT-24]** `internal/cron/scheduler.go:200 (s.mu)` 单 mutex 全局序列化所有 mutation 路径；改 per-job sharding `sync.Map[string]*jobShard`。
 - [ ] **R243-ARCH-4 [REFACTOR][REPEAT-16]** `internal/session/router_lifecycle.go:255-345` `spawningKeys` 自旋 + 20ms timer poll；改 `map[string]chan struct{}` 由 spawn 完成 close(ch)。
@@ -867,7 +869,7 @@
 
 - [ ] **R240-ARCH-1 — `internal/server/server.go:55-100` god-object Server 30+ 异质字段 [REFACTOR]（P1）**：12 handler + router + dedup + 各 cache + watchdog。方案：抽 serverDeps + handlerSet。Breaking：否（内部）。
 - [ ] **R240-ARCH-2 — `internal/server/wshub.go:59-203` Hub god-object 30+ 字段 5 WG 4 mu [REFACTOR]（P1）**：5 broadcast taxonomy + cron/sysession 钩子 + tailers + linkers。方案：拆 Hub + BroadcastDispatcher。Breaking：否。
-- [ ] **R240-ARCH-4 — `internal/cron/scheduler.go:198-329` Scheduler 35+ 字段 god-object [REFACTOR]（P1）**：jobs/router/persist/notifier 全混。方案：拆 Scheduler + Persister + Notifier。Breaking：否。
+- [x] **R240-ARCH-4 — `internal/cron/scheduler.go:198-329` Scheduler 35+ 字段 god-object [REFACTOR]（P1）**：jobs/router/persist/notifier 全混。方案：拆 Scheduler + Persister + Notifier。Breaking：否。 *(R243-ARCH-1 同根因派生，PR #309 已实施 6-stage split。)*
 - [ ] **R240-ARCH-5 — `internal/server/dashboard.go:299,341` cron/sysession 钩子两步 wiring [REFACTOR]（P1）**：SetScheduler + SetOnRunStarted/Ended 分散。方案：cron.RegisterBroadcaster(b CronBroadcaster) 接口；同模式套 sysession。Breaking：否。
 - [ ] **R240-ARCH-7 — `internal/server/dashboard_session.go:280` server 三个 cron 接口 cronStubChecker/cronSessionLister/cronHubOps [REFACTOR]（P2）**：方案：与 ARCH-3 合并到 cron.ServerSurface。Breaking：否。
 - [ ] **R240-ARCH-8 — `internal/cli/eventlog.go` vs `internal/eventlog/persist+schema` 双 eventlog 物理包 [REFACTOR]（P2）**：方案：rename in-mem ring 到 cli.EventBuffer 或 internal/eventbuffer。Breaking：否（rename）。
@@ -923,7 +925,7 @@
 
 ### 代码质量（剩余）
 
-- [ ] **R239-CR-1 — `internal/cron/scheduler.go` 3131 行远超项目 800 行硬上限（P1）[REFACTOR]**：与同日 R238-ARCH-1 / R237-ARCH-2 同根因。方向：拆 scheduler_execute.go（executeOpt/finishRun/deadlineWatchdog）+ scheduler_jobs.go（CRUD）+ scheduler_notify.go（resolveNotifyTarget/deliverNotice）。Breaking：否（内部拆分）。
+- [x] **R239-CR-1 — `internal/cron/scheduler.go` 3131 行远超项目 800 行硬上限（P1）[REFACTOR]**：与同日 R238-ARCH-1 / R237-ARCH-2 同根因。方向：拆 scheduler_execute.go（executeOpt/finishRun/deadlineWatchdog）+ scheduler_jobs.go（CRUD）+ scheduler_notify.go（resolveNotifyTarget/deliverNotice）。Breaking：否（内部拆分）。 *(R243-ARCH-1 同根因派生，PR #309 已 6-stage split：scheduler.go 现 852 行；executeOpt → scheduler_run.go (827)；finishRun → scheduler_finish.go (493)；CRUD → scheduler_jobs.go (942)；resolveNotifyTarget/deliverNotice → scheduler_notify.go (115)。)*
 - [~] **R239-CR-4 — `internal/server/dashboard_cron.go:369-391` validateCronTitle 与 validateCronPrompt 共享 25 行 C0+IsLogInjectionRune 扫描（P2）**：现有注释解释为何不共用 validateStringField，但底层两段扫描可加 disallowLF knob 抽到 stringFieldPolicy。方案：扩展 stringFieldPolicy + disallowLF。Breaking：否。
 - [~] **R239-CR-5 — `internal/dispatch/dispatch.go:667` shutdown 路径 `5*time.Second` 与 platformReplyTimeout(15s) 不一致且未命名（P2）**：方案：抽 const shutdownReplyTimeout = 5*time.Second + 注释解释为何短于 platformReplyTimeout（ctx 已 cancel 期望快速 fallback）。Breaking：否。
 - [ ] **R239-CR-6 — `internal/cron/scheduler.go:450-456` IsExcluded godoc 与 KnownSessionIDs 性能契约不一致（P2）**：godoc 自陈"auto-chain spawn 路径每次最多调一次"但函数本身每次 O(jobs × recentCap)。方案：godoc 标记 batch caller 应直接走 KnownSessionIDs。Breaking：否。
@@ -1161,7 +1163,7 @@
 - [ ] **R235-ARCH-2 — cron / sysession 各自定义 RunState / TriggerKind / ErrorClass（P1）**：两套字符串枚举语义高度重叠（succeeded/failed/timed_out/canceled、scheduled/manual、validation/upstream/timeout/panic）。注释自陈"Mirrors cron.RunState semantics"。建议 `internal/runschema` leaf 包共享 `type State string` / `type TriggerKind string` / `type ErrorClass string`，cron/sysession 改 alias。dashboard.js 也只剩一组常量。Breaking: 否（type alias 源码兼容）。
 - [ ] **R235-ARCH-3 — `dispatch.Dispatcher.scheduler` 仍持具体 `*cron.Scheduler`（P1）**：cron→session 已用 SessionRouter interface 反转，server→session 用 HubRouter，唯独 dispatch→cron 没抽 consumer interface。建议 `dispatch/cron_consumer.go` 定义 `CronScheduler` interface（AddJob / NextRun / ListJobs / DeleteJob / PauseJob / ResumeJob 6 method），contract_test 加 `var _ dispatch.CronScheduler = (*cron.Scheduler)(nil)`。
 - [ ] **R235-ARCH-4 — `cli.Wrapper.ShimManager` 是导出可变 `*shim.Manager`，protocol/transport 未拆分（P1）**：注释自陈"R230-ARCH-13 / R231-ARCH-7 已知债"。sysession.Runner 已走绕过 shim 的旁路 → transport 抽象缺失。建议 `cli.Transport` interface（StartSession / Reconnect / Close），ShimManager 适配为它的实现；新增 `WithTransport` option。Breaking: 是（cmd/naozhi/main.go 一处真消费方）。
-- [ ] **R235-ARCH-5..30 — 见各 reviewer 报告**：包含 config 反向 import session/project（ARCH-5）、3 个 workspace 概念名共享（ARCH-6）、platform.QuestionItem 与 cli.AskQuestionItem 双向手抄（ARCH-7）、feishu→transcribe 直依（ARCH-8）、cron / dispatch 各有 prompt/schedule 校验二级实现（ARCH-9）、Router struct 字段 30+（ARCH-10）、cli 包 67 文件混杂（ARCH-11）、contract_test 未覆盖 dispatch.CronScheduler / sysession.Manager（ARCH-12）、session 通过 blank import 触发 history backend init（ARCH-13）、SessionGuard / MessageQueue 运行时 either-or（ARCH-14）、server 13 个 *Handlers god struct（ARCH-15）、cli.Process 字段导出与并发约束注释冲突（ARCH-16）、eventlog/schema 未承担 single source of truth（ARCH-17）、dispatch.DispatcherConfig.Router 字段类型 *session.Router（ARCH-18）、router.Version 同时承载 data + render（ARCH-19）、process.go 1500+ 行字段 60+（ARCH-20）、discovery 同时依赖 cli + cli/backend（ARCH-21）、replyTagForBackend sync.Once 兜底掩盖 wireup 时序（ARCH-22）、Reactor / QuestionCardSender type-assertion 模式（ARCH-23）、scheduler.go 2400+ 行混合多职责（ARCH-24）、sysession.Runner 硬编码 claude bin（ARCH-25）、Wrapper.Spawn 100 行 protocol+transport 混杂（ARCH-26）、validateWorkspace / cron.workDirUnderRoot 重复（ARCH-27）、cli 包同住 image/thumbnail/askquestion/todo DTO（ARCH-28）、ManagedSession.process 直接持 *cli.Process（ARCH-29）、缺 wireup 集中包（ARCH-30）。所有 ARCH 类条目均为方案不唯一 / 跨模块改动，按 Round 节存档供未来 RFC 引用。
+- [ ] **R235-ARCH-5..30 — 见各 reviewer 报告**：包含 config 反向 import session/project（ARCH-5）、3 个 workspace 概念名共享（ARCH-6）、platform.QuestionItem 与 cli.AskQuestionItem 双向手抄（ARCH-7）、feishu→transcribe 直依（ARCH-8）、cron / dispatch 各有 prompt/schedule 校验二级实现（ARCH-9）、Router struct 字段 30+（ARCH-10）、cli 包 67 文件混杂（ARCH-11）、contract_test 未覆盖 dispatch.CronScheduler / sysession.Manager（ARCH-12）、session 通过 blank import 触发 history backend init（ARCH-13）、SessionGuard / MessageQueue 运行时 either-or（ARCH-14）、server 13 个 *Handlers god struct（ARCH-15）、cli.Process 字段导出与并发约束注释冲突（ARCH-16）、eventlog/schema 未承担 single source of truth（ARCH-17）、dispatch.DispatcherConfig.Router 字段类型 *session.Router（ARCH-18）、router.Version 同时承载 data + render（ARCH-19）、process.go 1500+ 行字段 60+（ARCH-20）、discovery 同时依赖 cli + cli/backend（ARCH-21）、replyTagForBackend sync.Once 兜底掩盖 wireup 时序（ARCH-22）、Reactor / QuestionCardSender type-assertion 模式（ARCH-23）、~~scheduler.go 2400+ 行混合多职责（ARCH-24）✓ 已修：PR #309 6-stage split scheduler.go 至 852 行 + 7 职责文件~~、sysession.Runner 硬编码 claude bin（ARCH-25）、Wrapper.Spawn 100 行 protocol+transport 混杂（ARCH-26）、validateWorkspace / cron.workDirUnderRoot 重复（ARCH-27）、cli 包同住 image/thumbnail/askquestion/todo DTO（ARCH-28）、ManagedSession.process 直接持 *cli.Process（ARCH-29）、缺 wireup 集中包（ARCH-30）。所有 ARCH 类条目均为方案不唯一 / 跨模块改动，按 Round 节存档供未来 RFC 引用。
 
 ### Go 正确性 / 性能（合并到现有跟踪）
 
@@ -1185,7 +1187,7 @@
 - [ ] **R235-CR-3 — `ErrClassPausedConcurrent` 常量定义后从未发出**：`registerJob` 闭包并发暂停分支静默 return 不调 finishRun，使 dashboard 永远收不到 paused_concurrent 状态。建议要么发 emitOverlapSkipped(ErrClassPausedConcurrent)，要么在常量旁加注释 + 删除。需要决定 dashboard UX 是否需要这个状态。
 - [ ] **R235-CR-4 — `XxxByID`/`Xxx` 6 对方法 60 行重复（DeleteJob/PauseJob/ResumeJob × ByID/byPrefix）**：抽 `deleteJobAfterLookup` / `pauseJobAfterLookup` / `resumeJobAfterLookup` helper。无 breaking 但改动 ~120 行。
 - [ ] **R235-CR-7 — `emitRunEnded` 无 godoc 与 emitRunStarted 不对称**：补 godoc 说明 CronRunEndedTotal 在 finishRun 末尾 bump 而非函数内部，防止维护者错误对齐造成 double-count。
-- [ ] **R235-CR-8 — scheduler.go 3038 行**：拆 `scheduler_exec.go` / `scheduler_notify.go` / `scheduler_persist.go`（同 R235-ARCH-24 路线）。
+- [x] **R235-CR-8 — scheduler.go 3038 行**：拆 `scheduler_exec.go` / `scheduler_notify.go` / `scheduler_persist.go`（同 R235-ARCH-24 路线）。 *(R243-ARCH-1 同根因派生，PR #309 已 6-stage split。)*
 - [ ] **R235-CR-9 — `skipAppendTrim` 三处 appendsSinceTrim=0 重置语义不齐**：注释解释或对齐到"只在真正触发 trim 时才重置"。
 - [ ] **R235-CR-14 — `validateSchedule` 与 `PreviewSchedule` 重复 cronParser.Parse + 两次 sched.Next**：复用 `schedulePeriod`。
 - [ ] **R235-CR-15 — diskListNewestFirst 同秒 mtime tie-break 用 runID（hex）不反映时间顺序**：注释说明，或在 list 路径用 StartedAt 二次排序（成本高）。
@@ -1335,7 +1337,7 @@
 
 ### 架构（高优先）— 本轮新发现
 
-- [ ] **R232-ARCH-1 — internal/cron/scheduler.go 2870 行 / 67 函数 god file（P1）**: scheduler.go 已汇集 CAS gate / jitter / preflight / watchdog / recordResult 双 / persist seq gate / deliverNotice / redactPaths / slogPrintfLogger 全部职责。任何修改都要在 ~3000 行内追锁顺序。方案：参考 router-split RFC 拆 5–6 个文件（lifecycle / jobs / execute / finish / persist / core）。Breaking：否（纯文件移动）。合并 R231-ARCH-N。
+- [x] **R232-ARCH-1 — internal/cron/scheduler.go 2870 行 / 67 函数 god file（P1）**: scheduler.go 已汇集 CAS gate / jitter / preflight / watchdog / recordResult 双 / persist seq gate / deliverNotice / redactPaths / slogPrintfLogger 全部职责。任何修改都要在 ~3000 行内追锁顺序。方案：参考 router-split RFC 拆 5–6 个文件（lifecycle / jobs / execute / finish / persist / core）。Breaking：否（纯文件移动）。合并 R231-ARCH-N。 *(R243-ARCH-1 同根因派生，PR #309 commit c13fa47 已实施 6-stage split。)*
 - [~] **R232-ARCH-3 — cron 的 SessionRouter 接口仍声明 RegisterCronStub + RegisterCronStubWithChain（误报关闭 2026-05-23）**: 复核 cron/scheduler.go:72-90 SessionRouter 接口现仅声明 RegisterCronStubWithChain（line 82，无双方法），condition 已落地。session 包仍保留 RegisterCronStub 公开方法但仅给测试 / upstream test 用，移除会破坏 ~10 测试 — 留作独立测试重构。本批 PR
 - [ ] **R232-ARCH-5 — 28 个 contract test 用 os.ReadFile + 字符串/正则 pin 源代码（P1）**: notify_background_ctx_test / debounce_contract_test / on_turn_done_contract_test 等把 gofmt + 注释 + 标识符当 API。方案：抽到行为级断言；真正必须 source-pin 的统一放 `internal/contract/` 加 README。Breaking：否（重构 test）。
 - [ ] **R232-ARCH-6 — 5 个独立 *Router 消费者接口 + 2 个临时 cronStubChecker/cronSessionLister（P2）**: cron / dispatch / server.HubRouter / sysession.SystemSessionRouter / upstream.SessionRouter 重叠严重。方案：合并到 `internal/session/iface` 子包按 Lifecycle/Reader/Lookup 三细分接口。Breaking：否。
