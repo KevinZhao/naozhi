@@ -190,7 +190,18 @@ func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []I
 	// reuse capacity, return on Put.
 	cw := captureWriterPool.Get().(*captureWriter)
 	cw.bytes = cw.bytes[:0]
-	defer captureWriterPool.Put(cw)
+	// R237-GO-11: skip Put when the backing array grew past
+	// captureWriterPoolMaxCap (e.g. an 11 MiB image-bearing message). Returning
+	// such an outsize buffer to the pool would let it dominate steady-state
+	// memory: every subsequent small Get pulls the giant slice and append's
+	// own grow path can't shrink it. Letting the GC reclaim the oversized
+	// buffer trades a one-time alloc for stable pool footprint.
+	defer func() {
+		if cap(cw.bytes) > captureWriterPoolMaxCap {
+			return
+		}
+		captureWriterPool.Put(cw)
+	}()
 	if err := p.protocol.WriteUserMessageLocked(cw, uuidStr, text, images, priority); err != nil {
 		return err
 	}
@@ -235,6 +246,13 @@ var captureWriterPool = sync.Pool{
 		return &captureWriter{bytes: make([]byte, 0, 4096)}
 	},
 }
+
+// captureWriterPoolMaxCap caps the backing-array size we allow back into
+// captureWriterPool. Messages with embedded images can grow the slice to
+// many MiB; recycling those buffers would pin oversized arrays in steady
+// state. 64 KiB comfortably covers normal text payloads (typical < 4 KiB)
+// while letting outsize image messages fall through to the GC. R237-GO-11.
+const captureWriterPoolMaxCap = 64 * 1024
 
 // removeSlotByID removes a single slot from pendingSlots. Used on write-fail.
 // FIFO preserved for the remaining entries.
