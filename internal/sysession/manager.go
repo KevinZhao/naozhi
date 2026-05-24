@@ -573,6 +573,12 @@ func (m *Manager) recordRun(rec *daemonRecord, runID string, trigger DaemonTrigg
 		// Intentionally do nothing — see comment above.  Timeouts
 		// surface via the run record (state=DaemonRunTimedOut) without
 		// touching counters.
+	case DaemonErrorClassCanceled:
+		// Same as Timeout — Canceled means the operator shut us down
+		// or naozhi is restarting, NOT that the daemon is broken.
+		// State=DaemonRunCanceled records the event without touching
+		// the breaker counters or the success counters (so a long
+		// success streak is not nuked by an orderly shutdown). R236-QA-05.
 	}
 
 	if cb := m.loadOnRunEnded(); cb != nil {
