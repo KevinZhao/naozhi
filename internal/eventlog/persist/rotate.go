@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
-	"path/filepath"
 
 	"github.com/naozhi/naozhi/internal/eventlog/schema"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -334,16 +332,3 @@ func fsyncPath(path string) error {
 	defer f.Close()
 	return f.Sync()
 }
-
-// cleanFile removes path, ignoring ENOENT. Used to tidy up after
-// tmp file failures without cluttering error paths.
-func cleanFile(path string) {
-	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		slog.Debug("event log persist: cleanup remove failed", "path", path, "err", err)
-	}
-}
-
-// ensure the rotate path doesn't accidentally reference a stale
-// filepath helper.
-var _ = filepath.Join
-var _ = cleanFile
