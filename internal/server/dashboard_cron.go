@@ -132,6 +132,10 @@ func validateStringField(s string, p stringFieldPolicy) error {
 // check (e.g. to accept workspace-relative paths for a new feature) the
 // cron handler continues to enforce the stricter contract inherited from
 // the scheduler worker which runs on absolute paths only.
+//
+// Second pass (delegated to validateStringField) rejects C1 controls +
+// Unicode bidi / directional isolate / line separator runes that are
+// >= 0x20 at the byte level and therefore bypass the ASCII loop above.
 func validateCronWorkDir(wd string) error {
 	if len(wd) > maxCronWorkDirBytesDashboard {
 		return fmt.Errorf("work_dir exceeds %d-byte limit", maxCronWorkDirBytesDashboard)
@@ -353,9 +357,6 @@ func validateCronBackend(backend string) error {
 // `--append-system-prompt` and must stay single-line; do not copy this relaxed
 // policy back to those fields without re-auditing their downstream writers.
 //
-// Second pass mirrors validateCronWorkDir: reject C1 controls + Unicode
-// bidi / directional isolate / line separator runes that are >= 0x20 at
-// the byte level and therefore bypass the ASCII loop above.
 // validateCronTitle 是 Job.Title 在 handler 层的守门：单行（禁内嵌换行，
 // 卡片布局不允许）、长度 256 rune、禁控制字符 + 日志注入 rune。空值合法
 // （允许用户不填，UI 自动 fallback 到 Prompt 首行）。
