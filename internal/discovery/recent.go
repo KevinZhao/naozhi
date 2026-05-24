@@ -21,8 +21,16 @@ type RecentSession struct {
 	Summary    string `json:"summary,omitempty"`
 	LastPrompt string `json:"last_prompt,omitempty"`
 	LastActive int64  `json:"last_active"` // unix ms (JSONL mtime)
-	Workspace  string `json:"workspace,omitempty"`
-	Project    string `json:"project,omitempty"` // filled by server
+	// RetiredAt is the unix ms instant the session left the live sidebar
+	// (Router.Reset / Router.Remove). Filled by SessionHandlers from the
+	// RetiredStore when present; zero means "never observed retiring under
+	// the current naozhi process generation, fall back to LastActive".
+	// The dashboard sorts the history popover by RetiredAt || LastActive
+	// so the most recently closed session lands on top regardless of when
+	// its JSONL was last appended.
+	RetiredAt int64  `json:"retired_at,omitempty"`
+	Workspace string `json:"workspace,omitempty"`
+	Project   string `json:"project,omitempty"` // filled by server
 }
 
 // RecentSessionsFilter is the consumer-facing hook RecentSessions calls
