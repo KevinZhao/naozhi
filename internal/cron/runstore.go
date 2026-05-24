@@ -212,9 +212,10 @@ func (s *runStore) Append(run *CronRun) {
 		// 退化路径：把 Result 砍到极短，重新 marshal。Prompt 亦同。
 		// 这里不返回 — 一定要落盘一条记录，UI 才能看到 "曾有这么一条 run"。
 		shrunk := *run
-		shrunk.Result = truncateForRetry(shrunk.Result, maxRetryFieldRunes)
-		shrunk.Prompt = truncateForRetry(shrunk.Prompt, maxRetryFieldRunes)
-		shrunk.ErrorMsg = truncateForRetry(shrunk.ErrorMsg, maxRetryFieldRunes)
+		// R238-CR-2: 直接调 truncateWithSuffix，删掉等价 wrapper。
+		shrunk.Result = truncateWithSuffix(shrunk.Result, maxRetryFieldRunes)
+		shrunk.Prompt = truncateWithSuffix(shrunk.Prompt, maxRetryFieldRunes)
+		shrunk.ErrorMsg = truncateWithSuffix(shrunk.ErrorMsg, maxRetryFieldRunes)
 		if data2, err2 := json.Marshal(&shrunk); err2 == nil && int64(len(data2)) <= s.maxRunBytes {
 			data = data2
 		} else {
@@ -409,23 +410,11 @@ func (s *runStore) cacheInvalidate(jobID string) {
 	s.recentCache.Delete(jobID)
 }
 
-// truncateForRetry shrinks a string for the over-cap retry path. Keeps
-// the prefix + "…[truncated]" sentinel so the UI can still indicate
-// data was lost without forcing a code change. maxRunes counts runes,
-// not bytes — a byte-level slice would split multi-byte UTF-8 (Chinese
-// prompts/results are common here) and produce a malformed string that
-// json.Marshal silently re-encodes as U+FFFD; in the worst case the
-// second marshal still exceeds maxRunBytes and the run record is never
-// persisted. Rune-aware truncation closes that hole. R221-FIX-P0-1.
-//
-// R234-CR-1: delegates to truncateWithSuffix in limits.go so the suffix
-// literal stays in one place. Wrapper retained because the retry path's
-// rune budget (maxRetryFieldRunes) is logically distinct from the
-// over-cap result budget — keeping the named entry point makes call
-// sites self-documenting.
-func truncateForRetry(s string, maxRunes int) string {
-	return truncateWithSuffix(s, maxRunes)
-}
+// R238-CR-2: 删除 truncateForRetry 空 wrapper（仅 return truncateWithSuffix(...)）。
+// 历史背景见 R221-FIX-P0-1（rune-aware 截断避免 UTF-8 split）/ R234-CR-1
+// （委托 limits.go 的 truncateWithSuffix 集中后缀字面量）。callsites
+// 现在直接 truncateWithSuffix(field, maxRetryFieldRunes)，maxRetryFieldRunes
+// 常量本身就足够说明"retry 路径"语义，无需中间封装。
 
 // maxRetryFieldRunes 是 over-cap retry 路径每个字段（Result/Prompt/ErrorMsg）
 // 各自允许的最大 rune 数。三处共用同一上限是有意——保证退化路径单条记录的
