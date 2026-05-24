@@ -623,8 +623,13 @@ func (r *tailerRegistry) Shutdown() {
 	for _, t := range r.byTask {
 		tailers = append(tailers, t)
 	}
-	r.byTask = make(map[tailerKey]*agentTailer)
-	r.clientSubs = make(map[*wsClient]map[tailerKey]struct{})
+	// R247-PERF-25: clear() reuses the existing map's bucket array instead
+	// of paying the runtime.makemap allocation each Shutdown. The registry
+	// is rebuilt from empty after Shutdown() returns (the next ensureTailer
+	// re-populates), so reusing the underlying bucket slab is safe — no
+	// stale pointer is observable through the cleared map.
+	clear(r.byTask)
+	clear(r.clientSubs)
 	r.count.Store(0)
 	r.mu.Unlock()
 	for _, t := range tailers {
