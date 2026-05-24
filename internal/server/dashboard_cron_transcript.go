@@ -585,7 +585,7 @@ func flattenUserEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcript
 			Index: nextIdx + len(out),
 			Kind:  "user",
 			TS:    ts,
-			Text:  truncateRunes(text, maxAssistantTextBytes),
+			Text:  sanitizeWireText(truncateRunes(text, maxAssistantTextBytes)),
 		})
 	}
 	for _, b := range blocks {
@@ -600,7 +600,7 @@ func flattenUserEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcript
 		if strings.IndexByte(outStr, 0x1b) >= 0 {
 			outStr = ansiEscRe.ReplaceAllString(outStr, "")
 		}
-		outStr = truncateRunes(outStr, maxToolOutputBytes)
+		outStr = sanitizeWireText(truncateRunes(outStr, maxToolOutputBytes))
 		status := "ok"
 		if b.IsError {
 			status = "error"
@@ -647,7 +647,7 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 			textBuf.WriteString(b.Text)
 		case "tool_use":
 			toolCalls++
-			summary := summariseToolInput(b.Name, b.Input)
+			summary := sanitizeWireText(summariseToolInput(b.Name, b.Input))
 			out = append(out, transcriptTurn{
 				Index:     nextIdx + len(out),
 				Kind:      "tool_use",
@@ -666,7 +666,7 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 			Index:  nextIdx,
 			Kind:   "assistant",
 			TS:     ts,
-			Text:   truncateRunes(text, maxAssistantTextBytes),
+			Text:   sanitizeWireText(truncateRunes(text, maxAssistantTextBytes)),
 			Tokens: tok.Output,
 		}}, out...)
 		// re-number subsequent turns: prepending the assistant turn shifts
@@ -706,7 +706,7 @@ func flattenSystemEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcri
 		Index: nextIdx,
 		Kind:  "error",
 		TS:    ts,
-		Text:  truncateRunes(sys.Message, maxAssistantTextBytes),
+		Text:  sanitizeWireText(truncateRunes(sys.Message, maxAssistantTextBytes)),
 	})
 	return out, tok, 0, true
 }
