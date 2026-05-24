@@ -194,12 +194,12 @@
 - [ ] **R247-CR-2 — DeleteJob/PauseJob/ResumeJob (prefix) 与 *ByID 第二组同构（P1）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:687-758` ~150 行重复。方案：lookup 抽 helper，lockedOp+持久化共用。
 - [ ] **R247-CR-3 — executeOpt 仍 345 行 cyclomatic >30（P1）** [REPEAT-3]: `internal/cron/scheduler_run.go:367-711` 与 R246-CR-001 同根因仍 open；本轮新增 sendCtx 双预算 warn / abort 通道收发 / classifyExecError 进一步推高复杂度。方案：runSpawn/runSend/runFinish 切分。
 - [ ] **R247-CR-4 — Scheduler.Stop() 95 行 mini-state-machine（P2）** [REFACTOR]: `internal/cron/scheduler.go:684-777`。方案：抽 waitGCDrain/waitCronStop/waitTriggerWG/persistOnShutdown 四 helper。
-- [ ] **R247-CR-5 — `[Cron %s]` 中文文案 3 处 hardcode（P2）** [REPEAT-3]: `internal/cron/scheduler_run.go:567,671,709`。方案：抽 const + helper formatCronNotice(label, kind, body)。
+- [~] **R247-CR-5 — `[Cron %s]` 中文文案 3 处 hardcode（P2）** [REPEAT-3]: `internal/cron/scheduler_run.go:567,671,709`。方案：抽 const + helper formatCronNotice(label, kind, body)。
 - [ ] **R247-CR-6 — opts.ExtraArgs 三参数 slice 表达式纯防御性（P2）** [REFACTOR]: `internal/cron/scheduler_run.go:485-489` cron 后续从不 append。方案：slices.Clone 或注释 "future-proof"。
-- [ ] **R247-CR-7 — SetOnExecute/SetOnRunStarted/SetOnRunEnded 三 setter 同构（P2）** [REPEAT-3]: `internal/cron/scheduler_callbacks.go:61-88`。方案：泛型 setCallback[T] helper。
+- [~] **R247-CR-7 — SetOnExecute/SetOnRunStarted/SetOnRunEnded 三 setter 同构（P2）** [REPEAT-3]: `internal/cron/scheduler_callbacks.go:61-88`。方案：泛型 setCallback[T] helper。
 - [ ] **R247-CR-8 — *ByID 三入口注释暗示对称但 Pause/Resume 不删 runs（P2）** [REFACTOR]: `internal/cron/scheduler_jobs.go:273-388`。方案：godoc 显式区分或 helper 接 cleanup 钩子。
 - [ ] **R247-CR-9 — NotifyDefault 缺 godoc 行为契约（P2）** [REFACTOR]: `internal/cron/scheduler.go:472-482` 与 Location 不一致。方案：补 godoc。
-- [ ] **R247-CR-10 — registerJob AddFunc closure 与 executeIfNotDeletedOrPaused 同源（P2）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:843-862`。方案：closure 直调 executeIfNotDeletedOrPaused。
+- [~] **R247-CR-10 — registerJob AddFunc closure 与 executeIfNotDeletedOrPaused 同源（P2）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:843-862`。方案：closure 直调 executeIfNotDeletedOrPaused。
 - [ ] **R247-CR-11 — strHeap/timeHeap helper reset 路径反成噪音（P2）** [REFACTOR]: `internal/cron/runinflight.go:64-74,91-95` 与 R246-CR-011 同根因；本轮新发现 reset 不分配。方案：删 helper 或 cross-reference。
 - [ ] **R247-CR-12 — runs 限额 const 散落（P2）** [REFACTOR]: `internal/cron/runstore.go:170-187` 大小写不统一。方案：集中到 limits.go。
 - [ ] **R247-CR-13 — emitOverlapSkipped godoc 引用已归档 review（P2）** [REFACTOR]: `internal/cron/scheduler_finish.go:281-299`。方案：简化 godoc 删历史引用。
@@ -212,13 +212,13 @@
 - [ ] **R247-CR-20 — runs 限额 magic number 推导散落（P3）** [REFACTOR]: `internal/cron/runstore.go:170-187`。方案：集中注释块 + 推导公式。
 - [ ] **R247-CR-21 — emitOverlapSkipped godoc 否定式叙述（P3）** [REFACTOR]: `internal/cron/scheduler_finish.go:269-279`。方案：改正向 "Emits start→end pair with state=Skipped"。
 - [ ] **R247-CR-22 — maxJobsHardCap=500 等 const 缺 benchmark 引用（P3）** [REFACTOR]: `internal/cron/scheduler.go:283-294`。方案：链到 cron-v2-polish.md。
-- [ ] **R247-CR-23 — slogPrintfLogger panic/recovered 字符串扫描负面陈述（P3）** [REPEAT-3]: `internal/cron/scheduler.go:807-815` 与 R246-CR-016 同根因。方案：抽命名常量 + godoc。
+- [~] **R247-CR-23 — slogPrintfLogger panic/recovered 字符串扫描负面陈述（P3）** [REPEAT-3]: `internal/cron/scheduler.go:807-815` 与 R246-CR-016 同根因。方案：抽命名常量 + godoc。
 - [ ] **R247-CR-24 — executeIfNotDeletedOrPaused godoc 历史 review 引用（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:38-49`。方案：去 review code 仅留行为说明。
 - [ ] **R247-CR-25 — 历史 review 编号注释累计 40+ 处（P3）** [REFACTOR]: `internal/cron/scheduler_run.go,scheduler.go` 多处。方案：归档时同步删除注释或加 docs/COMMENT_CONVENTIONS.md。
 - [ ] **R247-CR-26 — containsCronC0 函数名误导（P3）** [REFACTOR]: `internal/cron/store.go:241-266` 实际还查 bidi/LS/PS。方案：改名 containsCronUnsafe。
 - [ ] **R247-CR-27 — Append truncate 三字段注释不对称（P3）** [REFACTOR]: `internal/cron/runstore.go:280-339`。方案：抽 shrinkOversizeRun helper。
 - [ ] **R247-CR-28 — spawn budget 警告 magic factor 0.5（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:606-613`。方案：const spawnElapsedWarnRatio + godoc。
-- [ ] **R247-CR-29 — TriggerNow 60 行 + 3 goroutine 分支（P3）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:780-833`。方案：合并单 goroutine + 内部 if。
+- [~] **R247-CR-29 — TriggerNow 60 行 + 3 goroutine 分支（P3）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:780-833`。方案：合并单 goroutine + 内部 if。
 - [ ] **R247-CR-30 — IsExcluded godoc 与实现 cost 不一致（P3）** [REFACTOR]: `internal/cron/scheduler_session.go:40-46`。方案：godoc 标注 O(jobs × recentCap) + 推 KnownSessionIDs cache。
 
 ### 架构（剩余）
