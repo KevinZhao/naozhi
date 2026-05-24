@@ -2108,8 +2108,11 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		return
 	}
 	defer func() {
-		inflight.running.Store(false)
+		// Reset metadata BEFORE releasing the CAS gate; otherwise a TriggerNow
+		// that wins the next CompareAndSwap can have its freshly-populated
+		// RunID/StartedAt clobbered by this deferred reset. R238-GO-2.
 		inflight.reset()
+		inflight.running.Store(false)
 		metrics.CronRunInflight.Add(-1)
 	}()
 
