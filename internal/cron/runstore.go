@@ -265,7 +265,21 @@ func (s *runStore) Append(run *CronRun) {
 // don't hold — a missed trim is bounded by appendTrimBatch and the next
 // trimAll cold-pass, so over-keeping a few entries is acceptable; missing a
 // trim entirely is not.
+//
+// CALLER CONTRACT: caller MUST hold jobLock(jobID). The function bumps
+// entry.appendsSinceTrim and resets it on the "do trim" branches; without
+// jobLock serialisation two parallel Appends can both hit the
+// >= appendTrimBatch boundary, mis-coalesce trim cadence, or — combined
+// with cacheHeadPush which is also jobLock-serialised — race trimJobLocked
+// against a fresh Append's WriteFileAtomic. Today the sole caller is
+// Append (runstore.go:252) which acquires jobLock at line 213; any future
+// helper must do the same. R239-GO-5.
 func (s *runStore) skipAppendTrim(jobID string) bool {
+	// Race-detector friendly contract assertion: panics when jobLock is
+	// currently free, the unambiguous signature of a caller that forgot to
+	// lock. False negatives accepted (another goroutine may hold the lock
+	// while ours doesn't); false positives impossible.
+	s.assertJobLockHeld(jobID)
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
 		return false

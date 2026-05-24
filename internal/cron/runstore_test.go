@@ -732,7 +732,13 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 				keepWindow: tc.keepWindow,
 			}
 			s.recentCache.Store("job", tc.entry)
+			// R239-GO-5: skipAppendTrim contract requires caller hold
+			// jobLock; the production callsite (Append) does. Match
+			// here so the assertJobLockHeld guard inside doesn't fire.
+			lock := s.jobLock("job")
+			lock.Lock()
 			got := s.skipAppendTrim("job")
+			lock.Unlock()
 			if got != tc.wantSkip {
 				t.Errorf("skipAppendTrim = %v, want %v", got, tc.wantSkip)
 			}
@@ -749,6 +755,10 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 // false (forcing a full trim) and not panic on the nil load.
 func TestRunStore_SkipAppendTrim_MissingEntry(t *testing.T) {
 	s := &runStore{keepCount: 100, keepWindow: 24 * time.Hour}
+	// R239-GO-5: skipAppendTrim contract requires caller hold jobLock.
+	lock := s.jobLock("never-seen")
+	lock.Lock()
+	defer lock.Unlock()
 	if s.skipAppendTrim("never-seen") {
 		t.Error("expected false for unknown jobID")
 	}
