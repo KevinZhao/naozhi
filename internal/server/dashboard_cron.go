@@ -481,6 +481,26 @@ type CronHandlers struct {
 	// Nil-guarded just like runsLimiter so newCronHandlersForTest paths
 	// skip the gate. Wiring lives in server.New.
 	listLimiter *ipLimiter
+
+	// writeLimiter caps per-IP rate of authenticated cron-write/control
+	// endpoints that fan out side-effects beyond a cheap read:
+	//
+	//   - POST /api/cron/trigger  spawns the job's claude CLI subprocess
+	//     and may send IM notifications, so loop-triggering is a realistic
+	//     DoS / amplification vector even for a logged-in caller.
+	//   - GET  /api/cron/preview   parses cron expressions in a tight loop
+	//     up to N=10 next-run computations; cheaper than trigger but still
+	//     not a heartbeat endpoint and shouldn't be unbounded.
+	//
+	// Sustained 30 req/min with burst 6 is generous for legitimate UI usage
+	// (a single user form-edit cycle hits preview a handful of times per
+	// minute) while capping a stolen-token attacker at one trigger every
+	// 2 s steady-state. Single shared bucket per IP keeps the wiring
+	// simple and the per-IP control surface uniform.
+	//
+	// Nil-guarded so newCronHandlersForTest paths skip the gate; wiring
+	// lives in server.New. [R247-SEC-2 / R247-SEC-3]
+	writeLimiter *ipLimiter
 }
 
 // GET /api/cron — list all cron jobs (unscoped, admin view).
@@ -882,6 +902,14 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/cron/trigger — manually trigger a cron job execution (for debugging).
 func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
+	// [R247-SEC-2] Per-IP rate limit: each call spawns the cron job's
+	// claude CLI subprocess and may emit IM notifications; without this
+	// gate a stolen dashboard token could loop-trigger jobs to amplify
+	// CPU/IM-quota damage. Nil-guarded for hand-built test handlers.
+	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
+		return
+	}
 	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
