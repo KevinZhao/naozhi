@@ -235,6 +235,30 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, resp)
 		return
 	}
+	// R236-SEC-13: defence in depth before ClaudeProjectSlug encodes
+	// WorkDir into a filesystem path component. ClaudeProjectSlug only
+	// replaces '/' with '-' and strips the leading separator — it does
+	// NOT scrub C0/C1/bidi/zero-width or invalid UTF-8. A persisted run
+	// from a hand-edited disk file (or an older naozhi version that
+	// allowed weaker WorkDir validation) could carry a control rune
+	// that tunnels through the slug into the projects/ directory name
+	// and lets the EvalSymlinks below land on an unintended path.
+	// Reject before constructing jsonlPath so the strict check below is
+	// not asked to defend against a malformed input.
+	if !utf8.ValidString(run.WorkDir) {
+		slog.Warn("cron transcript: rejecting non-UTF8 WorkDir", "job_id", jobID, "run_id", runID)
+		resp.Fallback = "missing"
+		writeJSON(w, resp)
+		return
+	}
+	for _, r := range run.WorkDir {
+		if osutil.IsLogInjectionRune(r) {
+			slog.Warn("cron transcript: rejecting WorkDir with control rune", "job_id", jobID, "run_id", runID)
+			resp.Fallback = "missing"
+			writeJSON(w, resp)
+			return
+		}
+	}
 
 	jsonlPath := filepath.Join(h.claudeDir, "projects", discovery.ClaudeProjectSlug(run.WorkDir), run.SessionID+".jsonl")
 
