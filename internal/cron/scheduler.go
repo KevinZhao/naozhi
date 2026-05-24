@@ -3172,6 +3172,9 @@ func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
 	// identical in-memory state would produce diff-noisy JSON across saves —
 	// breaking git audit of backed-up cron_jobs.json and making post-incident
 	// diffs much harder to read.
+	//
+	// O(N log N) sort 每 mutation 一次；50 jobs × log50 ≈ 280 比较，热路径可接受。
+	// NEEDS-DESIGN R241-PERF-9：未来若 jobs 上千，可改增量维护已排 ID slice。
 	slices.SortFunc(entries, func(a, b *Job) int { return cmp.Compare(a.ID, b.ID) })
 	return (*marshalJobs.Load())(entries)
 }
