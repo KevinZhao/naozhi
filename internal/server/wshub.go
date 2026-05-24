@@ -636,6 +636,8 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	// ("subscriberCounts map[string]int O(1)") would only save a small
 	// constant on the cold subscribe path while adding a second invariant
 	// to maintain on every disconnect — not worth the bookkeeping.
+	// NEEDS-DESIGN R242-GO-5: 锁内 O(N) 遍历 clients 计算 per-key 订阅数；
+	// 单 dashboard 用户场景可接受，多 operator 时改增量计数器避免锁内全扫描。
 	if _, alreadySub := c.subscriptions[key]; !alreadySub {
 		count := 0
 		for other := range h.clients {
