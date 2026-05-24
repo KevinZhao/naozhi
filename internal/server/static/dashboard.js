@@ -11978,7 +11978,8 @@ function cronRunTurnHtml(t) {
     '</div>';
   }
   if (t.kind === 'assistant') {
-    const tokens = t.tokens ? '<span class="crs-tokens">+' + (t.tokens >= 1000 ? (t.tokens / 1000).toFixed(1) + 'k' : t.tokens) + '</span>' : '';
+    const _tk = Number(t.tokens) | 0;
+    const tokens = _tk ? '<span class="crs-tokens">+' + (_tk >= 1000 ? (_tk / 1000).toFixed(1) + 'k' : _tk) + '</span>' : '';
     return '<div class="crs-turn assistant">' +
       '<div class="crs-avatar assistant" aria-hidden="true">C</div>' +
       '<div class="crs-turn-body">' +
