@@ -37,7 +37,7 @@ func makeRouterForAutoChain(t *testing.T) *Router {
 	r.backendOverrides = make(map[string]string)
 	r.knownIDs = make(map[string]bool)
 	r.sessionIDToKey = make(map[string]string)
-	r.spawningKeys = make(map[string]struct{})
+	r.spawningKeys = make(map[string]chan struct{})
 	r.autoChainPolicy = alwaysOnPolicy{}
 	return r
 }

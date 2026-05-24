@@ -31,7 +31,7 @@ func newTakeoverTestRouter(maxProcs int) *Router {
 	r.workspaceOverrides = map[string]string{}
 	r.backendOverrides = map[string]string{}
 	r.sessionIDToKey = map[string]string{}
-	r.spawningKeys = map[string]struct{}{}
+	r.spawningKeys = map[string]chan struct{}{}
 	return r
 }
 
