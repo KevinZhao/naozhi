@@ -47,11 +47,20 @@ func loadJobs(path string) (map[string]*Job, error) {
 	// contents would be parsed and any parse failure would rename the
 	// linked file out of place via the corrupt-rename branch). os.Lstat
 	// inspects the link itself rather than the target.
-	if fi, lerr := os.Lstat(path); lerr == nil {
-		if fi.Mode()&os.ModeSymlink != 0 {
-			slog.Warn("cron store path is a symlink; refusing to follow", "path", path)
-			return nil, fmt.Errorf("cron store path is a symlink, refusing to follow")
+	if fi, lerr := os.Lstat(path); lerr != nil {
+		// R238-CR-2: silently ignoring non-NotExist Lstat errors (EPERM,
+		// EACCES, ELOOP, etc.) lets a local attacker bypass the symlink
+		// check by arranging for Lstat to fail — os.Open below would then
+		// happily traverse the symlink. We can't refuse to load on every
+		// transient stat error (that would brick startup), but at minimum
+		// surface the failure so operators can investigate.
+		if !errors.Is(lerr, fs.ErrNotExist) {
+			slog.Warn("cron: lstat store path failed, falling through to open",
+				"path", path, "err", lerr)
 		}
+	} else if fi.Mode()&os.ModeSymlink != 0 {
+		slog.Warn("cron store path is a symlink; refusing to follow", "path", path)
+		return nil, fmt.Errorf("cron store path is a symlink, refusing to follow")
 	}
 	f, err := os.Open(path)
 	if err != nil {
