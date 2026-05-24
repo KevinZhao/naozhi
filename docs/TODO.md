@@ -124,8 +124,8 @@
 - [ ] **R237-GO-7 — `cmd/naozhi/main.go:96` `readJSONWithRetry` 阻塞 main goroutine（P2）**：`time.Sleep(sleep)` 重试不响应 ctx 取消。建议加 ctx 参数 + select 替换 Sleep。Breaking: 是（调用点更新）。
 - [ ] **R237-GO-8 — `dispatch.ownerLoop` defer 顺序与 panic 路径耦合（P2）**：`defer NotifyIdle()` 在 `defer recover()` 之后注册，panic 路径下 NotifyIdle 在 handleOwnerLoopPanic 之后调用。建议把 NotifyIdle defer 移到 recover defer 之前。Non-breaking。
 - [ ] **R237-GO-9 — `shim.Manager.StopAll(ctx)` 接收 ctx 但从不使用（P3）**：误导调用方。建议移除 ctx 参数或实现 ctx-aware drain。Breaking: 是（移参数）。
-- [ ] **R237-GO-10 — `process.go:411` `setDeathReason` upgrade-path 死代码（P3）**：注释 "not taken today" 自陈死代码。建议删除 upgrade-path（425-428 行）。Non-breaking。
-- [ ] **R237-GO-11 — `cli.captureWriterPool` 大 payload 污染 sync.Pool（P3）**：11MB 图片消息后 backing array 留在 pool。建议 Put 前检查 cap > 64KiB 跳过。Non-breaking。
+- [~] **R237-GO-10 — `process.go:411` `setDeathReason` upgrade-path 死代码（P3）**：注释 "not taken today" 自陈死代码。建议删除 upgrade-path（425-428 行）。Non-breaking。
+- [~] **R237-GO-11 — `cli.captureWriterPool` 大 payload 污染 sync.Pool（P3）**：11MB 图片消息后 backing array 留在 pool。建议 Put 前检查 cap > 64KiB 跳过。Non-breaking。
 - [ ] **R237-GO-12 — `dispatch.BuildHandler` 中 `d.dedup` 为 nil 时 Seen 会 panic（P3）**：与 takeoverFn 不一致。建议 NewDispatcher 加 noop fallback：`if d.dedup == nil { d.dedup = platform.NewDedup(0) }`。Non-breaking。
 - [ ] **R237-GO-13 — `cli.process_send.go:60` `buildUserEntry` 信号量错位（P3）**：`sem <- struct{}{}` 在主 goroutine 中阻塞，应在 worker goroutine 中。建议挪到 goroutine 启动后。Non-breaking。
 
@@ -148,7 +148,7 @@
 - [ ] **R237-PERF-8 — `runstore.diskListNewestFirst` 无 mtime 预过滤（P2）**：分页查询时全量解析 JSON 再丢弃靠前的条目。建议 before 非零时先 mtime 预过滤。Non-breaking。
 - [ ] **R237-PERF-9 — `Router.knownIDsOrder` 无上限（P2）**：无 cap 持续 append，过期 ID 占内存。建议设 maxKnownIDsOrder = 10000 + FIFO 截断。Non-breaking。
 - [ ] **R237-PERF-10 — `cron.KnownSessionIDs` 高频调用无 memoize（P2）**：归 R235-PERF-4 / R235-PERF-11 主条目。
-- [ ] **R237-PERF-11 — `eventlog/persist/idx.AppendBatch` 每次分配新 buf（P2）**：默认 200ms 间隔每批 28-896 字节短命对象给 GC 增压。建议 buf 改 IdxWriter 字段复用或栈分配。Non-breaking。
+- [~] **R237-PERF-11 — `eventlog/persist/idx.AppendBatch` 每次分配新 buf（P2）**：默认 200ms 间隔每批 28-896 字节短命对象给 GC 增压。建议 buf 改 IdxWriter 字段复用或栈分配。Non-breaking。
 - [ ] **R237-PERF-12 — `session.EventEntriesSince` dead-session 全量 sort（P2）**：1Hz × N tabs × M dead sessions。建议 persistedHistory 维护按 Time 排序的不变式 + 二分查找。Non-breaking。
 - [ ] **R237-PERF-13 — discovery extractText 单 block 路径多余 alloc（P3）**：blocks 长度 1 时仍走 strings.Join。建议早返。Non-breaking。
 - [ ] **R237-PERF-14 — runstore.skipAppendTrim 高频 sync.Map lookup + entry.mu lock（P3）**：建议改 jobAppendCount sync.Map[*atomic.Int32] 无锁。Non-breaking。
@@ -335,7 +335,7 @@
 - [ ] **R234-PERF-13 — readShimLine 错误漏 cap drain 路径（P3）**：bufio chunk 临时切片漏。
 - [ ] **R234-PERF-14 — runstore.warmCache 持 entry.mu 做 ReadDir+N×ReadFile 阻塞 dashboard 冷启动（P3）**：建议 warm 异步，首次 Recent miss 立即返空切片，后台 populate。
 - [ ] **R234-PERF-15 — agent_tailer pollOnce 200ms ticker 对 refCount==0 silent tailer 仍 open/close（P3）**：建议 silent + size-unchanged 时 backoff 到 2s。
-- [ ] **R234-PERF-16 — protocol_claude.extractAskQuestion 每 assistant 事件全 block 扫描（P3）**：建议 `strings.Contains(rawContent, "AskUserQuestion")` 早 short circuit。
+- [~] **R234-PERF-16 — protocol_claude.extractAskQuestion 每 assistant 事件全 block 扫描（P3）**：建议 `strings.Contains(rawContent, "AskUserQuestion")` 早 short circuit。
 
 ### 代码质量 — 本轮新发现
 

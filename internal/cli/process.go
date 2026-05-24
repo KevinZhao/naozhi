@@ -405,27 +405,19 @@ const (
 // both observe a nil pointer on Load and then both Store, letting the slower
 // goroutine overwrite the earlier classification.
 //
-// Each Store allocates a fresh *string (captured by address of a local); the
-// CAS loop retries while an empty string is in place (defensive — no code path
-// stores "" today, but tolerating the upgrade is cheap and forward-compatible).
+// Each Store allocates a fresh *string (captured by address of a local).
+// First-writer-wins: once the pointer is non-nil it is never overwritten —
+// no code path stores an empty-string pointer, so the historical "upgrade
+// from empty" branch was dead code (R237-GO-10) and has been removed.
 func (p *Process) setDeathReason(reason string) {
 	if reason == "" {
 		return
 	}
-	// First attempt: store only if the pointer is still nil (never set).
-	// CompareAndSwap returns true on success, so a subsequent caller observing
-	// a non-nil pointer drops out here.
+	// Store only if the pointer is still nil (never set). CompareAndSwap
+	// returns true on success, so a subsequent caller observing a non-nil
+	// pointer drops out here and preserves first-writer-wins.
 	fresh := reason
-	if p.deathReason.CompareAndSwap(nil, &fresh) {
-		return
-	}
-	// Upgrade path: if somebody stored a pointer to "" explicitly (not taken
-	// today, but cheap to tolerate), swap it for the real reason. Snapshot
-	// the current pointer and CAS against it; a concurrent non-empty writer
-	// will invalidate our CAS and we bail to preserve first-writer-wins.
-	if cur := p.deathReason.Load(); cur != nil && *cur == "" {
-		_ = p.deathReason.CompareAndSwap(cur, &fresh)
-	}
+	p.deathReason.CompareAndSwap(nil, &fresh)
 }
 
 // DeathReason returns the recorded death reason, or "" if alive or unset.
