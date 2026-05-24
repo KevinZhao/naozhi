@@ -1402,10 +1402,20 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 // unit tests in internal/cli/subagent_link_test.go are the canonical spot
 // for that coverage.
 //
+// R239-ARCH-I: the consumer-facing interface lives at
+// internal/session/agentlink.AgentLinker — server stores wired linkers
+// keyed on that interface. ManagedSession still returns the concrete
+// *cli.SubagentLinker so callers that need the full linker surface
+// (SeedFromHistory / Resolve / SetContext / ConfigureForTest, used by
+// the cli package itself plus its tests) keep working without an extra
+// type assertion. The interface widens only at the server boundary.
+//
 // TODO: introduce AgentIntrospector interface when a second backend needs
 // agent-view support. Tracked in docs/TODO.md (R214-CODE-6 / R217-ARCH-2 /
-// R219-ARCH-3). Drop R239-CR-11 (R245-CR-008): orphan ID — never landed
-// in TODO.md; the three live anchors above already cover the same root.
+// R219-ARCH-3 — the lifecycle question, distinct from the consumer-side
+// interface R239-ARCH-I now solves). Drop R239-CR-11 (R245-CR-008):
+// orphan ID — never landed in TODO.md; the three live anchors above
+// already cover the same root.
 func (s *ManagedSession) SubagentLinker() *cli.SubagentLinker {
 	if real := s.loadCliProcess(); real != nil {
 		return real.Linker()
