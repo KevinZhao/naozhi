@@ -283,7 +283,13 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 		// next expected idx entry. Sparse idx: not every record has
 		// one; only push a new IdxEntry when there was one in the old
 		// idx at this exact record.
+		//
+		// UnmarshalRecord copies the raw bytes via json.RawMessage so
+		// it's safe to release the body buffer immediately after the
+		// decode call regardless of whether we end up appending an
+		// IdxEntry below.
 		rec, err := schema.UnmarshalRecord(body)
+		ReleaseFramedBody(body)
 		if err != nil {
 			return 0, nil, fmt.Errorf("decode spliced record: %w", err)
 		}

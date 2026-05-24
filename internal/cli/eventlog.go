@@ -356,6 +356,22 @@ type EventLog struct {
 	// ring buffer pre-allocates maxSize entries.
 	sinkReady      atomic.Bool
 	persistSinkPtr atomic.Pointer[PersistSink]
+
+	// replayInvokeTotal counts how many invokePersistSink calls fired
+	// while sinkReady was still false (replayPhase=true). This window
+	// starts at construction and ends when SetPersistSink Stores
+	// sinkReady=true; entries observed in this window are tagged for
+	// the Persister to drop without committing to disk so an
+	// InjectHistory replay cannot create a write-loop. R242-ARCH-20.
+	//
+	// The counter is purely diagnostic — production reads come from
+	// /health (and tests via ReplayInvokeTotal()) to confirm the
+	// SetPersistSink-after-InjectHistory ordering held in practice.
+	// A non-zero steady-state value at runtime means a Append /
+	// AppendBatch caller raced ahead of the persister attach, which
+	// is a contract violation worth flagging in dashboards even when
+	// the Persister silently absorbs the drop.
+	replayInvokeTotal atomic.Int64
 }
 
 // PersistSink is the event log's persistence hook contract.
@@ -474,7 +490,29 @@ func (l *EventLog) invokePersistSink(entries []EventEntry) {
 	// When sinkReady is false the batch must be tagged replayPhase=true
 	// — this is the runtime blocker-1 guard from RFC §3.2.3.
 	replay := !l.sinkReady.Load()
+	if replay {
+		// R242-ARCH-20: count replay-phase invocations so /health (or
+		// equivalent diagnostic endpoint) can surface a non-zero value
+		// as a contract-violation signal. Steady-state production should
+		// see this counter freeze at the InjectHistory replay total and
+		// never grow once SetPersistSink has run.
+		l.replayInvokeTotal.Add(1)
+	}
 	(*p)(entries, replay)
+}
+
+// ReplayInvokeTotal returns the number of invokePersistSink calls that
+// observed sinkReady=false (replayPhase=true). This is a diagnostic
+// counter only: production code does not gate behaviour on it. Tests
+// use it to assert that the SetPersistSink-after-InjectHistory ordering
+// held; dashboards / /health endpoints can expose it to detect a
+// pre-attach burst that would otherwise be silently absorbed by the
+// Persister's replay-drop logic.
+//
+// Safe to call from any goroutine; returns the cumulative count from
+// the EventLog's construction.
+func (l *EventLog) ReplayInvokeTotal() int64 {
+	return l.replayInvokeTotal.Load()
 }
 
 // stampUUID guarantees every appended EventEntry has a non-empty

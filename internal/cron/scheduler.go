@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	mrand "math/rand/v2"
 	"os"
 	"path/filepath"
@@ -203,11 +204,12 @@ type Scheduler struct {
 	router SessionRouter
 	// platforms / agents / agentCommands are populated from SchedulerConfig
 	// at NewScheduler and treated as immutable thereafter — notifyTarget
-	// reads platforms without s.mu (line ~1864) and executeOpt reads agents
-	// without s.mu (line ~1534). A future caller must NOT mutate these maps
-	// in place; if dynamic backend/agent registration ever lands, switch to
+	// reads platforms without s.mu and executeOpt reads agents without
+	// s.mu. A future caller must NOT mutate these maps in place; if dynamic
+	// backend/agent registration ever lands, switch to
 	// atomic.Pointer[map[...]] swap-on-write so reads stay lock-free without
-	// racing the writer.
+	// racing the writer. (Explicit line numbers omitted on purpose — they
+	// drift with every refactor; grep `s.platforms`/`s.agents` instead.)
 	platforms     map[string]platform.Platform
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
@@ -738,6 +740,14 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		slog.Debug("cron: 'general' agent missing from agents map; cron jobs without slash-prefix will fall back to backend defaults",
 			"agent_count", len(cfg.Agents))
 	}
+	// R241-ARCH-3: clone the immutable-after-construction maps so a caller
+	// who keeps the original SchedulerConfig reference can't mutate the
+	// underlying buckets out from under cron's lock-free reads
+	// (notifyTarget reads s.platforms, executeOpt reads s.agents, both
+	// without s.mu — see the godoc on the fields). maps.Clone is a shallow
+	// copy: the values (platform.Platform / session.AgentOpts /
+	// agentCommand string) are unchanged. Nil-in → nil-out so the existing
+	// `cfg.Agents == nil` paths stay observable.
 	return &Scheduler{
 		cron: robfigcron.New(
 			robfigcron.WithLocation(loc),
@@ -748,9 +758,9 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		),
 		jobs:                make(map[string]*Job),
 		router:              cfg.Router,
-		platforms:           cfg.Platforms,
-		agents:              cfg.Agents,
-		agentCommands:       cfg.AgentCommands,
+		platforms:           maps.Clone(cfg.Platforms),
+		agents:              maps.Clone(cfg.Agents),
+		agentCommands:       maps.Clone(cfg.AgentCommands),
 		storePath:           cfg.StorePath,
 		maxJobs:             cfg.MaxJobs,
 		maxJobsPerChat:      maxPerChat,

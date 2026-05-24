@@ -629,6 +629,23 @@ func TestRunStore_RecentReturnsNewestFirst(t *testing.T) {
 	}
 }
 
+// newEntryFromRows builds a warm recentCacheEntry whose ring is seeded
+// from rows (newest-first). appendsSinceTrim sets the bookkeeping
+// counter for skipAppendTrim test cases. Pure test helper for R242-GO-8
+// — production code seeds via ringSeed inside warmCache.
+func newEntryFromRows(rows []CronRunSummary, appendsSinceTrim int) *recentCacheEntry {
+	e := &recentCacheEntry{warm: true, appendsSinceTrim: appendsSinceTrim}
+	// Cap the ring to len(rows) at minimum so iteration works; production
+	// uses keepCount, but skipAppendTrim only reads count and ringRead
+	// which both honour cap(ring).
+	cap := len(rows)
+	if cap == 0 {
+		cap = 1
+	}
+	e.ringSeed(rows, cap)
+	return e
+}
+
 // TestRunStore_SkipAppendTrim_Conditions covers the four return branches of
 // runStore.skipAppendTrim, the optimisation introduced by R232-PERF-8 that
 // lets Append skip the per-call ReadDir when the cache shows we're well
@@ -645,15 +662,15 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 
 	// "happy" entry: cache warm, comfortably under keepCount, oldest row is
 	// inside keepWindow (newer than cutoff). All three skip conditions pass.
+	//
+	// R242-GO-8: cache storage is now a ring buffer (entry.ring + head +
+	// count). The newEntryFromRows helper centralises the slice → ring
+	// translation so test cases keep their declarative shape.
 	makeHappyEntry := func() *recentCacheEntry {
-		return &recentCacheEntry{
-			warm: true,
-			runs: []CronRunSummary{
-				{RunID: "a", EndedAt: now.Add(-1 * time.Minute)},
-				{RunID: "b", EndedAt: now.Add(-2 * time.Minute)},
-			},
-			appendsSinceTrim: 0,
-		}
+		return newEntryFromRows([]CronRunSummary{
+			{RunID: "a", EndedAt: now.Add(-1 * time.Minute)},
+			{RunID: "b", EndedAt: now.Add(-2 * time.Minute)},
+		}, 0)
 	}
 
 	cases := []struct {
@@ -671,7 +688,7 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 			keepCount:   100,
 			keepWindow:  24 * time.Hour,
 			wantSkip:    false,
-			wantCounter: 0, // not warm: counter untouched
+			wantCounter: 0, // not warm: counter untouched (R242-GO-8: cold ring stays nil)
 		},
 		{
 			name:        "warm + headroom + within window: skip",
@@ -683,18 +700,14 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 		},
 		{
 			name: "near keepCount cap: do not skip",
-			entry: &recentCacheEntry{
-				warm: true,
+			entry: newEntryFromRows(func() []CronRunSummary {
 				// keepCount=15 + appendTrimBatch(=10) → 15-10+1 = 6 rows triggers gate
-				runs: func() []CronRunSummary {
-					r := make([]CronRunSummary, 6)
-					for i := range r {
-						r[i] = CronRunSummary{EndedAt: now.Add(-time.Duration(i) * time.Minute)}
-					}
-					return r
-				}(),
-				appendsSinceTrim: 0,
-			},
+				r := make([]CronRunSummary, 6)
+				for i := range r {
+					r[i] = CronRunSummary{EndedAt: now.Add(-time.Duration(i) * time.Minute)}
+				}
+				return r
+			}(), 0),
 			keepCount:   15,
 			keepWindow:  24 * time.Hour,
 			wantSkip:    false,
@@ -702,14 +715,10 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 		},
 		{
 			name: "oldest row beyond keepWindow: do not skip",
-			entry: &recentCacheEntry{
-				warm: true,
-				runs: []CronRunSummary{
-					{RunID: "a", EndedAt: now.Add(-30 * time.Second)},
-					{RunID: "b", EndedAt: now.Add(-2 * time.Hour)}, // older than keepWindow
-				},
-				appendsSinceTrim: 0,
-			},
+			entry: newEntryFromRows([]CronRunSummary{
+				{RunID: "a", EndedAt: now.Add(-30 * time.Second)},
+				{RunID: "b", EndedAt: now.Add(-2 * time.Hour)}, // older than keepWindow
+			}, 0),
 			keepCount:   100,
 			keepWindow:  1 * time.Hour, // cutoff = now-1h, oldest at now-2h is older
 			wantSkip:    false,
@@ -717,7 +726,7 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 		},
 		{
 			name:        "appendTrimBatch reached: force trim",
-			entry:       &recentCacheEntry{warm: true, runs: []CronRunSummary{{EndedAt: now}}, appendsSinceTrim: appendTrimBatch - 1},
+			entry:       newEntryFromRows([]CronRunSummary{{EndedAt: now}}, appendTrimBatch-1),
 			keepCount:   100,
 			keepWindow:  24 * time.Hour,
 			wantSkip:    false,

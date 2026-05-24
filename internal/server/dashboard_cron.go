@@ -461,10 +461,38 @@ type CronHandlers struct {
 	// hand-rolled CronHandlers instances) skip the gate; wiring lives in
 	// server.New.
 	runsLimiter *ipLimiter
+
+	// listLimiter caps GET /api/cron — the dashboard's primary 1 Hz
+	// polling endpoint. R242-CR-3: the runs/transcript endpoints are
+	// already rate-limited because each call fans out FS I/O, but the
+	// list endpoint runs ListAllJobsWithNextRun + RecentRuns(5) per job
+	// and per-call cost grows with N (jobs) × 5 (recent run files). A
+	// stolen token can otherwise burn IO at unbounded rate while the
+	// runs limiter sits idle.
+	//
+	// Sustained 2 req/s with burst 30 — generous enough that a single
+	// dashboard tab refresh storm (open + immediate filter change at
+	// the top of a minute) doesn't trip, but caps a parallel-poll
+	// attacker at ~2 req/s steady-state per source IP. Mirrors the
+	// shape of runsLimiter (rate.Every + burst) so ops familiarity
+	// transfers; the higher steady rate reflects that this endpoint is
+	// the dashboard's heartbeat.
+	//
+	// Nil-guarded just like runsLimiter so newCronHandlersForTest paths
+	// skip the gate. Wiring lives in server.New.
+	listLimiter *ipLimiter
 }
 
 // GET /api/cron — list all cron jobs (unscoped, admin view).
 func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
+	// R242-CR-3: gate per-IP before the scheduler/FS work so a stolen
+	// dashboard token cannot enumerate the job list (with embedded
+	// RecentRuns(5) per job) at unbounded rate. Mirrors runsLimiter
+	// usage in handleRunsList. Nil-guarded for hand-built tests.
+	if h.listLimiter != nil && !h.listLimiter.AllowRequest(r) {
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron list rate limit exceeded"})
+		return
+	}
 	if h.scheduler == nil {
 		// R230B-CR-3: keep wire shape `{"jobs":[]}` byte-equal to the prior
 		// map[string]any{"jobs": []any{}} fast path. Explicit empty slice
@@ -658,6 +686,20 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// Guard: notify=true without any target (neither per-job override nor
 	// scheduler default) would silently swallow notifications. Reject it
 	// at the edge so users see the problem immediately.
+	//
+	// R242-SEC-11: a per-job override is only "set" when BOTH platform and
+	// chat_id are present — half-configured (one filled, one blank) used to
+	// quietly fall through to NotifyDefault, hiding what is almost always a
+	// dashboard form-fill mistake (typo'd ChatID, lost focus before saving
+	// platform). Reject the half-set case explicitly with a distinct error
+	// so the user can self-correct, instead of letting it land on cron job
+	// disk and silently route notifications to the global fallback target.
+	if req.NotifyPlatform != "" || req.NotifyChatID != "" {
+		if req.NotifyPlatform == "" || req.NotifyChatID == "" {
+			http.Error(w, "notify_platform and notify_chat_id must be set together", http.StatusBadRequest)
+			return
+		}
+	}
 	if req.Notify != nil && *req.Notify {
 		perJobSet := req.NotifyPlatform != "" && req.NotifyChatID != ""
 		if !perJobSet && !h.scheduler.NotifyDefault().IsSet() {
@@ -1067,6 +1109,20 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		c := ""
 		if req.NotifyChatID != nil {
 			c = *req.NotifyChatID
+		}
+		// R242-SEC-11: a half-set patch (one field present + non-empty,
+		// the other present + empty OR absent) lands an orphan-target on
+		// disk that silently routes notifications to the wrong place.
+		// Disk shape we want is: both empty (no override) or both set.
+		// Reject the half-set case so the caller can self-correct.
+		// Patch leaves the missing pointer as nil — interpreted as
+		// "leave existing", so a PATCH-of-one-field is a request to
+		// edit one half: also disallowed for the same reason.
+		platformSet := p != ""
+		chatIDSet := c != ""
+		if platformSet != chatIDSet {
+			http.Error(w, "notify_platform and notify_chat_id must be set together", http.StatusBadRequest)
+			return
 		}
 		if err := validateNotifyTarget(p, c); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)

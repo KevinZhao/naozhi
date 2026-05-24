@@ -154,7 +154,15 @@ type Manager struct {
 	daemons []*daemonRecord
 	wg      sync.WaitGroup
 	ctx     context.Context
-	cancel  context.CancelFunc
+	// cancelP holds the daemon-loop cancel function once Start has
+	// installed ctx + spawned goroutines. nil pointer ⇒ Start has not
+	// run; non-nil ⇒ ctx is live and cancellable. R242-GO-6 replaces
+	// the previous "started atomic.Bool + plain cancel field" pair —
+	// the bool/field happened-before contract was carried by a comment
+	// on Start; collapsing both signals into a single atomic.Pointer
+	// store makes the contract a property of the type rather than a
+	// load-bearing comment.
+	cancelP atomic.Pointer[context.CancelFunc]
 
 	// Lifecycle hooks.  Held under hookMu so SetCallbacks (called late
 	// during startup wiring, after Hub is built) doesn't race
@@ -165,16 +173,6 @@ type Manager struct {
 	hookMu       sync.RWMutex
 	onRunStarted func(DaemonRunStartedEvent)
 	onRunEnded   func(DaemonRunEndedEvent)
-
-	// started is set to true inside Start's startOnce.Do.  Stop checks
-	// it before doing any cancellation/wait work so a Stop-before-Start
-	// caller (e.g. a wiring bug that fails between NewManager and Start)
-	// short-circuits cleanly instead of waiting on a never-built ctx.
-	// R232-GO-3: previous guard `m.cancel != nil` was correct only after
-	// Start ran but didn't disambiguate "Start never called" from "Start
-	// called but raced past the m.cancel assignment" — this atomic flag
-	// closes that ambiguity by happening exactly once under startOnce.
-	started atomic.Bool
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -211,22 +209,13 @@ func NewManager(cfg Config) (*Manager, error) {
 		cfg:     cfg,
 		tickFn:  cfg.NewTicker,
 	}
-	// R242-GO-16: route the constructor-time callbacks through the same
-	// SetCallbacks path the late-wiring caller (cmd/naozhi/main.go after
-	// the WS hub is built) uses. Two motivations:
-	//
-	//  1. Single write path keeps the hookMu invariant explicit — there
-	//     is now exactly one place that mutates onRunStarted/onRunEnded,
-	//     so future readers cannot infer "writes only happen pre-Start
-	//     so we can skip the lock" from the constructor branch and miss
-	//     the post-Start SetCallbacks branch.
-	//  2. NewManager is called by tests that pass cfg.OnRunStarted /
-	//     cfg.OnRunEnded directly without ever calling SetCallbacks; the
-	//     unified path means those tests still observe the callbacks via
-	//     loadOnRunStarted's RLock-protected read.
-	//
-	// hookMu is uncontended here (no goroutines yet) but going through
-	// SetCallbacks costs one Lock/Unlock pair — negligible at construction.
+	// Route initial callbacks through SetCallbacks so onRunStarted /
+	// onRunEnded have a single write path (R242-GO-16). The constructor
+	// is the only caller before publication, so the lock acquired by
+	// SetCallbacks is uncontended; the symmetry vs the late re-bind from
+	// main.go (when Hub is finally available) avoids the previous
+	// "constructor writes plain field, runtime writes via mutex" race
+	// shape that left the lock contract one-sided.
 	m.SetCallbacks(cfg.OnRunStarted, cfg.OnRunEnded)
 	if !cfg.Enabled {
 		// Build nothing; Start is a no-op.
@@ -289,15 +278,17 @@ func (m *Manager) Start(parent context.Context) {
 	}
 	startedThisCall := false
 	m.startOnce.Do(func() {
-		m.ctx, m.cancel = context.WithCancel(parent)
+		var cancel context.CancelFunc
+		m.ctx, cancel = context.WithCancel(parent)
 		for _, rec := range m.daemons {
 			m.wg.Add(1)
 			go m.runDaemonLoop(rec)
 		}
-		// Publish the started flag AFTER ctx/cancel/goroutines are
-		// installed so a concurrent Stop that observes started=true is
-		// guaranteed to see m.cancel populated.
-		m.started.Store(true)
+		// Publish cancel AFTER ctx/goroutines are installed so a
+		// concurrent Stop that observes a non-nil cancelP is guaranteed
+		// to see m.ctx populated. The atomic store is the single
+		// happens-before edge between Start and Stop (R242-GO-6).
+		m.cancelP.Store(&cancel)
 		slog.Info("sysession: manager started", "daemons", len(m.daemons))
 		startedThisCall = true
 	})
@@ -342,19 +333,22 @@ func (m *Manager) Stop(stopCtx context.Context) {
 	if !m.enabled {
 		return
 	}
-	// R232-GO-3: short-circuit when Start was never called. The atomic
-	// `started` flag is set inside startOnce.Do so the only way to observe
-	// false here is "Start has not entered its critical section yet" — in
-	// that case there are no daemons to cancel and no wg slots to drain,
-	// and a later Start would still no-op because stopOnce already fired.
-	if !m.started.Load() {
+	// R232-GO-3 / R242-GO-6: short-circuit when Start was never called.
+	// cancelP is published inside startOnce.Do AFTER ctx/goroutines are
+	// installed, so the only way to observe nil here is "Start has not
+	// entered its critical section yet" — in that case there are no
+	// daemons to cancel and no wg slots to drain, and a later Start would
+	// still no-op because stopOnce already fired.
+	cancel := m.cancelP.Load()
+	if cancel == nil {
 		m.stopOnce.Do(func() {})
 		return
 	}
 	m.stopOnce.Do(func() {
-		// m.cancel is set by Start; the started.Load() check above
-		// guarantees m.cancel is populated by the time we reach here.
-		m.cancel()
+		// cancel was loaded above and is published only after ctx is
+		// installed — the load is the happens-before pair for the
+		// store inside Start.
+		(*cancel)()
 		done := make(chan struct{})
 		// R234-GO-5: this watcher goroutine is intentionally not tracked
 		// in any WaitGroup. The only termination path on the stopCtx

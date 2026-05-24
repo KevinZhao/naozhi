@@ -258,6 +258,67 @@ func TestReadRecord_NonJSONBody(t *testing.T) {
 	}
 }
 
+// TestReleaseFramedBody_NilSafe verifies the R242-PERF-1 contract:
+// callers handing back a nil slice (e.g. early-error path) must not
+// panic. The pool's New() returns *[]byte so a nil slice would only
+// arrive via deliberate caller misuse, but the guard hardens the API
+// against that without forcing every caller to nil-check.
+func TestReleaseFramedBody_NilSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("ReleaseFramedBody(nil) panicked: %v", r)
+		}
+	}()
+	ReleaseFramedBody(nil)
+}
+
+// TestReleaseFramedBody_OversizeNotPooled confirms the 1 MiB cap on
+// the pool's reuse: handing back an outlier-sized buffer (e.g. a
+// max-image record) must not stash that much heap into the pool
+// indefinitely. We can't directly observe the pool internals, but we
+// can at least exercise the path and confirm no panic.
+func TestReleaseFramedBody_OversizeNotPooled(t *testing.T) {
+	// Build a >1 MiB buffer. The release path branches on cap, so a
+	// length-only buffer would also work but cap is the explicit gate.
+	huge := make([]byte, 0, (1<<20)+1)
+	huge = huge[:cap(huge)]
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("ReleaseFramedBody(>1MiB) panicked: %v", r)
+		}
+	}()
+	ReleaseFramedBody(huge)
+}
+
+// TestReadFramedBody_PoolReuse exercises the happy-path round-trip
+// twice over the same bufio.Reader to confirm a Released buffer is
+// safe to re-acquire on the next Read. The pool's behaviour is
+// stochastic (sync.Pool may evict between Put and Get) but a fresh
+// Get always returns a usable buffer regardless of pool state.
+func TestReadFramedBody_PoolReuse(t *testing.T) {
+	var buf bytes.Buffer
+	for i := 0; i < 3; i++ {
+		body := []byte(`{"v":1,"seq":42,"type":"entry","entry":{}}`)
+		if _, err := WriteRecordRaw(&buf, body); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	br := bufio.NewReader(&buf)
+	for i := 0; i < 3; i++ {
+		got, _, err := ReadFramedBody(br)
+		if err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+		// Capture summary data BEFORE Release — the backing array may
+		// be reused by a subsequent Read.
+		gotLen := len(got)
+		ReleaseFramedBody(got)
+		if gotLen == 0 {
+			t.Errorf("read %d: empty body", i)
+		}
+	}
+}
+
 // intToStr is a tiny helper so the tests don't depend on strconv.
 func intToStr(n int) string {
 	if n == 0 {

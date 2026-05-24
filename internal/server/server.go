@@ -630,6 +630,15 @@ func buildServer(opts ServerOptions) *Server {
 			// run history at unbounded rate, both burning IO and exposing
 			// per-job activity timing.
 			runsLimiter: newIPLimiterWithProxy(rate.Every(time.Second), 60, opts.TrustedProxy),
+			// R242-CR-3: per-IP limiter for the 1 Hz GET /api/cron poll.
+			// Dashboard tabs hit this endpoint roughly once per second
+			// each, and the per-call cost is O(N jobs × RecentRuns(5))
+			// of sync.Map loads + entry locks — cheap individually but
+			// unbounded under hostile parallelism. 2 req/s sustained
+			// with burst 30 leaves plenty of headroom for legit dashboard
+			// refresh bursts (tab switch + filter change) while capping
+			// a stolen token's steady-state poll rate.
+			listLimiter: newIPLimiterWithProxy(rate.Every(500*time.Millisecond), 30, opts.TrustedProxy),
 		},
 		transcribeH: &TranscribeHandler{
 			transcriber:       opts.Transcriber,
@@ -845,8 +854,18 @@ func buildServer(opts ServerOptions) *Server {
 	// future server.New refactor that forgets to wire runsLimiter would
 	// silently downgrade to unlimited rate. Fail-fast at construction so
 	// the regression surfaces during boot rather than under attack.
-	if s.scheduler != nil && s.cronH != nil && s.cronH.runsLimiter == nil {
-		panic("server: runsLimiter must be non-nil when scheduler is wired")
+	//
+	// R242-CR-3: same guard for listLimiter — handleList is the cron
+	// dashboard's heartbeat and the most attractive enumeration target
+	// of the cron HTTP surface, so silent unlimited-rate downgrade is
+	// unacceptable.
+	if s.scheduler != nil && s.cronH != nil {
+		if s.cronH.runsLimiter == nil {
+			panic("server: runsLimiter must be non-nil when scheduler is wired")
+		}
+		if s.cronH.listLimiter == nil {
+			panic("server: listLimiter must be non-nil when scheduler is wired")
+		}
 	}
 
 	return s

@@ -670,9 +670,28 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	// symlink check above. The added EvalSymlinks call is bounded by a few
 	// syscalls, well below the IO cost of the file body that follows.
 	rootResolved, rrErr := filepath.EvalSymlinks(rootPath)
-	if rrErr != nil ||
-		(resolved != rootResolved &&
-			!strings.HasPrefix(resolved, rootResolved+string(filepath.Separator))) {
+	if rrErr != nil {
+		// R242-SEC-15: surface IO failures (EACCES, EIO, EMFILE, …) as a
+		// Warn so ops can investigate. Previously every EvalSymlinks
+		// failure silently collapsed to 404 — fine for the "user typed a
+		// missing path" branch but blinds us to the rarer "filesystem
+		// degraded" / "permissions broken on rootPath" cases. fs.ErrNotExist
+		// is the legitimate "rootPath was just deleted" race and stays
+		// silent; everything else gets a single structured log line so a
+		// future SRE can grep for cron job IDs whose rootPath flapped.
+		// Response stays 404 in both branches — surfacing the underlying
+		// errno to the client would leak host filesystem state.
+		if !errors.Is(rrErr, fs.ErrNotExist) {
+			slog.Warn("project files: rootPath EvalSymlinks IO failure",
+				"err", rrErr,
+				"project", project,
+				"path", path)
+		}
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+	if resolved != rootResolved &&
+		!strings.HasPrefix(resolved, rootResolved+string(filepath.Separator)) {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}

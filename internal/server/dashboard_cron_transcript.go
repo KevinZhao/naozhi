@@ -250,8 +250,18 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, resp)
 		return
 	}
+	// R242-SEC-14: IsLogInjectionRune covers C1 / bidi / LS-PS but
+	// intentionally NOT C0 controls (see osutil/loginject.go godoc —
+	// "Callers that also need to reject C0 controls (< 0x20) should
+	// gate on `r < 0x20 || r == 0x7f` separately"). A persisted run
+	// with an embedded tab / NUL / DEL in WorkDir (older naozhi
+	// versions or hand-edited disk files) would otherwise slip
+	// through this guard and reach the EvalSymlinks below with a
+	// malformed slug. Add the C0+DEL band explicitly so the strict
+	// check downstream is not asked to defend against shell control
+	// characters.
 	for _, r := range run.WorkDir {
-		if osutil.IsLogInjectionRune(r) {
+		if r < 0x20 || r == 0x7f || osutil.IsLogInjectionRune(r) {
 			slog.Warn("cron transcript: rejecting WorkDir with control rune", "job_id", jobID, "run_id", runID)
 			resp.Fallback = "missing"
 			writeJSON(w, resp)
@@ -387,12 +397,6 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	turns := make([]transcriptTurn, 0, 32)
 	truncated := false
 	parsedAny := false
-	// scratchTurns is the per-event scratch buffer reused across every
-	// JSONL line. flattenJSONLEvent appends into it and we hand the
-	// (possibly grown) backing array back on the next iteration so the
-	// inner make([]transcriptTurn, 0, 2) is a one-time cost rather than
-	// per-line. R243-GO-8.
-	scratchTurns := make([]transcriptTurn, 0, 4)
 
 	for scanner.Scan() {
 		if len(turns) >= maxTranscriptTurns {
@@ -418,13 +422,7 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 				continue
 			}
 		}
-		// scratchTurns is a per-loop reusable buffer fed back into
-		// flattenJSONLEvent every iteration so the per-line make([]transcriptTurn,
-		// 0, 2) shows up zero times in the alloc profile (R243-GO-8).
-		scratchTurns = scratchTurns[:0]
-		newTurns, addedTokens, addedToolCalls, isParsed := flattenJSONLEvent(&ev, ts, len(turns), scratchTurns)
-		// Persist the (possibly grown) backing array for the next iteration.
-		scratchTurns = newTurns[:0]
+		newTurns, addedTokens, addedToolCalls, isParsed := flattenJSONLEvent(&ev, ts, len(turns))
 		if isParsed {
 			parsedAny = true
 		}
@@ -549,164 +547,167 @@ func sanitizeWireText(s string) string {
 // parsedAny is true when the event maps to at least one recognised turn
 // shape — used by the caller to decide whether to set fallback:"raw".
 //
-// scratch is a caller-owned reusable slice (length must be 0; capacity is
-// preserved). The returned slice shares the same backing array when capacity
-// permits, so the JSONL scan loop avoids a per-line `make([]transcriptTurn,
-// 0, 2)` allocation. Pass `scratch=nil` when allocation is fine. R243-GO-8.
-func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, scratch []transcriptTurn) ([]transcriptTurn, transcriptTokens, int, bool) {
-	out := scratch[:0]
-	tok := transcriptTokens{}
-	toolCalls := 0
-	parsed := false
-
+// R242-CR-13: previously this function held three event-type cases inline
+// at 4-5 levels of nesting (~120 lines). Per-type extraction below
+// flattens the dispatch to a single switch and lets each helper own
+// just its own (decode → walk → emit) sub-flow.
+func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
 	switch ev.Type {
 	case "user":
-		var msg claudeMessage
-		if err := json.Unmarshal(ev.Message, &msg); err != nil {
-			return out, tok, 0, false
-		}
-		// content can be a plain string OR a content-block array (when
-		// the user message contains a tool_result).
-		text, blocks := decodeStringOrBlocks(msg.Content)
-		if text != "" {
-			parsed = true
-			out = append(out, transcriptTurn{
-				Index: nextIdx + len(out),
-				Kind:  "user",
-				TS:    ts,
-				// R243-SEC-5: drop bidi / C1 / LS-PS before encoding to wire.
-				Text: sanitizeTranscriptDisplay(truncateRunes(text, maxAssistantTextBytes)),
-			})
-		}
-		for _, b := range blocks {
-			if b.Type == "tool_result" {
-				parsed = true
-				outStr, _ := decodeStringOrBlocks(b.Content)
-				// ANSI escapes are rare in agent tool_result text; skip the
-				// regex (NFA traversal of every byte) when the ESC byte
-				// 0x1b is absent, which is the common case.
-				if strings.IndexByte(outStr, 0x1b) >= 0 {
-					outStr = ansiEscRe.ReplaceAllString(outStr, "")
-				}
-				outStr = truncateRunes(outStr, maxToolOutputBytes)
-				// R243-SEC-5: tool_result bodies are arbitrary CLI output —
-				// any process the agent invoked could embed bidi or LS/PS
-				// runes that flip log/terminal rendering.
-				outStr = sanitizeTranscriptDisplay(outStr)
-				status := "ok"
-				if b.IsError {
-					status = "error"
-				}
-				out = append(out, transcriptTurn{
-					Index:     nextIdx + len(out),
-					Kind:      "tool_result",
-					TS:        ts,
-					ToolUseID: b.ToolUseID,
-					Output:    outStr,
-					Status:    status,
-				})
-			}
-		}
+		return flattenUserEvent(ev, ts, nextIdx)
 	case "assistant":
-		var msg claudeMessage
-		if err := json.Unmarshal(ev.Message, &msg); err != nil {
-			return out, tok, 0, false
-		}
-		_, blocks := decodeStringOrBlocks(msg.Content)
-		if msg.Usage != nil {
-			tok.Input = msg.Usage.InputTokens
-			tok.Output = msg.Usage.OutputTokens
-		}
-		// Aggregate text blocks into one assistant turn (multiple text
-		// blocks in a single message are common for streamed responses
-		// and split awkwardly when shown as separate timeline entries).
-		// Two passes: first scan to materialise the text buffer so the
-		// assistant turn — which logically precedes any tool_use turns
-		// in the same message — can be appended first. Avoids the
-		// prepend-via-fresh-slice allocation the previous one-pass
-		// implementation used. R243-GO-8.
-		var textBuf strings.Builder
-		hasToolUse := false
-		for _, b := range blocks {
-			switch b.Type {
-			case "text":
-				if textBuf.Len() > 0 {
-					textBuf.WriteString("\n\n")
-				}
-				textBuf.WriteString(b.Text)
-			case "tool_use":
-				hasToolUse = true
-			}
-		}
-		if textBuf.Len() > 0 {
-			text := textBuf.String()
-			out = append(out, transcriptTurn{
-				Index: nextIdx + len(out),
-				Kind:  "assistant",
-				TS:    ts,
-				// R243-SEC-5: assistant text travels back from upstream and
-				// can echo attacker content; strip bidi / LS-PS before wire.
-				Text:   sanitizeTranscriptDisplay(truncateRunes(text, maxAssistantTextBytes)),
-				Tokens: tok.Output,
-			})
-			parsed = true
-		}
-		if hasToolUse {
-			for _, b := range blocks {
-				if b.Type != "tool_use" {
-					continue
-				}
-				toolCalls++
-				// R243-SEC-5: belt-and-braces; summariseToolInput already
-				// runs SanitizeForLog on chosen field but explicit wrap
-				// is no-op for ASCII and survives future regressions.
-				summary := sanitizeWireText(summariseToolInput(b.Name, b.Input))
-				out = append(out, transcriptTurn{
-					Index:     nextIdx + len(out),
-					Kind:      "tool_use",
-					TS:        ts,
-					Tool:      b.Name,
-					ToolUseID: b.ID,
-					Summary:   summary,
-					Input:     b.Input,
-				})
-				parsed = true
-			}
-		}
+		return flattenAssistantEvent(ev, ts, nextIdx)
 	case "system":
-		// system events (init, error from claude) — surface errors
-		// as an error turn so timeline shows them; init is dropped.
-		var sys struct {
-			Subtype string `json:"subtype"`
-			Message string `json:"message"`
+		return flattenSystemEvent(ev, ts, nextIdx)
+	}
+	return nil, transcriptTokens{}, 0, false
+}
+
+// flattenUserEvent emits a "user" text turn (when content carries one)
+// plus zero or more "tool_result" turns (when the user message wraps
+// a content-block array). content can be a plain string OR a
+// content-block array (the latter is how Claude carries tool_result
+// payloads back into the conversation).
+func flattenUserEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
+	out := make([]transcriptTurn, 0, 2)
+	tok := transcriptTokens{}
+
+	var msg claudeMessage
+	if err := json.Unmarshal(ev.Message, &msg); err != nil {
+		return out, tok, 0, false
+	}
+	parsed := false
+	text, blocks := decodeStringOrBlocks(msg.Content)
+	if text != "" {
+		parsed = true
+		out = append(out, transcriptTurn{
+			Index: nextIdx + len(out),
+			Kind:  "user",
+			TS:    ts,
+			Text:  truncateRunes(text, maxAssistantTextBytes),
+		})
+	}
+	for _, b := range blocks {
+		if b.Type != "tool_result" {
+			continue
 		}
-		// Many system events ship without a "message" field (init,
-		// queue-op, etc.); json.Unmarshal(nil, &sys) would always fail
-		// with "unexpected end of JSON input" and flood Debug logs.
-		// Skip the unmarshal entirely when there is nothing to parse —
-		// sys stays zero-valued so the error-turn branch is naturally
-		// skipped, matching the existing downgrade behavior.
-		if len(ev.Message) > 0 {
-			if err := json.Unmarshal(ev.Message, &sys); err != nil {
-				// Surface real parse failures (malformed JSON in
-				// "message") for ops visibility.
-				slog.Debug("cron transcript: system event unmarshal failed; skipping",
-					"err", err)
+		parsed = true
+		outStr, _ := decodeStringOrBlocks(b.Content)
+		// ANSI escapes are rare in agent tool_result text; skip the regex
+		// (NFA traversal of every byte) when the ESC byte 0x1b is absent,
+		// which is the common case.
+		if strings.IndexByte(outStr, 0x1b) >= 0 {
+			outStr = ansiEscRe.ReplaceAllString(outStr, "")
+		}
+		outStr = truncateRunes(outStr, maxToolOutputBytes)
+		status := "ok"
+		if b.IsError {
+			status = "error"
+		}
+		out = append(out, transcriptTurn{
+			Index:     nextIdx + len(out),
+			Kind:      "tool_result",
+			TS:        ts,
+			ToolUseID: b.ToolUseID,
+			Output:    outStr,
+			Status:    status,
+		})
+	}
+	return out, tok, 0, parsed
+}
+
+// flattenAssistantEvent emits a single aggregated "assistant" text turn
+// (multiple text blocks in one message are merged with blank-line
+// separators because they split awkwardly when shown as separate
+// timeline entries) followed by per-tool_use turns. Returns the token
+// usage delta from msg.Usage so callers can advance the running total.
+func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
+	out := make([]transcriptTurn, 0, 2)
+	tok := transcriptTokens{}
+	toolCalls := 0
+
+	var msg claudeMessage
+	if err := json.Unmarshal(ev.Message, &msg); err != nil {
+		return out, tok, 0, false
+	}
+	_, blocks := decodeStringOrBlocks(msg.Content)
+	if msg.Usage != nil {
+		tok.Input = msg.Usage.InputTokens
+		tok.Output = msg.Usage.OutputTokens
+	}
+	parsed := false
+	var textBuf strings.Builder
+	for _, b := range blocks {
+		switch b.Type {
+		case "text":
+			if textBuf.Len() > 0 {
+				textBuf.WriteString("\n\n")
 			}
-		}
-		if sys.Subtype == "error" && sys.Message != "" {
+			textBuf.WriteString(b.Text)
+		case "tool_use":
+			toolCalls++
+			summary := summariseToolInput(b.Name, b.Input)
 			out = append(out, transcriptTurn{
-				Index: nextIdx,
-				Kind:  "error",
-				TS:    ts,
-				// R243-SEC-5: system error message originates from the CLI
-				// but may include propagated stderr — sanitize for wire.
-				Text: sanitizeTranscriptDisplay(truncateRunes(sys.Message, maxAssistantTextBytes)),
+				Index:     nextIdx + len(out),
+				Kind:      "tool_use",
+				TS:        ts,
+				Tool:      b.Name,
+				ToolUseID: b.ID,
+				Summary:   summary,
+				Input:     b.Input,
 			})
 			parsed = true
 		}
 	}
+	if textBuf.Len() > 0 {
+		text := textBuf.String()
+		out = append([]transcriptTurn{{
+			Index:  nextIdx,
+			Kind:   "assistant",
+			TS:     ts,
+			Text:   truncateRunes(text, maxAssistantTextBytes),
+			Tokens: tok.Output,
+		}}, out...)
+		// re-number subsequent turns: prepending the assistant turn shifts
+		// every tool_use turn's index by one.
+		for i := range out {
+			out[i].Index = nextIdx + i
+		}
+		parsed = true
+	}
 	return out, tok, toolCalls, parsed
+}
+
+// flattenSystemEvent surfaces system error events (claude CLI lifecycle
+// init / error). init events are dropped because they don't add
+// timeline value; only `subtype == "error"` becomes an "error" turn.
+// Unmarshal failures are logged at Debug — we want operator visibility
+// without changing the downgrade fallback.
+func flattenSystemEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
+	out := make([]transcriptTurn, 0, 1)
+	tok := transcriptTokens{}
+
+	var sys struct {
+		Subtype string `json:"subtype"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(ev.Message, &sys); err != nil {
+		// Don't change downgrade behavior — sys stays zero-valued so
+		// the error-turn branch below is skipped naturally. Just surface
+		// the parse failure for ops visibility.
+		slog.Debug("cron transcript: system event unmarshal failed; skipping",
+			"err", err)
+	}
+	if sys.Subtype != "error" || sys.Message == "" {
+		return out, tok, 0, false
+	}
+	out = append(out, transcriptTurn{
+		Index: nextIdx,
+		Kind:  "error",
+		TS:    ts,
+		Text:  truncateRunes(sys.Message, maxAssistantTextBytes),
+	})
+	return out, tok, 0, true
 }
 
 // decodeStringOrBlocks accepts either a JSON string or an array of
