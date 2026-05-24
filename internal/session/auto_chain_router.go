@@ -64,16 +64,10 @@ func (r *Router) maybeAttachAutoChainOnSpawn(
 	}
 
 	// Phase 1: snapshot excluders under r.mu.
-	r.mu.Lock()
-	routerExcluder := r.snapshotRouterExcludedLocked()
-	extras := r.extraExcluders()
-	r.mu.Unlock()
+	phase1 := r.snapshotCombinedExcluderLocked()
 
 	// Phase 2: disk-touching candidate selection (no lock).
-	inner := make([]SessionIDExcluder, 0, 1+len(extras))
-	inner = append(inner, routerExcluder)
-	inner = append(inner, extras...)
-	auto := pickWorkspaceChain(workspace, r.autoChainListJSONL, combinedExcluder{inner: inner}, r.autoChainPolicy, time.Now())
+	auto := pickWorkspaceChain(workspace, r.autoChainListJSONL, phase1, r.autoChainPolicy, time.Now())
 	if len(auto) == 0 {
 		return nil
 	}
@@ -85,11 +79,8 @@ func (r *Router) maybeAttachAutoChainOnSpawn(
 	// Phase 3: re-validate under r.mu. Cron / sys may have registered
 	// new sessionIDs since phase 1; rebuild the excluder set with the
 	// latest snapshot before committing.
-	r.mu.Lock()
-	verifyBase := []SessionIDExcluder{r.snapshotRouterExcludedLocked()}
-	verifyBase = append(verifyBase, r.extraExcluders()...)
-	r.mu.Unlock()
-	verified := filterByExcluder(auto, combinedExcluder{inner: verifyBase})
+	phase3 := r.snapshotCombinedExcluderLocked()
+	verified := filterByExcluder(auto, phase3)
 	if drops := len(auto) - len(verified); drops > 0 {
 		metrics.AutoChainTOCTOUCollisionTotal.Add(int64(drops))
 		slog.Warn("auto-chain TOCTOU drop on spawn",
@@ -174,6 +165,27 @@ func (r *Router) snapshotRouterExcludedLocked() SessionIDExcluder {
 		s.historyMu.RUnlock()
 	}
 	return mapExcluder{set: used}
+}
+
+// snapshotCombinedExcluderLocked is the canonical "router snapshot +
+// extras" combined excluder used by the spawn-path auto-chain decision.
+// Acquires r.mu internally for the snapshot + atomic-load and returns
+// the bundle ready to feed into pickWorkspaceChain / filterByExcluder.
+//
+// R242-ARCH-18: previously inlined twice in maybeAttachAutoChainOnSpawn
+// (phase 1 + phase 3) with subtly different slice-cap layouts. Extracting
+// keeps phase 2 and phase 3 byte-for-byte equivalent so a future excluder
+// type added to the bundle lands in both phases by construction rather
+// than two coordinated edits.
+func (r *Router) snapshotCombinedExcluderLocked() combinedExcluder {
+	r.mu.Lock()
+	routerExcluder := r.snapshotRouterExcludedLocked()
+	extras := r.extraExcluders()
+	r.mu.Unlock()
+	inner := make([]SessionIDExcluder, 0, 1+len(extras))
+	inner = append(inner, routerExcluder)
+	inner = append(inner, extras...)
+	return combinedExcluder{inner: inner}
 }
 
 // mapExcluder is a SessionIDExcluder backed by a plain map. Used by
