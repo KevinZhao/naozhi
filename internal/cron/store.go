@@ -194,6 +194,22 @@ func loadJobs(path string) (map[string]*Job, error) {
 				"path", path, "cron_id", j.ID, "work_dir_bytes", len(j.WorkDir))
 			continue
 		}
+		// R239-CR-2 / R236-QA-16: same defensive rationale for NotifyChatID /
+		// NotifyPlatform. Both fields ride the cronJobView struct and are
+		// broadcast to dashboard at 1Hz via /api/cron; an attacker hand-editing
+		// cron_jobs.json could smuggle bidi / control bytes into the dashboard
+		// payload that way. AddJob / dashboard PATCH validate these on the
+		// write path; this is the equivalent guard for the load path.
+		if !utf8.ValidString(j.NotifyChatID) || containsCronC0(j.NotifyChatID) {
+			slog.Warn("cron store: dropping job with invalid notify_chat_id bytes",
+				"path", path, "cron_id", j.ID, "chat_id_bytes", len(j.NotifyChatID))
+			continue
+		}
+		if !utf8.ValidString(j.NotifyPlatform) || containsCronC0(j.NotifyPlatform) {
+			slog.Warn("cron store: dropping job with invalid notify_platform bytes",
+				"path", path, "cron_id", j.ID, "platform_bytes", len(j.NotifyPlatform))
+			continue
+		}
 		m[j.ID] = j
 	}
 	slog.Info("loaded cron store", "count", len(m), "path", path)
