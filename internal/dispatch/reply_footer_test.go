@@ -5,13 +5,18 @@ import (
 	"testing"
 )
 
-// TestDispatcher_ReplyFooterFn_PerBackend pins the per-session ReplyFooter
+// TestDispatcher_ReplyFooter_PerBackend pins the per-session ReplyFooter
 // contract: the dispatcher reads sess.Backend() at IM-reply time and asks
-// the configured fn for a tag, never caching a server-global value. This is
-// the central requirement of multi-backend Sprint 2: a kiro session in a
-// claude-default deployment must still get [kiro] at the bottom of its IM
-// replies.
-func TestDispatcher_ReplyFooterFn_PerBackend(t *testing.T) {
+// the configured Capabilities for a tag, never caching a server-global
+// value. This is the central requirement of multi-backend Sprint 2: a kiro
+// session in a claude-default deployment must still get [kiro] at the
+// bottom of its IM replies.
+//
+// Post R243-ARCH-10 the closure-as-DI was collapsed to Capabilities; the
+// nil-fn case becomes NoopCapabilities (returns "" so no footer is
+// appended) and the explicit-fn cases are wrapped in closureCapabilities
+// to keep the existing assertions intact.
+func TestDispatcher_ReplyFooter_PerBackend(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name        string
@@ -43,13 +48,17 @@ func TestDispatcher_ReplyFooterFn_PerBackend(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			d := &Dispatcher{replyFooterFn: c.fn}
+			var caps Capabilities
+			if c.fn == nil {
+				caps = NoopCapabilities{}
+			} else {
+				caps = closureCapabilities{replyFooter: c.fn}
+			}
+			d := &Dispatcher{caps: caps}
 			body := "hello"
-			// Mirror the production path in handleSendResult line 702-712.
-			if d.replyFooterFn != nil {
-				if tag := d.replyFooterFn(c.backend); tag != "" {
-					body += "\n\n— " + tag
-				}
+			// Mirror the production path in handleSendResult.
+			if tag := d.caps.ReplyFooter(c.backend); tag != "" {
+				body += "\n\n— " + tag
 			}
 			if c.wantPresent {
 				if !strings.HasSuffix(body, "— "+c.wantFooter) {
