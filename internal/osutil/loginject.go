@@ -72,21 +72,25 @@ func SanitizeForLog(s string, maxLen int) string {
 		return s
 	}
 	// Fast path: scan bytes. If every byte is ASCII-printable (0x20..0x7E)
-	// and we're within the cap, return unchanged. This covers every error
-	// string produced by Go stdlib or our own Errorf wrappers.
+	// return unchanged or — when oversized — slice directly. This covers
+	// every error string produced by Go stdlib or our own Errorf wrappers.
 	clean := true
-	if maxLen > 0 && len(s) > maxLen {
-		clean = false
-	} else {
-		for i := 0; i < len(s); i++ {
-			c := s[i]
-			if c < 0x20 || c == 0x7f || c >= 0x80 {
-				clean = false
-				break
-			}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == 0x7f || c >= 0x80 {
+			clean = false
+			break
 		}
 	}
 	if clean {
+		// R243-GO-9: ASCII-clean superlong used to fall to strings.Map
+		// just to truncate, walking every byte through the slow-path
+		// mapper. Slice directly — every byte is single-rune ASCII so
+		// the cap lands on a rune boundary without the rune-walk-back
+		// the slow path needs (utf8.RuneStart loop below).
+		if maxLen > 0 && len(s) > maxLen {
+			return s[:maxLen]
+		}
 		return s
 	}
 	// Slow path: rewrite unsafe bytes/runes. Use strings.Map so we get
