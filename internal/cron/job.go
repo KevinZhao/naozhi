@@ -272,6 +272,21 @@ var cronParser = robfigcron.NewParser(
 // Prevents resource exhaustion from overly frequent schedules like "@every 1s".
 const minCronInterval = 5 * time.Minute
 
+// missed-schedule heuristics for HasMissedSchedule.
+//
+// missedScheduleSuppressFactor: boot grace, suppress "missed" verdicts during
+// the first N×period after process start so long-period jobs don't always
+// look behind on the first dashboard read.
+//
+// missedScheduleSlack{Num,Den}: tolerate prev-tick vs LastRunAt drift up to
+// Num/Den × period before declaring a miss (1.5× by default; relaxes the
+// bound for jobs that ran slightly late).
+const (
+	missedScheduleSuppressFactor = 5
+	missedScheduleSlackNum       = 3
+	missedScheduleSlackDen       = 2
+)
+
 // schedulePeriod 估算给定 cron 表达式在参考时刻 now 附近的周期（相邻两次
 // 触发的间隔）。通过 sched.Next 两次外推实现，精度对 "每 N 分钟 /
 // 每天 HH:MM" 这类常见形态足够。无法解析 / 不等间隔（DST 切换窗口）
@@ -379,9 +394,7 @@ func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
 	if period <= 0 {
 		return false, time.Time{}
 	}
-	// 启动抑制：刚 boot 时所有 long-period job 都会"错过"，这是可预期的。
-	// 5 × period 给足让第一轮调度落地的余量。
-	if !startedAt.IsZero() && now.Sub(startedAt) < 5*period {
+	if !startedAt.IsZero() && now.Sub(startedAt) < missedScheduleSuppressFactor*period {
 		return false, time.Time{}
 	}
 	prev := previousTickBeforeFromSched(sched, period, now)
@@ -389,14 +402,12 @@ func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
 		return false, time.Time{}
 	}
 	if j.LastRunAt.IsZero() {
-		// 从未跑过：看任务本身存在了多久
 		if !j.CreatedAt.IsZero() && now.Sub(j.CreatedAt) > period {
 			return true, prev
 		}
 		return false, time.Time{}
 	}
-	// 跑过：对比上次跑的时刻和"上次应跑的时刻"
-	if prev.Sub(j.LastRunAt) > period*3/2 {
+	if prev.Sub(j.LastRunAt) > period*missedScheduleSlackNum/missedScheduleSlackDen {
 		return true, prev
 	}
 	return false, time.Time{}
