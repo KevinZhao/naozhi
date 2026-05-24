@@ -387,6 +387,11 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	turns := make([]transcriptTurn, 0, 32)
 	truncated := false
 	parsedAny := false
+	// R243-GO-8: per-line scratch buffer reused across flattenJSONLEvent
+	// calls to eliminate per-line `make([]transcriptTurn, 0, 2)` alloc.
+	// Cap=4 covers the common shapes (user+tool_result pair, assistant
+	// text+tool_use pair); flatten resizes via append as needed.
+	turnsScratch := make([]transcriptTurn, 0, 4)
 
 	for scanner.Scan() {
 		if len(turns) >= maxTranscriptTurns {
@@ -412,7 +417,10 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 				continue
 			}
 		}
-		newTurns, addedTokens, addedToolCalls, isParsed := flattenJSONLEvent(&ev, ts, len(turns))
+		newTurns, addedTokens, addedToolCalls, isParsed := flattenJSONLEvent(&ev, ts, len(turns), turnsScratch[:0])
+		// Re-bind scratch to whatever flattenJSONLEvent grew the buffer
+		// to so the next iteration starts from the largest array seen.
+		turnsScratch = newTurns
 		if isParsed {
 			parsedAny = true
 		}
@@ -499,8 +507,14 @@ func parseRunPathParams(w http.ResponseWriter, r *http.Request) (runID, jobID st
 //
 // parsedAny is true when the event maps to at least one recognised turn
 // shape — used by the caller to decide whether to set fallback:"raw".
-func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
-	out := make([]transcriptTurn, 0, 2)
+//
+// R243-GO-8: callers pass a reusable `buf` slice (any cap, any length —
+// it is reset to len=0 internally) so the per-line hot path avoids
+// `make([]transcriptTurn, 0, 2)` per call. A 5000-line transcript drops
+// from 5000 backing-array allocs to ~1. Pass `nil` for ad-hoc / test
+// callers; append handles nil naturally.
+func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int, buf []transcriptTurn) ([]transcriptTurn, transcriptTokens, int, bool) {
+	out := buf[:0]
 	tok := transcriptTokens{}
 	toolCalls := 0
 	parsed := false
@@ -586,13 +600,19 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 		}
 		if textBuf.Len() > 0 {
 			text := textBuf.String()
-			out = append([]transcriptTurn{{
+			// R243-GO-8: prepend assistant turn in-place rather than
+			// `append([]transcriptTurn{...}, out...)` which would alloc
+			// a fresh backing array and defeat caller-side buffer reuse.
+			// Grow by 1, shift right, write head.
+			out = append(out, transcriptTurn{})
+			copy(out[1:], out[:len(out)-1])
+			out[0] = transcriptTurn{
 				Index:  nextIdx,
 				Kind:   "assistant",
 				TS:     ts,
 				Text:   truncateRunes(text, maxAssistantTextBytes),
 				Tokens: tok.Output,
-			}}, out...)
+			}
 			// re-number subsequent turns
 			for i := range out {
 				out[i].Index = nextIdx + i

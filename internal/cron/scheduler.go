@@ -3007,6 +3007,20 @@ func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
 	s.notifyTarget(target.Platform, target.ChatID, text)
 }
 
+// redactBuilderPool reuses the slow-path strings.Builder in
+// redactPathsInCronError so each cron run with a path-bearing error
+// avoids a fresh backing []byte allocation. R243-PERF-13.
+//
+// Capacity is bounded by maxRedactErrLen (2KB) because the input is
+// pre-truncated to that size at the top of redactPathsInCronError, so
+// retained Builders cannot grow past O(maxRedactErrLen). String() copies
+// the buffer into a fresh string before we return, making it safe to
+// Reset+Put the Builder synchronously via defer (no caller-visible
+// reference into the Builder's backing array).
+var redactBuilderPool = sync.Pool{
+	New: func() any { return new(strings.Builder) },
+}
+
 // redactPathsInCronError strips absolute filesystem paths from a cron
 // execution error message before persistence. session.GetOrCreate and
 // session.Send produce errors like "session error: workspace …/repo/x:
@@ -3056,8 +3070,19 @@ func redactPathsInCronError(s string) string {
 	if strings.IndexByte(s, '/') < 0 && strings.IndexByte(s, '\\') < 0 && strings.IndexByte(s, '~') < 0 {
 		return s
 	}
-	var b strings.Builder
+	// R243-PERF-13: pool the Builder so the slow path doesn't allocate a
+	// fresh backing []byte per cron run. recordResult fires on every
+	// execution and the path-bearing branch happens whenever the CLI
+	// surfaces a workspace-related error (a common failure mode), so the
+	// pool's hit rate is high in steady state. Each pooled Builder keeps
+	// its grown buffer; small inputs (~256B common case) reuse last
+	// allocation, large inputs (~maxRedactErrLen=2KB max) bound the
+	// retained capacity. We must Reset before Put because String()
+	// copies internally — the Builder's buffer is reusable after Reset.
+	b := redactBuilderPool.Get().(*strings.Builder)
+	b.Reset()
 	b.Grow(len(s))
+	defer redactBuilderPool.Put(b)
 	i := 0
 	for i < len(s) {
 		c := s[i]
