@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -33,7 +34,7 @@ func TestReadJSONWithRetry_validFirstTry(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"ok":true}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	data, err := readJSONWithRetry(path, 3, 1*time.Millisecond)
+	data, err := readJSONWithRetry(context.Background(), path, 3, 1*time.Millisecond)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -48,7 +49,7 @@ func TestReadJSONWithRetry_allAttemptsInvalidReturnsError(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"ok":`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := readJSONWithRetry(path, 3, 1*time.Millisecond)
+	_, err := readJSONWithRetry(context.Background(), path, 3, 1*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -60,7 +61,7 @@ func TestReadJSONWithRetry_allAttemptsInvalidReturnsError(t *testing.T) {
 func TestReadJSONWithRetry_missingFileNoRetry(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "does-not-exist.json")
 	start := time.Now()
-	_, err := readJSONWithRetry(path, 5, 500*time.Millisecond)
+	_, err := readJSONWithRetry(context.Background(), path, 5, 500*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
@@ -91,7 +92,7 @@ func TestReadJSONWithRetry_eventuallyValid(t *testing.T) {
 		_ = os.WriteFile(path, []byte(`{"ok":true}`), 0600)
 		fixed.Store(true)
 	}()
-	data, err := readJSONWithRetry(path, 5, 100*time.Millisecond)
+	data, err := readJSONWithRetry(context.Background(), path, 5, 100*time.Millisecond)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -118,7 +119,7 @@ func TestApplyClaudeEnvSettings_injectsOnlyAllowedPrefixes(t *testing.T) {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
 	}
-	if err := applyClaudeEnvSettings(); err != nil {
+	if err := applyClaudeEnvSettings(context.Background()); err != nil {
 		t.Fatalf("applyClaudeEnvSettings: %v", err)
 	}
 	if got := os.Getenv("CLAUDE_CODE_USE_BEDROCK"); got != "1" {
@@ -142,7 +143,7 @@ func TestApplyClaudeEnvSettings_injectsOnlyAllowedPrefixes(t *testing.T) {
 func TestApplyClaudeEnvSettings_shellVarTakesPrecedence(t *testing.T) {
 	seedClaudeHome(t, `{"env": {"ANTHROPIC_MODEL": "from-settings"}}`)
 	t.Setenv("ANTHROPIC_MODEL", "from-shell")
-	if err := applyClaudeEnvSettings(); err != nil {
+	if err := applyClaudeEnvSettings(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if got := os.Getenv("ANTHROPIC_MODEL"); got != "from-shell" {
@@ -152,7 +153,7 @@ func TestApplyClaudeEnvSettings_shellVarTakesPrecedence(t *testing.T) {
 
 func TestApplyClaudeEnvSettings_invalidJSONReturnsError(t *testing.T) {
 	seedClaudeHome(t, `{"env": {"ANTHROPIC_MODEL":`)
-	err := applyClaudeEnvSettings()
+	err := applyClaudeEnvSettings(context.Background())
 	if err == nil {
 		t.Fatal("expected error on invalid JSON, got nil")
 	}
@@ -161,7 +162,7 @@ func TestApplyClaudeEnvSettings_invalidJSONReturnsError(t *testing.T) {
 func TestApplyClaudeEnvSettings_missingFileReturnsError(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	err := applyClaudeEnvSettings()
+	err := applyClaudeEnvSettings(context.Background())
 	if err == nil {
 		t.Fatal("expected error when settings.json missing")
 	}
@@ -169,7 +170,7 @@ func TestApplyClaudeEnvSettings_missingFileReturnsError(t *testing.T) {
 
 func TestApplyClaudeEnvSettings_emptyEnvSectionNoError(t *testing.T) {
 	seedClaudeHome(t, `{}`)
-	if err := applyClaudeEnvSettings(); err != nil {
+	if err := applyClaudeEnvSettings(context.Background()); err != nil {
 		t.Fatalf("empty env section should not error: %v", err)
 	}
 }
@@ -183,7 +184,7 @@ func TestWriteClaudeSettingsOverride_preservesPreviousOnParseFail(t *testing.T) 
 	home := seedClaudeHome(t, `{"env": {"CLAUDE_CODE_USE_BEDROCK":"1"}}`)
 
 	// First run: settings.json is good. Override gets written.
-	path := writeClaudeSettingsOverride(":8180")
+	path := writeClaudeSettingsOverride(context.Background(), ":8180")
 	if path == "" {
 		t.Fatal("first run: empty path")
 	}
@@ -201,7 +202,7 @@ func TestWriteClaudeSettingsOverride_preservesPreviousOnParseFail(t *testing.T) 
 	}
 
 	// Second run: read fails after retries. Override must NOT be overwritten.
-	path2 := writeClaudeSettingsOverride(":8180")
+	path2 := writeClaudeSettingsOverride(context.Background(), ":8180")
 	if path2 == "" {
 		t.Fatal("second run: empty path")
 	}
@@ -219,7 +220,7 @@ func TestWriteClaudeSettingsOverride_firstRunWithCorruptSettingsFallsBackToEmpty
 	// "{}" so --settings has a readable target; operator will see the warn log
 	// and the "Not logged in" error from claude.
 	seedClaudeHome(t, `{"env":`)
-	path := writeClaudeSettingsOverride(":8180")
+	path := writeClaudeSettingsOverride(context.Background(), ":8180")
 	if path == "" {
 		t.Fatal("expected non-empty path")
 	}
@@ -252,7 +253,7 @@ func TestWriteClaudeSettingsOverride_stripsDeniedAWSEnvKeys(t *testing.T) {
     "FOO_BAR": "should-not-pass-allowlist"
   }
 }`)
-	path := writeClaudeSettingsOverride(":8180")
+	path := writeClaudeSettingsOverride(context.Background(), ":8180")
 	if path == "" {
 		t.Fatal("empty path")
 	}
@@ -297,7 +298,7 @@ func TestWriteClaudeSettingsOverride_stripsDeniedAWSEnvKeys(t *testing.T) {
 // instances until systemctl restart.
 func TestWriteClaudeSettingsOverride_isCalledPerSpawn(t *testing.T) {
 	home := seedClaudeHome(t, `{"env":{"ANTHROPIC_MODEL":"old-model"}}`)
-	path1 := writeClaudeSettingsOverride(":8180")
+	path1 := writeClaudeSettingsOverride(context.Background(), ":8180")
 	if path1 == "" {
 		t.Fatal("first write empty path")
 	}
@@ -312,7 +313,7 @@ func TestWriteClaudeSettingsOverride_isCalledPerSpawn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	path2 := writeClaudeSettingsOverride(":8180")
+	path2 := writeClaudeSettingsOverride(context.Background(), ":8180")
 	second, _ := os.ReadFile(path2)
 	if strings.Contains(string(second), "old-model") {
 		t.Errorf("override still has stale old-model: %s", second)
@@ -339,7 +340,7 @@ func TestWriteClaudeSettingsOverride_filtersNaozhiHooks(t *testing.T) {
   },
   "env": {"CLAUDE_CODE_USE_BEDROCK": "1"}
 }`)
-	path := writeClaudeSettingsOverride(":8180")
+	path := writeClaudeSettingsOverride(context.Background(), ":8180")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
