@@ -188,7 +188,7 @@
 - [ ] **R236-SEC-08 — handleList 1Hz 全量返回完整 prompt（P2）**: `internal/server/dashboard_cron.go:446-454` 50 jobs × 8 KiB = 每秒 400 KiB，token 泄漏后单次 GET 即拉走所有 prompt。方案：列表截断 256 字节，详情走 GET /api/cron/{id}；前端搜索改服务端。Breaking：是（前端需调整）。
 - [ ] **R236-SEC-10 — cookie_secret WriteFile 失败仅 slog.Warn 静默降级（P2）**: `internal/server/server.go:295-354` MkdirAll/WriteFile 失败 fallthrough 用内存 secret，导致每次重启所有会话失效。方案：升级为 slog.Error 或返回 fatal error。Breaking：是（启动行为）。
 - [~] **R236-SEC-11 — moveToShimsCgroup busctl args 缺 scope 名字符集校验（P3）**: `internal/shim/manager_linux.go:106-130` shimPID 当前来源安全，但 buildBusctlArgs 缺 scope 名正则验证，未来重构有注入隐患。方案：scope name 正则 `[a-zA-Z0-9\-.]` 验证。Breaking：否。
-- [ ] **R236-SEC-13 — handleRunTranscript run.WorkDir 未做 C0/bidi 验证（P3）**: `internal/server/dashboard_cron_transcript.go:239` ClaudeProjectSlug(run.WorkDir) 编码若不完全转义路径分隔符可能产生 ../。方案：调 ClaudeProjectSlug 前对 WorkDir 加 utf8.ValidString + IsLogInjectionRune 检查。Breaking：否。
+- [~] **R236-SEC-13 — handleRunTranscript run.WorkDir 未做 C0/bidi 验证（P3）**: `internal/server/dashboard_cron_transcript.go:239` ClaudeProjectSlug(run.WorkDir) 编码若不完全转义路径分隔符可能产生 ../。方案：调 ClaudeProjectSlug 前对 WorkDir 加 utf8.ValidString + IsLogInjectionRune 检查。Breaking：否。
 - [ ] **R236-SEC-14 — 主 dashboard CSP `img-src` 含 `data:`（P3）**: `internal/server/dashboard.go:486` 在 R236-SEC-02 unsafe-inline 存在前提下，data: URI 可被用作 XSS 数据外泄通道。方案：与 R236-SEC-02 一并升级 CSP 时收紧 img-src 为 `'self' blob:`。Breaking：否（需确认前端无合法 data: 图片）。
 - [ ] **R236-SEC-15 — notifyTarget chunk × retry 复合超时可能超 30s 预算（P3）**: `internal/cron/scheduler.go:2845-2879` ReplyWithRetry 内部超时未必使用 replyCtx 剩余时间。方案：限制最大 chunk 数（如 5）+ 确认 ReplyWithRetry 使用传入 ctx。Breaking：否。
 

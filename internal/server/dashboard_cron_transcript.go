@@ -235,6 +235,27 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, resp)
 		return
 	}
+	// Defence in depth before ClaudeProjectSlug encodes WorkDir into a
+	// directory name segment. Cron's job-load path already strips C0/bidi,
+	// but a hand-edited cron_runs.json on disk could carry runes that
+	// either round-trip badly through the encoder or split log lines if
+	// the slug ends up in a slog attr below. Reject invalid UTF-8 and any
+	// rune classified as log-injection (C1 / bidi / LS-PS) before we
+	// touch the filesystem path. (R236-SEC-13)
+	if !utf8.ValidString(run.WorkDir) {
+		slog.Warn("cron transcript: invalid UTF-8 in run WorkDir", "job_id", jobID, "run_id", runID)
+		resp.Fallback = "missing"
+		writeJSON(w, resp)
+		return
+	}
+	for _, r := range run.WorkDir {
+		if osutil.IsLogInjectionRune(r) {
+			slog.Warn("cron transcript: rejecting WorkDir with log-injection rune", "job_id", jobID, "run_id", runID, "rune", int(r))
+			resp.Fallback = "missing"
+			writeJSON(w, resp)
+			return
+		}
+	}
 
 	jsonlPath := filepath.Join(h.claudeDir, "projects", discovery.ClaudeProjectSlug(run.WorkDir), run.SessionID+".jsonl")
 
