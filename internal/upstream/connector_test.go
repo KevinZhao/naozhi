@@ -174,7 +174,9 @@ func TestNew_SetDiscoverFunc(t *testing.T) {
 		called = true
 		return json.RawMessage(`[]`), nil
 	})
-	c.discoverFunc()
+	if fn := c.loadDiscoverFunc(); fn != nil {
+		_, _ = fn()
+	}
 	if !called {
 		t.Error("SetDiscoverFunc callback not stored")
 	}
@@ -188,7 +190,9 @@ func TestNew_SetPreviewFunc(t *testing.T) {
 		gotID = id
 		return json.RawMessage(`[]`), nil
 	})
-	c.previewFunc("sess-123")
+	if fn := c.loadPreviewFunc(); fn != nil {
+		_, _ = fn("sess-123")
+	}
 	if gotID != "sess-123" {
 		t.Errorf("previewFunc got sessionID = %q, want \"sess-123\"", gotID)
 	}
