@@ -90,6 +90,61 @@ func TestMarshalResult_Nil(t *testing.T) {
 	}
 }
 
+// TestMarshalResult_ByteEquivalentToJSONMarshal pins R246-PERF-10: the
+// pooled-encoder marshalResult MUST emit the exact same bytes as the
+// prior json.Marshal call so reverse-RPC consumers (primary side) keep
+// parsing replies unchanged. Covers HTML-escaping (Encoder default) and
+// the implicit trailing newline trim.
+func TestMarshalResult_ByteEquivalentToJSONMarshal(t *testing.T) {
+	cases := []any{
+		map[string]string{"status": "ok", "key": "scratch:feishu:direct:alice"},
+		map[string]any{"sessions": []map[string]string{{"key": "k1"}, {"key": "k2"}}},
+		// HTML-escapable runes: encoding/json keeps them \u-escaped so a
+		// reply embedded inside a hypothetical HTML page can't break out.
+		map[string]string{"prompt": "<script>alert(1)</script> &  "},
+		// Unicode + emoji + Chinese.
+		map[string]string{"label": "项目 测试 🚀"},
+		nil,
+		[]int{},
+	}
+	for i, v := range cases {
+		want, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("case %d: json.Marshal: %v", i, err)
+		}
+		got, err := marshalResult(v)
+		if err != nil {
+			t.Fatalf("case %d: marshalResult: %v", i, err)
+		}
+		if string(got) != string(want) {
+			t.Errorf("case %d: marshalResult=%q want=%q", i, got, want)
+		}
+	}
+}
+
+// TestMarshalResult_PoolReuseDoesNotShareBacking pins that consecutive
+// marshalResult calls return slices whose backing arrays are independent
+// of the pool's bytes.Buffer (otherwise the second call's Reset would
+// clobber the first call's payload). R246-PERF-10.
+func TestMarshalResult_PoolReuseDoesNotShareBacking(t *testing.T) {
+	a, err := marshalResult(map[string]string{"k": "first-value-" + strings.Repeat("x", 64)})
+	if err != nil {
+		t.Fatalf("marshalResult a: %v", err)
+	}
+	aSnap := append([]byte(nil), a...)
+	// Force the pool to hand the same buffer back by marshaling several
+	// payloads; if we returned a slice aliasing the buffer, one of these
+	// Reset()+Encode() calls would corrupt aSnap.
+	for i := 0; i < 4; i++ {
+		if _, err := marshalResult(map[string]int{"i": i, "pad": 1234}); err != nil {
+			t.Fatalf("marshalResult padding %d: %v", i, err)
+		}
+	}
+	if string(a) != string(aSnap) {
+		t.Errorf("first marshalResult slice mutated by pool reuse: got %q want %q", a, aSnap)
+	}
+}
+
 // ---- Connector.New ----
 
 func TestNew_CreatesConnector(t *testing.T) {
