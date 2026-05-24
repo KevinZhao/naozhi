@@ -1158,9 +1158,18 @@ type JobWithNextRun struct {
 
 // ListAllJobsWithNextRun returns every job plus its next scheduled run.
 // Lock strategy: snapshot (*Job, entryID) under s.mu.RLock, release s.mu, then
-// call s.cron.Entry() without holding s.mu. Calling cron.Entry inside s.mu
-// would invert the lock order taken by the cron dispatcher path
-// (cron-internal → execute → recordResultP0WithSanitised → s.mu.Lock), risking a deadlock.
+// call s.cron.Entries() without holding s.mu. Calling cron.Entries inside
+// s.mu would invert the lock order taken by the cron dispatcher path
+// (cron-internal → execute → recordResultP0WithSanitised → s.mu.Lock),
+// risking a deadlock.
+//
+// R236-PERF-11: this used to call s.cron.Entry(id) per job, but
+// robfig/cron v3's Entry is implemented as `for _, e := range Entries()
+// { if e.ID == id }` and Entries() takes runningMu — so N jobs cost
+// N×N entry walks plus N mutex acquisitions on the dispatcher's mutex.
+// Building one entryID→Next map up front collapses the cost to O(N) and
+// a single mutex acquisition, which matters when the dashboard list API
+// polls at 1 Hz with 50 jobs registered.
 func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 	s.mu.RLock()
 	type pair struct {
@@ -1173,11 +1182,20 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 	}
 	s.mu.RUnlock()
 
+	// Single Entries() snapshot → entryID-keyed map. Allocates one map
+	// per call; the alternative — re-walking the slice per pair — is
+	// O(N²) and re-acquires runningMu per Entry() call.
+	entries := s.cron.Entries()
+	nextByID := make(map[robfigcron.EntryID]time.Time, len(entries))
+	for _, e := range entries {
+		nextByID[e.ID] = e.Next
+	}
+
 	result := make([]JobWithNextRun, 0, len(pairs))
 	for _, p := range pairs {
 		var next time.Time
 		if p.entryID != 0 {
-			next = s.cron.Entry(p.entryID).Next
+			next = nextByID[p.entryID]
 		}
 		result = append(result, JobWithNextRun{Job: p.job, NextRun: next})
 	}
