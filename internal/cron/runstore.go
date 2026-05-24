@@ -49,12 +49,25 @@ type runStore struct {
 	// 任何后续 read 不需要锁保护。若将来引入运行时调整 API，必须先把
 	// 三者改为 atomic.Int64 / atomic.Value 之后才能放开 store 之外的
 	// 写入路径。R234-GO-13。
-	keepCount    int
-	keepWindow   time.Duration
-	maxRunBytes  int64
-	jobLocks     sync.Map // jobID -> *sync.Mutex
-	disabled     bool     // true when StorePath is empty (tests / no-persist)
-	enableTrimGC bool     // true in production; tests can disable for determinism
+	keepCount   int
+	keepWindow  time.Duration
+	maxRunBytes int64
+	jobLocks    sync.Map // jobID -> *sync.Mutex
+	// jobDirEnsured 记录 Append 已经为该 jobID 跑过 MkdirAll 至少一次。
+	// 长寿 cron job（每 1m 触发，存活若干天）每次 Append 都做 lstat+mkdir
+	// 是纯浪费 syscall — 除非 operator 手动 rm -rf 该目录，目录一旦建立就
+	// 不会消失。R246-GO-4 / R232-PERF-8 同根因（对 store dir 已用相似
+	// storeDirOnce 模式）。
+	//
+	// Concurrency: sync.Map 自带原子读写。两个 goroutine 同时 Append 同
+	// jobID 时仅一个 Store，多余的 LoadOrStore 命中自然降级。MkdirAll 本身
+	// 也是幂等的，作为 fallback 自洽。
+	//
+	// Cache miss 路径：sync.Map.LoadOrStore 拿到 false 后跑 MkdirAll；失败
+	// 则 Delete cache entry 让下次重试，避免一次 transient 错误永久毒化。
+	jobDirEnsured sync.Map // jobID -> struct{}
+	disabled      bool     // true when StorePath is empty (tests / no-persist)
+	enableTrimGC  bool     // true in production; tests can disable for determinism
 
 	// recentCache memoises the newest-N summaries per job so the dashboard
 	// list endpoint (1 Hz poll × 50 jobs) does not perform 50× ReadDir +
@@ -277,6 +290,27 @@ func (s *runStore) assertJobLockHeld(jobID string) {
 	}
 }
 
+// ensureJobDir 确保 dir 已存在，缓存命中后跳过 syscall。
+//
+// R246-GO-4: 长寿 cron job 每次 Append 触发的 os.MkdirAll(0o700) 在 Linux
+// 实质执行 lstat + (cond) mkdir；目录稳定存在期内 lstat 是纯浪费，且在
+// jobLock 下串行化所有 Append。jobDirEnsured 缓存首次成功之后，后续
+// Append 走 sync.Map.Load fast-path 命中即返回。Cache miss 路径 MkdirAll
+// 失败时把 cache 项删掉，避免单次 transient EACCES 永久毒化（下次 Append
+// 会重试）。MkdirAll 自身幂等，作为 fallback 是安全的；缓存用于减少
+// syscall，不是正确性保证。
+func (s *runStore) ensureJobDir(jobID, dir string) error {
+	if _, ok := s.jobDirEnsured.Load(jobID); ok {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		// 不写入 cache：让下次 Append 重试。
+		return err
+	}
+	s.jobDirEnsured.Store(jobID, struct{}{})
+	return nil
+}
+
 // Append writes one run record to disk and trims the per-job ring.
 // Errors are logged, never returned: cron must not block history failure.
 func (s *runStore) Append(run *CronRun) {
@@ -298,7 +332,7 @@ func (s *runStore) Append(run *CronRun) {
 	defer lock.Unlock()
 
 	dir := filepath.Join(s.root, run.JobID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := s.ensureJobDir(run.JobID, dir); err != nil {
 		slog.Warn("cron run: mkdir failed", "dir", dir, "err", err)
 		return
 	}
@@ -720,6 +754,10 @@ func (s *runStore) DeleteJob(jobID string) {
 	if err := os.RemoveAll(dir); err != nil {
 		slog.Warn("cron run: delete job runs subtree failed", "dir", dir, "err", err)
 	}
+	// R246-GO-4: drop MkdirAll cache so a subsequent Append recreates the dir
+	// (otherwise a delete + re-create-on-disk-only-by-operator scenario would
+	// silently miss the mkdir).
+	s.jobDirEnsured.Delete(jobID)
 	s.cacheInvalidate(jobID)
 }
 
