@@ -75,18 +75,20 @@ func TestSetDeathReason_FirstWriterWins(t *testing.T) {
 	}
 }
 
-// TestSetDeathReason_UpgradesExplicitEmpty exercises the upgrade-from-empty
-// path: if the pointer is non-nil but points to "", a subsequent write must
-// install the real reason (no code path stores "" today, but the helper
-// tolerates the upgrade for forward compatibility).
-func TestSetDeathReason_UpgradesExplicitEmpty(t *testing.T) {
+// TestSetDeathReason_EmptyPointerIsStable: after R237-GO-10 the upgrade-from-
+// empty path was deleted as dead code (no caller has ever stored a *""). Lock
+// the simplified contract: if a hypothetical caller did install *"", a later
+// real reason now NO-OPs (first-writer-wins, even when the first writer
+// installed empty). This test exists to make a future revival of the upgrade
+// path a deliberate decision rather than a silent revert.
+func TestSetDeathReason_EmptyPointerIsStable(t *testing.T) {
 	t.Parallel()
 	p := &Process{}
 	empty := ""
 	p.deathReason.Store(&empty)
 	p.setDeathReason("idle_timeout")
-	if got := p.DeathReason(); got != "idle_timeout" {
-		t.Errorf("upgrade-from-empty: got %q, want idle_timeout", got)
+	if got := p.DeathReason(); got != "" {
+		t.Errorf("first-writer-wins broken: got %q, want \"\" (upgrade path was removed in R237-GO-10)", got)
 	}
 }
 
