@@ -570,6 +570,16 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	if err := ValidatePromptStrict(prompt); err != nil {
 		return err
 	}
+	// R246-SEC-10: bound prompt size on this dashboard write path. The
+	// dashboard handler runs validateCronPrompt (which enforces
+	// maxCronPromptBytesDashboard == cron.MaxPromptBytes) before reaching
+	// here, but SetJobPrompt is also exposed via Scheduler so any future
+	// caller (or a code path that bypasses validateCronPrompt) would write
+	// an unbounded prompt to disk and amplify it across LastResult records.
+	// Mirror the same cap as cron run prompts.
+	if len(prompt) > MaxPromptBytes {
+		return fmt.Errorf("prompt too large: %d bytes (cap %d)", len(prompt), MaxPromptBytes)
+	}
 
 	s.mu.Lock()
 
@@ -584,6 +594,11 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	}
 
 	j.Prompt = prompt
+	// R246-CR-247: capture identity fields under lock so the stub refresh
+	// below reads stable values even if a concurrent UpdateJob mutates *Job
+	// after the IIFE's deferred Unlock fires. Mirrors AddJob / UpdateJob.
+	stubWorkDir := j.WorkDir
+	stubLastSession := j.LastSessionID
 	waspaused := j.Paused
 	if j.Paused {
 		// Delegate unpause to the shared helper so the registerJob + Paused
@@ -613,6 +628,11 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	}
 	s.mu.Unlock()
 	save()
+	// R246-CR-247: refresh the router stub so the dashboard sidebar
+	// immediately reflects the new prompt. Without this, the stub keeps the
+	// empty-prompt state from the initial AddJob until the next executeJob
+	// tick rebuilds it.
+	s.registerStubByValue(id, stubWorkDir, prompt, stubLastSession)
 	slog.Info("cron job prompt set", "job_id", id, "prompt_len", len(prompt))
 	return nil
 }

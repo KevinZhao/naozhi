@@ -68,6 +68,32 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			return
 		}
 
+		// Timestamp verification — enforce for any authenticated webhook mode
+		// to prevent replay attacks BEFORE the token check so a request with
+		// a valid token but missing/stale timestamp cannot be replayed within
+		// Feishu's 5-minute freshness window. Both EncryptKey and
+		// VerificationToken modes benefit from timestamp freshness checks as
+		// a defense-in-depth measure. Exception: url_verification handshakes
+		// are a one-shot Feishu bootstrap that historically may arrive without
+		// the X-Lark-Request-Timestamp header on some legacy app versions; we
+		// still gate them behind token equality (below) and the hookSem cap
+		// (challenge branch), and they cannot dispatch to handlers (the
+		// branch only reflects the challenge). When a url_verification DOES
+		// supply a timestamp we still reject if it is stale/malformed —
+		// only the missing-header case is exempted. R246-SEC-13.
+		isURLVerification := envelope.Type == "url_verification"
+		if ts := r.Header.Get("X-Lark-Request-Timestamp"); ts == "" {
+			if !isURLVerification && (f.cfg.EncryptKey != "" || f.cfg.VerificationToken != "") {
+				slog.Warn("feishu request missing timestamp header", "remote", r.RemoteAddr)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+		} else if !verifyTimestamp(ts) {
+			slog.Warn("feishu request timestamp too old or invalid", "timestamp", ts)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
 		// Token verification (v1: top-level token, v2: header.token)
 		if f.cfg.VerificationToken != "" {
 			token := envelope.Token
@@ -95,21 +121,6 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			}
 		}
 
-		// Timestamp verification — enforce for any authenticated webhook mode
-		// to prevent replay attacks. Both EncryptKey and VerificationToken modes
-		// benefit from timestamp freshness checks as a defense-in-depth measure.
-		if ts := r.Header.Get("X-Lark-Request-Timestamp"); ts == "" {
-			if f.cfg.EncryptKey != "" || f.cfg.VerificationToken != "" {
-				slog.Warn("feishu request missing timestamp header", "remote", r.RemoteAddr)
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-		} else if !verifyTimestamp(ts) {
-			slog.Warn("feishu request timestamp too old or invalid", "timestamp", ts)
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-
 		// Signature verification (v2 events with encrypt_key)
 		if f.cfg.EncryptKey != "" {
 			timestamp := r.Header.Get("X-Lark-Request-Timestamp")
@@ -133,7 +144,6 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		// up to maxSeenNonces, after which legitimate event webhooks return
 		// 429 until the TTL sweep catches up. The challenge reflection path
 		// itself is still rate-limited by hookSem.
-		isURLVerification := envelope.Type == "url_verification"
 		if ts := r.Header.Get("X-Lark-Request-Timestamp"); ts != "" {
 			nonce := r.Header.Get("X-Lark-Request-Nonce")
 			if nonce != "" {
