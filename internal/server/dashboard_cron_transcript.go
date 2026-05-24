@@ -390,7 +390,8 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	// wrong: bufio.Scanner pre-fills a 256 KB buffer, so the underlying
 	// file offset can advance well past the LimitReader's logical
 	// budget even when the scanner only consumed the first line.
-	lr := &io.LimitedReader{R: f, N: maxTranscriptBytes}
+	// 显式 int64 cast 防止 maxTranscriptBytes 类型变更后静默截断（当前已是 int64）。
+	lr := &io.LimitedReader{R: f, N: int64(maxTranscriptBytes)}
 	scanner := bufio.NewScanner(lr)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxTranscriptLineBytes)
 
