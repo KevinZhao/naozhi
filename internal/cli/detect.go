@@ -55,6 +55,20 @@ var knownBackends = []BackendInfo{
 	{ID: "kiro", DisplayName: "kiro", Protocol: "acp"},
 }
 
+// knownBackendBinaries maps backend.ID → default executable name detectCLI
+// probes when callers don't pass an explicit CLIPath. Kept beside
+// knownBackends rather than as a field on BackendInfo because BackendInfo's
+// JSON shape is consumed by the dashboard and adding an unrelated field
+// would broaden the wire contract. The cli package can't import
+// internal/cli/backend (cycle), so this is the cli-side mirror of
+// backend.Profile.DefaultBinary; backend/profile_*.go remains the
+// authoritative source for everything else (DisplayName, Features, etc.).
+// R225-CR-2.
+var knownBackendBinaries = map[string]string{
+	"claude": "claude",
+	"kiro":   "kiro-cli",
+}
+
 // DetectBackendsCtx probes the filesystem and $PATH for each known backend
 // and returns a list of probe results. Backends whose binary cannot be
 // located are included with Available=false so the dashboard can surface
