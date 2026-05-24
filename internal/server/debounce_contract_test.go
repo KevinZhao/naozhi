@@ -41,11 +41,20 @@ import (
 // passes on the current tree; a future edit that breaks the pairing
 // trips CI with a message pointing to this audit item.
 func TestDebounceTimer_ShutdownStopSemanticsContract(t *testing.T) {
+	// R243-ARCH-2 split: Hub.Shutdown stays in wshub.go (lifecycle owner),
+	// but the debounce AfterFunc scheduler moved to wshub_broadcast.go alongside
+	// BroadcastSessionsUpdate. Read both and concatenate so the regex anchors
+	// can locate either side without caring which file owns each fragment.
 	src, err := os.ReadFile("wshub.go")
 	if err != nil {
 		t.Fatalf("read wshub.go: %v", err)
 	}
+	bcastSrc, err := os.ReadFile("wshub_broadcast.go")
+	if err != nil {
+		t.Fatalf("read wshub_broadcast.go: %v", err)
+	}
 	body := string(src)
+	bcastBody := string(bcastSrc)
 
 	// Locate the Shutdown function body. We match from `func (h *Hub) Shutdown()`
 	// up to the next top-level `^func `. Using a simple anchor search keeps
@@ -95,14 +104,17 @@ func TestDebounceTimer_ShutdownStopSemanticsContract(t *testing.T) {
 	// Find the AfterFunc schedule call and the closest `defer h.clientWG.Done()`.
 	// If the defer is missing the callback's Stop()==false branch never
 	// decrements the WG, and Shutdown hangs.
-	afterFuncIdx := strings.Index(body, "time.AfterFunc(debounceInterval, func()")
+	//
+	// R243-ARCH-2 split: AfterFunc lives in wshub_broadcast.go (alongside
+	// BroadcastSessionsUpdate). bcastBody is the relevant source.
+	afterFuncIdx := strings.Index(bcastBody, "time.AfterFunc(debounceInterval, func()")
 	if afterFuncIdx < 0 {
 		t.Fatal("could not locate time.AfterFunc(debounceInterval, ...) — " +
 			"the Stop() contract assumes this is the sole debounce timer " +
 			"scheduler. R37-CONCUR3.")
 	}
 	// Look at the next ~200 bytes of the closure body.
-	tail := body[afterFuncIdx:]
+	tail := bcastBody[afterFuncIdx:]
 	if len(tail) > 400 {
 		tail = tail[:400]
 	}

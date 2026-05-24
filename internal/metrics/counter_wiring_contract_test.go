@@ -49,8 +49,9 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			pattern: `metrics\.RecordCLISpawn\(`,
 		},
 		{
+			// R243-ARCH-2 split: handleAuth lives in wshub_upgrade.go.
 			name:    "WSAuthFailTotal fires on both WS auth_fail branches",
-			path:    "../server/wshub.go",
+			path:    "../server/wshub_upgrade.go",
 			pattern: `metrics\.WSAuthFailTotal\.Add\(1\)`,
 		},
 		{
@@ -114,13 +115,15 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			// aggregate WSAuthFailTotal — rate-limited and invalid-token arms
 			// of handleAuth. Absence means an arm was refactored to bypass
 			// the split (a regression).
+			//
+			// R243-ARCH-2 split: handleAuth lives in wshub_upgrade.go.
 			name:    "WSAuthFailRateLimitedTotal fires in rate-limit arm",
-			path:    "../server/wshub.go",
+			path:    "../server/wshub_upgrade.go",
 			pattern: `metrics\.WSAuthFailRateLimitedTotal\.Add\(1\)`,
 		},
 		{
 			name:    "WSAuthFailInvalidTokenTotal fires in invalid-token arm",
-			path:    "../server/wshub.go",
+			path:    "../server/wshub_upgrade.go",
 			pattern: `metrics\.WSAuthFailInvalidTokenTotal\.Add\(1\)`,
 		},
 		{
@@ -167,8 +170,10 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 func TestOBS1_PanicRecoveredWiredIntoTopSites(t *testing.T) {
 	t.Parallel()
 	expected := []string{
-		"../server/wsclient.go",        // dashboard WS readPump
-		"../server/wshub.go",           // remote WS interrupt + send goroutines
+		"../server/wsclient.go", // dashboard WS readPump
+		// R243-ARCH-2 split: remote WS interrupt + send goroutines moved
+		// from wshub.go to wshub_send.go alongside handleSend / handleInterrupt.
+		"../server/wshub_send.go",
 		"../dispatch/dispatch.go",      // ownerLoop (core IM turn loop)
 		"../platform/feishu/feishu.go", // cleanupNoncesTick (replay protection)
 	}
@@ -224,16 +229,18 @@ func TestOBS2_SpawnPanicRecoveredInRecoverArm(t *testing.T) {
 // by BOTH branches of handleAuth (rate-limit-hit and invalid-token). If a
 // refactor only keeps one, operators watching naozhi_ws_auth_fail_total
 // lose signal for the other class.
+//
+// R243-ARCH-2 split: handleAuth lives in wshub_upgrade.go.
 func TestOBS2_WSAuthFailBothBranches(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("../server/wshub.go")
+	data, err := os.ReadFile("../server/wshub_upgrade.go")
 	if err != nil {
-		t.Fatalf("read wshub.go: %v", err)
+		t.Fatalf("read wshub_upgrade.go: %v", err)
 	}
 	re := regexp.MustCompile(`metrics\.WSAuthFailTotal\.Add\(1\)`)
 	matches := re.FindAll(data, -1)
 	if len(matches) < 2 {
-		t.Errorf("expected ≥2 WSAuthFailTotal.Add sites in wshub.go (rate-limit + invalid-token), got %d",
+		t.Errorf("expected ≥2 WSAuthFailTotal.Add sites in wshub_upgrade.go (rate-limit + invalid-token), got %d",
 			len(matches))
 	}
 }
