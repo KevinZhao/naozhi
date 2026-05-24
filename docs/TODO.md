@@ -162,7 +162,7 @@
 
 ### 性能（剩余）
 
-- [ ] **R239-PERF-1 — `internal/cron/scheduler.go:1164-1184` ListAllJobsWithNextRun 每 job 串行调 cron.Entry 持 robfig/cron 内部锁（P1）[REPEAT-N]**：注意：新 master 已通过 [R236-PERF-11] 部分缓解（Entries() map 消除 O(N²) 锁竞争），但 reviewer 仍命中本路径需复核改造效果。方案：若 [R236-PERF-11] 已落地完整 Entries map 路径则本条归档；否则参考其方案。Breaking：否。
+- [x] **R239-PERF-1 — `internal/cron/scheduler.go:1164-1184` ListAllJobsWithNextRun 每 job 串行调 cron.Entry 持 robfig/cron 内部锁（P1）[REPEAT-N]**：~~reviewer 仍命中本路径需复核改造效果。~~ 已确认 [R236-PERF-11] 完整路径在 master 落地（scheduler.go:1191 `s.cron.Entries()` 一次性快照 + entryID-keyed map），归档 2026-05-24（cron-fix）。 [closes via R236-PERF-11]
 - [ ] **R239-PERF-3 — `internal/cron/runstore.go:302-325` cacheHeadPush 仍 append+copy O(N) memmove，keepCount=200 单次 16KB [REPEAT-N]**：与 R233-PERF-2 / R234-GO-1 同根因，未实施 ring buffer。方案：固定数组 + head 指针。Breaking：否（内部）。
 - [ ] **R239-PERF-4 — `internal/cron/scheduler.go:478-517` KnownSessionIDs 全 job 遍历构建 map[string]bool，IsExcluded 是其包装每 spawn 重建 [REPEAT-N]**：同 R233-PERF-3 / R236-PERF-02。方案：scheduler 维护 atomic.Pointer[map[string]bool] 缓存 + finishRun/DeleteJob 主动失效。Breaking：否。
 - [ ] **R239-PERF-5 — `internal/cron/runstore.go:628-713` Append 路径双 ReadDir（warmCache + trimJobLocked）（P2）**：trimJobLocked 与 diskListNewestFirst 各自独立 ReadDir + e.Info() 排序。方案：trimJobLocked 复用 diskListNewestFirst 已排序 slice 判 trim 边界。Breaking：否。
