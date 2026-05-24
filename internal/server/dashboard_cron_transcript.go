@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -722,6 +721,3 @@ func truncateRunes(s string, maxBytes int) string {
 	}
 	return s[:cut] + ellipsis
 }
-
-// _ keeps strconv imported for future tweaks (line index in errors).
-var _ = strconv.Itoa
