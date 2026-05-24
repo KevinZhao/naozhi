@@ -1179,6 +1179,14 @@ func (t *replyTracker) stop() {
 	// by the onEvent goroutine's defer.
 	t.releaseInitialReplySlot()
 	t.loopWG.Wait()
+	// R246-GO-14: clear the pendingTodo mailbox after the loop has exited.
+	// onEvent may have stashed a final todo snapshot just before close(t.done)
+	// raced ahead of todoLoop's wake; without this Store(nil) the *string
+	// (and its underlying byte buffer) stays reachable from the tracker
+	// instance until the tracker itself is GC'd, holding ~few-hundred bytes
+	// per stopped session for an extra GC cycle. Done after loopWG.Wait so
+	// the loop cannot be racing against this Store at the same instant.
+	t.pendingTodo.Store(nil)
 }
 
 func (t *replyTracker) onEvent(ev cli.Event) {

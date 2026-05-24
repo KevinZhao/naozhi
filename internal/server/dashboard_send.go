@@ -1169,7 +1169,13 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	etagSeed = append(etagSeed, '|')
 	etagSeed = strconv.AppendInt(etagSeed, info.ModTime().UnixNano(), 10)
 	etagSum := sha256.Sum256(etagSeed)
-	etag := `"` + hex.EncodeToString(etagSum[:8]) + `"`
+	// R246-SEC-13: widen the ETag from 8 (64-bit) to 12 bytes (96-bit) of the
+	// hash. The header is opportunistically cacheable per object, but a 64-bit
+	// truncation puts birthday-bound ETag forgery within ~2^32 attempts for an
+	// attacker who can passively observe many ETags. 96 bits restores
+	// "cryptographically irrelevant collision risk" without bloating the
+	// header beyond 24 hex chars.
+	etag := `"` + hex.EncodeToString(etagSum[:12]) + `"`
 	if inm := r.Header.Get("If-None-Match"); inm != "" && inm == etag {
 		w.Header().Set("ETag", etag)
 		w.WriteHeader(http.StatusNotModified)

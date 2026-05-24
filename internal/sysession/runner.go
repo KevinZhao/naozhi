@@ -208,6 +208,18 @@ const runnerStdoutCapBytes = 64 * 1024
 //
 // Any change here is a contract change for sysession + auto_titler.
 // Verify against internal/cli/wrapper.go's spawn argv before editing.
+//
+// NEEDS-DESIGN (R241-ARCH-14): this slice is conceptually duplicated
+// by internal/cli/protocol_claude.go:BuildArgs (which constructs the
+// same -p / --output-format / --setting-sources triplet for
+// ManagedSession one-shots). Today we keep them aligned by hand and
+// rely on the inline reminder above. Plan: extend backend.Profile
+// with a OneshotArgs() method so a new backend can express its
+// streaming-vs-oneshot argv contract once; runnerImplBaseArgs and
+// BuildArgs both consume that shared output. Deferred until a
+// second backend (gemini-cli) needs the split, since premature
+// abstraction here would commit cli + sysession to a Profile shape
+// that doesn't yet have a non-Claude consumer to constrain it.
 var runnerImplBaseArgs = []string{"-p", "--output-format", "text", "--setting-sources", ""}
 
 func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
