@@ -325,6 +325,21 @@ func (m *Manager) Stop(stopCtx context.Context) {
 		// guarantees m.cancel is populated by the time we reach here.
 		m.cancel()
 		done := make(chan struct{})
+		// R234-GO-5: this watcher goroutine is intentionally not tracked
+		// in any WaitGroup. The only termination path on the stopCtx
+		// timeout branch is osExit(2), which terminates the entire
+		// process — abandoning the goroutine is therefore safe in
+		// production.
+		//
+		// CAVEAT for test harnesses that swap osExit (see osExit pkg
+		// var): if osExit is replaced with panic-recovery or no-op, this
+		// goroutine will block on m.wg.Wait() until some daemon finally
+		// returns, leaking a goroutine for the lifetime of the test
+		// binary. Tests that swap osExit MUST also drive every spawned
+		// daemon to return so wg.Wait can complete. Do not "fix" this
+		// by adding a context to wg.Wait — the production semantic is
+		// "block forever or kill the process", and weakening it lets
+		// stuck-daemon shutdowns silently torn-down the router.
 		go func() {
 			m.wg.Wait()
 			close(done)
