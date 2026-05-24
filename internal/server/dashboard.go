@@ -483,7 +483,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// opaque origin + iframe sandbox=""（零权限），三层防御
 	// （serveRender octet-stream attachment / blob opaque origin /
 	// sandbox 空）都未变化，安全契约保持。
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:; frame-src 'self' blob:")
+	// R236-SEC-2: frame-ancestors 'none' 与 X-Frame-Options: DENY 双重防御 clickjacking；
+	// 现代浏览器优先 CSP frame-ancestors，X-Frame-Options 仅作 fallback。
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:; frame-src 'self' blob:; frame-ancestors 'none'")
 	// HSTS is only meaningful over TLS (RFC 6797 §7.2). Sending it on plain
 	// HTTP would still be honoured by browsers and can brick local HTTP
 	// loopback access for a year. Gate on the same isSecure() helper the
