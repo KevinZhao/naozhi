@@ -7,12 +7,20 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// osStat is a package-level alias for os.Stat used by
+// resolveBinPathFromEnv.  Keeping it as a function var lets unit tests
+// stub the filesystem walk without touching disk; production callers
+// pay one indirect call per PATH entry which is negligible (PATH walk
+// happens once at NewRunner, not per Run).
+var osStat = os.Stat
 
 // Runner is the LLM-call abstraction used by all daemons.  Each Run()
 // invocation execs a fresh "claude -p" subprocess (= one transient
@@ -89,7 +97,76 @@ func NewRunner(cfg RunnerConfig) (Runner, error) {
 	// EnvAllowlist + parent env are stable post-construction, so the
 	// filtered "KEY=value" slice is computed once. Avoids an os.Environ()
 	// syscall + O(N) scan on every Run() (AutoTitler call rate). R230-PERF-3.
-	return &runnerImpl{cfg: cfg, env: filterEnv(cfg.EnvAllowlist)}, nil
+	env := filterEnv(cfg.EnvAllowlist)
+	// R245-SEC-11: pin BinPath to an absolute path at construction time
+	// using the PATH snapshot embedded in env.  Otherwise NewRunner
+	// snapshots filtered PATH into env but Run() lets exec.CommandContext
+	// resolve a relative BinPath via os.Getenv("PATH") at *call* time —
+	// any later os.Setenv("PATH", ...) (tests, plugin loaders, etc.)
+	// causes the binary picked up by Run() to diverge from what env says.
+	// The race window is dashboard-restart wide: PATH-mutating goroutines
+	// with NewRunner+Run pairs can land arbitrary CLI bins.
+	//
+	// We re-implement a minimal PATH walk because exec.LookPath uses the
+	// process's live os.Getenv("PATH"), which is exactly the value we're
+	// trying to insulate from. resolveBinPathFromEnv reads the PATH= entry
+	// out of env (which is the snapshot we already commit to) and walks
+	// it for the first executable file matching cfg.BinPath. On miss we
+	// keep the original relative name so Run() still degrades gracefully
+	// with an upstream error (matches the godoc above).
+	if !filepath.IsAbs(cfg.BinPath) && !strings.ContainsRune(cfg.BinPath, filepath.Separator) {
+		if abs, ok := resolveBinPathFromEnv(cfg.BinPath, env); ok {
+			cfg.BinPath = abs
+		}
+	}
+	return &runnerImpl{cfg: cfg, env: env}, nil
+}
+
+// resolveBinPathFromEnv walks the PATH= entry inside env (env-slice
+// form: "KEY=value" lines) for an executable whose basename equals
+// name. Returns ("", false) when no PATH entry exists or no candidate
+// is executable; the caller should leave cfg.BinPath as a relative
+// name and let Run()'s exec.CommandContext degrade gracefully.
+//
+// We deliberately do not consult os.Getenv("PATH"): the whole point of
+// this function is to insulate from a parent PATH that may be racing
+// with another goroutine via os.Setenv. R245-SEC-11.
+func resolveBinPathFromEnv(name string, env []string) (string, bool) {
+	const pathPrefix = "PATH="
+	var path string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, pathPrefix) {
+			path = kv[len(pathPrefix):]
+			break
+		}
+	}
+	if path == "" {
+		return "", false
+	}
+	for _, dir := range filepath.SplitList(path) {
+		if dir == "" {
+			// POSIX: empty entry is implicit "."; we refuse to honour it
+			// because cwd-relative resolution is exactly the
+			// cross-tenant attack vector we're trying to close.
+			continue
+		}
+		candidate := filepath.Join(dir, name)
+		info, err := osStat(candidate)
+		if err != nil {
+			continue
+		}
+		if info.IsDir() {
+			continue
+		}
+		// Mode()&0o111 != 0 mirrors exec.LookPath's executability check
+		// (any user/group/other +x bit).  Avoids trying to spawn a 0644
+		// "claude" config file someone dropped in $PATH.
+		if info.Mode()&0o111 == 0 {
+			continue
+		}
+		return candidate, true
+	}
+	return "", false
 }
 
 type runnerImpl struct {
