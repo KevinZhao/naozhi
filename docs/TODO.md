@@ -391,7 +391,7 @@
 
 - [ ] **R245-PERF-1 [REPEAT-N R71-PERF-H1] — `internal/cli/process_shim_io.go:58,87` shimWriter 每帧 byte→string 堆拷贝**: 建议：shimClientMsg.Line 改 json.RawMessage 零拷贝。
 - [ ] **R245-PERF-2 [REFACTOR R233-PERF-3 / R242-PERF-7 主条目] — `internal/cron/scheduler.go:481-521` KnownSessionIDs 1Hz 重建**: 建议：atomic.Pointer[knownIDsSnapshot] + 30s TTL；finishRun/DeleteJob 主动失效；IsExcluded spawn 路径同步收敛。
-- [ ] **R245-PERF-3 [REFACTOR R233-PERF-2 / R243-PERF-4 主条目] — `internal/cron/runstore.go:353-355` cacheHeadPush O(N) memmove**: 建议：定长 ring buffer。
+- [x] **R245-PERF-3 [REFACTOR R233-PERF-2 / R243-PERF-4 主条目] — `internal/cron/runstore.go:353-355` cacheHeadPush O(N) memmove**: 建议：定长 ring buffer。
 - [ ] **R245-PERF-4 [REFACTOR R241-PERF-3 / R242-PERF-11] — `internal/server/dashboard_cron.go:519,559` 1Hz × N tabs handleList**: HasMissedSchedule 内 cronParser.Parse regexp 50/s + 第 559 行 time.Now().In(loc) 重复调用（行 480 已有 now）。建议：Job.parsedSchedule 缓存；559 改 now.In(loc).Zone()。
 - [ ] **R245-PERF-5 [REFACTOR R240-PERF-6] — `internal/cron/runstore.go:221,235` Append json.Marshal 无 buffer pool**: 建议：sync.Pool + bytes.Buffer + json.NewEncoder（仿 bridgeEncPool）。
 - [ ] **R245-PERF-6 [REFACTOR R243-PERF-2] — IsExcluded spawn 路径独立重建 map**: 同 R245-PERF-2 收敛。
@@ -531,10 +531,10 @@
 
 ### 性能 (ecc:performance-optimizer 第 53 轮)
 
-- [ ] **R243-PERF-1 [REFACTOR]** `internal/cron/runstore.go:316/253` `Append` 在 `jobLock` 内多次调 `time.Now()`；建议 lock 前捕获一次 `now` 传下游，与 eventlog Persister 模式对齐。
+- [x] **R243-PERF-1 [REFACTOR]** `internal/cron/runstore.go:316/253` `Append` 在 `jobLock` 内多次调 `time.Now()`；建议 lock 前捕获一次 `now` 传下游，与 eventlog Persister 模式对齐。
 - [ ] **R243-PERF-2 [REFACTOR]** `internal/cron/scheduler.go:453-458` `IsExcluded` 每次 spawn 重建 jobs×200 KnownSessionIDs map；与 dashboard 30s 快照独立。建议 atomic.Pointer[map] + 30s TTL 缓存。
 - [ ] **R243-PERF-3 [REPEAT-25]** `internal/cron/scheduler.go:2340` `executeOpt` 内 `slog.With(4 attr)` 每次 cron 执行新建 logger；与 PERF-1 ReadEvent alloc 同模式第 25 次（cron 变体）。
-- [ ] **R243-PERF-4 [REFACTOR]** `internal/cron/runstore.go:353-355` `cacheHeadPush` `append` + `copy` 做 O(N) shift；改定长 ring buffer head/tail 指针 O(1) insert。
+- [x] **R243-PERF-4 [REFACTOR]** `internal/cron/runstore.go:353-355` `cacheHeadPush` `append` + `copy` 做 O(N) shift；改定长 ring buffer head/tail 指针 O(1) insert。
 - [ ] **R243-PERF-5 [REFACTOR]** `internal/cron/runstore.go:483-558` `diskListNewestFirst` `before≠0` 时绕 cache 直 ReadDir + Lstat；可在 cache 内尾段先扫，再 fallback disk。
 - [ ] **R243-PERF-6 [REPEAT-22]** `internal/cron/scheduler.go:3165-3174` `marshalJobsLocked` 每次 mutation 全量 sort + Marshal；`finishRun` 1Hz/job × 50 jobs 累积压力。
 - [ ] **R243-PERF-7 [REFACTOR]** `internal/server/static/dashboard.js:12459` `cronTimelineRefreshHead` 每个 `cron_run_ended` WS 全量 sort + innerHTML 重绘；rAF 防抖。
