@@ -8244,8 +8244,27 @@ function inlineMd(s) {
   // also makes path-traversal in the data-slug attribute impossible by
   // construction. The popover handler below attaches lazily on hover/click.
   // See docs/rfc/memory-link-rendering.md.
+  // Chip render: type prefix → color + emoji icon; tail of slug → short label.
+  // Type heuristic uses Claude's auto-memory naming convention (feedback_*,
+  // project_*, user_*, reference_*) — unknown prefixes fall back to a neutral
+  // 🧠 chip. Hover popover (below) still shows full slug + body.
   s = s.replace(/\[\[([a-zA-Z0-9_\-]{1,64})\]\]/g, function(_, slug) {
-    return '<span class="md-memlink" data-slug="' + escAttr(slug) + '" tabindex="0">[[' + slug + ']]</span>';
+    var m = slug.match(/^(feedback|project|user|reference)_(.+)$/);
+    var type = m ? m[1] : 'memory';
+    var tail = m ? m[2] : slug;
+    var segs = tail.split('_');
+    var label = segs.slice(-2).join('_');
+    var icon = ({
+      feedback:  '💡',
+      project:   '📌',
+      user:      '👤',
+      reference: '🔗',
+      memory:    '🧠',
+    })[type];
+    return '<span class="md-memlink" data-slug="' + escAttr(slug) +
+      '" data-type="' + type + '" tabindex="0" role="link">' +
+      '<span class="md-memlink-icon" aria-hidden="true">' + icon + '</span>' +
+      '<span class="md-memlink-label">' + esc(label) + '</span></span>';
   });
   // Use function-form replacements to prevent JS's special $-sequences
   // ($&, $', $`, $n) from expanding inside the replacement string. Those

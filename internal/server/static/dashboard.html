@@ -2075,12 +2075,32 @@ body.kbd-open .sidebar-footer{display:none}
    inlineMd; the popover container lives at the end of body and is
    positioned via JS. Broken-link variant uses dotted underline so users
    can tell at a glance which links resolved. */
-.md-memlink{display:inline;border-bottom:1px dashed var(--nz-text-mute);
-  cursor:help;color:var(--nz-accent);text-decoration:none}
-.md-memlink:hover,.md-memlink:focus{background:rgba(88,166,255,.1);outline:none}
-.md-memlink-broken{color:var(--nz-text-mute);border-bottom-style:dotted;
-  cursor:not-allowed}
-.md-memlink-broken:hover{background:rgba(139,148,158,.08)}
+/* Chip variant (B+D): type emoji + short label, color-coded per memory type.
+   Full slug + body still appear in the hover popover below. */
+.md-memlink{display:inline-flex;align-items:baseline;gap:4px;
+  padding:0 8px 1px 7px;border-radius:10px;
+  background:var(--nz-bg-2);color:var(--nz-text);
+  border:1px solid transparent;
+  font-size:12px;line-height:1.5;cursor:help;text-decoration:none;
+  vertical-align:baseline;
+  transition:background .12s, border-color .12s, box-shadow .12s}
+.md-memlink:hover,.md-memlink:focus{background:var(--nz-bg-1);
+  border-color:var(--nz-accent);outline:none;
+  box-shadow:0 0 0 1px rgba(88,166,255,.15)}
+.md-memlink-icon{font-size:10.5px;display:inline-block;flex:0 0 auto;
+  filter:saturate(.9)}
+.md-memlink-label{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11.5px;letter-spacing:.01em}
+.md-memlink[data-type="feedback"]{background:#3a2a14;color:#f7c97a}
+.md-memlink[data-type="user"]{background:#1a3a2c;color:#7ad9a3}
+.md-memlink[data-type="project"]{background:#1a2a4a;color:#7aacf7}
+.md-memlink[data-type="reference"]{background:#3a1a3a;color:#d97af7}
+.md-memlink[data-type="memory"]{background:var(--nz-bg-2);color:var(--nz-text)}
+.md-memlink-broken,.md-memlink-broken[data-type]{
+  background:transparent !important;color:var(--nz-text-mute) !important;
+  border:1px dashed var(--nz-text-mute);cursor:not-allowed}
+.md-memlink-broken .md-memlink-icon{filter:grayscale(1) opacity(.6)}
+.md-memlink-broken:hover{background:rgba(139,148,158,.08) !important}
 #mem-popover{position:fixed;z-index:300;max-width:560px;min-width:320px;
   max-height:60vh;overflow:auto;background:var(--nz-bg-1);
   border:1px solid var(--nz-border);border-radius:8px;
