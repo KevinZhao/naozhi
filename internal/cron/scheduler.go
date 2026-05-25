@@ -495,9 +495,27 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	}
 }
 
-// NotifyDefault returns the configured fallback IM target so the dashboard can
-// show users where a "notify on completion" toggle will deliver messages.
-func (s *Scheduler) NotifyDefault() NotifyTarget { return s.notifyDefault }
+// NotifyDefault returns the configured fallback IM target so the dashboard
+// can show users where a "notify on completion" toggle will deliver
+// messages. The value is the snapshot captured at NewScheduler time from
+// SchedulerConfig.NotifyDefault — runtime mutation is not supported, so
+// callers can cache the return value for the lifetime of the process.
+//
+// Returns the zero NotifyTarget when no fallback was configured; the
+// dashboard uses NotifyTarget.IsSet() to decide whether to render the
+// toggle hint. The zero value is also what jobs without an explicit
+// Notify target fall back to inside resolveNotifyTarget.
+//
+// Safe to call on a nil *Scheduler: returns the zero NotifyTarget. This
+// matches the nil-safe pattern used by Location() / StartedAt() so the
+// dashboard can render a placeholder during the bootstrap window before
+// the scheduler is wired. R247-CR-9.
+func (s *Scheduler) NotifyDefault() NotifyTarget {
+	if s == nil {
+		return NotifyTarget{}
+	}
+	return s.notifyDefault
+}
 
 // StartedAt 返回 Scheduler 最近一次 Start() 的时刻。用于 missed-schedule
 // 检测的启动抑制窗口。未 Start 前返回零值。
