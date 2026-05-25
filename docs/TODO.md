@@ -1,10 +1,17 @@
-# TODO
+# TODO（FROZEN — 历史归档，自 2026-05-25 起只读）
 
-> 最后更新：2026-05-25 — 详见 `docs/TODO_CHANGELOG.md`
+> **状态**：FROZEN。新 finding 不再写入此文件。
 >
-> **当前规模**：Open ~1124 / Pending ~275 / Done 已搬到 `docs/TODO_ARCHIVE.md`
+> **新流程**：
+> - review agent 跑完 → 产出 `docs/review/R{N}-raw.md` 临时文件
+> - `triage-findings` skill 自动分流 → 真问题 `gh issue create` / godoc/命名归 `docs/cosmetic-backlog.md` / 误报留 audit trail
+> - active backlog 看 GitHub Issues（`label:priority:p0,priority:p1,priority:p2` `is:open`）
 >
-> **最近 3 轮重大动作**（详见 changelog）：
+> **本文件用途**：历史 audit trail，供 grep R{N}-{CAT}-{N} 锚点回溯当时上下文；不再做状态更新（不再标 `[x]` / `[~]`）。
+>
+> **冻结时快照**：Open ~1054 / Paused ~293 / Done ~37。涉及 R215..R248 共 65 个 review round。
+>
+> **最近 3 轮重大动作**（保留作历史）：
 >   - **2026-05-25 R248 cluster 收尾**：14 条同根因归档（PR #348）+ R246-GO-7 jitter Paused re-check + 3 条误报归档（PR #349）
 >   - **2026-05-24 4 个核心架构 refactor**：wshub.go 6-stage split (PR #327, R243-ARCH-2) + spawningKeys spin→chan (PR #329, R243-ARCH-4) + dispatch.Capabilities interface (PR #330, R243-ARCH-10) + AgentLinker interface (PR #331, R239-ARCH-I) + 5 个清理 PR (#342-#346)
 >   - **2026-05-23 cron 大批改**：scheduler.go god-object split → 7 职责文件 (PR #309)
