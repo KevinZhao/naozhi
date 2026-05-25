@@ -55,4 +55,16 @@ func TestDashboardCSP_FrameSrcBlob(t *testing.T) {
 	if !strings.Contains(csp, "img-src 'self' data: blob:") {
 		t.Errorf("CSP img-src must keep `data: blob:` for composer image previews, got %q", csp)
 	}
+
+	// R243-SEC-4 / R244-SEC-P2-4 [REPEAT-3]: dashboard CSP must carry
+	// `require-sri-for script style font` as a forward-compatibility hook.
+	// Today every CDN <script>/<link> injected by dashboard.js (mermaid,
+	// KaTeX) already declares `integrity=`; the directive is therefore a
+	// no-op for naozhi but locks the contract so a future change adding a
+	// CDN asset without SRI fails closed when any browser revives the
+	// withdrawn spec. Pin both `script` and `style` tokens (the original
+	// directive only listed `font`).
+	if !strings.Contains(csp, "require-sri-for script style font") {
+		t.Errorf("CSP must include `require-sri-for script style font` as forward-compat SRI gate (R243-SEC-4 / R244-SEC-P2-4), got %q", csp)
+	}
 }
