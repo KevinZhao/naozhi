@@ -176,20 +176,6 @@ func (s jobSnapshot) labelOrID() string {
 	return s.jobID
 }
 
-// cronNoticePrefix is the IM-notice prefix every cron-originated message
-// shares. Centralised so a future i18n / branding change updates one place
-// instead of scanning %d call sites. R247-CR-5.
-const cronNoticePrefix = "[Cron %s]"
-
-// cronNotice formats an IM-notice payload as "[Cron <label>] <body>" using
-// snap.labelOrID() for the label slot. Use formatCronNoticef when the body
-// itself needs %-format args. R247-CR-5: the prefix had been hand-written at
-// 4 call sites (scheduler_run.go:254/601/721/759) which made operator wording
-// audits / future i18n migrations a multi-edit chore.
-func (s jobSnapshot) cronNotice(body string) string {
-	return fmt.Sprintf(cronNoticePrefix+" %s", s.labelOrID(), body)
-}
-
 // snapshotJob reads j under s.mu so a concurrent SetJobPrompt /
 // UpdateJob cannot tear the read across fields. Always returns a value
 // (never nil); j is dereferenced inside the lock. RLock is sufficient
