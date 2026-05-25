@@ -890,6 +890,14 @@ func (s *Scheduler) TriggerNow(id string) error {
 // holds an old entry, we want the next tick to resolve the currently-registered
 // job rather than fire against a stale pointer whose fields may have diverged
 // from the user's intent.
+//
+// R247-CR-10: tick-dispatch closure routes through executeJobIDIfLive
+// shared with TriggerNow's executeIfNotDeletedOrPaused, so the
+// deleted/paused pre-flight gate stays in one place. A Pause that lands
+// between cron-tick dispatch and our re-lock is honored — PauseJobByID
+// removes the entry via cron.Remove(), so normally this tick wouldn't
+// fire, but robfig/cron may already be mid-dispatch when Remove runs,
+// yielding exactly this race.
 func (s *Scheduler) registerJob(j *Job) error {
 	jobID := j.ID
 	// R247-CR-10: route the scheduled tick through executeIfReadyOpt so the
@@ -900,7 +908,7 @@ func (s *Scheduler) registerJob(j *Job) error {
 	// race (PauseJobByID's cron.Remove vs robfig mid-dispatch) is honoured
 	// by executeIfReadyOpt's paused branch — same Debug log, same skip.
 	entryID, err := s.cron.AddFunc(j.Schedule, func() {
-		s.executeIfReadyOpt(jobID, false)
+		s.executeJobIDIfLive(jobID, false /* viaTriggerNow */, "cron")
 	})
 	if err != nil {
 		return fmt.Errorf("register cron: %w", err)

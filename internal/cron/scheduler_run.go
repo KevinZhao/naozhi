@@ -48,37 +48,32 @@ const cronSlowThreshold = 30 * time.Second
 // silent skips with a Debug log — operators see the intent acked but
 // no run record bumps.
 func (s *Scheduler) executeIfNotDeletedOrPaused(jobID string) {
-	s.executeIfReadyOpt(jobID, true)
+	s.executeJobIDIfLive(jobID, true /* viaTriggerNow */, "TriggerNow")
 }
 
-// executeIfReadyOpt is the parameterised dispatch shared between TriggerNow
-// (manual=true, skips robfig chain wrappers) and registerJob's scheduled
-// tick closure (manual=false). R247-CR-10: registerJob's closure used to
-// hand-build the same {RLock → check exists/paused → executeOpt} sequence;
-// folding it through one entry point keeps quota / circuit-breaker insertions
-// to a single edit.
-//
-// The Debug-log "scope" string ("TriggerNow:" vs "cron:") is the only
-// behavioural difference and is preserved so log analysers that distinguish
-// scheduled-tick races from manual-trigger races stay green.
-func (s *Scheduler) executeIfReadyOpt(jobID string, manual bool) {
-	scope := "cron"
-	if manual {
-		scope = "TriggerNow"
-	}
+// executeJobIDIfLive is the shared lookup-and-dispatch primitive used by
+// both TriggerNow (executeIfNotDeletedOrPaused) and the registerJob
+// AddFunc closure (R247-CR-10). Both paths previously open-coded the
+// RLock → exists/paused check → executeOpt fan-out with only the
+// viaTriggerNow flag and Debug log subject differing; the duplicated
+// closure made it easy to drift one path's pre-flight gate without the
+// other. logSubject is the caller-supplied prefix used in skip Debug
+// logs so operators distinguish "TriggerNow:" vs "cron:" in the
+// shutdown / pause race traces.
+func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubject string) {
 	s.mu.RLock()
 	cur, ok := s.jobs[jobID]
 	paused := ok && cur.Paused
 	s.mu.RUnlock()
 	if !ok {
-		slog.Debug(scope+": job deleted before execute, skipping", "job_id", jobID)
+		slog.Debug(logSubject+": job deleted before execute, skipping", "job_id", jobID)
 		return
 	}
 	if paused {
-		slog.Debug(scope+": job paused concurrently, skipping", "job_id", jobID)
+		slog.Debug(logSubject+": job paused concurrently, skipping", "job_id", jobID)
 		return
 	}
-	s.executeOpt(cur, manual)
+	s.executeOpt(cur, viaTriggerNow)
 }
 
 // jobInflight returns a lazily created *runInflight per job ID. The
