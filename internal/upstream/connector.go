@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -71,6 +72,17 @@ var circuitBreakerBackoff = 5 * time.Minute
 // match on, not a scatter of stringly-typed tokens. RNEW-005.
 const reasonSessionReset = "session_reset"
 
+// discoverFn is the signature stored behind Connector.discoverFunc.
+// Aliased to a named type so atomic.Pointer can box it (Go does not
+// allow `atomic.Pointer[func(...)]` without an intermediate name) and
+// to give SetDiscoverFunc / loadDiscoverFunc a single source of truth
+// for the contract.
+type discoverFn func() (json.RawMessage, error)
+
+// previewFn is the signature stored behind Connector.previewFunc.
+// Same atomic.Pointer rationale as discoverFn above.
+type previewFn func(sessionID string) (json.RawMessage, error)
+
 // Connector dials a primary naozhi and serves it as a reverse-connected node.
 // Run on machines behind NAT that cannot be reached by the primary directly.
 type Connector struct {
@@ -89,8 +101,17 @@ type Connector struct {
 	claudeDir        string
 	hostname         string
 	defaultWorkspace string // used as allowedRoot for incoming workspace overrides
-	discoverFunc     func() (json.RawMessage, error)
-	previewFunc      func(sessionID string) (json.RawMessage, error)
+	// R246-ARCH-6: discoverFunc / previewFunc were plain function fields
+	// previously, with the wiring contract that "main.go is single-
+	// threaded so no reader/writer race exists". Storing under
+	// atomic.Pointer instead removes the load-bearing comment and lets
+	// the race detector enforce the invariant — any future caller that
+	// resets the hook from a goroutine post-Run is now well-defined
+	// instead of UB. Read path is loadDiscoverFunc / loadPreviewFunc;
+	// nil-safe because atomic.Pointer.Load returns the zero value (nil
+	// *T) when never stored.
+	discoverFunc atomic.Pointer[discoverFn]
+	previewFunc  atomic.Pointer[previewFn]
 }
 
 // New creates a Connector. projMgr may be nil if projects are not configured.
@@ -121,27 +142,61 @@ func New(cfg *config.UpstreamConfig, router *session.Router, projMgr *project.Ma
 
 // SetDiscoverFunc sets a callback that returns discovered sessions as JSON.
 //
-// Wiring contract: this MUST be called once during startup wiring (typically
-// from cmd/naozhi/main.go after the discovery subsystem is built) BEFORE
-// Connector.Run starts pumping reverse-RPC requests. The field is plain
-// (no atomic / mutex) — concurrent SetDiscoverFunc and handleRequest racing
-// over the same Connector would be a data race and is undefined behaviour.
-// Tests that rebuild a Connector per case are unaffected; production startup
-// is single-threaded through main.go so the read-after-write happens-before
-// is naturally satisfied. R233B-ARCH-9 archive anchor: when this field
-// eventually moves out of upstream into a server-supplied handler map,
-// drop both setters and let the constructor accept the funcs directly so
-// the wiring contract is enforced by the type system.
+// Originally this was a plain field write with the wiring contract that
+// "main.go startup is single-threaded so no reader/writer race exists";
+// R246-ARCH-6 promoted the field to atomic.Pointer so the race detector
+// enforces the invariant rather than relying on a load-bearing comment.
+// Concurrent SetDiscoverFunc / handleRequest sequences are now well-
+// defined: the most recent Store wins, the read path always sees a
+// fully-published function value (or nil if never set).
+//
+// Calling with a nil fn clears the callback (loadDiscoverFunc returns
+// nil and the RPC fast-path returns an empty array). Tests that rebuild
+// a Connector per case are unaffected. R233B-ARCH-9 archive anchor:
+// when this hook eventually moves out of upstream into a server-
+// supplied handler map, drop both setters and let the constructor
+// accept the funcs directly so the wiring contract is enforced by the
+// type system.
 func (c *Connector) SetDiscoverFunc(fn func() (json.RawMessage, error)) {
-	c.discoverFunc = fn
+	if fn == nil {
+		c.discoverFunc.Store(nil)
+		return
+	}
+	boxed := discoverFn(fn)
+	c.discoverFunc.Store(&boxed)
 }
 
 // SetPreviewFunc sets a callback that returns conversation history for a discovered session.
 //
-// Same wiring contract as SetDiscoverFunc — call once at startup before
-// Run begins. See SetDiscoverFunc godoc.
+// Same atomic.Pointer wiring shape as SetDiscoverFunc — see SetDiscoverFunc
+// godoc. Calling with nil clears the callback.
 func (c *Connector) SetPreviewFunc(fn func(sessionID string) (json.RawMessage, error)) {
-	c.previewFunc = fn
+	if fn == nil {
+		c.previewFunc.Store(nil)
+		return
+	}
+	boxed := previewFn(fn)
+	c.previewFunc.Store(&boxed)
+}
+
+// loadDiscoverFunc returns the current discover callback, or nil if
+// none was installed. Read path is lock-free; pair with SetDiscoverFunc
+// for race-free wiring.
+func (c *Connector) loadDiscoverFunc() discoverFn {
+	if p := c.discoverFunc.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+// loadPreviewFunc returns the current preview callback, or nil if
+// none was installed. Read path is lock-free; pair with SetPreviewFunc
+// for race-free wiring.
+func (c *Connector) loadPreviewFunc() previewFn {
+	if p := c.previewFunc.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // Run connects to the primary and serves requests. Reconnects on disconnect.

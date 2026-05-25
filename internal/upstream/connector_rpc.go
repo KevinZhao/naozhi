@@ -59,8 +59,8 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		return marshalResult(c.projMgr.All())
 
 	case "fetch_discovered":
-		if c.discoverFunc != nil {
-			return c.discoverFunc()
+		if fn := c.loadDiscoverFunc(); fn != nil {
+			return fn()
 		}
 		return marshalResult([]any{})
 
@@ -81,8 +81,8 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if p.SessionID != "" && !discovery.IsValidSessionID(p.SessionID) {
 			return nil, fmt.Errorf("invalid session_id format")
 		}
-		if c.previewFunc != nil {
-			return c.previewFunc(p.SessionID)
+		if fn := c.loadPreviewFunc(); fn != nil {
+			return fn(p.SessionID)
 		}
 		return marshalResult([]any{})
 
