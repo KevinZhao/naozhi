@@ -232,6 +232,20 @@ type DispatcherConfig struct {
 	// and future hooks add an interface method instead of a new closure +
 	// nil-fallback line. This field is still honoured for backward
 	// compatibility but new code should set Capabilities directly.
+	//
+	// Removal trigger (#374): production has been Capabilities-only since
+	// R243-ARCH-10 (server.go::Server.Start uses serverCaps; cmd/* and
+	// internal/platform/* never reference *Fn). The remaining call sites
+	// are tests (internal/dispatch/dispatch_test.go::buildDispatcher,
+	// internal/server/server_test.go and capability-adapter coverage in
+	// dispatch_test.go::TestNewDispatcher_*Capabilities*). Once those tests
+	// migrate to dispatch.closureCapabilities literals or a small test
+	// helper, ReplyFooterFn / SendFn / TakeoverFn plus the
+	// closureCapabilities adapter and the legacy-detection branch in
+	// NewDispatcher (the "if cfg.SendFn != nil ..." block and the
+	// Capabilities-and-*Fn-both-set slog.Warn) can be removed in one
+	// pass. Target: 2026-Q3, gated on those test migrations landing.
+	// See R248-ARCH-3 in docs/TODO.md (linked from issue #374).
 	ReplyFooterFn func(backendID string) string
 
 	NoOutputTimeout       time.Duration
@@ -242,12 +256,14 @@ type DispatcherConfig struct {
 	// SendFn forwards a turn payload to the session router after guard /
 	// queue gating has succeeded. Production wires Server.sendWithBroadcast.
 	//
-	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn.
+	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn
+	// for the consolidated removal trigger (#374).
 	SendFn func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
 	// TakeoverFn is the optional auto-takeover hook invoked on the first
 	// message of every chat. nil is treated as "return false".
 	//
-	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn.
+	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn
+	// for the consolidated removal trigger (#374).
 	TakeoverFn func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
 
 	// AllowMissingSender opts out of the constructor-time "Send must be
