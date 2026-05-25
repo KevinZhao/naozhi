@@ -64,6 +64,50 @@ func putACPEncBuf(e *acpEncBuf) {
 	acpEncPool.Put(e)
 }
 
+// acpB64BufPool reuses []byte scratch buffers used by base64 encoding of
+// per-image payloads in WriteMessage. R247-PERF-17: replaces the
+// base64.StdEncoding.EncodeToString hot path which allocated an encode
+// buffer + a separate string copy per image. AppendEncode lets us reuse
+// the encode buffer across calls; the final string conversion still
+// allocates (Data field is `string` — changing it to []byte would shift
+// the alloc into encoding/json's marshaller without net savings) but the
+// encode-side buffer is now amortised across the process lifetime.
+//
+// Multi-image turns (4-5 attached screenshots × ~400KB base64 each) are
+// the realistic worst case; a single shared pool entry with a pre-grown
+// 16KB capacity covers the common 1-image case in zero growths and
+// degrades gracefully to grow-and-discard for the outlier large-image
+// case (see acpB64BufMaxCap).
+var acpB64BufPool = sync.Pool{
+	New: func() any {
+		// 16KB seeds cover small screenshots without growing; larger
+		// payloads cause the slice to grow naturally.
+		b := make([]byte, 0, 16*1024)
+		return &b
+	},
+}
+
+// acpB64BufMaxCap matches acpEncBufMaxCap (64KB) — buffers that grew past
+// this on a multi-MB outlier image are dropped on Put rather than retained
+// forever.
+const acpB64BufMaxCap = 64 * 1024
+
+// encodeImageBase64 returns a base64-encoded string of img using a pooled
+// scratch buffer for the encode step. The returned string is freshly
+// allocated (mandatory for the JSON marshaller's `Data string` field) but
+// the encode buffer is recycled. R247-PERF-17.
+func encodeImageBase64(img []byte) string {
+	bp := acpB64BufPool.Get().(*[]byte)
+	buf := (*bp)[:0]
+	buf = base64.StdEncoding.AppendEncode(buf, img)
+	out := string(buf)
+	if cap(buf) <= acpB64BufMaxCap {
+		*bp = buf[:0]
+		acpB64BufPool.Put(bp)
+	}
+	return out
+}
+
 // toolJSONMaxRunes caps the rune count of tool_call input/output payloads
 // stuffed into Event.ToolCall before they are forwarded to dashboard / IM
 // renderers. 16 KiB runes is generous enough to hold a typical Read /
@@ -359,12 +403,15 @@ func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData)
 	hasText := text != ""
 	prompt := make([]acpPromptBlock, 0, len(images)+1)
 	for _, img := range images {
+		// R247-PERF-17: encodeImageBase64 reuses a pooled []byte scratch
+		// for the AppendEncode step, halving the per-image allocation
+		// vs the prior base64.StdEncoding.EncodeToString call.
 		prompt = append(prompt, acpPromptBlock{
 			Type: "image",
 			Source: &acpImageSource{
 				Type:      "base64",
 				MediaType: img.MimeType,
-				Data:      base64.StdEncoding.EncodeToString(img.Data),
+				Data:      encodeImageBase64(img.Data),
 			},
 		})
 	}
