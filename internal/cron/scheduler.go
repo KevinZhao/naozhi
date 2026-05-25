@@ -281,16 +281,19 @@ type Scheduler struct {
 // maxJobsHardCap caps user-configurable MaxJobs to prevent accidental
 // overload. 500 jobs ≈ 500 tick timers; well within robfig/cron's tested
 // scale, but higher values tend to indicate a config mistake.
+// See docs/rfc/cron-v2-polish.md for sizing rationale.
 const maxJobsHardCap = 500
 
 // defaultMaxJobs is the fallback for SchedulerConfig.MaxJobs when the operator
 // leaves it zero/negative. Sized for typical single-tenant deployments; the
 // hard cap above protects against runaway configs.
+// See docs/rfc/cron-v2-polish.md for sizing rationale.
 const defaultMaxJobs = 50
 
 // defaultExecTimeout bounds a single job execution when the operator leaves
 // SchedulerConfig.ExecTimeout zero. 5 min covers nearly all CLI turn budgets
 // without leaving runaway jobs holding the per-job overlap gate forever.
+// See docs/rfc/cron-v2-polish.md for sizing rationale.
 const defaultExecTimeout = 5 * time.Minute
 
 // DefaultMaxJobsPerChat bounds how many cron jobs a single chat (platform+
@@ -308,6 +311,7 @@ const defaultExecTimeout = 5 * time.Minute
 // (maxProjectExempt / maxSysExempt) and can no longer be starved by a
 // noisy cron chat. DefaultMaxJobsPerChat still bounds per-chat usage so
 // one loud group cannot saturate the cron quota by itself.
+// See docs/rfc/cron-v2-polish.md for sizing rationale.
 const DefaultMaxJobsPerChat = 10
 
 // workDirReachable reports whether workDir exists and resolves to a
