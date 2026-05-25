@@ -43,91 +43,82 @@ const (
 )
 
 // Server is the HTTP entry point for Naozhi.
+//
+// Field-block contract (server-split-phase4-design.md §五 / §六.6):
+// Each field below carries `// 读写: <files>` to indicate which non-test
+// files in this package access it. New fields MUST add this annotation.
+// Phase 4-5 will redistribute most of these into wshub Options, dashboard
+// sub-packages, or routes.go locals. Verification rule:
+//
+//	awk '/^type Server struct/,/^}$/' server.go | grep -cE '^\s+[a-zA-Z_]+ '
+//
+// must equal the field count documented in
+// docs/design/server-split-phase4-baseline.md §2 (currently 47).
 type Server struct {
-	addr           string
-	mux            *http.ServeMux
-	platforms      map[string]platform.Platform
-	router         *session.Router
-	dedup          *platform.Dedup
-	sessionGuard   *session.Guard
-	msgQueue       *dispatch.MessageQueue
-	startedAt      time.Time
-	agents         map[string]session.AgentOpts
-	agentCommands  map[string]string
-	scheduler      *cron.Scheduler
-	backendTag     string // e.g., "cc" or "kiro", appended to replies
-	dashboardToken string // optional bearer token for dashboard API
-	// debugMode gates /api/debug/pprof and /api/debug/vars; both 404 when
-	// false. Default off so a stolen token cannot pull goroutine stacks or
-	// memstats fingerprints. Operators set server.debug_mode=true only
-	// during a profiling session. R244-SEC-P3-1 [REPEAT-3].
-	debugMode         bool
-	hub               *Hub // WebSocket hub
-	nodes             map[string]node.Conn
-	reverseNodeServer *node.ReverseServer
-	nodesMu           sync.RWMutex
-	claudeDir         string // path to ~/.claude for session discovery
-	projectMgr        *project.Manager
-	// resolver centralises session-key → opts derivation. Constructed
-	// once in buildServer from (agents, project.NewDataSource(projectMgr))
-	// and shared across Dispatcher / Hub / ProjectHandlers. Guaranteed
-	// non-nil in production wiring; tests that bypass buildServer may
-	// leave it unset (callers fall back to legacy inlined merge).
-	resolver       *session.KeyResolver
-	workspaceName  string
-	allowedRoot    string             // /cd is restricted to paths under this directory (used by Hub)
-	nodeCache      *node.CacheManager // background-cached remote node data
-	discoveryCache *discoveryCache    // background-cached local discovery results
+	// ── HTTP entry (Phase 5: keep) ─────────────────────
+	addr      string          // 读写: server.go
+	mux       *http.ServeMux  // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
+	startedAt time.Time       // 读写: server.go
+	onReady   func()          // 读写: server.go (called after listener is bound)
+	appCtx    context.Context // 读写: server.go, dashboard.go (HubOptions.ParentCtx)
 
-	// Extracted handler groups
-	auth         *AuthHandlers
-	cronH        *CronHandlers
-	transcribeH  *TranscribeHandler
-	nodeAccess   *nodeAccessor
-	discoveryH   *DiscoveryHandlers
-	projectH     *ProjectHandlers
-	sessionH     *SessionHandlers
-	healthH      *HealthHandler
-	sendH        *SendHandler
-	cliH         *CLIBackendsHandler
-	scratchH     *ScratchHandler
-	memoryH      *MemoryHandler
-	agentEventsH *AgentEventsHandlers
+	// ── core deps (Phase 5: keep) ──────────────────────
+	router     *session.Router  // 读写: server.go, dashboard.go, dashboard_system.go, send.go, takeover.go, consumer.go
+	scheduler  *cron.Scheduler  // 读写: server.go, dashboard.go, dashboard_cron.go, dashboard_cron_transcript.go, wshub.go
+	hub        *Hub             // 读写: server.go, dashboard.go, send.go (WebSocket hub)
+	projectMgr *project.Manager // 读写: server.go, dashboard.go, project_api.go, project_files.go
 
-	// scratchPool manages ephemeral "aside" sessions backing the dashboard
-	// preview drawer. Separate from router.sessions because scratches must
-	// not appear in the sidebar, persist across restarts, or tie up maxProcs
-	// beyond their 10-minute idle TTL. Owned by Server so Shutdown can stop
-	// the sweeper alongside the rest of the teardown chain.
-	scratchPool *session.ScratchPool
+	// ── multi-node (Phase 5: keep) ─────────────────────
+	nodes             map[string]node.Conn // 读写: server.go, dashboard.go
+	reverseNodeServer *node.ReverseServer  // 读写: server.go, dashboard.go
+	nodesMu           sync.RWMutex         // 读写: server.go, dashboard.go (shared with Hub.nodesMu)
 
-	// sysessionMgr drives system-daemon Tick scheduling (docs/rfc/system-session.md).
-	// nil when disabled in config; the GET /api/system/daemons endpoint
-	// returns an empty list in that case.
-	sysessionMgr *sysession.Manager
+	// ── Phase 5: → routes.go local variables ───────────
+	auth         *AuthHandlers        // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
+	cronH        *CronHandlers        // 读写: server.go, dashboard.go
+	transcribeH  *TranscribeHandler   // 读写: dashboard.go (ctor only in server.go)
+	nodeAccess   *nodeAccessor        // 读写: server.go, dashboard.go
+	discoveryH   *DiscoveryHandlers   // 读写: server.go, dashboard.go
+	projectH     *ProjectHandlers     // 读写: server.go, dashboard.go
+	sessionH     *SessionHandlers     // 读写: server.go, dashboard.go
+	healthH      *HealthHandler       // 读写: server.go (ctor only)
+	sendH        *SendHandler         // 读写: dashboard.go (ctor only in server.go)
+	cliH         *CLIBackendsHandler  // 读写: server.go, dashboard.go
+	scratchH     *ScratchHandler      // 读写: dashboard.go (ctor only in server.go)
+	memoryH      *MemoryHandler       // 读写: dashboard.go (ctor only in server.go)
+	agentEventsH *AgentEventsHandlers // 读写: server.go, dashboard.go
 
-	// Watchdog kill counters — incremented atomically, exposed via /health and /api/sessions.
-	watchdogNoOutputKills atomic.Int64
-	watchdogTotalKills    atomic.Int64
+	// ── Phase 5: → NewHub Options ──────────────────────
+	dedup           *platform.Dedup              // 读写: server.go (ctor only)
+	sessionGuard    *session.Guard               // 读写: server.go, dashboard.go
+	msgQueue        *dispatch.MessageQueue       // 读写: server.go, dashboard.go (R242-GO-10: → wshub.MessageEnqueuer interface)
+	agents          map[string]session.AgentOpts // 读写: server.go, dashboard.go, dashboard_session.go
+	agentCommands   map[string]string            // 读写: server.go, dashboard.go
+	dashboardToken  string                       // 读写: server.go, dashboard.go, dashboard_auth.go
+	allowedRoot     string                       // 读写: server.go, dashboard.go (also Hub.allowedRoot — merge in Phase 4)
+	noOutputTimeout time.Duration                // 读写: server.go (timeout error messages)
+	totalTimeout    time.Duration                // 读写: server.go
 
-	// Watchdog configuration stored for user-facing timeout error messages.
-	noOutputTimeout time.Duration
-	totalTimeout    time.Duration
+	// ── Phase 5: → dashboard/* sub-packages ────────────
+	claudeDir      string               // 读写: server.go, takeover.go, discovery_cache.go, dashboard_cron_transcript.go, dashboard_discovered.go, dashboard_session.go
+	workspaceName  string               // 读写: server.go (ctor only; copied into SessionHandlers/HealthHandler)
+	discoveryCache *discoveryCache      // 读写: server.go (background-cached local discovery results)
+	scratchPool    *session.ScratchPool // 读写: server.go, dashboard.go, wshub.go (ephemeral aside sessions for preview drawer)
+	sysessionMgr   *sysession.Manager   // 读写: dashboard.go, dashboard_system.go (system-daemon Tick scheduling)
 
-	onReady func() // called after listener is bound
+	// ── Phase 5: → server-internal reorg ───────────────
+	debugMode bool                 // 读写: dashboard.go (gates /api/debug/pprof and /api/debug/vars; R244-SEC-P3-1)
+	resolver  *session.KeyResolver // 读写: server.go, dashboard.go (session-key → opts derivation; → routes.go local)
+	nodeCache *node.CacheManager   // 读写: server.go (background-cached remote node data; → server/nodecache.go)
 
-	// knownNodes holds all configured node IDs → display names, including
-	// reverse nodes that may currently be disconnected. Never mutated after startup.
-	knownNodes map[string]string
+	// ── Phase 5: → metrics package ─────────────────────
+	watchdogNoOutputKills atomic.Int64 // 读写: server.go (exposed via /health and /api/sessions)
+	watchdogTotalKills    atomic.Int64 // 读写: server.go
 
-	// appCtx is the top-level application context set by Start before it
-	// wires dependent subsystems (hub, caches, scan loops). Forwarded into
-	// HubOptions.ParentCtx so parent-ctx cancellation propagates to Hub's
-	// send/push goroutines even if a future code path forgets to call
-	// hub.Shutdown() (CTX1). Zero value (nil) in headless wiring / tests
-	// that construct the server via New() without Start(); NewHub treats
-	// nil as context.Background() to preserve legacy behaviour.
-	appCtx context.Context
+	// ── Phase 5: pending evaluation (delete after grep verifies no usage) ─
+	platforms  map[string]platform.Platform // 读写: server.go (likely routes-registration-only)
+	backendTag string                       // 读写: server.go (ctor only; copied into SessionHandlers; v0.4 §六.6 待评估 → dispatch.BackendTag())
+	knownNodes map[string]string            // 读写: server.go (configured node IDs → display names; merge into nodes map)
 }
 
 // Sentinel errors returned by validateWorkspace. Handlers map these onto

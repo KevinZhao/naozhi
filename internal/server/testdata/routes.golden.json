@@ -1,0 +1,272 @@
+[
+  {
+    "method": "POST",
+    "path": "/api/auth/login",
+    "handler_type": "*AuthHandlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/logout",
+    "handler_type": "*AuthHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/cli/backends",
+    "handler_type": "*CLIBackendsHandler"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/cron",
+    "handler_type": "*CronHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/cron",
+    "handler_type": "*CronHandlers"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/cron",
+    "handler_type": "*CronHandlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/cron",
+    "handler_type": "*CronHandlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/cron/pause",
+    "handler_type": "*CronHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/cron/preview",
+    "handler_type": "*CronHandlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/cron/resume",
+    "handler_type": "*CronHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/cron/runs",
+    "handler_type": "*CronHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/cron/runs/{run_id}",
+    "handler_type": "*CronHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/cron/runs/{run_id}/transcript",
+    "handler_type": "*CronHandlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/cron/trigger",
+    "handler_type": "*CronHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/debug/pprof",
+    "handler_type": "*AuthHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/debug/pprof/",
+    "handler_type": "*AuthHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/debug/vars",
+    "handler_type": "*AuthHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/discovered",
+    "handler_type": "*DiscoveryHandlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/discovered/close",
+    "handler_type": "*DiscoveryHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/discovered/preview",
+    "handler_type": "*DiscoveryHandlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/discovered/takeover",
+    "handler_type": "*DiscoveryHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/memory/{slug}",
+    "handler_type": "*MemoryHandler"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects",
+    "handler_type": "*ProjectHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/config",
+    "handler_type": "*ProjectHandlers"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/projects/config",
+    "handler_type": "*ProjectHandlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/projects/favorite",
+    "handler_type": "*ProjectHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/projects/file",
+    "handler_type": "*ProjectHandlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/projects/files/exists",
+    "handler_type": "*ProjectHandlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/projects/planner/restart",
+    "handler_type": "*ProjectHandlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/scratch/open",
+    "handler_type": "*ScratchHandler"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/scratch/{id}",
+    "handler_type": "*ScratchHandler"
+  },
+  {
+    "method": "POST",
+    "path": "/api/scratch/{id}/promote",
+    "handler_type": "*ScratchHandler"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/sessions",
+    "handler_type": "*SessionHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/sessions",
+    "handler_type": "*SessionHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/sessions/agent_events",
+    "handler_type": "*AgentEventsHandlers"
+  },
+  {
+    "method": "GET",
+    "path": "/api/sessions/attachment",
+    "handler_type": "*SendHandler"
+  },
+  {
+    "method": "GET",
+    "path": "/api/sessions/events",
+    "handler_type": "*SessionHandlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/sessions/interrupt",
+    "handler_type": "*SessionHandlers"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/sessions/label",
+    "handler_type": "*SessionHandlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/sessions/resume",
+    "handler_type": "*SessionHandlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/sessions/send",
+    "handler_type": "*SendHandler"
+  },
+  {
+    "method": "GET",
+    "path": "/api/sessions/tool_result",
+    "handler_type": "*AgentEventsHandlers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/sessions/upload",
+    "handler_type": "*SendHandler"
+  },
+  {
+    "method": "GET",
+    "path": "/api/system/daemons",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "POST",
+    "path": "/api/system/labels/clear-origin",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "POST",
+    "path": "/api/transcribe",
+    "handler_type": "*TranscribeHandler"
+  },
+  {
+    "method": "GET",
+    "path": "/dashboard",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "GET",
+    "path": "/health",
+    "handler_type": "*HealthHandler"
+  },
+  {
+    "method": "GET",
+    "path": "/manifest.json",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "GET",
+    "path": "/static/agent_view.js",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "GET",
+    "path": "/static/dashboard.js",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "GET",
+    "path": "/sw.js",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "GET",
+    "path": "/ws",
+    "handler_type": "*Hub"
+  },
+  {
+    "method": "GET",
+    "path": "/ws-node",
+    "handler_type": "*node.ReverseServer"
+  }
+]

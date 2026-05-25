@@ -1,0 +1,49 @@
+file_size:
+    - path: internal/server/dashboard_session.go
+      current: 1514
+      limit: 800
+      until_phase: 3e
+    - path: internal/server/dashboard_cron.go
+      current: 1418
+      limit: 800
+      until_phase: "1"
+    - path: internal/server/server.go
+      current: 1309
+      limit: 500
+      until_phase: "5"
+    - path: internal/server/project_files.go
+      current: 1302
+      limit: 500
+      until_phase: "2"
+    - path: internal/server/dashboard_send.go
+      current: 1214
+      limit: 800
+      until_phase: 3f
+    - path: internal/server/dashboard_cron_transcript.go
+      current: 909
+      limit: 800
+      until_phase: "1"
+    - path: internal/server/dashboard.go
+      current: 731
+      limit: 500
+      until_phase: "5"
+    - path: internal/server/send.go
+      current: 699
+      limit: 500
+      until_phase: 3f
+    - path: internal/server/agent_tailer.go
+      current: 655
+      limit: 500
+      until_phase: "4"
+    - path: internal/server/wshub.go
+      current: 579
+      limit: 500
+      until_phase: "4"
+handle_baseline:
+    - Server.handleAgentViewJS
+    - Server.handleClearLabelOrigin
+    - Server.handleDashboard
+    - Server.handleDashboardJS
+    - Server.handleManifest
+    - Server.handleSW
+    - Server.handleSystemDaemons
