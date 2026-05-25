@@ -678,30 +678,44 @@ func (s *Scheduler) EnsureStub(key string) bool {
 	return true
 }
 
-// stopBudget is the overall deadline Scheduler.Stop() will spend waiting on
-// cron.Stop + triggerWG before proceeding to save. Shared between both waits
-// (not doubled per wait) so a production deployment with execTimeout=3600s
-// cannot pin restart for ≈2 h — the prior two-budget design had a worst case
-// of 2×(execTimeout+5s). Aligned with session.ShutdownTimeout (30s) so both
-// subsystems agree on the upper bound systemd sees.
-//
-// Package-level var (not const) so tests can shorten it to milliseconds
-// without race-racing a Stop call with real wall-clock timeouts.
-// R49-REL-CRON-STOP-BUDGET.
-var stopBudget = 30 * time.Second
+// defaultStopBudget is the production overall deadline Scheduler.Stop()
+// will spend waiting on cron.Stop + triggerWG before proceeding to save.
+// Shared between both waits (not doubled per wait) so a production
+// deployment with execTimeout=3600s cannot pin restart for ≈2 h — the
+// prior two-budget design had a worst case of 2×(execTimeout+5s).
+// Aligned with session.ShutdownTimeout (30s) so both subsystems agree on
+// the upper bound systemd sees. R49-REL-CRON-STOP-BUDGET.
+const defaultStopBudget = 30 * time.Second
 
 // gcWaitBudget bounds the cold-start GC goroutine wait in Stop(). Smaller
-// than stopBudget because trimAll's IO is short-lived (ReadDir + N Removes);
-// a wedge here means a stuck filesystem and we'd rather skip the wait than
-// pin systemd TimeoutStopSec.
+// than defaultStopBudget because trimAll's IO is short-lived
+// (ReadDir + N Removes); a wedge here means a stuck filesystem and we'd
+// rather skip the wait than pin systemd TimeoutStopSec.
 //
-// R247-CR-18 (R246-CR-012 same-root): kept as const — no test or production
-// site swaps this value, so the package-level mutable var pattern (still
-// applied to stopBudget below for fast shutdown tests) was unwarranted here
-// and only invited racy parallel-test reads. If a future test ever needs to
-// shorten this, prefer threading it through SchedulerConfig.GCWaitBudget so
-// the scoping remains per-instance instead of package-global.
+// R247-CR-18: kept as a const because no production / test path needs to
+// shorten it. If you find yourself wanting to override per-test, use a
+// `*time.Timer` injected via a Scheduler field instead of reintroducing
+// a package-level var — package vars under t.Parallel races silently.
 const gcWaitBudget = 5 * time.Second
+
+// stopBudget is the active stop budget used by Scheduler.Stop(). Tests
+// MUST mutate it only through WithStopBudget so the var swap is paired
+// with a t.Cleanup restore — direct writes from t.Parallel tests would
+// race a concurrent Stop on another Scheduler instance with real
+// wall-clock timeouts.
+var stopBudget = defaultStopBudget
+
+// WithStopBudget shortens stopBudget for the duration of the test and
+// returns a restore func intended for t.Cleanup. Centralising the swap
+// here keeps the racy direct-write pattern off the call sites and gives
+// future maintainers a single seam to migrate to a Scheduler-field
+// design (the long-term direction noted on gcWaitBudget) without
+// touching every test. R247-CR-18.
+func WithStopBudget(d time.Duration) func() {
+	orig := stopBudget
+	stopBudget = d
+	return func() { stopBudget = orig }
+}
 
 // Stop halts the scheduler and saves state. It waits for both scheduled jobs
 // (drained by s.cron.Stop) and any TriggerNow-spawned goroutines before
@@ -823,7 +837,18 @@ func (s *Scheduler) Stop() {
 // deleteJobLocked. Caller MUST NOT hold s.mu — router.Reset re-enters
 // router state and its notifyChange callback may take s.mu. Safe on a
 // nil router (tests). R240-GO-1.
+//
+// R247-GO-11: also defensive against a nil receiver. Sibling getters
+// (StartedAt / KnownSessionIDs) already short-circuit on a nil
+// *Scheduler so test fixtures can construct a partial Scheduler and
+// invoke deletion paths without dereferencing s. Without this guard a
+// test calling DeleteJobByID on a zero-value scheduler — or production
+// code that has not yet wired router — would NPE on s.router access
+// rather than returning quietly.
 func (s *Scheduler) resetRouterStub(jobID string) {
+	if s == nil {
+		return
+	}
 	if s.router == nil {
 		return
 	}
@@ -844,19 +869,20 @@ func (s *Scheduler) resetRouterStub(jobID string) {
 // visible without silently demoting them.
 type slogPrintfLogger struct{}
 
-// cronPanicMarker / cronRecoveredMarker are the substrings whose presence in
-// a robfig/cron Printf line indicate a recovered-panic event (vs. a generic
-// schedule warning). Named here rather than inlined as string literals so:
+// Recovery markers scanned in robfig/cron-emitted log lines to escalate to
+// slog.Error rather than slog.Warn. Pulled out as named consts (R247-CR-23)
+// so call-site readers see WHAT we look for and WHY in one place — the
+// previous inline `strings.Contains(msg, "panic") || ...` reads as a
+// negative assertion ("if this is a panic line") that obscured the
+// upstream-stability rationale baked into the comment.
 //
-//   - the positive-intent meaning ("this line came from chain.go's Recoverer")
-//     is encoded in the identifier, not the negative scan reading;
-//   - upstream library wording shifts only require updating the const list;
-//   - tests can assert the same vocabulary the matcher uses.
-//
-// "panic" matches the current chain.go:30 "cron: panic running job:" prefix;
-// "recovered" is the stable fallback marker if upstream rewords (e.g. moves
-// to "cron: recovered from panic"). Both are case-sensitive, matching the
-// upstream string literal exactly. R247-CR-23 (R246-CR-016 follow-up).
+// Both markers are matched: robfig/cron's recover chain currently emits
+// recovery messages containing "panic" (chain.go: `cron: panic running
+// job: %v\n%s`). "recovered" is the upstream-stability fallback — if the
+// library renames the message we still surface as Error rather than
+// silently demoting a real fault to Warn. Keep both even when one
+// becomes redundant; the cost is one extra strings.Contains scan per
+// emitted line, dwarfed by Error path's slog overhead.
 const (
 	cronPanicMarker     = "panic"
 	cronRecoveredMarker = "recovered"

@@ -48,37 +48,32 @@ const cronSlowThreshold = 30 * time.Second
 // silent skips with a Debug log — operators see the intent acked but
 // no run record bumps.
 func (s *Scheduler) executeIfNotDeletedOrPaused(jobID string) {
-	s.executeIfReadyOpt(jobID, true)
+	s.executeJobIDIfLive(jobID, true /* viaTriggerNow */, "TriggerNow")
 }
 
-// executeIfReadyOpt is the parameterised dispatch shared between TriggerNow
-// (manual=true, skips robfig chain wrappers) and registerJob's scheduled
-// tick closure (manual=false). R247-CR-10: registerJob's closure used to
-// hand-build the same {RLock → check exists/paused → executeOpt} sequence;
-// folding it through one entry point keeps quota / circuit-breaker insertions
-// to a single edit.
-//
-// The Debug-log "scope" string ("TriggerNow:" vs "cron:") is the only
-// behavioural difference and is preserved so log analysers that distinguish
-// scheduled-tick races from manual-trigger races stay green.
-func (s *Scheduler) executeIfReadyOpt(jobID string, manual bool) {
-	scope := "cron"
-	if manual {
-		scope = "TriggerNow"
-	}
+// executeJobIDIfLive is the shared lookup-and-dispatch primitive used by
+// both TriggerNow (executeIfNotDeletedOrPaused) and the registerJob
+// AddFunc closure (R247-CR-10). Both paths previously open-coded the
+// RLock → exists/paused check → executeOpt fan-out with only the
+// viaTriggerNow flag and Debug log subject differing; the duplicated
+// closure made it easy to drift one path's pre-flight gate without the
+// other. logSubject is the caller-supplied prefix used in skip Debug
+// logs so operators distinguish "TriggerNow:" vs "cron:" in the
+// shutdown / pause race traces.
+func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubject string) {
 	s.mu.RLock()
 	cur, ok := s.jobs[jobID]
 	paused := ok && cur.Paused
 	s.mu.RUnlock()
 	if !ok {
-		slog.Debug(scope+": job deleted before execute, skipping", "job_id", jobID)
+		slog.Debug(logSubject+": job deleted before execute, skipping", "job_id", jobID)
 		return
 	}
 	if paused {
-		slog.Debug(scope+": job paused concurrently, skipping", "job_id", jobID)
+		slog.Debug(logSubject+": job paused concurrently, skipping", "job_id", jobID)
 		return
 	}
-	s.executeOpt(cur, manual)
+	s.executeOpt(cur, viaTriggerNow)
 }
 
 // jobInflight returns a lazily created *runInflight per job ID. The
@@ -136,6 +131,27 @@ type jobSnapshot struct {
 	// 用 snap-time chain anchor（与本次 attempt 起点一致），后续新成功 run
 	// 由其 finishRun 路径再覆写。
 	lastSessionID string
+}
+
+// cronNoticePrefixFmt is the IM-notice prefix template every cron-side
+// deliverNotice call funnels through. Centralising the literal closes
+// R247-CR-5 (REPEAT-3): three execute-path notice strings each carried
+// their own copy of "[Cron %s] …", so the only thing pinning the prefix
+// shape was test fixtures grepping the formatted string. New notice
+// sites should compose via formatCronNotice rather than inline a 4th
+// copy.
+const cronNoticePrefixFmt = "[Cron %s] %s"
+
+// formatCronNotice renders the IM-notice line cron jobs send through
+// deliverNotice. label is the snap.labelOrID() result (job title or
+// fallback ID); body is the human-readable suffix already in the
+// caller's display locale (Chinese for the static error templates,
+// sanitised result text on the success path). Kept as a pure formatter
+// so it can be reused from non-execute code paths (e.g. future manual
+// retry surface) without dragging the deliverNotice / Scheduler
+// dependencies along.
+func formatCronNotice(label, body string) string {
+	return fmt.Sprintf(cronNoticePrefixFmt, label, body)
 }
 
 // labelOrID returns the IM-notice display label: snap.label when populated,
@@ -283,7 +299,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 			errMsg: "work_dir unreachable",
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(args.notifyTo, snap.cronNotice("工作目录不可达，本次执行已跳过。"))
+		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(), "工作目录不可达，本次执行已跳过。"))
 		return noopRefresh, false
 	}
 	s.router.Reset(args.key)
@@ -641,7 +657,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("session error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, snap.cronNotice("执行跳过，请稍后重试。"))
+		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行跳过，请稍后重试。"))
 		stubRefresh()
 		return
 	}
@@ -761,7 +777,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("send error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, snap.cronNotice("执行失败，请稍后重试。"))
+		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行失败，请稍后重试。"))
 		stubRefresh()
 		return
 	}
@@ -799,7 +815,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// 否则未截断 / 未脱敏的 claude 输出会绕过所有保护落到 IM 渠道
 	// （prompt-injection / IM 富文本指令 / 巨量响应耗尽队列）。
 	// finishRun 在持久化路径已做过同样处理，这里复用相同管线。
-	replyText := snap.cronNotice(sanitiseRunResult(result.Text))
+	replyText := formatCronNotice(snap.labelOrID(), sanitiseRunResult(result.Text))
 	s.deliverNotice(notifyTo, replyText)
 }
 

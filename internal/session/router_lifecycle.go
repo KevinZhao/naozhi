@@ -527,6 +527,18 @@ func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resume
 	return entries, prevIDs
 }
 
+// markSpawnDoneLocked closes the per-spawn done channel and removes the
+// spawningKeys map entry for key. Caller MUST hold r.mu. Single point of
+// truth for the close-before-delete sequence so no future caller can swap
+// the order accidentally — both ops are commutative under r.mu (waiters
+// observe close via the channel reference they already hold, not via
+// map lookup) but the convention matters for grep-ability and review.
+// R248-ARCH-10.
+func (r *Router) markSpawnDoneLocked(key string, ch chan struct{}) {
+	close(ch)
+	delete(r.spawningKeys, key)
+}
+
 // spawnSession creates a new process, optionally resuming an existing session.
 // LOCK: enter with r.mu held. This function releases and re-acquires r.mu
 // internally (around Spawn() and history collection) to avoid blocking other
@@ -541,11 +553,11 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// R243-ARCH-4: the map value is a per-spawn done-channel rather than a
 	// presence-only struct{}. close(ch) wakes any GetOrCreate caller parked
 	// on the same key in O(1) regardless of waiter count, replacing the
-	// previous 20ms tick poll. Order matters: close BEFORE delete so a
-	// caller dispatched between "lock acquired" and "delete returned"
-	// observes the closed channel from the still-present map entry, not a
-	// fresh nil from a re-arrived spawnSession that read the map after we
-	// finished. Both operations run under r.mu.
+	// previous 20ms tick poll. close-before-delete is for readability, not
+	// correctness — both run under r.mu, and any waiter observes the close
+	// via the channel reference it already holds (not via map lookup), so
+	// the two ops are commutative. Kept in this order purely as a uniform
+	// convention. R248-GO-3.
 	if r.spawningKeys == nil {
 		r.spawningKeys = make(map[string]chan struct{})
 	}
@@ -553,8 +565,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	r.spawningKeys[key] = doneCh
 	defer func() {
 		r.mu.Lock()
-		close(doneCh)
-		delete(r.spawningKeys, key)
+		r.markSpawnDoneLocked(key, doneCh)
 		r.mu.Unlock()
 	}()
 

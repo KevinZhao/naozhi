@@ -28,14 +28,15 @@ import (
 )
 
 // withShortStopBudget shortens stopBudget for the duration of a test and
-// restores the original on cleanup. Test-side var overwrite is safe
-// because we run these tests serially relative to other cron tests that
-// call Stop — no cron_test.go uses t.Parallel around Scheduler lifecycle.
+// restores the original on cleanup. R247-CR-18: routed through
+// WithStopBudget so the var swap + restore stays paired in one place,
+// and future migration to a Scheduler-field design only touches that
+// helper. Test-side override is safe because we run these tests
+// serially relative to other cron tests that call Stop — no
+// cron_test.go uses t.Parallel around Scheduler lifecycle.
 func withShortStopBudget(t *testing.T, d time.Duration) {
 	t.Helper()
-	orig := stopBudget
-	stopBudget = d
-	t.Cleanup(func() { stopBudget = orig })
+	t.Cleanup(WithStopBudget(d))
 }
 
 func TestStop_BudgetCapsTotalDuration(t *testing.T) {

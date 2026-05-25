@@ -4,17 +4,7 @@
 // CLI) can plug a noop implementation so the dashboard agent-team UI does
 // not need conditional nil branches per backend type.
 //
-// Defined under internal/session/ so callers stay free of internal/cli
-// when mounting the agent-team UI plumbing — the wshub linker-wiring map
-// keys on agentlink.AgentLinker rather than *cli.SubagentLinker, removing
-// the only direct concrete-pointer dependency the server map had on cli.
-//
-// Anchor: docs/TODO.md R239-ARCH-I (and the same root captured under
-// R231-ARCH-6 / R219-ARCH-3 / R224-ARCH-18). The pre-R239 setup leaked
-// `*cli.SubagentLinker` into server's struct definition, blocking ACP /
-// Gemini-style backends from reusing the same dashboard wiring without
-// either (a) inventing a fake *cli.SubagentLinker or (b) hardcoding nil
-// guards into every server call site.
+// History / motivation: docs/TODO.md R239-ARCH-I.
 package agentlink
 
 import "github.com/naozhi/naozhi/internal/cli"

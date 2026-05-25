@@ -329,6 +329,22 @@ type SessionHandlers struct {
 	// Races are benign: concurrent misses re-format the same value. R65-PERF-L-1.
 	uptimeCache atomic.Pointer[uptimeSnapshot]
 
+	// projectListCache memoises the projectList slice built in handleList at
+	// 1-second resolution, sharing one rebuild across N dashboard tabs polling
+	// at 1 Hz. Each tab opening adds (len(projects) ≤ ~50) projectListEntry
+	// allocations + redactGitRemoteURL calls per second; with the cache N tabs
+	// collapse to 1 rebuild/s instead of N. The cached slice is read-only —
+	// handleList copies the header into stats.Projects, never mutating it —
+	// so multiple readers can safely share the same backing array within a
+	// bucket. Misses re-build identically; last-writer-wins via Store is
+	// intentional (the formatted slice still escapes to the response).
+	//
+	// 1s resolution is chosen over a Manager-version invalidation hook because
+	// (a) project mutations are minute-scale (operator clicks vs poll Hz), so
+	// 1s lag is invisible to humans; (b) versioning project.Manager would
+	// touch a package outside this file's domain. R247-PERF-15 [REPEAT-3].
+	projectListCache atomic.Pointer[projectListSnapshot]
+
 	// staticStats pre-builds the subset of /api/sessions stats fields that
 	// are immutable after startup (backend, cli_name, workspace_*, system,
 	// agents). handleList copies this struct by value on each poll instead
@@ -543,36 +559,33 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	// named-struct values (not map[string]any) so the hot 1 Hz poll path skips
 	// the inner-map + interface{} boxing overhead. R70-PERF-M1.
 	//
-	// R230C-PERF-7: the slice itself is rebuilt on every /api/sessions poll
-	// (1 Hz × open dashboard tabs) even though projects change at minute-scale.
-	// Caching across polls would require invalidation hooks on every project
-	// CRUD path (Add/Remove/SetFavorite/git-detect/node-cache refresh) plus a
-	// remote-projects merge cursor; the cache invariant footprint dwarfs the
-	// allocation it saves. At realistic scale (≤50 projects × ≤20 tabs ≈ 50
-	// rebuilds/s, each ≤4 KB) this is a few hundred KB/s of GC churn — well
-	// below the dashboard's own JSON-encode allocation. Accept the rebuild.
+	// R247-PERF-15 [REPEAT-3]: collapse N dashboard tabs polling at 1 Hz into
+	// one rebuild/sec via projectListCache. The 1s bucket is invisible to
+	// human operators (project CRUD is minute-scale) and avoids touching the
+	// project package with a version hook. The cached slice is read-only —
+	// see projectListSnapshot godoc for the alias contract that keeps
+	// concurrent reads race-free.
 	var projectList []projectListEntry
 	if h.projectMgr != nil {
-		projects := h.projectMgr.All()
-		projectList = make([]projectListEntry, 0, len(projects))
-		for _, p := range projects {
-			projectList = append(projectList, projectListEntry{
-				Name:     p.Name,
-				Path:     p.Path,
-				Node:     "local",
-				Favorite: p.Config.Favorite,
-				// Strip embedded userinfo (PAT) before handing the URL to any
-				// dashboard client. Round 46 redacted /api/projects but missed
-				// this path — /api/sessions is polled every few seconds, so
-				// the leak is actually larger here.
-				GitRemoteURL: redactGitRemoteURL(p.GitRemoteURL),
-				GitHub:       p.IsGitHub,
-			})
-		}
+		projectList = h.projectListLocalAt(now)
 	}
-	// Merge remote projects (always, even without a local project manager)
+	// Merge remote projects (always, even without a local project manager).
+	// When we will append remote rows onto the cached local slice we MUST
+	// detach the cache first: projectListLocalAt returns the cached header
+	// (alias contract), so an append that fits the existing capacity would
+	// silently mutate every other reader's view. Building the merged slice
+	// fresh keeps the cached entry untouched. R247-PERF-15.
 	if h.nodeAccess.HasNodes() {
 		cachedProjects := h.nodeCache.Projects()
+		var remoteCount int
+		for _, items := range cachedProjects {
+			remoteCount += len(items)
+		}
+		if remoteCount > 0 {
+			merged := make([]projectListEntry, len(projectList), len(projectList)+remoteCount)
+			copy(merged, projectList)
+			projectList = merged
+		}
 		for _, items := range cachedProjects {
 			for _, item := range items {
 				name := strOrFallback(item, "name", "Name")
@@ -1173,6 +1186,21 @@ type uptimeSnapshot struct {
 	Str    string
 }
 
+// projectListSnapshot caches the local projectList slice build inside
+// handleList at 1-second granularity. Bucket is unix-seconds at the time
+// of build; a new bucket triggers a rebuild on the first miss.
+//
+// READ-ONLY CONTRACT: handleList reads Entries via the slice header only
+// (no append, no element mutation) and copies the header into the response
+// struct, which then JSON-encodes into the per-request buffer. Multiple
+// concurrent readers therefore alias the same backing array — race-free
+// because writers ALWAYS install a freshly built slice, never mutate in
+// place. R247-PERF-15 [REPEAT-3].
+type projectListSnapshot struct {
+	Bucket  int64
+	Entries []projectListEntry
+}
+
 // uptimeString returns time.Since(startedAt).Round(time.Second).String() with
 // a 1-second resolution memoisation. Concurrent misses may all format the
 // same value; last-writer-wins via unconditional Store is intentional —
@@ -1195,6 +1223,44 @@ func (h *SessionHandlers) uptimeStringAt(now time.Time) string {
 	s := d.String()
 	h.uptimeCache.Store(&uptimeSnapshot{Bucket: bucket, Str: s})
 	return s
+}
+
+// projectListLocalAt returns the local projectListEntry slice with 1-second
+// cache resolution. The returned slice is shared READ-ONLY across concurrent
+// callers in the same bucket; any caller that intends to append must copy
+// first (handleList does this in the remote-merge branch). h.projectMgr
+// MUST be non-nil — callers gate on that check before invoking. R247-PERF-15
+// [REPEAT-3].
+//
+// Cache races are benign: two pollers crossing a bucket boundary may each
+// rebuild and Store; whichever writes last wins, the loser's locally
+// computed slice is GC'd as soon as the response encodes. Critically, both
+// rebuilds produce identical content (Manager.All takes a read lock and
+// returns sorted snapshots) so observers cannot see torn data even if they
+// hold an old header concurrent with the new Store.
+func (h *SessionHandlers) projectListLocalAt(now time.Time) []projectListEntry {
+	bucket := now.Unix()
+	if cur := h.projectListCache.Load(); cur != nil && cur.Bucket == bucket {
+		return cur.Entries
+	}
+	projects := h.projectMgr.All()
+	entries := make([]projectListEntry, 0, len(projects))
+	for _, p := range projects {
+		entries = append(entries, projectListEntry{
+			Name:     p.Name,
+			Path:     p.Path,
+			Node:     "local",
+			Favorite: p.Config.Favorite,
+			// Strip embedded userinfo (PAT) before handing the URL to any
+			// dashboard client. Round 46 redacted /api/projects but missed
+			// this path — /api/sessions is polled every few seconds, so
+			// the leak is actually larger here.
+			GitRemoteURL: redactGitRemoteURL(p.GitRemoteURL),
+			GitHub:       p.IsGitHub,
+		})
+	}
+	h.projectListCache.Store(&projectListSnapshot{Bucket: bucket, Entries: entries})
+	return entries
 }
 
 // initStaticStats pre-builds the immutable subset of /api/sessions stats so
