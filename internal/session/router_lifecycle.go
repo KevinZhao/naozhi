@@ -541,11 +541,11 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// R243-ARCH-4: the map value is a per-spawn done-channel rather than a
 	// presence-only struct{}. close(ch) wakes any GetOrCreate caller parked
 	// on the same key in O(1) regardless of waiter count, replacing the
-	// previous 20ms tick poll. Order matters: close BEFORE delete so a
-	// caller dispatched between "lock acquired" and "delete returned"
-	// observes the closed channel from the still-present map entry, not a
-	// fresh nil from a re-arrived spawnSession that read the map after we
-	// finished. Both operations run under r.mu.
+	// previous 20ms tick poll. close-before-delete is for readability, not
+	// correctness — both run under r.mu, and any waiter observes the close
+	// via the channel reference it already holds (not via map lookup), so
+	// the two ops are commutative. Kept in this order purely as a uniform
+	// convention. R248-GO-3.
 	if r.spawningKeys == nil {
 		r.spawningKeys = make(map[string]chan struct{})
 	}
