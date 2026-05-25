@@ -1,0 +1,47 @@
+{
+  "_comment": [
+    "Phase 0 baseline snapshot — captured 2026-05-25 on commit ff034155",
+    "(server-split/phase0 branch HEAD).",
+    "",
+    "Required by docs/design/server-split-phase4-design.md §六.2.0.6.",
+    "Each future Phase N PR must capture the same metrics post-merge and",
+    "verify regressions don't exceed +10% (test wall time) or shrinkage",
+    "tracks the planned phase removals.",
+    "",
+    "Regenerate via:",
+    "  go test -race -count=1 ./... > /tmp/test.log",
+    "  bash tools/lint-server-handlers/snapshot-baseline.sh > tools/lint-server-handlers/baseline-snapshot.json"
+  ],
+  "captured_at": "2026-05-25",
+  "git_commit": "ff034155",
+  "git_branch": "server-split/phase0",
+  "test_suite": {
+    "command": "go test -race -count=1 -timeout 300s ./...",
+    "wall_time_sec": 25,
+    "pass_packages": 36,
+    "fail_packages": 0,
+    "no_test_packages": 5,
+    "total_packages": 41
+  },
+  "server_package": {
+    "with_test_lines": 39221,
+    "non_test_lines": 17262,
+    "total_files": 113,
+    "non_test_files": 41,
+    "_note": "Phase 0 PR added routes_snapshot_test.go + wshub_types.go + 47/37 field annotations; non-test lines grew 17156→17262 (+106) vs pre-PR baseline."
+  },
+  "struct_fields": {
+    "Server": 47,
+    "Hub": 37,
+    "_note": "Phase 5 target: Server ≤ 12, Hub stays at 37 (5 blocks reorg). See §六.6 字段去向表."
+  },
+  "routes": {
+    "total": 54,
+    "_note": "50 dashboard handler routes + 1 /health + 1 /ws + 1 /ws-node + 3 /api/debug/* (pprof + vars + pprof/) — design.md baseline counted only the 50 dashboard handler routes."
+  },
+  "linter": {
+    "exemptions_count": 10,
+    "handle_baseline_count": 7,
+    "_note": "10 over-size files (server.go=1309 .. wshub.go=579) frozen at Phase 0; 7 *Server.handle* methods locked. New violations of either fail in mode=fail (Phase 5)."
+  }
+}
