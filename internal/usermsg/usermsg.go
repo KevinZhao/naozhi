@@ -16,9 +16,12 @@ package usermsg
 import (
 	"context"
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // ForSendError returns a short Chinese label describing err for end-user
@@ -71,5 +74,36 @@ func ForSendError(err error, key string) string {
 		return "系统正在重启，请稍后重试。"
 	default:
 		return "处理失败，请发送 /new 重置后重试。"
+	}
+}
+
+// UserMessage maps err to a user-facing Chinese label, with timeout-aware
+// specialisation: cli.ErrNoOutputTimeout / cli.ErrTotalTimeout render the
+// configured per-session no-output / total durations using
+// textutil.FormatChineseDuration so the user sees the actual budget
+// rather than a generic "处理超时" line.
+//
+// Callers that have no per-session timeouts (dashboard send_ack on the
+// WS path) should keep using ForSendError directly — its collapsed
+// timeout branch yields the generic phrasing. Callers with timeouts
+// (IM dispatch) consume this helper and decorate the result if they
+// want a leading emoji or other channel-specific styling: the helper
+// returns plain text without emoji so each surface owns its own
+// presentation. R226-CR-9 collapsed the duplicated sentinel switch
+// onto ForSendError; R249-DISPATCH-1 (#419) extracts the timeout
+// specialisation here so the dispatch send path no longer keeps a
+// parallel switch with cross-package "keep in sync" comments.
+//
+// noOutputTimeout / totalTimeout are zero-safe: a zero/negative duration
+// renders as "未知" via textutil.FormatChineseDuration. Production callers
+// always pass non-zero values from DispatcherConfig.
+func UserMessage(err error, key string, noOutputTimeout, totalTimeout time.Duration) string {
+	switch {
+	case errors.Is(err, cli.ErrNoOutputTimeout):
+		return fmt.Sprintf("处理超时（%s 无输出），请简化任务后重试。", textutil.FormatChineseDuration(noOutputTimeout))
+	case errors.Is(err, cli.ErrTotalTimeout):
+		return fmt.Sprintf("处理超时（总耗时超过 %s），请拆分为更小的任务。", textutil.FormatChineseDuration(totalTimeout))
+	default:
+		return ForSendError(err, key)
 	}
 }
