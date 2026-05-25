@@ -764,6 +764,18 @@ func WithStopBudget(d time.Duration) func() {
 // a ctx-aware pattern and reclaim the goroutine, otherwise restart
 // cycles accumulate stuck webhook goroutines until OOM. R44-REL-
 // TRIGGER-GOROUTINE.
+//
+// The same intentional-orphan contract applies to the gcWG.Wait wrapper
+// goroutine spawned just below (the cold-start GC waiter). When
+// gcWaitBudget elapses with trimAll still wedged on a stuck filesystem
+// (ReadDir / Remove not returning), the wrapper around `gcWG.Wait()`
+// stays parked and is reclaimed only when the OS tears the process
+// down. Rationale is identical: Scheduler is single-shot, the process
+// is moments from exit, and gcWG offers no cancel signal. If a future
+// reuse path is added (Start after Stop on the same instance), this
+// wrapper MUST also be migrated to a ctx-aware pattern (e.g. trimAll
+// observing stopCtx) so successive lifecycles do not accumulate stuck
+// filesystem-IO goroutines until OOM. R247-GO-7.
 func (s *Scheduler) Stop() {
 	s.stopCancel()
 
