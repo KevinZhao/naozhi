@@ -3,10 +3,7 @@ package feishu
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -84,16 +80,9 @@ const (
 	// otherwise multiplied by hookSem concurrency).
 	maxWebhookTokenLen = 512
 
-	// webhookTimestampFutureSkew is the maximum seconds that a webhook
-	// X-Lark-Request-Timestamp header may be in the future before being
-	// rejected. Tolerates clock skew without giving attackers a wide
-	// pre-issuance window for nonce-replay (see verifyTimestamp).
-	webhookTimestampFutureSkew = 30
-
-	// webhookTimestampMaxAge is the maximum seconds that a webhook timestamp
-	// may be in the past before being rejected. 5 minutes covers normal
-	// network latency and legitimate Feishu-side retries (see R218-SEC-13).
-	webhookTimestampMaxAge = 5 * 60
+	// Webhook timestamp freshness window constants (webhookTimestampFutureSkew /
+	// webhookTimestampMaxAge) and the verifySignature / verifyTimestamp helpers
+	// they back live in signature.go (R214-ARCH-13 split).
 
 	// wsStopTimeout caps how long Stop() waits for the lark-ws SDK to exit.
 	// The SDK's Start() may block in select{} if its internal disconnect path
@@ -1250,60 +1239,7 @@ func (f *Feishu) getAccessToken(_ context.Context) (string, error) {
 	return token, nil
 }
 
-// verifySignature verifies the request signature (for encrypt_key mode).
-// Uses the incremental hash.Hash interface to avoid copying the body into a
-// concatenated string — webhook bodies can be up to 64 KB, and the old
-// `timestamp + nonce + encryptKey + string(body)` path allocated ~64 KB per
-// request and did it twice (once for the string, once for the []byte cast).
-// Also hex-encodes via encoding/hex to avoid the fmt.Sprintf "%x" parse
-// overhead, and compares as bytes under ConstantTimeCompare without stringy
-// intermediate allocation.
-//
-// R224-SEC-2: callers MUST gate this call on `encryptKey != ""` themselves.
-// The earlier "empty key → return true" internal fallback was a footgun:
-// any future caller forgetting the outer guard would silently bypass
-// signature verification entirely. Empty key now returns false (a missing
-// signature cannot be valid), forcing the configuration check to live at
-// the call site where it's auditable.
-func verifySignature(timestamp, nonce, encryptKey string, body []byte, signature string) bool {
-	if encryptKey == "" {
-		return false
-	}
-	h := sha256.New()
-	h.Write([]byte(timestamp))
-	h.Write([]byte(nonce))
-	h.Write([]byte(encryptKey))
-	h.Write(body)
-	var sumBuf [sha256.Size]byte
-	sum := h.Sum(sumBuf[:0])
-	var hexBuf [sha256.Size * 2]byte
-	hex.Encode(hexBuf[:], sum)
-	return subtle.ConstantTimeCompare(hexBuf[:], []byte(signature)) == 1
-}
-
-// verifyTimestamp checks that the request timestamp is plausibly recent.
-//
-// Asymmetric window:
-//
-//   - up to 5 minutes in the past (300s) covers normal network latency and
-//     legitimate retries from Feishu's side.
-//   - at most 30 seconds in the future tolerates clock skew without giving
-//     attackers a 5-minute pre-issuance window to amplify nonce-replay
-//     opportunities. R218-SEC-13.
-func verifyTimestamp(timestamp string) bool {
-	ts, err := strconv.ParseInt(timestamp, 10, 64)
-	if err != nil {
-		return false
-	}
-	now := time.Now().Unix()
-	if ts > now+webhookTimestampFutureSkew {
-		return false
-	}
-	if now-ts > webhookTimestampMaxAge {
-		return false
-	}
-	return true
-}
+// verifySignature / verifyTimestamp moved to signature.go (R214-ARCH-13).
 
 // reactionEmojiType maps platform-agnostic ReactionType to Feishu emoji_type.
 // Feishu's reaction API uses string emoji_types (see OpenAPI docs). Unknown
