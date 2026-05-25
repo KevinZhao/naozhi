@@ -2478,9 +2478,9 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 }
 
 // TestSpawningKeys_CloseBeforeDelete_Order pins the documented ordering
-// inside spawnSession's defer: `close(doneCh)` must run BEFORE
-// `delete(r.spawningKeys, key)`. The comment block above the defer in
-// router_lifecycle.go (~line 544) explains why: a caller dispatched between
+// inside markSpawnDoneLocked: `close(ch)` must run BEFORE
+// `delete(r.spawningKeys, key)`. The helper godoc above the body in
+// router_lifecycle.go (~line 530) explains why: a caller dispatched between
 // "lock acquired" and "delete returned" must observe the closed channel from
 // the still-present map entry, not a fresh nil from a re-arrived
 // spawnSession that read the map after we finished.
@@ -2489,6 +2489,9 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 // observes the wakeup but cannot easily distinguish "closed then deleted"
 // from "deleted then closed" without injecting a deterministic interleave.
 // Pinning the lexical order makes the regression a fast CI failure.
+//
+// R248-ARCH-10 lifted the close+delete pair into the helper; the lexical
+// pin moved with it.
 func TestSpawningKeys_CloseBeforeDelete_Order(t *testing.T) {
 	t.Parallel()
 	src, err := os.ReadFile("router_lifecycle.go")
@@ -2497,17 +2500,17 @@ func TestSpawningKeys_CloseBeforeDelete_Order(t *testing.T) {
 	}
 	body := string(src)
 
-	closeIdx := strings.Index(body, "close(doneCh)")
+	closeIdx := strings.Index(body, "close(ch)")
 	if closeIdx < 0 {
-		t.Fatal("close(doneCh) not found in router_lifecycle.go — defer body refactored")
+		t.Fatal("close(ch) not found in router_lifecycle.go — markSpawnDoneLocked refactored")
 	}
 	deleteIdx := strings.Index(body, "delete(r.spawningKeys, key)")
 	if deleteIdx < 0 {
-		t.Fatal("delete(r.spawningKeys, key) not found in router_lifecycle.go — defer body refactored")
+		t.Fatal("delete(r.spawningKeys, key) not found in router_lifecycle.go — markSpawnDoneLocked refactored")
 	}
 	if closeIdx >= deleteIdx {
-		t.Errorf("close(doneCh) at byte %d is not before delete(r.spawningKeys, key) at byte %d; "+
-			"the defer ordering is load-bearing for R243-ARCH-4 — see comment on router_lifecycle.go ~line 544",
+		t.Errorf("close(ch) at byte %d is not before delete(r.spawningKeys, key) at byte %d; "+
+			"the order in markSpawnDoneLocked is load-bearing for R243-ARCH-4 / R248-ARCH-10",
 			closeIdx, deleteIdx)
 	}
 }
