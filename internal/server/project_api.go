@@ -83,6 +83,15 @@ type ProjectHandlers struct {
 	// Nil in tests that build ProjectHandlers by hand; handleFilesExists
 	// guards with a nil check so the limiter is optional. S13.
 	filesExistsLimiter *ipLimiter
+	// configPutLimiter caps PUT /api/projects/config writes per IP. The
+	// handler persists ProjectConfig to disk and broadcasts a WS update
+	// fan-out to every subscribed dashboard client; an unmetered post-auth
+	// caller can therefore drive disk I/O + N×WS fan-out at line rate.
+	// 5/sec burst 5 ≈ 5×60=300/min — well above interactive UX (a human
+	// only saves config sub-second after edit) but below abuse rates.
+	// Nil-safe in tests; handleConfigPut guards with a nil check.
+	// R247-SEC-7.
+	configPutLimiter *ipLimiter
 }
 
 // GET /api/projects — list all projects (local + remote).
@@ -157,6 +166,15 @@ func (h *ProjectHandlers) handleConfigGet(w http.ResponseWriter, r *http.Request
 
 // PUT /api/projects/config?name=...
 func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request) {
+	// R247-SEC-7: cap per-IP rate before any work — disk write +
+	// dashboard-wide WS fan-out is otherwise rate-unlimited for any
+	// authenticated caller. Same nil-guard convention as filesExistsLimiter
+	// so tests that build ProjectHandlers by hand still pass.
+	if h.configPutLimiter != nil && !h.configPutLimiter.AllowRequest(r) {
+		w.Header().Set("Retry-After", "1")
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "config update rate limit exceeded"})
+		return
+	}
 	name := r.URL.Query().Get("name")
 	if err := validateProjectName(name); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
