@@ -116,10 +116,19 @@ const unknownOwner = "__unknown__"
 // Returns errUploadStoreFull when either the global entry cap or global
 // byte cap is hit, or errUploadPerOwner when the caller's entry/byte
 // sub-limit would be exceeded.
+//
+// R247-SEC-20: crypto/rand failure used to panic, taking the entire HTTP
+// server down. The kernel RNG initialisation can hiccup early in boot on
+// containers that share /dev/urandom under heavy IO; map that to a
+// transient errUploadStoreFull (callers already retry on this sentinel
+// with a "try again later" prompt) plus a slog.Error so operators can
+// page on the underlying RNG outage rather than discover it via a process
+// crash.
 func (s *uploadStore) Put(owner string, img cli.ImageData) (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand unavailable: " + err.Error())
+		slog.Error("uploadStore Put: crypto/rand unavailable", "err", err)
+		return "", errUploadStoreFull
 	}
 	id := hex.EncodeToString(b)
 
