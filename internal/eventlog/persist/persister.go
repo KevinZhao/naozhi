@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -696,8 +697,42 @@ func (p *Persister) flushAllLocked() error {
 	return firstErr
 }
 
+// flushCandidate is reused inside tickFlush for a stable oldest-first
+// flush order across map iterations. Without this Go's randomised map
+// iter occasionally starves a writer that crossed the FlushInterval
+// boundary by re-entering tickFlush before fsync runs (the run loop's
+// fsync gate is global; one slow fsync can monopolise a tick window).
+// Sorting by firstDirtyAt makes the worst-case flush latency bounded
+// to N tick intervals, regardless of map iter randomness. R247-PERF-26.
+type flushCandidate struct {
+	key string
+	w   *perKeyWriter
+}
+
 func (p *Persister) tickFlush() {
 	now := p.opts.Clock()
+	// Collect-then-sort instead of a true heap: 1-200 typical writers
+	// per tick, sort.Slice is faster in practice than a container/heap
+	// init+pop loop at that N. The slice itself is allocated once per
+	// tick — see flushCandidatePool below if profiling later indicates
+	// this matters.
+	cands := p.collectFlushCandidates(now)
+	if len(cands) == 0 {
+		return
+	}
+	for _, c := range cands {
+		if err := c.w.flush(p); err != nil {
+			slog.Warn("event log persist: debounced flush failed",
+				"key", c.key, "err", err)
+		}
+	}
+}
+
+// collectFlushCandidates returns writers whose firstDirtyAt has aged
+// past FlushInterval, sorted oldest-first. Split out so tickFlush stays
+// readable and the sort can be unit-tested independently.
+func (p *Persister) collectFlushCandidates(now time.Time) []flushCandidate {
+	var cands []flushCandidate
 	for k, w := range p.writers {
 		if !w.dirty {
 			continue
@@ -705,11 +740,14 @@ func (p *Persister) tickFlush() {
 		if now.Sub(w.firstDirtyAt) < p.opts.FlushInterval {
 			continue
 		}
-		if err := w.flush(p); err != nil {
-			slog.Warn("event log persist: debounced flush failed",
-				"key", k, "err", err)
-		}
+		cands = append(cands, flushCandidate{key: k, w: w})
 	}
+	if len(cands) > 1 {
+		sort.Slice(cands, func(i, j int) bool {
+			return cands[i].w.firstDirtyAt.Before(cands[j].w.firstDirtyAt)
+		})
+	}
+	return cands
 }
 
 func (p *Persister) tickIdleClose() {

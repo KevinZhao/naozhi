@@ -145,7 +145,7 @@
 - [ ] **R247-SEC-4 — agent_view.js inline onclick attr 嵌 escAttr（P1）** [REFACTOR]: `internal/server/static/agent_view.js:69` `onclick="...switchTo(\\'" + escAttr(a.taskId) + "\\')"` —— escAttr 仅 HTML-escape 不处理 JS string；当前 a.taskId 由 server `agentTaskIDRe ^[a-z0-9]{1,32}$` 兜底但 sink 错误层。方案：addEventListener + dataset，移除 inline onclick。
 - [ ] **R247-SEC-5 — selfupdate.fetchFile 初始 URL 无显式 https 断言（P2）** [REFACTOR]: `internal/selfupdate/selfupdate.go:313` 仅 CheckRedirect 内卡 https。方案：req.URL.Scheme!="https" 早拒，与 redirect 路径对齐。
 - [ ] **R247-SEC-6 — transcribe ffmpeg 无 wall-clock 上限（P2）** [BREAKING-LOCAL]: `internal/transcribe/convert.go:104` 仅靠外层 ctx；构造 audio 可长时间占 transcribeSemCap=3 槽。方案：argv 加 `-t 600` 解码上限。
-- [ ] **R247-SEC-7 — handleConfigPut 缺 per-IP rate limit（P2）** [REFACTOR]: `internal/server/project_api.go:159` 写盘 + WS 广播无频次墙。方案：加 ipLimiter 或 projectMgr.UpdateConfig 5/sec gate。
+- [~] **R247-SEC-7 — handleConfigPut 缺 per-IP rate limit（P2）** [REFACTOR]: `internal/server/project_api.go:159` 写盘 + WS 广播无频次墙。方案：加 ipLimiter 或 projectMgr.UpdateConfig 5/sec gate。
 - [ ] **R247-SEC-8 — uploadOwner crypto/rand 失败回退 clientIP（P2）** [REPEAT-2]: `internal/server/dashboard_send.go:140-148` 与 R246-SEC-8 同根因不同 site。方案：失败返 503。
 - [~] **R247-SEC-9 — shortPromoteSuffix 32-bit 熵（P2）** [BREAKING-LOCAL]: `internal/server/dashboard_scratch.go:351` birthday-bound ~2^16；与 anonCookie/upload 16 byte 不齐。方案：8 字节（64-bit）。
 - [ ] **R247-SEC-10 — isSensitiveDownloadName 不卡父目录段（P2）** [BREAKING-LOCAL]: `internal/server/project_files.go:1212` `secrets/db.yaml` `.ssh/foo` 不命中 basename。方案：sensitivePathSegments allowlist。
@@ -154,11 +154,11 @@
 - [ ] **R247-SEC-13 — cron runstore MkdirAll 0700 同 mode 漏修（P2）** [REFACTOR]: `internal/cron/runstore.go:236-301` 同上。
 - [ ] **R247-SEC-14 — attachment store MkdirAll 0700 同 mode 漏修（P2）** [REFACTOR]: `internal/attachment/store.go:232` workspace 共享场景下他 UID 可预创建。
 - [ ] **R247-SEC-15 — mintAnonCookie 30d MaxAge 永不轮换（P2）** [BREAKING-LOCAL]: `internal/server/dashboard_send.go:39-52` token 模式切换 / 服务重启不清。方案：缩到 7d 或登录态变化时强制 expire。
-- [ ] **R247-SEC-16 — ownerKeyFromCookie sha256[:8] 64-bit 熵（P2）** [BREAKING-LOCAL]: `internal/server/dashboard_send.go:114-120` 同 BroadcastCronResult/ETag short-hash。方案：sha256[:16]（128-bit）。
+- [~] **R247-SEC-16 — ownerKeyFromCookie sha256[:8] 64-bit 熵（P2）** [BREAKING-LOCAL]: `internal/server/dashboard_send.go:114-120` 同 BroadcastCronResult/ETag short-hash。方案：sha256[:16]（128-bit）。
 - [~] **R247-SEC-17 — cookieMAC 缺 cookie-rotation（P2）** [REPEAT-3]: `internal/server/dashboard_auth.go:117-121` 与 R243-SEC-13/R245-SEC-2/R242-SEC-5 同根因；HMAC 输入未含 ts/nonce。方案：MAC 输入加 cookie-gen ts。
 - [ ] **R247-SEC-18 — collectTranscripts 直拼 alternative.Transcript（P3）** [REFACTOR]: `internal/transcribe/transcribe.go:194` 未过 SanitizeForLog/IsLogInjectionRune。方案：与 cron sanitiseRunResult 对齐过滤 bidi/C1。
 - [x] **R247-SEC-19 — sysession runner BinPath 未 LookPath 校验（P3）** [REPEAT-2]: `internal/sysession/runner.go:79` 与 R245-SEC-15 同根因不同位置。 *(已实施：NewRunner 在 absolute / contains-separator 分支补 os.Stat 校验，要求 regular file + executable bit；与 resolveBinPathFromEnv 的 PATH 分支同 gate；保留 symlink-following 兼容 distro 包 /usr/local/bin/claude 链。)*
-- [ ] **R247-SEC-20 — uploadStore.Put crypto/rand 失败 panic（P3）** [REFACTOR]: `internal/server/upload_store.go:122` 让 HTTP server 倒塌。方案：返 errUploadStoreFull + slog.Error。
+- [~] **R247-SEC-20 — uploadStore.Put crypto/rand 失败 panic（P3）** [REFACTOR]: `internal/server/upload_store.go:122` 让 HTTP server 倒塌。方案：返 errUploadStoreFull + slog.Error。
 - [~] **R247-SEC-21 — cliAvailable os.Stat 暴露二进制路径（P3）** [REFACTOR]: `internal/server/health.go:283-289` 认证后 token 窃取者可探主机布局。方案：返常量 boolean 不区分 IO 类型。
 - [ ] **R247-SEC-22 — reverseUpgrader.CheckOrigin 仅靠 Origin 缺失判 m2m（P3）** [REPEAT-3]: `internal/node/reverseserver.go:69-73` 反代剥 Origin 场景下 browser-XSS 端可凑无 Origin 请求。方案：r.TLS != nil 强制或 explicit insecure_node 配置。
 - [ ] **R247-SEC-23 — CSP font-src https://cdn.jsdelivr.net 无 SRI（P3）** [REPEAT-3]: `internal/server/dashboard.go:503` 与 R246-SEC-10 同根因；KaTeX woff2 走同信任链。方案：vendored //go:embed 或 require-sri-for font。
@@ -191,7 +191,7 @@
 - [ ] **R247-PERF-23 — Enqueue 队列满 O(N) memmove（P3）** [REPEAT-2]: `internal/dispatch/msgqueue.go:184-208` MaxDepth=16 拷贝 15。方案：环形 buffer。
 - [ ] **R247-PERF-24 — workDirUnderRoot 每 execute EvalSymlinks（P3）** [REFACTOR]: `internal/cron/scheduler.go:177-189` 长寿命下重复 syscall。方案：TTL 缓存。
 - [~] **R247-PERF-25 — agent_tailer Shutdown 重新 alloc map（P3）** [REFACTOR]: `internal/server/agent_tailer.go:565-578`。方案：clear(r.byTask) (go1.21+)。
-- [ ] **R247-PERF-26 — eventlog persister tickFlush 无序 map iter（P3）** [REFACTOR]: `internal/eventlog/persist/persister.go:629-657` 高 N session 抖动。方案：sorted dirty heap。
+- [~] **R247-PERF-26 — eventlog persister tickFlush 无序 map iter（P3）** [REFACTOR]: `internal/eventlog/persist/persister.go:629-657` 高 N session 抖动。方案：sorted dirty heap。
 
 ### 代码质量（剩余）
 
@@ -338,7 +338,7 @@
 - [ ] **R246-ARCH-5 [P2] [REFACTOR] — `internal/cron/scheduler_callbacks.go:18` + `internal/sysession/manager.go:418` + `internal/server/server.go:684` callback 注册三模式不统一**: 同抽象三套实现 + 三套加锁 + 三种 nil-fallback。建议：统一为构造时只接受可空 fn 字段；运行时切换用 eventbus.Hook[T] 包级 helper。
 - [ ] **R246-ARCH-6 [P2] [REFACTOR] — `internal/upstream/connector.go:122,130` SetDiscoverFunc/SetPreviewFunc 启动时 race-prone 设值**: connector.go:114 注释自承"plain 字段 (no atomic / mutex) — 并发 SetX 与 handleRequest 是 data race"，依赖 main 单线程顺序。建议：upstream.New(..., Hooks{Discover, Preview}) 构造参数，或 atomic.Pointer。
 - [ ] **R246-ARCH-7 [P3] [REFACTOR] — `internal/server/server.go` HTTP 中间件链未抽象 MaxBytesReader 在 13+ handler 内手写**: dashboard_cron.go 5 处 r.Body = http.MaxBytesReader、dashboard_send.go 4 处不同上限，新加 handler 漏 limiter 不会被编译捕获。建议：middleware.Chain{authM, maxBytes(N), gzip}.Then(handler) 或表驱动。
-- [ ] **R246-ARCH-8 [P3] [REFACTOR] — `internal/session/testutil.go` 通过 package session 把 TestProcess + InjectSession 编入生产二进制**: 自承"this file ships in the production binary"——是反模式。建议：创建 internal/session/sessiontest 子包加 //go:build !release，或 export Router.injectForTest 仅 sessiontest 友包能调。
+- [~] **R246-ARCH-8 [P3] [REFACTOR] — `internal/session/testutil.go` 通过 package session 把 TestProcess + InjectSession 编入生产二进制**: 自承"this file ships in the production binary"——是反模式。建议：创建 internal/session/sessiontest 子包加 //go:build !release，或 export Router.injectForTest 仅 sessiontest 友包能调。
 - [ ] **R246-ARCH-9 [P2] [REFACTOR] — `internal/cron/scheduler.go:208` Scheduler 持有 stopCtx + stopCancel 字段**: 自承"context in struct usually anti-pattern"。同症 sysession/manager.go:156。建议：包装 robfig/cron 回调到 cronEntry struct{ ctx; fn func(context.Context) }，让 ctx 显式流过。
 - [ ] **R246-ARCH-10 [P3] [REFACTOR] — `internal/dispatch/passthrough_ctx.go:12,31` 用 context.Value 跨 goroutine/包传 boolean 控制位**: dispatch sendFn 已显式 6 参数，再用 context.Value 传两个 bool 是冗余 + 隐式控制流。建议：扩签名 SendOpts{Passthrough, Urgent bool}；ctx.Value 留给真正跨 framework 边界。
 - [ ] **R246-ARCH-11 [P2] [REFACTOR] — 4 个 SessionRouter interface 同名方法集错位**: cron/dispatch/server/upstream consumer 4 包，upstream 已 split Lookup/Lifecycle/Mutator 但其它三家未 split，contract_test 锚点跨 4 包同步成本高。建议：先把 upstream split 提到 session/api 子包，cron/dispatch 各 embed 子集，作为单 PR 落（与 R243-ARCH-9 协同）。
@@ -459,7 +459,7 @@
 - [ ] **R244-SEC-P2-1 — upload_store 文件 MIME 验证依赖客户端 Content-Type [BREAKING-LOCAL]**: 上传文件 MIME 校验需为 byte-sniff（http.DetectContentType）覆盖客户端声明。方案：上传后立即 sniff；MIME 不在 allowlist（png/jpeg/gif/webp/pdf）则 reject。Breaking：是。
 - [ ] **R244-SEC-P2-2 — project_files.previewableByExt 含 `.html`/`.htm` [BREAKING-LOCAL]**: `internal/server/project_files.go:114-115` 含 .html → text/html。servePreview 已挡，但未来回归易回归。方案：从 previewableByExt 移除 html/htm；让其走 byte-sniff。Breaking：低。
 - [ ] **R244-SEC-P2-3 — wsclient sendLimiter per-conn 不是 per-user [BREAKING-LOCAL]**: send rate 5/burst 1/s 应用于每连接；同一 user 开 N 连接 burst capacity 倍增。方案：按 uploadOwner 聚合 limiter。Breaking：是。
-- [ ] **R244-SEC-P2-4 — cdn.jsdelivr.net 资源无 SRI 整合度校验 [REPEAT-3]**: KaTeX/Mermaid 动态 script 注入未带 integrity。方案：自托管或动态注入时附 sha256 integrity。
+- [~] **R244-SEC-P2-4 — cdn.jsdelivr.net 资源无 SRI 整合度校验 [REPEAT-3]**: KaTeX/Mermaid 动态 script 注入未带 integrity。方案：自托管或动态注入时附 sha256 integrity。
 - [ ] **R244-SEC-P2-5 — Scheduler.SetJobPrompt 不限 prompt 字节上限 [BREAKING-LOCAL]**: dashboard 用户可写多 MB prompt 落盘。方案：加 `len(prompt)>maxCronPromptBytes` guard。Breaking：是。
 - [x] **R244-SEC-P3-1 — pprof/expvar 端点对认证用户暴露 goroutine 栈包含路径 [REPEAT-3]**: 方案：`debug_mode` flag 控制注册。 *(已实施：dashboard.go:440 `if s.debugMode { s.registerPprof(); s.registerExpvar() }` gate + Server.debugMode 字段（来自 ServerOptions.DebugMode → config.yaml `server.debug_mode`，default false）。本批补 TestPprofExpvarGatedByDebugMode 源码扫描契约测试 pin gate + exactly-one-call 防 ungated 回归。R244-SEC-P3-1 [REPEAT-3]。)*
 - [ ] **R244-SEC-P3-2 — `__public_tmp__` pseudo-project 默认 enabled 暴露全 /tmp [BREAKING-LOCAL]**: 方案：operator opt-in flag。Breaking：是。
@@ -518,7 +518,7 @@
 - [ ] **R243-SEC-1 [REPEAT-1]** `internal/server/static/dashboard.js:11865` `cronTimelineDetailHtml` 把 `detail.result`（claude CLI 输出）直接喂给 `renderMd` 后 innerHTML，无 DOMPurify 二次过滤。`SetEscapeHTML(false)` 让 `<>&` 透传 wire；renderMd 自身的 `esc()` 不能完全防御 mermaid/KaTeX 路径。方案：renderMd 输出走 DOMPurify。
 - [ ] **R243-SEC-2 [REPEAT-1]** `internal/server/static/dashboard.js:11878,11944` `lastAssistant.text` / `t.text`（JSONL transcript 文本）同上路径，`handleRunTranscript` 路径未 SanitizeForLog。
 - [ ] **R243-SEC-3 [REPEAT-2]** `internal/server/dashboard.go:488` CSP `script-src 'unsafe-inline'` 让任何 innerHTML XSS 直升 RCE；与 R242-SEC-1 同根因第 2 次。
-- [ ] **R243-SEC-4 [REPEAT-3]** `internal/server/static/dashboard.js:7084` mermaid SRI 在场但 KaTeX/CDN 路径未启 require-sri-for；与 R242-SEC-2 同根因第 3 次。
+- [~] **R243-SEC-4 [REPEAT-3]** `internal/server/static/dashboard.js:7084` mermaid SRI 在场但 KaTeX/CDN 路径未启 require-sri-for；与 R242-SEC-2 同根因第 3 次。
 - [ ] **R243-SEC-6 [REFACTOR]** `internal/server/dashboard_cron_transcript.go:525-527` ANSI strip 仅覆盖 CSI（`\x1b[`），OSC 序列（`\x1b]8;;url\x1b\\` hyperlink）未覆盖；当前 `<pre>+esc()` 兜底但需 defence-in-depth。
 - [ ] **R243-SEC-7 [REPEAT-10]** `internal/server/dashboard_cron.go:570-579` `notify_default.ChatID` 在 list response 中暴露给所有认证 dashboard 用户；多 operator 部署的 cross-tenant data leak。
 - [x] **R243-SEC-8 [REPEAT-5]** `internal/cron/scheduler.go (SetJobPrompt path)` IM 路径调 `SetJobPrompt` 时未走 `validateCronPrompt`（仅 `prompt != ""`）；dashboard 路径有完整校验。 — 解决 2026-05-25：`internal/cron/limits.go:36` 已实现 `ValidatePromptStrict` 集中策略（empty / MaxPromptBytes / utf8 / C0 控制 / IsLogInjectionRune C1·bidi·LS·PS）；`internal/cron/scheduler_jobs.go:592` `Scheduler.SetJobPrompt` 入口先调 `ValidatePromptStrict(prompt)` 再检 MaxPromptBytes 上限，IM (`/cron …` → Hub.runTurn / runTurnPassthrough → SetJobPrompt) 与 dashboard wshub 双路径同 policy；返 wrapped `ErrInvalidPrompt` sentinel 让 caller `errors.Is` 区分 ErrJobNotFound / ErrPersistFailed。
@@ -661,7 +661,7 @@
 - [ ] **R242-ARCH-14 [REFACTOR]** `internal/cron/scheduler.go:2125-2163` `deadlineInterrupter` 单方法接口直接依赖 `session.InterruptOutcome`；提到 internal/types 共享或 cron 镜像枚举。
 - [ ] **R242-ARCH-15 [REFACTOR]** `internal/cron/scheduler.go:280-294` `runningJobs sync.Map` 永不清理；DeleteJob 调 LoadAndDelete 或 freshness epoch。
 - [ ] **R242-ARCH-16 [REFACTOR]** `internal/session/router_core.go:413` excluders atomic.Pointer 启动期 nil pool fallback；cmd 装配前 SetPendingExcluders(true) blocking。
-- [ ] **R242-ARCH-18 [REFACTOR]** `internal/session/auto_chain_router.go:73-89` PickWorkspaceChain Phase 2/3 双 build excluder 不一致；Phase 3 复用 Phase 2 inner。
+- [~] **R242-ARCH-18 [REFACTOR]** `internal/session/auto_chain_router.go:73-89` PickWorkspaceChain Phase 2/3 双 build excluder 不一致；Phase 3 复用 Phase 2 inner。
 - [ ] **R242-ARCH-19 [REFACTOR]** `internal/cron/runstore.go:22-32` runs/ vs cron_jobs.json 物理分离无 atomic transaction；DeleteJob 先 await persistJobsLocked 再删 runs/。
 - [ ] **R242-ARCH-20 [REFACTOR]** `internal/cli/eventlog.go:469-478` PersistSink 双 atomic store sinkReady 顺序无 healthcheck；加 `replayDropTotal atomic.Int64` 在 /health 端点。
 - [ ] **R242-ARCH-21 [REFACTOR]** `cmd/naozhi/main.go:919-937` 关闭顺序 sysMgr → scheduler → router 仅注释；抽 `lifecycle.Coordinator` 显式依赖图。
