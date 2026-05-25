@@ -378,9 +378,8 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 	}
 	s.lastActive.Store(time.Now().UnixNano())
 	s.initCreatedAtIfUnset()
-	r.attachHistorySource(s)
-	r.sessions[key] = s
-	r.indexAdd(key)
+	// R215-ARCH-P2-2: single publish funnel.
+	r.publishSessionLocked(key, s, false)
 	r.storeDirty = true
 	r.storeGen.Add(1)
 	r.mu.Unlock()
@@ -513,9 +512,8 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 	}
 	s.lastActive.Store(time.Now().UnixNano())
 	s.initCreatedAtIfUnset()
-	r.attachHistorySource(s)
-	r.sessions[key] = s
-	r.indexAdd(key)
+	// R215-ARCH-P2-2: single publish funnel.
+	r.publishSessionLocked(key, s, false)
 	r.storeDirty = true
 	r.storeGen.Add(1)
 	r.mu.Unlock()

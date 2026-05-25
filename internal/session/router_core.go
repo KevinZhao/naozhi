@@ -1042,9 +1042,11 @@ func NewRouter(cfg RouterConfig) *Router {
 			default:
 				s.initCreatedAtIfUnset()
 			}
-			r.attachHistorySource(s)
-			r.sessions[key] = s
-			r.indexAdd(key)
+			// R215-ARCH-P2-2: publishSessionLocked funnels the
+			// attachHistorySource + map insert + index update so the
+			// invariant is a property of the publish step, not five
+			// copy-paste sites.
+			r.publishSessionLocked(key, s, false)
 			r.trackSessionID(entry.SessionID)
 			if entry.SessionID != "" {
 				r.sessionIDToKey[entry.SessionID] = key
