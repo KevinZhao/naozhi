@@ -667,7 +667,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		}
 		s.finishRun(finishArgs{
 			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-			state: state, errClass: errClass, errMsg: fmt.Sprintf("session error: %v", err),
+			state: state, errClass: errClass, errMsg: "session error: " + err.Error(),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
 		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行跳过，请稍后重试。"))
@@ -793,7 +793,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		}
 		s.finishRun(finishArgs{
 			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-			state: state, errClass: errClass, errMsg: fmt.Sprintf("send error: %v", err),
+			state: state, errClass: errClass, errMsg: "send error: " + err.Error(),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
 		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行失败，请稍后重试。"))
