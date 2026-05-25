@@ -304,24 +304,8 @@ const maxSeenNonces = 50000
 // with upstream rate protection.
 const tokenFailCooldown = 5 * time.Second
 
-// reactionCacheTTL bounds how long an unpaired reactionIDs entry lingers
-// before the cleanup sweep drops it. Add-without-Remove windows come from:
-// (a) bot restart between the two calls (rare; queue processing is short);
-// (b) the Feishu user deleting the message out from under us; (c) an early
-// return in the dispatch path before RemoveReaction fires. 12h comfortably
-// exceeds the session ttl default (30m) and the longest reasonable "queued"
-// lifespan a message might have, so any live RemoveReaction still hits a
-// cached entry; anything older than 12h is almost certainly orphaned and
-// safe to GC. R175-P1.
-const reactionCacheTTL = 12 * time.Hour
-
-// reactionCacheEntry is the sync.Map value shape for reactionIDs. Kept as a
-// struct (not a raw string) so the expiry can be checked without consulting
-// any external state. R175-P1.
-type reactionCacheEntry struct {
-	id     string
-	expiry int64 // UnixNano; expired when time.Now().UnixNano() >= expiry (boundary-inclusive, matches sweep at cleanupNoncesTick)
-}
+// reactionCacheTTL / reactionCacheEntry / reactionEmojiType / reactionCacheKey
+// moved to reaction_cache.go (R214-ARCH-13 continuation).
 
 // nonceCleanupInterval is set to nonceTTL/2 so an expired entry never sits
 // in seenNonces longer than ~1.5 × TTL after expiry. Previously the ticker
@@ -1240,23 +1224,7 @@ func (f *Feishu) getAccessToken(_ context.Context) (string, error) {
 }
 
 // verifySignature / verifyTimestamp moved to signature.go (R214-ARCH-13).
-
-// reactionEmojiType maps platform-agnostic ReactionType to Feishu emoji_type.
-// Feishu's reaction API uses string emoji_types (see OpenAPI docs). Unknown
-// types return "" so callers can skip.
-func reactionEmojiType(r platform.ReactionType) string {
-	switch r {
-	case platform.ReactionQueued:
-		// HOURGLASS hints "waiting" without implying success or failure.
-		return "HOURGLASS"
-	}
-	return ""
-}
-
-// reactionCacheKey builds the (msgID, emojiType) composite key for reactionIDs.
-func reactionCacheKey(messageID, emojiType string) string {
-	return messageID + "|" + emojiType
-}
+// reactionEmojiType / reactionCacheKey moved to reaction_cache.go.
 
 // reactionRequestBody is the JSON body sent to POST /reactions.
 // R182-PERF-P1-1: a fixed struct avoids the 2 map[string]any / map[string]string
