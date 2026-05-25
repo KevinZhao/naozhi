@@ -1289,6 +1289,17 @@ func (s *ManagedSession) DeathReason() string {
 // snapshot should not rely on this path; a future SnapshotReadOnly
 // variant is tracked under R229-GO-2 once the dashboard polling cadence
 // is moved to a dedicated mirror.
+//
+// Performance contract (R214-PERF-2 #411): Snapshot MUST NOT copy
+// persistedHistory or any other O(N) backing structure. Dashboards poll
+// at 1Hz × N tabs × M sessions, and at 500 entries × ~400 B each the
+// per-call copy would burn ~200 KB of allocation per session per second.
+// Scalar fields are cached via atomic.Pointer[string] (lastPrompt,
+// lastActivity, lastResponse, deathReason, model) so the snapshot is
+// O(1) regardless of session age. Callers that need the full event log
+// must call EventEntries / EventLastN / EventEntriesSince explicitly,
+// which is the cheap-rare-call path versus this hot poll path.
+// snapshot_no_history_copy_test.go pins the contract.
 func (s *ManagedSession) Snapshot() SessionSnapshot {
 	s.parseKeyParts()
 	snap := SessionSnapshot{
