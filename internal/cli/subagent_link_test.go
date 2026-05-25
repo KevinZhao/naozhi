@@ -204,7 +204,12 @@ func TestLinker_Resolve_RetryThenSucceed(t *testing.T) {
 	// Fire Resolve first; have file appear mid-grace. Simulates "CLI writes
 	// meta.json 30ms after task_started".
 	toolUseTime := time.Now().UnixMilli()
+	// defer-join the writer goroutine: without it a late wakeup races t.TempDir
+	// cleanup and the goroutine's t.Fatalf fires after the test is done.
+	done := make(chan struct{})
+	defer func() { <-done }()
 	go func() {
+		defer close(done)
 		time.Sleep(30 * time.Millisecond)
 		writeAgentFiles(t, subagentDir, "33333333333333333", "delayed", sessionID, "p_d", time.Now())
 	}()
