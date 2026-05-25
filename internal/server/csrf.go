@@ -33,26 +33,6 @@ func requestHost(r *http.Request, trustedProxy bool) string {
 	return host
 }
 
-// requestScheme returns the effective scheme ("http" or "https") the browser
-// (or trusted proxy) used to reach naozhi. Mirrors AuthHandlers.isSecure:
-// r.TLS is the source of truth for direct HTTPS, and X-Forwarded-Proto is
-// honored only when trustedProxy is set (ALB / CloudFront / nginx in front).
-//
-// [R247-SEC-1] Used by sameOriginOK to require Origin/Referer scheme to
-// match the request scheme: an HTTPS dashboard request must not be paired
-// with an `Origin: http://...` header (mixed-content downgrade) and vice
-// versa, otherwise an attacker on a sibling http:// origin can satisfy the
-// host-only same-origin gate against the secure dashboard.
-func requestScheme(r *http.Request, trustedProxy bool) string {
-	if r.TLS != nil {
-		return "https"
-	}
-	if trustedProxy && r.Header.Get("X-Forwarded-Proto") == "https" {
-		return "https"
-	}
-	return "http"
-}
-
 // sameOriginOK reports whether the Origin (or Referer fallback) header
 // identifies the same host naozhi is serving on. Missing Origin AND
 // Referer is treated as "not a browser navigation" (curl, server-to-server
@@ -67,6 +47,16 @@ func requestScheme(r *http.Request, trustedProxy bool) string {
 // SameSite=Strict cookies do not protect against same-registrable-domain
 // cross-origin attackers (evil.naozhi-host.example → naozhi-host.example)
 // — this gate closes that gap at the HTTP layer.
+//
+// Scheme is intentionally not compared. The auth cookie is issued without
+// a Domain attribute (handleLogin sets only Path/HttpOnly/Secure/SameSite),
+// so the browser only sends it back to the exact request host; SameSite=Strict
+// additionally prevents cross-site requests from carrying it. A sibling-origin
+// attacker who somehow forces a same-host scheme downgrade still cannot get
+// the cookie attached, so the previous scheme-match gate (R247-SEC-1) added
+// no real protection while breaking deployments where the CDN→origin hop is
+// HTTP-only and X-Forwarded-Proto reaches naozhi as http even on HTTPS
+// viewer traffic.
 func sameOriginOK(r *http.Request, trustedProxy bool) bool {
 	host := requestHost(r, trustedProxy)
 	if host == "" {
@@ -74,12 +64,6 @@ func sameOriginOK(r *http.Request, trustedProxy bool) bool {
 		// anything. Refuse the write to fail closed.
 		return false
 	}
-	// [R247-SEC-1] Compute the request scheme once; both Origin and
-	// Referer paths must match it so an HTTPS request cannot be paired
-	// with an `Origin: http://host` (mixed-content downgrade) and vice
-	// versa. Without this an attacker on a sibling http:// host can
-	// pass the host-only gate against an https:// dashboard.
-	reqScheme := requestScheme(r, trustedProxy)
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		// Fall back to Referer. Some browsers omit Origin on same-origin
@@ -101,10 +85,6 @@ func sameOriginOK(r *http.Request, trustedProxy bool) bool {
 		if u.Scheme != "http" && u.Scheme != "https" {
 			return false
 		}
-		// [R247-SEC-1] Referer scheme must match the request scheme.
-		if u.Scheme != reqScheme {
-			return false
-		}
 		return u.Host == host
 	}
 	// RFC 6454 allows "null" for opaque origins (sandboxed iframes, file://
@@ -119,12 +99,6 @@ func sameOriginOK(r *http.Request, trustedProxy bool) bool {
 	}
 	// R191-SEC-M1: Same scheme guard as the Referer fallback above.
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return false
-	}
-	// [R247-SEC-1] Origin scheme must match the request scheme so a
-	// downgrade attack from a sibling http:// origin cannot satisfy the
-	// gate against an https:// dashboard.
-	if u.Scheme != reqScheme {
 		return false
 	}
 	return u.Host == host

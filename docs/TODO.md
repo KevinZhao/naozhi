@@ -196,7 +196,7 @@
 > - [R247-GO-2] cron 引入 `ErrAmbiguousPrefix` sentinel + `findByPrefix` ambiguous 分支 `%w` 包装，让 dashboard handler 能 errors.Is 区分 not-found vs ambiguous
 > - [R247-GO-3] (BREAKING-LOCAL) cron/scheduler_jobs.go `ListJobs` nil slice 改 make([]Job, 0, len)；空 list JSON 从 null → []
 > - [R247-GO-4] (BREAKING-LOCAL) cron/runstore.go ringRead/ringSnapshot 加 cap(ring)==0 守卫防 integer divide-by-zero panic
-> - [R247-SEC-1] (BREAKING-LOCAL) server/csrf.go sameOriginOK 加 scheme 比对（HTTPS 请求拒绝 `Origin: http://host`）+ `requestScheme(r, trustedProxy)` helper
+> - [R247-SEC-1] (BREAKING-LOCAL) server/csrf.go sameOriginOK 加 scheme 比对（HTTPS 请求拒绝 `Origin: http://host`）+ `requestScheme(r, trustedProxy)` helper — **REVERTED 2026-05-25**：CDN→origin HTTP-only 链路下 `X-Forwarded-Proto=http` 强制注入，HTTPS viewer 访问 `Origin: https://host` 触发 scheme mismatch 403；auth cookie 已是 host-scoped + SameSite=Strict，scheme-match 边际安全收益 ~0。
 > - [R247-SEC-2] server/dashboard_cron.go handleTrigger 加 per-IP rate limit（30 req/min，burst 6，统一 `writeLimiter` 桶）
 > - [R247-SEC-3] server/dashboard_cron.go handlePreview 复用同 `writeLimiter` 桶
 >
