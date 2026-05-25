@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -99,6 +100,44 @@ func (m *Manager) Scan() error {
 		}
 	}
 
+	// Sidebar order migration: stamp CreatedAt on any project missing one.
+	// Sort the names so the synthesised timestamps preserve the upgraded
+	// binary's first-render order (which used to be byte-name ascending via
+	// All()'s old comparator) — operators see no visible reshuffling on the
+	// upgrade boot. Each project gets a 1ms-spaced value so subsequent
+	// All() sorts have a strict order regardless of clock resolution.
+	//
+	// Concurrency: this block runs before m.mu.Lock() and writes both
+	// in-memory ProjectConfig.CreatedAt and project.yaml on disk. Scan was
+	// never concurrency-safe; two simultaneous Scans would each pick their
+	// own `base`, the last m.projects = projects assignment wins in memory,
+	// and on disk the last writer wins. Migration is idempotent on
+	// subsequent boots (zero-CreatedAt set is empty), so a one-off skew
+	// during a racing first-upgrade Scan self-heals on the next clean Scan.
+	// No current caller invokes Scan concurrently.
+	missing := make([]string, 0, len(projects))
+	for name, p := range projects {
+		if p.Config.CreatedAt == 0 {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		slices.Sort(missing)
+		base := time.Now().UnixMilli()
+		for i, name := range missing {
+			p := projects[name]
+			p.Config.CreatedAt = base + int64(i)
+			// Best-effort persist: a write failure here just means the next
+			// boot will re-stamp (with a different base, so order may shift
+			// once). Log and move on rather than failing the whole scan.
+			cfgSnap := snapshotConfig(p)
+			if err := saveConfigToPath(p.configPath(), cfgSnap); err != nil {
+				slog.Warn("persist project CreatedAt failed",
+					"name", name, "err", err)
+			}
+		}
+	}
+
 	m.mu.Lock()
 	m.projects = projects
 	m.rebuildBindingIndex()
@@ -120,7 +159,10 @@ func (m *Manager) Get(name string) *Project {
 	return p.snapshot()
 }
 
-// All returns snapshots of all projects sorted by name.
+// All returns snapshots of all projects sorted by CreatedAt ascending so the
+// dashboard sidebar can render newly-added folders at the bottom of the list.
+// Name is the tiebreaker for entries that share a timestamp (mostly the
+// migration backfill batch and the unlikely same-millisecond create case).
 func (m *Manager) All() []*Project {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -130,6 +172,9 @@ func (m *Manager) All() []*Project {
 		result = append(result, p.snapshot())
 	}
 	slices.SortFunc(result, func(a, b *Project) int {
+		if c := cmp.Compare(a.Config.CreatedAt, b.Config.CreatedAt); c != 0 {
+			return c
+		}
 		return cmp.Compare(a.Name, b.Name)
 	})
 	return result

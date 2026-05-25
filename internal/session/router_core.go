@@ -980,6 +980,19 @@ func NewRouter(cfg RouterConfig) *Router {
 			if entry.LastActive != 0 {
 				s.lastActive.Store(entry.LastActive)
 			}
+			// Sidebar order anchor: prefer the persisted CreatedAt, fall back
+			// to LastActive for pre-feature stores so the upgraded binary keeps
+			// older sessions in roughly their previous relative order. If both
+			// are zero (very first save loop after a brand-new key), stamp now
+			// so the entry still gets a stable comparator key.
+			switch {
+			case entry.CreatedAt != 0:
+				s.createdAt.Store(entry.CreatedAt)
+			case entry.LastActive != 0:
+				s.createdAt.Store(entry.LastActive)
+			default:
+				s.initCreatedAtIfUnset()
+			}
 			r.attachHistorySource(s)
 			r.sessions[key] = s
 			r.indexAdd(key)

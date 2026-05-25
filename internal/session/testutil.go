@@ -136,6 +136,7 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 	}
 	s.storeProcess(proc)
 	s.touchLastActive()
+	s.initCreatedAtIfUnset()
 	r.attachHistorySource(s)
 	r.sessions[key] = s
 	r.activeCount.Add(1)

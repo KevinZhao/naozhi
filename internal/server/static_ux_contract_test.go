@@ -2041,10 +2041,14 @@ func TestDashboardJS_R110P3_CostTooltipHelper(t *testing.T) {
 	}
 
 	// 3) Four data-point labels in Chinese. Pinning the literal copy so
-	//    an i18n refactor touches this line with intent.
+	//    an i18n refactor touches this line with intent. "创建时间" replaced
+	//    "首次打开" when sidebar order migrated from per-client localStorage
+	//    firstSeen to the server-stamped session created_at: the tooltip
+	//    now mirrors the same value the comparator uses, instead of a
+	//    separate per-dashboard timestamp.
 	for _, label := range []string{
 		"'累计花费: $'",
-		"'首次打开: '",
+		"'创建时间: '",
 		"'最后活动: '",
 		"'会话 ID: …'",
 	} {
