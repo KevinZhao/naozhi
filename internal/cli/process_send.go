@@ -269,34 +269,58 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 				}, nil
 			}
 		case <-watchdog.C:
-			now := time.Now()
-			if now.Sub(lastOutput) >= noOutputDur {
-				if sr := p.findResultSince(turnStartMS); sr != nil {
-					return sr, nil
-				}
-				// Set death reason BEFORE Kill so readLoop's shim_eof/
-				// shim_read_error classification (triggered by shimConn.Close)
-				// cannot overwrite the true root cause. setDeathReason is
-				// first-writer-wins, so the earlier set wins the CAS.
-				p.setDeathReason(DeathReasonNoOutputTimeout)
-				p.slogger().Error("watchdog: no output timeout", "timeout", noOutputDur)
-				p.Kill()
-				return nil, fmt.Errorf("%w (%s)", ErrNoOutputTimeout, noOutputDur)
-			}
-			if now.Sub(turnStart) >= totalDur {
-				if sr := p.findResultSince(turnStartMS); sr != nil {
-					return sr, nil
-				}
-				p.setDeathReason(DeathReasonTotalTimeout)
-				p.slogger().Error("watchdog: total timeout", "timeout", totalDur)
-				p.Kill()
-				return nil, fmt.Errorf("%w (%s)", ErrTotalTimeout, totalDur)
+			sr, err := p.handleWatchdogTick(time.Now(), lastOutput, turnStart, turnStartMS, noOutputDur, totalDur)
+			if sr != nil || err != nil {
+				return sr, err
 			}
 			// Re-arm. watchdog.C was just drained by the case-receive so
 			// Reset on a stopped/expired timer is safe per stdlib docs.
 			watchdog.Reset(checkInterval)
 		}
 	}
+}
+
+// handleWatchdogTick evaluates the no-output and total-turn deadlines for a
+// single watchdog wakeup. It returns:
+//
+//   - (sr, nil) when the deadline elapsed but a result event already landed
+//     in the EventLog (eventCh non-blocking send dropped it); caller returns
+//     sr.
+//   - (nil, err) when the deadline elapsed and no fallback result is
+//     available; caller returns the error after Kill() has been issued.
+//   - (nil, nil) when neither deadline has fired; caller re-arms the
+//     watchdog and continues the receive loop.
+//
+// Extracted from Send so the watchdog branch is independently testable and
+// the parent function reads as a flat select. R237-GO-3.
+func (p *Process) handleWatchdogTick(
+	now, lastOutput, turnStart time.Time,
+	turnStartMS int64,
+	noOutputDur, totalDur time.Duration,
+) (*SendResult, error) {
+	if now.Sub(lastOutput) >= noOutputDur {
+		if sr := p.findResultSince(turnStartMS); sr != nil {
+			return sr, nil
+		}
+		// Set death reason BEFORE Kill so readLoop's shim_eof/
+		// shim_read_error classification (triggered by shimConn.Close)
+		// cannot overwrite the true root cause. setDeathReason is
+		// first-writer-wins, so the earlier set wins the CAS.
+		p.setDeathReason(DeathReasonNoOutputTimeout)
+		p.slogger().Error("watchdog: no output timeout", "timeout", noOutputDur)
+		p.Kill()
+		return nil, fmt.Errorf("%w (%s)", ErrNoOutputTimeout, noOutputDur)
+	}
+	if now.Sub(turnStart) >= totalDur {
+		if sr := p.findResultSince(turnStartMS); sr != nil {
+			return sr, nil
+		}
+		p.setDeathReason(DeathReasonTotalTimeout)
+		p.slogger().Error("watchdog: total timeout", "timeout", totalDur)
+		p.Kill()
+		return nil, fmt.Errorf("%w (%s)", ErrTotalTimeout, totalDur)
+	}
+	return nil, nil
 }
 
 // Interrupt sends SIGINT to the CLI process via shim.
