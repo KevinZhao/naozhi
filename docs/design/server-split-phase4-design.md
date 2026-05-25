@@ -271,6 +271,10 @@ git diff phase-N..phase-N-1 -- '*.go' | grep -vE "^[+-]package |^[+-]import " | 
 
 #### v0.3 方案：单接口 + cross-method 契约
 
+> **v0.4 实测修订**：2026-05-25 grep `h\.queue\.[A-Z]` 在所有 wshub*.go 中实际只出现 5 个方法（Enqueue / DoneOrDrain / Discard / Mode / CollectDelay）；`ShouldNotify` 仅在 `dispatch` 包内部被调用，Hub 不需要。接口面按实测裁剪到 5 方法，避免"interface 写得宽但实测无人用"的 ISP 噪音。
+>
+> **签名按实际 dispatch.MessageQueue 方法集对齐**（不是设计稿之前粗估的 `Enqueue(key, text, payload any)` 那种简化签名）：
+
 ```go
 // internal/wshub/types.go
 
@@ -280,14 +284,15 @@ git diff phase-N..phase-N-1 -- '*.go' | grep -vE "^[+-]package |^[+-]import " | 
 //
 // Cross-method contract: see docs/design/server-consumer-contracts.md#message-queue
 type MessageEnqueuer interface {
-    Enqueue(key, text string, payload any) (queued bool, depth int)
+    Enqueue(key string, msg dispatch.QueuedMsg) (isOwner, enqueued, shouldInterrupt bool, gen uint64)
+    DoneOrDrain(key string, gen uint64) []dispatch.QueuedMsg
     Discard(key string)
-    Mode() string
+    Mode() dispatch.QueueMode
     CollectDelay() time.Duration
-    DoneOrDrain(key string) bool
-    ShouldNotify(key string, depth int) bool
 }
 ```
+
+> **未来扩展**：如果某次 phase 改动让 Hub 直接调用 `ShouldNotify` / `TryAcquire` / `Release` 等，接口加方法 + 实现侧编译期 `var _` 绑定保证不漂移。
 
 dispatch 侧单条绑定：
 

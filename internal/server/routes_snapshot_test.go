@@ -47,6 +47,25 @@ func TestRoutesSnapshot(t *testing.T) {
 		t.Fatal("no routes scanned — likely a regex/AST parse miss")
 	}
 
+	// M2 (PR #369 review): fallback strings ("<unmapped:..>", "<unknown>",
+	// "<bare:..>") in HandlerType signal that handlerTypeOf could not
+	// resolve the receiver — silently writing them into golden lets a
+	// future Phase 1+ PR add a new handler field without updating
+	// serverFieldType. Fail the test instead so the gap is visible at
+	// PR review time.
+	for _, r := range routes {
+		if strings.HasPrefix(r.HandlerType, "<") {
+			t.Errorf("unresolvable handler for %s %s: %q\n"+
+				"hint: add the field name to serverFieldType "+
+				"(routes_snapshot_test.go) so this PR can map it to a "+
+				"stable type identifier.",
+				r.Method, r.Path, r.HandlerType)
+		}
+	}
+	if t.Failed() {
+		return
+	}
+
 	sort.Slice(routes, func(i, j int) bool {
 		if routes[i].Path != routes[j].Path {
 			return routes[i].Path < routes[j].Path
