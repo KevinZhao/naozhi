@@ -57,6 +57,37 @@ func capHistoryBatch(entries []cli.EventEntry) []cli.EventEntry {
 	return entries[len(entries)-maxHistoryPushEntries:]
 }
 
+// marshalHistoryFrame produces the WS "history" frame bytes for the given
+// session key + entries tail, coalescing the marshalPooled call across all
+// eventPushLoop goroutines that are in lock-step on the same session. R214-
+// PERF-4: the prior code path called marshalPooled directly inside each
+// pushLoop, so N multi-tab dashboards on one session paid N reflect-marshals
+// per notify wave on payloads that were byte-identical between tabs.
+//
+// The cache is keyed by session key; the per-key fingerprint
+// (lastTime, latest entry Time, count) detects out-of-lockstep subscribers
+// (e.g. a slow tab that fell behind the head and is now catching up) and
+// forces a fresh marshal rather than handing back stale bytes.
+//
+// On cache miss the marshal runs under the per-key mutex inside
+// historyMarshalCache.getOrMarshal so the first arriving subscriber pays the
+// marshal cost once and the rest of the fan-out wave reuses the bytes. The
+// returned []byte is safe to hand to wsClient.SendRaw concurrently from
+// multiple goroutines — SendRaw enqueues a slice header into a per-client
+// channel and the writePump never mutates the underlying buffer.
+func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []cli.EventEntry) ([]byte, error) {
+	if h.historyMarshalCache == nil {
+		// Defensive: should not happen for a Hub built via NewHub, but a
+		// hand-constructed test Hub may skip the field. Fall back to the
+		// uncached path so behaviour is identical to pre-R214-PERF-4.
+		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
+	}
+	data, _, err := h.historyMarshalCache.getOrMarshal(key, lastTime, entries, func() ([]byte, error) {
+		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
+	})
+	return data, err
+}
+
 // eventPushLoop is the per-subscription pump that reads EventLog notifications
 // and streams entries to the WS client. It owns exactly one clientWG slot for
 // its entire lifetime (Add happens in completeSubscribe before go; Done runs
@@ -103,7 +134,7 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 				entries := sess.EventEntriesSince(lastTime)
 				if len(entries) > 0 {
 					entries = capHistoryBatch(entries)
-					data, err := marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
+					data, err := h.marshalHistoryFrame(key, lastTime, entries)
 					if err == nil {
 						c.SendRaw(data)
 					}
@@ -126,8 +157,13 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 			// doesn't see a single multi-MB push frame that starves the
 			// WS send channel — the dashboard already backfills older
 			// events via /api/sessions/events?before=. R68-PERF-H1.
+			//
+			// R214-PERF-4: marshalHistoryFrame coalesces the JSON marshal
+			// across N pushLoops subscribed to the same session — multi-tab
+			// dashboards previously paid N marshals per notify wave for the
+			// identical (key, entries-tail) payload.
 			entries = capHistoryBatch(entries)
-			data, err := marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
+			data, err := h.marshalHistoryFrame(key, lastTime, entries)
 			if err != nil {
 				continue
 			}

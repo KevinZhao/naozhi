@@ -109,6 +109,10 @@ const (
 //	agent tailer (3)  tailers                       wshub.go, wshub_agent.go
 //	                  wiredLinkersMu                wshub.go, wshub_agent.go
 //	                  wiredLinkers                  wshub.go, wshub_agent.go
+//	event-push (1)    historyMarshalCache           wshub.go (ctor),
+//	                                                wshub_eventpush.go,
+//	                                                wshub_subscribe.go,
+//	                                                wshub_eventpush_cache.go
 //
 // Phase 4 抽到 internal/wshub/ 后，方法严格按文件分块（hub_broadcast.go
 // 只 WRITE broadcast block + READ shared deps；其余同理）。CI lint
@@ -264,6 +268,15 @@ type Hub struct {
 	// stable per linker lifetime) and document the new invariant here.
 	wiredLinkersMu sync.Mutex
 	wiredLinkers   map[agentlink.AgentLinker]struct{}
+
+	// historyMarshalCache coalesces eventPushLoop's per-subscriber JSON
+	// marshal of the "history" frame so N dashboard tabs on one session
+	// pay one marshalPooled per notify wave instead of N. R214-PERF-4.
+	// Wired in NewHub; cleared on the last unsubscribe per key
+	// (handleUnsubscribe / completeSubscribe race-recovery) and on
+	// Hub.Shutdown. See wshub_eventpush_cache.go for the fingerprint /
+	// fan-out contract.
+	historyMarshalCache *historyMarshalCache
 }
 
 // HubOptions holds configuration for a Hub.
@@ -351,6 +364,7 @@ func NewHub(opts HubOptions) *Hub {
 	}
 	h.tailers = newTailerRegistry(h)
 	h.wiredLinkers = make(map[agentlink.AgentLinker]struct{})
+	h.historyMarshalCache = newHistoryMarshalCache()
 	// R219-CR-11 / R229-CR-4: a nil queue makes every WS send fall through to
 	// sessionSendLegacy (the deprecated guard path). Test harnesses and
 	// headless tools deliberately wire a nil Queue, but a production Hub
@@ -577,6 +591,13 @@ func (h *Hub) Shutdown() {
 	h.wiredLinkersMu.Lock()
 	h.wiredLinkers = nil
 	h.wiredLinkersMu.Unlock()
+
+	// R214-PERF-4: drop any cached "history" marshal payloads so the buffers
+	// (up to capHistoryBatch entries each) become collectable promptly. Safe
+	// after clientWG.Wait — no eventPushLoop will call getOrMarshal again.
+	if h.historyMarshalCache != nil {
+		h.historyMarshalCache.reset()
+	}
 
 	// Barrier: any TrackSend call that observed h.ctx.Err()==nil and was
 	// about to Add(1) is racing us. Holding sendTrackMu here forces it to

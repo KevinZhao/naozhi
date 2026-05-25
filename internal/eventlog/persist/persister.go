@@ -729,15 +729,26 @@ func (p *Persister) tickFlush() {
 }
 
 // collectFlushCandidates returns writers whose firstDirtyAt has aged
-// past FlushInterval, sorted oldest-first. Split out so tickFlush stays
-// readable and the sort can be unit-tested independently.
+// past the (adaptive) flush interval, sorted oldest-first. Split out so
+// tickFlush stays readable and the sort + adaptive scaling can be
+// unit-tested independently.
 func (p *Persister) collectFlushCandidates(now time.Time) []flushCandidate {
+	// R214-PERF-3: lengthen the effective flush interval as the live
+	// writer-set grows. Each writer's flush() does its own fsync(log) +
+	// fsync(idx); 50 sessions × 100 ms tick = 100 fsync/s sustained,
+	// dominating disk IO on slow SSD-backed instances. Scaling the
+	// debounce window damps the per-second fsync rate proportionally
+	// while preserving the FlushInterval semantics (worst-case latency
+	// is still bounded by the scaled interval). Computed once per tick
+	// rather than per writer so the bucket boundary is stable across
+	// the iteration.
+	threshold := effectiveFlushInterval(p.opts.FlushInterval, len(p.writers))
 	var cands []flushCandidate
 	for k, w := range p.writers {
 		if !w.dirty {
 			continue
 		}
-		if now.Sub(w.firstDirtyAt) < p.opts.FlushInterval {
+		if now.Sub(w.firstDirtyAt) < threshold {
 			continue
 		}
 		cands = append(cands, flushCandidate{key: k, w: w})
@@ -748,6 +759,37 @@ func (p *Persister) collectFlushCandidates(now time.Time) []flushCandidate {
 		})
 	}
 	return cands
+}
+
+// effectiveFlushInterval returns the adaptive debounce window applied
+// inside tickFlush. The base is FlushInterval; the multiplier grows in
+// fixed buckets so the resulting window doesn't oscillate as session
+// count drifts across a single boundary.
+//
+// Buckets (writerCount):
+//
+//	≤16  → 1.0× (default, single-tab dashboards / unit tests)
+//	17–64 → 1.5× (typical small deploys)
+//	65–256 → 2.0× (busy production hosts)
+//	>256  → 4.0× (cap; running this many concurrent sessions on one
+//	             host already implies operator opt-in to longer flush
+//	             windows)
+//
+// At 50 writers (the issue's headline scenario) the window goes from
+// 200 ms → 300 ms, cutting fsync rate from ~100/s to ~67/s without
+// changing durability semantics — flush still happens; it just batches
+// more entries between syncs.
+func effectiveFlushInterval(base time.Duration, writerCount int) time.Duration {
+	switch {
+	case writerCount <= 16:
+		return base
+	case writerCount <= 64:
+		return base + base/2 // 1.5×
+	case writerCount <= 256:
+		return base * 2
+	default:
+		return base * 4
+	}
 }
 
 func (p *Persister) tickIdleClose() {

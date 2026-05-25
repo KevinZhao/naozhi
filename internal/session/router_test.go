@@ -164,6 +164,7 @@ func (f *fakeProcess) EventEntriesBefore(beforeMS int64, limit int) []cli.EventE
 	return out
 }
 func (f *fakeProcess) LastActivitySummary() string { return "" }
+func (f *fakeProcess) LastResponseSummary() string { return "" }
 func (f *fakeProcess) LastEventAt() time.Time {
 	f.mu.Lock()
 	defer f.mu.Unlock()

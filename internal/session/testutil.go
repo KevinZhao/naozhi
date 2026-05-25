@@ -106,6 +106,7 @@ func (p *TestProcess) EventEntriesBefore(beforeMS int64, limit int) []cli.EventE
 	return p.EventLog.EntriesBefore(beforeMS, limit)
 }
 func (p *TestProcess) LastActivitySummary() string                { return p.EventLog.LastActivitySummary() }
+func (p *TestProcess) LastResponseSummary() string                { return p.EventLog.LastResponseSummary() }
 func (p *TestProcess) LastEventAt() time.Time                     { return p.EventLog.LastEventAt() }
 func (p *TestProcess) UserTurnCount() int64                       { return p.EventLog.UserTurnCount() }
 func (p *TestProcess) ProtocolName() string                       { return "test" }

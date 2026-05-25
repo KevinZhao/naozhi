@@ -335,3 +335,86 @@ func TestEventLog_SinkConcurrent(t *testing.T) {
 		t.Errorf("ring empty despite 200 appends")
 	}
 }
+
+// TestEventLog_AppendBatch_RingMatchesSink locks down the R214-PERF-5
+// invariant that moved the sinkCopy build outside l.mu: the ring buffer
+// entry at slot N must be byte-identical to the sink batch entry at
+// slot N. Both paths now derive from the same pre-prepared slice, so
+// any drift here would mean an InjectHistory replay shows different
+// data on disk vs. dashboard reads. Specifically asserts:
+//   - default-time substitution (e.Time == 0 → defaultTime applied to both)
+//   - UUID stamping reaches both
+//   - Summary / Type fields preserved on both
+func TestEventLog_AppendBatch_RingMatchesSink(t *testing.T) {
+	l := NewEventLog(64)
+	c := &captureSink{}
+	l.SetPersistSink(c.asSink())
+	in := []EventEntry{
+		{Type: "user", Summary: "a"},                   // Time=0 → triggers default-time path
+		{Type: "text", Summary: "b", Time: 1700000},    // explicit Time preserved
+		{Type: "tool_use", Summary: "c", Tool: "Read"}, // tool field preserved
+	}
+	l.AppendBatch(in)
+	if c.batchCount() != 1 {
+		t.Fatalf("sink called %d times, want 1", c.batchCount())
+	}
+	sinkBatch, _, _ := c.lastBatch()
+	ring := l.Entries()
+	if len(sinkBatch) != len(ring) || len(ring) != 3 {
+		t.Fatalf("len mismatch: sink=%d ring=%d want 3", len(sinkBatch), len(ring))
+	}
+	for i := range sinkBatch {
+		s, r := sinkBatch[i], ring[i]
+		if s.UUID != r.UUID || s.UUID == "" {
+			t.Errorf("entry %d UUID mismatch: sink=%q ring=%q", i, s.UUID, r.UUID)
+		}
+		if s.Time != r.Time || s.Time == 0 {
+			t.Errorf("entry %d Time mismatch or default-time not applied: sink=%d ring=%d", i, s.Time, r.Time)
+		}
+		if s.Summary != r.Summary {
+			t.Errorf("entry %d Summary mismatch: sink=%q ring=%q", i, s.Summary, r.Summary)
+		}
+		if s.Type != r.Type {
+			t.Errorf("entry %d Type mismatch: sink=%q ring=%q", i, s.Type, r.Type)
+		}
+		if s.Tool != r.Tool {
+			t.Errorf("entry %d Tool mismatch: sink=%q ring=%q", i, s.Tool, r.Tool)
+		}
+	}
+	// Default-time entry should match the explicit-time entry's time
+	// only if the test ran across a millisecond boundary (defaultTime is
+	// captured once per AppendBatch call from time.Now().UnixMilli()).
+	// We just verify the default-time entry got SOME nonzero value that
+	// matches between ring and sink (already covered above), and that
+	// the explicit-time entry kept its 1700000 value.
+	if ring[1].Time != 1700000 {
+		t.Errorf("explicit Time was overwritten: got %d, want 1700000", ring[1].Time)
+	}
+}
+
+// TestEventLog_AppendBatch_NoSinkFastPath confirms the !captureForSink
+// path still works correctly after the R214-PERF-5 split: when no sink
+// is wired, sinkCopy stays nil, the inner loop falls back to in-loop
+// stamping, and the ring still receives correctly-prepared entries.
+func TestEventLog_AppendBatch_NoSinkFastPath(t *testing.T) {
+	l := NewEventLog(16)
+	// No SetPersistSink call — captureForSink will be false.
+	in := []EventEntry{
+		{Type: "user", Summary: "x"}, // Time=0 → default-time
+		{Type: "text", Summary: "y", Time: 1700001},
+	}
+	l.AppendBatch(in)
+	ring := l.Entries()
+	if len(ring) != 2 {
+		t.Fatalf("ring len=%d, want 2", len(ring))
+	}
+	if ring[0].UUID == "" || ring[1].UUID == "" {
+		t.Errorf("UUIDs not stamped on no-sink path: %+v", ring)
+	}
+	if ring[0].Time == 0 {
+		t.Errorf("default Time not applied on no-sink path: %d", ring[0].Time)
+	}
+	if ring[1].Time != 1700001 {
+		t.Errorf("explicit Time clobbered on no-sink path: %d", ring[1].Time)
+	}
+}

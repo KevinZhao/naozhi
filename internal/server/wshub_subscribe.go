@@ -295,6 +295,7 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 	}
 
 	h.mu.Lock()
+	dropMarshalCache := false
 	if unsub, ok := c.subscriptions[key]; ok {
 		unsub()
 		delete(c.subscriptions, key)
@@ -313,11 +314,39 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 		nowNanos := time.Now().UnixNano()
 		c.markSubGenReleasable(key, nowNanos)
 		c.sweepSubGenExpiredLocked(nowNanos)
+		// R214-PERF-4: if no other client still subscribes to this key, drop
+		// the cached "history" marshal slot so its payload (capped at
+		// maxHistoryPushEntries entries; up to ~100 KB worst case) is GC'd
+		// instead of pinning memory until Shutdown. Walk under h.mu — already
+		// held — so no other client can register a subscription concurrently.
+		dropMarshalCache = !h.anyOtherClientSubscribesLocked(c, key)
 	}
 	h.mu.Unlock()
+	if dropMarshalCache && h.historyMarshalCache != nil {
+		h.historyMarshalCache.drop(key)
+	}
 	c.SendJSON(node.ServerMsg{Type: "unsubscribed", Key: key})
 }
 
+// anyOtherClientSubscribesLocked returns true when at least one client other
+// than `excluded` has a live subscription on `key`. Caller MUST hold h.mu.
+//
+// O(N_clients) — acceptable on the unsubscribe path because the dashboard's
+// per-tab subscribe/unsubscribe rate is bounded by user navigation, not
+// per-event traffic. The fan-out hot path (eventPushLoop / broadcast) does
+// NOT call this helper; only handleUnsubscribe / Shutdown do, so this scan
+// is off the per-event critical path.
+func (h *Hub) anyOtherClientSubscribesLocked(excluded *wsClient, key string) bool {
+	for other := range h.clients {
+		if other == excluded {
+			continue
+		}
+		if _, ok := other.subscriptions[key]; ok {
+			return true
+		}
+	}
+	return false
+}
 
 // ─── Remote node handlers ────────────────────────────────────────────────────
 
@@ -360,7 +389,6 @@ func (h *Hub) handleRemoteUnsubscribe(c *wsClient, msg node.ClientMsg) {
 	}
 	conn.Unsubscribe(c, msg.Key)
 }
-
 
 // PurgeNodeSubscriptions notifies all browser clients that a node disconnected,
 // so they can deselect stale sessions.
