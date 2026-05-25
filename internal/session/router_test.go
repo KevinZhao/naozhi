@@ -2361,6 +2361,65 @@ func TestCollectPreviousHistory(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// snapshotOldSessionLocked — CQ2 (R397) extraction
+// ---------------------------------------------------------------------------
+
+// TestSnapshotOldSessionLocked covers the four shapes spawnSession feeds in:
+// nil old session (genuinely-new key), populated prevSessionIDs (defensive
+// copy), totalCost preference (process value wins over store), and createdAt
+// pass-through. Pure read helper — no mutation, lock-free in the test
+// (caller documentation pins the r.mu requirement; the helper itself is a
+// plain function so it works without a Router).
+func TestSnapshotOldSessionLocked(t *testing.T) {
+	t.Run("nil returns zero values", func(t *testing.T) {
+		prev, cost, created := snapshotOldSessionLocked(nil)
+		if prev != nil || cost != 0 || created != 0 {
+			t.Errorf("snapshotOldSessionLocked(nil) = (%v, %v, %v), want (nil, 0, 0)",
+				prev, cost, created)
+		}
+	})
+
+	t.Run("prevSessionIDs defensive copy", func(t *testing.T) {
+		s := &ManagedSession{prevSessionIDs: []string{"id-a", "id-b"}}
+		prev, _, _ := snapshotOldSessionLocked(s)
+		if len(prev) != 2 || prev[0] != "id-a" || prev[1] != "id-b" {
+			t.Fatalf("prev = %v, want [id-a id-b]", prev)
+		}
+		// Mutating the returned slice must not affect the source.
+		prev[0] = "mutated"
+		if s.prevSessionIDs[0] != "id-a" {
+			t.Errorf("source mutated through returned slice: %v", s.prevSessionIDs)
+		}
+	})
+
+	t.Run("totalCost falls back to store when no proc", func(t *testing.T) {
+		s := &ManagedSession{}
+		storeTotalCost(&s.totalCost, 1.234)
+		_, cost, _ := snapshotOldSessionLocked(s)
+		if cost != 1.234 {
+			t.Errorf("cost = %v, want 1.234 (from store, proc=nil)", cost)
+		}
+	})
+
+	t.Run("createdAt round-trips", func(t *testing.T) {
+		s := &ManagedSession{}
+		s.createdAt.Store(123456789)
+		_, _, created := snapshotOldSessionLocked(s)
+		if created != 123456789 {
+			t.Errorf("created = %v, want 123456789", created)
+		}
+	})
+
+	t.Run("empty prevSessionIDs yields nil (no zero-len alloc)", func(t *testing.T) {
+		s := &ManagedSession{}
+		prev, _, _ := snapshotOldSessionLocked(s)
+		if prev != nil {
+			t.Errorf("prev = %v, want nil for empty source", prev)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
 // installFreshSessionLocked — CQ2 Round 213 extraction
 // ---------------------------------------------------------------------------
 //

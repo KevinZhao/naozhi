@@ -456,6 +456,49 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	}
 }
 
+// snapshotOldSessionLocked captures the per-session fields that spawnSession
+// needs to read AFTER it releases r.mu. Returns (prevIDs copy, totalCost,
+// createdAtNanos). Pure read; safe to call with old == nil (returns zero
+// values for all three).
+//
+// LOCK: caller MUST hold r.mu — these fields are written under r.mu by
+// sibling paths (RegisterCronStub touches workspace, evictOldest touches
+// totalCost via Process accessors, spawnSession itself stamps createdAt).
+// Reading them after r.mu is released races those writers.
+//
+// CQ2 (R194 / Round 174-194): extracted from spawnSession so the long
+// validate → reserve → spawn → register sequence does not require the
+// reader to scroll through the snapshot block to find the next phase.
+// Behavior is byte-for-byte identical to the previous inline copy.
+func snapshotOldSessionLocked(old *ManagedSession) ([]string, float64, int64) {
+	if old == nil {
+		return nil, 0, 0
+	}
+	var oldPrevIDs []string
+	if len(old.prevSessionIDs) > 0 {
+		oldPrevIDs = make([]string, len(old.prevSessionIDs))
+		copy(oldPrevIDs, old.prevSessionIDs)
+	}
+	// Preserve the cumulative cost across process replacement so the
+	// dashboard doesn't flash $0.00 between spawn and the first result
+	// event. Prefer the live process's value (freshest) over the
+	// store-restored s.totalCost; fall back to the latter when no
+	// process is attached (restored-from-disk sessions).
+	var oldTotalCost float64
+	if p := old.loadProcess(); p != nil {
+		oldTotalCost = p.TotalCost()
+	}
+	if oldTotalCost == 0 {
+		oldTotalCost = loadTotalCost(&old.totalCost)
+	}
+	// Carry the original creation timestamp across spawn so resume /
+	// reset-and-recreate / takeover paths keep the session in its
+	// established sidebar position. installFreshSessionLocked stamps now
+	// when this is zero (genuinely-new key).
+	oldCreatedAt := old.createdAt.Load()
+	return oldPrevIDs, oldTotalCost, oldCreatedAt
+}
+
 // collectPreviousHistory gathers JSONL-backed history entries and the
 // session ID chain for a respawn. Returns (entries, chain). Pure
 // computation — no mutation of r.sessions; caller must hold r.mu
@@ -674,35 +717,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// acquired independently by event injection). The old reference is safe to
 	// read because sessions are never mutated after creation, only replaced.
 	old := r.sessions[key]
-	// Snapshot fields that are written under r.mu elsewhere (e.g.
-	// RegisterCronStub writes old.workspace under r.mu) before releasing
-	// the lock; reading them after the release races those writers.
-	// Round 49 concurrency finding.
-	var oldPrevIDs []string
-	var oldTotalCost float64
-	var oldCreatedAt int64
-	if old != nil {
-		if len(old.prevSessionIDs) > 0 {
-			oldPrevIDs = make([]string, len(old.prevSessionIDs))
-			copy(oldPrevIDs, old.prevSessionIDs)
-		}
-		// Preserve the cumulative cost across process replacement so the
-		// dashboard doesn't flash $0.00 between spawn and the first result
-		// event. Prefer the live process's value (freshest) over the
-		// store-restored s.totalCost; fall back to the latter when no
-		// process is attached (restored-from-disk sessions).
-		if p := old.loadProcess(); p != nil {
-			oldTotalCost = p.TotalCost()
-		}
-		if oldTotalCost == 0 {
-			oldTotalCost = loadTotalCost(&old.totalCost)
-		}
-		// Carry the original creation timestamp across spawn so resume /
-		// reset-and-recreate / takeover paths keep the session in its
-		// established sidebar position. installFreshSessionLocked stamps now
-		// when this is zero (genuinely-new key).
-		oldCreatedAt = old.createdAt.Load()
-	}
+	oldPrevIDs, oldTotalCost, oldCreatedAt := snapshotOldSessionLocked(old)
 	r.mu.Unlock()
 
 	oldHistory, prevIDs := collectPreviousHistory(old, oldPrevIDs, resumeID)
