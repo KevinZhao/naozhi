@@ -480,25 +480,12 @@ func main() {
 	// driven, so missing imports fail loudly. docs/rfc/multi-backend.md §3.
 	backend.RegisterDefaults()
 
-	// docs/rfc/multi-backend.md §11.1: warn-and-continue validation. An
-	// unknown cli.backends ID would otherwise be silently dropped by the
-	// loop below — surface each finding so journalctl shows the typo
-	// within the first 30s. error-level diags do NOT abort startup
-	// because runtime gracefully skips unknown IDs and erroring here
-	// would defeat the multi-backend rollout's "fail-soft" posture.
-	for _, diag := range cfg.Validate() {
-		switch diag.Level {
-		case "error":
-			slog.Error("config validation",
-				"field", diag.Field, "msg", diag.Msg, "hint", diag.Hint)
-		default:
-			slog.Warn("config validation",
-				"field", diag.Field, "msg", diag.Msg, "hint", diag.Hint)
-		}
-	}
+	// CQ1 (#396): config validation diag fan-out extracted to
+	// logConfigValidationDiagnostics so a future format change is
+	// unit-testable. docs/rfc/multi-backend.md §11.1 fail-soft posture
+	// preserved — error-level diags do NOT abort startup.
+	logConfigValidationDiagnostics(cfg)
 
-	backendsCfg := cfg.EnabledBackends()
-	defaultBackend := cfg.DefaultBackendID()
 	// Shared shim manager across all backends — every shim records its own
 	// Backend in state, so reconnect routing is backend-aware without
 	// needing per-backend state directories.
@@ -515,82 +502,38 @@ func main() {
 		os.Exit(1)
 	}
 
-	wrappers := make(map[string]*cli.Wrapper, len(backendsCfg))
-	backendModels := make(map[string]string, len(backendsCfg))
-	backendExtraArgs := make(map[string][]string, len(backendsCfg))
-	var defaultWrapper *cli.Wrapper
-	for _, b := range backendsCfg {
-		var proto cli.Protocol
-		// RefreshSettings closes over cfg.Server.Addr so every spawn
-		// regenerates ~/.naozhi/claude-settings.json from the live
-		// ~/.claude/settings.json. Without this, edits made after naozhi
-		// start (adding ANTHROPIC_BEDROCK_BASE_URL, swapping models, etc.)
-		// are invisible to dashboard / cron / IM-spawned sessions until
-		// systemctl restart. claude profile copies these into its own
-		// ProtocolDeps; kiro profile ignores them (and Sprint 6a seeds
-		// BackendID="kiro" inside the kiro profile factory itself).
-		serverAddr := cfg.Server.Addr
-		profile, ok := backend.Get(b.ID)
-		if !ok {
-			// Empty ID is a legacy single-backend config; treat it as claude
-			// to preserve the historical default.
-			if b.ID == "" {
-				profile, ok = backend.Get("claude")
-			}
-			if !ok {
-				slog.Warn("skipping unknown cli.backends entry", "id", b.ID)
-				continue
-			}
-		}
-		proto = profile.NewProtocol(backend.ProtocolDeps{
-			SettingsFile:    settingsFile,
-			RefreshSettings: func() string { return writeClaudeSettingsOverride(ctx, serverAddr) },
-		})
-		w := cli.NewWrapper(b.Path, proto, b.ID)
-		w.ShimManager = shimMgr
-		wrappers[w.BackendID] = w
-		if b.Model != "" {
-			backendModels[w.BackendID] = b.Model
-		}
-		if len(b.Args) > 0 {
-			backendExtraArgs[w.BackendID] = b.Args
-		}
-		if defaultWrapper == nil || w.BackendID == defaultBackend {
-			defaultWrapper = w
-		}
-		// Empty CLIVersion means `--version` failed (binary missing, wrong
-		// path, or crash). The wrapper is still registered so the dashboard
-		// surfaces the configuration intent, but spawn attempts will fail.
-		// Log at Warn so operators notice during startup instead of
-		// discovering the breakage only when the first user message lands.
-		// R55-QUAL-001.
-		if w.CLIVersion == "" {
-			slog.Warn("cli backend version probe failed",
-				"id", w.BackendID, "name", w.CLIName, "path", w.CLIPath,
-				"hint", "binary missing or --version crashed; spawns will fail until resolved")
+	// CQ1 (#396): backend wrapper construction + default selection extracted
+	// to initBackendWrappers. RefreshSettings closes over cfg.Server.Addr so
+	// every spawn regenerates ~/.naozhi/claude-settings.json from the live
+	// ~/.claude/settings.json. Without this, edits made after naozhi start
+	// (adding ANTHROPIC_BEDROCK_BASE_URL, swapping models, etc.) are
+	// invisible to dashboard / cron / IM-spawned sessions until restart.
+	// claude profile copies these into its own ProtocolDeps; kiro profile
+	// ignores them (and Sprint 6a seeds BackendID="kiro" inside the kiro
+	// profile factory itself).
+	serverAddr := cfg.Server.Addr
+	bws, ok := initBackendWrappers(ctx, cfg, shimMgr, settingsFile, func() string {
+		return writeClaudeSettingsOverride(ctx, serverAddr)
+	})
+	if !ok {
+		if bws.Default == nil {
+			slog.Error("no usable cli backend configured")
 		} else {
-			slog.Info("cli backend enabled",
-				"id", w.BackendID, "name", w.CLIName,
-				"path", w.CLIPath, "version", w.CLIVersion)
+			// Default backend's --version probe failed. R55-QUAL-001:
+			// surface the operator-actionable hint so the journalctl line
+			// points at the config field they need to fix instead of just
+			// saying "spawn failed" on the first user message.
+			slog.Error("default cli backend is unavailable",
+				"id", bws.Default.BackendID, "path", bws.Default.CLIPath,
+				"hint", "fix the binary path in cli.backends or set cli.default to an available backend")
 		}
-	}
-	if defaultWrapper == nil {
-		slog.Error("no usable cli backend configured")
 		os.Exit(1)
 	}
-	// Exit non-zero when the default backend failed its version probe. A
-	// healthy non-default sibling isn't useful — wrapperFor falls back to
-	// defaultWrapper when no explicit backend is requested, and the per-spawn
-	// error would say "wrapper selected, spawn failed" without surfacing the
-	// root cause. Fail fast so operators can fix the config rather than have
-	// every IM message bounce. R55-QUAL-001.
-	if defaultWrapper.CLIVersion == "" {
-		slog.Error("default cli backend is unavailable",
-			"id", defaultWrapper.BackendID, "path", defaultWrapper.CLIPath,
-			"hint", "fix the binary path in cli.backends or set cli.default to an available backend")
-		os.Exit(1)
-	}
-	wrapper := defaultWrapper
+	wrappers := bws.Wrappers
+	backendModels := bws.Models
+	backendExtraArgs := bws.ExtraArgs
+	defaultBackend := bws.DefaultID
+	wrapper := bws.Default
 
 	// Parse watchdog and store path
 	noOutputTimeout, totalTimeout := cfg.ParseWatchdog()
@@ -794,7 +737,7 @@ func main() {
 	// when cfg.Sysession.Enabled is false; degraded silently when the
 	// runner can't be initialised so a missing/broken claude binary
 	// doesn't break naozhi startup as a whole.
-	sysMgr, sysWorkDir, err := buildSysessionManager(cfg, router, defaultWrapper, storePath)
+	sysMgr, sysWorkDir, err := buildSysessionManager(cfg, router, wrapper, storePath)
 	if err != nil {
 		slog.Warn("sysession manager unavailable; daemons disabled", "err", err)
 	}
