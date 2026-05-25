@@ -681,12 +681,19 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// ── Lock release 1: Spawn may block (ACP Init handshake, process startup).
 	// We release r.mu to avoid holding it during I/O. pendingSpawns prevents
 	// a concurrent Cleanup from pruning slots we're about to fill.
-	r.pendingSpawns++
+	//
+	// R215-ARCH-P1-2: acquire via RAII token + defer slot.release(). The
+	// happy-path still decrements via releaseLocked() at the original site
+	// (preserves the existing lock-state contract — the second
+	// pendingSpawns-- happens after we re-take r.mu for the install path),
+	// and the defer absorbs any future panic / forgotten early-return on the
+	// other 3 segments between ++ and the original --. Idempotent: the
+	// defer's release() is a no-op once releaseLocked() has flipped the flag.
+	slot := r.acquirePendingSpawnSlotLocked()
+	defer slot.release()
 	r.mu.Unlock()
 	if wrapper == nil {
-		r.mu.Lock()
-		r.pendingSpawns--
-		r.mu.Unlock()
+		// slot.release() in defer will reacquire r.mu and decrement.
 		return nil, fmt.Errorf("spawn process (backend %q): %w", backendID, ErrNoCLIWrapper)
 	}
 	// Panic-safe Spawn: if wrapper.Spawn panics (shim exec failure, protocol
@@ -697,7 +704,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// seam). RES1.
 	proc, err := panicSafeSpawn(ctx, wrapper, spawnOpts, key, backendID)
 	r.mu.Lock()
-	r.pendingSpawns--
+	slot.releaseLocked()
 	if err != nil {
 		r.mu.Unlock()
 		return nil, fmt.Errorf("spawn process: %w", err)

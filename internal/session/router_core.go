@@ -539,6 +539,55 @@ type Router struct {
 // wraps (*cli.Wrapper).Spawn in a closure at the call site.
 type spawnerFunc func(context.Context, cli.SpawnOptions) (*cli.Process, error)
 
+// pendingSpawnSlot is a one-shot RAII token returned by
+// (*Router).acquirePendingSpawnSlotLocked. It guards r.pendingSpawns against
+// stranded ++ on any panic / new error path between increment and the matching
+// decrement. release() is idempotent: explicit happy-path callers decrement at
+// the original site (preserving the existing lock-state contract) and a
+// `defer token.release()` absorbs any unexpected exit (panic, future early
+// return added without a manual --). R215-ARCH-P1-2.
+type pendingSpawnSlot struct {
+	r        *Router
+	released bool
+}
+
+// acquirePendingSpawnSlotLocked increments r.pendingSpawns under r.mu (caller
+// must hold r.mu for writing). It returns a slot token whose release method
+// can be called from any lock state — release acquires r.mu itself if needed.
+//
+// LOCK: caller must hold r.mu (write).
+func (r *Router) acquirePendingSpawnSlotLocked() *pendingSpawnSlot {
+	r.pendingSpawns++
+	return &pendingSpawnSlot{r: r}
+}
+
+// releaseLocked decrements pendingSpawns assuming the caller already holds
+// r.mu for writing. Idempotent — a second call (e.g. from defer after the
+// happy-path explicit release) is a no-op.
+func (s *pendingSpawnSlot) releaseLocked() {
+	if s == nil || s.released {
+		return
+	}
+	s.r.pendingSpawns--
+	s.released = true
+}
+
+// release is the lock-agnostic counterpart used from defer. It acquires r.mu
+// only when the slot has not yet been released, so the common happy-path
+// (which calls releaseLocked() inline) pays no extra lock acquisition.
+// Idempotent.
+func (s *pendingSpawnSlot) release() {
+	if s == nil || s.released {
+		return
+	}
+	s.r.mu.Lock()
+	if !s.released {
+		s.r.pendingSpawns--
+		s.released = true
+	}
+	s.r.mu.Unlock()
+}
+
 // panicSafeSpawn invokes wrapper.Spawn inside a deferred recover so a panic
 // from the wrapper (shim exec crash, bogus protocol Init, etc.) cannot leave
 // pendingSpawns stranded in spawnSession. A stranded counter would make the
