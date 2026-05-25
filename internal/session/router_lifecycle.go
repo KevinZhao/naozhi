@@ -1462,8 +1462,8 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	// established sidebar position. Zero-fallback to now would shove the
 	// row to the bottom — surprising for the scratch-promote flow where
 	// the user is preserving an existing conversation.
-	if old.createdAt.Load() != 0 {
-		fresh.createdAt.Store(old.createdAt.Load())
+	if oldCreatedAt := old.createdAt.Load(); oldCreatedAt != 0 {
+		fresh.createdAt.Store(oldCreatedAt)
 	} else {
 		fresh.initCreatedAtIfUnset()
 	}

@@ -113,3 +113,71 @@ func TestRenameSession_InvalidNewKey(t *testing.T) {
 		t.Error("invalid new key accepted")
 	}
 }
+
+// TestRenameSession_PreservesCreatedAt locks the scratch-promote contract:
+// renaming an existing session must carry its createdAt into the fresh
+// ManagedSession so the sidebar row keeps its established position rather
+// than getting shoved to the bottom on rename.
+func TestRenameSession_PreservesCreatedAt(t *testing.T) {
+	t.Parallel()
+	r := NewRouter(RouterConfig{})
+	const oldKey = "scratch:abc:general:general"
+	const newKey = "feishu:direct:alice:aside-general-deadbeef"
+
+	stamp := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC).UnixNano()
+	s := &ManagedSession{key: oldKey}
+	s.setSessionID("sess-rename-ca")
+	s.createdAt.Store(stamp)
+	s.lastActive.Store(stamp + int64(time.Hour))
+
+	r.mu.Lock()
+	r.sessions[oldKey] = s
+	r.indexAdd(oldKey)
+	r.sessionIDToKey["sess-rename-ca"] = oldKey
+	r.mu.Unlock()
+
+	if !r.RenameSession(oldKey, newKey) {
+		t.Fatal("RenameSession returned false")
+	}
+	got := r.GetSession(newKey)
+	if got == nil {
+		t.Fatal("new key missing after rename")
+	}
+	if gotCA := got.createdAt.Load(); gotCA != stamp {
+		t.Errorf("createdAt not preserved: got %d want %d", gotCA, stamp)
+	}
+}
+
+// TestRenameSession_StampsCreatedAtWhenSourceUnstamped covers the legacy
+// edge case: the source session somehow has createdAt == 0 (pre-feature
+// store loaded with both CreatedAt and LastActive zero). Rename must stamp
+// `now` rather than leaving the fresh row anchored at zero, where it would
+// otherwise float to the very top of the sidebar.
+func TestRenameSession_StampsCreatedAtWhenSourceUnstamped(t *testing.T) {
+	t.Parallel()
+	r := NewRouter(RouterConfig{})
+	const oldKey = "scratch:abc:general:general"
+	const newKey = "feishu:direct:alice:aside-general-deadbeef"
+
+	s := &ManagedSession{key: oldKey}
+	s.setSessionID("sess-rename-zero")
+	// createdAt left at 0 to simulate the pre-feature pathological case.
+
+	r.mu.Lock()
+	r.sessions[oldKey] = s
+	r.indexAdd(oldKey)
+	r.sessionIDToKey["sess-rename-zero"] = oldKey
+	r.mu.Unlock()
+
+	before := time.Now().UnixNano()
+	if !r.RenameSession(oldKey, newKey) {
+		t.Fatal("RenameSession returned false")
+	}
+	got := r.GetSession(newKey)
+	if got == nil {
+		t.Fatal("new key missing after rename")
+	}
+	if gotCA := got.createdAt.Load(); gotCA < before {
+		t.Errorf("createdAt not stamped on rename: got %d, want >= %d", gotCA, before)
+	}
+}

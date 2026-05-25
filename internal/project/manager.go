@@ -106,6 +106,15 @@ func (m *Manager) Scan() error {
 	// All()'s old comparator) — operators see no visible reshuffling on the
 	// upgrade boot. Each project gets a 1ms-spaced value so subsequent
 	// All() sorts have a strict order regardless of clock resolution.
+	//
+	// Concurrency: this block runs before m.mu.Lock() and writes both
+	// in-memory ProjectConfig.CreatedAt and project.yaml on disk. Scan was
+	// never concurrency-safe; two simultaneous Scans would each pick their
+	// own `base`, the last m.projects = projects assignment wins in memory,
+	// and on disk the last writer wins. Migration is idempotent on
+	// subsequent boots (zero-CreatedAt set is empty), so a one-off skew
+	// during a racing first-upgrade Scan self-heals on the next clean Scan.
+	// No current caller invokes Scan concurrently.
 	missing := make([]string, 0, len(projects))
 	for name, p := range projects {
 		if p.Config.CreatedAt == 0 {

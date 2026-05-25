@@ -497,6 +497,10 @@ function renderSidebar(data) {
           // Project entry missing CreatedAt (pre-feature server, or fallback
           // group without a registered project): fall back to the earliest
           // session's created_at so the group still has a stable anchor.
+          // If every session in the group is also unstamped (very-pre-feature
+          // server with empty last_active), `earliest` stays 0 and the
+          // comparator falls through to name.localeCompare — fine, the
+          // first re-stamp on next save will give them stable anchors.
           let earliest = 0;
           for (const s of g.items) {
             const c = s.created_at || s.last_active || 0;
