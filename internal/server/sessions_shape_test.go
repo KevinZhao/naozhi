@@ -42,7 +42,12 @@ func TestDashboardJSON_Sessions_ShapeContract(t *testing.T) {
 	// produces a ManagedSession without spawning a real CLI subprocess.
 	router.RegisterForResume("dashboard:direct:shape-contract:general", "sess-shape-1", "", "")
 	platforms := map[string]platform.Platform{"test": &mockPlatform{}}
-	srv := New(":0", router, platforms, nil, nil, nil, "claude", ServerOptions{})
+	srv := NewWithOptions(ServerOptions{
+		Addr:      ":0",
+		Router:    router,
+		Platforms: platforms,
+		Backend:   "claude",
+	})
 	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)

@@ -30,7 +30,12 @@ func TestHandleAPISessions_StatsStructShape(t *testing.T) {
 		MaxProcs:  3,
 		Workspace: "/tmp/naozhi-ws",
 	})
-	srv := New(":0", router, nil, agents, nil, nil, "claude", ServerOptions{})
+	srv := NewWithOptions(ServerOptions{
+		Addr:    ":0",
+		Router:  router,
+		Agents:  agents,
+		Backend: "claude",
+	})
 	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
@@ -119,7 +124,7 @@ func TestHandleAPISessions_StatsStructShape(t *testing.T) {
 // must still short-circuit correctly.
 func TestHandleAPISessions_StatsProjectsOmitemptyEmpty(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
-	srv := New(":0", router, nil, nil, nil, nil, "claude", ServerOptions{})
+	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
@@ -144,7 +149,7 @@ func TestHandleAPISessions_StatsProjectsOmitemptyEmpty(t *testing.T) {
 // deliberately narrow — it proves the embed is anonymous, not named.
 func TestHandleAPISessions_StatsStaticStructEmbedsFlatJSON(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
-	srv := New(":0", router, nil, nil, nil, nil, "claude", ServerOptions{})
+	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)

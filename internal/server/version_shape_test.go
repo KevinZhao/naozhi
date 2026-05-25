@@ -19,7 +19,11 @@ import (
 func TestHealth_VersionAbsentOnUnauthedProbe(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": &mockPlatform{}}
-	srv := New(":0", router, platforms, nil, nil, nil, "claude", ServerOptions{
+	srv := NewWithOptions(ServerOptions{
+		Addr:           ":0",
+		Router:         router,
+		Platforms:      platforms,
+		Backend:        "claude",
 		DashboardToken: "secret",
 		Version:        "v1.2.3-test",
 	})
@@ -54,7 +58,11 @@ func TestHealth_VersionAbsentOnUnauthedProbe(t *testing.T) {
 func TestHealth_VersionPresentOnAuthedProbe(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": &mockPlatform{}}
-	srv := New(":0", router, platforms, nil, nil, nil, "claude", ServerOptions{
+	srv := NewWithOptions(ServerOptions{
+		Addr:           ":0",
+		Router:         router,
+		Platforms:      platforms,
+		Backend:        "claude",
 		DashboardToken: "secret",
 		Version:        "v1.2.3-test",
 	})
@@ -84,7 +92,10 @@ func TestHealth_VersionPresentOnAuthedProbe(t *testing.T) {
 // field (store mutation counter) must remain untouched.
 func TestStats_VersionTagPresent(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
-	srv := New(":0", router, nil, nil, nil, nil, "claude", ServerOptions{
+	srv := NewWithOptions(ServerOptions{
+		Addr:    ":0",
+		Router:  router,
+		Backend: "claude",
 		Version: "v9.9.9-test",
 	})
 	srv.registerDashboard()
@@ -125,7 +136,10 @@ func TestStats_VersionTagPresent(t *testing.T) {
 // string works too, but the wire stability test pins the absent-key shape.
 func TestStats_VersionTagOmittedWhenUnset(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
-	srv := New(":0", router, nil, nil, nil, nil, "claude", ServerOptions{
+	srv := NewWithOptions(ServerOptions{
+		Addr:    ":0",
+		Router:  router,
+		Backend: "claude",
 		// Version empty
 	})
 	srv.registerDashboard()
