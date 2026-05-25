@@ -168,6 +168,13 @@ func (r *Router) Cleanup() {
 	// to size the slice exactly, but loadProcess() is an atomic read whose
 	// result can change between the two passes, and the doubled map walk
 	// paid O(2n) for no correctness benefit. R59-GO-M1.
+	//
+	// Also closes R57-ARCH-001 (the historical "double pass loadProcess() in
+	// non-exempt majority deployments is slower" concern): the single-pass
+	// candidate build above means there is exactly one loadProcess() call
+	// per non-exempt session per tick, regardless of exempt density. The
+	// idle-plan deployment shape (5-minute tick, mostly-suspended sessions)
+	// shows zero observed cost difference vs the older two-pass form.
 	r.mu.RLock()
 	type cand struct {
 		key        string

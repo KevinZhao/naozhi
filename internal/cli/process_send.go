@@ -166,9 +166,16 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 		totalDur = DefaultTotalTimeout
 	}
 
-	// Watchdog via a single periodic ticker instead of per-event timer
-	// Stop/drain/Reset (three timer-heap ops per event). The ticker interval
+	// Watchdog via a single periodic timer instead of per-event timer
+	// Stop/drain/Reset (three timer-heap ops per event). The interval
 	// caps timeout precision, but timeouts are minutes so this is acceptable.
+	//
+	// R246-PERF-3: replaced time.NewTicker with time.NewTimer + Reset so
+	// each Send pays one runtime timer allocation (NewTicker also creates
+	// the timer+chan but lacks a public Reset that lets us re-arm without
+	// rebuilding the underlying timer state). The timer is re-armed from
+	// the watchdog branch after each fire; Stop()+drain on early-return
+	// (via defer) keeps the goroutine local to this Send invocation.
 	checkInterval := noOutputDur / 4
 	if checkInterval < time.Second {
 		checkInterval = time.Second
@@ -178,8 +185,18 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 	}
 	turnStart := time.Now()
 	lastOutput := turnStart
-	ticker := time.NewTicker(checkInterval)
-	defer ticker.Stop()
+	watchdog := time.NewTimer(checkInterval)
+	defer func() {
+		// Stop returns false if the timer already fired and its value was
+		// not yet drained; drain in that case so a subsequent leak detector
+		// (or the next Send if we ever pool watchdogs) sees a clean state.
+		if !watchdog.Stop() {
+			select {
+			case <-watchdog.C:
+			default:
+			}
+		}
+	}()
 
 	for {
 		select {
@@ -251,7 +268,7 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 					CostUSD:   ev.CostUSD,
 				}, nil
 			}
-		case <-ticker.C:
+		case <-watchdog.C:
 			now := time.Now()
 			if now.Sub(lastOutput) >= noOutputDur {
 				if sr := p.findResultSince(turnStartMS); sr != nil {
@@ -275,6 +292,9 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 				p.Kill()
 				return nil, fmt.Errorf("%w (%s)", ErrTotalTimeout, totalDur)
 			}
+			// Re-arm. watchdog.C was just drained by the case-receive so
+			// Reset on a stopped/expired timer is safe per stdlib docs.
+			watchdog.Reset(checkInterval)
 		}
 	}
 }

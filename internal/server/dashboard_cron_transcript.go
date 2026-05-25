@@ -632,22 +632,35 @@ func flattenUserEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcript
 // separators because they split awkwardly when shown as separate
 // timeline entries) followed by per-tool_use turns. Returns the token
 // usage delta from msg.Usage so callers can advance the running total.
+//
+// R247-PERF-2 / R247-PERF-18: the previous implementation emitted tool_use
+// turns first (with provisional indices nextIdx + len(out)), then prepended
+// the assistant turn via `append([]turn{a}, out...)` and re-indexed every
+// element. Each call therefore allocated a fresh backing slice and reindexed
+// O(N) — on a 500-row transcript the prepend dominated the parse cost. We
+// now build textBuf in a first pass over `blocks`, emit the assistant turn
+// first (when present) at the deterministic nextIdx, then emit tool_use
+// turns at sequential indices in a second pass over the same blocks. No
+// prepend, no reindex; allocations stay at O(1) for the slice header
+// regardless of textBuf vs tool_use mix.
 func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
-	out := make([]transcriptTurn, 0, 2)
 	tok := transcriptTokens{}
 	toolCalls := 0
 
 	var msg claudeMessage
 	if err := json.Unmarshal(ev.Message, &msg); err != nil {
-		return out, tok, 0, false
+		return nil, tok, 0, false
 	}
 	_, blocks := decodeStringOrBlocks(msg.Content)
 	if msg.Usage != nil {
 		tok.Input = msg.Usage.InputTokens
 		tok.Output = msg.Usage.OutputTokens
 	}
-	parsed := false
+	// First pass: aggregate text blocks + count tool_use blocks so we can
+	// pre-size the output slice exactly. Avoids the per-row `make([]T,0,2)`
+	// + grow churn flagged by R247-PERF-18 across 500-row transcripts.
 	var textBuf strings.Builder
+	toolUseCount := 0
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
@@ -656,34 +669,47 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 			}
 			textBuf.WriteString(b.Text)
 		case "tool_use":
-			toolCalls++
-			summary := sanitizeWireText(summariseToolInput(b.Name, b.Input))
-			out = append(out, transcriptTurn{
-				Index:     nextIdx + len(out),
-				Kind:      "tool_use",
-				TS:        ts,
-				Tool:      b.Name,
-				ToolUseID: b.ID,
-				Summary:   summary,
-				Input:     b.Input,
-			})
-			parsed = true
+			toolUseCount++
 		}
 	}
-	if textBuf.Len() > 0 {
-		text := textBuf.String()
-		out = append([]transcriptTurn{{
+	hasText := textBuf.Len() > 0
+	totalTurns := toolUseCount
+	if hasText {
+		totalTurns++
+	}
+	if totalTurns == 0 {
+		return nil, tok, 0, false
+	}
+	out := make([]transcriptTurn, 0, totalTurns)
+	parsed := false
+	if hasText {
+		out = append(out, transcriptTurn{
 			Index:  nextIdx,
 			Kind:   "assistant",
 			TS:     ts,
-			Text:   sanitizeWireText(truncateRunes(text, maxAssistantTextBytes)),
+			Text:   sanitizeWireText(truncateRunes(textBuf.String(), maxAssistantTextBytes)),
 			Tokens: tok.Output,
-		}}, out...)
-		// re-number subsequent turns: prepending the assistant turn shifts
-		// every tool_use turn's index by one.
-		for i := range out {
-			out[i].Index = nextIdx + i
+		})
+		parsed = true
+	}
+	// Second pass: emit tool_use turns in source order at indices that
+	// follow the (optional) assistant turn. No reindex needed — indices
+	// land in their final positions on first write.
+	for _, b := range blocks {
+		if b.Type != "tool_use" {
+			continue
 		}
+		toolCalls++
+		summary := sanitizeWireText(summariseToolInput(b.Name, b.Input))
+		out = append(out, transcriptTurn{
+			Index:     nextIdx + len(out),
+			Kind:      "tool_use",
+			TS:        ts,
+			Tool:      b.Name,
+			ToolUseID: b.ID,
+			Summary:   summary,
+			Input:     b.Input,
+		})
 		parsed = true
 	}
 	return out, tok, toolCalls, parsed

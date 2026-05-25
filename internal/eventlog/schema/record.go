@@ -144,6 +144,62 @@ func MarshalRecord(r *Record) ([]byte, error) {
 	return out, nil
 }
 
+// MarshalRecordInto encodes r as JSON and appends the bytes to dst,
+// returning the slice of dst that holds the encoded record. dst MUST
+// be empty (or have its content treated as already-flushed) because
+// callers walk the returned slice as a self-contained record body.
+//
+// Mirrors MarshalRecord's validation and ErrRecordTooLarge contract,
+// but lets the caller pool the destination buffer to avoid the
+// per-call alloc that json.Marshal performs for its own scratch
+// space (encodeState in encoding/json).
+//
+// R245-PERF-12 [REFACTOR R242-PERF-13]: persister.handleBatch is the
+// hot path (≥5 events/s × N sessions) and was the heaviest remaining
+// reflection alloc in the persist tier; this helper plus a
+// sync.Pool-backed bytes.Buffer in persister gets handleBatch off
+// the per-event encodeState alloc, mirroring bridgeEncPool in
+// internal/session/eventlog_bridge.go.
+//
+// json.Encoder always appends a trailing '\n' after the JSON object;
+// we strip it here so the returned slice is byte-identical to
+// MarshalRecord's output (the framing layer adds its own newline).
+func MarshalRecordInto(buf *bytes.Buffer, r *Record) ([]byte, error) {
+	if err := r.Validate(); err != nil {
+		return nil, err
+	}
+	if buf == nil {
+		return nil, fmt.Errorf("marshal record: nil buffer")
+	}
+	startLen := buf.Len()
+	enc := json.NewEncoder(buf)
+	// Match MarshalRecord's default escape behaviour (json.Marshal
+	// escapes <, >, &). Existing on-disk records already carry these
+	// escapes, so flipping SetEscapeHTML(false) here would diverge
+	// from MarshalRecord output and cause the byte-identity tests in
+	// schema/record_test.go to fail. Keep the default.
+	if err := enc.Encode(r); err != nil {
+		// Roll back any bytes the encoder wrote before failing so the
+		// pooled buffer is in a known state for the caller's next op.
+		buf.Truncate(startLen)
+		return nil, fmt.Errorf("marshal record: %w", err)
+	}
+	// Encode appended bytes plus a trailing '\n'. Strip the newline so
+	// the returned slice matches MarshalRecord exactly — the framing
+	// layer adds its own '\n' separator.
+	all := buf.Bytes()
+	if n := len(all); n > startLen && all[n-1] == '\n' {
+		buf.Truncate(n - 1)
+	}
+	body := buf.Bytes()[startLen:]
+	if len(body) > MaxRecordBytes {
+		buf.Truncate(startLen)
+		return nil, fmt.Errorf("record seq=%d size=%d: %w",
+			r.Seq, len(body), ErrRecordTooLarge)
+	}
+	return body, nil
+}
+
 // UnmarshalRecord parses a single JSON-encoded record. Returns
 // ErrUnsupportedVersion when the record declares a WireVersion newer
 // than we can read; callers should stop reading the file on this error
