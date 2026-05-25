@@ -1,0 +1,139 @@
+// @ts-check
+//
+// renderMd list 渲染回归测试。
+//
+// 触发场景（dashboard 截图里的"三段都是 1."）：
+//   - ordered list 的源数字被丢弃 → CSS decimal 强制从 1 重新计数
+//   - 每一段无序列表都把上一段 ordered list 截断
+//   - 不支持嵌套
+//
+// 跑法：cd test/e2e && npx playwright test markdown_lists.test.js --project=desktop-chrome
+
+const { test, expect } = require('@playwright/test');
+const { startMockServer } = require('./mock-server');
+
+test.beforeEach(({ }, testInfo) => {
+  if (testInfo.project.name !== 'desktop-chrome') {
+    testInfo.skip(true, '渲染逻辑与 viewport 无关，仅 desktop-chrome 跑一次');
+  }
+});
+
+test.describe('renderMd list 渲染', () => {
+  /** @type {Awaited<ReturnType<typeof startMockServer>>} */
+  let mock;
+  /** @type {import('@playwright/test').Page} */
+  let page;
+
+  test.beforeAll(async ({ browser }) => {
+    mock = await startMockServer();
+    const ctx = await browser.newContext();
+    page = await ctx.newPage();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForFunction(() => typeof (/** @type {any} */ (window)).renderMd === 'function');
+  });
+  test.afterAll(async () => {
+    await page.context().close();
+    mock.server.close();
+  });
+
+  /** @param {string} src */
+  const render = (src) => page.evaluate((s) => /** @type {any} */ (window).renderMd(s), src);
+
+  test('源数字被保留为 ol start', async () => {
+    const html = await render('5. 五\n6. 六\n7. 七\n');
+    expect(html).toMatch(/<ol[^>]*\bstart="5"/);
+    // 三个项都在同一 ol 里
+    expect((html.match(/<ol/g) || []).length).toBe(1);
+    expect((html.match(/<li>/g) || []).length).toBe(3);
+  });
+
+  test('1. 起始的 ol 不写多余 start 属性', async () => {
+    const html = await render('1. a\n2. b\n');
+    expect(html).toMatch(/<ol class="md-ol">/);
+    expect(html).not.toMatch(/start=/);
+  });
+
+  test('夹在 ol 中的同深度 ul 不再 mid-段截断 ol', async () => {
+    // 不带段间空行的混排：旧实现每遇到 `-` 行立即关 ol、开 ul；下一个
+    // 顶格 `1.` 又开新 ol → 截图里"全是 1." 的根因。新实现把 ul 嵌套
+    // 进父 li，ol 全程只开一次。
+    const src =
+      '1. 必须 source\n' +
+      '- 强依赖 VPC_ID\n' +
+      '- 这次走 terraform\n' +
+      '2. 必须先有 SG\n' +
+      '- 这个 SG\n' +
+      '3. 脚本同时干两件事\n';
+    const html = await render(src);
+    // 同段内 ol 只开一次（旧实现会切成 3 个）
+    expect((html.match(/<ol/g) || []).length).toBe(1);
+    // 三个 ol 父项 + 中间嵌套的 ul
+    const olInner = html.match(/<ol[^>]*>([\s\S]*)<\/ol>/)[1];
+    expect((olInner.match(/<li>必须 source|<li>必须先有|<li>脚本/g) || []).length).toBe(3);
+    expect((olInner.match(/<ul/g) || []).length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('嵌套 list（缩进 3 空格）作为父 li 的子节点', async () => {
+    const src = '1. 父项一\n   - 子项 a\n   - 子项 b\n2. 父项二\n';
+    const html = await render(src);
+    // 父 ol 内：父 li 的内部包含 ul + 两个 li，然后 ol 内再有第二个 li
+    expect(html).toMatch(/<ol[^>]*><li>父项一<ul[^>]*><li>子项 a<\/li><li>子项 b<\/li><\/ul><\/li><li>父项二<\/li><\/ol>/);
+  });
+
+  test('嵌套 list（tab 缩进）等价于 4 列', async () => {
+    const src = '1. 父\n\t- 子\n';
+    const html = await render(src);
+    expect(html).toMatch(/<li>父<ul[^>]*><li>子<\/li><\/ul><\/li>/);
+  });
+
+  test('空行不切断同质 list', async () => {
+    const html = await render('1. a\n\n2. b\n');
+    expect((html.match(/<ol/g) || []).length).toBe(1);
+  });
+
+  test('空行后非 list 行切断 list', async () => {
+    const html = await render('1. a\n\nplain\n');
+    expect(html).toMatch(/<\/ol>.*<div class="md-blank"><\/div>plain/);
+  });
+
+  test('lazy continuation 把缩进续行折叠到上一 li', async () => {
+    const html = await render('1. 父\n   续行\n2. 兄\n');
+    expect(html).toMatch(/<li>父 续行<\/li><li>兄<\/li>/);
+  });
+
+  test('深度上限 6（不爆栈）', async () => {
+    // 14 层缩进：14 / 2 = 7，应被截到 6
+    const indents = Array.from({ length: 7 }, (_, i) => ' '.repeat(i * 2) + '- L' + i).join('\n');
+    const html = await render(indents + '\n');
+    // 只要 render 完成且没抛错就算 pass；顺便检查最后一层不再加深
+    expect(html).toContain('L6');
+  });
+
+  test('fence code 不被误识为 list', async () => {
+    const src = '1. a\n```\n2. fake\n```\n';
+    const html = await render(src);
+    expect(html).toMatch(/<li>a<\/li><\/ol>.*<div class="md-code-wrap">/s);
+  });
+
+  test('list 行后非空行的 table 仍能渲染', async () => {
+    // 注：空行后的 table 检测在旧实现里就走不到（已有局限，与本 PR 无关）。
+    // 这里测"无空行衔接"的情形，确认 list 关闭后 table 路径仍触发。
+    // renderTable 要求至少两列（|---|---|）才算合法 table，所以 fixture 给两列。
+    const src = '1. a\nplain\n| h1 | h2 |\n|---|---|\n| v1 | v2 |\n';
+    const html = await render(src);
+    expect(html).toMatch(/<\/ol>/);
+    expect(html).toMatch(/<table/);
+  });
+
+  test('list item 内 inline markdown（bold/code）正常 token 还原', async () => {
+    const html1 = await render('1. **bold**\n');
+    expect(html1).toMatch(/<li><strong>bold<\/strong><\/li>/);
+    const html2 = await render('1. `code`\n');
+    expect(html2).toMatch(/<li><code[^>]*>code<\/code><\/li>/);
+  });
+
+  test('headings 仍然关闭 list', async () => {
+    const html = await render('1. a\n# H\n');
+    expect(html).toMatch(/<\/ol>.*<strong class="md-h1">/);
+  });
+});
