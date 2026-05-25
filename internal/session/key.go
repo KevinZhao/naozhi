@@ -48,19 +48,61 @@ const (
 	SysKeyPrefix = "sys:"
 )
 
-// reservedKeyPrefixes is the authoritative list of namespaces that do NOT
-// follow the standard IM key shape. Kept sorted for grep. When adding a new
-// entry, update:
+// keyNamespace captures the per-prefix policy bits in one row so the reserved
+// + exempt classifications stay co-defined. R239-ARCH-L: previously the
+// "is this a reserved namespace" list lived in key.go and the "is this a
+// TTL-exempt namespace" list lived in router_core.go, with comments asking
+// each side to update the other. They drifted in practice — adding a new
+// reserved prefix without updating exemptKeyPrefixes silently routed the
+// new namespace through the regular TTL eviction path even though the
+// namespace was "non-IM-shape" by definition (cron / project / sys are
+// exempt; only scratch is reserved-but-not-exempt because it's
+// deliberately short-lived).
+//
+// Single source of truth: keyNamespaces below. Both reservedKeyPrefixes
+// (key.go) and exemptKeyPrefixes (router_core.go) derive from it so a
+// new namespace is added in exactly one row.
+type keyNamespace struct {
+	prefix string
+	// exempt means alive sessions under this prefix bypass TTL eviction,
+	// LRU pressure, and the active-process counter. ScratchKeyPrefix is
+	// the canonical reserved-but-not-exempt entry: scratch sessions are
+	// ephemeral and MUST stay subject to TTL so abandoned scratch
+	// conversations release their process slot.
+	exempt bool
+}
+
+// keyNamespaces is the authoritative table of reserved-namespace prefixes.
+// Both `reservedKeyPrefixes` (consumers: IsReservedNamespace, IsUserVisibleKey)
+// and `exemptKeyPrefixes` (consumers: isExemptKey, exemptKind, exemptCapFor)
+// derive from this table. Kept sorted for grep stability.
+//
+// When adding a new entry, update:
 //   - DESIGN.md §"Session key namespace"
-//   - exemptKeyPrefixes (router.go) if the new namespace is TTL-exempt
+//   - the exempt flag below (true = bypass TTL/LRU; default false)
 //   - the sidebar / persistence filter if the new namespace should not be
 //     persisted / displayed in the default UI
-var reservedKeyPrefixes = []string{
-	CronKeyPrefix,
-	ProjectKeyPrefix,
-	ScratchKeyPrefix,
-	SysKeyPrefix,
+//   - if exempt=true, add a sub-quota cap in router_core.go's exemptCapFor
+//     (otherwise spawnSession routes through maxExemptSessions fallback).
+var keyNamespaces = []keyNamespace{
+	{prefix: CronKeyPrefix, exempt: true},
+	{prefix: ProjectKeyPrefix, exempt: true},
+	{prefix: ScratchKeyPrefix, exempt: false},
+	{prefix: SysKeyPrefix, exempt: true},
 }
+
+// reservedKeyPrefixes is the list of namespaces that do NOT follow the
+// standard IM key shape, derived from keyNamespaces. Use the slice rather
+// than iterating keyNamespaces directly for hot-path callers — Go does not
+// elide the struct-field load even on each iteration of a small slice, and
+// grep-locality matches the prior single-file declaration.
+var reservedKeyPrefixes = func() []string {
+	out := make([]string, len(keyNamespaces))
+	for i, ns := range keyNamespaces {
+		out[i] = ns.prefix
+	}
+	return out
+}()
 
 // IsReservedNamespace reports whether the given key belongs to any reserved
 // namespace (cron / project / scratch). Callers should prefer the namespace-

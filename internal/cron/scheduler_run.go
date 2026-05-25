@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -161,7 +162,22 @@ const cronNoticePrefixFmt = "[Cron %s] %s"
 // so it can be reused from non-execute code paths (e.g. future manual
 // retry surface) without dragging the deliverNotice / Scheduler
 // dependencies along.
+//
+// R239-SEC-5: label flows through to the IM channel without ever
+// transiting sanitiseRunResult, so an attacker-supplied job Title (e.g.
+// "‮…" RLO) — which Scheduler.AddJob's MaxCronTitleLen check does
+// not strip — would land verbatim in the IM render and reverse the
+// surrounding text. Force it through osutil.SanitizeForLog (covers C0/C1,
+// bidi overrides + isolates, LS/PS) so the rendered notice cannot be
+// hijacked by control runes hidden in the title or prompt-derived
+// fallback. body is already SanitizeForLog'd on the success path
+// (sanitiseRunResult); applying it here is idempotent on clean ASCII
+// templates and adds defence-in-depth.
 func formatCronNotice(label, body string) string {
+	// MaxCronTitleLen (256 runes) bounds label after the rune-count gate
+	// at AddJob/UpdateJob — a 4× rune→byte budget is more than enough for
+	// CJK / emoji to round-trip through SanitizeForLog without truncation.
+	label = osutil.SanitizeForLog(label, MaxCronTitleLen*4)
 	return fmt.Sprintf(cronNoticePrefixFmt, label, body)
 }
 

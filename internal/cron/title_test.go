@@ -204,3 +204,41 @@ func TestUpdateJob_TitleLengthGuard(t *testing.T) {
 		t.Fatalf("error should mention title length, got %v", err)
 	}
 }
+
+// TestFormatCronNotice_StripsBidi locks the R239-SEC-5 contract: a label
+// carrying bidi/directional-isolate runes must not survive into the IM
+// notice. Without the SanitizeForLog pass in formatCronNotice, an
+// attacker who set Job.Title via the dashboard PATCH could plant a U+202E
+// (Right-to-Left Override) and reverse the rendered notice — Title isn't
+// validated for control runes (only length).
+func TestFormatCronNotice_StripsBidi(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		rune rune
+	}{
+		{"RLO", 0x202E},
+		{"LRE", 0x202A},
+		{"RLI", 0x2067},
+		{"PDI", 0x2069},
+		{"LS", 0x2028},
+		{"PS", 0x2029},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			label := "good" + string(tc.rune) + "evil"
+			got := formatCronNotice(label, "body")
+			if strings.ContainsRune(got, tc.rune) {
+				t.Fatalf("notice contains %q rune U+%04X: %q", tc.name, tc.rune, got)
+			}
+			// Body must remain intact — only the label is sanitised at
+			// this layer (success path's body is already sanitised
+			// upstream via sanitiseRunResult; the static error
+			// templates are clean ASCII so SanitizeForLog would no-op).
+			if !strings.Contains(got, "body") {
+				t.Fatalf("notice lost body suffix: %q", got)
+			}
+		})
+	}
+}
