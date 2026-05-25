@@ -634,26 +634,29 @@ func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError func(string)) (bool, 
 	return false, sendAckAccepted, nil
 }
 
-// dispatchCapabilities adapts *Server's hooks (sendWithBroadcast,
+// serverCaps adapts *Server's hooks (sendWithBroadcast,
 // tryAutoTakeover, replyTagForBackend) into the dispatch.Capabilities
 // interface that NewDispatcher consumes. Replaces the legacy
 // SendFn / TakeoverFn / ReplyFooterFn closure-as-DI wireup so adding a
 // future hook (e.g. a stream-cancel callback) costs one method here
 // instead of a new DispatcherConfig closure field plus its nil-fallback
 // line. R243-ARCH-10.
-type dispatchCapabilities struct{ s *Server }
+//
+// Renamed from dispatchCapabilities (R248-CR-3) to disambiguate from the
+// dispatch.Capabilities interface this struct implements.
+type serverCaps struct{ s *Server }
 
 // Send forwards to Server.sendWithBroadcast (delegates to Hub when
 // registered, falls back to sess.Send for headless mode). Tracks
 // dashboard "running"/"ready" transitions; see send.go top docstring.
-func (c dispatchCapabilities) Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error) {
+func (c serverCaps) Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error) {
 	return c.s.sendWithBroadcast(ctx, key, sess, text, images, onEvent)
 }
 
 // Takeover forwards to Server.tryAutoTakeover. Returns true when an
 // external Claude session was adopted; the dispatcher discards the
 // result either way (GetOrCreate runs unconditionally afterwards).
-func (c dispatchCapabilities) Takeover(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool {
+func (c serverCaps) Takeover(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool {
 	return c.s.tryAutoTakeover(ctx, chatKey, key, opts)
 }
 
@@ -662,7 +665,7 @@ func (c dispatchCapabilities) Takeover(ctx context.Context, chatKey, key string,
 // pinned one (legacy / pre-multi-backend sessions). replyTagForBackend
 // returns "" for unknown ids so dispatch will skip the footer rather
 // than emit a garbled tag.
-func (c dispatchCapabilities) ReplyFooter(backendID string) string {
+func (c serverCaps) ReplyFooter(backendID string) string {
 	if backendID == "" {
 		backendID = c.s.router.DefaultBackend()
 	}

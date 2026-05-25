@@ -298,6 +298,7 @@
 - [ ] **R247-CR-28 — spawn budget 警告 magic factor 0.5（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:606-613`。方案：const spawnElapsedWarnRatio + godoc。
 - [ ] **R247-CR-29 — TriggerNow 60 行 + 3 goroutine 分支（P3）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:780-833`。方案：合并单 goroutine + 内部 if。
 - [ ] **R247-CR-30 — IsExcluded godoc 与实现 cost 不一致（P3）** [REFACTOR]: `internal/cron/scheduler_session.go:40-46`。方案：godoc 标注 O(jobs × recentCap) + 推 KnownSessionIDs cache。
+- [x] **R248-CR-3 — `dispatchCapabilities` 类型名与 `dispatch.Capabilities` interface 易混淆** [REFACTOR]: `internal/server/send.go:644` 类型名 `dispatchCapabilities` 与所实现的 `dispatch.Capabilities` interface 易混淆；`internal/dispatch/capabilities.go:24` godoc 已经叫 `serverCapabilities` — 文档与实际类型名不一致。方案：改短名 `serverCaps`。 *(已实施：dispatchCapabilities → serverCaps；server/send.go + server/server.go + dispatch/capabilities.go godoc 同步)*
 
 ### 架构（剩余）
 

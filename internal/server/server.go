@@ -916,7 +916,7 @@ func (s *Server) Start(ctx context.Context) error {
 		Dedup:                 s.dedup,
 		AllowedRoot:           s.allowedRoot,
 		ClaudeDir:             s.claudeDir,
-		Capabilities:          dispatchCapabilities{s: s},
+		Capabilities:          serverCaps{s: s},
 		NoOutputTimeout:       s.noOutputTimeout,
 		TotalTimeout:          s.totalTimeout,
 		WatchdogNoOutputKills: &s.watchdogNoOutputKills,
