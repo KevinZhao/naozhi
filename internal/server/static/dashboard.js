@@ -8248,12 +8248,17 @@ function inlineMd(s) {
   // Type heuristic uses Claude's auto-memory naming convention (feedback_*,
   // project_*, user_*, reference_*) — unknown prefixes fall back to a neutral
   // 🧠 chip. Hover popover (below) still shows full slug + body.
+  // a11y contract: aria-label exposes the full [[slug]] to screen readers and
+  // role=link + tabindex=0 + Enter/Space handler (see popover IIFE) make the
+  // chip keyboard-activable. Copy fallback: a document-level `copy` listener
+  // rewrites clipboardData to [[slug]] when selection touches a chip, so the
+  // wiki-link survives copy/paste even though the visible glyphs are shorter.
   s = s.replace(/\[\[([a-zA-Z0-9_\-]{1,64})\]\]/g, function(_, slug) {
     var m = slug.match(/^(feedback|project|user|reference)_(.+)$/);
     var type = m ? m[1] : 'memory';
     var tail = m ? m[2] : slug;
     var segs = tail.split('_');
-    var label = segs.slice(-2).join('_');
+    var label = segs.slice(-3).join('_');
     var icon = ({
       feedback:  '💡',
       project:   '📌',
@@ -8261,8 +8266,10 @@ function inlineMd(s) {
       reference: '🔗',
       memory:    '🧠',
     })[type];
+    var ariaLabel = 'memory 引用：[[' + slug + ']]';
     return '<span class="md-memlink" data-slug="' + escAttr(slug) +
-      '" data-type="' + type + '" tabindex="0" role="link">' +
+      '" data-type="' + type + '" tabindex="0" role="link"' +
+      ' aria-label="' + escAttr(ariaLabel) + '">' +
       '<span class="md-memlink-icon" aria-hidden="true">' + icon + '</span>' +
       '<span class="md-memlink-label">' + esc(label) + '</span></span>';
   });
@@ -14754,6 +14761,62 @@ initSidebarSearch();
   function onKeyDown(e) {
     if (e.key === 'Escape' && pinned) {
       hidePopover();
+      return;
+    }
+    // role=link contract (WCAG 2.1.1): Enter/Space on a focused chip must
+    // activate it. Without this branch, keyboard users could tab to a chip
+    // and find no way to read the memory body.
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      const span = e.target && e.target.closest && e.target.closest('.md-memlink');
+      if (!span) return;
+      e.preventDefault();
+      const slug = span.getAttribute('data-slug');
+      if (!slug) return;
+      if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = 0; }
+      loadAndShow(slug, span, true);
+    }
+  }
+
+  // Copy fallback: chip renders only the icon + a short tail label, so a raw
+  // selection-copy would yield e.g. "💡 vs_practice" — the original
+  // [[full_slug]] wiki-link is lost, breaking round-trip into other docs / IM
+  // / markdown editors. We rewrite clipboardData when the active selection
+  // touches at least one chip, replacing each chip's text with its data-slug
+  // wrapped in [[]].
+  function onCopy(e) {
+    const sel = document.getSelection && document.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+    // Cheap pre-check: only intervene if the selection actually crosses a chip.
+    let touchesChip = false;
+    for (let i = 0; i < sel.rangeCount; i++) {
+      const r = sel.getRangeAt(i);
+      const c = r.commonAncestorContainer;
+      const root = c.nodeType === 1 ? c : c.parentNode;
+      if (!root) continue;
+      if ((root.closest && root.closest('.md-memlink')) ||
+          (root.querySelector && root.querySelector('.md-memlink'))) {
+        touchesChip = true;
+        break;
+      }
+    }
+    if (!touchesChip) return;
+    const parts = [];
+    for (let i = 0; i < sel.rangeCount; i++) {
+      const frag = sel.getRangeAt(i).cloneContents();
+      // Replace each chip element inside the cloned fragment with a text node
+      // carrying [[slug]]. cloneContents loses parent context, so we walk
+      // the fragment itself.
+      const chips = frag.querySelectorAll ? frag.querySelectorAll('.md-memlink') : [];
+      chips.forEach((chip) => {
+        const slug = chip.getAttribute('data-slug') || '';
+        chip.replaceWith(document.createTextNode('[[' + slug + ']]'));
+      });
+      parts.push(frag.textContent || '');
+    }
+    const text = parts.join('\n');
+    if (e.clipboardData) {
+      e.clipboardData.setData('text/plain', text);
+      e.preventDefault();
     }
   }
 
@@ -14762,4 +14825,5 @@ initSidebarSearch();
   document.addEventListener('click', onClick, true);
   document.addEventListener('mousedown', onDocClick, true);
   document.addEventListener('keydown', onKeyDown);
+  document.addEventListener('copy', onCopy);
 })();
