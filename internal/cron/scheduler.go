@@ -141,12 +141,6 @@ type SchedulerConfig struct {
 	JitterMax time.Duration
 }
 
-type (
-	OnRunStartedFunc func(RunStartedEvent)
-
-	OnRunEndedFunc func(RunEndedEvent)
-)
-
 // Scheduler manages cron jobs and executes them on schedule.
 type Scheduler struct {
 	cron *robfigcron.Cron
