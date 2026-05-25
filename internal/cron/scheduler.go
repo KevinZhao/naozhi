@@ -778,6 +778,17 @@ func (s *Scheduler) Stop() {
 	// skip triggerWG.Wait entirely (the leaked goroutines die when the
 	// process exits moments later). Either way saveJobs runs — losing it
 	// would undo mutations that had already returned 2xx to dashboard/IM.
+	//
+	// R246-GO-13: track stopStart and re-derive the remaining budget for
+	// the second select via time.After, instead of reusing deadline.C from
+	// a NewTimer across two select statements. Reusing a fired timer's
+	// channel is a known footgun (the receive cannot be guaranteed to
+	// observe the prior firing exactly once across both selects, and Go
+	// makes no documented guarantee about timer-channel buffering across
+	// independent receivers); a fresh time.After on the remaining budget
+	// is the explicit, documented pattern. The first select still uses
+	// the NewTimer so we can defer-Stop it on the early-drain path.
+	stopStart := time.Now()
 	deadline := time.NewTimer(stopBudget)
 	defer deadline.Stop()
 
@@ -816,11 +827,22 @@ func (s *Scheduler) Stop() {
 			s.triggerWG.Wait()
 			close(triggerDone)
 		}()
+		// R246-GO-13: derive remaining budget from stopStart instead of
+		// re-reading deadline.C. If cron.Stop drained at the very edge of
+		// the budget, remaining can be near-zero; clamp to a tiny floor so
+		// we still observe an instantaneous triggerDone (already-closed
+		// channel) without wedging on a 0-duration timer. The clamp is
+		// not a guaranteed minimum wait — both the channel and the timer
+		// are checked in the same select.
+		remaining := stopBudget - time.Since(stopStart)
+		if remaining < time.Millisecond {
+			remaining = time.Millisecond
+		}
 		select {
 		case <-triggerDone:
-		case <-deadline.C:
+		case <-time.After(remaining):
 			slog.Warn("cron scheduler: stop deadline exceeded during triggerWG wait, proceeding",
-				"budget", stopBudget)
+				"budget", stopBudget, "remaining_ms", remaining.Milliseconds())
 		}
 	}
 
