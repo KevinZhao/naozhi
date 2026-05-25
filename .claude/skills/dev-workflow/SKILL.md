@@ -28,7 +28,7 @@ Pick exactly one bucket. If two apply, pick the stricter one.
 | **B. Bug fix — small** | Fix that is ALL of: ≤20 lines changed, ≤3 files touched, AND triggers no item on the Risk Checklist |
 | **C. Bug fix — large** | Bug fix that violates ANY of: >20 lines, >3 files, or any Risk Checklist item |
 | **D. Trivial** | Typo, comment, formatting, doc-only — skip this skill |
-| **E. Hotfix** | Live incident or user-authorized emergency fix. Bypass design path to stop the bleeding. Required afterwards within 24h: write the design retroactively, add a regression test, and log a postmortem item in `docs/TODO.md`. Commit message must use `hotfix:` prefix. |
+| **E. Hotfix** | Live incident or user-authorized emergency fix. Bypass design path to stop the bleeding. Required afterwards within 24h: write the design retroactively, add a regression test, and open a GitHub issue with `priority:p0` + appropriate `type:` label for the postmortem trail. Commit message must use `hotfix:` prefix. |
 
 ### Risk Checklist (any one match → escalate to "needs design")
 
@@ -92,7 +92,7 @@ Run a dedicated review pass before coding starts. The reviewer can be:
 - Observability: are failures debuggable from logs/metrics alone?
 - Backward compatibility & migration safety
 - Failure modes & graceful degradation
-- Documentation & TODO sync
+- Documentation sync (`docs/TODO.md` is FROZEN — do NOT append findings; produce `docs/review/R{N}-raw.md` and run the `triage-findings` skill, which routes to GitHub Issues / `docs/cosmetic-backlog.md` / discard)
 
 Save review evidence to `docs/reviews/<topic>-<date>.md` if the repo uses that pattern; otherwise paste into the PR description. When using an agent team, capture each agent's verdict and note whether disagreements were resolved.
 
@@ -201,7 +201,9 @@ task arrives
 - Project-scoped skills live under `.claude/skills/` and are tracked in git (whitelisted in `.gitignore`). Edits to a skill follow the same worktree → review → PR loop as code.
 - Worktrees live under `.claude/worktrees/<name>/` and are ignored. Use `EnterWorktree` (or `git worktree add`) — never branch by editing the existing checkout in place.
 - Large designs go in `docs/rfc/`, indexed in `docs/rfc/README.md`
-- Outstanding work tracked in `docs/TODO.md` — update it when starting/closing items
+- Outstanding work tracked in **GitHub Issues** (`label:priority:p0,priority:p1,priority:p2 is:open`); `docs/TODO.md` is FROZEN as a historical archive — do NOT append new items there
+- Cosmetic / godoc / naming suggestions go to `docs/cosmetic-backlog.md`, not issues
+- Review findings flow: review agent → `docs/review/R{N}-raw.md` → `triage-findings` skill → issues / cosmetic-backlog / discarded (never directly into TODO.md)
 - Local restart after a build during development: `sudo systemctl restart naozhi` (see `docs/ops/naozhi-deploy-skill.md`); never hand-kill the process
 - Prior review sweeps are referenced from the project memory `MEMORY.md`
 

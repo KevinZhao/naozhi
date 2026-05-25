@@ -1,0 +1,45 @@
+name: Review finding
+description: review agent 产出的待修条目（由 triage-findings skill 自动开 issue）
+title: "[R{ROUND}-{CAT}-{IDX}] <一句话症状>"
+labels: ["needs-triage"]
+body:
+  - type: input
+    id: anchor
+    attributes:
+      label: Anchor
+      description: review round + 类别 + 序号，用于跨 round 去重和 commit message 引用
+      placeholder: "R249-GO-3"
+    validations:
+      required: true
+  - type: textarea
+    id: symptom
+    attributes:
+      label: Symptom
+      description: 症状 / 实际行为 / 触发条件
+    validations:
+      required: true
+  - type: textarea
+    id: location
+    attributes:
+      label: Location
+      description: 文件:行 + 关键代码片段（用 markdown 代码块包住）
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: 建议方案；多个候选都列出来
+    validations:
+      required: false
+  - type: textarea
+    id: triage
+    attributes:
+      label: Triage notes
+      description: triage skill 的判定记录（grep 验证、去重检查、相关 issue）
+      placeholder: |
+        - verified: file/line 仍存在 (commit abc1234)
+        - dedup: 不与 #N 重复
+        - severity: P1 → priority:p1
+    validations:
+      required: false
