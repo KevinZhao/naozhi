@@ -505,11 +505,12 @@ func TestWS_SendAccepted(t *testing.T) {
 	defer conn.Close()
 
 	wsWrite(t, conn, node.ClientMsg{Type: "send", Key: "test:d:u:general", Text: "hello", ID: "req-1"})
-	resp := wsRead(t, conn)
+	// sendWithBroadcastPriority emits a "session_state running" broadcast on
+	// the same client connection just before sessionSend completes (R236-PERF-01),
+	// so it can race the send_ack into the read pipe. Skip non-target frames
+	// instead of pinning a fragile "first frame" assumption.
+	resp := readUntilType(t, conn, "send_ack")
 
-	if resp.Type != "send_ack" {
-		t.Fatalf("type = %q, want send_ack", resp.Type)
-	}
 	if resp.Status != "accepted" {
 		t.Errorf("status = %q, want accepted", resp.Status)
 	}
@@ -518,6 +519,20 @@ func TestWS_SendAccepted(t *testing.T) {
 	}
 	if resp.Key != "test:d:u:general" {
 		t.Errorf("key = %q, want test:d:u:general", resp.Key)
+	}
+}
+
+// readUntilType drains and discards WS frames until one matching wantType
+// arrives, or fails the test on read error / 5s deadline (the same deadline
+// dialWS installed via SetReadDeadline). Used by tests that exercise paths
+// where multiple unordered frames may share one client connection.
+func readUntilType(t *testing.T, conn *websocket.Conn, wantType string) node.ServerMsg {
+	t.Helper()
+	for {
+		resp := wsRead(t, conn)
+		if resp.Type == wantType {
+			return resp
+		}
 	}
 }
 
