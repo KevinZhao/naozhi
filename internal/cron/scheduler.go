@@ -862,13 +862,25 @@ func (s *Scheduler) Stop() {
 		// channel) without wedging on a 0-duration timer. The clamp is
 		// not a guaranteed minimum wait — both the channel and the timer
 		// are checked in the same select.
+		//
+		// R249-GO-4: use NewTimer + defer Stop instead of time.After.
+		// time.After returns a fresh timer whose underlying resources
+		// are released only when it fires; on the triggerDone-fast path
+		// the timer would leak its slot until expiry (~30s default).
+		// More urgently, with remaining clamped to 1ms the timer almost
+		// certainly fires before the select runs, and a fired channel
+		// from time.After is unreachable for explicit Stop. Mirror the
+		// first select's NewTimer + defer Stop pattern (line ~820) so
+		// both halves of Stop release timer state deterministically.
 		remaining := stopBudget - time.Since(stopStart)
 		if remaining < time.Millisecond {
 			remaining = time.Millisecond
 		}
+		triggerTimer := time.NewTimer(remaining)
+		defer triggerTimer.Stop()
 		select {
 		case <-triggerDone:
-		case <-time.After(remaining):
+		case <-triggerTimer.C:
 			slog.Warn("cron scheduler: stop deadline exceeded during triggerWG wait, proceeding",
 				"budget", stopBudget, "remaining_ms", remaining.Milliseconds())
 		}
