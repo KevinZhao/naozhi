@@ -7914,7 +7914,15 @@ const BLOCK_SPLIT_RE = new RegExp(
 // 2-column step (LLM/CJK convention). MAX_LIST_DEPTH caps adversarial input.
 const LIST_DEPTH_STEP = 2;
 const MAX_LIST_DEPTH = 6;
-const LIST_ITEM_RE = /^(\s*)(?:([-*])|(\d+)\.)\s+(.*)$/;
+// Trailing \r? handles CRLF source. The list pass runs after split('\n')
+// which preserves the \r on Windows-pasted text; without explicit handling
+// (.*)$ would not match (`.` excludes \r, $ does not anchor before \r
+// without the m flag), and the line silently falls out of the list path.
+const LIST_ITEM_RE = /^(\s*)(?:([-*])|(\d+)\.)\s+(.*?)\r?$/;
+// Reject anything > 3 digits as a list start: real ordinals max out around
+// dozens; 4+ digit prefixes are year/version/issue tokens ("2024. 关于...",
+// "1234. xxx") that the user does not want rendered as <ol start="2024">.
+const OL_START_MAX_DIGITS = 3;
 
 function leadingColumns(s) {
   let cols = 0;
@@ -7935,10 +7943,19 @@ function parseListItem(line, baselineCols) {
   let depth = Math.floor(Math.max(0, cols - base) / LIST_DEPTH_STEP);
   if (depth > MAX_LIST_DEPTH) depth = MAX_LIST_DEPTH;
   if (m[2]) return { kind: 'ul', depth, cols, content: m[4] };
+  // Reject ordinals with too many digits — those are year/version tokens
+  // ("2024. 关于") not real list starts. Returning null pushes the line into
+  // the plain-text branch instead of opening <ol start="2024">.
+  if (m[3].length > OL_START_MAX_DIGITS) return null;
   return { kind: 'ol', depth, cols, startNum: parseInt(m[3], 10), content: m[4] };
 }
 
 function renderMdUncached(s) {
+  // Normalize CRLF/CR to LF up front. Source can be Windows-pasted text or
+  // IM payloads carrying \r\n. Without this every per-line regex below
+  // (LIST_ITEM_RE, heading, table) would silently miss-match on the trailing
+  // \r and demote rich blocks to plain <br> spans.
+  if (s.indexOf('\r') !== -1) s = s.replace(/\r\n?/g, '\n');
   // Split by fenced code blocks and display math blocks (including LaTeX
   // environments like \begin{aligned}...\end{aligned}).
   const parts = s.split(BLOCK_SPLIT_RE);
@@ -8057,21 +8074,38 @@ function renderMdUncached(s) {
           chunks.push('</li>');
           chunks.push('</' + listStack.pop().kind + '>');
         }
-        const startAttr = (li.kind === 'ol' && li.startNum !== 1)
+        // startNum=0 / negative / NaN never produce a start attribute —
+        // <ol start="0"> renders "0. 1. ..." which is jarring; let the
+        // browser fall back to default "1. 2. ..." instead.
+        const startAttr = (li.kind === 'ol' && li.startNum >= 2)
             ? ' start="' + li.startNum + '"' : '';
         const cls = li.kind === 'ol' ? 'md-ol' : 'md-ul';
         chunks.push('<' + li.kind + ' class="' + cls + '"' + startAttr + '>');
-        listStack.push({ kind: li.kind, depth: li.depth });
+        // Frame stores li.cols too so lazy-continuation can use the original
+        // source column rather than the (possibly promoted) depth — promotion
+        // mutates depth but not the user's actual indent.
+        listStack.push({ kind: li.kind, depth: li.depth, cols: li.cols });
         chunks.push('<li>' + inlineMd(li.content));
         continue;
       }
-      if (line === '') {
+      // Treat all-whitespace lines as blanks: LLM/IM pipelines occasionally
+      // emit a single space on otherwise-empty lines. Without this they fall
+      // through to lazy continuation (or closeAll) and visibly fracture lists.
+      if (line === '' || /^\s+$/.test(line)) {
         if (listStack.length > 0) {
-          // Look ahead: if next non-blank line is a list item, keep state.
+          // Look ahead: only keep list state when the next non-blank line is
+          // a list item OF THE SAME KIND as the active top frame. Cross-kind
+          // continuation across a blank line is exactly the case the user
+          // means as "two separate lists with paragraph break between them"
+          // — keeping state would force the next list into a nested child.
           let peek = i + 1;
-          while (peek < lines.length && lines[peek] === '') peek++;
-          if (peek < lines.length && parseListItem(lines[peek], baselineCols)) {
-            continue;
+          while (peek < lines.length && (lines[peek] === '' || /^\s+$/.test(lines[peek]))) peek++;
+          if (peek < lines.length) {
+            const pli = parseListItem(lines[peek], baselineCols);
+            const top = listStack[listStack.length - 1];
+            if (pli && pli.kind === top.kind) {
+              continue;
+            }
           }
           closeAll();
         }
@@ -8079,11 +8113,13 @@ function renderMdUncached(s) {
         continue;
       }
       // Lazy continuation: a non-list line indented at least one step beyond
-      // the current top frame folds into the active <li>.
+      // the active top frame's source column folds into the open <li>. Using
+      // top.cols (raw source column) instead of top.depth keeps the threshold
+      // honest after lenient promotion bumped depth without bumping cols.
       if (listStack.length > 0) {
         const top = listStack[listStack.length - 1];
         const cols = leadingColumns(line);
-        if (cols - baselineCols >= (top.depth + 1) * 2) {
+        if (cols - top.cols >= LIST_DEPTH_STEP) {
           chunks.push(' ' + inlineMd(line.trim()));
           continue;
         }

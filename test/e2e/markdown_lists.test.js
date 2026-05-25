@@ -136,4 +136,100 @@ test.describe('renderMd list 渲染', () => {
     const html = await render('1. a\n# H\n');
     expect(html).toMatch(/<\/ol>.*<strong class="md-h1">/);
   });
+
+  // ===== Code-review fix-up coverage =====
+
+  test('CRLF 输入仍能正确识别为 list', async () => {
+    // Windows-paste / IM 文本会保留 \r。renderMd 入口的 CRLF→LF 归一化
+    // 必须吃掉 \r，否则 LIST_ITEM_RE 全段 miss → list 完全不渲染。
+    const html = await render('1. a\r\n2. b\r\n');
+    expect(html).toMatch(/<ol class="md-ol"><li>a<\/li><li>b<\/li><\/ol>/);
+    expect(html).not.toMatch(/\r/);
+  });
+
+  test('CRLF 不会让 ordered list 退化为 br 段', async () => {
+    const html = await render('5. five\r\n6. six\r\n');
+    expect(html).toMatch(/<ol[^>]*\bstart="5"/);
+    expect(html).not.toMatch(/<br>/);
+  });
+
+  test('cross-kind 空行：两个独立 list 之间保留 md-blank 分隔', async () => {
+    // 用户截图回归：- a + 空行 + 1. b 旧实现产 ul + md-blank + ol，
+    // 第一版修复误把它嵌套；现在恢复"同 kind 才续接"语义。
+    const html = await render('- a\n\n1. b\n');
+    expect(html).toMatch(/<ul class="md-ul"><li>a<\/li><\/ul>/);
+    expect(html).toMatch(/<ol class="md-ol"><li>b<\/li><\/ol>/);
+    expect(html).toMatch(/<\/ul><div class="md-blank"><\/div><ol/);
+  });
+
+  test('同 kind 空行仍不切断 list', async () => {
+    const html = await render('1. a\n\n2. b\n');
+    expect((html.match(/<ol/g) || []).length).toBe(1);
+  });
+
+  test('lazy continuation 在 lenient promotion 之后仍能折叠 2-cols 续行', async () => {
+    // 1. parent + - detail（lenient 把 ul 推到 depth=1）+ 2-col 缩进续行 cont。
+    // 阈值原本用 (top.depth+1)*2=4，永远不命中；改用 top.cols+STEP 后命中。
+    const html = await render('1. parent\n- detail\n  cont\n');
+    expect(html).toMatch(/<li>detail cont<\/li>/);
+  });
+
+  test('start 数字过长（年份 / 版本号开头段）不被识别为 ol', async () => {
+    // "2024. 关于新需求" 不应渲染为 <ol start="2024">；走普通行 + br 即可。
+    const html = await render('2024. 关于新需求\n');
+    expect(html).not.toMatch(/<ol[^>]*start="2024"/);
+    expect(html).not.toMatch(/<ol\b/);
+  });
+
+  test('start=0 / start=1 都不写 start 属性（避免 <ol start="0"> 异常）', async () => {
+    const h0 = await render('0. zero\n');
+    expect(h0).not.toMatch(/<ol[^>]*start="0"/);
+    const h1 = await render('1. one\n');
+    expect(h1).not.toMatch(/start=/);
+  });
+
+  test('全空白行（仅空格）等价于空行，不污染 list', async () => {
+    const html = await render('1. a\n   \n2. b\n');
+    // 中间不该产生空格污染 li 内容
+    expect(html).not.toMatch(/<li>a <\/li>/);
+    expect((html.match(/<ol/g) || []).length).toBe(1);
+  });
+
+  test('CSS：嵌套 list 在 .crs-text.md 容器下拿到紧凑 16px 缩进', async () => {
+    const m = await page.evaluate(() => {
+      const w = /** @type {any} */ (window);
+      const html = w.renderMd('1. 父项\n   - 子项\n');
+      const host = document.createElement('div');
+      host.className = 'crs-text md';
+      host.innerHTML = html;
+      document.body.appendChild(host);
+      const innerUl = host.querySelector('.md-ol > li > .md-ul');
+      const cs = innerUl ? getComputedStyle(innerUl) : null;
+      const result = {
+        found: !!innerUl,
+        marginLeft: cs ? cs.marginLeft : null,
+        listStyle: cs ? cs.listStyleType : null,
+      };
+      host.remove();
+      return result;
+    });
+    expect(m.found).toBe(true);
+    // 期望 16px（PR 紧凑规则），而非 22px（.crs-text.md ul 的覆盖）
+    expect(m.marginLeft).toBe('16px');
+    expect(m.listStyle).toBe('circle');
+  });
+
+  test('list 末尾不带 \\n 仍能正确闭合', async () => {
+    const html = await render('1. a');
+    expect(html).toMatch(/<ol class="md-ol"><li>a<\/li><\/ol>/);
+  });
+
+  test('深度 cap 验证：超过 MAX_LIST_DEPTH 的栈帧不再加深', async () => {
+    // 14 列 → depth=7 被截到 6；再深的 list item 不会让栈再长。
+    const src = '- L0\n  - L1\n    - L2\n      - L3\n        - L4\n          - L5\n            - L6\n              - L7\n                - L8\n';
+    const html = await render(src);
+    // 实际 ul 嵌套层数 ≤ MAX_LIST_DEPTH+1 = 7（depth 0..6，每层一个 ul）
+    const ulCount = (html.match(/<ul\b/g) || []).length;
+    expect(ulCount).toBeLessThanOrEqual(7);
+  });
 });
