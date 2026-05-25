@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -166,6 +168,39 @@ func TestApplyClaudeEnvSettings_missingFileReturnsError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when settings.json missing")
 	}
+}
+
+// TestApplyClaudeEnvSettings_errorTypeDistinguishesMissingVsCorrupt is the
+// regression test for R236-QA-13. main() previously logged both file-missing
+// and file-corrupt as Warn, so operators couldn't tell the difference between
+// "first-run, settings file not yet created" (legitimate, no action) and
+// "somebody hand-edited settings.json and broke it" (operator-actionable).
+// The fix differentiates at the call site by checking errors.Is(fs.ErrNotExist).
+// This test pins the error-type contract that makes that branching reliable
+// regardless of how readJSONWithRetry wraps the underlying error in future.
+func TestApplyClaudeEnvSettings_errorTypeDistinguishesMissingVsCorrupt(t *testing.T) {
+	t.Run("missing file returns fs.ErrNotExist-compatible error", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		err := applyClaudeEnvSettings(context.Background())
+		if err == nil {
+			t.Fatal("expected error for missing file")
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("missing-file error should be fs.ErrNotExist-compatible (so main can route to Warn); got %v", err)
+		}
+	})
+
+	t.Run("corrupt JSON returns non-NotExist error", func(t *testing.T) {
+		seedClaudeHome(t, `{"env":`)
+		err := applyClaudeEnvSettings(context.Background())
+		if err == nil {
+			t.Fatal("expected error for corrupt JSON")
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("corrupt-JSON error must NOT match fs.ErrNotExist (so main can route to Error); got %v", err)
+		}
+	})
 }
 
 func TestApplyClaudeEnvSettings_emptyEnvSectionNoError(t *testing.T) {

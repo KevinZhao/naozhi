@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -230,7 +231,15 @@ func writeClaudeSettingsOverride(ctx context.Context, serverAddr string) string 
 		// Read/parse failed. Do NOT overwrite an existing override — the last
 		// known-good copy still lets Claude CLI authenticate. Report via logs so
 		// the operator notices the degraded mode.
-		slog.Warn("read ~/.claude/settings.json failed; keeping previous override", "err", err)
+		//
+		// R236-QA-13: file-missing is the normal first-run state and stays at
+		// Warn; corrupt-JSON / unreadable means somebody actively broke the
+		// settings file and gets logged at Error so it surfaces in alerting.
+		if errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("read ~/.claude/settings.json: file missing; keeping previous override", "err", err)
+		} else {
+			slog.Error("read ~/.claude/settings.json: corrupt or unreadable; keeping previous override", "err", err)
+		}
 		if _, statErr := os.Stat(path); statErr == nil {
 			return path
 		}
@@ -467,10 +476,17 @@ func main() {
 
 	// CLI Protocol + Wrapper
 	if err := applyClaudeEnvSettings(ctx); err != nil {
-		// Non-fatal: Bedrock / Anthropic env may already be set via systemd
-		// EnvironmentFile or exported by the shell. Warn so operators notice
-		// if the only source was settings.json and that read failed.
-		slog.Warn("apply ~/.claude/settings.json env failed", "err", err)
+		// R236-QA-13: differentiate "file legitimately missing" from "file
+		// exists but is corrupt JSON". The former is a normal first-run /
+		// ops-not-configured state and stays at Warn; the latter is operator-
+		// actionable (somebody hand-edited settings.json and broke it, or a
+		// rewrite-in-place writer crashed mid-flush) and should surface at
+		// Error so it shows up in the SLO log filter.
+		if errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("apply ~/.claude/settings.json env: file missing", "err", err)
+		} else {
+			slog.Error("apply ~/.claude/settings.json env: read or parse failed", "err", err)
+		}
 	}
 	settingsFile := writeClaudeSettingsOverride(ctx, cfg.Server.Addr)
 
