@@ -242,6 +242,19 @@ type DispatcherConfig struct {
 	//
 	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn.
 	TakeoverFn func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
+
+	// AllowMissingSender opts out of the constructor-time "Send must be
+	// wired" check. Test wiring that builds a Dispatcher without ever
+	// touching the IM send path (e.g. pure routing / queue / commands tests)
+	// sets this true so NewDispatcher does not panic.
+	//
+	// Production code MUST leave this false: production wiring always sets
+	// Capabilities (or, legacy, SendFn). Without the gate, a missing
+	// wireup surfaces as a runtime panic on the first user message —
+	// healthcheck-ok-then-systemd-restart-loop, which is worse than
+	// silent drop because it leaves no clear failure signal at boot.
+	// R248-ARCH-2.
+	AllowMissingSender bool
 }
 
 // NewDispatcher creates a Dispatcher from the given config.
@@ -294,6 +307,41 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		} else {
 			caps = NoopCapabilities{}
 		}
+	}
+	// R248-ARCH-2 boot-panic gate: surface missing Send wireup at
+	// constructor-time, not on the first user message. The legacy
+	// NoopCapabilities.Send / closureCapabilities (with c.send==nil) both
+	// panic when actually invoked — but that arrives AFTER healthcheck,
+	// systemd marks the unit healthy, and the first user message turns into
+	// a panic-restart loop. Catching it here lets a misconfigured boot fail
+	// loud before any traffic is accepted. Tests that genuinely never call
+	// Send opt out via AllowMissingSender.
+	if !cfg.AllowMissingSender {
+		hasSend := false
+		switch c := caps.(type) {
+		case NoopCapabilities:
+			hasSend = false
+		case closureCapabilities:
+			hasSend = c.send != nil
+		default:
+			// Any other Capabilities implementation is presumed to wire
+			// Send; if its Send actually panics that is the contract the
+			// caller chose, not a missing wireup we can detect lexically.
+			hasSend = true
+		}
+		if !hasSend {
+			panic("dispatch: NewDispatcher missing Send wireup — set DispatcherConfig.Capabilities or DispatcherConfig.SendFn (test wiring may set DispatcherConfig.AllowMissingSender to opt out)")
+		}
+	}
+	// R248-GO-2: warn when Capabilities and the legacy *Fn fields are both
+	// set — Capabilities wins and the *Fn closures are silently ignored,
+	// which is a common transition-period misuse. One-time slog.Warn at
+	// constructor time, no hot-path cost.
+	if cfg.Capabilities != nil && (cfg.SendFn != nil || cfg.TakeoverFn != nil || cfg.ReplyFooterFn != nil) {
+		slog.Warn("dispatch: DispatcherConfig.Capabilities set; legacy SendFn/TakeoverFn/ReplyFooterFn ignored",
+			"send_fn_set", cfg.SendFn != nil,
+			"takeover_fn_set", cfg.TakeoverFn != nil,
+			"reply_footer_fn_set", cfg.ReplyFooterFn != nil)
 	}
 	d := &Dispatcher{
 		router:                router,
