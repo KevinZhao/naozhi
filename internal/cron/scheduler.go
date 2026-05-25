@@ -678,30 +678,44 @@ func (s *Scheduler) EnsureStub(key string) bool {
 	return true
 }
 
-// stopBudget is the overall deadline Scheduler.Stop() will spend waiting on
-// cron.Stop + triggerWG before proceeding to save. Shared between both waits
-// (not doubled per wait) so a production deployment with execTimeout=3600s
-// cannot pin restart for ≈2 h — the prior two-budget design had a worst case
-// of 2×(execTimeout+5s). Aligned with session.ShutdownTimeout (30s) so both
-// subsystems agree on the upper bound systemd sees.
-//
-// Package-level var (not const) so tests can shorten it to milliseconds
-// without race-racing a Stop call with real wall-clock timeouts.
-// R49-REL-CRON-STOP-BUDGET.
-var stopBudget = 30 * time.Second
+// defaultStopBudget is the production overall deadline Scheduler.Stop()
+// will spend waiting on cron.Stop + triggerWG before proceeding to save.
+// Shared between both waits (not doubled per wait) so a production
+// deployment with execTimeout=3600s cannot pin restart for ≈2 h — the
+// prior two-budget design had a worst case of 2×(execTimeout+5s).
+// Aligned with session.ShutdownTimeout (30s) so both subsystems agree on
+// the upper bound systemd sees. R49-REL-CRON-STOP-BUDGET.
+const defaultStopBudget = 30 * time.Second
 
 // gcWaitBudget bounds the cold-start GC goroutine wait in Stop(). Smaller
-// than stopBudget because trimAll's IO is short-lived (ReadDir + N Removes);
-// a wedge here means a stuck filesystem and we'd rather skip the wait than
-// pin systemd TimeoutStopSec.
+// than defaultStopBudget because trimAll's IO is short-lived
+// (ReadDir + N Removes); a wedge here means a stuck filesystem and we'd
+// rather skip the wait than pin systemd TimeoutStopSec.
 //
-// R247-CR-18 (R246-CR-012 same-root): kept as const — no test or production
-// site swaps this value, so the package-level mutable var pattern (still
-// applied to stopBudget below for fast shutdown tests) was unwarranted here
-// and only invited racy parallel-test reads. If a future test ever needs to
-// shorten this, prefer threading it through SchedulerConfig.GCWaitBudget so
-// the scoping remains per-instance instead of package-global.
+// R247-CR-18: kept as a const because no production / test path needs to
+// shorten it. If you find yourself wanting to override per-test, use a
+// `*time.Timer` injected via a Scheduler field instead of reintroducing
+// a package-level var — package vars under t.Parallel races silently.
 const gcWaitBudget = 5 * time.Second
+
+// stopBudget is the active stop budget used by Scheduler.Stop(). Tests
+// MUST mutate it only through WithStopBudget so the var swap is paired
+// with a t.Cleanup restore — direct writes from t.Parallel tests would
+// race a concurrent Stop on another Scheduler instance with real
+// wall-clock timeouts.
+var stopBudget = defaultStopBudget
+
+// WithStopBudget shortens stopBudget for the duration of the test and
+// returns a restore func intended for t.Cleanup. Centralising the swap
+// here keeps the racy direct-write pattern off the call sites and gives
+// future maintainers a single seam to migrate to a Scheduler-field
+// design (the long-term direction noted on gcWaitBudget) without
+// touching every test. R247-CR-18.
+func WithStopBudget(d time.Duration) func() {
+	orig := stopBudget
+	stopBudget = d
+	return func() { stopBudget = orig }
+}
 
 // Stop halts the scheduler and saves state. It waits for both scheduled jobs
 // (drained by s.cron.Stop) and any TriggerNow-spawned goroutines before
