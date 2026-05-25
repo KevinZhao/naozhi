@@ -6,6 +6,27 @@ import (
 	"testing"
 )
 
+// wshubLockOrderFiles enumerates every file in this package that is
+// allowed to mention Hub state and EventLog subscription primitives
+// in the same translation unit. Keeping this list explicit (rather
+// than globbing wshub_*.go) forces a deliberate choice when a new
+// wshub_ file is added: either include it here so invariant A guards
+// it, or leave a paper trail explaining why it is exempt.
+//
+// R248-TEST-4: PR #327 split the original wshub.go god-object into
+// six files and the lock-acquisition code that invariant A is meant
+// to police migrated to wshub_subscribe.go / wshub_eventpush.go.
+// Reading only wshub.go made the scan empty (a silent green test).
+var wshubLockOrderFiles = []string{
+	"wshub.go",
+	"wshub_broadcast.go",
+	"wshub_send.go",
+	"wshub_subscribe.go",
+	"wshub_eventpush.go",
+	"wshub_upgrade.go",
+	"wshub_agent.go",
+}
+
 // TestHubShutdown_LockOrderInvariant is the R35-REL2 pin for the
 // h.mu → eventLog.subMu lock ordering documented on Hub.Shutdown.
 // Shutdown invokes per-key unsub closures while holding h.mu; each
@@ -26,8 +47,12 @@ import (
 //
 // Guard all three properties at source level:
 //
-//	A. wshub.go (this package) must not contain any lexical pattern
-//	   where a function acquires subMu and then h.mu.
+//	A. None of the wshub_*.go files in this package may contain a
+//	   lexical pattern where a function acquires subMu and then
+//	   h.mu. (Originally only wshub.go was scanned; PR #327 split
+//	   the file and the relevant lock sites moved to siblings, so
+//	   the scan now covers every wshub_*.go that owns Hub or push
+//	   logic — see wshubLockOrderFiles.)
 //	B. eventlog.go (internal/cli) must not import internal/server —
 //	   if it did, a direct h.mu access from a subMu-holding callback
 //	   would become possible without this test catching it.
@@ -37,12 +62,13 @@ import (
 // Any failure here forces the author to re-evaluate whether the
 // new lock site can starve Shutdown.
 func TestHubShutdown_LockOrderInvariant(t *testing.T) {
+	// C) the LOCK ORDER CONTRACT tripwire comment must survive in
+	// wshub.go (Hub.Shutdown's godoc anchor). Read it eagerly so we
+	// fail fast if the file vanished.
 	wshubSrc, err := os.ReadFile("wshub.go")
 	if err != nil {
 		t.Fatalf("read wshub.go: %v", err)
 	}
-
-	// C) the LOCK ORDER CONTRACT tripwire comment must survive.
 	if !regexp.MustCompile(`LOCK ORDER CONTRACT \(R35-REL2\)`).Match(wshubSrc) {
 		t.Error("Hub.Shutdown no longer carries the LOCK ORDER CONTRACT godoc. " +
 			"R35-REL2: the comment is the only anchor linking the h.mu → " +
@@ -51,9 +77,10 @@ func TestHubShutdown_LockOrderInvariant(t *testing.T) {
 			"test can still locate it.")
 	}
 
-	// A) within wshub.go, reject any function body that acquires
-	// subMu (hypothetical future code accessing EventLog directly)
-	// AND also has a subsequent h.mu.Lock / h.mu.RLock.
+	// A) within every wshub_*.go file in the package, reject any
+	// function body that acquires subMu (hypothetical future code
+	// accessing EventLog directly) AND also has a subsequent
+	// h.mu.Lock / h.mu.RLock.
 	//
 	// We use a conservative heuristic: within ~1000 chars of any
 	// `subMu.Lock(` or `subMu.RLock(` call, no `h.mu.Lock(` /
@@ -62,19 +89,26 @@ func TestHubShutdown_LockOrderInvariant(t *testing.T) {
 	// the hub into a subMu-holding callback) are out of scope for
 	// a lexical test but would need a runtime -race reproducer
 	// instead.
-	wshubStr := string(wshubSrc)
 	subMuRe := regexp.MustCompile(`subMu\.(?:R?Lock)\(`)
-	for _, m := range subMuRe.FindAllStringIndex(wshubStr, -1) {
-		end := m[1] + 1000
-		if end > len(wshubStr) {
-			end = len(wshubStr)
+	hMuRe := regexp.MustCompile(`h\.mu\.(?:R?Lock)\(`)
+	for _, file := range wshubLockOrderFiles {
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
 		}
-		window := wshubStr[m[1]:end]
-		if regexp.MustCompile(`h\.mu\.(?:R?Lock)\(`).MatchString(window) {
-			t.Errorf("wshub.go acquires subMu at offset %d and then h.mu within "+
-				"the next ~1000 chars. R35-REL2: h.mu must be acquired BEFORE "+
-				"subMu (the Shutdown path) — the inverse ordering creates an "+
-				"ABBA deadlock.", m[0])
+		body := string(src)
+		for _, m := range subMuRe.FindAllStringIndex(body, -1) {
+			end := m[1] + 1000
+			if end > len(body) {
+				end = len(body)
+			}
+			window := body[m[1]:end]
+			if hMuRe.MatchString(window) {
+				t.Errorf("%s acquires subMu at offset %d and then h.mu within "+
+					"the next ~1000 chars. R35-REL2: h.mu must be acquired BEFORE "+
+					"subMu (the Shutdown path) — the inverse ordering creates an "+
+					"ABBA deadlock.", file, m[0])
+			}
 		}
 	}
 
