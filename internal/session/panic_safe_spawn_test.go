@@ -114,6 +114,30 @@ func TestPanicSafeSpawnFn_IncrementsPanicCounter(t *testing.T) {
 	}
 }
 
+// TestPanicSafeSpawnFn_PreservesErrorChainOnErrorPanic pins R249-GO-15:
+// when the panic value is itself an error (e.g. a wrapped sentinel from
+// deep inside wrapper.Spawn), the recover arm must use %w so callers can
+// still walk the chain with errors.Is. Pre-fix the helper used %v which
+// flattened to a string and broke programmatic detection.
+func TestPanicSafeSpawnFn_PreservesErrorChainOnErrorPanic(t *testing.T) {
+	t.Parallel()
+
+	sentinel := errors.New("inner shim crash")
+	spawn := func(context.Context, cli.SpawnOptions) (*cli.Process, error) {
+		panic(sentinel)
+	}
+	_, err := panicSafeSpawnFn(context.Background(), spawn, cli.SpawnOptions{}, "k", "claude")
+	if err == nil {
+		t.Fatal("err = nil, want non-nil panic-wrapped error")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("errors.Is(err, sentinel) = false, want true — recover arm must use %%w when panic value is an error (R249-GO-15)")
+	}
+	if !strings.Contains(err.Error(), "panic") {
+		t.Errorf("err = %q, want substring %q", err.Error(), "panic")
+	}
+}
+
 // TestPanicSafeSpawnFn_NilSpawnPanicIsRecovered pins behaviour for the
 // "nil wrapper was never meant to reach this path" guard: if someone
 // accidentally calls the helper with a nil spawn, the panic must be

@@ -649,6 +649,13 @@ func (p *Process) Detach() {
 			slog.Debug("detach: shimSend failed", "err", err)
 		}
 	}
+	// R249-GO-17: mirror Close()'s R175-P2 pattern — zero the write deadline
+	// before closeShimConn so any defensive write attempt that sneaks in via
+	// a parallel teardown path (Kill, heartbeat) cannot inherit our 2s
+	// deadline and trigger a spurious i/o timeout. SetWriteDeadline on an
+	// already-closed conn returns an error which is harmless (zero-time
+	// means "no deadline" and the conn is about to be Close'd anyway).
+	_ = p.shimConn.SetWriteDeadline(time.Time{})
 	p.closeShimConn()
 	p.shimWMu.Unlock()
 }

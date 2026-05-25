@@ -382,6 +382,22 @@ type abortResult struct {
 // explicitly; the watchdog observes ctx.Err()==Canceled, skips
 // InterruptViaControl, and returns abortResult{fired:false}.
 func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan abortResult {
+	// R249-GO-3: defensive nil guard. A nil ctx would panic on <-ctx.Done()
+	// inside the goroutine; a nil sess would panic on InterruptViaControl
+	// when the deadline path fires. Both are caller bugs (production wires
+	// real values), but the cron run goroutine swallows panics via
+	// robfig/cron's recover chain elsewhere — here a panic would surface as
+	// "cron logger" Error noise without the run ever recording a result.
+	// Return a pre-completed channel so the caller's `<-abortCh` sees a
+	// zero abortResult and proceeds with normal finishRun bookkeeping.
+	// Buffer=1 with no close mirrors the success-path contract: the caller
+	// drains exactly once; an unclosed channel of buffer=1 with one send
+	// already buffered satisfies that without leaking a goroutine.
+	if ctx == nil || sess == nil {
+		ch := make(chan abortResult, 1)
+		ch <- abortResult{}
+		return ch
+	}
 	ch := make(chan abortResult, 1)
 	go func() {
 		<-ctx.Done()
