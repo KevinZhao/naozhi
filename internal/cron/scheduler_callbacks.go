@@ -20,6 +20,16 @@ import (
 // It receives the job ID, result text (or empty), and error message (or empty).
 type OnExecuteFunc func(jobID, result, errMsg string)
 
+// OnRunStartedFunc fires when a cron run enters the executing state.
+// Subscribers receive RunStartedEvent describing the snapshot. See
+// SetOnRunStarted for thread-safety / lifecycle contract.
+type OnRunStartedFunc func(RunStartedEvent)
+
+// OnRunEndedFunc fires when a cron run reaches a terminal state.
+// Subscribers receive RunEndedEvent describing the outcome. See
+// SetOnRunEnded for thread-safety / lifecycle contract.
+type OnRunEndedFunc func(RunEndedEvent)
+
 // RunStartedEvent is broadcast when a cron run enters the running state
 // (after CAS gate, before IM notify resolution). Consumers (Hub) marshal
 // to a WS message; the cron package itself never serialises — this keeps

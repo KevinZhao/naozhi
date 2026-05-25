@@ -192,6 +192,10 @@ func (e *recentCacheEntry) ringSeed(rows []CronRunSummary, keepCount int) {
 	e.count = n
 }
 
+// User-configurable defaults — fallbacks when SchedulerConfig leaves
+// RunsKeepCount / RunsKeepWindow zero. Operators may raise / lower
+// them via SchedulerConfig at construction time; cron-run-history.md
+// §4.3 explains the 200 / 30d sizing rationale.
 const (
 	// DefaultRunsKeepCount caps per-job history at this many entries.
 	// 200 is the user-confirmed upper bound (cron-run-history.md §4.3 +
@@ -203,9 +207,14 @@ const (
 	// kept only when (count_rank ≤ keepCount) AND (age ≤ keepWindow);
 	// either condition false → trim.
 	DefaultRunsKeepWindow = 30 * 24 * time.Hour
+)
 
-	// MaxRunRecordBytes caps a single CronRun JSON payload. The 4K
-	// rune cap on Result + 512-rune cap on ErrorMsg + 8K Prompt + ~512
+// Hard limits — immutable per-record format invariants, not
+// operator-tunable. Changing them requires a schema bump because old
+// run.json files may exist on disk above the new cap.
+const (
+	// MaxRunRecordBytes caps a single CronRun JSON payload. The 4K rune
+	// cap on Result + 512-rune cap on ErrorMsg + 8K Prompt + ~512
 	// metadata add up to ~13 KiB worst case; 32 KiB leaves headroom.
 	// Reading a file larger than this returns ErrCorruptRun.
 	MaxRunRecordBytes = 32 * 1024

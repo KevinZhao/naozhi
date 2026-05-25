@@ -47,18 +47,15 @@ const cronSlowThreshold = 30 * time.Second
 // fresh-context runs that legitimately spawn slowly. R247-CR-28.
 const spawnElapsedWarnRatio = 0.5
 
-// executeIfNotDeletedOrPaused looks up the latest *Job pointer under
-// s.mu.RLock and dispatches executeOpt only when the job is still present
-// AND not paused. R233B-CR-3: extracted from TriggerNow's two goroutine
-// bodies so the deleted/paused guard + executeOpt(..., true) call lives in
-// one place — adding new pre-execute checks (e.g. quota / circuit breaker)
-// no longer requires touching both branches.
+// executeIfNotDeletedOrPaused is the TriggerNow dispatch entry. It looks
+// up the freshest *Job under s.mu.RLock, then — only if still present and
+// not paused — releases the lock and calls executeOpt(cur, true). Deleted
+// or paused jobs surface as a Debug-log skip with no run record.
 //
-// jobID is captured by the goroutine spawning this; the snapshot pattern
-// matches registerJob's tick path so the freshest pointer wins, including
-// after an UpdateJob swap. Concurrent deletes / pauses both surface as
-// silent skips with a Debug log — operators see the intent acked but
-// no run record bumps.
+// LOCK: caller MUST NOT hold s.mu (this acquires s.mu.RLock); robfig/cron
+// MUST NOT hold its internal cron lock when invoking this (the snapshot →
+// release → executeOpt split exists precisely so executeOpt's long-running
+// send/notify pipeline never runs under s.mu).
 func (s *Scheduler) executeIfNotDeletedOrPaused(jobID string) {
 	s.executeJobIDIfLive(jobID, true /* viaTriggerNow */, "TriggerNow")
 }
