@@ -1413,9 +1413,9 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 // TODO: introduce AgentIntrospector interface when a second backend needs
 // agent-view support. Tracked in docs/TODO.md (R214-CODE-6 / R217-ARCH-2 /
 // R219-ARCH-3 — the lifecycle question, distinct from the consumer-side
-// interface R239-ARCH-I now solves). Drop R239-CR-11 (R245-CR-008):
-// orphan ID — never landed in TODO.md; the three live anchors above
-// already cover the same root.
+// interface R239-ARCH-I now solves). The three live anchors above cover
+// the same root; the orphan-id reference (R245-CR-008) was retired in
+// favour of pointing at the live anchors directly.
 func (s *ManagedSession) SubagentLinker() *cli.SubagentLinker {
 	if real := s.loadCliProcess(); real != nil {
 		return real.Linker()

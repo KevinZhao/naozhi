@@ -239,6 +239,39 @@ func NewPersister(opts Options) (*Persister, error) {
 	if err := os.MkdirAll(opts.Dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create events dir %s: %w", opts.Dir, err)
 	}
+	// R247-SEC-12: MkdirAll honours `perm` only on directories it actually
+	// creates — pre-existing components (including opts.Dir itself, when
+	// laid down by a prior process or by an attacker who racd ahead of
+	// startup) keep whatever mode they had. The events dir holds the
+	// session JSONL stream + idx files which carry user prompts and tool
+	// outputs verbatim; world-readable parent dirs leak the file names
+	// (channel:chatType:id hashes) and any fs.ReadDir-style enumeration
+	// surfaces them. Chmod the leaf to the contractual 0o700 so a
+	// pre-created 0o755 / 0o777 dir is corrected on the next startup; we
+	// log + continue rather than fail because operators sometimes run
+	// naozhi inside containers where the bind-mount root cannot be
+	// chmod'd by the running uid (NoNewPrivileges, read-only rootfs)
+	// and a hard fail there would brick the persister entirely. The Lstat
+	// guard keeps us from following a symlink to a location we should not
+	// be modifying — if the path is a symlink, log the surprise and skip
+	// the chmod (the SweepOrphans call below will flag oddly-shaped
+	// states for the operator anyway).
+	if info, lerr := os.Lstat(opts.Dir); lerr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			slog.Warn("event log persist: events dir is a symlink; skipping mode normalise",
+				"dir", opts.Dir)
+		} else if perm := info.Mode().Perm(); perm != 0o700 {
+			if cerr := os.Chmod(opts.Dir, 0o700); cerr != nil {
+				slog.Warn("event log persist: chmod events dir to 0700 failed",
+					"dir", opts.Dir, "had_mode", perm.String(), "err", cerr)
+			} else {
+				slog.Info("event log persist: corrected events dir mode to 0700",
+					"dir", opts.Dir, "had_mode", perm.String())
+			}
+		}
+	} else {
+		slog.Warn("event log persist: lstat events dir failed", "dir", opts.Dir, "err", lerr)
+	}
 	// Sweep rotate stagings from any prior crashed session.
 	if _, err := SweepOrphans(opts.Dir); err != nil {
 		slog.Warn("event log persist: orphan sweep failed", "err", err)
@@ -1017,6 +1050,20 @@ func (w *perKeyWriter) close() error {
 // that is reused across flushes to avoid a per-flush heap allocation. When
 // `stride <= 1` the function returns `pending` directly without touching
 // scratch. R218-PERF-7.
+//
+// R243-PERF-10: aliasing contract. When the function returns `pending`
+// (stride<=1 fast path or single-entry batch), the returned slice
+// shares its backing array with `pending`. The sole caller in flush()
+// passes the returned slice straight to idxWriter.AppendBatch, which
+// SYNCHRONOUSLY copies every entry into its own batchBuf and Writes it
+// before returning — see idx.go:76. After AppendBatch returns the
+// caller resets `pendingIdx[:0]` and the alias is severed before any
+// subsequent append into pendingIdx can touch the slot. Do NOT add an
+// async / queued AppendBatch variant or expose the returned slice to
+// callers that may retain it: the next pendingIdx append would
+// overwrite live idx bytes the writer is still reading. If a future
+// caller cannot honour synchronous consumption it must take a
+// defensive copy (`append([]schema.IdxEntry(nil), kept...)`).
 func selectForIdx(pending []schema.IdxEntry, stride, cursor int, scratch []schema.IdxEntry) []schema.IdxEntry {
 	if stride <= 1 {
 		return pending

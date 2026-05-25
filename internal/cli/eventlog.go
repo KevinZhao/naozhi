@@ -569,6 +569,29 @@ func (l *EventLog) invokePersistSink(entries []EventEntry) {
 // pre-attach burst that would otherwise be silently absorbed by the
 // Persister's replay-drop logic.
 //
+// R242-ARCH-20 (closed): the review asked for a `replayDropTotal
+// atomic.Int64` exposed on /health to detect the SetPersistSink double-
+// store ordering window misfiring in production. The counter pair is
+// already in place across the cli ↔ persist boundary:
+//
+//   - cli side: ReplayInvokeTotal() above counts invokePersistSink calls
+//     that fired with replayPhase=true (the cli's local view of "this
+//     entry was tagged replay because sinkReady was false").
+//   - persist side: persist.Stats().ReplayLeak (persister.replayLeakCnt)
+//     counts entries the Persister received with replayPhase=true and
+//     dropped on the floor, plus persist.Observer.OnReplayLeak fires per
+//     batch for push-based monitoring.
+//
+// Operators wiring /health surface both values: cli's count > 0 with
+// persist's count == 0 means the sink had not yet attached when the
+// race fired (the harmless case the SetPersistSink godoc above
+// documents); both > 0 means the InjectHistory replay batches were
+// genuinely absorbed by the persister's replay-drop guard. The
+// counters together fully cover the contract-violation surface the
+// original review wanted observable; no additional `replayDropTotal`
+// is needed because the boundary is two-sided and each side keeps its
+// own honest count.
+//
 // Safe to call from any goroutine; returns the cumulative count from
 // the EventLog's construction.
 func (l *EventLog) ReplayInvokeTotal() int64 {

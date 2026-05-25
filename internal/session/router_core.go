@@ -489,6 +489,23 @@ type Router struct {
 	// spawn / backfill paths to guarantee no internal sessionID is folded
 	// into a user-facing chain (RFC §4.3 Arch-B2). Atomic copy-on-write so
 	// the read path stays lock-free under r.mu.
+	//
+	// NEEDS-DESIGN (R242-ARCH-16): excluders is read-as-nil-pool during
+	// the cmd-startup window between NewRouter and the first call to
+	// AddSessionIDExcluder. Today auto-chain readers fall back to "no
+	// exclusions" — a benign opening because cron Scheduler / sysession
+	// Manager have not yet installed any internal sessionIDs (they
+	// register themselves *after* their stub keys exist), so a Phase-2
+	// candidate scan during that window has nothing to exclude. The
+	// fallback's drift cost is that adding a third subsystem (e.g.
+	// planner) which owns sessionIDs from t=0 would silently leak them
+	// into auto-chain candidates until its registration call lands.
+	// Plan: SetPendingExcluders(true) at NewRouter, flip to false in
+	// the cmd-wire step that awaits cron + sysession + planner
+	// registration; auto-chain reads block on the gate so the leak
+	// window is closed by construction. Deferred until a third
+	// excluder owner ships, since the current two-owner topology has
+	// no exposure.
 	excluders atomic.Pointer[[]SessionIDExcluder]
 
 	// autoChainListJSONL is the listJSONL function injected into
