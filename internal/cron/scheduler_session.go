@@ -32,11 +32,15 @@ const knownSessionIDsRecentCap = 200
 // cron-spawned run. Implements session.SessionIDExcluder so the
 // auto-workspace-chain feature can reject cron sessionIDs from the
 // candidate pool when filling user sessions' prev_session_ids
-// (docs/rfc/auto-workspace-chain.md §4.3 Arch-B2). Builds a transient
-// map by delegating to KnownSessionIDs — auto-chain calls this once
-// per spawn at most, so the cost is amortised against the spawn itself.
+// (docs/rfc/auto-workspace-chain.md §4.3 Arch-B2). Returns false for
+// the empty sessionID. Safe to call on a nil Scheduler (returns
+// false).
 //
-// Safe to call on a nil Scheduler (returns false).
+// Cost: O(jobs × recentCap) per call — KnownSessionIDs builds a
+// transient map on every invocation. The auto-chain spawn path calls
+// this at most once per spawn so the cost is amortised; dashboard
+// 1Hz / hot-path callers should batch via KnownSessionIDs() and reuse
+// the snapshot. R247-PERF-3 tracks the long-term TTL-cache fix.
 func (s *Scheduler) IsExcluded(sessionID string) bool {
 	if s == nil || sessionID == "" {
 		return false

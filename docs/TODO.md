@@ -128,7 +128,7 @@
 
 - [ ] **R247-GO-5 — runDeadlineWatchdog goroutine ctx 缺 hard timeout（P1）** [BREAKING-LOCAL]: `internal/cron/scheduler_run.go:339-350` watchdog 内调 `sess.InterruptViaControl()` 若 shim 写 wedge 可阻塞，导致 wrapper goroutine 持 abortCh 槽位超过 stopBudget。方案：select{<-abortCh} 配 hard timeout 或 sendCtx-like 传入 InterruptViaControl。
 - [ ] **R247-GO-6 — runstore warmCache LoadOrStore 与 cacheGet 不同 entry 实例 race（P1）** [BREAKING-LOCAL]: `internal/cron/runstore.go:494-509` 若 cacheInvalidate(DeleteJob) 在两次 LoadOrStore 之间执行，cacheGet 的 OLD entry 永远 warm=false → 返回 (nil,false) 静默 miss。方案：把 entry 指针从 cacheGet 透传给 warmCache，或 cacheGet 在 warmCache 后再 Load() 切到当前 entry。
-- [ ] **R247-GO-7 — Stop() gcWG.Wait wrapper goroutine 漏写 contract（P1）** [REPEAT-2]: `internal/cron/scheduler.go:694-705` 与 triggerWG 同 leak 模式但 CONTRACT 块只覆盖 triggerWG。方案：扩展同一 CONTRACT 注释或让 trimAll 观测 stopCtx。
+- [x] **R247-GO-7 — Stop() gcWG.Wait wrapper goroutine 漏写 contract（P1）** [REPEAT-2]: `internal/cron/scheduler.go:694-705` 与 triggerWG 同 leak 模式但 CONTRACT 块只覆盖 triggerWG。方案：扩展同一 CONTRACT 注释或让 trimAll 观测 stopCtx。 *(已实施：Stop() CONTRACT 段加 gcWG.Wait wrapper goroutine 同 triggerWG 同 intentional-orphan 语义说明；R44 + R247-GO-7 anchor 共存。)*
 - [ ] **R247-GO-8 — Append path-traversal 防御深度（P2）** [BREAKING-LOCAL]: `internal/cron/runstore.go:282-339` IsValidID 已防 hex-only 输入，但写路径无 filepath.Rel 校验。方案：MkdirAll 前 `filepath.Rel(s.root, dir)` 校验，与 readRun Lstat 对齐。
 - [ ] **R247-GO-10 — EnsureStub 总返 true 不反映 register 失败（P2）** [REFACTOR]: `internal/cron/scheduler.go:617-643` registerStubByValue 不返 error，调用方误以为 stub 已注册。方案：让 RegisterCronStubWithChain 返 error 一路上抛。
 - [~] **R247-GO-11 — resetRouterStub 缺 nil-receiver 防御（P2）** [BREAKING-LOCAL]: `internal/cron/scheduler.go:783-788` 与 sibling StartedAt/KnownSessionIDs 不一致；测试构造部分 Scheduler 调 DeleteJobByID 会 NPE。方案：开头 `if s == nil { return }`。
@@ -190,7 +190,7 @@
 - [~] **R247-CR-7 — SetOnExecute/SetOnRunStarted/SetOnRunEnded 三 setter 同构（P2）** [REPEAT-3]: `internal/cron/scheduler_callbacks.go:61-88`。方案：泛型 setCallback[T] helper。
 - [ ] **R247-CR-8 — *ByID 三入口注释暗示对称但 Pause/Resume 不删 runs（P2）** [REFACTOR]: `internal/cron/scheduler_jobs.go:273-388`。方案：godoc 显式区分或 helper 接 cleanup 钩子。
 - [~] **R247-CR-10 — registerJob AddFunc closure 与 executeIfNotDeletedOrPaused 同源（P2）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:843-862`。方案：closure 直调 executeIfNotDeletedOrPaused。
-- [ ] **R247-CR-11 — strHeap/timeHeap helper reset 路径反成噪音（P2）** [REFACTOR]: `internal/cron/runinflight.go:64-74,91-95` 与 R246-CR-011 同根因；本轮新发现 reset 不分配。方案：删 helper 或 cross-reference。
+- [x] **R247-CR-11 — strHeap/timeHeap helper reset 路径反成噪音（P2）** [REFACTOR]: `internal/cron/runinflight.go:64-74,91-95` 与 R246-CR-011 同根因；本轮新发现 reset 不分配。方案：删 helper 或 cross-reference。 *(已实施：strHeap → boxString / timeHeap → boxTime；godoc 跟改但保留 escape analysis 历史；11 处调用点 internal/cron/runinflight.go + internal/cron/scheduler_run.go 全量切换。R246-CR-011 同根因。)*
 - [ ] **R247-CR-12 — runs 限额 const 散落（P2）** [REFACTOR]: `internal/cron/runstore.go:170-187` 大小写不统一。方案：集中到 limits.go。
 - [ ] **R247-CR-14 — recordResultP0WithSanitised 64 行 P0 命名已无意义（P2）** [REFACTOR]: `internal/cron/scheduler_finish.go:330-394`。方案：改名 recordTerminalResult；rollback 抽 prevSnapshot struct。
 - [ ] **R247-CR-15 — recordResultP0WithSanitised P0 后缀历史 noise（P2）** [REFACTOR]: `internal/cron/scheduler_finish.go:301-329`。方案：与 R247-CR-14 一并改名。
@@ -198,12 +198,12 @@
 - [ ] **R247-CR-19 — marshalJobs atomic.Pointer test seam 通过 init() 装载（P3）** [REFACTOR]: `internal/cron/scheduler_persist.go:32-37` 与 R242-CR-5 同根因。方案：build tag testonly 或字段 DI。
 - [ ] **R247-CR-20 — runs 限额 magic number 推导散落（P3）** [REFACTOR]: `internal/cron/runstore.go:170-187`。方案：集中注释块 + 推导公式。
 - [x] **R247-CR-22 — maxJobsHardCap=500 等 const 缺 benchmark 引用（P3）** [REFACTOR]: `internal/cron/scheduler.go:283-294`。方案：链到 cron-v2-polish.md。 *(已实施：maxJobsHardCap / defaultMaxJobs / defaultExecTimeout / DefaultMaxJobsPerChat 四个 const godoc 末尾加 cron-v2-polish.md RFC 引用。)*
-- [~] **R247-CR-23 — slogPrintfLogger panic/recovered 字符串扫描负面陈述（P3）** [REPEAT-3]: `internal/cron/scheduler.go:807-815` 与 R246-CR-016 同根因。方案：抽命名常量 + godoc。
+- [x] **R247-CR-23 — slogPrintfLogger panic/recovered 字符串扫描负面陈述（P3）** [REPEAT-3]: `internal/cron/scheduler.go:807-815` 与 R246-CR-016 同根因。方案：抽命名常量 + godoc。 *(已实施：scheduler.go:920-947 抽 cronPanicMarker / cronRecoveredMarker 命名 const + godoc 解释为何同时 match 两个 marker（"panic" 是当前 robfig/cron 实际文案，"recovered" 是 upstream-stability fallback）；reviewer 调措辞只需改一处。)*
 - [x] **R247-CR-24 — executeIfNotDeletedOrPaused godoc 历史 review 引用（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:38-49`。方案：去 review code 仅留行为说明。 *(已实施：godoc 重写为只留行为契约 + 锁顺序约束，删除历史 review 编号 noise；contract test 锚点（如 CRON3/4）保留。)*
 - [ ] **R247-CR-25 — 历史 review 编号注释累计 40+ 处（P3）** [REFACTOR]: `internal/cron/scheduler_run.go,scheduler.go` 多处。方案：归档时同步删除注释或加 docs/COMMENT_CONVENTIONS.md。
 - [ ] **R247-CR-27 — Append truncate 三字段注释不对称（P3）** [REFACTOR]: `internal/cron/runstore.go:280-339`。方案：抽 shrinkOversizeRun helper。
 - [ ] **R247-CR-29 — TriggerNow 60 行 + 3 goroutine 分支（P3）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:780-833`。方案：合并单 goroutine + 内部 if。注意：trigger_now_wg_done_test.go 的 CRON4 结构契约硬性要求"3 个 go func() + 3 个 defer Done"；要落地本 TODO 必须先调整该 test 表达新契约（"恰好 1 个 go func() 且包含 defer Done"），是 BREAKING-LOCAL 跨 test+impl，不适合 hourly pick。
-- [ ] **R247-CR-30 — IsExcluded godoc 与实现 cost 不一致（P3）** [REFACTOR]: `internal/cron/scheduler_session.go:40-46`。方案：godoc 标注 O(jobs × recentCap) + 推 KnownSessionIDs cache。
+- [x] **R247-CR-30 — IsExcluded godoc 与实现 cost 不一致（P3）** [REFACTOR]: `internal/cron/scheduler_session.go:40-46`。方案：godoc 标注 O(jobs × recentCap) + 推 KnownSessionIDs cache。 *(已实施：godoc 拆两段，cost 段明示 O(jobs × recentCap) per call 并指向 R247-PERF-3 长期 TTL-cache fix；hot-path callers 走 KnownSessionIDs() snapshot 复用。)*
 
 ### 架构（剩余）
 
@@ -300,12 +300,12 @@
 - [ ] **R246-CR-006 [P2] [REFACTOR] — `internal/server/wshub.go:1215` resubscribeEvents 183 行**: 连接状态机+key 校验+gen 比较+ManagedSession 拉取+event backfill+broadcast，cyclomatic > 25。建议：backfill+initial-state 段独立 backfillSubscriberEvents(c, sess)。
 - [ ] **R246-CR-008 [P2] [REFACTOR] — `internal/cron/runstore.go:526-633` diskListNewestFirst pagination 语义不一致**: items 按 mtime 排序但 before cutoff 比 run.StartedAt（行 627），跨进程/重启 mtime 与 StartedAt 可能不单调。建议：cutoff 比 it.mtime；或 sort key 与 pagination key 都用 mtime。
 - [x] **R246-CR-010 [P3] [REFACTOR] — `internal/cron/scheduler.go:138-142` 类型块仅声明回调类型却放在 var/const 旁**: R245 已新建 scheduler_callbacks.go。建议：把 OnRunStartedFunc/OnRunEndedFunc/OnExecuteFunc 类型也搬到 scheduler_callbacks.go。 *(已实施：OnRunStartedFunc/OnRunEndedFunc 类型从 scheduler.go 搬到 scheduler_callbacks.go 与 OnExecuteFunc 同住；scheduler.go 仅留 RunStartedEvent/RunEndedEvent struct + atomic.Pointer 字段。)*
-- [ ] **R246-CR-011 [P3] [REFACTOR] — `internal/cron/runinflight.go:64-74` strHeap/timeHeap helper 命名误导**: 名字暗示"分配 heap"但实际只是命名 local + 取地址，escape 与否仍由编译器决定。建议：改名为 boxString/boxTime 或加备注，避免读者误以为强制 heap。
+- [x] **R246-CR-011 [P3] [REFACTOR] — `internal/cron/runinflight.go:64-74` strHeap/timeHeap helper 命名误导**: 名字暗示"分配 heap"但实际只是命名 local + 取地址，escape 与否仍由编译器决定。建议：改名为 boxString/boxTime 或加备注，避免读者误以为强制 heap。 *(已实施：strHeap → boxString / timeHeap → boxTime；godoc 跟改但保留 escape analysis 历史；11 处调用点 internal/cron/runinflight.go + internal/cron/scheduler_run.go 全量切换。R246-CR-011 同根因。)*
 - [x] **R246-CR-012 [P3] [REPEAT-N] — `internal/cron/scheduler.go:655,661` `var stopBudget = 30*time.Second` 与 `gcWaitBudget` 包级 var**: 注释说改 var 是测试可调，但 mutable var 易被多测试并发改写。建议：const + WithStopBudget(d) test helper（依赖注入）。 *(已实现 via R247-CR-18 commit d1bd6a7：defaultStopBudget/defaultGCWaitBudget const + WithStopBudget(d) helper 单点维护，stop_budget_test 改用 helper)*
 - [ ] **R246-CR-013 [P2] [REFACTOR] — `internal/cron/scheduler_finish.go:281-299` emitOverlapSkipped 只在 1 处调用且 18 行**: 跨包/跨文件复用并不存在。建议：合并到 executeOpt CAS 失败分支，或加 godoc 明确"future caller will reuse"。
 - [ ] **R246-CR-014 [P3] [REFACTOR] — `internal/cron/scheduler_run.go:165-202` preflightArgs 字段顺序导致 padding**: 8B/120B/16B/8B/32B/16B/24B/16B 混排，64-bit 平台多 8-16 bytes。建议：按 size DESC 重排（snap → notifyTo → startedAt → 16B strings → ptrs）。
 - [x] **R246-CR-015 [P3] [REFACTOR] — `internal/cron/runstore.go:163-188` const 块混排不同语义**: User-configurable defaults 与 Hard limits 混在一组。建议：拆两组并加注释。 *(已实施：const 块拆 user-configurable defaults / hard limits 两组，每组前加分组 godoc 解释可调性差异。)*
-- [ ] **R246-CR-016 [P3] [REFACTOR] — `internal/cron/scheduler.go:801-816` slogPrintfLogger strings.Contains "panic"/"recovered" 字符串扫描脆弱**: robfig/cron v3 PrintfLogger 措辞调整就降级。建议：抽 panicMarker/recoveredMarker 命名常量便于一处改。
+- [x] **R246-CR-016 [P3] [REFACTOR] — `internal/cron/scheduler.go:801-816` slogPrintfLogger strings.Contains "panic"/"recovered" 字符串扫描脆弱**: robfig/cron v3 PrintfLogger 措辞调整就降级。建议：抽 panicMarker/recoveredMarker 命名常量便于一处改。 *(已实施 via R247-CR-23：cronPanicMarker / cronRecoveredMarker 命名 const + godoc 解释 upstream-stability 双 marker 策略，同根因合并跟踪。)*
 - [ ] **R246-CR-017 [P2] [REFACTOR] — `internal/cron/scheduler_run.go:376-390` defer + atomic 组合阅读负担**: 三步顺序约束（reset → Store(false) → metrics.Add(-1)）只有 godoc 防御，无静态检查。建议：抽 helper inflight.releaseRun(metrics.CronRunInflight)。
 - [ ] **R246-CR-018 [P3] [REPEAT-N] — `internal/cron/scheduler_jobs.go:875` findByPrefix O(N) 线性扫**: maxJobsHardCap=500 下可接受，但与 1Hz dashboard 列表 RLock 抢锁。建议：保留实现但改用 RLock 之外读：在 ListAllJobsWithNextRun snapshot map keys 后 unlock 线性扫。
 

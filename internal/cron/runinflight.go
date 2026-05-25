@@ -45,7 +45,7 @@ const (
 	PhaseSending   = "sending"
 )
 
-// strHeap returns a *string referencing a fresh heap-allocated copy of s.
+// boxString returns a *string referencing a fresh named local copy of s.
 // R234-GO-2 / R234-GO-6: setPhase / setSessionID and the 5-field initializer
 // in executeOpt previously called `r.phase.Store(&phase)` directly on a
 // parameter or local variable. That pattern depends on Go's escape analysis
@@ -54,21 +54,26 @@ const (
 // compiler today, but it is silent — readers cannot tell from the call site
 // that the local "must" escape, and a future inliner change could surprise.
 //
-// Routing every Store through strHeap makes the heap allocation explicit and
-// removes the escape-analysis dependency. The single named local (`p := s`)
-// captured by `&p` is unambiguously addressable storage that survives the
-// caller's stack frame regardless of inlining heuristics.
+// Routing every Store through boxString makes the addressable storage
+// explicit and removes the escape-analysis dependency at the call site.
+// The single named local (`p := s`) captured by `&p` is unambiguously
+// addressable storage that survives the caller's stack frame regardless of
+// inlining heuristics; whether it lands on the heap is still the compiler's
+// call (the name "box" reflects the addressable-named-local pattern, not a
+// forced heap allocation — see R246-CR-011 / R247-CR-11 for the rename
+// rationale).
 //
-// Cost is identical to the prior code (one heap alloc per Store) — the
-// helper is purely a readability + correctness anchor.
-func strHeap(s string) *string {
+// Cost is identical to the prior code (one alloc per Store under current
+// escape analysis) — the helper is purely a readability + correctness
+// anchor.
+func boxString(s string) *string {
 	p := s
 	return &p
 }
 
-// timeHeap is the time.Time analogue of strHeap. Same rationale: explicit
-// heap copy for atomic.Pointer[time.Time].Store.
-func timeHeap(t time.Time) *time.Time {
+// boxTime is the time.Time analogue of boxString. Same rationale: explicit
+// addressable named local for atomic.Pointer[time.Time].Store.
+func boxTime(t time.Time) *time.Time {
 	p := t
 	return &p
 }
@@ -80,7 +85,7 @@ func timeHeap(t time.Time) *time.Time {
 // inflight 残影显示给前端。
 //
 // R240-PERF-1: Store(nil) on each *string / *time.Time avoids the 5
-// strHeap("") + 1 timeHeap(zero) heap allocations per finishRun (1Hz × N
+// boxString("") + 1 boxTime(zero) heap allocations per finishRun (1Hz × N
 // jobs accumulates). snapshot already treats Load() == nil as the zero
 // value (see the `if p := r.X.Load(); p != nil` guards), so callers
 // observe identical zero semantics.
@@ -143,7 +148,7 @@ func (r *runInflight) setPhase(phase string) {
 	if cur := r.phase.Load(); cur != nil && *cur == phase {
 		return
 	}
-	r.phase.Store(strHeap(phase))
+	r.phase.Store(boxString(phase))
 }
 
 // setSessionID 写入 GetOrCreate 拿到的 session_id。同样 fast-path 去重。
@@ -154,7 +159,7 @@ func (r *runInflight) setSessionID(id string) {
 	if cur := r.sessionID.Load(); cur != nil && *cur == id {
 		return
 	}
-	r.sessionID.Store(strHeap(id))
+	r.sessionID.Store(boxString(id))
 }
 
 // jobRunCounters 是 Job 的累计计数。维护策略详见 RFC §3.2：list API 直接
