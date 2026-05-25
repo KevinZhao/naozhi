@@ -84,8 +84,16 @@ type Dispatcher struct {
 	// tests can inject fakes and a future Router sub-aggregation can
 	// swap implementations without touching dispatch internals. The
 	// router field itself is guaranteed non-nil in production wiring.
-	router        SessionRouter
-	platforms     map[string]platform.Platform
+	router    SessionRouter
+	platforms map[string]platform.Platform
+	// agents / agentCommands are populated from DispatcherConfig at
+	// NewDispatcher and treated as immutable thereafter. The IM hot path
+	// (BuildHandler, sendAndReply, slash commands) reads these maps without
+	// any lock, so any future code that needs to mutate them MUST switch to
+	// atomic.Pointer[map[...]] swap-on-write or guard with a new mutex.
+	// Document mirrors `internal/cron/scheduler.go` Scheduler.agents
+	// (R242-GO-18) so the contract is identical across both consumers of
+	// session.AgentOpts maps.
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
 	scheduler     *cron.Scheduler
