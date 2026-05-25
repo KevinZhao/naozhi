@@ -49,40 +49,45 @@ type RunEndedEvent struct {
 	Trigger    TriggerKind
 }
 
-// storeCallback is the shared nil-aware setter for the SetOn* family. The
-// atomic.Pointer[T] holders are typed per callback variant so callers retain
-// the typed Load() ergonomics; the pattern that varies is just "nil → clear,
-// non-nil → store address". Centralised here so a future change (e.g. switch
-// to atomic.Value, add metrics on swap, route through DI) lands in one place
-// instead of three.
+// storeCallback is a generic helper that consolidates the SetOn* nil-check
+// + atomic store pattern shared by SetOnExecute / SetOnRunStarted /
+// SetOnRunEnded. R247-CR-7: pre-helper the three setters were 8-line
+// copies of the same nil-or-store-pointer dance; new RunEvent additions
+// either grew the same boilerplate or risked drifting (e.g. forgetting the
+// nil-clears-store branch).
 //
-// R230-GO-2 alloc tradeoff is unchanged: storing &fn forces fn to escape, but
-// SetOn* are startup-wiring calls (1 per scheduler lifetime), so the per-call
-// allocation is invisible. R247-CR-7 collapses three identical bodies.
-func storeCallback[T any](holder *atomic.Pointer[T], fn T, isNil bool) {
-	if isNil {
-		holder.Store(nil)
+// R230-GO-2 escape rationale (preserved): callers pass fn by value, the
+// helper takes &fn under its own stack frame, fn escapes to heap (1
+// alloc). Setters only fire at startup wiring (~1 call per Scheduler
+// instance per process lifetime), so the per-call allocation is
+// invisible. The alternative — atomic.Value with a wrapper struct, or a
+// dedicated holder struct — would either lose the typed Load() ergonomics
+// (Load returns *OnExecuteFunc directly) or balloon the API surface.
+// Document-and-accept rather than pessimize the read path.
+func storeCallback[T any](slot *atomic.Pointer[T], fn T, isNil func(T) bool) {
+	if isNil(fn) {
+		slot.Store(nil)
 		return
 	}
-	holder.Store(&fn)
+	slot.Store(&fn)
 }
 
 // SetOnExecute registers a callback invoked after each cron job execution.
 func (s *Scheduler) SetOnExecute(fn OnExecuteFunc) {
-	storeCallback(&s.onExecute, fn, fn == nil)
+	storeCallback(&s.onExecute, fn, func(f OnExecuteFunc) bool { return f == nil })
 }
 
 // SetOnRunStarted registers a callback for the run-started broadcast event.
 // nil disables the broadcast (testing path / no-WS mode).
 func (s *Scheduler) SetOnRunStarted(fn OnRunStartedFunc) {
-	storeCallback(&s.onRunStarted, fn, fn == nil)
+	storeCallback(&s.onRunStarted, fn, func(f OnRunStartedFunc) bool { return f == nil })
 }
 
 // SetOnRunEnded registers a callback for the run-ended broadcast event.
 // Invoked for every terminal state including skipped/canceled — the
 // callback should distinguish via RunEndedEvent.State.
 func (s *Scheduler) SetOnRunEnded(fn OnRunEndedFunc) {
-	storeCallback(&s.onRunEnded, fn, fn == nil)
+	storeCallback(&s.onRunEnded, fn, func(f OnRunEndedFunc) bool { return f == nil })
 }
 
 // emitRunStarted invokes the registered server-side hook outside s.mu so
