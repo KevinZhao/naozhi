@@ -70,6 +70,35 @@ func TestRunDeadlineWatchdog_SkipsOnExplicitCancel(t *testing.T) {
 	}
 }
 
+// TestRunDeadlineWatchdog_NilGuard verifies the R249-GO-3 defensive guard:
+// nil ctx or nil sess returns a pre-completed channel with a zero
+// abortResult instead of panicking inside the goroutine. Production never
+// passes nil, but the guard keeps a caller bug from corrupting the run
+// goroutine via robfig/cron's recover chain.
+func TestRunDeadlineWatchdog_NilGuard(t *testing.T) {
+	t.Parallel()
+	t.Run("nil ctx", func(t *testing.T) {
+		t.Parallel()
+		ci := &countingInterrupter{outcome: session.InterruptSent}
+		abort := <-runDeadlineWatchdog(nil, ci) //nolint:staticcheck // intentional nil for guard test
+		if abort.fired {
+			t.Fatalf("abort.fired = true with nil ctx; want false")
+		}
+		if got := ci.calls.Load(); got != 0 {
+			t.Fatalf("InterruptViaControl call count = %d, want 0", got)
+		}
+	})
+	t.Run("nil sess", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		abort := <-runDeadlineWatchdog(ctx, nil)
+		if abort.fired {
+			t.Fatalf("abort.fired = true with nil sess; want false")
+		}
+	})
+}
+
 // TestRunDeadlineWatchdog_PropagatesUnsupportedOutcome covers the ACP
 // backend case: when InterruptViaControl reports the protocol can't
 // abort a turn, the watchdog must still mark fired=true and pass the

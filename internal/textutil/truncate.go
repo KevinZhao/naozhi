@@ -9,7 +9,16 @@
 // diamond. Lifting the helpers into a leaf package severs the back-edge.
 package textutil
 
-import "unicode/utf8"
+import (
+	"strings"
+	"unicode/utf8"
+)
+
+// ellipsis is the suffix appended by TruncateRunes / TruncateRunesBytes
+// when the input is actually trimmed. Hoisted to a constant so the
+// pre-grow Builder math reads as `i + len(ellipsis)` instead of a
+// magic `+3`. R249-PERF-1.
+const ellipsis = "..."
 
 // TruncateRunes truncates s to at most maxRunes runes, appending "..." if
 // the input was actually trimmed. Uses byte-level rune decoding to avoid
@@ -34,7 +43,15 @@ func TruncateRunes(s string, maxRunes int) string {
 	i, count := 0, 0
 	for i < len(s) {
 		if count == maxRunes {
-			return s[:i] + "..."
+			// R249-PERF-1: `s[:i] + ellipsis` allocates twice (the concat
+			// result and intermediate). A pre-grown strings.Builder fuses
+			// both into a single backing slice; len math is exact so
+			// Grow's amortised behaviour collapses to one allocation.
+			var b strings.Builder
+			b.Grow(i + len(ellipsis))
+			b.WriteString(s[:i])
+			b.WriteString(ellipsis)
+			return b.String()
 		}
 		_, size := utf8.DecodeRuneInString(s[i:])
 		i += size
@@ -111,7 +128,13 @@ func TruncateRunesBytes(b []byte, maxRunes int) string {
 	i, count := 0, 0
 	for i < len(b) {
 		if count == maxRunes {
-			return string(b[:i]) + "..."
+			// R249-PERF-1: same fusion as TruncateRunes — string(b[:i])
+			// + ellipsis is two allocations, the Builder pre-grow is one.
+			var sb strings.Builder
+			sb.Grow(i + len(ellipsis))
+			sb.Write(b[:i])
+			sb.WriteString(ellipsis)
+			return sb.String()
 		}
 		_, size := utf8.DecodeRune(b[i:])
 		i += size

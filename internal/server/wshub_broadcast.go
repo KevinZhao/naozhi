@@ -162,7 +162,16 @@ func (h *Hub) BroadcastSessionsUpdate() {
 		defer h.clientWG.Done()
 		h.debounceMu.Lock()
 		h.debounceTimer = nil
+		// R249-GO-7: Shutdown sets debounceClosed=true while this callback may
+		// already be parked in the timer goroutine (Stop returned false because
+		// it had fired). Re-check under the lock and skip the broadcast — the
+		// hub is tearing down clients and broadcasting now would race the
+		// h.mu-protected clients map being drained in Shutdown.
+		closed := h.debounceClosed
 		h.debounceMu.Unlock()
+		if closed {
+			return
+		}
 		h.doBroadcastSessionsUpdate()
 	})
 }

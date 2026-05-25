@@ -829,6 +829,17 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 // contained single-file content and are unaffected. Relative-asset support is
 // B2, gated on actual user demand.
 func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, resolved string, info os.FileInfo) {
+	// R249-SEC-5: mirror servePreview / serveRaw / serveDownload — refuse
+	// credential-bearing names even when the bytes happen to sniff as
+	// text/html or image/svg+xml. Without this gate an attacker who can
+	// drop or rename a .env / id_rsa / .npmrc with HTML-shaped contents
+	// could read it through render mode despite the other three modes
+	// blocking it. The sensitive list is full-path scanned so subtree
+	// stashes like `secrets/db.yaml` or `.ssh/known_hosts` are caught.
+	if isSensitiveDownloadPath(resolved) {
+		writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": "render blocked for sensitive file name"})
+		return
+	}
 	if info.Size() > maxRawBytes {
 		writeJSONStatus(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "file too large for inline render; use download mode"})
 		return
