@@ -91,7 +91,7 @@
 - [ ] **R248-ARCH-7 — wshub.go SetScheduler/SetUploadStore/SetScratchPool setter 滞留（P2）** [REFACTOR]: `internal/server/wshub.go:308-321` split 把 5 类职责拆出 5 文件，但 3 个 setter 留 wshub.go；cronHubOps interface 定义（line 303）唯一 caller 是 broadcast/send 路径。方案：搬到 wshub_send.go 或新建 wshub_lifecycle.go；或注释明确 "wshub.go = struct + ctor + lifecycle，handlers 在 wshub_*.go"。
 - [ ] **R248-ARCH-8 — PR #330 commit oversold 关闭 R242-GO-10 / R242-ARCH-17 等（P2）** [REFACTOR]: `internal/server/wshub.go:86-88` 仍自陈 "NEEDS-DESIGN R242-GO-10: 改抽 MessageEnqueuer interface"。PR #330 抽 Capabilities 同时声称关闭一组 ARCH 条目但 dashboard send 路径（Hub.queue 字段）仍直接引 *dispatch.MessageQueue。方案：要么删 commit msg 的"同时关闭"清单，要么补 follow-up PR 把 Hub.queue 抽成 MessageEnqueuer interface（Enqueue/Discard/Mode/CollectDelay/DoneOrDrain/ShouldNotify 6 方法）。
 - [ ] **R248-ARCH-9 — dispatchCapabilities + Hub.sendWithBroadcast 双层 nil-fallback 职责模糊（P3）** [REFACTOR]: `internal/server/send.go:644-670` Capabilities 层 panic（生产语义）vs Hub 层 hub==nil 悄悄降级 sess.Send（headless 语义），同 send 调用在不同 wiring 下行为差异极大但无显式 mode 字段。方案：headless 应显式声明 HeadlessCapabilities 而非 Server.sendWithBroadcast 内部隐式判断。
-- [ ] **R248-ARCH-10 — spawningKeys close-before-delete 靠 godoc 注释而非类型保证（P3）** [REFACTOR]: `internal/session/router_lifecycle.go:540-559` lock-order-by-convention 脆弱模式。方案：封私有方法 `r.markSpawnDoneLocked(key)` (caller 持锁)，单点维护两步顺序 — 类型不能强保证但调用方至少不能搞错局部顺序。
+- [~] **R248-ARCH-10 — spawningKeys close-before-delete 靠 godoc 注释而非类型保证（P3）** [REFACTOR]: `internal/session/router_lifecycle.go:540-559` lock-order-by-convention 脆弱模式。方案：封私有方法 `r.markSpawnDoneLocked(key)` (caller 持锁)，单点维护两步顺序 — 类型不能强保证但调用方至少不能搞错局部顺序。
 
 ### 代码质量 / godoc / 命名
 

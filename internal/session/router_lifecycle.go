@@ -527,6 +527,18 @@ func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resume
 	return entries, prevIDs
 }
 
+// markSpawnDoneLocked closes the per-spawn done channel and removes the
+// spawningKeys map entry for key. Caller MUST hold r.mu. Single point of
+// truth for the close-before-delete sequence so no future caller can swap
+// the order accidentally — both ops are commutative under r.mu (waiters
+// observe close via the channel reference they already hold, not via
+// map lookup) but the convention matters for grep-ability and review.
+// R248-ARCH-10.
+func (r *Router) markSpawnDoneLocked(key string, ch chan struct{}) {
+	close(ch)
+	delete(r.spawningKeys, key)
+}
+
 // spawnSession creates a new process, optionally resuming an existing session.
 // LOCK: enter with r.mu held. This function releases and re-acquires r.mu
 // internally (around Spawn() and history collection) to avoid blocking other
@@ -553,8 +565,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	r.spawningKeys[key] = doneCh
 	defer func() {
 		r.mu.Lock()
-		close(doneCh)
-		delete(r.spawningKeys, key)
+		r.markSpawnDoneLocked(key, doneCh)
 		r.mu.Unlock()
 	}()
 
