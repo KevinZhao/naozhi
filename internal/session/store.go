@@ -65,7 +65,14 @@ type storeEntry struct {
 	Workspace          string   `json:"workspace,omitempty"`
 	Backend            string   `json:"backend,omitempty"`     // "claude" | "kiro" | ...
 	LastActive         int64    `json:"last_active,omitempty"` // unix nano
-	UserLabel          string   `json:"user_label,omitempty"`  // operator-set display name override
+	// CreatedAt anchors the session's sidebar position; written once at
+	// creation and persisted across restarts. unix nano. Pre-feature stores
+	// have CreatedAt==0, in which case the router restore copies LastActive
+	// into the in-memory createdAt so the upgraded binary keeps existing
+	// sessions in roughly their previous order before the comparator
+	// switched to ascending.
+	CreatedAt int64  `json:"created_at,omitempty"`
+	UserLabel string `json:"user_label,omitempty"` // operator-set display name override
 	// LabelOrigin records who set UserLabel: "" / "user" (human-set) or
 	// "auto" (sysession daemon-set). See ManagedSession.LabelOrigin and
 	// docs/rfc/system-session.md §7.3. Empty is forward-compatible with
@@ -191,6 +198,7 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 				Workspace:          s.Workspace(),
 				Backend:            s.Backend(),
 				LastActive:         s.lastActive.Load(),
+				CreatedAt:          s.createdAt.Load(),
 				UserLabel:          s.UserLabel(),
 				LabelOrigin:        s.LabelOrigin(),
 				Model:              s.Model(),

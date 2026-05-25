@@ -25,7 +25,6 @@ let oldestFetchedEventTime = 0;
 let lastCompositionEnd = 0;
 let sessionsData = {};
 let allSessionsCache = [];
-let sessionFirstSeen = (function() { try { return JSON.parse(localStorage.getItem('nz_firstSeen') || '{}'); } catch(_) { return {}; } })();
 // Collapsed project sections: Set of "node:name" keys. Persisted in
 // localStorage so a user's fold state survives reloads. Toggled via the
 // chevron button in the project section-header; the renderer skips emitting
@@ -383,28 +382,16 @@ function renderSidebar(data) {
     ? allItemsUnfiltered.filter(s => (s.node || 'local') === selectedNode)
     : allItemsUnfiltered;
 
-  // Stamp first-seen time for each session (stable sort anchor).
-  // Once recorded, position never changes regardless of activity.
-  let fsChanged = false;
-  allItems.forEach(s => {
-    const id = (s.node || 'local') + ':' + s.key;
-    if (!sessionFirstSeen[id]) { sessionFirstSeen[id] = s.last_active || Date.now(); fsChanged = true; }
-  });
-  // Prune entries for sessions that no longer exist
-  const activeIds = new Set(allItems.map(s => (s.node || 'local') + ':' + s.key));
-  for (const k of Object.keys(sessionFirstSeen)) {
-    if (!activeIds.has(k)) { delete sessionFirstSeen[k]; fsChanged = true; }
-  }
-  if (fsChanged) { try { localStorage.setItem('nz_firstSeen', JSON.stringify(sessionFirstSeen)); } catch(_) {} }
-
-  // Sort: running first (still active), then by first-seen desc (newest on top, position stable)
+  // Stable sidebar order: oldest at top, newest at bottom, position never
+  // shifts on activity or state change. Each session ships a server-stamped
+  // created_at (unix ms); pre-feature payloads fall back to last_active so
+  // the upgrade boot keeps existing rows in roughly their previous order
+  // before they get re-stamped.
   allItems.sort((a, b) => {
-    const aRun = a.state === 'running' ? 0 : 1;
-    const bRun = b.state === 'running' ? 0 : 1;
-    if (aRun !== bRun) return aRun - bRun;
-    const aFS = sessionFirstSeen[(a.node || 'local') + ':' + a.key] || 0;
-    const bFS = sessionFirstSeen[(b.node || 'local') + ':' + b.key] || 0;
-    return bFS - aFS;
+    const aC = a.created_at || a.last_active || 0;
+    const bC = b.created_at || b.last_active || 0;
+    if (aC !== bC) return aC - bC;
+    return (a.key || '').localeCompare(b.key || '');
   });
 
   // cron-panel-consolidation RFC §4.2: cron stubs are filtered server-side
@@ -494,32 +481,36 @@ function renderSidebar(data) {
     // reserved for human conversation surfaces. Scheduled-task management
     // lives in the 定时任务 panel.
     if (groupKeys.length > 0) {
-      // Pre-compute per-group sort keys once — avoids repeated map lookups
-      // inside the sort comparator (fav flag, max firstSeen, display name).
-      // This keeps comparator at O(1) scalar comparisons rather than
-      // O(M + map-lookup) per call. Also sidesteps the Math.max(...spread)
-      // call-stack limit that would eventually RangeError at huge session
-      // counts.
+      // Pre-compute per-group sort keys once. Order is { tier asc, created
+      // asc, name asc }: tier keeps favorites pinned to the top and fallback
+      // (unregistered workspace-basename) groups sunk to the bottom, while
+      // `created` carries the project's server-stamped CreatedAt (unix ms).
+      // Fallback groups have no project entry, so we derive their anchor
+      // from the earliest session in the group — ad-hoc quick sessions
+      // therefore land in the order their workspace was first opened.
       const sortKeys = {};
       groupKeys.forEach(k => {
         const g = groups[k];
         const p = projIndex[k];
-        let m = 0;
-        for (const s of g.items) {
-          const fs = sessionFirstSeen[(s.node || 'local') + ':' + s.key] || 0;
-          if (fs > m) m = fs;
+        let created = (p && p.created_at) ? p.created_at : 0;
+        if (!created) {
+          // Project entry missing CreatedAt (pre-feature server, or fallback
+          // group without a registered project): fall back to the earliest
+          // session's created_at so the group still has a stable anchor.
+          let earliest = 0;
+          for (const s of g.items) {
+            const c = s.created_at || s.last_active || 0;
+            if (c && (earliest === 0 || c < earliest)) earliest = c;
+          }
+          created = earliest;
         }
-        // Tier order: favorite projects → regular projects → fallback
-        // (workspace-basename) groups. Fallback groups represent ad-hoc
-        // quick-session folders that were never registered as projects, so
-        // they should always sink below real project sections.
         const tier = g.fallback ? 2 : ((p && p.favorite) ? 0 : 1);
-        sortKeys[k] = { tier, first: m, name: g.name };
+        sortKeys[k] = { tier, created, name: g.name };
       });
       groupKeys.sort((a, b) => {
         const ka = sortKeys[a], kb = sortKeys[b];
         if (ka.tier !== kb.tier) return ka.tier - kb.tier;
-        if (ka.first !== kb.first) return kb.first - ka.first;
+        if (ka.created !== kb.created) return ka.created - kb.created;
         return ka.name.localeCompare(kb.name);
       });
       groupKeys.forEach(k => {
@@ -9447,16 +9438,10 @@ function formatHeaderCostTooltip(s, selKey, selNode) {
       lines.push('上一轮: ' + m.value.toFixed(4) + (unit ? ' ' + unit : ''));
     });
   }
-  // firstSeen is stored per-(node,key) in localStorage by renderSidebar.
-  // Read it here so the tooltip shows when THIS dashboard first saw the
-  // session — matches operator mental model for "how long has this been
-  // running" better than any server-side timestamp we currently surface.
-  const seenKey = (selNode || 'local') + ':' + (selKey || '');
-  const first = typeof sessionFirstSeen === 'object' && sessionFirstSeen
-    ? sessionFirstSeen[seenKey]
-    : 0;
-  if (first > 0) {
-    lines.push('首次打开: ' + formatAbsTime(first));
+  // Server-stamped session creation time; same value drives the sidebar
+  // sort anchor so tooltip and visual position stay consistent.
+  if (s.created_at && s.created_at > 0) {
+    lines.push('创建时间: ' + formatAbsTime(s.created_at));
   }
   if (s.last_active && s.last_active > 0) {
     lines.push('最后活动: ' + formatAbsTime(s.last_active));

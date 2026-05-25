@@ -2388,6 +2388,7 @@ func TestInstallFreshSessionLocked_SignatureGuard(t *testing.T) {
 		oldHistory []cli.EventEntry,
 		prevIDs []string,
 		oldTotalCost float64,
+		oldCreatedAt int64,
 		exempt bool,
 	) *ManagedSession {
 		return r.installFreshSessionLocked
