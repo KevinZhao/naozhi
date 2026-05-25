@@ -112,19 +112,23 @@ func isExemptKey(key string) bool {
 // exemptKind classifies an exempt session key into one of three buckets:
 // "cron", "project", "sys", or "" if the key is not exempt. Used by the
 // per-namespace sub-quota gate in spawnSession so a noisy cron chat
-// can't starve planner / sys exempt sessions (R242-ARCH-2). Order
-// matches exemptKeyPrefixes for grep-consistency.
+// can't starve planner / sys exempt sessions (R242-ARCH-2).
+//
+// R239-ARCH-L: derived from keyNamespaces (key.go) so a new exempt
+// namespace registers its kind label in one place. Iteration is bounded
+// by len(keyNamespaces) (4 entries today) so the linear scan stays
+// cheap relative to the strings.HasPrefix calls a switch would make
+// anyway.
 func exemptKind(key string) string {
-	switch {
-	case strings.HasPrefix(key, CronKeyPrefix):
-		return "cron"
-	case strings.HasPrefix(key, ProjectKeyPrefix):
-		return "project"
-	case strings.HasPrefix(key, SysKeyPrefix):
-		return "sys"
-	default:
-		return ""
+	for _, ns := range keyNamespaces {
+		if !ns.exempt {
+			continue
+		}
+		if strings.HasPrefix(key, ns.prefix) {
+			return ns.kind
+		}
 	}
+	return ""
 }
 
 // exemptCapFor returns the sub-quota cap for a given exempt kind. Unknown

@@ -105,12 +105,48 @@ func TestExemptKindCovers_AllExempt(t *testing.T) {
 		kind := exemptKind(key)
 		if kind == "" {
 			t.Errorf("exemptKind(%q) = \"\" for an exempt namespace; "+
-				"add a switch case in router_core.go::exemptKind so the "+
+				"populate the kind field in keyNamespaces (key.go) so the "+
 				"per-namespace sub-quota cap (exemptCapFor) applies.", key)
 		}
 		if cap := exemptCapFor(kind); cap <= 0 {
 			t.Errorf("exemptCapFor(%q) = %d (≤0) for kind derived from "+
 				"prefix %q; sub-quota must be positive.", kind, cap, prefix)
 		}
+	}
+}
+
+// TestKeyNamespaces_KindFieldInvariants pins the (exempt, kind) consistency:
+// non-exempt rows must have empty kind (so an exempt-flagged row that
+// loses its kind label still surfaces here instead of silently routing
+// through the maxExemptSessions fallback), and every distinct exempt
+// kind must be unique (two prefixes sharing one kind would collide in
+// the exemptCapFor switch with last-write-wins semantics).
+func TestKeyNamespaces_KindFieldInvariants(t *testing.T) {
+	t.Parallel()
+	seenKind := make(map[string]string)
+	for _, ns := range keyNamespaces {
+		if !ns.exempt {
+			if ns.kind != "" {
+				t.Errorf("keyNamespaces row %q is non-exempt but kind=%q "+
+					"is set; non-exempt rows MUST leave kind empty so "+
+					"exemptKind cannot misfire on a future flag flip.",
+					ns.prefix, ns.kind)
+			}
+			continue
+		}
+		if ns.kind == "" {
+			t.Errorf("keyNamespaces row %q is exempt but kind is empty; "+
+				"exemptKind would return \"\" for any key in this namespace "+
+				"and exemptCapFor would route through the maxExemptSessions "+
+				"fallback (R242-ARCH-2 sub-quota bypass).", ns.prefix)
+			continue
+		}
+		if prior, dup := seenKind[ns.kind]; dup {
+			t.Errorf("keyNamespaces kind=%q used by both %q and %q; "+
+				"exemptCapFor switches on kind so a duplicate label "+
+				"forces last-write-wins semantics on sub-quota caps.",
+				ns.kind, prior, ns.prefix)
+		}
+		seenKind[ns.kind] = ns.prefix
 	}
 }

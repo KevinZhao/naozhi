@@ -70,25 +70,31 @@ type keyNamespace struct {
 	// ephemeral and MUST stay subject to TTL so abandoned scratch
 	// conversations release their process slot.
 	exempt bool
+	// kind is the per-namespace bucket label used by the exempt sub-quota
+	// gate (R242-ARCH-2 / exemptCapFor). For non-exempt namespaces this is
+	// the empty string and exemptKind never observes the row.
+	kind string
 }
 
 // keyNamespaces is the authoritative table of reserved-namespace prefixes.
 // Both `reservedKeyPrefixes` (consumers: IsReservedNamespace, IsUserVisibleKey)
-// and `exemptKeyPrefixes` (consumers: isExemptKey, exemptKind, exemptCapFor)
-// derive from this table. Kept sorted for grep stability.
+// and `exemptKeyPrefixes` + `exemptKind` (consumers: isExemptKey,
+// router_core.go::exemptKind, exemptCapFor) derive from this table.
+// Kept sorted for grep stability.
 //
 // When adding a new entry, update:
 //   - DESIGN.md §"Session key namespace"
 //   - the exempt flag below (true = bypass TTL/LRU; default false)
+//   - kind below if exempt=true (label flows into exemptCapFor switch)
 //   - the sidebar / persistence filter if the new namespace should not be
 //     persisted / displayed in the default UI
 //   - if exempt=true, add a sub-quota cap in router_core.go's exemptCapFor
 //     (otherwise spawnSession routes through maxExemptSessions fallback).
 var keyNamespaces = []keyNamespace{
-	{prefix: CronKeyPrefix, exempt: true},
-	{prefix: ProjectKeyPrefix, exempt: true},
-	{prefix: ScratchKeyPrefix, exempt: false},
-	{prefix: SysKeyPrefix, exempt: true},
+	{prefix: CronKeyPrefix, exempt: true, kind: "cron"},
+	{prefix: ProjectKeyPrefix, exempt: true, kind: "project"},
+	{prefix: ScratchKeyPrefix, exempt: false, kind: ""},
+	{prefix: SysKeyPrefix, exempt: true, kind: "sys"},
 }
 
 // reservedKeyPrefixes is the list of namespaces that do NOT follow the
