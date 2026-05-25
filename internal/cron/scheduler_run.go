@@ -373,10 +373,17 @@ type abortResult struct {
 // and InterruptViaControl gates on State==StateRunning, so calling it
 // post-Send is dead code (returns ErrNoActiveTurn → outcome=no_turn).
 //
-// The returned channel emits exactly one abortResult and is closed
-// implicitly when read. Caller must drain it before returning so the
-// goroutine cannot outlive the cron run (otherwise a fast cron tick could
-// race the next session.Reset against the in-flight interrupt write).
+// Channel contract (R249-CR-27): the returned channel has buffer=1 and
+// is intentionally NOT closed. The goroutine self-completes thanks to
+// buffer=1 — its single send never blocks, so the goroutine returns
+// regardless of whether the caller reads. The caller drains ch only to
+// observe the abort outcome (abort.fired / abort.outcome) for logging
+// and to ensure InterruptViaControl has finished before recording the
+// run state; failing to drain leaks the abortResult value, NOT the
+// goroutine, and is harmless for shutdown bookkeeping. Earlier godoc
+// said the caller "must drain" to keep the goroutine from outliving the
+// run — that was misleading, what actually matters is sequencing the
+// interrupt write before session.Reset on the next tick.
 //
 // On the success / non-deadline error path the caller cancels ctx
 // explicitly; the watchdog observes ctx.Err()==Canceled, skips
