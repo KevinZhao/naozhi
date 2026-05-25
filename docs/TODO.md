@@ -400,7 +400,7 @@
 - [ ] **R245-PERF-9 [REFACTOR R243-PERF-11] — `internal/cron/runstore.go:592-612` readRun 双 syscall（Lstat+ReadFile）**: 建议：抽 readRunNoLstat 从 dirent info 传 mode 跳 Lstat。
 - [ ] **R245-PERF-10 [REFACTOR R243-PERF-5 / R242-PERF-9] — `internal/cron/runstore.go:483-558` diskListNewestFirst pagination 绕 cache**: 建议：recentCacheEntry 存 sorted []item 内 cache 过滤。
 - [ ] **R245-PERF-11 [REFACTOR R240-PERF-16 / R242-PERF-5/6] — `internal/cron/scheduler.go:1196-1218` ListAllJobsWithNextRun 三次 alloc + handleList 内 ×50 sync.Map.Load**: 建议：sync.Pool 复用 map（maps.Clear）+ 批量快照合并。
-- [ ] **R245-PERF-12 [REFACTOR R242-PERF-13] — `internal/eventlog/persist/persister.go:670-711` handleBatch MarshalRecord 反射路径无 pool**: 建议：参照 bridgeEncPool 加 json.Encoder pool。
+- [~] **R245-PERF-12 [REFACTOR R242-PERF-13] — `internal/eventlog/persist/persister.go:670-711` handleBatch MarshalRecord 反射路径无 pool**: 建议：参照 bridgeEncPool 加 json.Encoder pool。
 - [ ] **R245-PERF-13 [REFACTOR R243-PERF-1] — `internal/cron/runstore.go:316/253` Append 内 jobLock 期间多次 time.Now()**: 建议：lock 前捕获 now。
 - [ ] **R245-PERF-14 [REFACTOR R240-PERF-17] — `internal/cron/runstore.go:268-308` skipAppendTrim 无竞争快路径仍 Lock**: 建议：appendsSinceTrim 改 atomic.Int32 + Load 快路径。
 - [ ] **R245-PERF-15 [REFACTOR] — `internal/server/agent_tailer.go:390-396` pollOnce 200ms tick 每次 make 新 subs slice**: 建议：sync.Pool 复用（Put 前清零 pointer）。

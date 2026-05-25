@@ -745,9 +745,17 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 		return
 	}
 
+	// R245-PERF-12: borrow a single pooled buffer for every record in this
+	// batch so the encodeState alloc inside encoding/json is amortised
+	// across the batch rather than paid per-entry. The buffer is reset
+	// between records via Truncate(0) (cheap; just resets the read/write
+	// cursor on the underlying slice).
+	encBuf := recordBufPool.Get().(*bytes.Buffer)
+	defer putRecordBuf(encBuf)
 	for _, e := range job.Entries {
 		rec := schema.NewEntry(w.nextSeq, e.JSON)
-		body, err := schema.MarshalRecord(rec)
+		encBuf.Reset()
+		body, err := schema.MarshalRecordInto(encBuf, rec)
 		if err != nil {
 			// Over-size / malformed — count and drop just this entry.
 			p.malformedCnt.Add(1)
