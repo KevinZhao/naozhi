@@ -364,11 +364,11 @@ function renderSidebar(data) {
   // Workspace sidebar: managed + discovered sessions (full cache, pre-filter).
   // The node selector dropdown needs unfiltered counts, so allSessionsCache
   // must hold every node's items. The selector itself is refreshed via the
-  // updateStatusBar() call above (which tail-calls updateNodeSelector so a
-  // 1s status tick keeps the trigger dot live during disconnect); session
-  // counts in the dropdown therefore lag by at most one poll cycle, which
-  // only matters while the dropdown is open — an acceptable trade for not
-  // paying two full dropdown repaints per poll.
+  // updateStatusBar() call above (which tail-calls updateNodeSelector — that
+  // path is also fired from setState on every WS transition); session counts
+  // in the dropdown therefore lag by at most one poll cycle, which only
+  // matters while the dropdown is open — an acceptable trade for not paying
+  // two full dropdown repaints per poll.
 
   allSessionsCache = allItemsUnfiltered;
 
@@ -1494,21 +1494,16 @@ function formatOutageDuration(elapsedMs) {
   return remM > 0 ? '已断开 ' + h + ' 小时 ' + remM + ' 分' : '已断开 ' + h + ' 小时';
 }
 
-// _statusTickTimer drives the 1s repaint loop while WS is disconnected so
-// the "已断开 N 秒" label advances without waiting for the next state
-// transition. Started by _updateStatusTick when state != CONNECTED; stopped
-// when state returns to CONNECTED. Repaint cost is O(N) where N = count of
-// sidebar-status rows (<=1 + node count); negligible.
-let _statusTickTimer = null;
-function _updateStatusTick(state) {
-  if (state === WS_STATES.CONNECTED) {
-    if (_statusTickTimer) { clearInterval(_statusTickTimer); _statusTickTimer = null; }
-    return;
-  }
-  if (!_statusTickTimer) {
-    _statusTickTimer = setInterval(updateStatusBar, 1000);
-  }
-}
+// (Removed) _statusTickTimer / _updateStatusTick previously drove a 1s
+// setInterval(updateStatusBar) loop while WS was disconnected so the
+// "已断开 N 秒" label inside #sidebar-status could tick forward between
+// state transitions. That DOM was deleted when the sidebar gave its bottom
+// real estate to the session list, after which updateStatusBar early-
+// returns when the container is missing — its only remaining side-effect
+// is updateNodeSelector(), which setState already invokes on every WS
+// state change via updateStatusBar(). The 1s tick therefore had no
+// user-visible effect (the trigger dot updates on real state changes,
+// not by polling) and was a periodic no-op repaint. Issue #434.
 
 function updateStatusBar() {
   const container = document.getElementById('sidebar-status');
@@ -9396,7 +9391,9 @@ const wsm = {
       this._disconnectedSince = Date.now();
     }
     updateStatusBar();
-    _updateStatusTick(s);
+    // (Removed _updateStatusTick — issue #434: the 1s repaint timer was a
+    // no-op since #sidebar-status DOM was deleted; updateNodeSelector is
+    // already driven by this updateStatusBar() call.)
     if (s === WS_STATES.CONNECTED) {
       // No reconnect toast: the sidebar status row already conveys the
       // transition (amber "connecting..." dot → green "connected" dot,
@@ -13868,16 +13865,13 @@ wsm.connect();
 //   - eventTimer (1s polling fallback when WS isn't connected) — stopped
 //     when hidden; resumed only if a session is selected AND WS is not
 //     already delivering live events, to avoid double-fetching.
-//   - _statusTickTimer (1s repaint of "已断开 N 秒" label) — stopped
-//     when hidden; resumed via _updateStatusTick only if WS state still
-//     != CONNECTED. When hidden there is no user to read the label, so
-//     suppressing the tick is free.
+// (Issue #434: _statusTickTimer was removed — it was a 1s no-op since
+// the #sidebar-status DOM no longer exists.)
 (function () {
   const stopPollers = () => {
     if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
     if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
     if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
-    if (_statusTickTimer) { clearInterval(_statusTickTimer); _statusTickTimer = null; }
   };
   const startPollers = () => {
     if (!sessionPollTimer) {
@@ -13894,10 +13888,6 @@ wsm.connect();
       fetchEvents(false);
       eventTimer = setInterval(() => fetchEvents(false), 1000);
     }
-    // _statusTickTimer: only re-arm if WS is still not connected. The
-    // existing _updateStatusTick(state) helper owns the lifecycle; calling
-    // it with current wsm state is idempotent.
-    if (wsm) { _updateStatusTick(wsm.state); }
   };
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) stopPollers();
