@@ -272,11 +272,38 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 	return nil
 }
 
-// DeleteJobByID removes a job by exact ID (unscoped, for dashboard use).
-func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
+// withJobByID 是 DeleteJobByID / PauseJobByID / ResumeJobByID 三 dashboard
+// 入口的共用执行框架。R247-CR-1：原本三函数 ~120 行重复 closure + 持锁 +
+// persist + unlock-then-save 逻辑，本 helper 收口为 3 阶段：
+//
+//  1. 持 s.mu.Lock 查 id；缺失即返回 ErrJobNotFound 包装错误；
+//  2. 调 op(j) 执行业务变更（可返回 op-specific 错误而无 mutation）；
+//     op 成功后 persistJobsLocked 拿 save 闭包；
+//  3. 释放 s.mu，调 postCleanup(j)（router.Reset / runStore.DeleteJob
+//     之类需在锁外的副作用），然后 save() 落盘。
+//
+// op 在 s.mu.Lock 下执行；postCleanup 在 s.mu 释放后执行。op 返回
+// 非 nil 错误时 perr 透传给上层，且 postCleanup 不会被调用。op == nil
+// 表示纯删除/查询无业务校验（DeleteJobByID 用此）。postCleanup == nil
+// 表示无锁外副作用（Pause/Resume 用此）。
+//
+// 返回三元组 (*Job, error)：
+//   - 找不到：(nil, ErrJobNotFound 包装)；
+//   - op 失败：(nil, op 返回的 err)；
+//   - persist 失败：(nil, ErrPersistFailed 包装)；postCleanup 已执行。
+//   - 成功：(*Job, nil)。
+//
+// R241-GO-2/3 的"explicit found/ok"语义在此聚合：内部用 found 区分
+// 找不到 vs op 失败，调用方不再重复 if j == nil 的歧义判断。
+func (s *Scheduler) withJobByID(
+	id string,
+	op func(j *Job) error,
+	postCleanup func(j *Job),
+) (*Job, error) {
 	var save func()
 	var j *Job
 	var found bool
+	var opErr error
 	var perr error
 	func() {
 		s.mu.Lock()
@@ -287,107 +314,65 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 			return
 		}
+		if op != nil {
+			if err := op(j); err != nil {
+				opErr = err
+				return
+			}
+		}
 		found = true
-		s.deleteJobLocked(j)
 		save, perr = s.persistJobsLocked()
 	}()
 
-	// R241-GO-2: explicit `found` separates the not-found sentinel from
-	// any future caller path that might legitimately set j=nil while the
-	// lookup succeeded; relying on j==nil conflated those two cases.
+	if opErr != nil {
+		return nil, opErr
+	}
 	if !found {
 		return nil, perr
 	}
-	// R240-GO-1: router.Reset moved out of deleteJobLocked to avoid
-	// holding s.mu across router callbacks (notifyChange may try to
-	// re-take s.mu, deadlocking the scheduler).
-	s.resetRouterStub(j.ID)
-	// R238-GO-3: deleteJobLocked already mutated in-memory state. The
-	// runStore must be cleaned even when persist fails, otherwise the
-	// runs/<jobID>/ subtree leaks on disk while the in-memory job is gone.
-	// P1 cron-run-history: drop the runs/<jobID>/ subtree alongside the
-	// job entry. Does NOT touch ~/.claude/projects/<cwd>/<session_id>.jsonl
-	// (RFC §2.3 / §4.4): those JSONL files are user-facing claude session
-	// logs, deletable only via session.Router or the user's own claude
-	// commands.
-	if s.runStore != nil {
-		s.runStore.DeleteJob(j.ID)
+	if postCleanup != nil {
+		postCleanup(j)
 	}
 	if perr != nil {
 		return nil, perr
 	}
 	save()
 	return j, nil
+}
+
+// DeleteJobByID removes a job by exact ID (unscoped, for dashboard use).
+func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
+	return s.withJobByID(
+		id,
+		// op：调 deleteJobLocked 移除 in-memory 记录；不返回错误（删除路径无校验）。
+		func(j *Job) error {
+			s.deleteJobLocked(j)
+			return nil
+		},
+		// postCleanup：锁外做 router.Reset + runStore.DeleteJob。
+		// R240-GO-1: router.Reset 移出 deleteJobLocked，避免在 s.mu 下
+		// 走 router callback 触发 lock-order inversion。
+		// R238-GO-3: deleteJobLocked 已变内存态，runStore 必须清理，否则
+		// runs/<jobID>/ 子树会泄漏；persist 失败也要清，故放在 perr 检查前。
+		// P1 cron-run-history: 仅删 runs/<jobID>/，不动用户面 jsonl
+		// （RFC §2.3 / §4.4）。
+		func(j *Job) {
+			s.resetRouterStub(j.ID)
+			if s.runStore != nil {
+				s.runStore.DeleteJob(j.ID)
+			}
+		},
+	)
 }
 
 // PauseJobByID pauses a job by exact ID (unscoped, for dashboard use).
 func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
-	var save func()
-	var j *Job
-	var ok bool
-	var perr error
-	func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		j, ok = s.jobs[id]
-		if !ok {
-			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
-			return
-		}
-		if err := s.pauseJobLocked(j); err != nil {
-			perr = err
-			ok = false
-			j = nil
-			return
-		}
-		save, perr = s.persistJobsLocked()
-	}()
-
-	// R241-GO-3: explicit `ok` mirrors the lookup result; j==nil is no
-	// longer overloaded as the not-found sentinel.
-	if !ok {
-		return nil, perr
-	}
-	if perr != nil {
-		return nil, perr
-	}
-	save()
-	return j, nil
+	return s.withJobByID(id, s.pauseJobLocked, nil)
 }
 
 // ResumeJobByID resumes a paused job by exact ID (unscoped, for dashboard use).
 func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
-	var save func()
-	var j *Job
-	var ok bool
-	var perr error
-	func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		j, ok = s.jobs[id]
-		if !ok {
-			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
-			return
-		}
-		if err := s.resumeJobLocked(j); err != nil {
-			perr = err
-			ok = false
-			j = nil
-			return
-		}
-		save, perr = s.persistJobsLocked()
-	}()
-
-	// R241-GO-3: explicit `ok` mirrors the lookup result; j==nil is no
-	// longer overloaded as the not-found sentinel.
-	if !ok {
-		return nil, perr
-	}
-	if perr != nil {
-		return nil, perr
-	}
-	save()
-	return j, nil
+	return s.withJobByID(id, s.resumeJobLocked, nil)
 }
 
 // JobUpdate captures fields a dashboard user may edit on an existing cron

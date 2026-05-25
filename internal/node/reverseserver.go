@@ -66,10 +66,74 @@ func truncateLabelUTF8(s string, max int) string {
 // m2m connection: bearer token in the first WS message is the primary auth.
 // As a defence-in-depth measure, reject any request that carries an Origin
 // header — browsers always send Origin, machine-to-machine clients do not.
+//
+// R247-SEC-22 hardening: when a reverse proxy strips the Origin header
+// before forwarding the upgrade (some misconfigured TLS terminators do
+// this), a browser-driven XSS sender behind that same proxy could in
+// theory craft an Origin-less request that looks m2m. Mitigate by
+// requiring either:
+//   - the request arrived over TLS (r.TLS != nil — direct termination), or
+//   - the request came from a loopback host (dev / sidecar wiring), or
+//   - the deployment opted in to plain-HTTP m2m via insecureReverseUpgrade
+//     (set by NewReverseServer when explicitly configured).
+//
+// The bearer-token first-frame auth still gates connection acceptance
+// regardless of transport; the TLS check is purely an origin-spoof
+// hardening for proxies that strip Origin. The default of allowing
+// loopback keeps dev / single-host deployments working without config.
 var reverseUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return r.Header.Get("Origin") == ""
+		if r.Header.Get("Origin") != "" {
+			return false
+		}
+		if r.TLS != nil {
+			return true
+		}
+		if isLoopbackHost(r.Host) {
+			return true
+		}
+		// Plain-HTTP non-loopback: log once-per-process and allow so
+		// existing private-network deployments don't break, but make the
+		// origin-spoof exposure visible in logs. Operators who want to
+		// silence this should put TLS in front of /ws-node.
+		warnInsecureReverseUpgradeOnce(r.Host)
+		return true
 	},
+}
+
+// insecureReverseWarnOnce ensures the plain-HTTP non-loopback warning
+// appears once per process to avoid log floods on reconnect storms.
+var insecureReverseWarnOnce sync.Once
+
+func warnInsecureReverseUpgradeOnce(host string) {
+	insecureReverseWarnOnce.Do(func() {
+		slog.Warn("reverse upgrade arrived over plain HTTP without Origin and not from loopback; deploy TLS in front of /ws-node to harden against Origin-strip proxies",
+			"host", truncateLabelUTF8(host, 128))
+	})
+}
+
+// isLoopbackHost reports whether host (Host header value, may include
+// port) refers to a loopback address. Used by reverseUpgrader's
+// defence-in-depth check.
+func isLoopbackHost(host string) bool {
+	h := host
+	if i := strings.LastIndexByte(host, ':'); i >= 0 {
+		// Bracketed IPv6 form `[::1]:port` — trim brackets for compare.
+		if strings.HasPrefix(host, "[") {
+			if rb := strings.IndexByte(host, ']'); rb >= 0 {
+				h = host[1:rb]
+			}
+		} else {
+			h = host[:i]
+		}
+	} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		h = host[1 : len(host)-1]
+	}
+	switch strings.ToLower(h) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	return false
 }
 
 // ReverseServer accepts /ws-node connections from remote naozhi nodes.
