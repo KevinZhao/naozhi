@@ -587,7 +587,11 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		// caller's workspace string.
 		var workDirForCLI string
 		if s.allowedRoot != "" {
-			resolved, ok := workDirResolveUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved)
+			// R247-PERF-24: cached variant collapses repeated EvalSymlinks
+			// for fast-firing jobs whose workDir / allowedRoot is stable.
+			// TTL-bounded (workDirResolveCacheTTL) so a deliberate symlink
+			// retarget surfaces within one notify-budget on the next tick.
+			resolved, ok := s.workDirResolveUnderRootCached(snap.workDir)
 			if !ok {
 				lg.Warn("cron job work_dir outside allowed root; aborting run",
 					"work_dir", snap.workDir)

@@ -276,6 +276,13 @@ type Scheduler struct {
 	// cron-run-history). nil-safe: empty StorePath disables persistence
 	// transparently (tests / no-disk deployments).
 	runStore *runStore
+
+	// workDirCache memoises positive workDirResolveUnderRoot results so
+	// fast-firing jobs do not repeat the EvalSymlinks chain (~Lstat+Readlink
+	// per path component) every tick. TTL-bounded
+	// (workDirResolveCacheTTL) so symlink retargets surface within one
+	// notify-budget worth of time. R247-PERF-24.
+	workDirCache workDirResolveCache
 }
 
 // maxJobsHardCap caps user-configurable MaxJobs to prevent accidental
@@ -354,6 +361,72 @@ func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 	return ok
 }
 
+// workDirResolveCacheTTL caps how long a positive workDirResolveUnderRoot
+// result may be reused before re-running EvalSymlinks. R247-PERF-24:
+// long-lived schedulers re-evaluate the same per-job workDir every tick;
+// each call costs Lstat+Readlink per path component plus the same chain
+// for allowedRoot. A short TTL collapses the hot-path syscall load on
+// fast-firing jobs while still bounding the TOCTOU window the per-call
+// EvalSymlinks was added to close. 30s matches the cronNotifyTimeout
+// budget — an operator who retargets a workspace symlink and immediately
+// fires a job will see the next tick re-resolve, not the same tick. Only
+// "ok" results are cached: a negative answer means we just refused to
+// run, and we want a re-resolve on the next call to surface a workspace
+// that has been restored.
+const workDirResolveCacheTTL = 30 * time.Second
+
+// workDirResolveCacheEntry captures one cached resolution. Stored value-
+// typed in sync.Map so the read path does no allocation.
+type workDirResolveCacheEntry struct {
+	resolved  string
+	expiresAt time.Time
+}
+
+// workDirResolveCache memoises positive workDirResolveUnderRoot results
+// keyed by raw (workDir,allowedRoot,allowedRootResolved) tuple. Negative
+// results bypass the cache. Concurrent-safe via sync.Map; entries expire
+// lazily on read so a wedged job does not pin stale resolutions
+// indefinitely. R247-PERF-24.
+type workDirResolveCache struct {
+	m sync.Map // map[string]workDirResolveCacheEntry
+}
+
+// nowFn is overridable for tests so the TTL boundary can be exercised
+// deterministically. Production always reads time.Now.
+func (c *workDirResolveCache) lookup(key string, now time.Time) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	v, ok := c.m.Load(key)
+	if !ok {
+		return "", false
+	}
+	e := v.(workDirResolveCacheEntry)
+	if !now.Before(e.expiresAt) {
+		// Expired — drop so the next miss path doesn't keep observing it.
+		c.m.Delete(key)
+		return "", false
+	}
+	return e.resolved, true
+}
+
+func (c *workDirResolveCache) store(key, resolved string, now time.Time) {
+	if c == nil {
+		return
+	}
+	c.m.Store(key, workDirResolveCacheEntry{
+		resolved:  resolved,
+		expiresAt: now.Add(workDirResolveCacheTTL),
+	})
+}
+
+// workDirResolveCacheKey concatenates the three inputs with separators
+// that are not valid in absolute paths (`\x00`) so distinct triples
+// cannot collide on a single key. R247-PERF-24.
+func workDirResolveCacheKey(workDir, allowedRoot, allowedRootResolved string) string {
+	return workDir + "\x00" + allowedRoot + "\x00" + allowedRootResolved
+}
+
 // workDirResolveUnderRoot is the variant of workDirUnderRoot that also
 // returns the symlink-resolved workDir on success. R246-GO-12: callers
 // that subsequently hand workDir to a CLI (cli wrapper / claude spawn)
@@ -366,6 +439,28 @@ func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 // Returned path is filepath.Clean'd (EvalSymlinks already does that).
 // On the empty-workDir / empty-root short-circuit returns ("", true)
 // so the caller leaves opts.Workspace untouched (router default applies).
+// workDirResolveUnderRootCached is the Scheduler-scoped variant that
+// memoises positive results in s.workDirCache. The pure
+// workDirResolveUnderRoot below stays the canonical correctness path —
+// cold callers (loadJobs / UpdateJob) keep using it because they run
+// once per operator action and a stale-cached resolve would mask a
+// deliberate retarget. R247-PERF-24.
+func (s *Scheduler) workDirResolveUnderRootCached(workDir string) (string, bool) {
+	if s == nil {
+		return workDirResolveUnderRoot(workDir, "", "")
+	}
+	now := time.Now()
+	key := workDirResolveCacheKey(workDir, s.allowedRoot, s.allowedRootResolved)
+	if resolved, ok := s.workDirCache.lookup(key, now); ok {
+		return resolved, true
+	}
+	resolved, ok := workDirResolveUnderRoot(workDir, s.allowedRoot, s.allowedRootResolved)
+	if ok {
+		s.workDirCache.store(key, resolved, now)
+	}
+	return resolved, ok
+}
+
 func workDirResolveUnderRoot(workDir, allowedRoot, allowedRootResolved string) (string, bool) {
 	if workDir == "" || allowedRoot == "" {
 		return "", true // empty WorkDir uses router default; empty root = disabled
