@@ -234,6 +234,11 @@ type Hub struct {
 	// its clientWG.Wait could schedule a callback that never gets Waited on,
 	// or worse, add to clientWG after Wait has already returned.
 	debounceClosed bool
+	// debounceFire is the AfterFunc callback assigned once at NewHub. The
+	// previous BroadcastSessionsUpdate created a fresh closure literal on
+	// every call (high-frequency sidebar refresh path), incurring per-call
+	// heap alloc for the captured `h` pointer + func object. R239-PERF-6.
+	debounceFire func()
 
 	// tailers owns the agentTailer registry backing agent_subscribe / agent_
 	// unsubscribe WS flows (RFC v4 agent-team-ui §3.5.4). Initialised by
@@ -365,6 +370,20 @@ func NewHub(opts HubOptions) *Hub {
 	h.tailers = newTailerRegistry(h)
 	h.wiredLinkers = make(map[agentlink.AgentLinker]struct{})
 	h.historyMarshalCache = newHistoryMarshalCache()
+	// R239-PERF-6: pre-bind the AfterFunc callback so BroadcastSessionsUpdate
+	// (high-frequency sidebar refresh path) reuses one heap-allocated closure
+	// for the lifetime of the Hub instead of allocating a fresh one per call.
+	h.debounceFire = func() {
+		defer h.clientWG.Done()
+		h.debounceMu.Lock()
+		h.debounceTimer = nil
+		closed := h.debounceClosed
+		h.debounceMu.Unlock()
+		if closed {
+			return
+		}
+		h.doBroadcastSessionsUpdate()
+	}
 	// R219-CR-11 / R229-CR-4: a nil queue makes every WS send fall through to
 	// sessionSendLegacy (the deprecated guard path). Test harnesses and
 	// headless tools deliberately wire a nil Queue, but a production Hub
