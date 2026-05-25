@@ -1,10 +1,10 @@
-# TODO Archive — 已完成条目
+# TODO Archive — 已完成条目（历史归档，只读）
 
-> 本文件记录 docs/TODO.md 中已 [x] 标记完成的条目存档。
-> 主 TODO.md 仅保留 [ ] open 与 [~] pending 项以提升可读性；
-> [x] 完成项搬到这里作历史追溯。
+> docs/TODO.md 已于 2026-05-26 删除（所有 1054 finding 已 triage 处理为
+> GitHub Issues / docs/cosmetic-backlog.md / discarded audit trail）。
+> 本文件保留作 review anchor `R{N}-{CAT}-{IDX}` 的历史 reference，供 grep 回溯当时上下文。
 >
-> 排序：按行号原顺序（即 Round 节倒序，最近在前）。
+> 新 finding 流程见 `.claude/skills/triage-findings/SKILL.md`。
 
 - [x] **R248-GO-1 — closureCapabilities.Send c.send==nil 运行时 panic（P3）** [REFACTOR]: `internal/dispatch/capabilities.go:104-109` 当 NewDispatcher 走 closure 适配器分支但 SendFn 为 nil（用户只设了 TakeoverFn/ReplyFooterFn），首次 Send 调用才 panic。契约违规应在构造期暴露。 *(已实施：与 R248-ARCH-2 一同修复 — NewDispatcher 加 boot-panic gate 检测 closureCapabilities{send:nil} 也判 missing；test 路径用 AllowMissingSender opt-out。)*
 - [x] **R248-GO-2 — NewDispatcher Capabilities 与 *Fn 同时设置静默忽略 *Fn（P3）** [REFACTOR]: `internal/dispatch/dispatch.go:286-297` `caps := cfg.Capabilities; if caps == nil { ... }` —— 若调用者同时设置 `Capabilities` 和 `SendFn`（迁移期常见误用），SendFn 静默丢失，hot-path 走 Capabilities.Send。 *(已实施：NewDispatcher 在 Capabilities 与 *Fn 同时设置时 slog.Warn 一次性日志，标识哪些 *Fn 被忽略。)*

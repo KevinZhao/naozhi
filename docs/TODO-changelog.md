@@ -1,7 +1,10 @@
-# TODO 变更历史
+# TODO 变更历史（只读归档）
 
-> 本文档是 [`docs/TODO.md`](TODO.md) 的历史归档，存放 Round-by-Round 变更详情（narrative 段 + 已修复归档）。
-> 活跃的 open items（CRITICAL / HIGH / MEDIUM / LOW / UX / 新功能）仍在 [`docs/TODO.md`](TODO.md)。
+> docs/TODO.md 已于 2026-05-26 删除（迁移至 GitHub Issues）。
+> 本文档保留作 Round-by-Round 变更详情(narrative 段 + 已修复归档)的历史 reference,
+> 供 grep R-anchor 回溯当时上下文。
+>
+> 活跃 backlog 见 GitHub Issues。新 finding 流程见 `.claude/skills/triage-findings/SKILL.md`。
 >
 > 顺序：顶部 "上一轮更新" 长段 → Round 194/110 批 narrative → Round 109..83 narratives → 已修复归档。
 
