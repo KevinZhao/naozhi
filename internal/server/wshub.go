@@ -48,6 +48,71 @@ const (
 )
 
 // Hub manages WebSocket client connections and event subscriptions.
+//
+// Field-block contract (server-split-phase4-design.md §五 / baseline §3):
+// 37 fields organized in 6 blocks. Phase 4 抽包 to internal/wshub/ keeps
+// the struct intact; Phase 5 considers Hub.allowedRoot merge with
+// Server.allowedRoot via NewHub Options. Field → file access map below;
+// new fields MUST add a "// 读写:" inline comment AND update this map.
+//
+//	Block             Field                         读写文件
+//	─────────────────────────────────────────────────────────────────────
+//	lifecycle (3)     mu                            wshub.go, wsclient.go,
+//	                                                wshub_broadcast.go,
+//	                                                wshub_eventpush.go,
+//	                                                wshub_subscribe.go
+//	                  ctx                           wshub.go, wshub_eventpush.go,
+//	                                                wshub_send.go, wshub_subscribe.go
+//	                  cancel                        wshub.go (Shutdown only)
+//	subscriber (8)    clients                       wshub.go, wshub_broadcast.go,
+//	                                                wshub_subscribe.go, wshub_upgrade.go
+//	                  connCount                     wshub.go, wshub_upgrade.go
+//	                  clientWG                      wshub.go, wshub_broadcast.go,
+//	                                                wshub_subscribe.go, wshub_upgrade.go
+//	                  wsAuthLimiter                 wshub_upgrade.go
+//	                  wsUpgradeLimiter              wshub_upgrade.go
+//	                  upgrader                      wshub.go, wshub_upgrade.go
+//	                  dashTokenHash                 wshub.go, wshub_upgrade.go
+//	                  cookieMAC                     wshub_upgrade.go
+//	broadcast (4)     debounceMu                    wshub.go, wshub_broadcast.go
+//	                  debounceTimer                 wshub.go, wshub_broadcast.go
+//	                  debounceFirst                 wshub_broadcast.go
+//	                  debounceClosed                wshub.go, wshub_broadcast.go
+//	send (5)          queue                         wshub.go (ctor); via wsclient
+//	                                                READ-ALSO from wshub_subscribe.go
+//	                                                (close client → drain pending)
+//	                  sendWG                        wshub.go (TrackSend / Shutdown)
+//	                  sendTrackMu                   wshub.go (TrackSend / Shutdown)
+//	                  sendClosed                    wshub.go (TrackSend / Shutdown)
+//	                  droppedTotal                  wshub_broadcast.go
+//	shared deps (14)  router                        consumer.go, wshub_agent.go,
+//	                                                wshub_eventpush.go, wshub_send.go,
+//	                                                wshub_subscribe.go
+//	                  agents                        wshub.go (ctor); via wsclient
+//	                  agentCmds                     wshub.go (ctor); via wsclient
+//	                  dashToken                     wshub_upgrade.go
+//	                  guard                         wshub.go (ctor); via wsclient
+//	                  nodes                         wshub.go, wshub_send.go,
+//	                                                wshub_subscribe.go
+//	                  nodesMu                       wshub.go, wshub_send.go,
+//	                                                wshub_subscribe.go
+//	                  projectMgr                    wshub.go (ctor); via wsclient
+//	                  resolver                      wshub.go (ctor); via wsclient
+//	                  scheduler                     wshub.go, wshub_subscribe.go
+//	                  uploadStore                   wshub.go, wshub_send.go
+//	                  scratchPool                   wshub.go (ctor); via wsclient
+//	                  allowedRoot                   wshub.go (ctor); via wsclient.
+//	                                                Phase 5 merges with
+//	                                                Server.allowedRoot via NewHub
+//	                                                Options.
+//	                  trustedProxy                  wshub.go, wshub_upgrade.go
+//	agent tailer (3)  tailers                       wshub.go, wshub_agent.go
+//	                  wiredLinkersMu                wshub.go, wshub_agent.go
+//	                  wiredLinkers                  wshub.go, wshub_agent.go
+//
+// Phase 4 抽到 internal/wshub/ 后，方法严格按文件分块（hub_broadcast.go
+// 只 WRITE broadcast block + READ shared deps；其余同理）。CI lint
+// rule 3 (field_block) 验证此约束。
 type Hub struct {
 	mu sync.RWMutex
 	// connCount mirrors len(h.clients) for the unauthenticated connection

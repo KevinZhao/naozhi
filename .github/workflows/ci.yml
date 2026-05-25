@@ -34,6 +34,23 @@ jobs:
         # Separate Build and Vet steps are redundant and have been removed.
         run: go test -race -timeout 300s ./...
 
+  # server-package contracts (lint-server-handlers).
+  # warn mode during Phase 0-4 of server-split: violations print to logs
+  # but exit 0 (continue-on-error). Switch to fail mode after Phase 5
+  # — see docs/design/server-split-phase4-design.md §九.2.
+  lint-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run lint-server-handlers (warn mode)
+        run: make lint-server
+
   vuln:
     runs-on: ubuntu-latest
     timeout-minutes: 10

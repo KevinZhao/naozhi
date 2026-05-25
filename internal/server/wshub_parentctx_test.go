@@ -170,7 +170,11 @@ func TestServer_AppCtxWiredToHub(t *testing.T) {
 		t.Error("server.go: Start must assign s.appCtx = ctx before registerDashboard " +
 			"(CTX1 requires appCtx to be set when NewHub reads it)")
 	}
-	if !strings.Contains(string(serverSrc), "appCtx context.Context") {
+	// Match `appCtx ... context.Context` allowing arbitrary whitespace
+	// between the name and the type. gofmt aligns struct fields when
+	// adjacent fields have longer names, so a strict single-space match
+	// would break the moment a sibling field is renamed.
+	if !regexp.MustCompile(`\bappCtx\s+context\.Context\b`).Match(serverSrc) {
 		t.Error("server.go: Server struct must declare appCtx context.Context field")
 	}
 
