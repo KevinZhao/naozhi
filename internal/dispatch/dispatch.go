@@ -18,7 +18,6 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
-	"github.com/naozhi/naozhi/internal/textutil"
 	"github.com/naozhi/naozhi/internal/usermsg"
 )
 
@@ -233,6 +232,20 @@ type DispatcherConfig struct {
 	// and future hooks add an interface method instead of a new closure +
 	// nil-fallback line. This field is still honoured for backward
 	// compatibility but new code should set Capabilities directly.
+	//
+	// Removal trigger (#374): production has been Capabilities-only since
+	// R243-ARCH-10 (server.go::Server.Start uses serverCaps; cmd/* and
+	// internal/platform/* never reference *Fn). The remaining call sites
+	// are tests (internal/dispatch/dispatch_test.go::buildDispatcher,
+	// internal/server/server_test.go and capability-adapter coverage in
+	// dispatch_test.go::TestNewDispatcher_*Capabilities*). Once those tests
+	// migrate to dispatch.closureCapabilities literals or a small test
+	// helper, ReplyFooterFn / SendFn / TakeoverFn plus the
+	// closureCapabilities adapter and the legacy-detection branch in
+	// NewDispatcher (the "if cfg.SendFn != nil ..." block and the
+	// Capabilities-and-*Fn-both-set slog.Warn) can be removed in one
+	// pass. Target: 2026-Q3, gated on those test migrations landing.
+	// See R248-ARCH-3 in docs/TODO.md (linked from issue #374).
 	ReplyFooterFn func(backendID string) string
 
 	NoOutputTimeout       time.Duration
@@ -243,12 +256,14 @@ type DispatcherConfig struct {
 	// SendFn forwards a turn payload to the session router after guard /
 	// queue gating has succeeded. Production wires Server.sendWithBroadcast.
 	//
-	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn.
+	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn
+	// for the consolidated removal trigger (#374).
 	SendFn func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
 	// TakeoverFn is the optional auto-takeover hook invoked on the first
 	// message of every chat. nil is treated as "return false".
 	//
-	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn.
+	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn
+	// for the consolidated removal trigger (#374).
 	TakeoverFn func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
 
 	// AllowMissingSender opts out of the constructor-time "Send must be
@@ -822,27 +837,33 @@ func (d *Dispatcher) sendAndReply(
 	if err != nil {
 		d.replyErrorCount.Add(1)
 		lg.Error("send to claude", "err", err)
-		// IM path keeps two timeout-aware specialisations (the configured
-		// no-output / total durations rendered in Chinese) before falling
-		// back to the shared sentinel→message helper. Dashboard send path
-		// (server/errors_usermsg.go) collapses the timeout cases to the
-		// generic "处理超时，请简化任务后重试。" because it has no per-
-		// session timeout configured.
+		// IM path uses the timeout-aware helper (it renders the configured
+		// no-output / total durations in Chinese) and prepends a clock
+		// emoji for visibility on chat surfaces. Dashboard send path
+		// (server/errors_usermsg.go) calls usermsg.ForSendError directly
+		// so the timeout cases collapse to the generic "处理超时，请简化任务后重试。"
+		// — it has no per-session timeout configured. R249-DISPATCH-1 (#419)
+		// extracted usermsg.UserMessage so a new sentinel only registers
+		// once, instead of two parallel switches with cross-package
+		// "keep in sync" comments.
 		// /clear early-return mirrors the prior behaviour: the user just
 		// triggered the reset, so we suppress the extra "会话已重置" reply.
 		if errors.Is(err, cli.ErrSessionReset) {
 			return
 		}
-		var errMsg string
+		// Watchdog counters stay in dispatch because they are owned by the
+		// IM-side configuration; the shared helper only renders text.
 		switch {
 		case errors.Is(err, cli.ErrNoOutputTimeout):
 			d.watchdogNoOutputKills.Add(1)
-			errMsg = fmt.Sprintf("⏱️ 处理超时（%s 无输出），请简化任务后重试。", textutil.FormatChineseDuration(d.noOutputTimeout))
 		case errors.Is(err, cli.ErrTotalTimeout):
 			d.watchdogTotalKills.Add(1)
-			errMsg = fmt.Sprintf("⏱️ 处理超时（总耗时超过 %s），请拆分为更小的任务。", textutil.FormatChineseDuration(d.totalTimeout))
-		default:
-			errMsg = usermsg.ForSendError(err, key)
+		}
+		errMsg := usermsg.UserMessage(err, key, d.noOutputTimeout, d.totalTimeout)
+		// IM-only emoji decoration for the timeout cases. Other surfaces
+		// (dashboard send_ack) deliberately stay emoji-free.
+		if errors.Is(err, cli.ErrNoOutputTimeout) || errors.Is(err, cli.ErrTotalTimeout) {
+			errMsg = "⏱️ " + errMsg
 		}
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, platformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)

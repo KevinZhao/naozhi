@@ -2971,7 +2971,10 @@ func minInt(a, b int) int {
 // indication of HOW LONG the connection has been dead, leaving operators
 // unable to tell "just blipped 2s ago" from "been dead for 10 minutes".
 //
-// Four structural invariants:
+// Three structural invariants (issue #434 dropped invariant 4 — the
+// _statusTickTimer 1s repaint loop became a no-op once the
+// #sidebar-status DOM was removed and was deleted; this test now also
+// asserts it stays gone):
 //
 //  1. formatOutageDuration is a pure helper (no DOM, no wsm access) with
 //     the documented rounding behaviour: <5s suppressed to ”, 5-89s as
@@ -2983,11 +2986,14 @@ func minInt(a, b int) int {
 //  3. updateStatusBar reads the stamp + renders a .status-outage row
 //     only when the gate (!wsUp && stamp > 0) allows AND format returns
 //     non-empty, so transient reconnects don't spawn a noisy hint.
-//  4. _updateStatusTick starts a 1s interval while disconnected and
-//     clears it on CONNECTED, so the "已断开 N 秒" label advances
-//     without waiting for the next WS state transition. The timer
-//     handle lives at module scope (not inside updateStatusBar) so
-//     multiple repaint paths don't spawn leaking intervals.
+//
+// Removed (issue #434): the _statusTickTimer / _updateStatusTick helper
+// pair previously lived under invariant 4. Once #sidebar-status was
+// deleted from the sidebar, updateStatusBar early-returned and the 1s
+// tick had no user-visible effect — its only side-effect, a bare
+// updateNodeSelector() call, was already covered by the setState path.
+// The test now asserts the helpers stay deleted so a refactor can't
+// silently re-introduce the dead timer.
 func TestDashboardJS_R110P1_WSOutageDurationHint(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
@@ -3038,26 +3044,27 @@ func TestDashboardJS_R110P1_WSOutageDurationHint(t *testing.T) {
 		t.Error("updateStatusBar must render .status-outage row via esc() for XSS safety")
 	}
 
-	// Invariant 4: _statusTickTimer module handle + _updateStatusTick
-	// start/stop contract. The timer must be declared at module scope
-	// (not redeclared inside a function) so the start/stop logic references
-	// a single shared handle.
-	if !strings.Contains(js, "let _statusTickTimer = null;") {
-		t.Error("_statusTickTimer must be declared at module scope so start/stop reference one handle")
+	// Reverse guardrail (issue #434): the deleted _statusTickTimer /
+	// _updateStatusTick pair must NOT come back. The 1s repaint loop
+	// became a no-op once #sidebar-status was removed (updateStatusBar
+	// early-returns when the container is missing) and its only
+	// remaining side-effect, updateNodeSelector(), is already driven
+	// by setState via the same updateStatusBar() tail-call. A refactor
+	// that re-introduces either the module-level handle or the helper
+	// is almost certainly recreating the dead loop.
+	//
+	// Match on declaration / definition forms specifically so the
+	// "(Removed) _statusTickTimer …" explanatory comments left in
+	// dashboard.js (which intentionally name the dead helpers so a
+	// future reader can find this issue thread) don't false-positive.
+	if strings.Contains(js, "let _statusTickTimer = null;") || strings.Contains(js, "var _statusTickTimer") {
+		t.Error("_statusTickTimer was removed in #434; dashboard.js must not re-introduce the module handle")
 	}
-	if !strings.Contains(js, "function _updateStatusTick(state)") {
-		t.Fatal("dashboard.js missing _updateStatusTick(state) helper")
+	if strings.Contains(js, "function _updateStatusTick(") {
+		t.Error("_updateStatusTick was removed in #434; dashboard.js must not re-introduce the helper")
 	}
-	if !strings.Contains(js, "if (state === WS_STATES.CONNECTED) {") {
-		t.Error("_updateStatusTick must clear the timer on CONNECTED")
-	}
-	if !strings.Contains(js, "_statusTickTimer = setInterval(updateStatusBar, 1000);") {
-		t.Error("_updateStatusTick must set a 1s setInterval on non-CONNECTED states")
-	}
-	// setState must call _updateStatusTick so the timer maintenance is
-	// wired into every state change — otherwise the tick never arms.
-	if !strings.Contains(js, "_updateStatusTick(s);") {
-		t.Error("setState must invoke _updateStatusTick(s) so the 1s tick timer tracks WS state changes")
+	if strings.Contains(js, "setInterval(updateStatusBar,") {
+		t.Error("setInterval(updateStatusBar, ...) was removed in #434; the 1s tick is dead and must not return")
 	}
 }
 

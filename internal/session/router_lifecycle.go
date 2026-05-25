@@ -905,12 +905,18 @@ func (r *Router) installPersistSink(proc processIface, key string) {
 	if log == nil {
 		return
 	}
-	sink := newEventLogSink(
-		r.eventLogPersister.SinkFor(key),
-		r.attachmentTracker,
-		persist.KeyHash(key),
-	)
-	log.SetPersistSink(sink)
+	persisterSink := r.eventLogPersister.SinkFor(key)
+	keyhash := persist.KeyHash(key)
+	sink := newEventLogSink(persisterSink, r.attachmentTracker, keyhash)
+	// #410: pair a single-entry sink so EventLog.Append can skip the
+	// 1-slot []EventEntry{e} literal it would otherwise pass through
+	// the slice sink. Both sinks point at the same persisterSink; the
+	// persister sees identical byte stream regardless of which
+	// dispatch path EventLog used. AppendBatch keeps using `sink`
+	// (slice form), preserving contiguous batch ordering for the
+	// persister.
+	sinkOne := newEventLogSinkOne(persisterSink, r.attachmentTracker, keyhash)
+	log.SetPersistSinkPair(sink, sinkOne)
 }
 
 // loadResumeHistoryOnSpawn walks the previous CLI session-ID chain and, when

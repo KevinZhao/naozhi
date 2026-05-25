@@ -26,9 +26,47 @@ func TestServiceUserSudo(t *testing.T) {
 	if user != "testuser" {
 		t.Errorf("expected user=testuser, got %s", user)
 	}
-	// getent may not resolve testuser, fallback to /home/testuser
+	// os/user.Lookup may not resolve "testuser" on the test host;
+	// the fallback to /home/testuser keeps the installer functional
+	// in that case. (#391 — replaced exec-getent with os/user.Lookup
+	// so this branch no longer requires a `getent` binary on PATH.)
 	if home == "" {
 		t.Error("expected non-empty home")
+	}
+}
+
+// TestServiceUserSudo_ResolvesRealUser exercises the os/user.Lookup
+// success branch by setting SUDO_USER to whatever the test process is
+// running as — that user must resolve via the runtime's nsswitch
+// machinery, returning a HomeDir that matches os.UserHomeDir(). #391
+// replaced the `exec.Command("getent", "passwd", su)` shellout with
+// user.Lookup; this test locks in the success path so a future
+// regression that re-introduces the shellout (or breaks the Lookup
+// call) is caught.
+func TestServiceUserSudo_ResolvesRealUser(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SUDO_USER path is POSIX-only; skip on windows")
+	}
+	want, err := os.UserHomeDir()
+	if err != nil || want == "" {
+		t.Skipf("UserHomeDir unavailable in test env: %v", err)
+	}
+	currentUser := os.Getenv("USER")
+	if currentUser == "" {
+		t.Skip("$USER not set; cannot derive a known-resolvable name")
+	}
+	t.Setenv("SUDO_USER", currentUser)
+	user, home := serviceUser()
+	if user != currentUser {
+		t.Errorf("user = %q, want %q", user, currentUser)
+	}
+	// On hosts where the current user resolves through os/user.Lookup,
+	// `home` must come from the Lookup (matching os.UserHomeDir()).
+	// On minimal containers where Lookup falls through to the
+	// /home/<su> fallback, the home will instead be /home/<currentUser>;
+	// accept either to keep the test portable across CI runners.
+	if home != want && home != filepath.Join("/home", currentUser) {
+		t.Errorf("home = %q, want %q or %q", home, want, filepath.Join("/home", currentUser))
 	}
 }
 

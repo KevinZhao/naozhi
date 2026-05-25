@@ -417,6 +417,20 @@ type EventLog struct {
 	sinkReady      atomic.Bool
 	persistSinkPtr atomic.Pointer[PersistSink]
 
+	// persistSinkOnePtr is the optional single-entry fast-path sink,
+	// installed via SetPersistSinkPair. When non-nil, Append's hot path
+	// uses it instead of constructing a 1-slot []EventEntry{e} literal
+	// before invokePersistSink — that literal heap-escapes through the
+	// slice sink's retention contract (#410). AppendBatch never consults
+	// this pointer; the multi-entry path always uses persistSinkPtr so
+	// the persister observes contiguous batches.
+	//
+	// Lifetime: paired with persistSinkPtr by SetPersistSinkPair.
+	// Callers using only the legacy SetPersistSink keep this nil and
+	// pay the slice-literal allocation, preserving full backward
+	// compatibility for sinks that have not opted in.
+	persistSinkOnePtr atomic.Pointer[PersistSinkOne]
+
 	// replayInvokeTotal counts how many invokePersistSink calls fired
 	// while sinkReady was still false (replayPhase=true). This window
 	// starts at construction and ends when SetPersistSink Stores
@@ -433,6 +447,25 @@ type EventLog struct {
 	// the Persister silently absorbs the drop.
 	replayInvokeTotal atomic.Int64
 }
+
+// PersistSinkOne is the single-entry counterpart to PersistSink. When
+// installed alongside (or in lieu of) the slice-shaped PersistSink via
+// SetPersistSinkPair, it is preferred by Append's hot path so the
+// per-call `[]EventEntry{e}` literal allocation disappears (#410).
+//
+// Semantics match PersistSink exactly: the entry is the same value that
+// would have landed at index 0 of the slice variant; replayPhase is
+// derived from sinkReady identically. AppendBatch always uses the slice
+// path — collapsing N>1 entries into N single-entry calls would lose the
+// per-batch atomic write-order the persister relies on (see persister.go
+// SinkFor batching contract).
+//
+// Implementations MUST be non-blocking, identical to PersistSink. Callers
+// that retain the EventEntry past return must copy any reference fields
+// they care about (Images / ImagePaths / AskQuestion / ToolCall) — the
+// EventEntry struct itself is passed by value, but its slice/pointer
+// fields share backing memory with the ring buffer slot.
+type PersistSinkOne func(entry EventEntry, replayPhase bool)
 
 // PersistSink is the event log's persistence hook contract.
 // cli.EventLog calls the stored sink (when set) after every Append
@@ -518,6 +551,14 @@ type PersistSink func(entries []EventEntry, replayPhase bool)
 func (l *EventLog) SetPersistSink(fn PersistSink) {
 	if fn == nil {
 		l.persistSinkPtr.Store(nil)
+		// Clear any previously paired single-entry sink — leaving it
+		// installed would cause Append to fire the single-entry
+		// closure while AppendBatch silently no-ops (slice ptr nil),
+		// breaking the "consistent dispatch" invariant the two paths
+		// share. SetPersistSinkPair is the only entrypoint that
+		// installs a single sink; SetPersistSink-with-nil clears both
+		// for symmetry.
+		l.persistSinkOnePtr.Store(nil)
 		return
 	}
 	// Store the sink pointer FIRST so any concurrent Append that
@@ -527,6 +568,48 @@ func (l *EventLog) SetPersistSink(fn PersistSink) {
 	// in the godoc above for the ordering proof.
 	p := fn
 	l.persistSinkPtr.Store(&p)
+	// Installing a slice-only sink retracts any previously paired
+	// single-entry sink: callers who switch back from the pair API to
+	// the legacy slice API must not silently keep the old single sink
+	// firing — the two slices may correspond to entirely different
+	// downstream destinations.
+	l.persistSinkOnePtr.Store(nil)
+	l.sinkReady.Store(true)
+}
+
+// SetPersistSinkPair installs both the slice-shaped batch sink and a
+// single-entry fast-path sink in one call. The two sinks MUST drain to
+// the same downstream destination — Append uses `single`, AppendBatch
+// uses `batch`, and the per-call decision is invisible to operators.
+// When `single` is nil, behaviour collapses back to SetPersistSink(batch).
+//
+// Ordering matches SetPersistSink's documented R224-GO-5 contract: the
+// sink pointers are stored before sinkReady flips to true so a concurrent
+// Append observing sinkReady=true is guaranteed to see a non-nil sink
+// for at least one dispatch path. The single-entry pointer is stored
+// before the slice pointer so Append's "prefer single" dispatch never
+// regresses to a slice-literal alloc once the pair has been installed.
+//
+// #410: the single-entry path lets Append skip the `[]EventEntry{e}`
+// literal that would otherwise escape through the slice sink's retention
+// contract, removing one heap alloc per live event on the hot path.
+func (l *EventLog) SetPersistSinkPair(batch PersistSink, single PersistSinkOne) {
+	if batch == nil {
+		// Treat a nil batch as "uninstall everything" so callers do not
+		// have to remember a separate clear sequence; mirrors
+		// SetPersistSink(nil) semantics.
+		l.persistSinkOnePtr.Store(nil)
+		l.persistSinkPtr.Store(nil)
+		return
+	}
+	bp := batch
+	if single != nil {
+		sp := single
+		l.persistSinkOnePtr.Store(&sp)
+	} else {
+		l.persistSinkOnePtr.Store(nil)
+	}
+	l.persistSinkPtr.Store(&bp)
 	l.sinkReady.Store(true)
 }
 
@@ -559,6 +642,26 @@ func (l *EventLog) invokePersistSink(entries []EventEntry) {
 		l.replayInvokeTotal.Add(1)
 	}
 	(*p)(entries, replay)
+}
+
+// invokePersistSinkOne is the single-entry counterpart to invokePersistSink,
+// fired only by Append (not AppendBatch). Returns true when the single sink
+// was attached and dispatched; false when the caller must fall back to the
+// slice-shaped invokePersistSink path. Sharing the same replayPhase
+// derivation + replayInvokeTotal counter as invokePersistSink keeps the
+// telemetry surface unified: a sink-pair caller and a slice-only caller
+// observe identical counter behaviour. (#410)
+func (l *EventLog) invokePersistSinkOne(entry EventEntry) bool {
+	p := l.persistSinkOnePtr.Load()
+	if p == nil {
+		return false
+	}
+	replay := !l.sinkReady.Load()
+	if replay {
+		l.replayInvokeTotal.Add(1)
+	}
+	(*p)(entry, replay)
+	return true
 }
 
 // ReplayInvokeTotal returns the number of invokePersistSink calls that
@@ -1027,17 +1130,23 @@ func (l *EventLog) Append(e EventEntry) {
 	// them in the no-sink case saves one alloc per event in the hot
 	// stdout path. Mirrors AppendBatch's pre-loop sinkAttached gate.
 	//
+	// #410: prefer the single-entry sink when the caller paired one via
+	// SetPersistSinkPair. The single sink path passes the EventEntry by
+	// value, eliminating the `[]EventEntry{e}` literal that would
+	// otherwise heap-escape through the slice sink's retention contract.
+	// Falls back to the slice form for legacy SetPersistSink-only
+	// callers; both branches share replayPhase derivation +
+	// replayInvokeTotal accounting through invokePersistSinkOne /
+	// invokePersistSink.
+	//
 	// R215-PERF-P2-1 / R219-PERF-4 / R228-PERF-7 archive anchor:
-	// the remaining `[]EventEntry{e}` literal allocation on the
-	// sink-attached branch is structurally required by PersistSink's
-	// retention contract — the sink may keep the slice past return,
-	// so a stack array (`[1]EventEntry` with `s[:]`) escapes via the
-	// atomic.Pointer-loaded function pointer regardless of -gcflags=-m.
-	// sync.Pool would just trade alloc for Get/Put overhead on a 48 B
-	// payload. Production hot path is the no-sink early-return above,
-	// so the marginal cost on the sink-attached path is accepted.
-	if l.persistSinkPtr.Load() != nil {
-		l.invokePersistSink([]EventEntry{e})
+	// the slice-literal allocation on the legacy sink-attached branch
+	// remains structurally required by PersistSink's retention
+	// contract — opting into SetPersistSinkPair is the way to skip it.
+	if !l.invokePersistSinkOne(e) {
+		if l.persistSinkPtr.Load() != nil {
+			l.invokePersistSink([]EventEntry{e})
+		}
 	}
 
 	l.notifySubscribers()

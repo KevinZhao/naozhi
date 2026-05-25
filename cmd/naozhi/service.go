@@ -8,6 +8,7 @@ import (
 	iofs "io/fs"
 	"os"
 	"os/exec"
+	osuser "os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -47,12 +48,21 @@ func serviceUser() (user, home string) {
 			}
 		}
 		user = su
-		// Resolve home via getent (works on Linux)
-		if out, err := exec.Command("getent", "passwd", su).Output(); err == nil {
-			fields := strings.Split(strings.TrimSpace(string(out)), ":")
-			if len(fields) >= 6 {
-				home = fields[5]
-			}
+		// Resolve home via os/user.Lookup so the install path does not
+		// depend on a `getent` binary being present on PATH and does
+		// not pay the fork+exec round-trip every install/uninstall
+		// cycle. os/user falls through nsswitch.conf entries on glibc
+		// hosts (compat -> files -> sssd -> ldap -> ...), so it
+		// already covers the LDAP/SSSD-only home directories that
+		// motivated the original getent shellout. (#391)
+		//
+		// Fallback to /home/<su> mirrors the prior behaviour: a
+		// Lookup failure (su not in any nsswitch backend, or a pure
+		// container with only minimal /etc/passwd entries) keeps the
+		// installer functional rather than aborting on the most
+		// common deployment path.
+		if u, err := osuser.Lookup(su); err == nil && u.HomeDir != "" {
+			home = u.HomeDir
 		}
 		if home == "" {
 			home = filepath.Join("/home", su)

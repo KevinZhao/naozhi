@@ -133,36 +133,12 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 		// breaks every existing sink implementation. Logged here so a
 		// future re-evaluator does not repeat the -gcflags walk.
 		if len(entries) == 1 {
-			eb := bridgeEncPool.Get().(*bridgeEncBuf)
-			eb.buf.Reset()
-			e := entries[0]
-			if err := eb.enc.Encode(e); err != nil {
-				slog.Warn("eventlog bridge: marshal entry failed",
-					"uuid", e.UUID, "type", e.Type, "err", err)
-				if eb.buf.Cap() <= bridgeEncMaxCap {
-					bridgeEncPool.Put(eb)
-				}
-				return
-			}
-			raw := eb.buf.Bytes()
-			if n := len(raw); n > 0 && raw[n-1] == '\n' {
-				raw = raw[:n-1]
-			}
-			// Copy out of the pooled buffer so caller can hold the
-			// bytes past Put. PersistSink contract permits sink to
-			// retain entries.
-			buf := make([]byte, len(raw))
-			copy(buf, raw)
-			if eb.buf.Cap() <= bridgeEncMaxCap {
-				bridgeEncPool.Put(eb)
-			}
-			var stackArr [1]persist.Entry
-			out := append(stackArr[:0], persist.Entry{JSON: buf, TimeMS: e.Time})
-			// Refcount bump — same guard as multi-entry path below.
-			if !replayPhase && attachTracker != nil && keyhash != "" && len(e.ImagePaths) > 0 {
-				attachTracker.OnPersistedEntry(keyhash, e.ImagePaths, e.Time)
-			}
-			persisterSink(out, replayPhase)
+			// Delegate to the single-entry helper so the marshal /
+			// refcount logic lives in exactly one place. Both this
+			// branch and the cli.PersistSinkOne fast path
+			// (newEventLogSinkOne) call the same helper, so a future
+			// schema tweak only has to land in one place. (#410)
+			persistOneEntry(persisterSink, attachTracker, keyhash, entries[0], replayPhase)
 			return
 		}
 
@@ -207,5 +183,54 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 			return
 		}
 		persisterSink(out, replayPhase)
+	}
+}
+
+// persistOneEntry marshals a single EventEntry through bridgeEncPool and
+// forwards it to persisterSink. Shared between newEventLogSink's
+// len(entries)==1 fast path and newEventLogSinkOne's by-value fast path
+// so the encode/copy/refcount logic lives in exactly one place. Behaviour
+// (marshal failure handling, pool-cap guard, attachment refcount bump,
+// stack-allocated [1]persist.Entry slice) matches the inline code that
+// previously lived in newEventLogSink — extracting it here changes no
+// semantics, only call shape. (#410)
+func persistOneEntry(persisterSink persist.PersistSink, attachTracker *tracker.Tracker, keyhash string, e cli.EventEntry, replayPhase bool) {
+	eb := bridgeEncPool.Get().(*bridgeEncBuf)
+	eb.buf.Reset()
+	if err := eb.enc.Encode(e); err != nil {
+		slog.Warn("eventlog bridge: marshal entry failed",
+			"uuid", e.UUID, "type", e.Type, "err", err)
+		if eb.buf.Cap() <= bridgeEncMaxCap {
+			bridgeEncPool.Put(eb)
+		}
+		return
+	}
+	raw := eb.buf.Bytes()
+	if n := len(raw); n > 0 && raw[n-1] == '\n' {
+		raw = raw[:n-1]
+	}
+	buf := make([]byte, len(raw))
+	copy(buf, raw)
+	if eb.buf.Cap() <= bridgeEncMaxCap {
+		bridgeEncPool.Put(eb)
+	}
+	var stackArr [1]persist.Entry
+	out := append(stackArr[:0], persist.Entry{JSON: buf, TimeMS: e.Time})
+	if !replayPhase && attachTracker != nil && keyhash != "" && len(e.ImagePaths) > 0 {
+		attachTracker.OnPersistedEntry(keyhash, e.ImagePaths, e.Time)
+	}
+	persisterSink(out, replayPhase)
+}
+
+// newEventLogSinkOne is the cli.PersistSinkOne counterpart to
+// newEventLogSink. Wires Append's single-entry fast path directly to the
+// per-key persister without the `[]EventEntry{e}` slice literal that the
+// legacy slice contract required. AppendBatch continues to use the slice
+// sink built by newEventLogSink — the two share persistOneEntry's
+// marshal/refcount logic so the wire format and attachment-tracker
+// behaviour are byte-identical between the two dispatch paths. (#410)
+func newEventLogSinkOne(persisterSink persist.PersistSink, attachTracker *tracker.Tracker, keyhash string) cli.PersistSinkOne {
+	return func(e cli.EventEntry, replayPhase bool) {
+		persistOneEntry(persisterSink, attachTracker, keyhash, e, replayPhase)
 	}
 }
