@@ -794,11 +794,25 @@ func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
 	return j, nil
 }
 
-// NextRun returns the next scheduled run time for a job.
+// NextRun returns the next scheduled run time for a job. R247-GO-9
+// [REPEAT-2]: the prior implementation read j.entryID under s.mu.RLock
+// then released the lock before calling s.cron.Entry(entryID). A
+// concurrent UpdateJob path (which Remove+AddFunc the entry under s.mu)
+// could race in that window and return the cron-library zero-value
+// Entry{} (Next == time.Time{}) for what is in fact a still-scheduled
+// job. Same root cause as R246-GO-1 on TriggerNow's entry read.
+//
+// Hold s.mu.RLock across both the entryID load AND the cron.Entry call
+// so the entry the caller asked about cannot be removed mid-read.
+// robfig/cron.Cron.Entry takes its own internal lock — there is no
+// lock-order conflict with s.mu (cron's locks never call back into
+// scheduler code), so the cross-call hold is safe. The cost is one
+// extra contended RLock window per dashboard 1Hz poll, dwarfed by
+// the s.cron.Entry sort+scan it wraps.
 func (s *Scheduler) NextRun(j *Job) time.Time {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
 	entryID := j.entryID
-	s.mu.RUnlock()
 	if entryID == 0 {
 		return time.Time{}
 	}
