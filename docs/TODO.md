@@ -309,7 +309,7 @@
 - [ ] **R246-PERF-13 [P3] [REFACTOR] — `internal/dispatch/msgqueue.go:185-208` Enqueue 队列满 copy + 零槽 + slice shrink 是 O(N)**: MaxDepth 默认 16 但每次 evict memmove 15 个 QueuedMsg。建议：环形 buffer（head/tail 索引）O(1) 入队/出队。
 - [ ] **R246-PERF-14 [P3] [REFACTOR] — `internal/sysession/runner.go:166-204` exec.CommandContext 每次启动 claude -p subprocess**: AutoTitler 频繁触发时 50-100ms 启动 × N。建议：长寿命单例 stream-json claude（与 RFC §6.1 SharedCLI 决策冲突，需重新评估批量场景）。
 - [ ] **R246-PERF-15 [P3] [REFACTOR] — `internal/server/dashboard_session.go:411-412` router.Version() + ListSessions() 双 RLock**: 可在 ListSessions 内一次返回 (snapshots, version) 元组避免 race window；预期语义更清晰。
-- [ ] **R246-PERF-16 [P3] [REPEAT-2] — `internal/cli/eventlog.go:1217-1245` Entries()/LastN() 全 ring 拷贝走 []EventEntry**: 500 slot ring 复制是 ~200KB+ 浅拷贝。建议：返回 []*EventEntry + lifetime contract，或 sync.Pool 缓存 slice 重用 backing array。
+- [x] **R246-PERF-16 [P3] [REPEAT-2] — `internal/cli/eventlog.go:1217-1245` Entries()/LastN() 全 ring 拷贝走 []EventEntry**: 500 slot ring 复制是 ~200KB+ 浅拷贝。建议：返回 []*EventEntry + lifetime contract，或 sync.Pool 缓存 slice 重用 backing array。 — F1 [REPEAT-2]: 同根因 R247-PERF-13 已合并修复（fde8f67：EntriesAppend/LastNAppend buffer-reuse API）。
 
 #### 代码质量（CR，18 项）
 
