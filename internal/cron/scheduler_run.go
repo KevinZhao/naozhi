@@ -445,19 +445,30 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		inflight.setPhase(PhaseJittering)
 		applyJitter(s.stopCtx, j.Schedule, s.jitterMax)
 
-		// R220-GO-3: a DeleteJob that lands during the jitter window leaves
-		// the inflight CAS still held until we finish — blocking TriggerNow
-		// for the same id with an "already running" overlap skip. Re-check
-		// the job is still registered after the jitter wait so the deferred
-		// inflight.running.Store(false) above releases promptly. snapshotJob
-		// reads under s.mu so a stale dereference is impossible after Delete
-		// (the field reads return the last-known values and we never use
-		// them past this point).
+		// R220-GO-3 + R246-GO-7: a DeleteJob OR a PauseJobByID that lands
+		// during the jitter window must abort the run before we spawn /
+		// send. The registerJob closure has a paused-check upstream of
+		// executeOpt, but it runs *before* the jitter wait — a Pause that
+		// lands inside the (default up-to-30s) jitter window would
+		// otherwise leak through and violate the "Paused job must not run"
+		// invariant. DeleteJob also leaves the inflight CAS still held
+		// until we finish — blocking TriggerNow for the same id with an
+		// "already running" overlap skip; the early return below releases
+		// it via the deferred inflight.running.Store(false) above.
+		// snapshotJob reads under s.mu so a stale dereference is
+		// impossible after Delete (the field reads return the last-known
+		// values and we never use them past this point).
 		s.mu.RLock()
-		_, stillRegistered := s.jobs[j.ID]
+		cur, stillRegistered := s.jobs[j.ID]
+		paused := stillRegistered && cur.Paused
 		s.mu.RUnlock()
 		if !stillRegistered {
 			slog.Debug("cron: job deleted during jitter window, aborting run",
+				"job_id", j.ID, "run_id", runID)
+			return
+		}
+		if paused {
+			slog.Debug("cron: job paused during jitter window, aborting run",
 				"job_id", j.ID, "run_id", runID)
 			return
 		}

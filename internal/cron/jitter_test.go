@@ -2,6 +2,8 @@ package cron
 
 import (
 	"context"
+	"os"
+	"regexp"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -164,6 +166,37 @@ func TestExecuteOpt_ScheduledTickAppliesJitter_WhenEnabled(t *testing.T) {
 	}
 	if !sawJitter {
 		t.Fatal("10 attempts with 1s jitter window never observed any delay — rng stuck at 0?")
+	}
+}
+
+// TestExecuteOpt_JitterPausedReCheck_SourceAnchor 是 R246-GO-7 的源码锚点：
+// jitter 等待结束后那段 RLock 必须同时读 cur.Paused，不只是
+// stillRegistered。registerJob closure 里的 paused-check 在 jitter *之前*，
+// 无法防住 jitter 窗口内（默认 ≤30s）的 PauseJobByID — 这之后再 spawn /
+// send 就违反了 "Paused job must not run" 不变量。
+//
+// 任何回退（删掉 paused 读 / 删掉 paused 早退分支）都让本测试立刻报错，
+// 而不必依赖端到端的 fake-router 时序构造。
+func TestExecuteOpt_JitterPausedReCheck_SourceAnchor(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("scheduler_run.go")
+	if err != nil {
+		t.Fatalf("read scheduler_run.go: %v", err)
+	}
+	body := string(src)
+
+	// jitter block：applyJitter(...) ... cur, stillRegistered ... cur.Paused
+	// 必须按这个顺序串起来 — 即 jitter 之后那段 RLock 既读 cur 又读 paused。
+	rePausedRead := regexp.MustCompile(`(?s)applyJitter\([^)]*\)[^}]*?cur,\s*stillRegistered\s*:=\s*s\.jobs\[[^]]+\][^}]*?paused\s*:=\s*stillRegistered\s*&&\s*cur\.Paused`)
+	if !rePausedRead.MatchString(body) {
+		t.Error("scheduler_run.go jitter block 不再 re-check cur.Paused (R246-GO-7 防退化失守)")
+	}
+
+	// 还要存在 paused → return 的早退分支。仅读 paused 不 return 不算修复。
+	reEarlyReturn := regexp.MustCompile(`(?s)if\s+paused\s*\{[^}]*?paused during jitter window[^}]*?return`)
+	if !reEarlyReturn.MatchString(body) {
+		t.Error("scheduler_run.go jitter block 缺 paused → return 早退分支 (R246-GO-7)")
 	}
 }
 
