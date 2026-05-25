@@ -138,6 +138,27 @@ type jobSnapshot struct {
 	lastSessionID string
 }
 
+// cronNoticePrefixFmt is the IM-notice prefix template every cron-side
+// deliverNotice call funnels through. Centralising the literal closes
+// R247-CR-5 (REPEAT-3): three execute-path notice strings each carried
+// their own copy of "[Cron %s] …", so the only thing pinning the prefix
+// shape was test fixtures grepping the formatted string. New notice
+// sites should compose via formatCronNotice rather than inline a 4th
+// copy.
+const cronNoticePrefixFmt = "[Cron %s] %s"
+
+// formatCronNotice renders the IM-notice line cron jobs send through
+// deliverNotice. label is the snap.labelOrID() result (job title or
+// fallback ID); body is the human-readable suffix already in the
+// caller's display locale (Chinese for the static error templates,
+// sanitised result text on the success path). Kept as a pure formatter
+// so it can be reused from non-execute code paths (e.g. future manual
+// retry surface) without dragging the deliverNotice / Scheduler
+// dependencies along.
+func formatCronNotice(label, body string) string {
+	return fmt.Sprintf(cronNoticePrefixFmt, label, body)
+}
+
 // labelOrID returns the IM-notice display label: snap.label when populated,
 // jobID otherwise. R233B-CR-5: keeps the "[Cron <X>] …" prefix readable
 // without crashing on Title-empty + Prompt-empty edge cases.
@@ -283,7 +304,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 			errMsg: "work_dir unreachable",
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(args.notifyTo, snap.cronNotice("工作目录不可达，本次执行已跳过。"))
+		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(), "工作目录不可达，本次执行已跳过。"))
 		return noopRefresh, false
 	}
 	s.router.Reset(args.key)
@@ -641,7 +662,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("session error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, snap.cronNotice("执行跳过，请稍后重试。"))
+		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行跳过，请稍后重试。"))
 		stubRefresh()
 		return
 	}
@@ -761,7 +782,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("send error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, snap.cronNotice("执行失败，请稍后重试。"))
+		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行失败，请稍后重试。"))
 		stubRefresh()
 		return
 	}
@@ -799,7 +820,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// 否则未截断 / 未脱敏的 claude 输出会绕过所有保护落到 IM 渠道
 	// （prompt-injection / IM 富文本指令 / 巨量响应耗尽队列）。
 	// finishRun 在持久化路径已做过同样处理，这里复用相同管线。
-	replyText := snap.cronNotice(sanitiseRunResult(result.Text))
+	replyText := formatCronNotice(snap.labelOrID(), sanitiseRunResult(result.Text))
 	s.deliverNotice(notifyTo, replyText)
 }
 
