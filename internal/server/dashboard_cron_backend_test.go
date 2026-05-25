@@ -298,3 +298,121 @@ func TestCronUpdate_RejectsInvalidBackend(t *testing.T) {
 		t.Fatalf("backend after rejected PATCH = %+v, want unchanged 'claude'", listResp.Jobs)
 	}
 }
+
+// TestCronUpdate_RejectsHalfNotifyPatch pins R238-SEC-14: a PATCH that
+// touches ONE notify field but omits the other lands an orphan-target on
+// disk (UpdateJob applies the present pointer in isolation and the missing
+// pointer is interpreted as "leave existing"). Concrete failure: a job with
+// {platform="feishu", chat_id="oc_x"} PATCHed with notify_platform:""
+// alone clears the platform but leaves chat_id behind, silently re-routing
+// notifications to cron.notify_default. Reject the half-PATCH with 422 so
+// the dashboard fails fast instead of persisting the orphan tuple.
+//
+// The platformSet/chatIDSet check below this gate covers the (set, absent)
+// shape; the new "both pointers must be present together" gate covers the
+// (cleared, absent) shape that previously slipped through.
+func TestCronUpdate_RejectsHalfNotifyPatch(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		body     string
+		wantCode int
+	}{
+		// Only notify_platform present (clearing it) — notify_chat_id absent.
+		// Caught by the new pointer-pair gate (422).
+		{"clear_platform_only", `{"notify_platform":""}`, http.StatusUnprocessableEntity},
+		// Only notify_chat_id present (clearing it) — notify_platform absent.
+		// Caught by the new pointer-pair gate (422).
+		{"clear_chat_id_only", `{"notify_chat_id":""}`, http.StatusUnprocessableEntity},
+		// Only notify_platform set — notify_chat_id absent. Caught by the
+		// new pointer-pair gate first (422). Asserting the unified contract:
+		// half-PATCH always rejects regardless of set-vs-clear semantics.
+		{"set_platform_only", `{"notify_platform":"feishu"}`, http.StatusUnprocessableEntity},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := newTestServerWithScheduler(&mockPlatform{})
+
+			// Seed a job that already carries both notify halves so the
+			// PATCH is exercising the "edit one half" hazard, not a fresh
+			// create.
+			createBody := `{"schedule":"@every 5m","prompt":"x","notify":true,"notify_platform":"feishu","notify_chat_id":"oc_seed"}`
+			cw := postCronCreate(t, srv, createBody)
+			if cw.Code != http.StatusOK {
+				t.Fatalf("seed create status = %d; body=%s", cw.Code, cw.Body.String())
+			}
+			var created struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(cw.Body.Bytes(), &created); err != nil {
+				t.Fatalf("decode create: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPatch, "/api/cron?id="+created.ID, bytes.NewReader([]byte(tc.body)))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.mux.ServeHTTP(w, req)
+			if w.Code != tc.wantCode {
+				t.Fatalf("half-PATCH status = %d, want %d; body=%s", w.Code, tc.wantCode, w.Body.String())
+			}
+
+			// Confirm the stored notify halves still match the seed (no
+			// partial write). This is the property the caller cares about
+			// — the wire-level status is incidental, what matters is that
+			// the orphan tuple never reaches disk.
+			listReq := httptest.NewRequest(http.MethodGet, "/api/cron", nil)
+			listW := httptest.NewRecorder()
+			srv.mux.ServeHTTP(listW, listReq)
+			var listResp struct {
+				Jobs []struct {
+					NotifyPlatform string `json:"notify_platform"`
+					NotifyChatID   string `json:"notify_chat_id"`
+				} `json:"jobs"`
+			}
+			if err := json.Unmarshal(listW.Body.Bytes(), &listResp); err != nil {
+				t.Fatalf("decode list: %v", err)
+			}
+			if len(listResp.Jobs) != 1 {
+				t.Fatalf("jobs = %d, want 1", len(listResp.Jobs))
+			}
+			if listResp.Jobs[0].NotifyPlatform != "feishu" || listResp.Jobs[0].NotifyChatID != "oc_seed" {
+				t.Errorf("seed notify pair drifted after rejected PATCH: platform=%q chat_id=%q",
+					listResp.Jobs[0].NotifyPlatform, listResp.Jobs[0].NotifyChatID)
+			}
+		})
+	}
+}
+
+// TestCronUpdate_AcceptsBothNotifyPatch pins the positive companion to
+// TestCronUpdate_RejectsHalfNotifyPatch: a PATCH that sends BOTH notify
+// pointers together must succeed. Without this we'd risk over-tightening
+// the half-PATCH gate into a "no notify edits ever" regression.
+func TestCronUpdate_AcceptsBothNotifyPatch(t *testing.T) {
+	t.Parallel()
+	srv := newTestServerWithScheduler(&mockPlatform{})
+
+	createBody := `{"schedule":"@every 5m","prompt":"x","notify":true,"notify_platform":"feishu","notify_chat_id":"oc_seed"}`
+	cw := postCronCreate(t, srv, createBody)
+	if cw.Code != http.StatusOK {
+		t.Fatalf("seed create status = %d; body=%s", cw.Code, cw.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(cw.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+
+	// Both halves cleared together — the legitimate "fall back to default"
+	// flow. Must accept.
+	patchBody := `{"notify_platform":"","notify_chat_id":""}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/cron?id="+created.ID, bytes.NewReader([]byte(patchBody)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("both-cleared PATCH status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+}
