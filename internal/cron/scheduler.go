@@ -956,29 +956,32 @@ func (s *Scheduler) resetRouterStub(jobID string) {
 // visible without silently demoting them.
 type slogPrintfLogger struct{}
 
-// Recovery markers scanned in robfig/cron-emitted log lines to escalate to
-// slog.Error rather than slog.Warn. Pulled out as named consts (R247-CR-23)
-// so call-site readers see WHAT we look for and WHY in one place — the
-// previous inline `strings.Contains(msg, "panic") || ...` reads as a
-// negative assertion ("if this is a panic line") that obscured the
-// upstream-stability rationale baked into the comment.
+// cronPanicMarker is the substring scanned in robfig/cron-emitted log
+// lines to escalate to slog.Error rather than slog.Warn. Pulled out as a
+// named const (R247-CR-23) so call-site readers see WHAT we look for and
+// WHY in one place — the previous inline `strings.Contains(msg, "panic")`
+// read as a negative assertion ("if this is a panic line") that obscured
+// the upstream-stability rationale baked into the comment.
 //
-// Both markers are matched: robfig/cron's recover chain currently emits
-// recovery messages containing "panic" (chain.go: `cron: panic running
-// job: %v\n%s`). "recovered" is the upstream-stability fallback — if the
-// library renames the message we still surface as Error rather than
-// silently demoting a real fault to Warn. Keep both even when one
-// becomes redundant; the cost is one extra strings.Contains scan per
-// emitted line, dwarfed by Error path's slog overhead.
-const (
-	cronPanicMarker     = "panic"
-	cronRecoveredMarker = "recovered"
-)
+// robfig/cron's Recover wrapper invokes logger.Error(err, "panic",
+// "stack", ...) (chain.go ~line 50); the printfLogger Error formatter
+// renders the msg argument verbatim, so the literal substring "panic"
+// is guaranteed to appear in every recover-emitted line. No other Error
+// path through the library carries this token.
+//
+// R249-CR-24: dropped the historical cronRecoveredMarker = "recovered"
+// fallback. It existed as a forward-compat hedge for a hypothetical
+// upstream rename of the Recover message but never matched real output:
+// robfig/cron 3.0.x emits "panic" only, and a future rename would arrive
+// in a Go module bump where we'd update the marker alongside any other
+// breakage. Single Contains scan is enough — keeping a no-op fallback
+// added a strings.Contains call per emitted line for no observed signal.
+const cronPanicMarker = "panic"
 
 func (slogPrintfLogger) Printf(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	msg = strings.TrimRight(msg, "\n")
-	if strings.Contains(msg, cronPanicMarker) || strings.Contains(msg, cronRecoveredMarker) {
+	if strings.Contains(msg, cronPanicMarker) {
 		slog.Error("cron logger", "msg", msg)
 		return
 	}
