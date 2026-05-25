@@ -721,11 +721,21 @@ func WithStopBudget(d time.Duration) func() {
 // (drained by s.cron.Stop) and any TriggerNow-spawned goroutines before
 // returning, so callers can safely tear down the router afterwards.
 //
-// Shutdown is bounded by stopBudget (30s by default). A stuck cron job
-// (execute() hanging past ctx cancel, e.g. a broken shim ignoring context)
-// or a stuck triggerWG (deliverNotice → platform Reply webhook that refuses
-// to honour its own timeout) cannot hold us past this budget. The final
-// saveJobs runs regardless so a stuck drain does not cost the state file.
+// Shutdown wall-clock is bounded by gcWaitBudget + stopBudget (5s + 30s
+// = 35s default; both are independent timers — gcWG.Wait runs first to
+// completion or timeout, *then* the stopBudget deadline starts for
+// cron.Stop + triggerWG). R247-GO-14: prior godoc only mentioned the 30s
+// stopBudget, which under-stated worst-case Stop() wall-clock by the
+// 5s gc wait when the cold-start GC goroutine is wedged on a stuck
+// filesystem.
+//
+// A stuck cron job (execute() hanging past ctx cancel, e.g. a broken
+// shim ignoring context) or a stuck triggerWG (deliverNotice → platform
+// Reply webhook that refuses to honour its own timeout) cannot hold us
+// past stopBudget. A stuck trimAll cannot hold us past gcWaitBudget. The
+// final saveJobs runs regardless so a stuck drain does not cost the
+// state file. Tests overriding budgets via WithStopBudget /
+// WithGCWaitBudget on the *Scheduler instance see the same composition.
 //
 // CONTRACT: Stop assumes the naozhi process terminates shortly after it
 // returns. When triggerWG.Wait is cut off by the budget, the wrapper
