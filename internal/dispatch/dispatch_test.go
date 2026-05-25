@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -1097,5 +1098,133 @@ func TestBuildHandler_GroupChatGate(t *testing.T) {
 				t.Errorf("messageCount>0 = %v, want %v", got, tt.wantMsgsInc)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// R248-TEST-2 — Capabilities precedence in NewDispatcher
+// ---------------------------------------------------------------------------
+
+// stubCaps is a Capabilities implementation that returns a sentinel error
+// from Send so the precedence test can identify which wiring path the
+// dispatcher resolved without driving a full Send through router/platform.
+type stubCaps struct{ id string }
+
+func (s stubCaps) Send(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []cli.ImageData, _ cli.EventCallback) (*cli.SendResult, error) {
+	return nil, fmt.Errorf("stubCaps:%s", s.id)
+}
+func (stubCaps) Takeover(_ context.Context, _, _ string, _ session.AgentOpts) bool { return false }
+func (stubCaps) ReplyFooter(_ string) string                                       { return "" }
+
+// TestNewDispatcher_CapabilitiesPrecedence pins the three-way precedence
+// resolution in NewDispatcher (capabilities.go / dispatch.go ~line 286):
+//
+//  1. cfg.Capabilities wins when set, even if a legacy *Fn closure is also
+//     provided. The closure is silently shadowed — operators migrating to
+//     Capabilities should not have a stale SendFn quietly take over.
+//  2. Only legacy SendFn (no Capabilities) → constructor wraps in
+//     closureCapabilities so the historical wireup keeps working.
+//  3. Both unset → NoopCapabilities{} (covered by R248-TEST-6 below).
+//
+// The sentinel error pattern is the cheapest way to identify which path
+// won without standing up a full router + session + platform stack: each
+// wiring returns a distinguishing error string when Send fires.
+func TestNewDispatcher_CapabilitiesPrecedence(t *testing.T) {
+	t.Parallel()
+
+	sendFnSentinel := errors.New("legacy-sendfn-fired")
+	legacySendFn := func(_ context.Context, _ string, _ *session.ManagedSession, _ string, _ []cli.ImageData, _ cli.EventCallback) (*cli.SendResult, error) {
+		return nil, sendFnSentinel
+	}
+
+	cases := []struct {
+		name       string
+		cfg        DispatcherConfig
+		wantErrSub string // substring expected from caps.Send
+	}{
+		{
+			name: "only SendFn → closureCapabilities adapter",
+			cfg: DispatcherConfig{
+				Router: session.NewRouter(session.RouterConfig{MaxProcs: 1}),
+				SendFn: legacySendFn,
+			},
+			wantErrSub: "legacy-sendfn-fired",
+		},
+		{
+			name: "only Capabilities → used directly",
+			cfg: DispatcherConfig{
+				Router:       session.NewRouter(session.RouterConfig{MaxProcs: 1}),
+				Capabilities: stubCaps{id: "caps-only"},
+			},
+			wantErrSub: "stubCaps:caps-only",
+		},
+		{
+			name: "both set → Capabilities wins (SendFn shadowed)",
+			cfg: DispatcherConfig{
+				Router:       session.NewRouter(session.RouterConfig{MaxProcs: 1}),
+				Capabilities: stubCaps{id: "caps-wins"},
+				SendFn:       legacySendFn,
+			},
+			wantErrSub: "stubCaps:caps-wins",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := NewDispatcher(tc.cfg)
+			if d.caps == nil {
+				t.Fatal("d.caps is nil — constructor must always install a Capabilities implementation")
+			}
+			_, err := d.caps.Send(context.Background(), "k", nil, "msg", nil, nil)
+			if err == nil {
+				t.Fatalf("d.caps.Send returned nil error, want substring %q", tc.wantErrSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrSub) {
+				t.Errorf("d.caps.Send error = %q, want substring %q (precedence resolved to wrong wiring)",
+					err.Error(), tc.wantErrSub)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// R248-TEST-6 — d.caps invariant: never nil after NewDispatcher
+// ---------------------------------------------------------------------------
+
+// TestNewDispatcher_CapsAlwaysNonNil pins the constructor invariant that
+// d.caps is non-nil for any DispatcherConfig — including the all-zero case.
+// The hot path (dispatch.go) calls d.caps.Send / d.caps.Takeover unconditionally
+// without nil guards; a regression that left d.caps zero on some construction
+// path would surface as a nil-pointer panic on the first IM message instead
+// of a clear constructor-time signal.
+//
+// This test paired with R248-TEST-1 (NoopCapabilities semantics) covers the
+// "no wiring at all" branch end-to-end: Takeover returns false, ReplyFooter
+// returns "" — exactly the documented defaults for the headless construction.
+// Send is intentionally NOT exercised here (it panics by contract; that
+// branch is covered separately by TestNoopCapabilities_SendPanics).
+func TestNewDispatcher_CapsAlwaysNonNil(t *testing.T) {
+	t.Parallel()
+	// AllowMissingSender opts out of the R248-ARCH-2 boot-panic gate; this
+	// test specifically exercises the empty-config path where NoopCapabilities
+	// is installed as the default. Production wiring leaves AllowMissingSender
+	// false so missing Send wireup still panics at constructor time.
+	d := NewDispatcher(DispatcherConfig{AllowMissingSender: true})
+	if d.caps == nil {
+		t.Fatal("d.caps is nil for empty DispatcherConfig — hot path will nil-panic on first message")
+	}
+	if _, ok := d.caps.(NoopCapabilities); !ok {
+		t.Errorf("d.caps type = %T, want dispatch.NoopCapabilities for empty config (no closures, no Capabilities)", d.caps)
+	}
+	if got := d.caps.Takeover(context.Background(), "chat", "key", session.AgentOpts{}); got {
+		t.Errorf("default Takeover = true, want false (NoopCapabilities default)")
+	}
+	if got := d.caps.ReplyFooter(""); got != "" {
+		t.Errorf("default ReplyFooter = %q, want \"\" (NoopCapabilities default)", got)
+	}
+	if got := d.caps.ReplyFooter("claude"); got != "" {
+		t.Errorf("default ReplyFooter(claude) = %q, want \"\" (NoopCapabilities ignores backendID)", got)
 	}
 }
