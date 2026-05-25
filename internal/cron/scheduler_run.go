@@ -35,6 +35,18 @@ import (
 // workflow inspection. R208-OBS1.
 const cronSlowThreshold = 30 * time.Second
 
+// spawnElapsedWarnRatio is the fraction of jobTimeout the spawn phase
+// (router.GetOrCreate) is allowed to consume before we emit the
+// "send budget exceeds job/2" warning + bump CronSendBudgetDoubledTotal.
+//
+// 0.5 chosen because once spawn alone has consumed half the per-run
+// budget, the in-flight wall clock can reach ~2*jobTimeout (spawn +
+// fresh-budget Send), which is the doubling pattern operators of 300s+
+// jobs need a runbook signal for. Lower the ratio (e.g. 0.4) to surface
+// near-doubling earlier; raise (e.g. 0.7) to suppress noise on cold
+// fresh-context runs that legitimately spawn slowly. R247-CR-28.
+const spawnElapsedWarnRatio = 0.5
+
 // executeIfNotDeletedOrPaused looks up the latest *Job pointer under
 // s.mu.RLock and dispatches executeOpt only when the job is still present
 // AND not paused. R233B-CR-3: extracted from TriggerNow's two goroutine
@@ -691,18 +703,24 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), jobTimeout)
 	defer sendCancel()
 	// R240-GO-4: emit an explicit signal when entering sendCtx after the
-	// spawn phase already consumed >50% of jobTimeout. The wall-clock
-	// doubling described above is intentional but historically silent;
-	// operators of 300s+ jobs need a structured event to drive runbook
-	// alerts. Counter + slog pair (mirrors CronExecutionSlowTotal +
-	// "cron execution slow" lower in this same function).
-	if spawnElapsed := time.Since(startedAt); spawnElapsed > jobTimeout/2 {
+	// spawn phase already consumed >spawnElapsedWarnRatio of jobTimeout.
+	// The wall-clock doubling described above is intentional but
+	// historically silent; operators of 300s+ jobs need a structured
+	// event to drive runbook alerts. Counter + slog pair (mirrors
+	// CronExecutionSlowTotal + "cron execution slow" lower in this same
+	// function). R247-CR-28: ratio extracted to a documented const so
+	// future tuning is a one-line change with shared rationale.
+	spawnWarnBudget := time.Duration(float64(jobTimeout) * spawnElapsedWarnRatio)
+	if spawnElapsed := time.Since(startedAt); spawnElapsed > spawnWarnBudget {
 		metrics.CronSendBudgetDoubledTotal.Add(1)
+		// Message string preserved for runbook grep — see docs/ops/pprof.md
+		// + internal/metrics/metrics.go CronSendBudgetDoubledTotal godoc.
 		lg.Warn("cron send budget exceeds job/2",
 			"job_id", snap.jobID,
 			"spawn_elapsed_ms", spawnElapsed.Milliseconds(),
 			"job_timeout_ms", jobTimeout.Milliseconds(),
-			"send_budget_ms", jobTimeout.Milliseconds())
+			"send_budget_ms", jobTimeout.Milliseconds(),
+			"warn_ratio", spawnElapsedWarnRatio)
 	}
 	inflight.setPhase(PhaseSending)
 
