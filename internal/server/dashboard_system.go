@@ -32,12 +32,19 @@ import (
 // a clean 500 rather than the ResponseWriter footgun where Encode has
 // already streamed bytes (header sent, status frozen at 200) before the
 // error path tries to upgrade the response.
+//
+// R246-SEC-3 [BREAKING-LOCAL]: route success bodies through
+// writeJSONBytes so the X-Content-Type-Options / Cache-Control headers
+// match the rest of /api/*.  Without nosniff a legacy browser MIME-
+// sniffing path could re-interpret the JSON as HTML; without
+// no-store a shared proxy would cache another operator's daemon
+// snapshot. The breaking surface is purely additive (extra response
+// headers); same wire body.
 func (s *Server) handleSystemDaemons(w http.ResponseWriter, _ *http.Request) {
 	if s.sysessionMgr == nil {
 		// Empty array preserves the "GET always returns JSON array"
 		// contract for the dashboard polling loop.
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		_, _ = w.Write([]byte("[]"))
+		writeJSONBytes(w, []byte("[]"))
 		return
 	}
 	statuses := s.sysessionMgr.Inspector()
@@ -51,8 +58,7 @@ func (s *Server) handleSystemDaemons(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "encode daemon list", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_, _ = w.Write(buf.Bytes())
+	writeJSONBytes(w, buf.Bytes())
 }
 
 // clearLabelOriginRequest is the POST body for /api/system/labels/clear-origin.
@@ -99,6 +105,10 @@ func (s *Server) handleClearLabelOrigin(w http.ResponseWriter, r *http.Request) 
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_, _ = w.Write([]byte(`{"ok":true}`))
+	// R246-SEC-3 [BREAKING-LOCAL]: writeJSONBytes routes through the same
+	// header set (nosniff + no-store) used by every other /api/* mutation
+	// success path. The body shape `{"ok":true}` differs from writeOK's
+	// `{"status":"ok"}` so we keep the bytes literal here rather than
+	// switching to writeOK, which would change the wire contract.
+	writeJSONBytes(w, []byte(`{"ok":true}`))
 }

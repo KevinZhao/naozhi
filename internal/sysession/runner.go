@@ -119,6 +119,38 @@ func NewRunner(cfg RunnerConfig) (Runner, error) {
 			cfg.BinPath = abs
 		}
 	}
+	// R247-SEC-19 (REPEAT-2 of R245-SEC-15): if cfg.BinPath is now an
+	// absolute path (either operator-supplied or resolved out of the
+	// snapshotted PATH above), Stat the eventual target and reject
+	// anything that isn't a regular file with at least one executable
+	// bit set. Stat (not Lstat) is intentional — a symlinked
+	// /usr/local/bin/claude → /opt/.../claude is the dominant
+	// installation pattern (Homebrew, pkg managers) and refusing it
+	// would break operators on common setups. The TOCTOU window between
+	// this check and Run() exec is the same as exec.LookPath's; this
+	// guard catches the construction-time class (operator points
+	// BinPath at a config dir / dangling link / dir-confused path) so
+	// an obviously misconfigured Runner fails fast with a clear error
+	// rather than degrading at first Tick.
+	//
+	// Relative names left in cfg.BinPath (resolveBinPathFromEnv missed)
+	// fall through without validation — that path is already documented
+	// to "degrade gracefully" via Run's exec.CommandContext and we keep
+	// the same behaviour so a missing or mid-install CLI doesn't fail
+	// naozhi startup.
+	if filepath.IsAbs(cfg.BinPath) {
+		info, err := os.Stat(cfg.BinPath)
+		if err != nil {
+			return nil, fmt.Errorf("sysession: stat BinPath %q: %w", cfg.BinPath, err)
+		}
+		mode := info.Mode()
+		if !mode.IsRegular() {
+			return nil, fmt.Errorf("sysession: BinPath %q is not a regular file (mode=%v)", cfg.BinPath, mode)
+		}
+		if mode.Perm()&0o111 == 0 {
+			return nil, fmt.Errorf("sysession: BinPath %q is not executable (mode=%v)", cfg.BinPath, mode)
+		}
+	}
 	return &runnerImpl{cfg: cfg, env: env}, nil
 }
 

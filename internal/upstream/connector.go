@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -340,6 +341,49 @@ func pingOnce(conn *websocket.Conn, writeMu *sync.Mutex) bool {
 	return true
 }
 
+// marshalResultBufPool reuses bytes.Buffer + json.Encoder pairs so the
+// reflect-based encodeState scratch is not freshly allocated for every
+// reverse-RPC reply. Each handleRequest path (ListSessions / Discover /
+// Preview / EventEntriesSince / Status maps / etc.) calls marshalResult
+// at least once, and a busy primary fans out 5-50 calls/s; pooling the
+// scratch buffer cuts ~1 alloc/call at this rate. R246-PERF-10.
+//
+// Buffers larger than marshalResultMaxRetainBytes are dropped on Put so
+// a one-off megabyte payload (e.g. a large EventEntriesSince response)
+// can't pin retained heap forever for steady-state callers that only
+// ever marshal small status maps.
+var marshalResultBufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
+const marshalResultMaxRetainBytes = 64 * 1024
+
 func marshalResult(v any) (json.RawMessage, error) {
-	return json.Marshal(v)
+	buf := marshalResultBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	enc := json.NewEncoder(buf)
+	// json.Encoder.Encode appends a trailing '\n' the upstream RPC reader
+	// does not expect; trim before returning so the wire format matches
+	// the prior json.Marshal output exactly.
+	if err := enc.Encode(v); err != nil {
+		// On error, drop the buffer (potentially partially-written) so a
+		// poison value cannot leak into the next reuse.
+		marshalResultBufPool.Put(new(bytes.Buffer))
+		return nil, err
+	}
+	out := buf.Bytes()
+	if n := len(out); n > 0 && out[n-1] == '\n' {
+		out = out[:n-1]
+	}
+	// Copy out so the returned RawMessage is decoupled from the pooled
+	// buffer (the next Put would clobber it via Reset).
+	cp := append(json.RawMessage(nil), out...)
+	if buf.Cap() <= marshalResultMaxRetainBytes {
+		marshalResultBufPool.Put(buf)
+	} else {
+		// Drop oversized buffers so a single huge response doesn't pin
+		// retained heap for the lifetime of the pool.
+		marshalResultBufPool.Put(new(bytes.Buffer))
+	}
+	return cp, nil
 }

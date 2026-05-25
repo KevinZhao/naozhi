@@ -892,25 +892,15 @@ func (s *Scheduler) TriggerNow(id string) error {
 // from the user's intent.
 func (s *Scheduler) registerJob(j *Job) error {
 	jobID := j.ID
+	// R247-CR-10: route the scheduled tick through executeIfReadyOpt so the
+	// {RLock → exists/paused → executeOpt} sequence shared with TriggerNow
+	// lives in one place. The closure captures jobID (not *Job) so an
+	// UpdateJob remove+re-add between tick dispatch and re-lock resolves to
+	// the freshest pointer. The "tick fired for job paused concurrently"
+	// race (PauseJobByID's cron.Remove vs robfig mid-dispatch) is honoured
+	// by executeIfReadyOpt's paused branch — same Debug log, same skip.
 	entryID, err := s.cron.AddFunc(j.Schedule, func() {
-		s.mu.RLock()
-		cur, ok := s.jobs[jobID]
-		paused := ok && cur.Paused
-		s.mu.RUnlock()
-		if !ok {
-			slog.Debug("cron: scheduled job no longer registered, skipping", "job_id", jobID)
-			return
-		}
-		// A Pause that lands between cron-tick dispatch and our re-lock should
-		// be honored; otherwise the user sees a paused job still firing once.
-		// PauseJobByID removes the entry via cron.Remove(), so normally this
-		// tick wouldn't fire — but robfig/cron may already be mid-dispatch when
-		// Remove runs, yielding exactly this race.
-		if paused {
-			slog.Debug("cron: tick fired for job paused concurrently, skipping", "job_id", jobID)
-			return
-		}
-		s.executeOpt(cur, false)
+		s.executeIfReadyOpt(jobID, false)
 	})
 	if err != nil {
 		return fmt.Errorf("register cron: %w", err)

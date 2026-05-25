@@ -306,14 +306,14 @@ const defaultExecTimeout = 5 * time.Minute
 // SchedulerConfig.MaxJobsPerChat (zero / unset falls back to this
 // default — no way to "disable" the cap without rebuilding).
 //
-// Relationship to exempt pool (BL2 acknowledged design):
+// Relationship to exempt pool:
 // Every cron job calls session.Router.RegisterCronStubWithChain at scheduler
-// Start / AddJob time and consumes 1 slot from session.maxExemptSessions
-// (currently 20). At DefaultMaxJobsPerChat=10 × 2 busy chats, the exempt
-// pool is fully consumed and planner/scratch exempt sessions may be
-// starved. This is an acknowledged trade-off: a separate
-// maxCronExemptSessions reserve or per-chat fair-share eviction is the
-// escape hatch if pressure materialises.
+// Start / AddJob time and consumes 1 slot from session.maxCronExempt — a
+// dedicated cron-only sub-quota inside the global maxExemptSessions pool
+// (R242-ARCH-2). Planner and sys daemon stubs have their own sub-quotas
+// (maxProjectExempt / maxSysExempt) and can no longer be starved by a
+// noisy cron chat. DefaultMaxJobsPerChat still bounds per-chat usage so
+// one loud group cannot saturate the cron quota by itself.
 const DefaultMaxJobsPerChat = 10
 
 // workDirReachable reports whether workDir exists and resolves to a
@@ -694,7 +694,14 @@ var stopBudget = 30 * time.Second
 // than stopBudget because trimAll's IO is short-lived (ReadDir + N Removes);
 // a wedge here means a stuck filesystem and we'd rather skip the wait than
 // pin systemd TimeoutStopSec.
-var gcWaitBudget = 5 * time.Second
+//
+// R247-CR-18 (R246-CR-012 same-root): kept as const — no test or production
+// site swaps this value, so the package-level mutable var pattern (still
+// applied to stopBudget below for fast shutdown tests) was unwarranted here
+// and only invited racy parallel-test reads. If a future test ever needs to
+// shorten this, prefer threading it through SchedulerConfig.GCWaitBudget so
+// the scoping remains per-instance instead of package-global.
+const gcWaitBudget = 5 * time.Second
 
 // Stop halts the scheduler and saves state. It waits for both scheduled jobs
 // (drained by s.cron.Stop) and any TriggerNow-spawned goroutines before
@@ -837,14 +844,28 @@ func (s *Scheduler) resetRouterStub(jobID string) {
 // visible without silently demoting them.
 type slogPrintfLogger struct{}
 
+// cronPanicMarker / cronRecoveredMarker are the substrings whose presence in
+// a robfig/cron Printf line indicate a recovered-panic event (vs. a generic
+// schedule warning). Named here rather than inlined as string literals so:
+//
+//   - the positive-intent meaning ("this line came from chain.go's Recoverer")
+//     is encoded in the identifier, not the negative scan reading;
+//   - upstream library wording shifts only require updating the const list;
+//   - tests can assert the same vocabulary the matcher uses.
+//
+// "panic" matches the current chain.go:30 "cron: panic running job:" prefix;
+// "recovered" is the stable fallback marker if upstream rewords (e.g. moves
+// to "cron: recovered from panic"). Both are case-sensitive, matching the
+// upstream string literal exactly. R247-CR-23 (R246-CR-016 follow-up).
+const (
+	cronPanicMarker     = "panic"
+	cronRecoveredMarker = "recovered"
+)
+
 func (slogPrintfLogger) Printf(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	msg = strings.TrimRight(msg, "\n")
-	// 同时匹配 "panic" 和 "recovered"：robfig/cron 的 recover chain 把
-	// recovery 消息固定包含 "panic"（chain.go:30 "cron: panic running job:
-	// %v\n%s"），但 upstream 措辞调整时 "recovered" 是更稳定的兜底标记，
-	// 避免静默降级为 Warn 漏报真实故障。
-	if strings.Contains(msg, "panic") || strings.Contains(msg, "recovered") {
+	if strings.Contains(msg, cronPanicMarker) || strings.Contains(msg, cronRecoveredMarker) {
 		slog.Error("cron logger", "msg", msg)
 		return
 	}

@@ -284,10 +284,30 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 // cliAvailable reports whether the CLI binary at path is stat-able. Extracted
 // so handleHealth reads linearly without branching on `err != nil` for a single
 // boolean — cleaner when the rest of the handler is struct initialization.
+//
+// R247-SEC-21: the result is cached per (path) on first call. The CLI binary
+// path is set at process start and is effectively static; running os.Stat on
+// every authenticated /health response (1 Hz × N tabs) gives a token-thief
+// a precise filesystem-syscall oracle on the host's binary layout (timing of
+// hot vs cold dentry cache differs measurably across reachable directories).
+// Caching collapses every subsequent call to a wait-free atomic load and
+// makes the response time independent of host filesystem state. The trade
+// is that a binary install/uninstall after process start no longer flips
+// the bit until restart — acceptable since that path on a managed deploy
+// requires a service restart anyway.
 func cliAvailable(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+	v, _ := cliAvailCache.LoadOrStore(path, sync.OnceValue(func() bool {
+		_, err := os.Stat(path)
+		return err == nil
+	}))
+	return v.(func() bool)()
 }
+
+// cliAvailCache memoises cliAvailable(path) → bool. Keyed by path so a future
+// caller with a different argument doesn't share another path's cached
+// answer; in practice handleHealth always passes router.CLIPath() which is
+// stable for the process lifetime.
+var cliAvailCache sync.Map
 
 // systemInfo returns compact system fingerprint for the workspace info bar.
 // Cached after first call since values are static for the process lifetime.

@@ -10,6 +10,7 @@
 package cron
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -48,43 +49,40 @@ type RunEndedEvent struct {
 	Trigger    TriggerKind
 }
 
-// SetOnExecute registers a callback invoked after each cron job execution.
+// storeCallback is the shared nil-aware setter for the SetOn* family. The
+// atomic.Pointer[T] holders are typed per callback variant so callers retain
+// the typed Load() ergonomics; the pattern that varies is just "nil → clear,
+// non-nil → store address". Centralised here so a future change (e.g. switch
+// to atomic.Value, add metrics on swap, route through DI) lands in one place
+// instead of three.
 //
-// R230-GO-2: the `s.onExecute.Store(&fn)` pattern takes the address of the
-// parameter, which forces fn to escape to heap (1 alloc per call). This is
-// deliberately accepted: SetOn* are only invoked at startup wiring (1 call
-// per scheduler instance per process lifetime), so the per-call allocation
-// is invisible. The alternative — atomic.Value with a wrapper struct, or a
-// dedicated holder struct — would either lose the typed Load() ergonomics
-// callers rely on (Load returns *OnExecuteFunc directly) or balloon the
-// API surface. Document-and-accept rather than pessimize the read path.
-func (s *Scheduler) SetOnExecute(fn OnExecuteFunc) {
-	if fn == nil {
-		s.onExecute.Store(nil)
+// R230-GO-2 alloc tradeoff is unchanged: storing &fn forces fn to escape, but
+// SetOn* are startup-wiring calls (1 per scheduler lifetime), so the per-call
+// allocation is invisible. R247-CR-7 collapses three identical bodies.
+func storeCallback[T any](holder *atomic.Pointer[T], fn T, isNil bool) {
+	if isNil {
+		holder.Store(nil)
 		return
 	}
-	s.onExecute.Store(&fn)
+	holder.Store(&fn)
+}
+
+// SetOnExecute registers a callback invoked after each cron job execution.
+func (s *Scheduler) SetOnExecute(fn OnExecuteFunc) {
+	storeCallback(&s.onExecute, fn, fn == nil)
 }
 
 // SetOnRunStarted registers a callback for the run-started broadcast event.
 // nil disables the broadcast (testing path / no-WS mode).
 func (s *Scheduler) SetOnRunStarted(fn OnRunStartedFunc) {
-	if fn == nil {
-		s.onRunStarted.Store(nil)
-		return
-	}
-	s.onRunStarted.Store(&fn)
+	storeCallback(&s.onRunStarted, fn, fn == nil)
 }
 
 // SetOnRunEnded registers a callback for the run-ended broadcast event.
 // Invoked for every terminal state including skipped/canceled — the
 // callback should distinguish via RunEndedEvent.State.
 func (s *Scheduler) SetOnRunEnded(fn OnRunEndedFunc) {
-	if fn == nil {
-		s.onRunEnded.Store(nil)
-		return
-	}
-	s.onRunEnded.Store(&fn)
+	storeCallback(&s.onRunEnded, fn, fn == nil)
 }
 
 // emitRunStarted invokes the registered server-side hook outside s.mu so

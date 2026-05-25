@@ -43,6 +43,12 @@ var ErrMaxProcs = errors.New("max concurrent processes reached")
 // different retry policies: exempt exhaustion means "too many projects
 // configured" and is roughly permanent until an exempt session exits;
 // ErrMaxProcs means "user sessions full" and clears faster.
+//
+// R242-ARCH-2: this sentinel now also fires when a per-namespace
+// sub-quota (cron / planner / sys) is hit, even if the global pool
+// still has room. Callers Is-checking on this sentinel keep working;
+// the wrapped %d count matches the namespace cap that actually
+// rejected so logs surface which sub-quota is exhausted.
 var ErrMaxExemptSessions = errors.New("max exempt sessions reached")
 
 // ErrNoCLIWrapper is returned when spawnSession is called but the router
@@ -95,6 +101,42 @@ func isExemptKey(key string) bool {
 	return false
 }
 
+// exemptKind classifies an exempt session key into one of three buckets:
+// "cron", "project", "sys", or "" if the key is not exempt. Used by the
+// per-namespace sub-quota gate in spawnSession so a noisy cron chat
+// can't starve planner / sys exempt sessions (R242-ARCH-2). Order
+// matches exemptKeyPrefixes for grep-consistency.
+func exemptKind(key string) string {
+	switch {
+	case strings.HasPrefix(key, CronKeyPrefix):
+		return "cron"
+	case strings.HasPrefix(key, ProjectKeyPrefix):
+		return "project"
+	case strings.HasPrefix(key, SysKeyPrefix):
+		return "sys"
+	default:
+		return ""
+	}
+}
+
+// exemptCapFor returns the sub-quota cap for a given exempt kind. Unknown
+// kinds return maxExemptSessions (the pre-R242-ARCH-2 global cap) so a
+// future exempt namespace added to exemptKeyPrefixes without wiring up
+// a sub-quota still has a defined limit and never reaches a "missing
+// case ⇒ unlimited" state.
+func exemptCapFor(kind string) int {
+	switch kind {
+	case "cron":
+		return maxCronExempt
+	case "project":
+		return maxProjectExempt
+	case "sys":
+		return maxSysExempt
+	default:
+		return maxExemptSessions
+	}
+}
+
 // Router defaults applied by NewRouter when the corresponding RouterConfig
 // field is zero. Exported so other packages (tests, config validation, CLI
 // flag defaults) can reference the single source of truth instead of
@@ -113,21 +155,48 @@ const (
 )
 
 const (
-	// maxExemptSessions caps the number of alive exempt (planner) sessions
-	// to prevent unbounded growth when many projects are configured.
+	// maxExemptSessions caps the total number of alive exempt sessions
+	// (cron stubs + project planners + sys daemon stubs) to prevent
+	// unbounded growth when many projects / cron jobs are configured.
 	//
-	// Shared across all exempt-marked sessions (BL2, known design limit):
-	//   - Cron stubs: each job consumes 1 slot via RegisterCronStub,
-	//     with cron.DefaultMaxJobsPerChat as the per-chat cap (see
-	//     internal/cron/scheduler.go for the current value — kept out
-	//     of this comment so it doesn't drift).
-	//   - Project planners: up to 1 per project.
-	// Scratch drawers are NOT exempt (ScratchPool.Open sets Exempt=false), so
-	// they consume regular session slots, not exempt slots.
-	// At high cron density the pool can be dominated by cron stubs,
-	// squeezing planner slots. Tracked as acknowledged trade-off;
-	// a dedicated maxCronExemptSessions sub-cap is a possible follow-up.
+	// R242-ARCH-2: this used to be the only cap, which let a noisy cron
+	// chat starve project planners (BL2 acknowledged). Per-namespace
+	// sub-quotas below are now the primary limit — the global cap stays
+	// as a belt-and-braces ceiling so a future exempt namespace
+	// (planner / quick session / etc.) added without sub-quota wiring
+	// still has a hard upper bound.
+	//
+	// Sum of sub-quotas should stay ≤ maxExemptSessions so the global
+	// check is the relief valve (never the primary trigger) — see
+	// docs/design/exempt-quotas.md if that ever changes.
 	maxExemptSessions = 20
+
+	// maxCronExempt caps the alive cron-stub exempt sessions. R242-ARCH-2
+	// hard isolation: a noisy chat that configures DefaultMaxJobsPerChat
+	// (10 today) cron jobs can no longer push planner / sys exempt
+	// sessions out of the pool. Sized so the typical "1-2 busy chats ×
+	// few jobs" deployment fits comfortably while leaving room for
+	// planner + sys quotas to coexist.
+	maxCronExempt = 12
+
+	// maxProjectExempt caps the alive project-planner exempt sessions.
+	// One per project is the design contract; this cap doubles as an
+	// implicit ceiling on the active project count for planner-spawn
+	// purposes (the project count itself isn't capped — un-spawned
+	// projects sit dormant).
+	maxProjectExempt = 5
+
+	// maxSysExempt caps the alive sys-daemon exempt sessions. Phase 1
+	// sysession daemons typically don't register stubs (they use a
+	// transient claude -p Runner instead), so this cap is small;
+	// future stub-using daemons can request a bump via a follow-up
+	// review rather than silently consuming the cron quota.
+	//
+	// 12 + 5 + 3 = 20 = maxExemptSessions; sub-quotas fully partition
+	// the global pool. Adding a new exempt namespace MUST shrink an
+	// existing quota or bump maxExemptSessions in tandem, otherwise
+	// the relief-valve check in spawnSession is a soft-fail surprise.
+	maxSysExempt = 3
 
 	// historyLoadConcurrency limits parallel disk I/O goroutines during
 	// startup session history loading.
