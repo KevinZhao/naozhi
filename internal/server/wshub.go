@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/time/rate"
 
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
@@ -282,6 +283,15 @@ type Hub struct {
 	// Hub.Shutdown. See wshub_eventpush_cache.go for the fingerprint /
 	// fan-out contract.
 	historyMarshalCache *historyMarshalCache
+
+	// userSendLimitersMu + userSendLimiters bucket the WS "send" budget by
+	// uploadOwner (cookie-MAC / token-hash / IP fallback) instead of
+	// per-connection so a single user holding N tabs cannot multiply the
+	// burst budget N×. The wsClient.sendLimiter is still the per-conn
+	// floor — both must Allow() before the message is processed.
+	// R244-SEC-P2-3 / #888.
+	userSendLimitersMu sync.Mutex
+	userSendLimiters   map[string]*rate.Limiter
 }
 
 // HubOptions holds configuration for a Hub.
@@ -370,6 +380,9 @@ func NewHub(opts HubOptions) *Hub {
 	h.tailers = newTailerRegistry(h)
 	h.wiredLinkers = make(map[agentlink.AgentLinker]struct{})
 	h.historyMarshalCache = newHistoryMarshalCache()
+	// R244-SEC-P2-3 / #888: per-uploadOwner send-budget map. Initialised
+	// here so allowSendForOwner can lookup-or-create without a sync.Once.
+	h.userSendLimiters = make(map[string]*rate.Limiter)
 	// R239-PERF-6: pre-bind the AfterFunc callback so BroadcastSessionsUpdate
 	// (high-frequency sidebar refresh path) reuses one heap-allocated closure
 	// for the lifetime of the Hub instead of allocating a fresh one per call.
@@ -425,6 +438,39 @@ func (h *Hub) SetUploadStore(s *uploadStore) { h.uploadStore = s }
 // resolve AgentOpts for scratch keys without touching the sidebar-visible
 // router state.
 func (h *Hub) SetScratchPool(p *session.ScratchPool) { h.scratchPool = p }
+
+// allowSendForOwner returns whether the per-user (uploadOwner-keyed) send
+// budget admits another "send" message. The per-connection
+// wsClient.sendLimiter still gates first; this is the per-user ceiling
+// that prevents N tabs from multiplying the 5 sends/s burst by N. Owner
+// = "" (anonymous, no-token mode pre-cookie) skips the per-user gate to
+// keep the legacy single-user path unchanged. Hand-built hubs that
+// bypass NewHub leave userSendLimiters nil; the nil-guard preserves
+// their behaviour. R244-SEC-P2-3 / #888.
+//
+// Budget mirrors the per-conn shape (rate.Every(time.Second), burst=5)
+// so a legitimate single-tab user observes no behavioural change. With
+// N tabs, the per-user bucket caps the aggregate at the same 5 burst /
+// 1 sustained sps regardless of tab count, while the per-conn floor
+// still limits a single rogue tab.
+func (h *Hub) allowSendForOwner(owner string) bool {
+	if h == nil || owner == "" {
+		return true
+	}
+	h.userSendLimitersMu.Lock()
+	if h.userSendLimiters == nil {
+		h.userSendLimitersMu.Unlock()
+		return true
+	}
+	lim, ok := h.userSendLimiters[owner]
+	if !ok {
+		lim = rate.NewLimiter(rate.Every(time.Second), 5)
+		h.userSendLimiters[owner] = lim
+	}
+	h.userSendLimitersMu.Unlock()
+	return lim.Allow()
+}
+
 func (h *Hub) register(c *wsClient) {
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
@@ -617,6 +663,13 @@ func (h *Hub) Shutdown() {
 	if h.historyMarshalCache != nil {
 		h.historyMarshalCache.reset()
 	}
+
+	// R244-SEC-P2-3 / #888: drop the per-uploadOwner limiter map so the
+	// rate.Limiter values can be GC'd after Hub teardown (test harnesses
+	// that build and tear down many Hubs in one process).
+	h.userSendLimitersMu.Lock()
+	h.userSendLimiters = nil
+	h.userSendLimitersMu.Unlock()
 
 	// Barrier: any TrackSend call that observed h.ctx.Err()==nil and was
 	// about to Add(1) is racing us. Holding sendTrackMu here forces it to
