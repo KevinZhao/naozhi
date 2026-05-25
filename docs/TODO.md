@@ -199,7 +199,7 @@
 - [ ] **R247-CR-20 — runs 限额 magic number 推导散落（P3）** [REFACTOR]: `internal/cron/runstore.go:170-187`。方案：集中注释块 + 推导公式。
 - [ ] **R247-CR-22 — maxJobsHardCap=500 等 const 缺 benchmark 引用（P3）** [REFACTOR]: `internal/cron/scheduler.go:283-294`。方案：链到 cron-v2-polish.md。
 - [~] **R247-CR-23 — slogPrintfLogger panic/recovered 字符串扫描负面陈述（P3）** [REPEAT-3]: `internal/cron/scheduler.go:807-815` 与 R246-CR-016 同根因。方案：抽命名常量 + godoc。
-- [ ] **R247-CR-24 — executeIfNotDeletedOrPaused godoc 历史 review 引用（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:38-49`。方案：去 review code 仅留行为说明。
+- [x] **R247-CR-24 — executeIfNotDeletedOrPaused godoc 历史 review 引用（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:38-49`。方案：去 review code 仅留行为说明。 *(已实施：godoc 重写为只留行为契约 + 锁顺序约束，删除历史 review 编号 noise；contract test 锚点（如 CRON3/4）保留。)*
 - [ ] **R247-CR-25 — 历史 review 编号注释累计 40+ 处（P3）** [REFACTOR]: `internal/cron/scheduler_run.go,scheduler.go` 多处。方案：归档时同步删除注释或加 docs/COMMENT_CONVENTIONS.md。
 - [ ] **R247-CR-27 — Append truncate 三字段注释不对称（P3）** [REFACTOR]: `internal/cron/runstore.go:280-339`。方案：抽 shrinkOversizeRun helper。
 - [ ] **R247-CR-29 — TriggerNow 60 行 + 3 goroutine 分支（P3）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:780-833`。方案：合并单 goroutine + 内部 if。注意：trigger_now_wg_done_test.go 的 CRON4 结构契约硬性要求"3 个 go func() + 3 个 defer Done"；要落地本 TODO 必须先调整该 test 表达新契约（"恰好 1 个 go func() 且包含 defer Done"），是 BREAKING-LOCAL 跨 test+impl，不适合 hourly pick。
