@@ -10,7 +10,6 @@ package cron
 // IM webhook before the cron lib could observe the tick as done.
 
 import (
-	"sync"
 	"testing"
 	"time"
 )
@@ -89,31 +88,20 @@ func TestDeliverNotice_ReturnsBeforeNotifyTarget(t *testing.T) {
 	s.triggerWG.Wait()
 }
 
-// TestDeliverNotice_StopBoundsDelivery verifies the async wrapper still
-// honours the Stop() drain contract: a pending goroutine Add'd here must
-// be observed by triggerWG.Wait. We use a custom hook via a fake
-// "platform" implemented entirely through the `p == nil` short-circuit
-// (the goroutine returns fast). The contract test is: many concurrent
-// deliverNotice calls all drain by Wait.
-func TestDeliverNotice_StopBoundsDelivery(t *testing.T) {
+// TestDeliverNotice_BurstAddsCompleteSerially verifies the async wrapper still
+// honours the Stop() drain contract: many serial deliverNotice calls must all
+// be Add'd onto triggerWG and observed by Wait. Calls are issued on the
+// caller goroutine (deliverNotice does its own Add(1) BEFORE `go`) so we
+// avoid racing the test goroutines against triggerWG.Wait — that race is what
+// sync.WaitGroup explicitly disallows (Add concurrent with Wait).
+func TestDeliverNotice_BurstAddsCompleteSerially(t *testing.T) {
 	t.Parallel()
 	s := &Scheduler{}
 	const n = 32
 	target := NotifyTarget{Platform: "no-such-plat", ChatID: "y"}
-	var startWG sync.WaitGroup
-	startWG.Add(n)
 	for i := 0; i < n; i++ {
-		go func() {
-			startWG.Done()
-			s.deliverNotice(target, "burst")
-		}()
+		s.deliverNotice(target, "burst")
 	}
-	startWG.Wait()
-	// Drain must complete promptly (goroutine bodies are nil-platform
-	// short-circuits). If deliverNotice is no longer tracking via
-	// triggerWG, Wait might return immediately — we cannot detect that
-	// case here directly, but a missing Add+Done pair means a leaked
-	// goroutine, which the package-wide goleak (if any) would surface.
 	done := make(chan struct{})
 	go func() {
 		s.triggerWG.Wait()
