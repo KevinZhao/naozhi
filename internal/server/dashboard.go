@@ -525,7 +525,37 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// sandbox 空）都未变化，安全契约保持。
 	// R236-SEC-2: frame-ancestors 'none' 与 X-Frame-Options: DENY 双重防御 clickjacking；
 	// 现代浏览器优先 CSP frame-ancestors，X-Frame-Options 仅作 fallback。
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:; frame-src 'self' blob:; frame-ancestors 'none'")
+	//
+	// R247-SEC-23 [REPEAT-3, ties to R243-SEC-4 / R246-SEC-10]: font-src
+	// `https://cdn.jsdelivr.net` is required because KaTeX's CSS @font-face
+	// rules pull math woff2 files from the same CDN. Subresource Integrity
+	// (SRI) is *not* enforceable on @font-face fonts — neither the CSS
+	// `unicode-range`/`src` syntax nor any CSP directive supports an
+	// integrity hash on font assets, and the once-proposed CSP3
+	// `require-sri-for font` directive was withdrawn before browser
+	// implementation. Defence in depth has three layers today:
+	//   (1) the KaTeX *CSS* itself is loaded with `integrity=sha384-…`
+	//       (dashboard.js loadKatex), so a CDN-substituted stylesheet
+	//       cannot redirect @font-face to attacker-controlled origins;
+	//       a tampered woff2 byte-stream still reaches a font parser
+	//       that runs in a sandbox and cannot execute script;
+	//   (2) Permissions-Policy strips camera/microphone/geolocation/payment
+	//       so a font-parser-RCE in the browser still cannot reach the
+	//       hardware/credential surface most attackers want;
+	//   (3) script-src does NOT include `cdn.jsdelivr.net` for non-SRI
+	//       loads — every CDN script is pinned by integrity in JS.
+	// NEEDS-DESIGN: full mitigation requires `//go:embed` of the ~6 MB
+	// KaTeX woff2 bundle (~30 files spanning Math/Main/Caligraphic/Fraktur
+	// /SansSerif/Script/Size/Typewriter variants × Regular/Bold/Italic
+	// faces) and a CSS rewriter that strips the `https://cdn.jsdelivr.net`
+	// prefix from KaTeX's bundled `katex.min.css`. That work is tracked
+	// for a separate change so this CSP comment stays the authoritative
+	// pointer to "why we still trust jsdelivr for fonts" until it lands.
+	// `require-sri-for font` is included as a no-op forward-compatibility
+	// hook: every shipping browser ignores the directive today, but if
+	// any vendor revives the proposal we get integrity enforcement for
+	// free without another CSP edit.
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:; frame-src 'self' blob:; frame-ancestors 'none'; require-sri-for font")
 	// HSTS is only meaningful over TLS (RFC 6797 §7.2). Sending it on plain
 	// HTTP would still be honoured by browsers and can brick local HTTP
 	// loopback access for a year. Gate on the same isSecure() helper the

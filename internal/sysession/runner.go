@@ -118,6 +118,29 @@ func NewRunner(cfg RunnerConfig) (Runner, error) {
 		if abs, ok := resolveBinPathFromEnv(cfg.BinPath, env); ok {
 			cfg.BinPath = abs
 		}
+	} else {
+		// R247-SEC-19 / R245-SEC-15: when caller supplies an absolute path
+		// or a path containing a separator we skip the PATH walk, but we
+		// still want the regular-file + executable gate
+		// resolveBinPathFromEnv enforces on PATH-resolved hits. Otherwise
+		// Run() can be tricked into spawning a 0644 config file
+		// ("/etc/claude.yaml"), a directory, or a device node when an
+		// operator misconfigures BinPath; exec.CommandContext only fails
+		// at fork-time with a confusing "permission denied".
+		//
+		// We use os.Stat (follows symlinks) on purpose: distro-packaged
+		// `claude` is commonly a symlink chain
+		// (/usr/local/bin/claude → /opt/claude/cli/claude) and rejecting
+		// all symlinks would break production. The terminal target is
+		// what matters; if the chain ends at a regular executable file
+		// the spawn is safe.
+		if info, err := os.Stat(cfg.BinPath); err != nil {
+			return nil, fmt.Errorf("sysession: BinPath %q: %w", cfg.BinPath, err)
+		} else if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("sysession: BinPath %q is not a regular file", cfg.BinPath)
+		} else if info.Mode()&0o111 == 0 {
+			return nil, fmt.Errorf("sysession: BinPath %q is not executable", cfg.BinPath)
+		}
 	}
 	// R247-SEC-19 (REPEAT-2 of R245-SEC-15): if cfg.BinPath is now an
 	// absolute path (either operator-supplied or resolved out of the
