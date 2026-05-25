@@ -1294,20 +1294,17 @@ func (l *EventLog) CloseSubscribers() {
 // deadlock subsequent writers. The defer cost is a handful of ns and not
 // material on the broadcast fan-out path.
 //
-// R247-PERF-13: backing array drawn from entriesPool. Hot callers that
-// consume the slice synchronously (HTTP responses, marshalPooled to
-// websocket frame) may call ReleaseEntriesSlice once done. Callers that
-// retain the slice (channel handoff to another goroutine) skip the release
-// and the array is GC-reclaimed normally.
+// R247-PERF-13 / R246-PERF-16 [REPEAT-3]: Entries() allocates a fresh
+// `[]EventEntry` of up to `maxSize=500` slots (~140KB) on every call, and the
+// dashboard subscribe path on a 500-session deployment hits this in steady
+// state. Callers that re-fetch the whole log on a hot loop (dashboard 1Hz
+// poll, agent_tailer fan-in) should prefer `LastN(n)` with a bounded `n` to
+// keep the working set small, or use `EntriesAppend(dst)` to recycle a
+// caller-owned backing array via sync.Pool. Entries() is retained as the
+// "give me everything" convenience used by tests and one-shot history dumps;
+// the documented expectation is that production hot paths bound their reads.
 func (l *EventLog) Entries() []EventEntry {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	out := getEntriesSlice(l.count)
-	start := (l.head - l.count + l.maxSize) % l.maxSize
-	for i := 0; i < l.count; i++ {
-		out[i] = l.entries[(start+i)%l.maxSize]
-	}
-	return out
+	return l.LastNAppend(nil, 0)
 }
 
 // LastN returns the most recent n entries in chronological order.
@@ -1316,18 +1313,57 @@ func (l *EventLog) Entries() []EventEntry {
 // Uses defer RUnlock; see Entries for rationale. Backing array pooled —
 // see Entries godoc for the lifetime contract.
 func (l *EventLog) LastN(n int) []EventEntry {
+	return l.LastNAppend(nil, n)
+}
+
+// EntriesAppend copies all entries in chronological order into `dst`,
+// reslicing it (and growing the backing array if cap is short). When
+// `dst` already has enough capacity (e.g. retrieved from a sync.Pool
+// of pre-grown buffers), no allocation occurs on the hot path.
+//
+// Pass dst[:0] when reusing a pooled buffer; passing nil is equivalent
+// to Entries() (allocates a fresh slice sized exactly to l.count).
+//
+// R247-PERF-13: callers on the dashboard fan-out path (poll-style
+// refresh on every WS notify) can amortise the per-call ~140KB
+// allocation by holding a sync.Pool of `[]EventEntry` and rotating
+// the slice through this method. Lifetime contract: the returned
+// slice is fully owned by the caller after the call returns; the
+// EventLog never retains a reference. Callers that route the slice
+// onto a channel must NOT recycle it until the consumer signals
+// completion — standard pool-of-slice discipline.
+func (l *EventLog) EntriesAppend(dst []EventEntry) []EventEntry {
+	return l.LastNAppend(dst, 0)
+}
+
+// LastNAppend is the buffer-reusing variant of LastN. See EntriesAppend
+// for the lifetime contract; pass `n<=0` for "all entries" semantics.
+func (l *EventLog) LastNAppend(dst []EventEntry, n int) []EventEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	count := l.count
 	if n > 0 && n < count {
 		count = n
 	}
-	out := getEntriesSlice(count)
+	if cap(dst) >= count {
+		dst = dst[:count]
+	} else {
+		dst = make([]EventEntry, count)
+	}
 	start := (l.head - count + l.maxSize) % l.maxSize
 	for i := 0; i < count; i++ {
-		out[i] = l.entries[(start+i)%l.maxSize]
+		dst[i] = l.entries[(start+i)%l.maxSize]
 	}
-	return out
+	return dst
+}
+
+// Count returns the current number of valid entries (0..maxSize).
+// Useful for sync.Pool-backed callers that want to right-size their
+// scratch buffer before a LastNAppend call.
+func (l *EventLog) Count() int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.count
 }
 
 // EntriesSince returns entries after the given unix ms timestamp, in chronological order.
