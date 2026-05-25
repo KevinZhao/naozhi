@@ -111,12 +111,23 @@ type SendHandler struct {
 // auth-cookie value. The cookie is itself an HMAC hex string so hashing it
 // ensures the owner key does not leak raw MAC material (the old code used a
 // raw 16-char cookie prefix which exposed half of the MAC).
+//
+// R247-SEC-16: sha256[:8] gave 64-bit owner-key entropy — collision-find /
+// preimage feasible at scale (~2^32 keys for 50% collision). Bump to
+// sha256[:16] (128-bit) so the per-owner upload bucket cannot be steered
+// onto another tenant's quota by a chosen-cookie collision attack. The
+// owner key is opaque: only equality-tested against ownerCounts/ownerBytes
+// map keys. Existing in-memory entries from prior process incarnations are
+// invalidated on restart anyway (uploadStore is RAM-only), so widening
+// the key has no migration cost. Mirrors R246-SEC-5 / R247-SEC-24
+// (resume key) and R67-SEC-1 (WS bearer hash) which all carry ≥128-bit
+// material elsewhere in the codebase.
 func ownerKeyFromCookie(cookieValue string) string {
 	if cookieValue == "" {
 		return ""
 	}
 	sum := sha256.Sum256([]byte(cookieValue))
-	return hex.EncodeToString(sum[:8])
+	return hex.EncodeToString(sum[:16])
 }
 
 // uploadOwner derives a stable owner key from auth cookie, Bearer token, or
@@ -130,8 +141,9 @@ func uploadOwner(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, tru
 	}
 	if bearer := r.Header.Get("Authorization"); strings.HasPrefix(bearer, "Bearer ") {
 		if token := strings.TrimPrefix(bearer, "Bearer "); token != "" {
+			// R247-SEC-16: 128-bit (matches ownerKeyFromCookie); see godoc above.
 			sum := sha256.Sum256([]byte(token))
-			return hex.EncodeToString(sum[:8])
+			return hex.EncodeToString(sum[:16])
 		}
 	}
 	if c, err := r.Cookie(anonCookieName); err == nil && c.Value != "" {

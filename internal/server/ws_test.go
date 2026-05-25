@@ -846,9 +846,10 @@ func TestHandleAuth_WSToken_SetsUploadOwner(t *testing.T) {
 	if c.uploadOwner == "" {
 		t.Fatal("uploadOwner is empty — per-owner upload quota cannot be enforced (R67-SEC-1)")
 	}
-	// Exactly hex(sha256("secret")[:8]) — 16 hex chars = 8 bytes.
-	if len(c.uploadOwner) != 16 {
-		t.Errorf("uploadOwner length = %d, want 16 (hex of 8-byte prefix)", len(c.uploadOwner))
+	// R247-SEC-16: hex(sha256("secret")[:16]) — 32 hex chars = 16 bytes
+	// (128-bit, was 64-bit). Parity with HTTP ownerKeyFromCookie.
+	if len(c.uploadOwner) != 32 {
+		t.Errorf("uploadOwner length = %d, want 32 (hex of 16-byte prefix; R247-SEC-16)", len(c.uploadOwner))
 	}
 }
 
