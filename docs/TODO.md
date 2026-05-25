@@ -180,7 +180,7 @@
 - [ ] **R247-PERF-12 — protocol_acp WriteMessage Marshal 无 pool（P2）** [REFACTOR]: `internal/cli/protocol_acp.go:308-356,675-680` ACP turn / permissionResponse 高频。方案：镜像 shimSendBufPool。
 - [x] **R247-PERF-13 — eventlog Entries 全 ring 拷贝 ~140KB/call（P2）** [REPEAT-3]: `internal/cli/eventlog.go:1217-1245` dashboard subscribe 路径。方案：LastN 上限或 sync.Pool slice 复用。 — F1 [REPEAT-3]: 加 EntriesAppend(dst) / LastNAppend(dst,n) / Count() 让 sync.Pool 缓存 backing array；Entries/LastN 退化为 nil-dst 包装。提供 zero-alloc 路径让 dashboard subscribe 可逐步迁移。
 - [ ] **R247-PERF-14 — eventlog Subscribe 每次 alloc subscriber（P2）** [REFACTOR]: `internal/cli/eventlog.go:1141-1166` dashboard 高频 reconnect 形成分配峰。方案：close-once 限制改 broadcast cond。
-- [ ] **R247-PERF-15 — handleList projectList 每次 1Hz 全量 alloc（P2）** [REPEAT-3]: `internal/server/dashboard_session.go:554-572` R230C-PERF-7 已知。方案：atomic.Pointer + projectMgr 版本号失效。
+- [~] **R247-PERF-15 — handleList projectList 每次 1Hz 全量 alloc（P2）** [REPEAT-3]: `internal/server/dashboard_session.go:554-572` R230C-PERF-7 已知。方案：atomic.Pointer + projectMgr 版本号失效。 — F3 in-flight
 - [ ] **R247-PERF-16 — RecentSessions 无 prealloc（P2）** [REFACTOR]: `internal/discovery/recent.go:84-178` 7day×多 project 规模可观。方案：make 估上限。
 - [ ] **R247-PERF-17 — protocol_acp base64.EncodeToString 全 alloc（P2）** [REFACTOR]: `internal/cli/protocol_acp.go:322-339` 多图 turn 浪费。方案：base64.StdEncoding.AppendEncode 写 pre-grown buffer。
 - [ ] **R247-PERF-18 — flattenAssistantEvent make([]T,0,2) 每行（P2）** [REPEAT-2]: `internal/server/dashboard_cron_transcript.go:625-679` 500 行 = 500 alloc。方案：caller-provided scratch slice。
@@ -461,7 +461,7 @@
 - [ ] **R244-SEC-P2-3 — wsclient sendLimiter per-conn 不是 per-user [BREAKING-LOCAL]**: send rate 5/burst 1/s 应用于每连接；同一 user 开 N 连接 burst capacity 倍增。方案：按 uploadOwner 聚合 limiter。Breaking：是。
 - [ ] **R244-SEC-P2-4 — cdn.jsdelivr.net 资源无 SRI 整合度校验 [REPEAT-3]**: KaTeX/Mermaid 动态 script 注入未带 integrity。方案：自托管或动态注入时附 sha256 integrity。
 - [ ] **R244-SEC-P2-5 — Scheduler.SetJobPrompt 不限 prompt 字节上限 [BREAKING-LOCAL]**: dashboard 用户可写多 MB prompt 落盘。方案：加 `len(prompt)>maxCronPromptBytes` guard。Breaking：是。
-- [ ] **R244-SEC-P3-1 — pprof/expvar 端点对认证用户暴露 goroutine 栈包含路径 [REPEAT-3]**: 方案：`debug_mode` flag 控制注册。
+- [~] **R244-SEC-P3-1 — pprof/expvar 端点对认证用户暴露 goroutine 栈包含路径 [REPEAT-3]**: 方案：`debug_mode` flag 控制注册。 — F3 in-flight (close as already implemented in dashboard.go:440 + Server.debugMode)
 - [ ] **R244-SEC-P3-2 — `__public_tmp__` pseudo-project 默认 enabled 暴露全 /tmp [BREAKING-LOCAL]**: 方案：operator opt-in flag。Breaking：是。
 - [~] **R244-SEC-P3-3 — ip_limiter unknownIPKey 共享一桶导致 trustedProxy 配错时全用户共桶 [REPEAT-3]**: 方案：trustedProxy=true 且 X-Forwarded-For 缺失时 400。
 - [~] **R244-SEC-P3-4 — git remote URL 显示 / openExternal 缺 scheme allowlist [REPEAT-3]**: 方案：window.open 前显式 startsWith 校验。
@@ -540,7 +540,7 @@
 - [ ] **R243-PERF-7 [REFACTOR]** `internal/server/static/dashboard.js:12459` `cronTimelineRefreshHead` 每个 `cron_run_ended` WS 全量 sort + innerHTML 重绘；rAF 防抖。
 - [ ] **R243-PERF-8 [REPEAT-19]** `internal/server/static/dashboard.js:11383-11407` `ensureCronRunningTick` 1Hz × `renderCronPanel` 全量重建 cron list；只更新 `cj-when` 文字节点。
 - [ ] **R243-PERF-9 [REPEAT-10]** `internal/cron/runstore.go:657-743` `trimJobLocked` 每次 ReadDir + Sort；`appendTrimBatch` 由 10 提至 50 或 keepCount/4。
-- [ ] **R243-PERF-10 [REFACTOR]** `internal/eventlog/persist/persister.go:853-1004` `flush` stride<=1 路径 `kept` 与 `pendingIdx` 共享底层 array；`AppendBatch` 必须同步消费的不变量需文档化或防御性 copy。
+- [x] **R243-PERF-10 [REFACTOR]** `internal/eventlog/persist/persister.go:853-1004` `flush` stride<=1 路径 `kept` 与 `pendingIdx` 共享底层 array；`AppendBatch` 必须同步消费的不变量需文档化或防御性 copy。 — F1: idx.go::AppendBatch 加 "Slice ownership contract" godoc 显式声明同步消费 + 禁 retain；persister.go::flush stride<=1 aliasing 注释扩展引用契约 + future-change 防御要求。
 - [ ] **R243-PERF-11 [REFACTOR]** `internal/cron/runstore.go:592-612` `readRun` 双 syscall（Lstat + ReadFile），`diskListNewestFirst` 已通过 `e.Info()` 拿过 stat；提供 `readRunNoLstat` 快路径。
 - [ ] **R243-PERF-12 [REPEAT-13]** `internal/server/static/dashboard.js:11694-11735` `cronTimelineHtml` 每次全 200 行重渲；加 identity check + data-run-id key diff。
 - [~] **R243-PERF-13 [REPEAT-8]** `internal/cron/scheduler.go:3035-3082` `redactPathsInCronError` slow-path Builder + SanitizeForLog 双 alloc；sync.Pool 复用 Builder。 — F2 4a3ff2c: add redactBuilderPool with 8 KiB retention cap.
