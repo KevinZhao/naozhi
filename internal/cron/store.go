@@ -155,7 +155,7 @@ func loadJobs(path string) (map[string]*Job, error) {
 		// CronRun.Result and dashboard broadcast. Drop offenders rather
 		// than aborting the whole load — losing a single tampered job is
 		// strictly safer than refusing to start the scheduler.
-		if !utf8.ValidString(j.Prompt) || containsCronC0(j.Prompt) {
+		if !utf8.ValidString(j.Prompt) || containsCronUnsafe(j.Prompt) {
 			slog.Warn("cron store: dropping job with invalid prompt bytes",
 				"path", path, "cron_id", j.ID, "prompt_bytes", len(j.Prompt))
 			continue
@@ -165,12 +165,12 @@ func loadJobs(path string) (map[string]*Job, error) {
 		// hand-editing the JSON could smuggle bidi / control bytes into
 		// dashboard responses and platform notifications via Job.Title or
 		// Job.Backend, so drop offenders here as well.
-		if !utf8.ValidString(j.Title) || containsCronC0(j.Title) {
+		if !utf8.ValidString(j.Title) || containsCronUnsafe(j.Title) {
 			slog.Warn("cron store: dropping job with invalid title bytes",
 				"path", path, "cron_id", j.ID, "title_bytes", len(j.Title))
 			continue
 		}
-		if !utf8.ValidString(j.Backend) || containsCronC0(j.Backend) {
+		if !utf8.ValidString(j.Backend) || containsCronUnsafe(j.Backend) {
 			slog.Warn("cron store: dropping job with invalid backend bytes",
 				"path", path, "cron_id", j.ID, "backend_bytes", len(j.Backend))
 			continue
@@ -186,14 +186,14 @@ func loadJobs(path string) (map[string]*Job, error) {
 		// the per-Job WorkDir budget below — runtime semantics are not
 		// affected because Scheduler.registerJob re-validates the schedule
 		// before adding it to robfig/cron.
-		if len(j.Schedule) > MaxScheduleBytes || !utf8.ValidString(j.Schedule) || containsCronC0(j.Schedule) {
+		if len(j.Schedule) > MaxScheduleBytes || !utf8.ValidString(j.Schedule) || containsCronUnsafe(j.Schedule) {
 			slog.Warn("cron store: dropping job with invalid schedule bytes",
 				"path", path, "cron_id", j.ID, "schedule_bytes", len(j.Schedule))
 			continue
 		}
 		// 4 KiB matches the de-facto Linux PATH_MAX × small slack; longer
 		// values cannot legitimately reach a real filesystem.
-		if len(j.WorkDir) > 4096 || !utf8.ValidString(j.WorkDir) || containsCronC0(j.WorkDir) {
+		if len(j.WorkDir) > 4096 || !utf8.ValidString(j.WorkDir) || containsCronUnsafe(j.WorkDir) {
 			slog.Warn("cron store: dropping job with invalid work_dir bytes",
 				"path", path, "cron_id", j.ID, "work_dir_bytes", len(j.WorkDir))
 			continue
@@ -204,12 +204,12 @@ func loadJobs(path string) (map[string]*Job, error) {
 		// cron_jobs.json could smuggle bidi / control bytes into the dashboard
 		// payload that way. AddJob / dashboard PATCH validate these on the
 		// write path; this is the equivalent guard for the load path.
-		if !utf8.ValidString(j.NotifyChatID) || containsCronC0(j.NotifyChatID) {
+		if !utf8.ValidString(j.NotifyChatID) || containsCronUnsafe(j.NotifyChatID) {
 			slog.Warn("cron store: dropping job with invalid notify_chat_id bytes",
 				"path", path, "cron_id", j.ID, "chat_id_bytes", len(j.NotifyChatID))
 			continue
 		}
-		if !utf8.ValidString(j.NotifyPlatform) || containsCronC0(j.NotifyPlatform) {
+		if !utf8.ValidString(j.NotifyPlatform) || containsCronUnsafe(j.NotifyPlatform) {
 			slog.Warn("cron store: dropping job with invalid notify_platform bytes",
 				"path", path, "cron_id", j.ID, "platform_bytes", len(j.NotifyPlatform))
 			continue
@@ -220,29 +220,30 @@ func loadJobs(path string) (map[string]*Job, error) {
 	return m, nil
 }
 
-// containsCronC0 reports whether s contains any C0 control byte that
-// validateCronPrompt rejects on the IM / dashboard write paths, or any
-// Unicode bidi / line-/paragraph-separator codepoint that would let a
-// hand-edited cron_jobs.json smuggle direction-flipping or line-break
-// characters into IM notifications and dashboard responses.
+// containsCronUnsafe reports whether s contains any byte sequence that the
+// cron field-safety audit rejects: disallowed C0 control bytes, the DEL
+// byte, Unicode bidi overrides, or line-/paragraph-separator codepoints.
+// Together these are the codepoints that validateCronPrompt blocks on the
+// IM / dashboard write paths and that a hand-edited cron_jobs.json could
+// otherwise smuggle into IM notifications and dashboard responses.
 //
 // C0 policy: \t (0x09), \n (0x0A), \r (0x0D) are explicitly allowed;
 // everything else in 0x00-0x1F plus 0x7F (DEL) trips the guard.
 //
-// Bidi policy (R236-SEC-07): U+202A..U+202E (LRE/RLE/PDF/LRO/RLO) and
-// U+2066..U+2069 (LRI/RLI/FSI/PDI) can visually reorder surrounding
-// glyphs in any IM / browser renderer, so a tampered prompt could swap
-// "rm -rf /tmp/safe" into "rm -rf /etc/passwd" at display time without
-// changing the bytes on the wire. U+2028 (LS) and U+2029 (PS) introduce
-// hard line breaks the prompt sanitiser otherwise accepts. All eight
-// codepoints encode as 3-byte UTF-8 sequences in the E2 80 prefix range,
-// so we only decode when the first two bytes match — keeps the common
-// ASCII-only path branchless.
+// Bidi / separator policy (R236-SEC-07): U+202A..U+202E (LRE/RLE/PDF/
+// LRO/RLO) and U+2066..U+2069 (LRI/RLI/FSI/PDI) can visually reorder
+// surrounding glyphs in any IM / browser renderer, so a tampered prompt
+// could swap "rm -rf /tmp/safe" into "rm -rf /etc/passwd" at display
+// time without changing the bytes on the wire. U+2028 (LS) and U+2029
+// (PS) introduce hard line breaks the prompt sanitiser otherwise
+// accepts. All eight codepoints encode as 3-byte UTF-8 sequences in the
+// E2 80 / E2 81 prefix range, so we only decode when the first two
+// bytes match — keeps the common ASCII-only path branchless.
 //
 // Inlined byte scan rather than the textutil regex helper because
 // loadJobs runs once at startup over a small file and importing textutil
 // would pull in regexp init cost on every scheduler boot. R234-SEC-12.
-func containsCronC0(s string) bool {
+func containsCronUnsafe(s string) bool {
 	for i := 0; i < len(s); i++ {
 		b := s[i]
 		if b == '\t' || b == '\n' || b == '\r' {

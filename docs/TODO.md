@@ -147,7 +147,7 @@
 - [ ] **R247-SEC-6 — transcribe ffmpeg 无 wall-clock 上限（P2）** [BREAKING-LOCAL]: `internal/transcribe/convert.go:104` 仅靠外层 ctx；构造 audio 可长时间占 transcribeSemCap=3 槽。方案：argv 加 `-t 600` 解码上限。
 - [x] **R247-SEC-7 — handleConfigPut 缺 per-IP rate limit（P2）** [REFACTOR]: `internal/server/project_api.go:159` 写盘 + WS 广播无频次墙。方案：加 ipLimiter 或 projectMgr.UpdateConfig 5/sec gate。 *(已实施：ProjectHandlers 加 configPutLimiter (5/sec, burst 5, ≈300/min) 字段；handleConfigPut 在所有工作前 AllowRequest 守门，超限返 429 + Retry-After:1。server.go 用 newIPLimiterWithProxy 串 opts.TrustedProxy 与 filesExistsLimiter 同 pattern 接入。tests 手搓 ProjectHandlers 的 nil-safe 路径未变。)*
 - [ ] **R247-SEC-8 — uploadOwner crypto/rand 失败回退 clientIP（P2）** [REPEAT-2]: `internal/server/dashboard_send.go:140-148` 与 R246-SEC-8 同根因不同 site。方案：失败返 503。
-- [~] **R247-SEC-9 — shortPromoteSuffix 32-bit 熵（P2）** [BREAKING-LOCAL]: `internal/server/dashboard_scratch.go:351` birthday-bound ~2^16；与 anonCookie/upload 16 byte 不齐。方案：8 字节（64-bit）。
+- [x] **R247-SEC-9 — shortPromoteSuffix 32-bit 熵（P2）** [BREAKING-LOCAL]: `internal/server/dashboard_scratch.go:351` birthday-bound ~2^16；与 anonCookie/upload 16 byte 不齐。方案：8 字节（64-bit）。 *(已实现：`shortPromoteSuffix` 用 `var buf [8]byte` (8 字节 = 64-bit 熵 = 16 hex char)，与 anonCookie/upload-id 的 short-id 风格统一；godoc 显式记录 BREAKING-LOCAL 影响仅限内部 RenameSession→promoteScratch 路径，无外部 API/持久化格式改动。)*
 - [ ] **R247-SEC-10 — isSensitiveDownloadName 不卡父目录段（P2）** [BREAKING-LOCAL]: `internal/server/project_files.go:1212` `secrets/db.yaml` `.ssh/foo` 不命中 basename。方案：sensitivePathSegments allowlist。
 - [ ] **R247-SEC-11 — parseAttachmentFile 用 declared Content-Type 决定 size cap（P2）** [REPEAT-2]: `internal/server/dashboard_send.go:172` 与 R246-SEC-9 同根因不同 fork；io.ReadAll 在 magic-byte 复核前已 buffer 32MB。方案：magic-byte 优先读 head 决定 cap。
 - [ ] **R247-SEC-12 — eventlog persister MkdirAll 0700 不修复 existing dir mode（P2）** [REFACTOR]: `internal/eventlog/persist/persister.go:202` 攻击者预创建 0755/0777 父目录可绕过 0700 contract。方案：MkdirAll 后 os.Chmod 校正或 Lstat 检查 mode != 0700 拒启。
@@ -190,7 +190,7 @@
 - [x] **R247-PERF-22 — HandleEvent permissionResponse Atoi+Itoa 来回（P3）** [REFACTOR]: `internal/cli/protocol_acp.go:660-666`。方案：直接 json.RawMessage 写。 — 解决 2026-05-24：Atoi 仅用作 validation，原始 ev.RPCRequestID 字符串复用为 RawMessage（已是合法 JSON 数字字面量），省 1 alloc/permission；string-id 路径维持 json.Marshal 以保留 escape 处理。
 - [ ] **R247-PERF-23 — Enqueue 队列满 O(N) memmove（P3）** [REPEAT-2]: `internal/dispatch/msgqueue.go:184-208` MaxDepth=16 拷贝 15。方案：环形 buffer。
 - [ ] **R247-PERF-24 — workDirUnderRoot 每 execute EvalSymlinks（P3）** [REFACTOR]: `internal/cron/scheduler.go:177-189` 长寿命下重复 syscall。方案：TTL 缓存。
-- [~] **R247-PERF-25 — agent_tailer Shutdown 重新 alloc map（P3）** [REFACTOR]: `internal/server/agent_tailer.go:565-578`。方案：clear(r.byTask) (go1.21+)。
+- [x] **R247-PERF-25 — agent_tailer Shutdown 重新 alloc map（P3）** [REFACTOR]: `internal/server/agent_tailer.go:565-578`。方案：clear(r.byTask) (go1.21+)。 *(已实现：tailerRegistry.Shutdown 已用 `clear(r.byTask)` + `clear(r.clientSubs)`，省去重新 alloc 两个 map 的 GC 压力；注释明示 Shutdown 后不再 re-populate，复用 backing slab 安全。)*
 - [~] **R247-PERF-26 — eventlog persister tickFlush 无序 map iter（P3）** [REFACTOR]: `internal/eventlog/persist/persister.go:629-657` 高 N session 抖动。方案：sorted dirty heap。
 
 ### 代码质量（剩余）
@@ -210,7 +210,7 @@
 - [x] **R247-CR-13 — emitOverlapSkipped godoc 引用已归档 review（P2）** [REFACTOR]: `internal/cron/scheduler_finish.go:281-299`。方案：简化 godoc 删历史引用。 — 解决 2026-05-25 (F2)：删 R233B-CR-2 review 编号引用；重组 godoc 先说 trigger 来源（CAS-reject tick / TriggerNow losing gate）再说 dual-event 行为契约 + skipPersist 用途。
 - [ ] **R247-CR-14 — recordResultP0WithSanitised 64 行 P0 命名已无意义（P2）** [REFACTOR]: `internal/cron/scheduler_finish.go:330-394`。方案：改名 recordTerminalResult；rollback 抽 prevSnapshot struct。
 - [ ] **R247-CR-15 — recordResultP0WithSanitised P0 后缀历史 noise（P2）** [REFACTOR]: `internal/cron/scheduler_finish.go:301-329`。方案：与 R247-CR-14 一并改名。
-- [ ] **R247-CR-16 — jobSnapshot struct 字段顺序非最优（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:96-121` 64-bit 平台 padding 浪费 ~8B。方案：size DESC 重排。
+- [x] **R247-CR-16 — jobSnapshot struct 字段顺序非最优（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:96-121` 64-bit 平台 padding 浪费 ~8B。方案：size DESC 重排。 *(已实现：字段按 size DESC 重排，消除 padding；所有 godoc 注释贴回对应字段保留语义。)*
 - [x] **R247-CR-17 — hexIDBytes=8 命名误导（P3）** [REFACTOR]: `internal/cron/job.go:202` godoc 说 "16-char hex"。方案：改名 hexIDEntropyBytes。 — 解决 2026-05-25 (F2)：改名 hexIDBytes → hexIDEntropyBytes 钉死语义到熵源侧；godoc 显式说 "熵字节数（不是字符数）" + "8 字节 → hex.EncodeToString → 16 hex 字符"。仅内部 const，无外部 caller。
 - [~] **R247-CR-18 — gcWaitBudget 包级 mutable var 测试 racy（P3）** [REPEAT-3]: `internal/cron/scheduler.go:655,661` 与 R246-CR-012 同根因。方案：const + WithStopBudget(d) helper。
 - [ ] **R247-CR-19 — marshalJobs atomic.Pointer test seam 通过 init() 装载（P3）** [REFACTOR]: `internal/cron/scheduler_persist.go:32-37` 与 R242-CR-5 同根因。方案：build tag testonly 或字段 DI。
@@ -220,7 +220,7 @@
 - [~] **R247-CR-23 — slogPrintfLogger panic/recovered 字符串扫描负面陈述（P3）** [REPEAT-3]: `internal/cron/scheduler.go:807-815` 与 R246-CR-016 同根因。方案：抽命名常量 + godoc。
 - [ ] **R247-CR-24 — executeIfNotDeletedOrPaused godoc 历史 review 引用（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:38-49`。方案：去 review code 仅留行为说明。
 - [ ] **R247-CR-25 — 历史 review 编号注释累计 40+ 处（P3）** [REFACTOR]: `internal/cron/scheduler_run.go,scheduler.go` 多处。方案：归档时同步删除注释或加 docs/COMMENT_CONVENTIONS.md。
-- [ ] **R247-CR-26 — containsCronC0 函数名误导（P3）** [REFACTOR]: `internal/cron/store.go:241-266` 实际还查 bidi/LS/PS。方案：改名 containsCronUnsafe。
+- [x] **R247-CR-26 — containsCronC0 函数名误导（P3）** [REFACTOR]: `internal/cron/store.go:241-266` 实际还查 bidi/LS/PS。方案：改名 containsCronUnsafe。 *(已实现：函数改名 containsCronC0→containsCronUnsafe，godoc 同步说明检测范围含 C0+bidi+LS/PS；7 个调用点 internal/cron/store.go 全量切换。)*
 - [ ] **R247-CR-27 — Append truncate 三字段注释不对称（P3）** [REFACTOR]: `internal/cron/runstore.go:280-339`。方案：抽 shrinkOversizeRun helper。
 - [x] **R247-CR-28 — spawn budget 警告 magic factor 0.5（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:606-613`。方案：const spawnElapsedWarnRatio + godoc。 — 解决 2026-05-25 (F2)：抽 spawnElapsedWarnRatio = 0.5 const + godoc 解释取值依据；改用 time.Duration(float64(jobTimeout)*ratio) 算 spawnWarnBudget；slog 消息 "cron send budget exceeds job/2" 保留不动（runbook + docs/ops/pprof.md + metrics.go godoc 都按这串 grep），新增 warn_ratio 结构化字段。
 - [ ] **R247-CR-29 — TriggerNow 60 行 + 3 goroutine 分支（P3）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:780-833`。方案：合并单 goroutine + 内部 if。注意：trigger_now_wg_done_test.go 的 CRON4 结构契约硬性要求"3 个 go func() + 3 个 defer Done"；要落地本 TODO 必须先调整该 test 表达新契约（"恰好 1 个 go func() 且包含 defer Done"），是 BREAKING-LOCAL 跨 test+impl，不适合 hourly pick。
