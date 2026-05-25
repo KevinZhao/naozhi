@@ -198,7 +198,7 @@
 - [ ] **R247-CR-19 — marshalJobs atomic.Pointer test seam 通过 init() 装载（P3）** [REFACTOR]: `internal/cron/scheduler_persist.go:32-37` 与 R242-CR-5 同根因。方案：build tag testonly 或字段 DI。
 - [ ] **R247-CR-20 — runs 限额 magic number 推导散落（P3）** [REFACTOR]: `internal/cron/runstore.go:170-187`。方案：集中注释块 + 推导公式。
 - [x] **R247-CR-22 — maxJobsHardCap=500 等 const 缺 benchmark 引用（P3）** [REFACTOR]: `internal/cron/scheduler.go:283-294`。方案：链到 cron-v2-polish.md。 *(已实施：maxJobsHardCap / defaultMaxJobs / defaultExecTimeout / DefaultMaxJobsPerChat 四个 const godoc 末尾加 cron-v2-polish.md RFC 引用。)*
-- [~] **R247-CR-23 — slogPrintfLogger panic/recovered 字符串扫描负面陈述（P3）** [REPEAT-3]: `internal/cron/scheduler.go:807-815` 与 R246-CR-016 同根因。方案：抽命名常量 + godoc。
+- [x] **R247-CR-23 — slogPrintfLogger panic/recovered 字符串扫描负面陈述（P3）** [REPEAT-3]: `internal/cron/scheduler.go:807-815` 与 R246-CR-016 同根因。方案：抽命名常量 + godoc。 *(已实施：scheduler.go:920-947 抽 cronPanicMarker / cronRecoveredMarker 命名 const + godoc 解释为何同时 match 两个 marker（"panic" 是当前 robfig/cron 实际文案，"recovered" 是 upstream-stability fallback）；reviewer 调措辞只需改一处。)*
 - [x] **R247-CR-24 — executeIfNotDeletedOrPaused godoc 历史 review 引用（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:38-49`。方案：去 review code 仅留行为说明。 *(已实施：godoc 重写为只留行为契约 + 锁顺序约束，删除历史 review 编号 noise；contract test 锚点（如 CRON3/4）保留。)*
 - [ ] **R247-CR-25 — 历史 review 编号注释累计 40+ 处（P3）** [REFACTOR]: `internal/cron/scheduler_run.go,scheduler.go` 多处。方案：归档时同步删除注释或加 docs/COMMENT_CONVENTIONS.md。
 - [ ] **R247-CR-27 — Append truncate 三字段注释不对称（P3）** [REFACTOR]: `internal/cron/runstore.go:280-339`。方案：抽 shrinkOversizeRun helper。
@@ -305,7 +305,7 @@
 - [ ] **R246-CR-013 [P2] [REFACTOR] — `internal/cron/scheduler_finish.go:281-299` emitOverlapSkipped 只在 1 处调用且 18 行**: 跨包/跨文件复用并不存在。建议：合并到 executeOpt CAS 失败分支，或加 godoc 明确"future caller will reuse"。
 - [ ] **R246-CR-014 [P3] [REFACTOR] — `internal/cron/scheduler_run.go:165-202` preflightArgs 字段顺序导致 padding**: 8B/120B/16B/8B/32B/16B/24B/16B 混排，64-bit 平台多 8-16 bytes。建议：按 size DESC 重排（snap → notifyTo → startedAt → 16B strings → ptrs）。
 - [x] **R246-CR-015 [P3] [REFACTOR] — `internal/cron/runstore.go:163-188` const 块混排不同语义**: User-configurable defaults 与 Hard limits 混在一组。建议：拆两组并加注释。 *(已实施：const 块拆 user-configurable defaults / hard limits 两组，每组前加分组 godoc 解释可调性差异。)*
-- [ ] **R246-CR-016 [P3] [REFACTOR] — `internal/cron/scheduler.go:801-816` slogPrintfLogger strings.Contains "panic"/"recovered" 字符串扫描脆弱**: robfig/cron v3 PrintfLogger 措辞调整就降级。建议：抽 panicMarker/recoveredMarker 命名常量便于一处改。
+- [x] **R246-CR-016 [P3] [REFACTOR] — `internal/cron/scheduler.go:801-816` slogPrintfLogger strings.Contains "panic"/"recovered" 字符串扫描脆弱**: robfig/cron v3 PrintfLogger 措辞调整就降级。建议：抽 panicMarker/recoveredMarker 命名常量便于一处改。 *(已实施 via R247-CR-23：cronPanicMarker / cronRecoveredMarker 命名 const + godoc 解释 upstream-stability 双 marker 策略，同根因合并跟踪。)*
 - [ ] **R246-CR-017 [P2] [REFACTOR] — `internal/cron/scheduler_run.go:376-390` defer + atomic 组合阅读负担**: 三步顺序约束（reset → Store(false) → metrics.Add(-1)）只有 godoc 防御，无静态检查。建议：抽 helper inflight.releaseRun(metrics.CronRunInflight)。
 - [ ] **R246-CR-018 [P3] [REPEAT-N] — `internal/cron/scheduler_jobs.go:875` findByPrefix O(N) 线性扫**: maxJobsHardCap=500 下可接受，但与 1Hz dashboard 列表 RLock 抢锁。建议：保留实现但改用 RLock 之外读：在 ListAllJobsWithNextRun snapshot map keys 后 unlock 线性扫。
 
