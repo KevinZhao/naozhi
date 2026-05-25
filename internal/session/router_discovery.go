@@ -377,6 +377,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 		r.sessionIDToKey[sessionID] = key
 	}
 	s.lastActive.Store(time.Now().UnixNano())
+	s.initCreatedAtIfUnset()
 	r.attachHistorySource(s)
 	r.sessions[key] = s
 	r.indexAdd(key)
@@ -511,6 +512,7 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 		storeAtomicString(&s.lastPrompt, lastPrompt)
 	}
 	s.lastActive.Store(time.Now().UnixNano())
+	s.initCreatedAtIfUnset()
 	r.attachHistorySource(s)
 	r.sessions[key] = s
 	r.indexAdd(key)

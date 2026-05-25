@@ -680,6 +680,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// Round 49 concurrency finding.
 	var oldPrevIDs []string
 	var oldTotalCost float64
+	var oldCreatedAt int64
 	if old != nil {
 		if len(old.prevSessionIDs) > 0 {
 			oldPrevIDs = make([]string, len(old.prevSessionIDs))
@@ -696,6 +697,11 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		if oldTotalCost == 0 {
 			oldTotalCost = loadTotalCost(&old.totalCost)
 		}
+		// Carry the original creation timestamp across spawn so resume /
+		// reset-and-recreate / takeover paths keep the session in its
+		// established sidebar position. installFreshSessionLocked stamps now
+		// when this is zero (genuinely-new key).
+		oldCreatedAt = old.createdAt.Load()
 	}
 	r.mu.Unlock()
 
@@ -731,7 +737,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 
 	s := r.installFreshSessionLocked(
 		key, proc, workspace, backendID, wrapper, resumeID,
-		oldHistory, prevIDs, oldTotalCost, opts.Exempt,
+		oldHistory, prevIDs, oldTotalCost, oldCreatedAt, opts.Exempt,
 	)
 	r.mu.Unlock()
 
@@ -782,6 +788,7 @@ func (r *Router) installFreshSessionLocked(
 	oldHistory []cli.EventEntry,
 	prevIDs []string,
 	oldTotalCost float64,
+	oldCreatedAt int64,
 	exempt bool,
 ) *ManagedSession {
 	s := &ManagedSession{
@@ -799,6 +806,14 @@ func (r *Router) installFreshSessionLocked(
 		},
 	}
 	storeTotalCost(&s.totalCost, oldTotalCost)
+	// Sidebar order anchor: inherit oldCreatedAt when this spawn replaces a
+	// prior incarnation (resume / ResetAndRecreate / takeover); fall back to
+	// now for genuinely-new keys via initCreatedAtIfUnset.
+	if oldCreatedAt != 0 {
+		s.createdAt.Store(oldCreatedAt)
+	} else {
+		s.initCreatedAtIfUnset()
+	}
 	s.setWorkspace(workspace)
 	s.SetBackend(backendID)
 	s.SetCLIName(wrapper.CLIName)
@@ -1443,6 +1458,15 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		storeAtomicString(&fresh.deathReason, dr)
 	}
 	fresh.lastActive.Store(old.lastActive.Load())
+	// Carry the original creation timestamp so the renamed row keeps its
+	// established sidebar position. Zero-fallback to now would shove the
+	// row to the bottom — surprising for the scratch-promote flow where
+	// the user is preserving an existing conversation.
+	if old.createdAt.Load() != 0 {
+		fresh.createdAt.Store(old.createdAt.Load())
+	} else {
+		fresh.initCreatedAtIfUnset()
+	}
 	// Go through storeAtomicString so each write allocates a fresh *string —
 	// direct `.Store(lp)` would share the underlying pointer with `old` and
 	// diverge from the rest of the codebase's "always helper" convention.

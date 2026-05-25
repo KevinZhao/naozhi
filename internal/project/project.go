@@ -31,6 +31,14 @@ type ProjectConfig struct {
 	GitRemote  string `yaml:"git_remote,omitempty" json:"git_remote,omitempty"`
 	MemoryFile string `yaml:"memory_file,omitempty" json:"memory_file,omitempty"`
 
+	// CreatedAt anchors a project's sidebar order: the dashboard sorts
+	// projects by this value ascending so newly-added folders always land at
+	// the bottom of their tier (favorite / regular / fallback). unix ms.
+	// On first scan after upgrade, manager.Scan synthesises the value using
+	// the directory name's lexical rank (so existing layouts keep their
+	// relative order) and persists it back so subsequent boots are stable.
+	CreatedAt int64 `yaml:"created_at,omitempty" json:"created_at,omitempty"`
+
 	PlannerModel  string `yaml:"planner_model,omitempty" json:"planner_model,omitempty"`
 	PlannerPrompt string `yaml:"planner_prompt,omitempty" json:"planner_prompt,omitempty"`
 

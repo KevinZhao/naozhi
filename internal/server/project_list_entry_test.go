@@ -26,20 +26,21 @@ func TestProjectListEntry_JSONShape(t *testing.T) {
 			entry: projectListEntry{
 				Name: "work", Path: "/home/u/work", Node: "local",
 				Favorite: true, GitRemoteURL: "https://github.com/o/r", GitHub: true,
+				CreatedAt: 1714000000000,
 			},
-			wantHas: []string{`"name":"work"`, `"path":"/home/u/work"`, `"node":"local"`, `"favorite":true`, `"git_remote_url":"https://github.com/o/r"`, `"github":true`},
+			wantHas: []string{`"name":"work"`, `"path":"/home/u/work"`, `"node":"local"`, `"favorite":true`, `"git_remote_url":"https://github.com/o/r"`, `"github":true`, `"created_at":1714000000000`},
 		},
 		{
-			name:     "minimal entry (favorite/github false, no remote URL)",
+			name:     "minimal entry (favorite/github false, no remote URL, unstamped)",
 			entry:    projectListEntry{Name: "n", Path: "/p", Node: "remote-1"},
 			wantHas:  []string{`"name":"n"`, `"path":"/p"`, `"node":"remote-1"`},
-			wantMiss: []string{`"favorite"`, `"git_remote_url"`, `"github"`},
+			wantMiss: []string{`"favorite"`, `"git_remote_url"`, `"github"`, `"created_at"`},
 		},
 		{
 			name:     "remote entry without favorite but with git URL",
 			entry:    projectListEntry{Name: "r", Path: "/x", Node: "node2", GitRemoteURL: "git@github.com:o/r.git"},
 			wantHas:  []string{`"git_remote_url":"git@github.com:o/r.git"`},
-			wantMiss: []string{`"favorite"`, `"github"`},
+			wantMiss: []string{`"favorite"`, `"github"`, `"created_at"`},
 		},
 	}
 	for _, tc := range cases {

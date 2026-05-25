@@ -311,6 +311,8 @@ func TestAll_Sorted(t *testing.T) {
 	m, _ := NewManager(root, PlannerDefaults{})
 	m.Scan()
 
+	// First-scan migration stamps CreatedAt in lexical-name order so the
+	// upgrade boot keeps the previous "All() sorted by name" output verbatim.
 	all := m.All()
 	if len(all) != 3 {
 		t.Fatalf("All() = %d, want 3", len(all))
@@ -320,6 +322,83 @@ func TestAll_Sorted(t *testing.T) {
 	for i := range want {
 		if names[i] != want[i] {
 			t.Errorf("All()[%d].Name = %q, want %q", i, names[i], want[i])
+		}
+	}
+}
+
+// TestScan_StampsCreatedAtOnFirstScan locks the migration contract: a freshly
+// scanned project tree without any CreatedAt values gets monotonically
+// increasing timestamps in lexical order, persisted back to project.yaml so
+// subsequent boots are idempotent (no reshuffling).
+func TestScan_StampsCreatedAtOnFirstScan(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	for _, name := range []string{"zeta", "alpha", "mu"} {
+		makeProjectDir(t, root, name, nil)
+	}
+	m, _ := NewManager(root, PlannerDefaults{})
+	if err := m.Scan(); err != nil {
+		t.Fatalf("first Scan: %v", err)
+	}
+
+	// In-memory: ascending CreatedAt, ordered by name.
+	all := m.All()
+	if len(all) != 3 {
+		t.Fatalf("All() = %d, want 3", len(all))
+	}
+	for i, want := range []string{"alpha", "mu", "zeta"} {
+		if all[i].Name != want {
+			t.Errorf("All()[%d].Name = %q, want %q", i, all[i].Name, want)
+		}
+		if all[i].Config.CreatedAt == 0 {
+			t.Errorf("All()[%d] CreatedAt = 0, want non-zero post-scan", i)
+		}
+	}
+	if !(all[0].Config.CreatedAt < all[1].Config.CreatedAt &&
+		all[1].Config.CreatedAt < all[2].Config.CreatedAt) {
+		t.Errorf("CreatedAt not strictly ascending: %d %d %d",
+			all[0].Config.CreatedAt, all[1].Config.CreatedAt, all[2].Config.CreatedAt)
+	}
+
+	// On-disk: subsequent Scan reads stamped values rather than restamping.
+	first := []int64{all[0].Config.CreatedAt, all[1].Config.CreatedAt, all[2].Config.CreatedAt}
+	m2, _ := NewManager(root, PlannerDefaults{})
+	if err := m2.Scan(); err != nil {
+		t.Fatalf("second Scan: %v", err)
+	}
+	all2 := m2.All()
+	for i, want := range first {
+		if all2[i].Config.CreatedAt != want {
+			t.Errorf("second Scan reshuffled CreatedAt[%d]: got %d want %d",
+				i, all2[i].Config.CreatedAt, want)
+		}
+	}
+}
+
+// TestAll_OrderedByCreatedAt locks the comparator: existing CreatedAt values
+// drive sidebar order regardless of name. New folders added later (with a
+// larger CreatedAt) land at the bottom even when their name sorts earlier
+// alphabetically.
+func TestAll_OrderedByCreatedAt(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// Pre-stamp three projects with explicit timestamps; "alpha" is added
+	// LAST chronologically to prove the comparator ignores the name.
+	makeProjectDir(t, root, "older", &ProjectConfig{CreatedAt: 100})
+	makeProjectDir(t, root, "middle", &ProjectConfig{CreatedAt: 200})
+	makeProjectDir(t, root, "alpha", &ProjectConfig{CreatedAt: 300})
+	m, _ := NewManager(root, PlannerDefaults{})
+	if err := m.Scan(); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	all := m.All()
+	if len(all) != 3 {
+		t.Fatalf("All() = %d, want 3", len(all))
+	}
+	for i, want := range []string{"older", "middle", "alpha"} {
+		if all[i].Name != want {
+			t.Errorf("All()[%d].Name = %q, want %q (creation-order driven)",
+				i, all[i].Name, want)
 		}
 	}
 }

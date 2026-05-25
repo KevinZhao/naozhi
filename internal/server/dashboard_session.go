@@ -222,6 +222,10 @@ type projectListEntry struct {
 	Favorite     bool   `json:"favorite,omitempty"`
 	GitRemoteURL string `json:"git_remote_url,omitempty"`
 	GitHub       bool   `json:"github,omitempty"`
+	// CreatedAt anchors the project's sidebar order: the dashboard sorts
+	// projects by this value ascending so newly-added folders always land at
+	// the bottom of their tier. unix ms.
+	CreatedAt int64 `json:"created_at,omitempty"`
 }
 
 // isUnknownRPCMethodErr reports whether a remote-proxy error came from the
@@ -607,6 +611,14 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 				}
 				if v, ok := item["github"].(bool); ok {
 					entry.GitHub = v
+				}
+				// JSON numbers decode as float64 from map[string]any. Pull
+				// remote-node CreatedAt the same way; pre-feature peers won't
+				// emit the key, so the zero-value fallback keeps their
+				// projects at the very top of the sidebar (oldest by
+				// definition) until they upgrade and self-stamp.
+				if v, ok := item["created_at"].(float64); ok {
+					entry.CreatedAt = int64(v)
 				}
 				projectList = append(projectList, entry)
 			}
@@ -1255,10 +1267,11 @@ func (h *SessionHandlers) projectListLocalAt(now time.Time) []projectListEntry {
 	entries := make([]projectListEntry, 0, len(projects))
 	for _, p := range projects {
 		entries = append(entries, projectListEntry{
-			Name:     p.Name,
-			Path:     p.Path,
-			Node:     "local",
-			Favorite: p.Config.Favorite,
+			Name:      p.Name,
+			Path:      p.Path,
+			Node:      "local",
+			Favorite:  p.Config.Favorite,
+			CreatedAt: p.Config.CreatedAt,
 			// Strip embedded userinfo (PAT) before handing the URL to any
 			// dashboard client. Round 46 redacted /api/projects but missed
 			// this path — /api/sessions is polled every few seconds, so

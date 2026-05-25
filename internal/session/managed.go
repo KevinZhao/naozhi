@@ -197,6 +197,13 @@ type ManagedSession struct {
 	// between Send() (under sendMu) and Cleanup/evictOldest (under r.mu).
 	lastActive atomic.Int64
 
+	// createdAt anchors the session's sidebar position. Set once at construction
+	// (or carried over via Rename) and never touched again, so neither activity
+	// nor process state changes shift the row. Persisted via storeEntry; on
+	// load, missing values fall back to LastActive so older sessions retain
+	// their relative order across the upgrade.
+	createdAt atomic.Int64
+
 	// lastPrompt caches the most recent user message summary (atomic for lock-free Snapshot reads).
 	lastPrompt atomic.Pointer[string]
 
@@ -775,6 +782,26 @@ func (s *ManagedSession) touchLastActive() {
 	s.lastActive.Store(time.Now().UnixNano())
 }
 
+// initCreatedAtIfUnset stamps createdAt to now when it has not been set yet.
+// Idempotent: a non-zero value is left alone, so Rename / loadStore paths that
+// preload the original creation timestamp keep sidebar order stable.
+func (s *ManagedSession) initCreatedAtIfUnset() {
+	if s.createdAt.Load() == 0 {
+		s.createdAt.Store(time.Now().UnixNano())
+	}
+}
+
+// createdAtMillis returns the createdAt instant in unix milliseconds for the
+// dashboard payload. Zero stays zero so the JSON omitempty check fires for
+// sessions that somehow never received a stamp.
+func (s *ManagedSession) createdAtMillis() int64 {
+	v := s.createdAt.Load()
+	if v == 0 {
+		return 0
+	}
+	return v / int64(time.Millisecond)
+}
+
 // SendPassthrough is the concurrent-capable Send for passthrough mode.
 // Unlike Send, it does NOT serialise the entire turn under sendMu — the
 // CLI's internal commandQueue plus the Process-level sendSlot FIFO
@@ -1144,8 +1171,13 @@ type SessionSnapshot struct {
 	//     docs/TODO.md. Until that lands, dashboards consuming Snapshot
 	//     for ACP backends should expect the configured value, not the
 	//     in-effect runtime model. R225-CR-8.
-	Model        string  `json:"model,omitempty"`
-	LastActive   int64   `json:"last_active"` // unix ms
+	Model      string `json:"model,omitempty"`
+	LastActive int64  `json:"last_active"` // unix ms
+	// CreatedAt anchors sidebar order: the dashboard sorts sessions by this
+	// value ascending so newly-created rows always land at the bottom and
+	// existing rows never shift on activity. unix ms, 0 only if the loadStore
+	// fallback couldn't infer one (treated as "very old" by the comparator).
+	CreatedAt    int64   `json:"created_at,omitempty"`
 	TotalCost    float64 `json:"total_cost"`
 	Workspace    string  `json:"workspace,omitempty"`
 	DeathReason  string  `json:"death_reason,omitempty"`
@@ -1248,6 +1280,7 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		Agent:       s.keyAgentID,
 		SessionID:   s.getSessionID(),
 		LastActive:  s.LastActive().UnixMilli(),
+		CreatedAt:   s.createdAtMillis(),
 		Workspace:   s.Workspace(),
 		Backend:     s.Backend(),
 		CLIName:     s.CLIName(),
