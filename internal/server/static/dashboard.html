@@ -712,6 +712,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .md-ul li{margin:2px 0;line-height:1.6}
 .md-ol{margin:6px 0 6px 16px;padding:0;list-style:decimal}
 .md-ol li{margin:2px 0;line-height:1.6}
+.md-ul>li>.md-ul,.md-ul>li>.md-ol,.md-ol>li>.md-ul,.md-ol>li>.md-ol{margin:2px 0 2px 16px}
+.md-ul>li>.md-ul,.md-ol>li>.md-ul{list-style:circle}
+.md-ul>li>.md-ul>li>.md-ul,.md-ol>li>.md-ul>li>.md-ul,.md-ul>li>.md-ol>li>.md-ul,.md-ol>li>.md-ol>li>.md-ul{list-style:square}
 .md-link{color:var(--nz-accent);text-decoration:none}
 .md-link:hover{text-decoration:underline}
 .md-table-wrap{overflow-x:auto;max-width:100%;margin:8px 0}
@@ -1378,6 +1381,7 @@ body.kbd-open .input-hints{display:none}
 .crs-text.md p{margin-bottom:6px}
 .crs-text.md p:last-child{margin-bottom:0}
 .crs-text.md ul,.crs-text.md ol{margin:6px 0 6px 22px}
+.crs-text.md ul ul,.crs-text.md ul ol,.crs-text.md ol ul,.crs-text.md ol ol{margin:2px 0 2px 16px}
 .crs-text.md code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;background:var(--nz-bg-1);border:1px solid var(--nz-border);padding:0 5px;border-radius:3px}
 .crs-tool-card{border:1px solid var(--nz-border);border-radius:6px;background:var(--nz-bg-1);overflow:hidden}
 .crs-tool-card.err{border-color:rgba(248,81,73,.4)}
