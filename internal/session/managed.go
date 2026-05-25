@@ -125,6 +125,11 @@ type processIface interface {
 	EventEntriesSince(afterMS int64) []cli.EventEntry
 	EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry
 	LastActivitySummary() string
+	// LastResponseSummary returns the summary of the most recent assistant
+	// "text" entry the process's EventLog has seen. Used by Snapshot to feed
+	// SessionSnapshot.LastResponse for the sidebar 30-rune dim preview line
+	// (R110-P1). Empty until at least one assistant text block has streamed.
+	LastResponseSummary() string
 	// LastEventAt returns the wall-clock time of the most recent live event
 	// appended to the process's EventLog, or zero Time when nothing has
 	// arrived yet. Router.Cleanup uses it as a fallback activity signal so
@@ -209,6 +214,14 @@ type ManagedSession struct {
 
 	// lastActivity caches the most recent tool_use/thinking summary.
 	lastActivity atomic.Pointer[string]
+
+	// lastResponse caches the most recent assistant text summary so the
+	// sidebar can render a 30-rune dim preview line under the prompt
+	// (R110-P1). Mirrors lastPrompt's lock-free Snapshot read pattern.
+	// Live updates flow from proc.LastResponseSummary; the cache exists for
+	// dead/suspended sessions whose process is gone (parallels lastPrompt's
+	// extractLastPromptFromProcess seeding path).
+	lastResponse atomic.Pointer[string]
 
 	// Cached key parts, parsed once via keyOnce. Key is immutable.
 	keyOnce     sync.Once
@@ -1186,8 +1199,14 @@ type SessionSnapshot struct {
 	Node         string  `json:"node,omitempty"`
 	LastPrompt   string  `json:"last_prompt,omitempty"`   // most recent user message
 	LastActivity string  `json:"last_activity,omitempty"` // most recent tool/thinking status
-	Summary      string  `json:"summary,omitempty"`       // Claude-generated session title
-	UserLabel    string  `json:"user_label,omitempty"`    // operator-set override for sidebar/header title
+	// LastResponse is the truncated summary of the most recent assistant
+	// text reply, used by the dashboard sidebar's 30-rune dim second-line
+	// preview (R110-P1). Sourced from proc.LastResponseSummary when a live
+	// process is attached; falls back to s.lastResponse atomic cache for
+	// suspended/dead sessions, mirroring LastPrompt's resolution path.
+	LastResponse string `json:"last_response,omitempty"`
+	Summary      string `json:"summary,omitempty"`    // Claude-generated session title
+	UserLabel    string `json:"user_label,omitempty"` // operator-set override for sidebar/header title
 	// LabelOrigin records who set UserLabel: "" / "user" (human) or "auto"
 	// (sysession daemon). Frontend uses this to show a small bot icon on
 	// auto-labeled sessions and to enable the "restore auto naming"
@@ -1344,6 +1363,11 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		// event) so we don't need a wrapper closure around Send just to track
 		// lastActivity.
 		snap.LastActivity = proc.LastActivitySummary()
+		// R110-P1: live process is the authoritative source for the most-recent
+		// assistant text reply. Empty when no text block has streamed yet
+		// (post-spawn pre-result window); the s.lastResponse fallback below
+		// covers the post-restart / pre-replay case via scanLastSummaries seed.
+		snap.LastResponse = proc.LastResponseSummary()
 		// MessageCount is the cumulative user turn count observed by the
 		// current Process since its last spawn. proc==nil branch leaves the
 		// field at zero so UI code can gate visibility on `> 0` and skip the
@@ -1391,6 +1415,15 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 	if snap.LastActivity == "" {
 		if la := loadAtomicString(&s.lastActivity); la != "" {
 			snap.LastActivity = la
+		}
+	}
+	// R110-P1: only fall back to the cached lastResponse when the live process
+	// hasn't yet reported one. Mirrors the LastPrompt/LastActivity priority
+	// (live wins, cache survives restart). Empty cache + empty live leaves the
+	// field unset → JSON omitempty hides the dim line on brand-new sessions.
+	if snap.LastResponse == "" {
+		if lr := loadAtomicString(&s.lastResponse); lr != "" {
+			snap.LastResponse = lr
 		}
 	}
 
@@ -1711,7 +1744,7 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	// it out of historyMu lets concurrent readers (EventEntries / EventEntriesSince
 	// / EventEntriesBefore) proceed during 500-entry JSONL replays at startup.
 	// R61-PERF-9.
-	prompt, activity := scanLastSummaries(entries)
+	prompt, activity, response := scanLastSummaries(entries)
 
 	// Mutate persistedHistory AND read s.process under the same historyMu
 	// hold so a concurrent attachProcessAndSnapshotPersisted (also serialised
@@ -1787,32 +1820,49 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	if activity != "" && loadAtomicString(&s.lastActivity) == "" {
 		storeAtomicString(&s.lastActivity, activity)
 	}
+	// R110-P1: seed lastResponse alongside lastPrompt/lastActivity. Same
+	// "only set if empty" guard so a concurrent live Send that already
+	// stamped a fresher response doesn't get clobbered by historical replay.
+	if response != "" && loadAtomicString(&s.lastResponse) == "" {
+		storeAtomicString(&s.lastResponse, response)
+	}
 }
 
 // extractLastPromptFromProcess scans the attached process's event log to populate
-// lastPrompt and lastActivity when they haven't been set yet (e.g. after shim reconnect
-// where events were injected directly into the process, bypassing InjectHistory).
+// lastPrompt, lastActivity, and lastResponse when they haven't been set yet
+// (e.g. after shim reconnect where events were injected directly into the
+// process, bypassing InjectHistory).
 func (s *ManagedSession) extractLastPromptFromProcess() {
-	if loadAtomicString(&s.lastPrompt) != "" && loadAtomicString(&s.lastActivity) != "" {
+	if loadAtomicString(&s.lastPrompt) != "" &&
+		loadAtomicString(&s.lastActivity) != "" &&
+		loadAtomicString(&s.lastResponse) != "" {
 		return
 	}
 	p := s.loadProcess()
 	if p == nil {
 		return
 	}
-	prompt, activity := scanLastSummaries(p.EventEntries())
+	prompt, activity, response := scanLastSummaries(p.EventEntries())
 	if prompt != "" && loadAtomicString(&s.lastPrompt) == "" {
 		storeAtomicString(&s.lastPrompt, prompt)
 	}
 	if activity != "" && loadAtomicString(&s.lastActivity) == "" {
 		storeAtomicString(&s.lastActivity, activity)
 	}
+	if response != "" && loadAtomicString(&s.lastResponse) == "" {
+		storeAtomicString(&s.lastResponse, response)
+	}
 }
 
 // scanLastSummaries walks entries in reverse, returning the most-recent
-// user-prompt summary and the most-recent activity summary. Stops early once
-// both are found. Used by InjectHistory and extractLastPromptFromProcess.
-func scanLastSummaries(entries []cli.EventEntry) (prompt, activity string) {
+// user-prompt summary, activity summary, and assistant response summary.
+// Stops early once all three are found. Used by InjectHistory and
+// extractLastPromptFromProcess to seed the atomic caches after replay.
+//
+// R110-P1: response capture extends the existing prompt/activity scan so
+// suspended/dead sessions still surface a sidebar second-line preview after
+// shim reconnect (which replays history into a fresh EventLog).
+func scanLastSummaries(entries []cli.EventEntry) (prompt, activity, response string) {
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
 		if prompt == "" && e.Type == "user" {
@@ -1821,11 +1871,14 @@ func scanLastSummaries(entries []cli.EventEntry) (prompt, activity string) {
 		if activity == "" && cli.IsActivityType(e.Type) {
 			activity = e.Summary
 		}
-		if prompt != "" && activity != "" {
+		if response == "" && e.Type == "text" {
+			response = e.Summary
+		}
+		if prompt != "" && activity != "" && response != "" {
 			break
 		}
 	}
-	return prompt, activity
+	return prompt, activity, response
 }
 
 // costUnitForBackend returns the SessionSnapshot.CostUnit value for a given

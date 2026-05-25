@@ -206,6 +206,13 @@ func (p *Process) LastActivitySummary() string {
 	return p.eventLog.LastActivitySummary()
 }
 
+// LastResponseSummary returns the summary of the most recent assistant "text"
+// entry, as maintained atomically by EventLog.Append. Used by the dashboard
+// sidebar's R110-P1 30-rune second-line preview.
+func (p *Process) LastResponseSummary() string {
+	return p.eventLog.LastResponseSummary()
+}
+
 // LastEventAt returns the wall-clock time of the most recent live event
 // observed by this process's EventLog. Zero Time means no live event has
 // landed yet. Consumed by Router.Cleanup to treat a long-running turn

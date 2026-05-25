@@ -277,6 +277,7 @@ async function fetchSessions() {
             workspace: sessionWorkspaces[key],
             last_active: 0,
             last_prompt: '',
+            last_response: '',
             node: sessionNodes[key] || 'local',
             project: matchProject(sessionWorkspaces[key]),
             backend: pendingBackend,
@@ -1362,6 +1363,19 @@ function sessionCardHtml(s) {
     typeTag +
     agentBadge;
 
+  // R110-P1: dim 30-rune preview of last assistant text reply. Skipped when
+  // empty (omitempty hides it for brand-new sessions / runs that have not
+  // produced an assistant text block yet — tool-only turns intentionally
+  // leave the slot blank rather than echoing the prompt). Server already
+  // truncates to 120 runes via textutil.TruncateRunes in
+  // EventEntriesFromEventAt; the 30-cap here is a sidebar-specific second
+  // truncation to keep the line tight on narrow widths.
+  const responseRaw = s.last_response || '';
+  const responseTrunc = truncateForSidebar(responseRaw, 30);
+  const responseHtml = responseTrunc
+    ? '<div class="sc-response" title="' + escAttr(responseRaw) + '">' + esc(responseTrunc) + '</div>'
+    : '';
+
   return '<div class="' + cls + '" role="listitem" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" tabindex="0" aria-label="' + escAttr(prompt + ' · ' + displayState) + '" onclick="selectSession(this.dataset.key,this.dataset.node)" onkeydown="sessionCardKey(event)">' +
     dismissBtn +
     icon +
@@ -1371,9 +1385,24 @@ function sessionCardHtml(s) {
         unreadBadge +
         (ago ? '<span class="sc-time"' + (absTime ? ' title="' + escAttr(absTime) + '"' : '') + '>' + ago + '</span>' : '') +
       '</div>' +
+      responseHtml +
       '<div class="sc-meta">' + metaHtml + '</div>' +
     '</div>' +
   '</div>';
+}
+
+// truncateForSidebar caps `s` to at most `n` Unicode code points (so CJK
+// characters count as one each, matching textutil.TruncateRunes on the
+// backend) and appends an ellipsis when truncation actually fired. Returns
+// '' for null/empty inputs so callers can chain `if (out)` cheaply.
+function truncateForSidebar(s, n) {
+  if (!s) return '';
+  // Array.from splits by code point; .length on a string would split by
+  // UTF-16 code unit and double-count surrogate-pair emoji. n=30 with
+  // emoji-heavy responses would otherwise cut a row at ~15 visible glyphs.
+  const arr = Array.from(s);
+  if (arr.length <= n) return s;
+  return arr.slice(0, n).join('') + '…';
 }
 
 // updateCardUnreadChip patches the chat-style unread bubble inside a session

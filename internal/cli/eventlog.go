@@ -319,6 +319,12 @@ type EventLog struct {
 	// when never stored, distinct from a stored empty string.
 	lastPromptSummary   atomic.Pointer[string] // most recent "user" entry summary
 	lastActivitySummary atomic.Pointer[string] // most recent "tool_use"/"thinking" entry summary
+	// lastResponseSummary tracks the most recent assistant "text" entry summary
+	// so the sidebar can render a 30-rune dim second line under the prompt.
+	// R110-P1: assistant response preview. Mirrors lastPromptSummary's atomic
+	// store-on-Append discipline (under l.mu so AppendBatch's last-writer
+	// ordering stays consistent). Lock-free read via LastResponseSummary().
+	lastResponseSummary atomic.Pointer[string] // most recent assistant "text" entry summary
 
 	// userTurnCount is a monotonic counter of "user" entries appended to this
 	// log since the Process was spawned. Exposed on SessionSnapshot.MessageCount
@@ -1093,6 +1099,12 @@ func (l *EventLog) Append(e EventEntry) {
 	if e.Type == "user" {
 		storeAtomicString(&l.lastPromptSummary, e.Summary)
 		l.userTurnCount.Add(1)
+	} else if e.Type == "text" {
+		// R110-P1: assistant text reply — feed sidebar 30-rune preview.
+		// Stored even when Summary is empty so a freshly-streamed empty
+		// text block (rare but possible) overwrites stale values rather
+		// than leaving last-turn's response visible.
+		storeAtomicString(&l.lastResponseSummary, e.Summary)
 	} else if IsActivityType(e.Type) {
 		// IsActivityType is the shared predicate for the "activity" set;
 		// session.ManagedSession history scans also consume it so the
@@ -1166,10 +1178,10 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 		return
 	}
 	var (
-		lastPrompt, lastActivity string
-		sawPrompt, sawActivity   bool
-		userDelta                int64
-		pendingDone              []pendingTaskDone
+		lastPrompt, lastActivity, lastResponse string
+		sawPrompt, sawActivity, sawResponse    bool
+		userDelta                              int64
+		pendingDone                            []pendingTaskDone
 	)
 	// Capture a single wall-clock read before locking so the N zero-time
 	// entries inside the loop (typical case: InjectHistory's 500-entry
@@ -1215,10 +1227,6 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 	// batch.
 	sinkAttached := l.persistSinkPtr.Load() != nil
 	captureForSink := sinkAttached && l.sinkReady.Load()
-	var sinkCopy []EventEntry
-	if captureForSink {
-		sinkCopy = make([]EventEntry, 0, len(entries))
-	}
 	// R225-PERF-11: stamp UUIDs in-place *before* l.mu so the N
 	// crypto/rand.Read syscalls (getrandom, one per missing UUID) don't run
 	// under the write-lock. InjectHistory's 500-entry replay would otherwise
@@ -1227,26 +1235,59 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 	for i := range entries {
 		stampUUID(&entries[i])
 	}
-	l.mu.Lock()
-	for _, e := range entries {
-		if e.Time == 0 {
-			e.Time = defaultTime
+	// R214-PERF-5: when a persist sink is wired, build the fully-prepared
+	// sink slice OUTSIDE l.mu so the ~200KB copy on a 500-entry InjectHistory
+	// replay no longer pins the write-lock. The original code did
+	// `sinkCopy = append(sinkCopy, e)` inside the loop under l.mu; under heavy
+	// shim reconnect (drop + reconnect on transient network blip) every
+	// concurrent Append on the same EventLog blocked behind that copy.
+	//
+	// `sinkCopy` doubles as the inner-loop iteration source so per-entry
+	// stamping (default time, image sanitize) is also paid only once per
+	// entry — the ring-buffer write inside the lock simply assigns the
+	// pre-prepared struct without re-running sanitize/default-time logic.
+	//
+	// Fast path (!captureForSink): sinkCopy stays nil and the inner loop
+	// falls back to the historical "stamp inside lock" path. Test harnesses
+	// and the InjectHistory phase before the persister attaches don't pay
+	// for the extra 200KB allocation.
+	var sinkCopy []EventEntry
+	if captureForSink {
+		sinkCopy = make([]EventEntry, len(entries))
+		for i, e := range entries {
+			if e.Time == 0 {
+				e.Time = defaultTime
+			}
+			// S15 (Round 174): same enforcement as Append. Replays from
+			// history (InjectHistory → AppendBatch) should never contain
+			// non-image data URIs today, but defense-in-depth is trivially
+			// cheap and locks the contract to a single sink.
+			if len(e.Images) > 0 {
+				e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
+			}
+			sinkCopy[i] = e
 		}
-		// S15 (Round 174): same enforcement as Append. Replays from history
-		// (InjectHistory → AppendBatch) should never contain non-image data
-		// URIs today, but defense-in-depth is trivially cheap and locks the
-		// contract to a single sink.
-		if len(e.Images) > 0 {
-			e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
+	}
+	l.mu.Lock()
+	for idx, e := range entries {
+		if captureForSink {
+			// Already prepared above; use the sink copy as the source of
+			// truth so the ring-buffer entry matches what the persister
+			// will write. Avoids a divergence window where Time / Images
+			// could differ between in-memory ring and on-disk record.
+			e = sinkCopy[idx]
+		} else {
+			if e.Time == 0 {
+				e.Time = defaultTime
+			}
+			if len(e.Images) > 0 {
+				e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
+			}
 		}
 		l.entries[l.head] = e
 		l.head = (l.head + 1) % l.maxSize
 		if l.count < l.maxSize {
 			l.count++
-		}
-
-		if captureForSink {
-			sinkCopy = append(sinkCopy, e)
 		}
 
 		// Skip applyEntryStateLocked for entries whose Type is not one of
@@ -1269,6 +1310,13 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 			lastPrompt = e.Summary
 			sawPrompt = true
 			userDelta++
+		} else if e.Type == "text" {
+			// R110-P1: track tail assistant text for sidebar response preview.
+			// Mirrors the live Append store under l.mu — last-writer-wins
+			// matches entry order even when batches interleave with live
+			// Appends. See lastPromptSummary single-Store treatment above.
+			lastResponse = e.Summary
+			sawResponse = true
 		} else if IsActivityType(e.Type) {
 			lastActivity = e.Summary
 			sawActivity = true
@@ -1277,6 +1325,9 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 
 	if sawPrompt {
 		storeAtomicString(&l.lastPromptSummary, lastPrompt)
+	}
+	if sawResponse {
+		storeAtomicString(&l.lastResponseSummary, lastResponse)
 	}
 	if sawActivity {
 		storeAtomicString(&l.lastActivitySummary, lastActivity)
@@ -1620,6 +1671,13 @@ func (l *EventLog) lastEntryOfType(typ string) EventEntry {
 // LastActivitySummary returns the summary of the most recent "tool_use" or "thinking" entry.
 func (l *EventLog) LastActivitySummary() string {
 	return loadAtomicString(&l.lastActivitySummary)
+}
+
+// LastResponseSummary returns the summary of the most recent assistant "text"
+// entry. Used by the sidebar to render a 30-rune dim preview line under the
+// prompt (R110-P1). Empty when no assistant text has streamed yet.
+func (l *EventLog) LastResponseSummary() string {
+	return loadAtomicString(&l.lastResponseSummary)
 }
 
 // LastEventAt returns the wall-clock time of the most recent live Append,
