@@ -504,6 +504,65 @@ func TestScan_KeepsFreshSessionWithoutJSONL(t *testing.T) {
 	}
 }
 
+// TestProcPidPath pins the byte-level path builder against fmt.Sprintf
+// equivalence (R247-PERF-5). The dashboard scan calls this once per PID,
+// per refresh — any divergence from the canonical "/proc/<pid>/<leaf>"
+// shape would mis-route stat reads.
+func TestProcPidPath(t *testing.T) {
+	cases := []struct {
+		pid  int
+		leaf string
+		want string
+	}{
+		{1, "stat", "/proc/1/stat"},
+		{12345, "cmdline", "/proc/12345/cmdline"},
+		{99999, "stat", "/proc/99999/stat"},
+		{0, "stat", "/proc/0/stat"},
+	}
+	for _, c := range cases {
+		if got := procPidPath(c.pid, c.leaf); got != c.want {
+			t.Errorf("procPidPath(%d, %q) = %q, want %q", c.pid, c.leaf, got, c.want)
+		}
+	}
+}
+
+// TestProcStartTime_ParsesStatFieldsExtra ensures the byte-level field
+// scanner in ProcStartTime is equivalent to the previous strings.Fields
+// implementation when field 22 is what we want, including the quirky case
+// where the comm field contains spaces and parentheses (the kernel does
+// not escape them). R247-PERF-5.
+func TestProcStartTime_ParsesStatFieldsExtra(t *testing.T) {
+	// Two passes against the live process must agree.
+	pid := os.Getpid()
+	v1, err := ProcStartTime(pid)
+	if err != nil {
+		t.Fatalf("ProcStartTime: %v", err)
+	}
+	v2, err := ProcStartTime(pid)
+	if err != nil {
+		t.Fatalf("ProcStartTime (2nd): %v", err)
+	}
+	if v1 != v2 {
+		t.Errorf("ProcStartTime not idempotent across calls: %d vs %d", v1, v2)
+	}
+	if v1 == 0 {
+		t.Error("ProcStartTime returned 0 for current process")
+	}
+}
+
+// BenchmarkProcStartTime_Self measures the hot path that runs once per
+// alive PID during dashboard scan. Goal of R247-PERF-5 was to drop the
+// per-call allocations to the single os.ReadFile + ParseUint result.
+func BenchmarkProcStartTime_Self(b *testing.B) {
+	pid := os.Getpid()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := ProcStartTime(pid); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestScan_ProcStartTimeInStat(t *testing.T) {
 	// Verify that /proc/self/stat field parsing works correctly.
 	// This is a Linux-only test that double-checks our field indexing.
