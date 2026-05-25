@@ -269,6 +269,11 @@ func detectVersion(cliPath string) string {
 // slow --version probe can never exceed the shorter of "caller's
 // shutdown signal" and "5 seconds". R55-QUAL-004.
 func detectVersionCtx(parent context.Context, cliPath string) string {
+	// Short-circuit if the caller's context is already cancelled — avoids
+	// forking a subprocess that will be SIGKILL'd immediately. R249-GO-11.
+	if err := parent.Err(); err != nil {
+		return ""
+	}
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, cliPath, "--version")
