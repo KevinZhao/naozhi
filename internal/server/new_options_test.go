@@ -2,6 +2,7 @@ package server
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -152,5 +153,52 @@ func TestServerNew_MarkedDeprecated(t *testing.T) {
 	window := src[start:idx]
 	if !strings.Contains(window, "// Deprecated: use NewWithOptions") {
 		t.Errorf("server.New must carry godoc `// Deprecated: use NewWithOptions` immediately above the func; window=%q", window)
+	}
+}
+
+// TestLegacyServerNew_NoNewCallSites pins R214-CODE-4: after the bulk
+// migration of test call sites to NewWithOptions, the legacy
+// `New(":0", ...)` constructor must remain referenced only by this file —
+// the deliberate dual-path equivalence test. Any new file that adds a
+// positional-args call site reverses the migration, so this regression
+// guard fails the build to keep the deprecation surface shrinking.
+//
+// The test scans every *.go file in the server package directory for the
+// substring `New(":0",` (the canonical positional-arg shape used by tests).
+// `new_options_test.go` is allow-listed because TestNew_PositionalOverridesOptions
+// and TestNewWithOptions_EquivalentToPositional intentionally exercise the
+// legacy entry point. Comment-only mentions in this file are also ignored
+// via the allow-list.
+func TestLegacyServerNew_NoNewCallSites(t *testing.T) {
+	t.Parallel()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	allowed := map[string]bool{
+		"new_options_test.go": true,
+	}
+	const needle = `New(":0",`
+	var offenders []string
+	for _, ent := range entries {
+		name := ent.Name()
+		if ent.IsDir() || filepath.Ext(name) != ".go" {
+			continue
+		}
+		if allowed[name] {
+			continue
+		}
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		// Skip the legacy New definition in server.go itself — the literal
+		// substring would never appear there but be defensive.
+		if strings.Contains(string(data), needle) {
+			offenders = append(offenders, name)
+		}
+	}
+	if len(offenders) > 0 {
+		t.Errorf("legacy `New(\":0\", ...)` call sites still present in: %v — migrate to NewWithOptions(ServerOptions{...}) per R214-CODE-4 (issue #421)", offenders)
 	}
 }

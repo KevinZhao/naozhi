@@ -55,7 +55,11 @@ func TestDashboardJSON_Projects_ShapeContract(t *testing.T) {
 
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": &mockPlatform{}}
-	srv := New(":0", router, platforms, nil, nil, nil, "claude", ServerOptions{
+	srv := NewWithOptions(ServerOptions{
+		Addr:           ":0",
+		Router:         router,
+		Platforms:      platforms,
+		Backend:        "claude",
 		ProjectManager: mgr,
 	})
 	srv.registerDashboard()

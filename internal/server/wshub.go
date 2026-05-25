@@ -243,9 +243,25 @@ type Hub struct {
 	// state; Shutdown nils the map so AgentLinker references can be GC'd —
 	// the package-level leak this replaces was R201-CRIT-2.
 	//
-	// Interface map keys dedup on (dynamic type, pointer value), equivalent
-	// to the prior *cli.SubagentLinker pointer-keyed map under the current
-	// 1:1 (cli.Process → *SubagentLinker) producer. R239-ARCH-I.
+	// Interface map keys dedup on the (dynamic type, dynamic value) tuple,
+	// equivalent to the prior *cli.SubagentLinker pointer-keyed map under
+	// the current 1:1 (cli.Process → *SubagentLinker) producer. R239-ARCH-I.
+	//
+	// R248-GO-5 (issue #372): when a second AgentLinker implementation lands
+	// (ACP / Gemini / etc.), the dedup contract becomes *type-aware*. Two
+	// linkers that share an underlying pointer value but differ in dynamic
+	// type are stored as separate keys (correct: they are observably
+	// different objects, register their own callbacks, and must dedup
+	// independently). The subtler case is a future helper that wraps an
+	// AgentLinker in a thin adapter without changing identity — the
+	// adapter's dynamic type would create a duplicate key for the same
+	// underlying linker, double-firing OnResolve. New backend authors
+	// MUST verify their producer satisfies the 1:1 invariant
+	// (one canonical AgentLinker per cli.Process / equivalent owner) and
+	// either dedup at the producer or pass the canonical reference here.
+	// If multi-backend wrapping becomes routine, switch the key to a
+	// stable identity field (e.g. linker.ProjectSessionDir() once it is
+	// stable per linker lifetime) and document the new invariant here.
 	wiredLinkersMu sync.Mutex
 	wiredLinkers   map[agentlink.AgentLinker]struct{}
 }

@@ -61,7 +61,12 @@ func (m *mockPlatform) allReplies() []platform.OutgoingMessage {
 func newTestServer(p *mockPlatform) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
-	s := New(":0", router, platforms, nil, nil, nil, "claude", ServerOptions{})
+	s := NewWithOptions(ServerOptions{
+		Addr:      ":0",
+		Router:    router,
+		Platforms: platforms,
+		Backend:   "claude",
+	})
 	s.registerDashboard()
 	return s
 }
@@ -70,7 +75,13 @@ func newTestServerWithScheduler(p *mockPlatform) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
 	sched := cron.NewScheduler(cron.SchedulerConfig{})
-	s := New(":0", router, platforms, nil, nil, sched, "claude", ServerOptions{})
+	s := NewWithOptions(ServerOptions{
+		Addr:      ":0",
+		Router:    router,
+		Platforms: platforms,
+		Scheduler: sched,
+		Backend:   "claude",
+	})
 	s.registerDashboard()
 	return s
 }
@@ -78,7 +89,13 @@ func newTestServerWithScheduler(p *mockPlatform) *Server {
 func newTestServerWithToken(p *mockPlatform, token string) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
-	s := New(":0", router, platforms, nil, nil, nil, "claude", ServerOptions{DashboardToken: token})
+	s := NewWithOptions(ServerOptions{
+		Addr:           ":0",
+		Router:         router,
+		Platforms:      platforms,
+		Backend:        "claude",
+		DashboardToken: token,
+	})
 	s.registerDashboard()
 	return s
 }
@@ -291,7 +308,14 @@ func TestBuildMessageHandler_NewResetsNamedAgent(t *testing.T) {
 	platforms := map[string]platform.Platform{"test": p}
 	agentCommands := map[string]string{"review": "code-reviewer"}
 	agents := map[string]session.AgentOpts{"code-reviewer": {}}
-	srv := New(":0", router, platforms, agents, agentCommands, nil, "claude", ServerOptions{})
+	srv := NewWithOptions(ServerOptions{
+		Addr:          ":0",
+		Router:        router,
+		Platforms:     platforms,
+		Agents:        agents,
+		AgentCommands: agentCommands,
+		Backend:       "claude",
+	})
 	handler := newTestDispatcher(srv).BuildHandler()
 
 	handler(context.Background(), platform.IncomingMessage{

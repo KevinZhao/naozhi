@@ -33,7 +33,7 @@ func newAttachmentServer(t *testing.T, ws string) *Server {
 		t.Fatalf("eval symlinks: %v", err)
 	}
 	router := session.NewRouter(session.RouterConfig{Workspace: resolved})
-	srv := New(":0", router, nil, nil, nil, nil, "claude", ServerOptions{})
+	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 	srv.registerDashboard()
 	router.SetWorkspace("dash:direct:alice", resolved)
 	return srv
@@ -169,7 +169,7 @@ func TestHandleAttachment_NoWorkspace(t *testing.T) {
 	// fallback path that newAttachmentServer exercises is specifically
 	// what we want to bypass here.
 	router := session.NewRouter(session.RouterConfig{})
-	srv := New(":0", router, nil, nil, nil, nil, "claude", ServerOptions{})
+	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 	srv.registerDashboard()
 
 	u := "/api/sessions/attachment?key=dash:direct:bob:general&path=" + url.QueryEscape(rel)

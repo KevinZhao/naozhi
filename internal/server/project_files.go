@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -20,6 +21,43 @@ import (
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// fileETagSalt is a per-process random byte string mixed into the ETag
+// hash for handleFileGet. R214-SEC-4 (issue #418): the original
+// sha256(size||mtime)[:8] form was theoretically probe-able — an
+// authenticated caller who could enumerate (size, mtime) candidates
+// could submit each as If-None-Match against a known path and use the
+// 304-vs-200 oracle to recover both attributes from the response. By
+// mixing in a 32-byte process-random salt the attacker can no longer
+// precompute candidate ETags; size+mtime are still implicitly committed
+// (so cacheability holds within a process) but the wire-visible bytes
+// no longer leak them across processes.
+//
+// The salt is regenerated on every process start, which means client
+// caches are invalidated on naozhi restart. That's an acceptable cost:
+// project files are private, max-age=60, and a restart is expected to
+// trigger a re-fetch anyway.
+//
+// Initialised lazily inside the package so test binaries that never
+// touch the file API don't pay the crypto/rand setup cost. crypto/rand
+// failure at init time is treated as a hard fault — the binary refuses
+// to start rather than serving probe-able ETags. ProcessFromCryptorand
+// failures during normal operation are pathologically rare (<1 in
+// millions of years on modern Linux) so a single Read at init is the
+// right ergonomic.
+var fileETagSalt = func() []byte {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand init failure is fatal: serving ETags without salt
+		// would silently regress the security property. Panicking at
+		// package init is consistent with how upload_store.go's Put
+		// handles in-flight rand.Read failures (errUploadStoreFull),
+		// only escalated because we cannot return an error from a
+		// package-level var initialiser.
+		panic("crypto/rand unavailable for fileETagSalt: " + err.Error())
+	}
+	return b[:]
+}()
 
 // File API size / count limits. All values are deliberately conservative so a
 // misbehaving browser tab or compromised token cannot DoS the host:
@@ -598,7 +636,9 @@ func mimeFromExtOnly(resolved string) (string, bool) {
 //     Content-Disposition=attachment. No body size cap (but http.ServeContent
 //     handles Range so the client can resume).
 //
-// ETag is "<size>-<mtime-nanos>" in all modes. 304 on If-None-Match.
+// ETag is sha256(size||mtime||fileETagSalt)[:12] in all modes. 304 on
+// If-None-Match. The per-process salt prevents probe-based recovery of
+// (size, mtime) — see fileETagSalt godoc.
 func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) {
 	if h.projectMgr == nil {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
@@ -701,14 +741,24 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	// Matches the attachment endpoint convention — see handleAttachment.
 	//
 	// R224-PERF-4: same strconv-into-stack-buffer trick as dashboard_send's
-	// handleAttachment to skip fmt.Sprintf's reflection path. SHA-256 input
-	// is byte-identical to the prior "%d|%d" form so the ETag is unchanged.
-	var etagBuf [48]byte
+	// handleAttachment to skip fmt.Sprintf's reflection path.
+	//
+	// R214-SEC-4 (issue #418): mix in fileETagSalt (per-process random 32
+	// bytes) so the ETag bytes cannot be precomputed from candidate
+	// (size, mtime) tuples. Without the salt an authenticated caller could
+	// probe for the file's exact size+mtime via an If-None-Match oracle —
+	// the salt closes that channel without breaking same-process caching
+	// (the salt stays constant across requests until restart). The hash
+	// prefix is also widened from 8 to 12 bytes to match the 96-bit
+	// strength established by R246-SEC-13 for handleAttachment.
+	var etagBuf [80]byte
 	etagSeed := strconv.AppendInt(etagBuf[:0], info.Size(), 10)
 	etagSeed = append(etagSeed, '|')
 	etagSeed = strconv.AppendInt(etagSeed, info.ModTime().UnixNano(), 10)
+	etagSeed = append(etagSeed, '|')
+	etagSeed = append(etagSeed, fileETagSalt...)
 	etagSum := sha256.Sum256(etagSeed)
-	etag := `"` + hex.EncodeToString(etagSum[:8]) + `"`
+	etag := `"` + hex.EncodeToString(etagSum[:12]) + `"`
 	if inm := r.Header.Get("If-None-Match"); inm != "" && inm == etag {
 		w.Header().Set("ETag", etag)
 		w.WriteHeader(http.StatusNotModified)

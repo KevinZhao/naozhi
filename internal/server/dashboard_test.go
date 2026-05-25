@@ -615,7 +615,7 @@ func TestHandleAPISessions_StatsIncludeAgentsAndWorkspace(t *testing.T) {
 		MaxProcs:  5,
 		Workspace: "/test/workspace",
 	})
-	srv := New(":0", router, nil, agents, nil, nil, "claude", ServerOptions{})
+	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Agents: agents, Backend: "claude"})
 	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
@@ -673,7 +673,7 @@ func TestHandleAPISend_WorkspaceOverride(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{
 		Workspace: "/default/workspace",
 	})
-	srv := New(":0", router, nil, nil, nil, nil, "claude", ServerOptions{})
+	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 	srv.registerDashboard()
 
 	key := "dashboard:direct:test-session:general"
@@ -707,7 +707,7 @@ func TestHandleAPISend_WorkspaceInvalidDir(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{
 		Workspace: "/default/workspace",
 	})
-	srv := New(":0", router, nil, nil, nil, nil, "claude", ServerOptions{})
+	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 	srv.registerDashboard()
 
 	key := "dashboard:direct:test-session:general"
@@ -1282,7 +1282,7 @@ func TestHistorySessions_EmptyHistoryCached(t *testing.T) {
 func TestHandleDelete_AcceptsQueryAndBody(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{MaxProcs: 5})
-	srv := New(":0", router, nil, nil, nil, nil, "claude", ServerOptions{})
+	srv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude"})
 	srv.registerDashboard()
 
 	cases := []struct {

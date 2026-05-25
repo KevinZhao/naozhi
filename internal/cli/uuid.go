@@ -27,9 +27,19 @@ import (
 //
 // R233B-PERF-7: high-frequency event ingest (50 sessions × 50 evt/s =
 // 2500 events/s) makes the 16-byte getrandom syscall a measurable
-// fraction of Append cost. We refill 256-byte goroutine-local pools
-// per call so steady-state Append pulls from a slice rather than the
-// kernel — amortising the syscall cost down by 16×.
+// fraction of Append cost. We refill goroutine-local pools per call so
+// steady-state Append pulls from a slice rather than the kernel.
+//
+// R214-PERF-7: bumped the pool from 256 → 4096 bytes (16 → 256 UUIDs
+// per refill) so the syscall amortisation is 256× rather than 16×. At
+// 2500 events/s this drops getrandom from ~156/s to ~10/s — well below
+// the noise floor of any other per-event work — without rolling our own
+// per-session AES-CSPRNG (which the original triage proposed). The
+// memory footprint is bounded: each goroutine that issues UUIDs holds
+// at most one bucket = 4 KiB; sync.Pool reclaims idle buckets via GC.
+// Defensive zeroing on consume (below) erases each UUID's source bytes
+// immediately, so a larger bucket does not extend the lifetime of any
+// individual issued value's randomness.
 func newEventUUID() string {
 	var raw [16]byte
 	pulled := pullFromUUIDPool(raw[:])
@@ -50,15 +60,21 @@ func newEventUUID() string {
 	return string(dst[:])
 }
 
-// uuidPoolBytes is the per-bucket refill size. 256 bytes = 16 UUIDs;
-// large enough to amortise the syscall, small enough that an idle
-// pool returned via sync.Pool's GC reclaim path doesn't waste much.
-const uuidPoolBytes = 256
+// uuidPoolBytes is the per-bucket refill size. 4096 bytes = 256 UUIDs.
+// Sized so the rand.Read syscall amortises ~256× per refill (R214-PERF-7
+// bumped from the initial 256 bytes / 16 UUIDs). Each goroutine holds at
+// most one bucket via sync.Pool, so the per-process memory ceiling is
+// bounded by the active goroutine count × 4 KiB — sync.Pool's GC reclaim
+// path drops idle buckets between cycles. Larger sizes keep diminishing
+// returns (kernel cost dominated by per-call entry overhead, not byte
+// count) and would also widen the window before sync.Pool GC reclaims an
+// idle bucket's stale randomness. 4 KiB is the sweet spot.
+const uuidPoolBytes = 4096
 
 // uuidPool buckets pre-fetched random bytes per goroutine. Each
-// bucket carries a 256-byte buffer + cursor. When the cursor reaches
-// the end, the next pull triggers a refill (one rand.Read per 16
-// uuids amortised).
+// bucket carries a uuidPoolBytes-byte buffer + cursor. When the cursor
+// reaches the end, the next pull triggers a refill (one rand.Read per
+// uuidPoolBytes/16 UUIDs amortised — currently 256).
 type uuidBucket struct {
 	buf [uuidPoolBytes]byte
 	pos int
