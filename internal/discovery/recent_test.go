@@ -153,6 +153,50 @@ func TestCachedJSONLFileInfo_CacheHitAfterRead(t *testing.T) {
 	}
 }
 
+// TestCachedJSONLByID_ReusedAcrossCalls pins R247-PERF-19: the sessionID→mtime
+// map is built once at cache fill time and reused on subsequent calls (same
+// directory mtime). Identity equality (==) on the map header is the cleanest
+// way to confirm the second call did not allocate a fresh map.
+func TestCachedJSONLByID_ReusedAcrossCalls(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sid := "aaaaaaaa-0002-0002-0002-000000000001"
+	if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dirFilesCache.Delete(dir)
+	t.Cleanup(func() { dirFilesCache.Delete(dir) })
+
+	m1 := cachedJSONLByID(dir)
+	m2 := cachedJSONLByID(dir)
+
+	if m1 == nil || m2 == nil {
+		t.Fatalf("expected non-nil maps, got m1=%v m2=%v", m1, m2)
+	}
+	if _, ok := m1[sid]; !ok {
+		t.Errorf("byID missing session %q: %v", sid, m1)
+	}
+	// Same map header — confirms no per-call rebuild.
+	// (reflect.ValueOf().Pointer() returns the underlying hashmap pointer.)
+	if fmt.Sprintf("%p", m1) != fmt.Sprintf("%p", m2) {
+		t.Errorf("cachedJSONLByID rebuilt map per call: %p vs %p", m1, m2)
+	}
+}
+
+// TestCachedJSONLByID_EmptyDirReturnsNilMap documents the empty-dir contract:
+// no .jsonl entries means no map allocation at all (saves a 0-cap map on
+// every cache-miss for fresh project dirs).
+func TestCachedJSONLByID_EmptyDirReturnsNilMap(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dirFilesCache.Delete(dir)
+	t.Cleanup(func() { dirFilesCache.Delete(dir) })
+
+	if got := cachedJSONLByID(dir); got != nil {
+		t.Errorf("cachedJSONLByID(empty dir) = %v, want nil", got)
+	}
+}
+
 func TestCachedJSONLFileInfo_NonexistentDir(t *testing.T) {
 	t.Parallel()
 	dirFilesCache.Delete("/nonexistent/dir")
@@ -773,8 +817,8 @@ type stubFilter struct {
 	skipSessionIDs map[string]bool
 }
 
-func (s stubFilter) SkipWorkspace(ws string) bool   { return s.skipWorkspaces[ws] }
-func (s stubFilter) SkipSessionID(sid string) bool  { return s.skipSessionIDs[sid] }
+func (s stubFilter) SkipWorkspace(ws string) bool  { return s.skipWorkspaces[ws] }
+func (s stubFilter) SkipSessionID(sid string) bool { return s.skipSessionIDs[sid] }
 
 func TestRecentSessions_FilterSkipsWorkspace(t *testing.T) {
 	t.Parallel()

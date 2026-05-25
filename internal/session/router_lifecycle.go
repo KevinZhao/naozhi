@@ -32,6 +32,30 @@ import (
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
+// publishSessionLocked is the single funnel for installing a freshly-built
+// ManagedSession into the router's lookup tables. R215-ARCH-P2-2: callers
+// were previously expected to remember the (attachHistorySource → sessions
+// map → indexAdd) triple at every spawn / discovery / rename / takeover
+// site. Five production paths plus several tests had to keep the pattern
+// in sync; missing the attachHistorySource step at any one of them would
+// leave EventEntriesBeforeCtx returning empty and the dashboard "history"
+// drawer silently blank for that session.
+//
+// Funneling them through one helper makes the invariant a property of the
+// publish step instead of "five copy-paste sites that the contract test
+// has to chase". Callers that already attached the source explicitly (rename
+// path: attaches the *renamed* fresh session, then we just need the map
+// entries) pass alreadyAttached=true so we do not double-attach.
+//
+// LOCK: caller must hold r.mu (write).
+func (r *Router) publishSessionLocked(key string, s *ManagedSession, alreadyAttached bool) {
+	if !alreadyAttached {
+		r.attachHistorySource(s)
+	}
+	r.sessions[key] = s
+	r.indexAdd(key)
+}
+
 // attachHistorySource picks the right history.Source for a session based on
 // its backend ID and installs it. Called immediately after every
 // ManagedSession allocation in this file so EventEntriesBeforeCtx's disk
@@ -681,12 +705,19 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// ── Lock release 1: Spawn may block (ACP Init handshake, process startup).
 	// We release r.mu to avoid holding it during I/O. pendingSpawns prevents
 	// a concurrent Cleanup from pruning slots we're about to fill.
-	r.pendingSpawns++
+	//
+	// R215-ARCH-P1-2: acquire via RAII token + defer slot.release(). The
+	// happy-path still decrements via releaseLocked() at the original site
+	// (preserves the existing lock-state contract — the second
+	// pendingSpawns-- happens after we re-take r.mu for the install path),
+	// and the defer absorbs any future panic / forgotten early-return on the
+	// other 3 segments between ++ and the original --. Idempotent: the
+	// defer's release() is a no-op once releaseLocked() has flipped the flag.
+	slot := r.acquirePendingSpawnSlotLocked()
+	defer slot.release()
 	r.mu.Unlock()
 	if wrapper == nil {
-		r.mu.Lock()
-		r.pendingSpawns--
-		r.mu.Unlock()
+		// slot.release() in defer will reacquire r.mu and decrement.
 		return nil, fmt.Errorf("spawn process (backend %q): %w", backendID, ErrNoCLIWrapper)
 	}
 	// Panic-safe Spawn: if wrapper.Spawn panics (shim exec failure, protocol
@@ -697,7 +728,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// seam). RES1.
 	proc, err := panicSafeSpawn(ctx, wrapper, spawnOpts, key, backendID)
 	r.mu.Lock()
-	r.pendingSpawns--
+	slot.releaseLocked()
 	if err != nil {
 		r.mu.Unlock()
 		return nil, fmt.Errorf("spawn process: %w", err)
@@ -870,9 +901,9 @@ func (r *Router) installFreshSessionLocked(
 		r.sessionIDToKey[effectiveSID] = key
 	}
 	s.touchLastActive()
-	r.attachHistorySource(s)
-	r.sessions[key] = s
-	r.indexAdd(key)
+	// R215-ARCH-P2-2: single publish funnel ensures attachHistorySource is
+	// never forgotten alongside the sessions-map insert.
+	r.publishSessionLocked(key, s, false)
 	if !exempt {
 		r.activeCount.Add(1)
 	}
@@ -1519,13 +1550,12 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 
 	// Rebind the history source to the renamed session — the old Source
 	// captured `old.SnapshotChainIDs` which reads the now-orphaned struct.
-	r.attachHistorySource(fresh)
-
-	// Swap map entries and maintain every derived index.
-	r.sessions[newKey] = fresh
+	// publishSessionLocked installs the rebound source + map entry; oldKey's
+	// map entry and index slot are cleaned up next so the rename is atomic
+	// under r.mu. R215-ARCH-P2-2.
+	r.publishSessionLocked(newKey, fresh, false)
 	delete(r.sessions, oldKey)
 	r.indexDel(oldKey)
-	r.indexAdd(newKey)
 	if id := fresh.getSessionID(); id != "" {
 		r.sessionIDToKey[id] = newKey
 	}

@@ -483,3 +483,67 @@ func TestTranscript_RouteIsRegistered(t *testing.T) {
 		t.Fatalf("route not registered: %d", w.Code)
 	}
 }
+
+// TestFlattenUserEvent_PreallocCapacity pins R241-PERF-7: per-line slice
+// allocation must match the actual turn count exactly. The prior
+// implementation hard-coded `make([]transcriptTurn, 0, 2)` which over-
+// allocated for text-only lines and grew (re-allocate) for tool_result
+// arrays larger than 2 — both wasteful on a 500-row transcript.
+//
+// We pin three shapes:
+//  1. text-only line → cap == 1
+//  2. zero-turn line (empty content array) → returns nil slice (no alloc)
+//  3. text + 3 tool_results → cap == 4 (no grow)
+//
+// The cap check would still pass after a future `make(... 0, 8)` regression
+// (cap >= len), so the empty-content sub-case is the load-bearing assertion:
+// it pins that we no longer pay the per-line 2-cap header on lines that
+// produce nothing.
+func TestFlattenUserEvent_PreallocCapacity(t *testing.T) {
+	t.Parallel()
+
+	// Case 1: text-only.
+	textEv := &claudeJSONLEvent{
+		Type:    "user",
+		Message: json.RawMessage(`{"role":"user","content":"hello world"}`),
+	}
+	out, _, _, parsed := flattenUserEvent(textEv, 0, 0)
+	if !parsed || len(out) != 1 {
+		t.Fatalf("text-only: parsed=%v len(out)=%d (want true / 1)", parsed, len(out))
+	}
+	if cap(out) != 1 {
+		t.Errorf("text-only: cap(out)=%d, want exactly 1 (R241-PERF-7 prealloc)", cap(out))
+	}
+	if out[0].Kind != "user" || out[0].Text != "hello world" {
+		t.Errorf("text-only: turn=%+v", out[0])
+	}
+
+	// Case 2: empty content-block array → no turns at all. Previous code
+	// returned a 2-cap empty slice from the `out := make(... 0, 2)` line;
+	// we now return nil so the per-line allocation is skipped entirely.
+	emptyEv := &claudeJSONLEvent{
+		Type:    "user",
+		Message: json.RawMessage(`{"role":"user","content":[]}`),
+	}
+	out2, _, _, parsed2 := flattenUserEvent(emptyEv, 0, 0)
+	if parsed2 || len(out2) != 0 {
+		t.Fatalf("empty-content: parsed=%v len(out)=%d (want false / 0)", parsed2, len(out2))
+	}
+	if out2 != nil {
+		t.Errorf("empty-content: out=%v want nil (no per-line alloc on zero-turn lines)", out2)
+	}
+
+	// Case 3: 3 tool_result blocks → cap == 3 (no grow). Sized exactly so
+	// the append loop does no reallocation.
+	threeRes := json.RawMessage(`{"role":"user","content":[` +
+		`{"type":"tool_result","tool_use_id":"a","content":"o1","is_error":false},` +
+		`{"type":"tool_result","tool_use_id":"b","content":"o2","is_error":false},` +
+		`{"type":"tool_result","tool_use_id":"c","content":"o3","is_error":false}]}`)
+	out3, _, _, parsed3 := flattenUserEvent(&claudeJSONLEvent{Type: "user", Message: threeRes}, 0, 0)
+	if !parsed3 || len(out3) != 3 {
+		t.Fatalf("3-tool_result: parsed=%v len(out)=%d (want true / 3)", parsed3, len(out3))
+	}
+	if cap(out3) != 3 {
+		t.Errorf("3-tool_result: cap(out)=%d, want exactly 3 (no grow)", cap(out3))
+	}
+}

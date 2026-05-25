@@ -579,24 +579,47 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 // a content-block array). content can be a plain string OR a
 // content-block array (the latter is how Claude carries tool_result
 // payloads back into the conversation).
+//
+// R241-PERF-7: previously this allocated `make([]transcriptTurn, 0, 2)`
+// per JSONL line — on a 500-line cron transcript that's 500 grow-prone
+// 2-cap headers even when the line decoded into zero or one turns. We
+// now mirror flattenAssistantEvent's two-pass shape: count tool_result
+// blocks first, pre-size out exactly (text? + N×tool_result), and skip
+// the allocation entirely on lines that contribute no turns. Negligible
+// CPU cost (one extra pass over `blocks`, which is already in-cache from
+// decodeStringOrBlocks) for an O(N) → O(parsed-rows) allocation drop.
 func flattenUserEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
-	out := make([]transcriptTurn, 0, 2)
 	tok := transcriptTokens{}
 
 	var msg claudeMessage
 	if err := json.Unmarshal(ev.Message, &msg); err != nil {
-		return out, tok, 0, false
+		return nil, tok, 0, false
 	}
-	parsed := false
 	text, blocks := decodeStringOrBlocks(msg.Content)
-	if text != "" {
-		parsed = true
+	hasText := text != ""
+	toolResultCount := 0
+	for i := range blocks {
+		if blocks[i].Type == "tool_result" {
+			toolResultCount++
+		}
+	}
+	totalTurns := toolResultCount
+	if hasText {
+		totalTurns++
+	}
+	if totalTurns == 0 {
+		return nil, tok, 0, false
+	}
+	out := make([]transcriptTurn, 0, totalTurns)
+	parsed := false
+	if hasText {
 		out = append(out, transcriptTurn{
 			Index: nextIdx + len(out),
 			Kind:  "user",
 			TS:    ts,
 			Text:  sanitizeWireText(truncateRunes(text, maxAssistantTextBytes)),
 		})
+		parsed = true
 	}
 	for _, b := range blocks {
 		if b.Type != "tool_result" {

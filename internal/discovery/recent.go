@@ -188,9 +188,17 @@ type jsonlFileInfo struct {
 }
 
 // dirFilesCacheEntry stores cached file metadata for a project directory.
+//
+// R247-PERF-19: byID is a derived sessionID→mtime map built once at cache
+// fill time so recentFromParsedIndex (called per dashboard sidebar refresh)
+// no longer rebuilds it on every call. Map and slice share the same dirMtime
+// invalidation lifetime; populating both up front trades O(N) extra memory
+// (where N = .jsonl count, typically ≤ a few dozen per workspace) for one
+// allocation amortised over many sidebar reads.
 type dirFilesCacheEntry struct {
 	dirMtime int64 // directory mtime in UnixNano (changes on file add/remove)
 	files    []jsonlFileInfo
+	byID     map[string]int64 // sessionID → mtime; nil iff len(files)==0
 }
 
 // dirFilesCache caches per-directory .jsonl file metadata. Cache entries are
@@ -202,6 +210,26 @@ var dirFilesCache sync.Map // projDir → *dirFilesCacheEntry
 // cachedJSONLFileInfo returns .jsonl file metadata for a project directory,
 // using a cache validated by the directory's own mtime.
 func cachedJSONLFileInfo(projDir string) []jsonlFileInfo {
+	if entry := loadCachedDirEntry(projDir); entry != nil {
+		return entry.files
+	}
+	return nil
+}
+
+// cachedJSONLByID returns the sessionID→mtime map for a project directory,
+// reusing the same mtime-validated cache as cachedJSONLFileInfo. The returned
+// map is read-only; callers must not mutate it. R247-PERF-19.
+func cachedJSONLByID(projDir string) map[string]int64 {
+	if entry := loadCachedDirEntry(projDir); entry != nil {
+		return entry.byID
+	}
+	return nil
+}
+
+// loadCachedDirEntry returns the cached entry for projDir, refilling the cache
+// on a miss / stale dirMtime. Centralised so cachedJSONLFileInfo and
+// cachedJSONLByID share one scan + one cache slot per directory state.
+func loadCachedDirEntry(projDir string) *dirFilesCacheEntry {
 	dirInfo, err := os.Stat(projDir)
 	if err != nil {
 		return nil
@@ -210,7 +238,7 @@ func cachedJSONLFileInfo(projDir string) []jsonlFileInfo {
 
 	if v, ok := dirFilesCache.Load(projDir); ok {
 		if entry := v.(*dirFilesCacheEntry); entry.dirMtime == dirMtime {
-			return entry.files
+			return entry
 		}
 	}
 
@@ -235,8 +263,16 @@ func cachedJSONLFileInfo(projDir string) []jsonlFileInfo {
 		})
 	}
 
-	dirFilesCache.Store(projDir, &dirFilesCacheEntry{dirMtime: dirMtime, files: files})
-	return files
+	var byID map[string]int64
+	if len(files) > 0 {
+		byID = make(map[string]int64, len(files))
+		for _, f := range files {
+			byID[f.sessionID] = f.mtime
+		}
+	}
+	entry := &dirFilesCacheEntry{dirMtime: dirMtime, files: files, byID: byID}
+	dirFilesCache.Store(projDir, entry)
+	return entry
 }
 
 // recentFromJSONLFiles scans a project directory for .jsonl files and collects
@@ -324,12 +360,12 @@ func resolveWorkspaceWithIndex(projDir, dirName string) (string, *sessionsIndex)
 
 // recentFromParsedIndex extracts sessions from an already-parsed sessions index.
 // Uses cached file metadata and O(1) map lookups per index entry.
+//
+// R247-PERF-19: the sessionID→mtime map is now cached inside the directory
+// cache entry, so repeated sidebar refreshes (no .jsonl add/remove between
+// them) reuse the same map allocation instead of rebuilding it per call.
 func recentFromParsedIndex(idx *sessionsIndex, projDir, workspace string, exclude map[string]bool) []RecentSession {
-	files := cachedJSONLFileInfo(projDir)
-	jsonlMtimes := make(map[string]int64, len(files))
-	for _, f := range files {
-		jsonlMtimes[f.sessionID] = f.mtime
-	}
+	jsonlMtimes := cachedJSONLByID(projDir)
 
 	var out []RecentSession
 	for _, entry := range idx.Entries {

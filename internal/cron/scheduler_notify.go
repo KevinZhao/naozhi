@@ -71,11 +71,32 @@ func (s *Scheduler) resolveNotifyTarget(platName, chatID, notifyPlat, notifyChat
 
 // deliverNotice sends a result/error message to the resolved target.
 // No-op when target is unset or the platform is not registered.
+//
+// R242-GO-13: delivery is dispatched on a goroutine tracked by triggerWG.
+// Previously synchronous: the cron-tick callback (or freshContextPreflightP0
+// error path) blocked on the IM reply chain (chunk × retry × per-call HTTP),
+// extending the run's wall-clock by up to cronNotifyTimeout (30s) before
+// the next tick / preflight could proceed. finishRun has already stamped
+// the terminal state by the time we reach this call, so the operator-
+// facing record is final — the only thing the caller is waiting for is
+// the network. Stop() drains triggerWG within the same stopBudget that
+// previously bounded the synchronous path, so shutdown latency is
+// unchanged.
+//
+// Add(1) is performed BEFORE the `go` launch so a Stop() landing between
+// here and the goroutine's first scheduling tick still observes the
+// in-flight delivery and waits for it (matching the contract documented
+// in scheduler.go's Stop CONTRACT block — every triggerWG.Add must
+// pair with a `defer s.triggerWG.Done()` on its own goroutine).
 func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
 	if !target.IsSet() {
 		return
 	}
-	s.notifyTarget(target.Platform, target.ChatID, text)
+	s.triggerWG.Add(1)
+	go func() {
+		defer s.triggerWG.Done()
+		s.notifyTarget(target.Platform, target.ChatID, text)
+	}()
 }
 
 // notifyTarget sends a message to an arbitrary platform/chat (notify target).
