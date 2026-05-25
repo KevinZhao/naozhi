@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
 
@@ -306,5 +307,63 @@ func TestToolResult_Oversize_413(t *testing.T) {
 	h.handleToolResult(w, req)
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("status=%d want 413", w.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// R248-TEST-5 — AgentLinker typed-nil guard
+// ---------------------------------------------------------------------------
+
+// TestLinkerForSession_TypedNilGuard pins the typed-nil interface guard at
+// dashboard_agent_events.go:linkerForSession's `if concrete == nil` line.
+// ManagedSession.SubagentLinker() returns *cli.SubagentLinker — a concrete
+// pointer type — and a nil concrete return becomes a NON-nil agentlink.AgentLinker
+// interface value when promoted directly (Go's classic typed-nil hazard).
+// Without the explicit guard, callers checking `if linker == nil` would see
+// false and dereference the nil pointer on the next method call.
+//
+// To exercise the production code path (no linkerFor injection), this test
+// stands up a real *session.Router, injects a session backed by a non-cli.Process
+// (session.TestProcess satisfies processIface but is not *cli.Process), and
+// observes that:
+//
+//   - linkerForSession returns an interface value that compares == nil
+//     (the guard converted typed-nil → untyped nil).
+//   - The HTTP handler routed through this lookup returns 404 "unknown task",
+//     proving the guard prevents a nil-dereference panic from leaking.
+//
+// R248-TEST-5.
+func TestLinkerForSession_TypedNilGuard(t *testing.T) {
+	t.Parallel()
+	router := session.NewRouter(session.RouterConfig{MaxProcs: 3})
+	// TestProcess satisfies processIface but is NOT a *cli.Process, so
+	// ManagedSession.loadCliProcess returns untyped nil and SubagentLinker
+	// returns a typed-nil *cli.SubagentLinker. That is exactly the input
+	// the linkerForSession guard is designed for.
+	router.InjectSession(testAgentEventsKey, session.NewTestProcess())
+
+	h := &AgentEventsHandlers{router: router}
+
+	// Direct check: linkerForSession converts typed-nil → untyped nil so
+	// callers can use the idiomatic `if linker == nil` form.
+	got := h.linkerForSession(testAgentEventsKey)
+	if got != nil {
+		t.Errorf("linkerForSession returned non-nil interface (%T %v) for a "+
+			"non-cli.Process-backed session; the typed-nil guard at "+
+			"dashboard_agent_events.go must convert to untyped nil so callers' "+
+			"`if linker == nil` works idiomatically. R248-TEST-5.", got, got)
+	}
+
+	// End-to-end: the HTTP handler must return 404 (no live linker) rather
+	// than panic. taskID uses an alphanumeric form so the early task_id
+	// validator does not short-circuit before reaching linkerForSession.
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/sessions/agent_events?key="+testAgentEventsKey+"&task_id=tabc", nil)
+	w := httptest.NewRecorder()
+	h.handleAgentEvents(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("HTTP status = %d, want 404; the typed-nil-promoted linker "+
+			"would slip past the nil guard and either reach linker.QueryOrResolveFast "+
+			"(panic) or write a misleading 200/202. R248-TEST-5.", w.Code)
 	}
 }

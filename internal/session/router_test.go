@@ -2,11 +2,13 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1358,15 +1360,78 @@ func TestConcurrentGetOrCreate_SameKey_Race(t *testing.T) {
 	r := newTestRouter(5)
 	key := "feishu:direct:user1:general"
 
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
+	const N = 10
+	// Hard timeout — newTestRouter's wrapper points at a nonexistent binary,
+	// so each spawn fails fast (sub-millisecond). Even with 10 concurrent
+	// goroutines serialising through r.mu, a healthy run finishes in <1s.
+	// 10s is generous against -race + slow CI; a deadlock or missed
+	// close(doneCh) trips this rather than the test hanging the suite.
+	// R248-TEST-9.
+	const hardTimeout = 10 * time.Second
+
+	var (
+		wg            sync.WaitGroup
+		errCount      atomic.Int64
+		successCount  atomic.Int64
+		nonNilErrSeen atomic.Int64
+	)
+	wg.Add(N)
+	for i := 0; i < N; i++ {
 		go func() {
 			defer wg.Done()
-			_, _, _ = r.GetOrCreate(context.Background(), key, AgentOpts{})
+			_, _, err := r.GetOrCreate(context.Background(), key, AgentOpts{})
+			if err != nil {
+				errCount.Add(1)
+				nonNilErrSeen.Add(1)
+			} else {
+				successCount.Add(1)
+			}
 		}()
 	}
-	wg.Wait()
+
+	// Drive wg.Wait through a guarded channel so the hard timer can fail
+	// the test loud rather than hanging the whole suite.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(hardTimeout):
+		t.Fatalf("TestConcurrentGetOrCreate_SameKey_Race did not finish within %v — "+
+			"likely deadlock in spawningKeys handoff or missed close(doneCh)", hardTimeout)
+	}
+
+	// At least N-1 goroutines must have taken the inflight-wait branch.
+	// newTestRouter's wrapper is missing-binary so every Spawn errors,
+	// meaning at most ONE goroutine can be the first-spawn winner — the
+	// rest necessarily observed spawningKeys[key] and parked on doneCh.
+	// (Even if the winner finishes its failed spawn before some siblings
+	// arrive, those siblings re-enter the loop, see no session, become
+	// the next "winner" themselves; either way they did not race the
+	// shim-socket dial and the contract holds.)
+	//
+	// The signal we want to defend: every concurrent GetOrCreate either
+	// succeeds (impossible here — Spawn always fails) or surfaces an
+	// error. A regression that corrupts spawningKeys could result in a
+	// nil-result + nil-error return, which we'd see as a goroutine that
+	// counted neither. R248-TEST-9.
+	totalAccountedFor := errCount.Load() + successCount.Load()
+	if totalAccountedFor != int64(N) {
+		t.Errorf("only %d/%d goroutines returned a recorded result (errs=%d successes=%d); "+
+			"a missing return path is a regression", totalAccountedFor, N, errCount.Load(), successCount.Load())
+	}
+	if successCount.Load() != 0 {
+		t.Errorf("successes = %d, want 0 — newTestRouter wrapper points at /nonexistent/cli-binary",
+			successCount.Load())
+	}
+	if nonNilErrSeen.Load() < int64(N-1) {
+		t.Errorf("only %d goroutines saw a non-nil error; expected at least N-1=%d "+
+			"(only one can be the spawn-winner; the rest must take the inflight-wait path "+
+			"and ultimately surface a Spawn error of their own). R248-TEST-9.",
+			nonNilErrSeen.Load(), N-1)
+	}
 }
 
 func TestConcurrentGetOrCreate_DifferentKeys_Race(t *testing.T) {
@@ -2328,4 +2393,168 @@ func TestInstallFreshSessionLocked_SignatureGuard(t *testing.T) {
 		return r.installFreshSessionLocked
 	}
 	_ = t
+}
+
+// ---------------------------------------------------------------------------
+// R248-TEST-3 — spawningKeys close-then-delete invariants
+// ---------------------------------------------------------------------------
+
+// TestSpawningKeys_FailedSpawnWakesWaiters pins R243-ARCH-4's headline
+// guarantee: when the in-flight spawn for a key fails, every concurrent
+// GetOrCreate goroutine parked on the same key wakes immediately rather
+// than tick-polling. The test simulates the in-flight window by manually
+// installing a doneCh in r.spawningKeys (mirroring spawnSession's prologue),
+// launches N concurrent GetOrCreate callers, and then performs the failure-
+// path defer (close + delete under r.mu) by hand. Every waiter must return
+// within 100ms (the historical poll interval was 20ms; instantaneous wakeup
+// targets <1ms in practice but 100ms gives ample margin for race-detector
+// scheduling on slow CI).
+//
+// The test runs with -race to catch any forgotten lock around the
+// spawningKeys mutation; under -race the goroutines also exercise the
+// release-and-reacquire mu pattern in the GetOrCreate retry loop.
+func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
+	r := newTestRouter(5)
+	key := "feishu:direct:wakeup-waiters:general"
+
+	// Install the spawningKeys marker so the next GetOrCreate hit takes
+	// the inflight wait path. spawnSession uses the same pattern in its
+	// prologue (router_lifecycle.go ~line 549).
+	r.mu.Lock()
+	if r.spawningKeys == nil {
+		r.spawningKeys = make(map[string]chan struct{})
+	}
+	doneCh := make(chan struct{})
+	r.spawningKeys[key] = doneCh
+	r.mu.Unlock()
+
+	const N = 10
+	var wg sync.WaitGroup
+	wg.Add(N)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer wg.Done()
+			// All N parked on the same key. Each will see the marker on
+			// the first iteration of GetOrCreate's loop, release r.mu,
+			// and select on doneCh.
+			_, _, _ = r.GetOrCreate(context.Background(), key, AgentOpts{})
+		}()
+	}
+
+	// Give all N goroutines time to enter the inflight wait. 50ms is well
+	// past goroutine-launch overhead under -race; not a correctness
+	// requirement, just stabilises the test against scheduler skew.
+	time.Sleep(50 * time.Millisecond)
+
+	// Simulate spawnSession's failure-path defer: close BEFORE delete (the
+	// order is itself part of the contract — see TEST-3(b) below).
+	start := time.Now()
+	r.mu.Lock()
+	close(doneCh)
+	delete(r.spawningKeys, key)
+	r.mu.Unlock()
+
+	// All waiters should observe the close + retry the loop. With
+	// newTestRouter the second-iteration spawn also fails (binary
+	// missing), so each goroutine returns its own error after a fast
+	// failed Spawn. The wakeup itself is what we're timing.
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		elapsed := time.Since(start)
+		// 100ms is generous; observed wakeup is sub-millisecond. A regression
+		// to the old 20ms tick-poll would still pass here, so the assertion's
+		// real value is catching a deadlock or a missed close.
+		if elapsed > 100*time.Millisecond {
+			t.Errorf("waiters took %v to drain after close+delete; want <100ms", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiters did not drain within 2s — close(doneCh) likely failed to wake them")
+	}
+}
+
+// TestSpawningKeys_CloseBeforeDelete_Order pins the documented ordering
+// inside spawnSession's defer: `close(doneCh)` must run BEFORE
+// `delete(r.spawningKeys, key)`. The comment block above the defer in
+// router_lifecycle.go (~line 544) explains why: a caller dispatched between
+// "lock acquired" and "delete returned" must observe the closed channel from
+// the still-present map entry, not a fresh nil from a re-arrived
+// spawnSession that read the map after we finished.
+//
+// This is a source-grep anchor — the runtime test (TEST-3(a) above)
+// observes the wakeup but cannot easily distinguish "closed then deleted"
+// from "deleted then closed" without injecting a deterministic interleave.
+// Pinning the lexical order makes the regression a fast CI failure.
+func TestSpawningKeys_CloseBeforeDelete_Order(t *testing.T) {
+	t.Parallel()
+	src, err := os.ReadFile("router_lifecycle.go")
+	if err != nil {
+		t.Fatalf("read router_lifecycle.go: %v", err)
+	}
+	body := string(src)
+
+	closeIdx := strings.Index(body, "close(doneCh)")
+	if closeIdx < 0 {
+		t.Fatal("close(doneCh) not found in router_lifecycle.go — defer body refactored")
+	}
+	deleteIdx := strings.Index(body, "delete(r.spawningKeys, key)")
+	if deleteIdx < 0 {
+		t.Fatal("delete(r.spawningKeys, key) not found in router_lifecycle.go — defer body refactored")
+	}
+	if closeIdx >= deleteIdx {
+		t.Errorf("close(doneCh) at byte %d is not before delete(r.spawningKeys, key) at byte %d; "+
+			"the defer ordering is load-bearing for R243-ARCH-4 — see comment on router_lifecycle.go ~line 544",
+			closeIdx, deleteIdx)
+	}
+}
+
+// TestSpawningKeys_CtxCancelPriorityOverDoneCh pins that GetOrCreate's
+// inflight-wait select-arm honours ctx.Done() — when ctx is already
+// cancelled, the call must return ctx.Err() rather than retry the spawn
+// loop. A request whose context already expired is by definition no longer
+// interested in the result; retrying would burn another spawn slot on a
+// corpse.
+//
+// The deterministic case is constructed by installing an in-flight marker
+// that is never closed, leaving doneCh's select arm not-ready; the only way
+// out is ctx.Done().
+func TestSpawningKeys_CtxCancelPriorityOverDoneCh(t *testing.T) {
+	r := newTestRouter(5)
+	key := "feishu:direct:ctx-cancel:general"
+
+	// Install an in-flight marker that we never close, so the doneCh arm
+	// stays not-ready. ctx.Done() must therefore be the first ready arm.
+	r.mu.Lock()
+	if r.spawningKeys == nil {
+		r.spawningKeys = make(map[string]chan struct{})
+	}
+	doneCh := make(chan struct{})
+	r.spawningKeys[key] = doneCh
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		close(doneCh)
+		delete(r.spawningKeys, key)
+		r.mu.Unlock()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // immediately cancelled
+
+	startedAt := time.Now()
+	_, _, err := r.GetOrCreate(ctx, key, AgentOpts{})
+	if err == nil {
+		t.Fatal("GetOrCreate returned nil error despite cancelled ctx — must surface ctx.Err()")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("GetOrCreate err = %v, want errors.Is(err, context.Canceled); "+
+			"a ctx-cancelled caller must NOT fall through to retry-spawn", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 500*time.Millisecond {
+		t.Errorf("ctx-cancelled GetOrCreate took %v; ctx.Done() arm should fire immediately", elapsed)
+	}
 }

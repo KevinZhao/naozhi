@@ -245,6 +245,32 @@ func TestOBS2_WSAuthFailBothBranches(t *testing.T) {
 	}
 }
 
+// TestOBS2_WSAuthFailNotInMainHub is the negative companion to
+// TestOBS2_WSAuthFailBothBranches (above) and TestOBS2_CounterCallSiteWiring's
+// "WSAuthFailTotal fires on both WS auth_fail branches" entry. After the
+// R243-ARCH-2 split, handleAuth lives in wshub_upgrade.go and its counter
+// increments must NOT drift back into the parent wshub.go file. The split
+// was motivated specifically by wshub.go's god-object size; reintroducing
+// any auth-fail Add into it would silently undo the locality the refactor
+// established.
+//
+// Pinning the negative case turns "an editor accidentally pasted the .Add
+// back into wshub.go while merging" into a fast CI failure. R248-TEST-7.
+func TestOBS2_WSAuthFailNotInMainHub(t *testing.T) {
+	t.Parallel()
+	src, err := os.ReadFile("../server/wshub.go")
+	if err != nil {
+		t.Fatalf("read wshub.go: %v", err)
+	}
+	re := regexp.MustCompile(`metrics\.WSAuthFailTotal\.Add`)
+	if re.Match(src) {
+		t.Error("metrics.WSAuthFailTotal.Add(...) found in wshub.go — after the " +
+			"R243-ARCH-2 split, the auth-fail counter increments belong in " +
+			"wshub_upgrade.go (handleAuth's home). Moving them back into wshub.go " +
+			"silently undoes the god-object split. R248-TEST-7.")
+	}
+}
+
 // TestOBS2_InterruptCountersInOutcomeSwitch pins that every Interrupt*
 // counter increment sits inside a `switch outcome` — they must not be
 // hoisted to the function prologue (which would count one per call rather

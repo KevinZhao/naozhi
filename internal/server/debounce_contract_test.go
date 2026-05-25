@@ -126,4 +126,16 @@ func TestDebounceTimer_ShutdownStopSemanticsContract(t *testing.T) {
 			"clientWG.Wait leaks a slot — Wait hangs until the deadline " +
 			"timer forces teardown. R37-CONCUR3.")
 	}
+
+	// 4) R248-TEST-8 negative anchor: time.AfterFunc(debounceInterval, ...)
+	// must NOT live in wshub.go. The R243-ARCH-2 split moved the debounce
+	// scheduler to wshub_broadcast.go alongside BroadcastSessionsUpdate so
+	// the parent wshub.go stayed lifecycle-only. A future merge that pastes
+	// the AfterFunc back into wshub.go (e.g. while resolving a conflict on
+	// the broadcast path) would silently undo the locality the split
+	// established and reintroduce the god-object. Pin the negative case so
+	// such a merge fails CI.
+	if regexp.MustCompile(`time\.AfterFunc\(debounceInterval`).Match(src) {
+		t.Error("AfterFunc 不应回到 wshub.go - 应保留在 wshub_broadcast.go (R248-TEST-8)")
+	}
 }
