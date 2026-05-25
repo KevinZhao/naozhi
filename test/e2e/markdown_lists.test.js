@@ -232,4 +232,84 @@ test.describe('renderMd list 渲染', () => {
     const ulCount = (html.match(/<ul\b/g) || []).length;
     expect(ulCount).toBeLessThanOrEqual(7);
   });
+
+  // ===== Follow-up: 二次 review 抓出的 bug 回归 =====
+
+  test('lenient sibling：多个无序兄弟在父 ol 之下应共享一个 ul', async () => {
+    // 截图主诉求场景的最常见变体：旧实现产 N 个独立 ul（每个一项）。
+    const html = await render('1. parent\n- detail A\n- detail B\n2. next\n');
+    // 同段内 ol 一个、ul 一个（不是两个）
+    expect((html.match(/<ol\b/g) || []).length).toBe(1);
+    expect((html.match(/<ul\b/g) || []).length).toBe(1);
+    // ul 内含两个连续 li
+    expect(html).toMatch(/<ul[^>]*><li>detail A<\/li><li>detail B<\/li><\/ul>/);
+    // ol 内两项
+    expect(html).toMatch(/<li>parent<ul[^>]*>.*<\/ul><\/li><li>next<\/li>/);
+  });
+
+  test('lenient sibling：多对父项各自含多兄弟', async () => {
+    const html = await render('1. one\n- A\n- B\n2. two\n- X\n- Y\n');
+    expect((html.match(/<ol\b/g) || []).length).toBe(1);
+    expect((html.match(/<ul\b/g) || []).length).toBe(2);
+    expect(html).toMatch(/<li>A<\/li><li>B<\/li>/);
+    expect(html).toMatch(/<li>X<\/li><li>Y<\/li>/);
+  });
+
+  test('lenient sibling：ol 兄弟在父 ul 下也归并为单一 ol', async () => {
+    const html = await render('- a\n1. b\n2. c\n');
+    expect((html.match(/<ol\b/g) || []).length).toBe(1);
+    expect((html.match(/<ul\b/g) || []).length).toBe(1);
+    expect(html).toMatch(/<ol[^>]*><li>b<\/li><li>c<\/li><\/ol>/);
+  });
+
+  test('缩进 table 不被 lazy-continuation 吞噬', async () => {
+    // 父 li 之下的缩进 table 必须走 renderTable，不能拼到 li 文本里。
+    const src = '1. parent\n   | h1 | h2 |\n   |---|---|\n   | a | b |\n';
+    const html = await render(src);
+    expect(html).toMatch(/<\/ol>/);
+    expect(html).toMatch(/<table/);
+    // li 内不该包含 table 行的字面字符
+    expect(html).not.toMatch(/<li>parent[^<]*\| h1/);
+  });
+
+  test('缩进 heading 不被 lazy-continuation 吞噬', async () => {
+    const html = await render('1. parent\n   ## sub\n');
+    // closeAll 后 ## sub 走普通行；不再拼进 li
+    expect(html).not.toMatch(/<li>parent[^<]*##/);
+    expect(html).toMatch(/<\/ol>/);
+  });
+
+  test('缩进的 4+ 位数字行不被 lazy-continuation 吞噬', async () => {
+    // "2024. ..." 在缩进下 parseListItem 返回 null（数字超阈值），
+    // 旧逻辑会把它折进父 li。新逻辑用 LIST_SHAPE_RE 守卫。
+    const html = await render('1. notes\n   2024. Q1 highlights\n');
+    expect(html).not.toMatch(/<li>notes[^<]*2024/);
+    expect(html).toMatch(/2024\. Q1 highlights/);
+  });
+
+  test('00100. 起步 ordinal 按数值（=100）接受', async () => {
+    const html = await render('00100. installation\n');
+    expect(html).toMatch(/<ol[^>]*\bstart="100"/);
+  });
+
+  test('099. 接受 start=99（前导 0 不影响）', async () => {
+    const html = await render('099. ninety-nine\n');
+    expect(html).toMatch(/<ol[^>]*\bstart="99"/);
+  });
+
+  test('2024. 仍按年份 token 拒绝（数值阈值守恒）', async () => {
+    const html = await render('2024. year\n');
+    expect(html).not.toMatch(/<ol\b/);
+    expect(html).toMatch(/2024\. year/);
+  });
+
+  test('NBSP/U+00A0 缩进不再误识为缩进 bullet', async () => {
+    // ASCII-only LIST_ITEM_RE：含 NBSP 的"看似缩进"行不进 list path，
+    // 不再触发 closeTo 把已建立的嵌套 list 弹空。
+    const html = await render('1. a\n - weird\n');
+    // 第一行仍是合法 ol
+    expect(html).toMatch(/<ol[^>]*><li>a<\/li><\/ol>/);
+    // weird 行作为普通段落，不进入任何 ul
+    expect(html).not.toMatch(/<li>weird<\/li>/);
+  });
 });
