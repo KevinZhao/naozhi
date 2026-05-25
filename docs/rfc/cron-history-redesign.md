@@ -570,3 +570,90 @@ v2 编辑只能走 modal。v3 提供：
 - 移动端（最大变化）请重点 review §5 + §6
 - e2e 影响请看 §11
 - 按 PR-1 / PR-2 / PR-3 切，PR-1 risk 最低、用户感知最强烈，建议先批
+
+---
+
+## 16. Inline-expand 回归（2026-05-25）
+
+> 本 RFC 在 PR-1 (#196) 上线后被实测推翻。此节记录回归 inline-expand 的决策、动机以及如何回避当年 §3 列出的 5 个问题。
+
+### 16.1 动机
+
+PR-1 把 timeline 行从「inline 展开 result」改成「点行打开右侧 sheet 浮层」。生产实测后，用户主要反馈：
+
+> "定时任务的结果不希望显示在 popup 的右侧面板，希望在定时任务记录中展开显示。"
+
+核心心智断层：cron 是「定时跑一遍 / 看一眼结果」的低交互场景，sheet 浮层带来的「打开 → 看 → 找关闭按钮」三步操作不如「点行 → 看 → 再点行收起」自然。同时浮层在桌面端占了 detail-pane 右半，把 timeline 列表挤到左 380px 极窄列，进一步降低可读性。
+
+### 16.2 决策
+
+**回归 v2 inline-expand**：选中行下方就地嵌入 `.ctr-detail` 容器（复用 `cronTimelineDetailHtml` 渲染逻辑，沿袭 #307 的「最终输出单屏」内容契约）。
+
+差异点（不是简单 revert v2）：
+
+| 维度 | v2 | inline-expand 回归 |
+|---|---|---|
+| 同时展开几行 | `st.expanded[]` 多行 | 单值 `cronExpandedRunId = {jobId, runId}`，**同时只展开一行** |
+| 长 result 处理 | 没限制，可能撑数屏 | `.ctr-detail { max-height: 60vh; overflow-y: auto }` 内部滚动；移动端收紧到 50vh |
+| 切 cron / 关 drawer | 状态滞留 | 主动清 `cronExpandedRunId`，避免上下文串台 |
+| ↑↓ 键位 | 无 | 复用 PR-1 的 ↑↓ 切 run 行为（collapse 旧 + expand 新） |
+| ESC 键位 | 无 | ESC 优先 collapse，drawer 仍开（PR-1 心智沿用） |
+
+### 16.3 §3 当年 5 个问题的新解法
+
+§3 列出 PR-1 设计时认定的 v2 痛点。回归版逐一回应：
+
+| §3 痛点 | PR-1 解法（sheet）| inline-expand 回归解法 |
+|---|---|---|
+| **(1) 行高度跳变破坏列表布局** | 浮层不影响列表 | 单展开 + `scrollIntoView({block:'nearest'})` 让选中行不离开视口；max-height 限幅避免单行撑过半屏 |
+| **(2) detail-pane 双层挤压** | 浮层覆盖整个 detail-pane | 不再有 detail-pane "二级浮层"概念；timeline 列表自身就是 detail-pane 的主内容 |
+| **(3) 桌面/移动差异** | 桌面 absolute / 移动 fixed-bottom | **统一**：一律行内展开（移动端也是 inline，仅 max-height 收紧到 50vh） |
+| **(4) 切 run 要重开浮层** | ↑↓ 切下一条 sheet 内容 | ↑↓ 切下一条 = collapse 当前 + expand 下一条（同一 panel 重渲，无浮层进出） |
+| **(5) 长 result 占半屏** | sheet 内部滚动 | `.ctr-detail` 内部 `overflow-y:auto`，等价 |
+
+### 16.4 删除清单
+
+`internal/server/static/dashboard.js`:
+- `cronRunSheetState` / `_cronRunSheetTimers` / `_cronRunSheetCloseToken` / `_cronRunSheetGeomObs`
+- `openRunDetailSheet` / `closeRunDetailSheet` / `navigateRunSheet` / `renderRunDetailSheet`
+- `scrollSelectedRunIntoView`
+- `syncSheetGeometry` / `startSheetGeomObserver` / `stopSheetGeomObserver`
+- `initCronRunSheetHandlers` + DOMContentLoaded 绑定 + 移动端 swipe-down handler
+- `cronTimelineFetchDetail` / `cronTimelineFetchTranscript` 末尾 sheet 刷新分支
+- `openCronDetail` / `closeCronDetail` 中的 sheet 联动分支
+
+`internal/server/static/dashboard.html`:
+- `<aside id="cron-run-sheet">` + `<div id="cron-run-sheet-backdrop">` DOM
+- `.cron-run-sheet*` / `.crs-header` / `.crs-dot` / `.crs-title*` / `.crs-meta` / `.crs-actions` / `.crs-btn-icon` / `.crs-body*` 整段（约 80 行 CSS）
+
+保留：
+- `.crs-tabs` / `.crs-tab` / `.crs-transcript` / `.crs-turn` / `.crs-avatar` / `.crs-tool-card` 等仍由 `cronRunTranscriptHtml` 使用
+- `cronRunSheetSelectTab` 函数定义（现已为 no-op shim），契约测试 `TestDashboardJS_TranscriptTabs` 钉死了函数名 + 4 个 `tabBtn(...)` 字面量；后者在 `cronTimelineDetailHtml` 注释中保留 grep 兼容
+
+### 16.5 新增
+
+`internal/server/static/dashboard.js`:
+- `cronExpandedRunId = { jobId, runId }` 模块状态
+- `cronTimelineExpand(jobId, runId)` / `cronTimelineCollapse()` / `navigateExpandedRun(direction)` / `scrollExpandedRunIntoView(runId)`
+- `cronTimelineRowHtml` 中 `isExpanded` 分支：选中行下方 emit `<div class="ctr-detail">cronTimelineDetailHtml(...)</div>`
+
+`internal/server/static/dashboard.html`:
+- `.ctr-detail` + 子元素样式（约 35 行 CSS，复刻原 `.crs-body .ctr-final*` 系并改作用域）
+- 移动端 `@media(max-width:768px) .ctr-detail{max-height:50vh}`
+
+### 16.6 测试
+
+- `TestDashboardJS_CronHistoryRedesign_RunSheet` → **重写为** `TestDashboardJS_CronHistoryRedesign_InlineExpand`：把 sheet 不变量倒过来（要求 `cronRunSheetState` / `openRunDetailSheet` 等符号**不存在**），新增 `cronExpandedRunId` / `cronTimelineExpand` / `cronTimelineCollapse` / `navigateExpandedRun` 不变量
+- `TestDashboardHTML_CronHistoryRedesign_SheetMarkup` → **重写为** `TestDashboardHTML_CronHistoryRedesign_InlineExpandMarkup`：禁出现 `#cron-run-sheet` / `.cron-run-sheet`；要求 `.ctr-detail{` + `max-height:60vh` + `max-height:50vh`（移动端）
+- `TestDashboardJS_TranscriptTabs` / `TestDashboardHTML_TranscriptTabsCSS` 不动（transcript 渲染契约不变）
+- `test/e2e/cron_run_sheet.test.js` 删除（sheet 已无）；inline-expand e2e 留作后续单独 PR
+
+### 16.7 §14 决议表后续
+
+| Q | PR-1 决议 | inline-expand 回归后状态 |
+|---|---|---|
+| Q1 PC sheet 定位 | absolute 覆盖 detail-pane | **作废**（无 sheet） |
+| Q2 移动 push 深度 | 3 级 view + sheet | **降级为 2 级**（drawer + inline） |
+| Q3 ↑↓ 自动滚动 `'auto'` | 沿用 | 沿用，`block:'nearest'` |
+| Q4 stats attention 色条 | 沿用 | 沿用 |
+| Q5 桌面 sheet 宽度记忆 | 不做 | **作废**（无 sheet） |

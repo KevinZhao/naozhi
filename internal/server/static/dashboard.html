@@ -1406,85 +1406,46 @@ body.kbd-open .input-hints{display:none}
 .cron-timeline-panel .ctr.is-selected .ctr-time{color:var(--nz-text-strong)}
 .cron-timeline-panel .ctr.is-selected .ctr-dot{box-shadow:0 0 0 2px var(--nz-bg-1),0 0 0 3px var(--nz-accent)}
 
-/* ===== cron-history-redesign §6 — Run-Detail Sheet 共组件 =====
- * 桌面 (≥769)：position:absolute 仅覆盖 detail-pane（不挡列表，方便切 cron）
- * 移动 (<769)：position:fixed 全屏 bottom sheet（75vh，drag handle）
- * 同一组件，渲染逻辑复用 cronTimelineDetailHtml。 */
-.cron-run-sheet[hidden]{display:none!important}
-.cron-run-sheet{position:fixed;background:var(--nz-bg-1);border:1px solid var(--nz-border);box-shadow:-8px 0 24px rgba(0,0,0,.5);z-index:200;display:flex;flex-direction:column;transition:transform .25s ease,opacity .15s ease;opacity:0;pointer-events:none}
-.cron-run-sheet.is-open{opacity:1;pointer-events:auto}
-.crs-header{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-0);flex-shrink:0}
-.crs-dot{width:10px;height:10px;border-radius:50%;background:var(--nz-text-faint);flex-shrink:0}
-.crs-dot.ok{background:var(--nz-green)}
-.crs-dot.err{background:var(--nz-red)}
-.crs-dot.skip{background:var(--nz-text-faint)}
-.crs-dot.warn{background:var(--nz-amber)}
-.crs-dot.cancel{background:#a371f7}
-.crs-dot.run{background:var(--nz-accent);animation:cjDotPulse 1.4s ease-in-out infinite}
-.crs-title-wrap{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
-.crs-title{margin:0;font-size:15px;font-weight:600;color:var(--nz-text-strong);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.crs-meta{font-size:11px;color:var(--nz-text-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.crs-actions{display:flex;gap:2px;flex-shrink:0}
-.crs-btn-icon{width:32px;height:32px;border-radius:6px;border:1px solid transparent;background:transparent;color:var(--nz-text-mute);cursor:pointer;font-size:14px;line-height:1;display:inline-flex;align-items:center;justify-content:center;font-family:inherit;-webkit-tap-highlight-color:transparent}
-.crs-btn-icon:hover:not([disabled]){background:var(--nz-bg-2);color:var(--nz-text-strong);border-color:var(--nz-border)}
-.crs-btn-icon[disabled]{opacity:.35;cursor:not-allowed}
-.crs-btn-icon.crs-close{font-size:18px}
-.crs-body{flex:1;overflow-y:auto;padding:14px 16px;background:var(--nz-bg-0)}
-.crs-body .ctr-block{margin-bottom:12px}
-.crs-body .ctr-block:last-child{margin-bottom:0}
-.crs-body .ctr-block-label{font-size:10px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;display:flex;align-items:center;gap:6px}
-.crs-body .ctr-block.err .ctr-block-label{color:var(--nz-red)}
-.crs-body .ctr-bytes{text-transform:none;font-size:10px;color:var(--nz-text-faint)}
-.crs-body .ctr-block-body{margin:0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:var(--nz-text);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:4px;padding:10px 12px;white-space:pre-wrap;word-break:break-word;line-height:1.5;max-height:none}
-.crs-body .ctr-block.err .ctr-block-body{color:var(--nz-red)}
-.crs-body .ctr-loading,.crs-body .ctr-err-load,.crs-body .ctr-empty-detail{font-size:13px;color:var(--nz-text-mute);font-style:italic;padding:20px 4px;text-align:center}
-.crs-body .ctr-err-load{color:var(--nz-red)}
-.crs-body .ctr-fresh-hint{font-size:12px;color:var(--nz-text);background:rgba(31,111,235,.08);border:1px solid rgba(31,111,235,.25);border-radius:6px;padding:8px 10px;margin-bottom:10px;line-height:1.5}
-.crs-body .ctr-sid-chip{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--nz-accent);background:transparent;border:1px solid var(--nz-border);border-radius:3px;padding:1px 6px;font-size:11px;cursor:pointer}
-.crs-body .ctr-sid-chip:hover{background:rgba(31,111,235,.12);border-color:var(--nz-accent)}
-.crs-body .ctr-meta-row{font-size:11px;color:var(--nz-text-mute);margin-top:4px}
-.crs-body .ctr-meta-row code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:3px;padding:0 4px}
-/* 最终输出单屏视图：取代 4-tab 结构，只展示 result / 错误 / 兜底文本 */
-.crs-body .ctr-final{padding:2px 0}
-.crs-body .ctr-final-label{font-size:11px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px;display:flex;align-items:center;gap:6px}
-.crs-body .ctr-final.err .ctr-final-label{color:var(--nz-red)}
-.crs-body .ctr-final-tag{text-transform:none;font-size:10px;color:var(--nz-red);background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.35);border-radius:3px;padding:1px 6px}
-.crs-body .ctr-final-body{margin:0;font-size:13px;color:var(--nz-text);line-height:1.6;word-break:break-word;overflow-wrap:anywhere}
-.crs-body .ctr-final-body.md{font-family:inherit;white-space:normal}
-.crs-body .ctr-final-body:not(.md){font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;padding:10px 12px;white-space:pre-wrap;line-height:1.55}
-.crs-body .ctr-final.err .ctr-final-body{color:var(--nz-red);background:rgba(248,81,73,.06);border-color:rgba(248,81,73,.3)}
-.crs-body .ctr-final-body.md p{margin:0 0 10px}
-.crs-body .ctr-final-body.md p:last-child{margin-bottom:0}
-.crs-body .ctr-final-body.md > :first-child{margin-top:0}
-.crs-body .ctr-final-body.md > :last-child{margin-bottom:0}
-.crs-body .ctr-final-body.md pre{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;padding:10px 12px;overflow-x:auto}
-.crs-body .ctr-final-body.md code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
-.crs-body .ctr-final-body.md p code,.crs-body .ctr-final-body.md li code{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:3px;padding:0 4px}
+/* ===== §16 inline-expand 回归: 行内展开详情块 =====
+ * 选中行下方就地嵌入 .ctr-detail（cronTimelineDetailHtml 渲染）。
+ * 取代 v3 sheet 浮层 — 无几何同步、无浮层 backdrop、无桌面/移动分支差异。
+ * 长 result 通过 max-height + overflow-y:auto 内部滚动而不撑爆列表。
+ * 视觉上以浅色背景 + 上下边框区分于普通 timeline 行。 */
+.ctr-detail{padding:14px 16px;background:var(--nz-bg-0);border-top:1px solid var(--nz-border);border-bottom:1px solid var(--nz-border);max-height:60vh;overflow-y:auto;cursor:default}
+.ctr-detail .ctr-block{margin-bottom:12px}
+.ctr-detail .ctr-block:last-child{margin-bottom:0}
+.ctr-detail .ctr-block-label{font-size:10px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;display:flex;align-items:center;gap:6px}
+.ctr-detail .ctr-block.err .ctr-block-label{color:var(--nz-red)}
+.ctr-detail .ctr-bytes{text-transform:none;font-size:10px;color:var(--nz-text-faint)}
+.ctr-detail .ctr-block-body{margin:0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:var(--nz-text);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:4px;padding:10px 12px;white-space:pre-wrap;word-break:break-word;line-height:1.5;max-height:none}
+.ctr-detail .ctr-block.err .ctr-block-body{color:var(--nz-red)}
+.ctr-detail .ctr-loading,.ctr-detail .ctr-err-load,.ctr-detail .ctr-empty-detail{font-size:13px;color:var(--nz-text-mute);font-style:italic;padding:14px 4px;text-align:center}
+.ctr-detail .ctr-err-load{color:var(--nz-red)}
+.ctr-detail .ctr-fresh-hint{font-size:12px;color:var(--nz-text);background:rgba(31,111,235,.08);border:1px solid rgba(31,111,235,.25);border-radius:6px;padding:8px 10px;margin-bottom:10px;line-height:1.5}
+.ctr-detail .ctr-sid-chip{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--nz-accent);background:transparent;border:1px solid var(--nz-border);border-radius:3px;padding:1px 6px;font-size:11px;cursor:pointer}
+.ctr-detail .ctr-sid-chip:hover{background:rgba(31,111,235,.12);border-color:var(--nz-accent)}
+.ctr-detail .ctr-meta-row{font-size:11px;color:var(--nz-text-mute);margin-top:4px}
+.ctr-detail .ctr-meta-row code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:3px;padding:0 4px}
+/* 最终输出单屏视图：error → result → 兜底 assistant 文本（cronTimelineDetailHtml 决策链）*/
+.ctr-detail .ctr-final{padding:2px 0}
+.ctr-detail .ctr-final-label{font-size:11px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.ctr-detail .ctr-final.err .ctr-final-label{color:var(--nz-red)}
+.ctr-detail .ctr-final-tag{text-transform:none;font-size:10px;color:var(--nz-red);background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.35);border-radius:3px;padding:1px 6px}
+.ctr-detail .ctr-final-body{margin:0;font-size:13px;color:var(--nz-text);line-height:1.6;word-break:break-word;overflow-wrap:anywhere}
+.ctr-detail .ctr-final-body.md{font-family:inherit;white-space:normal}
+.ctr-detail .ctr-final-body:not(.md){font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;padding:10px 12px;white-space:pre-wrap;line-height:1.55}
+.ctr-detail .ctr-final.err .ctr-final-body{color:var(--nz-red);background:rgba(248,81,73,.06);border-color:rgba(248,81,73,.3)}
+.ctr-detail .ctr-final-body.md p{margin:0 0 10px}
+.ctr-detail .ctr-final-body.md p:last-child{margin-bottom:0}
+.ctr-detail .ctr-final-body.md > :first-child{margin-top:0}
+.ctr-detail .ctr-final-body.md > :last-child{margin-bottom:0}
+.ctr-detail .ctr-final-body.md pre{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;padding:10px 12px;overflow-x:auto}
+.ctr-detail .ctr-final-body.md code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+.ctr-detail .ctr-final-body.md p code,.ctr-detail .ctr-final-body.md li code{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:3px;padding:0 4px}
 
-/* 桌面：sheet 浮在 detail-pane 右半（Q1 决议：列表常驻可见 + timeline 半数行
- * 也常驻可见，让"同行二次点击关 sheet"这条 toggle 路径可达）。
- * 由 JS 同步 left/top/width/height 到 .cron-detail-pane bounding rect 右半
- * （见 dashboard.js syncSheetGeometry），CSS 只负责 transform 滑入动画。
- * Playwright 实测：sheet 不能用 absolute（DOM 在 body，无法锚 detail-pane；
- * reparent 会被 renderCronDrawer 的 innerHTML 重写吞掉），故走 fixed + JS。 */
-@media(min-width:769px){
-  .cron-run-sheet{transform:translateX(100%);border-left:1px solid var(--nz-border)}
-  .cron-run-sheet.is-open{transform:translateX(0)}
-}
-
-/* 移动：bottom sheet (75vh)，drag handle，软键盘适配 visualViewport */
+/* 移动端：屏小，detail 高度收紧到 50vh 防止占满整屏 */
 @media(max-width:768px){
-  .cron-run-sheet{left:0;right:0;bottom:0;top:auto;width:100%;height:auto;max-height:75vh;transform:translateY(100%);border-radius:16px 16px 0 0;border-bottom:none;border-left:none;border-right:none;box-shadow:0 -8px 24px rgba(0,0,0,.5);padding-bottom:max(0px,env(safe-area-inset-bottom))}
-  .cron-run-sheet.is-open{transform:translateY(0)}
-  .cron-run-sheet::before{content:'';display:block;width:36px;height:4px;background:var(--nz-text-faint);border-radius:2px;margin:8px auto;flex-shrink:0}
-  .crs-header{padding:8px 14px 10px}
-  .crs-actions .crs-btn-icon{width:36px;height:36px}
-  /* 移动端遮罩，点击关 sheet */
-  .cron-run-sheet-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:199;opacity:0;pointer-events:none;transition:opacity .2s ease}
-  .cron-run-sheet-backdrop.is-open{opacity:1;pointer-events:auto}
-}
-@media(min-width:769px){
-  .cron-run-sheet-backdrop{display:none}
+  .ctr-detail{max-height:50vh;padding:10px 12px}
 }
 
 /* ===== cron-panel-consolidation RFC §4 — drawer + list-pane =====
@@ -2283,28 +2244,8 @@ body.kbd-open .sidebar-footer{display:none}
     <div class="vo-hint" id="vo-hint"></div>
   </div>
 </div>
-<!-- cron-history-redesign §6: run detail sheet 共组件
-     桌面端：右滑抽屉（仅在 main 容器内）
-     移动端：bottom sheet (75vh)
-     沿用 cronTimelineDetailHtml 渲染逻辑；timeline 行不再 inline 展开。
-     默认隐藏，openRunDetailSheet() 加 .is-open 触发滑出。 -->
-<div class="cron-run-sheet-backdrop" id="cron-run-sheet-backdrop" hidden onclick="closeRunDetailSheet()"></div>
-<aside class="cron-run-sheet" id="cron-run-sheet" role="dialog" aria-modal="false" aria-labelledby="crs-title" aria-hidden="true" hidden>
-  <header class="crs-header">
-    <span class="crs-dot" id="crs-dot" aria-hidden="true"></span>
-    <div class="crs-title-wrap">
-      <h3 class="crs-title" id="crs-title" tabindex="-1">执行详情</h3>
-      <div class="crs-meta" id="crs-meta"></div>
-    </div>
-    <div class="crs-actions">
-      <button type="button" class="crs-btn-icon" id="crs-prev" title="上一条 (↑)" aria-label="上一条" disabled>&#8593;</button>
-      <button type="button" class="crs-btn-icon" id="crs-next" title="下一条 (↓)" aria-label="下一条" disabled>&#8595;</button>
-      <button type="button" class="crs-btn-icon" id="crs-copy" title="复制 run ID" aria-label="复制 run ID">&#8869;</button>
-      <button type="button" class="crs-btn-icon crs-close" id="crs-close" title="关闭 (Esc)" aria-label="关闭详情">&times;</button>
-    </div>
-  </header>
-  <div class="crs-body" id="crs-body"></div>
-</aside>
+<!-- §16 inline-expand 回归: cron-run-sheet 浮层 DOM 已删，详情现在直接嵌
+     在 timeline 行下方（cronTimelineRowHtml 内 .ctr-detail 容器）。 -->
 <div id="mem-popover" role="dialog" aria-label="记忆预览" aria-hidden="true">
   <button type="button" class="mem-pop-close" id="mem-pop-close" aria-label="关闭预览">&times;</button>
   <div id="mem-pop-content"></div>

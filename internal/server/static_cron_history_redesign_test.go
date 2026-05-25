@@ -5,23 +5,21 @@ import (
 	"testing"
 )
 
-// TestDashboardJS_CronHistoryRedesign_RunSheet pins the PR-1 invariants from
-// docs/rfc/cron-history-redesign.md §6 — Run-Detail Sheet 共组件:
+// TestDashboardJS_CronHistoryRedesign_InlineExpand pins the §16 invariants
+// (inline-expand 回归 2026-05-25)，取代 v3 的 sheet 浮层契约：
 //
-//  1. cronRunSheetState 模块状态存在
-//  2. openRunDetailSheet / closeRunDetailSheet / navigateRunSheet / renderRunDetailSheet 均存在
-//  3. cronTimelineSelectRun 替代 cronTimelineToggleRow（旧 API 仅作 shim 转发）
-//  4. cronTimelineRowHtml 不再 emit `<div class="ctr-detail">` 内联展开块
-//  5. ESC handler 优先关 sheet 再关 drawer
-//  6. ↑↓ 全局快捷键调 navigateRunSheet
-//  7. cronTimelineFetchDetail 在 sheet 命中同一 run 时刷新 sheet
-//  8. openCronDetail 切 cron 时关 sheet（清上下文，避免内容串台）
-//  9. closeCronDetail 时连带关 sheet
+//  1. cronExpandedRunId 模块状态存在（同时只展开一行）
+//  2. cronTimelineExpand / cronTimelineCollapse / navigateExpandedRun 均存在
+//  3. cronTimelineSelectRun 是行 onclick 入口；二次点击触发 collapse
+//  4. cronTimelineRowHtml 选中行下方就地 emit `<div class="ctr-detail">`
+//  5. ESC handler 优先关行内展开（cronTimelineCollapse），再关 drawer
+//  6. ↑↓ 全局快捷键调 navigateExpandedRun
+//  7. 全部 sheet 符号已删除（无残余依赖）
+//  8. openCronDetail 切 cron 时清 cronExpandedRunId（上下文隔离）
+//  9. closeCronDetail 时清 cronExpandedRunId（drawer 关 → 行内展开也无意义）
 //
-// 这些不变量保证 PR-1 的核心 UX：timeline 行不再 inline 展开 → 点击进 sheet →
-// ↑↓/Esc/同行二次点击切换或关闭。一旦有人无意中破坏其中任意一条，sheet 行为
-// 就会回退到 v2 的 inline-expand 模式，掩盖 review 出来的核心问题。
-func TestDashboardJS_CronHistoryRedesign_RunSheet(t *testing.T) {
+// 这些不变量保证：cron 任务结果显示在记录中行内展开，而不是右侧 popup。
+func TestDashboardJS_CronHistoryRedesign_InlineExpand(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
@@ -29,100 +27,96 @@ func TestDashboardJS_CronHistoryRedesign_RunSheet(t *testing.T) {
 	}
 	js := string(data)
 
-	// 1. Module-scoped sheet state.
-	if !strings.Contains(js, "const cronRunSheetState = {") {
-		t.Error("dashboard.js: cronRunSheetState 模块状态缺失 — sheet 必须有单一 state 源")
+	// 1. Module-scoped expanded state.
+	if !strings.Contains(js, "const cronExpandedRunId = {") {
+		t.Error("dashboard.js: cronExpandedRunId 模块状态缺失 — inline-expand 必须有单一 state 源")
 	}
 
 	// 2. Lifecycle functions.
 	for _, fn := range []string{
-		"function openRunDetailSheet(jobId, runId)",
-		"function closeRunDetailSheet()",
-		"function navigateRunSheet(direction)",
-		"function renderRunDetailSheet()",
+		"function cronTimelineExpand(jobId, runId)",
+		"function cronTimelineCollapse()",
+		"function navigateExpandedRun(direction)",
 	} {
 		if !strings.Contains(js, fn) {
-			t.Errorf("dashboard.js: 缺少 %s — sheet 生命周期 API 必备", fn)
+			t.Errorf("dashboard.js: 缺少 %s — inline-expand 生命周期 API 必备", fn)
 		}
 	}
 
-	// 3. cronTimelineSelectRun 是新主入口；旧 cronTimelineToggleRow 仅作 shim。
+	// 3. cronTimelineSelectRun 是行入口，二次点击 collapse。
 	if !strings.Contains(js, "function cronTimelineSelectRun(jobId, runId)") {
-		t.Error("dashboard.js: 缺少 cronTimelineSelectRun(jobId, runId) — 替代 v2 inline-expand 入口")
+		t.Error("dashboard.js: 缺少 cronTimelineSelectRun(jobId, runId)")
 	}
-	// 行 onclick 必须打到 cronTimelineSelectRun（不是旧 Toggle）
 	rowIdx := strings.Index(js, "function cronTimelineRowHtml(jobId, r, st)")
 	if rowIdx < 0 {
 		t.Fatal("dashboard.js: cronTimelineRowHtml 不存在")
 	}
-	rowEnd := rowIdx + 4000
+	rowEnd := rowIdx + 4500
 	if rowEnd > len(js) {
 		rowEnd = len(js)
 	}
 	rowBody := js[rowIdx:rowEnd]
 	if !strings.Contains(rowBody, "cronTimelineSelectRun(") {
-		t.Error("cronTimelineRowHtml: 行 onclick 必须调 cronTimelineSelectRun（PR-1 §6）")
+		t.Error("cronTimelineRowHtml: 行 onclick 必须调 cronTimelineSelectRun")
 	}
 
-	// 4. inline expand 必须移除 — 行 markup 不再 emit ctr-detail 容器。
-	if strings.Contains(rowBody, "ctr-detail") {
-		t.Error("cronTimelineRowHtml: 不能再 emit `ctr-detail` 容器（v2 inline-expand 已废弃，详情进 sheet）")
+	// 4. Inline expand 标志：选中行 emit ctr-detail 容器（v2 inline 形态回归）。
+	if !strings.Contains(rowBody, "ctr-detail") {
+		t.Error("cronTimelineRowHtml: 必须 emit `ctr-detail` 容器（行内展开详情块的宿主）")
 	}
-	if strings.Contains(rowBody, "isExpanded") {
-		t.Error("cronTimelineRowHtml: 不能再有 isExpanded 分支（PR-1 行只有选中态，无展开态）")
+	if !strings.Contains(rowBody, "isExpanded") {
+		t.Error("cronTimelineRowHtml: 必须有 isExpanded 分支控制展开渲染")
 	}
-	// 选中态：is-selected class + cronRunSheetState gate
-	if !strings.Contains(rowBody, "is-selected") {
-		t.Error("cronTimelineRowHtml: 必须 emit `is-selected` 选中态 class（与 sheet 联动）")
+	if !strings.Contains(rowBody, "cronExpandedRunId") {
+		t.Error("cronTimelineRowHtml: 选中态必须 gate 在 cronExpandedRunId 上")
 	}
-	if !strings.Contains(rowBody, "cronRunSheetState.runId") {
-		t.Error("cronTimelineRowHtml: 选中态必须 gate 在 cronRunSheetState 上")
+	if !strings.Contains(rowBody, "cronTimelineDetailHtml(") {
+		t.Error("cronTimelineRowHtml: 展开行内必须复用 cronTimelineDetailHtml 渲染详情")
 	}
 
-	// 5. ESC handler 优先关 sheet 再关 drawer。
-	// 通过更稳定的结构特征定位（"if (e.key !== 'Escape') return;"），
-	// 避免依赖注释字符串 — 注释一改测试 fatal，对维护者不友好。
+	// 5. ESC handler 优先 collapse 再关 drawer。
 	escIdx := strings.Index(js, "if (e.key !== 'Escape') return;")
 	if escIdx < 0 {
-		t.Fatal("dashboard.js: Global Esc handler 块未找到（搜索 \"if (e.key !== 'Escape') return;\"）")
+		t.Fatal("dashboard.js: Global Esc handler 块未找到")
 	}
 	escEnd := escIdx + 2500
 	if escEnd > len(js) {
 		escEnd = len(js)
 	}
 	escBody := js[escIdx:escEnd]
-	sheetCloseIdx := strings.Index(escBody, "closeRunDetailSheet()")
+	collapseIdx := strings.Index(escBody, "cronTimelineCollapse()")
 	drawerCloseIdx := strings.Index(escBody, "closeCronDetail()")
-	if sheetCloseIdx < 0 {
-		t.Error("Global Esc handler: 缺少 closeRunDetailSheet() 分支 — sheet 必须可 ESC 关闭")
+	if collapseIdx < 0 {
+		t.Error("Global Esc handler: 缺少 cronTimelineCollapse() 分支 — 行内展开必须可 ESC 关闭")
 	}
 	if drawerCloseIdx < 0 {
-		t.Error("Global Esc handler: 缺少 closeCronDetail() 分支（v2 已有，不应被本次 PR 移除）")
+		t.Error("Global Esc handler: 缺少 closeCronDetail() 分支（v2 已有，不应被本次改动移除）")
 	}
-	if sheetCloseIdx > 0 && drawerCloseIdx > 0 && sheetCloseIdx > drawerCloseIdx {
-		t.Error("Global Esc handler: closeRunDetailSheet 必须在 closeCronDetail 之前（sheet 是更靠前的浮层）")
+	if collapseIdx > 0 && drawerCloseIdx > 0 && collapseIdx > drawerCloseIdx {
+		t.Error("Global Esc handler: cronTimelineCollapse 必须在 closeCronDetail 之前（行展开是更靠前的状态）")
 	}
 
 	// 6. ↑↓ 全局键盘 handler。
-	if !strings.Contains(js, "navigateRunSheet(e.key === 'ArrowUp' ? 'prev' : 'next')") {
-		t.Error("dashboard.js: 缺少 ↑↓ 键盘绑定到 navigateRunSheet（PR-1 §6 Q3）")
+	if !strings.Contains(js, "navigateExpandedRun(e.key === 'ArrowUp' ? 'prev' : 'next')") {
+		t.Error("dashboard.js: 缺少 ↑↓ 键盘绑定到 navigateExpandedRun")
 	}
 
-	// 7. cronTimelineFetchDetail 命中 sheet 同一 run 时必须刷新 sheet body。
-	fetchIdx := strings.Index(js, "async function cronTimelineFetchDetail(jobId, runId)")
-	if fetchIdx < 0 {
-		t.Fatal("dashboard.js: cronTimelineFetchDetail 不存在")
-	}
-	fetchEnd := fetchIdx + 3500
-	if fetchEnd > len(js) {
-		fetchEnd = len(js)
-	}
-	fetchBody := js[fetchIdx:fetchEnd]
-	if !strings.Contains(fetchBody, "cronRunSheetState.open") || !strings.Contains(fetchBody, "renderRunDetailSheet()") {
-		t.Error("cronTimelineFetchDetail: detail 加载完成后必须刷新 sheet（如果 sheet 看的就是同一条 run）")
+	// 7. v3 sheet 符号已删除：禁止再出现 cronRunSheetState / openRunDetailSheet /
+	// closeRunDetailSheet / navigateRunSheet / renderRunDetailSheet 任意符号。
+	for _, banned := range []string{
+		"cronRunSheetState",
+		"openRunDetailSheet",
+		"closeRunDetailSheet",
+		"function navigateRunSheet",
+		"function renderRunDetailSheet",
+		"syncSheetGeometry",
+	} {
+		if strings.Contains(js, banned) {
+			t.Errorf("dashboard.js: sheet 浮层残余符号 %q 必须已被 inline-expand 替代", banned)
+		}
 	}
 
-	// 8. openCronDetail 切 cron 时关 sheet。
+	// 8. openCronDetail 切 cron 时清 cronExpandedRunId。
 	openIdx := strings.Index(js, "function openCronDetail(jobId, originRow)")
 	if openIdx < 0 {
 		t.Fatal("dashboard.js: openCronDetail 不存在")
@@ -132,11 +126,11 @@ func TestDashboardJS_CronHistoryRedesign_RunSheet(t *testing.T) {
 		openEnd = len(js)
 	}
 	openBody := js[openIdx:openEnd]
-	if !strings.Contains(openBody, "closeRunDetailSheet()") {
-		t.Error("openCronDetail: 切 cron 时必须关 sheet（避免上下文串台）")
+	if !strings.Contains(openBody, "cronExpandedRunId") {
+		t.Error("openCronDetail: 切 cron 时必须清 cronExpandedRunId（避免上下文串台）")
 	}
 
-	// 9. closeCronDetail 连带关 sheet。
+	// 9. closeCronDetail 时清 cronExpandedRunId。
 	closeIdx := strings.Index(js, "function closeCronDetail()")
 	if closeIdx < 0 {
 		t.Fatal("dashboard.js: closeCronDetail 不存在")
@@ -146,19 +140,18 @@ func TestDashboardJS_CronHistoryRedesign_RunSheet(t *testing.T) {
 		closeEnd = len(js)
 	}
 	closeBody := js[closeIdx:closeEnd]
-	if !strings.Contains(closeBody, "closeRunDetailSheet()") {
-		t.Error("closeCronDetail: drawer 关闭时必须连带关 sheet（drawer 是 sheet 的父级）")
+	if !strings.Contains(closeBody, "cronExpandedRunId") {
+		t.Error("closeCronDetail: drawer 关闭时必须清 cronExpandedRunId（drawer 是宿主）")
 	}
 }
 
-// TestDashboardHTML_CronHistoryRedesign_SheetMarkup pins the sheet DOM + CSS:
+// TestDashboardHTML_CronHistoryRedesign_InlineExpandMarkup pins inline-expand
+// CSS + 确认 sheet DOM 已被移除：
 //
-//  1. body 末尾有 #cron-run-sheet 容器（带 ARIA 属性）
-//  2. 桌面 (≥769) sheet 用 position:absolute（Q1 决议 — 仅覆盖 detail-pane）
-//  3. 移动 (≤768) sheet 用 bottom-sheet 布局（transform:translateY）
-//  4. backdrop（移动遮罩）存在
-//  5. 桌面：detail-pane 设 position:relative（让 absolute sheet 能锚定）
-func TestDashboardHTML_CronHistoryRedesign_SheetMarkup(t *testing.T) {
+//  1. body 末尾不再有 #cron-run-sheet 容器
+//  2. .ctr-detail 容器样式存在，且对长 result 有 max-height 保护
+//  3. 移动端 .ctr-detail 收紧 max-height 到 50vh
+func TestDashboardHTML_CronHistoryRedesign_InlineExpandMarkup(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardHTML.ReadFile("static/dashboard.html")
 	if err != nil {
@@ -166,49 +159,36 @@ func TestDashboardHTML_CronHistoryRedesign_SheetMarkup(t *testing.T) {
 	}
 	html := string(data)
 
-	// 1. Sheet 容器。
-	if !strings.Contains(html, `id="cron-run-sheet"`) {
-		t.Error("dashboard.html: 缺少 #cron-run-sheet 容器")
-	}
-	if !strings.Contains(html, `id="cron-run-sheet-backdrop"`) {
-		t.Error("dashboard.html: 缺少 #cron-run-sheet-backdrop（移动端遮罩）")
-	}
-	for _, marker := range []string{
-		`id="crs-title"`,
-		`id="crs-meta"`,
-		`id="crs-body"`,
+	// 1. Sheet 容器已删除。
+	for _, banned := range []string{
+		`id="cron-run-sheet"`,
+		`id="cron-run-sheet-backdrop"`,
 		`id="crs-prev"`,
 		`id="crs-next"`,
 		`id="crs-close"`,
-		`id="crs-copy"`,
-		`role="dialog"`,
-		`aria-modal="false"`, // 不是 modal — 用户可继续在 timeline 上 ↑↓ 切
+		`id="crs-body"`,
+		`.cron-run-sheet{`,
+		`.cron-run-sheet.is-open`,
 	} {
-		if !strings.Contains(html, marker) {
-			t.Errorf("dashboard.html: sheet 缺少 %s", marker)
+		if strings.Contains(html, banned) {
+			t.Errorf("dashboard.html: sheet 残余 %q 必须已被 inline-expand 替代", banned)
 		}
 	}
 
-	// 2. 桌面 sheet 用 fixed + JS 同步几何到 detail-pane 右半（Playwright 实测后调整）。
-	// CSS 不再依赖 absolute 锚定（sheet DOM 在 body 中，无法锚到 detail-pane；
-	// 强行 reparent 会被 renderCronDrawer 的 innerHTML 吞掉）。
-	// 桌面 transition: translateX(100%) → 0；坐标由 syncSheetGeometry() 算。
-	if !strings.Contains(html, ".cron-run-sheet{transform:translateX(100%)") {
-		t.Error("dashboard.html: 桌面 .cron-run-sheet 必须以 translateX(100%) 起始隐藏态")
+	// 2. inline-expand 容器样式必备。
+	for _, marker := range []string{
+		".ctr-detail{",
+		"max-height:60vh",
+		"overflow-y:auto",
+		".ctr-detail .ctr-final",
+	} {
+		if !strings.Contains(html, marker) {
+			t.Errorf("dashboard.html: inline-expand 样式缺少 %q", marker)
+		}
 	}
 
-	// 3. 移动：bottom sheet 布局。
-	// 在 max-width:768 媒体查询里，sheet 必须用 translateY 上滑。
-	if !strings.Contains(html, "translateY(100%)") {
-		t.Error("dashboard.html: 移动端 sheet 必须用 translateY(100%) 隐藏态")
-	}
-	// 移动端 backdrop 在 768 媒体查询内
-	if !strings.Contains(html, ".cron-run-sheet-backdrop") {
-		t.Error("dashboard.html: 缺少 .cron-run-sheet-backdrop CSS")
-	}
-
-	// 4. is-open class 控制显隐
-	if !strings.Contains(html, ".cron-run-sheet.is-open") {
-		t.Error("dashboard.html: sheet 必须用 .is-open class 触发滑出动画")
+	// 3. 移动端 max-height 收紧。
+	if !strings.Contains(html, "max-height:50vh") {
+		t.Error("dashboard.html: 移动端 .ctr-detail 应收紧到 max-height:50vh")
 	}
 }
