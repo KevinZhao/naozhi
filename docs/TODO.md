@@ -102,7 +102,7 @@
 - [ ] **R248-CR-5 — AgentLinker.Query vs QueryOrResolveFast 命名差异不表达行为（P2）** [REFACTOR]: `internal/session/agentlink/agentlink.go:33-50` 两方法返回 (LinkInfo, bool) 签名一样，仅靠 godoc 区分语义。方案：改 Lookup（缓存只读）+ Resolve（含 stat fallback）。
 - [ ] **R248-CR-6 — NoopCapabilities.Send panic 契约埋在 type docstring 中段（P2）** [REFACTOR]: `internal/dispatch/capabilities.go:65-83` 方法本身只有 "see type docstring"，IDE go-to-definition 跳方法时只看 method godoc，panic 契约对 hover 隐形。方案：把 "panics with msg X，原因 Y" 完整写在方法 godoc 上方。
 - [ ] **R248-CR-7 — wshub_agent.go vs wshub_subscribe.go handleAgentSubscribe 文件归属（P2）** [REFACTOR]: `internal/server/wshub_agent.go` 包含 (a) maybeWireLinkerTailer 内部 wiring + (b) enrichSnapshot + (c) handleAgentSubscribe WS handler 三种职责。方案：把 (c) 并入 wshub_subscribe.go（同 ValidateSessionKey 入口模式），wshub_agent.go 留 wiring + tailer 桥。
-- [~] **R248-CR-8 — dispatchCapabilities 三个方法各 3 行 forward 缺 godoc 解释（P3）** [REFACTOR]: `internal/server/send.go:649-669` 应说明"为什么不用 method value &c.s.sendWithBroadcast" — *Server 是接口受体，method value 会对每次调用 alloc funcval。 — F3 in-flight
+- [x] **R248-CR-8 — dispatchCapabilities 三个方法各 3 行 forward 缺 godoc 解释（P3）** [REFACTOR]: `internal/server/send.go:649-669` 应说明"为什么不用 method value &c.s.sendWithBroadcast" — *Server 是接口受体，method value 会对每次调用 alloc funcval。 *(已实施：serverCaps type godoc 加 "WHY METHODS, NOT METHOD-VALUE CLOSURES (R248-CR-8)" 段说明 funcval / receiver-box / 测试可换 fake 三点；Send/Takeover/ReplyFooter 三方法各加 1 行 anchor 指回 type godoc 避免重复。R248-CR-8。)*
 
 ### 性能（已审，全部确认无回归 — 见 Reviewer 3 报告）
 
