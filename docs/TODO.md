@@ -220,7 +220,7 @@
 - [~] **R247-CR-23 — slogPrintfLogger panic/recovered 字符串扫描负面陈述（P3）** [REPEAT-3]: `internal/cron/scheduler.go:807-815` 与 R246-CR-016 同根因。方案：抽命名常量 + godoc。
 - [ ] **R247-CR-24 — executeIfNotDeletedOrPaused godoc 历史 review 引用（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:38-49`。方案：去 review code 仅留行为说明。
 - [ ] **R247-CR-25 — 历史 review 编号注释累计 40+ 处（P3）** [REFACTOR]: `internal/cron/scheduler_run.go,scheduler.go` 多处。方案：归档时同步删除注释或加 docs/COMMENT_CONVENTIONS.md。
-- [ ] **R247-CR-26 — containsCronC0 函数名误导（P3）** [REFACTOR]: `internal/cron/store.go:241-266` 实际还查 bidi/LS/PS。方案：改名 containsCronUnsafe。
+- [x] **R247-CR-26 — containsCronC0 函数名误导（P3）** [REFACTOR]: `internal/cron/store.go:241-266` 实际还查 bidi/LS/PS。方案：改名 containsCronUnsafe。 *(已实现：函数改名 containsCronC0→containsCronUnsafe，godoc 同步说明检测范围含 C0+bidi+LS/PS；7 个调用点 internal/cron/store.go 全量切换。)*
 - [ ] **R247-CR-27 — Append truncate 三字段注释不对称（P3）** [REFACTOR]: `internal/cron/runstore.go:280-339`。方案：抽 shrinkOversizeRun helper。
 - [x] **R247-CR-28 — spawn budget 警告 magic factor 0.5（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:606-613`。方案：const spawnElapsedWarnRatio + godoc。 — 解决 2026-05-25 (F2)：抽 spawnElapsedWarnRatio = 0.5 const + godoc 解释取值依据；改用 time.Duration(float64(jobTimeout)*ratio) 算 spawnWarnBudget；slog 消息 "cron send budget exceeds job/2" 保留不动（runbook + docs/ops/pprof.md + metrics.go godoc 都按这串 grep），新增 warn_ratio 结构化字段。
 - [ ] **R247-CR-29 — TriggerNow 60 行 + 3 goroutine 分支（P3）** [REPEAT-3]: `internal/cron/scheduler_jobs.go:780-833`。方案：合并单 goroutine + 内部 if。注意：trigger_now_wg_done_test.go 的 CRON4 结构契约硬性要求"3 个 go func() + 3 个 defer Done"；要落地本 TODO 必须先调整该 test 表达新契约（"恰好 1 个 go func() 且包含 defer Done"），是 BREAKING-LOCAL 跨 test+impl，不适合 hourly pick。
