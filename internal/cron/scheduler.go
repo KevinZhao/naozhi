@@ -823,7 +823,18 @@ func (s *Scheduler) Stop() {
 // deleteJobLocked. Caller MUST NOT hold s.mu — router.Reset re-enters
 // router state and its notifyChange callback may take s.mu. Safe on a
 // nil router (tests). R240-GO-1.
+//
+// R247-GO-11: also defensive against a nil receiver. Sibling getters
+// (StartedAt / KnownSessionIDs) already short-circuit on a nil
+// *Scheduler so test fixtures can construct a partial Scheduler and
+// invoke deletion paths without dereferencing s. Without this guard a
+// test calling DeleteJobByID on a zero-value scheduler — or production
+// code that has not yet wired router — would NPE on s.router access
+// rather than returning quietly.
 func (s *Scheduler) resetRouterStub(jobID string) {
+	if s == nil {
+		return
+	}
 	if s.router == nil {
 		return
 	}
