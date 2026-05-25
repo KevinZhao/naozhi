@@ -79,6 +79,21 @@ type SessionRouter interface {
 	RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string)
 	// Reset discards the session for the given key (used by fresh-mode
 	// cron jobs and by Delete/Rename flows).
+	//
+	// Concurrency contract (R249-CR-14):
+	//   - Reset MUST NOT block on in-flight turns. Implementations must
+	//     short-circuit (or asynchronously complete) any active Send so
+	//     callers — notably the cron run goroutine that calls Reset
+	//     between two ticks — see bounded latency. A blocking Reset
+	//     would let one slow CLI turn pin the entire scheduler tick
+	//     loop and starve subsequent jobs.
+	//   - Callers MUST NOT hold scheduler.mu (or any lock the router's
+	//     notifyChange callback might re-acquire) when invoking Reset.
+	//     The router's Reset path may synchronously fan out a
+	//     notifyChange that re-enters scheduler state (e.g. to refresh
+	//     the dashboard projections), and re-entrant lock acquisition
+	//     would deadlock. Reset is invoked only from execute-time call
+	//     sites that have already released scheduler.mu.
 	Reset(key string)
 	// GetOrCreate returns an existing session or spawns a new one at
 	// execute time. The SessionStatus and *ManagedSession escape the
