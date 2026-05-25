@@ -2,6 +2,8 @@ package server
 
 import (
 	"errors"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -229,5 +231,49 @@ func TestUploadStoreTakeAll_EmptySliceReturnsNilNoErr(t *testing.T) {
 	taken, err = s.TakeAll([]string{}, "alice")
 	if err != nil || taken != nil {
 		t.Errorf("TakeAll([]) = (%v, %v), want (nil, nil)", taken, err)
+	}
+}
+
+// TestUploadStorePut_NoPanicOnRandFailure_SourceContract pins R247-SEC-20:
+// crypto/rand exhaustion in uploadStore.Put used to panic, taking the
+// entire HTTP server down. The fix maps the failure to errUploadStoreFull
+// + slog.Error so callers (which already retry on this sentinel) just see
+// a transient 503/429 instead of a process crash. The actual rand.Read
+// behaviour is platform-dependent and hard to fault-inject in a unit test,
+// so this is a source-scan regression guard: assert that Put references
+// errUploadStoreFull on rand.Read err and does NOT call panic in that
+// branch. Cheap insurance against a future refactor that re-introduces
+// the panic out of "this can't fail" thinking.
+func TestUploadStorePut_NoPanicOnRandFailure_SourceContract(t *testing.T) {
+	src, err := os.ReadFile("upload_store.go")
+	if err != nil {
+		t.Fatalf("read upload_store.go: %v", err)
+	}
+	body := string(src)
+	// Locate the Put function body.
+	startIdx := strings.Index(body, "func (s *uploadStore) Put(")
+	if startIdx < 0 {
+		t.Fatal("Put method not found in upload_store.go")
+	}
+	// Crude scan to next top-level func decl.
+	rest := body[startIdx:]
+	endIdx := strings.Index(rest[1:], "\nfunc ")
+	if endIdx < 0 {
+		endIdx = len(rest)
+	} else {
+		endIdx += 1
+	}
+	put := rest[:endIdx]
+
+	if !strings.Contains(put, "rand.Read") {
+		t.Error("Put body lost rand.Read call — surprising; verify byte-source still seeded")
+	}
+	// The rand-fail branch must surface errUploadStoreFull (the documented
+	// sentinel callers retry on) rather than crashing the process.
+	if !strings.Contains(put, "errUploadStoreFull") {
+		t.Error("Put body must return errUploadStoreFull on rand.Read failure (R247-SEC-20)")
+	}
+	if strings.Contains(put, "panic(") {
+		t.Error("Put body must NOT panic on rand.Read failure (R247-SEC-20 regression)")
 	}
 }

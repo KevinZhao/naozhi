@@ -164,15 +164,24 @@ type Manager struct {
 	// load-bearing comment.
 	cancelP atomic.Pointer[context.CancelFunc]
 
-	// Lifecycle hooks.  Held under hookMu so SetCallbacks (called late
-	// during startup wiring, after Hub is built) doesn't race
-	// recordRun callers.  Reads happen on every Tick (twice — once at
-	// run start, once at run end); writes are once or twice during
-	// init.  RWMutex lets concurrent ticks read in parallel without
-	// serialising on a single mutex.
-	hookMu       sync.RWMutex
-	onRunStarted func(DaemonRunStartedEvent)
-	onRunEnded   func(DaemonRunEndedEvent)
+	// Lifecycle hooks.  Held under atomic.Pointer so SetCallbacks
+	// (called late during startup wiring, after Hub is built) doesn't
+	// race recordRun callers. Reads happen on every Tick (twice — once
+	// at run start, once at run end); writes are once or twice during
+	// init.
+	//
+	// R242-GO-16 + R246-ARCH-6 alignment: previously held under a
+	// sync.RWMutex with plain function fields. Switched to
+	// atomic.Pointer[holder] to (a) drop the lock-acquire pair on every
+	// Tick read, (b) match the upstream/connector.go pattern where
+	// SetDiscoverFunc / SetPreviewFunc already use atomic.Pointer for
+	// the identical "wired late, read often" lifecycle, and (c) let
+	// the race detector enforce the invariant rather than relying on a
+	// "main is single-threaded" doc comment. See holder type docs in
+	// hook_holders.go for why we wrap the function values in a struct
+	// (atomic.Pointer needs a concrete pointee type).
+	onRunStarted atomic.Pointer[onRunStartedHolder]
+	onRunEnded   atomic.Pointer[onRunEndedHolder]
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -415,23 +424,40 @@ func (m *Manager) Inspector() []DaemonStatus {
 // (which is built after the Manager) can wire daemon_run_* broadcasts.
 //
 // Pass nil to clear a hook.  Either argument may be nil independently.
+//
+// R246-ARCH-6 alignment: implemented via atomic.Pointer.Store so
+// concurrent Set / load sequences are well-defined without a mutex.
+// The two hook fields are stored independently — passing one nil and
+// one non-nil clears one without affecting the other.
 func (m *Manager) SetCallbacks(onRunStarted func(DaemonRunStartedEvent), onRunEnded func(DaemonRunEndedEvent)) {
-	m.hookMu.Lock()
-	defer m.hookMu.Unlock()
-	m.onRunStarted = onRunStarted
-	m.onRunEnded = onRunEnded
+	if onRunStarted == nil {
+		m.onRunStarted.Store(nil)
+	} else {
+		m.onRunStarted.Store(&onRunStartedHolder{fn: onRunStarted})
+	}
+	if onRunEnded == nil {
+		m.onRunEnded.Store(nil)
+	} else {
+		m.onRunEnded.Store(&onRunEndedHolder{fn: onRunEnded})
+	}
 }
 
+// loadOnRunStarted returns the currently installed start hook, or nil
+// if none is set. Lock-free; safe from any goroutine.
 func (m *Manager) loadOnRunStarted() func(DaemonRunStartedEvent) {
-	m.hookMu.RLock()
-	defer m.hookMu.RUnlock()
-	return m.onRunStarted
+	if h := m.onRunStarted.Load(); h != nil {
+		return h.fn
+	}
+	return nil
 }
 
+// loadOnRunEnded returns the currently installed end hook, or nil if
+// none is set. Lock-free; safe from any goroutine.
 func (m *Manager) loadOnRunEnded() func(DaemonRunEndedEvent) {
-	m.hookMu.RLock()
-	defer m.hookMu.RUnlock()
-	return m.onRunEnded
+	if h := m.onRunEnded.Load(); h != nil {
+		return h.fn
+	}
+	return nil
 }
 
 // DaemonStatus is the public read-only view of a daemon's state.

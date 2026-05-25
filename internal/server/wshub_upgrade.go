@@ -157,7 +157,6 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	go func() { defer h.clientWG.Done(); c.readPump() }()
 }
 
-
 func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 	// Per-IP rate limit to prevent brute-force via rapid connect/auth/disconnect cycles.
 	if h.wsAuthLimiter != nil && !h.wsAuthLimiter(c.remoteIP) {
@@ -217,8 +216,10 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		// store). Mirrors the derivation in dashboard_send.go uploadOwner().
 		// R67-SEC-1.
 		if c.uploadOwner == "" && msg.Token != "" {
+			// R247-SEC-16: 128-bit owner key, parity with HTTP path
+			// (dashboard_send.go ownerKeyFromCookie / Bearer hash).
 			sum := sha256.Sum256([]byte(msg.Token))
-			c.uploadOwner = hex.EncodeToString(sum[:8])
+			c.uploadOwner = hex.EncodeToString(sum[:16])
 		}
 		c.SendRaw([]byte(wsAuthOkMsg))
 	} else {

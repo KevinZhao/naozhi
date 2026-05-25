@@ -555,7 +555,19 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// hook: every shipping browser ignores the directive today, but if
 	// any vendor revives the proposal we get integrity enforcement for
 	// free without another CSP edit.
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:; frame-src 'self' blob:; frame-ancestors 'none'; require-sri-for font")
+	//
+	// R243-SEC-4 / R244-SEC-P2-4 [REPEAT-3]: extend the same forward-compat
+	// hook to `script` and `style` tokens. Today's CDN-loaded resources
+	// (mermaid script, KaTeX script + stylesheet) ALL carry an `integrity`
+	// attribute so the directive is currently a no-op for naozhi —
+	// dashboard.js loadKatex / loadMermaid are the only call paths that
+	// inject CDN <script>/<link> tags. If a future contributor adds a CDN
+	// asset without `integrity=` and any browser later revives the spec,
+	// the policy will fail-closed instead of silently shipping unsigned
+	// CDN code. Vendoring the assets via //go:embed remains the proper
+	// long-term mitigation; this is the cheap "no regression" gate while
+	// that work is queued (see R247-SEC-23 NEEDS-DESIGN comment above).
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:; frame-src 'self' blob:; frame-ancestors 'none'; require-sri-for script style font")
 	// HSTS is only meaningful over TLS (RFC 6797 §7.2). Sending it on plain
 	// HTTP would still be honoured by browsers and can brick local HTTP
 	// loopback access for a year. Gate on the same isSecure() helper the

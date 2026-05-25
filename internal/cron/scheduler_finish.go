@@ -262,22 +262,24 @@ func sanitiseRunErrMsg(s string) string {
 }
 
 // emitOverlapSkipped runs the full RunStarted→finishRun lifecycle for a
-// CAS-rejected execution attempt. Despite the "Skipped" terminology, this
-// function emits BOTH a RunStarted event AND drives finishRun (which emits
-// RunEnded), so subscribers see the same started→ended pair as a normal
-// run; the state field carries RunStateSkipped + ErrClassOverlapSkipped so
-// dashboards can render it as a no-op pill instead of a real run timeline.
-// CronRunStartedTotal (via emitRunStarted) + the per-state metric (via
-// finishRun) both bump.
+// CAS-rejected execution attempt (a tick or TriggerNow that lost the
+// concurrency gate to an already-in-flight run of the same job). Despite
+// the "Skipped" terminology, this function emits BOTH a RunStarted event
+// AND drives finishRun (which emits RunEnded), so subscribers see the
+// same started→ended pair they would for a normal run; the state field
+// carries RunStateSkipped + ErrClassOverlapSkipped so dashboards render
+// it as a no-op pill instead of a real run timeline.
 //
-// This dual-event emission is intentional: it keeps the runs/<id> dashboard
-// drawer renderable and prevents subscriber state machines from missing
-// the "started" anchor when a manual TriggerNow collides with an
-// in-flight run. R233B-CR-2.
+// CronRunStartedTotal (via emitRunStarted) and the per-state finished
+// metric (via finishRun) both bump. The dual emit is intentional: it
+// keeps the runs/<id> dashboard drawer renderable and prevents
+// subscriber state machines from missing the "started" anchor when a
+// manual TriggerNow collides with an in-flight run.
 //
 // The CAS gate trips before any inflight metadata is populated, so we
-// synthesise a RunID + StartedAt locally — finishRun's skipPersist=true
-// short-circuit avoids writing the synthetic run to disk.
+// synthesise a RunID + StartedAt locally; finishRun's skipPersist=true
+// short-circuit keeps the synthetic run off disk (it only exists in the
+// WS broadcast stream).
 func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 	runID := generateRunID()
 	startedAt := time.Now()

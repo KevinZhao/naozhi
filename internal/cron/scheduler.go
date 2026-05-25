@@ -495,9 +495,27 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	}
 }
 
-// NotifyDefault returns the configured fallback IM target so the dashboard can
-// show users where a "notify on completion" toggle will deliver messages.
-func (s *Scheduler) NotifyDefault() NotifyTarget { return s.notifyDefault }
+// NotifyDefault returns the configured fallback IM target so the dashboard
+// can show users where a "notify on completion" toggle will deliver
+// messages. The value is the snapshot captured at NewScheduler time from
+// SchedulerConfig.NotifyDefault — runtime mutation is not supported, so
+// callers can cache the return value for the lifetime of the process.
+//
+// Returns the zero NotifyTarget when no fallback was configured; the
+// dashboard uses NotifyTarget.IsSet() to decide whether to render the
+// toggle hint. The zero value is also what jobs without an explicit
+// Notify target fall back to inside resolveNotifyTarget.
+//
+// Safe to call on a nil *Scheduler: returns the zero NotifyTarget. This
+// matches the nil-safe pattern used by Location() / StartedAt() so the
+// dashboard can render a placeholder during the bootstrap window before
+// the scheduler is wired. R247-CR-9.
+func (s *Scheduler) NotifyDefault() NotifyTarget {
+	if s == nil {
+		return NotifyTarget{}
+	}
+	return s.notifyDefault
+}
 
 // StartedAt 返回 Scheduler 最近一次 Start() 的时刻。用于 missed-schedule
 // 检测的启动抑制窗口。未 Start 前返回零值。
@@ -778,6 +796,17 @@ func (s *Scheduler) Stop() {
 	// skip triggerWG.Wait entirely (the leaked goroutines die when the
 	// process exits moments later). Either way saveJobs runs — losing it
 	// would undo mutations that had already returned 2xx to dashboard/IM.
+	//
+	// R246-GO-13: track stopStart and re-derive the remaining budget for
+	// the second select via time.After, instead of reusing deadline.C from
+	// a NewTimer across two select statements. Reusing a fired timer's
+	// channel is a known footgun (the receive cannot be guaranteed to
+	// observe the prior firing exactly once across both selects, and Go
+	// makes no documented guarantee about timer-channel buffering across
+	// independent receivers); a fresh time.After on the remaining budget
+	// is the explicit, documented pattern. The first select still uses
+	// the NewTimer so we can defer-Stop it on the early-drain path.
+	stopStart := time.Now()
 	deadline := time.NewTimer(stopBudget)
 	defer deadline.Stop()
 
@@ -816,11 +845,22 @@ func (s *Scheduler) Stop() {
 			s.triggerWG.Wait()
 			close(triggerDone)
 		}()
+		// R246-GO-13: derive remaining budget from stopStart instead of
+		// re-reading deadline.C. If cron.Stop drained at the very edge of
+		// the budget, remaining can be near-zero; clamp to a tiny floor so
+		// we still observe an instantaneous triggerDone (already-closed
+		// channel) without wedging on a 0-duration timer. The clamp is
+		// not a guaranteed minimum wait — both the channel and the timer
+		// are checked in the same select.
+		remaining := stopBudget - time.Since(stopStart)
+		if remaining < time.Millisecond {
+			remaining = time.Millisecond
+		}
 		select {
 		case <-triggerDone:
-		case <-deadline.C:
+		case <-time.After(remaining):
 			slog.Warn("cron scheduler: stop deadline exceeded during triggerWG wait, proceeding",
-				"budget", stopBudget)
+				"budget", stopBudget, "remaining_ms", remaining.Milliseconds())
 		}
 	}
 

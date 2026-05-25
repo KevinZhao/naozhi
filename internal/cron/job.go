@@ -194,18 +194,23 @@ const (
 	ErrClassPanic ErrorClass = "panic"
 )
 
-// hexIDBytes 是所有 cron 内部 ID（jobID / runID）的熵字节数。固定 8 字节
-// = 16 hex 字符；想加宽时改这一个常量即可两侧同步，避免 ID 宽度漂移。
+// hexIDEntropyBytes 是所有 cron 内部 ID（jobID / runID）的熵字节数（不是
+// 字符数）。固定 8 字节 → hex.EncodeToString → 16 hex 字符。想加宽时
+// 改这一个常量即可两侧同步，避免 ID 宽度漂移。
+//
+// R247-CR-17: 旧名 hexIDBytes 在 godoc 旁写"16-char hex"造成歧义——
+// "Bytes" 究竟是熵字节还是输出字符？改名 hexIDEntropyBytes 把语义钉死
+// 在熵源侧，调用点 make([]byte, hexIDEntropyBytes) 一眼可读。
 // R220-GO-2: 之前 generateID 与 generateRunID 各自定义 8，注释口口声声
 // "为将来扩展分离"但其实就是同源逻辑——把字节数提到常量后再保留两个
 // 公开名字以维持调用语义。
-const hexIDBytes = 8
+const hexIDEntropyBytes = 8
 
-// generateHexID 返回 hexIDBytes 个 crypto/rand 字节的小写 hex 表示。
+// generateHexID 返回 hexIDEntropyBytes 个 crypto/rand 字节的小写 hex 表示。
 // crypto/rand 在 Linux 下来自 getrandom(2)，失败仅在内核 entropy 池不
 // 可用的极端场景；视作不可恢复的环境错误，panic 等同于 fatal。
 func generateHexID() string {
-	b := make([]byte, hexIDBytes)
+	b := make([]byte, hexIDEntropyBytes)
 	if _, err := rand.Read(b); err != nil {
 		panic("crypto/rand unavailable: " + err.Error())
 	}

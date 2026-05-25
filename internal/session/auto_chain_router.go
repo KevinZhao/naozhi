@@ -177,11 +177,32 @@ func (r *Router) snapshotRouterExcludedLocked() SessionIDExcluder {
 // keeps phase 2 and phase 3 byte-for-byte equivalent so a future excluder
 // type added to the bundle lands in both phases by construction rather
 // than two coordinated edits.
+//
+// Two-helper split: this function is the locking shell; the actual
+// bundle construction lives in combinedExcluderHeld so callers that
+// already hold r.mu (e.g. runAutoChainBackfillOnce Phase 3, which
+// holds the lock through the apply loop) can build the same bundle
+// without re-entering r.mu. Keeping a single source of truth for
+// "what goes in the bundle" closes R242-ARCH-18's secondary inlining
+// at the backfill site.
 func (r *Router) snapshotCombinedExcluderLocked() combinedExcluder {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.combinedExcluderHeld()
+}
+
+// combinedExcluderHeld assembles the router-snapshot + extras combined
+// excluder. CALLER MUST HOLD r.mu (read or write). Used by
+// snapshotCombinedExcluderLocked (which adds the lock shell) and by
+// runAutoChainBackfillOnce Phase 3 (which already holds r.mu through
+// the apply loop). Centralising the slice layout here means a future
+// excluder source added to the bundle (extra-extras, future namespace
+// gate, etc.) lands in every consumer by construction rather than
+// requiring coordinated edits across two call sites — R242-ARCH-18
+// closure for the backfill path.
+func (r *Router) combinedExcluderHeld() combinedExcluder {
 	routerExcluder := r.snapshotRouterExcludedLocked()
 	extras := r.extraExcluders()
-	r.mu.Unlock()
 	inner := make([]SessionIDExcluder, 0, 1+len(extras))
 	inner = append(inner, routerExcluder)
 	inner = append(inner, extras...)
@@ -328,9 +349,14 @@ func (r *Router) runAutoChainBackfillOnce() {
 	// ── Phase 3 ──────────────────────────────────────────────────
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	verifyBase := []SessionIDExcluder{r.snapshotRouterExcludedLocked()}
-	verifyBase = append(verifyBase, r.extraExcluders()...)
-	verifier := combinedExcluder{inner: verifyBase}
+	// R242-ARCH-18: re-use combinedExcluderHeld so this Phase 3 verifier
+	// stays byte-for-byte equivalent to the Phase 2 build inside
+	// snapshotCombinedExcluderLocked. Previously inlined `routerExcluder
+	// + extras` here drifted independently from the spawn-path bundle
+	// (different slice-cap layout); both paths now share one source of
+	// truth so a future excluder source added to the bundle lands here
+	// by construction.
+	verifier := r.combinedExcluderHeld()
 
 	dirty := false
 	for _, d := range decisions {

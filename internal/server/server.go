@@ -760,6 +760,14 @@ func buildServer(opts ServerOptions) *Server {
 		// can spawn several exists calls back-to-back when a session is
 		// opened with many file references.
 		filesExistsLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, opts.TrustedProxy),
+		// R247-SEC-7: per-IP limiter for PUT /api/projects/config. The
+		// handler persists ProjectConfig to disk and broadcasts a WS
+		// update to every subscribed dashboard client; without a gate
+		// any authenticated caller can drive unbounded disk + fan-out.
+		// 5/sec burst 5 ≈ 5×60=300/min — well above interactive editing
+		// (a single user saves config sub-second after each edit) but
+		// well below abuse rates a script could reach.
+		configPutLimiter: newIPLimiterWithProxy(rate.Every(200*time.Millisecond), 5, opts.TrustedProxy),
 	}
 	agentIDs := make([]string, 0, len(agents)+1)
 	agentIDs = append(agentIDs, "general")
