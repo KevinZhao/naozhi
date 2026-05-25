@@ -101,6 +101,49 @@
 // outside this package use the methods on Process, not the
 // underlying helpers.
 //
+// # process_*.go file map (R243-ARCH-21)
+//
+// The Process state machine is split across 6 non-test
+// process_*.go files; a 2026-04 review (R243-ARCH-21,
+// REPEAT-3) flagged this as "拆得过细" and noted stale
+// "Deprecated" / TODO anchors that no longer reflected current
+// content. The split is preserved (each file owns a coherent
+// slice of the type's methods, total ~5.5 kLoC) but reviewers
+// MUST treat the per-file headers as authoritative, not the
+// filename token alone:
+//
+//   - process.go — struct, lifecycle constants, ProcessState
+//     enum, Spawn entry-point, sentinel errors. Owns the type
+//     declaration; everything else hangs off methods on
+//     *Process.
+//   - process_readloop.go — stdout NDJSON reader goroutine,
+//     event coalescing, watchdog timers. The hottest single
+//     file: every ev.recvAt assignment + EventLog AppendBatch
+//     comes from here.
+//   - process_send.go — Send() / Cancel() write path; user
+//     turn entry buffering; image attachment marshalling.
+//   - process_turn.go — turn boundary tracking + replay
+//     bookkeeping (turn IDs, optimistic-bubble dedup).
+//   - process_shim_io.go — shim transport framing helpers
+//     (shimWriter / shimLineReader); pure I/O, no semantics.
+//   - process_event_format.go — Event → EventEntry pure
+//     conversion + FormatToolInput. Earlier "Deprecated"
+//     header noise has been cleared (R243-ARCH-21); the
+//     EventEntriesFromEvent test-helper variant is the only
+//     thing reviewers might mistake for legacy and it is the
+//     ergonomic public-test surface.
+//   - process_event_query.go — read-only EventLog accessors
+//     (EventEntries / EventLastN / EventEntriesSince /
+//     EventEntriesBefore) + Linker lifecycle + InjectHistory.
+//
+// The eventual refactor — splitting eventbus / linker / payload
+// into subpackages — is tracked separately on R243-ARCH-21 and
+// requires breaking the *Process method-set up; until that
+// lands, treat this map as the topological anchor and prefer
+// localised godoc patches (this commit) over partial extractions
+// that would leave method receivers split across multiple
+// packages mid-refactor.
+//
 // # Public surface
 //
 // Cross-package callers should depend on the Process struct, the

@@ -169,6 +169,17 @@ func (s *Scheduler) saveMarshaledSeq(data []byte, seq uint64) {
 		// staleness gate permissive enough that a retry from any later
 		// mutation can still attempt to land a fresh snapshot.
 		slog.Error("save cron store", "err", err, "disk_full", osutil.IsDiskFull(err))
+		// R247-GO-15: deliberately do NOT advance lastSavedSeq on write
+		// failure. The seq counter tracks "what is on disk", not "what we
+		// most recently tried to persist" — bumping it here would let a
+		// subsequent in-flight save with seq < this one's seq incorrectly
+		// trip the staleness short-circuit above and skip its (presumably
+		// successful) write, causing the disk state to lag the in-memory
+		// state across the next read until another mutation comes along.
+		// Leaving lastSavedSeq pinned to the last *successful* write means
+		// the next mutator's saveMarshaledSeq will see (seq > last) and
+		// retry persistence with the freshest snapshot, so a transient
+		// ENOSPC / EIO recovers without operator intervention.
 		return
 	}
 	s.lastSavedSeq.Store(seq)

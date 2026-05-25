@@ -217,9 +217,20 @@ func labelKey(labels []string) string {
 // (not rune-aware) since labels are expected to be ASCII identifiers;
 // the worst case for an unexpected UTF-8 input is a key that ends with
 // half a rune which is still a valid expvar.Map key.
+//
+// R246-SEC-6: any literal `|` in v collides with the joined-tuple
+// separator used by labelKey, so two distinct tuples ("a|b","c") and
+// ("a","b|c") would otherwise share an expvar.Map bucket and silently
+// merge metric streams. Replace `|` with `_` here so the cap is the
+// only place that needs to know about the separator. Cheap fast path:
+// IndexByte first so we don't allocate when v is the common case
+// (ASCII identifier with no separators).
 func clipLabelSegment(v string) string {
 	if v == "" {
 		return LabelEmpty
+	}
+	if strings.IndexByte(v, '|') >= 0 {
+		v = strings.ReplaceAll(v, "|", "_")
 	}
 	if len(v) > maxLabelSegmentLen {
 		return v[:maxLabelSegmentLen]
