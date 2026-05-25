@@ -464,16 +464,16 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	if viaTriggerNow {
 		trigger = TriggerManual
 	}
-	// R234-GO-6: route every atomic.Pointer.Store through strHeap/timeHeap
-	// (runinflight.go) so the heap allocation is explicit rather than relying
-	// on escape-analysis lifting `&localVar`. Pre-existing semantics (one
-	// alloc per field on this path) are unchanged; the helpers exist purely
-	// as a readability + future-inliner safety anchor.
-	inflight.runID.Store(strHeap(runID))
-	inflight.startedAt.Store(timeHeap(startedAt))
-	inflight.phase.Store(strHeap(PhaseQueued))
-	inflight.trigger.Store(strHeap(string(trigger)))
-	inflight.sessionID.Store(strHeap(""))
+	// R234-GO-6: route every atomic.Pointer.Store through boxString/boxTime
+	// (runinflight.go) so the addressable storage is explicit rather than
+	// relying on escape-analysis lifting `&localVar`. Pre-existing semantics
+	// (one alloc per field on this path) are unchanged; the helpers exist
+	// purely as a readability + future-inliner safety anchor.
+	inflight.runID.Store(boxString(runID))
+	inflight.startedAt.Store(boxTime(startedAt))
+	inflight.phase.Store(boxString(PhaseQueued))
+	inflight.trigger.Store(boxString(string(trigger)))
+	inflight.sessionID.Store(boxString(""))
 	// R247-GO-1: freshSnap is set authoritatively from snap.fresh after
 	// snapshotJob runs under s.mu (line ~447); writing j.FreshContext here
 	// without the lock was redundant and -race-suspect.
