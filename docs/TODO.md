@@ -95,7 +95,10 @@
 
 ### 代码质量 / godoc / 命名
 
-- [ ] **R248-CR-4 — agentlink.go 包级 godoc 17 行 + 三段 Anchor 提 4 个编号（P2）** [REFACTOR]: `internal/session/agentlink/agentlink.go:1-17` 包文档读者多数 IDE hover 看不下。方案：留前 5 行（接口存在意义 + 谁实现），Anchor 段移到 docs/TODO.md。
+- [x] **R248-CR-1 — capabilities.go 注释/代码比 1:1（P1）** [REFACTOR]: `internal/dispatch/capabilities.go:1-91` 类型 godoc 含 60+ 行混杂 review-history 与契约说明，超过实际 type+method 代码量。 *(已实施：Capabilities interface godoc 25→9 行；NoopCapabilities 14→6 行；保留契约说明 + R243-ARCH-10 + R248-ARCH-2 anchor。)*
+- [x] **R248-CR-2 — wshub.go wiredLinkers 单字段堆叠 5 个 review 编号（P1）** [REFACTOR]: `internal/server/wshub.go:175-194` 注释提 R201/R230/R231/R233B/R239 等价于 git log 摘要。 *(已实施：godoc 18→9 行；保留 R201-CRIT-2 (历史 leak fix) + R239-ARCH-I (interface 化等价性) 两 anchor，其他历史编号删除。)*
+- [x] **R248-CR-3 — dispatchCapabilities 类型名与 dispatch.Capabilities interface 易混淆（P1）** [REFACTOR]: `internal/server/send.go:644` capabilities.go godoc line 24 已用了 "serverCapabilities" — 文档与实际类型名不一致。 *(PR #343 已实施：dispatchCapabilities → serverCaps；server/send.go + server.go + dispatch/capabilities.go godoc 同步对齐。)*
+- [~] **R248-CR-4 — agentlink.go 包级 godoc 17 行 + 三段 Anchor 提 4 个编号（P2）** [REFACTOR]: `internal/session/agentlink/agentlink.go:1-17` 包文档读者多数 IDE hover 看不下。方案：留前 5 行（接口存在意义 + 谁实现），Anchor 段移到 docs/TODO.md。
 - [ ] **R248-CR-5 — AgentLinker.Query vs QueryOrResolveFast 命名差异不表达行为（P2）** [REFACTOR]: `internal/session/agentlink/agentlink.go:33-50` 两方法返回 (LinkInfo, bool) 签名一样，仅靠 godoc 区分语义。方案：改 Lookup（缓存只读）+ Resolve（含 stat fallback）。
 - [ ] **R248-CR-6 — NoopCapabilities.Send panic 契约埋在 type docstring 中段（P2）** [REFACTOR]: `internal/dispatch/capabilities.go:65-83` 方法本身只有 "see type docstring"，IDE go-to-definition 跳方法时只看 method godoc，panic 契约对 hover 隐形。方案：把 "panics with msg X，原因 Y" 完整写在方法 godoc 上方。
 - [ ] **R248-CR-7 — wshub_agent.go vs wshub_subscribe.go handleAgentSubscribe 文件归属（P2）** [REFACTOR]: `internal/server/wshub_agent.go` 包含 (a) maybeWireLinkerTailer 内部 wiring + (b) enrichSnapshot + (c) handleAgentSubscribe WS handler 三种职责。方案：把 (c) 并入 wshub_subscribe.go（同 ValidateSessionKey 入口模式），wshub_agent.go 留 wiring + tailer 桥。
@@ -174,8 +177,8 @@
 - [ ] **R247-PERF-9 — diskListNewestFirst 串行 readRun（P2）** [REPEAT-3]: `internal/cron/runstore.go:617-631` 与 R246-PERF-2 同根因。方案：recentCacheEntry 缓存 sorted slice + 8 worker pool 并行解码。
 - [ ] **R247-PERF-10 — Append jobLock 期间 MkdirAll+Marshal+WriteFileAtomic（P2）** [REPEAT-2]: `internal/cron/runstore.go:282-339` 每条 syscall。方案：json.Marshal pool + sync.Once-per-jobID MkdirAll。
 - [ ] **R247-PERF-11 — marshalJobsLocked 每次 mutation 全表 sort+Marshal（P2）** [REPEAT-2]: `internal/cron/scheduler_persist.go:45-58` 50 jobs ≈ 100KB write × 每 finishRun。方案：Encoder + bytes.Buffer pool。
-- [x] **R247-PERF-12 — protocol_acp WriteMessage Marshal 无 pool（P2）** [REFACTOR]: `internal/cli/protocol_acp.go:308-356,675-680` ACP turn / permissionResponse 高频。方案：镜像 shimSendBufPool。 — 解决 2026-05-24：新增 acpEncPool（*bytes.Buffer + *json.Encoder pair），SetEscapeHTML(false) 与 shim 路径对齐；WriteMessage 与 permissionResponse 双热路径共用池；putACPEncBuf 在 cap > 64KB 时丢弃防止 image-payload 钉占；Encoder 自带 NDJSON \n 故移除 manual append。
-- [x] **R247-PERF-13 — eventlog Entries 全 ring 拷贝 ~140KB/call（P2）** [REPEAT-3]: `internal/cli/eventlog.go:1217-1245` dashboard subscribe 路径。方案：LastN 上限或 sync.Pool slice 复用。 — 解决 2026-05-24：sync.Pool[*[]EventEntry] cap=defaultEventLogSize；新增 ReleaseEntriesSlice 公共 API；Entries/LastN 改走 getEntriesSlice 池路径；池容量 cap 512 防止 outlier 钉占；clear 释放避免 string/slice/pointer 字段 leak；contract 文档化（slice 在 Release 前不得跨 goroutine 共享）。所有 cli 测试通过。
+- [ ] **R247-PERF-12 — protocol_acp WriteMessage Marshal 无 pool（P2）** [REFACTOR]: `internal/cli/protocol_acp.go:308-356,675-680` ACP turn / permissionResponse 高频。方案：镜像 shimSendBufPool。
+- [~] **R247-PERF-13 — eventlog Entries 全 ring 拷贝 ~140KB/call（P2）** [REPEAT-3]: `internal/cli/eventlog.go:1217-1245` dashboard subscribe 路径。方案：LastN 上限或 sync.Pool slice 复用。
 - [ ] **R247-PERF-14 — eventlog Subscribe 每次 alloc subscriber（P2）** [REFACTOR]: `internal/cli/eventlog.go:1141-1166` dashboard 高频 reconnect 形成分配峰。方案：close-once 限制改 broadcast cond。
 - [ ] **R247-PERF-15 — handleList projectList 每次 1Hz 全量 alloc（P2）** [REPEAT-3]: `internal/server/dashboard_session.go:554-572` R230C-PERF-7 已知。方案：atomic.Pointer + projectMgr 版本号失效。
 - [ ] **R247-PERF-16 — RecentSessions 无 prealloc（P2）** [REFACTOR]: `internal/discovery/recent.go:84-178` 7day×多 project 规模可观。方案：make 估上限。
