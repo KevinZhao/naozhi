@@ -7918,11 +7918,23 @@ const MAX_LIST_DEPTH = 6;
 // which preserves the \r on Windows-pasted text; without explicit handling
 // (.*)$ would not match (`.` excludes \r, $ does not anchor before \r
 // without the m flag), and the line silently falls out of the list path.
-const LIST_ITEM_RE = /^(\s*)(?:([-*])|(\d+)\.)\s+(.*?)\r?$/;
+// Leading whitespace is restricted to ASCII space + tab so leadingColumns
+// stays in sync with the captured prefix; a Unicode-`\s*` would consume
+// NBSP/U+2028/etc. while leadingColumns counted only space+tab, producing
+// cols=0 for a visually-indented bullet.
+const LIST_ITEM_RE = /^([ \t]*)(?:([-*])|(\d+)\.)[ \t]+(.*?)\r?$/;
+// Cheap shape check used by the lazy-continuation guard. Treats both digit
+// shapes (any length) — the digit-cap reject path in parseListItem returns
+// null, but for lazy-continuation purposes "this looks like a list bullet"
+// is exactly what we want: refuse to fold such lines into the previous <li>.
+const LIST_SHAPE_RE = /^[ \t]*(?:[-*]|\d+\.)[ \t]+/;
 // Reject anything > 3 digits as a list start: real ordinals max out around
 // dozens; 4+ digit prefixes are year/version/issue tokens ("2024. 关于...",
 // "1234. xxx") that the user does not want rendered as <ol start="2024">.
-const OL_START_MAX_DIGITS = 3;
+// The cap is enforced on numeric value, not string length, so "00100." (5
+// chars but value 100) is accepted while "2024." (4 chars, value 2024) is
+// rejected — symmetric vs. the documented intent.
+const OL_START_MAX = 999;
 
 function leadingColumns(s) {
   let cols = 0;
@@ -7943,11 +7955,12 @@ function parseListItem(line, baselineCols) {
   let depth = Math.floor(Math.max(0, cols - base) / LIST_DEPTH_STEP);
   if (depth > MAX_LIST_DEPTH) depth = MAX_LIST_DEPTH;
   if (m[2]) return { kind: 'ul', depth, cols, content: m[4] };
-  // Reject ordinals with too many digits — those are year/version tokens
-  // ("2024. 关于") not real list starts. Returning null pushes the line into
-  // the plain-text branch instead of opening <ol start="2024">.
-  if (m[3].length > OL_START_MAX_DIGITS) return null;
-  return { kind: 'ol', depth, cols, startNum: parseInt(m[3], 10), content: m[4] };
+  // Reject year/version tokens as list starts. parseInt cap (not string
+  // length) so "00100." (value 100) is accepted, "2024." rejected. Returning
+  // null pushes the line into the plain-text/lazy-continuation branch.
+  const startNum = parseInt(m[3], 10);
+  if (startNum > OL_START_MAX) return null;
+  return { kind: 'ol', depth, cols, startNum, content: m[4] };
 }
 
 function renderMdUncached(s) {
@@ -8044,18 +8057,47 @@ function renderMdUncached(s) {
       const li = parseListItem(line, baselineCols);
       if (li) {
         if (listStack.length === 0) baselineCols = li.cols;
+        // Step 1: when the new bullet matches an existing frame in the stack
+        // by *source column AND kind*, that frame owns the bullet. Pop down
+        // to it and re-use it as a sibling. This is the key correctness
+        // fix-up over the original lenient-promotion design: without it, a
+        // promoted-up sibling chain like "1. a\n- b\n- c\n" causes each `-`
+        // to first close the just-promoted <ul> (because parseListItem
+        // computes li.depth=0 from cols=0 while top.depth was promoted to 1)
+        // and then reopen a brand-new <ul> — every bullet ends up in its
+        // own one-item list. Walking the stack first lets us recognise that
+        // `- c` belongs to the `- b` frame and emit a sibling <li>.
+        for (let k = listStack.length - 1; k >= 0; k--) {
+          const f = listStack[k];
+          if (f.cols === li.cols && f.kind === li.kind) {
+            // Close everything strictly above this frame, then sibling-emit.
+            closeTo(f.depth);
+            chunks.push('</li><li>' + inlineMd(li.content));
+            // We did NOT mutate the frame's depth, so no extra book-keeping.
+            // Skip the rest of the dispatch.
+            li.handled = true;
+            break;
+          }
+          // Another frame at strictly shallower cols means we cannot match
+          // anything further down — treat the new bullet as belonging to
+          // a position deeper than that frame.
+          if (f.cols < li.cols) break;
+        }
+        if (li.handled) continue;
+
+        // Step 2: standard depth-based dispatch (unchanged from R1).
         const top = listStack[listStack.length - 1];
         if (top && top.depth > li.depth) {
           closeTo(li.depth);
         }
         let top2 = listStack[listStack.length - 1];
-        // Lenient nesting: when an unindented bullet of the opposite kind
-        // appears at the same visual depth as the current ol/ul, treat it as
-        // a nested child rather than slicing the parent list. LLM output
-        // routinely writes "1. parent\n- detail\n2. next" without indenting
-        // the bullets — strict CommonMark would render three separate lists
-        // (the dashboard screenshot's "全是 1." root cause). Capping the
-        // promotion at MAX_LIST_DEPTH keeps the stack bounded.
+        // Lenient nesting: an unindented bullet of the opposite kind at the
+        // same visual depth as the current frame becomes a nested child
+        // rather than slicing the parent list. LLM output routinely writes
+        // "1. parent\n- detail\n2. next" without indenting the bullets —
+        // strict CommonMark would render three separate lists (the
+        // dashboard screenshot's "全是 1." root cause). MAX_LIST_DEPTH cap
+        // keeps the stack bounded under adversarial deep-promote sequences.
         if (top2 && top2.depth === li.depth && top2.kind !== li.kind) {
           if (li.depth < MAX_LIST_DEPTH) {
             li.depth = li.depth + 1;
@@ -8116,12 +8158,24 @@ function renderMdUncached(s) {
       // the active top frame's source column folds into the open <li>. Using
       // top.cols (raw source column) instead of top.depth keeps the threshold
       // honest after lenient promotion bumped depth without bumping cols.
+      // Guard rails: never fold lines that *look* like a list bullet shape
+      // (ordinal capped out — see OL_START_MAX), a markdown table row, or
+      // a heading. Without these guards an indented "2024. ..." paragraph,
+      // an indented "| h | v |" table, or an indented "## sub" heading
+      // disappears into the previous <li> as silent inline text.
       if (listStack.length > 0) {
         const top = listStack[listStack.length - 1];
         const cols = leadingColumns(line);
         if (cols - top.cols >= LIST_DEPTH_STEP) {
-          chunks.push(' ' + inlineMd(line.trim()));
-          continue;
+          const trimmed = line.trim();
+          const looksLikeBlock =
+            LIST_SHAPE_RE.test(line) ||
+            /^\|.+\|$/.test(trimmed) ||
+            /^#{1,4}\s/.test(trimmed);
+          if (!looksLikeBlock) {
+            chunks.push(' ' + inlineMd(trimmed));
+            continue;
+          }
         }
       }
       closeAll();
