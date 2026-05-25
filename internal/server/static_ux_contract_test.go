@@ -6375,3 +6375,47 @@ func TestDashboardJS_EscIsPureString(t *testing.T) {
 		t.Errorf("esc() must not read back shared _escEl.innerHTML")
 	}
 }
+
+// TestDashboardJS_ShowGitRemoteSchemeAllowlist pins R244-SEC-P3-4: the
+// showGitRemote helper that drives the `git_remote_url` toast must NOT
+// hand an arbitrary URL to window.open without a scheme allowlist. ssh
+// remotes (`git@host:user/repo`, `ssh://user@host/repo`) can carry
+// embedded credentials (user:pass@host) that would leak via the toast
+// surface or address-bar tooltip on hover, and `javascript:` URLs would
+// trivially execute attacker code in the dashboard origin if the remote
+// string were ever attacker-controlled (cron config, project metadata).
+//
+// The fix gates window.open behind a positive startsWith allowlist
+// covering exactly {http://, https://, git://}. We pin both the
+// allowlist constant and the gating shape so a future copy-paste cannot
+// drop the leading anchor (which would let "javascript:foo http://..."
+// past) or relax the scheme set without an explicit test update.
+func TestDashboardJS_ShowGitRemoteSchemeAllowlist(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// Allowlist must include exactly the three permitted schemes.
+	wantAllowlist := "const allowed = ['https://', 'http://', 'git://'];"
+	if !strings.Contains(js, wantAllowlist) {
+		t.Errorf("showGitRemote must declare scheme allowlist %q", wantAllowlist)
+	}
+
+	// The window.open call must be reachable only after the safe-flag
+	// check; the surrounding shape (`if (safe)`) is what the allowlist
+	// gates. If a refactor moves window.open out of the gate the safe
+	// branch wouldn't sit immediately above the call any more.
+	if !strings.Contains(js, "if (safe) {\n    window.open(url, '_blank', 'noopener,noreferrer');") {
+		t.Errorf("showGitRemote must gate window.open behind the safe flag (allowlist match)")
+	}
+
+	// Lowercased prefix probe — case-insensitive scheme matching per
+	// RFC 3986 §3.1. The lowercase normalisation MUST stay so an input
+	// like `JAVASCRIPT:foo` cannot bypass the lower-case allowlist.
+	if !strings.Contains(js, "const lower = String(url).toLowerCase();") {
+		t.Errorf("showGitRemote must lowercase the URL before scheme prefix probe")
+	}
+}
