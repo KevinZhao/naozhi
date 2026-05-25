@@ -172,23 +172,15 @@ type Hub struct {
 	// check. Shutdown tears it down alongside other background loops.
 	tailers *tailerRegistry
 
-	// wiredLinkersMu + wiredLinkers track the AgentLinker instances
-	// we've already attached the server-side OnResolve+task_done callbacks
-	// to, so repeat completeSubscribe calls (re-subscribe on reconnect)
-	// don't register duplicate callbacks. Kept per-Hub so tests that build
-	// multiple Hubs don't share state; Shutdown clears the map so the
-	// Linker pointers can be GC'd (previously they were leaked in a
-	// package-level map for the process lifetime). R201-CRIT-2.
+	// wiredLinkersMu + wiredLinkers dedup OnResolve / task_done callback
+	// registration so re-subscribes on reconnect don't pile up duplicate
+	// callbacks. Per-Hub (not package-level) so multi-Hub tests don't share
+	// state; Shutdown nils the map so AgentLinker references can be GC'd —
+	// the package-level leak this replaces was R201-CRIT-2.
 	//
-	// R239-ARCH-I (was R230-CQ-1 / R231-ARCH-6 / R233B-ARCH-3): the map
-	// key is the agentlink.AgentLinker interface — server's coupling to
-	// internal/cli is now mediated through the interface so future ACP /
-	// Gemini backends without a *cli.SubagentLinker concept can plug a
-	// noop implementation here. Interface map keys dedup on (dynamic
-	// type, pointer value); the *cli.SubagentLinker producer keeps a 1:1
-	// pointer identity per cli.Process, so the dedup semantics are
-	// equivalent to the prior pointer-keyed map. Shutdown still drops the
-	// map so the legacy package-level-leak hazard does not return.
+	// Interface map keys dedup on (dynamic type, pointer value), equivalent
+	// to the prior *cli.SubagentLinker pointer-keyed map under the current
+	// 1:1 (cli.Process → *SubagentLinker) producer. R239-ARCH-I.
 	wiredLinkersMu sync.Mutex
 	wiredLinkers   map[agentlink.AgentLinker]struct{}
 }

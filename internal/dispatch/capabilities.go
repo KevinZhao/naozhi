@@ -7,30 +7,15 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// Capabilities groups the host-supplied hooks that Dispatcher needs to
-// reach back into the surrounding Server (send-with-broadcast, takeover,
-// per-session reply tag). Bundling these into a single narrow interface
-// supersedes the legacy closure-as-DI pattern (DispatcherConfig.SendFn /
-// TakeoverFn / ReplyFooterFn) so:
+// Capabilities groups the host-supplied hooks the Dispatcher reaches into the
+// surrounding Server through (Send / Takeover / ReplyFooter). Implementations
+// live in the host package (server.serverCaps) so dispatch stays free of
+// server / Hub references.
 //
-//   - Wireup is one assignment (Capabilities: serverCaps{s}) instead of
-//     three closure-fields that are easy to omit silently.
-//   - The Dispatcher hot path can call the methods unconditionally; the
-//     constructor always installs a non-nil implementation (NoopCapabilities
-//     when callers don't supply one).
-//   - Future extensions (e.g. a 4th hook for stream cancel) require one
-//     interface method instead of a new closure field + a nil-fallback line.
-//
-// Implementations live in the host package (server.serverCapabilities) so
-// dispatch stays free of cli.Server / Hub references, preserving the
-// reverse-dependency boundary documented in docs/rfc/server-split.md.
-//
-// The legacy DispatcherConfig.SendFn / TakeoverFn / ReplyFooterFn fields
-// remain supported via an internal closure→Capabilities adapter so existing
-// test seams (dispatch_test.go, server_test.go) keep building during the
-// transition. New code SHOULD set DispatcherConfig.Capabilities directly.
-//
-// Tracked under TODO R243-ARCH-10 (see docs/TODO.md).
+// NewDispatcher always installs a non-nil Capabilities so the hot path can
+// dereference unconditionally; legacy DispatcherConfig.{SendFn,TakeoverFn,
+// ReplyFooterFn} closures are wrapped in an internal adapter for backward
+// compatibility. R243-ARCH-10.
 type Capabilities interface {
 	// Send forwards a turn payload to the session router after guard /
 	// queue gating has succeeded. Production wires
@@ -58,26 +43,21 @@ type Capabilities interface {
 	ReplyFooter(backendID string) string
 }
 
-// NoopCapabilities is the default Capabilities used when callers leave
-// DispatcherConfig.Capabilities unset AND don't provide the legacy
-// SendFn/TakeoverFn/ReplyFooterFn fields.
+// NoopCapabilities is the default Capabilities installed when callers leave
+// DispatcherConfig.Capabilities unset AND don't provide a legacy *Fn closure.
+// Take/ReplyFooter return their documented defaults (false / ""); Send panics.
 //
-// Send deliberately panics: the historical contract for the SendFn closure
-// was "no fallback — missing wireup must surface as a constructor-time
-// panic, not a silent drop in production" (dispatch.go docstring on the
-// old sendFn field). We keep that semantic so a misconfigured deployment
-// fails loud at boot rather than accepting messages and dropping the
-// reply silently. Tests exercising non-send paths (e.g. fakeGuard
-// scenarios) MUST still install a stub Send.
-//
-// Takeover and ReplyFooter return their documented defaults (false / "")
-// so headless constructions can rely on the dispatcher hot path
-// dereferencing caps unconditionally without nil guards.
+// In production, NewDispatcher's R248-ARCH-2 boot-panic gate fires before any
+// message arrives so misconfigured wireup fails loud at startup; this method
+// is the runtime backstop for tests/headless contexts that opt out via
+// AllowMissingSender and then still try to call Send.
 type NoopCapabilities struct{}
 
-// Send panics: see type docstring. Mirrors the pre-refactor contract that
-// DispatcherConfig.SendFn was required and NewDispatcher installed no
-// fallback.
+// Send panics with a "wireup missing" message. NoopCapabilities is the
+// constructor-default; the boot-panic gate (NewDispatcher, R248-ARCH-2)
+// catches missing Send wireup before any traffic arrives, so reaching this
+// method at runtime means a test opted out via DispatcherConfig.
+// AllowMissingSender and then still tried to call Send.
 func (NoopCapabilities) Send(context.Context, string, *session.ManagedSession, string, []cli.ImageData, cli.EventCallback) (*cli.SendResult, error) {
 	panic("dispatch: Capabilities.Send not wired (set DispatcherConfig.Capabilities or DispatcherConfig.SendFn)")
 }
