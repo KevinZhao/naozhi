@@ -893,6 +893,14 @@ func (w *perKeyWriter) flush(p *Persister) error {
 		if p.opts.IdxStride > 1 {
 			w.idxScratch = kept
 		}
+		// R243-PERF-10: AppendBatch consumes `kept` synchronously (see
+		// idx.go's slice-ownership contract). The aliasing is therefore
+		// safe — by the time we reset pendingIdx[:0] below, every byte of
+		// `kept` has already been marshalled into idxWriter.batchBuf and
+		// flushed to the underlying *os.File. If AppendBatch ever changes
+		// to retain `entries` (e.g. async write, deferred coalescing) the
+		// stride<=1 path must defensively copy here OR force kept != pending
+		// unconditionally.
 		if err := w.idxWriter.AppendBatch(kept); err != nil {
 			return fmt.Errorf("append idx batch: %w", err)
 		}

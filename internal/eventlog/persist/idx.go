@@ -73,6 +73,16 @@ func (w *IdxWriter) Append(e schema.IdxEntry) error {
 // The marshal scratch (`w.batchBuf`) is reused across calls — a single
 // Persister writer goroutine owns this writer, so no synchronisation
 // is required. R237-PERF-11.
+//
+// Slice ownership contract (R243-PERF-10): `entries` is consumed
+// synchronously — marshalled into w.batchBuf and written before this
+// method returns. AppendBatch does NOT retain a reference past return,
+// so callers may safely alias the input with a buffer they reset (e.g.
+// pendingIdx[:0]) immediately after the call. Any future change that
+// defers consumption (e.g. async write) MUST first defensively copy
+// `entries`, otherwise perKeyWriter.flush's stride<=1 fast-path —
+// where `kept == pending` and the caller resets pendingIdx to []—
+// would corrupt previously-queued entries.
 func (w *IdxWriter) AppendBatch(entries []schema.IdxEntry) error {
 	if len(entries) == 0 {
 		return nil
