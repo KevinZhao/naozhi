@@ -39,8 +39,18 @@ func TestRequestHost(t *testing.T) {
 		{"no_proxy_ignores_fwd", "naozhi.example", "evil.example", false, "naozhi.example"},
 		{"trusted_proxy_uses_fwd", "internal:8180", "naozhi.example", true, "naozhi.example"},
 		{"trusted_proxy_fallback_when_missing", "naozhi.example", "", true, "naozhi.example"},
-		{"trusted_proxy_multi_value_picks_first", "internal", "naozhi.example, cache.example", true, "naozhi.example"},
-		{"trusted_proxy_trims_whitespace", "internal", "  naozhi.example  , cache", true, "naozhi.example"},
+		// R236-SEC-03: take the LAST value (the one appended by the
+		// trusted proxy itself); a client-supplied first entry is
+		// untrusted.
+		{"trusted_proxy_multi_value_picks_LAST", "internal", "naozhi.example, cache.example", true, "cache.example"},
+		{"trusted_proxy_trims_whitespace_last_value", "internal", "  naozhi.example  ,  cache.example  ", true, "cache.example"},
+		// R236-SEC-03 attacker scenario: client prepends
+		// X-Forwarded-Host: attacker.com before the request reaches
+		// the trusted proxy; the proxy then appends the real host.
+		// requestHost must return the proxy-appended last entry so
+		// the CSRF Origin gate compares against the genuine host,
+		// not the attacker-controlled prefix.
+		{"trusted_proxy_attacker_prepended", "internal", "attacker.com, real-host.example", true, "real-host.example"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

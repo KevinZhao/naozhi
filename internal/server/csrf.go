@@ -19,15 +19,31 @@ func isSafeMethod(m string) bool {
 }
 
 // requestHost returns the effective host the browser (or trusted proxy)
-// addressed this request at. Mirrors the wshub CheckOrigin helper: when
-// trustedProxy is set and the X-Forwarded-Host header is present, we pick
-// the first value from the (possibly comma-separated) list as RFC 7239
-// allows. Otherwise we trust r.Host directly.
+// addressed this request at. When trustedProxy is set and the
+// X-Forwarded-Host header is present, we pick the LAST value from the
+// (possibly comma-separated) list — the one appended by the trusted
+// proxy itself, which cannot be spoofed by the client. Otherwise we
+// trust r.Host directly.
+//
+// R236-SEC-03: previously we took the FIRST value, which under
+// trustedProxy=true deployments behind ALB/CloudFront let an attacker
+// prepend `X-Forwarded-Host: attacker.com` so the proxy-appended real
+// host became the second entry — the CSRF Origin gate would then match
+// `Origin: attacker.com` against `attacker.com` and let the cross-site
+// write through. Mirrors netutil.ClientIP's last-XFF semantics so both
+// gates trust the same boundary.
 func requestHost(r *http.Request, trustedProxy bool) string {
 	host := r.Host
 	if trustedProxy {
 		if fwd := r.Header.Get("X-Forwarded-Host"); fwd != "" {
-			host = strings.TrimSpace(strings.SplitN(fwd, ",", 2)[0])
+			tail := fwd
+			if i := strings.LastIndexByte(fwd, ','); i >= 0 {
+				tail = fwd[i+1:]
+			}
+			tail = strings.TrimSpace(tail)
+			if tail != "" {
+				host = tail
+			}
 		}
 	}
 	return host
