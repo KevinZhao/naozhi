@@ -353,6 +353,25 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 // control_request channel. *session.ManagedSession satisfies this; cron
 // tests stub it with a counting mock to assert the watchdog fired
 // exactly when the deadline elapsed.
+//
+// SIGNATURE NOTE (R239-GO-2): InterruptViaControl here returns
+// session.InterruptOutcome — DELIBERATELY different from the lower-level
+// session.processIface.InterruptViaControl, which returns plain `error`.
+// The two operate at different layers:
+//
+//   - processIface (internal/session) is the raw cli.Process facet — its
+//     error reflects pipe-write / encode failure on the control_request
+//     channel and tells nothing about whether the CLI actually had an
+//     active turn to abort.
+//   - ManagedSession.InterruptViaControl (which this interface mirrors)
+//     wraps that and additionally classifies the no-active-turn / dead-
+//     process / unsupported-by-backend cases into structured outcomes.
+//     Cron's watchdog needs that classification to log "deadline fired,
+//     interrupt did not land" vs "deadline fired, ACP backend unsupported".
+//
+// Refactor footgun: a future "InterruptViaControl" added anywhere on the
+// session-facing surface MUST follow the layer convention — raw process =>
+// error, managed session => InterruptOutcome. Do NOT collapse the two.
 type deadlineInterrupter interface {
 	InterruptViaControl() session.InterruptOutcome
 }
