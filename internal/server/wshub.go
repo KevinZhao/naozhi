@@ -292,6 +292,16 @@ type Hub struct {
 	// R244-SEC-P2-3 / #888.
 	userSendLimitersMu sync.Mutex
 	userSendLimiters   map[string]*rate.Limiter
+
+	// connCountByOwnerMu + connCountByOwner enforce a per-uploadOwner WS
+	// connection sub-cap (maxConnsPerOwner) on top of the global
+	// maxWSConns ceiling. Without it a single token holder can monopolise
+	// the entire WS pool — R229-SEC-8 / #1022. Increment happens at
+	// HandleUpgrade after owner derivation; decrement at unregister so
+	// reconnects free the slot deterministically. uploadOwner == ""
+	// (anonymous no-token-mode pre-cookie) skips the per-owner cap.
+	connCountByOwnerMu sync.Mutex
+	connCountByOwner   map[string]int
 }
 
 // HubOptions holds configuration for a Hub.
@@ -383,6 +393,9 @@ func NewHub(opts HubOptions) *Hub {
 	// R244-SEC-P2-3 / #888: per-uploadOwner send-budget map. Initialised
 	// here so allowSendForOwner can lookup-or-create without a sync.Once.
 	h.userSendLimiters = make(map[string]*rate.Limiter)
+	// R229-SEC-8 / #1022: per-uploadOwner connection counter so a single
+	// token cannot monopolise the global maxWSConns pool.
+	h.connCountByOwner = make(map[string]int)
 	// R239-PERF-6: pre-bind the AfterFunc callback so BroadcastSessionsUpdate
 	// (high-frequency sidebar refresh path) reuses one heap-allocated closure
 	// for the lifetime of the Hub instead of allocating a fresh one per call.
@@ -494,6 +507,8 @@ func (h *Hub) unregister(c *wsClient) {
 		// `removed` so a double-unregister (stale close path) cannot leak
 		// the counter into negative territory.
 		h.connCount.Add(-1)
+		// R229-SEC-8 / #1022: free the per-uploadOwner sub-cap slot too.
+		h.releaseOwnerSlot(c.uploadOwner)
 		// Drop any agent_subscribe refs this client was holding so refCount
 		// stays accurate — otherwise an abrupt disconnect (mobile sleep)
 		// would leave the tailer in broadcasting mode forever, wedging a
@@ -529,6 +544,56 @@ func (h *Hub) unregister(c *wsClient) {
 // envelope instead of a hand-picked 256 that silently disables pooling
 // whenever connCount grows past it.
 const maxWSConns = 500
+
+// maxConnsPerOwner is the per-uploadOwner sub-cap. Sized so a single
+// power-user with browser tabs across multiple devices, plus a CLI/IDE
+// integration or two, fits comfortably while still preventing a single
+// stolen token from monopolising the maxWSConns global pool.
+// R229-SEC-8 / #1022.
+const maxConnsPerOwner = 20
+
+// reserveOwnerSlot atomically increments the per-uploadOwner connection
+// counter, returning false when the sub-cap (maxConnsPerOwner) is
+// already exhausted. The caller is responsible for pairing every
+// successful reserve with a releaseOwnerSlot when the connection is
+// torn down. Owner == "" (legacy single-user, anonymous pre-cookie)
+// always succeeds without bumping the map. R229-SEC-8 / #1022.
+func (h *Hub) reserveOwnerSlot(owner string) bool {
+	if h == nil || owner == "" {
+		return true
+	}
+	h.connCountByOwnerMu.Lock()
+	defer h.connCountByOwnerMu.Unlock()
+	if h.connCountByOwner == nil {
+		return true
+	}
+	if h.connCountByOwner[owner] >= maxConnsPerOwner {
+		return false
+	}
+	h.connCountByOwner[owner]++
+	return true
+}
+
+// releaseOwnerSlot decrements the per-uploadOwner connection counter
+// reserved by reserveOwnerSlot. Removes the map entry when the count
+// reaches zero so the map stays bounded to the active-user set rather
+// than the lifetime-user set. R229-SEC-8 / #1022.
+func (h *Hub) releaseOwnerSlot(owner string) {
+	if h == nil || owner == "" {
+		return
+	}
+	h.connCountByOwnerMu.Lock()
+	defer h.connCountByOwnerMu.Unlock()
+	if h.connCountByOwner == nil {
+		return
+	}
+	n := h.connCountByOwner[owner]
+	if n <= 1 {
+		delete(h.connCountByOwner, owner)
+		return
+	}
+	h.connCountByOwner[owner] = n - 1
+}
 
 // TrackSend reserves a sendWG slot for a background send goroutine and
 // returns a release function plus a shuttingDown flag. When shuttingDown
