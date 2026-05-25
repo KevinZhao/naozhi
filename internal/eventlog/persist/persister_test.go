@@ -572,6 +572,89 @@ func TestPersister_Stats_NoRace(t *testing.T) {
 	}
 }
 
+// TestEffectiveFlushInterval_Buckets locks down the adaptive scaling
+// table for R214-PERF-3 so changes to the multiplier ladder require a
+// deliberate test update. Boundaries (16, 64, 256) are spelled out
+// because the production behavior at high session counts depends on
+// each one — bumping a writer count past a bucket halves the per-tick
+// fsync rate, and we don't want a silent edit to that table.
+func TestEffectiveFlushInterval_Buckets(t *testing.T) {
+	const base = 200 * time.Millisecond
+	cases := []struct {
+		writers int
+		want    time.Duration
+	}{
+		{0, base},           // empty persister stays at base
+		{1, base},           // single session unchanged
+		{16, base},          // upper edge of bucket 1
+		{17, base + base/2}, // first to cross into 1.5×
+		{50, base + base/2}, // issue's headline scenario → 300 ms
+		{64, base + base/2}, // upper edge of bucket 2
+		{65, base * 2},      // first to cross into 2×
+		{200, base * 2},     // mid bucket 3
+		{256, base * 2},     // upper edge of bucket 3
+		{257, base * 4},     // first to cross into 4× cap
+		{10_000, base * 4},  // cap holds — no unbounded scaling
+	}
+	for _, tc := range cases {
+		got := effectiveFlushInterval(base, tc.writers)
+		if got != tc.want {
+			t.Errorf("writers=%d: got %v, want %v", tc.writers, got, tc.want)
+		}
+	}
+}
+
+// TestCollectFlushCandidates_AdaptiveSkipsUnderHighWriterCount verifies
+// that the adaptive interval defers a flush that would have fired at
+// the un-scaled FlushInterval boundary. Constructs writers manually
+// (bypassing the run goroutine) to assert the scheduling decision in
+// isolation from disk IO.
+func TestCollectFlushCandidates_AdaptiveSkipsUnderHighWriterCount(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	base := 200 * time.Millisecond
+	p := &Persister{
+		opts:    Options{FlushInterval: base},
+		writers: make(map[string]*perKeyWriter),
+	}
+	// Fill enough writers to land in the 1.5× bucket (17–64).
+	const N = 30
+	for i := 0; i < N; i++ {
+		key := fmt.Sprintf("k%d", i)
+		p.writers[key] = &perKeyWriter{
+			dirty:        true,
+			firstDirtyAt: now.Add(-250 * time.Millisecond), // past base, before 1.5×base=300ms
+		}
+	}
+	// At base (200 ms) all 30 would flush. With the 1.5× scale (300 ms)
+	// none of them have aged past the threshold yet.
+	cands := p.collectFlushCandidates(now)
+	if len(cands) != 0 {
+		t.Errorf("expected adaptive interval to defer flush, got %d candidates", len(cands))
+	}
+	// Advance past 1.5×base — every writer should now flush.
+	now2 := now.Add(60 * time.Millisecond) // age = 310 ms
+	cands2 := p.collectFlushCandidates(now2)
+	if len(cands2) != N {
+		t.Errorf("after deadline: got %d candidates, want %d", len(cands2), N)
+	}
+	// Sanity: with a small writer-set the same age would already be
+	// flushable at the base interval — confirms the adaptive branch is
+	// what gated the first call, not some other filter.
+	small := &Persister{
+		opts:    Options{FlushInterval: base},
+		writers: make(map[string]*perKeyWriter),
+	}
+	for i := 0; i < 5; i++ {
+		small.writers[fmt.Sprintf("k%d", i)] = &perKeyWriter{
+			dirty:        true,
+			firstDirtyAt: now.Add(-250 * time.Millisecond),
+		}
+	}
+	if got := len(small.collectFlushCandidates(now)); got != 5 {
+		t.Errorf("small writer-set should flush all 5 at age=250ms, got %d", got)
+	}
+}
+
 // Sanity compile check — prevents an unused atomic import from
 // going unnoticed while we're iterating.
 var _ = atomic.Int64{}
