@@ -17,9 +17,80 @@
 package session
 
 import (
+	"log/slog"
 	"slices"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// maxPlannerPromptBytesAtSpawn caps the planner prompt that flows into
+// `--append-system-prompt` argv at spawn time. Mirrors
+// internal/project.MaxPlannerPromptBytes (8 KB) but kept in session so
+// the dependency direction stays "project → session" only (session
+// cannot import project per the routing.go doc contract).
+//
+// 8 KB is far below Linux ARG_MAX (~2 MB) but well above any realistic
+// human-authored planner prompt; it bounds the worst case where a
+// tampered project.yaml / config.yaml / CLAUDE.md slipped past the
+// write-path validator (HTTP PUT, reverse-RPC update_config, Manager.Scan
+// load-time ValidateConfig). R215-SEC-P1-2.
+const maxPlannerPromptBytesAtSpawn = 8 * 1024
+
+// sanitisePlannerPromptForSpawn is defense-in-depth: re-validate the
+// PlannerPrompt at the spawn-routing site before it crosses the trust
+// boundary into CLI argv (`--append-system-prompt <prompt>`). Returns ""
+// for any rejected input so the spawn falls through to "no planner
+// system prompt" rather than running with a poisoned one.
+//
+// Mirror of project.EffectivePlannerPrompt's rune-level guards PLUS the
+// length cap that EffectivePlannerPrompt previously skipped (the
+// write-path ValidateConfig caps length, but a tampered disk file or
+// an in-memory mutation past the write-path could land an oversized
+// value here). project = source of truth; session re-runs the same
+// policy at the spawn boundary so any future code path that bypasses
+// the project layer (test helpers, future RPC, etc.) still cannot
+// inject control bytes or oversize argv.
+//
+// Called from both ResolveForChat (chat-view planner) and
+// ResolveForPlannerKey (administrative planner restart). R215-SEC-P1-2.
+func sanitisePlannerPromptForSpawn(prompt, projectName string) string {
+	if prompt == "" {
+		return ""
+	}
+	if len(prompt) > maxPlannerPromptBytesAtSpawn {
+		slog.Warn("planner prompt exceeds spawn-time length cap; dropping",
+			"project", projectName,
+			"len", len(prompt),
+			"cap", maxPlannerPromptBytesAtSpawn)
+		return ""
+	}
+	if !utf8.ValidString(prompt) {
+		slog.Warn("planner prompt contains invalid UTF-8 at spawn; dropping",
+			"project", projectName)
+		return ""
+	}
+	for i := 0; i < len(prompt); i++ {
+		c := prompt[i]
+		// 0x09 tab / 0x0A LF / 0x0D CR are legitimate markdown content;
+		// other C0 + NUL + DEL would truncate argv on execve or corrupt
+		// stream-json framing at the shim boundary.
+		if c == 0 || (c < 0x20 && c != 0x09 && c != 0x0a && c != 0x0d) || c == 0x7f {
+			slog.Warn("planner prompt contains control byte at spawn; dropping",
+				"project", projectName, "byte", c)
+			return ""
+		}
+	}
+	for _, r := range prompt {
+		if osutil.IsLogInjectionRune(r) {
+			slog.Warn("planner prompt contains injection rune (C1/bidi/LS-PS) at spawn; dropping",
+				"project", projectName)
+			return ""
+		}
+	}
+	return prompt
+}
 
 // PlannerDataSource abstracts the project-layer data KeyResolver needs.
 // Concrete implementation lives in the project package; session never
@@ -122,14 +193,17 @@ func (r *KeyResolver) ResolveForChat(platform, chatType, chatID, agentID string)
 	if b.PlannerModel != "" {
 		base.Model = b.PlannerModel
 	}
-	if b.PlannerPrompt != "" {
+	// R215-SEC-P1-2: re-validate at spawn boundary. Drops oversized /
+	// control-char prompts that could have slipped past the write-path
+	// ValidateConfig (tampered disk file, future bypass path).
+	if pp := sanitisePlannerPromptForSpawn(b.PlannerPrompt, b.Name); pp != "" {
 		// Three-arg slice forces fresh backing array. Without
 		// `:len:len`, append would write past len in the shared
 		// defaults slice when cap > len — see
 		// dispatch/planner_args_isolation_test.go for canary test.
 		base.ExtraArgs = append(
 			base.ExtraArgs[:len(base.ExtraArgs):len(base.ExtraArgs)],
-			"--append-system-prompt", b.PlannerPrompt,
+			"--append-system-prompt", pp,
 		)
 	}
 	return plannerKeyFor(b.Name), base
@@ -162,10 +236,14 @@ func (r *KeyResolver) ResolveForPlannerKey(projectName string) (key string, opts
 		Workspace: b.WorkspaceDir,
 		Model:     b.PlannerModel,
 	}
-	if b.PlannerPrompt != "" {
+	// R215-SEC-P1-2: same defense-in-depth as ResolveForChat. The
+	// planner-restart RPC paths (administrative HTTP / reverse-RPC) can
+	// also land here with a stale b.PlannerPrompt cached from a prior
+	// disk reload, so the boundary check must guard both entry points.
+	if pp := sanitisePlannerPromptForSpawn(b.PlannerPrompt, b.Name); pp != "" {
 		// Fresh literal slice; no aliasing risk because we do not
 		// read from defaults.
-		opts.ExtraArgs = []string{"--append-system-prompt", b.PlannerPrompt}
+		opts.ExtraArgs = []string{"--append-system-prompt", pp}
 	}
 	return plannerKeyFor(b.Name), opts, true
 }
