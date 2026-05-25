@@ -101,8 +101,17 @@ type Tracker struct {
 	// pending holds bumps that are inside the coalesce window. Keys
 	// are (keyhash, absPath) tuples; values capture the most recent
 	// observed timeMS. Single-writer — only the run goroutine
-	// touches this.
+	// touches this. Stats() must NOT read pending directly; use
+	// pendingSize instead. Reading len(pending) from any other
+	// goroutine is undefined behaviour and can fault the runtime
+	// with "concurrent map read and map write".
 	pending map[coalesceKey]pendingBump
+
+	// pendingSize mirrors len(pending) so Stats() can expose the
+	// gauge to /health without touching the map. The single writer
+	// (run goroutine) is responsible for keeping it in sync with
+	// every insert/delete in pending; readers Load atomically.
+	pendingSize atomic.Int64
 
 	// writtenCnt / clearCnt / droppedCnt mirror Observer callbacks
 	// for test introspection and /health stats snapshot.
@@ -325,7 +334,7 @@ func (t *Tracker) Stats() Stats {
 		Cleared:      t.clearCnt.Load(),
 		Dropped:      t.droppedCnt.Load(),
 		Errors:       t.errorCnt.Load(),
-		Pending:      len(t.pending), // race-tolerable: informational
+		Pending:      int(t.pendingSize.Load()),
 		ChannelCap:   cap(t.in),
 		ChannelDepth: len(t.in),
 		LastDrainMs:  lastMs,
@@ -442,6 +451,7 @@ func (t *Tracker) handleBump(job trackerJob) {
 		prev, ok := t.pending[key]
 		if !ok {
 			t.pending[key] = pendingBump{timeMS: job.timeMS, flushAt: flushAt}
+			t.pendingSize.Add(1)
 			continue
 		}
 		// Keep the highest timeMS observed and push the flushAt
@@ -519,6 +529,7 @@ func (t *Tracker) flushDue() {
 		}
 		t.applyBump(k, v)
 		delete(t.pending, k)
+		t.pendingSize.Add(-1)
 	}
 }
 
@@ -531,6 +542,7 @@ func (t *Tracker) flushAll() {
 	for k, v := range t.pending {
 		t.applyBump(k, v)
 		delete(t.pending, k)
+		t.pendingSize.Add(-1)
 	}
 }
 

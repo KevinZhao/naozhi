@@ -549,3 +549,113 @@ func TestErrTrackerClosed_Import(t *testing.T) {
 		t.Fatal("sentinel not match-able with errors.Is")
 	}
 }
+
+// TestStatsPendingNoRace pins the contract that Stats() reads
+// pendingSize (atomic) instead of len(t.pending). Regressing to
+// len(t.pending) — e.g. by deleting pendingSize as "redundant"
+// during a future cleanup — would race the run goroutine's map
+// writes and Go runtime can fault the process with "concurrent
+// map read and map write" on /health probes. Reproduces reliably
+// under -race; safe to run without the flag too (will pass).
+func TestStatsPendingNoRace(t *testing.T) {
+	ws := t.TempDir()
+	obs := &countingObs{}
+	tr, err := NewTracker(Options{
+		Workspaces:    func(string) string { return ws },
+		ChannelBuffer: 100000,
+		// Long coalesce window keeps entries in pending so the
+		// reader observes a non-zero map under the writer.
+		CoalesceWindow: 1 * time.Hour,
+		Clock:          time.Now,
+		Observer:       obs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Stop(context.Background())
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = tr.Stats()
+			}
+		}
+	}()
+	for i := 0; i < 5000; i++ {
+		path := filepath.ToSlash(filepath.Join(
+			attachment.Dir, "2026-05-25",
+			"f_"+string(rune('a'+i%26))+"_"+string(rune('a'+(i/26)%26))+".bin",
+		))
+		tr.OnPersistedEntry("kh", []string{path}, time.Now().UnixMilli())
+	}
+	close(stop)
+	wg.Wait()
+}
+
+// TestPendingSize_TracksMapLen pins the invariant that pendingSize
+// stays in sync with len(t.pending) across the three mutation
+// paths (insert, update, delete). A divergence — e.g. forgetting
+// the Add(1) on insert or double-counting an existing-key update
+// — is invisible at runtime (Stats just reports a wrong number)
+// but corrupts /health observability and downstream alerting.
+func TestPendingSize_TracksMapLen(t *testing.T) {
+	ws := t.TempDir()
+	// First write the .meta file so applyBump's UpdateMetaFile
+	// finds it and the bump is "real" (matches production path).
+	date := time.Now().Format("2006-01-02")
+	rel1, _ := writeAttachment(t, ws, date, "p1",
+		attachment.Meta{UploadedAt: time.Now()})
+	rel2, _ := writeAttachment(t, ws, date, "p2",
+		attachment.Meta{UploadedAt: time.Now()})
+
+	obs := &countingObs{}
+	tr, err := NewTracker(Options{
+		Workspaces: func(string) string { return ws },
+		// Long window so entries stay in pending until Flush.
+		CoalesceWindow: 1 * time.Hour,
+		ChannelBuffer:  64,
+		Observer:       obs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Stop(context.Background())
+
+	now := time.Now().UnixMilli()
+	tr.OnPersistedEntry("kh", []string{rel1}, now)
+	tr.OnPersistedEntry("kh", []string{rel2}, now)
+	// Same (keyhash, path) again — must NOT increment pendingSize
+	// because handleBump's existing-key branch only updates the
+	// value in place.
+	tr.OnPersistedEntry("kh", []string{rel1}, now+1)
+
+	// Wait for the worker to absorb the channel before reading.
+	// Bounded sleep instead of Flush (which would clear pending).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := tr.Stats().Pending; got == 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := tr.Stats().Pending; got != 2 {
+		t.Fatalf("Pending=%d after 2 distinct + 1 duplicate; want 2", got)
+	}
+
+	// Flush drains pending → pendingSize must hit 0.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := tr.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if got := tr.Stats().Pending; got != 0 {
+		t.Fatalf("Pending=%d after Flush; want 0", got)
+	}
+}
