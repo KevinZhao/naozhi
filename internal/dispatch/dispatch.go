@@ -1184,7 +1184,12 @@ func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
 	p := t.p
 	chatID := t.chatID
 
+	// Track on loopWG so stop() blocks until the card send finishes — without
+	// it a slow Feishu Reply parked inside SendQuestionCard could leak past the
+	// turn boundary and post for the wrong session. R249-GO-1.
+	t.loopWG.Add(1)
 	go func() {
+		defer t.loopWG.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Warn("ask_question: card send panic recovered",

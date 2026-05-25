@@ -579,7 +579,13 @@ func panicSafeSpawnFn(
 			// Keep this message unprefixed so logs read
 			// "spawn process: panic: <value>" instead of the doubled
 			// "spawn process: spawn process: panic: ...".
-			err = fmt.Errorf("panic: %v", r)
+			// R249-GO-15: preserve errors.Is/As chain when the panic value
+			// itself is an error (e.g. nil pointer deref wraps runtime.Error).
+			if e, ok := r.(error); ok {
+				err = fmt.Errorf("panic: %w", e)
+			} else {
+				err = fmt.Errorf("panic: %v", r)
+			}
 		}
 	}()
 	return spawn(ctx, opts)
