@@ -210,7 +210,7 @@
 - [x] **R247-CR-13 — emitOverlapSkipped godoc 引用已归档 review（P2）** [REFACTOR]: `internal/cron/scheduler_finish.go:281-299`。方案：简化 godoc 删历史引用。 — 解决 2026-05-25 (F2)：删 R233B-CR-2 review 编号引用；重组 godoc 先说 trigger 来源（CAS-reject tick / TriggerNow losing gate）再说 dual-event 行为契约 + skipPersist 用途。
 - [ ] **R247-CR-14 — recordResultP0WithSanitised 64 行 P0 命名已无意义（P2）** [REFACTOR]: `internal/cron/scheduler_finish.go:330-394`。方案：改名 recordTerminalResult；rollback 抽 prevSnapshot struct。
 - [ ] **R247-CR-15 — recordResultP0WithSanitised P0 后缀历史 noise（P2）** [REFACTOR]: `internal/cron/scheduler_finish.go:301-329`。方案：与 R247-CR-14 一并改名。
-- [ ] **R247-CR-16 — jobSnapshot struct 字段顺序非最优（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:96-121` 64-bit 平台 padding 浪费 ~8B。方案：size DESC 重排。
+- [x] **R247-CR-16 — jobSnapshot struct 字段顺序非最优（P3）** [REFACTOR]: `internal/cron/scheduler_run.go:96-121` 64-bit 平台 padding 浪费 ~8B。方案：size DESC 重排。 *(已实现：字段按 size DESC 重排，消除 padding；所有 godoc 注释贴回对应字段保留语义。)*
 - [x] **R247-CR-17 — hexIDBytes=8 命名误导（P3）** [REFACTOR]: `internal/cron/job.go:202` godoc 说 "16-char hex"。方案：改名 hexIDEntropyBytes。 — 解决 2026-05-25 (F2)：改名 hexIDBytes → hexIDEntropyBytes 钉死语义到熵源侧；godoc 显式说 "熵字节数（不是字符数）" + "8 字节 → hex.EncodeToString → 16 hex 字符"。仅内部 const，无外部 caller。
 - [~] **R247-CR-18 — gcWaitBudget 包级 mutable var 测试 racy（P3）** [REPEAT-3]: `internal/cron/scheduler.go:655,661` 与 R246-CR-012 同根因。方案：const + WithStopBudget(d) helper。
 - [ ] **R247-CR-19 — marshalJobs atomic.Pointer test seam 通过 init() 装载（P3）** [REFACTOR]: `internal/cron/scheduler_persist.go:32-37` 与 R242-CR-5 同根因。方案：build tag testonly 或字段 DI。

@@ -118,6 +118,8 @@ func (s *Scheduler) jobInflight(id string) *runInflight {
 // rest of the execution; concurrent SetJobPrompt/UpdateJob therefore land
 // for the next tick rather than racing the in-flight result. The shape
 // mirrors the original inline reads — no fields added/removed.
+//
+// R247-CR-16: 字段按 size DESC 排，消除 string/bool/*bool 混排引入的 padding。
 type jobSnapshot struct {
 	prompt  string
 	workDir string
@@ -132,8 +134,6 @@ type jobSnapshot struct {
 	chatID     string
 	notifyPlat string
 	notifyChat string
-	notify     *bool // nil = unset
-	fresh      bool
 	schedule   string
 	backend    string // "" = router default
 	// lastSessionID 是 snapshot 时刻 Job.LastSessionID 的拷贝，供 fresh-
@@ -143,6 +143,8 @@ type jobSnapshot struct {
 	// 用 snap-time chain anchor（与本次 attempt 起点一致），后续新成功 run
 	// 由其 finishRun 路径再覆写。
 	lastSessionID string
+	notify        *bool // nil = unset
+	fresh         bool
 }
 
 // cronNoticePrefixFmt is the IM-notice prefix template every cron-side
