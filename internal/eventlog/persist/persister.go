@@ -1017,6 +1017,20 @@ func (w *perKeyWriter) close() error {
 // that is reused across flushes to avoid a per-flush heap allocation. When
 // `stride <= 1` the function returns `pending` directly without touching
 // scratch. R218-PERF-7.
+//
+// R243-PERF-10: aliasing contract. When the function returns `pending`
+// (stride<=1 fast path or single-entry batch), the returned slice
+// shares its backing array with `pending`. The sole caller in flush()
+// passes the returned slice straight to idxWriter.AppendBatch, which
+// SYNCHRONOUSLY copies every entry into its own batchBuf and Writes it
+// before returning — see idx.go:76. After AppendBatch returns the
+// caller resets `pendingIdx[:0]` and the alias is severed before any
+// subsequent append into pendingIdx can touch the slot. Do NOT add an
+// async / queued AppendBatch variant or expose the returned slice to
+// callers that may retain it: the next pendingIdx append would
+// overwrite live idx bytes the writer is still reading. If a future
+// caller cannot honour synchronous consumption it must take a
+// defensive copy (`append([]schema.IdxEntry(nil), kept...)`).
 func selectForIdx(pending []schema.IdxEntry, stride, cursor int, scratch []schema.IdxEntry) []schema.IdxEntry {
 	if stride <= 1 {
 		return pending
