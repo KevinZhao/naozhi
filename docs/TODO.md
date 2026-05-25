@@ -1,6 +1,11 @@
 # TODO
 
-> 最后更新 2026-05-24（晚间）—— **R239-ARCH-I AgentLinker interface 解耦 server↔cli**（[BREAKING-LOCAL]，REPEAT-8）：新建 `internal/session/agentlink/agentlink.go` 定义 `AgentLinker` interface（4 方法 OnResolve / Query / QueryOrResolveFast / ProjectSessionDir）；Hub.wiredLinkers 类型改 `map[agentlink.AgentLinker]struct{}`，wshub.go 撤 `cli` import；wshub_agent.go + dashboard_agent_events.go 通过 interface 持有 linker（concrete *cli.SubagentLinker 隐式实现接口）；测试 fixture 跟改。`go test -race ./...` 全 ok。
+> 最后更新 2026-05-25 —— **同根因清理：归档 PR #329/#330/#331/#345 已解决的 11 条历史条目**：
+>   - 完全归档 `[x]`：R246-ARCH-14 / R245-ARCH-41 / R242-ARCH-17 / R242-ARCH-8 / R240-ARCH-11 / R237-ARCH-7 / R236-ARCH-12 / R243-ARCH-22 / R248-CR-3（共 9 条 — Capabilities interface 收口 sendFn/takeoverFn/replyFooterFn + spawningKeys chan 替自旋 + AgentLinker interface + dispatchCapabilities → serverCaps 改名 + boot-panic gate）
+>   - 部分归档 `[~]`：R226-ARCH-3 / R234-ARCH-8 / R231-ARCH-5 / R222-ARCH-6 / R217-CR-4（共 5 条 — wshub 文件已 split 但 struct 未拆，跟踪 R248-ARCH-6；dispatch.Capabilities 仍 import cli/session 类型，跟踪 R248-ARCH-3）
+>   - R240-CR-9 行号失效更新（PR #327 split 后方法分散到 wshub_*.go 多文件）
+>
+> 上一轮更新 2026-05-24（晚间）—— **R239-ARCH-I AgentLinker interface 解耦 server↔cli**（[BREAKING-LOCAL]，REPEAT-8）：新建 `internal/session/agentlink/agentlink.go` 定义 `AgentLinker` interface（4 方法 OnResolve / Query / QueryOrResolveFast / ProjectSessionDir）；Hub.wiredLinkers 类型改 `map[agentlink.AgentLinker]struct{}`，wshub.go 撤 `cli` import；wshub_agent.go + dashboard_agent_events.go 通过 interface 持有 linker（concrete *cli.SubagentLinker 隐式实现接口）；测试 fixture 跟改。`go test -race ./...` 全 ok。
 >
 > 上一轮更新 2026-05-24（夜间）—— **wshub.go god-object 拆分**（R243-ARCH-2，REPEAT-21 主条目 + R243-ARCH-17 / R240-ARCH-2 一并归档）：wshub.go 2028→525 行 (-74%)，拆出 5 个职责文件 _broadcast (368) / _send (379) / _subscribe (373) / _eventpush (274) / _upgrade (232)。Hub struct 不动保持锁不变量；source-anchor 测试 4 处指向新文件。
 >
@@ -170,7 +175,7 @@
 
 - [x] **R248-CR-1 — capabilities.go 注释/代码比 1:1（P1）** [REFACTOR]: `internal/dispatch/capabilities.go:1-91` 类型 godoc 含 60+ 行混杂 review-history 与契约说明，超过实际 type+method 代码量。 *(已实施：Capabilities interface godoc 25→9 行；NoopCapabilities 14→6 行；保留契约说明 + R243-ARCH-10 + R248-ARCH-2 anchor。)*
 - [x] **R248-CR-2 — wshub.go wiredLinkers 单字段堆叠 5 个 review 编号（P1）** [REFACTOR]: `internal/server/wshub.go:175-194` 注释提 R201/R230/R231/R233B/R239 等价于 git log 摘要。 *(已实施：godoc 18→9 行；保留 R201-CRIT-2 (历史 leak fix) + R239-ARCH-I (interface 化等价性) 两 anchor，其他历史编号删除。)*
-- [ ] **R248-CR-3 — dispatchCapabilities 类型名与 dispatch.Capabilities interface 易混淆（P1）** [REFACTOR]: `internal/server/send.go:644` capabilities.go godoc line 24 已用了 "serverCapabilities" — 文档与实际类型名不一致。方案：重命名为 serverCaps 或 hubCapabilities。
+- [x] **R248-CR-3 — dispatchCapabilities 类型名与 dispatch.Capabilities interface 易混淆（P1）** [REFACTOR]: `internal/server/send.go:644` capabilities.go godoc line 24 已用了 "serverCapabilities" — 文档与实际类型名不一致。 *(PR #343 已实施：dispatchCapabilities → serverCaps；server/send.go + server.go + dispatch/capabilities.go godoc 同步对齐。)*
 - [ ] **R248-CR-4 — agentlink.go 包级 godoc 17 行 + 三段 Anchor 提 4 个编号（P2）** [REFACTOR]: `internal/session/agentlink/agentlink.go:1-17` 包文档读者多数 IDE hover 看不下。方案：留前 5 行（接口存在意义 + 谁实现），Anchor 段移到 docs/TODO.md。
 - [ ] **R248-CR-5 — AgentLinker.Query vs QueryOrResolveFast 命名差异不表达行为（P2）** [REFACTOR]: `internal/session/agentlink/agentlink.go:33-50` 两方法返回 (LinkInfo, bool) 签名一样，仅靠 godoc 区分语义。方案：改 Lookup（缓存只读）+ Resolve（含 stat fallback）。
 - [ ] **R248-CR-6 — NoopCapabilities.Send panic 契约埋在 type docstring 中段（P2）** [REFACTOR]: `internal/dispatch/capabilities.go:65-83` 方法本身只有 "see type docstring"，IDE go-to-definition 跳方法时只看 method godoc，panic 契约对 hover 隐形。方案：把 "panics with msg X，原因 Y" 完整写在方法 godoc 上方。
@@ -434,7 +439,7 @@
 - [ ] **R246-ARCH-11 [P2] [REFACTOR] — 4 个 SessionRouter interface 同名方法集错位**: cron/dispatch/server/upstream consumer 4 包，upstream 已 split Lookup/Lifecycle/Mutator 但其它三家未 split，contract_test 锚点跨 4 包同步成本高。建议：先把 upstream split 提到 session/api 子包，cron/dispatch 各 embed 子集，作为单 PR 落（与 R243-ARCH-9 协同）。
 - [ ] **R246-ARCH-12 [P2] [REFACTOR] — `internal/cli/eventlog.go:1141` Process.SubscribeEvents 把 <-chan struct{} 直接暴露跨包**: subscriber 必须知道 channel 关闭语义、unsub 调用顺序、close 重入。建议：包装成 sess.Subscribe(handler func()) (cancel func())，channel 关在 eventlog 内部。
 - [ ] **R246-ARCH-13 [P3] [REFACTOR] — `internal/cli` ↔ `internal/history` 反向依赖循环约束**: history 想 import cli.EventEntry 才能定 Source 但 cli 不能 import history（cycle）。建议：抽 internal/eventlog/event 子包仅持 EventEntry/EventKind 类型（无行为），cli 与 history/* 都依赖它。
-- [ ] **R246-ARCH-14 [P3] [REFACTOR] — `internal/dispatch/dispatch.go:228,229` SendFn / TakeoverFn 用 closure 而非 interface**: closure 易丢失 wireup（main.go 漏一个不报错）；sendFn 现 6 参数，未来扩 stream/cancel 8 个 producer 跟着改。建议：dispatch.Sender interface { SendTurn(ctx, req SendRequest) (*SendResult, error) }。
+- [x] **R246-ARCH-14 [P3] [REFACTOR] — `internal/dispatch/dispatch.go:228,229` SendFn / TakeoverFn 用 closure 而非 interface**: closure 易丢失 wireup（main.go 漏一个不报错）；sendFn 现 6 参数，未来扩 stream/cancel 8 个 producer 跟着改。 *(PR #330 R243-ARCH-10 已实施：抽 dispatch.Capabilities interface，sendFn/takeoverFn/replyFooterFn 三 closure 收口；PR #345 R248-ARCH-2 加 boot-panic gate 防止 missing wireup。)*
 - [ ] **R246-ARCH-15 [P2] [REFACTOR] — `cmd/naozhi/main.go:823-855` ServerOptions 25 字段大爆炸 + main.go 1323 行**: NewWithOptions 是 god-builder，每加上层依赖就要再扩 ServerOptions。建议：抽 wireup.Build(cfg) → *Server；ServerOptions 拆 CoreDeps + Optionals + Config 三组。
 - [ ] **R246-ARCH-16 [P3] [REFACTOR] — `internal/metrics/metrics.go:54-` 全局可变 expvar 计数器单一注册表**: 19 包已耦合到中央表，metrics 反向被所有上层包导入，自己却不能 import 业务包。建议：metrics 仅暴露 Counter/Gauge interface + Register(name) Counter；具体常量名定义放回各业务包。
 - [ ] **R246-ARCH-17 [P2] [REFACTOR] — `internal/dispatch/dispatch.go:1086,1160,710` + cron/scheduler_notify.go:91 重复 context.WithTimeout(context.Background())**: 4 处反复出现"投 IM 不能被父 cancel"模式。建议：抽 platform.NotifyCtx(parent) 工厂，内部统一 detach + timeout 选择。
@@ -531,7 +536,7 @@
 - [ ] **R245-ARCH-38 [REFACTOR] — `cmd/naozhi/main.go:911-952` runShutdown 仅串行 sysMgr→scheduler→router，未显式 stop Hub/nodeCache/discoveryCache/scratchPool**: 建议：拓扑排序显式 + ShutdownPhaseMs metric。
 - [ ] **R245-ARCH-39 [REFACTOR] — `internal/dispatch/dispatch.go:649-871` sendAndReply 220 行单函数 7 阶段平铺**: 建议：切 acquireSession/runTurn/renderReply/postReply 四步。
 - [ ] **R245-ARCH-40 [REFACTOR] — `internal/server/server.go:45-125` Server 30+ 字段含 13 handler 子结构**: 建议：type Handlers struct{} 单字段聚合；Server 仅 router/platforms/lifecycle 三组。
-- [ ] **R245-ARCH-41 [REFACTOR] — replyFooterFn 闭包从 server.go 注入，presentation 跨包**: 建议：ReplyFooterRenderer interface，移 server/footer.go → dispatch/footer.go。
+- [x] **R245-ARCH-41 [REFACTOR] — replyFooterFn 闭包从 server.go 注入，presentation 跨包**: 建议：ReplyFooterRenderer interface，移 server/footer.go → dispatch/footer.go。 *(PR #330 R243-ARCH-10 已实施：replyFooterFn 收到 dispatch.Capabilities.ReplyFooter() 接口，serverCaps 实现，跨包注入用 narrow interface。)*
 - [ ] **R245-ARCH-42 [REFACTOR] — `internal/cli/process.go:163` Process struct ~60 字段 + 8 atomic + 5 mu，跨 7 文件 split 同结构**: 建议：facet 拆 processCore/processStream/processTurn 三结构。
 - [ ] **R245-ARCH-43 [REFACTOR] — `cmd/naozhi/main.go:577-592` default backend probe 失败 os.Exit(1)，sysession 与 default 不同时 fallback 不可达**: 建议：buildSysessionManager 显式可选第二 backend；或配置层强约束。
 - [ ] **R245-ARCH-44 [REFACTOR] — `internal/dispatch/dispatch.go:411-424` BuildHandler passthrough/queue/guard 三层 fallback 嵌套 ~200 行**: 建议：抽 GateStrategy interface 三实现；NewDispatcher 据 cfg 选一。
@@ -686,7 +691,7 @@
 - [ ] **R243-ARCH-19 [REFACTOR][REPEAT-3]** cron / session / server 锁层级仅靠 godoc 维持；dev-only 引入 lockorder build tag CI 校验。
 - [ ] **R243-ARCH-20 [REFACTOR][REPEAT-3]** 整 codebase 缺集成/E2E 测试（rg `^func TestFull|TestIntegration|TestE2E` 0 命中）；增 `tests/integration/` + testcontainers smoke。
 - [ ] **R243-ARCH-21 [REFACTOR][REPEAT-3]** `cli.Process` 12 process_*.go 拆得过细，process_event_format Deprecated 等 TODO 长期挂；真正 split eventbus / linker 子包。
-- [ ] **R243-ARCH-22 [BREAKING-LOCAL][REPEAT-3]** `cli.SubagentLinker → server.agent_tailer → wshub.SetSubscriber` 跨 3 包绑定具体类型；session 层抽 AgentLinker interface。
+- [x] **R243-ARCH-22 [BREAKING-LOCAL][REPEAT-3]** `cli.SubagentLinker → server.agent_tailer → wshub.SetSubscriber` 跨 3 包绑定具体类型；session 层抽 AgentLinker interface。 *(PR #331 R239-ARCH-I 已实施：新建 internal/session/agentlink/agentlink.go 定义 AgentLinker interface（4 方法 OnResolve/Query/QueryOrResolveFast/ProjectSessionDir）；wshub.wiredLinkers 类型从 map[*cli.SubagentLinker]struct{} 改 map[agentlink.AgentLinker]struct{}；server 不再直接持 *cli.SubagentLinker。)*
 - [ ] **R243-ARCH-23 [REFACTOR][REPEAT-3]** `executeOpt` 345 行 + 嵌套 7 层；改 state machine `runStateMachine.Run`。
 - [ ] **R243-ARCH-24 [REFACTOR][REPEAT-3]** WS / IM JSON struct 散在各包（sessionsUpdateMsg pre-marshal at server / RunStarted/Ended at cron / scratch at server）；抽 `internal/wireproto` 单一来源。
 - [ ] **R243-ARCH-25 [REFACTOR]** （本轮新结构发现）`executeOpt` / `dispatch.BuildHandler` / `upstream.connector.Run` 三个 hot-path 嵌入 lifecycle/policy 决策；抽 RetryPolicy/OverlapPolicy/NotifyPolicy 接口便于 zero-downtime restart RFC 替换。
@@ -777,7 +782,7 @@
 - [ ] **R242-ARCH-5 [REFACTOR]** `internal/cron/scheduler.go:264-368` 三个独立 SetOn* + emitRun* 副作用；抽 `SchedulerListener` 单接口 + finishRun 集中终态分发。
 - [ ] **R242-ARCH-6 [REFACTOR][REPEAT-2]** `internal/session/router_core.go:193-438` Router 38+ 字段 + 6 atomic.Pointer + 3 锁；进一步拆 `routerStore` + `routerLifecycle` + `routerExclusion`。
 - [ ] **R242-ARCH-7 [REFACTOR]** `internal/cron/scheduler.go:97` cron 反向依赖 `platform` map；抽 `NotifySender` interface 由 cmd/naozhi 注入。
-- [ ] **R242-ARCH-8 [REFACTOR]** `internal/session/router_lifecycle.go:255-345` `GetOrCreate` `spawningKeyPollInterval=20ms` 自旋 poll 模式无 metric；增 metrics + condition variable。
+- [x] **R242-ARCH-8 [REFACTOR]** `internal/session/router_lifecycle.go:255-345` `GetOrCreate` `spawningKeyPollInterval=20ms` 自旋 poll 模式无 metric；增 metrics + condition variable。 *(PR #329 R243-ARCH-4 已实施：spawningKeys map 值改 chan struct{} 即时唤醒 — close-on-done 替代 20ms tick poll，spawningKeyPollInterval 常量已删除；GetOrCreate 等待端从轮询改为 select{ctx.Done, <-doneCh}。)*
 - [ ] **R242-ARCH-9 [REFACTOR]** `internal/cli/process.go` + `wrapper.go` shim 协议常量散布 4-5 处；抽 `cli/protocol.go::ProtocolLimits` struct。
 - [ ] **R242-ARCH-10 [REFACTOR]** `internal/cron/scheduler.go:2511-2516` finishRun emitRunEnded 在 saveMarshaledSeq 前发；订阅者 fetch /api/cron 仍读旧 LastResult。事件 payload 直接带 result。
 - [ ] **R242-ARCH-11 [REFACTOR]** `internal/session/router_lifecycle.go:721` SetPersistSink + InjectHistory + attachHistorySource 顺序仅靠 sinkReady 兜底；合并为 `Router.bindNewSession(*ManagedSession)`。
@@ -786,7 +791,7 @@
 - [ ] **R242-ARCH-14 [REFACTOR]** `internal/cron/scheduler.go:2125-2163` `deadlineInterrupter` 单方法接口直接依赖 `session.InterruptOutcome`；提到 internal/types 共享或 cron 镜像枚举。
 - [ ] **R242-ARCH-15 [REFACTOR]** `internal/cron/scheduler.go:280-294` `runningJobs sync.Map` 永不清理；DeleteJob 调 LoadAndDelete 或 freshness epoch。
 - [ ] **R242-ARCH-16 [REFACTOR]** `internal/session/router_core.go:413` excluders atomic.Pointer 启动期 nil pool fallback；cmd 装配前 SetPendingExcluders(true) blocking。
-- [ ] **R242-ARCH-17 [REFACTOR]** `internal/dispatch/dispatch.go:135-152` sendFn/takeoverFn nil panic at runtime；DispatcherConfig.Validate() 编译期 nil 检查。
+- [x] **R242-ARCH-17 [REFACTOR]** `internal/dispatch/dispatch.go:135-152` sendFn/takeoverFn nil panic at runtime；DispatcherConfig.Validate() 编译期 nil 检查。 *(PR #330 R243-ARCH-10 + PR #345 R248-ARCH-2 已实施：抽 Capabilities interface 并加 NewDispatcher boot-panic gate — missing Send wireup 在构造时炸而非首条消息触发。AllowMissingSender 让测试 opt-out。)*
 - [ ] **R242-ARCH-18 [REFACTOR]** `internal/session/auto_chain_router.go:73-89` PickWorkspaceChain Phase 2/3 双 build excluder 不一致；Phase 3 复用 Phase 2 inner。
 - [ ] **R242-ARCH-19 [REFACTOR]** `internal/cron/runstore.go:22-32` runs/ vs cron_jobs.json 物理分离无 atomic transaction；DeleteJob 先 await persistJobsLocked 再删 runs/。
 - [ ] **R242-ARCH-20 [REFACTOR]** `internal/cli/eventlog.go:469-478` PersistSink 双 atomic store sinkReady 顺序无 healthcheck；加 `replayDropTotal atomic.Int64` 在 /health 端点。
@@ -932,7 +937,7 @@
 - [~] **R240-CR-5 — `internal/dispatch/dispatch.go:742,869` ReplyWithRetry 重试次数 3 magic number [REFACTOR]（P2）**：两处独立修改易飘。方案：抽 const platformReplyMaxAttempts = 3。Breaking：否。
 - [~] **R240-CR-6 — `internal/server/wshub.go:1217` resubscribeEvents `for i := range 12` + 5s magic numbers [REFACTOR]（P2）**：60s 总窗口未注释。方案：抽 const resubscribeMaxAttempts/resubscribeInterval。Breaking：否。
 - [ ] **R240-CR-8 — `internal/dispatch/dispatch.go:956,973,1164,1317` replyTracker 4 方法缺 godoc [REFACTOR]（P2）**：onEvent 是 IM 流式核心。方案：补 godoc 标注线程约束 + 超时契约。Breaking：否。
-- [ ] **R240-CR-9 — `internal/server/wshub.go:461,467,514,587,820,866,992,1031,1476,1821,1844,1861` 12 个 Hub 方法缺 godoc [REFACTOR]（P2）**：方案：至少补 handleAuth/handleSubscribe/doBroadcastSessionsUpdate/capHistoryBatch。Breaking：否。
+- [ ] **R240-CR-9 — Hub 方法缺 godoc [REFACTOR]（P2）**：register/unregister/handleAuth/handleSubscribe/handleUnsubscribe/handleSend/handleInterrupt/handleRemote*/eventPushLoop/resubscribeEvents/doBroadcastSessionsUpdate/capHistoryBatch/PurgeNodeSubscriptions 等 12+ 方法缺 godoc。**注**：PR #327 R243-ARCH-2 split 后这些方法分散在 wshub_upgrade.go / wshub_subscribe.go / wshub_send.go / wshub_eventpush.go / wshub_broadcast.go — 旧行号引用 (461, 1821 等) 失效，按函数名 grep 即可。Breaking：否。
 - [ ] **R240-CR-10 — `internal/config/config.go:477,551,584,1092` applyDefaults/parseDurations/validateConfig/containsEnvPlaceholder 缺 godoc [REFACTOR]（P2）**：方案：补流水线契约说明（first-error vs errors.Join）。Breaking：否。
 - [ ] **R240-CR-12 — `internal/cron/scheduler.go:2943` notifyTarget vs NotifyTarget vs deliverNotice 三层命名混淆 [REFACTOR]（P3）**：方案：私有方法重命名为 sendNoticeToChat 或 sendViaPlatform。Breaking：否。
 - [ ] **R240-CR-14 — `internal/server/dashboard_send.go|dashboard_session.go|dashboard_cron.go` 3 文件超 800 行 [REFACTOR]（P3）**：方案：按 endpoint 拆子文件。Breaking：否。
@@ -948,7 +953,7 @@
 - [ ] **R240-ARCH-8 — `internal/cli/eventlog.go` vs `internal/eventlog/persist+schema` 双 eventlog 物理包 [REFACTOR]（P2）**：方案：rename in-mem ring 到 cli.EventBuffer 或 internal/eventbuffer。Breaking：否（rename）。
 - [ ] **R240-ARCH-9 — `internal/sysession/manager.go:138` Manager + Scheduler + Router 三个 lifecycle 形状不一 [REFACTOR]（P2）**：方案：抽 internal/lifecycle.Daemon + RunReporter。Breaking：否。
 - [ ] **R240-ARCH-10 — `internal/cron/scheduler.go:3010` package-level init() 注册 marshalJobs atomic.Pointer [REFACTOR]（P2）**：隐藏全局；测试可见。方案：cfg.MarshalFn 字段 default json.Marshal。Breaking：否。
-- [ ] **R240-ARCH-11 — `internal/dispatch/dispatch.go:208,229` sendFn / takeoverFn 长签名 func 字段 [REFACTOR]（P2）**：takeoverFn 已加 fallback，sendFn 没有不对称。方案：DispatcherSendOps 接口 + SendFnAdapter 测试包装。Breaking：否。
+- [x] **R240-ARCH-11 — `internal/dispatch/dispatch.go:208,229` sendFn / takeoverFn 长签名 func 字段 [REFACTOR]（P2）**：takeoverFn 已加 fallback，sendFn 没有不对称。方案：DispatcherSendOps 接口 + SendFnAdapter 测试包装。Breaking：否。 *(PR #330 R243-ARCH-10 已实施：dispatch.Capabilities interface 收口三 closure；NoopCapabilities 兜底；closureCapabilities adapter 保兼容；fallback 不对称已统一。)*
 - [ ] **R240-ARCH-12 — `cmd/naozhi/main.go:735-789` cron + sysession wiring 命令式 60 行 blob [REFACTOR]（P2）**：顺序约束仅在 main.go 里。方案：抽 internal/wireup.WireSchedulers。Breaking：否。
 - [ ] **R240-ARCH-14 — `internal/server/server.go:76-88` 12 handler 字段全具体类型 [REFACTOR]（P2）**：handler 间互依赖（SendHandler↔Hub↔ScratchHandler）。方案：抽 httpHandlerSet 接口 + 自注册。Breaking：否。
 - [ ] **R240-ARCH-15 — `internal/upstream/connector.go:69` 等 5 个 "subset of session.Router" 接口 [REFACTOR]（P2）**：HubRouter 14 / dispatch 8 / cron 3 / sysession 4 / upstream 各一份；签名飘移风险。方案：internal/sessioniface 包提供 RouterReader/Mutator/Dispatcher mixin。Breaking：否。
@@ -1122,7 +1127,7 @@
 - [ ] **R237-ARCH-4 — discovery vs sysession 职责重叠（P1）**：项目 brief 与 R234-ARCH-3 已点出。建议设计单一 session catalog 抽象：discovery 只产出 DiscoveredSession（外部 CLI 进程）；sysession 消费 router + catalog。Breaking: 是（影响 RFC 接口）。
 - [ ] **R237-ARCH-5 — metrics 反向依赖（P1）**：`internal/metrics` 是叶子包但被 7+ 核心包直接 import 写 expvar。建议改 Observer 接口注入：cli.Wrapper / shim.Manager / cron.Scheduler 收 Observer 字段，main.go 装配。Breaking: 业务包公共构造函数加参数。
 - [ ] **R237-ARCH-6 — sysession.Manager.Stop 超时调 osExit(2) 让 systemd 重启进程（P1）**：单个 daemon 卡死 → 整个 naozhi 不可用。建议替换为：超时只 detach 该 daemon record，不再 broadcast；Stop 返回让上层决策。需 RFC 评估错误传播策略。
-- [ ] **R237-ARCH-7 — `dispatch.Dispatcher` 闭包注入 vs 接口双标（P1）**：sendFn / takeoverFn / ReplyFooterFn 是 func 字段，Router/Guard/Queue 是接口；Scheduler 是具体类型。建议收口为 `DispatcherDeps` 接口。Breaking: Dispatcher 公共 API 变。
+- [x] **R237-ARCH-7 — `dispatch.Dispatcher` 闭包注入 vs 接口双标（P1）**：sendFn / takeoverFn / ReplyFooterFn 是 func 字段，Router/Guard/Queue 是接口；Scheduler 是具体类型。建议收口为 `DispatcherDeps` 接口。Breaking: Dispatcher 公共 API 变。 *(PR #330 R243-ARCH-10 已实施：sendFn/takeoverFn/replyFooterFn 三 closure 收口到 dispatch.Capabilities interface，与 Router/Guard 同风格；旧 *Fn 字段保留 Deprecated 兼容期。)*
 - [ ] **R237-ARCH-8 — main.go 622 行 wiring + 业务逻辑（P1）**：subcommand dispatch / settings.json filtering / Bedrock env / shim manager / wrapper × N / router / sysession / 5 platform / cron / upstream / 4 webhook / shutdown 顺序全在 main()。建议抽 `internal/bootstrap` 包：`func Run(ctx, cfg) error`。Breaking: 否（内部重组）。
 - [ ] **R237-ARCH-9 — `Router` struct 字段 40+（P2）**：core/lifecycle/cleanup/discovery/shim/backend 5 文件共享同一大 struct。建议拆 SessionStore + KnownIDs + WorkspaceOverrides + BackendOverrides + AutoChainResolver。Breaking: 公共方法签名不变但锁顺序需重证。
 - [ ] **R237-ARCH-10 — server.Hub 持 22+ 字段（P2）**：WS 连接管理 + 业务路由 + 子 agent 跟踪 + cron 集成都在一起。建议拆 ConnPool / Broadcaster / SendPath / AgentLinker。
@@ -1223,7 +1228,7 @@
 - [ ] **R236-QA-20 — isNaozhiCallbackHook 用 strings.Contains "127." 误报合法 URL（P3）**: `cmd/naozhi/main.go:364-384`。方案：正则匹配 IP 前缀或确认 host:port token 格式。Breaking：否。
 - [ ] **R236-ARCH-06 — dispatch.Dispatcher 仍持具体 *cron.Scheduler 而非 interface（P1, is_localized=true）**: `internal/dispatch/dispatch.go:67-71` 与 R235-ARCH-3 同根因，本条提供具体方案：`internal/dispatch/cron_consumer.go` 定义 ~8 method CronScheduler interface + contract test。Breaking：否（接口断言迁移）。
 - [ ] **R236-ARCH-07 — cron.scheduler 直 import platform 绕过 dispatch 中文化/replyError 计数（P1）**: `internal/cron/scheduler.go:25` 第三条出口管线。本条提供窄方案：dispatch.Notifier interface 注入到 scheduler 替代 platforms map（比 SendOrchestrator RFC 改动面小 90%）。同根因 R230C-ARCH-3 主条目跟踪。
-- [ ] **R236-ARCH-12 — Dispatcher closure-pattern sendFn/takeoverFn 缺编译期非 nil 保证（P2, is_localized=true）**: `internal/dispatch/dispatch.go:125-209`。方案：抽 SessionSender interface（与 takeoverFn 同类）+ NewDispatcher 必填字段。Breaking：是（dispatchConfig 字段类型）。
+- [x] **R236-ARCH-12 — Dispatcher closure-pattern sendFn/takeoverFn 缺编译期非 nil 保证（P2, is_localized=true）**: `internal/dispatch/dispatch.go:125-209`。 *(PR #330 R243-ARCH-10 + PR #345 R248-ARCH-2 已实施：抽 dispatch.Capabilities interface（sendFn/takeoverFn/replyFooterFn 收口）；NewDispatcher boot-panic gate 在构造时校验 Send wireup 缺失即 panic。运行时 panic 模式提前到 boot 时 panic — 比编译期检查更直接。)*
 
 
 ## Round 235 — 5-agent 并行 code review 第 45 轮（2026-05-23）NEEDS-DESIGN
@@ -1278,7 +1283,7 @@
 - [~] **R234-ARCH-5 — server.send / dashboard_send / dispatch.SendSplitReply 三套发送路径（归档 2026-05-23）**：明确归到 R230-ARCH-2 SendOrchestrator 主条目；本轮仅记录 server.send 是第三条独立发送路径（reverse-node + WS push）作为未来 SendOrchestrator 设计输入。本批 PR 关闭子症状条目。
 - [ ] **R234-ARCH-6 — Shutdown 顺序无形式化合约（P1）**：cron.Scheduler.Stop / sysessionMgr.Stop / router.Shutdown 在 server.Shutdown 序列里位置不明。建议写 ADR `docs/rfc/shutdown-order.md` + 各组件导出 `WaitForExit(ctx) error`，由 server 串行 wait。
 - [ ] **R234-ARCH-7 — `cron.SessionRouter.GetOrCreate` 暴露完整 *ManagedSession（P2）**：调度器只需 Send，但接口暴露 50+ 方法的 ManagedSession，cli 接口塌陷同款。建议进一步收敛为 `Sender` 接口。
-- [ ] **R234-ARCH-8 — `server.Hub` 直 import dispatch+cron+cli+project+session（P2）**：典型 god hub。建议拆 `WSTransport`（仅 conn lifecycle）+ `WSCoordinator`（业务），需独立 RFC。
+- [~] **R234-ARCH-8 — `server.Hub` 直 import dispatch+cron+cli+project+session（P2）**：典型 god hub。建议拆 `WSTransport`（仅 conn lifecycle）+ `WSCoordinator`（业务），需独立 RFC。 *(PR #327 R243-ARCH-2 已 6-stage split：wshub.go 2028→525 行，方法分到 _broadcast/_send/_subscribe/_eventpush/_upgrade 5 文件。但 Hub struct 未拆 — 28+ 字段保持集中以维持锁不变量；进一步抽 BroadcastDispatcher / SubscriberRegistry 子 struct 跟踪到 R248-ARCH-6。)*
 - [ ] **R234-ARCH-9 — Channel adapter 越权读 router 状态：dashboard_session.go / dashboard_discovered.go 直 import cli+session（P2）**：缺 wire DTO 一层，cli.EventEntry 字段改名会自动 break dashboard JSON shape。建议 `internal/server/api/dto` 定义 SessionDTO/EventDTO，~20 文件。
 - [ ] **R234-ARCH-10 — dispatch ↔ platform 双向：platform webhook 回调 leak dispatch.IncomingMessage / Reply 内部类型（P2）**：建议在 `internal/platform` 定义最小 wire types，dispatch 提供 `From(IncomingMessage)` 适配。
 - [ ] **R234-ARCH-11 — 命名空间策略碎片化：sys: / cron: / scratch: / kiro: / chatKeyPrefix 5 类前缀无中央注册表（P2）**：建议 `internal/session/namespace.go` 集中 `NamespacePrefix` enum + `ParseKey(s)`，CI 加 grep test 拒绝裸字符串。前置 R233-ARCH-5。
@@ -1449,7 +1454,7 @@
 - [ ] **R231-ARCH-2 — 消息出口四套并行管线（P1，扩展 R230-ARCH-2/6）**: dispatch.sendAndReply / server.Hub.sendWithBroadcast / cron.scheduler.executeOpt / upstream.connector_rpc 四套 send 路径。cron 直持 platforms map、绕开 dispatch.replyText/queue/dedup；upstream 直调 sess.Send 绕开 MessageQueue/usermsg。Channel Adapter 不再是消息出口的唯一抽象。方案：抽 `internal/turnrunner` 或扩 `dispatch.Dispatcher` 为唯一 Send 协调器。
 - [ ] **R231-ARCH-3 — session/router_core.go 顶部 blank-import history backend（P1）**: `claudejsonl/kirojsonl/naozhilog` 三个包的 init() 注入。注释自承"Sprint 1b 将合并到 wireup 包"。session 包想成为 backend-agnostic 的话必须迁出。方案：抽 `internal/wireup` 显式 `RegisterDefaults()` 由 `cmd/naozhi` 调用。Breaking：no（机械迁移）。
 - [ ] **R231-ARCH-4 — Router god-object（60+ 方法 / 24+ 字段）（P1）**: 单结构体覆盖 7 大职责，5 处消费方手工裁剪 Reader/Writer 接口已出现 NotifyIdle/SetUserLabelWithOrigin 不对称（R230-ARCH-3）。方案：facet 化 `Router.Lifecycle()` / `Backends()` / `Stubs()` / `Overrides()`，每 facet 对应稳定接口。
-- [ ] **R231-ARCH-5 — Hub 与 Router god-object 双胞胎共同导致 Channel Adapter 抽象塌陷（P1）**: server.Hub 退化为第二个 Router（同时持 router/scheduler/scratchPool/queue/dedup/uploadStore/auth/tailers/nodes）；webhook 进来后路径从"Adapter→Router→Wrapper"变成"Adapter→{Hub/Server/Dispatcher} 三方共享状态"。方案：抽 WSEventBus / nodeRegistry / SendCoordinator 子聚合。
+- [~] **R231-ARCH-5 — Hub 与 Router god-object 双胞胎共同导致 Channel Adapter 抽象塌陷（P1）**: server.Hub 退化为第二个 Router（同时持 router/scheduler/scratchPool/queue/dedup/uploadStore/auth/tailers/nodes）；webhook 进来后路径从"Adapter→Router→Wrapper"变成"Adapter→{Hub/Server/Dispatcher} 三方共享状态"。方案：抽 WSEventBus / nodeRegistry / SendCoordinator 子聚合。 *(部分实施：PR #327 已 6-stage split wshub.go 文件层级；Router 端 PR #309 同 6-stage split scheduler.go；但 struct-level 的 SendCoordinator / SubscriberRegistry / WSEventBus 子聚合仍未抽出 — 跟踪到 R248-ARCH-6。)*
 - [~] **R231-ARCH-6 — server.Hub.wiredLinkers 直持 cli.SubagentLinker（P1）**: Channel Adapter / 上层 server 强耦合 cli 包内部领域类型；ACP 等"无 SubagentLinker 概念"的 backend 上线时整条 agent-team UI 链路要么硬编码空实现要么走 nil 分支。方案：在 session 或 internal/agentlink 包定义 AgentLinker / AgentIntrospector 接口。Breaking：是。 — 多轮 NEEDS-DESIGN 归档 2026-05-23（同根因主条目跟踪），本批 PR
 - [~] **R231-ARCH-7 — cli.Wrapper.ShimManager 公开可变字段（P1）**: ShimManager 本应是进程级 singleton；multi-backend 部署 router 持 `wrappers map[string]*cli.Wrapper`，每 Wrapper 一个 ShimManager 副本（R230-ARCH-13 / R219-ARCH-4）。方案：定义 cli.Transport interface，shim/direct-exec 各一实现；Wrapper 拆 immutable BackendProfile + 共享 Transport。Breaking：是。 — 多轮 NEEDS-DESIGN 归档 2026-05-23（同根因主条目跟踪），本批 PR
 - [ ] **R231-ARCH-8 — cli.Protocol 接口过宽（P2）**: 9 方法含 stream-json 专属能力 WriteUserMessageLocked / WriteInterrupt / SupportsPriority / SupportsReplay。ACP 这些方法必然 noop 或返回 ErrInterruptUnsupported。方案：缩为核心 7 方法 + passthrough/interrupt 下沉为可选 PassthroughExt / InterruptExt（type-assert）。Breaking：是。
@@ -1715,7 +1720,7 @@
 
 - [ ] **R226-ARCH-1 — `server` 包成"上帝包"（P1）**: 92 个 .go + 12 子 handler，承担路由+UI+业务编排+Hub+nodeCache。建议：薄壳 server + 拆 `internal/server/api/{cron,project,scratch,discovery,...}` 子包；Hub/nodeCache 走显式注入。需 RFC。
 - [~] **R226-ARCH-2 — `KeyResolver` 在 main/server/dispatch 三处独立构造（归档 2026-05-23）**: 实地核查 cmd/naozhi/main.go:834 + internal/server/server.go:551 + internal/dispatch/dispatch.go:195 三处仍各自 `session.NewKeyResolver(agents, project.NewDataSource(...))`。R230-ARCH-9 / R224-ARCH-12 / R229-ARCH-5 / R216-ARCH-3 同根因多轮重申。统一收敛到 R230-ARCH-9（projectMgr.Resolver() 单点暴露方案）跟踪，跨包构造签名变更 NEEDS-DESIGN。
-- [ ] **R226-ARCH-3 — dispatch `sendFn` 接 `*session.ManagedSession + cli.SendResult` 破坏分层（P1）**: dispatch 名义有 `SessionRouter` 接口但发送闭包绕过。方案：定义 dispatch.Sender 接口，server 实现，dispatch 不再 import cli/session 具体类型。
+- [~] **R226-ARCH-3 — dispatch `sendFn` 接 `*session.ManagedSession + cli.SendResult` 破坏分层（P1）**: dispatch 名义有 `SessionRouter` 接口但发送闭包绕过。 *(PR #330 R243-ARCH-10 已部分实施：sendFn 收口到 dispatch.Capabilities.Send interface，server.serverCaps 实现 — closure 已被 interface 替代。但**依然导入 cli/session 具体类型**（cli.ImageData / cli.EventCallback / *cli.SendResult / *session.ManagedSession 仍在 Capabilities.Send 签名里）— 跨包分层完整解耦需 dispatch.SendRequest/SendResult 自定义 DTO 才能切干净，跟踪到独立 NEEDS-DESIGN R248-ARCH-3 Deprecated 字段清理或 follow-up RFC。)*
 - [ ] **R226-ARCH-4 — `session.Router` 30+ 字段（P2，封 R225-ARCH-* 重申）**: 注解块边界天然拆分点（processPool/sessionStore/historyAttacher/shimReconciler/attachmentTracker）。需独立 RFC。
 - [ ] **R226-ARCH-5 — Platform 包间多份"形似独立"实现（P2）**: maxIncomingTextBytes / SafeHTTPClient / Start-Stop 模板 / messageID 编解码各家重复。方案：`platform.BasePlatform` + `SafeHTTPClient(opts)` + `MessageRefCodec`。
 - [ ] **R226-ARCH-6 — `workspace`/`workspaces`/`Session.cwd` 别名 + 无热重载（P2）**: 已有 deprecated warn 但仍接受双形；高频字段（agents/projects/cron）需 SIGHUP 重载。Breaking：v2 schema。
@@ -1884,7 +1889,7 @@
 - [ ] **R222-ARCH-2 — shim 协议细节泄漏到 session 层（P1）**: session/router.go 直调 `shim.SocketPath/KeyHash/WaitSocketGone/ServerMsg/State`；cli.Wrapper 应吸收为 `WaitSocketGoneForKey(key,dur)` + `Reconnect(ctx,key,lastSeq) (*Process, midTurn, err)`。
 - [ ] **R222-ARCH-3 — `internal/config` 反向 import `internal/session`（P1）**: 仅为读 `session.DefaultMaxProcs` 一个常量。方案：抽 internal/sessionconst 或 internal/defaults 子包，session/config 都依赖它。
 - [ ] **R222-ARCH-5 — server 直接持有大量 cli.* 类型，绕过 session 抽象（P1）**: 14 个 server 文件 import cli.Attachment/ImageData/EventEntry/SubagentLinker。方案：扩展 platform.Attachment 或抽 internal/dispatch/dto。
-- [ ] **R222-ARCH-6 — Hub god-object 苗头（35+ 方法 / 1700 行）（P2）**: 拆 Hub + SubscriptionRegistry + MessageBroker。
+- [~] **R222-ARCH-6 — Hub god-object 苗头（35+ 方法 / 1700 行）（P2）**: 拆 Hub + SubscriptionRegistry + MessageBroker。 *(PR #327 R243-ARCH-2 已 6-stage split：wshub.go 2028→525 行，方法分到 5 个职责文件。35+ 方法已物理分散；struct 层 SubscriptionRegistry/MessageBroker 抽出跟踪到 R248-ARCH-6。)*
 - [ ] **R222-ARCH-7 — `processIface` 30+ 方法（P2）**: 按 core/status/events/agents 切分四个小接口。
 - [ ] **R222-ARCH-8 — graceful shutdown 顺序约束散在 main.go + server.go + router.go（P2）**: 引入 internal/lifecycle.Coordinator + 拓扑 Stop。
 - [ ] **R222-ARCH-9 — env 探测散在 5+ 处独立读取（XDG_RUNTIME_DIR / HOME / APPDATA）（P2）**: Config.Paths 子结构集中；config.Load Normalize 阶段单点探测。
@@ -1998,7 +2003,7 @@
 ### 代码质量 — 小改动等合并窗口
 
 - [ ] **R217-CR-3 — `Cleanup` 三阶段加锁窗口**：worst-case stuckKill 目标进程在 Pass 2 已被 spawnSession 替换。`shouldPrune` 已 mitigates，stuckKill 路径未 re-check。需要 pass-2 再次 verify。
-- [ ] **R217-CR-4 — `Hub god struct 36 字段 / `node.Conn` 18+ 方法巨型接口**: 子聚合拆分。
+- [~] **R217-CR-4 — `Hub god struct 36 字段 / `node.Conn` 18+ 方法巨型接口**: 子聚合拆分。 *(PR #327 R243-ARCH-2 部分实施：wshub.go 文件 split 5 个职责文件；Hub struct 字段未拆（保锁不变量）。node.Conn 接口未动 — 跟踪 R231-ARCH-5。)*
 - [ ] **R217-CR-5 — cross-node 错误注入方向不对称**: 反向有 LogSystemEvent，正向 node.Conn.Send 失败只 slog 不进 EventLog。
 - [~] **R217-CR-7 — `project.DisplayName` / `Emoji` schema 校验但 dashboard UI 不读（归档 2026-05-23）**: 同根因 R216-CR-7（重复登记）+ R110-P2 父条目（"项目自定义显示名 + emoji（foundation 已落地 2026-05-10，UI 待续）"）已显式 own UI wire 工作。foundation 实地复核：`internal/project/validate.go:47-55,124-138` `ProjectConfig.DisplayName` (128 rune cap) + `ProjectConfig.Emoji` (8 rune cap) + `ProjectConfig_DisplayNameEmojiRoundtrip` / `ProjectConfig_LegacyYamlWithoutDisplayName` / `ProjectConfig_DisplayNameTooLong` 三测试已落地；`internal/server` 全包 grep `project.DisplayName / project.Emoji` 0 命中（UI/`/api/projects` 均未读）。统一收敛到 R110-P2 跟踪 UI 落地，本批 PR
 
