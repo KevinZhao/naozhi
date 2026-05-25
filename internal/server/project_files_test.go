@@ -2,11 +2,14 @@ package server
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1311,6 +1314,69 @@ func TestHandleFileGet_ETag304(t *testing.T) {
 	}
 	if w2.Body.Len() != 0 {
 		t.Error("304 response should have empty body")
+	}
+}
+
+// TestHandleFileGet_ETagIncludesSalt regresses R214-SEC-4 (issue #418):
+// the wire-visible ETag must depend on fileETagSalt, not just (size,
+// mtime). We assert this by recomputing the unsalted hash that the old
+// implementation produced and confirming it is NOT equal to the
+// returned ETag — if some future refactor accidentally drops the salt
+// the old prefix would start matching again and this test fails loudly.
+func TestHandleFileGet_ETagIncludesSalt(t *testing.T) {
+	h, proj, projDir := newProjectHandlersForTest(t, map[string]string{
+		"a.txt": "salted",
+	})
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+proj+"&path=a.txt&mode=preview", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+	gotETag := w.Header().Get("ETag")
+	if gotETag == "" {
+		t.Fatal("missing ETag")
+	}
+
+	// Recompute what the legacy unsalted form would have produced. If
+	// fileETagSalt regresses to zero-bytes (or is dropped from the
+	// hash input) the wire ETag will collide with this value — a
+	// deterministic recovery oracle for size+mtime.
+	info, err := os.Stat(filepath.Join(projDir, "a.txt"))
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	legacySeed := []byte(strconv.FormatInt(info.Size(), 10) + "|" +
+		strconv.FormatInt(info.ModTime().UnixNano(), 10))
+	legacySum := sha256.Sum256(legacySeed)
+	// Both 8-byte (pre-#418) and 12-byte (post-#418) forms must differ
+	// from the returned ETag, since the salt is mixed into the SHA-256
+	// input regardless of truncation length.
+	legacy8 := `"` + hex.EncodeToString(legacySum[:8]) + `"`
+	legacy12 := `"` + hex.EncodeToString(legacySum[:12]) + `"`
+	if gotETag == legacy8 || gotETag == legacy12 {
+		t.Errorf("ETag %q matches the unsalted hash — fileETagSalt regressed; size+mtime are now probe-recoverable", gotETag)
+	}
+}
+
+// TestHandleFileGet_ETagSalt_NonZero pins the integrity of the salt
+// itself: a zero-filled 32-byte array would defeat the whole point of
+// the salt (an attacker would simply use the all-zeros salt as a known
+// constant). The init path treats crypto/rand failure as a hard panic
+// so this can only regress via someone replacing the var with a
+// constant — assert by entropy.
+func TestHandleFileGet_ETagSalt_NonZero(t *testing.T) {
+	if len(fileETagSalt) < 16 {
+		t.Fatalf("fileETagSalt must be at least 16 bytes; got %d", len(fileETagSalt))
+	}
+	allZero := true
+	for _, b := range fileETagSalt {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		t.Error("fileETagSalt is all zeros — crypto/rand init failed silently or var was replaced with a literal")
 	}
 }
 
