@@ -154,25 +154,13 @@ func (p *Process) readLoop() {
 		if capExceeded {
 			log.Warn("readLoop: oversized shim message, skipping", "size", len(line))
 			if readErr != nil {
-				if errors.Is(readErr, io.EOF) || errors.Is(readErr, net.ErrClosed) {
-					log.Info("readLoop: shim connection closed after oversize drain")
-					p.setDeathReason(DeathReasonShimEOF)
-				} else {
-					log.Warn("readLoop: shim read error after oversize drain", "err", readErr)
-					p.setDeathReason(DeathReasonShimReadErr)
-				}
+				p.classifyEOF(readErr, true, log)
 				break
 			}
 			continue
 		}
 		if readErr != nil {
-			if errors.Is(readErr, io.EOF) || errors.Is(readErr, net.ErrClosed) {
-				log.Info("readLoop: shim connection closed")
-				p.setDeathReason(DeathReasonShimEOF)
-			} else {
-				log.Warn("readLoop: shim read error", "err", readErr)
-				p.setDeathReason(DeathReasonShimReadErr)
-			}
+			p.classifyEOF(readErr, false, log)
 			break
 		}
 
@@ -192,110 +180,8 @@ func (p *Process) readLoop() {
 			continue
 		}
 
-		switch msg.Type {
-		case "stdout":
-			p.lastSeq.Store(msg.Seq)
-			events, _, err := p.protocol.ReadEvent(msg.Line)
-			if err != nil {
-				// ACP RPC errors: kiro returned an error response to a request
-				// we sent (typically session/prompt). The turn is over from
-				// kiro's POV — done=true comes back from ReadEvent so we
-				// can synthesize a visible "result" event and let the active
-				// Send() unblock. Without this, state stays "running" forever
-				// (operator-visible as "kiro session never replies"; reproduced
-				// 2026-05-19 r3-cancel/r3-lifecycle stuck after restart).
-				if errors.Is(err, ErrACPRPC) {
-					events = []Event{{
-						Type:    "result",
-						SubType: "error",
-						Result:  "[kiro] " + err.Error(),
-					}}
-					log.Warn("readLoop: kiro returned RPC error; surfacing as failed turn",
-						"err", err, "seq", msg.Seq)
-					// Fall through into the normal turn-end dispatch path
-					// below so the assistant bubble + state transition happen.
-				} else {
-					log.Warn("readLoop: skip unparseable event", "err", err, "seq", msg.Seq)
-					continue
-				}
-			}
-			// ReadEvent now returns a slice. Today the only multi-event frame
-			// is ACPProtocol's stopReason response, which emits
-			// (assistant text, result) — iterating preserves the single-event
-			// claude semantics while letting the ACP turn-end split land
-			// naturally. dispatchProtocolEvent reports back when killCh fired
-			// so the outer readLoop can return and trigger teardown.
-			killed := false
-			for _, ev := range events {
-				if ev.Type == "" {
-					continue
-				}
-				if p.protocol.HandleEvent(p.shimStdinWriter(), ev) {
-					continue
-				}
-				if p.dispatchProtocolEvent(ev, log) {
-					killed = true
-					break
-				}
-			}
-			if killed {
-				return
-			}
-
-		case "stderr":
-			log.Debug("cli stderr", "line", sanitizeStderrLine(msg.Line))
-
-		case "cli_exited":
-			code := 0
-			if msg.Code.Present {
-				code = msg.Code.Value
-			}
-			log.Info("CLI exited via shim", "code", code)
-			reason := DeathReasonCLIExited
-			// R180-PERF-P2: string concat + strconv avoids fmt.Sprintf's
-			// reflection + scratch-buffer allocation. The death reason is
-			// stored in an atomic.Pointer[string] and consumed by health
-			// dashboards, so the cold-path savings are trivial but the
-			// replacement is zero-risk.
-			if code != 0 {
-				reason = DeathReasonCLIExited + "_code_" + strconv.Itoa(code)
-			} else if msg.Signal != "" {
-				// R183-SEC-H1: msg.Signal is the Signal field of the shim's
-				// cli_exited JSON frame. Normal shim builds emit canonical
-				// signal names ("SIGKILL", "SIGTERM"), but the shim is a
-				// separate process: a tampered shim (local attacker, future
-				// downgrade attack via stale binary) could ship arbitrary
-				// bytes. deathReason flows into slog attrs and the dashboard
-				// JSON for "/api/sessions" → HTML. Mirror the SanitizeForLog
-				// pattern (R172-SEC-M4 / R175-SEC-P1) used across the
-				// codebase; the numeric `code` branch is safe via Itoa.
-				reason = DeathReasonCLIExited + "_signal_" + osutil.SanitizeForLog(msg.Signal, 32)
-			}
-			p.setDeathReason(reason)
-			p.transitionToDead()
-			// Close shim conn so heartbeatLoop stops writing pings into a dead
-			// socket and the bufio.Writer's fd is released promptly. Without
-			// this, if the process isn't subsequently Kill/Detach'd (e.g. when
-			// Router.Cleanup evicts it from the map), the fd leaks to GC.
-			// closeShimConn is sync.Once-guarded so a later Kill/Detach is safe
-			// without producing a "use of closed network connection" debug log
-			// on the second close attempt. R219-GO-3.
-			p.closeShimConn()
+		if p.handleShimMessage(msg, log) == shimDispatchReturn {
 			return
-
-		case "pong":
-			// Signal heartbeat loop that shim is responsive
-			select {
-			case p.pongRecv <- struct{}{}:
-			default:
-			}
-
-		case "error":
-			// Sanitize shim-supplied message: shim wire is a semi-trusted
-			// boundary (degraded/tampered shim could emit arbitrary bytes).
-			// Mirrors the R183-SEC-H1 / R184-SEC-M1 policy used for
-			// cli_exited.Signal and ACP rpc error messages.
-			log.Warn("shim error", "msg", osutil.SanitizeForLog(msg.Line, 256))
 		}
 	}
 
@@ -305,6 +191,170 @@ func (p *Process) readLoop() {
 	// fired, Kill() was what unblocked ReadSlice via shimConn.Close, which
 	// surfaces as net.ErrClosed and is already classified as DeathReasonShimEOF.
 	p.transitionToDead()
+}
+
+// shimDispatchOutcome encodes the readLoop control transition produced by
+// handleShimMessage. shimDispatchContinue is the zero value so the default
+// path through readLoop is the cheapest; shimDispatchReturn signals the
+// outer loop must unwind (cli_exited terminal frame or a stdout dispatch
+// observed killCh). R214-CODE-3.
+type shimDispatchOutcome int
+
+const (
+	shimDispatchContinue shimDispatchOutcome = iota
+	shimDispatchReturn
+)
+
+// classifyEOF stamps the appropriate deathReason for a shim-socket read
+// error and emits a single log line at the matching level. afterDrain
+// flags the post-oversize-drain branch so the log message reflects which
+// readLoop path observed the error. Pure side-effects: no return value
+// because the caller's break-from-loop decision is independent of the
+// classification (any non-nil readErr breaks). R214-CODE-3.
+func (p *Process) classifyEOF(readErr error, afterDrain bool, log *slog.Logger) {
+	closed := errors.Is(readErr, io.EOF) || errors.Is(readErr, net.ErrClosed)
+	if closed {
+		if afterDrain {
+			log.Info("readLoop: shim connection closed after oversize drain")
+		} else {
+			log.Info("readLoop: shim connection closed")
+		}
+		p.setDeathReason(DeathReasonShimEOF)
+		return
+	}
+	if afterDrain {
+		log.Warn("readLoop: shim read error after oversize drain", "err", readErr)
+	} else {
+		log.Warn("readLoop: shim read error", "err", readErr)
+	}
+	p.setDeathReason(DeathReasonShimReadErr)
+}
+
+// handleShimMessage dispatches one parsed shim frame. Carved out of
+// readLoop's inner switch so the outer loop body stays at the I/O +
+// framing layer and per-frame protocol decisions live here. Returns
+// shimDispatchReturn when readLoop must unwind (cli_exited terminal frame
+// or a stdout dispatch observed killCh). R214-CODE-3.
+func (p *Process) handleShimMessage(msg shimMsg, log *slog.Logger) shimDispatchOutcome {
+	switch msg.Type {
+	case "stdout":
+		return p.handleShimStdout(msg, log)
+
+	case "stderr":
+		log.Debug("cli stderr", "line", sanitizeStderrLine(msg.Line))
+
+	case "cli_exited":
+		p.handleShimCLIExited(msg, log)
+		return shimDispatchReturn
+
+	case "pong":
+		// Signal heartbeat loop that shim is responsive.
+		select {
+		case p.pongRecv <- struct{}{}:
+		default:
+		}
+
+	case "error":
+		// Sanitize shim-supplied message: shim wire is a semi-trusted
+		// boundary (degraded/tampered shim could emit arbitrary bytes).
+		// Mirrors the R183-SEC-H1 / R184-SEC-M1 policy used for
+		// cli_exited.Signal and ACP rpc error messages.
+		log.Warn("shim error", "msg", osutil.SanitizeForLog(msg.Line, 256))
+	}
+	return shimDispatchContinue
+}
+
+// handleShimStdout decodes a stdout frame into one or more protocol Events
+// and runs each through HandleEvent / dispatchProtocolEvent. Returns
+// shimDispatchReturn when dispatch reports killCh fired so the readLoop
+// teardown path can unwind. R214-CODE-3.
+func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOutcome {
+	p.lastSeq.Store(msg.Seq)
+	events, _, err := p.protocol.ReadEvent(msg.Line)
+	if err != nil {
+		// ACP RPC errors: kiro returned an error response to a request
+		// we sent (typically session/prompt). The turn is over from
+		// kiro's POV — done=true comes back from ReadEvent so we
+		// can synthesize a visible "result" event and let the active
+		// Send() unblock. Without this, state stays "running" forever
+		// (operator-visible as "kiro session never replies"; reproduced
+		// 2026-05-19 r3-cancel/r3-lifecycle stuck after restart).
+		if errors.Is(err, ErrACPRPC) {
+			events = []Event{{
+				Type:    "result",
+				SubType: "error",
+				Result:  "[kiro] " + err.Error(),
+			}}
+			log.Warn("readLoop: kiro returned RPC error; surfacing as failed turn",
+				"err", err, "seq", msg.Seq)
+			// Fall through into the normal turn-end dispatch path
+			// below so the assistant bubble + state transition happen.
+		} else {
+			log.Warn("readLoop: skip unparseable event", "err", err, "seq", msg.Seq)
+			return shimDispatchContinue
+		}
+	}
+	// ReadEvent now returns a slice. Today the only multi-event frame
+	// is ACPProtocol's stopReason response, which emits
+	// (assistant text, result) — iterating preserves the single-event
+	// claude semantics while letting the ACP turn-end split land
+	// naturally. dispatchProtocolEvent reports back when killCh fired
+	// so the outer readLoop can return and trigger teardown.
+	for _, ev := range events {
+		if ev.Type == "" {
+			continue
+		}
+		if p.protocol.HandleEvent(p.shimStdinWriter(), ev) {
+			continue
+		}
+		if p.dispatchProtocolEvent(ev, log) {
+			return shimDispatchReturn
+		}
+	}
+	return shimDispatchContinue
+}
+
+// handleShimCLIExited finalises a cli_exited terminal frame: stamps
+// deathReason (sanitising any shim-supplied signal name), transitions
+// State to Dead, and closes the shim socket so heartbeatLoop stops
+// pinging into a dead fd. The caller (handleShimMessage) returns
+// shimDispatchReturn so readLoop unwinds. R214-CODE-3.
+func (p *Process) handleShimCLIExited(msg shimMsg, log *slog.Logger) {
+	code := 0
+	if msg.Code.Present {
+		code = msg.Code.Value
+	}
+	log.Info("CLI exited via shim", "code", code)
+	reason := DeathReasonCLIExited
+	// R180-PERF-P2: string concat + strconv avoids fmt.Sprintf's
+	// reflection + scratch-buffer allocation. The death reason is
+	// stored in an atomic.Pointer[string] and consumed by health
+	// dashboards, so the cold-path savings are trivial but the
+	// replacement is zero-risk.
+	if code != 0 {
+		reason = DeathReasonCLIExited + "_code_" + strconv.Itoa(code)
+	} else if msg.Signal != "" {
+		// R183-SEC-H1: msg.Signal is the Signal field of the shim's
+		// cli_exited JSON frame. Normal shim builds emit canonical
+		// signal names ("SIGKILL", "SIGTERM"), but the shim is a
+		// separate process: a tampered shim (local attacker, future
+		// downgrade attack via stale binary) could ship arbitrary
+		// bytes. deathReason flows into slog attrs and the dashboard
+		// JSON for "/api/sessions" → HTML. Mirror the SanitizeForLog
+		// pattern (R172-SEC-M4 / R175-SEC-P1) used across the
+		// codebase; the numeric `code` branch is safe via Itoa.
+		reason = DeathReasonCLIExited + "_signal_" + osutil.SanitizeForLog(msg.Signal, 32)
+	}
+	p.setDeathReason(reason)
+	p.transitionToDead()
+	// Close shim conn so heartbeatLoop stops writing pings into a dead
+	// socket and the bufio.Writer's fd is released promptly. Without
+	// this, if the process isn't subsequently Kill/Detach'd (e.g. when
+	// Router.Cleanup evicts it from the map), the fd leaks to GC.
+	// closeShimConn is sync.Once-guarded so a later Kill/Detach is safe
+	// without producing a "use of closed network connection" debug log
+	// on the second close attempt. R219-GO-3.
+	p.closeShimConn()
 }
 
 // transitionToDead performs the closing handshake when readLoop concludes a
