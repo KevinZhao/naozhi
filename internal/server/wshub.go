@@ -537,17 +537,30 @@ func (h *Hub) Shutdown() {
 	if h.tailers != nil {
 		h.tailers.Shutdown()
 	}
-	// Release wiredLinkers so the underlying linker objects can be GC'd —
-	// previously this was a process-lifetime package-level leak.
-	h.wiredLinkersMu.Lock()
-	h.wiredLinkers = nil
-	h.wiredLinkersMu.Unlock()
 
 	// Now that conns are closed, pumps will observe the read/write error
 	// and exit their loops; eventPushLoop sees h.ctx.Done() or c.done.
 	// Wait bounds the shutdown on explicit goroutine lifecycle rather than
 	// on the parent context timeout alone.
+	//
+	// Issue #371: clientWG.Wait MUST come before nil-ing wiredLinkers. An
+	// in-flight readPump can be partway through handleSubscribe →
+	// completeSubscribe → maybeWireLinkerTailer; if we nil the map first,
+	// that goroutine takes the "Hub shutting down — skip" branch and
+	// silently drops a wiring it would otherwise have completed. Swapping
+	// the order makes "wiredLinkers == nil" mean exactly "no client
+	// goroutines remain, no further wiring is possible" — which is what
+	// the nil-guard at wshub_agent.go:81 was always meant to express.
 	h.clientWG.Wait()
+
+	// Release wiredLinkers so the underlying linker objects can be GC'd —
+	// previously this was a process-lifetime package-level leak. Safe to
+	// drop the lock here because clientWG.Wait above has already drained
+	// every goroutine that might call maybeWireLinkerTailer; the mutex
+	// only guards against concurrent map writes from those goroutines.
+	h.wiredLinkersMu.Lock()
+	h.wiredLinkers = nil
+	h.wiredLinkersMu.Unlock()
 
 	// Barrier: any TrackSend call that observed h.ctx.Err()==nil and was
 	// about to Add(1) is racing us. Holding sendTrackMu here forces it to
