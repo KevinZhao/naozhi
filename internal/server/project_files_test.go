@@ -1118,6 +1118,46 @@ func TestHandleFileGet_RenderRejectsNonAllowed(t *testing.T) {
 	}
 }
 
+// TestHandleFileGet_RenderRejectsSensitive locks the R249-SEC-5 gate:
+// render mode must refuse the same credential-bearing names that
+// preview / raw / download already block. Without this, an attacker who
+// can drop or rename a .env / id_rsa / .npmrc with HTML-shaped contents
+// could read it through render mode despite the other three modes
+// blocking it.
+func TestHandleFileGet_RenderRejectsSensitive(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"env_basename", ".env"},
+		{"id_rsa", "id_rsa"},
+		{"nested_secret", filepath.Join("secrets", "db.yaml")},
+		{"ssh_known_hosts", filepath.Join(".ssh", "known_hosts")},
+	}
+	htmlBytes := []byte(`<!doctype html><html><body>secret stuff</body></html>`)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h, proj, projDir := newProjectHandlersForTest(t, nil)
+			full := filepath.Join(projDir, tc.path)
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, htmlBytes, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodGet,
+				"/api/projects/file?project="+proj+"&path="+tc.path+"&mode=render", nil)
+			w := httptest.NewRecorder()
+			h.handleFileGet(w, req)
+			if w.Code != http.StatusForbidden {
+				t.Errorf("status = %d, want 403 (render must refuse sensitive paths regardless of MIME)", w.Code)
+			}
+		})
+	}
+}
+
 // TestHandleFileGet_RenderSVG pins the contract that workspace .svg files
 // flow through the render route with the same defense-in-depth headers as
 // HTML. Critical — Content-Type must remain application/octet-stream (not

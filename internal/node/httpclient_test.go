@@ -653,3 +653,19 @@ func TestHTTPClient_Close_idempotent(t *testing.T) {
 	c.Close()
 	c.Close() // second close must not panic
 }
+
+// TestHTTPClient_BlocksRedirects pins the R249-SEC-1 SSRF defence: every
+// outbound request carries the dashboard Bearer token, so a 3xx from a
+// compromised peer (or DNS/MITM) must surface to the caller instead of
+// silently auto-following at IMDS / a loopback admin port. Mirrors the
+// slack/feishu/discord/weixin contract tests.
+func TestHTTPClient_BlocksRedirects(t *testing.T) {
+	t.Parallel()
+	c := NewHTTPClient("redir-test", "http://127.0.0.1:0", "secret", "Redir Test")
+	if c.httpClient.CheckRedirect == nil {
+		t.Fatal("HTTPClient.httpClient.CheckRedirect is nil — Bearer token can leak via 3xx (R249-SEC-1)")
+	}
+	if err := c.httpClient.CheckRedirect(nil, nil); err != http.ErrUseLastResponse {
+		t.Errorf("CheckRedirect returned %v, want http.ErrUseLastResponse", err)
+	}
+}

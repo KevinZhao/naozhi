@@ -373,15 +373,38 @@ type abortResult struct {
 // and InterruptViaControl gates on State==StateRunning, so calling it
 // post-Send is dead code (returns ErrNoActiveTurn → outcome=no_turn).
 //
-// The returned channel emits exactly one abortResult and is closed
-// implicitly when read. Caller must drain it before returning so the
-// goroutine cannot outlive the cron run (otherwise a fast cron tick could
-// race the next session.Reset against the in-flight interrupt write).
+// Channel contract (R249-CR-27): the returned channel has buffer=1 and
+// is intentionally NOT closed. The goroutine self-completes thanks to
+// buffer=1 — its single send never blocks, so the goroutine returns
+// regardless of whether the caller reads. The caller drains ch only to
+// observe the abort outcome (abort.fired / abort.outcome) for logging
+// and to ensure InterruptViaControl has finished before recording the
+// run state; failing to drain leaks the abortResult value, NOT the
+// goroutine, and is harmless for shutdown bookkeeping. Earlier godoc
+// said the caller "must drain" to keep the goroutine from outliving the
+// run — that was misleading, what actually matters is sequencing the
+// interrupt write before session.Reset on the next tick.
 //
 // On the success / non-deadline error path the caller cancels ctx
 // explicitly; the watchdog observes ctx.Err()==Canceled, skips
 // InterruptViaControl, and returns abortResult{fired:false}.
 func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan abortResult {
+	// R249-GO-3: defensive nil guard. A nil ctx would panic on <-ctx.Done()
+	// inside the goroutine; a nil sess would panic on InterruptViaControl
+	// when the deadline path fires. Both are caller bugs (production wires
+	// real values), but the cron run goroutine swallows panics via
+	// robfig/cron's recover chain elsewhere — here a panic would surface as
+	// "cron logger" Error noise without the run ever recording a result.
+	// Return a pre-completed channel so the caller's `<-abortCh` sees a
+	// zero abortResult and proceeds with normal finishRun bookkeeping.
+	// Buffer=1 with no close mirrors the success-path contract: the caller
+	// drains exactly once; an unclosed channel of buffer=1 with one send
+	// already buffered satisfies that without leaking a goroutine.
+	if ctx == nil || sess == nil {
+		ch := make(chan abortResult, 1)
+		ch <- abortResult{}
+		return ch
+	}
 	ch := make(chan abortResult, 1)
 	go func() {
 		<-ctx.Done()
@@ -651,7 +674,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		}
 		s.finishRun(finishArgs{
 			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-			state: state, errClass: errClass, errMsg: fmt.Sprintf("session error: %v", err),
+			state: state, errClass: errClass, errMsg: "session error: " + err.Error(),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
 		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行跳过，请稍后重试。"))
@@ -777,7 +800,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		}
 		s.finishRun(finishArgs{
 			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-			state: state, errClass: errClass, errMsg: fmt.Sprintf("send error: %v", err),
+			state: state, errClass: errClass, errMsg: "send error: " + err.Error(),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
 		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行失败，请稍后重试。"))

@@ -79,6 +79,21 @@ type SessionRouter interface {
 	RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string)
 	// Reset discards the session for the given key (used by fresh-mode
 	// cron jobs and by Delete/Rename flows).
+	//
+	// Concurrency contract (R249-CR-14):
+	//   - Reset MUST NOT block on in-flight turns. Implementations must
+	//     short-circuit (or asynchronously complete) any active Send so
+	//     callers — notably the cron run goroutine that calls Reset
+	//     between two ticks — see bounded latency. A blocking Reset
+	//     would let one slow CLI turn pin the entire scheduler tick
+	//     loop and starve subsequent jobs.
+	//   - Callers MUST NOT hold scheduler.mu (or any lock the router's
+	//     notifyChange callback might re-acquire) when invoking Reset.
+	//     The router's Reset path may synchronously fan out a
+	//     notifyChange that re-enters scheduler state (e.g. to refresh
+	//     the dashboard projections), and re-entrant lock acquisition
+	//     would deadlock. Reset is invoked only from execute-time call
+	//     sites that have already released scheduler.mu.
 	Reset(key string)
 	// GetOrCreate returns an existing session or spawns a new one at
 	// execute time. The SessionStatus and *ManagedSession escape the
@@ -862,13 +877,25 @@ func (s *Scheduler) Stop() {
 		// channel) without wedging on a 0-duration timer. The clamp is
 		// not a guaranteed minimum wait — both the channel and the timer
 		// are checked in the same select.
+		//
+		// R249-GO-4: use NewTimer + defer Stop instead of time.After.
+		// time.After returns a fresh timer whose underlying resources
+		// are released only when it fires; on the triggerDone-fast path
+		// the timer would leak its slot until expiry (~30s default).
+		// More urgently, with remaining clamped to 1ms the timer almost
+		// certainly fires before the select runs, and a fired channel
+		// from time.After is unreachable for explicit Stop. Mirror the
+		// first select's NewTimer + defer Stop pattern (line ~820) so
+		// both halves of Stop release timer state deterministically.
 		remaining := stopBudget - time.Since(stopStart)
 		if remaining < time.Millisecond {
 			remaining = time.Millisecond
 		}
+		triggerTimer := time.NewTimer(remaining)
+		defer triggerTimer.Stop()
 		select {
 		case <-triggerDone:
-		case <-time.After(remaining):
+		case <-triggerTimer.C:
 			slog.Warn("cron scheduler: stop deadline exceeded during triggerWG wait, proceeding",
 				"budget", stopBudget, "remaining_ms", remaining.Milliseconds())
 		}
@@ -929,29 +956,32 @@ func (s *Scheduler) resetRouterStub(jobID string) {
 // visible without silently demoting them.
 type slogPrintfLogger struct{}
 
-// Recovery markers scanned in robfig/cron-emitted log lines to escalate to
-// slog.Error rather than slog.Warn. Pulled out as named consts (R247-CR-23)
-// so call-site readers see WHAT we look for and WHY in one place — the
-// previous inline `strings.Contains(msg, "panic") || ...` reads as a
-// negative assertion ("if this is a panic line") that obscured the
-// upstream-stability rationale baked into the comment.
+// cronPanicMarker is the substring scanned in robfig/cron-emitted log
+// lines to escalate to slog.Error rather than slog.Warn. Pulled out as a
+// named const (R247-CR-23) so call-site readers see WHAT we look for and
+// WHY in one place — the previous inline `strings.Contains(msg, "panic")`
+// read as a negative assertion ("if this is a panic line") that obscured
+// the upstream-stability rationale baked into the comment.
 //
-// Both markers are matched: robfig/cron's recover chain currently emits
-// recovery messages containing "panic" (chain.go: `cron: panic running
-// job: %v\n%s`). "recovered" is the upstream-stability fallback — if the
-// library renames the message we still surface as Error rather than
-// silently demoting a real fault to Warn. Keep both even when one
-// becomes redundant; the cost is one extra strings.Contains scan per
-// emitted line, dwarfed by Error path's slog overhead.
-const (
-	cronPanicMarker     = "panic"
-	cronRecoveredMarker = "recovered"
-)
+// robfig/cron's Recover wrapper invokes logger.Error(err, "panic",
+// "stack", ...) (chain.go ~line 50); the printfLogger Error formatter
+// renders the msg argument verbatim, so the literal substring "panic"
+// is guaranteed to appear in every recover-emitted line. No other Error
+// path through the library carries this token.
+//
+// R249-CR-24: dropped the historical cronRecoveredMarker = "recovered"
+// fallback. It existed as a forward-compat hedge for a hypothetical
+// upstream rename of the Recover message but never matched real output:
+// robfig/cron 3.0.x emits "panic" only, and a future rename would arrive
+// in a Go module bump where we'd update the marker alongside any other
+// breakage. Single Contains scan is enough — keeping a no-op fallback
+// added a strings.Contains call per emitted line for no observed signal.
+const cronPanicMarker = "panic"
 
 func (slogPrintfLogger) Printf(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	msg = strings.TrimRight(msg, "\n")
-	if strings.Contains(msg, cronPanicMarker) || strings.Contains(msg, cronRecoveredMarker) {
+	if strings.Contains(msg, cronPanicMarker) {
 		slog.Error("cron logger", "msg", msg)
 		return
 	}

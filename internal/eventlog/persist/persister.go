@@ -197,6 +197,17 @@ type Persister struct {
 	// lastDrainNS updates every time the run goroutine finishes
 	// handling a batch. WriterAlive reads this to check liveness.
 	lastDrainNS atomic.Int64
+
+	// flushCands is a scratch slice reused across tickFlush calls so the
+	// per-tick `var cands []flushCandidate` inside collectFlushCandidates
+	// no longer allocates fresh on every flush tick. Touched ONLY on the
+	// run goroutine (tickFlush is invoked under the same select that owns
+	// p.writers), so no synchronisation is needed. Pre-grown to the
+	// 16-writer "no scaling" bucket to cover small deploys in zero
+	// allocations; larger writer-counts naturally grow the slice on the
+	// first call and stay grown for the process lifetime.
+	// R249-PERF-19.
+	flushCands []flushCandidate
 }
 
 // batchJob is the internal queue element. Key is the original
@@ -732,6 +743,11 @@ func (p *Persister) tickFlush() {
 // past the (adaptive) flush interval, sorted oldest-first. Split out so
 // tickFlush stays readable and the sort + adaptive scaling can be
 // unit-tested independently.
+//
+// R249-PERF-19: reuses p.flushCands rather than allocating a fresh
+// slice each tick. The clear+truncate is safe because tickFlush is
+// the sole reader of the returned slice (no goroutine retains a
+// reference past the loop) and runs only on the run goroutine.
 func (p *Persister) collectFlushCandidates(now time.Time) []flushCandidate {
 	// R214-PERF-3: lengthen the effective flush interval as the live
 	// writer-set grows. Each writer's flush() does its own fsync(log) +
@@ -743,7 +759,11 @@ func (p *Persister) collectFlushCandidates(now time.Time) []flushCandidate {
 	// rather than per writer so the bucket boundary is stable across
 	// the iteration.
 	threshold := effectiveFlushInterval(p.opts.FlushInterval, len(p.writers))
-	var cands []flushCandidate
+	// Drop pointer references from the previous tick before reuse so
+	// dropped/idle-closed writers can be GC'd while this slice holds
+	// the only remaining reference; then truncate to len=0 keeping cap.
+	clear(p.flushCands)
+	cands := p.flushCands[:0]
 	for k, w := range p.writers {
 		if !w.dirty {
 			continue
@@ -758,6 +778,9 @@ func (p *Persister) collectFlushCandidates(now time.Time) []flushCandidate {
 			return cands[i].w.firstDirtyAt.Before(cands[j].w.firstDirtyAt)
 		})
 	}
+	// Stash the (possibly grown) backing array back so the next tick
+	// inherits the larger cap.
+	p.flushCands = cands
 	return cands
 }
 
@@ -793,6 +816,16 @@ func effectiveFlushInterval(base time.Duration, writerCount int) time.Duration {
 }
 
 func (p *Persister) tickIdleClose() {
+	// R249-PERF-20: skip the Clock() vDSO call + map iter setup when no
+	// writers are open. Idle deployments (cron-only / dashboard-paused)
+	// hit this every IdleCloseAfter/4 (≥30s) and the empty-map walk is
+	// pure overhead. Safe without locking because tickIdleClose runs
+	// only on the run goroutine, the same goroutine that mutates
+	// p.writers — no other goroutine can append between this read and
+	// the loop body.
+	if len(p.writers) == 0 {
+		return
+	}
 	now := p.opts.Clock()
 	for k, w := range p.writers {
 		if w.dirty {

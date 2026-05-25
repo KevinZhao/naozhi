@@ -45,6 +45,16 @@ func NewHTTPClient(id, url, token, displayName string) *HTTPClient {
 				// or GODEBUG override cannot silently accept TLS 1.0/1.1.
 				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 			},
+			// R249-SEC-1: every doRequest attaches the dashboard Bearer token,
+			// so a 3xx response from a compromised peer (or DNS/MITM) could
+			// redirect the request — token and all — at IMDS or another
+			// internal address. Mirror the slack/feishu/discord/weixin
+			// hardening: surface the redirect to the caller via
+			// ErrUseLastResponse so the request fails cleanly instead of
+			// auto-following with credentials.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }
