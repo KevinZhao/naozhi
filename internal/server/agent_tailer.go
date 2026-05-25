@@ -154,9 +154,10 @@ func (r *tailerRegistry) pollLoop() {
 			// Drop references in the scratch slice between ticks so a tailer
 			// removed by closeTask becomes GC-eligible immediately rather than
 			// being pinned through r.pollWG's scratch capture.
-			for i := range scratch {
-				scratch[i] = nil
-			}
+			// R249-PERF-5: clear() compiles to a memclr that no-ops on an empty
+			// slice, so the steady-state idle tick (no tailers registered) pays
+			// zero work here instead of entering a manual range loop.
+			clear(scratch)
 		}
 	}
 }
