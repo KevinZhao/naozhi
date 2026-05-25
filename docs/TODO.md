@@ -661,7 +661,7 @@
 - [ ] **R242-ARCH-14 [REFACTOR]** `internal/cron/scheduler.go:2125-2163` `deadlineInterrupter` 单方法接口直接依赖 `session.InterruptOutcome`；提到 internal/types 共享或 cron 镜像枚举。
 - [ ] **R242-ARCH-15 [REFACTOR]** `internal/cron/scheduler.go:280-294` `runningJobs sync.Map` 永不清理；DeleteJob 调 LoadAndDelete 或 freshness epoch。
 - [ ] **R242-ARCH-16 [REFACTOR]** `internal/session/router_core.go:413` excluders atomic.Pointer 启动期 nil pool fallback；cmd 装配前 SetPendingExcluders(true) blocking。
-- [~] **R242-ARCH-18 [REFACTOR]** `internal/session/auto_chain_router.go:73-89` PickWorkspaceChain Phase 2/3 双 build excluder 不一致；Phase 3 复用 Phase 2 inner。
+- [x] **R242-ARCH-18 [REFACTOR]** `internal/session/auto_chain_router.go:73-89` PickWorkspaceChain Phase 2/3 双 build excluder 不一致；Phase 3 复用 Phase 2 inner。 *(已实施：spawn 路径之前已抽 `snapshotCombinedExcluderLocked` 收口；本批补 backfill 路径 — 拆出 `combinedExcluderHeld`（caller-must-hold-r.mu 变体）共享 slice layout，`snapshotCombinedExcluderLocked` 变成 lock shell + 调 held，`runAutoChainBackfillOnce` Phase 3 从内联 `routerExcluder + extras` 改为 `r.combinedExcluderHeld()`；spawn 与 backfill 现共享单一 source of truth，未来 excluder 来源加在 held 内全路径自动覆盖。auto-chain 全部既有测试通过（TestRunAutoChainBackfillOnce_* / TestMaybeAttachAutoChainOnSpawn_*）。)*
 - [ ] **R242-ARCH-19 [REFACTOR]** `internal/cron/runstore.go:22-32` runs/ vs cron_jobs.json 物理分离无 atomic transaction；DeleteJob 先 await persistJobsLocked 再删 runs/。
 - [ ] **R242-ARCH-20 [REFACTOR]** `internal/cli/eventlog.go:469-478` PersistSink 双 atomic store sinkReady 顺序无 healthcheck；加 `replayDropTotal atomic.Int64` 在 /health 端点。
 - [ ] **R242-ARCH-21 [REFACTOR]** `cmd/naozhi/main.go:919-937` 关闭顺序 sysMgr → scheduler → router 仅注释；抽 `lifecycle.Coordinator` 显式依赖图。
