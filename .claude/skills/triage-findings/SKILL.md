@@ -9,7 +9,7 @@ Filters raw review-agent output so only verified, non-duplicate, non-cosmetic pr
 
 ## Why this skill exists
 
-`docs/TODO.md` was the previous dump target for review findings. It grew to 2649 lines / 1054 open / 65 review rounds because every finding was appended without verification, dedup, or categorization. PRs touching TODO.md conflicted constantly. As of 2026-05-25 TODO.md is FROZEN; this skill is the gate for everything new.
+`docs/TODO.md` was the previous dump target for review findings. It grew to 2649 lines / 1054 open / 65 review rounds because every finding was appended without verification, dedup, or categorization. PRs touching TODO.md conflicted constantly. As of 2026-05-25 TODO.md was frozen, on 2026-05-26 it was deleted after all 1054 findings were triaged into GitHub Issues / cosmetic-backlog / discarded audit trail. This skill is the only gate for new findings.
 
 ## Inputs
 
@@ -28,7 +28,7 @@ For each finding, decide exactly one bucket:
 ### Bucket A — Open a GitHub Issue
 Open if ALL of:
 1. **Verified to still exist** in the current code (grep file path / line / function name; if file moved, find new location; if symbol removed, this is bucket C)
-2. **Not a duplicate** of an existing issue (`gh issue list --search "<anchor or symptom>"`) AND not already covered by an existing TODO.md anchor that's marked `[~]` or has a "降级" / "已实施" annotation
+2. **Not a duplicate** of an existing issue (`gh issue list --search "<anchor or symptom>"`)
 3. **Has a real functional impact** — could plausibly change runtime behavior, perf, or security posture. This includes P3 correctness items (e.g. rare-race / edge-case-only). **Priority does NOT gate issue creation**; even P3 correctness gets an issue. Tag with `priority:p{0..3}` so we can filter later.
 4. NOT purely a godoc/naming/comment suggestion (those are bucket B regardless of priority). If a finding mixes a godoc suggestion AND a functional claim (e.g. "rename and fix the lock"), the functional claim wins — bucket A. The "purely" qualifier is the gate.
 
@@ -127,10 +127,10 @@ Do not narrate every finding to the user; the annotations in R{ROUND}-raw.md are
 - **Anchor collision across rounds** (e.g. R246-CR-11 and R247-CR-11 about different things): namespace by full `R{ROUND}-{CAT}-{IDX}`; the round prefix prevents collision.
 - **Finding with no anchor**: assign one using the next sequence in the round, e.g. if R249-GO has 1..7, assign R249-GO-8. Note in the body that this was a triage-assigned anchor.
 - **Multi-finding from same root cause** (very common in 5-agent parallel review): cluster by file/function, open ONE issue with all anchors in the body, the rest go bucket C with reason "rolled into #N".
-- **Historical backfill (TODO.md → issues)**: when running on `docs/TODO.md` (not a R{ROUND}-raw.md file), treat each `- [ ]` bullet as a finding, use the existing anchor in the bullet. **Verify each via grep before deciding**; many items are 2-6 weeks old and silently fixed since. Staleness is NOT the same as low-priority — a P0 finding from 4 weeks ago that's still in the code is still bucket A. The bias for stale items should only express itself in: (a) double-checking already-fixed status with extra care, (b) treating ambiguous "降级 (deferred)" notes as bucket C unless the underlying claim still grep-verifies.
+<!-- Historical backfill mode (TODO.md → issues) was used during the 2026-05-25/26 migration; TODO.md no longer exists. The mode kept for reference: treat each `- [ ]` bullet as a finding, verify each via grep, staleness ≠ low-priority — a P0 finding from N weeks ago that still grep-verifies is still bucket A. -->
 
 ## Linked skills
 
 - Produced by: `dev-workflow` skill's review step (the `ecc:code-review` invocation).
 - Output consumed by: GitHub issue tracker + `docs/cosmetic-backlog.md`.
-- Never write to: `docs/TODO.md` (FROZEN as of 2026-05-25).
+- Never recreate: `docs/TODO.md` (deleted 2026-05-26 after migration).
