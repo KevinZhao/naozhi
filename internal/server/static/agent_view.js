@@ -63,13 +63,17 @@
     var label = a.name || a.description || 'agent';
     // Phase 3: clickable when we have a task_id. Pre-task_start agents
     // ("spawned" status without TaskID) have no internal view yet, so skip
-    // the onclick to avoid a dead tap.
+    // the data-task to avoid a dead tap.
+    //
+    // R247-SEC-4: previously this emitted an inline `onclick` that
+    // interpolated `escAttr(a.taskId)` into a JavaScript string literal —
+    // wrong sink (HTML-attr escape, not JS-string escape). Even though the
+    // server validates taskId via `agentTaskIDRe ^[a-z0-9]{1,32}$`, the
+    // layered escape made the wrong defense visible. We now rely on the
+    // delegated `click` listener below + dataset.taskId — no JS-in-attr.
     var clickable = !!a.taskId;
-    var onclick = clickable
-      ? ' onclick="window.AgentView.switchTo(\'' + escAttr(a.taskId) + '\')"'
-      : '';
     var parts = '<div class="' + cls + '" data-task="' + escAttr(a.taskId || '') + '"' +
-      (clickable ? ' role="button" tabindex="0"' : '') + onclick + '>';
+      (clickable ? ' role="button" tabindex="0"' : '') + '>';
     parts += '<span class="sa-dot"></span>';
     if (a.background) parts += '<span class="sa-bg">[bg]</span>';
     parts += '<span class="sa-name">' + esc(label) + '</span>';
@@ -358,13 +362,33 @@
     el.className = 'agent-breadcrumb';
     el.id = 'agent-breadcrumb';
     el.style.display = 'none';
-    el.innerHTML =
-      '<button class="bc-back" type="button" aria-label="返回父会话" ' +
-      'onclick="window.AgentView.switchTo(null)">← 返回父会话</button>' +
-      '<span class="bc-tag">agent</span>' +
-      '<span class="bc-name" id="bc-agent-name"></span>' +
-      '<span class="bc-team" id="bc-agent-team"></span>' +
-      '<span class="bc-stat" id="bc-agent-stat"></span>';
+    // R247-SEC-4: built via DOM API so we don't open another inline-onclick
+    // sink even with a hard-coded `null` argument (the lint/test that bans
+    // the JS-string-in-attr pattern would otherwise need a hand-tuned
+    // exception). The semantics are identical to the previous innerHTML.
+    var btn = document.createElement('button');
+    btn.className = 'bc-back';
+    btn.type = 'button';
+    btn.setAttribute('aria-label', '返回父会话');
+    btn.textContent = '← 返回父会话';
+    btn.addEventListener('click', function () { switchTo(null); });
+    el.appendChild(btn);
+    var tag = document.createElement('span');
+    tag.className = 'bc-tag';
+    tag.textContent = 'agent';
+    el.appendChild(tag);
+    var nm = document.createElement('span');
+    nm.className = 'bc-name';
+    nm.id = 'bc-agent-name';
+    el.appendChild(nm);
+    var tm = document.createElement('span');
+    tm.className = 'bc-team';
+    tm.id = 'bc-agent-team';
+    el.appendChild(tm);
+    var st = document.createElement('span');
+    st.className = 'bc-stat';
+    st.id = 'bc-agent-stat';
+    el.appendChild(st);
     // Insert at the top of the events scroll container so it sits just
     // above the agent events, matching the RFC §3.6.5 mockup.
     var scroll = document.getElementById('events-scroll');
@@ -526,6 +550,25 @@
       state.pollTimer = null;
     }
   }
+
+  // ─── Delegated click — agent row drill-in ─────────────────────────
+  //
+  // R247-SEC-4: replaces the per-row inline onclick attribute that fed
+  // taskId through HTML-attr escape into a JS-string sink. We delegate
+  // a single click listener at document level and pull taskId from the
+  // row's data-task attribute via dataset.task — the browser already
+  // decoded the HTML-attr escape, so the value is a plain JS string and
+  // never crosses a JS-parse boundary.
+  document.addEventListener('click', function (e) {
+    var t = e.target;
+    if (!t || typeof t.closest !== 'function') return;
+    var row = t.closest('.rb-agent-row[data-task]');
+    if (!row) return;
+    var taskID = row.dataset ? row.dataset.task : row.getAttribute('data-task');
+    if (!taskID) return; // pre-task_start agents (no taskId yet) — dead tap.
+    e.preventDefault();
+    switchTo(taskID);
+  });
 
   // ─── Esc key — back to parent ──────────────────────────────────────
 
