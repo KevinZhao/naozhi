@@ -997,14 +997,23 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	// path.Clean (POSIX, forward-slash only) is correct for the wire
 	// shape we accept (we already rejected backslash + IsAbs above), and
 	// matches the forward-slash attachmentDirPrefix HasPrefix check
-	// below. We deliberately do NOT swap to filepath.Clean here: on
-	// Windows that would treat backslash as a separator, but the
-	// pre-clean reject already disallows backslash entirely so
-	// filepath.Clean would be a no-op divergence with cross-platform
-	// risk. EvalSymlinks + attachRootAbs HasPrefix below provides the
+	// below. EvalSymlinks + attachRootAbs HasPrefix below provides the
 	// authoritative containment check after Join.
 	cleaned := path.Clean(relRaw)
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
+		return
+	}
+	// R215-SEC-P2-3: defence-in-depth on non-Linux. On Linux path.Clean and
+	// filepath.Clean are identical so this guard is a no-op. On macOS /
+	// Windows the OS path semantics diverge from POSIX (case-insensitive
+	// FS, alternate separators, drive letters); even though the pre-clean
+	// rejects backslash + IsAbs, an OS-aware re-clean catches anything the
+	// POSIX cleaner missed. We require the two cleaners to agree on the
+	// same forward-slash representation — any divergence is rejected
+	// rather than silently accepted, since by definition it means the
+	// wire shape was not stable across the path/filepath boundary.
+	if osCleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(cleaned))); osCleaned != cleaned {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
 		return
 	}

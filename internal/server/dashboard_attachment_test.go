@@ -181,6 +181,50 @@ func TestHandleAttachment_NoWorkspace(t *testing.T) {
 	}
 }
 
+// TestHandleAttachment_PathFilepathAgreement pins R215-SEC-P2-3: after
+// path.Clean (POSIX) the handler now requires filepath.Clean to round-trip
+// to the same forward-slash representation. On Linux the two cleaners are
+// identical so all valid attachment paths still pass through; on macOS /
+// Windows any divergence is rejected as 400 rather than silently accepted
+// with a different on-disk shape than the wire.
+//
+// The positive sub-case exercises the agreement path on the host that runs
+// CI (Linux) — if a future refactor breaks the path.Clean → filepath.Clean
+// round-trip in any way, the previously-passing fixture flips to 400.
+func TestHandleAttachment_PathFilepathAgreement(t *testing.T) {
+	ws := t.TempDir()
+	// Path that exercises path.Clean's ".." resolution and trailing-slash
+	// normalisation; must agree with filepath.Clean on Linux.
+	rel := writeAttachmentFixture(t, ws, "2026-05-25", "img.png", []byte{0x89, 'P', 'N', 'G'})
+	srv := newAttachmentServer(t, ws)
+	key := "dash:direct:alice:general"
+
+	u := "/api/sessions/attachment?key=" + url.QueryEscape(key) +
+		"&path=" + url.QueryEscape(rel)
+	req := httptest.NewRequest(http.MethodGet, u, nil)
+	w := httptest.NewRecorder()
+	srv.sendH.handleAttachment(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("valid attachment path rejected by path/filepath agreement guard: "+
+			"status=%d want 200 (body=%s)", w.Code, w.Body.String())
+	}
+
+	// Embedded "./" segment — path.Clean strips it, then the agreement
+	// check re-cleans through filepath. Both arrive at the same canonical
+	// form on Linux, so this still resolves; on Windows the dot-segment
+	// would still be stripped identically.
+	rel2 := ".naozhi/./attachments/2026-05-25/img.png"
+	u2 := "/api/sessions/attachment?key=" + url.QueryEscape(key) +
+		"&path=" + url.QueryEscape(rel2)
+	req2 := httptest.NewRequest(http.MethodGet, u2, nil)
+	w2 := httptest.NewRecorder()
+	srv.sendH.handleAttachment(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Errorf("dot-segment path cleaned by both cleaners should resolve, got status=%d body=%s",
+			w2.Code, w2.Body.String())
+	}
+}
+
 func TestHandleAttachment_NotModified(t *testing.T) {
 	ws := t.TempDir()
 	rel := writeAttachmentFixture(t, ws, "2026-05-07", "a.png", []byte{0x89, 'P', 'N', 'G'})
