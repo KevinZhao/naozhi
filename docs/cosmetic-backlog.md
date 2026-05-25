@@ -15,3 +15,11 @@
 ## Entries
 
 <!-- triage-findings skill 在此 append；新条目加到末尾 -->
+
+- [R248-ARCH-5] AgentLinker interface 放 consumer-local (server pkg) 而非 session/agentlink — internal/session/agentlink/agentlink.go:1
+- [R248-ARCH-7] SetScheduler/SetUploadStore/SetScratchPool 搬到 wshub_send.go 或新建 wshub_lifecycle.go — internal/server/wshub.go:369-378
+- [R248-CR-5] AgentLinker.Query → Lookup, QueryOrResolveFast → Resolve — internal/session/agentlink/agentlink.go:34-40
+- [R248-CR-7] handleAgentSubscribe 并入 wshub_subscribe.go (与 ValidateSessionKey 入口模式对齐) — internal/server/wshub_agent.go:127
+<!-- CURATED-NAMING-1 已改提为 GitHub Issue (caller-visible API rename, 125+ call sites,
+不符合 "zero functional impact" 标准；按 skill rule "godoc-AND-callers → A" 归 issue)。 -->
+

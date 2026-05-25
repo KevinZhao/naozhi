@@ -39,6 +39,15 @@ Append to `docs/cosmetic-backlog.md` if BOTH:
 
 A "P3 REFACTOR" is bucket B only if it really has zero functional impact. If it removes a subtle correctness foot-gun (even rarely triggered), it goes to bucket A.
 
+**Concrete examples for the A vs B borderline** (refactor-only items are the most ambiguous):
+- File move from `wshub.go` to `wshub_lifecycle.go` preserving behavior → **B**
+- Method rename `Query` → `Lookup` no caller change → **B**
+- Interface relocation across packages, identical signature → **B**
+- Add a NEEDS-DESIGN comment / TODO marker in code → **B** (not A — comments don't deserve issues unless they indicate a real bug)
+- Split a god-struct into N focused interfaces (changes consumers' import surface) → **A** (architectural, multi-step, deserves an issue tracker)
+- Remove a `Deprecated` field that has callers → **A** (caller-visible change)
+- Rename a public exported type with godoc-only impact → **B**, but with godoc-AND-callers → **A**
+
 Cosmetic backlog is read-only most of the time; once or twice a quarter someone can sweep it.
 
 ### Bucket C — Discard (audit trail only)
@@ -47,6 +56,10 @@ Drop if any of:
 - **False positive**: invariant the finding claims to break is actually maintained by a lock / contract the reviewer missed
 - **Out of scope**: depends on naozhi being deployed differently than it actually is (multi-tenant / different OS / etc.)
 - **Superseded**: another finding in this same R{ROUND}-raw.md or an existing issue covers the same root cause
+- **Self-rolled**: the raw bullet itself says `合并到 X 跟踪` / `rolled into #N` / `dup of X` — bucket-C immediately with reason `rolled-into:<X>`, no further verification needed
+- **Not actionable**: the raw bullet itself says "保留作长期跟踪条目（非 action item）" / "无需改动；观察性条目" or similar — bucket-C with reason `not-actionable`
+
+**Note on `降级 LOW` / `Paused` annotations**: do NOT auto-bucket-C these. They mean "deferred", not "discarded". Verify the underlying claim in code; if still present, it's bucket A with `priority:p3` (matching the deferred status). Only the explicit `not-actionable` / `rolled-into` markers above auto-discard.
 
 Drops are NOT silent. Append to the bottom of the same `docs/review/R{ROUND}-raw.md` under a `## Discarded` section with a one-line reason per anchor. Future reviewers grep for these reasons.
 
@@ -57,6 +70,7 @@ Drops are NOT silent. Append to the bottom of the same `docs/review/R{ROUND}-raw
 2. Verify:
    - If file path is referenced: Read or Grep that file. Confirm symbol/line still relevant.
    - If lock / invariant claim: Grep adjacent code, confirm the claim is correct.
+   - **Line-number drift is OK**: if the cited line moved (e.g. file got refactored) but the symbol/structure/claim is still present, count as verified. Only bucket-C as "already fixed" if the symbol or fix-target itself is gone.
 3. Dedup:
    - gh issue list --search "<anchor>" --state all
    - gh issue list --search "<key symptom phrase>" --state all
@@ -69,7 +83,9 @@ Drops are NOT silent. Append to the bottom of the same `docs/review/R{ROUND}-raw
      - **Location** ← file:line + code snippet from the bullet (or grepped if bullet lacks it)
      - **Proposal** ← the bullet's "方案" / "fix" text if present, else blank
      - **Triage notes** ← skill-generated: which file was grepped to verify, dedup search results, severity rationale
-     - Attach labels: `priority:p{0..3}`, `area:{cron|wshub|dashboard|cli|dispatch|server|session|adapter|shim|persistence}`, `type:{correctness|perf|sec|refactor|ux|feature}`, `source:R{ROUND}` (create the `source:R{ROUND}` label on first use of each round). Do NOT use `needs-triage` — that label is for manually-filed issues that bypassed this skill.
+     - Issue title: `[R{ROUND}-{CAT}-{IDX}] <symptom>` — keep ≤ 90 chars total.
+     - Attach labels: `priority:p{0..3}`, `area:{cron|wshub|dashboard|cli|dispatch|server|session|adapter|shim|persistence}`, `type:{correctness|perf|sec|refactor|ux|feature}`, `source:R{ROUND}` (create the `source:R{ROUND}` label on first use of each round, e.g. `gh label create source:R249 --color C5DEF5 --description "Round 249 finding"`). Optionally add `needs-design` if the proposal is non-obvious or has ≥ 2 candidate approaches. Do NOT use `needs-triage` — that label is reserved for issues filed via the GitHub UI that bypassed this skill.
+     - To dedup issues by round, use `gh issue list --label "source:R{ROUND}"` (NOT `--search "source:R{ROUND}"`, which doesn't match label).
    - Bucket B: append to docs/cosmetic-backlog.md as a single line: `- [R{ROUND}-{CAT}-{IDX}] <one-line> — file:line`
    - Bucket C: append to ## Discarded section in R{ROUND}-raw.md with reason.
 6. Annotate the original bullet in R{ROUND}-raw.md with the outcome: `→ #123` (issue) / `→ cosmetic` / `→ discarded:<reason>`.
