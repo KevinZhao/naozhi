@@ -816,6 +816,16 @@ func effectiveFlushInterval(base time.Duration, writerCount int) time.Duration {
 }
 
 func (p *Persister) tickIdleClose() {
+	// R249-PERF-20: skip the Clock() vDSO call + map iter setup when no
+	// writers are open. Idle deployments (cron-only / dashboard-paused)
+	// hit this every IdleCloseAfter/4 (≥30s) and the empty-map walk is
+	// pure overhead. Safe without locking because tickIdleClose runs
+	// only on the run goroutine, the same goroutine that mutates
+	// p.writers — no other goroutine can append between this read and
+	// the loop body.
+	if len(p.writers) == 0 {
+		return
+	}
 	now := p.opts.Clock()
 	for k, w := range p.writers {
 		if w.dirty {
