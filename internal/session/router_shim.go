@@ -448,6 +448,22 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// current session's JSONL may not yet be flushed to disk; assistant
 		// entries for that turn are transiently absent from the dashboard
 		// until the next live event repopulates them. Self-healing.
+		//
+		// R52-CONCUR-004 sub-issue: histEntries is loaded from JSONL fresh
+		// rather than merged with sess.persistedHistory. If the in-memory
+		// persistedHistory contains entries that never made it to JSONL
+		// (e.g. an interim user prompt or assistant chunk that crashed
+		// before disk flush), the new proc.eventLog will not see those
+		// entries and EventEntriesSince's "proc != nil → proc.EventEntries"
+		// fast path may under-return briefly. The fallback path
+		// (EventEntriesBeforeCtx, dashboard scrollback) merges
+		// sess.persistedHistory with the on-disk tier so the user-visible
+		// history converges; the gap is only in the live "since X" stream
+		// during the reconnect window. A proper merge here requires first
+		// landing R51-CONCUR-002 (sendMu protection on
+		// ReattachProcessNoCallback) so we can guarantee no in-flight Send
+		// is racing the merge. Tracked under R51-CONCUR-002 as the master
+		// sendMu refactor.
 		if r.claudeDir != "" {
 			ids := make([]string, 0, len(sessPrevIDs)+1)
 			ids = append(ids, sessPrevIDs...)
