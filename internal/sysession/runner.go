@@ -342,6 +342,14 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 			slog.Warn("sysession: runner stderr",
 				"binary", filepath.Base(r.cfg.BinPath),
 				"stderr_head", head)
+			// R238-GO-12 (#804): also append the sanitized head to the
+			// returned error so the dashboard circuit-breaker's
+			// last_error reflects the actual CLI failure (e.g. "model
+			// not found", "auth failed") rather than just "exit status
+			// N". Without this the breaker is observable but
+			// un-debuggable.
+			return "", fmt.Errorf("sysession: %s -p failed: %w: %s",
+				filepath.Base(r.cfg.BinPath), err, head)
 		}
 		return "", fmt.Errorf("sysession: %s -p failed: %w",
 			filepath.Base(r.cfg.BinPath), err)
