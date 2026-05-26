@@ -559,6 +559,20 @@ func buildExcerpt(seed string) string {
 	if seed == "" {
 		return ""
 	}
+	// R235-GO-4 (#1004): neutralise the EXCERPT delimiters BEFORE the
+	// per-line truncate walk. The previous implementation did the
+	// replace at the very end via strings.ReplaceAll, but the per-line
+	// 512-byte cap can split a marker across the cap boundary (e.g. a
+	// line with 500 bytes of payload then "---BEGIN CONVERSATION
+	// EXCERPT---" trailing) — the post-walk ReplaceAll then fails to
+	// detect the now-fragmented marker, and the LLM sees a partial
+	// delimiter in the data block. Pre-replacing on the raw seed
+	// guarantees the marker substring is neutralised as a contiguous
+	// run before any truncation can fragment it. Sec-MEDIUM-1.
+	if strings.Contains(seed, excerptBeginMarker) || strings.Contains(seed, excerptEndMarker) {
+		seed = strings.ReplaceAll(seed, excerptBeginMarker, excerptMarkerSafe)
+		seed = strings.ReplaceAll(seed, excerptEndMarker, excerptMarkerSafe)
+	}
 	var b strings.Builder
 	b.Grow(len(seed))
 	lineWritten := 0

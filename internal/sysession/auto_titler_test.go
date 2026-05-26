@@ -535,6 +535,39 @@ func TestPruneHighwaterOldest_RespectsCapAndKeepsNewest(t *testing.T) {
 	}
 }
 
+// TestBuildExcerpt_MarkerSurvivesLineTruncation guards R235-GO-4
+// (#1004): a line whose embedded EXCERPT marker would otherwise be
+// split by the 512-byte per-line cap must still be neutralised. The
+// pre-walk ReplaceAll catches the marker as a contiguous run before
+// truncation can fragment it.
+func TestBuildExcerpt_MarkerSurvivesLineTruncation(t *testing.T) {
+	t.Parallel()
+	// Construct a single line that pushes the BEGIN marker across the
+	// 512-byte boundary: 500 bytes of padding + the full BEGIN marker.
+	pad := strings.Repeat("a", 500)
+	in := pad + "---BEGIN CONVERSATION EXCERPT---"
+	got := buildExcerpt(in)
+	// The critical contract: no fragment of the structural delimiter
+	// survives. Even a partial like "BEGIN CONVERSATION EXCERPT" or
+	// "---BEGIN" or "EXCERPT---" would let an LLM treat the excerpt
+	// boundary as ambiguous.
+	if strings.Contains(got, "BEGIN CONVERSATION EXCERPT") {
+		t.Errorf("excerpt still contains BEGIN marker substring after sanitise: %q", got)
+	}
+	if strings.Contains(got, "---BEGIN") || strings.Contains(got, "EXCERPT---") {
+		t.Errorf("excerpt still contains marker fragment after sanitise: %q", got)
+	}
+	// The safe placeholder may itself be cut by the per-line cap (the
+	// substituted line can still exceed 512 bytes if pad+placeholder
+	// >512). What matters is that the marker substring is gone; check
+	// for at least the leading "[EXCERPT" prefix to confirm replacement
+	// happened (rather than the marker just being entirely truncated
+	// off, which would also pass the negative checks above).
+	if !strings.Contains(got, "[EXCERPT") {
+		t.Errorf("excerpt missing safe placeholder prefix: %q", got)
+	}
+}
+
 // TestPruneHighwaterOldest_NoOpUnderCap verifies the prune is a no-op
 // when the map is already within budget.
 func TestPruneHighwaterOldest_NoOpUnderCap(t *testing.T) {
