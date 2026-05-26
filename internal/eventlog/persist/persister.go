@@ -1122,10 +1122,19 @@ func (w *perKeyWriter) flush(p *Persister) error {
 		// beyond the steady-state IdxStride*2 sizing. Without this
 		// guard the per-session writer permanently retains the
 		// peak capacity once an oversized batch has flowed through.
+		//
+		// R250-PERF-17 (#1120): mirror the same shrink on idxScratch.
+		// When stride > 1 the line `w.idxScratch = kept` above pins
+		// the inflated capacity for the writer's lifetime; without
+		// this rebind a single replay burst keeps a multi-KB scratch
+		// slice alive across hundreds of writers in steady state.
 		if p.opts.IdxStride > 1 && cap(w.pendingIdx) > p.opts.IdxStride*4 {
 			w.pendingIdx = make([]schema.IdxEntry, 0, p.opts.IdxStride*2)
 		} else {
 			w.pendingIdx = w.pendingIdx[:0]
+		}
+		if p.opts.IdxStride > 1 && cap(w.idxScratch) > p.opts.IdxStride*4 {
+			w.idxScratch = make([]schema.IdxEntry, 0, p.opts.IdxStride*2)
 		}
 	}
 	// Skip the fsync entirely when this flush did not append any idx
