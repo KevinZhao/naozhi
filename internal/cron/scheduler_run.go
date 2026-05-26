@@ -1050,7 +1050,9 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// InterruptViaControl returns ErrNoActiveTurn → no-op).
 	abortCh := runDeadlineWatchdog(sendCtx, sess)
 
-	// Direct Send without sendWithBroadcast — cron jobs notify via onExecute callback instead.
+	// Direct Send without sendWithBroadcast — cron jobs notify via the
+	// IM deliverNotice path (resolveNotifyTarget + platform.Reply) and
+	// the cron_run_ended WS frame.
 	result, err := sess.Send(sendCtx, cleanText)
 	// Cancel sendCtx so the watchdog returns promptly on the success / non-
 	// deadline error path; on the deadline path it's already done. Block

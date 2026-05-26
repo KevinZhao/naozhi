@@ -8958,17 +8958,10 @@ const wsm = {
         });
         break;
       }
-      case 'cron_result':
-        // RNEW-UX-010 — cron completion is a fire-and-forget background
-        // event; the only sighted signal is a badge count bump. Announce
-        // politely so AT users learn the job landed. P0 cron-run-history:
-        // cron_run_ended now drives the same refresh; keep cron_result for
-        // legacy compat (older naozhi backends still send only this).
-        announce('定时任务已完成');
-        // R221-FIX-P1-4: fetchCronJobs is async and rethrows on non-status
-        // errors; without .catch the WS dispatch sees an unhandled rejection.
-        fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
-        break;
+      // Phase D (RFC §3.5) deleted the legacy cron_result frame. The
+      // announce("定时任务已完成") moved to the cron_run_ended succeeded
+      // branch below; the list refetch was a strict subset of what the
+      // cron_run_ended branch already does.
       case 'cron_run_started':
         // P0 cron-run-history (RFC §7.2) — drive the "运行中 Xs" inline
         // badge without waiting for a list refetch. Optimistically patch
@@ -8987,6 +8980,13 @@ const wsm = {
         // hydrate from backend; the optimistic patch on the same row is
         // overwritten cleanly. fresh=false / fresh=true behave identically
         // here since the change set is JobID-scoped.
+        //
+        // Phase D (RFC §3.5) absorbed the legacy cron_result frame:
+        // gate the AT-user announce on the succeeded state so failed
+        // runs do not mis-speak success. cron_run_ended fires for every
+        // terminal state (succeeded / failed / skipped / timed_out /
+        // canceled) — only succeeded should celebrate.
+        if (msg && msg.state === 'succeeded') announce('定时任务已完成');
         cronApplyRunEnded(msg);
         fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
         // P2 cron-run-history (RFC §8.2) — refresh the timeline head

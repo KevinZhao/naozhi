@@ -38,15 +38,8 @@ func (f *fakeRouter) GetOrCreate(ctx context.Context, key string, opts AgentOpts
 // skip. The callback shape is the contract dashboard.go relies on.
 func TestP0_OverlapSkippedEmitsTerminalEvent(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}})
-
-	var endedMu sync.Mutex
-	var endedEvents []RunEndedEvent
-	s.SetOnRunEnded(func(ev RunEndedEvent) {
-		endedMu.Lock()
-		endedEvents = append(endedEvents, ev)
-		endedMu.Unlock()
-	})
+	rec := &recordingBroadcaster{}
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, Telemetry: rec})
 
 	// Manually trip the inflight gate as if a run were in flight.
 	inf := s.jobInflight("job-overlap")
@@ -65,12 +58,10 @@ func TestP0_OverlapSkippedEmitsTerminalEvent(t *testing.T) {
 
 	s.emitOverlapSkipped(j, true)
 
-	endedMu.Lock()
-	defer endedMu.Unlock()
-	if len(endedEvents) != 1 {
-		t.Fatalf("want 1 ended event, got %d", len(endedEvents))
+	if rec.endedCount() != 1 {
+		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
 	}
-	got := endedEvents[0]
+	got := rec.endedAtCron(0)
 	if got.State != RunStateSkipped {
 		t.Errorf("state: want skipped, got %q", got.State)
 	}
@@ -143,15 +134,13 @@ func TestP0_InflightSnapshotReflectsCASState(t *testing.T) {
 // behaviour). state counter still bumps.
 func TestP0_FinishRunCanceledSkipsPersist(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}})
+	rec := &recordingBroadcaster{}
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, Telemetry: rec})
 	prevRun := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
 	j := &Job{ID: "job-c", Schedule: "@every 5m", LastRunAt: prevRun}
 	s.mu.Lock()
 	s.jobs[j.ID] = j
 	s.mu.Unlock()
-
-	var endedSeen RunEndedEvent
-	s.SetOnRunEnded(func(ev RunEndedEvent) { endedSeen = ev })
 
 	s.finishRun(finishArgs{
 		job: j, runID: "r1", startedAt: time.Now(), trigger: TriggerScheduled,
@@ -164,6 +153,10 @@ func TestP0_FinishRunCanceledSkipsPersist(t *testing.T) {
 		t.Errorf("skipPersist=true must leave LastRunAt unchanged: got %v want %v", j.LastRunAt, prevRun)
 	}
 	s.mu.RUnlock()
+	if rec.endedCount() != 1 {
+		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
+	}
+	endedSeen := rec.endedAtCron(0)
 	if endedSeen.State != RunStateCanceled {
 		t.Errorf("ended event state: %q", endedSeen.State)
 	}
@@ -178,10 +171,8 @@ func TestP0_FinishRunCanceledSkipsPersist(t *testing.T) {
 func TestP0_PreflightWorkdirUnreachableMapsCorrectErrorClass(t *testing.T) {
 	t.Parallel()
 	router := &fakeRouter{}
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router})
-
-	var endedSeen RunEndedEvent
-	s.SetOnRunEnded(func(ev RunEndedEvent) { endedSeen = ev })
+	rec := &recordingBroadcaster{}
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router, Telemetry: rec})
 
 	j := &Job{ID: "job-w", Schedule: "@every 5m", FreshContext: true, WorkDir: "/nonexistent-naozhi-test-dir-xyz"}
 	s.mu.Lock()
@@ -200,6 +191,10 @@ func TestP0_PreflightWorkdirUnreachableMapsCorrectErrorClass(t *testing.T) {
 		t.Fatal("preflight should bail when workdir unreachable")
 	}
 	stubRefresh()
+	if rec.endedCount() != 1 {
+		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
+	}
+	endedSeen := rec.endedAtCron(0)
 	if endedSeen.State != RunStateFailed {
 		t.Errorf("state: %q", endedSeen.State)
 	}

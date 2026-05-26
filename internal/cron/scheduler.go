@@ -17,6 +17,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
@@ -134,8 +135,15 @@ type SchedulerConfig struct {
 	Platforms     map[string]platform.Platform
 	Agents        map[string]AgentOpts
 	AgentCommands map[string]string
-	StorePath     string
-	MaxJobs       int
+	// Telemetry receives RunStartedEvent / RunEndedEvent for every cron
+	// run via the shared runtelemetry shape. nil = no broadcast (tests /
+	// no-WS deployments). Replaces the legacy SetOnRunStarted /
+	// SetOnRunEnded / SetOnExecute setter trio. Late injection is also
+	// supported via SetTelemetry — cmd/naozhi builds the Scheduler before
+	// the Hub exists, then wires the broadcaster from dashboard.go. (RFC §3.5)
+	Telemetry runtelemetry.Broadcaster
+	StorePath string
+	MaxJobs   int
 	// MaxJobsPerChat overrides DefaultMaxJobsPerChat when > 0. Zero (and
 	// negative) values fall back to the default — this is deliberate so
 	// operators cannot accidentally disable the cap and let one chat
@@ -300,13 +308,15 @@ type Scheduler struct {
 	// flight executions. Callers outside execute() take ctx as an argument.
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
-	// R225-GO-5: callback fields accessed via atomic.Pointer so external
-	// readers (emit{Started,Ended} / recordResultP0WithSanitised) don't need to
-	// hold s.mu, and tests that read fields directly cannot race the setters
-	// that previously took s.mu only during write.
-	onExecute    atomic.Pointer[OnExecuteFunc]
-	onRunStarted atomic.Pointer[OnRunStartedFunc]
-	onRunEnded   atomic.Pointer[OnRunEndedFunc]
+	// telemetry receives the cron-run lifecycle events. Phase D (RFC §3.5)
+	// replaced the legacy onExecute / onRunStarted / onRunEnded
+	// atomic.Pointer trio with this single field. Set at construction
+	// from cfg.Telemetry; SetTelemetry rewires it for late injection
+	// (cmd/naozhi builds Scheduler before Hub exists). Plain field
+	// reads / writes are safe because the only writers are constructor
+	// + SetTelemetry, both during single-threaded boot before the
+	// scheduler's tick goroutines can fire.
+	telemetry runtelemetry.Broadcaster
 
 	// triggerWG tracks goroutines spawned by TriggerNow so Stop() can wait
 	// for them to finish. The scheduled entries are already drained by
@@ -721,6 +731,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		jobs:                make(map[string]*Job),
 		chatJobCount:        make(map[chatJobKey]int),
 		router:              cfg.Router,
+		telemetry:           cfg.Telemetry,
 		platforms:           cfg.Platforms,
 		agents:              cfg.Agents,
 		agentCommands:       cfg.AgentCommands,
