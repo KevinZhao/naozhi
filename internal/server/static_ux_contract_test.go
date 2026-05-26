@@ -6419,3 +6419,176 @@ func TestDashboardJS_ShowGitRemoteSchemeAllowlist(t *testing.T) {
 		t.Errorf("showGitRemote must lowercase the URL before scheme prefix probe")
 	}
 }
+
+// TestDashboardJS_R243Perf8_CronTickScopedTextUpdate pins R243-PERF-8 / #813:
+// the 1Hz running-cron tick MUST do a scoped text-node update (only the
+// `.cj-when` / `.cj-when-inline` elapsed labels on `.cj-row.is-running` rows)
+// instead of a full renderCronPanel rebuild. Pre-fix behaviour rebuilt the
+// entire cron list innerHTML every second, which scaled O(N) with the job
+// count just to advance the elapsed-seconds text.
+//
+// The contract is enforced at source-text level so a future refactor that
+// re-introduces renderCronPanel() inside the tick callback fails CI rather
+// than silently regressing a measurable jank hot path. We pin three
+// load-bearing shapes:
+//
+//  1. cronRunningTickPaintScoped exists and is the named scoped-update path.
+//  2. The setInterval callback inside ensureCronRunningTick calls it (and
+//     not renderCronPanel).
+//  3. The scoped-update body reaches for `.cj-row.is-running` rather than
+//     re-running the row template, and writes to `.cj-when` text via
+//     `.textContent = label` (the textContent assertion also reinforces the
+//     R71-SEC-L1 contract: cron prompts are user-controllable, so the tick
+//     MUST NOT splice them through innerHTML).
+func TestDashboardJS_R243Perf8_CronTickScopedTextUpdate(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// (1) The scoped-paint helper must exist by name; #813's fix lives there.
+	if !strings.Contains(js, "function cronRunningTickPaintScoped()") {
+		t.Errorf("dashboard.js: cronRunningTickPaintScoped() must exist as the scoped-update path (#813)")
+	}
+
+	// (2) The 1Hz tick callback must invoke the scoped path. We grep for the
+	// exact call site rather than parsing — the surrounding try/catch is
+	// load-bearing (we don't want a thrown DOM error to wedge the timer).
+	if !strings.Contains(js, "try { cronRunningTickPaintScoped(); } catch (_) {}") {
+		t.Errorf("dashboard.js: ensureCronRunningTick's setInterval body must call cronRunningTickPaintScoped() (#813)")
+	}
+
+	// (3) Regression guard: the tick callback must NOT call renderCronPanel
+	// directly. We can't forbid every renderCronPanel call site in the file
+	// (cronApplyRunStarted / cronApplyRunEnded legitimately do), but we can
+	// pin that no renderCronPanel() call appears inside the closing brace of
+	// the scoped helper or the tick callback's try/catch shape.
+	tickCallback := "try { cronRunningTickPaintScoped(); } catch (_) {}"
+	idx := strings.Index(js, tickCallback)
+	if idx < 0 {
+		t.Fatalf("dashboard.js: tick callback shape not found; preceding assertion should have caught this")
+	}
+	// Look backwards within ~400 bytes for a `}, 1000)` setInterval close
+	// and forwards within ~50 bytes — the callback is a single line, so a
+	// renderCronPanel() inside the same setInterval body would sit in this
+	// window.
+	start := idx - 400
+	if start < 0 {
+		start = 0
+	}
+	end := idx + 50
+	if end > len(js) {
+		end = len(js)
+	}
+	if strings.Contains(js[start:end], "renderCronPanel(") {
+		t.Errorf("dashboard.js: ensureCronRunningTick's setInterval body must NOT call renderCronPanel directly (#813 regression guard)")
+	}
+
+	// (4) The scoped helper must target `.cj-row.is-running` and write the
+	// elapsed label via textContent — pinning both the scope and the
+	// XSS-safe assignment. innerHTML on the same nodes would be a
+	// regression on R71-SEC-L1 because cron job prompts/titles can flow
+	// into adjacent fields.
+	if !strings.Contains(js, "host.querySelectorAll('.cj-row.is-running')") {
+		t.Errorf("dashboard.js: scoped tick must target '.cj-row.is-running' rows (#813)")
+	}
+	if !strings.Contains(js, "whenEl.textContent = label") {
+		t.Errorf("dashboard.js: scoped tick must write elapsed label via textContent on .cj-when (#813)")
+	}
+	if !strings.Contains(js, "inlineEl.textContent = label") {
+		t.Errorf("dashboard.js: scoped tick must write elapsed label via textContent on .cj-when-inline (#813)")
+	}
+}
+
+// TestDashboardJS_R243Perf8_CronTickPerformanceInvariants pins the secondary
+// invariants of the R243-PERF-8 / #813 fix that the primary contract test
+// (TestDashboardJS_R243Perf8_CronTickScopedTextUpdate) does not cover:
+//
+//  1. The scoped-paint helper builds an `id -> job` lookup Map BEFORE the
+//     row loop, so the per-row work is O(1) rather than O(N) on cronJobs.
+//     Pre-fix code that walked cronJobs.find() per row would scale O(N²)
+//     once N running rows were on screen and re-introduce the jank #813
+//     was filed about (just shifted from the renderCronPanel call into
+//     the per-row scan inside the tick).
+//  2. The timer's three stop-conditions (no running jobs / a session is
+//     selected / cron-list-items DOM unmounted) are still checked inside
+//     the setInterval body, not just at scheduling time. R220-FE-1 — a
+//     refactor that drops the in-callback check would let the timer keep
+//     firing across view transitions and amplify the regression #813's
+//     fix was meant to silence.
+//
+// Grouped into a separate test from the primary one so a #813 regression
+// surfaces with two distinct failure modes (text-update path vs perf
+// invariants) instead of one omnibus assertion bundle.
+func TestDashboardJS_R243Perf8_CronTickPerformanceInvariants(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// (1) O(1) lookup map. The exact shape `byId.set(j.id, j)` is what the
+	// per-row `byId.get(id)` reads — pinning both writes the contract that
+	// the helper builds the map once per tick and not per row.
+	if !strings.Contains(js, "const byId = new Map()") {
+		t.Errorf("dashboard.js: scoped tick must build O(1) id->job Map before the row loop (#813)")
+	}
+	if !strings.Contains(js, "byId.set(j.id, j)") {
+		t.Errorf("dashboard.js: scoped tick must populate byId via byId.set(j.id, j) (#813)")
+	}
+	if !strings.Contains(js, "byId.get(id)") {
+		t.Errorf("dashboard.js: scoped tick row loop must read jobs via byId.get(id), not Array.find (#813)")
+	}
+	// Negative pin: a pre-fix-style `cronJobs.find(...)` scan inside the
+	// scoped helper would re-introduce O(N²). The .find call exists
+	// elsewhere in the file (cronApplyRunStarted etc.) so we can't forbid
+	// it globally — instead pin that the named scoped function body does
+	// NOT contain `cronJobs.find(`.
+	const helperOpen = "function cronRunningTickPaintScoped()"
+	helperIdx := strings.Index(js, helperOpen)
+	if helperIdx < 0 {
+		t.Fatalf("dashboard.js: cronRunningTickPaintScoped() declaration missing — primary test should have caught this")
+	}
+	// Walk forward to the matching closing brace using a brace counter.
+	// Source-text balance is fine here — the helper is straight-line JS
+	// without templated strings whose braces would confuse the count.
+	body := js[helperIdx:]
+	depth := 0
+	end := -1
+	started := false
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '{':
+			depth++
+			started = true
+		case '}':
+			depth--
+			if started && depth == 0 {
+				end = i + 1
+				i = len(body) // break outer
+			}
+		}
+	}
+	if end < 0 {
+		t.Fatalf("dashboard.js: could not locate end of cronRunningTickPaintScoped body (brace mismatch?)")
+	}
+	helperBody := body[:end]
+	if strings.Contains(helperBody, "cronJobs.find(") {
+		t.Errorf("dashboard.js: scoped tick body must NOT use cronJobs.find — pre-fix O(N²) regression (#813)")
+	}
+
+	// (2) In-callback stop check. R220-FE-1 baseline: the setInterval body
+	// re-checks selectedKey and the cron-list-items DOM presence, and
+	// clears the interval when either trips. Pin both checks plus the
+	// clearInterval call so a refactor that drops them fails CI.
+	const stopCheck = "if (selectedKey || !document.getElementById('cron-list-items'))"
+	if !strings.Contains(js, stopCheck) {
+		t.Errorf("dashboard.js: tick body must re-check stop conditions inside setInterval — R220-FE-1 / #813")
+	}
+	if !strings.Contains(js, "clearInterval(cronRunningTickTimer)") {
+		t.Errorf("dashboard.js: tick stop must clearInterval(cronRunningTickTimer) — R220-FE-1 / #813")
+	}
+}
