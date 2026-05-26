@@ -394,18 +394,25 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 			s.deleteJobLocked(j)
 			return nil
 		},
-		// postCleanup：锁外做 router.Reset + runStore.DeleteJob。
+		// postCleanup：锁外做 router.Reset + runStore.DeleteJob.
 		// R240-GO-1: router.Reset 移出 deleteJobLocked，避免在 s.mu 下
 		// 走 router callback 触发 lock-order inversion。
 		// R238-GO-3: deleteJobLocked 已变内存态，runStore 必须清理，否则
 		// runs/<jobID>/ 子树会泄漏；persist 失败也要清，故放在 perr 检查前。
 		// P1 cron-run-history: 仅删 runs/<jobID>/，不动用户面 jsonl
 		// （RFC §2.3 / §4.4）。
+		// R242-ARCH-15 (#758): cleanupRunningJobIfIdle reclaims the
+		// s.runningJobs entry when the CAS gate is idle, bounding what
+		// was previously an unbounded leak (one *runInflight per
+		// historical jobID) over long-lived deployments. The idle check
+		// preserves the ID-reuse split-CAS guarantee documented on
+		// runningJobs.
 		func(j *Job) {
 			s.resetRouterStub(j.ID)
 			if s.runStore != nil {
 				s.runStore.DeleteJob(j.ID)
 			}
+			s.cleanupRunningJobIfIdle(j.ID)
 		},
 	)
 }
@@ -879,11 +886,16 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 		// re-enter s.mu. R238-GO-3: runStore.DeleteJob fires even when
 		// persist later fails so runs/<jobID>/ doesn't leak on disk
 		// while the in-memory record is gone.
+		// R242-ARCH-15 (#758): mirror DeleteJobByID's runningJobs reclaim
+		// here — the IM-prefix DeleteJob path is the cron alias side of
+		// the same lifecycle, so the leak fix has to land at both
+		// entry points.
 		func(j *Job) {
 			s.resetRouterStub(j.ID)
 			if s.runStore != nil {
 				s.runStore.DeleteJob(j.ID)
 			}
+			s.cleanupRunningJobIfIdle(j.ID)
 		},
 	)
 }
