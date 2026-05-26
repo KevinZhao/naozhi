@@ -533,18 +533,38 @@ func (h *Hub) register(c *wsClient) {
 }
 
 func (h *Hub) unregister(c *wsClient) {
+	// R249-PERF-23 (#938): the per-key unsub closures (eventLog.Unsubscribe,
+	// scheduler.Unsubscribe, …) each acquire their own mutex; calling them
+	// inside h.mu serialised every disconnect with len(c.subscriptions)
+	// closure invocations, which on heavy-tab clients (50 subs) added
+	// 10-50µs of lock-hold per disconnect. Snapshot the closures while
+	// holding h.mu (the map mutation must be atomic with decSubscriberCount-
+	// Locked), then release h.mu before invoking them.
+	//
+	// Lock-order: the surviving h.mu critical section only mutates h.clients
+	// + h.subscriberCount. The post-lock closures take their own mutexes;
+	// none of those mutexes is acquired anywhere with h.mu held in the
+	// reverse direction (see Hub.Shutdown's documented invariant), so
+	// releasing h.mu before invoking unsub is safe.
 	h.mu.Lock()
 	removed := false
+	var unsubs []func()
 	if _, ok := h.clients[c]; ok {
 		delete(h.clients, c)
-		for key, unsub := range c.subscriptions {
-			unsub()
-			h.decSubscriberCountLocked(key)
+		if n := len(c.subscriptions); n > 0 {
+			unsubs = make([]func(), 0, n)
+			for key, unsub := range c.subscriptions {
+				unsubs = append(unsubs, unsub)
+				h.decSubscriberCountLocked(key)
+			}
 		}
 		c.subscriptions = nil
 		removed = true
 	}
 	h.mu.Unlock()
+	for _, unsub := range unsubs {
+		unsub()
+	}
 	if removed {
 		// Release the connCount slot reserved at upgrade time. Guarded on
 		// `removed` so a double-unregister (stale close path) cannot leak
