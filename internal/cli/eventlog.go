@@ -892,12 +892,54 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 // forbidden (setting a second time replaces the first). Used by the
 // server-side tailer registry to stop tailers promptly once the parent
 // stream marks an agent task finished. nil clears.
+//
+// Prefer OnAgentTaskDone for new code: it returns a cancel func that
+// matches the Subscribe() idiom, so callback registration and channel
+// subscription share one mental model (R246-ARCH-20 / #802 P0 subset).
+// The set/clear semantics are unchanged here -- a future PR can promote
+// the field to a slice + EventFilter and unify the dispatch path itself.
 func (l *EventLog) SetOnAgentTaskDone(fn func(taskID, status string)) {
 	if fn == nil {
 		l.onAgentTaskDoneFn.Store(nil)
 		return
 	}
 	l.onAgentTaskDoneFn.Store(&fn)
+}
+
+// OnAgentTaskDone is the cancel-func form of SetOnAgentTaskDone per
+// R246-ARCH-20 / #802 (P0 subset). Registration shape now matches
+// Subscribe(): both return a cancel func that detaches the consumer
+// without the caller needing to remember "pass nil to clear".
+//
+// Multi-subscriber semantics still resolve to last-writer-wins because
+// the underlying single-pointer storage is unchanged in this P0 step --
+// the goal here is to unify the *registration idiom* so the eventlog
+// API surface stops asking callers to choose between Set/clear-via-nil
+// (callback channel) vs Subscribe/cancel (notification channel). A
+// follow-up PR can promote the storage to a []func + filter and the
+// idiom does not have to change again.
+//
+// The returned cancel is idempotent. If fn is nil, the call is a no-op
+// and the returned cancel is also a no-op (mirrors Subscribe's pre-
+// closed-channel-on-CloseSubscribers branch in spirit: callers can
+// safely defer cancel without conditional checks).
+func (l *EventLog) OnAgentTaskDone(fn func(taskID, status string)) func() {
+	if fn == nil {
+		return func() {}
+	}
+	stored := &fn
+	l.onAgentTaskDoneFn.Store(stored)
+	var cancelOnce sync.Once
+	return func() {
+		cancelOnce.Do(func() {
+			// CompareAndSwap so a later SetOnAgentTaskDone / OnAgentTaskDone
+			// caller's installed pointer is not clobbered by a stale cancel
+			// from this registration. Last-writer-wins is preserved without
+			// the cancel func acting as a delayed nil-clear on whatever the
+			// next consumer just installed.
+			l.onAgentTaskDoneFn.CompareAndSwap(stored, nil)
+		})
+	}
 }
 
 // loadAgentTaskDoneFn returns the current on-task-done callback so the
