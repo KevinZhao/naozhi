@@ -140,6 +140,16 @@ type SchedulerConfig struct {
 	// ParentCtx, if set, is used as the parent for the scheduler's internal stop context.
 	// When it is cancelled (e.g. during application shutdown) all running cron jobs are
 	// interrupted promptly.
+	//
+	// R245-GO-6 (#846): NewScheduler reads ParentCtx once and passes it to
+	// context.WithCancel; the SchedulerConfig itself is taken by value and
+	// not retained on *Scheduler. The only long-lived reference is the
+	// derived stopCtx (held internally and cancelled by Stop()). Callers
+	// can therefore set ParentCtx to a request-scoped or test-scoped ctx
+	// without leaking the parent's value-tree past the Scheduler's
+	// lifetime — the parent is "derived-only" from the Scheduler's
+	// perspective and the caller-supplied ctx may be discarded
+	// immediately after NewScheduler returns.
 	ParentCtx context.Context
 	// AllowedRoot mirrors Server.allowedRoot: the only directory tree under
 	// which cron jobs may execute. Persisted jobs whose WorkDir falls outside
