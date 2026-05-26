@@ -195,33 +195,10 @@ func (e *recentCacheEntry) ringSeed(rows []CronRunSummary, keepCount int) {
 	e.count = n
 }
 
-// User-configurable defaults — fallbacks when SchedulerConfig leaves
-// RunsKeepCount / RunsKeepWindow zero. Operators may raise / lower
-// them via SchedulerConfig at construction time; cron-run-history.md
-// §4.3 explains the 200 / 30d sizing rationale.
-const (
-	// DefaultRunsKeepCount caps per-job history at this many entries.
-	// 200 is the user-confirmed upper bound (cron-run-history.md §4.3 +
-	// chat conversation 2026-05-17).
-	DefaultRunsKeepCount = 200
-
-	// DefaultRunsKeepWindow ages out runs older than this even when the
-	// per-job count is below the cap. AND-with-OR semantics: a run is
-	// kept only when (count_rank ≤ keepCount) AND (age ≤ keepWindow);
-	// either condition false → trim.
-	DefaultRunsKeepWindow = 30 * 24 * time.Hour
-)
-
-// Hard limits — immutable per-record format invariants, not
-// operator-tunable. Changing them requires a schema bump because old
-// run.json files may exist on disk above the new cap.
-const (
-	// MaxRunRecordBytes caps a single CronRun JSON payload. The 4K rune
-	// cap on Result + 512-rune cap on ErrorMsg + 8K Prompt + ~512
-	// metadata add up to ~13 KiB worst case; 32 KiB leaves headroom.
-	// Reading a file larger than this returns ErrCorruptRun.
-	MaxRunRecordBytes = 32 * 1024
-)
+// User-configurable defaults (DefaultRunsKeepCount / DefaultRunsKeepWindow)
+// and hard schema caps (MaxRunRecordBytes) live in limits.go alongside the
+// other cron-trust-boundary constants — see R247-CR-12 / R247-CR-20 (#598)
+// for the rationale.
 
 // ErrCorruptRun is returned when a run JSON file fails to parse or
 // exceeds the size cap. Treated identically to "missing": list APIs
@@ -738,6 +715,57 @@ func (s *runStore) warmCache(jobID string) {
 	}
 }
 
+// cacheGetBefore is the before-cutoff variant of cacheGet. It serves a
+// before-filtered, newest-first slice from the cache only when the cache
+// is provably exhaustive — i.e. cache.count < keepCount, meaning every
+// on-disk row already lives in the ring and no entry has ever been
+// trimmed off the tail. In that regime the cache holds strictly the
+// same rows as a fresh disk scan, so a filter walk is correctness-
+// equivalent to diskListNewestFirst at zero ReadDir+ReadFile cost.
+//
+// Returns ok=false when count == keepCount (the cache may have shed
+// older entries via trim) — caller falls back to disk so pagination
+// beyond the cache horizon still works. Cold cache paths are NOT warmed
+// here: a cold-cache before-cutoff query is rare (dashboard typically
+// drives warm via a no-cutoff first page), so paying the warm cost on
+// the pagination path would add a ReadDir+per-file ReadFile to a query
+// that is already going to disk and reading it twice — once for warm,
+// once via the disk fallback. The warm path lazy-warms on the next
+// no-cutoff List call. R243-PERF-5 (#810).
+//
+// Caller must guard before.IsZero() == false; use cacheGet for the
+// no-cutoff fast path.
+func (s *runStore) cacheGetBefore(jobID string, limit int, before time.Time) ([]CronRunSummary, bool) {
+	v, ok := s.recentCache.Load(jobID)
+	if !ok {
+		return nil, false
+	}
+	entry := v.(*recentCacheEntry)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.warm {
+		return nil, false
+	}
+	// Exhaustive only when cache hasn't hit cap. count == keepCount
+	// means trimJobLocked may have evicted older rows that match the
+	// before cutoff; disk scan is the safe answer.
+	if entry.count >= s.keepCount {
+		return nil, false
+	}
+	out := make([]CronRunSummary, 0, limit)
+	for i := 0; i < entry.count && len(out) < limit; i++ {
+		r := entry.ringRead(i)
+		// diskListNewestFirst applies StartedAt strict-less-than the
+		// cutoff; mirror that here so cache and disk paths stay in
+		// lockstep on the equality boundary.
+		if !before.IsZero() && !r.StartedAt.Before(before) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, true
+}
+
 // cacheInvalidate forgets the cache entry for jobID. Used by DeleteJob.
 func (s *runStore) cacheInvalidate(jobID string) {
 	s.recentCache.Delete(jobID)
@@ -769,11 +797,18 @@ func (s *runStore) List(jobID string, limit int, before time.Time) []CronRunSumm
 
 	// Cache fast-path: when before is zero (most common — Recent and the
 	// first paginated page) and the entry is warm, return without IO.
-	// before-cutoff queries always go to disk because the cache only
-	// holds keepCount newest; pagination beyond that needs the filtered
-	// scan. R220-PERF-1.
+	// R220-PERF-1.
 	if before.IsZero() {
 		if cached, ok := s.cacheGet(jobID, limit); ok {
+			return cached
+		}
+	} else {
+		// before-cutoff fast path (R243-PERF-5 / #810): when the cache
+		// has not yet hit keepCount the ring holds every on-disk row,
+		// so a filter walk over the cache is equivalent to a disk scan.
+		// Falls through to disk once count == keepCount because trim
+		// may have shed older rows the caller would otherwise miss.
+		if cached, ok := s.cacheGetBefore(jobID, limit, before); ok {
 			return cached
 		}
 	}

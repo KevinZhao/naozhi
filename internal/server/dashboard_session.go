@@ -255,6 +255,30 @@ func isUnknownRPCMethodErr(err error) bool {
 // methods we actually call rather than the full Scheduler API. Lineage:
 // R228-ARCH-17 (cronStubChecker) → R232-ARCH-7 (cronHubOps) → R245-ARCH
 // (cronSessionLister) → R242-ARCH-13 (CronView).
+//
+// R242-ARCH-28 (#772): EnsureStub returns false in three distinct cases
+// that callers historically had to disambiguate by side-effect:
+//
+//	(a) the key isn't a `cron:` key at all (non-cron caller path —
+//	    legitimate no-op, not a failure);
+//	(b) the cron job ID parsed out of the key is unknown to the scheduler
+//	    (the job was deleted before the dashboard tab re-subscribed);
+//	(c) the job is known but stub-registration failed inside cron
+//	    (unexpected — should be slog'd by the cron implementation).
+//
+// All three currently surface as the same bool, so handleEvents /
+// handleSubscribe cannot tell "this is a non-cron key, behave normally"
+// from "this used to be a cron job, return 404". Today's callers fall
+// through to the existing nil-session 404 in case (b) which happens to
+// be correct, and case (c) is so rare that the absence of a structured
+// reason is acceptable; promoting EnsureStub to (ok bool, reason string)
+// is queued behind the cron→server interface tightening RFC because it
+// breaks every test mock + the *cron.Scheduler concrete signature, and
+// the production behaviour is already correct under the bool-only
+// contract. Reviewers picking up this comment: the proposal is in
+// `docs/review/batch3-B-r241-244-raw.md` under R242-ARCH-28; the
+// ambiguity is documented here so a future caller doesn't accidentally
+// add a bug-prone reason-by-deduction branch over the bool.
 type CronView interface {
 	EnsureStub(key string) bool
 	SetJobPrompt(jobID, prompt string) error
@@ -1129,10 +1153,20 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 			// Aligning with the dispatch/commands.go:51 pattern keeps the
 			// audit-log surface uniform, so a regression in either validator
 			// cannot smuggle log-fragmentation bytes past slog's TextHandler.
+			//
+			// R246-SEC-14 (REPEAT-3, #820): the upstream node's err.Error()
+			// can echo attacker-influenced bytes verbatim — a malicious
+			// remote naozhi build could embed CR/LF or bidi runes in its
+			// RPC error string and fragment our local slog audit trail.
+			// Wrapping err.Error() through SanitizeLogAttr closes that
+			// hole; the upstream wrapper text already includes "unknown
+			// method:" / "rpc:" / etc. so legitimate diagnostic content
+			// survives sanitisation (only control + bidi + C1 are
+			// stripped).
 			slog.Warn("remote set session label failed",
 				"node", session.SanitizeLogAttr(req.Node),
 				"key", session.SanitizeLogAttr(req.Key),
-				"err", err)
+				"err", session.SanitizeLogAttr(err.Error()))
 			if isUnknownRPCMethodErr(err) {
 				http.Error(w, "remote node needs upgrade to support this action", http.StatusConflict)
 				return

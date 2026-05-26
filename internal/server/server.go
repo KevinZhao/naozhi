@@ -496,23 +496,27 @@ func NewWithOptions(opts ServerOptions) *Server {
 	return buildServer(opts)
 }
 
-// New is the legacy positional-args constructor, retained so existing
-// call sites (especially tests) do not need mechanical updates. It
-// stuffs the positional args into ServerOptions (overriding any matching
-// fields the caller may have also set in opts) and delegates to
-// NewWithOptions. New callers should use NewWithOptions directly.
+// New is the legacy positional-args constructor, retained ONLY so the
+// dual-constructor equivalence contract test in new_options_test.go can
+// keep exercising both entry points. It stuffs the positional args into
+// ServerOptions (overriding any matching fields the caller may have also
+// set in opts) and delegates to NewWithOptions. New callers must use
+// NewWithOptions directly.
 //
 // Deprecated: use NewWithOptions. Production (cmd/naozhi/main.go) already
-// calls NewWithOptions; this signature is kept to avoid churning ~20 test
-// call sites at once — they can migrate in-place at any future touch.
-// Gopls / staticcheck will flag new positional-style call sites so the
-// migration path stays discoverable.
+// calls NewWithOptions; the bulk migration of test call sites completed
+// in R237-ARCH-14 (#614) — TestLegacyServerNew_NoNewCallSites pins the
+// zero-non-test-allowlist invariant so this wrapper now shrinks rather
+// than spreads. New positional-style call sites are blocked at test time
+// (the regression guard fails the build) so gopls / staticcheck warnings
+// alone are not the only signal anymore.
 //
-// Removal condition (R214-CODE-4 / R224-CR-5): delete this wrapper once
-// every *_test.go in this package and its consumers calls NewWithOptions
-// directly. Track via `git grep -l "server.New("` returning zero hits.
-// New positional-style call sites should NOT be added — start with
-// NewWithOptions and let this function shrink to test-only legacy.
+// Removal condition (R214-CODE-4 / R224-CR-5 / R237-ARCH-14): delete this
+// wrapper when new_options_test.go's two equivalence-test sites are also
+// rewritten to compare two NewWithOptions servers (or a fresh shape that
+// no longer needs the dual-constructor pin). The TestServerNew_MarkedDeprecated
+// test asserts the Deprecated marker stays in place above this function,
+// so a "rip out the marker" refactor would also need to drop that pin.
 func New(addr string, router *session.Router, platforms map[string]platform.Platform, agents map[string]session.AgentOpts, agentCommands map[string]string, scheduler *cron.Scheduler, backend string, opts ServerOptions) *Server {
 	opts.Addr = addr
 	opts.Router = router
@@ -929,13 +933,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// termination happens upstream (ALB/CloudFront), in which case this
 	// listener binding to plaintext loopback is fine.
 	if s.dashboardToken != "" && !s.auth.trustedProxy && isPlaintextPublicAddr(s.addr) {
-		slog.Warn(
-			"dashboard token served over plaintext HTTP with no trusted proxy: "+
-				"bearer tokens and session cookies may be sniffed. "+
-				"Terminate TLS upstream and set server.trusted_proxy=true, "+
-				"or bind to 127.0.0.1 for local-only access.",
-			"addr", s.addr,
-		)
+		slog.Warn(plaintextDashboardTokenWarning, "addr", s.addr)
 	}
 	// No-auth mode on a publicly reachable address is the biggest footgun the
 	// operator can step into — every /api/* endpoint becomes world-reachable.
@@ -1129,6 +1127,22 @@ func (s *Server) runRetiredStoreFlusher(ctx context.Context) {
 		}
 	}
 }
+
+// plaintextDashboardTokenWarning is the message logged when a token-protected
+// dashboard is served over plaintext HTTP with no trusted proxy. R217-SEC-8
+// (#602) extends the previous inline literal to spell out the /health attack
+// surface explicitly: an authenticated /health response carries workspace_id,
+// node status, version, system info, watchdog counters, and (when present)
+// dispatch + event-log + attachment-tracker stats. A passive sniffer on the
+// wire can therefore lift not only the bearer/cookie but also a deployment
+// fingerprint that aids targeting (e.g. node IDs, CLI version) without needing
+// to authenticate. Named const (not inline) so tests can pin the exact text
+// and a refactor that rewords one occurrence has a single source of truth.
+const plaintextDashboardTokenWarning = "dashboard token served over plaintext HTTP with no trusted proxy: " +
+	"bearer tokens and session cookies may be sniffed; authenticated /health responses " +
+	"also leak workspace_id, node status, version, and watchdog counters in the clear. " +
+	"Terminate TLS upstream and set server.trusted_proxy=true, " +
+	"or bind to 127.0.0.1 for local-only access."
 
 // noTokenOpenWarning is the message logged when the API accepts any caller
 // because dashboard_token is unset on a publicly reachable bind. Exposed as

@@ -504,7 +504,13 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	// Thread the caller's ctx so SIGTERM during a spawn storm cancels the
 	// busctl subprocess instead of letting dozens run in parallel for their
 	// full 3 s budget past shutdown.
-	moveToShimsCgroup(ctx, cmd.Process.Pid, handle.Hello.CLIPID)
+	//
+	// R216-SEC-5 (#546): pass the configured CLI path so the linux helper
+	// can verify /proc/<cliPID>/exe matches before adopting the CLI into the
+	// privileged cgroup. PPid validation alone (R229-SEC-4) defends against
+	// random PIDs but not against a child the shim genuinely spawned that
+	// happens not to be the CLI binary; the exe check closes that gap.
+	moveToShimsCgroup(ctx, cmd.Process.Pid, handle.Hello.CLIPID, cliPath)
 
 	m.mu.Lock()
 	// Guard against a concurrent StartShim/Reconnect having already installed

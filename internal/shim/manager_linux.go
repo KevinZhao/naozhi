@@ -125,7 +125,15 @@ func readPPidFromProcStatus(pid int) (int, error) {
 // alone is still adopted via its own cmd.Process.Pid which was not
 // attacker-supplied). R219-SEC-5 is the original anchor that asked for
 // PPid validation; R229-SEC-4 is the implementation lane.
-func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int) {
+//
+// R216-SEC-5 (#546): PPid validation defeats a forged-PID hello, but the
+// shim could still spawn a child that genuinely passes PPid==shimPID yet
+// is not the CLI binary (e.g. an attacker-influenced helper). Read
+// /proc/<cliPID>/exe and verify it matches the configured cliPath before
+// adopting; on mismatch drop the CLI PID from the scope. wantCLIPath==""
+// disables the exe gate (test harnesses + Darwin-only callers that don't
+// know the path); production wires StartShimWithBackend's resolved path.
+func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int, wantCLIPath string) {
 	scopeName := fmt.Sprintf("naozhi-shim-%d.scope", shimPID)
 
 	// Build PID list for the scope
@@ -142,7 +150,26 @@ func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int) {
 			slog.Warn("moveToShimsCgroup: CLI PID PPid mismatch, refusing to adopt — shim may be compromised",
 				"shim_pid", shimPID, "cli_pid", cliPID, "got_ppid", ppid)
 		default:
-			pids = append(pids, cliPID)
+			// R216-SEC-5: belt-and-suspenders exe check. Skip the gate when
+			// wantCLIPath is empty (caller doesn't know — fall back to PPid
+			// alone). On Readlink error, log + skip the CLI adoption (the
+			// shim PID is still adopted via the unmodified leading entry).
+			if wantCLIPath != "" {
+				exePath, rerr := os.Readlink(fmt.Sprintf("/proc/%d/exe", cliPID))
+				cleanExe := strings.TrimSuffix(exePath, " (deleted)")
+				switch {
+				case rerr != nil:
+					slog.Warn("moveToShimsCgroup: cannot readlink CLI PID exe, skipping CLI adoption",
+						"shim_pid", shimPID, "cli_pid", cliPID, "err", rerr)
+				case cleanExe != wantCLIPath:
+					slog.Warn("moveToShimsCgroup: CLI PID exe mismatch, refusing to adopt — shim may be compromised",
+						"shim_pid", shimPID, "cli_pid", cliPID, "got_exe", cleanExe, "want_exe", wantCLIPath)
+				default:
+					pids = append(pids, cliPID)
+				}
+			} else {
+				pids = append(pids, cliPID)
+			}
 		}
 	}
 

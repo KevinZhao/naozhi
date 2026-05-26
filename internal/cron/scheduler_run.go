@@ -872,10 +872,20 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		// resolved path was just validated by EvalSymlinks; using it here
 		// makes the validation view match the open view and forecloses a
 		// final TOCTOU window between this check and the CLI's own open.
-		// When allowedRoot is unset (sandbox disabled), keep the historical
-		// filepath.Clean(snap.workDir) — workDirResolveUnderRoot's empty-
-		// root short-circuit deliberately returns "" so we'd lose the
-		// caller's workspace string.
+		//
+		// R242-SEC-10 (#638): when allowedRoot is unset (sandbox disabled)
+		// the in-root containment short-circuit returned "" so we used to
+		// fall back to filepath.Clean — which does NOT resolve symlinks.
+		// A workDir like /var/cron-jobs/foo could point through a symlink
+		// at an operator-unintended location, and the CLI would then
+		// chdir there with the only validation being "looks lexically
+		// clean". Best-effort EvalSymlinks here mirrors what the
+		// allowedRoot branch already does so the CLI's open view matches
+		// the path we vetted; an EvalSymlinks failure (broken link,
+		// missing target, or insufficient perms to traverse) falls back
+		// to the cleaned raw input rather than aborting the run — losing
+		// resolution is preferable to refusing to run when sandbox is
+		// already off by operator choice.
 		var workDirForCLI string
 		if s.allowedRoot != "" {
 			// R247-PERF-24: cached variant collapses repeated EvalSymlinks
@@ -896,6 +906,8 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 				return
 			}
 			workDirForCLI = resolved
+		} else if resolved, err := filepath.EvalSymlinks(snap.workDir); err == nil {
+			workDirForCLI = filepath.Clean(resolved)
 		} else {
 			workDirForCLI = filepath.Clean(snap.workDir)
 		}

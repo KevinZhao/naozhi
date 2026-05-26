@@ -556,6 +556,16 @@ type Router struct {
 	// NewRouter (config-time injection); not subject to lock contention.
 	autoChainListJSONL func(workspace string) []discovery.WorkspaceJSONL
 
+	// resolver is the shared KeyResolver instance, exposed via Resolver()
+	// so downstream consumers (Dispatcher, Hub, upstream wiring) can read
+	// the same instance instead of constructing their own — preventing the
+	// agents-config drift documented in R237-ARCH-12 (#604). nil when the
+	// caller did not opt into the singleton (legacy wiring builds its own
+	// resolver). Read-only after NewRouter; the underlying KeyResolver is
+	// itself immutable post-construction so concurrent readers are safe.
+	// 读写: core (init), Resolver() (read-only accessor)
+	resolver *KeyResolver
+
 	// testHookBeforeSpawnPhase3 / testHookBeforeBackfillPhase3 are
 	// test-only TOCTOU race-pinning hooks (RFC §5.3.1). Production
 	// builds leave them nil. Trigger contracts and helper methods
@@ -882,6 +892,17 @@ type RouterConfig struct {
 	// Tests inject a fixture function so unit cases can synthesise
 	// JSONL listings without touching disk.
 	AutoChainListJSONL func(workspace string) []discovery.WorkspaceJSONL
+
+	// Resolver is the shared KeyResolver instance for this router.
+	// When set, callers (Dispatcher, Hub, upstream wiring) should fetch
+	// the singleton via Router.Resolver() instead of constructing fresh
+	// KeyResolver values from cfg.Agents — the latter caused config
+	// drift across the 4 historical construction sites
+	// (main.go upstream + buildServer + Dispatcher.cfg.Resolver +
+	// Hub.opts.Resolver). nil leaves Router.Resolver() returning nil so
+	// existing callers that already build their own resolver keep
+	// working (they just don't share). R237-ARCH-12 (#604).
+	Resolver *KeyResolver
 }
 
 // NewRouter creates a session router.
@@ -960,6 +981,7 @@ func NewRouter(cfg RouterConfig) *Router {
 		eventLogDir:        cfg.EventLogDir,
 		autoChainPolicy:    cfg.AutoChainPolicy,
 		autoChainListJSONL: cfg.AutoChainListJSONL,
+		resolver:           cfg.Resolver,
 	}
 	// Auto-chain defaults: nil policy → safely-disabled stub so the
 	// rest of the code can call r.autoChainPolicy.Enabled(...) without

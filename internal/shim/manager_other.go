@@ -15,7 +15,7 @@ import (
 // scope) and Darwin (launchd auto-reparenting); other GOOS builds compile so
 // `go build ./...` succeeds in CI but the shim cannot survive a naozhi
 // restart on those targets.
-func moveToShimsCgroup(_ context.Context, _, _ int) {}
+func moveToShimsCgroup(_ context.Context, _, _ int, _ string) {}
 
 // shimPIDBinaryMismatch returns an error on unsupported platforms; callers
 // treat err != nil as "skip the gate", matching the Linux readlink-failure

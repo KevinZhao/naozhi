@@ -1134,6 +1134,17 @@ func (w *perKeyWriter) flush(p *Persister) error {
 		// beyond the steady-state IdxStride*2 sizing. Without this
 		// guard the per-session writer permanently retains the
 		// peak capacity once an oversized batch has flowed through.
+		//
+		// R250-PERF-17 (#1120): idxScratch tracks the same growth pattern
+		// (selectForIdx writes kept entries into the caller-supplied
+		// scratch slice), so apply the matching shrink rule here. Without
+		// this, after a single InjectHistory burst every per-key writer
+		// pins a multi-KB scratch backing array for its lifetime; with
+		// 100+ active writers that's avoidable steady-state heap. The
+		// stride>1 gate matches the pendingIdx branch above — in the
+		// stride<=1 fast path idxScratch is never assigned (selectForIdx
+		// returns `pending` itself; see line 1102 guard) so there's
+		// nothing to shrink.
 		if p.opts.IdxStride > 1 && cap(w.pendingIdx) > p.opts.IdxStride*4 {
 			w.pendingIdx = make([]schema.IdxEntry, 0, p.opts.IdxStride*2)
 		} else {

@@ -98,6 +98,19 @@ const (
 	// renders the call but no longer ships the full payload.
 	maxToolInputBytes = 64 * 1024
 
+	// summariseInputCap is the upper byte limit for a tool_use.Input we
+	// will feed to json.Unmarshal in summariseToolInput. Sits between
+	// maxToolInputBytes (the wire payload cap, 64 KB) and
+	// maxTranscriptLineBytes (the bufio.Scanner line cap, 256 KB) so
+	// the contract documented on TestFlattenAssistantEvent_ToolInputSizeCap
+	// still holds — a tool_use.Input slightly larger than the wire cap
+	// (where the wire payload becomes "[truncated]") can still surface a
+	// probe-derived one-line summary. Inputs above this cap are rejected
+	// before json.Unmarshal so a hostile transcript line cannot drive the
+	// parser through a 256 KB deeply-nested blob just to populate a
+	// 200-byte label. R242-SEC-13 (#645).
+	summariseInputCap = 2 * maxToolInputBytes
+
 	// transcriptRunningSlackMS is the slack added to "now" when computing
 	// the upper bound of the time window for a still-running cron run.
 	// fresh=false runs share a JSONL across many invocations, so we filter
@@ -605,8 +618,36 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		// remains correct there.
 		ts := parseISO8601MS(ev.Timestamp)
 		if ts > 0 {
-			if ts < startedMS || ts > endedMS {
-				continue
+			// R242-SEC-12 (#642): for fresh=false the JSONL is shared
+			// across adjacent cron runs, so an event whose timestamp
+			// lands exactly on the millisecond boundary between two
+			// runs (run N ended at T, run N+1 started at T) was
+			// previously included in BOTH runs' transcript responses
+			// because the time-window check uses `ts > endedMS` on the
+			// upper side AND `ts < startedMS` on the lower side — both
+			// half-open in the wrong direction, so ts==endedMS_N and
+			// ts==startedMS_{N+1} both pass the gate. Without a per-run
+			// UUID we cannot reliably attribute the boundary event;
+			// the safe-by-default fix is the standard half-open
+			// interval [startedMS, endedMS) so a boundary event is
+			// claimed by the LATER run only (deterministic single
+			// owner). For fresh=true the JSONL is exclusively owned by
+			// this run, so the inclusive boundary is preserved (both
+			// ends inclusive matches the previous behaviour and is
+			// safe since no adjacent run shares the file).
+			if run.Fresh {
+				if ts < startedMS || ts > endedMS {
+					continue
+				}
+			} else {
+				// fresh=false: half-open [startedMS, endedMS). The
+				// boundary event ts == endedMS_N is rejected here for
+				// run N; it falls to run N+1 (whose startedMS_{N+1}
+				// == endedMS_N is the inclusive lower bound). Single
+				// owner per ts boundary, no leak.
+				if ts < startedMS || ts >= endedMS {
+					continue
+				}
 			}
 		} else if !run.Fresh {
 			// Shared JSONL + no timestamp ⇒ cannot attribute to this
@@ -1041,8 +1082,26 @@ type toolInputProbe struct {
 // summariseToolInput builds a one-line label for the tool_use card
 // header. Best-effort: Bash → command, Read/Write/Edit → file_path,
 // otherwise fall back to a JSON-trimmed dump of the input.
+//
+// R242-SEC-13 (#645): cap the JSON input handed to encoding/json. The
+// per-line bufio.Scanner buffer (maxTranscriptLineBytes = 256 KB) already
+// bounds a single transcript line, but a maximally-sized tool_use.Input
+// can still drive json.Unmarshal through a deeply-nested 256 KB blob just
+// to populate six string fields and a fallback that ends up truncated
+// to 200 bytes anyway. Refuse anything beyond summariseInputCap up front
+// so the parser never sees the amplifier shape — the wire payload is
+// already capped at maxToolInputBytes (64 KB) by the call site, so 64 KB
+// is also the largest input we could plausibly need to summarise.
 func summariseToolInput(name string, input json.RawMessage) string {
 	if len(input) == 0 {
+		return ""
+	}
+	if len(input) > summariseInputCap {
+		// Treat oversize input as opaque: the caller will already have
+		// rendered the [truncated] placeholder for the wire payload,
+		// and a one-line label built from a 64 KB+ blob is not useful
+		// anyway. Returning empty drops the header summary line; the
+		// dashboard already handles missing summaries.
 		return ""
 	}
 	var probe toolInputProbe

@@ -335,3 +335,19 @@ func (r *KeyResolver) ProjectBindingForChat(platform, chatType, chatID string) P
 	}
 	return r.data.ProjectBinding(platform, chatType, chatID)
 }
+
+// Resolver returns the router's shared KeyResolver instance, or nil if
+// none was injected via RouterConfig.Resolver. Downstream consumers
+// (dispatch.NewDispatcher, server.Hub, upstream wiring) should prefer
+// this accessor over constructing their own KeyResolver from the same
+// (Agents, ProjectMgr) inputs — when the prior pattern was practiced
+// across all 4 historical construction sites, agent-config edits to one
+// resolver did not propagate to the others, producing the silent drift
+// documented in R237-ARCH-12 (#604). A non-nil return is safe for
+// concurrent reads: KeyResolver is immutable post-construction.
+func (r *Router) Resolver() *KeyResolver {
+	if r == nil {
+		return nil
+	}
+	return r.resolver
+}
