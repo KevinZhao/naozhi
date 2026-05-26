@@ -1110,3 +1110,93 @@ func TestFlattenAssistantEvent_AssistantFirstThenSequentialIndices(t *testing.T)
 			out2[1].Kind, out2[1].Index, startIdx+1)
 	}
 }
+
+// TestTranscript_ConcurrencyCap_503WhenAllSlotsBusy pins R243-SEC-12 (#798):
+// when transcriptSem is saturated (every transcriptConcurrencyCap slot
+// held by an in-flight handler), arriving requests must receive 503
+// "transcript busy" immediately — NOT 200 with a partial payload, and
+// NOT a queued wait. The non-blocking acquire is the load-shedding gate
+// that bounds peak resident bytes (cap × 8 MB LimitReader + cap ×
+// 256 KB Scanner buffer) under multi-operator load.
+//
+// Test approach: directly fill the package-level transcriptSem channel
+// to the cap, then call the handler with a known-good fixture and
+// verify it returns 503. We restore the channel state via defer so
+// subsequent parallel tests don't observe a saturated semaphore. NOT
+// t.Parallel() because this test mutates package-global state.
+func TestTranscript_ConcurrencyCap_503WhenAllSlotsBusy(t *testing.T) {
+	// Saturate the package-level semaphore so the handler's non-blocking
+	// acquire takes the default branch.
+	for i := 0; i < transcriptConcurrencyCap; i++ {
+		transcriptSem <- struct{}{}
+	}
+	// Drain on exit so other tests aren't blocked by leaked slots.
+	defer func() {
+		for i := 0; i < transcriptConcurrencyCap; i++ {
+			<-transcriptSem
+		}
+	}()
+
+	now := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
+	h, jobID, runID, _ := fixtureRunWithJSONL(t, []string{
+		`{"type":"user","timestamp":"` + now + `","message":{"role":"user","content":"x"}}`,
+	})
+
+	w := callTranscript(h, jobID, runID)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("saturated semaphore must yield 503, got %d body=%s", w.Code, w.Body.String())
+	}
+	// Confirm the body shape matches the documented 503 envelope so
+	// dashboard JS keeps its existing 5xx-fallback branch wired.
+	var body map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal 503 body: %v body=%s", err, w.Body.String())
+	}
+	if got := body["error"]; got != "transcript busy" {
+		t.Errorf("503 error field = %q, want %q", got, "transcript busy")
+	}
+}
+
+// TestTranscript_ConcurrencyCap_ReleasesSlotOnReturn pins the defer-release
+// contract: handleRunTranscript must release its semaphore slot on every
+// return path so a transient burst doesn't permanently shrink the
+// transcriptConcurrencyCap budget. We acquire cap-1 slots manually,
+// run a real request through the handler (which acquires the last slot
+// and must release it on return), then verify a follow-up request can
+// still acquire — i.e. the slot count returned to capacity. NOT
+// t.Parallel() because this test mutates package-global state.
+func TestTranscript_ConcurrencyCap_ReleasesSlotOnReturn(t *testing.T) {
+	// Hold cap-1 slots so the handler under test takes the LAST slot.
+	for i := 0; i < transcriptConcurrencyCap-1; i++ {
+		transcriptSem <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < transcriptConcurrencyCap-1; i++ {
+			<-transcriptSem
+		}
+	}()
+
+	now := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
+	h, jobID, runID, _ := fixtureRunWithJSONL(t, []string{
+		`{"type":"user","timestamp":"` + now + `","message":{"role":"user","content":"hi"}}`,
+	})
+
+	// First request must succeed (cap-1 held + 1 acquired = cap, no overflow).
+	w := callTranscript(h, jobID, runID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first call status = %d body=%s", w.Code, w.Body.String())
+	}
+
+	// After the handler returns, its slot must be back in the pool.
+	// Confirm by attempting a non-blocking acquire — if the slot is
+	// available, this select takes the case branch.
+	select {
+	case transcriptSem <- struct{}{}:
+		// Got the released slot back. Return it so we don't leak across
+		// tests; the deferred drain above only counts cap-1 receives.
+		<-transcriptSem
+	default:
+		t.Errorf("handler did not release its semaphore slot on return — "+
+			"defer release contract broken; transcriptSem at cap=%d", len(transcriptSem))
+	}
+}

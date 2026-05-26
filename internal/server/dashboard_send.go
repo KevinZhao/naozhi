@@ -36,7 +36,20 @@ const anonCookieName = "nz_anon"
 // HttpOnly, SameSite=Strict (matches the auth cookie; nz_anon is only read by
 // same-origin XHR so Lax offered no value and left a cross-site-GET window
 // open for any future GET handler that reads it), Secure gated by
-// auth.isSecure(r), 30-day MaxAge.
+// auth.isSecure(r), MaxAge=anonCookieMaxAgeSeconds.
+//
+// R247-SEC-15 / #514: MaxAge was 30 days, which kept the per-browser owner
+// label alive across token-mode toggles and service restarts that the
+// operator may have used to invalidate sessions. The cookie is NOT an auth
+// credential — it only disambiguates uploadOwner between co-NAT users —
+// but a stale owner label can still be claimed by an attacker who sniffed
+// the value over a non-TLS deployment (where the Secure flag is absent
+// because auth.isSecure(r)=false). 7 days is the upper bound a reasonable
+// dev-laptop user would expect for a "remember this tab" hint, and it
+// shrinks the post-token-rotation window 4×. The cookieGen-coupled
+// rotation that #514's proposal flags as the deeper fix is left for a
+// follow-up because it requires a dashboard_auth coupling change; this
+// commit just lowers the MaxAge floor where there is no design decision.
 func mintAnonCookie(w http.ResponseWriter, r *http.Request, auth *AuthHandlers) (string, error) {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -47,10 +60,17 @@ func mintAnonCookie(w http.ResponseWriter, r *http.Request, auth *AuthHandlers) 
 	http.SetCookie(w, &http.Cookie{
 		Name: anonCookieName, Value: val, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteStrictMode,
-		Secure: secure, MaxAge: 30 * 24 * 3600,
+		Secure: secure, MaxAge: anonCookieMaxAgeSeconds,
 	})
 	return val, nil
 }
+
+// anonCookieMaxAgeSeconds bounds the lifetime of the nz_anon owner label.
+// R247-SEC-15 / #514: lowered from 30 days to 7 to shrink the window in
+// which a stale label can be reused after a service restart, token-mode
+// toggle, or non-TLS sniff. Pulled out as a const so regression tests can
+// pin the value without parsing the cookie header.
+const anonCookieMaxAgeSeconds = 7 * 24 * 3600
 
 // Upload size ceilings. Images stay at the long-standing 10 MB; PDFs get
 // their own cap derived from Anthropic's 32 MB document-block limit — we

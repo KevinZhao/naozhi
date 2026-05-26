@@ -273,6 +273,138 @@ func TestUpdateJob_TitleLengthGuard(t *testing.T) {
 	}
 }
 
+// TestJobUpdate_ApplyTo pins the contract for R238-ARCH-14 (#778) helper
+// that replaced UpdateJob's inline `if upd.X != nil` ladder. Each
+// patchable field MUST behave the same as the prior inline write:
+// nil leaves the field alone, non-nil writes through. WorkDir change
+// also clears LastSessionID (claude JSONL keyed by cwd). Schedule is
+// intentionally NOT in scope — the helper only handles pure-data fields.
+func TestJobUpdate_ApplyTo(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil_fields_are_no_ops", func(t *testing.T) {
+		t.Parallel()
+		original := Job{
+			ID:             "j1",
+			Prompt:         "orig prompt",
+			WorkDir:        "/orig/wd",
+			Title:          "orig title",
+			Backend:        "orig-backend",
+			NotifyPlatform: "feishu",
+			NotifyChatID:   "chat-orig",
+			FreshContext:   true,
+			LastSessionID:  "sess-orig",
+		}
+		j := original
+		var upd JobUpdate // every field nil
+		upd.applyTo(&j)
+		if j != original {
+			t.Errorf("zero-update changed job: got %+v want %+v", j, original)
+		}
+	})
+
+	t.Run("each_field_writes_through", func(t *testing.T) {
+		t.Parallel()
+		j := &Job{Prompt: "old"}
+		newPrompt := "new prompt"
+		newWorkDir := "/new/wd"
+		newTitle := "new title"
+		newBackend := "new-backend"
+		newPlat := "telegram"
+		newChat := "chat-new"
+		notify := true
+		fresh := false
+
+		upd := JobUpdate{
+			Prompt:         &newPrompt,
+			WorkDir:        &newWorkDir,
+			Title:          &newTitle,
+			Backend:        &newBackend,
+			NotifyPlatform: &newPlat,
+			NotifyChatID:   &newChat,
+			Notify:         &notify,
+			FreshContext:   &fresh,
+		}
+		upd.applyTo(j)
+
+		if j.Prompt != newPrompt {
+			t.Errorf("Prompt = %q want %q", j.Prompt, newPrompt)
+		}
+		if j.WorkDir != newWorkDir {
+			t.Errorf("WorkDir = %q want %q", j.WorkDir, newWorkDir)
+		}
+		if j.Title != newTitle {
+			t.Errorf("Title = %q want %q", j.Title, newTitle)
+		}
+		if j.Backend != newBackend {
+			t.Errorf("Backend = %q want %q", j.Backend, newBackend)
+		}
+		if j.NotifyPlatform != newPlat {
+			t.Errorf("NotifyPlatform = %q want %q", j.NotifyPlatform, newPlat)
+		}
+		if j.NotifyChatID != newChat {
+			t.Errorf("NotifyChatID = %q want %q", j.NotifyChatID, newChat)
+		}
+		if j.Notify == nil || *j.Notify != notify {
+			t.Errorf("Notify = %v want %v", j.Notify, notify)
+		}
+		if j.FreshContext != fresh {
+			t.Errorf("FreshContext = %v want %v", j.FreshContext, fresh)
+		}
+	})
+
+	t.Run("workdir_change_clears_last_session_id", func(t *testing.T) {
+		t.Parallel()
+		j := &Job{WorkDir: "/old/wd", LastSessionID: "sess-was-here"}
+		newWD := "/new/wd"
+		(JobUpdate{WorkDir: &newWD}).applyTo(j)
+		if j.LastSessionID != "" {
+			t.Errorf("LastSessionID should clear on WorkDir change, got %q", j.LastSessionID)
+		}
+		if j.WorkDir != newWD {
+			t.Errorf("WorkDir = %q want %q", j.WorkDir, newWD)
+		}
+	})
+
+	t.Run("workdir_unchanged_keeps_last_session_id", func(t *testing.T) {
+		t.Parallel()
+		j := &Job{WorkDir: "/same/wd", LastSessionID: "sess-keep-me"}
+		sameWD := "/same/wd"
+		(JobUpdate{WorkDir: &sameWD}).applyTo(j)
+		if j.LastSessionID != "sess-keep-me" {
+			t.Errorf("LastSessionID should persist when WorkDir unchanged, got %q", j.LastSessionID)
+		}
+	})
+
+	t.Run("notify_pointer_does_not_alias_input", func(t *testing.T) {
+		// The inline ladder (and applyTo) deliberately copies the bool
+		// before storing the pointer so a caller mutating its local var
+		// post-Apply doesn't bleed into the persisted Job.
+		t.Parallel()
+		val := true
+		upd := JobUpdate{Notify: &val}
+		j := &Job{}
+		upd.applyTo(j)
+
+		val = false // caller mutates after applyTo
+		if j.Notify == nil || *j.Notify != true {
+			t.Errorf("Notify should not alias caller's pointer; got %v after caller flip", j.Notify)
+		}
+	})
+
+	t.Run("clear_string_with_empty_pointer", func(t *testing.T) {
+		// pointer-to-"" is the documented "clear this field" path.
+		t.Parallel()
+		j := &Job{Title: "old", Backend: "old-backend", NotifyPlatform: "feishu", NotifyChatID: "c"}
+		empty := ""
+		upd := JobUpdate{Title: &empty, Backend: &empty, NotifyPlatform: &empty, NotifyChatID: &empty}
+		upd.applyTo(j)
+		if j.Title != "" || j.Backend != "" || j.NotifyPlatform != "" || j.NotifyChatID != "" {
+			t.Errorf("pointer-to-empty did not clear: %+v", j)
+		}
+	})
+}
+
 // TestFormatCronNotice_StripsBidi locks the R239-SEC-5 contract: a label
 // carrying bidi/directional-isolate runes must not survive into the IM
 // notice. Without the SanitizeForLog pass in formatCronNotice, an

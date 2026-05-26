@@ -1,8 +1,10 @@
 package server
 
 import (
+	"fmt"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"golang.org/x/time/rate"
 )
@@ -60,6 +62,100 @@ func TestIPLimiter_NoTrustedProxy_AcceptsMissingXFF(t *testing.T) {
 	r.RemoteAddr = "203.0.113.5:9999"
 	if !l.AllowRequest(r) {
 		t.Fatalf("AllowRequest returned false with trustedProxy=false; RemoteAddr fallback is broken")
+	}
+}
+
+// TestNewIPLimiterWithCap_RaisesLRUFloorAboveDefault pins R242-SEC-8 / #636:
+// the cron-handler limiters use newIPLimiterWithCap with an explicit
+// MaxKeys above the ratelimit package default (1000). Without the explicit
+// cap, a DDoS burst of fresh attacker IPs evicts the LRU tail — by
+// construction a legit rate-limited entry — and lets it back through
+// un-throttled. The test populates the limiter with more than 1000 distinct
+// IPs to confirm the explicit cap holds: an entry inserted at IP #1
+// must still be retained after IPs #2..#2000 land, because the LRU now
+// has room for 8192 keys rather than 1000.
+//
+// Regression shape: a future refactor that drops the cap arg (e.g. by
+// re-routing buildCronHandlers through plain newIPLimiterWithProxy) would
+// shrink the cap back to 1000 and IP #1 would be evicted by IP #1001 —
+// AllowRequest for IP #1 would then succeed (fresh bucket) instead of
+// reflecting accumulated debt. We assert IP #1's bucket survives.
+func TestNewIPLimiterWithCap_RaisesLRUFloorAboveDefault(t *testing.T) {
+	// Burst 1, refill never (rate.Every(1h)) — first call burns the only
+	// token; subsequent calls for the same key return false. After eviction
+	// a fresh bucket is installed and the first call returns true again,
+	// which is exactly the regression we want to catch.
+	l := newIPLimiterWithCap(rate.Every(time.Hour), 1, cronLimiterMaxKeys, cronLimiterTTL, false)
+
+	// Burn IP #1's only token.
+	r1 := httptest.NewRequest("GET", "/api/cron", nil)
+	r1.RemoteAddr = "10.0.0.1:1000"
+	if !l.AllowRequest(r1) {
+		t.Fatalf("first call for IP #1 must succeed (fresh bucket has 1 token)")
+	}
+	if l.AllowRequest(r1) {
+		t.Fatalf("second call for IP #1 must fail (rate.Every(1h) means no refill within test wall-time)")
+	}
+
+	// Inject 2000 distinct IPs — well above the 1000-key default that #636
+	// flags as a DDoS soft floor, but well below the 8192-key cron cap.
+	// If MaxKeys defaulted, IP #1 would be evicted around the 1001st insert.
+	for i := 2; i <= 2001; i++ {
+		r := httptest.NewRequest("GET", "/api/cron", nil)
+		r.RemoteAddr = fmt.Sprintf("10.0.%d.%d:1000", i/256, i%256)
+		_ = l.AllowRequest(r)
+	}
+
+	// IP #1's debt MUST still be honoured. If the cap were defaulted to
+	// 1000, IP #1 would have been evicted and a fresh bucket installed,
+	// which would then return true — the regression marker.
+	if l.AllowRequest(r1) {
+		t.Fatalf("IP #1's bucket was evicted under 2000-key load — explicit cronLimiterMaxKeys (%d) regressed to package default (1000)", cronLimiterMaxKeys)
+	}
+}
+
+// TestNewIPLimiterWithProxy_DefaultMaxKeysAlignsWithAuth pins R241-SEC-14
+// / #473: every newIPLimiterWithProxy bucket MUST inherit the 10000-key
+// LRU cap that the auth-side limiters (loginLimiter / wsUpgradeLimiter)
+// explicitly set, rather than the 1000-key ratelimit package default.
+// Misalignment means a flood of fresh attacker IPs evicts older legit
+// rate-limited entries from the unspecified buckets (uploadLimiter /
+// sendLimiter / openLimit / filesExistsLimiter / configPutLimiter /
+// transcribeLimiter / dashboard memory limiter) while the auth side
+// stays correctly sized — uneven hardening across paths facing the same
+// threat model.
+//
+// We exercise the cap by inserting 1500 distinct IPs after burning IP
+// #1's bucket. With the default still at 1000 (the regression we lock
+// against) IP #1 is evicted around insert 1001 and a fresh bucket lets
+// it back through; with the explicit 10000-key default it is preserved.
+//
+// The test uses newIPLimiterWithProxy directly so a future refactor that
+// removes the explicit MaxKeys/TTL pass — even silently via a code-mod
+// of the helper — re-surfaces the regression.
+func TestNewIPLimiterWithProxy_DefaultMaxKeysAlignsWithAuth(t *testing.T) {
+	l := newIPLimiterWithProxy(rate.Every(time.Hour), 1, false)
+
+	r1 := httptest.NewRequest("GET", "/api/anything", nil)
+	r1.RemoteAddr = "10.0.0.1:1000"
+	if !l.AllowRequest(r1) {
+		t.Fatalf("first call for IP #1 must succeed (fresh bucket)")
+	}
+	if l.AllowRequest(r1) {
+		t.Fatalf("second call for IP #1 must fail (no refill in test wall-time)")
+	}
+
+	// 1500 distinct IPs — overshoots the 1000-key default by 50% to
+	// guarantee eviction would have happened, while staying well under
+	// the 10000-key explicit cap.
+	for i := 2; i <= 1501; i++ {
+		r := httptest.NewRequest("GET", "/api/anything", nil)
+		r.RemoteAddr = fmt.Sprintf("10.%d.%d.%d:1000", i/65536, (i/256)%256, i%256)
+		_ = l.AllowRequest(r)
+	}
+
+	if l.AllowRequest(r1) {
+		t.Fatalf("R241-SEC-14 regression: IP #1 evicted under 1500-key load — newIPLimiterWithProxy default cap regressed below %d", defaultIPLimiterMaxKeys)
 	}
 }
 

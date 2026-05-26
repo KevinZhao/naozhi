@@ -56,6 +56,33 @@ func (s *Scheduler) IsExcluded(sessionID string) bool {
 	return s.containsSessionID(sessionID)
 }
 
+// LookupKnownSessionID reports whether the given Claude sessionID belongs
+// to a cron-spawned run, using the same fast-path / TTL-cache pipeline as
+// IsExcluded but without going through the session.SessionIDExcluder
+// interface boundary. Callers that already hold a *Scheduler reference
+// (auto-workspace-chain spawn, dashboard history-panel filter,
+// containsSessionID-equivalent probes) avoid the per-call interface
+// dispatch + `if s == nil` short-circuit and read the named API exactly
+// as proposed in R242-ARCH-23 (#767). Returns false on the empty
+// sessionID for shape symmetry with IsExcluded.
+//
+// The cluster of related issues (R243-PERF-2 / R242-PERF-7) targeted the
+// pre-cache O(jobs × recentCap) rebuild that ran on every IsExcluded
+// probe. R245-GO-4 already collapsed that walk into containsSessionID's
+// fast path (LastSessionID + runningJobs lookup before any rebuild), so
+// the perf delta of LookupKnownSessionID over IsExcluded is microseconds
+// — the named API is the user-visible payoff.
+//
+// Safe to call on a nil Scheduler — returns false. The name mirrors
+// KnownSessionIDs (the bulk dashboard accessor) so future readers see
+// "Lookup" → single-key probe / "Known" → full set in one place.
+func (s *Scheduler) LookupKnownSessionID(sessionID string) bool {
+	if s == nil || sessionID == "" {
+		return false
+	}
+	return s.containsSessionID(sessionID)
+}
+
 // containsSessionID is the single-key probe variant of KnownSessionIDs.
 // Shares the TTL cache + invalidation contract — readers see the same
 // snapshot a concurrent KnownSessionIDs() caller would observe — but

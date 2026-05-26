@@ -729,6 +729,16 @@ type flushCandidate struct {
 }
 
 func (p *Persister) tickFlush() {
+	// R250-PERF-6 (#1110): mirror the empty-writer guard already in
+	// tickIdleClose. Idle deployments (cron-only / dashboard-paused) hit
+	// this every FlushInterval/2 (≥10ms) and the empty-map walk + Clock
+	// vDSO call are pure overhead — at the default 100ms cadence that
+	// is ~864k context switches/day waking just to confirm zero writers.
+	// Safe without locking because tickFlush runs only on the run
+	// goroutine, the same goroutine that mutates p.writers.
+	if len(p.writers) == 0 {
+		return
+	}
 	now := p.opts.Clock()
 	// Collect-then-sort instead of a true heap: 1-200 typical writers
 	// per tick, sort.Slice is faster in practice than a container/heap
