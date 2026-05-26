@@ -751,3 +751,85 @@ func TestFlattenAssistantEvent_ToolInputSizeCap(t *testing.T) {
 		t.Errorf("big input: summary empty; expected probe-derived label to survive cap")
 	}
 }
+
+// TestSummariseToolInput_FallbackUsesRawBytes pins R244-GO-P2-2 (#909):
+// when summariseToolInput's typed-probe finds no recognised key, the
+// fallback path must hand the ORIGINAL raw input bytes to SanitizeForLog
+// rather than re-Marshalling the probe struct. A re-Marshal would (a)
+// allocate a fresh buffer per call AND (b) silently reorder keys
+// alphabetically because encoding/json sorts struct fields by declaration
+// order — both observable regressions if a future refactor swaps the
+// fallback back to json.Marshal(obj). Asserting `zeta` precedes `alpha`
+// in the surfaced summary catches the alphabetical-reorder symptom; an
+// empty result on broken JSON catches the early-return path; recognised
+// fields still winning over fallback locks priority semantics.
+func TestSummariseToolInput_FallbackUsesRawBytes(t *testing.T) {
+	t.Parallel()
+
+	// 1. Fallback branch (no recognised key): summary must preserve the
+	//    original key order (zeta-then-alpha). A re-Marshal would emit
+	//    keys in struct-declaration order (alphabetical for an unknown
+	//    key map fallback) and lose this property.
+	raw := json.RawMessage(`{"zeta":1,"alpha":2}`)
+	got := summariseToolInput("CustomTool", raw)
+	zetaAt := strings.Index(got, "zeta")
+	alphaAt := strings.Index(got, "alpha")
+	if zetaAt < 0 || alphaAt < 0 {
+		t.Fatalf("fallback: summary=%q lost both keys", got)
+	}
+	if zetaAt > alphaAt {
+		t.Errorf("fallback: zeta should precede alpha (got %q); a re-Marshal regression would reorder", got)
+	}
+
+	// 2. Broken JSON returns empty (early return on Unmarshal error).
+	if got := summariseToolInput("X", json.RawMessage(`{not-json`)); got != "" {
+		t.Errorf("broken JSON: summary=%q, want empty", got)
+	}
+
+	// 3. Recognised priority field (Command) still wins over fallback —
+	//    even when other fallback-eligible keys are present, the typed
+	//    probe path must short-circuit before reaching the raw-bytes
+	//    fallback.
+	raw3 := json.RawMessage(`{"command":"ls -la","other":"ignored"}`)
+	got3 := summariseToolInput("Bash", raw3)
+	if !strings.Contains(got3, "ls -la") {
+		t.Errorf("priority: summary=%q, want to contain command label", got3)
+	}
+	if strings.Contains(got3, "ignored") {
+		t.Errorf("priority: summary=%q leaked fallback raw bytes despite recognised key", got3)
+	}
+
+	// 4. Empty input returns empty (zero-byte short-circuit).
+	if got := summariseToolInput("X", json.RawMessage(``)); got != "" {
+		t.Errorf("empty input: summary=%q, want empty", got)
+	}
+}
+
+// TestMaxTranscriptBytes_Int64Type pins R244-GO-P2-3 (#911): the
+// transcript reader directly constructs `&io.LimitedReader{N: …}`
+// rather than calling io.LimitReader, so the source operand must be
+// int64-typed for the LimitedReader.N field assignment to round-trip
+// without truncation on any GOARCH. The current code does
+// `N: int64(maxTranscriptBytes)` (explicit cast even though the const
+// is already int64-typed) as defence-in-depth against a future cap
+// change to `1 << 32` written without a `int64` suffix on a 32-bit
+// platform — which would silently wrap maxTranscriptBytes to -2**31
+// and turn the LimitedReader into an immediate-EOF reader, hiding
+// transcript truncation. This test fails fast if the const ever loses
+// its int64 type or the cap becomes representable only as int64.
+func TestMaxTranscriptBytes_Int64Type(t *testing.T) {
+	t.Parallel()
+	// Compile-time-ish guard: assigning maxTranscriptBytes to an int64
+	// must be lossless. If a future refactor makes the constant
+	// int-typed, this still compiles on 64-bit but the explicit
+	// int64() cast at the LimitedReader call site stays load-bearing
+	// for 32-bit builds — assert the runtime value matches the
+	// declared 8 MiB cap so a typo in the literal also fails the test.
+	var n int64 = maxTranscriptBytes
+	if want := int64(8 * 1024 * 1024); n != want {
+		t.Errorf("maxTranscriptBytes = %d, want %d (8 MiB); literal drift breaks LimitedReader cap semantics", n, want)
+	}
+	if n <= 0 {
+		t.Fatalf("maxTranscriptBytes = %d must be > 0; a non-positive value would make io.LimitedReader return EOF immediately and silently truncate every transcript", n)
+	}
+}
