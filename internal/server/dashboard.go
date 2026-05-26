@@ -368,6 +368,14 @@ func (s *Server) registerDashboard() {
 		s.sessionH.snapshotEnricher = s.hub.enrichSnapshot
 	}
 
+	// R247-ARCH-15 (#650): wire ProjectHandlers' baseCtx now that
+	// s.hub.ctx exists. New() constructs projectH before the hub so
+	// the prior implementation captured the lookup in a closure; this
+	// setter call replaces that closure-as-DI antipattern.
+	if s.projectH != nil {
+		s.projectH.SetBaseContext(s.hub.ctx)
+	}
+
 	// Wire sendH now that hub exists
 	uploads := newUploadStore()
 	uploads.StartCleanup(s.hub.ctx)

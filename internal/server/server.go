@@ -696,12 +696,12 @@ func buildServer(opts ServerOptions) *Server {
 	// Wire extracted handler groups that depend on nodeAccess/nodeCache
 	// (literals live in build_handlers.go; #738).
 	s.discoveryH = buildDiscoveryHandlers(opts, claudeDir, s.discoveryCache, s.nodeAccess, s.nodeCache, hubBroadcast)
-	s.projectH = buildProjectHandlers(opts, resolver, s.nodeAccess, s.nodeCache, func() context.Context {
-		if s.hub != nil {
-			return s.hub.ctx
-		}
-		return context.Background()
-	})
+	// R247-ARCH-15 (#650): no closure here — ProjectHandlers stores
+	// baseCtx as a plain field that registerDashboard wires via
+	// SetBaseContext once `s.hub` exists. The two-phase construction
+	// is unchanged (Hub still doesn't exist at this point); only the
+	// DI shape moved from a captured closure to a direct field assign.
+	s.projectH = buildProjectHandlers(opts, resolver, s.nodeAccess, s.nodeCache)
 	agentIDs := agentIDList(agents)
 	s.sessionH = &SessionHandlers{
 		router:        router,
