@@ -168,3 +168,28 @@ func TestNewDispatcher_ResolverFabricatedWhenNil(t *testing.T) {
 		t.Fatal("explicit Resolver must be preserved, not replaced by a fresh fabrication")
 	}
 }
+
+// TestNewDispatcher_PrefersRouterResolver covers R237-ARCH-12 (#604):
+// when cfg.Resolver is unset and cfg.Router carries a Resolver via
+// RouterConfig.Resolver, NewDispatcher must adopt the router's
+// singleton instead of fabricating a parallel KeyResolver — that's
+// the central remediation for agents-config drift across the 4
+// historical construction sites.
+func TestNewDispatcher_PrefersRouterResolver(t *testing.T) {
+	t.Parallel()
+
+	shared := session.NewKeyResolver(map[string]session.AgentOpts{"general": {}}, nil)
+	router := session.NewRouter(session.RouterConfig{Resolver: shared})
+
+	d, err := NewDispatcher(DispatcherConfig{
+		Router:             router,
+		Agents:             map[string]session.AgentOpts{"general": {}},
+		AllowMissingSender: true,
+	})
+	if err != nil {
+		t.Fatalf("NewDispatcher: %v", err)
+	}
+	if d.resolver != shared {
+		t.Fatalf("Dispatcher.resolver = %p, want router-shared %p — router resolver was not adopted", d.resolver, shared)
+	}
+}

@@ -612,8 +612,36 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		// remains correct there.
 		ts := parseISO8601MS(ev.Timestamp)
 		if ts > 0 {
-			if ts < startedMS || ts > endedMS {
-				continue
+			// R242-SEC-12 (#642): for fresh=false the JSONL is shared
+			// across adjacent cron runs, so an event whose timestamp
+			// lands exactly on the millisecond boundary between two
+			// runs (run N ended at T, run N+1 started at T) was
+			// previously included in BOTH runs' transcript responses
+			// because the time-window check uses `ts > endedMS` on the
+			// upper side AND `ts < startedMS` on the lower side — both
+			// half-open in the wrong direction, so ts==endedMS_N and
+			// ts==startedMS_{N+1} both pass the gate. Without a per-run
+			// UUID we cannot reliably attribute the boundary event;
+			// the safe-by-default fix is the standard half-open
+			// interval [startedMS, endedMS) so a boundary event is
+			// claimed by the LATER run only (deterministic single
+			// owner). For fresh=true the JSONL is exclusively owned by
+			// this run, so the inclusive boundary is preserved (both
+			// ends inclusive matches the previous behaviour and is
+			// safe since no adjacent run shares the file).
+			if run.Fresh {
+				if ts < startedMS || ts > endedMS {
+					continue
+				}
+			} else {
+				// fresh=false: half-open [startedMS, endedMS). The
+				// boundary event ts == endedMS_N is rejected here for
+				// run N; it falls to run N+1 (whose startedMS_{N+1}
+				// == endedMS_N is the inclusive lower bound). Single
+				// owner per ts boundary, no leak.
+				if ts < startedMS || ts >= endedMS {
+					continue
+				}
 			}
 		} else if !run.Fresh {
 			// Shared JSONL + no timestamp ⇒ cannot attribute to this

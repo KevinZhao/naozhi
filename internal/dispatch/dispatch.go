@@ -387,6 +387,17 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	}
 	resolver := cfg.Resolver
 	if resolver == nil {
+		// Prefer the Router-attached singleton when the host wired one
+		// in via session.RouterConfig.Resolver — that's the agreed
+		// remediation for R237-ARCH-12 (#604) so all consumers
+		// (Dispatcher / Hub / upstream) read the same agents-config
+		// snapshot. Falls back to a fresh resolver only when the
+		// Router was constructed without one (legacy / headless tests).
+		if cfg.Router != nil {
+			resolver = cfg.Router.Resolver()
+		}
+	}
+	if resolver == nil {
 		var data session.PlannerDataSource
 		if cfg.ProjectMgr != nil {
 			data = project.NewDataSource(cfg.ProjectMgr)
