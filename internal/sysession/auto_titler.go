@@ -71,6 +71,21 @@ const (
 	// instruction so a non-compliant model can't write an over-long
 	// label.
 	autoTitlerMaxTitleRunes = 16
+
+	// autoTitlerHighwaterHardCap bounds the in-memory highwater map so
+	// it cannot grow unboundedly when earlyStop=true skips the
+	// dead-key prune. R238-GO-16 (#808): if more than batchPerTick × 4
+	// active sessions exist, the visitor early-stops once it has
+	// collected enough rename candidates (autoTitler.Tick line 289),
+	// and commitHighwater preserves the existing entries instead of
+	// pruning. Across many ticks under that condition the map would
+	// retain entries for all sessions ever observed. Cap at
+	// autoTitlerMaxBatchPerTick × 4 = 400 entries — comfortably above
+	// the early-stop candidate budget for the largest configured
+	// batch_per_tick (100), while bounding total memory at ~16 KiB
+	// (400 entries × ~40 B per autoTitlerHighwater struct + map
+	// overhead).
+	autoTitlerHighwaterHardCap = autoTitlerMaxBatchPerTick * 4
 )
 
 // autoTitlerHighwater records when AutoTitler last successfully wrote
@@ -352,7 +367,14 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 // allocation occurs at all.
 func (a *autoTitler) commitHighwater(writes map[string]autoTitlerHighwater, observed map[string]struct{}, earlyStop bool) {
 	if len(writes) == 0 && earlyStop {
-		return
+		// Skip-fast: nothing to write and prune is unsafe. But still
+		// enforce the hard cap so a stuck-earlyStop sequence cannot
+		// retain a stale entry forever. The cap check is cheap (single
+		// Load + len) — only fall through to the locked clone path
+		// when the cap is actually breached.
+		if cur := *a.highwater.Load(); len(cur) <= autoTitlerHighwaterHardCap {
+			return
+		}
 	}
 	a.writeMu.Lock()
 	defer a.writeMu.Unlock()
@@ -376,7 +398,45 @@ func (a *autoTitler) commitHighwater(writes map[string]autoTitlerHighwater, obse
 	for k, v := range writes {
 		next[k] = v
 	}
+	// R238-GO-16 (#808): when earlyStop=true the dead-key prune above
+	// is skipped, so the map can grow unboundedly across ticks if
+	// active session count exceeds the visitor's early-stop threshold.
+	// Enforce a hard cap by dropping the oldest lastRenamedAt entries
+	// (LRU-ish) until we are back under the limit. Most-recently-renamed
+	// entries are the ones whose minRenameInterval gate is still
+	// meaningful; oldest entries are equivalent to "not in the map" for
+	// future Tick decisions.
+	if len(next) > autoTitlerHighwaterHardCap {
+		pruneHighwaterOldest(next, autoTitlerHighwaterHardCap)
+	}
 	a.highwater.Store(&next)
+}
+
+// pruneHighwaterOldest evicts the oldest lastRenamedAt entries from m
+// until len(m) <= cap. Mutates m in place. Intended for the bounded
+// hard-cap path — under earlyStop=true the dead-key prune is skipped
+// and the map would otherwise grow unboundedly. Linear sort keeps the
+// implementation obvious; cap is small (a few hundred) so the once-per-
+// overflow O(N log N) cost is irrelevant.
+func pruneHighwaterOldest(m map[string]autoTitlerHighwater, cap int) {
+	if len(m) <= cap {
+		return
+	}
+	type kv struct {
+		k string
+		t time.Time
+	}
+	entries := make([]kv, 0, len(m))
+	for k, v := range m {
+		entries = append(entries, kv{k: k, t: v.lastRenamedAt})
+	}
+	slices.SortFunc(entries, func(a, b kv) int {
+		return a.t.Compare(b.t)
+	})
+	excess := len(m) - cap
+	for i := 0; i < excess; i++ {
+		delete(m, entries[i].k)
+	}
 }
 
 // buildExcerptFromHistory walks the full event log and concatenates

@@ -504,3 +504,47 @@ func TestAutoTitler_BatchPerTickClamp(t *testing.T) {
 		})
 	}
 }
+
+// TestPruneHighwaterOldest_RespectsCapAndKeepsNewest verifies the
+// hard-cap LRU prune used to bound the highwater map under sustained
+// earlyStop=true ticks. R238-GO-16 (#808).
+func TestPruneHighwaterOldest_RespectsCapAndKeepsNewest(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
+	m := make(map[string]autoTitlerHighwater, 10)
+	for i := 0; i < 10; i++ {
+		m[string(rune('a'+i))] = autoTitlerHighwater{
+			lastRenamedAt: base.Add(time.Duration(i) * time.Minute),
+		}
+	}
+	pruneHighwaterOldest(m, 4)
+	if len(m) != 4 {
+		t.Fatalf("len(m) = %d, want 4", len(m))
+	}
+	// The 4 newest keys are 'f','g','h','i','j' — wait we kept 4, so
+	// 'g','h','i','j' (entries 6..9, base+6..9 minutes).
+	for _, k := range []string{"g", "h", "i", "j"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("expected key %q to survive prune, missing", k)
+		}
+	}
+	for _, k := range []string{"a", "b", "c", "d", "e", "f"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("expected key %q to be pruned, still present", k)
+		}
+	}
+}
+
+// TestPruneHighwaterOldest_NoOpUnderCap verifies the prune is a no-op
+// when the map is already within budget.
+func TestPruneHighwaterOldest_NoOpUnderCap(t *testing.T) {
+	t.Parallel()
+	m := map[string]autoTitlerHighwater{
+		"a": {lastRenamedAt: time.Unix(1, 0)},
+		"b": {lastRenamedAt: time.Unix(2, 0)},
+	}
+	pruneHighwaterOldest(m, 5)
+	if len(m) != 2 {
+		t.Fatalf("len(m) = %d, want 2 (no prune expected)", len(m))
+	}
+}
