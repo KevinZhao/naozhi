@@ -295,7 +295,11 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 	}
 
 	// Fallback to legacy guard path when no queue is configured (tests, headless).
+	// Bumping h.legacySendInvokes lets R-LEGACY-SEND migrators (#710) observe
+	// remaining test fixtures via Hub.LegacySendInvokes(); a production Hub
+	// constructed with a real MessageQueue never reaches this branch.
 	if h.queue == nil {
+		h.legacySendInvokes.Add(1)
 		return h.sessionSendLegacy(p, onAsyncError)
 	}
 
