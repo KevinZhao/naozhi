@@ -1372,7 +1372,7 @@ func TestProcessStateString(t *testing.T) {
 
 func TestNewUserMessage(t *testing.T) {
 	t.Parallel()
-	msg := NewUserMessage("hello world", nil)
+	msg := NewUserMessageWithMeta("hello world", nil, "", "")
 	if msg.Type != "user" {
 		t.Errorf("Type = %q, want %q", msg.Type, "user")
 	}
@@ -1390,7 +1390,7 @@ func TestNewUserMessage_WithImages(t *testing.T) {
 		{Data: []byte("fake-png-data"), MimeType: "image/png"},
 		{Data: []byte("fake-jpeg-data"), MimeType: "image/jpeg"},
 	}
-	msg := NewUserMessage("describe this", images)
+	msg := NewUserMessageWithMeta("describe this", images, "", "")
 
 	if msg.Type != "user" || msg.Message.Role != "user" {
 		t.Fatalf("unexpected type/role: %q / %q", msg.Type, msg.Message.Role)
@@ -1457,7 +1457,7 @@ func TestNewUserMessage_WithImages(t *testing.T) {
 func TestNewUserMessage_WithImages_EmptyText(t *testing.T) {
 	t.Parallel()
 	images := []ImageData{{Data: []byte("img"), MimeType: "image/png"}}
-	msg := NewUserMessage("", images)
+	msg := NewUserMessageWithMeta("", images, "", "")
 
 	blocks, ok := msg.Message.Content.([]any)
 	if !ok {
@@ -1482,7 +1482,7 @@ func TestNewUserMessage_WithFileRef_PrependsHint(t *testing.T) {
 		OrigName:      "report.pdf",
 		Size:          1024 * 1024,
 	}}
-	msg := NewUserMessage("summarize key points", atts)
+	msg := NewUserMessageWithMeta("summarize key points", atts, "", "")
 
 	// Text-only message: the Content field must be a plain string (no
 	// multimodal block array) because we have no inline bytes. This keeps
@@ -1522,7 +1522,7 @@ func TestNewUserMessage_WithImageAndFileRef_Mixed(t *testing.T) {
 		{Kind: KindFileRef, MimeType: "application/pdf",
 			WorkspacePath: ".naozhi/attachments/x/y.pdf", OrigName: "y.pdf"},
 	}
-	msg := NewUserMessage("compare these", atts)
+	msg := NewUserMessageWithMeta("compare these", atts, "", "")
 
 	blocks, ok := msg.Message.Content.([]any)
 	if !ok {
@@ -1562,7 +1562,7 @@ func TestNewUserMessage_WithImageAndFileRef_Mixed(t *testing.T) {
 func TestNewUserMessage_NoFileRef_ByteIdentical(t *testing.T) {
 	t.Parallel()
 	// Text-only
-	text := NewUserMessage("just text", nil)
+	text := NewUserMessageWithMeta("just text", nil, "", "")
 	s, ok := text.Message.Content.(string)
 	if !ok || s != "just text" {
 		t.Errorf("text-only content changed: got %T %v", text.Message.Content, text.Message.Content)
@@ -1570,7 +1570,7 @@ func TestNewUserMessage_NoFileRef_ByteIdentical(t *testing.T) {
 
 	// Image-only
 	imgs := []Attachment{{Kind: KindImageInline, Data: []byte("x"), MimeType: "image/png"}}
-	m := NewUserMessage("look", imgs)
+	m := NewUserMessageWithMeta("look", imgs, "", "")
 	blocks, _ := m.Message.Content.([]any)
 	if len(blocks) != 2 {
 		t.Fatalf("image+text expected 2 blocks, got %d", len(blocks))
@@ -1594,7 +1594,7 @@ func TestNewUserMessage_FileRefWithoutPath_Skipped(t *testing.T) {
 		// WorkspacePath intentionally empty
 		OrigName: "orphan.pdf",
 	}}
-	msg := NewUserMessage("hello", atts)
+	msg := NewUserMessageWithMeta("hello", atts, "", "")
 	s, _ := msg.Message.Content.(string)
 	if strings.Contains(s, "  - \n") {
 		t.Errorf("empty path should be skipped, got hint: %q", s)

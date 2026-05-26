@@ -37,7 +37,7 @@ const (
 	// R239-ARCH-G (#900): canonical declaration lives in
 	// internal/keyspec.ProjectKeyPrefix; the session-local constant is a
 	// re-export so existing callers (the keyNamespaces table below,
-	// IsProjectKey, isPlannerKey, plannerNameFromKey) keep using the
+	// isPlannerKey, plannerNameFromKey) keep using the
 	// session-package symbol without an import cycle.
 	ProjectKeyPrefix = keyspec.ProjectKeyPrefix
 	// ScratchKeyPrefix is already defined in scratch.go; listed here only in
@@ -165,26 +165,6 @@ func CronKey(id string) string {
 // See SysKeyPrefix.
 func IsSysKey(key string) bool {
 	return strings.HasPrefix(key, SysKeyPrefix)
-}
-
-// IsProjectKey reports whether the key belongs to the project namespace
-// (any "project:..." key, planner or otherwise). Pairs with the
-// IsCronKey / IsScratchKey / IsSysKey helpers so prefix-based dispatch
-// has a uniform shape across all reserved namespaces — without this
-// helper, project was the odd-one-out forcing callers to either inline
-// strings.HasPrefix(key, ProjectKeyPrefix) (drifting from the constant)
-// or call the more specific isPlannerKey (which rejects non-planner
-// project keys). For "is this any project: key" callers should use
-// this; for "is this a project planner key" callers should use the
-// session-internal isPlannerKey or external project.IsPlannerKey.
-//
-// Today every project: key is a planner key, so IsProjectKey ≡
-// isPlannerKey shape-wise — but the namespace is reserved for future
-// project sub-roles (e.g. project:foo:tasks) and the helper exists so
-// new sub-roles can be added without sprinkling new prefix checks
-// across the codebase.
-func IsProjectKey(key string) bool {
-	return strings.HasPrefix(key, ProjectKeyPrefix)
 }
 
 // SysKey synthesises the session key for a system daemon. Caller must

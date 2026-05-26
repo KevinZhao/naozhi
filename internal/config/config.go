@@ -1071,17 +1071,65 @@ func (c *Config) QueueMode() string {
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
 
+// envExpansionDenyPrefixes lists env-var name prefixes that we refuse to
+// expand inside config.yaml even if the operator literally types the
+// placeholder. The threat model (R240-SEC-16 / #1047) is an operator who
+// mistakes ${ANTHROPIC_API_KEY} for a generic credential alias and
+// inadvertently materialises the upstream Claude API key into a string
+// field that may be echoed to logs (slog.Info("config loaded", "cfg",
+// ...)) or reflected back via the dashboard config inspector. None of
+// these prefixes have a legitimate naozhi-side use; if a future feature
+// genuinely needs one, prefer renaming the env (NAOZHI_-prefixed alias)
+// rather than relaxing this denylist. Match is case-insensitive against
+// the *full* env name; partial substring matches are NOT considered (so
+// the existing test fixture TEST_NAOZHI_VAR is unaffected).
+var envExpansionDenyPrefixes = []string{
+	"ANTHROPIC_",
+	"AWS_",
+	"AZURE_",
+	"GCP_",
+	"GOOGLE_",
+	"OCI_",
+	"OPENAI_",
+}
+
+// allowEnvExpansion reports whether key is safe to expand in config.yaml.
+// Returns false for known-secret upstream credential prefixes; the caller
+// leaves the placeholder un-expanded so the secret never reaches the
+// in-memory Config (and therefore never reaches log/echo paths).
+func allowEnvExpansion(key string) bool {
+	upper := strings.ToUpper(key)
+	for _, p := range envExpansionDenyPrefixes {
+		if strings.HasPrefix(upper, p) {
+			return false
+		}
+	}
+	return true
+}
+
 // expandEnvVars resolves ${VAR} placeholders inside the YAML payload.
 // It accepts []byte (R231-PERF-10) so Load can avoid materialising the
 // whole config file as a string just to feed the regex API; when no
 // placeholder is present we return data unchanged, and yaml.Unmarshal
 // also accepts []byte without further conversion.
+//
+// R240-SEC-16 / #1047: env-var names matching envExpansionDenyPrefixes
+// (ANTHROPIC_*, AWS_*, etc.) are deliberately NOT expanded, even if the
+// env is set. This keeps upstream credentials from being mistakenly
+// materialised into config string fields that downstream code may log or
+// echo back over the dashboard API. The placeholder is preserved as-is
+// so the bad config surfaces loudly (literal "${ANTHROPIC_API_KEY}"
+// inside e.g. dashboard_token will fail containsEnvPlaceholder validation
+// at startup) rather than silently leaking the key.
 func expandEnvVars(data []byte) []byte {
 	if !bytes.Contains(data, []byte("${")) {
 		return data
 	}
 	return envVarRe.ReplaceAllFunc(data, func(match []byte) []byte {
 		key := string(bytes.TrimSuffix(bytes.TrimPrefix(match, []byte("${")), []byte("}")))
+		if !allowEnvExpansion(key) {
+			return match
+		}
 		if val, ok := os.LookupEnv(key); ok {
 			return []byte(val)
 		}
