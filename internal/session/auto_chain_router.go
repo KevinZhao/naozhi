@@ -26,6 +26,32 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
+// isAutoChainSkippedKey is the single source of truth for "this session
+// key namespace is ineligible for auto-chain attach / backfill". The
+// historical set is cron + sys + scratch:
+//
+//   - cron / sys are exempt namespaces with their own resume contracts;
+//     the auto-chain heuristic (oldest-N from same workspace) would
+//     fight the cron-runner's deterministic chain selection.
+//   - scratch is intentionally short-lived and contextless; chaining
+//     prior IM history into a scratch drawer would leak unrelated
+//     conversations into a single-question side window.
+//
+// Project planner keys (project:{name}:planner) are deliberately NOT in
+// this skip set: planners share their bound chat's workspace and the
+// auto-chain backfill is the only path that retroactively populates
+// prev_session_ids on an already-spawned planner whose chain was
+// previously empty. Adding ProjectKeyPrefix here would silently regress
+// that path; #1212 (R-key-namespace-gate) recommended IsUserVisibleKey
+// here but the project carve-out makes the namespace policy locally
+// 3-prefix instead of 4.
+//
+// Keep this helper as the single skip-set source for the auto-chain
+// subsystem so the two call sites (spawn / backfill) cannot drift.
+func isAutoChainSkippedKey(key string) bool {
+	return IsCronKey(key) || IsSysKey(key) || IsScratchKey(key)
+}
+
 // maybeAttachAutoChainOnSpawn implements the spawn-path auto-chain
 // decision (RFC §4.4-A). Returns the chain to assign to prev_session_ids
 // (oldest → newest). Returns nil when auto-chain is skipped (internal
@@ -49,7 +75,7 @@ func (r *Router) maybeAttachAutoChainOnSpawn(
 	if r.autoChainPolicy == nil {
 		return nil
 	}
-	if IsCronKey(key) || IsSysKey(key) || IsScratchKey(key) {
+	if isAutoChainSkippedKey(key) {
 		return nil
 	}
 	if workspace == "" || !r.autoChainPolicy.Enabled(workspace) {
@@ -273,7 +299,7 @@ func (r *Router) runAutoChainBackfillOnce() {
 	r.mu.Lock()
 	candidates := make([]*ManagedSession, 0, len(r.sessions))
 	for _, s := range r.sessions {
-		if IsCronKey(s.key) || IsSysKey(s.key) || IsScratchKey(s.key) {
+		if isAutoChainSkippedKey(s.key) {
 			continue
 		}
 		s.historyMu.RLock()

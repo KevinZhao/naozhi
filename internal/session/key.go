@@ -138,9 +138,14 @@ func IsReservedNamespace(key string) bool {
 // project sidebar groupings, scratch drawer, system drawer) and must
 // be hidden from the catch-all "recent sessions" view.
 //
-// Keep this function as the single source of truth for "should this
-// key appear in a generic listing":  every new listing API must consult
-// it instead of re-growing strings.HasPrefix checks per call site.
+// Aspirational source of truth for "should this key appear in a
+// generic listing".  #1212 (R-key-namespace-gate) flagged that the
+// dashboard listing path at server/dashboard_session.go open-codes
+// the same prefix chain instead of consulting this helper; until
+// that wireup lands, treat any new listing API that adds its own
+// strings.HasPrefix sequence as a review failure rather than a
+// precedent — the hold-out is one site, not policy.
+//
 // R245-ARCH (cron+sys hide-from-history).
 func IsUserVisibleKey(key string) bool {
 	return !IsReservedNamespace(key)
