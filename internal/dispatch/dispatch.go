@@ -75,6 +75,44 @@ type SessionGuard interface {
 	Release(key string)
 }
 
+// CronScheduler is the consumer-side seam that dispatch's slash-command
+// handlers (handleCronAdd / handleCronList / handleCronDel /
+// handleCronPause / handleCronResume) require. *cron.Scheduler satisfies
+// this interface implicitly by virtue of its existing public method set;
+// the abstraction exists so dispatch_test.go can stand up a fake without
+// constructing a real Scheduler + tempdir + persistence loop just to
+// exercise reply-text and error-classification branches.
+//
+// R250-ARCH-17 (#1178): Dispatcher.scheduler used to be the concrete
+// pointer *cron.Scheduler, which forced every test that wanted to assert
+// "scheduler is nil → no /cron processing" or "AddJob fails → user sees
+// a generic error" to either construct a full Scheduler or skip the
+// branch entirely. Mirrors the SessionRouter / cron.SessionRouter
+// precedent — dispatch declares the consumer surface, the concrete type
+// in another package implements it implicitly.
+//
+// Method set is the strict subset of cron.Scheduler that dispatch needs:
+// the four read paths (NextRun, ListJobs) and the four write paths
+// (AddJob, DeleteJob, PauseJob, ResumeJob). Future /cron sub-commands
+// must add their methods here AND keep cron.Scheduler in sync — the
+// implicit-satisfaction check fires at NewDispatcher's struct
+// initialisation, so a missing method is a compile-time error.
+//
+// The signature uses *cron.Job / []cron.Job to keep the field-level
+// access (j.ID / j.Schedule / j.Prompt / j.Paused) that the existing
+// handlers rely on. R250-ARCH-1 (#1164) is the deeper "remove the
+// internal/cron import from dispatch entirely" refactor that would
+// break Job into a dispatch-side projection; that work is tracked
+// separately and out of scope for the test-seam fix.
+type CronScheduler interface {
+	AddJob(j *cron.Job) error
+	NextRun(j *cron.Job) time.Time
+	ListJobs(plat, chatID string) []cron.Job
+	DeleteJob(idPrefix, plat, chatID string) (*cron.Job, error)
+	PauseJob(idPrefix, plat, chatID string) (*cron.Job, error)
+	ResumeJob(idPrefix, plat, chatID string) (*cron.Job, error)
+}
+
 // Dispatcher holds the dependencies needed to dispatch incoming IM messages
 // to the session router, handle slash commands, and stream results back.
 type Dispatcher struct {
@@ -95,7 +133,14 @@ type Dispatcher struct {
 	// session.AgentOpts maps.
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
-	scheduler     *cron.Scheduler
+	// scheduler is the cron-side consumer surface dispatch slash-commands
+	// need. *cron.Scheduler satisfies CronScheduler implicitly; tests
+	// inject a fake without constructing the real Scheduler + tempdir.
+	// R250-ARCH-17 (#1178). nil when cron is disabled at the operator
+	// level — every call site already gates on `d.scheduler != nil`,
+	// preserving the no-cron-feature exit path. (See dispatchCommand
+	// in commands.go for the gate.)
+	scheduler CronScheduler
 	// projectMgr is used by slash-command handlers for: (a) UX echo of
 	// the bound project's name from /new, /cd, /project; (b) /cd guard
 	// against workspace-fixed projects; (c) /new resolution of planner
@@ -203,8 +248,12 @@ type DispatcherConfig struct {
 	Platforms     map[string]platform.Platform
 	Agents        map[string]session.AgentOpts
 	AgentCommands map[string]string
-	Scheduler     *cron.Scheduler
-	ProjectMgr    *project.Manager
+	// Scheduler is the cron consumer surface. Production wiring passes
+	// *cron.Scheduler (which satisfies CronScheduler implicitly); test
+	// wiring may inject a fake. nil disables /cron commands at runtime.
+	// R250-ARCH-17 (#1178).
+	Scheduler  CronScheduler
+	ProjectMgr *project.Manager
 	// Resolver is the central (key, opts) derivation. Optional: when nil,
 	// NewDispatcher fabricates a fallback resolver from cfg.Agents and a
 	// DataSource derived from cfg.ProjectMgr (which may itself be nil for
