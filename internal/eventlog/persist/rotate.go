@@ -255,7 +255,19 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 	// We preserve idx seq numbers from the old file (no seq recycle).
 	// However, we re-record idx entries only for the records we
 	// actually see — recovery picks them up from there.
+	//
+	// R217-GO-4 (#603): correlate frames to idx entries via the source
+	// byte-offset rather than re-decoding every body to read rec.Seq.
+	// The old file's idx entries past cutIdx are sorted by ByteOff
+	// (records are appended in monotonically-increasing offset order),
+	// so we can track srcOff relative to cutEntry.ByteOff and match
+	// idxEntries[nextExpectedIdxPos].ByteOff exactly. Records without an
+	// idx entry are skipped (sparse idx), and records that match push a
+	// new IdxEntry with the rebased dstOff. This drops one
+	// schema.UnmarshalRecord per record on the rotation path — for a
+	// rotation cutting 1000 records, that's 1000 fewer JSON decodes.
 	nextExpectedIdxPos := cutIdx
+	srcOff := cutEntry.ByteOff
 	for {
 		body, frameLen, err := ReadFramedBody(br)
 		if err != nil {
@@ -279,32 +291,28 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 		// frameWrite contract), so reuse via pool is safe.
 		ReleaseFramedBody(body)
 
-		// Advance idx if the record we just spliced lines up with the
-		// next expected idx entry. Sparse idx: not every record has
-		// one; only push a new IdxEntry when there was one in the old
-		// idx at this exact record.
-		//
-		// UnmarshalRecord copies the raw bytes via json.RawMessage so
-		// it's safe to release the body buffer immediately after the
-		// decode call regardless of whether we end up appending an
-		// IdxEntry below.
-		rec, err := schema.UnmarshalRecord(body)
-		ReleaseFramedBody(body)
-		if err != nil {
-			return 0, nil, fmt.Errorf("decode spliced record: %w", err)
-		}
-		for nextExpectedIdxPos < len(idxEntries) && idxEntries[nextExpectedIdxPos].Seq < rec.Seq {
+		// Skip any idx entries whose ByteOff is strictly less than the
+		// current src offset. This guards against a malformed idx that
+		// references an offset between record boundaries — recovery
+		// would have rejected such an idx upfront, but the defensive
+		// skip keeps spliceLog robust to a sparser-than-expected idx.
+		for nextExpectedIdxPos < len(idxEntries) && idxEntries[nextExpectedIdxPos].ByteOff < srcOff {
 			nextExpectedIdxPos++
 		}
-		if nextExpectedIdxPos < len(idxEntries) && idxEntries[nextExpectedIdxPos].Seq == rec.Seq {
+		// If the record we just spliced matches the next expected idx
+		// entry by source offset, push a rebased IdxEntry. Reuse the
+		// idx's Seq + TimeMS (authoritative) and the live frameLen from
+		// the splice (matches the actual on-disk record length post-rebase).
+		if nextExpectedIdxPos < len(idxEntries) && idxEntries[nextExpectedIdxPos].ByteOff == srcOff {
 			newIdx = append(newIdx, schema.IdxEntry{
-				Seq:     rec.Seq,
+				Seq:     idxEntries[nextExpectedIdxPos].Seq,
 				ByteOff: dstOff,
 				Len:     int32(frameLen),
 				TimeMS:  idxEntries[nextExpectedIdxPos].TimeMS,
 			})
 			nextExpectedIdxPos++
 		}
+		srcOff += int64(frameLen)
 		dstOff += int64(frameLen)
 	}
 
