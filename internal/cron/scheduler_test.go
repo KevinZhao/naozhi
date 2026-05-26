@@ -562,6 +562,39 @@ func TestEnsureStub(t *testing.T) {
 	}
 }
 
+// TestNewScheduler_StoreParentDirHardenedEagerly covers R238-SEC-12 (#834):
+// the parent dir of StorePath must be 0o700 immediately after NewScheduler
+// returns, before any save fires. The lazy storeDirOnce gate inside
+// saveMarshaledSeq used to leave a startup permission window in which a
+// local attacker could stat the data dir and enumerate cron_jobs.json's
+// existence/mtime. The fix mirrors that MkdirAll into NewScheduler so the
+// dir mode is correct from t=0; once.Do later in saveMarshaledSeq is then
+// a no-op (test asserts no second mode change is needed).
+func TestNewScheduler_StoreParentDirHardenedEagerly(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "data") // does not exist yet
+	path := filepath.Join(parent, "cron.json")
+
+	// NewScheduler must MkdirAll the parent at 0o700 even though we
+	// never call Start/Save. No-Start path is the worst case — the
+	// lazy storeDirOnce gate fires only on the first save, so without
+	// the eager fix the dir does not exist at this point.
+	_ = NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5})
+
+	fi, err := os.Stat(parent)
+	if err != nil {
+		t.Fatalf("stat parent dir: %v", err)
+	}
+	if !fi.IsDir() {
+		t.Fatalf("parent is not a dir: %v", fi.Mode())
+	}
+	// Compare the perm bits only — Mode() also carries the type bits.
+	if got := fi.Mode().Perm(); got != 0o700 {
+		t.Errorf("parent dir perm = %o, want 0o700", got)
+	}
+}
+
 func TestSchedulerPersistence(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
