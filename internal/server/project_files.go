@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -99,6 +100,49 @@ const (
 	publicTmpProject = "__public_tmp__"
 	publicTmpRoot    = "/tmp"
 )
+
+// processEUID is the effective UID of the naozhi process. Captured once at
+// init so isPublicTmpForeignPrivate avoids a syscall per request. Geteuid()
+// on Linux is implemented as a cached read of the kernel's saved
+// task->cred->euid; calling it per-file is cheap, but caching keeps the
+// hot path syscall-free and lets tests override the value.
+var processEUID = uint32(os.Geteuid())
+
+// isPublicTmpForeignPrivate enforces R245-SEC-7 (#831): when the dashboard
+// previews a path under /tmp via the publicTmpProject pseudo-project, the
+// caller is trusted as "an authenticated dashboard user" but NOT as a
+// system-level user. /tmp on a multi-user host can hold mode-0600 files
+// owned by other UIDs (e.g. another operator's editor swap, an SSH socket,
+// a systemd-private cache) — naozhi runs with read access to those bytes
+// because Linux DAC permissions only check the *running process*, not the
+// dashboard caller. Reflecting them through the dashboard would let the
+// dashboard user trivially read another OS user's private files.
+//
+// Policy: refuse files whose mode bits indicate "owner-private" (no group /
+// world bits) AND whose owner UID differs from the naozhi process's EUID.
+// World/group-readable files (mode & 0o044 != 0) stay accessible — those
+// the kernel already considers safe to share. Files owned by the same UID
+// as naozhi are also fine: the operator running naozhi already owns them.
+//
+// The mode/UID pair is read from the FileInfo we already Lstat'd, so this
+// is a zero-syscall check on the hot path.
+func isPublicTmpForeignPrivate(info os.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		// Non-Unix or stub FileInfo (test fakes); be conservative and
+		// allow — the production build is always Linux where the
+		// assertion holds. A unit test that wants to assert the deny
+		// path supplies a real *syscall.Stat_t via os.Lstat on a
+		// fixture file.
+		return false
+	}
+	if st.Uid == processEUID {
+		return false
+	}
+	// Owner-private == no group OR world read/exec/write bits.
+	const groupOrWorld = 0o077
+	return info.Mode().Perm()&groupOrWorld == 0
+}
 
 // textMimePrefixes identifies MIME types safe to return as UTF-8 text in
 // preview mode. http.DetectContentType tags source code as "text/plain" which
@@ -579,7 +623,24 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 			// text-only fallback.
 			break
 		}
-		results[rel] = statRelWithRoot(rootResolved, rel)
+		entry := statRelWithRoot(rootResolved, rel)
+		// R245-SEC-7 (#831): existence-probe parity with handleFileGet's
+		// foreign-private gate. Without this the dashboard could
+		// enumerate /tmp/<other-uid>/* via the batch-exists API even
+		// though handleFileGet refuses to serve the bytes — the
+		// {Exists, Size, Mime} fields alone leak presence + first-512-byte
+		// MIME signature. Re-Lstat the resolved entry so we evaluate
+		// owner/mode on the same inode the existence reply describes.
+		// Cost: at most one extra Lstat per /tmp probe; the production
+		// path is the project-root case where this branch is skipped.
+		if entry.Exists && req.Project == publicTmpProject {
+			if abs, rerr := resolveProjectFileWithRoot(rootResolved, rel); rerr == nil {
+				if info, lerr := os.Lstat(abs); lerr == nil && isPublicTmpForeignPrivate(info) {
+					entry = existsEntry{Exists: false}
+				}
+			}
+		}
+		results[rel] = entry
 	}
 
 	writeJSON(w, map[string]any{"results": results})
@@ -758,6 +819,21 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	// Reject as 404 to match the rest of the not-found / escape contract.
 	info, err := os.Lstat(resolved)
 	if err != nil || info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	// R245-SEC-7 (#831): publicTmpProject lets any authenticated dashboard
+	// user resolve absolute /tmp paths. Without this gate, a foreign UID's
+	// 0600 file (other operator's editor swap, systemd-private socket
+	// payload, …) flowed straight through because Linux DAC checks the
+	// naozhi *process* — which has read access — not the dashboard caller.
+	// Refuse owner-private files owned by a different UID; the same-UID
+	// case (operator's own /tmp output) and world/group-readable files
+	// stay accessible. Only applies to the publicTmpProject path; real
+	// projects are operator-registered roots whose contents the dashboard
+	// is by definition cleared to read.
+	if project == publicTmpProject && isPublicTmpForeignPrivate(info) {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}

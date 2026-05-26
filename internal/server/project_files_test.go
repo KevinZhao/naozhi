@@ -641,6 +641,96 @@ func TestHandleFileGet_PublicTmpRejectsCredential(t *testing.T) {
 	}
 }
 
+// TestHandleFileGet_PublicTmpRejectsForeignPrivate pins R245-SEC-7 (#831):
+// any 0600 file under /tmp owned by a UID other than the naozhi process EUID
+// must be invisible through the publicTmpProject pseudo-project — even
+// though the kernel grants the naozhi process read access (DAC checks the
+// running process, not the dashboard caller). Real /tmp on a multi-user
+// host holds another operator's editor swap, systemd-private socket
+// payloads, etc.; reflecting their bytes through the dashboard would
+// trivially leak them. We simulate "foreign UID" by overriding processEUID
+// to a sentinel != real UID; the test fixture file we drop is owned by the
+// real UID, which is now "foreign" relative to the captured EUID, so the
+// gate must refuse. The mirror branch (same UID) is covered by the existing
+// TestHandleFileGet_PublicTmpPreview which already round-trips a 0644 file
+// of our own UID.
+func TestHandleFileGet_PublicTmpRejectsForeignPrivate(t *testing.T) {
+	h, _, _ := newProjectHandlersForTest(t, nil)
+
+	// Override processEUID to a value guaranteed to differ from any real
+	// UID so files we just created (owned by the real UID) are foreign.
+	// uint32 max is reserved for nfsnobody on some distros but never
+	// matches a process EUID; restoring on cleanup keeps neighbouring
+	// tests (which assume processEUID == real EUID) working.
+	origEUID := processEUID
+	processEUID = ^uint32(0)
+	t.Cleanup(func() { processEUID = origEUID })
+
+	tmpFile, err := os.CreateTemp("/tmp", "naozhi-public-tmp-foreign-*.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tmpFile.WriteString("private bytes\n"); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+	t.Cleanup(func() { _ = os.Remove(tmpFile.Name()) })
+	// 0600 ⇒ owner-private; combined with foreign-UID this trips the gate.
+	if err := os.Chmod(tmpFile.Name(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rel, err := filepath.Rel("/tmp", tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=preview", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("foreign-UID 0600 file must be 404, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	// Existence-probe parity: handleFilesExists must mirror the gate so
+	// the dashboard can't enumerate /tmp/<other-uid>/* via the batch API.
+	body, _ := json.Marshal(existsReq{
+		Project: publicTmpProject,
+		Paths:   []string{rel},
+	})
+	probeReq := httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", bytes.NewReader(body))
+	probeReq.Header.Set("Content-Type", "application/json")
+	probeW := httptest.NewRecorder()
+	h.handleFilesExists(probeW, probeReq)
+	if probeW.Code != http.StatusOK {
+		t.Fatalf("exists probe status = %d body=%s", probeW.Code, probeW.Body.String())
+	}
+	var probeResp struct {
+		Results map[string]existsEntry `json:"results"`
+	}
+	if err := json.Unmarshal(probeW.Body.Bytes(), &probeResp); err != nil {
+		t.Fatalf("probe unmarshal: %v", err)
+	}
+	if probeResp.Results[rel].Exists {
+		t.Error("foreign-UID 0600 file must NOT be reported as existing via batch probe")
+	}
+
+	// Same file with world-readable bits must still be visible — gate
+	// only fires for owner-private mode. Negative control so a future
+	// over-eager edit (e.g. always-deny) is caught.
+	if err := os.Chmod(tmpFile.Name(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w2 := httptest.NewRecorder()
+	h.handleFileGet(w2,
+		httptest.NewRequest(http.MethodGet,
+			"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=preview", nil))
+	if w2.Code != http.StatusOK {
+		t.Errorf("0644 foreign file should still preview, got %d body=%s", w2.Code, w2.Body.String())
+	}
+}
+
 // TestHandleFilesExists_RateLimit pins the S13 per-IP limiter contract.
 // The endpoint does up to maxExistsPaths (100) filesystem stats per request
 // inside a fileStatTimeout budget, so unmetered access lets an authenticated
