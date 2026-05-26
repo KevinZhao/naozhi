@@ -25,7 +25,12 @@ import (
 //  2. No slog record is emitted for the bad id (drop happens at the
 //     edge, before any logging path that would carry attacker bytes).
 func TestCronWriteHandlers_IDShapeGate(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: this test swaps slog.Default (process-global) to
+	// capture log output. Running in parallel with peer tests that emit
+	// slog records (e.g. NewWithOptions → buildServer's allowed_root
+	// Warn at server.go:570) races on the captured bytes.Buffer because
+	// the swapped logger is still installed when those peers fire.
+	// The whole suite is fast so serialising costs nothing.
 
 	// Bad ids: every value must be ≤ maxCronIDLenDashboard so the length
 	// gate doesn't short-circuit the test — we want to assert the *shape*
