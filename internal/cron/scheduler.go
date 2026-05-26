@@ -235,6 +235,13 @@ type Scheduler struct {
 	// started 用 CAS 保证 Start() 幂等。重复调用直接返回 nil 而不再 reset
 	// startedAtNanos / 二次 spawn cold-start GC / 二次 cron.Start。R241-ARCH-2。
 	started atomic.Bool
+	// stopped 用 CAS 保证 Stop() 幂等。重复调用直接 return,避免:
+	//   - 二次 NewTimer (gcTimer / deadline / triggerTimer) 浪费定时器槽位
+	//   - 二次 persistJobsLocked + 落盘 (race 落盘文件)
+	//   - 二次 cron.Stop() (robfig/cron 内部对此能容忍但成本是无意义的)
+	// stopCancel 已经是 idempotent (sync.Once 内部保护),所以这里只需 CAS
+	// 把 Stop 的整体 body 短路就够了。R20260526-GO-007。
+	stopped atomic.Bool
 	// stopCtx is the scheduler's lifecycle context. Storing context in a
 	// struct is usually an anti-pattern, but here execute() is invoked via
 	// a callback from robfig/cron whose signature has no ctx parameter, so
@@ -959,6 +966,16 @@ var stopBudget = defaultStopBudget
 // observing stopCtx) so successive lifecycles do not accumulate stuck
 // filesystem-IO goroutines until OOM. R247-GO-7.
 func (s *Scheduler) Stop() {
+	// R20260526-GO-007: idempotent CAS guard. Without this, repeat calls
+	// re-enter the timer-allocating + persist branches below — wasting
+	// time.NewTimer slots, double-running persistJobsLocked, and racing the
+	// final marshaled write against itself. Mirror Start()'s `started`
+	// CAS so the lifecycle is symmetrically idempotent. stopCancel is
+	// already idempotent (context cancel is a no-op after the first call),
+	// so callers that bypass this guard via earlier wiring are unaffected.
+	if !s.stopped.CompareAndSwap(false, true) {
+		return
+	}
 	s.stopCancel()
 
 	// R236-GO-01: wait for the cold-start GC goroutine spawned in Start()

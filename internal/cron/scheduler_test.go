@@ -916,3 +916,41 @@ func TestKnownSessionIDs_TTLCache(t *testing.T) {
 		t.Errorf("invalidate+rebuild did not pick up new session id: %v", rebuilt)
 	}
 }
+
+// TestSchedulerStopIdempotent verifies repeat Stop() invocations are a
+// no-op (CAS-guarded) — they must not panic, double-run persistJobsLocked,
+// or attempt to allocate a second set of timers. R20260526-GO-007.
+//
+// Failure mode pre-fix: each Stop call re-entered the timer-allocating
+// branches and the persistJobsLocked path, racing the final marshaled
+// write against itself. Mirrors Start()'s `started` CAS.
+func TestSchedulerStopIdempotent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cron_jobs.json")
+	s := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// First Stop drains as normal. Subsequent Stops MUST short-circuit
+	// via the stopped-CAS guard. Recover so a second-call panic surfaces
+	// as a test failure with full context rather than aborting the suite.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("repeat Stop() panicked: %v", r)
+		}
+	}()
+	s.Stop()
+	s.Stop()
+	s.Stop()
+
+	// stopped flag must be set; started flag set by Start remains so
+	// callers reading lifecycle state see the post-Stop snapshot.
+	if !s.stopped.Load() {
+		t.Fatalf("stopped flag not set after Stop()")
+	}
+	if !s.started.Load() {
+		t.Fatalf("started flag flipped by Stop()")
+	}
+}

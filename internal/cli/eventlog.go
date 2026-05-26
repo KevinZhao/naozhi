@@ -524,9 +524,12 @@ type PersistSink func(entries []EventEntry, replayPhase bool)
 //
 // This method is the only public way to flip sinkReady to true.
 // Calling it twice replaces the sink (last-writer-wins); calling
-// it with nil "clears" the sink but does NOT flip sinkReady back
-// to false — operators who want a clean replay phase should create
-// a fresh EventLog rather than try to uninstall.
+// it with nil "clears" the sink AND flips sinkReady back to false
+// so that any subsequent SetPersistSink(real) re-enters the
+// pre-attach phase cleanly. R20260526-GO-010: without this reset,
+// a "pause persist → re-install sink → InjectHistory" sequence
+// would tag the replay batch replayPhase=false (live) and the
+// Persister would commit the duplicate history to disk.
 //
 // R224-GO-5 (closes TODO): the original review flagged a "race
 // window between sink Store and sinkReady Store where one entry
@@ -556,6 +559,14 @@ type PersistSink func(entries []EventEntry, replayPhase bool)
 // that runs once per session lifetime. Keep the asymmetry.
 func (l *EventLog) SetPersistSink(fn PersistSink) {
 	if fn == nil {
+		// Order: clear sinkReady FIRST so any concurrent Append racing
+		// the uninstall observes the pre-attach phase before the sink
+		// pointer goes nil. Storing the pointer first would open a
+		// window where invokePersistSink loads a non-nil pointer but
+		// reads sinkReady=true, then by the time it dispatches the
+		// pointer is nil — same shape as the inverted-order race
+		// documented in the install path. R20260526-GO-010.
+		l.sinkReady.Store(false)
 		l.persistSinkPtr.Store(nil)
 		// Clear any previously paired single-entry sink — leaving it
 		// installed would cause Append to fire the single-entry
@@ -603,7 +614,10 @@ func (l *EventLog) SetPersistSinkPair(batch PersistSink, single PersistSinkOne) 
 	if batch == nil {
 		// Treat a nil batch as "uninstall everything" so callers do not
 		// have to remember a separate clear sequence; mirrors
-		// SetPersistSink(nil) semantics.
+		// SetPersistSink(nil) semantics — including the sinkReady
+		// reset that lets a subsequent re-install enter the pre-attach
+		// phase cleanly. R20260526-GO-010.
+		l.sinkReady.Store(false)
 		l.persistSinkOnePtr.Store(nil)
 		l.persistSinkPtr.Store(nil)
 		return
