@@ -434,6 +434,59 @@ type JobUpdate struct {
 	Backend *string
 }
 
+// applyTo writes every non-nil JobUpdate field onto j. R238-ARCH-14
+// (#778): the inline `if upd.X != nil { j.X = *upd.X }` ladder used to
+// live inside UpdateJob's locked critical section, growing one branch
+// per new patchable field. Pulling the dispatch into a method keeps
+// UpdateJob's critical section short (one method call instead of a
+// 25-line ladder) and gives every patchable field a single edit point —
+// new fields land here without touching UpdateJob's body.
+//
+// Schedule is intentionally NOT applied here. Schedule mutations require
+// re-registering the robfig/cron entry under s.mu (with rollback on
+// failure) and the helper has no access to *Scheduler. Keeping Schedule
+// on the UpdateJob body localises the cron-side coupling and matches
+// the issue's "patch model mixes nil-vs-empty" concern only for the
+// pure-data fields.
+//
+// LastSessionID side effect: WorkDir change clears LastSessionID
+// because claude JSONL is keyed by cwd. The same caveats from the
+// pre-refactor inline comment apply (relies on AddJob/UpdateJob WorkDir
+// pre-normalisation; a non-normalised caller risks a spurious clear,
+// not data loss).
+//
+// Caller must hold s.mu (j is the *Job pulled from s.jobs).
+func (upd JobUpdate) applyTo(j *Job) {
+	if upd.Prompt != nil {
+		j.Prompt = *upd.Prompt
+	}
+	if upd.WorkDir != nil {
+		if *upd.WorkDir != j.WorkDir {
+			j.LastSessionID = ""
+		}
+		j.WorkDir = *upd.WorkDir
+	}
+	if upd.Notify != nil {
+		v := *upd.Notify
+		j.Notify = &v
+	}
+	if upd.NotifyPlatform != nil {
+		j.NotifyPlatform = *upd.NotifyPlatform
+	}
+	if upd.NotifyChatID != nil {
+		j.NotifyChatID = *upd.NotifyChatID
+	}
+	if upd.FreshContext != nil {
+		j.FreshContext = *upd.FreshContext
+	}
+	if upd.Title != nil {
+		j.Title = *upd.Title
+	}
+	if upd.Backend != nil {
+		j.Backend = *upd.Backend
+	}
+}
+
 // UpdateJob applies a partial edit to an existing cron job. Schedule changes
 // are validated and re-registered atomically (the old robfig entry is
 // removed before the new one is installed) so a failed reschedule leaves
@@ -491,43 +544,12 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 			return Job{}, nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 		}
 
-		if upd.Prompt != nil {
-			j.Prompt = *upd.Prompt
-		}
-		if upd.WorkDir != nil {
-			// WorkDir 一换 LastSessionID 就失效：claude JSONL 按 cwd 归档，
-			// 用老 workspace 的 session_id 去新 cwd 下查 history 只会 Stat 落空。
-			// 清零后下次执行写入的新 SessionID 会自然属于新 workspace。
-			//
-			// 对比靠原生字符串相等，依赖 dashboard / AddJob 路径已对 WorkDir 做
-			// 归一化（filepath.Clean / validateWorkspace）。如果将来有新 caller
-			// 绕过归一化直接塞相对路径，会导致清零误判：合法但路径写法不同的
-			// 相同 workspace 会被判定为变更而清零，后果是用户需要重跑一次才
-			// 能恢复 chain，不致数据损坏。
-			if *upd.WorkDir != j.WorkDir {
-				j.LastSessionID = ""
-			}
-			j.WorkDir = *upd.WorkDir
-		}
-		if upd.Notify != nil {
-			v := *upd.Notify
-			j.Notify = &v
-		}
-		if upd.NotifyPlatform != nil {
-			j.NotifyPlatform = *upd.NotifyPlatform
-		}
-		if upd.NotifyChatID != nil {
-			j.NotifyChatID = *upd.NotifyChatID
-		}
-		if upd.FreshContext != nil {
-			j.FreshContext = *upd.FreshContext
-		}
-		if upd.Title != nil {
-			j.Title = *upd.Title
-		}
-		if upd.Backend != nil {
-			j.Backend = *upd.Backend
-		}
+		// R238-ARCH-14 (#778): non-Schedule fields applied via JobUpdate.applyTo
+		// so the locked critical section stays short and adding a new patchable
+		// field is a single edit point on the helper. Schedule stays inline
+		// because it requires re-registering the robfig/cron entry under s.mu
+		// with rollback semantics (helper has no *Scheduler access).
+		upd.applyTo(j)
 
 		if upd.Schedule != nil && *upd.Schedule != j.Schedule {
 			// R236-QA-08: snapshot the old schedule so we can roll back the
