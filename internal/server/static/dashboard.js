@@ -8346,9 +8346,15 @@ function inlineMd(s) {
     if (safe === '#') return text;
     return '<a href="' + escAttr(safe) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + text + '</a>';
   });
-  // Auto-link bare URLs not already inside an <a> tag
+  // Auto-link bare URLs not already inside an <a> tag.
+  // R243-SEC-11 (#797): strip a wider set of trailing punctuation —
+  // including `>`, `]`, `"` and `'` — before forming the anchor. escAttr
+  // already neutralises these inside the href attribute, but stripping
+  // here also keeps them out of the link's visible text where they would
+  // otherwise dangle past sentences like `see <https://x.y/z>` or
+  // `[link](https://x.y/z)`. Defence-in-depth, not the only barrier.
   s = s.replace(/(^|[^"'>])(https?:\/\/[^\s<)}\]]+)/g, function(_, prefix, url) {
-    var clean = url.replace(/[.,;:!?)]+$/, '');
+    var clean = url.replace(/[.,;:!?)>\]"']+$/, '');
     var trail = url.slice(clean.length);
     return prefix + '<a href="' + escAttr(clean) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + clean + '</a>' + trail;
   });
