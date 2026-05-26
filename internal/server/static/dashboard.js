@@ -12328,12 +12328,54 @@ async function cronTimelineFetchTranscript(jobId, runId) {
 
 // renderCronTimelinePanel — 重绘当前 timeline 面板（不重新 mount shell）。
 // 用于 expand/collapse、loadMore、ws 刷新等场景。
+//
+// R243-PERF-12 (#817): 对话签名缓存——把 (runs × state × expanded × loading
+// × done × details-keys) 拼成 fingerprint，命中就跳过整段 200 行
+// innerHTML 重建。绝大多数 cron_run_ended 事件并不会改变 head 行的具体
+// 字段（只是把已有 running 行换成 succeeded 之类），fingerprint 一致时
+// 没必要 re-paint，省下整个 cronTimelineHtml 的字符串拼接 + 浏览器
+// re-parse + style/layout 工作。fingerprint 不一致时仍然走全量重建（DOM
+// keyed-diff 正确实现风险高于收益——cron timeline 不是热点路径）。
+function _cronTimelineFingerprint(jobId, st) {
+  if (!st) return '';
+  const parts = [jobId, st.loading ? '1' : '0', st.done ? '1' : '0'];
+  const exp = (cronExpandedRunId && cronExpandedRunId.jobId === jobId) ? (cronExpandedRunId.runId || '') : '';
+  parts.push(exp);
+  const runs = st.runs || [];
+  parts.push(String(runs.length));
+  for (const r of runs) {
+    if (!r) { parts.push('-'); continue; }
+    parts.push(
+      (r.run_id || '') + '|' +
+      (r.state || '') + '|' +
+      (r.error_class || '') + '|' +
+      (r.duration_ms | 0) + '|' +
+      (r.started_at | 0) + '|' +
+      (r.ended_at | 0)
+    );
+  }
+  // expand 行的 detail 缓存到达后需要 re-paint（骨架→真内容）。
+  if (exp && st.details) {
+    const det = st.details[exp];
+    parts.push('det:' + (det ? (det.__error ? 'e' : 'y') : 'n'));
+  }
+  return parts.join('');
+}
+
 function renderCronTimelinePanel(jobId) {
   const host = document.getElementById('cron-timeline-panel');
   if (!host) return;
   const job = (cronJobs || []).find(x => x && x.id === jobId);
   const st = getCronTimelineState(jobId);
+  const fp = _cronTimelineFingerprint(jobId, st);
+  if (fp && host.dataset.cronFp === fp && host.dataset.cronFpJob === jobId) {
+    // 内容签名未变：跳过整段 innerHTML 重建。expand-row 切换时
+    // fingerprint 包含 cronExpandedRunId，会自然失效。
+    return;
+  }
   host.innerHTML = cronTimelineHtml(jobId, job, st);
+  host.dataset.cronFp = fp;
+  host.dataset.cronFpJob = jobId;
   // result 走 renderMd 后会埋入 mermaid/katex 异步占位（mermaid-N / ktx-N），
   // 必须在 attach 到 DOM 后调用一次才能完成异步渲染。与 events bubble 路径
   // 的 stickEventsBottom / runPendingAsync 调用语义保持一致。
