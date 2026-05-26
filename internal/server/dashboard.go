@@ -505,6 +505,13 @@ func (s *Server) registerDashboard() {
 
 	// Unauthenticated routes (login, static assets, WebSocket with own auth)
 	s.mux.HandleFunc("POST /api/auth/login", s.auth.handleLogin)
+	// R243-SEC-15 (#800): explicit no-JS form-action target. The login page
+	// posts JSON via fetch() when JavaScript is enabled; this handler exists
+	// so a JS-disabled browser's submit lands in a controlled drain-and-
+	// discard path instead of a raw "POST /dashboard" that would (a) get
+	// 405 from the GET-only mux entry above and (b) ship the form-encoded
+	// token through any logging middleware that reads request bodies.
+	s.mux.HandleFunc("POST /api/auth/noscript", s.auth.handleLoginNoScript)
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
 	s.mux.HandleFunc("GET /manifest.json", s.handleManifest)
 	s.mux.HandleFunc("GET /sw.js", s.handleSW)
