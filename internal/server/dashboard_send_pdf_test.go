@@ -102,6 +102,43 @@ func TestParseAttachmentFile_PDF_MagicMismatch(t *testing.T) {
 	}
 }
 
+// TestParseAttachmentFile_PDF_DeclaredButNoMagic_RejectedBeforeFullBuffer
+// pins R247-SEC-11 (#503): a caller declaring Content-Type:application/pdf
+// without the actual %PDF- magic must be rejected after a 512-byte head
+// sniff — NOT after buffering up to the full 32 MB PDF cap. The test is
+// a behavioural lock (rejection happens) rather than a memory-watermark
+// test (Go's runtime alloc accounting isn't reliable in -race), but the
+// rejection path is now reached BEFORE io.ReadAll(LimitReader(... maxPDFBytes))
+// runs against a body that the caller has already proven non-PDF.
+func TestParseAttachmentFile_PDF_DeclaredButNoMagic_RejectedBeforeFullBuffer(t *testing.T) {
+	// Build a body that's larger than maxImageBytes but well under
+	// maxPDFBytes, with no %PDF- header. Pre-fix, the LimitReader cap
+	// would be maxPDFBytes+1 and io.ReadAll would buffer the whole body.
+	// Post-fix, the head sniff rejects before any further read.
+	body := bytes.Repeat([]byte{0x00}, maxImageBytes+(1<<20))
+	fh := makeMultipartFile(t, "fake.pdf", "application/pdf", body)
+
+	_, err := parseAttachmentFile(fh, true)
+	if err == nil {
+		t.Fatal("expected rejection of declared-PDF without magic header")
+	}
+	if !strings.Contains(err.Error(), "PDF") {
+		t.Errorf("expected error to mention PDF, got: %v", err)
+	}
+}
+
+// TestParseAttachmentFile_PDF_PartialHead_StillRejectedIfNotMagic guards a
+// subtle edge: a body shorter than the 512-byte sniff window, declared
+// PDF, but lacking the magic, must still be rejected on the early path.
+// io.ReadFull's ErrUnexpectedEOF case wraps to a head shorter than 512.
+func TestParseAttachmentFile_PDF_PartialHead_StillRejectedIfNotMagic(t *testing.T) {
+	// 4 bytes — not enough to carry "%PDF-" — declared as PDF.
+	fh := makeMultipartFile(t, "tiny.pdf", "application/pdf", []byte("abcd"))
+	if _, err := parseAttachmentFile(fh, true); err == nil {
+		t.Fatal("expected rejection of declared-PDF with sub-magic head")
+	}
+}
+
 // TestParseAttachmentFile_JFIFWithPDFBody guards against R232-SEC-7
 // (#1002): a JFIF magic header followed by a PDF body would historically
 // pass http.DetectContentType as image/jpeg and slip through as

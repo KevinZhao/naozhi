@@ -15,6 +15,7 @@ import (
 
 	robfigcron "github.com/robfig/cron/v3"
 
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -1092,6 +1093,11 @@ func (s *Scheduler) Stop() {
 	select {
 	case <-gcDone:
 	case <-gcTimer.C:
+		// R250-GO-20 (#1083): pair the per-phase Warn with a counter so
+		// dashboards can alert on shutdown-budget breaches without
+		// grepping journalctl. Useful for catching systemd TimeoutStopSec
+		// proximity in production.
+		metrics.CronStopBudgetExceededGCTotal.Add(1)
 		slog.Warn("cron: gc goroutine wait timeout", "budget", gcWaitBudget)
 	}
 
@@ -1121,6 +1127,8 @@ func (s *Scheduler) Stop() {
 	case <-cronDoneCtx.Done():
 	case <-deadline.C:
 		deadlineHit = true
+		// R250-GO-20 (#1083): see GC counter rationale above.
+		metrics.CronStopBudgetExceededDrainTotal.Add(1)
 		slog.Warn("cron scheduler: stop deadline exceeded before cron.Stop drained, proceeding",
 			"budget", stopBudget)
 	}
@@ -1180,6 +1188,8 @@ func (s *Scheduler) Stop() {
 		select {
 		case <-triggerDone:
 		case <-triggerTimer.C:
+			// R250-GO-20 (#1083): see GC counter rationale above.
+			metrics.CronStopBudgetExceededTriggerTotal.Add(1)
 			slog.Warn("cron scheduler: stop deadline exceeded during triggerWG wait, proceeding",
 				"budget", stopBudget, "remaining_ms", remaining.Milliseconds())
 		}

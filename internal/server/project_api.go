@@ -137,6 +137,28 @@ func (h *ProjectHandlers) restartCtx() context.Context {
 	return context.Background()
 }
 
+// projectsListEntry is the per-project element in GET /api/projects.
+// R247-PERF-6: replaces the prior `map[string]any{8 keys}` literal that
+// allocated one inner map + 8 interface{} boxing slots per project per
+// dashboard poll. The JSON shape pinned by TestDashboardJSON_Projects_
+// ShapeContract requires `git_remote_url` and `github` to always be
+// present (the dashboard JS reads them unconditionally), so neither
+// carries `omitempty` even though the empty/false zero values were
+// previously emitted via the map literal too. `Node` keeps `omitempty`
+// because the local-only path never sets it; the multi-node merge path
+// stamps "local" before serialise.
+type projectsListEntry struct {
+	Name         string                `json:"name"`
+	Path         string                `json:"path"`
+	Node         string                `json:"node,omitempty"`
+	PlannerState string                `json:"planner_state"`
+	PlannerModel string                `json:"planner_model"`
+	Config       project.ProjectConfig `json:"config"`
+	Favorite     bool                  `json:"favorite"`
+	GitRemoteURL string                `json:"git_remote_url"`
+	GitHub       bool                  `json:"github"`
+}
+
 // GET /api/projects — list all projects (local + remote).
 func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	if h.projectMgr == nil {
@@ -145,7 +167,7 @@ func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	projects := h.projectMgr.All()
-	result := make([]map[string]any, 0, len(projects))
+	result := make([]projectsListEntry, 0, len(projects))
 	for _, p := range projects {
 		plannerKey := p.PlannerSessionKey()
 		plannerState := "none"
@@ -154,24 +176,24 @@ func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			plannerState = snap.State
 		}
 
-		result = append(result, map[string]any{
-			"name":           p.Name,
-			"path":           p.Path,
-			"planner_state":  plannerState,
-			"planner_model":  h.projectMgr.EffectivePlannerModel(p),
-			"config":         p.Config,
-			"favorite":       p.Config.Favorite,
-			"git_remote_url": redactGitRemoteURL(p.GitRemoteURL),
-			"github":         p.IsGitHub,
+		result = append(result, projectsListEntry{
+			Name:         p.Name,
+			Path:         p.Path,
+			PlannerState: plannerState,
+			PlannerModel: h.projectMgr.EffectivePlannerModel(p),
+			Config:       p.Config,
+			Favorite:     p.Config.Favorite,
+			GitRemoteURL: redactGitRemoteURL(p.GitRemoteURL),
+			GitHub:       p.IsGitHub,
 		})
 	}
 
 	// Merge remote projects
 	if h.nodeAccess.HasNodes() {
 		allProjects := make([]any, 0, len(result))
-		for _, r := range result {
-			r["node"] = "local"
-			allProjects = append(allProjects, r)
+		for i := range result {
+			result[i].Node = "local"
+			allProjects = append(allProjects, result[i])
 		}
 		cachedProjects := h.nodeCache.Projects()
 		for _, items := range cachedProjects {
@@ -410,8 +432,17 @@ func (h *ProjectHandlers) handlePlannerRestart(w http.ResponseWriter, r *http.Re
 			Workspace: p.Path,
 			Exempt:    true,
 		}
-		if prompt := h.projectMgr.EffectivePlannerPrompt(p); prompt != "" {
-			opts.ExtraArgs = []string{"--append-system-prompt", prompt}
+		// R215-SEC-P1-2 (#535): mirror the resolver path's spawn-boundary
+		// re-validation. EffectivePlannerPrompt re-reads from cached
+		// project.yaml / CLAUDE.md, neither of which guarantees the bytes
+		// still satisfy ValidateConfig — Claude's Write tool can mutate
+		// CLAUDE.md and the next planner restart would inherit the
+		// tampered prompt without this sanitiser. Drop the prompt entirely
+		// when sanitisation fails so the spawn falls through to "no
+		// planner system prompt" rather than feeding control bytes /
+		// oversize argv into the CLI subprocess.
+		if pp := session.SanitisePlannerPromptForSpawn(h.projectMgr.EffectivePlannerPrompt(p), p.Name); pp != "" {
+			opts.ExtraArgs = []string{"--append-system-prompt", pp}
 		}
 	}
 

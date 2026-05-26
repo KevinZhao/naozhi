@@ -67,6 +67,17 @@ const maxSupportedSchemaVersion = 1
 // the token at rest would not raise the bar. Per-user threat model is "OS
 // accounts are trust boundaries" — encryption would only obfuscate, not
 // secure. Tracked as accepted risk.
+//
+// R247-ARCH-5 (#621): the write path delegates to osutil.WriteFileAtomic
+// rather than reimplementing the temp-write → fsync → rename → fsync-dir
+// sequence inline. The previous local copy and the canonical helper had
+// drifted on the temp-file naming pattern (".shim-state-*.tmp" here vs
+// ".<base>.*.tmp" in osutil); the helper's pattern groups temp files by
+// destination basename, which is a strict improvement for crash-recovery
+// sweeps. Mkdir + Chmod of the parent state directory remain the caller's
+// responsibility (osutil.WriteFileAtomic does not own the parent dir mode
+// because callers carry different perm policies — shim wants 0700, other
+// stores tolerate 0750).
 func WriteStateFile(path string, state State) error {
 	state.Version = stateVersion
 	data, err := json.MarshalIndent(state, "", "    ")
@@ -80,43 +91,8 @@ func WriteStateFile(path string, state State) error {
 	}
 	os.Chmod(dir, 0700) //nolint:errcheck
 
-	f, err := os.CreateTemp(dir, ".shim-state-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temp state: %w", err)
-	}
-	tmp := f.Name()
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("write temp state: %w", err)
-	}
-	// Fsync the payload before rename so a crash between data write and
-	// rename cannot surface as a zero-byte file that replaces the previous
-	// good state. This file is written infrequently (at connect/disconnect
-	// lifecycle events) so the fsync cost is negligible.
-	if err := f.Sync(); err != nil {
-		f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("sync temp state: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("close temp state: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename state: %w", err)
-	}
-	// Fsync the parent directory so the rename is durable on XFS and similar
-	// filesystems where a rename's directory entry is not automatically
-	// persisted. Without this, a power cut right after Rename could leave
-	// shim state invisible after reboot — reconnect would fail and live
-	// sessions would appear dead until a manual cleanup.
-	if err := osutil.SyncDir(dir); err != nil {
-		// Soft failure: data is already on disk; the only loss is
-		// durability of the directory entry on crash. Logged so ops can
-		// correlate if a reboot-time shim loss appears.
-		slog.Debug("shim state: fsync dir failed", "dir", dir, "err", err)
+	if err := osutil.WriteFileAtomic(path, data, 0600); err != nil {
+		return fmt.Errorf("write state file %s: %w", path, err)
 	}
 	return nil
 }

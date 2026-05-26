@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -154,44 +155,63 @@ func ownerKeyFromCookie(cookieValue string) string {
 // uploadOwner derives a stable owner key from auth cookie, Bearer token, or
 // (in no-token mode) a per-browser nz_anon cookie. RNEW-SEC-005: previously
 // no-token mode fell to clientIP(), so co-NAT User B could claim User A's
-// upload via TakeAll. Minting nz_anon gives each browser a distinct owner;
-// IP remains a last-resort fallback only when crypto/rand fails.
-func uploadOwner(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, trustedProxy bool) string {
+// upload via TakeAll. Minting nz_anon gives each browser a distinct owner.
+//
+// R247-SEC-8 (#501): the `ok=false` return signals "could not derive a
+// per-browser owner key" — typically because every credential path was
+// absent AND mintAnonCookie failed (crypto/rand exhausted on this kernel).
+// Callers must surface 503 (retry) so the client retries instead of being
+// silently bucketed alongside every other co-NAT browser via the legacy
+// IP fallback. The IP fallback was hashed in R246-SEC-8 to keep the key
+// shape uniform, but the underlying tenancy collision (User A's upload
+// claimable by User B at the same NAT) remained — returning ok=false
+// closes that hole at the API surface.
+func uploadOwner(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, trustedProxy bool) (string, bool) {
 	if c, err := r.Cookie(authCookieName); err == nil && c.Value != "" {
-		return ownerKeyFromCookie(c.Value)
+		return ownerKeyFromCookie(c.Value), true
 	}
 	if bearer := r.Header.Get("Authorization"); strings.HasPrefix(bearer, "Bearer ") {
 		if token := strings.TrimPrefix(bearer, "Bearer "); token != "" {
 			// R247-SEC-16: 128-bit (matches ownerKeyFromCookie); see godoc above.
 			sum := sha256.Sum256([]byte(token))
-			return hex.EncodeToString(sum[:16])
+			return hex.EncodeToString(sum[:16]), true
 		}
 	}
 	if c, err := r.Cookie(anonCookieName); err == nil && c.Value != "" {
-		return ownerKeyFromCookie(c.Value)
+		return ownerKeyFromCookie(c.Value), true
 	}
 	if w != nil {
 		val, err := mintAnonCookie(w, r, auth)
 		if err == nil {
-			return ownerKeyFromCookie(val)
+			return ownerKeyFromCookie(val), true
 		}
-		slog.Warn("uploadOwner: mintAnonCookie failed, falling back to client IP", "err", err)
+		slog.Warn("uploadOwner: mintAnonCookie failed; refusing to fall back to IP-derived owner key", "err", err)
 	}
-	// R246-SEC-8: route the IP fallback through ownerKeyFromCookie so the
-	// resulting key is the same SHA-256 hex shape the auth-cookie / Bearer /
-	// nz_anon paths produce. Previously a mintAnonCookie failure (crypto/rand
-	// exhausted) emitted a raw IPv4/IPv6 string that polluted ownerCounts
-	// alongside SHA-256 hex keys, breaking per-owner accounting and TakeAll
-	// scoping for the unlucky few requests that hit the fallback. Hashing also
-	// keeps raw IP literals out of the in-memory key set.
-	ip := clientIP(r, trustedProxy)
-	if ip == "" {
-		// Empty owner keys collide across all unauthenticated callers; mirror
-		// ip_limiter's _unknown_ sentinel so we still produce a stable
-		// (hashed) bucket rather than the empty string.
-		ip = "_unknown_"
+	// R247-SEC-8 (#501): on rand failure (or no ResponseWriter to mint into)
+	// we explicitly do NOT fall back to a clientIP-derived owner. Two
+	// co-NAT browsers would otherwise share the same SHA-256-hashed bucket,
+	// re-opening the TakeAll cross-tenant theft window that nz_anon was
+	// designed to close. Empty owner + ok=false signals to callers that
+	// they should respond 503 (retry) instead of pretending we minted a
+	// real key.
+	return "", false
+}
+
+// uploadOwnerOrFail wraps uploadOwner with the standard 503 response so
+// individual handlers don't repeat the writeJSONStatus boilerplate. Returns
+// owner + ok=true when a real per-browser key was minted/recovered; on
+// ok=false the caller MUST stop processing — the response has already been
+// written.
+func uploadOwnerOrFail(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, trustedProxy bool) (string, bool) {
+	owner, ok := uploadOwner(w, r, auth, trustedProxy)
+	if !ok {
+		// Service Unavailable + Retry-After hints the client/dashboard to
+		// retry on a fresh socket where /dev/urandom may have replenished.
+		// 30s mirrors the existing rate-limiter Retry-After convention.
+		w.Header().Set("Retry-After", "30")
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "could not derive upload owner; please retry"})
 	}
-	return ownerKeyFromCookie(ip)
+	return owner, ok
 }
 
 // parseAttachmentFile reads and validates a single multipart file. Images
@@ -242,18 +262,55 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 		return cli.Attachment{}, errors.New("failed to read uploaded file")
 	}
 	defer f.Close()
+
+	// R247-SEC-11 (#503): magic-byte sniff a 512-byte head BEFORE buffering
+	// the full body. The previous flow trusted `declared` to pick the size
+	// gate, so a caller asserting Content-Type: application/pdf could force
+	// a 32 MB allocation per request even when the body wasn't a PDF — the
+	// magic-byte recheck only ran AFTER io.ReadAll(LimitReader(... maxPDFBytes)).
+	// Sniffing the head first lets us collapse the buffer cap to maxImageBytes
+	// when the declared-PDF body doesn't actually start with %PDF-.
+	//
+	// We peek 512 bytes (http.DetectContentType's documented maximum) into
+	// a fixed-size buffer, sniff against the head, then resume reading the
+	// rest of the body via an io.MultiReader so the head is not lost.
+	const sniffLen = 512
+	head := make([]byte, sniffLen)
+	n, err := io.ReadFull(f, head)
+	switch {
+	case err == nil, errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		head = head[:n]
+	default:
+		slog.Debug("upload: head read failed", "err", err)
+		return cli.Attachment{}, errors.New("failed to read uploaded file")
+	}
+
 	// fh.Size comes from the Content-Disposition header (client-controlled).
 	// The size gate above rejects oversize uploads based on that header, but
 	// a lying client could understate size to bypass the gate. Wrap the
 	// reader in a LimitReader as a defence-in-depth byte cap, with a +1
 	// margin so we can detect overflow.
+	//
+	// R247-SEC-11: when the caller declared PDF but the head doesn't carry
+	// the %PDF- magic (or is too short to carry it), tighten the buffer cap
+	// to maxImageBytes. The downstream PDF branch will still reject the body
+	// for the same reason, but the runtime guarantee — peak in-memory bytes
+	// per request — now scales with the SNIFFED type, not the declared one.
+	headLooksPDF := len(head) >= 5 && bytes.Equal(head[:5], []byte("%PDF-"))
 	var sizeLimit int64
-	if isPDF {
+	switch {
+	case isPDF && headLooksPDF:
 		sizeLimit = maxPDFBytes
-	} else {
+	case isPDF && !headLooksPDF:
+		// Fail fast: a declared-PDF without the magic header cannot be
+		// a legitimate PDF, so allocating up to 32 MB to confirm what we
+		// already know is wasteful.
+		return cli.Attachment{}, fmt.Errorf("file does not look like a PDF")
+	default:
 		sizeLimit = maxImageBytes
 	}
-	data, err := io.ReadAll(io.LimitReader(f, sizeLimit+1))
+	body := io.MultiReader(bytes.NewReader(head), f)
+	data, err := io.ReadAll(io.LimitReader(body, sizeLimit+1))
 	if err != nil {
 		slog.Debug("upload: read multipart file failed", "err", err)
 		return cli.Attachment{}, errors.New("failed to read uploaded file")
@@ -647,7 +704,10 @@ func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	owner := uploadOwner(w, r, h.auth, h.trustedProxy)
+	owner, ok := uploadOwnerOrFail(w, r, h.auth, h.trustedProxy)
+	if !ok {
+		return
+	}
 	id, err := h.uploadStore.Put(owner, att)
 	if err != nil {
 		// Distinguish per-owner quota from global exhaustion so the client
@@ -770,7 +830,10 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	// nothing is consumed — the user can retry the whole batch after
 	// re-uploading instead of losing the earlier valid images silently.
 	// R37-CONCUR4.
-	owner := uploadOwner(w, r, h.auth, h.trustedProxy)
+	owner, ok := uploadOwnerOrFail(w, r, h.auth, h.trustedProxy)
+	if !ok {
+		return
+	}
 	if len(fileIDs) > 0 {
 		taken, err := h.uploadStore.TakeAll(fileIDs, owner)
 		if err != nil {
@@ -1167,8 +1230,23 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(resolved)
+	// R249-SEC-3 (#917): close the Lstat→Open TOCTOU symlink-swap window.
+	// Between the Lstat above and an unconstrained os.Open, an attacker
+	// with write access to attachRootAbs could replace `resolved` with a
+	// symlink pointing outside the workspace. openWorkspaceFile uses
+	// O_NOFOLLOW on unix so a final-component symlink-swap fails atomically
+	// at the kernel boundary (ELOOP); the windows shim falls back to
+	// plain Open with the same residual posture as the rest of the codebase.
+	// Mirrors the R219-SEC-2 close already shipped for handleFileGet.
+	f, err := openWorkspaceFile(resolved)
 	if err != nil {
+		// Map symlink-trap errors and any other open failure to the same
+		// 404 the rest of the handler returns — "missing or escape attempt
+		// look identical" matches the dashboard contract.
+		if errors.Is(err, syscall.ELOOP) {
+			writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+			return
+		}
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "open failed"})
 		return
 	}

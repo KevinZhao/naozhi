@@ -526,6 +526,29 @@ type Router struct {
 	// no exposure.
 	excluders atomic.Pointer[[]SessionIDExcluder]
 
+	// pendingExcluders is the R242-ARCH-16 (#760) startup-window gate.
+	// When set (atomic.Bool == true), auto-chain readers SKIP the
+	// chain-attach decision entirely — both the spawn-path
+	// (maybeAttachAutoChainOnSpawn) and the startup backfill
+	// (runAutoChainBackfillOnce). cmd-side wiring is expected to
+	// SetPendingExcluders(true) at the top of router setup, register
+	// every SessionIDExcluder owner (cron Scheduler, sysession Manager,
+	// any future namespace), then SetPendingExcluders(false) to admit
+	// chain decisions. Default zero-value is `false` so callers that
+	// have not opted into the gate (older cmd wiring, tests) keep the
+	// pre-#760 behaviour: auto-chain reads run the moment the policy
+	// is configured.
+	//
+	// Skip-rather-than-block was chosen over a sync.Cond wait so a
+	// misconfigured cmd that forgets the SetPendingExcluders(false)
+	// call surfaces as "auto-chain didn't run" (visible in metrics
+	// and logs) instead of "every spawn deadlocks waiting for an
+	// event that never arrives". The cost of skipping is at most one
+	// startup-window spawn missing its auto-chain attach; cron /
+	// sysession do not register session IDs that early, so the
+	// observable diff is zero in production.
+	pendingExcluders atomic.Bool
+
 	// autoChainListJSONL is the listJSONL function injected into
 	// pickWorkspaceChain. Production wires discovery.ListWorkspaceJSONL;
 	// tests inject a fixture function that returns synthetic
@@ -1547,6 +1570,29 @@ var listRefsPool = sync.Pool{
 // correct boundary for pooling. ~50 sessions × ~280 B SessionSnapshot
 // = ~14 KB / call; 1 Hz × N tabs is acceptable.
 func (r *Router) ListSessions() []SessionSnapshot {
+	snaps, _ := r.ListSessionsWithVersion()
+	return snaps
+}
+
+// ListSessionsWithVersion returns the session snapshot slice paired
+// with the storeGen value sampled in the same r.mu.RLock epoch. The
+// dashboard's /api/sessions handler uses this so the response.version
+// field is exactly the version that produced the data — without it the
+// pre-existing handleList code did `Version()` then `ListSessions()`
+// in two separate critical sections, opening a small race where a
+// mutation landing between the two reads could publish data tagged
+// with a stale version (or vice versa) and make the dashboard either
+// skip a real refresh or repeat a render. R246-PERF-15 (#726).
+//
+// storeGen is atomic.Uint64 so the read inside r.mu.RLock is wait-
+// free; correctness depends only on the writer ordering: writers do
+// `r.mu.Lock(); ... ; storeGen.Add(1); r.mu.Unlock()` (see
+// router_cleanup.go and router_core mutators), so a reader holding
+// RLock observes a (sessions, gen) pair that any concurrent writer
+// produced atomically. Pre-existing ListSessions() now delegates here
+// to share the implementation; callers that don't need the version
+// keep the pre-R246-PERF-15 signature and pay no extra cost.
+func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	refsPtr := listRefsPool.Get().(*[]*ManagedSession)
 	refs := (*refsPtr)[:0]
 	r.mu.RLock()
@@ -1559,6 +1605,7 @@ func (r *Router) ListSessions() []SessionSnapshot {
 	for _, s := range r.sessions {
 		refs = append(refs, s)
 	}
+	version := r.storeGen.Load()
 	r.mu.RUnlock()
 
 	snapshots := make([]SessionSnapshot, len(refs))
@@ -1572,7 +1619,7 @@ func (r *Router) ListSessions() []SessionSnapshot {
 	}
 	*refsPtr = refs[:0]
 	listRefsPool.Put(refsPtr)
-	return snapshots
+	return snapshots, version
 }
 
 // GetSession returns the session for the given key, or nil.

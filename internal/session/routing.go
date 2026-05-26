@@ -38,7 +38,7 @@ import (
 // load-time ValidateConfig). R215-SEC-P1-2.
 const maxPlannerPromptBytesAtSpawn = 8 * 1024
 
-// sanitisePlannerPromptForSpawn is defense-in-depth: re-validate the
+// SanitisePlannerPromptForSpawn is defense-in-depth: re-validate the
 // PlannerPrompt at the spawn-routing site before it crosses the trust
 // boundary into CLI argv (`--append-system-prompt <prompt>`). Returns ""
 // for any rejected input so the spawn falls through to "no planner
@@ -54,7 +54,19 @@ const maxPlannerPromptBytesAtSpawn = 8 * 1024
 // inject control bytes or oversize argv.
 //
 // Called from both ResolveForChat (chat-view planner) and
-// ResolveForPlannerKey (administrative planner restart). R215-SEC-P1-2.
+// ResolveForPlannerKey (administrative planner restart) in this
+// package. Exported (R215-SEC-P1-2 #535) so the server-package
+// handlePlannerRestart legacy fallback (resolver==nil test path) can
+// reuse the same sanitiser without rebuilding the policy in a second
+// place — the alternative was for that fallback to feed
+// EffectivePlannerPrompt straight into AgentOpts.ExtraArgs, which
+// bypasses the spawn-boundary check the resolver path enforces.
+func SanitisePlannerPromptForSpawn(prompt, projectName string) string {
+	return sanitisePlannerPromptForSpawn(prompt, projectName)
+}
+
+// sanitisePlannerPromptForSpawn is the unexported in-package implementation;
+// SanitisePlannerPromptForSpawn re-exports it for cross-package callers.
 func sanitisePlannerPromptForSpawn(prompt, projectName string) string {
 	if prompt == "" {
 		return ""

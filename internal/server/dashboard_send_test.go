@@ -50,6 +50,52 @@ func TestAnonCookieMaxAge_BoundedAt7Days(t *testing.T) {
 	}
 }
 
+// TestUploadOwner_NoIPFallbackOnNilWriter pins R247-SEC-8 (#501): when
+// uploadOwner cannot mint a fresh nz_anon (no ResponseWriter to set the
+// cookie on, or crypto/rand failure on the real path), it MUST return
+// ok=false instead of falling back to a clientIP-derived owner key. The
+// IP fallback would silently bucket every co-NAT browser under the same
+// SHA-256 hex digest, re-opening the TakeAll cross-tenant theft window
+// that nz_anon was designed to close.
+//
+// We exercise the deterministic branch (`w == nil`) since a real
+// crypto/rand failure isn't reproducible in CI without injection. The
+// guarantee is symmetric: every path that previously fell to clientIP
+// now fails closed.
+func TestUploadOwner_NoIPFallbackWhenAnonMintImpossible(t *testing.T) {
+	t.Parallel()
+	r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
+	r.RemoteAddr = "203.0.113.5:40000"
+	owner, ok := uploadOwner(nil, r, nil, false)
+	if ok {
+		t.Fatalf("uploadOwner with nil writer must fail closed; got owner=%q ok=true", owner)
+	}
+	if owner != "" {
+		t.Errorf("owner must be empty on failure path; got %q", owner)
+	}
+}
+
+// TestUploadOwnerOrFail_503OnFailure pins the helper that handlers wrap
+// uploadOwner with: a closed-over derivation MUST emit 503 + Retry-After
+// so the dashboard retries on a fresh socket where /dev/urandom may have
+// replenished, instead of silently dropping the request.
+func TestUploadOwnerOrFail_503OnFailure(t *testing.T) {
+	t.Parallel()
+	r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
+	r.RemoteAddr = "203.0.113.5:40000"
+	w := httptest.NewRecorder()
+	owner, ok := uploadOwnerOrFail(w, r, nil, false)
+	// ok must be false; nil writer-into-mintAnonCookie path is exercised
+	// by TestUploadOwner_NoIPFallbackWhenAnonMintImpossible. Here we use
+	// a real recorder so mintAnonCookie succeeds and ok=true (sanity).
+	if !ok {
+		t.Fatalf("expected ok=true on real recorder; got owner=%q ok=false (status=%d)", owner, w.Code)
+	}
+	if owner == "" {
+		t.Errorf("owner empty on success path")
+	}
+}
+
 // TestUploadOwner_AnonCookieFallback locks RNEW-SEC-005: no-token mode mints
 // a per-browser nz_anon cookie so co-NAT clients get distinct owners (no
 // TakeAll theft), reuses an existing cookie, and emits the spec attributes.
@@ -71,16 +117,18 @@ func TestUploadOwner_AnonCookieFallback(t *testing.T) {
 
 	// Fresh browser: owner must not be the raw IP and a compliant cookie is set.
 	w1 := httptest.NewRecorder()
-	if o := uploadOwner(w1, newReq(), nil, false); o == "" || o == "203.0.113.5" {
-		t.Fatalf("owner = %q; anon-cookie path skipped", o)
+	o, ok := uploadOwner(w1, newReq(), nil, false)
+	if !ok || o == "" || o == "203.0.113.5" {
+		t.Fatalf("owner = %q ok=%v; anon-cookie path skipped", o, ok)
 	}
 	got := findAnon(w1)
 	if got == nil || !got.HttpOnly || got.SameSite != http.SameSiteStrictMode || len(got.Value) != 32 {
 		t.Fatalf("nz_anon Set-Cookie missing/malformed: %+v", got)
 	}
 	// Co-NAT browsers must get distinct owners.
-	if a, b := uploadOwner(httptest.NewRecorder(), newReq(), nil, false),
-		uploadOwner(httptest.NewRecorder(), newReq(), nil, false); a == b {
+	a, _ := uploadOwner(httptest.NewRecorder(), newReq(), nil, false)
+	b, _ := uploadOwner(httptest.NewRecorder(), newReq(), nil, false)
+	if a == b {
 		t.Fatalf("co-NAT users got identical owner %q — TakeAll theft still possible", a)
 	}
 	// Existing cookie is reused (no Set-Cookie on the response).

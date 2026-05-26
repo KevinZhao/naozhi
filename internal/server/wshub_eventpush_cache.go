@@ -44,26 +44,41 @@ type marshalCacheEntry struct {
 }
 
 // historyMarshalCache is the per-session marshal coalescer.
+//
+// R250-PERF-28 (#1131): the entries map lives in a sync.Map so the
+// hot fan-out path (one notify wave wakes N pushLoops on the same
+// session) does not serialise every cache-hit subscriber behind a
+// single top-level mutex. The per-key *marshalCacheEntry is the
+// real synchronisation unit — its embedded e.mu still serialises
+// the marshal-once / fingerprint-update step inside getOrMarshal,
+// while sync.Map handles the map-insertion race for new keys
+// without forcing readers to wait. Pre-existing reset() / drop()
+// continue to share the same sync.Map.
 type historyMarshalCache struct {
-	mu      sync.Mutex
-	entries map[string]*marshalCacheEntry
+	entries sync.Map // map[string]*marshalCacheEntry
 }
 
 func newHistoryMarshalCache() *historyMarshalCache {
-	return &historyMarshalCache{entries: make(map[string]*marshalCacheEntry)}
+	return &historyMarshalCache{}
 }
 
 // slot returns (creating if needed) the per-key cache entry. Caller MUST
 // take entry.mu before reading or mutating its fingerprint / data fields.
+//
+// R250-PERF-28 (#1131): sync.Map's LoadOrStore lets repeated cache hits
+// for the same key skip the lock-on-read penalty the prior plain-map +
+// top-level mutex paid. The first caller for a missing key still
+// performs an alloc (the &marshalCacheEntry{} literal) even when the
+// store is unnecessary because some other caller raced ahead — that
+// alloc escapes only on the cold path. sync.Map's amortised cost is
+// designed for "many readers, few stable keys" which mirrors the WS
+// fan-out shape (N tabs / one session for the duration of the chat).
 func (c *historyMarshalCache) slot(key string) *marshalCacheEntry {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	e, ok := c.entries[key]
-	if !ok {
-		e = &marshalCacheEntry{}
-		c.entries[key] = e
+	if v, ok := c.entries.Load(key); ok {
+		return v.(*marshalCacheEntry)
 	}
-	return e
+	e, _ := c.entries.LoadOrStore(key, &marshalCacheEntry{})
+	return e.(*marshalCacheEntry)
 }
 
 // getOrMarshal returns the marshaled bytes for the given (key, entries) tail.
@@ -120,15 +135,19 @@ func (c *historyMarshalCache) getOrMarshal(
 // subscriber for the key unsubscribes (best-effort: a concurrent re-subscribe
 // will simply repopulate the slot on its first miss).
 func (c *historyMarshalCache) drop(key string) {
-	c.mu.Lock()
-	delete(c.entries, key)
-	c.mu.Unlock()
+	c.entries.Delete(key)
 }
 
 // reset clears the entire cache. Called by Hub.Shutdown so the map and any
 // large cached payloads become collectable promptly.
+//
+// sync.Map's Range is documented as a snapshot-style iteration that may
+// observe concurrent stores — for shutdown the goal is "drop everything we
+// can see right now" so a Delete inside Range is safe and matches Go's
+// own examples.
 func (c *historyMarshalCache) reset() {
-	c.mu.Lock()
-	c.entries = make(map[string]*marshalCacheEntry)
-	c.mu.Unlock()
+	c.entries.Range(func(k, _ any) bool {
+		c.entries.Delete(k)
+		return true
+	})
 }
