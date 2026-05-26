@@ -199,11 +199,14 @@ type cronResultMsg struct {
 
 // BroadcastCronResult notifies all connected WS clients that a cron job completed.
 func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
-	// R185-SEC-H2: scheduler generates jobID as 8-char hex today, but if a
-	// future path ever surfaces a config-supplied / user-typed ID, bidi/C0
-	// chars would reach the dashboard via a SetEscapeHTML(false) encoder.
-	// Sanitize defensively; result/errMsg are already scrubbed at recordResult
-	// (cron/scheduler_finish.go: truncateWithSuffix + SanitizeForLog).
+	// R185-SEC-H2: scheduler generates jobID as 16-char hex today (8 entropy
+	// bytes → hex.EncodeToString; see cron.generateID / hexIDEntropyBytes),
+	// but if a future path ever surfaces a config-supplied / user-typed ID,
+	// bidi/C0 chars would reach the dashboard via a SetEscapeHTML(false)
+	// encoder. Sanitize defensively; result/errMsg are already scrubbed at
+	// recordResult (cron/scheduler_finish.go: truncateWithSuffix +
+	// SanitizeForLog). The cron.MaxIDLen cap mirrors the IM/dashboard input
+	// boundary so log lines stay bounded if a wider ID ever leaks through.
 	//
 	// R246-SEC-7: bring result / errMsg to defense-in-depth parity with the
 	// rest of the broadcast surface. recordResult is the only documented
@@ -222,7 +225,7 @@ func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
 	const maxBroadcastErrorBytes = 4128
 	data, err := marshalPooled(cronResultMsg{
 		Type:   "cron_result",
-		JobID:  osutil.SanitizeForLog(jobID, 64),
+		JobID:  osutil.SanitizeForLog(jobID, cron.MaxIDLen),
 		Result: osutil.SanitizeForLog(result, maxBroadcastResultBytes),
 		Error:  osutil.SanitizeForLog(errMsg, maxBroadcastErrorBytes),
 	})
