@@ -468,6 +468,18 @@ func redactPathsInCronError(s string) string {
 	if s == "" {
 		return s
 	}
+	// Hot fast-path: short error-classifier strings ("context deadline
+	// exceeded", "dispatcher queue full") with no path-trigger byte never
+	// need truncation OR the Builder pool — return them aliased. The 256B
+	// cap is a defensive ceiling so an unexpectedly long no-path input
+	// still falls through to the byte-cap branch below; common cron error
+	// classes fit comfortably under this. R250-PERF-12 / #1115.
+	if len(s) <= redactFastPathMaxLen &&
+		strings.IndexByte(s, '/') < 0 &&
+		strings.IndexByte(s, '\\') < 0 &&
+		strings.IndexByte(s, '~') < 0 {
+		return s
+	}
 	// Byte-level cap, but split on a rune boundary — naked s[:maxRedactErrLen]
 	// can fall mid-codepoint for multibyte runes (CJK error messages from the
 	// CLI), producing invalid UTF-8 that then poisons cron_jobs.json.
