@@ -60,3 +60,61 @@ func readDashboardSessionSource(t *testing.T) string {
 	}
 	return string(data)
 }
+
+// TestHandleResume_KeyEntropyIs128Bit pins R246-SEC-5 / R247-SEC-24 (#807):
+// the resume key's random tail must be 16 bytes (128 bits), matching
+// anonCookie / upload IDs and the rest of the codebase's short-id
+// budget. The pre-fix form was `var rb [8]byte` — 64 bits, with a
+// birthday-bound (~2^32 IDs before collision) that, while comfortably
+// above realistic resume volume, was inconsistent with sibling code and
+// kept the audit item open across four review rounds.
+//
+// Source-level pin (instead of round-tripping through the HTTP handler)
+// because the key shape "dashboard:direct:r<32hex>:general" is only
+// observable after a successful RegisterForResume — which depends on
+// router state we don't otherwise need to spin up. A future refactor
+// that resurrects `[8]byte` (or any [N]byte with N < 16) fails this
+// test deterministically without flake from rand timing.
+func TestHandleResume_KeyEntropyIs128Bit(t *testing.T) {
+	t.Parallel()
+	body := readDashboardSessionSource(t)
+
+	// Negative: legacy 8-byte form must not reappear at the resume-key
+	// generation site. Match through whitespace tolerantly so a one-line
+	// reformat doesn't fool the gate.
+	if strings.Contains(body, "var rb [8]byte") {
+		t.Errorf("dashboard_session.go reintroduces 8-byte (64-bit) resume key entropy.\n" +
+			"R246-SEC-5 / R247-SEC-24 require ≥16 bytes (128 bits) — see the\n" +
+			"`resume register: generate key failed` site near hex.EncodeToString(rb[:]).")
+	}
+
+	// Positive: the 16-byte form must appear somewhere in the file.
+	if !strings.Contains(body, "var rb [16]byte") {
+		t.Errorf("dashboard_session.go must declare `var rb [16]byte` for the\n" +
+			"resume key tail (R246-SEC-5 / R247-SEC-24, 128-bit entropy baseline).")
+	}
+
+	// Anchor: the 16-byte declaration must sit immediately before the
+	// rand.Read call that feeds hex.EncodeToString(rb[:]) — otherwise a
+	// stray `var rb [16]byte` elsewhere could paper over a revert at the
+	// resume site. Walk forward from the array decl and verify the
+	// rand.Read + hex.EncodeToString pair appears within a small window.
+	idx := strings.Index(body, "var rb [16]byte")
+	if idx < 0 {
+		t.Fatalf("anchor missing — see negative branch above")
+	}
+	const windowBytes = 768
+	end := idx + windowBytes
+	if end > len(body) {
+		end = len(body)
+	}
+	window := body[idx:end]
+	if !strings.Contains(window, "rand.Read(rb[:])") {
+		t.Errorf("expected `rand.Read(rb[:])` within %d bytes of `var rb [16]byte`.\n"+
+			"Window:\n%s", windowBytes, window)
+	}
+	if !strings.Contains(window, "hex.EncodeToString(rb[:])") {
+		t.Errorf("expected `hex.EncodeToString(rb[:])` within %d bytes of `var rb [16]byte`.\n"+
+			"Window:\n%s", windowBytes, window)
+	}
+}
