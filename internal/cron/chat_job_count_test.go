@@ -157,6 +157,58 @@ func TestChatJobCount_RollbackOnPersistFailure(t *testing.T) {
 	assertChatJobCountInSync(t, s)
 }
 
+// TestPerChatJobCount_PublicAccessor exercises the exported O(1) reader
+// over s.chatJobCount. R237-PERF-5 (#661): callers (dashboard, metrics)
+// no longer have to duplicate the scan logic just to render a chat's
+// quota usage.
+func TestPerChatJobCount_PublicAccessor(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := NewScheduler(SchedulerConfig{
+		StorePath: filepath.Join(dir, "cron.json"),
+		MaxJobs:   50,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+
+	// Empty: zero for any chat.
+	if got := s.PerChatJobCount("feishu", "Q"); got != 0 {
+		t.Errorf("empty PerChatJobCount = %d, want 0", got)
+	}
+
+	for i := 0; i < 4; i++ {
+		if err := s.AddJob(&Job{Schedule: "@every 1h", Prompt: "p", Platform: "feishu", ChatID: "Q"}); err != nil {
+			t.Fatalf("AddJob: %v", err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := s.AddJob(&Job{Schedule: "@every 1h", Prompt: "p", Platform: "wecom", ChatID: "Q"}); err != nil {
+			t.Fatalf("AddJob: %v", err)
+		}
+	}
+	if got := s.PerChatJobCount("feishu", "Q"); got != 4 {
+		t.Errorf("PerChatJobCount(feishu/Q) = %d, want 4", got)
+	}
+	if got := s.PerChatJobCount("wecom", "Q"); got != 2 {
+		t.Errorf("PerChatJobCount(wecom/Q) = %d, want 2 (must distinguish platforms)", got)
+	}
+	if got := s.PerChatJobCount("unknown", "Q"); got != 0 {
+		t.Errorf("PerChatJobCount(unknown/Q) = %d, want 0", got)
+	}
+}
+
+// TestPerChatJobCount_NilSchedulerSafe pins the bootstrap-window
+// nil-Scheduler short-circuit.
+func TestPerChatJobCount_NilSchedulerSafe(t *testing.T) {
+	t.Parallel()
+	var s *Scheduler
+	if got := s.PerChatJobCount("feishu", "X"); got != 0 {
+		t.Errorf("nil Scheduler PerChatJobCount = %d, want 0", got)
+	}
+}
+
 // TestChatJobCount_StartLoadPopulates verifies persisted jobs reloaded by
 // Start() are reflected in chatJobCount, so a fresh process never
 // silently allows AddJob to push a chat above maxJobsPerChat just because

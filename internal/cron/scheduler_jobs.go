@@ -175,6 +175,26 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 	return save, nil
 }
 
+// PerChatJobCount returns the number of jobs registered against the
+// (Platform, ChatID) chat. Backed by s.chatJobCount (R237-PERF-5 / #661):
+// O(1) read, lock-free outside the RLock window, vs the historical
+// O(N) scan that addJobAcquiringLock used to enforce maxJobsPerChat.
+//
+// Intended use: dashboard / metrics surfaces that want to render
+// "you have N/M cron jobs in this chat" without paying the cost of a
+// full ListJobs walk. Returns 0 for a chat with no registered jobs.
+//
+// Safe on a nil *Scheduler (returns 0) so dashboard renders during
+// the bootstrap window before the scheduler is wired do not NPE.
+func (s *Scheduler) PerChatJobCount(plat, chatID string) int {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.chatJobCount[chatJobKey{Platform: plat, ChatID: chatID}]
+}
+
 // ListJobs returns jobs for a specific chat.
 func (s *Scheduler) ListJobs(plat, chatID string) []Job {
 	s.mu.RLock()
