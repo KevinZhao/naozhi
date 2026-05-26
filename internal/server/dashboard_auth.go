@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/ratelimit"
@@ -42,6 +44,26 @@ type AuthHandlers struct {
 	// cause across four review rounds: HMAC(secret, token) lacked any
 	// freshness input.
 	cookieGen string
+	// cookieGenSeq is an atomic counter mixed into cookieMAC alongside
+	// cookieGen. Bumping it (via RotateCookieGen) immediately invalidates
+	// every outstanding auth cookie because cookieMAC's HMAC input
+	// changes — even at-rest browsers carrying the old cookie value will
+	// fail constant-time compare on their next request and be
+	// re-challenged at /api/auth/login.
+	//
+	// R245-SEC-2 (#826): closes the hot-rotate gap. Pre-fix, cookieGen
+	// only changed at process restart, so a hot-reload of dashboardToken
+	// (or of any other secret-rotation event handlers added later) left
+	// existing cookies valid for the 24h MaxAge window. Per-process
+	// restart rotation still works (cookieGen seed continues to vary by
+	// time.Now().UnixNano() at construction); RotateCookieGen layers
+	// in-process freshness without disturbing the seed-once contract.
+	//
+	// atomic.Uint64 is zero-value safe so existing struct-literal
+	// fixtures (csrf_test.go, debug_pprof_test.go, etc.) keep working
+	// without changes. Read on the cookieMAC hot path is a single
+	// atomic load — same cost class as the existing cookieGen read.
+	cookieGenSeq atomic.Uint64
 	// loginLimiter is an O(1) LRU-backed per-IP limiter. At 10k attacking IPs
 	// the previous two-pass O(n) scan was done under a single mutex and could
 	// block legitimate logins; the ratelimit package does insertion, LRU
@@ -147,9 +169,14 @@ func (a *AuthHandlers) unauthDashAllow(ip string) bool {
 // R247-SEC-17: HMAC input now includes cookieGen so the MAC rotates on
 // every process restart (and any future hot-reload that bumps cookieGen)
 // even when stateDir / cookieSecret are stable. The serialised input uses
-// a length-prefixed framing (`token || \x00 || cookieGen`) so a malicious
-// (token, gen) split that concatenates to the same bytes cannot collide
-// with a legitimate split.
+// a length-prefixed framing (`token || \x00 || cookieGen || \x00 || seq`)
+// so a malicious (token, gen, seq) split that concatenates to the same
+// bytes cannot collide with a legitimate split.
+//
+// R245-SEC-2 (#826): cookieGenSeq is also mixed in so RotateCookieGen
+// produces a new MAC immediately, invalidating every outstanding cookie
+// without needing a process restart. The atomic load is the same cost
+// class as the prior plain-string read.
 func (a *AuthHandlers) cookieMAC() string {
 	if a.dashboardToken == "" {
 		return ""
@@ -158,7 +185,26 @@ func (a *AuthHandlers) cookieMAC() string {
 	mac.Write([]byte(a.dashboardToken))
 	mac.Write([]byte{0}) // domain separator: token || \x00 || cookieGen
 	mac.Write([]byte(a.cookieGen))
+	mac.Write([]byte{0}) // domain separator: cookieGen || \x00 || seq
+	var seqBuf [20]byte
+	mac.Write(strconv.AppendUint(seqBuf[:0], a.cookieGenSeq.Load(), 10))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// RotateCookieGen invalidates every outstanding auth cookie by bumping
+// the cookieGenSeq counter mixed into cookieMAC. Safe to call from any
+// goroutine — uses an atomic increment with no lock.
+//
+// R245-SEC-2 (#826): the rotation hook a future hot-reload handler must
+// invoke whenever the dashboard token (or any other auth-relevant
+// secret) changes. Without this call, a token rotation at runtime
+// leaves the prior token's cookies valid for the full 24h MaxAge
+// because cookieGen was only seeded once at construction. Calling
+// RotateCookieGen on the rotation event closes that window — every
+// browser carrying an old MAC fails the constant-time compare on its
+// next request and is sent back through /api/auth/login.
+func (a *AuthHandlers) RotateCookieGen() {
+	a.cookieGenSeq.Add(1)
 }
 
 // isAuthenticated checks auth without writing an error response. Used by
