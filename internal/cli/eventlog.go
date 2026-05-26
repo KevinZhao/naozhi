@@ -1586,9 +1586,17 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	}
 	// First pass: collect matches in reverse order. Most calls match 0-5
 	// entries so we allocate lazily only when the first match is found.
+	//
+	// R249-PERF-17: hoist the modulo arithmetic out of the loop.
+	// Previously each iter recomputed `(l.head - l.count + i + l.maxSize) % l.maxSize`
+	// — a DIV per step. Walk backward from the newest slot with a cheap
+	// branch-on-wrap instead. ~5-10ns × notify wave on hot streaming path.
 	var rev []EventEntry
+	idx := l.head - 1
+	if idx < 0 {
+		idx += l.maxSize
+	}
 	for i := l.count - 1; i >= 0; i-- {
-		idx := (l.head - l.count + i + l.maxSize) % l.maxSize
 		if l.entries[idx].Time <= afterMS {
 			break
 		}
@@ -1604,6 +1612,10 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 			rev = make([]EventEntry, 0, initialCap)
 		}
 		rev = append(rev, l.entries[idx])
+		idx--
+		if idx < 0 {
+			idx += l.maxSize
+		}
 	}
 	if len(rev) == 0 {
 		return nil
@@ -1641,12 +1653,22 @@ func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []EventEntry {
 	// Before this, EntriesBefore on a 500-entry ring with beforeMS pointing
 	// to the oldest page ran 500 iterations comparing timestamps; now it
 	// runs up to ~`skip`+`limit` iterations.
+	// R249-PERF-17: walk backward with hoisted index instead of recomputing
+	// (l.head - l.count + i + l.maxSize) % l.maxSize per iter. Same shape
+	// as EntriesSince — branch-on-wrap is one CMOV/cmp vs an IDIV.
 	var rev []EventEntry
 	crossed := beforeMS <= 0 // when beforeMS==0 treat as "no upper bound"
+	idx := l.head - 1
+	if idx < 0 {
+		idx += l.maxSize
+	}
 	for i := l.count - 1; i >= 0 && len(rev) < limit; i-- {
-		idx := (l.head - l.count + i + l.maxSize) % l.maxSize
 		if !crossed {
 			if l.entries[idx].Time >= beforeMS {
+				idx--
+				if idx < 0 {
+					idx += l.maxSize
+				}
 				continue
 			}
 			crossed = true
@@ -1659,6 +1681,10 @@ func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []EventEntry {
 			rev = make([]EventEntry, 0, initialCap)
 		}
 		rev = append(rev, l.entries[idx])
+		idx--
+		if idx < 0 {
+			idx += l.maxSize
+		}
 	}
 	if len(rev) == 0 {
 		return nil
