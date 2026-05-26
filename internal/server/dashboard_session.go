@@ -540,17 +540,22 @@ func filterAndCountSnapshots(snapshots []session.SessionSnapshot, now time.Time)
 // dashboard handler. R246-CR-002 (#736).
 func (h *SessionHandlers) fillProjectAndSummary(snapshots []session.SessionSnapshot) {
 	if h.projectMgr != nil {
+		// R217-PERF-10 (#616): pool the workspaces scratch slice across polls.
 		// Pre-size to len(snapshots): the loop accepts at most one entry per
 		// session, so the slice never grows past this bound. Starting at nil
 		// made append log(N) growth-realloc through 0→1→2→4→…→n per poll,
 		// visible in heap profiles on session-heavy dashboards. R60-PERF-4.
-		workspaces := make([]string, 0, len(snapshots))
+		// The pool layers reuse on top: ResolveWorkspaces only reads the
+		// slice and returns its own map, so the scratch can be cleared and
+		// returned without aliasing concerns.
+		workspaces := acquireWorkspaceSlice(len(snapshots))
 		for i := range snapshots {
 			if !project.IsPlannerKey(snapshots[i].Key) && snapshots[i].Workspace != "" {
 				workspaces = append(workspaces, snapshots[i].Workspace)
 			}
 		}
 		wsMap := h.projectMgr.ResolveWorkspaces(workspaces)
+		releaseWorkspaceSlice(workspaces)
 
 		for i := range snapshots {
 			if project.IsPlannerKey(snapshots[i].Key) {
