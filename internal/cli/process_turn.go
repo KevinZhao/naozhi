@@ -22,11 +22,22 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// stderrSanitizeBuilderPool reuses strings.Builder allocations across
+// sanitizeStderrLine slow-path calls. R235-PERF-10 (#1015): under noisy CLI
+// stderr (CC schema warnings, Bedrock retries) the slow path was allocating
+// a fresh Builder + backing slice per line; pooling keeps the per-line cost
+// to one Reset + (at most) one re-Grow. b.String() copies the bytes so
+// returning the builder to the pool after the read is safe.
+var stderrSanitizeBuilderPool = sync.Pool{
+	New: func() any { return &strings.Builder{} },
+}
 
 // interruptedSettleWindow caps how long a fresh Send waits for the previous
 // turn's result event to flush after Interrupt() was called. 500 ms balances
@@ -250,8 +261,10 @@ func sanitizeStderrLine(line string) string {
 	if clean {
 		return line
 	}
-	var b strings.Builder
+	b := stderrSanitizeBuilderPool.Get().(*strings.Builder)
+	b.Reset()
 	b.Grow(len(line))
+	defer stderrSanitizeBuilderPool.Put(b)
 	for i := 0; i < len(line); {
 		c := line[i]
 		if c == 0x1b { // ESC
