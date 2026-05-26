@@ -154,6 +154,16 @@ type SchedulerConfig struct {
 	// schedules are not swallowed. TriggerNow bypasses jitter.
 	// See docs/rfc/cron-v2-polish.md §3.2.
 	JitterMax time.Duration
+	// RunsKeepCount overrides DefaultRunsKeepCount when > 0. Sets the
+	// per-job cap on retained run-history records (newest N kept). Zero
+	// (and negative) values fall back to the default — additive: existing
+	// callers that omit the field keep the prior behaviour.
+	RunsKeepCount int
+	// RunsKeepWindow overrides DefaultRunsKeepWindow when > 0. Records
+	// older than the window are trimmed at GC time. Zero (and negative)
+	// values fall back to the default; additive (callers that omit it
+	// keep prior behaviour). R250-GO-3.
+	RunsKeepWindow time.Duration
 }
 
 // Scheduler manages cron jobs and executes them on schedule.
@@ -599,7 +609,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		jitterMax:           cfg.JitterMax,
 		stopCtx:             stopCtx,
 		stopCancel:          stopCancel,
-		runStore:            newRunStore(cfg.StorePath, 0, 0),
+		runStore:            newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
 	}
 }
 

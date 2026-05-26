@@ -749,3 +749,38 @@ func TestKnownSessionIDs_NoJobsReturnsEmpty(t *testing.T) {
 		t.Errorf("expected empty map, got %d: %v", len(got), got)
 	}
 }
+
+// TestSchedulerConfig_RunsKeepPlumbing verifies that SchedulerConfig.
+// RunsKeepCount and RunsKeepWindow flow through to the runStore. Zero
+// values must fall back to the documented defaults so existing callers
+// that omit the fields keep prior behaviour. R250-GO-3.
+func TestSchedulerConfig_RunsKeepPlumbing(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// Custom values are preserved.
+	custom := NewScheduler(SchedulerConfig{
+		StorePath:      filepath.Join(dir, "custom.json"),
+		MaxJobs:        5,
+		RunsKeepCount:  17,
+		RunsKeepWindow: 3 * time.Hour,
+	})
+	if got := custom.runStore.keepCount; got != 17 {
+		t.Errorf("keepCount: got %d, want 17", got)
+	}
+	if got := custom.runStore.keepWindow; got != 3*time.Hour {
+		t.Errorf("keepWindow: got %v, want 3h", got)
+	}
+
+	// Zero values fall back to defaults — additive contract.
+	dflt := NewScheduler(SchedulerConfig{
+		StorePath: filepath.Join(dir, "default.json"),
+		MaxJobs:   5,
+	})
+	if got := dflt.runStore.keepCount; got != DefaultRunsKeepCount {
+		t.Errorf("default keepCount: got %d, want %d", got, DefaultRunsKeepCount)
+	}
+	if got := dflt.runStore.keepWindow; got != DefaultRunsKeepWindow {
+		t.Errorf("default keepWindow: got %v, want %v", got, DefaultRunsKeepWindow)
+	}
+}
