@@ -633,7 +633,7 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 			if len(desc) > maxResolveDescBytes {
 				desc = desc[:textutil.TruncateAtRuneBoundary(desc, maxResolveDescBytes)]
 			}
-			go linker.Resolve(taskID, toolUseID, name, desc, nowMS)
+			go linker.Resolve(p.lifecycleContext(), taskID, toolUseID, name, desc, nowMS)
 		}
 	}
 

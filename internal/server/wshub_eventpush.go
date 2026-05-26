@@ -126,49 +126,27 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 					return
 				}
 				sess = newSess
-				// Catch up on events we missed during the transition.
-				// resubscribeEvents may consume one pending notification while
-				// probing newNotify (ok=true path) — if we didn't catch-up
-				// unconditionally here, those events would only surface on the
-				// next Append, which in an idle session may be seconds or more.
-				entries := sess.EventEntriesSince(lastTime)
-				if len(entries) > 0 {
-					entries = capHistoryBatch(entries)
-					data, err := h.marshalHistoryFrame(key, lastTime, entries)
-					if err == nil {
-						c.SendRaw(data)
-					}
-					lastTime = entries[len(entries)-1].Time
+				// Catch up on events missed during the resubscribe
+				// transition. resubscribeEvents may consume one pending
+				// notification while probing newNotify (ok=true path) — if
+				// we didn't catch up unconditionally here, those events
+				// would only surface on the next Append, which in an idle
+				// session may be seconds or more. R246-CR-006 / #744:
+				// extracted into backfillSubscriberEvents so the same
+				// coalesced-marshal path serves both the post-resubscribe
+				// catch-up and the regular notify drain.
+				newLast, alive := h.backfillSubscriberEvents(c, key, sess, lastTime)
+				if !alive {
+					return
 				}
+				lastTime = newLast
 				continue
 			}
-			entries := sess.EventEntriesSince(lastTime)
-			if len(entries) == 0 {
-				continue
-			}
-			select {
-			case <-c.done:
+			newLast, alive := h.backfillSubscriberEvents(c, key, sess, lastTime)
+			if !alive {
 				return
-			default:
 			}
-			// Batch events into a single "history" message to reduce
-			// per-event JSON marshaling and WebSocket frame overhead.
-			// Cap the batch so a slow client that built up a long backlog
-			// doesn't see a single multi-MB push frame that starves the
-			// WS send channel — the dashboard already backfills older
-			// events via /api/sessions/events?before=. R68-PERF-H1.
-			//
-			// R214-PERF-4: marshalHistoryFrame coalesces the JSON marshal
-			// across N pushLoops subscribed to the same session — multi-tab
-			// dashboards previously paid N marshals per notify wave for the
-			// identical (key, entries-tail) payload.
-			entries = capHistoryBatch(entries)
-			data, err := h.marshalHistoryFrame(key, lastTime, entries)
-			if err != nil {
-				continue
-			}
-			c.SendRaw(data)
-			lastTime = entries[len(entries)-1].Time
+			lastTime = newLast
 		case <-c.done:
 			return
 		case <-h.ctx.Done():
@@ -181,6 +159,52 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 			return
 		}
 	}
+}
+
+// backfillSubscriberEvents drains EventEntriesSince(lastTime) for sess,
+// marshals the batched "history" frame via the coalesced cache, and
+// writes it to c. Returns (newLastTime, alive) — the caller must update
+// its own lastTime with newLastTime AND exit when alive is false (the
+// client closed mid-drain).
+//
+// R246-CR-006 / #744: previously inlined twice in eventPushLoop — once
+// in the regular notify arm and once in the post-resubscribe catch-up
+// branch. The two copies differed only in the c.done early-return: the
+// regular arm exited the loop on close, the resubscribe arm did not. The
+// helper now propagates that signal via the alive return so both call
+// sites get the same eviction semantics.
+//
+// Capping via capHistoryBatch is mandatory: a slow client that built up
+// a long backlog must not see a single multi-MB push frame that starves
+// the WS send channel — the dashboard backfills older events via
+// /api/sessions/events?before=. R68-PERF-H1. marshalHistoryFrame
+// coalesces the JSON marshal across N pushLoops subscribed to the same
+// session — multi-tab dashboards previously paid N marshals per notify
+// wave for the identical (key, entries-tail) payload. R214-PERF-4.
+//
+// Behavior note: on marshal error the helper returns the unchanged
+// lastTime (matches the regular-notify arm's `continue` path). The
+// previous post-resubscribe inline branch advanced lastTime even on
+// marshal error, which silently dropped events — strictly more correct
+// to retry from the same lastTime on the next notify, which is what the
+// helper now does for both call sites.
+func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.ManagedSession, lastTime int64) (int64, bool) {
+	entries := sess.EventEntriesSince(lastTime)
+	if len(entries) == 0 {
+		return lastTime, true
+	}
+	select {
+	case <-c.done:
+		return lastTime, false
+	default:
+	}
+	entries = capHistoryBatch(entries)
+	data, err := h.marshalHistoryFrame(key, lastTime, entries)
+	if err != nil {
+		return lastTime, true
+	}
+	c.SendRaw(data)
+	return entries[len(entries)-1].Time, true
 }
 
 // resubscribeEvents waits for a new process to be attached to the session and
@@ -299,6 +323,7 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 		if u, exists := c.subscriptions[key]; exists {
 			staleUnsub = u
 			delete(c.subscriptions, key)
+			h.decSubscriberCountLocked(key)
 		}
 	}
 	h.mu.Unlock()

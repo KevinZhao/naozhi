@@ -759,77 +759,100 @@ func (s *Scheduler) Location() *time.Location {
 	return s.location
 }
 
-// DeleteJob removes a job by ID prefix (scoped to the given chat).
-func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
-	s.mu.Lock()
-	j, err := s.findByPrefixLocked(idPrefix, plat, chatID)
-	if err != nil {
-		s.mu.Unlock()
-		return nil, err
-	}
-	s.deleteJobLocked(j)
-	save, perr := s.persistJobsLocked()
-	s.mu.Unlock()
+// withJobByPrefix is the IM-prefix counterpart to withJobByID. It collapses
+// DeleteJob / PauseJob / ResumeJob (R238-ARCH-4 / #743) — three ~25-line
+// twins of "lock → findByPrefix → mutate → persist → unlock → side-effect"
+// — into a single 3-phase frame. Layout mirrors withJobByID exactly so a
+// reader who learns one helper has learned both.
+//
+//  1. Acquire s.mu, look up by (idPrefix, plat, chatID); a miss surfaces
+//     the findByPrefixLocked error verbatim (typically ErrJobNotFound or
+//     "ambiguous prefix").
+//  2. Run op(j) inside s.mu; an op error skips persist + postCleanup.
+//  3. Release s.mu, run postCleanup(j) lock-free (router.Reset /
+//     runStore.DeleteJob), then call save() to land the persist.
+//
+// Lock-order rationale follows withJobByID's: postCleanup must NOT run
+// under s.mu because router callbacks may re-take it (notifyChange
+// dead-locks otherwise — R240-GO-1). save() runs after postCleanup so a
+// persist failure leaves the in-memory + side-effect state already
+// committed (matches the pre-refactor semantics that runStore.DeleteJob
+// fires even when persist fails — R238-GO-3).
+//
+// Error precedence (preserved from the originals):
+//   - find miss      → (nil, find err)
+//   - op error       → (nil, op err)        ; persist + postCleanup skipped
+//   - persist error  → (nil, persist err)   ; postCleanup ALREADY ran
+//   - success        → (*Job, nil)
+func (s *Scheduler) withJobByPrefix(
+	idPrefix, plat, chatID string,
+	op func(j *Job) error,
+	postCleanup func(j *Job),
+) (*Job, error) {
+	var save func()
+	var j *Job
+	var findErr, opErr, perr error
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		j, findErr = s.findByPrefixLocked(idPrefix, plat, chatID)
+		if findErr != nil {
+			return
+		}
+		if op != nil {
+			if err := op(j); err != nil {
+				opErr = err
+				return
+			}
+		}
+		save, perr = s.persistJobsLocked()
+	}()
 
-	// R240-GO-1: router.Reset moved out of deleteJobLocked to avoid
-	// holding s.mu across router callbacks (notifyChange may try to
-	// re-take s.mu, deadlocking the scheduler).
-	s.resetRouterStub(j.ID)
-	// R238-GO-3: deleteJobLocked already mutated in-memory state. The
-	// runStore must be cleaned even when persist fails, otherwise the
-	// runs/<jobID>/ subtree leaks on disk while the in-memory job is gone.
-	if s.runStore != nil {
-		s.runStore.DeleteJob(j.ID)
+	if findErr != nil {
+		return nil, findErr
+	}
+	if opErr != nil {
+		return nil, opErr
+	}
+	if postCleanup != nil {
+		postCleanup(j)
 	}
 	if perr != nil {
 		return nil, perr
 	}
 	save()
 	return j, nil
+}
+
+// DeleteJob removes a job by ID prefix (scoped to the given chat).
+func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
+	return s.withJobByPrefix(
+		idPrefix, plat, chatID,
+		func(j *Job) error {
+			s.deleteJobLocked(j)
+			return nil
+		},
+		// R240-GO-1: router.Reset must run lock-free — notifyChange may
+		// re-enter s.mu. R238-GO-3: runStore.DeleteJob fires even when
+		// persist later fails so runs/<jobID>/ doesn't leak on disk
+		// while the in-memory record is gone.
+		func(j *Job) {
+			s.resetRouterStub(j.ID)
+			if s.runStore != nil {
+				s.runStore.DeleteJob(j.ID)
+			}
+		},
+	)
 }
 
 // PauseJob pauses a job by ID prefix.
 func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
-	s.mu.Lock()
-	j, err := s.findByPrefixLocked(idPrefix, plat, chatID)
-	if err != nil {
-		s.mu.Unlock()
-		return nil, err
-	}
-	if err := s.pauseJobLocked(j); err != nil {
-		s.mu.Unlock()
-		return nil, err
-	}
-	save, perr := s.persistJobsLocked()
-	s.mu.Unlock()
-
-	if perr != nil {
-		return nil, perr
-	}
-	save()
-	return j, nil
+	return s.withJobByPrefix(idPrefix, plat, chatID, s.pauseJobLocked, nil)
 }
 
 // ResumeJob resumes a paused job by ID prefix.
 func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
-	s.mu.Lock()
-	j, err := s.findByPrefixLocked(idPrefix, plat, chatID)
-	if err != nil {
-		s.mu.Unlock()
-		return nil, err
-	}
-	if err := s.resumeJobLocked(j); err != nil {
-		s.mu.Unlock()
-		return nil, err
-	}
-	save, perr := s.persistJobsLocked()
-	s.mu.Unlock()
-
-	if perr != nil {
-		return nil, perr
-	}
-	save()
-	return j, nil
+	return s.withJobByPrefix(idPrefix, plat, chatID, s.resumeJobLocked, nil)
 }
 
 // NextRun returns the next scheduled run time for a job. R247-GO-9

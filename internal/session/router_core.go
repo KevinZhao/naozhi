@@ -28,6 +28,7 @@ import (
 	// new backend only requires editing internal/wireup.
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/sessionconst"
 )
 
 // ShutdownTimeout is the maximum time to wait for graceful shutdown
@@ -153,17 +154,22 @@ func exemptCapFor(kind string) int {
 // field is zero. Exported so other packages (tests, config validation, CLI
 // flag defaults) can reference the single source of truth instead of
 // re-typing the literal and drifting out of sync. R70-ARCH-H5.
+//
+// R222-ARCH-3: the source of truth lives in internal/sessionconst so
+// internal/config can read it without reverse-importing internal/session.
+// This file re-exports the names so existing call sites (session.DefaultTTL
+// etc.) keep compiling unchanged.
 const (
 	// DefaultMaxProcs is the concurrent-process cap applied when
 	// RouterConfig.MaxProcs is not set.
-	DefaultMaxProcs = 3
+	DefaultMaxProcs = sessionconst.DefaultMaxProcs
 	// DefaultTTL is the idle-session eviction threshold applied when
 	// RouterConfig.TTL is not set.
-	DefaultTTL = 30 * time.Minute
+	DefaultTTL = sessionconst.DefaultTTL
 	// DefaultPruneTTL is the "keep metadata for long-idle session" threshold
 	// applied when RouterConfig.PruneTTL is not set. Entries older than this
 	// are pruned from the store even when exempt.
-	DefaultPruneTTL = 72 * time.Hour
+	DefaultPruneTTL = sessionconst.DefaultPruneTTL
 )
 
 const (
@@ -828,6 +834,20 @@ type RouterConfig struct {
 	// instead.
 	EventLogDevMode bool
 
+	// EventLogPersister, when non-nil, is used as the router's event-log
+	// sink instead of constructing one from EventLogDir/EventLogGenerator/
+	// EventLogDevMode. This decouples SessionStore wiring from event-log
+	// persistence ownership: callers that own the Persister lifecycle
+	// (tests, alternative startups) can inject the same instance shared
+	// across multiple routers, or pre-configure observers and codecs that
+	// the bare RouterConfig fields don't expose. R239-ARCH-N.
+	//
+	// When this field is nil and EventLogDir is non-empty the router
+	// keeps the legacy behaviour of constructing the Persister itself,
+	// which preserves wire compatibility with existing cmd/naozhi
+	// callers.
+	EventLogPersister *persist.Persister
+
 	// AutoChainPolicy drives the workspace auto-chain feature
 	// (docs/rfc/auto-workspace-chain.md). nil disables the feature
 	// (Router falls back to disabledAutoChainPolicy). Production
@@ -937,7 +957,18 @@ func NewRouter(cfg RouterConfig) *Router {
 	// Spin up the event-log persister BEFORE we touch the session
 	// store; the startup load path needs a live sink to attach
 	// to spawned ManagedSessions as they get restored.
-	if cfg.EventLogDir != "" {
+	//
+	// Two wire paths:
+	//   1. cfg.EventLogPersister != nil — caller-owned Persister wins.
+	//      Lets callers split SessionStore wiring from event-log
+	//      lifecycle (R239-ARCH-N).
+	//   2. cfg.EventLogPersister == nil && cfg.EventLogDir != "" —
+	//      legacy in-router construction; preserved for cmd/naozhi
+	//      and existing tests that pass only EventLogDir.
+	switch {
+	case cfg.EventLogPersister != nil:
+		r.eventLogPersister = cfg.EventLogPersister
+	case cfg.EventLogDir != "":
 		p, err := persist.NewPersister(persist.Options{
 			Dir:       cfg.EventLogDir,
 			Generator: cfg.EventLogGenerator,

@@ -16,7 +16,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionconst"
 )
 
 // Config is the top-level naozhi configuration loaded from config.yaml.
@@ -491,7 +491,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Server.Addr = ":8080"
 	}
 	if cfg.Session.MaxProcs <= 0 {
-		cfg.Session.MaxProcs = session.DefaultMaxProcs
+		cfg.Session.MaxProcs = sessionconst.DefaultMaxProcs
 	}
 	if cfg.Session.TTL == "" {
 		cfg.Session.TTL = "30m"

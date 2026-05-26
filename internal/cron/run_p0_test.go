@@ -115,14 +115,16 @@ func TestP0_InflightSnapshotReflectsCASState(t *testing.T) {
 	if !inf.running.CompareAndSwap(false, true) {
 		t.Fatal("CAS")
 	}
-	rid := "abc"
-	inf.runID.Store(&rid)
+	// R238-ARCH-3 (#742): writers go through populate / setPhase /
+	// setSessionID instead of touching per-field atomic.Pointers
+	// directly; test exercises the same observable surface.
 	st := time.Now()
-	inf.startedAt.Store(&st)
-	ph := PhaseSending
-	inf.phase.Store(&ph)
-	tr := string(TriggerScheduled)
-	inf.trigger.Store(&tr)
+	inf.populate(runInflightView{
+		RunID:     "abc",
+		StartedAt: st,
+		Phase:     PhaseSending,
+		Trigger:   TriggerScheduled,
+	})
 	v, ok := inf.snapshot()
 	if !ok {
 		t.Fatal("running snapshot should return ok=true")
