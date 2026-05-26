@@ -778,7 +778,9 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 				lg.Error("ownerLoop reply panic recovered", "key", key, "panic", rr)
 			}
 		}()
-		notifyCtx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
+		// R247-ARCH-10 (#632): NotifyCtx centralises the "detach from
+		// parent because the turn ctx is already Done" pattern.
+		notifyCtx, cancel := NotifyCtx(nil, NotifyKindOwnerLoopPanic, platformReplyTimeout)
 		defer cancel()
 		d.replyText(notifyCtx, msg, "处理异常，请稍后重试。", nil)
 	}()
@@ -831,7 +833,9 @@ func (d *Dispatcher) handleGetOrCreateError(
 		// the platform layer. Match the handleOwnerLoopPanic recovery
 		// pattern and use a fresh Background ctx with short timeout so the
 		// user actually sees the "restart, retry" message.
-		notifyCtx, cancel := context.WithTimeout(context.Background(), shutdownReplyTimeout)
+		// R247-ARCH-10 (#632): routed through NotifyCtx for parity with
+		// the other detached-reply sites.
+		notifyCtx, cancel := NotifyCtx(ctx, NotifyKindShutdown, shutdownReplyTimeout)
 		replyCtx = notifyCtx
 		cleanup = cancel
 	default:
@@ -1268,7 +1272,11 @@ func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
 					"chat_id", chatID, "tool_use_id", aq.ToolUseID, "panic", r)
 			}
 		}()
-		rctx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
+		// R247-ARCH-10 (#632): card-send detach goes through NotifyCtx
+		// alongside the other dispatch sites. The card must outlive the
+		// originating turn so a near-deadline /new doesn't drop it
+		// mid-flight (R218-GO-1).
+		rctx, cancel := NotifyCtx(nil, NotifyKindAskQuestionCard, platformReplyTimeout)
 		defer cancel()
 
 		if sender, ok := platform.AsQuestionCardSender(p); ok {
@@ -1342,7 +1350,9 @@ func (t *replyTracker) sendTodoMessage(text string) {
 	t.lastTodoText = text
 
 	// R236-GO-1: detach from t.ctx so a near-deadline turn can still finish writing TodoWrite.
-	rctx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
+	// R247-ARCH-10 (#632): routed through NotifyCtx for parity with the
+	// other dispatch detached-reply sites.
+	rctx, cancel := NotifyCtx(t.ctx, NotifyKindTodoMessage, platformReplyTimeout)
 	defer cancel()
 	if _, err := t.p.Reply(rctx, platform.OutgoingMessage{ChatID: t.chatID, Text: text}); err != nil {
 		// R238-CR-5: previously slog.Debug — silent because R236-GO-1
