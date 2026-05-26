@@ -756,6 +756,15 @@ function matchProject(workspace) {
 // controls the visual fill. A single constant avoids the misleading dead ternary
 // that previously implied a per-state SVG difference.
 const STAR_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"/></svg>';
+// "Clawd" pixel mascot for claude-backend assistant turns. Sourced from
+// the Custom Brand Icons set, icon `cbi:claude-clawd`
+// (https://github.com/elax46/custom-brand-icons), licensed CC BY-NC-SA
+// 4.0. Naozhi ships under BSL 1.1 (non-commercial Additional Use Grant
+// through 2030-03-21), so the NC clause is compatible for the current
+// licensed term — see ATTRIBUTIONS.md. Fill flows from currentColor so
+// the rust hex lives once in dashboard.html as --nz-clawd-rust (CSS sets
+// .cc-clawd { color: var(--nz-clawd-rust) }) — no inline hex in JS.
+const CLAWD_SVG = '<svg class="cc-clawd" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="currentColor" d="M4.5 6h15v5H22v2h-2.5v3h-1v2H17v-2h-1v2h-1.5v-2h-5v2H8v-2H7v2H5.5v-2h-1v-3H2v-2h2.5ZM7 8v3h1V8Zm9 0v3h1V8Z"/></svg>';
 const GITHUB_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>';
 // Chevron: points down when expanded (`▾`-like), rotated 90deg via CSS
 // when collapsed so the same glyph serves both states.
@@ -2965,7 +2974,15 @@ function eventHtml(e, opts) {
   // CLI-synthesised interrupt marker: SIGINT-aborted turn, not user intent.
   if (e.type === 'user' && (raw === '[Request interrupted by user]' || raw === '[Request interrupted by user for tool use]')) return '';
   const icons = {init:'\u2699',system:'\u2699',user:'\u{1f464}',text:'\u2726',todo:'\u2630'};
-  const icon = icons[e.type] || '';
+  let icon = icons[e.type] || '';
+  // Assistant turns on the claude backend get the clawd mascot instead of
+  // the default \u2726 glyph. Other backends (kiro, gemini, ...) keep the glyph
+  // so each backend has a distinct visual identity in the transcript.
+  if (e.type === 'text') {
+    const sess = sessionsData[sid(selectedKey, selectedNode)] || {};
+    const backendID = sess.backend || sessionBackends[selectedKey] || (cliBackends && cliBackends.default) || '';
+    if (backendID === 'claude' || backendID === '') icon = CLAWD_SVG;
+  }
 
   // Strip redundant "[+N image(s)]" suffix when thumbnails are present
   let cleanRaw = e.detail || e.summary || '';
