@@ -12460,7 +12460,30 @@ function cronTimelineJumpToSession(sessionId) {
 // cron-panel-consolidation RFC §4.6: 路由门由 selectedKey 切到
 // cronDetailJobId — cron 面板下 selectedKey 始终为 null（openCronPanel 已
 // 清空），不再适合做"当前看的是哪条 cron"判定。
+//
+// R243-PERF-7 (#812): rAF-debounce 状态。同一帧内多次 cron_run_ended
+// 只会真正打一次 fetch。bursty cron（hourly 同时跑 5 个任务）会在 ~1s
+// 内塞 5 条事件；不去重的话每条都 fetch + sort + 全 innerHTML 重建，
+// 把 RTT 当 paint 节流；coalesce 到帧后只剩一次。
+const _cronTimelineRefreshPending = Object.create(null);
+
 async function cronTimelineRefreshHead(jobId) {
+  if (!jobId || cronDetailJobId !== jobId) return;
+  // 帧内合并：已经排了一次就直接 await 那一次，不再启动新 fetch。
+  if (_cronTimelineRefreshPending[jobId]) {
+    return _cronTimelineRefreshPending[jobId];
+  }
+  const p = (async () => {
+    // 等下一帧再真正打 fetch——给同一帧内的连续事件一个合并窗口。
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    delete _cronTimelineRefreshPending[jobId];
+    return _cronTimelineRefreshHeadImpl(jobId);
+  })();
+  _cronTimelineRefreshPending[jobId] = p;
+  return p;
+}
+
+async function _cronTimelineRefreshHeadImpl(jobId) {
   if (cronDetailJobId !== jobId) return;
   const st = getCronTimelineState(jobId);
   // R220-FE-4: in-flight guard。用户快速触发多次 TriggerNow 时 cron_run_ended
