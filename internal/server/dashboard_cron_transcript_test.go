@@ -805,6 +805,53 @@ func TestSummariseToolInput_FallbackUsesRawBytes(t *testing.T) {
 	}
 }
 
+// TestSummariseToolInput_OversizedInputCap pins R242-SEC-13 / #645: an
+// attacker-controlled transcript line carrying a megabyte JSON blob in an
+// unrecognised key must not force json.Unmarshal to walk the full payload
+// — every assistant tool_use turn renders a header label, so a single
+// malicious line could otherwise amplify into a per-render full scan.
+//
+// Contract: inputs > maxToolInputProbeBytes skip the typed-probe decode
+// entirely and fall back to truncated raw bytes. SanitizeForLog still
+// caps output at 200 bytes either way, so wire output stays bounded.
+func TestSummariseToolInput_OversizedInputCap(t *testing.T) {
+	t.Parallel()
+
+	// Build a JSON object with a recognised key (`command`) buried after a
+	// huge unrecognised string. If the cap is honoured, the typed probe is
+	// skipped and the fallback returns the truncated head bytes (which
+	// start with `{"`). If the cap is missing, the probe would extract
+	// `command:"ls"` and emit just `ls` — an observable regression.
+	huge := make([]byte, maxToolInputProbeBytes+8)
+	for i := range huge {
+		huge[i] = 'x'
+	}
+	rawBytes := append([]byte(`{"junk":"`), huge...)
+	rawBytes = append(rawBytes, []byte(`","command":"ls"}`)...)
+
+	got := summariseToolInput("Bash", json.RawMessage(rawBytes))
+	if got == "ls" {
+		t.Errorf("oversized input bypassed cap: summary=%q decoded the trailing command field; the size guard should have skipped json.Unmarshal", got)
+	}
+	if got == "" {
+		t.Errorf("oversized input returned empty; expected truncated raw-bytes fallback")
+	}
+	// SanitizeForLog caps output at 200 bytes regardless of input size.
+	if len(got) > 200 {
+		t.Errorf("oversized input: summary length=%d > 200 cap; SanitizeForLog should have truncated", len(got))
+	}
+
+	// Inputs exactly at the cap must still go through the typed probe.
+	// Build a recognisable Bash payload sized to fit under the cap.
+	smallRaw := json.RawMessage(`{"command":"echo hi"}`)
+	if len(smallRaw) > maxToolInputProbeBytes {
+		t.Fatalf("test setup: small raw exceeds cap (%d > %d)", len(smallRaw), maxToolInputProbeBytes)
+	}
+	if got := summariseToolInput("Bash", smallRaw); got != "echo hi" {
+		t.Errorf("small input: summary=%q, want %q (probe path)", got, "echo hi")
+	}
+}
+
 // TestMaxTranscriptBytes_Int64Type pins R244-GO-P2-3 (#911): the
 // transcript reader directly constructs `&io.LimitedReader{N: …}`
 // rather than calling io.LimitReader, so the source operand must be

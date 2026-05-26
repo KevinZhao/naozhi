@@ -997,12 +997,42 @@ type toolInputProbe struct {
 	Query    string `json:"query,omitempty"`
 }
 
+// maxToolInputProbeBytes caps the JSON byte length summariseToolInput will
+// attempt to decode. R242-SEC-13 / #645: a transcript line carrying a
+// pathological tool_use input (deeply-nested JSON or a megabyte string in
+// an unrecognised key) would force json.Unmarshal to walk the full payload
+// even though we only emit a 200-byte header label. The decoder allocates
+// on every nested level it encounters, so an attacker who can write a
+// transcript can amplify a single header render into a multi-MB scan.
+//
+// 64 KiB is comfortably above any realistic tool-input recognised here
+// (Bash command + file_path are typically <1 KiB) while bounding the
+// worst-case decoder cost to a fixed budget. Lines exceeding the cap fall
+// through to the truncated-input fallback so the dashboard still shows a
+// useful header (the sanitizer below already enforces the 200-byte output
+// ceiling).
+const maxToolInputProbeBytes = 64 * 1024
+
 // summariseToolInput builds a one-line label for the tool_use card
 // header. Best-effort: Bash → command, Read/Write/Edit → file_path,
 // otherwise fall back to a JSON-trimmed dump of the input.
+//
+// R242-SEC-13 / #645: oversized inputs are truncated before json.Unmarshal
+// so a malicious transcript line cannot amplify the per-line decode cost
+// past a fixed budget. The output is independently capped at 200 bytes by
+// SanitizeForLog so wire output stays bounded either way.
 func summariseToolInput(name string, input json.RawMessage) string {
 	if len(input) == 0 {
 		return ""
+	}
+	if len(input) > maxToolInputProbeBytes {
+		// Skip the probe decode entirely on oversized payloads — the
+		// decoder's reflect cost grows with input length × nesting and
+		// the typed probe only carries six top-level string fields, so
+		// the work is wasted on a payload we will fall back to truncating
+		// anyway. SanitizeForLog still applies its 200-byte cap on the
+		// truncated head bytes.
+		return osutil.SanitizeForLog(string(input[:maxToolInputProbeBytes]), 200)
 	}
 	var probe toolInputProbe
 	if err := json.Unmarshal(input, &probe); err != nil {
