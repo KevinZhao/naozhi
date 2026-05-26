@@ -57,8 +57,11 @@ const maxLabelKeyLen = 256
 // while keeping the per-tuple cardinality bounded.
 const maxLabelSegmentLen = 64
 
-// LabeledCounter wraps an expvar.Map and exposes Add(labels, delta) plus
-// a Sum() helper for tests. Zero value not usable — call NewLabeledCounter.
+// LabeledCounter wraps an expvar.Map and exposes Add(labels, delta) as
+// the sole production write entrypoint. Read-side helpers (Get / Sum /
+// ForEachKey) live in labeled_test_helpers_test.go so they don't bloat
+// the production export surface — operators read labeled metrics via
+// /debug/vars. Zero value not usable — call NewLabeledCounter.
 type LabeledCounter struct {
 	m *expvar.Map
 }
@@ -78,33 +81,6 @@ func NewLabeledCounter(name string) *LabeledCounter {
 // keys collapse into LabelOverflow — see package doc.
 func (lc *LabeledCounter) Add(delta int64, labels ...string) {
 	lc.m.Add(labelKey(labels), delta)
-}
-
-// Get returns the current value for the given label tuple. Returns 0 if
-// the tuple was never seen (never incremented). Test-only helper; in
-// production read /debug/vars for the canonical view.
-func (lc *LabeledCounter) Get(labels ...string) int64 {
-	v := lc.m.Get(labelKey(labels))
-	if v == nil {
-		return 0
-	}
-	if iv, ok := v.(*expvar.Int); ok {
-		return iv.Value()
-	}
-	return 0
-}
-
-// Sum returns the total across all label tuples. Useful in tests to
-// assert "the sum of labeled increments equals the legacy unlabeled
-// counter" during the double-write migration window.
-func (lc *LabeledCounter) Sum() int64 {
-	var total int64
-	lc.m.Do(func(kv expvar.KeyValue) {
-		if iv, ok := kv.Value.(*expvar.Int); ok {
-			total += iv.Value()
-		}
-	})
-	return total
 }
 
 // LabeledGauge is the gauge counterpart to LabeledCounter. Same map
@@ -158,17 +134,6 @@ func (lg *LabeledGauge) Get(labels ...string) int64 {
 	return 0
 }
 
-// Sum returns the total across all label tuples.
-func (lg *LabeledGauge) Sum() int64 {
-	var total int64
-	lg.m.Do(func(kv expvar.KeyValue) {
-		if iv, ok := kv.Value.(*expvar.Int); ok {
-			total += iv.Value()
-		}
-	})
-	return total
-}
-
 // ForEachKey calls fn with every label-tuple key present in the gauge.
 // Used by reconciliation paths (e.g. session.Router.countActive) that
 // need to zero out previously-seen backends whose last session exited
@@ -176,12 +141,6 @@ func (lg *LabeledGauge) Sum() int64 {
 // last value forever. Fn must not call other methods on lg (deadlock).
 func (lg *LabeledGauge) ForEachKey(fn func(key string)) {
 	lg.m.Do(func(kv expvar.KeyValue) { fn(kv.Key) })
-}
-
-// ForEachKey on LabeledCounter for symmetry; rarely needed (counters
-// only grow) but useful in tests.
-func (lc *LabeledCounter) ForEachKey(fn func(key string)) {
-	lc.m.Do(func(kv expvar.KeyValue) { fn(kv.Key) })
 }
 
 // labelKey joins label values into a single string for use as an
