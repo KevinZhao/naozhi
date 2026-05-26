@@ -136,6 +136,22 @@ type Hub struct {
 	// the hot path and monotonic — acceptable because the existing return
 	// value was already eventually-consistent (per-client loads race with
 	// concurrent SendRaw drops).
+	//
+	// Granularity contract (R250-SEC-11 / #1100): this counter is
+	// intentionally process-wide / Hub-aggregated, NOT per-client. An
+	// authenticated dashboard tab that triggers its OWN SendRaw drops by
+	// stalling its WS read can observe DroppedMessages() advance, which
+	// in principle gives a 1-bit side-channel for "did anyone else's
+	// broadcast also drop in this window?". Mitigation in this codebase
+	// is the auth gate on /health (the only HTTP exporter) plus the
+	// fact that each authenticated user already shares the same trust
+	// boundary as the Hub itself — there is no "untrusted authenticated
+	// peer" tier. If a future deployment introduces multi-tenant auth
+	// (different users on different shards) this counter MUST move
+	// behind a debug-only flag (e.g. /api/debug/vars when debug_mode=
+	// true) before being surfaced to per-user JSON. Document at the
+	// field rather than at /health so the granularity decision survives
+	// a /health rewrite.
 	droppedTotal atomic.Int64
 	clients      map[*wsClient]struct{}
 	// subscriberCount tracks per-key subscriber count for the
