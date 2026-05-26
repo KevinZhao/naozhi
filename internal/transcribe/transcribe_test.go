@@ -3,6 +3,7 @@ package transcribe
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/transcribestreaming"
@@ -201,5 +202,60 @@ func TestBuildInput_MultiLanguage_Spaces(t *testing.T) {
 	}
 	if input.PreferredLanguage != "zh-CN" {
 		t.Errorf("PreferredLanguage = %q, want %q", input.PreferredLanguage, "zh-CN")
+	}
+}
+
+// TestLookupFFmpeg_NoProcessWideCache pins R240-SEC-9 (#1050): the previous
+// implementation memoised the first exec.LookPath result for the lifetime
+// of the process via sync.Once, so a startup-time PATH state stayed pinned
+// even after the operator (or an attacker) removed the offending entry.
+//
+// This test mutates PATH between two lookupFFmpeg calls and asserts the
+// second call observes the new state. The check only runs when ffmpeg is
+// actually installed on the host (otherwise both sides return
+// ErrFFmpegNotFound and the assertion is vacuous); the post-fix-only
+// branch below ALSO covers the cache-removed contract: clearing PATH
+// must produce a fresh "not found" answer immediately, not the cached
+// success.
+func TestLookupFFmpeg_NoProcessWideCache(t *testing.T) {
+	originalPATH := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", originalPATH) })
+
+	// First lookup with the host's normal PATH. Capture the outcome so the
+	// "PATH cleared" assertion below knows whether ffmpeg is available at
+	// all on this CI worker.
+	firstPath, firstErr := lookupFFmpeg()
+
+	// Clear PATH and call again. With the sync.Once cache the function
+	// would still report the previous success path; without the cache
+	// (post-fix) it must report "ffmpeg not found".
+	if err := os.Setenv("PATH", ""); err != nil {
+		t.Fatalf("setenv PATH=\"\": %v", err)
+	}
+	clearedPath, clearedErr := lookupFFmpeg()
+	if clearedErr == nil {
+		t.Errorf("lookupFFmpeg with empty PATH returned %q, nil — expected an error "+
+			"because the previous implementation cached the first PATH-resolved "+
+			"binary process-wide and ignored later PATH changes (R240-SEC-9 / #1050)",
+			clearedPath)
+	}
+
+	// Restore PATH and assert we again see whatever the host has —
+	// re-resolving must surface a fresh outcome each time.
+	os.Setenv("PATH", originalPATH)
+	secondPath, secondErr := lookupFFmpeg()
+	if firstErr == nil {
+		// Host has ffmpeg: re-resolution must still find it after PATH
+		// was bounced through empty. With the cache removed every call
+		// is a fresh exec.LookPath, so success must reappear.
+		if secondErr != nil {
+			t.Errorf("lookupFFmpeg after PATH restore returned err %v; "+
+				"expected a fresh resolution to find the same ffmpeg as the "+
+				"first lookup (%q)", secondErr, firstPath)
+		}
+		if secondPath == "" {
+			t.Errorf("lookupFFmpeg after PATH restore returned empty path; " +
+				"expected re-resolution to find a binary on the restored PATH")
+		}
 	}
 }

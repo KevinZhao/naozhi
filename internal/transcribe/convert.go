@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"sync"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
@@ -15,17 +14,29 @@ import (
 // ErrFFmpegNotFound is returned when ffmpeg is not installed.
 var ErrFFmpegNotFound = errors.New("ffmpeg not found in PATH; install with: dnf install -y ffmpeg")
 
-var (
-	ffmpegOnce sync.Once
-	ffmpegPath string
-	ffmpegErr  error
-)
-
+// lookupFFmpeg resolves the ffmpeg binary on every call rather than caching
+// the first PATH-resolved entry process-wide.
+//
+// R240-SEC-9 (#1050): the previous implementation used sync.Once to memoise
+// the first exec.LookPath result for the lifetime of the process. That
+// turned a one-shot startup-time PATH resolution into a permanent foot-gun:
+//
+//   - If a privileged operator updates PATH (e.g. installs ffmpeg into
+//     /usr/local/bin after the first transcribe attempt failed) the running
+//     naozhi keeps returning ErrFFmpegNotFound until restart.
+//   - If an attacker can transiently inject a writable directory ahead of
+//     the system ffmpeg in PATH at startup (PATH injection at the systemd
+//     unit / shell rc level), the malicious binary is pinned for the
+//     entire process lifetime even after the operator removes the rogue
+//     entry.
+//
+// Re-resolving on each transcribe request keeps the PATH binding fresh.
+// exec.LookPath is a stat per PATH entry — well under a millisecond on
+// any reasonable system, and this code path is voice-message-rate
+// (≤ a few requests/second per chat), nowhere near a hot loop. The
+// sync.Once-saved syscalls were never measurably worth the cache hazard.
 func lookupFFmpeg() (string, error) {
-	ffmpegOnce.Do(func() {
-		ffmpegPath, ffmpegErr = exec.LookPath("ffmpeg")
-	})
-	return ffmpegPath, ffmpegErr
+	return exec.LookPath("ffmpeg")
 }
 
 // pcmStream holds a running ffmpeg process that streams PCM output.
