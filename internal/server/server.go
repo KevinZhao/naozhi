@@ -566,10 +566,20 @@ func buildServer(opts ServerOptions) *Server {
 	// fatal escalation. This pair-warn at least guarantees operators see
 	// the risk before an incident, mapping onto the TODO's "升级 warn 严重度"
 	// ask while preserving boot-compat.
+	//
+	// R237-SEC-9 / #658: the multi-user-intent + network-reachable branch
+	// upgrades from Warn to Error. The single-user/loopback branch stays
+	// Warn because that's the legitimate dev-laptop default. Error level
+	// (a) routes to stderr in slog default text handler, (b) shows up
+	// distinctly under journald PRIORITY filtering, and (c) trips alerting
+	// pipelines that ignore Warn. The boot itself is intentionally not
+	// failed — `naozhi doctor` remains the right place for hard-fail
+	// because operators can run it standalone before exposing the listener
+	// without burning a service-restart cycle on an upgrade.
 	if opts.AllowedRoot == "" {
 		slog.Warn("server.allowed_root is unset; dashboard /cd, cron WorkDir, and takeover CWD accept any absolute path — set allowed_root in config.yaml to restrict")
 		if opts.DashboardToken != "" && isPlaintextPublicAddr(opts.Addr) {
-			slog.Warn("HIGH: allowed_root unset on a token-protected, network-reachable dashboard — any authenticated user can set cron WorkDir to /etc or other system paths and let the CLI write there. Set server.allowed_root before exposing this listener.",
+			slog.Error("allowed_root unset on a token-protected, network-reachable dashboard — any authenticated user can set cron WorkDir to /etc or other system paths and let the CLI write there. Set server.allowed_root before exposing this listener; `naozhi doctor` will hard-fail this configuration.",
 				"addr", opts.Addr,
 			)
 		}
