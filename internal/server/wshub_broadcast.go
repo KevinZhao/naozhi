@@ -202,12 +202,29 @@ func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
 	// R185-SEC-H2: scheduler generates jobID as 8-char hex today, but if a
 	// future path ever surfaces a config-supplied / user-typed ID, bidi/C0
 	// chars would reach the dashboard via a SetEscapeHTML(false) encoder.
-	// Sanitize defensively; result/errMsg are already scrubbed at recordResult.
+	// Sanitize defensively; result/errMsg are already scrubbed at recordResult
+	// (cron/scheduler_finish.go: truncateWithSuffix + SanitizeForLog).
+	//
+	// R246-SEC-7: bring result / errMsg to defense-in-depth parity with the
+	// rest of the broadcast surface. recordResult is the only documented
+	// caller today, but cron_result is a public Hub method — a future caller
+	// (test fixture, external webhook bridge, mistakenly-rebased cron path
+	// before sanitisation) would otherwise route raw bidi / C1 / DEL bytes
+	// straight to authenticated dashboard clients via SetEscapeHTML(false)
+	// JSON. Apply the same SanitizeForLog cap used by BroadcastCronRunEnded
+	// at this site so the WS payload is independently safe regardless of
+	// upstream pre-sanitisation. The 4128-byte cap (4096 result runes +
+	// truncate-suffix slack) matches maxStoredResultRunes so already-sanitised
+	// inputs round-trip unchanged; oversized inputs (which would never reach
+	// us through the documented path) get truncated rather than dropped so
+	// the dashboard still surfaces a partial result.
+	const maxBroadcastResultBytes = 4128
+	const maxBroadcastErrorBytes = 4128
 	data, err := marshalPooled(cronResultMsg{
 		Type:   "cron_result",
 		JobID:  osutil.SanitizeForLog(jobID, 64),
-		Result: result,
-		Error:  errMsg,
+		Result: osutil.SanitizeForLog(result, maxBroadcastResultBytes),
+		Error:  osutil.SanitizeForLog(errMsg, maxBroadcastErrorBytes),
 	})
 	if err != nil {
 		return
