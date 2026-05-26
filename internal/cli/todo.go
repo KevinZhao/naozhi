@@ -71,21 +71,6 @@ func ParseTodosWithRaw(input json.RawMessage) (todos []TodoItem, rawTodos json.R
 	return todos, rawW.Todos, true
 }
 
-// TodosDetailJSON returns a stable JSON representation of the todos list so
-// downstream consumers (dashboard UI) can parse without needing access to the
-// original tool input. Returns "" on marshal error.
-//
-// Prefer ParseTodosWithRaw + string(rawTodos) when the original tool_use
-// input is still in scope: it skips the redundant Marshal that this
-// helper performs.
-func TodosDetailJSON(todos []TodoItem) string {
-	b, err := json.Marshal(todos)
-	if err != nil {
-		return ""
-	}
-	return string(b)
-}
-
 // Status emoji used by TodosSummary / TodosMarkdown. Centralised so a
 // future policy switch (e.g. ASCII-only deployment, alternative status
 // glyphs) can land in one place. R227-CR-13.
