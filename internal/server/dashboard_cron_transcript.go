@@ -1038,12 +1038,34 @@ type toolInputProbe struct {
 	Query    string `json:"query,omitempty"`
 }
 
+// summariseToolInputMaxBytes caps the raw JSON we'll feed to
+// json.Unmarshal in summariseToolInput. R242-SEC-13 (#645): the upstream
+// per-line cap (maxTranscriptLineBytes = 256 KB) bounds b.Input by line
+// size, but a single large/deeply-nested tool_use Input would still pay
+// the full Unmarshal cost (and stack traversal) just to produce a 200-
+// char label that we'd ultimately truncate anyway. Anything that exceeds
+// this threshold falls back to a direct byte truncation: the output the
+// dashboard displays is identical (sanitised raw-bytes prefix) without
+// the deep-decode amplification on hostile / pathological inputs. 4 KB
+// covers every legitimate tool_use Input the CLI emits today (Bash
+// commands, file paths, URLs, search patterns) with comfortable headroom.
+const summariseToolInputMaxBytes = 4 * 1024
+
 // summariseToolInput builds a one-line label for the tool_use card
 // header. Best-effort: Bash → command, Read/Write/Edit → file_path,
 // otherwise fall back to a JSON-trimmed dump of the input.
 func summariseToolInput(name string, input json.RawMessage) string {
 	if len(input) == 0 {
 		return ""
+	}
+	// R242-SEC-13 (#645): defence in depth against decode-amplification on
+	// large/deeply-nested Input. Above the threshold we skip Unmarshal and
+	// fall straight through to the byte-truncated fallback the success path
+	// also uses on probe-miss; the wire output stays sanitised, just without
+	// the typed-key promotion (Bash → command etc.) that the probe would
+	// have provided. Legitimate tool_use Inputs are well under this cap.
+	if len(input) > summariseToolInputMaxBytes {
+		return osutil.SanitizeForLog(string(input), 200)
 	}
 	var probe toolInputProbe
 	if err := json.Unmarshal(input, &probe); err != nil {

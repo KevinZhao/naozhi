@@ -805,6 +805,64 @@ func TestSummariseToolInput_FallbackUsesRawBytes(t *testing.T) {
 	}
 }
 
+// TestSummariseToolInput_OversizeBypassesUnmarshal pins R242-SEC-13 (#645):
+// inputs that exceed summariseToolInputMaxBytes must skip json.Unmarshal
+// entirely and go directly to the byte-truncated fallback. This bounds
+// the worst-case decode cost regardless of how deeply nested or pathological
+// the input JSON is — even if the upstream maxTranscriptLineBytes (256 KB)
+// bounded the raw line, a single ridiculously-nested tool_use Input could
+// otherwise still pay the full Unmarshal stack-walk cost just to produce
+// a 200-char label that we'd ultimately truncate anyway.
+//
+// We verify two contracts:
+//
+//   - Output is non-empty for an oversize input that is otherwise
+//     well-formed JSON: the fallback path through SanitizeForLog must
+//     surface the prefix.
+//   - Even for an OVERSIZE input that is malformed JSON (would normally
+//     cause json.Unmarshal to return an error and summariseToolInput to
+//     return ""), the oversize bypass produces a non-empty truncated
+//     prefix — proving the Unmarshal step is never invoked for oversize
+//     inputs.
+func TestSummariseToolInput_OversizeBypassesUnmarshal(t *testing.T) {
+	t.Parallel()
+
+	// Build an oversize but otherwise well-formed JSON object with a
+	// recognised priority field. The well-formed path wouldn't take the
+	// fallback branch — but at the oversize threshold the bypass forces
+	// the raw-bytes fallback regardless. So the output must be a
+	// truncated prefix of the raw JSON, NOT the recognised "command"
+	// value the probe would have lifted.
+	pad := strings.Repeat("x", summariseToolInputMaxBytes+1)
+	raw := json.RawMessage(`{"command":"ls","filler":"` + pad + `"}`)
+	if len(raw) <= summariseToolInputMaxBytes {
+		t.Fatalf("test setup: raw len %d not > cap %d", len(raw), summariseToolInputMaxBytes)
+	}
+	got := summariseToolInput("Bash", raw)
+	if got == "" {
+		t.Errorf("oversize well-formed: summary unexpectedly empty (oversize bypass should yield truncated raw)")
+	}
+	// SanitizeForLog caps at 200 chars, so the bypass output must not
+	// exceed that ceiling regardless of input size.
+	if len(got) > 256 {
+		t.Errorf("oversize: summary len=%d exceeds 256 byte SanitizeForLog ceiling (200 chars + UTF-8 slack)", len(got))
+	}
+
+	// Oversize MALFORMED input: if the bypass were missing, json.Unmarshal
+	// would fail and summariseToolInput would return "". With the bypass,
+	// the raw-bytes fallback runs and produces a non-empty prefix — the
+	// canary proving the bypass is taking the Unmarshal off the hot path
+	// even on hostile inputs.
+	rawBroken := json.RawMessage(`{not-valid-json-` + pad)
+	if len(rawBroken) <= summariseToolInputMaxBytes {
+		t.Fatalf("test setup: rawBroken len %d not > cap %d", len(rawBroken), summariseToolInputMaxBytes)
+	}
+	gotBroken := summariseToolInput("X", rawBroken)
+	if gotBroken == "" {
+		t.Errorf("oversize malformed: summary empty — bypass missing, Unmarshal-failure path swallowed the input")
+	}
+}
+
 // TestFlattenJSONLEvent_DispatchByType pins R242-CR-13 (#704): the
 // monolithic flattenJSONLEvent body was split into per-type helpers
 // (flattenUserEvent / flattenAssistantEvent / flattenSystemEvent) wired
