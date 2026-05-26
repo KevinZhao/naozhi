@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -127,7 +126,7 @@ var processEUID = uint32(os.Geteuid())
 // The mode/UID pair is read from the FileInfo we already Lstat'd, so this
 // is a zero-syscall check on the hot path.
 func isPublicTmpForeignPrivate(info os.FileInfo) bool {
-	st, ok := info.Sys().(*syscall.Stat_t)
+	uid, ok := fileOwnerUID(info)
 	if !ok {
 		// Non-Unix or stub FileInfo (test fakes); be conservative and
 		// allow — the production build is always Linux where the
@@ -136,7 +135,7 @@ func isPublicTmpForeignPrivate(info os.FileInfo) bool {
 		// fixture file.
 		return false
 	}
-	if st.Uid == processEUID {
+	if uid == processEUID {
 		return false
 	}
 	// Owner-private == no group OR world read/exec/write bits.

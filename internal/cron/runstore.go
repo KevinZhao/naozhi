@@ -15,7 +15,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -861,19 +860,11 @@ func (s *runStore) Get(jobID, runID string) (*CronRun, error) {
 // directory scans, so they use readRunNoLstat to avoid paying for the
 // redundant fd validation.
 func (s *runStore) readRun(path string) (*CronRun, error) {
-	// O_NOFOLLOW: refuse to open a final-component symlink. If an attacker
-	// races a swap-to-symlink between our caller's path construction and
-	// Open, the open itself fails with ELOOP. O_RDONLY|O_CLOEXEC are
-	// hygiene defaults — never let a forked child inherit the fd.
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	// openRunFile is platform-specialised: Unix uses O_NOFOLLOW for a
+	// kernel-atomic symlink refusal; Windows falls back to a Lstat-then-
+	// Open two-step (best-effort, since O_NOFOLLOW is Unix-only).
+	f, err := openRunFile(path)
 	if err != nil {
-		// Map ELOOP to our "not a regular file" error so callers can
-		// distinguish "missing" (fs.ErrNotExist) from "actively malicious"
-		// (ErrCorruptRun) without leaking the syscall name to higher
-		// layers. Other errors (EACCES, EIO …) propagate unchanged.
-		if errors.Is(err, syscall.ELOOP) {
-			return nil, fmt.Errorf("%w: refused to follow symlink", ErrCorruptRun)
-		}
 		return nil, err
 	}
 	defer f.Close()
