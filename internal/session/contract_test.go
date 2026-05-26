@@ -28,13 +28,21 @@ import (
 	"github.com/naozhi/naozhi/internal/upstream"
 )
 
-// Enforce *session.Router satisfies every consumer's interface. All
-// four consumers from docs/rfc/consumer-interfaces.md are covered;
-// any new Router method signature drift surfaces here as a single
-// CI failure instead of four scattered ones.
+// Enforce *session.Router satisfies every consumer's interface. The
+// dispatch / server / upstream consumers from
+// docs/rfc/consumer-interfaces.md are covered here so any Router
+// signature drift surfaces in one CI failure instead of three.
+//
+// cron.SessionRouter is INTENTIONALLY not pinned: post Phase B
+// (docs/rfc/cron-sysession-merge.md §3.3) the cron interface speaks
+// in cron-local types (cron.AgentOpts / cron.Session) rather than
+// session.AgentOpts / *session.ManagedSession, so *session.Router no
+// longer satisfies it directly. The cmd/naozhi adapter
+// (cronRouterAdapter) bridges the two; the round-trip test for that
+// adapter lives in cmd/naozhi/cron_router_adapter_test.go.
 var (
 	_ dispatch.SessionRouter = (*session.Router)(nil)
 	_ server.HubRouter       = (*session.Router)(nil)
 	_ upstream.SessionRouter = (*session.Router)(nil)
-	_ cron.SessionRouter     = (*session.Router)(nil)
 )
+var _ = cron.SessionRouter(nil) // keep cron import alive for godoc cross-ref

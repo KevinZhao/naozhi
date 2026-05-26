@@ -16,7 +16,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 func TestWorkDirReachable_EmptyPath(t *testing.T) {
@@ -163,7 +163,7 @@ func TestCRON2_FreshExecuteProceedsWhenWorkDirExists(t *testing.T) {
 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	wantKey := session.CronKey(job.ID)
+	wantKey := sessionkey.CronKey(job.ID)
 	resetFound := false
 	for _, k := range fake.resetCalls {
 		if k == wantKey {
@@ -211,7 +211,7 @@ func TestCRON2_EmptyWorkDirPassesThrough(t *testing.T) {
 	// Empty WorkDir must reach Reset (guard is permissive on empty).
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	wantKey := session.CronKey(job.ID)
+	wantKey := sessionkey.CronKey(job.ID)
 	found := false
 	for _, k := range fake.resetCalls {
 		if k == wantKey {

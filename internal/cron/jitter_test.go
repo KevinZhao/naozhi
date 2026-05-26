@@ -7,8 +7,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/session"
 )
 
 // TestApplyJitter_ZeroMaxNoOp 确保 jitterMax=0 时 applyJitter 立即返回。
@@ -281,10 +279,10 @@ func (r *jitterStubRouter) RegisterCronStubWithChain(key, workspace, lastPrompt 
 	_, _, _, _ = key, workspace, lastPrompt, chainIDs
 }
 func (r *jitterStubRouter) Reset(key string) { _ = key }
-func (r *jitterStubRouter) GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error) {
+func (r *jitterStubRouter) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (Session, SessionStatus, error) {
 	_ = ctx
 	_ = key
 	_ = opts
 	atomic.AddInt64(&r.calls, 1)
-	return nil, session.SessionExisting, context.Canceled
+	return nil, SessionExisting, context.Canceled
 }

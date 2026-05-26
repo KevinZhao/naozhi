@@ -17,7 +17,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/platform"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // ErrJobNotFound is returned by lookup/mutation APIs when no cron job matches.
@@ -118,9 +118,11 @@ type SessionRouter interface {
 	//     sites that have already released scheduler.mu.
 	Reset(key string)
 	// GetOrCreate returns an existing session or spawns a new one at
-	// execute time. The SessionStatus and *ManagedSession escape the
-	// cron package because the scheduler needs to call Send on them.
-	GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
+	// execute time. Returns cron-local Session / SessionStatus types so
+	// the scheduler does not transitively depend on internal/session.
+	// The production wireup (cmd/naozhi/cron_router_adapter.go) wraps
+	// *session.ManagedSession in a cron.Session adapter.
+	GetOrCreate(ctx context.Context, key string, opts AgentOpts) (Session, SessionStatus, error)
 }
 
 // SchedulerConfig holds configuration for the cron scheduler.
@@ -130,7 +132,7 @@ type SchedulerConfig struct {
 	// passes a *session.Router which satisfies it transparently.
 	Router        SessionRouter
 	Platforms     map[string]platform.Platform
-	Agents        map[string]session.AgentOpts
+	Agents        map[string]AgentOpts
 	AgentCommands map[string]string
 	StorePath     string
 	MaxJobs       int
@@ -233,7 +235,7 @@ type Scheduler struct {
 	// atomic.Pointer[map[...]] swap-on-write so reads stay lock-free without
 	// racing the writer.
 	platforms     map[string]platform.Platform
-	agents        map[string]session.AgentOpts
+	agents        map[string]AgentOpts
 	agentCommands map[string]string
 	storePath     string
 	maxJobs       int
@@ -936,7 +938,7 @@ func (s *Scheduler) registerStubByValue(id, workDir, prompt, lastSessionID strin
 	if lastSessionID != "" {
 		chain = []string{lastSessionID}
 	}
-	s.router.RegisterCronStubWithChain(session.CronKey(id), workDir, prompt, chain)
+	s.router.RegisterCronStubWithChain(sessionkey.CronKey(id), workDir, prompt, chain)
 }
 
 // registerStubFromJob 是 registerStubByValue 的便捷包装，对未持锁、且对
@@ -959,10 +961,10 @@ func (s *Scheduler) registerStubFromJob(j *Job) {
 // has nothing to attach to. This method is the idempotent recovery hook
 // wired into handleSubscribe and /api/sessions/events.
 func (s *Scheduler) EnsureStub(key string) bool {
-	if !session.IsCronKey(key) {
+	if !sessionkey.IsCronKey(key) {
 		return false
 	}
-	id := key[len(session.CronKeyPrefix):]
+	id := key[len(sessionkey.CronKeyPrefix):]
 	if id == "" {
 		return false
 	}
@@ -1261,7 +1263,7 @@ func (s *Scheduler) resetRouterStub(jobID string) {
 	if s.router == nil {
 		return
 	}
-	s.router.Reset(session.CronKey(jobID))
+	s.router.Reset(sessionkey.CronKey(jobID))
 }
 
 // slogPrintfLogger satisfies the Printf interface that robfig/cron's

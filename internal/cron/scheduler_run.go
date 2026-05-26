@@ -28,7 +28,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 
 	robfigcron "github.com/robfig/cron/v3"
 )
@@ -488,41 +488,27 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 //     - bumps the per-state metrics.CronRun*Total counter
 //     so all terminal paths share one observability hook.
 //
-// deadlineInterrupter is the narrow capability runDeadlineWatchdog needs
-// from a session: a way to abort an in-flight CLI turn via the protocol's
-// control_request channel. *session.ManagedSession satisfies this; cron
-// tests stub it with a counting mock to assert the watchdog fired
-// exactly when the deadline elapsed.
-//
-// SIGNATURE NOTE (R239-GO-2): InterruptViaControl here returns
-// session.InterruptOutcome — DELIBERATELY different from the lower-level
-// session.processIface.InterruptViaControl, which returns plain `error`.
-// The two operate at different layers:
-//
-//   - processIface (internal/session) is the raw cli.Process facet — its
-//     error reflects pipe-write / encode failure on the control_request
-//     channel and tells nothing about whether the CLI actually had an
-//     active turn to abort.
-//   - ManagedSession.InterruptViaControl (which this interface mirrors)
-//     wraps that and additionally classifies the no-active-turn / dead-
-//     process / unsupported-by-backend cases into structured outcomes.
-//     Cron's watchdog needs that classification to log "deadline fired,
-//     interrupt did not land" vs "deadline fired, ACP backend unsupported".
-//
-// Refactor footgun: a future "InterruptViaControl" added anywhere on the
-// session-facing surface MUST follow the layer convention — raw process =>
-// error, managed session => InterruptOutcome. Do NOT collapse the two.
-type deadlineInterrupter interface {
-	InterruptViaControl() session.InterruptOutcome
-}
-
 // abortResult bundles the watchdog's exit signal: whether it actually
 // fired the interrupt (i.e. the ctx ended via DeadlineExceeded, not via
 // success-path Cancel) and what the InterruptViaControl outcome was when
 // it did. The fired flag is the discriminator the caller logs.
+//
+// outcome is the cron-local InterruptOutcome; the production adapter
+// in cmd/naozhi/cron_router_adapter.go casts session.InterruptOutcome
+// → cron.InterruptOutcome via a numeric cast, with an init() panic
+// pinning the ordinals.
 type abortResult struct {
-	outcome session.InterruptOutcome
+	outcome InterruptOutcome
 	fired   bool
+}
+
+// deadlineInterrupter is the narrow capability runDeadlineWatchdog needs
+// from a session: a way to abort an in-flight CLI turn via the protocol's
+// control_request channel. cron.Session satisfies this; cron tests
+// stub it with a counting mock to assert the watchdog fired exactly when
+// the deadline elapsed without having to also implement Send.
+type deadlineInterrupter interface {
+	InterruptViaControl() InterruptOutcome
 }
 
 // runDeadlineWatchdog spawns a goroutine that waits on ctx and fires
@@ -849,7 +835,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// construction (cfg.AgentCommands / cfg.Agents) and never mutated;
 	// reading them without s.mu is safe. If a future SetAgents API is
 	// introduced both reads must move under s.mu.
-	agentID, cleanText := session.ResolveAgent(snap.prompt, s.agentCommands)
+	agentID, cleanText := resolveAgent(snap.prompt, s.agentCommands)
 	opts := cloneAgentOpts(s.agents[agentID])
 	opts.Exempt = true // cron sessions must not count toward maxProcs or evict user sessions
 	// Sprint 6c (docs/rfc/multi-backend.md §9): per-job backend override.
@@ -913,7 +899,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		}
 		opts.Workspace = workDirForCLI
 	}
-	key := session.CronKey(snap.jobID)
+	key := sessionkey.CronKey(snap.jobID)
 
 	// Fresh mode: drop any existing session (and its process + history) so
 	// GetOrCreate spawns a brand-new CLI. The helper handles ctx-cancel,
@@ -1065,7 +1051,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	abortCh := runDeadlineWatchdog(sendCtx, sess)
 
 	// Direct Send without sendWithBroadcast — cron jobs notify via onExecute callback instead.
-	result, err := sess.Send(sendCtx, cleanText, nil, nil)
+	result, err := sess.Send(sendCtx, cleanText)
 	// Cancel sendCtx so the watchdog returns promptly on the success / non-
 	// deadline error path; on the deadline path it's already done. Block
 	// on abortCh so the InterruptViaControl call (if any) completes before
@@ -1110,8 +1096,8 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			// signal to investigate transport-level breakage. The
 			// InterruptUnsupported tag is excluded by design: ACP jobs
 			// always report unsupported and would otherwise spam Warn.
-			if abort.fired && abort.outcome != session.InterruptSent &&
-				abort.outcome != session.InterruptUnsupported {
+			if abort.fired && abort.outcome != InterruptSent &&
+				abort.outcome != InterruptUnsupported {
 				lg.Warn("cron send deadline exceeded; interrupt did not land",
 					"err", err,
 					"abort_fired", abort.fired,
@@ -1257,11 +1243,11 @@ func jitterSleep(ctx context.Context, period, jitterMax time.Duration) {
 // R246-GO-17 / R228-GO-P3-8: previous code only clipped ExtraArgs.
 // Today AgentOpts only carries one slice field (ExtraArgs) — plus
 // strings/bool — so clipping was sufficient. This helper centralises the
-// clone so any future field added to session.AgentOpts (e.g. an Env map
+// clone so any future field added to cron.AgentOpts (e.g. an Env map
 // or HookConfigs slice) gets defensive copy automatically rather than
 // leaking shared state into the per-run mutated copy. Keep this pure /
 // allocation-light: it sits on the cron run hot path.
-func cloneAgentOpts(opts session.AgentOpts) session.AgentOpts {
+func cloneAgentOpts(opts AgentOpts) AgentOpts {
 	if len(opts.ExtraArgs) > 0 {
 		// Slice-clone (full copy) rather than three-index clip because the
 		// caller may overwrite individual indices, not just append. Cost

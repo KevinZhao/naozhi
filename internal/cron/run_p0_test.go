@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // fakeRouter is a minimal SessionRouter that returns a configurable error
@@ -29,8 +29,8 @@ func (f *fakeRouter) Reset(key string) {
 	f.resetKey = key
 	f.mu.Unlock()
 }
-func (f *fakeRouter) GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error) {
-	return nil, 0, f.getErr
+func (f *fakeRouter) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (Session, SessionStatus, error) {
+	return nil, SessionExisting, f.getErr
 }
 
 // TestP0_OverlapSkippedEmitsTerminalEvent: when the CAS gate rejects a
@@ -193,7 +193,7 @@ func TestP0_PreflightWorkdirUnreachableMapsCorrectErrorClass(t *testing.T) {
 	}
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
 	stubRefresh, ok := s.freshContextPreflightP0(preflightArgs{
-		job: j, snap: snap, key: session.CronKey(j.ID), lg: lg,
+		job: j, snap: snap, key: sessionkey.CronKey(j.ID), lg: lg,
 		notifyTo: NotifyTarget{}, runID: "r1", startedAt: time.Now(), trigger: TriggerScheduled,
 	})
 	if ok {

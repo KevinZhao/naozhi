@@ -5,20 +5,19 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/session"
 )
 
 // countingInterrupter is a deadlineInterrupter test stub that records how
 // many times InterruptViaControl was called and what outcome to return.
 // Mirrors the minimal surface area runDeadlineWatchdog actually needs —
-// nothing else from session.ManagedSession is exercised by the watchdog.
+// nothing else from cron.Session (such as Send) is exercised by the
+// watchdog, so this stub deliberately stays narrower than Session.
 type countingInterrupter struct {
 	calls   atomic.Int32
-	outcome session.InterruptOutcome
+	outcome InterruptOutcome
 }
 
-func (c *countingInterrupter) InterruptViaControl() session.InterruptOutcome {
+func (c *countingInterrupter) InterruptViaControl() InterruptOutcome {
 	c.calls.Add(1)
 	return c.outcome
 }
@@ -32,7 +31,7 @@ func (c *countingInterrupter) InterruptViaControl() session.InterruptOutcome {
 // runs concurrently and fires while the process is still Running.
 func TestRunDeadlineWatchdog_FiresOnDeadlineExceeded(t *testing.T) {
 	t.Parallel()
-	ci := &countingInterrupter{outcome: session.InterruptSent}
+	ci := &countingInterrupter{outcome: InterruptSent}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 
@@ -41,7 +40,7 @@ func TestRunDeadlineWatchdog_FiresOnDeadlineExceeded(t *testing.T) {
 	if !abort.fired {
 		t.Fatalf("abort.fired = false, want true on DeadlineExceeded")
 	}
-	if abort.outcome != session.InterruptSent {
+	if abort.outcome != InterruptSent {
 		t.Fatalf("abort.outcome = %v, want InterruptSent", abort.outcome)
 	}
 	if got := ci.calls.Load(); got != 1 {
@@ -56,7 +55,7 @@ func TestRunDeadlineWatchdog_FiresOnDeadlineExceeded(t *testing.T) {
 // and force the next Send into a 500ms drain loop for nothing.
 func TestRunDeadlineWatchdog_SkipsOnExplicitCancel(t *testing.T) {
 	t.Parallel()
-	ci := &countingInterrupter{outcome: session.InterruptSent}
+	ci := &countingInterrupter{outcome: InterruptSent}
 	ctx, cancel := context.WithCancel(context.Background())
 
 	ch := runDeadlineWatchdog(ctx, ci)
@@ -79,7 +78,7 @@ func TestRunDeadlineWatchdog_NilGuard(t *testing.T) {
 	t.Parallel()
 	t.Run("nil ctx", func(t *testing.T) {
 		t.Parallel()
-		ci := &countingInterrupter{outcome: session.InterruptSent}
+		ci := &countingInterrupter{outcome: InterruptSent}
 		abort := <-runDeadlineWatchdog(nil, ci) //nolint:staticcheck // intentional nil for guard test
 		if abort.fired {
 			t.Fatalf("abort.fired = true with nil ctx; want false")
@@ -106,7 +105,7 @@ func TestRunDeadlineWatchdog_NilGuard(t *testing.T) {
 // fired but backend doesn't support it" from "no interrupt attempted".
 func TestRunDeadlineWatchdog_PropagatesUnsupportedOutcome(t *testing.T) {
 	t.Parallel()
-	ci := &countingInterrupter{outcome: session.InterruptUnsupported}
+	ci := &countingInterrupter{outcome: InterruptUnsupported}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
@@ -114,7 +113,7 @@ func TestRunDeadlineWatchdog_PropagatesUnsupportedOutcome(t *testing.T) {
 	if !abort.fired {
 		t.Fatal("abort.fired = false; ACP path should still record an attempt")
 	}
-	if abort.outcome != session.InterruptUnsupported {
+	if abort.outcome != InterruptUnsupported {
 		t.Fatalf("abort.outcome = %v, want InterruptUnsupported", abort.outcome)
 	}
 }
