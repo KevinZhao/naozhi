@@ -308,6 +308,17 @@ type ManagedSession struct {
 	// R231-CQ-6.
 	persistedSeededLen int
 
+	// persistedHistorySorted is true when persistedHistory is known to be
+	// sorted ascending by Time. Default false (zero value) keeps the legacy
+	// "sort on every read" behaviour for test fixtures that assign the
+	// slice directly; production mutations go through InjectHistory which
+	// computes monotonicity vs the existing tail and only flips the flag
+	// to true once a reader has paid the one-off sort. EventEntriesSince
+	// (1Hz dashboard push hot path × N tabs × M dead sessions) checks the
+	// flag and skips the stable sort once it lands true. Maintained under
+	// historyMu in lockstep with persistedHistory mutations. R237-PERF-12.
+	persistedHistorySorted bool
+
 	// prevSessionIDs tracks previous session IDs for this key (oldest → newest).
 	// Used on startup to load the full conversation chain from JSONL files.
 	// Capped at maxPrevSessionIDs to bound long-lived session memory and
@@ -1582,15 +1593,34 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	if proc != nil {
 		return proc.EventEntriesSince(afterMS)
 	}
-	var out []cli.EventEntry
+	// Skip the stable sort once the maintained invariant says
+	// persistedHistory is already in Time order. Steady-state dashboard
+	// polling (1Hz × N tabs × M dead sessions) used to pay this every
+	// call; the in-place sort under historyMu also blocks concurrent
+	// readers. While the flag is still false (initial state, or after an
+	// out-of-order InjectHistory) we promote to the write lock once, sort
+	// in place, set the flag, and downgrade — subsequent reads then take
+	// the cheap RLock-only path. R237-PERF-12.
 	s.historyMu.RLock()
+	if !s.persistedHistorySorted {
+		s.historyMu.RUnlock()
+		s.historyMu.Lock()
+		// Re-check under the write lock — another reader may have already
+		// sorted between the unlock and re-acquire.
+		if !s.persistedHistorySorted {
+			sortEntriesByTimeStable(s.persistedHistory)
+			s.persistedHistorySorted = true
+		}
+		s.historyMu.Unlock()
+		s.historyMu.RLock()
+	}
+	var out []cli.EventEntry
 	for _, e := range s.persistedHistory {
 		if e.Time > afterMS {
 			out = append(out, e)
 		}
 	}
 	s.historyMu.RUnlock()
-	sortEntriesByTimeStable(out)
 	return out
 }
 
@@ -1780,6 +1810,33 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	// The orphan ring is GC'd when the last reference (this closure)
 	// drops, so the extra append is a harmless no-op rather than a leak.
 	s.historyMu.Lock()
+	// Monotonicity check (R237-PERF-12): when persistedHistory is empty
+	// or already known sorted AND the appended batch is internally sorted
+	// w.r.t. the existing tail, the flag stays/becomes true and
+	// dead-session readers can skip the per-call stable sort. Out-of-order
+	// entries leave the flag false, falling back to the lazy sort-on-read
+	// path that EventEntriesSince still implements. Steady-state
+	// Send/result append is monotonic by construction (Append/AppendBatch
+	// stamp now), so the common path costs only this O(batch) scan.
+	if s.persistedHistorySorted || len(s.persistedHistory) == 0 {
+		monotonic := true
+		var prevTime int64
+		if n := len(s.persistedHistory); n > 0 {
+			prevTime = s.persistedHistory[n-1].Time
+		}
+		for _, e := range entries {
+			if e.Time < prevTime {
+				monotonic = false
+				break
+			}
+			prevTime = e.Time
+		}
+		if monotonic {
+			s.persistedHistorySorted = true
+		} else {
+			s.persistedHistorySorted = false
+		}
+	}
 	s.persistedHistory = append(s.persistedHistory, entries...)
 	if trimmed := len(s.persistedHistory) - maxPersistedHistory; trimmed > 0 {
 		s.persistedHistory = s.persistedHistory[trimmed:]
