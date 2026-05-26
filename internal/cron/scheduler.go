@@ -326,6 +326,16 @@ type Scheduler struct {
 	// notify-budget worth of time. R247-PERF-24.
 	workDirCache workDirResolveCache
 
+	// workDirCacheKeySuffix is the precomputed `"\x00" + allowedRoot +
+	// "\x00" + allowedRootResolved` tail of the workDirResolveCache key.
+	// allowedRoot/allowedRootResolved are immutable after NewScheduler, so
+	// the suffix only depends on per-job workDir; caching it lets the hot
+	// path concatenate two strings instead of four. R20260526-PERF-002
+	// (#1225): 50 cron jobs × every-tick schedule used to allocate three
+	// string concatenations per cache lookup; the suffix is now built
+	// once at construction and reused.
+	workDirCacheKeySuffix string
+
 	// knownSessionsCache memoises KnownSessionIDs() output for up to
 	// knownSessionsCacheTTL. The dashboard polls KnownSessionIDs at 1Hz
 	// per tab; rebuilding the set walks every job's runStore.Recent (up
@@ -498,8 +508,21 @@ func (c *workDirResolveCache) store(key, resolved string, now time.Time) {
 // workDirResolveCacheKey concatenates the three inputs with separators
 // that are not valid in absolute paths (`\x00`) so distinct triples
 // cannot collide on a single key. R247-PERF-24.
+//
+// R20260526-PERF-002 (#1225): hot-path callers should use
+// (*Scheduler).workDirResolveCacheKey, which reuses the precomputed
+// suffix and concatenates only two strings. This package-level form is
+// retained for tests and rare callers without a Scheduler in hand.
 func workDirResolveCacheKey(workDir, allowedRoot, allowedRootResolved string) string {
 	return workDir + "\x00" + allowedRoot + "\x00" + allowedRootResolved
+}
+
+// workDirResolveCacheKey is the Scheduler-scoped fast path: it appends
+// the precomputed allowedRoot/allowedRootResolved suffix to workDir,
+// avoiding the three-string concatenation that the package-level
+// helper does on every lookup. R20260526-PERF-002 (#1225).
+func (s *Scheduler) workDirResolveCacheKey(workDir string) string {
+	return workDir + s.workDirCacheKeySuffix
 }
 
 // workDirResolveUnderRoot is the variant of workDirUnderRoot that also
@@ -525,7 +548,7 @@ func (s *Scheduler) workDirResolveUnderRootCached(workDir string) (string, bool)
 		return workDirResolveUnderRoot(workDir, "", "")
 	}
 	now := time.Now()
-	key := workDirResolveCacheKey(workDir, s.allowedRoot, s.allowedRootResolved)
+	key := s.workDirResolveCacheKey(workDir)
 	if resolved, ok := s.workDirCache.lookup(key, now); ok {
 		return resolved, true
 	}
@@ -672,10 +695,14 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		notifyDefault:       cfg.NotifyDefault,
 		allowedRoot:         cfg.AllowedRoot,
 		allowedRootResolved: allowedRootResolved,
-		jitterMax:           cfg.JitterMax,
-		stopCtx:             stopCtx,
-		stopCancel:          stopCancel,
-		runStore:            newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
+		// R20260526-PERF-002 (#1225): precompute the immutable tail of the
+		// workDirResolveCacheKey so hot-path lookups concatenate only two
+		// strings (workDir + suffix) per tick.
+		workDirCacheKeySuffix: "\x00" + cfg.AllowedRoot + "\x00" + allowedRootResolved,
+		jitterMax:             cfg.JitterMax,
+		stopCtx:               stopCtx,
+		stopCancel:            stopCancel,
+		runStore:              newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
 	}
 	// R250-ARCH-14: initialise the per-Scheduler marshal seam so the
 	// hot path in marshalJobsLocked finds defaultMarshalJobs instead of
