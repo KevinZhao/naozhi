@@ -28,23 +28,10 @@ import (
 // function falls back to r.RemoteAddr. In a strict ALB-fronted deployment
 // every legitimate request is XFF-stamped, so an XFF-less request collapses
 // every "real" client into the single proxy-IP bucket and degrades per-IP
-// rate-limit fairness. Callers that want strict enforcement should use
-// ClientIPStrict, which surfaces the missing-XFF case so the caller can
-// reject the request with HTTP 400 instead of leaking through.
+// rate-limit fairness.
 func ClientIP(r *http.Request, trustedProxy bool) string {
 	ip, _ := clientIPInternal(r, trustedProxy)
 	return ip
-}
-
-// ClientIPStrict behaves like ClientIP but additionally reports whether the
-// returned IP came from a trustworthy source. When trustedProxy is true and
-// the request has no parseable X-Forwarded-For tail, ok is false and the
-// returned ip is the proxy-hop r.RemoteAddr (callers can still log it but
-// SHOULD reject the request with 400 to avoid bucketing every real client
-// onto the proxy IP). When trustedProxy is false ok is always true (the
-// remote address itself is the trustworthy source). R247-SEC-25.
-func ClientIPStrict(r *http.Request, trustedProxy bool) (ip string, ok bool) {
-	return clientIPInternal(r, trustedProxy)
 }
 
 func clientIPInternal(r *http.Request, trustedProxy bool) (string, bool) {
