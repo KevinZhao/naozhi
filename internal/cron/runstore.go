@@ -195,33 +195,10 @@ func (e *recentCacheEntry) ringSeed(rows []CronRunSummary, keepCount int) {
 	e.count = n
 }
 
-// User-configurable defaults — fallbacks when SchedulerConfig leaves
-// RunsKeepCount / RunsKeepWindow zero. Operators may raise / lower
-// them via SchedulerConfig at construction time; cron-run-history.md
-// §4.3 explains the 200 / 30d sizing rationale.
-const (
-	// DefaultRunsKeepCount caps per-job history at this many entries.
-	// 200 is the user-confirmed upper bound (cron-run-history.md §4.3 +
-	// chat conversation 2026-05-17).
-	DefaultRunsKeepCount = 200
-
-	// DefaultRunsKeepWindow ages out runs older than this even when the
-	// per-job count is below the cap. AND-with-OR semantics: a run is
-	// kept only when (count_rank ≤ keepCount) AND (age ≤ keepWindow);
-	// either condition false → trim.
-	DefaultRunsKeepWindow = 30 * 24 * time.Hour
-)
-
-// Hard limits — immutable per-record format invariants, not
-// operator-tunable. Changing them requires a schema bump because old
-// run.json files may exist on disk above the new cap.
-const (
-	// MaxRunRecordBytes caps a single CronRun JSON payload. The 4K rune
-	// cap on Result + 512-rune cap on ErrorMsg + 8K Prompt + ~512
-	// metadata add up to ~13 KiB worst case; 32 KiB leaves headroom.
-	// Reading a file larger than this returns ErrCorruptRun.
-	MaxRunRecordBytes = 32 * 1024
-)
+// User-configurable defaults (DefaultRunsKeepCount / DefaultRunsKeepWindow)
+// and hard schema caps (MaxRunRecordBytes) live in limits.go alongside the
+// other cron-trust-boundary constants — see R247-CR-12 / R247-CR-20 (#598)
+// for the rationale.
 
 // ErrCorruptRun is returned when a run JSON file fails to parse or
 // exceeds the size cap. Treated identically to "missing": list APIs
