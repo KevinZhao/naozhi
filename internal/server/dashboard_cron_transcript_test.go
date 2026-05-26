@@ -751,3 +751,63 @@ func TestFlattenAssistantEvent_ToolInputSizeCap(t *testing.T) {
 		t.Errorf("big input: summary empty; expected probe-derived label to survive cap")
 	}
 }
+
+// R243-CR-P2-4 (#822): an upstream CLI emitting `"input": null` must not
+// leak `"input": null` onto the wire. transcriptTurn.Input uses
+// json.RawMessage with omitempty, but RawMessage holding the literal
+// 4-byte `null` token is not zero-length, so the stdlib encoder still
+// emits it. flattenAssistantEvent normalises that to nil so omitempty
+// drops the field.
+func TestFlattenAssistantEvent_ToolInputNullOmitted(t *testing.T) {
+	t.Parallel()
+
+	ev := &claudeJSONLEvent{
+		Type: "assistant",
+		Message: json.RawMessage(`{"role":"assistant","content":[` +
+			`{"type":"tool_use","id":"tu_n","name":"Bash","input":null}` +
+			`]}`),
+	}
+	out, _, _, parsed := flattenAssistantEvent(ev, 0, 0)
+	if !parsed || len(out) != 1 {
+		t.Fatalf("parsed=%v len(out)=%d (want true / 1)", parsed, len(out))
+	}
+	if out[0].Input != nil {
+		t.Errorf("Input=%q, want nil so omitempty drops the field", string(out[0].Input))
+	}
+	// Round-trip through the JSON encoder to confirm wire output drops
+	// the field entirely rather than emitting `"input": null`.
+	wire, err := json.Marshal(out[0])
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(wire), `"input"`) {
+		t.Errorf("wire still carries input field: %s", string(wire))
+	}
+}
+
+// isJSONNull recognises the literal four-byte JSON `null` token and
+// rejects everything else (including whitespace-padded variants — the
+// flatten path receives RawMessage straight from encoding/json which
+// trims surrounding whitespace).
+func TestIsJSONNull(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   json.RawMessage
+		want bool
+	}{
+		{"null literal", json.RawMessage(`null`), true},
+		{"empty", json.RawMessage(``), false},
+		{"nil", nil, false},
+		{"object", json.RawMessage(`{}`), false},
+		{"string null", json.RawMessage(`"null"`), false},
+		{"trailing space", json.RawMessage(`null `), false},
+		{"caps", json.RawMessage(`NULL`), false},
+	}
+	for _, c := range cases {
+		if got := isJSONNull(c.in); got != c.want {
+			t.Errorf("%s: isJSONNull(%q)=%v, want %v", c.name, string(c.in), got, c.want)
+		}
+	}
+}

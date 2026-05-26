@@ -90,6 +90,15 @@ const (
 // literal here) so the wire shape stays consistent for dashboard JS.
 var truncatedToolInputPlaceholder = json.RawMessage(`"[truncated]"`)
 
+// isJSONNull reports whether b holds the literal four-byte JSON `null`
+// token (with no surrounding whitespace — bufio.Scanner already trims it
+// at line boundaries and json.RawMessage from the stdlib decoder is
+// pre-trimmed). Used so transcriptTurn.Input json:"omitempty" can drop
+// the field instead of emitting `"input": null`. R243-CR-P2-4 (#822).
+func isJSONNull(b json.RawMessage) bool {
+	return len(b) == 4 && b[0] == 'n' && b[1] == 'u' && b[2] == 'l' && b[3] == 'l'
+}
+
 // ansiEscRe matches the most common ANSI CSI sequences (color, cursor
 // motion). We strip these from tool output before serialising so the
 // rendered <pre> doesn't show garbled bytes. Defensive: the dashboard
@@ -810,6 +819,13 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 		// keeps its one-line label even when Input itself is replaced
 		// with the [truncated] placeholder.
 		input := b.Input
+		// R243-CR-P2-4 (#822): json.RawMessage with omitempty does NOT omit
+		// the literal `null` (it's 4 bytes, not zero-length), so an upstream
+		// CLI that emits `"input": null` would leak `"input": null` onto the
+		// wire. Normalise to nil so omitempty drops the field entirely.
+		if isJSONNull(input) {
+			input = nil
+		}
 		if len(input) > maxToolInputBytes {
 			input = truncatedToolInputPlaceholder
 		}
