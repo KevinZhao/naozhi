@@ -451,11 +451,29 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		// writes "queue-operation" / "attachment" events without
 		// timestamps for some shapes; we let those pass through and
 		// drop later if they're not turn-worthy.
+		//
+		// R240-SEC-15 / #1046: BUT for fresh=false (shared JSONL across
+		// many cron runs), letting timestamp-less events pass through
+		// causes adjacent runs to bleed into each other's transcript —
+		// a "queue-operation" or untimestamped attachment from run N+1
+		// would appear in the response for run N because the
+		// time-window gate is skipped. We have no per-event run-id to
+		// disambiguate, so the safe-by-default rule for shared files
+		// is: drop timestamp-less events entirely. The cost is a few
+		// missed metadata events on the boundary; the alternative
+		// (cross-run leak of attachments / queue ops with potentially
+		// sensitive content) is strictly worse. Fresh=true runs own
+		// the JSONL exclusively, so the existing pass-through behaviour
+		// remains correct there.
 		ts := parseISO8601MS(ev.Timestamp)
 		if ts > 0 {
 			if ts < startedMS || ts > endedMS {
 				continue
 			}
+		} else if !run.Fresh {
+			// Shared JSONL + no timestamp ⇒ cannot attribute to this
+			// run; skip rather than leak adjacent-run state.
+			continue
 		}
 		newTurns, addedTokens, addedToolCalls, isParsed := flattenJSONLEvent(&ev, ts, len(turns))
 		if isParsed {

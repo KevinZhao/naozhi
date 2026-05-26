@@ -875,23 +875,18 @@ const defaultStopBudget = 30 * time.Second
 const gcWaitBudget = 5 * time.Second
 
 // stopBudget is the active stop budget used by Scheduler.Stop(). Tests
-// MUST mutate it only through WithStopBudget so the var swap is paired
-// with a t.Cleanup restore — direct writes from t.Parallel tests would
-// race a concurrent Stop on another Scheduler instance with real
+// MUST mutate it only through the WithStopBudget seam in
+// scheduler_testutil_test.go so the var swap is paired with a
+// t.Cleanup restore — direct writes from t.Parallel tests would race
+// a concurrent Stop on another Scheduler instance with real
 // wall-clock timeouts.
 var stopBudget = defaultStopBudget
 
-// WithStopBudget shortens stopBudget for the duration of the test and
-// returns a restore func intended for t.Cleanup. Centralising the swap
-// here keeps the racy direct-write pattern off the call sites and gives
-// future maintainers a single seam to migrate to a Scheduler-field
-// design (the long-term direction noted on gcWaitBudget) without
-// touching every test. R247-CR-18.
-func WithStopBudget(d time.Duration) func() {
-	orig := stopBudget
-	stopBudget = d
-	return func() { stopBudget = orig }
-}
+// (R248-DEADCODE-24 / #1216) WithStopBudget moved to
+// scheduler_testutil_test.go: it is test-only and previously living in
+// production scheduler.go pinned dead surface area in the production
+// binary. Same-package _test.go retains access to the unexported
+// stopBudget without changing test call sites.
 
 // Stop halts the scheduler and saves state. It waits for both scheduled jobs
 // (drained by s.cron.Stop) and any TriggerNow-spawned goroutines before

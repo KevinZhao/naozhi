@@ -335,6 +335,21 @@ func detectMime(resolved string, head []byte) string {
 	if ext == ".svg" {
 		return "image/svg+xml"
 	}
+	// R244-SEC-P2-2: pin .html / .htm to text/html here ONLY so serveRender
+	// can route empty / short HTML (where http.DetectContentType returns
+	// text/plain) through its dedicated handler. Critically the mapping is
+	// NOT carried in previewableByExt, so mimeFromExtOnly's batch fast path
+	// cannot short-circuit the byte-sniff: any HTML reaching servePreview /
+	// serveRaw still goes through detectMime, where the text/html result
+	// triggers the existing HTML-block gates. Defense-in-depth — even a
+	// future caller that skipped the gates would not silently inherit a
+	// text/html response without a sniff confirmation on non-empty files.
+	if ext == ".html" || ext == ".htm" {
+		if strings.HasPrefix(mime, "text/plain") || strings.HasPrefix(mime, "application/octet-stream") {
+			return "text/html"
+		}
+		return mime
+	}
 	// Base name override for extensionless files like Dockerfile / Makefile.
 	// R232-SEC-8: paths whose basename starts with a dot (e.g. ".makefile",
 	// ".gitignore") have filepath.Ext == basename, so this branch was
