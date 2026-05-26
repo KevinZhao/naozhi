@@ -160,17 +160,6 @@ func TestIsSysKey(t *testing.T) {
 	}
 }
 
-func TestSysKey(t *testing.T) {
-	t.Parallel()
-	if got := SysKey("auto-titler"); got != "sys:auto-titler" {
-		t.Errorf("SysKey(%q) = %q, want %q", "auto-titler", got, "sys:auto-titler")
-	}
-	// Round-trip: SysKey output must satisfy IsSysKey.
-	if !IsSysKey(SysKey("any-name")) {
-		t.Error("SysKey output should satisfy IsSysKey")
-	}
-}
-
 // TestExemptKeyPrefixesUsesConstants locks the invariant that
 // router.go's exemptKeyPrefixes references the canonical constants,
 // not bare string literals that could drift. The concrete values live

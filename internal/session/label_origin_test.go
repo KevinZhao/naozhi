@@ -152,7 +152,7 @@ func TestSetUserLabelWithOrigin_RaceWindow(t *testing.T) {
 func TestRegisterSystemStub_HappyPath(t *testing.T) {
 	t.Parallel()
 	r := newTestRouter(3)
-	key := SysKey("test-daemon")
+	key := SysKeyPrefix + "test-daemon"
 	r.RegisterSystemStub(key, "/tmp/work", "initial prompt")
 
 	s, ok := r.sessions[key]
