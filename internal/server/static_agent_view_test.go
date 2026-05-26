@@ -1,6 +1,8 @@
 package server
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -147,5 +149,61 @@ func TestAgentView_NoInlineOnClickJSEscape(t *testing.T) {
 	if !strings.Contains(avStr, "dataset") {
 		t.Error("agent_view.js delegated click handler must read taskId from dataset, " +
 			"not parse it back out of the onclick attribute")
+	}
+}
+
+// TestStaticJS_RequiresAuthWhenTokenSet guards R230-SEC-3 (#1024): when
+// dashboardToken is configured, both /static/dashboard.js and
+// /static/agent_view.js MUST refuse unauthenticated callers. A MITM on
+// HTTP deployments can otherwise rewrite the JS body and have the next
+// authenticated /dashboard load run attacker-controlled code. The login
+// page is purely inline JS so it's unaffected — only the post-login
+// bundle benefits from the gate. Open-mode (token=="") deployments
+// remain ungated to keep the existing UX.
+func TestStaticJS_RequiresAuthWhenTokenSet(t *testing.T) {
+	t.Parallel()
+	srv := newTestServerWithToken(&mockPlatform{}, "secret-token")
+
+	for _, path := range []string{"/static/dashboard.js", "/static/agent_view.js"} {
+		path := path
+		t.Run(strings.TrimPrefix(path, "/static/"), func(t *testing.T) {
+			t.Parallel()
+			// Unauthenticated → 401.
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			w := httptest.NewRecorder()
+			srv.mux.ServeHTTP(w, req)
+			if w.Code != http.StatusUnauthorized {
+				t.Errorf("unauth GET %s: status = %d, want 401", path, w.Code)
+			}
+			// Authenticated via Bearer → 200.
+			authReq := httptest.NewRequest(http.MethodGet, path, nil)
+			authReq.Header.Set("Authorization", "Bearer secret-token")
+			authW := httptest.NewRecorder()
+			srv.mux.ServeHTTP(authW, authReq)
+			if authW.Code != http.StatusOK {
+				t.Errorf("authed GET %s: status = %d, want 200", path, authW.Code)
+			}
+		})
+	}
+}
+
+// TestStaticJS_OpenModeStaysUngated guards the no-token deployment path:
+// when dashboardToken is empty, the dashboard is open and JS bundles must
+// remain reachable so the page actually works. R230-SEC-3 (#1024).
+func TestStaticJS_OpenModeStaysUngated(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(&mockPlatform{})
+
+	for _, path := range []string{"/static/dashboard.js", "/static/agent_view.js"} {
+		path := path
+		t.Run(strings.TrimPrefix(path, "/static/"), func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			w := httptest.NewRecorder()
+			srv.mux.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Errorf("open-mode GET %s: status = %d, want 200", path, w.Code)
+			}
+		})
 	}
 }

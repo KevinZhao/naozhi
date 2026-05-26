@@ -667,6 +667,20 @@ func (s *Server) handleSW(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDashboardJS(w http.ResponseWriter, r *http.Request) {
+	// R230-SEC-3 (#1024): when dashboardToken is configured the dashboard
+	// page itself is auth-gated, but the bundled JS used to be served to
+	// any caller. An HTTP-deployment MITM could swap the JS body and have
+	// the *next* authenticated GET /dashboard load attacker-controlled
+	// code (the login page is purely inline JS so it isn't affected, only
+	// the post-login bundle matters). Gate the JS behind isAuthenticated
+	// so the bundle is unreachable unless the caller already holds a
+	// valid Bearer token or auth cookie. When dashboardToken=="" the
+	// gate is a no-op and the JS stays public, matching the open-mode
+	// dashboard.
+	if s.dashboardToken != "" && !s.auth.isAuthenticated(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -687,6 +701,14 @@ func (s *Server) handleDashboardJS(w http.ResponseWriter, r *http.Request) {
 // dashboard module. Mirrors handleDashboardJS for caching/CSP headers so
 // the two scripts behave identically in the browser cache.
 func (s *Server) handleAgentViewJS(w http.ResponseWriter, r *http.Request) {
+	// R230-SEC-3 (#1024): same auth gate as handleDashboardJS — agent_view.js
+	// loads after dashboard.js and only matters once the operator has signed
+	// in, so leaving it ungated would defeat the dashboardJS gate (the MITM
+	// just swaps this bundle instead).
+	if s.dashboardToken != "" && !s.auth.isAuthenticated(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	data, err := agentViewJS.ReadFile("static/agent_view.js")
 	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
