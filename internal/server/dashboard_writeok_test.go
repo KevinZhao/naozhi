@@ -232,3 +232,33 @@ func containsCodeOccurrence(src, needle string) bool {
 	}
 	return strings.Contains(b.String(), needle)
 }
+
+// TestJSONEncPool_RuntimeReassertsEscapeHTMLFalse pins the R238-SEC-5 (#821)
+// contract that getJSONEnc re-asserts SetEscapeHTML(false) on every Get, so
+// a misbehaving caller that briefly flips the bit to `true` and forgets to
+// restore it cannot poison the next borrower. Without the runtime re-assert,
+// the SetEscapeHTML(false) contract was a one-time pool-init invariant only —
+// fragile against any future code path that mutates a borrowed encoder.
+func TestJSONEncPool_RuntimeReassertsEscapeHTMLFalse(t *testing.T) {
+	probe := map[string]string{"v": "<b>&</b>"}
+	escLT := string([]byte{'\\', 'u', '0', '0', '3', 'c'})
+
+	// Step 1: poison a pooled encoder by flipping the bit and putting it back.
+	e := getJSONEnc()
+	e.enc.SetEscapeHTML(true)
+	putJSONEnc(e)
+
+	// Step 2: even after pulling many encoders (sync.Pool ordering is
+	// non-deterministic), every borrowed encoder must produce unescaped
+	// output. Loop a few times so we exercise both the same poisoned slot
+	// and any newly-created ones.
+	for i := 0; i < 8; i++ {
+		raw, err := marshalPooled(probe)
+		if err != nil {
+			t.Fatalf("marshalPooled iter %d: %v", i, err)
+		}
+		if strings.Contains(string(raw), escLT) {
+			t.Fatalf("iter %d: pool returned an encoder still in SetEscapeHTML(true) state — runtime re-assert regressed: %q", i, raw)
+		}
+	}
+}

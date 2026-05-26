@@ -120,6 +120,17 @@ type jsonEncBuf struct {
 // test (currently dashboard.go only); update both the test and this comment
 // in the same change if a new JSON-API helper genuinely needs to host the
 // call.
+//
+// R238-SEC-5 (#821): the contract is now also a *runtime* invariant — every
+// getJSONEnc() call re-asserts SetEscapeHTML(false) before returning the
+// borrowed encoder, so even if a future caller misbehaves and flips the bit
+// to `true` mid-borrow without resetting it (e.g. an early `return` that
+// skips a `defer SetEscapeHTML(false)`), the next borrower observes a clean
+// state. SetEscapeHTML is a single boolean flag inside json.Encoder; calling
+// it on every Get is a few CPU cycles and far cheaper than the JSON encode
+// itself, so we accept the runtime cost in exchange for defence-in-depth on
+// what is otherwise a pure documentation contract. The test is still the
+// primary line of defence; this is the secondary line.
 var jsonEncPool = sync.Pool{
 	New: func() any {
 		buf := new(bytes.Buffer)
@@ -136,10 +147,15 @@ const jsonEncBufMaxCap = 256 * 1024
 // getJSONEnc returns a pooled encoder. The returned encoder always has HTML
 // escaping disabled; callers MUST NOT mutate its configuration (see
 // jsonEncPool godoc for the invariant pinned by
-// TestJSONEncPool_HTMLEscapingDisabled). R243-SEC-10.
+// TestJSONEncPool_HTMLEscapingDisabled). R243-SEC-10. R238-SEC-5 (#821):
+// SetEscapeHTML(false) is re-asserted on every Get so the invariant survives
+// a hypothetical future caller that flipped the bit and forgot to reset.
 func getJSONEnc() *jsonEncBuf {
 	e := jsonEncPool.Get().(*jsonEncBuf)
 	e.buf.Reset()
+	// Re-assert the contract — see R238-SEC-5 / #821 note above. Idempotent on
+	// the freshly-minted encoder; safety net on any reused one.
+	e.enc.SetEscapeHTML(false)
 	return e
 }
 
