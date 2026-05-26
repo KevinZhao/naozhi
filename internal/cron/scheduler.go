@@ -22,7 +22,7 @@ import (
 // Callers should use errors.Is(err, cron.ErrJobNotFound) instead of string matching.
 var ErrJobNotFound = errors.New("cron: job not found")
 
-// ErrAmbiguousPrefix is returned by findByPrefix when an ID prefix matches more
+// ErrAmbiguousPrefix is returned by findByPrefixLocked when an ID prefix matches more
 // than one job in the same chat scope. Callers (CLI/HTTP) should use
 // errors.Is(err, cron.ErrAmbiguousPrefix) to surface a "please disambiguate"
 // hint instead of treating it as a generic not-found. [R247-GO-2]
@@ -235,6 +235,13 @@ type Scheduler struct {
 	// started 用 CAS 保证 Start() 幂等。重复调用直接返回 nil 而不再 reset
 	// startedAtNanos / 二次 spawn cold-start GC / 二次 cron.Start。R241-ARCH-2。
 	started atomic.Bool
+	// stopped 用 CAS 保证 Stop() 幂等。重复调用直接 return,避免:
+	//   - 二次 NewTimer (gcTimer / deadline / triggerTimer) 浪费定时器槽位
+	//   - 二次 persistJobsLocked + 落盘 (race 落盘文件)
+	//   - 二次 cron.Stop() (robfig/cron 内部对此能容忍但成本是无意义的)
+	// stopCancel 已经是 idempotent (sync.Once 内部保护),所以这里只需 CAS
+	// 把 Stop 的整体 body 短路就够了。R20260526-GO-007。
+	stopped atomic.Bool
 	// stopCtx is the scheduler's lifecycle context. Storing context in a
 	// struct is usually an anti-pattern, but here execute() is invoked via
 	// a callback from robfig/cron whose signature has no ctx parameter, so
@@ -595,6 +602,22 @@ func (cfg *SchedulerConfig) applyDefaults() {
 }
 
 func NewScheduler(cfg SchedulerConfig) *Scheduler {
+	// R20260526-GO-023: surface missing router wiring at construction so
+	// the misconfiguration shows up at boot rather than as an opaque NPE
+	// stack trace from executeOpt the first time a job ticks. We log
+	// instead of panicking because the test suite (persist_failure_test,
+	// scheduler_test, stop_budget_test, trigger_now_wg_done_test, …)
+	// constructs Schedulers without a router for narrowly-scoped paths
+	// (AddJob validation, persist failure injection, stop-budget timing)
+	// that never reach executeOpt; panicking would force a sprawling
+	// rewrite across dozens of unrelated test files. The companion
+	// R20260526-GO-004 guard inside executeOpt then short-circuits the
+	// hot path so a router-less fixture does not NPE if a job somehow
+	// does tick. Real production wiring (cmd/naozhi) always plumbs a
+	// router, so this warn fires only for misconfigurations.
+	if cfg.Router == nil {
+		slog.Warn("cron.NewScheduler: cfg.Router is nil; executeOpt will short-circuit until wired")
+	}
 	before := cfg.MaxJobs
 	if before > maxJobsHardCap {
 		slog.Warn("cron max_jobs exceeds hard cap, clamping", "requested", before, "cap", maxJobsHardCap)
@@ -959,6 +982,16 @@ var stopBudget = defaultStopBudget
 // observing stopCtx) so successive lifecycles do not accumulate stuck
 // filesystem-IO goroutines until OOM. R247-GO-7.
 func (s *Scheduler) Stop() {
+	// R20260526-GO-007: idempotent CAS guard. Without this, repeat calls
+	// re-enter the timer-allocating + persist branches below — wasting
+	// time.NewTimer slots, double-running persistJobsLocked, and racing the
+	// final marshaled write against itself. Mirror Start()'s `started`
+	// CAS so the lifecycle is symmetrically idempotent. stopCancel is
+	// already idempotent (context cancel is a no-op after the first call),
+	// so callers that bypass this guard via earlier wiring are unaffected.
+	if !s.stopped.CompareAndSwap(false, true) {
+		return
+	}
 	s.stopCancel()
 
 	// R236-GO-01: wait for the cold-start GC goroutine spawned in Start()

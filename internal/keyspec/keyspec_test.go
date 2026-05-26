@@ -64,6 +64,29 @@ func TestPlannerNameFromKey(t *testing.T) {
 	}
 }
 
+// TestPlannerNameFromKey_NonPlanner asserts the self-defense path:
+// PlannerNameFromKey returns "" for any input that is not a valid
+// planner key, instead of panicking on out-of-range slice arithmetic.
+// R20260526-CR-009.
+func TestPlannerNameFromKey_NonPlanner(t *testing.T) {
+	cases := []string{
+		"",
+		"project:",
+		"project::planner", // empty-name edge case rejected by IsPlannerKey
+		"project:foo",      // missing :planner suffix
+		"feishu:p2p:user:agent",
+		"x",        // shorter than prefix
+		":planner", // shorter than prefix
+		"project:foo:planner:extra",
+	}
+	for _, key := range cases {
+		got := PlannerNameFromKey(key)
+		if got != "" {
+			t.Errorf("PlannerNameFromKey(%q) = %q, want \"\" (non-planner input)", key, got)
+		}
+	}
+}
+
 // TestPlannerKeyFor_RoundTrip locks the inverse property:
 // PlannerNameFromKey(PlannerKeyFor(n)) == n for every name we
 // expect callers to pass. A future format change must preserve this

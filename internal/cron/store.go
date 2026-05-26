@@ -132,6 +132,14 @@ func loadJobs(path string) (map[string]*Job, error) {
 
 	m := make(map[string]*Job, len(entries))
 	for _, j := range entries {
+		// R20260526-CR-001: guard against nil entries in the JSON array.
+		// json.Unmarshal of `[null, {...}]` into []*Job yields a slice whose
+		// first element is a nil *Job. Without this check, j.ID below would
+		// panic (NPE) the moment a tampered or hand-edited cron_jobs.json
+		// is loaded. Drop the nil entry and keep loading the rest.
+		if j == nil {
+			continue
+		}
 		if j.ID == "" {
 			continue
 		}

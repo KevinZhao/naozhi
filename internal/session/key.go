@@ -184,11 +184,6 @@ func plannerKeyFor(name string) string {
 	return keyspec.PlannerKeyFor(name)
 }
 
-// plannerKeySuffix is the fixed suffix after {name} in a planner key.
-// R239-ARCH-G (#900): canonical declaration lives in
-// internal/keyspec.PlannerKeySuffix.
-const plannerKeySuffix = keyspec.PlannerKeySuffix
-
 // isPlannerKey is the session-package local accessor for planner-key
 // detection. Delegates to internal/keyspec.IsPlannerKey so the
 // "project:" + ":planner" + non-empty-name rule is encoded exactly

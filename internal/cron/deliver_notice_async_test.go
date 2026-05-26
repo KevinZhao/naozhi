@@ -35,6 +35,30 @@ func TestDeliverNotice_NoTargetIsNoOp(t *testing.T) {
 	}
 }
 
+// TestDeliverNotice_EmptyTextIsNoOp pins the contract that an empty text
+// payload short-circuits before the goroutine spawn. R20260526-CR-017:
+// without this guard, an empty-result run would still spawn a goroutine
+// running platform.SplitText("", maxLen) → [""] and burn one
+// platformReplyMaxAttempts retry on a zero-byte chunk. Mirror shape of
+// TestDeliverNotice_NoTargetIsNoOp — verify triggerWG.Wait returns
+// immediately, proving Add(1) never ran.
+func TestDeliverNotice_EmptyTextIsNoOp(t *testing.T) {
+	t.Parallel()
+	s := &Scheduler{}
+	target := NotifyTarget{Platform: "feishu", ChatID: "oc_x"}
+	s.deliverNotice(target, "")
+	done := make(chan struct{})
+	go func() {
+		s.triggerWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("triggerWG.Wait blocked on empty text — empty payload must short-circuit before Add(1)")
+	}
+}
+
 // TestDeliverNotice_SetTargetTracksWG is the core async-dispatch pin:
 // after deliverNotice returns the goroutine must already be Add'd onto
 // triggerWG, and Wait must drain it. The platform map is empty so

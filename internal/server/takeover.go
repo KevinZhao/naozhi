@@ -30,6 +30,12 @@ func (s *Server) killAndCleanupClaude(ctx context.Context, pid int, procStartTim
 	if procStartTime != 0 && !verifyProcIdentity(pid, procStartTime) {
 		return fmt.Errorf("process identity changed (PID reused): pid=%d", pid)
 	}
+	// Defense-in-depth: never SIGTERM a process owned by another user. Guards
+	// against a hypothetical same-cwd PID/start_time collision crafted by a
+	// local attacker. R20260526-SEC-009.
+	if err := verifyProcOwnedByEuid(pid); err != nil {
+		return err
+	}
 	if err := osutil.SendTerm(pid); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("sigterm pid %d: %w", pid, err)
 	}

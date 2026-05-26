@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 
 	"github.com/naozhi/naozhi/internal/eventlog/schema"
@@ -189,7 +190,15 @@ func decodeIdxBytes(data []byte) []schema.IdxEntry {
 			// Cannot happen given the alignment — schema.UnmarshalIdxEntry
 			// only returns ErrShortIdxBuf, which we pre-checked. Keep
 			// the error path explicit so future edits to schema can't
-			// silently introduce a new error class.
+			// silently introduce a new error class. R20260526-CR-020:
+			// since this is recovery-critical the path MUST surface a
+			// log line on the way out — silent truncation would mask a
+			// schema-evolution bug or an on-disk corruption that an
+			// operator needs to investigate before recovery completes.
+			slog.Warn("event log persist: idx decode unexpected error; truncating",
+				"i", i,
+				"count", count,
+				"err", err)
 			return out[:i]
 		}
 		out[i] = e

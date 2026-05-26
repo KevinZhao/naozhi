@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -938,7 +939,9 @@ func (d *Dispatcher) sendAndReply(
 	// Head slot of a merge group: append a small chip so the user knows the
 	// single bot bubble covers N messages.
 	if result.MergedCount > 1 && replyText != "" {
-		replyText += fmt.Sprintf("\n\n*— 合并了 %d 条消息的回复*", result.MergedCount)
+		// R20260526-PERF-005: hot path on every merge-group head reply,
+		// avoid fmt.Sprintf's reflect/format overhead for a single int.
+		replyText += "\n\n*— 合并了 " + strconv.Itoa(result.MergedCount) + " 条消息的回复*"
 	}
 	// Per-session ReplyFooter: when sess is non-nil we resolve the tag from
 	// sess.Backend(); when nil (cron edge case where the session has been
@@ -1034,7 +1037,9 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 	total := len(chunks)
 	for i, chunk := range chunks {
 		if total > 1 {
-			chunk += fmt.Sprintf("\n— [%d/%d]", i+1, total)
+			// R20260526-PERF-005: per-chunk on every multi-chunk reply,
+			// strconv.Itoa avoids fmt.Sprintf's per-call alloc/format.
+			chunk += "\n— [" + strconv.Itoa(i+1) + "/" + strconv.Itoa(total) + "]"
 		}
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: chunk}, platformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
