@@ -134,17 +134,45 @@ func initBackendWrappers(
 	if out.Default == nil {
 		return out, false
 	}
-	// Default backend's version probe must have succeeded. A healthy non-
-	// default sibling isn't useful — wrapperFor falls back to defaultWrapper
-	// when no explicit backend is requested, and the per-spawn error would
-	// say "wrapper selected, spawn failed" without surfacing the root cause.
-	// Caller fails fast so operators can fix the config rather than have
-	// every IM message bounce. R55-QUAL-001.
+	// R245-ARCH-43 (#903): when the default backend's --version probe failed
+	// but at least one sibling backend is healthy, continue startup with a
+	// Warn rather than os.Exit(1). The original R55-QUAL-001 contract was
+	// "fail fast on default-probe failure so operators don't see every IM
+	// message bounce" — but on heterogeneous deployments where sysession (or
+	// any explicit-backend session) targets a non-default backend, that exit
+	// makes the healthy fallback path unreachable. Default-bound requests
+	// still error at spawn time with the existing "spawn failed" message,
+	// which is the correct surface for routing-not-configured errors; the
+	// startup-time fast-fail is preserved only when EVERY backend is
+	// unreachable.
 	if out.Default.CLIVersion == "" {
-		return out, false
+		if !backendsHaveHealthySibling(out.Wrappers, out.DefaultID) {
+			return out, false
+		}
+		slog.Warn("default cli backend probe failed; healthy sibling(s) available — continuing startup",
+			"default_id", out.DefaultID, "default_path", out.Default.CLIPath,
+			"hint", "default-bound spawns will error until resolved; explicit-backend sessions remain usable")
 	}
 	// ctx is reserved for a future cancellable probe path (RFC §11.4) and
 	// kept on the signature now so callers don't need to update later.
 	_ = ctx
 	return out, true
+}
+
+// backendsHaveHealthySibling reports whether any wrapper other than the
+// default has a populated CLIVersion. R245-ARCH-43 (#903): this is the
+// "fallback path is reachable" check — when true, initBackendWrappers
+// returns ok=true with a Warn instead of forcing os.Exit(1) on a default-
+// probe failure, so heterogeneous deployments (sysession or explicit-
+// backend sessions on a healthy alt) can still operate.
+func backendsHaveHealthySibling(wrappers map[string]*cli.Wrapper, defaultID string) bool {
+	for id, w := range wrappers {
+		if id == defaultID {
+			continue
+		}
+		if w != nil && w.CLIVersion != "" {
+			return true
+		}
+	}
+	return false
 }

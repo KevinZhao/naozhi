@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -282,12 +283,43 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 	default:
 		return cli.Attachment{}, fmt.Errorf("unsupported image format (jpeg/png/gif/webp only)")
 	}
+	// R232-SEC-7 (#1002): defence-in-depth secondary magic scan. http.DetectContentType
+	// only inspects the leading bytes; a JFIF (or any image) header followed by an
+	// embedded "%PDF-" body slips past the first sniff and would otherwise be
+	// persisted as KindImageInline carrying a PDF payload. Scan the first 4 KB
+	// for the PDF magic and reject — the offset window is bounded so the cost
+	// is constant on legitimate uploads, while a nested PDF container is
+	// always shorter than 4 KB into the file (real JFIF headers are ~20-30
+	// bytes; %PDF-` would land well before 4 KB to be processed by any
+	// downstream PDF reader).
+	if pdfNestedInImage(data) {
+		return cli.Attachment{}, fmt.Errorf("file appears to be a PDF disguised as an image")
+	}
 	return cli.Attachment{
 		Kind:     cli.KindImageInline,
 		Data:     data,
 		MimeType: detected,
 	}, nil
 }
+
+// pdfNestedInImage reports whether the payload — already classified as an
+// image by http.DetectContentType — contains a "%PDF-" magic sequence in
+// the first 4 KB. R232-SEC-7 (#1002): blocks JFIF+PDF nested-container
+// bypass where the JFIF header passes the leading-byte sniff but the body
+// is actually a PDF.
+func pdfNestedInImage(data []byte) bool {
+	const scanWindow = 4 * 1024
+	end := len(data)
+	if end > scanWindow {
+		end = scanWindow
+	}
+	return bytes.Contains(data[:end], pdfMagicSignature)
+}
+
+// pdfMagicSignature is the 5-byte signature every conforming PDF starts
+// with. Kept at package scope so pdfNestedInImage's bounded-window scan
+// does not re-allocate the literal on each upload.
+var pdfMagicSignature = []byte("%PDF-")
 
 // hasPersistableAttachment reports whether any attachment needs to hit
 // persistFileRefs. file_ref must land on disk or the Read-tool hint has

@@ -581,6 +581,18 @@ func (s *runStore) cacheHeadPush(jobID string, summary CronRunSummary) {
 // jobID. Triggers a warm pass if the entry has not been hydrated yet.
 // Caller must NOT hold jobLock — warmCache acquires it internally to
 // populate the entry from disk.
+//
+// R240-GO-6 (#1039): a warm cache with count=0 is INTENTIONALLY treated as
+// a hit (returns (nil, true)) — not a miss. Forcing a disk fallback on
+// warm-empty would re-ReadDir on every List call for jobs that have never
+// run, defeating the whole point of the cache. The "stale empty masks new
+// disk row" race the original triage worried about is foreclosed by the
+// jobLock contract: warmCache holds jobLock while running, and Append
+// holds jobLock around its WriteFileAtomic + cacheHeadPush, so the two
+// cannot interleave. After warmCache releases jobLock, any subsequent
+// Append's cacheHeadPush observes warm=true and pushes into the ring,
+// and the next cacheGet sees the new row. Empty caches do not stay empty
+// once a run lands — they stay correct.
 func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {

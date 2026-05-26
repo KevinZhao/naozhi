@@ -607,6 +607,22 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 
 	// `lg` instead of `log` to avoid shadowing the standard `log` package
 	// imported at the top of the file (R60-GO-M2).
+	//
+	// R238-PERF-2 / R245-PERF-7 (#849, #858): one slog.With per execution
+	// allocates a 4-attr Logger handler chain. We deliberately keep this
+	// pattern despite the alloc: (a) the chain is reused 20+ times below
+	// (success Info + send-deadline Warn + session-error Error + the
+	// finishRun routing fan-out), so amortised cost per use is sub-µs;
+	// (b) Caching on *Job would require invalidation on every
+	// SetJobPlatform / SetJobChatID mutation — a correctness liability
+	// disproportionate to ~200 ns saved per cron tick; (c) Caching on
+	// *runInflight or jobSnapshot is per-execution scope, identical to
+	// the local `lg` and only adds an indirection. Lazy build via
+	// sync.Once would not help because line below unconditionally
+	// triggers the alloc on first .Info call. The cron-tick path's hot
+	// allocs are dominated by snapshot copy + CLI subprocess spawn —
+	// optimising the logger here would not move the needle. Leave the
+	// alloc; document the rationale so future reviewers don't reopen it.
 	lg := slog.With("job_id", snap.jobID, "platform", snap.platName, "chat", snap.chatID, "run_id", runID)
 	lg.Info("cron job executing", "prompt_len", len(snap.prompt))
 

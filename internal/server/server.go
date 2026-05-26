@@ -670,9 +670,10 @@ func buildServer(opts ServerOptions) *Server {
 		},
 	}
 
-	// Q1: wire router's terminal-removal hook. Router.Reset/Remove both
-	// fire this callback (LRU evictOldest deliberately does NOT) and we
-	// fan out to two cleanup riders:
+	// Q1: the router's terminal-removal hook (Router.Reset/Remove; LRU
+	// evictOldest deliberately does NOT fire it) is wired below — once
+	// AFTER s.sessionH is constructed — so the single registration fans
+	// out atomically to both cleanup riders:
 	//
 	//   1. msgQueue.Cleanup so the per-session FIFO map entry is truly
 	//      deleted when the user resets or removes a session (/new,
@@ -681,10 +682,16 @@ func buildServer(opts ServerOptions) *Server {
 	//      might return) but a slow leak when the key is never reused.
 	//   2. sessionH.InvalidateHistoryCache so the history popover sees
 	//      the just-retired session within one /api/sessions poll
-	//      instead of being hidden by the 120s TTL. The hook is replayed
-	//      below right after s.sessionH is constructed — at this point
-	//      sessionH is still nil.
-	router.SetOnKeyRetired(s.msgQueue.Cleanup)
+	//      instead of being hidden by the 120s TTL.
+	//
+	// R238-CR-3: an earlier draft registered msgQueue.Cleanup here first
+	// and overwrote the hook with the full fanout after sessionH was
+	// constructed. WarmHistoryCache (a background goroutine) could
+	// observe a Reset in that overwrite window with InvalidateHistoryCache
+	// not yet wired. Skipping the half-wired registration removes the
+	// race entirely; until the replay below, msgQueue.Cleanup is reachable
+	// only via direct calls (router has no triggers active before the
+	// first session/cron is started).
 
 	// Construct the retired-store eagerly so the SessionHandlers below
 	// can hold a non-nil pointer; the actual file load is best-effort

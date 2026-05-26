@@ -228,8 +228,23 @@ func TestLatestRelease_NoRelease(t *testing.T) {
 
 // ----- Download (mock HTTP server) ------------------------------------------
 
+// installTestTLSTransport wires testHTTPTransport to trust srv's self-signed
+// cert and resets it on cleanup. R240-SEC-4 (#1048): fetchFile now refuses
+// non-https URLs at entry, so download tests must use NewTLSServer; this
+// helper threads srv.Client().Transport in so the production code's default
+// transport doesn't reject the test cert.
+//
+// NOTE: tests that use this helper MUST NOT run with t.Parallel() because
+// testHTTPTransport is a package-global. Sequential execution avoids cross-
+// test bleed of the override.
+func installTestTLSTransport(t *testing.T, srv *httptest.Server) {
+	t.Helper()
+	prev := testHTTPTransport
+	testHTTPTransport = srv.Client().Transport
+	t.Cleanup(func() { testHTTPTransport = prev })
+}
+
 func TestDownload_OK(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 
 	binContent := []byte("mock naozhi binary")
@@ -240,7 +255,7 @@ func TestDownload_OK(t *testing.T) {
 	asset := assetName()
 	checksumsTxt := fmt.Sprintf("%s  %s\n", checksum, asset)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, asset):
 			w.WriteHeader(http.StatusOK)
@@ -253,6 +268,7 @@ func TestDownload_OK(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	installTestTLSTransport(t, srv)
 
 	rel := &Release{
 		Tag:      "v1.0.0",
@@ -271,7 +287,6 @@ func TestDownload_OK(t *testing.T) {
 }
 
 func TestDownload_ChecksumMismatch(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 
 	asset := assetName()
@@ -279,7 +294,7 @@ func TestDownload_ChecksumMismatch(t *testing.T) {
 	badHash := hex.EncodeToString(sha256.New().Sum(nil)) // hash of empty
 	checksumsTxt := fmt.Sprintf("%s  %s\n", badHash, asset)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, asset):
 			w.Write([]byte("actual binary content")) //nolint:errcheck
@@ -288,6 +303,7 @@ func TestDownload_ChecksumMismatch(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
+	installTestTLSTransport(t, srv)
 
 	rel := &Release{
 		Tag:      "v1.0.0",
@@ -302,13 +318,13 @@ func TestDownload_ChecksumMismatch(t *testing.T) {
 }
 
 func TestDownload_HTTP404(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer srv.Close()
+	installTestTLSTransport(t, srv)
 
 	rel := &Release{
 		Tag:      "v1.0.0",
@@ -319,5 +335,28 @@ func TestDownload_HTTP404(t *testing.T) {
 	_, err := Download(context.Background(), rel, dir)
 	if err == nil || !strings.Contains(err.Error(), "HTTP 404") {
 		t.Errorf("expected HTTP 404 error, got: %v", err)
+	}
+}
+
+// TestFetchFile_RejectsNonHTTPS guards R240-SEC-4 (#1048): the entry-point
+// https-prefix check refuses any URL that doesn't start with https://, so a
+// future caller passing a plain http:// asset URL fails fast instead of
+// silently transmitting the binary in cleartext.
+func TestFetchFile_RejectsNonHTTPS(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "asset")
+
+	err := fetchFile(context.Background(), "http://example.invalid/asset", dest, maxBinaryBytes)
+	if err == nil {
+		t.Fatal("expected http:// URL to be rejected")
+	}
+	if !strings.Contains(err.Error(), "non-https") {
+		t.Errorf("expected non-https rejection message, got: %v", err)
+	}
+	// Staging file must NOT be created when the URL is rejected — the
+	// 0600 file-creation step lives downstream of the prefix check.
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Errorf("expected dest to NOT be created, stat err = %v", statErr)
 	}
 }

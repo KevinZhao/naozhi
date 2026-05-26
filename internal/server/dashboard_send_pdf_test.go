@@ -102,6 +102,28 @@ func TestParseAttachmentFile_PDF_MagicMismatch(t *testing.T) {
 	}
 }
 
+// TestParseAttachmentFile_JFIFWithPDFBody guards against R232-SEC-7
+// (#1002): a JFIF magic header followed by a PDF body would historically
+// pass http.DetectContentType as image/jpeg and slip through as
+// KindImageInline. The secondary 4 KB %PDF- scan must reject it.
+func TestParseAttachmentFile_JFIFWithPDFBody(t *testing.T) {
+	// JFIF/JPEG SOI + APP0 marker (FF D8 FF E0 ... "JFIF\0"), then a
+	// fake PDF body within the 4 KB scan window.
+	body := []byte{
+		0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10,
+		'J', 'F', 'I', 'F', 0x00, 0x01, 0x01, 0x00,
+		0x00, 0x48, 0x00, 0x48, 0x00, 0x00,
+	}
+	body = append(body, []byte("\n%PDF-1.7\n%\xff\xff\xff\xff\nfake pdf body\n")...)
+	fh := makeMultipartFile(t, "trojan.jpg", "image/jpeg", body)
+
+	if _, err := parseAttachmentFile(fh, true); err == nil {
+		t.Fatal("expected JFIF+PDF nested-container rejection, got nil error")
+	} else if !strings.Contains(err.Error(), "PDF") {
+		t.Errorf("expected error to mention PDF, got: %v", err)
+	}
+}
+
 func TestParseAttachmentFile_Image_StillWorks(t *testing.T) {
 	// 8-byte PNG signature + minimal IHDR so DetectContentType returns
 	// image/png. The real raster data is unnecessary — sniff is header-based.

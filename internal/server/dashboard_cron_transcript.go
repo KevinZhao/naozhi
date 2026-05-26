@@ -841,6 +841,24 @@ func decodeStringOrBlocks(raw json.RawMessage) (string, []claudeContentBlock) {
 	return "", nil
 }
 
+// toolInputProbe is the partial schema used by summariseToolInput to pick
+// the most useful one-liner label for a tool_use card header. Only the
+// six fields below are surfaced today (Bash → command, Read/Write/Edit →
+// file_path, etc.); decoding into this typed struct avoids the reflection
+// + map allocation cost of `map[string]any` on every transcript line.
+// Unrecognised keys are silently skipped by encoding/json, so a future CLI
+// adding new tool-input fields will not break parsing.
+//
+// R233-PERF-5 (#1010): replaces a per-line `var obj map[string]any` decode.
+type toolInputProbe struct {
+	Command  string `json:"command,omitempty"`
+	FilePath string `json:"file_path,omitempty"`
+	Path     string `json:"path,omitempty"`
+	URL      string `json:"url,omitempty"`
+	Pattern  string `json:"pattern,omitempty"`
+	Query    string `json:"query,omitempty"`
+}
+
 // summariseToolInput builds a one-line label for the tool_use card
 // header. Best-effort: Bash → command, Read/Write/Edit → file_path,
 // otherwise fall back to a JSON-trimmed dump of the input.
@@ -848,20 +866,25 @@ func summariseToolInput(name string, input json.RawMessage) string {
 	if len(input) == 0 {
 		return ""
 	}
-	var obj map[string]any
-	if err := json.Unmarshal(input, &obj); err != nil {
+	var probe toolInputProbe
+	if err := json.Unmarshal(input, &probe); err != nil {
 		return ""
 	}
-	prefer := []string{"command", "file_path", "path", "url", "pattern", "query"}
-	for _, k := range prefer {
-		if v, ok := obj[k]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return osutil.SanitizeForLog(s, 200)
-			}
+	// Iterate in priority order (matches the previous map-based code's
+	// `prefer` slice) so callers see deterministic output when a tool
+	// happens to populate multiple fields.
+	candidates := [...]string{
+		probe.Command, probe.FilePath, probe.Path,
+		probe.URL, probe.Pattern, probe.Query,
+	}
+	for _, s := range candidates {
+		if s != "" {
+			return osutil.SanitizeForLog(s, 200)
 		}
 	}
-	// Fallback: 沿用原已校验过的 input bytes（json.Unmarshal 不改写源 bytes，
-	// obj 只用于 key 探测，无需再 Marshal 一次浪费 alloc）。R244-GO-P2-2.
+	// Fallback: reuse the original input bytes (json.Unmarshal does not
+	// mutate its source). The probe struct only validated structure, no
+	// need to Marshal again. R244-GO-P2-2.
 	return osutil.SanitizeForLog(string(input), 200)
 }
 

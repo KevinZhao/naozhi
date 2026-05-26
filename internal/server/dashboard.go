@@ -111,6 +111,15 @@ type jsonEncBuf struct {
 // borrows from this pool, do NOT mutate `e.enc` configuration — make a fresh
 // encoder if you need different settings, or extend the contract test to cover
 // the new mode explicitly.
+//
+// R245-SEC-13 (#842): the SetEscapeHTML(false) literal must NOT appear in
+// any other internal/server source file, even via a hand-rolled encoder
+// outside this pool. TestSetEscapeHTMLFalse_ScopedToWriteJSONHelper scans
+// every non-test .go in the package and fails CI if a fresh encoder anywhere
+// flips the bit on an HTML-template render path. Allow-list lives in that
+// test (currently dashboard.go only); update both the test and this comment
+// in the same change if a new JSON-API helper genuinely needs to host the
+// call.
 var jsonEncPool = sync.Pool{
 	New: func() any {
 		buf := new(bytes.Buffer)
@@ -206,27 +215,6 @@ func writeJSON(w http.ResponseWriter, v any) {
 		return
 	}
 	if _, err := w.Write(e.buf.Bytes()); err != nil {
-		slog.Debug("write json response", "err", err)
-	}
-}
-
-// writeJSONBytes writes a pre-marshaled JSON body with the same security
-// header set as writeJSON (Content-Type, X-Content-Type-Options=nosniff,
-// Cache-Control=no-store). Use this when the body is already a finished
-// byte slice (raw `[]`, an externally-encoded buf.Bytes(), etc.) and you
-// would otherwise hand-roll w.Header().Set / w.Write — those hand-rolled
-// sites historically diverged on which security headers they remembered
-// to add (R246-SEC-3 caught two such sites in dashboard_system.go).
-//
-// Note: Content-Type is `application/json` without `; charset=utf-8`
-// to match writeJSON / writeOK exactly. JSON is UTF-8 by spec (RFC 8259
-// §8.1) so the parameter is redundant, and uniformity here matters
-// more than legacy charset annotations.
-func writeJSONBytes(w http.ResponseWriter, body []byte) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-store")
-	if _, err := w.Write(body); err != nil {
 		slog.Debug("write json response", "err", err)
 	}
 }

@@ -168,10 +168,3 @@ func (b *RingBuffer) Count() int {
 	defer b.mu.Unlock()
 	return b.count
 }
-
-// Bytes returns the total byte size of all lines in the buffer.
-func (b *RingBuffer) Bytes() int64 {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.curBytes
-}

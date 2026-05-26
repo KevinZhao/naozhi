@@ -103,16 +103,23 @@ func CoalesceMessages(msgs []QueuedMsg) (string, []cli.ImageData) {
 			truncated++
 			continue
 		}
-		// R228-PERF-19 + R246-PERF-1: direct WriteString avoids fmt's
-		// reflection path; AppendFormat into a 5-byte stack scratch then
-		// b.Write avoids the small-string heap alloc that Format("15:04")
-		// previously paid on every queued message (16-burst worst case
-		// landed 16 of these on the GC). The 5-byte stack array exactly
-		// fits "HH:MM" so AppendFormat never grows the buffer.
+		// R228-PERF-19 + R246-PERF-1 + R249-PERF-26: direct WriteString
+		// avoids fmt's reflection path; we now also bypass time package's
+		// layout parser entirely. AppendFormat("15:04") re-walks the layout
+		// string each call (chunkify "15" + ":" + "04"); on a 16-burst
+		// that's 16× the same parse work for fixed two-digit fields.
+		// time.Hour()/Minute() are O(1) struct decodes; emitting the four
+		// digits directly cuts both the layout-walk cost and any
+		// AppendFormat internal scratch grows.
 		b.WriteByte('\n')
 		b.WriteByte('[')
-		var hhmmBuf [5]byte
-		b.Write(m.EnqueueAt.AppendFormat(hhmmBuf[:0], "15:04"))
+		hh := m.EnqueueAt.Hour()
+		mm := m.EnqueueAt.Minute()
+		b.WriteByte(byte('0' + hh/10))
+		b.WriteByte(byte('0' + hh%10))
+		b.WriteByte(':')
+		b.WriteByte(byte('0' + mm/10))
+		b.WriteByte(byte('0' + mm%10))
 		b.WriteString("] ")
 		b.WriteString(m.Text)
 		b.WriteByte('\n')
