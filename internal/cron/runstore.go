@@ -326,7 +326,24 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *run
 	if keepWindow <= 0 {
 		keepWindow = DefaultRunsKeepWindow
 	}
-	root := filepath.Join(filepath.Dir(storePath), "runs")
+	// R245-SEC-1 (#825): canonicalise the store path before deriving the
+	// runs dir. Without this, a relative or `..`-laden StorePath (e.g.
+	// from an operator override) lets the runs dir escape the intended
+	// data root, and a symlinked storePath dir would pull every later
+	// runstore syscall through the link target — silently allowing an
+	// attacker who controls that target to redirect Append writes /
+	// List reads. filepath.Abs handles the relative case; EvalSymlinks
+	// resolves any link in the chain. Either failing reverts to the
+	// best-effort non-canonical join so a missing parent dir (fresh
+	// deploy) still works.
+	storeDir := filepath.Dir(storePath)
+	if abs, err := filepath.Abs(storeDir); err == nil {
+		storeDir = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(storeDir); err == nil {
+		storeDir = resolved
+	}
+	root := filepath.Join(storeDir, "runs")
 	// R234-SEC-4: 主动创建 runs/ 根目录并设 0o700。原先只在 Append 时
 	// 创建 runs/<jobID>/ 子目录用 0o700，而 runs/ 自身继承父目录权限
 	// （通常 0o755），同机器其他 OS 用户可枚举 jobID 列表，泄露 cron
@@ -334,6 +351,26 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *run
 	// 上 MkdirAll，不影响功能。
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		slog.Warn("cron run: mkdir root failed", "root", root, "err", err)
+	}
+	// R245-SEC-1 (#825): refuse a symlinked runs dir. If runs/ already
+	// exists as a symlink (e.g. an attacker-pre-created dangling link
+	// pointing to /etc), every later writeRun / listRun would follow it.
+	// Lstat sees the link itself; treat that as a hard configuration
+	// error and disable the store rather than write through it. The
+	// 0o700 mode tighten complements the eager Chmod for the parent dir
+	// (#834) by also covering the runs/ subdir if MkdirAll honoured a
+	// pre-existing looser mode.
+	if fi, err := os.Lstat(root); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			slog.Warn("cron run: refusing to use symlinked runs dir", "root", root)
+			return &runStore{disabled: true}
+		}
+		if fi.IsDir() && fi.Mode().Perm() != 0o700 {
+			if cerr := os.Chmod(root, 0o700); cerr != nil {
+				slog.Warn("cron run: chmod runs dir failed",
+					"root", root, "err", cerr, "mode", fi.Mode().Perm())
+			}
+		}
 	}
 	return &runStore{
 		root:         root,
