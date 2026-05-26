@@ -437,23 +437,18 @@ type SessionHandlers struct {
 // orchestrator so reviewers don't have to hold the whole pipeline in their
 // head while reading a single concern.
 func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
-	// Read Version() BEFORE ListSessions(). storeGen is atomic, ListSessions
-	// takes an RLock: a mutation landing between List→ and →Version would
-	// otherwise publish data at gen N with version N+1, and the dashboard
-	// would skip the next poll (N+1 already seen) until a later mutation
-	// bumps to N+2 — effectively a "stale sessions" window of up to 1 poll.
-	// Reading version first makes the response's version field an ≤ bound
-	// on the data's freshness, so the dashboard never skips a real change.
-	//
-	// The reverse race is intentional: a mutation landing between Version
-	// and ListSessions produces data at gen N+1 tagged with version N. The
-	// next poll sees version N+1, re-reads, and catches up — at worst one
-	// poll of display lag. The alternate ordering would instead make a
-	// real-change poll look like a duplicate and skip the refresh until a
-	// later unrelated mutation, which operators perceive as "my send didn't
-	// update the UI". version ≤ data is the safer side. R60-GO-M3.
-	version := h.router.Version()
-	snapshots := h.router.ListSessions()
+	// R246-PERF-15 (#726): read snapshots and storeGen in a single
+	// r.mu.RLock epoch via ListSessionsWithVersion. The pre-existing
+	// two-call pattern (Version → ListSessions) intentionally chose
+	// version-first ordering as the "version ≤ data" safer side per
+	// R60-GO-M3 — under that ordering a mutation landing between the
+	// two reads produced data at gen N+1 tagged with version N, which
+	// the next poll (seeing N+1) would re-fetch and catch up on. The
+	// new tuple closes the window entirely: response.version is
+	// exactly the version that produced the snapshot slice, so the
+	// dashboard's version-gate neither skips a refresh nor repeats a
+	// render.
+	snapshots, version := h.router.ListSessionsWithVersion()
 
 	// Capture once so downstream cutoff / uptime bucket computations share a
 	// single vDSO call rather than the 2 previously paid per poll. R67-PERF-4.

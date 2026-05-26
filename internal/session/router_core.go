@@ -1547,6 +1547,29 @@ var listRefsPool = sync.Pool{
 // correct boundary for pooling. ~50 sessions × ~280 B SessionSnapshot
 // = ~14 KB / call; 1 Hz × N tabs is acceptable.
 func (r *Router) ListSessions() []SessionSnapshot {
+	snaps, _ := r.ListSessionsWithVersion()
+	return snaps
+}
+
+// ListSessionsWithVersion returns the session snapshot slice paired
+// with the storeGen value sampled in the same r.mu.RLock epoch. The
+// dashboard's /api/sessions handler uses this so the response.version
+// field is exactly the version that produced the data — without it the
+// pre-existing handleList code did `Version()` then `ListSessions()`
+// in two separate critical sections, opening a small race where a
+// mutation landing between the two reads could publish data tagged
+// with a stale version (or vice versa) and make the dashboard either
+// skip a real refresh or repeat a render. R246-PERF-15 (#726).
+//
+// storeGen is atomic.Uint64 so the read inside r.mu.RLock is wait-
+// free; correctness depends only on the writer ordering: writers do
+// `r.mu.Lock(); ... ; storeGen.Add(1); r.mu.Unlock()` (see
+// router_cleanup.go and router_core mutators), so a reader holding
+// RLock observes a (sessions, gen) pair that any concurrent writer
+// produced atomically. Pre-existing ListSessions() now delegates here
+// to share the implementation; callers that don't need the version
+// keep the pre-R246-PERF-15 signature and pay no extra cost.
+func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	refsPtr := listRefsPool.Get().(*[]*ManagedSession)
 	refs := (*refsPtr)[:0]
 	r.mu.RLock()
@@ -1559,6 +1582,7 @@ func (r *Router) ListSessions() []SessionSnapshot {
 	for _, s := range r.sessions {
 		refs = append(refs, s)
 	}
+	version := r.storeGen.Load()
 	r.mu.RUnlock()
 
 	snapshots := make([]SessionSnapshot, len(refs))
@@ -1572,7 +1596,7 @@ func (r *Router) ListSessions() []SessionSnapshot {
 	}
 	*refsPtr = refs[:0]
 	listRefsPool.Put(refsPtr)
-	return snapshots
+	return snapshots, version
 }
 
 // GetSession returns the session for the given key, or nil.
