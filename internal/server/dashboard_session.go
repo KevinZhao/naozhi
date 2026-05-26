@@ -538,6 +538,77 @@ func filterAndCountSnapshots(snapshots []session.SessionSnapshot, now time.Time)
 	return snapshots[:n], running, ready
 }
 
+// workspacesPool reuses the []string scratch slice fillProjectAndSummary
+// + loadHistorySessions hand to ProjectManager.ResolveWorkspaces on every
+// /api/sessions poll (1 Hz × N tabs) and every history scan. R217-PERF-10
+// (#616): the previous per-call `make([]string, 0, len(snapshots))` showed
+// up in heap profiles on session-heavy dashboards. ResolveWorkspaces
+// reads the header inside its own RLock and never retains the backing
+// array, so a pool entry is safe to recycle once the call returns.
+//
+// Each pool entry is a *[]string so the runtime can elide the per-Get
+// alloc on the typed pointer wrapper too — directly pooling []string
+// would still alloc a new header on every Put because slice values are
+// non-pointer. The slice we hand out has cap >= the requested size and
+// len reset to 0; callers append fresh data and Put back the same
+// pointer. A grown slice (cap > 4096) is dropped on Put so a single
+// pathological request cannot inflate every pool entry's footprint.
+//
+// Concurrency: sync.Pool is safe; the per-tab calls never share a
+// borrowed slice. The cap-bounding contract on Put ensures the pool's
+// steady-state working-set stays bounded by the typical session count.
+var workspacesPool = sync.Pool{
+	New: func() any {
+		s := make([]string, 0, 32) // typical sidebar fits in this prefix
+		return &s
+	},
+}
+
+// borrowWorkspaces returns a recycled []string with cap >= want and len
+// 0. The returned slice header MUST be returned via returnWorkspaces;
+// callers that escape the slice into a struct field MUST copy first.
+func borrowWorkspaces(want int) *[]string {
+	p := workspacesPool.Get().(*[]string)
+	s := *p
+	if cap(s) < want {
+		// Grow once to the request size + slack rather than letting
+		// append's geometric growth stamp out a fresh backing array on
+		// each call. Bounded by the snapshot length so a deployment with
+		// thousands of sessions does not over-allocate.
+		s = make([]string, 0, want)
+	} else {
+		s = s[:0]
+	}
+	*p = s
+	return p
+}
+
+// returnWorkspaces hands the recycled slice back to the pool. Slices
+// whose backing array has been grown past the cap-bounding threshold are
+// dropped so a single oversized poll cannot inflate every pool entry's
+// retained footprint.
+func returnWorkspaces(p *[]string) {
+	if p == nil {
+		return
+	}
+	const maxRetainCap = 4096
+	if cap(*p) > maxRetainCap {
+		// Drop the oversized backing array; the pool will allocate a
+		// fresh small one on next Get via the New func above.
+		return
+	}
+	// Clear element references so the pool does not keep the workspace
+	// strings live past the request. Strings are interned by Go's
+	// compiler for short literals but workspace paths are dynamically
+	// constructed and would otherwise be GC-pinned via the pool.
+	s := *p
+	for i := range s {
+		s[i] = ""
+	}
+	*p = s[:0]
+	workspacesPool.Put(p)
+}
+
 // fillProjectAndSummary stamps each snapshot with its project name (from
 // ProjectManager + planner-key fallback) and any persisted Summary lookup
 // from sessions-index.json. Mutates snapshots in place.
@@ -547,16 +618,21 @@ func filterAndCountSnapshots(snapshots []session.SessionSnapshot, now time.Time)
 // dashboard handler. R246-CR-002 (#736).
 func (h *SessionHandlers) fillProjectAndSummary(snapshots []session.SessionSnapshot) {
 	if h.projectMgr != nil {
-		// Pre-size to len(snapshots): the loop accepts at most one entry per
-		// session, so the slice never grows past this bound. Starting at nil
-		// made append log(N) growth-realloc through 0→1→2→4→…→n per poll,
-		// visible in heap profiles on session-heavy dashboards. R60-PERF-4.
-		workspaces := make([]string, 0, len(snapshots))
+		// Borrow a recycled []string scratch buffer to feed
+		// ResolveWorkspaces. R217-PERF-10 (#616): the previous per-call
+		// `make([]string, 0, len(snapshots))` showed up in heap profiles
+		// on session-heavy dashboards (1 Hz × N tabs). ResolveWorkspaces
+		// reads the header inside its own RLock and never retains the
+		// backing array, so the pool entry is safe to recycle on return.
+		wsPtr := borrowWorkspaces(len(snapshots))
+		defer returnWorkspaces(wsPtr)
+		workspaces := *wsPtr
 		for i := range snapshots {
 			if !project.IsPlannerKey(snapshots[i].Key) && snapshots[i].Workspace != "" {
 				workspaces = append(workspaces, snapshots[i].Workspace)
 			}
 		}
+		*wsPtr = workspaces
 		wsMap := h.projectMgr.ResolveWorkspaces(workspaces)
 
 		for i := range snapshots {
@@ -1565,13 +1641,19 @@ func (h *SessionHandlers) loadHistorySessions() []discovery.RecentSession {
 	}
 	all := discovery.RecentSessions(h.claudeDir, 200, 7*24*time.Hour, excludeIDs, filter)
 
-	// Resolve project names in batch.
+	// Resolve project names in batch.  R217-PERF-10 (#616): borrow the
+	// pooled []string scratch (same pool fillProjectAndSummary uses) so
+	// the history-scan path also stops paying a per-call workspaces alloc
+	// every time the 120s history TTL expires.
 	if h.projectMgr != nil && len(all) > 0 {
-		workspaces := make([]string, 0, len(all))
+		wsPtr := borrowWorkspaces(len(all))
+		workspaces := *wsPtr
 		for _, rs := range all {
 			workspaces = append(workspaces, rs.Workspace)
 		}
+		*wsPtr = workspaces
 		wsMap := h.projectMgr.ResolveWorkspaces(workspaces)
+		returnWorkspaces(wsPtr)
 		for i := range all {
 			all[i].Project = wsMap[all[i].Workspace]
 		}
