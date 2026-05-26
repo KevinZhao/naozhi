@@ -1127,6 +1127,16 @@ func (w *perKeyWriter) flush(p *Persister) error {
 		} else {
 			w.pendingIdx = w.pendingIdx[:0]
 		}
+		// R250-PERF-17 (#1120): apply the same shrink rule to idxScratch.
+		// selectForIdx keeps `kept` pointing at the per-writer scratch
+		// (assigned to w.idxScratch above when stride > 1), so an
+		// InjectHistory burst inflates this slice's cap symmetrically with
+		// pendingIdx; without this reset, 100+ active writers would each
+		// pin a multi-KB scratch slice for the writer's lifetime even
+		// after returning to steady-state batch sizes.
+		if p.opts.IdxStride > 1 && cap(w.idxScratch) > p.opts.IdxStride*4 {
+			w.idxScratch = make([]schema.IdxEntry, 0, p.opts.IdxStride*2)
+		}
 	}
 	// Skip the fsync entirely when this flush did not append any idx
 	// bytes — under high session count + short FlushInterval the idx
