@@ -686,9 +686,13 @@ func (s *runStore) warmCache(jobID string) {
 	if entry.warm {
 		return // another goroutine warmed it during our wait
 	}
-	rows := s.diskListNewestFirst(jobID, s.keepCount, time.Time{})
+	rows, corruptCount := s.diskListNewestFirst(jobID, s.keepCount, time.Time{})
 	entry.ringSeed(rows, s.keepCount)
 	entry.warm = true
+	if corruptCount > 0 {
+		slog.Warn("cron runstore warmCache skipped corrupt files",
+			"count", corruptCount, "dir", filepath.Join(s.root, jobID))
+	}
 }
 
 // cacheInvalidate forgets the cache entry for jobID. Used by DeleteJob.
@@ -730,20 +734,23 @@ func (s *runStore) List(jobID string, limit int, before time.Time) []CronRunSumm
 			return cached
 		}
 	}
-	return s.diskListNewestFirst(jobID, limit, before)
+	rows, _ := s.diskListNewestFirst(jobID, limit, before)
+	return rows
 }
 
 // diskListNewestFirst is the on-disk variant of List, used by warmCache
 // and as the fall-through when cache is unavailable / before-cutoff is
-// set. Same return contract as List.
-func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time) []CronRunSummary {
+// set. Returns the summary list and the count of corrupt/unreadable run
+// files skipped during the scan (R20260526-CR-018, #1227 — surfaces
+// silent skips so warmCache can emit a single aggregate log line).
+func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time) ([]CronRunSummary, int) {
 	dir := filepath.Join(s.root, jobID)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			slog.Debug("cron run: list readdir", "dir", dir, "err", err)
 		}
-		return nil
+		return nil, 0
 	}
 	type item struct {
 		runID string
@@ -798,6 +805,7 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 	})
 
 	out := make([]CronRunSummary, 0, limit)
+	corruptCount := 0
 	for _, it := range items {
 		if len(out) >= limit {
 			break
@@ -810,6 +818,9 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 		// the warmCache pass.
 		run, err := s.readRunNoLstat(path)
 		if err != nil {
+			if errors.Is(err, ErrCorruptRun) {
+				corruptCount++
+			}
 			continue
 		}
 		if !before.IsZero() && !run.StartedAt.Before(before) {
@@ -817,7 +828,7 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 		}
 		out = append(out, run.summary())
 	}
-	return out
+	return out, corruptCount
 }
 
 // Recent returns the N most recent CronRunSummary entries for jobID
