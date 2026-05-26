@@ -805,6 +805,89 @@ func TestSummariseToolInput_FallbackUsesRawBytes(t *testing.T) {
 	}
 }
 
+// TestFlattenJSONLEvent_DispatchByType pins R242-CR-13 (#704): the
+// monolithic flattenJSONLEvent body was split into per-type helpers
+// (flattenUserEvent / flattenAssistantEvent / flattenSystemEvent) wired
+// through a one-line switch. Test the dispatch contract directly so a
+// future refactor flattening the helpers back into one function (or
+// dropping a case branch) trips before it ships:
+//   - "user" routes to flattenUserEvent (text turn surfaces)
+//   - "assistant" routes to flattenAssistantEvent (assistant turn surfaces)
+//   - "system" routes to flattenSystemEvent (only error subtype emits)
+//   - unknown event types return parsed=false (default branch holds)
+func TestFlattenJSONLEvent_DispatchByType(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		ev        *claudeJSONLEvent
+		wantKinds []string // ordered kinds expected in output
+		wantParse bool
+	}{
+		{
+			name: "user_text",
+			ev: &claudeJSONLEvent{
+				Type:    "user",
+				Message: json.RawMessage(`{"role":"user","content":"hello"}`),
+			},
+			wantKinds: []string{"user"},
+			wantParse: true,
+		},
+		{
+			name: "assistant_text",
+			ev: &claudeJSONLEvent{
+				Type:    "assistant",
+				Message: json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"hi"}]}`),
+			},
+			wantKinds: []string{"assistant"},
+			wantParse: true,
+		},
+		{
+			name: "system_error",
+			ev: &claudeJSONLEvent{
+				Type:    "system",
+				Message: json.RawMessage(`{"subtype":"error","message":"boom"}`),
+			},
+			wantKinds: []string{"error"},
+			wantParse: true,
+		},
+		{
+			name: "system_init_skipped",
+			ev: &claudeJSONLEvent{
+				Type:    "system",
+				Message: json.RawMessage(`{"subtype":"init"}`),
+			},
+			wantKinds: nil,
+			wantParse: false,
+		},
+		{
+			name:      "unknown_type_default",
+			ev:        &claudeJSONLEvent{Type: "queue-operation", Message: json.RawMessage(`{}`)},
+			wantKinds: nil,
+			wantParse: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out, _, _, parsed := flattenJSONLEvent(tc.ev, 0, 0)
+			if parsed != tc.wantParse {
+				t.Errorf("parsed=%v, want %v", parsed, tc.wantParse)
+			}
+			if len(out) != len(tc.wantKinds) {
+				t.Fatalf("len(out)=%d, want %d (kinds=%v)", len(out), len(tc.wantKinds), tc.wantKinds)
+			}
+			for i, want := range tc.wantKinds {
+				if out[i].Kind != want {
+					t.Errorf("out[%d].Kind=%q, want %q", i, out[i].Kind, want)
+				}
+			}
+		})
+	}
+}
+
 // BenchmarkSummariseToolInput_TypedProbe locks the R233-PERF-5 / #695
 // perf win: the typed `toolInputProbe` decode replaced the prior
 // `map[string]any` decode + key hunt, halving allocations on the hot
