@@ -28,6 +28,8 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
+
+	robfigcron "github.com/robfig/cron/v3"
 )
 
 // cronSlowThreshold is the wall-clock budget beyond which a successful
@@ -598,10 +600,29 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		// R250-GO-1: snapshot Schedule under s.mu.RLock so a concurrent
 		// UpdateJob mutating j.Schedule doesn't race with applyJitter's
 		// read. Mirrors the pattern used for the cur.Paused check below.
+		//
+		// R250-CR-14 (#1147): also snapshot j.entryID so we can fetch the
+		// already-parsed robfigcron.Schedule via s.cron.Entry(entryID)
+		// instead of re-parsing the schedule string inside applyJitter.
+		// cronParser.Parse uses regex + struct alloc; on every tick of every
+		// jittered job this was wasted work since robfig/cron already holds
+		// the parsed Schedule for dispatch. Fall back to the string-parse
+		// path (applyJitter) if entryID is 0 (job not yet registered, e.g.
+		// tests) or if the entry has been removed concurrently (DeleteJob
+		// races) — the parse-fallback preserves the historical behaviour.
 		s.mu.RLock()
-		sched := j.Schedule
+		schedStr := j.Schedule
+		entryID := j.entryID
+		var parsedSched robfigcron.Schedule
+		if entryID != 0 {
+			parsedSched = s.cron.Entry(entryID).Schedule
+		}
 		s.mu.RUnlock()
-		applyJitter(s.stopCtx, sched, s.jitterMax)
+		if parsedSched != nil {
+			applyJitterSched(s.stopCtx, parsedSched, s.jitterMax)
+		} else {
+			applyJitter(s.stopCtx, schedStr, s.jitterMax)
+		}
 
 		// R220-GO-3 + R246-GO-7: a DeleteJob OR a PauseJobByID that lands
 		// during the jitter window must abort the run before we spawn /
@@ -976,8 +997,41 @@ func applyJitter(ctx context.Context, schedule string, jitterMax time.Duration) 
 	if jitterMax <= 0 {
 		return
 	}
+	// R250-CR-14 (#1147): the string-keyed entry point re-parses on every
+	// call. Production now prefers applyJitterSched with the pre-parsed
+	// robfigcron.Schedule pulled from s.cron.Entry, but this signature is
+	// retained for tests and for the fallback path when entryID is 0 /
+	// concurrently removed. Keep the parse → period → sleep pipeline
+	// behaviourally identical to applyJitterSched so the two paths cannot
+	// diverge.
+	period := schedulePeriod(schedule, time.Now())
+	jitterSleep(ctx, period, jitterMax)
+}
+
+// applyJitterSched is the entry point for the cron tick hot path. It reuses
+// the already-parsed robfigcron.Schedule that the cron engine holds inside
+// each Entry, avoiding a redundant cronParser.Parse on every tick. Behaviour
+// is otherwise identical to applyJitter — same window cap (period/4), same
+// jitterMax fallback, same ctx.Done() short-circuit. R250-CR-14 / #1147.
+func applyJitterSched(ctx context.Context, sched robfigcron.Schedule, jitterMax time.Duration) {
+	if jitterMax <= 0 {
+		return
+	}
+	var period time.Duration
+	if sched != nil {
+		period = schedulePeriodFromSched(sched, time.Now())
+	}
+	jitterSleep(ctx, period, jitterMax)
+}
+
+// jitterSleep is the shared tail of applyJitter / applyJitterSched: clamp
+// jitterMax by period/4 (with period<=0 meaning "use jitterMax as-is"),
+// roll a random duration in [0, window), and sleep on a Timer that respects
+// ctx cancellation. Extracted so the parse-once vs reuse-parsed split lives
+// only in the two thin entry points above. R250-CR-14 / #1147.
+func jitterSleep(ctx context.Context, period, jitterMax time.Duration) {
 	window := jitterMax
-	if period := schedulePeriod(schedule, time.Now()); period > 0 {
+	if period > 0 {
 		if quarter := period / 4; quarter < window {
 			window = quarter
 		}

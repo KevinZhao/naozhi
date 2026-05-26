@@ -66,6 +66,57 @@ func TestApplyJitter_CapClampedByPeriod(t *testing.T) {
 	}
 }
 
+// TestApplyJitterSched_ReusesParsedSchedule 验证 applyJitterSched 接受
+// 已 parse 的 robfigcron.Schedule，period 计算结果与字符串路径一致，
+// 且 jitterMax=0 / nil sched 都不 sleep。R250-CR-14 (#1147)。
+func TestApplyJitterSched_ReusesParsedSchedule(t *testing.T) {
+	t.Parallel()
+
+	// 用同一份字符串经 cronParser 解析后传给 applyJitterSched，对照
+	// 字符串入口 schedulePeriod 的结果，确认两者拿到同一个 period。
+	const expr = "@every 5m"
+	sched, err := cronParser.Parse(expr)
+	if err != nil {
+		t.Fatalf("cronParser.Parse(%q): %v", expr, err)
+	}
+	now := time.Now()
+	if got, want := schedulePeriodFromSched(sched, now), schedulePeriod(expr, now); got != want {
+		t.Fatalf("period mismatch: sched=%v string=%v", got, want)
+	}
+
+	// jitterMax=0 → 立即返回，不 sleep。
+	start := time.Now()
+	applyJitterSched(context.Background(), sched, 0)
+	if elapsed := time.Since(start); elapsed > 5*time.Millisecond {
+		t.Fatalf("zero jitterMax should be instant, took %v", elapsed)
+	}
+
+	// nil schedule → 退化为 jitterMax 兜底，但 ctx 立刻 cancel 也应秒返。
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start = time.Now()
+	applyJitterSched(ctx, nil, 100*time.Millisecond)
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("cancelled ctx + nil sched should return immediately, took %v", elapsed)
+	}
+
+	// ctx cancel 在窗口内 → 立即返回。覆盖 select 路径不依赖 timer 触发。
+	ctx, cancel = context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		applyJitterSched(ctx, sched, 10*time.Second)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("applyJitterSched did not return within 500ms after ctx cancel")
+	}
+
+}
+
 // TestApplyJitter_UnparsableSchedule_UsesMaxCap 验证 bad cron 表达式下
 // period 返回 0，applyJitter 退化为使用完整 jitterMax 窗口兜底。
 func TestApplyJitter_UnparsableSchedule_UsesMaxCap(t *testing.T) {
@@ -186,11 +237,30 @@ func TestExecuteOpt_JitterPausedReCheck_SourceAnchor(t *testing.T) {
 	}
 	body := string(src)
 
-	// jitter block：applyJitter(...) ... cur, stillRegistered ... cur.Paused
+	// jitter block：applyJitter[Sched](...) ... cur, stillRegistered ... cur.Paused
 	// 必须按这个顺序串起来 — 即 jitter 之后那段 RLock 既读 cur 又读 paused。
-	rePausedRead := regexp.MustCompile(`(?s)applyJitter\([^)]*\)[^}]*?cur,\s*stillRegistered\s*:=\s*s\.jobs\[[^]]+\][^}]*?paused\s*:=\s*stillRegistered\s*&&\s*cur\.Paused`)
+	// R250-CR-14 (#1147): jitter 入口被拆成 applyJitter / applyJitterSched
+	// （后者复用已 parse 的 robfigcron.Schedule 避开重复 Parse），原本的
+	// `applyJitter(...)` 单行变成 if-parsedSched/else 两行——else 分支的
+	// `applyJitter(...)` 后面紧跟 `}` 关闭 else 块，再到 paused re-check。
+	// 锚点选 else 分支：applyJitterSched 走 if 分支、applyJitter 走 else
+	// 分支，整段 jitter 等待无论走哪条路径都在 else 的 `}` 之前结束。
+	// `[^}]*?` 限定不能再跨越任何 `}`——如果将 paused check 挪到外层
+	// scope 之外（额外 `}`），本断言立即失败。
+	rePausedRead := regexp.MustCompile(`(?s)applyJitter\([^)]*\)\s*\}[^}]*?cur,\s*stillRegistered\s*:=\s*s\.jobs\[[^]]+\][^}]*?paused\s*:=\s*stillRegistered\s*&&\s*cur\.Paused`)
 	if !rePausedRead.MatchString(body) {
 		t.Error("scheduler_run.go jitter block 不再 re-check cur.Paused (R246-GO-7 防退化失守)")
+	}
+
+	// applyJitterSched 必须存在且位于 paused re-check 之前——保证 fast-path
+	// （已 parse Schedule 复用）也走同一个 jitter→paused 流水线，不会绕开。
+	// 用 SubexpIndex 做位置比较：两个 anchor 同时存在且顺序正确即可。
+	idxSched := regexp.MustCompile(`applyJitterSched\(`).FindStringIndex(body)
+	idxPaused := regexp.MustCompile(`paused\s*:=\s*stillRegistered\s*&&\s*cur\.Paused`).FindStringIndex(body)
+	if idxSched == nil {
+		t.Error("scheduler_run.go 缺少 applyJitterSched 调用 (R250-CR-14 fast-path 退化)")
+	} else if idxPaused == nil || idxSched[0] >= idxPaused[0] {
+		t.Error("scheduler_run.go 中 applyJitterSched 必须先于 paused re-check (R250-CR-14 / R246-GO-7)")
 	}
 
 	// 还要存在 paused → return 的早退分支。仅读 paused 不 return 不算修复。
