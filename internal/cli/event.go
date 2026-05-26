@@ -386,12 +386,6 @@ type imageSource struct {
 	Data      string `json:"data"`       // base64-encoded
 }
 
-// NewUserMessage creates the NDJSON input for a user message.
-// When images is non-empty, content is formatted as multimodal content blocks.
-func NewUserMessage(text string, images []ImageData) InputMessage {
-	return NewUserMessageWithMeta(text, images, "", "")
-}
-
 // splitAttachments partitions atts into inline (image) and file-reference
 // slices while preserving original order within each bucket. The zero-value
 // Kind ("") is treated as KindImageInline so legacy call sites that never
