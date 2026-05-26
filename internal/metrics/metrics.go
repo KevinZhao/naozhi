@@ -384,4 +384,13 @@ var (
 	// any increment indicates a code path violated the append-only
 	// invariant on prev_session_ids.
 	AutoChainOriginsLengthMismatch = expvar.NewInt("naozhi_auto_chain_origins_length_mismatch_total")
+
+	// AutoChainExcludersWaitTimeout counts auto-chain readers that
+	// gave up waiting on the excluders-ready gate (R242-ARCH-16 /
+	// #760). Steady-state must be 0 in production: a non-zero value
+	// means cmd-wireup either never called Router.MarkExcludersReady
+	// or did so >5s after NewRouter, leaving the spawn-path /
+	// backfill-path auto-chain decision to fall through to the
+	// legacy "no exclusions" behaviour for the racing reader.
+	AutoChainExcludersWaitTimeout = expvar.NewInt("naozhi_auto_chain_excluders_wait_timeout_total")
 )

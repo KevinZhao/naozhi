@@ -508,23 +508,41 @@ type Router struct {
 	// into a user-facing chain (RFC §4.3 Arch-B2). Atomic copy-on-write so
 	// the read path stays lock-free under r.mu.
 	//
-	// NEEDS-DESIGN (R242-ARCH-16): excluders is read-as-nil-pool during
-	// the cmd-startup window between NewRouter and the first call to
+	// R242-ARCH-16 (#760): excluders is read-as-nil-pool during the
+	// cmd-startup window between NewRouter and the first call to
 	// AddSessionIDExcluder. Today auto-chain readers fall back to "no
 	// exclusions" — a benign opening because cron Scheduler / sysession
-	// Manager have not yet installed any internal sessionIDs (they
-	// register themselves *after* their stub keys exist), so a Phase-2
-	// candidate scan during that window has nothing to exclude. The
-	// fallback's drift cost is that adding a third subsystem (e.g.
-	// planner) which owns sessionIDs from t=0 would silently leak them
-	// into auto-chain candidates until its registration call lands.
-	// Plan: SetPendingExcluders(true) at NewRouter, flip to false in
-	// the cmd-wire step that awaits cron + sysession + planner
-	// registration; auto-chain reads block on the gate so the leak
-	// window is closed by construction. Deferred until a third
-	// excluder owner ships, since the current two-owner topology has
-	// no exposure.
+	// Manager register themselves *after* their stub keys exist, so a
+	// Phase-2 candidate scan during that window has nothing to
+	// exclude. The fallback's drift cost is that adding a third
+	// subsystem (e.g. planner) which owns sessionIDs from t=0 would
+	// silently leak them into auto-chain candidates until its
+	// registration call lands.
+	//
+	// Mitigation (this commit): excludersReadyCh is a one-shot gate
+	// closed by MarkExcludersReady(). When RouterConfig leaves
+	// PendingExcluders=false (default) the gate is closed at
+	// construction so existing callers see no change. cmd-wire opts
+	// in by setting RouterConfig.PendingExcluders=true; auto-chain
+	// readers (runAutoChainBackfillOnce, maybeAttachAutoChainOnSpawn)
+	// block on waitExcludersReady with a bounded timeout so the
+	// startup window is closed by construction once the cmd-wire
+	// step calls MarkExcludersReady. Deferred wiring of the
+	// PendingExcluders flag in cmd is intentional: a third excluder
+	// owner can opt in without further router changes.
 	excluders atomic.Pointer[[]SessionIDExcluder]
+
+	// excludersReadyCh is closed by MarkExcludersReady. Auto-chain
+	// readers block on this channel (with bounded timeout) when the
+	// router was constructed with RouterConfig.PendingExcluders=true.
+	// nil-typed close-once semantics: the channel is created in
+	// NewRouter and never re-assigned. Readers that arrive after
+	// the channel is closed proceed immediately.
+	excludersReadyCh chan struct{}
+	// excludersReadyOnce guards close(excludersReadyCh) against
+	// double-close panics when MarkExcludersReady is called more
+	// than once (e.g. wireup retry, test reuse).
+	excludersReadyOnce sync.Once
 
 	// autoChainListJSONL is the listJSONL function injected into
 	// pickWorkspaceChain. Production wires discovery.ListWorkspaceJSONL;
@@ -859,6 +877,16 @@ type RouterConfig struct {
 	// Tests inject a fixture function so unit cases can synthesise
 	// JSONL listings without touching disk.
 	AutoChainListJSONL func(workspace string) []discovery.WorkspaceJSONL
+
+	// PendingExcluders, when true, defers the auto-chain "excluders
+	// ready" gate so runAutoChainBackfillOnce and the spawn-path
+	// auto-chain decision block until MarkExcludersReady is called
+	// (typically by cmd-wireup after every owner — cron Scheduler,
+	// sysession Manager, future subsystems — has registered its
+	// SessionIDExcluder via AddSessionIDExcluder). Default false
+	// preserves legacy behaviour for embedders that do not register
+	// any excluders. R242-ARCH-16 (#760).
+	PendingExcluders bool
 }
 
 // NewRouter creates a session router.
@@ -989,6 +1017,17 @@ func NewRouter(cfg RouterConfig) *Router {
 	// Parent is Background because NewRouter has no caller-supplied ctx;
 	// Shutdown is the sole cancel trigger.
 	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
+
+	// Excluders-ready gate (R242-ARCH-16 / #760). When PendingExcluders
+	// is false (default) the gate is closed immediately so legacy
+	// readers see no change. When true, MarkExcludersReady must be
+	// called by cmd-wireup once all SessionIDExcluder owners have
+	// registered; auto-chain readers wait on the gate with a bounded
+	// timeout.
+	r.excludersReadyCh = make(chan struct{})
+	if !cfg.PendingExcluders {
+		r.excludersReadyOnce.Do(func() { close(r.excludersReadyCh) })
+	}
 
 	// Load historical session IDs (all IDs ever used by naozhi).
 	// Insertion order is lost on reload (persistence writes as an unordered

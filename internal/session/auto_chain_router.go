@@ -17,6 +17,7 @@
 package session
 
 import (
+	"context"
 	"log/slog"
 	"slices"
 	"sort"
@@ -60,6 +61,18 @@ func (r *Router) maybeAttachAutoChainOnSpawn(
 	// top of it. Empty prev + empty history is the signal for "fresh
 	// session, eligible for auto-attach".
 	if len(prevIDs) > 0 || len(oldHistory) > 0 {
+		return nil
+	}
+
+	// R242-ARCH-16 (#760): block until every SessionIDExcluder owner
+	// (cron Scheduler, sysession Manager, future subsystems) has
+	// registered. When the router was constructed with
+	// PendingExcluders=false the gate is already closed and this
+	// returns immediately. On timeout we skip the auto-chain attach
+	// rather than risk leaking an internal sessionID into the chain.
+	if !r.waitExcludersReady(context.Background()) {
+		slog.Warn("auto-chain spawn: excluders-ready gate timed out; skipping attach",
+			"key", key, "workspace", workspace)
 		return nil
 	}
 
@@ -131,6 +144,59 @@ func (r *Router) extraExcluders() []SessionIDExcluder {
 		return nil
 	}
 	return *cur
+}
+
+// MarkExcludersReady signals that every owner of internal CLI session
+// IDs has registered its SessionIDExcluder via AddSessionIDExcluder.
+// Auto-chain readers block on this gate when the router was
+// constructed with RouterConfig.PendingExcluders=true.
+//
+// Idempotent: subsequent calls are no-ops (sync.Once-guarded close).
+// Safe to call from any goroutine. R242-ARCH-16 (#760).
+func (r *Router) MarkExcludersReady() {
+	r.excludersReadyOnce.Do(func() { close(r.excludersReadyCh) })
+}
+
+// excludersReadyWait is the default timeout for waitExcludersReady. The
+// auto-chain paths that consult it are non-critical (no user-visible
+// blocking), and a 5s ceiling keeps NewRouter / spawn paths from
+// hanging if cmd-wireup never calls MarkExcludersReady (e.g. a partial
+// startup that errored before wireup completed).
+const excludersReadyWait = 5 * time.Second
+
+// waitExcludersReady blocks until either the gate is closed (i.e.
+// MarkExcludersReady was called), the supplied context is cancelled,
+// or excludersReadyWait elapses. Returns true when the gate is closed
+// in time; false on timeout or ctx cancel — callers fall through to
+// the legacy "no exclusions" behaviour and emit a metrics counter.
+//
+// The function never blocks when RouterConfig.PendingExcluders was
+// left unset (default), because NewRouter closes excludersReadyCh
+// immediately in that case.
+func (r *Router) waitExcludersReady(ctx context.Context) bool {
+	if r.excludersReadyCh == nil {
+		// Defensive: a zero-value Router constructed bypassing
+		// NewRouter (older test helpers) would have a nil channel;
+		// treat as ready to preserve legacy behaviour.
+		return true
+	}
+	select {
+	case <-r.excludersReadyCh:
+		return true
+	default:
+	}
+	t := time.NewTimer(excludersReadyWait)
+	defer t.Stop()
+	select {
+	case <-r.excludersReadyCh:
+		return true
+	case <-ctx.Done():
+		metrics.AutoChainExcludersWaitTimeout.Add(1)
+		return false
+	case <-t.C:
+		metrics.AutoChainExcludersWaitTimeout.Add(1)
+		return false
+	}
 }
 
 // snapshotRouterExcludedLocked returns a SessionIDExcluder backed by
@@ -251,6 +317,14 @@ func (m mapExcluder) IsExcluded(id string) bool {
 // (RFC §4.4-B Phase 2 note).
 func (r *Router) runAutoChainBackfillOnce() {
 	if r.autoChainPolicy == nil {
+		return
+	}
+	// R242-ARCH-16 (#760): block until every SessionIDExcluder owner
+	// has registered. The default-PendingExcluders=false embedder
+	// (tests, single-owner topologies) sees no change because the
+	// gate is closed at NewRouter.
+	if !r.waitExcludersReady(r.historyCtx) {
+		slog.Warn("auto-chain backfill: excluders-ready gate timed out; skipping run")
 		return
 	}
 	startedAt := time.Now()
