@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/transcribestreaming"
@@ -256,6 +257,66 @@ func TestLookupFFmpeg_NoProcessWideCache(t *testing.T) {
 		if secondPath == "" {
 			t.Errorf("lookupFFmpeg after PATH restore returned empty path; " +
 				"expected re-resolution to find a binary on the restored PATH")
+		}
+	}
+}
+
+// TestLookupFFmpeg_OverrideEnv pins the NAOZHI_FFMPEG_PATH operator-override
+// branch (#1050 follow-on): a non-empty env var bypasses PATH resolution
+// entirely. A working override must succeed even when PATH is empty; a
+// pointing-at-nothing override must error loudly rather than silently fall
+// back to PATH (a misconfigured override should be a loud failure, not a
+// degraded one).
+func TestLookupFFmpeg_OverrideEnv(t *testing.T) {
+	originalPATH := os.Getenv("PATH")
+	originalOverride := os.Getenv(ffmpegPathEnv)
+	t.Cleanup(func() {
+		os.Setenv("PATH", originalPATH)
+		os.Setenv(ffmpegPathEnv, originalOverride)
+	})
+
+	// Find a real executable to point the override at. Use /bin/sh which
+	// every POSIX host has — we are testing the resolution flow, not the
+	// downstream ffmpeg behaviour. lookupFFmpeg only verifies the binary
+	// resolves and is executable; the actual ffmpeg invocation is gated
+	// elsewhere.
+	shellPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("no sh on PATH; cannot exercise override branch: %v", err)
+	}
+
+	// Override set + PATH cleared: must succeed via override.
+	os.Setenv(ffmpegPathEnv, shellPath)
+	if err := os.Setenv("PATH", ""); err != nil {
+		t.Fatalf("setenv PATH=\"\": %v", err)
+	}
+	got, err := lookupFFmpeg()
+	if err != nil {
+		t.Fatalf("override %q with empty PATH: lookupFFmpeg err=%v; "+
+			"expected the override to bypass PATH resolution entirely",
+			shellPath, err)
+	}
+	if got != shellPath {
+		t.Errorf("override returned %q, want %q (must echo the env override "+
+			"verbatim, not re-resolve through PATH)", got, shellPath)
+	}
+
+	// Override pointing at a missing path must error, not fall back to PATH.
+	os.Setenv(ffmpegPathEnv, "/nonexistent/ffmpeg-fake")
+	os.Setenv("PATH", originalPATH)
+	if _, err := lookupFFmpeg(); err == nil {
+		t.Error("override pointing at missing binary returned nil err; " +
+			"expected an explicit failure rather than silent PATH fallback")
+	}
+
+	// Empty override falls back to PATH (regression guard for "" handling).
+	os.Setenv(ffmpegPathEnv, "")
+	if _, err := lookupFFmpeg(); err != nil && originalPATH != "" {
+		// PATH lookup may legitimately fail on hosts without ffmpeg — only
+		// assert when the cleanup PATH actually contains it.
+		if _, lookErr := exec.LookPath("ffmpeg"); lookErr == nil {
+			t.Errorf("empty override + PATH-with-ffmpeg returned err %v; "+
+				"expected fallback to PATH lookup", err)
 		}
 	}
 }
