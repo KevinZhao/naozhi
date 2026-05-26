@@ -489,6 +489,26 @@ func classifyExecError(err error, defaultClass ErrorClass) (RunState, ErrorClass
 }
 
 func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
+	// R20260526-GO-004: hot-path self-defence against a nil router. The
+	// companion R20260526-GO-023 already logs at construction when
+	// cfg.Router is nil, but tests build narrow fixtures via NewScheduler
+	// without a router and only the fail-safe NPE-vs-skip distinction
+	// matters at tick time. Without this guard the s.router.Reset call
+	// inside freshContextPreflightP0 (line ~318) and s.router.GetOrCreate
+	// (line ~712) NPE deep in the run loop, leaving CAS gates held and
+	// triggerWG.Add already incremented. Short-circuit before any of that
+	// state changes — the inflight CAS has not been taken yet, so an
+	// early return is safe.
+	if s == nil || s.router == nil {
+		slog.Error("cron: router is nil; skipping run",
+			"id", func() string {
+				if j == nil {
+					return ""
+				}
+				return j.ID
+			}())
+		return
+	}
 	// Guard against concurrent execution of the same job. The cron chain's
 	// SkipIfStillRunning protects the scheduled-tick path, but TriggerNow
 	// that arrives while a tick is in flight bypasses the chain entirely
