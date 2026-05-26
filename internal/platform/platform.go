@@ -124,6 +124,21 @@ func DecodeMessageRef(ref string) (chatID, msgID string, ok bool) {
 	return ref[:idx], ref[idx+1:], true
 }
 
+// AsCapability is the generic discriminator for optional Platform
+// capabilities. Each capability is declared as its own interface;
+// callers query support via AsCapability[T](p). Adding a new
+// capability is now a single interface declaration in this package
+// and a typed call at the use-site — no per-capability AsX helper
+// required (R239-ARCH-H).
+//
+// Existing AsReactor / AsQuestionCardSender remain as thin wrappers
+// for back-compat with current call sites; new capabilities should
+// use AsCapability directly.
+func AsCapability[T any](p Platform) (T, bool) {
+	c, ok := p.(T)
+	return c, ok
+}
+
 // Reactor is an optional capability: platforms that can add/remove reactions
 // on inbound messages implement it. Enables non-intrusive queue feedback —
 // a reaction on the user's own message instead of a separate bot reply.
@@ -137,9 +152,10 @@ type Reactor interface {
 }
 
 // AsReactor returns p as a Reactor if it implements the interface.
+// Equivalent to AsCapability[Reactor](p); kept as a named helper for
+// existing call-site readability.
 func AsReactor(p Platform) (Reactor, bool) {
-	r, ok := p.(Reactor)
-	return r, ok
+	return AsCapability[Reactor](p)
 }
 
 // QuestionCard is the platform-agnostic payload for an AskUserQuestion prompt.
@@ -187,9 +203,10 @@ type QuestionCardSender interface {
 }
 
 // AsQuestionCardSender returns p as a QuestionCardSender if supported.
+// Equivalent to AsCapability[QuestionCardSender](p); kept as a named
+// helper for existing call-site readability.
 func AsQuestionCardSender(p Platform) (QuestionCardSender, bool) {
-	q, ok := p.(QuestionCardSender)
-	return q, ok
+	return AsCapability[QuestionCardSender](p)
 }
 
 // RunnablePlatform extends Platform for platforms needing background goroutines.
