@@ -163,28 +163,23 @@ func (p *ClaudeProtocol) Capabilities() Caps {
 	return Caps{Replay: true, Priority: true, SoftInterrupt: false, StreamJSON: true}
 }
 
-// controlRequestInterrupt is the NDJSON payload for an in-band "abort this turn"
-// signal sent via stdin. The Claude CLI reacts by killing any in-flight tool
-// call (bash children are SIGKILL'd), closing the current turn with a
+// WriteInterrupt emits the NDJSON "abort this turn" control_request payload
+// to stdin. The Claude CLI reacts by killing any in-flight tool call (bash
+// children are SIGKILL'd), closing the current turn with a
 // `stop_reason=tool_use` or `end_turn` result event, and returning to the
-// ready state — without tearing down the session. Verified against CLI 2.1.119.
-type controlRequestInterrupt struct {
-	Type      string                      `json:"type"`
-	RequestID string                      `json:"request_id"`
-	Request   controlRequestInterruptBody `json:"request"`
-}
-
-type controlRequestInterruptBody struct {
-	Subtype string `json:"subtype"`
-}
-
+// ready state — without tearing down the session. Verified against CLI
+// 2.1.119.
+//
+// R228-PERF-1: hand-build the static envelope and only json.Marshal the
+// variable requestID, mirroring the ACP WriteInterrupt fast-path
+// (R226-PERF-9). encoding/json takes a fast-path for plain string values
+// (no struct reflection) and yields a properly escaped JSON string with
+// surrounding quotes — identical to what a struct-based Marshal would
+// produce for the request_id field. The hand-rolled byte template below is
+// the single source of truth for the interrupt envelope shape; the
+// previously-typed `controlRequestInterrupt{Body}` shapes were unused and
+// were removed in DEADCODE-4 (#1197).
 func (p *ClaudeProtocol) WriteInterrupt(w io.Writer, requestID string) error {
-	// R228-PERF-1: hand-build the static envelope and only json.Marshal the
-	// variable requestID, mirroring the ACP WriteInterrupt fast-path
-	// (R226-PERF-9). encoding/json takes a fast-path for plain string values
-	// (no struct reflection) and yields a properly escaped JSON string with
-	// surrounding quotes — identical to what the previous struct-based
-	// Marshal produced for the request_id field.
 	idJSON, err := json.Marshal(requestID)
 	if err != nil {
 		return fmt.Errorf("marshal control_request: %w", err)
