@@ -3,6 +3,7 @@ package server
 import (
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/ratelimit"
 	"golang.org/x/time/rate"
@@ -20,6 +21,29 @@ type ipLimiter struct {
 func newIPLimiterWithProxy(r rate.Limit, burst int, trustedProxy bool) *ipLimiter {
 	return &ipLimiter{
 		inner:        ratelimit.New(ratelimit.Config{Rate: r, Burst: burst}),
+		trustedProxy: trustedProxy,
+	}
+}
+
+// newIPLimiterWithCap is a sibling of newIPLimiterWithProxy that pins the
+// underlying ratelimit.Limiter MaxKeys (LRU cap) and TTL explicitly rather
+// than inheriting the package defaults (1000 / 10m). R242-SEC-8 / #636:
+// for endpoints that face DDoS-class abuse the implicit 1000-key LRU is a
+// soft cap — once full, every fresh attacker-IP evicts the oldest legit
+// entry and the rate-limited IPs come back unthrottled. Pinning a higher
+// MaxKeys raises the saturation floor before LRU eviction starts to
+// recycle still-active rate-limited keys, and pinning the TTL aligns
+// idle-key expiry with the 1 Hz dashboard cadence so transient pollers
+// don't accumulate as ghost entries. Pass MaxKeys=0/TTL=0 to fall back
+// to ratelimit defaults.
+func newIPLimiterWithCap(r rate.Limit, burst, maxKeys int, ttl time.Duration, trustedProxy bool) *ipLimiter {
+	return &ipLimiter{
+		inner: ratelimit.New(ratelimit.Config{
+			Rate:    r,
+			Burst:   burst,
+			MaxKeys: maxKeys,
+			TTL:     ttl,
+		}),
 		trustedProxy: trustedProxy,
 	}
 }
