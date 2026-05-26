@@ -535,10 +535,12 @@ func buildServer(opts ServerOptions) *Server {
 	// session.Backend() at IM-reply time so a kiro session in a claude-default
 	// deployment gets [kiro] correctly.
 	tag := defaultTag
-	claudeDir := ""
-	if home, err := os.UserHomeDir(); err == nil {
-		claudeDir = filepath.Join(home, ".claude")
-	}
+	// R222-ARCH-9 / #724: env probe goes through the shared helper so the
+	// "where is ~/.claude" decision lives in one place (claude_paths.go).
+	// resolveClaudeDir returns "" when UserHomeDir fails, matching the
+	// previous inline shape exactly — downstream sites already nil-check
+	// claudeDir before joining or reading.
+	claudeDir := resolveClaudeDir()
 
 	nodes := opts.Nodes
 	if nodes == nil {

@@ -56,12 +56,12 @@ const (
 var errMemoryPathEscape = errors.New("path escapes projects dir")
 
 func NewMemoryHandler(trustedProxy bool) *MemoryHandler {
-	dir := os.Getenv("CLAUDE_PROJECTS_DIR")
-	if dir == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			dir = filepath.Join(home, ".claude", "projects")
-		}
-	}
+	// R222-ARCH-9 / #724: single-point env probe via resolveClaudeProjectsDir
+	// (was: inline CLAUDE_PROJECTS_DIR + UserHomeDir → filepath.Join). The
+	// helper preserves the original semantics exactly: honour the
+	// CLAUDE_PROJECTS_DIR override first, fall back to ~/.claude/projects,
+	// and return "" when both probe paths fail.
+	dir := resolveClaudeProjectsDir()
 	// R240-SEC-1: canonicalise projectsDir at construction. If the dir is itself
 	// reachable via a symlinked component (Docker bind-mount, AMI-customised
 	// layout, ~/.claude → /var/data/.claude on macOS), the prefix check inside
