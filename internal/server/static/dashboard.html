@@ -17,6 +17,10 @@
   --nz-text-dim:#6e7681;--nz-text-faint:#484f58;
   --nz-accent:#58a6ff;--nz-blue:#1f6feb;--nz-green:#3fb950;
   --nz-red:#da3633;--nz-amber:#d29922;
+  /* Anthropic rust — used for the Clawd mascot rendered next to assistant
+     turns on the claude backend. Defined as a token so the icon's pixel
+     fill stays consistent with any future Anthropic-tinted accents. */
+  --nz-clawd-rust:#d97757;
   --nz-focus:#58a6ff;
   /* R110-P1 status-dot palette: side-bar session cards render three
      states via .dot-running / .dot-ready / .dot-new. Before Round 126
@@ -282,6 +286,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .event.user.optimistic-msg .msg-queued-chip{display:inline-block;margin-top:4px;font-size:11px;color:var(--nz-text-mute);opacity:.85}
 /* AI text: left-aligned, clean markdown */
 .event.text .event-icon{background:rgba(163,118,255,.15);color:#a376ff;font-size:13px}
+/* Clawd mascot for claude-backend assistant turns. Drop the .event-icon
+   circular background so the pixel robot reads as a free-standing avatar;
+   the SVG itself is enlarged past the original 26px icon-slot to give it
+   visual presence next to the assistant text.
+   Color flows from --nz-clawd-rust via currentColor on the SVG path. */
+.event.text .event-icon:has(.cc-clawd){background:transparent;padding:0;width:32px;height:32px;overflow:visible}
+.event.text .event-icon .cc-clawd{width:32px;height:32px;display:block;color:var(--nz-clawd-rust)}
 .event.text .event-content{color:var(--nz-text);max-width:clamp(720px,60vw,1100px)}
 /* Copy button: permanent for long AI messages; hover-revealed via
    .hover-only for short bubbles so every text/user message stays
