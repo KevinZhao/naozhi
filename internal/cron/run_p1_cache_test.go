@@ -124,6 +124,47 @@ func TestR220Perf1_BeforeCutoffBypassesCache(t *testing.T) {
 	}
 }
 
+// TestR243Perf5_BeforeCutoffCacheTail (#810): when the on-disk count is
+// below keepCount the cache is exhaustive, so List(before≠0) can serve
+// from cache without ReadDir. Verified by warming cache, deleting all
+// disk files, then querying with a before-cutoff: cache should still
+// answer because count<cap.
+func TestR243Perf5_BeforeCutoffCacheTail(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	s := newRunStore(filepath.Join(tmp, "cron_jobs.json"), 10, time.Hour) // keepCount=10
+	s.enableTrimGC = false
+
+	jobID := generateID()
+	now := time.Now()
+	for i := 0; i < 5; i++ { // 5 < keepCount=10 → cache is exhaustive
+		runID := generateRunID()
+		startedAt := now.Add(time.Duration(i) * time.Minute)
+		s.Append(&CronRun{
+			RunID: runID, JobID: jobID, State: RunStateSucceeded,
+			StartedAt: startedAt,
+		})
+		path := filepath.Join(tmp, "runs", jobID, runID+".json")
+		_ = os.Chtimes(path, startedAt, startedAt)
+	}
+	// Warm cache.
+	if got := s.Recent(jobID, 10); len(got) != 5 {
+		t.Fatalf("warm: got %d entries, want 5", len(got))
+	}
+	// Delete disk files. If List served from disk it would return 0.
+	dir := filepath.Join(tmp, "runs", jobID)
+	files, _ := os.ReadDir(dir)
+	for _, f := range files {
+		_ = os.Remove(filepath.Join(dir, f.Name()))
+	}
+	// Query before-cutoff between entry 1 and 2; should see entries 0, 1.
+	cutoff := now.Add(time.Minute + 30*time.Second)
+	rows := s.List(jobID, 10, cutoff)
+	if len(rows) != 2 {
+		t.Fatalf("cache tail before-cutoff: got %d rows, want 2: %s", len(rows), summariesDesc(rows))
+	}
+}
+
 func summariesDesc(rs []CronRunSummary) string {
 	out := ""
 	for i, r := range rs {

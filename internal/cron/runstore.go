@@ -722,15 +722,62 @@ func (s *runStore) List(jobID string, limit int, before time.Time) []CronRunSumm
 
 	// Cache fast-path: when before is zero (most common — Recent and the
 	// first paginated page) and the entry is warm, return without IO.
-	// before-cutoff queries always go to disk because the cache only
-	// holds keepCount newest; pagination beyond that needs the filtered
-	// scan. R220-PERF-1.
+	// R220-PERF-1.
 	if before.IsZero() {
 		if cached, ok := s.cacheGet(jobID, limit); ok {
 			return cached
 		}
+	} else if cached, ok := s.cacheGetBefore(jobID, limit, before); ok {
+		// R243-PERF-5 (#810): before-cutoff queries can also serve from
+		// cache when the cached ring is exhaustive — i.e. count <
+		// cap(ring), meaning disk holds nothing beyond what the cache
+		// already mirrors. The common deployment (≤ keepCount=200 runs
+		// per job in 7 days) hits this path, sparing the ReadDir + Stat
+		// + ReadFile chain on every "older runs" pagination click.
+		// When the cache is full (count == cap) we fall through to disk
+		// because rows older than the ring tail may exist there.
+		return cached
 	}
 	return s.diskListNewestFirst(jobID, limit, before)
+}
+
+// cacheGetBefore returns cached summaries with StartedAt < before, but
+// ONLY when the cache is known to be exhaustive (count < cap, i.e. all
+// disk rows fit in the ring). When the ring is full we cannot tell
+// whether older rows exist on disk, so callers must fall back to
+// diskListNewestFirst. Returns (nil, false) on cold cache (without
+// warming — warmCache is reserved for the zero-before path). R243-PERF-5
+// (#810).
+func (s *runStore) cacheGetBefore(jobID string, limit int, before time.Time) ([]CronRunSummary, bool) {
+	v, ok := s.recentCache.Load(jobID)
+	if !ok {
+		return nil, false
+	}
+	entry := v.(*recentCacheEntry)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.warm {
+		return nil, false
+	}
+	// Ring is full → disk may hold older rows the cache cannot see.
+	if entry.count >= cap(entry.ring) {
+		return nil, false
+	}
+	if entry.count == 0 {
+		return nil, true
+	}
+	out := make([]CronRunSummary, 0, limit)
+	for i := 0; i < entry.count; i++ {
+		if len(out) >= limit {
+			break
+		}
+		row := entry.ringRead(i)
+		if !row.StartedAt.Before(before) {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out, true
 }
 
 // diskListNewestFirst is the on-disk variant of List, used by warmCache
