@@ -19,7 +19,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cron"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -28,7 +27,6 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 	"github.com/naozhi/naozhi/internal/transcribe"
-	"golang.org/x/time/rate"
 )
 
 const (
@@ -624,50 +622,13 @@ func buildServer(opts ServerOptions) *Server {
 		knownNodes:      knownNodes,
 		sysessionMgr:    opts.SysessionManager,
 
-		// Extracted handler groups
-		auth: &AuthHandlers{
-			dashboardToken:    opts.DashboardToken,
-			cookieSecret:      cookieSecret,
-			cookieGen:         cookieGen,
-			loginLimiter:      newLoginLimiter(),
-			wsUpgradeLimiter:  newWSUpgradeLimiter(),
-			unauthDashLimiter: newWSUpgradeLimiter(), // same bucket shape: 60/min sustained, 20 burst — fits human refresh cadence, blocks scanners. R230C-SEC-12.
-			trustedProxy:      opts.TrustedProxy,
-		},
-		cronH: &CronHandlers{
-			scheduler:   scheduler,
-			allowedRoot: opts.AllowedRoot,
-			claudeDir:   claudeDir,
-			// R222-SEC-3: per-IP limiter for /api/cron/runs and
-			// /api/cron/runs/{run_id}. 60 req/min/IP with burst 60 mirrors the
-			// per-minute pace the dashboard uses when paginating run history
-			// (one initial fetch + occasional refresh) and leaves enough
-			// headroom for the run-detail drawer to fan out a few sequential
-			// reads. A stolen token can otherwise enumerate the entire on-disk
-			// run history at unbounded rate, both burning IO and exposing
-			// per-job activity timing.
-			runsLimiter: newIPLimiterWithProxy(rate.Every(time.Second), 60, opts.TrustedProxy),
-			// R242-CR-3: per-IP limiter for the 1 Hz GET /api/cron poll.
-			// Dashboard tabs hit this endpoint roughly once per second
-			// each, and the per-call cost is O(N jobs × RecentRuns(5))
-			// of sync.Map loads + entry locks — cheap individually but
-			// unbounded under hostile parallelism. 2 req/s sustained
-			// with burst 30 leaves plenty of headroom for legit dashboard
-			// refresh bursts (tab switch + filter change) while capping
-			// a stolen token's steady-state poll rate.
-			listLimiter: newIPLimiterWithProxy(rate.Every(500*time.Millisecond), 30, opts.TrustedProxy),
-			// [R247-SEC-2 / R247-SEC-3] per-IP limiter shared by the
-			// cron write / control endpoints (trigger, preview). 30 req/min
-			// sustained with burst 6 — legitimate UI form-edit loops hit
-			// preview a handful of times per minute, while a stolen token
-			// is capped at one trigger every 2 s steady-state.
-			writeLimiter: newIPLimiterWithProxy(rate.Every(2*time.Second), 6, opts.TrustedProxy),
-		},
-		transcribeH: &TranscribeHandler{
-			transcriber:       opts.Transcriber,
-			transcribeLimiter: newIPLimiterWithProxy(rate.Every(12*time.Second), 5, opts.TrustedProxy), // 5 transcriptions/min per IP
-			sem:               make(chan struct{}, transcribeSemCap),
-		},
+		// Extracted handler groups (literals factored to build_handlers.go;
+		// #738 / R246-CR-004). Helper docstrings carry the limiter rationale
+		// that previously lived inline; buildServer keeps initialization
+		// order visible while shedding ~40 LOC of struct literals.
+		auth:        buildAuthHandlers(opts, cookieSecret, cookieGen),
+		cronH:       buildCronHandlers(opts, claudeDir),
+		transcribeH: buildTranscribeHandler(opts),
 	}
 
 	// Q1: the router's terminal-removal hook (Router.Reset/Remove; LRU
@@ -698,80 +659,38 @@ func buildServer(opts ServerOptions) *Server {
 	// and a parse error here just means the store starts empty. The
 	// store is only persisted when StateDir is configured — in-memory
 	// only otherwise (tests, ephemeral deployments).
-	var retiredStore *discovery.RetiredStore
-	if opts.StateDir != "" {
-		var err error
-		retiredStore, err = discovery.NewRetiredStore(filepath.Join(opts.StateDir, "history-retired.json"))
-		if err != nil {
-			slog.Warn("retired store load failed (degrades to last_active sort)", "err", err)
-		}
-	} else {
-		retiredStore, _ = discovery.NewRetiredStore("")
+	retiredStore, retiredErr := buildRetiredStoreWithErr(opts.StateDir)
+	if retiredErr != nil {
+		slog.Warn("retired store load failed (degrades to last_active sort)", "err", retiredErr)
 	}
 
 	s.nodeAccess = newNodeAccessor(&s.nodesMu, s.nodes, s.knownNodes)
+
+	hubBroadcast := func() {
+		if s.hub != nil {
+			s.hub.BroadcastSessionsUpdate()
+		}
+	}
 
 	s.nodeCache = node.NewCacheManager(
 		func() map[string]node.Conn {
 			return s.nodeAccess.NodesSnapshot()
 		},
-		func() {
-			if s.hub != nil {
-				s.hub.BroadcastSessionsUpdate()
-			}
-		},
+		hubBroadcast,
 	)
 
 	s.discoveryCache = newDiscoveryCache(claudeDir, s.router.ManagedExcludeSets, opts.ProjectManager)
 
 	// Wire extracted handler groups that depend on nodeAccess/nodeCache
-	s.discoveryH = &DiscoveryHandlers{
-		discoveryCache: s.discoveryCache,
-		nodeAccess:     s.nodeAccess,
-		nodeCache:      s.nodeCache,
-		claudeDir:      claudeDir,
-		router:         router,
-		allowedRoot:    opts.AllowedRoot,
-		defaultAgent:   agents["general"],
-		broadcast: func() {
-			if s.hub != nil {
-				s.hub.BroadcastSessionsUpdate()
-			}
-		},
-	}
-	s.projectH = &ProjectHandlers{
-		projectMgr: opts.ProjectManager,
-		router:     router,
-		resolver:   resolver,
-		nodeAccess: s.nodeAccess,
-		nodeCache:  s.nodeCache,
-		ctxFunc: func() context.Context {
-			if s.hub != nil {
-				return s.hub.ctx
-			}
-			return context.Background()
-		},
-		// S13: per-IP limiter for /api/projects/files/exists. 10/min
-		// matches the uploadLimiter cadence — both endpoints do
-		// filesystem I/O and belong to the same DoS class. Burst 10
-		// accommodates the dashboard's initial batch-render pass that
-		// can spawn several exists calls back-to-back when a session is
-		// opened with many file references.
-		filesExistsLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, opts.TrustedProxy),
-		// R247-SEC-7: per-IP limiter for PUT /api/projects/config. The
-		// handler persists ProjectConfig to disk and broadcasts a WS
-		// update to every subscribed dashboard client; without a gate
-		// any authenticated caller can drive unbounded disk + fan-out.
-		// 5/sec burst 5 ≈ 5×60=300/min — well above interactive editing
-		// (a single user saves config sub-second after each edit) but
-		// well below abuse rates a script could reach.
-		configPutLimiter: newIPLimiterWithProxy(rate.Every(200*time.Millisecond), 5, opts.TrustedProxy),
-	}
-	agentIDs := make([]string, 0, len(agents)+1)
-	agentIDs = append(agentIDs, "general")
-	for id := range agents {
-		agentIDs = append(agentIDs, id)
-	}
+	// (literals live in build_handlers.go; #738).
+	s.discoveryH = buildDiscoveryHandlers(opts, claudeDir, s.discoveryCache, s.nodeAccess, s.nodeCache, hubBroadcast)
+	s.projectH = buildProjectHandlers(opts, resolver, s.nodeAccess, s.nodeCache, func() context.Context {
+		if s.hub != nil {
+			return s.hub.ctx
+		}
+		return context.Background()
+	})
+	agentIDs := agentIDList(agents)
 	s.sessionH = &SessionHandlers{
 		router:        router,
 		projectMgr:    opts.ProjectManager,
@@ -835,10 +754,7 @@ func buildServer(opts ServerOptions) *Server {
 	} else {
 		s.cliH = NewCLIBackendsHandler(router)
 	}
-	platNames := make(map[string]struct{}, len(platforms))
-	for name := range platforms {
-		platNames[name] = struct{}{}
-	}
+	platNames := platformNameSet(platforms)
 	s.healthH = &HealthHandler{
 		router:             router,
 		auth:               s.auth,

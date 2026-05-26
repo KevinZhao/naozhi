@@ -738,25 +738,55 @@ func (s *runStore) List(jobID string, limit int, before time.Time) []CronRunSumm
 	return rows
 }
 
-// diskListNewestFirst is the on-disk variant of List, used by warmCache
-// and as the fall-through when cache is unavailable / before-cutoff is
-// set. Returns the summary list and the count of corrupt/unreadable run
-// files skipped during the scan (R20260526-CR-018, #1227 — surfaces
-// silent skips so warmCache can emit a single aggregate log line).
-func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time) ([]CronRunSummary, int) {
+// runDirItem is a single .json entry that survived the filter pass in
+// scanSortedRunDir: regular file (not a dir / not a symlink), .json
+// suffix, IsValidID runID, Info() succeeded. Both diskListNewestFirst
+// (warmCache path) and trimJobLocked (Append GC path) consume the same
+// shape, so caching it once eliminates the duplicate ReadDir + filter +
+// Stat + sort that R239-PERF-5 (#871) flagged.
+type runDirItem struct {
+	path  string // absolute path including .json suffix; safe to os.Remove
+	runID string
+	mtime time.Time
+}
+
+// scanSortedRunDir reads runs/<jobID>/, filters out non-regular / non-hex
+// entries, Stat's each survivor, and returns the slice sorted newest
+// first (mtime DESC, runID DESC tie-break). The dir path is returned
+// alongside so callers can build paths or log without re-running
+// filepath.Join. err is fs.ErrNotExist when the job has never run; other
+// errors are surfaced verbatim so callers can decide whether to slog.
+//
+// R239-PERF-5 (#871): originally diskListNewestFirst and trimJobLocked
+// each open-coded the same scan loop + sort. On Append's hot path the
+// cold-cache scenario flowed (cacheGet → warmCache → diskListNewestFirst)
+// then later (Append → trimJobLocked), running ReadDir + Stat-per-entry
+// twice for the same directory. Sharing the scan keeps both paths in
+// lockstep (any sort-order or filter-policy change lands once) and
+// halves the ReadDir + per-entry Stat work — important on FUSE / NFS
+// where each e.Info() Stat is a separate round-trip.
+//
+// Sort policy:
+//   - mtime DESC: newer first; mtime ≈ WriteFileAtomic landing time, the
+//     coarse total order callers want. R235-PERF-17 keeps Time.Compare
+//     instead of UnixNano so wall-clock jumps / monotonic resets do not
+//     desync the ordering between trim and list paths (R236-QA-01).
+//   - runID DESC tie-break: when low-resolution filesystems collapse two
+//     concurrent atomic writes to the same nanosecond, ReadDir iteration
+//     order becomes load-bearing without a deterministic key — the
+//     pagination cutoff in diskListNewestFirst (StartedAt < before) and
+//     the cap cutoff in trimJobLocked (i < keepCount) would otherwise
+//     disagree about which equal-mtime record to drop, leaving a record
+//     visible in the list that trim deletes (or vice versa). runID is
+//     16-char random hex, so the tie-break is stable across processes
+//     and re-reads. R222-GO-5 / R235-GO-7.
+func (s *runStore) scanSortedRunDir(jobID string) ([]runDirItem, string, error) {
 	dir := filepath.Join(s.root, jobID)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			slog.Debug("cron run: list readdir", "dir", dir, "err", err)
-		}
-		return nil, 0
+		return nil, dir, err
 	}
-	type item struct {
-		runID string
-		mtime time.Time
-	}
-	items := make([]item, 0, len(entries))
+	items := make([]runDirItem, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -778,31 +808,42 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 		if err != nil {
 			continue
 		}
-		items = append(items, item{runID: runID, mtime: info.ModTime()})
+		items = append(items, runDirItem{
+			path:  filepath.Join(dir, name),
+			runID: runID,
+			mtime: info.ModTime(),
+		})
 	}
-	// Sort by mtime desc; mtime tracks WriteFileAtomic landing. StartedAt
-	// inside the JSON is the real source of truth, but ReadDir + Stat is
-	// cheap; reading every JSON to sort by StartedAt would inflate list
-	// latency from O(N) stat to O(N) parse.
-	//
-	// R222-GO-5: when the underlying FS has low timestamp precision (FAT32 ≈
-	// 2 s, ext3 ≈ 1 s, tmpfs occasionally collapses concurrent atomic writes
-	// to the same nanosecond), two runs that complete in the same tick get
-	// identical mtimes and ReadDir's iteration order becomes load-bearing —
-	// flipping ordering on rerun and letting pagination cutoff (StartedAt <
-	// before) silently skip a record. Use runID as a deterministic secondary
-	// key: it's 16-char random hex, so the tie-breaker is stable across
-	// processes and re-reads even though it carries no time signal of its own.
-	slices.SortFunc(items, func(a, b item) int {
-		// mtime DESC: newer first. time.Time.Compare (Go 1.20+) returns
-		// -1/0/+1 in a single call vs. the prior Equal+After pair.
-		// R235-PERF-17.
+	slices.SortFunc(items, func(a, b runDirItem) int {
+		// mtime DESC: newer first. Time.Compare (Go 1.20+) instead of
+		// UnixNano so wall-clock jumps don't desync trim ↔ list ordering
+		// (R236-QA-01). R235-PERF-17.
 		if c := b.mtime.Compare(a.mtime); c != 0 {
 			return c
 		}
-		// Same mtime: runID DESC tie-break. R222-GO-5.
+		// Equal-mtime tie-break by runID DESC for cross-process stability.
+		// R222-GO-5.
 		return cmp.Compare(b.runID, a.runID)
 	})
+	return items, dir, nil
+}
+
+// diskListNewestFirst is the on-disk variant of List, used by warmCache
+// and as the fall-through when cache is unavailable / before-cutoff is
+// set. Returns the summary list and the count of corrupt/unreadable run
+// files skipped during the scan (R20260526-CR-018, #1227 — surfaces
+// silent skips so warmCache can emit a single aggregate log line).
+//
+// R239-PERF-5 (#871): scan + sort delegated to scanSortedRunDir so this
+// path stays in lockstep with trimJobLocked.
+func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time) ([]CronRunSummary, int) {
+	items, dir, err := s.scanSortedRunDir(jobID)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			slog.Debug("cron run: list readdir", "dir", dir, "err", err)
+		}
+		return nil, 0
+	}
 
 	out := make([]CronRunSummary, 0, limit)
 	corruptCount := 0
@@ -829,13 +870,12 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 		if !before.IsZero() && !it.mtime.Before(before) {
 			continue
 		}
-		path := filepath.Join(dir, it.runID+".json")
-		// R245-PERF-9: skip readRun's Lstat — diskListNewestFirst's loop
-		// already filtered each DirEntry by ModeSymlink + IsValidID, so the
-		// IsRegular() recheck would just duplicate the syscall. One ReadFile
-		// instead of (Lstat + ReadFile) per listed run halves syscalls in
-		// the warmCache pass.
-		run, err := s.readRunNoLstat(path)
+		// R245-PERF-9: skip readRun's Lstat — scanSortedRunDir already
+		// filtered each DirEntry by ModeSymlink + IsValidID, so the
+		// IsRegular() recheck would just duplicate the syscall. One
+		// ReadFile instead of (Lstat + ReadFile) per listed run halves
+		// syscalls in the warmCache pass.
+		run, err := s.readRunNoLstat(it.path)
 		if err != nil {
 			if errors.Is(err, ErrCorruptRun) {
 				corruptCount++
@@ -1051,76 +1091,44 @@ func (s *runStore) DeleteJob(jobID string) {
 // jobs get capped by count; low-frequency jobs by window.
 func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	s.assertJobLockHeld(jobID)
-	dir := filepath.Join(s.root, jobID)
-	entries, err := os.ReadDir(dir)
+	// R239-PERF-5 (#871): scan + sort delegated to scanSortedRunDir so the
+	// trim path is in lockstep with diskListNewestFirst (matching sort
+	// order, symlink filter, IsValidID guard) and the duplicate ReadDir +
+	// Stat-per-entry — expensive on FUSE/NFS — runs through one shared
+	// implementation rather than two open-coded copies that drifted on
+	// every R220/R222/R235/R236 review.
+	items, _, err := s.scanSortedRunDir(jobID)
 	if err != nil {
 		return
 	}
-	type item struct {
-		path  string
-		runID string
-		mtime time.Time
-	}
-	items := make([]item, 0, len(entries))
 	cutoff := now.Add(-s.keepWindow)
+	// items already sorted newest first (mtime DESC). Walk once to detect
+	// any expired entry — the first one not after cutoff means every
+	// later entry is also expired, so we can break early. The boolean
+	// feeds the "under-cap AND no expiry" fast path that returns without
+	// running the remove loop below.
 	anyExpired := false
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		// 跳过 symlink，与 diskListNewestFirst 对齐（path traversal 防御）。
-		if e.Type()&fs.ModeSymlink != 0 {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		runID := strings.TrimSuffix(name, ".json")
-		if !IsValidID(runID) {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		mtime := info.ModTime()
-		if !mtime.After(cutoff) {
+	for _, it := range items {
+		if !it.mtime.After(cutoff) {
 			anyExpired = true
+			break
 		}
-		items = append(items, item{
-			path:  filepath.Join(dir, name),
-			runID: runID,
-			mtime: mtime,
-		})
 	}
-	// Fast path: under cap AND nothing expired → no sort, no remove. The
-	// common case for healthy 5-min cron jobs that ride well under the
-	// 200-entry cap. R220-PERF-3.
+	// Fast path: under cap AND nothing expired → no remove. The common
+	// case for healthy 5-min cron jobs that ride well under the 200-entry
+	// cap. R220-PERF-3.
 	if len(items) <= s.keepCount && !anyExpired {
 		return
 	}
 	if len(items) == 0 {
 		return
 	}
-	// Sort newest first so rank checking is index-based. Same total order as
-	// diskListNewestFirst: mtime DESC, then runID DESC for the equal-mtime
-	// tiebreak — without the runID secondary key the trim cutoff
-	// (i < s.keepCount) and the list cutoff would disagree about which
-	// equal-mtime record to drop, leaving a window where a record visible
-	// in the list could be removed by trim. R235-GO-7.
-	slices.SortFunc(items, func(a, b item) int {
-		// R236-QA-01: use time.Time.Compare to mirror diskListNewestFirst
-		// exactly. UnixNano() can disagree with Time.Compare across wall
-		// clock jumps / monotonic-clock resets (e.g. ntp step) and would
-		// break the trim-cutoff / list-cutoff equality invariant noted
-		// above, leaving a record visible in the list that trim deletes
-		// (or vice versa). Time.Compare is the canonical total order.
-		if c := b.mtime.Compare(a.mtime); c != 0 {
-			return c
-		}
-		return cmp.Compare(b.runID, a.runID)
-	})
+	// items sorted newest first by scanSortedRunDir, so rank checking
+	// below is index-based. Sort policy / tie-break rationale lives on
+	// scanSortedRunDir's godoc; trim and list paths must observe the same
+	// total order or the cap cutoff (i < keepCount) and the list cutoff
+	// (StartedAt < before) disagree about which equal-mtime record to
+	// drop. R235-GO-7 / R236-QA-01.
 	for i, it := range items {
 		// Both conditions must hold to keep.
 		keep := i < s.keepCount && it.mtime.After(cutoff)

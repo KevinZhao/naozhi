@@ -412,12 +412,17 @@ func TestHub_Subscribe_PerKeyCap(t *testing.T) {
 	// Pre-seed maxSubscribersPerKey distinct clients each holding a placeholder
 	// subscription for `key`. Bypassing handleSubscribe avoids the
 	// "session not found" cleanup that otherwise removes the placeholder, so
-	// the cap-counting branch sees the full population.
+	// the cap-counting branch sees the full population. Mirror the increment
+	// that handleSubscribe normally does on the per-key counter
+	// (R246-PERF-4 / #716) so the cap check sees the seeded population.
 	hub.mu.Lock()
 	for i := 0; i < maxSubscribersPerKey; i++ {
 		c := newTestWSClient()
 		hub.clients[c] = struct{}{}
 		c.subscriptions[key] = func() {}
+		if hub.subscriberCount != nil {
+			hub.subscriberCount[key]++
+		}
 	}
 	hub.mu.Unlock()
 

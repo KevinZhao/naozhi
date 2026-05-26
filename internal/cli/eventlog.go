@@ -1553,10 +1553,19 @@ func (l *EventLog) Count() int {
 // hot streaming path (k = 1-5 new events per notify) the constant savings are
 // small but the code path is simpler and avoids the arithmetic error surface
 // of two separate modular indexing expressions.
+//
+// R220-PERF-3 (#685): the in-place slices.Reverse runs OUTSIDE l.mu so an
+// initial subscribe with hundreds of matched entries cannot block a
+// concurrent Append. The reverse-buffer (`rev`) holds value-copied
+// EventEntry slots; once the scan returns we no longer touch l.entries
+// and the lock can be released. RUnlock is explicit (not deferred) so
+// the reverse touches the locally-owned slice only, shrinking the
+// reader-blocks-writer footprint from "RLock for the whole function"
+// to "RLock for the scan only".
 func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	l.mu.RLock()
-	defer l.mu.RUnlock()
 	if l.count == 0 {
+		l.mu.RUnlock()
 		return nil
 	}
 	// First pass: collect matches in reverse order. Most calls match 0-5
@@ -1592,6 +1601,7 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 			idx += l.maxSize
 		}
 	}
+	l.mu.RUnlock()
 	if len(rev) == 0 {
 		return nil
 	}

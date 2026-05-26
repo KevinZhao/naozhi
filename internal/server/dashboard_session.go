@@ -412,6 +412,23 @@ type SessionHandlers struct {
 }
 
 // GET /api/sessions
+//
+// R246-CR-002 split (#736): handleList previously combined cutoff filter +
+// state count + project mapping + summary lookup + stats build + node merge
+// + JSON shape selection in one ~300 line function. The body now orchestrates
+// focused helpers; each helper is independently testable and the per-helper
+// docstring states its mutation contract:
+//   - filterAndCountSnapshots — sidebar cutoff + scratch/cron/sys filter +
+//     running/ready counts in a single pass
+//   - fillProjectAndSummary  — workspace → project name + summaries-index
+//     lookup; mutates snapshots in place
+//   - buildSessionStats      — typed stats payload (no map[string]any boxing)
+//   - buildLocalResp         — single-node JSON shape
+//   - buildMultiNodeResp     — multi-node merge (live + cached) JSON shape
+//
+// Performance comments + race anchors stay on the helpers rather than this
+// orchestrator so reviewers don't have to hold the whole pipeline in their
+// head while reading a single concern.
 func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	// Read Version() BEFORE ListSessions(). storeGen is atomic, ListSessions
 	// takes an RLock: a mutation landing between List→ and →Version would
@@ -435,11 +452,54 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	// single vDSO call rather than the 2 previously paid per poll. R67-PERF-4.
 	now := time.Now()
 
-	// Keep dead sessions in the workspace sidebar for up to 24 hours. Merge
-	// the filter pass with running/ready accounting so we only walk the
-	// slice once — the dashboard polls this at 1 Hz × N tabs, and a full
-	// re-scan later in handleList was pure bookkeeping for state counts the
-	// filter pass could have computed in-place at zero extra cost.
+	snapshots, running, ready := filterAndCountSnapshots(snapshots, now)
+
+	// Overlay tailer-side agent metrics (RFC v4 §3.5.4). No-op when the
+	// hub tailer registry is empty or hasn't been wired — safe for tests
+	// that build SessionHandlers without a Hub.
+	if h.snapshotEnricher != nil {
+		for i := range snapshots {
+			h.snapshotEnricher(&snapshots[i])
+		}
+	}
+
+	h.fillProjectAndSummary(snapshots)
+
+	stats := h.buildSessionStats(now, version, running, ready)
+
+	// KnownNodes returns an immutable snapshot without acquiring the
+	// nodeAccess lock; NodesSnapshot does both. Single-node deployments
+	// (the common case) have len(knownNodes)==0 and never need the live
+	// snapshot — check KnownNodes first and short-circuit before paying
+	// the NodesSnapshot RLock + map alloc.
+	knownNodes := h.nodeAccess.KnownNodes()
+
+	if len(knownNodes) == 0 {
+		writeJSON(w, h.buildLocalResp(snapshots, stats))
+		return
+	}
+
+	writeJSON(w, h.buildMultiNodeResp(snapshots, stats, knownNodes))
+}
+
+// filterAndCountSnapshots walks the router snapshot exactly once to:
+//
+//  1. evict dead sessions whose LastActive is older than 24h (sidebar TTL),
+//  2. count running / ready sessions across ALL surviving entries (so the
+//     maxProcs pressure indicator stays correct even for scratch / cron /
+//     sys sessions that don't show up in the sidebar),
+//  3. drop scratch / cron / sys keys from the returned slice — those
+//     surfaces own dedicated dashboard panels (drawer / 「定时任务」 /
+//     System) and must not duplicate-render in the sidebar.
+//
+// The function compacts in place: the returned slice aliases the input
+// header but with len shrunk to the number of sidebar-eligible entries,
+// so callers must not retain the original header after this call.
+//
+// R246-CR-002 split (#736): previously inlined into handleList; the merged
+// filter+count pass (rather than two walks) was deliberate for hot-path
+// alloc reasons and the performance contract is preserved here.
+func filterAndCountSnapshots(snapshots []session.SessionSnapshot, now time.Time) ([]session.SessionSnapshot, int, int) {
 	cutoff24h := now.Add(-24 * time.Hour).UnixMilli()
 	var running, ready int
 	n := 0
@@ -468,18 +528,17 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		snapshots[n] = snap
 		n++
 	}
-	snapshots = snapshots[:n]
+	return snapshots[:n], running, ready
+}
 
-	// Overlay tailer-side agent metrics (RFC v4 §3.5.4). No-op when the
-	// hub tailer registry is empty or hasn't been wired — safe for tests
-	// that build SessionHandlers without a Hub.
-	if h.snapshotEnricher != nil {
-		for i := range snapshots {
-			h.snapshotEnricher(&snapshots[i])
-		}
-	}
-
-	// Fill project field from ProjectManager
+// fillProjectAndSummary stamps each snapshot with its project name (from
+// ProjectManager + planner-key fallback) and any persisted Summary lookup
+// from sessions-index.json. Mutates snapshots in place.
+//
+// Splitting this out of handleList lets tests exercise project-name
+// resolution against a stub ProjectManager without spinning up the full
+// dashboard handler. R246-CR-002 (#736).
+func (h *SessionHandlers) fillProjectAndSummary(snapshots []session.SessionSnapshot) {
 	if h.projectMgr != nil {
 		// Pre-size to len(snapshots): the loop accepts at most one entry per
 		// session, so the slice never grows past this bound. Starting at nil
@@ -532,16 +591,16 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
 
+// buildSessionStats assembles the typed sessionStats payload that ships in
+// the GET /api/sessions response. The named-struct copy avoids the
+// map[string]any-style boxing the prior implementation paid on every 1 Hz
+// poll. R70-PERF-H1 / R68-PERF-H3 / R59-PERF-001 / R51-PERF-005 /
+// R49-PERF-STATS-STRUCT / R43-PERF-P43-1 / R54-PERF-001. Split out per
+// R246-CR-002 (#736).
+func (h *SessionHandlers) buildSessionStats(now time.Time, version uint64, running, ready int) sessionStats {
 	active, total := h.router.Stats()
-
-	// Build stats as a named struct (sessionStats). The immutable sub-struct
-	// (backend/cli/workspace/system/agents) is copied by value from
-	// h.staticStats — a single stack memmove, zero heap alloc. Dynamic
-	// counters + uptime + watchdog assign directly to struct fields so
-	// there is no per-poll map-literal + interface{} boxing like the prior
-	// map[string]any implementation. R70-PERF-H1 / R68-PERF-H3 / R59-PERF-001 /
-	// R51-PERF-005 / R49-PERF-STATS-STRUCT / R43-PERF-P43-1 / R54-PERF-001.
 	stats := sessionStats{
 		sessionStatsStatic: h.staticStats,
 		Active:             active,
@@ -556,19 +615,28 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			TotalKills:    h.watchdogTotal.Load(),
 		},
 	}
+	if projectList := h.buildProjectList(now); len(projectList) > 0 {
+		stats.Projects = projectList
+	}
+	return stats
+}
 
-	// Include project list for dashboard sidebar rendering.
-	// Pre-allocate the outer slice so the append loop doesn't trigger log(N)
-	// growth reallocs on projects-heavy dashboards. Entries are projectListEntry
-	// named-struct values (not map[string]any) so the hot 1 Hz poll path skips
-	// the inner-map + interface{} boxing overhead. R70-PERF-M1.
-	//
-	// R247-PERF-15 [REPEAT-3]: collapse N dashboard tabs polling at 1 Hz into
-	// one rebuild/sec via projectListCache. The 1s bucket is invisible to
-	// human operators (project CRUD is minute-scale) and avoids touching the
-	// project package with a version hook. The cached slice is read-only —
-	// see projectListSnapshot godoc for the alias contract that keeps
-	// concurrent reads race-free.
+// buildProjectList returns the dashboard sidebar's "Projects" panel data —
+// local projects (cached at 1s buckets via projectListLocalAt) plus any
+// remote-node projects forwarded through the node cache.
+//
+// Pre-allocate the outer slice so the append loop doesn't trigger log(N)
+// growth reallocs on projects-heavy dashboards. Entries are projectListEntry
+// named-struct values (not map[string]any) so the hot 1 Hz poll path skips
+// the inner-map + interface{} boxing overhead. R70-PERF-M1.
+//
+// R247-PERF-15 [REPEAT-3]: collapse N dashboard tabs polling at 1 Hz into
+// one rebuild/sec via projectListCache. The 1s bucket is invisible to
+// human operators (project CRUD is minute-scale) and avoids touching the
+// project package with a version hook. The cached slice is read-only —
+// see projectListSnapshot godoc for the alias contract that keeps
+// concurrent reads race-free. Split out per R246-CR-002 (#736).
+func (h *SessionHandlers) buildProjectList(now time.Time) []projectListEntry {
 	var projectList []projectListEntry
 	if h.projectMgr != nil {
 		projectList = h.projectListLocalAt(now)
@@ -579,80 +647,85 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	// (alias contract), so an append that fits the existing capacity would
 	// silently mutate every other reader's view. Building the merged slice
 	// fresh keeps the cached entry untouched. R247-PERF-15.
-	if h.nodeAccess.HasNodes() {
-		cachedProjects := h.nodeCache.Projects()
-		var remoteCount int
-		for _, items := range cachedProjects {
-			remoteCount += len(items)
-		}
-		if remoteCount > 0 {
-			merged := make([]projectListEntry, len(projectList), len(projectList)+remoteCount)
-			copy(merged, projectList)
-			projectList = merged
-		}
-		for _, items := range cachedProjects {
-			for _, item := range items {
-				name := strOrFallback(item, "name", "Name")
-				path := strOrFallback(item, "path", "Path")
-				nd, _ := item["node"].(string)
-				if name == "" {
-					continue
-				}
-				entry := projectListEntry{Name: name, Path: path, Node: nd}
-				if v, ok := item["favorite"].(bool); ok {
-					entry.Favorite = v
-				}
-				// Remote node may be running an older binary that hasn't
-				// redacted the URL yet — always run the redactor on data
-				// forwarded via the node cache so credentials never leak
-				// even if a peer node is behind on patches.
-				if v, ok := item["git_remote_url"].(string); ok && v != "" {
-					entry.GitRemoteURL = redactGitRemoteURL(v)
-				}
-				if v, ok := item["github"].(bool); ok {
-					entry.GitHub = v
-				}
-				// JSON numbers decode as float64 from map[string]any. Pull
-				// remote-node CreatedAt the same way; pre-feature peers won't
-				// emit the key, so the zero-value fallback keeps their
-				// projects at the very top of the sidebar (oldest by
-				// definition) until they upgrade and self-stamp.
-				if v, ok := item["created_at"].(float64); ok {
-					entry.CreatedAt = int64(v)
-				}
-				projectList = append(projectList, entry)
+	if !h.nodeAccess.HasNodes() {
+		return projectList
+	}
+	cachedProjects := h.nodeCache.Projects()
+	var remoteCount int
+	for _, items := range cachedProjects {
+		remoteCount += len(items)
+	}
+	if remoteCount > 0 {
+		merged := make([]projectListEntry, len(projectList), len(projectList)+remoteCount)
+		copy(merged, projectList)
+		projectList = merged
+	}
+	for _, items := range cachedProjects {
+		for _, item := range items {
+			name := strOrFallback(item, "name", "Name")
+			path := strOrFallback(item, "path", "Path")
+			nd, _ := item["node"].(string)
+			if name == "" {
+				continue
 			}
+			entry := projectListEntry{Name: name, Path: path, Node: nd}
+			if v, ok := item["favorite"].(bool); ok {
+				entry.Favorite = v
+			}
+			// Remote node may be running an older binary that hasn't
+			// redacted the URL yet — always run the redactor on data
+			// forwarded via the node cache so credentials never leak
+			// even if a peer node is behind on patches.
+			if v, ok := item["git_remote_url"].(string); ok && v != "" {
+				entry.GitRemoteURL = redactGitRemoteURL(v)
+			}
+			if v, ok := item["github"].(bool); ok {
+				entry.GitHub = v
+			}
+			// JSON numbers decode as float64 from map[string]any. Pull
+			// remote-node CreatedAt the same way; pre-feature peers won't
+			// emit the key, so the zero-value fallback keeps their
+			// projects at the very top of the sidebar (oldest by
+			// definition) until they upgrade and self-stamp.
+			if v, ok := item["created_at"].(float64); ok {
+				entry.CreatedAt = int64(v)
+			}
+			projectList = append(projectList, entry)
 		}
 	}
-	if len(projectList) > 0 {
-		stats.Projects = projectList
+	return projectList
+}
+
+// buildLocalResp constructs the single-node /api/sessions JSON shape.
+//
+// Use a named struct (sessionListLocalResp) instead of map[string]any
+// so the 1 Hz dashboard poll skips the map-bucket alloc + interface{}
+// boxing on every request. JSON output is byte-identical to the prior
+// map literal because the field tags + omitempty preserve key order
+// and the optional history_sessions semantics. R226-PERF-7. Split out
+// per R246-CR-002 (#736).
+func (h *SessionHandlers) buildLocalResp(snapshots []session.SessionSnapshot, stats sessionStats) sessionListLocalResp {
+	resp := sessionListLocalResp{
+		Sessions: snapshots,
+		Stats:    stats,
 	}
-
-	// KnownNodes returns an immutable snapshot without acquiring the
-	// nodeAccess lock; NodesSnapshot does both. Single-node deployments
-	// (the common case) have len(knownNodes)==0 and never need the live
-	// snapshot — check KnownNodes first and short-circuit before paying
-	// the NodesSnapshot RLock + map alloc.
-	knownNodes := h.nodeAccess.KnownNodes()
-
-	// No configured nodes at all: use simple single-node response format.
-	// Use a named struct (sessionListLocalResp) instead of map[string]any
-	// so the 1 Hz dashboard poll skips the map-bucket alloc + interface{}
-	// boxing on every request. JSON output is byte-identical to the prior
-	// map literal because the field tags + omitempty preserve key order
-	// and the optional history_sessions semantics. R226-PERF-7.
-	if len(knownNodes) == 0 {
-		resp := sessionListLocalResp{
-			Sessions: snapshots,
-			Stats:    stats,
-		}
-		if history := h.historySessions(); len(history) > 0 {
-			resp.HistorySessions = history
-		}
-		writeJSON(w, resp)
-		return
+	if history := h.historySessions(); len(history) > 0 {
+		resp.HistorySessions = history
 	}
+	return resp
+}
 
+// buildMultiNodeResp constructs the multi-node /api/sessions JSON shape.
+// Local sessions are tagged with Node="local"; remote-node sessions and
+// connection status are merged from the node cache + live nodesSnapshot.
+//
+// Use a named struct (sessionListMultiResp) instead of map[string]any
+// so the multi-node hot path mirrors the single-node optimisation: no
+// map-bucket alloc, no interface{} boxing of sessions/stats/nodes on
+// every 1 Hz poll. JSON output stays byte-identical because the
+// field tags preserve key names and history_sessions keeps omitempty.
+// R226-PERF-7. Split out per R246-CR-002 (#736).
+func (h *SessionHandlers) buildMultiNodeResp(snapshots []session.SessionSnapshot, stats sessionStats, knownNodes map[string]string) sessionListMultiResp {
 	// Multi-node path: now we actually need the live nodesSnapshot for
 	// connection status + fill-in. This acquires the nodeAccess lock.
 	nodesSnapshot := h.nodeAccess.NodesSnapshot()
@@ -702,12 +775,6 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Use a named struct (sessionListMultiResp) instead of map[string]any
-	// so the multi-node hot path mirrors the single-node optimisation: no
-	// map-bucket alloc, no interface{} boxing of sessions/stats/nodes on
-	// every 1 Hz poll. JSON output stays byte-identical because the
-	// field tags preserve key names and history_sessions keeps omitempty.
-	// R226-PERF-7.
 	resp := sessionListMultiResp{
 		Sessions: allSessions,
 		Stats:    stats,
@@ -716,7 +783,7 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	if history := h.historySessions(); len(history) > 0 {
 		resp.HistorySessions = history
 	}
-	writeJSON(w, resp)
+	return resp
 }
 
 // maxEventsPageLimit caps the per-request history slice so a malicious or
