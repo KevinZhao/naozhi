@@ -163,20 +163,12 @@ func (p *ClaudeProtocol) Capabilities() Caps {
 	return Caps{Replay: true, Priority: true, SoftInterrupt: false, StreamJSON: true}
 }
 
-// controlRequestInterrupt is the NDJSON payload for an in-band "abort this turn"
-// signal sent via stdin. The Claude CLI reacts by killing any in-flight tool
-// call (bash children are SIGKILL'd), closing the current turn with a
-// `stop_reason=tool_use` or `end_turn` result event, and returning to the
-// ready state — without tearing down the session. Verified against CLI 2.1.119.
-type controlRequestInterrupt struct {
-	Type      string                      `json:"type"`
-	RequestID string                      `json:"request_id"`
-	Request   controlRequestInterruptBody `json:"request"`
-}
-
-type controlRequestInterruptBody struct {
-	Subtype string `json:"subtype"`
-}
+// The NDJSON payload for an in-band "abort this turn" signal sent via stdin
+// is hand-built in WriteInterrupt below (R228-PERF-1). The CLI reacts by
+// killing any in-flight tool call (bash children are SIGKILL'd), closing the
+// current turn with a `stop_reason=tool_use` or `end_turn` result event, and
+// returning to the ready state — without tearing down the session. Verified
+// against CLI 2.1.119.
 
 func (p *ClaudeProtocol) WriteInterrupt(w io.Writer, requestID string) error {
 	// R228-PERF-1: hand-build the static envelope and only json.Marshal the
