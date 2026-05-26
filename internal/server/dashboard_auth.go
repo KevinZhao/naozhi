@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -375,6 +376,65 @@ func (a *AuthHandlers) isSecure(r *http.Request) bool {
 	return a.trustedProxy && r.Header.Get("X-Forwarded-Proto") == "https"
 }
 
+// handleLoginNoScript is the form-action target for the login page's
+// `<form action="/api/auth/noscript" method="POST">`. The login flow is
+// fully JavaScript-driven (the JS submit handler intercepts and POSTs
+// JSON to /api/auth/login); a non-JS browser that hits Submit would
+// otherwise cause the form-encoded `token=…` body to be POSTed to
+// `/dashboard` and land in server access logs as part of the URL-decoded
+// body if any future middleware reads it.
+//
+// R243-SEC-15 (#800): defence-in-depth. Today no handler reads the form
+// body, but the browser still ships the token inside an unencrypted POST
+// frame (no TLS guarantee) and the proxy hop chain can log it. Routing
+// the no-JS path to this dedicated handler makes the contract explicit:
+// (a) we never read r.Body, so the token never enters server memory in
+// log-format; (b) we return a 400 with a clear "JavaScript required"
+// page so the operator knows what happened; (c) the response is plain
+// HTML so a screen-reader user can still see the failure mode.
+//
+// We do NOT parse the form body — the io.Copy(io.Discard, ...) on a
+// MaxBytesReader-bounded body drains and drops it without exposing it
+// to slog. ParseForm would otherwise stash key/value pairs in
+// r.PostForm where any debug handler could later dump them.
+func (a *AuthHandlers) handleLoginNoScript(w http.ResponseWriter, r *http.Request) {
+	// Bound + drain the body so the connection can be reused but the
+	// token bytes never enter a parsed map. MaxBytesReader caps at
+	// 1 KiB — same ceiling handleLogin uses for its JSON body. The
+	// drain is best-effort; closing without reading would also work
+	// but some proxies hold the request open expecting the body to be
+	// consumed. We deliberately ignore the read err — we already chose
+	// to discard the bytes regardless of content.
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Explicit 400 (not 405) so the operator's browser shows our
+	// message instead of the default ServeMux "Method Not Allowed".
+	w.WriteHeader(http.StatusBadRequest)
+	if _, err := w.Write([]byte(noScriptLoginHTML)); err != nil {
+		slog.Debug("noscript login write", "err", err)
+	}
+}
+
+// noScriptLoginHTML is the response body for handleLoginNoScript. Plain
+// static HTML — no embedded token, no embedded URL parameter, nothing
+// derivable from request input. Kept short to fit a single TCP frame.
+const noScriptLoginHTML = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>naozhi — JavaScript required</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{background:#0a0a0a;color:#e0e0e0;font-family:-apple-system,sans-serif;padding:2rem;max-width:42rem;margin:0 auto}h1{font-size:1.25rem;margin-bottom:1rem}p{line-height:1.6;color:#ccc}a{color:#4a9eff}</style>
+</head><body>
+<h1>JavaScript required</h1>
+<p>The naozhi dashboard requires JavaScript to sign in. Please enable JavaScript and reload the login page.</p>
+<p><a href="/dashboard">Back to login</a></p>
+</body></html>`
+
 func (a *AuthHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// handleLogin sits outside requireAuth (it's the endpoint that GRANTS
 	// auth), so apply the same-origin gate manually. A cross-origin login
@@ -479,7 +539,7 @@ button:hover{background:#3a8eef}button:active{background:#2a7edf}
 <div class="login">
 <h1>naozhi</h1>
 <p>enter token to continue</p>
-<form id="login-form" action="/dashboard" method="POST" autocomplete="on">
+<form id="login-form" action="/api/auth/noscript" method="POST" autocomplete="on">
 <input type="text" name="username" autocomplete="username" value="naozhi" tabindex="-1" aria-hidden="true">
 <label for="token" style="position:absolute;left:-9999px">dashboard token</label>
 <input type="password" name="token" id="token" autocomplete="current-password" placeholder="dashboard token" aria-label="dashboard token" autofocus>

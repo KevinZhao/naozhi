@@ -778,7 +778,9 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 				lg.Error("ownerLoop reply panic recovered", "key", key, "panic", rr)
 			}
 		}()
-		notifyCtx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
+		// R247-ARCH-10 (#632): NotifyCtx centralises the "detach from
+		// parent because the turn ctx is already Done" pattern.
+		notifyCtx, cancel := NotifyCtx(nil, NotifyKindOwnerLoopPanic, platformReplyTimeout)
 		defer cancel()
 		d.replyText(notifyCtx, msg, "处理异常，请稍后重试。", nil)
 	}()
@@ -831,13 +833,73 @@ func (d *Dispatcher) handleGetOrCreateError(
 		// the platform layer. Match the handleOwnerLoopPanic recovery
 		// pattern and use a fresh Background ctx with short timeout so the
 		// user actually sees the "restart, retry" message.
-		notifyCtx, cancel := context.WithTimeout(context.Background(), shutdownReplyTimeout)
+		// R247-ARCH-10 (#632): routed through NotifyCtx for parity with
+		// the other detached-reply sites.
+		notifyCtx, cancel := NotifyCtx(ctx, NotifyKindShutdown, shutdownReplyTimeout)
 		replyCtx = notifyCtx
 		cleanup = cancel
 	default:
 		errMsg = "会话创建失败，请发送 /new 重置后重试。"
 	}
 	return replyCtx, cleanup, errMsg
+}
+
+// handleSendError maps a Capabilities.Send failure into the user-facing
+// error reply, watchdog counter bumps, and metrics increments. Pulled
+// out of sendAndReply so the seven-stage main path stays focused on the
+// happy turn flow (R237-GO-4 / #624). The per-sentinel switch is the
+// part most likely to grow as new send-side failure modes are added
+// (e.g. backend disabled, model deprecated) and now has a single home
+// that unit tests can target without standing up a full Dispatcher.
+//
+// Caller has already entered the err != nil branch and consumed the
+// Send result; this method does NOT signal whether a reply was actually
+// delivered — failure to land the error reply is logged at Warn but
+// not surfaced.
+func (d *Dispatcher) handleSendError(
+	ctx context.Context,
+	err error,
+	key string,
+	msg platform.IncomingMessage,
+	p platform.Platform,
+	lg *slog.Logger,
+) {
+	d.replyErrorCount.Add(1)
+	dispatchReplyErrorTotal.Add(1)
+	lg.Error("send to claude", "err", err)
+	// IM path uses the timeout-aware helper (it renders the configured
+	// no-output / total durations in Chinese) and prepends a clock
+	// emoji for visibility on chat surfaces. Dashboard send path
+	// (server/errors_usermsg.go) calls usermsg.ForSendError directly
+	// so the timeout cases collapse to the generic "处理超时，请简化任务后重试。"
+	// — it has no per-session timeout configured. R249-DISPATCH-1 (#419)
+	// extracted usermsg.UserMessage so a new sentinel only registers
+	// once, instead of two parallel switches with cross-package
+	// "keep in sync" comments.
+	// /clear early-return mirrors the prior behaviour: the user just
+	// triggered the reset, so we suppress the extra "会话已重置" reply.
+	if errors.Is(err, cli.ErrSessionReset) {
+		return
+	}
+	// Watchdog counters stay in dispatch because they are owned by the
+	// IM-side configuration; the shared helper only renders text.
+	switch {
+	case errors.Is(err, cli.ErrNoOutputTimeout):
+		d.watchdogNoOutputKills.Add(1)
+	case errors.Is(err, cli.ErrTotalTimeout):
+		d.watchdogTotalKills.Add(1)
+	}
+	errMsg := usermsg.UserMessage(err, key, d.noOutputTimeout, d.totalTimeout)
+	// IM-only emoji decoration for the timeout cases. Other surfaces
+	// (dashboard send_ack) deliberately stay emoji-free.
+	if errors.Is(err, cli.ErrNoOutputTimeout) || errors.Is(err, cli.ErrTotalTimeout) {
+		errMsg = "⏱️ " + errMsg
+	}
+	if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, platformReplyMaxAttempts); err != nil {
+		d.sendFailCount.Add(1)
+		dispatchSendFailTotal.Add(1)
+		lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
+	}
 }
 
 // sendAndReply performs one turn: GetOrCreate session, send message, deliver reply.
@@ -900,42 +962,7 @@ func (d *Dispatcher) sendAndReply(
 
 	result, err := d.caps.Send(ctx, key, sess, text, images, tracker.onEvent)
 	if err != nil {
-		d.replyErrorCount.Add(1)
-		dispatchReplyErrorTotal.Add(1)
-		lg.Error("send to claude", "err", err)
-		// IM path uses the timeout-aware helper (it renders the configured
-		// no-output / total durations in Chinese) and prepends a clock
-		// emoji for visibility on chat surfaces. Dashboard send path
-		// (server/errors_usermsg.go) calls usermsg.ForSendError directly
-		// so the timeout cases collapse to the generic "处理超时，请简化任务后重试。"
-		// — it has no per-session timeout configured. R249-DISPATCH-1 (#419)
-		// extracted usermsg.UserMessage so a new sentinel only registers
-		// once, instead of two parallel switches with cross-package
-		// "keep in sync" comments.
-		// /clear early-return mirrors the prior behaviour: the user just
-		// triggered the reset, so we suppress the extra "会话已重置" reply.
-		if errors.Is(err, cli.ErrSessionReset) {
-			return
-		}
-		// Watchdog counters stay in dispatch because they are owned by the
-		// IM-side configuration; the shared helper only renders text.
-		switch {
-		case errors.Is(err, cli.ErrNoOutputTimeout):
-			d.watchdogNoOutputKills.Add(1)
-		case errors.Is(err, cli.ErrTotalTimeout):
-			d.watchdogTotalKills.Add(1)
-		}
-		errMsg := usermsg.UserMessage(err, key, d.noOutputTimeout, d.totalTimeout)
-		// IM-only emoji decoration for the timeout cases. Other surfaces
-		// (dashboard send_ack) deliberately stay emoji-free.
-		if errors.Is(err, cli.ErrNoOutputTimeout) || errors.Is(err, cli.ErrTotalTimeout) {
-			errMsg = "⏱️ " + errMsg
-		}
-		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, platformReplyMaxAttempts); err != nil {
-			d.sendFailCount.Add(1)
-			dispatchSendFailTotal.Add(1)
-			lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
-		}
+		d.handleSendError(ctx, err, key, msg, p, lg)
 		return
 	}
 
@@ -1268,7 +1295,11 @@ func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
 					"chat_id", chatID, "tool_use_id", aq.ToolUseID, "panic", r)
 			}
 		}()
-		rctx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
+		// R247-ARCH-10 (#632): card-send detach goes through NotifyCtx
+		// alongside the other dispatch sites. The card must outlive the
+		// originating turn so a near-deadline /new doesn't drop it
+		// mid-flight (R218-GO-1).
+		rctx, cancel := NotifyCtx(nil, NotifyKindAskQuestionCard, platformReplyTimeout)
 		defer cancel()
 
 		if sender, ok := platform.AsQuestionCardSender(p); ok {
@@ -1342,7 +1373,9 @@ func (t *replyTracker) sendTodoMessage(text string) {
 	t.lastTodoText = text
 
 	// R236-GO-1: detach from t.ctx so a near-deadline turn can still finish writing TodoWrite.
-	rctx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
+	// R247-ARCH-10 (#632): routed through NotifyCtx for parity with the
+	// other dispatch detached-reply sites.
+	rctx, cancel := NotifyCtx(t.ctx, NotifyKindTodoMessage, platformReplyTimeout)
 	defer cancel()
 	if _, err := t.p.Reply(rctx, platform.OutgoingMessage{ChatID: t.chatID, Text: text}); err != nil {
 		// R238-CR-5: previously slog.Debug — silent because R236-GO-1

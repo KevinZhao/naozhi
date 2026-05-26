@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"expvar"
 	"sync/atomic"
 	"time"
 )
@@ -219,6 +220,52 @@ func (r *runInflight) setFresh(fresh bool) {
 	}
 	v.Fresh = fresh
 	r.view.Store(&v)
+}
+
+// releaseRun encapsulates the 3-step terminal release contract that the
+// scheduler_run.go run goroutine MUST execute (in order) when an
+// executeOpt invocation exits the running window:
+//
+//  1. reset()                      — drop the observable view so the list
+//     API stops surfacing stale RunID /
+//     Phase / SessionID for a finished run.
+//  2. running.Store(false)          — release the CAS gate so the next
+//     scheduled tick or TriggerNow can
+//     enter executeOpt for this job.
+//  3. inflightGauge.Add(-1)         — decrement the metrics gauge that
+//     pairs with the +1 done at the start
+//     of executeOpt's CAS-true window.
+//
+// Order matters:
+//   - reset BEFORE Store(false) so a TriggerNow that wins the next CAS
+//     cannot have its freshly-populated view clobbered by our reset
+//     (R238-GO-2). Inverting these two steps reintroduces the torn-view
+//     bug the prior 6-atomic.Pointer layout had.
+//   - Add(-1) AFTER Store(false) is harmless ordering-wise (the gauge is
+//     observational), but kept last so the gauge underflow guard pairs
+//     with the Add(+1) that fires immediately after CAS=true at the
+//     entry of executeOpt — both bookend the running window symmetrically.
+//
+// R246-CR-017 (#759): previously these three steps were inlined as a
+// 3-line defer block in scheduler_run.go. Static analysis cannot enforce
+// the ordering contract from the call site; extracting the helper lets
+// future maintainers see the contract in one place and gives tests a
+// hook to verify the gauge / metadata postconditions without poking at
+// scheduler internals.
+//
+// Safe on a nil receiver — mirrors reset / populate / setPhase. Safe on
+// a nil gauge so test fixtures that build a runInflight without wiring
+// metrics keep working (production callers always pass
+// metrics.CronRunInflight).
+func (r *runInflight) releaseRun(inflightGauge *expvar.Int) {
+	if r == nil {
+		return
+	}
+	r.reset()
+	r.running.Store(false)
+	if inflightGauge != nil {
+		inflightGauge.Add(-1)
+	}
 }
 
 // JobRunCounters lives in job.go (R239-CR-7) — it is a Job field, not a

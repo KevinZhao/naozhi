@@ -36,7 +36,20 @@ const anonCookieName = "nz_anon"
 // HttpOnly, SameSite=Strict (matches the auth cookie; nz_anon is only read by
 // same-origin XHR so Lax offered no value and left a cross-site-GET window
 // open for any future GET handler that reads it), Secure gated by
-// auth.isSecure(r), 30-day MaxAge.
+// auth.isSecure(r), MaxAge=anonCookieMaxAgeSeconds.
+//
+// R247-SEC-15 / #514: MaxAge was 30 days, which kept the per-browser owner
+// label alive across token-mode toggles and service restarts that the
+// operator may have used to invalidate sessions. The cookie is NOT an auth
+// credential — it only disambiguates uploadOwner between co-NAT users —
+// but a stale owner label can still be claimed by an attacker who sniffed
+// the value over a non-TLS deployment (where the Secure flag is absent
+// because auth.isSecure(r)=false). 7 days is the upper bound a reasonable
+// dev-laptop user would expect for a "remember this tab" hint, and it
+// shrinks the post-token-rotation window 4×. The cookieGen-coupled
+// rotation that #514's proposal flags as the deeper fix is left for a
+// follow-up because it requires a dashboard_auth coupling change; this
+// commit just lowers the MaxAge floor where there is no design decision.
 func mintAnonCookie(w http.ResponseWriter, r *http.Request, auth *AuthHandlers) (string, error) {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -47,10 +60,17 @@ func mintAnonCookie(w http.ResponseWriter, r *http.Request, auth *AuthHandlers) 
 	http.SetCookie(w, &http.Cookie{
 		Name: anonCookieName, Value: val, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteStrictMode,
-		Secure: secure, MaxAge: 30 * 24 * 3600,
+		Secure: secure, MaxAge: anonCookieMaxAgeSeconds,
 	})
 	return val, nil
 }
+
+// anonCookieMaxAgeSeconds bounds the lifetime of the nz_anon owner label.
+// R247-SEC-15 / #514: lowered from 30 days to 7 to shrink the window in
+// which a stale label can be reused after a service restart, token-mode
+// toggle, or non-TLS sniff. Pulled out as a const so regression tests can
+// pin the value without parsing the cookie header.
+const anonCookieMaxAgeSeconds = 7 * 24 * 3600
 
 // Upload size ceilings. Images stay at the long-standing 10 MB; PDFs get
 // their own cap derived from Anthropic's 32 MB document-block limit — we
@@ -973,6 +993,27 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 // expressed with forward slashes (the sole form seen in EventEntry.ImagePaths).
 // Kept separate from attachment.Dir so the HTTP layer's guard does not silently
 // loosen if attachment.Dir grows a platform-dependent separator someday.
+//
+// Cross-platform contract — R241-SEC-8 (#468):
+//
+//   - The trailing `/` is REQUIRED. handleAttachment compares against this
+//     literal via strings.HasPrefix on the POSIX-cleaned wire path, after
+//     rejecting any input containing a backslash or NUL byte
+//     (see handleAttachment's pre-clean above). The slash here is a wire-
+//     format separator (forward slash always, on every platform), NOT a
+//     filesystem separator — never substitute filepath.Separator here.
+//
+//   - Down-stream Joins must convert via filepath.FromSlash before passing
+//     the prefix-trimmed remainder to filepath.Join (see the attachRootAbs
+//     line that calls strings.TrimSuffix(attachmentDirPrefix, "/") inside
+//     filepath.Join). On Windows / on a hypothetical FS with a non-`/`
+//     separator, the FromSlash hop is what makes this prefix portable.
+//
+//   - Adding a backslash variant or making this prefix platform-conditional
+//     would BREAK the wire contract: every existing EventEntry.ImagePaths
+//     value on disk uses forward slashes regardless of host OS, and any
+//     mismatch with the HasPrefix gate either rejects legitimate paths
+//     (denial-of-service) or admits non-attachment paths (escape).
 const attachmentDirPrefix = ".naozhi/attachments/"
 
 // maxAttachmentBytes caps the per-response size. Images from the dashboard

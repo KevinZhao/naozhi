@@ -1058,6 +1058,110 @@ func TestIsExcluded_FastPathSkipsCacheBuild(t *testing.T) {
 	}
 }
 
+// TestLookupKnownSessionID pins the named single-key probe API exposed by
+// R242-ARCH-23 (#767). Behaviour mirrors IsExcluded (same fast-path /
+// TTL-cache pipeline) but the named API removes the SessionIDExcluder
+// interface dispatch for in-package callers and matches the issue's
+// requested shape ("Expose LookupKnownSessionID(id) bool for direct set
+// lookup").
+func TestLookupKnownSessionID(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil_receiver_returns_false", func(t *testing.T) {
+		t.Parallel()
+		var s *Scheduler
+		if s.LookupKnownSessionID("any-id") {
+			t.Fatal("nil Scheduler must return false (mirrors IsExcluded contract)")
+		}
+	})
+
+	t.Run("empty_id_returns_false", func(t *testing.T) {
+		t.Parallel()
+		s := NewScheduler(SchedulerConfig{MaxJobs: 1})
+		if s.LookupKnownSessionID("") {
+			t.Fatal("empty sessionID must return false")
+		}
+	})
+
+	t.Run("hit_via_last_session_id_fast_path", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		s := NewScheduler(SchedulerConfig{
+			StorePath: filepath.Join(dir, "cron.json"),
+			MaxJobs:   5,
+		})
+		if err := s.Start(); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer s.Stop()
+
+		job := &Job{Schedule: "@every 1h", Prompt: "p", Platform: "feishu", ChatID: "c", ChatType: "direct"}
+		if err := s.AddJob(job); err != nil {
+			t.Fatalf("AddJob: %v", err)
+		}
+		s.mu.Lock()
+		s.jobs[job.ID].LastSessionID = "lookup-aaaa-bbbb-cccc-000000000001"
+		s.mu.Unlock()
+		s.invalidateKnownSessionsCache()
+
+		if !s.LookupKnownSessionID("lookup-aaaa-bbbb-cccc-000000000001") {
+			t.Fatal("LookupKnownSessionID did not match seeded LastSessionID")
+		}
+		// Mirror the IsExcluded fast-path contract: LastSessionID hit must NOT
+		// poison the TTL cache, so a follow-up KnownSessionIDs() still rebuilds
+		// the full set.
+		s.knownSessionsCache.mu.Lock()
+		cached := s.knownSessionsCache.set
+		s.knownSessionsCache.mu.Unlock()
+		if cached != nil {
+			t.Fatalf("fast-path hit must not populate TTL cache; got set with %d entries", len(cached))
+		}
+	})
+
+	t.Run("miss_returns_false", func(t *testing.T) {
+		t.Parallel()
+		s := NewScheduler(SchedulerConfig{MaxJobs: 5})
+		if s.LookupKnownSessionID("never-seen-aaaa-bbbb-cccc-000000000099") {
+			t.Fatal("LookupKnownSessionID matched an id that was never seen")
+		}
+	})
+
+	// IsExcluded and LookupKnownSessionID must agree on every input; the
+	// named API is purely a re-export of containsSessionID. A divergence
+	// would mean one of them grew a probe path the other does not. (#767)
+	t.Run("agrees_with_is_excluded", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		s := NewScheduler(SchedulerConfig{
+			StorePath: filepath.Join(dir, "cron.json"),
+			MaxJobs:   5,
+		})
+		if err := s.Start(); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer s.Stop()
+
+		job := &Job{Schedule: "@every 1h", Prompt: "p", Platform: "feishu", ChatID: "c", ChatType: "direct"}
+		if err := s.AddJob(job); err != nil {
+			t.Fatalf("AddJob: %v", err)
+		}
+		s.mu.Lock()
+		s.jobs[job.ID].LastSessionID = "agree-aaaa-bbbb-cccc-000000000003"
+		s.mu.Unlock()
+
+		probes := []string{
+			"agree-aaaa-bbbb-cccc-000000000003",   // hit
+			"missing-aaaa-bbbb-cccc-000000000099", // miss
+			"",                                    // empty
+		}
+		for _, p := range probes {
+			if got, want := s.LookupKnownSessionID(p), s.IsExcluded(p); got != want {
+				t.Errorf("LookupKnownSessionID(%q) = %v, IsExcluded(%q) = %v (must agree)", p, got, p, want)
+			}
+		}
+	})
+}
+
 // TestNewSchedulerNilRouterWarns verifies NewScheduler does not panic
 // when cfg.Router is nil and the resulting Scheduler stores a nil
 // router for the executeOpt-side guard (R20260526-GO-004) to pick up.

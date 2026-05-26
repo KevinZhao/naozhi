@@ -92,7 +92,38 @@ const (
 	// neither is NTP-synced in test fixtures, and a turn timestamp slightly
 	// ahead of "now" should still appear in the live transcript view.
 	transcriptRunningSlackMS int64 = 5_000
+
+	// transcriptConcurrencyCap caps concurrent in-flight handleRunTranscript
+	// handlers process-wide. R243-SEC-12 (#798): the existing per-IP
+	// runsLimiter (60/s burst) bounds the per-source rate, but every
+	// authenticated operator still owns a 60/s budget — so N operators
+	// each hitting the limit drive N × per-call resident bytes. Per call
+	// the handler holds a 256 KB bufio.Scanner buffer (maxTranscriptLineBytes)
+	// plus a budget-bounded io.LimitReader chain (maxTranscriptBytes 8 MB
+	// upper bound on bytes drawn from disk before truncated:true is set).
+	// 8 concurrent slots × 8 MB = 64 MB peak resident envelope, which is
+	// well under any reasonable single-server budget; the JSONL is on the
+	// same disk as everything else so even single-stream throughput
+	// dominates wall-time. 503 returned to callers that arrive when all
+	// slots are busy mirrors the TranscribeHandler pattern in
+	// dashboard_transcribe.go and preserves the dashboard's existing
+	// "show 'try again' on 5xx" branch — no client-side change needed.
+	transcriptConcurrencyCap = 8
 )
+
+// transcriptSem is the package-level concurrency gate for
+// handleRunTranscript. Buffered channel with capacity
+// transcriptConcurrencyCap implements a semaphore: send-on-channel
+// acquires a slot; receive releases it. The non-blocking acquire (select
+// default) returns 503 immediately under saturation rather than queuing
+// — queueing would let a slow disk on one run starve the dashboard's
+// live-tab refresh on every other run.
+//
+// Package-level init keeps this self-contained inside the transcript
+// source file; CronHandlers itself does not need a new field, so the
+// gate stays orthogonal to the existing per-IP runsLimiter wiring and
+// the construction call sites in build_handlers.go are untouched.
+var transcriptSem = make(chan struct{}, transcriptConcurrencyCap)
 
 // truncatedToolInputPlaceholder is the JSON value substituted for
 // tool_use.Input fields that exceed maxToolInputBytes. Pre-encoded so the
@@ -222,6 +253,20 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	}
 	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		return
+	}
+	// R243-SEC-12 (#798): cap concurrent in-flight transcript reads
+	// process-wide so the per-call 256 KB scanner buffer + 8 MB
+	// LimitReader budget cannot multiply without bound under multi-
+	// operator load. Non-blocking acquire returns 503 immediately
+	// rather than queueing — a slow JSONL read on one run must not
+	// starve a live-tab refresh on another run. Mirrors the
+	// TranscribeHandler pattern in dashboard_transcribe.go.
+	select {
+	case transcriptSem <- struct{}{}:
+		defer func() { <-transcriptSem }()
+	default:
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcript busy"})
 		return
 	}
 

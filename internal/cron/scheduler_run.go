@@ -588,6 +588,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// 不依赖 *runInflight 上的任何 atomic。R238-GO-2 + R246-GO-3 (#689).
 	finalizer := &runFinalizer{inflight: inflight}
 	defer func() {
+		// R246-GO-3 (#689) 取代了 R246-CR-017 (#759) 把 reset + CAS-release
+		// 抽到 inflight.releaseRun 的设计：那个共享 *runInflight 上的方法
+		// 无法防 run-A 的迟到 defer clobber run-B 已抢占的字段。改用
+		// per-run 栈局部 finalizer：done 标志保证 run-A 的 defer 只看到
+		// 自己的 finalizer，绝不会动到 run-B 的元数据。reset → CAS-release
+		// 的内部顺序（R238-GO-2）在 finalize() 内部保留。Gauge 的 -1 留在
+		// 这里与 executeOpt 入口的 +1 视觉配对。
 		finalizer.finalize()
 		metrics.CronRunInflight.Add(-1)
 	}()
@@ -872,6 +879,23 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行跳过，请稍后重试。"))
 		stubRefresh()
 		return
+	}
+
+	// R242-ARCH-22 (#766): populate inflight.SessionID as soon as
+	// GetOrCreate returns. Persistent-mode runs reuse a session that
+	// already carries its CLI session_id (set during the original spawn's
+	// init handshake), so sess.SessionID() is non-empty here. Fresh-mode
+	// runs spawn a new CLI whose session_id is only stamped after the
+	// init turn completes — sess.SessionID() returns "" in that window
+	// and the post-Send setSessionID below remains the authoritative
+	// write. Without this early capture, KnownSessionIDs / IsExcluded
+	// probes during the Send window miss the in-flight run on
+	// persistent-mode jobs (the auto-workspace-chain feature then
+	// momentarily considers the cron session a candidate for prev_session_ids
+	// until Send completes). setSessionID is idempotent and same-value
+	// writes fast-path so the post-Send call is a no-op when the IDs match.
+	if sid := sess.SessionID(); sid != "" {
+		inflight.setSessionID(sid)
 	}
 
 	// R238-GO-4 / R236-GO-07 (#790, #500): Send is parented on s.stopCtx

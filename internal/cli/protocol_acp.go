@@ -523,7 +523,9 @@ func (p *ACPProtocol) Capabilities() Caps {
 
 func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	var msg RPCMessage
-	if err := json.Unmarshal([]byte(line), &msg); err != nil {
+	// stringToBytesUnsafe avoids the per-event []byte(line) heap copy.
+	// R222-PERF-3 (#700) — see protocol_claude.go for the safety contract.
+	if err := json.Unmarshal(stringToBytesUnsafe(line), &msg); err != nil {
 		return nil, false, err
 	}
 

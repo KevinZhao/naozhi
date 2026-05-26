@@ -32,6 +32,23 @@ type MemoryHandler struct {
 
 var memorySlugRE = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,64}$`)
 
+// memoryProjectDirRE locks the shape of a Claude `~/.claude/projects/<name>`
+// directory entry. Claude encodes the project path as `-` + slash-replaced
+// CWD, so legitimate names look like `-home-user-workspace-foo` — leading
+// dash, alnum + `_-.` thereafter, capped at a generous length.
+//
+// R241-SEC-6 (#467): defence in depth. tryRead joins the entry name into
+// the lookup path; even though we only iterate `os.ReadDir(projectsDir)`
+// (so an attacker would need write access to ~/.claude/projects to plant
+// a malicious entry), an entry whose name carried `..` separators or
+// embedded NUL / control bytes could still influence the resolved path
+// or pollute audit logs. Filtering at iteration time keeps every Join
+// input within the alphabet the encoder produces. Non-matching entries
+// are silently skipped — they cannot be Claude project dirs and any
+// memory file inside them would not be discoverable through the regular
+// lookup path either.
+var memoryProjectDirRE = regexp.MustCompile(`^-[a-zA-Z0-9_][a-zA-Z0-9._\-]{0,255}$`)
+
 // utf8BOM is defined as bytes (not a string literal) so a literal BOM never
 // appears in this Go source file — the compiler rejects mid-file BOM.
 var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
@@ -174,6 +191,15 @@ func (h *MemoryHandler) lookup(slug string) (memoryResponse, error) {
 		if !ent.IsDir() || ent.Name() == h.currentProject {
 			continue
 		}
+		// R241-SEC-6 (#467): skip entries whose names cannot be a
+		// Claude-encoded project dir. Disk-controlled names containing
+		// `..`, slashes, or control bytes would otherwise reach
+		// tryRead's filepath.Join and depend solely on the lexical
+		// HasPrefix check below to stay rooted. The regex is the first
+		// line of defence; the prefix + EvalSymlinks checks remain.
+		if !memoryProjectDirRE.MatchString(ent.Name()) {
+			continue
+		}
 		names = append(names, ent.Name())
 	}
 	sort.Strings(names)
@@ -192,6 +218,31 @@ func (h *MemoryHandler) lookup(slug string) (memoryResponse, error) {
 }
 
 func (h *MemoryHandler) tryRead(projectDir, slug string) (*memoryResponse, error) {
+	// R241-SEC-6 (#467): pin every Join input to the alphabet Claude's
+	// project-dir encoder produces (see encodeCurrentProjectDir). The
+	// only call sites pass either h.currentProject or an entry returned
+	// by os.ReadDir, but a future caller plumbing user input through
+	// projectDir would otherwise reach filepath.Join with no shape
+	// gate.
+	//
+	// Two failure modes, two response shapes — preserves the existing
+	// errMemoryPathEscape contract that callers already test:
+	//
+	//   • Name contains traversal/separator bytes ("..", "/", "\\") —
+	//     return errMemoryPathEscape so a deliberate attack-shaped
+	//     input is loud (matches the lexical-prefix check below).
+	//   • Name simply doesn't match the encoder alphabet (e.g. random
+	//     stray dirs disk-write planted, ent.Name() that didn't pass
+	//     the iteration filter for some other reason) — return
+	//     (nil, nil) the same way "slug not found" does, so a benign
+	//     non-Claude entry never surfaces an error to the dashboard.
+	if strings.Contains(projectDir, "..") ||
+		strings.ContainsAny(projectDir, `/\`) {
+		return nil, errMemoryPathEscape
+	}
+	if !memoryProjectDirRE.MatchString(projectDir) {
+		return nil, nil
+	}
 	full := filepath.Join(h.projectsDir, projectDir, "memory", slug+".md")
 	clean := filepath.Clean(full)
 

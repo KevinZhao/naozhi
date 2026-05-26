@@ -29,7 +29,6 @@ import (
 	"github.com/naozhi/naozhi/internal/history/merged"
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
 	"github.com/naozhi/naozhi/internal/metrics"
-	"github.com/naozhi/naozhi/internal/shim"
 )
 
 // publishSessionLocked is the single funnel for installing a freshly-built
@@ -388,6 +387,16 @@ type spawnParams struct {
 // Pure-ish: no I/O except resolveResumeID's jsonl stat. No log output, no
 // process spawn — a test can exercise the merge rules without standing up
 // wrappers or filesystems beyond what resolveResumeID already needs.
+//
+// CONTRACT (R222-ARCH-12 / #735): this function is the SINGLE source of
+// truth for workspace + backend + model + args + resumeID resolution.
+// Earlier rounds had the same precedence rules copy-pasted across
+// spawnSession / Resume / ResetAndRecreate; pinning the merge here keeps
+// reset/recreate/resume from drifting. Any new spawn-adjacent path
+// (Takeover, Reattach, etc.) MUST route through this function rather
+// than re-implement the precedence inline. workspace_resolver_contract_test.go
+// guards the invariant by asserting exactly one `workspace = opts.Workspace`
+// site survives in router_lifecycle.go.
 //
 // LOCK: caller must hold r.mu for writing.
 func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) spawnParams {
@@ -1345,12 +1354,17 @@ func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 // socket path derived from KeyHash, so callers don't need to plumb a
 // shim.Manager reference through every Reset path. Returns quickly if
 // the socket was never created.
+//
+// R222-ARCH-2 (#711): the actual socket-path computation + filesystem
+// poll lives behind cli.WaitSocketGoneForKey so the session package no
+// longer reaches directly into internal/shim for socket naming. Keep
+// this thin shim (pun intended) so existing call sites stay unchanged
+// and the boolean return from cli is intentionally dropped — Reset
+// callers proceed regardless of whether the socket actually disappeared
+// (a stuck shim falls through to spawnSession's StartShim which
+// surfaces the "refusing to clobber" error to the operator).
 func waitSocketGoneForKey(key string, maxWait time.Duration) {
-	if key == "" {
-		return
-	}
-	socketPath := shim.SocketPath(shim.KeyHash(key))
-	shim.WaitSocketGone(socketPath, maxWait)
+	cli.WaitSocketGoneForKey(key, maxWait)
 }
 
 // ResetAndRecreate atomically resets a session and spawns a new one for the same key.
