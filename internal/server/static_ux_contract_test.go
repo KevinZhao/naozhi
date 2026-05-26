@@ -6592,3 +6592,55 @@ func TestDashboardJS_R243Perf8_CronTickPerformanceInvariants(t *testing.T) {
 		t.Errorf("dashboard.js: tick stop must clearInterval(cronRunningTickTimer) — R220-FE-1 / #813")
 	}
 }
+
+// TestDashboardJS_R243Perf8_CronTickNoFullRepaintGuard is an additional
+// regression guard for R243-PERF-8 / #813. Distinct from the two earlier
+// tests, this one walks the entire ensureCronRunningTick function body and
+// asserts that NO renderCronPanel( call appears anywhere inside it — the
+// scheduling shape (setInterval(...)) AND the surrounding outer block
+// alike. A refactor that re-introduces a renderCronPanel call in either
+// the schedule-time check or the in-tick callback would silently undo the
+// scoped-update savings; this catches both shapes with one source-text walk.
+//
+// The two earlier tests pin the specific scoped-update path
+// (cronRunningTickPaintScoped) and its O(1) Map invariants; this one is the
+// catch-all "the tick must not full-repaint" property test, narrowly scoped
+// to the ensureCronRunningTick function body.
+func TestDashboardJS_R243Perf8_CronTickNoFullRepaintGuard(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	const fnOpen = "function ensureCronRunningTick()"
+	idx := strings.Index(js, fnOpen)
+	if idx < 0 {
+		t.Fatalf("dashboard.js: ensureCronRunningTick declaration missing (#813)")
+	}
+	body := js[idx:]
+	depth := 0
+	end := -1
+	started := false
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '{':
+			depth++
+			started = true
+		case '}':
+			depth--
+			if started && depth == 0 {
+				end = i + 1
+				i = len(body) // break
+			}
+		}
+	}
+	if end < 0 {
+		t.Fatalf("dashboard.js: could not balance braces in ensureCronRunningTick (#813)")
+	}
+	fnBody := body[:end]
+	if strings.Contains(fnBody, "renderCronPanel(") {
+		t.Errorf("dashboard.js: ensureCronRunningTick body must NOT call renderCronPanel — full-repaint regression (#813)")
+	}
+}
