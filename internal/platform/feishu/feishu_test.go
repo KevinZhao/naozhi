@@ -617,6 +617,77 @@ func TestWebhook_EmptyTokenBypass(t *testing.T) {
 	}
 }
 
+// TestWebhook_TokenOnlyMode_MissingTimestamp pins R245-SEC-5 (issue #828):
+// in VerificationToken-only mode (EncryptKey=""), a request with the token
+// but NO X-Lark-Request-Timestamp header must still be rejected, otherwise
+// a stolen token replays freely (no freshness check, no nonce dedup, since
+// the nonce-dedup branch only fires when ts != "").
+//
+// The fix lives at internal/platform/feishu/transport_hook.go:85-95 where
+// the missing-timestamp gate now triggers when EITHER EncryptKey OR
+// VerificationToken is set (not just EncryptKey). This test pins the
+// gate so a regression that narrows the condition back to EncryptKey-only
+// is caught at test time.
+func TestWebhook_TokenOnlyMode_MissingTimestamp(t *testing.T) {
+	t.Parallel()
+	f := makeWebhookFeishu(Config{
+		AppID: "id", AppSecret: "secret",
+		VerificationToken: "test_token",
+		// Deliberately leave EncryptKey="" so we exercise token-only mode.
+	})
+	mux := http.NewServeMux()
+	called := false
+	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {
+		called = true
+	})
+
+	// Carry a valid token in the body but omit X-Lark-Request-Timestamp.
+	body := buildV2MessageBody("ev_no_ts", "oc_chat1", "p2p", "replay")
+	req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(string(body)))
+	// Intentionally NOT calling buildTokenRequest — we want the headers blank.
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 (token-only mode must reject missing timestamp)", w.Code)
+	}
+	if called {
+		t.Error("handler must not run when timestamp header is missing in token-only mode")
+	}
+}
+
+// TestWebhook_TokenOnlyMode_MissingNonce pins the companion guard: even if
+// the timestamp arrives, a token-only request that omits X-Lark-Request-Nonce
+// must be rejected. Without this, a leaked token + a single fresh timestamp
+// replays for the entire 5-minute freshness window since the nonce-dedup
+// map is the only per-request idempotency key.
+func TestWebhook_TokenOnlyMode_MissingNonce(t *testing.T) {
+	t.Parallel()
+	f := makeWebhookFeishu(Config{
+		AppID: "id", AppSecret: "secret",
+		VerificationToken: "test_token",
+	})
+	mux := http.NewServeMux()
+	called := false
+	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {
+		called = true
+	})
+
+	body := buildV2MessageBody("ev_no_nonce", "oc_chat1", "p2p", "replay")
+	req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(string(body)))
+	// Provide timestamp but omit nonce.
+	req.Header.Set("X-Lark-Request-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 (token-only mode must reject missing nonce)", w.Code)
+	}
+	if called {
+		t.Error("handler must not run when nonce header is missing in token-only mode")
+	}
+}
+
 func TestWebhook_SignatureFailure(t *testing.T) {
 	t.Parallel()
 	f := makeWebhookFeishu(Config{
