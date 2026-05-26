@@ -97,9 +97,10 @@ const (
 
 	// MaxIDLen bounds cron job IDs flowing in via the IM `/cron <op> <id>`
 	// commands and the dashboard URL/JSON parameters. Generated IDs are
-	// 8-char hex (see scheduler.generateID); 64 bytes leaves slack for
-	// future ID schemes while preventing multi-MB inputs from propagating
-	// into log/error allocations on the miss path.
+	// 16-char hex (8 entropy bytes → hex.EncodeToString; see generateHexID
+	// / hexIDEntropyBytes in job.go); 64 bytes leaves slack for future ID
+	// schemes while preventing multi-MB inputs from propagating into
+	// log/error allocations on the miss path.
 	MaxIDLen = 64
 
 	// MaxScheduleBytes caps the schedule expression length. robfig/cron
