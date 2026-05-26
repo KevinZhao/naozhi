@@ -1117,6 +1117,25 @@ func (s *Scheduler) registerJob(j *Job) error {
 // persistJobsLocked / …) so future callers see the locking requirement
 // without grepping the call graph.
 func (s *Scheduler) findByPrefixLocked(idPrefix, plat, chatID string) (*Job, error) {
+	// R246-GO-16 (#705): fast path — when the caller supplies a full canonical
+	// ID (16 lowercase hex chars), the s.jobs map gives us O(1) lookup. The
+	// IM path most commonly has dashboard / clipboard pastes that hand us the
+	// full 16-char ID, and the prior O(N) scan held s.mu (write side from
+	// withJobByPrefix) for the entire duration — blocking concurrent dashboard
+	// 1Hz list reads at 500-job scale. The slow loop below is preserved for
+	// genuine prefix queries (short tab-completed input from chat slash
+	// commands), and the (Platform, ChatID) scoping check still runs so a
+	// caller from chat A cannot reach a job from chat B by guessing its ID.
+	if len(idPrefix) == 16 && IsValidID(idPrefix) {
+		if j, ok := s.jobs[idPrefix]; ok && j.Platform == plat && j.ChatID == chatID {
+			return j, nil
+		}
+		// Fall through to the slow path on miss: the supplied 16-char string
+		// might be a longer-than-typical prefix (theoretical) or simply not a
+		// real ID, in which case we want the same ErrJobNotFound shape the
+		// scan would produce. Scan also covers the (rare) case of an ID that
+		// existed but has been deleted between the caller's lookup and now.
+	}
 	var matches []*Job
 	for _, j := range s.jobs {
 		if j.Platform == plat && j.ChatID == chatID && strings.HasPrefix(j.ID, idPrefix) {
