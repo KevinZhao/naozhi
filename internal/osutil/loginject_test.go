@@ -220,6 +220,34 @@ func TestSanitizeForLog_EnforcesMaxLen(t *testing.T) {
 	})
 }
 
+// TestSanitizeForLog_FastPathBoundedByMaxLen locks the R245-GO-10 fix:
+// when the input is oversized, the ASCII-clean fast path scans only up
+// to maxLen bytes (bytes past the cap are truncated either way). A
+// hostile suffix on a long ASCII-clean prefix must take the fast path
+// and yield the prefix — not pay an O(n) walk through strings.Map.
+func TestSanitizeForLog_FastPathBoundedByMaxLen(t *testing.T) {
+	t.Parallel()
+
+	// 1 KiB clean ASCII followed by a bidi override. With cap=64 we should
+	// get a clean 64-byte slice back without ever inspecting the bidi byte.
+	in := strings.Repeat("a", 1024) + "‮"
+	got := SanitizeForLog(in, 64)
+	want := strings.Repeat("a", 64)
+	if got != want {
+		t.Errorf("SanitizeForLog(clean+RLO, cap=64) = %q (len=%d), want %q (len=64)", got, len(got), want)
+	}
+
+	// Boundary: maxLen exactly equal to the clean-prefix length. The fast
+	// path must still slice cleanly — equality with maxLen does not flip
+	// the fast path off because len(s) > maxLen on the suffix character.
+	in2 := strings.Repeat("a", 64) + "‮"
+	got2 := SanitizeForLog(in2, 64)
+	want2 := strings.Repeat("a", 64)
+	if got2 != want2 {
+		t.Errorf("SanitizeForLog(64a+RLO, cap=64) = %q, want %q", got2, want2)
+	}
+}
+
 // TestSanitizeForLog_EmptyInput locks the empty-string short-circuit so
 // future callers can rely on it without extra guards.
 func TestSanitizeForLog_EmptyInput(t *testing.T) {

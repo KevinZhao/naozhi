@@ -74,8 +74,19 @@ func SanitizeForLog(s string, maxLen int) string {
 	// Fast path: scan bytes. If every byte is ASCII-printable (0x20..0x7E)
 	// return unchanged or — when oversized — slice directly. This covers
 	// every error string produced by Go stdlib or our own Errorf wrappers.
+	//
+	// R245-GO-10: when maxLen > 0 and the input is oversized, only the
+	// first maxLen bytes can ever survive — anything past the cap is
+	// truncated either way. So we cap the scan at maxLen and slice
+	// directly when those bytes are ASCII-clean. Bytes past maxLen are
+	// invisible to callers, so a hostile suffix on a 1 MiB ASCII-clean
+	// prefix no longer forces an O(n) full-string walk into strings.Map.
+	scanLimit := len(s)
+	if maxLen > 0 && scanLimit > maxLen {
+		scanLimit = maxLen
+	}
 	clean := true
-	for i := 0; i < len(s); i++ {
+	for i := 0; i < scanLimit; i++ {
 		c := s[i]
 		if c < 0x20 || c == 0x7f || c >= 0x80 {
 			clean = false
