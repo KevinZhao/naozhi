@@ -590,6 +590,54 @@ func TestRunStore_TrimAllScansAllJobs(t *testing.T) {
 	}
 }
 
+// TestRunStore_MarshalRunPooledMatchesStdlib — #1043 / R240-PERF-6:
+// the pooled marshal helper must produce byte-identical output to
+// json.Marshal so on-disk records are unchanged. Drives the helper
+// across two consecutive runs to exercise the pool-recycle path.
+func TestRunStore_MarshalRunPooledMatchesStdlib(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	cases := []*CronRun{
+		makeRun("0123456789abcdef", now),
+		{
+			JobID:     "fedcba9876543210",
+			RunID:     "abc123",
+			StartedAt: now,
+			Result:    "html-escape <script>tag</script>&friend",
+			Prompt:    "p",
+		},
+	}
+	for _, r := range cases {
+		want, err := json.Marshal(r)
+		if err != nil {
+			t.Fatalf("stdlib json.Marshal: %v", err)
+		}
+		got, err := marshalRunPooled(r)
+		if err != nil {
+			t.Fatalf("marshalRunPooled: %v", err)
+		}
+		if string(want) != string(got) {
+			t.Fatalf("byte mismatch\nwant: %s\n got: %s", want, got)
+		}
+		// Second pass exercises the pool-recycled buffer.
+		got2, err := marshalRunPooled(r)
+		if err != nil {
+			t.Fatalf("marshalRunPooled (recycle): %v", err)
+		}
+		if string(want) != string(got2) {
+			t.Fatalf("byte mismatch on recycled buf\nwant: %s\n got: %s", want, got2)
+		}
+		// Returned slice must be independent of the pooled buffer:
+		// mutating got1 must not corrupt got2.
+		if len(got) > 0 {
+			got[0] = 'X'
+		}
+		if string(want) != string(got2) {
+			t.Fatalf("returned slice not independent of pool buffer")
+		}
+	}
+}
+
 // TestRunStore_TrimAllCtxCancelled — #1019 / R234-GO-3: trimAllCtx exits
 // early at the next job-entry boundary when the supplied ctx is cancelled.
 // We seed many job dirs each with a stale entry; cancel ctx before calling;

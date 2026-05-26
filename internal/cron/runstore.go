@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -226,6 +227,55 @@ const (
 // skip the entry, GC removes it.
 var ErrCorruptRun = errors.New("cron run: corrupt or oversize record")
 
+// appendMarshalBufPool reuses bytes.Buffer + json.Encoder scratch space
+// across runStore.Append calls so each Append avoids the per-call
+// encodeState alloc that json.Marshal performs internally. Mirrors the
+// MarshalRecord pattern in internal/eventlog/schema/record.go. Cron Append
+// rate is bounded (≤ 1Hz × N jobs) but every persisted record allocates
+// ~2KB of encode scratch otherwise — pooling drops that to amortised zero
+// after the warmup period. R240-PERF-6 / #1043.
+var appendMarshalBufPool = sync.Pool{
+	New: func() any {
+		return bytes.NewBuffer(make([]byte, 0, 4*1024))
+	},
+}
+
+// appendMarshalPoolMaxCap drops oversized buffers from the pool so a
+// one-off near-MaxRunRecordBytes record does not pin memory for the
+// process lifetime. Sized at 2× MaxRunRecordBytes for headroom.
+const appendMarshalPoolMaxCap = 2 * MaxRunRecordBytes
+
+// marshalRunPooled encodes run via a pooled bytes.Buffer + json.Encoder.
+// Returns a freshly-copied []byte (independent of the pooled buffer) so
+// callers may retain it after the buffer is recycled. Behaviourally
+// identical to json.Marshal(run) except for json.Encoder's trailing
+// '\n' which is stripped to match Marshal output.
+func marshalRunPooled(run *CronRun) ([]byte, error) {
+	buf := appendMarshalBufPool.Get().(*bytes.Buffer)
+	defer func() {
+		if buf.Cap() > appendMarshalPoolMaxCap {
+			return
+		}
+		buf.Reset()
+		appendMarshalBufPool.Put(buf)
+	}()
+	buf.Reset()
+	enc := json.NewEncoder(buf)
+	// json.Marshal default — keep HTML-escape parity so on-disk bytes match
+	// the legacy callers and any future Unmarshal of historical records is
+	// indistinguishable from json.Marshal output.
+	if err := enc.Encode(run); err != nil {
+		return nil, err
+	}
+	body := buf.Bytes()
+	if n := len(body); n > 0 && body[n-1] == '\n' {
+		body = body[:n-1]
+	}
+	out := make([]byte, len(body))
+	copy(out, body)
+	return out, nil
+}
+
 // IsValidID reports whether s is a valid cron / cron-run identifier:
 // a non-empty lowercase hex string of at most 64 bytes. Currently job
 // and run IDs are generated as 16 hex chars; the 64-byte upper bound
@@ -372,7 +422,7 @@ func (s *runStore) Append(run *CronRun) {
 		slog.Warn("cron run: mkdir failed", "dir", dir, "err", err)
 		return
 	}
-	data, err := json.Marshal(run)
+	data, err := marshalRunPooled(run)
 	if err != nil {
 		slog.Warn("cron run: marshal failed", "job_id", run.JobID, "run_id", run.RunID, "err", err)
 		return
@@ -386,7 +436,7 @@ func (s *runStore) Append(run *CronRun) {
 		shrunk.Result = truncateWithSuffix(shrunk.Result, maxRetryFieldRunes)
 		shrunk.Prompt = truncateWithSuffix(shrunk.Prompt, maxRetryFieldRunes)
 		shrunk.ErrorMsg = truncateWithSuffix(shrunk.ErrorMsg, maxRetryFieldRunes)
-		if data2, err2 := json.Marshal(&shrunk); err2 == nil && int64(len(data2)) <= s.maxRunBytes {
+		if data2, err2 := marshalRunPooled(&shrunk); err2 == nil && int64(len(data2)) <= s.maxRunBytes {
 			data = data2
 		} else {
 			// R246-CR-250: previously this branch swallowed the failure
