@@ -250,6 +250,40 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 	return m.StartShimWithBackend(ctx, key, m.cliPath, "", cliArgs, cwd)
 }
 
+// buildShimArgs assembles the argv for the shim subprocess. Extracted from
+// StartShimWithBackend (R237-CR-11 / #717) so the 200-line spawn function
+// body reads as the lifecycle script its godoc describes (validate -> args
+// -> exec -> ready -> token -> connect -> cgroup -> map swap) rather than
+// 30 lines of strconv-flag-construction wedged between the slot reservation
+// and ensureSocketFreeForReuse.
+//
+// Pure function of its inputs (no Manager mutation, no I/O), so the
+// argv-shape regression test can call it directly without spawning a real
+// shim.
+func (m *Manager) buildShimArgs(key, socketPath, stateFile, cliPath, backend, cwd string, cliArgs []string) []string {
+	args := []string{"shim", "run",
+		"--key", key,
+		"--socket", socketPath,
+		"--state-file", stateFile,
+		// R246-CR-007: integer→string via strconv avoids the fmt reflect
+		// path in StartShimWithBackend (called once per shim spawn).
+		// bufferSize is int; maxBufBytes is int64 (see fields above).
+		"--buffer-size", strconv.Itoa(m.bufferSize),
+		"--max-buffer-bytes", strconv.FormatInt(m.maxBufBytes, 10),
+		"--idle-timeout", m.idleTimeout.String(),
+		"--watchdog-timeout", m.watchdogTimeout.String(),
+		"--cli-path", cliPath,
+		"--cwd", cwd,
+	}
+	if backend != "" {
+		args = append(args, "--backend", backend)
+	}
+	for _, a := range cliArgs {
+		args = append(args, "--cli-arg", a)
+	}
+	return args
+}
+
 // StartShimWithBackend spawns a new shim process with an explicit CLI binary
 // and backend identifier. The backend is recorded in the shim state file so
 // naozhi reconnects post-restart can route back to the matching wrapper.
@@ -290,27 +324,7 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	socketPath := SocketPath(keyHash)
 	stateFile := StateFilePath(m.stateDir, keyHash)
 
-	// Build shim subprocess args
-	args := []string{"shim", "run",
-		"--key", key,
-		"--socket", socketPath,
-		"--state-file", stateFile,
-		// R246-CR-007: integer→string via strconv avoids the fmt reflect
-		// path in StartShimWithBackend (called once per shim spawn).
-		// bufferSize is int; maxBufBytes is int64 (see fields above).
-		"--buffer-size", strconv.Itoa(m.bufferSize),
-		"--max-buffer-bytes", strconv.FormatInt(m.maxBufBytes, 10),
-		"--idle-timeout", m.idleTimeout.String(),
-		"--watchdog-timeout", m.watchdogTimeout.String(),
-		"--cli-path", cliPath,
-		"--cwd", cwd,
-	}
-	if backend != "" {
-		args = append(args, "--backend", backend)
-	}
-	for _, a := range cliArgs {
-		args = append(args, "--cli-arg", a)
-	}
+	args := m.buildShimArgs(key, socketPath, stateFile, cliPath, backend, cwd, cliArgs)
 
 	// Use exec.Command (not CommandContext): shim must outlive naozhi.
 	// Context is only used for the startup handshake timeout below.
