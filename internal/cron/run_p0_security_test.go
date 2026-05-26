@@ -18,7 +18,7 @@ func TestR220Sec1_SkipPersistBroadcastErrorMsgIsRedacted(t *testing.T) {
 	var got RunEndedEvent
 	s.SetOnRunEnded(func(ev RunEndedEvent) { got = ev })
 
-	jobID := generateID()
+	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
 	s.jobs[jobID] = j
@@ -26,7 +26,7 @@ func TestR220Sec1_SkipPersistBroadcastErrorMsgIsRedacted(t *testing.T) {
 
 	rawErr := "session error: open /home/ops/private-secret/file.go: " + context.Canceled.Error()
 	s.finishRun(finishArgs{
-		job: j, runID: generateRunID(), startedAt: time.Now(),
+		job: j, runID: mustGenerateRunID(), startedAt: time.Now(),
 		trigger: TriggerScheduled, state: RunStateCanceled,
 		errClass: ErrClassCanceled, errMsg: rawErr, skipPersist: true,
 	})
@@ -50,7 +50,7 @@ func TestR220Sec1_SuccessPathBroadcastUsesPersistedErrMsg(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: tmp + "/cron_jobs.json"})
-	jobID := generateID()
+	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
 	s.jobs[jobID] = j
@@ -61,7 +61,7 @@ func TestR220Sec1_SuccessPathBroadcastUsesPersistedErrMsg(t *testing.T) {
 
 	rawErr := "send error: dial tcp 10.0.0.1:443: connect: connection refused"
 	s.finishRun(finishArgs{
-		job: j, runID: generateRunID(), startedAt: time.Now(),
+		job: j, runID: mustGenerateRunID(), startedAt: time.Now(),
 		trigger: TriggerScheduled, state: RunStateFailed,
 		errClass: ErrClassSendError, errMsg: rawErr,
 	})
@@ -90,10 +90,10 @@ func TestR220Arch2_PersistFailureSkipsCronRun(t *testing.T) {
 	// Construct a job that's NOT registered in s.jobs — recordResultP0
 	// will hit the "_, ok := s.jobs[j.ID]; !ok" early-return path and
 	// return ok=false without touching disk.
-	j := &Job{ID: generateID(), Schedule: "@every 5m"}
+	j := &Job{ID: mustGenerateID(), Schedule: "@every 5m"}
 	// Note: deliberately not adding to s.jobs.
 
-	runID := generateRunID()
+	runID := mustGenerateRunID()
 	s.finishRun(finishArgs{
 		job: j, runID: runID, startedAt: time.Now(),
 		trigger: TriggerScheduled, state: RunStateSucceeded, result: "x",

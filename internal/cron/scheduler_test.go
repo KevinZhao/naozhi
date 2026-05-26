@@ -13,12 +13,12 @@ import (
 
 func TestGenerateID(t *testing.T) {
 	t.Parallel()
-	id := generateID()
+	id := mustGenerateID()
 	if len(id) != 16 {
 		t.Errorf("expected 16 char ID, got %d: %q", len(id), id)
 	}
 	// Should be unique
-	id2 := generateID()
+	id2 := mustGenerateID()
 	if id == id2 {
 		t.Error("expected unique IDs")
 	}

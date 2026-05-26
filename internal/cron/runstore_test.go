@@ -16,7 +16,7 @@ import (
 
 // runstore_test.go covers internal/cron/runstore.go (RFC: docs/rfc/cron-run-history.md).
 // All tests use t.TempDir() + storePath = <tmp>/cron_jobs.json so the runStore
-// roots itself at <tmp>/runs/. Tests use generateID()/generateRunID() to mint
+// roots itself at <tmp>/runs/. Tests use mustGenerateID()/mustGenerateRunID() to mint
 // 16-hex IDs the runIDPattern accepts.
 
 // newTestStore returns a runStore rooted under t.TempDir() with the given
@@ -40,7 +40,7 @@ func newTestStore(t *testing.T, keepCount int, keepWindow time.Duration) *runSto
 // Caller can override fields after the helper returns.
 func makeRun(jobID string, startedAt time.Time) *CronRun {
 	return &CronRun{
-		RunID:      generateRunID(),
+		RunID:      mustGenerateRunID(),
 		JobID:      jobID,
 		State:      RunStateSucceeded,
 		Trigger:    TriggerScheduled,
@@ -74,7 +74,7 @@ func countJSONFiles(t *testing.T, dir string) int {
 func TestRunStore_AppendListRoundTrip(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
-	jobID := generateID()
+	jobID := mustGenerateID()
 
 	run := makeRun(jobID, time.Now())
 	run.State = RunStateFailed
@@ -119,7 +119,7 @@ func TestRunStore_RejectInvalidIDs(t *testing.T) {
 	}
 
 	// Hex jobID but non-hex runID → rejected.
-	jobID := generateID()
+	jobID := mustGenerateID()
 	run = makeRun(jobID, time.Now())
 	run.RunID = "ZZZZZZZZZZZZZZZZ"
 	s.Append(run)
@@ -132,10 +132,10 @@ func TestRunStore_RejectInvalidIDs(t *testing.T) {
 		t.Fatalf("List(non-hex) = %v want nil", got)
 	}
 	// Get with non-hex jobID/runID → fs.ErrNotExist.
-	if _, err := s.Get("not-hex-id", generateRunID()); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := s.Get("not-hex-id", mustGenerateRunID()); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Get(non-hex job) err = %v want fs.ErrNotExist", err)
 	}
-	if _, err := s.Get(generateID(), "ZZZZ"); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := s.Get(mustGenerateID(), "ZZZZ"); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Get(non-hex run) err = %v want fs.ErrNotExist", err)
 	}
 }
@@ -149,7 +149,7 @@ func TestRunStore_Disabled(t *testing.T) {
 		t.Fatalf("expected disabled store; got %+v", s)
 	}
 
-	jobID := generateID()
+	jobID := mustGenerateID()
 	run := makeRun(jobID, time.Now())
 	s.Append(run) // must no-op
 	if got := s.List(jobID, 10, time.Time{}); got != nil {
@@ -170,7 +170,7 @@ func TestRunStore_Disabled(t *testing.T) {
 func TestRunStore_OversizePayloadShrinksAndPersists(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
-	jobID := generateID()
+	jobID := mustGenerateID()
 
 	huge := strings.Repeat("A", 50*1024)
 	run := makeRun(jobID, time.Now())
@@ -206,7 +206,7 @@ func TestRunStore_OversizePayloadShrinksAndPersists(t *testing.T) {
 func TestRunStore_OversizeMultiByteUTF8DoesNotSplitRune(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
-	jobID := generateID()
+	jobID := mustGenerateID()
 
 	// "汉" is 3 bytes per rune; 50 KiB / 3 = ~17066 runes — well over the
 	// 256-rune retry cap, and crucially every rune crosses byte boundaries.
@@ -239,7 +239,7 @@ func TestRunStore_RetentionByCount(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 3, 30*24*time.Hour)
 	s.enableTrimGC = false
-	jobID := generateID()
+	jobID := mustGenerateID()
 
 	now := time.Now()
 	runIDs := make([]string, 5)
@@ -286,7 +286,7 @@ func TestRunStore_RetentionByWindow(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 24*time.Hour)
 	s.enableTrimGC = false // run trim manually so mtime injection is honored
-	jobID := generateID()
+	jobID := mustGenerateID()
 
 	now := time.Now()
 	runs := make([]*CronRun, 3)
@@ -322,7 +322,7 @@ func TestRunStore_RetentionAndConjunction(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 10, 24*time.Hour)
 	s.enableTrimGC = false
-	jobID := generateID()
+	jobID := mustGenerateID()
 
 	now := time.Now()
 	runs := make([]*CronRun, 5)
@@ -366,7 +366,7 @@ func TestRunStore_RetentionAndConjunction(t *testing.T) {
 func TestRunStore_DeleteJobRemovesSubtree(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
-	jobID := generateID()
+	jobID := mustGenerateID()
 
 	for i := 0; i < 3; i++ {
 		s.Append(makeRun(jobID, time.Now()))
@@ -388,9 +388,9 @@ func TestRunStore_DeleteJobIdempotent(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
 	// The lock entry will be created; the rmdir is a no-op.
-	s.DeleteJob(generateID())
+	s.DeleteJob(mustGenerateID())
 	// And again — still fine.
-	s.DeleteJob(generateID())
+	s.DeleteJob(mustGenerateID())
 }
 
 // TestRunStore_GetMissingReturnsErrNotExist — fs.ErrNotExist must propagate
@@ -398,7 +398,7 @@ func TestRunStore_DeleteJobIdempotent(t *testing.T) {
 func TestRunStore_GetMissingReturnsErrNotExist(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
-	_, err := s.Get(generateID(), generateRunID())
+	_, err := s.Get(mustGenerateID(), mustGenerateRunID())
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Get(missing) err = %v want fs.ErrNotExist", err)
 	}
@@ -409,8 +409,8 @@ func TestRunStore_GetMissingReturnsErrNotExist(t *testing.T) {
 func TestRunStore_GetCorruptReturnsErrCorruptRun(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
-	jobID := generateID()
-	runID := generateRunID()
+	jobID := mustGenerateID()
+	runID := mustGenerateRunID()
 
 	dir := filepath.Join(s.root, jobID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -432,8 +432,8 @@ func TestRunStore_GetCorruptReturnsErrCorruptRun(t *testing.T) {
 func TestRunStore_GetOversizeReturnsErrCorruptRun(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
-	jobID := generateID()
-	runID := generateRunID()
+	jobID := mustGenerateID()
+	runID := mustGenerateRunID()
 
 	huge := &CronRun{
 		RunID:     runID,
@@ -469,14 +469,14 @@ func TestRunStore_GetOversizeReturnsErrCorruptRun(t *testing.T) {
 func TestRunStore_ListSkipsCorruptEntries(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
-	jobID := generateID()
+	jobID := mustGenerateID()
 
 	good := makeRun(jobID, time.Now())
 	s.Append(good)
 
 	// Plant a sibling corrupt file.
 	dir := filepath.Join(s.root, jobID)
-	bad := filepath.Join(dir, generateRunID()+".json")
+	bad := filepath.Join(dir, mustGenerateRunID()+".json")
 	if err := os.WriteFile(bad, []byte("not json"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -502,7 +502,7 @@ func TestRunStore_ListSkipsCorruptEntries(t *testing.T) {
 func TestRunStore_ListBeforeCutoff(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
-	jobID := generateID()
+	jobID := mustGenerateID()
 
 	now := time.Now()
 	for i := 0; i < 5; i++ {
@@ -539,7 +539,7 @@ func TestRunStore_ListBeforeCutoff(t *testing.T) {
 func TestRunStore_ConcurrentAppendsSameJobAreSerialised(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 1000, 30*24*time.Hour)
-	jobID := generateID()
+	jobID := mustGenerateID()
 
 	const N = 50
 	var wg sync.WaitGroup
@@ -565,7 +565,7 @@ func TestRunStore_TrimAllScansAllJobs(t *testing.T) {
 	s := newTestStore(t, 10, 24*time.Hour)
 	s.enableTrimGC = false
 
-	jobIDs := []string{generateID(), generateID(), generateID()}
+	jobIDs := []string{mustGenerateID(), mustGenerateID(), mustGenerateID()}
 	allRuns := make(map[string][]*CronRun, 3)
 
 	now := time.Now()
@@ -667,7 +667,7 @@ func TestRunStore_TrimAllCtxCancelled(t *testing.T) {
 	const N = 12
 	jobIDs := make([]string, N)
 	for i := 0; i < N; i++ {
-		jid := generateID()
+		jid := mustGenerateID()
 		jobIDs[i] = jid
 		// 2 stale + 1 fresh entry per job
 		for j := 0; j < 3; j++ {
@@ -716,7 +716,7 @@ func TestRunStore_RecentReturnsNewestFirst(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
 	s.enableTrimGC = false
-	jobID := generateID()
+	jobID := mustGenerateID()
 
 	now := time.Now()
 	runs := make([]*CronRun, 5)
@@ -901,7 +901,7 @@ func TestRunStore_SkipAppendTrim_MissingEntry(t *testing.T) {
 func TestRunStore_ReadRunNoLstat_MatchesReadRun(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
-	jobID := generateID()
+	jobID := mustGenerateID()
 
 	run := makeRun(jobID, time.Now())
 	s.Append(run)
@@ -929,11 +929,11 @@ func TestRunStore_ReadRunNoLstat_OverCap(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
 	s.maxRunBytes = 64 // tight cap; valid CronRun JSON is well over 64 bytes.
-	jobID := generateID()
+	jobID := mustGenerateID()
 	if err := os.MkdirAll(filepath.Join(s.root, jobID), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	runID := generateRunID()
+	runID := mustGenerateRunID()
 	path := filepath.Join(s.root, jobID, runID+".json")
 	payload := []byte(`{"run_id":"` + runID + `","job_id":"` + jobID + `","state":"succeeded","prompt":"this prompt is intentionally long enough to bust the tight cap"}`)
 	if err := os.WriteFile(path, payload, 0o600); err != nil {
@@ -968,7 +968,7 @@ func TestR245Sec1_NewRunStoreRejectsSymlinkRunsDir(t *testing.T) {
 	// Ensure subsequent Append is a safe no-op rather than writing into
 	// the symlink target.
 	s.Append(&CronRun{
-		RunID: generateRunID(), JobID: generateID(),
+		RunID: mustGenerateRunID(), JobID: mustGenerateID(),
 		State: RunStateSucceeded, StartedAt: time.Now(),
 	})
 	entries, err := os.ReadDir(target)
@@ -1012,8 +1012,8 @@ func TestR245Sec1_NewRunStoreNormalisesDotDot(t *testing.T) {
 func TestR238Sec7_ReadRunRefusesSymlink(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
-	jobID := generateID()
-	runID := generateRunID()
+	jobID := mustGenerateID()
+	runID := mustGenerateRunID()
 
 	dir := filepath.Join(s.root, jobID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -1049,7 +1049,7 @@ func TestRunStore_DiskList_BeforeMtimeCoarseFilter(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
 	s.enableTrimGC = false
-	jobID := generateID()
+	jobID := mustGenerateID()
 
 	now := time.Now()
 	startedAts := []time.Time{

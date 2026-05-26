@@ -22,7 +22,7 @@ func TestLoadJobs_NilEntry(t *testing.T) {
 	// Build a payload mixing a nil entry with one valid Job. We construct
 	// the JSON by hand to ensure the nil literal is preserved literally as
 	// `null` rather than being elided by encoding/json.
-	validID := generateID()
+	validID := mustGenerateID()
 	valid := &Job{
 		ID:        validID,
 		Schedule:  "@every 1m",

@@ -17,8 +17,8 @@ func TestR220Perf1_RecentCacheHitsAvoidDiskIO(t *testing.T) {
 	tmp := t.TempDir()
 	s := newRunStore(filepath.Join(tmp, "cron_jobs.json"), 0, 0)
 
-	jobID := generateID()
-	runID := generateRunID()
+	jobID := mustGenerateID()
+	runID := mustGenerateRunID()
 	run := &CronRun{
 		RunID: runID, JobID: jobID, State: RunStateSucceeded,
 		StartedAt: time.Now(), EndedAt: time.Now(),
@@ -51,9 +51,9 @@ func TestR220Perf1_AppendPushesCacheHeadInOrder(t *testing.T) {
 	s := newRunStore(filepath.Join(tmp, "cron_jobs.json"), 0, 0)
 	s.enableTrimGC = false
 
-	jobID := generateID()
-	first := generateRunID()
-	second := generateRunID()
+	jobID := mustGenerateID()
+	first := mustGenerateRunID()
+	second := mustGenerateRunID()
 	s.Append(&CronRun{RunID: first, JobID: jobID, State: RunStateSucceeded, StartedAt: time.Now().Add(-time.Hour)})
 	// Warm cache via Recent before second Append.
 	_ = s.Recent(jobID, 10)
@@ -78,8 +78,8 @@ func TestR220Perf1_DeleteJobInvalidatesCache(t *testing.T) {
 	tmp := t.TempDir()
 	s := newRunStore(filepath.Join(tmp, "cron_jobs.json"), 0, 0)
 
-	jobID := generateID()
-	s.Append(&CronRun{RunID: generateRunID(), JobID: jobID, State: RunStateSucceeded, StartedAt: time.Now()})
+	jobID := mustGenerateID()
+	s.Append(&CronRun{RunID: mustGenerateRunID(), JobID: jobID, State: RunStateSucceeded, StartedAt: time.Now()})
 	if got := s.Recent(jobID, 10); len(got) != 1 {
 		t.Fatalf("warm: got %d entries, want 1", len(got))
 	}
@@ -100,10 +100,10 @@ func TestR220Perf1_BeforeCutoffBypassesCache(t *testing.T) {
 	s := newRunStore(filepath.Join(tmp, "cron_jobs.json"), 5, time.Hour) // keepCount=5
 	s.enableTrimGC = false                                               // 不让 trim 干扰
 
-	jobID := generateID()
+	jobID := mustGenerateID()
 	now := time.Now()
 	for i := 0; i < 8; i++ {
-		runID := generateRunID()
+		runID := mustGenerateRunID()
 		startedAt := now.Add(time.Duration(i) * time.Minute)
 		s.Append(&CronRun{
 			RunID: runID, JobID: jobID, State: RunStateSucceeded,
