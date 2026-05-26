@@ -57,6 +57,21 @@ let lastHistoryJSON = '';
 // re-hitting the server. Set by fetchSessions after a successful render;
 // consumed by the sidebar-search input oninput handler.
 let _lastSidebarData = null;
+// _lastSidebarHtml caches the last fully-built sidebar HTML string so
+// renderSidebar can skip the (expensive) `list.innerHTML = html` write
+// when the produced markup is byte-identical to what is already mounted.
+// 20 sessions × 1 Hz polling rebuilds the same string every tick when
+// nothing actually changed — comparing the produced string to the cache
+// is O(n) but fast (string equality short-circuits on length and runs in
+// native code), and skipping the assignment avoids a full sidebar reflow
+// + active-card detachment / re-resolve cycle. The cache is the only
+// consumer of the *output* — input fingerprinting is intentionally
+// avoided because the card HTML embeds many fields (selectedKey/Node,
+// unread counts, last_active text, project flags …) and any missed
+// field would cause stale-DOM bugs. Comparing the final string is
+// inherently correct: if it differs by a byte we re-render, if it
+// doesn't there is no observable change to apply. R33-UX1.
+let _lastSidebarHtml = null;
 let sessionPollTimer = null;
 let discoveredPollTimer = null;
 let discoveredItems = []; // discovered sessions, merged into sidebar
@@ -559,17 +574,33 @@ function renderSidebar(data) {
   // the header `+` button invokes. NOT emitted in filter mode — the
   // filter-specific empty state ('没有匹配的会话') already covers that path.
   if (!html && !filterActive) html = '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" onclick="createNewSession()">+ 开启你的第一个会话</button></div>';
-  list.innerHTML = html;
-  // Sidebar rebuild detached the previously-cached active card; re-resolve
-  // it against the fresh DOM so selector switches stay O(1) on the next
-  // click. No-op when nothing is selected (openCronPanel / previewDiscovered
-  // clear paths already reset _activeCardEl).
-  if (selectedKey) setActiveSessionCard(selectedKey, selectedNode);
-  // Restore scroll on the next frame so the browser finishes layout first;
-  // synchronous assignment after innerHTML can visibly jump on slow devices.
-  requestAnimationFrame(() => {
-    list.scrollTop = scrollTop;
-  });
+  // R33-UX1: skip the innerHTML write (and its full sidebar reflow) when
+  // the produced markup is byte-identical to what is already mounted.
+  // 20 sessions × 1 Hz polling cycle rebuilds the same string every tick
+  // whenever nothing has changed — the only thing the assignment did then
+  // was force a layout pass and detach `_activeCardEl`. Comparing strings
+  // is fast (length check short-circuits the common steady-state path
+  // when one item changed and the byte count differs anyway). If the
+  // strings match, the DOM is already correct: skip the write, the
+  // active-card re-resolve, and the scroll restoration (assigning the
+  // same value is a no-op but the rAF is still queued — so just bail).
+  if (html === _lastSidebarHtml) {
+    // Still refresh the history badge & home panel below — they read from
+    // allSessionsCache which was just refreshed regardless.
+  } else {
+    list.innerHTML = html;
+    _lastSidebarHtml = html;
+    // Sidebar rebuild detached the previously-cached active card; re-resolve
+    // it against the fresh DOM so selector switches stay O(1) on the next
+    // click. No-op when nothing is selected (openCronPanel / previewDiscovered
+    // clear paths already reset _activeCardEl).
+    if (selectedKey) setActiveSessionCard(selectedKey, selectedNode);
+    // Restore scroll on the next frame so the browser finishes layout first;
+    // synchronous assignment after innerHTML can visibly jump on slow devices.
+    requestAnimationFrame(() => {
+      list.scrollTop = scrollTop;
+    });
+  }
 
   // Update history badge (filesystem history sessions, deduplicated against workspace)
   const hBadge = document.getElementById('history-badge');
