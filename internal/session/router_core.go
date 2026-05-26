@@ -527,21 +527,13 @@ type Router struct {
 	// NewRouter (config-time injection); not subject to lock contention.
 	autoChainListJSONL func(workspace string) []discovery.WorkspaceJSONL
 
-	// testHookBeforeSpawnPhase3 fires after spawnSession's auto-chain
-	// phase-2 candidate selection completes and BEFORE the phase-3
-	// re-validation lock is acquired (RFC §5.3.1). Exists so concurrent
-	// integration tests can pin TOCTOU race orderings without
-	// time.Sleep. Production builds leave it nil.
-	//
-	// Tests set this field directly. The hook runs synchronously, so
-	// blocking inside it stalls the spawn — test goroutines that need
-	// to inject excluder mutations during the gap close their wait
-	// channel inside the hook.
-	testHookBeforeSpawnPhase3 func()
-
-	// testHookBeforeBackfillPhase3 mirrors the spawn hook for the
-	// startup backfill path (RFC §5.3.1). Fires after Phase 2 decision
-	// collection finishes and BEFORE Phase 3's r.mu apply lock.
+	// testHookBeforeSpawnPhase3 / testHookBeforeBackfillPhase3 are
+	// test-only TOCTOU race-pinning hooks (RFC §5.3.1). Production
+	// builds leave them nil. Trigger contracts and helper methods
+	// live in router_testhooks.go so this struct stays focused on
+	// production state. Tests set the fields directly. R245-ARCH-29
+	// (#882).
+	testHookBeforeSpawnPhase3    func()
 	testHookBeforeBackfillPhase3 func()
 }
 
