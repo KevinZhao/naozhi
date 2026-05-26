@@ -70,7 +70,7 @@ func (p *Process) InjectHistory(entries []EventEntry) {
 		// so the Resolve goroutine doesn't pin multi-KB strings until the
 		// resolveSem slot frees.
 		desc = textutil.TruncateRunes(desc, eventDetailMaxRunes)
-		go linker.Resolve(taskID, toolUseID, name, desc, wallclock)
+		go linker.Resolve(p.lifecycleContext(), taskID, toolUseID, name, desc, wallclock)
 	}
 	for _, e := range entries {
 		switch e.Type {

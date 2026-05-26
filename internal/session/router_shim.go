@@ -426,7 +426,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 					// other guards (sessionID match, toolUseID dedup,
 					// per-jsonl modtime ordering) still apply.
 					wallclock := int64(0)
-					go linker.Resolve(taskID, toolUseID, name, desc, wallclock)
+					go linker.Resolve(parentCtx, taskID, toolUseID, name, desc, wallclock)
 				}
 			}
 		}
