@@ -31,10 +31,17 @@ func memoryTestHandler(t *testing.T, projectsDir, currentProject string) *Memory
 		}
 		projectsDir = filepath.Clean(projectsDir)
 	}
+	prefixNoSep := strings.TrimRight(filepath.Clean(projectsDir), string(filepath.Separator))
+	prefix := prefixNoSep
+	if prefix != "" {
+		prefix += string(filepath.Separator)
+	}
 	return &MemoryHandler{
-		projectsDir:    projectsDir,
-		currentProject: currentProject,
-		limiter:        newIPLimiterWithProxy(rate.Inf, 1, false),
+		projectsDir:         projectsDir,
+		currentProject:      currentProject,
+		limiter:             newIPLimiterWithProxy(rate.Inf, 1, false),
+		resolvedPrefix:      prefix,
+		resolvedPrefixNoSep: prefixNoSep,
 	}
 }
 

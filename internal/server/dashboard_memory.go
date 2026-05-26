@@ -28,6 +28,22 @@ type MemoryHandler struct {
 	projectsDir    string
 	currentProject string
 	limiter        *ipLimiter
+
+	// R242-SEC-7 (#635): cache the resolved-prefix at construction time so the
+	// runtime base used for both the lexical HasPrefix gate and the post-
+	// EvalSymlinks recheck is identical and immutable. Recomputing the prefix
+	// per-request from h.projectsDir is functionally equivalent (h.projectsDir
+	// is set once at construction and never mutated), but caching here pins
+	// the base as a property of the handler — future code that repoints
+	// projectsDir cannot drift the gates apart, and there's no chance the
+	// prefix is rebuilt under a partially-set field.
+	//
+	// resolvedPrefix already carries the trailing separator; resolvedPrefixNoSep
+	// is the same value with the trailing separator stripped, so a direct
+	// equality match with the projects root itself (resolved == prefixNoSep)
+	// stays accepted exactly as before.
+	resolvedPrefix      string
+	resolvedPrefixNoSep string
 }
 
 var memorySlugRE = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,64}$`)
@@ -97,10 +113,17 @@ func NewMemoryHandler(trustedProxy bool) *MemoryHandler {
 		dir = filepath.Clean(dir)
 	}
 	cur := encodeCurrentProjectDir(dir)
+	prefixNoSep := strings.TrimRight(filepath.Clean(dir), string(filepath.Separator))
+	prefix := prefixNoSep
+	if prefix != "" {
+		prefix += string(filepath.Separator)
+	}
 	return &MemoryHandler{
-		projectsDir:    dir,
-		currentProject: cur,
-		limiter:        newIPLimiterWithProxy(memoryLimiterRate, memoryLimiterBurst, trustedProxy),
+		projectsDir:         dir,
+		currentProject:      cur,
+		limiter:             newIPLimiterWithProxy(memoryLimiterRate, memoryLimiterBurst, trustedProxy),
+		resolvedPrefix:      prefix,
+		resolvedPrefixNoSep: prefixNoSep,
 	}
 }
 
@@ -248,8 +271,15 @@ func (h *MemoryHandler) tryRead(projectDir, slug string) (*memoryResponse, error
 
 	// Defence in depth: even though slug is regex-locked, re-verify the
 	// resolved path stays inside projectsDir.
-	prefix := strings.TrimRight(filepath.Clean(h.projectsDir), string(filepath.Separator)) + string(filepath.Separator)
-	prefixNoSep := strings.TrimRight(filepath.Clean(h.projectsDir), string(filepath.Separator))
+	//
+	// R242-SEC-7 (#635): use the construction-time cached prefix so the
+	// lexical gate and the post-EvalSymlinks recheck below share an
+	// identical, immutable base. Rebuilding the prefix per-request was
+	// functionally equivalent here (h.projectsDir is set once and never
+	// mutated) but kept the door open for a future caller mutating it,
+	// or for the two derivations to drift via filepath.Clean differences.
+	prefix := h.resolvedPrefix
+	prefixNoSep := h.resolvedPrefixNoSep
 	if !strings.HasPrefix(clean, prefix) {
 		return nil, errMemoryPathEscape
 	}
