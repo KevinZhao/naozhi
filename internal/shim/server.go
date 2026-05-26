@@ -25,6 +25,39 @@ import (
 // preventing unbounded memory allocation from malformed or malicious input.
 const maxClientLineBytes = 16 * 1024 * 1024 // 16MB
 
+// defaultMaxClientSessionBytes is the cumulative post-auth byte budget per
+// client connection. R216-SEC-3 (#541): without it, a client holding a
+// valid auth token can repeatedly send near-16-MB lines because the
+// per-line LimitedReader resets on every iteration. 1000 maximum-sized
+// lines (16 GB gross) is well above any legitimate prompt+image traffic
+// but stops a post-auth memory-pressure DoS before the writer goroutine,
+// CLI, or downstream readers feel it. The cap is generous on purpose —
+// the goal is catching pathological abuse, not throttling well-behaved
+// clients.
+const defaultMaxClientSessionBytes int64 = int64(maxClientLineBytes) * 1000
+
+// maxClientSessionBytes is held in an atomic so tests can dial it down
+// without racing the runCommandLoop reader on the hot recv path. Mirrors
+// the pattern used by maxWriteLineBytes (R237-CR-4 / #701).
+var maxClientSessionBytes atomic.Int64
+
+// maxClientSessionBytesValue returns the active cumulative cap. A zero
+// stored value resolves to defaultMaxClientSessionBytes.
+func maxClientSessionBytesValue() int64 {
+	v := maxClientSessionBytes.Load()
+	if v == 0 {
+		return defaultMaxClientSessionBytes
+	}
+	return v
+}
+
+// setMaxClientSessionBytes overrides the cumulative cap for tests.
+// Returns the previous value so callers can restore it via defer. A
+// value of zero resets to the compiled-in default.
+func setMaxClientSessionBytes(v int64) int64 {
+	return maxClientSessionBytes.Swap(v)
+}
+
 // maxWriteLineBytes caps the inner "line" field of a post-auth "write" frame
 // before it is piped into CLI stdin. The outer frame cap above accommodates
 // an entire NDJSON envelope including 16-MB leeway; but every byte of
@@ -985,6 +1018,12 @@ func (s *shimServer) runCommandLoop(
 	lineCh := make(chan []byte, 1)
 	go func() {
 		defer close(lineCh)
+		// R216-SEC-3 (#541): track cumulative bytes consumed since auth so a
+		// client holding a valid token cannot keep sending near-max-size
+		// lines indefinitely. The per-line LimitedReader caps any single
+		// line, but without a session-wide tally an attacker can drive
+		// sustained 16-MB payload churn through the post-auth path.
+		var sessionBytes int64
 		for {
 			postAuthLR.N = int64(maxClientLineBytes) + 1 // reset per-line limit
 			line, err := reader.ReadBytes('\n')
@@ -1000,6 +1039,15 @@ func (s *shimServer) runCommandLoop(
 			// single-client semaphore slot — better to sever and let them reconnect.
 			if len(line) > maxClientLineBytes {
 				slog.Warn("client line too large, disconnecting", "size", len(line))
+				return
+			}
+			// Cumulative cap (R216-SEC-3 / #541). Disconnect once the total
+			// bytes a single authenticated session has fed us crosses the
+			// budget; legitimate clients never approach this in practice.
+			sessionBytes += int64(len(line))
+			if cap := maxClientSessionBytesValue(); sessionBytes > cap {
+				slog.Warn("client session byte cap exceeded, disconnecting",
+					"session_bytes", sessionBytes, "cap", cap)
 				return
 			}
 			select {
