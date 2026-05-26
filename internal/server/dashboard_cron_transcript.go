@@ -91,12 +91,21 @@ const (
 var truncatedToolInputPlaceholder = json.RawMessage(`"[truncated]"`)
 
 // ansiEscRe matches the most common ANSI CSI sequences (color, cursor
-// motion). We strip these from tool output before serialising so the
-// rendered <pre> doesn't show garbled bytes. Defensive: the dashboard
-// uses esc()-then-<pre> so the bytes wouldn't be interpreted as HTML
-// either way, but they'd render as literal escape codes which hurt
-// readability for a debugging-focused view.
-var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
+// motion) AND OSC sequences (operating-system commands such as the
+// hyperlink escape `\x1b]8;;url\x1b\\` / BEL-terminated `\x1b]8;;url\x07`).
+// We strip these from tool output before serialising so the rendered
+// <pre> doesn't show garbled bytes. Defensive: the dashboard uses
+// esc()-then-<pre> so the bytes wouldn't be interpreted as HTML either
+// way, but they'd render as literal escape codes which hurt readability
+// for a debugging-focused view.
+//
+// R243-SEC-6 (#788): the regex previously covered only CSI (`\x1b[`),
+// leaving OSC hyperlinks (used by `gh`, modern `ls --hyperlink`, and
+// language-server output) intact. Extend the alternation so both
+// terminators (BEL `\x07` and ST `\x1b\\`) are scrubbed together with
+// CSI. The two halves run as one Go RE2 alternation so a single regex
+// pass covers both classes — no extra hot-path allocation.
+var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
 
 // transcriptResponse is the wire shape the dashboard consumes.
 type transcriptResponse struct {
