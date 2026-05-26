@@ -499,6 +499,26 @@ func buildExcerpt(seed string) string {
 	if seed == "" {
 		return ""
 	}
+	// R235-GO-4 (#1004): neutralise the EXCERPT delimiters BEFORE the
+	// per-line truncation pass below. If we deferred this to a
+	// post-truncation ReplaceAll on the output (the previous shape),
+	// the autoTitlerLineCapBytes cap could split a literal
+	// "---BEGIN CONVERSATION EXCERPT---" across two lines:
+	//
+	//   prefix ...---BEGIN CONVERS<cap>…
+	//   ATION EXCERPT---...
+	//
+	// neither half matches the full marker string, so the post-pass
+	// ReplaceAll silently misses both fragments and the LLM sees
+	// what looks like a real BEGIN delimiter spliced into the user
+	// content. Pre-replacing on the raw seed ensures no truncation
+	// boundary can land mid-marker — the placeholder is shorter than
+	// either marker (16 vs 32/30 bytes), so this only ever shrinks
+	// the seed and the cap math below stays conservative.
+	if strings.Contains(seed, excerptBeginMarker) || strings.Contains(seed, excerptEndMarker) {
+		seed = strings.ReplaceAll(seed, excerptBeginMarker, excerptMarkerSafe)
+		seed = strings.ReplaceAll(seed, excerptEndMarker, excerptMarkerSafe)
+	}
 	var b strings.Builder
 	b.Grow(len(seed))
 	lineWritten := 0
@@ -539,16 +559,5 @@ func buildExcerpt(seed string) string {
 		b.WriteRune(r)
 		lineWritten += w
 	}
-	out := strings.TrimSpace(b.String())
-	// Sec-MEDIUM-1:  if a user crafts a message containing the literal
-	// EXCERPT delimiter, two END markers in the prompt would create a
-	// "post-data" section the LLM may treat as ground truth.  Replace
-	// both BEGIN and END markers with an inert placeholder so the
-	// structural boundary stays unique to the framework's own header /
-	// footer.
-	if strings.Contains(out, excerptBeginMarker) || strings.Contains(out, excerptEndMarker) {
-		out = strings.ReplaceAll(out, excerptBeginMarker, excerptMarkerSafe)
-		out = strings.ReplaceAll(out, excerptEndMarker, excerptMarkerSafe)
-	}
-	return out
+	return strings.TrimSpace(b.String())
 }
