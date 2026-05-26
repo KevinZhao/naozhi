@@ -41,41 +41,48 @@ func loadJobs(path string) (map[string]*Job, error) {
 	if path == "" {
 		return nil, nil
 	}
-	// R236-SEC-01 (CWE-59): refuse to follow a symlink at the cron store
-	// path. A local attacker who can write the data dir could otherwise
-	// replace cron_jobs.json with a symlink to a sensitive file (whose
-	// contents would be parsed and any parse failure would rename the
-	// linked file out of place via the corrupt-rename branch). os.Lstat
-	// inspects the link itself rather than the target.
-	if fi, lerr := os.Lstat(path); lerr != nil {
-		// R246-SEC-12: previously we logged non-NotExist Lstat errors
-		// (EPERM, EACCES, ELOOP, …) and fell through to os.Open. That
-		// defeated the symlink check entirely — a local attacker who can
-		// arrange for Lstat to fail (e.g. by removing search permission on
-		// an ancestor directory but keeping it on the file via a different
-		// path) could still get os.Open to traverse a symlink. Treat any
-		// non-NotExist lstat failure as a hard error: the file exists in
-		// some form and we cannot prove it is not a symlink. ErrNotExist
-		// remains the "no file = empty jobs" path.
-		if !errors.Is(lerr, fs.ErrNotExist) {
-			slog.Warn("cron: lstat store path failed; refusing to load",
-				"path", path, "err", lerr)
-			return nil, fmt.Errorf("cron: lstat %s: %w", path, lerr)
-		}
-	} else if fi.Mode()&os.ModeSymlink != 0 {
-		slog.Warn("cron store path is a symlink; refusing to follow", "path", path)
-		return nil, fmt.Errorf("cron store path is a symlink, refusing to follow")
-	}
-	f, err := os.Open(path)
+	// R236-SEC-01 / R238-SEC-8 (#829, CWE-59 / CWE-367): refuse to follow a
+	// symlink at the cron store path with no TOCTOU window. The earlier
+	// Lstat-then-Open shape left a race in which a local attacker could
+	// swap cron_jobs.json for a symlink between the two syscalls; openCron-
+	// StoreFile uses OpenFile(O_NOFOLLOW|O_CLOEXEC) on unix so the kernel
+	// refuses the follow atomically (windows falls back to the historical
+	// Lstat→Open two-step — naozhi's production target is Linux). Fstat on
+	// the resulting fd validates the inode we actually have open is a
+	// regular file, closing the corrupt-rename branch as well: an attacker
+	// who hands us a fifo/socket cannot reach the json.Unmarshal +
+	// os.Rename code path because !IsRegular bails first.
+	f, err := openCronStoreFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		// Drop path from wrapped error; keep full path in log for operator.
+		if isSymlinkLoopErr(err) {
+			slog.Warn("cron store path is a symlink; refusing to follow", "path", path)
+			return nil, fmt.Errorf("cron store path is a symlink, refusing to follow")
+		}
+		// Treat any non-NotExist open failure as a hard error: the file
+		// exists in some form and we cannot prove it is not a symlink.
+		// ErrNotExist remains the "no file = empty jobs" path.
 		slog.Warn("open cron store failed", "path", path, "err", err)
 		return nil, fmt.Errorf("open cron store: %w", err)
 	}
 	defer f.Close()
+	// Fstat on the open fd: same inode the bytes will be read from, no
+	// second path lookup. Reject anything that's not a plain file —
+	// O_NOFOLLOW filtered symlinks but a fifo/socket/device with the right
+	// name would still get past Open and only Fstat catches it.
+	fi, err := f.Stat()
+	if err != nil {
+		slog.Warn("cron: fstat store path failed; refusing to load",
+			"path", path, "err", err)
+		return nil, fmt.Errorf("cron: fstat %s: %w", path, err)
+	}
+	if !fi.Mode().IsRegular() {
+		slog.Warn("cron store path is not a regular file; refusing to load",
+			"path", path, "mode", fi.Mode().String())
+		return nil, fmt.Errorf("cron store path is not a regular file, refusing to load")
+	}
 	data, err := io.ReadAll(io.LimitReader(f, maxCronStoreBytes+1))
 	if err != nil {
 		slog.Warn("read cron store failed", "path", path, "err", err)
