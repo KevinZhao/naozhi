@@ -111,6 +111,15 @@ type jsonEncBuf struct {
 // borrows from this pool, do NOT mutate `e.enc` configuration — make a fresh
 // encoder if you need different settings, or extend the contract test to cover
 // the new mode explicitly.
+//
+// R245-SEC-13 (#842): the SetEscapeHTML(false) literal must NOT appear in
+// any other internal/server source file, even via a hand-rolled encoder
+// outside this pool. TestSetEscapeHTMLFalse_ScopedToWriteJSONHelper scans
+// every non-test .go in the package and fails CI if a fresh encoder anywhere
+// flips the bit on an HTML-template render path. Allow-list lives in that
+// test (currently dashboard.go only); update both the test and this comment
+// in the same change if a new JSON-API helper genuinely needs to host the
+// call.
 var jsonEncPool = sync.Pool{
 	New: func() any {
 		buf := new(bytes.Buffer)
