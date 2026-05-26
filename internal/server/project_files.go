@@ -225,6 +225,29 @@ type existsEntry struct {
 // Unlike validateWorkspace (which demands a directory), this helper accepts
 // both files and directories; callers post-process via os.Stat if they need
 // to distinguish.
+// isClientPathRejection reports whether err is one of the well-known
+// "client supplied a malformed path" rejections from resolveProjectFile /
+// resolveProjectFileWithRoot. The handler logs ONLY genuine filesystem
+// failures (EACCES, EIO, EMFILE, …) so a probing client cannot flood the
+// logs with crafted paths. Matched by exact error.Error() string against
+// the literals returned in this package; a future refactor that introduces
+// a sentinel can drop this helper without changing call sites.
+func isClientPathRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch err.Error() {
+	case "project not configured",
+		"path is required",
+		"path too long",
+		"invalid path",
+		"path must be relative",
+		"path escapes workspace":
+		return true
+	}
+	return false
+}
+
 func resolveProjectFile(projectPath, rel string) (string, error) {
 	// Check empty BEFORE EvalSymlinks: filepath.EvalSymlinks("") returns
 	// (".", nil) on Linux, which would silently bind resolution to the
@@ -684,6 +707,24 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		// os.ErrNotExist (valid but missing) vs outside-workspace collapse to
 		// 404 — an attacker probing paths gets the same signal either way.
+		//
+		// R242-SEC-15 (#651): symmetric to the second-EvalSymlinks branch
+		// below — surface real IO errors (EACCES, EIO, EMFILE, …) as a
+		// structured Warn so ops can distinguish "operator typo" from
+		// "filesystem degraded / permissions broken on rootPath". The
+		// most common non-IO failures from resolveProjectFile are the
+		// hostile-path rejections ("path escapes workspace", "path must
+		// be relative", "invalid path") whose strings are stable. We
+		// gate the Warn on fs.ErrNotExist absence AND not-a-path-shape
+		// rejection so a probing client can't flood logs by sending
+		// crafted paths. Path is NOT logged on the noisy IO branch
+		// because it's user-supplied and potentially attacker-shaped;
+		// the project name is sanitised via validateProjectName above.
+		if !errors.Is(err, fs.ErrNotExist) && !isClientPathRejection(err) {
+			slog.Warn("project files: resolveProjectFile IO failure",
+				"err", err,
+				"project", project)
+		}
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}

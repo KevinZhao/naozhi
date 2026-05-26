@@ -1558,3 +1558,47 @@ func TestStatRelWithRoot_RejectsSymlinkAfterResolve(t *testing.T) {
 		t.Errorf("legitimate symlink to real file should resolve as exists:true, got %+v", got)
 	}
 }
+
+// errStr is a tiny stand-alone error wrapper used by
+// TestIsClientPathRejection so the test can build errors with arbitrary
+// messages without pulling errors.New (no allocator chatter, no
+// dependency). Stays within this file to keep the helper local.
+type errStr string
+
+func (e errStr) Error() string { return string(e) }
+
+// TestIsClientPathRejection covers R242-SEC-15 (#651): the helper that
+// gates the resolveProjectFile error-Warn branch must classify the
+// well-known "malformed path" rejections so a probing client cannot
+// flood logs by sending crafted paths. Real IO errors fall through
+// (the handler logs them). Verify the matrix here so a future literal
+// change in resolveProjectFile cannot silently re-enable noisy logs.
+func TestIsClientPathRejection(t *testing.T) {
+	rejected := []string{
+		"project not configured",
+		"path is required",
+		"path too long",
+		"invalid path",
+		"path must be relative",
+		"path escapes workspace",
+	}
+	for _, s := range rejected {
+		if !isClientPathRejection(errStr(s)) {
+			t.Errorf("isClientPathRejection(%q) = false, want true", s)
+		}
+	}
+	notRejected := []string{
+		"permission denied",
+		"input/output error",
+		"too many open files",
+		"",
+	}
+	for _, s := range notRejected {
+		if isClientPathRejection(errStr(s)) {
+			t.Errorf("isClientPathRejection(%q) = true, want false (real IO failures must surface to ops)", s)
+		}
+	}
+	if isClientPathRejection(nil) {
+		t.Errorf("isClientPathRejection(nil) = true, want false")
+	}
+}
