@@ -1153,7 +1153,20 @@ func (s *Scheduler) Stop() {
 	save, err := s.persistJobsLocked()
 	s.mu.Unlock()
 	if err != nil {
-		slog.Error("marshal cron store on shutdown", "err", err)
+		// R246-GO-5 (#690): silent data loss only on shutdown is exactly the
+		// failure mode operators most need to alert on — stopCancel and
+		// cron.Stop already ran above, so any unsaved AddJob/UpdateJob/
+		// DeleteJob mutation since the last successful save is now lost
+		// forever (process is moments from exit). Tag the slog line with an
+		// explicit `persist:FAILED_DURING_SHUTDOWN` field so log aggregation
+		// can route it to a different alert channel than the per-mutation
+		// "save cron store" failure (which is recoverable on the next
+		// mutation, this one is not). Stop() remains void per the existing
+		// caller contract; surfacing the loss via structured logs is the
+		// minimum signal the issue triage prescribed.
+		slog.Error("marshal cron store on shutdown",
+			"err", err,
+			"persist", "FAILED_DURING_SHUTDOWN")
 		return
 	}
 	if save != nil {

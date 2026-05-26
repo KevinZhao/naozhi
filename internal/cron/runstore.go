@@ -393,22 +393,40 @@ func (s *runStore) jobLock(jobID string) *sync.Mutex {
 	return actual.(*sync.Mutex)
 }
 
-// assertJobLockHeld panics when jobLock(jobID) is currently free, which
-// — outside concurrent tests — is the unambiguous signature of a caller
-// that violated the *Locked-suffix contract (forgot to acquire). Use
-// from helpers whose godoc says "caller must hold jobLock".
+// assertJobLockHeld logs a warning when jobLock(jobID) is currently free,
+// which — outside concurrent tests — is the unambiguous signature of a
+// caller that violated the *Locked-suffix contract (forgot to acquire).
+// Use from helpers whose godoc says "caller must hold jobLock".
 //
-// The check is best-effort: TryLock+Unlock is cheap (uncontended fast
-// path) and the panic message includes the jobID so failures point
+// R242-CR-11 (#696) / R242-CR-7 (#694): the historical implementation
+// `panic`'d on the contract miss. Two real production hazards:
+//
+//  1. skipAppendTrim called assertJobLockHeld BEFORE locking entry.mu, so
+//     a panic propagated up through Append's `defer lock.Unlock()` for
+//     jobLock and eventually crashed the process. The cron history path
+//     is supposed to be best-effort — RFC §4.2 says cron must NOT block
+//     on history failure — yet a contract bug elsewhere could still take
+//     the whole scheduler down.
+//  2. The TryLock+Unlock pair is observable contention from any goroutine
+//     legitimately holding the lock, plus any future caller that forgets
+//     to hold it gets a `panic` rather than a bounded recoverable log.
+//
+// The check is still best-effort: TryLock+Unlock is cheap (uncontended
+// fast path) and the warn message includes the jobID so failures point
 // straight at the offending caller. False negatives — another goroutine
 // holds the lock, our caller doesn't, TryLock fails so we miss the bug
 // — are accepted in exchange for catching the dominant "single-flight
-// test caller forgot to lock" failure mode reliably. R236-GO-03.
+// test caller forgot to lock" failure mode reliably. R236-GO-03 +
+// R242-CR-11 (#696) + R242-CR-7 (#694).
+//
+// Tests that want hard-fail-on-contract-miss can wrap the slog handler
+// to escalate; production stays alive.
 func (s *runStore) assertJobLockHeld(jobID string) {
 	lock := s.jobLock(jobID)
 	if lock.TryLock() {
 		lock.Unlock()
-		panic("cron runstore: jobLock(" + jobID + ") not held by caller; *Locked-suffix contract violated")
+		slog.Warn("cron runstore: jobLock not held by caller; *Locked-suffix contract violated",
+			"job_id", jobID)
 	}
 }
 
@@ -851,30 +869,25 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 		if len(out) >= limit {
 			break
 		}
-		// R238-GO-8 (#796): coarse mtime cutoff on `before`-paginated lists.
-		// runStore.Append writes the JSON once at finishRun time, so mtime
-		// ≈ EndedAt ≥ StartedAt within the run's wall-clock duration —
-		// itself bounded by SchedulerConfig.ExecTimeout (default 5 min).
-		// When mtime is at or after `before` the StartedAt < before strict
-		// filter below is overwhelmingly likely to discard the entry too;
-		// short-circuit here saves a ReadFile + JSON parse per entry on
-		// the dominant path. The strict StartedAt < before guard in the
-		// post-readRun branch remains the source of truth for any entry
-		// that passes this gate (mtime < before still does the read +
-		// confirms StartedAt). Asymmetry: a hypothetical run with
-		// StartedAt < before but EndedAt ≥ before would be filtered here
-		// without reading; in practice ExecTimeout caps that window so
-		// the only way to hit it is configuring ExecTimeout to a span
-		// large enough to cross the pagination cutoff (rare; operator
-		// can widen `before` to recover).
-		if !before.IsZero() && !it.mtime.Before(before) {
-			continue
-		}
+		// R246-CR-008 (#745): pagination key consistency. The strict cutoff
+		// below filters on StartedAt; an earlier coarse mtime gate
+		// (`!it.mtime.Before(before)` skip) was unsafe in one direction —
+		// a long-running job with StartedAt < before but mtime (≈ EndedAt)
+		// ≥ before would be skipped here without ever reading the file,
+		// even though it should appear in the page. The previous comment
+		// dismissed the asymmetry as "rare in practice", but operators
+		// configuring ExecTimeout to span the pagination window (or any
+		// process restart that bumps mtime via re-touch) hits it
+		// silently — page truncation looked like "no older runs" instead
+		// of pagination skip. Drop the coarse gate; readRunNoLstat is
+		// cheap enough on the typical limit≤50 page that one ReadFile per
+		// candidate is acceptable for correctness here. Items are still
+		// sorted newest-first by mtime so the StartedAt strict filter
+		// applies to the correct prefix of candidates.
+		//
 		// R245-PERF-9: skip readRun's Lstat — scanSortedRunDir already
 		// filtered each DirEntry by ModeSymlink + IsValidID, so the
-		// IsRegular() recheck would just duplicate the syscall. One
-		// ReadFile instead of (Lstat + ReadFile) per listed run halves
-		// syscalls in the warmCache pass.
+		// IsRegular() recheck would just duplicate the syscall.
 		run, err := s.readRunNoLstat(it.path)
 		if err != nil {
 			if errors.Is(err, ErrCorruptRun) {

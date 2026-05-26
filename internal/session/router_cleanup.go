@@ -256,6 +256,20 @@ func (r *Router) Cleanup() {
 
 	closedCount := 0
 	for _, e := range stuckKill {
+		// R217-CR-3: re-verify the session still holds the proc we
+		// classified as stuck. Pass-2 ran without r.mu (PID syscalls), so
+		// a concurrent spawnSession / resetLocked could have replaced
+		// s.process between the snapshot and now. Killing the originally-
+		// captured proc would still target a now-orphaned shim conn — a
+		// no-op in the steady state but it pollutes the deathReason
+		// (already stamped to "stuck_running" / "pid_gone" above) on the
+		// fresh ManagedSession the user is actively using. Skip when the
+		// session has moved on; the new proc gets its own chance next
+		// tick. shouldPrune already handles the orphan-process side; this
+		// just stops the false-positive kill bookkeeping.
+		if cur := e.s.loadProcess(); cur != nil && cur != e.proc {
+			continue
+		}
 		e.proc.Kill()
 		closedCount++
 	}

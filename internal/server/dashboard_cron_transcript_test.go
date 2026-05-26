@@ -805,6 +805,110 @@ func TestSummariseToolInput_FallbackUsesRawBytes(t *testing.T) {
 	}
 }
 
+// TestFlattenJSONLEvent_DispatchByType pins R242-CR-13 (#704): the
+// monolithic flattenJSONLEvent body was split into per-type helpers
+// (flattenUserEvent / flattenAssistantEvent / flattenSystemEvent) wired
+// through a one-line switch. Test the dispatch contract directly so a
+// future refactor flattening the helpers back into one function (or
+// dropping a case branch) trips before it ships:
+//   - "user" routes to flattenUserEvent (text turn surfaces)
+//   - "assistant" routes to flattenAssistantEvent (assistant turn surfaces)
+//   - "system" routes to flattenSystemEvent (only error subtype emits)
+//   - unknown event types return parsed=false (default branch holds)
+func TestFlattenJSONLEvent_DispatchByType(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		ev        *claudeJSONLEvent
+		wantKinds []string // ordered kinds expected in output
+		wantParse bool
+	}{
+		{
+			name: "user_text",
+			ev: &claudeJSONLEvent{
+				Type:    "user",
+				Message: json.RawMessage(`{"role":"user","content":"hello"}`),
+			},
+			wantKinds: []string{"user"},
+			wantParse: true,
+		},
+		{
+			name: "assistant_text",
+			ev: &claudeJSONLEvent{
+				Type:    "assistant",
+				Message: json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"hi"}]}`),
+			},
+			wantKinds: []string{"assistant"},
+			wantParse: true,
+		},
+		{
+			name: "system_error",
+			ev: &claudeJSONLEvent{
+				Type:    "system",
+				Message: json.RawMessage(`{"subtype":"error","message":"boom"}`),
+			},
+			wantKinds: []string{"error"},
+			wantParse: true,
+		},
+		{
+			name: "system_init_skipped",
+			ev: &claudeJSONLEvent{
+				Type:    "system",
+				Message: json.RawMessage(`{"subtype":"init"}`),
+			},
+			wantKinds: nil,
+			wantParse: false,
+		},
+		{
+			name:      "unknown_type_default",
+			ev:        &claudeJSONLEvent{Type: "queue-operation", Message: json.RawMessage(`{}`)},
+			wantKinds: nil,
+			wantParse: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out, _, _, parsed := flattenJSONLEvent(tc.ev, 0, 0)
+			if parsed != tc.wantParse {
+				t.Errorf("parsed=%v, want %v", parsed, tc.wantParse)
+			}
+			if len(out) != len(tc.wantKinds) {
+				t.Fatalf("len(out)=%d, want %d (kinds=%v)", len(out), len(tc.wantKinds), tc.wantKinds)
+			}
+			for i, want := range tc.wantKinds {
+				if out[i].Kind != want {
+					t.Errorf("out[%d].Kind=%q, want %q", i, out[i].Kind, want)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkSummariseToolInput_TypedProbe locks the R233-PERF-5 / #695
+// perf win: the typed `toolInputProbe` decode replaced the prior
+// `map[string]any` decode + key hunt, halving allocations on the hot
+// transcript-flatten path. A regression to map[string]any (e.g. someone
+// "simplifying" the struct away) would visibly inflate allocs/op against
+// the recorded baseline. Benchmarks the three input shapes the production
+// code sees: priority-key short-circuit (Bash), priority-key fallthrough
+// to FilePath, and the typed-probe-empty fallback to raw bytes.
+func BenchmarkSummariseToolInput_TypedProbe(b *testing.B) {
+	bashInput := json.RawMessage(`{"command":"echo hello","other":"x"}`)
+	readInput := json.RawMessage(`{"file_path":"/tmp/x.txt"}`)
+	customInput := json.RawMessage(`{"alpha":1,"beta":"long-fallback-text"}`)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = summariseToolInput("Bash", bashInput)
+		_ = summariseToolInput("Read", readInput)
+		_ = summariseToolInput("Custom", customInput)
+	}
+}
+
 // TestMaxTranscriptBytes_Int64Type pins R244-GO-P2-3 (#911): the
 // transcript reader directly constructs `&io.LimitedReader{N: …}`
 // rather than calling io.LimitReader, so the source operand must be
@@ -928,5 +1032,81 @@ func TestFlattenAssistantEvent_ToolInputSizeCap_MultiBlock(t *testing.T) {
 	}
 	if totalInputBytes >= 4*maxToolInputBytes {
 		t.Errorf("multi-block: total surfaced Input bytes=%d, must be << 4×maxToolInputBytes=%d (#1018 cap is per-block, not per-line)", totalInputBytes, 4*maxToolInputBytes)
+	}
+}
+
+// TestFlattenAssistantEvent_AssistantFirstThenSequentialIndices pins
+// R247-PERF-2 / R247-PERF-18 (#823): the assistant text turn must appear
+// at index nextIdx, followed by tool_use turns at sequential indices —
+// no prepend, no re-number. Before R247-PERF-2 the loop emitted tool_use
+// turns first with provisional indices and then prepended the assistant
+// turn via append([]turn{a}, out...) which forced a fresh backing slice
+// allocation and an O(N) re-index per call. A future refactor that
+// reintroduces the prepend pattern would break this index contract on
+// the very first tool_use turn — assert it directly so the regression
+// is loud at test time, not at dashboard-render time.
+func TestFlattenAssistantEvent_AssistantFirstThenSequentialIndices(t *testing.T) {
+	t.Parallel()
+
+	// Mixed: text + 2 tool_use + text (text blocks merge, so we expect
+	// 1 assistant turn + 2 tool_use turns = 3 turns total).
+	ev := &claudeJSONLEvent{
+		Type: "assistant",
+		Message: json.RawMessage(`{"role":"assistant","content":[` +
+			`{"type":"text","text":"first"},` +
+			`{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"a"}},` +
+			`{"type":"tool_use","id":"tu_2","name":"Read","input":{"file_path":"/x"}},` +
+			`{"type":"text","text":"second"}` +
+			`]}`),
+	}
+	const startIdx = 7 // arbitrary non-zero base to catch off-by-one
+	out, _, toolCalls, parsed := flattenAssistantEvent(ev, 1234, startIdx)
+	if !parsed {
+		t.Fatalf("expected parsed=true")
+	}
+	if got, want := len(out), 3; got != want {
+		t.Fatalf("len(out)=%d, want %d (1 assistant + 2 tool_use)", got, want)
+	}
+	if toolCalls != 2 {
+		t.Errorf("toolCalls=%d, want 2", toolCalls)
+	}
+
+	// Index contract: assistant first at nextIdx, tool_use next at
+	// nextIdx+1, nextIdx+2.
+	if out[0].Kind != "assistant" {
+		t.Errorf("out[0].Kind=%q, want %q (assistant must appear first; prepend regression)", out[0].Kind, "assistant")
+	}
+	if out[0].Index != startIdx {
+		t.Errorf("out[0].Index=%d, want %d (assistant must land at nextIdx without re-number)", out[0].Index, startIdx)
+	}
+	if out[1].Kind != "tool_use" || out[1].Index != startIdx+1 {
+		t.Errorf("out[1] = (%q, %d), want (tool_use, %d)", out[1].Kind, out[1].Index, startIdx+1)
+	}
+	if out[2].Kind != "tool_use" || out[2].Index != startIdx+2 {
+		t.Errorf("out[2] = (%q, %d), want (tool_use, %d)", out[2].Kind, out[2].Index, startIdx+2)
+	}
+
+	// Tool-only branch: no text blocks, only tool_use. The assistant
+	// turn must NOT be emitted at all (text empty), and tool_use turns
+	// must start at nextIdx without a phantom slot reserved for the
+	// missing assistant turn.
+	toolOnly := &claudeJSONLEvent{
+		Type: "assistant",
+		Message: json.RawMessage(`{"role":"assistant","content":[` +
+			`{"type":"tool_use","id":"tu_a","name":"Bash","input":{"command":"a"}},` +
+			`{"type":"tool_use","id":"tu_b","name":"Read","input":{"file_path":"/y"}}` +
+			`]}`),
+	}
+	out2, _, _, parsed2 := flattenAssistantEvent(toolOnly, 0, startIdx)
+	if !parsed2 || len(out2) != 2 {
+		t.Fatalf("tool-only: parsed=%v len(out)=%d (want true / 2)", parsed2, len(out2))
+	}
+	if out2[0].Kind != "tool_use" || out2[0].Index != startIdx {
+		t.Errorf("tool-only out[0] = (%q, %d), want (tool_use, %d) — no phantom assistant slot",
+			out2[0].Kind, out2[0].Index, startIdx)
+	}
+	if out2[1].Kind != "tool_use" || out2[1].Index != startIdx+1 {
+		t.Errorf("tool-only out[1] = (%q, %d), want (tool_use, %d)",
+			out2[1].Kind, out2[1].Index, startIdx+1)
 	}
 }

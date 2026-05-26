@@ -1103,6 +1103,18 @@ var envExpansionDenyPrefixes = []string{
 	"GOOGLE_",
 	"OCI_",
 	"OPENAI_",
+	// Additional upstream-credential prefixes that have no legitimate
+	// naozhi-side config use. GITHUB_TOKEN / GH_TOKEN are matched as
+	// full names via this prefix (no partial suffixes follow). The
+	// OPENROUTER_ / MISTRAL_ / HUGGINGFACE_ / HUGGING_FACE_ prefixes
+	// guard against alternative-LLM provider keys that an operator
+	// might confuse with a generic alias slot. R240-SEC-16 / #1047.
+	"GITHUB_TOKEN",
+	"GH_TOKEN",
+	"OPENROUTER_",
+	"MISTRAL_",
+	"HUGGINGFACE_",
+	"HUGGING_FACE_",
 }
 
 // allowEnvExpansion reports whether key is safe to expand in config.yaml.
