@@ -97,15 +97,19 @@ type Config struct {
 	CWD             string
 }
 
-// shimLogFilePtr keeps the log file open for the shim's lifetime
-// (prevents GC). atomic.Pointer instead of a plain `*os.File` so the
-// deferred panic handler reads through a memory barrier when other
-// goroutines (signal handler, panic recover) might observe Run()'s
-// initialization concurrently. R216-GO-2.
-var shimLogFilePtr atomic.Pointer[os.File]
-
 // Run is the main entry point for the shim process.
+//
+// R237-CR-8 (#715): the log-file handle is a Run-local atomic.Pointer
+// instead of a package-level var so test harnesses that spin up multiple
+// shimServer instances in the same process (no production caller does
+// this — the OS-level shim is one binary one Run — but the Run-as-library
+// exec path under -race shares the address space) cannot clobber each
+// other's deferred panic handler. atomic.Pointer is still required so the
+// deferred recover() observes a memory-barrier-reachable handle even if
+// the signal handler / panic recover races against the os.OpenFile branch
+// initialization (R216-GO-2 invariant preserved).
 func Run(cfg Config) error {
+	var shimLogFilePtr atomic.Pointer[os.File]
 	// Redirect slog to a persistent log file so shim logs survive parent restart.
 	logPath := filepath.Join(filepath.Dir(cfg.StateFile), fmt.Sprintf("shim-%d.log", os.Getpid()))
 	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
