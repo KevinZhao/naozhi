@@ -301,6 +301,18 @@ func detectVersionCtx(parent context.Context, cliPath string) string {
 // detect.go) rather than an inline switch so adding a future backend (e.g.
 // gemini-cli) is a single registry edit. Unknown backend ids fall back to
 // "claude" for the historical default-launcher behaviour. R225-CR-2.
+//
+// R249-SEC-7 (#920): when neither the well-known candidate paths nor
+// exec.LookPath resolve the binary, return "" instead of the bare basename
+// (e.g. "claude"). The bare-name path was reached at exec.Command time
+// which re-resolves through the live PATH; a PATH-poisoning vector (admin
+// misconfig prepending an attacker-writable directory, or a local
+// privilege-escalation chain that mutates the env between detect and
+// exec) would then run a malicious binary inside the shim spawn path.
+// Returning "" forces the caller through the empty-path branch — Probe
+// short-circuits, validateCLIPath stays silent, and exec.Command("")
+// surfaces a clear error at spawn time instead of silently launching
+// whatever happens to be on PATH at that moment.
 func detectCLI(backend string) string {
 	name, ok := knownBackendBinaries[backend]
 	if !ok {
@@ -317,7 +329,7 @@ func detectCLI(backend string) string {
 		return p
 	}
 
-	return name
+	return ""
 }
 
 // candidatePaths returns OS-specific install locations to probe.

@@ -107,3 +107,34 @@ func TestDetectBackendsCtx_CancelledCtxStillReturnsSlice(t *testing.T) {
 		}
 	}
 }
+
+// TestDetectCLI_NoBareNamePathPoisoning is the behavioural guard for
+// R249-SEC-7 (#920): when neither candidatePaths nor exec.LookPath
+// resolves the binary, detectCLI must return "" so the spawn path
+// surfaces a clear error instead of letting exec.Command re-resolve
+// against the live PATH at fork time. A regression that flipped this
+// back to the bare basename ("claude", "kiro-cli") would re-open the
+// PATH-poisoning vector. NOT t.Parallel — mutates os.Setenv("PATH").
+func TestDetectCLI_NoBareNamePathPoisoning(t *testing.T) {
+	origPath := os.Getenv("PATH")
+	os.Setenv("PATH", "")
+	defer os.Setenv("PATH", origPath)
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", t.TempDir())
+	defer os.Setenv("HOME", origHome)
+
+	// Probe every known backend; each must return "" (or an absolute
+	// path if the test runner happens to have the binary at a candidate
+	// path despite our HOME override). The forbidden value is the bare
+	// basename — that is the historical regression path.
+	for _, b := range knownBackends {
+		got := detectCLI(b.ID)
+		bin := knownBackendBinaries[b.ID]
+		if got == bin {
+			t.Errorf("backend %q: detectCLI returned bare basename %q; "+
+				"PATH-poisoning vector — must be \"\" or absolute path",
+				b.ID, got)
+		}
+	}
+}

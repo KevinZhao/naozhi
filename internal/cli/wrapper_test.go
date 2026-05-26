@@ -46,7 +46,16 @@ func TestCandidatePaths_Kiro(t *testing.T) {
 // NOT t.Parallel() — mutates process-global env PATH/HOME via os.Setenv.
 // Parallel siblings reading PATH (e.g., exec.LookPath) would see torn
 // state across the deferred restore window. Serial only.
-func TestDetectCLI_FallsBackToBareNameWhenNothingFound(t *testing.T) {
+//
+// R249-SEC-7 (#920): the historical bare-name fallback let exec.Command
+// re-resolve through the live PATH at spawn time, opening a PATH-poisoning
+// window between detect and exec. detectCLI now returns "" when neither
+// candidatePaths nor exec.LookPath finds the binary; callers (NewWrapper,
+// DetectBackendsCtx) already handle empty paths gracefully (Probe
+// short-circuits, dashboard marks unavailable, exec.Command surfaces a
+// clear error at spawn time instead of launching whatever happens to be
+// on PATH at exec time).
+func TestDetectCLI_ReturnsEmptyWhenNothingFound(t *testing.T) {
 	// candidatePaths uses "claude" for any non-"kiro" backend,
 	// so we test with a name unlikely to exist via PATH lookup
 	origPath := os.Getenv("PATH")
@@ -59,9 +68,11 @@ func TestDetectCLI_FallsBackToBareNameWhenNothingFound(t *testing.T) {
 	defer os.Setenv("HOME", origHome)
 
 	result := detectCLI("claude")
-	// With empty PATH and no files, should fall back to bare "claude"
-	if result != "claude" {
-		t.Errorf("expected bare name fallback, got %q", result)
+	// With empty PATH and no files, must return "" rather than the bare
+	// basename — the bare name re-resolves through live PATH at exec time
+	// and opens a PATH-poisoning vector.
+	if result != "" {
+		t.Errorf("expected empty fallback, got %q", result)
 	}
 }
 
