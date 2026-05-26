@@ -543,7 +543,7 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxExistsBody)
+	r = withMaxBytes(w, r, maxExistsBody)
 	var req existsReq
 	if err := decodeJSONBody(r, &req); err != nil {
 		slog.Debug("files exists: decode failed", "err", err)
