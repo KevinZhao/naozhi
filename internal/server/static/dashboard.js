@@ -11504,11 +11504,47 @@ function ensureCronRunningTick() {
         cronRunningTickTimer = null;
         return;
       }
-      try { renderCronPanel(); } catch (_) {}
+      // R243-PERF-8 (#813): 只刷新 running 行的 .cj-when 文本节点，而不再
+      // 整体 renderCronPanel() 重建 DOM。1Hz × 全量重建在 cron 列表稍长时
+      // 会成为可见的 paint/sort 浪费——只有"运行中 Xs"这个秒级计时器需要
+      // 更新；其它字段（next_run / last_run_at / paused / error）只在 WS
+      // event 或 fetchCronJobs 之后才会变。
+      try { updateCronRunningTimers(); } catch (_) {}
     }, 1000);
   } else if (!shouldRun && cronRunningTickTimer) {
     clearInterval(cronRunningTickTimer);
     cronRunningTickTimer = null;
+  }
+}
+
+// updateCronRunningTimers — 1Hz tick 的轻量路径（#813 / R243-PERF-8）。
+// 只走 querySelectorAll('.cj-row.is-running') 找到 running 行，把对应的
+// .cj-when 文本节点更新为最新的 formatRunningElapsed 结果。整列表的
+// sort / filter / DOM 重建都不再发生。如果某个 job 的 running 状态在
+// 上一次 paint 之后才改变（罕见——状态切换走 cronApplyRunStarted /
+// cronApplyRunEnded，那两个都已经显式 renderCronPanel 一次），下一次
+// WS 事件或 fetchCronJobs 重绘会兜底。
+function updateCronRunningTimers() {
+  const rows = document.querySelectorAll('.cj-row.is-running');
+  if (!rows || rows.length === 0) return;
+  const list = Array.isArray(cronJobs) ? cronJobs : [];
+  // 用 jobId -> job 的小表，避免每行 O(N) find。
+  let byId = null;
+  for (const row of rows) {
+    const jobId = row.getAttribute('data-cron-id');
+    if (!jobId) continue;
+    if (!byId) {
+      byId = Object.create(null);
+      for (const j of list) { if (j && j.id) byId[j.id] = j; }
+    }
+    const j = byId[jobId];
+    if (!j || !j.current_run || !j.current_run.started_at) continue;
+    const next = formatRunningElapsed(j.current_run.started_at);
+    // 桌面 .cj-when 列 + 移动 .cj-when-inline（窄屏 hide 桌面列后嵌在 sub-row）。
+    const when = row.querySelector('.cj-when');
+    if (when && when.textContent !== next) when.textContent = next;
+    const inline = row.querySelector('.cj-when-inline');
+    if (inline && inline.textContent !== next) inline.textContent = next;
   }
 }
 
