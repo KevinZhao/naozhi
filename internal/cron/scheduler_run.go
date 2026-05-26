@@ -23,6 +23,7 @@ import (
 	mrand "math/rand/v2"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -265,6 +266,17 @@ func formatCronNotice(label, body string) string {
 	// at AddJob/UpdateJob — a 4× rune→byte budget is more than enough for
 	// CJK / emoji to round-trip through SanitizeForLog without truncation.
 	label = osutil.SanitizeForLog(label, MaxCronTitleLen*4)
+	// R250-SEC-6 (#1095): the cronNoticePrefixFmt template is "[Cron %s] %s",
+	// so a `]` byte inside the label silently terminates the bracket prefix
+	// from an IM renderer's view. Markdown-aware channels (Slack / Discord
+	// / Feishu rich-card extensions) would let a Title like
+	// `evil](evil-link) [Cron real` collapse the prefix into a clickable
+	// link target. validateCronTitle blocks bidi / C0 controls but ASCII
+	// `]` slips through. Belt-and-braces: replace `]` with the full-width
+	// closing bracket U+FF3D, visually similar but never bracket-matched
+	// by markdown parsers. Prefix invariant `[Cron <label>]` is preserved
+	// because we substitute inside label, never at the template `]`.
+	label = strings.ReplaceAll(label, "]", "］")
 	return fmt.Sprintf(cronNoticePrefixFmt, label, body)
 }
 
@@ -724,14 +736,25 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		s.mu.RLock()
 		schedStr := j.Schedule
 		entryID := j.entryID
+		cachedPeriod := j.cachedPeriod
 		var parsedSched robfigcron.Schedule
-		if entryID != 0 {
+		if entryID != 0 && cachedPeriod <= 0 {
+			// R242-PERF-2 (#664): only fetch the parsed Schedule for the live
+			// computation when the cache is cold. registerJob populates
+			// cachedPeriod alongside entryID, so production runs hit the
+			// pre-computed branch and skip both the s.cron.Entry RLock-friendly
+			// lookup and the 2× sched.Next that schedulePeriodFromSched runs.
 			parsedSched = s.cron.Entry(entryID).Schedule
 		}
 		s.mu.RUnlock()
-		if parsedSched != nil {
+		switch {
+		case cachedPeriod > 0:
+			// R242-PERF-2 (#664): hot path — period was cached at registerJob
+			// time, no per-tick parsing or sched.Next needed.
+			jitterSleep(s.stopCtx, cachedPeriod, s.jitterMax)
+		case parsedSched != nil:
 			applyJitterSched(s.stopCtx, parsedSched, s.jitterMax)
-		} else {
+		default:
 			applyJitter(s.stopCtx, schedStr, s.jitterMax)
 		}
 

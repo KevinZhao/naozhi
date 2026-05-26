@@ -336,6 +336,20 @@ func (h *Hub) DroppedMessages() int64 {
 	return h.droppedTotal.Load()
 }
 
+// LegacySendInvokes returns the total number of times sessionSend fell
+// through to the deprecated sessionSendLegacy path. Production Hubs wire a
+// real MessageQueue and never increment this counter; tests/headless tools
+// that omit Queue do. R-LEGACY-SEND (#710) uses this counter to drive the
+// migration to one delivery contract — once every test fixture wires a
+// MessageQueue stub the counter stays at zero and sessionSendLegacy can
+// be deleted alongside its sole caller branch in send.go.
+func (h *Hub) LegacySendInvokes() int64 {
+	if h == nil {
+		return 0
+	}
+	return h.legacySendInvokes.Load()
+}
+
 // daemonRunStartedMsg / daemonRunEndedMsg are the WS payloads for
 // docs/rfc/system-session.md §9.4.  Crucially we do NOT carry an
 // ErrorMsg field — error messages from the daemon's Runner subprocess

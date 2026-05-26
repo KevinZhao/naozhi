@@ -1063,6 +1063,21 @@ var stopBudget = defaultStopBudget
 // wrapper MUST also be migrated to a ctx-aware pattern (e.g. trimAll
 // observing stopCtx) so successive lifecycles do not accumulate stuck
 // filesystem-IO goroutines until OOM. R247-GO-7.
+//
+// THIRD intentional-orphan site (R250-GO-9 / #1072): runDeadlineWatchdog
+// in scheduler_run.go spawns a goroutine that parks on the run's sendCtx
+// outside the triggerWG accounting. On the success path the caller's
+// sendCancel() unblocks <-ctx.Done() and the goroutine returns; on the
+// stuck-Send path (CLI ignoring ctx, shim hanging) the watchdog stays
+// parked until Send eventually returns or the OS reclaims it. The
+// goroutine holds only the abortCh send (buffer=1, so the send itself
+// does not block) — no triggerWG.Add is held, so Stop()'s budget never
+// waits on it. Acceptable on the same single-shot-Scheduler grounds as
+// triggerWG / gcWG, with one extra leak source operators should know
+// exists when reading "deadline fired but interrupt did not land"
+// post-Stop log lines. If a future reuse path is added the watchdog
+// MUST also be migrated under triggerWG so its lifetime is bounded by
+// the same stopBudget the Send-spawning code is.
 func (s *Scheduler) Stop() {
 	// R20260526-GO-007: idempotent CAS guard. Without this, repeat calls
 	// re-enter the timer-allocating + persist branches below — wasting

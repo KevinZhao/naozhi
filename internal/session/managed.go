@@ -1075,22 +1075,48 @@ func (o InterruptOutcome) String() string {
 // Transport failures are logged at Warn here (rather than silently returned)
 // so operators do not need every caller to plumb their own error log; the
 // outcome return value still lets callers tune their user-facing text.
+//
+// Callers that need to inspect the underlying error (e.g. to errors.Is
+// against a specific transport sentinel for triage) should call
+// InterruptViaControlDetail instead — see R249-GO-18 (#916).
 func (s *ManagedSession) InterruptViaControl() InterruptOutcome {
+	outcome, _ := s.InterruptViaControlDetail()
+	return outcome
+}
+
+// InterruptViaControlDetail mirrors InterruptViaControl but additionally
+// returns the underlying error so callers can errors.Is against transport
+// sentinels (e.g. distinguish a write-broken socket from a generic protocol
+// error). Returned error semantics:
+//
+//   - InterruptSent       → nil
+//   - InterruptNoSession  → nil (no live process to fail against)
+//   - InterruptNoTurn     → cli.ErrNoActiveTurn
+//   - InterruptUnsupported → cli.ErrInterruptUnsupported
+//   - InterruptError      → the wrapped transport error (non-nil)
+//
+// R249-GO-18 (#916): pre-fix, InterruptError was opaque so cron / dispatch
+// could not distinguish "shim socket dead, retry useless" from "stdin
+// write returned EAGAIN, retry safe". Adding the err return lets each
+// caller errors.Is on specific sentinels without breaking the existing
+// outcome-only callers (those keep using InterruptViaControl, which now
+// delegates to this method).
+func (s *ManagedSession) InterruptViaControlDetail() (InterruptOutcome, error) {
 	proc := s.loadProcess()
 	if proc == nil || !proc.Alive() {
-		return InterruptNoSession
+		return InterruptNoSession, nil
 	}
 	err := proc.InterruptViaControl()
 	if err == nil {
-		return InterruptSent
+		return InterruptSent, nil
 	}
 	switch {
 	case errors.Is(err, cli.ErrNoActiveTurn):
-		return InterruptNoTurn
+		return InterruptNoTurn, err
 	case errors.Is(err, cli.ErrInterruptUnsupported):
 		// Caller decides whether to fall back; do not escalate to SIGINT
 		// silently because that would couple two different semantics.
-		return InterruptUnsupported
+		return InterruptUnsupported, err
 	default:
 		// Transport / write error. Process.InterruptViaControl has already
 		// rolled back the settle flags, so the next Send() will not spin
@@ -1098,7 +1124,7 @@ func (s *ManagedSession) InterruptViaControl() InterruptOutcome {
 		// is visible even to callers that treat non-Sent as "fall back".
 		slog.Warn("session interrupt via control_request failed",
 			"key", s.key, "err", err)
-		return InterruptError
+		return InterruptError, err
 	}
 }
 

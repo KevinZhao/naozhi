@@ -357,8 +357,20 @@ func (p *Persister) SinkFor(key string) PersistSink {
 		default:
 			p.droppedCnt.Add(int64(len(entries)))
 			p.opts.Observer.OnDrop(len(entries))
+			// R250-ARCH-23 (#1184): include channel_used so operators
+			// can distinguish "writer goroutine wedged with N pending
+			// jobs" from "instantaneous burst overrun". Without this
+			// signal the drop log line tells you which key got starved
+			// but not how saturated the queue was at the moment the
+			// drop fired — the single most useful piece of context for
+			// diagnosing whether the writer is making progress at all.
+			// Full per-key fairness (drop additional batches from the
+			// same chatty key first) needs a per-key counter map and
+			// is a follow-up; the observable signal here unblocks
+			// operator triage today.
 			slog.Warn("event log persist: channel full; dropping batch",
 				"key", key, "count", len(entries),
+				"channel_used", len(p.in),
 				"channel_cap", cap(p.in))
 		}
 	}
@@ -1126,6 +1138,16 @@ func (w *perKeyWriter) flush(p *Persister) error {
 			w.pendingIdx = make([]schema.IdxEntry, 0, p.opts.IdxStride*2)
 		} else {
 			w.pendingIdx = w.pendingIdx[:0]
+		}
+		// R250-PERF-17 (#1120): apply the same shrink rule to idxScratch.
+		// selectForIdx keeps `kept` pointing at the per-writer scratch
+		// (assigned to w.idxScratch above when stride > 1), so an
+		// InjectHistory burst inflates this slice's cap symmetrically with
+		// pendingIdx; without this reset, 100+ active writers would each
+		// pin a multi-KB scratch slice for the writer's lifetime even
+		// after returning to steady-state batch sizes.
+		if p.opts.IdxStride > 1 && cap(w.idxScratch) > p.opts.IdxStride*4 {
+			w.idxScratch = make([]schema.IdxEntry, 0, p.opts.IdxStride*2)
 		}
 	}
 	// Skip the fsync entirely when this flush did not append any idx

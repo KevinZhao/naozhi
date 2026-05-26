@@ -481,6 +481,15 @@ func (s *runStore) Append(run *CronRun) {
 		slog.Warn("cron run: marshal failed", "job_id", run.JobID, "run_id", run.RunID, "err", err)
 		return
 	}
+	// summarySrc points at the CronRun whose summary we will push into the
+	// recentCache. By default the original *run; the over-cap retry path
+	// (#1079 / R250-GO-16) rebinds it to &shrunk so the cache row stays in
+	// lockstep with the on-disk truncated record. Without this, a rare
+	// over-cap run would persist a shrunk JSON file but cache the
+	// untruncated summary — `Recent` would return cached oversized
+	// LastError/Result strings until the next process restart re-warmed
+	// the cache from disk.
+	summarySrc := run
 	if int64(len(data)) > s.maxRunBytes {
 		slog.Warn("cron run: payload exceeds size cap; truncating result/prompt and retrying",
 			"job_id", run.JobID, "run_id", run.RunID, "bytes", len(data), "cap", s.maxRunBytes)
@@ -492,6 +501,10 @@ func (s *runStore) Append(run *CronRun) {
 		shrunk.ErrorMsg = truncateWithSuffix(shrunk.ErrorMsg, maxRetryFieldRunes)
 		if data2, err2 := marshalRunPooled(&shrunk); err2 == nil && int64(len(data2)) <= s.maxRunBytes {
 			data = data2
+			// #1079: keep the cache push consistent with disk — the
+			// truncated record is what landed on disk, so the summary
+			// must reflect those truncated fields.
+			summarySrc = &shrunk
 		} else {
 			// R246-CR-250: previously this branch swallowed the failure
 			// silently — operators had no signal that a run record was
@@ -521,7 +534,9 @@ func (s *runStore) Append(run *CronRun) {
 	// Append + Recent see consistent newest-first order. Cache may not
 	// yet be warm for this jobID — that's fine: cacheHeadPush is a no-op
 	// then, and the next Recent call will lazy-warm via warmCache.
-	s.cacheHeadPush(run.JobID, run.summary())
+	// #1079: summarySrc points at the truncated copy on the over-cap retry
+	// path so the cache row matches the on-disk truncated bytes.
+	s.cacheHeadPush(run.JobID, summarySrc.summary())
 	if s.enableTrimGC && !s.skipAppendTrim(run.JobID) {
 		s.trimJobLocked(run.JobID, time.Now())
 	}

@@ -153,7 +153,16 @@ type Hub struct {
 	// field rather than at /health so the granularity decision survives
 	// a /health rewrite.
 	droppedTotal atomic.Int64
-	clients      map[*wsClient]struct{}
+	// legacySendInvokes counts how many times sessionSend fell through to
+	// sessionSendLegacy (the deprecated pre-MessageQueue branch documented
+	// in send.go). The counter unblocks R-LEGACY-SEND (#710) by giving
+	// operators and CI a numeric handle on test fixtures still missing a
+	// real MessageQueue: a green steady-state production deployment must
+	// observe this counter at zero, while migrations land one fixture at a
+	// time and watch the counter monotonically drop towards zero in tests.
+	// Lock-free atomic so the hot send path stays uncontested.
+	legacySendInvokes atomic.Int64
+	clients           map[*wsClient]struct{}
 	// subscriberCount tracks per-key subscriber count for the
 	// maxSubscribersPerKey cap (R246-PERF-4 / #716). Without this, the
 	// cap check in handleSubscribe scanned every connected client × every
@@ -524,18 +533,38 @@ func (h *Hub) register(c *wsClient) {
 }
 
 func (h *Hub) unregister(c *wsClient) {
+	// R249-PERF-23 (#938): the per-key unsub closures (eventLog.Unsubscribe,
+	// scheduler.Unsubscribe, …) each acquire their own mutex; calling them
+	// inside h.mu serialised every disconnect with len(c.subscriptions)
+	// closure invocations, which on heavy-tab clients (50 subs) added
+	// 10-50µs of lock-hold per disconnect. Snapshot the closures while
+	// holding h.mu (the map mutation must be atomic with decSubscriberCount-
+	// Locked), then release h.mu before invoking them.
+	//
+	// Lock-order: the surviving h.mu critical section only mutates h.clients
+	// + h.subscriberCount. The post-lock closures take their own mutexes;
+	// none of those mutexes is acquired anywhere with h.mu held in the
+	// reverse direction (see Hub.Shutdown's documented invariant), so
+	// releasing h.mu before invoking unsub is safe.
 	h.mu.Lock()
 	removed := false
+	var unsubs []func()
 	if _, ok := h.clients[c]; ok {
 		delete(h.clients, c)
-		for key, unsub := range c.subscriptions {
-			unsub()
-			h.decSubscriberCountLocked(key)
+		if n := len(c.subscriptions); n > 0 {
+			unsubs = make([]func(), 0, n)
+			for key, unsub := range c.subscriptions {
+				unsubs = append(unsubs, unsub)
+				h.decSubscriberCountLocked(key)
+			}
 		}
 		c.subscriptions = nil
 		removed = true
 	}
 	h.mu.Unlock()
+	for _, unsub := range unsubs {
+		unsub()
+	}
 	if removed {
 		// Release the connCount slot reserved at upgrade time. Guarded on
 		// `removed` so a double-unregister (stale close path) cannot leak
@@ -557,12 +586,21 @@ func (h *Hub) unregister(c *wsClient) {
 	// empty map to skip a per-disconnect `[]node.Conn{}` allocation. Mobile
 	// clients that reconnect frequently made this visible in heap profiles.
 	// R46-PERF-UNREGISTER-NODES-ALLOC.
+	//
+	// R249-PERF-6 (#927): for multi-node deployments the snapshot slice is
+	// reused across disconnects via unregisterNodesPool so the steady-state
+	// reconnect path drops the per-disconnect `make([]node.Conn, 0, n)`
+	// allocation visible in heap profiles.
 	h.nodesMu.RLock()
 	if len(h.nodes) == 0 {
 		h.nodesMu.RUnlock()
 		return
 	}
-	nodes := make([]node.Conn, 0, len(h.nodes))
+	nodesPtr := unregisterNodesPool.Get().(*[]node.Conn)
+	nodes := (*nodesPtr)[:0]
+	if cap(nodes) < len(h.nodes) {
+		nodes = make([]node.Conn, 0, len(h.nodes))
+	}
 	for _, conn := range h.nodes {
 		nodes = append(nodes, conn)
 	}
@@ -571,6 +609,26 @@ func (h *Hub) unregister(c *wsClient) {
 	for _, conn := range nodes {
 		conn.RemoveClient(c)
 	}
+	// Clear pointer references before returning to the pool so disconnected
+	// node.Conn instances stay GC-eligible. Reset length to zero so the next
+	// borrower sees an empty slice.
+	for i := range nodes {
+		nodes[i] = nil
+	}
+	*nodesPtr = nodes[:0]
+	unregisterNodesPool.Put(nodesPtr)
+}
+
+// unregisterNodesPool reuses the []node.Conn snapshot slice that
+// Hub.unregister builds while holding nodesMu so the multi-node disconnect
+// path drops one heap allocation per disconnect. The pool stores pointers
+// rather than slices directly so Pool.Put avoids the *[]T → []T copy that
+// makes go vet's "Put argument allocates" warning fire. R249-PERF-6 (#927).
+var unregisterNodesPool = sync.Pool{
+	New: func() any {
+		s := make([]node.Conn, 0, 4)
+		return &s
+	},
 }
 
 // maxWSConns caps simultaneous WebSocket upgrades. Exposed here so the

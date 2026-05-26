@@ -1103,6 +1103,18 @@ func (s *Scheduler) registerJob(j *Job) error {
 		return fmt.Errorf("register cron: %w", err)
 	}
 	j.entryID = entryID
+	// R242-PERF-2 (#664): cache the schedule period now so the per-tick
+	// applyJitterSched fast-path can read it instead of running 2× sched.Next
+	// on every fire. Period only depends on Schedule; UpdateJob's Schedule
+	// branch (line ~627) calls registerJob again after Remove, so the cache
+	// stays in lockstep with the live entry. Zero on parse failure leaves
+	// callers on the existing fallback (jitterSleep with period<=0 uses the
+	// full jitterMax window).
+	if sched := s.cron.Entry(entryID).Schedule; sched != nil {
+		j.cachedPeriod = schedulePeriodFromSched(sched, time.Now())
+	} else {
+		j.cachedPeriod = 0
+	}
 	return nil
 }
 

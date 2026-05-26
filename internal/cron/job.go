@@ -140,6 +140,16 @@ type Job struct {
 	RunCounters JobRunCounters `json:"run_counters,omitempty"`
 
 	entryID robfigcron.EntryID // runtime only, not persisted
+
+	// cachedPeriod is the precomputed schedule period (Next-Next delta), populated
+	// once per registerJob alongside entryID. The hot jitter path (#664 / R242-PERF-2)
+	// previously called schedulePeriodFromSched(sched, time.Now()) on every cron tick,
+	// running 2× sched.Next per jittered job per fire. Period only changes when
+	// Schedule mutates (UpdateJob path re-registers and recomputes); cache it on
+	// the Job to skip the per-tick recompute. Zero = unknown / not yet registered;
+	// callers fall back to the live computation in that case so test fixtures
+	// (which never call registerJob) keep working.
+	cachedPeriod time.Duration // runtime only, not persisted
 }
 
 // RunState 是单次 cron 执行的终态分类。运行中态不进 RunState（用 runInflight
