@@ -159,6 +159,12 @@ func putJSONEnc(e *jsonEncBuf) {
 // CLIENT-SIDE CONTRACT documented on writeJSON applies to any string field
 // carried over a marshalPooled-encoded message: clients MUST render strings
 // via textContent (or DOMPurify) and never assign them to innerHTML.
+//
+// R238-SEC-5 (#821): if a future consumer renders a marshalPooled-encoded
+// payload via innerHTML (without DOMPurify), the unescaped `<`/`>`/`&`
+// preserved here become an XSS escalation. Such call sites MUST switch to
+// marshalEscaped instead — the contract is JSON-API-only; HTML-template render
+// paths require the escaped variant.
 func marshalPooled(v any) ([]byte, error) {
 	e := getJSONEnc()
 	defer putJSONEnc(e)
@@ -166,6 +172,40 @@ func marshalPooled(v any) ([]byte, error) {
 		return nil, err
 	}
 	raw := e.buf.Bytes()
+	if n := len(raw); n > 0 && raw[n-1] == '\n' {
+		raw = raw[:n-1]
+	}
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	return out, nil
+}
+
+// marshalEscaped is the HTML-safe counterpart to marshalPooled. R238-SEC-5
+// (#821) called out that the SetEscapeHTML(false) baked into jsonEncPool is
+// only safe under the writeJSON CLIENT-SIDE CONTRACT (no innerHTML without
+// DOMPurify); callers who cannot guarantee that contract — e.g. payloads that
+// are spliced into HTML templates, embedded inside <script type="application/
+// json">, or rendered via innerHTML on any non-DOMPurify path — MUST encode
+// via this helper instead.
+//
+// Implementation note: this is intentionally a fresh json.Encoder per call
+// (not a separate sync.Pool). The expected call sites for marshalEscaped are
+// rare, off-hot-path, and already paying for HTML-template rendering; pooling
+// an additional encoder type would invite the same future-mutation hazard
+// (TestSetEscapeHTMLFalse_ScopedToWriteJSONHelper documents) without measurable
+// payoff. If a future hot path needs the escaped form, introduce a second
+// pool with its own contract test rather than reusing jsonEncPool.
+func marshalEscaped(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	// SetEscapeHTML(true) is the json package default; we set it explicitly so
+	// readers of this site see the escape contract without chasing stdlib
+	// defaults, and so that a future stdlib change cannot silently invert it.
+	enc.SetEscapeHTML(true)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	raw := buf.Bytes()
 	if n := len(raw); n > 0 && raw[n-1] == '\n' {
 		raw = raw[:n-1]
 	}

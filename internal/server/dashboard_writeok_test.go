@@ -130,6 +130,44 @@ func TestJSONEncPool_HTMLEscapingDisabled(t *testing.T) {
 	check("marshalPooled body", string(raw))
 }
 
+// TestMarshalEscaped_HTMLEscapingEnabled pins R238-SEC-5 (#821): marshalEscaped
+// is the HTML-safe counterpart to marshalPooled. Future call sites that splice
+// JSON into HTML templates / innerHTML-without-DOMPurify paths MUST use this
+// helper, and a regression that flipped its escape bit would silently re-open
+// the XSS escalation that motivated providing the helper. We assert the
+// JSON-`\uXXXX` form for `<`/`>`/`&` is in the wire and the literal bytes are
+// absent — the inverse of TestJSONEncPool_HTMLEscapingDisabled.
+func TestMarshalEscaped_HTMLEscapingEnabled(t *testing.T) {
+	probe := map[string]string{
+		"v": "<a href=\"x\">&</a>",
+	}
+	raw, err := marshalEscaped(probe)
+	if err != nil {
+		t.Fatalf("marshalEscaped: %v", err)
+	}
+	body := string(raw)
+
+	// Escaped forms must appear.
+	escLT := string([]byte{'\\', 'u', '0', '0', '3', 'c'})
+	escGT := string([]byte{'\\', 'u', '0', '0', '3', 'e'})
+	escAmp := string([]byte{'\\', 'u', '0', '0', '2', '6'})
+	for _, esc := range []string{escLT, escGT, escAmp} {
+		if !strings.Contains(body, esc) {
+			t.Errorf("marshalEscaped body missing escape %q (HTML escaping unexpectedly disabled?): %q", esc, body)
+		}
+	}
+	// Raw `<` / `>` chars must NOT appear (the `&` literal can leak via
+	// the JSON quoting of the surrounding `"` so we only check `<` / `>`
+	// for unescaped presence — the escape forms above are the load-bearing
+	// assertion). Asserting `<`/`>` literals are absent is the inverse of
+	// TestJSONEncPool_HTMLEscapingDisabled and pins the bit.
+	for _, lit := range []string{"<", ">"} {
+		if strings.Contains(body, lit) {
+			t.Errorf("marshalEscaped body contains raw %q — SetEscapeHTML(true) regressed: %q", lit, body)
+		}
+	}
+}
+
 // TestSetEscapeHTMLFalse_ScopedToWriteJSONHelper pins R245-SEC-13 (#842):
 // inside internal/server, the SetEscapeHTML(false) call site is a JSON-API
 // contract that must live exclusively next to writeJSON / writeJSONStatus /
