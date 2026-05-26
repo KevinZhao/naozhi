@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -41,41 +42,50 @@ func loadJobs(path string) (map[string]*Job, error) {
 	if path == "" {
 		return nil, nil
 	}
-	// R236-SEC-01 (CWE-59): refuse to follow a symlink at the cron store
-	// path. A local attacker who can write the data dir could otherwise
-	// replace cron_jobs.json with a symlink to a sensitive file (whose
-	// contents would be parsed and any parse failure would rename the
-	// linked file out of place via the corrupt-rename branch). os.Lstat
-	// inspects the link itself rather than the target.
-	if fi, lerr := os.Lstat(path); lerr != nil {
-		// R246-SEC-12: previously we logged non-NotExist Lstat errors
-		// (EPERM, EACCES, ELOOP, …) and fell through to os.Open. That
-		// defeated the symlink check entirely — a local attacker who can
-		// arrange for Lstat to fail (e.g. by removing search permission on
-		// an ancestor directory but keeping it on the file via a different
-		// path) could still get os.Open to traverse a symlink. Treat any
-		// non-NotExist lstat failure as a hard error: the file exists in
-		// some form and we cannot prove it is not a symlink. ErrNotExist
-		// remains the "no file = empty jobs" path.
-		if !errors.Is(lerr, fs.ErrNotExist) {
-			slog.Warn("cron: lstat store path failed; refusing to load",
-				"path", path, "err", lerr)
-			return nil, fmt.Errorf("cron: lstat %s: %w", path, lerr)
-		}
-	} else if fi.Mode()&os.ModeSymlink != 0 {
-		slog.Warn("cron store path is a symlink; refusing to follow", "path", path)
-		return nil, fmt.Errorf("cron store path is a symlink, refusing to follow")
-	}
-	f, err := os.Open(path)
+	// R236-SEC-01 (CWE-59) + R238-SEC-8 (#829): refuse to follow a symlink
+	// at the cron store path. A local attacker who can write the data dir
+	// could otherwise replace cron_jobs.json with a symlink to a sensitive
+	// file (whose contents would be parsed and any parse failure would
+	// rename the linked file out of place via the corrupt-rename branch).
+	//
+	// Earlier code did `os.Lstat → os.Open`, which left a TOCTOU window:
+	// an attacker who lost the race once could simply rename the file
+	// to a symlink between the two syscalls. The fix is to use
+	// O_NOFOLLOW on the open itself: the kernel guarantees the open
+	// either returns ELOOP (symlink at the final component) or yields
+	// an fd to the real file, with no intervening window.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
+		}
+		// O_NOFOLLOW returns ELOOP when the final component is a symlink;
+		// surface that as the same "refusing to follow" hard error the
+		// pre-fix Lstat path emitted, so operators see a consistent
+		// message. Other errors (EPERM, EACCES, …) propagate as before.
+		if errors.Is(err, syscall.ELOOP) {
+			slog.Warn("cron store path is a symlink; refusing to follow", "path", path)
+			return nil, fmt.Errorf("cron store path is a symlink, refusing to follow")
 		}
 		// Drop path from wrapped error; keep full path in log for operator.
 		slog.Warn("open cron store failed", "path", path, "err", err)
 		return nil, fmt.Errorf("open cron store: %w", err)
 	}
 	defer f.Close()
+	// Belt-and-suspenders: even with O_NOFOLLOW, defensively confirm the
+	// opened fd is a regular file via Fstat. A future kernel quirk or a
+	// caller passing a path resolving to /dev/* would otherwise be
+	// readable. Fstat operates on the fd, eliminating any residual
+	// race with the path namespace.
+	if fi, ferr := f.Stat(); ferr != nil {
+		slog.Warn("cron: fstat store fd failed; refusing to load",
+			"path", path, "err", ferr)
+		return nil, fmt.Errorf("cron: fstat %s: %w", path, ferr)
+	} else if !fi.Mode().IsRegular() {
+		slog.Warn("cron store path is not a regular file; refusing to load",
+			"path", path, "mode", fi.Mode())
+		return nil, fmt.Errorf("cron store path is not a regular file")
+	}
 	data, err := io.ReadAll(io.LimitReader(f, maxCronStoreBytes+1))
 	if err != nil {
 		slog.Warn("read cron store failed", "path", path, "err", err)
