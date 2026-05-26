@@ -327,6 +327,13 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 		// limiting how much prompt content can leak into log
 		// aggregators.  ErrorMsg in the breaker log line is still
 		// sanitized (only "exit status N").
+		// R238-GO-12 (#804): also fold a sanitized stderr head into the
+		// returned error so the dashboard breaker's last_error field has
+		// a meaningful diagnostic instead of just "exit status N".
+		// Pre-compute once here and use the same head for both the slog
+		// Warn and the error wrap below — keeps the cap rationale single-
+		// sourced and avoids re-sanitizing.
+		var stderrHead string
 		if stderr.Len() > 0 {
 			// SanitizeForLog handles both byte-level truncation and
 			// rune-boundary safety, so a multi-byte CJK character at the
@@ -338,10 +345,14 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 			// 超过 maxLen 时触发；slow-path strings.Map 把非法 rune 替换
 			// 为 '_'（1 字节），mapped 长度 ≤ 输入长度，于是 walk-back
 			// 不会跑，最终输出残留 mid-rune 字节。
-			head := osutil.SanitizeForLog(stderr.String(), 256)
+			stderrHead = osutil.SanitizeForLog(stderr.String(), 256)
 			slog.Warn("sysession: runner stderr",
 				"binary", filepath.Base(r.cfg.BinPath),
-				"stderr_head", head)
+				"stderr_head", stderrHead)
+		}
+		if stderrHead != "" {
+			return "", fmt.Errorf("sysession: %s -p failed: %w (stderr: %s)",
+				filepath.Base(r.cfg.BinPath), err, stderrHead)
 		}
 		return "", fmt.Errorf("sysession: %s -p failed: %w",
 			filepath.Base(r.cfg.BinPath), err)

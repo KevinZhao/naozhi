@@ -1,6 +1,7 @@
 package sysession
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -104,6 +105,44 @@ type failingWriter struct {
 func (f *failingWriter) Write(p []byte) (int, error) {
 	f.calls++
 	return 0, errors.New("inner-writer dead")
+}
+
+// TestRunner_Run_AppendsStderrToError pins R238-GO-12 (#804): when the
+// underlying binary exits non-zero AND emits stderr, the returned error
+// MUST embed a sanitized head of that stderr so the dashboard breaker's
+// last_error field carries a meaningful diagnostic. Previously stderr
+// only reached the slog Warn output and operators saw "exit status 1"
+// in the breaker UI.
+func TestRunner_Run_AppendsStderrToError(t *testing.T) {
+	t.Parallel()
+	// Build a shell-script BinPath that emits a known stderr marker and
+	// exits non-zero. Avoids depending on a real claude binary.
+	dir := t.TempDir()
+	work := filepath.Join(dir, "work")
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		t.Fatalf("mkdir work: %v", err)
+	}
+	bin := filepath.Join(dir, "fake-claude")
+	script := "#!/bin/sh\necho 'NAOZHI_TEST_STDERR_MARKER_42' 1>&2\nexit 7\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write bin: %v", err)
+	}
+
+	r, err := NewRunner(RunnerConfig{BinPath: bin, WorkDir: work})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	_, err = r.Run(context.Background(), "ignored prompt")
+	if err == nil {
+		t.Fatal("Run on exit-7 binary should error")
+	}
+	if !strings.Contains(err.Error(), "NAOZHI_TEST_STDERR_MARKER_42") {
+		t.Errorf("error must embed sanitized stderr head; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "stderr:") {
+		t.Errorf("error must label the stderr section; got: %v", err)
+	}
 }
 
 // TestLimitedWriter_StopsCallingFailedInnerWriter pins R238-GO-5 (#794):
