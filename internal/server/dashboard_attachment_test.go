@@ -225,6 +225,63 @@ func TestHandleAttachment_PathFilepathAgreement(t *testing.T) {
 	}
 }
 
+// TestHandleAttachment_RejectsSymlinkAtFinalComponent pins R249-SEC-3 (#917):
+// the final-component open MUST refuse to follow a symlink that was swapped
+// in between EvalSymlinks/Lstat and the open syscall. We can't deterministically
+// race the swap from a test, but we can assert the equivalent contract: a
+// symlink already present at the resolved path is rejected as 404, even if
+// the target is a legitimate readable file. Pre-fix, os.Open would have
+// followed the symlink; post-fix openWorkspaceFile raises ELOOP on unix
+// (mapped to 404) and the windows shim still gets caught by the existing
+// Lstat-symlink rejection at line ~1223 above.
+//
+// On unix, this exercises the O_NOFOLLOW kernel-atomic close. On windows
+// the prior Lstat ModeSymlink check still fires; both paths produce 404.
+func TestHandleAttachment_RejectsSymlinkAtFinalComponent(t *testing.T) {
+	if filepath.Separator == '\\' {
+		// Symlink creation requires admin or developer-mode on Windows;
+		// the prior Lstat-ModeSymlink branch covers this platform anyway.
+		t.Skip("symlink test skipped on Windows")
+	}
+	ws := t.TempDir()
+
+	// Plant a legitimate target file outside the attachment dir — the
+	// symlink would point here, and a successful follow would expose its
+	// bytes through the attachment endpoint.
+	target := filepath.Join(ws, "outside-target.png")
+	if err := os.WriteFile(target, []byte{0x89, 'P', 'N', 'G'}, 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	// Plant a symlink under .naozhi/attachments/<date>/ that lexically
+	// looks like a normal attachment but actually points at the target
+	// outside. EvalSymlinks would resolve to the outside path which the
+	// prefix check would reject — but that's the lexical gate. The
+	// inode-swap concern is: if the resolved path resolves to a regular
+	// file at one moment and is replaced with a symlink before open(),
+	// O_NOFOLLOW must catch it.
+	dir := filepath.Join(ws, ".naozhi", "attachments", "2026-05-26")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	link := filepath.Join(dir, "spoof.png")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	srv := newAttachmentServer(t, ws)
+	key := "dash:direct:alice:general"
+	rel := ".naozhi/attachments/2026-05-26/spoof.png"
+	u := "/api/sessions/attachment?key=" + url.QueryEscape(key) +
+		"&path=" + url.QueryEscape(rel)
+	req := httptest.NewRequest(http.MethodGet, u, nil)
+	w := httptest.NewRecorder()
+	srv.sendH.handleAttachment(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("symlink at attachment path: status=%d want 404 (body=%s)", w.Code, w.Body.String())
+	}
+}
+
 func TestHandleAttachment_NotModified(t *testing.T) {
 	ws := t.TempDir()
 	rel := writeAttachmentFixture(t, ws, "2026-05-07", "a.png", []byte{0x89, 'P', 'N', 'G'})

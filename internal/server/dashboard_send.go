@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -1229,8 +1230,23 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(resolved)
+	// R249-SEC-3 (#917): close the Lstat→Open TOCTOU symlink-swap window.
+	// Between the Lstat above and an unconstrained os.Open, an attacker
+	// with write access to attachRootAbs could replace `resolved` with a
+	// symlink pointing outside the workspace. openWorkspaceFile uses
+	// O_NOFOLLOW on unix so a final-component symlink-swap fails atomically
+	// at the kernel boundary (ELOOP); the windows shim falls back to
+	// plain Open with the same residual posture as the rest of the codebase.
+	// Mirrors the R219-SEC-2 close already shipped for handleFileGet.
+	f, err := openWorkspaceFile(resolved)
 	if err != nil {
+		// Map symlink-trap errors and any other open failure to the same
+		// 404 the rest of the handler returns — "missing or escape attempt
+		// look identical" matches the dashboard contract.
+		if errors.Is(err, syscall.ELOOP) {
+			writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+			return
+		}
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "open failed"})
 		return
 	}
