@@ -1023,42 +1023,11 @@ type toolInputProbe struct {
 	Query    string `json:"query,omitempty"`
 }
 
-// maxSummariseToolInputBytes caps how many bytes of a tool_use input
-// blob summariseToolInput will hand to json.Unmarshal. R242-SEC-13
-// (#645): the function's only job is to extract a one-line label, so
-// even if a malformed transcript line carries a megabyte-sized
-// tool_use.input we must not pay parser CPU + allocation cost
-// proportional to the full blob. The upstream maxToolInputBytes
-// (64 KB) already bounds the wire response surfaced to the dashboard,
-// but summariseToolInput is invoked BEFORE that truncation in some
-// code paths; a hard cap inside the helper keeps the parser-amplifier
-// closed regardless of caller. 32 KB is well above the largest
-// legitimate tool_use input we have observed (Bash command + cwd +
-// timeout flags fit in <2 KB) while still keeping the per-call
-// json.Unmarshal cost bounded.
-const maxSummariseToolInputBytes = 32 * 1024
-
 // summariseToolInput builds a one-line label for the tool_use card
 // header. Best-effort: Bash → command, Read/Write/Edit → file_path,
 // otherwise fall back to a JSON-trimmed dump of the input.
-//
-// R242-SEC-13 (#645): the input blob is capped at
-// maxSummariseToolInputBytes BEFORE json.Unmarshal. A pathological
-// transcript line carrying a multi-megabyte tool_use.input would
-// otherwise drive Unmarshal to allocate proportional memory just to
-// extract a 200-byte label. The truncation is byte-wise; if the cut
-// lands mid-token Unmarshal returns an error and the function
-// short-circuits to "" — same code path as a corrupt JSON body, so no
-// new failure mode for callers.
 func summariseToolInput(name string, input json.RawMessage) string {
 	if len(input) == 0 {
-		return ""
-	}
-	if len(input) > maxSummariseToolInputBytes {
-		// Don't even attempt to decode — a multi-MB blob is either
-		// corrupt or attacker-influenced; the parser allocations are
-		// the cost we are trying to avoid. The caller falls back to
-		// rendering "" in the card header which the dashboard handles.
 		return ""
 	}
 	var probe toolInputProbe
