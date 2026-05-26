@@ -450,12 +450,12 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 		return nil, fmt.Errorf("protocol init: %w", err)
 	}
 	if sessionID != "" {
-		proc.SessionID = sessionID
+		proc.sessionID = sessionID
 	}
 
 	// If shim already captured session_id from init event during startup
-	if handle.Hello.SessionID != "" && proc.SessionID == "" {
-		proc.SessionID = handle.Hello.SessionID
+	if handle.Hello.SessionID != "" && proc.sessionID == "" {
+		proc.sessionID = handle.Hello.SessionID
 	}
 
 	proc.startReadLoop()
@@ -513,7 +513,7 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	proc.InitLinker("")
 
 	if handle.Hello.SessionID != "" {
-		proc.SessionID = handle.Hello.SessionID
+		proc.sessionID = handle.Hello.SessionID
 	}
 
 	proc.startReadLoop()
@@ -525,7 +525,7 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	// calling Send() on this reattached process.
 	if isMidTurn(replays, proto) {
 		proc.mu.Lock()
-		proc.State = StateRunning
+		proc.state = StateRunning
 		proc.mu.Unlock()
 		proc.reconnectedMidTurn.Store(true)
 	}

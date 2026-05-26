@@ -17,7 +17,7 @@ import (
 // where a future refactor flips mu back to sync.Mutex.
 func TestProcess_ReadsUnderRLock_AllowConcurrency(t *testing.T) {
 	t.Parallel()
-	p := &Process{State: StateRunning, SessionID: "sess"}
+	p := &Process{state: StateRunning, sessionID: "sess"}
 
 	// Grab and hold an RLock in a helper goroutine so the readers below can
 	// only make progress if they also go through RLock (shared mode). If any

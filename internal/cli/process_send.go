@@ -120,17 +120,17 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 // callback fires from, so no events are lost.
 func (p *Process) Send(ctx context.Context, text string, images []ImageData, onEvent EventCallback) (*SendResult, error) {
 	p.mu.Lock()
-	if p.State == StateRunning {
+	if p.state == StateRunning {
 		p.mu.Unlock()
-		return nil, fmt.Errorf("process busy (state=%s): %w", p.State, ErrProcessBusy)
+		return nil, fmt.Errorf("process busy (state=%s): %w", p.state, ErrProcessBusy)
 	}
-	p.State = StateRunning
+	p.state = StateRunning
 	p.mu.Unlock()
 
 	defer func() {
 		p.mu.Lock()
-		if p.State == StateRunning {
-			p.State = StateReady
+		if p.state == StateRunning {
+			p.state = StateReady
 		}
 		p.mu.Unlock()
 	}()
@@ -225,8 +225,8 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 			// logEvent (called by readLoop) already skips init events.
 			if ev.Type == "system" && ev.SubType == "init" {
 				p.mu.Lock()
-				if p.SessionID == "" {
-					p.SessionID = ev.SessionID
+				if p.sessionID == "" {
+					p.sessionID = ev.SessionID
 				}
 				p.mu.Unlock()
 				// UI Round 5 R5-3: claude advertises the resolved model
@@ -258,8 +258,8 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 			// Result means this turn is done
 			if ev.Type == "result" {
 				p.mu.Lock()
-				if p.SessionID == "" {
-					p.SessionID = ev.SessionID
+				if p.sessionID == "" {
+					p.sessionID = ev.SessionID
 				}
 				p.mu.Unlock()
 				return &SendResult{
@@ -361,7 +361,7 @@ func (p *Process) Interrupt() {
 	// drainStaleEvents would then skip the settle wait and the interrupted
 	// result event from the in-flight turn would leak into the next turn.
 	p.mu.Lock()
-	state := p.State
+	state := p.state
 	p.interrupted.Store(true)
 	if state == StateRunning {
 		p.interruptedRun.Store(true)
@@ -410,7 +410,7 @@ func (p *Process) InterruptViaControl() error {
 	// Send() flipping State to Running after our read cannot race us into
 	// "wrote control_request but skipped the settle flags".
 	p.mu.Lock()
-	state := p.State
+	state := p.state
 	if state == StateRunning {
 		p.interrupted.Store(true)
 		p.interruptedRun.Store(true)
