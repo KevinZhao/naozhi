@@ -614,8 +614,46 @@ func sortByLastActive(indices []int, candidates []scanCandidate) {
 // calls this function, and a cross-package equivalence test pins the two
 // call sites together so a future change to Claude's scheme cannot be
 // applied to only one side (RNEW-002).
+//
+// R241-SEC-4 (#465): control bytes (< 0x20) in cwd are rejected by
+// stripping them before the '/' → '-' substitution. Hand-edited
+// persisted state (cron_jobs.json, sessions-index.json) can carry
+// embedded \t / \n / \r values that would otherwise leak into the
+// resulting filesystem path component, where downstream Stat/Open
+// calls produce confusingly-quoted error messages or — worse — succeed
+// on an attacker-prepared dir whose name happens to share the encoded
+// prefix. The encoding is lossy by design; an operator who legitimately
+// runs CWD with a literal newline in the path is not on the supported
+// matrix.
 func ClaudeProjectSlug(cwd string) string {
+	if hasControlByte(cwd) {
+		cwd = stripControlBytes(cwd)
+	}
 	return strings.ReplaceAll(cwd, "/", "-")
+}
+
+// hasControlByte returns true when s contains any byte < 0x20. Single
+// pass with no allocation when the string is clean (the common case).
+func hasControlByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 {
+			return true
+		}
+	}
+	return false
+}
+
+// stripControlBytes returns s with every byte < 0x20 removed. Allocates
+// only when called — hasControlByte gates this so the typical cwd
+// string never pays the copy.
+func stripControlBytes(s string) string {
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x20 {
+			b = append(b, s[i])
+		}
+	}
+	return string(b)
 }
 
 // projDirName is the package-internal alias retained for call-site brevity.
