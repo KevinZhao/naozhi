@@ -804,13 +804,19 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 		}
 		toolCalls++
 		summary := sanitizeWireText(summariseToolInput(b.Name, b.Input))
+		// R243-CR-P2-4: json.RawMessage with `omitempty` does not omit a
+		// literal `null`; the encoder treats len>0 as "non-empty". Guard
+		// explicitly so the wire shape matches operator expectations.
 		// R234-SEC-8: cap the raw Input JSON we surface. summary is built
 		// from a probe-Unmarshal of the original bytes (still bounded by
 		// the per-line maxTranscriptLineBytes), so the dashboard timeline
 		// keeps its one-line label even when Input itself is replaced
 		// with the [truncated] placeholder.
 		input := b.Input
-		if len(input) > maxToolInputBytes {
+		switch {
+		case len(input) == 0 || string(input) == "null":
+			input = nil
+		case len(input) > maxToolInputBytes:
 			input = truncatedToolInputPlaceholder
 		}
 		out = append(out, transcriptTurn{

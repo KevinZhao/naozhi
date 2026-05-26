@@ -853,7 +853,7 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 			// here so the assertJobLockHeld guard inside doesn't fire.
 			lock := s.jobLock("job")
 			lock.Lock()
-			got := s.skipAppendTrim("job")
+			got := s.skipAppendTrim("job", time.Now())
 			lock.Unlock()
 			if got != tc.wantSkip {
 				t.Errorf("skipAppendTrim = %v, want %v", got, tc.wantSkip)
@@ -875,7 +875,7 @@ func TestRunStore_SkipAppendTrim_MissingEntry(t *testing.T) {
 	lock := s.jobLock("never-seen")
 	lock.Lock()
 	defer lock.Unlock()
-	if s.skipAppendTrim("never-seen") {
+	if s.skipAppendTrim("never-seen", time.Now()) {
 		t.Error("expected false for unknown jobID")
 	}
 }

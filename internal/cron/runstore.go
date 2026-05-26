@@ -413,6 +413,12 @@ func (s *runStore) Append(run *CronRun) {
 		slog.Warn("cron run: skipping append with non-hex job_id", "job_id", run.JobID)
 		return
 	}
+	// R245-PERF-13: capture wall-clock once before lock acquire and reuse
+	// for both the skipAppendTrim window check and the trimJobLocked
+	// cutoff. Prior code called time.Now() up to twice while holding
+	// jobLock; vdso reads are cheap but multiplying them under a hot lock
+	// adds avoidable contention.
+	now := time.Now()
 	lock := s.jobLock(run.JobID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -468,8 +474,8 @@ func (s *runStore) Append(run *CronRun) {
 	// yet be warm for this jobID — that's fine: cacheHeadPush is a no-op
 	// then, and the next Recent call will lazy-warm via warmCache.
 	s.cacheHeadPush(run.JobID, run.summary())
-	if s.enableTrimGC && !s.skipAppendTrim(run.JobID) {
-		s.trimJobLocked(run.JobID, time.Now())
+	if s.enableTrimGC && !s.skipAppendTrim(run.JobID, now) {
+		s.trimJobLocked(run.JobID, now)
 	}
 }
 
@@ -493,7 +499,7 @@ func (s *runStore) Append(run *CronRun) {
 // against a fresh Append's WriteFileAtomic. Today the sole caller is
 // Append (runstore.go:252) which acquires jobLock at line 213; any future
 // helper must do the same. R239-GO-5.
-func (s *runStore) skipAppendTrim(jobID string) bool {
+func (s *runStore) skipAppendTrim(jobID string, now time.Time) bool {
 	// Race-detector friendly contract assertion: panics when jobLock is
 	// currently free, the unambiguous signature of a caller that forgot to
 	// lock. False negatives accepted (another goroutine may hold the lock
@@ -532,7 +538,7 @@ func (s *runStore) skipAppendTrim(jobID string) bool {
 		if ts.IsZero() {
 			ts = oldest.StartedAt
 		}
-		cutoff := time.Now().Add(-s.keepWindow)
+		cutoff := now.Add(-s.keepWindow)
 		if !ts.After(cutoff) {
 			entry.appendsSinceTrim = 0
 			return false
