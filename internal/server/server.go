@@ -444,6 +444,16 @@ type ServerOptions struct {
 	// profile, then flip it back. R244-SEC-P3-1 [REPEAT-3].
 	DebugMode bool
 
+	// PublicTmpEnabled opts the __public_tmp__ pseudo-project in (R237-SEC-5,
+	// #646). When false (default) requests for that pseudo-project fall
+	// through to the regular "project not found" surface — closes the
+	// "any authed dashboard user can read /tmp" gap on multi-user
+	// deployments. Single-operator dashboards (the typical naozhi use)
+	// flip it on via `server.public_tmp_enabled: true` in config.yaml so
+	// chat-mentioned /tmp/... paths still resolve without first
+	// registering /tmp as a real project.
+	PublicTmpEnabled bool
+
 	// === Core dependencies (previously positional args of New) ===
 	//
 	// These fields were originally positional parameters on New(); they

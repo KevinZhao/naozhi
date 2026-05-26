@@ -497,8 +497,8 @@ func (p *Process) onSystemInit() {
 	p.slotsMu.Unlock()
 
 	p.mu.Lock()
-	if p.State == StateReady || p.State == StateSpawning {
-		p.State = StateRunning
+	if p.state == StateReady || p.state == StateSpawning {
+		p.state = StateRunning
 	}
 	p.mu.Unlock()
 }
@@ -532,8 +532,8 @@ func (p *Process) onTurnResult() []*sendSlot {
 	// handler below in readLoop.
 	if len(owners) > 0 && pendingLeft == 0 {
 		p.mu.Lock()
-		if p.State == StateRunning {
-			p.State = StateReady
+		if p.state == StateRunning {
+			p.state = StateReady
 		}
 		p.mu.Unlock()
 	}

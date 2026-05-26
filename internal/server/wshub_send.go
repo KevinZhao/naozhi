@@ -10,6 +10,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -241,7 +242,16 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 		defer cancel()
 		interrupted, err := nc.ProxyInterruptSession(ctx, capturedKey)
 		if err != nil {
-			slog.Error("remote ws interrupt failed", "node", nodeID, "key", capturedKey, "err", err)
+			// R217-CR-5 (#641): mirror the upstream connector_rpc.go
+			// LogSystemEvent path which routes err.Error() through
+			// osutil.SanitizeForLog before surfacing it. The error
+			// originates from the remote / transport stack so it can
+			// carry C1 controls / bidi / LS+PS that byte-level `<0x20`
+			// gates miss; without the sanitiser an authenticated client
+			// who controls a compromised peer node could inject log
+			// lines into the primary's slog sink. 512 B matches the cap
+			// used by upstream/connector_rpc.go.
+			slog.Error("remote ws interrupt failed", "node", nodeID, "key", capturedKey, "err", osutil.SanitizeForLog(err.Error(), 512))
 			errMsg := "remote interrupt failed"
 			if isUnknownRPCMethodErr(err) {
 				// Explicit hint so the dashboard toast tells the operator
@@ -362,7 +372,13 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
 		defer cancel()
 		if err := nc.Send(ctx, capturedKey, msg.Text, msg.Workspace); err != nil {
-			slog.Error("remote ws send failed", "node", nodeID, "key", capturedKey, "err", err)
+			// R217-CR-5 (#641): symmetric sanitisation with the interrupt
+			// path above and the upstream connector_rpc.go LogSystemEvent
+			// site. err originates from the remote transport so it may
+			// carry control bytes / bidi overrides; route through
+			// osutil.SanitizeForLog to keep journald + dashboard tail
+			// rendering safe.
+			slog.Error("remote ws send failed", "node", nodeID, "key", capturedKey, "err", osutil.SanitizeForLog(err.Error(), 512))
 			// Do not surface the raw err: transport-level messages can leak
 			// internal host/port/auth details back to authenticated browser
 			// clients. Operators still see the detail in the slog above.

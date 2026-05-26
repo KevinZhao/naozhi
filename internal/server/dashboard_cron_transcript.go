@@ -203,6 +203,21 @@ type transcriptTokens struct {
 // (omitted via json:"omitempty"). Index reflects this turn's position in
 // the *response*, not the original JSONL line — the dashboard uses it
 // for stable React-style keys when diffing live updates.
+//
+// CLIENT-SIDE CONTRACT (R249-SEC-8 / #921): the Input field is forwarded
+// as raw JSON bytes from the CLI's tool_use payload. writeJSON disables
+// SetEscapeHTML (see dashboard.go writeJSON R71-SEC-L1 godoc), so any
+// `<`, `>`, `&` literals embedded in the original tool input survive
+// onto the wire verbatim. Today's dashboard.js renders Input via
+// JSON.stringify + esc() before assembling DOM, which is safe; a future
+// debug viewer that injects Input directly via innerHTML — without
+// DOMPurify — would immediately become a stored-XSS sink because tool
+// input is attacker-influenced (a malicious project file can steer the
+// CLI's tool calls). When introducing a new consumer of this field,
+// mirror the existing Text / Output sanitizeWireText pattern or route
+// the bytes through DOMPurify before any innerHTML assignment. The
+// upstream maxToolInputBytes cap + truncatedToolInputPlaceholder
+// substitution keep Input bounded but do not normalise its byte set.
 type transcriptTurn struct {
 	Index      int             `json:"index"`
 	Kind       string          `json:"kind"` // "user" | "assistant" | "tool_use" | "tool_result" | "error"
@@ -212,7 +227,7 @@ type transcriptTurn struct {
 	Tool       string          `json:"tool,omitempty"`        // tool_use
 	ToolUseID  string          `json:"tool_use_id,omitempty"` // tool_use / tool_result link
 	Summary    string          `json:"summary,omitempty"`     // tool_use one-liner derived from input
-	Input      json.RawMessage `json:"input,omitempty"`       // tool_use raw input (object)
+	Input      json.RawMessage `json:"input,omitempty"`       // tool_use raw input (object) — see CLIENT-SIDE CONTRACT godoc
 	Output     string          `json:"output,omitempty"`      // tool_result content
 	Status     string          `json:"status,omitempty"`      // tool_result: "ok" | "error"
 	DurationMS int64           `json:"duration_ms,omitempty"` // tool_result duration if available
