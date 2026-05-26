@@ -113,4 +113,19 @@ func TestSanitizeStderrLine_TableDriven(t *testing.T) {
 			t.Errorf("truncation tore a rune: body=%q", body)
 		}
 	})
+
+	// Pool reuse safety: the slow path now pulls strings.Builder from a
+	// sync.Pool (#1015 R235-PERF-10). Repeatedly calling the slow path with
+	// distinct inputs must produce independent results — i.e. the pooled
+	// builder must be reset between calls and b.String() must capture a
+	// stable copy that survives the next call's overwrite.
+	t.Run("pool_reuse_independent_results", func(t *testing.T) {
+		first := sanitizeStderrLine("\x1b[31malpha\x1b[0m")
+		second := sanitizeStderrLine("\x1b[31mbeta\x1b[0m")
+		third := sanitizeStderrLine("\x1b[31mgamma\x1b[0m")
+		if first != "alpha" || second != "beta" || third != "gamma" {
+			t.Errorf("pooled builder leaked state: got %q / %q / %q",
+				first, second, third)
+		}
+	})
 }

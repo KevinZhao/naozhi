@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -38,6 +39,18 @@ var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 const (
 	memoryLimiterRate  = 10
 	memoryLimiterBurst = 20
+
+	// maxMemoryFileBytes caps the size of a single memory .md read. Auto-memory
+	// slugs are normally small (front-matter + a few KB of narrative); a
+	// pathological case (multi-MB hand-written notes, or a stray binary
+	// dropped under projects/<proj>/memory/) would otherwise be slurped into
+	// RAM, JSON-marshalled, and re-shipped on every hover preview, amplifying
+	// cost N times per dashboard tab. 256 KB covers any realistic memory file
+	// and keeps peak alloc bounded. Files larger than the cap are truncated
+	// at the cap and the response carries Truncated:true so the client can
+	// show "(展开为大文件,内容已截断)" instead of silently losing the tail.
+	// R240-SEC-11 / #1044.
+	maxMemoryFileBytes = 256 * 1024
 )
 
 var errMemoryPathEscape = errors.New("path escapes projects dir")
@@ -102,6 +115,10 @@ type memoryResponse struct {
 	Description string `json:"description,omitempty"`
 	Type        string `json:"type,omitempty"`
 	Body        string `json:"body,omitempty"`
+	// Truncated signals that the source file exceeded maxMemoryFileBytes
+	// and Body holds only the prefix. Client may surface a "(已截断)" hint.
+	// R240-SEC-11 / #1044.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 func (h *MemoryHandler) handleGet(w http.ResponseWriter, r *http.Request) {
@@ -206,7 +223,12 @@ func (h *MemoryHandler) tryRead(projectDir, slug string) (*memoryResponse, error
 		return nil, nil
 	}
 
-	raw, err := os.ReadFile(resolved)
+	// R240-SEC-11 / #1044: cap memory file reads at maxMemoryFileBytes so a
+	// pathological multi-MB file cannot be slurped+JSON-marshalled+re-shipped
+	// on every hover. Use os.Open + io.ReadAll on a LimitedReader (cap+1) so
+	// we can distinguish "exactly at cap" (legitimate boundary) from "exceeded
+	// cap" (truncation). Non-existent files match the prior ReadFile path.
+	raw, truncated, err := readCappedMemoryFile(resolved, int64(maxMemoryFileBytes))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -221,8 +243,34 @@ func (h *MemoryHandler) tryRead(projectDir, slug string) (*memoryResponse, error
 		Description: meta.description,
 		Type:        meta.typ,
 		Body:        body,
+		Truncated:   truncated,
 	}
 	return resp, nil
+}
+
+// readCappedMemoryFile reads up to capBytes bytes from path. If the
+// underlying file is larger than capBytes, returns the first capBytes bytes
+// plus truncated=true; otherwise returns the full content with
+// truncated=false. Errors (including os.ErrNotExist) propagate unchanged so
+// the caller's existing branches keep working.
+func readCappedMemoryFile(path string, capBytes int64) ([]byte, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	// Read capBytes+1 to detect overflow without a separate Stat — Stat may
+	// race with the read on a live FS (file growing/shrinking) and an extra
+	// syscall is wasteful for the common small-file path.
+	lr := &io.LimitedReader{R: f, N: capBytes + 1}
+	raw, err := io.ReadAll(lr)
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(raw)) > capBytes {
+		return raw[:capBytes], true, nil
+	}
+	return raw, false, nil
 }
 
 type memoryFrontmatter struct {

@@ -590,3 +590,63 @@ func TestSameFileAncestor(t *testing.T) {
 		t.Errorf("missing root must return false rather than panic")
 	}
 }
+
+// TestTranscript_TruncateReason_LineTooLong covers R240-SEC-8 / #1049: a
+// JSONL line that exceeds maxTranscriptLineBytes must surface
+// truncate_reason="line_too_long", distinct from a generic IO error or a
+// size-cap hit. Forensics rely on this discrimination.
+func TestTranscript_TruncateReason_LineTooLong(t *testing.T) {
+	t.Parallel()
+	// Build a single assistant line whose JSON-encoded size > maxTranscriptLineBytes.
+	// We pad the assistant's text content with a single huge string so the
+	// resulting JSONL line is well over the per-line cap.
+	now := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
+	pad := strings.Repeat("x", maxTranscriptLineBytes+8*1024)
+	bigLine := `{"type":"assistant","timestamp":"` + now + `","message":{"role":"assistant","content":[{"type":"text","text":"` + pad + `"}],"usage":{"input_tokens":1,"output_tokens":1}}}`
+	h, jobID, runID, _ := fixtureRunWithJSONL(t, []string{bigLine})
+
+	w := callTranscript(h, jobID, runID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp transcriptResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	if !resp.Truncated {
+		t.Fatalf("truncated should be true (line exceeded maxTranscriptLineBytes)")
+	}
+	if resp.TruncateReason != "line_too_long" {
+		t.Errorf("truncate_reason = %q, want %q", resp.TruncateReason, "line_too_long")
+	}
+}
+
+// TestTranscript_TruncateReason_SizeCap covers the size_cap branch of
+// R240-SEC-8 / #1049: hitting maxTranscriptTurns must surface
+// truncate_reason="size_cap", not "line_too_long" or "scan_io_error".
+func TestTranscript_TruncateReason_SizeCap(t *testing.T) {
+	t.Parallel()
+	// maxTranscriptTurns=500 ; emit 510 user turns, all within the time
+	// window. The handler should stop at the cap and report size_cap.
+	now := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
+	lines := make([]string, 0, maxTranscriptTurns+10)
+	for i := 0; i < maxTranscriptTurns+10; i++ {
+		lines = append(lines, `{"type":"user","timestamp":"`+now+`","message":{"role":"user","content":"hi"}}`)
+	}
+	h, jobID, runID, _ := fixtureRunWithJSONL(t, lines)
+
+	w := callTranscript(h, jobID, runID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var resp transcriptResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	if !resp.Truncated {
+		t.Fatalf("truncated should be true (turns >= cap)")
+	}
+	if resp.TruncateReason != "size_cap" {
+		t.Errorf("truncate_reason = %q, want %q", resp.TruncateReason, "size_cap")
+	}
+}

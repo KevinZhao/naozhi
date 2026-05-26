@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -617,6 +618,36 @@ func TestRedactPathsInCronError(t *testing.T) {
 				t.Errorf("redactPathsInCronError(%q)\n  got  = %q\n  want = %q", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRedactPathsInCronError_PoolRecycle pins #872 / R245-PERF-17: the
+// strings.Builder pool added in this fix must NOT poison the next call
+// with residual bytes from the previous call. Drive two consecutive
+// redactions and verify each returns the expected output independently.
+func TestRedactPathsInCronError_PoolRecycle(t *testing.T) {
+	t.Parallel()
+	got1 := redactPathsInCronError("workspace /home/u/proj: permission denied")
+	got2 := redactPathsInCronError("error opening /tmp/scratch: timeout")
+	got3 := redactPathsInCronError("session error: context canceled") // fast-path, bypasses pool
+
+	if got1 != "workspace <path>: permission denied" {
+		t.Errorf("got1 = %q", got1)
+	}
+	if got2 != "error opening <path>: timeout" {
+		t.Errorf("got2 = %q", got2)
+	}
+	if got3 != "session error: context canceled" {
+		t.Errorf("got3 = %q (fast-path should bypass pool)", got3)
+	}
+
+	// Drive a ~1KB input to exercise the oversize-drop branch (Cap below
+	// pool max, so the pool keeps it; this is just a smoke test that the
+	// large slow-path doesn't truncate or alias prior buffer content).
+	long := "open /a/" + strings.Repeat("x", 800) + ": denied"
+	gotLong := redactPathsInCronError(long)
+	if !strings.HasPrefix(gotLong, "open <path>: denied") {
+		t.Errorf("long path not redacted: got %q", gotLong)
 	}
 }
 

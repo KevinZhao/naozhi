@@ -425,11 +425,21 @@ func (p *Process) transitionToDead() {
 // the long readLoop body.
 func readShimLine(r *bufio.Reader, lineBuf []byte) (line []byte, capExceeded bool, readErr error) {
 	line = lineBuf[:0]
+	// chunkTerminated tracks whether the cap-exceeding chunk already contained
+	// the message terminator ('\n'). When true, the next call starts cleanly
+	// at the next message boundary and we MUST NOT drain — draining would
+	// consume the following message. R234-PERF-13 (#1014).
+	chunkTerminated := false
 	for {
 		chunk, err := r.ReadSlice('\n')
 		if len(chunk) > 0 {
 			if len(line)+len(chunk) > maxScannerBufBytes {
 				capExceeded = true
+				// ReadSlice returns nil error iff chunk ended on '\n'; that
+				// chunk IS the message terminator, so the bufio reader is
+				// already positioned at the next message and the drain
+				// loop below would erroneously eat it.
+				chunkTerminated = err == nil
 				break
 			}
 			line = append(line, chunk...)
@@ -444,16 +454,20 @@ func readShimLine(r *bufio.Reader, lineBuf []byte) (line []byte, capExceeded boo
 		return line, false, readErr
 	}
 	// capExceeded path: drain the rest of the overlong line so the next call
-	// doesn't read its tail as a separate message. ReadSlice returns nil on
-	// '\n' delimiter; ErrBufferFull means buffer filled with no newline.
-	for {
-		_, err := r.ReadSlice('\n')
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, bufio.ErrBufferFull) {
-			readErr = err
-			break
+	// doesn't read its tail as a separate message. Skip when the cap-exceeding
+	// chunk already terminated the line (see chunkTerminated above).
+	// ReadSlice returns nil on '\n' delimiter; ErrBufferFull means buffer
+	// filled with no newline.
+	if !chunkTerminated {
+		for {
+			_, err := r.ReadSlice('\n')
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, bufio.ErrBufferFull) {
+				readErr = err
+				break
+			}
 		}
 	}
 	return line, true, readErr

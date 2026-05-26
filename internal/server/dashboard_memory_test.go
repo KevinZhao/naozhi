@@ -355,3 +355,53 @@ func errorsIs(err, target error) bool {
 	}
 	return false
 }
+
+// TestMemoryHandler_OversizeFileTruncated covers R240-SEC-11 / #1044: a
+// memory file larger than maxMemoryFileBytes must be capped at the limit
+// and the response must carry truncated=true so the client can hint the
+// user instead of silently losing the tail.
+func TestMemoryHandler_OversizeFileTruncated(t *testing.T) {
+	dir := t.TempDir()
+	// Build content well beyond the cap so we positively cross the limit
+	// even after frontmatter parsing strips a header (none here — plain
+	// body only). 2× cap is enough to detect any off-by-one.
+	big := strings.Repeat("a", maxMemoryFileBytes*2)
+	writeMemoryFile(t, dir, "-cur", "huge_memory", big)
+	h := memoryTestHandler(t, dir, "-cur")
+
+	w, resp, _ := callMemoryHandler(t, h, "huge_memory")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	if !resp.Found {
+		t.Fatalf("resp.Found = false, want true")
+	}
+	if !resp.Truncated {
+		t.Errorf("resp.Truncated = false, want true for >cap file")
+	}
+	// Body holds the cap-capped prefix (no frontmatter on this fixture, so
+	// body == raw[:cap]).
+	if got, want := len(resp.Body), maxMemoryFileBytes; got != want {
+		t.Errorf("len(Body) = %d, want %d (cap)", got, want)
+	}
+}
+
+// TestMemoryHandler_AtCapNotTruncated guards the boundary: a file exactly
+// at maxMemoryFileBytes must NOT be flagged truncated.
+func TestMemoryHandler_AtCapNotTruncated(t *testing.T) {
+	dir := t.TempDir()
+	exact := strings.Repeat("b", maxMemoryFileBytes)
+	writeMemoryFile(t, dir, "-cur", "boundary_mem", exact)
+	h := memoryTestHandler(t, dir, "-cur")
+
+	_, resp, _ := callMemoryHandler(t, h, "boundary_mem")
+	if !resp.Found {
+		t.Fatalf("resp.Found = false")
+	}
+	if resp.Truncated {
+		t.Errorf("file exactly at cap must NOT be truncated, got Truncated=true")
+	}
+	if got := len(resp.Body); got != maxMemoryFileBytes {
+		t.Errorf("len(Body) = %d, want %d", got, maxMemoryFileBytes)
+	}
+}
