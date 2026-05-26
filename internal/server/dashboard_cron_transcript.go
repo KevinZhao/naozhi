@@ -100,6 +100,55 @@ const (
 // literal here) so the wire shape stays consistent for dashboard JS.
 var truncatedToolInputPlaceholder = json.RawMessage(`"[truncated]"`)
 
+// transcriptScanInflight bounds concurrent transcript-scan handlers globally
+// across the process. R243-SEC-12 (#798): each in-flight call holds a 256 KB
+// bufio.Scanner buffer plus a 32 KB output-aggregation slice plus the decoded
+// transcriptResponse — call it ~512 KB resident per request once the scanner
+// fully fills. Without a cap, N concurrent operators × M browser tabs each
+// hammering /api/cron/runs/.../transcript can push hundreds of MB of resident
+// scanner state through a server that's otherwise designed for a single
+// operator.
+//
+// runsLimiter (per-IP rate) bounds *frequency* per source — but concurrent
+// in-flight memory is orthogonal: a single IP firing 64 parallel fetch()
+// calls fits under any sane rate-limit budget yet still pins half a GB of
+// live scanner buffers until the writes drain. Cap the parallel scans to a
+// small number (16) chosen so:
+//
+//	16 × ~512KB ≈ 8MB worst-case resident scanner state, well below the
+//	naozhi single-binary memory budget even on the smallest deployments.
+//
+// Channel-based semaphore (buffered channel of size 16) is preferred over
+// golang.org/x/sync/semaphore.Weighted because (a) we don't need a context
+// timeout — handlers should fail fast rather than queue, and (b) it adds
+// zero new dependencies to the package.
+//
+// On full bucket: reply with 503 Service Unavailable + Retry-After: 1 so the
+// dashboard's fetch wrapper backs off gracefully. Status 503 (not 429) keeps
+// the per-IP rate-limit signal distinguishable from the cross-IP
+// concurrency-cap signal so operators can tell which gate fired.
+const transcriptScanInflightCap = 16
+
+var transcriptScanInflight = make(chan struct{}, transcriptScanInflightCap)
+
+// acquireTranscriptScanSlot returns true and reserves a slot if one is
+// available; returns false immediately when all slots are in use. Callers
+// MUST call releaseTranscriptScanSlot exactly once on the success path.
+func acquireTranscriptScanSlot() bool {
+	select {
+	case transcriptScanInflight <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func releaseTranscriptScanSlot() {
+	// Buffered receive — never blocks because acquire only succeeds on
+	// successful send, so the counter is always ≥ 1 when this is called.
+	<-transcriptScanInflight
+}
+
 // ansiEscRe matches the most common ANSI CSI sequences (color, cursor
 // motion) AND OSC sequences (operating-system commands such as the
 // hyperlink escape `\x1b]8;;url\x1b\\` / BEL-terminated `\x1b]8;;url\x07`).
@@ -220,6 +269,18 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
 		return
 	}
+	// R243-SEC-12 (#798): cap concurrent in-flight transcript scans across
+	// the whole process to bound resident scanner-buffer memory under
+	// multi-operator load. See transcriptScanInflight godoc for the
+	// budget rationale. Distinct from runsLimiter (per-IP rate) so
+	// operators can tell concurrency-cap (503) and rate-limit (429)
+	// signals apart in logs.
+	if !acquireTranscriptScanSlot() {
+		w.Header().Set("Retry-After", "1")
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcript readers busy, retry shortly"})
+		return
+	}
+	defer releaseTranscriptScanSlot()
 	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
