@@ -319,9 +319,9 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// only the former survives `r.RemoteAddr` fallback above.
 	rc := newReverseConnWithMeta(msg.NodeID, displayName, remoteLabel, conn, msg.Capabilities, msg.Hostname)
 	// Bound the register response write so a slow-read attacker can't
-	// park this goroutine indefinitely at the TCP window. newReverseConn
-	// applies 10s per write thereafter; this pre-handoff write needs the
-	// same protection. If SetWriteDeadline fails (conn closed mid-handshake),
+	// park this goroutine indefinitely at the TCP window.
+	// newReverseConnWithMeta applies 10s per write thereafter; this
+	// pre-handoff write needs the same protection. If SetWriteDeadline fails (conn closed mid-handshake),
 	// abort before WriteJSON would block deadline-less on a dead socket.
 	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		rc.Close()
@@ -334,7 +334,7 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// R183-GO-M1: clearing the write deadline can only fail on a broken /
 	// half-closed socket. Silently dropping the error mirrors a bug fixed
 	// symmetrically at line 144/155 for SetReadDeadline (R182-GO-P1-1):
-	// per-write deadline resets in newReverseConn's writePump also fail,
+	// per-write deadline resets in newReverseConnWithMeta's writePump also fail,
 	// and without a deadline, a subsequent WriteJSON on this conn can
 	// block until TCP keepalive expires (minutes). Treat failure as
 	// "connection unusable", tear down, and bail.
