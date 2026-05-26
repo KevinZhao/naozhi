@@ -28,6 +28,16 @@ func (n NotifyTarget) IsSet() bool { return n.Platform != "" && n.ChatID != "" }
 // Distinct from dispatch.platformReplyTimeout (15s) because cron flushes can
 // chunk large outputs across multiple ReplyWithRetry calls under cron.Stop's
 // 30s in-flight budget — see notifyTarget call site for the shutdown contract.
+//
+// R245-GO-9 (#851): the per-target 30s budget does NOT extend Stop()'s
+// wall-clock past systemd TimeoutStopSec. Stop bounds triggerWG.Wait() with
+// stopBudget (default 30s, see scheduler.go ~L978) so a stuck webhook is
+// preempted at the budget boundary even though replyCtx itself is rooted
+// in context.Background(). Tightening this constant to 5s — the original
+// proposal — would risk cutting legitimate large-chunk flushes mid-stream;
+// the stopBudget gate is the actual hazard mitigation, this constant is
+// only the per-target ceiling. Keep both 30s for symmetry; if a future
+// review tightens stopBudget, mirror the change here.
 const cronNotifyTimeout = 30 * time.Second
 
 // resolveNotifyTarget picks the IM destination for this execution's
