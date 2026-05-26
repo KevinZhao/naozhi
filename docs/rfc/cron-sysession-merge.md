@@ -2,7 +2,7 @@
 
 | 字段 | 值 |
 | :--- | :--- |
-| 状态 | Draft v3 (Pending Approval) |
+| 状态 | Implemented v3 (Phase A1/A2/B/D-prep/D-main/E landed; Phase C deferred to follow-up PR) |
 | 作者 | naozhi team |
 | 创建日期 | 2026-05-26 |
 | 修订日期 | 2026-05-26（v3：按 H1-H17 修订；v2：按 F1-F13 + G1-G10 修订） |
@@ -11,6 +11,22 @@
 | 关联 issue | #1166 (runtelemetry) · #1173 (cron→session) · #1164 (dispatch→cron) · #734/#945 (executeOpt) · #1036 (RegisterBroadcaster) · #746 (SchedulerDeps) · #583 (prefix DRY，撤出 RFC) |
 
 ## 0. 修订历史
+
+### v3 (2026-05-26) — implemented except Phase C
+
+Implementation status as of 2026-05-26 evening:
+
+- **A1 runtelemetry**: ✅ landed (commit `f4f3066`) — close #1166
+- **A2 sessionkey**: ✅ landed (commit `7e87699`)
+- **B cron 本地化**: ✅ landed (commit `85cf01f`) — close #1173
+- **D-prep**: ✅ evidence in §3.5.3.1 of this RFC
+- **D-main**: ✅ landed (commit `ff93563`) — close #1036, #746
+- **E dispatch invert**: ✅ landed (commit `48a7492`) — close #1164
+- **C executeOpt 4-helper**: ⏸ deferred — RFC §3.4 + §6 race × 100
+  gate stand; recommend a separate focused PR after Phase A+B
+  cron-cr issue-rate gate (§6) clears
+
+All landed phases passed `go test -race ./internal/cron/... ./internal/server/... ./internal/dispatch/... ./internal/session/...` on first run.
 
 ### v3 (2026-05-26)
 
