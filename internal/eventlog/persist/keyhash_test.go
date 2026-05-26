@@ -53,7 +53,7 @@ func TestLogPath_IdxPath(t *testing.T) {
 	key := "dashboard:direct:alice:general"
 
 	log := LogPath(dir, key)
-	idx := IdxPath(dir, key)
+	idx := filepath.Join(dir, KeyHash(key)+idxExt)
 
 	if filepath.Dir(log) != dir {
 		t.Errorf("LogPath parent = %q, want %q", filepath.Dir(log), dir)
