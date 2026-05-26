@@ -82,17 +82,16 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 	}
 
 	// Per-chat limit to prevent one chat from exhausting global quota.
-	// O(maxJobs) linear scan; acceptable given maxJobsHardCap=500 and
-	// AddJob is called at human cadence (not on the hot path). A
-	// chatID-indexed map would mirror the sessionsByChat optimisation in
-	// the router but is premature given the bound.
-	chatCount := 0
-	for _, existing := range s.jobs {
-		if existing.Platform == j.Platform && existing.ChatID == j.ChatID {
-			chatCount++
-		}
-	}
-	if chatCount >= s.maxJobsPerChat {
+	// R237-PERF-5 (#661): O(1) lookup on s.chatJobCount replaces the prior
+	// O(maxJobs) linear scan. The scan held s.mu across up to 500 *Job
+	// entries on every AddJob — a direct hot-path block on the dashboard
+	// 1Hz add path that also stalled TriggerNow / emitRunStarted callers
+	// contending on the same mutex. The counter is maintained synchronously
+	// in deleteJobLocked / Start so it stays in lock-step with len-by-chat
+	// (s.jobs); s.jobs is still the canonical truth, asserted by
+	// TestChatJobCount_TracksJobsByChat.
+	chatKey := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+	if s.chatJobCount[chatKey] >= s.maxJobsPerChat {
 		return nil, fmt.Errorf("per-chat cron limit reached (%d)", s.maxJobsPerChat)
 	}
 
@@ -139,6 +138,12 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 		}
 	}
 	s.jobs[j.ID] = j
+	// R237-PERF-5 (#661): increment the per-chat counter synchronously
+	// with s.jobs so the next addJobAcquiringLock observes the up-to-date
+	// count without re-scanning. deleteJobLocked is the paired decrement;
+	// the rollback path (s.deleteJobLocked below on persist failure) goes
+	// through that helper so the counter unwinds correctly.
+	s.chatJobCount[chatKey]++
 	save, perr := s.persistJobsLocked()
 	if perr != nil {
 		// R236-GO-10: persist failed *after* registerJob + map insertion.
@@ -262,7 +267,23 @@ func (s *Scheduler) deleteJobLocked(j *Job) {
 	if j.entryID != 0 {
 		s.cron.Remove(j.entryID)
 	}
-	delete(s.jobs, j.ID)
+	if _, present := s.jobs[j.ID]; present {
+		delete(s.jobs, j.ID)
+		// R237-PERF-5 (#661): paired decrement for the addJobAcquiringLock
+		// increment. Guarded by the s.jobs membership check above so a
+		// double-delete (rollback path calling this on a never-inserted
+		// job, or a future caller hitting this twice) cannot drive the
+		// counter negative — divergence from s.jobs would silently disable
+		// the per-chat cap. Drop the entry when count hits zero so the
+		// map's working set tracks the live chat set rather than every
+		// chat that has ever owned a job.
+		key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+		if n := s.chatJobCount[key]; n > 1 {
+			s.chatJobCount[key] = n - 1
+		} else {
+			delete(s.chatJobCount, key)
+		}
+	}
 }
 
 // pauseJobLocked transitions a job to Paused state under s.mu. Returns
