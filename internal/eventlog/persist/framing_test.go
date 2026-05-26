@@ -5,11 +5,35 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/eventlog/schema"
 )
+
+// writeRecordForTest is the marshal+frame convenience used only by tests
+// in this package. Production code uses WriteRecordRaw because record
+// bodies are already marshalled at the call site (rotate copy paths,
+// Persister handleBatch). The wrapper lived in framing.go for years with
+// no production caller, so it now lives next to its tests instead
+// (DEADCODE-13).
+func writeRecordForTest(w io.Writer, r *schema.Record) (int64, error) {
+	body, err := schema.MarshalRecord(r)
+	if err != nil {
+		return 0, err
+	}
+	return WriteRecordRaw(w, body)
+}
+
+// frameSize computes the on-disk length of a framed record given the
+// JSON body length: <decimal-length>\n<body>\n. Used by the framing
+// invariant test to assert that WriteRecordRaw returns the value the
+// idx Len field would predict. Test-only — production never recomputes
+// frame sizes from body length (DEADCODE-13).
+func frameSize(bodyLen int) int {
+	return len(strconv.Itoa(bodyLen)) + 1 + bodyLen + 1
+}
 
 // TestWriteRecord_HappyPath emits a small record and confirms the
 // framing shape (<len>\n<json>\n). The size returned must match the
@@ -20,9 +44,9 @@ func TestWriteRecord_HappyPath(t *testing.T) {
 	var buf bytes.Buffer
 	r := schema.NewHeader("k", 42, "gen")
 
-	n, err := WriteRecord(&buf, r)
+	n, err := writeRecordForTest(&buf, r)
 	if err != nil {
-		t.Fatalf("WriteRecord: %v", err)
+		t.Fatalf("writeRecordForTest: %v", err)
 	}
 	if n != int64(buf.Len()) {
 		t.Errorf("returned n=%d, buffer wrote %d — byte counter would drift",
@@ -53,7 +77,7 @@ func TestWriteRecord_HappyPath(t *testing.T) {
 func TestReadRecord_RoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	want := schema.NewEntry(7, []byte(`{"time":1,"uuid":"aa","type":"user","summary":"hi"}`))
-	if _, err := WriteRecord(&buf, want); err != nil {
+	if _, err := writeRecordForTest(&buf, want); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -75,7 +99,7 @@ func TestReadRecord_MultipleInSequence(t *testing.T) {
 	var buf bytes.Buffer
 	for i := uint64(1); i <= 5; i++ {
 		r := schema.NewEntry(i, []byte(`{"time":1,"uuid":"aa","type":"user"}`))
-		if _, err := WriteRecord(&buf, r); err != nil {
+		if _, err := writeRecordForTest(&buf, r); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
 	}
@@ -212,13 +236,13 @@ func TestFrameSize_MatchesWriteRecord(t *testing.T) {
 		if err != nil {
 			t.Fatalf("write %d bytes: %v", len(body), err)
 		}
-		want := int64(FrameSize(len(body)))
+		want := int64(frameSize(len(body)))
 		if n != want {
-			t.Errorf("bodyLen=%d: WriteRecordRaw returned %d, FrameSize=%d",
+			t.Errorf("bodyLen=%d: WriteRecordRaw returned %d, frameSize=%d",
 				len(body), n, want)
 		}
 		if int64(buf.Len()) != want {
-			t.Errorf("bodyLen=%d: buffer len=%d, FrameSize=%d",
+			t.Errorf("bodyLen=%d: buffer len=%d, frameSize=%d",
 				len(body), buf.Len(), want)
 		}
 	}
