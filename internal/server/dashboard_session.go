@@ -990,7 +990,18 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		// Parallel audit entry with the local-path slog.Info below so an
 		// operator grepping journalctl sees every label change regardless of
 		// which node owns the session. R64-GO-M3.
-		slog.Info("session label updated", "node", req.Node, "key", req.Key, "label_len", len(label))
+		//
+		// R246-SEC-14 (#820): req.Key already passed ValidateSessionKey but
+		// that gate only enforces UTF-8 + C0 stripping; bidi-control runes
+		// (U+202E etc.) and other zero-width / log-injection characters are
+		// not covered. Run through session.SanitizeLogAttr to align with
+		// dispatch/commands.go and dispatch/dispatch.go so a hostile session
+		// key cannot smuggle escape sequences through journalctl. Same for
+		// req.Node which is operator-supplied.
+		slog.Info("session label updated",
+			"node", session.SanitizeLogAttr(req.Node),
+			"key", session.SanitizeLogAttr(req.Key),
+			"label_len", len(label))
 		// Don't echo label — it is attacker-influenced text. Validation already
 		// ensured it is safe in storage, but reflecting user input in an HTTP
 		// body is a latent reflected-XSS vector if any future caller renders
@@ -1005,7 +1016,11 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	slog.Info("session label updated", "node", "local", "key", req.Key, "label_len", len(label))
+	// R246-SEC-14 (#820): same SanitizeLogAttr as the remote-path audit
+	// entry above so journalctl observers cannot be misled by a bidi-rune
+	// session key smuggled through the API. node="local" is a literal so
+	// it does not need wrapping.
+	slog.Info("session label updated", "node", "local", "key", session.SanitizeLogAttr(req.Key), "label_len", len(label))
 	// Don't echo label — reflected-XSS precaution matches the remote-path
 	// above. Client patches its cache from its own optimistic value.
 	writeOK(w)
