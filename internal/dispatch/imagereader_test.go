@@ -10,9 +10,12 @@ import (
 // existing production wiring keeps reading attachment paths off disk
 // without an explicit field. R245-ARCH-33 (#884).
 func TestImageReader_DefaultIsOsImageReader(t *testing.T) {
-	d := NewDispatcher(DispatcherConfig{
+	d, err := NewDispatcher(DispatcherConfig{
 		AllowMissingSender: true,
 	})
+	if err != nil {
+		t.Fatalf("NewDispatcher: %v", err)
+	}
 	if d.imageReader == nil {
 		t.Fatalf("NewDispatcher left d.imageReader nil; default osImageReader{} must be installed")
 	}
@@ -26,10 +29,13 @@ func TestImageReader_DefaultIsOsImageReader(t *testing.T) {
 // read-success / read-failure branches without writing to /tmp.
 func TestImageReader_OverrideHonoured(t *testing.T) {
 	fake := &fakeImageReader{}
-	d := NewDispatcher(DispatcherConfig{
+	d, err := NewDispatcher(DispatcherConfig{
 		AllowMissingSender: true,
 		ImageReader:        fake,
 	})
+	if err != nil {
+		t.Fatalf("NewDispatcher: %v", err)
+	}
 	if d.imageReader != ImageReader(fake) {
 		t.Fatalf("DispatcherConfig.ImageReader override ignored; got %T", d.imageReader)
 	}
