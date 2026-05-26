@@ -526,6 +526,29 @@ type Router struct {
 	// no exposure.
 	excluders atomic.Pointer[[]SessionIDExcluder]
 
+	// pendingExcluders is the R242-ARCH-16 (#760) startup-window gate.
+	// When set (atomic.Bool == true), auto-chain readers SKIP the
+	// chain-attach decision entirely — both the spawn-path
+	// (maybeAttachAutoChainOnSpawn) and the startup backfill
+	// (runAutoChainBackfillOnce). cmd-side wiring is expected to
+	// SetPendingExcluders(true) at the top of router setup, register
+	// every SessionIDExcluder owner (cron Scheduler, sysession Manager,
+	// any future namespace), then SetPendingExcluders(false) to admit
+	// chain decisions. Default zero-value is `false` so callers that
+	// have not opted into the gate (older cmd wiring, tests) keep the
+	// pre-#760 behaviour: auto-chain reads run the moment the policy
+	// is configured.
+	//
+	// Skip-rather-than-block was chosen over a sync.Cond wait so a
+	// misconfigured cmd that forgets the SetPendingExcluders(false)
+	// call surfaces as "auto-chain didn't run" (visible in metrics
+	// and logs) instead of "every spawn deadlocks waiting for an
+	// event that never arrives". The cost of skipping is at most one
+	// startup-window spawn missing its auto-chain attach; cron /
+	// sysession do not register session IDs that early, so the
+	// observable diff is zero in production.
+	pendingExcluders atomic.Bool
+
 	// autoChainListJSONL is the listJSONL function injected into
 	// pickWorkspaceChain. Production wires discovery.ListWorkspaceJSONL;
 	// tests inject a fixture function that returns synthetic
