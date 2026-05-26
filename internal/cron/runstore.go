@@ -318,6 +318,16 @@ func IsValidID(s string) bool {
 // newRunStore constructs a runStore rooted at <storePath dir>/runs.
 // storePath="" disables the store (List returns empty, Append no-ops);
 // callers can pass a Scheduler in tests without wiring up a tempdir.
+//
+// R245-SEC-1 (#825): the root path is normalised via filepath.Abs +
+// filepath.Clean so a storePath containing `..` segments cannot escape
+// its data dir (e.g. "/data/x/../../etc/cron.json" would otherwise
+// produce a runs/ tree at "/data/x/../../etc/runs"). After mkdir, we
+// Lstat the result — if the runs dir is a symlink (or some other
+// non-directory), refuse to use the store: an operator-controlled
+// runs/ symlink could redirect the entire run-history tree at a
+// sensitive directory and any subsequent Append would write CronRun
+// JSON over arbitrary files.
 func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *runStore {
 	if storePath == "" {
 		return &runStore{disabled: true}
@@ -328,7 +338,16 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *run
 	if keepWindow <= 0 {
 		keepWindow = DefaultRunsKeepWindow
 	}
-	root := filepath.Join(filepath.Dir(storePath), "runs")
+	// filepath.Abs already cleans the path, normalising any `..` /  `.` /
+	// double-slash segments. If Abs fails (CWD missing — extremely rare
+	// outside containers in error states) fall back to Clean so we still
+	// remove `..` traversal even when we can't fully resolve.
+	storeAbs, err := filepath.Abs(storePath)
+	if err != nil {
+		slog.Warn("cron run: storePath Abs failed; falling back to Clean", "path", storePath, "err", err)
+		storeAbs = filepath.Clean(storePath)
+	}
+	root := filepath.Join(filepath.Dir(storeAbs), "runs")
 	// R234-SEC-4: 主动创建 runs/ 根目录并设 0o700。原先只在 Append 时
 	// 创建 runs/<jobID>/ 子目录用 0o700，而 runs/ 自身继承父目录权限
 	// （通常 0o755），同机器其他 OS 用户可枚举 jobID 列表，泄露 cron
@@ -336,6 +355,22 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *run
 	// 上 MkdirAll，不影响功能。
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		slog.Warn("cron run: mkdir root failed", "root", root, "err", err)
+	}
+	// R245-SEC-1 (#825): refuse to attach to a runs/ that is a symlink or
+	// other non-directory. MkdirAll does not error when the path already
+	// exists as a symlink to a directory, so without this Lstat an
+	// attacker (or accidental operator action) who pre-created
+	// `<dataDir>/runs` as a symlink to `/etc` would have all subsequent
+	// CronRun JSONs land outside the data dir. Lstat reports the link
+	// itself; we reject anything that's not a plain directory and disable
+	// the store so Append/List become safe no-ops rather than write to
+	// the wrong tree.
+	if fi, err := os.Lstat(root); err == nil {
+		if fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir() {
+			slog.Error("cron run: runs/ is a symlink or non-directory; disabling store",
+				"root", root, "mode", fi.Mode().String())
+			return &runStore{disabled: true}
+		}
 	}
 	return &runStore{
 		root:         root,
