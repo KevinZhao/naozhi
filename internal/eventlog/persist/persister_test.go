@@ -217,7 +217,7 @@ func TestPersister_SeqMonotonic(t *testing.T) {
 	defer cancel()
 	p.Flush(ctx)
 
-	idx, err := ReadAllIdx(IdxPath(dir, "k"))
+	idx, err := ReadAllIdx(filepath.Join(dir, KeyHash("k")+idxExt))
 	if err != nil {
 		t.Fatalf("ReadAllIdx: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestPersister_DropKey_RemovesFiles(t *testing.T) {
 	if _, err := os.Stat(LogPath(dir, "k")); err != nil {
 		t.Fatalf("log missing pre-drop: %v", err)
 	}
-	if _, err := os.Stat(IdxPath(dir, "k")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, KeyHash("k")+idxExt)); err != nil {
 		t.Fatalf("idx missing pre-drop: %v", err)
 	}
 
@@ -258,7 +258,7 @@ func TestPersister_DropKey_RemovesFiles(t *testing.T) {
 	if _, err := os.Stat(LogPath(dir, "k")); !os.IsNotExist(err) {
 		t.Errorf("log still exists after drop: err=%v", err)
 	}
-	if _, err := os.Stat(IdxPath(dir, "k")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, KeyHash("k")+idxExt)); !os.IsNotExist(err) {
 		t.Errorf("idx still exists after drop: err=%v", err)
 	}
 }
