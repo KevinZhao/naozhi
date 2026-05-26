@@ -480,6 +480,14 @@ func formatBytesShort(n int64) string {
 // The CLI (verified against 2.1.126) accepts any top-level uuid/priority on
 // the NDJSON user message and round-trips uuid on the corresponding replay
 // event. Priority "now" is an explicit abort signal (print.ts:1858-1863).
+//
+// DEADCODE-10 (#1203): the legacy `NewUserMessage(text, images)` wrapper
+// (a one-line shim that called this constructor with empty uuid/priority)
+// has been retired — production callers (protocol_claude.go's user-turn
+// path) all use NewUserMessageWithMeta directly so they can plumb uuid +
+// priority. Tests that need the no-meta shape pass empty strings here
+// explicitly, making the "no uuid / no priority" intent obvious at the
+// call site.
 func NewUserMessageWithMeta(text string, atts []Attachment, uuid, priority string) InputMessage {
 	// file_ref attachments do NOT produce a content block — they are surfaced
 	// to Claude via a prepended instruction in the text, so the CLI's native
