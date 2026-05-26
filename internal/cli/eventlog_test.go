@@ -291,6 +291,88 @@ func TestEventLog_Subscribe_ConcurrentSafe(t *testing.T) {
 	wg.Wait()
 }
 
+// TestEventLog_Unsubscribe_SwapToEnd_PreservesOthers pins R239-PERF-9: the
+// migration from `map[*subscriber]struct{}` to `[]*subscriber` swaps the
+// leaving subscriber with the slice tail before truncating. The test
+// unsubscribes a middle entry from a 4-subscriber set and then drives an
+// Append, asserting (a) every surviving channel still fires once,
+// (b) subCount + len(subscribers) shrink by exactly one, and (c) the
+// trailing slot is nil-cleared so the leaving subscriber is not retained
+// by the backing array. A buggy swap that lost a survivor's slot would
+// manifest as a missing notify on chD (the slot promoted into chB's old
+// index); a buggy nil-clear would leak the closed *subscriber, which we
+// observe via the slice's last element after a second unsubscribe.
+func TestEventLog_Unsubscribe_SwapToEnd_PreservesOthers(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+
+	chA, _ := l.Subscribe()
+	_, unsubB := l.Subscribe()
+	chC, _ := l.Subscribe()
+	chD, _ := l.Subscribe()
+
+	// Drain any pre-existing buffered notifies so the per-channel select
+	// below observes only the post-Append signal.
+	drain := func(ch <-chan struct{}) {
+		for {
+			select {
+			case <-ch:
+			default:
+				return
+			}
+		}
+	}
+	drain(chA)
+	drain(chC)
+	drain(chD)
+
+	// Unsubscribe the MIDDLE subscriber. Linear scan + swap-to-end will
+	// move the tail slot (chD's *subscriber) into chB's old index.
+	unsubB()
+
+	if got, want := l.subCount.Load(), int32(3); got != want {
+		t.Fatalf("subCount = %d, want %d", got, want)
+	}
+	l.subMu.RLock()
+	gotLen := len(l.subscribers)
+	// Inspect the slot just past the new length to confirm the
+	// nil-clear ran (R239-PERF-9 retention guard). Reading past
+	// len() into the underlying array is normally undefined for
+	// callers but is well-defined when we hold subMu and the
+	// backing capacity is preserved.
+	var trailingSlotNil bool
+	if cap(l.subscribers) > gotLen {
+		trailingSlotNil = l.subscribers[:gotLen+1][gotLen] == nil
+	} else {
+		// Cap shrunk to length: nothing to verify, treat as pass.
+		trailingSlotNil = true
+	}
+	l.subMu.RUnlock()
+	if gotLen != 3 {
+		t.Fatalf("len(subscribers) = %d, want 3", gotLen)
+	}
+	if !trailingSlotNil {
+		t.Fatalf("trailing slot not nil-cleared after unsubscribe — leaking *subscriber")
+	}
+
+	// Drive a notify and confirm every survivor — including chD,
+	// whose backing-array slot was swapped into chB's vacated index —
+	// receives the signal.
+	l.Append(EventEntry{Time: time.Now().UnixMilli(), Type: "swap_test"})
+
+	check := func(name string, ch <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("%s: missed notify after swap-to-end unsubscribe", name)
+		}
+	}
+	check("chA", chA)
+	check("chC", chC)
+	check("chD (promoted from tail)", chD)
+}
+
 func TestEventLog_DetailAndToolFields(t *testing.T) {
 	t.Parallel()
 	l := NewEventLog(10)
