@@ -100,11 +100,16 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 		return true
 
 	case strings.HasPrefix(trimmed, "/cd "):
-		if d.projectMgr != nil {
-			if proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
-				d.replyText(ctx, msg, fmt.Sprintf("当前已绑定项目 %s，工作目录固定为项目路径。如需切换，请先 /project off 解绑。", proj.Name), log)
-				return true
-			}
+		// R218B-ARCH-2 (#648): route project read through resolver so the
+		// /cd guard sees the same project snapshot the IM hot path's key
+		// derivation used. Pre-fix, dispatch.projectMgr was a parallel
+		// info source that could disagree with the resolver under a
+		// concurrent /project bind/unbind. Resolver is always non-nil
+		// after NewDispatcher; ProjectBindingForChat returns Bound=false
+		// when project feature is disabled or chat unbound.
+		if b := d.resolver.ProjectBindingForChat(msg.Platform, msg.ChatType, msg.ChatID); b.Bound {
+			d.replyText(ctx, msg, fmt.Sprintf("当前已绑定项目 %s，工作目录固定为项目路径。如需切换，请先 /project off 解绑。", b.Name), log)
+			return true
 		}
 		d.handleCdCommand(ctx, msg, trimmed, log)
 		return true
@@ -256,28 +261,31 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 	// "general", a bound chat yields a planner key (prefixed "project:"),
 	// unbound yields an IM key. The project name is recovered from the
 	// router-side metadata (slog attr) not re-fetched here.
-	if d.projectMgr != nil {
-		if proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
-			if agentToReset == "" {
-				plannerKey := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, "general")
-				d.router.Reset(plannerKey)
-				d.discardQueue(plannerKey)
-				d.replyText(ctx, msg, "项目 "+proj.Name+" 的 planner 已重置。", log)
+	//
+	// R218B-ARCH-2 (#648): read project state through resolver so /new and
+	// the IM hot path see the same snapshot — funnelling slash-command
+	// reads through KeyResolver.ProjectBindingForChat closes the
+	// resolver-vs-projectMgr dual-info-source race.
+	if b := d.resolver.ProjectBindingForChat(msg.Platform, msg.ChatType, msg.ChatID); b.Bound {
+		if agentToReset == "" {
+			plannerKey := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, "general")
+			d.router.Reset(plannerKey)
+			d.discardQueue(plannerKey)
+			d.replyText(ctx, msg, "项目 "+b.Name+" 的 planner 已重置。", log)
+		} else {
+			if id, ok := d.agentCommands[agentToReset]; ok {
+				key := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, id)
+				d.router.Reset(key)
+				d.discardQueue(key)
+				d.replyText(ctx, msg, "会话已重置 ("+id+")。", log)
 			} else {
-				if id, ok := d.agentCommands[agentToReset]; ok {
-					key := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, id)
-					d.router.Reset(key)
-					d.discardQueue(key)
-					d.replyText(ctx, msg, "会话已重置 ("+id+")。", log)
-				} else {
-					// R187-SEC-M1: agentToReset is user IM input, sanitize
-					// before echo into group chat to prevent bidi-override
-					// visual spoofing. Matches /cd/echo sanitize (R185-SEC-H1).
-					d.replyText(ctx, msg, "未知的 agent: "+osutil.SanitizeForLog(agentToReset, 64), log)
-				}
+				// R187-SEC-M1: agentToReset is user IM input, sanitize
+				// before echo into group chat to prevent bidi-override
+				// visual spoofing. Matches /cd/echo sanitize (R185-SEC-H1).
+				d.replyText(ctx, msg, "未知的 agent: "+osutil.SanitizeForLog(agentToReset, 64), log)
 			}
-			return
 		}
+		return
 	}
 
 	agentID := "general"

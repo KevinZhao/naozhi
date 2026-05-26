@@ -312,3 +312,26 @@ func (r *KeyResolver) KeyForChat(platform, chatType, chatID, agentID string) str
 	}
 	return SessionKey(platform, chatType, chatID, agentID)
 }
+
+// ProjectBindingForChat exposes the resolver's project lookup so dispatch
+// slash-command UX paths (/cd, /pwd echo, /new echo) can read the bound
+// project's name / workspace / planner config from the same source the
+// session-key derivation uses, instead of reaching for *project.Manager
+// independently. R218B-ARCH-2 (#648): pre-fix, dispatch held both
+// resolver and projectMgr — a concurrent BindChat / UnbindAllChat could
+// race the IM hot path's resolver-derived key against a stale
+// ProjectForChat read in the same handler. Funnelling read paths through
+// the resolver keeps the two sources reading the same snapshot from the
+// PlannerDataSource adapter.
+//
+// Returns ProjectBinding{Bound: false} when the resolver has no data
+// source wired (test/headless construction with NewKeyResolver(nil, nil))
+// or when the chat is genuinely unbound. Callers should branch on
+// b.Bound rather than nil-checking the resolver, mirroring the
+// ProjectBinding zero-value contract documented on PlannerDataSource.
+func (r *KeyResolver) ProjectBindingForChat(platform, chatType, chatID string) ProjectBinding {
+	if r.data == nil {
+		return ProjectBinding{}
+	}
+	return r.data.ProjectBinding(platform, chatType, chatID)
+}
