@@ -11852,6 +11852,12 @@ function getCronTimelineState(jobId) {
       loading: false,
       details: Object.create(null),
       lastMountAt: 0,       // 上次 mount 渲染的 ms 时戳；renderCronTimelineForSession 用来判 stale
+      // R243-PERF-12 (#817): cache the last innerHTML written by
+      // renderCronTimelinePanel so a no-op re-render (e.g. WS broadcast
+      // arrives but no run changed) skips the full innerHTML rewrite.
+      // Stored on the per-job state so it is reset together with
+      // runs/details when CRON_TIMELINE_FRESH_MS evicts the cache.
+      lastRenderedHtml: '',
     };
   }
   return cronTimelineState[jobId];
@@ -12364,7 +12370,23 @@ function renderCronTimelinePanel(jobId) {
   if (!host) return;
   const job = (cronJobs || []).find(x => x && x.id === jobId);
   const st = getCronTimelineState(jobId);
-  host.innerHTML = cronTimelineHtml(jobId, job, st);
+  // R243-PERF-12 (#817): identity-check the rendered HTML against the
+  // last paint for this job. cronTimelineHtml builds up to ~200 row
+  // strings on each call; when the WS poll fires and nothing changed
+  // (the common case at idle), the resulting HTML is byte-identical to
+  // the previous paint and re-assigning innerHTML would discard and
+  // rebuild every row's DOM nodes for nothing — including blowing away
+  // any in-flight katex/mermaid async-render placeholders inside
+  // expanded run details. A string-equality check is cheap (~1 µs for
+  // a 100 KB blob in V8) compared to the parse + DOM-rebuild cost it
+  // saves. The cache is stored on the per-job state so the
+  // CRON_TIMELINE_FRESH_MS eviction path naturally resets it.
+  const html = cronTimelineHtml(jobId, job, st);
+  if (html === st.lastRenderedHtml && host.innerHTML !== '') {
+    return;
+  }
+  st.lastRenderedHtml = html;
+  host.innerHTML = html;
   // result 走 renderMd 后会埋入 mermaid/katex 异步占位（mermaid-N / ktx-N），
   // 必须在 attach 到 DOM 后调用一次才能完成异步渲染。与 events bubble 路径
   // 的 stickEventsBottom / runPendingAsync 调用语义保持一致。
@@ -12986,7 +13008,13 @@ function renderCronTimelineForJob(jobId) {
     st.done = job.recent_runs.length < 10;
   }
   st.lastMountAt = Date.now();
-  host.innerHTML = cronTimelineHtml(jobId, job, st);
+  // Mount path: unconditional innerHTML rewrite (shell remount or
+  // first paint). Stash the result so the subsequent identity-check in
+  // renderCronTimelinePanel sees a non-empty baseline and short-circuits
+  // truly idempotent re-renders. R243-PERF-12 (#817).
+  const html = cronTimelineHtml(jobId, job, st);
+  st.lastRenderedHtml = html;
+  host.innerHTML = html;
   if (!job) {
     fetchCronJobs().then(() => {
       if (cronDetailJobId === jobId) renderCronTimelineForJob(jobId);
