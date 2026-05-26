@@ -506,6 +506,19 @@ func (s *Server) registerDashboard() {
 	// Unauthenticated routes (login, static assets, WebSocket with own auth)
 	s.mux.HandleFunc("POST /api/auth/login", s.auth.handleLogin)
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
+	// R243-SEC-15 (#800): the login form's `action="/dashboard"` is a JS-disabled
+	// fallback — the live UI intercepts submit() and POSTs the token to
+	// /api/auth/login as JSON. With JS off the browser would still submit
+	// `token=…` as application/x-www-form-urlencoded to /dashboard. Without an
+	// explicit POST handler, Go's mux pattern-routes it to the GET-only entry,
+	// returning 405 Method Not Allowed but only AFTER the request body has
+	// crossed the wire and any reverse-proxy access log on the path may have
+	// captured the form-encoded token in its request line / body trailer.
+	// Registering an explicit POST handler that never reads r.Body and returns
+	// a deterministic 400 makes the contract auditable: even if a future
+	// regression added a parser to /dashboard, this branch fires first and
+	// short-circuits before any token bytes reach handler code.
+	s.mux.HandleFunc("POST /dashboard", s.handleDashboardNoScript)
 	s.mux.HandleFunc("GET /manifest.json", s.handleManifest)
 	s.mux.HandleFunc("GET /sw.js", s.handleSW)
 	s.mux.HandleFunc("GET /static/dashboard.js", s.handleDashboardJS)
@@ -622,6 +635,30 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("dashboard write", "err", err)
+	}
+}
+
+// handleDashboardNoScript handles POST /dashboard, the no-JS form fallback for
+// the login template. R243-SEC-15 (#800): we never parse r.Body and never echo
+// any submitted bytes — token submission is supposed to go through the JS
+// fetch() to /api/auth/login. Returning a deterministic 400 with a short text
+// body and Allow: GET keeps the contract obvious to operators reading access
+// logs (a token-bearing form post here is a misconfiguration / scripted abuse,
+// not normal traffic) and ensures any future change that adds body parsing
+// here trips this branch's intentional no-read invariant first.
+func (s *Server) handleDashboardNoScript(w http.ResponseWriter, _ *http.Request) {
+	// Allow header signals the JS-aware client which method to use without
+	// leaking that this path is auth-gated. Status is 400 (not 405) because
+	// 405 implies the same resource is reachable via another method on this
+	// URL, which would be true in a strict HTTP sense but operationally
+	// confusing — a token-laden POST here is a client bug, not a method
+	// negotiation failure.
+	w.Header().Set("Allow", "GET")
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusBadRequest)
+	if _, err := w.Write([]byte("javascript required: please enable JavaScript and reload\n")); err != nil {
+		slog.Debug("noscript dashboard write", "err", err)
 	}
 }
 

@@ -235,6 +235,11 @@
     "handler_type": "*Server"
   },
   {
+    "method": "POST",
+    "path": "/dashboard",
+    "handler_type": "*Server"
+  },
+  {
     "method": "GET",
     "path": "/health",
     "handler_type": "*HealthHandler"
