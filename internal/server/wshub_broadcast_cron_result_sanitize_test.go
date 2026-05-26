@@ -3,9 +3,12 @@ package server
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/session"
 )
 
 // TestBroadcastCronResult_PayloadSanitisesResultAndError pins R246-SEC-7:
@@ -93,5 +96,83 @@ func TestBroadcastCronResult_PayloadSanitisesResultAndError(t *testing.T) {
 			t.Errorf("payload contains danger rune %U after sanitise; result=%q error=%q",
 				r, got.Result, got.Error)
 		}
+	}
+}
+
+// TestBroadcastCronResult_EndToEnd_SanitisesViaHub drives the actual Hub
+// method (rather than re-deriving its payload locally) to close the
+// regression-coverage gap: a future change that drops or moves the
+// SanitizeForLog calls inside BroadcastCronResult must fail this test.
+//
+// We register a captured wsClient with the Hub, mark it authenticated so
+// broadcastToAuthenticated will route to it, fire the broadcast, and
+// inspect the bytes that reach the wire. The structural test above
+// confirms the payload shape; this one confirms the implementation
+// actually invokes the sanitiser path.
+func TestBroadcastCronResult_EndToEnd_SanitisesViaHub(t *testing.T) {
+	t.Parallel()
+
+	router := session.NewRouter(session.RouterConfig{})
+	guard := session.NewGuard()
+	var nodesMu sync.RWMutex
+	hub := NewHub(HubOptions{
+		Router:  router,
+		Guard:   guard,
+		NodesMu: &nodesMu,
+	})
+
+	c := &wsClient{
+		hub:  hub,
+		send: make(chan []byte, 8),
+		done: make(chan struct{}),
+	}
+	c.authenticated.Store(true)
+	hub.register(c)
+	t.Cleanup(func() { close(c.done) })
+
+	// Mix bidi / C1 / DEL / CR / LF in result, error, and jobID. If
+	// BroadcastCronResult ever stops calling SanitizeForLog at the marshal
+	// site, these bytes will round-trip into the wire payload and trip the
+	// invariants below.
+	const (
+		dirtyResult = "ok‮evil\nresult\x7f"
+		dirtyErr    = "failreason\rline"
+		dirtyJobID  = "job\nid"
+	)
+
+	hub.BroadcastCronResult(dirtyJobID, dirtyResult, dirtyErr)
+
+	var data []byte
+	select {
+	case data = <-c.send:
+	case <-time.After(2 * time.Second):
+		t.Fatal("BroadcastCronResult did not deliver to authenticated client within 2s")
+	}
+
+	var got cronResultMsg
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal wire payload: %v", err)
+	}
+	if got.Type != "cron_result" {
+		t.Errorf("Type = %q, want cron_result", got.Type)
+	}
+	for _, r := range []rune{0x202E, 0x0085, 0x7f, '\n', '\r'} {
+		if strings.ContainsRune(got.JobID, r) {
+			t.Errorf("JobID round-tripped danger rune %U: %q", r, got.JobID)
+		}
+		if strings.ContainsRune(got.Result, r) {
+			t.Errorf("Result round-tripped danger rune %U: %q", r, got.Result)
+		}
+		if strings.ContainsRune(got.Error, r) {
+			t.Errorf("Error round-tripped danger rune %U: %q", r, got.Error)
+		}
+	}
+	// The sanitiser must not silently drop the surrounding payload — the
+	// non-danger prefix/suffix must survive so operators still see context.
+	if !strings.HasPrefix(got.Result, "ok") || !strings.Contains(got.Result, "evil") {
+		t.Errorf("Result lost its non-danger payload after sanitise: %q", got.Result)
+	}
+	if !strings.HasPrefix(got.Error, "fail") || !strings.Contains(got.Error, "reason") {
+		t.Errorf("Error lost its non-danger payload after sanitise: %q", got.Error)
 	}
 }

@@ -351,3 +351,46 @@ func TestReadStoreMeta_MalformedMetaIsTolerated(t *testing.T) {
 	// restored may be an empty map — just ensure no panic occurred.
 	_ = restored
 }
+
+// TestWriteStoreMeta_AtomicNoLeftoverTmp pins R233B-ARCH-6 (#1023): the
+// sidecar must be written via the atomic primitive, leaving zero `*.tmp`
+// or partial files in the store directory after a successful write. If a
+// future regression swaps WriteFileAtomic back to os.WriteFile, the stray
+// half-line guarantee disappears and a power-loss crash mid-write produces
+// a corrupt meta that readStoreMeta then warns on every load.
+func TestWriteStoreMeta_AtomicNoLeftoverTmp(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	// Drive saveStore so the meta sidecar is produced via the production
+	// path (not by hand-crafting the file).
+	if err := saveStore(path, map[string]*ManagedSession{
+		"feishu:direct:alice:general": newSessionWithID("feishu:direct:alice:general", "sess-meta"),
+	}); err != nil {
+		t.Fatalf("saveStore: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		// WriteFileAtomic uses ".<base>.*.tmp" pattern; assert no leftover
+		// after the rename completed. Any leading-dot tmp file means the
+		// atomic primitive was bypassed or the rename leaked.
+		if len(name) > 0 && name[0] == '.' {
+			t.Errorf("unexpected hidden tmp file %q in store dir after saveStore", name)
+		}
+	}
+
+	// Round-trip: meta must parse cleanly.
+	meta, ok := readStoreMeta(path)
+	if !ok {
+		t.Fatalf("readStoreMeta: ok=false after saveStore")
+	}
+	if meta.Version != storeFormatVersion {
+		t.Errorf("meta.Version = %d, want %d", meta.Version, storeFormatVersion)
+	}
+}
