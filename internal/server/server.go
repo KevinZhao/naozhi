@@ -955,6 +955,25 @@ func (s *Server) Start(ctx context.Context) error {
 			"addr", s.addr,
 		)
 	}
+	// R238-SEC-15 (#848): when trustedProxy=true, every per-IP rate limiter,
+	// per-IP audit slog field, and same-origin gate decision flows from the
+	// last X-Forwarded-For hop. If the upstream proxy does NOT strip
+	// client-supplied XFF headers before re-appending its own (or honours
+	// arbitrary-depth XFF without a hop-count limit), an attacker can spoof
+	// the source IP by sending `X-Forwarded-For: <victim>, <attacker>` —
+	// every per-IP gate then attributes the request to the victim's bucket.
+	// The fix MUST happen at the proxy (e.g. ALB/CloudFront drop-and-replace,
+	// nginx `real_ip_recursive on` with a trusted-proxy allowlist) — naozhi
+	// honouring the last XFF hop is by design once trustedProxy is set.
+	// Surface a one-shot info-level reminder at startup so an operator
+	// who flipped trustedProxy=true on a misconfigured upstream sees the
+	// requirement in the boot journal rather than discovering it via a
+	// rate-limiter bypass weeks later. Info-level (not Warn) because the
+	// configuration itself is legitimate — the warning is about the
+	// upstream contract, which we cannot verify from inside the process.
+	if s.auth.trustedProxy {
+		slog.Info(trustedProxyXFFReminder, "addr", s.addr)
+	}
 	slog.Info("server starting", "addr", s.addr)
 
 	ln, err := net.Listen("tcp", s.addr)
@@ -1126,6 +1145,18 @@ const reverseNodePlaintextWarning = "reverse-node /ws-node endpoint served over 
 	"the remote node and stream arbitrary session data into the primary. " +
 	"Terminate TLS upstream and set server.trusted_proxy=true, or bind to " +
 	"127.0.0.1 for local-only access."
+
+// trustedProxyXFFReminder is the startup info-level note emitted whenever
+// trusted_proxy=true. Pulled out so unit tests can pin the exact text and
+// future ops doc references can grep one source of truth. R238-SEC-15 (#848).
+const trustedProxyXFFReminder = "trusted_proxy=true: per-IP rate limiters, audit-log " +
+	"client_ip fields, and same-origin gates trust the last X-Forwarded-For hop. " +
+	"Ensure the upstream proxy (ALB/CloudFront/nginx) strips client-supplied XFF " +
+	"headers before appending its own, or applies a hop-count limit — otherwise " +
+	"a spoofed XFF can bypass per-IP rate limiting by attributing requests to a " +
+	"victim's bucket. naozhi cannot verify the upstream contract from inside the " +
+	"process; this reminder is one-shot at startup so the requirement is visible " +
+	"in the boot journal."
 
 // shouldWarnReverseNodePlaintext reports whether the /ws-node plaintext warning
 // should fire at Server.Start.
