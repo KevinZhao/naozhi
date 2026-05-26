@@ -724,14 +724,25 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		s.mu.RLock()
 		schedStr := j.Schedule
 		entryID := j.entryID
+		cachedPeriod := j.cachedPeriod
 		var parsedSched robfigcron.Schedule
-		if entryID != 0 {
+		if entryID != 0 && cachedPeriod <= 0 {
+			// R242-PERF-2 (#664): only fetch the parsed Schedule for the live
+			// computation when the cache is cold. registerJob populates
+			// cachedPeriod alongside entryID, so production runs hit the
+			// pre-computed branch and skip both the s.cron.Entry RLock-friendly
+			// lookup and the 2× sched.Next that schedulePeriodFromSched runs.
 			parsedSched = s.cron.Entry(entryID).Schedule
 		}
 		s.mu.RUnlock()
-		if parsedSched != nil {
+		switch {
+		case cachedPeriod > 0:
+			// R242-PERF-2 (#664): hot path — period was cached at registerJob
+			// time, no per-tick parsing or sched.Next needed.
+			jitterSleep(s.stopCtx, cachedPeriod, s.jitterMax)
+		case parsedSched != nil:
 			applyJitterSched(s.stopCtx, parsedSched, s.jitterMax)
-		} else {
+		default:
 			applyJitter(s.stopCtx, schedStr, s.jitterMax)
 		}
 
