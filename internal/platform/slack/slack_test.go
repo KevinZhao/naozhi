@@ -44,6 +44,45 @@ func TestStartAlreadyStarted(t *testing.T) {
 	}
 }
 
+// TestStart_RejectsEmptyCredentials pins the R244-SEC-P1-4 (#879) guard:
+// Start() must hard-reject empty BotToken or AppToken so a misconfigured
+// deployment fails loudly at lifecycle entry rather than burning a
+// connection attempt against slack.com and surfacing an opaque
+// "missing_scope"/"invalid_auth" further down the stack. The empty-
+// credential path is the Socket-Mode equivalent of feishu's empty
+// signing-secret fallback (transport_hook.go:30-34); both must hard-fail.
+func TestStart_RejectsEmptyCredentials(t *testing.T) {
+	t.Parallel()
+	noop := func(_ context.Context, _ platform.IncomingMessage) {}
+	cases := []struct {
+		name string
+		cfg  Config
+	}{
+		{"empty BotToken", Config{BotToken: "", AppToken: "xapp-test"}},
+		{"empty AppToken", Config{BotToken: "xoxb-test", AppToken: ""}},
+		{"both empty", Config{BotToken: "", AppToken: ""}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := New(tc.cfg)
+			err := s.Start(noop)
+			if err == nil {
+				t.Fatalf("Start() with %s must reject empty credential", tc.name)
+			}
+			// Ensure no lifecycle goroutines were started — s.started
+			// must remain false so a subsequent Start() (after the
+			// operator fixes config) is not blocked by the stale flag.
+			s.startMu.Lock()
+			started := s.started
+			s.startMu.Unlock()
+			if started {
+				t.Errorf("Start() rejected %s but s.started=true; subsequent valid Start() would be blocked", tc.name)
+			}
+		})
+	}
+}
+
 func TestStopNoop(t *testing.T) {
 	t.Parallel()
 	s := New(Config{BotToken: "xoxb-test", AppToken: "xapp-test"})

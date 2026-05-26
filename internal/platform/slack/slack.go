@@ -104,6 +104,24 @@ func (s *Slack) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
 
 // Start implements RunnablePlatform. Launches Socket Mode connection.
 func (s *Slack) Start(handler platform.MessageHandler) error {
+	// R244-SEC-P1-4 (#879): hard-reject empty credentials before any
+	// network call. The slack-go SDK eventually surfaces a misleading
+	// "missing_scope"/"invalid_auth" error from AuthTest, but by then
+	// the operator has already burned a connection attempt against
+	// slack.com and the failure mode is opaque in journalctl. An empty
+	// BotToken or AppToken is the Socket-Mode equivalent of feishu's
+	// empty signing-secret fallback (see transport_hook.go:30-34): a
+	// misconfiguration that lets the platform silently accept all
+	// inbound traffic / fail open. Surfacing it here keeps the gate
+	// next to the lifecycle entry-point so config.validateConfig and
+	// this guard form a defence-in-depth pair (config rejects at
+	// startup; this rejects at programmatic-construction Start()).
+	if s.cfg.BotToken == "" {
+		return fmt.Errorf("slack: BotToken required (got empty)")
+	}
+	if s.cfg.AppToken == "" {
+		return fmt.Errorf("slack: AppToken required for Socket Mode (got empty)")
+	}
 	// Initialize lifecycle state (ctx/cancel/done) under startMu so a
 	// concurrent Stop() that observes `started=true` cannot race a
 	// half-initialized ctx. Stop() also acquires startMu now, making
