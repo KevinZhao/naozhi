@@ -773,7 +773,9 @@ func (s *Scheduler) Start() error {
 		go func() {
 			defer s.gcWG.Done()
 			slog.Info("cron run history: cold-start GC starting")
-			s.runStore.trimAll(time.Now())
+			// R234-GO-3 / #1019: 传 stopCtx 进 trimAll，Stop 可在 job 入口
+			// 之间中断长时间的 GC 扫描，避免 Stop 等到 gcWaitBudget。
+			s.runStore.trimAllCtx(s.stopCtx, time.Now())
 			slog.Info("cron run history: cold-start GC done")
 		}()
 	}

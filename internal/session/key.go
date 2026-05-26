@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/keyspec"
 )
 
 // MaxSessionKeyBytes caps the byte length of a session key accepted over any
@@ -32,7 +34,12 @@ const (
 	CronKeyPrefix = "cron:"
 	// ProjectKeyPrefix is used for project-scoped planner sessions. Key
 	// shape is "project:{name}:planner" — see internal/project.IsPlannerKey.
-	ProjectKeyPrefix = "project:"
+	// R239-ARCH-G (#900): canonical declaration lives in
+	// internal/keyspec.ProjectKeyPrefix; the session-local constant is a
+	// re-export so existing callers (the keyNamespaces table below,
+	// IsProjectKey, isPlannerKey, plannerNameFromKey) keep using the
+	// session-package symbol without an import cycle.
+	ProjectKeyPrefix = keyspec.ProjectKeyPrefix
 	// ScratchKeyPrefix is already defined in scratch.go; listed here only in
 	// documentation for grep-ability. Do not redefine.
 	// SysKeyPrefix is used for naozhi-internal background daemon sessions.
@@ -190,43 +197,42 @@ func SysKey(name string) string {
 	return SysKeyPrefix + name
 }
 
-// plannerKeyFor is the session-package local replica of
-// internal/project.PlannerKeyFor. Kept unexported because external callers
-// should continue to use the project package's exported API. KeyResolver
-// needs to construct planner keys without importing project (reverse
-// dependency), so we replicate the literal here.
+// plannerKeyFor is the session-package local accessor for the planner
+// key shape. Kept unexported because external callers should continue
+// to use internal/project's public API. KeyResolver needs to construct
+// planner keys without importing project (reverse dependency), so the
+// session package delegates to internal/keyspec for the canonical
+// constructor — that package is zero-dep so any consumer can take it
+// without an import cycle.
 //
-// MIRRORED: internal/project.PlannerKeyFor uses identical literals.
-// Consistency is enforced by double-ended hardcoded assertions:
-// session/routing_test.go asserts plannerKeyFor("foo") ==
-// "project:foo:planner" and project_test.go's TestPlannerKeyFor asserts
-// the same literal. A format change must update both — when this
-// mirror set grows beyond two implementations, consider extracting a
-// shared zero-dependency keyspec package instead.
+// R239-ARCH-G (#900): pre-extraction this function held the literal
+// "project:{name}:planner" in two places (here and in internal/project)
+// kept in sync only via cross-module hardcoded tests. The literal now
+// lives once in internal/keyspec.PlannerKeyFor; both call sites
+// delegate.
 func plannerKeyFor(name string) string {
-	return ProjectKeyPrefix + name + ":planner"
+	return keyspec.PlannerKeyFor(name)
 }
 
 // plannerKeySuffix is the fixed suffix after {name} in a planner key.
-const plannerKeySuffix = ":planner"
+// R239-ARCH-G (#900): canonical declaration lives in
+// internal/keyspec.PlannerKeySuffix.
+const plannerKeySuffix = keyspec.PlannerKeySuffix
 
-// isPlannerKey is the session-package local replica of
-// internal/project.IsPlannerKey. Same motivation as plannerKeyFor.
+// isPlannerKey is the session-package local accessor for planner-key
+// detection. Delegates to internal/keyspec.IsPlannerKey so the
+// "project:" + ":planner" + non-empty-name rule is encoded exactly
+// once. R239-ARCH-G (#900).
 func isPlannerKey(key string) bool {
-	if !strings.HasPrefix(key, ProjectKeyPrefix) {
-		return false
-	}
-	if !strings.HasSuffix(key, plannerKeySuffix) {
-		return false
-	}
-	// Reject empty-name edge case "project::planner" — mid must be non-empty.
-	return len(key) > len(ProjectKeyPrefix)+len(plannerKeySuffix)
+	return keyspec.IsPlannerKey(key)
 }
 
 // plannerNameFromKey extracts {name} from "project:{name}:planner". Callers
 // must have verified isPlannerKey(key) first; otherwise behaviour is undefined.
+// R239-ARCH-G (#900): delegates to internal/keyspec.PlannerNameFromKey so
+// the slice math lives once.
 func plannerNameFromKey(key string) string {
-	return key[len(ProjectKeyPrefix) : len(key)-len(plannerKeySuffix)]
+	return keyspec.PlannerNameFromKey(key)
 }
 
 // ValidateSessionKey rejects session keys that contain control bytes, non-UTF-8

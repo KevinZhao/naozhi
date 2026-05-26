@@ -22,7 +22,11 @@ import (
 // lifetime (RFC v4 agent-team-ui §3.3.7 — A3 defence against CLI-dead
 // respawn changing session_uuid).
 func (p *Process) InjectHistory(entries []EventEntry) {
-	p.eventLog.AppendBatch(entries)
+	// Replay path: AppendBatchReplay skips applyEntryStateLocked under l.mu.
+	// SetPersistSink runs AFTER InjectHistory and the on-task-done callback
+	// is wired by the server tailer registry only on live spawn, so replay
+	// can never produce an observable side effect. R240-PERF-3 (#1042).
+	p.eventLog.AppendBatchReplay(entries)
 	if p.linker == nil {
 		return
 	}

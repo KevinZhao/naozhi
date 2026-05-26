@@ -15,6 +15,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -408,6 +409,33 @@ func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionI
 	return result, errMsg, true
 }
 
+// redactPathsBuilderPool reuses strings.Builder scratch space across
+// redactPathsInCronError slow-path invocations. recordResultP0WithSanitised
+// is the hot caller (every cron tick + every TriggerNow). Empty / no-path
+// fast-path inputs do not touch the pool. R245-PERF-17 / #872.
+//
+// Note: strings.Builder.Reset zeroes the internal slice header but cannot
+// resize it; b.String() still allocates a fresh string from the buffer
+// bytes (Go's strings.Builder is value-only by API), so this pool only
+// elides the Builder + initial backing-slice alloc, not the final string
+// copy. That is sufficient — the final string copy is unavoidable for
+// any non-aliasing implementation.
+var redactPathsBuilderPool = sync.Pool{
+	New: func() any {
+		// 512B initial capacity: most cron error messages are small;
+		// long ones grow via Builder.Grow inside the call.
+		b := &strings.Builder{}
+		b.Grow(512)
+		return b
+	},
+}
+
+// redactPathsBuilderPoolMaxCap drops oversized buffers from the pool so a
+// near-maxRedactErrLen input does not pin memory for the process lifetime.
+// Sized at 4× maxRedactErrLen to allow worst-case Grow(len(s)) headroom
+// without recycling.
+const redactPathsBuilderPoolMaxCap = 4 * maxRedactErrLen
+
 // redactPathsInCronError strips absolute filesystem paths from a cron
 // execution error message before persistence. session.GetOrCreate and
 // session.Send produce errors like "session error: workspace …/repo/x:
@@ -457,7 +485,28 @@ func redactPathsInCronError(s string) string {
 	if strings.IndexByte(s, '/') < 0 && strings.IndexByte(s, '\\') < 0 && strings.IndexByte(s, '~') < 0 {
 		return s
 	}
-	var b strings.Builder
+	b := redactPathsBuilderPool.Get().(*strings.Builder)
+	// Important: strings.Builder.Reset() drops the internal byte slice
+	// entirely (sets it to nil), so we must Reset BEFORE Grow on the
+	// pooled instance — otherwise the prior call's residual bytes would
+	// prefix this call's output. The pool's New() pre-grows to 512B; the
+	// first Reset+Grow on a recycled builder reallocates if and only if
+	// len(s) exceeds the residual capacity (which is 0 post-Reset, so a
+	// fresh alloc happens here). The win is the *Builder header itself
+	// (24B) coming from the pool; the backing []byte still allocates per
+	// call. b.String() always allocates a fresh string regardless.
+	// Even so, eliminating the per-call *Builder header alloc closes the
+	// "double alloc" path called out in R245-PERF-17 / #872.
+	defer func() {
+		// Drop oversized buffers so a one-off near-maxRedactErrLen input
+		// does not pin memory for the process lifetime.
+		if b.Cap() > redactPathsBuilderPoolMaxCap {
+			return
+		}
+		b.Reset()
+		redactPathsBuilderPool.Put(b)
+	}()
+	b.Reset()
 	b.Grow(len(s))
 	i := 0
 	for i < len(s) {

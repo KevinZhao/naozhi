@@ -91,6 +91,18 @@ type transcriptResponse struct {
 	Turns     []transcriptTurn  `json:"turns"`
 	NextIndex int               `json:"next_index"`
 	Truncated bool              `json:"truncated"`
+	// TruncateReason discriminates why Truncated is true so forensics can
+	// distinguish a legitimate size-cap hit from a disk read error or an
+	// over-long JSONL line. Only populated when Truncated is true.
+	// R240-SEC-8 / #1049.
+	//
+	//   ""               — Truncated=false (normal path) or legacy producers
+	//   "size_cap"       — hit maxTranscriptBytes / maxTranscriptTurns
+	//   "line_too_long"  — bufio.ErrTooLong (one line exceeded
+	//                      maxTranscriptLineBytes)
+	//   "scan_io_error"  — Scanner.Err returned a non-ErrTooLong error
+	//                      (disk read failure, truncated file mid-syscall)
+	TruncateReason string `json:"truncate_reason,omitempty"`
 	// Fallback signals a degraded path:
 	//   "missing" — SessionID empty or JSONL not found
 	//   "raw"     — JSONL exists but no turns parsed
@@ -408,11 +420,22 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 
 	turns := make([]transcriptTurn, 0, 32)
 	truncated := false
+	// truncateReason discriminates Truncated cause for forensics
+	// (R240-SEC-8 / #1049). Set alongside `truncated = true`. First
+	// reason sticks — we report the earliest cause to keep the
+	// reason field deterministic when multiple caps trigger.
+	truncateReason := ""
+	setTruncated := func(reason string) {
+		truncated = true
+		if truncateReason == "" {
+			truncateReason = reason
+		}
+	}
 	parsedAny := false
 
 	for scanner.Scan() {
 		if len(turns) >= maxTranscriptTurns {
-			truncated = true
+			setTruncated("size_cap")
 			break
 		}
 		line := scanner.Bytes()
@@ -443,7 +466,7 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		toolCalls += addedToolCalls
 		for _, t := range newTurns {
 			if len(turns) >= maxTranscriptTurns {
-				truncated = true
+				setTruncated("size_cap")
 				break
 			}
 			turns = append(turns, t)
@@ -451,8 +474,18 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	}
 	if err := scanner.Err(); err != nil {
 		// Don't 5xx — the prefix we did parse is still useful.
-		slog.Warn("cron transcript: scan err (returning partial)", "path", resolved, "err", err)
-		truncated = true
+		// R240-SEC-8 / #1049: discriminate ErrTooLong (oversize line)
+		// from genuine IO errors (disk read failure, file truncated
+		// mid-syscall). Forensics need this distinction — collapsing
+		// both into truncated=true loses the signal that the JSONL
+		// file itself was malformed vs. the disk was sick.
+		if errors.Is(err, bufio.ErrTooLong) {
+			slog.Warn("cron transcript: line too long (returning partial)", "path", resolved, "err", err)
+			setTruncated("line_too_long")
+		} else {
+			slog.Warn("cron transcript: scan io error (returning partial)", "path", resolved, "err", err)
+			setTruncated("scan_io_error")
+		}
 	}
 
 	// LimitReader hit means we read maxTranscriptBytes worth without
@@ -472,13 +505,14 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	// internal 256 KB buffer may still hold partly-parsed data, but
 	// the LimitedReader will refuse to top it up further.
 	if lr.N <= 0 {
-		truncated = true
+		setTruncated("size_cap")
 	}
 
 	tokens.Total = tokens.Input + tokens.Output
 	resp.Turns = turns
 	resp.NextIndex = len(turns)
 	resp.Truncated = truncated
+	resp.TruncateReason = truncateReason
 	resp.ToolCalls = toolCalls
 	if tokens.Total > 0 {
 		resp.Tokens = &tokens
