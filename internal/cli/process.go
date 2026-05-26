@@ -238,7 +238,15 @@ type Process struct {
 	// metering kiro turns — the dominant Snapshot polling case).
 	meteringMu    sync.RWMutex
 	meteringUsage []MeteringEntry
-	meteringLen   atomic.Int32
+	// meteringIdx maps Unit → index into meteringUsage so applyMetadata's
+	// per-frame merge is O(n) instead of O(n×m) string-equality scan
+	// (R225-PERF-4 / R235-PERF-12). The slice is the canonical store —
+	// MeteringUsage()'s snapshot path returns a defensive copy of the
+	// slice unchanged, no map iteration on the read path. Lazily init'd
+	// on first applyMetadata call to keep the zero-metering case (claude
+	// + pre-metering kiro turns, the dominant deployment) allocation-free.
+	meteringIdx map[string]int
+	meteringLen atomic.Int32
 	// model is the spawn-time CLI model identifier ("claude-opus-4.7",
 	// "claude-sonnet-4.6", ""), set once by Wrapper.Spawn before
 	// readLoop starts. Empty string means "operator did not configure
@@ -773,24 +781,28 @@ func (p *Process) applyMetadata(m *EventMetadata) {
 		// new unit strings every turn would otherwise grow this slice
 		// without bound for the lifetime of the session. (R227-CR-11)
 		const maxMeteringUnits = 16
-		for _, in := range m.MeteringUsage {
-			merged := false
+		// R225-PERF-4 / R235-PERF-12: O(1) Unit lookup via meteringIdx.
+		// Lazy init on first metadata frame so zero-metering sessions (the
+		// dominant deployment) never allocate this map.
+		if p.meteringIdx == nil {
+			p.meteringIdx = make(map[string]int, maxMeteringUnits)
 			for i := range p.meteringUsage {
-				if p.meteringUsage[i].Unit == in.Unit {
-					p.meteringUsage[i].Value += in.Value
-					if in.UnitPlural != "" {
-						p.meteringUsage[i].UnitPlural = in.UnitPlural
-					}
-					merged = true
-					break
-				}
+				p.meteringIdx[p.meteringUsage[i].Unit] = i
 			}
-			if !merged {
-				if len(p.meteringUsage) >= maxMeteringUnits {
-					continue
+		}
+		for _, in := range m.MeteringUsage {
+			if i, ok := p.meteringIdx[in.Unit]; ok {
+				p.meteringUsage[i].Value += in.Value
+				if in.UnitPlural != "" {
+					p.meteringUsage[i].UnitPlural = in.UnitPlural
 				}
-				p.meteringUsage = append(p.meteringUsage, in)
+				continue
 			}
+			if len(p.meteringUsage) >= maxMeteringUnits {
+				continue
+			}
+			p.meteringIdx[in.Unit] = len(p.meteringUsage)
+			p.meteringUsage = append(p.meteringUsage, in)
 		}
 		// R227-PERF-10: publish the post-merge length so MeteringUsage's
 		// fast-path can skip the RLock. Stored under meteringMu so the
