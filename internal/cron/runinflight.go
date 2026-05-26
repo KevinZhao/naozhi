@@ -97,6 +97,39 @@ func (r *runInflight) populate(v runInflightView) {
 	r.view.Store(&cp)
 }
 
+// inflightInflightCounter is the contract that releaseRun expects from a
+// metrics counter — implemented by metrics.LabeledCounter (Add(int64)).
+// Defined inline so runinflight.go does not pull internal/metrics into
+// its import graph (keeps this file dependency-light and the
+// finalizing-side contract explicit). R246-CR-017.
+type inflightInflightCounter interface {
+	Add(int64)
+}
+
+// releaseRun encapsulates the 3-step release contract that pairs with the
+// CAS-true entry in executeOpt: clear observable metadata, drop the CAS
+// gate, then decrement the inflight gauge. Order is load-bearing — see
+// R238-GO-2 for the reset-before-Store(false) rationale (a TriggerNow that
+// wins the next CAS must not have its freshly-populated metadata
+// clobbered by this reset). Extracting the trio into a single helper
+// pins the order behind one call site so a future inliner / refactor
+// cannot drift the steps without a compile-visible signature change.
+// R246-CR-017.
+//
+// Safe to call on a nil receiver (no-op) so test fixtures that build a
+// partial Scheduler without an inflight pool do not NPE on the deferred
+// release.
+func (r *runInflight) releaseRun(gauge inflightInflightCounter) {
+	if r == nil {
+		return
+	}
+	r.reset()
+	r.running.Store(false)
+	if gauge != nil {
+		gauge.Add(-1)
+	}
+}
+
 // snapshot 拷贝当前 inflight 状态。返回 ok=false 时调用方应该忽略 view
 // 字段——running=false 时元数据可能是上一轮残留。
 //

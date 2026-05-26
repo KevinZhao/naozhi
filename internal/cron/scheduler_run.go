@@ -556,12 +556,14 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		return
 	}
 	defer func() {
-		// Reset metadata BEFORE releasing the CAS gate; otherwise a TriggerNow
-		// that wins the next CompareAndSwap can have its freshly-populated
-		// RunID/StartedAt clobbered by this deferred reset. R238-GO-2.
-		inflight.reset()
-		inflight.running.Store(false)
-		metrics.CronRunInflight.Add(-1)
+		// R246-CR-017: route through inflight.releaseRun so the 3-step
+		// ordering contract (reset → Store(false) → metric Add(-1)) lives
+		// behind a single helper. The reset MUST precede the CAS gate
+		// release; otherwise a TriggerNow that wins the next
+		// CompareAndSwap can have its freshly-populated RunID/StartedAt
+		// clobbered by this deferred reset. See R238-GO-2 + the helper
+		// godoc for the order rationale.
+		inflight.releaseRun(metrics.CronRunInflight)
 	}()
 
 	// Populate the inflight metadata under the CAS-true window. RunID is
