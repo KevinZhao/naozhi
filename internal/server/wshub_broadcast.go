@@ -197,18 +197,44 @@ type cronResultMsg struct {
 	Error  string `json:"error,omitempty"`
 }
 
+// cron_result sanitisation caps. Result is generous (4 KiB) so summarised
+// job output still fits without truncation; errMsg is the path-redacted
+// error string only (1 KiB). Both bound the byte budget that bidi / C0 / C1
+// scrubbing has to walk so a hostile producer cannot wedge the broadcast
+// hot path on pathologically long input.
+const (
+	cronResultBroadcastResultMax = 4 * 1024
+	cronResultBroadcastErrorMax  = 1024
+)
+
+// buildCronResultMsg constructs the cron_result WS payload with sanitisation
+// applied to every operator-visible field. Extracted so the sanitisation
+// invariants can be unit-tested without spinning up a Hub + WS round-trip.
+// R246-SEC-7 (#811).
+func buildCronResultMsg(jobID, result, errMsg string) cronResultMsg {
+	return cronResultMsg{
+		Type:   "cron_result",
+		JobID:  osutil.SanitizeForLog(jobID, 64),
+		Result: osutil.SanitizeForLog(result, cronResultBroadcastResultMax),
+		Error:  osutil.SanitizeForLog(errMsg, cronResultBroadcastErrorMax),
+	}
+}
+
 // BroadcastCronResult notifies all connected WS clients that a cron job completed.
 func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
 	// R185-SEC-H2: scheduler generates jobID as 8-char hex today, but if a
 	// future path ever surfaces a config-supplied / user-typed ID, bidi/C0
 	// chars would reach the dashboard via a SetEscapeHTML(false) encoder.
-	// Sanitize defensively; result/errMsg are already scrubbed at recordResult.
-	data, err := marshalPooled(cronResultMsg{
-		Type:   "cron_result",
-		JobID:  osutil.SanitizeForLog(jobID, 64),
-		Result: result,
-		Error:  errMsg,
-	})
+	// Sanitize defensively.
+	//
+	// R246-SEC-7 (#811): result / errMsg are not authoritatively scrubbed at
+	// every producer — the SanitizeForLog pipeline runs at recordResultP0 for
+	// the cron-run-history path, but the legacy cron_result broadcast can be
+	// reached from older code paths that bypass it (and from future paths a
+	// refactor might add). Apply SanitizeForLog parity here so bidi/C0/C1
+	// bytes from cron job stdout cannot reach the dashboard renderer
+	// regardless of which producer fed the broadcast.
+	data, err := marshalPooled(buildCronResultMsg(jobID, result, errMsg))
 	if err != nil {
 		return
 	}
