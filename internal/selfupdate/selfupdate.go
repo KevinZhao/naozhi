@@ -310,7 +310,24 @@ func assetName() string {
 	return fmt.Sprintf("naozhi-%s-%s", runtime.GOOS, runtime.GOARCH)
 }
 
+// testHTTPTransport is set ONLY by selfupdate_test.go (TestDownload_*)
+// to inject a transport that trusts httptest.NewTLSServer's self-signed
+// certificate. Production code MUST leave this nil so the default
+// transport (system CA pool) is used. R240-SEC-4 (#1048): the entry-point
+// https-prefix guard below symmetrically enforces TLS for the first leg
+// — the test transport is the only sanctioned escape hatch.
+var testHTTPTransport http.RoundTripper
+
 func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error {
+	// R240-SEC-4 (#1048): symmetric https-only guard for the first leg.
+	// CheckRedirect already pins subsequent hops to https, but the initial
+	// request URL was unchecked; today every caller passes a hardcoded
+	// https://github.com URL, but a future caller (or a config-driven
+	// override) handing us a http:// URL would silently lose TLS for the
+	// first leg and leave verifyChecksum chasing the wrong threat model.
+	if !strings.HasPrefix(fetchURL, "https://") {
+		return fmt.Errorf("selfupdate: refused non-https URL: %s", fetchURL)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fetchURL, nil)
 	if err != nil {
 		return fmt.Errorf("build fetch request: %w", err)
@@ -321,7 +338,8 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 	// load-bearing — both files travel the same path and could be replaced
 	// in lock-step. (R228-SEC-1/SEC-9，覆盖 R227-SEC-5 的 https-only 检查)
 	client := &http.Client{
-		Timeout: defaultTimeout,
+		Timeout:   defaultTimeout,
+		Transport: testHTTPTransport, // nil in production → http.DefaultTransport
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > 5 {
 				return fmt.Errorf("too many redirects")
