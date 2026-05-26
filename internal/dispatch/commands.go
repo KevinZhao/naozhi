@@ -285,9 +285,16 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 		if id, ok := d.agentCommands[agentToReset]; ok {
 			agentID = id
 		} else {
+			// R250-CR-26: agentToReset was lowercased above (line 251); the
+			// stored values in agentCommands are operator-supplied agent IDs
+			// which may legitimately carry mixed case (e.g. "ReviewerBot").
+			// Use EqualFold so a user typing "/new ReviewerBot" still resets
+			// the right session even though the lookup-key path normalizes
+			// to lowercase. The linear scan stays — agentCommands is a small
+			// operator-curated map, not a hot path.
 			found := false
 			for _, id := range d.agentCommands {
-				if id == agentToReset {
+				if strings.EqualFold(id, agentToReset) {
 					agentID = id
 					found = true
 					break
