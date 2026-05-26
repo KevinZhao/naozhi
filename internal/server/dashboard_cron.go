@@ -543,6 +543,21 @@ type CronHandlers struct {
 	// outdated "missed" verdict for a full second. R245-PERF-4 (#857).
 	missedCacheMu sync.Mutex
 	missedCache   map[string]missedVerdict
+
+	// transcriptSem caps concurrent /api/cron/runs/{run_id}/transcript
+	// requests across the whole process. R243-SEC-12 (#798): each
+	// in-flight transcript holds a 256 KB bufio.Scanner buffer plus
+	// the LimitReader's 8 MB read budget, so the per-IP runsLimiter
+	// alone is not enough — N distinct authenticated operators can
+	// each saturate their own bucket and collectively park N×8 MB
+	// of file-mapped pages plus N×256 KB of scanner buffers in
+	// memory. The semaphore puts a process-wide ceiling on that
+	// concurrency so memory cannot grow unbounded with operator
+	// count. Excess requests receive 503 immediately, mirroring the
+	// transcribeSemCap pattern in dashboard_transcribe.go. Nil leaves
+	// the gate disabled (newCronHandlersForTest paths) so legacy
+	// hand-rolled fixtures keep compiling.
+	transcriptSem chan struct{}
 }
 
 // missedVerdict caches one HasMissedSchedule return tuple plus the inputs

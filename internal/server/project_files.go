@@ -873,6 +873,46 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// R219-SEC-2 (#655) + R220-GO-2: open the file ONCE here, with O_NOFOLLOW,
+	// and plumb the resulting *os.File into the serve* helpers. Previously
+	// each helper (serveRender / servePreview / serveRaw / serveDownload) ran
+	// its own os.Open(resolved) AFTER the Lstat-after-resolve guard above —
+	// an attacker who could win a sub-millisecond race could swap the regular
+	// file for an unrelated regular file (different inode, same path) between
+	// Lstat and Open and have the swapped bytes streamed under the original
+	// path's authorization. O_NOFOLLOW closes the symlink-swap leg of the
+	// TOCTOU kernel-atomically; the fstat-IsRegular re-check below closes the
+	// "swap to non-regular file" leg. The remaining same-regular-different-
+	// inode swap is unavoidable without renameat2/openat2 but the impact
+	// shrinks to "attacker swaps File A's bytes with File B's bytes within
+	// the same workspace+sensitive-name guard set" — bounded by the
+	// authorization gate the request already passed.
+	f, err := openWorkspaceFile(resolved)
+	if err != nil {
+		// O_NOFOLLOW returns ELOOP on a final-component symlink. Collapse to
+		// 404 so attacker probing cannot distinguish "missing" from "swapped
+		// to symlink" — same contract as the Lstat-symlink branch above.
+		if !errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("project files: openWorkspaceFile IO failure",
+				"err", err,
+				"project", project)
+		}
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+	// fstat the fd so size/mtime/regular-mode reflect the SAME inode the
+	// helpers will read from. info from Lstat above is intentionally
+	// discarded for the body — it described a name, not a fd. A swap to a
+	// dir/socket/fifo between Lstat and Open is rejected here.
+	finfo, ferr := f.Stat()
+	if ferr != nil || finfo.IsDir() || !finfo.Mode().IsRegular() {
+		_ = f.Close()
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+	info = finfo
+	defer f.Close()
+
 	// ETag hashes (size, mtime-ns) so the header does not leak exact byte
 	// count or nanosecond modification timestamp to authenticated clients.
 	// Matches the attachment endpoint convention — see handleAttachment.
@@ -908,13 +948,13 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 
 	switch mode {
 	case "preview":
-		h.servePreview(w, resolved, info)
+		h.servePreview(w, f, resolved, info)
 	case "raw":
-		h.serveRaw(w, r, resolved, info)
+		h.serveRaw(w, r, f, resolved, info)
 	case "render":
-		h.serveRender(w, r, resolved, info)
+		h.serveRender(w, r, f, resolved, info)
 	case "download":
-		h.serveDownload(w, r, resolved, info)
+		h.serveDownload(w, r, f, resolved, info)
 	}
 }
 
@@ -965,7 +1005,7 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 // -html`, Playwright trace, pytest-html) and most SVG diagrams emit self-
 // contained single-file content and are unaffected. Relative-asset support is
 // B2, gated on actual user demand.
-func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, resolved string, info os.FileInfo) {
+func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, f *os.File, resolved string, info os.FileInfo) {
 	// R249-SEC-5: mirror servePreview / serveRaw / serveDownload — refuse
 	// credential-bearing names even when the bytes happen to sniff as
 	// text/html or image/svg+xml. Without this gate an attacker who can
@@ -982,12 +1022,9 @@ func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, re
 		return
 	}
 
-	f, err := os.Open(resolved)
-	if err != nil {
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "open failed"})
-		return
-	}
-	defer f.Close()
+	// R219-SEC-2 (#655): fd opened once by handleFileGet with O_NOFOLLOW and
+	// plumbed in; no second os.Open here so an inode-swap between Lstat and
+	// serve* cannot redirect the streamed bytes. Caller owns Close.
 
 	head := make([]byte, 512)
 	n, _ := io.ReadFull(f, head)
@@ -1072,7 +1109,7 @@ func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, re
 // tools create/edit files arbitrarily — so raw innerHTML would be a stored-XSS
 // sink. dashboard.js currently uses `<pre><code>esc(content)</code></pre>`
 // with esc() HTML-escaping the payload, satisfying this contract. R71-SEC-L1.
-func (h *ProjectHandlers) servePreview(w http.ResponseWriter, resolved string, info os.FileInfo) {
+func (h *ProjectHandlers) servePreview(w http.ResponseWriter, f *os.File, resolved string, info os.FileInfo) {
 	// Mirror the serveDownload guard: a file like .netrc / .npmrc / id_rsa
 	// has a text MIME and would otherwise have its raw contents echoed in
 	// the JSON `content` field. The download path's credential allowlist
@@ -1100,12 +1137,8 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, resolved string, i
 		truncated = true
 	}
 
-	f, err := os.Open(resolved)
-	if err != nil {
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "open failed"})
-		return
-	}
-	defer f.Close()
+	// R219-SEC-2 (#655): fd plumbed in by handleFileGet. No second os.Open;
+	// caller owns Close.
 
 	// Read head for MIME detection first so we can refuse non-text quickly
 	// without allocating a full buffer for a potentially large binary.
@@ -1188,7 +1221,7 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, resolved string, i
 	})
 }
 
-func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resolved string, info os.FileInfo) {
+func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, f *os.File, resolved string, info os.FileInfo) {
 	// R246-SEC-2: enforce the same sensitive-name guard as servePreview /
 	// serveDownload. A file like .env / id_rsa / .npmrc sniffs to text/plain
 	// and would otherwise pass the isTextMime check below, exposing
@@ -1204,12 +1237,8 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 		return
 	}
 
-	f, err := os.Open(resolved)
-	if err != nil {
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "open failed"})
-		return
-	}
-	defer f.Close()
+	// R219-SEC-2 (#655): fd plumbed in by handleFileGet. No second os.Open;
+	// caller owns Close.
 
 	// Sniff MIME from file head so we don't hand the browser octet-stream for
 	// images; http.ServeContent reads content-type from w.Header() if set.
@@ -1266,11 +1295,11 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 	// download path so the browser / OS handler treats them as explicit
 	// attachments. R71-SEC-M2.
 	if mime == "application/pdf" {
-		// R186-QUAL-M1: serveDownload re-opens the file itself; release our fd
-		// first so we don't briefly hold two descriptors for the same file and
-		// the deferred Close above doesn't race with serveDownload's own defer.
-		_ = f.Close()
-		h.serveDownload(w, r, resolved, info)
+		// R219-SEC-2 (#655): handleFileGet now opens once and plumbs the fd
+		// through; serveDownload no longer re-opens, so we hand off the same
+		// *os.File directly. handleFileGet's deferred Close stays the sole
+		// owner — serveDownload only reads, never closes.
+		h.serveDownload(w, r, f, resolved, info)
 		return
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
@@ -1301,7 +1330,7 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 	http.ServeContent(w, r, filepath.Base(resolved), info.ModTime(), f)
 }
 
-func (h *ProjectHandlers) serveDownload(w http.ResponseWriter, r *http.Request, resolved string, info os.FileInfo) {
+func (h *ProjectHandlers) serveDownload(w http.ResponseWriter, r *http.Request, f *os.File, resolved string, info os.FileInfo) {
 	// SEC-009: deny credential-bearing files even on the explicit download
 	// path. servePreview already excludes .env via previewableByExt + the
 	// MIME guard, but download had no equivalent stop, letting authenticated
@@ -1312,12 +1341,17 @@ func (h *ProjectHandlers) serveDownload(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	f, err := os.Open(resolved)
-	if err != nil {
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "open failed"})
+	// R219-SEC-2 (#655): fd plumbed in by handleFileGet (or relayed from
+	// serveRaw's PDF branch). No second os.Open; ownership stays with the
+	// caller's deferred Close.
+	//
+	// serveRaw's PDF hand-off may have already advanced the fd reading the
+	// first 512 bytes for MIME sniffing; rewind so http.ServeContent streams
+	// from offset 0.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "seek failed"})
 		return
 	}
-	defer f.Close()
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", contentDisposition("attachment", resolved))

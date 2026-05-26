@@ -82,17 +82,16 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 	}
 
 	// Per-chat limit to prevent one chat from exhausting global quota.
-	// O(maxJobs) linear scan; acceptable given maxJobsHardCap=500 and
-	// AddJob is called at human cadence (not on the hot path). A
-	// chatID-indexed map would mirror the sessionsByChat optimisation in
-	// the router but is premature given the bound.
-	chatCount := 0
-	for _, existing := range s.jobs {
-		if existing.Platform == j.Platform && existing.ChatID == j.ChatID {
-			chatCount++
-		}
-	}
-	if chatCount >= s.maxJobsPerChat {
+	// R237-PERF-5 (#661): O(1) lookup on s.chatJobCount replaces the prior
+	// O(maxJobs) linear scan. The scan held s.mu across up to 500 *Job
+	// entries on every AddJob — a direct hot-path block on the dashboard
+	// 1Hz add path that also stalled TriggerNow / emitRunStarted callers
+	// contending on the same mutex. The counter is maintained synchronously
+	// in deleteJobLocked / Start so it stays in lock-step with len-by-chat
+	// (s.jobs); s.jobs is still the canonical truth, asserted by
+	// TestChatJobCount_TracksJobsByChat.
+	chatKey := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+	if s.chatJobCount[chatKey] >= s.maxJobsPerChat {
 		return nil, fmt.Errorf("per-chat cron limit reached (%d)", s.maxJobsPerChat)
 	}
 
@@ -139,6 +138,12 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 		}
 	}
 	s.jobs[j.ID] = j
+	// R237-PERF-5 (#661): increment the per-chat counter synchronously
+	// with s.jobs so the next addJobAcquiringLock observes the up-to-date
+	// count without re-scanning. deleteJobLocked is the paired decrement;
+	// the rollback path (s.deleteJobLocked below on persist failure) goes
+	// through that helper so the counter unwinds correctly.
+	s.chatJobCount[chatKey]++
 	save, perr := s.persistJobsLocked()
 	if perr != nil {
 		// R236-GO-10: persist failed *after* registerJob + map insertion.
@@ -168,6 +173,26 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 		return nil, perr
 	}
 	return save, nil
+}
+
+// PerChatJobCount returns the number of jobs registered against the
+// (Platform, ChatID) chat. Backed by s.chatJobCount (R237-PERF-5 / #661):
+// O(1) read, lock-free outside the RLock window, vs the historical
+// O(N) scan that addJobAcquiringLock used to enforce maxJobsPerChat.
+//
+// Intended use: dashboard / metrics surfaces that want to render
+// "you have N/M cron jobs in this chat" without paying the cost of a
+// full ListJobs walk. Returns 0 for a chat with no registered jobs.
+//
+// Safe on a nil *Scheduler (returns 0) so dashboard renders during
+// the bootstrap window before the scheduler is wired do not NPE.
+func (s *Scheduler) PerChatJobCount(plat, chatID string) int {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.chatJobCount[chatJobKey{Platform: plat, ChatID: chatID}]
 }
 
 // ListJobs returns jobs for a specific chat.
@@ -262,7 +287,23 @@ func (s *Scheduler) deleteJobLocked(j *Job) {
 	if j.entryID != 0 {
 		s.cron.Remove(j.entryID)
 	}
-	delete(s.jobs, j.ID)
+	if _, present := s.jobs[j.ID]; present {
+		delete(s.jobs, j.ID)
+		// R237-PERF-5 (#661): paired decrement for the addJobAcquiringLock
+		// increment. Guarded by the s.jobs membership check above so a
+		// double-delete (rollback path calling this on a never-inserted
+		// job, or a future caller hitting this twice) cannot drive the
+		// counter negative — divergence from s.jobs would silently disable
+		// the per-chat cap. Drop the entry when count hits zero so the
+		// map's working set tracks the live chat set rather than every
+		// chat that has ever owned a job.
+		key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+		if n := s.chatJobCount[key]; n > 1 {
+			s.chatJobCount[key] = n - 1
+		} else {
+			delete(s.chatJobCount, key)
+		}
+	}
 }
 
 // pauseJobLocked transitions a job to Paused state under s.mu. Returns
@@ -373,18 +414,25 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 			s.deleteJobLocked(j)
 			return nil
 		},
-		// postCleanup：锁外做 router.Reset + runStore.DeleteJob。
+		// postCleanup：锁外做 router.Reset + runStore.DeleteJob.
 		// R240-GO-1: router.Reset 移出 deleteJobLocked，避免在 s.mu 下
 		// 走 router callback 触发 lock-order inversion。
 		// R238-GO-3: deleteJobLocked 已变内存态，runStore 必须清理，否则
 		// runs/<jobID>/ 子树会泄漏；persist 失败也要清，故放在 perr 检查前。
 		// P1 cron-run-history: 仅删 runs/<jobID>/，不动用户面 jsonl
 		// （RFC §2.3 / §4.4）。
+		// R242-ARCH-15 (#758): cleanupRunningJobIfIdle reclaims the
+		// s.runningJobs entry when the CAS gate is idle, bounding what
+		// was previously an unbounded leak (one *runInflight per
+		// historical jobID) over long-lived deployments. The idle check
+		// preserves the ID-reuse split-CAS guarantee documented on
+		// runningJobs.
 		func(j *Job) {
 			s.resetRouterStub(j.ID)
 			if s.runStore != nil {
 				s.runStore.DeleteJob(j.ID)
 			}
+			s.cleanupRunningJobIfIdle(j.ID)
 		},
 	)
 }
@@ -858,11 +906,16 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 		// re-enter s.mu. R238-GO-3: runStore.DeleteJob fires even when
 		// persist later fails so runs/<jobID>/ doesn't leak on disk
 		// while the in-memory record is gone.
+		// R242-ARCH-15 (#758): mirror DeleteJobByID's runningJobs reclaim
+		// here — the IM-prefix DeleteJob path is the cron alias side of
+		// the same lifecycle, so the leak fix has to land at both
+		// entry points.
 		func(j *Job) {
 			s.resetRouterStub(j.ID)
 			if s.runStore != nil {
 				s.runStore.DeleteJob(j.ID)
 			}
+			s.cleanupRunningJobIfIdle(j.ID)
 		},
 	)
 }

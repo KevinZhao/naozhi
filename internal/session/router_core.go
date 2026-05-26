@@ -1277,24 +1277,51 @@ func NewRouter(cfg RouterConfig) *Router {
 		}
 	}
 
-	// Reap <keyhash>.log files that don't correspond to any restored
-	// session AND are older than orphanSweepAge. See §4.4 of
-	// docs/rfc/event-log-persistence.md for the rationale; in short,
-	// DropKey failures + sessions.json rewrites can leave stranded
-	// logs that never get reclaimed otherwise.
-	r.runOrphanSweep()
-
-	// Attachment refcount tracker. See docs/rfc/attachment-refcount.md.
-	// Must be started AFTER r.sessions is populated so the resolver
-	// closure can see them; first OnPersistedEntry callback arrives
-	// when a live CLI produces a new EventEntry which cannot happen
-	// until callers call GetOrCreate, which can't happen until
-	// NewRouter returns.
-	r.startAttachmentTracker()
+	// R245-ARCH-46 (#906): the orphan sweep + attachment tracker are
+	// genuine background-lifecycle side effects (goroutine spawn / worker
+	// install). Funnel them through startBackgroundLifecycle so a future
+	// caller can opt out (tests construct a Router and want determinism)
+	// without losing the construction-time path used by production.
+	r.startBackgroundLifecycle()
 
 	r.backendIDs = computeBackendIDs(r.wrapper, r.wrappers, r.defaultBackend)
 
 	return r
+}
+
+// startBackgroundLifecycle launches the long-running side effects that
+// were previously executed inline at the tail of NewRouter:
+//
+//   - runOrphanSweep      — reaps <keyhash>.log files for sessions that
+//     no longer exist (RFC event-log-persistence §4.4).
+//   - startAttachmentTracker — installs the refcount worker that bumps
+//     attachment retention based on OnPersistedEntry events.
+//
+// Both are idempotent guard-checks against r.eventLogDir; calling this a
+// second time replays the same guards but does not double-spawn a sweep
+// goroutine that finished, and the tracker.NewTracker write to
+// r.attachmentTracker will overwrite the existing tracker reference if
+// any. This is fine for the production single-call path; tests that need
+// finer control should construct a Router directly without calling Start.
+//
+// NOTE: runAutoChainBackfillOnce is intentionally NOT moved here because
+// it must execute synchronously BEFORE the Tier 1 / Tier 2 history
+// goroutines spawn (TestNewRouter_AutoChainPrecedesTier2Loaders pins
+// this ordering). Treat it as part of construction, not a side effect.
+func (r *Router) startBackgroundLifecycle() {
+	r.runOrphanSweep()
+	r.startAttachmentTracker()
+}
+
+// Start exposes the background-lifecycle hook so callers can defer the
+// side effects to a chosen moment. Today NewRouter still invokes the
+// hook eagerly so existing call sites are unchanged; future refactors
+// (tests, lazy boot) can construct a Router and call Start(ctx) when
+// they're ready. ctx is accepted for forward-compat — current sweepers
+// honour r.historyCtx, but a future implementation may shift to the
+// caller's context.
+func (r *Router) Start(_ context.Context) {
+	r.startBackgroundLifecycle()
 }
 
 // onChangeHolder wraps a callback so the atomic pointer Store site is an

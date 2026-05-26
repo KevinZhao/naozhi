@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -284,6 +285,75 @@ func (m *Manager) buildShimArgs(key, socketPath, stateFile, cliPath, backend, cw
 	return args
 }
 
+// awaitReady reads exactly one JSON ready frame from the shim's stdout pipe
+// and returns the base64-encoded auth token, or an error if the frame is
+// malformed, the shim reported a startup failure, the timeout elapsed, or ctx
+// was cancelled.
+//
+// Extracted from StartShimWithBackend per R246-CR-005 / #740 (P0 subset) so
+// the spawn function reads as a lifecycle script (validate → args → exec →
+// awaitReady → decode → connect → cgroup → map swap) instead of inlining the
+// scanner goroutine + 30s timer + 3-way select. The caller still owns
+// lifecycle cleanup (killAndUnblock); awaitReady deliberately does not Kill
+// or Close the parent's resources itself so the same outer helper handles
+// cleanup regardless of which step (decode token, connect, cgroup move, …)
+// fails.
+//
+// Concurrency: spawns one goroutine that runs a bufio.Scanner.Scan() and
+// writes a single shimReadyMsg to a buffered (size-1) channel. The goroutine
+// owns Close on the supplied stdout via defer; if the caller's killAndUnblock
+// closes stdout to unblock the Scan after a timeout / ctx cancel, the
+// goroutine's deferred Close is harmless (double Close returns ErrClosed).
+func awaitReady(ctx context.Context, stdout io.ReadCloser, timeout time.Duration) (string, error) {
+	readyCh := make(chan shimReadyMsg, 1)
+	go func() {
+		defer stdout.Close()
+		scanner := bufio.NewScanner(stdout)
+		if scanner.Scan() {
+			var ready struct {
+				Status string `json:"status"`
+				PID    int    `json:"pid"`
+				Token  string `json:"token"`
+				Error  string `json:"error"`
+			}
+			if err := json.Unmarshal(scanner.Bytes(), &ready); err != nil {
+				readyCh <- shimReadyMsg{"", fmt.Errorf("parse ready: %w", err)}
+				return
+			}
+			if ready.Status == "error" {
+				readyCh <- shimReadyMsg{"", fmt.Errorf("shim startup failed: %s", ready.Error)}
+				return
+			}
+			if ready.Status != "ready" {
+				readyCh <- shimReadyMsg{"", fmt.Errorf("unexpected status: %s", ready.Status)}
+				return
+			}
+			readyCh <- shimReadyMsg{ready.Token, nil}
+		} else {
+			readyCh <- shimReadyMsg{"", fmt.Errorf("shim exited before ready")}
+		}
+	}()
+
+	// NewTimer + defer Stop so the runtime goroutine backing time.After does
+	// not park for the full timeout after a fast-path success or ctx
+	// cancellation. Under high start/restart pressure this previously
+	// accumulated up to thousands of live timer goroutines between GC cycles.
+	readyTimer := time.NewTimer(timeout)
+	defer readyTimer.Stop()
+
+	select {
+	case result := <-readyCh:
+		if result.err != nil {
+			return "", result.err
+		}
+		return result.token, nil
+	case <-readyTimer.C:
+		return "", fmt.Errorf("shim ready timeout")
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
 // StartShimWithBackend spawns a new shim process with an explicit CLI binary
 // and backend identifier. The backend is recorded in the shim state file so
 // naozhi reconnects post-restart can route back to the matching wrapper.
@@ -367,72 +437,30 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 		}
 	}()
 
-	// Read ready message (with timeout)
-	readyCh := make(chan shimReadyMsg, 1)
-	go func() {
-		defer stdout.Close()
-		scanner := bufio.NewScanner(stdout)
-		if scanner.Scan() {
-			var ready struct {
-				Status string `json:"status"`
-				PID    int    `json:"pid"`
-				Token  string `json:"token"`
-				Error  string `json:"error"`
-			}
-			if err := json.Unmarshal(scanner.Bytes(), &ready); err != nil {
-				readyCh <- shimReadyMsg{"", fmt.Errorf("parse ready: %w", err)}
-				return
-			}
-			if ready.Status == "error" {
-				readyCh <- shimReadyMsg{"", fmt.Errorf("shim startup failed: %s", ready.Error)}
-				return
-			}
-			if ready.Status != "ready" {
-				readyCh <- shimReadyMsg{"", fmt.Errorf("unexpected status: %s", ready.Status)}
-				return
-			}
-			readyCh <- shimReadyMsg{ready.Token, nil}
-		} else {
-			readyCh <- shimReadyMsg{"", fmt.Errorf("shim exited before ready")}
-		}
-	}()
-
-	// Use NewTimer + defer Stop so the goroutine backing time.After does not
-	// park for 30s after a fast-path success or ctx cancellation. Under high
-	// start/restart pressure this previously accumulated up to thousands of
-	// live timer goroutines between GC cycles.
-	readyTimer := time.NewTimer(30 * time.Second)
-	defer readyTimer.Stop()
-
 	// killAndUnblock terminates the shim and closes the caller-side stdout
-	// pipe so the scanner goroutine spawned above is not left parked on a
-	// Read that won't return until the OS tears down the shim's stdout fd.
-	// Closing stdout here raises an error in the goroutine's Scan() and lets
-	// it deliver to the buffered readyCh + run its own defer stdout.Close()
-	// (double Close returns ErrClosed, which is harmless). Without this
-	// helper, a shim that ignores SIGTERM keeps the goroutine alive for up
-	// to its 4 h idle-timeout — under high-frequency restart pressure this
-	// previously accumulated dozens to hundreds of leaked goroutines.
-	// R40-CONCUR1 / R42-REL-SHIM-PGKILL.
+	// pipe so the scanner goroutine inside awaitReady is not left parked on
+	// a Read that won't return until the OS tears down the shim's stdout
+	// fd. Closing stdout here raises an error in the scanner's Scan() and
+	// lets it deliver to the buffered readyCh + run its own defer
+	// stdout.Close() (double Close returns ErrClosed, which is harmless).
+	// Without this helper, a shim that ignores SIGTERM keeps the goroutine
+	// alive for up to its 4 h idle-timeout — under high-frequency restart
+	// pressure this previously accumulated dozens to hundreds of leaked
+	// goroutines. R40-CONCUR1 / R42-REL-SHIM-PGKILL.
 	killAndUnblock := func() {
 		_ = stdout.Close()
 		_ = cmd.Process.Kill()
 	}
 
-	var tokenB64 string
-	select {
-	case result := <-readyCh:
-		if result.err != nil {
-			killAndUnblock()
-			return nil, result.err
-		}
-		tokenB64 = result.token
-	case <-readyTimer.C:
+	// awaitReady owns the scanner goroutine + 30s timer + 3-way select so
+	// the surrounding 7-step lifecycle script (R246-CR-005 / #740 P0
+	// subset) reads at one consistent abstraction level. Cleanup on every
+	// failure branch goes through killAndUnblock here, mirroring the
+	// downstream decode / connect / cgroup-move failure paths.
+	tokenB64, err := awaitReady(ctx, stdout, 30*time.Second)
+	if err != nil {
 		killAndUnblock()
-		return nil, fmt.Errorf("shim ready timeout")
-	case <-ctx.Done():
-		killAndUnblock()
-		return nil, ctx.Err()
+		return nil, err
 	}
 
 	tokenRaw, err := base64.StdEncoding.DecodeString(tokenB64)

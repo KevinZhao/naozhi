@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"path/filepath"
 	"time"
 
@@ -95,6 +94,14 @@ func buildCronHandlers(opts ServerOptions, claudeDir string) *CronHandlers {
 			rate.Every(2*time.Second), 6,
 			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
 		),
+		// R243-SEC-12 (#798): process-wide concurrency ceiling for
+		// /api/cron/runs/{run_id}/transcript. The per-IP runsLimiter
+		// gates request rate but not in-flight memory; without this
+		// semaphore N operators each saturating their bucket can park
+		// N × (8 MB LimitReader + 256 KB scanner buffer) in resident
+		// memory. See transcriptSemCap commentary for the cap
+		// rationale.
+		transcriptSem: make(chan struct{}, transcriptSemCap),
 	}
 }
 
@@ -188,12 +195,18 @@ func buildDiscoveryHandlers(
 //     well above interactive editing (a single user saves config sub-
 //     second after each edit) but well below abuse rates a script could
 //     reach.
+//
+// R247-ARCH-15 (#650): ctxFunc closure parameter retired. The handler
+// now stores `baseCtx` as a plain field that registerDashboard wires
+// via SetBaseContext once `s.hub` exists. The two-phase wiring is
+// unchanged (Hub still doesn't exist when buildProjectHandlers is
+// called); only the DI shape moved from a captured closure to a
+// direct field assign.
 func buildProjectHandlers(
 	opts ServerOptions,
 	resolver *session.KeyResolver,
 	nodeAccess *nodeAccessor,
 	nodeCache *node.CacheManager,
-	ctxFunc func() context.Context,
 ) *ProjectHandlers {
 	return &ProjectHandlers{
 		projectMgr:         opts.ProjectManager,
@@ -201,7 +214,6 @@ func buildProjectHandlers(
 		resolver:           resolver,
 		nodeAccess:         nodeAccess,
 		nodeCache:          nodeCache,
-		ctxFunc:            ctxFunc,
 		filesExistsLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, opts.TrustedProxy),
 		configPutLimiter:   newIPLimiterWithProxy(rate.Every(200*time.Millisecond), 5, opts.TrustedProxy),
 	}

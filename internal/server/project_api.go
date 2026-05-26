@@ -71,7 +71,17 @@ type ProjectHandlers struct {
 	resolver   *session.KeyResolver
 	nodeAccess NodeAccessor
 	nodeCache  *node.CacheManager
-	ctxFunc    func() context.Context // returns hub.ctx or Background
+	// baseCtx is the long-lived context the planner-restart timeout
+	// derives from. R247-ARCH-15 (#650): replaces a `ctxFunc func()
+	// context.Context` closure that captured `*Server` indirectly
+	// through `s.hub.ctx`. The closure-as-DI antipattern made test
+	// substitution awkward — every test had to rebuild a closure. Now
+	// tests assign `h.baseCtx = ctx` directly. Production wiring
+	// happens via `SetBaseContext` from registerDashboard once
+	// `s.hub.ctx` exists. Nil falls back to Background in restartCtx
+	// so a handler cannot panic on an un-wired ProjectHandlers
+	// (matches the prior closure's `Background()` fallback).
+	baseCtx context.Context
 	// filesExistsLimiter caps how often a single authenticated caller can
 	// invoke /api/projects/files/exists. The endpoint fans out up to
 	// maxExistsPaths (100) filesystem stats per request with a
@@ -92,6 +102,29 @@ type ProjectHandlers struct {
 	// Nil-safe in tests; handleConfigPut guards with a nil check.
 	// R247-SEC-7.
 	configPutLimiter *ipLimiter
+}
+
+// SetBaseContext wires the long-lived process context (typically
+// `Hub.ctx`) used by the planner-restart timeout. Called from
+// registerDashboard after the Hub is constructed. Pre-wiring tests
+// can assign `h.baseCtx` directly; this setter exists so production
+// callers don't need to reach into an unexported field. R247-ARCH-15
+// (#650).
+func (h *ProjectHandlers) SetBaseContext(ctx context.Context) {
+	h.baseCtx = ctx
+}
+
+// restartCtx returns the parent context for `handleRestartPlanner`'s
+// 30s timeout. Falls back to context.Background() when baseCtx has
+// not been wired (test paths that build ProjectHandlers by hand
+// without calling SetBaseContext). Mirrors the prior `ctxFunc`
+// closure's nil branch so behaviour is unchanged for existing call
+// sites. R247-ARCH-15 (#650).
+func (h *ProjectHandlers) restartCtx() context.Context {
+	if h.baseCtx != nil {
+		return h.baseCtx
+	}
+	return context.Background()
 }
 
 // GET /api/projects — list all projects (local + remote).
@@ -372,7 +405,7 @@ func (h *ProjectHandlers) handlePlannerRestart(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(h.ctxFunc(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(h.restartCtx(), 30*time.Second)
 	defer cancel()
 	if _, err := h.router.ResetAndRecreate(ctx, plannerKey, opts); err != nil {
 		slog.Error("planner restart failed", "project", name, "err", err)

@@ -892,12 +892,54 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 // forbidden (setting a second time replaces the first). Used by the
 // server-side tailer registry to stop tailers promptly once the parent
 // stream marks an agent task finished. nil clears.
+//
+// Prefer OnAgentTaskDone for new code: it returns a cancel func that
+// matches the Subscribe() idiom, so callback registration and channel
+// subscription share one mental model (R246-ARCH-20 / #802 P0 subset).
+// The set/clear semantics are unchanged here -- a future PR can promote
+// the field to a slice + EventFilter and unify the dispatch path itself.
 func (l *EventLog) SetOnAgentTaskDone(fn func(taskID, status string)) {
 	if fn == nil {
 		l.onAgentTaskDoneFn.Store(nil)
 		return
 	}
 	l.onAgentTaskDoneFn.Store(&fn)
+}
+
+// OnAgentTaskDone is the cancel-func form of SetOnAgentTaskDone per
+// R246-ARCH-20 / #802 (P0 subset). Registration shape now matches
+// Subscribe(): both return a cancel func that detaches the consumer
+// without the caller needing to remember "pass nil to clear".
+//
+// Multi-subscriber semantics still resolve to last-writer-wins because
+// the underlying single-pointer storage is unchanged in this P0 step --
+// the goal here is to unify the *registration idiom* so the eventlog
+// API surface stops asking callers to choose between Set/clear-via-nil
+// (callback channel) vs Subscribe/cancel (notification channel). A
+// follow-up PR can promote the storage to a []func + filter and the
+// idiom does not have to change again.
+//
+// The returned cancel is idempotent. If fn is nil, the call is a no-op
+// and the returned cancel is also a no-op (mirrors Subscribe's pre-
+// closed-channel-on-CloseSubscribers branch in spirit: callers can
+// safely defer cancel without conditional checks).
+func (l *EventLog) OnAgentTaskDone(fn func(taskID, status string)) func() {
+	if fn == nil {
+		return func() {}
+	}
+	stored := &fn
+	l.onAgentTaskDoneFn.Store(stored)
+	var cancelOnce sync.Once
+	return func() {
+		cancelOnce.Do(func() {
+			// CompareAndSwap so a later SetOnAgentTaskDone / OnAgentTaskDone
+			// caller's installed pointer is not clobbered by a stale cancel
+			// from this registration. Last-writer-wins is preserved without
+			// the cancel func acting as a delayed nil-clear on whatever the
+			// next consumer just installed.
+			l.onAgentTaskDoneFn.CompareAndSwap(stored, nil)
+		})
+	}
 }
 
 // loadAgentTaskDoneFn returns the current on-task-done callback so the
@@ -1388,8 +1430,61 @@ func (l *EventLog) notifySubscribers() {
 	l.subMu.RUnlock()
 }
 
+// EventSubscription wraps an EventLog notification channel together with the
+// matching cancel func so callers no longer pass a bare `<-chan struct{}`
+// across package boundaries. R246-ARCH-12 / #792 (P0 subset): the raw channel
+// surface forced every cross-package consumer (server/wshub, upstream
+// connector, session/managed) to internalize EventLog's close semantics --
+// "channel closed exactly once by either Cancel or CloseSubscribers, do not
+// close it yourself, do not assume close ⇒ unsubscribe". Bundling the two
+// into one value gives the eventlog package a single point of contact and
+// lets the close contract stay an internal invariant of (*subscriber).closeOnce.
+//
+// Hot-path callers still consume Notify() directly inside their `select` --
+// the wrapper has zero allocation cost beyond the existing make-channel
+// inside Subscribe (the EventSubscription struct is stack-allocated by the
+// caller's register-as-named-result path). Callers that need to thread the
+// cancel callback into a defer chain or a peer-cleanup map continue to use
+// the legacy Subscribe() return shape.
+type EventSubscription struct {
+	notify <-chan struct{}
+	cancel func()
+}
+
+// Notify returns the channel that fires (non-blocking, buffered-1) on every
+// EventLog.Append. Callers consume it inside a `select` arm. The channel is
+// closed by Cancel() or by EventLog.CloseSubscribers when the underlying
+// Process dies -- callers MUST NOT close it themselves.
+func (s EventSubscription) Notify() <-chan struct{} { return s.notify }
+
+// Cancel detaches this subscription from the EventLog and closes Notify().
+// Idempotent: a second call is a no-op. Safe to call from any goroutine,
+// including after CloseSubscribers has fired (the subscriber's closeOnce
+// guard makes the close re-entry safe).
+func (s EventSubscription) Cancel() {
+	if s.cancel != nil {
+		s.cancel()
+	}
+}
+
+// SubscribeNew is the typed, package-encapsulated form of Subscribe.
+// Returns an EventSubscription that owns both the notify channel and the
+// cancel func, hiding (*subscriber).closeOnce semantics from cross-package
+// callers per R246-ARCH-12 / #792. New call sites should prefer this entry
+// point; Subscribe() is retained for the existing fleet of callers that
+// already correctly wire the (channel, func) pair.
+func (l *EventLog) SubscribeNew() EventSubscription {
+	ch, cancel := l.Subscribe()
+	return EventSubscription{notify: ch, cancel: cancel}
+}
+
 // Subscribe returns a notification channel and an unsubscribe function.
 // The channel receives a signal (non-blocking) whenever Append is called.
+//
+// Prefer SubscribeNew for new code: it returns an EventSubscription value
+// that bundles (channel, cancel) together so the channel-close contract
+// stays an internal invariant of the eventlog package rather than a
+// cross-package convention every caller must learn (R246-ARCH-12 / #792).
 //
 // If CloseSubscribers has already been called (process is dying), returns a
 // channel that is already closed so the caller's select-on-notify arm fires

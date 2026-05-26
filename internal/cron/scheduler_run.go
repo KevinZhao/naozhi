@@ -117,14 +117,70 @@ func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubj
 	s.executeOpt(cur, viaTriggerNow)
 }
 
+// cleanupRunningJobIfIdle drops the s.runningJobs entry for jobID iff
+// the runInflight CAS gate is currently false (no in-flight execute()
+// holds it). R242-ARCH-15 (#758): the prior policy was "never clean,
+// bounded by maxJobsHardCap=500" — but a long-lived deployment that
+// adds and deletes thousands of cron jobs over weeks accumulates an
+// unbounded sync.Map of dead *runInflight structs, never freed.
+//
+// The original ID-reuse split-CAS concern (a fresh AddJob colliding on
+// the same 16-hex-char ID while the old execute() still holds the
+// pointer to the OLD guard) is mitigated three ways at this entry
+// point:
+//
+//  1. We only LoadAndDelete when running.Load() == false. If the gate
+//     is held, leave the entry alone — the executeOpt goroutine still
+//     holds the pointer and is about to releaseRun() on it. The caller
+//     can re-attempt cleanup later (or accept the per-job-id leak;
+//     bounded by jobs that get deleted while a run is in flight, an
+//     even narrower window than the original maxJobsHardCap bound).
+//  2. ID generation is crypto/rand 8 bytes (16 hex chars, 2^64 space);
+//     for the maxJobsHardCap=500 working set the birthday-paradox
+//     collision probability is ~2^-32 over the entire process lifetime
+//     — far below any other production race we accept.
+//  3. AddJob already retries on s.jobs collision (10 attempts, slog.Warn
+//     each) so a re-used ID would not silently slip in undetected; the
+//     window where new AddJob lands BEFORE the old run finishes is
+//     vanishingly thin.
+//
+// Returns true if the entry was deleted. Safe to call after s.mu is
+// released — sync.Map.LoadAndDelete needs no scheduler lock. Callers
+// invoke this from postCleanup branches that already run lock-free.
+func (s *Scheduler) cleanupRunningJobIfIdle(jobID string) bool {
+	v, ok := s.runningJobs.Load(jobID)
+	if !ok {
+		return false
+	}
+	inf, ok := v.(*runInflight)
+	if !ok || inf == nil {
+		// Defensive: an unexpected map value type implies the package
+		// invariant was violated upstream. LoadAndDelete still cleans it.
+		s.runningJobs.LoadAndDelete(jobID)
+		return true
+	}
+	if inf.running.Load() {
+		// In-flight execute() goroutine still holds the pointer and is
+		// about to releaseRun(); skip — leaking THIS one entry until the
+		// next DeleteJob sweep is cheaper than risking a CAS-gate split
+		// against a (vanishingly rare) ID-reuse collision.
+		return false
+	}
+	s.runningJobs.LoadAndDelete(jobID)
+	return true
+}
+
 // jobInflight returns a lazily created *runInflight per job ID. The
 // embedded atomic.Bool keeps the original CAS-gate semantics (used by
 // executeOpt to reject concurrent runs); the surrounding metadata fields
 // expose RunID/StartedAt/Phase to the list API for the cron-run-history
 // P0 visibility work.
 //
-// Entries are intentionally NOT cleared on DeleteJob — see runningJobs's
-// struct comment for the ID-reuse split-CAS rationale.
+// Entries are reclaimed on DeleteJob via cleanupRunningJobIfIdle when
+// the CAS gate is idle (R242-ARCH-15 / #758). The prior never-cleanup
+// policy was a worst-case bound of maxJobsHardCap=500 entries; in long-
+// lived deployments that delete and re-add jobs the working set could
+// grow without limit.
 func (s *Scheduler) jobInflight(id string) *runInflight {
 	if v, ok := s.runningJobs.Load(id); ok {
 		if inf, ok := v.(*runInflight); ok && inf != nil {

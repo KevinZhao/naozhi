@@ -197,11 +197,31 @@ type SchedulerConfig struct {
 	RunsKeepWindow time.Duration
 }
 
+// chatJobKey identifies a (Platform, ChatID) pair for the per-chat job
+// counter. R237-PERF-5 (#661): replaces the O(N) scan over s.jobs that
+// addJobAcquiringLock used to enforce maxJobsPerChat. The scan held s.mu
+// across maxJobs entries on every AddJob — a direct hot-path block on
+// the dashboard 1Hz add path. With this counter map the per-chat
+// capacity check is one map lookup. Updates piggy-back on the already-
+// locked s.mu sections in addJobAcquiringLock / deleteJobLocked / Start
+// so the counter never drifts from len-by-chat(s.jobs).
+type chatJobKey struct {
+	Platform string
+	ChatID   string
+}
+
 // Scheduler manages cron jobs and executes them on schedule.
 type Scheduler struct {
 	cron *robfigcron.Cron
 	mu   sync.RWMutex
 	jobs map[string]*Job
+	// chatJobCount tracks the number of jobs per (Platform, ChatID) chat.
+	// Maintained synchronously with s.jobs writes under s.mu so the
+	// per-chat capacity check in addJobAcquiringLock is O(1) instead of
+	// O(maxJobs). Entries are deleted when the count hits zero so the
+	// map's working set tracks the live chat set rather than every chat
+	// that has ever owned a job. R237-PERF-5 (#661).
+	chatJobCount map[chatJobKey]int
 	// router is set once in NewScheduler and never reassigned.
 	router SessionRouter
 	// platforms / agents / agentCommands are populated from SchedulerConfig
@@ -696,6 +716,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 			),
 		),
 		jobs:                make(map[string]*Job),
+		chatJobCount:        make(map[chatJobKey]int),
 		router:              cfg.Router,
 		platforms:           cfg.Platforms,
 		agents:              cfg.Agents,
@@ -852,6 +873,7 @@ func (s *Scheduler) Start() error {
 		}
 		if j.Paused {
 			s.jobs[j.ID] = j
+			s.chatJobCount[chatJobKey{Platform: j.Platform, ChatID: j.ChatID}]++
 			stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 			continue
 		}
@@ -860,6 +882,7 @@ func (s *Scheduler) Start() error {
 			continue
 		}
 		s.jobs[j.ID] = j
+		s.chatJobCount[chatJobKey{Platform: j.Platform, ChatID: j.ChatID}]++
 		stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 	}
 	jobCount := len(s.jobs)

@@ -119,6 +119,64 @@ func releaseTailerSubsSlice(s []*wsClient, h tailerSubsHandle) {
 	tailerSubsPool.Put(h.sp)
 }
 
+// tailerBufferedPool reuses []cli.EventEntry buffers used by attach()
+// to copy the in-memory ring under lock and replay events to a new
+// subscriber outside the lock. Without the pool, every agent_subscribe
+// path allocated a fresh buffer of up to 500 EventEntry values
+// (~140 KB) inside t.mu — the lock window is short, but the allocation
+// itself is GC-visible and was the #1 attach-path alloc per
+// R249-PERF-4 (#926) profiling. Reuse pattern matches tailerSubsPool:
+// pointer-to-slice in the pool so the slice metadata round-trips on
+// the same heap object, and a handle wrapper so the same pointer comes
+// back through Put.
+//
+// Default cap is 16 (the typical attach replays a handful of events
+// for a fresh tab joining mid-run); larger replays grow the slice via
+// append() inside attach() and the grown slice returns to the pool so
+// subsequent attaches at similar sizes skip the growth.
+var tailerBufferedPool = sync.Pool{
+	New: func() any {
+		s := make([]cli.EventEntry, 0, 16)
+		return &s
+	},
+}
+
+// tailerBufferedHandle wraps the pool entry pointer so attach() can
+// hand back the *exact* pointer it pulled. Same rationale as
+// tailerSubsHandle (taking &local would force the local to escape to
+// the heap on every attach call).
+type tailerBufferedHandle struct {
+	sp *[]cli.EventEntry
+}
+
+// acquireTailerBufferedSlice returns a reusable []cli.EventEntry with
+// len==0 and cap >= hint plus the handle the caller must hand back.
+// R249-PERF-4 (#926).
+func acquireTailerBufferedSlice(hint int) ([]cli.EventEntry, tailerBufferedHandle) {
+	sp := tailerBufferedPool.Get().(*[]cli.EventEntry)
+	s := (*sp)[:0]
+	if cap(s) < hint {
+		s = make([]cli.EventEntry, 0, hint)
+	}
+	*sp = s
+	return s, tailerBufferedHandle{sp: sp}
+}
+
+// releaseTailerBufferedSlice zero-clears each EventEntry (so its
+// embedded pointers — Images, ToolCall, Message bytes — become
+// GC-eligible immediately rather than pinning whatever the previous
+// attach handed us) and returns the slice to the pool. Nil-handle-safe.
+func releaseTailerBufferedSlice(s []cli.EventEntry, h tailerBufferedHandle) {
+	if h.sp == nil {
+		return
+	}
+	for i := range s {
+		s[i] = cli.EventEntry{}
+	}
+	*h.sp = s[:0]
+	tailerBufferedPool.Put(h.sp)
+}
+
 // agentTailer streams a single agent jsonl to any number of subscribed
 // wsClients and tracks aggregate stats (LastTool/ToolUses/DurationMS) for
 // enrichSnapshot consumers even when no client is listening.
@@ -350,13 +408,26 @@ func (r *tailerRegistry) attach(tk tailerKey, c *wsClient) bool {
 		t.subs[c] = struct{}{}
 		t.refCount.Add(1)
 	}
-	buffered := make([]cli.EventEntry, len(t.buffered))
-	copy(buffered, t.buffered)
+	// R249-PERF-4 (#926): pool the replay buffer instead of allocating
+	// a fresh up-to-500-element []cli.EventEntry per attach. The pool
+	// is keyed by len(t.buffered) so a tab joining a hot run with 500
+	// buffered events grows the underlying slice once and subsequent
+	// attaches at similar buffer depths reuse the grown slice. The
+	// copy-out under lock is unchanged — we still snapshot the ring
+	// here so the replay loop below runs lock-free; only the
+	// destination slice is now reused across calls.
+	buffered, bufferedHandle := acquireTailerBufferedSlice(len(t.buffered))
+	buffered = append(buffered, t.buffered...)
 	meta := t.meta
 	t.mu.Unlock()
 
 	// Replay buffered events to the new subscriber outside the lock so a
-	// slow client cannot stall other subscribers.
+	// slow client cannot stall other subscribers. Defer the pool
+	// release until after the replay so the SendJSON loop can borrow
+	// the slice without a copy; releaseTailerBufferedSlice zero-clears
+	// each EventEntry before returning the slice so the pool does not
+	// pin Images / ToolCall / Message pointers across calls.
+	defer releaseTailerBufferedSlice(buffered, bufferedHandle)
 	for i := range buffered {
 		e := buffered[i]
 		c.SendJSON(node.ServerMsg{
