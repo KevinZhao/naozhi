@@ -514,10 +514,7 @@ func (s *Server) registerDashboard() {
 	// reading or echoing the body — http.Error never reflects request data, and we
 	// never call ParseForm/decodeJSONBody so the token bytes are discarded by the
 	// kernel without ever entering our address space.
-	s.mux.HandleFunc("POST /dashboard", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Allow", "GET")
-		http.Error(w, "POST not supported; sign in via the login form (JavaScript required)", http.StatusMethodNotAllowed)
-	})
+	s.mux.HandleFunc("POST /dashboard", s.handleDashboardPostReject)
 	s.mux.HandleFunc("GET /manifest.json", s.handleManifest)
 	s.mux.HandleFunc("GET /sw.js", s.handleSW)
 	s.mux.HandleFunc("GET /static/dashboard.js", s.handleDashboardJS)
@@ -526,6 +523,13 @@ func (s *Server) registerDashboard() {
 	if s.reverseNodeServer != nil {
 		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
 	}
+}
+
+// handleDashboardPostReject answers POST /dashboard with 405 without reading
+// or echoing the request body — see #800 / R243-SEC-15.
+func (s *Server) handleDashboardPostReject(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Allow", "GET")
+	http.Error(w, "POST not supported; sign in via the login form (JavaScript required)", http.StatusMethodNotAllowed)
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
