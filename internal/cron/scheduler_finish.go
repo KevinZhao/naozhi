@@ -299,7 +299,17 @@ func sanitiseRunErrMsg(s string) string {
 // short-circuit keeps the synthetic run off disk (it only exists in the
 // WS broadcast stream).
 func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
-	runID := generateRunID()
+	runID, err := generateRunID()
+	if err != nil {
+		// R242-CR-14 (#706): emitOverlapSkipped 仅产生一对 RunStarted +
+		// RunEnded 信息事件给 dashboard 消费，没有持久化、没有副作用。
+		// 没有 RunID 就无法构造合法事件，悄悄丢弃比起 panic 进程是更好
+		// 的折衷 —— overlap 本身已经是「这次没跑」，多丢一个 informational
+		// event 不影响 cron job 的下次正常执行。
+		slog.Error("cron: failed to generate overlap-skipped run ID; suppressing event",
+			"job_id", j.ID, "trigger_now", viaTriggerNow, "err", err)
+		return
+	}
 	startedAt := time.Now()
 	trigger := TriggerScheduled
 	if viaTriggerNow {

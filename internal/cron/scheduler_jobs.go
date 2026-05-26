@@ -96,7 +96,15 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 		return nil, fmt.Errorf("per-chat cron limit reached (%d)", s.maxJobsPerChat)
 	}
 
-	j.ID = generateID()
+	id, err := generateID()
+	if err != nil {
+		// R242-CR-14 (#706): crypto/rand 失败由 generateID 透传，AddJob 是
+		// 公共入口（dashboard / IM 创建任务），失败应表现为 add 请求拒绝
+		// 而非进程 panic。10 次重试圈仅对 ID 碰撞有意义；rand 整体失效
+		// 时所有重试都会复现同一错误，提早 bail 比循环 10 次更诚实。
+		return nil, fmt.Errorf("cron: generate job id: %w", err)
+	}
+	j.ID = id
 	// Retry on unlikely ID collision. Bound the loop so a hypothetical
 	// degenerate generateID (e.g., a test that injects a deterministic mock
 	// or a /dev/urandom failure path) cannot spin AddJob under s.mu and
@@ -113,7 +121,12 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 		// operators see the pattern (same ID repeating) before users hit
 		// AddJob errors.
 		slog.Warn("cron: job ID collision, retrying", "attempt", i+1, "job_id", j.ID)
-		j.ID = generateID()
+		retryID, retryErr := generateID()
+		if retryErr != nil {
+			// 同上：rand 中途失效，提早返回比继续循环更诚实。
+			return nil, fmt.Errorf("cron: regenerate job id (retry %d): %w", i+1, retryErr)
+		}
+		j.ID = retryID
 	}
 	if _, exists := s.jobs[j.ID]; exists {
 		return nil, fmt.Errorf("cron: failed to generate unique job ID after 10 attempts")

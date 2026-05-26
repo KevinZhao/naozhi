@@ -563,11 +563,31 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		inflight.running.Store(false)
 		metrics.CronRunInflight.Add(-1)
 	}()
+	// R242-CR-14 (#706): metrics.CronRunInflight semantically tracks "how
+	// many jobs hold the CAS slot right now", which is exactly the window
+	// the defer guards. The historical placement was after metadata
+	// population — fine when the only exit between defer and Add(+1) was
+	// success, but the new generateRunID error branch returns before
+	// reaching it, so the defer's Add(-1) would underflow the gauge.
+	// Hoisting Add(+1) here pairs it with the defer's Add(-1) on every
+	// early-return path (rand failure today, future preconditions later).
+	metrics.CronRunInflight.Add(1)
 
 	// Populate the inflight metadata under the CAS-true window. RunID is
 	// generated once per run; StartedAt is captured before jitter so the
 	// "running 12s" badge in the UI counts true wall-clock from CAS.
-	runID := generateRunID()
+	runID, err := generateRunID()
+	if err != nil {
+		// R242-CR-14 (#706): crypto/rand 不可用时不能 panic 整个进程 ——
+		// cron tick 是后台 goroutine，panic 会被 robfig/cron 的 wrapper
+		// recover 但接下来这个 job 的 entry 也不会再正常工作；不如直接
+		// log + skip 该次 tick，下一周期自然恢复（getrandom 失效是瞬时的
+		// 内核事件）。defer 已经覆盖 inflight 释放 + CronRunInflight
+		// 配对，无需手动清理。
+		slog.Error("cron: failed to generate run ID; skipping tick",
+			"job_id", j.ID, "trigger_now", viaTriggerNow, "err", err)
+		return
+	}
 	startedAt := time.Now()
 	trigger := TriggerScheduled
 	if viaTriggerNow {
@@ -587,7 +607,6 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// R247-GO-1: freshSnap is set authoritatively from snap.fresh after
 	// snapshotJob runs under s.mu (line ~447); writing j.FreshContext here
 	// without the lock was redundant and -race-suspect.
-	metrics.CronRunInflight.Add(1)
 	// CronRunStartedTotal bumps inside emitRunStarted (R230C-GO-15).
 
 	// Apply jitter after CAS, before snapshot. After-CAS so concurrent overlap
