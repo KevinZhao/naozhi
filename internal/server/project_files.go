@@ -962,8 +962,20 @@ func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, re
 	// allow-same-origin), NOT from CSP — script execution here cannot read
 	// dashboard cookies regardless. Removing 'unsafe-inline' would silently
 	// break inline math rendering with no security benefit.
+	//
+	// R245-SEC-10: img-src deliberately restricted to data: blob: only.
+	// 'self' here is the document's blob: URL origin (opaque), so the
+	// keyword adds no real loading capability for the rendered HTML —
+	// but a workspace document loaded via a future code-path that flipped
+	// back to a same-origin document URL would be able to phone home with
+	// `<img src=/api/sessions/state>` etc., probing dashboard endpoints
+	// for side-channel signal (load timing → state-change tracking) even
+	// though credentials are stripped by COEP/CORP. Tighten to data: blob:
+	// so cron transcript / report HTML can still inline base64 PNGs and
+	// load chart-lib-generated blob URLs, while every other origin is
+	// refused at the CSP layer regardless of how the document is served.
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; sandbox allow-scripts; script-src 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'unsafe-inline'; img-src 'self' data: blob:; font-src data:")
+		"default-src 'none'; sandbox allow-scripts; script-src 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'unsafe-inline'; img-src data: blob:; font-src data:")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	// Workspace bytes must not sit in shared proxy caches under no-auth

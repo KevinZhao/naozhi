@@ -1049,6 +1049,19 @@ func TestHandleFileGet_RenderHTML(t *testing.T) {
 			t.Errorf("CSP must not grant sandbox token %q (collapses opaque-origin isolation), got %q", forbidden, csp)
 		}
 	}
+	// R245-SEC-10: img-src must NOT include 'self'. The rendered HTML lives
+	// in an opaque blob: origin so 'self' adds no real loading capability
+	// today, but a future regression that flips the document back to a
+	// same-origin URL would let the workspace HTML phone home through
+	// `<img src=/api/...>` probes (load-timing exfil, side-channel state
+	// signal). data: + blob: cover legitimate inline-PNG / chart-blob use
+	// cases without granting any cross-origin loading permission.
+	if strings.Contains(csp, "img-src 'self'") {
+		t.Errorf("CSP img-src must not include 'self' (R245-SEC-10): got %q", csp)
+	}
+	if !strings.Contains(csp, "img-src data: blob:") {
+		t.Errorf("CSP img-src directive missing or not data:+blob: only; got %q", csp)
+	}
 	if corp := w.Header().Get("Cross-Origin-Resource-Policy"); corp != "same-origin" {
 		t.Errorf("Cross-Origin-Resource-Policy = %q, want same-origin", corp)
 	}
