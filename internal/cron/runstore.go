@@ -798,6 +798,12 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 	})
 
 	out := make([]CronRunSummary, 0, limit)
+	// R20260526-CR-018 (#1227): count corrupt / unreadable run files seen
+	// during the scan. Per-entry errors stay at Debug to avoid log-spam on
+	// busy jobs, but a non-zero aggregate (Warn) makes it visible that
+	// warmCache silently dropped rows — useful when an operator reports
+	// "expected 50 runs but List only shows 47".
+	corrupt := 0
 	for _, it := range items {
 		if len(out) >= limit {
 			break
@@ -810,12 +816,16 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 		// the warmCache pass.
 		run, err := s.readRunNoLstat(path)
 		if err != nil {
+			corrupt++
 			continue
 		}
 		if !before.IsZero() && !run.StartedAt.Before(before) {
 			continue
 		}
 		out = append(out, run.summary())
+	}
+	if corrupt > 0 {
+		slog.Warn("cron run: list dropped corrupt entries", "job_id", jobID, "corrupt", corrupt, "scanned", len(items))
 	}
 	return out
 }
