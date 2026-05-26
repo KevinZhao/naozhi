@@ -114,6 +114,51 @@ func TestNewIPLimiterWithCap_RaisesLRUFloorAboveDefault(t *testing.T) {
 	}
 }
 
+// TestNewIPLimiterWithProxy_DefaultMaxKeysAlignsWithAuth pins R241-SEC-14
+// / #473: every newIPLimiterWithProxy bucket MUST inherit the 10000-key
+// LRU cap that the auth-side limiters (loginLimiter / wsUpgradeLimiter)
+// explicitly set, rather than the 1000-key ratelimit package default.
+// Misalignment means a flood of fresh attacker IPs evicts older legit
+// rate-limited entries from the unspecified buckets (uploadLimiter /
+// sendLimiter / openLimit / filesExistsLimiter / configPutLimiter /
+// transcribeLimiter / dashboard memory limiter) while the auth side
+// stays correctly sized — uneven hardening across paths facing the same
+// threat model.
+//
+// We exercise the cap by inserting 1500 distinct IPs after burning IP
+// #1's bucket. With the default still at 1000 (the regression we lock
+// against) IP #1 is evicted around insert 1001 and a fresh bucket lets
+// it back through; with the explicit 10000-key default it is preserved.
+//
+// The test uses newIPLimiterWithProxy directly so a future refactor that
+// removes the explicit MaxKeys/TTL pass — even silently via a code-mod
+// of the helper — re-surfaces the regression.
+func TestNewIPLimiterWithProxy_DefaultMaxKeysAlignsWithAuth(t *testing.T) {
+	l := newIPLimiterWithProxy(rate.Every(time.Hour), 1, false)
+
+	r1 := httptest.NewRequest("GET", "/api/anything", nil)
+	r1.RemoteAddr = "10.0.0.1:1000"
+	if !l.AllowRequest(r1) {
+		t.Fatalf("first call for IP #1 must succeed (fresh bucket)")
+	}
+	if l.AllowRequest(r1) {
+		t.Fatalf("second call for IP #1 must fail (no refill in test wall-time)")
+	}
+
+	// 1500 distinct IPs — overshoots the 1000-key default by 50% to
+	// guarantee eviction would have happened, while staying well under
+	// the 10000-key explicit cap.
+	for i := 2; i <= 1501; i++ {
+		r := httptest.NewRequest("GET", "/api/anything", nil)
+		r.RemoteAddr = fmt.Sprintf("10.%d.%d.%d:1000", i/65536, (i/256)%256, i%256)
+		_ = l.AllowRequest(r)
+	}
+
+	if l.AllowRequest(r1) {
+		t.Fatalf("R241-SEC-14 regression: IP #1 evicted under 1500-key load — newIPLimiterWithProxy default cap regressed below %d", defaultIPLimiterMaxKeys)
+	}
+}
+
 // TestRequestHasResolvableClientIP_TrustedProxy_XFFShapes validates the
 // XFF parse rules used by the gate: tail of comma list, surrounding
 // whitespace, and ParseIP rejection of garbage.

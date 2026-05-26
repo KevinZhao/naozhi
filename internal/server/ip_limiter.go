@@ -18,9 +18,30 @@ type ipLimiter struct {
 	trustedProxy bool
 }
 
+// defaultIPLimiterMaxKeys / defaultIPLimiterTTL pin the LRU cap + idle TTL
+// applied by newIPLimiterWithProxy when callers don't override via
+// newIPLimiterWithCap. R241-SEC-14 / #473: the previous shape passed
+// nothing, falling back to ratelimit.New defaults (1000 / 10m). Sibling
+// limiters in dashboard_auth (loginLimiter / wsUpgradeLimiter) explicitly
+// pin maxLoginLimiters=10000, so an attacker IP-flood that filled the
+// 1000-key LRU evicted older legit rate-limited entries while the auth
+// buckets stayed correctly sized — diverging DoS-hardening between paths
+// that face the same threat model. Lifting the default to 10000/1h aligns
+// every newIPLimiterWithProxy site with the auth limiters and keeps the
+// per-bucket worst-case memory at ~1.2 MiB (10k × ~120B entry).
+const (
+	defaultIPLimiterMaxKeys = 10_000
+	defaultIPLimiterTTL     = time.Hour
+)
+
 func newIPLimiterWithProxy(r rate.Limit, burst int, trustedProxy bool) *ipLimiter {
 	return &ipLimiter{
-		inner:        ratelimit.New(ratelimit.Config{Rate: r, Burst: burst}),
+		inner: ratelimit.New(ratelimit.Config{
+			Rate:    r,
+			Burst:   burst,
+			MaxKeys: defaultIPLimiterMaxKeys,
+			TTL:     defaultIPLimiterTTL,
+		}),
 		trustedProxy: trustedProxy,
 	}
 }
