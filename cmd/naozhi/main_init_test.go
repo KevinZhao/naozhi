@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/config"
 )
@@ -108,6 +109,82 @@ func TestInitBackendWrappers_NoUsableBackend(t *testing.T) {
 	}
 	if len(bws.Wrappers) != 0 {
 		t.Errorf("expected empty Wrappers map on no-usable-backend path; got %d entries", len(bws.Wrappers))
+	}
+}
+
+// TestBackendsHaveHealthySibling locks the policy decision used by the
+// R245-ARCH-43 (#903) softened startup path: when the default backend's
+// --version probe fails, initBackendWrappers now continues startup if any
+// non-default sibling is healthy. The helper is the single seam between
+// "fail fast" and "warn and continue" so a future reviewer who re-tightens
+// the policy sees the test fixture flip clearly.
+func TestBackendsHaveHealthySibling(t *testing.T) {
+	t.Parallel()
+
+	mk := func(id, version string) *cli.Wrapper {
+		// NewWrapperLazy skips the --version subprocess so the test can
+		// pin CLIVersion directly without a real binary on disk.
+		w := cli.NewWrapperLazy("/tmp/"+id, nil, id)
+		w.CLIVersion = version
+		return w
+	}
+
+	cases := []struct {
+		name      string
+		wrappers  map[string]*cli.Wrapper
+		defaultID string
+		want      bool
+	}{
+		{
+			name:      "empty map → no sibling",
+			wrappers:  map[string]*cli.Wrapper{},
+			defaultID: "claude",
+			want:      false,
+		},
+		{
+			name: "only default present, even if healthy → no sibling",
+			wrappers: map[string]*cli.Wrapper{
+				"claude": mk("claude", "1.2.3"),
+			},
+			defaultID: "claude",
+			want:      false,
+		},
+		{
+			name: "sibling unhealthy → no sibling",
+			wrappers: map[string]*cli.Wrapper{
+				"claude": mk("claude", ""),
+				"kiro":   mk("kiro", ""),
+			},
+			defaultID: "claude",
+			want:      false,
+		},
+		{
+			name: "sibling healthy → has sibling (the #903 fallback case)",
+			wrappers: map[string]*cli.Wrapper{
+				"claude": mk("claude", ""),
+				"kiro":   mk("kiro", "0.7.1"),
+			},
+			defaultID: "claude",
+			want:      true,
+		},
+		{
+			name: "default healthy + sibling healthy → has sibling (irrelevant but consistent)",
+			wrappers: map[string]*cli.Wrapper{
+				"claude": mk("claude", "1.2.3"),
+				"kiro":   mk("kiro", "0.7.1"),
+			},
+			defaultID: "claude",
+			want:      true,
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := backendsHaveHealthySibling(c.wrappers, c.defaultID); got != c.want {
+				t.Errorf("backendsHaveHealthySibling=%v want=%v", got, c.want)
+			}
+		})
 	}
 }
 
