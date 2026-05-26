@@ -43,6 +43,21 @@ import (
 // pathological JSONL files (long-lived fresh=false sessions accumulate
 // turns from many runs into one file — see internal/cron/run.go:48).
 
+// transcriptSemCap caps concurrent transcript requests across the
+// whole process. R243-SEC-12 (#798): each in-flight transcript holds
+// a 256 KB scanner buffer + 8 MB LimitReader budget; without a
+// process-wide ceiling, N concurrent authenticated operators can each
+// drive their own per-IP bucket and pile up N×8 MB of file-mapped
+// pages. 8 mirrors the dashboard's typical "few operators, occasional
+// detail-drawer fan-out" workload — enough headroom that two users
+// inspecting parallel runs don't 503 each other while still capping
+// the memory amplifier at 8 × 8 MB = 64 MB. Tuned by the same
+// reasoning as transcribeSemCap (which gates ffmpeg runs at 3); the
+// higher cap here reflects that transcript reads are I/O-bound, not
+// CPU-bound, so the bottleneck is buffer memory rather than work
+// throughput.
+const transcriptSemCap = 8
+
 const (
 	// maxTranscriptBytes is the hard cap on bytes read from the JSONL
 	// file. Beyond this we set truncated:true and stop. 8 MB roughly
@@ -250,6 +265,33 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
 		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
 		return
+	}
+	// R243-SEC-12 (#798): cap concurrent in-flight transcript reads.
+	// Each running scan holds 256 KB of bufio.Scanner buffer plus an
+	// 8 MB LimitReader budget; without this gate, N distinct
+	// authenticated operators can each saturate their per-IP
+	// runsLimiter and collectively park N×8 MB of file-mapped pages
+	// + N×256 KB of scanner buffers. The non-blocking acquire keeps
+	// the failure mode "503 immediately" instead of "slow-loris
+	// holds a goroutine open until the request context expires" —
+	// matches the transcribeSemCap pattern. Acquired BEFORE the
+	// scheduler-nil check so the gate is testable in isolation
+	// (handlers built without a scheduler can still exercise the
+	// busy fast-fail path); a 503 here also short-circuits the
+	// scheduler lookup, which is mildly cheaper than the reverse
+	// ordering. Nil-guarded so older hand-rolled CronHandlers
+	// fixtures (newCronHandlersForTest) skip the gate.
+	if h.transcriptSem != nil {
+		select {
+		case h.transcriptSem <- struct{}{}:
+			defer func() { <-h.transcriptSem }()
+		case <-r.Context().Done():
+			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcript busy"})
+			return
+		default:
+			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcript busy"})
+			return
+		}
 	}
 	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)

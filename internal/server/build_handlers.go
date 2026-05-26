@@ -94,6 +94,14 @@ func buildCronHandlers(opts ServerOptions, claudeDir string) *CronHandlers {
 			rate.Every(2*time.Second), 6,
 			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
 		),
+		// R243-SEC-12 (#798): process-wide concurrency ceiling for
+		// /api/cron/runs/{run_id}/transcript. The per-IP runsLimiter
+		// gates request rate but not in-flight memory; without this
+		// semaphore N operators each saturating their bucket can park
+		// N × (8 MB LimitReader + 256 KB scanner buffer) in resident
+		// memory. See transcriptSemCap commentary for the cap
+		// rationale.
+		transcriptSem: make(chan struct{}, transcriptSemCap),
 	}
 }
 
