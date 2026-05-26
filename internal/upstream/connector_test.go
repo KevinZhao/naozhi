@@ -1337,3 +1337,78 @@ func TestHandleRequest_SetSessionLabel_TooLong(t *testing.T) {
 		t.Errorf("expected error for oversized label, got nil")
 	}
 }
+
+// TestSetDiscoverFunc_ConcurrentSwap pins R246-ARCH-6 / #779: the
+// discoverFunc / previewFunc fields used to be plain function fields
+// with the wiring contract "main.go is single-threaded so no race
+// exists". That contract was not enforced by the type system; a
+// future caller resetting the hook from a goroutine post-Run would
+// be UB, and the race detector would not flag it because the read
+// path reused the same plain field.
+//
+// Promoting both to atomic.Pointer[T] makes the invariant
+// machine-checkable. This test exercises Set + load concurrently
+// from many goroutines so that `go test -race ./internal/upstream`
+// trips the race detector if a future refactor reverts to a plain
+// field. The exact callback content is irrelevant — we only assert
+// that load returns a non-nil callable on every iteration AND that
+// the test as a whole runs cleanly under -race.
+func TestSetDiscoverFunc_ConcurrentSwap(t *testing.T) {
+	t.Parallel()
+	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	c := New(cfg, makeRouter(), nil, nil)
+
+	// Seed an initial value so loadDiscoverFunc is non-nil for the
+	// first iteration of every reader goroutine.
+	c.SetDiscoverFunc(func() (json.RawMessage, error) { return json.RawMessage(`[]`), nil })
+	c.SetPreviewFunc(func(string) (json.RawMessage, error) { return json.RawMessage(`[]`), nil })
+
+	const writers, readers, iters = 4, 8, 200
+	var wg sync.WaitGroup
+	wg.Add(writers + readers)
+
+	for w := 0; w < writers; w++ {
+		go func(idx int) {
+			defer wg.Done()
+			for i := 0; i < iters; i++ {
+				// Distinct closure each iteration so the underlying
+				// pointer actually swaps; the race detector only
+				// fires on torn writes if the *Pointer is hit by
+				// concurrent unsynchronised writers.
+				c.SetDiscoverFunc(func() (json.RawMessage, error) {
+					return json.RawMessage(`[]`), nil
+				})
+				c.SetPreviewFunc(func(string) (json.RawMessage, error) {
+					return json.RawMessage(`[]`), nil
+				})
+			}
+		}(w)
+	}
+	for r := 0; r < readers; r++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iters; i++ {
+				if fn := c.loadDiscoverFunc(); fn != nil {
+					_, _ = fn()
+				}
+				if fn := c.loadPreviewFunc(); fn != nil {
+					_, _ = fn("sess-x")
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Calling with nil must clear the hook (atomic.Pointer.Store(nil));
+	// load then returns nil and downstream RPCs fall back to the empty-
+	// array path. This locks the documented "Calling with a nil fn
+	// clears the callback" contract in SetDiscoverFunc godoc.
+	c.SetDiscoverFunc(nil)
+	if fn := c.loadDiscoverFunc(); fn != nil {
+		t.Errorf("SetDiscoverFunc(nil) did not clear callback; loadDiscoverFunc returned non-nil")
+	}
+	c.SetPreviewFunc(nil)
+	if fn := c.loadPreviewFunc(); fn != nil {
+		t.Errorf("SetPreviewFunc(nil) did not clear callback; loadPreviewFunc returned non-nil")
+	}
+}

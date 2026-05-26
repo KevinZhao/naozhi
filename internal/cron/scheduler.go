@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -705,11 +706,27 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	// mtime in that window. Run the same MkdirAll(0o700) eagerly at
 	// construction; once.Do later in saveMarshaledSeq becomes a no-op,
 	// so the hot-path cost is unchanged.
+	//
+	// R238-SEC-10 (#830): MkdirAll only sets permissions when CREATING
+	// the directory — if the operator pre-created the parent data dir
+	// (or it inherited XDG_CONFIG_HOME at 0o755), MkdirAll is a no-op
+	// and the broader perms persist. Defense-in-depth: Chmod(0o700)
+	// after MkdirAll so the parent directory is always clamped to
+	// owner-only. Both `cron_jobs.json` (0o600) and `runs/` (0o700) are
+	// already restrictive; tightening the parent prevents other local
+	// users from listing the cron data dir's contents (e.g. confirming
+	// cron_jobs.json's existence and mtime). Failures are logged and
+	// non-fatal — perms may already be tighter, or we may not own the
+	// dir; in either case the per-file modes are still the strict
+	// barrier.
 	if cfg.StorePath != "" {
 		s.storeDirOnce.Do(func() {
 			if dir := filepath.Dir(cfg.StorePath); dir != "" && dir != "." {
 				if err := os.MkdirAll(dir, 0o700); err != nil {
 					slog.Warn("cron store parent dir mkdir failed (eager)", "err", err, "dir", dir)
+				}
+				if err := os.Chmod(dir, 0o700); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					slog.Warn("cron store parent dir chmod failed (eager)", "err", err, "dir", dir)
 				}
 			}
 		})

@@ -11,7 +11,9 @@ package cron
 import (
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -166,10 +168,17 @@ func (s *Scheduler) saveMarshaledSeq(data []byte, seq uint64) {
 	// sync.Once keeps the MkdirAll out of the per-mutation hot path; if the
 	// directory disappears later (operator rm -rf), WriteFileAtomic will
 	// surface ENOENT and the operator can recover by restarting.
+	//
+	// R238-SEC-10 (#830): MkdirAll skips perm changes on an existing dir;
+	// follow with Chmod(0o700) so a pre-existing 0o755 parent gets clamped.
+	// Mirror of the eager NewScheduler path.
 	s.storeDirOnce.Do(func() {
 		if dir := filepath.Dir(s.storePath); dir != "" && dir != "." {
 			if err := os.MkdirAll(dir, 0o700); err != nil {
 				slog.Warn("cron store parent dir mkdir failed", "err", err, "dir", dir)
+			}
+			if err := os.Chmod(dir, 0o700); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				slog.Warn("cron store parent dir chmod failed", "err", err, "dir", dir)
 			}
 		}
 	})

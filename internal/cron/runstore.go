@@ -810,6 +810,25 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 		if len(out) >= limit {
 			break
 		}
+		// R238-GO-8 (#796): coarse mtime cutoff on `before`-paginated lists.
+		// runStore.Append writes the JSON once at finishRun time, so mtime
+		// ≈ EndedAt ≥ StartedAt within the run's wall-clock duration —
+		// itself bounded by SchedulerConfig.ExecTimeout (default 5 min).
+		// When mtime is at or after `before` the StartedAt < before strict
+		// filter below is overwhelmingly likely to discard the entry too;
+		// short-circuit here saves a ReadFile + JSON parse per entry on
+		// the dominant path. The strict StartedAt < before guard in the
+		// post-readRun branch remains the source of truth for any entry
+		// that passes this gate (mtime < before still does the read +
+		// confirms StartedAt). Asymmetry: a hypothetical run with
+		// StartedAt < before but EndedAt ≥ before would be filtered here
+		// without reading; in practice ExecTimeout caps that window so
+		// the only way to hit it is configuring ExecTimeout to a span
+		// large enough to cross the pagination cutoff (rare; operator
+		// can widen `before` to recover).
+		if !before.IsZero() && !it.mtime.Before(before) {
+			continue
+		}
 		path := filepath.Join(dir, it.runID+".json")
 		// R245-PERF-9: skip readRun's Lstat — diskListNewestFirst's loop
 		// already filtered each DirEntry by ModeSymlink + IsValidID, so the

@@ -595,6 +595,38 @@ func TestNewScheduler_StoreParentDirHardenedEagerly(t *testing.T) {
 	}
 }
 
+// TestNewScheduler_StoreParentDirChmodsExisting covers R238-SEC-10 (#830):
+// when the parent data dir ALREADY EXISTS at a broader perm (0o755 from
+// XDG_CONFIG_HOME or a manual mkdir), MkdirAll is a no-op on the perm —
+// the broader bits persist and other local users can list the data dir's
+// contents (confirming cron_jobs.json's existence + mtime). The chmod
+// follow-up clamps the dir to 0o700 unconditionally at construction.
+func TestNewScheduler_StoreParentDirChmodsExisting(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "data")
+	// Pre-create the dir at 0o755 — emulates the operator running
+	// `mkdir -p ~/.config/naozhi` with default umask 022.
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatalf("pre-mkdir: %v", err)
+	}
+	// Defensive: umask may have stripped bits; force the broad perms.
+	if err := os.Chmod(parent, 0o755); err != nil {
+		t.Fatalf("pre-chmod: %v", err)
+	}
+	path := filepath.Join(parent, "cron.json")
+
+	_ = NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5})
+
+	fi, err := os.Stat(parent)
+	if err != nil {
+		t.Fatalf("stat parent dir: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o700 {
+		t.Errorf("parent dir perm = %o, want 0o700 (chmod must clamp pre-existing 0o755)", got)
+	}
+}
+
 func TestSchedulerPersistence(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -961,6 +993,68 @@ func TestKnownSessionIDs_TTLCache(t *testing.T) {
 	rebuilt := s.KnownSessionIDs()
 	if !rebuilt["22222222-aaaa-bbbb-cccc-000000000002"] {
 		t.Errorf("invalidate+rebuild did not pick up new session id: %v", rebuilt)
+	}
+}
+
+// TestIsExcluded_FastPathSkipsCacheBuild verifies the R245-GO-4 fast path:
+// when IsExcluded hits via Job.LastSessionID on a cold cache, it MUST
+// short-circuit without populating the TTL snapshot — leaving the cache
+// cold so a subsequent KnownSessionIDs() call still rebuilds the full
+// set (jobs + runningJobs + runStore.Recent). The previous implementation
+// always built the full set, paying the O(jobs × recentCap) cost on every
+// spawn-time probe. (#844)
+func TestIsExcluded_FastPathSkipsCacheBuild(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := NewScheduler(SchedulerConfig{
+		StorePath: filepath.Join(dir, "cron.json"),
+		MaxJobs:   5,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+
+	job := &Job{Schedule: "@every 1h", Prompt: "p", Platform: "feishu", ChatID: "c", ChatType: "direct"}
+	if err := s.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	s.mu.Lock()
+	s.jobs[job.ID].LastSessionID = "fastpath-aaaa-bbbb-cccc-000000000001"
+	s.mu.Unlock()
+
+	// Cold cache assertion guard — invalidate ensures we start from cold
+	// regardless of any AddJob-side cache touches.
+	s.invalidateKnownSessionsCache()
+	s.knownSessionsCache.mu.Lock()
+	if s.knownSessionsCache.set != nil {
+		s.knownSessionsCache.mu.Unlock()
+		t.Fatalf("expected cold cache before fast-path probe")
+	}
+	s.knownSessionsCache.mu.Unlock()
+
+	// Fast-path hit (LastSessionID match). Must return true without
+	// populating the TTL cache.
+	if !s.IsExcluded("fastpath-aaaa-bbbb-cccc-000000000001") {
+		t.Fatalf("IsExcluded did not match seeded LastSessionID")
+	}
+	s.knownSessionsCache.mu.Lock()
+	cached := s.knownSessionsCache.set
+	s.knownSessionsCache.mu.Unlock()
+	if cached != nil {
+		t.Fatalf("fast-path hit must not populate TTL cache; got set with %d entries", len(cached))
+	}
+
+	// Probe a sessionID that is NOT in any cheap source — the slow path
+	// must run buildKnownSessionsSet and populate the cache.
+	if s.IsExcluded("never-existed-aaaa-bbbb-cccc-000000000099") {
+		t.Fatalf("IsExcluded matched an id that was never seen")
+	}
+	s.knownSessionsCache.mu.Lock()
+	cached = s.knownSessionsCache.set
+	s.knownSessionsCache.mu.Unlock()
+	if cached == nil {
+		t.Fatalf("slow path must populate TTL cache after full build")
 	}
 }
 

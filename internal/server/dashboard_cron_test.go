@@ -103,6 +103,61 @@ func TestHandleTrigger_NilLimiter_PassThrough(t *testing.T) {
 	}
 }
 
+// TestHandleList_PerIPRateLimit pins R240-SEC-13 / #1045: GET /api/cron
+// MUST gate per-IP via listLimiter before fanning out scheduler reads
+// (ListAllJobsWithNextRun + RecentRuns(5) per job). A stolen dashboard
+// token without this gate could enumerate the entire cron config —
+// including full prompts up to 8 KiB × ~50 jobs — at unbounded rate.
+//
+// Burst=2 + rate.Every(time.Hour) means the third request inside the
+// test window MUST hit 429. The handler nil-guards scheduler so first
+// requests can pass through to the empty-list happy path; we just need
+// the limiter to reject the third request before reaching that path.
+func TestHandleList_PerIPRateLimit(t *testing.T) {
+	t.Parallel()
+	h := &CronHandlers{
+		listLimiter: newIPLimiterWithProxy(rate.Every(time.Hour), 2, false),
+	}
+
+	doReq := func() int {
+		req := httptest.NewRequest(http.MethodGet, "/api/cron", nil)
+		req.RemoteAddr = "10.1.2.3:5555"
+		w := httptest.NewRecorder()
+		h.handleList(w, req)
+		return w.Code
+	}
+
+	// First two requests should pass the limiter (burst=2). They will
+	// reach the scheduler-nil empty-list branch and return 200; either
+	// way they MUST NOT 429.
+	for i := 0; i < 2; i++ {
+		if got := doReq(); got == http.StatusTooManyRequests {
+			t.Fatalf("request %d 429ed early — burst budget exhausted prematurely", i+1)
+		}
+	}
+	// Third request MUST hit 429: limiter exhausted. Pins #1045 — a
+	// future refactor that drops the listLimiter gate would let a stolen
+	// token enumerate /api/cron at unbounded rate.
+	if got := doReq(); got != http.StatusTooManyRequests {
+		t.Fatalf("3rd /api/cron after burst exhaustion: got %d, want 429 Too Many Requests; #1045 list rate-limit gate may be missing", got)
+	}
+}
+
+// TestHandleList_NilLimiter_PassThrough mirrors TestHandleTrigger_NilLimiter_PassThrough
+// for handleList: nil listLimiter must NOT 429, otherwise hand-built
+// CronHandlers in unrelated tests would 429 spuriously. R240-SEC-13 / #1045.
+func TestHandleList_NilLimiter_PassThrough(t *testing.T) {
+	t.Parallel()
+	h := &CronHandlers{} // listLimiter nil
+
+	req := httptest.NewRequest(http.MethodGet, "/api/cron", nil)
+	w := httptest.NewRecorder()
+	h.handleList(w, req)
+	if w.Code == http.StatusTooManyRequests {
+		t.Fatalf("nil listLimiter must not produce 429; got %d body=%q", w.Code, w.Body.String())
+	}
+}
+
 // TestFormatTZOffset_MatchesStdlib verifies the helper agrees with time.Zone()
 // for a live half-hour zone, so locale database changes cannot regress the
 // output format without a test failure.
