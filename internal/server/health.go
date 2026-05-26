@@ -172,15 +172,13 @@ type healthResp struct {
 //
 //   - Unauthenticated probes: status + uptime only. Intentionally cheap so
 //     orchestrators (k8s liveness, ALB target-group checks) don't need a
-//     token, but also cheap enough that the absence of rate-limiting here
-//     is not currently a DoS amplifier — the response is a stack-allocated
-//     struct + writeJSON, no DB / disk / lock contention. R226-SEC-7
-//     proposed adding a per-IP limiter; deferred because (a) the unauth
-//     payload reveals only "process alive" + uptime string, (b) every
-//     authenticated subobject is already gated by isAuthenticated below,
-//     so attackers cannot enumerate watchdog kills / platform names /
-//     node status without first stealing a token. If unauthenticated body
-//     ever grows beyond status+uptime, revisit R226-SEC-7 before merging.
+//     token. R246-SEC-11 (#819): the unauth branch is now gated by the
+//     same per-IP unauthDashLimiter that throttles the login-page render
+//     so a scanner cannot fingerprint deployment uptime at unbounded rate.
+//     Authenticated callers skip the gate (the auth check happens first
+//     so legitimate dashboard polls never count against the bucket).
+//     The limiter is nil-safe; tests that build HealthHandler without
+//     an AuthHandlers fall through to the previous unthrottled path.
 //
 //   - Authenticated probes (operator dashboard, /api/sessions polling):
 //     full sub-objects. Already throttled at the HTTP layer by the
@@ -192,6 +190,16 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Uptime: time.Since(h.startedAt).Round(time.Second).String(),
 	}
 	if !h.auth.isAuthenticated(r) {
+		// R246-SEC-11 (#819): per-IP cap so an attacker scanning across
+		// time cannot enumerate uptime to fingerprint deploy/restart
+		// cadence. unauthDashAllow returns true when the limiter is not
+		// wired (test harness without server.New) so this stays a no-op
+		// for fixtures that bypass the bucket.
+		if h.auth != nil && !h.auth.unauthDashAllow(clientIP(r, h.auth.trustedProxy)) {
+			w.Header().Set("Retry-After", "60")
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
 		writeJSON(w, resp)
 		return
 	}

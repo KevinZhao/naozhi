@@ -169,6 +169,13 @@ func (p *ClaudeProtocol) Capabilities() Caps {
 // current turn with a `stop_reason=tool_use` or `end_turn` result event, and
 // returning to the ready state — without tearing down the session. Verified
 // against CLI 2.1.119.
+//
+// DEADCODE-4 (#1197): the legacy `controlRequestInterrupt` /
+// `controlRequestInterruptBody` struct types that used to back this
+// envelope via json.Marshal have been retired — the byte-template path
+// below is the single source of truth for the interrupt envelope shape.
+// New protocol-version variants should pair a typed shape with a real
+// caller rather than reintroducing orphan types.
 
 func (p *ClaudeProtocol) WriteInterrupt(w io.Writer, requestID string) error {
 	// R228-PERF-1: hand-build the static envelope and only json.Marshal the

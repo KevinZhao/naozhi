@@ -32,12 +32,15 @@ func (n NotifyTarget) IsSet() bool { return n.Platform != "" && n.ChatID != "" }
 // R245-GO-9 (#851): the per-target 30s budget does NOT extend Stop()'s
 // wall-clock past systemd TimeoutStopSec. Stop bounds triggerWG.Wait() with
 // stopBudget (default 30s, see scheduler.go ~L978) so a stuck webhook is
-// preempted at the budget boundary even though replyCtx itself is rooted
-// in context.Background(). Tightening this constant to 5s — the original
-// proposal — would risk cutting legitimate large-chunk flushes mid-stream;
-// the stopBudget gate is the actual hazard mitigation, this constant is
-// only the per-target ceiling. Keep both 30s for symmetry; if a future
-// review tightens stopBudget, mirror the change here.
+// preempted at the budget boundary.
+//
+// R243-SEC-14 (#799): replyCtx now chains to s.stopCtx (notifyTarget,
+// this file) so a hung webhook short-circuits the moment Stop fires
+// instead of waiting for the per-target timer. The constant stays the
+// per-target ceiling for normal operation; combined with the chained
+// parent, a stuck reply costs at most min(cronNotifyTimeout, time-since-
+// stopCancel) wall-clock. Keep at 30s for symmetry with stopBudget; if
+// a future review tightens stopBudget, mirror the change here.
 const cronNotifyTimeout = 30 * time.Second
 
 // platformReplyMaxAttempts mirrors dispatch.platformReplyMaxAttempts. Both
@@ -155,10 +158,28 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		slog.Warn("cron notify: platform not found", "platform", plat)
 		return
 	}
-	// Use Background parent: during shutdown stopCtx is cancelled first, then
-	// cron.Stop() waits for in-flight jobs — those must still be able to deliver
-	// their IM replies within the 30s bound rather than fail instantly.
-	replyCtx, replyCancel := context.WithTimeout(context.Background(), cronNotifyTimeout)
+	// R243-SEC-14 (#799): replyCtx chains to s.stopCtx so a hung webhook
+	// POST short-circuits the moment Scheduler.Stop() cancels stopCtx —
+	// previously parented on Background, which left triggerWG.Wait pinned
+	// at the full stopBudget (30s) waiting for the per-target timer to
+	// expire even though the operator had already signalled shutdown.
+	// The per-target ceiling stays at cronNotifyTimeout so a slow-but-
+	// progressing chunk-flush during normal operation is unchanged; only
+	// the shutdown path observes the new short-circuit. Cancelled mid-
+	// flush appears to ReplyWithRetry as a context error and the existing
+	// "cron notify partial" WARN aggregator records the partial delivery
+	// — same observability shape as a chunk-failure mid-stream.
+	parent := s.stopCtx
+	if parent == nil {
+		// Defensive: a Scheduler that was never NewScheduler'd (e.g. a
+		// hand-constructed test fake) won't have stopCtx wired. Fall back
+		// to Background so the per-target timeout still bounds the call;
+		// production paths (NewScheduler) always set stopCtx so the
+		// fallback is dead code in normal operation but keeps the package
+		// usable from narrow unit tests.
+		parent = context.Background()
+	}
+	replyCtx, replyCancel := context.WithTimeout(parent, cronNotifyTimeout)
 	defer replyCancel()
 	maxLen := p.MaxReplyLength()
 	if maxLen <= 0 {
