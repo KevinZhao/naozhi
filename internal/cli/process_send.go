@@ -280,6 +280,25 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 	}
 }
 
+// clearInflightFlags resets the interrupt-bookkeeping atomics. Called when
+// the watchdog kills the CLI on a no-output / total-turn timeout — the
+// process is about to be in StateDead so any leftover interrupted/
+// interruptedRun flags can never be consumed by drainStaleEvents in this
+// process's lifetime, but a future Send on a recycled Process struct
+// (unlikely; routers spawn fresh) would otherwise burn the 500ms settle
+// window for a result event that will never arrive. R242-ARCH-27 (#770):
+// coordinates interruptedSettleWindow with runDeadlineWatchdog completion
+// so the two timers no longer leave inconsistent state behind. Held under
+// p.mu to match the Interrupt() / InterruptViaControl() locking contract
+// (those callers also Store under p.mu so a concurrent Interrupt and a
+// watchdog kill cannot race the flags into a torn state).
+func (p *Process) clearInflightFlags() {
+	p.mu.Lock()
+	p.interrupted.Store(false)
+	p.interruptedRun.Store(false)
+	p.mu.Unlock()
+}
+
 // handleWatchdogTick evaluates the no-output and total-turn deadlines for a
 // single watchdog wakeup. It returns:
 //
@@ -309,6 +328,12 @@ func (p *Process) handleWatchdogTick(
 		p.setDeathReason(DeathReasonNoOutputTimeout)
 		p.slogger().Error("watchdog: no output timeout", "timeout", noOutputDur)
 		p.Kill()
+		// R242-ARCH-27 (#770): clear inflight settle flags so the
+		// 500ms drainStaleEvents wait cannot fire against a
+		// watchdog-killed process whose result event will never
+		// arrive. See clearInflightFlags doc for the coordination
+		// rationale with interruptedSettleWindow.
+		p.clearInflightFlags()
 		return nil, fmt.Errorf("%w (%s)", ErrNoOutputTimeout, noOutputDur)
 	}
 	if now.Sub(turnStart) >= totalDur {
@@ -318,6 +343,7 @@ func (p *Process) handleWatchdogTick(
 		p.setDeathReason(DeathReasonTotalTimeout)
 		p.slogger().Error("watchdog: total timeout", "timeout", totalDur)
 		p.Kill()
+		p.clearInflightFlags()
 		return nil, fmt.Errorf("%w (%s)", ErrTotalTimeout, totalDur)
 	}
 	return nil, nil
