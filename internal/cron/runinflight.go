@@ -64,6 +64,49 @@ type runInflightView struct {
 	Fresh     bool
 }
 
+// runFinalizer is a per-run, stack-local cleanup gate. executeOpt creates
+// one immediately after it wins the inflight.running CAS and threads the
+// pointer through finishRun (broadcast-time cleanup) and its own defer
+// (catch-all for jitter-window early returns). finishRun fires it BEFORE
+// emitRunEnded so a dashboard list arriving with cron_run_ended observes
+// CurrentRun(jobID) == ok:false rather than the stale Spawning view.
+//
+// Why a per-run struct instead of an atomic gate on *runInflight (the
+// pre-#689 first-cut design): both finishRun and the executeOpt defer
+// live in the same goroutine, and run-A's finalizer is a distinct object
+// from run-B's. The done bool needs no atomic — it's only read+written
+// inside one goroutine. More importantly the per-run identity guarantees
+// run-A's late defer can NEVER reset metadata that a racing run-B has
+// installed: run-A's done=true short-circuits run-A's defer regardless
+// of what run-B did to the shared *runInflight in the meantime. R238-GO-2
+// + R246-GO-3 (#689). Tests in run_inflight_finalize_test.go pin both
+// the broadcast-ordering contract and the run-A→run-B isolation.
+type runFinalizer struct {
+	inflight *runInflight
+	done     bool
+}
+
+// finalize is the single cleanup path: clear inflight metadata, then
+// release the running CAS gate (R238-GO-2 ordering — clear before
+// release, so a TriggerNow that wins the next CAS cannot be observed
+// by this goroutine writing nil over its freshly-installed fields).
+//
+// Idempotent within one finalizer: the done-flag short-circuit ensures
+// the executeOpt defer, when finishRun already ran, leaves the shared
+// *runInflight alone. Nil-safe so finishRun callers that don't own the
+// gate (emitOverlapSkipped) can pass nil. R246-GO-3 (#689).
+func (f *runFinalizer) finalize() {
+	if f == nil || f.done {
+		return
+	}
+	f.done = true
+	if f.inflight == nil {
+		return
+	}
+	f.inflight.reset()
+	f.inflight.running.Store(false)
+}
+
 // 各 phase 名字常量。固定字符串便于前端切图标。
 const (
 	PhaseQueued    = "queued"

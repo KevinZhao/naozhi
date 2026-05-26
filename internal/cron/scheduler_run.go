@@ -365,6 +365,10 @@ type preflightArgs struct {
 	// lg 是带 jobID/runID 标签的 slog.Logger，preflight 自身只输出
 	// info/warn 不输出 error（error 由 finishRun 的 errMsg 落盘统一处理）。
 	lg *slog.Logger
+	// finalizer 是 caller 栈上的 *runFinalizer。preflight 失败分支把它转
+	// 交给 finishRun，让 cron_run_ended broadcast 之前 finalize 元数据，
+	// CurrentRun(jobID) 与 broadcast 同步可见 ok=false。R246-GO-3 (#689).
+	finalizer *runFinalizer
 }
 
 // freshContextPreflightP0 handles the fresh-mode prologue: ctx-cancel guard
@@ -405,6 +409,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
 			skipPersist: true,
 			prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+			finalizer: args.finalizer,
 		})
 		return noopRefresh, false
 	}
@@ -416,6 +421,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 			state: RunStateFailed, errClass: ErrClassWorkDirUnreachable,
 			errMsg: "work_dir unreachable",
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+			finalizer: args.finalizer,
 		})
 		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(), "工作目录不可达，本次执行已跳过。"))
 		return noopRefresh, false
@@ -449,6 +455,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 			state: RunStateCanceled, errClass: ErrClassCanceled,
 			errMsg: "job deleted mid-execute", skipPersist: true,
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+			finalizer: args.finalizer,
 		})
 		return refresh, false
 	}
@@ -629,16 +636,23 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		s.emitOverlapSkipped(j, viaTriggerNow)
 		return
 	}
+	// finalizer 是本次 run 的栈局部清理器。finishRun 在 emitRunEnded 之前
+	// 调一次（让 broadcast 与 inflight view 同步可见 ok=false），下面的
+	// defer 兜底覆盖 jitter-window 早返路径。done 标记由 finalize() 自身
+	// 维护，run-A 的 defer 永远只看到 run-A 的 done=true，不会动到 run-B
+	// 已抢占的 *runInflight 字段——并发隔离来自 finalizer 的 per-run 身份，
+	// 不依赖 *runInflight 上的任何 atomic。R238-GO-2 + R246-GO-3 (#689).
+	finalizer := &runFinalizer{inflight: inflight}
 	defer func() {
-		// R246-CR-017 (#759): the 3-step release contract (reset → CAS
-		// release → gauge decrement) lives behind inflight.releaseRun so
-		// the ordering invariant — reset BEFORE Store(false) so a
-		// TriggerNow that wins the next CompareAndSwap cannot have its
-		// freshly-populated RunID/StartedAt clobbered by this deferred
-		// reset (R238-GO-2) — is enforced in one place rather than
-		// spread across executeOpt's defer body. See releaseRun's godoc
-		// for the full rationale.
-		inflight.releaseRun(metrics.CronRunInflight)
+		// R246-GO-3 (#689) 取代了 R246-CR-017 (#759) 把 reset + CAS-release
+		// 抽到 inflight.releaseRun 的设计：那个共享 *runInflight 上的方法
+		// 无法防 run-A 的迟到 defer clobber run-B 已抢占的字段。改用
+		// per-run 栈局部 finalizer：done 标志保证 run-A 的 defer 只看到
+		// 自己的 finalizer，绝不会动到 run-B 的元数据。reset → CAS-release
+		// 的内部顺序（R238-GO-2）在 finalize() 内部保留。Gauge 的 -1 留在
+		// 这里与 executeOpt 入口的 +1 视觉配对。
+		finalizer.finalize()
+		metrics.CronRunInflight.Add(-1)
 	}()
 	// R242-CR-14 (#706): metrics.CronRunInflight semantically tracks "how
 	// many jobs hold the CAS slot right now", which is exactly the window
@@ -847,6 +861,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 					state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
 					errMsg: "work_dir outside allowed root",
 					prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+					finalizer: finalizer,
 				})
 				return
 			}
@@ -869,6 +884,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	stubRefresh, ok := s.freshContextPreflightP0(preflightArgs{
 		job: j, snap: snap, key: key, lg: lg, notifyTo: notifyTo,
 		runID: runID, startedAt: startedAt, trigger: trigger,
+		finalizer: finalizer,
 	})
 	if !ok {
 		stubRefresh()
@@ -899,6 +915,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
 				skipPersist: true, // 与 historical recordResult skip 一致
 				prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+				finalizer: finalizer,
 			})
 			stubRefresh()
 			return
@@ -913,6 +930,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
 			state: state, errClass: errClass, errMsg: "session error: " + err.Error(),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+			finalizer: finalizer,
 		})
 		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行跳过，请稍后重试。"))
 		stubRefresh()
@@ -1019,6 +1037,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
 				skipPersist: true,
 				prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+				finalizer: finalizer,
 			})
 			stubRefresh()
 			return
@@ -1057,6 +1076,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
 			state: state, errClass: errClass, errMsg: "send error: " + err.Error(),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+			finalizer: finalizer,
 		})
 		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行失败，请稍后重试。"))
 		stubRefresh()
@@ -1090,6 +1110,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		job: j, runID: runID, startedAt: startedAt, trigger: trigger,
 		state: RunStateSucceeded, sessionID: result.SessionID, result: result.Text,
 		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+		finalizer: finalizer,
 	})
 
 	// R234-SEC-1: deliverNotice 必须用经过 sanitiseRunResult 的文本，
