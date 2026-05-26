@@ -118,6 +118,19 @@ func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
 	if !target.IsSet() {
 		return
 	}
+	// R20260526-CR-017: empty text is a no-op — short-circuit before
+	// triggerWG.Add so an empty notice does not spawn a goroutine that
+	// then walks platform.SplitText("", maxLen) → [""] and consumes one
+	// platformReplyMaxAttempts retry budget on a zero-byte chunk. The
+	// empty-text path is reachable when a non-failing run produced no
+	// IM-visible output (e.g. a job that wrote only to disk and an
+	// upstream caller still routed the empty Result through).
+	// The early return MUST land before triggerWG.Add(1); otherwise a
+	// concurrent Stop() observing the just-incremented counter would
+	// block on triggerWG.Wait until the empty-send goroutine drains.
+	if text == "" {
+		return
+	}
 	s.triggerWG.Add(1)
 	go func() {
 		defer s.triggerWG.Done()
