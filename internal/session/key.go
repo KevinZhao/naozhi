@@ -167,6 +167,16 @@ func IsSysKey(key string) bool {
 	return strings.HasPrefix(key, SysKeyPrefix)
 }
 
+// SysKey synthesises the session key for a system daemon. Caller must
+// have validated name against `^[a-z][a-z0-9-]{1,30}$` (typically via
+// internal/sysession/registry.go's startup-time check on BuiltinDaemons).
+// Phase 1 most daemons run Runner-style transient subprocesses and do NOT
+// register a stub via this key; the helper is kept for symmetry with
+// CronKey and for future daemons that need a persistent ManagedSession.
+func SysKey(name string) string {
+	return SysKeyPrefix + name
+}
+
 // plannerKeyFor is the session-package local accessor for the planner
 // key shape. Kept unexported because external callers should continue
 // to use internal/project's public API. KeyResolver needs to construct
