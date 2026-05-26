@@ -329,27 +329,7 @@ func Run(cfg Config) error {
 		case <-cli.exited:
 			slog.Info("CLI exited", "code", cli.exitCode)
 			s.saveStateCLIDead()
-			exitTimer := time.NewTimer(postExitReattachWindow)
-			select {
-			case conn := <-acceptCh:
-				exitTimer.Stop()
-				spawnClient(conn)
-				reconnectTimer := time.NewTimer(postExitReattachWindow)
-				select {
-				case <-s.done:
-					reconnectTimer.Stop()
-					slog.Info("exiting: done after cli exit + reconnect")
-				case <-reconnectTimer.C:
-					slog.Info("exiting: post-exit reattach window expired after cli exit + reconnect",
-						"window", postExitReattachWindow)
-				}
-			case <-s.done:
-				exitTimer.Stop()
-				slog.Info("exiting: done after cli exit")
-			case <-exitTimer.C:
-				slog.Info("exiting: post-exit reattach window expired after cli exit",
-					"window", postExitReattachWindow)
-			}
+			s.waitForReattach(acceptCh, spawnClient, "cli exit")
 			return nil
 
 		case <-s.idleC():
@@ -367,27 +347,7 @@ func Run(cfg Config) error {
 		case <-s.watchdog.Fired():
 			slog.Warn("watchdog fired, CLI killed")
 			s.saveStateCLIDead()
-			wdTimer := time.NewTimer(postExitReattachWindow)
-			select {
-			case conn := <-acceptCh:
-				wdTimer.Stop()
-				spawnClient(conn)
-				wdReconnectTimer := time.NewTimer(postExitReattachWindow)
-				select {
-				case <-s.done:
-					wdReconnectTimer.Stop()
-					slog.Info("exiting: done after watchdog + reconnect")
-				case <-wdReconnectTimer.C:
-					slog.Info("exiting: post-exit reattach window expired after watchdog + reconnect",
-						"window", postExitReattachWindow)
-				}
-			case <-s.done:
-				wdTimer.Stop()
-				slog.Info("exiting: done after watchdog")
-			case <-wdTimer.C:
-				slog.Info("exiting: post-exit reattach window expired after watchdog",
-					"window", postExitReattachWindow)
-			}
+			s.waitForReattach(acceptCh, spawnClient, "watchdog")
 			return nil
 
 		case <-s.done:
@@ -397,6 +357,42 @@ func Run(cfg Config) error {
 			slog.Info("exiting: shutdown done")
 			return nil
 		}
+	}
+}
+
+// waitForReattach implements the post-CLI-death grace window. After the
+// CLI process has exited (cleanly via cli.exited or forcibly via
+// watchdog.Fired) the shim keeps its socket open for postExitReattachWindow
+// so a reconnecting naozhi client can pick up the dead-CLI signal. If a
+// client connects, the helper hands it to spawnClient and waits a second
+// postExitReattachWindow for the operator handoff to complete (or s.done
+// to fire). Either way the helper returns once the window has elapsed or
+// shutdown was requested.
+//
+// reason is woven into the log messages so cli_exited and watchdog paths
+// remain individually traceable in operator logs even though the timer
+// machinery is shared. Closes R237-CR-5 (#707).
+func (s *shimServer) waitForReattach(acceptCh <-chan net.Conn, spawnClient func(net.Conn), reason string) {
+	exitTimer := time.NewTimer(postExitReattachWindow)
+	select {
+	case conn := <-acceptCh:
+		exitTimer.Stop()
+		spawnClient(conn)
+		reconnectTimer := time.NewTimer(postExitReattachWindow)
+		select {
+		case <-s.done:
+			reconnectTimer.Stop()
+			slog.Info("exiting: done after " + reason + " + reconnect")
+		case <-reconnectTimer.C:
+			slog.Info("exiting: post-exit reattach window expired after "+reason+" + reconnect",
+				"window", postExitReattachWindow)
+		}
+	case <-s.done:
+		exitTimer.Stop()
+		slog.Info("exiting: done after " + reason)
+	case <-exitTimer.C:
+		slog.Info("exiting: post-exit reattach window expired after "+reason,
+			"window", postExitReattachWindow)
 	}
 }
 
