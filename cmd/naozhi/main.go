@@ -877,6 +877,14 @@ func main() {
 					slog.Error("panic during shutdown", "panic", r)
 				}
 			}()
+			// R245-ARCH-38 (#893): emit per-phase timing at shutdown so a
+			// hung subsystem is attributable from logs alone (operator can
+			// grep `phase=` in journalctl output without an external metric
+			// store). The sysMgr → scheduler → router order is a contract
+			// (see comments below) — each phase is intentionally serial,
+			// not topo-sort-derived, because the ordering is encoded in
+			// upstream callgraphs that a runtime sort cannot infer.
+			shutdownT0 := time.Now()
 			slog.Info("shutdown starting", "reason", reason)
 			if err := osutil.SdNotify("STOPPING=1"); err != nil {
 				slog.Warn("sd_notify STOPPING failed", "err", err)
@@ -890,16 +898,23 @@ func main() {
 			// process at shutdown rather than leak goroutines.  5s budget
 			// is comfortable headroom for Runner subprocess teardown via
 			// exec.CommandContext.
+			sysT0 := time.Now()
 			if sysMgr != nil {
 				sysStopCtx, sysStopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				sysMgr.Stop(sysStopCtx)
 				sysStopCancel()
 			}
+			slog.Info("shutdown phase complete", "phase", "sysmgr", "ms", time.Since(sysT0).Milliseconds())
 			// Scheduler must stop fully before router.Shutdown: in-flight cron
 			// jobs still call into router (GetOrCreate/Send), so tearing the
 			// router down in parallel would race against those calls.
+			schedT0 := time.Now()
 			scheduler.Stop()
+			slog.Info("shutdown phase complete", "phase", "scheduler", "ms", time.Since(schedT0).Milliseconds())
+			routerT0 := time.Now()
 			router.Shutdown()
+			slog.Info("shutdown phase complete", "phase", "router", "ms", time.Since(routerT0).Milliseconds())
+			slog.Info("shutdown complete", "reason", reason, "total_ms", time.Since(shutdownT0).Milliseconds())
 		})
 	}
 
