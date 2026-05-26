@@ -863,3 +863,70 @@ func TestTruncatedToolInputPlaceholder_ValidJSON(t *testing.T) {
 		t.Errorf("placeholder len=%d exceeds maxToolInputBytes=%d; replacement value must satisfy the cap it enforces", len(truncatedToolInputPlaceholder), maxToolInputBytes)
 	}
 }
+
+// TestFlattenAssistantEvent_ToolInputSizeCap_MultiBlock pins R234-SEC-8
+// (#1018) at the per-block-aggregation boundary: a single assistant
+// message with N tool_use blocks must apply the cap independently to
+// each block. Without this, an attacker could split the 256 KiB
+// per-line budget across 4 × 65 KiB tool_use blocks and bypass the
+// 64 KiB per-input cap by sneaking each one past the per-line gate.
+// The flattenJSONLEvent loop must visit every block and rewrite each
+// over-cap Input independently. Existing TestFlattenAssistantEvent_
+// ToolInputSizeCap covers the single-block case; this test guards the
+// loop-level invariant.
+func TestFlattenAssistantEvent_ToolInputSizeCap_MultiBlock(t *testing.T) {
+	t.Parallel()
+
+	smallInput := `{"command":"echo small"}`
+	pad := strings.Repeat("y", maxToolInputBytes+4*1024)
+	bigInput := `{"command":"` + pad + `"}`
+
+	// Mix small + big + small + big in one assistant event so the loop
+	// must independently classify each block.
+	ev := &claudeJSONLEvent{
+		Type: "assistant",
+		Message: json.RawMessage(`{"role":"assistant","content":[` +
+			`{"type":"tool_use","id":"tu_1","name":"Bash","input":` + smallInput + `},` +
+			`{"type":"tool_use","id":"tu_2","name":"Bash","input":` + bigInput + `},` +
+			`{"type":"tool_use","id":"tu_3","name":"Bash","input":` + smallInput + `},` +
+			`{"type":"tool_use","id":"tu_4","name":"Bash","input":` + bigInput + `}` +
+			`]}`),
+	}
+	out, _, toolCalls, parsed := flattenAssistantEvent(ev, 0, 0)
+	if !parsed || len(out) != 4 {
+		t.Fatalf("multi-block: parsed=%v len(out)=%d (want true / 4)", parsed, len(out))
+	}
+	if toolCalls != 4 {
+		t.Errorf("multi-block: toolCalls=%d, want 4 (every block counts toward the running total even after truncation)", toolCalls)
+	}
+
+	// Block 0 (small) — verbatim pass-through.
+	if string(out[0].Input) != smallInput {
+		t.Errorf("block 0 (small): Input=%q, want pass-through %q", string(out[0].Input), smallInput)
+	}
+	// Block 1 (big) — replaced.
+	if string(out[1].Input) != `"[truncated]"` {
+		t.Errorf("block 1 (big): Input=%q, want %q (must be capped independently)", string(out[1].Input), `"[truncated]"`)
+	}
+	// Block 2 (small) — verbatim, NOT collateral-damage from block 1's cap.
+	if string(out[2].Input) != smallInput {
+		t.Errorf("block 2 (small after big): Input=%q, want pass-through %q (cap must not bleed across blocks)", string(out[2].Input), smallInput)
+	}
+	// Block 3 (big) — replaced.
+	if string(out[3].Input) != `"[truncated]"` {
+		t.Errorf("block 3 (big): Input=%q, want %q", string(out[3].Input), `"[truncated]"`)
+	}
+
+	// Aggregate-bytes invariant: total Input bytes surfaced must stay
+	// well below the per-line cap. With 2 small (~25 B each) + 2
+	// placeholder (13 B each), total is ~76 B — vs. ~140 KiB if the
+	// cap silently dropped. The 4 × maxToolInputBytes guard documents
+	// the worst-case headroom an unbounded variant would consume.
+	totalInputBytes := 0
+	for _, t := range out {
+		totalInputBytes += len(t.Input)
+	}
+	if totalInputBytes >= 4*maxToolInputBytes {
+		t.Errorf("multi-block: total surfaced Input bytes=%d, must be << 4×maxToolInputBytes=%d (#1018 cap is per-block, not per-line)", totalInputBytes, 4*maxToolInputBytes)
+	}
+}
