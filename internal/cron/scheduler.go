@@ -574,14 +574,19 @@ func workDirResolveUnderRoot(workDir, allowedRoot, allowedRootResolved string) (
 	}
 	rootResolved, err := filepath.EvalSymlinks(allowedRoot)
 	if err != nil {
-		// Fall back to the cached resolution (captured at construction) or
-		// the raw path if no cache exists. Either way the fallback chain
-		// preserves the historical behaviour when EvalSymlinks fails.
-		if allowedRootResolved != "" {
-			rootResolved = allowedRootResolved
-		} else {
-			rootResolved = allowedRoot
+		// Fall back to the construction-time cache; that snapshot was
+		// captured when allowedRoot was known to resolve, so it is still
+		// a faithful prefix to gate against. If even that is empty (the
+		// root failed to resolve at NewScheduler too), refuse the
+		// validation rather than degrade to a raw-string prefix match —
+		// raw allowedRoot is the unresolved path the operator typed and
+		// can be a symlink whose target lies outside the intended
+		// sandbox, re-introducing the symlink-escape this whole helper
+		// exists to close. R243-SEC-9 (#795).
+		if allowedRootResolved == "" {
+			return "", false
 		}
+		rootResolved = allowedRootResolved
 	}
 	if resolved == rootResolved {
 		return resolved, true
