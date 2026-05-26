@@ -48,32 +48,17 @@ import (
 // deciding a corrupt length field is fatal.
 const maxLengthDigits = 11
 
-// WriteRecord encodes r via schema.MarshalRecord, wraps it in the
-// length-prefix framing, and writes the complete frame to w in a single
-// Write call.
-//
-// A single Write() keeps the record intact from the kernel's point of
-// view on local ext4 / xfs as long as len(frame) <= 2 GB (no Linux
-// write above that returns atomically either way). For writes above
-// PIPE_BUF the OS may still split internally, which is precisely why
-// the framing protects readers: this function's contract is "emit a
-// single logical record", not "be atomic at the syscall layer".
-//
-// Returns the total number of bytes written (including the prefix
-// bytes and the trailing newlines). Callers need this to update
-// Persister's per-file byte counter for rotate threshold detection.
-func WriteRecord(w io.Writer, r *schema.Record) (int64, error) {
-	body, err := schema.MarshalRecord(r)
-	if err != nil {
-		return 0, err
-	}
-	return writeFramedBody(w, body)
-}
-
 // WriteRecordRaw is the lower-level variant that takes an
 // already-marshalled record body. It skips the MarshalRecord call so
 // callers (rotate, in particular) don't re-marshal records they're
 // just copying from one file to another.
+//
+// DEADCODE-13 (#1206): the higher-level WriteRecord (marshal + frame
+// combo) was retired — every production caller (Persister.Append /
+// rotate.spliceLog) already holds pre-marshalled record bytes from
+// schema.MarshalRecord and feeds them straight in here. The
+// marshal+frame combo lives on as the test-only writeRecord helper in
+// framing_test.go.
 //
 // Callers MUST ensure body is a valid schema.Record JSON or the
 // written file will be unreadable. Validate + MarshalRecord should be
@@ -137,16 +122,13 @@ func writeFramedBody(w io.Writer, body []byte) (int64, error) {
 // writeFramedBody doesn't take the address of a local each call.
 var newline = [1]byte{'\n'}
 
-// FrameSize computes the on-disk length of a framed record given the
-// JSON body length. Used by idx entries' Len field — we never write a
-// record without knowing its frame size up front, so recomputing on
-// the read side would be wasteful.
-func FrameSize(bodyLen int) int {
-	// Integer log10 of bodyLen for the decimal prefix width, plus two
-	// newlines. strconv.Itoa is O(log10) but the alternative is an
-	// extra allocation; 20 ns either way is not worth optimizing.
-	return len(strconv.Itoa(bodyLen)) + 1 + bodyLen + 1
-}
+// DEADCODE-13 (#1206): FrameSize (computes the on-disk length of a
+// framed record given the JSON body length) was retired — production
+// never recomputed the frame size from a body length, since rotate /
+// idx tracking already pull the post-write byte count from the
+// WriteRecordRaw return value. Tests still need the predicted size as
+// an invariant assertion; the helper lives on as the test-only
+// frameSize function in framing_test.go.
 
 // ReadRecord reads the next framed record from br. Returns (nil, io.EOF)
 // at clean end-of-file, (nil, ErrPartialTail) when a partial record is

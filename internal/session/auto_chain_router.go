@@ -72,9 +72,7 @@ func (r *Router) maybeAttachAutoChainOnSpawn(
 		return nil
 	}
 
-	if hook := r.testHookBeforeSpawnPhase3; hook != nil {
-		hook()
-	}
+	r.firePhase3SpawnHook()
 
 	// Phase 3: re-validate under r.mu. Cron / sys may have registered
 	// new sessionIDs since phase 1; rebuild the excluder set with the
@@ -338,9 +336,7 @@ func (r *Router) runAutoChainBackfillOnce() {
 		decisions = append(decisions, decision{s: s, ids: ids})
 	}
 
-	if hook := r.testHookBeforeBackfillPhase3; hook != nil {
-		hook()
-	}
+	r.firePhase3BackfillHook()
 
 	if len(decisions) == 0 {
 		return

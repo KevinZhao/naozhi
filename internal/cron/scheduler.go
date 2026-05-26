@@ -1045,11 +1045,14 @@ func (s *Scheduler) Stop() {
 	}
 
 	// Bound triggerWG.Wait with the *remaining* share of the same budget:
-	// while manual TriggerNow respects stopCtx via execute(), the notify
-	// delivery path (deliverNotice → platform Reply) uses a Background-
-	// derived ctx so stopCtx cancellation does not interrupt an in-flight
-	// webhook POST. Without this deadline, a stuck platform HTTP call
-	// could pin Stop() past systemd TimeoutStopSec.
+	// manual TriggerNow respects stopCtx via execute(), and R243-SEC-14
+	// (#799) wired notifyTarget's replyCtx to s.stopCtx so a hung webhook
+	// short-circuits on the cancel edge instead of waiting for its own
+	// per-target timer. The deadline here remains the backstop for any
+	// notify path that still parents on Background (e.g. a future helper
+	// or a test fake that bypasses notifyTarget): without it a stuck
+	// platform HTTP call could otherwise pin Stop() past systemd
+	// TimeoutStopSec.
 	//
 	// R222-GO-10: when the deadline pre-empts triggerDone, the wrapper
 	// goroutine started by `go func() { s.triggerWG.Wait(); close(...) }`

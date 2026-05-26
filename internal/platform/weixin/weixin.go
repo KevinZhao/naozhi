@@ -1,3 +1,34 @@
+// Package weixin implements the WeChat iLink Bot platform adapter.
+//
+// Security threat model (R244-SEC-P3-5, #899)
+//
+// Unlike Feishu/Slack/Discord (which receive inbound webhooks and therefore
+// require HMAC-style request-signature verification with timestamp + nonce
+// replay protection), weixin uses iLink's outbound long-poll API: naozhi
+// initiates every connection over TLS to https://ilinkai.weixin.qq.com and
+// pulls events with the configured Token presented as a bearer credential.
+// There is no inbound webhook surface that an external attacker could spoof,
+// so there is also no SHA-1 / HMAC signature path in this package — the
+// upstream issue's "SHA-1 token verification, replay risk" framing assumed
+// a webhook receiver that does not exist for this transport.
+//
+// Authenticity assumptions:
+//   - Upstream identity: the server's TLS certificate (MinVersion 1.2 in
+//     api.go) authenticates iLink. A successful TLS handshake plus a valid
+//     getUpdates response is the only inbound trust anchor; no payload
+//     signature is computed because the long-poll body is delivered inside
+//     the same TLS channel.
+//   - Token confidentiality: the Token is passed in request bodies (not URL
+//     query strings) and never logged. Operators who deploy with a stolen
+//     token can impersonate the bot at the API layer; rotating Token at the
+//     iLink dashboard invalidates the prior credential.
+//   - Replay: no nonce/timestamp gate exists in this package because there
+//     is no inbound message to replay — a third party cannot inject an
+//     event without first compromising TLS or stealing the Token.
+//
+// If a future iLink revision adds an inbound webhook, the threat model above
+// no longer holds and this package must grow a transport_hook.go mirroring
+// internal/platform/feishu/transport_hook.go (timestamp + nonce + signature).
 package weixin
 
 import (

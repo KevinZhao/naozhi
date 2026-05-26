@@ -269,19 +269,21 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 		}, nil
 	}
 
-	// Image path — preserve the pre-PDF allowlist and prefix guard. SVG is
-	// deliberately rejected: even though DetectContentType returns text/xml
-	// for SVG (which would already fall through the image/* prefix check),
-	// we allowlist the raster formats Claude actually accepts so a future
-	// sniffer change cannot silently let SVG + script payloads through.
-	if !strings.HasPrefix(declared, "image/") {
-		return cli.Attachment{}, fmt.Errorf("only image/* or application/pdf files are accepted")
-	}
+	// Image path — gate purely on the byte-sniffed `detected` MIME (R244-SEC-P2-1
+	// #886). Trusting `declared` (the client-supplied Content-Type) lets a caller
+	// either smuggle a non-image body past the image branch by claiming
+	// "image/png", or have a legitimate PNG rejected because the client sent
+	// "application/octet-stream". `http.DetectContentType` is the authoritative
+	// classifier; allowlist the raster formats Claude accepts so a future
+	// sniffer change cannot silently let SVG (text/xml) or any other oddity
+	// through. The `declared` value is still used above to pick the size gate
+	// (PDF gets a higher cap) — that is intentional defense-in-depth, not the
+	// final authority.
 	switch detected {
 	case "image/jpeg", "image/png", "image/gif", "image/webp":
 		// ok
 	default:
-		return cli.Attachment{}, fmt.Errorf("unsupported image format (jpeg/png/gif/webp only)")
+		return cli.Attachment{}, fmt.Errorf("only image/* or application/pdf files are accepted")
 	}
 	// R232-SEC-7 (#1002): defence-in-depth secondary magic scan. http.DetectContentType
 	// only inspects the leading bytes; a JFIF (or any image) header followed by an
