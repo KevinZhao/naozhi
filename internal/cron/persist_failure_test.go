@@ -18,19 +18,24 @@ import (
 	"time"
 )
 
-// withFailingMarshal swaps marshalJobs to a stub that always errors, then
-// restores the original on test cleanup. Centralised so each mutation case
-// stays focused on its assertion and new callers inherit the same cleanup.
+// withFailingMarshal swaps the per-Scheduler marshalJobs field to a stub
+// that always errors, then restores the original on test cleanup.
+// Centralised so each mutation case stays focused on its assertion and
+// new callers inherit the same cleanup.
 //
 // Uses atomic.Pointer.Swap so parallel tests in the same package do not race
 // on the function-value word.
-func withFailingMarshal(t *testing.T) {
+//
+// R250-ARCH-14: takes a *Scheduler so the seam is per-instance, not a
+// package global; this prevents one test's failing stub from leaking
+// into a parallel scheduler instance via init/Cleanup ordering.
+func withFailingMarshal(t *testing.T, s *Scheduler) {
 	t.Helper()
 	failing := marshalJobsFn(func(any) ([]byte, error) {
 		return nil, fmt.Errorf("injected marshal failure")
 	})
-	orig := marshalJobs.Swap(&failing)
-	t.Cleanup(func() { marshalJobs.Store(orig) })
+	orig := s.marshalJobs.Swap(&failing)
+	t.Cleanup(func() { s.marshalJobs.Store(orig) })
 }
 
 // newTestSchedulerForPersist sets up a Scheduler + one pre-registered job
@@ -75,7 +80,7 @@ func TestPersistFailure_AddJob(t *testing.T) {
 	}
 	defer s.Stop()
 
-	withFailingMarshal(t)
+	withFailingMarshal(t, s)
 
 	err := s.AddJob(&Job{
 		Schedule: "@every 1h",
@@ -93,7 +98,7 @@ func TestPersistFailure_AddJob(t *testing.T) {
 func TestPersistFailure_DeleteJobByID(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 
-	withFailingMarshal(t)
+	withFailingMarshal(t, s)
 
 	_, err := s.DeleteJobByID(id)
 	if !errors.Is(err, ErrPersistFailed) {
@@ -104,7 +109,7 @@ func TestPersistFailure_DeleteJobByID(t *testing.T) {
 func TestPersistFailure_DeleteJobByPrefix(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 
-	withFailingMarshal(t)
+	withFailingMarshal(t, s)
 
 	_, err := s.DeleteJob(id[:4], "feishu", "chat1")
 	if !errors.Is(err, ErrPersistFailed) {
@@ -121,7 +126,7 @@ func TestPersistFailure_PauseJobByID(t *testing.T) {
 		t.Fatalf("ResumeJobByID seed: %v", err)
 	}
 
-	withFailingMarshal(t)
+	withFailingMarshal(t, s)
 
 	_, err := s.PauseJobByID(id)
 	if !errors.Is(err, ErrPersistFailed) {
@@ -133,7 +138,7 @@ func TestPersistFailure_ResumeJobByID(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 	// Seed starts Paused=true, so Resume is the natural mutation.
 
-	withFailingMarshal(t)
+	withFailingMarshal(t, s)
 
 	_, err := s.ResumeJobByID(id)
 	if !errors.Is(err, ErrPersistFailed) {
@@ -147,7 +152,7 @@ func TestPersistFailure_PauseJobByPrefix(t *testing.T) {
 		t.Fatalf("ResumeJobByID seed: %v", err)
 	}
 
-	withFailingMarshal(t)
+	withFailingMarshal(t, s)
 
 	_, err := s.PauseJob(id[:4], "feishu", "chat1")
 	if !errors.Is(err, ErrPersistFailed) {
@@ -158,7 +163,7 @@ func TestPersistFailure_PauseJobByPrefix(t *testing.T) {
 func TestPersistFailure_ResumeJobByPrefix(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 
-	withFailingMarshal(t)
+	withFailingMarshal(t, s)
 
 	_, err := s.ResumeJob(id[:4], "feishu", "chat1")
 	if !errors.Is(err, ErrPersistFailed) {
@@ -169,7 +174,7 @@ func TestPersistFailure_ResumeJobByPrefix(t *testing.T) {
 func TestPersistFailure_UpdateJob(t *testing.T) {
 	s, id := newTestSchedulerForPersist(t)
 
-	withFailingMarshal(t)
+	withFailingMarshal(t, s)
 
 	newPrompt := "updated"
 	_, err := s.UpdateJob(id, JobUpdate{Prompt: &newPrompt})
@@ -205,7 +210,7 @@ func TestPersistFailure_SetJobPrompt(t *testing.T) {
 	s.jobs[j.ID] = j
 	s.mu.Unlock()
 
-	withFailingMarshal(t)
+	withFailingMarshal(t, s)
 
 	err := s.SetJobPrompt(j.ID, "filled in")
 	if !errors.Is(err, ErrPersistFailed) {
@@ -267,7 +272,7 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 	s.jobs[j.ID] = j
 	s.mu.Unlock()
 
-	withFailingMarshal(t)
+	withFailingMarshal(t, s)
 
 	// R230C-CR-1 / R232-ARCH-2: tests now exercise the production path
 	// (recordResultP0WithSanitised) directly. The discriminating fields
@@ -359,7 +364,7 @@ func TestPersistFailure_PersistJobsLockedReturnsErrAndNilFunc(t *testing.T) {
 	}
 	defer s.Stop()
 
-	withFailingMarshal(t)
+	withFailingMarshal(t, s)
 
 	s.mu.Lock()
 	save, err := s.persistJobsLocked()

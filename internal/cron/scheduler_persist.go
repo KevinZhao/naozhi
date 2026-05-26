@@ -16,25 +16,27 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sync/atomic"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // marshalJobsFn is the signature of the JSON serializer used by
-// marshalJobsLocked. It is swapped via atomic.Pointer in tests (see
-// withFailingMarshal) to exercise persist-failure paths without constructing
-// a cyclic graph in Job. Kept behind an atomic.Pointer because other cron
-// tests in the same package run with t.Parallel(); a naked var swap races
-// with concurrent marshalJobsLocked readers under -race.
+// marshalJobsLocked. It is swapped via the per-Scheduler atomic.Pointer in
+// tests (see withFailingMarshal) to exercise persist-failure paths without
+// constructing a cyclic graph in Job. Kept behind an atomic.Pointer because
+// other cron tests in the same package run with t.Parallel(); a naked field
+// swap races with concurrent marshalJobsLocked readers under -race.
+//
+// R250-ARCH-14: lifted from a package-level var to a *Scheduler field so a
+// failing-marshal test in one parallel run cannot leak into another scheduler
+// instance, and so the test seam no longer pokes a hole through prod surface.
 type marshalJobsFn func(any) ([]byte, error)
 
-var marshalJobs atomic.Pointer[marshalJobsFn]
-
-func init() {
-	fn := marshalJobsFn(json.Marshal)
-	marshalJobs.Store(&fn)
-}
+// defaultMarshalJobs is the production serializer plumbed into every
+// *Scheduler.marshalJobs slot at NewScheduler. Stored as a package var
+// (read-only after init) so the *Scheduler initialiser can take its
+// address without allocating a fresh closure per scheduler.
+var defaultMarshalJobs = marshalJobsFn(json.Marshal)
 
 // marshalJobsLocked serialises the current jobs map to JSON while the caller
 // still holds s.mu. Round 47: replaces the map clone on every mutation. Safe
@@ -55,7 +57,15 @@ func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
 	// O(N log N) sort 每 mutation 一次；50 jobs × log50 ≈ 280 比较，热路径可接受。
 	// NEEDS-DESIGN R241-PERF-9：未来若 jobs 上千，可改增量维护已排 ID slice。
 	slices.SortFunc(entries, func(a, b *Job) int { return cmp.Compare(a.ID, b.ID) })
-	return (*marshalJobs.Load())(entries)
+	fn := s.marshalJobs.Load()
+	if fn == nil {
+		// Defensive fallback: a *Scheduler constructed via the zero
+		// value (or a future code path that forgets to initialise the
+		// field) still uses the production marshaller rather than
+		// nil-deref panicking the persist hot path.
+		return defaultMarshalJobs(entries)
+	}
+	return (*fn)(entries)
 }
 
 // persistJobsLocked marshals under the caller's s.mu and writes asynchronously.

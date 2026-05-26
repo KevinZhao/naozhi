@@ -154,6 +154,16 @@ type SchedulerConfig struct {
 	// schedules are not swallowed. TriggerNow bypasses jitter.
 	// See docs/rfc/cron-v2-polish.md §3.2.
 	JitterMax time.Duration
+	// RunsKeepCount overrides DefaultRunsKeepCount when > 0. Sets the
+	// per-job cap on retained run-history records (newest N kept). Zero
+	// (and negative) values fall back to the default — additive: existing
+	// callers that omit the field keep the prior behaviour.
+	RunsKeepCount int
+	// RunsKeepWindow overrides DefaultRunsKeepWindow when > 0. Records
+	// older than the window are trimmed at GC time. Zero (and negative)
+	// values fall back to the default; additive (callers that omit it
+	// keep prior behaviour). R250-GO-3.
+	RunsKeepWindow time.Duration
 }
 
 // Scheduler manages cron jobs and executes them on schedule.
@@ -298,7 +308,40 @@ type Scheduler struct {
 	// (workDirResolveCacheTTL) so symlink retargets surface within one
 	// notify-budget worth of time. R247-PERF-24.
 	workDirCache workDirResolveCache
+
+	// knownSessionsCache memoises KnownSessionIDs() output for up to
+	// knownSessionsCacheTTL. The dashboard polls KnownSessionIDs at 1Hz
+	// per tab; rebuilding the set walks every job's runStore.Recent (up
+	// to ~jobs × 200 file metadata reads) per call. The TTL cache cuts
+	// that to one rebuild per 30s. Invalidated explicitly on writes that
+	// can change the set (LastSessionID assignment, runStore.Append).
+	// R250-PERF-7.
+	knownSessionsCache knownSessionsCache
+
+	// marshalJobs is the JSON serializer used by marshalJobsLocked, held
+	// behind atomic.Pointer so tests (withFailingMarshal in
+	// persist_failure_test.go) can swap a failing stub without racing
+	// concurrent persist hot-path readers under -race. Initialised to
+	// defaultMarshalJobs in NewScheduler. Lifted from a package-level
+	// var so the seam stops being a global and parallel tests can no
+	// longer leak a stub across schedulers. R250-ARCH-14.
+	marshalJobs atomic.Pointer[marshalJobsFn]
 }
+
+// knownSessionsCache holds a TTL-bounded snapshot of KnownSessionIDs
+// output. Set is read-only after publication so callers can hand out
+// the map directly without copying. R250-PERF-7.
+type knownSessionsCache struct {
+	mu          sync.Mutex
+	generatedAt time.Time
+	set         map[string]struct{}
+}
+
+// knownSessionsCacheTTL bounds how stale a cached KnownSessionIDs
+// snapshot may be. 30s matches the godoc claim and is well below the
+// auto-workspace-chain spawn cadence (one spawn per user message);
+// dashboard 1Hz pollers see at most one rebuild per cache cycle. R250-PERF-7.
+const knownSessionsCacheTTL = 30 * time.Second
 
 // maxJobsHardCap caps user-configurable MaxJobs to prevent accidental
 // overload. 500 jobs ≈ 500 tick timers; well within robfig/cron's tested
@@ -575,7 +618,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		slog.Debug("cron: 'general' agent missing from agents map; cron jobs without slash-prefix will fall back to backend defaults",
 			"agent_count", len(cfg.Agents))
 	}
-	return &Scheduler{
+	s := &Scheduler{
 		cron: robfigcron.New(
 			robfigcron.WithLocation(loc),
 			robfigcron.WithChain(
@@ -599,8 +642,13 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		jitterMax:           cfg.JitterMax,
 		stopCtx:             stopCtx,
 		stopCancel:          stopCancel,
-		runStore:            newRunStore(cfg.StorePath, 0, 0),
+		runStore:            newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
 	}
+	// R250-ARCH-14: initialise the per-Scheduler marshal seam so the
+	// hot path in marshalJobsLocked finds defaultMarshalJobs instead of
+	// nil. Tests swap a failing stub via withFailingMarshal.
+	s.marshalJobs.Store(&defaultMarshalJobs)
+	return s
 }
 
 // NotifyDefault returns the configured fallback IM target so the dashboard

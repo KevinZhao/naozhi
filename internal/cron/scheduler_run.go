@@ -546,7 +546,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// "run now = run now" semantics.
 	if !viaTriggerNow && s.jitterMax > 0 {
 		inflight.setPhase(PhaseJittering)
-		applyJitter(s.stopCtx, j.Schedule, s.jitterMax)
+		// R250-GO-1: snapshot Schedule under s.mu.RLock so a concurrent
+		// UpdateJob mutating j.Schedule doesn't race with applyJitter's
+		// read. Mirrors the pattern used for the cur.Paused check below.
+		s.mu.RLock()
+		sched := j.Schedule
+		s.mu.RUnlock()
+		applyJitter(s.stopCtx, sched, s.jitterMax)
 
 		// R220-GO-3 + R246-GO-7: a DeleteJob OR a PauseJobByID that lands
 		// during the jitter window must abort the run before we spawn /

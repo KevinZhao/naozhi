@@ -285,28 +285,58 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 // so handleHealth reads linearly without branching on `err != nil` for a single
 // boolean — cleaner when the rest of the handler is struct initialization.
 //
-// R247-SEC-21: the result is cached per (path) on first call. The CLI binary
-// path is set at process start and is effectively static; running os.Stat on
-// every authenticated /health response (1 Hz × N tabs) gives a token-thief
-// a precise filesystem-syscall oracle on the host's binary layout (timing of
+// R247-SEC-21: the result is cached per (path). The CLI binary path is set
+// at process start and is effectively static; running os.Stat on every
+// authenticated /health response (1 Hz × N tabs) gives a token-thief a
+// precise filesystem-syscall oracle on the host's binary layout (timing of
 // hot vs cold dentry cache differs measurably across reachable directories).
-// Caching collapses every subsequent call to a wait-free atomic load and
-// makes the response time independent of host filesystem state. The trade
-// is that a binary install/uninstall after process start no longer flips
-// the bit until restart — acceptable since that path on a managed deploy
-// requires a service restart anyway.
+// Caching collapses every subsequent call to a wait-free load and makes the
+// response time independent of host filesystem state.
+//
+// R250-SEC-3: a coarse TTL (cliAvailCacheTTL) is applied so a removed or
+// re-deployed binary surfaces in /health within at most one TTL window
+// instead of requiring a process restart. The window must be long enough
+// that an attacker cannot use back-to-back stat calls as a precise oracle
+// (60s mirrors the dashboard's other coarse caches) but short enough that
+// a deploy-rotated binary becomes visible to operators within a minute.
 func cliAvailable(path string) bool {
-	v, _ := cliAvailCache.LoadOrStore(path, sync.OnceValue(func() bool {
-		_, err := os.Stat(path)
-		return err == nil
-	}))
-	return v.(func() bool)()
+	return cliAvailableAt(path, time.Now())
 }
 
-// cliAvailCache memoises cliAvailable(path) → bool. Keyed by path so a future
-// caller with a different argument doesn't share another path's cached
-// answer; in practice handleHealth always passes router.CLIPath() which is
-// stable for the process lifetime.
+// cliAvailableAt is the test seam: callers in production pass time.Now;
+// tests inject a synthetic clock to exercise the TTL refresh path without
+// sleeping. The seam keeps the public surface (cliAvailable) untouched.
+func cliAvailableAt(path string, now time.Time) bool {
+	if v, ok := cliAvailCache.Load(path); ok {
+		entry := v.(cliAvailEntry)
+		if now.Sub(entry.generatedAt) < cliAvailCacheTTL {
+			return entry.available
+		}
+	}
+	_, err := os.Stat(path)
+	available := err == nil
+	cliAvailCache.Store(path, cliAvailEntry{generatedAt: now, available: available})
+	return available
+}
+
+// cliAvailEntry is a single cache record. generatedAt is monotonic-safe
+// (time.Now() returns a wall+mono pair; Sub uses the mono component) so
+// clock skew during host suspend cannot prematurely expire the cache.
+type cliAvailEntry struct {
+	generatedAt time.Time
+	available   bool
+}
+
+// cliAvailCacheTTL caps how long a stat result is reused. Shared with the
+// other dashboard read-only caches that prefer coarse refresh over per-call
+// fs syscalls; 60s matches the existing convention. Test code may shadow
+// this with a much shorter value via cliAvailCacheTTLForTest.
+var cliAvailCacheTTL = 60 * time.Second
+
+// cliAvailCache memoises cliAvailable(path) → cliAvailEntry. Keyed by path
+// so a future caller with a different argument doesn't share another path's
+// cached answer; in practice handleHealth always passes router.CLIPath()
+// which is stable for the process lifetime.
 var cliAvailCache sync.Map
 
 // systemInfo returns compact system fingerprint for the workspace info bar.

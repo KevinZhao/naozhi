@@ -142,10 +142,13 @@ type Dispatcher struct {
 	// can call methods unconditionally.
 	//
 	// Wireup contract:
-	//   - Capabilities.Send is required for production. NoopCapabilities.Send
-	//     panics, mirroring the legacy "no fallback for SendFn" contract:
-	//     missing wireup surfaces as a constructor-time panic, not a silent
-	//     drop in production.
+	//   - Capabilities.Send is required for production. R250-ARCH-12:
+	//     NewDispatcher returns ErrSendWireupMissing when no usable Send is
+	//     supplied (no Capabilities, no SendFn, no AllowMissingSender) so
+	//     the caller controls the failure mode (callable from systemd-aware
+	//     boot path) instead of crashing with a panic. NoopCapabilities.Send
+	//     still panics if reached at runtime to catch the AllowMissingSender
+	//     opt-out cases that misuse the dispatcher.
 	//   - Capabilities.Takeover defaults to false (no external session).
 	//   - Capabilities.ReplyFooter defaults to "" (no footer).
 	//
@@ -297,7 +300,20 @@ type DispatcherConfig struct {
 // when ProjectMgr is also nil so behaviour matches pre-resolver code.
 // This eliminates the legacy nil-resolver inline branches scattered
 // across dispatch / commands / urgent.
-func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
+// ErrSendWireupMissing is returned by NewDispatcher when no usable Send
+// hook was supplied. R250-ARCH-12: prefer surfacing missing wireup as an
+// error the caller can branch on, rather than as a panic that crashes
+// systemd before logs flush. Tests that intentionally omit Send wireup
+// can opt out via DispatcherConfig.AllowMissingSender.
+var ErrSendWireupMissing = errors.New("dispatch: Capabilities.Send is required (set DispatcherConfig.Capabilities or DispatcherConfig.SendFn; tests may set AllowMissingSender)")
+
+// NewDispatcher constructs a Dispatcher from cfg. Returns
+// ErrSendWireupMissing when neither cfg.Capabilities (with non-noop Send)
+// nor cfg.SendFn is set and AllowMissingSender is false. R250-ARCH-12
+// converted this from a constructor-time panic to a returned error so the
+// caller controls the failure mode (systemd-friendly logging vs panic
+// stack trace).
+func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	var router SessionRouter
 	if cfg.Router != nil {
 		router = cfg.Router
@@ -353,7 +369,7 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 			hasSend = true
 		}
 		if !hasSend {
-			panic("dispatch: NewDispatcher missing Send wireup — set DispatcherConfig.Capabilities or DispatcherConfig.SendFn (test wiring may set DispatcherConfig.AllowMissingSender to opt out)")
+			return nil, ErrSendWireupMissing
 		}
 	}
 	// R248-GO-2: warn when Capabilities and the legacy *Fn fields are both
@@ -404,7 +420,7 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 	if d.dedup == nil {
 		d.dedup = platform.NewDedup(0)
 	}
-	return d
+	return d, nil
 }
 
 // BuildHandler returns a platform.MessageHandler wired to this Dispatcher.
