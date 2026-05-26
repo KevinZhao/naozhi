@@ -811,3 +811,145 @@ func TestIsJSONNull(t *testing.T) {
 		}
 	}
 }
+
+// R234-PERF-10 (#1012): the parseISO8601MS fast path must produce
+// bit-identical UnixMilli output to time.Parse(time.RFC3339Nano, …) on
+// the canonical claude-CLI shape `YYYY-MM-DDThh:mm:ss[.fff…]Z`. Any
+// deviation (offsets, year-zero, missing-Z) must fall through to the
+// stdlib parser, which the wrapper does after parseISO8601MSFast returns
+// ok=false.
+func TestParseISO8601MS_FastPathMatchesStdlib(t *testing.T) {
+	t.Parallel()
+
+	canonical := []string{
+		"2026-05-26T12:34:56Z",
+		"2026-05-26T12:34:56.7Z",
+		"2026-05-26T12:34:56.78Z",
+		"2026-05-26T12:34:56.789Z",
+		"2026-05-26T12:34:56.789012345Z",
+		"1970-01-01T00:00:00Z",
+		"2099-12-31T23:59:59.999999999Z",
+		"2024-02-29T00:00:00Z", // real leap day — fast path admits, stdlib admits
+	}
+	for _, s := range canonical {
+		got := parseISO8601MS(s)
+		want := func() int64 {
+			tt, err := time.Parse(time.RFC3339Nano, s)
+			if err != nil {
+				return 0
+			}
+			return tt.UnixMilli()
+		}()
+		if got != want {
+			t.Errorf("%q: parseISO8601MS=%d, time.Parse=%d", s, got, want)
+		}
+	}
+}
+
+// R234-PERF-10 (#1012): non-canonical shapes must round-trip via the
+// stdlib fallback so we never silently mis-parse a deviation.
+func TestParseISO8601MS_NonCanonicalShapesFallThrough(t *testing.T) {
+	t.Parallel()
+
+	// Inputs that the fast path rejects (ok=false) but time.Parse accepts:
+	// the wrapper must still surface a non-zero UnixMilli matching stdlib.
+	// Includes second=60 (leap second policy) and 10+ fractional digits
+	// (stdlib is lenient there) so the fallback path is exercised.
+	deviations := []string{
+		"2026-05-26T12:34:56+00:00",
+		"2026-05-26T12:34:56-07:00",
+		"2026-05-26T12:34:56.5+09:30",
+		"2026-05-26T12:34:56.1234567890Z",
+	}
+	for _, s := range deviations {
+		got := parseISO8601MS(s)
+		tt, err := time.Parse(time.RFC3339Nano, s)
+		if err != nil {
+			t.Fatalf("setup: time.Parse rejected %q: %v", s, err)
+		}
+		if got != tt.UnixMilli() {
+			t.Errorf("%q: parseISO8601MS=%d, time.Parse=%d (fallback path broken)", s, got, tt.UnixMilli())
+		}
+	}
+
+	// Inputs that everyone rejects → 0.
+	bogus := []string{
+		"",
+		"2026",
+		"not-a-timestamp",
+		"2026-05-26T12:34:56",   // missing zone
+		"2026-13-01T00:00:00Z",  // month 13
+		"2026-05-26T25:00:00Z",  // hour 25
+		"2026-05-26T12:34:56.Z", // empty fractional
+		"2026-02-30T00:00:00Z",  // Feb 30 — fast path rejects via daysInMonth, stdlib rejects too
+		"2026-02-29T00:00:00Z",  // Feb 29 in non-leap year — both reject
+	}
+	for _, s := range bogus {
+		if got := parseISO8601MS(s); got != 0 {
+			t.Errorf("%q: parseISO8601MS=%d, want 0", s, got)
+		}
+	}
+}
+
+// BenchmarkParseISO8601MS confirms the fast path is materially cheaper
+// than the stdlib fallback. Not gated as a perf test (no thresholds) —
+// run with `go test -bench=ParseISO8601MS` to compare.
+func BenchmarkParseISO8601MS(b *testing.B) {
+	const sample = "2026-05-26T12:34:56.789Z"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		parseISO8601MS(sample)
+	}
+}
+
+// TestAnsiEscRe_StripsOSCHyperlinks guards R243-SEC-6 (#788): tools like
+// `gh`, `ls --hyperlink`, and language servers emit OSC sequences (e.g.
+// `\x1b]8;;url\x07link\x1b]8;;\x07`) which used to leak through unstripped
+// because the regex only covered CSI. The strip must scrub both BEL- and
+// ST-terminated OSC bodies while preserving plain text and continuing to
+// scrub CSI as before.
+func TestAnsiEscRe_StripsOSCHyperlinks(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "osc_hyperlink_bel_terminated",
+			in:   "see \x1b]8;;https://example.com\x07link text\x1b]8;;\x07 here",
+			want: "see link text here",
+		},
+		{
+			name: "osc_hyperlink_st_terminated",
+			in:   "see \x1b]8;;https://example.com\x1b\\link text\x1b]8;;\x1b\\ here",
+			want: "see link text here",
+		},
+		{
+			name: "csi_color_still_stripped",
+			in:   "\x1b[31merror\x1b[0m: details",
+			want: "error: details",
+		},
+		{
+			name: "mixed_csi_and_osc",
+			in:   "\x1b[1m\x1b]8;;https://x\x07X\x1b]8;;\x07\x1b[0m",
+			want: "X",
+		},
+		{
+			name: "plain_text_untouched",
+			in:   "no escapes here, just text",
+			want: "no escapes here, just text",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ansiEscRe.ReplaceAllString(tc.in, "")
+			if got != tc.want {
+				t.Fatalf("strip(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

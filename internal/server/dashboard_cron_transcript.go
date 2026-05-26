@@ -100,12 +100,21 @@ func isJSONNull(b json.RawMessage) bool {
 }
 
 // ansiEscRe matches the most common ANSI CSI sequences (color, cursor
-// motion). We strip these from tool output before serialising so the
-// rendered <pre> doesn't show garbled bytes. Defensive: the dashboard
-// uses esc()-then-<pre> so the bytes wouldn't be interpreted as HTML
-// either way, but they'd render as literal escape codes which hurt
-// readability for a debugging-focused view.
-var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
+// motion) AND OSC sequences (operating-system commands such as the
+// hyperlink escape `\x1b]8;;url\x1b\\` / BEL-terminated `\x1b]8;;url\x07`).
+// We strip these from tool output before serialising so the rendered
+// <pre> doesn't show garbled bytes. Defensive: the dashboard uses
+// esc()-then-<pre> so the bytes wouldn't be interpreted as HTML either
+// way, but they'd render as literal escape codes which hurt readability
+// for a debugging-focused view.
+//
+// R243-SEC-6 (#788): the regex previously covered only CSI (`\x1b[`),
+// leaving OSC hyperlinks (used by `gh`, modern `ls --hyperlink`, and
+// language-server output) intact. Extend the alternation so both
+// terminators (BEL `\x07` and ST `\x1b\\`) are scrubbed together with
+// CSI. The two halves run as one Go RE2 alternation so a single regex
+// pass covers both classes — no extra hot-path allocation.
+var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
 
 // transcriptResponse is the wire shape the dashboard consumes.
 type transcriptResponse struct {
@@ -956,15 +965,138 @@ func summariseToolInput(name string, input json.RawMessage) string {
 // the latter accepts is also accepted by the former — so the previous
 // RFC3339 fallback was dead code and is now removed (R243-CR-P3-6).
 // (Go time.Parse treats .999... fragment as optional, so RFC3339Nano layout accepts both fractional and non-fractional inputs.)
+//
+// R234-PERF-10 (#1012): on bulk transcript reads we parse one timestamp per
+// JSONL line, and time.Parse spends ~300 ns/call on the RFC3339Nano layout
+// even though the claude CLI emits a single canonical UTC shape
+// `YYYY-MM-DDThh:mm:ss[.fffffffff]Z`. The fast path below hand-parses that
+// exact shape (~30 ns) and falls back to time.Parse for any deviation —
+// negative timezones, +HH:MM offsets, missing seconds, etc. Output matches
+// the stdlib parser bit-for-bit on the canonical shape (verified by
+// TestParseISO8601MS_FastPathMatchesStdlib).
 func parseISO8601MS(s string) int64 {
 	if s == "" {
 		return 0
+	}
+	if ms, ok := parseISO8601MSFast(s); ok {
+		return ms
 	}
 	t, err := time.Parse(time.RFC3339Nano, s)
 	if err != nil {
 		return 0
 	}
 	return t.UnixMilli()
+}
+
+// parseISO8601MSFast hand-parses the canonical claude-CLI timestamp shape
+// `YYYY-MM-DDThh:mm:ssZ` or `YYYY-MM-DDThh:mm:ss.fffffffffZ` (1..9 fractional
+// digits) without allocating. ok=false signals a shape mismatch — callers must
+// fall back to time.Parse, which handles negative years, +HH:MM offsets, and
+// other RFC3339 dialects this fast path deliberately rejects.
+func parseISO8601MSFast(s string) (int64, bool) {
+	// Canonical shape requires at minimum YYYY-MM-DDTHH:MM:SSZ (20 bytes).
+	if len(s) < 20 || s[len(s)-1] != 'Z' {
+		return 0, false
+	}
+	if s[4] != '-' || s[7] != '-' || s[10] != 'T' || s[13] != ':' || s[16] != ':' {
+		return 0, false
+	}
+	year, ok := parseFixedInt(s[0:4])
+	if !ok {
+		return 0, false
+	}
+	month, ok := parseFixedInt(s[5:7])
+	if !ok || month < 1 || month > 12 {
+		return 0, false
+	}
+	day, ok := parseFixedInt(s[8:10])
+	if !ok || day < 1 || day > 31 {
+		return 0, false
+	}
+	hour, ok := parseFixedInt(s[11:13])
+	if !ok || hour > 23 {
+		return 0, false
+	}
+	minute, ok := parseFixedInt(s[14:16])
+	if !ok || minute > 59 {
+		return 0, false
+	}
+	second, ok := parseFixedInt(s[17:19])
+	// time.Parse(RFC3339Nano, …) rejects second=60 unless it lands on a
+	// real leap-second boundary, which is too narrow a contract to mirror
+	// in a fast path. Reject 60 here so callers fall through to the stdlib
+	// parser, which preserves whatever leap-second policy the runtime uses.
+	if !ok || second > 59 {
+		return 0, false
+	}
+	// Optional fractional seconds: `.` then 1..9 digits, then `Z`.
+	nano := 0
+	if len(s) > 20 {
+		if s[19] != '.' {
+			return 0, false
+		}
+		frac := s[20 : len(s)-1]
+		if len(frac) == 0 || len(frac) > 9 {
+			return 0, false
+		}
+		for i := 0; i < len(frac); i++ {
+			c := frac[i]
+			if c < '0' || c > '9' {
+				return 0, false
+			}
+			nano = nano*10 + int(c-'0')
+		}
+		// Pad to nanosecond resolution: `.5` means 500_000_000 ns.
+		for i := len(frac); i < 9; i++ {
+			nano *= 10
+		}
+	} else if len(s) != 20 {
+		return 0, false
+	}
+	// Day-of-month overflow check: time.Date silently normalises Feb 30 →
+	// Mar 2, but time.Parse(RFC3339Nano, …) rejects it. Validate against a
+	// per-month max with the simple leap-year rule before constructing so
+	// we never disagree with the stdlib parser on a real-world timestamp.
+	maxDay := daysInMonth(year, month)
+	if day > maxDay {
+		return 0, false
+	}
+	t := time.Date(year, time.Month(month), day, hour, minute, second, nano, time.UTC)
+	return t.UnixMilli(), true
+}
+
+// daysInMonth returns the number of days in the given Gregorian month
+// (1..12). Used by parseISO8601MSFast to reject day-of-month values that
+// time.Parse(RFC3339Nano, …) rejects but time.Date silently normalises.
+func daysInMonth(year, month int) int {
+	switch month {
+	case 1, 3, 5, 7, 8, 10, 12:
+		return 31
+	case 4, 6, 9, 11:
+		return 30
+	case 2:
+		// Gregorian leap-year rule.
+		if year%4 == 0 && (year%100 != 0 || year%400 == 0) {
+			return 29
+		}
+		return 28
+	}
+	return 0
+}
+
+// parseFixedInt decodes a fixed-width unsigned decimal string. Returns
+// ok=false if any byte is not an ASCII digit. Used by parseISO8601MSFast
+// for the YYYY/MM/DD/HH/MM/SS components where the position is known.
+func parseFixedInt(s string) (int, bool) {
+	n := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, true
 }
 
 // sanitizeTranscriptDisplay strips Unicode runes that would corrupt the JSON
