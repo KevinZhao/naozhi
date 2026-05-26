@@ -16,7 +16,7 @@ import (
 func makeFakeLog(t *testing.T, dir, key string, age time.Duration) {
 	t.Helper()
 	log := persist.LogPath(dir, key)
-	idx := persist.IdxPath(dir, key)
+	idx := filepath.Join(dir, persist.KeyHash(key)+".idx")
 	for _, p := range []string{log, idx} {
 		if err := os.WriteFile(p, []byte("fake"), 0o600); err != nil {
 			t.Fatalf("write %s: %v", p, err)
@@ -46,7 +46,7 @@ func TestOrphanSweep_RemovesStaleUnknown(t *testing.T) {
 	if _, err := os.Stat(persist.LogPath(dir, "ghost")); !os.IsNotExist(err) {
 		t.Errorf("log not removed: err=%v", err)
 	}
-	if _, err := os.Stat(persist.IdxPath(dir, "ghost")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, persist.KeyHash("ghost")+".idx")); !os.IsNotExist(err) {
 		t.Errorf("idx not removed: err=%v", err)
 	}
 }
