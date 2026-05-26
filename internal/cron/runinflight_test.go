@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"expvar"
 	"sync"
 	"testing"
 	"time"
@@ -134,5 +135,68 @@ func TestRunInflight_SetPhaseFastPath(t *testing.T) {
 	v, ok := inf.snapshot()
 	if !ok || v.Phase != PhaseSending || v.RunID != "x" {
 		t.Errorf("phase update lost siblings: ok=%v v=%+v", ok, v)
+	}
+}
+
+// TestRunInflight_ReleaseRun_ContractOrder pins the 3-step terminal
+// release contract that R246-CR-017 (#759) extracted into releaseRun:
+// after the call, the CAS gate must be released, snapshot() must return
+// ok=false (so list handlers stop surfacing stale RunID/Phase), and the
+// inflight gauge must have decremented once. Order matters — see
+// releaseRun's godoc and R238-GO-2.
+func TestRunInflight_ReleaseRun_ContractOrder(t *testing.T) {
+	inf := &runInflight{}
+	if !inf.running.CompareAndSwap(false, true) {
+		t.Fatal("CAS")
+	}
+	inf.populate(runInflightView{
+		RunID:     "aaaaaaaaaaaaaaaa",
+		StartedAt: time.Now(),
+		Phase:     PhaseSending,
+		SessionID: "sess-x",
+		Trigger:   TriggerScheduled,
+	})
+
+	gauge := expvar.NewInt("test_release_run_gauge_" + t.Name())
+	gauge.Add(1) // mirror executeOpt's CAS-true Add(+1).
+
+	if v, ok := inf.snapshot(); !ok || v.RunID == "" {
+		t.Fatalf("precondition: snapshot before release must be live: ok=%v v=%+v", ok, v)
+	}
+
+	inf.releaseRun(gauge)
+
+	if inf.running.Load() {
+		t.Errorf("releaseRun must Store(false) on running CAS gate")
+	}
+	if v, ok := inf.snapshot(); ok || v.RunID != "" {
+		t.Errorf("releaseRun must reset view (no stale metadata): ok=%v v=%+v", ok, v)
+	}
+	if got := gauge.Value(); got != 0 {
+		t.Errorf("releaseRun must decrement gauge: got=%d want=0", got)
+	}
+}
+
+// TestRunInflight_ReleaseRun_NilSafe locks in the nil-receiver and
+// nil-gauge contract documented on releaseRun. Test fixtures that build
+// a runInflight without wiring metrics rely on the nil-gauge branch.
+func TestRunInflight_ReleaseRun_NilSafe(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("releaseRun on nil receiver / nil gauge panicked: %v", r)
+		}
+	}()
+	var inf *runInflight
+	inf.releaseRun(nil) // nil receiver
+
+	live := &runInflight{}
+	live.running.Store(true)
+	live.populate(runInflightView{RunID: "y"})
+	live.releaseRun(nil) // nil gauge — must still reset + release CAS
+	if live.running.Load() {
+		t.Errorf("nil-gauge releaseRun must still release CAS gate")
+	}
+	if _, ok := live.snapshot(); ok {
+		t.Errorf("nil-gauge releaseRun must still reset view")
 	}
 }
