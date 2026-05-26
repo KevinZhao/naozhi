@@ -120,6 +120,49 @@ func TestReadShimLine_CapExceeded_DrainsToNextLine(t *testing.T) {
 	_ = r
 }
 
+// TestReadShimLine_CapExceededTerminatedDoesNotEatNext covers R234-PERF-13
+// (#1014): when the chunk that pushes us over maxScannerBufBytes already
+// ends with '\n', readShimLine MUST NOT drain afterwards because the
+// terminator was in that chunk; draining would consume the next message.
+//
+// Pre-fix this test would observe the second readShimLine call returning
+// "" (EOF) because the drain loop ate "next\n".
+func TestReadShimLine_CapExceededTerminatedDoesNotEatNext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates >10 MiB; skipped under -short")
+	}
+	// Build a single oversize line (cap+1 bytes followed by '\n') so that
+	// the LAST chunk yielded by ReadSlice contains the '\n' terminator, then
+	// follow with a small "next\n". Pre-fix the helper drained "next\n"
+	// believing it was the tail of the oversize message.
+	oversize := strings.Repeat("x", maxScannerBufBytes+1) + "\n"
+	follow := "next\n"
+	// Use a bufio buffer large enough that ReadSlice yields the terminator
+	// in a single chunk (or one of the later chunks ending on '\n').
+	r := bufio.NewReaderSize(strings.NewReader(oversize+follow), 1<<20)
+
+	lineBuf := make([]byte, 0, 4096)
+	_, capExceeded, err := readShimLine(r, lineBuf)
+	if err != nil {
+		t.Fatalf("first call err = %v, want nil", err)
+	}
+	if !capExceeded {
+		t.Fatal("first call: expected capExceeded=true")
+	}
+	// Second call must observe the next message intact, not EOF / partial.
+	line, capExceeded2, err2 := readShimLine(r, lineBuf)
+	if err2 != nil {
+		t.Fatalf("second call err = %v, want nil (drain ate next message?)", err2)
+	}
+	if capExceeded2 {
+		t.Fatalf("second call: capExceeded should be false, line=%q", line)
+	}
+	if string(line) != follow {
+		t.Fatalf("second call: line = %q, want %q (drain consumed next message)",
+			line, follow)
+	}
+}
+
 func TestReadShimLine_ReadErrorPropagated(t *testing.T) {
 	// Use an io.Reader that returns a custom error mid-read.
 	want := errors.New("synthetic shim fault")

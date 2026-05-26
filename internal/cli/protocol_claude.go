@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"regexp"
+	"strings"
 )
 
 // resumeIDRe accepts only characters that can legally appear in a Claude
@@ -252,7 +253,15 @@ func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	// card so the next user turn carries the chosen option(s). The
 	// AskQuestion field rides on the same assistant event so the existing
 	// tool_use EventLog entry still flows through unchanged.
-	if ev.Type == "assistant" && ev.Message != nil {
+	//
+	// R234-PERF-16 (#1008): substring-skip on the raw line so the
+	// per-block walk only runs for events that actually mention the tool.
+	// AskUserQuestion is rare in practice — most assistant events carry
+	// only text/thinking blocks. strings.Contains over the raw shim line
+	// is single-pass and ~3 orders of magnitude cheaper than the
+	// for-block iteration when no AQ tool_use is present.
+	if ev.Type == "assistant" && ev.Message != nil &&
+		strings.Contains(line, "AskUserQuestion") {
 		if aq := extractAskQuestion(ev.Message.Content); aq != nil {
 			ev.AskQuestion = aq
 		}
@@ -278,6 +287,11 @@ type askUserQuestionInput struct {
 // contain a tool_use with name "AskUserQuestion" and valid input.
 // Returns nil when no AQ tool_use present or the input fails to decode —
 // callers treat nil as "no card to render".
+//
+// Callers should pre-filter via strings.Contains(rawLine, "AskUserQuestion")
+// to avoid running the per-block walk for assistant events that don't
+// reference the tool — the cheap substring scan is ~1000× faster than the
+// structural iteration when no AQ tool_use is present (R234-PERF-16 / #1008).
 func extractAskQuestion(blocks []ContentBlock) *AskQuestion {
 	for _, b := range blocks {
 		if b.Type != "tool_use" || b.Name != "AskUserQuestion" || len(b.Input) == 0 {

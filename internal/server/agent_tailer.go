@@ -343,12 +343,12 @@ func (r *tailerRegistry) detachClient(c *wsClient) {
 		return
 	}
 	delete(r.clientSubs, c)
-	keys := make([]tailerKey, 0, len(subs))
+	// R249-PERF-3 (#925): cold-path detach but no reason to spend two
+	// allocations. The previous shape built keys[], then walked it to
+	// build targets[] — keys was dead the moment targets finished. Walk
+	// subs directly into targets[] and skip the intermediate slice.
+	targets := make([]*agentTailer, 0, len(subs))
 	for k := range subs {
-		keys = append(keys, k)
-	}
-	targets := make([]*agentTailer, 0, len(keys))
-	for _, k := range keys {
 		if t, ok := r.byTask[k]; ok {
 			targets = append(targets, t)
 		}

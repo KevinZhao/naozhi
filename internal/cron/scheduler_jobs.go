@@ -33,6 +33,17 @@ func (s *Scheduler) AddJob(j *Job) error {
 	if n := utf8.RuneCountInString(j.Title); n > MaxCronTitleLen {
 		return fmt.Errorf("title too long: %d runes > %d cap", n, MaxCronTitleLen)
 	}
+	// R244-SEC-P2-5 / #889: AddJob is the canonical create path; mirror
+	// SetJobPrompt's strict prompt validation so any non-dashboard caller
+	// (test, IM op, future API) cannot persist multi-MB / log-injection
+	// prompts to cron_jobs.json. Empty prompts are permitted because the
+	// dashboard creates jobs in a paused-with-empty-prompt state to be
+	// filled in via SetJobPrompt later.
+	if j.Prompt != "" {
+		if err := ValidatePromptStrict(j.Prompt); err != nil {
+			return err
+		}
+	}
 
 	// addJobAcquiringLock runs under s.mu (defer Unlock). Splitting the locked
 	// section into a helper means every early-return path goes through
@@ -437,6 +448,20 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	if upd.Title != nil {
 		if n := utf8.RuneCountInString(*upd.Title); n > MaxCronTitleLen {
 			return nil, fmt.Errorf("title too long: %d runes > %d cap", n, MaxCronTitleLen)
+		}
+	}
+	// R244-SEC-P2-5 / #889: UpdateJob is a Scheduler-public entry point that
+	// historically wrote *upd.Prompt straight into j.Prompt without a size
+	// guard. The dashboard PATCH handler already runs validateCronPrompt at
+	// the HTTP edge, but any non-dashboard caller (test, CLI utility, future
+	// IM op) bypassing that validator would persist a multi-MB / log-injection
+	// prompt to cron_jobs.json. Mirror SetJobPrompt's policy so the cap is
+	// consistent across all Scheduler write paths. Empty pointer-to-empty is
+	// allowed (clears the prompt to the paused-empty initial state); any
+	// non-empty value goes through the strict validator.
+	if upd.Prompt != nil && *upd.Prompt != "" {
+		if err := ValidatePromptStrict(*upd.Prompt); err != nil {
+			return nil, err
 		}
 	}
 

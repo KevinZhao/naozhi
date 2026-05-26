@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -125,6 +124,15 @@ type Dispatcher struct {
 	totalTimeout          time.Duration
 	watchdogNoOutputKills *atomic.Int64
 	watchdogTotalKills    *atomic.Int64
+
+	// imageReader resolves cli-extracted image paths to bytes for the
+	// outbound platform.Image payload (sendAndReply). Production wires
+	// osImageReader{} which delegates to os.ReadFile; tests inject an
+	// in-memory map so reply-footer / image-attachment assertions don't
+	// touch disk. R245-ARCH-33 (#884) — previously dispatch.go reached
+	// for os.ReadFile directly, leaving no seam for tests to mock the
+	// filesystem branch. Always non-nil after NewDispatcher.
+	imageReader ImageReader
 
 	// Operational counters exposed via /health for triaging. Incremented
 	// atomically and never reset (monotonic since process start).
@@ -255,6 +263,14 @@ type DispatcherConfig struct {
 	TotalTimeout          time.Duration
 	WatchdogNoOutputKills *atomic.Int64
 	WatchdogTotalKills    *atomic.Int64
+
+	// ImageReader resolves outbound image paths to bytes when the cli
+	// reply contains attachment markers. Optional — NewDispatcher
+	// installs osImageReader{} (os.ReadFile delegation) when nil so
+	// production wiring keeps zero-config. Tests inject a fake to
+	// exercise the read-success / read-failure branches without
+	// touching the filesystem. R245-ARCH-33 (#884).
+	ImageReader ImageReader
 
 	// SendFn forwards a turn payload to the session router after guard /
 	// queue gating has succeeded. Production wires Server.sendWithBroadcast.
@@ -420,6 +436,11 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	if d.dedup == nil {
 		d.dedup = platform.NewDedup(0)
 	}
+	if cfg.ImageReader != nil {
+		d.imageReader = cfg.ImageReader
+	} else {
+		d.imageReader = osImageReader{}
+	}
 	return d, nil
 }
 
@@ -500,7 +521,10 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 
 		// Count accepted messages (post-dedup, post-command-filter). Does not
 		// include slash commands, ignored non-text items, or dedup hits.
+		// Per-Dispatcher counter feeds /health; expvar mirror feeds
+		// /debug/vars. R245-ARCH-36 (#892).
 		d.messageCount.Add(1)
+		dispatchMessageTotal.Add(1)
 
 		// Determine session key and opts via KeyResolver — single source of
 		// truth for project-binding precedence and aliasing-safe ExtraArgs
@@ -852,6 +876,7 @@ func (d *Dispatcher) sendAndReply(
 	result, err := d.caps.Send(ctx, key, sess, text, images, tracker.onEvent)
 	if err != nil {
 		d.replyErrorCount.Add(1)
+		dispatchReplyErrorTotal.Add(1)
 		lg.Error("send to claude", "err", err)
 		// IM path uses the timeout-aware helper (it renders the configured
 		// no-output / total durations in Chinese) and prepends a clock
@@ -883,6 +908,7 @@ func (d *Dispatcher) sendAndReply(
 		}
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, platformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
+			dispatchSendFailTotal.Add(1)
 			lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
 		}
 		return
@@ -941,7 +967,7 @@ func (d *Dispatcher) sendAndReply(
 		// extracted path got rewritten to "[图片]" regardless of read success.
 		replacePairs := make([]string, 0, 2*len(imagePaths))
 		for _, path := range imagePaths {
-			data, err := os.ReadFile(path)
+			data, err := d.imageReader.ReadFile(path)
 			if err == nil {
 				outImages = append(outImages, platform.Image{Data: data, MimeType: cli.MimeFromPath(path)})
 			}
@@ -1012,6 +1038,7 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 		}
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: chunk}, platformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
+			dispatchSendFailTotal.Add(1)
 			slog.Error("reply chunk failed after retries", "chat", chatID, "chunk", i+1, "err", err)
 		} else {
 			d.markReplySuccess()

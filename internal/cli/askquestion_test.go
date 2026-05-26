@@ -67,6 +67,30 @@ func TestClaudeProtocol_ReadEvent_NonAskQuestionUntouched(t *testing.T) {
 	}
 }
 
+// TestClaudeProtocol_ReadEvent_FastPathSkipsParseForBashToolUse pins
+// R234-PERF-16 (#1008): an assistant event carrying ONLY non-AQ tool_uses
+// (e.g. Bash) must produce AskQuestion=nil — the substring fast path
+// short-circuits before extractAskQuestion runs at all. The fixture
+// deliberately omits the literal "AskUserQuestion" substring anywhere
+// in the line so the strings.Contains gate evaluates to false.
+func TestClaudeProtocol_ReadEvent_FastPathSkipsParseForBashToolUse(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_x","name":"Bash","input":{"command":"ls"}}]}}`
+	ev, _, err := readOne(t, p, line)
+	if err != nil {
+		t.Fatalf("ReadEvent err=%v", err)
+	}
+	if ev.AskQuestion != nil {
+		t.Errorf("fast-path failed: AskQuestion=%+v on Bash tool_use", ev.AskQuestion)
+	}
+	// Verify the original tool_use bubble still flows through.
+	if ev.Message == nil || len(ev.Message.Content) != 1 ||
+		ev.Message.Content[0].Name != "Bash" {
+		t.Error("Bash tool_use block must remain intact after fast-path skip")
+	}
+}
+
 func TestExtractAskQuestion_ReturnsNilOnMalformed(t *testing.T) {
 	t.Parallel()
 	// tool_use with name=AskUserQuestion but malformed input (not JSON object)

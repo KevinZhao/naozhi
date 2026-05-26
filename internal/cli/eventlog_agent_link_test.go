@@ -213,3 +213,37 @@ func TestEventLog_SetAgentInternalID_ConcurrentWithAppend(t *testing.T) {
 	_ = l.Entries()
 	_ = l.Subagents()
 }
+
+// TestEventLog_AppendBatchReplay_SkipsTaskDoneCallback pins R240-PERF-3
+// (#1042): the replay path must not fire on-task-done callbacks. A live
+// task_done in the same EventLog continues to fire the callback, so the
+// gate is replay-only and not a global disable.
+func TestEventLog_AppendBatchReplay_SkipsTaskDoneCallback(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(20)
+
+	var fired []string
+	l.SetOnAgentTaskDone(func(taskID, status string) {
+		fired = append(fired, taskID+":"+status)
+	})
+
+	// Replay path: two task_done events MUST NOT fire the callback.
+	// (Mirrors InjectHistory's typical content — terminal task entries
+	// already persisted from a prior process lifetime.)
+	l.AppendBatchReplay([]EventEntry{
+		{Type: "task_done", TaskID: "replay_1", Summary: "ok"},
+		{Type: "task_done", TaskID: "replay_2", Summary: "ok"},
+	})
+	if len(fired) != 0 {
+		t.Errorf("AppendBatchReplay fired %d callbacks, want 0: %v", len(fired), fired)
+	}
+
+	// Live path on the same log: callback must still fire. Status defaults
+	// to "completed" inside applyEntryStateLocked when the entry omits one.
+	l.AppendBatch([]EventEntry{
+		{Type: "task_done", TaskID: "live_1", Summary: "ok"},
+	})
+	if len(fired) != 1 || fired[0] != "live_1:completed" {
+		t.Errorf("live AppendBatch fired %v, want [live_1:completed]", fired)
+	}
+}

@@ -1,9 +1,13 @@
 package cron
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
+
+// errorsIs is a thin wrapper around errors.Is so the test reads naturally.
+func errorsIs(err, target error) bool { return errors.Is(err, target) }
 
 // TestJobTitleOrFallback_ExplicitTitle 验证显式 Title 优先返回（trim 后）。
 func TestJobTitleOrFallback_ExplicitTitle(t *testing.T) {
@@ -99,6 +103,70 @@ func TestAddJob_TitleLengthGuard(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "title too long") {
 		t.Fatalf("error should mention title length, got %v", err)
+	}
+}
+
+// TestAddJob_PromptLengthGuard 验证 AddJob 在 scheduler 层拒绝超过
+// MaxPromptBytes 的 prompt（#889 / R244-SEC-P2-5）。仅当上游
+// dashboard handler 被绕过（例如测试或未来 IM 接入）时此 guard 生效。
+func TestAddJob_PromptLengthGuard(t *testing.T) {
+	t.Parallel()
+
+	s := NewScheduler(SchedulerConfig{
+		Router:    &jitterStubRouter{},
+		StorePath: t.TempDir() + "/cron.json",
+		MaxJobs:   5,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { s.Stop() })
+
+	huge := strings.Repeat("a", MaxPromptBytes+1)
+	err := s.AddJob(&Job{
+		Schedule: "@every 30m",
+		Prompt:   huge,
+	})
+	if err == nil {
+		t.Fatal("AddJob should reject prompt > MaxPromptBytes")
+	}
+	// Error must wrap ErrInvalidPrompt for callers using errors.Is.
+	if !errorsIs(err, ErrInvalidPrompt) {
+		t.Fatalf("err = %v, want errors.Is(ErrInvalidPrompt)", err)
+	}
+}
+
+// TestUpdateJob_PromptLengthGuard mirrors TestAddJob_PromptLengthGuard for
+// the UpdateJob path (#889).
+func TestUpdateJob_PromptLengthGuard(t *testing.T) {
+	t.Parallel()
+
+	s := NewScheduler(SchedulerConfig{
+		Router:    &jitterStubRouter{},
+		StorePath: t.TempDir() + "/cron.json",
+		MaxJobs:   5,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { s.Stop() })
+
+	if err := s.AddJob(&Job{Schedule: "@every 30m", Prompt: "ok"}); err != nil {
+		t.Fatalf("AddJob seed: %v", err)
+	}
+	var seedID string
+	for id := range s.jobs {
+		seedID = id
+		break
+	}
+
+	huge := strings.Repeat("b", MaxPromptBytes+1)
+	_, err := s.UpdateJob(seedID, JobUpdate{Prompt: &huge})
+	if err == nil {
+		t.Fatal("UpdateJob should reject prompt > MaxPromptBytes")
+	}
+	if !errorsIs(err, ErrInvalidPrompt) {
+		t.Fatalf("err = %v, want errors.Is(ErrInvalidPrompt)", err)
 	}
 }
 
