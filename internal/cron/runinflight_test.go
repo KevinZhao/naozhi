@@ -118,6 +118,58 @@ func TestRunInflight_ResetClearsView(t *testing.T) {
 	}
 }
 
+// TestRunInflight_SetSessionIDEmptyIsNoop pins the contract that the
+// R242-ARCH-22 (#766) early-set hook in scheduler_run.go relies on:
+// calling setSessionID("") right after GetOrCreate when sess.SessionID()
+// is still empty (fresh-mode CLI mid-handshake) MUST NOT clobber the
+// later post-Send setSessionID(result.SessionID) write. Without this
+// contract the early hook would race the post-Send write and leave the
+// inflight view's SessionID empty for the run's lifetime, defeating the
+// entire purpose of the early-set fix (KnownSessionIDs miss during the
+// Send window). Same-value writes also fast-path so the post-Send call
+// stays cheap when sess.SessionID() already matched.
+func TestRunInflight_SetSessionIDEmptyIsNoop(t *testing.T) {
+	inf := &runInflight{}
+	inf.running.Store(true)
+	inf.populate(runInflightView{RunID: "r1", Phase: PhaseSpawning})
+
+	// Empty-id call must be a no-op — used by the post-GetOrCreate early
+	// hook on fresh-mode runs (sess.SessionID() == "" until init turn lands).
+	inf.setSessionID("")
+	if v, _ := inf.snapshot(); v.SessionID != "" {
+		t.Errorf("setSessionID(\"\") leaked: got %q", v.SessionID)
+	}
+
+	// Real id from GetOrCreate (persistent-mode reuse path).
+	inf.setSessionID("sess-early")
+	if v, _ := inf.snapshot(); v.SessionID != "sess-early" {
+		t.Errorf("first non-empty setSessionID lost: got %q", v.SessionID)
+	}
+
+	// Empty after a real id is also a no-op (defends against a hypothetical
+	// future caller racing the early hook with a half-cleared session).
+	inf.setSessionID("")
+	if v, _ := inf.snapshot(); v.SessionID != "sess-early" {
+		t.Errorf("setSessionID(\"\") clobbered prior value: got %q", v.SessionID)
+	}
+
+	// Same id again — fast-path skips Store. View pointer stays the same.
+	before := inf.view.Load()
+	inf.setSessionID("sess-early")
+	after := inf.view.Load()
+	if before != after {
+		t.Errorf("same-value setSessionID must skip Store: before=%p after=%p", before, after)
+	}
+
+	// Replacing with a different id IS authoritative — the post-Send
+	// path writes result.SessionID which can differ from sess.SessionID()
+	// if the CLI handshake assigned a new id mid-turn.
+	inf.setSessionID("sess-final")
+	if v, _ := inf.snapshot(); v.SessionID != "sess-final" {
+		t.Errorf("replacement setSessionID lost: got %q", v.SessionID)
+	}
+}
+
 // TestRunInflight_SetPhaseFastPath ensures setPhase is a no-op when the
 // phase is unchanged (preserving the cache-line write economy of the
 // pre-refactor implementation).
