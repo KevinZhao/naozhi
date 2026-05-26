@@ -71,6 +71,25 @@ func (s *Scheduler) executeIfNotDeletedOrPaused(jobID string) {
 // logs so operators distinguish "TriggerNow:" vs "cron:" in the
 // shutdown / pause race traces.
 func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubject string) {
+	// R238-GO-9: TriggerNow's executeIfNotDeletedOrPaused bypasses the
+	// robfig/cron chain (and therefore its Recover wrapper); a panic in
+	// executeOpt would otherwise crash the entire process via the
+	// triggerWG goroutine. Recover here so the inflight CAS gate (released
+	// by executeOpt's own defer) is the only side-effect, and the offending
+	// panic is logged for postmortem instead of taking down the host.
+	// The cron-tick path (registerJob AddFunc closure) also funnels through
+	// here; it is already Recover-wrapped by the chain, but a redundant
+	// recover is harmless — the panic stops at the first defer that calls
+	// recover().
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("cron: panic in executeOpt — recovered",
+				"job_id", jobID,
+				"via_trigger_now", viaTriggerNow,
+				"subject", logSubject,
+				"panic", r)
+		}
+	}()
 	s.mu.RLock()
 	cur, ok := s.jobs[jobID]
 	paused := ok && cur.Paused
