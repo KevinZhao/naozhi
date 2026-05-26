@@ -812,8 +812,15 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// instead of killing a long-running job, so the deadline does not need
 	// to anticipate the next tick).
 	jobTimeout := s.execTimeout
-	ctx, cancel := context.WithTimeout(s.stopCtx, jobTimeout)
-	defer cancel()
+	// spawnCtx 是 GetOrCreate 阶段的超时上下文，从 GetOrCreate 返回后到
+	// finishRun 之间这条 ctx 不再有任何消费者；让其底层 timer 一直挂到
+	// executeOpt return 才被 defer 释放，意味着 N 个并发 in-flight job
+	// (上限 maxJobsHardCap=500) 会在整个 Send 阶段 (≤jobTimeout) 占着
+	// 等同的 *time.Timer 槽位。R250-GO-15 (#1078): 显式在 GetOrCreate
+	// 出口 cancel()；defer 仍兜底（cancel 幂等，二次调用 no-op），早 free
+	// 掉这条 timer 后续 ≤jobTimeout 都不再压 runtime timerproc。
+	ctx, spawnCancel := context.WithTimeout(s.stopCtx, jobTimeout)
+	defer spawnCancel()
 
 	// s.agentCommands and s.agents are assigned once at scheduler
 	// construction (cfg.AgentCommands / cfg.Agents) and never mutated;
@@ -936,6 +943,17 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		stubRefresh()
 		return
 	}
+	// R250-GO-15 (#1078): GetOrCreate consumed spawnCtx; nothing below references
+	// it (Send uses sendCtx). Cancel now to free the underlying *time.Timer
+	// instead of waiting for the function-scoped defer at executeOpt return.
+	// On a 500-job-deep deployment with 5min jobTimeout this trims up to
+	// ~500 idle timers off runtime timerproc during the Send window. The
+	// outer defer remains as a safety net (cancel is idempotent: second
+	// invocation is a no-op). Must come AFTER the err-return block above
+	// so an early return on session error still trips the defer (already
+	// covered) — placing here keeps the explicit cancel on the success
+	// path only, mirroring the issue's "after the err handling" guidance.
+	spawnCancel()
 
 	// R242-ARCH-22 (#766): populate inflight.SessionID as soon as
 	// GetOrCreate returns. Persistent-mode runs reuse a session that
