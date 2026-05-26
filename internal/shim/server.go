@@ -25,6 +25,21 @@ import (
 // preventing unbounded memory allocation from malformed or malicious input.
 const maxClientLineBytes = 16 * 1024 * 1024 // 16MB
 
+// maxPostAuthSessionBytes caps the total bytes an authenticated client may
+// stream over a single connection before the shim severs it. The per-line
+// LimitedReader (postAuthLR) is reset on every iteration, so without a
+// cumulative tally an attacker possessing the auth token could repeatedly
+// hand the shim 16 MB lines and drive arbitrary memory pressure through the
+// process lifetime. The tally is reset whenever the client reconnects (a
+// fresh handleClient call gets a fresh counter), so legitimate long-running
+// sessions that stay under the cap are unaffected. R216-SEC-3 (#541).
+//
+// 1000 × maxClientLineBytes = 16 GiB matches the proposal's headroom — well
+// above any plausible legitimate single-session footprint (real workloads
+// stream KB-scale frames, not multi-MB) yet bounded so the worst-case
+// attacker window is finite.
+const maxPostAuthSessionBytes int64 = 1000 * maxClientLineBytes
+
 // maxWriteLineBytes caps the inner "line" field of a post-auth "write" frame
 // before it is piped into CLI stdin. The outer frame cap above accommodates
 // an entire NDJSON envelope including 16-MB leeway; but every byte of
@@ -985,6 +1000,13 @@ func (s *shimServer) runCommandLoop(
 	lineCh := make(chan []byte, 1)
 	go func() {
 		defer close(lineCh)
+		// R216-SEC-3 (#541): cumulative byte tally so an authenticated client
+		// cannot drive arbitrary memory pressure by repeating maxClientLineBytes
+		// lines for the lifetime of the connection. postAuthLR.N resets per
+		// iteration, so without this guard the per-line cap leaks at the
+		// session granularity. Counted in bytes-actually-read (post-trim is
+		// not necessary; the worst case is the raw stream size).
+		var sessionBytes int64
 		for {
 			postAuthLR.N = int64(maxClientLineBytes) + 1 // reset per-line limit
 			line, err := reader.ReadBytes('\n')
@@ -1000,6 +1022,12 @@ func (s *shimServer) runCommandLoop(
 			// single-client semaphore slot — better to sever and let them reconnect.
 			if len(line) > maxClientLineBytes {
 				slog.Warn("client line too large, disconnecting", "size", len(line))
+				return
+			}
+			sessionBytes += int64(len(line))
+			if sessionBytes > maxPostAuthSessionBytes {
+				slog.Warn("post-auth session byte cap exceeded, disconnecting",
+					"session_bytes", sessionBytes, "cap", maxPostAuthSessionBytes)
 				return
 			}
 			select {
