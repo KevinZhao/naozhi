@@ -72,6 +72,23 @@ const (
 	// label.
 	autoTitlerMaxTitleRunes = 16
 
+	// autoTitlerHighwaterMaxEntries hard-caps the highwater map size.
+	// R238-GO-16 (#808): when the visitor early-stops (`earlyStop==true`)
+	// the post-tick prune is intentionally skipped because a partial
+	// `observed` set would drop highwater entries for live-but-unvisited
+	// sessions and defeat per-session min_rename_interval.  However, if
+	// earlyStop stays true across many ticks (very large session pool)
+	// the map can keep growing because new candidates accumulate but
+	// nothing ever evicts dead entries.  The hard cap guarantees a
+	// bounded memory footprint regardless of which path the tick takes:
+	// when len(map) > cap, commitHighwater evicts the oldest entries by
+	// lastRenamedAt so the most recently bumped sessions survive.  The
+	// number is sized at autoTitlerMaxBatchPerTick * 32 = 3200 — well
+	// above any realistic active-session count, but small enough that a
+	// pathological workload tops out at ~150 KiB instead of growing
+	// without bound.
+	autoTitlerHighwaterMaxEntries = autoTitlerMaxBatchPerTick * 32
+
 	// autoTitlerExcerptSoftCapBytes is the total-length softcap applied
 	// to buildExcerptFromHistory.  R238-GO-15 (#806): the previous
 	// implementation accumulated every user-turn summary into a single
@@ -366,7 +383,15 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 // allocation occurs at all.
 func (a *autoTitler) commitHighwater(writes map[string]autoTitlerHighwater, observed map[string]struct{}, earlyStop bool) {
 	if len(writes) == 0 && earlyStop {
-		return
+		// Fast-path skip is still safe ONLY when the existing map is
+		// within the hard cap.  If a long earlyStop streak has bloated
+		// the map past autoTitlerHighwaterMaxEntries we MUST fall
+		// through and force an eviction pass (R238-GO-16 / #808) —
+		// otherwise the cap would never engage on workloads that
+		// always early-stop.
+		if old := a.highwater.Load(); old == nil || len(*old) <= autoTitlerHighwaterMaxEntries {
+			return
+		}
 	}
 	a.writeMu.Lock()
 	defer a.writeMu.Unlock()
@@ -390,7 +415,57 @@ func (a *autoTitler) commitHighwater(writes map[string]autoTitlerHighwater, obse
 	for k, v := range writes {
 		next[k] = v
 	}
+	// R238-GO-16 (#808): hard cap eviction.  Even with the prune step
+	// above, an earlyStop streak can keep `next` near len(old)+len(writes)
+	// indefinitely.  When the result still exceeds the hard cap, evict
+	// the oldest entries by lastRenamedAt so memory stays bounded and
+	// the surviving entries are the ones most likely to still gate
+	// useful min_rename_interval decisions.
+	if len(next) > autoTitlerHighwaterMaxEntries {
+		evictOldestHighwater(next, autoTitlerHighwaterMaxEntries)
+	}
 	a.highwater.Store(&next)
+}
+
+// evictOldestHighwater removes entries from m until len(m) <= keep.
+// Eviction is by ascending lastRenamedAt (oldest first); on ties the
+// map iteration order picks one deterministically per Go runtime —
+// arbitrary but acceptable since the cap is well above the realistic
+// active set.  The slice/sort cost is paid only when the cap engages,
+// which is the rare overflow path; the hot path skips this entirely.
+func evictOldestHighwater(m map[string]autoTitlerHighwater, keep int) {
+	if keep < 0 {
+		keep = 0
+	}
+	excess := len(m) - keep
+	if excess <= 0 {
+		return
+	}
+	type kv struct {
+		k string
+		t time.Time
+	}
+	entries := make([]kv, 0, len(m))
+	for k, v := range m {
+		entries = append(entries, kv{k, v.lastRenamedAt})
+	}
+	slices.SortFunc(entries, func(a, b kv) int {
+		// Ascending by time: oldest first so we drop from the front.
+		// IsZero entries (never-renamed seeds, in practice none reach
+		// here) sort before any real timestamp, which is the right
+		// eviction order — they carry no useful gate information.
+		switch {
+		case a.t.Before(b.t):
+			return -1
+		case a.t.After(b.t):
+			return 1
+		default:
+			return 0
+		}
+	})
+	for i := 0; i < excess; i++ {
+		delete(m, entries[i].k)
+	}
 }
 
 // buildExcerptFromHistory walks the full event log and concatenates
