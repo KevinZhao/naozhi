@@ -36,6 +36,7 @@
 | [pdf-attachment.md](pdf-attachment.md) | 设计提案 → 实现中 | 2026-05-06 | Dashboard PDF 附件上传，走 workspace + Read 工具路径 |
 | [process-split.md](process-split.md) | Proposal v2 | 2026-05-11 | ARCH-PROCESS-SPLIT：`cli/process.go` 2464 行按职责拆 7 份，纯文件移动零语义改动（v2 修正 shimMsg 归属、EventCallback 跨包使用、测试文件数） |
 | [system-session.md](system-session.md) | 设计提案 Draft v2.1（已过三路 review + OQ 决议） | 2026-05-20 | naozhi 内置后台线程（System Session）统一抽象：`sys:` 命名空间、`internal/sysession/` Daemon+Manager+Runner（派生 transient system session 调 LLM）、AutoTitler MVP（中英双语 prompt、默认跳群聊、跟随 default backend）、`LabelOrigin` + ClearUserLabelOrigin、二段式 structured prompt + sweepOldJSONL on startup、cron/sys 共享 ExemptStub 注册路径。Phase 2 仅承诺浅归并不做接口归并 |
+| [todo-to-issues-migration.md](todo-to-issues-migration.md) | 已实施（PR #370/#464/#1063/#1064） | 2026-05-26 | docs/TODO.md 1054 finding 迁移到 GitHub Issues：`triage-findings` skill 三桶分流 + 21 label 体系 + 4 cron prompt 改造（v8 GitHub Issues 单源 + v3 PR Merge cron-mergeable + verify Closes #N） + 6 并行 agent 处理 1042 Round dump finding + 581 issue 落地 / 200 cosmetic-backlog / 372 audit-trail discarded |
 
 ## 已废弃 / 已被取代
 
