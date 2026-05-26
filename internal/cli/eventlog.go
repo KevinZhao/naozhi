@@ -1165,7 +1165,8 @@ func (l *EventLog) Append(e EventEntry) {
 }
 
 // AppendBatch adds multiple entries to the log, holding the lock once and
-// notifying subscribers once. Used by InjectHistory to avoid per-entry overhead.
+// notifying subscribers once. Used by live dispatch (multi-block assistant
+// events) to avoid per-entry lock acquisition + subscriber wake-ups.
 //
 // Mirrors Append's per-entry sub-agent tracking and summary atomics so the
 // sidebar does not show stale "(no prompt)" placeholders after history
@@ -1174,6 +1175,21 @@ func (l *EventLog) Append(e EventEntry) {
 // after our Unlock but before our own Store, our older batch value would
 // clobber it.
 func (l *EventLog) AppendBatch(entries []EventEntry) {
+	l.appendBatch(entries, false)
+}
+
+// AppendBatchReplay is the replay-aware variant used by InjectHistory.
+// Setting isReplay=true skips applyEntryStateLocked entirely: replay never
+// triggers the on-task-done callback (the persister is not yet wired and
+// downstream tailers don't yet exist), so the per-entry switch dispatch +
+// turn/bg agent slice scans inside l.mu are pure overhead. R240-PERF-3
+// (#1042). Live AppendBatch callers MUST keep isReplay=false so task_done
+// callbacks continue to fire on real turn-end events.
+func (l *EventLog) AppendBatchReplay(entries []EventEntry) {
+	l.appendBatch(entries, true)
+}
+
+func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	if len(entries) == 0 {
 		return
 	}
@@ -1295,7 +1311,13 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 		// 500-entry replay is dominated by assistant_text/tool_use rows
 		// which previously paid switch-dispatch + return overhead inside
 		// the write lock. R240-PERF-3.
-		if entryAffectsAgentState(e.Type) {
+		//
+		// On the replay path we skip applyEntryStateLocked unconditionally:
+		// no on-task-done subscriber is wired during InjectHistory (#1042),
+		// and the turnAgents/bgAgents per-turn slices are reset by the
+		// next live "result"/"user" event anyway. This avoids 500× O(N)
+		// agent-slice scans inside the write-lock during shim reconnect.
+		if !isReplay && entryAffectsAgentState(e.Type) {
 			if fire, p := l.applyEntryStateLocked(e); fire {
 				pendingDone = append(pendingDone, p)
 			}
