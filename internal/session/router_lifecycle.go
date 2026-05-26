@@ -1357,22 +1357,45 @@ func waitSocketGoneForKey(key string, maxWait time.Duration) {
 // This avoids the race window between Reset and GetOrCreate where a concurrent
 // message could create a session with wrong opts.
 //
-// NOTE (R62-GO-3): ResetAndRecreate releases r.mu between session
-// teardown and respawn so proc.Close() can run without holding the
-// router mutex. A concurrent GetOrCreate arriving in that window
-// can win the race and spawn a fresh session with its own opts,
-// which may not match what the caller of ResetAndRecreate expected.
+// R62-GO-3 (#775) mitigation: ResetAndRecreate releases r.mu between
+// session teardown and respawn so proc.Close() can run without
+// holding the router mutex. A concurrent GetOrCreate arriving in
+// that window can win the race and spawn a fresh session before our
+// own spawnSession reacquires the lock. To prevent the racing
+// caller from picking the WRONG backend, we stash opts.Backend into
+// r.backendOverrides[key] BEFORE releasing the lock. spawnSession's
+// resolveSpawnParamsLocked precedence rules (router_lifecycle.go
+// resolveSpawnParamsLocked: "1. AgentOpts.Backend → 2. one-shot
+// r.backendOverrides[key] → ...") guarantee that:
 //
-// Mitigation: callers whose behavior depends on opts.Backend being
-// honored MUST treat ResetAndRecreate's returned session as a
-// best-effort — it guarantees "a fresh session exists" but not
-// "a fresh session with MY opts". The TOCTOU guard in spawnSession
-// returns existing sessions rather than stacking dup spawns, so the
-// invariant "exactly one live session per key" holds. Round 209's
-// SM1 (ResetAndDiscardOverride) is the atomic alternative when
-// opts fidelity matters.
+//   - the racing GetOrCreate (which arrives with empty opts.Backend
+//     in production — message paths do not set Backend; only the
+//     dashboard "pick backend" flow does) consumes our stashed
+//     override and spawns with the intended backend; or
+//
+//   - our own resumed spawnSession arrives first, finds opts.Backend
+//     set on the call, and the precedence-1 path consumes the same
+//     stashed override (delete via resolveSpawnParamsLocked), so the
+//     post-condition is identical.
+//
+// Round 209's SM1 (ResetAndDiscardOverride) remains the atomic
+// alternative when callers want to DROP any pending override.
 func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, error) {
 	r.mu.Lock()
+
+	// R62-GO-3 (#775): pre-stash opts.Backend so a racing GetOrCreate
+	// arriving in the unlock window inherits the intended backend.
+	// Empty opts.Backend leaves the override untouched (we do not
+	// want to clear a pre-existing override the caller did not
+	// explicitly opt out of). Capacity check matches SetSessionBackend
+	// — a brand-new key past the cap silently no-ops, which is
+	// strictly safer than the racing-call-wins-with-default outcome
+	// the original R62-GO-3 doc described.
+	if opts.Backend != "" {
+		if _, existing := r.backendOverrides[key]; existing || len(r.backendOverrides) < maxBackendOverrides {
+			r.backendOverrides[key] = opts.Backend
+		}
+	}
 
 	// Delete old session if present
 	hadOld := false
