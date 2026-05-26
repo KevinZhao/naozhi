@@ -376,9 +376,24 @@ func (s *Server) registerDashboard() {
 		s.projectH.SetBaseContext(s.hub.ctx)
 	}
 
-	// Wire sendH now that hub exists
+	// Wire sendH now that hub exists.
+	//
+	// R215-ARCH-P2-3 (#579): the upload-store cleanup goroutine is an
+	// app-lifecycle subsystem, not a Hub-internal one — its lifetime must
+	// follow the process, not the Hub's hot-reload boundary. A future Hub
+	// hot-reload (drain + replace) would otherwise prematurely cancel the
+	// cleanup loop and leak temp-file entries until the next process start.
+	// `s.appCtx` is wired by Server.Start before registerDashboard runs (see
+	// project_api_basectx_test.go's CTX1 pin); it is canceled only on full
+	// process shutdown. Falling back to s.hub.ctx is unsafe (semantics drift)
+	// and to context.Background is unsafe (no cancellation at all), so the
+	// nil-fallback below is purely defensive against tests that bypass Start.
 	uploads := newUploadStore()
-	uploads.StartCleanup(s.hub.ctx)
+	cleanupCtx := s.appCtx
+	if cleanupCtx == nil {
+		cleanupCtx = s.hub.ctx
+	}
+	uploads.StartCleanup(cleanupCtx)
 	s.hub.SetUploadStore(uploads)
 	s.sendH = &SendHandler{
 		nodeAccess:    s.nodeAccess,
