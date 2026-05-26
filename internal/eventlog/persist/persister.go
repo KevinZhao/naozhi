@@ -494,15 +494,23 @@ func (p *Persister) WriterAlive() bool {
 	if p.closed.Load() {
 		return false
 	}
-	s := p.Stats()
-	if s.ChannelCap == 0 {
+	// Read fields directly instead of via Stats() to avoid the
+	// 80-byte struct allocation per /health probe. R250-PERF-24.
+	chanCap := cap(p.in)
+	if chanCap == 0 {
 		return false
 	}
-	notFull := s.ChannelDepth*5 < s.ChannelCap*4
-	if s.ChannelDepth == 0 {
+	chanDepth := len(p.in)
+	notFull := chanDepth*5 < chanCap*4
+	if chanDepth == 0 {
 		return notFull
 	}
-	drainedRecently := s.LastDrainAgo > 0 && s.LastDrainAgo < 5*time.Second
+	ns := p.lastDrainNS.Load()
+	if ns == 0 {
+		return false
+	}
+	lastAgo := p.opts.Clock().Sub(time.Unix(0, ns))
+	drainedRecently := lastAgo > 0 && lastAgo < 5*time.Second
 	return drainedRecently && notFull
 }
 
