@@ -975,7 +975,19 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		}
 		updated, err := nc.ProxySetSessionLabel(r.Context(), req.Key, label)
 		if err != nil {
-			slog.Warn("remote set session label failed", "node", req.Node, "key", req.Key, "err", err)
+			// R246-SEC-14 (#820): wrap node + key through SanitizeLogAttr
+			// before slog encodes them. ValidateSessionKey already rejects
+			// the bidi / C0 / C1 / zero-width classes that fragment slog
+			// attrs, but `req.Node` only travels through nodeAccess.LookupNode
+			// (which validates against the discovery directory, not the byte
+			// class) — a future node-id format change could re-open the gap.
+			// Aligning with the dispatch/commands.go:51 pattern keeps the
+			// audit-log surface uniform, so a regression in either validator
+			// cannot smuggle log-fragmentation bytes past slog's TextHandler.
+			slog.Warn("remote set session label failed",
+				"node", session.SanitizeLogAttr(req.Node),
+				"key", session.SanitizeLogAttr(req.Key),
+				"err", err)
 			if isUnknownRPCMethodErr(err) {
 				http.Error(w, "remote node needs upgrade to support this action", http.StatusConflict)
 				return
@@ -990,7 +1002,12 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		// Parallel audit entry with the local-path slog.Info below so an
 		// operator grepping journalctl sees every label change regardless of
 		// which node owns the session. R64-GO-M3.
-		slog.Info("session label updated", "node", req.Node, "key", req.Key, "label_len", len(label))
+		// R246-SEC-14 (#820): defence-in-depth sanitiser on node + key,
+		// matches the warn-path branch above.
+		slog.Info("session label updated",
+			"node", session.SanitizeLogAttr(req.Node),
+			"key", session.SanitizeLogAttr(req.Key),
+			"label_len", len(label))
 		// Don't echo label — it is attacker-influenced text. Validation already
 		// ensured it is safe in storage, but reflecting user input in an HTTP
 		// body is a latent reflected-XSS vector if any future caller renders
@@ -1005,7 +1022,10 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	slog.Info("session label updated", "node", "local", "key", req.Key, "label_len", len(label))
+	// R246-SEC-14 (#820): SanitizeLogAttr on key matches the remote path so
+	// the audit-log byte class is uniform regardless of which branch fired.
+	slog.Info("session label updated", "node", "local",
+		"key", session.SanitizeLogAttr(req.Key), "label_len", len(label))
 	// Don't echo label — reflected-XSS precaution matches the remote-path
 	// above. Client patches its cache from its own optimistic value.
 	writeOK(w)
