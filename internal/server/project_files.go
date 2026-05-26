@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -79,6 +80,43 @@ const (
 	maxRawBytes      = 50 * 1024 * 1024
 	fileStatTimeout  = 2 * time.Second
 )
+
+// publicTmpFileForbidden reports whether the file at `info` (under the
+// __public_tmp__ pseudo-project) should be refused on multi-tenant grounds.
+//
+// R245-SEC-7 (#831): the __public_tmp__ route lets any authenticated
+// dashboard caller read files anywhere under /tmp, including artefacts
+// other UNIX users on the same host left behind. Files mode 0600 owned by
+// a different UID are clearly private — refuse them so a multi-tenant
+// host can't be trivially mined for other users' /tmp dumps via a stolen
+// dashboard token. Mode 0644 / 0664 / world-readable files are still
+// served (they're already readable to every UID on the host).
+//
+// The Stat_t cast is Linux + Darwin only — both platforms in the build
+// matrix expose Uid on the *syscall.Stat_t. A future GOOS that doesn't
+// implement Sys() returning *syscall.Stat_t falls through the !ok branch
+// and refuses the file, which is the safe default for the multi-tenant
+// concern this guard addresses.
+func publicTmpFileForbidden(info os.FileInfo) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		// Unknown platform — be conservative and refuse. Single-operator
+		// deployments are unaffected because they can register /tmp as a
+		// real project (no __public_tmp__ short-circuit) when they really
+		// want to expose those files.
+		return true
+	}
+	// Mode bits: 0600 means owner-only. Anything more permissive is by
+	// definition group / world readable so the operator's UID could read
+	// it through a normal os.ReadFile anyway — refusing here would only
+	// inflate UX cost without raising the bar.
+	const ownerOnlyMask = 0o077 // any non-zero bit here means group/other has access
+	if int(info.Mode().Perm())&ownerOnlyMask != 0 {
+		return false
+	}
+	// owner-only file — only allow when the running process owns it.
+	return uint32(os.Geteuid()) != st.Uid
+}
 
 // publicTmpProject is a reserved pseudo-project name that maps onto /tmp,
 // letting the dashboard preview/download chat-mentioned absolute paths under
@@ -558,7 +596,20 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 			// text-only fallback.
 			break
 		}
-		results[rel] = statRelWithRoot(rootResolved, rel)
+		entry := statRelWithRoot(rootResolved, rel)
+		// R245-SEC-7 (#831): same multi-tenant gate as handleFileGet — under
+		// __public_tmp__ refuse 0600 files owned by another UID. Collapsing
+		// to {exists:false} matches the existing convention for paths that
+		// fail any validation stage (path-escape / not-found / TOCTOU
+		// symlink) so the dashboard's existence-probe cannot distinguish
+		// "absent" from "owned by someone else".
+		if req.Project == publicTmpProject && entry.Exists && !entry.IsDir {
+			full := filepath.Join(rootResolved, rel)
+			if info, err := os.Lstat(full); err == nil && publicTmpFileForbidden(info) {
+				entry = existsEntry{Exists: false}
+			}
+		}
+		results[rel] = entry
 	}
 
 	writeJSON(w, map[string]any{"results": results})
@@ -737,6 +788,17 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	// Reject as 404 to match the rest of the not-found / escape contract.
 	info, err := os.Lstat(resolved)
 	if err != nil || info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+	// R245-SEC-7 (#831): __public_tmp__ multi-user gate. Refuse 0600 files
+	// owned by another UID so a multi-tenant host's /tmp cannot be enumerated
+	// via the operator's dashboard token. Real-project routes are unaffected
+	// because the project registration is itself an operator-controlled
+	// boundary; only the wide-open __public_tmp__ short-circuit needs this
+	// extra fence. Same 404 collapse keeps the wire shape consistent with
+	// every other not-found / forbidden branch in this handler.
+	if project == publicTmpProject && publicTmpFileForbidden(info) {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
