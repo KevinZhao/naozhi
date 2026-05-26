@@ -244,6 +244,18 @@ type Hub struct {
 	// its clientWG.Wait could schedule a callback that never gets Waited on,
 	// or worse, add to clientWG after Wait has already returned.
 	debounceClosed bool
+	// debounceClosedFast mirrors debounceClosed as an atomic flag so post-
+	// shutdown callers can short-circuit BEFORE acquiring debounceMu. During
+	// process teardown a flurry of producers (router, cron, dashboard send,
+	// scratch, etc.) may race a Shutdown() in flight — without this fast
+	// path each one serialises on debounceMu just to read the bool and
+	// return. Writes happen exclusively under debounceMu so the strict
+	// invariant ("flag set ⇒ no new clientWG.Add(1)") is preserved: once
+	// Shutdown has flipped the flag, every subsequent caller bails out
+	// before Add. The mutex-guarded `debounceClosed` field stays as the
+	// authoritative state for code paths that already hold the lock; the
+	// atomic is a duplicate read-side accelerator only. R246-PERF-9 / #723.
+	debounceClosedFast atomic.Bool
 	// debounceFire is the AfterFunc callback assigned once at NewHub. The
 	// previous BroadcastSessionsUpdate created a fresh closure literal on
 	// every call (high-frequency sidebar refresh path), incurring per-call
@@ -656,8 +668,12 @@ func (h *Hub) Shutdown() {
 	// Block any further AfterFunc scheduling first; then drain the pending
 	// timer (if any). Setting the flag before Stop() ensures a concurrent
 	// BroadcastSessionsUpdate that holds debounceMu next cannot wedge a
-	// new WG slot past our upcoming clientWG.Wait.
+	// new WG slot past our upcoming clientWG.Wait. The atomic mirror is
+	// flipped inside the critical section so its publish happens-before
+	// any later Stop()/Reset, keeping the existing R37-CONCUR3 ordering
+	// (callers can also observe it lock-free via the atomic-only fast path).
 	h.debounceClosed = true
+	h.debounceClosedFast.Store(true)
 	if h.debounceTimer != nil {
 		if h.debounceTimer.Stop() {
 			h.clientWG.Done()

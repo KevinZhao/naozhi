@@ -124,6 +124,17 @@ func (h *Hub) BroadcastSessionsUpdate() {
 		debounceInterval = 50 * time.Millisecond
 		maxDebounceDelay = 500 * time.Millisecond
 	)
+	// R246-PERF-9 / #723: check the atomic mirror BEFORE acquiring the
+	// debounce mutex. Once Shutdown has set the flag every subsequent call
+	// is a no-op; without this fast path, the dozens of producer paths
+	// racing a teardown (router/cron/dashboard send/scratch/etc.) all
+	// serialise on debounceMu just to read the bool and return. The
+	// authoritative `debounceClosed` check below still runs under the
+	// mutex so the Shutdown ordering contract is unchanged for callers
+	// that arrive before the flag publishes.
+	if h.debounceClosedFast.Load() {
+		return
+	}
 	// Capture wall clock outside the critical section so the vDSO call
 	// does not extend the mutex window.
 	now := time.Now()
