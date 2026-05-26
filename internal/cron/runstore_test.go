@@ -853,7 +853,7 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 			// here so the assertJobLockHeld guard inside doesn't fire.
 			lock := s.jobLock("job")
 			lock.Lock()
-			got := s.skipAppendTrim("job")
+			got := s.skipAppendTrim("job", now)
 			lock.Unlock()
 			if got != tc.wantSkip {
 				t.Errorf("skipAppendTrim = %v, want %v", got, tc.wantSkip)
@@ -875,8 +875,38 @@ func TestRunStore_SkipAppendTrim_MissingEntry(t *testing.T) {
 	lock := s.jobLock("never-seen")
 	lock.Lock()
 	defer lock.Unlock()
-	if s.skipAppendTrim("never-seen") {
+	if s.skipAppendTrim("never-seen", time.Now()) {
 		t.Error("expected false for unknown jobID")
+	}
+}
+
+// TestRunStore_SkipAppendTrim_HonoursCallerNow covers issue #862
+// (R245-PERF-13): the caller-supplied now must drive the keepWindow
+// cutoff comparison, not a fresh time.Now() inside the function. We
+// inject a synthetic "now" that's far in the future so the oldest
+// cached row falls BEFORE the cutoff, forcing a trim — proving the
+// parameter is the live source of truth and not ignored.
+func TestRunStore_SkipAppendTrim_HonoursCallerNow(t *testing.T) {
+	s := &runStore{keepCount: 100, keepWindow: 1 * time.Hour}
+
+	realNow := time.Now()
+	// Cached row is "fresh" relative to realNow.
+	entry := newEntryFromRows([]CronRunSummary{
+		{RunID: "a", EndedAt: realNow.Add(-30 * time.Second)},
+	}, 0)
+	s.recentCache.Store("job", entry)
+
+	lock := s.jobLock("job")
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Synthetic "now" 2 hours in the future puts cutoff at realNow+1h,
+	// so the cached row (realNow-30s) falls before cutoff and the trim
+	// branch must fire (skip=false).
+	future := realNow.Add(2 * time.Hour)
+	if s.skipAppendTrim("job", future) {
+		t.Errorf("skipAppendTrim returned true; caller-supplied now=%v ignored (cached row should be older than cutoff=%v)",
+			future, future.Add(-1*time.Hour))
 	}
 }
 
