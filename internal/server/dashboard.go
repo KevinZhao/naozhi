@@ -210,27 +210,6 @@ func writeJSON(w http.ResponseWriter, v any) {
 	}
 }
 
-// writeJSONBytes writes a pre-marshaled JSON body with the same security
-// header set as writeJSON (Content-Type, X-Content-Type-Options=nosniff,
-// Cache-Control=no-store). Use this when the body is already a finished
-// byte slice (raw `[]`, an externally-encoded buf.Bytes(), etc.) and you
-// would otherwise hand-roll w.Header().Set / w.Write — those hand-rolled
-// sites historically diverged on which security headers they remembered
-// to add (R246-SEC-3 caught two such sites in dashboard_system.go).
-//
-// Note: Content-Type is `application/json` without `; charset=utf-8`
-// to match writeJSON / writeOK exactly. JSON is UTF-8 by spec (RFC 8259
-// §8.1) so the parameter is redundant, and uniformity here matters
-// more than legacy charset annotations.
-func writeJSONBytes(w http.ResponseWriter, body []byte) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-store")
-	if _, err := w.Write(body); err != nil {
-		slog.Debug("write json response", "err", err)
-	}
-}
-
 // jsonOKBody is the pre-marshaled body for the common `{"status":"ok"}`
 // acknowledgement reply. 20+ dashboard endpoints used to allocate a
 // `map[string]string{"status":"ok"}` + run it through the JSON encoder on every
