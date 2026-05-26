@@ -261,18 +261,55 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 		return cli.Attachment{}, errors.New("failed to read uploaded file")
 	}
 	defer f.Close()
+
+	// R247-SEC-11 (#503): magic-byte sniff a 512-byte head BEFORE buffering
+	// the full body. The previous flow trusted `declared` to pick the size
+	// gate, so a caller asserting Content-Type: application/pdf could force
+	// a 32 MB allocation per request even when the body wasn't a PDF — the
+	// magic-byte recheck only ran AFTER io.ReadAll(LimitReader(... maxPDFBytes)).
+	// Sniffing the head first lets us collapse the buffer cap to maxImageBytes
+	// when the declared-PDF body doesn't actually start with %PDF-.
+	//
+	// We peek 512 bytes (http.DetectContentType's documented maximum) into
+	// a fixed-size buffer, sniff against the head, then resume reading the
+	// rest of the body via an io.MultiReader so the head is not lost.
+	const sniffLen = 512
+	head := make([]byte, sniffLen)
+	n, err := io.ReadFull(f, head)
+	switch {
+	case err == nil, errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		head = head[:n]
+	default:
+		slog.Debug("upload: head read failed", "err", err)
+		return cli.Attachment{}, errors.New("failed to read uploaded file")
+	}
+
 	// fh.Size comes from the Content-Disposition header (client-controlled).
 	// The size gate above rejects oversize uploads based on that header, but
 	// a lying client could understate size to bypass the gate. Wrap the
 	// reader in a LimitReader as a defence-in-depth byte cap, with a +1
 	// margin so we can detect overflow.
+	//
+	// R247-SEC-11: when the caller declared PDF but the head doesn't carry
+	// the %PDF- magic (or is too short to carry it), tighten the buffer cap
+	// to maxImageBytes. The downstream PDF branch will still reject the body
+	// for the same reason, but the runtime guarantee — peak in-memory bytes
+	// per request — now scales with the SNIFFED type, not the declared one.
+	headLooksPDF := len(head) >= 5 && bytes.Equal(head[:5], []byte("%PDF-"))
 	var sizeLimit int64
-	if isPDF {
+	switch {
+	case isPDF && headLooksPDF:
 		sizeLimit = maxPDFBytes
-	} else {
+	case isPDF && !headLooksPDF:
+		// Fail fast: a declared-PDF without the magic header cannot be
+		// a legitimate PDF, so allocating up to 32 MB to confirm what we
+		// already know is wasteful.
+		return cli.Attachment{}, fmt.Errorf("file does not look like a PDF")
+	default:
 		sizeLimit = maxImageBytes
 	}
-	data, err := io.ReadAll(io.LimitReader(f, sizeLimit+1))
+	body := io.MultiReader(bytes.NewReader(head), f)
+	data, err := io.ReadAll(io.LimitReader(body, sizeLimit+1))
 	if err != nil {
 		slog.Debug("upload: read multipart file failed", "err", err)
 		return cli.Attachment{}, errors.New("failed to read uploaded file")
