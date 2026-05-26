@@ -825,6 +825,24 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		return
 	}
 
+	// R242-ARCH-22 (#766): populate inflight.sessionID as soon as GetOrCreate
+	// returns a session. Previously sessionID was only stamped after Send
+	// (via result.SessionID below), leaving a (spawn + send budget) window
+	// during which KnownSessionIDs / IsExcluded probes against this run's
+	// sess.SessionID would miss — auto-workspace-chain candidates from a
+	// concurrent dashboard tab could pull the cron run's freshly-created
+	// JSONL into a user session's prev_session_ids before the cron run
+	// itself claimed the ID. Calling setSessionID here closes the window
+	// for any GetOrCreate path that already carries a SessionID
+	// (persistent-mode resume, ACP /resume handshake). When the spawn is
+	// brand-new and the CLI hasn't yet emitted the first event,
+	// sess.SessionID() returns "" and setSessionID short-circuits via the
+	// id=="" guard inside runinflight.go; the post-Send write below
+	// remains the authoritative late-bind for that case.
+	if sid := sess.SessionID(); sid != "" {
+		inflight.setSessionID(sid)
+	}
+
 	// R238-GO-4 / R236-GO-07 (#790, #500): Send is parented on s.stopCtx
 	// so Scheduler.Stop() can short-circuit an in-flight cron Send instead
 	// of letting it run for up to jobTimeout (default 5min) after Stop
