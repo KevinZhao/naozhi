@@ -1143,6 +1143,25 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	// Validate notify target only when the caller is actually changing it.
 	if req.NotifyPlatform != nil || req.NotifyChatID != nil {
+		// R238-SEC-14: a PATCH that touches ONE notify field but omits the
+		// other lands an orphan-target on disk. Concrete failure: the job
+		// already has {platform="feishu", chat_id="oc_xxx"} and the caller
+		// PATCHes notify_platform:"" without notify_chat_id — UpdateJob
+		// clears NotifyPlatform but leaves NotifyChatID="oc_xxx", silently
+		// re-routing notifications to the cron.notify_default fallback
+		// instead of the explicit per-job target the operator just edited.
+		// The platformSet/chatIDSet check below catches the (set,absent)
+		// and (absent,set) cases but not (cleared-via-empty,absent) and
+		// (absent,cleared-via-empty), because both halves coerce to "" and
+		// the != check returns false. Force the caller to send both
+		// pointers together so on-disk state always reflects a coherent
+		// (both clear, both set) tuple. 422 mirrors the validation-shape
+		// failure category — the request is well-formed JSON, the values
+		// just describe an unprocessable on-disk transition.
+		if (req.NotifyPlatform == nil) != (req.NotifyChatID == nil) {
+			http.Error(w, "notify_platform and notify_chat_id must be patched together", http.StatusUnprocessableEntity)
+			return
+		}
 		p := ""
 		if req.NotifyPlatform != nil {
 			p = *req.NotifyPlatform

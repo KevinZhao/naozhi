@@ -464,7 +464,18 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// ReattachProcessNoCallback) so we can guarantee no in-flight Send
 		// is racing the merge. Tracked under R51-CONCUR-002 as the master
 		// sendMu refactor.
-		if r.claudeDir != "" {
+		//
+		// R231-CQ-1: only load+inject when persistedHistory is empty.
+		// If tier1/tier2 (NewRouter startup goroutine via s.InjectHistory)
+		// already populated it, the upcoming ReattachProcessNoCallback at
+		// the bottom of this branch will snapshot persistedHistory into
+		// the fresh proc — re-injecting the same JSONL entries here would
+		// double-fill proc.EventLog (direct proc.InjectHistory append +
+		// snapshot copy via attachProcessAndSnapshotPersisted's seed).
+		// Route through sess.InjectHistory so persistedHistory stays the
+		// single source of truth and seededLen accounting protects against
+		// duplicate forwarding.
+		if r.claudeDir != "" && !sess.hasInjectedHistory() {
 			ids := make([]string, 0, len(sessPrevIDs)+1)
 			ids = append(ids, sessPrevIDs...)
 			if state.SessionID != "" {
@@ -483,7 +494,12 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			)
 			histCancel()
 			if len(histEntries) > 0 {
-				proc.InjectHistory(histEntries)
+				// sess.InjectHistory appends to persistedHistory; proc is
+				// not yet attached so loadProcess() inside InjectHistory
+				// observes nil and skips forwarding. The snapshot path in
+				// ReattachProcessNoCallback below seeds proc from
+				// persistedHistory exactly once.
+				sess.InjectHistory(histEntries)
 			}
 		}
 

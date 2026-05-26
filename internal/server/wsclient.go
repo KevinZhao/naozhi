@@ -341,6 +341,15 @@ func (c *wsClient) readPump() {
 				c.SendRaw([]byte(wsErrRateLimitedMsg))
 				continue
 			}
+			// R244-SEC-P2-3 / #888: per-user (uploadOwner) ceiling so a
+			// single user holding N tabs cannot multiply the burst budget
+			// by N. Per-conn limiter above is still the per-tab floor; we
+			// only consult the per-user bucket once that admits the call,
+			// which preserves legitimate single-tab burst semantics.
+			if !c.hub.allowSendForOwner(c.uploadOwner) {
+				c.SendRaw([]byte(wsErrRateLimitedMsg))
+				continue
+			}
 			c.hub.handleSend(c, msg)
 		case "interrupt":
 			if !c.authenticated.Load() {

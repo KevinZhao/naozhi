@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -161,7 +162,22 @@ const cronNoticePrefixFmt = "[Cron %s] %s"
 // so it can be reused from non-execute code paths (e.g. future manual
 // retry surface) without dragging the deliverNotice / Scheduler
 // dependencies along.
+//
+// R239-SEC-5: label flows through to the IM channel without ever
+// transiting sanitiseRunResult, so an attacker-supplied job Title (e.g.
+// "‮…" RLO) — which Scheduler.AddJob's MaxCronTitleLen check does
+// not strip — would land verbatim in the IM render and reverse the
+// surrounding text. Force it through osutil.SanitizeForLog (covers C0/C1,
+// bidi overrides + isolates, LS/PS) so the rendered notice cannot be
+// hijacked by control runes hidden in the title or prompt-derived
+// fallback. body is already SanitizeForLog'd on the success path
+// (sanitiseRunResult); applying it here is idempotent on clean ASCII
+// templates and adds defence-in-depth.
 func formatCronNotice(label, body string) string {
+	// MaxCronTitleLen (256 runes) bounds label after the rune-count gate
+	// at AddJob/UpdateJob — a 4× rune→byte budget is more than enough for
+	// CJK / emoji to round-trip through SanitizeForLog without truncation.
+	label = osutil.SanitizeForLog(label, MaxCronTitleLen*4)
 	return fmt.Sprintf(cronNoticePrefixFmt, label, body)
 }
 
@@ -353,6 +369,25 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 // control_request channel. *session.ManagedSession satisfies this; cron
 // tests stub it with a counting mock to assert the watchdog fired
 // exactly when the deadline elapsed.
+//
+// SIGNATURE NOTE (R239-GO-2): InterruptViaControl here returns
+// session.InterruptOutcome — DELIBERATELY different from the lower-level
+// session.processIface.InterruptViaControl, which returns plain `error`.
+// The two operate at different layers:
+//
+//   - processIface (internal/session) is the raw cli.Process facet — its
+//     error reflects pipe-write / encode failure on the control_request
+//     channel and tells nothing about whether the CLI actually had an
+//     active turn to abort.
+//   - ManagedSession.InterruptViaControl (which this interface mirrors)
+//     wraps that and additionally classifies the no-active-turn / dead-
+//     process / unsupported-by-backend cases into structured outcomes.
+//     Cron's watchdog needs that classification to log "deadline fired,
+//     interrupt did not land" vs "deadline fired, ACP backend unsupported".
+//
+// Refactor footgun: a future "InterruptViaControl" added anywhere on the
+// session-facing surface MUST follow the layer convention — raw process =>
+// error, managed session => InterruptOutcome. Do NOT collapse the two.
 type deadlineInterrupter interface {
 	InterruptViaControl() session.InterruptOutcome
 }

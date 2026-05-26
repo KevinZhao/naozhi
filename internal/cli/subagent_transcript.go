@@ -20,6 +20,14 @@ import (
 // (key, task_id, jsonl_path) tuple. Read/Tail are NOT goroutine-safe with
 // each other; callers that want concurrent tail + one-shot fetch should
 // serialise via a mutex or use separate TranscriptReader instances.
+//
+// R233-PERF-4 / R228-PERF-3: each Read/Tail used to open+ReadAll+close the
+// file. With agent_tailer's 200 ms ticker × up to 50 active tailers that
+// burned ~250 fd-lifecycle syscalls/s for nothing — once the offset is
+// past the file size most polls have nothing to read. We now keep a
+// persistent *os.File and reopen only when the on-disk inode changes
+// (rotation / replacement). Callers SHOULD invoke Close when done so the
+// fd is released eagerly rather than waiting on the *os.File finalizer.
 type TranscriptReader struct {
 	path string
 
@@ -32,6 +40,13 @@ type TranscriptReader struct {
 	// → 250 alloc/s without; reusing the buffer drops that to 0 in
 	// steady state. R231-PERF-3 / R232-PERF-3.
 	readBuf []byte
+	// f is the persistent transcript fd; nil before the first read and
+	// after Close. statSig identifies the open file via os.FileInfo so
+	// a rotation (rm + create on the same path, or atomic rename swap)
+	// triggers a reopen via os.SameFile. R233-PERF-4 / R228-PERF-3.
+	f         *os.File
+	statSig   os.FileInfo
+	closeOnce sync.Once
 }
 
 // NewTranscriptReader constructs a reader anchored at path. path is trusted
@@ -40,6 +55,74 @@ type TranscriptReader struct {
 // regex (§4 Security).
 func NewTranscriptReader(path string) *TranscriptReader {
 	return &TranscriptReader{path: path}
+}
+
+// Close releases the persistent transcript fd. Idempotent; subsequent
+// Read/Tail calls reopen on demand. Callers SHOULD invoke Close when
+// dropping the reader so the fd is released eagerly instead of waiting on
+// the *os.File finalizer. R233-PERF-4.
+func (r *TranscriptReader) Close() error {
+	var err error
+	r.closeOnce.Do(func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.f != nil {
+			err = r.f.Close()
+			r.f = nil
+			r.statSig = nil
+		}
+	})
+	return err
+}
+
+// openOrReuse returns the cached fd when the on-disk inode still matches
+// what we previously opened, otherwise opens fresh. Returns reset=true
+// when the caller must drop bookkeeping (offset/tail) — that is, when a
+// prior fd existed and the inode swapped under us (rotation). The very
+// first open returns reset=false because offset/tail are already zero.
+//
+// On Stat/Open errors any prior fd is closed so a transient ENOENT does
+// not leave a stale handle behind. The caller MUST hold r.mu.
+func (r *TranscriptReader) openOrReuse() (*os.File, bool, error) {
+	st, err := os.Stat(r.path)
+	if err != nil {
+		// Path disappeared (logrotate window, /new prune). Drop any cached
+		// fd so the next call reopens cleanly. Surface err verbatim so the
+		// caller can branch on os.IsNotExist for 404 semantics.
+		if r.f != nil {
+			_ = r.f.Close()
+			r.f = nil
+			r.statSig = nil
+		}
+		return nil, false, err
+	}
+	if r.f != nil && r.statSig != nil && os.SameFile(r.statSig, st) {
+		// Same inode — reuse the open fd, keep offset/tail.
+		return r.f, false, nil
+	}
+	hadPrior := r.f != nil
+	if r.f != nil {
+		_ = r.f.Close()
+		r.f = nil
+		r.statSig = nil
+	}
+	f, err := os.Open(r.path)
+	if err != nil {
+		return nil, false, err
+	}
+	// Re-stat the just-opened fd so the cached signature reflects the
+	// inode actually held by f (a tight rotation race could swap the file
+	// between Stat and Open above).
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, false, err
+	}
+	r.f = f
+	r.statSig = fi
+	// reset=true only when a prior fd existed and we just discarded it.
+	// First open keeps reset=false because offset/tail are already zero.
+	return r.f, hadPrior, nil
 }
 
 // Read returns up to `limit` EventEntry values with Time > afterMS. Entries
@@ -67,21 +150,27 @@ func (r *TranscriptReader) Tail() ([]EventEntry, error) {
 }
 
 func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]EventEntry, error) {
-	f, err := os.Open(r.path)
+	// R233-PERF-4 / R228-PERF-3: persistent fd. Prior open+ReadAll+close
+	// per call burned ~250 fd-lifecycle syscalls/s under agent_tailer's
+	// 200ms × up to 50 tailers, mostly to read zero new bytes. On a
+	// rotation (inode swap) openOrReuse closes the stale fd and opens
+	// fresh; the reset flag tells us to drop the now-stale offset/tail.
+	f, reset, err := r.openOrReuse()
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	if reset {
+		r.offset = 0
+		r.tail = nil
+	}
 
 	// Offset semantics: r.offset is the next file byte we haven't yet read
 	// as part of a complete line. r.tail is the in-memory buffer of the
 	// most recent incomplete trailing line seen on a prior read; its bytes
 	// have ALREADY been consumed from the file from the OS's point of view
 	// (r.offset points past them), so don't read them twice.
-	if r.offset > 0 {
-		if _, err := f.Seek(r.offset, io.SeekStart); err != nil {
-			return nil, err
-		}
+	if _, err := f.Seek(r.offset, io.SeekStart); err != nil {
+		return nil, err
 	}
 
 	// Bound a single read so an unexpectedly large transcript (or a
@@ -94,13 +183,6 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]EventEntry, e
 	// dodge io.ReadAll's growth-doubling allocs. readAllInto appends to
 	// r.readBuf[:0]; the cap is retained for next call unless it
 	// exceeds readBufRetainCap (one-off oversized poll won't pin memory).
-	//
-	// R230B-PERF-5 archive anchor: the open+ReadAll+close per call still
-	// happens above, but the buffered read above already removes the
-	// growth-doubling part. The remaining open/close-per-poll cost is
-	// tracked as R233-PERF-4 (persistent fd + ReadAt + inode-change
-	// reopen) — that lane has the design space for log-rotation
-	// invalidation. Treating R230B-PERF-5 as superseded by R233-PERF-4.
 	const readBufRetainCap = 256 * 1024
 	r.readBuf = r.readBuf[:0]
 	freshBytes, err := readAllInto(io.LimitReader(f, maxTranscriptReadBytes), r.readBuf)

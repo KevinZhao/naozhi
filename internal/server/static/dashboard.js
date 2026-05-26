@@ -6935,11 +6935,33 @@ function timeDividerHtml(ms) {
   return '<div class="event-time-divider" data-time="' + (ms || 0) + '">' + esc(formatTimeShort(ms)) + '</div>';
 }
 
-const _escEl = document.createElement('div');
+// R244-SEC-P3-6: pure-string replace chain instead of a shared <div>
+// scratch element. The previous implementation wrote the input to a
+// shared scratch element's textContent and read back its innerHTML,
+// which is correct in straight-line code but fragile under reentrancy:
+// if the rendering pipeline ever invokes esc() recursively (e.g. a
+// custom toString on the input that triggers a render hook, or a future
+// getter on the input that calls esc() on a sub-field) the inner call
+// clobbers the outer's pending scratch state before the outer reads it
+// back, leaking the inner value into the outer scope's HTML output.
+// Pure string replacement has no shared mutable state.
+//
+// The output set (&, <, >) matches the textContent → innerHTML round-trip
+// the previous implementation produced — modern browsers do NOT serialise
+// quote characters via that round-trip, so adding " / ' here would change
+// observable behaviour at every escAttr() call site that already chains a
+// further quote-escape on top. Quote handling stays delegated to escAttr
+// (defined just below) so the behavioural surface for the 171 esc() call
+// sites is unchanged.
+const _escAmpRe = /&/g;
+const _escLtRe = /</g;
+const _escGtRe = />/g;
 function esc(s) {
   if (!s) return '';
-  _escEl.textContent = s;
-  return _escEl.innerHTML;
+  return String(s)
+    .replace(_escAmpRe, '&amp;')
+    .replace(_escLtRe, '&lt;')
+    .replace(_escGtRe, '&gt;');
 }
 // Escape for HTML attribute context. We don't know whether the caller used
 // single- or double-quoted attributes, so we escape both to be safe.

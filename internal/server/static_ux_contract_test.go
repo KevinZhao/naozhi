@@ -6317,3 +6317,105 @@ func TestDashboardJS_InlineMathAcceptsFunctionRefs(t *testing.T) {
 		t.Errorf("isMathInline still uses the old digit/operator-only hint regex %q — function-call references like $h(x)$ would not render", stale)
 	}
 }
+
+// TestDashboardJS_EscIsPureString pins R244-SEC-P3-6: esc() must NOT use
+// a shared `_escEl = document.createElement('div')` scratch element with
+// textContent/innerHTML round-trip, because a recursive esc() call (custom
+// toString() on `s` triggering a render hook, future getter that calls
+// esc() on a sub-field, etc.) would clobber the outer call's pending
+// textContent before innerHTML is read, leaking the inner value into the
+// outer's HTML output. The fix replaces the shared-DOM round-trip with a
+// pure-string regex chain that has no shared mutable state.
+//
+// We pin both halves explicitly so a future "let me revert to the
+// concise textContent form" patch fails the contract test instead of
+// silently re-introducing the reentrancy hazard.
+func TestDashboardJS_EscIsPureString(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// New shape: pure-string regex chain. The three core entities (&, <, >)
+	// match the textContent → innerHTML round-trip the previous esc()
+	// produced — quote handling stays in escAttr so the 171 esc() call
+	// site behaviours are unchanged.
+	wants := []string{
+		"const _escAmpRe = /&/g;",
+		"const _escLtRe = /</g;",
+		"const _escGtRe = />/g;",
+		".replace(_escAmpRe, '&amp;')",
+		".replace(_escLtRe, '&lt;')",
+		".replace(_escGtRe, '&gt;')",
+	}
+	for _, want := range wants {
+		if !strings.Contains(js, want) {
+			t.Errorf("esc() must use pure-string regex chain; missing %q", want)
+		}
+	}
+
+	// Old shape: shared `_escEl = document.createElement('div')` MUST be
+	// gone as live code. A future copy-paste re-introducing the variable
+	// would fail here even if the function body changed shape. Mention in
+	// a comment is fine (the new esc() comment references the old shape
+	// for context); only the executable declaration line is forbidden.
+	if strings.Contains(js, "const _escEl = document.createElement('div');") {
+		t.Errorf("esc() must not declare shared scratch DOM element _escEl")
+	}
+	// `_escEl.textContent =` and `_escEl.innerHTML` would only appear as
+	// live code if the old esc() body were resurrected. Use `=` and `;`
+	// suffixes to ensure we are matching statements rather than the
+	// backquote-quoted prose in the comment block above the new esc().
+	if strings.Contains(js, "_escEl.textContent =") {
+		t.Errorf("esc() must not assign to shared _escEl.textContent")
+	}
+	if strings.Contains(js, "return _escEl.innerHTML;") {
+		t.Errorf("esc() must not read back shared _escEl.innerHTML")
+	}
+}
+
+// TestDashboardJS_ShowGitRemoteSchemeAllowlist pins R244-SEC-P3-4: the
+// showGitRemote helper that drives the `git_remote_url` toast must NOT
+// hand an arbitrary URL to window.open without a scheme allowlist. ssh
+// remotes (`git@host:user/repo`, `ssh://user@host/repo`) can carry
+// embedded credentials (user:pass@host) that would leak via the toast
+// surface or address-bar tooltip on hover, and `javascript:` URLs would
+// trivially execute attacker code in the dashboard origin if the remote
+// string were ever attacker-controlled (cron config, project metadata).
+//
+// The fix gates window.open behind a positive startsWith allowlist
+// covering exactly {http://, https://, git://}. We pin both the
+// allowlist constant and the gating shape so a future copy-paste cannot
+// drop the leading anchor (which would let "javascript:foo http://..."
+// past) or relax the scheme set without an explicit test update.
+func TestDashboardJS_ShowGitRemoteSchemeAllowlist(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// Allowlist must include exactly the three permitted schemes.
+	wantAllowlist := "const allowed = ['https://', 'http://', 'git://'];"
+	if !strings.Contains(js, wantAllowlist) {
+		t.Errorf("showGitRemote must declare scheme allowlist %q", wantAllowlist)
+	}
+
+	// The window.open call must be reachable only after the safe-flag
+	// check; the surrounding shape (`if (safe)`) is what the allowlist
+	// gates. If a refactor moves window.open out of the gate the safe
+	// branch wouldn't sit immediately above the call any more.
+	if !strings.Contains(js, "if (safe) {\n    window.open(url, '_blank', 'noopener,noreferrer');") {
+		t.Errorf("showGitRemote must gate window.open behind the safe flag (allowlist match)")
+	}
+
+	// Lowercased prefix probe — case-insensitive scheme matching per
+	// RFC 3986 §3.1. The lowercase normalisation MUST stay so an input
+	// like `JAVASCRIPT:foo` cannot bypass the lower-case allowlist.
+	if !strings.Contains(js, "const lower = String(url).toLowerCase();") {
+		t.Errorf("showGitRemote must lowercase the URL before scheme prefix probe")
+	}
+}

@@ -547,3 +547,46 @@ func TestFlattenUserEvent_PreallocCapacity(t *testing.T) {
 		t.Errorf("3-tool_result: cap(out)=%d, want exactly 3 (no grow)", cap(out3))
 	}
 }
+
+// TestSameFileAncestor exercises the path-containment helper that backs the
+// case-insensitive fallback for the path-escape gate (R238-SEC-6). The
+// helper must:
+//   - return true when root == resolved (same inode trivially).
+//   - return true when resolved is N levels under root.
+//   - return false when resolved escapes the root subtree.
+//   - return false when root does not exist (Stat error).
+//   - traverse symlinks at the call sites — but the helper itself takes the
+//     already-resolved paths, so symlink behaviour is covered by the
+//     handler-level happy-path test above.
+func TestSameFileAncestor(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	root := filepath.Join(tmp, "claude", "projects")
+	deep := filepath.Join(root, "slug", "session.jsonl")
+	if err := os.MkdirAll(filepath.Dir(deep), 0o755); err != nil {
+		t.Fatalf("mkdir deep: %v", err)
+	}
+	if err := os.WriteFile(deep, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write deep: %v", err)
+	}
+	outside := filepath.Join(tmp, "elsewhere", "x.jsonl")
+	if err := os.MkdirAll(filepath.Dir(outside), 0o755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write outside: %v", err)
+	}
+
+	if !sameFileAncestor(root, root) {
+		t.Errorf("root == resolved must be contained")
+	}
+	if !sameFileAncestor(deep, root) {
+		t.Errorf("deep child must be contained under root")
+	}
+	if sameFileAncestor(outside, root) {
+		t.Errorf("path outside root must not be contained")
+	}
+	if sameFileAncestor(deep, filepath.Join(tmp, "does-not-exist")) {
+		t.Errorf("missing root must return false rather than panic")
+	}
+}

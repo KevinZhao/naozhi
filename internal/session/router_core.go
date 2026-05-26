@@ -65,23 +65,31 @@ var ErrNoCLIWrapper = errors.New("no CLI wrapper configured")
 var ErrNoActiveProcess = errors.New("session has no active process")
 
 // exemptKeyPrefixes lists the session-key namespaces that are exempt from
-// TTL expiry, LRU eviction, and the active-process counter. Centralising
-// the list keeps the policy one line away from anyone adding a new
-// long-lived session type (e.g. a future "planner:" family) — previously
-// the predicate was inlined at the single construction site while three
-// separate skip branches read `s.exempt`. Keep the list sorted for grep.
+// TTL expiry, LRU eviction, and the active-process counter. Derived from
+// keyNamespaces (key.go) so the reserved + exempt lists share a single
+// source of truth — see R239-ARCH-L for the prior drift between the two
+// independently-maintained slices.
 //
-// R176-ARCH-M1: references the canonical prefix constants in key.go so
-// there is one source of truth for reserved namespaces. Scratch keys are
-// deliberately NOT exempt — they are short-lived and should pay the
-// normal TTL / eviction cost.
+// To toggle a namespace's exempt status (or add a new exempt namespace),
+// edit the matching `exempt` flag in keyNamespaces in key.go; this slice
+// is rebuilt at package init from that table.
 //
-// SysKeyPrefix is exempt: system daemon stubs (when daemons opt to register
-// one — see docs/rfc/system-session.md) must outlive the regular TTL/LRU
-// pressure. Phase 1 daemons typically don't register stubs at all (Runner
-// path), but the prefix is reserved here to keep the policy consistent
-// with future stub-using daemons.
-var exemptKeyPrefixes = []string{CronKeyPrefix, ProjectKeyPrefix, SysKeyPrefix}
+// Scratch keys are deliberately NOT exempt — they are short-lived and
+// should pay the normal TTL / eviction cost (ScratchPool manages its own
+// lifetime on top of that). SysKeyPrefix is exempt: system daemon stubs
+// (when daemons opt to register one — see docs/rfc/system-session.md)
+// must outlive the regular TTL/LRU pressure. Phase 1 daemons typically
+// don't register stubs at all (Runner path), but the prefix is reserved
+// here to keep the policy consistent with future stub-using daemons.
+var exemptKeyPrefixes = func() []string {
+	out := make([]string, 0, len(keyNamespaces))
+	for _, ns := range keyNamespaces {
+		if ns.exempt {
+			out = append(out, ns.prefix)
+		}
+	}
+	return out
+}()
 
 // isExemptKey reports whether key belongs to an exempt namespace. Callers
 // that already have a ManagedSession should prefer reading s.exempt —
@@ -104,19 +112,23 @@ func isExemptKey(key string) bool {
 // exemptKind classifies an exempt session key into one of three buckets:
 // "cron", "project", "sys", or "" if the key is not exempt. Used by the
 // per-namespace sub-quota gate in spawnSession so a noisy cron chat
-// can't starve planner / sys exempt sessions (R242-ARCH-2). Order
-// matches exemptKeyPrefixes for grep-consistency.
+// can't starve planner / sys exempt sessions (R242-ARCH-2).
+//
+// R239-ARCH-L: derived from keyNamespaces (key.go) so a new exempt
+// namespace registers its kind label in one place. Iteration is bounded
+// by len(keyNamespaces) (4 entries today) so the linear scan stays
+// cheap relative to the strings.HasPrefix calls a switch would make
+// anyway.
 func exemptKind(key string) string {
-	switch {
-	case strings.HasPrefix(key, CronKeyPrefix):
-		return "cron"
-	case strings.HasPrefix(key, ProjectKeyPrefix):
-		return "project"
-	case strings.HasPrefix(key, SysKeyPrefix):
-		return "sys"
-	default:
-		return ""
+	for _, ns := range keyNamespaces {
+		if !ns.exempt {
+			continue
+		}
+		if strings.HasPrefix(key, ns.prefix) {
+			return ns.kind
+		}
 	}
+	return ""
 }
 
 // exemptCapFor returns the sub-quota cap for a given exempt kind. Unknown
