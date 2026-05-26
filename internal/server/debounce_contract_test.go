@@ -101,30 +101,42 @@ func TestDebounceTimer_ShutdownStopSemanticsContract(t *testing.T) {
 	}
 
 	// 3) The AfterFunc callback body must still begin with `defer h.clientWG.Done()`.
-	// Find the AfterFunc schedule call and the closest `defer h.clientWG.Done()`.
 	// If the defer is missing the callback's Stop()==false branch never
 	// decrements the WG, and Shutdown hangs.
 	//
 	// R243-ARCH-2 split: AfterFunc lives in wshub_broadcast.go (alongside
-	// BroadcastSessionsUpdate). bcastBody is the relevant source.
-	afterFuncIdx := strings.Index(bcastBody, "time.AfterFunc(debounceInterval, func()")
-	if afterFuncIdx < 0 {
-		t.Fatal("could not locate time.AfterFunc(debounceInterval, ...) — " +
-			"the Stop() contract assumes this is the sole debounce timer " +
-			"scheduler. R37-CONCUR3.")
-	}
-	// Look at the next ~200 bytes of the closure body.
-	tail := bcastBody[afterFuncIdx:]
-	if len(tail) > 400 {
-		tail = tail[:400]
-	}
-	if !regexp.MustCompile(`func\(\)\s*\{\s*defer\s+h\.clientWG\.Done\(\)`).
-		MatchString(tail) {
+	// BroadcastSessionsUpdate). The scheduler call hands a pre-bound closure
+	// (h.debounceFire) so the contract pins the defer in the closure
+	// definition itself (NewHub in wshub.go) AND keeps a fallback inline
+	// closure shape for hand-rolled hubs in BroadcastSessionsUpdate.
+	// R239-PERF-6 introduced the pre-bound shape to drop the per-call alloc;
+	// either site is acceptable as long as the deferred Done remains the
+	// first statement of the AfterFunc callback body.
+	deferShape := regexp.MustCompile(`func\(\)\s*\{\s*defer\s+h\.clientWG\.Done\(\)`)
+	if !deferShape.MatchString(string(src)) && !deferShape.MatchString(bcastBody) {
 		t.Error("debounce AfterFunc callback no longer opens with " +
 			"`defer h.clientWG.Done()`. Without this defer, a callback that " +
 			"fires between Stop() returning false and Shutdown draining " +
 			"clientWG.Wait leaks a slot — Wait hangs until the deadline " +
 			"timer forces teardown. R37-CONCUR3.")
+	}
+	// The pre-bound closure path must still be wired by NewHub (otherwise
+	// every call falls back to the inline literal and R239-PERF-6 regresses
+	// silently). Pin the field assignment so future refactors that drop the
+	// pre-bind step trip CI.
+	if !regexp.MustCompile(`h\.debounceFire\s*=\s*func\(\)`).Match(src) {
+		t.Error("Hub.NewHub no longer pre-binds h.debounceFire — " +
+			"BroadcastSessionsUpdate would fall back to the per-call inline " +
+			"closure literal, regressing R239-PERF-6.")
+	}
+	// The scheduler call site must still pass the pre-bound closure so
+	// hot-path BroadcastSessionsUpdate calls reuse the Hub-lifetime func
+	// value rather than allocating a fresh one each refresh.
+	if !regexp.MustCompile(`time\.AfterFunc\(debounceInterval,\s*fire\)`).
+		MatchString(bcastBody) {
+		t.Error("BroadcastSessionsUpdate no longer hands the pre-bound " +
+			"`fire` callback to time.AfterFunc — the per-call closure " +
+			"allocation is back. R239-PERF-6.")
 	}
 
 	// 4) R248-TEST-8 negative anchor: time.AfterFunc(debounceInterval, ...)

@@ -704,7 +704,12 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 			break
 		}
 		path := filepath.Join(dir, it.runID+".json")
-		run, err := s.readRun(path)
+		// R245-PERF-9: skip readRun's Lstat — diskListNewestFirst's loop
+		// already filtered each DirEntry by ModeSymlink + IsValidID, so the
+		// IsRegular() recheck would just duplicate the syscall. One ReadFile
+		// instead of (Lstat + ReadFile) per listed run halves syscalls in
+		// the warmCache pass.
+		run, err := s.readRunNoLstat(path)
 		if err != nil {
 			continue
 		}
@@ -757,6 +762,30 @@ func (s *runStore) readRun(path string) (*CronRun, error) {
 	if !li.Mode().IsRegular() {
 		return nil, fmt.Errorf("%w: not a regular file", ErrCorruptRun)
 	}
+	return s.parseRunBytes(path)
+}
+
+// readRunNoLstat is the loop-friendly variant of readRun for callers that
+// have already filtered the entry through DirEntry.Type() (rejecting symlinks
+// + non-regular modes during the directory scan). It skips the redundant
+// Lstat syscall, halving syscall count for large directory listings —
+// R245-PERF-9 (cluster: R243-PERF-11).
+//
+// SAFETY: must NOT be used as the entry-point for a constructed path (e.g.
+// Get()'s direct path lookup). Get arrives with a caller-supplied runID
+// that has not been ReadDir-filtered, so the Lstat guard in readRun is the
+// only barrier against `runs/<jobID>/<runID>.json` being a symlink to
+// /etc/passwd. diskListNewestFirst is the sole caller because its scan loop
+// already drops symlinks at the e.Type()&fs.ModeSymlink check.
+func (s *runStore) readRunNoLstat(path string) (*CronRun, error) {
+	return s.parseRunBytes(path)
+}
+
+// parseRunBytes is the shared ReadFile + size-cap + json.Unmarshal tail used
+// by both readRun and readRunNoLstat. Centralising the byte-decode keeps
+// the over-cap and unmarshal-error wrapping paths identical regardless of
+// whether the caller paid for an Lstat guard.
+func (s *runStore) parseRunBytes(path string) (*CronRun, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err

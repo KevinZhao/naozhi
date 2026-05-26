@@ -140,6 +140,29 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 			c.uploadOwner = ownerKeyFromCookie(cookie.Value)
 		}
 	}
+	// R229-SEC-8 / #1022: per-uploadOwner sub-cap. Reserve AFTER the
+	// owner derivation above so the bucket is keyed by the same value
+	// upload-quota / send-limiter use. The conn was already counted
+	// against the global maxWSConns ceiling above, so a refusal here
+	// must release that slot too: closing the upgraded conn lets the
+	// outer slotReleased defer fire, and we bail before register().
+	// Owner == "" (legacy single-user no-token path on first connect)
+	// passes through unchanged.
+	ownerSlotHeld := false
+	if !h.reserveOwnerSlot(c.uploadOwner) {
+		// Close the upgraded socket so the client sees a clean RST and
+		// can reconnect after another tab disconnects. Do not write a
+		// CloseFrame: the budget is exhausted at the boundary and we are
+		// trying NOT to allocate the per-conn write buffer for it.
+		conn.Close()
+		return
+	}
+	ownerSlotHeld = true
+	defer func() {
+		if ownerSlotHeld && !slotReleased {
+			h.releaseOwnerSlot(c.uploadOwner)
+		}
+	}()
 	// Arm clientWG BEFORE registering the client, not after. If Shutdown
 	// runs between register() and Add(2), it could snapshot h.clients,
 	// close the conn, observe clientWG count == 0, and return before the

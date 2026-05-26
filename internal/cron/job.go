@@ -231,6 +231,42 @@ func generateID() string { return generateHexID() }
 // 在 handler 层复用同一上限，避免两处数字不同步漂移。
 const MaxCronTitleLen = 256
 
+// JobRunCounters is the per-Job cumulative counter Job persists alongside
+// LastRunAt / LastResult / LastError. Maintained on every finishRun (RFC
+// §3.2) so the dashboard list endpoint can show terminal-state tallies
+// without rescanning runs/<jobID>/. EWMA / P² latency aggregates landed
+// in P1; the byte schema here stays the same.
+//
+// R239-CR-7: relocated from runinflight.go (where it was misleadingly co-
+// located with the in-flight tracker) to sit next to the rest of Job's
+// wire schema. runinflight.go is for live tick state; this is durable
+// per-Job state.
+type JobRunCounters struct {
+	Total     int64 `json:"total,omitempty"`
+	Succeeded int64 `json:"succeeded,omitempty"`
+	Failed    int64 `json:"failed,omitempty"`
+	Skipped   int64 `json:"skipped,omitempty"`
+	TimedOut  int64 `json:"timed_out,omitempty"`
+	Canceled  int64 `json:"canceled,omitempty"`
+}
+
+// addRun 把一次终态 run 累加到 counters。调用方持 s.mu.Lock。
+func (c *JobRunCounters) addRun(state RunState) {
+	c.Total++
+	switch state {
+	case RunStateSucceeded:
+		c.Succeeded++
+	case RunStateFailed:
+		c.Failed++
+	case RunStateSkipped:
+		c.Skipped++
+	case RunStateTimedOut:
+		c.TimedOut++
+	case RunStateCanceled:
+		c.Canceled++
+	}
+}
+
 // titleFallbackRuneLimit 是 Title 为空时 UI/搜索用 Prompt 首行截断的
 // 长度上限（按 rune 算，避免切断中文）。60 rune 与卡片视觉宽度对齐。
 const titleFallbackRuneLimit = 60

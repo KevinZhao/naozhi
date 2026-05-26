@@ -158,22 +158,28 @@ func (h *Hub) BroadcastSessionsUpdate() {
 	// callback still runs even after Stop() if it had already fired and
 	// was scheduled, so the tracking guards against a post-Shutdown race.
 	h.clientWG.Add(1)
-	h.debounceTimer = time.AfterFunc(debounceInterval, func() {
-		defer h.clientWG.Done()
-		h.debounceMu.Lock()
-		h.debounceTimer = nil
-		// R249-GO-7: Shutdown sets debounceClosed=true while this callback may
-		// already be parked in the timer goroutine (Stop returned false because
-		// it had fired). Re-check under the lock and skip the broadcast — the
-		// hub is tearing down clients and broadcasting now would race the
-		// h.mu-protected clients map being drained in Shutdown.
-		closed := h.debounceClosed
-		h.debounceMu.Unlock()
-		if closed {
-			return
+	// R239-PERF-6: reuse the pre-bound closure stored on the Hub instead
+	// of allocating a fresh `func()` literal per call. AfterFunc itself
+	// still allocates a *time.Timer (unavoidable without an internal pool),
+	// but the captured-variable + funcval pair is now amortised across
+	// every refresh on the same Hub. Hand-rolled hubs from old tests that
+	// skip NewHub fall back to building the callback inline. The fallback
+	// keeps the R249-GO-7 closed-check so Shutdown-races stay safe.
+	fire := h.debounceFire
+	if fire == nil {
+		fire = func() {
+			defer h.clientWG.Done()
+			h.debounceMu.Lock()
+			h.debounceTimer = nil
+			closed := h.debounceClosed
+			h.debounceMu.Unlock()
+			if closed {
+				return
+			}
+			h.doBroadcastSessionsUpdate()
 		}
-		h.doBroadcastSessionsUpdate()
-	})
+	}
+	h.debounceTimer = time.AfterFunc(debounceInterval, fire)
 }
 
 func (h *Hub) doBroadcastSessionsUpdate() {

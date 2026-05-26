@@ -772,3 +772,54 @@ func TestRunStore_SkipAppendTrim_MissingEntry(t *testing.T) {
 		t.Error("expected false for unknown jobID")
 	}
 }
+
+// TestRunStore_ReadRunNoLstat_MatchesReadRun pins the contract that the
+// no-Lstat variant returns byte-identical run records for a normal regular
+// .json file: callers in diskListNewestFirst must observe no parsing drift
+// across the optimisation. R245-PERF-9.
+func TestRunStore_ReadRunNoLstat_MatchesReadRun(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t, 200, 30*24*time.Hour)
+	jobID := generateID()
+
+	run := makeRun(jobID, time.Now())
+	s.Append(run)
+
+	path := filepath.Join(s.root, jobID, run.RunID+".json")
+	withLstat, err := s.readRun(path)
+	if err != nil {
+		t.Fatalf("readRun: %v", err)
+	}
+	noLstat, err := s.readRunNoLstat(path)
+	if err != nil {
+		t.Fatalf("readRunNoLstat: %v", err)
+	}
+	a, _ := json.Marshal(withLstat)
+	b, _ := json.Marshal(noLstat)
+	if string(a) != string(b) {
+		t.Fatalf("readRunNoLstat diverges from readRun:\nwithLstat=%s\n noLstat=%s", a, b)
+	}
+}
+
+// TestRunStore_ReadRunNoLstat_OverCap asserts the size-cap path still rejects
+// oversized payloads as ErrCorruptRun without the Lstat. The size enforcement
+// lives in parseRunBytes shared between both readers.
+func TestRunStore_ReadRunNoLstat_OverCap(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t, 200, 30*24*time.Hour)
+	s.maxRunBytes = 64 // tight cap; valid CronRun JSON is well over 64 bytes.
+	jobID := generateID()
+	if err := os.MkdirAll(filepath.Join(s.root, jobID), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	runID := generateRunID()
+	path := filepath.Join(s.root, jobID, runID+".json")
+	payload := []byte(`{"run_id":"` + runID + `","job_id":"` + jobID + `","state":"succeeded","prompt":"this prompt is intentionally long enough to bust the tight cap"}`)
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err := s.readRunNoLstat(path)
+	if !errors.Is(err, ErrCorruptRun) {
+		t.Fatalf("readRunNoLstat over-cap err = %v, want ErrCorruptRun wrap", err)
+	}
+}

@@ -320,8 +320,19 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	// "double-append separator" form was correct but easy to misread as
 	// "if I forget the trailing sep on one side, the check is now wrong",
 	// which is the failure mode the unified pattern eliminates.
+	//
+	// R238-SEC-6: HasPrefix is byte-wise case-sensitive. On macOS APFS /
+	// HFS+ (default case-insensitive) and Windows NTFS, EvalSymlinks may
+	// preserve the user-typed case for path components that the kernel
+	// otherwise treats as equivalent — e.g. resolved="/Users/alice/.claude/projects/..."
+	// vs resolvedRoot="/Users/Alice/.claude/projects" would falsely fail
+	// the prefix check and downgrade every legitimate run to "missing".
+	// Fall back to a SameFile-walk on the resolved path's ancestors when
+	// the byte-wise check fails so the gate matches actual filesystem
+	// containment semantics rather than path-string identity.
 	if resolved != resolvedRoot &&
-		!strings.HasPrefix(resolved, resolvedRoot+string(os.PathSeparator)) {
+		!strings.HasPrefix(resolved, resolvedRoot+string(os.PathSeparator)) &&
+		!sameFileAncestor(resolved, resolvedRoot) {
 		slog.Warn("cron transcript: path escape attempt", "raw", jsonlPath, "resolved", resolved, "claudeDir", h.claudeDir, "allowedRoot", resolvedRoot)
 		resp.Fallback = "missing"
 		writeJSON(w, resp)
@@ -929,4 +940,32 @@ func truncateRunes(s string, maxBytes int) string {
 		cut = i + size
 	}
 	return s[:cut] + ellipsis
+}
+
+// sameFileAncestor reports whether root names the same inode as resolved or
+// any of its ancestors. Used as a fallback after a byte-wise HasPrefix check
+// fails so the path-escape gate honours filesystem containment semantics on
+// case-insensitive filesystems (macOS APFS/HFS+ default, Windows NTFS) where
+// EvalSymlinks preserves user-typed case while the kernel still treats the
+// path as equivalent. Walking parents one Stat at a time bounds the work to
+// path depth and avoids os-specific case-folding rules. Returns false on any
+// Stat error (root deleted mid-flight, permission denied, broken chain) so a
+// failed ancestor probe never weakens the byte-wise gate's negative result.
+func sameFileAncestor(resolved, root string) bool {
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		return false
+	}
+	cur := filepath.Clean(resolved)
+	for {
+		info, err := os.Stat(cur)
+		if err == nil && os.SameFile(info, rootInfo) {
+			return true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur { // reached filesystem root, stop.
+			return false
+		}
+		cur = parent
+	}
 }

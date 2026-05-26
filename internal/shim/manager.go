@@ -94,6 +94,16 @@ type Manager struct {
 	mu           sync.Mutex
 	shims        map[string]*ShimHandle // key → active shim handle
 	pendingShims int                    // spawn in progress, not yet in shims map
+
+	// reconnectMu serializes Reconnect calls per key so two concurrent
+	// callers cannot each build their own handle, swap one in, and close
+	// the other while it's still in use by Router (R51-CONCUR-005). The
+	// outer m.mu must NEVER be held while taking a reconnectMu entry —
+	// the dial inside connect() takes up to 10 s, and blocking m.mu for
+	// that long would stall every other map mutation. See Reconnect for
+	// the lock acquisition sequence.
+	reconnectMu sync.Mutex
+	reconnectKM map[string]*sync.Mutex
 }
 
 // ShimHandle represents a running shim that naozhi is connected to.
@@ -204,7 +214,26 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		naozhiBin:       naozhiBin,
 		shimEnv:         filterShimEnv(os.Environ()),
 		shims:           make(map[string]*ShimHandle),
+		reconnectKM:     make(map[string]*sync.Mutex),
 	}, nil
+}
+
+// reconnectKey returns (and lazily creates) the per-key mutex used by
+// Reconnect to serialise concurrent attempts on the same key. The
+// returned mutex is shared across all callers for that key and held
+// across the dial — see Reconnect for the rationale. Per-key mutexes
+// stay in the map for the Manager's lifetime; the entries are tiny
+// (sync.Mutex pointer) and the key set is bounded by the lifetime
+// session count, so cleanup is unnecessary.
+func (m *Manager) reconnectKey(key string) *sync.Mutex {
+	m.reconnectMu.Lock()
+	defer m.reconnectMu.Unlock()
+	mu, ok := m.reconnectKM[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		m.reconnectKM[key] = mu
+	}
+	return mu
 }
 
 // StartShim spawns a new shim process using the manager's default CLI path.
@@ -456,20 +485,31 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 // it to a Process). Closing a handle under active use causes the
 // Process's readLoop to observe EOF and mark the session Dead.
 //
-// Today the scenario is not observed in production because:
-//   - Router's reconcile ticker runs at 30 s intervals and each per-key
-//     Reconnect finishes well within that window.
-//   - StartShim and Reconnect cannot race on the same key either, because
-//     Router only calls Reconnect for suspended-but-shim-alive sessions.
+// R51-CONCUR-005 fix: per-key mutex (reconnectKM) now serialises
+// concurrent Reconnect attempts on the same key. The lock is held
+// across the read-state + dial + swap sequence, so two callers see
+// the second one wait until the first publishes its handle. The
+// second caller then sees the freshly-installed handle in m.shims —
+// it does NOT race a second dial, the prior dial's result is what
+// gets reused. Outer m.mu is still acquired only for the map mutation
+// itself, never across the dial (10 s timeout), so reconcile-time
+// fan-out across DIFFERENT keys still proceeds in parallel.
 //
-// If you add a second driver that calls Reconnect (e.g. a UI-triggered
-// "reattach now" action) or shorten the reconcile interval, you MUST
-// introduce per-key serialisation here (e.g. a singleflight keyed on
-// `key`, or a per-key mutex pool) — otherwise the above invariant is
-// one race edge away from breaking and the user sees spurious session
-// deaths on reconcile. The no-leak semantics of the `oldHandle.Close()`
-// step below are contract-tested in manager_reconnect_contract_test.go.
+// Lock ordering: reconnectKM[key] -> m.mu. NEVER hold m.mu when
+// taking a reconnectKM entry (would defeat the cross-key parallelism
+// motivation above).
+//
+// The no-leak semantics of the `oldHandle.Close()` step below are
+// contract-tested in manager_reconnect_contract_test.go.
 func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*ShimHandle, error) {
+	// R51-CONCUR-005: per-key serialise. Held across read-state + dial
+	// + swap so a second caller never observes a half-installed handle
+	// or builds a parallel dial that could close the first caller's
+	// in-flight handle. Cross-key Reconnect remains parallel.
+	rmu := m.reconnectKey(key)
+	rmu.Lock()
+	defer rmu.Unlock()
+
 	keyHash := KeyHash(key)
 	stateFile := StateFilePath(m.stateDir, keyHash)
 

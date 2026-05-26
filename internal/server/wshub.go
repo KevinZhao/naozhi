@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/time/rate"
 
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
@@ -234,6 +235,11 @@ type Hub struct {
 	// its clientWG.Wait could schedule a callback that never gets Waited on,
 	// or worse, add to clientWG after Wait has already returned.
 	debounceClosed bool
+	// debounceFire is the AfterFunc callback assigned once at NewHub. The
+	// previous BroadcastSessionsUpdate created a fresh closure literal on
+	// every call (high-frequency sidebar refresh path), incurring per-call
+	// heap alloc for the captured `h` pointer + func object. R239-PERF-6.
+	debounceFire func()
 
 	// tailers owns the agentTailer registry backing agent_subscribe / agent_
 	// unsubscribe WS flows (RFC v4 agent-team-ui §3.5.4). Initialised by
@@ -277,6 +283,25 @@ type Hub struct {
 	// Hub.Shutdown. See wshub_eventpush_cache.go for the fingerprint /
 	// fan-out contract.
 	historyMarshalCache *historyMarshalCache
+
+	// userSendLimitersMu + userSendLimiters bucket the WS "send" budget by
+	// uploadOwner (cookie-MAC / token-hash / IP fallback) instead of
+	// per-connection so a single user holding N tabs cannot multiply the
+	// burst budget N×. The wsClient.sendLimiter is still the per-conn
+	// floor — both must Allow() before the message is processed.
+	// R244-SEC-P2-3 / #888.
+	userSendLimitersMu sync.Mutex
+	userSendLimiters   map[string]*rate.Limiter
+
+	// connCountByOwnerMu + connCountByOwner enforce a per-uploadOwner WS
+	// connection sub-cap (maxConnsPerOwner) on top of the global
+	// maxWSConns ceiling. Without it a single token holder can monopolise
+	// the entire WS pool — R229-SEC-8 / #1022. Increment happens at
+	// HandleUpgrade after owner derivation; decrement at unregister so
+	// reconnects free the slot deterministically. uploadOwner == ""
+	// (anonymous no-token-mode pre-cookie) skips the per-owner cap.
+	connCountByOwnerMu sync.Mutex
+	connCountByOwner   map[string]int
 }
 
 // HubOptions holds configuration for a Hub.
@@ -365,6 +390,26 @@ func NewHub(opts HubOptions) *Hub {
 	h.tailers = newTailerRegistry(h)
 	h.wiredLinkers = make(map[agentlink.AgentLinker]struct{})
 	h.historyMarshalCache = newHistoryMarshalCache()
+	// R244-SEC-P2-3 / #888: per-uploadOwner send-budget map. Initialised
+	// here so allowSendForOwner can lookup-or-create without a sync.Once.
+	h.userSendLimiters = make(map[string]*rate.Limiter)
+	// R229-SEC-8 / #1022: per-uploadOwner connection counter so a single
+	// token cannot monopolise the global maxWSConns pool.
+	h.connCountByOwner = make(map[string]int)
+	// R239-PERF-6: pre-bind the AfterFunc callback so BroadcastSessionsUpdate
+	// (high-frequency sidebar refresh path) reuses one heap-allocated closure
+	// for the lifetime of the Hub instead of allocating a fresh one per call.
+	h.debounceFire = func() {
+		defer h.clientWG.Done()
+		h.debounceMu.Lock()
+		h.debounceTimer = nil
+		closed := h.debounceClosed
+		h.debounceMu.Unlock()
+		if closed {
+			return
+		}
+		h.doBroadcastSessionsUpdate()
+	}
 	// R219-CR-11 / R229-CR-4: a nil queue makes every WS send fall through to
 	// sessionSendLegacy (the deprecated guard path). Test harnesses and
 	// headless tools deliberately wire a nil Queue, but a production Hub
@@ -406,6 +451,39 @@ func (h *Hub) SetUploadStore(s *uploadStore) { h.uploadStore = s }
 // resolve AgentOpts for scratch keys without touching the sidebar-visible
 // router state.
 func (h *Hub) SetScratchPool(p *session.ScratchPool) { h.scratchPool = p }
+
+// allowSendForOwner returns whether the per-user (uploadOwner-keyed) send
+// budget admits another "send" message. The per-connection
+// wsClient.sendLimiter still gates first; this is the per-user ceiling
+// that prevents N tabs from multiplying the 5 sends/s burst by N. Owner
+// = "" (anonymous, no-token mode pre-cookie) skips the per-user gate to
+// keep the legacy single-user path unchanged. Hand-built hubs that
+// bypass NewHub leave userSendLimiters nil; the nil-guard preserves
+// their behaviour. R244-SEC-P2-3 / #888.
+//
+// Budget mirrors the per-conn shape (rate.Every(time.Second), burst=5)
+// so a legitimate single-tab user observes no behavioural change. With
+// N tabs, the per-user bucket caps the aggregate at the same 5 burst /
+// 1 sustained sps regardless of tab count, while the per-conn floor
+// still limits a single rogue tab.
+func (h *Hub) allowSendForOwner(owner string) bool {
+	if h == nil || owner == "" {
+		return true
+	}
+	h.userSendLimitersMu.Lock()
+	if h.userSendLimiters == nil {
+		h.userSendLimitersMu.Unlock()
+		return true
+	}
+	lim, ok := h.userSendLimiters[owner]
+	if !ok {
+		lim = rate.NewLimiter(rate.Every(time.Second), 5)
+		h.userSendLimiters[owner] = lim
+	}
+	h.userSendLimitersMu.Unlock()
+	return lim.Allow()
+}
+
 func (h *Hub) register(c *wsClient) {
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
@@ -429,6 +507,8 @@ func (h *Hub) unregister(c *wsClient) {
 		// `removed` so a double-unregister (stale close path) cannot leak
 		// the counter into negative territory.
 		h.connCount.Add(-1)
+		// R229-SEC-8 / #1022: free the per-uploadOwner sub-cap slot too.
+		h.releaseOwnerSlot(c.uploadOwner)
 		// Drop any agent_subscribe refs this client was holding so refCount
 		// stays accurate — otherwise an abrupt disconnect (mobile sleep)
 		// would leave the tailer in broadcasting mode forever, wedging a
@@ -464,6 +544,56 @@ func (h *Hub) unregister(c *wsClient) {
 // envelope instead of a hand-picked 256 that silently disables pooling
 // whenever connCount grows past it.
 const maxWSConns = 500
+
+// maxConnsPerOwner is the per-uploadOwner sub-cap. Sized so a single
+// power-user with browser tabs across multiple devices, plus a CLI/IDE
+// integration or two, fits comfortably while still preventing a single
+// stolen token from monopolising the maxWSConns global pool.
+// R229-SEC-8 / #1022.
+const maxConnsPerOwner = 20
+
+// reserveOwnerSlot atomically increments the per-uploadOwner connection
+// counter, returning false when the sub-cap (maxConnsPerOwner) is
+// already exhausted. The caller is responsible for pairing every
+// successful reserve with a releaseOwnerSlot when the connection is
+// torn down. Owner == "" (legacy single-user, anonymous pre-cookie)
+// always succeeds without bumping the map. R229-SEC-8 / #1022.
+func (h *Hub) reserveOwnerSlot(owner string) bool {
+	if h == nil || owner == "" {
+		return true
+	}
+	h.connCountByOwnerMu.Lock()
+	defer h.connCountByOwnerMu.Unlock()
+	if h.connCountByOwner == nil {
+		return true
+	}
+	if h.connCountByOwner[owner] >= maxConnsPerOwner {
+		return false
+	}
+	h.connCountByOwner[owner]++
+	return true
+}
+
+// releaseOwnerSlot decrements the per-uploadOwner connection counter
+// reserved by reserveOwnerSlot. Removes the map entry when the count
+// reaches zero so the map stays bounded to the active-user set rather
+// than the lifetime-user set. R229-SEC-8 / #1022.
+func (h *Hub) releaseOwnerSlot(owner string) {
+	if h == nil || owner == "" {
+		return
+	}
+	h.connCountByOwnerMu.Lock()
+	defer h.connCountByOwnerMu.Unlock()
+	if h.connCountByOwner == nil {
+		return
+	}
+	n := h.connCountByOwner[owner]
+	if n <= 1 {
+		delete(h.connCountByOwner, owner)
+		return
+	}
+	h.connCountByOwner[owner] = n - 1
+}
 
 // TrackSend reserves a sendWG slot for a background send goroutine and
 // returns a release function plus a shuttingDown flag. When shuttingDown
@@ -598,6 +728,13 @@ func (h *Hub) Shutdown() {
 	if h.historyMarshalCache != nil {
 		h.historyMarshalCache.reset()
 	}
+
+	// R244-SEC-P2-3 / #888: drop the per-uploadOwner limiter map so the
+	// rate.Limiter values can be GC'd after Hub teardown (test harnesses
+	// that build and tear down many Hubs in one process).
+	h.userSendLimitersMu.Lock()
+	h.userSendLimiters = nil
+	h.userSendLimitersMu.Unlock()
 
 	// Barrier: any TrackSend call that observed h.ctx.Err()==nil and was
 	// about to Add(1) is racing us. Holding sendTrackMu here forces it to

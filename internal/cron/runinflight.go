@@ -162,31 +162,7 @@ func (r *runInflight) setSessionID(id string) {
 	r.sessionID.Store(boxString(id))
 }
 
-// jobRunCounters 是 Job 的累计计数。维护策略详见 RFC §3.2：list API 直接
-// 读，避免扫 runs/<jobID>/。EWMA / P² 由 P1 引入；P0 阶段先填 total/
-// succeeded/failed/skipped/canceled/timed_out 计数，AvgMS 在 P1 实现。
-type JobRunCounters struct {
-	Total     int64 `json:"total,omitempty"`
-	Succeeded int64 `json:"succeeded,omitempty"`
-	Failed    int64 `json:"failed,omitempty"`
-	Skipped   int64 `json:"skipped,omitempty"`
-	TimedOut  int64 `json:"timed_out,omitempty"`
-	Canceled  int64 `json:"canceled,omitempty"`
-}
-
-// addRun 把一次终态 run 累加到 counters。调用方持 s.mu.Lock。
-func (c *JobRunCounters) addRun(state RunState) {
-	c.Total++
-	switch state {
-	case RunStateSucceeded:
-		c.Succeeded++
-	case RunStateFailed:
-		c.Failed++
-	case RunStateSkipped:
-		c.Skipped++
-	case RunStateTimedOut:
-		c.TimedOut++
-	case RunStateCanceled:
-		c.Canceled++
-	}
-}
+// JobRunCounters lives in job.go (R239-CR-7) — it is a Job field, not a
+// runInflight field, so keeping its type definition next to the rest of
+// Job's wire schema prevents a "where does this field type live?"
+// scavenger hunt. Anchor preserved here for git-blame continuity.
