@@ -12353,12 +12353,25 @@ async function cronTimelineFetchTranscript(jobId, runId) {
 
 // renderCronTimelinePanel — 重绘当前 timeline 面板（不重新 mount shell）。
 // 用于 expand/collapse、loadMore、ws 刷新等场景。
+//
+// R243-PERF-12 (#817): identity-check 上次渲染的 HTML，命中则跳过 innerHTML
+// 赋值——dashboard 1Hz 拉到的 cron list 多数 tick run 状态没变化，重新写
+// innerHTML 会丢掉用户当前 hover/focus 状态并重新 attach 异步占位。完整
+// data-run-id keyed diff 还在跟（issue #817），这里先把"全表纹丝不动也
+// 重渲"这条最低垂的 perf 摘掉。lastHtml 挂在 host element 上而不是模块
+// 状态，这样任意原因导致 host 被替换（DOM 重 mount）后会自然重渲。
 function renderCronTimelinePanel(jobId) {
   const host = document.getElementById('cron-timeline-panel');
   if (!host) return;
   const job = (cronJobs || []).find(x => x && x.id === jobId);
   const st = getCronTimelineState(jobId);
-  host.innerHTML = cronTimelineHtml(jobId, job, st);
+  const next = cronTimelineHtml(jobId, job, st);
+  if (host.__ctLastHtml === next && host.__ctLastJobId === jobId) {
+    return;
+  }
+  host.innerHTML = next;
+  host.__ctLastHtml = next;
+  host.__ctLastJobId = jobId;
   // result 走 renderMd 后会埋入 mermaid/katex 异步占位（mermaid-N / ktx-N），
   // 必须在 attach 到 DOM 后调用一次才能完成异步渲染。与 events bubble 路径
   // 的 stickEventsBottom / runPendingAsync 调用语义保持一致。
@@ -12980,7 +12993,15 @@ function renderCronTimelineForJob(jobId) {
     st.done = job.recent_runs.length < 10;
   }
   st.lastMountAt = Date.now();
-  host.innerHTML = cronTimelineHtml(jobId, job, st);
+  // R243-PERF-12 (#817): same identity-check as renderCronTimelinePanel —
+  // skip the innerHTML write when the rendered HTML hasn't changed. Cuts
+  // mount-time DOM churn on the 1Hz refresh loop.
+  const next = cronTimelineHtml(jobId, job, st);
+  if (host.__ctLastHtml !== next || host.__ctLastJobId !== jobId) {
+    host.innerHTML = next;
+    host.__ctLastHtml = next;
+    host.__ctLastJobId = jobId;
+  }
   if (!job) {
     fetchCronJobs().then(() => {
       if (cronDetailJobId === jobId) renderCronTimelineForJob(jobId);
