@@ -113,8 +113,8 @@ type processIface interface {
 	Close()
 	Kill()
 	// Dashboard introspection
-	GetSessionID() string
-	GetState() cli.ProcessState
+	SessionID() string
+	State() cli.ProcessState
 	// DeathReason returns the process-level reason string recorded when the
 	// shim-backed CLI exited (passive death). Empty while alive or when the
 	// reason has not been classified yet.
@@ -1114,13 +1114,13 @@ func (s *ManagedSession) InterruptViaControl() InterruptOutcome {
 //     the cli.HistorySessionView interface (Wrapper.NewHistorySource
 //     factory wiring) and is the right entry point for cross-package
 //     callers in internal/server / internal/dispatch.
-//   - cli.Process.GetSessionID — different layer entirely. Reads the CLI
+//   - cli.Process.SessionID — different layer entirely. Reads the CLI
 //     subprocess's most-recently-observed session ID off the live event
 //     stream. The two layers may briefly disagree during a /resume
 //     handshake or first-Send capture; callers picking between them
 //     should choose by intent: "what does naozhi remember for this chat
 //     key" → ManagedSession.SessionID; "what does the CLI think the
-//     active session is right now" → Process.GetSessionID.
+//     active session is right now" → Process.SessionID.
 func (s *ManagedSession) getSessionID() string {
 	return loadAtomicString(&s.sessionID)
 }
@@ -1129,7 +1129,7 @@ func (s *ManagedSession) getSessionID() string {
 // for getSessionID used by the cli.HistorySessionView interface
 // (Sprint 1a, Wrapper.NewHistorySource factory wiring) and any future
 // caller that needs the current ID without taking r.mu. See
-// getSessionID's godoc for the relationship with cli.Process.GetSessionID
+// getSessionID's godoc for the relationship with cli.Process.SessionID
 // (R230C-CR-5).
 func (s *ManagedSession) SessionID() string { return s.getSessionID() }
 
@@ -1278,7 +1278,7 @@ func (s *ManagedSession) State() string {
 	if proc == nil {
 		return "ready"
 	}
-	return proc.GetState().String()
+	return proc.State().String()
 }
 
 // DeathReason returns the recorded death cause string ("" when the
@@ -1343,7 +1343,7 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		snap.TotalCost = sessCost
 		snap.State = "ready"
 	} else {
-		snap.State = proc.GetState().String()
+		snap.State = proc.State().String()
 		snap.Protocol = proc.ProtocolName()
 		// UI Round 5 R5-3: model resolution priority
 		//   1. live proc.Model() (claude system/init or kiro SpawnOptions)

@@ -89,7 +89,7 @@ func (f *fakeProcess) Send(_ context.Context, _ string, _ []cli.ImageData, _ cli
 	return &cli.SendResult{Text: "fake"}, nil
 }
 
-func (f *fakeProcess) GetState() cli.ProcessState {
+func (f *fakeProcess) State() cli.ProcessState {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !f.isAlive {
@@ -176,7 +176,7 @@ func (f *fakeProcess) UserTurnCount() int64 {
 	return f.userTurnCount
 }
 func (f *fakeProcess) ProtocolName() string { return "test" }
-func (f *fakeProcess) GetSessionID() string { return "" }
+func (f *fakeProcess) SessionID() string { return "" }
 func (f *fakeProcess) Interrupt() {
 	f.mu.Lock()
 	f.interruptCalls++

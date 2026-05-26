@@ -54,7 +54,7 @@ func (p *Process) findResultSince(afterMS int64) *SendResult {
 		if entries[i].Type == "result" {
 			return &SendResult{
 				Text:      entries[i].Detail,
-				SessionID: p.GetSessionID(),
+				SessionID: p.SessionID(),
 				CostUSD:   entries[i].Cost,
 			}
 		}

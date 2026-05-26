@@ -201,7 +201,7 @@ func (r *Router) Cleanup() {
 		if proc == nil {
 			continue
 		}
-		candidates = append(candidates, cand{key, s, proc, s.LastActive(), proc.GetState()})
+		candidates = append(candidates, cand{key, s, proc, s.LastActive(), proc.State()})
 	}
 	ttl := r.ttl
 	totalTimeout := r.totalTimeout

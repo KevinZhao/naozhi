@@ -8,7 +8,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
-// countingProc wraps fakeProcess to count GetState/IsRunning invocations so
+// countingProc wraps fakeProcess to count State/IsRunning invocations so
 // the R220-PERF-4 test can assert that pass-2 reads from the cached state
 // rather than re-locking proc.mu.
 type countingProc struct {
@@ -21,9 +21,9 @@ func newCountingRunningProc() *countingProc {
 	return &countingProc{fakeProcess: newRunningProc()}
 }
 
-func (c *countingProc) GetState() cli.ProcessState {
+func (c *countingProc) State() cli.ProcessState {
 	c.getStateCalls.Add(1)
-	return c.fakeProcess.GetState()
+	return c.fakeProcess.State()
 }
 
 func (c *countingProc) IsRunning() bool {
@@ -52,10 +52,10 @@ func TestCleanup_PassTwo_UsesCachedState(t *testing.T) {
 	r.Cleanup()
 
 	if got := proc.isRunningCalls.Load(); got != 0 {
-		t.Errorf("IsRunning() called %d times in pass-2; want 0 (state must come from pass-1 GetState cache)", got)
+		t.Errorf("IsRunning() called %d times in pass-2; want 0 (state must come from pass-1 State cache)", got)
 	}
 	if got := proc.getStateCalls.Load(); got != 1 {
-		t.Errorf("GetState() called %d times; want exactly 1 (pass-1 snapshot)", got)
+		t.Errorf("State() called %d times; want exactly 1 (pass-1 snapshot)", got)
 	}
 }
 

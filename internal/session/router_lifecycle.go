@@ -913,7 +913,7 @@ func (r *Router) installFreshSessionLocked(
 	// matches its legacy behaviour.
 	effectiveSID := resumeID
 	if effectiveSID == "" {
-		effectiveSID = proc.GetSessionID()
+		effectiveSID = proc.SessionID()
 	}
 	s.setSessionID(effectiveSID)
 	if effectiveSID != "" {

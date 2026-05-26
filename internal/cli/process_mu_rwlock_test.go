@@ -9,7 +9,7 @@ import (
 
 // TestProcess_ReadsUnderRLock_AllowConcurrency verifies that R70-PERF-L3's
 // switch of Process.mu from sync.Mutex to sync.RWMutex lets many concurrent
-// GetState / IsRunning / GetSessionID / TotalCost readers proceed in parallel.
+// State / IsRunning / SessionID / TotalCost readers proceed in parallel.
 //
 // With a Mutex these four goroutines would serialise through RLock slots —
 // here we hold one RLock open (via a sentinel goroutine) and confirm the
@@ -40,9 +40,9 @@ func TestProcess_ReadsUnderRLock_AllowConcurrency(t *testing.T) {
 	for i := 0; i < readers; i++ {
 		go func() {
 			defer wg.Done()
-			_ = p.GetState()
+			_ = p.State()
 			_ = p.IsRunning()
-			_ = p.GetSessionID()
+			_ = p.SessionID()
 			_ = p.TotalCost()
 			done.Add(1)
 		}()

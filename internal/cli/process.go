@@ -181,7 +181,7 @@ type Process struct {
 	shimPID       int  // shim PID reported by shim hello; used by Kill() for SIGUSR2 fallback
 
 	// sessionID and state are protected by mu. External readers MUST use
-	// GetSessionID() / GetState() rather than reading the field directly to
+	// SessionID() / State() rather than reading the field directly to
 	// avoid racing readLoop's transition writes (system/init / result
 	// events). Unexported (R237-GO-2 / #623) so cross-package callers
 	// cannot silently bypass the locking contract by direct field access;
@@ -190,7 +190,7 @@ type Process struct {
 	sessionID string
 	state     ProcessState
 	// mu protects state / sessionID / onTurnDone. Read-only accessors
-	// (GetState / IsRunning / GetSessionID) use RLock so concurrent
+	// (State / IsRunning / SessionID) use RLock so concurrent
 	// ListSessions snapshots across N sessions and M tabs proceed in
 	// parallel instead of serialising through a single Mutex. Write paths
 	// (readLoop state transitions, Send state→Running, Interrupt
@@ -736,8 +736,8 @@ func (p *Process) closeShimConn() {
 	})
 }
 
-// GetState returns the current process state.
-func (p *Process) GetState() ProcessState {
+// State returns the current process state.
+func (p *Process) State() ProcessState {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.state
@@ -759,8 +759,8 @@ func (p *Process) SetOnTurnDone(fn func()) {
 	p.mu.Unlock()
 }
 
-// GetSessionID returns the session ID in a thread-safe manner.
-func (p *Process) GetSessionID() string {
+// SessionID returns the session ID in a thread-safe manner.
+func (p *Process) SessionID() string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.sessionID

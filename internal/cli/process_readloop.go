@@ -96,7 +96,7 @@ func (p *Process) readLoop() {
 	// "turn boundary reached, reap progress" rather than "process channels
 	// fully torn down" — the normal terminal path also fires onTurnDone
 	// before the deferred channel closes. Callbacks must NOT use p.done as
-	// a "process is fully torn down" signal; use IsRunning / GetState
+	// a "process is fully torn down" signal; use IsRunning / State
 	// instead, both of which already reflect StateDead at this point.
 	defer func() {
 		if r := recover(); r != nil {

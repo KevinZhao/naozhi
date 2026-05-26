@@ -162,11 +162,11 @@ func (p *Process) SetCwdForLinker(cwd string) {
 	// later ingests an init with a different id, the normal SetContext
 	// call in the readLoop path updates it.
 	//
-	// Reads sessionID under p.mu via the GetSessionID accessor rather than
+	// Reads sessionID under p.mu via the SessionID accessor rather than
 	// the bare field so the cross-package locking contract still holds —
 	// wrapper.go's reconnect store path holds p.mu.Lock when populating
-	// sessionID, GetSessionID's RLock pairs with that.
-	if sid := p.GetSessionID(); session == "" && sid != "" {
+	// sessionID, SessionID's RLock pairs with that.
+	if sid := p.SessionID(); session == "" && sid != "" {
 		session = sid
 	}
 	p.linker.SetContext(projectDir, session)
