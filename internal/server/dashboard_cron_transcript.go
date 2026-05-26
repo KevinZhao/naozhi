@@ -72,23 +72,20 @@ const (
 	// maxAssistantTextBytes caps a single assistant text block.
 	maxAssistantTextBytes = 64 * 1024
 
-	// maxToolInputBytes caps the raw tool_use.Input JSON we surface to the
-	// dashboard (R234-SEC-8). Without this, a transcript containing 500
-	// turns × 256KB lines of tool_use.Input would push ~128MB of bytes into
-	// the response per request — the request handler is auth'd but that
-	// is still a trivial dashboard-side memory amplifier. Bash command
-	// payloads / Read tool args / Edit diffs all fit comfortably in 64KB;
-	// pathological cases (a tool that streams binary as a single-call
-	// argument) get a "[truncated]" placeholder so the timeline still
-	// renders the call but no longer ships the full payload.
+	// maxToolInputBytes caps tool_use Input json.RawMessage we surface to
+	// the dashboard. Without this guard a 500-turn transcript with worst-
+	// case 256 KB lines could materialise ~128 MB of serialised output.
+	// Tool inputs are decision-side metadata for the dashboard timeline,
+	// not a forensic record — the operator can fall back to reading the
+	// JSONL file directly when full payload is needed. R234-SEC-8.
 	maxToolInputBytes = 64 * 1024
 )
 
-// truncatedToolInputPlaceholder is the JSON value substituted for
-// tool_use.Input fields that exceed maxToolInputBytes. Pre-encoded so the
-// hot path never re-marshals; must be a valid JSON value (a string
-// literal here) so the wire shape stays consistent for dashboard JS.
-var truncatedToolInputPlaceholder = json.RawMessage(`"[truncated]"`)
+// truncatedInputSentinel is the JSON-encoded literal returned in place of
+// an oversize tool_use Input. It is a valid JSON string so the wire shape
+// (json.RawMessage) stays parseable by the dashboard without special
+// casing on the receiving end.
+var truncatedInputSentinel = json.RawMessage(`"[truncated]"`)
 
 // ansiEscRe matches the most common ANSI CSI sequences (color, cursor
 // motion). We strip these from tool output before serialising so the
@@ -817,7 +814,11 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 		case len(input) == 0 || string(input) == "null":
 			input = nil
 		case len(input) > maxToolInputBytes:
-			input = truncatedToolInputPlaceholder
+			// R234-SEC-8: replace oversize Input with a small JSON
+			// sentinel so a 500-turn transcript cannot materialise
+			// hundreds of MB on the wire. Operators reading full
+			// payloads should consult the underlying JSONL file.
+			input = truncatedInputSentinel
 		}
 		out = append(out, transcriptTurn{
 			Index:     nextIdx + len(out),
