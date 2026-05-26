@@ -1129,10 +1129,20 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 			// Aligning with the dispatch/commands.go:51 pattern keeps the
 			// audit-log surface uniform, so a regression in either validator
 			// cannot smuggle log-fragmentation bytes past slog's TextHandler.
+			//
+			// R246-SEC-14 (REPEAT-3, #820): the upstream node's err.Error()
+			// can echo attacker-influenced bytes verbatim — a malicious
+			// remote naozhi build could embed CR/LF or bidi runes in its
+			// RPC error string and fragment our local slog audit trail.
+			// Wrapping err.Error() through SanitizeLogAttr closes that
+			// hole; the upstream wrapper text already includes "unknown
+			// method:" / "rpc:" / etc. so legitimate diagnostic content
+			// survives sanitisation (only control + bidi + C1 are
+			// stripped).
 			slog.Warn("remote set session label failed",
 				"node", session.SanitizeLogAttr(req.Node),
 				"key", session.SanitizeLogAttr(req.Key),
-				"err", err)
+				"err", session.SanitizeLogAttr(err.Error()))
 			if isUnknownRPCMethodErr(err) {
 				http.Error(w, "remote node needs upgrade to support this action", http.StatusConflict)
 				return
