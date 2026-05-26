@@ -317,6 +317,15 @@ type Scheduler struct {
 	// can change the set (LastSessionID assignment, runStore.Append).
 	// R250-PERF-7.
 	knownSessionsCache knownSessionsCache
+
+	// marshalJobs is the JSON serializer used by marshalJobsLocked, held
+	// behind atomic.Pointer so tests (withFailingMarshal in
+	// persist_failure_test.go) can swap a failing stub without racing
+	// concurrent persist hot-path readers under -race. Initialised to
+	// defaultMarshalJobs in NewScheduler. Lifted from a package-level
+	// var so the seam stops being a global and parallel tests can no
+	// longer leak a stub across schedulers. R250-ARCH-14.
+	marshalJobs atomic.Pointer[marshalJobsFn]
 }
 
 // knownSessionsCache holds a TTL-bounded snapshot of KnownSessionIDs
@@ -609,7 +618,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		slog.Debug("cron: 'general' agent missing from agents map; cron jobs without slash-prefix will fall back to backend defaults",
 			"agent_count", len(cfg.Agents))
 	}
-	return &Scheduler{
+	s := &Scheduler{
 		cron: robfigcron.New(
 			robfigcron.WithLocation(loc),
 			robfigcron.WithChain(
@@ -635,6 +644,11 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		stopCancel:          stopCancel,
 		runStore:            newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
 	}
+	// R250-ARCH-14: initialise the per-Scheduler marshal seam so the
+	// hot path in marshalJobsLocked finds defaultMarshalJobs instead of
+	// nil. Tests swap a failing stub via withFailingMarshal.
+	s.marshalJobs.Store(&defaultMarshalJobs)
+	return s
 }
 
 // NotifyDefault returns the configured fallback IM target so the dashboard
