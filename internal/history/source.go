@@ -15,11 +15,7 @@
 // API, or is empty.
 package history
 
-import (
-	"context"
-
-	"github.com/naozhi/naozhi/internal/cli"
-)
+import "github.com/naozhi/naozhi/internal/cli"
 
 // Source exposes a read-only view of a session's historical events backed
 // by persistent storage. Implementations must be safe for concurrent use —
@@ -40,18 +36,23 @@ import (
 //     them as end-of-history to avoid infinite retry loops.
 //   - ctx cancellation propagates into file I/O; implementations should
 //     return promptly on Done.
-type Source interface {
-	LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]cli.EventEntry, error)
-}
+//
+// R246-ARCH-1 (#761): Source is a type alias for cli.HistorySource so the
+// two definitions can no longer drift. Adding a method on cli.HistorySource
+// is now an immediate compile error across every history backend instead
+// of silent structural-satisfaction breakage. The cycle is broken in the
+// only direction that matters: cli/history.go does NOT import this
+// package (the cli package owns the canonical interface), and every
+// downstream history backend already imports cli.
+type Source = cli.HistorySource
 
 // Noop is a Source that always returns nil. Backends without a durable
 // history store (kiro today, any future CLI whose transcript isn't yet
 // introspectable) use this as a placeholder so the session layer can
 // treat Source as never-nil and skip defensive null checks at call sites.
-type Noop struct{}
-
-// LoadBefore always returns (nil, nil) — no history, no error. Callers
-// interpret this as "end of history reached" on the very first call.
-func (Noop) LoadBefore(context.Context, int64, int) ([]cli.EventEntry, error) {
-	return nil, nil
-}
+//
+// R246-ARCH-1 (#761): aliased onto cli.NoopHistorySource for the same
+// drift-prevention reason as Source above. Existing callers that write
+// `history.Noop{}` resolve to `cli.NoopHistorySource{}` at compile time;
+// behaviour is byte-identical.
+type Noop = cli.NoopHistorySource

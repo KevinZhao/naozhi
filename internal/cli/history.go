@@ -17,12 +17,15 @@
 //     internal/history/claudejsonl) automatically gets its factory
 //     registered with cli.
 //
-// The HistorySource interface declared here is structurally identical to
-// internal/history.Source (same single LoadBefore method). Go interface
-// satisfaction is structural, so any history.Source value satisfies
-// cli.HistorySource without an explicit adapter — callers can return a
-// claudejsonl.Source straight from a HistoryFactoryFn even though the
-// concrete type's compile-time interface is history.Source.
+// The HistorySource interface declared here is the canonical source of
+// truth for the history-pagination contract. R246-ARCH-1 (#761) collapsed
+// the previously-duplicated internal/history.Source down to a type alias
+// (`type Source = cli.HistorySource`) so adding or renaming a method on
+// HistorySource is now an immediate compile error across every history
+// backend instead of silent structural-satisfaction breakage. The alias
+// direction (history → cli) is forced by the import graph: cli cannot
+// import history without a cycle, but every backend already imports cli
+// for cli.EventEntry.
 package cli
 
 import (
