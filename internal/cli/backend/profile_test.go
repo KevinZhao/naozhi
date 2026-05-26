@@ -97,7 +97,7 @@ func TestMustGet_PanicOnMissing(t *testing.T) {
 		Register(sampleProfile("alpha"))
 
 		// Hit path: should not panic.
-		got := MustGet("alpha")
+		got := mustGet("alpha")
 		if got.ID != "alpha" {
 			t.Errorf("MustGet returned ID %q; want %q", got.ID, "alpha")
 		}
@@ -116,7 +116,7 @@ func TestMustGet_PanicOnMissing(t *testing.T) {
 				t.Errorf("panic message %q missing %q", msg, "unknown id")
 			}
 		}()
-		MustGet("missing")
+		mustGet("missing")
 	})
 }
 
@@ -245,7 +245,7 @@ func TestProfile_NewProtocol_Claude(t *testing.T) {
 	withCleanRegistry(t, func() {
 		RegisterDefaults()
 
-		p := MustGet("claude")
+		p := mustGet("claude")
 		if p.NewProtocol == nil {
 			t.Fatal("claude profile NewProtocol is nil")
 		}
@@ -287,7 +287,7 @@ func TestProfile_NewProtocol_Kiro(t *testing.T) {
 	withCleanRegistry(t, func() {
 		RegisterDefaults()
 
-		p := MustGet("kiro")
+		p := mustGet("kiro")
 		if p.NewProtocol == nil {
 			t.Fatal("kiro profile NewProtocol is nil")
 		}
@@ -317,8 +317,8 @@ func TestProfile_DetectInProc(t *testing.T) {
 	withCleanRegistry(t, func() {
 		RegisterDefaults()
 
-		claude := MustGet("claude")
-		kiro := MustGet("kiro")
+		claude := mustGet("claude")
+		kiro := mustGet("kiro")
 
 		cases := []struct {
 			name       string

@@ -163,7 +163,8 @@ func Register(p Profile) {
 }
 
 // Get returns the Profile registered under id and whether it exists.
-// Callers that want a hard failure on missing IDs should use MustGet.
+// Callers that want a hard failure on missing IDs should check ok and
+// fail-fast at the call site (e.g. log.Fatal, t.Fatal, panic).
 func Get(id string) (Profile, bool) {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
@@ -172,17 +173,6 @@ func Get(id string) (Profile, bool) {
 		return Profile{}, false
 	}
 	return e.profile, true
-}
-
-// MustGet returns the Profile registered under id or panics if absent.
-// Use only for IDs that must be present at this point in startup
-// (e.g. main.go after RegisterDefaults). Library code should prefer Get.
-func MustGet(id string) Profile {
-	p, ok := Get(id)
-	if !ok {
-		panic(fmt.Sprintf("backend: unknown id %q", id))
-	}
-	return p
 }
 
 // All returns every registered Profile in registration order. The slice
