@@ -378,3 +378,73 @@ func TestServerMsg_MarshalLine_NewlineTerminated(t *testing.T) {
 		t.Fatalf("roundtrip mismatch: %+v", parsed)
 	}
 }
+
+// TestMarshalStdoutLine_WireEquivalent locks down R67-PERF-3: the fast
+// stdout-frame encoder must produce byte-identical output to the generic
+// MarshalLine() path so naozhi's ParseServerMsg cannot tell the two apart.
+// Covers the three classes of CLI stdout content the readStdout hot path
+// actually produces: pure ASCII (most assistant_delta frames), embedded
+// JSON-special bytes that demand escaping (tool_use payloads with quotes /
+// backslashes), and multi-byte UTF-8 (CJK assistant text).
+func TestMarshalStdoutLine_WireEquivalent(t *testing.T) {
+	cases := []struct {
+		name string
+		seq  int64
+		line string
+	}{
+		{"ascii", 1, `{"type":"assistant","text":"hello"}`},
+		{"escaped", 42, "line with \"quote\" and \\ backslash and \nnewline"},
+		{"utf8", 99, `{"text":"中文 🚀 ñ"}`},
+		{"empty", 7, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fast, err := MarshalStdoutLine(tc.seq, []byte(tc.line))
+			if err != nil {
+				t.Fatalf("MarshalStdoutLine err: %v", err)
+			}
+			ref := ServerMsg{Type: "stdout", Seq: tc.seq, Line: tc.line}
+			slow, err := ref.MarshalLine()
+			if err != nil {
+				t.Fatalf("MarshalLine err: %v", err)
+			}
+			if string(fast) != string(slow) {
+				t.Fatalf("wire mismatch:\n fast=%q\n slow=%q", fast, slow)
+			}
+			// Round-trip through ParseServerMsg.
+			parsed, err := ParseServerMsg(fast)
+			if err != nil {
+				t.Fatalf("ParseServerMsg: %v", err)
+			}
+			if parsed.Type != "stdout" || parsed.Seq != tc.seq || parsed.Line != tc.line {
+				t.Fatalf("roundtrip mismatch: got %+v want seq=%d line=%q",
+					parsed, tc.seq, tc.line)
+			}
+		})
+	}
+}
+
+// TestMarshalStdoutLine_NoBufferAlias guards the unsafe.String aliasing
+// contract: MarshalStdoutLine must NOT return a slice that retains a
+// pointer into the caller's `line` buffer. Otherwise mutating `line`
+// after the call (which the shim's bufio.Scanner does on the very next
+// Scan()) would corrupt the in-flight wire frame. We assert independence
+// by overwriting `line` and confirming the returned bytes are unchanged.
+func TestMarshalStdoutLine_NoBufferAlias(t *testing.T) {
+	line := []byte(`{"k":"v"}`)
+	data, err := MarshalStdoutLine(5, line)
+	if err != nil {
+		t.Fatalf("MarshalStdoutLine err: %v", err)
+	}
+	snapshot := append([]byte(nil), data...)
+	// Simulate bufio.Scanner reusing its buffer: clobber the caller's
+	// `line` storage. If json.Marshal had retained the alias, the
+	// returned bytes would now contain garbage.
+	for i := range line {
+		line[i] = 'X'
+	}
+	if string(data) != string(snapshot) {
+		t.Fatalf("wire frame aliased into caller buffer:\n before=%q\n after =%q",
+			snapshot, data)
+	}
+}

@@ -577,22 +577,22 @@ func (s *shimServer) readStdout() {
 	for s.cli.stdout.Scan() {
 		line := s.cli.stdout.Bytes() // valid until next Scan()
 
-		// `line` is reused by bufio on the next Scan(), so we must convert to
-		// string (immutable, GC-owned copy) before doing anything that could
-		// outlive this iteration. Doing it first also means ServerMsg and
-		// RingBuffer share the same backing copy via string→[]byte reuse
-		// isn't safe, but we at least avoid running string(line) twice
-		// (once implicitly inside Push's append-copy and once here).
-		lineStr := string(line)
 		seq := s.buffer.Push(line) // Push makes its own copy for replay storage
 		s.watchdog.Reset()
 
 		// Extract session_id from init/result events
 		s.tryExtractSessionID(line)
 
-		// Build message and enqueue (non-blocking, no lock during Flush)
-		msg := ServerMsg{Type: "stdout", Seq: seq, Line: lineStr}
-		if data, err := msg.MarshalLine(); err == nil {
+		// Build message and enqueue (non-blocking, no lock during Flush).
+		//
+		// R67-PERF-3: route the stdout hot path through MarshalStdoutLine,
+		// which aliases `line` directly into the ServerMsg via unsafe.String
+		// so json.Marshal walks the scanner's existing buffer instead of an
+		// intermediate `string(line)` copy. enqueueWrite hands the result to
+		// a client channel before the next Scan() runs, so the alias never
+		// outlives this iteration. Wire output is byte-for-byte identical to
+		// the prior MarshalLine path (round-tripped in protocol_test.go).
+		if data, err := MarshalStdoutLine(seq, line); err == nil {
 			s.enqueueWrite(data)
 		}
 	}
