@@ -269,14 +269,18 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 		}, nil
 	}
 
-	// Image path — preserve the pre-PDF allowlist and prefix guard. SVG is
-	// deliberately rejected: even though DetectContentType returns text/xml
-	// for SVG (which would already fall through the image/* prefix check),
-	// we allowlist the raster formats Claude actually accepts so a future
-	// sniffer change cannot silently let SVG + script payloads through.
-	if !strings.HasPrefix(declared, "image/") {
-		return cli.Attachment{}, fmt.Errorf("only image/* or application/pdf files are accepted")
-	}
+	// Image path — byte-sniff is the authority (R244-SEC-P2-1 / #886).
+	// Previously this gate also required strings.HasPrefix(declared, "image/")
+	// before the detect-switch, which trusted the client Content-Type as a
+	// pre-filter and rejected legitimate uploads that arrived with
+	// application/octet-stream (a common default for "send this binary"
+	// HTTP libraries). The detect-switch below is the real allowlist;
+	// SVG/text/xml/anything else still gets rejected because it doesn't
+	// match the four raster formats Claude actually consumes. Dropping the
+	// declared-prefix check is BREAKING-LOCAL: clients that previously got
+	// a generic "only image/* or application/pdf" error for a wrong-CT but
+	// valid-bytes image will now succeed; clients sending non-image bytes
+	// continue to be rejected with the format-specific error below.
 	switch detected {
 	case "image/jpeg", "image/png", "image/gif", "image/webp":
 		// ok
