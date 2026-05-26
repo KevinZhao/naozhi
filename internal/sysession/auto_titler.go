@@ -71,6 +71,20 @@ const (
 	// instruction so a non-compliant model can't write an over-long
 	// label.
 	autoTitlerMaxTitleRunes = 16
+
+	// autoTitlerExcerptSoftCapBytes is the total-length softcap applied
+	// to buildExcerptFromHistory.  R238-GO-15 (#806): the previous
+	// implementation accumulated every user-turn summary into a single
+	// strings.Builder with no upper bound — a session with thousands of
+	// turns (cron-driven planner sessions, very long support chats) could
+	// drive the builder past hundreds of MiB before downstream
+	// buildExcerpt's per-line cap had a chance to filter anything.  1 MiB
+	// is well above the LLM context the runner consumes downstream
+	// (buildExcerpt + system prompt fit comfortably in tens of KiB), but
+	// keeps the upper-bound predictable so an adversarial / runaway
+	// session can't OOM the daemon.  We append "…" once when the cap
+	// triggers so a downstream reviewer can tell the excerpt was clipped.
+	autoTitlerExcerptSoftCapBytes = 1 << 20 // 1 MiB
 )
 
 // autoTitlerHighwater records when AutoTitler last successfully wrote
@@ -385,10 +399,14 @@ func (a *autoTitler) commitHighwater(writes map[string]autoTitlerHighwater, obse
 // — the title-extraction LLM only needs to see what the user asked,
 // because the title reflects user intent, not assistant output.
 //
-// Long conversations are NOT truncated: the operator asked for "全局
-// review" and we honour it. Per-line cap (autoTitlerLineCapBytes) is
-// still enforced inside buildExcerpt below as the last prompt-injection
-// defence.
+// Long conversations are clipped at autoTitlerExcerptSoftCapBytes (1 MiB)
+// — R238-GO-15 (#806).  Per-line cap (autoTitlerLineCapBytes) is also
+// enforced inside buildExcerpt below as the last prompt-injection defence,
+// but the softcap here protects against thousands-of-turns sessions
+// where the *number* of lines (not any single line) would push memory
+// usage past the daemon's budget.  We stop appending once the cap is
+// reached and tag the truncation with a single "…" marker so a
+// downstream operator reviewing the prompt can tell content was clipped.
 func buildExcerptFromHistory(entries []cli.EventEntry) string {
 	if len(entries) == 0 {
 		return ""
@@ -401,6 +419,26 @@ func buildExcerptFromHistory(entries []cli.EventEntry) string {
 		s := strings.TrimSpace(e.Summary)
 		if s == "" {
 			continue
+		}
+		// Reserve 1 byte for the leading newline (when sb is non-empty)
+		// plus the rune width of the trailing "…" marker so the cap is
+		// never exceeded on the wire.  We compare against the projected
+		// post-write size to avoid the off-by-one where a single
+		// oversized entry would slip through because the pre-write
+		// length was still under the cap.
+		need := len(s)
+		if sb.Len() > 0 {
+			need++ // newline
+		}
+		if sb.Len()+need > autoTitlerExcerptSoftCapBytes {
+			// Tag truncation with a single ellipsis so the LLM sees a
+			// visible cut.  The line-cap pass downstream tolerates the
+			// "…" rune (it's not a control character).
+			if sb.Len() > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString("…")
+			break
 		}
 		if sb.Len() > 0 {
 			sb.WriteByte('\n')

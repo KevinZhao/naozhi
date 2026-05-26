@@ -408,6 +408,39 @@ func TestBuildExcerptFromHistory(t *testing.T) {
 	}
 }
 
+// TestBuildExcerptFromHistory_SoftCap verifies R238-GO-15 (#806):
+// thousands-of-turns sessions can no longer drive the builder past
+// autoTitlerExcerptSoftCapBytes.  We feed entries whose summed length
+// exceeds the cap and assert the result stays bounded and ends with the
+// truncation marker.
+func TestBuildExcerptFromHistory_SoftCap(t *testing.T) {
+	t.Parallel()
+	// Use a 4 KiB summary repeated enough times to exceed the 1 MiB cap.
+	const perEntry = 4 * 1024
+	bigChunk := strings.Repeat("a", perEntry)
+	// Want at least cap/perEntry + 8 entries so the loop hits the
+	// truncation path and keeps iterating with no further appends.
+	count := (autoTitlerExcerptSoftCapBytes / perEntry) + 8
+	entries := make([]cli.EventEntry, 0, count)
+	for i := 0; i < count; i++ {
+		entries = append(entries, cli.EventEntry{
+			Time: int64(i), Type: "user", Summary: bigChunk,
+		})
+	}
+	got := buildExcerptFromHistory(entries)
+	// Cap is a soft cap: result MUST NOT exceed cap + ellipsis bytes
+	// (the marker is appended once when the cap fires).
+	maxLen := autoTitlerExcerptSoftCapBytes + len("\n…")
+	if len(got) > maxLen {
+		t.Errorf("buildExcerptFromHistory exceeded soft cap: got %d bytes, max %d", len(got), maxLen)
+	}
+	// Truncation marker must be present so downstream review can spot
+	// the cut.  Confirms the break-on-cap branch fired.
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("expected truncation ellipsis at tail, got tail %q", got[max(0, len(got)-32):])
+	}
+}
+
 // TestAutoTitler_PromptIncludesAllUserTurns ensures the rename prompt
 // reviews every user turn in the conversation, not just the LastPrompt
 // cached on SessionSnapshot. The previous implementation only saw the
