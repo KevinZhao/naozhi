@@ -521,7 +521,10 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 
 		// Count accepted messages (post-dedup, post-command-filter). Does not
 		// include slash commands, ignored non-text items, or dedup hits.
+		// Per-Dispatcher counter feeds /health; expvar mirror feeds
+		// /debug/vars. R245-ARCH-36 (#892).
 		d.messageCount.Add(1)
+		dispatchMessageTotal.Add(1)
 
 		// Determine session key and opts via KeyResolver — single source of
 		// truth for project-binding precedence and aliasing-safe ExtraArgs
@@ -873,6 +876,7 @@ func (d *Dispatcher) sendAndReply(
 	result, err := d.caps.Send(ctx, key, sess, text, images, tracker.onEvent)
 	if err != nil {
 		d.replyErrorCount.Add(1)
+		dispatchReplyErrorTotal.Add(1)
 		lg.Error("send to claude", "err", err)
 		// IM path uses the timeout-aware helper (it renders the configured
 		// no-output / total durations in Chinese) and prepends a clock
@@ -904,6 +908,7 @@ func (d *Dispatcher) sendAndReply(
 		}
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, platformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
+			dispatchSendFailTotal.Add(1)
 			lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
 		}
 		return
@@ -1033,6 +1038,7 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 		}
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: chunk}, platformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
+			dispatchSendFailTotal.Add(1)
 			slog.Error("reply chunk failed after retries", "chat", chatID, "chunk", i+1, "err", err)
 		} else {
 			d.markReplySuccess()
