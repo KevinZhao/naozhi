@@ -260,37 +260,55 @@ func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
 // them as positional args made future additions (e.g. a new error-class)
 // risk silent argument-order swaps. Named fields also let tests express
 // intent without reading parameter positions.
+//
+// R246-CR-014 (#757): field ordering is size DESC so the value type packs
+// without intra-struct padding.
+//
+//	snap (jobSnapshot, ~144B incl. *Job/strings/bools — already size-DESC'd)
+//	startedAt (time.Time, 24B)
+//	notifyTo (NotifyTarget, 32B but two strings — keep with strings group)
+//	16B fields (key, runID, trigger=string-typed) grouped
+//	8B pointers (job, lg) trailing
+//
+// Pre-fix order (job → snap → key → lg → notifyTo → runID → startedAt →
+// trigger) interleaved 8-byte pointers and 16-byte strings; on amd64/arm64
+// each layout-mismatched neighbour added 8 bytes of padding, wasting
+// ~16 bytes per executeOpt call (~1Hz × N jobs lifetime).
 type preflightArgs struct {
-	// job 是 freshContextPreflightP0 操作的目标 Job 指针（持有用于
-	// stub-refresh 闭包），调用前 caller 已 snapshot；preflight 不会修改
-	// *Job 字段，但失败分支会通过 finishArgs.job 把它转交给 finishRun。
-	job *Job
 	// snap 是 snapshotJob 拷贝出的快照（fresh / workDir / prompt /
 	// jobID / labelOrID）。preflight 优先读 snap 而非 *job，避免与并发
-	// DeleteJob/PauseJob 起读写竞争。
+	// DeleteJob/PauseJob 起读写竞争。Largest field — leads the struct so
+	// no 8B head pads it down to a 16B / 24B boundary.
 	snap jobSnapshot
-	// key 是 router GetOrCreate / Reset 用到的 session key
-	// （`cron:<jobID>` 形式）。fresh 路径 Reset 该 key 后再让 caller
-	// 重新 GetOrCreate，确保新 CLI 进程接管。
-	key string
-	// lg 是带 jobID/runID 标签的 slog.Logger，preflight 自身只输出
-	// info/warn 不输出 error（error 由 finishRun 的 errMsg 落盘统一处理）。
-	lg *slog.Logger
-	// notifyTo 是 fresh-preflight 工作目录不可达分支用来回写
-	// 「[Cron …] 工作目录不可达」中文提示的目标；其它失败分支不通知，
-	// 因为「shutdown / Reset 失败」对终端用户没有可操作信号。
-	notifyTo NotifyTarget
-	// runID 是 caller 已生成的 16-char hex 运行 ID。失败分支转给
-	// finishRun，使 cron_run_ended 与 cron_run_started 配对（emitOverlapSkipped
-	// 同样模式）。
-	runID string
 	// startedAt 是 caller 进入 executeOpt 时记录的 wall-clock 起点；
 	// finishRun 据此算 durationMS。preflight 失败也保留这个起点而非
 	// 重新 time.Now()，让 dashboard 看到真实的"从触发到放弃"时长。
 	startedAt time.Time
+	// notifyTo 是 fresh-preflight 工作目录不可达分支用来回写
+	// 「[Cron …] 工作目录不可达」中文提示的目标；其它失败分支不通知，
+	// 因为「shutdown / Reset 失败」对终端用户没有可操作信号。Two strings
+	// = 32B; sits with the 16B string-shaped fields below.
+	notifyTo NotifyTarget
+	// key 是 router GetOrCreate / Reset 用到的 session key
+	// （`cron:<jobID>` 形式）。fresh 路径 Reset 该 key 后再让 caller
+	// 重新 GetOrCreate，确保新 CLI 进程接管。
+	key string
+	// runID 是 caller 已生成的 16-char hex 运行 ID。失败分支转给
+	// finishRun，使 cron_run_ended 与 cron_run_started 配对（emitOverlapSkipped
+	// 同样模式）。
+	runID string
 	// trigger 区分 TriggerScheduled / TriggerManual；deliverNotice 与
-	// dashboard run timeline 对二者渲染不同图标。
+	// dashboard run timeline 对二者渲染不同图标。Underlying type string
+	// (16B) — packs with key/runID.
 	trigger TriggerKind
+	// job 是 freshContextPreflightP0 操作的目标 Job 指针（持有用于
+	// stub-refresh 闭包），调用前 caller 已 snapshot；preflight 不会修改
+	// *Job 字段，但失败分支会通过 finishArgs.job 把它转交给 finishRun。
+	// 8B trailing — pointers grouped at the end.
+	job *Job
+	// lg 是带 jobID/runID 标签的 slog.Logger，preflight 自身只输出
+	// info/warn 不输出 error（error 由 finishRun 的 errMsg 落盘统一处理）。
+	lg *slog.Logger
 }
 
 // freshContextPreflightP0 handles the fresh-mode prologue: ctx-cancel guard
