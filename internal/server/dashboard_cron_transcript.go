@@ -99,11 +99,17 @@ const (
 	maxToolInputBytes = 64 * 1024
 
 	// summariseInputCap is the upper byte limit for a tool_use.Input we
-	// will feed to json.Unmarshal in summariseToolInput. Matches
-	// maxToolInputBytes (the wire payload cap): an input larger than the
-	// rendered slice cannot contribute a useful one-line label, and we
-	// avoid handing oversize blobs to the JSON parser. R242-SEC-13 (#645).
-	summariseInputCap = maxToolInputBytes
+	// will feed to json.Unmarshal in summariseToolInput. Sits between
+	// maxToolInputBytes (the wire payload cap, 64 KB) and
+	// maxTranscriptLineBytes (the bufio.Scanner line cap, 256 KB) so
+	// the contract documented on TestFlattenAssistantEvent_ToolInputSizeCap
+	// still holds — a tool_use.Input slightly larger than the wire cap
+	// (where the wire payload becomes "[truncated]") can still surface a
+	// probe-derived one-line summary. Inputs above this cap are rejected
+	// before json.Unmarshal so a hostile transcript line cannot drive the
+	// parser through a 256 KB deeply-nested blob just to populate a
+	// 200-byte label. R242-SEC-13 (#645).
+	summariseInputCap = 2 * maxToolInputBytes
 
 	// transcriptRunningSlackMS is the slack added to "now" when computing
 	// the upper bound of the time window for a still-running cron run.
