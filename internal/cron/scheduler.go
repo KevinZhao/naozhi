@@ -1198,7 +1198,17 @@ type slogPrintfLogger struct{}
 const cronPanicMarker = "panic"
 
 func (slogPrintfLogger) Printf(format string, args ...any) {
-	msg := fmt.Sprintf(format, args...)
+	// R250-CR-15 (#1148): skip fmt.Sprintf when there are no args. Saves
+	// an alloc per emitted line and avoids passing untrusted format
+	// verbs through the formatter (robfig/cron's PrintfLogger.Error and
+	// Info both call Printf with the message as the first arg, which
+	// can contain user-controlled content like cron spec strings).
+	var msg string
+	if len(args) == 0 {
+		msg = format
+	} else {
+		msg = fmt.Sprintf(format, args...)
+	}
 	msg = strings.TrimRight(msg, "\n")
 	if strings.Contains(msg, cronPanicMarker) {
 		slog.Error("cron logger", "msg", msg)
