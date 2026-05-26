@@ -27,6 +27,22 @@ import (
 	"time"
 )
 
+// WithStopBudget shortens stopBudget for the duration of the test and
+// returns a restore func intended for t.Cleanup. Centralising the swap
+// here keeps the racy direct-write pattern off the call sites and gives
+// future maintainers a single seam to migrate to a Scheduler-field
+// design (the long-term direction noted on gcWaitBudget) without
+// touching every test. R247-CR-18.
+//
+// DEADCODE-24 (#1216): moved from scheduler.go to a _test.go file so
+// this test seam no longer occupies production binary surface area.
+// Same package keeps the unexported `stopBudget` reachable.
+func WithStopBudget(d time.Duration) func() {
+	orig := stopBudget
+	stopBudget = d
+	return func() { stopBudget = orig }
+}
+
 // withShortStopBudget shortens stopBudget for the duration of a test and
 // restores the original on cleanup. R247-CR-18: routed through
 // WithStopBudget so the var swap + restore stays paired in one place,
