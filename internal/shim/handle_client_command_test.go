@@ -18,7 +18,7 @@ func TestHandleClientCommand_OversizeWriteDisconnects(t *testing.T) {
 	// any attempt to deref would panic the test cleanly).
 	msg := ClientMsg{
 		Type: "write",
-		Line: strings.Repeat("x", maxWriteLineBytes+1),
+		Line: strings.Repeat("x", int(maxWriteLineBytesValue())+1),
 	}
 	if got := s.handleClientCommand(msg); !got {
 		t.Fatalf("oversize write should request disconnect, got false")
