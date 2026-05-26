@@ -1003,8 +1003,16 @@ func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, re
 	// allow-same-origin), NOT from CSP — script execution here cannot read
 	// dashboard cookies regardless. Removing 'unsafe-inline' would silently
 	// break inline math rendering with no security benefit.
+	// R245-SEC-10 (#833): img-src previously included 'self' which let a
+	// rendered HTML / SVG payload issue image requests back to the dashboard
+	// origin (server-side probe / phone-home oracle even though scripts run
+	// in an opaque blob origin — <img> errors / load timing leak through
+	// onerror / Resource Timing API regardless of opaque origin). Drop
+	// 'self' so only inline / blob / data URLs render; the iframe is sourced
+	// from a blob URL that has no usable base path so 'self' was already
+	// dead for legitimate workspace resource references.
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; sandbox allow-scripts; script-src 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'unsafe-inline'; img-src 'self' data: blob:; font-src data:")
+		"default-src 'none'; sandbox allow-scripts; script-src 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'unsafe-inline'; img-src data: blob:; font-src data:")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	// Workspace bytes must not sit in shared proxy caches under no-auth
