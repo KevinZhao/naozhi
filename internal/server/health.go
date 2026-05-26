@@ -192,6 +192,17 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Uptime: time.Since(h.startedAt).Round(time.Second).String(),
 	}
 	if !h.auth.isAuthenticated(r) {
+		// R246-SEC-11: rate-limit the unauth branch so a sustained
+		// scanner cannot mine the Uptime field for restart timing
+		// (which fingerprints deployment cadence even though it stays
+		// out of the auth-only sub-section). Reuses the same per-IP
+		// limiter that gates GET /dashboard for unauth GETs — one
+		// budget across the unauthenticated probe surface.
+		if !h.auth.unauthDashAllow(clientIP(r, h.auth.trustedProxy)) {
+			w.Header().Set("Retry-After", "60")
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
 		writeJSON(w, resp)
 		return
 	}
