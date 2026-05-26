@@ -77,6 +77,26 @@ type SessionRouter interface {
 	// 查到上一次成功运行留下的 JSONL 历史
 	// （~/.claude/projects/<cwd>/<id>.jsonl）。chainIDs 为空 / nil 时
 	// 等同于无链 stub 注册。
+	//
+	// R242-ARCH-26 (#768): from cron's side every caller (registerStubByValue
+	// at scheduler.go) builds at most a 1-element slice — `[]string{lastSessionID}`
+	// when lastSessionID != "" else nil. The slice signature is preserved for two
+	// reasons:
+	//
+	//  1. session.Router (the implementer) consumes chainIDs as a generic
+	//     prevSessionIDs link to support non-cron callers in the future
+	//     (e.g. workspace-chain bind on user sessions). Collapsing the cron
+	//     interface to (chainID string) would force a parallel signature on
+	//     the session side or a slice rebuild at every cross-package call —
+	//     net zero ergonomics improvement, plus a wider API surface.
+	//  2. The empty / nil branch is a meaningful "no chain" signal that a
+	//     scalar string would have to overload onto "" (which is also
+	//     ambiguous with "lastSessionID was set but is empty" — a state we
+	//     never want to enter, but couldn't structurally rule out).
+	//
+	// If a future cron caller legitimately needs a multi-step chain (e.g.
+	// daisy-chained fresh_context resets that want to preserve N>1 generations
+	// of JSONL history), the slice already supports it — no signature change.
 	RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string)
 	// Reset discards the session for the given key (used by fresh-mode
 	// cron jobs and by Delete/Rename flows).
