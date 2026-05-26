@@ -479,7 +479,8 @@ button:hover{background:#3a8eef}button:active{background:#2a7edf}
 <div class="login">
 <h1>naozhi</h1>
 <p>enter token to continue</p>
-<form id="login-form" action="/dashboard" method="POST" autocomplete="on">
+<noscript><p style="color:#ef4444;font-size:.85rem;margin-bottom:1rem">JavaScript is required to sign in.</p></noscript>
+<form id="login-form" action="javascript:void(0)" method="POST" autocomplete="on">
 <input type="text" name="username" autocomplete="username" value="naozhi" tabindex="-1" aria-hidden="true">
 <label for="token" style="position:absolute;left:-9999px">dashboard token</label>
 <input type="password" name="token" id="token" autocomplete="current-password" placeholder="dashboard token" aria-label="dashboard token" autofocus>

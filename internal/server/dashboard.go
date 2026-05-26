@@ -506,6 +506,18 @@ func (s *Server) registerDashboard() {
 	// Unauthenticated routes (login, static assets, WebSocket with own auth)
 	s.mux.HandleFunc("POST /api/auth/login", s.auth.handleLogin)
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
+	// R243-SEC-15 (#800): the login form's HTML5 fallback used to action="/dashboard"
+	// which would POST the token in the body to the dashboard handler when JS was
+	// disabled or the JS handler crashed. The form action is now javascript:void(0)
+	// so the browser cannot submit without JS, but defensively reject any POST that
+	// still slips through (older cached login pages, hand-crafted clients) without
+	// reading or echoing the body — http.Error never reflects request data, and we
+	// never call ParseForm/decodeJSONBody so the token bytes are discarded by the
+	// kernel without ever entering our address space.
+	s.mux.HandleFunc("POST /dashboard", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "POST not supported; sign in via the login form (JavaScript required)", http.StatusMethodNotAllowed)
+	})
 	s.mux.HandleFunc("GET /manifest.json", s.handleManifest)
 	s.mux.HandleFunc("GET /sw.js", s.handleSW)
 	s.mux.HandleFunc("GET /static/dashboard.js", s.handleDashboardJS)
