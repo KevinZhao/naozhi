@@ -716,6 +716,53 @@ func TestRedactPathsInCronError_PoolRecycle(t *testing.T) {
 	}
 }
 
+// TestRedactPathsInCronError_FastPathNoAlloc pins R250-PERF-12 / #1115:
+// short error-classifier strings with no path-trigger byte must hit the
+// zero-alloc fast path — no truncate copy, no Builder pool. The aliased
+// return value must share the input's backing bytes (verified via the
+// allocs/op accounting from testing.AllocsPerRun, which tolerates one
+// alloc for the closure capture). Anything > 0 base allocs would mean a
+// regression back to the slow path.
+func TestRedactPathsInCronError_FastPathNoAlloc(t *testing.T) {
+	// No t.Parallel(): testing.AllocsPerRun panics if invoked from a
+	// parallel test (Go runtime needs exclusive GC quiescence to count).
+	in := "session error: context deadline exceeded"
+	got := redactPathsInCronError(in)
+	if got != in {
+		t.Fatalf("fast path must return input unchanged: got %q, want %q", got, in)
+	}
+	// AllocsPerRun returns the *additional* allocs caused by f beyond the
+	// closure overhead; for a true zero-alloc body this is 0.
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = redactPathsInCronError(in)
+	})
+	if allocs != 0 {
+		t.Errorf("fast path allocated %v times per run, want 0", allocs)
+	}
+}
+
+// TestRedactPathsInCronError_FastPathLengthBoundary pins the 256-byte
+// ceiling on the zero-alloc fast path: an input at exactly the cap with
+// no path triggers must still take the fast path; one byte over and a
+// no-path input falls through to the secondary IndexByte branch (also
+// returns input, just past the truncate guard). R250-PERF-12 / #1115.
+func TestRedactPathsInCronError_FastPathLengthBoundary(t *testing.T) {
+	t.Parallel()
+	atCap := strings.Repeat("a", redactFastPathMaxLen)
+	if got := redactPathsInCronError(atCap); got != atCap {
+		t.Errorf("at-cap input mutated: len(got)=%d, len(want)=%d", len(got), len(atCap))
+	}
+	overCap := strings.Repeat("b", redactFastPathMaxLen+1)
+	if got := redactPathsInCronError(overCap); got != overCap {
+		t.Errorf("over-cap no-path input mutated: len(got)=%d, len(want)=%d", len(got), len(overCap))
+	}
+	// Path triggers must always reach the slow path even when short.
+	withPath := "open /tmp/x: denied"
+	if got := redactPathsInCronError(withPath); got != "open <path>: denied" {
+		t.Errorf("short path not redacted: got %q", got)
+	}
+}
+
 // TestSchedulerMaxJobsPerChat pins the per-chat cap wiring — default
 // path, override path, and the zero-means-default fallback. R208-BL2.
 func TestSchedulerMaxJobsPerChat(t *testing.T) {

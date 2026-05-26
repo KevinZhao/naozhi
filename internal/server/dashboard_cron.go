@@ -353,6 +353,33 @@ type cronRunsListResp struct {
 	NextBefore int64                `json:"next_before,omitempty"`
 }
 
+// cronPreviewResp is the wire shape returned by GET /api/cron/preview.
+// Replaces an inline map[string]any so the JSON encoder can cache the
+// reflect descriptor and field names are enforced at compile time
+// (R250-CR-25). The "valid: false" branch carries only Error; the
+// success branch carries Timezone (+ optional TimezoneLabel) and, when
+// the parser produced runs, NextRun and NextRuns. omitempty keeps the
+// on-the-wire shape identical to the previous map[string]any output —
+// dashboard.js cronPreviewJob still reads `valid` / `error` /
+// `timezone` / `timezone_label` / `next_run` / `next_runs` unchanged.
+type cronPreviewResp struct {
+	Valid         bool    `json:"valid"`
+	Error         string  `json:"error,omitempty"`
+	Timezone      string  `json:"timezone,omitempty"`
+	TimezoneLabel string  `json:"timezone_label,omitempty"`
+	NextRun       int64   `json:"next_run,omitempty"`
+	NextRuns      []int64 `json:"next_runs,omitempty"`
+}
+
+// cronUpdateResp is the wire shape returned by PATCH /api/cron. Replaces
+// an inline map[string]any so the field names are compile-checked
+// (R250-CR-24). Status is always "ok" on the success path; ID echoes the
+// canonical job ID resolved by UpdateJob.
+type cronUpdateResp struct {
+	Status string `json:"status"`
+	ID     string `json:"id"`
+}
+
 // validateCronBackend enforces the shared shape contract for the
 // dashboard-picked backend override on cron jobs:
 //   - empty is OK (router default fallback at execute time);
@@ -634,6 +661,18 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
+// httpErrPersistFailed writes the standard 500 body for the "in-memory
+// mutation succeeded but on-disk persist failed" case. The five cron
+// write handlers (create / delete / pause / resume / update) all surface
+// cron.ErrPersistFailed identically — same status, same wording with
+// only the verb differing — so the literal had drifted across five
+// copy-paste sites. Centralising the format keeps the wording in one
+// place and stops a future copy from accidentally diverging the
+// operator-visible string. R250-CR-20.
+func httpErrPersistFailed(w http.ResponseWriter, op string) {
+	http.Error(w, "job "+op+" but not persisted; please check server logs", http.StatusInternalServerError)
+}
+
 // POST /api/cron — create a new cron job from dashboard.
 func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if h.scheduler == nil {
@@ -760,7 +799,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// successful 2xx that won't survive a restart. R51-QUAL-001.
 		if errors.Is(err, cron.ErrPersistFailed) {
 			slog.Error("cron AddJob persisted in-memory but store write failed", "err", err, "id", job.ID)
-			http.Error(w, "job created but not persisted; please check server logs", http.StatusInternalServerError)
+			httpErrPersistFailed(w, "created")
 			return
 		}
 		// robfig/cron parser errors can mention internal field offsets and
@@ -813,7 +852,7 @@ func (h *CronHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 			// 500 alerts the operator to inspect logs instead of treating
 			// the delete as quietly successful. R51-QUAL-001.
 			slog.Error("cron DeleteJobByID deletion not persisted", "err", err, "id", id)
-			http.Error(w, "job deleted but not persisted; please check server logs", http.StatusInternalServerError)
+			httpErrPersistFailed(w, "deleted")
 		default:
 			slog.Debug("cron delete failed", "err", err)
 			http.Error(w, "delete failed", http.StatusBadRequest)
@@ -860,7 +899,7 @@ func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "job already paused", http.StatusConflict)
 		case errors.Is(err, cron.ErrPersistFailed):
 			slog.Error("cron PauseJobByID pause not persisted", "err", err, "id", req.ID)
-			http.Error(w, "job paused but not persisted; please check server logs", http.StatusInternalServerError)
+			httpErrPersistFailed(w, "paused")
 		default:
 			slog.Debug("cron pause failed", "err", err)
 			http.Error(w, "pause failed", http.StatusBadRequest)
@@ -905,7 +944,7 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "job not paused", http.StatusConflict)
 		case errors.Is(err, cron.ErrPersistFailed):
 			slog.Error("cron ResumeJobByID resume not persisted", "err", err, "id", req.ID)
-			http.Error(w, "job resumed but not persisted; please check server logs", http.StatusInternalServerError)
+			httpErrPersistFailed(w, "resumed")
 		default:
 			slog.Debug("cron resume failed", "err", err)
 			http.Error(w, "resume failed", http.StatusBadRequest)
@@ -1038,24 +1077,22 @@ func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 		// and internal token names that help an attacker enumerate accepted
 		// grammar. Log the detail for operators instead.
 		slog.Debug("cron preview parse failed", "err", err)
-		writeJSON(w, map[string]any{"valid": false, "error": "invalid schedule expression"})
+		writeJSON(w, cronPreviewResp{Valid: false, Error: "invalid schedule expression"})
 		return
 	}
 
-	resp := map[string]any{
-		"valid":    true,
-		"timezone": tzName,
-	}
-	if tzLabel != "" {
-		resp["timezone_label"] = tzLabel
+	resp := cronPreviewResp{
+		Valid:         true,
+		Timezone:      tzName,
+		TimezoneLabel: tzLabel, // omitempty drops the empty-zone case
 	}
 	if len(runs) > 0 {
-		resp["next_run"] = runs[0].UnixMilli()
+		resp.NextRun = runs[0].UnixMilli()
 		nextRuns := make([]int64, len(runs))
 		for i, t := range runs {
 			nextRuns[i] = t.UnixMilli()
 		}
-		resp["next_runs"] = nextRuns
+		resp.NextRuns = nextRuns
 	}
 	writeJSON(w, resp)
 }
@@ -1237,7 +1274,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "job not found", http.StatusNotFound)
 		case errors.Is(err, cron.ErrPersistFailed):
 			slog.Error("cron UpdateJob update not persisted", "err", err, "id", id)
-			http.Error(w, "job updated but not persisted; please check server logs", http.StatusInternalServerError)
+			httpErrPersistFailed(w, "updated")
 		default:
 			// Sanitize: the underlying parser error can leak internal field
 			// names and offsets if the new schedule is rejected.
@@ -1248,7 +1285,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job updated via dashboard", "id", j.ID)
-	writeJSON(w, map[string]any{"status": "ok", "id": j.ID})
+	writeJSON(w, cronUpdateResp{Status: "ok", ID: j.ID})
 }
 
 // formatTZOffset renders a timezone label like "Asia/Shanghai (UTC+08:00)" or
