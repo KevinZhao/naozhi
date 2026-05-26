@@ -1002,7 +1002,22 @@ func TestProcess_InjectHistory(t *testing.T) {
 		t.Errorf("EventEntriesSince(1500) = 0, want >= 1")
 	}
 
-	last := p.lastEntryOfType("user")
+	// Inline backward scan: production never needed lastEntryOfType, the
+	// helpers were retired in DEADCODE-8. The test still needs the same
+	// "find the most recent entry of type X" semantic to validate the
+	// EventLog ring buffer's user-turn bookkeeping.
+	last := func() EventEntry {
+		l := p.eventLog
+		l.mu.RLock()
+		defer l.mu.RUnlock()
+		for i := l.count - 1; i >= 0; i-- {
+			idx := (l.head - l.count + i + l.maxSize) % l.maxSize
+			if l.entries[idx].Type == "user" {
+				return l.entries[idx]
+			}
+		}
+		return EventEntry{}
+	}()
 	if last.Type != "user" {
 		t.Errorf("lastEntryOfType(user).Type = %q, want user", last.Type)
 	}

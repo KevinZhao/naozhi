@@ -189,16 +189,6 @@ func (p *Process) EventEntriesBefore(beforeMS int64, limit int) []EventEntry {
 	return p.eventLog.EntriesBefore(beforeMS, limit)
 }
 
-// lastEntryOfType returns the most recent event entry with the given type.
-// Package-private because no production code outside cli reads this — the
-// only consumers are the cli package's own tests. Keeping the method
-// unexported avoids enlarging the processIface surface for a probe that
-// has never been needed by the dashboard / server / dispatch layers.
-// (R228-CR-4)
-func (p *Process) lastEntryOfType(typ string) EventEntry {
-	return p.eventLog.lastEntryOfType(typ)
-}
-
 // TurnAgents returns the sub-agent types spawned in the current turn.
 func (p *Process) TurnAgents() []SubagentInfo {
 	return p.eventLog.TurnAgents()
