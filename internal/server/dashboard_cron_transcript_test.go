@@ -302,6 +302,50 @@ func TestTranscript_TimeWindowFilter_DropsOlderTurns(t *testing.T) {
 	}
 }
 
+// TestTranscript_FreshFalse_DropsTimestampLessEvents pins R240-SEC-15 /
+// #1046: in fresh=false mode (shared JSONL across cron runs) any event
+// without an explicit timestamp must NOT be returned, because the
+// time-window gate cannot attribute it to a specific run and an
+// adjacent-run "queue-operation" / untimestamped attachment would
+// otherwise leak into this run's transcript.
+func TestTranscript_FreshFalse_DropsTimestampLessEvents(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	inside := now.Add(-30 * time.Second).Format(time.RFC3339Nano)
+
+	// Mix of dated (in-window) + un-dated events. Un-dated events must
+	// be dropped because run.Fresh defaults to false in the fixture.
+	lines := []string{
+		`{"type":"user","timestamp":"` + inside + `","message":{"role":"user","content":"in-window prompt"}}`,
+		`{"type":"assistant","timestamp":"` + inside + `","message":{"role":"assistant","content":[{"type":"text","text":"in-window reply"}]}}`,
+		// Un-dated user event with content that would betray a leak if
+		// it accidentally surfaced. In fresh=false mode this is
+		// indistinguishable from "from an adjacent run".
+		`{"type":"user","message":{"role":"user","content":"LEAKED_FROM_ADJACENT_RUN"}}`,
+		// Un-dated assistant event likewise.
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"LEAKED_REPLY"}]}}`,
+	}
+	h, jobID, runID, _ := fixtureRunWithJSONL(t, lines)
+
+	w := callTranscript(h, jobID, runID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var resp transcriptResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	for _, tr := range resp.Turns {
+		if strings.Contains(tr.Text, "LEAK") {
+			t.Errorf("fresh=false leaked timestamp-less turn %q (R240-SEC-15)", tr.Text)
+		}
+	}
+	// In-window turns must still appear.
+	if len(resp.Turns) == 0 {
+		t.Error("all turns dropped — expected the in-window pair to survive")
+	}
+}
+
 func TestTranscript_RejectsSymlinkEscape(t *testing.T) {
 	t.Parallel()
 	h, jobID, runID, claudeDir := fixtureRunWithJSONL(t, []string{

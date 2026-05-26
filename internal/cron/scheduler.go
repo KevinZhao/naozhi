@@ -648,6 +648,23 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	// hot path in marshalJobsLocked finds defaultMarshalJobs instead of
 	// nil. Tests swap a failing stub via withFailingMarshal.
 	s.marshalJobs.Store(&defaultMarshalJobs)
+	// R238-SEC-12 (#834): close the startup permission window. The
+	// storeDirOnce gate in saveMarshaledSeq only fires on the *first*
+	// save, so between process start and that first mutation the parent
+	// data dir keeps whatever mode it inherited from XDG (often 0o755) —
+	// a local attacker could enumerate cron_jobs.json's existence /
+	// mtime in that window. Run the same MkdirAll(0o700) eagerly at
+	// construction; once.Do later in saveMarshaledSeq becomes a no-op,
+	// so the hot-path cost is unchanged.
+	if cfg.StorePath != "" {
+		s.storeDirOnce.Do(func() {
+			if dir := filepath.Dir(cfg.StorePath); dir != "" && dir != "." {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					slog.Warn("cron store parent dir mkdir failed (eager)", "err", err, "dir", dir)
+				}
+			}
+		})
+	}
 	return s
 }
 
