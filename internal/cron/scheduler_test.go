@@ -595,6 +595,38 @@ func TestNewScheduler_StoreParentDirHardenedEagerly(t *testing.T) {
 	}
 }
 
+// TestNewScheduler_StoreParentDirChmodsExisting covers R238-SEC-10 (#830):
+// when the parent data dir ALREADY EXISTS at a broader perm (0o755 from
+// XDG_CONFIG_HOME or a manual mkdir), MkdirAll is a no-op on the perm —
+// the broader bits persist and other local users can list the data dir's
+// contents (confirming cron_jobs.json's existence + mtime). The chmod
+// follow-up clamps the dir to 0o700 unconditionally at construction.
+func TestNewScheduler_StoreParentDirChmodsExisting(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "data")
+	// Pre-create the dir at 0o755 — emulates the operator running
+	// `mkdir -p ~/.config/naozhi` with default umask 022.
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatalf("pre-mkdir: %v", err)
+	}
+	// Defensive: umask may have stripped bits; force the broad perms.
+	if err := os.Chmod(parent, 0o755); err != nil {
+		t.Fatalf("pre-chmod: %v", err)
+	}
+	path := filepath.Join(parent, "cron.json")
+
+	_ = NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5})
+
+	fi, err := os.Stat(parent)
+	if err != nil {
+		t.Fatalf("stat parent dir: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o700 {
+		t.Errorf("parent dir perm = %o, want 0o700 (chmod must clamp pre-existing 0o755)", got)
+	}
+}
+
 func TestSchedulerPersistence(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
