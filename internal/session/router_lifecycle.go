@@ -389,6 +389,16 @@ type spawnParams struct {
 // process spawn — a test can exercise the merge rules without standing up
 // wrappers or filesystems beyond what resolveResumeID already needs.
 //
+// CONTRACT (R222-ARCH-12 / #735): this function is the SINGLE source of
+// truth for workspace + backend + model + args + resumeID resolution.
+// Earlier rounds had the same precedence rules copy-pasted across
+// spawnSession / Resume / ResetAndRecreate; pinning the merge here keeps
+// reset/recreate/resume from drifting. Any new spawn-adjacent path
+// (Takeover, Reattach, etc.) MUST route through this function rather
+// than re-implement the precedence inline. workspace_resolver_contract_test.go
+// guards the invariant by asserting exactly one `workspace = opts.Workspace`
+// site survives in router_lifecycle.go.
+//
 // LOCK: caller must hold r.mu for writing.
 func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) spawnParams {
 	// Backend pick precedence (highest to lowest):
