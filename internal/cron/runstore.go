@@ -363,6 +363,13 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *run
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		slog.Warn("cron run: mkdir root failed", "root", root, "err", err)
 	}
+	// R238-SEC-12 (#834) 的 runs/ 镜像：MkdirAll 在目录已存在时不会改权限，
+	// 一个由前一版本（或 operator 手工 mkdir）以 0o755 留下的 runs/ 会让
+	// 其他本地用户列举 jobID 子目录名。Chmod follow-up 把已存在目录也夹到
+	// 0o700。失败非致命：runs/ 子目录的 0o700 仍是磁盘记录的最终屏障。
+	if err := os.Chmod(root, 0o700); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		slog.Warn("cron run: chmod root failed", "root", root, "err", err)
+	}
 	// R245-SEC-1 (#825): refuse to attach to a runs/ that is a symlink or
 	// other non-directory. MkdirAll does not error when the path already
 	// exists as a symlink to a directory, so without this Lstat an
