@@ -14,7 +14,25 @@ import (
 // alongside the run-ended broadcast.
 func TestR246GO3_FinishRunFinalizesInflightBeforeBroadcast(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}})
+
+	// Capture CurrentRun visibility from inside the broadcaster callback —
+	// the exact concurrency window the issue describes. Phase D (RFC §3.5)
+	// migrated SetOnRunEnded to runtelemetry.Broadcaster; observingBroadcaster
+	// (defined in finishrun_persist_before_emit_test.go) wraps the
+	// callback into the new shape.
+	var sawOK atomic.Bool
+	var sawPhase atomic.Pointer[string]
+	sawOK.Store(true)
+
+	var sched *Scheduler
+	cfg := SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, Telemetry: observingBroadcaster{onEnded: func() {
+		v, ok := sched.CurrentRun("job-finalize")
+		sawOK.Store(ok)
+		phase := v.Phase
+		sawPhase.Store(&phase)
+	}}}
+	sched = NewScheduler(cfg)
+	s := sched
 
 	j := &Job{ID: "job-finalize", Schedule: "@every 5m"}
 	s.mu.Lock()
@@ -37,18 +55,6 @@ func TestR246GO3_FinishRunFinalizesInflightBeforeBroadcast(t *testing.T) {
 	if v, ok := inflight.snapshot(); !ok || v.Phase != PhaseSpawning {
 		t.Fatalf("pre-finish snapshot want Spawning/ok=true, got %+v ok=%v", v, ok)
 	}
-
-	// Capture CurrentRun visibility from inside the OnRunEnded callback —
-	// the exact concurrency window the issue describes.
-	var sawOK atomic.Bool
-	var sawPhase atomic.Pointer[string]
-	sawOK.Store(true)
-	s.SetOnRunEnded(func(ev RunEndedEvent) {
-		v, ok := s.CurrentRun(j.ID)
-		sawOK.Store(ok)
-		phase := v.Phase
-		sawPhase.Store(&phase)
-	})
 
 	finalizer := &runFinalizer{inflight: inflight}
 	s.finishRun(finishArgs{

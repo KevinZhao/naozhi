@@ -50,7 +50,9 @@ const (
 )
 
 // Session is the minimum surface cron needs from a live router-spawned
-// session: send a turn and (when deadline fires) interrupt. Cron does
+// session: send a turn, query the running CLI session id (so the
+// inflight broadcast can fill in SessionID before Send returns —
+// fix(cron) #766), and (when deadline fires) interrupt. Cron does
 // NOT use attachments or per-turn event callbacks today; if that ever
 // changes, add fields here then.
 //
@@ -58,6 +60,7 @@ const (
 // cmd/naozhi/cron_router_adapter.go cronSessionAdapter.
 type Session interface {
 	Send(ctx context.Context, text string) (SendResult, error)
+	SessionID() string
 	InterruptViaControl() InterruptOutcome
 }
 

@@ -43,6 +43,12 @@ func (s realSessionAdapter) Send(ctx context.Context, text string) (SendResult, 
 	}
 	return SendResult{Text: r.Text, SessionID: r.SessionID}, err
 }
+func (s realSessionAdapter) SessionID() string {
+	if s.s == nil {
+		return ""
+	}
+	return s.s.SessionID()
+}
 func (s realSessionAdapter) InterruptViaControl() InterruptOutcome {
 	return InterruptOutcome(int(s.s.InterruptViaControl()))
 }

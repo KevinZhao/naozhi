@@ -118,6 +118,18 @@ func (c cronSessionAdapter) Send(ctx context.Context, text string) (cron.SendRes
 	return cron.SendResult{Text: r.Text, SessionID: r.SessionID}, err
 }
 
+// SessionID forwards to *session.ManagedSession.SessionID so the cron
+// inflight broadcast can fill in the running CLI session id mid-Send.
+// Mirrors fix(cron) #766 (commits 53981bf2 / 49bf32de) which the
+// pre-Phase-B code reached via the *session.ManagedSession concrete
+// type — the cron-local Session interface now exposes the same hook.
+func (c cronSessionAdapter) SessionID() string {
+	if c.s == nil {
+		return ""
+	}
+	return c.s.SessionID()
+}
+
 func (c cronSessionAdapter) InterruptViaControl() cron.InterruptOutcome {
 	return cron.InterruptOutcome(int(c.s.InterruptViaControl()))
 }

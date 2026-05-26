@@ -28,7 +28,7 @@ func TestEnsureStub_DoesNotHoldOrRequireWriteLock(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{})
 	s := NewScheduler(SchedulerConfig{
-		Router:  router,
+		Router:  realRouterAdapter{r: router},
 		MaxJobs: 10,
 	})
 	if err := s.Start(); err != nil {
@@ -98,7 +98,7 @@ func TestEnsureStub_ConcurrentReadersDoNotSerialise(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{})
 	s := NewScheduler(SchedulerConfig{
-		Router:  router,
+		Router:  realRouterAdapter{r: router},
 		MaxJobs: 10,
 	})
 	if err := s.Start(); err != nil {
