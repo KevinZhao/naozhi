@@ -503,16 +503,23 @@ func NewWithOptions(opts ServerOptions) *Server {
 // NewWithOptions. New callers should use NewWithOptions directly.
 //
 // Deprecated: use NewWithOptions. Production (cmd/naozhi/main.go) already
-// calls NewWithOptions; this signature is kept to avoid churning ~20 test
-// call sites at once — they can migrate in-place at any future touch.
-// Gopls / staticcheck will flag new positional-style call sites so the
-// migration path stays discoverable.
+// calls NewWithOptions; this signature is now referenced ONLY by the two
+// dual-path equivalence call sites in new_options_test.go (verified at
+// build time by TestLegacyServerNew_NoNewCallSites). Gopls / staticcheck
+// will flag new positional-style call sites so the migration surface
+// cannot regrow silently.
 //
-// Removal condition (R214-CODE-4 / R224-CR-5): delete this wrapper once
-// every *_test.go in this package and its consumers calls NewWithOptions
-// directly. Track via `git grep -l "server.New("` returning zero hits.
-// New positional-style call sites should NOT be added — start with
-// NewWithOptions and let this function shrink to test-only legacy.
+// R237-ARCH-14 (#614): the original "20 test call sites" migration backlog
+// is closed — the bulk migration landed via R214-CODE-4 / R224-CR-5, and
+// the regression guard pins the surface at exactly one allow-listed file.
+// The wrapper now exists purely to keep the dual-path equivalence test
+// driving both code paths; deleting it is a one-line change once the
+// equivalence test itself is retired.
+//
+// Removal condition: delete this wrapper together with new_options_test.go's
+// TestNew_PositionalOverridesOptions / TestNewWithOptions_EquivalentToPositional
+// pair when the dual-path test loses its review value (i.e. once
+// NewWithOptions has had no signature change for a release cycle).
 func New(addr string, router *session.Router, platforms map[string]platform.Platform, agents map[string]session.AgentOpts, agentCommands map[string]string, scheduler *cron.Scheduler, backend string, opts ServerOptions) *Server {
 	opts.Addr = addr
 	opts.Router = router
