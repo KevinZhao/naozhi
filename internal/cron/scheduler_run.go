@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	mrand "math/rand/v2"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -57,8 +58,36 @@ const spawnElapsedWarnRatio = 0.5
 // MUST NOT hold its internal cron lock when invoking this (the snapshot →
 // release → executeOpt split exists precisely so executeOpt's long-running
 // send/notify pipeline never runs under s.mu).
+//
+// R238-GO-9 (#801): TriggerNow's goroutine bypasses the robfig/cron chain's
+// Recover wrapper that protects the scheduled-tick path, so a panic in
+// executeOpt would propagate up to the TriggerNow goroutine and kill it
+// (and any inflight defer that hadn't fired yet — the deferred Done in
+// scheduler_jobs.go's TriggerNow closure DOES still fire because it's
+// registered before this call, but the panic surfaces as a runtime crash
+// in the slog of the goroutine that ran it). Recover here so a panicking
+// job fails loud once (Error log + stack) and the surrounding goroutine
+// still completes. The scheduled path keeps robfig's Recover and does NOT
+// pass through this helper — registerJob's AddFunc closure routes through
+// executeJobIDIfLive directly so we don't double-recover.
 func (s *Scheduler) executeIfNotDeletedOrPaused(jobID string) {
+	defer func() {
+		if r := recover(); r != nil {
+			recordTriggerNowPanic(jobID, r)
+		}
+	}()
 	s.executeJobIDIfLive(jobID, true /* viaTriggerNow */, "TriggerNow")
+}
+
+// recordTriggerNowPanic logs a TriggerNow-path panic. Split out of
+// executeIfNotDeletedOrPaused's defer so the recover site stays a one-
+// liner and the formatted-log path is exercisable in tests without
+// deferring inside the test body. R238-GO-9 (#801).
+func recordTriggerNowPanic(jobID string, r any) {
+	slog.Error("TriggerNow: panic recovered, run abandoned",
+		"job_id", jobID,
+		"panic", r,
+		"stack", string(debug.Stack()))
 }
 
 // executeJobIDIfLive is the shared lookup-and-dispatch primitive used by
