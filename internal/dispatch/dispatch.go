@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -448,12 +449,24 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 			"takeover_fn_set", cfg.TakeoverFn != nil,
 			"reply_footer_fn_set", cfg.ReplyFooterFn != nil)
 	}
+	// Defend against the Go typed-nil-interface trap: production wiring
+	// passes Scheduler: *cron.Scheduler, and when cron is disabled that
+	// pointer is nil — but boxed into the CronScheduler interface it is
+	// not == nil. Every slash-command gate uses `d.scheduler != nil`,
+	// so we collapse the typed-nil here exactly once. R250-ARCH-17 (#1178).
+	scheduler := cfg.Scheduler
+	if scheduler != nil {
+		v := reflect.ValueOf(scheduler)
+		if v.Kind() == reflect.Pointer && v.IsNil() {
+			scheduler = nil
+		}
+	}
 	d := &Dispatcher{
 		router:                router,
 		platforms:             cfg.Platforms,
 		agents:                cfg.Agents,
 		agentCommands:         cfg.AgentCommands,
-		scheduler:             cfg.Scheduler,
+		scheduler:             scheduler,
 		projectMgr:            cfg.ProjectMgr,
 		resolver:              resolver,
 		guard:                 cfg.Guard,
