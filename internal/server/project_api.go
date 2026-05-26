@@ -422,8 +422,17 @@ func (h *ProjectHandlers) handlePlannerRestart(w http.ResponseWriter, r *http.Re
 			Workspace: p.Path,
 			Exempt:    true,
 		}
-		if prompt := h.projectMgr.EffectivePlannerPrompt(p); prompt != "" {
-			opts.ExtraArgs = []string{"--append-system-prompt", prompt}
+		// R215-SEC-P1-2 (#535): mirror the resolver path's spawn-boundary
+		// re-validation. EffectivePlannerPrompt re-reads from cached
+		// project.yaml / CLAUDE.md, neither of which guarantees the bytes
+		// still satisfy ValidateConfig — Claude's Write tool can mutate
+		// CLAUDE.md and the next planner restart would inherit the
+		// tampered prompt without this sanitiser. Drop the prompt entirely
+		// when sanitisation fails so the spawn falls through to "no
+		// planner system prompt" rather than feeding control bytes /
+		// oversize argv into the CLI subprocess.
+		if pp := session.SanitisePlannerPromptForSpawn(h.projectMgr.EffectivePlannerPrompt(p), p.Name); pp != "" {
+			opts.ExtraArgs = []string{"--append-system-prompt", pp}
 		}
 	}
 
