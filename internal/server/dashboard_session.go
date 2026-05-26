@@ -255,6 +255,30 @@ func isUnknownRPCMethodErr(err error) bool {
 // methods we actually call rather than the full Scheduler API. Lineage:
 // R228-ARCH-17 (cronStubChecker) → R232-ARCH-7 (cronHubOps) → R245-ARCH
 // (cronSessionLister) → R242-ARCH-13 (CronView).
+//
+// R242-ARCH-28 (#772): EnsureStub returns false in three distinct cases
+// that callers historically had to disambiguate by side-effect:
+//
+//	(a) the key isn't a `cron:` key at all (non-cron caller path —
+//	    legitimate no-op, not a failure);
+//	(b) the cron job ID parsed out of the key is unknown to the scheduler
+//	    (the job was deleted before the dashboard tab re-subscribed);
+//	(c) the job is known but stub-registration failed inside cron
+//	    (unexpected — should be slog'd by the cron implementation).
+//
+// All three currently surface as the same bool, so handleEvents /
+// handleSubscribe cannot tell "this is a non-cron key, behave normally"
+// from "this used to be a cron job, return 404". Today's callers fall
+// through to the existing nil-session 404 in case (b) which happens to
+// be correct, and case (c) is so rare that the absence of a structured
+// reason is acceptable; promoting EnsureStub to (ok bool, reason string)
+// is queued behind the cron→server interface tightening RFC because it
+// breaks every test mock + the *cron.Scheduler concrete signature, and
+// the production behaviour is already correct under the bool-only
+// contract. Reviewers picking up this comment: the proposal is in
+// `docs/review/batch3-B-r241-244-raw.md` under R242-ARCH-28; the
+// ambiguity is documented here so a future caller doesn't accidentally
+// add a bug-prone reason-by-deduction branch over the bool.
 type CronView interface {
 	EnsureStub(key string) bool
 	SetJobPrompt(jobID, prompt string) error
