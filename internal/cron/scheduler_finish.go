@@ -298,6 +298,28 @@ func sanitiseRunErrMsg(s string) string {
 // synthesise a RunID + StartedAt locally; finishRun's skipPersist=true
 // short-circuit keeps the synthetic run off disk (it only exists in the
 // WS broadcast stream).
+//
+// R246-CR-013 (#747): kept as a named function despite having a single
+// call site (executeOpt's CAS-fail branch in scheduler_run.go) for two
+// reasons:
+//
+//  1. The 5-line synthesise-RunID + start + finish dance is a
+//     non-trivial composition over emitRunStarted + finishRun + a
+//     hand-built finishArgs literal. Inlining at the call site would
+//     bury the "skipped runs go through the same lifecycle as real
+//     runs" contract inside the executeOpt function, where it competes
+//     for attention with the run-success/error happy path.
+//  2. Future call sites are anticipated (not hypothetical): when other
+//     CAS-style guards land — e.g. a per-workspace cap that rejects
+//     spawn before reaching the per-job CAS, or a backpressure-driven
+//     manual skip — they will need the same "emit started+ended pair
+//     so subscriber timelines stay consistent" semantics. Having the
+//     helper avoid copy-pasting the 5-line dance across each future
+//     guard preserves the single-place edit point for the lifecycle
+//     contract (e.g. if RunEvent gains a new required field).
+//
+// Reviewers tempted to inline this back into executeOpt: please add the
+// new caller(s) first, then re-evaluate.
 func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 	runID, err := generateRunID()
 	if err != nil {
