@@ -139,6 +139,17 @@ type Job struct {
 	RunCounters JobRunCounters `json:"run_counters,omitempty"`
 
 	entryID robfigcron.EntryID // runtime only, not persisted
+
+	// parsedSchedule 缓存 cronParser.Parse(Schedule) 的结果。runtime-only,
+	// 不持久化(像 entryID),由 registerJob 在挂入 robfig/cron 时填充。
+	// 当 Schedule 字符串无法解析时为 nil(被 registerJob 的 AddFunc 提前
+	// reject,所以正常路径不会出现 nil)。
+	//
+	// 引入背景: R245-PERF-4 — dashboard 1Hz 的 handleList 路径里
+	// HasMissedSchedule 对每个 job 重新 cronParser.Parse 同一个表达式,
+	// N=50 jobs × 1Hz = 50 次 Parse/s。Schedule 只在 AddJob/UpdateJob
+	// 路径变更,挂在 Job 上一次填充即可在所有读路径复用。
+	parsedSchedule robfigcron.Schedule
 }
 
 // RunState 是单次 cron 执行的终态分类。运行中态不进 RunState（用 runInflight
@@ -427,9 +438,19 @@ func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
 	if j == nil {
 		return false, time.Time{}
 	}
-	sched, err := cronParser.Parse(j.Schedule)
-	if err != nil {
-		return false, time.Time{}
+	// R245-PERF-4: prefer the cached parsed schedule populated by
+	// registerJob; only Parse() when the cache is empty (test fixtures
+	// that build Job literals directly without going through AddJob).
+	// Live dashboard reads — handleList at 1 Hz × N jobs — used to
+	// re-Parse the same string per job per tick; with this cache the
+	// Parse cost collapses to once per AddJob/UpdateJob.
+	sched := j.parsedSchedule
+	if sched == nil {
+		var err error
+		sched, err = cronParser.Parse(j.Schedule)
+		if err != nil {
+			return false, time.Time{}
+		}
 	}
 	period := schedulePeriodFromSched(sched, now)
 	if period <= 0 {

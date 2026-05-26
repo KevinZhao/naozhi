@@ -946,6 +946,16 @@ func (s *Scheduler) registerJob(j *Job) error {
 		return fmt.Errorf("register cron: %w", err)
 	}
 	j.entryID = entryID
+	// R245-PERF-4: cache parsed schedule alongside entryID. Hot reads
+	// (HasMissedSchedule on the dashboard 1 Hz path) reuse this instead
+	// of re-Parsing the same string per job per tick. AddFunc above
+	// already validated the expression, so a second Parse failing here
+	// would be a robfig/cron bug — log and fall through to the
+	// uncached path so we don't fail registration on a transient
+	// inconsistency we can recover from.
+	if sched, parseErr := cronParser.Parse(j.Schedule); parseErr == nil {
+		j.parsedSchedule = sched
+	}
 	return nil
 }
 
