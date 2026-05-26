@@ -833,3 +833,33 @@ func TestMaxTranscriptBytes_Int64Type(t *testing.T) {
 		t.Fatalf("maxTranscriptBytes = %d must be > 0; a non-positive value would make io.LimitedReader return EOF immediately and silently truncate every transcript", n)
 	}
 }
+
+// TestTruncatedToolInputPlaceholder_ValidJSON pins R234-SEC-8 (#1018):
+// the placeholder substituted for over-cap tool_use.Input must itself
+// be valid JSON so the wire shape stays a json.RawMessage the dashboard
+// can render with its existing JSON renderer. A previous fix introduced
+// the cap and chose `"[truncated]"` as the placeholder; this test guards
+// against a future refactor that swaps to a non-JSON sentinel like
+// `[truncated]` (no quotes) or `null` (loses the truncation signal),
+// either of which would break dashboard JSON parsing or hide the cap-hit
+// from operators investigating an oversized run.
+//
+// We assert:
+//  1. the placeholder Unmarshals as JSON without error (wire-shape safety)
+//  2. it decodes to the literal string "[truncated]" (forensic signal)
+//  3. its raw bytes do NOT exceed maxToolInputBytes (cap self-consistency
+//     — replacing with a value that itself exceeds the cap would be a
+//     logic regression)
+func TestTruncatedToolInputPlaceholder_ValidJSON(t *testing.T) {
+	t.Parallel()
+	var s string
+	if err := json.Unmarshal(truncatedToolInputPlaceholder, &s); err != nil {
+		t.Fatalf("placeholder %q is not valid JSON: %v; dashboard JSON renderer would fail", string(truncatedToolInputPlaceholder), err)
+	}
+	if s != "[truncated]" {
+		t.Errorf("placeholder decoded to %q, want %q (forensic signal for cap-hit operators)", s, "[truncated]")
+	}
+	if len(truncatedToolInputPlaceholder) > maxToolInputBytes {
+		t.Errorf("placeholder len=%d exceeds maxToolInputBytes=%d; replacement value must satisfy the cap it enforces", len(truncatedToolInputPlaceholder), maxToolInputBytes)
+	}
+}
