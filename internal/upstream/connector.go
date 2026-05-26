@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -426,6 +428,50 @@ var marshalResultBufPool = sync.Pool{
 }
 
 const marshalResultMaxRetainBytes = 64 * 1024
+
+// sanitizeWorkspacePath validates and canonicalises a remote-supplied
+// workspace / cwd path. It centralises the EvalSymlinks + Clean + IsAbs
+// + allowed-root prefix gate that previously lived inline in the "send",
+// "takeover", and "close_discovered" reverse-RPC branches. R237-CR-6 (#709).
+//
+// Contract:
+//   - raw is the remote-supplied path (already non-empty by caller).
+//   - kind is the human-readable label used in error messages, e.g.
+//     "workspace", "takeover cwd", "close_discovered cwd".
+//   - tolerateMissing controls whether fs.ErrNotExist from EvalSymlinks
+//     is downgraded to "use the cleaned syntactic path". close_discovered
+//     sets this true because the CWD frequently vanishes after the Claude
+//     CLI has exited; send/takeover keep it false because they expect the
+//     directory to still exist.
+//
+// Caller responsibility: invoke session.ValidateRemoteWorkspacePath(raw)
+// FIRST so syntactic traversal / control-byte / non-absolute inputs are
+// rejected before they hit filepath.Clean (which silently folds
+// `/home/../etc` into `/etc`). Caller must also enforce the empty-
+// defaultWorkspace policy (refuse vs. fall back) since send/takeover
+// refuse but close_discovered tolerates — that policy lives at the call
+// site, not here. R68-SEC-M2.
+//
+// Returns the canonical absolute path on success.
+func (c *Connector) sanitizeWorkspacePath(raw, kind string, tolerateMissing bool) (string, error) {
+	cleaned := filepath.Clean(raw)
+	resolved, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		if tolerateMissing && errors.Is(err, fs.ErrNotExist) {
+			resolved = cleaned
+		} else {
+			return "", fmt.Errorf("%s path invalid: %w", kind, err)
+		}
+	}
+	if !filepath.IsAbs(resolved) {
+		return "", fmt.Errorf("%s must be absolute path", kind)
+	}
+	if resolved != c.defaultWorkspace &&
+		!strings.HasPrefix(resolved, c.defaultWorkspace+string(filepath.Separator)) {
+		return "", fmt.Errorf("%s %q outside allowed root %q", kind, resolved, c.defaultWorkspace)
+	}
+	return resolved, nil
+}
 
 func marshalResult(v any) (json.RawMessage, error) {
 	buf := marshalResultBufPool.Get().(*bytes.Buffer)
