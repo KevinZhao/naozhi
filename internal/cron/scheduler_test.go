@@ -917,6 +917,68 @@ func TestKnownSessionIDs_TTLCache(t *testing.T) {
 	}
 }
 
+// TestIsExcluded_FastPathSkipsCacheBuild verifies the R245-GO-4 fast path:
+// when IsExcluded hits via Job.LastSessionID on a cold cache, it MUST
+// short-circuit without populating the TTL snapshot — leaving the cache
+// cold so a subsequent KnownSessionIDs() call still rebuilds the full
+// set (jobs + runningJobs + runStore.Recent). The previous implementation
+// always built the full set, paying the O(jobs × recentCap) cost on every
+// spawn-time probe. (#844)
+func TestIsExcluded_FastPathSkipsCacheBuild(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := NewScheduler(SchedulerConfig{
+		StorePath: filepath.Join(dir, "cron.json"),
+		MaxJobs:   5,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+
+	job := &Job{Schedule: "@every 1h", Prompt: "p", Platform: "feishu", ChatID: "c", ChatType: "direct"}
+	if err := s.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	s.mu.Lock()
+	s.jobs[job.ID].LastSessionID = "fastpath-aaaa-bbbb-cccc-000000000001"
+	s.mu.Unlock()
+
+	// Cold cache assertion guard — invalidate ensures we start from cold
+	// regardless of any AddJob-side cache touches.
+	s.invalidateKnownSessionsCache()
+	s.knownSessionsCache.mu.Lock()
+	if s.knownSessionsCache.set != nil {
+		s.knownSessionsCache.mu.Unlock()
+		t.Fatalf("expected cold cache before fast-path probe")
+	}
+	s.knownSessionsCache.mu.Unlock()
+
+	// Fast-path hit (LastSessionID match). Must return true without
+	// populating the TTL cache.
+	if !s.IsExcluded("fastpath-aaaa-bbbb-cccc-000000000001") {
+		t.Fatalf("IsExcluded did not match seeded LastSessionID")
+	}
+	s.knownSessionsCache.mu.Lock()
+	cached := s.knownSessionsCache.set
+	s.knownSessionsCache.mu.Unlock()
+	if cached != nil {
+		t.Fatalf("fast-path hit must not populate TTL cache; got set with %d entries", len(cached))
+	}
+
+	// Probe a sessionID that is NOT in any cheap source — the slow path
+	// must run buildKnownSessionsSet and populate the cache.
+	if s.IsExcluded("never-existed-aaaa-bbbb-cccc-000000000099") {
+		t.Fatalf("IsExcluded matched an id that was never seen")
+	}
+	s.knownSessionsCache.mu.Lock()
+	cached = s.knownSessionsCache.set
+	s.knownSessionsCache.mu.Unlock()
+	if cached == nil {
+		t.Fatalf("slow path must populate TTL cache after full build")
+	}
+}
+
 // TestNewSchedulerNilRouterWarns verifies NewScheduler does not panic
 // when cfg.Router is nil and the resulting Scheduler stores a nil
 // router for the executeOpt-side guard (R20260526-GO-004) to pick up.
