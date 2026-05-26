@@ -50,6 +50,12 @@ func TestExpandEnvVars_DenyUpstreamCredentials(t *testing.T) {
 		{"GOOGLE_API_KEY", "google-secret"},
 		{"OCI_AUTH_TOKEN", "oci-secret"},
 		{"OPENAI_API_KEY", "sk-oai-secret"},
+		{"GITHUB_TOKEN", "ghp_secret-do-not-leak"},
+		{"GH_TOKEN", "ghp_secret-do-not-leak"},
+		{"OPENROUTER_API_KEY", "sk-or-secret"},
+		{"MISTRAL_API_KEY", "mistral-secret"},
+		{"HUGGINGFACE_TOKEN", "hf_secret"},
+		{"HUGGING_FACE_HUB_TOKEN", "hf_secret"},
 	}
 	for _, tc := range denyCases {
 		t.Run(tc.envName, func(t *testing.T) {
