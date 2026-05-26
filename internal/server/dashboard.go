@@ -381,8 +381,12 @@ func (s *Server) registerDashboard() {
 	uploads.StartCleanup(s.hub.ctx)
 	s.hub.SetUploadStore(uploads)
 	s.sendH = &SendHandler{
-		nodeAccess:    s.nodeAccess,
-		hub:           s.hub,
+		nodeAccess: s.nodeAccess,
+		hub:        s.hub,
+		// R215-ARCH-P1-4 (#566): wire the SendRouter consumer interface
+		// at construction so handleAttachment stops transiting through
+		// h.hub.router. *session.Router satisfies SendRouter implicitly.
+		router:        s.router,
 		uploadStore:   uploads,
 		uploadLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, s.auth.trustedProxy), // 10 uploads/min per IP
 		sendLimiter:   newIPLimiterWithProxy(rate.Every(2*time.Second), 30, s.auth.trustedProxy), // 30 sends/min per IP (burst 30)
@@ -396,7 +400,12 @@ func (s *Server) registerDashboard() {
 		s.hub.SetScratchPool(s.scratchPool)
 		s.scratchPool.StartSweeper()
 		s.scratchH = &ScratchHandler{
-			hub:       s.hub,
+			hub: s.hub,
+			// R215-ARCH-P1-4 (#566): wire the ScratchRouter consumer
+			// interface at construction so handleOpen / handlePromote
+			// stop transiting through h.hub.router. *session.Router
+			// satisfies ScratchRouter implicitly.
+			router:    s.router,
 			pool:      s.scratchPool,
 			openLimit: newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.trustedProxy), // 5 opens/min per IP
 			agents:    s.agents,

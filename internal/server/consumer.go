@@ -16,6 +16,11 @@
 // NOT part of Hub and are deferred to ARCH-SERVER-ROUTER-IF (RFC
 // §Phase 2.5, non-goal of the current RFC).
 //
+// R215-ARCH-P1-4 (#566): *ScratchHandler / *SendHandler now own the
+// ScratchRouter / SendRouter consumer interfaces declared below
+// instead of borrowing Hub's router handle. Other handlers in the
+// "deferred" list above remain unchanged.
+//
 // See docs/rfc/consumer-interfaces.md §3.2.2.
 package server
 
@@ -25,12 +30,13 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// HubRouter is the *Hub-only subset of *session.Router.
-// Method list = direct h.router. calls (wshub*.go / send.go) PLUS
-// dashboard_scratch.go / dashboard_send.go's h.hub.router.* transits
-// where *ScratchHandler / *SendHandler intentionally borrow Hub's
-// router handle (a Phase 2.5 cleanup would push those handlers onto
-// their own router interface; out of scope for this RFC).
+// HubRouter is the *Hub-only subset of *session.Router. Method list
+// derived from direct h.router. calls in wshub*.go / send.go.
+//
+// R215-ARCH-P1-4 (#566): the Phase 2.5 cleanup that the previous godoc
+// flagged as out-of-scope has landed for *ScratchHandler / *SendHandler —
+// see ScratchRouter / SendRouter below. Their handlers no longer transit
+// through h.hub.router; this interface is now genuinely Hub-only.
 //
 // 14 methods — under the "rethink at >15" threshold from docs/rfc/
 // consumer-interfaces.md §7.2.
@@ -49,4 +55,39 @@ type HubRouter interface {
 	InterruptSessionSafe(key string) session.InterruptOutcome
 	InterruptSessionViaControl(key string) session.InterruptOutcome
 	NotifyIdle()
+}
+
+// ScratchRouter is the *ScratchHandler subset of *session.Router. Lifted
+// from the previous h.hub.router.* transit so the scratch handler does
+// not pay a transitive `*Hub → *Router` import in tests, and so the
+// scratch surface stays grep-discoverable on its own. R215-ARCH-P1-4 (#566).
+//
+// Method list = direct calls in dashboard_scratch.go (handleOpen +
+// handlePromote): GetSession at open-time validation; Remove for orphan
+// teardown on promote-time defensive paths; RenameSession to atomically
+// re-parent a scratch onto a permanent session key.
+//
+// *session.Router satisfies this interface implicitly via Go structural
+// typing; tests can substitute a hand-rolled stub without dragging in
+// the full HubRouter surface (14 methods → 3).
+type ScratchRouter interface {
+	GetSession(key string) *session.ManagedSession
+	Remove(key string) bool
+	RenameSession(oldKey, newKey string) bool
+}
+
+// SendRouter is the *SendHandler subset of *session.Router. Lifted from
+// h.hub.router.* in handleAttachment so attachment-resolve does not
+// reach across the Hub boundary for what is conceptually a per-key
+// workspace lookup. R215-ARCH-P1-4 (#566).
+//
+// Method list = direct calls in dashboard_send.go's handleAttachment:
+// GetSession (live workspace via Snapshot.Workspace) and GetWorkspace
+// (paused / discovered fallback via the chat-key → workspace map).
+//
+// *session.Router satisfies this interface implicitly via Go structural
+// typing.
+type SendRouter interface {
+	GetSession(key string) *session.ManagedSession
+	GetWorkspace(chatKey string) string
 }

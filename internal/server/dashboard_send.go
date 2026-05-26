@@ -120,8 +120,18 @@ func rejectIfTooManyFields(w http.ResponseWriter, r *http.Request) bool {
 
 // SendHandler serves the HTTP send API, delegating to Hub for local sends.
 type SendHandler struct {
-	nodeAccess    NodeAccessor
-	hub           *Hub
+	nodeAccess NodeAccessor
+	hub        *Hub
+	// router is the SendRouter subset used by handleAttachment for the
+	// per-key workspace resolution chain (live via GetSession.Workspace,
+	// paused fallback via GetWorkspace). Replaces the prior h.hub.router.*
+	// transit so attachment lookups do not borrow Hub's router handle —
+	// keeps the dependency graph one edge shorter and lets tests inject a
+	// minimal SendRouter stub instead of the full HubRouter surface.
+	// R215-ARCH-P1-4 (#566). nil-safe: when a future call site emerges in
+	// a hand-built SendHandler test fixture, the consuming handler must
+	// nil-guard or wire the field.
+	router        SendRouter
 	uploadStore   *uploadStore
 	uploadLimiter *ipLimiter    // per-IP upload rate limiter (10/min)
 	sendLimiter   *ipLimiter    // per-IP send rate limiter (30/min)
@@ -1172,7 +1182,7 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	// associated with the key, so a crafted workspace in the query would
 	// just be ignored.
 	var ws string
-	if sess := h.hub.router.GetSession(key); sess != nil {
+	if sess := h.router.GetSession(key); sess != nil {
 		ws = sess.Workspace()
 	}
 	if ws == "" {
@@ -1180,7 +1190,7 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		if idx := strings.LastIndexByte(key, ':'); idx > 0 {
 			chatKey = key[:idx]
 		}
-		ws = h.hub.router.GetWorkspace(chatKey)
+		ws = h.router.GetWorkspace(chatKey)
 	}
 	if ws == "" {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
