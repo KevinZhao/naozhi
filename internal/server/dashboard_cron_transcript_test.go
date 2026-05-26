@@ -946,6 +946,50 @@ func TestFlattenJSONLEvent_DispatchByType(t *testing.T) {
 	}
 }
 
+// TestFlattenSystemEvent_NilOnEarlyExit pins R241-PERF-7 (#481): the
+// early-exit branches of flattenSystemEvent (init events, parse-failed
+// events, missing-message events) must return a NIL slice rather than
+// a make([]T,0,1) empty slice. The caller's range loop accepts both
+// shapes equivalently, so a future refactor that re-introduces the
+// per-call alloc on the common-case path would silently regress
+// transcript-flatten allocation count without breaking semantics —
+// this test catches that regression at the source.
+func TestFlattenSystemEvent_NilOnEarlyExit(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		msg  string
+	}{
+		{name: "init_subtype", msg: `{"subtype":"init"}`},
+		{name: "non_error_subtype", msg: `{"subtype":"compact"}`},
+		{name: "error_empty_message", msg: `{"subtype":"error","message":""}`},
+		{name: "malformed_json", msg: `{"subtype":`},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ev := &claudeJSONLEvent{Type: "system", Message: json.RawMessage(tc.msg)}
+			out, _, _, parsed := flattenSystemEvent(ev, 0, 0)
+			if parsed {
+				t.Errorf("parsed=true, want false (early-exit branch)")
+			}
+			if out != nil {
+				t.Errorf("out=%v (len=%d), want nil — alloc-on-early-exit regression", out, len(out))
+			}
+		})
+	}
+
+	// Positive-path sanity: error subtype with a non-empty message DOES
+	// allocate and emit one turn — confirms the deferred-alloc path still
+	// reaches the success branch when it should.
+	ev := &claudeJSONLEvent{Type: "system", Message: json.RawMessage(`{"subtype":"error","message":"boom"}`)}
+	out, _, _, parsed := flattenSystemEvent(ev, 0, 0)
+	if !parsed || len(out) != 1 || out[0].Kind != "error" {
+		t.Errorf("error path regressed: parsed=%v out=%v", parsed, out)
+	}
+}
+
 // BenchmarkSummariseToolInput_TypedProbe locks the R233-PERF-5 / #695
 // perf win: the typed `toolInputProbe` decode replaced the prior
 // `map[string]any` decode + key hunt, halving allocations on the hot

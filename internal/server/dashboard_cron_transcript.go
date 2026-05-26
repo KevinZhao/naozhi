@@ -968,7 +968,6 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 // Unmarshal failures are logged at Debug — we want operator visibility
 // without changing the downgrade fallback.
 func flattenSystemEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
-	out := make([]transcriptTurn, 0, 1)
 	tok := transcriptTokens{}
 
 	var sys struct {
@@ -983,8 +982,15 @@ func flattenSystemEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcri
 			"err", err)
 	}
 	if sys.Subtype != "error" || sys.Message == "" {
-		return out, tok, 0, false
+		// R241-PERF-7 (#481): defer the slice allocation past the early-
+		// exit branches so non-error system events (init / parse-failed /
+		// empty message — the common case across every cron transcript)
+		// return a nil slice instead of a make([]T,0,1) header. The caller's
+		// `for _, t := range newTurns` loop treats nil and empty slices
+		// identically, so the wire shape is unchanged.
+		return nil, tok, 0, false
 	}
+	out := make([]transcriptTurn, 0, 1)
 	out = append(out, transcriptTurn{
 		Index: nextIdx,
 		Kind:  "error",
