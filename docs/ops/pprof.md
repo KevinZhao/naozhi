@@ -138,6 +138,9 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_attachment_ref_drop_total` | tracker 非阻塞 enqueue 满 channel 丢弃数 | 稳态 0;非零 = 调用方提交过快或磁盘 latency 异常,同 Persister 运维 |
 | `naozhi_cron_execution_slow_total` | cron job 成功执行但耗时超过 `cronSlowThreshold`（当前 30s）的累计次数（R208-OBS1 的 MVP histogram 替身） | 持续增长 = 某些 job 长期压线超时；对照 job id（slog.Warn "cron execution slow"）确认是 prompt 设计问题还是 backend 退化 |
 | `naozhi_cron_send_budget_doubled_total` | spawn 阶段已耗 >50% jobTimeout 后才进入 sendCtx 的次数（R240-GO-4 / R230B-GO-1 wall-clock 翻倍信号） | 持续增长 = GetOrCreate / Spawn 慢路径在挤压 Send 预算，单次 run 实际 wall clock 接近 2×jobTimeout；对照 slog.Warn "cron send budget exceeds job/2" 找具体 job_id 排查 spawn 慢因 |
+| `naozhi_cron_stop_budget_exceeded_gc_total` | Scheduler.Stop() 冷启动 GC 等待超过 `gcWaitBudget`（5s）的累计次数（R250-GO-20 / #1083） | 非零 = trimAll 卡在文件系统层；接近 systemd TimeoutStopSec=30s 时报警，参考 slog.Warn "cron: gc goroutine wait timeout" |
+| `naozhi_cron_stop_budget_exceeded_drain_total` | Scheduler.Stop() cron drain 阶段超过 `stopBudget`（30s）的累计次数（R250-GO-20 / #1083） | 非零 = 在途 cron tick 没在预算内退出；持续增长说明热点 job 在 shutdown 路径占用太久，参考 slog.Warn "cron scheduler: stop deadline exceeded before cron.Stop drained" |
+| `naozhi_cron_stop_budget_exceeded_trigger_total` | Scheduler.Stop() triggerWG 等待阶段超过剩余预算的累计次数（R250-GO-20 / #1083） | 非零 = 手动 TriggerNow 引发的 goroutine 拖到 stopBudget 末尾；对照 slog.Warn "cron scheduler: stop deadline exceeded during triggerWG wait" 排查 webhook / notify 阻塞 |
 | `naozhi_cron_run_started_total` | cron run 开始计数（CAS gate 通过后；docs/rfc/cron-run-history.md P0） | 与 `_ended_total` 差值远大于 inflight gauge = 进程崩溃打断在途 run；查 panic 日志 |
 | `naozhi_cron_run_ended_total` | cron run 终态计数（聚合 succeeded/failed/skipped/timed_out/canceled） | 与 `_started_total` 配合判断"开了但没收尾"的 run 数 |
 | `naozhi_cron_run_succeeded_total` | succeeded 终态计数 | 比例骤降 = backend / prompt 退化；对比 failed/timed_out 看根因 |
