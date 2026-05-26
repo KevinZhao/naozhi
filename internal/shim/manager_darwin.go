@@ -18,7 +18,7 @@ import (
 // plist's main process, and a child started with Setsid: true is reparented
 // to launchd (PID 1) when the parent exits — so the shim survives a naozhi
 // restart for free, no external lifecycle move required.
-func moveToShimsCgroup(_ context.Context, _, _ int) {}
+func moveToShimsCgroup(_ context.Context, _, _ int, _ string) {}
 
 // shimPIDBinaryMismatch reports whether the running process at pid is NOT
 // the same binary as wantBin. Linux compares /proc/PID/exe against the
