@@ -30,6 +30,68 @@ func TestExpandEnvVars(t *testing.T) {
 	}
 }
 
+// TestExpandEnvVars_DenyUpstreamCredentials pins R240-SEC-16 / #1047:
+// an operator who mistakenly types ${ANTHROPIC_API_KEY} (or any other
+// known-secret upstream credential prefix) into a config field must NOT
+// have the secret expanded into the in-memory Config; the placeholder is
+// preserved verbatim so downstream containsEnvPlaceholder validation
+// fails loudly instead of silently leaking the key into logs / API
+// echoes.
+func TestExpandEnvVars_DenyUpstreamCredentials(t *testing.T) {
+	denyCases := []struct {
+		envName string
+		envVal  string
+	}{
+		{"ANTHROPIC_API_KEY", "sk-ant-secret-do-not-leak"},
+		{"AWS_ACCESS_KEY_ID", "AKIA-secret"},
+		{"AWS_SECRET_ACCESS_KEY", "secret-do-not-leak"},
+		{"AZURE_CLIENT_SECRET", "azure-secret"},
+		{"GCP_SERVICE_KEY", "gcp-secret"},
+		{"GOOGLE_API_KEY", "google-secret"},
+		{"OCI_AUTH_TOKEN", "oci-secret"},
+		{"OPENAI_API_KEY", "sk-oai-secret"},
+	}
+	for _, tc := range denyCases {
+		t.Run(tc.envName, func(t *testing.T) {
+			os.Setenv(tc.envName, tc.envVal)
+			defer os.Unsetenv(tc.envName)
+
+			placeholder := "${" + tc.envName + "}"
+			got := string(expandEnvVars([]byte(placeholder)))
+			if got != placeholder {
+				t.Errorf("expandEnvVars(%q) = %q, want placeholder preserved (got expanded value)", placeholder, got)
+			}
+			// Defence-in-depth: even if it accidentally expanded, the
+			// secret value MUST NOT appear in the output.
+			if got == tc.envVal {
+				t.Errorf("expandEnvVars(%q) leaked secret value", placeholder)
+			}
+		})
+	}
+
+	// Sanity: NAOZHI_/FEISHU_/SLACK_/PC_/IM_ prefixes still expand.
+	allowCases := []struct {
+		envName string
+		envVal  string
+	}{
+		{"NAOZHI_DASHBOARD_TOKEN", "dash-token"},
+		{"FEISHU_APP_SECRET", "feishu-secret"},
+		{"SLACK_BOT_TOKEN", "xoxb-tok"},
+		{"PC_REVERSE_TOKEN", "pc-tok"},
+	}
+	for _, tc := range allowCases {
+		t.Run("allow_"+tc.envName, func(t *testing.T) {
+			os.Setenv(tc.envName, tc.envVal)
+			defer os.Unsetenv(tc.envName)
+			placeholder := "${" + tc.envName + "}"
+			got := string(expandEnvVars([]byte(placeholder)))
+			if got != tc.envVal {
+				t.Errorf("expandEnvVars(%q) = %q, want %q", placeholder, got, tc.envVal)
+			}
+		})
+	}
+}
+
 func TestParseTTL(t *testing.T) {
 	tests := []struct {
 		yaml     string

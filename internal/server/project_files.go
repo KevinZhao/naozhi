@@ -119,38 +119,44 @@ var textMimeSet = map[string]struct{}{
 // that DetectContentType returns for most source code extensions. Without
 // this, every .go/.py/.ts file would be refused preview.
 var previewableByExt = map[string]string{
-	".go":         "text/x-go",
-	".py":         "text/x-python",
-	".js":         "application/javascript",
-	".mjs":        "application/javascript",
-	".ts":         "application/typescript",
-	".tsx":        "application/typescript",
-	".jsx":        "application/javascript",
-	".rs":         "text/x-rust",
-	".java":       "text/x-java",
-	".kt":         "text/x-kotlin",
-	".kts":        "text/x-kotlin",
-	".c":          "text/x-c",
-	".h":          "text/x-c",
-	".cc":         "text/x-c++",
-	".cpp":        "text/x-c++",
-	".hpp":        "text/x-c++",
-	".cs":         "text/x-csharp",
-	".rb":         "text/x-ruby",
-	".php":        "text/x-php",
-	".swift":      "text/x-swift",
-	".md":         "text/markdown",
-	".markdown":   "text/markdown",
-	".txt":        "text/plain",
-	".log":        "text/plain",
-	".json":       "application/json",
-	".jsonl":      "application/json",
-	".yaml":       "application/yaml",
-	".yml":        "application/yaml",
-	".toml":       "application/toml",
-	".xml":        "application/xml",
-	".html":       "text/html",
-	".htm":        "text/html",
+	".go":       "text/x-go",
+	".py":       "text/x-python",
+	".js":       "application/javascript",
+	".mjs":      "application/javascript",
+	".ts":       "application/typescript",
+	".tsx":      "application/typescript",
+	".jsx":      "application/javascript",
+	".rs":       "text/x-rust",
+	".java":     "text/x-java",
+	".kt":       "text/x-kotlin",
+	".kts":      "text/x-kotlin",
+	".c":        "text/x-c",
+	".h":        "text/x-c",
+	".cc":       "text/x-c++",
+	".cpp":      "text/x-c++",
+	".hpp":      "text/x-c++",
+	".cs":       "text/x-csharp",
+	".rb":       "text/x-ruby",
+	".php":      "text/x-php",
+	".swift":    "text/x-swift",
+	".md":       "text/markdown",
+	".markdown": "text/markdown",
+	".txt":      "text/plain",
+	".log":      "text/plain",
+	".json":     "application/json",
+	".jsonl":    "application/json",
+	".yaml":     "application/yaml",
+	".yml":      "application/yaml",
+	".toml":     "application/toml",
+	".xml":      "application/xml",
+	// R244-SEC-P2-2: .html / .htm intentionally NOT mapped. servePreview
+	// blocks text/html via HasPrefix gate (see line ~1040) and serveRaw
+	// has the symmetric block, but listing the extension here would let
+	// mimeFromExtOnly's batch fast path return text/html without sniffing
+	// — a future caller that bypasses servePreview's mime gate (e.g. a
+	// new render handler) would inherit the trust silently. Falling
+	// through to detectMime keeps the canonical decision in one place
+	// (the same byte-sniff path serveRender already gates on).
 	".css":        "text/css",
 	".sh":         "application/x-sh",
 	".bash":       "application/x-sh",
@@ -328,6 +334,21 @@ func detectMime(resolved string, head []byte) string {
 	// forces a download; no inline rendering regardless of underlying bytes.
 	if ext == ".svg" {
 		return "image/svg+xml"
+	}
+	// R244-SEC-P2-2: pin .html / .htm to text/html here ONLY so serveRender
+	// can route empty / short HTML (where http.DetectContentType returns
+	// text/plain) through its dedicated handler. Critically the mapping is
+	// NOT carried in previewableByExt, so mimeFromExtOnly's batch fast path
+	// cannot short-circuit the byte-sniff: any HTML reaching servePreview /
+	// serveRaw still goes through detectMime, where the text/html result
+	// triggers the existing HTML-block gates. Defense-in-depth — even a
+	// future caller that skipped the gates would not silently inherit a
+	// text/html response without a sniff confirmation on non-empty files.
+	if ext == ".html" || ext == ".htm" {
+		if strings.HasPrefix(mime, "text/plain") || strings.HasPrefix(mime, "application/octet-stream") {
+			return "text/html"
+		}
+		return mime
 	}
 	// Base name override for extensionless files like Dockerfile / Makefile.
 	// R232-SEC-8: paths whose basename starts with a dot (e.g. ".makefile",
@@ -941,8 +962,20 @@ func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, re
 	// allow-same-origin), NOT from CSP — script execution here cannot read
 	// dashboard cookies regardless. Removing 'unsafe-inline' would silently
 	// break inline math rendering with no security benefit.
+	//
+	// R245-SEC-10: img-src deliberately restricted to data: blob: only.
+	// 'self' here is the document's blob: URL origin (opaque), so the
+	// keyword adds no real loading capability for the rendered HTML —
+	// but a workspace document loaded via a future code-path that flipped
+	// back to a same-origin document URL would be able to phone home with
+	// `<img src=/api/sessions/state>` etc., probing dashboard endpoints
+	// for side-channel signal (load timing → state-change tracking) even
+	// though credentials are stripped by COEP/CORP. Tighten to data: blob:
+	// so cron transcript / report HTML can still inline base64 PNGs and
+	// load chart-lib-generated blob URLs, while every other origin is
+	// refused at the CSP layer regardless of how the document is served.
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; sandbox allow-scripts; script-src 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'unsafe-inline'; img-src 'self' data: blob:; font-src data:")
+		"default-src 'none'; sandbox allow-scripts; script-src 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'unsafe-inline'; img-src data: blob:; font-src data:")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	// Workspace bytes must not sit in shared proxy caches under no-auth

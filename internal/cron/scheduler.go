@@ -140,6 +140,16 @@ type SchedulerConfig struct {
 	// ParentCtx, if set, is used as the parent for the scheduler's internal stop context.
 	// When it is cancelled (e.g. during application shutdown) all running cron jobs are
 	// interrupted promptly.
+	//
+	// R245-GO-6 (#846): NewScheduler reads ParentCtx once and passes it to
+	// context.WithCancel; the SchedulerConfig itself is taken by value and
+	// not retained on *Scheduler. The only long-lived reference is the
+	// derived stopCtx (held internally and cancelled by Stop()). Callers
+	// can therefore set ParentCtx to a request-scoped or test-scoped ctx
+	// without leaking the parent's value-tree past the Scheduler's
+	// lifetime — the parent is "derived-only" from the Scheduler's
+	// perspective and the caller-supplied ctx may be discarded
+	// immediately after NewScheduler returns.
 	ParentCtx context.Context
 	// AllowedRoot mirrors Server.allowedRoot: the only directory tree under
 	// which cron jobs may execute. Persisted jobs whose WorkDir falls outside
@@ -648,6 +658,23 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	// hot path in marshalJobsLocked finds defaultMarshalJobs instead of
 	// nil. Tests swap a failing stub via withFailingMarshal.
 	s.marshalJobs.Store(&defaultMarshalJobs)
+	// R238-SEC-12 (#834): close the startup permission window. The
+	// storeDirOnce gate in saveMarshaledSeq only fires on the *first*
+	// save, so between process start and that first mutation the parent
+	// data dir keeps whatever mode it inherited from XDG (often 0o755) —
+	// a local attacker could enumerate cron_jobs.json's existence /
+	// mtime in that window. Run the same MkdirAll(0o700) eagerly at
+	// construction; once.Do later in saveMarshaledSeq becomes a no-op,
+	// so the hot-path cost is unchanged.
+	if cfg.StorePath != "" {
+		s.storeDirOnce.Do(func() {
+			if dir := filepath.Dir(cfg.StorePath); dir != "" && dir != "." {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					slog.Warn("cron store parent dir mkdir failed (eager)", "err", err, "dir", dir)
+				}
+			}
+		})
+	}
 	return s
 }
 
@@ -875,23 +902,18 @@ const defaultStopBudget = 30 * time.Second
 const gcWaitBudget = 5 * time.Second
 
 // stopBudget is the active stop budget used by Scheduler.Stop(). Tests
-// MUST mutate it only through WithStopBudget so the var swap is paired
-// with a t.Cleanup restore — direct writes from t.Parallel tests would
-// race a concurrent Stop on another Scheduler instance with real
+// MUST mutate it only through the WithStopBudget seam in
+// scheduler_testutil_test.go so the var swap is paired with a
+// t.Cleanup restore — direct writes from t.Parallel tests would race
+// a concurrent Stop on another Scheduler instance with real
 // wall-clock timeouts.
 var stopBudget = defaultStopBudget
 
-// WithStopBudget shortens stopBudget for the duration of the test and
-// returns a restore func intended for t.Cleanup. Centralising the swap
-// here keeps the racy direct-write pattern off the call sites and gives
-// future maintainers a single seam to migrate to a Scheduler-field
-// design (the long-term direction noted on gcWaitBudget) without
-// touching every test. R247-CR-18.
-func WithStopBudget(d time.Duration) func() {
-	orig := stopBudget
-	stopBudget = d
-	return func() { stopBudget = orig }
-}
+// (R248-DEADCODE-24 / #1216) WithStopBudget moved to
+// scheduler_testutil_test.go: it is test-only and previously living in
+// production scheduler.go pinned dead surface area in the production
+// binary. Same-package _test.go retains access to the unexported
+// stopBudget without changing test call sites.
 
 // Stop halts the scheduler and saves state. It waits for both scheduled jobs
 // (drained by s.cron.Stop) and any TriggerNow-spawned goroutines before

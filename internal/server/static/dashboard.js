@@ -8944,7 +8944,10 @@ const wsm = {
         // defence-in-depth.
         // R221-FIX-P1-4: cronTimelineRefreshHead is async; swallow its
         // rejection at the dispatch boundary.
-        if (msg && msg.job_id) cronTimelineRefreshHead(msg.job_id).catch(() => {});
+        // R243-PERF-7 / #812: route through the rAF-debounced wrapper so
+        // bursty cron_run_ended events for the same job collapse to one
+        // sort+innerHTML rebuild per paint frame instead of one per event.
+        if (msg && msg.job_id) cronTimelineRefreshHeadDebounced(msg.job_id);
         break;
       case 'pong':
         break;
@@ -11486,11 +11489,67 @@ function formatRunningElapsed(startedAt) {
 // Polling timer that re-renders cron rows so "运行中 Xs" advances each
 // second while at least one job is running. Idle when no jobs are running.
 let cronRunningTickTimer = null;
+
+// R243-PERF-8 / #813: per-tick scoped text update.
+//
+// Pre-fix behaviour: ensureCronRunningTick fired renderCronPanel() every
+// second, which rebuilt the *entire* cron list innerHTML (N rows × full
+// HTML strings + onclick wiring) just to advance the elapsed-time text
+// on the running rows. With 50 jobs and any one of them running, that
+// was 50× full-row reflow per second — a measurable jank hot path on
+// modest hardware.
+//
+// Post-fix: the tick walks only `.cj-row.is-running` elements and
+// updates the two text nodes that carry the elapsed label
+// (`.cj-when.running` desktop, `.cj-when-inline.is-running` mobile).
+// Everything else — schedule chip, stats badge, action buttons — is
+// untouched, so the layout never reflows past the elapsed label.
+//
+// Fallback: if no running rows are mounted (the panel was closed between
+// the timer firing and this callback) we DON'T fall back to a full
+// renderCronPanel — the timer's own three-condition guard above already
+// catches that case and clears the interval, so the no-op is correct.
+//
+// Job churn (a row finishes / a new row starts running) is handled by
+// the WS cron_run_started / cron_run_ended fan-out which calls
+// cronApplyRunStarted / cronApplyRunEnded → renderCronPanel; that path
+// already updates row classes (`is-running` on/off) and is the right
+// place to add/remove rows. The 1Hz tick is therefore *only* responsible
+// for advancing the elapsed text on rows that are already classed
+// is-running, which is exactly the scope of this targeted update.
+function cronRunningTickPaintScoped() {
+  const host = document.getElementById('cron-list-items');
+  if (!host) return;
+  const rows = host.querySelectorAll('.cj-row.is-running');
+  if (!rows.length) return;
+  // Build a quick lookup so we don't O(N) scan cronJobs once per row.
+  const byId = new Map();
+  if (Array.isArray(cronJobs)) {
+    for (const j of cronJobs) {
+      if (j && j.id) byId.set(j.id, j);
+    }
+  }
+  for (const row of rows) {
+    const id = row.getAttribute('data-cron-id');
+    if (!id) continue;
+    const job = byId.get(id);
+    if (!job || !job.current_run || !job.current_run.started_at) continue;
+    const label = formatRunningElapsed(job.current_run.started_at);
+    // Desktop column.
+    const whenEl = row.querySelector('.cj-when.running');
+    if (whenEl && whenEl.textContent !== label) whenEl.textContent = label;
+    // Mobile inline span (cj-when-inline). Class set carries imminent /
+    // paused but for running rows we just rewrite text.
+    const inlineEl = row.querySelector('.cj-when-inline');
+    if (inlineEl && inlineEl.textContent !== label) inlineEl.textContent = label;
+  }
+}
+
 function ensureCronRunningTick() {
   const anyRunning = Array.isArray(cronJobs) && cronJobs.some(j => j && j.current_run);
   // Stop conditions（任何一个成立即清掉 timer）：
   //   - 无 running job
-  //   - 当前选中了某个 session（renderCronPanel 第一行就 return，timer 等于在浪费 CPU）
+  //   - 当前选中了某个 session（renderCronPanel 第一行就 return,timer 等于在浪费 CPU）
   //   - cron-list-items DOM 已不在文档（用户切到非 cron 视图）
   // R220-FE-1: 修复 timer 永不停的内存/CPU 泄漏。
   const cronListMounted = !!document.getElementById('cron-list-items');
@@ -11504,7 +11563,9 @@ function ensureCronRunningTick() {
         cronRunningTickTimer = null;
         return;
       }
-      try { renderCronPanel(); } catch (_) {}
+      // R243-PERF-8 / #813: scoped text update instead of full
+      // renderCronPanel rebuild. See cronRunningTickPaintScoped godoc.
+      try { cronRunningTickPaintScoped(); } catch (_) {}
     }, 1000);
   } else if (!shouldRun && cronRunningTickTimer) {
     clearInterval(cronRunningTickTimer);
@@ -12374,6 +12435,32 @@ function cronTimelineJumpToSession(sessionId) {
   showToast('未找到对应 session（' + sessionId.slice(0, 8) + '…）', 'warning');
 }
 
+// R243-PERF-7 / #812: rAF-debounce coalescing for cronTimelineRefreshHead.
+// Bursty cron_run_ended events (multiple jobs ending in the same tick, or
+// a manual TriggerNow loop) used to fire a full fetch + sort + innerHTML
+// rebuild per event; the WS handler now routes through
+// cronTimelineRefreshHeadDebounced which collapses N events to a single
+// rAF-aligned call per (jobId). Coalescing is keyed on jobId so two
+// different jobs ending in the same tick still each get exactly one
+// refresh — the saving is on repeated events for the same job.
+//
+// rAF (rather than setTimeout) keeps the refresh aligned with the next
+// paint frame, so sort+innerHTML happens once per visible frame instead
+// of once per network event.
+const _cronTimelineRefreshScheduled = new Set();
+function cronTimelineRefreshHeadDebounced(jobId) {
+  if (!jobId) return;
+  if (_cronTimelineRefreshScheduled.has(jobId)) return;
+  _cronTimelineRefreshScheduled.add(jobId);
+  const raf = (typeof requestAnimationFrame === 'function')
+    ? requestAnimationFrame
+    : (cb) => setTimeout(cb, 16);
+  raf(() => {
+    _cronTimelineRefreshScheduled.delete(jobId);
+    cronTimelineRefreshHead(jobId).catch(() => {});
+  });
+}
+
 // cronTimelineRefreshHead — WS cron_run_ended 触发。如果当前 drawer 打开
 // 的就是该 job（cronDetailJobId === jobId），fetch /api/cron/runs?limit=10
 // 替换头 10 条；否则只刷新列表 stats（已有逻辑：fetchCronJobs +
@@ -12382,6 +12469,10 @@ function cronTimelineJumpToSession(sessionId) {
 // cron-panel-consolidation RFC §4.6: 路由门由 selectedKey 切到
 // cronDetailJobId — cron 面板下 selectedKey 始终为 null（openCronPanel 已
 // 清空），不再适合做"当前看的是哪条 cron"判定。
+//
+// 调用方应优先走 cronTimelineRefreshHeadDebounced（rAF-debounced wrapper）以
+// 在 bursty cron_run_ended 序列下避免 N 次 sort+innerHTML 重建（R243-PERF-7
+// / #812）。直接调用本函数仍合法（手动 trigger / 测试路径）。
 async function cronTimelineRefreshHead(jobId) {
   if (cronDetailJobId !== jobId) return;
   const st = getCronTimelineState(jobId);

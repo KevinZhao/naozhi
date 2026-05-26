@@ -119,12 +119,6 @@ const dropNotifyMaxKeys = 1024
 // burst after recovery produces a fresh datum.
 const evictWarnCooldownNs = int64(5 * time.Second)
 
-// NewMessageQueue creates a MessageQueue in Collect mode.
-// maxDepth <= 0 disables queuing (degrades to drop+wait, same as old Guard).
-func NewMessageQueue(maxDepth int, collectDelay time.Duration) *MessageQueue {
-	return NewMessageQueueWithMode(maxDepth, collectDelay, ModeCollect)
-}
-
 // NewMessageQueueWithMode creates a MessageQueue with an explicit queue mode.
 // See QueueMode for the semantic difference between Collect and Interrupt.
 func NewMessageQueueWithMode(maxDepth int, collectDelay time.Duration, mode QueueMode) *MessageQueue {

@@ -16,28 +16,16 @@ import (
 	"log/slog"
 	"math"
 	"strings"
-	"time"
 
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// EventEntriesFromEvent converts an Event to zero or more EventEntry values.
-// Assistant messages can contain multiple content blocks (thinking + tool_use + text);
-// each block that maps to a known type produces its own entry so downstream consumers
-// (EventLog, dashboard) don't silently drop blocks after the first.
-//
-// Test-helper variant: this convenience wrapper reads time.Now() to stamp
-// the resulting entries. Production hot paths (readLoop) MUST use
-// EventEntriesFromEventAt to share a single time.Now() call between
-// ev.recvAt assignment and entry timestamping — calling this function
-// instead pays an extra wall-clock read per event. R225-PERF-5.
-func EventEntriesFromEvent(ev Event) []EventEntry {
-	return EventEntriesFromEventAt(ev, time.Now().UnixMilli())
-}
-
-// EventEntriesFromEventAt is the caller-supplied-now variant used by readLoop
-// to share a single time.Now() call between ev.recvAt assignment and entry
-// timestamping. Public callers still use EventEntriesFromEvent. R67-PERF-9.
+// EventEntriesFromEventAt converts an Event to zero or more EventEntry values
+// using a caller-supplied wall-clock to share a single time.Now() call between
+// ev.recvAt assignment and entry timestamping. Assistant messages can contain
+// multiple content blocks (thinking + tool_use + text); each block that maps
+// to a known type produces its own entry so downstream consumers (EventLog,
+// dashboard) don't silently drop blocks after the first. R67-PERF-9.
 func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 	// Replay events are a passthrough-internal CLI ack for messages naozhi
 	// already showed to the user via the optimistic bubble. Writing them to
@@ -306,18 +294,6 @@ func parseAgentInput(input json.RawMessage) agentInput {
 			"err", err, "input_len", len(input))
 	}
 	return inp
-}
-
-// label returns the preferred human-readable identifier for an Agent tool call.
-// Used by tests that lock the Agent event formatting contract.
-func (a agentInput) label() string {
-	if a.SubagentType != "" {
-		return a.SubagentType
-	}
-	if a.Name != "" {
-		return a.Name
-	}
-	return a.TeamName
 }
 
 func formatToolDetail(block ContentBlock) string {

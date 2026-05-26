@@ -40,17 +40,48 @@ const knownSessionIDsRecentCap = 200
 // the empty sessionID. Safe to call on a nil Scheduler (returns
 // false).
 //
-// Cost: O(jobs × recentCap) per call — KnownSessionIDs builds a
-// transient map on every invocation. The auto-chain spawn path calls
-// this at most once per spawn so the cost is amortised; dashboard
-// 1Hz / hot-path callers should batch via KnownSessionIDs() and reuse
-// the snapshot. R247-PERF-3 tracks the long-term TTL-cache fix.
+// Cost: O(1) on a warm cache (mutex + map lookup); O(jobs × recentCap)
+// when the cache misses or has expired. R245-GO-4 (#844): previously
+// this routed through KnownSessionIDs() which clones the cached set
+// before returning a map[string]bool — for a single-key probe that
+// allocation is pure overhead (~recentCap × jobs entries copied per
+// auto-chain spawn). containsSessionID below reads the cached set
+// directly under the cache mutex and short-circuits on the first
+// match. Public KnownSessionIDs() retains the clone-and-return shape
+// because dashboard pollers iterate the map.
 func (s *Scheduler) IsExcluded(sessionID string) bool {
 	if s == nil || sessionID == "" {
 		return false
 	}
-	// KnownSessionIDs returns a fresh map; the lookup is O(1) once built.
-	return s.KnownSessionIDs()[sessionID]
+	return s.containsSessionID(sessionID)
+}
+
+// containsSessionID is the single-key probe variant of KnownSessionIDs.
+// Shares the TTL cache + invalidation contract — readers see the same
+// snapshot a concurrent KnownSessionIDs() caller would observe — but
+// avoids the per-call map clone IsExcluded does not need. Triggers a
+// rebuild on the same conditions as KnownSessionIDs (cold cache or
+// TTL expired); the rebuilt set is then cached so subsequent IsExcluded
+// + KnownSessionIDs callers in the same window share work. R245-GO-4.
+func (s *Scheduler) containsSessionID(sessionID string) bool {
+	s.knownSessionsCache.mu.Lock()
+	if s.knownSessionsCache.set != nil &&
+		time.Since(s.knownSessionsCache.generatedAt) < knownSessionsCacheTTL {
+		_, ok := s.knownSessionsCache.set[sessionID]
+		s.knownSessionsCache.mu.Unlock()
+		return ok
+	}
+	s.knownSessionsCache.mu.Unlock()
+
+	set := s.buildKnownSessionsSet()
+
+	s.knownSessionsCache.mu.Lock()
+	s.knownSessionsCache.set = set
+	s.knownSessionsCache.generatedAt = time.Now()
+	s.knownSessionsCache.mu.Unlock()
+
+	_, ok := set[sessionID]
+	return ok
 }
 
 // KnownSessionIDs returns the set of Claude session IDs (UUID-style)

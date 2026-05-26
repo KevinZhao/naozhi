@@ -331,6 +331,12 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 }
 
 // handleCronCommand dispatches /cron subcommands (add, list, del, pause, resume).
+//
+// R239-CR-8 (#885): the inline 5-arm switch grew to 126 lines and forced
+// readers to scan past every arm to find the one they cared about.
+// Subcommands are now extracted into per-arm helpers so this dispatcher
+// stays narrow (parse → route) and each arm reads as a self-contained
+// unit. The reply / log surface is unchanged — only the call shape moves.
 func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) {
 	if d.platforms[msg.Platform] == nil {
 		return
@@ -347,106 +353,15 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 
 	switch sub {
 	case "add":
-		if len(parts) < 3 {
-			reply("用法: /cron add \"<schedule>\" <prompt>\n例: /cron add \"@every 30m\" 检查服务状态")
-			return
-		}
-		schedule, prompt, err := ParseCronAdd(parts[2])
-		if err != nil {
-			reply("格式错误: " + err.Error() + "\n用法: /cron add \"<schedule>\" <prompt>")
-			return
-		}
-		job := cron.NewJob(schedule, prompt, cron.JobIMContext{
-			Platform:  msg.Platform,
-			ChatID:    msg.ChatID,
-			ChatType:  msg.ChatType,
-			CreatedBy: msg.UserID,
-		})
-		if err := d.scheduler.AddJob(job); err != nil {
-			// AddJob wraps the raw schedule string + robfig/cron parser
-			// internals into the error; echoing that to IM leaks both the
-			// server-normalized form of the attacker's input and parser
-			// token positions. Log the detail for operator triage, reply
-			// with a generic message. Mirrors dashboard_cron handleCreate.
-			// R188-LOG-M1: schedule comes from user IM input; ParseCronAdd
-			// only gates ASCII C0/DEL, leaving C1 controls / bidi / LS/PS
-			// that can fragment journald structured fields.
-			log.Warn("cron AddJob rejected", "err", err,
-				"schedule", osutil.SanitizeForLog(job.Schedule, 256))
-			reply("创建失败：请检查定时表达式格式")
-			return
-		}
-		next := d.scheduler.NextRun(job)
-		// R190-LOG-M1: even though ParseCronAdd rejects C0/C1/bidi runes now,
-		// defence-in-depth: any future parser change that relaxes the policy
-		// must not leak visual-spoofing bytes back into group-chat replies.
-		reply(fmt.Sprintf("Job %s 已创建。Schedule: %s, Next: %s",
-			job.ID,
-			osutil.SanitizeForLog(job.Schedule, 256),
-			next.Format("01/02 15:04")))
-		log.Info("cron job created", "id", job.ID,
-			"schedule", osutil.SanitizeForLog(job.Schedule, 256))
-
+		d.handleCronAdd(msg, parts, reply, log)
 	case "list":
-		jobs := d.scheduler.ListJobs(msg.Platform, msg.ChatID)
-		if len(jobs) == 0 {
-			reply("当前聊天没有定时任务。")
-			return
-		}
-		var sb strings.Builder
-		sb.WriteString("定时任务:\n")
-		for _, j := range jobs {
-			status := ""
-			if j.Paused {
-				status = " [暂停]"
-			}
-			fmt.Fprintf(&sb, "  %s  %-20s %s%s\n", j.ID, j.Schedule, j.Prompt, status)
-		}
-		reply(sb.String())
-
+		d.handleCronList(msg, reply)
 	case "del":
-		if !validateCronIDArg(parts, "del", reply) {
-			return
-		}
-		j, err := d.scheduler.DeleteJob(parts[2], msg.Platform, msg.ChatID)
-		if err != nil {
-			// Echoing err.Error() to IM leaks internal scheduler state
-			// (normalized ID form, lock annotations). Dashboard already
-			// sanitises analogous handlers. Log raw, reply generic.
-			log.Warn("cron DeleteJob failed", "err", err, "id_prefix", parts[2])
-			reply("删除失败：请确认 ID 正确")
-			return
-		}
-		reply(fmt.Sprintf("Job %s 已删除。", j.ID))
-		log.Info("cron job deleted", "id", j.ID)
-
+		d.handleCronDel(msg, parts, reply, log)
 	case "pause":
-		if !validateCronIDArg(parts, "pause", reply) {
-			return
-		}
-		j, err := d.scheduler.PauseJob(parts[2], msg.Platform, msg.ChatID)
-		if err != nil {
-			log.Warn("cron PauseJob failed", "err", err, "id_prefix", parts[2])
-			reply("暂停失败：请确认 ID 正确或任务是否已暂停")
-			return
-		}
-		reply(fmt.Sprintf("Job %s 已暂停。", j.ID))
-		log.Info("cron job paused", "id", j.ID)
-
+		d.handleCronPause(msg, parts, reply, log)
 	case "resume":
-		if !validateCronIDArg(parts, "resume", reply) {
-			return
-		}
-		j, err := d.scheduler.ResumeJob(parts[2], msg.Platform, msg.ChatID)
-		if err != nil {
-			log.Warn("cron ResumeJob failed", "err", err, "id_prefix", parts[2])
-			reply("恢复失败：请确认 ID 正确或任务是否已暂停")
-			return
-		}
-		next := d.scheduler.NextRun(j)
-		reply(fmt.Sprintf("Job %s 已恢复。Next: %s", j.ID, next.Format("01/02 15:04")))
-		log.Info("cron job resumed", "id", j.ID)
-
+		d.handleCronResume(msg, parts, reply, log)
 	default:
 		reply("用法: /cron <add|list|del|pause|resume>\n" +
 			"  /cron add \"@every 30m\" 检查服务状态\n" +
@@ -456,6 +371,117 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 			"  /cron pause <id>\n" +
 			"  /cron resume <id>")
 	}
+}
+
+// handleCronAdd implements /cron add "<schedule>" <prompt>.
+func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string, reply func(string), log *slog.Logger) {
+	if len(parts) < 3 {
+		reply("用法: /cron add \"<schedule>\" <prompt>\n例: /cron add \"@every 30m\" 检查服务状态")
+		return
+	}
+	schedule, prompt, err := ParseCronAdd(parts[2])
+	if err != nil {
+		reply("格式错误: " + err.Error() + "\n用法: /cron add \"<schedule>\" <prompt>")
+		return
+	}
+	job := cron.NewJob(schedule, prompt, cron.JobIMContext{
+		Platform:  msg.Platform,
+		ChatID:    msg.ChatID,
+		ChatType:  msg.ChatType,
+		CreatedBy: msg.UserID,
+	})
+	if err := d.scheduler.AddJob(job); err != nil {
+		// AddJob wraps the raw schedule string + robfig/cron parser
+		// internals into the error; echoing that to IM leaks both the
+		// server-normalized form of the attacker's input and parser
+		// token positions. Log the detail for operator triage, reply
+		// with a generic message. Mirrors dashboard_cron handleCreate.
+		// R188-LOG-M1: schedule comes from user IM input; ParseCronAdd
+		// only gates ASCII C0/DEL, leaving C1 controls / bidi / LS/PS
+		// that can fragment journald structured fields.
+		log.Warn("cron AddJob rejected", "err", err,
+			"schedule", osutil.SanitizeForLog(job.Schedule, 256))
+		reply("创建失败：请检查定时表达式格式")
+		return
+	}
+	next := d.scheduler.NextRun(job)
+	// R190-LOG-M1: even though ParseCronAdd rejects C0/C1/bidi runes now,
+	// defence-in-depth: any future parser change that relaxes the policy
+	// must not leak visual-spoofing bytes back into group-chat replies.
+	reply(fmt.Sprintf("Job %s 已创建。Schedule: %s, Next: %s",
+		job.ID,
+		osutil.SanitizeForLog(job.Schedule, 256),
+		next.Format("01/02 15:04")))
+	log.Info("cron job created", "id", job.ID,
+		"schedule", osutil.SanitizeForLog(job.Schedule, 256))
+}
+
+// handleCronList implements /cron list.
+func (d *Dispatcher) handleCronList(msg platform.IncomingMessage, reply func(string)) {
+	jobs := d.scheduler.ListJobs(msg.Platform, msg.ChatID)
+	if len(jobs) == 0 {
+		reply("当前聊天没有定时任务。")
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("定时任务:\n")
+	for _, j := range jobs {
+		status := ""
+		if j.Paused {
+			status = " [暂停]"
+		}
+		fmt.Fprintf(&sb, "  %s  %-20s %s%s\n", j.ID, j.Schedule, j.Prompt, status)
+	}
+	reply(sb.String())
+}
+
+// handleCronDel implements /cron del <id>.
+func (d *Dispatcher) handleCronDel(msg platform.IncomingMessage, parts []string, reply func(string), log *slog.Logger) {
+	if !validateCronIDArg(parts, "del", reply) {
+		return
+	}
+	j, err := d.scheduler.DeleteJob(parts[2], msg.Platform, msg.ChatID)
+	if err != nil {
+		// Echoing err.Error() to IM leaks internal scheduler state
+		// (normalized ID form, lock annotations). Dashboard already
+		// sanitises analogous handlers. Log raw, reply generic.
+		log.Warn("cron DeleteJob failed", "err", err, "id_prefix", parts[2])
+		reply("删除失败：请确认 ID 正确")
+		return
+	}
+	reply(fmt.Sprintf("Job %s 已删除。", j.ID))
+	log.Info("cron job deleted", "id", j.ID)
+}
+
+// handleCronPause implements /cron pause <id>.
+func (d *Dispatcher) handleCronPause(msg platform.IncomingMessage, parts []string, reply func(string), log *slog.Logger) {
+	if !validateCronIDArg(parts, "pause", reply) {
+		return
+	}
+	j, err := d.scheduler.PauseJob(parts[2], msg.Platform, msg.ChatID)
+	if err != nil {
+		log.Warn("cron PauseJob failed", "err", err, "id_prefix", parts[2])
+		reply("暂停失败：请确认 ID 正确或任务是否已暂停")
+		return
+	}
+	reply(fmt.Sprintf("Job %s 已暂停。", j.ID))
+	log.Info("cron job paused", "id", j.ID)
+}
+
+// handleCronResume implements /cron resume <id>.
+func (d *Dispatcher) handleCronResume(msg platform.IncomingMessage, parts []string, reply func(string), log *slog.Logger) {
+	if !validateCronIDArg(parts, "resume", reply) {
+		return
+	}
+	j, err := d.scheduler.ResumeJob(parts[2], msg.Platform, msg.ChatID)
+	if err != nil {
+		log.Warn("cron ResumeJob failed", "err", err, "id_prefix", parts[2])
+		reply("恢复失败：请确认 ID 正确或任务是否已暂停")
+		return
+	}
+	next := d.scheduler.NextRun(j)
+	reply(fmt.Sprintf("Job %s 已恢复。Next: %s", j.ID, next.Format("01/02 15:04")))
+	log.Info("cron job resumed", "id", j.ID)
 }
 
 // validateCronIDArg checks that parts contains a third token (the cron job ID)

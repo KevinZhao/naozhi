@@ -1672,24 +1672,6 @@ func (l *EventLog) LastPromptSummary() string {
 	return loadAtomicString(&l.lastPromptSummary)
 }
 
-// lastEntryOfType scans backward through the ring buffer and returns the most
-// recent entry with the given type. Returns a zero EventEntry if none found.
-//
-// Unexported: only Process.lastEntryOfType (also unexported) calls this
-// helper, and that wrapper is exercised solely by cli-internal tests.
-// (R228-CR-4)
-func (l *EventLog) lastEntryOfType(typ string) EventEntry {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	for i := l.count - 1; i >= 0; i-- {
-		idx := (l.head - l.count + i + l.maxSize) % l.maxSize
-		if l.entries[idx].Type == typ {
-			return l.entries[idx]
-		}
-	}
-	return EventEntry{}
-}
-
 // LastActivitySummary returns the summary of the most recent "tool_use" or "thinking" entry.
 func (l *EventLog) LastActivitySummary() string {
 	return loadAtomicString(&l.lastActivitySummary)

@@ -85,19 +85,6 @@ func TestTodosMarkdownEmpty(t *testing.T) {
 	}
 }
 
-func TestTodosDetailJSONRoundTrip(t *testing.T) {
-	t.Parallel()
-	in := []TodoItem{{Content: "x", Status: "pending"}}
-	s := TodosDetailJSON(in)
-	var out []TodoItem
-	if err := json.Unmarshal([]byte(s), &out); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(out) != 1 || out[0].Content != "x" {
-		t.Errorf("round-trip mismatch: %+v", out)
-	}
-}
-
 // TestParseTodosWithRaw_RawIsArrayLiteral pins the R226-PERF-8 contract:
 // rawTodos must come back as the original `[...]` array bytes — not the
 // `{"todos":[...]}` envelope and not a re-serialised slice. process_event_
