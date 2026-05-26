@@ -83,3 +83,52 @@ func TestRunInflight_ReleaseRun_NilSafety(t *testing.T) {
 		t.Fatalf("CAS gate must be released even when gauge is nil")
 	}
 }
+
+// TestRunInflight_SetSessionID_ResumeWindow pins the R242-ARCH-22 (#766)
+// contract: setSessionID is the seam executeOpt invokes both immediately
+// after GetOrCreate (when the router carries a SessionID from a /resume
+// handshake) AND after Send (the new-spawn late-bind). Both writes must
+// be observable through snapshot() — the second write is idempotent on
+// equal value (no extra alloc) but MUST overwrite stale empty values.
+// Empty strings short-circuit so the GetOrCreate-fast-path can call
+// setSessionID(sess.SessionID()) unconditionally without erasing a
+// previously-set ID. Without this contract the empty-sessionID window
+// between CAS-true and Send-return lets KnownSessionIDs probes from a
+// concurrent auto-workspace-chain spawn miss this run's ID.
+func TestRunInflight_SetSessionID_ResumeWindow(t *testing.T) {
+	r := &runInflight{}
+	if !r.running.CompareAndSwap(false, true) {
+		t.Fatalf("CAS into running=true failed")
+	}
+	r.runID.Store(boxString("rid"))
+	r.startedAt.Store(boxTime(time.Now()))
+	r.phase.Store(boxString(PhaseSpawning))
+	r.trigger.Store(boxString(string(TriggerScheduled)))
+
+	// Empty string is a no-op (preserves any prior write).
+	r.setSessionID("")
+	if v, ok := r.snapshot(); !ok || v.SessionID != "" {
+		t.Fatalf("after setSessionID(\"\") sessionID should remain empty; got %+v ok=%v", v, ok)
+	}
+
+	// First non-empty Store (GetOrCreate-time path).
+	r.setSessionID("sess-from-resume")
+	v, ok := r.snapshot()
+	if !ok || v.SessionID != "sess-from-resume" {
+		t.Fatalf("setSessionID after GetOrCreate did not stick; got %+v ok=%v", v, ok)
+	}
+
+	// Idempotent same-value Store (post-Send path with same id).
+	r.setSessionID("sess-from-resume")
+	v, ok = r.snapshot()
+	if !ok || v.SessionID != "sess-from-resume" {
+		t.Fatalf("idempotent setSessionID changed value; got %+v ok=%v", v, ok)
+	}
+
+	// Distinct value overwrites (the rare case of resume + new spawn ID).
+	r.setSessionID("sess-from-send")
+	v, ok = r.snapshot()
+	if !ok || v.SessionID != "sess-from-send" {
+		t.Fatalf("setSessionID overwrite did not stick; got %+v ok=%v", v, ok)
+	}
+}

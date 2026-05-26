@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -283,27 +282,10 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	socketPath := SocketPath(keyHash)
 	stateFile := StateFilePath(m.stateDir, keyHash)
 
-	// Build shim subprocess args
-	args := []string{"shim", "run",
-		"--key", key,
-		"--socket", socketPath,
-		"--state-file", stateFile,
-		// R246-CR-007: integer→string via strconv avoids the fmt reflect
-		// path in StartShimWithBackend (called once per shim spawn).
-		// bufferSize is int; maxBufBytes is int64 (see fields above).
-		"--buffer-size", strconv.Itoa(m.bufferSize),
-		"--max-buffer-bytes", strconv.FormatInt(m.maxBufBytes, 10),
-		"--idle-timeout", m.idleTimeout.String(),
-		"--watchdog-timeout", m.watchdogTimeout.String(),
-		"--cli-path", cliPath,
-		"--cwd", cwd,
-	}
-	if backend != "" {
-		args = append(args, "--backend", backend)
-	}
-	for _, a := range cliArgs {
-		args = append(args, "--cli-arg", a)
-	}
+	// R237-CR-11 / R246-CR-005: argv construction is its own concern —
+	// extracted into buildShimArgs so the rest of StartShimWithBackend can
+	// stay focused on slot bookkeeping, ready handshake, and handle install.
+	args := m.buildShimArgs(key, socketPath, stateFile, cliPath, backend, cliArgs, cwd)
 
 	// Use exec.Command (not CommandContext): shim must outlive naozhi.
 	// Context is only used for the startup handshake timeout below.
@@ -346,72 +328,28 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 		}
 	}()
 
-	// Read ready message (with timeout)
-	readyCh := make(chan shimReadyMsg, 1)
-	go func() {
-		defer stdout.Close()
-		scanner := bufio.NewScanner(stdout)
-		if scanner.Scan() {
-			var ready struct {
-				Status string `json:"status"`
-				PID    int    `json:"pid"`
-				Token  string `json:"token"`
-				Error  string `json:"error"`
-			}
-			if err := json.Unmarshal(scanner.Bytes(), &ready); err != nil {
-				readyCh <- shimReadyMsg{"", fmt.Errorf("parse ready: %w", err)}
-				return
-			}
-			if ready.Status == "error" {
-				readyCh <- shimReadyMsg{"", fmt.Errorf("shim startup failed: %s", ready.Error)}
-				return
-			}
-			if ready.Status != "ready" {
-				readyCh <- shimReadyMsg{"", fmt.Errorf("unexpected status: %s", ready.Status)}
-				return
-			}
-			readyCh <- shimReadyMsg{ready.Token, nil}
-		} else {
-			readyCh <- shimReadyMsg{"", fmt.Errorf("shim exited before ready")}
-		}
-	}()
-
-	// Use NewTimer + defer Stop so the goroutine backing time.After does not
-	// park for 30s after a fast-path success or ctx cancellation. Under high
-	// start/restart pressure this previously accumulated up to thousands of
-	// live timer goroutines between GC cycles.
-	readyTimer := time.NewTimer(30 * time.Second)
-	defer readyTimer.Stop()
-
 	// killAndUnblock terminates the shim and closes the caller-side stdout
-	// pipe so the scanner goroutine spawned above is not left parked on a
-	// Read that won't return until the OS tears down the shim's stdout fd.
-	// Closing stdout here raises an error in the goroutine's Scan() and lets
-	// it deliver to the buffered readyCh + run its own defer stdout.Close()
-	// (double Close returns ErrClosed, which is harmless). Without this
-	// helper, a shim that ignores SIGTERM keeps the goroutine alive for up
-	// to its 4 h idle-timeout — under high-frequency restart pressure this
-	// previously accumulated dozens to hundreds of leaked goroutines.
-	// R40-CONCUR1 / R42-REL-SHIM-PGKILL.
+	// pipe so the scanner goroutine inside waitForShimReady is not left
+	// parked on a Read that won't return until the OS tears down the shim's
+	// stdout fd. Closing stdout here raises an error in the goroutine's
+	// Scan() and lets it deliver to the buffered readyCh + run its own
+	// defer stdout.Close() (double Close returns ErrClosed, harmless).
+	// Without this helper, a shim that ignores SIGTERM keeps the goroutine
+	// alive for up to its 4 h idle-timeout — under high-frequency restart
+	// pressure this previously accumulated dozens to hundreds of leaked
+	// goroutines. R40-CONCUR1 / R42-REL-SHIM-PGKILL.
 	killAndUnblock := func() {
 		_ = stdout.Close()
 		_ = cmd.Process.Kill()
 	}
 
-	var tokenB64 string
-	select {
-	case result := <-readyCh:
-		if result.err != nil {
-			killAndUnblock()
-			return nil, result.err
-		}
-		tokenB64 = result.token
-	case <-readyTimer.C:
-		killAndUnblock()
-		return nil, fmt.Errorf("shim ready timeout")
-	case <-ctx.Done():
-		killAndUnblock()
-		return nil, ctx.Err()
+	// R237-CR-11 / R246-CR-005: ready-frame parse + 30s timeout +
+	// ctx-cancel selection extracted into waitForShimReady. The cleanup
+	// closure is invoked here (not inside the helper) so the helper stays
+	// pure I/O — the slot-release defer above wraps the whole flow.
+	tokenB64, err := waitForShimReady(ctx, stdout, 30*time.Second, killAndUnblock)
+	if err != nil {
+		return nil, err
 	}
 
 	tokenRaw, err := base64.StdEncoding.DecodeString(tokenB64)

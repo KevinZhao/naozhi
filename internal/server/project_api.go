@@ -94,6 +94,31 @@ type ProjectHandlers struct {
 	configPutLimiter *ipLimiter
 }
 
+// projectListItem is the typed wire shape for GET /api/projects local
+// entries. Replaces a per-project `map[string]any` with 8 entries — that
+// allocated a hash table + 8 boxed `any` slots per project on every
+// dashboard 1Hz poll (multi-tab × N projects). The named struct serialises
+// directly via reflect-cached encoders, no map alloc, no any boxing.
+//
+// Field order/JSON tags match the previous map keys exactly so wire output
+// is byte-stable for clients (wire bytes still differ trivially since map
+// iteration was unordered, but every clinet treats the response as a JSON
+// object with named keys). R247-PERF-6 / #538.
+type projectListItem struct {
+	Name         string                `json:"name"`
+	Path         string                `json:"path"`
+	PlannerState string                `json:"planner_state"`
+	PlannerModel string                `json:"planner_model"`
+	Config       project.ProjectConfig `json:"config"`
+	Favorite     bool                  `json:"favorite"`
+	GitRemoteURL string                `json:"git_remote_url"`
+	GitHub       bool                  `json:"github"`
+	// Node is populated only when remote nodes are configured. omitempty
+	// so the local-only response (no `node` key in the legacy map shape)
+	// stays byte-stable.
+	Node string `json:"node,omitempty"`
+}
+
 // GET /api/projects — list all projects (local + remote).
 func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	if h.projectMgr == nil {
@@ -102,7 +127,8 @@ func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	projects := h.projectMgr.All()
-	result := make([]map[string]any, 0, len(projects))
+	hasNodes := h.nodeAccess.HasNodes()
+	result := make([]projectListItem, 0, len(projects))
 	for _, p := range projects {
 		plannerKey := p.PlannerSessionKey()
 		plannerState := "none"
@@ -111,24 +137,27 @@ func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			plannerState = snap.State
 		}
 
-		result = append(result, map[string]any{
-			"name":           p.Name,
-			"path":           p.Path,
-			"planner_state":  plannerState,
-			"planner_model":  h.projectMgr.EffectivePlannerModel(p),
-			"config":         p.Config,
-			"favorite":       p.Config.Favorite,
-			"git_remote_url": redactGitRemoteURL(p.GitRemoteURL),
-			"github":         p.IsGitHub,
-		})
+		item := projectListItem{
+			Name:         p.Name,
+			Path:         p.Path,
+			PlannerState: plannerState,
+			PlannerModel: h.projectMgr.EffectivePlannerModel(p),
+			Config:       p.Config,
+			Favorite:     p.Config.Favorite,
+			GitRemoteURL: redactGitRemoteURL(p.GitRemoteURL),
+			GitHub:       p.IsGitHub,
+		}
+		if hasNodes {
+			item.Node = "local"
+		}
+		result = append(result, item)
 	}
 
 	// Merge remote projects
-	if h.nodeAccess.HasNodes() {
+	if hasNodes {
 		allProjects := make([]any, 0, len(result))
-		for _, r := range result {
-			r["node"] = "local"
-			allProjects = append(allProjects, r)
+		for i := range result {
+			allProjects = append(allProjects, result[i])
 		}
 		cachedProjects := h.nodeCache.Projects()
 		for _, items := range cachedProjects {
