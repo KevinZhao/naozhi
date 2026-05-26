@@ -834,10 +834,29 @@ func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
 // scheduler code), so the cross-call hold is safe. The cost is one
 // extra contended RLock window per dashboard 1Hz poll, dwarfed by
 // the s.cron.Entry sort+scan it wraps.
+//
+// R238-ARCH-17 (#784): entryID is an unexported runtime-only field that
+// is zero-valued on any *Job that did not flow through this Scheduler's
+// AddJob / loadJobs path (e.g. a test fixture, a deserialised snapshot,
+// or a cross-package caller that passed json.Unmarshal output). The
+// previous implementation silently returned time.Time{} in that case,
+// which the dashboard / IM reply layer renders as "01/01 00:00" — a
+// misleading "unknown next run" that looks like a real schedule. When
+// j.entryID is zero, fall back to looking up the live *Job by j.ID in
+// s.jobs and reading its entryID; the on-record entryID is the source
+// of truth, and a non-existent jobID yields a true zero return.
 func (s *Scheduler) NextRun(j *Job) time.Time {
+	if j == nil {
+		return time.Time{}
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	entryID := j.entryID
+	if entryID == 0 && j.ID != "" {
+		if live, ok := s.jobs[j.ID]; ok {
+			entryID = live.entryID
+		}
+	}
 	if entryID == 0 {
 		return time.Time{}
 	}

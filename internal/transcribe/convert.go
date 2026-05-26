@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -14,8 +15,21 @@ import (
 // ErrFFmpegNotFound is returned when ffmpeg is not installed.
 var ErrFFmpegNotFound = errors.New("ffmpeg not found in PATH; install with: dnf install -y ffmpeg")
 
+// ffmpegPathEnv is the operator-override knob for the ffmpeg binary
+// location. When set to a non-empty absolute path, lookupFFmpeg uses it
+// directly and skips PATH resolution entirely. Pointing this at the system
+// ffmpeg (e.g. /usr/bin/ffmpeg) sidesteps any PATH-injection attack
+// surface at the systemd unit / shell rc level.
+const ffmpegPathEnv = "NAOZHI_FFMPEG_PATH"
+
 // lookupFFmpeg resolves the ffmpeg binary on every call rather than caching
 // the first PATH-resolved entry process-wide.
+//
+// Resolution order:
+//  1. NAOZHI_FFMPEG_PATH env var (operator-supplied absolute path; verified
+//     executable on each call — if it disappears, surface the error rather
+//     than silently fall back to PATH so a misconfigured override is loud).
+//  2. exec.LookPath("ffmpeg") — the historical default.
 //
 // R240-SEC-9 (#1050): the previous implementation used sync.Once to memoise
 // the first exec.LookPath result for the lifetime of the process. That
@@ -35,7 +49,25 @@ var ErrFFmpegNotFound = errors.New("ffmpeg not found in PATH; install with: dnf 
 // any reasonable system, and this code path is voice-message-rate
 // (≤ a few requests/second per chat), nowhere near a hot loop. The
 // sync.Once-saved syscalls were never measurably worth the cache hazard.
+//
+// The env-var override (NAOZHI_FFMPEG_PATH) addresses the second half of
+// the issue's proposal: operators in tightened production environments
+// can pin the absolute path so transcribe never depends on PATH at all,
+// removing the injection surface entirely instead of merely refreshing it.
 func lookupFFmpeg() (string, error) {
+	if override := os.Getenv(ffmpegPathEnv); override != "" {
+		// Stat to verify the override is still a real file — a misconfigured
+		// path that points at a deleted binary should error loudly rather
+		// than silently fall back to PATH. exec.LookPath also enforces the
+		// executable bit which Stat alone does not, so prefer LookPath for
+		// the absolute-path branch (it accepts absolute inputs and verifies
+		// the +x bit in one call).
+		if path, err := exec.LookPath(override); err == nil {
+			return path, nil
+		} else {
+			return "", fmt.Errorf("%s=%q: %w", ffmpegPathEnv, override, err)
+		}
+	}
 	return exec.LookPath("ffmpeg")
 }
 

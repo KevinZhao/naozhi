@@ -784,6 +784,62 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 	}()
 }
 
+// handleGetOrCreateError maps a router.GetOrCreate failure into the
+// user-facing reply ctx, an optional ctx.cancel cleanup, and a Chinese
+// error message. Pulled out of sendAndReply so the seven-stage main
+// path stays focused on the happy-path turn flow (R245-ARCH-39 / #894);
+// the per-sentinel switch is the part most likely to grow as new
+// session-spawn failure modes are added (e.g. backend-disabled, quota
+// exhausted) and now has a single home that unit tests can target
+// directly without standing up a full Dispatcher.
+//
+// cleanup is non-nil when this returns a fresh background ctx (the
+// shutdown / context.Canceled branch). Callers MUST defer it before
+// using replyCtx, or the timeout goroutine leaks.
+//
+// Error logging policy: shutdown-path cancellation is expected noise on
+// every restart and downgrades to Info so ops dashboards don't light up;
+// every other GetOrCreate failure stays at Error.
+func (d *Dispatcher) handleGetOrCreateError(
+	ctx context.Context,
+	err error,
+	lg *slog.Logger,
+) (replyCtx context.Context, cleanup func(), errMsg string) {
+	if errors.Is(err, context.Canceled) {
+		lg.Info("get session cancelled during shutdown", "err", err)
+	} else {
+		lg.Error("get session", "err", err)
+	}
+	replyCtx = ctx
+	switch {
+	case errors.Is(err, session.ErrMaxProcs):
+		errMsg = "当前处理已满，请稍后重试。"
+	case errors.Is(err, session.ErrMaxExemptSessions):
+		// R190-WRAP-M1: exempt-session cap means "too many projects/cron
+		// workers"; user /new won't clear it because the exempt counter
+		// is independent of user sessions. Tell the user explicitly so
+		// they contact the operator instead of looping on /new.
+		errMsg = "长时会话（planner/cron）已满，请联系管理员。"
+	case errors.Is(err, session.ErrNoCLIWrapper):
+		// R190-WRAP-M1: permanent config error; /new retry is hopeless.
+		// Surface a clear "ask operator" so IM users don't spin on it.
+		errMsg = "会话后端未配置，请联系管理员。"
+	case errors.Is(err, context.Canceled):
+		errMsg = "系统正在重启，请稍后重试。"
+		// R188-CONC-M1: ctx is already Done on shutdown path; using it for
+		// the user-facing error reply silently drops the notification at
+		// the platform layer. Match the handleOwnerLoopPanic recovery
+		// pattern and use a fresh Background ctx with short timeout so the
+		// user actually sees the "restart, retry" message.
+		notifyCtx, cancel := context.WithTimeout(context.Background(), shutdownReplyTimeout)
+		replyCtx = notifyCtx
+		cleanup = cancel
+	default:
+		errMsg = "会话创建失败，请发送 /new 重置后重试。"
+	}
+	return replyCtx, cleanup, errMsg
+}
+
 // sendAndReply performs one turn: GetOrCreate session, send message, deliver reply.
 // isFirst indicates whether this is the first message (triggers takeover/session-new
 // notifications); queued follow-ups skip these.
@@ -818,41 +874,9 @@ func (d *Dispatcher) sendAndReply(
 
 	sess, sessStatus, err := d.router.GetOrCreate(ctx, key, opts)
 	if err != nil {
-		// Shutdown-path cancellation is expected noise, not an alarm;
-		// downgrade to Info so ops dashboards don't light up on every
-		// restart. Unexpected failures stay at Error.
-		if errors.Is(err, context.Canceled) {
-			lg.Info("get session cancelled during shutdown", "err", err)
-		} else {
-			lg.Error("get session", "err", err)
-		}
-		var errMsg string
-		replyCtx := ctx
-		switch {
-		case errors.Is(err, session.ErrMaxProcs):
-			errMsg = "当前处理已满，请稍后重试。"
-		case errors.Is(err, session.ErrMaxExemptSessions):
-			// R190-WRAP-M1: exempt-session cap means "too many projects/cron
-			// workers"; user /new won't clear it because the exempt counter
-			// is independent of user sessions. Tell the user explicitly so
-			// they contact the operator instead of looping on /new.
-			errMsg = "长时会话（planner/cron）已满，请联系管理员。"
-		case errors.Is(err, session.ErrNoCLIWrapper):
-			// R190-WRAP-M1: permanent config error; /new retry is hopeless.
-			// Surface a clear "ask operator" so IM users don't spin on it.
-			errMsg = "会话后端未配置，请联系管理员。"
-		case errors.Is(err, context.Canceled):
-			errMsg = "系统正在重启，请稍后重试。"
-			// R188-CONC-M1: ctx is already Done on shutdown path; using it for
-			// the user-facing error reply silently drops the notification at
-			// the platform layer. Match the handleOwnerLoopPanic recovery
-			// pattern and use a fresh Background ctx with short timeout so the
-			// user actually sees the "restart, retry" message.
-			notifyCtx, cancel := context.WithTimeout(context.Background(), shutdownReplyTimeout)
-			defer cancel()
-			replyCtx = notifyCtx
-		default:
-			errMsg = "会话创建失败，请发送 /new 重置后重试。"
+		replyCtx, cleanup, errMsg := d.handleGetOrCreateError(ctx, err, lg)
+		if cleanup != nil {
+			defer cleanup()
 		}
 		d.replyText(replyCtx, msg, errMsg, lg)
 		return

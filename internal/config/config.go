@@ -405,8 +405,20 @@ func Load(path string) (*Config, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("config file %s is not a regular file", path)
 	}
-	if fi.Mode()&0o044 != 0 {
-		return nil, fmt.Errorf("config file %s is group/world-readable (mode %04o); restrict with: chmod 0600 %s",
+	// R237-SEC-8 / #654: align the fd-stat mask with the Lstat path's 0o077.
+	// The previous 0o044 only covered group-read + world-read, so a 0o650
+	// (group rwx + group-write only) symlink-swap target Lstat would have
+	// flagged via the wider mask still squeaked through this fd-stat
+	// re-check — a TOCTOU window where an attacker who can interrupt the
+	// Lstat→OpenFile gap with a symlink swap to a 0o650 file gets the file
+	// loaded into memory anyway. Widen to 0o077 so the two gates apply the
+	// SAME policy and the second check is a real backstop, not a narrower
+	// (and therefore weaker) one. Error string keeps "group/world-readable"
+	// because read-only is still the most common operator misstep; the
+	// extra coverage rejects rarer write/execute bits that have no business
+	// on a credential-bearing config file regardless of the read bit.
+	if fi.Mode()&0o077 != 0 {
+		return nil, fmt.Errorf("config file %s is group/world-accessible (mode %04o); restrict with: chmod 0600 %s",
 			path, fi.Mode().Perm(), path)
 	}
 	// Cap config reads at 1 MiB; the on-disk shape is ~hundreds of

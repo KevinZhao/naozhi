@@ -253,6 +253,18 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 // after a successful saveStore so the two files stay correlated. Uses the
 // same atomic-write primitive so a crash between the two writes leaves the
 // main store consistent even if the meta is stale by one cycle.
+//
+// R233B-ARCH-6 (#1023): switched from os.WriteFile to osutil.WriteFileAtomic
+// so a partial write under power loss can no longer leave a half-written
+// JSON object on disk that readStoreMeta then fails to unmarshal. Although
+// the sidecar is advisory and a missing meta is treated as legacy v1 (so a
+// truncated meta would not crash the loader), a corrupt half-line meta
+// emits the "parse session store meta failed" warn on every load — operators
+// then chase a phantom error. Atomic write ensures the meta is either the
+// previous version or the new version, never a torn middle state. The
+// 2-fsync overhead (tmp file + SyncDir) is paid at most once per saveStore
+// and runs *after* the main store is already durable, so the user-visible
+// save latency is dominated by the main-store write.
 func writeStoreMeta(storePath string) {
 	metaPath := storeMetaPath(storePath)
 	if metaPath == "" {
@@ -267,14 +279,7 @@ func writeStoreMeta(storePath string) {
 		slog.Warn("marshal session store meta failed", "err", err)
 		return
 	}
-	// The meta sidecar is advisory (used only for cross-version downgrade
-	// detection) — failure here does not compromise the already-durable main
-	// store. A plain write spares two fsyncs per save (vs. WriteFileAtomic's
-	// fsync tmp + SyncDir pair), which matters on slower durable backends like
-	// EBS gp2 where each fsync can run 20-50ms. A partial write on crash only
-	// loses the sidecar; readStoreMeta treats a missing/malformed sidecar as
-	// legacy v1, so the downgrade check degrades gracefully.
-	if err := os.WriteFile(metaPath, data, 0600); err != nil {
+	if err := osutil.WriteFileAtomic(metaPath, data, 0600); err != nil {
 		slog.Warn("write session store meta failed", "path", metaPath, "err", err)
 	}
 }

@@ -201,6 +201,19 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	//   - skipPersist=false（这次 run 应该被记录）
 	//   - jobPersistOK=true（Job 端写盘成功；否则 disk-divergence 风险）
 	//   - runStore 启用
+	//
+	// R250-SEC-5 (#1094): a.prompt is the snapshot Job.Prompt at execute
+	// time. New jobs flow through containsCronUnsafe / validateCronPrompt
+	// at the dashboard / IM write edge AND a defence-in-depth scan inside
+	// loadJobs. But a cron_jobs.json predating those gates can carry a
+	// legacy Prompt with C0 / C1 / bidi runes — every CronRun.Prompt
+	// persisted thereafter inherits them, landing in operator-side log
+	// scrapers and SIEMs that read runs/<jobID>/<runID>.json directly.
+	// Run the same SanitizeForLog scrub at the persist boundary so the
+	// stored record matches what handleRunDetail (read-side) would produce.
+	// Idempotent on already-clean prompts; cheap relative to JSON marshal +
+	// fsync that immediately follow.
+	persistedPrompt := osutil.SanitizeForLog(a.prompt, MaxPromptBytes)
 	if !a.skipPersist && jobPersistOK && s.runStore != nil {
 		s.runStore.Append(&CronRun{
 			RunID:       a.runID,
@@ -211,7 +224,7 @@ func (s *Scheduler) finishRun(a finishArgs) {
 			EndedAt:     endedAt,
 			DurationMS:  durationMS,
 			SessionID:   a.sessionID,
-			Prompt:      a.prompt,
+			Prompt:      persistedPrompt,
 			WorkDir:     a.workDir,
 			Fresh:       a.fresh,
 			Result:      persistedResult,
