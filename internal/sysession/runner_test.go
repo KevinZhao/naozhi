@@ -93,3 +93,56 @@ func TestNewRunner_BinPathValidation(t *testing.T) {
 		}
 	})
 }
+
+// failingWriter returns errors on every Write call. Models a strings.Builder
+// that has been corrupted, a wrapped fd that hit ENOSPC mid-stream, or any
+// other inner sink that has fully failed.
+type failingWriter struct {
+	calls int
+}
+
+func (f *failingWriter) Write(p []byte) (int, error) {
+	f.calls++
+	return 0, errors.New("inner-writer dead")
+}
+
+// TestLimitedWriter_StopsCallingFailedInnerWriter pins R238-GO-5 (#794):
+// once the inner io.Writer has reported a non-nil error, limitedWriter
+// MUST NOT call it again. The previous shape kept invoking inner.Write on
+// every subsequent chunk because lw.n never grew (failed writes return
+// written=0), so the cap-overflow fast-path never engaged either. exec.Cmd
+// would burn a syscall per stderr line for the rest of the subprocess
+// lifetime. Verify the failed flag short-circuits to the same
+// swallow-and-claim-success behaviour the cap-overflow path uses.
+func TestLimitedWriter_StopsCallingFailedInnerWriter(t *testing.T) {
+	t.Parallel()
+	fw := &failingWriter{}
+	lw := &limitedWriter{w: fw, max: 1024}
+
+	// First Write triggers the inner-writer error. We still must report
+	// (len(p), nil) so exec.Cmd's pump treats the chunk as accepted.
+	chunk := []byte("first stderr line\n")
+	n, err := lw.Write(chunk)
+	if n != len(chunk) || err != nil {
+		t.Fatalf("first Write = (%d, %v), want (%d, nil)", n, err, len(chunk))
+	}
+	if fw.calls != 1 {
+		t.Fatalf("first Write should have called inner once, got %d", fw.calls)
+	}
+	if !lw.failed {
+		t.Errorf("limitedWriter.failed should be set after inner error")
+	}
+
+	// Subsequent Writes must NOT touch the inner writer at all — the
+	// failed flag should short-circuit. Without the fix, every line
+	// would re-enter inner.Write.
+	for i := 0; i < 5; i++ {
+		n, err := lw.Write([]byte("subsequent line\n"))
+		if n != 16 || err != nil {
+			t.Fatalf("post-fail Write %d returned (%d, %v), want (16, nil)", i, n, err)
+		}
+	}
+	if fw.calls != 1 {
+		t.Errorf("inner writer was called %d times after first failure; want exactly 1", fw.calls)
+	}
+}

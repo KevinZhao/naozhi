@@ -378,9 +378,10 @@ var _ Runner = (*runnerImpl)(nil)
 // cmd.Stderr / cmd.Stdout for the sysession one-shot Run path; do
 // NOT expose it beyond the package without revisiting this trade-off.
 type limitedWriter struct {
-	w   io.Writer
-	max int
-	n   int
+	w      io.Writer
+	max    int
+	n      int
+	failed bool // R238-GO-5 (#794): set once inner.Write reports err.
 }
 
 func (lw *limitedWriter) Write(p []byte) (int, error) {
@@ -390,6 +391,18 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 	// Anything past max is silently discarded.
 	remaining := lw.max - lw.n
 	if remaining <= 0 {
+		return len(p), nil
+	}
+	// R238-GO-5 (#794): once the inner writer has errored, do not call
+	// it again. The previous shape kept invoking lw.w.Write on every
+	// subsequent chunk; if the writer was a strings.Builder backed by a
+	// dead buffer or a wrapped-fd that hit ENOSPC, lw.n never grew so
+	// the cap-fast-path never engaged and we burned a syscall per
+	// stderr line for the rest of the subprocess lifetime. The failed
+	// flag short-circuits to the same swallow-and-claim-success
+	// behaviour the cap-overflow path already uses, so the pump still
+	// makes forward progress without re-trying a known-broken sink.
+	if lw.failed {
 		return len(p), nil
 	}
 	chunk := p
@@ -403,6 +416,8 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 	// stderr pump). On the discard path we already swallow overflow
 	// without an error; do the same on writer error so the pump treats
 	// the chunk as fully accepted and keeps draining.
-	_ = err
+	if err != nil {
+		lw.failed = true
+	}
 	return len(p), nil
 }
