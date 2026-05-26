@@ -778,7 +778,7 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 				lg.Error("ownerLoop reply panic recovered", "key", key, "panic", rr)
 			}
 		}()
-		notifyCtx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
+		notifyCtx, cancel := detachedNotifyCtx(platformReplyTimeout)
 		defer cancel()
 		d.replyText(notifyCtx, msg, "处理异常，请稍后重试。", nil)
 	}()
@@ -848,7 +848,7 @@ func (d *Dispatcher) sendAndReply(
 			// the platform layer. Match the handleOwnerLoopPanic recovery
 			// pattern and use a fresh Background ctx with short timeout so the
 			// user actually sees the "restart, retry" message.
-			notifyCtx, cancel := context.WithTimeout(context.Background(), shutdownReplyTimeout)
+			notifyCtx, cancel := detachedNotifyCtx(shutdownReplyTimeout)
 			defer cancel()
 			replyCtx = notifyCtx
 		default:
@@ -1244,7 +1244,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
 					"chat_id", chatID, "tool_use_id", aq.ToolUseID, "panic", r)
 			}
 		}()
-		rctx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
+		rctx, cancel := detachedNotifyCtx(platformReplyTimeout)
 		defer cancel()
 
 		if sender, ok := platform.AsQuestionCardSender(p); ok {
@@ -1318,7 +1318,7 @@ func (t *replyTracker) sendTodoMessage(text string) {
 	t.lastTodoText = text
 
 	// R236-GO-1: detach from t.ctx so a near-deadline turn can still finish writing TodoWrite.
-	rctx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
+	rctx, cancel := detachedNotifyCtx(platformReplyTimeout)
 	defer cancel()
 	if _, err := t.p.Reply(rctx, platform.OutgoingMessage{ChatID: t.chatID, Text: text}); err != nil {
 		// R238-CR-5: previously slog.Debug — silent because R236-GO-1
