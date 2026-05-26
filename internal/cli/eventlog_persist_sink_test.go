@@ -373,6 +373,69 @@ func TestEventLog_ReplayInvokeTotal_PreSinkAttach(t *testing.T) {
 	}
 }
 
+// TestEventLog_SinkReady_LifecycleTransitions pins R242-ARCH-20 by
+// locking down the SinkReady() accessor — the diagnostic /health ports
+// the original review asked for. The state machine is:
+//
+//	construction          → SinkReady=false
+//	SetPersistSink(real)  → SinkReady=true
+//	SetPersistSink(nil)   → SinkReady=false (clear path)
+//	SetPersistSink(real2) → SinkReady=true
+//
+// Each transition is atomic with the persistSinkPtr Store inside
+// SetPersistSink (sink-first/ready-second on install, ready-first/sink-
+// second on clear — see the godoc on SetPersistSink for the asymmetry
+// proof). A regression that flipped sinkReady without the matching
+// pointer Store would either silently lose an event (sinkReady=true,
+// ptr=nil) or mis-tag a live event as replay (sinkReady=false,
+// ptr=real). The accessor lets /health detect both via the
+// SinkReady ↔ ReplayInvokeTotal pair.
+//
+// Also exercises the nil-receiver guard so /health request paths that
+// race a torn-down EventLog report "not ready" instead of panicking.
+func TestEventLog_SinkReady_LifecycleTransitions(t *testing.T) {
+	t.Parallel()
+
+	var nilLog *EventLog
+	if nilLog.SinkReady() {
+		t.Fatalf("SinkReady on nil receiver = true, want false")
+	}
+
+	l := NewEventLog(16)
+	if l.SinkReady() {
+		t.Fatalf("SinkReady at construction = true, want false")
+	}
+
+	c := &captureSink{}
+	l.SetPersistSink(c.asSink())
+	if !l.SinkReady() {
+		t.Fatalf("SinkReady after SetPersistSink(real) = false, want true")
+	}
+
+	// Clear path: ready must flip back to false so a subsequent
+	// SetPersistSink(real) re-enters the pre-attach phase cleanly.
+	// Without this, a "pause persist → re-install sink → InjectHistory"
+	// sequence would tag the replay batch replayPhase=false (live)
+	// per R20260526-GO-010.
+	l.SetPersistSink(nil)
+	if l.SinkReady() {
+		t.Fatalf("SinkReady after SetPersistSink(nil) = true, want false")
+	}
+
+	// Re-install: ready returns to true.
+	l.SetPersistSink(c.asSink())
+	if !l.SinkReady() {
+		t.Fatalf("SinkReady after re-install = false, want true")
+	}
+
+	// SetPersistSinkPair install path also flips ready=true.
+	l2 := NewEventLog(16)
+	l2.SetPersistSinkPair(c.asSink(), nil)
+	if !l2.SinkReady() {
+		t.Fatalf("SinkReady after SetPersistSinkPair = false, want true")
+	}
+}
+
 // TestEventLog_SinkConcurrent runs Appends under -race alongside
 // sink-replacing SetPersistSink calls. Racey access to the atomic
 // pointer would show up here.

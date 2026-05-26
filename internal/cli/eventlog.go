@@ -661,6 +661,30 @@ func (l *EventLog) ReplayInvokeTotal() int64 {
 	return l.replayInvokeTotal.Load()
 }
 
+// SinkReady reports whether SetPersistSink has wired a persistence hook
+// and toggled `sinkReady` to true. Designed for /health surfacing — pair
+// with ReplayInvokeTotal() so operators can distinguish "the sink simply
+// hasn't attached yet" (SinkReady=false, ReplayInvokeTotal frozen at the
+// InjectHistory replay total) from "the SetPersistSink-after-Append
+// ordering window opened in production" (SinkReady=true,
+// ReplayInvokeTotal still climbing — should be statistically impossible
+// under correct caller ordering).
+//
+// R242-ARCH-20 (closes the diagnostic surface the original review asked
+// for). The counter pair already covers the leak side; this accessor
+// closes the "is the sink up?" half so /health doesn't have to peek at
+// internal atomics.
+//
+// Safe to call from any goroutine. Returns false on a nil receiver so
+// /health request paths that observe a torn-down EventLog (rare, but
+// possible during shutdown) report "not ready" rather than panic.
+func (l *EventLog) SinkReady() bool {
+	if l == nil {
+		return false
+	}
+	return l.sinkReady.Load()
+}
+
 // stampUUID guarantees every appended EventEntry has a non-empty
 // UUID. Legacy callers that already set UUID (e.g. history replay
 // paths using textutil.DeriveLegacyUUID for determinism) keep their
