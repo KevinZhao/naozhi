@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -112,7 +113,14 @@ type recentCacheEntry struct {
 	// pass. Used by skipAppendTrim to batch ReadDir-driven trims when the
 	// cache shows we're well under keepCount. Reset to 0 by Append after
 	// calling trimJobLocked. R232-PERF-8.
-	appendsSinceTrim int
+	//
+	// R245-PERF-14 (#863): atomic.Int32 so the increment in skipAppendTrim's
+	// fast path does not need entry.mu — the increment is bookkeeping-only
+	// and never observed in conjunction with other entry fields, so a race
+	// at the boundary may at worst force or skip exactly one extra trim
+	// (bounded by appendTrimBatch). Reset writes are also atomic so a stale
+	// reader cannot under-count and starve the periodic-force branch.
+	appendsSinceTrim atomic.Int32
 }
 
 // ringRead returns the i-th newest entry (0 = newest). Caller holds entry.mu
@@ -564,17 +572,19 @@ func (s *runStore) skipAppendTrim(jobID string) bool {
 		return false
 	}
 	// Force a trim every appendTrimBatch Appends so window-based eviction
-	// still happens for jobs that never approach keepCount.
-	entry.appendsSinceTrim++
-	if entry.appendsSinceTrim >= appendTrimBatch {
-		entry.appendsSinceTrim = 0
+	// still happens for jobs that never approach keepCount. R245-PERF-14
+	// (#863): the counter is atomic.Int32 so future fast-path callers can
+	// short-circuit without entry.mu; here we already hold the lock for the
+	// warm/count/ring reads below, so a plain Add is fine.
+	if entry.appendsSinceTrim.Add(1) >= appendTrimBatch {
+		entry.appendsSinceTrim.Store(0)
 		return false
 	}
 	// Plenty of headroom under count cap?  Cache reflects the on-disk
 	// newest-first ring (capped to keepCount), so entry.count is a safe
 	// upper bound on disk rows that survived the last trim.
 	if entry.count+appendTrimBatch >= s.keepCount {
-		entry.appendsSinceTrim = 0
+		entry.appendsSinceTrim.Store(0)
 		return false
 	}
 	// Oldest cached row still inside keepWindow?  Use EndedAt to mirror
@@ -588,7 +598,7 @@ func (s *runStore) skipAppendTrim(jobID string) bool {
 		}
 		cutoff := time.Now().Add(-s.keepWindow)
 		if !ts.After(cutoff) {
-			entry.appendsSinceTrim = 0
+			entry.appendsSinceTrim.Store(0)
 			return false
 		}
 	}

@@ -755,7 +755,8 @@ func TestRunStore_RecentReturnsNewestFirst(t *testing.T) {
 // counter for skipAppendTrim test cases. Pure test helper for R242-GO-8
 // — production code seeds via ringSeed inside warmCache.
 func newEntryFromRows(rows []CronRunSummary, appendsSinceTrim int) *recentCacheEntry {
-	e := &recentCacheEntry{warm: true, appendsSinceTrim: appendsSinceTrim}
+	e := &recentCacheEntry{warm: true}
+	e.appendsSinceTrim.Store(int32(appendsSinceTrim))
 	// Cap the ring to len(rows) at minimum so iteration works; production
 	// uses keepCount, but skipAppendTrim only reads count and ringRead
 	// which both honour cap(ring).
@@ -872,9 +873,9 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 			if got != tc.wantSkip {
 				t.Errorf("skipAppendTrim = %v, want %v", got, tc.wantSkip)
 			}
-			if tc.entry.appendsSinceTrim != tc.wantCounter {
+			if got := int(tc.entry.appendsSinceTrim.Load()); got != tc.wantCounter {
 				t.Errorf("appendsSinceTrim = %d, want %d",
-					tc.entry.appendsSinceTrim, tc.wantCounter)
+					got, tc.wantCounter)
 			}
 		})
 	}
