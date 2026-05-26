@@ -85,15 +85,23 @@ func TestTodosMarkdownEmpty(t *testing.T) {
 	}
 }
 
-func TestTodosDetailJSONRoundTrip(t *testing.T) {
+// TestParseTodosWithRaw_RoundTrip pins the round-trip property the deleted
+// TodosDetailJSON helper used to assert: a single typed entry must come back
+// out of the rawTodos bytes returned by ParseTodosWithRaw. R226-PERF-8 made
+// rawTodos the on-wire representation, so this is what the dashboard sees.
+// DEADCODE-9 (#1202) removed the wrapper.
+func TestParseTodosWithRaw_RoundTrip(t *testing.T) {
 	t.Parallel()
-	in := []TodoItem{{Content: "x", Status: "pending"}}
-	s := TodosDetailJSON(in)
+	input := json.RawMessage(`{"todos":[{"content":"x","status":"pending"}]}`)
+	_, raw, ok := ParseTodosWithRaw(input)
+	if !ok {
+		t.Fatal("ParseTodosWithRaw returned ok=false on valid input")
+	}
 	var out []TodoItem
-	if err := json.Unmarshal([]byte(s), &out); err != nil {
+	if err := json.Unmarshal(raw, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(out) != 1 || out[0].Content != "x" {
+	if len(out) != 1 || out[0].Content != "x" || out[0].Status != "pending" {
 		t.Errorf("round-trip mismatch: %+v", out)
 	}
 }

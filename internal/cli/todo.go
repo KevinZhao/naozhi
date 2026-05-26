@@ -16,8 +16,8 @@ type TodoItem struct {
 // todoWriteInputRaw mirrors a TodoWrite tool input but keeps the inner todos
 // array as its original JSON bytes so callers that need both the parsed slice
 // (for summary counts) and the on-wire array string (for dashboard rendering)
-// can avoid the extra Marshal+copy that the old TodosDetailJSON helper paid
-// on every TodoWrite event. R226-PERF-8.
+// can avoid the extra Marshal+copy the legacy helper paid on every TodoWrite
+// event. R226-PERF-8.
 type todoWriteInputRaw struct {
 	Todos json.RawMessage `json:"todos"`
 }
@@ -36,9 +36,8 @@ func ParseTodos(input json.RawMessage) ([]TodoItem, bool) {
 // ParseTodosWithRaw extracts the todos array from a TodoWrite tool_use
 // input and additionally returns the original JSON bytes of the todos
 // field (a JSON array literal). Callers that need a "stable JSON
-// representation" for the dashboard (the historical TodosDetailJSON
-// payload) can use rawTodos directly instead of re-marshalling the
-// parsed slice.
+// representation" for the dashboard can use rawTodos directly instead
+// of re-marshalling the parsed slice.
 //
 // Returns (nil, nil, false) when input is malformed or the todos field
 // is missing/empty.
@@ -69,21 +68,6 @@ func ParseTodosWithRaw(input json.RawMessage) (todos []TodoItem, rawTodos json.R
 		return nil, nil, false
 	}
 	return todos, rawW.Todos, true
-}
-
-// TodosDetailJSON returns a stable JSON representation of the todos list so
-// downstream consumers (dashboard UI) can parse without needing access to the
-// original tool input. Returns "" on marshal error.
-//
-// Prefer ParseTodosWithRaw + string(rawTodos) when the original tool_use
-// input is still in scope: it skips the redundant Marshal that this
-// helper performs.
-func TodosDetailJSON(todos []TodoItem) string {
-	b, err := json.Marshal(todos)
-	if err != nil {
-		return ""
-	}
-	return string(b)
 }
 
 // Status emoji used by TodosSummary / TodosMarkdown. Centralised so a
