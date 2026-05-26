@@ -88,6 +88,13 @@ func ParseClientMsg(line []byte) (ClientMsg, error) {
 }
 
 // ParseServerMsg parses a single NDJSON line into a ServerMsg.
+//
+// No in-tree consumer: naozhi is the *server* side of this protocol — it
+// writes ServerMsg and reads ClientMsg (see ParseClientMsg). This helper
+// is kept as the symmetric counterpart of ParseClientMsg and is part of
+// the protocol's public contract surface, so a future client / log-tail
+// inspector can decode server output without copy-pasting the unmarshal
+// boilerplate. Round-trip-tested in protocol_test.go.
 func ParseServerMsg(line []byte) (ServerMsg, error) {
 	var msg ServerMsg
 	err := json.Unmarshal(line, &msg)
