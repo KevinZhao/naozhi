@@ -1,7 +1,9 @@
-# TODO Changelog — 历史摘要存档
+# TODO Changelog — 历史摘要存档（只读）
 
-> 这里保留 docs/TODO.md 顶部历史"上一轮更新"长段，
-> 主 TODO.md 简化为最近 3 轮一行摘要 + 指向本文件。
+> docs/TODO.md 已于 2026-05-26 删除。本文件保留作历史"上一轮更新"摘要追溯,
+> 供 grep R-anchor 回溯当时上下文。
+>
+> 新流程:`gh issue list` / `.claude/skills/triage-findings/SKILL.md`。
 >
 > 排序：最新在前。
 
