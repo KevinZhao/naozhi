@@ -134,6 +134,17 @@ const (
 	// (worst-case 4 bytes/rune). R230B-CR-5.
 	maxRedactErrLen = 2048
 
+	// redactFastPathMaxLen caps the input length for the zero-alloc
+	// fast-path in redactPathsInCronError: if the input is at or below
+	// this length AND contains no path-trigger byte, the function returns
+	// the aliased input without touching the truncate branch or the
+	// Builder pool. Sized to comfortably fit common cron error
+	// classifiers ("context deadline exceeded", "dispatcher queue full",
+	// "session not found") while keeping a defensive ceiling so an
+	// unexpectedly long no-path input still flows through the byte-cap
+	// branch. R250-PERF-12 / #1115.
+	redactFastPathMaxLen = 256
+
 	// previousTickMaxIter caps previousTickBefore's sched.Next loop. See
 	// the comment on previousTickBefore for the per-schedule-class
 	// derivation; 1000 leaves a ~3× safety margin over the worst legitimate
