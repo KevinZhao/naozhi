@@ -61,8 +61,12 @@ func (s *Scheduler) resolveNotifyTarget(platName, chatID, notifyPlat, notifyChat
 	}
 
 	// Legacy default (notify==nil): IM-created jobs reply to their source chat.
-	// Platform "dashboard" has no registered platform object so this naturally
-	// no-ops for dashboard jobs that predate the toggle.
+	// Dashboard-created jobs have platName="dashboard" which is never a
+	// registered IM platform — short-circuit here so notifyTarget doesn't
+	// fire a per-tick "platform not found" WARN for every dashboard job.
+	if platName == "dashboard" {
+		return NotifyTarget{}
+	}
 	if platName != "" && chatID != "" {
 		return NotifyTarget{Platform: platName, ChatID: chatID}
 	}
