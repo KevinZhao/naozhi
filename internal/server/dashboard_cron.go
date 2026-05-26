@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -501,6 +502,101 @@ type CronHandlers struct {
 	// Nil-guarded so newCronHandlersForTest paths skip the gate; wiring
 	// lives in server.New. [R247-SEC-2 / R247-SEC-3]
 	writeLimiter *ipLimiter
+
+	// missedCache memoises HasMissedSchedule verdicts so the 1 Hz dashboard
+	// poll path doesn't re-Parse cron expressions (regexp NFA build inside
+	// robfig/cron) for every job on every tick, scaled by the number of
+	// dashboard tabs polling concurrently. Without this, two dashboard
+	// tabs × 50 jobs × 1 Hz = 100 Parse calls/s; with the cache the
+	// steady-state cost falls to ≤ N parses per missedCacheTTL.
+	//
+	// Key: jobID. Value: (verdict, prev expected-at, lastRunAt nanos at
+	// time of compute, computedAt). A cached entry is reusable iff
+	// j.LastRunAt has not advanced since the cache write — if the job
+	// ran in between we MUST recompute because the verdict depends on
+	// LastRunAt. Within a 1 s TTL with no LastRunAt change we serve the
+	// cached verdict and skip the Parse path entirely.
+	//
+	// Schedule string is captured in the key so a runtime UpdateJob that
+	// changes the schedule invalidates by-construction (entries for the
+	// old key become unreachable; they GC away once the cache rotates).
+	// startedAt is also part of the key because the missed-schedule
+	// suppression window (now-startedAt < 5×period) is sticky to the
+	// scheduler boot instant; if the scheduler restarts, old verdicts
+	// must not survive across the boundary. R245-PERF-4 (#857).
+	missedCacheMu sync.Mutex
+	missedCache   map[string]missedVerdict
+}
+
+// missedVerdict is the cached return tuple of cron.HasMissedSchedule plus
+// the inputs that decide whether the cache entry is still valid. Stored
+// under CronHandlers.missedCache keyed by `jobID|schedule|startedNs` so a
+// schedule edit or scheduler restart invalidates by key change rather than
+// requiring a sweep. R245-PERF-4 (#857).
+type missedVerdict struct {
+	missed       bool
+	prevAt       time.Time
+	lastRunNanos int64
+	computedAt   time.Time
+}
+
+// missedCacheTTL is the freshness window for cached HasMissedSchedule
+// verdicts. 1 s matches the dashboard poll cadence — verdicts that are
+// up to one tick stale are equivalent to verdicts computed for the
+// previous tick, which is the same staleness the human eye sees on the
+// rendered card anyway. R245-PERF-4 (#857).
+const missedCacheTTL = time.Second
+
+// missedScheduleVerdict returns HasMissedSchedule(j, now, startedAt) but
+// memoises the result for missedCacheTTL so 1 Hz dashboard polling does
+// not re-Parse the cron expression on every job per tick. Cache hits skip
+// the regexp build entirely; misses fall through to the cron package and
+// store the freshly computed tuple. Safe to call from concurrent
+// goroutines (mu-protected map; map access is short and uncontended in
+// practice because handleList serialises per request).
+func (h *CronHandlers) missedScheduleVerdict(j *cron.Job, now, startedAt time.Time) (bool, time.Time) {
+	if j == nil {
+		return false, time.Time{}
+	}
+	startedNs := startedAt.UnixNano()
+	key := j.ID + "|" + j.Schedule + "|" + strconv.FormatInt(startedNs, 10)
+	lastRunNanos := j.LastRunAt.UnixNano()
+
+	h.missedCacheMu.Lock()
+	if h.missedCache != nil {
+		if v, ok := h.missedCache[key]; ok {
+			if v.lastRunNanos == lastRunNanos && now.Sub(v.computedAt) < missedCacheTTL {
+				h.missedCacheMu.Unlock()
+				return v.missed, v.prevAt
+			}
+		}
+	}
+	h.missedCacheMu.Unlock()
+
+	missed, prev := cron.HasMissedSchedule(j, now, startedAt)
+
+	h.missedCacheMu.Lock()
+	if h.missedCache == nil {
+		h.missedCache = make(map[string]missedVerdict)
+	}
+	// Cap at a generous bound so a runaway schedule-edit storm cannot
+	// grow the map without limit; the cache exists to collapse 1 Hz
+	// polling, not to remember every schedule we've ever seen. When
+	// the cap is hit we drop the whole map — simpler than LRU and the
+	// next poll repopulates the live entries within one tick. The bound
+	// is generous (10× typical fleet of 50 jobs × 5 schedule edits) so
+	// healthy operation never trips it.
+	if len(h.missedCache) >= 2500 {
+		h.missedCache = make(map[string]missedVerdict)
+	}
+	h.missedCache[key] = missedVerdict{
+		missed:       missed,
+		prevAt:       prev,
+		lastRunNanos: lastRunNanos,
+		computedAt:   now,
+	}
+	h.missedCacheMu.Unlock()
+	return missed, prev
 }
 
 // GET /api/cron — list all cron jobs (unscoped, admin view).
@@ -563,8 +659,15 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		// missed-schedule 检测：cron-v2-polish §3.3 Increment C。
 		// 只对非 paused 的 job 判定——paused 的任务用户主动停了，错过
 		// 是预期行为不应告警。
+		//
+		// R245-PERF-4 (#857): route through missedScheduleVerdict so the
+		// per-call cron.Parse (regexp NFA build) is collapsed into one
+		// Parse per (job, schedule, startedAt) per missedCacheTTL across
+		// concurrent dashboard tabs. The cache is invalidated when
+		// LastRunAt advances so the verdict stays correct after a run
+		// completes.
 		if !j.Paused {
-			if missed, prevAt := cron.HasMissedSchedule(&j, now, startedAt); missed {
+			if missed, prevAt := h.missedScheduleVerdict(&j, now, startedAt); missed {
 				v.Missed = true
 				v.MissedSince = prevAt.UnixMilli()
 			}

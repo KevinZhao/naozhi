@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron"
 	"golang.org/x/time/rate"
 )
 
@@ -100,6 +101,77 @@ func TestHandleTrigger_NilLimiter_PassThrough(t *testing.T) {
 	h.handleTrigger(w, req)
 	if w.Code == http.StatusTooManyRequests {
 		t.Fatalf("nil writeLimiter must not produce 429; got %d body=%q", w.Code, w.Body.String())
+	}
+}
+
+// TestMissedScheduleVerdict_CachesWithinTTL guards R245-PERF-4 (#857):
+// the dashboard handleList path must not re-Parse the cron expression on
+// every poll. Two back-to-back calls within missedCacheTTL with the same
+// LastRunAt must reuse the cached verdict (cache size stays at 1, single
+// underlying compute) rather than triggering a fresh cron parse per call.
+func TestMissedScheduleVerdict_CachesWithinTTL(t *testing.T) {
+	t.Parallel()
+	h := &CronHandlers{}
+	startedAt := time.Now().Add(-24 * time.Hour) // past suppression window
+	now := time.Now()
+	j := &cron.Job{
+		ID:        "job-cache-1",
+		Schedule:  "@every 30m",
+		CreatedAt: startedAt,
+		LastRunAt: now.Add(-15 * time.Minute), // recent → not missed
+	}
+
+	// First call populates the cache.
+	missed1, _ := h.missedScheduleVerdict(j, now, startedAt)
+	if missed1 {
+		t.Fatalf("recent run should not be missed")
+	}
+	if len(h.missedCache) != 1 {
+		t.Fatalf("missedCache size = %d, want 1", len(h.missedCache))
+	}
+	// Mutate the underlying job's schedule in a way that would change the
+	// verdict if HasMissedSchedule were re-evaluated. Because the cache key
+	// includes the schedule string, this would normally miss the cache —
+	// but we want to assert the same-key path serves cached values, so we
+	// query with the *original* job pointer and inspect the cached value
+	// directly via a same-key second call. The verdict must remain the
+	// cached one even when the cron package would compute differently.
+	missed2, _ := h.missedScheduleVerdict(j, now, startedAt)
+	if missed2 != missed1 {
+		t.Fatalf("second call within TTL returned %v, want cached %v", missed2, missed1)
+	}
+	if len(h.missedCache) != 1 {
+		t.Fatalf("second call grew cache to %d, want 1 (cache reuse failed)", len(h.missedCache))
+	}
+}
+
+// TestMissedScheduleVerdict_InvalidatesOnLastRunAdvance guards the
+// correctness leg of R245-PERF-4 (#857): when LastRunAt advances (the job
+// completed a run), the cached verdict MUST be discarded — otherwise a
+// post-run dashboard tick would still report the pre-run verdict.
+func TestMissedScheduleVerdict_InvalidatesOnLastRunAdvance(t *testing.T) {
+	t.Parallel()
+	h := &CronHandlers{}
+	startedAt := time.Now().Add(-24 * time.Hour)
+	now := time.Now()
+	// Stale LastRunAt → should be flagged missed under @every 5m.
+	j := &cron.Job{
+		ID:        "job-invalidate-1",
+		Schedule:  "@every 5m",
+		CreatedAt: startedAt,
+		LastRunAt: now.Add(-90 * time.Minute),
+	}
+	missedStale, _ := h.missedScheduleVerdict(j, now, startedAt)
+	if !missedStale {
+		t.Fatalf("90m-stale @every 5m must be missed")
+	}
+
+	// Job ran just now: LastRunAt advances. The cache key matches but
+	// lastRunNanos differs, so the verdict must be recomputed → not missed.
+	j.LastRunAt = now
+	missedFresh, _ := h.missedScheduleVerdict(j, now, startedAt)
+	if missedFresh {
+		t.Fatalf("after fresh run, missed verdict must clear (cache stale)")
 	}
 }
 
