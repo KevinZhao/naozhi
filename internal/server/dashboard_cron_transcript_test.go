@@ -805,6 +805,27 @@ func TestSummariseToolInput_FallbackUsesRawBytes(t *testing.T) {
 	}
 }
 
+// BenchmarkSummariseToolInput_TypedProbe locks the R233-PERF-5 / #695
+// perf win: the typed `toolInputProbe` decode replaced the prior
+// `map[string]any` decode + key hunt, halving allocations on the hot
+// transcript-flatten path. A regression to map[string]any (e.g. someone
+// "simplifying" the struct away) would visibly inflate allocs/op against
+// the recorded baseline. Benchmarks the three input shapes the production
+// code sees: priority-key short-circuit (Bash), priority-key fallthrough
+// to FilePath, and the typed-probe-empty fallback to raw bytes.
+func BenchmarkSummariseToolInput_TypedProbe(b *testing.B) {
+	bashInput := json.RawMessage(`{"command":"echo hello","other":"x"}`)
+	readInput := json.RawMessage(`{"file_path":"/tmp/x.txt"}`)
+	customInput := json.RawMessage(`{"alpha":1,"beta":"long-fallback-text"}`)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = summariseToolInput("Bash", bashInput)
+		_ = summariseToolInput("Read", readInput)
+		_ = summariseToolInput("Custom", customInput)
+	}
+}
+
 // TestMaxTranscriptBytes_Int64Type pins R244-GO-P2-3 (#911): the
 // transcript reader directly constructs `&io.LimitedReader{N: …}`
 // rather than calling io.LimitReader, so the source operand must be
