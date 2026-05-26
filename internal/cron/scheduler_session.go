@@ -56,6 +56,22 @@ func (s *Scheduler) IsExcluded(sessionID string) bool {
 	return s.containsSessionID(sessionID)
 }
 
+// LookupKnownSessionID is the explicitly-named direct-lookup API
+// requested by R242-ARCH-23 (#767). It is a thin alias over IsExcluded
+// — same contract: O(1) on a warm cache, O(jobs × recentCap) on a cold
+// rebuild via the containsSessionID fast path (R245-GO-4 #844 already
+// short-circuits on Job.LastSessionID + runningJobs.Range before
+// touching buildKnownSessionsSet). Exposed under the LookupKnownSessionID
+// name so callers in non-auto-workspace-chain contexts (future cron
+// dashboard widgets, scriptable run-history audit tools) can probe a
+// single sessionID without semantically committing to the
+// "session-ID-excluder" framing IsExcluded carries. The two methods
+// MUST stay behaviourally identical — see TestKnownSessionID_LookupAndIsExcluded
+// for the contract pin.
+func (s *Scheduler) LookupKnownSessionID(sessionID string) bool {
+	return s.IsExcluded(sessionID)
+}
+
 // containsSessionID is the single-key probe variant of KnownSessionIDs.
 // Shares the TTL cache + invalidation contract — readers see the same
 // snapshot a concurrent KnownSessionIDs() caller would observe — but
