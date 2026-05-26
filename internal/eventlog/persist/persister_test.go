@@ -16,8 +16,8 @@ import (
 )
 
 // entry is a convenience JSON-producing helper used across the tests.
-// Generates a minimal cli.EventEntry-shape payload that the schema
-// EntryView decoder accepts.
+// Generates a minimal cli.EventEntry-shape payload acceptable to the
+// schema record envelope.
 func entry(t *testing.T, timeMS int64, uuid string) Entry {
 	t.Helper()
 	payload := map[string]any{

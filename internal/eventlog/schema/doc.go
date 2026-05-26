@@ -6,21 +6,19 @@
 //   - Record: the envelope every line in <keyhash>.log carries
 //   - FileHeader: the metadata record that is always line #0
 //   - IdxEntry: the fixed-width record format of the .idx sidecar
-//   - EntryView: the minimal interface schema uses to read fields out of
-//     an arbitrary "entry" payload. cli.EventEntry implements this; the
-//     adapter lives in internal/eventlog/schema/entryview_test.go as a
-//     fixture-driven round-trip so new fields added to cli.EventEntry are
-//     caught here in CI rather than later in persist/ or naozhilog/.
 //
 // Design constraints:
 //
 //   - schema must NOT import the cli package. cli depends on schema, not
-//     the reverse. EntryView is the escape hatch that lets schema-level
-//     tests consume a real EventEntry JSON blob without the type dependency.
-//
-//   - Record.Entry is deliberately json.RawMessage so schema owns the
-//     envelope bytes and the callers (persist / naozhilog) own the
+//     the reverse. Record.Entry stays json.RawMessage so schema owns the
+//     envelope bytes and the callers (persist / naozhilog / cli) own the
 //     higher-level (de)serialization.
+//
+//   - The previous EntryView interface (DEADCODE-14, #1207) was removed:
+//     it was abstraction-without-consumers. The same "EventEntry JSON
+//     shape doesn't drift" guarantee is preserved by the cli package's
+//     own round-trip tests and by Record's MarshalRecord/UnmarshalRecord
+//     contract tests in record_test.go.
 //
 //   - All serialization is UTF-8 JSON with a single trailing newline,
 //     length-prefixed at the framing layer in internal/eventlog/persist
