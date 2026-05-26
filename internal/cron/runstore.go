@@ -393,22 +393,40 @@ func (s *runStore) jobLock(jobID string) *sync.Mutex {
 	return actual.(*sync.Mutex)
 }
 
-// assertJobLockHeld panics when jobLock(jobID) is currently free, which
-// — outside concurrent tests — is the unambiguous signature of a caller
-// that violated the *Locked-suffix contract (forgot to acquire). Use
-// from helpers whose godoc says "caller must hold jobLock".
+// assertJobLockHeld logs a warning when jobLock(jobID) is currently free,
+// which — outside concurrent tests — is the unambiguous signature of a
+// caller that violated the *Locked-suffix contract (forgot to acquire).
+// Use from helpers whose godoc says "caller must hold jobLock".
 //
-// The check is best-effort: TryLock+Unlock is cheap (uncontended fast
-// path) and the panic message includes the jobID so failures point
+// R242-CR-11 (#696) / R242-CR-7 (#694): the historical implementation
+// `panic`'d on the contract miss. Two real production hazards:
+//
+//  1. skipAppendTrim called assertJobLockHeld BEFORE locking entry.mu, so
+//     a panic propagated up through Append's `defer lock.Unlock()` for
+//     jobLock and eventually crashed the process. The cron history path
+//     is supposed to be best-effort — RFC §4.2 says cron must NOT block
+//     on history failure — yet a contract bug elsewhere could still take
+//     the whole scheduler down.
+//  2. The TryLock+Unlock pair is observable contention from any goroutine
+//     legitimately holding the lock, plus any future caller that forgets
+//     to hold it gets a `panic` rather than a bounded recoverable log.
+//
+// The check is still best-effort: TryLock+Unlock is cheap (uncontended
+// fast path) and the warn message includes the jobID so failures point
 // straight at the offending caller. False negatives — another goroutine
 // holds the lock, our caller doesn't, TryLock fails so we miss the bug
 // — are accepted in exchange for catching the dominant "single-flight
-// test caller forgot to lock" failure mode reliably. R236-GO-03.
+// test caller forgot to lock" failure mode reliably. R236-GO-03 +
+// R242-CR-11 (#696) + R242-CR-7 (#694).
+//
+// Tests that want hard-fail-on-contract-miss can wrap the slog handler
+// to escalate; production stays alive.
 func (s *runStore) assertJobLockHeld(jobID string) {
 	lock := s.jobLock(jobID)
 	if lock.TryLock() {
 		lock.Unlock()
-		panic("cron runstore: jobLock(" + jobID + ") not held by caller; *Locked-suffix contract violated")
+		slog.Warn("cron runstore: jobLock not held by caller; *Locked-suffix contract violated",
+			"job_id", jobID)
 	}
 }
 
