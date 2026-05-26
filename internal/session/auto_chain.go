@@ -18,10 +18,6 @@
 //     another decision in this batch" hook.
 //   - filterByExcluder        — re-validation filter used by §4.4-A phase 3
 //     and §4.4-B Phase 3 (New-B1 closure).
-//   - recentFilterAsExcluder  — adapter so cron/sys can implement
-//     discovery.RecentSessionsFilter once and
-//     flow into both auto-chain and history-panel
-//     filtering (Arch-MINOR-2).
 //   - GlobalAutoChainPolicy   — the production policy struct, populated by
 //     cmd/naozhi/main.go from cfg.Session.AutoChain.
 package session
@@ -120,37 +116,6 @@ func (s selfExcluder) IsExcluded(id string) bool {
 		return false
 	}
 	return s.set[id]
-}
-
-// recentFilterAsExcluder adapts a discovery.RecentSessionsFilter to the
-// SessionIDExcluder interface (RFC §4.3 Arch-MINOR-2). cron / sysession
-// only need to implement RecentSessionsFilter once; the adapter lets
-// auto-chain consume the same filter without separate boilerplate.
-//
-// SkipWorkspace is intentionally ignored — auto-chain is already scoped
-// to a single workspace by the time pickWorkspaceChain runs, so a
-// per-ID exclusion via SkipSessionID is the only relevant primitive.
-type recentFilterAsExcluder struct {
-	f discovery.RecentSessionsFilter
-}
-
-// IsExcluded forwards to SkipSessionID. nil filter → never excluded.
-func (a recentFilterAsExcluder) IsExcluded(id string) bool {
-	if a.f == nil {
-		return false
-	}
-	return a.f.SkipSessionID(id)
-}
-
-// AsExcluder is the public factory used by cmd/naozhi wiring:
-//
-//	router.AddSessionIDExcluder(session.AsExcluder(scheduler))
-//
-// scheduler must satisfy discovery.RecentSessionsFilter. Returning
-// SessionIDExcluder (not the concrete adapter) keeps the seam stable
-// across future changes.
-func AsExcluder(f discovery.RecentSessionsFilter) SessionIDExcluder {
-	return recentFilterAsExcluder{f: f}
 }
 
 // filterByExcluder returns the subset of ids not currently excluded.

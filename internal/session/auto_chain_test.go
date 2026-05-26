@@ -32,26 +32,6 @@ func (f fakePolicy) Enabled(string) bool         { return f.enabled }
 func (f fakePolicy) Window(string) time.Duration { return f.window }
 func (f fakePolicy) Cap(string) int              { return f.cap }
 
-// fakeFilter is a discovery.RecentSessionsFilter for the
-// recentFilterAsExcluder adapter test.
-type fakeFilter struct {
-	skipIDs   map[string]bool
-	skipWS    string
-	wsCalls   int
-	idCalls   int
-	skipWSAns bool
-}
-
-func (f *fakeFilter) SkipWorkspace(ws string) bool {
-	f.wsCalls++
-	return f.skipWSAns && (f.skipWS == "" || ws == f.skipWS)
-}
-
-func (f *fakeFilter) SkipSessionID(id string) bool {
-	f.idCalls++
-	return f.skipIDs[id]
-}
-
 // listFn synthesises a deterministic ListWorkspaceJSONL output for the
 // given (id, mtime-offset-seconds) pairs. Mtime is "now - secAgo" so
 // tests can assert window cutoff behaviour.
@@ -301,39 +281,6 @@ func TestFilterByExcluder_DropsAll(t *testing.T) {
 	out := filterByExcluder(in, excl)
 	if len(out) != 0 {
 		t.Errorf("expected empty result, got %v", out)
-	}
-}
-
-func TestRecentFilterAsExcluder_ForwardsSkipSessionID(t *testing.T) {
-	f := &fakeFilter{skipIDs: map[string]bool{"a": true}}
-	a := recentFilterAsExcluder{f: f}
-	if !a.IsExcluded("a") {
-		t.Fatal("expected adapter to forward SkipSessionID(a)=true")
-	}
-	if a.IsExcluded("b") {
-		t.Fatal("expected adapter to forward SkipSessionID(b)=false")
-	}
-	if f.idCalls != 2 {
-		t.Errorf("expected 2 SkipSessionID calls, got %d", f.idCalls)
-	}
-	// SkipWorkspace must NOT be invoked through the adapter.
-	if f.wsCalls != 0 {
-		t.Errorf("expected adapter to ignore SkipWorkspace, got %d calls", f.wsCalls)
-	}
-}
-
-func TestRecentFilterAsExcluder_NilFilterReturnsFalse(t *testing.T) {
-	a := recentFilterAsExcluder{f: nil}
-	if a.IsExcluded("anything") {
-		t.Fatal("nil filter must return false")
-	}
-}
-
-func TestAsExcluder_PublicFactory(t *testing.T) {
-	f := &fakeFilter{skipIDs: map[string]bool{"x": true}}
-	e := AsExcluder(f)
-	if !e.IsExcluded("x") {
-		t.Fatal("AsExcluder(f) should forward SkipSessionID(x)=true")
 	}
 }
 
