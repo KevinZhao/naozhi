@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -115,7 +116,7 @@ func TestLinker_Resolve_SingleCandidate(t *testing.T) {
 	writeAgentFiles(t, subagentDir, "0123456789abcdef0", "lister-1", sessionID, "p1", now)
 
 	toolUseTime := now.Add(-50 * time.Millisecond).UnixMilli()
-	info, resolved := l.Resolve("t_aaa", "toolu_A", "lister-1", "", toolUseTime)
+	info, resolved := l.Resolve(context.Background(), "t_aaa", "toolu_A", "lister-1", "", toolUseTime)
 	if !resolved {
 		t.Fatalf("expected Resolve to succeed, info=%+v", info)
 	}
@@ -148,7 +149,7 @@ func TestLinker_Resolve_MTimeDescSelector(t *testing.T) {
 	writeAgentFiles(t, subagentDir, "bbbbbbbbbbbbbbbbb", "worker", sessionID, "p_new", newTime)
 
 	toolUseTime := newTime.Add(-50 * time.Millisecond).UnixMilli()
-	info, resolved := l.Resolve("t_worker", "toolu_W", "worker", "", toolUseTime)
+	info, resolved := l.Resolve(context.Background(), "t_worker", "toolu_W", "worker", "", toolUseTime)
 	if !resolved {
 		t.Fatalf("Resolve failed")
 	}
@@ -171,7 +172,7 @@ func TestLinker_Resolve_SessionIDMismatch_Skip(t *testing.T) {
 	writeAgentFiles(t, subagentDir, "11111111111111111", "collider", otherSession, "p_other", time.Now())
 
 	toolUseTime := time.Now().UnixMilli()
-	info, resolved := l.Resolve("t_coll", "toolu_C", "collider", "", toolUseTime)
+	info, resolved := l.Resolve(context.Background(), "t_coll", "toolu_C", "collider", "", toolUseTime)
 	if resolved && info.InternalAgentID != "" {
 		t.Errorf("cross-session jsonl leaked: %+v", info)
 	}
@@ -188,7 +189,7 @@ func TestLinker_Resolve_StaleCandidate_Skip(t *testing.T) {
 	writeAgentFiles(t, subagentDir, "22222222222222222", "stale", sessionID, "p_stale", fileTime)
 
 	toolUseTime := time.Now().UnixMilli()
-	info, resolved := l.Resolve("t_stale", "toolu_S", "stale", "", toolUseTime)
+	info, resolved := l.Resolve(context.Background(), "t_stale", "toolu_S", "stale", "", toolUseTime)
 	if resolved && info.InternalAgentID != "" {
 		t.Errorf("stale candidate accepted: %+v", info)
 	}
@@ -213,7 +214,7 @@ func TestLinker_Resolve_RetryThenSucceed(t *testing.T) {
 		time.Sleep(30 * time.Millisecond)
 		writeAgentFiles(t, subagentDir, "33333333333333333", "delayed", sessionID, "p_d", time.Now())
 	}()
-	info, resolved := l.Resolve("t_d", "toolu_D", "delayed", "", toolUseTime)
+	info, resolved := l.Resolve(context.Background(), "t_d", "toolu_D", "delayed", "", toolUseTime)
 	if !resolved {
 		t.Fatalf("Resolve should succeed after retry, info=%+v", info)
 	}
@@ -231,7 +232,7 @@ func TestLinker_Resolve_Timeout_Tombstone(t *testing.T) {
 	l.retryLimit = 3
 
 	toolUseTime := time.Now().UnixMilli()
-	info, resolved := l.Resolve("t_miss", "toolu_M", "missing", "", toolUseTime)
+	info, resolved := l.Resolve(context.Background(), "t_miss", "toolu_M", "missing", "", toolUseTime)
 	if !resolved {
 		t.Fatalf("tombstone should be 'Resolved' (§3.3.1 step 4), info=%+v", info)
 	}
@@ -240,7 +241,7 @@ func TestLinker_Resolve_Timeout_Tombstone(t *testing.T) {
 	}
 
 	// Second call returns cached tombstone without scanning again.
-	info2, resolved2 := l.Resolve("t_miss", "toolu_M", "missing", "", toolUseTime)
+	info2, resolved2 := l.Resolve(context.Background(), "t_miss", "toolu_M", "missing", "", toolUseTime)
 	if !resolved2 || info2.InternalAgentID != "" {
 		t.Errorf("cached tombstone missing: info2=%+v resolved=%v", info2, resolved2)
 	}
@@ -262,10 +263,10 @@ func TestLinker_Resolve_DirCacheTTL(t *testing.T) {
 
 	toolUseTime := now.Add(-10 * time.Millisecond).UnixMilli()
 	// Two Resolves within the TTL window — share ONE scan.
-	if _, ok := l.Resolve("t_a1", "toolu_A1", "a1", "", toolUseTime); !ok {
+	if _, ok := l.Resolve(context.Background(), "t_a1", "toolu_A1", "a1", "", toolUseTime); !ok {
 		t.Fatalf("Resolve a1 failed")
 	}
-	if _, ok := l.Resolve("t_a2", "toolu_A2", "a2", "", toolUseTime); !ok {
+	if _, ok := l.Resolve(context.Background(), "t_a2", "toolu_A2", "a2", "", toolUseTime); !ok {
 		t.Fatalf("Resolve a2 failed")
 	}
 	if got := scans.Load(); got != 1 {
@@ -275,7 +276,7 @@ func TestLinker_Resolve_DirCacheTTL(t *testing.T) {
 	// Wait past TTL, write a third and Resolve — expect a fresh scan.
 	time.Sleep(70 * time.Millisecond)
 	writeAgentFiles(t, subagentDir, "66666666666666666", "a3", sessionID, "p3", time.Now())
-	if _, ok := l.Resolve("t_a3", "toolu_A3", "a3", "", time.Now().UnixMilli()); !ok {
+	if _, ok := l.Resolve(context.Background(), "t_a3", "toolu_A3", "a3", "", time.Now().UnixMilli()); !ok {
 		t.Fatalf("Resolve a3 failed")
 	}
 	if got := scans.Load(); got != 2 {
@@ -334,7 +335,7 @@ func TestLinker_SameName_PromptIDDivergence_Keeps_Original(t *testing.T) {
 	now := time.Now()
 	writeAgentFiles(t, subagentDir, "88888888888888888", "dup", sessionID, "p_first", now.Add(-5*time.Second))
 	// First resolve binds toolu_A → agent-8888... with p_first
-	info1, ok := l.Resolve("t1", "toolu_A", "dup", "", now.Add(-4*time.Second).UnixMilli())
+	info1, ok := l.Resolve(context.Background(), "t1", "toolu_A", "dup", "", now.Add(-4*time.Second).UnixMilli())
 	if !ok || info1.FirstPromptID != "p_first" {
 		t.Fatalf("first resolve: %+v", info1)
 	}
@@ -344,7 +345,7 @@ func TestLinker_SameName_PromptIDDivergence_Keeps_Original(t *testing.T) {
 	writeAgentFiles(t, subagentDir, "99999999999999999", "dup", sessionID, "p_second", now)
 	// Expire dirCache so the second Resolve actually sees the new file.
 	time.Sleep(l.cacheTTL + 5*time.Millisecond)
-	info2, ok := l.Resolve("t2", "toolu_B", "dup", "", now.Add(-100*time.Millisecond).UnixMilli())
+	info2, ok := l.Resolve(context.Background(), "t2", "toolu_B", "dup", "", now.Add(-100*time.Millisecond).UnixMilli())
 	if !ok {
 		t.Fatalf("second resolve failed")
 	}
@@ -374,7 +375,7 @@ func TestLinker_OnResolve_Fires(t *testing.T) {
 	writeAgentFiles(t, subagentDir, "abcabcabcabcabcab", "solo", sessionID, "p_s", now)
 
 	toolUseTime := now.Add(-20 * time.Millisecond).UnixMilli()
-	if _, ok := l.Resolve("t_solo", "toolu_S", "solo", "", toolUseTime); !ok {
+	if _, ok := l.Resolve(context.Background(), "t_solo", "toolu_S", "solo", "", toolUseTime); !ok {
 		t.Fatal("Resolve failed")
 	}
 	select {
@@ -391,7 +392,7 @@ func TestLinker_PreContext_Resolve_NoOp(t *testing.T) {
 	t.Parallel()
 	l := NewSubagentLinker()
 	// SetContext not called — Resolve must bail out, not scan.
-	info, resolved := l.Resolve("t", "u", "x", "", time.Now().UnixMilli())
+	info, resolved := l.Resolve(context.Background(), "t", "u", "x", "", time.Now().UnixMilli())
 	if resolved || info.InternalAgentID != "" {
 		t.Errorf("pre-context Resolve returned %+v resolved=%v", info, resolved)
 	}

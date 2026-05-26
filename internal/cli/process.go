@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -204,6 +205,20 @@ type Process struct {
 	done     chan struct{}
 	killCh   chan struct{} // closed by Kill() to unblock readLoop
 	killOnce sync.Once
+
+	// lifecycleCtx is canceled when the process exits (readLoop returns,
+	// Kill() fires, or shim disconnects). Used to bind subagent-Resolve
+	// goroutines so a SIGTERM doesn't leave them spinning through the
+	// full retryLimit*retryInterval (≤ 3s) budget after the parent
+	// goroutine is gone. R218B-GO-3 (#644).
+	//
+	// Lazy-initialized via lifecycleCtxOnce on first lifecycleContext()
+	// call so legacy test fixtures that construct &Process{} (without
+	// newShimProcess) still work — the canceler watcher only spawns when
+	// at least one of done/killCh is non-nil.
+	lifecycleCtxOnce   sync.Once
+	lifecycleCtxValue  context.Context
+	lifecycleCtxCancel context.CancelFunc
 
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
@@ -442,6 +457,42 @@ func (p *Process) DeathReason() string {
 		return *ptr
 	}
 	return ""
+}
+
+// lifecycleContext returns a context tied to the process lifetime: it is
+// canceled when readLoop's `defer close(p.done)` fires, when Kill() closes
+// killCh, or when both channels are nil (test fixture path) — in the test
+// case the returned ctx is a never-canceled Background, since lifetime
+// signals don't exist.
+//
+// Lazy-init via sync.Once: the watcher goroutine only spawns on first call,
+// so legacy &Process{} test constructions that never invoke this method
+// pay zero cost. R218B-GO-3 (#644).
+//
+// Returned ctx is safe to share across goroutines; subagent Resolve callers
+// (process_readloop / InjectHistory) pass it directly to bind their work
+// to the process's life. Callers MUST NOT call the returned cancel function
+// — it's wired internally.
+func (p *Process) lifecycleContext() context.Context {
+	p.lifecycleCtxOnce.Do(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		p.lifecycleCtxValue = ctx
+		p.lifecycleCtxCancel = cancel
+		// Watcher: cancel when either lifetime signal closes. Both channels
+		// can be nil in legacy tests; nil-channel receives block forever in
+		// a select, so we degrade gracefully rather than panic.
+		if p.done == nil && p.killCh == nil {
+			return
+		}
+		go func() {
+			select {
+			case <-p.done:
+			case <-p.killCh:
+			}
+			cancel()
+		}()
+	})
+	return p.lifecycleCtxValue
 }
 
 // newShimProcess creates a Process connected to a shim.
