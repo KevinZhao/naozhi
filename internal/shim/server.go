@@ -926,6 +926,28 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	s.mu.Unlock()
 	s.saveState()
 
+	s.runCommandLoop(reader, postAuthLR, clientDone, cliWasAlive)
+}
+
+// runCommandLoop is the post-auth, post-replay client message dispatch loop.
+// Carved out of handleClient (#697 / R237-CR-3) so the 327-line parent
+// stays comprehensible to AI-review windows. Pure semantic-equivalent
+// extraction: same goroutine ownership, same return semantics (any return
+// here unwinds the calling handleClient defers), same channel topology.
+//
+//   - reader / postAuthLR: bounded post-auth line reader; postAuthLR.N is
+//     reset per-line so the LimitedReader gate fires on oversize input.
+//   - clientDone: closed by setClient teardown; the producer goroutine
+//     watches it to avoid leaking when handleClient returns.
+//   - cliWasAlive: snapshot of cli.alive() taken at attach time. Drives
+//     the cli.exited dedup so a dead-CLI replay path doesn't re-emit
+//     cli_exited (closed channel is always selectable).
+func (s *shimServer) runCommandLoop(
+	reader *bufio.Reader,
+	postAuthLR *io.LimitedReader,
+	clientDone <-chan struct{},
+	cliWasAlive bool,
+) {
 	// Command loop: reads from client, also watches for CLI exit and shutdown
 	lineCh := make(chan []byte, 1)
 	go func() {
@@ -965,78 +987,8 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 			if err != nil {
 				continue
 			}
-			switch msg.Type {
-			case "write":
-				// Reject payloads that would overflow Claude's 10 MB bufio.Scanner
-				// buffer and deadlock stdout. naozhi's own dispatch layer caps
-				// coalesced user text well below this ceiling; a hostile or buggy
-				// client reaching this path is treated as a protocol violation
-				// and disconnected so the slot frees for healthy clients.
-				// R67-SEC-5.
-				if limit := maxWriteLineBytesValue(); int64(len(msg.Line)) > limit {
-					slog.Warn("client write too large, disconnecting",
-						"size", len(msg.Line), "limit", limit)
-					return
-				}
-				if s.cli.alive() {
-					// R190-ERR-M1: previously the write error was silently
-					// dropped. If the CLI process dies between alive() and
-					// Write (EPIPE), the client's message is lost without
-					// notification — the client keeps waiting for a reply
-					// that will never arrive until its next ping times out.
-					// Log the failure and disconnect the client so it can
-					// reconnect to a fresh shim; cli.exited will fire on
-					// the next loop iteration and take the normal exit path.
-					if _, err := s.cli.stdin.Write([]byte(msg.Line + "\n")); err != nil {
-						slog.Warn("shim: cli stdin write failed, disconnecting client", "err", err)
-						return
-					}
-				}
-			case "interrupt":
-				s.cli.interrupt()
-			case "close_stdin":
-				s.cli.closeStdin()
-			case "kill":
-				s.cli.kill()
-			case "ping":
-				resp := ServerMsg{
-					Type:     "pong",
-					CLIAlive: boolPtr(s.cli.alive()),
-					Buffered: s.buffer.Count(),
-				}
-				if data, err := resp.MarshalLine(); err == nil {
-					s.enqueueWrite(data)
-				}
-			case "shutdown":
-				// Only refuse an "early shutdown" when it comes from a path
-				// with no authenticated client. An authenticated client
-				// (naozhi) issuing shutdown within the 60s window means the
-				// client has made the deliberate choice to tear this shim
-				// down — fresh_context cron, explicit Router.Reset, config
-				// drift handling, etc. Blocking those would keep the shim's
-				// socket listening for 30+ seconds and cause the "refusing
-				// to clobber" regression on fast restart (UCCLEP-2026-04-26).
-				// The 60s window was originally added to protect against
-				// handshake glitches where a half-ready shim receives an
-				// errant shutdown before buffers are primed; that's only
-				// meaningful when no client is actively driving the
-				// lifecycle. We're inside the per-client message loop here,
-				// so clientConn normally equals conn — the defensive check
-				// below stays in case a future refactor drifts that.
-				s.mu.Lock()
-				hasClient := s.clientConn != nil
-				s.mu.Unlock()
-				if !hasClient && s.cli.alive() && time.Since(s.startedAt) < freshShimShutdownGuard {
-					slog.Warn("ignoring shutdown: CLI alive, shim recently started, no authed client",
-						"age", time.Since(s.startedAt).Round(time.Millisecond))
-					return
-				}
-				s.cli.closeStdin()
-				s.cli.waitOrKill(5 * time.Second)
-				s.initiateShutdown()
+			if disconnect := s.handleClientCommand(msg); disconnect {
 				return
-			case "detach":
-				return // disconnect but keep running
 			}
 
 		case <-s.cli.exited:
@@ -1057,6 +1009,89 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 			return
 		}
 	}
+}
+
+// handleClientCommand dispatches a single ClientMsg into the appropriate
+// shim action. Returns true when the caller must disconnect the client
+// (oversize write, stdin EPIPE, shutdown, detach, refused-shutdown
+// guard); returns false to keep the loop running. Carved out of
+// runCommandLoop's switch (#697 / R237-CR-3) so each verb's policy
+// stays readable in isolation.
+func (s *shimServer) handleClientCommand(msg ClientMsg) (disconnect bool) {
+	switch msg.Type {
+	case "write":
+		// Reject payloads that would overflow Claude's 10 MB bufio.Scanner
+		// buffer and deadlock stdout. naozhi's own dispatch layer caps
+		// coalesced user text well below this ceiling; a hostile or buggy
+		// client reaching this path is treated as a protocol violation
+		// and disconnected so the slot frees for healthy clients.
+		// R67-SEC-5.
+		if limit := maxWriteLineBytesValue(); int64(len(msg.Line)) > limit {
+			slog.Warn("client write too large, disconnecting",
+				"size", len(msg.Line), "limit", limit)
+			return true
+		}
+		if s.cli.alive() {
+			// R190-ERR-M1: previously the write error was silently
+			// dropped. If the CLI process dies between alive() and
+			// Write (EPIPE), the client's message is lost without
+			// notification — the client keeps waiting for a reply
+			// that will never arrive until its next ping times out.
+			// Log the failure and disconnect the client so it can
+			// reconnect to a fresh shim; cli.exited will fire on
+			// the next loop iteration and take the normal exit path.
+			if _, err := s.cli.stdin.Write([]byte(msg.Line + "\n")); err != nil {
+				slog.Warn("shim: cli stdin write failed, disconnecting client", "err", err)
+				return true
+			}
+		}
+	case "interrupt":
+		s.cli.interrupt()
+	case "close_stdin":
+		s.cli.closeStdin()
+	case "kill":
+		s.cli.kill()
+	case "ping":
+		resp := ServerMsg{
+			Type:     "pong",
+			CLIAlive: boolPtr(s.cli.alive()),
+			Buffered: s.buffer.Count(),
+		}
+		if data, err := resp.MarshalLine(); err == nil {
+			s.enqueueWrite(data)
+		}
+	case "shutdown":
+		// Only refuse an "early shutdown" when it comes from a path
+		// with no authenticated client. An authenticated client
+		// (naozhi) issuing shutdown within the 60s window means the
+		// client has made the deliberate choice to tear this shim
+		// down — fresh_context cron, explicit Router.Reset, config
+		// drift handling, etc. Blocking those would keep the shim's
+		// socket listening for 30+ seconds and cause the "refusing
+		// to clobber" regression on fast restart (UCCLEP-2026-04-26).
+		// The 60s window was originally added to protect against
+		// handshake glitches where a half-ready shim receives an
+		// errant shutdown before buffers are primed; that's only
+		// meaningful when no client is actively driving the
+		// lifecycle. We're inside the per-client message loop here,
+		// so clientConn normally equals conn — the defensive check
+		// below stays in case a future refactor drifts that.
+		s.mu.Lock()
+		hasClient := s.clientConn != nil
+		s.mu.Unlock()
+		if !hasClient && s.cli.alive() && time.Since(s.startedAt) < freshShimShutdownGuard {
+			slog.Warn("ignoring shutdown: CLI alive, shim recently started, no authed client",
+				"age", time.Since(s.startedAt).Round(time.Millisecond))
+			return true
+		}
+		s.cli.closeStdin()
+		s.cli.waitOrKill(5 * time.Second)
+		s.initiateShutdown()
+		return true
+	case "detach":
+		return true // disconnect but keep running
+	}
+	return false
 }
 
 // writeMsg writes a ServerMsg directly to a connection (used during auth/replay
