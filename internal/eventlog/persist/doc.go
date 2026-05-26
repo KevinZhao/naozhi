@@ -18,8 +18,8 @@
 //     of the same files persist writes.
 //   - cli.EventEntry semantics: this package treats entries as opaque
 //     JSON bytes wrapped in the schema.Record envelope. If EventEntry
-//     evolves, schema.EntryView catches it in CI long before persist
-//     sees the drift.
+//     evolves, schema-side round-trip tests on Record/Entry shape catch
+//     it in CI before persist sees the drift.
 //   - Merging local + Claude JSONL sources: that is MergedSource's job.
 //
 // Concurrency model:
