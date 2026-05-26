@@ -1038,14 +1038,17 @@ func TestR238Sec7_ReadRunRefusesSymlink(t *testing.T) {
 	}
 }
 
-// TestRunStore_DiskList_BeforeMtimeCoarseFilter (R238-GO-8 / #796) verifies
-// diskListNewestFirst's coarse mtime gate skips readRun for entries whose
-// mtime is at or after the `before` cutoff. Plant 4 runs with mtimes pinned
-// to match StartedAt (production invariant), corrupt the JSON of the two
-// newest so any readRun on them would surface as a corruptCount bump,
-// then assert the List result still excludes them — proving the mtime
-// gate fired before readRun touched the file.
-func TestRunStore_DiskList_BeforeMtimeCoarseFilter(t *testing.T) {
+// TestRunStore_DiskList_BeforeStartedAtFilter (R246-CR-008 / #745) pins
+// the corrected pagination semantics. Pre-fix the coarse mtime gate
+// short-circuited entries whose mtime was at or after `before`, but the
+// strict cutoff filtered on StartedAt — a long-running job with
+// StartedAt < before but mtime ≥ before was silently dropped from the
+// page. After dropping the coarse mtime gate, every candidate is read
+// and StartedAt drives the cut. The corrupt-newest entries continue to
+// be skipped, just now via the strict ErrCorruptRun branch (so
+// corruptCount bumps), preserving the operator-observable contract that
+// corrupt records do not poison list output.
+func TestRunStore_DiskList_BeforeStartedAtFilter(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
 	s.enableTrimGC = false
@@ -1069,9 +1072,11 @@ func TestRunStore_DiskList_BeforeMtimeCoarseFilter(t *testing.T) {
 			t.Fatalf("Chtimes: %v", err)
 		}
 	}
-	// Corrupt the JSON of the two newest. If the coarse gate fails to
-	// short-circuit them readRunNoLstat would raise ErrCorruptRun and
-	// the returned corruptCount would be > 0.
+	// Corrupt the JSON of the two newest. After the R246-CR-008 fix the
+	// coarse gate is gone — diskListNewestFirst MUST still exclude them
+	// from `rows`, just via the readRun ErrCorruptRun branch which bumps
+	// corruptCount. Test asserts the list payload remains unchanged
+	// (operator-visible contract preserved).
 	for i := 0; i < 2; i++ {
 		path := filepath.Join(s.root, jobID, runIDs[i]+".json")
 		if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
@@ -1084,14 +1089,57 @@ func TestRunStore_DiskList_BeforeMtimeCoarseFilter(t *testing.T) {
 
 	before := now.Add(-time.Hour)
 	rows, corruptCount := s.diskListNewestFirst(jobID, 100, before)
-	if corruptCount != 0 {
-		t.Fatalf("corruptCount=%d, want 0 — coarse gate must short-circuit mtime>=before before readRun", corruptCount)
+	// The two corrupt newer entries are read+rejected (corruptCount bumps).
+	// Pre-fix this was 0 (coarse gate skipped them); post-fix it's 2 because
+	// the strict StartedAt filter is the sole truth — we MUST read each
+	// candidate to know its StartedAt.
+	if corruptCount != 2 {
+		t.Fatalf("corruptCount=%d, want 2 — strict StartedAt filter must read each candidate; coarse mtime gate removed for correctness", corruptCount)
 	}
 	if got, want := len(rows), 2; got != want {
-		t.Fatalf("rows=%d want %d (only mtime<before runs should land)", got, want)
+		t.Fatalf("rows=%d want %d (only StartedAt<before runs should land)", got, want)
 	}
 	gotIDs := map[string]bool{rows[0].RunID: true, rows[1].RunID: true}
 	if !gotIDs[runIDs[2]] || !gotIDs[runIDs[3]] {
 		t.Fatalf("rows missing expected older runs: got=%v want %s,%s", rows, runIDs[2], runIDs[3])
+	}
+}
+
+// TestRunStore_DiskList_BeforeStartedAtMtimeDivergence (R246-CR-008 /
+// #745) is the regression that the old coarse-mtime gate hid: a run
+// with StartedAt < before but mtime ≥ before MUST still appear in the
+// page. Pre-fix the entry was silently dropped because mtime ≥ before
+// short-circuited before the StartedAt strict filter ran. Mimic the
+// long-running-job scenario by writing a real run, then bumping mtime
+// past `before` while leaving StartedAt earlier.
+func TestRunStore_DiskList_BeforeStartedAtMtimeDivergence(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t, 200, 30*24*time.Hour)
+	s.enableTrimGC = false
+	jobID := mustGenerateID()
+
+	now := time.Now()
+	// StartedAt 2h ago — clearly inside the page (before = 1h ago).
+	startedAt := now.Add(-2 * time.Hour)
+	run := makeRun(jobID, startedAt)
+	s.Append(run)
+	// Bump mtime to NOW (post-`before`) to simulate a late finishRun
+	// rename / process-restart re-touch. StartedAt in the JSON is
+	// untouched — the bug surface.
+	path := filepath.Join(s.root, jobID, run.RunID+".json")
+	if err := os.Chtimes(path, now, now); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	before := now.Add(-time.Hour)
+	rows, corruptCount := s.diskListNewestFirst(jobID, 100, before)
+	if corruptCount != 0 {
+		t.Fatalf("unexpected corruptCount=%d", corruptCount)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d want 1 — StartedAt<before run must NOT be skipped just because mtime>=before", len(rows))
+	}
+	if rows[0].RunID != run.RunID {
+		t.Fatalf("rows[0].RunID=%q want %q", rows[0].RunID, run.RunID)
 	}
 }

@@ -869,30 +869,25 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 		if len(out) >= limit {
 			break
 		}
-		// R238-GO-8 (#796): coarse mtime cutoff on `before`-paginated lists.
-		// runStore.Append writes the JSON once at finishRun time, so mtime
-		// ≈ EndedAt ≥ StartedAt within the run's wall-clock duration —
-		// itself bounded by SchedulerConfig.ExecTimeout (default 5 min).
-		// When mtime is at or after `before` the StartedAt < before strict
-		// filter below is overwhelmingly likely to discard the entry too;
-		// short-circuit here saves a ReadFile + JSON parse per entry on
-		// the dominant path. The strict StartedAt < before guard in the
-		// post-readRun branch remains the source of truth for any entry
-		// that passes this gate (mtime < before still does the read +
-		// confirms StartedAt). Asymmetry: a hypothetical run with
-		// StartedAt < before but EndedAt ≥ before would be filtered here
-		// without reading; in practice ExecTimeout caps that window so
-		// the only way to hit it is configuring ExecTimeout to a span
-		// large enough to cross the pagination cutoff (rare; operator
-		// can widen `before` to recover).
-		if !before.IsZero() && !it.mtime.Before(before) {
-			continue
-		}
+		// R246-CR-008 (#745): pagination key consistency. The strict cutoff
+		// below filters on StartedAt; an earlier coarse mtime gate
+		// (`!it.mtime.Before(before)` skip) was unsafe in one direction —
+		// a long-running job with StartedAt < before but mtime (≈ EndedAt)
+		// ≥ before would be skipped here without ever reading the file,
+		// even though it should appear in the page. The previous comment
+		// dismissed the asymmetry as "rare in practice", but operators
+		// configuring ExecTimeout to span the pagination window (or any
+		// process restart that bumps mtime via re-touch) hits it
+		// silently — page truncation looked like "no older runs" instead
+		// of pagination skip. Drop the coarse gate; readRunNoLstat is
+		// cheap enough on the typical limit≤50 page that one ReadFile per
+		// candidate is acceptable for correctness here. Items are still
+		// sorted newest-first by mtime so the StartedAt strict filter
+		// applies to the correct prefix of candidates.
+		//
 		// R245-PERF-9: skip readRun's Lstat — scanSortedRunDir already
 		// filtered each DirEntry by ModeSymlink + IsValidID, so the
-		// IsRegular() recheck would just duplicate the syscall. One
-		// ReadFile instead of (Lstat + ReadFile) per listed run halves
-		// syscalls in the warmCache pass.
+		// IsRegular() recheck would just duplicate the syscall.
 		run, err := s.readRunNoLstat(it.path)
 		if err != nil {
 			if errors.Is(err, ErrCorruptRun) {
