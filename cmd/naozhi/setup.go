@@ -99,7 +99,13 @@ func runSetup(args []string) {
 func runSetupWeixin(args []string) {
 	fs := flag.NewFlagSet("setup weixin", flag.ExitOnError)
 	configPath := fs.String("config", "", "config file path (default ~/.naozhi/config.yaml)")
-	fs.Parse(args)
+	// R245-CR-006: ExitOnError currently never returns an error from
+	// Parse, but a future caller switching to ContinueOnError must not
+	// silently drop a parse failure. Surface explicitly so the failure
+	// mode stays visible at the call site.
+	if err := fs.Parse(args); err != nil {
+		fatalf("parse setup weixin args: %v", err)
+	}
 
 	if *configPath == "" {
 		home, _ := os.UserHomeDir()
