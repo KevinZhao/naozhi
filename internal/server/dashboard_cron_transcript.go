@@ -832,6 +832,20 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 		if len(input) > maxToolInputBytes {
 			input = truncatedToolInputPlaceholder
 		}
+		// R243-CR-P2-4 / #822: json.RawMessage's `omitempty` only checks
+		// `len(value) == 0`, so a literal `null` (4 bytes) survives as a
+		// `"input": null` field on the wire — confusing the dashboard's
+		// "card has tool input?" check (truthy on the field's *presence*
+		// rather than its value) and wasting bytes on a value the field
+		// is supposed to omit by zero-value semantics. Normalise the JSON
+		// `null` literal to a zero-length RawMessage so omitempty trips
+		// correctly. Whitespace-only variants (`null`, `null\n`, etc.)
+		// don't appear in CLI output — RFC 8259 forbids interior
+		// whitespace in JSON literals — but bytes.TrimSpace + compare
+		// would handle a future formatter blip with negligible cost.
+		if isJSONNull(input) {
+			input = nil
+		}
 		out = append(out, transcriptTurn{
 			Index:     nextIdx + len(out),
 			Kind:      "tool_use",
@@ -949,6 +963,35 @@ func summariseToolInput(name string, input json.RawMessage) string {
 	// mutate its source). The probe struct only validated structure, no
 	// need to Marshal again. R244-GO-P2-2.
 	return osutil.SanitizeForLog(string(input), 200)
+}
+
+// isJSONNull reports whether b is the JSON `null` literal (with optional
+// surrounding ASCII whitespace per RFC 8259). Used to suppress an upstream
+// `"input": null` from the tool_use turn so the wire response matches the
+// `omitempty` contract callers reasonably expect from a RawMessage field.
+// R243-CR-P2-4 / #822.
+func isJSONNull(b json.RawMessage) bool {
+	// RFC 8259 permits insignificant whitespace (sp/tab/lf/cr) outside
+	// structural tokens; trim conservatively before the byte compare.
+	for len(b) > 0 {
+		switch b[0] {
+		case ' ', '\t', '\n', '\r':
+			b = b[1:]
+		default:
+			goto trail
+		}
+	}
+trail:
+	for len(b) > 0 {
+		switch b[len(b)-1] {
+		case ' ', '\t', '\n', '\r':
+			b = b[:len(b)-1]
+		default:
+			goto compare
+		}
+	}
+compare:
+	return len(b) == 4 && b[0] == 'n' && b[1] == 'u' && b[2] == 'l' && b[3] == 'l'
 }
 
 // parseISO8601MS converts an RFC 3339 / ISO 8601 timestamp into unix ms.
