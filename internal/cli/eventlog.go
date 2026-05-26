@@ -40,66 +40,6 @@ const setAgentInternalIDMaxScan = 50
 // between subscriber reads.
 const entriesSinceInitialCap = 16
 
-// entriesPoolMaxCap caps the capacity returned to entriesPool. Backing arrays
-// larger than the default ring (500 slots) are uncommon — the dashboard
-// pagination path only fetches `limit` entries at a time — and pooling them
-// would let one pathological session hold a multi-MB array forever.
-const entriesPoolMaxCap = 512
-
-// entriesPool reuses []EventEntry backing arrays across Entries / LastN
-// calls. R247-PERF-13 (REPEAT-3): each dashboard subscribe / history
-// snapshot allocates ~140KB (500 × ~280B EventEntry) per call; the
-// dashboard live-tail flow can call Entries() at >1Hz per session, so on
-// 50 active sessions the alloc bandwidth is meaningful.
-//
-// Lifetime contract: slices returned by Entries/LastN are valid until the
-// caller releases them via ReleaseEntriesSlice. Callers that retain the
-// slice across goroutine boundaries (e.g. into channels) MUST NOT release;
-// the slice will then be GC-reclaimed normally — no regression vs the
-// pre-pool behaviour. The Get path tolerates a smaller-than-needed pooled
-// slice by re-allocating, so a missed Release only forfeits the savings
-// for one call.
-var entriesPool = sync.Pool{
-	New: func() any {
-		// Default ring size matches defaultEventLogSize so the first call
-		// after pool warmup hits the common path without spilling.
-		s := make([]EventEntry, 0, defaultEventLogSize)
-		return &s
-	},
-}
-
-// getEntriesSlice returns a []EventEntry with cap >= n. The returned slice
-// is length n and contains zero values; callers fill it in place.
-func getEntriesSlice(n int) []EventEntry {
-	if n <= 0 {
-		return nil
-	}
-	sp := entriesPool.Get().(*[]EventEntry)
-	s := *sp
-	if cap(s) < n {
-		// Pool entry too small — drop it on the floor (let GC reclaim) and
-		// allocate exactly what we need. The next Get refills via New.
-		return make([]EventEntry, n)
-	}
-	return s[:n]
-}
-
-// ReleaseEntriesSlice returns a slice obtained from Entries/LastN to the
-// pool. Safe to call with nil; safe to call from any goroutine. Callers
-// MUST NOT touch the slice after release. Slices whose capacity exceeds
-// entriesPoolMaxCap are dropped to bound pool memory.
-func ReleaseEntriesSlice(s []EventEntry) {
-	if cap(s) == 0 || cap(s) > entriesPoolMaxCap {
-		return
-	}
-	// Zero entries before release so EventEntry's reference fields (strings,
-	// slices, *AskQuestion, *ToolCall) don't pin garbage past the caller's
-	// last use.
-	clear(s[:cap(s)])
-	s = s[:0]
-	entriesPool.Put(&s)
-}
-
 // imageDataURIPrefix is the required leading substring for every entry in
 // EventEntry.Images. Today the only producer is MakeThumbnail (process.go:853),
 // which always returns "data:image/jpeg;base64,..." or "". Future refactors
