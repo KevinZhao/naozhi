@@ -2,6 +2,8 @@ package slack
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/platform"
@@ -138,5 +140,64 @@ func TestHandleMessage_EmptyAfterMentionStrip(t *testing.T) {
 	s.handleMessage(&slackevents.MessageEvent{Text: "<@U123>"})
 	if called {
 		t.Error("empty text after mention strip should be skipped")
+	}
+}
+
+// TestNoSigningSecretSurface pins the architectural fact that the Slack
+// adapter exposes NO HTTP webhook endpoint — it is a Socket Mode adapter
+// only. Issue #879 (R244-SEC-P1-4) flagged that the feishu transport_hook
+// has a signingSecret == "" / token-only fallback that was historically
+// replay-vulnerable; the pin test there asks: does Slack share that risk?
+//
+// The answer is "no, by construction": Slack inbound traffic arrives on a
+// websocket the slack-go SDK opens to https://wss-primary.slack.com/ using
+// the AppToken (xapp-…). Slack itself authenticates the inbound stream;
+// there is no naozhi-side HMAC verification path to bypass and no empty-
+// secret fallback to misconfigure. RegisterRoutes is a documented no-op
+// (slack.go:103). This test pins that no-op so a future refactor that
+// adds an HTTP webhook surface without an HMAC signing-secret check
+// fails compile-time / test-time, surfacing the security review need
+// before the bypass ships.
+//
+// If a future change DOES need an HTTP webhook (e.g. for slash commands
+// or interactive components), this test must be updated AND the new
+// surface must validate X-Slack-Signature with a constant-time HMAC
+// compare against a non-empty signing secret — empty-secret config must
+// hard-reject (parity with feishu's EncryptKey/VerificationToken gates,
+// see internal/platform/feishu/transport_hook.go:85-95).
+func TestNoSigningSecretSurface(t *testing.T) {
+	t.Parallel()
+
+	// Config has only BotToken + AppToken + MaxReplyLen. There is no
+	// SigningSecret field: the empty-secret path the issue worried about
+	// cannot exist because no field exists to leave empty.
+	cfg := Config{BotToken: "xoxb-test", AppToken: "xapp-test"}
+	s := New(cfg)
+
+	// RegisterRoutes must remain a no-op so the HTTP mux acquires no
+	// inbound handler from the Slack adapter. If a future change wires
+	// in /webhook/slack, the mux below will gain a route and the test
+	// fails with a clear migration prompt.
+	mux := http.NewServeMux()
+	noop := func(_ context.Context, _ platform.IncomingMessage) {}
+	s.RegisterRoutes(mux, noop)
+
+	// Probe the mux for any registered handler on common Slack webhook
+	// paths. http.ServeMux returns the default NotFoundHandler when no
+	// pattern matches; we assert that explicitly.
+	for _, path := range []string{
+		"/webhook/slack",
+		"/slack/events",
+		"/slack/interactive",
+		"/slack/commands",
+	} {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		_, pattern := mux.Handler(req)
+		if pattern != "" {
+			t.Errorf("Slack adapter registered HTTP route %q (pattern=%q) — adapter must remain Socket Mode only "+
+				"OR add a constant-time HMAC signing-secret check (issue #879 / R244-SEC-P1-4); "+
+				"empty SigningSecret must hard-reject like feishu transport_hook.go:85-95",
+				path, pattern)
+		}
 	}
 }
