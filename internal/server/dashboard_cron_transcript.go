@@ -82,6 +82,16 @@ const (
 	// argument) get a "[truncated]" placeholder so the timeline still
 	// renders the call but no longer ships the full payload.
 	maxToolInputBytes = 64 * 1024
+
+	// transcriptRunningSlackMS is the slack added to "now" when computing
+	// the upper bound of the time window for a still-running cron run.
+	// fresh=false runs share a JSONL across many invocations, so we filter
+	// turns by [run.StartedAt, endedMS]. While the run is still going we
+	// have no run.EndedAt, so we use time.Now()+slack to absorb clock skew
+	// between the cron wall-clock and the JSONL writer (CLI subprocess) —
+	// neither is NTP-synced in test fixtures, and a turn timestamp slightly
+	// ahead of "now" should still appear in the live transcript view.
+	transcriptRunningSlackMS int64 = 5_000
 )
 
 // truncatedToolInputPlaceholder is the JSON value substituted for
@@ -419,10 +429,10 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		endedMS = run.EndedAt.UnixMilli()
 	} else {
 		// Running run: include everything up to "now". A small slack
-		// (5s) handles clock skew between the cron wall-clock and the
-		// JSONL writer (CLI subprocess), neither of which is NTP-synced
-		// in test fixtures.
-		endedMS = time.Now().UnixMilli() + 5000
+		// (transcriptRunningSlackMS) handles clock skew between the
+		// cron wall-clock and the JSONL writer (CLI subprocess),
+		// neither of which is NTP-synced in test fixtures.
+		endedMS = time.Now().UnixMilli() + transcriptRunningSlackMS
 	}
 
 	tokens := transcriptTokens{}
@@ -958,58 +968,6 @@ func parseISO8601MS(s string) int64 {
 		return 0
 	}
 	return t.UnixMilli()
-}
-
-// sanitizeTranscriptDisplay strips Unicode runes that would corrupt the JSON
-// wire / dashboard rendering when a JSONL transcript carries adversarial
-// content (e.g. an attacker-controlled tool_result or a chat user paste).
-//
-// Specifically removes:
-//   - C1 controls (U+0080..U+009F)
-//   - Bidi override / embedding (U+202A..U+202E)
-//   - Bidi isolate (U+2066..U+2069)
-//   - Line/Paragraph separators (U+2028 / U+2029) — JSON passes these through
-//     literally, but some downstream consumers (legacy log shippers, terminal
-//     emulators) interpret them as record separators.
-//   - DEL (0x7f)
-//
-// Crucially, this PRESERVES standard whitespace (\n / \t / \r) so multi-line
-// transcripts and code-block indentation render correctly. That is the key
-// difference from osutil.SanitizeForLog which targets slog/EventLog attrs and
-// rewrites every byte < 0x20 to '_'. The handleRunDetail surface (Prompt /
-// WorkDir / ErrorMsg / Result) does use SanitizeForLog because those fields
-// are inherently single-line, but transcript bodies cannot afford to lose
-// formatting. R243-SEC-5.
-//
-// Fast path: when the input is ASCII-only (no high bit set, no DEL) the
-// function returns s unchanged — every rune in the danger class above is
-// either >= U+0080 (high-bit) or DEL (0x7f), so any all-ASCII string skips
-// the rewrite entirely.
-func sanitizeTranscriptDisplay(s string) string {
-	// Fast scan: if no byte triggers DEL or the high-bit, the string contains
-	// no rune from the danger class.
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == 0x7f || c >= 0x80 {
-			return sanitizeTranscriptDisplaySlow(s)
-		}
-	}
-	return s
-}
-
-// sanitizeTranscriptDisplaySlow walks the input rune-by-rune and rewrites any
-// member of the danger class to '_'. Tabs / newlines / carriage returns are
-// passed through. Split out so the fast path inlines.
-func sanitizeTranscriptDisplaySlow(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r == 0x7f {
-			return '_'
-		}
-		if osutil.IsLogInjectionRune(r) {
-			return '_'
-		}
-		return r
-	}, s)
 }
 
 // truncateRunes caps a string to maxBytes by rune boundary, appending

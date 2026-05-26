@@ -97,9 +97,10 @@ const (
 
 	// MaxIDLen bounds cron job IDs flowing in via the IM `/cron <op> <id>`
 	// commands and the dashboard URL/JSON parameters. Generated IDs are
-	// 8-char hex (see scheduler.generateID); 64 bytes leaves slack for
-	// future ID schemes while preventing multi-MB inputs from propagating
-	// into log/error allocations on the miss path.
+	// 16-char hex (8 entropy bytes → hex.EncodeToString; see generateHexID
+	// / hexIDEntropyBytes in job.go); 64 bytes leaves slack for future ID
+	// schemes while preventing multi-MB inputs from propagating into
+	// log/error allocations on the miss path.
 	MaxIDLen = 64
 
 	// MaxScheduleBytes caps the schedule expression length. robfig/cron
@@ -132,6 +133,17 @@ const (
 	// equals the SanitizeForLog cap survives intact through redaction
 	// (worst-case 4 bytes/rune). R230B-CR-5.
 	maxRedactErrLen = 2048
+
+	// redactFastPathMaxLen caps the input length for the zero-alloc
+	// fast-path in redactPathsInCronError: if the input is at or below
+	// this length AND contains no path-trigger byte, the function returns
+	// the aliased input without touching the truncate branch or the
+	// Builder pool. Sized to comfortably fit common cron error
+	// classifiers ("context deadline exceeded", "dispatcher queue full",
+	// "session not found") while keeping a defensive ceiling so an
+	// unexpectedly long no-path input still flows through the byte-cap
+	// branch. R250-PERF-12 / #1115.
+	redactFastPathMaxLen = 256
 
 	// previousTickMaxIter caps previousTickBefore's sched.Next loop. See
 	// the comment on previousTickBefore for the per-schedule-class
