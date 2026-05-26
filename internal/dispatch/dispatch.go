@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -125,6 +124,15 @@ type Dispatcher struct {
 	totalTimeout          time.Duration
 	watchdogNoOutputKills *atomic.Int64
 	watchdogTotalKills    *atomic.Int64
+
+	// imageReader resolves cli-extracted image paths to bytes for the
+	// outbound platform.Image payload (sendAndReply). Production wires
+	// osImageReader{} which delegates to os.ReadFile; tests inject an
+	// in-memory map so reply-footer / image-attachment assertions don't
+	// touch disk. R245-ARCH-33 (#884) — previously dispatch.go reached
+	// for os.ReadFile directly, leaving no seam for tests to mock the
+	// filesystem branch. Always non-nil after NewDispatcher.
+	imageReader ImageReader
 
 	// Operational counters exposed via /health for triaging. Incremented
 	// atomically and never reset (monotonic since process start).
@@ -255,6 +263,14 @@ type DispatcherConfig struct {
 	TotalTimeout          time.Duration
 	WatchdogNoOutputKills *atomic.Int64
 	WatchdogTotalKills    *atomic.Int64
+
+	// ImageReader resolves outbound image paths to bytes when the cli
+	// reply contains attachment markers. Optional — NewDispatcher
+	// installs osImageReader{} (os.ReadFile delegation) when nil so
+	// production wiring keeps zero-config. Tests inject a fake to
+	// exercise the read-success / read-failure branches without
+	// touching the filesystem. R245-ARCH-33 (#884).
+	ImageReader ImageReader
 
 	// SendFn forwards a turn payload to the session router after guard /
 	// queue gating has succeeded. Production wires Server.sendWithBroadcast.
@@ -419,6 +435,11 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	// platform.NewDedup's own zero-cap fallback (10000). (R237-GO-12)
 	if d.dedup == nil {
 		d.dedup = platform.NewDedup(0)
+	}
+	if cfg.ImageReader != nil {
+		d.imageReader = cfg.ImageReader
+	} else {
+		d.imageReader = osImageReader{}
 	}
 	return d, nil
 }
@@ -941,7 +962,7 @@ func (d *Dispatcher) sendAndReply(
 		// extracted path got rewritten to "[图片]" regardless of read success.
 		replacePairs := make([]string, 0, 2*len(imagePaths))
 		for _, path := range imagePaths {
-			data, err := os.ReadFile(path)
+			data, err := d.imageReader.ReadFile(path)
 			if err == nil {
 				outImages = append(outImages, platform.Image{Data: data, MimeType: cli.MimeFromPath(path)})
 			}

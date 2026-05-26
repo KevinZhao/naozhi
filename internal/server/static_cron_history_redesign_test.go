@@ -51,11 +51,10 @@ func TestDashboardJS_CronHistoryRedesign_InlineExpand(t *testing.T) {
 	if rowIdx < 0 {
 		t.Fatal("dashboard.js: cronTimelineRowHtml 不存在")
 	}
-	rowEnd := rowIdx + 4500
-	if rowEnd > len(js) {
-		rowEnd = len(js)
+	rowBody, ok := sliceFunctionBody(js, rowIdx)
+	if !ok {
+		t.Fatal("dashboard.js: cronTimelineRowHtml 函数体边界 `}\\n` 未找到 — 解析失败,断言无意义")
 	}
-	rowBody := js[rowIdx:rowEnd]
 	if !strings.Contains(rowBody, "cronTimelineSelectRun(") {
 		t.Error("cronTimelineRowHtml: 行 onclick 必须调 cronTimelineSelectRun")
 	}
@@ -79,11 +78,13 @@ func TestDashboardJS_CronHistoryRedesign_InlineExpand(t *testing.T) {
 	if escIdx < 0 {
 		t.Fatal("dashboard.js: Global Esc handler 块未找到")
 	}
-	escEnd := escIdx + 2500
-	if escEnd > len(js) {
-		escEnd = len(js)
+	// Esc handler 不是函数定义,而是 function(e){...} 体内的第一行 anchor。
+	// 改用显式右花括号收敛符 `\n});\n`(addEventListener 注册的 IIFE 收尾形态)。
+	escEndRel := strings.Index(js[escIdx:], "\n});\n")
+	if escEndRel < 0 {
+		t.Fatal("dashboard.js: Esc handler 闭合 `\\n});\\n` 未找到 — 解析失败,断言无意义")
 	}
-	escBody := js[escIdx:escEnd]
+	escBody := js[escIdx : escIdx+escEndRel]
 	collapseIdx := strings.Index(escBody, "cronTimelineCollapse()")
 	drawerCloseIdx := strings.Index(escBody, "closeCronDetail()")
 	if collapseIdx < 0 {
@@ -121,11 +122,10 @@ func TestDashboardJS_CronHistoryRedesign_InlineExpand(t *testing.T) {
 	if openIdx < 0 {
 		t.Fatal("dashboard.js: openCronDetail 不存在")
 	}
-	openEnd := openIdx + 2500
-	if openEnd > len(js) {
-		openEnd = len(js)
+	openBody, ok := sliceFunctionBody(js, openIdx)
+	if !ok {
+		t.Fatal("dashboard.js: openCronDetail 函数体边界 `}\\n` 未找到 — 解析失败,断言无意义")
 	}
-	openBody := js[openIdx:openEnd]
 	if !strings.Contains(openBody, "cronExpandedRunId") {
 		t.Error("openCronDetail: 切 cron 时必须清 cronExpandedRunId（避免上下文串台）")
 	}
@@ -135,11 +135,10 @@ func TestDashboardJS_CronHistoryRedesign_InlineExpand(t *testing.T) {
 	if closeIdx < 0 {
 		t.Fatal("dashboard.js: closeCronDetail 不存在")
 	}
-	closeEnd := closeIdx + 2500
-	if closeEnd > len(js) {
-		closeEnd = len(js)
+	closeBody, ok := sliceFunctionBody(js, closeIdx)
+	if !ok {
+		t.Fatal("dashboard.js: closeCronDetail 函数体边界 `}\\n` 未找到 — 解析失败,断言无意义")
 	}
-	closeBody := js[closeIdx:closeEnd]
 	if !strings.Contains(closeBody, "cronExpandedRunId") {
 		t.Error("closeCronDetail: drawer 关闭时必须清 cronExpandedRunId（drawer 是宿主）")
 	}
@@ -191,4 +190,40 @@ func TestDashboardHTML_CronHistoryRedesign_InlineExpandMarkup(t *testing.T) {
 	if !strings.Contains(html, "max-height:50vh") {
 		t.Error("dashboard.html: 移动端 .ctr-detail 应收紧到 max-height:50vh")
 	}
+}
+
+// sliceFunctionBody slices js[idx:] up to the first `}\n` (function-end
+// boundary) that is preceded by a balanced run of inner `{`/`}`. R244-CR-P3-1
+// (#1062): replaces magic 4000/2500-byte windows that silently false-passed
+// when a function grew larger than the window. Returns ok=false if no closing
+// boundary is found, so the caller can t.Fatal instead of asserting against a
+// truncated body.
+//
+// 实现策略: 从 idx 开始线性扫描,跟踪 `{` `}` 计数。第一次出现 `{` 计数从 1
+// 起跳;之后每遇 `{` +1,每遇 `}` -1;当计数归零且其后是 `\n` 即为函数结束。
+// JS 内字符串/正则/注释里的花括号会被误计入,但 dashboard.js 形态稳定且本检测
+// 用于"窗口够不够大",误差只会让 ok=false 触发显式 fatal,不会静默漏断言。
+func sliceFunctionBody(js string, idx int) (string, bool) {
+	depth := 0
+	started := false
+	for i := idx; i < len(js); i++ {
+		c := js[i]
+		switch c {
+		case '{':
+			depth++
+			started = true
+		case '}':
+			depth--
+			if started && depth == 0 {
+				if i+1 < len(js) && js[i+1] == '\n' {
+					return js[idx : i+2], true
+				}
+				// allow EOF immediately after closing brace
+				if i+1 == len(js) {
+					return js[idx : i+1], true
+				}
+			}
+		}
+	}
+	return "", false
 }
