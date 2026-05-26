@@ -573,16 +573,17 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	if viaTriggerNow {
 		trigger = TriggerManual
 	}
-	// R234-GO-6: route every atomic.Pointer.Store through boxString/boxTime
-	// (runinflight.go) so the addressable storage is explicit rather than
-	// relying on escape-analysis lifting `&localVar`. Pre-existing semantics
-	// (one alloc per field on this path) are unchanged; the helpers exist
-	// purely as a readability + future-inliner safety anchor.
-	inflight.runID.Store(boxString(runID))
-	inflight.startedAt.Store(boxTime(startedAt))
-	inflight.phase.Store(boxString(PhaseQueued))
-	inflight.trigger.Store(boxString(string(trigger)))
-	inflight.sessionID.Store(boxString(""))
+	// R238-ARCH-3 (#742): single atomic.Pointer.Store with the complete
+	// view replaces the prior 6 separate atomic.Pointer Stores. Readers
+	// that snapshot() during this populate observe either the prior view
+	// (still ok semantically — running gate already guards them) or the
+	// complete new view; never a half-populated mix.
+	inflight.populate(runInflightView{
+		RunID:     runID,
+		StartedAt: startedAt,
+		Phase:     PhaseQueued,
+		Trigger:   trigger,
+	})
 	// R247-GO-1: freshSnap is set authoritatively from snap.fresh after
 	// snapshotJob runs under s.mu (line ~447); writing j.FreshContext here
 	// without the lock was redundant and -race-suspect.
@@ -657,7 +658,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// execution can run lock-free; concurrent SetJobPrompt/UpdateJob land
 	// for the next tick rather than racing this in-flight result.
 	snap := s.snapshotJob(j)
-	inflight.freshSnap.Store(snap.fresh)
+	inflight.setFresh(snap.fresh)
 
 	// Resolve the effective notification target. Returns empty struct
 	// when no delivery should happen, so both success and failure paths

@@ -138,6 +138,15 @@ type Hub struct {
 	// concurrent SendRaw drops).
 	droppedTotal atomic.Int64
 	clients      map[*wsClient]struct{}
+	// subscriberCount tracks per-key subscriber count for the
+	// maxSubscribersPerKey cap (R246-PERF-4 / #716). Without this, the
+	// cap check in handleSubscribe scanned every connected client × every
+	// subscription per call (O(N_clients) map lookups under h.mu —
+	// 500 conns at the worst case). The counter collapses the check to an
+	// O(1) map lookup. Mutated under h.mu alongside c.subscriptions so
+	// the two stay consistent. Read-only outside of subscribe/unsubscribe
+	// paths; cleared on Shutdown.
+	subscriberCount map[string]int
 	// router is the HubRouter subset (consumer.go). *session.Router
 	// satisfies this interface implicitly; kept as an interface so
 	// tests can inject a fake and a future Router sub-aggregation
@@ -354,6 +363,7 @@ func NewHub(opts HubOptions) *Hub {
 	ctx, cancel := context.WithCancel(parent)
 	h := &Hub{
 		clients:          make(map[*wsClient]struct{}),
+		subscriberCount:  make(map[string]int),
 		router:           opts.Router,
 		agents:           opts.Agents,
 		agentCmds:        opts.AgentCmds,
@@ -495,8 +505,9 @@ func (h *Hub) unregister(c *wsClient) {
 	removed := false
 	if _, ok := h.clients[c]; ok {
 		delete(h.clients, c)
-		for _, unsub := range c.subscriptions {
+		for key, unsub := range c.subscriptions {
 			unsub()
+			h.decSubscriberCountLocked(key)
 		}
 		c.subscriptions = nil
 		removed = true
@@ -673,6 +684,11 @@ func (h *Hub) Shutdown() {
 		}
 		delete(h.clients, c)
 		removed++
+	}
+	// Bulk-clear the per-key counter — every subscriber map was just niled
+	// above so the per-key counts are mechanically zero. R246-PERF-4 (#716).
+	for k := range h.subscriberCount {
+		delete(h.subscriberCount, k)
 	}
 	h.mu.Unlock()
 	// Keep connCount in sync with h.clients. conn.Close() below triggers
