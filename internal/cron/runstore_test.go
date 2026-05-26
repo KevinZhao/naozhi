@@ -930,3 +930,96 @@ func TestRunStore_ReadRunNoLstat_OverCap(t *testing.T) {
 		t.Fatalf("readRunNoLstat over-cap err = %v, want ErrCorruptRun wrap", err)
 	}
 }
+
+// TestR245Sec1_NewRunStoreRejectsSymlinkRunsDir — regression for #825.
+// If a malicious operator (or post-compromise attacker) pre-creates
+// `<dataDir>/runs` as a symlink to /etc, every Append would write a
+// CronRun JSON outside the data dir. newRunStore must Lstat runs/ and
+// disable the store when it's not a plain directory.
+func TestR245Sec1_NewRunStoreRejectsSymlinkRunsDir(t *testing.T) {
+	t.Parallel()
+	dataDir := t.TempDir()
+	// Pre-create runs/ as a symlink to a sibling tempdir. MkdirAll on a
+	// symlink-to-existing-dir succeeds silently, so without the Lstat
+	// guard newRunStore would happily proceed.
+	target := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(dataDir, "runs")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	storePath := filepath.Join(dataDir, "cron.json")
+	s := newRunStore(storePath, 0, 0)
+	if !s.disabled {
+		t.Fatalf("newRunStore must disable when runs/ is a symlink; got enabled root=%q", s.root)
+	}
+	// Ensure subsequent Append is a safe no-op rather than writing into
+	// the symlink target.
+	s.Append(&CronRun{
+		RunID: generateRunID(), JobID: generateID(),
+		State: RunStateSucceeded, StartedAt: time.Now(),
+	})
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatalf("readdir target: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("Append on disabled store wrote %d entries to symlink target", len(entries))
+	}
+}
+
+// TestR245Sec1_NewRunStoreNormalisesDotDot — regression for #825. A
+// storePath with `..` segments must be cleaned by filepath.Abs so the
+// derived runs/ root cannot escape the intended data dir.
+func TestR245Sec1_NewRunStoreNormalisesDotDot(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	// Construct a path with traversal: <tmp>/x/../cron.json should land
+	// the runs root at <tmp>/runs, NOT at <tmp>/x/../runs (which would
+	// equal <tmp>/runs only after cleaning — point of the test is that
+	// the stored root is canonicalised).
+	dirty := filepath.Join(tmp, "x", "..", "cron.json")
+	s := newRunStore(dirty, 0, 0)
+	if s.disabled {
+		t.Fatalf("newRunStore must succeed with cleanable path; got disabled")
+	}
+	wantRoot := filepath.Join(tmp, "runs")
+	if s.root != wantRoot {
+		t.Errorf("root = %q, want %q (filepath.Abs must normalise `..`)", s.root, wantRoot)
+	}
+}
+
+// TestR238Sec7_ReadRunRefusesSymlink — regression for #827. readRun
+// (Get's entry path) must reject a symlink final component without
+// dereferencing it. Pre-fix used Lstat + ReadFile which left a TOCTOU
+// window — Lstat could see a regular file, then an attacker swaps the
+// path to a symlink before ReadFile and the contents of /etc/passwd
+// (or any sensitive file) leaks into the run record. Post-fix uses
+// OpenFile(O_NOFOLLOW) + Fstat so the bytes we parse come from exactly
+// the inode whose mode we validated.
+func TestR238Sec7_ReadRunRefusesSymlink(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t, 200, 30*24*time.Hour)
+	jobID := generateID()
+	runID := generateRunID()
+
+	dir := filepath.Join(s.root, jobID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Plant a "secret" file outside runs/ that the attacker would want
+	// readRun to dereference.
+	secretDir := t.TempDir()
+	secret := filepath.Join(secretDir, "secret.json")
+	if err := os.WriteFile(secret, []byte(`{"run_id":"deadbeef","job_id":"deadbeef","state":"succeeded"}`), 0o600); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	// The attacker-planted symlink lives where Get would look for the
+	// run record. O_NOFOLLOW must refuse to traverse it.
+	link := filepath.Join(dir, runID+".json")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if _, err := s.Get(jobID, runID); !errors.Is(err, ErrCorruptRun) {
+		t.Fatalf("Get on symlink err = %v want ErrCorruptRun (O_NOFOLLOW must refuse)", err)
+	}
+}

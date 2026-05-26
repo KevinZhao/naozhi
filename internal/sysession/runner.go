@@ -327,6 +327,13 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 		// limiting how much prompt content can leak into log
 		// aggregators.  ErrorMsg in the breaker log line is still
 		// sanitized (only "exit status N").
+		// R238-GO-12 (#804): also fold a sanitized stderr head into the
+		// returned error so the dashboard breaker's last_error field has
+		// a meaningful diagnostic instead of just "exit status N".
+		// Pre-compute once here and use the same head for both the slog
+		// Warn and the error wrap below — keeps the cap rationale single-
+		// sourced and avoids re-sanitizing.
+		var stderrHead string
 		if stderr.Len() > 0 {
 			// SanitizeForLog handles both byte-level truncation and
 			// rune-boundary safety, so a multi-byte CJK character at the
@@ -338,10 +345,14 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 			// 超过 maxLen 时触发；slow-path strings.Map 把非法 rune 替换
 			// 为 '_'（1 字节），mapped 长度 ≤ 输入长度，于是 walk-back
 			// 不会跑，最终输出残留 mid-rune 字节。
-			head := osutil.SanitizeForLog(stderr.String(), 256)
+			stderrHead = osutil.SanitizeForLog(stderr.String(), 256)
 			slog.Warn("sysession: runner stderr",
 				"binary", filepath.Base(r.cfg.BinPath),
-				"stderr_head", head)
+				"stderr_head", stderrHead)
+		}
+		if stderrHead != "" {
+			return "", fmt.Errorf("sysession: %s -p failed: %w (stderr: %s)",
+				filepath.Base(r.cfg.BinPath), err, stderrHead)
 		}
 		return "", fmt.Errorf("sysession: %s -p failed: %w",
 			filepath.Base(r.cfg.BinPath), err)
@@ -378,9 +389,10 @@ var _ Runner = (*runnerImpl)(nil)
 // cmd.Stderr / cmd.Stdout for the sysession one-shot Run path; do
 // NOT expose it beyond the package without revisiting this trade-off.
 type limitedWriter struct {
-	w   io.Writer
-	max int
-	n   int
+	w      io.Writer
+	max    int
+	n      int
+	failed bool // R238-GO-5 (#794): set once inner.Write reports err.
 }
 
 func (lw *limitedWriter) Write(p []byte) (int, error) {
@@ -390,6 +402,18 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 	// Anything past max is silently discarded.
 	remaining := lw.max - lw.n
 	if remaining <= 0 {
+		return len(p), nil
+	}
+	// R238-GO-5 (#794): once the inner writer has errored, do not call
+	// it again. The previous shape kept invoking lw.w.Write on every
+	// subsequent chunk; if the writer was a strings.Builder backed by a
+	// dead buffer or a wrapped-fd that hit ENOSPC, lw.n never grew so
+	// the cap-fast-path never engaged and we burned a syscall per
+	// stderr line for the rest of the subprocess lifetime. The failed
+	// flag short-circuits to the same swallow-and-claim-success
+	// behaviour the cap-overflow path already uses, so the pump still
+	// makes forward progress without re-trying a known-broken sink.
+	if lw.failed {
 		return len(p), nil
 	}
 	chunk := p
@@ -403,6 +427,8 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 	// stderr pump). On the discard path we already swallow overflow
 	// without an error; do the same on writer error so the pump treats
 	// the chunk as fully accepted and keeps draining.
-	_ = err
+	if err != nil {
+		lw.failed = true
+	}
 	return len(p), nil
 }

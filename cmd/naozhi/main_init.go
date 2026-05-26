@@ -102,7 +102,15 @@ func initBackendWrappers(
 			SettingsFile:    settingsFile,
 			RefreshSettings: refreshSettings,
 		})
-		w := cli.NewWrapper(b.Path, proto, b.ID)
+		// DEADCODE-6 / R241-ARCH-1: use NewWrapperLazy + Probe(ctx) so a hung
+		// `<cli> --version` cannot pin startup for the full 5 s when SIGTERM
+		// arrives mid-init. NewWrapper is the legacy synchronous form (still
+		// kept for tests that don't have a stopCtx). Production startup gets
+		// the cancellable variant — same field shape, so downstream readers of
+		// w.CLIVersion (the "backend X version Y" banner below at line 123-124)
+		// see identical values.
+		w := cli.NewWrapperLazy(b.Path, proto, b.ID)
+		w.Probe(ctx)
 		w.ShimManager = shimMgr
 		out.Wrappers[w.BackendID] = w
 		if b.Model != "" {

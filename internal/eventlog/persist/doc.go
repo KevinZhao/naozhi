@@ -17,9 +17,8 @@
 //     internal/history/naozhilog, which builds a history.Source on top
 //     of the same files persist writes.
 //   - cli.EventEntry semantics: this package treats entries as opaque
-//     JSON bytes wrapped in the schema.Record envelope. If EventEntry
-//     evolves, schema.EntryView catches it in CI long before persist
-//     sees the drift.
+//     JSON bytes wrapped in the schema.Record envelope. EventEntry
+//     drift is caught at the cli-package round-trip tests, not here.
 //   - Merging local + Claude JSONL sources: that is MergedSource's job.
 //
 // Concurrency model:

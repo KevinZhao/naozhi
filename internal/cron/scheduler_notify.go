@@ -114,6 +114,16 @@ func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
 }
 
 // notifyTarget sends a message to an arbitrary platform/chat (notify target).
+//
+// R250-CR-18 (#1151): aborts the chunk loop on the first ReplyWithRetry
+// failure rather than continuing to push subsequent chunks. Once any chunk
+// fails the user's reading order is already broken (they would see
+// chunk[0]+chunk[3]+chunk[4] interleaved with whatever else lands in the
+// channel between retries), so finishing the message is just adding noise.
+// A single aggregated WARN ("cron notify partial: K/N chunks delivered")
+// replaces the prior "one WARN per failed chunk" stream so operators can
+// match a single log line to a single dropped message instead of having
+// to reconstruct chunk boundaries from N independent warnings.
 func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	p := s.platforms[plat]
 	if p == nil {
@@ -130,6 +140,7 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		maxLen = platform.DefaultMaxReplyLen
 	}
 	chunks := platform.SplitText(text, maxLen)
+	delivered := 0
 	for i, chunk := range chunks {
 		// R235-GO-5: short-circuit on the shared replyCtx deadline so a long
 		// chunk list cannot run past cronNotifyTimeout when each ReplyWithRetry
@@ -137,14 +148,24 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		if err := replyCtx.Err(); err != nil {
 			slog.Warn("cron notify target deadline reached; remaining chunks dropped",
 				"platform", plat, "chat", chatID, "err", err,
-				"sent", i, "remaining", len(chunks)-i)
+				"sent", delivered, "remaining", len(chunks)-i)
 			return
 		}
 		if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
 			ChatID: chatID,
 			Text:   chunk,
 		}, 3); err != nil {
-			slog.Warn("cron notify target failed", "platform", plat, "chat", chatID, "err", err)
+			// R250-CR-18: abort on first chunk failure. Subsequent sends
+			// would interleave with foreign messages the user receives in
+			// the meantime, so partial delivery is worse than a clean
+			// truncation. Aggregate the count into a single WARN so log
+			// readers can match one line to one dropped notify.
+			slog.Warn("cron notify partial: chunks dropped after send failure",
+				"platform", plat, "chat", chatID, "err", err,
+				"delivered", delivered, "total", len(chunks),
+				"failed_index", i)
+			return
 		}
+		delivered++
 	}
 }

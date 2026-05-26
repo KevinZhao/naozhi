@@ -1243,20 +1243,12 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	// batch.
 	sinkAttached := l.persistSinkPtr.Load() != nil
 	captureForSink := sinkAttached && l.sinkReady.Load()
-	// R225-PERF-11: stamp UUIDs in-place *before* l.mu so the N
-	// crypto/rand.Read syscalls (getrandom, one per missing UUID) don't run
-	// under the write-lock. InjectHistory's 500-entry replay would otherwise
-	// hold l.mu across 500 syscalls during shim reconnect and starve every
-	// concurrent Append. Caller-set UUIDs (history replay) are preserved.
-	for i := range entries {
-		stampUUID(&entries[i])
-	}
-	// R214-PERF-5: when a persist sink is wired, build the fully-prepared
-	// sink slice OUTSIDE l.mu so the ~200KB copy on a 500-entry InjectHistory
-	// replay no longer pins the write-lock. The original code did
-	// `sinkCopy = append(sinkCopy, e)` inside the loop under l.mu; under heavy
-	// shim reconnect (drop + reconnect on transient network blip) every
-	// concurrent Append on the same EventLog blocked behind that copy.
+	// R225-PERF-11 + R249-PERF-16: single pre-lock pass that stamps UUIDs,
+	// applies the default Time, and sanitises image URIs. The N
+	// crypto/rand.Read syscalls (getrandom, one per missing UUID) and the
+	// ~200KB sinkCopy build for a 500-entry InjectHistory replay all happen
+	// outside the write-lock. Caller-set UUIDs (history replay) are preserved
+	// by stampUUID's no-op-on-non-empty contract.
 	//
 	// `sinkCopy` doubles as the inner-loop iteration source so per-entry
 	// stamping (default time, image sanitize) is also paid only once per
@@ -1266,23 +1258,28 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	// Fast path (!captureForSink): sinkCopy stays nil and the inner loop
 	// falls back to the historical "stamp inside lock" path. Test harnesses
 	// and the InjectHistory phase before the persister attaches don't pay
-	// for the extra 200KB allocation.
+	// for the extra 200KB allocation, but UUID stamping still runs here.
 	var sinkCopy []EventEntry
 	if captureForSink {
 		sinkCopy = make([]EventEntry, len(entries))
-		for i, e := range entries {
-			if e.Time == 0 {
-				e.Time = defaultTime
-			}
-			// S15 (Round 174): same enforcement as Append. Replays from
-			// history (InjectHistory → AppendBatch) should never contain
-			// non-image data URIs today, but defense-in-depth is trivially
-			// cheap and locks the contract to a single sink.
-			if len(e.Images) > 0 {
-				e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
-			}
-			sinkCopy[i] = e
+	}
+	for i := range entries {
+		stampUUID(&entries[i])
+		if !captureForSink {
+			continue
 		}
+		e := entries[i]
+		if e.Time == 0 {
+			e.Time = defaultTime
+		}
+		// S15 (Round 174): same enforcement as Append. Replays from
+		// history (InjectHistory → AppendBatch) should never contain
+		// non-image data URIs today, but defense-in-depth is trivially
+		// cheap and locks the contract to a single sink.
+		if len(e.Images) > 0 {
+			e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
+		}
+		sinkCopy[i] = e
 	}
 	l.mu.Lock()
 	for idx, e := range entries {
@@ -1586,9 +1583,17 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	}
 	// First pass: collect matches in reverse order. Most calls match 0-5
 	// entries so we allocate lazily only when the first match is found.
+	//
+	// R249-PERF-17: hoist the modulo arithmetic out of the loop.
+	// Previously each iter recomputed `(l.head - l.count + i + l.maxSize) % l.maxSize`
+	// — a DIV per step. Walk backward from the newest slot with a cheap
+	// branch-on-wrap instead. ~5-10ns × notify wave on hot streaming path.
 	var rev []EventEntry
+	idx := l.head - 1
+	if idx < 0 {
+		idx += l.maxSize
+	}
 	for i := l.count - 1; i >= 0; i-- {
-		idx := (l.head - l.count + i + l.maxSize) % l.maxSize
 		if l.entries[idx].Time <= afterMS {
 			break
 		}
@@ -1604,6 +1609,10 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 			rev = make([]EventEntry, 0, initialCap)
 		}
 		rev = append(rev, l.entries[idx])
+		idx--
+		if idx < 0 {
+			idx += l.maxSize
+		}
 	}
 	if len(rev) == 0 {
 		return nil
@@ -1641,12 +1650,22 @@ func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []EventEntry {
 	// Before this, EntriesBefore on a 500-entry ring with beforeMS pointing
 	// to the oldest page ran 500 iterations comparing timestamps; now it
 	// runs up to ~`skip`+`limit` iterations.
+	// R249-PERF-17: walk backward with hoisted index instead of recomputing
+	// (l.head - l.count + i + l.maxSize) % l.maxSize per iter. Same shape
+	// as EntriesSince — branch-on-wrap is one CMOV/cmp vs an IDIV.
 	var rev []EventEntry
 	crossed := beforeMS <= 0 // when beforeMS==0 treat as "no upper bound"
+	idx := l.head - 1
+	if idx < 0 {
+		idx += l.maxSize
+	}
 	for i := l.count - 1; i >= 0 && len(rev) < limit; i-- {
-		idx := (l.head - l.count + i + l.maxSize) % l.maxSize
 		if !crossed {
 			if l.entries[idx].Time >= beforeMS {
+				idx--
+				if idx < 0 {
+					idx += l.maxSize
+				}
 				continue
 			}
 			crossed = true
@@ -1659,6 +1678,10 @@ func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []EventEntry {
 			rev = make([]EventEntry, 0, initialCap)
 		}
 		rev = append(rev, l.entries[idx])
+		idx--
+		if idx < 0 {
+			idx += l.maxSize
+		}
 	}
 	if len(rev) == 0 {
 		return nil
