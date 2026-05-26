@@ -96,6 +96,72 @@ func TestUploadOwnerOrFail_503OnFailure(t *testing.T) {
 	}
 }
 
+// TestMintAnonCookie_ForcesSecureInMultiUserMode pins R222-SEC-4 / #687: when
+// a dashboard token is configured (multi-user intent) the nz_anon cookie MUST
+// be marked Secure even if the request itself arrived over plaintext. The
+// browser will then refuse to ship the cookie back over HTTP, which is the
+// fail-closed behaviour the issue calls for. Without this guard, a same-
+// network attacker on a non-TLS deployment could sniff the per-browser owner
+// label and steal pending uploads via TakeAll.
+//
+// We construct an AuthHandlers literal with only dashboardToken populated;
+// isSecure(r) returns false because r.TLS==nil and trustedProxy==false, so
+// the legacy `secure` branch would have produced Secure=false. Asserting
+// got.Secure==true therefore directly exercises the new force-Secure path.
+func TestMintAnonCookie_ForcesSecureInMultiUserMode(t *testing.T) {
+	t.Parallel()
+	r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
+	r.RemoteAddr = "203.0.113.5:40000"
+	w := httptest.NewRecorder()
+	auth := &AuthHandlers{dashboardToken: "deploy-token"}
+	if _, err := mintAnonCookie(w, r, auth); err != nil {
+		t.Fatalf("mintAnonCookie returned error: %v", err)
+	}
+	var got *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == anonCookieName {
+			got = c
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("nz_anon cookie not set by mintAnonCookie")
+	}
+	if !got.Secure {
+		t.Fatalf("R222-SEC-4 regression: nz_anon Secure=false in multi-user mode (dashboardToken set). The browser would ship the owner label over plaintext, re-opening the same-network sniff window. Force-Secure must remain on whenever auth.dashboardToken is non-empty.")
+	}
+}
+
+// TestMintAnonCookie_NoForceSecureInSingleUserMode pins the converse: when no
+// dashboard token is configured (single-user / dev-laptop default) the cookie
+// stays at the legacy Secure=isSecure(r) branch. Operators on http://127.0.0.1
+// without a token must keep the cookie usable so upload disambiguation works
+// — in single-user deployments there is at most one owner and no sniff vector
+// to close. Asserts the new logic does not over-fire.
+func TestMintAnonCookie_NoForceSecureInSingleUserMode(t *testing.T) {
+	t.Parallel()
+	r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
+	r.RemoteAddr = "127.0.0.1:40000"
+	w := httptest.NewRecorder()
+	auth := &AuthHandlers{} // no dashboardToken, single-user mode
+	if _, err := mintAnonCookie(w, r, auth); err != nil {
+		t.Fatalf("mintAnonCookie returned error: %v", err)
+	}
+	var got *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == anonCookieName {
+			got = c
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("nz_anon cookie not set by mintAnonCookie")
+	}
+	if got.Secure {
+		t.Fatalf("nz_anon Secure=true in single-user mode without TLS — would make the browser drop the cookie under HTTP and break upload disambiguation. Force-Secure must only fire when auth.dashboardToken is set.")
+	}
+}
+
 // TestUploadOwner_AnonCookieFallback locks RNEW-SEC-005: no-token mode mints
 // a per-browser nz_anon cookie so co-NAT clients get distinct owners (no
 // TakeAll theft), reuses an existing cookie, and emits the spec attributes.

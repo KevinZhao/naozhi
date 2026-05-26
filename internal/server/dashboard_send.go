@@ -51,6 +51,19 @@ const anonCookieName = "nz_anon"
 // rotation that #514's proposal flags as the deeper fix is left for a
 // follow-up because it requires a dashboard_auth coupling change; this
 // commit just lowers the MaxAge floor where there is no design decision.
+//
+// R222-SEC-4 / #687: in multi-user mode (dashboardToken set) with no TLS
+// terminator on the request path, the previous Secure=false branch let a
+// same-network attacker sniff the cookie and bucket-collide future uploads.
+// We now force Secure=true whenever a dashboard token is configured, which
+// makes the browser refuse to ship the cookie over plaintext — fail-closed
+// rather than silently degrade. The single-user / no-token deployment is
+// unchanged: those operators legitimately run on http://127.0.0.1 and the
+// Secure-on-non-TLS combination would simply make the browser drop the
+// cookie, breaking upload disambiguation for nobody (single user, single
+// owner). The startup-time warning on server.go:931 already calls out the
+// "token + plaintext" misconfiguration so an operator running this combo
+// will see the cookies disappear and find the warning in the same log.
 func mintAnonCookie(w http.ResponseWriter, r *http.Request, auth *AuthHandlers) (string, error) {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -58,6 +71,13 @@ func mintAnonCookie(w http.ResponseWriter, r *http.Request, auth *AuthHandlers) 
 	}
 	val := hex.EncodeToString(buf[:])
 	secure := auth != nil && auth.isSecure(r)
+	// R222-SEC-4 / #687: force Secure when a dashboard token is configured —
+	// the operator has signalled multi-user intent, so plaintext sniff of the
+	// owner label is no longer an acceptable degradation. The browser will
+	// drop the cookie under HTTP, which is the desired fail-closed.
+	if !secure && auth != nil && auth.dashboardToken != "" {
+		secure = true
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name: anonCookieName, Value: val, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteStrictMode,
