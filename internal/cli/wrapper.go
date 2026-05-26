@@ -257,9 +257,16 @@ func validateCLIPath(cliPath string) {
 
 // detectVersion runs "<cli> --version" and parses the version string.
 // Uses a Background-derived 5s timeout — fine for test / single-backend
-// paths. Prefer detectVersionCtx when the caller has a shutdown context
-// (e.g. naozhi startup) so SIGTERM during probe doesn't block for the
-// full timeout.
+// paths. Production startup MUST go through NewWrapperLazy + Probe(ctx)
+// (R241-ARCH-1) so SIGTERM during probe never blocks for the full
+// timeout: the cmd/naozhi/main_init.go bootstrap already does this, and
+// the legacy NewWrapper → detectVersion path now only runs in tests.
+//
+// R246-ARCH-21 (#803): the per-backend 5s × N startup hang is closed by
+// the lazy-Probe migration above; this helper survives only because
+// in-package tests construct Wrappers without a shutdown ctx and would
+// otherwise force every test fixture to thread a context.Background
+// boilerplate. New callers MUST use NewWrapperLazy.
 func detectVersion(cliPath string) string {
 	return detectVersionCtx(context.Background(), cliPath)
 }
