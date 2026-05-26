@@ -602,6 +602,22 @@ func (cfg *SchedulerConfig) applyDefaults() {
 }
 
 func NewScheduler(cfg SchedulerConfig) *Scheduler {
+	// R20260526-GO-023: surface missing router wiring at construction so
+	// the misconfiguration shows up at boot rather than as an opaque NPE
+	// stack trace from executeOpt the first time a job ticks. We log
+	// instead of panicking because the test suite (persist_failure_test,
+	// scheduler_test, stop_budget_test, trigger_now_wg_done_test, …)
+	// constructs Schedulers without a router for narrowly-scoped paths
+	// (AddJob validation, persist failure injection, stop-budget timing)
+	// that never reach executeOpt; panicking would force a sprawling
+	// rewrite across dozens of unrelated test files. The companion
+	// R20260526-GO-004 guard inside executeOpt then short-circuits the
+	// hot path so a router-less fixture does not NPE if a job somehow
+	// does tick. Real production wiring (cmd/naozhi) always plumbs a
+	// router, so this warn fires only for misconfigurations.
+	if cfg.Router == nil {
+		slog.Warn("cron.NewScheduler: cfg.Router is nil; executeOpt will short-circuit until wired")
+	}
 	before := cfg.MaxJobs
 	if before > maxJobsHardCap {
 		slog.Warn("cron max_jobs exceeds hard cap, clamping", "requested", before, "cap", maxJobsHardCap)

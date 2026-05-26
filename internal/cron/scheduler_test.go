@@ -917,6 +917,32 @@ func TestKnownSessionIDs_TTLCache(t *testing.T) {
 	}
 }
 
+// TestNewSchedulerNilRouterWarns verifies NewScheduler does not panic
+// when cfg.Router is nil and the resulting Scheduler stores a nil
+// router for the executeOpt-side guard (R20260526-GO-004) to pick up.
+//
+// We intentionally do NOT panic at construction because dozens of
+// in-tree tests build narrow fixtures via NewScheduler without a
+// router (persist_failure / scheduler / stop_budget / trigger_now);
+// they only exercise mutation paths that never reach executeOpt. The
+// log line surfaces misconfiguration in production where ticks do run.
+// R20260526-GO-023.
+func TestNewSchedulerNilRouterWarns(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("NewScheduler panicked on nil router: %v", r)
+		}
+	}()
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5})
+	if s == nil {
+		t.Fatalf("NewScheduler returned nil")
+	}
+	if s.router != nil {
+		t.Fatalf("expected nil router on the constructed scheduler, got %T", s.router)
+	}
+}
+
 // TestSchedulerStopIdempotent verifies repeat Stop() invocations are a
 // no-op (CAS-guarded) — they must not panic, double-run persistJobsLocked,
 // or attempt to allocate a second set of timers. R20260526-GO-007.
