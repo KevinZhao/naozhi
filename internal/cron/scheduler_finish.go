@@ -132,6 +132,15 @@ type finishArgs struct {
 	prompt      string
 	workDir     string
 	fresh       bool
+	// finalizer 是 caller 栈上的 *runFinalizer。finishRun 在 emitRunEnded
+	// 之前调 finalizer.finalize() 让 CurrentRun(jobID) 与 broadcast 同步
+	// ok=false；caller 自己的 defer 也调一次作兜底（覆盖 jitter-window
+	// 早返路径）。done bool 保证两次调用只清理一次，并且因为 finalizer
+	// 是 per-run 栈对象，run-A 的 defer 只会看到 run-A 的 done=true，
+	// 永远不会动到 run-B 已抢占的 *runInflight 字段。emitOverlapSkipped
+	// 必须传 nil（它的 inflight gate 归并发 run 拥有，不应在 overlap
+	// 路径释放）。R246-GO-3 (#689).
+	finalizer *runFinalizer
 }
 
 // finishRun is the single terminal hook for every cron execution path.
@@ -241,6 +250,21 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// Broadcast last so server-side hub locks aren't held while we hold s.mu.
 	// ErrorMsg uses persistedErrMsg (post-redact, post-sanitise) — see the
 	// SECURITY note above for why a.errMsg is never used here.
+	//
+	// R246-GO-3 (#689): finalize before the broadcast so a dashboard list
+	// arriving concurrently with cron_run_ended observes CurrentRun(jobID)
+	// == ok:false rather than the stale runInflightView{Phase:Spawning}
+	// the defer would otherwise leave until executeOpt returns. The
+	// finalizer is per-run stack-local; finishRun fires it first, the
+	// executeOpt defer fires it second as a no-op (done flag set). Run-A's
+	// defer can NEVER reset run-B's freshly-installed metadata because
+	// run-A's done=true short-circuits run-A's defer regardless of whether
+	// a racing run-B has won the next CAS — the gate isolation comes from
+	// per-run finalizer identity, not from any atomic on *runInflight.
+	// emitOverlapSkipped passes nil here (its inflight gate belongs to
+	// the concurrent owning run we must not release).
+	a.finalizer.finalize()
+
 	s.emitRunEnded(RunEndedEvent{
 		JobID:      a.job.ID,
 		RunID:      a.runID,
@@ -301,12 +325,14 @@ func sanitiseRunErrMsg(s string) string {
 func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 	runID, err := generateRunID()
 	if err != nil {
-		// R242-CR-14 (#706): emitOverlapSkipped 仅产生一对 RunStarted +
-		// RunEnded 信息事件给 dashboard 消费，没有持久化、没有副作用。
-		// 没有 RunID 就无法构造合法事件，悄悄丢弃比起 panic 进程是更好
-		// 的折衷 —— overlap 本身已经是「这次没跑」，多丢一个 informational
-		// event 不影响 cron job 的下次正常执行。
-		slog.Error("cron: failed to generate overlap-skipped run ID; suppressing event",
+		// R242-CR-14 (#706): rand failure on the overlap-skipped path is
+		// already a degraded scenario — the actually-running execution still
+		// holds the inflight gate and will produce its own start/end pair.
+		// Suppressing the synthetic overlap event when we can't even mint
+		// its RunID is strictly better than panicking from the cron tick
+		// goroutine. Operators see the in-flight job's normal events; the
+		// missing overlap-skipped is purely informational.
+		slog.Error("cron: failed to generate run ID for overlap-skipped event; suppressing",
 			"job_id", j.ID, "trigger_now", viaTriggerNow, "err", err)
 		return
 	}
