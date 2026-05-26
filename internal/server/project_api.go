@@ -102,6 +102,16 @@ type ProjectHandlers struct {
 	// Nil-safe in tests; handleConfigPut guards with a nil check.
 	// R247-SEC-7.
 	configPutLimiter *ipLimiter
+	// publicTmpEnabled gates the __public_tmp__ pseudo-project (R237-SEC-5,
+	// #646). When false (default), any request naming publicTmpProject as
+	// the project field is rejected as "project not found" — same surface
+	// as a non-existent regular project. The single-operator dashboard
+	// model can flip this to true via server.public_tmp_enabled in
+	// config.yaml; multi-user deployments leave it off so an authenticated
+	// dashboard user cannot enumerate / preview arbitrary /tmp paths
+	// (other operators' editor swaps, systemd-private payloads, …) just
+	// because the naozhi process happens to have read access on Linux DAC.
+	publicTmpEnabled bool
 }
 
 // SetBaseContext wires the long-lived process context (typically

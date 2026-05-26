@@ -95,6 +95,11 @@ const (
 //
 // The handler intercepts this name before the projectMgr lookup so a real
 // project named "__public_tmp__" on disk cannot accidentally shadow it.
+//
+// R237-SEC-5 (#646): the interception is gated by ProjectHandlers.publicTmpEnabled
+// — default false so multi-user deployments fall through to the normal
+// "project not found" surface. Single-operator setups flip it on via
+// `server.public_tmp_enabled: true` in config.yaml.
 const (
 	publicTmpProject = "__public_tmp__"
 	publicTmpRoot    = "/tmp"
@@ -556,7 +561,7 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 	// through the same resolveProjectFileWithRoot guard so symlink escape /
 	// path-traversal / credential-name rejection still apply.
 	rootPath := ""
-	if req.Project == publicTmpProject {
+	if req.Project == publicTmpProject && h.publicTmpEnabled {
 		rootPath = publicTmpRoot
 	} else {
 		// R183-SEC-M2: every other /api/projects path gates on validateProjectName
@@ -767,7 +772,7 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	// against /tmp instead of looking up a real project, but keep the same
 	// path-traversal / symlink-escape / credential-name guards downstream.
 	rootPath := ""
-	if project == publicTmpProject {
+	if project == publicTmpProject && h.publicTmpEnabled {
 		rootPath = publicTmpRoot
 	} else {
 		// R183-SEC-M2: same trust-boundary gate as handleFilesExists above.

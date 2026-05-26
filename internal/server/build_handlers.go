@@ -216,6 +216,7 @@ func buildProjectHandlers(
 		nodeCache:          nodeCache,
 		filesExistsLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, opts.TrustedProxy),
 		configPutLimiter:   newIPLimiterWithProxy(rate.Every(200*time.Millisecond), 5, opts.TrustedProxy),
+		publicTmpEnabled:   opts.PublicTmpEnabled,
 	}
 }
 
