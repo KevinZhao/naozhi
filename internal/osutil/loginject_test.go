@@ -97,6 +97,41 @@ func TestSanitizeForLog_FastPathASCII(t *testing.T) {
 	}
 }
 
+// TestSanitizeForLog_FastPathASCII_OverLength_Slices pins R243-GO-9: an
+// ASCII-clean string longer than maxLen returns a slice into the original
+// (s[:maxLen]) rather than walking through strings.Map. The slow path used
+// to do a full O(n) rune-mapper pass just to land on a clean ASCII prefix;
+// the slicing fast-path produces identical bytes with zero work past the
+// scan that already proved cleanness.
+//
+// We assert wire output AND no string-body allocation. A regression that
+// re-routed the over-length ASCII case through strings.Map would still
+// produce the right bytes but bump alloc count to 1 (the mapper's output
+// buffer); AllocsPerRun catches that.
+func TestSanitizeForLog_FastPathASCII_OverLength_Slices(t *testing.T) {
+	// Intentionally NOT t.Parallel: testing.AllocsPerRun is incompatible
+	// with parallel tests (runtime.MemStats sampling can race with the
+	// allocator on other goroutines, and Go's test runner panics rather
+	// than report a noisy alloc count).
+
+	in := strings.Repeat("abcdefgh", 64) // 512 bytes, all ASCII-printable
+	got := SanitizeForLog(in, 64)
+	if want := strings.Repeat("abcdefgh", 8); got != want { // 64 bytes
+		t.Fatalf("SanitizeForLog(512×ASCII, cap=64) = %q (len=%d), want %q (len=%d)",
+			got, len(got), want, len(want))
+	}
+
+	// AllocsPerRun returns avg allocs; the slice fast path must report 0.
+	// strings.Map allocates exactly one []byte → string conversion when it
+	// produces a result, so a regression to the slow path would yield 1.
+	allocs := testing.AllocsPerRun(50, func() {
+		_ = SanitizeForLog(in, 64)
+	})
+	if allocs != 0 {
+		t.Errorf("ASCII-clean over-length fast path leaked allocs: got %.1f, want 0", allocs)
+	}
+}
+
 // TestSanitizeForLog_RewritesControlBytes covers C0 controls, DEL, C1 (via
 // UTF-8 encoding), bidi overrides, and LS/PS in a single error-string
 // shaped input. The expected shape deliberately does NOT test rune-exact

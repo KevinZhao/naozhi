@@ -492,6 +492,13 @@ func TestRunStore_ListSkipsCorruptEntries(t *testing.T) {
 
 // TestRunStore_ListBeforeCutoff — stagger StartedAt by 1h, ask for entries
 // strictly before "now-2h", expect only those satisfying StartedAt < cutoff.
+//
+// R238-GO-8 (#796): mtimes are pinned to match StartedAt to mirror the
+// production invariant (Append fires at finishRun time so mtime ≈
+// EndedAt ≥ StartedAt, bounded by ExecTimeout). Without the pin the
+// raw Append path stamps mtime = wall-clock-now, which mismatches the
+// synthetic backdated StartedAt and would intersect the new mtime
+// coarse-filter — a test-fixture artefact, not a production case.
 func TestRunStore_ListBeforeCutoff(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
@@ -503,6 +510,13 @@ func TestRunStore_ListBeforeCutoff(t *testing.T) {
 		startedAt := now.Add(-time.Duration(4-i) * time.Hour)
 		run := makeRun(jobID, startedAt)
 		s.Append(run)
+		// Pin mtime ≈ StartedAt to match production semantics. Required
+		// after R238-GO-8 (#796) added a coarse mtime gate before
+		// readRun.
+		path := filepath.Join(s.root, jobID, run.RunID+".json")
+		if err := os.Chtimes(path, startedAt, startedAt); err != nil {
+			t.Fatalf("Chtimes: %v", err)
+		}
 	}
 
 	cutoff := now.Add(-2 * time.Hour)
@@ -1021,5 +1035,63 @@ func TestR238Sec7_ReadRunRefusesSymlink(t *testing.T) {
 
 	if _, err := s.Get(jobID, runID); !errors.Is(err, ErrCorruptRun) {
 		t.Fatalf("Get on symlink err = %v want ErrCorruptRun (O_NOFOLLOW must refuse)", err)
+	}
+}
+
+// TestRunStore_DiskList_BeforeMtimeCoarseFilter (R238-GO-8 / #796) verifies
+// diskListNewestFirst's coarse mtime gate skips readRun for entries whose
+// mtime is at or after the `before` cutoff. Plant 4 runs with mtimes pinned
+// to match StartedAt (production invariant), corrupt the JSON of the two
+// newest so any readRun on them would surface as a corruptCount bump,
+// then assert the List result still excludes them — proving the mtime
+// gate fired before readRun touched the file.
+func TestRunStore_DiskList_BeforeMtimeCoarseFilter(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t, 200, 30*24*time.Hour)
+	s.enableTrimGC = false
+	jobID := generateID()
+
+	now := time.Now()
+	startedAts := []time.Time{
+		now,
+		now.Add(-30 * time.Minute),
+		now.Add(-2 * time.Hour),
+		now.Add(-3 * time.Hour),
+	}
+	runIDs := make([]string, 4)
+	for i, sa := range startedAts {
+		run := makeRun(jobID, sa)
+		runIDs[i] = run.RunID
+		s.Append(run)
+		// Pin mtime ≈ StartedAt to mirror the production invariant.
+		path := filepath.Join(s.root, jobID, run.RunID+".json")
+		if err := os.Chtimes(path, sa, sa); err != nil {
+			t.Fatalf("Chtimes: %v", err)
+		}
+	}
+	// Corrupt the JSON of the two newest. If the coarse gate fails to
+	// short-circuit them readRunNoLstat would raise ErrCorruptRun and
+	// the returned corruptCount would be > 0.
+	for i := 0; i < 2; i++ {
+		path := filepath.Join(s.root, jobID, runIDs[i]+".json")
+		if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+			t.Fatalf("corrupt write: %v", err)
+		}
+		if err := os.Chtimes(path, startedAts[i], startedAts[i]); err != nil {
+			t.Fatalf("re-Chtimes: %v", err)
+		}
+	}
+
+	before := now.Add(-time.Hour)
+	rows, corruptCount := s.diskListNewestFirst(jobID, 100, before)
+	if corruptCount != 0 {
+		t.Fatalf("corruptCount=%d, want 0 — coarse gate must short-circuit mtime>=before before readRun", corruptCount)
+	}
+	if got, want := len(rows), 2; got != want {
+		t.Fatalf("rows=%d want %d (only mtime<before runs should land)", got, want)
+	}
+	gotIDs := map[string]bool{rows[0].RunID: true, rows[1].RunID: true}
+	if !gotIDs[runIDs[2]] || !gotIDs[runIDs[3]] {
+		t.Fatalf("rows missing expected older runs: got=%v want %s,%s", rows, runIDs[2], runIDs[3])
 	}
 }

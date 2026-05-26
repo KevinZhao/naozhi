@@ -1152,6 +1152,16 @@ func TestHandleFileGet_RenderHTML(t *testing.T) {
 	if !strings.Contains(csp, "img-src data: blob:") {
 		t.Errorf("CSP img-src directive missing or not data:+blob: only; got %q", csp)
 	}
+	// R245-SEC-10 defense-in-depth: even if a future patch keeps `data:
+	// blob:` and adds an http(s) origin, that would re-open the
+	// phone-home channel by another route. Reject any explicit network
+	// scheme in the img-src directive so the CSP can't silently drift
+	// back to a network-loading shape via copy-paste.
+	for _, banned := range []string{"img-src http:", "img-src https:", "img-src *", "img-src 'unsafe-eval'"} {
+		if strings.Contains(csp, banned) {
+			t.Errorf("CSP must not grant img-src network scheme %q (R245-SEC-10): got %q", banned, csp)
+		}
+	}
 	if corp := w.Header().Get("Cross-Origin-Resource-Policy"); corp != "same-origin" {
 		t.Errorf("Cross-Origin-Resource-Policy = %q, want same-origin", corp)
 	}
