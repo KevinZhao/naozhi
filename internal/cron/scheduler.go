@@ -648,6 +648,34 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	// hot path in marshalJobsLocked finds defaultMarshalJobs instead of
 	// nil. Tests swap a failing stub via withFailingMarshal.
 	s.marshalJobs.Store(&defaultMarshalJobs)
+	// R238-SEC-12 (#834): eagerly clamp the cron data dir to 0o700 at
+	// NewScheduler time. The lazy storeDirOnce path in saveMarshaledSeq
+	// would only fire on the first save, leaving the directory at its
+	// inherited (often 0o755) mode between process start and the first
+	// mutation — a window in which other local users can list cron job
+	// IDs by directory enumeration. MkdirAll only honours the mode for
+	// dirs it creates, so we follow with an explicit Chmod to clamp an
+	// existing-but-loose dir as well. Consume the same sync.Once so the
+	// save path's MkdirAll becomes a no-op once we succeed here.
+	s.storeDirOnce.Do(func() {
+		if s.storePath == "" {
+			return
+		}
+		dir := filepath.Dir(s.storePath)
+		if dir == "" || dir == "." {
+			return
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			slog.Warn("cron store parent dir mkdir failed at NewScheduler",
+				"err", err, "dir", dir)
+			return
+		}
+		// Tighten an inherited-loose dir (e.g. 0o755 from XDG default).
+		if err := os.Chmod(dir, 0o700); err != nil {
+			slog.Warn("cron store parent dir chmod failed at NewScheduler",
+				"err", err, "dir", dir)
+		}
+	})
 	return s
 }
 
