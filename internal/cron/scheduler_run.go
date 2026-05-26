@@ -23,6 +23,7 @@ import (
 	mrand "math/rand/v2"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -265,6 +266,17 @@ func formatCronNotice(label, body string) string {
 	// at AddJob/UpdateJob — a 4× rune→byte budget is more than enough for
 	// CJK / emoji to round-trip through SanitizeForLog without truncation.
 	label = osutil.SanitizeForLog(label, MaxCronTitleLen*4)
+	// R250-SEC-6 (#1095): the cronNoticePrefixFmt template is "[Cron %s] %s",
+	// so a `]` byte inside the label silently terminates the bracket prefix
+	// from an IM renderer's view. Markdown-aware channels (Slack / Discord
+	// / Feishu rich-card extensions) would let a Title like
+	// `evil](evil-link) [Cron real` collapse the prefix into a clickable
+	// link target. validateCronTitle blocks bidi / C0 controls but ASCII
+	// `]` slips through. Belt-and-braces: replace `]` with the full-width
+	// closing bracket U+FF3D, visually similar but never bracket-matched
+	// by markdown parsers. Prefix invariant `[Cron <label>]` is preserved
+	// because we substitute inside label, never at the template `]`.
+	label = strings.ReplaceAll(label, "]", "］")
 	return fmt.Sprintf(cronNoticePrefixFmt, label, body)
 }
 
