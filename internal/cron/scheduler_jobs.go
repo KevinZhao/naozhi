@@ -749,7 +749,7 @@ func (s *Scheduler) Location() *time.Location {
 // DeleteJob removes a job by ID prefix (scoped to the given chat).
 func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 	s.mu.Lock()
-	j, err := s.findByPrefix(idPrefix, plat, chatID)
+	j, err := s.findByPrefixLocked(idPrefix, plat, chatID)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err
@@ -778,7 +778,7 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 // PauseJob pauses a job by ID prefix.
 func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 	s.mu.Lock()
-	j, err := s.findByPrefix(idPrefix, plat, chatID)
+	j, err := s.findByPrefixLocked(idPrefix, plat, chatID)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err
@@ -800,7 +800,7 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 // ResumeJob resumes a paused job by ID prefix.
 func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
 	s.mu.Lock()
-	j, err := s.findByPrefix(idPrefix, plat, chatID)
+	j, err := s.findByPrefixLocked(idPrefix, plat, chatID)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err
@@ -952,8 +952,17 @@ func (s *Scheduler) registerJob(j *Job) error {
 	return nil
 }
 
-// findByPrefix finds a job by ID prefix scoped to a specific chat.
-func (s *Scheduler) findByPrefix(idPrefix, plat, chatID string) (*Job, error) {
+// findByPrefixLocked finds a job by ID prefix scoped to a specific chat.
+//
+// LOCK: caller MUST hold s.mu (read or write). The body iterates s.jobs
+// directly without taking the mutex; every in-tree caller (DeleteJob /
+// PauseJob / ResumeJob) already holds s.mu.Lock() across the find +
+// mutate + persist window, so the *Locked suffix is a documentation
+// contract, not a behaviour change. Renamed under R20260526-GO-002 to
+// match the package convention (deleteJobLocked / pauseJobLocked /
+// persistJobsLocked / …) so future callers see the locking requirement
+// without grepping the call graph.
+func (s *Scheduler) findByPrefixLocked(idPrefix, plat, chatID string) (*Job, error) {
 	var matches []*Job
 	for _, j := range s.jobs {
 		if j.Platform == plat && j.ChatID == chatID && strings.HasPrefix(j.ID, idPrefix) {
