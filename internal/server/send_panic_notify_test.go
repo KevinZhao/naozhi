@@ -16,7 +16,7 @@ import (
 
 func TestHandleOwnerLoopPanic_CallsOnAsyncError(t *testing.T) {
 	hub, _ := newTestHub("")
-	hub.queue = dispatch.NewMessageQueue(5, 0)
+	hub.queue = dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
 	t.Cleanup(hub.Shutdown)
 
 	var (
@@ -45,7 +45,7 @@ func TestHandleOwnerLoopPanic_NilOnAsyncErrorNoCrash(t *testing.T) {
 	// HTTP path uses nil onAsyncError because the 202 ack has already
 	// been shipped; the recover path must tolerate that silently.
 	hub, _ := newTestHub("")
-	hub.queue = dispatch.NewMessageQueue(5, 0)
+	hub.queue = dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
 	t.Cleanup(hub.Shutdown)
 
 	defer func() {
@@ -58,7 +58,7 @@ func TestHandleOwnerLoopPanic_NilOnAsyncErrorNoCrash(t *testing.T) {
 
 func TestHandleOwnerLoopPanic_DiscardsQueue(t *testing.T) {
 	hub, _ := newTestHub("")
-	hub.queue = dispatch.NewMessageQueue(5, 0)
+	hub.queue = dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
 	t.Cleanup(hub.Shutdown)
 
 	key := "key-c"
@@ -80,7 +80,7 @@ func TestHandleOwnerLoopPanic_OnAsyncErrorPanicAbsorbed(t *testing.T) {
 	// when the process is under duress. The nested recover inside
 	// handleOwnerLoopPanic must swallow it so the outer defer finishes.
 	hub, _ := newTestHub("")
-	hub.queue = dispatch.NewMessageQueue(5, 0)
+	hub.queue = dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
 	t.Cleanup(hub.Shutdown)
 
 	called := false
