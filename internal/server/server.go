@@ -933,13 +933,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// termination happens upstream (ALB/CloudFront), in which case this
 	// listener binding to plaintext loopback is fine.
 	if s.dashboardToken != "" && !s.auth.trustedProxy && isPlaintextPublicAddr(s.addr) {
-		slog.Warn(
-			"dashboard token served over plaintext HTTP with no trusted proxy: "+
-				"bearer tokens and session cookies may be sniffed. "+
-				"Terminate TLS upstream and set server.trusted_proxy=true, "+
-				"or bind to 127.0.0.1 for local-only access.",
-			"addr", s.addr,
-		)
+		slog.Warn(plaintextDashboardTokenWarning, "addr", s.addr)
 	}
 	// No-auth mode on a publicly reachable address is the biggest footgun the
 	// operator can step into — every /api/* endpoint becomes world-reachable.
@@ -1133,6 +1127,22 @@ func (s *Server) runRetiredStoreFlusher(ctx context.Context) {
 		}
 	}
 }
+
+// plaintextDashboardTokenWarning is the message logged when a token-protected
+// dashboard is served over plaintext HTTP with no trusted proxy. R217-SEC-8
+// (#602) extends the previous inline literal to spell out the /health attack
+// surface explicitly: an authenticated /health response carries workspace_id,
+// node status, version, system info, watchdog counters, and (when present)
+// dispatch + event-log + attachment-tracker stats. A passive sniffer on the
+// wire can therefore lift not only the bearer/cookie but also a deployment
+// fingerprint that aids targeting (e.g. node IDs, CLI version) without needing
+// to authenticate. Named const (not inline) so tests can pin the exact text
+// and a refactor that rewords one occurrence has a single source of truth.
+const plaintextDashboardTokenWarning = "dashboard token served over plaintext HTTP with no trusted proxy: " +
+	"bearer tokens and session cookies may be sniffed; authenticated /health responses " +
+	"also leak workspace_id, node status, version, and watchdog counters in the clear. " +
+	"Terminate TLS upstream and set server.trusted_proxy=true, " +
+	"or bind to 127.0.0.1 for local-only access."
 
 // noTokenOpenWarning is the message logged when the API accepts any caller
 // because dashboard_token is unset on a publicly reachable bind. Exposed as
