@@ -136,6 +136,22 @@ type Hub struct {
 	// the hot path and monotonic — acceptable because the existing return
 	// value was already eventually-consistent (per-client loads race with
 	// concurrent SendRaw drops).
+	//
+	// Granularity contract (R250-SEC-11 / #1100): this counter is
+	// intentionally process-wide / Hub-aggregated, NOT per-client. An
+	// authenticated dashboard tab that triggers its OWN SendRaw drops by
+	// stalling its WS read can observe DroppedMessages() advance, which
+	// in principle gives a 1-bit side-channel for "did anyone else's
+	// broadcast also drop in this window?". Mitigation in this codebase
+	// is the auth gate on /health (the only HTTP exporter) plus the
+	// fact that each authenticated user already shares the same trust
+	// boundary as the Hub itself — there is no "untrusted authenticated
+	// peer" tier. If a future deployment introduces multi-tenant auth
+	// (different users on different shards) this counter MUST move
+	// behind a debug-only flag (e.g. /api/debug/vars when debug_mode=
+	// true) before being surfaced to per-user JSON. Document at the
+	// field rather than at /health so the granularity decision survives
+	// a /health rewrite.
 	droppedTotal atomic.Int64
 	clients      map[*wsClient]struct{}
 	// subscriberCount tracks per-key subscriber count for the
@@ -176,12 +192,14 @@ type Hub struct {
 	// things: (a) reviving a dismissed cron stub when a dashboard tab
 	// re-subscribes (handleSubscribe → EnsureStub) and (b) auto-saving
 	// the user's first prompt as the cron job's permanent prompt
-	// (sessionSend → SetJobPrompt). R232-ARCH-7: typed as the narrow
-	// cronHubOps interface (defined in this file) instead of
-	// *cron.Scheduler, so server's coupling to cron is the 2 methods
-	// it actually uses, not the full 60+ method scheduler surface.
-	// *cron.Scheduler satisfies cronHubOps implicitly.
-	scheduler   cronHubOps
+	// (sessionSend → SetJobPrompt). Typed as the narrow CronView
+	// interface (defined in dashboard_session.go) instead of
+	// *cron.Scheduler, so server's coupling to cron is the small
+	// CronView method-set, not the full 60+ method scheduler surface.
+	// R232-ARCH-7 / R242-ARCH-13 (#754) — was the file-local cronHubOps
+	// interface; collapsed into the package-level CronView shared with
+	// SessionHandlers. *cron.Scheduler satisfies CronView implicitly.
+	scheduler   CronView
 	uploadStore *uploadStore // optional, for resolving WS-sent file_ids
 	// scratchPool lets sessionOptsFor resolve the inherited AgentOpts for an
 	// ephemeral "scratch" key without touching the persistent agent registry.
@@ -449,20 +467,13 @@ func NewHub(opts HubOptions) *Hub {
 	return h
 }
 
-// cronHubOps is the narrow consumer interface the Hub needs from
-// *cron.Scheduler. Defined here (and not in cron) so server's coupling
-// to the scheduler stays at the two methods we actually call, and tests
-// can inject a fake without depending on the full Scheduler. R232-ARCH-7
-// extension of the cronStubChecker pattern from R228-ARCH-17.
-type cronHubOps interface {
-	EnsureStub(key string) bool
-	SetJobPrompt(jobID, prompt string) error
-}
-
 // SetScheduler sets the cron scheduler for auto-saving prompts on first send.
 // Accepts the concrete *cron.Scheduler (production wiring) — the field type
-// is the narrower cronHubOps interface so the Hub never sees the rest of the
-// scheduler API.
+// is the narrower CronView interface so the Hub never sees the rest of the
+// scheduler API. R242-ARCH-13 (#754): the previous file-local cronHubOps
+// interface has been collapsed into the package-level CronView (see
+// dashboard_session.go) shared with SessionHandlers — fewer micro-interfaces
+// to learn, identical method-set against *cron.Scheduler.
 func (h *Hub) SetScheduler(s *cron.Scheduler) { h.scheduler = s }
 
 // SetUploadStore wires the upload store used by WS sends to resolve file_ids

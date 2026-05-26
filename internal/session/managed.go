@@ -1862,19 +1862,33 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 		}
 	}
 	proc := s.loadProcess()
-	var forward []cli.EventEntry
+	// R237-PERF-6 (#667): capture only the bounds of the forward window
+	// under historyMu; defer the make+copy to AFTER Unlock so concurrent
+	// EventEntries / EventEntriesSince RLockers do not stall on a
+	// 500-entry replay's allocation+memcpy. Safety: subsequent
+	// InjectHistory calls cannot mutate slots the captured `tail` slice
+	// points at — append only writes past the current len, and cap-trim
+	// merely reslices the header. A reallocating append leaves the old
+	// backing array referenced by `tail` alive for GC; element data at
+	// [seededLen..end) is never overwritten in place anywhere in the
+	// codebase (verified by Grep on persistedHistory[ writes — only
+	// `s.persistedHistory = …` reslices the header). seededLen is
+	// committed under the lock so no second InjectHistory can re-forward
+	// the same entries.
+	var tail []cli.EventEntry
 	if proc != nil && s.persistedSeededLen < len(s.persistedHistory) {
-		// Defensive copy: the slice escapes the lock and proc.InjectHistory
-		// outlives historyMu, so handing it persistedHistory's backing array
-		// would race with subsequent appends.
-		tail := s.persistedHistory[s.persistedSeededLen:]
-		forward = make([]cli.EventEntry, len(tail))
-		copy(forward, tail)
+		tail = s.persistedHistory[s.persistedSeededLen:]
 		s.persistedSeededLen = len(s.persistedHistory)
 	}
 	s.historyMu.Unlock()
 
-	if len(forward) > 0 {
+	if len(tail) > 0 {
+		// Defensive copy outside historyMu: proc.InjectHistory consumes
+		// the slice and may outlive this call, while the caller's
+		// entries slice and `tail`'s backing array are owned by us — a
+		// fresh allocation severs both ties cleanly.
+		forward := make([]cli.EventEntry, len(tail))
+		copy(forward, tail)
 		proc.InjectHistory(forward)
 	}
 

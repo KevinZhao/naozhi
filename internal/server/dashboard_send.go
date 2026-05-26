@@ -973,6 +973,27 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 // expressed with forward slashes (the sole form seen in EventEntry.ImagePaths).
 // Kept separate from attachment.Dir so the HTTP layer's guard does not silently
 // loosen if attachment.Dir grows a platform-dependent separator someday.
+//
+// Cross-platform contract — R241-SEC-8 (#468):
+//
+//   - The trailing `/` is REQUIRED. handleAttachment compares against this
+//     literal via strings.HasPrefix on the POSIX-cleaned wire path, after
+//     rejecting any input containing a backslash or NUL byte
+//     (see handleAttachment's pre-clean above). The slash here is a wire-
+//     format separator (forward slash always, on every platform), NOT a
+//     filesystem separator — never substitute filepath.Separator here.
+//
+//   - Down-stream Joins must convert via filepath.FromSlash before passing
+//     the prefix-trimmed remainder to filepath.Join (see the attachRootAbs
+//     line that calls strings.TrimSuffix(attachmentDirPrefix, "/") inside
+//     filepath.Join). On Windows / on a hypothetical FS with a non-`/`
+//     separator, the FromSlash hop is what makes this prefix portable.
+//
+//   - Adding a backslash variant or making this prefix platform-conditional
+//     would BREAK the wire contract: every existing EventEntry.ImagePaths
+//     value on disk uses forward slashes regardless of host OS, and any
+//     mismatch with the HasPrefix gate either rejects legitimate paths
+//     (denial-of-service) or admits non-attachment paths (escape).
 const attachmentDirPrefix = ".naozhi/attachments/"
 
 // maxAttachmentBytes caps the per-response size. Images from the dashboard

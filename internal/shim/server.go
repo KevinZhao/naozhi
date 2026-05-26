@@ -36,9 +36,30 @@ const maxClientLineBytes = 16 * 1024 * 1024 // 16MB
 // layer already coalesces user text to a much smaller soft cap, so
 // production paths never approach this limit. R67-SEC-5.
 //
-// Var (not const) so the handleClient oversize-reject test can dial it down
-// without allocating 13 MB — regression coverage without a heavy test.
-var maxWriteLineBytes = 12 * 1024 * 1024 // 12MB
+// R237-CR-4 (#701): held in an atomic.Int64 (instead of a plain `var int`)
+// so the handleClient oversize-reject test can dial it down without racing
+// the runtime read on the hot recv path. Tests use setMaxWriteLineBytes /
+// maxWriteLineBytesValue; production callers read via Load().
+const defaultMaxWriteLineBytes int64 = 12 * 1024 * 1024 // 12MB
+
+var maxWriteLineBytes atomic.Int64
+
+// maxWriteLineBytesValue returns the active write-line cap. Wraps the
+// atomic load so call sites read like the legacy plain-int access.
+func maxWriteLineBytesValue() int64 {
+	v := maxWriteLineBytes.Load()
+	if v == 0 {
+		return defaultMaxWriteLineBytes
+	}
+	return v
+}
+
+// setMaxWriteLineBytes overrides the cap for tests. Returns the previous
+// value so callers can restore it via defer. A value of zero resets to the
+// compiled-in default.
+func setMaxWriteLineBytes(v int64) int64 {
+	return maxWriteLineBytes.Swap(v)
+}
 
 // Shim server timers. These three durations historically shared the same
 // "30s" literal but are semantically independent:
@@ -952,9 +973,9 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 				// client reaching this path is treated as a protocol violation
 				// and disconnected so the slot frees for healthy clients.
 				// R67-SEC-5.
-				if len(msg.Line) > maxWriteLineBytes {
+				if limit := maxWriteLineBytesValue(); int64(len(msg.Line)) > limit {
 					slog.Warn("client write too large, disconnecting",
-						"size", len(msg.Line), "limit", maxWriteLineBytes)
+						"size", len(msg.Line), "limit", limit)
 					return
 				}
 				if s.cli.alive() {

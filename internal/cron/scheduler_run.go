@@ -574,12 +574,15 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		return
 	}
 	defer func() {
-		// Reset metadata BEFORE releasing the CAS gate; otherwise a TriggerNow
-		// that wins the next CompareAndSwap can have its freshly-populated
-		// RunID/StartedAt clobbered by this deferred reset. R238-GO-2.
-		inflight.reset()
-		inflight.running.Store(false)
-		metrics.CronRunInflight.Add(-1)
+		// R246-CR-017 (#759): the 3-step release contract (reset → CAS
+		// release → gauge decrement) lives behind inflight.releaseRun so
+		// the ordering invariant — reset BEFORE Store(false) so a
+		// TriggerNow that wins the next CompareAndSwap cannot have its
+		// freshly-populated RunID/StartedAt clobbered by this deferred
+		// reset (R238-GO-2) — is enforced in one place rather than
+		// spread across executeOpt's defer body. See releaseRun's godoc
+		// for the full rationale.
+		inflight.releaseRun(metrics.CronRunInflight)
 	}()
 	// R242-CR-14 (#706): metrics.CronRunInflight semantically tracks "how
 	// many jobs hold the CAS slot right now", which is exactly the window
