@@ -6,7 +6,7 @@ import (
 
 // TestKeyNamespaces_DriveDerivedSlices pins the R239-ARCH-L invariant:
 // keyNamespaces is the single source of truth for both reservedKeyPrefixes
-// (used by IsReservedNamespace / IsUserVisibleKey) and exemptKeyPrefixes
+// (used by IsReservedNamespace) and exemptKeyPrefixes
 // (used by isExemptKey / exemptKind / exemptCapFor).
 //
 // The two slices used to live in separate files and drift without warning;

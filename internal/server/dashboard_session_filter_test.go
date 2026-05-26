@@ -164,19 +164,29 @@ func TestHistoryFilter_NilCronSessionsDegrades(t *testing.T) {
 	}
 }
 
-// TestIsUserVisibleKey_ContractRoundtrip is a smoke check that
-// dashboard/server still depends on session.IsUserVisibleKey for any
-// future generic listing endpoint — kept here (not in session/) so a
-// removal in this package surfaces with the right blame.
-func TestIsUserVisibleKey_ContractRoundtrip(t *testing.T) {
+// TestDashboardListingFilter_ContractRoundtrip pins the per-prefix skip
+// decision the dashboard's sidebar listing path applies (see
+// dashboard_session.go::listSessions): cron / sys / scratch namespaces
+// must be hidden from the catch-all "recent sessions" sidebar; standard
+// IM keys and project planner keys (deliberately surfaced via the
+// project sidebar grouping) must remain visible.
+//
+// Replaces the prior contract that pinned session.IsUserVisibleKey,
+// which was deleted because no listing path actually consulted it —
+// project keys could not flow through that umbrella without regressing
+// the planner UI. See #1212 for the deletion rationale.
+func TestDashboardListingFilter_ContractRoundtrip(t *testing.T) {
+	hiddenInSidebar := func(key string) bool {
+		return session.IsScratchKey(key) || session.IsCronKey(key) || session.IsSysKey(key)
+	}
 	for _, k := range []string{"cron:job-1", "sys:auto-titler", "scratch:abc:general:general"} {
-		if session.IsUserVisibleKey(k) {
-			t.Errorf("IsUserVisibleKey(%q) should be false", k)
+		if !hiddenInSidebar(k) {
+			t.Errorf("dashboard listing must hide %q", k)
 		}
 	}
-	for _, k := range []string{"feishu:group:c:general", "slack:direct:U:general"} {
-		if !session.IsUserVisibleKey(k) {
-			t.Errorf("IsUserVisibleKey(%q) should be true", k)
+	for _, k := range []string{"feishu:group:c:general", "slack:direct:U:general", "project:myrepo:planner"} {
+		if hiddenInSidebar(k) {
+			t.Errorf("dashboard listing must surface %q", k)
 		}
 	}
 
