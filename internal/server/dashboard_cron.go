@@ -83,6 +83,15 @@ type stringFieldPolicy struct {
 // The caller owns the length check (units differ: WorkDir/Prompt cap bytes,
 // Title caps runes, NotifyChatID caps bytes) and any field-specific extras
 // (validateCronWorkDir's filepath.IsAbs check). R219-CR-5.
+//
+// R250-PERF-22 (#1125): the IsLogInjectionRune set covers C1 (0x80..0x9F)
+// and assorted Unicode formatting codepoints (bidi, LS/PS) which all
+// encode in UTF-8 with at least one byte >= 0x80. An ASCII-only string —
+// the common case for absolute paths, schedule expressions, lowercase-hex
+// IDs — therefore cannot contain a hit, and the second `for _, r := range
+// s` decode pass is pure overhead. Track an `anyHighBit` flag during the
+// first byte loop and skip the rune walk when the input is provably
+// ASCII. Hot path on cron CREATE/PATCH validates 5+ fields per request.
 func validateStringField(s string, p stringFieldPolicy) error {
 	// R179-GO-P1: validate UTF-8 before the rune-range loop below. A
 	// `for _, r := range s` over broken UTF-8 silently produces utf8.RuneError
@@ -93,8 +102,13 @@ func validateStringField(s string, p stringFieldPolicy) error {
 	if !utf8.ValidString(s) {
 		return fmt.Errorf("%s contains invalid characters", p.name)
 	}
+	anyHighBit := false
 	for i := 0; i < len(s); i++ {
 		c := s[i]
+		if c >= 0x80 {
+			anyHighBit = true
+			continue
+		}
 		if c >= 0x20 && c != 0x7f {
 			continue
 		}
@@ -115,6 +129,14 @@ func validateStringField(s string, p stringFieldPolicy) error {
 			return fmt.Errorf("%s contains invalid characters", p.name)
 		}
 		return fmt.Errorf("%s contains invalid control characters", p.name)
+	}
+	// R250-PERF-22 (#1125): pure-ASCII fast path — IsLogInjectionRune cannot
+	// match any rune whose UTF-8 form is single-byte < 0x80, so the rune
+	// loop below has zero work to do when no high-bit byte was observed.
+	// Skips the second UTF-8 decode pass on the common case (absolute
+	// paths, cron schedules, lowercase-hex IDs).
+	if !anyHighBit {
+		return nil
 	}
 	// Reject Unicode bidi override / embedding / directional isolate
 	// characters (U+202A–U+202E, U+2066–U+2069) and Unicode line/paragraph
@@ -733,10 +755,16 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		// recent_runs: P1 — 5 条 newest-first 摘要给卡片 tooltip 用。
 		// 上限 5 是 wire 大小的折中：list response 总大小 = jobs × ~2KB。
 		// 详情页要更多用 GET /api/cron/runs.
+		//
+		// R250-PERF-19 (#1122): pre-extend rv to len(recent) and use index
+		// assignment in place of append. Skips the per-iteration cap/len
+		// bookkeeping the append builtin pays even when the backing array
+		// is already pre-sized — a 1Hz × N-tab × 50-job poll churns enough
+		// of these short slices that the saved bound checks add up.
 		if recent := h.scheduler.RecentRuns(j.ID, 5); len(recent) > 0 {
-			rv := make([]cronRunSummaryView, 0, len(recent))
-			for _, r := range recent {
-				rv = append(rv, cronSummaryToView(r))
+			rv := make([]cronRunSummaryView, len(recent))
+			for i, r := range recent {
+				rv[i] = cronSummaryToView(r)
 			}
 			v.RecentRuns = rv
 		}

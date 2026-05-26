@@ -730,10 +730,31 @@ func (s *shimServer) saveState() {
 	}
 }
 
-// handleClient manages one naozhi connection. Runs in its own goroutine.
-func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
-	defer conn.Close()
-
+// performHandshake runs the pre-active-client auth phase: peer-UID
+// verification, attach-message read under a deadline + LimitedReader, and
+// constant-time token compare against s.tokenRaw. On success it clears the
+// auth read deadline (so the post-auth command loop is not capped at
+// shimAuthReadDeadline) and returns the parsed attach message + ok=true.
+//
+// Carved out of handleClient (R219-CR-8 / #657) so the auth gate is
+// independently testable and the parent function reads as a flat:
+//
+//	handshake → hello → replay → become-active → loop.
+//
+// Pure semantic-equivalent extraction; ALL the legacy guard-rails are
+// preserved in place:
+//   - VerifyPeerUID Warn-level audit log on UID mismatch.
+//   - SetReadDeadline failure short-circuits BEFORE the read loop starts
+//     (prevents goroutine leak if the conn is half-closed).
+//   - LimitedReader caps pre-auth memory at maxClientLineBytes+1 so a
+//     pre-auth peer cannot OOM the shim with a very long attach line.
+//   - subtle.ConstantTimeCompare guards the token check.
+//   - On token failure we send "auth_failed" so the client can surface
+//     the reason (vs. silent close which would look like a network blip).
+//   - Clearing the read deadline post-auth is itself fail-safe: if the
+//     clear fails (rare; conn dying) we bail rather than leave a stale
+//     deadline armed against the post-auth command loop.
+func (s *shimServer) performHandshake(conn net.Conn) (ClientMsg, bool) {
 	// Verify connecting peer has same UID (defense-in-depth beyond token auth)
 	if !VerifyPeerUID(conn) {
 		// Elevated to Warn: a UID mismatch on a unix socket that is supposed
@@ -742,7 +763,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 		// same-host privilege escalation attempt.
 		slog.Warn("shim: rejecting client with UID mismatch",
 			"remote", conn.RemoteAddr().String())
-		return
+		return ClientMsg{}, false
 	}
 
 	// Set read deadline for auth phase (shimAuthReadDeadline to send attach).
@@ -751,7 +772,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	// goroutine. Bail out immediately instead.
 	if err := conn.SetReadDeadline(time.Now().Add(shimAuthReadDeadline)); err != nil {
 		slog.Debug("shim: set auth read deadline failed", "err", err)
-		return
+		return ClientMsg{}, false
 	}
 
 	// Use LimitedReader to prevent pre-auth memory exhaustion
@@ -762,19 +783,19 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	attachLine, err := reader.ReadBytes('\n')
 	if err != nil || lr.N == 0 {
 		slog.Debug("client read attach failed", "err", err)
-		return
+		return ClientMsg{}, false
 	}
 	var attachMsg ClientMsg
 	if err := json.Unmarshal(bytes.TrimSpace(attachLine), &attachMsg); err != nil || attachMsg.Type != "attach" {
 		slog.Debug("client invalid attach message")
-		return
+		return ClientMsg{}, false
 	}
 
 	// Verify token BEFORE setting as active client
 	clientToken, err := base64.StdEncoding.DecodeString(attachMsg.Token)
 	if err != nil || subtle.ConstantTimeCompare(clientToken, s.tokenRaw) != 1 {
 		writeMsg(conn, ServerMsg{Type: "auth_failed", Msg: "invalid token"})
-		return
+		return ClientMsg{}, false
 	}
 
 	// Clear read deadline after successful auth. If clearing fails, an old
@@ -782,13 +803,25 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	// the client reconnects cleanly.
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		slog.Debug("shim: clear auth read deadline failed", "err", err)
+		return ClientMsg{}, false
+	}
+
+	return attachMsg, true
+}
+
+// handleClient manages one naozhi connection. Runs in its own goroutine.
+func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
+	defer conn.Close()
+
+	attachMsg, ok := s.performHandshake(conn)
+	if !ok {
 		return
 	}
 
 	// Switch to bounded reader for the authenticated command loop.
 	// LimitedReader prevents a single oversized line from exhausting memory.
 	postAuthLR := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes) + 1}
-	reader = bufio.NewReaderSize(postAuthLR, 64*1024)
+	reader := bufio.NewReaderSize(postAuthLR, 64*1024)
 
 	// Send hello directly (before becoming the active client, so no live events interleave)
 	s.mu.Lock()

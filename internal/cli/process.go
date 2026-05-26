@@ -180,19 +180,22 @@ type Process struct {
 	cliPID        int  // CLI PID reported by shim hello
 	shimPID       int  // shim PID reported by shim hello; used by Kill() for SIGUSR2 fallback
 
-	// SessionID is protected by mu. External readers MUST use
-	// GetSessionID() rather than reading the field directly to avoid
-	// racing readLoop's transition writes (system/init / result events).
+	// sessionID and state are protected by mu. External readers MUST use
+	// GetSessionID() / GetState() rather than reading the field directly to
+	// avoid racing readLoop's transition writes (system/init / result
+	// events). Unexported (R237-GO-2 / #623) so cross-package callers
+	// cannot silently bypass the locking contract by direct field access;
+	// the existing accessors already cover every external read site.
 	// R225-GO-9.
-	SessionID string
-	State     ProcessState
-	// mu protects State / SessionID / onTurnDone. Read-only accessors
+	sessionID string
+	state     ProcessState
+	// mu protects state / sessionID / onTurnDone. Read-only accessors
 	// (GetState / IsRunning / GetSessionID) use RLock so concurrent
 	// ListSessions snapshots across N sessions and M tabs proceed in
 	// parallel instead of serialising through a single Mutex. Write paths
-	// (readLoop state transitions, Send State→Running, Interrupt
+	// (readLoop state transitions, Send state→Running, Interrupt
 	// snapshot-and-flag) continue to use Lock to preserve the existing
-	// "read State and set interrupted together under one lock" contract.
+	// "read state and set interrupted together under one lock" contract.
 	// R70-PERF-L3.
 	//
 	// totalCost is stored separately as an atomic.Uint64 (math.Float64bits)
@@ -507,7 +510,7 @@ func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 		caps:            ProtocolCaps(proto),
 		cliPID:          cliPID,
 		shimPID:         shimPID,
-		State:           StateSpawning,
+		state:           StateSpawning,
 		eventCh:         make(chan Event, 256),
 		done:            make(chan struct{}),
 		killCh:          make(chan struct{}),
@@ -542,7 +545,7 @@ func (p *Process) shimStdinWriter() io.Writer {
 // startReadLoop begins the shim message reader goroutine and heartbeat.
 func (p *Process) startReadLoop() {
 	p.mu.Lock()
-	p.State = StateReady
+	p.state = StateReady
 	p.mu.Unlock()
 	go p.readLoop()
 	go p.heartbeatLoop()
@@ -563,7 +566,7 @@ func (p *Process) Alive() bool {
 func (p *Process) IsRunning() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.State == StateRunning
+	return p.state == StateRunning
 }
 
 // Kill forcefully terminates the CLI process via shim.
@@ -737,7 +740,7 @@ func (p *Process) closeShimConn() {
 func (p *Process) GetState() ProcessState {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.State
+	return p.state
 }
 
 // SetOnTurnDone sets the callback invoked by readLoop when a result event
@@ -760,7 +763,7 @@ func (p *Process) SetOnTurnDone(fn func()) {
 func (p *Process) GetSessionID() string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.SessionID
+	return p.sessionID
 }
 
 // TotalCost returns the cumulative cost (lock-free via atomic.Uint64).

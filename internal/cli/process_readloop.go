@@ -72,7 +72,7 @@ func (p *Process) readLoop() {
 	// RNEW-007: Defers execute LIFO. Declaration order below is:
 	//   close(eventCh) -> close(done) -> CloseSubscribers -> recover
 	// Execution order on return is the reverse:
-	//   1. recover block: transition p.State to StateDead and fire onTurnDone
+	//   1. recover block: transition p.state to StateDead and fire onTurnDone
 	//   2. CloseSubscribers: unblock EventLog subscribers
 	//   3. close(done): signal readLoop exit to waiters
 	//   4. close(eventCh): isChanAlive relies on done closing BEFORE eventCh so
@@ -104,7 +104,7 @@ func (p *Process) readLoop() {
 				"panic", r, "stack", string(debug.Stack()))
 			p.setDeathReason(DeathReasonReadLoopPanic)
 			p.mu.Lock()
-			p.State = StateDead
+			p.state = StateDead
 			cb := p.onTurnDone
 			p.mu.Unlock()
 			if cb != nil {
@@ -378,11 +378,11 @@ func (p *Process) handleShimCLIExited(msg shimMsg, log *slog.Logger) {
 //
 // onTurnDone idempotency: this function may run after a partial-state
 // recovery in the panic defer (R222-GO-9). The defer guards against
-// double-fire by checking p.State before calling cb, so callers here can
+// double-fire by checking p.state before calling cb, so callers here can
 // rely on at-most-once semantics for the callback per readLoop instance.
 func (p *Process) transitionToDead() {
 	p.mu.Lock()
-	p.State = StateDead
+	p.state = StateDead
 	cb := p.onTurnDone
 	p.mu.Unlock()
 	if cb != nil {
@@ -658,9 +658,9 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	// is not confused with another stray result.
 	if ev.Type == "result" && p.reconnectedMidTurn.CompareAndSwap(true, false) {
 		p.mu.Lock()
-		wasRunning := p.State == StateRunning
+		wasRunning := p.state == StateRunning
 		if wasRunning {
-			p.State = StateReady
+			p.state = StateReady
 		}
 		cb := p.onTurnDone
 		p.mu.Unlock()
@@ -677,7 +677,7 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	case <-p.killCh:
 		p.setDeathReason(DeathReasonKilled)
 		p.mu.Lock()
-		p.State = StateDead
+		p.state = StateDead
 		cb := p.onTurnDone
 		p.mu.Unlock()
 		if cb != nil {

@@ -491,12 +491,46 @@ func TestHandleFilesExists_InvalidJSON(t *testing.T) {
 	}
 }
 
+// TestHandleFilesExists_PublicTmpDisabledByDefault pins R237-SEC-5 (#646):
+// without an explicit opt-in the __public_tmp__ pseudo-project must be
+// indistinguishable from a missing project — closes the "any authed
+// dashboard user can read /tmp" gap on multi-user deployments. The
+// symmetric handleFileGet branch is exercised by the same default below.
+func TestHandlePublicTmp_DisabledByDefault(t *testing.T) {
+	h, _, _ := newProjectHandlersForTest(t, nil)
+	// publicTmpEnabled left at its zero value (false).
+
+	body, _ := json.Marshal(existsReq{
+		Project: publicTmpProject,
+		Paths:   []string{"unused"},
+	})
+	existsHTTP := httptest.NewRequest(http.MethodPost,
+		"/api/projects/files/exists", bytes.NewReader(body))
+	existsHTTP.Header.Set("Content-Type", "application/json")
+	existsW := httptest.NewRecorder()
+	h.handleFilesExists(existsW, existsHTTP)
+	if existsW.Code != http.StatusNotFound {
+		t.Errorf("exists default-disabled status = %d, want 404 body=%s",
+			existsW.Code, existsW.Body.String())
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+publicTmpProject+"&path=any.txt&mode=preview", nil)
+	getW := httptest.NewRecorder()
+	h.handleFileGet(getW, getReq)
+	if getW.Code != http.StatusNotFound {
+		t.Errorf("get default-disabled status = %d, want 404 body=%s",
+			getW.Code, getW.Body.String())
+	}
+}
+
 // TestHandleFilesExists_PublicTmp covers the __public_tmp__ pseudo-project
 // fallback: chat-mentioned /tmp/... paths can be resolved without first
 // registering /tmp as a real project. Symlink-escape and path-traversal
 // guards from resolveProjectFileWithRoot must still apply.
 func TestHandleFilesExists_PublicTmp(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
+	h.publicTmpEnabled = true
 
 	// Drop a unique-named file directly under /tmp. Pin the dir explicitly
 	// because os.TempDir() on macOS returns /var/folders/..., which
@@ -554,6 +588,7 @@ func TestHandleFilesExists_PublicTmp(t *testing.T) {
 // previews as text via the __public_tmp__ pseudo-project.
 func TestHandleFileGet_PublicTmpPreview(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
+	h.publicTmpEnabled = true
 
 	// Pin /tmp explicitly: see TestHandleFilesExists_PublicTmp for the
 	// macOS os.TempDir() rationale.
@@ -592,6 +627,7 @@ func TestHandleFileGet_PublicTmpPreview(t *testing.T) {
 // guards under the pseudo-project.
 func TestHandleFileGet_PublicTmpRejectsTraversal(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
+	h.publicTmpEnabled = true
 
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+publicTmpProject+"&path=../etc/passwd&mode=preview", nil)
@@ -607,6 +643,7 @@ func TestHandleFileGet_PublicTmpRejectsTraversal(t *testing.T) {
 // must not be downloadable.
 func TestHandleFileGet_PublicTmpRejectsCredential(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
+	h.publicTmpEnabled = true
 
 	credPath := filepath.Join("/tmp", ".env.naozhi-test")
 	if err := os.WriteFile(credPath, []byte("SECRET=1\n"), 0o600); err != nil {
@@ -656,6 +693,7 @@ func TestHandleFileGet_PublicTmpRejectsCredential(t *testing.T) {
 // of our own UID.
 func TestHandleFileGet_PublicTmpRejectsForeignPrivate(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
+	h.publicTmpEnabled = true
 
 	// Override processEUID to a value guaranteed to differ from any real
 	// UID so files we just created (owned by the real UID) are foreign.

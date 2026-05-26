@@ -155,14 +155,19 @@ func (p *Process) SetCwdForLinker(cwd string) {
 	p.linker.mu.RLock()
 	session := p.linker.parentSessionID
 	p.linker.mu.RUnlock()
-	// On reconnect the wrapper populates proc.SessionID from
+	// On reconnect the wrapper populates proc.sessionID from
 	// handle.Hello.SessionID BEFORE the first live init event arrives —
 	// mirror that into the linker so Resolve works immediately on
 	// historical agent tasks replayed via InjectHistory. If readLoop
 	// later ingests an init with a different id, the normal SetContext
 	// call in the readLoop path updates it.
-	if session == "" && p.SessionID != "" {
-		session = p.SessionID
+	//
+	// Reads sessionID under p.mu via the GetSessionID accessor rather than
+	// the bare field so the cross-package locking contract still holds —
+	// wrapper.go's reconnect store path holds p.mu.Lock when populating
+	// sessionID, GetSessionID's RLock pairs with that.
+	if sid := p.GetSessionID(); session == "" && sid != "" {
+		session = sid
 	}
 	p.linker.SetContext(projectDir, session)
 }

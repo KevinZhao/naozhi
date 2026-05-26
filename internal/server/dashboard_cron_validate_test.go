@@ -194,6 +194,58 @@ func TestIsLogInjectionRune(t *testing.T) {
 	}
 }
 
+// TestValidateStringField_ASCIIFastPath pins the R250-PERF-22 (#1125)
+// optimisation: ASCII-only inputs (no byte >= 0x80) skip the second
+// rune-decode pass. We cannot directly observe "did the rune loop run",
+// but we can assert that every legitimate ASCII shape across the
+// validator surface still returns nil and every bidi/C1 input still
+// rejects — so the fast-path branch never accidentally smuggles a hit
+// past the decode pass. Mirrors the byte+rune class coverage already
+// pinned by TestValidateCronWorkDir_Rejects{ASCIIControl,UnicodeBidi}.
+func TestValidateStringField_ASCIIFastPath(t *testing.T) {
+	t.Parallel()
+	// ASCII-only inputs the optimisation must accept (every common
+	// shape we feed through cron CREATE/PATCH).
+	asciiOK := []struct {
+		name string
+		s    string
+	}{
+		{"abs_path", "/home/user/proj/x"},
+		{"hex_id", "0123456789abcdef"},
+		{"schedule_5", "*/5 * * * *"},
+		{"schedule_at", "@daily"},
+	}
+	for _, tc := range asciiOK {
+		tc := tc
+		t.Run("ascii_ok/"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			if err := validateStringField(tc.s, stringFieldPolicy{name: "f"}); err != nil {
+				t.Errorf("validateStringField(%q) = %v, want nil (ASCII fast path)", tc.s, err)
+			}
+		})
+	}
+	// High-bit inputs must still reject — exercises the post-fast-path
+	// rune loop. RLO (U+202E) is the canonical bidi-class hit.
+	rlo := "good‮bad"
+	if err := validateStringField(rlo, stringFieldPolicy{name: "f"}); err == nil {
+		t.Errorf("validateStringField(%q) = nil, want bidi rejection", rlo)
+	}
+	// C1 (0x80..0x9F) encodes as two-byte UTF-8 with first byte 0xC2 —
+	// non-ASCII so it goes through the rune loop.
+	c1 := "okbad"
+	if err := validateStringField(c1, stringFieldPolicy{name: "f"}); err == nil {
+		t.Errorf("validateStringField(%q) = nil, want C1 rejection", c1)
+	}
+	// CJK / accented-Latin runes are non-ASCII but legitimate; the rune
+	// loop must NOT reject them. Pins that the fast path doesn't hide a
+	// regression where every high-bit byte is treated as suspect.
+	for _, s := range []string{"中文", "café", "日本語"} {
+		if err := validateStringField(s, stringFieldPolicy{name: "f"}); err != nil {
+			t.Errorf("validateStringField(%q) = %v, want nil (legitimate non-ASCII)", s, err)
+		}
+	}
+}
+
 // TestValidateCronFields_RejectInvalidUTF8 covers R179-GO-P1: a
 // `for _, r := range s` over broken UTF-8 yields utf8.RuneError (U+FFFD)
 // for each bad byte, which IsLogInjectionRune does not flag — lone

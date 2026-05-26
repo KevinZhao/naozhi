@@ -290,7 +290,7 @@ func TestProcess_Send_Busy(t *testing.T) {
 	p.startReadLoop()
 
 	p.mu.Lock()
-	p.State = StateRunning
+	p.state = StateRunning
 	p.mu.Unlock()
 
 	_, err := p.Send(context.Background(), "hello", nil, nil)
@@ -461,7 +461,7 @@ func TestProcess_Interrupt_WhenRunning(t *testing.T) {
 	p.startReadLoop()
 
 	p.mu.Lock()
-	p.State = StateRunning
+	p.state = StateRunning
 	p.mu.Unlock()
 
 	p.Interrupt()
@@ -527,7 +527,7 @@ func TestProcess_InterruptViaControl_Running_SetsFlagsAndWrites(t *testing.T) {
 	defer p.Kill()
 
 	p.mu.Lock()
-	p.State = StateRunning
+	p.state = StateRunning
 	p.mu.Unlock()
 
 	if err := p.InterruptViaControl(); err != nil {
@@ -549,7 +549,7 @@ func TestProcess_InterruptViaControl_WriteFailure_RollsBackFlags(t *testing.T) {
 	defer p.Kill()
 
 	p.mu.Lock()
-	p.State = StateRunning
+	p.state = StateRunning
 	p.mu.Unlock()
 
 	err := p.InterruptViaControl()
@@ -600,10 +600,10 @@ func TestProcess_InterruptViaControl_RequestIDIsPerProcess(t *testing.T) {
 	defer p2.Kill()
 
 	p1.mu.Lock()
-	p1.State = StateRunning
+	p1.state = StateRunning
 	p1.mu.Unlock()
 	p2.mu.Lock()
-	p2.State = StateRunning
+	p2.state = StateRunning
 	p2.mu.Unlock()
 
 	if err := p1.InterruptViaControl(); err != nil {
@@ -893,7 +893,7 @@ func TestProcess_SetOnTurnDone(t *testing.T) {
 	// post-reconnect path where readLoop owns the State→Ready transition.
 	// Outside reconnect, Send() owns the transition (see readLoop guard).
 	p.mu.Lock()
-	p.State = StateRunning
+	p.state = StateRunning
 	p.mu.Unlock()
 	p.reconnectedMidTurn.Store(true)
 
@@ -928,7 +928,7 @@ func TestProcess_ResultDoesNotFlipStateWithoutReconnect(t *testing.T) {
 	// Simulate Send() acquiring the turn: Ready → Running, but do NOT arm
 	// reconnectedMidTurn. This is the normal path.
 	p.mu.Lock()
-	p.State = StateRunning
+	p.state = StateRunning
 	p.mu.Unlock()
 
 	srv.SendStdout(`{"type":"result","result":"done","session_id":"s1"}`)
@@ -1078,8 +1078,8 @@ func TestProcess_FindResultSince(t *testing.T) {
 func TestProcess_StartReadLoop_StateReady(t *testing.T) {
 	p, srv := shimTestPair(&ClaudeProtocol{})
 	startServerDrain(srv)
-	if p.State != StateSpawning {
-		t.Errorf("initial State = %v, want StateSpawning", p.State)
+	if p.state != StateSpawning {
+		t.Errorf("initial state = %v, want StateSpawning", p.state)
 	}
 	p.startReadLoop()
 	// Poll for StateReady instead of sleeping a fixed 10ms; this is
@@ -1087,7 +1087,7 @@ func TestProcess_StartReadLoop_StateReady(t *testing.T) {
 	testhelper.Eventually(t, func() bool {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		return p.State == StateReady
+		return p.state == StateReady
 	}, time.Second, "startReadLoop did not reach StateReady")
 	p.Kill()
 }

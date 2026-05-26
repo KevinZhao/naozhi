@@ -46,7 +46,16 @@ func TestCandidatePaths_Kiro(t *testing.T) {
 // NOT t.Parallel() — mutates process-global env PATH/HOME via os.Setenv.
 // Parallel siblings reading PATH (e.g., exec.LookPath) would see torn
 // state across the deferred restore window. Serial only.
-func TestDetectCLI_FallsBackToBareNameWhenNothingFound(t *testing.T) {
+//
+// R249-SEC-7 (#920): the historical bare-name fallback let exec.Command
+// re-resolve through the live PATH at spawn time, opening a PATH-poisoning
+// window between detect and exec. detectCLI now returns "" when neither
+// candidatePaths nor exec.LookPath finds the binary; callers (NewWrapper,
+// DetectBackendsCtx) already handle empty paths gracefully (Probe
+// short-circuits, dashboard marks unavailable, exec.Command surfaces a
+// clear error at spawn time instead of launching whatever happens to be
+// on PATH at exec time).
+func TestDetectCLI_ReturnsEmptyWhenNothingFound(t *testing.T) {
 	// candidatePaths uses "claude" for any non-"kiro" backend,
 	// so we test with a name unlikely to exist via PATH lookup
 	origPath := os.Getenv("PATH")
@@ -59,9 +68,11 @@ func TestDetectCLI_FallsBackToBareNameWhenNothingFound(t *testing.T) {
 	defer os.Setenv("HOME", origHome)
 
 	result := detectCLI("claude")
-	// With empty PATH and no files, should fall back to bare "claude"
-	if result != "claude" {
-		t.Errorf("expected bare name fallback, got %q", result)
+	// With empty PATH and no files, must return "" rather than the bare
+	// basename — the bare name re-resolves through live PATH at exec time
+	// and opens a PATH-poisoning vector.
+	if result != "" {
+		t.Errorf("expected empty fallback, got %q", result)
 	}
 }
 
@@ -101,11 +112,31 @@ func TestNewWrapper_ExplicitPathTakesPrecedence(t *testing.T) {
 	}
 }
 
+// NOT t.Parallel() — uses t.Setenv to point PATH/HOME at a fake-binary
+// fixture, which Go test forbids combining with parallel mode.
+//
+// R249-SEC-7 (#920): detectCLI now returns "" when neither candidatePaths
+// nor exec.LookPath finds the binary, so a CI runner without a real claude
+// install legitimately produces an empty CLIPath. Stage a fake claude in a
+// temp PATH dir so we exercise the actual contract — NewWrapper threads
+// detectCLI's resolved absolute path into CLIPath — without depending on
+// the host having claude on its real PATH.
 func TestNewWrapper_EmptyPathAutoDetects(t *testing.T) {
-	t.Parallel()
+	dir := t.TempDir()
+	ext := ""
+	if runtime.GOOS == "windows" {
+		ext = ".exe"
+	}
+	fakeCLI := filepath.Join(dir, "claude"+ext)
+	if err := os.WriteFile(fakeCLI, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir()) // avoid native installer hit at ~/.local/bin/claude
+	t.Setenv("PATH", dir)
+
 	w := NewWrapper("", &ClaudeProtocol{}, "claude")
 	if w.CLIPath == "" {
-		t.Error("auto-detect should produce a non-empty path")
+		t.Error("auto-detect should produce a non-empty path when binary exists on PATH")
 	}
 }
 
