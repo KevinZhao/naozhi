@@ -1289,7 +1289,13 @@ func (t *replyTracker) sendTodoMessage(text string) {
 	rctx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
 	defer cancel()
 	if _, err := t.p.Reply(rctx, platform.OutgoingMessage{ChatID: t.chatID, Text: text}); err != nil {
-		slog.Debug("todo reply failed", "chat_id", t.chatID, "err", err)
+		// R238-CR-5: previously slog.Debug — silent because R236-GO-1
+		// detached this Reply from t.ctx, so cancellation no longer
+		// short-circuits errors. Promote to Warn to match the
+		// ask_question card-send failure path on the same tracker
+		// (Warn is the in-this-file convention for platform Reply
+		// failures the user-visible turn cared about).
+		slog.Warn("todo reply failed", "chat_id", t.chatID, "err", err)
 	}
 }
 
