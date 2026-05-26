@@ -803,6 +803,44 @@ func TestSummariseToolInput_FallbackUsesRawBytes(t *testing.T) {
 	if got := summariseToolInput("X", json.RawMessage(``)); got != "" {
 		t.Errorf("empty input: summary=%q, want empty", got)
 	}
+
+	// 5. R242-SEC-13 (#645): inputs larger than summariseInputCap are
+	//    rejected before json.Unmarshal so a hostile/malformed transcript
+	//    line cannot drive the parser through a deeply-nested megabyte
+	//    blob just to populate a 200-byte label that the wire layer
+	//    truncates anyway. Build a 64 KB+1 byte payload (one byte over
+	//    the cap) shaped as valid JSON with a recognised priority field;
+	//    the cap must short-circuit BEFORE the priority path runs, so
+	//    even a recognised key returns empty here.
+	oversize := make([]byte, summariseInputCap+1)
+	oversize[0] = '{'
+	copy(oversize[1:], []byte(`"command":"ls"`))
+	// Pad with whitespace (still valid JSON) up to cap+1 total bytes,
+	// then close the object. Whitespace inside an object is permitted
+	// per RFC 8259 so the payload would otherwise parse as
+	// {"command":"ls"} and surface "ls" via the priority path.
+	for i := 1 + len(`"command":"ls"`); i < len(oversize)-1; i++ {
+		oversize[i] = ' '
+	}
+	oversize[len(oversize)-1] = '}'
+	if got := summariseToolInput("Bash", oversize); got != "" {
+		t.Errorf("oversize input (%d bytes > cap %d): summary=%q, want empty (cap must short-circuit)",
+			len(oversize), summariseInputCap, got)
+	}
+
+	// 6. Inputs exactly at the cap are still summarised (boundary off-by-one
+	//    guard). A 64 KB payload that fits within summariseInputCap should
+	//    produce the priority label.
+	atCap := make([]byte, summariseInputCap)
+	atCap[0] = '{'
+	copy(atCap[1:], []byte(`"command":"ls"`))
+	for i := 1 + len(`"command":"ls"`); i < len(atCap)-1; i++ {
+		atCap[i] = ' '
+	}
+	atCap[len(atCap)-1] = '}'
+	if got := summariseToolInput("Bash", atCap); !strings.Contains(got, "ls") {
+		t.Errorf("at-cap input (%d bytes == cap): summary=%q, want to contain priority label", len(atCap), got)
+	}
 }
 
 // TestFlattenJSONLEvent_DispatchByType pins R242-CR-13 (#704): the

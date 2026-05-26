@@ -98,6 +98,13 @@ const (
 	// renders the call but no longer ships the full payload.
 	maxToolInputBytes = 64 * 1024
 
+	// summariseInputCap is the upper byte limit for a tool_use.Input we
+	// will feed to json.Unmarshal in summariseToolInput. Matches
+	// maxToolInputBytes (the wire payload cap): an input larger than the
+	// rendered slice cannot contribute a useful one-line label, and we
+	// avoid handing oversize blobs to the JSON parser. R242-SEC-13 (#645).
+	summariseInputCap = maxToolInputBytes
+
 	// transcriptRunningSlackMS is the slack added to "now" when computing
 	// the upper bound of the time window for a still-running cron run.
 	// fresh=false runs share a JSONL across many invocations, so we filter
@@ -1041,8 +1048,26 @@ type toolInputProbe struct {
 // summariseToolInput builds a one-line label for the tool_use card
 // header. Best-effort: Bash → command, Read/Write/Edit → file_path,
 // otherwise fall back to a JSON-trimmed dump of the input.
+//
+// R242-SEC-13 (#645): cap the JSON input handed to encoding/json. The
+// per-line bufio.Scanner buffer (maxTranscriptLineBytes = 256 KB) already
+// bounds a single transcript line, but a maximally-sized tool_use.Input
+// can still drive json.Unmarshal through a deeply-nested 256 KB blob just
+// to populate six string fields and a fallback that ends up truncated
+// to 200 bytes anyway. Refuse anything beyond summariseInputCap up front
+// so the parser never sees the amplifier shape — the wire payload is
+// already capped at maxToolInputBytes (64 KB) by the call site, so 64 KB
+// is also the largest input we could plausibly need to summarise.
 func summariseToolInput(name string, input json.RawMessage) string {
 	if len(input) == 0 {
+		return ""
+	}
+	if len(input) > summariseInputCap {
+		// Treat oversize input as opaque: the caller will already have
+		// rendered the [truncated] placeholder for the wire payload,
+		// and a one-line label built from a 64 KB+ blob is not useful
+		// anyway. Returning empty drops the header summary line; the
+		// dashboard already handles missing summaries.
 		return ""
 	}
 	var probe toolInputProbe
