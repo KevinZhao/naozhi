@@ -903,6 +903,50 @@ func BenchmarkParseISO8601MS(b *testing.B) {
 	}
 }
 
+// R244-GO-P2-2 (#909): summariseToolInput's fallback branch (no
+// recognised field) used to json.Marshal the probe struct, which (a)
+// allocates a fresh buffer per call and (b) sorts keys alphabetically,
+// disagreeing with the original wire bytes for any caller that diffed
+// the dashboard output against the JSONL log. The fix returns
+// string(input) directly so the original bytes (and key order)
+// round-trip into the summary string. Lock that contract here:
+//   - probe-Unmarshal still validates structure (broken JSON → "")
+//   - on no-recognised-field, the summary text is the raw input bytes
+//     (post-SanitizeForLog), preserving key order vs. the JSONL source.
+func TestSummariseToolInput_FallbackPreservesKeyOrder(t *testing.T) {
+	t.Parallel()
+
+	// Choose key order `zeta` then `alpha` so a re-Marshal round-trip
+	// (which sorts struct fields by their declaration order, but maps
+	// alphabetically) would visibly reorder. None of the keys appear in
+	// toolInputProbe so the fallback branch fires.
+	input := json.RawMessage(`{"zeta":"z","alpha":"a"}`)
+	got := summariseToolInput("Custom", input)
+	if got == "" {
+		t.Fatalf("expected non-empty fallback summary, got empty")
+	}
+	if !strings.Contains(got, `"zeta":"z"`) || !strings.Contains(got, `"alpha":"a"`) {
+		t.Errorf("fallback summary should preserve original keys, got %q", got)
+	}
+	zetaIdx := strings.Index(got, `"zeta"`)
+	alphaIdx := strings.Index(got, `"alpha"`)
+	if zetaIdx < 0 || alphaIdx < 0 || zetaIdx > alphaIdx {
+		t.Errorf("fallback summary reordered keys (alpha < zeta — likely a re-Marshal regression), got %q", got)
+	}
+
+	// Broken JSON → empty (probe Unmarshal fails).
+	if got := summariseToolInput("X", json.RawMessage(`{not valid`)); got != "" {
+		t.Errorf("broken JSON should yield empty summary, got %q", got)
+	}
+
+	// Recognised field → summary surfaces that field's value, not the
+	// raw bytes. Locks the priority-order contract too (Bash → command
+	// even if file_path is also present).
+	if got := summariseToolInput("Bash", json.RawMessage(`{"file_path":"/x","command":"echo hi"}`)); got != "echo hi" {
+		t.Errorf("recognised-field path must surface command, got %q", got)
+	}
+}
+
 // TestAnsiEscRe_StripsOSCHyperlinks guards R243-SEC-6 (#788): tools like
 // `gh`, `ls --hyperlink`, and language servers emit OSC sequences (e.g.
 // `\x1b]8;;url\x07link\x1b]8;;\x07`) which used to leak through unstripped
