@@ -227,6 +227,22 @@ func (p *Process) UserTurnCount() int64 {
 }
 
 // SubscribeEvents returns a notification channel and unsubscribe function.
+//
+// Prefer SubscribeEventsTyped for new callers: it returns an
+// EventSubscription value that bundles the (channel, cancel) pair so the
+// channel-close contract stays internal to the cli/eventlog package rather
+// than a cross-package convention each consumer must internalize
+// (R246-ARCH-12 / #792).
 func (p *Process) SubscribeEvents() (<-chan struct{}, func()) {
 	return p.eventLog.Subscribe()
+}
+
+// SubscribeEventsTyped is the typed form of SubscribeEvents per
+// R246-ARCH-12 / #792 (P0 subset). The returned EventSubscription owns
+// both the notify channel and the cancel callback, so cross-package
+// callers no longer need to know that the channel is closed by
+// CloseSubscribers / unsub -- they just hold the value and call Cancel()
+// when done.
+func (p *Process) SubscribeEventsTyped() EventSubscription {
+	return p.eventLog.SubscribeNew()
 }
