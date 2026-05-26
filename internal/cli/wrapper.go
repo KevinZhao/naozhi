@@ -597,6 +597,16 @@ type shimLineReader struct {
 	proc *Process
 }
 
+// shimLineReaderMaxSkips caps the number of non-stdout/non-cli_exited shim
+// frames the Init handshake will silently swallow before bailing with an
+// error. Defends against a buggy or hostile shim that streams stderr / pong
+// frames forever during proto.Init: the surrounding LineReader interface
+// has no ctx parameter (R237-GO-6 / #633), so this is the structural
+// timeout. 4096 is generous enough to absorb the realistic burst of
+// transient ping / stderr lines a freshly-spawned CLI might emit before
+// its first stdout JSON event, while still bounding the DoS surface.
+const shimLineReaderMaxSkips = 4096
+
 // ReadLine returns the next CLI stdout line received over the shim
 // transport, blocking until either a stdout frame arrives or the shim
 // signals CLI exit.
@@ -632,6 +642,16 @@ type shimLineReader struct {
 func (r *shimLineReader) ReadLine() ([]byte, bool, error) {
 	// During Init, we need to read lines that come through the shim stdout wrapper.
 	// The shim sends {"type":"stdout","line":"..."} — we need to unwrap.
+	//
+	// R237-GO-6 (#633): bounded skip counter so a misbehaving shim that
+	// streams non-stdout/non-cli_exited frames forever cannot wedge the
+	// handshake. The LineReader interface has no ctx parameter (its only
+	// caller is Protocol.Init across both stream-json and ACP; widening
+	// the signature is breaking across both backends), so we enforce the
+	// upper bound locally here. On overflow we return eof=true + a
+	// descriptive error so Spawn's error path tears down the shim
+	// connection (Init failure goes through proc.Kill / handle.Close).
+	skipped := 0
 	for {
 		rawLine, err := r.proc.shimR.ReadBytes('\n')
 		if err != nil {
@@ -639,6 +659,10 @@ func (r *shimLineReader) ReadLine() ([]byte, bool, error) {
 		}
 		var msg shimMsg
 		if json.Unmarshal(rawLine, &msg) != nil {
+			skipped++
+			if skipped > shimLineReaderMaxSkips {
+				return nil, true, fmt.Errorf("shim sent %d unparseable frames during init without stdout", skipped)
+			}
 			continue
 		}
 		if msg.Type == "stdout" {
@@ -647,6 +671,11 @@ func (r *shimLineReader) ReadLine() ([]byte, bool, error) {
 		if msg.Type == "cli_exited" {
 			return nil, true, fmt.Errorf("cli exited during init")
 		}
-		// Skip other message types (stderr, pong, etc.) during init
+		// Skip other message types (stderr, pong, etc.) during init,
+		// but bound the loop so a forever-pinging shim cannot stall Init.
+		skipped++
+		if skipped > shimLineReaderMaxSkips {
+			return nil, true, fmt.Errorf("shim sent %d non-stdout frames during init without stdout (last type=%q)", skipped, msg.Type)
+		}
 	}
 }
