@@ -1538,14 +1538,14 @@ func TestWriteStateFile_ChmodDir(t *testing.T) {
 // maxWriteLineBytes for the test so the regression assertion completes
 // quickly; the production constant is 12 MB.
 func TestHandleClient_WriteOversize_Disconnects(t *testing.T) {
-	origLimit := maxWriteLineBytes
-	maxWriteLineBytes = 1024 // 1 KiB for the test
-	defer func() { maxWriteLineBytes = origLimit }()
+	origLimit := maxWriteLineBytes.Load()
+	maxWriteLineBytes.Store(1024) // 1 KiB for the test
+	defer func() { maxWriteLineBytes.Store(origLimit) }()
 
 	_, client, cleanup := setupShimServerWithClient(t)
 	defer cleanup()
 
-	oversize := strings.Repeat("A", maxWriteLineBytes+1)
+	oversize := strings.Repeat("A", int(maxWriteLineBytes.Load())+1)
 	sendClientCmd(t, client, ClientMsg{Type: "write", Line: oversize})
 
 	// handleClient returns on oversize → defer chain closes the connection.

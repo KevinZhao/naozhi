@@ -36,9 +36,15 @@ const maxClientLineBytes = 16 * 1024 * 1024 // 16MB
 // layer already coalesces user text to a much smaller soft cap, so
 // production paths never approach this limit. R67-SEC-5.
 //
-// Var (not const) so the handleClient oversize-reject test can dial it down
-// without allocating 13 MB — regression coverage without a heavy test.
-var maxWriteLineBytes = 12 * 1024 * 1024 // 12MB
+// atomic.Int64 (not plain var) so the handleClient oversize-reject test can
+// dial it down without allocating 13 MB — regression coverage without a heavy
+// test. R237-CR-4: handleClient runs concurrently with test goroutines, so a
+// plain var assignment trips `go test -race`. Use atomic load/store instead.
+var maxWriteLineBytes atomic.Int64
+
+func init() {
+	maxWriteLineBytes.Store(12 * 1024 * 1024) // 12MB
+}
 
 // Shim server timers. These three durations historically shared the same
 // "30s" literal but are semantically independent:
@@ -952,9 +958,9 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 				// client reaching this path is treated as a protocol violation
 				// and disconnected so the slot frees for healthy clients.
 				// R67-SEC-5.
-				if len(msg.Line) > maxWriteLineBytes {
+				if limit := maxWriteLineBytes.Load(); int64(len(msg.Line)) > limit {
 					slog.Warn("client write too large, disconnecting",
-						"size", len(msg.Line), "limit", maxWriteLineBytes)
+						"size", len(msg.Line), "limit", limit)
 					return
 				}
 				if s.cli.alive() {
