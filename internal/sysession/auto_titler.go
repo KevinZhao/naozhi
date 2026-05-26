@@ -90,7 +90,7 @@ const (
 	autoTitlerHighwaterMaxEntries = autoTitlerMaxBatchPerTick * 32
 
 	// autoTitlerExcerptSoftCapBytes is the total-length softcap applied
-	// to buildExcerptFromHistory.  R238-GO-15 (#806): the previous
+	// to buildExcerptFromHistory (R238-GO-15 / issue #806).  The previous
 	// implementation accumulated every user-turn summary into a single
 	// strings.Builder with no upper bound — a session with thousands of
 	// turns (cron-driven planner sessions, very long support chats) could
@@ -474,8 +474,8 @@ func evictOldestHighwater(m map[string]autoTitlerHighwater, keep int) {
 // — the title-extraction LLM only needs to see what the user asked,
 // because the title reflects user intent, not assistant output.
 //
-// Long conversations are clipped at autoTitlerExcerptSoftCapBytes (1 MiB)
-// — R238-GO-15 (#806).  Per-line cap (autoTitlerLineCapBytes) is also
+// Long conversations are clipped at autoTitlerExcerptSoftCapBytes (1 MiB);
+// see R238-GO-15 / issue #806.  Per-line cap (autoTitlerLineCapBytes) is also
 // enforced inside buildExcerpt below as the last prompt-injection defence,
 // but the softcap here protects against thousands-of-turns sessions
 // where the *number* of lines (not any single line) would push memory
