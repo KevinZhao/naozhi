@@ -779,6 +779,15 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	}
 
 	inflight.setPhase(PhaseSpawning)
+	// R250-CR-22 (#1155): capture spawnStart immediately before GetOrCreate
+	// so the "send budget exceeds job/2" warn at line ~831 measures actual
+	// spawn time, not (jitter + spawn). startedAt is captured pre-jitter for
+	// the dashboard "running 12s" badge (true wall-clock from CAS), but the
+	// warn is calibrated against jobTimeout/2 to detect when the spawn phase
+	// alone consumed too much of the budget — folding jitter (default up to
+	// 30s) into that measurement triggers false positives on healthy jobs
+	// whose schedule landed unlucky in the jitter window.
+	spawnStart := time.Now()
 	sess, _, err := s.router.GetOrCreate(ctx, key, opts)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -849,7 +858,9 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// function). R247-CR-28: ratio extracted to a documented const so
 	// future tuning is a one-line change with shared rationale.
 	spawnWarnBudget := time.Duration(float64(jobTimeout) * spawnElapsedWarnRatio)
-	if spawnElapsed := time.Since(startedAt); spawnElapsed > spawnWarnBudget {
+	// R250-CR-22 (#1155): time.Since(spawnStart) — not startedAt — so jitter
+	// time is excluded. See spawnStart capture above (just before GetOrCreate).
+	if spawnElapsed := time.Since(spawnStart); spawnElapsed > spawnWarnBudget {
 		metrics.CronSendBudgetDoubledTotal.Add(1)
 		// Message string preserved for runbook grep — see docs/ops/pprof.md
 		// + internal/metrics/metrics.go CronSendBudgetDoubledTotal godoc.
