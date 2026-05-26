@@ -128,9 +128,10 @@
 //     (shimWriter / shimLineReader); pure I/O, no semantics.
 //   - process_event_format.go — Event → EventEntry pure
 //     conversion + FormatToolInput. Earlier "Deprecated"
-//     header noise has been cleared (R243-ARCH-21); the
-//     EventEntriesFromEvent test-helper variant was retired
-//     in DEADCODE-7 (only EventEntriesFromEventAt remains).
+//     header noise has been cleared (R243-ARCH-21);
+//     EventEntriesFromEventAt is the single entry point —
+//     production callers pass a shared time.Now(); the
+//     no-args wrapper has been retired (DEADCODE-7).
 //   - process_event_query.go — read-only EventLog accessors
 //     (EventEntries / EventLastN / EventEntriesSince /
 //     EventEntriesBefore) + Linker lifecycle + InjectHistory.

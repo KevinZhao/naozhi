@@ -20,12 +20,15 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// EventEntriesFromEventAt converts an Event to zero or more EventEntry values
-// using a caller-supplied wall-clock to share a single time.Now() call between
-// ev.recvAt assignment and entry timestamping. Assistant messages can contain
-// multiple content blocks (thinking + tool_use + text); each block that maps
-// to a known type produces its own entry so downstream consumers (EventLog,
-// dashboard) don't silently drop blocks after the first. R67-PERF-9.
+// EventEntriesFromEventAt converts an Event to zero or more EventEntry values,
+// stamping every entry with the caller-supplied unix-ms timestamp.
+//
+// Assistant messages can contain multiple content blocks (thinking + tool_use + text);
+// each block that maps to a known type produces its own entry so downstream consumers
+// (EventLog, dashboard) don't silently drop blocks after the first.
+//
+// readLoop calls this with a single time.Now() so ev.recvAt and EventEntry.Time
+// share one wall-clock read per event (R67-PERF-9, R225-PERF-5).
 func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 	// Replay events are a passthrough-internal CLI ack for messages naozhi
 	// already showed to the user via the optimistic bubble. Writing them to

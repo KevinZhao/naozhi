@@ -10,6 +10,19 @@ import (
 	"time"
 )
 
+// label returns the preferred human-readable identifier for an Agent tool call.
+// Test-only helper that locks the Agent event formatting contract; production
+// code synthesises the Agent display name inline in process_event_format.go.
+func (a agentInput) label() string {
+	if a.SubagentType != "" {
+		return a.SubagentType
+	}
+	if a.Name != "" {
+		return a.Name
+	}
+	return a.TeamName
+}
+
 // shimTestPair creates a Process connected to a fake shim via net.Pipe.
 // The returned shimEnd can be used to send shim protocol messages.
 // Close the returned shimEnd to simulate shim disconnect.
