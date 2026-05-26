@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -809,23 +811,50 @@ func (s *runStore) Get(jobID, runID string) (*CronRun, error) {
 // readRun parses a single run file. Returns ErrCorruptRun on parse
 // failure or oversize; fs.ErrNotExist propagates unchanged.
 //
-// R235-SEC-5 / R242-GO-17: Lstat is intentionally used here (not Stat).
-// Stat would follow symlinks, which an attacker with write access to
-// runs/<jobID>/ could exploit by replacing a legitimate .json with a
-// symlink to /etc/passwd or another sensitive file. Lstat reports the
-// link itself, so the IsRegular() check below rejects the symlink before
-// ReadFile dereferences it. diskListNewestFirst / trimJobLocked already
-// skip symlinks during directory scans, but Get() arrives here directly
-// with a constructed path so this guard is the only barrier.
+// R235-SEC-5 / R242-GO-17 / R238-SEC-7 (#827): the original implementation
+// did Lstat + (cond) ReadFile, which left a TOCTOU window — between the
+// Lstat result observing a regular file and ReadFile opening the path,
+// an attacker with write access to runs/<jobID>/ could swap the entry
+// for a symlink and have ReadFile dereference a sensitive file. We close
+// the window by using OpenFile with O_NOFOLLOW (kernel refuses to follow
+// a final-component symlink, returning ELOOP) and Fstat'ing the resulting
+// fd: the bytes we read come from exactly the inode whose mode we just
+// validated as a regular file, regardless of any concurrent rename. The
+// guard is the only barrier between Get() and a malicious symlink because
+// Get() takes a caller-supplied runID that has not been ReadDir-filtered.
+// diskListNewestFirst / trimJobLocked already skip symlinks during their
+// directory scans, so they use readRunNoLstat to avoid paying for the
+// redundant fd validation.
 func (s *runStore) readRun(path string) (*CronRun, error) {
-	li, err := os.Lstat(path)
+	// O_NOFOLLOW: refuse to open a final-component symlink. If an attacker
+	// races a swap-to-symlink between our caller's path construction and
+	// Open, the open itself fails with ELOOP. O_RDONLY|O_CLOEXEC are
+	// hygiene defaults — never let a forked child inherit the fd.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		// Map ELOOP to our "not a regular file" error so callers can
+		// distinguish "missing" (fs.ErrNotExist) from "actively malicious"
+		// (ErrCorruptRun) without leaking the syscall name to higher
+		// layers. Other errors (EACCES, EIO …) propagate unchanged.
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, fmt.Errorf("%w: refused to follow symlink", ErrCorruptRun)
+		}
+		return nil, err
+	}
+	defer f.Close()
+	// Fstat on the fd returns metadata for the exact inode we have
+	// open — no second path lookup, no race window. Reject anything
+	// that's not a plain file: Open with O_NOFOLLOW already filtered
+	// symlinks, but a fifo/socket/device with the right name would
+	// still get past Open and only Fstat catches it.
+	fi, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
-	if !li.Mode().IsRegular() {
+	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%w: not a regular file", ErrCorruptRun)
 	}
-	return s.parseRunBytes(path)
+	return s.parseRunFromFile(f, fi)
 }
 
 // readRunNoLstat is the loop-friendly variant of readRun for callers that
@@ -844,17 +873,71 @@ func (s *runStore) readRunNoLstat(path string) (*CronRun, error) {
 	return s.parseRunBytes(path)
 }
 
-// parseRunBytes is the shared ReadFile + size-cap + json.Unmarshal tail used
-// by both readRun and readRunNoLstat. Centralising the byte-decode keeps
-// the over-cap and unmarshal-error wrapping paths identical regardless of
-// whether the caller paid for an Lstat guard.
+// parseRunBytes is the ReadFile + size-cap + json.Unmarshal tail used by
+// readRunNoLstat — callers that have already filtered the DirEntry by
+// type. Centralising the byte-decode keeps the over-cap and unmarshal-
+// error wrapping paths identical with parseRunFromFile.
 func (s *runStore) parseRunBytes(path string) (*CronRun, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(data)) > s.maxRunBytes {
-		return nil, fmt.Errorf("%w: %d bytes > %d cap", ErrCorruptRun, len(data), s.maxRunBytes)
+	return decodeRunBytes(data, s.maxRunBytes)
+}
+
+// parseRunFromFile reads the open fd's contents (bounded by maxRunBytes+1
+// so we can detect oversize without slurping arbitrary bytes) and decodes
+// the JSON. Used by readRun where the fd is the TOCTOU-safe handle. fi is
+// the Fstat result already validated as a regular file, used to size-hint
+// the buffer.
+func (s *runStore) parseRunFromFile(f *os.File, fi os.FileInfo) (*CronRun, error) {
+	// io.ReadAll grows incrementally; preallocate when fi.Size() is a
+	// reasonable hint. The cap+1 read pattern is irrelevant here because
+	// decodeRunBytes enforces the cap explicitly on the returned slice
+	// length, so even a regular file that grew between Stat and Read
+	// gets rejected by the size check.
+	size := fi.Size()
+	if size < 0 || size > s.maxRunBytes {
+		// Stat already says we're over cap — short-circuit before any
+		// ReadAll alloc. Match parseRunBytes's wrap exactly so callers
+		// can't tell the readRun vs readRunNoLstat path apart by error
+		// shape.
+		return nil, fmt.Errorf("%w: %d bytes > %d cap", ErrCorruptRun, size, s.maxRunBytes)
+	}
+	buf := make([]byte, 0, size)
+	data, err := readAllInto(f, buf)
+	if err != nil {
+		return nil, err
+	}
+	return decodeRunBytes(data, s.maxRunBytes)
+}
+
+// readAllInto reads f to EOF, appending into the supplied prefix-allocated
+// buffer. Mirrors io.ReadAll's loop but lets the caller pre-size based on
+// Fstat to avoid repeated re-grows on the typical ~2KB run record.
+func readAllInto(f *os.File, buf []byte) ([]byte, error) {
+	for {
+		if len(buf) == cap(buf) {
+			buf = append(buf, 0)[:len(buf)]
+		}
+		n, err := f.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return buf, nil
+			}
+			return buf, err
+		}
+	}
+}
+
+// decodeRunBytes enforces the size cap and json.Unmarshal step shared by
+// both file-based and bytes-based read paths. Extracted from parseRunBytes
+// so parseRunFromFile (the TOCTOU-safe path) can reuse the wrapping shape
+// without an extra ReadFile.
+func decodeRunBytes(data []byte, maxRunBytes int64) (*CronRun, error) {
+	if int64(len(data)) > maxRunBytes {
+		return nil, fmt.Errorf("%w: %d bytes > %d cap", ErrCorruptRun, len(data), maxRunBytes)
 	}
 	var run CronRun
 	if err := json.Unmarshal(data, &run); err != nil {
