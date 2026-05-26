@@ -7,7 +7,11 @@
 
 package cron
 
-import "github.com/naozhi/naozhi/internal/session"
+import (
+	"time"
+
+	"github.com/naozhi/naozhi/internal/session"
+)
 
 // Compile-time guard: *Scheduler must satisfy session.SessionIDExcluder.
 // If session.SessionIDExcluder gains a method, this assertion makes the
@@ -61,26 +65,60 @@ func (s *Scheduler) IsExcluded(sessionID string) bool {
 //   - All in-flight runs (s.runningJobs sync.Map; one per active run).
 //   - The last knownSessionIDsRecentCap runs per job from runStore.
 //
-// Result is a fresh map; safe to retain.  Cost is O(jobs ×
-// knownSessionIDsRecentCap), bounded by maxJobsHardCap (500) ×
-// recentCap (200) = 100k map ops worst case — acceptable for a
-// 30-second-cached dashboard call.  Returns an empty (non-nil) map
-// when there are no jobs.
+// Result is a fresh map; safe to retain.  TTL-cached for
+// knownSessionsCacheTTL so dashboard 1Hz pollers do not pay the
+// O(jobs × recentCap) build cost on every call. Invalidated on
+// LastSessionID writes and runStore.Append. Returns an empty
+// (non-nil) map when there are no jobs.
 //
 // Safe to call on a nil Scheduler — returns empty map.  R245-ARCH
-// (cron+sys hide-from-history).
+// (cron+sys hide-from-history); R250-PERF-7 (TTL cache).
 func (s *Scheduler) KnownSessionIDs() map[string]bool {
 	if s == nil {
 		return map[string]bool{}
 	}
-	out := make(map[string]bool, 32)
+
+	s.knownSessionsCache.mu.Lock()
+	if s.knownSessionsCache.set != nil &&
+		time.Since(s.knownSessionsCache.generatedAt) < knownSessionsCacheTTL {
+		// Clone to honour the "safe to retain" contract — callers may
+		// mutate or persist the returned map.
+		cached := s.knownSessionsCache.set
+		s.knownSessionsCache.mu.Unlock()
+		out := make(map[string]bool, len(cached))
+		for id := range cached {
+			out[id] = true
+		}
+		return out
+	}
+	s.knownSessionsCache.mu.Unlock()
+
+	set := s.buildKnownSessionsSet()
+
+	s.knownSessionsCache.mu.Lock()
+	s.knownSessionsCache.set = set
+	s.knownSessionsCache.generatedAt = time.Now()
+	s.knownSessionsCache.mu.Unlock()
+
+	out := make(map[string]bool, len(set))
+	for id := range set {
+		out[id] = true
+	}
+	return out
+}
+
+// buildKnownSessionsSet does the actual O(jobs × recentCap) walk that
+// KnownSessionIDs serves out of cache. Extracted so the cached and
+// uncached paths share one source of truth. R250-PERF-7.
+func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
+	out := make(map[string]struct{}, 32)
 
 	s.mu.RLock()
 	jobIDs := make([]string, 0, len(s.jobs))
 	for id, j := range s.jobs {
 		jobIDs = append(jobIDs, id)
 		if j.LastSessionID != "" {
-			out[j.LastSessionID] = true
+			out[j.LastSessionID] = struct{}{}
 		}
 	}
 	s.mu.RUnlock()
@@ -90,7 +128,7 @@ func (s *Scheduler) KnownSessionIDs() map[string]bool {
 	s.runningJobs.Range(func(_, v any) bool {
 		if inf, ok := v.(*runInflight); ok && inf != nil {
 			if view, running := inf.snapshot(); running && view.SessionID != "" {
-				out[view.SessionID] = true
+				out[view.SessionID] = struct{}{}
 			}
 		}
 		return true
@@ -102,11 +140,25 @@ func (s *Scheduler) KnownSessionIDs() map[string]bool {
 		for _, jobID := range jobIDs {
 			for _, sum := range s.runStore.Recent(jobID, knownSessionIDsRecentCap) {
 				if sum.SessionID != "" {
-					out[sum.SessionID] = true
+					out[sum.SessionID] = struct{}{}
 				}
 			}
 		}
 	}
 
 	return out
+}
+
+// invalidateKnownSessionsCache clears the TTL snapshot so the next
+// KnownSessionIDs call rebuilds. Called from mutator paths that can
+// change the set: LastSessionID writes (recordResultP0WithSanitised)
+// and runStore.Append. Cheap (one mutex + nil-set), so callers can
+// invoke unconditionally. R250-PERF-7.
+func (s *Scheduler) invalidateKnownSessionsCache() {
+	if s == nil {
+		return
+	}
+	s.knownSessionsCache.mu.Lock()
+	s.knownSessionsCache.set = nil
+	s.knownSessionsCache.mu.Unlock()
 }

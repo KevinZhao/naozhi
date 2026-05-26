@@ -117,7 +117,10 @@ func TestNewDispatcher_NilRouterStaysUntypedNil(t *testing.T) {
 	// AllowMissingSender: this test exercises only nil-router/discardQueue
 	// behaviour and never reaches the IM Send path, so opt out of the
 	// boot-panic check that was added in R248-ARCH-2.
-	d := NewDispatcher(DispatcherConfig{Router: nil, AllowMissingSender: true})
+	d, err := NewDispatcher(DispatcherConfig{Router: nil, AllowMissingSender: true})
+	if err != nil {
+		t.Fatalf("NewDispatcher: %v", err)
+	}
 	if d.router != nil {
 		t.Fatal("Dispatcher.router should be untyped nil when cfg.Router is nil; typed-nil trap reintroduced")
 	}
@@ -140,10 +143,13 @@ func TestNewDispatcher_ResolverFabricatedWhenNil(t *testing.T) {
 	// Case 1: no Resolver, no ProjectMgr — should still get a usable resolver.
 	// AllowMissingSender: this case asserts on resolver / keyForChat only,
 	// not the IM Send path; opt out of R248-ARCH-2 boot-panic.
-	d := NewDispatcher(DispatcherConfig{
+	d, err := NewDispatcher(DispatcherConfig{
 		Agents:             map[string]session.AgentOpts{"general": {}},
 		AllowMissingSender: true,
 	})
+	if err != nil {
+		t.Fatalf("NewDispatcher: %v", err)
+	}
 	if d.resolver == nil {
 		t.Fatal("NewDispatcher must fabricate a Resolver when cfg.Resolver is nil")
 	}
@@ -154,7 +160,10 @@ func TestNewDispatcher_ResolverFabricatedWhenNil(t *testing.T) {
 
 	// Case 2: explicit Resolver passes through unchanged.
 	custom := session.NewKeyResolver(map[string]session.AgentOpts{"general": {}}, nil)
-	d2 := NewDispatcher(DispatcherConfig{Resolver: custom, AllowMissingSender: true})
+	d2, err := NewDispatcher(DispatcherConfig{Resolver: custom, AllowMissingSender: true})
+	if err != nil {
+		t.Fatalf("NewDispatcher (custom resolver): %v", err)
+	}
 	if d2.resolver != custom {
 		t.Fatal("explicit Resolver must be preserved, not replaced by a fresh fabrication")
 	}

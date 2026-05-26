@@ -823,18 +823,18 @@ func (s *Scheduler) NextRun(j *Job) time.Time {
 // TriggerNow manually executes a job by ID in a new goroutine (for debugging/dashboard).
 // Returns an error if the job is not found, paused, or has no prompt.
 func (s *Scheduler) TriggerNow(id string) error {
-	s.mu.Lock()
+	s.mu.RLock()
 	j, ok := s.jobs[id]
 	if !ok {
-		s.mu.Unlock()
+		s.mu.RUnlock()
 		return fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 	}
 	if j.Paused {
-		s.mu.Unlock()
+		s.mu.RUnlock()
 		return fmt.Errorf("%w: id %q", ErrJobPaused, id)
 	}
 	if j.Prompt == "" {
-		s.mu.Unlock()
+		s.mu.RUnlock()
 		return fmt.Errorf("%w: id %q", ErrJobNoPrompt, id)
 	}
 	entryID := j.entryID
@@ -845,8 +845,13 @@ func (s *Scheduler) TriggerNow(id string) error {
 	// with a Done() in each goroutine body below; if we bail out before
 	// spawning (concurrent delete), we Done() the counter inline.
 	s.triggerWG.Add(1)
-	s.mu.Unlock()
 
+	// R250-GO-2: hold s.mu.RLock across s.cron.Entry(entryID) and the
+	// WrappedJob nil check so a concurrent DeleteJob (which calls
+	// s.cron.Remove under s.mu.Lock) cannot observe entryID-in-flight
+	// while we're mid-lookup. NextRun (above) already uses the same
+	// cross-lock pattern; cron's internal lock cannot call back into
+	// scheduler code, so cross-lock holding is safe.
 	if entryID != 0 {
 		// TriggerNow 不再通过 cron chain 的 WrappedJob.Run()——因为我们要跳过
 		// jitter（用户显式 "run now" 期望立刻跑）。改为直接 executeOpt(..., true)。
@@ -862,7 +867,9 @@ func (s *Scheduler) TriggerNow(id string) error {
 		// 相关测试：TestTriggerNow_EntryGoneReleasesWG（trigger_now_wg_done_test.go）。
 		// R192-CRON-B: cron-v2-polish §3.2 jitter。
 		entry := s.cron.Entry(entryID)
-		if entry.WrappedJob == nil {
+		entryGone := entry.WrappedJob == nil
+		s.mu.RUnlock()
+		if entryGone {
 			go func() {
 				defer s.triggerWG.Done()
 				slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "job_id", id, "entry_id", entryID)
@@ -874,6 +881,7 @@ func (s *Scheduler) TriggerNow(id string) error {
 			}()
 		}
 	} else {
+		s.mu.RUnlock()
 		go func() {
 			defer s.triggerWG.Done()
 			s.executeIfNotDeletedOrPaused(jobID)
