@@ -101,7 +101,7 @@ func newTestServerWithToken(p *mockPlatform, token string) *Server {
 }
 
 func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
-	return dispatch.NewDispatcher(dispatch.DispatcherConfig{
+	d, err := dispatch.NewDispatcher(dispatch.DispatcherConfig{
 		Router:        srv.router,
 		Platforms:     srv.platforms,
 		Agents:        srv.agents,
@@ -126,6 +126,12 @@ func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
 		WatchdogNoOutputKills: &srv.watchdogNoOutputKills,
 		WatchdogTotalKills:    &srv.watchdogTotalKills,
 	})
+	if err != nil {
+		// Test helper passes a real SendFn so wireup never fails. Panic
+		// keeps the helper signature simple (no testing.T plumbing).
+		panic("newTestDispatcher: NewDispatcher returned error with SendFn set: " + err.Error())
+	}
+	return d
 }
 
 // ─── validateRemoteWorkspace (R61-SEC-2) ─────────────────────────────────────

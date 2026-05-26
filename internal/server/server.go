@@ -913,7 +913,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// Resolver is constructed in buildServer and reused across the
 	// dispatch / hub / project-api surfaces. docs/rfc/key-resolver.md
 	// Phase 4.
-	d := dispatch.NewDispatcher(dispatch.DispatcherConfig{
+	d, err := dispatch.NewDispatcher(dispatch.DispatcherConfig{
 		Router:                s.router,
 		Platforms:             s.platforms,
 		Agents:                s.agents,
@@ -932,6 +932,13 @@ func (s *Server) Start(ctx context.Context) error {
 		WatchdogNoOutputKills: &s.watchdogNoOutputKills,
 		WatchdogTotalKills:    &s.watchdogTotalKills,
 	})
+	if err != nil {
+		// R250-ARCH-12: missing Send wireup is a boot-time configuration
+		// fault. Surface it through Server.Start's existing error return
+		// path so systemd logs the cause and the unit fails fast instead
+		// of crashing on first user message.
+		return fmt.Errorf("dispatch wireup: %w", err)
+	}
 	// Expose dispatcher counters via /health. The handler is constructed
 	// earlier in New() without a dispatcher reference, so we wire the
 	// closure here once the dispatcher exists.

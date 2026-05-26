@@ -123,7 +123,7 @@ func newTestDispatcher(fp *fakePlatform, sendFn func(context.Context, string, *s
 			return &cli.SendResult{Text: "ok"}, nil
 		}
 	}
-	return NewDispatcher(DispatcherConfig{
+	d, err := NewDispatcher(DispatcherConfig{
 		Router:                session.NewRouter(session.RouterConfig{MaxProcs: 10}),
 		Platforms:             map[string]platform.Platform{"fake": fp},
 		Agents:                map[string]session.AgentOpts{},
@@ -137,6 +137,14 @@ func newTestDispatcher(fp *fakePlatform, sendFn func(context.Context, string, *s
 		NoOutputTimeout:       5 * time.Second,
 		TotalTimeout:          30 * time.Second,
 	})
+	if err != nil {
+		// R250-ARCH-12: helper passes a real SendFn so wireup never fails.
+		// Panic so a future helper edit that drops SendFn fails loudly in
+		// the helper rather than producing a nil dispatcher and confusing
+		// later assertions about Send behaviour.
+		panic("newTestDispatcher: NewDispatcher returned error with SendFn set: " + err.Error())
+	}
+	return d
 }
 
 func incomingMsg(text string) platform.IncomingMessage {
@@ -1173,11 +1181,14 @@ func TestNewDispatcher_CapabilitiesPrecedence(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			d := NewDispatcher(tc.cfg)
+			d, err := NewDispatcher(tc.cfg)
+			if err != nil {
+				t.Fatalf("NewDispatcher: %v", err)
+			}
 			if d.caps == nil {
 				t.Fatal("d.caps is nil — constructor must always install a Capabilities implementation")
 			}
-			_, err := d.caps.Send(context.Background(), "k", nil, "msg", nil, nil)
+			_, err = d.caps.Send(context.Background(), "k", nil, "msg", nil, nil)
 			if err == nil {
 				t.Fatalf("d.caps.Send returned nil error, want substring %q", tc.wantErrSub)
 			}
@@ -1211,7 +1222,10 @@ func TestNewDispatcher_CapsAlwaysNonNil(t *testing.T) {
 	// test specifically exercises the empty-config path where NoopCapabilities
 	// is installed as the default. Production wiring leaves AllowMissingSender
 	// false so missing Send wireup still panics at constructor time.
-	d := NewDispatcher(DispatcherConfig{AllowMissingSender: true})
+	d, err := NewDispatcher(DispatcherConfig{AllowMissingSender: true})
+	if err != nil {
+		t.Fatalf("NewDispatcher with AllowMissingSender: %v", err)
+	}
 	if d.caps == nil {
 		t.Fatal("d.caps is nil for empty DispatcherConfig — hot path will nil-panic on first message")
 	}
