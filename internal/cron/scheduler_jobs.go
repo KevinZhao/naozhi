@@ -932,13 +932,16 @@ func (s *Scheduler) TriggerNow(id string) error {
 // yielding exactly this race.
 func (s *Scheduler) registerJob(j *Job) error {
 	jobID := j.ID
-	// R247-CR-10: route the scheduled tick through executeIfReadyOpt so the
-	// {RLock → exists/paused → executeOpt} sequence shared with TriggerNow
-	// lives in one place. The closure captures jobID (not *Job) so an
-	// UpdateJob remove+re-add between tick dispatch and re-lock resolves to
-	// the freshest pointer. The "tick fired for job paused concurrently"
-	// race (PauseJobByID's cron.Remove vs robfig mid-dispatch) is honoured
-	// by executeIfReadyOpt's paused branch — same Debug log, same skip.
+	// R247-CR-10 / R250-CR-1 (#1134): route the scheduled tick through
+	// executeJobIDIfLive so the {RLock → exists/paused → executeOpt}
+	// sequence shared with TriggerNow lives in one place. The closure
+	// captures jobID (not *Job) so an UpdateJob remove+re-add between
+	// tick dispatch and re-lock resolves to the freshest pointer. The
+	// "tick fired for job paused concurrently" race (PauseJobByID's
+	// cron.Remove vs robfig mid-dispatch) is honoured by
+	// executeJobIDIfLive's paused branch — same Debug log, same skip.
+	// The previous godoc named "executeIfReadyOpt", a rename casualty
+	// from R247-CR-10 that no helper actually carries.
 	entryID, err := s.cron.AddFunc(j.Schedule, func() {
 		s.executeJobIDIfLive(jobID, false /* viaTriggerNow */, "cron")
 	})
