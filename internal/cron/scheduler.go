@@ -222,6 +222,13 @@ type Scheduler struct {
 	// allowedRoot string when its own EvalSymlinks fails (legacy
 	// behaviour).
 	allowedRootResolved string
+	// workDirCacheKeySuffix is "\x00" + allowedRoot + "\x00" +
+	// allowedRootResolved precomputed at construction. allowedRoot and
+	// allowedRootResolved are immutable after NewScheduler returns, so the
+	// hot path in workDirResolveUnderRootCached only needs one
+	// concatenation (workDir + suffix) instead of three per tick.
+	// R20260526-PERF-002 (#1225).
+	workDirCacheKeySuffix string
 	// jitterMax is the scheduling jitter cap. See SchedulerConfig.JitterMax.
 	// Immutable after NewScheduler returns, so no lock needed.
 	jitterMax time.Duration
@@ -525,7 +532,10 @@ func (s *Scheduler) workDirResolveUnderRootCached(workDir string) (string, bool)
 		return workDirResolveUnderRoot(workDir, "", "")
 	}
 	now := time.Now()
-	key := workDirResolveCacheKey(workDir, s.allowedRoot, s.allowedRootResolved)
+	// R20260526-PERF-002 (#1225): use precomputed suffix to avoid the
+	// three-segment concat allocation each tick. Equivalent to
+	// workDirResolveCacheKey(workDir, s.allowedRoot, s.allowedRootResolved).
+	key := workDir + s.workDirCacheKeySuffix
 	if resolved, ok := s.workDirCache.lookup(key, now); ok {
 		return resolved, true
 	}
@@ -672,10 +682,16 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		notifyDefault:       cfg.NotifyDefault,
 		allowedRoot:         cfg.AllowedRoot,
 		allowedRootResolved: allowedRootResolved,
-		jitterMax:           cfg.JitterMax,
-		stopCtx:             stopCtx,
-		stopCancel:          stopCancel,
-		runStore:            newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
+		// R20260526-PERF-002 (#1225): precompute the cache-key suffix so
+		// the hot path in workDirResolveUnderRootCached avoids three
+		// per-tick string concats. Must stay byte-for-byte identical to
+		// workDirResolveCacheKey(workDir, allowedRoot, allowedRootResolved)
+		// minus the leading workDir, otherwise cache lookups miss.
+		workDirCacheKeySuffix: "\x00" + cfg.AllowedRoot + "\x00" + allowedRootResolved,
+		jitterMax:             cfg.JitterMax,
+		stopCtx:               stopCtx,
+		stopCancel:            stopCancel,
+		runStore:              newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
 	}
 	// R250-ARCH-14: initialise the per-Scheduler marshal seam so the
 	// hot path in marshalJobsLocked finds defaultMarshalJobs instead of
