@@ -71,7 +71,24 @@ const (
 
 	// maxAssistantTextBytes caps a single assistant text block.
 	maxAssistantTextBytes = 64 * 1024
+
+	// maxToolInputBytes caps the raw tool_use.Input JSON we surface to the
+	// dashboard (R234-SEC-8). Without this, a transcript containing 500
+	// turns × 256KB lines of tool_use.Input would push ~128MB of bytes into
+	// the response per request — the request handler is auth'd but that
+	// is still a trivial dashboard-side memory amplifier. Bash command
+	// payloads / Read tool args / Edit diffs all fit comfortably in 64KB;
+	// pathological cases (a tool that streams binary as a single-call
+	// argument) get a "[truncated]" placeholder so the timeline still
+	// renders the call but no longer ships the full payload.
+	maxToolInputBytes = 64 * 1024
 )
+
+// truncatedToolInputPlaceholder is the JSON value substituted for
+// tool_use.Input fields that exceed maxToolInputBytes. Pre-encoded so the
+// hot path never re-marshals; must be a valid JSON value (a string
+// literal here) so the wire shape stays consistent for dashboard JS.
+var truncatedToolInputPlaceholder = json.RawMessage(`"[truncated]"`)
 
 // ansiEscRe matches the most common ANSI CSI sequences (color, cursor
 // motion). We strip these from tool output before serialising so the
@@ -787,6 +804,15 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 		}
 		toolCalls++
 		summary := sanitizeWireText(summariseToolInput(b.Name, b.Input))
+		// R234-SEC-8: cap the raw Input JSON we surface. summary is built
+		// from a probe-Unmarshal of the original bytes (still bounded by
+		// the per-line maxTranscriptLineBytes), so the dashboard timeline
+		// keeps its one-line label even when Input itself is replaced
+		// with the [truncated] placeholder.
+		input := b.Input
+		if len(input) > maxToolInputBytes {
+			input = truncatedToolInputPlaceholder
+		}
 		out = append(out, transcriptTurn{
 			Index:     nextIdx + len(out),
 			Kind:      "tool_use",
@@ -794,7 +820,7 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 			Tool:      b.Name,
 			ToolUseID: b.ID,
 			Summary:   summary,
-			Input:     b.Input,
+			Input:     input,
 		})
 		parsed = true
 	}

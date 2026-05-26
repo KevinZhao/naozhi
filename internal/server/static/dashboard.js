@@ -8944,7 +8944,10 @@ const wsm = {
         // defence-in-depth.
         // R221-FIX-P1-4: cronTimelineRefreshHead is async; swallow its
         // rejection at the dispatch boundary.
-        if (msg && msg.job_id) cronTimelineRefreshHead(msg.job_id).catch(() => {});
+        // R243-PERF-7 / #812: route through the rAF-debounced wrapper so
+        // bursty cron_run_ended events for the same job collapse to one
+        // sort+innerHTML rebuild per paint frame instead of one per event.
+        if (msg && msg.job_id) cronTimelineRefreshHeadDebounced(msg.job_id);
         break;
       case 'pong':
         break;
@@ -12374,6 +12377,32 @@ function cronTimelineJumpToSession(sessionId) {
   showToast('未找到对应 session（' + sessionId.slice(0, 8) + '…）', 'warning');
 }
 
+// R243-PERF-7 / #812: rAF-debounce coalescing for cronTimelineRefreshHead.
+// Bursty cron_run_ended events (multiple jobs ending in the same tick, or
+// a manual TriggerNow loop) used to fire a full fetch + sort + innerHTML
+// rebuild per event; the WS handler now routes through
+// cronTimelineRefreshHeadDebounced which collapses N events to a single
+// rAF-aligned call per (jobId). Coalescing is keyed on jobId so two
+// different jobs ending in the same tick still each get exactly one
+// refresh — the saving is on repeated events for the same job.
+//
+// rAF (rather than setTimeout) keeps the refresh aligned with the next
+// paint frame, so sort+innerHTML happens once per visible frame instead
+// of once per network event.
+const _cronTimelineRefreshScheduled = new Set();
+function cronTimelineRefreshHeadDebounced(jobId) {
+  if (!jobId) return;
+  if (_cronTimelineRefreshScheduled.has(jobId)) return;
+  _cronTimelineRefreshScheduled.add(jobId);
+  const raf = (typeof requestAnimationFrame === 'function')
+    ? requestAnimationFrame
+    : (cb) => setTimeout(cb, 16);
+  raf(() => {
+    _cronTimelineRefreshScheduled.delete(jobId);
+    cronTimelineRefreshHead(jobId).catch(() => {});
+  });
+}
+
 // cronTimelineRefreshHead — WS cron_run_ended 触发。如果当前 drawer 打开
 // 的就是该 job（cronDetailJobId === jobId），fetch /api/cron/runs?limit=10
 // 替换头 10 条；否则只刷新列表 stats（已有逻辑：fetchCronJobs +
@@ -12382,6 +12411,10 @@ function cronTimelineJumpToSession(sessionId) {
 // cron-panel-consolidation RFC §4.6: 路由门由 selectedKey 切到
 // cronDetailJobId — cron 面板下 selectedKey 始终为 null（openCronPanel 已
 // 清空），不再适合做"当前看的是哪条 cron"判定。
+//
+// 调用方应优先走 cronTimelineRefreshHeadDebounced（rAF-debounced wrapper）以
+// 在 bursty cron_run_ended 序列下避免 N 次 sort+innerHTML 重建（R243-PERF-7
+// / #812）。直接调用本函数仍合法（手动 trigger / 测试路径）。
 async function cronTimelineRefreshHead(jobId) {
   if (cronDetailJobId !== jobId) return;
   const st = getCronTimelineState(jobId);

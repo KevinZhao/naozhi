@@ -334,9 +334,20 @@ func TestParseAgentInput(t *testing.T) {
 			{"all empty", `{"description":"do stuff"}`, ""},
 			{"empty input", ``, ""},
 		}
+		// Inline label-priority resolution: kept in this test (not on
+		// agentInput) because production no longer needs it — DEADCODE-7.
+		labelOf := func(a agentInput) string {
+			if a.SubagentType != "" {
+				return a.SubagentType
+			}
+			if a.Name != "" {
+				return a.Name
+			}
+			return a.TeamName
+		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				got := parseAgentInput(json.RawMessage(tc.input)).label()
+				got := labelOf(parseAgentInput(json.RawMessage(tc.input)))
 				if got != tc.want {
 					t.Errorf("label() = %q, want %q", got, tc.want)
 				}

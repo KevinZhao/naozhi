@@ -694,3 +694,60 @@ func TestTranscript_TruncateReason_SizeCap(t *testing.T) {
 		t.Errorf("truncate_reason = %q, want %q", resp.TruncateReason, "size_cap")
 	}
 }
+
+// TestFlattenAssistantEvent_ToolInputSizeCap pins R234-SEC-8: tool_use.Input
+// JSON exceeding maxToolInputBytes must be replaced with the [truncated]
+// placeholder. Without this guard a transcript with 500 turns × 256KB
+// tool_use.Input lines would amplify the response by ~128MB. We assert
+// both the small-input pass-through (Input bytes returned verbatim) and
+// the over-cap replacement, plus that summary still survives the cap so
+// the timeline label is preserved.
+func TestFlattenAssistantEvent_ToolInputSizeCap(t *testing.T) {
+	t.Parallel()
+
+	// Small Input — passes through unchanged.
+	smallInput := `{"command":"echo hi"}`
+	smallEv := &claudeJSONLEvent{
+		Type: "assistant",
+		Message: json.RawMessage(`{"role":"assistant","content":[` +
+			`{"type":"tool_use","id":"tu_a","name":"Bash","input":` + smallInput + `}` +
+			`]}`),
+	}
+	out, _, _, parsed := flattenAssistantEvent(smallEv, 0, 0)
+	if !parsed || len(out) != 1 {
+		t.Fatalf("small input: parsed=%v len(out)=%d (want true / 1)", parsed, len(out))
+	}
+	if string(out[0].Input) != smallInput {
+		t.Errorf("small input: Input=%q, want pass-through %q", string(out[0].Input), smallInput)
+	}
+	if !strings.Contains(out[0].Summary, "echo hi") {
+		t.Errorf("small input: summary=%q lost label", out[0].Summary)
+	}
+
+	// Oversized Input — replaced with [truncated] placeholder. Pad the
+	// command field to push raw Input bytes past maxToolInputBytes.
+	pad := strings.Repeat("x", maxToolInputBytes+8*1024)
+	bigInput := `{"command":"` + pad + `"}`
+	bigEv := &claudeJSONLEvent{
+		Type: "assistant",
+		Message: json.RawMessage(`{"role":"assistant","content":[` +
+			`{"type":"tool_use","id":"tu_b","name":"Bash","input":` + bigInput + `}` +
+			`]}`),
+	}
+	out2, _, _, parsed2 := flattenAssistantEvent(bigEv, 0, 0)
+	if !parsed2 || len(out2) != 1 {
+		t.Fatalf("big input: parsed=%v len(out)=%d (want true / 1)", parsed2, len(out2))
+	}
+	if string(out2[0].Input) != `"[truncated]"` {
+		t.Errorf("big input: Input=%q, want %q (R234-SEC-8 cap)", string(out2[0].Input), `"[truncated]"`)
+	}
+	if len(out2[0].Input) > maxToolInputBytes {
+		t.Errorf("big input: Input bytes=%d, must be <= maxToolInputBytes=%d after truncation", len(out2[0].Input), maxToolInputBytes)
+	}
+	// Summary derives from a probe-Unmarshal of the original Input bytes
+	// before truncation (capped to 200 chars by SanitizeForLog), so the
+	// timeline label still surfaces even though raw Input was dropped.
+	if out2[0].Summary == "" {
+		t.Errorf("big input: summary empty; expected probe-derived label to survive cap")
+	}
+}

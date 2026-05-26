@@ -1264,7 +1264,7 @@ func TestEventEntryFromEvent(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			entries := EventEntriesFromEvent(tt.event)
+			entries := EventEntriesFromEventAt(tt.event, time.Now().UnixMilli())
 			ok := len(entries) > 0
 			if ok != tt.wantOK {
 				t.Errorf("ok = %v, want %v", ok, tt.wantOK)
@@ -1310,7 +1310,7 @@ func TestEventEntriesFromEvent_ResultDoesNotEmitVisibleText(t *testing.T) {
 		{Type: "result", Result: "", CostUSD: 0.0042},
 		{Type: "result", Result: "x", CostUSD: 0.0},
 	} {
-		entries := EventEntriesFromEvent(ev)
+		entries := EventEntriesFromEventAt(ev, time.Now().UnixMilli())
 		if len(entries) != 1 {
 			t.Fatalf("ev=%+v: want 1 entry, got %d (%+v)", ev, len(entries), entries)
 		}
@@ -1335,7 +1335,7 @@ func TestEventEntryFromEvent_TodoWriteDetailIsArray(t *testing.T) {
 	ev := Event{Type: "assistant", Message: &AssistantMessage{
 		Content: []ContentBlock{{Type: "tool_use", Name: "TodoWrite", Input: raw}},
 	}}
-	entries := EventEntriesFromEvent(ev)
+	entries := EventEntriesFromEventAt(ev, time.Now().UnixMilli())
 	if len(entries) == 0 || entries[0].Type != "todo" {
 		t.Fatalf("len=%d type=%q", len(entries), func() string {
 			if len(entries) == 0 {
