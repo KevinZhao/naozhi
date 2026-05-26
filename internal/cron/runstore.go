@@ -715,6 +715,57 @@ func (s *runStore) warmCache(jobID string) {
 	}
 }
 
+// cacheGetBefore is the before-cutoff variant of cacheGet. It serves a
+// before-filtered, newest-first slice from the cache only when the cache
+// is provably exhaustive — i.e. cache.count < keepCount, meaning every
+// on-disk row already lives in the ring and no entry has ever been
+// trimmed off the tail. In that regime the cache holds strictly the
+// same rows as a fresh disk scan, so a filter walk is correctness-
+// equivalent to diskListNewestFirst at zero ReadDir+ReadFile cost.
+//
+// Returns ok=false when count == keepCount (the cache may have shed
+// older entries via trim) — caller falls back to disk so pagination
+// beyond the cache horizon still works. Cold cache paths are NOT warmed
+// here: a cold-cache before-cutoff query is rare (dashboard typically
+// drives warm via a no-cutoff first page), so paying the warm cost on
+// the pagination path would add a ReadDir+per-file ReadFile to a query
+// that is already going to disk and reading it twice — once for warm,
+// once via the disk fallback. The warm path lazy-warms on the next
+// no-cutoff List call. R243-PERF-5 (#810).
+//
+// Caller must guard before.IsZero() == false; use cacheGet for the
+// no-cutoff fast path.
+func (s *runStore) cacheGetBefore(jobID string, limit int, before time.Time) ([]CronRunSummary, bool) {
+	v, ok := s.recentCache.Load(jobID)
+	if !ok {
+		return nil, false
+	}
+	entry := v.(*recentCacheEntry)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.warm {
+		return nil, false
+	}
+	// Exhaustive only when cache hasn't hit cap. count == keepCount
+	// means trimJobLocked may have evicted older rows that match the
+	// before cutoff; disk scan is the safe answer.
+	if entry.count >= s.keepCount {
+		return nil, false
+	}
+	out := make([]CronRunSummary, 0, limit)
+	for i := 0; i < entry.count && len(out) < limit; i++ {
+		r := entry.ringRead(i)
+		// diskListNewestFirst applies StartedAt strict-less-than the
+		// cutoff; mirror that here so cache and disk paths stay in
+		// lockstep on the equality boundary.
+		if !before.IsZero() && !r.StartedAt.Before(before) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, true
+}
+
 // cacheInvalidate forgets the cache entry for jobID. Used by DeleteJob.
 func (s *runStore) cacheInvalidate(jobID string) {
 	s.recentCache.Delete(jobID)
@@ -746,11 +797,18 @@ func (s *runStore) List(jobID string, limit int, before time.Time) []CronRunSumm
 
 	// Cache fast-path: when before is zero (most common — Recent and the
 	// first paginated page) and the entry is warm, return without IO.
-	// before-cutoff queries always go to disk because the cache only
-	// holds keepCount newest; pagination beyond that needs the filtered
-	// scan. R220-PERF-1.
+	// R220-PERF-1.
 	if before.IsZero() {
 		if cached, ok := s.cacheGet(jobID, limit); ok {
+			return cached
+		}
+	} else {
+		// before-cutoff fast path (R243-PERF-5 / #810): when the cache
+		// has not yet hit keepCount the ring holds every on-disk row,
+		// so a filter walk over the cache is equivalent to a disk scan.
+		// Falls through to disk once count == keepCount because trim
+		// may have shed older rows the caller would otherwise miss.
+		if cached, ok := s.cacheGetBefore(jobID, limit, before); ok {
 			return cached
 		}
 	}
