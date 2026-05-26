@@ -218,6 +218,10 @@ func (s *Scheduler) finishRun(a finishArgs) {
 			ErrorClass:  a.errClass,
 			ErrorMsg:    persistedErrMsg,
 		})
+		// R250-PERF-7: a new run record may introduce a SessionID the
+		// cache does not know about; drop the snapshot so the next
+		// KnownSessionIDs() call rebuilds.
+		s.invalidateKnownSessionsCache()
 	}
 
 	// Broadcast last so server-side hub locks aren't held while we hold s.mu.
@@ -386,8 +390,17 @@ func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionI
 	// removes the entry from s.jobs but never mutates *Job in place), but
 	// pinning the value here makes future refactors safer. R235-GO-1.
 	jobID := j.ID
+	// R250-PERF-7: detect whether LastSessionID changed under the lock
+	// so we can invalidate the KnownSessionIDs TTL cache exactly when
+	// the persisted set has shifted. Comparing against the snapshot
+	// taken before the in-place write avoids redundant invalidation
+	// when the same session id repeats.
+	sessionChanged := sessionID != "" && sessionID != prev.LastSessionID
 	s.mu.Unlock()
 
+	if sessionChanged {
+		s.invalidateKnownSessionsCache()
+	}
 	save()
 	if fn := s.onExecute.Load(); fn != nil {
 		(*fn)(jobID, result, errMsg)

@@ -308,7 +308,31 @@ type Scheduler struct {
 	// (workDirResolveCacheTTL) so symlink retargets surface within one
 	// notify-budget worth of time. R247-PERF-24.
 	workDirCache workDirResolveCache
+
+	// knownSessionsCache memoises KnownSessionIDs() output for up to
+	// knownSessionsCacheTTL. The dashboard polls KnownSessionIDs at 1Hz
+	// per tab; rebuilding the set walks every job's runStore.Recent (up
+	// to ~jobs × 200 file metadata reads) per call. The TTL cache cuts
+	// that to one rebuild per 30s. Invalidated explicitly on writes that
+	// can change the set (LastSessionID assignment, runStore.Append).
+	// R250-PERF-7.
+	knownSessionsCache knownSessionsCache
 }
+
+// knownSessionsCache holds a TTL-bounded snapshot of KnownSessionIDs
+// output. Set is read-only after publication so callers can hand out
+// the map directly without copying. R250-PERF-7.
+type knownSessionsCache struct {
+	mu          sync.Mutex
+	generatedAt time.Time
+	set         map[string]struct{}
+}
+
+// knownSessionsCacheTTL bounds how stale a cached KnownSessionIDs
+// snapshot may be. 30s matches the godoc claim and is well below the
+// auto-workspace-chain spawn cadence (one spawn per user message);
+// dashboard 1Hz pollers see at most one rebuild per cache cycle. R250-PERF-7.
+const knownSessionsCacheTTL = 30 * time.Second
 
 // maxJobsHardCap caps user-configurable MaxJobs to prevent accidental
 // overload. 500 jobs ≈ 500 tick timers; well within robfig/cron's tested

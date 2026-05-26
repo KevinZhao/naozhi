@@ -784,3 +784,71 @@ func TestSchedulerConfig_RunsKeepPlumbing(t *testing.T) {
 		t.Errorf("default keepWindow: got %v, want %v", got, DefaultRunsKeepWindow)
 	}
 }
+
+// TestKnownSessionIDs_TTLCache verifies the TTL snapshot kicks in:
+// the first call rebuilds; subsequent calls within the TTL serve the
+// same content without re-reading job state. We cannot peek inside the
+// build pipeline, so we proxy "did we hit the cache" by checking the
+// recorded `generatedAt` does not advance on the second call.
+// R250-PERF-7.
+func TestKnownSessionIDs_TTLCache(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := NewScheduler(SchedulerConfig{
+		StorePath: filepath.Join(dir, "cron.json"),
+		MaxJobs:   5,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+
+	job := &Job{Schedule: "@every 1h", Prompt: "p", Platform: "feishu", ChatID: "c", ChatType: "direct"}
+	if err := s.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	s.mu.Lock()
+	s.jobs[job.ID].LastSessionID = "11111111-aaaa-bbbb-cccc-000000000001"
+	s.mu.Unlock()
+
+	// First call populates cache.
+	first := s.KnownSessionIDs()
+	if !first["11111111-aaaa-bbbb-cccc-000000000001"] {
+		t.Fatalf("first call missing seeded session id: %v", first)
+	}
+
+	s.knownSessionsCache.mu.Lock()
+	gen1 := s.knownSessionsCache.generatedAt
+	s.knownSessionsCache.mu.Unlock()
+	if gen1.IsZero() {
+		t.Fatalf("generatedAt must be populated after first call")
+	}
+
+	// Mutate LastSessionID *without* invalidating — the cache should
+	// still serve the old snapshot until it expires or is invalidated.
+	s.mu.Lock()
+	s.jobs[job.ID].LastSessionID = "22222222-aaaa-bbbb-cccc-000000000002"
+	s.mu.Unlock()
+
+	cached := s.KnownSessionIDs()
+	if !cached["11111111-aaaa-bbbb-cccc-000000000001"] {
+		t.Errorf("TTL cache did not serve stale snapshot: %v", cached)
+	}
+	if cached["22222222-aaaa-bbbb-cccc-000000000002"] {
+		t.Errorf("fresh value leaked into TTL window: %v", cached)
+	}
+
+	s.knownSessionsCache.mu.Lock()
+	gen2 := s.knownSessionsCache.generatedAt
+	s.knownSessionsCache.mu.Unlock()
+	if !gen2.Equal(gen1) {
+		t.Errorf("generatedAt advanced on cached read; cache miss when fresh: %v vs %v", gen1, gen2)
+	}
+
+	// Explicit invalidation drops the snapshot; the next call rebuilds.
+	s.invalidateKnownSessionsCache()
+	rebuilt := s.KnownSessionIDs()
+	if !rebuilt["22222222-aaaa-bbbb-cccc-000000000002"] {
+		t.Errorf("invalidate+rebuild did not pick up new session id: %v", rebuilt)
+	}
+}
