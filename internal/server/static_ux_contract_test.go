@@ -6644,3 +6644,87 @@ func TestDashboardJS_R243Perf8_CronTickNoFullRepaintGuard(t *testing.T) {
 		t.Errorf("dashboard.js: ensureCronRunningTick body must NOT call renderCronPanel — full-repaint regression (#813)")
 	}
 }
+
+// TestDashboardJS_R243Perf7_CronTimelineRefreshHeadDebounced pins
+// R243-PERF-7 / #812: bursty `cron_run_ended` WS events must funnel through
+// `cronTimelineRefreshHeadDebounced` (rAF-aligned, per-jobId coalesced) so
+// the head-of-timeline `fetchJSON + sort + innerHTML` cycle runs at most
+// once per visible frame per job, not once per network event. Pre-fix
+// behaviour wired the WS handler directly to `cronTimelineRefreshHead`,
+// turning a flurry of TriggerNow events / a job churning through retries
+// into N sequential full-rebuilds.
+//
+// We pin five load-bearing source-text shapes — the contract is multi-axis
+// (bookkeeping Set, rAF wrapper, key-by-jobId, single fetch, WS routing):
+//
+//  1. `cronTimelineRefreshHeadDebounced` exists by name (call site target).
+//  2. The dedupe Set `_cronTimelineRefreshScheduled` exists and is checked
+//     via `.has(jobId)` before scheduling — without this the rAF would
+//     still fire N times for N events.
+//  3. `requestAnimationFrame` is the scheduling primitive (with a
+//     setTimeout fallback for non-browser test contexts; both must be
+//     present so the contract is robust under jsdom-less environments).
+//  4. The wrapped call goes to `cronTimelineRefreshHead(jobId)` and the
+//     scheduling state is cleared inside the rAF callback so a subsequent
+//     event scheduled in the next frame is honoured.
+//  5. The WS handler that receives `cron_run_ended` calls the debounced
+//     wrapper, NOT `cronTimelineRefreshHead` directly. This is the actual
+//     fix — leaving the WS path on the unwrapped call would silently
+//     undo the debounce no matter how thorough the wrapper itself is.
+func TestDashboardJS_R243Perf7_CronTimelineRefreshHeadDebounced(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// (1) Wrapper exists.
+	if !strings.Contains(js, "function cronTimelineRefreshHeadDebounced(jobId)") {
+		t.Errorf("dashboard.js: cronTimelineRefreshHeadDebounced(jobId) must exist as the rAF-debounced wrapper (#812)")
+	}
+
+	// (2) Dedupe Set + per-jobId early return.
+	if !strings.Contains(js, "_cronTimelineRefreshScheduled = new Set()") {
+		t.Errorf("dashboard.js: _cronTimelineRefreshScheduled must be a Set keyed by jobId (#812)")
+	}
+	if !strings.Contains(js, "_cronTimelineRefreshScheduled.has(jobId)") {
+		t.Errorf("dashboard.js: debounced wrapper must check Set.has(jobId) before scheduling — coalescing relies on this gate (#812)")
+	}
+	if !strings.Contains(js, "_cronTimelineRefreshScheduled.add(jobId)") {
+		t.Errorf("dashboard.js: debounced wrapper must add jobId to scheduled-Set before rAF fire (#812)")
+	}
+	if !strings.Contains(js, "_cronTimelineRefreshScheduled.delete(jobId)") {
+		t.Errorf("dashboard.js: debounced wrapper must clear scheduled-Set inside rAF callback so the next frame's events go through (#812)")
+	}
+
+	// (3) requestAnimationFrame wrapper with setTimeout fallback. The
+	// fallback is load-bearing for unit tests / non-browser hosts where
+	// rAF may be undefined; it also caps the delay at ~16ms which is
+	// the rAF-equivalent worst case.
+	if !strings.Contains(js, "typeof requestAnimationFrame === 'function'") {
+		t.Errorf("dashboard.js: debounced wrapper must feature-detect requestAnimationFrame (#812)")
+	}
+	if !strings.Contains(js, "requestAnimationFrame") {
+		t.Errorf("dashboard.js: debounced wrapper must use requestAnimationFrame (#812)")
+	}
+	if !strings.Contains(js, "(cb) => setTimeout(cb, 16)") {
+		t.Errorf("dashboard.js: debounced wrapper must fall back to setTimeout(cb, 16) when rAF is unavailable (#812)")
+	}
+
+	// (4) Dispatched call lands on cronTimelineRefreshHead(jobId) inside
+	// the rAF callback. The order matters — clearing the scheduled-Set
+	// BEFORE invoking the fetcher means a new event arriving while the
+	// fetch is in flight will schedule another refresh (correct), while
+	// clearing AFTER would let one fetch swallow events that arrived
+	// during its own duration (subtle stale-tail bug).
+	if !strings.Contains(js, "cronTimelineRefreshHead(jobId).catch(() => {})") {
+		t.Errorf("dashboard.js: rAF callback must invoke cronTimelineRefreshHead(jobId).catch — fetcher entry point (#812)")
+	}
+
+	// (5) WS handler routing. The cron_run_ended branch must call the
+	// debounced wrapper, not the bare fetcher.
+	if !strings.Contains(js, "cronTimelineRefreshHeadDebounced(msg.job_id)") {
+		t.Errorf("dashboard.js: WS cron_run_ended handler must route through cronTimelineRefreshHeadDebounced(msg.job_id), not cronTimelineRefreshHead direct (#812)")
+	}
+}
