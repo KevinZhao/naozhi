@@ -112,11 +112,31 @@ func TestNewWrapper_ExplicitPathTakesPrecedence(t *testing.T) {
 	}
 }
 
+// NOT t.Parallel() — uses t.Setenv to point PATH/HOME at a fake-binary
+// fixture, which Go test forbids combining with parallel mode.
+//
+// R249-SEC-7 (#920): detectCLI now returns "" when neither candidatePaths
+// nor exec.LookPath finds the binary, so a CI runner without a real claude
+// install legitimately produces an empty CLIPath. Stage a fake claude in a
+// temp PATH dir so we exercise the actual contract — NewWrapper threads
+// detectCLI's resolved absolute path into CLIPath — without depending on
+// the host having claude on its real PATH.
 func TestNewWrapper_EmptyPathAutoDetects(t *testing.T) {
-	t.Parallel()
+	dir := t.TempDir()
+	ext := ""
+	if runtime.GOOS == "windows" {
+		ext = ".exe"
+	}
+	fakeCLI := filepath.Join(dir, "claude"+ext)
+	if err := os.WriteFile(fakeCLI, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir()) // avoid native installer hit at ~/.local/bin/claude
+	t.Setenv("PATH", dir)
+
 	w := NewWrapper("", &ClaudeProtocol{}, "claude")
 	if w.CLIPath == "" {
-		t.Error("auto-detect should produce a non-empty path")
+		t.Error("auto-detect should produce a non-empty path when binary exists on PATH")
 	}
 }
 

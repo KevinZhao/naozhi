@@ -19,7 +19,7 @@ import (
 // client. Direct exercise of the carved-out helper guards against future
 // edits silently dropping the constant-time compare.
 func TestPerformHandshake_BadToken(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	socketPath := filepath.Join(dir, "h.sock")
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
@@ -111,7 +111,7 @@ func TestPerformHandshake_BadToken(t *testing.T) {
 // from the conn; if the auth deadline lingers, the read returns
 // immediately with a deadline error.
 func TestPerformHandshake_GoodTokenClearsDeadline(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	socketPath := filepath.Join(dir, "h.sock")
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
