@@ -986,29 +986,12 @@ func (d *Dispatcher) sendAndReply(
 	// /health's lastReplySuccess go stale on otherwise-healthy sessions.
 	d.markReplySuccess()
 
-	replyText := localizeAPIError(result.Text)
-	// Head slot of a merge group: append a small chip so the user knows the
-	// single bot bubble covers N messages.
-	if result.MergedCount > 1 && replyText != "" {
-		// R20260526-PERF-005: hot path on every merge-group head reply,
-		// avoid fmt.Sprintf's reflect/format overhead for a single int.
-		replyText += "\n\n*— 合并了 " + strconv.Itoa(result.MergedCount) + " 条消息的回复*"
-	}
-	// Per-session ReplyFooter: when sess is non-nil we resolve the tag from
-	// sess.Backend(); when nil (cron edge case where the session has been
-	// pruned but the reply path still fires) Capabilities.ReplyFooter
-	// receives "" and the implementation falls back to the router default.
-	// NoopCapabilities returns "" so an unwired host yields no footer (same
-	// as the legacy nil-closure behaviour).
-	{
-		var backendID string
-		if sess != nil {
-			backendID = sess.Backend()
-		}
-		if footer := d.caps.ReplyFooter(backendID); footer != "" {
-			replyText += "\n\n— " + footer
-		}
-	}
+	// R219-CR-7 (#656): decorateReplyText folds the localize step, the
+	// merge-group chip, and the per-session ReplyFooter into one helper so
+	// sendAndReply isn't a 240-line linear stack of post-processing
+	// passes. Pure function on (result, sess) — easy to unit-test without
+	// spinning up a Dispatcher / Router / platform.
+	replyText := d.decorateReplyText(result, sess)
 	var outImages []platform.Image
 	imagePaths := cli.ExtractImagePaths(replyText)
 	if len(imagePaths) > 0 {
@@ -1072,6 +1055,47 @@ func (d *Dispatcher) sendAndReply(
 			slog.Warn("send image failed", "err", err)
 		}
 	}
+}
+
+// decorateReplyText post-processes the raw CLI result text for IM
+// delivery: localises Anthropic API errors to Chinese, appends the
+// merge-group chip when the head slot covers N messages, and appends
+// the per-session ReplyFooter (resolved from sess.Backend(), or the
+// router default when sess is nil — a cron edge case where the session
+// has been pruned but the reply path still fires).
+//
+// Extracted from sendAndReply for R219-CR-7 (#656). Keeping this as a
+// method on *Dispatcher (rather than a free function) gives the helper
+// access to d.caps.ReplyFooter without pushing the Capabilities
+// dependency through a parameter list.
+//
+// Returns the empty string when the input result.Text is empty AND no
+// footer applies — callers typically gate on `replyText != ""` before
+// dispatching to the platform, so an empty return is the existing
+// "nothing to send" sentinel.
+func (d *Dispatcher) decorateReplyText(result *cli.SendResult, sess *session.ManagedSession) string {
+	replyText := localizeAPIError(result.Text)
+	// Head slot of a merge group: append a small chip so the user knows the
+	// single bot bubble covers N messages.
+	if result.MergedCount > 1 && replyText != "" {
+		// R20260526-PERF-005: hot path on every merge-group head reply,
+		// avoid fmt.Sprintf's reflect/format overhead for a single int.
+		replyText += "\n\n*— 合并了 " + strconv.Itoa(result.MergedCount) + " 条消息的回复*"
+	}
+	// Per-session ReplyFooter: when sess is non-nil we resolve the tag from
+	// sess.Backend(); when nil (cron edge case where the session has been
+	// pruned but the reply path still fires) Capabilities.ReplyFooter
+	// receives "" and the implementation falls back to the router default.
+	// NoopCapabilities returns "" so an unwired host yields no footer (same
+	// as the legacy nil-closure behaviour).
+	var backendID string
+	if sess != nil {
+		backendID = sess.Backend()
+	}
+	if footer := d.caps.ReplyFooter(backendID); footer != "" {
+		replyText += "\n\n— " + footer
+	}
+	return replyText
 }
 
 // SendSplitReply sends a reply, splitting into multiple messages if too long.
