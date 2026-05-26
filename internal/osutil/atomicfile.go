@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -89,10 +90,23 @@ func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 // (e.g. some older FUSE backends), the open error is treated as a soft
 // failure and swallowed — the caller has already written + fsynced the
 // data file; a lost directory entry on crash is acceptable degradation.
+//
+// R237-CR-15 (#730): fs.ErrPermission previously returned nil with no
+// trace. Real config issues (wrong UID on the data dir) silently lost
+// the directory-entry fsync. We still swallow the error so the rename
+// already on disk is reported as success, but emit slog.Debug so an
+// operator scanning logs can correlate "data dir fsync skipped"
+// against a misconfigured deployment. EINVAL stays silent because it
+// is the documented FUSE/older-fs soft-failure path.
 func SyncDir(dir string) error {
 	f, err := os.Open(dir)
 	if err != nil {
-		if errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EINVAL) {
+		if errors.Is(err, fs.ErrPermission) {
+			slog.Debug("osutil.SyncDir: open denied, skipping fsync",
+				"dir", dir, "err", err)
+			return nil
+		}
+		if errors.Is(err, syscall.EINVAL) {
 			return nil
 		}
 		return err

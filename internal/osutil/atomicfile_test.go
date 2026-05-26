@@ -50,6 +50,32 @@ func TestSyncDir_Missing(t *testing.T) {
 	}
 }
 
+// TestSyncDir_PermissionDeniedSwallowed pins R237-CR-15 (#730): a
+// permission-denied open on the directory still returns nil (the
+// rename target is already on disk; degraded fsync of the directory
+// entry is acceptable), but should not panic and should log at debug.
+// We can only reproduce ErrPermission if the test isn't running as
+// root — skip otherwise so CI under root doesn't false-pass.
+func TestSyncDir_PermissionDeniedSwallowed(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod 0 still allows open(2)")
+	}
+	dir := t.TempDir()
+	inner := filepath.Join(dir, "locked")
+	if err := os.Mkdir(inner, 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Chmod(inner, 0); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(inner, 0700) })
+
+	if err := SyncDir(inner); err != nil {
+		t.Fatalf("SyncDir on chmod-0 dir: want nil (soft failure), got %v", err)
+	}
+}
+
 // TestWriteFileAtomic_ConcurrentSameDest confirms that concurrent writers to
 // the same destination path do not corrupt each other's temp files. Before
 // the switch to os.CreateTemp the fixed `.tmp` suffix meant two racers would
