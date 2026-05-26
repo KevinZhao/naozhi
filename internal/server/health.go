@@ -172,26 +172,40 @@ type healthResp struct {
 //
 //   - Unauthenticated probes: status + uptime only. Intentionally cheap so
 //     orchestrators (k8s liveness, ALB target-group checks) don't need a
-//     token, but also cheap enough that the absence of rate-limiting here
-//     is not currently a DoS amplifier — the response is a stack-allocated
-//     struct + writeJSON, no DB / disk / lock contention. R226-SEC-7
-//     proposed adding a per-IP limiter; deferred because (a) the unauth
-//     payload reveals only "process alive" + uptime string, (b) every
-//     authenticated subobject is already gated by isAuthenticated below,
-//     so attackers cannot enumerate watchdog kills / platform names /
-//     node status without first stealing a token. If unauthenticated body
-//     ever grows beyond status+uptime, revisit R226-SEC-7 before merging.
+//     token. R246-SEC-11 (#819): the unauth branch now shares the
+//     unauthDashLimiter so an anonymous attacker cannot fingerprint the
+//     deployment by polling uptime drift between samples (uptime
+//     resolution is 1s and the bucket is 60/min sustained / 20 burst —
+//     comfortably above any legitimate liveness probe cadence). The
+//     authenticated branch is exempt from this limiter because the
+//     dashboard's 1Hz poll already exceeds the unauth burst on reload
+//     bursts; isAuthenticated gates that path on its own credential.
 //
 //   - Authenticated probes (operator dashboard, /api/sessions polling):
 //     full sub-objects. Already throttled at the HTTP layer by the
 //     dashboard's 1 Hz poll cadence; lateral moves from a stolen token
 //     would face the same poll budget as a legitimate dashboard tab.
 func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
+	authed := h.auth.isAuthenticated(r)
+	if !authed {
+		// R246-SEC-11 (#819): apply per-IP throttle on unauthenticated
+		// probes so the uptime-drift fingerprinting channel is bounded.
+		// 429 is the right status (vs collapsing to 503 / 200) so legit
+		// orchestrators with momentary blips can back off and retry; the
+		// limiter's 20-burst tolerance covers normal tab-reload + mobile-
+		// wake spikes before tripping. Wired through h.auth which already
+		// owns unauthDashLimiter and the trustedProxy-aware clientIP
+		// extractor — no new field plumbing.
+		if !h.auth.unauthDashAllow(h.auth.clientIP(r)) {
+			writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "rate limit exceeded"})
+			return
+		}
+	}
 	resp := healthResp{
 		Status: "ok",
 		Uptime: time.Since(h.startedAt).Round(time.Second).String(),
 	}
-	if !h.auth.isAuthenticated(r) {
+	if !authed {
 		writeJSON(w, resp)
 		return
 	}
