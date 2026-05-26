@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -586,6 +587,64 @@ func TestRunStore_TrimAllScansAllJobs(t *testing.T) {
 	dir := filepath.Join(s.root, target)
 	if n := countJSONFiles(t, dir); n != 3 {
 		t.Fatalf("trimAll on aged job: %d files want 3", n)
+	}
+}
+
+// TestRunStore_TrimAllCtxCancelled — #1019 / R234-GO-3: trimAllCtx exits
+// early at the next job-entry boundary when the supplied ctx is cancelled.
+// We seed many job dirs each with a stale entry; cancel ctx before calling;
+// verify NOT all jobs were trimmed (early-exit path) — i.e. at least one
+// job retains its full pre-trim file count.
+func TestRunStore_TrimAllCtxCancelled(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t, 10, 24*time.Hour)
+	s.enableTrimGC = false
+
+	now := time.Now()
+	old := now.Add(-48 * time.Hour)
+	const N = 12
+	jobIDs := make([]string, N)
+	for i := 0; i < N; i++ {
+		jid := generateID()
+		jobIDs[i] = jid
+		// 2 stale + 1 fresh entry per job
+		for j := 0; j < 3; j++ {
+			r := makeRun(jid, now)
+			s.Append(r)
+			if j < 2 {
+				p := filepath.Join(s.root, jid, r.RunID+".json")
+				if err := os.Chtimes(p, old, old); err != nil {
+					t.Fatalf("Chtimes: %v", err)
+				}
+			}
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before the call → first ctx.Err() check fires immediately
+	s.trimAllCtx(ctx, now)
+
+	// With pre-cancelled ctx, the first iteration's ctx.Err() check returns
+	// before any trimJobUnderLock runs, so every job retains its 3 files.
+	untouched := 0
+	for _, jid := range jobIDs {
+		dir := filepath.Join(s.root, jid)
+		if countJSONFiles(t, dir) == 3 {
+			untouched++
+		}
+	}
+	if untouched != N {
+		t.Fatalf("trimAllCtx with cancelled ctx should be a no-op; "+
+			"untouched=%d want %d", untouched, N)
+	}
+
+	// Sanity: same store with fresh ctx does perform the trim.
+	s.trimAllCtx(context.Background(), now)
+	for _, jid := range jobIDs {
+		dir := filepath.Join(s.root, jid)
+		if n := countJSONFiles(t, dir); n != 1 {
+			t.Fatalf("trimAllCtx with bg ctx: job %s has %d files, want 1", jid, n)
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package cron
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1015,8 +1016,23 @@ func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
 // Called from Scheduler.Start (one cold pass to catch entries that
 // went stale during a long process downtime).
 func (s *runStore) trimAll(now time.Time) {
+	s.trimAllCtx(context.Background(), now)
+}
+
+// trimAllCtx is the ctx-aware variant of trimAll. The cold-start GC pass
+// can be many ReadDir+Remove syscalls on a large runs/ tree; on a stuck
+// FUSE/NFS mount Scheduler.Stop wedges past gcWaitBudget. Passing the
+// scheduler stopCtx lets Stop unblock the goroutine between job entries
+// (R234-GO-3 / #1019). Inner trimJobLocked is still uninterruptible —
+// each job's ReadDir+Remove window is short (≤retention cap) and the
+// per-job lock must be held for atomicity, so we only check ctx at job
+// boundaries. nil ctx is tolerated for the legacy trimAll() entrypoint.
+func (s *runStore) trimAllCtx(ctx context.Context, now time.Time) {
 	if s == nil || s.disabled {
 		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	entries, err := os.ReadDir(s.root)
 	if err != nil {
@@ -1028,6 +1044,12 @@ func (s *runStore) trimAll(now time.Time) {
 		return
 	}
 	for _, e := range entries {
+		// 在每个 job 入口前检查 ctx；scheduler.Stop 触发 stopCancel 后
+		// 当前 job 完成即退出循环，避免 Stop 等到 gcWaitBudget 超时。
+		if err := ctx.Err(); err != nil {
+			slog.Info("cron run: trimAll cancelled mid-pass", "err", err)
+			return
+		}
 		// R234-SEC-10: 跳过 symlink，与 diskListNewestFirst 对 symlink
 		// 文件的处理对齐。否则 runs/ 下放置一个指向外部目录的 symlink
 		// 目录（IsDir() 为 true 且 jobID 形似有效 hex），trimJobUnderLock
