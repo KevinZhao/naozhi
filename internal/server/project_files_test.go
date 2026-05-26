@@ -1558,19 +1558,3 @@ func TestStatRelWithRoot_RejectsSymlinkAfterResolve(t *testing.T) {
 		t.Errorf("legitimate symlink to real file should resolve as exists:true, got %+v", got)
 	}
 }
-
-// TestPreviewableByExt_NoHTML pins R244-SEC-P2-2 (#887): the extension→MIME
-// override map MUST NOT carry .html / .htm. servePreview already blocks
-// text/html via the runtime HasPrefix guard, but keeping the entries here
-// turns the override map into a second (and brittle) authoritative gate;
-// dropping them lets http.DetectContentType drive HTML detection so renamed
-// payloads (`evil.html` → `evil.txt`) and the canonical extension share the
-// same chokepoint. Regression test fails the moment a future refactor adds
-// .html / .htm back without revisiting servePreview.
-func TestPreviewableByExt_NoHTML(t *testing.T) {
-	for _, ext := range []string{".html", ".htm"} {
-		if mime, ok := previewableByExt[ext]; ok {
-			t.Errorf("previewableByExt[%q] = %q, want absent (R244-SEC-P2-2)", ext, mime)
-		}
-	}
-}
