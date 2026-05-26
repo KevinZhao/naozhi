@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron"
 	"golang.org/x/time/rate"
 )
 
@@ -155,6 +156,55 @@ func TestHandleList_NilLimiter_PassThrough(t *testing.T) {
 	h.handleList(w, req)
 	if w.Code == http.StatusTooManyRequests {
 		t.Fatalf("nil listLimiter must not produce 429; got %d body=%q", w.Code, w.Body.String())
+	}
+}
+
+// TestCronSummaryToView_PreservesOrderAndFields locks the wire-shape
+// contract for the recent_runs builder. R250-PERF-19 (#1122) replaced
+// `make([]cronRunSummaryView, 0, len(recent))` + `append` with
+// `make(..., len(recent))` + index assignment in handleList; the
+// assertion below pins that:
+//
+//   - the per-row mapping (RunID/State/Trigger/StartedAt/EndedAt/...)
+//     is unchanged regardless of which fill strategy a future refactor
+//     uses, and
+//   - the source ordering survives intact (a future bug that swapped to
+//     a parallel goroutine fan-out without sorting would fail this).
+//
+// We exercise cronSummaryToView directly rather than reaching through
+// handleList because this shape is the single contract the dashboard
+// consumes; handleList only reorders nothing on its own.
+func TestCronSummaryToView_PreservesOrderAndFields(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	in := []cron.CronRunSummary{
+		{RunID: "aa00000000000001", State: "succeeded", StartedAt: t0, EndedAt: t0.Add(time.Second), DurationMS: 1000, SessionID: "s1"},
+		{RunID: "aa00000000000002", State: "failed", StartedAt: t0.Add(time.Minute), EndedAt: t0.Add(time.Minute + time.Second), DurationMS: 1000, ErrorClass: "exec"},
+		{RunID: "aa00000000000003", State: "running", StartedAt: t0.Add(2 * time.Minute)}, // EndedAt zero
+	}
+	out := make([]cronRunSummaryView, len(in))
+	for i, r := range in {
+		out[i] = cronSummaryToView(r)
+	}
+	if got := len(out); got != len(in) {
+		t.Fatalf("len(out) = %d, want %d", got, len(in))
+	}
+	for i, view := range out {
+		if view.RunID != in[i].RunID {
+			t.Errorf("out[%d].RunID = %q, want %q (order corruption)", i, view.RunID, in[i].RunID)
+		}
+		if view.State != string(in[i].State) {
+			t.Errorf("out[%d].State = %q, want %q", i, view.State, string(in[i].State))
+		}
+		if view.StartedAt != in[i].StartedAt.UnixMilli() {
+			t.Errorf("out[%d].StartedAt = %d, want %d", i, view.StartedAt, in[i].StartedAt.UnixMilli())
+		}
+	}
+	// Running run (index 2) MUST emit ended_at=0 — IsZero() guard suppresses
+	// the conversion. A bug that pre-allocates and forgets to reset would
+	// silently land Unix epoch (-62...) instead.
+	if out[2].EndedAt != 0 {
+		t.Errorf("running run EndedAt = %d, want 0 (zero time → omitted)", out[2].EndedAt)
 	}
 }
 

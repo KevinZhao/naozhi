@@ -733,10 +733,16 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		// recent_runs: P1 — 5 条 newest-first 摘要给卡片 tooltip 用。
 		// 上限 5 是 wire 大小的折中：list response 总大小 = jobs × ~2KB。
 		// 详情页要更多用 GET /api/cron/runs.
+		//
+		// R250-PERF-19 (#1122): pre-extend rv to len(recent) and use index
+		// assignment in place of append. Skips the per-iteration cap/len
+		// bookkeeping the append builtin pays even when the backing array
+		// is already pre-sized — a 1Hz × N-tab × 50-job poll churns enough
+		// of these short slices that the saved bound checks add up.
 		if recent := h.scheduler.RecentRuns(j.ID, 5); len(recent) > 0 {
-			rv := make([]cronRunSummaryView, 0, len(recent))
-			for _, r := range recent {
-				rv = append(rv, cronSummaryToView(r))
+			rv := make([]cronRunSummaryView, len(recent))
+			for i, r := range recent {
+				rv[i] = cronSummaryToView(r)
 			}
 			v.RecentRuns = rv
 		}
