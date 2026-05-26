@@ -533,6 +533,31 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	return proc, replays, nil
 }
 
+// WaitSocketGoneForKey blocks until the shim socket associated with the
+// given session key disappears from the filesystem, or maxWait elapses.
+// Returns true when the socket is gone, false on timeout. Empty key is
+// treated as "nothing to wait for" and returns true immediately.
+//
+// R222-ARCH-2 (#711): this absorbs the shim.SocketPath / shim.KeyHash /
+// shim.WaitSocketGone trio behind a single cli-level helper so the
+// session package no longer needs to import internal/shim just to
+// compute a socket path. Lifecycle-side callers (Reset / ResetAndRecreate)
+// use this to ensure the previous shim has released its UNIX socket
+// before a fresh StartShim attempts to bind the same path; without the
+// wait the dial-first guard ("refusing to clobber") in shim/server.go
+// rejects the new bind and the user-visible reset stalls.
+//
+// Stateless: depends only on the global shim socket-naming convention
+// (XDG_RUNTIME_DIR + KeyHash), so a *Wrapper receiver is unnecessary —
+// callers reach this without plumbing a wrapper through Reset paths.
+func WaitSocketGoneForKey(key string, maxWait time.Duration) bool {
+	if key == "" {
+		return true
+	}
+	socketPath := shim.SocketPath(shim.KeyHash(key))
+	return shim.WaitSocketGone(socketPath, maxWait)
+}
+
 // isMidTurn checks replay events to determine if the CLI was mid-turn at
 // reconnection time. Returns true if the last meaningful event is not a
 // turn-complete result.
