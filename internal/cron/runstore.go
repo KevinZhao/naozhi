@@ -549,9 +549,17 @@ func (s *runStore) skipAppendTrim(jobID string, now time.Time) bool {
 
 // appendTrimBatch is the maximum number of Append calls we'll let pass
 // without running trimJobLocked when skipAppendTrim's safety conditions
-// hold. Picked low enough that even a runaway 1 Hz job sees a trim every
-// 10 s.
-const appendTrimBatch = 10
+// hold. R243-PERF-9 (#814): bumped 10 → 50 so even moderate-frequency
+// jobs amortise the per-Append ReadDir+Sort across many writes; a
+// runaway 1 Hz job still sees a forced full trim every 50 s, which is
+// well inside any keepWindow setting in practice. The on-disk count cap
+// is still enforced eagerly via the `count + appendTrimBatch >= keepCount`
+// branch in skipAppendTrim — that branch widens by 5× now, but since
+// keepCount defaults to 200 a 50-headroom margin is < 25% of the cap and
+// the operator-visible "rows on disk" never exceeds keepCount + batch,
+// matching the historical 10-headroom contract within the same order of
+// magnitude.
+const appendTrimBatch = 50
 
 // cacheHeadPush prepends summary to the recentCache for jobID. The
 // caller must hold jobLock(jobID) so the push is serialised against

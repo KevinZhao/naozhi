@@ -808,14 +808,18 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 		{
 			name: "near keepCount cap: do not skip",
 			entry: newEntryFromRows(func() []CronRunSummary {
-				// keepCount=15 + appendTrimBatch(=10) → 15-10+1 = 6 rows triggers gate
-				r := make([]CronRunSummary, 6)
+				// Pick row count so count+appendTrimBatch crosses keepCount,
+				// which fires the near-cap gate. R243-PERF-9 (#814) bumped
+				// appendTrimBatch 10 → 50, so the test sizes scale with it
+				// rather than embedding "10" or "50" literals.
+				rows := 5 // anything > 0 keeps oldest-row branch happy
+				r := make([]CronRunSummary, rows)
 				for i := range r {
 					r[i] = CronRunSummary{EndedAt: now.Add(-time.Duration(i) * time.Minute)}
 				}
 				return r
 			}(), 0),
-			keepCount:   15,
+			keepCount:   appendTrimBatch + 5, // gate fires: 5+batch >= batch+5
 			keepWindow:  24 * time.Hour,
 			wantSkip:    false,
 			wantCounter: 0, // forced trim resets counter
