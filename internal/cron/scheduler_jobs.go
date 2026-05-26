@@ -900,6 +900,30 @@ func (s *Scheduler) NextRun(j *Job) time.Time {
 	return entry.Next
 }
 
+// cronEntryGone reports whether the robfig/cron Entry identified by id
+// has been removed (or never existed). robfig/cron's Entry(id) returns a
+// zero Entry struct when the entry is unknown, distinguishable by
+// WrappedJob == nil — but consumers that test that field directly leak
+// the lib's internal struct shape into business code. This helper is the
+// single point at which scheduler code touches robfig/cron's removed-entry
+// sentinel; any future lib bump that changes the sentinel (or replaces
+// Entry() with HasEntry / Lookup-style API) lands here once.
+//
+// Caller must hold s.mu.RLock or s.mu.Lock — concurrent DeleteJob calls
+// s.cron.Remove under s.mu.Lock, so reading the entry without a scheduler
+// lock can race with removal. The current caller (TriggerNow) already
+// holds the lock for its own snapshotting reasons; the helper does not
+// re-acquire so it can be used inside an existing lock window without
+// lock-order surprises.
+//
+// R242-ARCH-29 (#774).
+func (s *Scheduler) cronEntryGone(id robfigcron.EntryID) bool {
+	if id == 0 {
+		return true
+	}
+	return s.cron.Entry(id).WrappedJob == nil
+}
+
 // TriggerNow manually executes a job by ID in a new goroutine (for debugging/dashboard).
 // Returns an error if the job is not found, paused, or has no prompt.
 func (s *Scheduler) TriggerNow(id string) error {

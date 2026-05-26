@@ -37,6 +37,13 @@ type shimReadyMsg struct {
 // session.MaxSessionKeyBytes (4*128+3=515), and the rune filter mirrors
 // that function verbatim. If either side grows new rune classes, update
 // both together.
+//
+// R237-CR-12 (#719): the "keep in sync" guarantee is no longer comment-only.
+// TestValidateKeyForShim_Contract pins this validator's behaviour against
+// the same table used by internal/session/router_test.go::TestValidateSessionKey.
+// When session's table grows a row, mirror it here in
+// internal/shim/manager_validate_key_test.go and the test will fail loudly
+// if either side regresses.
 func validateKeyForShim(k string) error {
 	if k == "" {
 		return errors.New("empty key")
