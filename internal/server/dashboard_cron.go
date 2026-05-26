@@ -794,6 +794,13 @@ func (h *CronHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id too long", http.StatusBadRequest)
 		return
 	}
+	// [R250-SEC-1] Shape gate before id reaches scheduler/slog: keeps log
+	// attributes free of newlines/control bytes that would inject forged
+	// records into the operator log when the lookup misses.
+	if !cron.IsValidID(id) {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
 
 	j, err := h.scheduler.DeleteJobByID(id)
 	if err != nil {
@@ -839,6 +846,11 @@ func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id too long", http.StatusBadRequest)
 		return
 	}
+	// [R250-SEC-1] Shape gate before id reaches scheduler/slog.
+	if !cron.IsValidID(req.ID) {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
 
 	if _, err := h.scheduler.PauseJobByID(req.ID); err != nil {
 		switch {
@@ -877,6 +889,11 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.ID) > maxCronIDLenDashboard {
 		http.Error(w, "id too long", http.StatusBadRequest)
+		return
+	}
+	// [R250-SEC-1] Shape gate before id reaches scheduler/slog.
+	if !cron.IsValidID(req.ID) {
+		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
 
@@ -929,6 +946,11 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.ID) > maxCronIDLenDashboard {
 		http.Error(w, "id too long", http.StatusBadRequest)
+		return
+	}
+	// [R250-SEC-1] Shape gate before id reaches scheduler/slog.
+	if !cron.IsValidID(req.ID) {
+		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
 
@@ -1052,6 +1074,11 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(id) > maxCronIDLenDashboard {
 		http.Error(w, "id too long", http.StatusBadRequest)
+		return
+	}
+	// [R250-SEC-1] Shape gate before id reaches scheduler/slog.
+	if !cron.IsValidID(id) {
+		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
 
