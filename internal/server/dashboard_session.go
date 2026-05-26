@@ -1221,19 +1221,13 @@ type projectListSnapshot struct {
 	Entries []projectListEntry
 }
 
-// uptimeString returns time.Since(startedAt).Round(time.Second).String() with
-// a 1-second resolution memoisation. Concurrent misses may all format the
-// same value; last-writer-wins via unconditional Store is intentional —
-// losers drop their locally formatted copy (the formatted string still
-// escapes to the response regardless, so no leak).
-func (h *SessionHandlers) uptimeString() string {
-	return h.uptimeStringAt(time.Now())
-}
-
-// uptimeStringAt is the caller-supplied-now variant: handleList captures
-// time.Now() once at the top of the request so cutoff24h and uptimeString
-// share a single vDSO call. Other callers (tests, health probes) stay on
-// uptimeString(). R67-PERF-4.
+// uptimeStringAt returns time.Since(startedAt).Round(time.Second).String()
+// with a 1-second resolution memoisation. handleList captures time.Now()
+// once at the top of the request so cutoff24h and the per-session uptime
+// share a single vDSO call. Concurrent misses may all format the same
+// value; last-writer-wins via unconditional Store is intentional — losers
+// drop their locally formatted copy (the formatted string still escapes
+// to the response regardless, so no leak). R67-PERF-4.
 func (h *SessionHandlers) uptimeStringAt(now time.Time) string {
 	d := now.Sub(h.startedAt).Round(time.Second)
 	bucket := int64(d / time.Second)
