@@ -1096,9 +1096,18 @@ func (s *Scheduler) registerJob(j *Job) error {
 	// executeJobIDIfLive's paused branch — same Debug log, same skip.
 	// The previous godoc named "executeIfReadyOpt", a rename casualty
 	// from R247-CR-10 that no helper actually carries.
-	entryID, err := s.cron.AddFunc(j.Schedule, func() {
-		s.executeJobIDIfLive(jobID, false /* viaTriggerNow */, "cron")
-	})
+	//
+	// R246-ARCH-9 (#785): the AddFunc closure is constructed via
+	// (*Scheduler).newCronTickCallback so the dispatch-boundary contract
+	// (jobID-only capture, no *Job pointer leak, single executeJobIDIfLive
+	// call site) is documented and pinned in one place. The Scheduler's
+	// stopCtx struct field still owns the lifecycle context — robfig/cron's
+	// AddFunc takes a func() with no ctx parameter so the field cannot be
+	// eliminated entirely until the upstream API grows ctx-aware Schedule.
+	// Wrapping the closure here at least makes the dispatch boundary
+	// explicit for future ctx-flow refactors (e.g. lifting executeOpt's
+	// downstream s.stopCtx reads to receive ctx as a parameter).
+	entryID, err := s.cron.AddFunc(j.Schedule, s.newCronTickCallback(jobID))
 	if err != nil {
 		return fmt.Errorf("register cron: %w", err)
 	}
@@ -1116,6 +1125,39 @@ func (s *Scheduler) registerJob(j *Job) error {
 		j.cachedPeriod = 0
 	}
 	return nil
+}
+
+// newCronTickCallback returns the func() closure registered with
+// robfig/cron's AddFunc for jobID. R246-ARCH-9 (#785): isolating the
+// dispatch boundary in one factory makes three contracts explicit:
+//
+//  1. The closure captures jobID by value, NOT a *Job pointer. An
+//     UpdateJob remove+re-add between tick dispatch and re-lock must
+//     resolve to the freshest entry, which executeJobIDIfLive does by
+//     re-reading s.jobs[jobID] under RLock. Capturing *Job here would
+//     leak a stale pointer past the next UpdateJob.
+//
+//  2. The closure delegates to executeJobIDIfLive — never calls
+//     executeOpt directly — so the deleted/paused pre-flight gate
+//     stays shared with TriggerNow's path. R247-CR-10 / R250-CR-1
+//     (#1134) is the historical anchor.
+//
+//  3. The viaTriggerNow=false / logSubject="cron" pair is fixed at
+//     the dispatch boundary; future tick-dispatch fan-outs (e.g. a
+//     "missed-schedule replay" trigger) must mint their own factory
+//     to keep the trigger-source label in lockstep with the dispatch
+//     path.
+//
+// Lifting this from an inline closure also gives a stable structural
+// anchor for future ctx-aware AddFunc shims if robfig/cron grows a
+// ctx parameter — the wrapper signature is the single place a ctx
+// argument would land. Until then s.stopCtx remains a Scheduler
+// struct field (see scheduler.go godoc on the field's anti-pattern
+// rationale: robfig/cron callbacks have no ctx parameter slot).
+func (s *Scheduler) newCronTickCallback(jobID string) func() {
+	return func() {
+		s.executeJobIDIfLive(jobID, false /* viaTriggerNow */, "cron")
+	}
 }
 
 // findByPrefixLocked finds a job by ID prefix scoped to a specific chat.
