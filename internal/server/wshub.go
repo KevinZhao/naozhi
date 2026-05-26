@@ -176,12 +176,14 @@ type Hub struct {
 	// things: (a) reviving a dismissed cron stub when a dashboard tab
 	// re-subscribes (handleSubscribe → EnsureStub) and (b) auto-saving
 	// the user's first prompt as the cron job's permanent prompt
-	// (sessionSend → SetJobPrompt). R232-ARCH-7: typed as the narrow
-	// cronHubOps interface (defined in this file) instead of
-	// *cron.Scheduler, so server's coupling to cron is the 2 methods
-	// it actually uses, not the full 60+ method scheduler surface.
-	// *cron.Scheduler satisfies cronHubOps implicitly.
-	scheduler   cronHubOps
+	// (sessionSend → SetJobPrompt). Typed as the narrow CronView
+	// interface (defined in dashboard_session.go) instead of
+	// *cron.Scheduler, so server's coupling to cron is the small
+	// CronView method-set, not the full 60+ method scheduler surface.
+	// R232-ARCH-7 / R242-ARCH-13 (#754) — was the file-local cronHubOps
+	// interface; collapsed into the package-level CronView shared with
+	// SessionHandlers. *cron.Scheduler satisfies CronView implicitly.
+	scheduler   CronView
 	uploadStore *uploadStore // optional, for resolving WS-sent file_ids
 	// scratchPool lets sessionOptsFor resolve the inherited AgentOpts for an
 	// ephemeral "scratch" key without touching the persistent agent registry.
@@ -449,20 +451,13 @@ func NewHub(opts HubOptions) *Hub {
 	return h
 }
 
-// cronHubOps is the narrow consumer interface the Hub needs from
-// *cron.Scheduler. Defined here (and not in cron) so server's coupling
-// to the scheduler stays at the two methods we actually call, and tests
-// can inject a fake without depending on the full Scheduler. R232-ARCH-7
-// extension of the cronStubChecker pattern from R228-ARCH-17.
-type cronHubOps interface {
-	EnsureStub(key string) bool
-	SetJobPrompt(jobID, prompt string) error
-}
-
 // SetScheduler sets the cron scheduler for auto-saving prompts on first send.
 // Accepts the concrete *cron.Scheduler (production wiring) — the field type
-// is the narrower cronHubOps interface so the Hub never sees the rest of the
-// scheduler API.
+// is the narrower CronView interface so the Hub never sees the rest of the
+// scheduler API. R242-ARCH-13 (#754): the previous file-local cronHubOps
+// interface has been collapsed into the package-level CronView (see
+// dashboard_session.go) shared with SessionHandlers — fewer micro-interfaces
+// to learn, identical method-set against *cron.Scheduler.
 func (h *Hub) SetScheduler(s *cron.Scheduler) { h.scheduler = s }
 
 // SetUploadStore wires the upload store used by WS sends to resolve file_ids

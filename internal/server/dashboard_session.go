@@ -240,24 +240,24 @@ func isUnknownRPCMethodErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "unknown method")
 }
 
-// cronStubChecker is the 1-method consumer interface SessionHandlers needs
-// from cron.Scheduler — handleEvents revives a dismissed cron stub when a
-// dashboard tab requests its event tail. Defined here so the server package
-// does not import cron's full type just for this single call. R228-ARCH-17.
-//
-// *cron.Scheduler satisfies this implicitly.
-type cronStubChecker interface {
-	EnsureStub(key string) bool
-}
-
-// cronSessionLister is the 1-method consumer interface used by
+// CronView is the consolidated narrow consumer interface the server
+// package needs from *cron.Scheduler. R242-ARCH-13 (#754) collapses three
+// previously-separate single-method shapes — cronHubOps (EnsureStub +
+// SetJobPrompt, used by the Hub's auto-save-prompt path), cronStubChecker
+// (EnsureStub, used by SessionHandlers.handleEvents to revive dismissed
+// cron stubs) and cronSessionLister (KnownSessionIDs, used by
 // loadHistorySessions to hide cron-spawned JSONLs from the catch-all
-// history panel.  *cron.Scheduler satisfies this via KnownSessionIDs.
-// Defined here (not as a thicker import of cron.Scheduler) for the
-// same reason as cronStubChecker — keep server's coupling to cron
-// minimal and easy to test with a fake.  R245-ARCH (cron+sys
-// hide-from-history).
-type cronSessionLister interface {
+// history panel) — into one interface so reviewers and test authors only
+// have to learn one shape.
+//
+// *cron.Scheduler satisfies CronView implicitly. Defined in the server
+// package (not in cron) so server's coupling to cron stays at the three
+// methods we actually call rather than the full Scheduler API. Lineage:
+// R228-ARCH-17 (cronStubChecker) → R232-ARCH-7 (cronHubOps) → R245-ARCH
+// (cronSessionLister) → R242-ARCH-13 (CronView).
+type CronView interface {
+	EnsureStub(key string) bool
+	SetJobPrompt(jobID, prompt string) error
 	KnownSessionIDs() map[string]bool
 }
 
@@ -281,13 +281,20 @@ func (f historyFilter) SkipSessionID(sid string) bool {
 type SessionHandlers struct {
 	router     *session.Router
 	projectMgr *project.Manager
-	scheduler  cronStubChecker // optional; used by handleEvents to revive dismissed cron stubs
-	// cronSessions is the optional Scheduler-side lister consulted when
-	// building the history panel.  When nil, cron-spawned JSONLs are NOT
-	// filtered from history (degraded behaviour matches pre-R245). The
-	// underlying type is *cron.Scheduler in production; tests may inject
+	scheduler  CronView // optional; used by handleEvents to revive dismissed cron stubs (EnsureStub)
+	// cronSessions is the optional Scheduler-side view consulted when
+	// building the history panel via KnownSessionIDs(). When nil, cron-spawned
+	// JSONLs are NOT filtered from history (degraded behaviour matches pre-R245).
+	// The underlying type is *cron.Scheduler in production; tests may inject
 	// a stub. R245-ARCH (cron+sys hide-from-history).
-	cronSessions cronSessionLister
+	//
+	// scheduler and cronSessions remain two separate CronView fields rather
+	// than a single shared one because production wiring (server.go) must
+	// be allowed to nil either independently — e.g. to disable history
+	// filtering while keeping stub revival, or vice versa. Both are typed
+	// CronView so a single concrete *cron.Scheduler can satisfy both.
+	// R242-ARCH-13 (#754).
+	cronSessions CronView
 	// sysWorkDir is the absolute filesystem path used by sysession's
 	// transient claude -p Runner.  When non-empty, every JSONL under
 	// this workspace path is hidden from the history panel — AutoTitler
