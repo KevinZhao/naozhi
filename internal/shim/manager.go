@@ -112,6 +112,15 @@ type Manager struct {
 	// the lock acquisition sequence.
 	reconnectMu sync.Mutex
 	reconnectKM map[string]*sync.Mutex
+
+	// reaperWG tracks the per-shim cmd.Wait() reaper goroutines spawned
+	// by StartShimWithBackend. StopAll waits on this group (bounded by
+	// the caller-supplied ctx) so the systemd shutdown path does not
+	// return while reaper goroutines may still be running and touching
+	// captured locals (today only `keyHash`, but the WaitGroup contract
+	// is the structural defense against future captures of Manager state
+	// being read mid-shutdown). R216-GO-6 (#565).
+	reaperWG sync.WaitGroup
 }
 
 // ShimHandle represents a running shim that naozhi is connected to.
@@ -431,7 +440,16 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	// shim doesn't silently vanish. Normal termination (idle-timeout exit 0)
 	// returns nil and stays quiet; any other exit surfaces in journald with
 	// the keyHash so operators can correlate with the next dial failure.
+	//
+	// R216-GO-6 (#565): tracked via m.reaperWG so StopAll can bound the
+	// shutdown path on these goroutines. Today the goroutine only reads
+	// the function-local `keyHash` string — Add(1) here and Done() inside
+	// the goroutine make the structural contract explicit so future edits
+	// that capture Manager state are caught by the WaitGroup-on-shutdown
+	// contract rather than by silent races.
+	m.reaperWG.Add(1)
 	go func() {
+		defer m.reaperWG.Done()
 		if err := cmd.Wait(); err != nil {
 			slog.Warn("shim exited unexpectedly", "key_hash", keyHash, "err", err)
 		}
@@ -980,6 +998,15 @@ func (m *Manager) StopAll(ctx context.Context) {
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
+		// Also wait for reaper goroutines (cmd.Wait() per spawned shim)
+		// so callers blocking on StopAll see a fully-drained Manager.
+		// The reapers themselves are bounded by the shim process lifetime
+		// — if the shim survived our Shutdown signal (Setsid: true keeps
+		// it under cgroup control), reaperWG would block until the cgroup
+		// owner cleans up. The outer ctx still bounds the wall-clock here
+		// so a stuck reaper cannot wedge service shutdown indefinitely.
+		// R216-GO-6 (#565).
+		m.reaperWG.Wait()
 		close(done)
 	}()
 	select {

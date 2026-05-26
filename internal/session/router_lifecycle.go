@@ -637,8 +637,19 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	if r.spawningKeys == nil {
 		r.spawningKeys = make(map[string]chan struct{})
 	}
-	doneCh := make(chan struct{})
-	r.spawningKeys[key] = doneCh
+	// R62-GO-3 (#775): if a caller (e.g. ResetAndRecreate) pre-installed a
+	// guard channel before releasing r.mu, reuse that channel so the
+	// "spawn-in-flight" marker is continuous from the caller's unlock
+	// through this defer. Concurrent GetOrCreate parked on the guardCh
+	// will never observe a `inflight=false` window in r.spawningKeys[key]
+	// before this function's prologue, so it cannot race in and spawn its
+	// own session with mismatched opts. If no pre-existing entry, install
+	// a fresh per-spawn channel as before.
+	doneCh, reused := r.spawningKeys[key]
+	if !reused {
+		doneCh = make(chan struct{})
+		r.spawningKeys[key] = doneCh
+	}
 	defer func() {
 		r.mu.Lock()
 		r.markSpawnDoneLocked(key, doneCh)
@@ -1371,20 +1382,21 @@ func waitSocketGoneForKey(key string, maxWait time.Duration) {
 // This avoids the race window between Reset and GetOrCreate where a concurrent
 // message could create a session with wrong opts.
 //
-// NOTE (R62-GO-3): ResetAndRecreate releases r.mu between session
-// teardown and respawn so proc.Close() can run without holding the
-// router mutex. A concurrent GetOrCreate arriving in that window
-// can win the race and spawn a fresh session with its own opts,
-// which may not match what the caller of ResetAndRecreate expected.
+// R62-GO-3 (#775) FIX: ResetAndRecreate now installs a guard channel in
+// r.spawningKeys[key] BEFORE releasing r.mu for proc.Close(). Concurrent
+// GetOrCreate callers parking in the (key not present, but inflight)
+// window will block on the guardCh until spawnSession's defer closes it
+// (whether spawn succeeded or failed). spawnSession's prologue reuses
+// an existing channel rather than overwriting it, so the guardCh is
+// continuously installed from this function's first unlock through
+// spawnSession's defer — no concurrent caller can observe "no session,
+// no inflight marker" and spawn its own with different opts.
 //
-// Mitigation: callers whose behavior depends on opts.Backend being
-// honored MUST treat ResetAndRecreate's returned session as a
-// best-effort — it guarantees "a fresh session exists" but not
-// "a fresh session with MY opts". The TOCTOU guard in spawnSession
-// returns existing sessions rather than stacking dup spawns, so the
-// invariant "exactly one live session per key" holds. Round 209's
-// SM1 (ResetAndDiscardOverride) is the atomic alternative when
-// opts fidelity matters.
+// Historical NOTE: prior to the #775 fix the gap allowed a concurrent
+// GetOrCreate to win and spawn with its own opts. Callers that needed
+// opts fidelity were directed to ResetAndDiscardOverride (R209 SM1).
+// With the guard in place, ResetAndRecreate now provides the same
+// "MY opts" guarantee for the simple reset+recreate case.
 func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, error) {
 	r.mu.Lock()
 
@@ -1412,6 +1424,18 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		r.storeGen.Add(1)
 
 		if proc != nil && proc.Alive() {
+			// R62-GO-3 (#775): install a guardCh in r.spawningKeys[key]
+			// BEFORE we release r.mu. Concurrent GetOrCreate that
+			// observes (no session, but inflight marker) will park on
+			// guardCh and not race in to spawn its own session with
+			// different opts. spawnSession below reuses this same
+			// channel and its defer closes+removes it.
+			if r.spawningKeys == nil {
+				r.spawningKeys = make(map[string]chan struct{})
+			}
+			if _, exists := r.spawningKeys[key]; !exists {
+				r.spawningKeys[key] = make(chan struct{})
+			}
 			r.mu.Unlock()
 			proc.Close()
 			// Same rationale as Router.Reset: make sure the shim
