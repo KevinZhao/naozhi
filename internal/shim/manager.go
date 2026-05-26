@@ -499,12 +499,34 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 		return nil, fmt.Errorf("connect to new shim: %w", err)
 	}
 
+	// R216-SEC-5 (#546): verify the CLI PID reported in the shim's hello
+	// frame actually points at the configured CLI binary before forwarding
+	// it to busctl / the cgroup move. The shim is trusted (we spawned it),
+	// but defence-in-depth: any future bug or compromised hello path that
+	// reports a foreign PID would otherwise migrate an unrelated process
+	// into the naozhi cgroup via sudo. On Linux this reads /proc/PID/exe;
+	// on Darwin it falls back to ps -o comm= (weaker but still detects
+	// PID reuse by an unrelated program). Mismatch / lookup error skips
+	// the cgroup move with a Warn — the shim itself still gets adopted
+	// (cliPIDForMove=0 takes the existing 'if cliPID > 0' branch in
+	// moveToShimsCgroup), the CLI just joins the default cgroup like any
+	// other Setsid: true grandchild. Parallel to the existing PPid
+	// validation inside moveToShimsCgroup (R229-SEC-4).
+	cliPIDForMove := handle.Hello.CLIPID
+	if mismatch, mErr := shimPIDBinaryMismatch(handle.Hello.CLIPID, cliPath); mErr != nil {
+		slog.Warn("shim hello CLIPID identity check skipped",
+			"pid", handle.Hello.CLIPID, "err", mErr)
+	} else if mismatch {
+		slog.Warn("shim hello CLIPID does not match configured CLI binary; skipping CLI cgroup adoption",
+			"pid", handle.Hello.CLIPID, "want_bin", cliPath)
+		cliPIDForMove = 0
+	}
 	// Move shim (and CLI) to an independent systemd scope so they survive
 	// service restarts. Must happen after connect so we have the CLI PID from hello.
 	// Thread the caller's ctx so SIGTERM during a spawn storm cancels the
 	// busctl subprocess instead of letting dozens run in parallel for their
 	// full 3 s budget past shutdown.
-	moveToShimsCgroup(ctx, cmd.Process.Pid, handle.Hello.CLIPID)
+	moveToShimsCgroup(ctx, cmd.Process.Pid, cliPIDForMove)
 
 	m.mu.Lock()
 	// Guard against a concurrent StartShim/Reconnect having already installed
