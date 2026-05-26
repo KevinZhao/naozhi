@@ -561,14 +561,19 @@ func workDirResolveUnderRoot(workDir, allowedRoot, allowedRootResolved string) (
 	}
 	rootResolved, err := filepath.EvalSymlinks(allowedRoot)
 	if err != nil {
-		// Fall back to the cached resolution (captured at construction) or
-		// the raw path if no cache exists. Either way the fallback chain
-		// preserves the historical behaviour when EvalSymlinks fails.
-		if allowedRootResolved != "" {
-			rootResolved = allowedRootResolved
-		} else {
-			rootResolved = allowedRoot
+		// Fall back to the construction-time cached resolution. If neither
+		// the per-call EvalSymlinks nor the cache produced a resolved path,
+		// hard-reject — comparing the symlink-resolved workDir against the
+		// raw allowedRoot string opens a TOCTOU/symlink escape window:
+		// allowedRoot="/data/workspace" might resolve to
+		// "/mnt/disk0/workspace", in which case a raw-prefix compare against
+		// "/data/workspace" would either reject every legitimate child OR
+		// (if a subsequent rename swapped the symlink target) admit a
+		// path under an attacker-controlled tree. R243-SEC-9 (#795).
+		if allowedRootResolved == "" {
+			return "", false
 		}
+		rootResolved = allowedRootResolved
 	}
 	if resolved == rootResolved {
 		return resolved, true
