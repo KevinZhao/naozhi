@@ -67,11 +67,11 @@ type ReverseConn struct {
 	remoteAddr  string
 	// meta is the immutable snapshot of register-time metadata
 	// (capabilities, hostname, registered-at). Built once in
-	// newReverseConn from the values flowing in via reverseserver.go's
-	// register frame; never mutated thereafter so concurrent Meta()
-	// readers (server-side selectNodeForBackend on every dispatch) need
-	// no locking. Stored by value so the public Meta() returns a
-	// pointer into a stable allocation.
+	// newReverseConnWithMeta from the values flowing in via
+	// reverseserver.go's register frame; never mutated thereafter so
+	// concurrent Meta() readers (server-side selectNodeForBackend on
+	// every dispatch) need no locking. Stored by value so the public
+	// Meta() returns a pointer into a stable allocation.
 	meta NodeMeta
 
 	writeMu sync.Mutex
@@ -100,19 +100,14 @@ type ReverseConn struct {
 	baseCancel context.CancelFunc
 }
 
-func newReverseConn(id, displayName, remoteAddr string, conn *websocket.Conn) *ReverseConn {
-	return newReverseConnWithMeta(id, displayName, remoteAddr, conn, nil, "")
-}
-
 // newReverseConnWithMeta is the capability-aware constructor used by
 // reverseserver.go after a successful register. caps is the wire-form
 // slice from ReverseMsg.Capabilities; nil/empty means "node advertised
 // no caps" (legacy peer). hostname is the truncated remote-supplied
 // label, separate from remoteAddr (which is r.RemoteAddr fallback).
 //
-// Tests that don't care about caps go through newReverseConn instead;
-// it forwards here with empty values so the meta surface stays
-// uniformly populated.
+// Tests that don't care about caps call this directly with nil caps and
+// an empty hostname so the meta surface stays uniformly populated.
 func newReverseConnWithMeta(id, displayName, remoteAddr string, conn *websocket.Conn, caps []string, hostname string) *ReverseConn {
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 	return &ReverseConn{
