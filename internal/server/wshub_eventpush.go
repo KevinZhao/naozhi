@@ -299,6 +299,7 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 		if u, exists := c.subscriptions[key]; exists {
 			staleUnsub = u
 			delete(c.subscriptions, key)
+			h.decSubscriberCountLocked(key)
 		}
 	}
 	h.mu.Unlock()
