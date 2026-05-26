@@ -20,7 +20,7 @@ func TestWriteRecord_HappyPath(t *testing.T) {
 	var buf bytes.Buffer
 	r := schema.NewHeader("k", 42, "gen")
 
-	n, err := WriteRecord(&buf, r)
+	n, err := writeRecord(&buf, r)
 	if err != nil {
 		t.Fatalf("WriteRecord: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestWriteRecord_HappyPath(t *testing.T) {
 func TestReadRecord_RoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	want := schema.NewEntry(7, []byte(`{"time":1,"uuid":"aa","type":"user","summary":"hi"}`))
-	if _, err := WriteRecord(&buf, want); err != nil {
+	if _, err := writeRecord(&buf, want); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -75,7 +75,7 @@ func TestReadRecord_MultipleInSequence(t *testing.T) {
 	var buf bytes.Buffer
 	for i := uint64(1); i <= 5; i++ {
 		r := schema.NewEntry(i, []byte(`{"time":1,"uuid":"aa","type":"user"}`))
-		if _, err := WriteRecord(&buf, r); err != nil {
+		if _, err := writeRecord(&buf, r); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
 	}
@@ -212,7 +212,7 @@ func TestFrameSize_MatchesWriteRecord(t *testing.T) {
 		if err != nil {
 			t.Fatalf("write %d bytes: %v", len(body), err)
 		}
-		want := int64(FrameSize(len(body)))
+		want := int64(frameSize(len(body)))
 		if n != want {
 			t.Errorf("bodyLen=%d: WriteRecordRaw returned %d, FrameSize=%d",
 				len(body), n, want)
@@ -317,6 +317,33 @@ func TestReadFramedBody_PoolReuse(t *testing.T) {
 			t.Errorf("read %d: empty body", i)
 		}
 	}
+}
+
+// writeRecord is the test-only marshal+frame combo helper. Production
+// always pre-marshals records via schema.MarshalRecord and feeds the
+// pre-marshalled bytes into WriteRecordRaw, so the combo wrapper has
+// no production caller — it only exists here so the tests can keep
+// asserting the round-trip property without re-typing two function
+// calls per fixture. DEADCODE-13 (#1206).
+func writeRecord(w io.Writer, r *schema.Record) (int64, error) {
+	body, err := schema.MarshalRecord(r)
+	if err != nil {
+		return 0, err
+	}
+	return WriteRecordRaw(w, body)
+}
+
+// frameSize predicts the on-disk length of a framed record given the
+// JSON body length. Production never recomputes this from the body
+// length (rotate / idx tracking pull the post-write count from the
+// WriteRecordRaw return value), so the predictor lives only as a
+// test invariant — TestFrameSize_MatchesWriteRecord pins the
+// "predicted size matches written size" contract that protects rotate's
+// cut-offset math from drift. DEADCODE-13 (#1206).
+func frameSize(bodyLen int) int {
+	// Integer log10 of bodyLen for the decimal prefix width, plus two
+	// newlines.
+	return len(intToStr(bodyLen)) + 1 + bodyLen + 1
 }
 
 // intToStr is a tiny helper so the tests don't depend on strconv.
