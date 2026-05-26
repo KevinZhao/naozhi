@@ -185,6 +185,20 @@ func loadJobs(path string) (map[string]*Job, error) {
 				"path", path, "cron_id", j.ID, "title_bytes", len(j.Title))
 			continue
 		}
+		// R250-GO-12 (#1075): defence-in-depth rune-count cap mirroring
+		// addJobAcquiringLock / UpdateJob's MaxCronTitleLen guard. Without
+		// this, a hand-edited cron_jobs.json with a 1 MiB legal-UTF-8 Title
+		// would persist and inflate every /api/cron list broadcast at 1 Hz.
+		// Byte-level bound below would let a single CJK title (~3B/rune)
+		// reach 3× MaxCronTitleLen runes before tripping; rune count is the
+		// invariant the write-path enforces, so mirror it here.
+		if utf8.RuneCountInString(j.Title) > MaxCronTitleLen {
+			slog.Warn("cron store: dropping job with overlong title",
+				"path", path, "cron_id", j.ID,
+				"title_runes", utf8.RuneCountInString(j.Title),
+				"cap", MaxCronTitleLen)
+			continue
+		}
 		if !utf8.ValidString(j.Backend) || containsCronUnsafe(j.Backend) {
 			slog.Warn("cron store: dropping job with invalid backend bytes",
 				"path", path, "cron_id", j.ID, "backend_bytes", len(j.Backend))
