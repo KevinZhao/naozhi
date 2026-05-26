@@ -603,8 +603,12 @@ const appendTrimBatch = 10
 
 // cacheHeadPush prepends summary to the recentCache for jobID. The
 // caller must hold jobLock(jobID) so the push is serialised against
-// concurrent Recent / List reads. No-op when the cache entry is not yet
-// warm (List/Recent will populate from disk on first miss).
+// concurrent Recent / List reads. No-op on the ring when the cache
+// entry is not yet warm — but we still LoadOrStore an empty placeholder
+// so the next cacheGet avoids the redundant LoadOrStore + alloc on its
+// own miss path. R246-GO-9 (#702): the pre-fix version returned silently
+// when Load missed, leaving cacheGet to allocate the recentCacheEntry
+// itself moments later.
 //
 // R242-GO-8 / R235-PERF-3 / R233-PERF-2: ring-buffer push in O(1).
 // The pre-ring implementation did `append([]T{x}, slice...)` (later
@@ -614,7 +618,13 @@ const appendTrimBatch = 10
 func (s *runStore) cacheHeadPush(jobID string, summary CronRunSummary) {
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
-		return
+		// Lazy-allocate the placeholder so cacheGet doesn't have to. The
+		// summary is NOT seeded into the placeholder ring: warm=false stays
+		// because warmCache must still read disk to pick up records that
+		// predate process start. Once warmCache lands, all subsequent
+		// cacheHeadPush calls observe warm=true and push into the ring.
+		actual, _ := s.recentCache.LoadOrStore(jobID, &recentCacheEntry{})
+		v = actual
 	}
 	entry := v.(*recentCacheEntry)
 	entry.mu.Lock()
