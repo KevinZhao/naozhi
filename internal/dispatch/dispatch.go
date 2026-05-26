@@ -844,6 +844,64 @@ func (d *Dispatcher) handleGetOrCreateError(
 	return replyCtx, cleanup, errMsg
 }
 
+// handleSendError maps a Capabilities.Send failure into the user-facing
+// error reply, watchdog counter bumps, and metrics increments. Pulled
+// out of sendAndReply so the seven-stage main path stays focused on the
+// happy turn flow (R237-GO-4 / #624). The per-sentinel switch is the
+// part most likely to grow as new send-side failure modes are added
+// (e.g. backend disabled, model deprecated) and now has a single home
+// that unit tests can target without standing up a full Dispatcher.
+//
+// Caller has already entered the err != nil branch and consumed the
+// Send result; this method does NOT signal whether a reply was actually
+// delivered — failure to land the error reply is logged at Warn but
+// not surfaced.
+func (d *Dispatcher) handleSendError(
+	ctx context.Context,
+	err error,
+	key string,
+	msg platform.IncomingMessage,
+	p platform.Platform,
+	lg *slog.Logger,
+) {
+	d.replyErrorCount.Add(1)
+	dispatchReplyErrorTotal.Add(1)
+	lg.Error("send to claude", "err", err)
+	// IM path uses the timeout-aware helper (it renders the configured
+	// no-output / total durations in Chinese) and prepends a clock
+	// emoji for visibility on chat surfaces. Dashboard send path
+	// (server/errors_usermsg.go) calls usermsg.ForSendError directly
+	// so the timeout cases collapse to the generic "处理超时，请简化任务后重试。"
+	// — it has no per-session timeout configured. R249-DISPATCH-1 (#419)
+	// extracted usermsg.UserMessage so a new sentinel only registers
+	// once, instead of two parallel switches with cross-package
+	// "keep in sync" comments.
+	// /clear early-return mirrors the prior behaviour: the user just
+	// triggered the reset, so we suppress the extra "会话已重置" reply.
+	if errors.Is(err, cli.ErrSessionReset) {
+		return
+	}
+	// Watchdog counters stay in dispatch because they are owned by the
+	// IM-side configuration; the shared helper only renders text.
+	switch {
+	case errors.Is(err, cli.ErrNoOutputTimeout):
+		d.watchdogNoOutputKills.Add(1)
+	case errors.Is(err, cli.ErrTotalTimeout):
+		d.watchdogTotalKills.Add(1)
+	}
+	errMsg := usermsg.UserMessage(err, key, d.noOutputTimeout, d.totalTimeout)
+	// IM-only emoji decoration for the timeout cases. Other surfaces
+	// (dashboard send_ack) deliberately stay emoji-free.
+	if errors.Is(err, cli.ErrNoOutputTimeout) || errors.Is(err, cli.ErrTotalTimeout) {
+		errMsg = "⏱️ " + errMsg
+	}
+	if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, platformReplyMaxAttempts); err != nil {
+		d.sendFailCount.Add(1)
+		dispatchSendFailTotal.Add(1)
+		lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
+	}
+}
+
 // sendAndReply performs one turn: GetOrCreate session, send message, deliver reply.
 // isFirst indicates whether this is the first message (triggers takeover/session-new
 // notifications); queued follow-ups skip these.
@@ -904,42 +962,7 @@ func (d *Dispatcher) sendAndReply(
 
 	result, err := d.caps.Send(ctx, key, sess, text, images, tracker.onEvent)
 	if err != nil {
-		d.replyErrorCount.Add(1)
-		dispatchReplyErrorTotal.Add(1)
-		lg.Error("send to claude", "err", err)
-		// IM path uses the timeout-aware helper (it renders the configured
-		// no-output / total durations in Chinese) and prepends a clock
-		// emoji for visibility on chat surfaces. Dashboard send path
-		// (server/errors_usermsg.go) calls usermsg.ForSendError directly
-		// so the timeout cases collapse to the generic "处理超时，请简化任务后重试。"
-		// — it has no per-session timeout configured. R249-DISPATCH-1 (#419)
-		// extracted usermsg.UserMessage so a new sentinel only registers
-		// once, instead of two parallel switches with cross-package
-		// "keep in sync" comments.
-		// /clear early-return mirrors the prior behaviour: the user just
-		// triggered the reset, so we suppress the extra "会话已重置" reply.
-		if errors.Is(err, cli.ErrSessionReset) {
-			return
-		}
-		// Watchdog counters stay in dispatch because they are owned by the
-		// IM-side configuration; the shared helper only renders text.
-		switch {
-		case errors.Is(err, cli.ErrNoOutputTimeout):
-			d.watchdogNoOutputKills.Add(1)
-		case errors.Is(err, cli.ErrTotalTimeout):
-			d.watchdogTotalKills.Add(1)
-		}
-		errMsg := usermsg.UserMessage(err, key, d.noOutputTimeout, d.totalTimeout)
-		// IM-only emoji decoration for the timeout cases. Other surfaces
-		// (dashboard send_ack) deliberately stay emoji-free.
-		if errors.Is(err, cli.ErrNoOutputTimeout) || errors.Is(err, cli.ErrTotalTimeout) {
-			errMsg = "⏱️ " + errMsg
-		}
-		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, platformReplyMaxAttempts); err != nil {
-			d.sendFailCount.Add(1)
-			dispatchSendFailTotal.Add(1)
-			lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
-		}
+		d.handleSendError(ctx, err, key, msg, p, lg)
 		return
 	}
 
