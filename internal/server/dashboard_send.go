@@ -1116,6 +1116,54 @@ const attachmentDirPrefix = ".naozhi/attachments/"
 // cap that serveRaw uses.
 const maxAttachmentBytes = 16 << 20
 
+// cleanAttachmentRelPath validates the workspace-relative attachment path
+// the dashboard sends in ?path=. Returns (cleaned, "") on accept and
+// ("", errMsg) on reject — errMsg is the same operator-facing string the
+// HTTP handler used to embed inline so JSON shape stays byte-for-byte
+// stable. Carved out of handleAttachment (R215-SEC-P2-3 / #536) so a unit
+// test can drive the path.Clean / filepath.Clean divergence guard
+// directly; the inline cleaning logic is preserved verbatim below.
+//
+// The second cleaner check is a no-op on Linux (path.Clean and
+// filepath.Clean agree) but rejects any input that round-trips
+// differently through the OS-aware cleaner — mac/Windows paths with
+// alternate separators or platform-specific dot handling. Documented as
+// defense-in-depth: the pre-clean already rejects backslash + IsAbs.
+func cleanAttachmentRelPath(relRaw string) (string, string) {
+	if len(relRaw) > 1024 {
+		return "", "path too long"
+	}
+	if strings.ContainsRune(relRaw, 0) {
+		return "", "invalid path"
+	}
+	if strings.ContainsRune(relRaw, '\\') || filepath.IsAbs(relRaw) {
+		return "", "invalid path"
+	}
+	// path.Clean (POSIX, forward-slash only) is correct for the wire
+	// shape we accept (we already rejected backslash + IsAbs above), and
+	// matches the forward-slash attachmentDirPrefix HasPrefix check
+	// below. EvalSymlinks + attachRootAbs HasPrefix below provides the
+	// authoritative containment check after Join.
+	cleaned := path.Clean(relRaw)
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
+		return "", "invalid path"
+	}
+	// R215-SEC-P2-3 (#536): defence-in-depth on non-Linux. On Linux
+	// path.Clean and filepath.Clean are identical so this guard is a
+	// no-op for legitimate input. On macOS / Windows the OS path
+	// semantics diverge from POSIX (case-insensitive FS, alternate
+	// separators, drive letters); even though the pre-clean rejects
+	// backslash + IsAbs, an OS-aware re-clean catches anything the POSIX
+	// cleaner missed. We require the two cleaners to agree on the same
+	// forward-slash representation — any divergence is rejected rather
+	// than silently accepted, since by definition it means the wire
+	// shape was not stable across the path/filepath boundary.
+	if osCleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(cleaned))); osCleaned != cleaned {
+		return "", "invalid path"
+	}
+	return cleaned, ""
+}
+
 // handleAttachment streams an on-disk inline image from the session
 // workspace attachment directory. Supersedes the data-URI thumbnail for
 // the dashboard lightbox "view original" affordance — the thumbnail
@@ -1147,40 +1195,12 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	// absolute paths, no traversal, no NUL. Mirrors resolveProjectFile's
 	// guard so a crafted `path` field cannot escape the attachment dir
 	// even if the workspace resolution below returns a path the user
-	// does not own.
-	if len(relRaw) > 1024 {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "path too long"})
-		return
-	}
-	if strings.ContainsRune(relRaw, 0) {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
-		return
-	}
-	if strings.ContainsRune(relRaw, '\\') || filepath.IsAbs(relRaw) {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
-		return
-	}
-	// path.Clean (POSIX, forward-slash only) is correct for the wire
-	// shape we accept (we already rejected backslash + IsAbs above), and
-	// matches the forward-slash attachmentDirPrefix HasPrefix check
-	// below. EvalSymlinks + attachRootAbs HasPrefix below provides the
-	// authoritative containment check after Join.
-	cleaned := path.Clean(relRaw)
-	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
-		return
-	}
-	// R215-SEC-P2-3: defence-in-depth on non-Linux. On Linux path.Clean and
-	// filepath.Clean are identical so this guard is a no-op. On macOS /
-	// Windows the OS path semantics diverge from POSIX (case-insensitive
-	// FS, alternate separators, drive letters); even though the pre-clean
-	// rejects backslash + IsAbs, an OS-aware re-clean catches anything the
-	// POSIX cleaner missed. We require the two cleaners to agree on the
-	// same forward-slash representation — any divergence is rejected
-	// rather than silently accepted, since by definition it means the
-	// wire shape was not stable across the path/filepath boundary.
-	if osCleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(cleaned))); osCleaned != cleaned {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
+	// does not own. The shape checks live in cleanAttachmentRelPath so a
+	// unit test can exercise the path.Clean / filepath.Clean divergence
+	// guard (R215-SEC-P2-3 / #536) without standing up the HTTP handler.
+	cleaned, errMsg := cleanAttachmentRelPath(relRaw)
+	if errMsg != "" {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": errMsg})
 		return
 	}
 	// Pin to attachment subtree — refuses /etc/passwd, /workspace/secret.env,

@@ -374,6 +374,39 @@ type DispatcherConfig struct {
 // can opt out via DispatcherConfig.AllowMissingSender.
 var ErrSendWireupMissing = errors.New("dispatch: Capabilities.Send is required (set DispatcherConfig.Capabilities or DispatcherConfig.SendFn; tests may set AllowMissingSender)")
 
+// resolveOrFabricateKeyResolver returns the live KeyResolver Dispatcher
+// must hold. Precedence (single track — drift here = bug, no inline copy
+// elsewhere is permitted; see #543 R215-CR-P2-3):
+//
+//  1. cfg.Resolver — explicit caller-supplied singleton.
+//  2. cfg.Router.Resolver() — the Router-attached singleton from
+//     session.RouterConfig.Resolver (R237-ARCH-12 / #604) so Dispatcher /
+//     Hub / upstream see the same agents-config snapshot.
+//  3. Fabricate a fresh resolver from cfg.Agents and a project data
+//     source derived from cfg.ProjectMgr (nil-safe — NewKeyResolver and
+//     project.NewDataSource both accept nil inputs).
+//
+// All three branches return a non-nil *KeyResolver, so call sites
+// downstream of NewDispatcher can dereference d.resolver without a guard.
+// Adding a fourth branch (or copying this fallback chain into a
+// caller) is the legacy-double-track failure mode this helper exists
+// to prevent.
+func resolveOrFabricateKeyResolver(cfg DispatcherConfig) *session.KeyResolver {
+	if cfg.Resolver != nil {
+		return cfg.Resolver
+	}
+	if cfg.Router != nil {
+		if r := cfg.Router.Resolver(); r != nil {
+			return r
+		}
+	}
+	var data session.PlannerDataSource
+	if cfg.ProjectMgr != nil {
+		data = project.NewDataSource(cfg.ProjectMgr)
+	}
+	return session.NewKeyResolver(cfg.Agents, data)
+}
+
 // NewDispatcher constructs a Dispatcher from cfg. Returns
 // ErrSendWireupMissing when neither cfg.Capabilities (with non-noop Send)
 // nor cfg.SendFn is set and AllowMissingSender is false. R250-ARCH-12
@@ -385,25 +418,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	if cfg.Router != nil {
 		router = cfg.Router
 	}
-	resolver := cfg.Resolver
-	if resolver == nil {
-		// Prefer the Router-attached singleton when the host wired one
-		// in via session.RouterConfig.Resolver — that's the agreed
-		// remediation for R237-ARCH-12 (#604) so all consumers
-		// (Dispatcher / Hub / upstream) read the same agents-config
-		// snapshot. Falls back to a fresh resolver only when the
-		// Router was constructed without one (legacy / headless tests).
-		if cfg.Router != nil {
-			resolver = cfg.Router.Resolver()
-		}
-	}
-	if resolver == nil {
-		var data session.PlannerDataSource
-		if cfg.ProjectMgr != nil {
-			data = project.NewDataSource(cfg.ProjectMgr)
-		}
-		resolver = session.NewKeyResolver(cfg.Agents, data)
-	}
+	resolver := resolveOrFabricateKeyResolver(cfg)
 	// Resolve Capabilities precedence:
 	//   1. cfg.Capabilities wins when set (preferred path);
 	//   2. otherwise, if any legacy *Fn closure is non-nil, wrap them in a
@@ -859,6 +874,37 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 	}()
 }
 
+// resolveReplyCtx returns a context safe for an end-of-turn reply: when
+// ctx is already Done because of a shutdown-style cancellation
+// (context.Canceled), it returns a fresh NotifyCtx with the
+// shutdownReplyTimeout budget so the platform.Reply call can actually
+// land. Otherwise it returns ctx unchanged with a no-op cleanup.
+//
+// Centralising this swap removes the per-branch shutdown-ctx replacement
+// the previous sendAndReply / handleGetOrCreateError variants each
+// re-implemented (R242-GO-4, #550). Callers MUST defer cleanup() before
+// dispatching the reply or leak the timer goroutine on the swap path.
+//
+// Only context.Canceled triggers the swap. context.DeadlineExceeded is
+// treated as a legitimate per-turn timeout the caller asked for and is
+// not auto-extended — that would be silently lengthening a configured
+// budget. Pure ctx.Err() == nil short-circuits to the cheap "no swap"
+// branch so the helper costs nothing on the happy path.
+func resolveReplyCtx(ctx context.Context) (replyCtx context.Context, cleanup func()) {
+	if ctx == nil {
+		// nil parent: caller already lost its turn ctx. Mint a fresh
+		// shutdown-budget ctx so the reply can still land.
+		return NotifyCtx(nil, NotifyKindShutdown, shutdownReplyTimeout)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		// Happy path: cleanup is nil so callers using the
+		// `if cleanup != nil { defer cleanup() }` idiom skip the defer.
+		return ctx, nil
+	}
+	notifyCtx, cancel := NotifyCtx(ctx, NotifyKindShutdown, shutdownReplyTimeout)
+	return notifyCtx, cancel
+}
+
 // handleGetOrCreateError maps a router.GetOrCreate failure into the
 // user-facing reply ctx, an optional ctx.cancel cleanup, and a Chinese
 // error message. Pulled out of sendAndReply so the seven-stage main
@@ -885,7 +931,6 @@ func (d *Dispatcher) handleGetOrCreateError(
 	} else {
 		lg.Error("get session", "err", err)
 	}
-	replyCtx = ctx
 	switch {
 	case errors.Is(err, session.ErrMaxProcs):
 		errMsg = "当前处理已满，请稍后重试。"
@@ -901,19 +946,15 @@ func (d *Dispatcher) handleGetOrCreateError(
 		errMsg = "会话后端未配置，请联系管理员。"
 	case errors.Is(err, context.Canceled):
 		errMsg = "系统正在重启，请稍后重试。"
-		// R188-CONC-M1: ctx is already Done on shutdown path; using it for
-		// the user-facing error reply silently drops the notification at
-		// the platform layer. Match the handleOwnerLoopPanic recovery
-		// pattern and use a fresh Background ctx with short timeout so the
-		// user actually sees the "restart, retry" message.
-		// R247-ARCH-10 (#632): routed through NotifyCtx for parity with
-		// the other detached-reply sites.
-		notifyCtx, cancel := NotifyCtx(ctx, NotifyKindShutdown, shutdownReplyTimeout)
-		replyCtx = notifyCtx
-		cleanup = cancel
 	default:
 		errMsg = "会话创建失败，请发送 /new 重置后重试。"
 	}
+	// R242-GO-4 (#550): the shutdown-ctx swap is one helper, not a
+	// per-branch repeat. resolveReplyCtx returns ctx unchanged when no
+	// swap is needed (cheap), and a fresh NotifyCtx + cancel when ctx
+	// was canceled — without it the user-facing reply would silently
+	// drop at the platform layer (R188-CONC-M1).
+	replyCtx, cleanup = resolveReplyCtx(ctx)
 	return replyCtx, cleanup, errMsg
 }
 
@@ -968,7 +1009,17 @@ func (d *Dispatcher) handleSendError(
 	if errors.Is(err, cli.ErrNoOutputTimeout) || errors.Is(err, cli.ErrTotalTimeout) {
 		errMsg = "⏱️ " + errMsg
 	}
-	if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, platformReplyMaxAttempts); err != nil {
+	// R242-GO-4 (#550): on shutdown the inbound ctx is already Done; the
+	// user-facing error reply must still land. resolveReplyCtx swaps in a
+	// fresh NotifyCtx with the shutdown budget when applicable; otherwise
+	// returns ctx unchanged with nil cleanup. Identical to the swap done
+	// in handleGetOrCreateError so the two error-reply paths share one
+	// truth.
+	replyCtx, cleanup := resolveReplyCtx(ctx)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, platformReplyMaxAttempts); err != nil {
 		d.sendFailCount.Add(1)
 		dispatchSendFailTotal.Add(1)
 		lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)

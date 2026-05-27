@@ -471,28 +471,21 @@ func (s *runStore) Append(run *CronRun) {
 		slog.Warn("cron run: skipping append with non-hex job_id", "job_id", run.JobID)
 		return
 	}
-	lock := s.jobLock(run.JobID)
-	lock.Lock()
-	defer lock.Unlock()
 
-	dir := filepath.Join(s.root, run.JobID)
-	if err := s.ensureJobDir(run.JobID, dir); err != nil {
-		slog.Warn("cron run: mkdir failed", "dir", dir, "err", err)
-		return
-	}
+	// R247-PERF-10 (#549): Marshal + over-cap shrink retry are pure CPU on
+	// the caller-owned *run; they do not touch any runStore-shared state.
+	// Hoisting them above jobLock keeps a slow JSON encode (CronRun can
+	// approach maxRunBytes for chatty jobs) from serialising a concurrent
+	// Append on the same jobID. WriteFileAtomic + cacheHeadPush + trim
+	// stay under jobLock — those are the steps that genuinely need
+	// per-job mutex serialisation. summarySrc rebinding to &shrunk on the
+	// over-cap path is preserved verbatim so the cache row stays in
+	// lockstep with the on-disk truncated record (#1079 / R250-GO-16).
 	data, err := marshalRunPooled(run)
 	if err != nil {
 		slog.Warn("cron run: marshal failed", "job_id", run.JobID, "run_id", run.RunID, "err", err)
 		return
 	}
-	// summarySrc points at the CronRun whose summary we will push into the
-	// recentCache. By default the original *run; the over-cap retry path
-	// (#1079 / R250-GO-16) rebinds it to &shrunk so the cache row stays in
-	// lockstep with the on-disk truncated record. Without this, a rare
-	// over-cap run would persist a shrunk JSON file but cache the
-	// untruncated summary — `Recent` would return cached oversized
-	// LastError/Result strings until the next process restart re-warmed
-	// the cache from disk.
 	summarySrc := run
 	if int64(len(data)) > s.maxRunBytes {
 		slog.Warn("cron run: payload exceeds size cap; truncating result/prompt and retrying",
@@ -528,6 +521,16 @@ func (s *runStore) Append(run *CronRun) {
 				"cap", s.maxRunBytes)
 			return
 		}
+	}
+
+	lock := s.jobLock(run.JobID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	dir := filepath.Join(s.root, run.JobID)
+	if err := s.ensureJobDir(run.JobID, dir); err != nil {
+		slog.Warn("cron run: mkdir failed", "dir", dir, "err", err)
+		return
 	}
 	path := filepath.Join(dir, run.RunID+".json")
 	if err := osutil.WriteFileAtomic(path, data, 0o600); err != nil {
@@ -1222,6 +1225,23 @@ func (s *runStore) DeleteJob(jobID string) {
 // jobs get capped by count; low-frequency jobs by window.
 func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	s.assertJobLockHeld(jobID)
+	// R236-PERF-12 (#532): cache-driven fast exit. trimJobLocked is invoked
+	// from Append's appendTrimBatch boundary path (every N appends as a
+	// background-drift safety net) AND from the cold-start trimAll pass.
+	// When the cache is warm and shows count strictly below keepCount, the
+	// cache enumerates every on-disk file (warmCache + jobLock-serialised
+	// Append guarantee that invariant). Combined with cache's oldest
+	// StartedAt being newer than the keepWindow cutoff, no file can possibly
+	// need removal, so the ReadDir + per-entry Stat in scanSortedRunDir is
+	// pure overhead. assertJobLockHeld above + entry.mu below prevent races
+	// with cacheHeadPush / Append. The check is purely additive: any path
+	// that would have entered the ReadDir branch still does (a cold cache
+	// or count >= keepCount falls through). Cache-trim reconciliation
+	// (cacheTrimAfterDisk) is intentionally skipped here — there was nothing
+	// to remove, so the cache is already in sync with disk.
+	if s.trimSkipFromCache(jobID, now) {
+		return
+	}
 	// R239-PERF-5 (#871): scan + sort delegated to scanSortedRunDir so the
 	// trim path is in lockstep with diskListNewestFirst (matching sort
 	// order, symlink filter, IsValidID guard) and the duplicate ReadDir +
@@ -1298,6 +1318,58 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	// cache slice to the same (count + window) policy. We hold jobLock so
 	// concurrent Append's cacheHeadPush can't race.
 	s.cacheTrimAfterDisk(jobID, cutoff)
+}
+
+// trimSkipFromCache reports whether the cache state proves trimJobLocked
+// has no work to do, allowing the caller to skip ReadDir + per-entry Stat.
+// Returns true only when ALL of:
+//
+//   - cache is warm (so count + ring entries are authoritative);
+//   - cache.count < s.keepCount (so cache enumerates every on-disk file —
+//     a count == keepCount means trim may have shed older entries beyond
+//     the ring horizon and we can no longer be sure no extra file lingers);
+//   - oldest cached row's timestamp is strictly newer than the cutoff (so
+//     no window-based eviction is due).
+//
+// Caller MUST hold jobLock(jobID); the entry.mu acquisition here pairs
+// with cacheHeadPush / cacheTrimAfterDisk so a concurrent Append's
+// metadata mutation cannot race the read. R236-PERF-12 (#532).
+func (s *runStore) trimSkipFromCache(jobID string, now time.Time) bool {
+	v, ok := s.recentCache.Load(jobID)
+	if !ok {
+		return false
+	}
+	entry := v.(*recentCacheEntry)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.warm {
+		return false
+	}
+	// keepCount-margin: at count == keepCount the cache may have rotated
+	// older entries off the ring (they could still exist on disk because
+	// the previous trim might have failed or be pending). Stay strict.
+	if entry.count >= s.keepCount {
+		return false
+	}
+	// Empty cache → nothing on disk → nothing to trim. The trimJobLocked
+	// scanSortedRunDir branch returns at len(items) == 0, but skipping the
+	// syscall entirely is cheaper.
+	if entry.count == 0 {
+		return true
+	}
+	cutoff := now.Add(-s.keepWindow)
+	oldest := entry.ringRead(entry.count - 1)
+	ts := oldest.EndedAt
+	if ts.IsZero() {
+		ts = oldest.StartedAt
+	}
+	// Strict After: equal timestamps fall back to disk to avoid an off-by-one
+	// "boundary mtime gets evicted by the disk path but not the cache path"
+	// drift between trimJobLocked's mtime + cache's StartedAt approximation.
+	if !ts.After(cutoff) {
+		return false
+	}
+	return true
 }
 
 // cacheTrimAfterDisk reconciles the recentCache for jobID after on-disk
