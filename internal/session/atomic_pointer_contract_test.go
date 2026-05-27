@@ -24,14 +24,19 @@ import (
 // atomic.Pointer[string]. A source-level sanity sweep below complements
 // this with a grep for legacy `atomic.Value` spellings — the combination
 // catches both "field renamed" and "type reverted" regressions.
+//
+// R215-ARCH-P2-7: backend / cliName / cliVersion were collapsed into the
+// packed cliIdentity field (atomic.Pointer[cliIdentityBox]) so Snapshot()
+// reads all three with one Load. They are no longer individual
+// atomic.Pointer[string] fields and are therefore exercised below by the
+// dedicated cliIdentity field-existence check.
 func TestManagedSession_AtomicPointerStringFields(t *testing.T) {
 	t.Parallel()
 	want := reflect.TypeOf(atomic.Pointer[string]{})
 	typ := reflect.TypeOf(ManagedSession{})
 	for _, name := range []string{
 		"sessionID", "lastPrompt", "lastActivity",
-		"backend", "cliName", "cliVersion", "deathReason", "userLabel",
-		"workspace",
+		"deathReason", "userLabel", "workspace",
 	} {
 		f, ok := typ.FieldByName(name)
 		if !ok {
@@ -43,6 +48,14 @@ func TestManagedSession_AtomicPointerStringFields(t *testing.T) {
 				"Round 170 migration removed atomic.Value; do not revert",
 				name, f.Type)
 		}
+	}
+	// cliIdentity: packed triple, atomic.Pointer[cliIdentityBox].
+	// We don't pin the inner type via reflect (cliIdentityBox is unexported
+	// and the field type would force this test to import its own package
+	// type); checking presence + the public Backend/CLIName/CLIVersion
+	// behaviour (covered in snapshot_cli_identity_test.go) is enough.
+	if _, ok := typ.FieldByName("cliIdentity"); !ok {
+		t.Error("ManagedSession.cliIdentity missing — R215-ARCH-P2-7 packing reverted?")
 	}
 }
 

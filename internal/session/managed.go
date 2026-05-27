@@ -250,17 +250,19 @@ type ManagedSession struct {
 	// atomic.Pointer[string] to match the backend/cliName/cliVersion pattern
 	// already established above.
 	workspace atomic.Pointer[string]
-	// backend/cliName/cliVersion are written at spawn time AND later by
-	// reconnectShims under r.mu (write), but read by Snapshot() without
-	// any lock (called via ListSessions which only holds RLock while
-	// collecting refs). Using atomic.Pointer[string] keeps the read/write
-	// race-free without round-tripping Snapshot through r.mu — type-safe
-	// (unlike atomic.Value which accepts any interface value), and Load
-	// returns nil when never stored so an explicit empty-string store is
-	// distinguishable from "untouched".
-	backend     atomic.Pointer[string] // backend ID ("claude" | "kiro"); empty = router default
-	cliName     atomic.Pointer[string] // "claude-code", "kiro" — set at creation from Wrapper
-	cliVersion  atomic.Pointer[string] // semver from --version
+	// cliIdentity packs backend / cliName / cliVersion into a single
+	// atomic.Pointer so Snapshot() (1 Hz × N tabs × N sessions hot path —
+	// see R215-ARCH-P2-7 / R219-PERF-3 / R222-PERF-7) reads all three with
+	// one atomic.Load instead of three sequential Loads. The fields are
+	// written together at every spawn / reconnect / restore site (each
+	// triple is "snapshot of the wrapper that owns this session"), so
+	// packing them is also closer to the actual invariant. Updaters use
+	// updateCLIIdentity (CAS loop) so partial updates from the legacy
+	// SetBackend / SetCLIName / SetCLIVersion paths still compose
+	// safely. Read paths go through Backend() / CLIName() / CLIVersion()
+	// for callers that need only one field, or loadCLIIdentity() for
+	// Snapshot which needs all three.
+	cliIdentity atomic.Pointer[cliIdentityBox]
 	deathReason atomic.Pointer[string] // why process died, empty if alive
 	// userLabel is an operator-set display name that overrides summary/last_prompt
 	// in the dashboard sidebar and header. Empty = unset, fall back to
@@ -432,24 +434,87 @@ func storeTotalCost(v *atomic.Uint64, cost float64) {
 	v.Store(math.Float64bits(cost))
 }
 
+// cliIdentityBox is the immutable triple stored in ManagedSession.cliIdentity.
+// Treated as a value type — every update swaps the whole pointer rather than
+// mutating fields in place, so readers always observe a consistent snapshot
+// (no torn cliName-vs-cliVersion read across a partial write).
+type cliIdentityBox struct {
+	backend    string // "" = router default
+	cliName    string // e.g. "claude-code", "kiro"
+	cliVersion string // semver from --version
+}
+
+// loadCLIIdentity returns a copy of the current backend/cliName/cliVersion
+// triple in one atomic Load. Returns the zero box (all fields "") when
+// the session was constructed bare and nothing has been set yet — callers
+// must treat that as "use router default", same as the legacy nil-pointer
+// path did.
+func (s *ManagedSession) loadCLIIdentity() cliIdentityBox {
+	if box := s.cliIdentity.Load(); box != nil {
+		return *box
+	}
+	return cliIdentityBox{}
+}
+
+// updateCLIIdentity is the CAS-loop primitive that all Set* helpers below
+// funnel through. mut takes the current box (zero value when unset) and
+// returns the desired next box; we retry until the CAS succeeds. This
+// keeps independent SetBackend / SetCLIName / SetCLIVersion calls
+// composable — concurrent writers from spawn / reconnect under r.mu plus
+// occasional shim-discovery writes don't drop fields. The fast path
+// short-circuits when mut returns an unchanged box, mirroring the
+// loadAtomicString convention (see textutil.LoadAtomicString docs).
+func (s *ManagedSession) updateCLIIdentity(mut func(cliIdentityBox) cliIdentityBox) {
+	for {
+		cur := s.cliIdentity.Load()
+		var curVal cliIdentityBox
+		if cur != nil {
+			curVal = *cur
+		}
+		next := mut(curVal)
+		if cur != nil && next == *cur {
+			return
+		}
+		nextCopy := next
+		if s.cliIdentity.CompareAndSwap(cur, &nextCopy) {
+			return
+		}
+	}
+}
+
 // Backend returns the backend ID ("" when the router default is in effect).
-func (s *ManagedSession) Backend() string { return loadAtomicString(&s.backend) }
+func (s *ManagedSession) Backend() string { return s.loadCLIIdentity().backend }
 
 // SetBackend records the backend ID for this session. Called at spawn time
 // and (rarely) by reconnectShims after a naozhi restart.
-func (s *ManagedSession) SetBackend(id string) { storeAtomicString(&s.backend, id) }
+func (s *ManagedSession) SetBackend(id string) {
+	s.updateCLIIdentity(func(cur cliIdentityBox) cliIdentityBox {
+		cur.backend = id
+		return cur
+	})
+}
 
 // CLIName returns the CLI display name (e.g. "claude-code", "kiro").
-func (s *ManagedSession) CLIName() string { return loadAtomicString(&s.cliName) }
+func (s *ManagedSession) CLIName() string { return s.loadCLIIdentity().cliName }
 
 // SetCLIName records the wrapper-provided CLI display name.
-func (s *ManagedSession) SetCLIName(name string) { storeAtomicString(&s.cliName, name) }
+func (s *ManagedSession) SetCLIName(name string) {
+	s.updateCLIIdentity(func(cur cliIdentityBox) cliIdentityBox {
+		cur.cliName = name
+		return cur
+	})
+}
 
 // CLIVersion returns the detected CLI version string.
-func (s *ManagedSession) CLIVersion() string { return loadAtomicString(&s.cliVersion) }
+func (s *ManagedSession) CLIVersion() string { return s.loadCLIIdentity().cliVersion }
 
 // SetCLIVersion records the wrapper-provided CLI version.
-func (s *ManagedSession) SetCLIVersion(v string) { storeAtomicString(&s.cliVersion, v) }
+func (s *ManagedSession) SetCLIVersion(v string) {
+	s.updateCLIIdentity(func(cur cliIdentityBox) cliIdentityBox {
+		cur.cliVersion = v
+		return cur
+	})
+}
 
 // UserLabel returns the operator-set display label ("" when unset).
 func (s *ManagedSession) UserLabel() string { return loadAtomicString(&s.userLabel) }
@@ -1347,6 +1412,11 @@ func (s *ManagedSession) DeathReason() string {
 // snapshot_no_history_copy_test.go pins the contract.
 func (s *ManagedSession) Snapshot() SessionSnapshot {
 	s.parseKeyParts()
+	// R215-ARCH-P2-7: pull backend/cliName/cliVersion in one atomic Load
+	// instead of three sequential Loads — Snapshot is the 1 Hz × N tabs ×
+	// N sessions hot path, so collapsing redundant atomic reads here
+	// adds up at scale.
+	id := s.loadCLIIdentity()
 	snap := SessionSnapshot{
 		Key:         s.key,
 		Platform:    s.keyPlatform,
@@ -1357,9 +1427,9 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		LastActive:  s.LastActive().UnixMilli(),
 		CreatedAt:   s.createdAtMillis(),
 		Workspace:   s.Workspace(),
-		Backend:     s.Backend(),
-		CLIName:     s.CLIName(),
-		CLIVersion:  s.CLIVersion(),
+		Backend:     id.backend,
+		CLIName:     id.cliName,
+		CLIVersion:  id.cliVersion,
 		UserLabel:   s.UserLabel(),
 		LabelOrigin: s.LabelOrigin(),
 		// UI Round 5 R5-3: seed Model from persisted ManagedSession; the

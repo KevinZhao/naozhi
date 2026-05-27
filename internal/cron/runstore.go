@@ -1254,21 +1254,45 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	if len(items) == 0 {
 		return
 	}
+	// R246-GO-20 (#712): collect the to-remove paths first under jobLock,
+	// then release the lock for the os.Remove syscall batch so concurrent
+	// Append for the same jobID can proceed during slow-FS removes (FUSE/
+	// NFS can take 10s of ms per Remove). Re-acquire jobLock before
+	// cacheTrimAfterDisk so the cache reconciliation stays serialised
+	// against cacheHeadPush as before.
+	//
+	// Safety: the snapshot is captured under lock so a concurrent Append
+	// landing during the unlocked window writes a fresh file with newer
+	// mtime which is by definition not in our toRemove slice — we never
+	// delete it. The fresh Append's cacheHeadPush also runs after our
+	// release, so the cache observes the new row before our reconcile;
+	// cacheTrimAfterDisk preserves rows that survived the cutoff (it
+	// counts survivors from the head, never reaching the new entry).
+	//
 	// items sorted newest first by scanSortedRunDir, so rank checking
 	// below is index-based. Sort policy / tie-break rationale lives on
 	// scanSortedRunDir's godoc; trim and list paths must observe the same
 	// total order or the cap cutoff (i < keepCount) and the list cutoff
 	// (StartedAt < before) disagree about which equal-mtime record to
 	// drop. R235-GO-7 / R236-QA-01.
+	toRemove := make([]string, 0, len(items))
 	for i, it := range items {
 		// Both conditions must hold to keep.
 		keep := i < s.keepCount && it.mtime.After(cutoff)
 		if keep {
 			continue
 		}
-		if err := os.Remove(it.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			slog.Debug("cron run: trim remove failed", "path", it.path, "err", err)
+		toRemove = append(toRemove, it.path)
+	}
+	if len(toRemove) > 0 {
+		lock := s.jobLock(jobID)
+		lock.Unlock()
+		for _, p := range toRemove {
+			if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				slog.Debug("cron run: trim remove failed", "path", p, "err", err)
+			}
 		}
+		lock.Lock()
 	}
 	// Cache may now point to deleted entries; reconcile by trimming the
 	// cache slice to the same (count + window) policy. We hold jobLock so

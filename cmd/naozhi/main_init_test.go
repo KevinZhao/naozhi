@@ -25,11 +25,12 @@ import (
 // what config.Validate's contract documents would surface here as an
 // unexpected level token in the captured journald output.
 func TestLogConfigValidationDiagnostics_RoutesByLevel(t *testing.T) {
-	t.Parallel()
-	// Backend registry must be populated for cfg.Validate to recognise
-	// "claude" as known and flag the typo'd entry as unknown. Idempotent
-	// across tests.
-	backend.EnsureDefaults() // idempotent across parallel tests
+	// NOT t.Parallel(): hijacks the global slog default. A sibling
+	// parallel test (TestInitBackendWrappers_DefaultIDPropagated) calls
+	// slog.Warn from initBackendWrappers, which races with the buffer
+	// write here under -race on darwin/arm64. Keep this test sequential
+	// so the SetDefault window cannot overlap any other Warn site.
+	backend.EnsureDefaults() // idempotent across tests
 
 	// Capture slog output in JSON so we can assert on level + message.
 	var buf bytes.Buffer

@@ -376,9 +376,24 @@ func (s *Server) registerDashboard() {
 		s.projectH.SetBaseContext(s.hub.ctx)
 	}
 
-	// Wire sendH now that hub exists
+	// Wire sendH now that hub exists.
+	//
+	// R215-ARCH-P2-3 (#579): the upload-store cleanup goroutine is an
+	// app-lifecycle subsystem, not a Hub-internal one — its lifetime must
+	// follow the process, not the Hub's hot-reload boundary. A future Hub
+	// hot-reload (drain + replace) would otherwise prematurely cancel the
+	// cleanup loop and leak temp-file entries until the next process start.
+	// `s.appCtx` is wired by Server.Start before registerDashboard runs (see
+	// project_api_basectx_test.go's CTX1 pin); it is canceled only on full
+	// process shutdown. Falling back to s.hub.ctx is unsafe (semantics drift)
+	// and to context.Background is unsafe (no cancellation at all), so the
+	// nil-fallback below is purely defensive against tests that bypass Start.
 	uploads := newUploadStore()
-	uploads.StartCleanup(s.hub.ctx)
+	cleanupCtx := s.appCtx
+	if cleanupCtx == nil {
+		cleanupCtx = s.hub.ctx
+	}
+	uploads.StartCleanup(cleanupCtx)
 	s.hub.SetUploadStore(uploads)
 	s.sendH = &SendHandler{
 		nodeAccess: s.nodeAccess,
@@ -626,6 +641,24 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// CDN code. Vendoring the assets via //go:embed remains the proper
 	// long-term mitigation; this is the cheap "no regression" gate while
 	// that work is queued (see R247-SEC-23 NEEDS-DESIGN comment above).
+	//
+	// R236-SEC-14 (#562) audit: `img-src ... data:` is intentional and
+	// kept. The dropdown-arrow CSS in `static/dashboard.html`
+	// (`.cron-sort-select`, `.freq-mode-select`, `.freq-extra`) ships
+	// inline `data:image/svg+xml` URIs as `background-image`, which the
+	// CSP spec routes through `img-src` even though the syntactic context
+	// is CSS. Stripping `data:` therefore breaks the cron / scheduler UI
+	// dropdowns. The pre-condition of the original SEC-14 concern —
+	// pairing with `'unsafe-inline'` to enable a data: exfil channel —
+	// requires an attacker-injected `<img src="data:...">` element; the
+	// audit (`grep -nE '<img\s[^>]*src="data:' static/`) finds zero such
+	// occurrences in the shipped HTML, and the regression test
+	// `TestDashboardCSP_DataImgAuditPinned` pins that absence so the
+	// actual exfil precondition cannot regress. Tightening to
+	// `'self' blob:` must be bundled with (a) replacing those CSS
+	// data-URIs with embedded SVG files served from /static and
+	// (b) eliminating `script-src 'unsafe-inline'` per R236-SEC-02 /
+	// #441 — see triage note on #562 for the bundled work.
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:; frame-src 'self' blob:; frame-ancestors 'none'; require-sri-for script style font")
 	// HSTS is only meaningful over TLS (RFC 6797 §7.2). Sending it on plain
 	// HTTP would still be honoured by browsers and can brick local HTTP

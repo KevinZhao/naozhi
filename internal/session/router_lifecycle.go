@@ -47,9 +47,34 @@ import (
 // entries) pass alreadyAttached=true so we do not double-attach.
 //
 // LOCK: caller must hold r.mu (write).
+//
+// Post-condition: s.loadHistorySource() returns non-nil. R215-ARCH-P2-2
+// asks for "ManagedSession constructor mandates history.Source injection".
+// Adding a true mandatory-arg constructor would force a sweep of 20+
+// `&ManagedSession{key:...}` test literals, so we instead enforce the
+// invariant at the single canonical insertion funnel: any path that
+// publishes a session into r.sessions through this helper is guaranteed
+// to leave it with a usable history source. attachHistorySource itself
+// is nil-safe (degrades to history.Noop) and the alreadyAttached branch
+// trusts the caller — the post-publish guard below catches the case
+// where alreadyAttached==true was set by mistake / the pre-attach path
+// silently skipped the SetHistorySource call. EventEntriesBeforeCtx's
+// disk fallback then degrades gracefully to "no entries" instead of
+// silently returning empty because src==nil short-circuits.
 func (r *Router) publishSessionLocked(key string, s *ManagedSession, alreadyAttached bool) {
 	if !alreadyAttached {
 		r.attachHistorySource(s)
+	}
+	if s.loadHistorySource() == nil {
+		// Defence-in-depth: alreadyAttached==true with no actual
+		// SetHistorySource call would otherwise silently leave the
+		// dashboard "history" drawer blank. Emit the diagnostic that
+		// would have been needed to debug it AND install a Noop so
+		// callers downstream of EventEntriesBeforeCtx don't have to
+		// nil-check.
+		slog.Error("publishSessionLocked: history source missing after attach — falling back to Noop",
+			"key", key, "alreadyAttached", alreadyAttached)
+		s.SetHistorySource(history.Noop{})
 	}
 	r.sessions[key] = s
 	r.indexAdd(key)

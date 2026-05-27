@@ -400,13 +400,30 @@ func verifyChecksum(binPath, sumPath, asset string) error {
 	// runners), so this loop is correct against either LF or CRLF
 	// checksums.txt without an extra TrimRight. R235-SEC-7 reviewer
 	// misread; documented to deflect the same finding next round.
+	//
+	// R241-SEC-15 (#474): refuse a checksums.txt that contains MORE than
+	// one entry for the same asset. Previously the loop took the first
+	// match and ignored the rest, so an attacker who controlled the
+	// checksums.txt content could append a second line with a different
+	// hash for the same asset and rely on parser leniency. With the
+	// release format strictly one-line-per-asset (sha256sum --check
+	// itself rejects duplicates), reject the file outright instead so a
+	// malformed/tampered checksums.txt fails loudly rather than silently
+	// deferring to the first-line wins ordering.
 	expected := ""
+	dupSeen := false
 	for _, line := range strings.Split(string(sums), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 2 && fields[1] == asset {
+			if expected != "" {
+				dupSeen = true
+				break
+			}
 			expected = fields[0]
-			break
 		}
+	}
+	if dupSeen {
+		return fmt.Errorf("checksums.txt: duplicate entry for asset %q — refusing potentially tampered file", asset)
 	}
 	if expected == "" {
 		return fmt.Errorf("no checksum entry for %q in checksums.txt", asset)
