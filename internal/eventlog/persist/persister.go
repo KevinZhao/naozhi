@@ -693,7 +693,6 @@ func (p *Persister) shutdownAll() {
 }
 
 func (p *Persister) handleOp(o op) {
-	var err error
 	switch o.kind {
 	case opDrop:
 		// Drop must observe all prior writes for this key, otherwise a
@@ -701,17 +700,38 @@ func (p *Persister) handleOp(o op) {
 		// would arrive AFTER the remove and recreate the files. Drain
 		// the in channel first.
 		p.drainInChannel()
-		err = p.dropLocked(o.key, o.stem)
+		// R20260527-PERF-4 (#1284): split the drop into a synchronous
+		// in-memory phase (close writer fd + delete map entry) and an
+		// asynchronous file-removal phase. On slow filesystems
+		// (FUSE/NFS) the os.Remove pair could stall the writer
+		// goroutine for 100s of ms, blocking every concurrent Append
+		// draining p.in (cap 1024 then drops with telemetry). Once the
+		// map entry is gone any concurrent SinkFor reaches the empty
+		// map and proceeds normally; the unlinks racing the next
+		// possible recreation are handled by the same key-stem
+		// invariant the synchronous version relied on (KeyHash is
+		// deterministic, so a recreated session would reopen log/idx
+		// at the same paths regardless of whether the prior unlinks
+		// have completed yet — Linux/Darwin allow O_CREAT after
+		// unlink-in-flight, the new inode just replaces the dirent).
+		p.dropInMemoryLocked(o.key)
+		go func(stem string, done chan error) {
+			err := p.removeKeyFiles(stem)
+			if done != nil {
+				done <- err
+			}
+		}(o.stem, o.done)
+		return // explicit: skip the post-switch o.done write below
 	case opFlushAll:
 		// Same rationale as opDrop: Flush must observe every pending
 		// batchJob before fsyncing. Without this, tests and /health
 		// callers get a Flush return before their recent writes are
 		// durable.
 		p.drainInChannel()
-		err = p.flushAllLocked()
-	}
-	if o.done != nil {
-		o.done <- err
+		err := p.flushAllLocked()
+		if o.done != nil {
+			o.done <- err
+		}
 	}
 }
 
@@ -743,11 +763,26 @@ func (p *Persister) drainInChannel() {
 	}
 }
 
-func (p *Persister) dropLocked(key, stem string) error {
+// dropInMemoryLocked closes the per-key writer (if open) and removes its
+// map entry. Runs on the writer goroutine — must NOT touch the
+// filesystem beyond w.close()'s fd close, since the whole point of
+// R20260527-PERF-4 (#1284) is to keep this op fast even when the
+// underlying FS is slow on os.Remove.
+func (p *Persister) dropInMemoryLocked(key string) {
 	if w, ok := p.writers[key]; ok {
 		_ = w.close()
 		delete(p.writers, key)
 	}
+}
+
+// removeKeyFiles unlinks the on-disk log + idx for `stem`. Runs on a
+// dedicated goroutine spawned by handleOp(opDrop) so a slow os.Remove
+// on FUSE/NFS does not stall the writer's batch loop. R20260527-PERF-4
+// (#1284). Errors are returned (and forwarded to the caller's `done`
+// channel) preserving the original DropKey synchronous-feeling
+// contract — the caller still observes a single return value, just one
+// that the caller doesn't have to wait on the writer goroutine for.
+func (p *Persister) removeKeyFiles(stem string) error {
 	logPath := filepath.Join(p.opts.Dir, stem+logExt)
 	idxPath := filepath.Join(p.opts.Dir, stem+idxExt)
 	var firstErr error
