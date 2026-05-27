@@ -128,8 +128,21 @@ func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
 	// diffs much harder to read.
 	//
 	// O(N log N) sort 每 mutation 一次；50 jobs × log50 ≈ 280 比较，热路径可接受。
-	// NEEDS-DESIGN R241-PERF-9：未来若 jobs 上千，可改增量维护已排 ID slice。
-	slices.SortFunc(entries, func(a, b *Job) int { return cmp.Compare(a.ID, b.ID) })
+	// NEEDS-DESIGN R241-PERF-9 / R242-PERF-12 / R250-PERF-10 (#482 / #675 /
+	// #1113)：若 jobs 上千需增量维护已排 ID slice — 当前 mutator 散布在
+	// scheduler.go / scheduler_jobs.go 多处直写 s.jobs[ID]=j，安全的增量
+	// 实现需要先把所有 mutation 收紧到单一 helper，再加 sortedJobIDs 字段。
+	//
+	// R241-PERF-9 (#482) fast path: skip the sort entirely for the 0/1
+	// job case. slices.SortFunc returns early for n < 2 internally, but
+	// the comparator closure + reflect plumbing in the std lib still
+	// charges a few ns per call. Empty marshalls (`null` from
+	// json.Marshal — see the saveMarshaledSeq side; harmless because no
+	// caller reads jobs.json on a fresh install before any AddJob).
+	// Single-job operator setups + the entire test suite hit this path.
+	if len(entries) > 1 {
+		slices.SortFunc(entries, func(a, b *Job) int { return cmp.Compare(a.ID, b.ID) })
+	}
 	fn := s.marshalJobs.Load()
 	if fn == nil {
 		// Defensive fallback: a *Scheduler constructed via the zero
