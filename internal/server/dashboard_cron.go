@@ -358,6 +358,46 @@ type cronJobView struct {
 	// Backend: per docs/rfc/multi-backend.md §9 cron RPC contract. ""
 	// 表示跟随 router default；前端编辑器据此回填 backend 下拉选项。
 	Backend string `json:"backend,omitempty"`
+	// PromptTruncated is set by the GET /api/cron compact mode when the
+	// Prompt above was clipped to compactPromptPrefixBytes. The dashboard
+	// uses this flag to decide whether the cached client-side prompt needs
+	// a refetch before opening the editor / drawer-detail view. R236-SEC-08
+	// (#494): exists only on the compact path, so a non-compact list keeps
+	// byte-equal wire shape with prior releases.
+	PromptTruncated bool `json:"prompt_truncated,omitempty"`
+}
+
+// compactPromptPrefixBytes is the upper bound on Prompt bytes returned by
+// GET /api/cron?compact=1. 256 bytes is the cap chosen in R236-SEC-08
+// (#494): large enough to keep a one-line title-style summary visible in
+// any cached client view, small enough that 50 jobs × 256 B = 12 KiB
+// total per poll instead of the prior 50 × 8 KiB = 400 KiB worst case.
+//
+// Truncation is done in handleList against the rendered byte length, but
+// we clip on a UTF-8 boundary so a multi-byte rune at the cap can't end
+// up half-decoded by JSON consumers. Tests pin this contract — see
+// TestHandleList_Compact_TruncatesPromptOnRune.
+const compactPromptPrefixBytes = 256
+
+// truncatePromptUTF8 returns prompt with no more than max bytes, clipped
+// at the most recent UTF-8 rune boundary so the truncated string is still
+// valid UTF-8. Returns (clipped, true) when truncation occurred so the
+// caller can stamp PromptTruncated; otherwise returns (prompt, false).
+func truncatePromptUTF8(prompt string, max int) (string, bool) {
+	if max <= 0 || len(prompt) <= max {
+		return prompt, false
+	}
+	// Walk back from `max` until we land on a leading UTF-8 byte (top two
+	// bits are not 10xxxxxx). Bounded by ≤4 byte step-back per UTF-8
+	// invariant — never re-scans the whole prompt.
+	for n := max; n > 0; n-- {
+		if utf8.RuneStart(prompt[n]) {
+			return prompt[:n], true
+		}
+	}
+	// All-continuation prefix is impossible for valid UTF-8 input but
+	// fall back defensively rather than return invalid bytes.
+	return "", true
 }
 
 // cronNotifyDefaultView mirrors the {platform, chat_id} pair previously
@@ -736,6 +776,13 @@ func (h *CronHandlers) batchRecentRuns(jobs []cron.JobWithNextRun, n int) [][]cr
 }
 
 // GET /api/cron — list all cron jobs (unscoped, admin view).
+//
+// `?compact=1` opt-in (R236-SEC-08 / #494) clips Prompt to the first 256
+// UTF-8 bytes per job and stamps prompt_truncated=true. The default (no
+// query param) still returns the full prompt to preserve byte-equal wire
+// shape for any out-of-tree consumer pre-dating the compact mode.
+// Dashboard.js poll path passes compact=1; the editor/drawer detail view
+// fetches a single full job via the existing GET path with compact off.
 func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	// R242-CR-3: gate per-IP before the scheduler/FS work so a stolen
 	// dashboard token cannot enumerate the job list (with embedded
@@ -752,6 +799,12 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, cronListResp{Jobs: []cronJobView{}})
 		return
 	}
+
+	// R236-SEC-08 (#494): compact mode is opt-in via ?compact=1. Anything
+	// else (missing param, "0", "false", arbitrary strings) keeps the
+	// legacy full-prompt behaviour so existing curl / IM consumers don't
+	// silently lose data when this server upgrades.
+	compact := r.URL.Query().Get("compact") == "1"
 
 	jobs := h.scheduler.ListAllJobsWithNextRun()
 	// R241-PERF-1: capture once outside the loop; each non-paused job called
@@ -776,29 +829,39 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	views := make([]cronJobView, 0, len(jobs))
 	for idx, entry := range jobs {
 		j := entry.Job
-		// Prompt 不截断：dashboard.js 客户端 fuzzy-search 依赖完整 prompt
-		// 内容（filterCronJobs 在 j.prompt 上做 substring match）。截断后
-		// 搜索结果会假阴。8 KiB × 50 job = 400 KiB/响应 在 1 Hz 拉取下
-		// 是已知开销，待后续移到 server-side search 后再优化。
+		// R236-SEC-08 (#494): compact mode clips Prompt to 256 UTF-8 bytes
+		// and flags prompt_truncated so the dashboard knows to refetch the
+		// full body before opening the editor / drawer. Default (compact
+		// off) keeps the legacy full-prompt shape for backwards compat —
+		// the previous comment ("dashboard fuzzy-search depends on full
+		// prompt") still applies to the legacy path; compact callers must
+		// fall back to title/work_dir/schedule/id substring match (or
+		// future server-side search) for the truncated subset.
+		prompt := j.Prompt
+		truncated := false
+		if compact {
+			prompt, truncated = truncatePromptUTF8(j.Prompt, compactPromptPrefixBytes)
+		}
 		v := cronJobView{
-			ID:             j.ID,
-			Schedule:       j.Schedule,
-			Prompt:         j.Prompt,
-			Title:          j.Title,
-			Platform:       j.Platform,
-			ChatID:         j.ChatID,
-			CreatedBy:      j.CreatedBy,
-			CreatedAt:      j.CreatedAt.UnixMilli(),
-			Paused:         j.Paused,
-			WorkDir:        j.WorkDir,
-			NotifyPlatform: j.NotifyPlatform,
-			NotifyChatID:   j.NotifyChatID,
-			LastResult:     j.LastResult,
-			LastError:      j.LastError,
-			LastErrorClass: string(j.LastErrorClass),
-			Notify:         j.Notify,
-			FreshContext:   j.FreshContext,
-			Backend:        j.Backend,
+			ID:              j.ID,
+			Schedule:        j.Schedule,
+			Prompt:          prompt,
+			PromptTruncated: truncated,
+			Title:           j.Title,
+			Platform:        j.Platform,
+			ChatID:          j.ChatID,
+			CreatedBy:       j.CreatedBy,
+			CreatedAt:       j.CreatedAt.UnixMilli(),
+			Paused:          j.Paused,
+			WorkDir:         j.WorkDir,
+			NotifyPlatform:  j.NotifyPlatform,
+			NotifyChatID:    j.NotifyChatID,
+			LastResult:      j.LastResult,
+			LastError:       j.LastError,
+			LastErrorClass:  string(j.LastErrorClass),
+			Notify:          j.Notify,
+			FreshContext:    j.FreshContext,
+			Backend:         j.Backend,
 		}
 		if !j.LastRunAt.IsZero() {
 			v.LastRunAt = j.LastRunAt.UnixMilli()

@@ -756,12 +756,30 @@ func (h *Hub) Shutdown() {
 	// return, which in turn calls closeDone() so eventPushLoop unblocks.
 	// Without this ordering, closing node/router state before the pumps
 	// exit could cause use-after-close in unregister → RemoveClient.
+	// R249-PERF-24 (#939): mirror unregister's lock-split pattern. The
+	// per-key unsub closures (eventLog.Unsubscribe / scheduler.Unsubscribe /
+	// …) each take their own mutex; calling them inside h.mu while iterating
+	// h.clients serialised every per-client unsub closure — N clients × M
+	// subscriptions worth of foreign-mutex acquisitions — under the Hub-wide
+	// lock. Snapshot conns + every client's unsubs while holding h.mu (so
+	// the map deletes stay atomic with the per-key counter clear), then
+	// release h.mu before invoking the closures. Cold path, but the same
+	// argument that retired the inline walk in unregister applies here:
+	// the post-lock invocation can't deadlock against any other Hub mutex
+	// because no closure path acquires h.mu in reverse (see Hub.Shutdown
+	// invariant documented at unregister R249-PERF-23 / #938).
 	h.mu.Lock()
 	conns := make([]*websocket.Conn, 0, len(h.clients))
+	var unsubs []func()
 	removed := 0
 	for c := range h.clients {
-		for _, unsub := range c.subscriptions {
-			unsub()
+		if n := len(c.subscriptions); n > 0 {
+			if unsubs == nil {
+				unsubs = make([]func(), 0, n)
+			}
+			for _, unsub := range c.subscriptions {
+				unsubs = append(unsubs, unsub)
+			}
 		}
 		c.subscriptions = nil
 		if c.conn != nil {
@@ -776,6 +794,9 @@ func (h *Hub) Shutdown() {
 		delete(h.subscriberCount, k)
 	}
 	h.mu.Unlock()
+	for _, unsub := range unsubs {
+		unsub()
+	}
 	// Keep connCount in sync with h.clients. conn.Close() below triggers
 	// readPump/writePump exit → unregister, but unregister's decrement is
 	// guarded on h.clients membership which we just cleared, so without this

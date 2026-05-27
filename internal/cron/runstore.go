@@ -734,7 +734,27 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 // warmCache populates the recentCache for jobID by reading the on-disk
 // runs/<jobID>/ directory and parsing each .json file. Holds the per-job
 // disk lock so a concurrent Append can't race the warm pass.
+//
+// R236-PERF-09 (#527, partial): the corrupt-file slog.Warn was hoisted
+// past lock release so a slow stderr / structured-log shipper can't
+// extend the jobLock + entry.mu window that blocks concurrent Append
+// and cacheGet. The slog cost is small in steady state but unbounded
+// when the operator ships logs over a slow sink — keeping observability
+// out of the lock window is cheaper than auditing every log handler.
 func (s *runStore) warmCache(jobID string) {
+	corruptCount := s.warmCacheLocked(jobID)
+	if corruptCount > 0 {
+		slog.Warn("cron runstore warmCache skipped corrupt files",
+			"count", corruptCount, "dir", filepath.Join(s.root, jobID))
+	}
+}
+
+// warmCacheLocked is the inner critical section of warmCache. Returns
+// the count of corrupt run files diskListNewestFirst skipped during the
+// scan so the caller can emit a single aggregate slog AFTER the locks
+// drop. Callers MUST NOT hold any runStore lock; this function takes
+// jobLock and entry.mu internally.
+func (s *runStore) warmCacheLocked(jobID string) int {
 	lock := s.jobLock(jobID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -744,15 +764,12 @@ func (s *runStore) warmCache(jobID string) {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if entry.warm {
-		return // another goroutine warmed it during our wait
+		return 0 // another goroutine warmed it during our wait
 	}
 	rows, corruptCount := s.diskListNewestFirst(jobID, s.keepCount, time.Time{})
 	entry.ringSeed(rows, s.keepCount)
 	entry.warm = true
-	if corruptCount > 0 {
-		slog.Warn("cron runstore warmCache skipped corrupt files",
-			"count", corruptCount, "dir", filepath.Join(s.root, jobID))
-	}
+	return corruptCount
 }
 
 // cacheGetBefore is the before-cutoff variant of cacheGet. It serves a
@@ -975,6 +992,23 @@ func (s *runStore) scanSortedRunDir(jobID string) ([]runDirItem, string, error) 
 //
 // R239-PERF-5 (#871): scan + sort delegated to scanSortedRunDir so this
 // path stays in lockstep with trimJobLocked.
+//
+// PROPOSAL HISTORY (won't-fix as proposed):
+//   - R237-PERF-8 / #682 ("no mtime pre-filter — full JSON parse before
+//     discard") and R236-PERF-07 / #522 ("binary-search for `before`
+//     cutoff; ReadFile only items within the requested page") both
+//     proposed an mtime gate as a fast path. Both rejected because
+//     mtime ≥ before does NOT imply StartedAt ≥ before — long-running
+//     jobs that started before the cutoff but ended after it (or
+//     re-touched their file via process restart) would be silently
+//     dropped from the page. R246-CR-008 / #745 already removed the
+//     unsafe gate after operators reported phantom "no older runs"
+//     truncation; the strict StartedAt filter is the only correct one
+//     and the per-candidate ReadFile is the cost of correctness here.
+//   - The regression scenario is locked in by
+//     TestRunStore_DiskList_BeforeStartedAtMtimeDivergence in
+//     runstore_test.go; any future re-introduction of an mtime gate
+//     must keep that test green.
 func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time) ([]CronRunSummary, int) {
 	items, dir, err := s.scanSortedRunDir(jobID)
 	if err != nil {

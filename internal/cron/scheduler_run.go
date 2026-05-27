@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -549,6 +550,40 @@ type deadlineInterrupter interface {
 	InterruptViaControl() InterruptOutcome
 }
 
+// watchdogInterruptTimeoutDefault caps how long runDeadlineWatchdog
+// will wait for InterruptViaControl to return before recording the
+// attempt as InterruptError and unblocking the caller. R236-GO-09 (#507):
+// pre-fix, a wedged session.InterruptViaControl (control_request channel
+// pinned by a stuck stdin write or a kernel-blocked syscall) would hold
+// the goroutine forever; the caller's `<-abortCh` then blocked forever
+// and finishRun was never invoked, leaving inflight.running=true so
+// every subsequent tick skipped the job until process restart. Bounding
+// the call at 3s lets finishRun fire on the recovery path so the next
+// tick has a chance to spawn a fresh session. The InterruptViaControl
+// call itself is not aborted (no underlying ctx) — it leaks until the
+// session teardown unblocks it, but the leak is bounded (per-run,
+// drained on session.Reset) and far less harmful than a permanently
+// stuck job.
+const watchdogInterruptTimeoutDefault = 3 * time.Second
+
+// watchdogInterruptTimeoutAtomic stores the effective timeout in
+// nanoseconds. Atomic so the timeout regression tests can shorten it
+// (typically to 50ms so they don't burn 3s of CI wall time) without
+// racing the production read in the watchdog goroutine. Tests must
+// always restore the previous value via defer.
+var watchdogInterruptTimeoutAtomic atomic.Int64
+
+func init() {
+	watchdogInterruptTimeoutAtomic.Store(int64(watchdogInterruptTimeoutDefault))
+}
+
+// watchdogInterruptTimeout reads the active interrupt-call timeout.
+// Production callers see watchdogInterruptTimeoutDefault unless a test
+// has overridden it via the atomic.
+func watchdogInterruptTimeout() time.Duration {
+	return time.Duration(watchdogInterruptTimeoutAtomic.Load())
+}
+
 // runDeadlineWatchdog spawns a goroutine that waits on ctx and fires
 // sess.InterruptViaControl exactly when ctx ends with DeadlineExceeded.
 // The watchdog must run concurrently with sess.Send, NOT after — Send's
@@ -591,13 +626,72 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 	ch := make(chan abortResult, 1)
 	go func() {
 		<-ctx.Done()
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			ch <- abortResult{outcome: sess.InterruptViaControl(), fired: true}
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			ch <- abortResult{}
 			return
 		}
-		ch <- abortResult{}
+		// R236-GO-09 (#507): InterruptViaControl can block indefinitely
+		// when the protocol channel is wedged (kernel-blocked stdin
+		// write, control_request never acked). Bound it so the caller
+		// always observes a result on abortCh and finishRun runs —
+		// otherwise inflight.running stays true and every subsequent
+		// tick silently skips the job. The done channel is buffered=1
+		// so the inner goroutine never blocks on send: it returns
+		// whenever InterruptViaControl finishes, even after the timeout
+		// branch has already published an InterruptError outcome.
+		done := make(chan InterruptOutcome, 1)
+		go func() {
+			done <- sess.InterruptViaControl()
+		}()
+		select {
+		case outcome := <-done:
+			ch <- abortResult{outcome: outcome, fired: true}
+		case <-time.After(watchdogInterruptTimeout()):
+			ch <- abortResult{outcome: InterruptError, fired: true}
+		}
 	}()
 	return ch
+}
+
+// sendWithWatchdog runs sess.Send under a deadline-watchdog and returns
+// the SendResult, the watchdog abortResult, and the Send error in one
+// shot. R215-ARCH-P2-5 (#581) partial: factored out of executeOpt so
+// the four-step invariant — (1) start watchdog, (2) Send, (3)
+// sendCancel so the watchdog returns on the success path, (4) drain
+// abortCh BEFORE the next session.Reset to avoid the in-flight
+// interrupt write racing the next tick — lives in one named function
+// instead of inlined in a 569-line state machine where a future split
+// could accidentally reorder the cancel/drain pair.
+//
+// Caller contract:
+//   - sendCtx must be a context.WithTimeout / s.stopCtx-derived ctx.
+//     Watchdog uses ctx.Err() == DeadlineExceeded as its fire trigger;
+//     Background or any non-deadline ctx degrades to "interrupt never
+//     fires" silently.
+//   - sendCancel is called by this helper exactly once after Send
+//     returns; the caller's `defer sendCancel()` is therefore a no-op
+//     (cancelFunc is idempotent).
+func sendWithWatchdog(sendCtx context.Context, sendCancel context.CancelFunc, sess Session, text string) (SendResult, abortResult, error) {
+	// Watchdog: deadline-fired interrupt of the in-flight CLI turn. See
+	// runDeadlineWatchdog for the rationale (must fire BEFORE Send
+	// returns, otherwise Process.State has already flipped to Ready and
+	// InterruptViaControl returns ErrNoActiveTurn → no-op).
+	abortCh := runDeadlineWatchdog(sendCtx, sess)
+
+	// Direct Send without sendWithBroadcast — cron jobs notify via the
+	// IM deliverNotice path (resolveNotifyTarget + platform.Reply) and
+	// the cron_run_ended WS frame.
+	result, err := sess.Send(sendCtx, text)
+
+	// Cancel sendCtx so the watchdog returns promptly on the success /
+	// non-deadline error path; on the deadline path it's already done.
+	// Block on abortCh so the InterruptViaControl call (if any)
+	// completes before we record the run state — otherwise a fast cron
+	// tick could overlap the next session.Reset with the in-flight
+	// interrupt write.
+	sendCancel()
+	abort := <-abortCh
+	return result, abort, err
 }
 
 // classifyExecError maps an error from GetOrCreate or Send to
@@ -1082,23 +1176,15 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	}
 	inflight.setPhase(PhaseSending)
 
-	// Watchdog: deadline-fired interrupt of the in-flight CLI turn. See
-	// runDeadlineWatchdog for the rationale (must fire BEFORE Send returns,
-	// otherwise Process.State has already flipped to Ready and
-	// InterruptViaControl returns ErrNoActiveTurn → no-op).
-	abortCh := runDeadlineWatchdog(sendCtx, sess)
-
-	// Direct Send without sendWithBroadcast — cron jobs notify via the
-	// IM deliverNotice path (resolveNotifyTarget + platform.Reply) and
-	// the cron_run_ended WS frame.
-	result, err := sess.Send(sendCtx, cleanText)
-	// Cancel sendCtx so the watchdog returns promptly on the success / non-
-	// deadline error path; on the deadline path it's already done. Block
-	// on abortCh so the InterruptViaControl call (if any) completes before
-	// we record the run state — otherwise a fast cron tick could overlap
-	// the next session.Reset with the in-flight interrupt write.
-	sendCancel()
-	abort := <-abortCh
+	// R215-ARCH-P2-5 (#581) partial: the Send + watchdog + abort-drain
+	// trio is a self-contained sub-machine that doesn't need to share
+	// stack frame with the surrounding executeOpt. Extracting it
+	// localises the watchdog ↔ Send ordering contract (drain abortCh
+	// AFTER cancelling sendCtx) so a future executeOpt split doesn't
+	// accidentally reorder the lines and let the next Reset race the
+	// in-flight interrupt write. See sendWithWatchdog godoc for the
+	// invariant.
+	result, abort, err := sendWithWatchdog(sendCtx, sendCancel, sess, cleanText)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			// Same rationale as the session-error branch above: suppress

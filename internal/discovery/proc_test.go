@@ -563,6 +563,34 @@ func BenchmarkProcStartTime_Self(b *testing.B) {
 	}
 }
 
+// TestProcPidPath_SingleAlloc locks in the R247-PERF-5 (#533) goal: the
+// path builder must produce exactly one allocation per call (the
+// returned string itself). The previous fmt.Sprintf-based implementation
+// allocated the format buffer in addition to the final string, doubling
+// the per-PID allocation count on the dashboard scan path. testing.AllocsPerRun
+// runs the closure 100 times and reports the average; we tolerate a small
+// floating-point window so a future runtime change that bookkeeps an extra
+// transient allocation does not become a CI flake, but anything ≥2.0
+// is a regression of the byte-builder optimisation.
+func TestProcPidPath_SingleAlloc(t *testing.T) {
+	if testing.Short() {
+		t.Skip("alloc invariant test skipped in -short mode")
+	}
+	allocs := testing.AllocsPerRun(100, func() {
+		s := procPidPath(12345, "stat")
+		if s == "" {
+			t.Fatal("procPidPath returned empty string")
+		}
+	})
+	// Single alloc = the returned string copy. Anything higher means the
+	// stack-buffer optimisation regressed (e.g. someone re-introduced
+	// fmt.Sprintf, or the leaf overflowed the 16-byte tail and forced
+	// append to heap-grow).
+	if allocs > 1 {
+		t.Fatalf("procPidPath allocs/op = %.2f, want ≤1 (R247-PERF-5 #533)", allocs)
+	}
+}
+
 func TestScan_ProcStartTimeInStat(t *testing.T) {
 	// Verify that /proc/self/stat field parsing works correctly.
 	// This is a Linux-only test that double-checks our field indexing.

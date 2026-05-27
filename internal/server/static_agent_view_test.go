@@ -1,6 +1,7 @@
 package server
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -147,5 +148,32 @@ func TestAgentView_NoInlineOnClickJSEscape(t *testing.T) {
 	if !strings.Contains(avStr, "dataset") {
 		t.Error("agent_view.js delegated click handler must read taskId from dataset, " +
 			"not parse it back out of the onclick attribute")
+	}
+
+	// R247-SEC-4 broadened ban: any onclick="..." attribute concatenated from
+	// a JS-string-literal context that consumes an escAttr(...) value is the
+	// shape that originally triggered the finding. The literal-string checks
+	// above only catch the exact switchTo case; this regex generalises so a
+	// future inline handler (e.g. onclick="foo('" + escAttr(x) + "')") is
+	// caught by the same test rather than re-discovered as a new finding.
+	//
+	// Pattern intent: `onclick="..."` opens a JS-string literal `'` and then
+	// concatenates `escAttr(` — the wrong sink. We tolerate the legitimate
+	// `data-task="' + escAttr(...) + '"` shape because that value is a plain
+	// HTML attribute, never re-parsed as JS.
+	bannedSink := regexp.MustCompile(`onclick\s*=\s*"[^"]*\+\s*escAttr\s*\(`)
+	if loc := bannedSink.FindIndex(av); loc != nil {
+		ctxStart := loc[0] - 40
+		if ctxStart < 0 {
+			ctxStart = 0
+		}
+		ctxEnd := loc[1] + 40
+		if ctxEnd > len(av) {
+			ctxEnd = len(av)
+		}
+		t.Errorf("agent_view.js contains banned onclick=\"...\"+escAttr(...) sink at byte %d "+
+			"(R247-SEC-4: HTML-attr escape is the wrong sink for a JS-string literal — "+
+			"use addEventListener + dataset.* instead)\ncontext: %q",
+			loc[0], string(av[ctxStart:ctxEnd]))
 	}
 }
