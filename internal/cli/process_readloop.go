@@ -678,6 +678,17 @@ func (p *Process) notifyLinker(ev Event, nowMS int64, isSystemInit bool) {
 	}
 	taskID := ev.TaskID
 	toolUseID := ev.ToolUseID
+	linker := p.linker
+	// R241-PERF-5 (#478): cache fast-path BEFORE the goroutine spawn so
+	// repeated task_started events for the same task_id (which can fire
+	// across reconnect/replay paths or claude's own progress envelopes)
+	// do not each pay a goroutine schedule. Resolve already runs the
+	// same byTaskID RLock check inside, but reaching it requires the
+	// goroutine to be scheduled and to allocate a closure capture for
+	// taskID/toolUseID/name/desc — Query short-circuits that.
+	if info, ok := linker.Query(taskID); ok && info.Resolved {
+		return
+	}
 	// task_started.description is "<name>: <prompt body>" for
 	// teammates; for sub-agents it's just the prompt. The
 	// linker's fast path works either way; trimming to the
@@ -689,7 +700,6 @@ func (p *Process) notifyLinker(ev Event, nowMS int64, isSystemInit bool) {
 	if idx := strings.IndexByte(name, ':'); idx > 0 {
 		name = strings.TrimSpace(name[:idx])
 	}
-	linker := p.linker
 	// R225-CR-10 / R230B-PERF-7: cap description before handing it to a
 	// goroutine closure. ev.Description is unbounded user/agent text that
 	// the Resolve goroutine pins until the resolveSem slot frees, so a

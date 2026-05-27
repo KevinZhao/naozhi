@@ -66,6 +66,15 @@ func (p *Process) InjectHistory(entries []EventEntry) {
 		}
 		seen[taskID] = struct{}{}
 		linker := p.linker
+		// R241-PERF-5 (#478): skip goroutine spawn if linker has already
+		// resolved this task_id. InjectHistory replay can repeatedly hit
+		// the same backfill path during dashboard reconnects; Query is
+		// an O(1) RLock+map-read so it pays the same cost as the redundant
+		// resolveByTaskIDFast cache check inside Resolve, without the
+		// goroutine schedule + closure allocation cost.
+		if info, ok := linker.Query(taskID); ok && info.Resolved {
+			return
+		}
 		// R225-CR-10: cap description (matches process_readloop hot path)
 		// so the Resolve goroutine doesn't pin multi-KB strings until the
 		// resolveSem slot frees.
