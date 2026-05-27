@@ -374,6 +374,39 @@ type DispatcherConfig struct {
 // can opt out via DispatcherConfig.AllowMissingSender.
 var ErrSendWireupMissing = errors.New("dispatch: Capabilities.Send is required (set DispatcherConfig.Capabilities or DispatcherConfig.SendFn; tests may set AllowMissingSender)")
 
+// resolveOrFabricateKeyResolver returns the live KeyResolver Dispatcher
+// must hold. Precedence (single track — drift here = bug, no inline copy
+// elsewhere is permitted; see #543 R215-CR-P2-3):
+//
+//  1. cfg.Resolver — explicit caller-supplied singleton.
+//  2. cfg.Router.Resolver() — the Router-attached singleton from
+//     session.RouterConfig.Resolver (R237-ARCH-12 / #604) so Dispatcher /
+//     Hub / upstream see the same agents-config snapshot.
+//  3. Fabricate a fresh resolver from cfg.Agents and a project data
+//     source derived from cfg.ProjectMgr (nil-safe — NewKeyResolver and
+//     project.NewDataSource both accept nil inputs).
+//
+// All three branches return a non-nil *KeyResolver, so call sites
+// downstream of NewDispatcher can dereference d.resolver without a guard.
+// Adding a fourth branch (or copying this fallback chain into a
+// caller) is the legacy-double-track failure mode this helper exists
+// to prevent.
+func resolveOrFabricateKeyResolver(cfg DispatcherConfig) *session.KeyResolver {
+	if cfg.Resolver != nil {
+		return cfg.Resolver
+	}
+	if cfg.Router != nil {
+		if r := cfg.Router.Resolver(); r != nil {
+			return r
+		}
+	}
+	var data session.PlannerDataSource
+	if cfg.ProjectMgr != nil {
+		data = project.NewDataSource(cfg.ProjectMgr)
+	}
+	return session.NewKeyResolver(cfg.Agents, data)
+}
+
 // NewDispatcher constructs a Dispatcher from cfg. Returns
 // ErrSendWireupMissing when neither cfg.Capabilities (with non-noop Send)
 // nor cfg.SendFn is set and AllowMissingSender is false. R250-ARCH-12
@@ -385,25 +418,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	if cfg.Router != nil {
 		router = cfg.Router
 	}
-	resolver := cfg.Resolver
-	if resolver == nil {
-		// Prefer the Router-attached singleton when the host wired one
-		// in via session.RouterConfig.Resolver — that's the agreed
-		// remediation for R237-ARCH-12 (#604) so all consumers
-		// (Dispatcher / Hub / upstream) read the same agents-config
-		// snapshot. Falls back to a fresh resolver only when the
-		// Router was constructed without one (legacy / headless tests).
-		if cfg.Router != nil {
-			resolver = cfg.Router.Resolver()
-		}
-	}
-	if resolver == nil {
-		var data session.PlannerDataSource
-		if cfg.ProjectMgr != nil {
-			data = project.NewDataSource(cfg.ProjectMgr)
-		}
-		resolver = session.NewKeyResolver(cfg.Agents, data)
-	}
+	resolver := resolveOrFabricateKeyResolver(cfg)
 	// Resolve Capabilities precedence:
 	//   1. cfg.Capabilities wins when set (preferred path);
 	//   2. otherwise, if any legacy *Fn closure is non-nil, wrap them in a
