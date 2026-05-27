@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -84,6 +85,34 @@ type runStore struct {
 	// We do not expose the slice itself — callers always receive a fresh
 	// copy so dashboard handlers can sort / filter without mutating cache.
 	recentCache sync.Map // jobID -> *recentCacheEntry
+
+	// writeFailedTotal counts CronRun WriteFileAtomic failures (disk full,
+	// permission denied, ENOSPC, etc.). R20260527122801-CR-18 (#1338): Append
+	// historically only slog.Warn'd on a write failure, so an operator whose
+	// disk filled mid-run had no actionable signal until they noticed
+	// runs/ stopped growing. We can't add a top-level metric because this
+	// package owns the runstore (cron-local concern) — expose a counter
+	// here that /health and tests can read, and bump severity to Error so
+	// log scrapers alert. The split between writeFailedDiskFullTotal and
+	// writeFailedOtherTotal lets operators distinguish "ENOSPC, free up
+	// disk" from "EACCES / IO error, investigate the storage backend".
+	writeFailedDiskFullTotal atomic.Int64
+	writeFailedOtherTotal    atomic.Int64
+}
+
+// WriteFailedTotals returns the cumulative count of CronRun WriteFileAtomic
+// failures since process start, split by failure class. Stable counter
+// semantics: monotonically non-decreasing; callers diff snapshots over
+// time to compute rates.  R20260527122801-CR-18 (#1338).
+//
+// diskFull counts errors classified by osutil.IsDiskFull (ENOSPC + EDQUOT
+// today); other counts every other write failure (EACCES, EIO, broken
+// symlink under runs/, etc.). Returns (0, 0) when s is nil or disabled.
+func (s *runStore) WriteFailedTotals() (diskFull, other int64) {
+	if s == nil {
+		return 0, 0
+	}
+	return s.writeFailedDiskFullTotal.Load(), s.writeFailedOtherTotal.Load()
 }
 
 // recentCacheEntry is the cached newest-first snapshot for one job.
@@ -534,7 +563,21 @@ func (s *runStore) Append(run *CronRun) {
 	}
 	path := filepath.Join(dir, run.RunID+".json")
 	if err := osutil.WriteFileAtomic(path, data, 0o600); err != nil {
-		slog.Warn("cron run: write failed", "path", path, "err", err, "disk_full", osutil.IsDiskFull(err))
+		// R20260527122801-CR-18 (#1338): bump a runstore-local counter so
+		// /health (and tests) can surface the failure rate as an actionable
+		// signal, and escalate slog severity from Warn → Error so log-based
+		// alerting fires. Cron Append cannot return error to the caller
+		// (RFC §4.2 — history is best-effort), so the counter + Error log
+		// is the only operator-visible signal.
+		diskFull := osutil.IsDiskFull(err)
+		if diskFull {
+			s.writeFailedDiskFullTotal.Add(1)
+		} else {
+			s.writeFailedOtherTotal.Add(1)
+		}
+		slog.Error("cron run: write failed; run record dropped",
+			"path", path, "err", err, "disk_full", diskFull,
+			"job_id", run.JobID, "run_id", run.RunID)
 		return
 	}
 	// Push to recentCache head while still under jobLock so concurrent
