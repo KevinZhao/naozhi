@@ -245,6 +245,21 @@ type subscriber struct {
 	closeOnce sync.Once
 }
 
+// eventLogClosedCh is a process-wide pre-closed `chan struct{}` returned by
+// Subscribe when the EventLog has already been torn down (subsClosed=true).
+// R247-PERF-14 (#553): late-arriving subscribers during dashboard reconnect
+// storms used to allocate a fresh subscriber struct + buffered channel
+// pair just to immediately close it; sharing one pre-closed channel skips
+// both allocations on every post-close Subscribe. Receiving from a closed
+// channel always returns the zero value with ok=false, so the caller's
+// `select case <-notify: ok=false` arm still fires identically — and
+// because the channel has no senders, it is permanently safe to share.
+var eventLogClosedCh = func() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}()
+
 // EventLog is a thread-safe, bounded event log backed by a ring buffer.
 type EventLog struct {
 	mu      sync.RWMutex
@@ -1493,13 +1508,32 @@ func (l *EventLog) SubscribeNew() EventSubscription {
 // subscribers map and register a channel that nothing will ever close, so
 // the downstream eventPushLoop would hang on <-notify until Hub shutdown.
 func (l *EventLog) Subscribe() (<-chan struct{}, func()) {
-	sub := &subscriber{ch: make(chan struct{}, 1)}
+	// R247-PERF-14 (#553): hot-check subsClosed BEFORE allocating the
+	// subscriber struct + buffered channel. On dashboard reconnect storms
+	// during shutdown a single dying EventLog can absorb hundreds of
+	// late-arriving Subscribe attempts (each WS handshake registers a
+	// session-tail subscriber); pre-sub-close the make(chan) + struct
+	// literal would compose two heap allocations per call, only to be
+	// immediately discarded after the closeOnce close + return-shared-
+	// closed-channel hand-off below. The atomic counter is also load-only
+	// so this short-circuit costs nothing on the steady-state happy path.
+	//
+	// Read l.subsClosed via a quick Lock/Unlock — atomic.Bool would suffice
+	// but adding a third synchronization primitive next to subMu / subCount
+	// is more failure-mode surface than warranted; the cold-path lock is
+	// already taken on every Subscribe today. The shared eventLogClosedCh
+	// singleton is a package-level pre-closed chan struct{} so all post-
+	// close callers receive the same already-closed channel value rather
+	// than a freshly-allocated-then-closed one. The closeOnce contract is
+	// preserved by the no-op cancel func — callers MUST NOT close the
+	// returned channel themselves (documented on Subscribe) and the shared
+	// channel cannot be Cancelled twice into a double-close panic.
 	l.subMu.Lock()
 	if l.subsClosed {
 		l.subMu.Unlock()
-		sub.closeOnce.Do(func() { close(sub.ch) })
-		return sub.ch, func() {}
+		return eventLogClosedCh, func() {}
 	}
+	sub := &subscriber{ch: make(chan struct{}, 1)}
 	if l.subscribers == nil {
 		// R230C-PERF-12 / R239-PERF-9: pre-size the slice. CloseSubscribers
 		// nils out the slice so each Subscribe after a teardown allocates
