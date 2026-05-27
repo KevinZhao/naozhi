@@ -817,6 +817,39 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// early-return path (rand failure today, future preconditions later).
 	metrics.CronRunInflight.Add(1)
 
+	// R20260527122801-CR-8 (#1322): post-CAS paused/deleted recheck. The
+	// callers (executeJobIDIfLive for TriggerNow and the registerJob
+	// AddFunc closure for scheduled ticks) check paused/deleted under
+	// s.mu.RLock and release the lock BEFORE invoking executeOpt. There is
+	// a narrow 1-2µs window between that release and the CAS above where a
+	// concurrent PauseJobByID / DeleteJobByID can land — the original
+	// jitter-window recheck (line ~902-915 below) only fires in the
+	// `!viaTriggerNow && s.jitterMax > 0` branch, leaving TriggerNow and
+	// the jitter==0 scheduled path unprotected. Recheck once here, after
+	// CAS but before any heavy work (snapshot / spawn / send), so a Pause
+	// that lands in the cross-lock window aborts the run cleanly. The
+	// post-CAS placement also subsumes the existing jitter-window recheck
+	// for the in-jitter case — Pause that lands DURING jitter is still
+	// caught by that block's recheck after the sleep returns. The defer
+	// above handles inflight CAS release + gauge decrement on this early
+	// return.
+	{
+		s.mu.RLock()
+		cur, stillRegistered := s.jobs[j.ID]
+		paused := stillRegistered && cur.Paused
+		s.mu.RUnlock()
+		if !stillRegistered {
+			slog.Debug("cron: job deleted between dispatch lookup and CAS, aborting run",
+				"job_id", j.ID, "trigger_now", viaTriggerNow)
+			return
+		}
+		if paused {
+			slog.Debug("cron: job paused between dispatch lookup and CAS, aborting run",
+				"job_id", j.ID, "trigger_now", viaTriggerNow)
+			return
+		}
+	}
+
 	// Populate the inflight metadata under the CAS-true window. RunID is
 	// generated once per run; StartedAt is captured before jitter so the
 	// "running 12s" badge in the UI counts true wall-clock from CAS.
