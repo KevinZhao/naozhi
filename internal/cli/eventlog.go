@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -768,6 +769,20 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 		}
 		if label == "" {
 			label = "agent"
+		}
+		// task_start matching below requires a non-empty ToolUseID
+		// (`l.turnAgents[i].ToolUseID != ""` guard at line ~793). In
+		// production Claude CLI always emits ToolUseID with the agent
+		// tool_use; an empty value here means the entry will live in
+		// turnAgents/bgAgents but never link to its task_start, leaving
+		// Status stuck at "spawned" indefinitely. Surface this as a
+		// warn so the upstream emitter can be diagnosed (R20260527-COR-14).
+		if e.ToolUseID == "" {
+			slog.Warn("cli/eventlog: agent entry missing ToolUseID; task_start linkage will be dropped",
+				"name", label,
+				"background", e.Background,
+				"task_type", e.TaskType,
+			)
 		}
 		info := SubagentInfo{
 			Name:       label,
