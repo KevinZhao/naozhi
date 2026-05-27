@@ -1678,6 +1678,17 @@ func (l *EventLog) Count() int {
 // the reverse touches the locally-owned slice only, shrinking the
 // reader-blocks-writer footprint from "RLock for the whole function"
 // to "RLock for the scan only".
+//
+// R222-PERF-11 (#708) cross-reference: this method intentionally returns
+// []EventEntry, not pre-marshaled JSON bytes. The original ticket proposed
+// caching marshaled output here so multi-tab dashboards on the same session
+// would not each pay a fresh json.Marshal per notify wave. That cache lives
+// at the WS hub layer instead — see internal/server/wshub_eventpush_cache.go
+// (R214-PERF-4) — because EventLog is wire-format-agnostic (other consumers
+// are platform IM senders, history persisters, the cron scheduler, etc.,
+// each with their own encoding). Future contributors: do NOT introduce a
+// JSON cache at this layer; extend the hub-side coalescer if a new fan-out
+// site needs the same coalescing.
 func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	return l.EntriesSinceAppend(nil, afterMS)
 }
