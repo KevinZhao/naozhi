@@ -360,13 +360,17 @@ type Scheduler struct {
 	stopCancel context.CancelFunc
 	// telemetry receives the cron-run lifecycle events. Phase D (RFC §3.5)
 	// replaced the legacy onExecute / onRunStarted / onRunEnded
-	// atomic.Pointer trio with this single field. Set at construction
-	// from cfg.Telemetry; SetTelemetry rewires it for late injection
-	// (cmd/naozhi builds Scheduler before Hub exists). Plain field
-	// reads / writes are safe because the only writers are constructor
-	// + SetTelemetry, both during single-threaded boot before the
-	// scheduler's tick goroutines can fire.
-	telemetry runtelemetry.Broadcaster
+	// atomic.Pointer trio with a single broadcaster; R20260527-GO-1
+	// reverted the storage to atomic.Pointer because SetTelemetry can
+	// land after tick goroutines have already started (cmd/naozhi
+	// orchestration is not strictly boot-only) — emitRunStarted /
+	// emitRunEnded read this field on the cron-dispatch path while
+	// SetTelemetry could be writing it from the wiring goroutine.
+	//
+	// Broadcaster is an interface, so we store *Broadcaster (atomic
+	// pointer to the interface value) and Load + deref before use.
+	// nil pointer == no broadcaster (tests / no-WS setups).
+	telemetry atomic.Pointer[runtelemetry.Broadcaster]
 
 	// triggerWG tracks goroutines spawned by TriggerNow so Stop() can wait
 	// for them to finish. The scheduled entries are already drained by
@@ -790,7 +794,6 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		chatJobCount:        make(map[chatJobKey]int),
 		jobsByChat:          make(map[chatJobKey][]*Job),
 		router:              cfg.Router,
-		telemetry:           cfg.Telemetry,
 		platforms:           cfg.Platforms,
 		agents:              cfg.Agents,
 		agentCommands:       cfg.AgentCommands,
@@ -818,6 +821,14 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	// hot path in marshalJobsLocked finds defaultMarshalJobs instead of
 	// nil. Tests swap a failing stub via withFailingMarshal.
 	s.marshalJobs.Store(&defaultMarshalJobs)
+	// R20260527-GO-1: install the broadcaster via atomic.Pointer so
+	// later SetTelemetry calls are race-free vs the cron-dispatch read
+	// path in emitRunStarted / emitRunEnded. nil cfg.Telemetry leaves
+	// the pointer as zero-value (no broadcast).
+	if cfg.Telemetry != nil {
+		b := cfg.Telemetry
+		s.telemetry.Store(&b)
+	}
 	// R238-SEC-12 (#834): close the startup permission window. The
 	// storeDirOnce gate in saveMarshaledSeq only fires on the *first*
 	// save, so between process start and that first mutation the parent

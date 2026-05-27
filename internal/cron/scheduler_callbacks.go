@@ -57,13 +57,35 @@ type RunEndedEvent struct {
 // SetTelemetry installs (or replaces) the broadcaster late, after
 // construction. Used by cmd/naozhi which builds Scheduler before the
 // Hub exists, then injects the broadcaster once dashboard.go finishes
-// wiring. Calling SetTelemetry is the only mutation path on s.telemetry
-// after NewScheduler; production uses it exactly once during boot, so
-// the plain assignment is uncontended.
+// wiring.
+//
+// R20260527-GO-1: storage is atomic.Pointer[runtelemetry.Broadcaster].
+// Earlier revisions used a plain field on the assumption that
+// SetTelemetry only fires during single-threaded boot, but cmd/naozhi
+// orchestration is not strictly boot-only — wiring goroutines can call
+// SetTelemetry while cron tick goroutines are already invoking
+// emitRunStarted / emitRunEnded, racing the read path. atomic.Pointer
+// keeps the read path lock-free and free of data races.
 //
 // Passing nil clears the broadcaster (returns to no-broadcast mode).
 func (s *Scheduler) SetTelemetry(b runtelemetry.Broadcaster) {
-	s.telemetry = b
+	if b == nil {
+		s.telemetry.Store(nil)
+		return
+	}
+	bb := b
+	s.telemetry.Store(&bb)
+}
+
+// loadTelemetry returns the current broadcaster or nil. Centralised so
+// the deref dance (atomic.Pointer wraps a *Broadcaster, dereferencing
+// can panic on nil) lives in one place.
+func (s *Scheduler) loadTelemetry() runtelemetry.Broadcaster {
+	ptr := s.telemetry.Load()
+	if ptr == nil {
+		return nil
+	}
+	return *ptr
 }
 
 // emitRunStarted translates a cron-local RunStartedEvent to the shared
@@ -76,10 +98,11 @@ func (s *Scheduler) SetTelemetry(b runtelemetry.Broadcaster) {
 // new emit path lands.
 func (s *Scheduler) emitRunStarted(ev RunStartedEvent) {
 	metrics.CronRunStartedTotal.Add(1)
-	if s.telemetry == nil {
+	b := s.loadTelemetry()
+	if b == nil {
 		return
 	}
-	s.telemetry.BroadcastRunStarted(runtelemetry.RunStartedEvent{
+	b.BroadcastRunStarted(runtelemetry.RunStartedEvent{
 		Subsystem: runtelemetry.SubsystemCron,
 		OwnerID:   ev.JobID,
 		RunID:     ev.RunID,
@@ -91,10 +114,11 @@ func (s *Scheduler) emitRunStarted(ev RunStartedEvent) {
 }
 
 func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
-	if s.telemetry == nil {
+	b := s.loadTelemetry()
+	if b == nil {
 		return
 	}
-	s.telemetry.BroadcastRunEnded(runtelemetry.RunEndedEvent{
+	b.BroadcastRunEnded(runtelemetry.RunEndedEvent{
 		Subsystem:  runtelemetry.SubsystemCron,
 		OwnerID:    ev.JobID,
 		RunID:      ev.RunID,
