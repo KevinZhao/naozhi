@@ -58,7 +58,7 @@ var listNextByIDPool = sync.Pool{
 
 // AddJob validates, registers, and persists a new cron job.
 func (s *Scheduler) AddJob(j *Job) error {
-	if err := validateSchedule(j.Schedule); err != nil {
+	if err := validateSchedule(j.Schedule, s.previewLocation()); err != nil {
 		return fmt.Errorf("invalid schedule %q: %w", j.Schedule, err)
 	}
 	// Title 长度校验在 scheduler 层兜底，避免绕过 dashboard handler（例如
@@ -682,7 +682,7 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		if *upd.Schedule == "" {
 			return nil, fmt.Errorf("schedule must not be empty")
 		}
-		if err := validateSchedule(*upd.Schedule); err != nil {
+		if err := validateSchedule(*upd.Schedule, s.previewLocation()); err != nil {
 			return nil, fmt.Errorf("invalid schedule %q: %w", *upd.Schedule, err)
 		}
 	}
