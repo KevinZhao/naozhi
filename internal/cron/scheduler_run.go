@@ -653,10 +653,15 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 		go func() {
 			done <- sess.InterruptViaControl()
 		}()
+		// R20260527122801-GO-001: NewTimer + defer Stop mirrors
+		// scheduler.go:1337 — time.After leaks a *Timer slot until
+		// expiry on the success path.
+		t := time.NewTimer(watchdogInterruptTimeout())
+		defer t.Stop()
 		select {
 		case outcome := <-done:
 			ch <- abortResult{outcome: outcome, fired: true}
-		case <-time.After(watchdogInterruptTimeout()):
+		case <-t.C:
 			ch <- abortResult{outcome: InterruptError, fired: true}
 		}
 	}()
