@@ -1158,169 +1158,12 @@ func NewRouter(cfg RouterConfig) *Router {
 
 	// Async-load history for all suspended sessions so the dashboard
 	// shows conversation history without waiting for the next message.
-	//
-	// Tier 1: naozhilog (naozhi-native per-session log). When the
-	// event log persister is configured (r.eventLogDir != "") we
-	// LoadLatest from the local .log file. This tier preserves
-	// Images / ImagePaths / AskQuestion / agent-team linkage fields
-	// that Claude JSONL cannot provide.
-	//
-	// Tier 2: Claude CLI JSONL. Used when the local tier returns
-	// nothing (fresh deploy, user cleared events/). The walk is the
-	// same chain walker the reconnect path uses.
-	//
-	// Both tiers complete BEFORE the corresponding process's
-	// PersistSink is installed (via spawnSession / ReconnectShims),
-	// so replayed entries are tagged replayPhase=true and dropped by
-	// the Persister rather than re-persisted.
-	//
-	// historyLoadSem is shared across tier 1 and tier 2 so the cap
-	// expresses "total concurrent history-load disk I/O", not "10 per
-	// tier". Without this share the worst case was ~2× cap on a deploy
-	// that triggered both tiers (e.g. event-log persister enabled but
-	// some sessions only have Claude JSONL). R215-GO-P2-1.
-	historyLoadSem := make(chan struct{}, historyLoadConcurrency)
-
-	if r.eventLogPersister != nil {
-		sem := historyLoadSem
-		for _, s := range r.sessions {
-			r.historyWg.Add(1)
-			go func() {
-				defer r.historyWg.Done()
-				select {
-				case sem <- struct{}{}:
-				case <-r.historyCtx.Done():
-					return
-				}
-				defer func() { <-sem }()
-				src := naozhilog.New(r.eventLogDir, s.key)
-				entries, err := src.LoadLatest(r.historyCtx, maxPersistedHistory)
-				if err != nil || len(entries) == 0 {
-					return
-				}
-				// hasInjectedHistory guards against a concurrent
-				// ReconnectShims having already filled the session —
-				// we'd double-inject otherwise.
-				if s.hasInjectedHistory() {
-					return
-				}
-				s.InjectHistory(entries)
-				slog.Info("loaded session history from naozhi event log",
-					"key", s.key, "entries", len(entries))
-				r.notifyChange()
-			}()
-		}
-	}
-
-	// Tier 2 (Claude CLI JSONL) — runs unconditionally; the
-	// hasInjectedHistory check inside each goroutine skips work when
-	// tier 1 already populated the session.
-	//
-	// Two sub-paths (unchanged from pre-eventlog behaviour):
-	//   1. Non-shim-managed sessions (default): load immediately.
-	//   2. Shim-managed sessions (shimKeys[key]==true): defer for
-	//      shimReconnectGraceDelay to let ReconnectShims inject its own
-	//      replay + JSONL history first; then backfill only if the session
-	//      is still empty. This guards against R53-ARCH-001 — a short-lived
-	//      shim that appears in shimManagedKeys() at startup but has
-	//      exited by the time ReconnectShims runs its second Discover,
-	//      previously leaving the session with no history (skipped by
-	//      path #1, missed by ReconnectShims) until the user sent a
-	//      message. The deferred backfill checks hasInjectedHistory()
-	//      so successful ReconnectShims runs do not get duplicated.
-	if r.claudeDir != "" {
-		shimKeys := r.shimManagedKeys()
-		// Shared with tier 1 above — see historyLoadSem rationale at the
-		// top of this block (R215-GO-P2-1: cap = total disk I/O, not per
-		// tier).
-		sem := historyLoadSem
-		for _, s := range r.sessions {
-			if s.getSessionID() == "" {
-				continue
-			}
-			deferred := shimKeys[s.key]
-			r.historyWg.Add(1)
-			go func() {
-				defer r.historyWg.Done()
-				if deferred {
-					// Wait for ReconnectShims to complete its first pass.
-					// historyCtx cancel (Shutdown) aborts the wait cleanly.
-					// R175-P3: use NewTimer + Stop instead of time.After —
-					// on fast shutdown (within shimReconnectGraceDelay) the
-					// time.After variant leaks a runtime timer per goroutine
-					// for the full grace window, and at startup we can have
-					// up to historyLoadConcurrency * #deferred-sessions
-					// goroutines parked here.
-					graceTimer := time.NewTimer(shimReconnectGraceDelay)
-					select {
-					case <-graceTimer.C:
-						// Fired — no Stop needed, timer channel already drained.
-					case <-r.historyCtx.Done():
-						if !graceTimer.Stop() {
-							<-graceTimer.C
-						}
-						return
-					}
-					// If ReconnectShims already populated history (happy
-					// path), skip the JSONL load to avoid duplicate entries.
-					if s.hasInjectedHistory() {
-						return
-					}
-					// Otherwise fall through: the shim disappeared between
-					// shimManagedKeys() and ReconnectShims' Discover, so we
-					// must backfill directly or the dashboard shows empty
-					// history until the next message.
-					// R172-ARCH-D10: counter sits AFTER the hasInjectedHistory
-					// short-circuit, so only the fallback branch increments it.
-					// A non-zero value flags the short-lived-shim race from
-					// R53-ARCH-001 — ReconnectShims' happy path must not move
-					// this number, or the signal inverts.
-					metrics.ShimReconnectGraceBackfillTotal.Add(1)
-					slog.Info("shim-managed session missing history after reconnect grace, falling back to JSONL load",
-						"key", s.key)
-				}
-				select {
-				case sem <- struct{}{}:
-				case <-r.historyCtx.Done():
-					return
-				}
-				defer func() { <-sem }()
-
-				// Skip when tier 1 (naozhilog) already filled the
-				// session. Without this, a deploy with BOTH event-log
-				// persistence and a populated Claude JSONL would
-				// double-inject the first ~500 entries.
-				if s.hasInjectedHistory() {
-					return
-				}
-
-				// Build ordered list of all session IDs: prev chain + current.
-				// LoadHistoryChainTailCtx walks from newest→oldest and stops
-				// as soon as maxPersistedHistory entries are collected, so a
-				// 32-link chain typically opens only 1-2 JSONL files.
-				ids := make([]string, 0, len(s.prevSessionIDs)+1)
-				ids = append(ids, s.prevSessionIDs...)
-				ids = append(ids, s.getSessionID())
-
-				allEntries := discovery.LoadHistoryChainTailCtx(
-					r.historyCtx, r.claudeDir, ids, s.Workspace(), maxPersistedHistory,
-				)
-				if len(allEntries) == 0 {
-					return
-				}
-				// Final check for the deferred path: ReconnectShims may have
-				// raced us between the grace timer and LoadHistory returning.
-				// InjectHistory appends (not replaces), so a double-inject
-				// shows duplicates in the sidebar.
-				if deferred && s.hasInjectedHistory() {
-					return
-				}
-				s.InjectHistory(allEntries)
-				slog.Info("loaded session history on startup", "key", s.key, "entries", len(allEntries), "chain", len(ids), "deferred", deferred)
-				r.notifyChange()
-			}()
-		}
-	}
+	// Extracted into startBackgroundHistoryLoaders for R217-ARCH-7 (#627)
+	// — the inline tier 1 / tier 2 blocks were ~165 lines and dominated
+	// the constructor's surface area; see the helper's godoc for the full
+	// tier ordering, shared-semaphore (R215-GO-P2-1), and
+	// shim-grace-window (R53-ARCH-001) contracts.
+	r.startBackgroundHistoryLoaders()
 
 	// R245-ARCH-46 (#906): the orphan sweep + attachment tracker are
 	// genuine background-lifecycle side effects (goroutine spawn / worker
@@ -1356,6 +1199,165 @@ func NewRouter(cfg RouterConfig) *Router {
 func (r *Router) startBackgroundLifecycle() {
 	r.runOrphanSweep()
 	r.startAttachmentTracker()
+}
+
+// startBackgroundHistoryLoaders launches the tier 1 / tier 2 history-load
+// goroutines for every restored session so the dashboard shows
+// conversation history without waiting for the next user turn.
+// Extracted from NewRouter for R217-ARCH-7 (#627) — keeps the constructor
+// readable and gives the tier ordering / shared-semaphore contract a
+// single named home.
+//
+// Tier 1 (naozhilog): when r.eventLogPersister is configured, LoadLatest
+// from the per-session naozhi-native log. Preserves Images / ImagePaths /
+// AskQuestion / agent-team linkage that Claude JSONL cannot represent.
+//
+// Tier 2 (Claude CLI JSONL): runs unconditionally when r.claudeDir is
+// set; the hasInjectedHistory check inside each goroutine skips work
+// when tier 1 already populated the session. Two sub-paths:
+//
+//  1. Non-shim-managed sessions: load immediately.
+//  2. Shim-managed sessions (shimKeys[key]==true): defer for
+//     shimReconnectGraceDelay so ReconnectShims can inject its own
+//     replay + JSONL history first; then backfill only when the
+//     session is still empty. Guards against R53-ARCH-001 — a
+//     short-lived shim that appears in shimManagedKeys() at startup
+//     but exits before ReconnectShims' second Discover, previously
+//     leaving the session with no history (skipped by path #1, missed
+//     by ReconnectShims) until the user sent a message.
+//
+// historyLoadSem is shared across both tiers so the cap expresses
+// "total concurrent history-load disk I/O", not "10 per tier"
+// (R215-GO-P2-1). Without this share the worst case was ~2× cap on
+// a deploy that triggered both tiers (event-log persister enabled but
+// some sessions only have Claude JSONL).
+//
+// Both tiers complete BEFORE the corresponding process's PersistSink is
+// installed (via spawnSession / ReconnectShims), so replayed entries
+// are tagged replayPhase=true and dropped by the Persister rather than
+// re-persisted.
+//
+// LOCK: must be invoked from NewRouter under construction (no
+// concurrent r.sessions writers); the helper ranges over r.sessions
+// without a lock because the publish-after-construct contract
+// guarantees no other goroutine can mutate the map at this point.
+func (r *Router) startBackgroundHistoryLoaders() {
+	historyLoadSem := make(chan struct{}, historyLoadConcurrency)
+
+	// Tier 1: naozhilog (in-process per-session log).
+	if r.eventLogPersister != nil {
+		sem := historyLoadSem
+		for _, s := range r.sessions {
+			r.historyWg.Add(1)
+			go func() {
+				defer r.historyWg.Done()
+				select {
+				case sem <- struct{}{}:
+				case <-r.historyCtx.Done():
+					return
+				}
+				defer func() { <-sem }()
+				src := naozhilog.New(r.eventLogDir, s.key)
+				entries, err := src.LoadLatest(r.historyCtx, maxPersistedHistory)
+				if err != nil || len(entries) == 0 {
+					return
+				}
+				// hasInjectedHistory guards against a concurrent
+				// ReconnectShims having already filled the session —
+				// double-inject otherwise.
+				if s.hasInjectedHistory() {
+					return
+				}
+				s.InjectHistory(entries)
+				slog.Info("loaded session history from naozhi event log",
+					"key", s.key, "entries", len(entries))
+				r.notifyChange()
+			}()
+		}
+	}
+
+	// Tier 2: Claude CLI JSONL.
+	if r.claudeDir == "" {
+		return
+	}
+	shimKeys := r.shimManagedKeys()
+	sem := historyLoadSem
+	for _, s := range r.sessions {
+		if s.getSessionID() == "" {
+			continue
+		}
+		deferred := shimKeys[s.key]
+		r.historyWg.Add(1)
+		go func() {
+			defer r.historyWg.Done()
+			if deferred {
+				// Wait for ReconnectShims to complete its first pass.
+				// historyCtx cancel (Shutdown) aborts the wait cleanly.
+				// R175-P3: NewTimer + Stop instead of time.After — on
+				// fast shutdown the time.After variant leaks a runtime
+				// timer per goroutine for the full grace window.
+				graceTimer := time.NewTimer(shimReconnectGraceDelay)
+				select {
+				case <-graceTimer.C:
+					// Fired — no Stop needed, channel already drained.
+				case <-r.historyCtx.Done():
+					if !graceTimer.Stop() {
+						<-graceTimer.C
+					}
+					return
+				}
+				if s.hasInjectedHistory() {
+					return
+				}
+				// R172-ARCH-D10: counter sits AFTER the
+				// hasInjectedHistory short-circuit so only the fallback
+				// branch increments. A non-zero value flags the
+				// short-lived-shim race from R53-ARCH-001.
+				metrics.ShimReconnectGraceBackfillTotal.Add(1)
+				slog.Info("shim-managed session missing history after reconnect grace, falling back to JSONL load",
+					"key", s.key)
+			}
+			select {
+			case sem <- struct{}{}:
+			case <-r.historyCtx.Done():
+				return
+			}
+			defer func() { <-sem }()
+
+			// Skip when tier 1 (naozhilog) already filled the session
+			// — without this, a deploy with both event-log persistence
+			// and a populated Claude JSONL would double-inject the
+			// first ~500 entries.
+			if s.hasInjectedHistory() {
+				return
+			}
+
+			// Build ordered list of all session IDs: prev chain + current.
+			// LoadHistoryChainTailCtx walks newest→oldest and stops as
+			// soon as maxPersistedHistory entries are collected, so a
+			// 32-link chain typically opens only 1-2 JSONL files.
+			ids := make([]string, 0, len(s.prevSessionIDs)+1)
+			ids = append(ids, s.prevSessionIDs...)
+			ids = append(ids, s.getSessionID())
+
+			allEntries := discovery.LoadHistoryChainTailCtx(
+				r.historyCtx, r.claudeDir, ids, s.Workspace(), maxPersistedHistory,
+			)
+			if len(allEntries) == 0 {
+				return
+			}
+			// Final check for the deferred path: ReconnectShims may
+			// have raced us between the grace timer and LoadHistory
+			// returning. InjectHistory appends, so a double-inject
+			// shows duplicates in the sidebar.
+			if deferred && s.hasInjectedHistory() {
+				return
+			}
+			s.InjectHistory(allEntries)
+			slog.Info("loaded session history on startup", "key", s.key, "entries", len(allEntries), "chain", len(ids), "deferred", deferred)
+			r.notifyChange()
+		}()
+	}
 }
 
 // Start exposes the background-lifecycle hook so callers can defer the

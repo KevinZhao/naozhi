@@ -1145,6 +1145,16 @@ func allowEnvExpansion(key string) bool {
 // so the bad config surfaces loudly (literal "${ANTHROPIC_API_KEY}"
 // inside e.g. dashboard_token will fail containsEnvPlaceholder validation
 // at startup) rather than silently leaking the key.
+//
+// R237-SEC-4 / #637: an env value containing a newline (or other control
+// byte) was previously substituted raw into the YAML payload, so an
+// attacker who controlled an env var could inject arbitrary YAML keys —
+// e.g. `FOO=$'value\ndashboard_token: pwned'` would inject a
+// `dashboard_token` field even into a single-line scalar. Refuse to
+// expand any value that contains a control byte; the placeholder is left
+// intact so the bad config surfaces loudly via downstream validation
+// (containsEnvPlaceholder) rather than silently turning into a forged
+// config.
 func expandEnvVars(data []byte) []byte {
 	if !bytes.Contains(data, []byte("${")) {
 		return data
@@ -1155,10 +1165,33 @@ func expandEnvVars(data []byte) []byte {
 			return match
 		}
 		if val, ok := os.LookupEnv(key); ok {
+			if containsYAMLBreakingByte(val) {
+				return match
+			}
 			return []byte(val)
 		}
 		return match
 	})
+}
+
+// containsYAMLBreakingByte reports whether s contains any byte that, when
+// substituted raw into a YAML payload, could break the original token's
+// scope and inject a sibling/parent-level key. Newlines (\n, \r) are the
+// primary vector; other ASCII control bytes are refused defensively (they
+// have no legitimate place in a config scalar). Tab is treated as
+// breaking too — YAML 1.2 forbids tabs inside indentation, so a tab inside
+// an expanded value can confuse a downstream parser. R237-SEC-4 / #637.
+func containsYAMLBreakingByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b == '\n' || b == '\r' || b == '\t' {
+			return true
+		}
+		if b < 0x20 || b == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 func containsEnvPlaceholder(s string) bool {

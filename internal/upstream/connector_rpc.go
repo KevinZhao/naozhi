@@ -13,11 +13,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
-	"path/filepath"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"syscall"
 
@@ -149,17 +146,11 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			if c.defaultWorkspace == "" {
 				return nil, fmt.Errorf("workspace overrides disabled: no allowed root configured on this node")
 			}
-			// Sanitize workspace path to prevent directory traversal via symlinks.
-			ws, err := filepath.EvalSymlinks(filepath.Clean(p.Workspace))
+			// Sanitize workspace path via shared helper — EvalSymlinks +
+			// Clean + IsAbs + allowed-root prefix check. R237-CR-6 (#709).
+			ws, err := c.sanitizeWorkspacePath(p.Workspace, "workspace", false)
 			if err != nil {
-				return nil, fmt.Errorf("workspace path invalid: %w", err)
-			}
-			if !filepath.IsAbs(ws) {
-				return nil, fmt.Errorf("workspace must be absolute path")
-			}
-			if ws != c.defaultWorkspace &&
-				!strings.HasPrefix(ws, c.defaultWorkspace+string(filepath.Separator)) {
-				return nil, fmt.Errorf("workspace %q outside allowed root %q", ws, c.defaultWorkspace)
+				return nil, err
 			}
 			opts.Workspace = ws
 		}
@@ -262,16 +253,12 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			if c.defaultWorkspace == "" {
 				return nil, fmt.Errorf("takeover cwd overrides disabled: no allowed root configured on this node")
 			}
-			cleanCWD, err := filepath.EvalSymlinks(filepath.Clean(cwd))
+			// R237-CR-6 (#709): shared helper. Takeover does NOT tolerate
+			// ENOENT — the shim is still alive in the directory, so the
+			// path must resolve.
+			cleanCWD, err := c.sanitizeWorkspacePath(cwd, "takeover cwd", false)
 			if err != nil {
-				return nil, fmt.Errorf("takeover cwd path invalid: %w", err)
-			}
-			if !filepath.IsAbs(cleanCWD) {
-				return nil, fmt.Errorf("takeover cwd must be absolute path")
-			}
-			if cleanCWD != c.defaultWorkspace &&
-				!strings.HasPrefix(cleanCWD, c.defaultWorkspace+string(filepath.Separator)) {
-				return nil, fmt.Errorf("takeover cwd %q outside allowed root %q", cleanCWD, c.defaultWorkspace)
+				return nil, err
 			}
 			cwd = cleanCWD
 		}
@@ -345,25 +332,15 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 				// Unlike takeover (which expects the CWD to exist because
 				// the shim is still running inside it), close_discovered
 				// frequently runs AFTER the Claude CLI has exited and the
-				// working directory may already be gone. Treat ENOENT as
-				// "not a symlink attack, path just vanished" — fall back to
-				// the cleaned syntactic path and still enforce the allowed-
-				// root prefix check so a relocated-but-existed attacker
+				// working directory may already be gone. tolerateMissing=true
+				// downgrades fs.ErrNotExist to "fall back to the cleaned
+				// syntactic path", and the helper still enforces IsAbs +
+				// allowed-root prefix so a relocated-but-existed attacker
 				// payload like "/etc/passwd" cannot slip through.
-				cleaned := filepath.Clean(p.CWD)
-				cleanCWD, err := filepath.EvalSymlinks(cleaned)
+				// R237-CR-6 (#709).
+				cleanCWD, err := c.sanitizeWorkspacePath(p.CWD, "close_discovered cwd", true)
 				if err != nil {
-					if !errors.Is(err, fs.ErrNotExist) {
-						return nil, fmt.Errorf("close_discovered cwd path invalid: %w", err)
-					}
-					cleanCWD = cleaned
-				}
-				if !filepath.IsAbs(cleanCWD) {
-					return nil, fmt.Errorf("close_discovered cwd must be absolute path")
-				}
-				if cleanCWD != c.defaultWorkspace &&
-					!strings.HasPrefix(cleanCWD, c.defaultWorkspace+string(filepath.Separator)) {
-					return nil, fmt.Errorf("close_discovered cwd %q outside allowed root %q", cleanCWD, c.defaultWorkspace)
+					return nil, err
 				}
 				p.CWD = cleanCWD
 			}
