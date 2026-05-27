@@ -9,6 +9,7 @@ package cron
 //     vanishes does not leak a stale "ok=false" forever once it returns.
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -128,6 +129,46 @@ func TestWorkDirResolveUnderRootCached_NegativeBypassesCache(t *testing.T) {
 	}
 	if _, ok := s.workDirResolveUnderRootCached(missing); !ok {
 		t.Fatalf("after restore: ok=false, want ok=true (negative result must not be cached)")
+	}
+}
+
+// TestWorkDirResolveCache_CapEnforced verifies that the entry cap
+// (R20260527-SEC-4 / #1273) bounds memory growth: once the live count
+// reaches workDirResolveCacheMaxEntries the next store-without-room
+// either evicts an expired entry or drops the new write entirely. A
+// hostile or buggy job-creation path that varies workDir per call no
+// longer grows the map indefinitely.
+func TestWorkDirResolveCache_CapEnforced(t *testing.T) {
+	t.Parallel()
+	c := &workDirResolveCache{}
+	now := time.Now()
+	// Fill to cap with warm (non-expired) entries. fmt.Sprintf yields
+	// guaranteed-unique keys so the count grows by exactly cap.
+	for i := 0; i < workDirResolveCacheMaxEntries; i++ {
+		c.store(fmt.Sprintf("key-%d", i), "/r", now)
+	}
+	beforeCount := c.count.Load()
+	if beforeCount > int64(workDirResolveCacheMaxEntries) {
+		t.Fatalf("count=%d exceeds cap=%d before over-cap store",
+			beforeCount, workDirResolveCacheMaxEntries)
+	}
+	// Over-cap store with all-warm entries: must NOT grow the map.
+	c.store("overflow-key", "/r", now)
+	afterCount := c.count.Load()
+	if afterCount > int64(workDirResolveCacheMaxEntries) {
+		t.Fatalf("count=%d exceeds cap=%d after over-cap store (warm entries case)",
+			afterCount, workDirResolveCacheMaxEntries)
+	}
+	// Sweep frees room: advance now past TTL so all entries are expired,
+	// then a fresh store must succeed and the count must not exceed cap.
+	future := now.Add(workDirResolveCacheTTL + time.Second)
+	c.store("after-expiry", "/r", future)
+	if got, ok := c.lookup("after-expiry", future); !ok || got != "/r" {
+		t.Fatalf("after-expiry: lookup got=%q ok=%v want=/r ok=true", got, ok)
+	}
+	if c.count.Load() > int64(workDirResolveCacheMaxEntries) {
+		t.Fatalf("count=%d exceeds cap=%d after sweep+store", c.count.Load(),
+			workDirResolveCacheMaxEntries)
 	}
 }
 
