@@ -710,6 +710,16 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 	// a defensive guard against a future warmCache change rather than a
 	// real disk-error fallback path.
 	s.warmCache(jobID)
+	// R247-GO-6 (#483): re-Load() after warmCache so a concurrent
+	// cacheInvalidate (DeleteJob path) that races between our initial
+	// LoadOrStore and warmCache's own LoadOrStore cannot leave us
+	// reading the stale `entry` reference whose `warm=false` will never
+	// be flipped — warmCache populated a DIFFERENT entry under the same
+	// jobID. Without this re-Load the result was a silent permanent
+	// (nil, false) miss until the next Append re-seeded the cache.
+	if v2, ok := s.recentCache.Load(jobID); ok {
+		entry = v2.(*recentCacheEntry)
+	}
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if !entry.warm {
