@@ -478,15 +478,26 @@ func (p *Process) DeathReason() string {
 // — it's wired internally.
 func (p *Process) lifecycleContext() context.Context {
 	p.lifecycleCtxOnce.Do(func() {
+		// R20260527-GO-13 (#1289): when both lifetime signals are nil
+		// (legacy test fixture path), do not allocate a cancelCtx that
+		// will never be canceled. context.WithCancel registers the
+		// cancelCtx with the parent's cancellation tree (Background's
+		// is empty, but the cancelCtx itself stays heap-resident with
+		// no scheduled cancel) — `go vet` lostcancel flags that, and
+		// each leaked cancelCtx pins ~120B + the embedded Mutex. Plain
+		// context.Background is the documented "never-canceled"
+		// behaviour the test path needs and costs nothing.
+		if p.done == nil && p.killCh == nil {
+			p.lifecycleCtxValue = context.Background()
+			p.lifecycleCtxCancel = func() {}
+			return
+		}
 		ctx, cancel := context.WithCancel(context.Background())
 		p.lifecycleCtxValue = ctx
 		p.lifecycleCtxCancel = cancel
-		// Watcher: cancel when either lifetime signal closes. Both channels
-		// can be nil in legacy tests; nil-channel receives block forever in
-		// a select, so we degrade gracefully rather than panic.
-		if p.done == nil && p.killCh == nil {
-			return
-		}
+		// Watcher: cancel when either lifetime signal closes. nil-channel
+		// receives block forever in a select, so a partially-wired Process
+		// (only one of done/killCh set) still cancels off the live signal.
 		go func() {
 			select {
 			case <-p.done:
