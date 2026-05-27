@@ -55,8 +55,9 @@ func TestHandleSubscribe_NoFullClientScan(t *testing.T) {
 
 	// Forbidden patterns: any iteration over h.clients would re-introduce
 	// the O(N_clients) lock-time path. completeSubscribe / handleUnsubscribe
-	// live in separate helpers (anyOtherClientSubscribesLocked) and are
-	// off this critical path, so checking only the handleSubscribe body
+	// also avoid scanning (R236-PERF-06 / #513 collapsed the last
+	// h.clients walk into an h.subscriberCount[key] read), but those live
+	// in separate functions, so checking only the handleSubscribe body
 	// avoids false positives.
 	forbidden := []string{
 		"for _, other := range h.clients",
