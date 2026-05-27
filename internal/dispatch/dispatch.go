@@ -874,6 +874,37 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 	}()
 }
 
+// resolveReplyCtx returns a context safe for an end-of-turn reply: when
+// ctx is already Done because of a shutdown-style cancellation
+// (context.Canceled), it returns a fresh NotifyCtx with the
+// shutdownReplyTimeout budget so the platform.Reply call can actually
+// land. Otherwise it returns ctx unchanged with a no-op cleanup.
+//
+// Centralising this swap removes the per-branch shutdown-ctx replacement
+// the previous sendAndReply / handleGetOrCreateError variants each
+// re-implemented (R242-GO-4, #550). Callers MUST defer cleanup() before
+// dispatching the reply or leak the timer goroutine on the swap path.
+//
+// Only context.Canceled triggers the swap. context.DeadlineExceeded is
+// treated as a legitimate per-turn timeout the caller asked for and is
+// not auto-extended — that would be silently lengthening a configured
+// budget. Pure ctx.Err() == nil short-circuits to the cheap "no swap"
+// branch so the helper costs nothing on the happy path.
+func resolveReplyCtx(ctx context.Context) (replyCtx context.Context, cleanup func()) {
+	if ctx == nil {
+		// nil parent: caller already lost its turn ctx. Mint a fresh
+		// shutdown-budget ctx so the reply can still land.
+		return NotifyCtx(nil, NotifyKindShutdown, shutdownReplyTimeout)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		// Happy path: cleanup is nil so callers using the
+		// `if cleanup != nil { defer cleanup() }` idiom skip the defer.
+		return ctx, nil
+	}
+	notifyCtx, cancel := NotifyCtx(ctx, NotifyKindShutdown, shutdownReplyTimeout)
+	return notifyCtx, cancel
+}
+
 // handleGetOrCreateError maps a router.GetOrCreate failure into the
 // user-facing reply ctx, an optional ctx.cancel cleanup, and a Chinese
 // error message. Pulled out of sendAndReply so the seven-stage main
@@ -900,7 +931,6 @@ func (d *Dispatcher) handleGetOrCreateError(
 	} else {
 		lg.Error("get session", "err", err)
 	}
-	replyCtx = ctx
 	switch {
 	case errors.Is(err, session.ErrMaxProcs):
 		errMsg = "当前处理已满，请稍后重试。"
@@ -916,19 +946,15 @@ func (d *Dispatcher) handleGetOrCreateError(
 		errMsg = "会话后端未配置，请联系管理员。"
 	case errors.Is(err, context.Canceled):
 		errMsg = "系统正在重启，请稍后重试。"
-		// R188-CONC-M1: ctx is already Done on shutdown path; using it for
-		// the user-facing error reply silently drops the notification at
-		// the platform layer. Match the handleOwnerLoopPanic recovery
-		// pattern and use a fresh Background ctx with short timeout so the
-		// user actually sees the "restart, retry" message.
-		// R247-ARCH-10 (#632): routed through NotifyCtx for parity with
-		// the other detached-reply sites.
-		notifyCtx, cancel := NotifyCtx(ctx, NotifyKindShutdown, shutdownReplyTimeout)
-		replyCtx = notifyCtx
-		cleanup = cancel
 	default:
 		errMsg = "会话创建失败，请发送 /new 重置后重试。"
 	}
+	// R242-GO-4 (#550): the shutdown-ctx swap is one helper, not a
+	// per-branch repeat. resolveReplyCtx returns ctx unchanged when no
+	// swap is needed (cheap), and a fresh NotifyCtx + cancel when ctx
+	// was canceled — without it the user-facing reply would silently
+	// drop at the platform layer (R188-CONC-M1).
+	replyCtx, cleanup = resolveReplyCtx(ctx)
 	return replyCtx, cleanup, errMsg
 }
 
@@ -983,7 +1009,17 @@ func (d *Dispatcher) handleSendError(
 	if errors.Is(err, cli.ErrNoOutputTimeout) || errors.Is(err, cli.ErrTotalTimeout) {
 		errMsg = "⏱️ " + errMsg
 	}
-	if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, platformReplyMaxAttempts); err != nil {
+	// R242-GO-4 (#550): on shutdown the inbound ctx is already Done; the
+	// user-facing error reply must still land. resolveReplyCtx swaps in a
+	// fresh NotifyCtx with the shutdown budget when applicable; otherwise
+	// returns ctx unchanged with nil cleanup. Identical to the swap done
+	// in handleGetOrCreateError so the two error-reply paths share one
+	// truth.
+	replyCtx, cleanup := resolveReplyCtx(ctx)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, platformReplyMaxAttempts); err != nil {
 		d.sendFailCount.Add(1)
 		dispatchSendFailTotal.Add(1)
 		lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
