@@ -32,12 +32,20 @@ import (
 	robfigcron "github.com/robfig/cron/v3"
 )
 
-// cronSlowThreshold is the wall-clock budget beyond which a successful
-// cron execution is counted as "slow" (metrics.CronExecutionSlowTotal).
-// 30s is picked as an order-of-magnitude above a typical interactive
-// agent turn; jobs that regularly tip over are candidates for timeout /
-// workflow inspection. R208-OBS1.
-const cronSlowThreshold = 30 * time.Second
+// defaultCronSlowThreshold is the wall-clock budget beyond which a
+// successful cron execution is counted as "slow"
+// (metrics.CronExecutionSlowTotal). 30s is picked as an order-of-magnitude
+// above a typical interactive agent turn; jobs that regularly tip over are
+// candidates for timeout / workflow inspection. R208-OBS1.
+//
+// R241-ARCH-11 (#519): the threshold is now per-Scheduler-configurable
+// via SchedulerConfig.SlowThreshold so deployments running with
+// ExecTimeout=300s do not flood operators with a daily slow-alert per
+// successful long job. The package const stays as the default — callers
+// that omit SlowThreshold (or pass 0/negative) keep the legacy 30s
+// behaviour. Production wiring (cmd/naozhi) reads cron.slow_threshold
+// from config so operators can raise the threshold without recompiling.
+const defaultCronSlowThreshold = 30 * time.Second
 
 // spawnElapsedWarnRatio is the fraction of jobTimeout the spawn phase
 // (router.GetOrCreate) is allowed to consume before we emit the
@@ -1161,16 +1169,22 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	lg.Info("cron job completed",
 		"result_len", len(result.Text),
 		"elapsed_ms", elapsed.Milliseconds())
-	if elapsed > cronSlowThreshold {
+	slowThreshold := s.slowThreshold
+	if slowThreshold <= 0 {
+		slowThreshold = defaultCronSlowThreshold
+	}
+	if elapsed > slowThreshold {
 		// R208-OBS1: poor-man's histogram — a single counter that fires
-		// when a successful execution takes longer than cronSlowThreshold.
+		// when a successful execution takes longer than slowThreshold.
 		// Wired here (not in finishRun) so only success-path latency
 		// counts; error paths already surface via metrics state counters.
+		// R241-ARCH-11 (#519): threshold reads s.slowThreshold (config-
+		// supplied) with the package default as fallback.
 		metrics.CronExecutionSlowTotal.Add(1)
 		lg.Warn("cron execution slow",
 			"job_id", snap.jobID,
 			"elapsed_ms", elapsed.Milliseconds(),
-			"threshold_ms", cronSlowThreshold.Milliseconds())
+			"threshold_ms", slowThreshold.Milliseconds())
 	}
 	// 把本次产生的 Claude session_id 也记下来：fresh_context=true 的
 	// 路径下一次 Reset 会清掉 stub 的 chain，不保留这个 ID 的话

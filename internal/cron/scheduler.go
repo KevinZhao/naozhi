@@ -206,6 +206,17 @@ type SchedulerConfig struct {
 	// values fall back to the default; additive (callers that omit it
 	// keep prior behaviour). R250-GO-3.
 	RunsKeepWindow time.Duration
+	// SlowThreshold overrides defaultCronSlowThreshold (30s) when > 0.
+	// A successful cron execution exceeding this wall-clock budget is
+	// counted as "slow" (metrics.CronExecutionSlowTotal +
+	// "cron execution slow" warn). 30s suits typical interactive-agent
+	// jobs but flags every long batch run when ExecTimeout is set to
+	// 300s+; raising SlowThreshold to align with ExecTimeout silences
+	// the daily false-alarm without losing the metric for jobs that
+	// truly tip over the operator's expectation. Zero (and negative)
+	// values fall back to defaultCronSlowThreshold so callers that omit
+	// the field keep the prior behaviour. R241-ARCH-11 (#519).
+	SlowThreshold time.Duration
 }
 
 // chatJobKey identifies a (Platform, ChatID) pair for the per-chat job
@@ -296,6 +307,11 @@ type Scheduler struct {
 	// jitterMax is the scheduling jitter cap. See SchedulerConfig.JitterMax.
 	// Immutable after NewScheduler returns, so no lock needed.
 	jitterMax time.Duration
+	// slowThreshold is the wall-clock budget beyond which a successful cron
+	// execution is counted as "slow". See SchedulerConfig.SlowThreshold;
+	// zero/negative reads fall through to defaultCronSlowThreshold at the
+	// callsite. Immutable after NewScheduler returns. R241-ARCH-11 (#519).
+	slowThreshold time.Duration
 	// startedAtNanos 是 Start() 被调用的时刻（UnixNano）。用于 missed-schedule 检测的启动
 	// 抑制窗口——刚启动时所有长间隔 job 都会被算成"错过过"，需要
 	// (now - startedAt) > 5×period 时才算 missed。原本用 time.Time 字段，
@@ -763,6 +779,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		// minus the leading workDir, otherwise cache lookups miss.
 		workDirCacheKeySuffix: "\x00" + cfg.AllowedRoot + "\x00" + allowedRootResolved,
 		jitterMax:             cfg.JitterMax,
+		slowThreshold:         cfg.SlowThreshold,
 		stopCtx:               stopCtx,
 		stopCancel:            stopCancel,
 		runStore:              newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
