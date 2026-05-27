@@ -60,6 +60,20 @@ const defaultCronSlowThreshold = 30 * time.Second
 // fresh-context runs that legitimately spawn slowly. R247-CR-28.
 const spawnElapsedWarnRatio = 0.5
 
+// minSendBudget is the lower bound on the per-run send-phase context budget
+// when spawn already consumed most of jobTimeout. R20260527122801-CR-2 (#1311):
+// historically sendCtx used the full jobTimeout regardless of how long spawn
+// took, so a 5min jobTimeout could yield ~10min wall-clock + jitter in the
+// worst case (spawn ~5min then send another ~5min). Operators reported
+// systemd TimeoutStopSec being exceeded as a result. We now clamp sendCtx
+// to (jobTimeout - time.Since(spawnStart)), bounded below by minSendBudget so
+// a flaky cold-start spawn doesn't immediately turn into a "send timed out"
+// without operator signal — the historical concern documented at the
+// sendCtx assignment below. 30s is enough for a single Send round-trip on
+// a healthy CLI; the spawnElapsedWarnRatio warn already alerts operators
+// when spawn is eating the budget.
+const minSendBudget = 30 * time.Second
+
 // executeIfNotDeletedOrPaused is the TriggerNow dispatch entry. It looks
 // up the freshest *Job under s.mu.RLock, then — only if still present and
 // not paused — releases the lock and calls executeOpt(cur, true). Deleted
@@ -1192,21 +1206,21 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// stamped, and the job re-runs on the next Start (matching the spawn
 	// path's GetOrCreate cancel handling immediately above).
 	//
-	// R230B-GO-1 / R222-GO-1 (worst-case wall clock): the spawn ctx above
-	// (line ~2062, derived from s.stopCtx with WithTimeout(jobTimeout)) and
-	// this sendCtx do NOT share a budget — a slow GetOrCreate that consumes
-	// most of jobTimeout still hands a fresh jobTimeout to Send below. A
-	// pathological run can therefore last ~2*jobTimeout + a brief scheduling
-	// gap before finishRun stamps a terminal state. This is intentional:
-	// clamping sendCtx to (jobTimeout - time.Since(startedAt)) would amplify
-	// flaky/cold-start spawns (~10s spawn → ~290s send budget on a 5min
-	// job), turning a transient session-spawn slowdown into a user-visible
-	// "send timed out" without the operator having any signal. The
-	// scheduler-level overlap guard (robfig SkipIfStillRunning chain
-	// wrapper) already prevents two concurrent
-	// runs of the same job from stacking budgets, so the doubled wall
-	// clock affects only the CURRENT run's recorded duration, not throughput.
-	sendCtx, sendCancel := context.WithTimeout(s.stopCtx, jobTimeout)
+	// R20260527122801-CR-2 (#1311): clamp sendCtx to the remaining budget
+	// after spawn consumed `time.Since(spawnStart)` of jobTimeout, with a
+	// minSendBudget floor to preserve the historical concern (R230B-GO-1 /
+	// R222-GO-1) that flaky cold-start spawns shouldn't immediately surface
+	// as "send timed out" — a 30s floor still lets a healthy Send complete
+	// while bounding worst-case wall-clock to (jobTimeout + minSendBudget)
+	// instead of ~2*jobTimeout. Operators previously saw systemd
+	// TimeoutStopSec exceeded on cron runs because the un-clamped sendCtx
+	// could double the per-run budget; the floor + spawnElapsedWarnRatio
+	// warn (just below) keep the operator-signal path intact.
+	sendBudget := jobTimeout - time.Since(spawnStart)
+	if sendBudget < minSendBudget {
+		sendBudget = minSendBudget
+	}
+	sendCtx, sendCancel := context.WithTimeout(s.stopCtx, sendBudget)
 	defer sendCancel()
 	// R240-GO-4: emit an explicit signal when entering sendCtx after the
 	// spawn phase already consumed >spawnElapsedWarnRatio of jobTimeout.
@@ -1227,7 +1241,12 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			"job_id", snap.jobID,
 			"spawn_elapsed_ms", spawnElapsed.Milliseconds(),
 			"job_timeout_ms", jobTimeout.Milliseconds(),
-			"send_budget_ms", jobTimeout.Milliseconds(),
+			// R20260527122801-CR-2 (#1311): send_budget now reflects the
+			// post-clamp budget (jobTimeout - spawnElapsed, floored at
+			// minSendBudget) instead of the historical un-clamped jobTimeout.
+			// Operators reading this warn line can compare spawn_elapsed +
+			// send_budget against jobTimeout to see the floor in action.
+			"send_budget_ms", sendBudget.Milliseconds(),
 			"warn_ratio", spawnElapsedWarnRatio)
 	}
 	inflight.setPhase(PhaseSending)
