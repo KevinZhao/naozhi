@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -381,6 +382,13 @@ func sanitizeLogCmd(cmd string) string {
 	}, cmd)
 }
 
+// loopbackV4Re matches a 127/8 IPv4 dotted-quad followed by ":<port>" so a
+// substring like "version 127." or a hostname containing "foo127.example.com"
+// does not produce a false positive. The leading boundary requires a non-
+// digit / non-dot prefix (or the start of the string) so the digits cannot
+// be a tail of some other number. R236-QA-20 (#544).
+var loopbackV4Re = regexp.MustCompile(`(^|[^0-9a-z.])127\.\d{1,3}\.\d{1,3}\.\d{1,3}:`)
+
 // isNaozhiCallbackHook reports whether a hook command appears to call back into
 // naozhi's HTTP server (which would cause an infinite loop).
 // It matches: any mention of "naozhi", or an HTTP call to localhost/127.0.0.1 on
@@ -399,8 +407,16 @@ func isNaozhiCallbackHook(cmd, port string) bool {
 				return true
 			}
 		}
-		// Match any 127.x.x.x address (entire 127/8 loopback block)
-		if strings.Contains(lower, "127.") && strings.Contains(lower, ":"+port) {
+		// Match any 127.x.x.x:port address (entire 127/8 loopback block).
+		// R236-QA-20 (#544): the historical substring check
+		// `strings.Contains(lower, "127.")` produced false positives on any
+		// command containing the literal "127." even in unrelated contexts
+		// (e.g. "version 127." or hostnames such as "foo127.example.com")
+		// provided the same command also mentioned ":<port>" somewhere.
+		// The regex requires a real dotted-quad shape next to the port
+		// boundary so legitimate hooks survive while real loopback URLs
+		// keep firing.
+		if loopbackV4Re.MatchString(lower) && strings.Contains(lower, ":"+port) {
 			return true
 		}
 	}
