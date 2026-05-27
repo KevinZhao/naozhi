@@ -491,32 +491,19 @@ func (q *MessageQueue) ShouldSendWait(key string) bool {
 
 // Release implements SessionGuard. Releases ownership without draining
 // — internally it calls ReleaseWithDrain(key, nil), which clears the
-// busy flag but leaves any queued messages parked in the sessionQueue
-// for a future Enqueue owner to consume via DoneOrDrain.  This is the
+// busy flag and (post R20260527-COR-9 fix) drops any queued messages
+// with a Warn so the map entry doesn't leak. This is the
 // SessionGuard-compatible path; it is *not* a drain failure.
 //
 // R37-REL1: if messages landed during the busy window (concurrent
-// Enqueue while Dashboard/WS Guard held the session), they would
-// otherwise be stuck until the next Enqueue re-entered the queue.
+// Enqueue while Dashboard/WS Guard held the session), the caller
+// won't see them — they're logged-and-dropped rather than stranded.
 // Callers that can process the drained batch should use
 // ReleaseWithDrain instead.
 func (q *MessageQueue) Release(key string) {
-	// Peek depth under the lock so we can warn callers about stranded messages
-	// without changing Release's no-drain contract. Without this log the only
-	// signal is a silent "queue appears to lose messages" user report.
-	q.mu.Lock()
-	depth := 0
-	if sq := q.queues[key]; sq != nil {
-		depth = sq.ring.len()
-	}
-	q.mu.Unlock()
-	if depth > 0 {
-		// `pending` is a lock-release snapshot — Enqueue callers racing this
-		// unlock can shift the real depth. Accurate enough for "a caller
-		// stranded N+ messages" triage.
-		slog.Warn("msgqueue release with pending messages, use ReleaseWithDrain to avoid strand",
-			"key", key, "pending_snapshot", depth)
-	}
+	// Single Warn emitted from ReleaseWithDrain's no-drain branch
+	// covers the previous peek-and-warn here (de-duplicated post
+	// R20260527-COR-9 / #1283 / #1290).
 	q.ReleaseWithDrain(key, nil)
 }
 
@@ -526,9 +513,10 @@ func (q *MessageQueue) Release(key string) {
 // session marked idle — so the callback can safely re-enter Enqueue or
 // otherwise process each message without re-acquiring q.mu re-entrantly.
 //
-// onDrain may be nil; in that case behaviour matches the legacy Release
-// (messages stay in sq.msgs waiting for a future Enqueue owner to sweep
-// them via DoneOrDrain).
+// onDrain may be nil; in that case any queued messages are dropped with a
+// Warn log and the map entry deleted (R20260527-COR-9 / #1283 / #1290 — the
+// pre-fix legacy was to leave them parked, which leaked the entry forever
+// on quiet sessions). Callers that need delivery must supply a callback.
 //
 // Callback invocation happens AFTER the queue state is cleared and the lock
 // released, mirroring DoneOrDrain's out-of-lock delivery contract.
