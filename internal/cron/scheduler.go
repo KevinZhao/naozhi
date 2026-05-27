@@ -233,6 +233,18 @@ type Scheduler struct {
 	// map's working set tracks the live chat set rather than every chat
 	// that has ever owned a job. R237-PERF-5 (#661).
 	chatJobCount map[chatJobKey]int
+	// jobsByChat is a per-(Platform, ChatID) index of *Job pointers.
+	// Maintained synchronously with s.jobs writes under s.mu so
+	// findByPrefixLocked iterates only the small slice of jobs in the
+	// caller's chat instead of the full s.jobs map. With maxJobsHardCap=500
+	// and a typical 1-5 jobs/chat, the prefix-match scan drops from O(500)
+	// to O(5) per IM-prefix lookup (DeleteJob/PauseJob/ResumeJob via
+	// withJobByPrefix). Entries are deleted when the slice empties so the
+	// map's working set tracks the live chat set, mirroring chatJobCount.
+	// (Platform, ChatID) of a job is immutable post-AddJob (UpdateJob
+	// rejects both via JobUpdate field absence), so an entry never moves
+	// across keys — add appends, delete swaps-and-shrinks. R242-GO-9 (#558).
+	jobsByChat map[chatJobKey][]*Job
 	// router is set once in NewScheduler and never reassigned.
 	router SessionRouter
 	// platforms / agents / agentCommands are populated from SchedulerConfig
@@ -730,6 +742,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		),
 		jobs:                make(map[string]*Job),
 		chatJobCount:        make(map[chatJobKey]int),
+		jobsByChat:          make(map[chatJobKey][]*Job),
 		router:              cfg.Router,
 		telemetry:           cfg.Telemetry,
 		platforms:           cfg.Platforms,
@@ -887,7 +900,9 @@ func (s *Scheduler) Start() error {
 		}
 		if j.Paused {
 			s.jobs[j.ID] = j
-			s.chatJobCount[chatJobKey{Platform: j.Platform, ChatID: j.ChatID}]++
+			key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+			s.chatJobCount[key]++
+			s.jobsByChat[key] = append(s.jobsByChat[key], j)
 			stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 			continue
 		}
@@ -896,7 +911,9 @@ func (s *Scheduler) Start() error {
 			continue
 		}
 		s.jobs[j.ID] = j
-		s.chatJobCount[chatJobKey{Platform: j.Platform, ChatID: j.ChatID}]++
+		key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+		s.chatJobCount[key]++
+		s.jobsByChat[key] = append(s.jobsByChat[key], j)
 		stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 	}
 	jobCount := len(s.jobs)

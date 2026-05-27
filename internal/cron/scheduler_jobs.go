@@ -144,6 +144,9 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 	// the rollback path (s.deleteJobLocked below on persist failure) goes
 	// through that helper so the counter unwinds correctly.
 	s.chatJobCount[chatKey]++
+	// R242-GO-9 (#558): append to per-chat job index synchronously with
+	// s.jobs so findByPrefixLocked iterates only this chat's jobs.
+	s.jobsByChat[chatKey] = append(s.jobsByChat[chatKey], j)
 	save, perr := s.persistJobsLocked()
 	if perr != nil {
 		// R236-GO-10: persist failed *after* registerJob + map insertion.
@@ -302,6 +305,29 @@ func (s *Scheduler) deleteJobLocked(j *Job) {
 			s.chatJobCount[key] = n - 1
 		} else {
 			delete(s.chatJobCount, key)
+		}
+		// R242-GO-9 (#558): paired remove from per-chat job index. Swap-
+		// and-shrink to keep amortised O(1) (insertion-order is not
+		// preserved, which is fine because findByPrefixLocked already
+		// reports an ambiguous-prefix error rather than picking a winner
+		// when two jobs share the prefix). Drop the entry when the slice
+		// empties so the map's working set tracks the live chat set,
+		// mirroring the chatJobCount cleanup above.
+		if list := s.jobsByChat[key]; len(list) > 0 {
+			for i, p := range list {
+				if p == j {
+					last := len(list) - 1
+					list[i] = list[last]
+					list[last] = nil // help GC drop the pointer
+					list = list[:last]
+					break
+				}
+			}
+			if len(list) == 0 {
+				delete(s.jobsByChat, key)
+			} else {
+				s.jobsByChat[key] = list
+			}
 		}
 	}
 }
@@ -1120,18 +1146,24 @@ func (s *Scheduler) registerJob(j *Job) error {
 
 // findByPrefixLocked finds a job by ID prefix scoped to a specific chat.
 //
-// LOCK: caller MUST hold s.mu (read or write). The body iterates s.jobs
-// directly without taking the mutex; every in-tree caller (DeleteJob /
-// PauseJob / ResumeJob) already holds s.mu.Lock() across the find +
-// mutate + persist window, so the *Locked suffix is a documentation
-// contract, not a behaviour change. Renamed under R20260526-GO-002 to
-// match the package convention (deleteJobLocked / pauseJobLocked /
-// persistJobsLocked / …) so future callers see the locking requirement
-// without grepping the call graph.
+// LOCK: caller MUST hold s.mu (read or write). The body iterates the
+// per-chat slice from s.jobsByChat directly without taking the mutex;
+// every in-tree caller (DeleteJob / PauseJob / ResumeJob) already holds
+// s.mu.Lock() across the find + mutate + persist window, so the *Locked
+// suffix is a documentation contract, not a behaviour change. Renamed
+// under R20260526-GO-002 to match the package convention (deleteJobLocked
+// / pauseJobLocked / persistJobsLocked / …) so future callers see the
+// locking requirement without grepping the call graph.
+//
+// R242-GO-9 (#558): scan is bounded by s.jobsByChat[chat] (typically
+// 1-5 jobs/chat) rather than the full s.jobs map (up to maxJobsHardCap=
+// 500). This drops the lock-time prefix scan to O(jobs-in-this-chat) so
+// withJobByPrefix doesn't pin s.mu across the entire job table on every
+// IM-prefix delete/pause/resume.
 func (s *Scheduler) findByPrefixLocked(idPrefix, plat, chatID string) (*Job, error) {
 	var matches []*Job
-	for _, j := range s.jobs {
-		if j.Platform == plat && j.ChatID == chatID && strings.HasPrefix(j.ID, idPrefix) {
+	for _, j := range s.jobsByChat[chatJobKey{Platform: plat, ChatID: chatID}] {
+		if strings.HasPrefix(j.ID, idPrefix) {
 			matches = append(matches, j)
 		}
 	}
