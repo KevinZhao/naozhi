@@ -18,7 +18,6 @@ package cron
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	mrand "math/rand/v2"
 	"path/filepath"
@@ -33,12 +32,20 @@ import (
 	robfigcron "github.com/robfig/cron/v3"
 )
 
-// cronSlowThreshold is the wall-clock budget beyond which a successful
-// cron execution is counted as "slow" (metrics.CronExecutionSlowTotal).
-// 30s is picked as an order-of-magnitude above a typical interactive
-// agent turn; jobs that regularly tip over are candidates for timeout /
-// workflow inspection. R208-OBS1.
-const cronSlowThreshold = 30 * time.Second
+// defaultCronSlowThreshold is the wall-clock budget beyond which a
+// successful cron execution is counted as "slow"
+// (metrics.CronExecutionSlowTotal). 30s is picked as an order-of-magnitude
+// above a typical interactive agent turn; jobs that regularly tip over are
+// candidates for timeout / workflow inspection. R208-OBS1.
+//
+// R241-ARCH-11 (#519): the threshold is now per-Scheduler-configurable
+// via SchedulerConfig.SlowThreshold so deployments running with
+// ExecTimeout=300s do not flood operators with a daily slow-alert per
+// successful long job. The package const stays as the default — callers
+// that omit SlowThreshold (or pass 0/negative) keep the legacy 30s
+// behaviour. Production wiring (cmd/naozhi) reads cron.slow_threshold
+// from config so operators can raise the threshold without recompiling.
+const defaultCronSlowThreshold = 30 * time.Second
 
 // spawnElapsedWarnRatio is the fraction of jobTimeout the spawn phase
 // (router.GetOrCreate) is allowed to consume before we emit the
@@ -240,7 +247,26 @@ type jobSnapshot struct {
 // shape was test fixtures grepping the formatted string. New notice
 // sites should compose via formatCronNotice rather than inline a 4th
 // copy.
+//
+// R247-PERF-7 (#539): the formatter implementation uses strings.Builder
+// instead of fmt.Sprintf so a busy scheduler firing N notices/min stops
+// paying the reflection-driven %s walk on already-bounded label/body
+// strings. The template literal stays for documentation / test fixture
+// grep — the formatter inlines its shape ("[Cron <label>] <body>") so a
+// future template change has to touch both sides, which the
+// notice_label_bracket_test invariants pin.
 const cronNoticePrefixFmt = "[Cron %s] %s"
+
+// cronNoticePrefix / cronNoticeMid / cronNoticeSuffix are the literal
+// segments stitched into formatCronNotice's strings.Builder output. They
+// are intentionally separate consts so a future template change cannot
+// silently desync from cronNoticePrefixFmt above (the
+// notice_label_bracket_test pins the exact byte sequence, which catches
+// any drift).
+const (
+	cronNoticePrefix = "[Cron "
+	cronNoticeMid    = "] "
+)
 
 // formatCronNotice renders the IM-notice line cron jobs send through
 // deliverNotice. label is the snap.labelOrID() result (job title or
@@ -277,7 +303,19 @@ func formatCronNotice(label, body string) string {
 	// by markdown parsers. Prefix invariant `[Cron <label>]` is preserved
 	// because we substitute inside label, never at the template `]`.
 	label = strings.ReplaceAll(label, "]", "］")
-	return fmt.Sprintf(cronNoticePrefixFmt, label, body)
+	// R247-PERF-7 (#539): strings.Builder skips fmt.Sprintf's reflection
+	// walk over the already-bounded label/body inputs. Pre-grow once so
+	// the underlying buffer covers the largest plausible payload (label is
+	// MaxCronTitleLen runes after SanitizeForLog; body is sanitiseRunResult
+	// output bounded by MaxCronResultBytes). On a busy scheduler this
+	// drops one alloc + the reflect.Value boxing per notice.
+	var b strings.Builder
+	b.Grow(len(cronNoticePrefix) + len(label) + len(cronNoticeMid) + len(body))
+	b.WriteString(cronNoticePrefix)
+	b.WriteString(label)
+	b.WriteString(cronNoticeMid)
+	b.WriteString(body)
+	return b.String()
 }
 
 // labelOrID returns the IM-notice display label: snap.label when populated,
@@ -1131,16 +1169,22 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	lg.Info("cron job completed",
 		"result_len", len(result.Text),
 		"elapsed_ms", elapsed.Milliseconds())
-	if elapsed > cronSlowThreshold {
+	slowThreshold := s.slowThreshold
+	if slowThreshold <= 0 {
+		slowThreshold = defaultCronSlowThreshold
+	}
+	if elapsed > slowThreshold {
 		// R208-OBS1: poor-man's histogram — a single counter that fires
-		// when a successful execution takes longer than cronSlowThreshold.
+		// when a successful execution takes longer than slowThreshold.
 		// Wired here (not in finishRun) so only success-path latency
 		// counts; error paths already surface via metrics state counters.
+		// R241-ARCH-11 (#519): threshold reads s.slowThreshold (config-
+		// supplied) with the package default as fallback.
 		metrics.CronExecutionSlowTotal.Add(1)
 		lg.Warn("cron execution slow",
 			"job_id", snap.jobID,
 			"elapsed_ms", elapsed.Milliseconds(),
-			"threshold_ms", cronSlowThreshold.Milliseconds())
+			"threshold_ms", slowThreshold.Milliseconds())
 	}
 	// 把本次产生的 Claude session_id 也记下来：fresh_context=true 的
 	// 路径下一次 Reset 会清掉 stub 的 chain，不保留这个 ID 的话

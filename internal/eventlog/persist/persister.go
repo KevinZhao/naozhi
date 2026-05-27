@@ -765,6 +765,16 @@ func (p *Persister) dropLocked(key, stem string) error {
 func (p *Persister) flushAllLocked() error {
 	var firstErr error
 	for k, w := range p.writers {
+		// R250-PERF-25 (#1128): w.flush() already short-circuits on
+		// !w.dirty, but at 100+ writers with most idle the per-call
+		// frame overhead (atomic loads, interface dispatch on the
+		// inlined-but-not-zero check) adds up. Skip the call entirely
+		// for clean writers — the dirty bit is only mutated on the
+		// run goroutine that already owns this iteration, so no
+		// synchronisation is needed.
+		if !w.dirty {
+			continue
+		}
 		if err := w.flush(p); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("flush %s: %w", k, err)

@@ -113,6 +113,20 @@ const marshalRecordPoolMaxCap = 64 * 1024
 // copy (independent of the pooled buffer) so the caller may retain
 // it past the end of MarshalRecord — the buffer is reset and re-filed
 // before return.
+//
+// R249-PERF-22 (#996) verify-stale: the trailing `out := make + copy`
+// at the end is a hard correctness invariant of the pooled-buffer
+// design, not a missed optimisation. Returning `body` directly would
+// hand the caller a slice whose backing array gets re-filed into the
+// pool by the defer below; the next pool consumer would Reset() that
+// array and start writing into the byte range a previous caller still
+// holds. Hot-path callers (Persister.handleBatch) avoid the copy by
+// using MarshalRecordInto with their own scratch buffer; the surviving
+// MarshalRecord callers (initial header write, tests, recovery) run
+// at most once per file lifetime so the per-call alloc is in the
+// noise. Do not "optimise" by removing the copy — see
+// MarshalRecordInto immediately below for the API that lets callers
+// own the buffer.
 func MarshalRecord(r *Record) ([]byte, error) {
 	if err := r.Validate(); err != nil {
 		return nil, err

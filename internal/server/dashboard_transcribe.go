@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
 	"github.com/naozhi/naozhi/internal/transcribe"
 )
@@ -140,6 +141,17 @@ func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Requ
 		slog.Warn("transcribe text truncated", "orig_len", len(text), "cap", maxTranscribeRespBytes)
 		text = text[:textutil.TruncateAtRuneBoundary(text, maxTranscribeRespBytes)]
 	}
+
+	// R247-SEC-18 (#516): defence-in-depth sanitiser at the dashboard
+	// boundary. The upstream AWS transcriber already runs joined results
+	// through osutil.SanitizeForLog, but this server-side file is the last
+	// hop before the bytes hit IM dispatch / dashboard wire and a future
+	// transcriber implementation (or a regression in the AWS path) must
+	// not be able to land bidi / C1 / LS-PS runes — which terminal log
+	// tail-ers and some browsers still interpret — into the user-facing
+	// reply text. Mirrors the cron sanitiseRunResult policy so the same
+	// scrub policy covers both run-result text and transcript text.
+	text = osutil.SanitizeForLog(text, maxTranscribeRespBytes)
 
 	slog.Info("transcribe ok", "text_len", len(text), "mime", mimeType, "size", len(data))
 

@@ -1466,9 +1466,15 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		// after spawn until the first result event triggered a save).
 		liveModel := proc.Model()
 		if liveModel != "" {
-			// SetModel internally short-circuits when the value is unchanged,
-			// so the outer equality check would just duplicate that work.
-			s.SetModel(liveModel)
+			// R236-PERF-13 (#534): the previous comment claimed SetModel
+			// short-circuits internally — it does NOT. storeAtomicString
+			// always swaps the pointer, which dirties the cache line and
+			// at 1Hz × N tabs × M sessions costs an avoidable atomic
+			// store per poll on what is otherwise a pure-read path.
+			// Compare the cached value first and only mirror on change.
+			if cached := s.Model(); cached != liveModel {
+				s.SetModel(liveModel)
+			}
 			snap.Model = liveModel
 		} else {
 			snap.Model = s.Model()
