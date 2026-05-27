@@ -26,8 +26,14 @@ import "context"
 // the slice on the way out to session.AgentOpts so a downstream
 // append() can't corrupt cron's own copy and vice-versa.
 type AgentOpts struct {
-	Backend          string
-	Model            string
+	Backend string
+	Model   string
+	// SystemPromptFile is reserved for a future cron-side override; the
+	// production adapter (cmd/naozhi/cron_router_adapter.go) does NOT
+	// translate it onto session.AgentOpts today and session.AgentOpts
+	// has no matching field. Setting it has no effect; left here as a
+	// placeholder so adding the wire later does not require a struct
+	// rename. R20260527-MEDIUM-2.
 	SystemPromptFile string
 	Workspace        string
 	ExtraArgs        []string
