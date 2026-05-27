@@ -992,6 +992,23 @@ func (s *runStore) scanSortedRunDir(jobID string) ([]runDirItem, string, error) 
 //
 // R239-PERF-5 (#871): scan + sort delegated to scanSortedRunDir so this
 // path stays in lockstep with trimJobLocked.
+//
+// PROPOSAL HISTORY (won't-fix as proposed):
+//   - R237-PERF-8 / #682 ("no mtime pre-filter — full JSON parse before
+//     discard") and R236-PERF-07 / #522 ("binary-search for `before`
+//     cutoff; ReadFile only items within the requested page") both
+//     proposed an mtime gate as a fast path. Both rejected because
+//     mtime ≥ before does NOT imply StartedAt ≥ before — long-running
+//     jobs that started before the cutoff but ended after it (or
+//     re-touched their file via process restart) would be silently
+//     dropped from the page. R246-CR-008 / #745 already removed the
+//     unsafe gate after operators reported phantom "no older runs"
+//     truncation; the strict StartedAt filter is the only correct one
+//     and the per-candidate ReadFile is the cost of correctness here.
+//   - The regression scenario is locked in by
+//     TestRunStore_DiskList_BeforeStartedAtMtimeDivergence in
+//     runstore_test.go; any future re-introduction of an mtime gate
+//     must keep that test green.
 func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time) ([]CronRunSummary, int) {
 	items, dir, err := s.scanSortedRunDir(jobID)
 	if err != nil {
