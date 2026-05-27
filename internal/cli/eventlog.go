@@ -1333,12 +1333,18 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	}
 	l.mu.Lock()
 	for idx, e := range entries {
+		// R20260527122801-PERF-7: when captureForSink is true the entry
+		// has already been fully prepared in sinkCopy[idx] above. Write
+		// it directly into the ring slot and rebind ePtr to that slot
+		// so the downstream state-tracking code reads from the canonical
+		// store without paying a second per-entry struct copy through
+		// the range-loop local. The prior shape (`e = sinkCopy[idx];
+		// l.entries[l.head] = e`) cost two EventEntry value copies on
+		// the InjectHistory hot path (500× per shim reconnect).
+		var ePtr *EventEntry
 		if captureForSink {
-			// Already prepared above; use the sink copy as the source of
-			// truth so the ring-buffer entry matches what the persister
-			// will write. Avoids a divergence window where Time / Images
-			// could differ between in-memory ring and on-disk record.
-			e = sinkCopy[idx]
+			l.entries[l.head] = sinkCopy[idx]
+			ePtr = &l.entries[l.head]
 		} else {
 			if e.Time == 0 {
 				e.Time = defaultTime
@@ -1346,8 +1352,9 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 			if len(e.Images) > 0 {
 				e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
 			}
+			l.entries[l.head] = e
+			ePtr = &l.entries[l.head]
 		}
-		l.entries[l.head] = e
 		l.head = (l.head + 1) % l.maxSize
 		if l.count < l.maxSize {
 			l.count++
@@ -1364,8 +1371,8 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 		// and the turnAgents/bgAgents per-turn slices are reset by the
 		// next live "result"/"user" event anyway. This avoids 500× O(N)
 		// agent-slice scans inside the write-lock during shim reconnect.
-		if !isReplay && entryAffectsAgentState(e.Type) {
-			if fire, p := l.applyEntryStateLocked(e); fire {
+		if !isReplay && entryAffectsAgentState(ePtr.Type) {
+			if fire, p := l.applyEntryStateLocked(*ePtr); fire {
 				pendingDone = append(pendingDone, p)
 			}
 		}
@@ -1375,19 +1382,19 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 		// separate from the value so an empty final Summary still
 		// overwrites the atomic — Append stores unconditionally for these
 		// types, and diverging here would leave stale summaries visible.
-		if e.Type == "user" {
-			lastPrompt = e.Summary
+		if ePtr.Type == "user" {
+			lastPrompt = ePtr.Summary
 			sawPrompt = true
 			userDelta++
-		} else if e.Type == "text" {
+		} else if ePtr.Type == "text" {
 			// R110-P1: track tail assistant text for sidebar response preview.
 			// Mirrors the live Append store under l.mu — last-writer-wins
 			// matches entry order even when batches interleave with live
 			// Appends. See lastPromptSummary single-Store treatment above.
-			lastResponse = e.Summary
+			lastResponse = ePtr.Summary
 			sawResponse = true
-		} else if IsActivityType(e.Type) {
-			lastActivity = e.Summary
+		} else if IsActivityType(ePtr.Type) {
+			lastActivity = ePtr.Summary
 			sawActivity = true
 		}
 	}

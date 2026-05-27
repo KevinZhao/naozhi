@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -608,7 +609,14 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 				cmd = cleanText[:idx]
 			}
 			if !strings.Contains(cmd[1:], "/") {
-				d.replyText(ctx, msg, "未知命令: "+cmd+"\n输入 /help 查看可用命令，或直接发送消息。", lg)
+				// R20260527122801-CR-15: sanitize the user-controlled cmd
+				// before echoing — IM renderers may interpret embedded ANSI
+				// escape sequences or control bytes as formatting / injected
+				// log fields. SanitizeForLog scrubs C0/C1, DEL, and the
+				// bidi/LS-PS rune classes; the cap also bounds reply size
+				// against an attacker stuffing a 4KB "/" prefix into chat.
+				safeCmd := osutil.SanitizeForLog(cmd, 64)
+				d.replyText(ctx, msg, "未知命令: "+safeCmd+"\n输入 /help 查看可用命令，或直接发送消息。", lg)
 				return
 			}
 		}

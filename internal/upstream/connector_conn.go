@@ -198,11 +198,17 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 						return
 					}
 				}
-				reqSemReqInflight.Add(1)
+				// R20260527122801-GO-007: register the release defer BEFORE
+				// reqSemReqInflight.Add(1) so a panic between the slot
+				// acquire and the inflight increment cannot leave the
+				// counter and the semaphore desynced. Both states then
+				// roll back together via the deferred release on any
+				// downstream panic in handleRequest.
 				defer func() {
 					<-reqSem
 					reqSemReqInflight.Add(-1)
 				}()
+				reqSemReqInflight.Add(1)
 				result, err := c.handleRequest(ctx, connCtx, req, &wg)
 				resp := node.ReverseMsg{Type: "response", ReqID: req.ReqID}
 				if err != nil {

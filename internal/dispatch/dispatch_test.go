@@ -413,6 +413,27 @@ func TestBuildHandler_UnknownSlash(t *testing.T) {
 	}
 }
 
+// TestBuildHandler_UnknownSlash_SanitizesAttackerControl pins
+// R20260527122801-CR-15: the unknown-command reply embeds the user-supplied
+// cmd token directly. ANSI / C0 / C1 / DEL bytes from chat must be scrubbed
+// so IM renderers cannot reinterpret them as formatting (e.g. an embedded
+// ESC starts an ANSI colour run; a tab splits slog attributes downstream).
+func TestBuildHandler_UnknownSlash_SanitizesAttackerControl(t *testing.T) {
+	fp := &fakePlatform{}
+	d := newTestDispatcher(fp, nil)
+	// Embed ESC (0x1b), DEL (0x7f), and a tab — all should be replaced.
+	d.BuildHandler()(context.Background(), incomingMsg("/\x1b[31mevil\x7f\tcmd"))
+	reply := fp.lastReply()
+	if !strings.Contains(reply, "未知命令") {
+		t.Fatalf("expected unknown-command reply, got %q", reply)
+	}
+	for _, bad := range []string{"\x1b", "\x7f", "\t"} {
+		if strings.Contains(reply, bad) {
+			t.Errorf("reply still contains unsanitized byte %q: %q", bad, reply)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // BuildHandler — path-like slash is NOT flagged as unknown command
 // ---------------------------------------------------------------------------

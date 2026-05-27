@@ -313,7 +313,15 @@ func formatCronNotice(label, body string) string {
 	// closing bracket U+FF3D, visually similar but never bracket-matched
 	// by markdown parsers. Prefix invariant `[Cron <label>]` is preserved
 	// because we substitute inside label, never at the template `]`.
-	label = strings.ReplaceAll(label, "]", "］")
+	//
+	// R20260527122801-PERF-15: skip ReplaceAll alloc when label has no
+	// ']' — common case for ASCII titles. ReplaceAll always walks the
+	// string and may reallocate even when nothing matches; IndexByte is
+	// a single SIMD-accelerated scan so the fast path is essentially
+	// free on the hot tick path.
+	if strings.IndexByte(label, ']') >= 0 {
+		label = strings.ReplaceAll(label, "]", "］")
+	}
 	// R247-PERF-7 (#539): strings.Builder skips fmt.Sprintf's reflection
 	// walk over the already-bounded label/body inputs. Pre-grow once so
 	// the underlying buffer covers the largest plausible payload (label is
@@ -653,10 +661,15 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 		go func() {
 			done <- sess.InterruptViaControl()
 		}()
+		// R20260527122801-GO-001: NewTimer + defer Stop mirrors
+		// scheduler.go:1337 — time.After leaks a *Timer slot until
+		// expiry on the success path.
+		t := time.NewTimer(watchdogInterruptTimeout())
+		defer t.Stop()
 		select {
 		case outcome := <-done:
 			ch <- abortResult{outcome: outcome, fired: true}
-		case <-time.After(watchdogInterruptTimeout()):
+		case <-t.C:
 			ch <- abortResult{outcome: InterruptError, fired: true}
 		}
 	}()
@@ -1366,7 +1379,19 @@ func jitterSleep(ctx context.Context, period, jitterMax time.Duration) {
 	if window <= 0 {
 		return
 	}
-	d := time.Duration(mrand.Int64N(int64(window)))
+	// R20260527122801-GO-018 defensive: int64(window) underflow guard
+	// so future Schedule providers returning non-monotonic Next don't
+	// panic Int64N. window is already a time.Duration (int64) and the
+	// `window <= 0` check above covers the normal range, but a hostile
+	// or buggy custom Schedule could conceivably produce a period that
+	// arithmetic clamps to a non-positive int64; mrand.Int64N panics
+	// on n <= 0, so a single extra branch keeps the tick goroutine
+	// from going down to robfig/cron's recover path.
+	n := int64(window)
+	if n <= 0 {
+		return
+	}
+	d := time.Duration(mrand.Int64N(n))
 	if d <= 0 {
 		return
 	}

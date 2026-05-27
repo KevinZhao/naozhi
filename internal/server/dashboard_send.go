@@ -1387,9 +1387,7 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	// separator fit easily in 48 bytes; the SHA-256 input is byte-identical
 	// to the prior "%d|%d" form so the resulting ETag is unchanged.
 	var etagBuf [48]byte
-	etagSeed := strconv.AppendInt(etagBuf[:0], info.Size(), 10)
-	etagSeed = append(etagSeed, '|')
-	etagSeed = strconv.AppendInt(etagSeed, info.ModTime().UnixNano(), 10)
+	etagSeed := buildAttachmentETagSeed(etagBuf[:0], info.Size(), info.ModTime())
 	etagSum := sha256.Sum256(etagSeed)
 	// R246-SEC-13: widen the ETag from 8 (64-bit) to 12 bytes (96-bit) of the
 	// hash. The header is opportunistically cacheable per object, but a 64-bit
@@ -1421,4 +1419,22 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox; img-src 'self' data:")
 
 	http.ServeContent(w, r, filepath.Base(resolved), info.ModTime(), f)
+}
+
+// buildAttachmentETagSeed builds the SHA-256 input for the attachment ETag.
+// Format: "<size>|<mtime-millis>" appended into dst. Caller passes a stack
+// buffer slice header so the hot path stays allocation-free (R224-PERF-4).
+//
+// R20260527122801-SEC-14: millisecond precision (was UnixNano). Nanoseconds
+// gave an authenticated attacker an extra 30 bits of (size, mtime) entropy
+// to brute-force per object via repeated If-None-Match probes. Milliseconds
+// still distinguish every real attachment write — filesystem mtime updates
+// land at human-message cadence, well above 1ms granularity — so cache
+// effectiveness is unaffected. Existing on-the-wire ETags will rotate once
+// (clients perform one conditional revalidate) and resume normal caching.
+func buildAttachmentETagSeed(dst []byte, size int64, mtime time.Time) []byte {
+	dst = strconv.AppendInt(dst, size, 10)
+	dst = append(dst, '|')
+	dst = strconv.AppendInt(dst, mtime.UnixMilli(), 10)
+	return dst
 }

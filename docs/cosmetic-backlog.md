@@ -287,3 +287,33 @@
 - [R20260527-COR-13] SetTelemetry godoc 'plain assignment is uncontended' wrong against main.go ordering (already fixed in #R20260527-GO-1) — internal/cron/scheduler_callbacks.go:65
 - [R20260527-COR-20] sendMu hold across full passthrough turn breaks lock-ordering doc claim cross-reference — internal/session/managed.go:1024
 - [R20260527-COS-3] dashboard_cron_transcript Lstat→Open uses bare os.Open instead of openWorkspaceFile/O_NOFOLLOW (already R249-SEC-4) — internal/server/dashboard_cron_transcript.go:0
+- [R20260527122801-GO-005] buildUserEntry image goroutines 不接 ctx,Send 取消时仍 await thumbnail — internal/cli/process_send.go:65
+- [R20260527122801-GO-006] ACPProtocol.WriteInterrupt buf [256]byte sid 长度无 sanity — internal/cli/protocol_acp.go:497
+- [R20260527122801-GO-008] sysession runDaemonLoop jitter timer ctx.Done 分支不 drain — internal/sysession/manager.go:516
+- [R20260527122801-GO-010] Scheduler.Stop gcWaitBudget 后 wrapper goroutine 仍 park — internal/cron/scheduler.go:1238
+- [R20260527122801-GO-011] ACP non-shim reader 在 timeout 后泄漏 (R224-GO-2 known design gap) — internal/cli/protocol_acp.go:1133
+- [R20260527122801-GO-012] cron.executeOpt jobInflight Load+LoadOrStore 双步骤 alloc 浪费 — internal/cron/scheduler_run.go:193
+- [R20260527122801-GO-013] persistOnShutdown lastSavedSeq 拒绝时无显式日志区分 — internal/cron/scheduler.go:1372
+- [R20260527122801-GO-015] containsSessionID fast-path 不写 cache(已注释合理化) — internal/cron/scheduler_session.go:122
+- [R20260527122801-GO-016] Process.Send WriteMessage 失败后 state=Ready 与 readLoop transitionToDead 窗口 — internal/cli/process_send.go:130
+- [R20260527122801-GO-017] eventlog Append 双 sink dispatch 两次 atomic Load 之间 reconfigure 窄窗 — internal/cli/eventlog.go:1193
+- [R20260527122801-CR-9] Process.setDeathReason upgrade-from-empty godoc 与 best-effort 实现失配 — internal/cli/process.go:430
+- [R20260527122801-CR-10] eventlog Append double-fire race(R20260527122801-GO-017 同源) — internal/cli/eventlog.go:1193
+- [R20260527122801-CR-14] durationMS<0 silent clamp 应改 slog.Warn — internal/cron/scheduler_finish.go:159
+- [R20260527122801-CR-17] eventlog Time==0 sentinel 与 unix epoch 0 撞车(P2 cosmetic) — internal/cli/eventlog.go:1097
+- [R20260527122801-CR-19] AllowMissingSender 命名误导 NoopCapabilities.Send 仍 panic — internal/dispatch/dispatch.go:411
+- [R20260527122801-CR-20] drainTriggerWG 1ms floor metric 与 stopBudget 不足混在一起 — internal/cron/scheduler.go:1346
+- [R20260527122801-CR-21] eventlog persister WriteRecordRaw 绕过 logBuf 注释应说明 O_APPEND 安全 — internal/eventlog/persist/persister.go:1078
+- [R20260527122801-CR-25] applyDefaults godoc "in place" 在 NewScheduler 调用处不成立 — internal/cron/scheduler.go:707
+- [R20260527122801-PERF-11] workDirResolveCacheKey suffix 仍残留 string concat — internal/cron/scheduler.go:638
+- [R20260527122801-PERF-12] parseRunBytes ReadFile 未 pool buffer (250 reads/s × 2KB churn) — internal/cron/runstore.go:1144
+- [R20260527122801-PERF-13] Claude WriteMessage json.Marshal 未 pool encoder buffer (#997 类同) — internal/cli/protocol_claude.go:166
+- [R20260527122801-PERF-14] dispatch MessageQueue.mu 单锁 (sharded by key 待考虑) — internal/dispatch/msgqueue.go:178
+- [R20260527122801-ARCH-18] dispatch maxCronPromptBytes alias 双声明应直接 import cron 常量 — internal/dispatch/commands.go:686
+- [R20260527122801-ARCH-19] cron.AgentOpts/SessionStatus/InterruptOutcome 复刻一对一(由 ARCH-1 解决) — internal/cron/agent_opts.go:28
+- [R20260527122801-ARCH-20] scheduler_session.go 文件名歧义(实际给 session 反向用) — internal/cron/scheduler_session.go:27
+- [R20260527122801-ARCH-21] server 当 sysession→runtelemetry 胶水(cron 已对齐 broadcaster) — internal/server/dashboard.go:451
+- [R20260527122801-ARCH-22] Process.Close 实为 StopCLI 而非 io.Closer Close — internal/cli/process.go:430
+- [R20260527122801-SEC-9] feishu token-only 模式 hash-DoS hardening (production warn) — internal/platform/feishu/transport_hook.go:107
+- [R20260527122801-SEC-10] WSDropped multitenant 警示加到 validateConfig — internal/server/wshub.go:155
+- [R20260527122801-SEC-11] cron executeOpt nil-router 兜底位置(应在 inflight CAS 之前) — internal/cron/scheduler_run.go:739

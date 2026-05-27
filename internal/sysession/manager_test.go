@@ -442,6 +442,81 @@ func TestManager_ValidationDoesNotTripBreaker(t *testing.T) {
 	}
 }
 
+// TestManager_StopPreStart_DoesNotBurnStopOnce pins R20260527122801-GO-003:
+// calling Stop before Start used to consume m.stopOnce via stopOnce.Do(noop),
+// so the legitimate Stop after a successful Start would observe the
+// already-fired sync.Once and skip cancelling daemon ctx — daemon goroutines
+// then leaked until process exit. The early path now returns without touching
+// stopOnce.
+//
+// We assert the post-fix sequence: pre-Start Stop → Start → Stop drains
+// m.wg within a generous deadline. With the bug present, m.wg.Wait inside
+// the Stop watcher goroutine would block forever (daemon ctx never
+// cancelled), and our explicit drain check below would time out.
+func TestManager_StopPreStart_DoesNotBurnStopOnce(t *testing.T) {
+	pulse, tickFn := pulseTicker()
+
+	d := &signalDaemon{name: "auto-titler"}
+	withRegistry(t, []builtinDaemonFactory{
+		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
+	})
+
+	router := newFakeRouter()
+	m, err := NewManager(Config{
+		Enabled:     true,
+		TickTimeout: 100 * time.Millisecond,
+		Router:      router,
+		Daemons: map[string]DaemonRuntimeConfig{
+			"auto-titler": {Enabled: true, Tick: 50 * time.Millisecond},
+		},
+		NewTicker: tickFn,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// 1) Stop pre-Start: must be a true no-op (cancelP is nil; early
+	// return). Pre-fix this would burn stopOnce.
+	m.Stop(context.Background())
+
+	// 2) Start: spawns the daemon goroutine and publishes cancelP.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx)
+
+	// Drive one tick to confirm the daemon is alive (sanity).
+	pulse <- time.Now()
+	deadline := time.Now().Add(2 * time.Second)
+	for d.calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if d.calls.Load() == 0 {
+		t.Fatal("daemon Tick was never invoked after Start")
+	}
+
+	// 3) Stop: must cancel daemon ctx and drain m.wg. We bound the
+	// Stop call with a stopCtx; if the bug were present, Stop would
+	// hit the early-return branch (stopOnce already burned) and the
+	// daemon ctx would NOT be cancelled. We additionally probe m.wg
+	// directly so the assertion does not rely on Stop's internal
+	// watcher behaviour.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopCancel()
+	m.Stop(stopCtx)
+
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		// ok — daemon ctx was cancelled and goroutine returned.
+	case <-time.After(2 * time.Second):
+		t.Fatal("m.wg did not drain after Stop — daemon ctx was never cancelled, suggesting stopOnce was consumed by the pre-Start Stop")
+	}
+}
+
 // withRegistry temporarily replaces builtinDaemons with the supplied
 // list and restores the original on test cleanup.  Used to inject test
 // daemons without polluting other parallel tests' view (each parallel

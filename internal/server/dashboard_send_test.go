@@ -1,10 +1,53 @@
 package server
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
+
+// TestBuildAttachmentETagSeed_MillisecondPrecision pins R20260527122801-SEC-14:
+// the (size, mtime) ETag seed must use millisecond-resolution mtime, not
+// nanoseconds. UnixNano gave an authenticated attacker an extra 30 bits of
+// (size, mtime) entropy per object that can be brute-forced via repeated
+// If-None-Match probes. UnixMilli still distinguishes every real attachment
+// write (filesystem mtime updates land at human-message cadence, well above
+// 1ms granularity) so cache effectiveness is unaffected.
+//
+// Two times that share their millisecond truncation but differ at the
+// nanosecond level MUST produce a byte-identical seed (and therefore
+// identical SHA-256). A regression that re-introduced UnixNano would
+// produce two distinct seeds and fail this assertion.
+func TestBuildAttachmentETagSeed_MillisecondPrecision(t *testing.T) {
+	t.Parallel()
+
+	const size int64 = 4096
+	base := time.Date(2026, 5, 27, 12, 0, 0, 123_000_000, time.UTC) // …123 ms exact
+	jitterNs := base.Add(456 * time.Nanosecond)                     // same ms, different ns
+
+	a := buildAttachmentETagSeed(nil, size, base)
+	b := buildAttachmentETagSeed(nil, size, jitterNs)
+	if !bytes.Equal(a, b) {
+		t.Fatalf("ETag seed differs across sub-millisecond mtime jitter — UnixNano regression?\nbase:   %q\njitter: %q", a, b)
+	}
+
+	// Confirm the resulting hash matches too — the seed is the only
+	// non-stable input to sha256, so this is belt+braces.
+	if sha256.Sum256(a) != sha256.Sum256(b) {
+		t.Fatalf("ETag hash differs across sub-millisecond mtime jitter")
+	}
+
+	// Sanity guard against over-rounding: a +1ms jitter MUST still flip
+	// the seed so legitimate updates still rotate the ETag.
+	plusMs := base.Add(time.Millisecond)
+	c := buildAttachmentETagSeed(nil, size, plusMs)
+	if bytes.Equal(a, c) {
+		t.Fatalf("ETag seed unchanged across +1ms mtime — over-rounding regression: %q", a)
+	}
+}
 
 // TestAnonCookieMaxAge_BoundedAt7Days pins R247-SEC-15 / #514: the nz_anon
 // MaxAge MUST be bounded at the 7-day floor encoded by

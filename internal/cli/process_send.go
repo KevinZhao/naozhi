@@ -135,9 +135,6 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 		p.mu.Unlock()
 	}()
 
-	// Log user message before sending
-	p.eventLog.Append(buildUserEntry(text, images))
-
 	// Drain stale events from a previous turn that completed while no Send()
 	// was active (e.g., CLI was mid-turn when service restarted and reconnected
 	// to shim). These events are already logged to EventLog by readLoop.
@@ -156,6 +153,14 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 	if err := p.protocol.WriteMessage(p.shimStdinWriter(), text, images); err != nil {
 		return nil, fmt.Errorf("write message: %w", err)
 	}
+
+	// Log user message AFTER successful protocol write so a rejected write
+	// does not leave a ghost entry in EventLog (R20260527122801-GO-002).
+	// Mirrors the passthrough.go ordering at line ~132 — both paths must
+	// commit the user bubble only once the CLI has accepted the bytes,
+	// otherwise a transient stdin-write failure leaves a permanent orphan
+	// user message in the dashboard transcript.
+	p.eventLog.Append(buildUserEntry(text, images))
 
 	noOutputDur := p.noOutputTimeout
 	if noOutputDur <= 0 {
