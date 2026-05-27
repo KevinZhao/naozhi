@@ -486,6 +486,19 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 // to match the un-persisted disk state — and skips postCleanup so the
 // mutation's lock-released side effects (cron.Remove / router.Reset)
 // don't fire on a rolled-back op.
+//
+// R20260527-GO-8 (#1300) op contract：op MUST be one of：
+//
+//  1. 全 mutate 成功 → return nil；in-memory 状态一致，persistJobsLocked
+//     紧接其后落盘（marshal 失败时见 R20260527-COR-1 / #1272 的退路语义）。
+//  2. 全无 mutate 失败 → return non-nil error；contract 是 op MUST NOT
+//     leave any partial mutation on *j when returning error。否则 perr
+//     透传给调用方但 in-memory 已脏 + persist 未触发，重启后状态发散。
+//
+// 现有 op 实现（pauseJobLocked / resumeJobLocked / deleteJobLocked-wrap）
+// 均满足该不变量：失败检查放在所有写入之前。新增 op 时 reviewer 必须验
+// 证：op 函数体内任意 return non-nil 路径之前没有 j.X = ... 写入；如果
+// op 需要先尝试再回滚，应在 op 内部完成回滚后再 return。
 type withJobByIDOpts struct {
 	op                   func(j *Job) error
 	postCleanup          func(j *Job)
