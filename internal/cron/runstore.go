@@ -1159,6 +1159,71 @@ func (s *runStore) Recent(jobID string, n int) []CronRunSummary {
 	return s.List(jobID, n, time.Time{})
 }
 
+// RecentSessionIDs returns up to n distinct non-empty SessionID strings from
+// the newest-first run history for jobID. Functionally equivalent to walking
+// `Recent(jobID, n)` and reading the SessionID field of each entry, but avoids
+// the per-row CronRunSummary value-copy that Recent's defensive `ringSnapshot`
+// makes (CronRunSummary embeds Result []byte up to ~4 KB plus several
+// allocated string fields). On the buildKnownSessionsSet hot path
+// (#1285 / R20260527-PERF-6) the caller only needs the session IDs and a
+// 50-job × 200-cap walk over Recent copies up to 10 000 summary structs of
+// pure overhead. Cache-warm fast path stays O(min(n, count)) under entry.mu;
+// cold path falls back to disk via List+filter so we never silently miss a
+// session ID that lives only on disk.
+//
+// Returns a fresh slice; safe to retain. Empty (non-nil) when the job has
+// never run or every recent run lacks a SessionID. Limit clamping mirrors
+// Recent / List.
+func (s *runStore) RecentSessionIDs(jobID string, n int) []string {
+	if s == nil || s.disabled || jobID == "" {
+		return nil
+	}
+	if !IsValidID(jobID) {
+		return nil
+	}
+	if n <= 0 {
+		n = 50
+	}
+	if n > DefaultRunsKeepCount {
+		n = DefaultRunsKeepCount
+	}
+	// Cache-warm fast path: read SessionIDs directly off the ring under
+	// entry.mu without materialising a CronRunSummary slice. Mirrors the
+	// before=zero branch of List → cacheGet but skips ringSnapshot's
+	// per-row value copy.
+	if v, ok := s.recentCache.Load(jobID); ok {
+		entry := v.(*recentCacheEntry)
+		entry.mu.Lock()
+		if entry.warm {
+			limit := n
+			if limit > entry.count {
+				limit = entry.count
+			}
+			out := make([]string, 0, limit)
+			for i := 0; i < limit; i++ {
+				if sid := entry.ringRead(i).SessionID; sid != "" {
+					out = append(out, sid)
+				}
+			}
+			entry.mu.Unlock()
+			return out
+		}
+		entry.mu.Unlock()
+	}
+	// Cold path: fall back to the cached/disk Recent walk. We pay the
+	// per-row copy here but cold misses are rare (warmCache lazy-fills on
+	// first List/Recent), so the steady-state allocation profile is the
+	// fast path above.
+	rows := s.List(jobID, n, time.Time{})
+	out := make([]string, 0, len(rows))
+	for i := range rows {
+		if sid := rows[i].SessionID; sid != "" {
+			out = append(out, sid)
+		}
+	}
+	return out
+}
+
 // Get returns the full CronRun for runID under jobID, or (nil, error)
 // when missing / corrupt. ErrCorruptRun signals "file present but
 // unusable" so the caller can render a "this run's record is broken"
