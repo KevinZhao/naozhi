@@ -286,7 +286,9 @@ func writeOK(w http.ResponseWriter) {
 // handlers in this package all follow that pattern. RNEW-PERF-001: compared
 // with json.NewDecoder(r.Body).Decode(dst), this variant avoids the 4 KiB
 // bufio.Reader the stdlib Decoder wraps around every request body — bodies
-// are already ≤ a few MiB and fit comfortably in a single []byte.
+// are already ≤ a few MiB and fit comfortably in a single []byte. We feed
+// those bytes into a json.Decoder via bytes.Reader (no internal buffering)
+// purely to enable DisallowUnknownFields below.
 //
 // Error semantics match Decoder.Decode closely: unmarshal errors, empty
 // body (io.EOF equivalent → json.Unmarshal returns "unexpected end of JSON
@@ -294,6 +296,14 @@ func writeOK(w http.ResponseWriter) {
 // caller can log/return as 400. Callers that previously wrote specific
 // 413 responses from MaxBytesReader must still check errors.As against
 // *http.MaxBytesError; they already do today.
+//
+// R20260527122801-SEC-5 (#1329): the helper now sets DisallowUnknownFields
+// on the decoder. Mass-assignment hygiene — if a future patch adds a new
+// sensitive field to a struct (e.g. `Privileged bool`) before the
+// dashboard exposes it, attackers cannot blind-POST it through any
+// endpoint that decodes via this helper. Callers receive a 400-class
+// json error ("json: unknown field …") and surface it like any other
+// malformed body.
 func decodeJSONBody(r *http.Request, dst any) error {
 	// net/http closes the body after the handler returns, but closing here
 	// is still correct for future non-HTTP callers (test mocks, potential
@@ -310,7 +320,9 @@ func decodeJSONBody(r *http.Request, dst any) error {
 		// input" that json.Unmarshal would otherwise produce.
 		return errEmptyJSONBody
 	}
-	return json.Unmarshal(body, dst)
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	return dec.Decode(dst)
 }
 
 // errEmptyJSONBody is returned by decodeJSONBody when the request has a zero-

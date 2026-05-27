@@ -801,6 +801,16 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 				}
 				return j.ID
 			}())
+		// R20260527122801-CR-13 (#1323): emit a synthetic started→ended
+		// pair so dashboard "running" counters and subscriber timelines
+		// stay consistent. errClass=router_missing distinguishes this
+		// degraded short-circuit from a real overlap_skipped. Guarded on
+		// non-nil s + j: if s is nil there's no Scheduler to broadcast
+		// from, and a nil j means we have no JobID to attach the frames
+		// to either.
+		if s != nil && j != nil {
+			s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassRouterMissing, "router unavailable", "router-missing")
+		}
 		return
 	}
 	// Guard against concurrent execution of the same job. The cron chain's

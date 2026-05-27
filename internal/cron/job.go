@@ -198,6 +198,11 @@ const (
 	ErrClassWorkDirUnreachable ErrorClass = "workdir_unreachable"
 	ErrClassWorkDirOutsideRoot ErrorClass = "workdir_outside_root"
 	ErrClassOverlapSkipped     ErrorClass = "overlap_skipped"
+	// ErrClassRouterMissing fires when executeOpt's hot-path self-defence
+	// short-circuits on a nil router (test fixtures or a misconfigured
+	// scheduler). Subscribers see a started→ended pair so dashboard
+	// "running" counters stay consistent. R20260527122801-CR-13 (#1323).
+	ErrClassRouterMissing ErrorClass = "router_missing"
 	// reserved; not yet emitted by any execute path
 	ErrClassPausedConcurrent ErrorClass = "paused_concurrent"
 	// ErrClassPanic is reserved for the future panic-recovery path
