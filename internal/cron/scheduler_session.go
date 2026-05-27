@@ -19,6 +19,27 @@ import (
 // distant call site like router.AddSessionIDExcluder.
 var _ session.SessionIDExcluder = (*Scheduler)(nil)
 
+// Compile-time guard: *session.Router must satisfy SessionRouter (the
+// cron-side consumer interface declared in scheduler.go). Mirrors the
+// SessionIDExcluder assertion above so any signature drift on the Router
+// methods cron consumes (RegisterCronStubWithChain / Reset / GetOrCreate)
+// surfaces as a `go build ./internal/cron/...` failure.
+//
+// The same assertion already lives in internal/session/contract_test.go
+// (single CI fan-in for every consumer interface), but that file is in
+// the session_test package — it does not run on `go build`. Pinning a
+// non-test guard here on the cron side catches drift in:
+//
+//   - vendored / minimal builds that exclude *_test.go;
+//   - editor / LSP "build only" feedback loops where test files are
+//     compiled separately and the failure surface is muddier;
+//   - the standard `go build ./...` path that operators run before
+//     `go test` in tight iteration.
+//
+// Adjacent to the SessionIDExcluder guard so cron's two router-shaped
+// contracts with the session package stay co-located. R249-ARCH-7 (#973).
+var _ SessionRouter = (*session.Router)(nil)
+
 // knownSessionIDsRecentCap bounds how many recent runs per job we walk
 // when building the known-IDs set. Cron jobs share the user's workspace
 // (~/.claude/projects/<workspace>/<UUID>.jsonl is co-located with regular
