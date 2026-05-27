@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1290,18 +1291,24 @@ func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
 	if limit > entry.count {
 		limit = entry.count
 	}
-	survive := 0
-	for i := 0; i < limit; i++ {
+	// R249-PERF-9 (#930): the ring is newest-first by ts and the
+	// `ts.Before(cutoff)` predicate is monotone (once a row is older than
+	// cutoff every later row in the ring is also older), so the survive
+	// boundary is exactly the smallest index i where ringRead(i).ts is
+	// before cutoff — sort.Search territory. Linear scan walks up to
+	// keepCount=200 rows on every Append-driven trim; binary search
+	// collapses that to ~log2(200) ≈ 8 ringRead calls. Cosmetic cost
+	// (handleList runs at 1Hz × N tabs and trim fires once per Append),
+	// but the cleaner shape also documents the monotonicity contract
+	// future readers need to preserve when changing the cutoff predicate.
+	survive := sort.Search(limit, func(i int) bool {
 		r := entry.ringRead(i)
 		ts := r.EndedAt
 		if ts.IsZero() {
 			ts = r.StartedAt
 		}
-		if ts.Before(cutoff) {
-			break
-		}
-		survive++
-	}
+		return ts.Before(cutoff)
+	})
 	// Zero out the dropped slots to release any retained string fields.
 	c := cap(entry.ring)
 	if c > 0 {
