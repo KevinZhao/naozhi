@@ -260,8 +260,15 @@ func fileSize(path string) (int64, bool, error) {
 // truncateFile opens + truncates + closes, returning a clearer error
 // than the bare os.Truncate (which silently succeeds on nonexistent
 // files in some environments).
+//
+// O_CREATE is necessary because reconcileIdxAheadOfLog can call us
+// against a logfile that a concurrent rotate / external operator just
+// removed; without O_CREATE we'd surface ENOENT and Recover would fail
+// the entire Persister startup. Mode 0o600 matches the per-shard log
+// permissions set by the Persister at file-creation time so a crash
+// recovery does not silently widen access. R20260527122801-CR-5.
 func truncateFile(path string, size int64) error {
-	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
