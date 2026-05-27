@@ -22,11 +22,14 @@ func TestClassifyEOF_DeathReasons(t *testing.T) {
 		want       string
 	}{
 		{name: "EOF_normal", err: io.EOF, afterDrain: false, want: DeathReasonShimEOF},
-		{name: "EOF_after_drain", err: io.EOF, afterDrain: true, want: DeathReasonShimEOF},
+		// R20260527-GO-19 (#1288): post-oversize-drain EOF/ErrClosed/read-error
+		// retain a distinct death reason so dashboards can attribute the close
+		// to the upstream overflow rather than a clean shim shutdown.
+		{name: "EOF_after_drain", err: io.EOF, afterDrain: true, want: DeathReasonShimOversizeThenEOF},
 		{name: "netClosed_normal", err: net.ErrClosed, afterDrain: false, want: DeathReasonShimEOF},
-		{name: "netClosed_after_drain", err: net.ErrClosed, afterDrain: true, want: DeathReasonShimEOF},
+		{name: "netClosed_after_drain", err: net.ErrClosed, afterDrain: true, want: DeathReasonShimOversizeThenEOF},
 		{name: "other_normal", err: errors.New("read fault"), afterDrain: false, want: DeathReasonShimReadErr},
-		{name: "other_after_drain", err: errors.New("read fault"), afterDrain: true, want: DeathReasonShimReadErr},
+		{name: "other_after_drain", err: errors.New("read fault"), afterDrain: true, want: DeathReasonShimOversizeThenErr},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

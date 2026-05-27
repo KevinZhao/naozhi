@@ -412,13 +412,15 @@ func (p *Process) slogger() *slog.Logger {
 // Death reason labels. Kept as exported constants so session/router callers
 // can match without relying on stringly-typed literals that drift.
 const (
-	DeathReasonCLIExited       = "cli_exited"
-	DeathReasonShimEOF         = "shim_eof"
-	DeathReasonShimReadErr     = "shim_read_error"
-	DeathReasonReadLoopPanic   = "readloop_panic"
-	DeathReasonKilled          = "killed"
-	DeathReasonNoOutputTimeout = "no_output_timeout"
-	DeathReasonTotalTimeout    = "total_timeout"
+	DeathReasonCLIExited           = "cli_exited"
+	DeathReasonShimEOF             = "shim_eof"
+	DeathReasonShimReadErr         = "shim_read_error"
+	DeathReasonShimOversizeThenEOF = "shim_oversize_then_eof"
+	DeathReasonShimOversizeThenErr = "shim_oversize_then_read_error"
+	DeathReasonReadLoopPanic       = "readloop_panic"
+	DeathReasonKilled              = "killed"
+	DeathReasonNoOutputTimeout     = "no_output_timeout"
+	DeathReasonTotalTimeout        = "total_timeout"
 )
 
 // setDeathReason records the death reason if not already set. First writer wins
