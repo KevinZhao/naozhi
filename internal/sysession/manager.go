@@ -11,9 +11,15 @@ import (
 	"time"
 )
 
-// osExit is os.Exit indirected through a package var so tests can swap
-// it for a panic recovery.  Stop calls this on the deadline-exceeded
-// path; production code never overrides it.
+// osExit was previously the default Stop deadline-exceeded exit hook,
+// indirected through a package var so tests could swap it for panic
+// recovery. Per #1287 (R20260527-GO-5) the default OnHardFail now binds
+// os.Exit directly so a swap of this var does NOT bleed into Manager
+// instances that left cfg.OnHardFail unset. Tests that want to observe
+// the hard-fail path MUST set cfg.OnHardFail explicitly (e.g. wrap this
+// var, or supply their own no-op / panic-recovery func). Kept exported
+// at package scope only because legacy in-pkg tests may still wire
+// through it via cfg.OnHardFail = func(c int) { osExit(c) }.
 var osExit = os.Exit
 
 // StopPolicyForceExit is the documented Stop-overflow strategy this
@@ -84,7 +90,8 @@ type Config struct {
 	NewTicker tickerFactory
 
 	// OnHardFail is invoked from Stop when stopCtx expires before
-	// daemons drain. Defaults to func(code int) { osExit(code) }.
+	// daemons drain. Defaults to os.Exit (bound directly, not through
+	// the osExit package var — see #1287 / R20260527-GO-5).
 	// Embedders that wrap sysession in a larger process (tests,
 	// future supervisor that hosts cron + sysession + server in one
 	// binary) can override this to shut down cleanly without taking
@@ -228,12 +235,17 @@ func NewManager(cfg Config) (*Manager, error) {
 	if cfg.TickTimeout <= 0 {
 		cfg.TickTimeout = defaultTickTimeout
 	}
-	// R240-ARCH-22: caller-overridable hard-fail hook. Default routes
-	// through the package-level osExit var (still test-injectable for
-	// the existing osExit-swap test pattern), but embedders can supply
-	// their own without touching package globals.
+	// R240-ARCH-22 / #1287 (R20260527-GO-5): caller-overridable hard-fail
+	// hook. Default binds os.Exit directly (NOT through the osExit pkg
+	// var) so a test that swaps osExit AND constructs another Manager
+	// without supplying cfg.OnHardFail won't see this Manager's "default"
+	// closure read the swapped osExit at call time. Tests that need to
+	// observe the hard-fail path MUST supply cfg.OnHardFail explicitly;
+	// the osExit pkg-var is reserved for the legacy in-pkg test patterns
+	// that wire NewManager directly without setting cfg.OnHardFail and
+	// rely on the caller-side var swap (see osExit godoc).
 	if cfg.OnHardFail == nil {
-		cfg.OnHardFail = func(code int) { osExit(code) }
+		cfg.OnHardFail = os.Exit
 	}
 
 	m := &Manager{
@@ -417,7 +429,25 @@ func (m *Manager) Stop(stopCtx context.Context) {
 			// embedders aren't forced to swap a package-level var to
 			// avoid taking the host process down. Default hook still
 			// calls osExit(2) — semantics unchanged for naozhi binary.
-			m.cfg.OnHardFail(2)
+			//
+			// #1286 (R20260527-COR-6): isolate the call in a recover
+			// frame. The default os.Exit never returns and never panics,
+			// but a test-supplied OnHardFail might panic. Without recover
+			// the panic propagates out of stopOnce.Do, leaves stopOnce
+			// already-fired, and (depending on the call site) leaks the
+			// watcher goroutine spawned above which is still parked on
+			// m.wg.Wait(). Logging the panic and returning normally lets
+			// Stop callers observe a clean return — they were going to be
+			// terminated anyway in the production default path.
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("sysession: OnHardFail panicked; ignoring to avoid leaking Stop watcher",
+							"panic", r)
+					}
+				}()
+				m.cfg.OnHardFail(2)
+			}()
 		}
 	})
 }

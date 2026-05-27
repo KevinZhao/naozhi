@@ -345,17 +345,27 @@ func sanitiseRunErrMsg(s string) string {
 // Reviewers tempted to inline this back into executeOpt: please add the
 // new caller(s) first, then re-evaluate.
 func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
+	s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassOverlapSkipped, "previous run still in flight", "overlap-skipped")
+}
+
+// emitSyntheticSkipped synthesises a started→ended pair for a CAS-bypassing
+// guard that rejects a tick before any inflight metadata is populated. Used
+// by both emitOverlapSkipped (per-job CAS lost) and the router=nil
+// short-circuit in executeOpt (R20260527122801-CR-13 #1323) so dashboards
+// see the same lifecycle frames they would for a real run, with the
+// errClass distinguishing why the run never reached spawn.
+//
+// logTag distinguishes the slog message on the rare RunID-mint failure
+// path so operators can tell which guard tripped.
+func (s *Scheduler) emitSyntheticSkipped(j *Job, viaTriggerNow bool, errClass ErrorClass, errMsg, logTag string) {
 	runID, err := generateRunID()
 	if err != nil {
-		// R242-CR-14 (#706): rand failure on the overlap-skipped path is
-		// already a degraded scenario — the actually-running execution still
-		// holds the inflight gate and will produce its own start/end pair.
-		// Suppressing the synthetic overlap event when we can't even mint
-		// its RunID is strictly better than panicking from the cron tick
-		// goroutine. Operators see the in-flight job's normal events; the
-		// missing overlap-skipped is purely informational.
-		slog.Error("cron: failed to generate run ID for overlap-skipped event; suppressing",
-			"job_id", j.ID, "trigger_now", viaTriggerNow, "err", err)
+		// R242-CR-14 (#706): rand failure on the synthetic-skip path is
+		// already degraded; suppressing the WS frame is strictly better
+		// than panicking from the cron tick goroutine. Operators still
+		// see the underlying guard's slog.Error.
+		slog.Error("cron: failed to generate run ID for synthetic skipped event; suppressing",
+			"job_id", j.ID, "trigger_now", viaTriggerNow, "err_class", string(errClass), "tag", logTag, "err", err)
 		return
 	}
 	startedAt := time.Now()
@@ -371,8 +381,8 @@ func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 	})
 	s.finishRun(finishArgs{
 		job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-		state: RunStateSkipped, errClass: ErrClassOverlapSkipped,
-		errMsg: "previous run still in flight", skipPersist: true,
+		state: RunStateSkipped, errClass: errClass,
+		errMsg: errMsg, skipPersist: true,
 	})
 }
 

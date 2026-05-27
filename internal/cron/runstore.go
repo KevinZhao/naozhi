@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -84,6 +85,34 @@ type runStore struct {
 	// We do not expose the slice itself — callers always receive a fresh
 	// copy so dashboard handlers can sort / filter without mutating cache.
 	recentCache sync.Map // jobID -> *recentCacheEntry
+
+	// writeFailedTotal counts CronRun WriteFileAtomic failures (disk full,
+	// permission denied, ENOSPC, etc.). R20260527122801-CR-18 (#1338): Append
+	// historically only slog.Warn'd on a write failure, so an operator whose
+	// disk filled mid-run had no actionable signal until they noticed
+	// runs/ stopped growing. We can't add a top-level metric because this
+	// package owns the runstore (cron-local concern) — expose a counter
+	// here that /health and tests can read, and bump severity to Error so
+	// log scrapers alert. The split between writeFailedDiskFullTotal and
+	// writeFailedOtherTotal lets operators distinguish "ENOSPC, free up
+	// disk" from "EACCES / IO error, investigate the storage backend".
+	writeFailedDiskFullTotal atomic.Int64
+	writeFailedOtherTotal    atomic.Int64
+}
+
+// WriteFailedTotals returns the cumulative count of CronRun WriteFileAtomic
+// failures since process start, split by failure class. Stable counter
+// semantics: monotonically non-decreasing; callers diff snapshots over
+// time to compute rates.  R20260527122801-CR-18 (#1338).
+//
+// diskFull counts errors classified by osutil.IsDiskFull (ENOSPC + EDQUOT
+// today); other counts every other write failure (EACCES, EIO, broken
+// symlink under runs/, etc.). Returns (0, 0) when s is nil or disabled.
+func (s *runStore) WriteFailedTotals() (diskFull, other int64) {
+	if s == nil {
+		return 0, 0
+	}
+	return s.writeFailedDiskFullTotal.Load(), s.writeFailedOtherTotal.Load()
 }
 
 // recentCacheEntry is the cached newest-first snapshot for one job.
@@ -523,10 +552,21 @@ func (s *runStore) Append(run *CronRun) {
 		}
 	}
 
-	lock := s.jobLock(run.JobID)
-	lock.Lock()
-	defer lock.Unlock()
-
+	// R20260527122801-PERF-4 (#1335): hoist the disk write OUT of jobLock.
+	// WriteFileAtomic is rename-atomic at the FS level — each Append writes
+	// a unique <runID>.json so two concurrent Appends do NOT collide on the
+	// destination path. Holding jobLock across the fsync+rename serialised
+	// every Append on the same job behind a slow disk, even though the
+	// per-call work is independent. ensureJobDir is also safe outside the
+	// lock: os.MkdirAll is idempotent + concurrent-safe, and the
+	// jobDirEnsured cache is a sync.Map.
+	//
+	// The interleave hazard this opens — warmCache reading the new file
+	// from disk before our cacheHeadPush re-acquires the lock — is
+	// neutralised by the RunID-dedup inside cacheHeadPush (see comment
+	// there). cacheHeadPush + skipAppendTrim + trimJobLocked still run
+	// under jobLock so the cache + trim cadence keep their per-job
+	// serialisation contract.
 	dir := filepath.Join(s.root, run.JobID)
 	if err := s.ensureJobDir(run.JobID, dir); err != nil {
 		slog.Warn("cron run: mkdir failed", "dir", dir, "err", err)
@@ -534,15 +574,35 @@ func (s *runStore) Append(run *CronRun) {
 	}
 	path := filepath.Join(dir, run.RunID+".json")
 	if err := osutil.WriteFileAtomic(path, data, 0o600); err != nil {
-		slog.Warn("cron run: write failed", "path", path, "err", err, "disk_full", osutil.IsDiskFull(err))
+		// R20260527122801-CR-18 (#1338): bump a runstore-local counter so
+		// /health (and tests) can surface the failure rate as an actionable
+		// signal, and escalate slog severity from Warn → Error so log-based
+		// alerting fires. Cron Append cannot return error to the caller
+		// (RFC §4.2 — history is best-effort), so the counter + Error log
+		// is the only operator-visible signal.
+		diskFull := osutil.IsDiskFull(err)
+		if diskFull {
+			s.writeFailedDiskFullTotal.Add(1)
+		} else {
+			s.writeFailedOtherTotal.Add(1)
+		}
+		slog.Error("cron run: write failed; run record dropped",
+			"path", path, "err", err, "disk_full", diskFull,
+			"job_id", run.JobID, "run_id", run.RunID)
 		return
 	}
-	// Push to recentCache head while still under jobLock so concurrent
-	// Append + Recent see consistent newest-first order. Cache may not
-	// yet be warm for this jobID — that's fine: cacheHeadPush is a no-op
-	// then, and the next Recent call will lazy-warm via warmCache.
+
+	// Push to recentCache head + run trim under jobLock so concurrent
+	// cacheHeadPush + cacheGetBefore + trimJobLocked stay serialised
+	// per-job. The disk write is already durable above; this critical
+	// section is now O(few-µs) ring updates instead of O(fsync) IO.
+	// Cache may not yet be warm — that's fine: cacheHeadPush no-ops then,
+	// and the next Recent call lazy-warms via warmCache.
 	// #1079: summarySrc points at the truncated copy on the over-cap retry
 	// path so the cache row matches the on-disk truncated bytes.
+	lock := s.jobLock(run.JobID)
+	lock.Lock()
+	defer lock.Unlock()
 	s.cacheHeadPush(run.JobID, summarySrc.summary())
 	if s.enableTrimGC && !s.skipAppendTrim(run.JobID) {
 		s.trimJobLocked(run.JobID, time.Now())
@@ -670,6 +730,24 @@ func (s *runStore) cacheHeadPush(jobID string, summary CronRunSummary) {
 	if cap(entry.ring) != s.keepCount {
 		entry.ringSeed(nil, s.keepCount)
 	}
+	// R20260527122801-PERF-4 (#1335): with WriteFileAtomic now hoisted out
+	// of jobLock (so concurrent Appends do not serialise on the slow
+	// fsync+rename), warmCache and Append's cacheHeadPush can interleave
+	// such that warmCache reads the freshly-renamed file(s) from disk and
+	// seeds them into the ring BEFORE the matching cacheHeadPush re-acquires
+	// the lock to push. Without dedup, that interleaving would land the
+	// same RunID twice in the ring. We scan the ring for an existing
+	// matching RunID — head-only dedup is insufficient because warmCache
+	// can seed multiple concurrently-written rows ahead of any of their
+	// late-arriving pushes (e.g. ring [Y,X], then X's late push would
+	// otherwise dup since head==Y). Cost is O(count) but the interleave
+	// is rare and the ring is small (default keepCount=200); the dedup
+	// fires only on the contended path, so amortised cost stays flat.
+	for i := 0; i < entry.count; i++ {
+		if entry.ringRead(i).RunID == summary.RunID {
+			return
+		}
+	}
 	entry.ringPushHead(summary)
 }
 
@@ -682,13 +760,19 @@ func (s *runStore) cacheHeadPush(jobID string, summary CronRunSummary) {
 // a hit (returns (nil, true)) — not a miss. Forcing a disk fallback on
 // warm-empty would re-ReadDir on every List call for jobs that have never
 // run, defeating the whole point of the cache. The "stale empty masks new
-// disk row" race the original triage worried about is foreclosed by the
-// jobLock contract: warmCache holds jobLock while running, and Append
-// holds jobLock around its WriteFileAtomic + cacheHeadPush, so the two
-// cannot interleave. After warmCache releases jobLock, any subsequent
-// Append's cacheHeadPush observes warm=true and pushes into the ring,
-// and the next cacheGet sees the new row. Empty caches do not stay empty
-// once a run lands — they stay correct.
+// disk row" race is foreclosed by a two-part contract:
+//
+//  1. warmCache holds jobLock while it ReadDirs and seeds the ring; Append
+//     also holds jobLock around its cacheHeadPush. Neither side can read
+//     a half-installed ring.
+//  2. R20260527122801-PERF-4 (#1335) hoisted Append's WriteFileAtomic OUT
+//     of jobLock so a concurrent warmCache CAN now ReadDir a fresh file
+//     before the matching cacheHeadPush runs. cacheHeadPush dedups by
+//     RunID against the ring head so the warmCache-then-push interleave
+//     does not insert a duplicate. The "fresh disk row" still becomes
+//     visible — either via warmCache's seed OR via cacheHeadPush — so
+//     readers never miss it. Empty caches do not stay empty once a run
+//     lands; they stay correct.
 func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {

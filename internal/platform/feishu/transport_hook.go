@@ -187,12 +187,27 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 					// a concurrent burst of N webhooks could each pass the Load()
 					// guard before any Add(1) fires, letting count overshoot the
 					// cap by up to N (bounded by hookSem but still observable).
+					//
+					// R20260527122801-SEC-8 (#1332): when the cap is hit, evict
+					// the oldest nonceEvictionBatch entries before refusing the
+					// request. Without this self-heal, an attacker holding a
+					// leaked verification_token can pin the map at cap for the
+					// full nonceTTL window (5 min), 429-ing every legitimate
+					// webhook. Re-check the cap after eviction; if eviction
+					// somehow returned zero entries (race with cleanupNoncesTick
+					// or a sync.Map quirk under contention), fall back to the
+					// 429 surface so memory stays bounded.
 					if n := f.seenNoncesCount.Add(1); n > maxSeenNonces {
-						f.seenNoncesCount.Add(-1)
-						slog.Warn("feishu webhook nonce map at cap, dropping request",
-							"cap", maxSeenNonces)
-						w.WriteHeader(http.StatusTooManyRequests)
-						return
+						evicted := f.evictOldestNonces()
+						if evicted == 0 || f.seenNoncesCount.Load() >= maxSeenNonces {
+							f.seenNoncesCount.Add(-1)
+							slog.Warn("feishu webhook nonce map at cap, dropping request",
+								"cap", maxSeenNonces, "evicted", evicted)
+							w.WriteHeader(http.StatusTooManyRequests)
+							return
+						}
+						slog.Warn("feishu webhook nonce map at cap, evicted oldest entries",
+							"cap", maxSeenNonces, "evicted", evicted)
 					}
 					key := ts + ":" + nonce
 					expiry := time.Now().Add(nonceTTL).Unix()
