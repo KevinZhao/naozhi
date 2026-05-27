@@ -1164,6 +1164,23 @@ func (s *runStore) DeleteJob(jobID string) {
 // jobs get capped by count; low-frequency jobs by window.
 func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	s.assertJobLockHeld(jobID)
+	// R236-PERF-12 (#532): cache-driven fast exit. trimJobLocked is invoked
+	// from Append's appendTrimBatch boundary path (every N appends as a
+	// background-drift safety net) AND from the cold-start trimAll pass.
+	// When the cache is warm and shows count strictly below keepCount, the
+	// cache enumerates every on-disk file (warmCache + jobLock-serialised
+	// Append guarantee that invariant). Combined with cache's oldest
+	// StartedAt being newer than the keepWindow cutoff, no file can possibly
+	// need removal, so the ReadDir + per-entry Stat in scanSortedRunDir is
+	// pure overhead. assertJobLockHeld above + entry.mu below prevent races
+	// with cacheHeadPush / Append. The check is purely additive: any path
+	// that would have entered the ReadDir branch still does (a cold cache
+	// or count >= keepCount falls through). Cache-trim reconciliation
+	// (cacheTrimAfterDisk) is intentionally skipped here — there was nothing
+	// to remove, so the cache is already in sync with disk.
+	if s.trimSkipFromCache(jobID, now) {
+		return
+	}
 	// R239-PERF-5 (#871): scan + sort delegated to scanSortedRunDir so the
 	// trim path is in lockstep with diskListNewestFirst (matching sort
 	// order, symlink filter, IsValidID guard) and the duplicate ReadDir +
@@ -1216,6 +1233,58 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	// cache slice to the same (count + window) policy. We hold jobLock so
 	// concurrent Append's cacheHeadPush can't race.
 	s.cacheTrimAfterDisk(jobID, cutoff)
+}
+
+// trimSkipFromCache reports whether the cache state proves trimJobLocked
+// has no work to do, allowing the caller to skip ReadDir + per-entry Stat.
+// Returns true only when ALL of:
+//
+//   - cache is warm (so count + ring entries are authoritative);
+//   - cache.count < s.keepCount (so cache enumerates every on-disk file —
+//     a count == keepCount means trim may have shed older entries beyond
+//     the ring horizon and we can no longer be sure no extra file lingers);
+//   - oldest cached row's timestamp is strictly newer than the cutoff (so
+//     no window-based eviction is due).
+//
+// Caller MUST hold jobLock(jobID); the entry.mu acquisition here pairs
+// with cacheHeadPush / cacheTrimAfterDisk so a concurrent Append's
+// metadata mutation cannot race the read. R236-PERF-12 (#532).
+func (s *runStore) trimSkipFromCache(jobID string, now time.Time) bool {
+	v, ok := s.recentCache.Load(jobID)
+	if !ok {
+		return false
+	}
+	entry := v.(*recentCacheEntry)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.warm {
+		return false
+	}
+	// keepCount-margin: at count == keepCount the cache may have rotated
+	// older entries off the ring (they could still exist on disk because
+	// the previous trim might have failed or be pending). Stay strict.
+	if entry.count >= s.keepCount {
+		return false
+	}
+	// Empty cache → nothing on disk → nothing to trim. The trimJobLocked
+	// scanSortedRunDir branch returns at len(items) == 0, but skipping the
+	// syscall entirely is cheaper.
+	if entry.count == 0 {
+		return true
+	}
+	cutoff := now.Add(-s.keepWindow)
+	oldest := entry.ringRead(entry.count - 1)
+	ts := oldest.EndedAt
+	if ts.IsZero() {
+		ts = oldest.StartedAt
+	}
+	// Strict After: equal timestamps fall back to disk to avoid an off-by-one
+	// "boundary mtime gets evicted by the disk path but not the cache path"
+	// drift between trimJobLocked's mtime + cache's StartedAt approximation.
+	if !ts.After(cutoff) {
+		return false
+	}
+	return true
 }
 
 // cacheTrimAfterDisk reconciles the recentCache for jobID after on-disk
