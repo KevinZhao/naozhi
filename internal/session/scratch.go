@@ -179,6 +179,16 @@ func (p *ScratchPool) Stop() {
 // sweep removes scratches idle past TTL. Router.Remove() is called outside
 // the pool lock to avoid holding our mutex during potentially slow process
 // teardown.
+//
+// SCALE NOTE: the inner loop uses Go's well-known range+delete pattern, which
+// is safe for builtin maps but degrades to a full O(N) walk per call. This is
+// acceptable here because the pool is hard-capped at DefaultScratchMax (20)
+// entries — even a degenerate sweep visits at most 20 keys. If that cap ever
+// grows past O(100), switch to a two-pass approach (collect IDs in pass one,
+// delete in pass two) or to a min-heap keyed by lastUsed so the sweeper can
+// stop as soon as it sees a non-expired entry. Don't ignore: at max=1000+ the
+// hot-loop allocation pattern (slice growth from `var expired`) and lock-hold
+// time both become operator-visible during heavy sweep windows.
 func (p *ScratchPool) sweep(now time.Time) {
 	cutoff := now.Add(-p.ttl).UnixNano()
 	var expired []*Scratch
