@@ -448,6 +448,27 @@ func (a *AuthHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cross-origin request refused", http.StatusForbidden)
 		return
 	}
+	// R247-SEC-25 (#528): when trustedProxy=true and X-Forwarded-For is
+	// missing or unparseable, a.clientIP(r) silently falls back to
+	// r.RemoteAddr — which under ALB/CloudFront is the proxy's single IP.
+	// Every legitimate XFF-less request would then share that one bucket,
+	// letting a single attacker burn the loginLimiter slot for every other
+	// XFF-less caller. In a properly configured trusted-proxy deployment
+	// the proxy MUST stamp XFF, so an XFF-less request is either a proxy
+	// misconfig or an attacker bypassing the proxy — either way, fail
+	// loud (400) so the operator notices, instead of degrading to a
+	// shared-bucket rate limit. Mirrors the AllowRequest gate on the
+	// general HTTP rate-limiter (R244-SEC-P3-3).
+	if !requestHasResolvableClientIP(r, a.trustedProxy) {
+		slog.Warn("login refused: trusted-proxy mode but X-Forwarded-For missing/unparseable",
+			"remote", r.RemoteAddr, "xff", r.Header.Get("X-Forwarded-For"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		if _, err := w.Write([]byte(`{"error":"missing X-Forwarded-For header"}`)); err != nil {
+			slog.Debug("write XFF error response", "err", err)
+		}
+		return
+	}
 	ip := a.clientIP(r)
 	if !a.loginAllow(ip) {
 		w.Header().Set("Content-Type", "application/json")
