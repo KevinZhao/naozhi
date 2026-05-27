@@ -313,7 +313,15 @@ func formatCronNotice(label, body string) string {
 	// closing bracket U+FF3D, visually similar but never bracket-matched
 	// by markdown parsers. Prefix invariant `[Cron <label>]` is preserved
 	// because we substitute inside label, never at the template `]`.
-	label = strings.ReplaceAll(label, "]", "］")
+	//
+	// R20260527122801-PERF-15: skip ReplaceAll alloc when label has no
+	// ']' — common case for ASCII titles. ReplaceAll always walks the
+	// string and may reallocate even when nothing matches; IndexByte is
+	// a single SIMD-accelerated scan so the fast path is essentially
+	// free on the hot tick path.
+	if strings.IndexByte(label, ']') >= 0 {
+		label = strings.ReplaceAll(label, "]", "］")
+	}
 	// R247-PERF-7 (#539): strings.Builder skips fmt.Sprintf's reflection
 	// walk over the already-bounded label/body inputs. Pre-grow once so
 	// the underlying buffer covers the largest plausible payload (label is
