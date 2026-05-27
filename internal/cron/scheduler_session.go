@@ -9,22 +9,17 @@ package cron
 
 import (
 	"time"
-
-	"github.com/naozhi/naozhi/internal/session"
 )
 
-// Compile-time guard: *Scheduler must satisfy session.SessionIDExcluder.
-// If session.SessionIDExcluder gains a method, this assertion makes the
-// breakage land here — next to the implementation — instead of at a
-// distant call site like router.AddSessionIDExcluder.
-//
-// SessionRouter is satisfied by cmd/naozhi.cronRouterAdapter (Phase B,
-// docs/rfc/cron-sysession-merge.md §3.3.3) — cron returns cron-local
-// Session / SessionStatus from GetOrCreate, *session.Router returns
-// *session.ManagedSession, so a direct `*session.Router` guard would
-// not compile. The adapter pins the SessionRouter contract via its own
-// `var _ cron.SessionRouter = cronRouterAdapter{}` at the call site.
-var _ session.SessionIDExcluder = (*Scheduler)(nil)
+// R20260527122801-ARCH-1 (#1318): The compile-time guard
+// `var _ session.SessionIDExcluder = (*Scheduler)(nil)` previously lived
+// here, which forced internal/cron to import internal/session — the
+// last reverse import in production code (RFC cron-sysession-merge
+// Phase B). The guard moved to cmd/naozhi/cron_router_adapter.go where
+// session is already imported (alongside the InterruptOutcome ordinal
+// pin and the cron.SessionRouter guard), keeping the breakage co-located
+// with the wiring that actually consumes it. cron is now fully decoupled
+// from session in production code.
 
 // knownSessionIDsRecentCap bounds how many recent runs per job we walk
 // when building the known-IDs set. Cron jobs share the user's workspace

@@ -653,6 +653,20 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 			// Shared JSONL + no timestamp ⇒ cannot attribute to this
 			// run; skip rather than leak adjacent-run state.
 			continue
+		} else if ev.Timestamp != "" {
+			// R250-SEC-8 (#1097): ts==0 but the source timestamp string
+			// is non-empty means parseISO8601MS rejected the input. Even
+			// for fresh=true (this run owns the JSONL exclusively) an
+			// unparseable timestamp signals either disk corruption or a
+			// hand-written / hostile JSONL entry that an operator with
+			// workspace write access could craft to surface across every
+			// run's transcript drawer. Align parse-failure with the
+			// empty-timestamp skip policy already used for fresh=false:
+			// drop rather than include. Empty ev.Timestamp (legitimate
+			// CLI shapes like "queue-operation" without a timestamp) is
+			// preserved on the fresh=true branch so existing metadata
+			// continues to flow through.
+			continue
 		}
 		newTurns, addedTokens, addedToolCalls, isParsed := flattenJSONLEvent(&ev, ts, len(turns))
 		if isParsed {
