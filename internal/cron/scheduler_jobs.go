@@ -360,21 +360,29 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 //
 // R241-GO-2/3 的"explicit found/ok"语义在此聚合：内部用 found 区分
 // 找不到 vs op 失败，调用方不再重复 if j == nil 的歧义判断。
+//
+// R242-GO-3 (#548)：返回的 *Job 是 in-lock 时刻 *j 的 value-copy 的地址，
+// 不再是 s.jobs[id] 的活指针。原本 j 被赋为 s.jobs[id] 后随 s.mu.Unlock
+// 一起返回给调用方，调用方在锁外读取的 j.Field 可能与另一个 goroutine 的
+// UpdateJob/SetJobPrompt 并发，触发 string header tear / data race。
+// UpdateJob (line 655) 的 critical section 已经在锁内做 *j 复制，本 helper
+// 把同样语义铺到 Delete/Pause/Resume 三入口；postCleanup 仍然收到锁外
+// 拿到的 *jobSnapshot，副作用（router.Reset / runStore.DeleteJob）只读
+// snapshot 的不可变字段（ID/Platform/ChatID）所以语义不变。
 func (s *Scheduler) withJobByID(
 	id string,
 	op func(j *Job) error,
 	postCleanup func(j *Job),
 ) (*Job, error) {
 	var save func()
-	var j *Job
+	var snapshot Job
 	var found bool
 	var opErr error
 	var perr error
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		var ok bool
-		j, ok = s.jobs[id]
+		j, ok := s.jobs[id]
 		if !ok {
 			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 			return
@@ -387,6 +395,11 @@ func (s *Scheduler) withJobByID(
 		}
 		found = true
 		save, perr = s.persistJobsLocked()
+		// R242-GO-3 (#548): value-copy under s.mu so the caller (and
+		// postCleanup) read a stable Job even if a concurrent
+		// UpdateJob / SetJobPrompt mutates the live *j right after we
+		// unlock. Mirrors UpdateJob's `return *j, save, perr` pattern.
+		snapshot = *j
 	}()
 
 	if opErr != nil {
@@ -396,13 +409,13 @@ func (s *Scheduler) withJobByID(
 		return nil, perr
 	}
 	if postCleanup != nil {
-		postCleanup(j)
+		postCleanup(&snapshot)
 	}
 	if perr != nil {
 		return nil, perr
 	}
 	save()
-	return j, nil
+	return &snapshot, nil
 }
 
 // DeleteJobByID removes a job by exact ID (unscoped, for dashboard use).
