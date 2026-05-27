@@ -17,6 +17,13 @@ import (
 // If session.SessionIDExcluder gains a method, this assertion makes the
 // breakage land here — next to the implementation — instead of at a
 // distant call site like router.AddSessionIDExcluder.
+//
+// SessionRouter is satisfied by cmd/naozhi.cronRouterAdapter (Phase B,
+// docs/rfc/cron-sysession-merge.md §3.3.3) — cron returns cron-local
+// Session / SessionStatus from GetOrCreate, *session.Router returns
+// *session.ManagedSession, so a direct `*session.Router` guard would
+// not compile. The adapter pins the SessionRouter contract via its own
+// `var _ cron.SessionRouter = cronRouterAdapter{}` at the call site.
 var _ session.SessionIDExcluder = (*Scheduler)(nil)
 
 // knownSessionIDsRecentCap bounds how many recent runs per job we walk

@@ -206,6 +206,30 @@ type SchedulerConfig struct {
 	// values fall back to the default; additive (callers that omit it
 	// keep prior behaviour). R250-GO-3.
 	RunsKeepWindow time.Duration
+	// SlowThreshold overrides defaultCronSlowThreshold (30s) when > 0.
+	// A successful cron execution exceeding this wall-clock budget is
+	// counted as "slow" (metrics.CronExecutionSlowTotal +
+	// "cron execution slow" warn). 30s suits typical interactive-agent
+	// jobs but flags every long batch run when ExecTimeout is set to
+	// 300s+; raising SlowThreshold to align with ExecTimeout silences
+	// the daily false-alarm without losing the metric for jobs that
+	// truly tip over the operator's expectation. Zero (and negative)
+	// values fall back to defaultCronSlowThreshold so callers that omit
+	// the field keep the prior behaviour. R241-ARCH-11 (#519).
+	SlowThreshold time.Duration
+	// AllowNilRouter opts the constructor out of the boot-time
+	// "router required" slog.Error contract added in R241-ARCH-6 (#510).
+	// Production wiring (cmd/naozhi) always sets Router; this flag exists
+	// so the in-package test suite — which constructs Schedulers for
+	// narrowly scoped paths (AddJob validation, persist failure injection,
+	// stop-budget timing) that never reach executeOpt or registerStub —
+	// can opt into silence without coupling those tests to a fakeRouter
+	// dependency. When unset (the default) and Router is nil,
+	// NewScheduler emits a slog.Error so misconfigurations surface at
+	// boot rather than as an opaque empty-sidebar at runtime; the
+	// registerStubByValue sync.Once log adds a second loud signal the
+	// first time the missing router would have refreshed a stub.
+	AllowNilRouter bool
 }
 
 // chatJobKey identifies a (Platform, ChatID) pair for the per-chat job
@@ -233,6 +257,18 @@ type Scheduler struct {
 	// map's working set tracks the live chat set rather than every chat
 	// that has ever owned a job. R237-PERF-5 (#661).
 	chatJobCount map[chatJobKey]int
+	// jobsByChat is a per-(Platform, ChatID) index of *Job pointers.
+	// Maintained synchronously with s.jobs writes under s.mu so
+	// findByPrefixLocked iterates only the small slice of jobs in the
+	// caller's chat instead of the full s.jobs map. With maxJobsHardCap=500
+	// and a typical 1-5 jobs/chat, the prefix-match scan drops from O(500)
+	// to O(5) per IM-prefix lookup (DeleteJob/PauseJob/ResumeJob via
+	// withJobByPrefix). Entries are deleted when the slice empties so the
+	// map's working set tracks the live chat set, mirroring chatJobCount.
+	// (Platform, ChatID) of a job is immutable post-AddJob (UpdateJob
+	// rejects both via JobUpdate field absence), so an entry never moves
+	// across keys — add appends, delete swaps-and-shrinks. R242-GO-9 (#558).
+	jobsByChat map[chatJobKey][]*Job
 	// router is set once in NewScheduler and never reassigned.
 	router SessionRouter
 	// platforms / agents / agentCommands are populated from SchedulerConfig
@@ -284,6 +320,20 @@ type Scheduler struct {
 	// jitterMax is the scheduling jitter cap. See SchedulerConfig.JitterMax.
 	// Immutable after NewScheduler returns, so no lock needed.
 	jitterMax time.Duration
+	// slowThreshold is the wall-clock budget beyond which a successful cron
+	// execution is counted as "slow". See SchedulerConfig.SlowThreshold;
+	// zero/negative reads fall through to defaultCronSlowThreshold at the
+	// callsite. Immutable after NewScheduler returns. R241-ARCH-11 (#519).
+	slowThreshold time.Duration
+	// routerNilOnce ensures registerStubByValue logs the "router missing"
+	// slog.Error at most once per Scheduler lifetime, so a router-less
+	// test fixture (or a deployment that legitimately opted into
+	// AllowNilRouter) does not spam the log across N ticks. Combined
+	// with the boot-time slog.Error in NewScheduler this gives one loud
+	// surface at startup and one loud surface at the first runtime
+	// callsite — enough to flag the wireup bug without burying the
+	// operator under repeated identical entries. R241-ARCH-6 (#510).
+	routerNilOnce sync.Once
 	// startedAtNanos 是 Start() 被调用的时刻（UnixNano）。用于 missed-schedule 检测的启动
 	// 抑制窗口——刚启动时所有长间隔 job 都会被算成"错过过"，需要
 	// (now - startedAt) > 5×period 时才算 missed。原本用 time.Time 字段，
@@ -671,21 +721,29 @@ func (cfg *SchedulerConfig) applyDefaults() {
 }
 
 func NewScheduler(cfg SchedulerConfig) *Scheduler {
-	// R20260526-GO-023: surface missing router wiring at construction so
-	// the misconfiguration shows up at boot rather than as an opaque NPE
-	// stack trace from executeOpt the first time a job ticks. We log
-	// instead of panicking because the test suite (persist_failure_test,
-	// scheduler_test, stop_budget_test, trigger_now_wg_done_test, …)
-	// constructs Schedulers without a router for narrowly-scoped paths
-	// (AddJob validation, persist failure injection, stop-budget timing)
-	// that never reach executeOpt; panicking would force a sprawling
-	// rewrite across dozens of unrelated test files. The companion
-	// R20260526-GO-004 guard inside executeOpt then short-circuits the
-	// hot path so a router-less fixture does not NPE if a job somehow
-	// does tick. Real production wiring (cmd/naozhi) always plumbs a
-	// router, so this warn fires only for misconfigurations.
-	if cfg.Router == nil {
-		slog.Warn("cron.NewScheduler: cfg.Router is nil; executeOpt will short-circuit until wired")
+	// R20260526-GO-023 / R241-ARCH-6 (#510): surface missing router wiring
+	// at construction so the misconfiguration shows up at boot rather than
+	// as an opaque NPE stack trace from executeOpt the first time a job
+	// ticks. We log slog.Error (not panic) because the test suite
+	// (persist_failure_test, scheduler_test, stop_budget_test,
+	// trigger_now_wg_done_test, …) constructs Schedulers without a router
+	// for narrowly-scoped paths (AddJob validation, persist failure
+	// injection, stop-budget timing) that never reach executeOpt;
+	// panicking would force a sprawling rewrite across dozens of unrelated
+	// test files. The companion R20260526-GO-004 guard inside executeOpt
+	// then short-circuits the hot path so a router-less fixture does not
+	// NPE if a job somehow does tick.
+	//
+	// R241-ARCH-6 (#510): Tests that legitimately want silence opt in via
+	// SchedulerConfig.AllowNilRouter (additive, default false). Production
+	// wiring (cmd/naozhi) sets Router to a non-nil adapter so the error
+	// fires only for misconfigurations + tests that haven't opted in. The
+	// upgrade from slog.Warn to slog.Error matches the operator
+	// expectation: a missing router means the dashboard sidebar is empty
+	// for the lifetime of the process — that's a wireup bug, not a
+	// transient warning.
+	if cfg.Router == nil && !cfg.AllowNilRouter {
+		slog.Error("cron.NewScheduler: cfg.Router is nil; dashboard sidebar entries will not be created and executeOpt will short-circuit. Set SchedulerConfig.Router on the production wireup, or SchedulerConfig.AllowNilRouter=true on tests that intentionally exercise router-less paths.")
 	}
 	before := cfg.MaxJobs
 	if before > maxJobsHardCap {
@@ -730,6 +788,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		),
 		jobs:                make(map[string]*Job),
 		chatJobCount:        make(map[chatJobKey]int),
+		jobsByChat:          make(map[chatJobKey][]*Job),
 		router:              cfg.Router,
 		telemetry:           cfg.Telemetry,
 		platforms:           cfg.Platforms,
@@ -750,6 +809,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		// minus the leading workDir, otherwise cache lookups miss.
 		workDirCacheKeySuffix: "\x00" + cfg.AllowedRoot + "\x00" + allowedRootResolved,
 		jitterMax:             cfg.JitterMax,
+		slowThreshold:         cfg.SlowThreshold,
 		stopCtx:               stopCtx,
 		stopCancel:            stopCancel,
 		runStore:              newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
@@ -887,7 +947,9 @@ func (s *Scheduler) Start() error {
 		}
 		if j.Paused {
 			s.jobs[j.ID] = j
-			s.chatJobCount[chatJobKey{Platform: j.Platform, ChatID: j.ChatID}]++
+			key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+			s.chatJobCount[key]++
+			s.jobsByChat[key] = append(s.jobsByChat[key], j)
 			stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 			continue
 		}
@@ -896,7 +958,9 @@ func (s *Scheduler) Start() error {
 			continue
 		}
 		s.jobs[j.ID] = j
-		s.chatJobCount[chatJobKey{Platform: j.Platform, ChatID: j.ChatID}]++
+		key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+		s.chatJobCount[key]++
+		s.jobsByChat[key] = append(s.jobsByChat[key], j)
 		stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 	}
 	jobCount := len(s.jobs)
@@ -941,8 +1005,21 @@ func (s *Scheduler) Start() error {
 // R232-CR-12 把原 registerStub(*Job) / registerStubByValue / stubChain 三
 // 个仅参数差异的 helper 合成单个值参数版本：避免持锁路径误传 *Job 指针
 // 后被并发 UpdateJob 改动；调用方一律先快照字段再传值。
+//
+// R241-ARCH-6 (#510): the historical "silent no-op when router is nil"
+// hid wireup bugs because the misconfiguration only surfaced as a
+// missing dashboard sidebar entry, not as a startup or first-tick
+// failure. The construction-time slog.Error in NewScheduler now flags
+// the missing wiring loud at boot; this callsite additionally logs the
+// first time it would have refreshed a stub but couldn't (sync.Once
+// gate so a router-less test fixture / AllowNilRouter deployment does
+// not spam the log across N ticks).
 func (s *Scheduler) registerStubByValue(id, workDir, prompt, lastSessionID string) {
 	if s.router == nil {
+		s.routerNilOnce.Do(func() {
+			slog.Error("cron: registerStubByValue called without a router; dashboard sidebar will be empty for this scheduler — wireup bug or missing SchedulerConfig.Router?",
+				"job_id", id)
+		})
 		return
 	}
 	var chain []string
@@ -1104,13 +1181,24 @@ func (s *Scheduler) Stop() {
 	}
 	s.stopCancel()
 
-	// R236-GO-01: wait for the cold-start GC goroutine spawned in Start()
-	// before draining the cron scheduler. Without this, trimAll's filesystem
-	// mutations on the runs/ tree race with Stop's final persist path and
-	// any in-flight Append from a TriggerNow draining via triggerWG.Wait.
-	// Bounded by a 5s timer so a wedged trimAll cannot pin Stop past
-	// stopBudget — the goroutine is naturally short-lived (ReadDir + N
-	// Removes), so any timeout here indicates a stuck filesystem.
+	// R247-CR-4 (#584): the four shutdown stages each own an explicit
+	// budget; Stop() orchestrates them in order. Each helper logs a Warn +
+	// bumps its CronStopBudgetExceeded* counter on its own deadline; Stop
+	// itself contains no budget arithmetic.
+	s.waitGCDrain()
+	deadlineHit, stopStart := s.drainCronStop()
+	if !deadlineHit {
+		s.drainTriggerWG(stopStart)
+	}
+	s.persistOnShutdown()
+}
+
+// waitGCDrain blocks until the cold-start GC goroutine spawned in Start()
+// completes or gcWaitBudget elapses. Filesystem mutations on the runs/
+// tree from trimAll race the upcoming persist + Append-from-triggerWG
+// paths if we don't drain first; the budget keeps a wedged trimAll from
+// pinning systemd TimeoutStopSec. R236-GO-01 (origin) / R247-CR-4 (extract).
+func (s *Scheduler) waitGCDrain() {
 	gcDone := make(chan struct{})
 	go func() {
 		s.gcWG.Wait()
@@ -1128,7 +1216,15 @@ func (s *Scheduler) Stop() {
 		metrics.CronStopBudgetExceededGCTotal.Add(1)
 		slog.Warn("cron: gc goroutine wait timeout", "budget", gcWaitBudget)
 	}
+}
 
+// drainCronStop signals the robfig/cron runner to stop accepting new ticks
+// and waits up to stopBudget for in-flight ticks to drain. Returns
+// (deadlineHit, stopStart) — caller skips drainTriggerWG when deadlineHit
+// is true (the budget is shared across both phases). stopStart anchors the
+// remaining-budget arithmetic in drainTriggerWG so both phases account
+// against the same wall clock. R246-GO-13 / R247-CR-4.
+func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
 	cronDoneCtx := s.cron.Stop()
 
 	// Single overall deadline shared across both waits. If cron.Stop drains
@@ -1146,11 +1242,10 @@ func (s *Scheduler) Stop() {
 	// independent receivers); a fresh time.After on the remaining budget
 	// is the explicit, documented pattern. The first select still uses
 	// the NewTimer so we can defer-Stop it on the early-drain path.
-	stopStart := time.Now()
+	stopStart = time.Now()
 	deadline := time.NewTimer(stopBudget)
 	defer deadline.Stop()
 
-	deadlineHit := false
 	select {
 	case <-cronDoneCtx.Done():
 	case <-deadline.C:
@@ -1160,91 +1255,89 @@ func (s *Scheduler) Stop() {
 		slog.Warn("cron scheduler: stop deadline exceeded before cron.Stop drained, proceeding",
 			"budget", stopBudget)
 	}
+	return deadlineHit, stopStart
+}
 
-	// Bound triggerWG.Wait with the *remaining* share of the same budget:
-	// manual TriggerNow respects stopCtx via execute(), and R243-SEC-14
-	// (#799) wired notifyTarget's replyCtx to s.stopCtx so a hung webhook
-	// short-circuits on the cancel edge instead of waiting for its own
-	// per-target timer. The deadline here remains the backstop for any
-	// notify path that still parents on Background (e.g. a future helper
-	// or a test fake that bypasses notifyTarget): without it a stuck
-	// platform HTTP call could otherwise pin Stop() past systemd
-	// TimeoutStopSec.
+// drainTriggerWG waits for TriggerNow + deliverNotice goroutines to drain,
+// budgeted by the *remaining* share of stopBudget after drainCronStop. Caller
+// must skip this phase entirely when drainCronStop's deadlineHit is true so
+// the budget is honoured as a single overall ceiling.
+//
+// R222-GO-10: when the deadline pre-empts triggerDone, the wrapper goroutine
+// started by `go func() { s.triggerWG.Wait(); close(...) }` stays parked on
+// triggerWG.Wait — exactly the intentional-orphan path documented in the
+// Stop CONTRACT block. Reclaim happens when the OS tears the process down.
+// We deliberately do NOT add a sync.Once / chan-cancel reclaim path here:
+// triggerWG.Wait does not accept a cancel signal, and Scheduler is
+// single-shot (Stop is terminal). A goroutine-leak detector running in
+// tests that shorten stopBudget to milliseconds will surface this orphan;
+// tests that care should plumb a non-stuck deliverNotice fake instead.
+//
+// Bound triggerWG.Wait with the *remaining* share of the same budget:
+// manual TriggerNow respects stopCtx via execute(), and R243-SEC-14
+// (#799) wired notifyTarget's replyCtx to s.stopCtx so a hung webhook
+// short-circuits on the cancel edge instead of waiting for its own
+// per-target timer. The deadline here remains the backstop for any
+// notify path that still parents on Background (e.g. a future helper
+// or a test fake that bypasses notifyTarget): without it a stuck
+// platform HTTP call could otherwise pin Stop() past systemd
+// TimeoutStopSec.
+//
+// R247-CR-4: extracted from Stop().
+func (s *Scheduler) drainTriggerWG(stopStart time.Time) {
+	triggerDone := make(chan struct{})
+	go func() {
+		s.triggerWG.Wait()
+		close(triggerDone)
+	}()
+	// R246-GO-13: derive remaining budget from stopStart instead of
+	// re-reading deadline.C. If cron.Stop drained at the very edge of
+	// the budget, remaining can be near-zero; clamp to a tiny floor so
+	// we still observe an instantaneous triggerDone (already-closed
+	// channel) without wedging on a 0-duration timer. The clamp is
+	// not a guaranteed minimum wait — both the channel and the timer
+	// are checked in the same select.
 	//
-	// R222-GO-10: when the deadline pre-empts triggerDone, the wrapper
-	// goroutine started by `go func() { s.triggerWG.Wait(); close(...) }`
-	// stays parked on triggerWG.Wait — exactly the intentional-orphan path
-	// documented in the function-level CONTRACT block (lines 715–725). The
-	// cost is one wedged goroutine per process exit; reclaim happens when
-	// the OS tears the process down moments later. We deliberately do NOT
-	// add a sync.Once / chan-cancel reclaim path here: triggerWG.Wait does
-	// not accept a cancel signal, and Scheduler is single-shot (Stop is
-	// terminal). The `if !deadlineHit` outer gate already keeps us from
-	// spawning the wrapper when cron.Stop itself ate the budget. A
-	// goroutine-leak detector running in tests that shorten stopBudget to
-	// milliseconds will surface this orphan; tests that care should plumb
-	// a non-stuck deliverNotice fake instead.
-	if !deadlineHit {
-		triggerDone := make(chan struct{})
-		go func() {
-			s.triggerWG.Wait()
-			close(triggerDone)
-		}()
-		// R246-GO-13: derive remaining budget from stopStart instead of
-		// re-reading deadline.C. If cron.Stop drained at the very edge of
-		// the budget, remaining can be near-zero; clamp to a tiny floor so
-		// we still observe an instantaneous triggerDone (already-closed
-		// channel) without wedging on a 0-duration timer. The clamp is
-		// not a guaranteed minimum wait — both the channel and the timer
-		// are checked in the same select.
-		//
-		// R249-GO-4: use NewTimer + defer Stop instead of time.After.
-		// time.After returns a fresh timer whose underlying resources
-		// are released only when it fires; on the triggerDone-fast path
-		// the timer would leak its slot until expiry (~30s default).
-		// More urgently, with remaining clamped to 1ms the timer almost
-		// certainly fires before the select runs, and a fired channel
-		// from time.After is unreachable for explicit Stop. Mirror the
-		// first select's NewTimer + defer Stop pattern (line ~820) so
-		// both halves of Stop release timer state deterministically.
-		remaining := stopBudget - time.Since(stopStart)
-		if remaining < time.Millisecond {
-			remaining = time.Millisecond
-		}
-		triggerTimer := time.NewTimer(remaining)
-		defer triggerTimer.Stop()
-		select {
-		case <-triggerDone:
-		case <-triggerTimer.C:
-			// R250-GO-20 (#1083): see GC counter rationale above.
-			metrics.CronStopBudgetExceededTriggerTotal.Add(1)
-			slog.Warn("cron scheduler: stop deadline exceeded during triggerWG wait, proceeding",
-				"budget", stopBudget, "remaining_ms", remaining.Milliseconds())
-		}
+	// R249-GO-4: use NewTimer + defer Stop instead of time.After.
+	// time.After returns a fresh timer whose underlying resources
+	// are released only when it fires; on the triggerDone-fast path
+	// the timer would leak its slot until expiry (~30s default).
+	// More urgently, with remaining clamped to 1ms the timer almost
+	// certainly fires before the select runs, and a fired channel
+	// from time.After is unreachable for explicit Stop. Mirror the
+	// first select's NewTimer + defer Stop pattern (line ~820) so
+	// both halves of Stop release timer state deterministically.
+	remaining := stopBudget - time.Since(stopStart)
+	if remaining < time.Millisecond {
+		remaining = time.Millisecond
 	}
+	triggerTimer := time.NewTimer(remaining)
+	defer triggerTimer.Stop()
+	select {
+	case <-triggerDone:
+	case <-triggerTimer.C:
+		// R250-GO-20 (#1083): see GC counter rationale above.
+		metrics.CronStopBudgetExceededTriggerTotal.Add(1)
+		slog.Warn("cron scheduler: stop deadline exceeded during triggerWG wait, proceeding",
+			"budget", stopBudget, "remaining_ms", remaining.Milliseconds())
+	}
+}
 
-	// R232-ARCH-10: route shutdown save through persistJobsLocked so it
-	// participates in the saveSeq monotonic gate. Without this, a queued
-	// in-flight saveMarshaledSeq from a mutator that committed just before
-	// Stop could acquire storeMu *after* Stop's bare WriteFileAtomic and
-	// overwrite the freshest snapshot with stale data — Stop's bare write
-	// did not bump lastSavedSeq, so the staleness check would let the
-	// older write through.
+// persistOnShutdown runs the final cron_jobs.json write through
+// persistJobsLocked + saveSeq gate. Routing through the gate (not a bare
+// WriteFileAtomic) keeps a queued-but-not-landed mutator save from later
+// overwriting Stop's snapshot with stale data — R232-ARCH-10. R246-GO-5
+// (#690) tags failures with persist=FAILED_DURING_SHUTDOWN so log
+// aggregation routes them to the unrecoverable-data-loss alert channel
+// (the per-mutation "save cron store" failure is recoverable on the next
+// mutation; this one is not, the process is moments from exit).
+//
+// R247-CR-4: extracted from Stop().
+func (s *Scheduler) persistOnShutdown() {
 	s.mu.Lock()
 	save, err := s.persistJobsLocked()
 	s.mu.Unlock()
 	if err != nil {
-		// R246-GO-5 (#690): silent data loss only on shutdown is exactly the
-		// failure mode operators most need to alert on — stopCancel and
-		// cron.Stop already ran above, so any unsaved AddJob/UpdateJob/
-		// DeleteJob mutation since the last successful save is now lost
-		// forever (process is moments from exit). Tag the slog line with an
-		// explicit `persist:FAILED_DURING_SHUTDOWN` field so log aggregation
-		// can route it to a different alert channel than the per-mutation
-		// "save cron store" failure (which is recoverable on the next
-		// mutation, this one is not). Stop() remains void per the existing
-		// caller contract; surfacing the loss via structured logs is the
-		// minimum signal the issue triage prescribed.
 		slog.Error("marshal cron store on shutdown",
 			"err", err,
 			"persist", "FAILED_DURING_SHUTDOWN")

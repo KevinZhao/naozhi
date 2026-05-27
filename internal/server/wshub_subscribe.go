@@ -322,9 +322,15 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 		// R214-PERF-4: if no other client still subscribes to this key, drop
 		// the cached "history" marshal slot so its payload (capped at
 		// maxHistoryPushEntries entries; up to ~100 KB worst case) is GC'd
-		// instead of pinning memory until Shutdown. Walk under h.mu — already
-		// held — so no other client can register a subscription concurrently.
-		dropMarshalCache = !h.anyOtherClientSubscribesLocked(c, key)
+		// instead of pinning memory until Shutdown.
+		//
+		// R236-PERF-06 (#513): O(1) via the counter h.decSubscriberCountLocked
+		// just decremented. After the decrement, h.subscriberCount[key] holds
+		// the residual subscriber population on this key; zero (counter map
+		// entry deleted) means we were the last subscriber, so the cache slot
+		// is unreachable. The pre-counter implementation walked h.clients
+		// here — O(N_clients) under h.mu on every dashboard tab close.
+		dropMarshalCache = h.subscriberCount == nil || h.subscriberCount[key] == 0
 	}
 	h.mu.Unlock()
 	if dropMarshalCache && h.historyMarshalCache != nil {
@@ -350,26 +356,6 @@ func (h *Hub) decSubscriberCountLocked(key string) {
 		return
 	}
 	h.subscriberCount[key] = n - 1
-}
-
-// anyOtherClientSubscribesLocked returns true when at least one client other
-// than `excluded` has a live subscription on `key`. Caller MUST hold h.mu.
-//
-// O(N_clients) — acceptable on the unsubscribe path because the dashboard's
-// per-tab subscribe/unsubscribe rate is bounded by user navigation, not
-// per-event traffic. The fan-out hot path (eventPushLoop / broadcast) does
-// NOT call this helper; only handleUnsubscribe / Shutdown do, so this scan
-// is off the per-event critical path.
-func (h *Hub) anyOtherClientSubscribesLocked(excluded *wsClient, key string) bool {
-	for other := range h.clients {
-		if other == excluded {
-			continue
-		}
-		if _, ok := other.subscriptions[key]; ok {
-			return true
-		}
-	}
-	return false
 }
 
 // ─── Remote node handlers ────────────────────────────────────────────────────

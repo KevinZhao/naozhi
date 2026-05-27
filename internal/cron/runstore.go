@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -331,6 +332,32 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *run
 	// 上 MkdirAll，不影响功能。
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		slog.Warn("cron run: mkdir root failed", "root", root, "err", err)
+	}
+	// R247-SEC-12 (#504): MkdirAll honours `perm` only on directories it
+	// actually creates — a pre-existing runs/ tree (e.g. laid down by a
+	// prior version with 0o755, or by an attacker who racd ahead of
+	// startup) keeps whatever mode it had. The directory carries cron
+	// run JSON files that include script source, env values, and stdout
+	// summaries; world-readable parent dirs leak both the existence of
+	// scheduled jobs and their content to other OS users on the same
+	// host. Chmod the leaf to the contractual 0o700 so a pre-created
+	// 0o755 / 0o777 dir is corrected on next startup. We log + continue
+	// rather than fail because operators sometimes run naozhi inside
+	// containers where the bind-mount root cannot be chmod'd by the
+	// running uid (NoNewPrivileges, read-only rootfs); a hard fail would
+	// brick the whole cron subsystem there. The Lstat check below is the
+	// authoritative symlink/non-directory guard that protects against
+	// the path-redirect attack — Chmod is only the perm-tightening step.
+	if fi, err := os.Lstat(root); err == nil && fi.Mode()&fs.ModeSymlink == 0 && fi.IsDir() {
+		if perm := fi.Mode().Perm(); perm != 0o700 {
+			if cerr := os.Chmod(root, 0o700); cerr != nil {
+				slog.Warn("cron run: chmod runs root to 0700 failed",
+					"root", root, "had_mode", perm.String(), "err", cerr)
+			} else {
+				slog.Info("cron run: corrected runs root mode to 0700",
+					"root", root, "had_mode", perm.String())
+			}
+		}
 	}
 	// R245-SEC-1 (#825): refuse to attach to a runs/ that is a symlink or
 	// other non-directory. MkdirAll does not error when the path already
@@ -686,6 +713,16 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 	// a defensive guard against a future warmCache change rather than a
 	// real disk-error fallback path.
 	s.warmCache(jobID)
+	// R247-GO-6 (#483): re-Load() after warmCache so a concurrent
+	// cacheInvalidate (DeleteJob path) that races between our initial
+	// LoadOrStore and warmCache's own LoadOrStore cannot leave us
+	// reading the stale `entry` reference whose `warm=false` will never
+	// be flipped — warmCache populated a DIFFERENT entry under the same
+	// jobID. Without this re-Load the result was a silent permanent
+	// (nil, false) miss until the next Append re-seeded the cache.
+	if v2, ok := s.recentCache.Load(jobID); ok {
+		entry = v2.(*recentCacheEntry)
+	}
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if !entry.warm {
@@ -867,7 +904,28 @@ func (s *runStore) scanSortedRunDir(jobID string) ([]runDirItem, string, error) 
 	if err != nil {
 		return nil, dir, err
 	}
-	items := make([]runDirItem, 0, len(entries))
+	// R249-PERF-25 (#940): cap is bounded by min(len(entries), 2*keepCount).
+	// trimJobLocked keeps runs/<jobID>/ around keepCount entries (default
+	// 200) plus transient slack for in-progress writes. Sizing the slice
+	// to len(entries) over-allocates whenever the directory accumulates
+	// non-json orphans (atomic-write tmp files crashed mid-rename, hidden
+	// dotfiles, .DS_Store, operator scratch) — those entries are filtered
+	// in the loop below but still pay the initial alloc. The 2× factor
+	// gives headroom for a brief over-cap window between finishRun's
+	// Append and the subsequent trimJobLocked, while keepCount=0 (a
+	// disabled / mis-configured store) falls back to len(entries) so we
+	// don't degrade to a many-realloc growth curve. min(...) also handles
+	// the tiny-dir case where len(entries) < 2*keepCount and the cap
+	// equals the historical value — no regression for the warm steady
+	// state.
+	cap0 := len(entries)
+	if s.keepCount > 0 {
+		bound := 2 * s.keepCount
+		if bound < cap0 {
+			cap0 = bound
+		}
+	}
+	items := make([]runDirItem, 0, cap0)
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -1216,21 +1274,45 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	if len(items) == 0 {
 		return
 	}
+	// R246-GO-20 (#712): collect the to-remove paths first under jobLock,
+	// then release the lock for the os.Remove syscall batch so concurrent
+	// Append for the same jobID can proceed during slow-FS removes (FUSE/
+	// NFS can take 10s of ms per Remove). Re-acquire jobLock before
+	// cacheTrimAfterDisk so the cache reconciliation stays serialised
+	// against cacheHeadPush as before.
+	//
+	// Safety: the snapshot is captured under lock so a concurrent Append
+	// landing during the unlocked window writes a fresh file with newer
+	// mtime which is by definition not in our toRemove slice — we never
+	// delete it. The fresh Append's cacheHeadPush also runs after our
+	// release, so the cache observes the new row before our reconcile;
+	// cacheTrimAfterDisk preserves rows that survived the cutoff (it
+	// counts survivors from the head, never reaching the new entry).
+	//
 	// items sorted newest first by scanSortedRunDir, so rank checking
 	// below is index-based. Sort policy / tie-break rationale lives on
 	// scanSortedRunDir's godoc; trim and list paths must observe the same
 	// total order or the cap cutoff (i < keepCount) and the list cutoff
 	// (StartedAt < before) disagree about which equal-mtime record to
 	// drop. R235-GO-7 / R236-QA-01.
+	toRemove := make([]string, 0, len(items))
 	for i, it := range items {
 		// Both conditions must hold to keep.
 		keep := i < s.keepCount && it.mtime.After(cutoff)
 		if keep {
 			continue
 		}
-		if err := os.Remove(it.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			slog.Debug("cron run: trim remove failed", "path", it.path, "err", err)
+		toRemove = append(toRemove, it.path)
+	}
+	if len(toRemove) > 0 {
+		lock := s.jobLock(jobID)
+		lock.Unlock()
+		for _, p := range toRemove {
+			if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				slog.Debug("cron run: trim remove failed", "path", p, "err", err)
+			}
 		}
+		lock.Lock()
 	}
 	// Cache may now point to deleted entries; reconcile by trimming the
 	// cache slice to the same (count + window) policy. We hold jobLock so
@@ -1341,18 +1423,24 @@ func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
 	if limit > entry.count {
 		limit = entry.count
 	}
-	survive := 0
-	for i := 0; i < limit; i++ {
+	// R249-PERF-9 (#930): the ring is newest-first by ts and the
+	// `ts.Before(cutoff)` predicate is monotone (once a row is older than
+	// cutoff every later row in the ring is also older), so the survive
+	// boundary is exactly the smallest index i where ringRead(i).ts is
+	// before cutoff — sort.Search territory. Linear scan walks up to
+	// keepCount=200 rows on every Append-driven trim; binary search
+	// collapses that to ~log2(200) ≈ 8 ringRead calls. Cosmetic cost
+	// (handleList runs at 1Hz × N tabs and trim fires once per Append),
+	// but the cleaner shape also documents the monotonicity contract
+	// future readers need to preserve when changing the cutoff predicate.
+	survive := sort.Search(limit, func(i int) bool {
 		r := entry.ringRead(i)
 		ts := r.EndedAt
 		if ts.IsZero() {
 			ts = r.StartedAt
 		}
-		if ts.Before(cutoff) {
-			break
-		}
-		survive++
-	}
+		return ts.Before(cutoff)
+	})
 	// Zero out the dropped slots to release any retained string fields.
 	c := cap(entry.ring)
 	if c > 0 {

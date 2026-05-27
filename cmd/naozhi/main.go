@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -381,6 +382,13 @@ func sanitizeLogCmd(cmd string) string {
 	}, cmd)
 }
 
+// loopbackV4Re matches a 127/8 IPv4 dotted-quad followed by ":<port>" so a
+// substring like "version 127." or a hostname containing "foo127.example.com"
+// does not produce a false positive. The leading boundary requires a non-
+// digit / non-dot prefix (or the start of the string) so the digits cannot
+// be a tail of some other number. R236-QA-20 (#544).
+var loopbackV4Re = regexp.MustCompile(`(^|[^0-9a-z.])127\.\d{1,3}\.\d{1,3}\.\d{1,3}:`)
+
 // isNaozhiCallbackHook reports whether a hook command appears to call back into
 // naozhi's HTTP server (which would cause an infinite loop).
 // It matches: any mention of "naozhi", or an HTTP call to localhost/127.0.0.1 on
@@ -399,8 +407,16 @@ func isNaozhiCallbackHook(cmd, port string) bool {
 				return true
 			}
 		}
-		// Match any 127.x.x.x address (entire 127/8 loopback block)
-		if strings.Contains(lower, "127.") && strings.Contains(lower, ":"+port) {
+		// Match any 127.x.x.x:port address (entire 127/8 loopback block).
+		// R236-QA-20 (#544): the historical substring check
+		// `strings.Contains(lower, "127.")` produced false positives on any
+		// command containing the literal "127." even in unrelated contexts
+		// (e.g. "version 127." or hostnames such as "foo127.example.com")
+		// provided the same command also mentioned ":<port>" somewhere.
+		// The regex requires a real dotted-quad shape next to the port
+		// boundary so legitimate hooks survive while real loopback URLs
+		// keep firing.
+		if loopbackV4Re.MatchString(lower) && strings.Contains(lower, ":"+port) {
 			return true
 		}
 	}
@@ -482,9 +498,17 @@ func main() {
 		// actionable (somebody hand-edited settings.json and broke it, or a
 		// rewrite-in-place writer crashed mid-flush) and should surface at
 		// Error so it shows up in the SLO log filter.
-		if errors.Is(err, fs.ErrNotExist) {
+		//
+		// R241-GO-4 (#490): ctx-cancel mid-retry returns ctx.Err() — Warn
+		// rather than Error so shutdown noise does not pollute the
+		// corruption alerting filter, while still surfacing the cancel
+		// cause to the operator.
+		switch {
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			slog.Warn("apply ~/.claude/settings.json env: aborted by ctx cancel", "err", err)
+		case errors.Is(err, fs.ErrNotExist):
 			slog.Warn("apply ~/.claude/settings.json env: file missing", "err", err)
-		} else {
+		default:
 			slog.Error("apply ~/.claude/settings.json env: read or parse failed", "err", err)
 		}
 	}
@@ -884,6 +908,14 @@ func main() {
 					slog.Error("panic during shutdown", "panic", r)
 				}
 			}()
+			// R245-ARCH-38 (#893): emit per-phase timing at shutdown so a
+			// hung subsystem is attributable from logs alone (operator can
+			// grep `phase=` in journalctl output without an external metric
+			// store). The sysMgr → scheduler → router order is a contract
+			// (see comments below) — each phase is intentionally serial,
+			// not topo-sort-derived, because the ordering is encoded in
+			// upstream callgraphs that a runtime sort cannot infer.
+			shutdownT0 := time.Now()
 			slog.Info("shutdown starting", "reason", reason)
 			if err := osutil.SdNotify("STOPPING=1"); err != nil {
 				slog.Warn("sd_notify STOPPING failed", "err", err)
@@ -897,16 +929,23 @@ func main() {
 			// process at shutdown rather than leak goroutines.  5s budget
 			// is comfortable headroom for Runner subprocess teardown via
 			// exec.CommandContext.
+			sysT0 := time.Now()
 			if sysMgr != nil {
 				sysStopCtx, sysStopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 				sysMgr.Stop(sysStopCtx)
 				sysStopCancel()
 			}
+			slog.Info("shutdown phase complete", "phase", "sysmgr", "ms", time.Since(sysT0).Milliseconds())
 			// Scheduler must stop fully before router.Shutdown: in-flight cron
 			// jobs still call into router (GetOrCreate/Send), so tearing the
 			// router down in parallel would race against those calls.
+			schedT0 := time.Now()
 			scheduler.Stop()
+			slog.Info("shutdown phase complete", "phase", "scheduler", "ms", time.Since(schedT0).Milliseconds())
+			routerT0 := time.Now()
 			router.Shutdown()
+			slog.Info("shutdown phase complete", "phase", "router", "ms", time.Since(routerT0).Milliseconds())
+			slog.Info("shutdown complete", "reason", reason, "total_ms", time.Since(shutdownT0).Milliseconds())
 		})
 	}
 
