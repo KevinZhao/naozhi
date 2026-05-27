@@ -91,6 +91,21 @@ func NewWrapperLazy(cliPath string, proto Protocol, backend string) *Wrapper {
 	return newWrapperCommon(cliPath, proto, backend)
 }
 
+// Manager returns the wrapper's transport (today, *shim.Manager). New
+// callers should prefer this accessor over reading the ShimManager field
+// directly: when R242-ARCH-3 (#721) lands the cli.Transport interface,
+// Wrapper will hold an unexported field of that interface type and
+// Manager() will be the only forward-compatible read. Returns nil when
+// the wrapper was constructed without a manager (e.g. test fixtures) or
+// when the receiver is nil — callers can chain `w.Manager() == nil`
+// without a separate nil-Wrapper guard.
+func (w *Wrapper) Manager() *shim.Manager {
+	if w == nil {
+		return nil
+	}
+	return w.ShimManager
+}
+
 // Probe runs `<cli> --version` under the caller's context and stores
 // the parsed result on the receiver. Safe to call multiple times; each
 // call overwrites the cached version. Intended for callers that built
