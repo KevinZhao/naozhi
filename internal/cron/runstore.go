@@ -829,6 +829,20 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 // runs/<jobID>/ directory and parsing each .json file. Holds the per-job
 // disk lock so a concurrent Append can't race the warm pass.
 //
+// Post-condition (R241-CR-6 / #486): on return, the cache entry's
+// warm flag is true REGARDLESS of disk outcome — diskListNewestFirst
+// folds ReadDir failures into a nil rows + 0 corruptCount return, and
+// ringSeed installs an empty ring; warm=true is set unconditionally
+// before the inner Unlock. This intentionally caches the absence of
+// runs (or a transient disk error) for the jobLock+entry.mu window so
+// a 1Hz dashboard poller does not re-ReadDir the same failing
+// directory on every call. A subsequent Append always invalidates +
+// re-warms via cacheHeadPush + warmCacheLocked, so a transient ENOENT
+// during process startup self-heals on the first persisted run. The
+// "post-warm `if !entry.warm { return nil, false }`" guard in cacheGet
+// is therefore a defensive belt for a future warmCache change rather
+// than a real disk-error fallback path.
+//
 // R236-PERF-09 (#527, partial): the corrupt-file slog.Warn was hoisted
 // past lock release so a slow stderr / structured-log shipper can't
 // extend the jobLock + entry.mu window that blocks concurrent Append
