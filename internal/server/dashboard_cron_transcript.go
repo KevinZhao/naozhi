@@ -758,35 +758,50 @@ func parseRunPathParams(w http.ResponseWriter, r *http.Request) (runID, jobID st
 }
 
 // sanitizeWireText drops bidi / C1 / LS-PS runes (the IsLogInjectionRune
-// class) before transcript turn fields reach the JSON wire. Preserves
-// \t / \n / \r so multi-line tool_result rendering survives — calling
-// SanitizeForLog directly would map those to '_' and destroy formatting
-// in the dashboard's <pre> sink.
+// class) AND C0 control bytes (except \t / \n / \r) before transcript turn
+// fields reach the JSON wire. Preserves \t / \n / \r so multi-line
+// tool_result rendering survives — calling SanitizeForLog directly would
+// map those to '_' and destroy formatting in the dashboard's <pre> sink.
 //
 // R243-SEC-5: handleRunDetail runs Prompt/WorkDir through the strict
 // SanitizeForLog before wire-encode; the JSONL transcript path skipped
 // sanitisation entirely, so a JSONL file with bidi overrides could reach
 // the dashboard verbatim and corrupt visual ordering despite esc()-then-
 // <pre>. Defence-in-depth.
+//
+// R20260527122801-SEC-7 (#1331): IsLogInjectionRune only covers C1
+// (0x80..9F) + bidi + LS/PS — 0x1B ESC (and other C0 control bytes) used
+// to flow through verbatim. Operators copy-pasting transcript JSON into a
+// terminal viewer would then trigger ANSI escape interpretation. Drop all
+// r < 0x20 except the three whitespace chars we explicitly preserve.
 func sanitizeWireText(s string) string {
 	if s == "" {
 		return s
 	}
-	// Fast path: every IsLogInjectionRune codepoint encodes with leading
-	// byte ≥ 0x80 in UTF-8 (C1 0x80..9F → 0xC2..; bidi 0x202A..2069 →
-	// 0xE2..). Pure ASCII proves nothing to drop, so return s without
-	// allocating. Keeps tab/newline/CR which are < 0x20 ASCII.
-	hasNonASCII := false
+	// Fast path: drop nothing if string is pure ASCII printable (with the
+	// three preserved whitespace runes). Any C0 control byte (< 0x20) other
+	// than \t/\n/\r forces the slow path even on pure ASCII; bidi / C1
+	// codepoints encode with leading byte ≥ 0x80 in UTF-8.
+	dirty := false
 	for i := 0; i < len(s); i++ {
-		if s[i] >= 0x80 {
-			hasNonASCII = true
+		b := s[i]
+		if b >= 0x80 {
+			dirty = true
+			break
+		}
+		if b < 0x20 && b != '\t' && b != '\n' && b != '\r' {
+			dirty = true
 			break
 		}
 	}
-	if !hasNonASCII {
+	if !dirty {
 		return s
 	}
 	return strings.Map(func(r rune) rune {
+		// Drop C0 control runes (incl. 0x1B ESC) except \t / \n / \r.
+		if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+			return -1
+		}
 		if osutil.IsLogInjectionRune(r) {
 			return -1 // drop
 		}
