@@ -239,6 +239,19 @@ func (p *ClaudeProtocol) WriteInterrupt(w io.Writer, requestID string) error {
 // accepted (~200 B-4 KiB per event, dwarfed by the json.Unmarshal value
 // graph it feeds).
 func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
+	// R20260527122801-PERF-3 (#1334): substring fast-path skip for the
+	// dominant 99%-share frame types — hook_started / hook_response /
+	// control_response — before paying for the full Event reflect-unmarshal
+	// (~1.2 MB/s heap churn at 50 sessions × 50 events/s otherwise). The
+	// frame-type token uniquely identifies these events on the wire so a
+	// cheap strings.Contains over the raw line is sufficient; full parse
+	// still runs for genuine assistant / user / result frames where the
+	// payload is needed downstream.
+	if strings.Contains(line, `"hook_started"`) ||
+		strings.Contains(line, `"hook_response"`) ||
+		strings.Contains(line, `"control_response"`) {
+		return nil, false, nil
+	}
 	var ev Event
 	// stringToBytesUnsafe avoids the per-event []byte(line) heap copy that
 	// the obvious []byte(line) cast would force. json.Unmarshal only reads
@@ -247,13 +260,12 @@ func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	if err := json.Unmarshal(stringToBytesUnsafe(line), &ev); err != nil {
 		return nil, false, err
 	}
-	// Skip hook events
+	// Defence-in-depth: keep the structural skip in case the substring
+	// match misses (e.g. CLI starts emitting the token under a different
+	// JSON key).
 	if ev.Type == "system" && (ev.SubType == "hook_started" || ev.SubType == "hook_response") {
 		return nil, false, nil
 	}
-	// Skip control_response — it's a protocol-level ack for our own
-	// control_request (interrupt) and carries no user-visible payload.
-	// Forwarding it would confuse logEvent / EventEntriesFromEvent.
 	if ev.Type == "control_response" {
 		return nil, false, nil
 	}
