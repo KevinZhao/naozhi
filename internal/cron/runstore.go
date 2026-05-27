@@ -444,28 +444,21 @@ func (s *runStore) Append(run *CronRun) {
 		slog.Warn("cron run: skipping append with non-hex job_id", "job_id", run.JobID)
 		return
 	}
-	lock := s.jobLock(run.JobID)
-	lock.Lock()
-	defer lock.Unlock()
 
-	dir := filepath.Join(s.root, run.JobID)
-	if err := s.ensureJobDir(run.JobID, dir); err != nil {
-		slog.Warn("cron run: mkdir failed", "dir", dir, "err", err)
-		return
-	}
+	// R247-PERF-10 (#549): Marshal + over-cap shrink retry are pure CPU on
+	// the caller-owned *run; they do not touch any runStore-shared state.
+	// Hoisting them above jobLock keeps a slow JSON encode (CronRun can
+	// approach maxRunBytes for chatty jobs) from serialising a concurrent
+	// Append on the same jobID. WriteFileAtomic + cacheHeadPush + trim
+	// stay under jobLock — those are the steps that genuinely need
+	// per-job mutex serialisation. summarySrc rebinding to &shrunk on the
+	// over-cap path is preserved verbatim so the cache row stays in
+	// lockstep with the on-disk truncated record (#1079 / R250-GO-16).
 	data, err := marshalRunPooled(run)
 	if err != nil {
 		slog.Warn("cron run: marshal failed", "job_id", run.JobID, "run_id", run.RunID, "err", err)
 		return
 	}
-	// summarySrc points at the CronRun whose summary we will push into the
-	// recentCache. By default the original *run; the over-cap retry path
-	// (#1079 / R250-GO-16) rebinds it to &shrunk so the cache row stays in
-	// lockstep with the on-disk truncated record. Without this, a rare
-	// over-cap run would persist a shrunk JSON file but cache the
-	// untruncated summary — `Recent` would return cached oversized
-	// LastError/Result strings until the next process restart re-warmed
-	// the cache from disk.
 	summarySrc := run
 	if int64(len(data)) > s.maxRunBytes {
 		slog.Warn("cron run: payload exceeds size cap; truncating result/prompt and retrying",
@@ -501,6 +494,16 @@ func (s *runStore) Append(run *CronRun) {
 				"cap", s.maxRunBytes)
 			return
 		}
+	}
+
+	lock := s.jobLock(run.JobID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	dir := filepath.Join(s.root, run.JobID)
+	if err := s.ensureJobDir(run.JobID, dir); err != nil {
+		slog.Warn("cron run: mkdir failed", "dir", dir, "err", err)
+		return
 	}
 	path := filepath.Join(dir, run.RunID+".json")
 	if err := osutil.WriteFileAtomic(path, data, 0o600); err != nil {
