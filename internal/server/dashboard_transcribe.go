@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -14,6 +16,16 @@ import (
 // transcribeSemCap is the maximum number of concurrent ffmpeg transcriptions.
 // Exceeded requests receive 503 immediately to prevent CPU/memory DoS.
 const transcribeSemCap = 3
+
+// transcribeWallClockCap bounds the wall-clock lifetime of a single Transcribe
+// call (R247-SEC-6, #499). The underlying ffmpeg decode stage relies on
+// ctx-cancel propagation (no `-t` argv flag), so a crafted audio stream
+// that loops indefinitely inside libavformat could otherwise occupy a
+// transcribeSemCap slot until the outer HTTP request context cancels —
+// which for a long client connection may be effectively never. 10 minutes
+// matches the proposal in #499 and is well above the 10 MB upload cap ×
+// realistic decode throughput, so it cannot fire on legitimate audio.
+const transcribeWallClockCap = 10 * time.Minute
 
 // TranscribeHandler handles the audio transcription API endpoint.
 type TranscribeHandler struct {
@@ -126,7 +138,11 @@ func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Requ
 	if mimeType == "application/ogg" {
 		mimeType = "audio/ogg"
 	}
-	text, err := h.transcriber.Transcribe(r.Context(), data, mimeType)
+	// R247-SEC-6 (#499): bound the decode stage with a wall-clock cap so
+	// a crafted audio cannot pin a transcribeSemCap slot indefinitely.
+	tctx, tcancel := context.WithTimeout(r.Context(), transcribeWallClockCap)
+	defer tcancel()
+	text, err := h.transcriber.Transcribe(tctx, data, mimeType)
 	if err != nil {
 		slog.Warn("transcribe failed", "err", err, "mime", mimeType, "declared", declaredMIME, "size", len(data))
 		http.Error(w, "transcription failed", http.StatusInternalServerError)
