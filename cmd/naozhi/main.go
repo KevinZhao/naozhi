@@ -80,6 +80,34 @@ var awsEnvDenyList = map[string]bool{
 	"AWS_ENDPOINT_URL":            true,
 }
 
+// settingsErrSeverity classifies the outcome of applyClaudeEnvSettings so
+// main() can route to slog.Warn vs slog.Error consistently and the
+// classification itself is unit-testable. R236-QA-13 (#542): file-missing
+// is a legitimate first-run state and stays at Warn; corrupt JSON is
+// operator-actionable and surfaces at Error so the SLO log filter picks
+// it up. R241-GO-4 (#490): ctx-cancel mid-retry stays at Warn so
+// shutdown noise does not pollute the corruption alerting filter.
+type settingsErrSeverity int
+
+const (
+	settingsErrSeverityFatal settingsErrSeverity = iota
+	settingsErrSeverityCancel
+	settingsErrSeverityMissing
+)
+
+func claudeSettingsErrSeverity(err error) settingsErrSeverity {
+	switch {
+	case err == nil:
+		return settingsErrSeverityFatal // unreachable; caller already nil-checked
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return settingsErrSeverityCancel
+	case errors.Is(err, fs.ErrNotExist):
+		return settingsErrSeverityMissing
+	default:
+		return settingsErrSeverityFatal
+	}
+}
+
 // readClaudeSettingsRaw reads ~/.claude/settings.json and returns its raw bytes,
 // retrying a few times if JSON parsing fails. The retry handles the race where
 // another process (Claude CLI, a VS Code extension, etc.) is rewriting the file
@@ -492,21 +520,10 @@ func main() {
 
 	// CLI Protocol + Wrapper
 	if err := applyClaudeEnvSettings(ctx); err != nil {
-		// R236-QA-13: differentiate "file legitimately missing" from "file
-		// exists but is corrupt JSON". The former is a normal first-run /
-		// ops-not-configured state and stays at Warn; the latter is operator-
-		// actionable (somebody hand-edited settings.json and broke it, or a
-		// rewrite-in-place writer crashed mid-flush) and should surface at
-		// Error so it shows up in the SLO log filter.
-		//
-		// R241-GO-4 (#490): ctx-cancel mid-retry returns ctx.Err() — Warn
-		// rather than Error so shutdown noise does not pollute the
-		// corruption alerting filter, while still surfacing the cancel
-		// cause to the operator.
-		switch {
-		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		switch claudeSettingsErrSeverity(err) {
+		case settingsErrSeverityCancel:
 			slog.Warn("apply ~/.claude/settings.json env: aborted by ctx cancel", "err", err)
-		case errors.Is(err, fs.ErrNotExist):
+		case settingsErrSeverityMissing:
 			slog.Warn("apply ~/.claude/settings.json env: file missing", "err", err)
 		default:
 			slog.Error("apply ~/.claude/settings.json env: read or parse failed", "err", err)
