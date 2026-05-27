@@ -1016,6 +1016,31 @@ func (s *Scheduler) EnsureStub(key string) bool {
 	return true
 }
 
+// StopPolicy is the documented Stop-overflow strategy this Scheduler
+// honours: when the per-call wait budget elapses with goroutines still
+// in flight, Stop logs a warning and proceeds to the final persist,
+// leaving any orphaned goroutines for the OS to reap on process exit.
+//
+// Why this is a string constant rather than a typed enum: cron and
+// sysession independently document their Stop-overflow strategies
+// (sysession uses StopPolicyForceExit — see
+// internal/sysession/manager.go) and the divergence is a deliberate
+// security decision (Sec-LOW-2: sysession daemons run user-prompt-
+// derived strings through a CLI subprocess, so a stuck goroutine
+// touching a torn-down router could echo conversation excerpts back
+// to a different session's reply path; cron deliveries do not have
+// that surface). Mechanically unifying the two via a shared enum
+// would invite the wrong "harmonise the strategies" intuition. Each
+// package exposes its own string constant operators can grep.
+//
+// Closes #1060 (R244-ARCH-7) — promotes the implicit decision (live
+// only in comments inside Stop's godoc + R49-REL-CRON-STOP-BUDGET
+// linkage) to a typed constant operators can reference in alerts /
+// runbooks. NOT used in cron's control flow today; intentionally
+// doc-only so future "let's check policy at runtime" callers must
+// add the comparison and its tests deliberately.
+const StopPolicyBudgetThenLeak = "budget_then_leak"
+
 // defaultStopBudget is the production overall deadline Scheduler.Stop()
 // will spend waiting on cron.Stop + triggerWG before proceeding to save.
 // Shared between both waits (not doubled per wait) so a production
