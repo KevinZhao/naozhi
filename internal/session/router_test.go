@@ -651,6 +651,46 @@ func TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace(t *testing.T) {
 	_ = r.GetWorkspace("key2")
 }
 
+// TestRouter_SetWorkspace_RejectsEmptyChatKey pins R20260527122801-CR-16:
+// SetWorkspace must reject chatKey=="" before mutating workspaceOverrides.
+//
+// An unauthenticated or misrouted dashboard request that reaches this
+// path with chatKey="" used to silently install an override under the
+// empty-string key — that single slot is harmless on its own, but the
+// hardening also disarms a class of misuse where every sentinel-keyed
+// caller stomps the same slot, masking the originating call site, and
+// (worse) GetWorkspace("") would then return the attacker-supplied path
+// instead of the configured workspace fallback. Fail closed at the
+// entry point.
+func TestRouter_SetWorkspace_RejectsEmptyChatKey(t *testing.T) {
+	r := newTestRouter(3)
+	r.workspaceOverrides = make(map[string]string)
+	r.workspace = "/default"
+
+	r.SetWorkspace("", "/tmp/attacker")
+
+	// 1) Empty-key slot must not be installed.
+	if _, ok := r.workspaceOverrides[""]; ok {
+		t.Error("workspaceOverrides[\"\"] was installed; expected empty-chatKey reject")
+	}
+	// 2) Map cap must not have been consumed.
+	if got := len(r.workspaceOverrides); got != 0 {
+		t.Errorf("len(workspaceOverrides) = %d after empty-chatKey SetWorkspace; want 0", got)
+	}
+	// 3) GetWorkspace("") must fall through to the configured default,
+	// not return the attacker-supplied path.
+	if got := r.GetWorkspace(""); got != "/default" {
+		t.Errorf("GetWorkspace(\"\") = %q, want %q (must fall through to default)", got, "/default")
+	}
+
+	// 4) Real chatKeys still work — the guard must not regress the happy
+	// path.
+	r.SetWorkspace("real:user:alice", "/tmp/real")
+	if got := r.GetWorkspace("real:user:alice"); got != "/tmp/real" {
+		t.Errorf("GetWorkspace(real:user:alice) = %q, want /tmp/real", got)
+	}
+}
+
 // TestWaitSocketGoneForKey_EmptyKey — the helper must be a no-op when
 // called with an empty key (unused session). Without this guard Reset
 // would block the caller for 2s for every test that never started a shim.

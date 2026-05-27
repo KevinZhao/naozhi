@@ -154,6 +154,21 @@ const maxWorkspaceOverrides = 1024
 // SetWorkspace sets the working directory override for a chat. Bounded by
 // maxWorkspaceOverrides to prevent DoS via unique-chat-key flooding (R58-SEC-H1).
 func (r *Router) SetWorkspace(chatKey, path string) {
+	// R20260527122801-CR-16: reject empty chatKey before taking the lock.
+	// An unauthenticated or misrouted dashboard request that reaches this
+	// path with chatKey=="" used to silently install an override under the
+	// empty-string key — that single slot is harmless on its own, but the
+	// pre-check also disarms a class of misuse where every sentinel-keyed
+	// caller stomps the same slot, masking the originating call site. More
+	// importantly, GetWorkspace("") would then return the attacker-supplied
+	// path instead of the configured workspace fallback, so a downstream
+	// handler that passes chatKey through unsanitized would route to an
+	// attacker-controlled directory. Fail closed here.
+	if chatKey == "" {
+		slog.Warn("SetWorkspace: empty chatKey rejected",
+			"hint", "caller passed unauthenticated or misrouted chat_key — verify upstream auth")
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	// Allow existing keys to be updated without bumping against the cap;
