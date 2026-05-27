@@ -175,7 +175,17 @@ func (s *Scheduler) cleanupRunningJobIfIdle(jobID string) bool {
 		// against a (vanishingly rare) ID-reuse collision.
 		return false
 	}
-	s.runningJobs.LoadAndDelete(jobID)
+	// R20260527-GO-2 (#1270): use CompareAndDelete on the *runInflight
+	// pointer rather than LoadAndDelete on the key. The Load+LoadAndDelete
+	// pair is non-atomic — between the running.Load() check and the
+	// LoadAndDelete, a concurrent executeOpt for an ID-reused jobID can
+	// CompareAndSwap the gate to true and we'd then drop the now-active
+	// entry. The next jobInflight call would LoadOrStore a fresh
+	// *runInflight, leaving two goroutines holding distinct gate pointers
+	// for the same jobID → double execution. CompareAndDelete only
+	// succeeds when the map still holds OUR observed inf pointer; if a
+	// fresh entry was stored it leaves the new one alone.
+	s.runningJobs.CompareAndDelete(jobID, inf)
 	return true
 }
 
