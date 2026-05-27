@@ -774,8 +774,8 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	loc := cfg.Location
 	// R232-CR-4: surface "general" fallback being absent. ResolveAgent returns
 	// "general" when the prompt has no slash-prefix; if that agent isn't
-	// configured, executeOpt reads a zero AgentOpts (empty Backend / Model /
-	// SystemPromptFile) and the cron tick spawns with backend defaults
+	// configured, executeOpt reads a zero AgentOpts (empty Backend / Model
+	// / Workspace) and the cron tick spawns with backend defaults
 	// silently. Logging at construction makes the misconfiguration visible
 	// without changing runtime behaviour.
 	if _, ok := cfg.Agents["general"]; !ok {
