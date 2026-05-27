@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -549,6 +550,40 @@ type deadlineInterrupter interface {
 	InterruptViaControl() InterruptOutcome
 }
 
+// watchdogInterruptTimeoutDefault caps how long runDeadlineWatchdog
+// will wait for InterruptViaControl to return before recording the
+// attempt as InterruptError and unblocking the caller. R236-GO-09 (#507):
+// pre-fix, a wedged session.InterruptViaControl (control_request channel
+// pinned by a stuck stdin write or a kernel-blocked syscall) would hold
+// the goroutine forever; the caller's `<-abortCh` then blocked forever
+// and finishRun was never invoked, leaving inflight.running=true so
+// every subsequent tick skipped the job until process restart. Bounding
+// the call at 3s lets finishRun fire on the recovery path so the next
+// tick has a chance to spawn a fresh session. The InterruptViaControl
+// call itself is not aborted (no underlying ctx) — it leaks until the
+// session teardown unblocks it, but the leak is bounded (per-run,
+// drained on session.Reset) and far less harmful than a permanently
+// stuck job.
+const watchdogInterruptTimeoutDefault = 3 * time.Second
+
+// watchdogInterruptTimeoutAtomic stores the effective timeout in
+// nanoseconds. Atomic so the timeout regression tests can shorten it
+// (typically to 50ms so they don't burn 3s of CI wall time) without
+// racing the production read in the watchdog goroutine. Tests must
+// always restore the previous value via defer.
+var watchdogInterruptTimeoutAtomic atomic.Int64
+
+func init() {
+	watchdogInterruptTimeoutAtomic.Store(int64(watchdogInterruptTimeoutDefault))
+}
+
+// watchdogInterruptTimeout reads the active interrupt-call timeout.
+// Production callers see watchdogInterruptTimeoutDefault unless a test
+// has overridden it via the atomic.
+func watchdogInterruptTimeout() time.Duration {
+	return time.Duration(watchdogInterruptTimeoutAtomic.Load())
+}
+
 // runDeadlineWatchdog spawns a goroutine that waits on ctx and fires
 // sess.InterruptViaControl exactly when ctx ends with DeadlineExceeded.
 // The watchdog must run concurrently with sess.Send, NOT after — Send's
@@ -591,11 +626,29 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 	ch := make(chan abortResult, 1)
 	go func() {
 		<-ctx.Done()
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			ch <- abortResult{outcome: sess.InterruptViaControl(), fired: true}
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			ch <- abortResult{}
 			return
 		}
-		ch <- abortResult{}
+		// R236-GO-09 (#507): InterruptViaControl can block indefinitely
+		// when the protocol channel is wedged (kernel-blocked stdin
+		// write, control_request never acked). Bound it so the caller
+		// always observes a result on abortCh and finishRun runs —
+		// otherwise inflight.running stays true and every subsequent
+		// tick silently skips the job. The done channel is buffered=1
+		// so the inner goroutine never blocks on send: it returns
+		// whenever InterruptViaControl finishes, even after the timeout
+		// branch has already published an InterruptError outcome.
+		done := make(chan InterruptOutcome, 1)
+		go func() {
+			done <- sess.InterruptViaControl()
+		}()
+		select {
+		case outcome := <-done:
+			ch <- abortResult{outcome: outcome, fired: true}
+		case <-time.After(watchdogInterruptTimeout()):
+			ch <- abortResult{outcome: InterruptError, fired: true}
+		}
 	}()
 	return ch
 }
