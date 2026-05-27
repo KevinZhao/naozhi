@@ -140,7 +140,12 @@ func (p *Persister) rotate(key, stem string, w *perKeyWriter) error {
 	// close() nilled w.logBuf; if we skipped this the next
 	// handleBatch would panic on WriteRecordRaw(w.logBuf, ...)
 	// dereferencing a nil *bufio.Writer.
-	w.logBuf = bufio.NewWriterSize(logFile, logWriteBufSize)
+	//
+	// R249-PERF-21 (#995): borrow from the shared pool rather than
+	// allocating a fresh 64 KiB buffer per rotate. close() above
+	// already returned the previous logBuf, so a hot rotate cycle
+	// reuses the same backing array each iteration.
+	w.logBuf = acquireLogBuf(logFile)
 	w.idxWriter = idxWriter
 	w.bytes = newLogSize
 	// nextSeq keeps increasing; rotate does NOT recycle seq numbers.

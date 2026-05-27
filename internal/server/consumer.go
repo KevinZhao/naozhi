@@ -1,4 +1,4 @@
-// Package server — consumer.go (HubRouter)
+// Package server — consumer.go (HubRouter / ScratchRouter / SendRouter)
 //
 // HubRouter is the subset of *session.Router that *Hub consumes on the
 // WebSocket subscribe / send / interrupt paths. Declared here (not in
@@ -49,4 +49,32 @@ type HubRouter interface {
 	InterruptSessionSafe(key string) session.InterruptOutcome
 	InterruptSessionViaControl(key string) session.InterruptOutcome
 	NotifyIdle()
+}
+
+// ScratchRouter is the *ScratchHandler-only subset of *session.Router.
+// Closes the Phase 2.5 cleanup item flagged in the consumer.go godoc
+// header above: dashboard_scratch.go now reaches its router via this
+// interface instead of borrowing *Hub's concrete router handle as a
+// transit. R215-ARCH-P1-4 / #566.
+//
+// *session.Router satisfies the interface implicitly via Go structural
+// typing — no contract test wiring is required because *session.Router
+// already exposes these three methods (each call site previously typed
+// h.hub.router.X). Tests can inject a fake by assigning ScratchHandler.
+// router to a local stub.
+type ScratchRouter interface {
+	GetSession(key string) *session.ManagedSession
+	Remove(key string) bool
+	RenameSession(oldKey, newKey string) bool
+}
+
+// SendRouter is the *SendHandler-only subset of *session.Router.
+// Same Phase 2.5 cleanup as ScratchRouter: dashboard_send.go's two
+// h.hub.router.* call sites for resolveAttachmentWorkspace now flow
+// through this interface so the handler's router dependency is
+// declared at its own type rather than borrowed off *Hub.
+// R215-ARCH-P1-4 / #566.
+type SendRouter interface {
+	GetSession(key string) *session.ManagedSession
+	GetWorkspace(chatKey string) string
 }

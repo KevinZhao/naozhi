@@ -587,55 +587,11 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	if isSystemInit && ev.Model != "" {
 		p.setModel(ev.Model)
 	}
-	if p.linker != nil {
-		if isSystemInit && ev.SessionID != "" {
-			projectDir := resolveProjectDir(p.cwd)
-			p.linker.SetContext(projectDir, ev.SessionID)
-		}
-		// Trigger Resolve for BOTH in-process teammates (TeamCreate's
-		// Agent spawns; task_type="in_process_teammate") AND standalone
-		// sub-agents (Task(subagent_type=...); task_type often empty
-		// or vendor-specific). Both write subagents/agent-<task_id>.
-		// jsonl, so the linker's fast path (stat by task_id) is the
-		// right common denominator. Exclude local_bash — those only
-		// persist to tool-results/ and have no internal transcript.
-		if ev.Type == "system" && ev.SubType == "task_started" &&
-			ev.TaskType != "local_bash" && ev.TaskID != "" && ev.ToolUseID != "" {
-			taskID := ev.TaskID
-			toolUseID := ev.ToolUseID
-			// task_started.description is "<name>: <prompt body>" for
-			// teammates; for sub-agents it's just the prompt. The
-			// linker's fast path works either way; trimming to the
-			// name prefix only helps the name-scan fallback. Single
-			// TrimSpace pass — the colon-prefix branch trims again
-			// because the prefix can carry leading whitespace from
-			// the producer. (R227-PERF-20)
-			name := strings.TrimSpace(ev.Description)
-			if idx := strings.IndexByte(name, ':'); idx > 0 {
-				name = strings.TrimSpace(name[:idx])
-			}
-			linker := p.linker
-			// R225-CR-10 / R230B-PERF-7: cap description before handing it
-			// to a goroutine closure. ev.Description is unbounded user/agent
-			// text that the Resolve goroutine pins until the resolveSem slot
-			// frees, so a burst of multi-KB descriptions × 8 max parallel
-			// resolves can retain MBs of strings transiently. SubagentLinker
-			// only retains the string for the bounded resolveSem window and
-			// never decodes it, so a byte-level cap is sufficient: any UTF-8
-			// payload ≤ 8000 bytes already contains ≤ 8000 runes (and at the
-			// 2000-rune retention budget previously used here, 2000 × 4 max
-			// bytes/rune = 8000). Skipping the rune-decode loop avoids the
-			// per-event utf8 scan on the readLoop hot path. Cut at the
-			// nearest rune boundary so any operator-side dump of the value
-			// remains valid UTF-8.
-			const maxResolveDescBytes = 8000
-			desc := ev.Description
-			if len(desc) > maxResolveDescBytes {
-				desc = desc[:textutil.TruncateAtRuneBoundary(desc, maxResolveDescBytes)]
-			}
-			go linker.Resolve(p.lifecycleContext(), taskID, toolUseID, name, desc, nowMS)
-		}
-	}
+	// R237-GO-5 (#628): linker plumbing extracted into notifyLinker so
+	// dispatchProtocolEvent stays focused on the EventLog/eventCh dispatch
+	// pipeline. Behaviour is byte-identical; the helper internally re-
+	// gates on linker presence and Type/SubType.
+	p.notifyLinker(ev, nowMS, isSystemInit)
 
 	// Always log to EventLog so dashboard subscribers see events
 	// even when no Send() is active (e.g., after service restart
@@ -673,6 +629,76 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 		}
 	}
 
+	return p.deliverEvent(ev, now, log)
+}
+
+// notifyLinker forwards system/init context and system/task_started events
+// to the SubagentLinker. Extracted from dispatchProtocolEvent so the linker
+// plumbing (~50 lines mixing context-set + Resolve fan-out) doesn't crowd
+// the parent function's flat dispatch reading; behaviour is byte-identical.
+// R237-GO-5 (#628). Re-gates internally on `p.linker != nil` so the caller
+// can pass any event without a pre-check.
+func (p *Process) notifyLinker(ev Event, nowMS int64, isSystemInit bool) {
+	if p.linker == nil {
+		return
+	}
+	if isSystemInit && ev.SessionID != "" {
+		projectDir := resolveProjectDir(p.cwd)
+		p.linker.SetContext(projectDir, ev.SessionID)
+	}
+	// Trigger Resolve for BOTH in-process teammates (TeamCreate's
+	// Agent spawns; task_type="in_process_teammate") AND standalone
+	// sub-agents (Task(subagent_type=...); task_type often empty
+	// or vendor-specific). Both write subagents/agent-<task_id>.jsonl,
+	// so the linker's fast path (stat by task_id) is the right common
+	// denominator. Exclude local_bash — those only persist to
+	// tool-results/ and have no internal transcript.
+	if ev.Type != "system" || ev.SubType != "task_started" ||
+		ev.TaskType == "local_bash" || ev.TaskID == "" || ev.ToolUseID == "" {
+		return
+	}
+	taskID := ev.TaskID
+	toolUseID := ev.ToolUseID
+	// task_started.description is "<name>: <prompt body>" for
+	// teammates; for sub-agents it's just the prompt. The
+	// linker's fast path works either way; trimming to the
+	// name prefix only helps the name-scan fallback. Single
+	// TrimSpace pass — the colon-prefix branch trims again
+	// because the prefix can carry leading whitespace from
+	// the producer. (R227-PERF-20)
+	name := strings.TrimSpace(ev.Description)
+	if idx := strings.IndexByte(name, ':'); idx > 0 {
+		name = strings.TrimSpace(name[:idx])
+	}
+	linker := p.linker
+	// R225-CR-10 / R230B-PERF-7: cap description before handing it to a
+	// goroutine closure. ev.Description is unbounded user/agent text that
+	// the Resolve goroutine pins until the resolveSem slot frees, so a
+	// burst of multi-KB descriptions × 8 max parallel resolves can retain
+	// MBs of strings transiently. SubagentLinker only retains the string
+	// for the bounded resolveSem window and never decodes it, so a
+	// byte-level cap is sufficient: any UTF-8 payload ≤ 8000 bytes already
+	// contains ≤ 8000 runes (and at the 2000-rune retention budget
+	// previously used here, 2000 × 4 max bytes/rune = 8000). Skipping the
+	// rune-decode loop avoids the per-event utf8 scan on the readLoop hot
+	// path. Cut at the nearest rune boundary so any operator-side dump of
+	// the value remains valid UTF-8.
+	const maxResolveDescBytes = 8000
+	desc := ev.Description
+	if len(desc) > maxResolveDescBytes {
+		desc = desc[:textutil.TruncateAtRuneBoundary(desc, maxResolveDescBytes)]
+	}
+	go linker.Resolve(p.lifecycleContext(), taskID, toolUseID, name, desc, nowMS)
+}
+
+// deliverEvent runs the post-EventLog dispatch arm of dispatchProtocolEvent:
+// killCh probe followed by the non-blocking handoff to eventCh for Send()
+// consumption. Returns true when killCh fired and the read loop should
+// unwind. Extracted from dispatchProtocolEvent so the kill/deliver decision
+// reads as a single helper and the parent function ends with a flat tail
+// call. R237-GO-5 (#628). Behaviour is byte-identical to the inline
+// version: same death-reason set, same drainage, same drop-log levels.
+func (p *Process) deliverEvent(ev Event, now time.Time, log *slog.Logger) bool {
 	select {
 	case <-p.killCh:
 		p.setDeathReason(DeathReasonKilled)

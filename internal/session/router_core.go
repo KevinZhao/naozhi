@@ -1652,3 +1652,47 @@ func (r *Router) GetSession(key string) *ManagedSession {
 	defer r.mu.RUnlock()
 	return r.sessions[key]
 }
+
+// runHistoryTask launches fn in a goroutine tracked by r.historyWg,
+// parented on r.historyCtx. Refuses (returns false, no goroutine
+// spawned) when historyCtx is already cancelled — guards the late
+// Add(1) race against historyWg.Wait() that R232-GO-2 / R230-GO-1 /
+// R233-GO-1 patched inline.
+//
+// R222-ARCH-17 (#748): Router currently owns historyCtx/historyCancel/
+// historyWg directly; the full extraction (a HistorySubsystem with its
+// own context tree, owned alongside R222-ARCH-1 #383) is tracked
+// separately. This helper localises the spawn pattern so additional
+// subsystems do not bake more inline `historyWg.Add(1) ...
+// <-historyCtx.Done()` shapes into Router. Existing inline sites in
+// router_core / router_lifecycle that combine the spawn with a
+// concurrency semaphore + per-task timeout context remain in place;
+// they are documented at each site and will move with the larger
+// subsystem extraction.
+//
+// LOCK: callers must hold r.mu (read or write) when invoking, OR call
+// outside the lock when historyCtx is guaranteed live (NewRouter init,
+// early Start). The historyWg.Add(1) must be visible to Shutdown
+// before the goroutine begins observable work.
+func (r *Router) runHistoryTask(fn func(ctx context.Context)) bool {
+	r.historyWg.Add(1)
+	if r.historyCtx == nil {
+		// Test routers built by struct literal (skip NewRouter) get a
+		// never-cancelled background; production Router always wires
+		// historyCtx in NewRouter before any caller can reach here.
+		go func() {
+			defer r.historyWg.Done()
+			fn(context.Background())
+		}()
+		return true
+	}
+	if r.historyCtx.Err() != nil {
+		r.historyWg.Done()
+		return false
+	}
+	go func() {
+		defer r.historyWg.Done()
+		fn(r.historyCtx)
+	}()
+	return true
+}

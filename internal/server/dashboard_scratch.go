@@ -18,8 +18,15 @@ import (
 // ScratchHandler serves the /api/scratch/* endpoints used by the dashboard
 // "aside" drawer: a preview-pane chat seeded with quoted context from the
 // main transcript, kept out of the sidebar, and torn down on close or TTL.
+//
+// router is the consumer-side ScratchRouter view of *session.Router (see
+// consumer.go). The handler used to reach the router via h.hub.router.*
+// transits — R215-ARCH-P1-4 / #566 closes that Phase-2.5 cleanup item by
+// declaring the dependency on this struct directly. Wiring (dashboard.go)
+// passes hub.router; tests can inject a stub satisfying ScratchRouter.
 type ScratchHandler struct {
 	hub       *Hub
+	router    ScratchRouter
 	pool      *session.ScratchPool
 	openLimit *ipLimiter
 	agents    map[string]session.AgentOpts
@@ -95,7 +102,7 @@ func (h *ScratchHandler) handleOpen(w http.ResponseWriter, r *http.Request) {
 	// Source session must exist. Without this the pool happily spawns a
 	// scratch whose agent/workspace inheritance is based on lookups that
 	// silently miss; the user sees a confused "what was I quoting?" aside.
-	src := h.hub.router.GetSession(req.SourceKey)
+	src := h.router.GetSession(req.SourceKey)
 	if src == nil {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "source session not found"})
 		return
@@ -297,14 +304,14 @@ func (h *ScratchHandler) handlePromote(w http.ResponseWriter, r *http.Request) {
 		// Shouldn't happen: open-time ValidateSessionKey + the 4-split guard
 		// in handleOpen already reject malformed sources. Treat as a
 		// defensive programming error, kill the orphan, and report.
-		h.hub.router.Remove(sc.Key)
+		h.router.Remove(sc.Key)
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "source key malformed"})
 		return
 	}
 	short, err := shortPromoteSuffix()
 	if err != nil {
 		slog.Warn("promote suffix generation failed", "err", err)
-		h.hub.router.Remove(sc.Key)
+		h.router.Remove(sc.Key)
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "failed to promote"})
 		return
 	}
@@ -314,12 +321,12 @@ func (h *ScratchHandler) handlePromote(w http.ResponseWriter, r *http.Request) {
 	}
 	newKey := session.SessionKey(srcParts[0], srcParts[1], srcParts[2], newAgent)
 
-	if !h.hub.router.RenameSession(sc.Key, newKey) {
+	if !h.router.RenameSession(sc.Key, newKey) {
 		// Rename failed (collision, invalid new key, or the scratch's
 		// session entry vanished between Detach and Rename — the last
 		// case shouldn't happen post-Detach but handling it keeps us
 		// orphan-free under any future refactor that changes visibility).
-		h.hub.router.Remove(sc.Key)
+		h.router.Remove(sc.Key)
 		writeJSONStatus(w, http.StatusConflict, map[string]string{"error": "scratch unavailable"})
 		return
 	}

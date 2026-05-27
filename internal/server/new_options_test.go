@@ -6,84 +6,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// TestNewWithOptions_EquivalentToPositional pins the contract that
-// NewWithOptions and the legacy positional-arg New constructor produce
-// servers with identical observable state. Future refactors that add
-// fields to ServerOptions must keep both entry points in sync; this
-// test fails loudly if a positional arg stops being written by
-// buildServer.
-func TestNewWithOptions_EquivalentToPositional(t *testing.T) {
-	// Two independent routers so the test doesn't accidentally share
-	// state between the two servers — we only care that each field we
-	// passed surfaces on the resulting Server.
-	router1 := session.NewRouter(session.RouterConfig{})
-	router2 := session.NewRouter(session.RouterConfig{})
-	p := &mockPlatform{}
-	platforms := map[string]platform.Platform{"test": p}
-
-	srvPositional := New(":0", router1, platforms, nil, nil, nil, "kiro", ServerOptions{
-		WorkspaceID:   "ws-a",
-		WorkspaceName: "Alpha",
-		Version:       "v0.0.1",
-	})
-
-	srvOptions := NewWithOptions(ServerOptions{
-		Addr:          ":0",
-		Router:        router2,
-		Platforms:     platforms,
-		Backend:       "kiro",
-		WorkspaceID:   "ws-a",
-		WorkspaceName: "Alpha",
-		Version:       "v0.0.1",
-	})
-
-	// Both must set the "kiro" backend tag since Backend==kiro in both.
-	if srvPositional.backendTag != "kiro" {
-		t.Errorf("positional backendTag = %q, want kiro", srvPositional.backendTag)
-	}
-	if srvOptions.backendTag != "kiro" {
-		t.Errorf("options backendTag = %q, want kiro", srvOptions.backendTag)
-	}
-	if srvPositional.workspaceName != srvOptions.workspaceName {
-		t.Errorf("workspaceName mismatch: positional=%q options=%q",
-			srvPositional.workspaceName, srvOptions.workspaceName)
-	}
-	if srvPositional.addr != srvOptions.addr {
-		t.Errorf("addr mismatch: positional=%q options=%q",
-			srvPositional.addr, srvOptions.addr)
-	}
-	if srvPositional.router == nil || srvOptions.router == nil {
-		t.Fatal("router must be set via either constructor")
-	}
-}
-
-// TestNew_PositionalOverridesOptions locks the documented contract that
-// when a caller passes BOTH a positional arg to New and a matching field
-// in opts, the positional value wins. This prevents a subtle bug where
-// a caller populating opts.Router alongside New(addr, otherRouter, ...)
-// might expect opts.Router to be respected; documenting the wrapper's
-// override behavior prevents that confusion.
-func TestNew_PositionalOverridesOptions(t *testing.T) {
-	positionalRouter := session.NewRouter(session.RouterConfig{})
-	optsRouter := session.NewRouter(session.RouterConfig{})
-
-	// Intentionally set opts.Router to a DIFFERENT router than the
-	// positional arg. New() must use the positional one.
-	srv := New(":0", positionalRouter, nil, nil, nil, nil, "claude", ServerOptions{
-		Router: optsRouter,
-	})
-	if srv.router != positionalRouter {
-		t.Error("New positional router must override opts.Router; got opts value instead")
-	}
-}
-
 // TestNewWithOptions_DefaultBackendIsClaude verifies that an empty
 // Backend field falls back to the "cc" tag (i.e. the "claude" backend
-// selection logic). This matches the legacy New("", ...) behavior.
+// selection logic). Pre-R237-ARCH-14 this test had a sibling that
+// pinned the legacy New(":0", ...) shape; that wrapper has been deleted
+// (#614) and only the options entry point remains.
 func TestNewWithOptions_DefaultBackendIsClaude(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	srv := NewWithOptions(ServerOptions{
@@ -98,10 +28,8 @@ func TestNewWithOptions_DefaultBackendIsClaude(t *testing.T) {
 
 // TestNewWithOptions_NilMapsTolerated ensures the constructor does not
 // panic when Platforms / Agents / AgentCommands / Nodes are all nil.
-// The legacy New() already tolerated nil platforms/agents in tests; the
-// new entry point must preserve that so migrating a test from
-// New(":0", router, nil, nil, nil, nil, ...) to NewWithOptions is a
-// zero-risk rename.
+// Maps build a Server cleanly with only a router + addr — the legitimate
+// "smoke-test fixture" shape relied on by every server unit test.
 func TestNewWithOptions_NilMapsTolerated(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	srv := NewWithOptions(ServerOptions{
@@ -113,70 +41,76 @@ func TestNewWithOptions_NilMapsTolerated(t *testing.T) {
 	}
 }
 
-// TestServerNew_MarkedDeprecated pins the Round 125 audit: production
-// (cmd/naozhi/main.go) already uses NewWithOptions, and the legacy
-// positional-arg `New` constructor carries a `// Deprecated:` godoc
-// marker so new call sites get a staticcheck/gopls warning. The
-// marker must:
+// TestNewWithOptions_FieldsRoundTrip pins the contract that ServerOptions
+// fields surface verbatim on the resulting *Server. Replaces the prior
+// dual-constructor equivalence test now that the legacy positional-arg
+// `New` has been deleted (R237-ARCH-14 / #614 removal). Without this we
+// would lose coverage for "did buildServer remember to read opts.X" —
+// which is the actual invariant that the dual-test was indirectly
+// guarding.
+func TestNewWithOptions_FieldsRoundTrip(t *testing.T) {
+	router := session.NewRouter(session.RouterConfig{})
+	srv := NewWithOptions(ServerOptions{
+		Addr:          ":0",
+		Router:        router,
+		Backend:       "kiro",
+		WorkspaceID:   "ws-a",
+		WorkspaceName: "Alpha",
+		Version:       "v0.0.1",
+	})
+	// Backend selection must derive the kiro reply tag.
+	if srv.backendTag != "kiro" {
+		t.Errorf("backendTag = %q, want kiro", srv.backendTag)
+	}
+	if srv.workspaceName != "Alpha" {
+		t.Errorf("workspaceName = %q, want Alpha", srv.workspaceName)
+	}
+	if srv.addr != ":0" {
+		t.Errorf("addr = %q, want :0", srv.addr)
+	}
+	if srv.router == nil {
+		t.Fatal("router must be set")
+	}
+}
+
+// TestServerNew_NotReintroduced is the regression guard that replaces
+// the prior TestLegacyServerNew_NoNewCallSites + TestServerNew_Marked
+// Deprecated pair. Both pre-deletion tests existed to keep the
+// `func New(addr, ...)` shim from spreading; with the shim removed the
+// failure mode shifts from "callers grow" to "someone re-adds the
+// shim". This test fails the build if either:
 //
-//  1. Stay on the `New` function (not NewWithOptions).
-//  2. Point callers at NewWithOptions by name so the migration path is
-//     discoverable from the lint message alone.
+//  1. server.go gains a function whose signature begins with
+//     `func New(addr string` (the legacy shape we just removed).
+//  2. A non-test *.go file in this package adds a `New(":0",`
+//     call site (would re-introduce a positional dependency).
 //
-// We assert by reading the source file — godoc markers are not
-// reflectable at runtime. This catches both accidental removal during
-// a refactor and silent re-ordering that could break `go doc -all`.
-func TestServerNew_MarkedDeprecated(t *testing.T) {
+// R237-ARCH-14 / #614.
+func TestServerNew_NotReintroduced(t *testing.T) {
 	t.Parallel()
-	// Read the server.go source (tests and server are in the same package
-	// so a relative path works).
 	data, err := os.ReadFile("server.go")
 	if err != nil {
 		t.Fatalf("read server.go: %v", err)
 	}
-	src := string(data)
-	// The Deprecated godoc line must immediately precede `func New(`.
-	idx := strings.Index(src, "func New(addr string")
-	if idx < 0 {
-		t.Fatal("func New(addr string ...) not found in server.go")
+	// (1) The legacy func definition shape must NOT come back. Scan
+	// only at start-of-line so the deletion-rationale godoc above
+	// `buildServer` (which references `func New(addr string, ...)` in
+	// prose) does not generate a false positive — Go function defs
+	// always start at column 0, so a `^func New(addr string` anchor
+	// distinguishes definitions from references.
+	const defNeedle = "\nfunc New(addr string"
+	if strings.Contains("\n"+string(data), defNeedle) {
+		t.Error("server.go must not redefine `func New(addr string ...)` — use NewWithOptions(ServerOptions{...}) per R237-ARCH-14 (#614)")
 	}
-	// Look back for the `// Deprecated:` line within the preceding
-	// godoc block. R224-CR-5 added a "Removal condition" section after
-	// the Deprecated marker so the bare 600-char window no longer covers
-	// the marker itself; widen to 1200 chars (still well below pathological
-	// drift). The intent — Deprecated marker exists immediately above `func
-	// New(` — is preserved; only the trailing prose grew.
-	start := idx - 1200
-	if start < 0 {
-		start = 0
-	}
-	window := src[start:idx]
-	if !strings.Contains(window, "// Deprecated: use NewWithOptions") {
-		t.Errorf("server.New must carry godoc `// Deprecated: use NewWithOptions` immediately above the func; window=%q", window)
-	}
-}
 
-// TestLegacyServerNew_NoNewCallSites pins R214-CODE-4: after the bulk
-// migration of test call sites to NewWithOptions, the legacy
-// `New(":0", ...)` constructor must remain referenced only by this file —
-// the deliberate dual-path equivalence test. Any new file that adds a
-// positional-args call site reverses the migration, so this regression
-// guard fails the build to keep the deprecation surface shrinking.
-//
-// The test scans every *.go file in the server package directory for the
-// substring `New(":0",` (the canonical positional-arg shape used by tests).
-// `new_options_test.go` is allow-listed because TestNew_PositionalOverridesOptions
-// and TestNewWithOptions_EquivalentToPositional intentionally exercise the
-// legacy entry point. Comment-only mentions in this file are also ignored
-// via the allow-list.
-func TestLegacyServerNew_NoNewCallSites(t *testing.T) {
-	t.Parallel()
+	// (2) Scan every *.go file in the server package directory for the
+	// canonical positional-args call shape `New(":0",`. The previous
+	// allow-list (new_options_test.go) is no longer needed because the
+	// equivalence test that depended on the wrapper has been rewritten
+	// to live entirely in terms of NewWithOptions.
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)
-	}
-	allowed := map[string]bool{
-		"new_options_test.go": true,
 	}
 	const needle = `New(":0",`
 	var offenders []string
@@ -185,20 +119,22 @@ func TestLegacyServerNew_NoNewCallSites(t *testing.T) {
 		if ent.IsDir() || filepath.Ext(name) != ".go" {
 			continue
 		}
-		if allowed[name] {
+		// Skip the regression-guard file itself — its godoc references
+		// the literal in commentary which would otherwise be a false
+		// positive. The scan still covers EVERY other file so an
+		// accidental call-site addition does not slip through.
+		if name == "new_options_test.go" {
 			continue
 		}
-		data, err := os.ReadFile(name)
+		fileData, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
-		// Skip the legacy New definition in server.go itself — the literal
-		// substring would never appear there but be defensive.
-		if strings.Contains(string(data), needle) {
+		if strings.Contains(string(fileData), needle) {
 			offenders = append(offenders, name)
 		}
 	}
 	if len(offenders) > 0 {
-		t.Errorf("legacy `New(\":0\", ...)` call sites still present in: %v — migrate to NewWithOptions(ServerOptions{...}) per R214-CODE-4 (issue #421)", offenders)
+		t.Errorf("legacy `New(\":0\", ...)` call sites present in: %v — the legacy positional-args wrapper was deleted in R237-ARCH-14 (#614); use NewWithOptions(ServerOptions{...})", offenders)
 	}
 }

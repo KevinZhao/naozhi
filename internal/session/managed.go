@@ -112,7 +112,15 @@ type processIface interface {
 	IsRunning() bool
 	Close()
 	Kill()
-	// Dashboard introspection
+	// Dashboard introspection.
+	//
+	// GetSessionID / GetState are flagged as unidiomatic by R219-CR-9
+	// (#665) — Go convention drops the `Get` prefix on accessors. The
+	// rename to SessionID() / State() is breaking (~12 callsites + the
+	// fakeProcess / TestProcess fakes + cli.Process itself) and is
+	// tracked for a coordinated cross-package change. Until it lands the
+	// names are pinned by TestProcessIfaceGetterRenamePlanned so a
+	// piecemeal rename of just one side cannot slip through unnoticed.
 	GetSessionID() string
 	GetState() cli.ProcessState
 	// DeathReason returns the process-level reason string recorded when the

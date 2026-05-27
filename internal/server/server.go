@@ -496,42 +496,23 @@ func NewWithOptions(opts ServerOptions) *Server {
 	return buildServer(opts)
 }
 
-// New is the legacy positional-args constructor, retained ONLY so the
-// dual-constructor equivalence contract test in new_options_test.go can
-// keep exercising both entry points. It stuffs the positional args into
-// ServerOptions (overriding any matching fields the caller may have also
-// set in opts) and delegates to NewWithOptions. New callers must use
-// NewWithOptions directly.
+// (Removed in R237-ARCH-14 / #614): the legacy positional-args
+// constructor `func New(addr, router, platforms, agents, agentCommands,
+// scheduler, backend, opts)` was retired once the dual-constructor pin
+// in new_options_test.go was rewritten to live entirely in terms of
+// NewWithOptions. The removal-condition spelled out in the prior godoc
+// header (`Deprecated: use NewWithOptions`) is now satisfied — there
+// are zero call sites in production (`cmd/`) and zero in tests, so the
+// shim has no remaining purpose.
 //
-// Deprecated: use NewWithOptions. Production (cmd/naozhi/main.go) already
-// calls NewWithOptions; the bulk migration of test call sites completed
-// in R237-ARCH-14 (#614) — TestLegacyServerNew_NoNewCallSites pins the
-// zero-non-test-allowlist invariant so this wrapper now shrinks rather
-// than spreads. New positional-style call sites are blocked at test time
-// (the regression guard fails the build) so gopls / staticcheck warnings
-// alone are not the only signal anymore.
-//
-// Removal condition (R214-CODE-4 / R224-CR-5 / R237-ARCH-14): delete this
-// wrapper when new_options_test.go's two equivalence-test sites are also
-// rewritten to compare two NewWithOptions servers (or a fresh shape that
-// no longer needs the dual-constructor pin). The TestServerNew_MarkedDeprecated
-// test asserts the Deprecated marker stays in place above this function,
-// so a "rip out the marker" refactor would also need to drop that pin.
-func New(addr string, router *session.Router, platforms map[string]platform.Platform, agents map[string]session.AgentOpts, agentCommands map[string]string, scheduler *cron.Scheduler, backend string, opts ServerOptions) *Server {
-	opts.Addr = addr
-	opts.Router = router
-	opts.Platforms = platforms
-	opts.Agents = agents
-	opts.AgentCommands = agentCommands
-	opts.Scheduler = scheduler
-	opts.Backend = backend
-	return NewWithOptions(opts)
-}
+// TestServerNew_NotReintroduced (new_options_test.go) keeps drift from
+// re-adding `func New(addr string, ...)` in this file by source-scan
+// regression. Use NewWithOptions directly.
 
-// buildServer is the shared construction path used by both New and
-// NewWithOptions. Kept private so the two public entry points are the
-// only way to create a *Server, and their contracts can evolve
-// independently without leaking internal assembly details.
+// buildServer is the shared construction path used by NewWithOptions.
+// Kept private so the public entry point is the only way to create a
+// *Server, and its contract can evolve without leaking internal assembly
+// details.
 func buildServer(opts ServerOptions) *Server {
 	addr := opts.Addr
 	router := opts.Router

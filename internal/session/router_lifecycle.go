@@ -460,20 +460,15 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	wrapper, backendID := r.wrapperFor(reqBackend)
 
 	// Model merge: router default ← backend override ← per-request opts.
-	model := r.model
-	if bm, ok := r.backendModels[backendID]; ok && bm != "" {
-		model = bm
-	}
+	// Args: backend-scoped replacement wins over router-wide extraArgs, then
+	// per-request ExtraArgs is appended. REPLACE (not append) semantics for
+	// the backend level matches RouterConfig.BackendExtraArgs godoc
+	// (R53-ARCH-002). backendDefaultsFor consolidates the lookup that
+	// previously sat inline here and in router_shim drift detection
+	// (R222-ARCH-14, #739).
+	model, baseArgs := r.backendDefaultsFor(backendID)
 	if opts.Model != "" {
 		model = opts.Model
-	}
-
-	// Args: backend-scoped replacement wins over router-wide extraArgs, then
-	// per-request ExtraArgs is appended. REPLACE (not append) semantics for the
-	// backend level matches RouterConfig.BackendExtraArgs godoc (R53-ARCH-002).
-	baseArgs := r.extraArgs
-	if ba, ok := r.backendExtraArgs[backendID]; ok && len(ba) > 0 {
-		baseArgs = ba
 	}
 	args := make([]string, len(baseArgs))
 	copy(args, baseArgs)

@@ -93,6 +93,9 @@ func (p *TestProcess) PassthroughDepth() int { return 0 }
 // TestProcess whose wrapper overrides this (or supply a real *cli.Process).
 func (p *TestProcess) SupportsPassthrough() bool { return false }
 
+// GetSessionID / GetState mirror the unidiomatic processIface method
+// names flagged by R219-CR-9 (#665). When the coordinated rename to
+// SessionID() / State() ships, these fakes flip in the same PR.
 func (p *TestProcess) GetSessionID() string              { return "" }
 func (p *TestProcess) GetState() cli.ProcessState        { return p.StateVal }
 func (p *TestProcess) DeathReason() string               { return p.DeathReasonVal }

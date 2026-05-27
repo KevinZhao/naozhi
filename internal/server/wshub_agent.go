@@ -8,6 +8,25 @@ import (
 	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
 
+// agentTaskDoneSetter is the server-package consumer view of the
+// parent-stream EventLog surface that maybeWireLinkerTailer needs:
+// install a single callback fired when a parent-stream `task_done`
+// arrives so the matching agent tailer closes promptly. Declared here
+// (not imported from cli) so wshub_agent.go does not type-assert on
+// `*cli.EventLog` at the call site — *cli.EventLog satisfies the
+// interface implicitly via Go structural typing.
+//
+// R217-ARCH-2 / R222-ARCH-5 / #625: closes the type-assertion debt at
+// the wshub_agent.go boundary. A future ACP / Gemini backend that
+// wires its own task-done plumbing can pass an alternative
+// implementation through ManagedSession.AgentEventLog without forcing
+// the server to learn the new concrete type. The wider lifecycle
+// AgentIntrospector reform (also tracked under #625) lives in the
+// session package; this is the minimal server-side cut.
+type agentTaskDoneSetter interface {
+	SetOnAgentTaskDone(fn func(taskID, status string))
+}
+
 // enrichSnapshot overlays tailer-local aggregator metrics onto each
 // SubagentInfo in snap. Callers already have a *Hub — the tailer registry
 // lives there. Safe to call when h.tailers is nil (unit test harness);
@@ -106,8 +125,16 @@ func (h *Hub) maybeWireLinkerTailer(key string, sess *session.ManagedSession) {
 
 	// Parent stream task_done → close tailer (fires agent_done to any
 	// remaining subscribers + flushes final meta).
-	if agentLog := sess.AgentEventLog(); agentLog != nil {
-		agentLog.SetOnAgentTaskDone(func(taskID, status string) {
+	//
+	// We retain the concrete return for the typed-nil guard (a
+	// *cli.EventLog promoted to an interface keeps the dynamic-type
+	// half non-nil even when the value half is nil — the same trap
+	// SubagentLinker dodges above). After the guard we route through
+	// the local agentTaskDoneSetter interface so the call site does
+	// not name *cli.EventLog. R217-ARCH-2 / #625.
+	if rawLog := sess.AgentEventLog(); rawLog != nil {
+		var hook agentTaskDoneSetter = rawLog
+		hook.SetOnAgentTaskDone(func(taskID, status string) {
 			h.tailers.closeTask(key, taskID, status)
 		})
 	}
