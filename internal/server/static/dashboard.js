@@ -13334,6 +13334,19 @@ function openCronDetail(jobId, originRow) {
   };
   if (typeof requestAnimationFrame === 'function') requestAnimationFrame(focusDrawerHead);
   else setTimeout(focusDrawerHead, 0);
+  // R236-SEC-08 (#494): the drawer's prompt body comes from the cached
+  // job whose body may be 256-byte truncated (poll uses ?compact=1).
+  // Refetch the full job in the background so the drawer's "做什么"
+  // section shows the entire prompt rather than a clipped preview.
+  // No-op when the cached job is already non-truncated. Failure modes
+  // (timeout / 5xx) silently retain the truncated cache — the user
+  // still sees the first 256 bytes plus the cron-spec edit affordance,
+  // and the next poll will reconcile.
+  if (typeof cronRefetchFullJob === 'function') {
+    cronRefetchFullJob(jobId).then(j => {
+      if (j && cronDetailJobId === jobId) renderCronDrawer();
+    }).catch(() => {});
+  }
 }
 
 // closeCronDetail clears the drawer state and re-renders the cron panel
@@ -13391,9 +13404,17 @@ async function fetchCronJobs() {
     if (t) headers['Authorization'] = 'Bearer ' + t;
     // RNEW-UX-003: 8s timeout — cron list is polled periodically; a hung
     // disk/fs call must release before the next tick fires.
+    //
+    // R236-SEC-08 (#494): poll path opts into compact mode so the wire
+    // shape carries `prompt` clipped to 256 UTF-8 bytes per job instead
+    // of the legacy full prompt (which scaled to 8 KiB × N jobs every
+    // tick). Each list row sets `prompt_truncated:true` for jobs whose
+    // full body was clipped — the editor open path (cronEditFetchFull)
+    // re-fetches a single job without compact when the user actually
+    // needs the bytes.
     let data;
     try {
-      data = await fetchJSON('/api/cron', { headers, timeoutMs: 8000 });
+      data = await fetchJSON('/api/cron?compact=1', { headers, timeoutMs: 8000 });
     } catch (err) {
       if (err.status) return;
       throw err;
@@ -13646,27 +13667,67 @@ async function cronDelete(id) {
   } catch (e) { showNetworkError('删除定时任务', e); }
 }
 
+// cronRefetchFullJob refills `cronJobs[i].prompt` for a single job from
+// the non-compact /api/cron endpoint (R236-SEC-08 / #494). The poll path
+// uses ?compact=1 which clips prompts to 256 bytes — that's fine for the
+// list view but the editor / drawer detail need the full body before the
+// user can save without truncating their own data. Returns the (now
+// full) job object, or the cached one if the refetch fails (so the user
+// at least sees the truncated body rather than a blank textarea).
+async function cronRefetchFullJob(id) {
+  const cached = cronJobs.find(j => j.id === id);
+  if (!cached) return null;
+  if (!cached.prompt_truncated) return cached;
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    // No compact param — list endpoint returns full prompts. We pull
+    // the whole list here because there is no per-job GET endpoint
+    // exposed; the rate limiter on the list route is shared with the
+    // poll, and an editor open is a once-per-user-action event so the
+    // extra body is not a hot path.
+    const data = await fetchJSON('/api/cron', { headers, timeoutMs: 8000 });
+    const jobs = (data && data.jobs) || [];
+    const fresh = jobs.find(j => j.id === id);
+    if (fresh) {
+      // Splice the full-prompt copy back into the cache so subsequent
+      // editor opens / drawer renders see the full body without another
+      // network round trip.
+      const idx = cronJobs.findIndex(j => j.id === id);
+      if (idx >= 0) cronJobs[idx] = fresh;
+      return fresh;
+    }
+  } catch (e) { /* fall through to cached */ }
+  return cached;
+}
+
 // Edit an existing cron job. Opens a modal pre-populated with the current
 // schedule, prompt, and work_dir. The frequency picker tries to restore the
 // job's schedule via parseCronToFreq — when it can't (e.g. user wrote a
 // custom expression by hand), we surface the raw expression in the advanced
 // disclosure so it can still be edited without loss.
 function editCronJob(id) {
-  const job = cronJobs.find(j => j.id === id);
-  if (!job) { showToast('未找到该任务', 'warning'); return; }
-
-  // Sprint 6c: round-trip the saved backend choice. fetchCLIBackends is
-  // promise-based; we open the modal once it resolves so the picker (if
-  // multi-backend deploy) can pre-select the persisted value. Single-
-  // backend deploys collapse the picker — no UI difference for legacy
-  // installs.
-  fetchCLIBackends().then(backendsData => {
-    const backendHtml = renderBackendPicker(backendsData, {
-      selectId: 'edit-cron-backend',
-      selectedId: job.backend || '',
-    });
-    openCronEditModal(id, job, backendHtml);
-  }).catch(() => openCronEditModal(id, job, ''));
+  // R236-SEC-08 (#494): the poll fetches with ?compact=1 so j.prompt
+  // may be truncated to 256 bytes for any job whose full body exceeds
+  // that. Refetch the full job before opening the editor — if we
+  // skipped this, saving the modal would persist the truncated prompt
+  // back to disk, silently destroying the user's data.
+  cronRefetchFullJob(id).then(job => {
+    if (!job) { showToast('未找到该任务', 'warning'); return; }
+    // Sprint 6c: round-trip the saved backend choice. fetchCLIBackends is
+    // promise-based; we open the modal once it resolves so the picker (if
+    // multi-backend deploy) can pre-select the persisted value. Single-
+    // backend deploys collapse the picker — no UI difference for legacy
+    // installs.
+    fetchCLIBackends().then(backendsData => {
+      const backendHtml = renderBackendPicker(backendsData, {
+        selectId: 'edit-cron-backend',
+        selectedId: job.backend || '',
+      });
+      openCronEditModal(id, job, backendHtml);
+    }).catch(() => openCronEditModal(id, job, ''));
+  });
 }
 
 function openCronEditModal(id, job, backendHtml) {
