@@ -535,11 +535,13 @@ func (q *MessageQueue) Release(key string) {
 func (q *MessageQueue) ReleaseWithDrain(key string, onDrain func(QueuedMsg)) {
 	q.mu.Lock()
 	var drained []QueuedMsg
+	var dropped int
 	if sq := q.queues[key]; sq != nil {
 		sq.busy = false
-		if sq.ring.len() == 0 {
+		switch {
+		case sq.ring.len() == 0:
 			delete(q.queues, key)
-		} else if onDrain != nil {
+		case onDrain != nil:
 			// Transfer the queued batch to the caller and clear the
 			// internal ring so a later Enqueue starts fresh. Ownership
 			// is released (busy=false) so the next Enqueue becomes
@@ -552,9 +554,27 @@ func (q *MessageQueue) ReleaseWithDrain(key string, onDrain func(QueuedMsg)) {
 			// queued state; mirroring the empty branch above keeps the map
 			// from accumulating idle sessionQueue instances.
 			delete(q.queues, key)
+		default:
+			// R20260527-COR-9 (#1283/#1290): legacy Release()-via-nil path
+			// previously parked the queued msgs in the map for a future
+			// Enqueue owner to sweep via DoneOrDrain. But nothing guarantees
+			// such an Enqueue ever arrives; on a quiet session the entry
+			// (and its messages) leaks for the lifetime of the queue,
+			// growing memory unboundedly across hours. Release() already
+			// logged a Warn pointing callers to ReleaseWithDrain — drop
+			// the orphaned msgs here and delete the entry so the no-drain
+			// contract becomes "messages stranded during the busy window
+			// are lost (with a warning)" rather than "leaked forever".
+			dropped = sq.ring.len()
+			sq.ring.drainAll()
+			delete(q.queues, key)
 		}
 	}
 	q.mu.Unlock()
+	if dropped > 0 {
+		slog.Warn("msgqueue: dropping pending messages on Release without drain callback",
+			"key", key, "dropped", dropped)
+	}
 	for _, m := range drained {
 		onDrain(m)
 	}

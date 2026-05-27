@@ -240,6 +240,41 @@ func TestRelease_DrainsQueuedMessages(t *testing.T) {
 	}
 }
 
+// TestRelease_NoStrandWithoutCallback locks in R20260527-COR-9 (#1283/#1290):
+// the legacy Release() path (ReleaseWithDrain with nil onDrain) used to leave
+// pending messages parked in q.queues forever if no future Enqueue arrived,
+// growing memory unboundedly. The fix drops the orphaned msgs and deletes the
+// map entry so a quiet session can't leak.
+func TestRelease_NoStrandWithoutCallback(t *testing.T) {
+	t.Parallel()
+	q := NewMessageQueue(10, 0)
+
+	// Dashboard Guard path acquires the session.
+	if !q.TryAcquire("k1") {
+		t.Fatal("TryAcquire should succeed on idle key")
+	}
+
+	// Two IM messages land while the session is busy.
+	if _, enqueued, _, _ := q.Enqueue("k1", QueuedMsg{Text: "A"}); !enqueued {
+		t.Fatal("A should be enqueued during busy window")
+	}
+	if _, enqueued, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"}); !enqueued {
+		t.Fatal("B should be enqueued during busy window")
+	}
+
+	// Legacy no-drain release: caller drops on the floor.
+	q.Release("k1")
+
+	if d := q.Depth("k1"); d != 0 {
+		t.Fatalf("Depth = %d after no-drain Release, want 0 (entry must not strand)", d)
+	}
+
+	// Map entry must be gone — TryAcquire on idle key must succeed.
+	if !q.TryAcquire("k1") {
+		t.Fatal("TryAcquire should succeed after no-drain Release (entry must be deleted)")
+	}
+}
+
 func TestLastNotify_CleanedOnDrain(t *testing.T) {
 	t.Parallel()
 	q := NewMessageQueue(10, 0)
