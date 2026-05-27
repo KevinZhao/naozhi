@@ -27,3 +27,17 @@ package limits
 // Keep as a const, not a var: the cap is deliberately compile-time stable
 // to prevent accidental run-time mutation by tests or config-loading code.
 const MaxCoalescedText = 4 * 1024 * 1024
+
+// PlatformReplyMaxAttempts is the retry count passed to
+// platform.ReplyWithRetry on every outbound IM-platform reply path
+// (dispatch's error-reply fallback and SendSplitReply chunk loop, plus
+// cron's notifyTarget delivery). Shared here so the call sites in
+// internal/dispatch and internal/cron cannot drift independently —
+// historically the cron side carried a "KEEP-IN-SYNC" mirror const.
+//
+// 3 attempts matches the conservative IM platform budget where
+// transient 5xx responses typically clear within 1-2 retries; bumps
+// should be considered against the per-attempt platformReplyTimeout
+// (15s × 3 = 45s worst-case) staying inside outer ctx deadlines.
+// (R240-CR-5, R20260527-ARCH-8)
+const PlatformReplyMaxAttempts = 3

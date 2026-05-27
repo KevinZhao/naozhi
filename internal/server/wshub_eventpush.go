@@ -1,9 +1,13 @@
 package server
 
 import (
+	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -117,6 +121,21 @@ func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []cli.Even
 // review that simply notes "+1 goroutine here" is insufficient without
 // also updating the WG pairing.
 func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan struct{}, sess *session.ManagedSession, lastTime int64) {
+	defer func() {
+		if r := recover(); r != nil {
+			// Mirror readPump: bump counter first so the panic rate is
+			// visible even when stack output is truncated, then log the
+			// cause at Error and the stack at Debug to avoid leaking
+			// internal paths to aggregated log stores. Tag with the
+			// subscription key so operators can correlate the panic
+			// against a specific session fan-out.
+			metrics.PanicRecoveredTotal.Add(1)
+			slog.Error("panic in ws eventPushLoop (recovered)",
+				"key", key, "panic", fmt.Sprintf("%v", r))
+			slog.Debug("panic in ws eventPushLoop: stack",
+				"key", key, "stack", string(debug.Stack()))
+		}
+	}()
 	for {
 		select {
 		case _, ok := <-notify:

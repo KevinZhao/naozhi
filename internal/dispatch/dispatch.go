@@ -15,6 +15,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
@@ -37,15 +38,9 @@ const platformReplyTimeout = 15 * time.Second
 // landing before systemctl SIGKILLs the process. R239-CR-5.
 const shutdownReplyTimeout = 5 * time.Second
 
-// platformReplyMaxAttempts is the retry count passed to
-// platform.ReplyWithRetry on dispatch's two outbound paths (error-reply
-// fallback at the end of processMessage and the chunk-loop in
-// SendSplitReply). Shared so the two sites can't drift independently
-// (R240-CR-5). 3 attempts matches the conservative IM platform budget
-// where transient 5xx responses typically clear within 1-2 retries; bumps
-// should be considered against the per-attempt platformReplyTimeout
-// (15s × 3 = 45s worst-case) staying inside outer ctx deadlines.
-const platformReplyMaxAttempts = 3
+// platformReplyMaxAttempts moved to internal/limits.PlatformReplyMaxAttempts
+// (R20260527-ARCH-8) so internal/cron's notifyTarget path and internal/dispatch's
+// reply paths share one source-of-truth constant instead of mirrored copies.
 
 // SessionGuard prevents multiple concurrent messages to the same session.
 // MessageQueue is the production implementation; the IM path injects a
@@ -1019,7 +1014,7 @@ func (d *Dispatcher) handleSendError(
 	if cleanup != nil {
 		defer cleanup()
 	}
-	if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, platformReplyMaxAttempts); err != nil {
+	if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, limits.PlatformReplyMaxAttempts); err != nil {
 		d.sendFailCount.Add(1)
 		dispatchSendFailTotal.Add(1)
 		lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
@@ -1240,7 +1235,7 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 			// strconv.Itoa avoids fmt.Sprintf's per-call alloc/format.
 			chunk += "\n— [" + strconv.Itoa(i+1) + "/" + strconv.Itoa(total) + "]"
 		}
-		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: chunk}, platformReplyMaxAttempts); err != nil {
+		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: chunk}, limits.PlatformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
 			dispatchSendFailTotal.Add(1)
 			slog.Error("reply chunk failed after retries", "chat", chatID, "chunk", i+1, "err", err)

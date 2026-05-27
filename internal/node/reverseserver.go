@@ -187,8 +187,10 @@ func NewReverseServer(auth map[string]config.ReverseNodeEntry, trustedProxy bool
 		names: names,
 		conns: make(map[string]*ReverseConn),
 		wsLimiter: ratelimit.New(ratelimit.Config{
-			Rate:  rate.Every(5 * time.Second), // 1 per 5s sustained
-			Burst: 10,                          // 10 burst
+			Rate:    rate.Every(5 * time.Second), // 1 per 5s sustained
+			Burst:   10,                          // 10 burst
+			MaxKeys: 10_000,                      // cap per-IP table; matches dashboard auth limiter
+			TTL:     10 * time.Minute,            // idle eviction
 		}),
 		trustedProxy: trustedProxy,
 	}

@@ -232,18 +232,22 @@ func (s *Scheduler) PerChatJobCount(plat, chatID string) int {
 }
 
 // ListJobs returns jobs for a specific chat.
+//
+// R20260527-PERF-1: walks the jobsByChat[(plat, chatID)] index instead of
+// scanning the entire s.jobs map — O(jobs-in-chat) vs the historical O(N).
+// Matters once a deployment accumulates many cron jobs across many chats:
+// dashboard list polls hit ListJobs at 1 Hz per active chat.
 func (s *Scheduler) ListJobs(plat, chatID string) []Job {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	bucket := s.jobsByChat[chatJobKey{Platform: plat, ChatID: chatID}]
 	// R247-GO-3: pre-allocate so an empty result marshals as `[]` instead of
 	// `null` — keeps the JSON wire-format consistent with ListAllJobsWithNextRun
 	// and frontend `.length` defenders unaffected. [BREAKING-LOCAL]
-	result := make([]Job, 0, len(s.jobs))
-	for _, j := range s.jobs {
-		if j.Platform == plat && j.ChatID == chatID {
-			result = append(result, *j)
-		}
+	result := make([]Job, 0, len(bucket))
+	for _, j := range bucket {
+		result = append(result, *j)
 	}
 	return result
 }
@@ -1134,7 +1138,7 @@ func (s *Scheduler) NextRun(j *Job) time.Time {
 	return entry.Next
 }
 
-// cronEntryGone reports whether the robfig/cron Entry identified by id
+// cronEntryGoneLocked reports whether the robfig/cron Entry identified by id
 // has been removed (or never existed). robfig/cron's Entry(id) returns a
 // zero Entry struct when the entry is unknown, distinguishable by
 // WrappedJob == nil — but consumers that test that field directly leak
@@ -1151,7 +1155,7 @@ func (s *Scheduler) NextRun(j *Job) time.Time {
 // lock-order surprises.
 //
 // R242-ARCH-29 (#774).
-func (s *Scheduler) cronEntryGone(id robfigcron.EntryID) bool {
+func (s *Scheduler) cronEntryGoneLocked(id robfigcron.EntryID) bool {
 	if id == 0 {
 		return true
 	}
@@ -1205,10 +1209,10 @@ func (s *Scheduler) TriggerNow(id string) error {
 		// 相关测试：TestTriggerNow_EntryGoneReleasesWG（trigger_now_wg_done_test.go）。
 		// R192-CRON-B: cron-v2-polish §3.2 jitter。
 		// R242-ARCH-29 (#774): route the WrappedJob == nil sentinel through
-		// cronEntryGone so the robfig/cron internal-struct shape stays
+		// cronEntryGoneLocked so the robfig/cron internal-struct shape stays
 		// behind one helper — a future lib bump that switches to a
 		// HasEntry / Lookup API lands once.
-		entryGone := s.cronEntryGone(entryID)
+		entryGone := s.cronEntryGoneLocked(entryID)
 		s.mu.RUnlock()
 		if entryGone {
 			go func() {

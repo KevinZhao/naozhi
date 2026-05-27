@@ -39,7 +39,7 @@ func TestDeliverNotice_NoTargetIsNoOp(t *testing.T) {
 // payload short-circuits before the goroutine spawn. R20260526-CR-017:
 // without this guard, an empty-result run would still spawn a goroutine
 // running platform.SplitText("", maxLen) → [""] and burn one
-// platformReplyMaxAttempts retry on a zero-byte chunk. Mirror shape of
+// limits.PlatformReplyMaxAttempts retry on a zero-byte chunk. Mirror shape of
 // TestDeliverNotice_NoTargetIsNoOp — verify triggerWG.Wait returns
 // immediately, proving Add(1) never ran.
 func TestDeliverNotice_EmptyTextIsNoOp(t *testing.T) {
