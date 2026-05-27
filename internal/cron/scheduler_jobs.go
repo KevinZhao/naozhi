@@ -17,11 +17,44 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	robfigcron "github.com/robfig/cron/v3"
 )
+
+// listSnapshotPair pairs a Job value-copy with its robfig/cron entry ID
+// during ListAllJobsWithNextRun's two-phase snapshot. Defined at package
+// scope (not inside the function body) so sync.Pool below can reference
+// the type. R247-PERF-4 (#530).
+type listSnapshotPair struct {
+	job     Job
+	entryID robfigcron.EntryID
+}
+
+// listPairsPool reuses the transient []listSnapshotPair scratch slice
+// allocated once per ListAllJobsWithNextRun call. Dashboard polls at 1Hz
+// across multiple tabs so the call frequency × jobs-per-call dominates
+// the cron CRUD path's allocator pressure. Get returns a zero-length
+// slice with potentially non-zero capacity — callers must reset length
+// (`:0`) when they Put it back. R247-PERF-4 (#530).
+var listPairsPool = sync.Pool{
+	New: func() any {
+		s := make([]listSnapshotPair, 0, 64)
+		return &s
+	},
+}
+
+// listNextByIDPool reuses the EntryID -> Next time map. Reset via
+// `clear()` (Go 1.21) before re-Put so stale keys from a larger previous
+// snapshot don't leak into a smaller current one. R247-PERF-4 (#530).
+var listNextByIDPool = sync.Pool{
+	New: func() any {
+		m := make(map[robfigcron.EntryID]time.Time, 64)
+		return &m
+	},
+}
 
 // AddJob validates, registers, and persists a new cron job.
 func (s *Scheduler) AddJob(j *Job) error {
@@ -234,22 +267,41 @@ type JobWithNextRun struct {
 // a single mutex acquisition, which matters when the dashboard list API
 // polls at 1 Hz with 50 jobs registered.
 func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
+	// R247-PERF-4 (#530): the dashboard list endpoint polls this at 1Hz
+	// across N open tabs, so we pool the two transient containers
+	// (pairs scratch + EntryID-keyed nextRun map) to keep per-poll
+	// alloc count flat as job count grows. The result slice is owned by
+	// the caller and stays heap-resident, so it is NOT pooled.
+	pairsPtr := listPairsPool.Get().(*[]listSnapshotPair)
+	pairs := (*pairsPtr)[:0]
+	defer func() {
+		// Reset length but keep capacity so the next call skips the make.
+		*pairsPtr = pairs[:0]
+		listPairsPool.Put(pairsPtr)
+	}()
+
 	s.mu.RLock()
-	type pair struct {
-		job     Job
-		entryID robfigcron.EntryID
+	if cap(pairs) < len(s.jobs) {
+		pairs = make([]listSnapshotPair, 0, len(s.jobs))
 	}
-	pairs := make([]pair, 0, len(s.jobs))
 	for _, j := range s.jobs {
-		pairs = append(pairs, pair{job: *j, entryID: j.entryID})
+		pairs = append(pairs, listSnapshotPair{job: *j, entryID: j.entryID})
 	}
 	s.mu.RUnlock()
 
-	// Single Entries() snapshot → entryID-keyed map. Allocates one map
-	// per call; the alternative — re-walking the slice per pair — is
-	// O(N²) and re-acquires runningMu per Entry() call.
+	// Single Entries() snapshot → entryID-keyed map. The map is pooled and
+	// `clear()`-ed before re-Put so stale keys from a previous larger
+	// snapshot do not leak into a smaller current one. The alternative —
+	// re-walking Entries per pair — is O(N²) and re-acquires runningMu per
+	// Entry() call.
 	entries := s.cron.Entries()
-	nextByID := make(map[robfigcron.EntryID]time.Time, len(entries))
+	nextByIDPtr := listNextByIDPool.Get().(*map[robfigcron.EntryID]time.Time)
+	nextByID := *nextByIDPtr
+	clear(nextByID)
+	defer func() {
+		clear(nextByID)
+		listNextByIDPool.Put(nextByIDPtr)
+	}()
 	for _, e := range entries {
 		nextByID[e.ID] = e.Next
 	}
