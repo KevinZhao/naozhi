@@ -369,11 +369,17 @@ func (m *Manager) Stop(stopCtx context.Context) {
 	// cancelP is published inside startOnce.Do AFTER ctx/goroutines are
 	// installed, so the only way to observe nil here is "Start has not
 	// entered its critical section yet" — in that case there are no
-	// daemons to cancel and no wg slots to drain, and a later Start would
-	// still no-op because stopOnce already fired.
+	// daemons to cancel and no wg slots to drain.
+	//
+	// R20260527122801-GO-003: do NOT consume stopOnce on this early path.
+	// Burning stopOnce here would silently disarm a later legitimate Stop:
+	// in a Stop→Start→Stop sequence the second Stop would observe the
+	// already-fired stopOnce and skip cancelling daemon ctx, leaking the
+	// daemon goroutines until process exit. Returning without touching
+	// stopOnce keeps the early path a true no-op so a real Stop after a
+	// successful Start still cancels the daemon ctx exactly once.
 	cancel := m.cancelP.Load()
 	if cancel == nil {
-		m.stopOnce.Do(func() {})
 		return
 	}
 	m.stopOnce.Do(func() {
