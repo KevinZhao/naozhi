@@ -864,7 +864,28 @@ func (s *runStore) scanSortedRunDir(jobID string) ([]runDirItem, string, error) 
 	if err != nil {
 		return nil, dir, err
 	}
-	items := make([]runDirItem, 0, len(entries))
+	// R249-PERF-25 (#940): cap is bounded by min(len(entries), 2*keepCount).
+	// trimJobLocked keeps runs/<jobID>/ around keepCount entries (default
+	// 200) plus transient slack for in-progress writes. Sizing the slice
+	// to len(entries) over-allocates whenever the directory accumulates
+	// non-json orphans (atomic-write tmp files crashed mid-rename, hidden
+	// dotfiles, .DS_Store, operator scratch) — those entries are filtered
+	// in the loop below but still pay the initial alloc. The 2× factor
+	// gives headroom for a brief over-cap window between finishRun's
+	// Append and the subsequent trimJobLocked, while keepCount=0 (a
+	// disabled / mis-configured store) falls back to len(entries) so we
+	// don't degrade to a many-realloc growth curve. min(...) also handles
+	// the tiny-dir case where len(entries) < 2*keepCount and the cap
+	// equals the historical value — no regression for the warm steady
+	// state.
+	cap0 := len(entries)
+	if s.keepCount > 0 {
+		bound := 2 * s.keepCount
+		if bound < cap0 {
+			cap0 = bound
+		}
+	}
+	items := make([]runDirItem, 0, cap0)
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
