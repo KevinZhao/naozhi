@@ -14,7 +14,7 @@ package cron
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // TestCRON3_FreshExecuteSkippedAfterStopCtxCancel locks in that execute()
@@ -122,7 +122,7 @@ func TestCRON3_FreshExecuteRunsBeforeStop(t *testing.T) {
 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	wantKey := session.CronKey(job.ID)
+	wantKey := sessionkey.CronKey(job.ID)
 	resetFound := false
 	for _, k := range fake.resetCalls {
 		if k == wantKey {

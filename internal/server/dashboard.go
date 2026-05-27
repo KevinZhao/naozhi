@@ -16,8 +16,8 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 )
@@ -421,38 +421,45 @@ func (s *Server) registerDashboard() {
 	// Push session list changes to WS clients
 	s.router.SetOnChange(func() { s.hub.BroadcastSessionsUpdate() })
 
-	// Push cron execution results to WS clients. cron_result is preserved
-	// for backward compatibility; new clients should subscribe to the
-	// run-started / run-ended pair (P0 cron-run-history) which covers every
-	// terminal state including skipped and canceled.
+	// Phase D (RFC §3.5): unified Run lifecycle wiring via
+	// runtelemetry.Broadcaster. cron and sysession each register the
+	// same hubBroadcaster; subsystem-specific WS payload selection
+	// happens inside hubBroadcaster.Broadcast{Started,Ended}.
+	//
+	// The legacy cron_result frame and its SetOnExecute hook were
+	// deleted in this phase — dashboard.js migrated the announce()
+	// to the cron_run_ended succeeded branch. Result text, when needed,
+	// is fetched via the GET /api/cron/jobs/<id>/runs/<runID> endpoint.
+	telemetry := newHubBroadcaster(s.hub)
 	if s.scheduler != nil {
-		s.scheduler.SetOnExecute(func(jobID, result, errMsg string) {
-			s.hub.BroadcastCronResult(jobID, result, errMsg)
-		})
-		s.scheduler.SetOnRunStarted(func(ev cron.RunStartedEvent) {
-			s.hub.BroadcastCronRunStarted(ev.JobID, ev.RunID, ev.StartedAt,
-				string(ev.Trigger), ev.SessionID, ev.Fresh)
-		})
-		s.scheduler.SetOnRunEnded(func(ev cron.RunEndedEvent) {
-			s.hub.BroadcastCronRunEnded(ev.JobID, ev.RunID, string(ev.State),
-				ev.StartedAt, ev.EndedAt, ev.DurationMS, ev.SessionID,
-				string(ev.ErrorClass), ev.ErrorMsg, string(ev.Trigger))
-		})
+		s.scheduler.SetTelemetry(telemetry)
 	}
-
-	// Push system-daemon Run events to WS clients (RFC §9.4).
-	// Manager.SetCallbacks accepts wiring after Manager.Start so this is
-	// safe even when sysession was constructed in main.go before the Hub
-	// existed.
+	// sysession.Manager keeps its own SetCallbacks API for now (its
+	// atomic.Pointer holder shape would need its own refactor); the
+	// callbacks here translate sysession.DaemonRun*Event into
+	// runtelemetry events and route through the same hubBroadcaster
+	// so the wire shape matches Phase D's unified path.
 	if s.sysessionMgr != nil {
 		s.sysessionMgr.SetCallbacks(
 			func(ev sysession.DaemonRunStartedEvent) {
-				s.hub.BroadcastDaemonRunStarted(ev.Name, ev.RunID, string(ev.Trigger), ev.StartedAt)
+				telemetry.BroadcastRunStarted(runtelemetry.RunStartedEvent{
+					Subsystem: runtelemetry.SubsystemSysession,
+					OwnerID:   ev.Name,
+					RunID:     ev.RunID,
+					Trigger:   runtelemetry.TriggerKind(ev.Trigger),
+					StartedAt: ev.StartedAt,
+				})
 			},
 			func(ev sysession.DaemonRunEndedEvent) {
-				s.hub.BroadcastDaemonRunEnded(ev.Name, ev.RunID,
-					string(ev.State), string(ev.ErrorClass),
-					string(ev.Trigger), ev.DurationMS)
+				telemetry.BroadcastRunEnded(runtelemetry.RunEndedEvent{
+					Subsystem:  runtelemetry.SubsystemSysession,
+					OwnerID:    ev.Name,
+					RunID:      ev.RunID,
+					State:      runtelemetry.RunState(ev.State),
+					DurationMS: ev.DurationMS,
+					Trigger:    runtelemetry.TriggerKind(ev.Trigger),
+					ErrorClass: runtelemetry.ErrorClass(ev.ErrorClass),
+				})
 			},
 		)
 	}

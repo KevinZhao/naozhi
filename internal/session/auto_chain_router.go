@@ -24,6 +24,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // maybeAttachAutoChainOnSpawn implements the spawn-path auto-chain
@@ -49,7 +50,7 @@ func (r *Router) maybeAttachAutoChainOnSpawn(
 	if r.autoChainPolicy == nil {
 		return nil
 	}
-	if IsCronKey(key) || IsSysKey(key) || IsScratchKey(key) {
+	if sessionkey.IsCronKey(key) || sessionkey.IsSysKey(key) || sessionkey.IsScratchKey(key) {
 		return nil
 	}
 	if workspace == "" || !r.autoChainPolicy.Enabled(workspace) {
@@ -340,7 +341,7 @@ func (r *Router) runAutoChainBackfillOnce() {
 	r.mu.Lock()
 	candidates := make([]*ManagedSession, 0, len(r.sessions))
 	for _, s := range r.sessions {
-		if IsCronKey(s.key) || IsSysKey(s.key) || IsScratchKey(s.key) {
+		if sessionkey.IsCronKey(s.key) || sessionkey.IsSysKey(s.key) || sessionkey.IsScratchKey(s.key) {
 			continue
 		}
 		s.historyMu.RLock()

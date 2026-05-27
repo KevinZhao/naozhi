@@ -1,0 +1,45 @@
+# golangci-lint configuration.
+#
+# Status: not yet wired into CI (no lint job in .github/workflows/ci.yml as
+# of 2026-05-26). This file exists as the canonical home for project lint
+# rules; the per-package _test.go guards (e.g. internal/sessionkey/imports_test.go)
+# enforce the same invariants today via go test, which IS in CI.
+#
+# Adding a CI lint job is tracked separately — when that lands, the rules
+# below take effect.
+
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - depguard
+
+linters-settings:
+  depguard:
+    rules:
+      # internal/sessionkey is a leaf vocabulary package shared by cron /
+      # session / sysession / scratch. Adding a deeper internal/* import
+      # here creates a cycle (cron → session ← sessionkey ← cron) and
+      # defeats the whole point of the package. The matching go-test
+      # guard lives in internal/sessionkey/imports_test.go.
+      sessionkey-isolated:
+        list-mode: lax
+        files:
+          - "internal/sessionkey/**"
+        deny:
+          - pkg: github.com/naozhi/naozhi/internal
+            desc: "internal/sessionkey must remain a leaf package — adding a deeper internal/* import creates a cycle with cron/session"
+
+      # internal/runtelemetry is a leaf event-shape package. It is
+      # imported by both producers (cron / sysession) and the broadcaster
+      # implementation in server. Importing any internal/* back into
+      # runtelemetry would tangle the dependency graph it is meant to
+      # straighten.
+      runtelemetry-isolated:
+        list-mode: lax
+        files:
+          - "internal/runtelemetry/**"
+        deny:
+          - pkg: github.com/naozhi/naozhi/internal
+            desc: "internal/runtelemetry must remain a leaf package — see docs/rfc/cron-sysession-merge.md §3.1"

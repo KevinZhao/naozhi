@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // fakeSessionRouter is a minimal SessionRouter that records calls so tests
@@ -13,6 +13,11 @@ import (
 // up a real *session.Router. Any method the scheduler adds to SessionRouter
 // must also be added here — which is the point: the compiler forces the
 // contract to stay narrow.
+//
+// Post Phase B (docs/rfc/cron-sysession-merge.md §3.3) the SessionRouter
+// interface speaks in cron-local types (cron.AgentOpts, cron.Session,
+// cron.SessionStatus); the cmd/naozhi/cron_router_adapter.go bridges
+// against *session.Router for the production wiring.
 type fakeSessionRouter struct {
 	mu            sync.Mutex
 	registerCalls []stubCall
@@ -39,7 +44,7 @@ func (f *fakeSessionRouter) Reset(key string) {
 	f.resetCalls = append(f.resetCalls, key)
 }
 
-func (f *fakeSessionRouter) GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error) {
+func (f *fakeSessionRouter) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (Session, SessionStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.getCreateKeys = append(f.getCreateKeys, key)
@@ -47,7 +52,7 @@ func (f *fakeSessionRouter) GetOrCreate(ctx context.Context, key string, opts se
 	// the router integration point without invoking a real CLI. The
 	// scheduler handles a nil session gracefully further down when
 	// dereferencing; we only assert on the recorded call here.
-	return nil, session.SessionStatus(0), nil
+	return nil, SessionExisting, nil
 }
 
 // TestSchedulerConfig_AcceptsSessionRouterInterface is the compile-time
@@ -88,7 +93,7 @@ func TestSchedulerConfig_AcceptsSessionRouterInterface(t *testing.T) {
 		t.Fatalf("expected exactly 1 stub register call, got %d", len(fake.registerCalls))
 	}
 	got := fake.registerCalls[0]
-	wantKey := session.CronKey(job.ID)
+	wantKey := sessionkey.CronKey(job.ID)
 	if got.key != wantKey {
 		t.Errorf("register key = %q, want %q", got.key, wantKey)
 	}
@@ -130,7 +135,7 @@ func TestSchedulerConfig_ResetCalledOnDelete(t *testing.T) {
 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	wantKey := session.CronKey(job.ID)
+	wantKey := sessionkey.CronKey(job.ID)
 	found := false
 	for _, k := range fake.resetCalls {
 		if k == wantKey {
@@ -143,13 +148,7 @@ func TestSchedulerConfig_ResetCalledOnDelete(t *testing.T) {
 	}
 }
 
-// TestSessionRouterInterface_RealRouterSatisfies is a compile-time assertion
-// that *session.Router still satisfies the narrow interface. A var
-// declaration with the right-hand expression exercised only by the
-// compiler keeps this free at runtime. If session.Router renames any of
-// the three methods, this test fails to build and flags the drift
-// explicitly rather than letting production miscompile.
-func TestSessionRouterInterface_RealRouterSatisfies(t *testing.T) {
-	t.Parallel()
-	var _ SessionRouter = (*session.Router)(nil)
-}
+// The legacy "*session.Router satisfies cron.SessionRouter" compile-time
+// assertion was removed in Phase B: the interface now speaks in
+// cron-local types and the production glue lives in
+// cmd/naozhi/cron_router_adapter.go (with its own round-trip test).

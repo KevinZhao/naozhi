@@ -687,13 +687,20 @@ func main() {
 		slog.Warn("no platforms configured, running in dashboard-only mode")
 	}
 
-	// Build agent opts from config
+	// Build agent opts from config — kept as session.AgentOpts so the
+	// router-side spawn path uses the operator-trusted shape; cron's
+	// scheduler receives a translated view via toCronAgentOpts (see
+	// cron_router_adapter.go) so internal/cron does not import session.
 	agents := make(map[string]session.AgentOpts)
 	for id, ac := range cfg.Agents {
 		agents[id] = session.AgentOpts{
 			Model:     ac.Model,
 			ExtraArgs: ac.Args,
 		}
+	}
+	cronAgents := make(map[string]cron.AgentOpts, len(agents))
+	for id, a := range agents {
+		cronAgents[id] = toCronAgentOpts(a)
 	}
 
 	// Validate agent_commands reference existing agents
@@ -721,9 +728,9 @@ func main() {
 			"chat_id_suffix", chatIDSuffix(notifyDefault.ChatID))
 	}
 	scheduler := cron.NewScheduler(cron.SchedulerConfig{
-		Router:        router,
+		Router:        cronRouterAdapter{r: router},
 		Platforms:     platforms,
-		Agents:        agents,
+		Agents:        cronAgents,
 		AgentCommands: cfg.AgentCommands,
 		StorePath:     osutil.ExpandHome(cfg.Cron.StorePath),
 		MaxJobs:       cfg.Cron.MaxJobs,

@@ -12,19 +12,16 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
-// ScratchKeyPrefix is the session-key prefix used for all ephemeral "aside"
-// sessions created via the scratch pool. Session-list, persistence, and
-// sidebar paths filter on this prefix so scratch sessions never surface in
-// the normal sidebar or get written to sessions.json. Mutations to this
-// constant must be accompanied by updates in saveStore (filter) and the
-// dashboard handleList filter.
+// ScratchKeyPrefix re-exports sessionkey.ScratchKeyPrefix so existing
+// callers (saveStore filter / dashboard handleList / scratch construction
+// sites) keep using session.ScratchKeyPrefix during the alias deprecation
+// window. Canonical declaration lives in internal/sessionkey.
 //
-// R176-ARCH-M1: canonical reserved-namespace prefixes are listed together in
-// key.go (reservedKeyPrefixes); this constant lives here for historical
-// proximity to the ScratchPool implementation.
-const ScratchKeyPrefix = "scratch:"
+// Deprecated: use sessionkey.ScratchKeyPrefix.
+const ScratchKeyPrefix = sessionkey.ScratchKeyPrefix
 
 // MaxScratchQuoteBytes caps the quoted context passed to --append-system-prompt.
 // 8 KiB covers several paragraphs of ordinary text while keeping the spawn
@@ -416,11 +413,10 @@ func (p *ScratchPool) ForceExpireForTest(id string, t time.Time) {
 func (p *ScratchPool) SweepForTest(now time.Time) { p.sweep(now) }
 
 // IsScratchKey reports whether a session key belongs to the scratch pool.
-// Used by persistence (saveStore) and the dashboard sidebar filter to hide
-// scratches from places they should not appear.
-func IsScratchKey(key string) bool {
-	return strings.HasPrefix(key, ScratchKeyPrefix)
-}
+// Aliases sessionkey.IsScratchKey for the alias deprecation window.
+//
+// Deprecated: use sessionkey.IsScratchKey.
+func IsScratchKey(key string) bool { return sessionkey.IsScratchKey(key) }
 
 // SanitizeQuote strips control characters and invisible Unicode formatting
 // codepoints from s, truncating the result at MaxScratchQuoteBytes along a

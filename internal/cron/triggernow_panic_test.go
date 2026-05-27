@@ -6,8 +6,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/session"
 )
 
 // panickingRouter is a SessionRouter whose GetOrCreate panics on first
@@ -22,7 +20,7 @@ type panickingRouter struct {
 
 func (p *panickingRouter) RegisterCronStubWithChain(string, string, string, []string) {}
 func (p *panickingRouter) Reset(string)                                               {}
-func (p *panickingRouter) GetOrCreate(context.Context, string, session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error) {
+func (p *panickingRouter) GetOrCreate(context.Context, string, AgentOpts) (Session, SessionStatus, error) {
 	p.mu.Lock()
 	p.calls++
 	p.mu.Unlock()

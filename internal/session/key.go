@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/keyspec"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // MaxSessionKeyBytes caps the byte length of a session key accepted over any
@@ -28,31 +29,23 @@ const MaxSessionKeyBytes = 4*maxKeyComponent + 3
 //
 // Each prefix is a full token (trailing colon) so substring collisions cannot
 // accidentally misclassify a key like "cronographer:..." as cron-owned.
+// Reserved-namespace prefix constants are now owned by the leaf
+// internal/sessionkey package; the session-local constants alias them
+// so existing callers (internal/session keyNamespaces table; external
+// dispatch / server / project callers) keep referring to session.X
+// during the migration window. After the alias deprecation cycle these
+// re-exports go away and external callers shift to sessionkey.X.
+//
+// Refs: docs/rfc/cron-sysession-merge.md Phase A2 + Phase B §3.3.5.
 const (
-	// CronKeyPrefix is used for cron-scheduler-owned sessions. Key shape is
-	// "cron:{jobID}" — see internal/cron/scheduler.go RegisterCronStub.
-	CronKeyPrefix = "cron:"
+	// CronKeyPrefix re-exports sessionkey.CronKeyPrefix.
+	CronKeyPrefix = sessionkey.CronKeyPrefix
 	// ProjectKeyPrefix is used for project-scoped planner sessions. Key
 	// shape is "project:{name}:planner" — see internal/project.IsPlannerKey.
-	// R239-ARCH-G (#900): canonical declaration lives in
-	// internal/keyspec.ProjectKeyPrefix; the session-local constant is a
-	// re-export so existing callers (the keyNamespaces table below,
-	// isPlannerKey, plannerNameFromKey) keep using the
-	// session-package symbol without an import cycle.
+	// Canonical declaration lives in internal/keyspec.ProjectKeyPrefix.
 	ProjectKeyPrefix = keyspec.ProjectKeyPrefix
-	// ScratchKeyPrefix is already defined in scratch.go; listed here only in
-	// documentation for grep-ability. Do not redefine.
-	// SysKeyPrefix is used for naozhi-internal background daemon sessions.
-	// Key shape is "sys:{daemon-name}" where {daemon-name} matches
-	// `^[a-z][a-z0-9-]{1,30}$`. See docs/rfc/system-session.md and
-	// internal/sysession/registry.go (BuiltinDaemons name validation).
-	//
-	// Phase 1 daemons typically do NOT register a stub at all — Runner-style
-	// daemons (AutoTitler) only spawn transient claude -p subprocesses and
-	// never need a long-lived ManagedSession. The prefix is reserved here
-	// for future daemons that DO need a persistent stub (e.g. a metrics
-	// aggregator that must survive across ticks).
-	SysKeyPrefix = "sys:"
+	// SysKeyPrefix re-exports sessionkey.SysKeyPrefix.
+	SysKeyPrefix = sessionkey.SysKeyPrefix
 )
 
 // keyNamespace captures the per-prefix policy bits in one row so the reserved
@@ -131,26 +124,22 @@ func IsReservedNamespace(key string) bool {
 	return false
 }
 
-// IsCronKey reports whether the key belongs to the cron namespace. See
-// CronKeyPrefix.
-func IsCronKey(key string) bool {
-	return strings.HasPrefix(key, CronKeyPrefix)
-}
+// IsCronKey reports whether the key belongs to the cron namespace.
+// Aliases sessionkey.IsCronKey; kept for one release window so external
+// callers (dispatch / server / cmd) can migrate gradually.
+//
+// Deprecated: use sessionkey.IsCronKey.
+func IsCronKey(key string) bool { return sessionkey.IsCronKey(key) }
 
-// CronKey synthesises the session key for a cron job. Keep cron-namespace
-// key construction in one place so prefix changes (e.g. a future v2
-// namespace) only need to touch CronKeyPrefix here — callers in the cron
-// package previously inlined `"cron:" + id`, which the linker could not
-// detect if the constant drifted.
-func CronKey(id string) string {
-	return CronKeyPrefix + id
-}
+// CronKey synthesises the session key for a cron job.
+//
+// Deprecated: use sessionkey.CronKey.
+func CronKey(id string) string { return sessionkey.CronKey(id) }
 
 // IsSysKey reports whether the key belongs to the system-daemon namespace.
-// See SysKeyPrefix.
-func IsSysKey(key string) bool {
-	return strings.HasPrefix(key, SysKeyPrefix)
-}
+//
+// Deprecated: use sessionkey.IsSysKey.
+func IsSysKey(key string) bool { return sessionkey.IsSysKey(key) }
 
 // plannerKeyFor is the session-package local accessor for the planner
 // key shape. Kept unexported because external callers should continue

@@ -13,10 +13,8 @@ import (
 // which carried unredacted err.Error() output to all dashboard clients.
 func TestR220Sec1_SkipPersistBroadcastErrorMsgIsRedacted(t *testing.T) {
 	t.Parallel()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}})
-
-	var got RunEndedEvent
-	s.SetOnRunEnded(func(ev RunEndedEvent) { got = ev })
+	rec := &recordingBroadcaster{}
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, Telemetry: rec})
 
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
@@ -31,6 +29,10 @@ func TestR220Sec1_SkipPersistBroadcastErrorMsgIsRedacted(t *testing.T) {
 		errClass: ErrClassCanceled, errMsg: rawErr, skipPersist: true,
 	})
 
+	if rec.endedCount() != 1 {
+		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
+	}
+	got := rec.endedAtCron(0)
 	if strings.Contains(got.ErrorMsg, "/home/ops/private-secret/file.go") {
 		t.Fatalf("path leaked to broadcast ErrorMsg: %q", got.ErrorMsg)
 	}
@@ -49,15 +51,13 @@ func TestR220Sec1_SkipPersistBroadcastErrorMsgIsRedacted(t *testing.T) {
 func TestR220Sec1_SuccessPathBroadcastUsesPersistedErrMsg(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
-	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: tmp + "/cron_jobs.json"})
+	rec := &recordingBroadcaster{}
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: tmp + "/cron_jobs.json", Telemetry: rec})
 	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
 	s.jobs[jobID] = j
 	s.mu.Unlock()
-
-	var got RunEndedEvent
-	s.SetOnRunEnded(func(ev RunEndedEvent) { got = ev })
 
 	rawErr := "send error: dial tcp 10.0.0.1:443: connect: connection refused"
 	s.finishRun(finishArgs{
@@ -65,6 +65,10 @@ func TestR220Sec1_SuccessPathBroadcastUsesPersistedErrMsg(t *testing.T) {
 		trigger: TriggerScheduled, state: RunStateFailed,
 		errClass: ErrClassSendError, errMsg: rawErr,
 	})
+	if rec.endedCount() != 1 {
+		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
+	}
+	got := rec.endedAtCron(0)
 	// "10.0.0.1" is technically not a path so it stays; check that the
 	// broadcast field equals what the on-disk Job.LastError holds, since
 	// that's the consistency invariant.
