@@ -736,6 +736,36 @@ function initSidebarSearch() {
   });
 }
 
+// projectDisplayLabel returns the operator-facing name for a project,
+// preferring the explicit ProjectConfig.display_name override (R110-P2 /
+// #448) and falling back to the directory-derived `p.name` so projects
+// without a configured display_name keep their existing UI label.
+//
+// Pure: returns a string, no escaping. Callers MUST run the result
+// through esc() / escAttr() before injecting it into HTML — same
+// contract as `p.name`. Truthy guards on both fields tolerate the
+// pre-config case (`p.config` undefined on legacy /api/projects shapes
+// or remote-merge entries that the cache layer hasn't yet stamped).
+function projectDisplayLabel(p) {
+  if (!p) return '';
+  const cfg = p.config || {};
+  const dn = (cfg.display_name || '').trim();
+  if (dn) return dn;
+  return p.name || '';
+}
+
+// projectDisplayPrefix renders the optional emoji in front of the name.
+// Returns "" when the project has no emoji configured. The trailing
+// space lives inside the returned string so callers can simply
+// concatenate prefix + label without conditional whitespace.
+function projectDisplayPrefix(p) {
+  if (!p) return '';
+  const cfg = p.config || {};
+  const em = (cfg.emoji || '').trim();
+  if (!em) return '';
+  return em + ' ';
+}
+
 // Match a workspace path to a project from projectsData (longest prefix wins)
 function matchProject(workspace) {
   if (!workspace || !projectsData || projectsData.length === 0) return '';
@@ -829,9 +859,20 @@ function sectionHeaderHtml(p) {
   }
 
   const collapsedCls = collapsed ? ' is-collapsed' : '';
-  return '<div class="section-header' + collapsedCls + '" role="group" aria-label="' + escAttr(p.name) + '">' +
+  // R110-P2 / #448: prefix the display name with the configured emoji
+  // (if any) and use display_name when set; aria-label / title still
+  // carry p.name so screen-readers + tooltips disambiguate when the
+  // dirname differs from the human-friendly label.
+  const emojiPrefix = projectDisplayPrefix(p);
+  const displayName = projectDisplayLabel(p);
+  const labelTitle = (displayName && displayName !== p.name)
+    ? p.name + ' — ' + displayName
+    : p.name;
+  return '<div class="section-header' + collapsedCls + '" role="group" aria-label="' + escAttr(labelTitle) + '">' +
     collapseBtn + starBtn +
-    '<span class="sh-name" title="' + escAttr(p.name) + '">' + esc(p.name) + '</span>' +
+    '<span class="sh-name" title="' + escAttr(labelTitle) + '">' +
+      (emojiPrefix ? esc(emojiPrefix) : '') + esc(displayName) +
+    '</span>' +
     countBadge +
     ghBtn +
     '</div>';
@@ -5650,10 +5691,25 @@ function buildProjectRow(s, idx) {
   const icon = p.favorite
     ? '<span class="cp-icon cp-icon-fav" title="已收藏" aria-label="已收藏">★</span>'
     : '<span class="cp-icon">▸</span>';
+  // R110-P2 / #448: if the project has a configured emoji, render it
+  // before the name so palette rows match the sidebar headers. The
+  // raw `p.name` is still the search target (highlighted via
+  // s.nameRanges below) so fuzzy queries don't have to know about
+  // display_name; the visible label just gets a friendlier prefix.
+  // display_name itself is appended as a small parenthetical hint
+  // when it differs from the directory name — keeps the dirname
+  // visible for operators who think in paths but adds the human
+  // label for the rest.
+  const emojiPrefix = projectDisplayPrefix(p);
+  const displayName = projectDisplayLabel(p);
+  const dispHint = (displayName && displayName !== p.name)
+    ? ' <span class="cp-name-alias">(' + esc(displayName) + ')</span>'
+    : '';
   el.innerHTML =
     icon +
     '<div class="cp-main">' +
-      '<div class="cp-name">' + highlight(p.name, s.nameRanges) + '</div>' +
+      '<div class="cp-name">' + (emojiPrefix ? esc(emojiPrefix) : '') +
+        highlight(p.name, s.nameRanges) + dispHint + '</div>' +
       '<div class="cp-path">' + highlight(shortPath(p.path), s.pathRanges) + '</div>' +
     '</div>' + nodeBadge;
   el.addEventListener('click', () => pickPaletteProject(p));
