@@ -558,8 +558,17 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
 	s.mux.HandleFunc("GET /manifest.json", s.handleManifest)
 	s.mux.HandleFunc("GET /sw.js", s.handleSW)
-	s.mux.HandleFunc("GET /static/dashboard.js", s.handleDashboardJS)
-	s.mux.HandleFunc("GET /static/agent_view.js", s.handleAgentViewJS)
+	// R20260527122801-SEC-4 (#1328): the dashboard JS modules embed the
+	// list of authenticated API endpoints, the cron polling cadence, and
+	// the dashboard's client-side schema. Serving them to unauthenticated
+	// scanners gave a free recon surface — pull /static/dashboard.js,
+	// grep for `/api/`, fingerprint the deployment. Now gated behind
+	// requireAuth so only authenticated dashboard users (or no-token-mode
+	// deployments where requireAuth is a pass-through) can fetch them.
+	// The login page itself loads no JS from /static/, so wrapping these
+	// does not break the unauthenticated bootstrap.
+	s.mux.HandleFunc("GET /static/dashboard.js", auth(s.handleDashboardJS))
+	s.mux.HandleFunc("GET /static/agent_view.js", auth(s.handleAgentViewJS))
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
 	if s.reverseNodeServer != nil {
 		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
