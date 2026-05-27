@@ -1111,25 +1111,33 @@ func (s *Scheduler) Start() error {
 // first time it would have refreshed a stub but couldn't (sync.Once
 // gate so a router-less test fixture / AllowNilRouter deployment does
 // not spam the log across N ticks).
-func (s *Scheduler) registerStubByValue(id, workDir, prompt, lastSessionID string) {
+// registerStubByValue creates / refreshes a router stub. Returns true on
+// success, false when the scheduler has no router wired (the only silent
+// "fail" path today). Per #491 (R247-GO-10) the bool flows back into
+// EnsureStub so dashboard observability is honest about a no-op call;
+// without this the sidebar reported "stub registered" while the router
+// never saw the call.
+func (s *Scheduler) registerStubByValue(id, workDir, prompt, lastSessionID string) bool {
 	if s.router == nil {
 		s.routerNilOnce.Do(func() {
 			slog.Error("cron: registerStubByValue called without a router; dashboard sidebar will be empty for this scheduler — wireup bug or missing SchedulerConfig.Router?",
 				"job_id", id)
 		})
-		return
+		return false
 	}
 	var chain []string
 	if lastSessionID != "" {
 		chain = []string{lastSessionID}
 	}
 	s.router.RegisterCronStubWithChain(sessionkey.CronKey(id), workDir, prompt, chain)
+	return true
 }
 
 // registerStubFromJob 是 registerStubByValue 的便捷包装，对未持锁、且对
 // *Job 字段稳定性已有把握（如 AddJob 后立刻调）的调用方简化字面。
-func (s *Scheduler) registerStubFromJob(j *Job) {
-	s.registerStubByValue(j.ID, j.WorkDir, j.Prompt, j.LastSessionID)
+// Return value mirrors registerStubByValue (#491).
+func (s *Scheduler) registerStubFromJob(j *Job) bool {
+	return s.registerStubByValue(j.ID, j.WorkDir, j.Prompt, j.LastSessionID)
 }
 
 // EnsureStub lazily (re-)registers a dashboard stub session for the given
@@ -1169,8 +1177,9 @@ func (s *Scheduler) EnsureStub(key string) bool {
 	if !ok {
 		return false
 	}
-	s.registerStubByValue(id, workDir, prompt, lastSessionID)
-	return true
+	// #491 (R247-GO-10): propagate the registerStubByValue success bool so
+	// EnsureStub does not lie when the scheduler is router-less.
+	return s.registerStubByValue(id, workDir, prompt, lastSessionID)
 }
 
 // StopPolicy is the documented Stop-overflow strategy this Scheduler
