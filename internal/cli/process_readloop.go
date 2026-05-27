@@ -211,6 +211,16 @@ const (
 // readLoop path observed the error. Pure side-effects: no return value
 // because the caller's break-from-loop decision is independent of the
 // classification (any non-nil readErr breaks). R214-CODE-3.
+//
+// R20260527-GO-19 (#1288): the afterDrain && closed arm previously stamped
+// DeathReasonShimEOF — semantically misleading because the shim socket
+// closure was preceded by an oversize protocol frame (the drain loop was
+// running BECAUSE we had just refused a >maxScannerBufBytes line). Health
+// dashboards conflating the two arms could not distinguish a normal shim
+// shutdown from a degraded shim that emitted a malformed/giant frame
+// before the pipe gave up. Stamp DeathReasonShimOversizeThenEOF so the
+// two operational signatures are separable. The log lines were already
+// distinct (kept as-is); only the deathReason channel changes.
 func (p *Process) classifyEOF(readErr error, afterDrain bool, log *slog.Logger) {
 	closed := errors.Is(readErr, io.EOF) || errors.Is(readErr, net.ErrClosed)
 	if closed {

@@ -13,6 +13,10 @@ import (
 // must reproduce the same setDeathReason values the inline switch wrote
 // before R214-CODE-3, otherwise health dashboards lose the EOF vs ReadErr
 // distinction.
+//
+// R20260527-GO-19 (#1288): the afterDrain && closed arms now stamp
+// DeathReasonShimOversizeThenEOF (vs the plain shim_eof) so a malformed
+// oversize-frame disconnect is separable from a clean shim shutdown.
 func TestClassifyEOF_DeathReasons(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
