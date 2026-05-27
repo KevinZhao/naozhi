@@ -233,6 +233,18 @@ type Scheduler struct {
 	// map's working set tracks the live chat set rather than every chat
 	// that has ever owned a job. R237-PERF-5 (#661).
 	chatJobCount map[chatJobKey]int
+	// jobsByChat is a per-(Platform, ChatID) index of *Job pointers.
+	// Maintained synchronously with s.jobs writes under s.mu so
+	// findByPrefixLocked iterates only the small slice of jobs in the
+	// caller's chat instead of the full s.jobs map. With maxJobsHardCap=500
+	// and a typical 1-5 jobs/chat, the prefix-match scan drops from O(500)
+	// to O(5) per IM-prefix lookup (DeleteJob/PauseJob/ResumeJob via
+	// withJobByPrefix). Entries are deleted when the slice empties so the
+	// map's working set tracks the live chat set, mirroring chatJobCount.
+	// (Platform, ChatID) of a job is immutable post-AddJob (UpdateJob
+	// rejects both via JobUpdate field absence), so an entry never moves
+	// across keys — add appends, delete swaps-and-shrinks. R242-GO-9 (#558).
+	jobsByChat map[chatJobKey][]*Job
 	// router is set once in NewScheduler and never reassigned.
 	router SessionRouter
 	// platforms / agents / agentCommands are populated from SchedulerConfig
@@ -730,6 +742,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		),
 		jobs:                make(map[string]*Job),
 		chatJobCount:        make(map[chatJobKey]int),
+		jobsByChat:          make(map[chatJobKey][]*Job),
 		router:              cfg.Router,
 		telemetry:           cfg.Telemetry,
 		platforms:           cfg.Platforms,
@@ -887,7 +900,9 @@ func (s *Scheduler) Start() error {
 		}
 		if j.Paused {
 			s.jobs[j.ID] = j
-			s.chatJobCount[chatJobKey{Platform: j.Platform, ChatID: j.ChatID}]++
+			key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+			s.chatJobCount[key]++
+			s.jobsByChat[key] = append(s.jobsByChat[key], j)
 			stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 			continue
 		}
@@ -896,7 +911,9 @@ func (s *Scheduler) Start() error {
 			continue
 		}
 		s.jobs[j.ID] = j
-		s.chatJobCount[chatJobKey{Platform: j.Platform, ChatID: j.ChatID}]++
+		key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+		s.chatJobCount[key]++
+		s.jobsByChat[key] = append(s.jobsByChat[key], j)
 		stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 	}
 	jobCount := len(s.jobs)
@@ -1104,13 +1121,24 @@ func (s *Scheduler) Stop() {
 	}
 	s.stopCancel()
 
-	// R236-GO-01: wait for the cold-start GC goroutine spawned in Start()
-	// before draining the cron scheduler. Without this, trimAll's filesystem
-	// mutations on the runs/ tree race with Stop's final persist path and
-	// any in-flight Append from a TriggerNow draining via triggerWG.Wait.
-	// Bounded by a 5s timer so a wedged trimAll cannot pin Stop past
-	// stopBudget — the goroutine is naturally short-lived (ReadDir + N
-	// Removes), so any timeout here indicates a stuck filesystem.
+	// R247-CR-4 (#584): the four shutdown stages each own an explicit
+	// budget; Stop() orchestrates them in order. Each helper logs a Warn +
+	// bumps its CronStopBudgetExceeded* counter on its own deadline; Stop
+	// itself contains no budget arithmetic.
+	s.waitGCDrain()
+	deadlineHit, stopStart := s.drainCronStop()
+	if !deadlineHit {
+		s.drainTriggerWG(stopStart)
+	}
+	s.persistOnShutdown()
+}
+
+// waitGCDrain blocks until the cold-start GC goroutine spawned in Start()
+// completes or gcWaitBudget elapses. Filesystem mutations on the runs/
+// tree from trimAll race the upcoming persist + Append-from-triggerWG
+// paths if we don't drain first; the budget keeps a wedged trimAll from
+// pinning systemd TimeoutStopSec. R236-GO-01 (origin) / R247-CR-4 (extract).
+func (s *Scheduler) waitGCDrain() {
 	gcDone := make(chan struct{})
 	go func() {
 		s.gcWG.Wait()
@@ -1128,7 +1156,15 @@ func (s *Scheduler) Stop() {
 		metrics.CronStopBudgetExceededGCTotal.Add(1)
 		slog.Warn("cron: gc goroutine wait timeout", "budget", gcWaitBudget)
 	}
+}
 
+// drainCronStop signals the robfig/cron runner to stop accepting new ticks
+// and waits up to stopBudget for in-flight ticks to drain. Returns
+// (deadlineHit, stopStart) — caller skips drainTriggerWG when deadlineHit
+// is true (the budget is shared across both phases). stopStart anchors the
+// remaining-budget arithmetic in drainTriggerWG so both phases account
+// against the same wall clock. R246-GO-13 / R247-CR-4.
+func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
 	cronDoneCtx := s.cron.Stop()
 
 	// Single overall deadline shared across both waits. If cron.Stop drains
@@ -1146,11 +1182,10 @@ func (s *Scheduler) Stop() {
 	// independent receivers); a fresh time.After on the remaining budget
 	// is the explicit, documented pattern. The first select still uses
 	// the NewTimer so we can defer-Stop it on the early-drain path.
-	stopStart := time.Now()
+	stopStart = time.Now()
 	deadline := time.NewTimer(stopBudget)
 	defer deadline.Stop()
 
-	deadlineHit := false
 	select {
 	case <-cronDoneCtx.Done():
 	case <-deadline.C:
@@ -1160,91 +1195,89 @@ func (s *Scheduler) Stop() {
 		slog.Warn("cron scheduler: stop deadline exceeded before cron.Stop drained, proceeding",
 			"budget", stopBudget)
 	}
+	return deadlineHit, stopStart
+}
 
-	// Bound triggerWG.Wait with the *remaining* share of the same budget:
-	// manual TriggerNow respects stopCtx via execute(), and R243-SEC-14
-	// (#799) wired notifyTarget's replyCtx to s.stopCtx so a hung webhook
-	// short-circuits on the cancel edge instead of waiting for its own
-	// per-target timer. The deadline here remains the backstop for any
-	// notify path that still parents on Background (e.g. a future helper
-	// or a test fake that bypasses notifyTarget): without it a stuck
-	// platform HTTP call could otherwise pin Stop() past systemd
-	// TimeoutStopSec.
+// drainTriggerWG waits for TriggerNow + deliverNotice goroutines to drain,
+// budgeted by the *remaining* share of stopBudget after drainCronStop. Caller
+// must skip this phase entirely when drainCronStop's deadlineHit is true so
+// the budget is honoured as a single overall ceiling.
+//
+// R222-GO-10: when the deadline pre-empts triggerDone, the wrapper goroutine
+// started by `go func() { s.triggerWG.Wait(); close(...) }` stays parked on
+// triggerWG.Wait — exactly the intentional-orphan path documented in the
+// Stop CONTRACT block. Reclaim happens when the OS tears the process down.
+// We deliberately do NOT add a sync.Once / chan-cancel reclaim path here:
+// triggerWG.Wait does not accept a cancel signal, and Scheduler is
+// single-shot (Stop is terminal). A goroutine-leak detector running in
+// tests that shorten stopBudget to milliseconds will surface this orphan;
+// tests that care should plumb a non-stuck deliverNotice fake instead.
+//
+// Bound triggerWG.Wait with the *remaining* share of the same budget:
+// manual TriggerNow respects stopCtx via execute(), and R243-SEC-14
+// (#799) wired notifyTarget's replyCtx to s.stopCtx so a hung webhook
+// short-circuits on the cancel edge instead of waiting for its own
+// per-target timer. The deadline here remains the backstop for any
+// notify path that still parents on Background (e.g. a future helper
+// or a test fake that bypasses notifyTarget): without it a stuck
+// platform HTTP call could otherwise pin Stop() past systemd
+// TimeoutStopSec.
+//
+// R247-CR-4: extracted from Stop().
+func (s *Scheduler) drainTriggerWG(stopStart time.Time) {
+	triggerDone := make(chan struct{})
+	go func() {
+		s.triggerWG.Wait()
+		close(triggerDone)
+	}()
+	// R246-GO-13: derive remaining budget from stopStart instead of
+	// re-reading deadline.C. If cron.Stop drained at the very edge of
+	// the budget, remaining can be near-zero; clamp to a tiny floor so
+	// we still observe an instantaneous triggerDone (already-closed
+	// channel) without wedging on a 0-duration timer. The clamp is
+	// not a guaranteed minimum wait — both the channel and the timer
+	// are checked in the same select.
 	//
-	// R222-GO-10: when the deadline pre-empts triggerDone, the wrapper
-	// goroutine started by `go func() { s.triggerWG.Wait(); close(...) }`
-	// stays parked on triggerWG.Wait — exactly the intentional-orphan path
-	// documented in the function-level CONTRACT block (lines 715–725). The
-	// cost is one wedged goroutine per process exit; reclaim happens when
-	// the OS tears the process down moments later. We deliberately do NOT
-	// add a sync.Once / chan-cancel reclaim path here: triggerWG.Wait does
-	// not accept a cancel signal, and Scheduler is single-shot (Stop is
-	// terminal). The `if !deadlineHit` outer gate already keeps us from
-	// spawning the wrapper when cron.Stop itself ate the budget. A
-	// goroutine-leak detector running in tests that shorten stopBudget to
-	// milliseconds will surface this orphan; tests that care should plumb
-	// a non-stuck deliverNotice fake instead.
-	if !deadlineHit {
-		triggerDone := make(chan struct{})
-		go func() {
-			s.triggerWG.Wait()
-			close(triggerDone)
-		}()
-		// R246-GO-13: derive remaining budget from stopStart instead of
-		// re-reading deadline.C. If cron.Stop drained at the very edge of
-		// the budget, remaining can be near-zero; clamp to a tiny floor so
-		// we still observe an instantaneous triggerDone (already-closed
-		// channel) without wedging on a 0-duration timer. The clamp is
-		// not a guaranteed minimum wait — both the channel and the timer
-		// are checked in the same select.
-		//
-		// R249-GO-4: use NewTimer + defer Stop instead of time.After.
-		// time.After returns a fresh timer whose underlying resources
-		// are released only when it fires; on the triggerDone-fast path
-		// the timer would leak its slot until expiry (~30s default).
-		// More urgently, with remaining clamped to 1ms the timer almost
-		// certainly fires before the select runs, and a fired channel
-		// from time.After is unreachable for explicit Stop. Mirror the
-		// first select's NewTimer + defer Stop pattern (line ~820) so
-		// both halves of Stop release timer state deterministically.
-		remaining := stopBudget - time.Since(stopStart)
-		if remaining < time.Millisecond {
-			remaining = time.Millisecond
-		}
-		triggerTimer := time.NewTimer(remaining)
-		defer triggerTimer.Stop()
-		select {
-		case <-triggerDone:
-		case <-triggerTimer.C:
-			// R250-GO-20 (#1083): see GC counter rationale above.
-			metrics.CronStopBudgetExceededTriggerTotal.Add(1)
-			slog.Warn("cron scheduler: stop deadline exceeded during triggerWG wait, proceeding",
-				"budget", stopBudget, "remaining_ms", remaining.Milliseconds())
-		}
+	// R249-GO-4: use NewTimer + defer Stop instead of time.After.
+	// time.After returns a fresh timer whose underlying resources
+	// are released only when it fires; on the triggerDone-fast path
+	// the timer would leak its slot until expiry (~30s default).
+	// More urgently, with remaining clamped to 1ms the timer almost
+	// certainly fires before the select runs, and a fired channel
+	// from time.After is unreachable for explicit Stop. Mirror the
+	// first select's NewTimer + defer Stop pattern (line ~820) so
+	// both halves of Stop release timer state deterministically.
+	remaining := stopBudget - time.Since(stopStart)
+	if remaining < time.Millisecond {
+		remaining = time.Millisecond
 	}
+	triggerTimer := time.NewTimer(remaining)
+	defer triggerTimer.Stop()
+	select {
+	case <-triggerDone:
+	case <-triggerTimer.C:
+		// R250-GO-20 (#1083): see GC counter rationale above.
+		metrics.CronStopBudgetExceededTriggerTotal.Add(1)
+		slog.Warn("cron scheduler: stop deadline exceeded during triggerWG wait, proceeding",
+			"budget", stopBudget, "remaining_ms", remaining.Milliseconds())
+	}
+}
 
-	// R232-ARCH-10: route shutdown save through persistJobsLocked so it
-	// participates in the saveSeq monotonic gate. Without this, a queued
-	// in-flight saveMarshaledSeq from a mutator that committed just before
-	// Stop could acquire storeMu *after* Stop's bare WriteFileAtomic and
-	// overwrite the freshest snapshot with stale data — Stop's bare write
-	// did not bump lastSavedSeq, so the staleness check would let the
-	// older write through.
+// persistOnShutdown runs the final cron_jobs.json write through
+// persistJobsLocked + saveSeq gate. Routing through the gate (not a bare
+// WriteFileAtomic) keeps a queued-but-not-landed mutator save from later
+// overwriting Stop's snapshot with stale data — R232-ARCH-10. R246-GO-5
+// (#690) tags failures with persist=FAILED_DURING_SHUTDOWN so log
+// aggregation routes them to the unrecoverable-data-loss alert channel
+// (the per-mutation "save cron store" failure is recoverable on the next
+// mutation; this one is not, the process is moments from exit).
+//
+// R247-CR-4: extracted from Stop().
+func (s *Scheduler) persistOnShutdown() {
 	s.mu.Lock()
 	save, err := s.persistJobsLocked()
 	s.mu.Unlock()
 	if err != nil {
-		// R246-GO-5 (#690): silent data loss only on shutdown is exactly the
-		// failure mode operators most need to alert on — stopCancel and
-		// cron.Stop already ran above, so any unsaved AddJob/UpdateJob/
-		// DeleteJob mutation since the last successful save is now lost
-		// forever (process is moments from exit). Tag the slog line with an
-		// explicit `persist:FAILED_DURING_SHUTDOWN` field so log aggregation
-		// can route it to a different alert channel than the per-mutation
-		// "save cron store" failure (which is recoverable on the next
-		// mutation, this one is not). Stop() remains void per the existing
-		// caller contract; surfacing the loss via structured logs is the
-		// minimum signal the issue triage prescribed.
 		slog.Error("marshal cron store on shutdown",
 			"err", err,
 			"persist", "FAILED_DURING_SHUTDOWN")

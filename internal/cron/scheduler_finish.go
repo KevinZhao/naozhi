@@ -187,7 +187,7 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	persistedErrMsg := a.errMsg
 	jobPersistOK := false
 	if !a.skipPersist {
-		persistedResult, persistedErrMsg, jobPersistOK = s.recordResultP0WithSanitised(a.job, a.result, a.errMsg, a.sessionID, a.errClass, a.state)
+		persistedResult, persistedErrMsg, jobPersistOK = s.recordTerminalResult(a.job, a.result, a.errMsg, a.sessionID, a.errClass, a.state)
 	} else {
 		persistedResult = sanitiseRunResult(persistedResult)
 		persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
@@ -376,7 +376,35 @@ func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 	})
 }
 
-// recordResultP0WithSanitised persists the terminal result (LastResult /
+// jobResultSnapshot captures the terminal-result-relevant Job fields
+// before recordTerminalResult mutates them, so a persistJobsLocked failure
+// can roll the in-memory Job state back to the pre-mutation values without
+// rebuilding the field list at the rollback site. R247-CR-14 (#586): the
+// previous inline anonymous-struct literal duplicated field types between
+// the snapshot capture and the rollback assignment, leaving every future
+// "add a field to LastFoo" change two coupled edits to keep in sync.
+//
+// restore re-applies the captured values to j; caller MUST hold s.mu so
+// the in-memory state stays serialised against concurrent readers.
+type jobResultSnapshot struct {
+	LastRunAt      time.Time
+	LastResult     string
+	LastError      string
+	LastErrorClass ErrorClass
+	LastSessionID  string
+	Counters       JobRunCounters
+}
+
+func (p jobResultSnapshot) restore(j *Job) {
+	j.LastRunAt = p.LastRunAt
+	j.LastResult = p.LastResult
+	j.LastError = p.LastError
+	j.LastErrorClass = p.LastErrorClass
+	j.LastSessionID = p.LastSessionID
+	j.RunCounters = p.Counters
+}
+
+// recordTerminalResult persists the terminal result (LastResult /
 // LastError / LastErrorClass / Counters) for non-skipPersist paths and
 // returns the post-sanitised (result, errMsg) pair so finishRun can reuse
 // the same byte content in the CronRun history record. The two outputs
@@ -405,7 +433,13 @@ func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 // therefore moot — only this single P0 path remains, and persist_failure_test
 // (the last "test stub" caller) already invokes this function directly.
 // Do NOT reintroduce a thinner wrapper without first checking those TODOs.
-func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState) (string, string, bool) {
+//
+// R247-CR-14 / R247-CR-15 (#586): renamed from recordResultP0WithSanitised
+// to drop the "P0" review-tag prefix that lost meaning once the dead
+// recordResult path was deleted (R220-GO-1). The rollback state now lives
+// in the named jobResultSnapshot struct above so a future "add a Last*
+// field" diff lands once on the type instead of three coupled edits.
+func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState) (string, string, bool) {
 	// truncateWithSuffix (limits.go) is the single source of truth for the
 	// rune-trim + …[truncated] suffix; both this path and sanitiseRunResult
 	// must produce byte-identical output so the skipPersist branch of
@@ -425,14 +459,14 @@ func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionI
 		s.mu.Unlock()
 		return result, errMsg, false
 	}
-	prev := struct {
-		LastRunAt      time.Time
-		LastResult     string
-		LastError      string
-		LastErrorClass ErrorClass
-		LastSessionID  string
-		Counters       JobRunCounters
-	}{j.LastRunAt, j.LastResult, j.LastError, j.LastErrorClass, j.LastSessionID, j.RunCounters}
+	prev := jobResultSnapshot{
+		LastRunAt:      j.LastRunAt,
+		LastResult:     j.LastResult,
+		LastError:      j.LastError,
+		LastErrorClass: j.LastErrorClass,
+		LastSessionID:  j.LastSessionID,
+		Counters:       j.RunCounters,
+	}
 
 	j.LastRunAt = time.Now()
 	j.LastResult = result
@@ -445,14 +479,9 @@ func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionI
 
 	save, perr := s.persistJobsLocked()
 	if perr != nil {
-		j.LastRunAt = prev.LastRunAt
-		j.LastResult = prev.LastResult
-		j.LastError = prev.LastError
-		j.LastErrorClass = prev.LastErrorClass
-		j.LastSessionID = prev.LastSessionID
-		j.RunCounters = prev.Counters
+		prev.restore(j)
 		s.mu.Unlock()
-		slog.Warn("cron: recordResultP0 persist failed; in-memory result reverted",
+		slog.Warn("cron: recordTerminalResult persist failed; in-memory result reverted",
 			"job_id", j.ID, "err", perr)
 		return result, errMsg, false
 	}

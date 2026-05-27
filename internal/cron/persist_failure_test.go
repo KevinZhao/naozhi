@@ -271,11 +271,12 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 
 	withFailingMarshal(t, s)
 
-	// R230C-CR-1 / R232-ARCH-2: tests now exercise the production path
-	// (recordResultP0WithSanitised) directly. The discriminating fields
-	// (LastErrorClass, RunCounters) get rolled back the same way as the
-	// four LastRunAt/LastResult/LastError/LastSessionID fields.
-	_, _, _ = s.recordResultP0WithSanitised(j, "new-result", "new-error", "new-sess", ErrClassSessionError, RunStateFailed)
+	// R230C-CR-1 / R232-ARCH-2 / R247-CR-14 (#586): tests exercise the
+	// production path (recordTerminalResult, formerly recordResultP0WithSanitised)
+	// directly. The discriminating fields (LastErrorClass, RunCounters) get
+	// rolled back the same way as the four
+	// LastRunAt/LastResult/LastError/LastSessionID fields.
+	_, _, _ = s.recordTerminalResult(j, "new-result", "new-error", "new-sess", ErrClassSessionError, RunStateFailed)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -295,7 +296,7 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 }
 
 // TestPersistFailure_RecordResultHappyPathApplies is the positive
-// counterpart: when persistJobsLocked succeeds, recordResultP0WithSanitised
+// counterpart: when persistJobsLocked succeeds, recordTerminalResult
 // must apply the new Job values. Without this counterpart a regression
 // that accidentally always rolls back (e.g. inverted error check) would
 // pass the rollback test above.
@@ -327,11 +328,11 @@ func TestPersistFailure_RecordResultHappyPathApplies(t *testing.T) {
 	s.jobs[j.ID] = j
 	s.mu.Unlock()
 
-	// Real marshaler — persist succeeds. R230C-CR-1: exercises the
-	// production path directly so a future change to recordResultP0
-	// can't silently rot a happy-path test that exercises a separate
-	// helper.
-	_, _, _ = s.recordResultP0WithSanitised(j, "fresh-result", "", "sess-1", ErrClassNone, RunStateSucceeded)
+	// Real marshaler — persist succeeds. R230C-CR-1 / R247-CR-14 (#586):
+	// exercises the production path directly (recordTerminalResult, formerly
+	// recordResultP0WithSanitised) so a future change can't silently rot a
+	// happy-path test that exercises a separate helper.
+	_, _, _ = s.recordTerminalResult(j, "fresh-result", "", "sess-1", ErrClassNone, RunStateSucceeded)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
