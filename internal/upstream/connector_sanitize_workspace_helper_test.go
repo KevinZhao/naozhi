@@ -17,7 +17,16 @@ import (
 // send/takeover/close_discovered. The helper must accept canonical
 // in-root paths verbatim.
 func TestSanitizeWorkspacePath_AcceptsExistingPathInsideRoot(t *testing.T) {
-	root := t.TempDir()
+	// Resolve t.TempDir() through the same EvalSymlinks the helper applies
+	// to its input — on macOS /var/folders/... is a symlink to
+	// /private/var/folders/..., so feeding the raw t.TempDir() to
+	// defaultWorkspace would make the prefix gate compare resolved-vs-raw
+	// and reject every in-root path. Production wires defaultWorkspace
+	// from a path that has already cleared this resolution.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks(root): %v", err)
+	}
 	sub := filepath.Join(root, "proj")
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -27,23 +36,27 @@ func TestSanitizeWorkspacePath_AcceptsExistingPathInsideRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Resolve symlinks on root for the comparison — macOS /tmp is a
-	// symlink to /private/tmp so the cleaned helper output won't match
-	// the raw t.TempDir() literal.
-	wantRoot, _ := filepath.EvalSymlinks(root)
-	wantSub := filepath.Join(wantRoot, "proj")
-	if got != wantSub {
-		t.Errorf("got %q, want %q", got, wantSub)
+	if got != sub {
+		t.Errorf("got %q, want %q", got, sub)
 	}
 }
 
 // Outside-root paths must be rejected with an "outside allowed root"
 // message so operators can grep for it.
 func TestSanitizeWorkspacePath_RejectsOutsideAllowedRoot(t *testing.T) {
-	root := t.TempDir()
-	other := t.TempDir() // a sibling tempdir, definitely outside root
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks(root): %v", err)
+	}
+	// A sibling tempdir, definitely outside root. Resolved likewise so
+	// the helper's EvalSymlinks does not coincidentally yield root's
+	// canonical form.
+	other, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks(other): %v", err)
+	}
 	c := &Connector{cfg: &config.UpstreamConfig{}, defaultWorkspace: root}
-	_, err := c.sanitizeWorkspacePath(other, "workspace", false)
+	_, err = c.sanitizeWorkspacePath(other, "workspace", false)
 	if err == nil {
 		t.Fatal("expected outside-root error, got nil")
 	}
@@ -55,10 +68,13 @@ func TestSanitizeWorkspacePath_RejectsOutsideAllowedRoot(t *testing.T) {
 // tolerateMissing=false (send / takeover policy) must surface ENOENT as
 // an error; the path doesn't exist so we cannot trust it.
 func TestSanitizeWorkspacePath_StrictMissing(t *testing.T) {
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks(root): %v", err)
+	}
 	missing := filepath.Join(root, "does-not-exist")
 	c := &Connector{cfg: &config.UpstreamConfig{}, defaultWorkspace: root}
-	_, err := c.sanitizeWorkspacePath(missing, "workspace", false)
+	_, err = c.sanitizeWorkspacePath(missing, "workspace", false)
 	if err == nil {
 		t.Fatal("expected error for missing path under strict mode, got nil")
 	}
