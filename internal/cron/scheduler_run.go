@@ -18,7 +18,6 @@ package cron
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	mrand "math/rand/v2"
 	"path/filepath"
@@ -240,7 +239,26 @@ type jobSnapshot struct {
 // shape was test fixtures grepping the formatted string. New notice
 // sites should compose via formatCronNotice rather than inline a 4th
 // copy.
+//
+// R247-PERF-7 (#539): the formatter implementation uses strings.Builder
+// instead of fmt.Sprintf so a busy scheduler firing N notices/min stops
+// paying the reflection-driven %s walk on already-bounded label/body
+// strings. The template literal stays for documentation / test fixture
+// grep — the formatter inlines its shape ("[Cron <label>] <body>") so a
+// future template change has to touch both sides, which the
+// notice_label_bracket_test invariants pin.
 const cronNoticePrefixFmt = "[Cron %s] %s"
+
+// cronNoticePrefix / cronNoticeMid / cronNoticeSuffix are the literal
+// segments stitched into formatCronNotice's strings.Builder output. They
+// are intentionally separate consts so a future template change cannot
+// silently desync from cronNoticePrefixFmt above (the
+// notice_label_bracket_test pins the exact byte sequence, which catches
+// any drift).
+const (
+	cronNoticePrefix = "[Cron "
+	cronNoticeMid    = "] "
+)
 
 // formatCronNotice renders the IM-notice line cron jobs send through
 // deliverNotice. label is the snap.labelOrID() result (job title or
@@ -277,7 +295,19 @@ func formatCronNotice(label, body string) string {
 	// by markdown parsers. Prefix invariant `[Cron <label>]` is preserved
 	// because we substitute inside label, never at the template `]`.
 	label = strings.ReplaceAll(label, "]", "］")
-	return fmt.Sprintf(cronNoticePrefixFmt, label, body)
+	// R247-PERF-7 (#539): strings.Builder skips fmt.Sprintf's reflection
+	// walk over the already-bounded label/body inputs. Pre-grow once so
+	// the underlying buffer covers the largest plausible payload (label is
+	// MaxCronTitleLen runes after SanitizeForLog; body is sanitiseRunResult
+	// output bounded by MaxCronResultBytes). On a busy scheduler this
+	// drops one alloc + the reflect.Value boxing per notice.
+	var b strings.Builder
+	b.Grow(len(cronNoticePrefix) + len(label) + len(cronNoticeMid) + len(body))
+	b.WriteString(cronNoticePrefix)
+	b.WriteString(label)
+	b.WriteString(cronNoticeMid)
+	b.WriteString(body)
+	return b.String()
 }
 
 // labelOrID returns the IM-notice display label: snap.label when populated,
