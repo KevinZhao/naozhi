@@ -1455,9 +1455,31 @@ func (s *Scheduler) drainTriggerWG(stopStart time.Time) {
 // mutation; this one is not, the process is moments from exit).
 //
 // R247-CR-4: extracted from Stop().
+//
+// R20260527-GO-12 (#1301): saveMarshaledSeq returns void; the WriteFileAtomic
+// failure inside is logged at slog.Error("save cron store") but never
+// reaches the caller. The mutation hot path tolerates that (the next save
+// retries naturally) but on shutdown there is no "next save" — disk state
+// silently lags in-memory state and operators don't see a single
+// FAILED_DURING_SHUTDOWN signal that ties back to the Stop() that just
+// ran. Detect the failure indirectly by comparing lastSavedSeq before vs
+// after save(): saveMarshaledSeq Stores(seq) only on the success path
+// (R247-GO-15 keeps the gate pinned to the last successful write), so a
+// Load() that is still strictly less than the seq we just queued means
+// either the staleness gate skipped us (a newer save already raced ahead
+// — fine, nothing was lost) or WriteFileAtomic failed (data loss
+// imminent at exit). Distinguish by snapshotting before-Load: if a
+// newer save did land, before-Load already moved past our pre-save read,
+// so the after-Load >= seq case is unambiguous-success. Anything else
+// gets the FAILED_DURING_SHUTDOWN tag so log aggregation routes both
+// marshal-fail and write-fail to the same alert channel.
 func (s *Scheduler) persistOnShutdown() {
 	s.mu.Lock()
 	save, err := s.persistJobsLocked()
+	// Read the seq we just queued so the post-save check below is
+	// deterministic (saveSeq.Add was the last mutation persistJobsLocked
+	// performed before returning).
+	queuedSeq := s.saveSeq.Load()
 	s.mu.Unlock()
 	if err != nil {
 		slog.Error("marshal cron store on shutdown",
@@ -1465,8 +1487,18 @@ func (s *Scheduler) persistOnShutdown() {
 			"persist", "FAILED_DURING_SHUTDOWN")
 		return
 	}
-	if save != nil {
-		save()
+	if save == nil {
+		return
+	}
+	save()
+	// After save() returns, lastSavedSeq has either advanced to >= queuedSeq
+	// (success or a newer save raced ahead) or it has not (WriteFileAtomic
+	// failed AND no newer save took our place — disk lags memory at exit).
+	if landed := s.lastSavedSeq.Load(); landed < queuedSeq {
+		slog.Error("save cron store on shutdown failed; in-memory state will not survive restart",
+			"queued_seq", queuedSeq,
+			"last_saved_seq", landed,
+			"persist", "FAILED_DURING_SHUTDOWN")
 	}
 }
 
