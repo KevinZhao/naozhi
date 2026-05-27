@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
@@ -43,17 +44,10 @@ func (n NotifyTarget) IsSet() bool { return n.Platform != "" && n.ChatID != "" }
 // a future review tightens stopBudget, mirror the change here.
 const cronNotifyTimeout = 30 * time.Second
 
-// platformReplyMaxAttempts mirrors dispatch.platformReplyMaxAttempts. Both
-// represent the same per-call retry budget for platform.ReplyWithRetry —
-// dispatch's chunk-loop and cron's notifyTarget share the IM platform
-// envelope, so the two values must move together. Kept as a local mirror
-// (rather than re-exporting from dispatch) to avoid pulling internal/dispatch
-// into the cron import graph just for one int. R20260526-CR-003.
-//
-// KEEP-IN-SYNC: if you bump dispatch.platformReplyMaxAttempts (currently 3),
-// bump this too. Conversely a future review that promotes either side to a
-// platform-package export should collapse both call sites onto it.
-const platformReplyMaxAttempts = 3
+// The per-call retry budget for platform.ReplyWithRetry now lives on
+// limits.PlatformReplyMaxAttempts (R20260527-ARCH-8) so cron's
+// notifyTarget and dispatch's reply paths share a single source of
+// truth instead of mirrored "KEEP-IN-SYNC" copies.
 
 // resolveNotifyTarget picks the IM destination for this execution's
 // completion notice. Priority:
@@ -124,7 +118,7 @@ func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
 	// R20260526-CR-017: empty text is a no-op — short-circuit before
 	// triggerWG.Add so an empty notice does not spawn a goroutine that
 	// then walks platform.SplitText("", maxLen) → [""] and consumes one
-	// platformReplyMaxAttempts retry budget on a zero-byte chunk. The
+	// limits.PlatformReplyMaxAttempts retry budget on a zero-byte chunk. The
 	// empty-text path is reachable when a non-failing run produced no
 	// IM-visible output (e.g. a job that wrote only to disk and an
 	// upstream caller still routed the empty Result through).
@@ -190,7 +184,7 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	for i, chunk := range chunks {
 		// R235-GO-5: short-circuit on the shared replyCtx deadline so a long
 		// chunk list cannot run past cronNotifyTimeout when each ReplyWithRetry
-		// (platformReplyMaxAttempts × per-attempt budget) consumes the budget mid-loop.
+		// (limits.PlatformReplyMaxAttempts × per-attempt budget) consumes the budget mid-loop.
 		if err := replyCtx.Err(); err != nil {
 			slog.Warn("cron notify target deadline reached; remaining chunks dropped",
 				"platform", plat, "chat", chatID, "err", err,
@@ -200,7 +194,7 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
 			ChatID: chatID,
 			Text:   chunk,
-		}, platformReplyMaxAttempts); err != nil {
+		}, limits.PlatformReplyMaxAttempts); err != nil {
 			// R250-CR-18: abort on first chunk failure. Subsequent sends
 			// would interleave with foreign messages the user receives in
 			// the meantime, so partial delivery is worse than a clean
