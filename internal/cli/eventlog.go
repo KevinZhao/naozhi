@@ -1431,6 +1431,33 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 // an O(N) scan to find + swap-to-end the leaving subscriber. closeOnce
 // on subscriber.ch keeps the "close exactly once" invariant safe across
 // the unsub-vs-CloseSubscribers race.
+//
+// RNEW-PERF-004 (#455) — DO-NOT-DO note: a tempting micro-optimisation
+// is to snapshot `l.subscribers` under RLock then drop the lock before
+// the per-channel send loop, on the theory that the non-blocking sends
+// no longer need lock protection. This is UNSAFE in the current design:
+// the unsub closure (Subscribe's returned cancel func) closes
+// `sub.ch` *outside* l.subMu.Lock — `closeOnce.Do(func() { close(sub.ch) })`
+// runs after the lock release at line ~1556 below. With a snapshot-
+// then-unlock notify, the following sequence panics:
+//
+//	notify: RLock; copy l.subscribers into local; RUnlock
+//	unsub:  Lock; remove sub from slice; Unlock; close(sub.ch)
+//	notify: select { case sub.ch <- struct{}{}: …  ← PANIC: send on closed
+//
+// Today's RLock-around-send blocks unsub.Lock until the iteration ends,
+// so close(sub.ch) cannot run while a notify still holds a reference to
+// the channel. Any future "snapshot then unlock" attempt MUST first move
+// the close into the lock AND ensure no in-flight notify can hold a
+// reference to a *subscriber that has been removed from l.subscribers
+// (e.g. via subscriber refcount drained under Lock, or by switching
+// from close(ch) to a separate atomic "dead" flag observed before send).
+// The current cost — RLock acquire/release per Append — is bounded by
+// the subCount==0 fast path: idle sessions skip subMu entirely, and the
+// reader-only RWMutex makes concurrent Appends across different sessions
+// fan out without serialising on a single Mutex. Issue #455 is filed at
+// MEDIUM/defense-in-depth and remains accepted as-is until the close-
+// timing rework lands.
 func (l *EventLog) notifySubscribers() {
 	if l.subCount.Load() == 0 {
 		return
