@@ -217,6 +217,19 @@ type SchedulerConfig struct {
 	// values fall back to defaultCronSlowThreshold so callers that omit
 	// the field keep the prior behaviour. R241-ARCH-11 (#519).
 	SlowThreshold time.Duration
+	// AllowNilRouter opts the constructor out of the boot-time
+	// "router required" slog.Error contract added in R241-ARCH-6 (#510).
+	// Production wiring (cmd/naozhi) always sets Router; this flag exists
+	// so the in-package test suite — which constructs Schedulers for
+	// narrowly scoped paths (AddJob validation, persist failure injection,
+	// stop-budget timing) that never reach executeOpt or registerStub —
+	// can opt into silence without coupling those tests to a fakeRouter
+	// dependency. When unset (the default) and Router is nil,
+	// NewScheduler emits a slog.Error so misconfigurations surface at
+	// boot rather than as an opaque empty-sidebar at runtime; the
+	// registerStubByValue sync.Once log adds a second loud signal the
+	// first time the missing router would have refreshed a stub.
+	AllowNilRouter bool
 }
 
 // chatJobKey identifies a (Platform, ChatID) pair for the per-chat job
@@ -312,6 +325,15 @@ type Scheduler struct {
 	// zero/negative reads fall through to defaultCronSlowThreshold at the
 	// callsite. Immutable after NewScheduler returns. R241-ARCH-11 (#519).
 	slowThreshold time.Duration
+	// routerNilOnce ensures registerStubByValue logs the "router missing"
+	// slog.Error at most once per Scheduler lifetime, so a router-less
+	// test fixture (or a deployment that legitimately opted into
+	// AllowNilRouter) does not spam the log across N ticks. Combined
+	// with the boot-time slog.Error in NewScheduler this gives one loud
+	// surface at startup and one loud surface at the first runtime
+	// callsite — enough to flag the wireup bug without burying the
+	// operator under repeated identical entries. R241-ARCH-6 (#510).
+	routerNilOnce sync.Once
 	// startedAtNanos 是 Start() 被调用的时刻（UnixNano）。用于 missed-schedule 检测的启动
 	// 抑制窗口——刚启动时所有长间隔 job 都会被算成"错过过"，需要
 	// (now - startedAt) > 5×period 时才算 missed。原本用 time.Time 字段，
@@ -699,21 +721,29 @@ func (cfg *SchedulerConfig) applyDefaults() {
 }
 
 func NewScheduler(cfg SchedulerConfig) *Scheduler {
-	// R20260526-GO-023: surface missing router wiring at construction so
-	// the misconfiguration shows up at boot rather than as an opaque NPE
-	// stack trace from executeOpt the first time a job ticks. We log
-	// instead of panicking because the test suite (persist_failure_test,
-	// scheduler_test, stop_budget_test, trigger_now_wg_done_test, …)
-	// constructs Schedulers without a router for narrowly-scoped paths
-	// (AddJob validation, persist failure injection, stop-budget timing)
-	// that never reach executeOpt; panicking would force a sprawling
-	// rewrite across dozens of unrelated test files. The companion
-	// R20260526-GO-004 guard inside executeOpt then short-circuits the
-	// hot path so a router-less fixture does not NPE if a job somehow
-	// does tick. Real production wiring (cmd/naozhi) always plumbs a
-	// router, so this warn fires only for misconfigurations.
-	if cfg.Router == nil {
-		slog.Warn("cron.NewScheduler: cfg.Router is nil; executeOpt will short-circuit until wired")
+	// R20260526-GO-023 / R241-ARCH-6 (#510): surface missing router wiring
+	// at construction so the misconfiguration shows up at boot rather than
+	// as an opaque NPE stack trace from executeOpt the first time a job
+	// ticks. We log slog.Error (not panic) because the test suite
+	// (persist_failure_test, scheduler_test, stop_budget_test,
+	// trigger_now_wg_done_test, …) constructs Schedulers without a router
+	// for narrowly-scoped paths (AddJob validation, persist failure
+	// injection, stop-budget timing) that never reach executeOpt;
+	// panicking would force a sprawling rewrite across dozens of unrelated
+	// test files. The companion R20260526-GO-004 guard inside executeOpt
+	// then short-circuits the hot path so a router-less fixture does not
+	// NPE if a job somehow does tick.
+	//
+	// R241-ARCH-6 (#510): Tests that legitimately want silence opt in via
+	// SchedulerConfig.AllowNilRouter (additive, default false). Production
+	// wiring (cmd/naozhi) sets Router to a non-nil adapter so the error
+	// fires only for misconfigurations + tests that haven't opted in. The
+	// upgrade from slog.Warn to slog.Error matches the operator
+	// expectation: a missing router means the dashboard sidebar is empty
+	// for the lifetime of the process — that's a wireup bug, not a
+	// transient warning.
+	if cfg.Router == nil && !cfg.AllowNilRouter {
+		slog.Error("cron.NewScheduler: cfg.Router is nil; dashboard sidebar entries will not be created and executeOpt will short-circuit. Set SchedulerConfig.Router on the production wireup, or SchedulerConfig.AllowNilRouter=true on tests that intentionally exercise router-less paths.")
 	}
 	before := cfg.MaxJobs
 	if before > maxJobsHardCap {
@@ -975,8 +1005,21 @@ func (s *Scheduler) Start() error {
 // R232-CR-12 把原 registerStub(*Job) / registerStubByValue / stubChain 三
 // 个仅参数差异的 helper 合成单个值参数版本：避免持锁路径误传 *Job 指针
 // 后被并发 UpdateJob 改动；调用方一律先快照字段再传值。
+//
+// R241-ARCH-6 (#510): the historical "silent no-op when router is nil"
+// hid wireup bugs because the misconfiguration only surfaced as a
+// missing dashboard sidebar entry, not as a startup or first-tick
+// failure. The construction-time slog.Error in NewScheduler now flags
+// the missing wiring loud at boot; this callsite additionally logs the
+// first time it would have refreshed a stub but couldn't (sync.Once
+// gate so a router-less test fixture / AllowNilRouter deployment does
+// not spam the log across N ticks).
 func (s *Scheduler) registerStubByValue(id, workDir, prompt, lastSessionID string) {
 	if s.router == nil {
+		s.routerNilOnce.Do(func() {
+			slog.Error("cron: registerStubByValue called without a router; dashboard sidebar will be empty for this scheduler — wireup bug or missing SchedulerConfig.Router?",
+				"job_id", id)
+		})
 		return
 	}
 	var chain []string
