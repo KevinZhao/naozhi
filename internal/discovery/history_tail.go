@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -57,7 +57,7 @@ var maxTailReadBytes int64 = 128 * 1024 * 1024
 // `context.Background()` from callers — every call site now threads the
 // router's historyCtx through, so shutdown actually stops in-flight tail
 // reads instead of waiting on the FS.
-func LoadHistoryTailCtx(ctx context.Context, claudeDir, sessionID, cwd string, limit int) ([]cli.EventEntry, error) {
+func LoadHistoryTailCtx(ctx context.Context, claudeDir, sessionID, cwd string, limit int) ([]clievent.EventEntry, error) {
 	return LoadHistoryTailBeforeCtx(ctx, claudeDir, sessionID, cwd, 0, limit)
 }
 
@@ -71,7 +71,7 @@ func LoadHistoryTailCtx(ctx context.Context, claudeDir, sessionID, cwd string, l
 //
 // limit <= 0 falls back to the full-file LoadHistory for parity with the
 // legacy LoadHistoryTailCtx contract.
-func LoadHistoryTailBeforeCtx(ctx context.Context, claudeDir, sessionID, cwd string, beforeMS int64, limit int) ([]cli.EventEntry, error) {
+func LoadHistoryTailBeforeCtx(ctx context.Context, claudeDir, sessionID, cwd string, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	if limit <= 0 {
 		return LoadHistory(claudeDir, sessionID, cwd)
 	}
@@ -156,7 +156,7 @@ func resolveJSONLPath(claudeDir, sessionID, cwd string) (string, error) {
 //     line becomes 0-N entries (user = 1, assistant = 0-N text blocks).
 //   - the final result is reversed in-place so callers see chronological
 //     order (oldest → newest), matching LoadHistory.
-func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limit int) ([]cli.EventEntry, error) {
+func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limit int) ([]clievent.EventEntry, error) {
 	// Over-collect slightly: assistant lines may contribute 0 text blocks
 	// (tool_use / thinking filtered out), so a small cushion avoids a
 	// second pass when the newest lines are tool-heavy.
@@ -171,7 +171,7 @@ func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limi
 		// reallocs. Worst case the file is short and we waste a few hundred
 		// EventEntry slots; well-bounded vs the alloc churn this avoids on
 		// every dashboard sidebar history fetch. R247-PERF-19 family.
-		entries = make([]cli.EventEntry, 0, target)
+		entries = make([]clievent.EventEntry, 0, target)
 		carry   []byte // unterminated head fragment from prior chunk
 		offset  = size
 		buf     = make([]byte, tailChunkSize)
@@ -299,7 +299,7 @@ func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limi
 // parseHistoryLine decodes a single JSONL line into zero or more EventEntry
 // values. Returns ok=false for malformed lines so callers can skip them
 // silently (matches parseJSONL's tolerance for partially-flushed tails).
-func parseHistoryLine(line []byte) ([]cli.EventEntry, bool) {
+func parseHistoryLine(line []byte) ([]clievent.EventEntry, bool) {
 	var hl historyLine
 	if err := json.Unmarshal(line, &hl); err != nil {
 		slog.Debug("skip malformed tail history line", "err", err)
@@ -319,7 +319,7 @@ func parseHistoryLine(line []byte) ([]cli.EventEntry, bool) {
 		}
 		summary := textutil.TruncateRunes(text, 120)
 		detail := textutil.TruncateRunes(text, 2000)
-		return []cli.EventEntry{{
+		return []clievent.EventEntry{{
 			UUID:    uuidFromClaudeLine(hl, ts, "user", summary, detail),
 			Time:    ts,
 			Type:    "user",
@@ -336,14 +336,14 @@ func parseHistoryLine(line []byte) ([]cli.EventEntry, bool) {
 		if err := json.Unmarshal(msg.Content, &blocks); err != nil {
 			return nil, false
 		}
-		out := make([]cli.EventEntry, 0, len(blocks))
+		out := make([]clievent.EventEntry, 0, len(blocks))
 		for idx, b := range blocks {
 			if b.Type != "text" || strings.TrimSpace(b.Text) == "" {
 				continue
 			}
 			summary := textutil.TruncateRunes(b.Text, 120)
 			detail := textutil.TruncateRunes(b.Text, 16000)
-			out = append(out, cli.EventEntry{
+			out = append(out, clievent.EventEntry{
 				UUID:    uuidFromClaudeBlock(hl, idx, ts, "text", summary, detail),
 				Time:    ts,
 				Type:    "text",
@@ -371,7 +371,7 @@ func parseHistoryLine(line []byte) ([]cli.EventEntry, bool) {
 //
 // R222-GO-2 removed the non-ctx wrapper that hid `context.Background()` from
 // callers — every call site now threads the router's historyCtx through.
-func LoadHistoryChainTailCtx(ctx context.Context, claudeDir string, ids []string, cwd string, limit int) []cli.EventEntry {
+func LoadHistoryChainTailCtx(ctx context.Context, claudeDir string, ids []string, cwd string, limit int) []clievent.EventEntry {
 	if limit <= 0 || len(ids) == 0 || claudeDir == "" {
 		return nil
 	}
@@ -380,7 +380,7 @@ func LoadHistoryChainTailCtx(ctx context.Context, claudeDir string, ids []string
 	// ids+flatten at the end is O(total) which matches the legacy behaviour.
 	type bucket struct {
 		id      string
-		entries []cli.EventEntry
+		entries []clievent.EventEntry
 	}
 	var buckets []bucket
 	remaining := limit
@@ -422,7 +422,7 @@ func LoadHistoryChainTailCtx(ctx context.Context, claudeDir string, ids []string
 	for _, b := range buckets {
 		totalLen += len(b.entries)
 	}
-	out := make([]cli.EventEntry, 0, totalLen)
+	out := make([]clievent.EventEntry, 0, totalLen)
 	for i := len(buckets) - 1; i >= 0; i-- {
 		out = append(out, buckets[i].entries...)
 	}
@@ -442,7 +442,7 @@ func LoadHistoryChainTailCtx(ctx context.Context, claudeDir string, ids []string
 // order is preserved by parseTail. Between buckets, the natural JSONL
 // timestamps typically already monotonically decrease toward older chain
 // IDs; tie-breaking across branched sessions is the caller's concern.
-func LoadHistoryChainBeforeCtx(ctx context.Context, claudeDir string, ids []string, cwd string, beforeMS int64, limit int) []cli.EventEntry {
+func LoadHistoryChainBeforeCtx(ctx context.Context, claudeDir string, ids []string, cwd string, beforeMS int64, limit int) []clievent.EventEntry {
 	if limit <= 0 || len(ids) == 0 || claudeDir == "" {
 		return nil
 	}
@@ -452,7 +452,7 @@ func LoadHistoryChainBeforeCtx(ctx context.Context, claudeDir string, ids []stri
 
 	type bucket struct {
 		id      string
-		entries []cli.EventEntry
+		entries []clievent.EventEntry
 	}
 	var buckets []bucket
 	remaining := limit
@@ -488,7 +488,7 @@ func LoadHistoryChainBeforeCtx(ctx context.Context, claudeDir string, ids []stri
 	for _, b := range buckets {
 		totalLen += len(b.entries)
 	}
-	out := make([]cli.EventEntry, 0, totalLen)
+	out := make([]clievent.EventEntry, 0, totalLen)
 	for i := len(buckets) - 1; i >= 0; i-- {
 		out = append(out, buckets[i].entries...)
 	}

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -47,7 +47,7 @@ type historyBlock struct {
 // returning EventEntries for user and assistant messages.
 // If cwd is non-empty, the JSONL is located directly via the CWD-based path (O(1));
 // an empty cwd falls back to scanning all project directories.
-func LoadHistory(claudeDir, sessionID, cwd string) ([]cli.EventEntry, error) {
+func LoadHistory(claudeDir, sessionID, cwd string) ([]clievent.EventEntry, error) {
 	var path string
 	if cwd != "" {
 		candidate := filepath.Join(claudeDir, "projects", projDirName(cwd), sessionID+".jsonl")
@@ -227,14 +227,14 @@ func (s *Scanner) evictPathCacheLocked() {
 	}
 }
 
-func parseJSONL(path string) ([]cli.EventEntry, error) {
+func parseJSONL(path string) ([]clievent.EventEntry, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	entries := make([]cli.EventEntry, 0, 128)
+	entries := make([]clievent.EventEntry, 0, 128)
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
@@ -263,7 +263,7 @@ func parseJSONL(path string) ([]cli.EventEntry, error) {
 			}
 			summary := textutil.TruncateRunes(text, 120)
 			detail := textutil.TruncateRunes(text, 2000)
-			entries = append(entries, cli.EventEntry{
+			entries = append(entries, clievent.EventEntry{
 				UUID:    uuidFromClaudeLine(hl, ts, "user", summary, detail),
 				Time:    ts,
 				Type:    "user",
@@ -291,7 +291,7 @@ func parseJSONL(path string) ([]cli.EventEntry, error) {
 				}
 				summary := textutil.TruncateRunes(b.Text, 120)
 				detail := textutil.TruncateRunes(b.Text, 16000)
-				entries = append(entries, cli.EventEntry{
+				entries = append(entries, clievent.EventEntry{
 					UUID:    uuidFromClaudeBlock(hl, idx, ts, "text", summary, detail),
 					Time:    ts,
 					Type:    "text",

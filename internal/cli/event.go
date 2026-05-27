@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // Event represents a parsed stream-json event from claude CLI stdout.
@@ -116,54 +118,19 @@ type MeteringEntry struct {
 	UnitPlural string  `json:"unit_plural,omitempty"`
 }
 
-// ToolCall is the per-event payload for ACP tool_call / tool_call_update
-// session/update notifications. Multi-Backend RFC §8.3 D17.
-//
-// Same struct serves both the initial "tool invocation" event (Status==""
-// or "pending") and subsequent updates ("in_progress" / "completed" /
-// "failed"). The dashboard threads them by ID — successive events with the
-// same ID overwrite the prior progress row rather than appending.
-//
-// Output is the raw JSON payload kiro emits (kiro shape:
-// `{"items":[{"Json":{"exit_status":"...", "stdout":"..."}}]}`); the
-// dashboard decides how to extract a stdout string vs render JSON. Keeping
-// it here as a string preserves the original formatting for "view raw".
-type ToolCall struct {
-	ID         string `json:"id"`
-	Name       string `json:"name,omitempty"`
-	Title      string `json:"title,omitempty"`
-	Kind       string `json:"kind,omitempty"`        // "execute" / "read" / "write" / "search" / vendor-specific
-	Status     string `json:"status,omitempty"`      // "" (initial) / "in_progress" / "completed" / "failed"
-	InputJSON  string `json:"input_json,omitempty"`  // raw JSON of rawInput
-	OutputJSON string `json:"output_json,omitempty"` // raw JSON of rawOutput
-}
-
-// AskQuestion mirrors the shape of AskUserQuestion.input observed against
-// claude CLI 2.1.132 (see test/e2e/askuser/aq1_aq2_trigger_and_schema.py).
-// ToolUseID is the tool_use id emitted by the assistant and serves as a
-// correlation key across dashboard + IM renderings of the same question.
-type AskQuestion struct {
-	ToolUseID string            `json:"tool_use_id"`
-	Items     []AskQuestionItem `json:"items"`
-}
-
-// AskQuestionItem is one question in a possibly multi-question card.
-// MultiSelect=true signals checkbox semantics; the CLI may set it but the
-// dashboard currently degrades to single-select (one click = one answer).
-type AskQuestionItem struct {
-	Question    string           `json:"question"`
-	Header      string           `json:"header,omitempty"`
-	MultiSelect bool             `json:"multi_select,omitempty"`
-	Options     []AskQuestionOpt `json:"options"`
-}
-
-// AskQuestionOpt is one selectable choice. Label is the user-facing text that
-// the answer composer will echo back ("Header: Label."). Description is shown
-// in the card tooltip / secondary line but never echoed.
-type AskQuestionOpt struct {
-	Label       string `json:"label"`
-	Description string `json:"description,omitempty"`
-}
+// ToolCall, AskQuestion, AskQuestionItem, AskQuestionOpt are leaf record
+// types living in `internal/cli/clievent`. The aliases below keep every
+// existing call site (`cli.ToolCall`, `cli.AskQuestion`, ...) compiling
+// while letting `internal/discovery` and other leaf consumers import the
+// leaf pkg directly without pulling in the cli surface (R217-ARCH-3 #626 —
+// diamond import break). See `internal/cli/clievent/types.go` for full
+// field documentation.
+type (
+	ToolCall        = clievent.ToolCall
+	AskQuestion     = clievent.AskQuestion
+	AskQuestionItem = clievent.AskQuestionItem
+	AskQuestionOpt  = clievent.AskQuestionOpt
+)
 
 // TaskUsage holds resource consumption stats from agent task events.
 type TaskUsage struct {
