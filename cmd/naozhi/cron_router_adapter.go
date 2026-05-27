@@ -52,6 +52,20 @@ func init() {
 // translating the cron-local types into session-side equivalents.
 type cronRouterAdapter struct{ r *session.Router }
 
+// Compile-time guard: cronRouterAdapter must satisfy cron.SessionRouter.
+// If cron.SessionRouter gains a method, this assertion makes the
+// breakage land here — next to the implementation — instead of at the
+// distant NewScheduler call site that takes a SessionRouter interface
+// value. R249-ARCH-7 (#973): Phase B replaced "*session.Router
+// satisfies cron.SessionRouter" with this adapter, so the var _ assert
+// previously living on *session.Router migrated here.
+var _ cron.SessionRouter = cronRouterAdapter{}
+
+// Compile-time guard: cronSessionAdapter must satisfy cron.Session
+// (Send + SessionID + InterruptViaControl). Catches drift if the
+// cron.Session method set expands but the adapter forgets to forward.
+var _ cron.Session = cronSessionAdapter{}
+
 func (a cronRouterAdapter) RegisterCronStubWithChain(key, workspace, lastPrompt string, chain []string) {
 	a.r.RegisterCronStubWithChain(key, workspace, lastPrompt, chain)
 }
