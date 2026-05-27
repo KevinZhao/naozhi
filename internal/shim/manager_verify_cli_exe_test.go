@@ -3,6 +3,7 @@
 package shim
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -46,6 +47,13 @@ func TestVerifyCLIExeMatch_Mismatch(t *testing.T) {
 	if got == "" {
 		t.Errorf("cleanExe = %q, want non-empty so caller can log the actual exe", got)
 	}
+	// The error must wrap errCLIExeMismatch so callers can distinguish
+	// "actively wrong binary" from "readlink failed" via errors.Is rather
+	// than re-deriving the distinction from cleanExe == "". Defends the
+	// log-routing contract at the moveToShimsCgroup call site.
+	if !errors.Is(err, errCLIExeMismatch) {
+		t.Errorf("err = %v, want wrap errCLIExeMismatch", err)
+	}
 	// The error must carry both the resolved and configured paths so the
 	// log line at the call site has enough context for an operator to
 	// chase down the mismatch.
@@ -66,5 +74,11 @@ func TestVerifyCLIExeMatch_NonExistentPID(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("cleanExe = %q, want empty so caller selects the skip log branch", got)
+	}
+	// The readlink-failed path must NOT wrap errCLIExeMismatch — that
+	// sentinel is reserved for "actively wrong binary" rejections, and
+	// the caller routes the two to different log lines (skip vs reject).
+	if errors.Is(err, errCLIExeMismatch) {
+		t.Errorf("readlink-failed err wrapped errCLIExeMismatch, want a plain readlink error: %v", err)
 	}
 }

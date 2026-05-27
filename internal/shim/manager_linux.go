@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -110,13 +111,23 @@ func readPPidFromProcStatus(pid int) (int, error) {
 	return 0, fmt.Errorf("shim: PPid not found in /proc/%d/status", pid)
 }
 
+// errCLIExeMismatch is wrapped into the error returned by verifyCLIExeMatch
+// when /proc/<cliPID>/exe was readable but its target differs from
+// wantCLIPath. Callers (today only moveToShimsCgroup) can errors.Is on
+// this sentinel to distinguish the "actively-wrong binary" rejection
+// (R216-SEC-5 / #546) from the readlink-failed skip path so future log
+// pipelines can route the two differently without re-deriving the
+// distinction from cleanExe == "".
+var errCLIExeMismatch = errors.New("shim: CLI exe mismatch")
+
 // verifyCLIExeMatch resolves /proc/<cliPID>/exe and reports whether the
 // readlink target matches wantCLIPath. Returns:
 //
 //   - ("", err)        if /proc/<cliPID>/exe cannot be read (process gone,
 //     /proc unmounted, EPERM). Caller should skip CLI adoption.
 //   - (cleanExe, err)  if readlink succeeded but the target differs from
-//     wantCLIPath. cleanExe is the resolved path with the
+//     wantCLIPath. err wraps errCLIExeMismatch so callers can use
+//     errors.Is. cleanExe is the resolved path with the
 //     " (deleted)" suffix stripped (Linux appends this when
 //     the binary on disk has been replaced/removed since
 //     exec). Caller should refuse adoption — the shim may
@@ -133,7 +144,7 @@ func verifyCLIExeMatch(cliPID int, wantCLIPath string) (string, error) {
 	}
 	cleanExe := strings.TrimSuffix(exePath, " (deleted)")
 	if cleanExe != wantCLIPath {
-		return cleanExe, fmt.Errorf("shim: CLI exe mismatch: got %q want %q", cleanExe, wantCLIPath)
+		return cleanExe, fmt.Errorf("%w: got %q want %q", errCLIExeMismatch, cleanExe, wantCLIPath)
 	}
 	return cleanExe, nil
 }
@@ -188,12 +199,12 @@ func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int, wantCLIPa
 			if wantCLIPath != "" {
 				cleanExe, rerr := verifyCLIExeMatch(cliPID, wantCLIPath)
 				switch {
-				case rerr != nil && cleanExe == "":
-					slog.Warn("moveToShimsCgroup: cannot readlink CLI PID exe, skipping CLI adoption",
-						"shim_pid", shimPID, "cli_pid", cliPID, "err", rerr)
-				case rerr != nil:
+				case errors.Is(rerr, errCLIExeMismatch):
 					slog.Warn("moveToShimsCgroup: CLI PID exe mismatch, refusing to adopt — shim may be compromised",
 						"shim_pid", shimPID, "cli_pid", cliPID, "got_exe", cleanExe, "want_exe", wantCLIPath)
+				case rerr != nil:
+					slog.Warn("moveToShimsCgroup: cannot readlink CLI PID exe, skipping CLI adoption",
+						"shim_pid", shimPID, "cli_pid", cliPID, "err", rerr)
 				default:
 					pids = append(pids, cliPID)
 				}
