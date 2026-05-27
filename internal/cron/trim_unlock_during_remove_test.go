@@ -15,10 +15,19 @@ import (
 // cacheTrimAfterDisk.
 //
 // Structural pin: trimJobLocked source must contain the unlock-around-remove
-// pattern (lock.Unlock() ... os.Remove(...) ... lock.Lock()). A future
-// "simplification" that puts os.Remove back inside the held window (the
-// pre-#712 shape) would erase the perf win and surface as a regression here
-// rather than as latent jobLock contention in production.
+// pattern (lock.Unlock() ... os.Remove(...) with reacquisition guaranteed).
+// A future "simplification" that puts os.Remove back inside the held window
+// (the pre-#712 shape) would erase the perf win and surface as a regression
+// here rather than as latent jobLock contention in production.
+//
+// R20260527-GO-9 (#1271): the reacquisition is now scheduled via
+// `defer lock.Lock()` inside the unlock closure so a panic from os.Remove
+// (FUSE quirks, syscall traps) cannot leave the lock unlocked across the
+// outer trimJobUnderLock's defer Unlock. This test accepts either the
+// pre-#1271 bare reacquisition (lock.Unlock() ... os.Remove ... lock.Lock())
+// or the post-#1271 defer-reacquire shape (lock.Unlock(); defer lock.Lock();
+// ... os.Remove ...) — both preserve the lock-released-during-Remove
+// contract that motivated #712.
 func TestTrimJobLocked_ReleasesLockDuringRemoveBatch(t *testing.T) {
 	src, err := os.ReadFile("runstore.go")
 	if err != nil {
@@ -54,13 +63,19 @@ func TestTrimJobLocked_ReleasesLockDuringRemoveBatch(t *testing.T) {
 	}
 
 	// 3. Must reacquire jobLock before returning so cacheTrimAfterDisk
-	// stays serialised against concurrent cacheHeadPush.
+	// stays serialised against concurrent cacheHeadPush. The reacquisition
+	// can either be bare (lock.Lock() after the loop) or scheduled via
+	// `defer lock.Lock()` BEFORE the loop (panic-safe shape from #1271).
+	// Both are accepted; only "no reacquisition at all" should fail here.
+	betweenUnlockAndRemove := rest[idxUnlock : idxUnlock+idxRemove]
 	tail := rest[idxUnlock+idxRemove:]
-	if !strings.Contains(tail, "lock.Lock()") {
+	if !strings.Contains(tail, "lock.Lock()") &&
+		!strings.Contains(betweenUnlockAndRemove, "defer lock.Lock()") {
 		t.Fatal("trimJobLocked: expected lock.Lock() reacquisition after " +
-			"the os.Remove batch so cacheTrimAfterDisk runs under jobLock " +
-			"(matches the pre-#712 lock-order contract for cacheHeadPush " +
-			"serialisation).")
+			"the os.Remove batch (or `defer lock.Lock()` scheduled before " +
+			"the batch for panic safety, #1271) so cacheTrimAfterDisk runs " +
+			"under jobLock (matches the pre-#712 lock-order contract for " +
+			"cacheHeadPush serialisation).")
 	}
 
 	// 4. cacheTrimAfterDisk must be the last cache operation, called after
