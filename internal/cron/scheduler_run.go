@@ -1371,7 +1371,19 @@ func jitterSleep(ctx context.Context, period, jitterMax time.Duration) {
 	if window <= 0 {
 		return
 	}
-	d := time.Duration(mrand.Int64N(int64(window)))
+	// R20260527122801-GO-018 defensive: int64(window) underflow guard
+	// so future Schedule providers returning non-monotonic Next don't
+	// panic Int64N. window is already a time.Duration (int64) and the
+	// `window <= 0` check above covers the normal range, but a hostile
+	// or buggy custom Schedule could conceivably produce a period that
+	// arithmetic clamps to a non-positive int64; mrand.Int64N panics
+	// on n <= 0, so a single extra branch keeps the tick goroutine
+	// from going down to robfig/cron's recover path.
+	n := int64(window)
+	if n <= 0 {
+		return
+	}
+	d := time.Duration(mrand.Int64N(n))
 	if d <= 0 {
 		return
 	}
