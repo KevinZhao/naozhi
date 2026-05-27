@@ -354,6 +354,10 @@ func (s *Server) registerDashboard() {
 		TrustedProxy:     s.auth.trustedProxy,
 		WSAuthLimiter:    s.auth.loginAllow,
 		WSUpgradeLimiter: s.auth.wsUpgradeAllow,
+		// R20260527122801-SEC-2 / #1326: forward AuthHandlers so
+		// HandleUpgrade can mint nz_anon (and refuse upgrade if mint
+		// fails) instead of falling back to clientIP for uploadOwner.
+		Auth: s.auth,
 		// Forward the application-level ctx so a parent cancel cascades
 		// to Hub goroutines even when Shutdown() is not explicitly
 		// invoked (CTX1). Zero value in pure-unit tests that bypass

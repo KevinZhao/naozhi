@@ -259,7 +259,16 @@ type Hub struct {
 	wsUpgradeLimiter func(ip string) bool
 
 	trustedProxy bool // trust X-Forwarded-For for client IP extraction
-	upgrader     websocket.Upgrader
+	// auth lets HandleUpgrade mint a per-browser nz_anon cookie in
+	// no-token mode (R20260527122801-SEC-2 / #1326) so the WS upload
+	// owner key matches the HTTP path's per-browser bucket instead of
+	// falling back to client IP — which co-NAT clients share, allowing
+	// a sibling tenant to claim the victim's TakeAll uploads. Optional:
+	// older test harnesses that wire NewHub without HubOptions.Auth
+	// retain the legacy IP-fallback shape (those Hubs do not run
+	// uploadStore so the fallback is not security-relevant).
+	auth     *AuthHandlers
+	upgrader websocket.Upgrader
 
 	debounceMu    sync.Mutex
 	debounceTimer *time.Timer
@@ -374,6 +383,10 @@ type HubOptions struct {
 	TrustedProxy     bool
 	WSAuthLimiter    func(ip string) bool
 	WSUpgradeLimiter func(ip string) bool
+	// Auth, when non-nil, is used by HandleUpgrade to mint a per-browser
+	// nz_anon cookie in no-token mode so WS upload owner derivation
+	// mirrors the HTTP path. R20260527122801-SEC-2 / #1326.
+	Auth *AuthHandlers
 	// ParentCtx is the application-level context whose cancellation must
 	// propagate to the Hub. When set, NewHub derives h.ctx via
 	// context.WithCancel(ParentCtx) so that parent-ctx cancel tears down
@@ -418,6 +431,7 @@ func NewHub(opts HubOptions) *Hub {
 		trustedProxy:     opts.TrustedProxy,
 		wsAuthLimiter:    opts.WSAuthLimiter,
 		wsUpgradeLimiter: opts.WSUpgradeLimiter,
+		auth:             opts.Auth,
 		ctx:              ctx,
 		cancel:           cancel,
 	}

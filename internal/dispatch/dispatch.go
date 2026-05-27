@@ -539,6 +539,20 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	return d, nil
 }
 
+// fallbackDedupKey builds a composite dedup key for messages whose
+// adapter left EventID empty. The shape "fallback:<platform>:<chatID>:
+// <messageID>:<unixMinute>" gives platform retries within the same
+// minute a stable identity so platform.Dedup.Seen short-circuits them
+// rather than passing through (Seen("") returns false, never records).
+//
+// The "fallback:" prefix segregates the fallback namespace from real
+// EventIDs so a legitimate EventID that happens to look like a colon-
+// joined tuple cannot collide with a fallback. now is plumbed in so
+// tests can drive deterministic minute boundaries. (#1310)
+func fallbackDedupKey(msg platform.IncomingMessage, now time.Time) string {
+	return "fallback:" + msg.Platform + ":" + msg.ChatID + ":" + msg.MessageID + ":" + strconv.FormatInt(now.Unix()/60, 10)
+}
+
 // BuildHandler returns a platform.MessageHandler wired to this Dispatcher.
 func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 	return func(ctx context.Context, msg platform.IncomingMessage) {
@@ -548,7 +562,20 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		// a platform retry during guard contention won't be re-processed. In
 		// practice this is benign — the handler responds fast enough that
 		// platforms don't retry, and the user is told to resend.
-		if d.dedup.Seen(msg.EventID) {
+		//
+		// Empty EventID fallback (#1310): some adapters (older Feishu webhook
+		// shapes, raw HTTP test clients) leave EventID empty. platform.Dedup.Seen
+		// treats "" as "not seen" and never records — meaning a platform retry
+		// of the same message_id would call BuildHandler N times: token double-
+		// charge, queue noise ("正在处理上一条消息"), LLM N-fold dispatch. Build
+		// a composite fallback key from (Platform, ChatID, MessageID, minute-
+		// bucketed wall clock). The minute bucket bounds collision risk for the
+		// degenerate "no MessageID either" case to a single replay window.
+		dedupID := msg.EventID
+		if dedupID == "" {
+			dedupID = fallbackDedupKey(msg, time.Now())
+		}
+		if d.dedup.Seen(dedupID) {
 			return
 		}
 
