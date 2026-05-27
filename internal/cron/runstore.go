@@ -569,6 +569,21 @@ func (s *runStore) Append(run *CronRun) {
 // against a fresh Append's WriteFileAtomic. Today the sole caller is
 // Append (runstore.go:252) which acquires jobLock at line 213; any future
 // helper must do the same. R239-GO-5.
+//
+// R20260527-PERF-24 (#1295): the appendTrimBatch force-trim now ALSO
+// consults the cache predicate before triggering the disk walk.
+// Pre-fix, every 10th Append unconditionally returned false (do trim)
+// and walked ReadDir + Stat over the whole runs/<jobID>/ tree, even
+// when the cache already proved nothing was past the keepWindow cutoff
+// and nothing was over keepCount. With ~50 active jobs at 1 Hz that's
+// ~14400 wasted ReadDirs/day. New shape: at the appendTrimBatch
+// boundary we re-evaluate the cache-derived "needs trim?" predicate;
+// if it says no, we reset the counter (so the next force-trim probe
+// runs on schedule, not stale 9-call-old data) and return true (skip).
+// If it says yes — count near cap OR oldest cached row past cutoff —
+// the trim runs as before. The on-disk state is the cache's authority
+// (R246-GO-9 jobLock-serialised invariant), so dropping the
+// unconditional force-trim is safe.
 func (s *runStore) skipAppendTrim(jobID string) bool {
 	// Race-detector friendly contract assertion: panics when jobLock is
 	// currently free, the unambiguous signature of a caller that forgot to
@@ -585,24 +600,13 @@ func (s *runStore) skipAppendTrim(jobID string) bool {
 	if !entry.warm {
 		return false
 	}
-	// Force a trim every appendTrimBatch Appends so window-based eviction
-	// still happens for jobs that never approach keepCount.
 	entry.appendsSinceTrim++
-	if entry.appendsSinceTrim >= appendTrimBatch {
-		entry.appendsSinceTrim = 0
-		return false
-	}
-	// Plenty of headroom under count cap?  Cache reflects the on-disk
-	// newest-first ring (capped to keepCount), so entry.count is a safe
-	// upper bound on disk rows that survived the last trim.
-	if entry.count+appendTrimBatch >= s.keepCount {
-		entry.appendsSinceTrim = 0
-		return false
-	}
-	// Oldest cached row still inside keepWindow?  Use EndedAt to mirror
-	// trimJobLocked's mtime-based cutoff (cacheTrimAfterDisk also approximates
-	// mtime via EndedAt — keep these two paths consistent).
-	if entry.count > 0 {
+
+	// Cache-derived "needs trim now?" predicate. True when EITHER count
+	// is near keepCount OR oldest cached row is past keepWindow cutoff.
+	// Both checks are cheap (no syscalls).
+	needsTrim := entry.count+appendTrimBatch >= s.keepCount
+	if !needsTrim && entry.count > 0 {
 		oldest := entry.ringRead(entry.count - 1)
 		ts := oldest.EndedAt
 		if ts.IsZero() {
@@ -610,9 +614,30 @@ func (s *runStore) skipAppendTrim(jobID string) bool {
 		}
 		cutoff := time.Now().Add(-s.keepWindow)
 		if !ts.After(cutoff) {
-			entry.appendsSinceTrim = 0
-			return false
+			needsTrim = true
 		}
+	}
+
+	// At the force-trim boundary, only descend to trimJobLocked when the
+	// cache predicate says there's plausibly something to evict. Pre-fix
+	// every 10th Append on a healthy job triggered a wasted ReadDir even
+	// though count was far below keepCount and oldest was far inside
+	// the window. Reset the counter regardless so the next probe fires
+	// at the next appendTrimBatch cadence — not on every Append.
+	if entry.appendsSinceTrim >= appendTrimBatch {
+		entry.appendsSinceTrim = 0
+		if !needsTrim {
+			return true
+		}
+		return false
+	}
+
+	// Below the boundary: only trim when the cache predicate fires. This
+	// preserves the existing R232-PERF-8 semantics; the unified branch
+	// just reuses the predicate computed once above.
+	if needsTrim {
+		entry.appendsSinceTrim = 0
+		return false
 	}
 	return true
 }
