@@ -137,10 +137,9 @@ func (c cronSessionAdapter) Send(ctx context.Context, text string) (cron.SendRes
 // Mirrors fix(cron) #766 (commits 53981bf2 / 49bf32de) which the
 // pre-Phase-B code reached via the *session.ManagedSession concrete
 // type — the cron-local Session interface now exposes the same hook.
+// Like Send and InterruptViaControl, this method assumes c.s is non-nil;
+// the adapter is always constructed with a live ManagedSession.
 func (c cronSessionAdapter) SessionID() string {
-	if c.s == nil {
-		return ""
-	}
 	return c.s.SessionID()
 }
 
