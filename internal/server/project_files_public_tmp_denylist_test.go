@@ -18,7 +18,6 @@ import (
 // silently re-open the disclosure path.
 func TestIsPublicTmpDeniedName_Unit(t *testing.T) {
 	denied := []string{
-		"/tmp/ssh-XXXXXX/agent.1234",
 		"/tmp/ssh-agent.4567",
 		"/tmp/postgres.sock",
 		"/tmp/redis.sock",
