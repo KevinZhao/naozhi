@@ -15,10 +15,18 @@ import (
 // cacheTrimAfterDisk.
 //
 // Structural pin: trimJobLocked source must contain the unlock-around-remove
-// pattern (lock.Unlock() ... os.Remove(...) ... lock.Lock()). A future
-// "simplification" that puts os.Remove back inside the held window (the
-// pre-#712 shape) would erase the perf win and surface as a regression here
-// rather than as latent jobLock contention in production.
+// pattern (lock.Unlock() ... remove batch ... lock.Lock()). The remove batch
+// itself moved into trimRemoveBatch helper for panic safety
+// (R20260527-GO-9 / R20260527-COR-4 / #1271, #1291) so the os.Remove call
+// lives in the helper rather than inline; this test now asserts the helper
+// is invoked between Unlock and Lock and that the helper itself contains
+// os.Remove + a panic-recovery `lock.Lock()`. A future "simplification"
+// that puts the remove batch back inside the held window (the pre-#712
+// shape) would erase the perf win, AND a regression that drops the
+// helper's recover-and-relock would re-introduce the
+// Unlock-of-unlocked-mutex panic on FS-layer panics; both surface here
+// rather than as latent jobLock contention / mysterious goroutine deaths
+// in production.
 func TestTrimJobLocked_ReleasesLockDuringRemoveBatch(t *testing.T) {
 	src, err := os.ReadFile("runstore.go")
 	if err != nil {
@@ -37,28 +45,40 @@ func TestTrimJobLocked_ReleasesLockDuringRemoveBatch(t *testing.T) {
 		rest = rest[:len(fnMarker)+next]
 	}
 
-	// 1. Must release jobLock before the os.Remove loop.
+	// 1. Must release jobLock before the remove batch.
 	idxUnlock := strings.Index(rest, "lock.Unlock()")
 	if idxUnlock < 0 {
 		t.Fatal("trimJobLocked must release jobLock during the os.Remove " +
 			"batch (R246-GO-20 / #712). Without `lock.Unlock()` before the " +
-			"remove loop, concurrent Append for the same jobID queues " +
+			"remove site, concurrent Append for the same jobID queues " +
 			"behind N×Remove syscalls — pre-#712 regression.")
 	}
 
-	// 2. os.Remove call must appear AFTER the Unlock.
-	idxRemove := strings.Index(rest[idxUnlock:], "os.Remove(")
-	if idxRemove < 0 {
-		t.Fatal("trimJobLocked: expected os.Remove call after lock.Unlock() " +
-			"so the syscall batch runs without holding jobLock (#712).")
+	// 2. The remove batch must appear AFTER the Unlock — either inline
+	// (`os.Remove(`) or via the panic-safe helper (`s.trimRemoveBatch(`).
+	// R20260527-GO-9 / R20260527-COR-4 (#1271, #1291): the helper was
+	// extracted so a panicking os.Remove cannot leave jobLock unlocked
+	// for the outer caller's `defer lock.Unlock()` (which would itself
+	// panic on Unlock-of-unlocked-mutex, masking the original FS panic).
+	tail := rest[idxUnlock:]
+	idxRemove := strings.Index(tail, "os.Remove(")
+	idxHelper := strings.Index(tail, "s.trimRemoveBatch(")
+	if idxRemove < 0 && idxHelper < 0 {
+		t.Fatal("trimJobLocked: expected os.Remove call (or s.trimRemoveBatch " +
+			"helper invocation) after lock.Unlock() so the syscall batch runs " +
+			"without holding jobLock (#712 / panic-safe variant: #1271/#1291).")
+	}
+	idxBatch := idxHelper
+	if idxBatch < 0 || (idxRemove >= 0 && idxRemove < idxHelper) {
+		idxBatch = idxRemove
 	}
 
-	// 3. Must reacquire jobLock before returning so cacheTrimAfterDisk
+	// 3. Must reacquire jobLock after the batch so cacheTrimAfterDisk
 	// stays serialised against concurrent cacheHeadPush.
-	tail := rest[idxUnlock+idxRemove:]
-	if !strings.Contains(tail, "lock.Lock()") {
+	postBatch := tail[idxBatch:]
+	if !strings.Contains(postBatch, "lock.Lock()") {
 		t.Fatal("trimJobLocked: expected lock.Lock() reacquisition after " +
-			"the os.Remove batch so cacheTrimAfterDisk runs under jobLock " +
+			"the remove batch so cacheTrimAfterDisk runs under jobLock " +
 			"(matches the pre-#712 lock-order contract for cacheHeadPush " +
 			"serialisation).")
 	}
@@ -70,6 +90,38 @@ func TestTrimJobLocked_ReleasesLockDuringRemoveBatch(t *testing.T) {
 		t.Fatal("trimJobLocked: expected cacheTrimAfterDisk(jobID, cutoff) " +
 			"after the remove batch so the cache reconciles to the same " +
 			"on-disk state.")
+	}
+
+	// 5. If the helper variant is in use, validate the helper itself
+	// contains os.Remove AND a panic-recovery lock.Lock() — without
+	// those, a panic inside the syscall loop would leave jobLock
+	// unlocked, the outer Append `defer lock.Unlock()` would itself
+	// panic on Unlock-of-unlocked-mutex, and the original FS-layer
+	// panic would be masked. R20260527-GO-9 / R20260527-COR-4
+	// (#1271, #1291).
+	if idxHelper >= 0 {
+		const helperMarker = "func (s *runStore) trimRemoveBatch("
+		hidx := strings.Index(body, helperMarker)
+		if hidx < 0 {
+			t.Fatal("trimJobLocked invokes s.trimRemoveBatch but the helper " +
+				"definition is missing (#1271/#1291).")
+		}
+		hbody := body[hidx:]
+		if hnext := strings.Index(hbody[len(helperMarker):], "\nfunc "); hnext >= 0 {
+			hbody = hbody[:len(helperMarker)+hnext]
+		}
+		if !strings.Contains(hbody, "os.Remove(") {
+			t.Fatal("trimRemoveBatch must contain os.Remove() — the helper " +
+				"is the post-#712 home of the perf-critical syscall batch.")
+		}
+		if !strings.Contains(hbody, "recover()") || !strings.Contains(hbody, "lock.Lock()") {
+			t.Fatal("trimRemoveBatch must recover() + lock.Lock() before " +
+				"re-panicking so a panic inside os.Remove (FUSE quirks / " +
+				"cgo trap) leaves jobLock held when the panic propagates " +
+				"to trimJobUnderLock / Append's defer lock.Unlock(). " +
+				"Without this, Unlock-of-unlocked-mutex panics mask the " +
+				"original FS failure (#1271 / #1291).")
+		}
 	}
 }
 

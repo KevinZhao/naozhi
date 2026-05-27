@@ -1331,18 +1331,63 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	}
 	if len(toRemove) > 0 {
 		lock := s.jobLock(jobID)
+		// R20260527-GO-9 / R20260527-COR-4 (#1271, #1291): the os.Remove
+		// batch runs with jobLock released so concurrent Append for the
+		// same jobID can proceed across slow-FS removes. The unlock /
+		// re-lock pair must be panic-safe — if os.Remove (or anything
+		// underneath: FUSE quirks, cgo trap, signal-time misadventure)
+		// panics, the post-batch lock.Lock() never runs, function
+		// unwinds with jobLock UNLOCKED, and the outer caller's
+		// `defer lock.Unlock()` (trimJobUnderLock / Append's post-trim
+		// path) panics on Unlock-of-unlocked-mutex — masking the
+		// original FS panic and killing the goroutine confusingly.
+		//
+		// trimRemoveBatch wraps the loop in a recover-and-reraise that
+		// re-acquires jobLock on the panic path before re-panicking.
+		// On the normal-return path the post-batch lock.Lock() below
+		// re-acquires (the helper deliberately does NOT re-Lock on
+		// normal return so the source still shows the explicit
+		// Unlock → batch → Lock shape that
+		// trim_unlock_during_remove_test.go pins as the perf
+		// invariant). Net: jobLock is always held when trimJobLocked
+		// reaches cacheTrimAfterDisk and on every exit boundary.
 		lock.Unlock()
-		for _, p := range toRemove {
-			if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				slog.Debug("cron run: trim remove failed", "path", p, "err", err)
-			}
-		}
+		s.trimRemoveBatch(lock, toRemove)
 		lock.Lock()
 	}
 	// Cache may now point to deleted entries; reconcile by trimming the
 	// cache slice to the same (count + window) policy. We hold jobLock so
 	// concurrent Append's cacheHeadPush can't race.
 	s.cacheTrimAfterDisk(jobID, cutoff)
+}
+
+// trimRemoveBatch runs os.Remove for each path in toRemove with jobLock
+// already released by the caller. On panic from any os.Remove (FUSE
+// quirks, cgo trap, signal-time misadventure) it re-acquires jobLock
+// before re-panicking so trimJobLocked's outer caller observes the
+// Locked-suffix contract intact (no Unlock-of-unlocked panic from the
+// caller's `defer lock.Unlock()`). Normal return leaves the lock
+// RELEASED — the caller is responsible for re-Lock'ing on the happy
+// path so trim_unlock_during_remove_test.go's structural pin
+// (lock.Unlock() before the Remove site, lock.Lock() after it) still
+// matches the source. R20260527-GO-9 / R20260527-COR-4 (#1271, #1291).
+func (s *runStore) trimRemoveBatch(lock *sync.Mutex, toRemove []string) {
+	defer func() {
+		if r := recover(); r != nil {
+			// Re-acquire jobLock so the outer trimJobUnderLock /
+			// Append `defer lock.Unlock()` does not panic on
+			// Unlock-of-unlocked-mutex. Re-panic with the original
+			// value so observability still surfaces the FS-layer
+			// failure.
+			lock.Lock()
+			panic(r)
+		}
+	}()
+	for _, p := range toRemove {
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			slog.Debug("cron run: trim remove failed", "path", p, "err", err)
+		}
+	}
 }
 
 // trimSkipFromCache reports whether the cache state proves trimJobLocked
