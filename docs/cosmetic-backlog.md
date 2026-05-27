@@ -273,3 +273,17 @@
 - [R20260526-SEC-C02] wsAuthRetryAfterSeconds 60 与 burst 5 不一致 — internal/server/wshub_upgrade.go:36
 - [R20260526-SEC-C03] ClaudeProjectSlug 不 lowercase macOS APFS 边界 — internal/server/dashboard_cron_transcript.go:301
 - [R20260526-SEC-C04] validateRemoteWorkspace 不 cap 长度 defense-in-depth — internal/server/server.go:265
+
+## cron-cr-20260527-040146 追加 (11 项)
+
+- [R20260527-GO-3] cronNoticePrefixFmt const dead — used only as test grep token; godoc misleads — internal/cron/scheduler_run.go:258
+- [R20260527-COR-17] ErrClassPanic + ErrClassPausedConcurrent reserved with godoc 'not yet emitted' — internal/cron/error_class.go:202
+- [R20260527-COR-18] dispatch.CronScheduler interface satisfied implicitly; add var _ guard mirror cron_router_adapter — internal/dispatch/dispatch.go:108
+- [R20260527-PERF-2] runinflight setSessionID/setFresh allocate fresh runInflightView per call; split atomic.Pointer/Bool — internal/cron/runinflight.go:308
+- [R20260527-PERF-3] WriteUserMessageLocked json.Marshal+append('\n') forces realloc; use bytes.Buffer pool or pre-sized make — internal/cli/protocol_claude.go:166
+- [R20260527-COR-2] appendBatch invokePersistSink(nil) bumps replayInvokeTotal when sinkAttached=true sinkReady=false — internal/cli/eventlog.go:1389
+- [R20260527-GO-15] scratch.StartSweeper has no idempotency guard despite 'Safe to call once' godoc — wrap sync.Once — internal/session/scratch.go:152
+- [R20260527-COR-8] readShimLine n-2 index check after n captured pre-trim is fragile — add comment or refactor — internal/cli/process_readloop.go:170
+- [R20260527-COR-13] SetTelemetry godoc 'plain assignment is uncontended' wrong against main.go ordering (already fixed in #R20260527-GO-1) — internal/cron/scheduler_callbacks.go:65
+- [R20260527-COR-20] sendMu hold across full passthrough turn breaks lock-ordering doc claim cross-reference — internal/session/managed.go:1024
+- [R20260527-COS-3] dashboard_cron_transcript Lstat→Open uses bare os.Open instead of openWorkspaceFile/O_NOFOLLOW (already R249-SEC-4) — internal/server/dashboard_cron_transcript.go:0

@@ -10,6 +10,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // RetiredStore tracks the wall-clock instant a session left the live sidebar
@@ -199,34 +201,12 @@ func (rs *RetiredStore) Save() error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("mkdir retired store: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, ".retired-*.json")
-	if err != nil {
-		return fmt.Errorf("tmp retired store: %w", err)
-	}
-	tmpPath := tmp.Name()
-	// Cleanup on any error path so we don't leak a half-written tmpfile
-	// next to the live state.
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
+	// osutil.WriteFileAtomic handles tmpfile + fsync + rename + dir-fsync,
+	// replacing the inlined boilerplate (and adding a directory fsync that
+	// the previous code lacked).
+	if err := osutil.WriteFileAtomic(rs.path, data, 0o600); err != nil {
 		return fmt.Errorf("write retired store: %w", err)
 	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("fsync retired store: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close retired store: %w", err)
-	}
-	if err := os.Rename(tmpPath, rs.path); err != nil {
-		return fmt.Errorf("rename retired store: %w", err)
-	}
-	cleanup = false
 
 	rs.mu.Lock()
 	rs.dirty = false
