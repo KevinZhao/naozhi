@@ -13,6 +13,11 @@ import (
 // must reproduce the same setDeathReason values the inline switch wrote
 // before R214-CODE-3, otherwise health dashboards lose the EOF vs ReadErr
 // distinction.
+//
+// R20260527-GO-19 (#1288): the afterDrain branches now stamp dedicated
+// labels (DeathReasonShimOversizeThenEOF / …ThenReadErr) so dashboard
+// histograms can keep cap-violation lifecycle terminations distinct
+// from clean shim_eof / shim_read_error.
 func TestClassifyEOF_DeathReasons(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -22,11 +27,11 @@ func TestClassifyEOF_DeathReasons(t *testing.T) {
 		want       string
 	}{
 		{name: "EOF_normal", err: io.EOF, afterDrain: false, want: DeathReasonShimEOF},
-		{name: "EOF_after_drain", err: io.EOF, afterDrain: true, want: DeathReasonShimEOF},
+		{name: "EOF_after_drain", err: io.EOF, afterDrain: true, want: DeathReasonShimOversizeThenEOF},
 		{name: "netClosed_normal", err: net.ErrClosed, afterDrain: false, want: DeathReasonShimEOF},
-		{name: "netClosed_after_drain", err: net.ErrClosed, afterDrain: true, want: DeathReasonShimEOF},
+		{name: "netClosed_after_drain", err: net.ErrClosed, afterDrain: true, want: DeathReasonShimOversizeThenEOF},
 		{name: "other_normal", err: errors.New("read fault"), afterDrain: false, want: DeathReasonShimReadErr},
-		{name: "other_after_drain", err: errors.New("read fault"), afterDrain: true, want: DeathReasonShimReadErr},
+		{name: "other_after_drain", err: errors.New("read fault"), afterDrain: true, want: DeathReasonShimOversizeThenReadErr},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

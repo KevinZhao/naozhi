@@ -211,23 +211,33 @@ const (
 // readLoop path observed the error. Pure side-effects: no return value
 // because the caller's break-from-loop decision is independent of the
 // classification (any non-nil readErr breaks). R214-CODE-3.
+//
+// R20260527-GO-19 (#1288): a separate DeathReason is stamped for the
+// oversize-then-EOF and oversize-then-readErr branches so dashboard
+// histograms can keep cap-violation lifecycle terminations distinct
+// from clean shim_eof / shim_read_error. The log line already
+// distinguishes the path; the death-reason label exposes it to
+// downstream consumers (cron classification, /health snapshots) that
+// only see the structured field.
 func (p *Process) classifyEOF(readErr error, afterDrain bool, log *slog.Logger) {
 	closed := errors.Is(readErr, io.EOF) || errors.Is(readErr, net.ErrClosed)
 	if closed {
 		if afterDrain {
 			log.Info("readLoop: shim connection closed after oversize drain")
+			p.setDeathReason(DeathReasonShimOversizeThenEOF)
 		} else {
 			log.Info("readLoop: shim connection closed")
+			p.setDeathReason(DeathReasonShimEOF)
 		}
-		p.setDeathReason(DeathReasonShimEOF)
 		return
 	}
 	if afterDrain {
 		log.Warn("readLoop: shim read error after oversize drain", "err", readErr)
+		p.setDeathReason(DeathReasonShimOversizeThenReadErr)
 	} else {
 		log.Warn("readLoop: shim read error", "err", readErr)
+		p.setDeathReason(DeathReasonShimReadErr)
 	}
-	p.setDeathReason(DeathReasonShimReadErr)
 }
 
 // handleShimMessage dispatches one parsed shim frame. Carved out of

@@ -419,6 +419,15 @@ const (
 	DeathReasonKilled          = "killed"
 	DeathReasonNoOutputTimeout = "no_output_timeout"
 	DeathReasonTotalTimeout    = "total_timeout"
+	// R20260527-GO-19 (#1288): the shim closing its pipe immediately after
+	// emitting an oversize line was previously classified as plain shim_eof,
+	// erasing the upstream cap-violation context. Operators chasing
+	// "shim_eof spike" alerts could not tell whether the cause was a
+	// graceful CLI exit, a network blip, or a malformed-event flood
+	// without re-opening the readloop log. The dedicated label keeps
+	// the histogram dimension distinguishable.
+	DeathReasonShimOversizeThenEOF     = "shim_oversize_then_eof"
+	DeathReasonShimOversizeThenReadErr = "shim_oversize_then_read_error"
 )
 
 // setDeathReason records the death reason if not already set. First writer wins
