@@ -179,6 +179,24 @@ func (p *ScratchPool) Stop() {
 // sweep removes scratches idle past TTL. Router.Remove() is called outside
 // the pool lock to avoid holding our mutex during potentially slow process
 // teardown.
+//
+// R20260527-PERF-18 (#1303): the range-and-delete pattern below is normally
+// a Go anti-pattern — Go's spec permits but does not require deleted keys
+// to disappear from the in-progress iteration, and large maps pay rehash
+// work when entries are removed mid-walk. It is safe here because:
+//
+//   - p.items is hard-capped at DefaultScratchMax (currently 20), so the
+//     worst-case sweep walks 20 entries while holding p.mu and never blocks
+//     on I/O (Router.Remove runs after Unlock above).
+//   - At ≤ 20 items the map sits in a single bucket, so the runtime never
+//     rehashes during in-place deletes.
+//   - We need both the expired scratch slice (for out-of-lock Router.Remove)
+//     and the byKey index update; a two-pass collect-then-delete would add
+//     a separate len()-bounded allocation without measurable benefit.
+//
+// If DefaultScratchMax is ever raised meaningfully (≫ 100) revisit: collect
+// IDs first, release p.mu, then re-acquire to delete batches; or migrate to
+// a lock-free expiring map. The current tradeoff is intentional but cliffy.
 func (p *ScratchPool) sweep(now time.Time) {
 	cutoff := now.Add(-p.ttl).UnixNano()
 	var expired []*Scratch
