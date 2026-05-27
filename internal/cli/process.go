@@ -486,6 +486,13 @@ func (p *Process) lifecycleContext() context.Context {
 		// Watcher: cancel when either lifetime signal closes. Both channels
 		// can be nil in legacy tests; nil-channel receives block forever in
 		// a select, so we degrade gracefully rather than panic.
+		//
+		// R20260527-GO-13 (#1289): when both channels are nil, no watcher
+		// goroutine will ever invoke cancel(). The context.WithCancel
+		// allocation includes a goroutine-tracked timer/parent slot that
+		// must be released; without this proactive cancel(), every legacy
+		// &Process{} test that touches lifecycleContext leaks a context
+		// for the test binary's lifetime.
 		if p.done == nil && p.killCh == nil {
 			// R20260527-GO-13 (#1289): no lifetime signal can ever
 			// fire, so leaving the context live would leak the
