@@ -1163,7 +1163,40 @@ func (s *Scheduler) registerJob(j *Job) error {
 // 500). This drops the lock-time prefix scan to O(jobs-in-this-chat) so
 // withJobByPrefix doesn't pin s.mu across the entire job table on every
 // IM-prefix delete/pause/resume.
+//
+// R246-GO-16 (#705): full-ID fast path. When idPrefix is a complete
+// hex job ID (length 2*hexIDEntropyBytes = 16) we hit s.jobs directly —
+// O(1) map lookup instead of an O(N) range scan. Dashboard / HTTP
+// callers already round-trip the full ID (the truncated prefix form
+// only appears in the IM-typed CLI flow `naozhi cron pause abc` where
+// the operator types a partial ID), so the common case is ID-shaped
+// and benefits. The scan path is preserved verbatim for the partial-
+// prefix case so the ambiguous-match error still fires identically.
+// The Platform / ChatID match still has to gate the result — a full
+// ID may hit the wrong chat scope (cross-chat probe) and must return
+// ErrJobNotFound rather than the foreign job. Note we still hold the
+// caller-supplied write lock during the lookup; the dashboard 1Hz
+// read path is in s.mu.RLock (ListJobs / ListAllJobsWithNextRun) and
+// the win is shorter blocking — the partial-prefix scan stays an
+// honest O(N) tail.
 func (s *Scheduler) findByPrefixLocked(idPrefix, plat, chatID string) (*Job, error) {
+	if len(idPrefix) == 2*hexIDEntropyBytes {
+		if j, ok := s.jobs[idPrefix]; ok {
+			if j.Platform == plat && j.ChatID == chatID {
+				return j, nil
+			}
+			// Full ID exists but in a different chat scope — surface
+			// the same NotFound error the scan path would, so cross-
+			// chat callers can't probe foreign-job existence by ID.
+			return nil, fmt.Errorf("%w: prefix %q", ErrJobNotFound, idPrefix)
+		}
+		// Full-length ID with no map hit: still fall through to the
+		// scan path. A pathological store load could in theory keep a
+		// 16-char prefix that is NOT a full ID (e.g. data corruption
+		// or a future ID-width bump where the operator types a 16-
+		// char prefix of a 32-char ID), so the scan tail acts as the
+		// safety net rather than short-circuiting on the map miss.
+	}
 	var matches []*Job
 	for _, j := range s.jobsByChat[chatJobKey{Platform: plat, ChatID: chatID}] {
 		if strings.HasPrefix(j.ID, idPrefix) {
