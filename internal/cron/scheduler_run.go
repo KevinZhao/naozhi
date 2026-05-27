@@ -653,6 +653,47 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 	return ch
 }
 
+// sendWithWatchdog runs sess.Send under a deadline-watchdog and returns
+// the SendResult, the watchdog abortResult, and the Send error in one
+// shot. R215-ARCH-P2-5 (#581) partial: factored out of executeOpt so
+// the four-step invariant — (1) start watchdog, (2) Send, (3)
+// sendCancel so the watchdog returns on the success path, (4) drain
+// abortCh BEFORE the next session.Reset to avoid the in-flight
+// interrupt write racing the next tick — lives in one named function
+// instead of inlined in a 569-line state machine where a future split
+// could accidentally reorder the cancel/drain pair.
+//
+// Caller contract:
+//   - sendCtx must be a context.WithTimeout / s.stopCtx-derived ctx.
+//     Watchdog uses ctx.Err() == DeadlineExceeded as its fire trigger;
+//     Background or any non-deadline ctx degrades to "interrupt never
+//     fires" silently.
+//   - sendCancel is called by this helper exactly once after Send
+//     returns; the caller's `defer sendCancel()` is therefore a no-op
+//     (cancelFunc is idempotent).
+func sendWithWatchdog(sendCtx context.Context, sendCancel context.CancelFunc, sess Session, text string) (SendResult, abortResult, error) {
+	// Watchdog: deadline-fired interrupt of the in-flight CLI turn. See
+	// runDeadlineWatchdog for the rationale (must fire BEFORE Send
+	// returns, otherwise Process.State has already flipped to Ready and
+	// InterruptViaControl returns ErrNoActiveTurn → no-op).
+	abortCh := runDeadlineWatchdog(sendCtx, sess)
+
+	// Direct Send without sendWithBroadcast — cron jobs notify via the
+	// IM deliverNotice path (resolveNotifyTarget + platform.Reply) and
+	// the cron_run_ended WS frame.
+	result, err := sess.Send(sendCtx, text)
+
+	// Cancel sendCtx so the watchdog returns promptly on the success /
+	// non-deadline error path; on the deadline path it's already done.
+	// Block on abortCh so the InterruptViaControl call (if any)
+	// completes before we record the run state — otherwise a fast cron
+	// tick could overlap the next session.Reset with the in-flight
+	// interrupt write.
+	sendCancel()
+	abort := <-abortCh
+	return result, abort, err
+}
+
 // classifyExecError maps an error from GetOrCreate or Send to
 // (RunState, ErrorClass) for finishRun. defaultClass distinguishes the
 // session-spawn path (ErrClassSessionError) from the send path
@@ -1135,23 +1176,15 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	}
 	inflight.setPhase(PhaseSending)
 
-	// Watchdog: deadline-fired interrupt of the in-flight CLI turn. See
-	// runDeadlineWatchdog for the rationale (must fire BEFORE Send returns,
-	// otherwise Process.State has already flipped to Ready and
-	// InterruptViaControl returns ErrNoActiveTurn → no-op).
-	abortCh := runDeadlineWatchdog(sendCtx, sess)
-
-	// Direct Send without sendWithBroadcast — cron jobs notify via the
-	// IM deliverNotice path (resolveNotifyTarget + platform.Reply) and
-	// the cron_run_ended WS frame.
-	result, err := sess.Send(sendCtx, cleanText)
-	// Cancel sendCtx so the watchdog returns promptly on the success / non-
-	// deadline error path; on the deadline path it's already done. Block
-	// on abortCh so the InterruptViaControl call (if any) completes before
-	// we record the run state — otherwise a fast cron tick could overlap
-	// the next session.Reset with the in-flight interrupt write.
-	sendCancel()
-	abort := <-abortCh
+	// R215-ARCH-P2-5 (#581) partial: the Send + watchdog + abort-drain
+	// trio is a self-contained sub-machine that doesn't need to share
+	// stack frame with the surrounding executeOpt. Extracting it
+	// localises the watchdog ↔ Send ordering contract (drain abortCh
+	// AFTER cancelling sendCtx) so a future executeOpt split doesn't
+	// accidentally reorder the lines and let the next Reset race the
+	// in-flight interrupt write. See sendWithWatchdog godoc for the
+	// invariant.
+	result, abort, err := sendWithWatchdog(sendCtx, sendCancel, sess, cleanText)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			// Same rationale as the session-error branch above: suppress
