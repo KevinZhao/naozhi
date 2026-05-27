@@ -51,13 +51,16 @@ func TestPauseJobLocked_ReturnsCronRemoveClosure(t *testing.T) {
 		s.mu.Unlock()
 		t.Fatalf("expected non-zero entryID after AddJob; got 0")
 	}
-	cleanup, err := s.pauseJobLocked(j)
+	cleanup, rb, err := s.pauseJobLocked(j)
 	s.mu.Unlock()
 	if err != nil {
 		t.Fatalf("pauseJobLocked: unexpected err: %v", err)
 	}
 	if cleanup == nil {
 		t.Fatalf("pauseJobLocked must return a non-nil cleanup closure even on success")
+	}
+	if rb == nil {
+		t.Fatalf("pauseJobLocked must return a non-nil rollback closure even on success (R20260527-COR-1 / #1272)")
 	}
 	if !j.Paused {
 		t.Errorf("j.Paused = false; want true after pauseJobLocked")
@@ -73,13 +76,16 @@ func TestPauseJobLocked_ReturnsCronRemoveClosure(t *testing.T) {
 	// Already-paused: cleanup must still be non-nil (defensive
 	// default) so a defer call at the call site stays safe.
 	s.mu.Lock()
-	cleanup2, err2 := s.pauseJobLocked(j)
+	cleanup2, rb2, err2 := s.pauseJobLocked(j)
 	s.mu.Unlock()
 	if err2 == nil {
 		t.Errorf("pauseJobLocked on already-paused job: expected ErrJobAlreadyPaused, got nil")
 	}
 	if cleanup2 == nil {
 		t.Errorf("pauseJobLocked must return non-nil cleanup closure on error path so callers can `defer cleanup()` safely")
+	}
+	if rb2 == nil {
+		t.Errorf("pauseJobLocked must return non-nil rollback closure on error path so callers can defer it safely")
 	}
 }
 

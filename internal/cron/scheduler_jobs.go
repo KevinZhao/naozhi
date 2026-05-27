@@ -408,9 +408,16 @@ func (s *Scheduler) deleteJobLocked(j *Job) {
 // without nil-checking. cronCleanup is idempotent — re-running it after
 // a successful first call is a no-op (the captured entryID is consumed
 // at the first call, so subsequent calls hit the entryID==0 fast path).
-func (s *Scheduler) pauseJobLocked(j *Job) (cronCleanup func(), err error) {
+//
+// R20260527-COR-1 (#1272): also returns rollback that restores
+// j.entryID/j.Paused if persist fails after the in-memory mutation. The
+// rollback is safe to invoke under s.mu because it does NOT touch
+// s.cron — only the cleanup closure does. Caller must invoke rollback
+// BEFORE running cronCleanup; calling cronCleanup after a rollback would
+// remove the still-active entry. Both helpers are idempotent.
+func (s *Scheduler) pauseJobLocked(j *Job) (cronCleanup func(), rollback func(), err error) {
 	if j.Paused {
-		return func() {}, fmt.Errorf("%w: id %q", ErrJobAlreadyPaused, j.ID)
+		return func() {}, func() {}, fmt.Errorf("%w: id %q", ErrJobAlreadyPaused, j.ID)
 	}
 	// Snapshot the entryID we'll remove from cron AFTER s.mu is released.
 	// Set j.entryID = 0 under lock so any concurrent ListAllJobsWithNextRun
@@ -419,10 +426,17 @@ func (s *Scheduler) pauseJobLocked(j *Job) (cronCleanup func(), err error) {
 	captured := j.entryID
 	j.entryID = 0
 	j.Paused = true
-	if captured == 0 {
-		return func() {}, nil
+	rollback = func() {
+		// Restore in-memory pre-mutation state. Cron entry is still live
+		// (cronCleanup hasn't run yet on the persist-failure path), so
+		// reinstating entryID is sufficient — no s.cron call needed.
+		j.Paused = false
+		j.entryID = captured
 	}
-	return func() { s.cron.Remove(captured) }, nil
+	if captured == 0 {
+		return func() {}, rollback, nil
+	}
+	return func() { s.cron.Remove(captured) }, rollback, nil
 }
 
 // resumeJobLocked transitions a paused job back to active under s.mu by
@@ -430,15 +444,32 @@ func (s *Scheduler) pauseJobLocked(j *Job) (cronCleanup func(), err error) {
 // if the job is not paused, or registerJob's error if re-registration
 // fails (e.g. schedule no longer parses) — leaving Paused=true so the
 // caller can retry. R219-CR-4.
-func (s *Scheduler) resumeJobLocked(j *Job) error {
+//
+// R20260527-COR-1 (#1272): also returns rollback that re-pauses + clears
+// j.entryID if persist fails after registerJob. Without this, persist
+// failure would leave the job active in-memory but Paused on disk, so a
+// restart would replay the original Paused state and silently kill an
+// "active" job from the dashboard's perspective. rollback is idempotent.
+func (s *Scheduler) resumeJobLocked(j *Job) (rollback func(), err error) {
 	if !j.Paused {
-		return fmt.Errorf("%w: id %q", ErrJobNotPaused, j.ID)
+		return func() {}, fmt.Errorf("%w: id %q", ErrJobNotPaused, j.ID)
 	}
 	if err := s.registerJob(j); err != nil {
-		return err
+		return func() {}, err
 	}
+	captured := j.entryID
 	j.Paused = false
-	return nil
+	rollback = func() {
+		// Undo: re-pause and remove the cron entry we just registered.
+		// j.Paused must flip BEFORE s.cron.Remove so a concurrent ticker
+		// that already fired on this entry sees Paused=true and skips.
+		j.Paused = true
+		j.entryID = 0
+		if captured != 0 {
+			s.cron.Remove(captured)
+		}
+	}
+	return rollback, nil
 }
 
 // withJobByID 是 DeleteJobByID / PauseJobByID / ResumeJobByID 三 dashboard
@@ -459,7 +490,10 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 // 返回三元组 (*Job, error)：
 //   - 找不到：(nil, ErrJobNotFound 包装)；
 //   - op 失败：(nil, op 返回的 err)；
-//   - persist 失败：(nil, ErrPersistFailed 包装)；postCleanup 已执行。
+//   - persist 失败 + op 提供 rollback：(nil, ErrPersistFailed)；rollback 在
+//     锁内已执行；postCleanup 跳过（in-memory 已回滚到 pre-mutation）；
+//   - persist 失败 + 无 rollback：(nil, ErrPersistFailed)；postCleanup
+//     仍执行（legacy 行为，保 R238-GO-3：DeleteJobByID 必须清 runStore）；
 //   - 成功：(*Job, nil)。
 //
 // R241-GO-2/3 的"explicit found/ok"语义在此聚合：内部用 found 区分
@@ -473,14 +507,24 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 // 把同样语义铺到 Delete/Pause/Resume 三入口；postCleanup 仍然收到锁外
 // 拿到的 *jobSnapshot，副作用（router.Reset / runStore.DeleteJob）只读
 // snapshot 的不可变字段（ID/Platform/ChatID）所以语义不变。
+//
+// R20260527-COR-1 (#1272): op 现在返回 (rollback, err) 二元组。当 op
+// 成功但 persistJobsLocked 失败时，rollback 闭包在 s.mu 内执行，恢复
+// pre-mutation 状态，使内存与磁盘一致（避免 PauseJobByID 把
+// j.Paused=true 持久化失败后内存仍为 paused / 磁盘仍为 unpaused，重启
+// 把任务"复活"的 drift）。rollback==nil 表示 op 不需要回滚或回滚由
+// caller 自行处理（DeleteJobByID 走此路：deleteJobLocked 已发生，
+// postCleanup 必须执行以清 runStore，匹配 R238-GO-3 leak-prevention
+// contract）。
 func (s *Scheduler) withJobByID(
 	id string,
-	op func(j *Job) error,
+	op func(j *Job) (rollback func(), err error),
 	postCleanup func(j *Job),
 ) (*Job, error) {
 	var save func()
 	var snapshot Job
 	var found bool
+	var rolledBack bool
 	var opErr error
 	var perr error
 	func() {
@@ -491,14 +535,25 @@ func (s *Scheduler) withJobByID(
 			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 			return
 		}
+		var opRollback func()
 		if op != nil {
-			if err := op(j); err != nil {
+			rb, err := op(j)
+			if err != nil {
 				opErr = err
 				return
 			}
+			opRollback = rb
 		}
 		found = true
 		save, perr = s.persistJobsLocked()
+		if perr != nil && opRollback != nil {
+			// Roll back the in-memory mutation so disk and memory agree
+			// (both show the pre-mutation state). The caller gets
+			// ErrPersistFailed; the next request sees consistent state.
+			opRollback()
+			rolledBack = true
+			return
+		}
 		// R242-GO-3 (#548): value-copy under s.mu so the caller (and
 		// postCleanup) read a stable Job even if a concurrent
 		// UpdateJob / SetJobPrompt mutates the live *j right after we
@@ -510,6 +565,13 @@ func (s *Scheduler) withJobByID(
 		return nil, opErr
 	}
 	if !found {
+		return nil, perr
+	}
+	if rolledBack {
+		// Rollback path: do NOT run postCleanup — the in-memory state
+		// has been restored, so router.Reset / runStore.DeleteJob /
+		// cron.Remove (via the cronCleanup closure pattern) would
+		// operate on a still-active job and corrupt it.
 		return nil, perr
 	}
 	if postCleanup != nil {
@@ -527,9 +589,14 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	return s.withJobByID(
 		id,
 		// op：调 deleteJobLocked 移除 in-memory 记录；不返回错误（删除路径无校验）。
-		func(j *Job) error {
+		// rollback nil：delete is currently best-effort on persist failure
+		// (postCleanup still runs even if persist fails — see #1272 docs).
+		// A future hardening would re-add the job to s.jobs + cron entry,
+		// but that requires storing the pre-delete snapshot which the
+		// current deleteJobLocked path doesn't surface.
+		func(j *Job) (func(), error) {
 			s.deleteJobLocked(j)
-			return nil
+			return nil, nil
 		},
 		// postCleanup：锁外做 router.Reset + runStore.DeleteJob.
 		// R240-GO-1: router.Reset 移出 deleteJobLocked，避免在 s.mu 下
@@ -563,12 +630,17 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 // pauseJobLocked under s.mu so the entryID we're removing is the
 // exact one snapshotted at the in-memory mutation point (no
 // re-read race after Unlock).
+//
+// R20260527-COR-1 (#1272): pauseJobLocked also returns a rollback
+// closure that withJobByID invokes under s.mu when persistJobsLocked
+// fails — restores j.Paused=false + j.entryID=captured so a restart
+// doesn't replay the un-persisted pause state.
 func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 	var pauseCleanup func()
-	op := func(j *Job) error {
-		c, err := s.pauseJobLocked(j)
+	op := func(j *Job) (func(), error) {
+		c, rb, err := s.pauseJobLocked(j)
 		pauseCleanup = c
-		return err
+		return rb, err
 	}
 	postCleanup := func(_ *Job) {
 		if pauseCleanup != nil {
@@ -579,8 +651,14 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 }
 
 // ResumeJobByID resumes a paused job by exact ID (unscoped, for dashboard use).
+//
+// R20260527-COR-1 (#1272): resumeJobLocked returns a rollback closure
+// that withJobByID invokes under s.mu when persistJobsLocked fails —
+// re-pauses + drops the cron entry so disk and memory agree.
 func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
-	return s.withJobByID(id, s.resumeJobLocked, nil)
+	return s.withJobByID(id, func(j *Job) (func(), error) {
+		return s.resumeJobLocked(j)
+	}, nil)
 }
 
 // JobUpdate captures fields a dashboard user may edit on an existing cron
@@ -854,8 +932,10 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	if j.Paused {
 		// Delegate unpause to the shared helper so the registerJob + Paused
 		// flag transition stays consistent with PauseJob/ResumeJob/UpdateJob
-		// paths. R226-CR-16.
-		if err := s.resumeJobLocked(j); err != nil {
+		// paths. R226-CR-16. Discard the resume rollback closure here —
+		// SetJobPrompt has its own bespoke rollback path below that wraps
+		// the resume + Prompt write together.
+		if _, err := s.resumeJobLocked(j); err != nil {
 			j.Prompt = "" // rollback: Prompt was empty before this call
 			s.mu.Unlock()
 			return err
@@ -876,7 +956,7 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 		j.Prompt = ""
 		var pauseRollbackCleanup func()
 		if waspaused && !j.Paused {
-			c, rbErr := s.pauseJobLocked(j)
+			c, _, rbErr := s.pauseJobLocked(j)
 			if rbErr != nil && !errors.Is(rbErr, ErrJobAlreadyPaused) {
 				slog.Warn("cron rollback after persist failure also failed",
 					"job_id", j.ID, "rollback_err", rbErr, "orig_err", perr)
@@ -1000,16 +1080,23 @@ func (s *Scheduler) Location() *time.Location {
 // Error precedence (preserved from the originals):
 //   - find miss      → (nil, find err)
 //   - op error       → (nil, op err)        ; persist + postCleanup skipped
-//   - persist error  → (nil, persist err)   ; postCleanup ALREADY ran
+//   - persist error + rollback → (nil, persist err) ; rollback ran in lock,
+//     postCleanup SKIPPED so side effects don't fire on a restored job
+//   - persist error + no rollback → (nil, persist err) ; postCleanup ALREADY ran
 //   - success        → (*Job, nil)
+//
+// R20260527-COR-1 (#1272): mirrors withJobByID's rollback contract on
+// the IM-prefix side. Without this, PauseJob / ResumeJob via prefix had
+// the same disk-vs-memory drift on persist failure.
 func (s *Scheduler) withJobByPrefix(
 	idPrefix, plat, chatID string,
-	op func(j *Job) error,
+	op func(j *Job) (rollback func(), err error),
 	postCleanup func(j *Job),
 ) (*Job, error) {
 	var save func()
 	var j *Job
 	var findErr, opErr, perr error
+	var rolledBack bool
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -1017,13 +1104,21 @@ func (s *Scheduler) withJobByPrefix(
 		if findErr != nil {
 			return
 		}
+		var opRollback func()
 		if op != nil {
-			if err := op(j); err != nil {
+			rb, err := op(j)
+			if err != nil {
 				opErr = err
 				return
 			}
+			opRollback = rb
 		}
 		save, perr = s.persistJobsLocked()
+		if perr != nil && opRollback != nil {
+			opRollback()
+			rolledBack = true
+			return
+		}
 	}()
 
 	if findErr != nil {
@@ -1031,6 +1126,12 @@ func (s *Scheduler) withJobByPrefix(
 	}
 	if opErr != nil {
 		return nil, opErr
+	}
+	if rolledBack {
+		// Rollback restored pre-mutation state — skip postCleanup so
+		// router.Reset / runStore.DeleteJob / cron.Remove don't fire
+		// on a still-active job.
+		return nil, perr
 	}
 	if postCleanup != nil {
 		postCleanup(j)
@@ -1046,9 +1147,13 @@ func (s *Scheduler) withJobByPrefix(
 func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 	return s.withJobByPrefix(
 		idPrefix, plat, chatID,
-		func(j *Job) error {
+		// rollback nil: legacy behavior — postCleanup still runs on
+		// persist failure (R238-GO-3 leak prevention; deleteJobLocked
+		// already happened so runStore must clean up). #1272 preserves
+		// this for delete-paths.
+		func(j *Job) (func(), error) {
 			s.deleteJobLocked(j)
-			return nil
+			return nil, nil
 		},
 		// R240-GO-1: router.Reset must run lock-free — notifyChange may
 		// re-enter s.mu. R238-GO-3: runStore.DeleteJob fires even when
@@ -1073,12 +1178,15 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 // R236-QA-03 (#537): same lock-order pattern as PauseJobByID — the
 // cron.Remove returned by pauseJobLocked runs in postCleanup so the
 // unbuffered c.remove channel send doesn't happen under s.mu.
+//
+// R20260527-COR-1 (#1272): rollback closure plumbed through so
+// persist-failure restores Paused=false + entryID under s.mu.
 func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 	var pauseCleanup func()
-	op := func(j *Job) error {
-		c, err := s.pauseJobLocked(j)
+	op := func(j *Job) (func(), error) {
+		c, rb, err := s.pauseJobLocked(j)
 		pauseCleanup = c
-		return err
+		return rb, err
 	}
 	postCleanup := func(_ *Job) {
 		if pauseCleanup != nil {
@@ -1089,8 +1197,13 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 }
 
 // ResumeJob resumes a paused job by ID prefix.
+//
+// R20260527-COR-1 (#1272): rollback plumbed through so persist-failure
+// re-pauses + drops the cron entry, keeping disk and memory aligned.
 func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
-	return s.withJobByPrefix(idPrefix, plat, chatID, s.resumeJobLocked, nil)
+	return s.withJobByPrefix(idPrefix, plat, chatID, func(j *Job) (func(), error) {
+		return s.resumeJobLocked(j)
+	}, nil)
 }
 
 // NextRun returns the next scheduled run time for a job. R247-GO-9
