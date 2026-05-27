@@ -24,8 +24,19 @@ import (
 // full RGBA decode (e.g., 4096x4096 = 64 MB RGBA).
 const maxThumbnailPixels = 4096 * 4096
 
+// thumbnailWorkerCap is the maximum number of concurrent image decode
+// operations (and the matching maximum number of worker goroutines spawned
+// per multi-image user message in process_send.go).
+//
+// R247-PERF-21 (#569): single source of truth for the concurrency cap so
+// process_send.go's worker-pool sizing cannot drift from the actual
+// serialisation point in MakeThumbnail. Previously the cap=4 lived only
+// in this file and process_send.go spawned len(images) goroutines, paying
+// 8KB stack × N even though the inner thumbSem made anything past 4 idle.
+const thumbnailWorkerCap = 4
+
 // thumbSem limits concurrent image decode operations to cap aggregate memory.
-var thumbSem = make(chan struct{}, 4)
+var thumbSem = make(chan struct{}, thumbnailWorkerCap)
 
 // MakeThumbnail generates a small JPEG data URI from raw image bytes.
 // Returns empty string if the image cannot be decoded or is too large.
