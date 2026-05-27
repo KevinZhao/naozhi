@@ -12,9 +12,11 @@ import (
 // position 0 but the underlying slice header would otherwise carry the
 // previous record's len, and any caller that iterated buf.Bytes() (none
 // today, but cheap to defend in advance) would see corruption.
+// No t.Parallel on the recordBufPool tests below: they share the package-
+// global pool. Once a buffer is Put, another test can Get the same buffer
+// and mutate it concurrently with the first test's post-Put introspection.
+// -race on macOS catches the contention on bytes.Buffer's len/buf fields.
 func TestPutRecordBuf_ResetsBeforePool(t *testing.T) {
-	t.Parallel()
-
 	buf := bytes.NewBuffer(make([]byte, 0, 4*1024))
 	buf.WriteString("stale tail bytes that must not survive Put")
 	if buf.Len() == 0 {
@@ -38,7 +40,6 @@ func TestPutRecordBuf_ResetsBeforePool(t *testing.T) {
 // nil-safety here lets future test helpers Put unconditionally without
 // fear.
 func TestPutRecordBuf_NilSafe(t *testing.T) {
-	t.Parallel()
 	defer func() {
 		if r := recover(); r != nil {
 			t.Errorf("putRecordBuf(nil) panicked: %v", r)
@@ -52,8 +53,6 @@ func TestPutRecordBuf_NilSafe(t *testing.T) {
 // be returned to the pool, otherwise the pool would retain a multi-MB
 // backing array indefinitely after a single outlier event. R245-PERF-12.
 func TestPutRecordBuf_OversizeDropped(t *testing.T) {
-	t.Parallel()
-
 	// Construct a buffer whose cap exceeds recordBufMaxCap. The contents
 	// are irrelevant — only the cap gates the drop.
 	huge := bytes.NewBuffer(make([]byte, 0, recordBufMaxCap+1))
@@ -82,7 +81,6 @@ func TestPutRecordBuf_OversizeDropped(t *testing.T) {
 // PERF-13 introduced — handleBatch would pay an encodeState alloc per
 // record again.
 func TestRecordBufPool_NewSeedCap(t *testing.T) {
-	t.Parallel()
 	// New() is exercised when the pool is empty. We cannot reliably
 	// empty the package-global pool without racing other tests, so
 	// invoke the New func directly: it is a closure on the pool literal,

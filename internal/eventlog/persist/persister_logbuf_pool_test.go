@@ -13,8 +13,10 @@ import (
 // func installs. Without the Reset, the first batch routed through a
 // freshly-acquired writer would silently land in /dev/null. R249-PERF-21
 // (#995).
+// No t.Parallel on the logBufPool tests below: they share the package-global
+// pool. Concurrent Get/Put + bw.Reset/Write/Flush from sibling tests races on
+// bufio.Writer's internal buf/n/wr fields (-race on macOS catches it).
 func TestLogBufPool_AcquireRebindsToFile(t *testing.T) {
-	t.Parallel()
 	// acquireLogBuf takes *os.File in production; we use a bytes.Buffer
 	// stand-in by exercising the underlying Reset behaviour the helper
 	// relies on. The test mirrors how perKeyWriter.close → release →
@@ -68,7 +70,6 @@ func TestLogBufPool_AcquireRebindsToFile(t *testing.T) {
 // profile. The test reads bw.Available() against an empty buffer, which
 // equals the configured capacity.
 func TestLogBufPool_BufferSize(t *testing.T) {
-	t.Parallel()
 	bw := acquireLogBuf(nil) // nil io.Writer is fine: we don't write here
 	defer releaseLogBuf(bw)
 	if got, want := bw.Available(), logWriteBufSize; got != want {
@@ -83,7 +84,6 @@ func TestLogBufPool_BufferSize(t *testing.T) {
 // instance into the previous fd, which by then may have been closed and
 // reassigned to an unrelated file by the runtime.
 func TestLogBufPool_ReleaseRebindsToDiscard(t *testing.T) {
-	t.Parallel()
 	var sink bytes.Buffer
 	bw := logBufPool.Get().(*bufio.Writer)
 	bw.Reset(&sink)
