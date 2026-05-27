@@ -261,7 +261,12 @@ func loadCachedDirEntry(projDir string) *dirFilesCacheEntry {
 	if err != nil {
 		return nil
 	}
-	var files []jsonlFileInfo
+	// Preallocate to len(dirEntries) so the typical projects directory
+	// (almost-all .jsonl files, rare hidden subdirs) lands every entry
+	// in the initial backing array. Slot waste from filtered-out non-jsonl
+	// entries is bounded by the directory entry count, well below the
+	// nil→1→2→4→… grow churn this avoids on every cache miss. R247-PERF-19.
+	files := make([]jsonlFileInfo, 0, len(dirEntries))
 	for _, de := range dirEntries {
 		name := de.Name()
 		if de.IsDir() || !strings.HasSuffix(name, ".jsonl") {
