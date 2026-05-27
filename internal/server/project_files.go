@@ -148,6 +148,69 @@ func isPublicTmpForeignPrivate(info os.FileInfo) bool {
 	return info.Mode().Perm()&groupOrWorld == 0
 }
 
+// publicTmpDeniedSuffixes lists filename suffixes that must never be
+// served through the __public_tmp__ pseudo-project even when the file is
+// world/group readable. R20260527122801-SEC-6 (#1330): /tmp routinely
+// holds Unix-domain sockets (mode 0o777 srwx by default) for ssh-agent,
+// gpg-agent, postgres/redis IPC, etc. Linux DAC permissions check the
+// running process, so naozhi's UID can connect()/read() those sockets
+// transparently; reflecting their bytes through the dashboard is
+// catastrophic — an `ssh-agent.<pid>` socket payload is the operator's
+// authentication state. We also block .pid files (PID disclosure helps
+// kill/ptrace probes) and core/crash dumps (memory snapshots that may
+// contain secrets the producing process never intended to expose).
+//
+// Suffix matching is intentional: filenames like `agent.<pid>.sock`
+// or `ssh-XXXXXX/agent.<pid>` should still trip the ssh substring check.
+// All comparisons run against the basename of the resolved path so a
+// directory component called "ssh" does not trigger denial.
+var publicTmpDeniedSuffixes = []string{
+	".sock",
+	".pid",
+}
+
+// publicTmpDeniedSubstrings catches names that don't end in a known
+// suffix (e.g. `ssh-agent.<pid>`, `core.1234`, `crash.report`). The
+// match is case-insensitive on the basename. See publicTmpDeniedSuffixes
+// for the rationale.
+var publicTmpDeniedSubstrings = []string{
+	"ssh",
+}
+
+// publicTmpDeniedPrefixes catches dump/crash artefacts whose names start
+// with a known marker followed by a pid/timestamp. Matched on the
+// case-insensitive basename so `core.1234` and `crash.txt` both trip.
+var publicTmpDeniedPrefixes = []string{
+	"core.",
+	"crash.",
+}
+
+// isPublicTmpDeniedName reports whether the basename of resolved should
+// be refused by the __public_tmp__ pseudo-project regardless of the
+// file's mode bits. See publicTmpDeniedSuffixes godoc.
+func isPublicTmpDeniedName(resolved string) bool {
+	name := strings.ToLower(filepath.Base(resolved))
+	if name == "" || name == "." || name == "/" {
+		return false
+	}
+	for _, suf := range publicTmpDeniedSuffixes {
+		if strings.HasSuffix(name, suf) {
+			return true
+		}
+	}
+	for _, sub := range publicTmpDeniedSubstrings {
+		if strings.Contains(name, sub) {
+			return true
+		}
+	}
+	for _, pre := range publicTmpDeniedPrefixes {
+		if strings.HasPrefix(name, pre) {
+			return true
+		}
+	}
+	return false
+}
+
 // textMimePrefixes identifies MIME types safe to return as UTF-8 text in
 // preview mode. http.DetectContentType tags source code as "text/plain" which
 // covers most cases; JSON/YAML/XML/JS are also safe even when the detector
@@ -639,7 +702,14 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 		// path is the project-root case where this branch is skipped.
 		if entry.Exists && req.Project == publicTmpProject {
 			if abs, rerr := resolveProjectFileWithRoot(rootResolved, rel); rerr == nil {
-				if info, lerr := os.Lstat(abs); lerr == nil && isPublicTmpForeignPrivate(info) {
+				// R20260527122801-SEC-6 (#1330): also deny sensitive
+				// names (sockets / pid / core dumps / ssh-agent
+				// artefacts) so the existence-probe API cannot be
+				// used to enumerate IPC endpoints under /tmp even
+				// when their mode bits are world-readable.
+				if isPublicTmpDeniedName(abs) {
+					entry = existsEntry{Exists: false}
+				} else if info, lerr := os.Lstat(abs); lerr == nil && isPublicTmpForeignPrivate(info) {
 					entry = existsEntry{Exists: false}
 				}
 			}
@@ -838,6 +908,17 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	// projects are operator-registered roots whose contents the dashboard
 	// is by definition cleared to read.
 	if project == publicTmpProject && isPublicTmpForeignPrivate(info) {
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	// R20260527122801-SEC-6 (#1330): name-based deny-list for the
+	// __public_tmp__ pseudo-project. Even when the foreign-private gate
+	// above lets a file through (because it's world/group-readable, e.g.
+	// ssh-agent's 0o777 socket), some names must never be served — Unix
+	// sockets reflect IPC payload, core dumps contain process memory,
+	// PID files leak process structure. See publicTmpDeniedSuffixes.
+	if project == publicTmpProject && isPublicTmpDeniedName(resolved) {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
