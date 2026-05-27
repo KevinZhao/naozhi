@@ -81,7 +81,7 @@ func TestValidateSchedule(t *testing.T) {
 		{"", true},
 	}
 	for _, tt := range tests {
-		err := validateSchedule(tt.schedule)
+		err := validateSchedule(tt.schedule, time.UTC)
 		if (err != nil) != tt.wantErr {
 			t.Errorf("validateSchedule(%q): err=%v, wantErr=%v", tt.schedule, err, tt.wantErr)
 		}

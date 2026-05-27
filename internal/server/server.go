@@ -871,6 +871,13 @@ func (s *Server) Start(ctx context.Context) error {
 		TotalTimeout:          s.totalTimeout,
 		WatchdogNoOutputKills: &s.watchdogNoOutputKills,
 		WatchdogTotalKills:    &s.watchdogTotalKills,
+		// R20260527122801-CR-6 (#1320): plumb the long-lived service ctx into
+		// dispatch so the passthrough send goroutine observes graceful
+		// shutdown rather than ignoring SIGTERM until its 5min internal
+		// totalTimeout expires. Without this, NewDispatcher falls back to
+		// context.Background() which preserves the legacy "never cancels"
+		// behaviour but loses the SIGTERM-aware abort.
+		StopCtx: ctx,
 	})
 	if err != nil {
 		// R250-ARCH-12: missing Send wireup is a boot-time configuration

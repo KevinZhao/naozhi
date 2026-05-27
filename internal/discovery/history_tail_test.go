@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 )
 
 // ---------------------------------------------------------------------------
@@ -281,10 +281,11 @@ func TestParseTail_HonestSizeReturnsAllEntries(t *testing.T) {
 	}
 }
 
-// Verify the cli.EventEntry import is still referenced after the test
+// Verify the clievent.EventEntry import is still referenced after the test
 // refactor; without this the build would fail silently if test code is
-// reorganised and the declaration is no longer needed.
-var _ = cli.EventEntry{}
+// reorganised and the declaration is no longer needed. Post R217-ARCH-3
+// (#626) the type lives in `internal/cli/clievent`, not `internal/cli`.
+var _ = clievent.EventEntry{}
 
 func TestLoadHistoryTail_CancelledCtx(t *testing.T) {
 	t.Parallel()

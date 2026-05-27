@@ -26,8 +26,13 @@ func TestValidateCronBackend_Standalone(t *testing.T) {
 		{"with_digits", "claude4", false},
 		{"with_underscore", "kiro_v2", false},
 		{"with_hyphen", "long-name-1", false},
-		{"max_len_32", strings.Repeat("a", 32), false},
-		{"over_max_len", strings.Repeat("a", 33), true},
+		// R20260527122801-ARCH-8 (#1314): server cap aligned to 64 to match
+		// session/router_backend.go's maxBackendBytes. The previous 32-byte
+		// cap rejected legal 33–64 byte IDs that the router accepted, so a
+		// dashboard editor saw "invalid backend" for an ID the cron path
+		// happily routed.
+		{"max_len_64", strings.Repeat("a", 64), false},
+		{"over_max_len", strings.Repeat("a", 65), true},
 		// R233-SEC-9: charset unified onto isValidBackendID
 		// ([a-zA-Z0-9._-]) shared by HTTP send / WS dispatch / cron CRUD.
 		// Uppercase + dot are now ACCEPTED here to match the WS path; the
@@ -135,7 +140,7 @@ func TestCronCreate_RejectsInvalidBackendChars(t *testing.T) {
 		{"slash", "claude/v2"},
 		{"space", "claude v2"},
 		{"newline", "claude\n"},
-		{"too_long", strings.Repeat("a", 33)},
+		{"too_long", strings.Repeat("a", 65)},
 		{"emoji", "claude🚀"},
 	}
 	for _, tc := range cases {

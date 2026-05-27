@@ -397,8 +397,23 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	// with no additional signal. Keep Debug for the "brand-new vs resume"
 	// distinction when operators opt into verbose logging.
 	slog.Debug("creating new session", "key", key)
+	// (#1324) Consume the per-key shimStuckOnReset flag — set to true by a
+	// recent Reset / ResetAndRecreate whose waitSocketGoneForKey timed out.
+	// Read+delete under r.mu (already held). spawnSession unlocks/relocks
+	// internally so we cannot consume it after spawnSession returns; do it
+	// up front and apply the wrap on the error path below.
+	stuck := r.shimStuckOnReset[key]
+	if stuck {
+		delete(r.shimStuckOnReset, key)
+	}
 	s, err := r.spawnSession(ctx, key, "", opts)
 	if err != nil {
+		if stuck {
+			// errors.Is chain: callers (cron freshContextPreflightP0)
+			// can pin on ErrShimStuck for actionable classification
+			// while still seeing the underlying spawn error message.
+			return nil, 0, fmt.Errorf("session %s: %w: %w", key, ErrShimStuck, err)
+		}
 		return nil, 0, fmt.Errorf("session %s: %w", key, err)
 	}
 	return s, SessionNew, nil
@@ -1383,13 +1398,25 @@ func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 	// would otherwise hit the dial-first guard ("refusing to clobber")
 	// described in shim/server.go. Bounded at 2s so a truly stuck shim
 	// falls through and the caller sees the real error instead of hanging.
-	waitSocketGoneForKey(key, 2*time.Second)
+	gone := waitSocketGoneForKey(key, 2*time.Second)
 	// R191-CONC-H1-b: Broadcast under r.mu (see evictOldest comment).
-	if r.shutdownCond != nil {
-		r.mu.Lock()
-		r.shutdownCond.Broadcast()
-		r.mu.Unlock()
+	r.mu.Lock()
+	if !gone {
+		// (#1324) Flag the key so the next GetOrCreate wraps any spawn
+		// error with ErrShimStuck — operator-actionable diagnosis
+		// instead of the generic ErrClassSessionError + "执行跳过，请稍
+		// 后重试。" notice. Cleared by the next GetOrCreate for this key.
+		if r.shimStuckOnReset == nil {
+			r.shimStuckOnReset = make(map[string]bool)
+		}
+		r.shimStuckOnReset[key] = true
+		slog.Warn("shim socket still bound after Reset wait — flagging key for ErrShimStuck wrap on next GetOrCreate",
+			"key", key)
 	}
+	if r.shutdownCond != nil {
+		r.shutdownCond.Broadcast()
+	}
+	r.mu.Unlock()
 
 	slog.Info("session reset", "key", key)
 	r.notifyKeyRetired(key, sessionID)
@@ -1404,13 +1431,17 @@ func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 // R222-ARCH-2 (#711): the actual socket-path computation + filesystem
 // poll lives behind cli.WaitSocketGoneForKey so the session package no
 // longer reaches directly into internal/shim for socket naming. Keep
-// this thin shim (pun intended) so existing call sites stay unchanged
-// and the boolean return from cli is intentionally dropped — Reset
-// callers proceed regardless of whether the socket actually disappeared
-// (a stuck shim falls through to spawnSession's StartShim which
-// surfaces the "refusing to clobber" error to the operator).
-func waitSocketGoneForKey(key string, maxWait time.Duration) {
-	cli.WaitSocketGoneForKey(key, maxWait)
+// this thin shim (pun intended) so existing call sites stay unchanged.
+//
+// Returns true when the socket disappeared within maxWait, false on
+// timeout. Reset callers use the false branch to flag the per-key
+// shimStuckOnReset state so the next GetOrCreate can wrap its spawn
+// error with ErrShimStuck (#1324). Reset itself proceeds regardless —
+// a truly stuck shim still falls through to spawnSession's StartShim
+// "refusing to clobber" path, but with the wrap the operator gets an
+// actionable error class instead of the generic session_error.
+func waitSocketGoneForKey(key string, maxWait time.Duration) bool {
+	return cli.WaitSocketGoneForKey(key, maxWait)
 }
 
 // ResetAndRecreate atomically resets a session and spawns a new one for the same key.
@@ -1478,8 +1509,20 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 			// it. Without this, ResetAndRecreate races the 30s
 			// zombie window and fails with "refusing to clobber"
 			// on the immediate re-bind.
-			waitSocketGoneForKey(key, 2*time.Second)
+			gone := waitSocketGoneForKey(key, 2*time.Second)
 			r.mu.Lock()
+			if !gone {
+				// (#1324) Flag for ErrShimStuck wrap on the
+				// spawnSession failure path below. spawnSession
+				// will be the consumer here (not GetOrCreate) so
+				// the wrap is applied directly inline.
+				if r.shimStuckOnReset == nil {
+					r.shimStuckOnReset = make(map[string]bool)
+				}
+				r.shimStuckOnReset[key] = true
+				slog.Warn("shim socket still bound after ResetAndRecreate wait — flagging key for ErrShimStuck wrap on spawn failure",
+					"key", key)
+			}
 			// R191-CONC-H1-f: Broadcast under r.mu (see evictOldest comment).
 			if r.shutdownCond != nil {
 				r.shutdownCond.Broadcast()
@@ -1487,12 +1530,22 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		}
 	}
 
-	// Spawn new session while still holding mu (spawnSession handles unlock/relock)
+	// Spawn new session while still holding mu (spawnSession handles unlock/relock).
+	// (#1324) Consume the per-key shimStuckOnReset flag set above when the
+	// socket-gone wait timed out. r.mu is currently held; read+delete here
+	// is safe.
+	stuck := r.shimStuckOnReset[key]
+	if stuck {
+		delete(r.shimStuckOnReset, key)
+	}
 	s, err := r.spawnSession(ctx, key, "", opts)
 	if err != nil {
 		// spawnSession already unlocked mu on error
 		if hadOld {
 			r.notifyChange()
+		}
+		if stuck {
+			return nil, fmt.Errorf("%w: %w", ErrShimStuck, err)
 		}
 		return nil, err
 	}

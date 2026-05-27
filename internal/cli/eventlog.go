@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -129,76 +130,13 @@ func sanitizeImagesAligned(imgs, paths []string) ([]string, []string) {
 	return filtered, filteredPaths
 }
 
-// EventEntry is a simplified event record for the dashboard.
-type EventEntry struct {
-	// UUID is a 32-char lowercase hex identity for this event,
-	// assigned at Append-time by EventLog.stampUUID. Stable across
-	// process restarts because it rides along with the entry into
-	// the on-disk event log (internal/eventlog/persist). MergedSource
-	// uses UUID as the exact-match dedup key between the local
-	// JSONL tier and Claude CLI JSONL fallback — see RFC §3.5.2.
-	//
-	// "" means "legacy entry (from a pre-UUID persisted record or
-	// a Claude JSONL replay that hasn't been fingerprinted yet)".
-	// MergedSource handles the empty case by deriving a stable UUID
-	// from (Time + Summary) so two replays of the same Claude record
-	// land on the same key.
-	UUID       string   `json:"uuid,omitempty"`
-	Time       int64    `json:"time"`                 // unix ms
-	Type       string   `json:"type"`                 // init, thinking, tool_use, text, result, system, agent, todo, task_start, task_progress (also maps task_updated), task_done
-	Summary    string   `json:"summary,omitempty"`    // brief description
-	Cost       float64  `json:"cost,omitempty"`       // cumulative cost (result events only)
-	Detail     string   `json:"detail,omitempty"`     // fuller content for terminal view
-	Tool       string   `json:"tool,omitempty"`       // tool name for tool_use events
-	Subagent   string   `json:"subagent,omitempty"`   // subagent_type or name (empty for team-only agents)
-	TeamName   string   `json:"team_name,omitempty"`  // team grouping key for agent team members
-	Background bool     `json:"background,omitempty"` // true for run_in_background team agents
-	Images     []string `json:"images,omitempty"`     // thumbnail data URIs for user image uploads
-	// ImagePaths is the workspace-relative path of the on-disk copy of each
-	// inline image, index-aligned with Images. Populated opportunistically by
-	// buildUserEntry when persistFileRefs persisted an image to the workspace
-	// attachment directory. Consumed by the dashboard lightbox so clicking a
-	// thumbnail can load the original via /api/sessions/attachment instead of
-	// the downsampled data URI. An empty slot (e.g. persist failed, or a
-	// legacy replayed event) falls back to the thumbnail. ALWAYS sanitized
-	// before use: callers join it under the session workspace and must reject
-	// any absolute or escaping path — validation lives in the HTTP handler,
-	// not here, so persisted history is pass-through.
-	ImagePaths []string `json:"image_paths,omitempty"`
-	TaskID     string   `json:"task_id,omitempty"`     // agent task correlation ID
-	ToolUseID  string   `json:"tool_use_id,omitempty"` // links Agent tool_use → task_started
-	LastTool   string   `json:"last_tool,omitempty"`   // most recent tool in agent task
-	ToolUses   int      `json:"tool_uses,omitempty"`   // tool call count in agent task
-	Tokens     int      `json:"tokens,omitempty"`      // total tokens consumed by agent task
-	DurationMS int64    `json:"duration_ms,omitempty"` // elapsed ms for agent task
-	Status     string   `json:"status,omitempty"`      // agent task status (completed, error, etc.)
-	// Agent team internal-view linkage (RFC v4 agent-team-ui §3.2.2).
-	// All four fields are persisted to sessions/*.jsonl on "agent" and
-	// "task_start" entries so SubagentLinker.SeedFromHistory can rebuild
-	// the task_id → on-disk-transcript mapping after shim reconnect or
-	// CLI-dead respawn without re-scanning ~/.claude/projects/.
-	// Async backfilled via EventLog.SetAgentInternalID once the linker
-	// resolves, hence all omitempty.
-	TaskType        string `json:"task_type,omitempty"`         // "in_process_teammate" | "local_bash" | ""
-	InternalAgentID string `json:"internal_agent_id,omitempty"` // "agent-<hex17>" filename stem under <projectDir>/<sessionID>/subagents/
-	JSONLPath       string `json:"jsonl_path,omitempty"`        // absolute path to agent transcript jsonl
-	FirstPromptID   string `json:"first_prompt_id,omitempty"`   // jsonl first-line promptId; guards against same-name re-spawn
-
-	// AskQuestion carries the interactive AskUserQuestion card payload. Only
-	// set on Type=="ask_question" entries synthesised from an AskUserQuestion
-	// tool_use block — kept as a separate field (rather than stuffing JSON
-	// into Detail) so the dashboard renderer doesn't have to re-parse and
-	// so Go callers (EventLog replay → WS broadcast) don't pay a JSON
-	// unmarshal per question bubble.
-	AskQuestion *AskQuestion `json:"ask_question,omitempty"`
-
-	// ToolCall is the per-event payload for ACP tool_call / tool_call_update
-	// rich progress rows. Multi-Backend RFC §8.3 D17. Same struct on initial
-	// invocation and updates; dashboard threads them by ID. Stream-json
-	// (Claude) leaves nil and uses Type=="tool_use" with Tool name + Detail
-	// for input.
-	ToolCall *ToolCall `json:"tool_call,omitempty"`
-}
+// EventEntry is the simplified event record for the dashboard. The struct
+// itself lives in `internal/cli/clievent` (R217-ARCH-3 #626 — diamond
+// import break); the alias here keeps every existing call site
+// (`cli.EventEntry`) compiling. Future leaf consumers (e.g. discovery)
+// should import the leaf pkg directly to avoid pulling in the whole cli
+// surface.
+type EventEntry = clievent.EventEntry
 
 // SubagentInfo holds display information about an active sub-agent in the current turn.
 // Fields below "Background" are added by RFC v4 agent-team-ui §3.2.2 to surface
