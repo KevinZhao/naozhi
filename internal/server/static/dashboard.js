@@ -13733,8 +13733,11 @@ function openCronDetail(jobId, originRow) {
   // still sees the first 256 bytes plus the cron-spec edit affordance,
   // and the next poll will reconcile.
   if (typeof cronRefetchFullJob === 'function') {
-    cronRefetchFullJob(jobId).then(j => {
-      if (j && cronDetailJobId === jobId) renderCronDrawer();
+    cronRefetchFullJob(jobId).then(res => {
+      // Drawer is read-only: if the refetch failed we keep the truncated
+      // cache rendered. Only re-render on a success result so the drawer
+      // doesn't flicker when the network is slow / down.
+      if (res && res.ok && cronDetailJobId === jobId) renderCronDrawer();
     }).catch(() => {});
   }
 }
@@ -14066,13 +14069,20 @@ async function cronDelete(id) {
 // the non-compact /api/cron endpoint (R236-SEC-08 / #494). The poll path
 // uses ?compact=1 which clips prompts to 256 bytes — that's fine for the
 // list view but the editor / drawer detail need the full body before the
-// user can save without truncating their own data. Returns the (now
-// full) job object, or the cached one if the refetch fails (so the user
-// at least sees the truncated body rather than a blank textarea).
+// user can save without truncating their own data.
+//
+// Returns one of:
+//   { ok: true,  job }              — full prompt, safe to edit & save
+//   { ok: false, reason: 'missing' }— job not in cronJobs cache
+//   { ok: false, reason: 'fetch'  } — cache had truncated prompt and the
+//                                     refetch failed; caller MUST refuse
+//                                     to open the editor. Saving the
+//                                     truncated body would silently
+//                                     destroy the user's data.
 async function cronRefetchFullJob(id) {
   const cached = cronJobs.find(j => j.id === id);
-  if (!cached) return null;
-  if (!cached.prompt_truncated) return cached;
+  if (!cached) return { ok: false, reason: 'missing' };
+  if (!cached.prompt_truncated) return { ok: true, job: cached };
   try {
     const headers = {};
     const t = getToken();
@@ -14085,16 +14095,16 @@ async function cronRefetchFullJob(id) {
     const data = await fetchJSON('/api/cron', { headers, timeoutMs: 8000 });
     const jobs = (data && data.jobs) || [];
     const fresh = jobs.find(j => j.id === id);
-    if (fresh) {
+    if (fresh && !fresh.prompt_truncated) {
       // Splice the full-prompt copy back into the cache so subsequent
       // editor opens / drawer renders see the full body without another
       // network round trip.
       const idx = cronJobs.findIndex(j => j.id === id);
       if (idx >= 0) cronJobs[idx] = fresh;
-      return fresh;
+      return { ok: true, job: fresh };
     }
-  } catch (e) { /* fall through to cached */ }
-  return cached;
+  } catch (e) { /* fall through to fetch-failure */ }
+  return { ok: false, reason: 'fetch' };
 }
 
 // Edit an existing cron job. Opens a modal pre-populated with the current
@@ -14107,9 +14117,21 @@ function editCronJob(id) {
   // may be truncated to 256 bytes for any job whose full body exceeds
   // that. Refetch the full job before opening the editor — if we
   // skipped this, saving the modal would persist the truncated prompt
-  // back to disk, silently destroying the user's data.
-  cronRefetchFullJob(id).then(job => {
-    if (!job) { showToast('未找到该任务', 'warning'); return; }
+  // back to disk, silently destroying the user's data. The refetch
+  // helper returns { ok, ... } so we can refuse to open the editor on
+  // a fetch failure rather than handing the user a 256-byte preview
+  // that Save would happily commit back to disk (R251-FOLLOWUP / #494).
+  cronRefetchFullJob(id).then(res => {
+    if (!res || !res.ok) {
+      const reason = res && res.reason;
+      if (reason === 'fetch') {
+        showToast('无法获取完整 prompt，编辑暂停以防截断保存。请稍后重试。', 'warning');
+      } else {
+        showToast('未找到该任务', 'warning');
+      }
+      return;
+    }
+    const job = res.job;
     // Sprint 6c: round-trip the saved backend choice. fetchCLIBackends is
     // promise-based; we open the modal once it resolves so the picker (if
     // multi-backend deploy) can pre-select the persisted value. Single-
