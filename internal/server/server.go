@@ -980,8 +980,18 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("listen %s: %w", s.addr, err)
 	}
 
+	// R247-ARCH-20 / #677: withTraceID wraps the entire mux so every
+	// request — authenticated and unauthenticated alike — carries a
+	// trace id on its ctx and echoes the same id back in the
+	// X-Request-ID response header before any downstream handler runs.
+	// Prior to this wiring the middleware existed in
+	// traceid_middleware.go but was unreachable (no mux included it),
+	// leaving its contract unenforced in production. Outermost order is
+	// intentional: gzipMiddleware mutates the response writer; the
+	// trace id needs to be observable to gzip's behaviour and to any
+	// handler panic that fires before the body is written.
 	srv := &http.Server{
-		Handler:           gzipMiddleware(s.mux),
+		Handler:           withTraceID(gzipMiddleware(s.mux)),
 		ReadHeaderTimeout: 5 * time.Second, // Slowloris defense
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      60 * time.Second,
