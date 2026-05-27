@@ -565,6 +565,20 @@ func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 // that has been restored.
 const workDirResolveCacheTTL = 30 * time.Second
 
+// workDirResolveCacheMaxEntries caps the workDirResolveCache so a buggy
+// or hostile job-creation flow that varies WorkDir per call (each call
+// produces a distinct map key) cannot grow the cache without bound.
+// R20260527-SEC-4 (#1273). The cap is generous: real deployments see
+// at most one entry per cron job (≤200 typical), so 4096 leaves ample
+// headroom for legitimate distinct workspaces while bounding worst-case
+// memory at ~1 MB (key+value ≈ 256 B). When `store` observes the size
+// at-or-above the cap it triggers a one-shot sweep that drops every
+// expired entry; if still at-or-above after the sweep it returns
+// without inserting. Skipping the insert is correctness-safe — the
+// next call simply pays the EvalSymlinks cost again, exactly as it
+// would on a cold boot — and prevents pathological growth.
+const workDirResolveCacheMaxEntries = 4096
+
 // workDirResolveCacheEntry captures one cached resolution. Stored value-
 // typed in sync.Map so the read path does no allocation.
 type workDirResolveCacheEntry struct {
@@ -577,8 +591,18 @@ type workDirResolveCacheEntry struct {
 // results bypass the cache. Concurrent-safe via sync.Map; entries expire
 // lazily on read so a wedged job does not pin stale resolutions
 // indefinitely. R247-PERF-24.
+//
+// Entry-count bound (R20260527-SEC-4 / #1273): sync.Map exposes no Len,
+// so we maintain `size` via atomic add on store/Delete and use it as a
+// soft cap (workDirResolveCacheMaxEntries). On crossing the cap a
+// `sweep` walks every entry and Delete()s expired ones; if the cap is
+// still exceeded the new entry is dropped. The cap is generous so
+// healthy workloads never trigger sweep — only a misbehaving caller
+// that varies WorkDir per call (e.g. random suffix) does. Sweep is
+// O(N) but bounded by the cap and only fires at the cap boundary.
 type workDirResolveCache struct {
-	m sync.Map // map[string]workDirResolveCacheEntry
+	m    sync.Map     // map[string]workDirResolveCacheEntry
+	size atomic.Int64 // approximate live entry count; never goes negative
 }
 
 // nowFn is overridable for tests so the TTL boundary can be exercised
@@ -594,20 +618,67 @@ func (c *workDirResolveCache) lookup(key string, now time.Time) (string, bool) {
 	e := v.(workDirResolveCacheEntry)
 	if !now.Before(e.expiresAt) {
 		// Expired — drop so the next miss path doesn't keep observing it.
-		c.m.Delete(key)
+		// LoadAndDelete makes the size decrement race-safe: if a
+		// concurrent goroutine already removed the entry we don't double-
+		// count the decrement.
+		if _, loaded := c.m.LoadAndDelete(key); loaded {
+			c.size.Add(-1)
+		}
 		return "", false
 	}
 	return e.resolved, true
+}
+
+// sweep walks the map and Delete()s every entry whose expiresAt is on or
+// before now, decrementing size for each. R20260527-SEC-4 (#1273): the
+// cap-trigger path needs a way to actively prune so a sustained burst
+// of distinct keys cannot pin the cap forever (lookup-driven lazy
+// expiry only fires on re-query, which a one-shot key never sees).
+// Walk is O(N) but bounded by workDirResolveCacheMaxEntries.
+func (c *workDirResolveCache) sweep(now time.Time) {
+	if c == nil {
+		return
+	}
+	c.m.Range(func(k, v any) bool {
+		e := v.(workDirResolveCacheEntry)
+		if !now.Before(e.expiresAt) {
+			if _, loaded := c.m.LoadAndDelete(k); loaded {
+				c.size.Add(-1)
+			}
+		}
+		return true
+	})
 }
 
 func (c *workDirResolveCache) store(key, resolved string, now time.Time) {
 	if c == nil {
 		return
 	}
-	c.m.Store(key, workDirResolveCacheEntry{
+	// R20260527-SEC-4 (#1273): bound the entry count. When at-or-above
+	// the cap, sweep expired entries first; if still over, drop the new
+	// insert. The next call simply pays EvalSymlinks again — same as a
+	// cold boot — so correctness is unaffected. We accept that a key
+	// already in the map will Store-overwrite without going through the
+	// cap check (that path doesn't grow size), so the effective cap is
+	// "distinct live keys" which is exactly what we want to bound.
+	if c.size.Load() >= workDirResolveCacheMaxEntries {
+		// Fast path: maybe this key is already in the map (Store would
+		// be an overwrite, no growth) — let the LoadOrStore branch below
+		// distinguish.
+		if _, exists := c.m.Load(key); !exists {
+			c.sweep(now)
+			if c.size.Load() >= workDirResolveCacheMaxEntries {
+				return
+			}
+		}
+	}
+	entry := workDirResolveCacheEntry{
 		resolved:  resolved,
 		expiresAt: now.Add(workDirResolveCacheTTL),
-	})
+	}
+	if _, loaded := c.m.Swap(key, entry); !loaded {
+		c.size.Add(1)
+	}
 }
 
 // workDirResolveCacheKey concatenates the three inputs with separators
