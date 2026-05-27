@@ -70,7 +70,10 @@ func TestHandleTranscribe_SanitisesLogInjectionRunes(t *testing.T) {
 	//   - LS            U+2028
 	//   - C1 control    U+0085 (NEL)
 	// Plus surrounding ASCII so the fast-path doesn't short-circuit.
-	dirty := "hello‮world⁨x yz"
+	// Use \u escapes so Go source stays ASCII-clean — embedding LS/PS
+	// literally would put a real line separator inside the source file
+	// which is awkward for editors and diff tools.
+	dirty := "hello‮world⁨x yz"
 	h := &TranscribeHandler{
 		transcriber: stubTranscriberSanitize{out: dirty},
 		sem:         make(chan struct{}, 1),
@@ -89,7 +92,7 @@ func TestHandleTranscribe_SanitisesLogInjectionRunes(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v body=%q", err, rec.Body.String())
 	}
-	for _, bad := range []rune{'‮', '⁨', ' ', ''} {
+	for _, bad := range []rune{'‮', '⁨', ' ', ''} {
 		if strings.ContainsRune(resp.Text, bad) {
 			t.Fatalf("response text still contains log-injection rune U+%04X: %q", bad, resp.Text)
 		}
