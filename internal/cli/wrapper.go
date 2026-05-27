@@ -255,6 +255,40 @@ func validateCLIPath(cliPath string) {
 	}
 }
 
+// enforceCLIPathSafe is the spawn-time companion to validateCLIPath. It
+// returns a non-nil error iff cliPath is a known-dangerous file type
+// (FIFO, device node, socket, directory). Empty path, ENOENT, and
+// non-absolute paths stay nil here: those failures are surfaced by the
+// downstream shim spawn (or the construction-time warn). The point of
+// this helper is to refuse the file-type-confusion attack vector
+// (cli.path = /dev/fuse / /tmp/fifo) at the last hop before exec, even
+// when upstream config validation regresses. R20260527122801-SEC-1.
+func enforceCLIPathSafe(cliPath string) error {
+	if cliPath == "" {
+		return nil
+	}
+	fi, err := os.Lstat(cliPath)
+	if err != nil {
+		// ENOENT / permission-denied: let the downstream shim spawn
+		// surface the more diagnostic operator-facing message.
+		return nil
+	}
+	mode := fi.Mode()
+	// Regular file is the canonical case. Symlinks pass through —
+	// resolved at exec time; if the target is a FIFO/device the kernel
+	// itself will fail to exec it with EACCES/ENOEXEC, which is the
+	// strongest defense we can layer here without re-implementing the
+	// kernel's symlink-walk semantics.
+	if mode.IsRegular() || mode&os.ModeSymlink != 0 {
+		return nil
+	}
+	// Reject dangerous file types: FIFO / char-device / block-device /
+	// socket / directory. Each of these would cause exec.Command to
+	// either fail late (FIFO blocks indefinitely on open) or, worse,
+	// silently succeed with kernel-driven file-type-confusion.
+	return fmt.Errorf("not a regular file or symlink (mode=%s)", mode.String())
+}
+
 // detectVersion runs "<cli> --version" and parses the version string.
 // Uses a Background-derived 5s timeout — fine for test / single-backend
 // paths. Production startup MUST go through NewWrapperLazy + Probe(ctx)
@@ -366,6 +400,21 @@ func candidatePaths(name string) []string {
 func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error) {
 	if w.ShimManager == nil {
 		return nil, fmt.Errorf("shim manager not configured")
+	}
+
+	// R20260527122801-SEC-1: enforce argv hygiene at spawn time. The
+	// construction-time validateCLIPath is warn-only by design (test
+	// fixtures + uninstalled-CLI deployments rely on construction
+	// succeeding). But by the time we reach Spawn an IM message is in
+	// flight, so we MUST refuse to feed a FIFO / device / socket / dir
+	// into exec.Command via the shim — these are the real argv-injection
+	// / file-type-confusion vectors that warn-only validation cannot
+	// neutralise. ENOENT and empty-path stay warn-only here too: the
+	// downstream shim spawn produces the operator-facing error in those
+	// cases, and over-eager rejection would mask the more diagnostic
+	// "shim could not exec <path>" message.
+	if err := enforceCLIPathSafe(w.CLIPath); err != nil {
+		return nil, fmt.Errorf("cli path unsafe: %w", err)
 	}
 
 	proto := w.Protocol.Clone()
