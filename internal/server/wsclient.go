@@ -394,6 +394,17 @@ func (c *wsClient) readPump() {
 func (c *wsClient) writePump() {
 	ticker := time.NewTicker(wsPingPeriod)
 	defer func() {
+		if r := recover(); r != nil {
+			// Mirror readPump: bump counter first so observers see the rate
+			// even when stack output is truncated, then log the cause at
+			// Error and keep the stack at Debug to avoid leaking internal
+			// paths to aggregated log stores.
+			metrics.PanicRecoveredTotal.Add(1)
+			slog.Error("panic in ws writePump (recovered)",
+				"remote", c.remoteIP, "panic", fmt.Sprintf("%v", r))
+			slog.Debug("panic in ws writePump: stack",
+				"remote", c.remoteIP, "stack", string(debug.Stack()))
+		}
 		ticker.Stop()
 		// When writePump exits first (e.g. TCP RST on a ping write while
 		// readPump is still blocked in ReadMessage), we must mark the client
