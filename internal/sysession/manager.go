@@ -429,7 +429,25 @@ func (m *Manager) Stop(stopCtx context.Context) {
 			// embedders aren't forced to swap a package-level var to
 			// avoid taking the host process down. Default hook still
 			// calls osExit(2) — semantics unchanged for naozhi binary.
-			m.cfg.OnHardFail(2)
+			//
+			// #1286 (R20260527-COR-6): isolate the call in a recover
+			// frame. The default os.Exit never returns and never panics,
+			// but a test-supplied OnHardFail might panic. Without recover
+			// the panic propagates out of stopOnce.Do, leaves stopOnce
+			// already-fired, and (depending on the call site) leaks the
+			// watcher goroutine spawned above which is still parked on
+			// m.wg.Wait(). Logging the panic and returning normally lets
+			// Stop callers observe a clean return — they were going to be
+			// terminated anyway in the production default path.
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("sysession: OnHardFail panicked; ignoring to avoid leaking Stop watcher",
+							"panic", r)
+					}
+				}()
+				m.cfg.OnHardFail(2)
+			}()
 		}
 	})
 }
