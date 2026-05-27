@@ -139,9 +139,17 @@ func rejectIfTooManyFields(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // SendHandler serves the HTTP send API, delegating to Hub for local sends.
+//
+// router is the consumer-side SendRouter view of *session.Router (see
+// consumer.go). resolveAttachmentWorkspace used to reach the router via
+// h.hub.router.* transits — R215-ARCH-P1-4 / #566 closes that Phase-2.5
+// cleanup item by declaring the dependency on this struct directly.
+// Wiring (dashboard.go) passes hub.router; tests can inject a stub
+// satisfying SendRouter.
 type SendHandler struct {
 	nodeAccess    NodeAccessor
 	hub           *Hub
+	router        SendRouter
 	uploadStore   *uploadStore
 	uploadLimiter *ipLimiter    // per-IP upload rate limiter (10/min)
 	sendLimiter   *ipLimiter    // per-IP send rate limiter (30/min)
@@ -1192,7 +1200,7 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	// associated with the key, so a crafted workspace in the query would
 	// just be ignored.
 	var ws string
-	if sess := h.hub.router.GetSession(key); sess != nil {
+	if sess := h.router.GetSession(key); sess != nil {
 		ws = sess.Workspace()
 	}
 	if ws == "" {
@@ -1200,7 +1208,7 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		if idx := strings.LastIndexByte(key, ':'); idx > 0 {
 			chatKey = key[:idx]
 		}
-		ws = h.hub.router.GetWorkspace(chatKey)
+		ws = h.router.GetWorkspace(chatKey)
 	}
 	if ws == "" {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})

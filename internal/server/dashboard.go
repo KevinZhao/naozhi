@@ -381,8 +381,12 @@ func (s *Server) registerDashboard() {
 	uploads.StartCleanup(s.hub.ctx)
 	s.hub.SetUploadStore(uploads)
 	s.sendH = &SendHandler{
-		nodeAccess:    s.nodeAccess,
-		hub:           s.hub,
+		nodeAccess: s.nodeAccess,
+		hub:        s.hub,
+		// router: SendRouter consumer-interface view of *session.Router.
+		// Closes the R215-ARCH-P1-4 (#566) Phase-2.5 cleanup so the handler
+		// no longer reaches its router via h.hub.router.* transits.
+		router:        s.hub.router,
 		uploadStore:   uploads,
 		uploadLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, s.auth.trustedProxy), // 10 uploads/min per IP
 		sendLimiter:   newIPLimiterWithProxy(rate.Every(2*time.Second), 30, s.auth.trustedProxy), // 30 sends/min per IP (burst 30)
@@ -396,7 +400,12 @@ func (s *Server) registerDashboard() {
 		s.hub.SetScratchPool(s.scratchPool)
 		s.scratchPool.StartSweeper()
 		s.scratchH = &ScratchHandler{
-			hub:       s.hub,
+			hub: s.hub,
+			// router: ScratchRouter consumer-interface view of
+			// *session.Router. Closes the R215-ARCH-P1-4 (#566) Phase-2.5
+			// cleanup so the handler no longer reaches its router via
+			// h.hub.router.* transits.
+			router:    s.hub.router,
 			pool:      s.scratchPool,
 			openLimit: newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.trustedProxy), // 5 opens/min per IP
 			agents:    s.agents,
