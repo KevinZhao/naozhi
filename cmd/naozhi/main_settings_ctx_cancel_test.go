@@ -30,8 +30,13 @@ func TestReadJSONWithRetry_CtxCancelMidRetry_ReturnsCtxErr(t *testing.T) {
 	go func() {
 		// Cancel after the first attempt has begun the retry-sleep.
 		time.Sleep(40 * time.Millisecond)
-		cancel()
+		// Store BEFORE cancel: otherwise readJSONWithRetry can observe
+		// ctx.Done() and return before this goroutine schedules the
+		// Store, leaving the main goroutine to misread cancelled=false
+		// as a "ran without cancel" flake (in fact cancel did fire —
+		// the writer just hadn't been scheduled yet).
 		cancelled.Store(true)
+		cancel()
 	}()
 	_, err := readJSONWithRetry(ctx, path, 5, 500*time.Millisecond)
 	if err == nil {
@@ -41,7 +46,7 @@ func TestReadJSONWithRetry_CtxCancelMidRetry_ReturnsCtxErr(t *testing.T) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 	if !cancelled.Load() {
-		t.Fatalf("test flake: retry returned before cancel ran")
+		t.Fatalf("test bug: cancel goroutine never ran (ctx.Err=%v)", ctx.Err())
 	}
 }
 
