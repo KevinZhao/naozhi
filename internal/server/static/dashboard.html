@@ -1517,6 +1517,19 @@ body.kbd-open .input-hints{display:none}
 .cron-drawer-running .cdr-state::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--nz-accent);box-shadow:0 0 0 0 var(--nz-accent);animation:cjDotPulse 1.4s ease-in-out infinite;flex-shrink:0}
 .cron-drawer-running .cdr-detail{font-size:11px;color:var(--nz-text-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+/* cron-live RFC §6: 实时输出容器，紧贴 running banner 之下、历史时间线之上。
+ * 复用主面板 .event 卡片样式，本节只定义容器壳子 / status chip / 截尾提示。 */
+.cron-drawer-live{margin:14px 20px;border:1px solid var(--nz-border);border-radius:8px;background:var(--nz-bg-1);overflow:hidden}
+.cron-drawer-live .cdl-header{display:flex;justify-content:space-between;align-items:center;padding:8px 14px;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-0)}
+.cron-drawer-live .cdl-title{font-size:13px;font-weight:600;margin:0;color:var(--nz-text-strong)}
+.cron-drawer-live .cdl-status{font-size:11px;color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
+.cron-drawer-live .cdl-status-live{color:var(--nz-accent)}
+.cron-drawer-live .cdl-status-live::before{content:"\25CF";margin-right:4px;animation:cjDotPulse 1.4s ease-in-out infinite}
+.cron-drawer-live .cdl-status-stopped{color:var(--nz-text-mute)}
+.cron-drawer-live .cdl-truncated{font-size:11px;color:var(--nz-text-mute);text-align:center;padding:6px 14px;border-bottom:1px solid var(--nz-border);background:rgba(31,111,235,.04)}
+.cron-drawer-live .cdl-events{max-height:360px;overflow-y:auto;padding:10px 14px}
+.cron-drawer-live .cdl-events:empty::before{content:"暂无事件，任务起跑后会在此显示";color:var(--nz-text-mute);font-size:12px;display:block;text-align:center;padding:18px 0}
+
 /* Drawer summary — cron-dashboard-redesign P1 §4.3 collapsed into <details>
  * so prompt body + meta are now opt-in (default closed). The summary row
  * (visible when closed) shows a one-line prompt preview so a glance still
