@@ -80,37 +80,29 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	// R226-SEC-8: per-session-key cap across all connections. A single
 	// authenticated token could otherwise open many WS connections each
 	// subscribed to the same key, multiplying every event fan-out by N.
-	// 20 generously covers legitimate multi-tab/multi-device usage; the
-	// O(connections) scan is bounded by maxWSConns=500 and only runs on
-	// subscribe (low frequency) — not on each broadcast. The inner loop
-	// terminates early once count reaches the cap (R230C-PERF-4 archived
-	// 2026-05-23): worst-case work is O(maxSubscribersPerKey) regardless
-	// of total connection count, so the optimisation TODO described
-	// ("subscriberCounts map[string]int O(1)") would only save a small
-	// constant on the cold subscribe path while adding a second invariant
-	// to maintain on every disconnect — not worth the bookkeeping.
-	// NEEDS-DESIGN R242-GO-5: 锁内 O(N) 遍历 clients 计算 per-key 订阅数；
-	// 单 dashboard 用户场景可接受，多 operator 时改增量计数器避免锁内全扫描。
-	if _, alreadySub := c.subscriptions[key]; !alreadySub {
-		count := 0
-		for other := range h.clients {
-			if other.subscriptions == nil {
-				continue
-			}
-			if _, has := other.subscriptions[key]; has {
-				count++
-				if count >= maxSubscribersPerKey {
-					break
-				}
-			}
-		}
-		if count >= maxSubscribersPerKey {
-			h.mu.Unlock()
-			c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "too many subscribers for key"})
-			return
-		}
+	// 20 generously covers legitimate multi-tab/multi-device usage.
+	//
+	// R246-PERF-4 (#716): the cap check now reads h.subscriberCount[key]
+	// instead of walking every connected client × subscription map. The
+	// counter is maintained alongside c.subscriptions mutations under
+	// h.mu so the two stay consistent. Migration archived the prior
+	// "early-break loop is good enough" rationale (R230C-PERF-4) — the
+	// scan was O(N_clients) on cold keys (counter near 0) because the
+	// loop only breaks at the upper cap, not at the lower bound.
+	_, alreadySub := c.subscriptions[key]
+	// Hand-rolled Hubs from older tests can skip NewHub and leave the
+	// counter map nil; in that case a check against the nil map yields 0
+	// (always under cap) and the post-install increment below skips the
+	// nil map. The cap is then unenforced in those tests but production
+	// callers always go through NewHub.
+	if !alreadySub && h.subscriberCount != nil && h.subscriberCount[key] >= maxSubscribersPerKey {
+		h.mu.Unlock()
+		c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "too many subscribers for key"})
+		return
 	}
-	// Unsubscribe from previous subscription
+	// Unsubscribe from previous subscription. The counter stays unchanged
+	// across this branch (one delete, one re-insert at the placeholder
+	// install below) so the per-key population stays consistent.
 	if unsub, ok := c.subscriptions[key]; ok {
 		unsub()
 		delete(c.subscriptions, key)
@@ -120,6 +112,9 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	// real unsub. If we return via the "session not found" path below, we
 	// clear the reservation before returning.
 	c.subscriptions[key] = func() {}
+	if !alreadySub && h.subscriberCount != nil {
+		h.subscriberCount[key]++
+	}
 	h.mu.Unlock()
 
 	sess := h.router.GetSession(key)
@@ -139,7 +134,10 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	// since sess was nil the completeSubscribe branch cannot replace it, so
 	// an unconditional delete is safe.
 	h.mu.Lock()
-	delete(c.subscriptions, key)
+	if _, ok := c.subscriptions[key]; ok {
+		delete(c.subscriptions, key)
+		h.decSubscriberCountLocked(key)
+	}
 	h.mu.Unlock()
 
 	c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "session not found"})
@@ -155,7 +153,10 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		// process becomes available. Release the reserved slot since there is
 		// no real unsub to install; the client can always resubscribe.
 		h.mu.Lock()
-		delete(c.subscriptions, key)
+		if _, ok := c.subscriptions[key]; ok {
+			delete(c.subscriptions, key)
+			h.decSubscriberCountLocked(key)
+		}
 		h.mu.Unlock()
 
 		snap := sess.Snapshot()
@@ -183,7 +184,10 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	// entirely is cleaner).
 	if h.ctx.Err() != nil {
 		h.mu.Lock()
-		delete(c.subscriptions, key)
+		if _, ok := c.subscriptions[key]; ok {
+			delete(c.subscriptions, key)
+			h.decSubscriberCountLocked(key)
+		}
 		h.mu.Unlock()
 		return
 	}
@@ -299,6 +303,7 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 	if unsub, ok := c.subscriptions[key]; ok {
 		unsub()
 		delete(c.subscriptions, key)
+		h.decSubscriberCountLocked(key)
 		// Intentionally keep c.subGen[key] intact: a stale eventPushLoop from
 		// this subscription may still be parked in resubscribeEvents' ticker
 		// (up to 60s). Deleting subGen[key] and allowing a new subscribe to
@@ -317,9 +322,15 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 		// R214-PERF-4: if no other client still subscribes to this key, drop
 		// the cached "history" marshal slot so its payload (capped at
 		// maxHistoryPushEntries entries; up to ~100 KB worst case) is GC'd
-		// instead of pinning memory until Shutdown. Walk under h.mu — already
-		// held — so no other client can register a subscription concurrently.
-		dropMarshalCache = !h.anyOtherClientSubscribesLocked(c, key)
+		// instead of pinning memory until Shutdown.
+		//
+		// R236-PERF-06 (#513): O(1) via the counter h.decSubscriberCountLocked
+		// just decremented. After the decrement, h.subscriberCount[key] holds
+		// the residual subscriber population on this key; zero (counter map
+		// entry deleted) means we were the last subscriber, so the cache slot
+		// is unreachable. The pre-counter implementation walked h.clients
+		// here — O(N_clients) under h.mu on every dashboard tab close.
+		dropMarshalCache = h.subscriberCount == nil || h.subscriberCount[key] == 0
 	}
 	h.mu.Unlock()
 	if dropMarshalCache && h.historyMarshalCache != nil {
@@ -328,24 +339,23 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 	c.SendJSON(node.ServerMsg{Type: "unsubscribed", Key: key})
 }
 
-// anyOtherClientSubscribesLocked returns true when at least one client other
-// than `excluded` has a live subscription on `key`. Caller MUST hold h.mu.
+// decSubscriberCountLocked decrements h.subscriberCount[key] and removes the
+// entry once it hits zero, so the map size mirrors the number of distinct
+// keys that currently have at least one subscriber. Caller MUST hold h.mu.
 //
-// O(N_clients) — acceptable on the unsubscribe path because the dashboard's
-// per-tab subscribe/unsubscribe rate is bounded by user navigation, not
-// per-event traffic. The fan-out hot path (eventPushLoop / broadcast) does
-// NOT call this helper; only handleUnsubscribe / Shutdown do, so this scan
-// is off the per-event critical path.
-func (h *Hub) anyOtherClientSubscribesLocked(excluded *wsClient, key string) bool {
-	for other := range h.clients {
-		if other == excluded {
-			continue
-		}
-		if _, ok := other.subscriptions[key]; ok {
-			return true
-		}
+// Defensive against pre-counter Hubs (subscriberCount == nil): the cap check
+// in handleSubscribe falls through to "0 < cap" when the map is missing, so
+// this helper is a safe no-op rather than a panic. R246-PERF-4 (#716).
+func (h *Hub) decSubscriberCountLocked(key string) {
+	if h.subscriberCount == nil {
+		return
 	}
-	return false
+	n := h.subscriberCount[key]
+	if n <= 1 {
+		delete(h.subscriberCount, key)
+		return
+	}
+	h.subscriberCount[key] = n - 1
 }
 
 // ─── Remote node handlers ────────────────────────────────────────────────────

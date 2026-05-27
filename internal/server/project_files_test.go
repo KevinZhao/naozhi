@@ -491,12 +491,46 @@ func TestHandleFilesExists_InvalidJSON(t *testing.T) {
 	}
 }
 
+// TestHandleFilesExists_PublicTmpDisabledByDefault pins R237-SEC-5 (#646):
+// without an explicit opt-in the __public_tmp__ pseudo-project must be
+// indistinguishable from a missing project — closes the "any authed
+// dashboard user can read /tmp" gap on multi-user deployments. The
+// symmetric handleFileGet branch is exercised by the same default below.
+func TestHandlePublicTmp_DisabledByDefault(t *testing.T) {
+	h, _, _ := newProjectHandlersForTest(t, nil)
+	// publicTmpEnabled left at its zero value (false).
+
+	body, _ := json.Marshal(existsReq{
+		Project: publicTmpProject,
+		Paths:   []string{"unused"},
+	})
+	existsHTTP := httptest.NewRequest(http.MethodPost,
+		"/api/projects/files/exists", bytes.NewReader(body))
+	existsHTTP.Header.Set("Content-Type", "application/json")
+	existsW := httptest.NewRecorder()
+	h.handleFilesExists(existsW, existsHTTP)
+	if existsW.Code != http.StatusNotFound {
+		t.Errorf("exists default-disabled status = %d, want 404 body=%s",
+			existsW.Code, existsW.Body.String())
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+publicTmpProject+"&path=any.txt&mode=preview", nil)
+	getW := httptest.NewRecorder()
+	h.handleFileGet(getW, getReq)
+	if getW.Code != http.StatusNotFound {
+		t.Errorf("get default-disabled status = %d, want 404 body=%s",
+			getW.Code, getW.Body.String())
+	}
+}
+
 // TestHandleFilesExists_PublicTmp covers the __public_tmp__ pseudo-project
 // fallback: chat-mentioned /tmp/... paths can be resolved without first
 // registering /tmp as a real project. Symlink-escape and path-traversal
 // guards from resolveProjectFileWithRoot must still apply.
 func TestHandleFilesExists_PublicTmp(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
+	h.publicTmpEnabled = true
 
 	// Drop a unique-named file directly under /tmp. Pin the dir explicitly
 	// because os.TempDir() on macOS returns /var/folders/..., which
@@ -554,6 +588,7 @@ func TestHandleFilesExists_PublicTmp(t *testing.T) {
 // previews as text via the __public_tmp__ pseudo-project.
 func TestHandleFileGet_PublicTmpPreview(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
+	h.publicTmpEnabled = true
 
 	// Pin /tmp explicitly: see TestHandleFilesExists_PublicTmp for the
 	// macOS os.TempDir() rationale.
@@ -592,6 +627,7 @@ func TestHandleFileGet_PublicTmpPreview(t *testing.T) {
 // guards under the pseudo-project.
 func TestHandleFileGet_PublicTmpRejectsTraversal(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
+	h.publicTmpEnabled = true
 
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+publicTmpProject+"&path=../etc/passwd&mode=preview", nil)
@@ -607,6 +643,7 @@ func TestHandleFileGet_PublicTmpRejectsTraversal(t *testing.T) {
 // must not be downloadable.
 func TestHandleFileGet_PublicTmpRejectsCredential(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
+	h.publicTmpEnabled = true
 
 	credPath := filepath.Join("/tmp", ".env.naozhi-test")
 	if err := os.WriteFile(credPath, []byte("SECRET=1\n"), 0o600); err != nil {
@@ -638,6 +675,97 @@ func TestHandleFileGet_PublicTmpRejectsCredential(t *testing.T) {
 	h.handleFileGet(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403 for credential download", w.Code)
+	}
+}
+
+// TestHandleFileGet_PublicTmpRejectsForeignPrivate pins R245-SEC-7 (#831):
+// any 0600 file under /tmp owned by a UID other than the naozhi process EUID
+// must be invisible through the publicTmpProject pseudo-project — even
+// though the kernel grants the naozhi process read access (DAC checks the
+// running process, not the dashboard caller). Real /tmp on a multi-user
+// host holds another operator's editor swap, systemd-private socket
+// payloads, etc.; reflecting their bytes through the dashboard would
+// trivially leak them. We simulate "foreign UID" by overriding processEUID
+// to a sentinel != real UID; the test fixture file we drop is owned by the
+// real UID, which is now "foreign" relative to the captured EUID, so the
+// gate must refuse. The mirror branch (same UID) is covered by the existing
+// TestHandleFileGet_PublicTmpPreview which already round-trips a 0644 file
+// of our own UID.
+func TestHandleFileGet_PublicTmpRejectsForeignPrivate(t *testing.T) {
+	h, _, _ := newProjectHandlersForTest(t, nil)
+	h.publicTmpEnabled = true
+
+	// Override processEUID to a value guaranteed to differ from any real
+	// UID so files we just created (owned by the real UID) are foreign.
+	// uint32 max is reserved for nfsnobody on some distros but never
+	// matches a process EUID; restoring on cleanup keeps neighbouring
+	// tests (which assume processEUID == real EUID) working.
+	origEUID := processEUID
+	processEUID = ^uint32(0)
+	t.Cleanup(func() { processEUID = origEUID })
+
+	tmpFile, err := os.CreateTemp("/tmp", "naozhi-public-tmp-foreign-*.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tmpFile.WriteString("private bytes\n"); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+	t.Cleanup(func() { _ = os.Remove(tmpFile.Name()) })
+	// 0600 ⇒ owner-private; combined with foreign-UID this trips the gate.
+	if err := os.Chmod(tmpFile.Name(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rel, err := filepath.Rel("/tmp", tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=preview", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("foreign-UID 0600 file must be 404, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	// Existence-probe parity: handleFilesExists must mirror the gate so
+	// the dashboard can't enumerate /tmp/<other-uid>/* via the batch API.
+	body, _ := json.Marshal(existsReq{
+		Project: publicTmpProject,
+		Paths:   []string{rel},
+	})
+	probeReq := httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", bytes.NewReader(body))
+	probeReq.Header.Set("Content-Type", "application/json")
+	probeW := httptest.NewRecorder()
+	h.handleFilesExists(probeW, probeReq)
+	if probeW.Code != http.StatusOK {
+		t.Fatalf("exists probe status = %d body=%s", probeW.Code, probeW.Body.String())
+	}
+	var probeResp struct {
+		Results map[string]existsEntry `json:"results"`
+	}
+	if err := json.Unmarshal(probeW.Body.Bytes(), &probeResp); err != nil {
+		t.Fatalf("probe unmarshal: %v", err)
+	}
+	if probeResp.Results[rel].Exists {
+		t.Error("foreign-UID 0600 file must NOT be reported as existing via batch probe")
+	}
+
+	// Same file with world-readable bits must still be visible — gate
+	// only fires for owner-private mode. Negative control so a future
+	// over-eager edit (e.g. always-deny) is caught.
+	if err := os.Chmod(tmpFile.Name(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w2 := httptest.NewRecorder()
+	h.handleFileGet(w2,
+		httptest.NewRequest(http.MethodGet,
+			"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=preview", nil))
+	if w2.Code != http.StatusOK {
+		t.Errorf("0644 foreign file should still preview, got %d body=%s", w2.Code, w2.Body.String())
 	}
 }
 
@@ -1061,6 +1189,16 @@ func TestHandleFileGet_RenderHTML(t *testing.T) {
 	}
 	if !strings.Contains(csp, "img-src data: blob:") {
 		t.Errorf("CSP img-src directive missing or not data:+blob: only; got %q", csp)
+	}
+	// R245-SEC-10 defense-in-depth: even if a future patch keeps `data:
+	// blob:` and adds an http(s) origin, that would re-open the
+	// phone-home channel by another route. Reject any explicit network
+	// scheme in the img-src directive so the CSP can't silently drift
+	// back to a network-loading shape via copy-paste.
+	for _, banned := range []string{"img-src http:", "img-src https:", "img-src *", "img-src 'unsafe-eval'"} {
+		if strings.Contains(csp, banned) {
+			t.Errorf("CSP must not grant img-src network scheme %q (R245-SEC-10): got %q", banned, csp)
+		}
 	}
 	if corp := w.Header().Get("Cross-Origin-Resource-Policy"); corp != "same-origin" {
 		t.Errorf("Cross-Origin-Resource-Policy = %q, want same-origin", corp)

@@ -11,9 +11,10 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// fakeCronSessions is a stub cronSessionLister used to verify the
-// dashboard's history filter blocks cron-spawned UUIDs without
-// instantiating a real cron.Scheduler.  R245-ARCH.
+// fakeCronSessions is a stub CronView used to verify the dashboard's
+// history filter blocks cron-spawned UUIDs without instantiating a real
+// cron.Scheduler.  R245-ARCH; widened in R242-ARCH-13 (#754) to satisfy
+// the consolidated CronView with no-op EnsureStub / SetJobPrompt.
 type fakeCronSessions struct {
 	ids map[string]bool
 }
@@ -25,6 +26,15 @@ func (f fakeCronSessions) KnownSessionIDs() map[string]bool {
 	}
 	return out
 }
+
+// EnsureStub is a no-op — these tests never exercise stub revival.
+// Returning false matches the "no matching cron job" contract so a
+// caller branching on the return value sees consistent fake behaviour.
+func (f fakeCronSessions) EnsureStub(string) bool { return false }
+
+// SetJobPrompt is a no-op — these tests never auto-save the first prompt.
+// Returning nil keeps the err==nil happy path identical to a fresh job.
+func (f fakeCronSessions) SetJobPrompt(string, string) error { return nil }
 
 // makeProjectDir creates a project directory under claudeDir that
 // resolves back to a real workspace, plus a UUID JSONL inside it.
@@ -130,8 +140,8 @@ func TestLoadHistorySessions_HidesSysWorkspace(t *testing.T) {
 }
 
 // TestHistoryFilter_NilCronSessionsDegrades asserts the historyFilter
-// scaffolding tolerates a nil cronSessionLister (e.g. tests / configs
-// where cron is disabled) — must not panic and must not over-filter.
+// scaffolding tolerates a nil CronView (e.g. tests / configs where cron
+// is disabled) — must not panic and must not over-filter.
 func TestHistoryFilter_NilCronSessionsDegrades(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	srv.sessionH.WaitWarmHistory()
@@ -164,19 +174,29 @@ func TestHistoryFilter_NilCronSessionsDegrades(t *testing.T) {
 	}
 }
 
-// TestIsUserVisibleKey_ContractRoundtrip is a smoke check that
-// dashboard/server still depends on session.IsUserVisibleKey for any
-// future generic listing endpoint — kept here (not in session/) so a
-// removal in this package surfaces with the right blame.
-func TestIsUserVisibleKey_ContractRoundtrip(t *testing.T) {
+// TestDashboardListingFilter_ContractRoundtrip pins the per-prefix skip
+// decision the dashboard's sidebar listing path applies (see
+// dashboard_session.go::listSessions): cron / sys / scratch namespaces
+// must be hidden from the catch-all "recent sessions" sidebar; standard
+// IM keys and project planner keys (deliberately surfaced via the
+// project sidebar grouping) must remain visible.
+//
+// Replaces the prior contract that pinned session.IsUserVisibleKey,
+// which was deleted because no listing path actually consulted it —
+// project keys could not flow through that umbrella without regressing
+// the planner UI. See #1212 for the deletion rationale.
+func TestDashboardListingFilter_ContractRoundtrip(t *testing.T) {
+	hiddenInSidebar := func(key string) bool {
+		return session.IsScratchKey(key) || session.IsCronKey(key) || session.IsSysKey(key)
+	}
 	for _, k := range []string{"cron:job-1", "sys:auto-titler", "scratch:abc:general:general"} {
-		if session.IsUserVisibleKey(k) {
-			t.Errorf("IsUserVisibleKey(%q) should be false", k)
+		if !hiddenInSidebar(k) {
+			t.Errorf("dashboard listing must hide %q", k)
 		}
 	}
-	for _, k := range []string{"feishu:group:c:general", "slack:direct:U:general"} {
-		if !session.IsUserVisibleKey(k) {
-			t.Errorf("IsUserVisibleKey(%q) should be true", k)
+	for _, k := range []string{"feishu:group:c:general", "slack:direct:U:general", "project:myrepo:planner"} {
+		if hiddenInSidebar(k) {
+			t.Errorf("dashboard listing must surface %q", k)
 		}
 	}
 

@@ -751,3 +751,490 @@ func TestFlattenAssistantEvent_ToolInputSizeCap(t *testing.T) {
 		t.Errorf("big input: summary empty; expected probe-derived label to survive cap")
 	}
 }
+
+// TestSummariseToolInput_FallbackUsesRawBytes pins R244-GO-P2-2 (#909):
+// when summariseToolInput's typed-probe finds no recognised key, the
+// fallback path must hand the ORIGINAL raw input bytes to SanitizeForLog
+// rather than re-Marshalling the probe struct. A re-Marshal would (a)
+// allocate a fresh buffer per call AND (b) silently reorder keys
+// alphabetically because encoding/json sorts struct fields by declaration
+// order — both observable regressions if a future refactor swaps the
+// fallback back to json.Marshal(obj). Asserting `zeta` precedes `alpha`
+// in the surfaced summary catches the alphabetical-reorder symptom; an
+// empty result on broken JSON catches the early-return path; recognised
+// fields still winning over fallback locks priority semantics.
+func TestSummariseToolInput_FallbackUsesRawBytes(t *testing.T) {
+	t.Parallel()
+
+	// 1. Fallback branch (no recognised key): summary must preserve the
+	//    original key order (zeta-then-alpha). A re-Marshal would emit
+	//    keys in struct-declaration order (alphabetical for an unknown
+	//    key map fallback) and lose this property.
+	raw := json.RawMessage(`{"zeta":1,"alpha":2}`)
+	got := summariseToolInput("CustomTool", raw)
+	zetaAt := strings.Index(got, "zeta")
+	alphaAt := strings.Index(got, "alpha")
+	if zetaAt < 0 || alphaAt < 0 {
+		t.Fatalf("fallback: summary=%q lost both keys", got)
+	}
+	if zetaAt > alphaAt {
+		t.Errorf("fallback: zeta should precede alpha (got %q); a re-Marshal regression would reorder", got)
+	}
+
+	// 2. Broken JSON returns empty (early return on Unmarshal error).
+	if got := summariseToolInput("X", json.RawMessage(`{not-json`)); got != "" {
+		t.Errorf("broken JSON: summary=%q, want empty", got)
+	}
+
+	// 3. Recognised priority field (Command) still wins over fallback —
+	//    even when other fallback-eligible keys are present, the typed
+	//    probe path must short-circuit before reaching the raw-bytes
+	//    fallback.
+	raw3 := json.RawMessage(`{"command":"ls -la","other":"ignored"}`)
+	got3 := summariseToolInput("Bash", raw3)
+	if !strings.Contains(got3, "ls -la") {
+		t.Errorf("priority: summary=%q, want to contain command label", got3)
+	}
+	if strings.Contains(got3, "ignored") {
+		t.Errorf("priority: summary=%q leaked fallback raw bytes despite recognised key", got3)
+	}
+
+	// 4. Empty input returns empty (zero-byte short-circuit).
+	if got := summariseToolInput("X", json.RawMessage(``)); got != "" {
+		t.Errorf("empty input: summary=%q, want empty", got)
+	}
+
+	// 5. R242-SEC-13 (#645): inputs larger than summariseInputCap are
+	//    rejected before json.Unmarshal so a hostile/malformed transcript
+	//    line cannot drive the parser through a deeply-nested megabyte
+	//    blob just to populate a 200-byte label that the wire layer
+	//    truncates anyway. Build a 64 KB+1 byte payload (one byte over
+	//    the cap) shaped as valid JSON with a recognised priority field;
+	//    the cap must short-circuit BEFORE the priority path runs, so
+	//    even a recognised key returns empty here.
+	oversize := make([]byte, summariseInputCap+1)
+	oversize[0] = '{'
+	copy(oversize[1:], []byte(`"command":"ls"`))
+	// Pad with whitespace (still valid JSON) up to cap+1 total bytes,
+	// then close the object. Whitespace inside an object is permitted
+	// per RFC 8259 so the payload would otherwise parse as
+	// {"command":"ls"} and surface "ls" via the priority path.
+	for i := 1 + len(`"command":"ls"`); i < len(oversize)-1; i++ {
+		oversize[i] = ' '
+	}
+	oversize[len(oversize)-1] = '}'
+	if got := summariseToolInput("Bash", oversize); got != "" {
+		t.Errorf("oversize input (%d bytes > cap %d): summary=%q, want empty (cap must short-circuit)",
+			len(oversize), summariseInputCap, got)
+	}
+
+	// 6. Inputs exactly at the cap are still summarised (boundary off-by-one
+	//    guard). A 64 KB payload that fits within summariseInputCap should
+	//    produce the priority label.
+	atCap := make([]byte, summariseInputCap)
+	atCap[0] = '{'
+	copy(atCap[1:], []byte(`"command":"ls"`))
+	for i := 1 + len(`"command":"ls"`); i < len(atCap)-1; i++ {
+		atCap[i] = ' '
+	}
+	atCap[len(atCap)-1] = '}'
+	if got := summariseToolInput("Bash", atCap); !strings.Contains(got, "ls") {
+		t.Errorf("at-cap input (%d bytes == cap): summary=%q, want to contain priority label", len(atCap), got)
+	}
+}
+
+// TestFlattenJSONLEvent_DispatchByType pins R242-CR-13 (#704): the
+// monolithic flattenJSONLEvent body was split into per-type helpers
+// (flattenUserEvent / flattenAssistantEvent / flattenSystemEvent) wired
+// through a one-line switch. Test the dispatch contract directly so a
+// future refactor flattening the helpers back into one function (or
+// dropping a case branch) trips before it ships:
+//   - "user" routes to flattenUserEvent (text turn surfaces)
+//   - "assistant" routes to flattenAssistantEvent (assistant turn surfaces)
+//   - "system" routes to flattenSystemEvent (only error subtype emits)
+//   - unknown event types return parsed=false (default branch holds)
+func TestFlattenJSONLEvent_DispatchByType(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		ev        *claudeJSONLEvent
+		wantKinds []string // ordered kinds expected in output
+		wantParse bool
+	}{
+		{
+			name: "user_text",
+			ev: &claudeJSONLEvent{
+				Type:    "user",
+				Message: json.RawMessage(`{"role":"user","content":"hello"}`),
+			},
+			wantKinds: []string{"user"},
+			wantParse: true,
+		},
+		{
+			name: "assistant_text",
+			ev: &claudeJSONLEvent{
+				Type:    "assistant",
+				Message: json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"hi"}]}`),
+			},
+			wantKinds: []string{"assistant"},
+			wantParse: true,
+		},
+		{
+			name: "system_error",
+			ev: &claudeJSONLEvent{
+				Type:    "system",
+				Message: json.RawMessage(`{"subtype":"error","message":"boom"}`),
+			},
+			wantKinds: []string{"error"},
+			wantParse: true,
+		},
+		{
+			name: "system_init_skipped",
+			ev: &claudeJSONLEvent{
+				Type:    "system",
+				Message: json.RawMessage(`{"subtype":"init"}`),
+			},
+			wantKinds: nil,
+			wantParse: false,
+		},
+		{
+			name:      "unknown_type_default",
+			ev:        &claudeJSONLEvent{Type: "queue-operation", Message: json.RawMessage(`{}`)},
+			wantKinds: nil,
+			wantParse: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out, _, _, parsed := flattenJSONLEvent(tc.ev, 0, 0)
+			if parsed != tc.wantParse {
+				t.Errorf("parsed=%v, want %v", parsed, tc.wantParse)
+			}
+			if len(out) != len(tc.wantKinds) {
+				t.Fatalf("len(out)=%d, want %d (kinds=%v)", len(out), len(tc.wantKinds), tc.wantKinds)
+			}
+			for i, want := range tc.wantKinds {
+				if out[i].Kind != want {
+					t.Errorf("out[%d].Kind=%q, want %q", i, out[i].Kind, want)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkSummariseToolInput_TypedProbe locks the R233-PERF-5 / #695
+// perf win: the typed `toolInputProbe` decode replaced the prior
+// `map[string]any` decode + key hunt, halving allocations on the hot
+// transcript-flatten path. A regression to map[string]any (e.g. someone
+// "simplifying" the struct away) would visibly inflate allocs/op against
+// the recorded baseline. Benchmarks the three input shapes the production
+// code sees: priority-key short-circuit (Bash), priority-key fallthrough
+// to FilePath, and the typed-probe-empty fallback to raw bytes.
+func BenchmarkSummariseToolInput_TypedProbe(b *testing.B) {
+	bashInput := json.RawMessage(`{"command":"echo hello","other":"x"}`)
+	readInput := json.RawMessage(`{"file_path":"/tmp/x.txt"}`)
+	customInput := json.RawMessage(`{"alpha":1,"beta":"long-fallback-text"}`)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = summariseToolInput("Bash", bashInput)
+		_ = summariseToolInput("Read", readInput)
+		_ = summariseToolInput("Custom", customInput)
+	}
+}
+
+// TestMaxTranscriptBytes_Int64Type pins R244-GO-P2-3 (#911): the
+// transcript reader directly constructs `&io.LimitedReader{N: …}`
+// rather than calling io.LimitReader, so the source operand must be
+// int64-typed for the LimitedReader.N field assignment to round-trip
+// without truncation on any GOARCH. The current code does
+// `N: int64(maxTranscriptBytes)` (explicit cast even though the const
+// is already int64-typed) as defence-in-depth against a future cap
+// change to `1 << 32` written without a `int64` suffix on a 32-bit
+// platform — which would silently wrap maxTranscriptBytes to -2**31
+// and turn the LimitedReader into an immediate-EOF reader, hiding
+// transcript truncation. This test fails fast if the const ever loses
+// its int64 type or the cap becomes representable only as int64.
+func TestMaxTranscriptBytes_Int64Type(t *testing.T) {
+	t.Parallel()
+	// Compile-time-ish guard: assigning maxTranscriptBytes to an int64
+	// must be lossless. If a future refactor makes the constant
+	// int-typed, this still compiles on 64-bit but the explicit
+	// int64() cast at the LimitedReader call site stays load-bearing
+	// for 32-bit builds — assert the runtime value matches the
+	// declared 8 MiB cap so a typo in the literal also fails the test.
+	var n int64 = maxTranscriptBytes
+	if want := int64(8 * 1024 * 1024); n != want {
+		t.Errorf("maxTranscriptBytes = %d, want %d (8 MiB); literal drift breaks LimitedReader cap semantics", n, want)
+	}
+	if n <= 0 {
+		t.Fatalf("maxTranscriptBytes = %d must be > 0; a non-positive value would make io.LimitedReader return EOF immediately and silently truncate every transcript", n)
+	}
+}
+
+// TestTruncatedToolInputPlaceholder_ValidJSON pins R234-SEC-8 (#1018):
+// the placeholder substituted for over-cap tool_use.Input must itself
+// be valid JSON so the wire shape stays a json.RawMessage the dashboard
+// can render with its existing JSON renderer. A previous fix introduced
+// the cap and chose `"[truncated]"` as the placeholder; this test guards
+// against a future refactor that swaps to a non-JSON sentinel like
+// `[truncated]` (no quotes) or `null` (loses the truncation signal),
+// either of which would break dashboard JSON parsing or hide the cap-hit
+// from operators investigating an oversized run.
+//
+// We assert:
+//  1. the placeholder Unmarshals as JSON without error (wire-shape safety)
+//  2. it decodes to the literal string "[truncated]" (forensic signal)
+//  3. its raw bytes do NOT exceed maxToolInputBytes (cap self-consistency
+//     — replacing with a value that itself exceeds the cap would be a
+//     logic regression)
+func TestTruncatedToolInputPlaceholder_ValidJSON(t *testing.T) {
+	t.Parallel()
+	var s string
+	if err := json.Unmarshal(truncatedToolInputPlaceholder, &s); err != nil {
+		t.Fatalf("placeholder %q is not valid JSON: %v; dashboard JSON renderer would fail", string(truncatedToolInputPlaceholder), err)
+	}
+	if s != "[truncated]" {
+		t.Errorf("placeholder decoded to %q, want %q (forensic signal for cap-hit operators)", s, "[truncated]")
+	}
+	if len(truncatedToolInputPlaceholder) > maxToolInputBytes {
+		t.Errorf("placeholder len=%d exceeds maxToolInputBytes=%d; replacement value must satisfy the cap it enforces", len(truncatedToolInputPlaceholder), maxToolInputBytes)
+	}
+}
+
+// TestFlattenAssistantEvent_ToolInputSizeCap_MultiBlock pins R234-SEC-8
+// (#1018) at the per-block-aggregation boundary: a single assistant
+// message with N tool_use blocks must apply the cap independently to
+// each block. Without this, an attacker could split the 256 KiB
+// per-line budget across 4 × 65 KiB tool_use blocks and bypass the
+// 64 KiB per-input cap by sneaking each one past the per-line gate.
+// The flattenJSONLEvent loop must visit every block and rewrite each
+// over-cap Input independently. Existing TestFlattenAssistantEvent_
+// ToolInputSizeCap covers the single-block case; this test guards the
+// loop-level invariant.
+func TestFlattenAssistantEvent_ToolInputSizeCap_MultiBlock(t *testing.T) {
+	t.Parallel()
+
+	smallInput := `{"command":"echo small"}`
+	pad := strings.Repeat("y", maxToolInputBytes+4*1024)
+	bigInput := `{"command":"` + pad + `"}`
+
+	// Mix small + big + small + big in one assistant event so the loop
+	// must independently classify each block.
+	ev := &claudeJSONLEvent{
+		Type: "assistant",
+		Message: json.RawMessage(`{"role":"assistant","content":[` +
+			`{"type":"tool_use","id":"tu_1","name":"Bash","input":` + smallInput + `},` +
+			`{"type":"tool_use","id":"tu_2","name":"Bash","input":` + bigInput + `},` +
+			`{"type":"tool_use","id":"tu_3","name":"Bash","input":` + smallInput + `},` +
+			`{"type":"tool_use","id":"tu_4","name":"Bash","input":` + bigInput + `}` +
+			`]}`),
+	}
+	out, _, toolCalls, parsed := flattenAssistantEvent(ev, 0, 0)
+	if !parsed || len(out) != 4 {
+		t.Fatalf("multi-block: parsed=%v len(out)=%d (want true / 4)", parsed, len(out))
+	}
+	if toolCalls != 4 {
+		t.Errorf("multi-block: toolCalls=%d, want 4 (every block counts toward the running total even after truncation)", toolCalls)
+	}
+
+	// Block 0 (small) — verbatim pass-through.
+	if string(out[0].Input) != smallInput {
+		t.Errorf("block 0 (small): Input=%q, want pass-through %q", string(out[0].Input), smallInput)
+	}
+	// Block 1 (big) — replaced.
+	if string(out[1].Input) != `"[truncated]"` {
+		t.Errorf("block 1 (big): Input=%q, want %q (must be capped independently)", string(out[1].Input), `"[truncated]"`)
+	}
+	// Block 2 (small) — verbatim, NOT collateral-damage from block 1's cap.
+	if string(out[2].Input) != smallInput {
+		t.Errorf("block 2 (small after big): Input=%q, want pass-through %q (cap must not bleed across blocks)", string(out[2].Input), smallInput)
+	}
+	// Block 3 (big) — replaced.
+	if string(out[3].Input) != `"[truncated]"` {
+		t.Errorf("block 3 (big): Input=%q, want %q", string(out[3].Input), `"[truncated]"`)
+	}
+
+	// Aggregate-bytes invariant: total Input bytes surfaced must stay
+	// well below the per-line cap. With 2 small (~25 B each) + 2
+	// placeholder (13 B each), total is ~76 B — vs. ~140 KiB if the
+	// cap silently dropped. The 4 × maxToolInputBytes guard documents
+	// the worst-case headroom an unbounded variant would consume.
+	totalInputBytes := 0
+	for _, t := range out {
+		totalInputBytes += len(t.Input)
+	}
+	if totalInputBytes >= 4*maxToolInputBytes {
+		t.Errorf("multi-block: total surfaced Input bytes=%d, must be << 4×maxToolInputBytes=%d (#1018 cap is per-block, not per-line)", totalInputBytes, 4*maxToolInputBytes)
+	}
+}
+
+// TestFlattenAssistantEvent_AssistantFirstThenSequentialIndices pins
+// R247-PERF-2 / R247-PERF-18 (#823): the assistant text turn must appear
+// at index nextIdx, followed by tool_use turns at sequential indices —
+// no prepend, no re-number. Before R247-PERF-2 the loop emitted tool_use
+// turns first with provisional indices and then prepended the assistant
+// turn via append([]turn{a}, out...) which forced a fresh backing slice
+// allocation and an O(N) re-index per call. A future refactor that
+// reintroduces the prepend pattern would break this index contract on
+// the very first tool_use turn — assert it directly so the regression
+// is loud at test time, not at dashboard-render time.
+func TestFlattenAssistantEvent_AssistantFirstThenSequentialIndices(t *testing.T) {
+	t.Parallel()
+
+	// Mixed: text + 2 tool_use + text (text blocks merge, so we expect
+	// 1 assistant turn + 2 tool_use turns = 3 turns total).
+	ev := &claudeJSONLEvent{
+		Type: "assistant",
+		Message: json.RawMessage(`{"role":"assistant","content":[` +
+			`{"type":"text","text":"first"},` +
+			`{"type":"tool_use","id":"tu_1","name":"Bash","input":{"command":"a"}},` +
+			`{"type":"tool_use","id":"tu_2","name":"Read","input":{"file_path":"/x"}},` +
+			`{"type":"text","text":"second"}` +
+			`]}`),
+	}
+	const startIdx = 7 // arbitrary non-zero base to catch off-by-one
+	out, _, toolCalls, parsed := flattenAssistantEvent(ev, 1234, startIdx)
+	if !parsed {
+		t.Fatalf("expected parsed=true")
+	}
+	if got, want := len(out), 3; got != want {
+		t.Fatalf("len(out)=%d, want %d (1 assistant + 2 tool_use)", got, want)
+	}
+	if toolCalls != 2 {
+		t.Errorf("toolCalls=%d, want 2", toolCalls)
+	}
+
+	// Index contract: assistant first at nextIdx, tool_use next at
+	// nextIdx+1, nextIdx+2.
+	if out[0].Kind != "assistant" {
+		t.Errorf("out[0].Kind=%q, want %q (assistant must appear first; prepend regression)", out[0].Kind, "assistant")
+	}
+	if out[0].Index != startIdx {
+		t.Errorf("out[0].Index=%d, want %d (assistant must land at nextIdx without re-number)", out[0].Index, startIdx)
+	}
+	if out[1].Kind != "tool_use" || out[1].Index != startIdx+1 {
+		t.Errorf("out[1] = (%q, %d), want (tool_use, %d)", out[1].Kind, out[1].Index, startIdx+1)
+	}
+	if out[2].Kind != "tool_use" || out[2].Index != startIdx+2 {
+		t.Errorf("out[2] = (%q, %d), want (tool_use, %d)", out[2].Kind, out[2].Index, startIdx+2)
+	}
+
+	// Tool-only branch: no text blocks, only tool_use. The assistant
+	// turn must NOT be emitted at all (text empty), and tool_use turns
+	// must start at nextIdx without a phantom slot reserved for the
+	// missing assistant turn.
+	toolOnly := &claudeJSONLEvent{
+		Type: "assistant",
+		Message: json.RawMessage(`{"role":"assistant","content":[` +
+			`{"type":"tool_use","id":"tu_a","name":"Bash","input":{"command":"a"}},` +
+			`{"type":"tool_use","id":"tu_b","name":"Read","input":{"file_path":"/y"}}` +
+			`]}`),
+	}
+	out2, _, _, parsed2 := flattenAssistantEvent(toolOnly, 0, startIdx)
+	if !parsed2 || len(out2) != 2 {
+		t.Fatalf("tool-only: parsed=%v len(out)=%d (want true / 2)", parsed2, len(out2))
+	}
+	if out2[0].Kind != "tool_use" || out2[0].Index != startIdx {
+		t.Errorf("tool-only out[0] = (%q, %d), want (tool_use, %d) — no phantom assistant slot",
+			out2[0].Kind, out2[0].Index, startIdx)
+	}
+	if out2[1].Kind != "tool_use" || out2[1].Index != startIdx+1 {
+		t.Errorf("tool-only out[1] = (%q, %d), want (tool_use, %d)",
+			out2[1].Kind, out2[1].Index, startIdx+1)
+	}
+}
+
+// TestTranscript_ConcurrencyCap_503WhenAllSlotsBusy pins R243-SEC-12 (#798):
+// when transcriptSem is saturated (every transcriptConcurrencyCap slot
+// held by an in-flight handler), arriving requests must receive 503
+// "transcript busy" immediately — NOT 200 with a partial payload, and
+// NOT a queued wait. The non-blocking acquire is the load-shedding gate
+// that bounds peak resident bytes (cap × 8 MB LimitReader + cap ×
+// 256 KB Scanner buffer) under multi-operator load.
+//
+// Test approach: directly fill the package-level transcriptSem channel
+// to the cap, then call the handler with a known-good fixture and
+// verify it returns 503. We restore the channel state via defer so
+// subsequent parallel tests don't observe a saturated semaphore. NOT
+// t.Parallel() because this test mutates package-global state.
+func TestTranscript_ConcurrencyCap_503WhenAllSlotsBusy(t *testing.T) {
+	// Saturate the package-level semaphore so the handler's non-blocking
+	// acquire takes the default branch.
+	for i := 0; i < transcriptConcurrencyCap; i++ {
+		transcriptSem <- struct{}{}
+	}
+	// Drain on exit so other tests aren't blocked by leaked slots.
+	defer func() {
+		for i := 0; i < transcriptConcurrencyCap; i++ {
+			<-transcriptSem
+		}
+	}()
+
+	now := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
+	h, jobID, runID, _ := fixtureRunWithJSONL(t, []string{
+		`{"type":"user","timestamp":"` + now + `","message":{"role":"user","content":"x"}}`,
+	})
+
+	w := callTranscript(h, jobID, runID)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("saturated semaphore must yield 503, got %d body=%s", w.Code, w.Body.String())
+	}
+	// Confirm the body shape matches the documented 503 envelope so
+	// dashboard JS keeps its existing 5xx-fallback branch wired.
+	var body map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal 503 body: %v body=%s", err, w.Body.String())
+	}
+	if got := body["error"]; got != "transcript busy" {
+		t.Errorf("503 error field = %q, want %q", got, "transcript busy")
+	}
+}
+
+// TestTranscript_ConcurrencyCap_ReleasesSlotOnReturn pins the defer-release
+// contract: handleRunTranscript must release its semaphore slot on every
+// return path so a transient burst doesn't permanently shrink the
+// transcriptConcurrencyCap budget. We acquire cap-1 slots manually,
+// run a real request through the handler (which acquires the last slot
+// and must release it on return), then verify a follow-up request can
+// still acquire — i.e. the slot count returned to capacity. NOT
+// t.Parallel() because this test mutates package-global state.
+func TestTranscript_ConcurrencyCap_ReleasesSlotOnReturn(t *testing.T) {
+	// Hold cap-1 slots so the handler under test takes the LAST slot.
+	for i := 0; i < transcriptConcurrencyCap-1; i++ {
+		transcriptSem <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < transcriptConcurrencyCap-1; i++ {
+			<-transcriptSem
+		}
+	}()
+
+	now := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
+	h, jobID, runID, _ := fixtureRunWithJSONL(t, []string{
+		`{"type":"user","timestamp":"` + now + `","message":{"role":"user","content":"hi"}}`,
+	})
+
+	// First request must succeed (cap-1 held + 1 acquired = cap, no overflow).
+	w := callTranscript(h, jobID, runID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first call status = %d body=%s", w.Code, w.Body.String())
+	}
+
+	// After the handler returns, its slot must be back in the pool.
+	// Confirm by attempting a non-blocking acquire — if the slot is
+	// available, this select takes the case branch.
+	select {
+	case transcriptSem <- struct{}{}:
+		// Got the released slot back. Return it so we don't leak across
+		// tests; the deferred drain above only counts cap-1 receives.
+		<-transcriptSem
+	default:
+		t.Errorf("handler did not release its semaphore slot on return — "+
+			"defer release contract broken; transcriptSem at cap=%d", len(transcriptSem))
+	}
+}

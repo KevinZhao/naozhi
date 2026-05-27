@@ -166,8 +166,13 @@ func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limi
 	}
 
 	var (
-		entries []cli.EventEntry // collected newest-first
-		carry   []byte           // unterminated head fragment from prior chunk
+		// Preallocate to `target` upper bound so the typical limit=200
+		// history-tail load fills entries without 1→2→4→…→256 doubling
+		// reallocs. Worst case the file is short and we waste a few hundred
+		// EventEntry slots; well-bounded vs the alloc churn this avoids on
+		// every dashboard sidebar history fetch. R247-PERF-19 family.
+		entries = make([]cli.EventEntry, 0, target)
+		carry   []byte // unterminated head fragment from prior chunk
 		offset  = size
 		buf     = make([]byte, tailChunkSize)
 	)

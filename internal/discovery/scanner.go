@@ -135,6 +135,52 @@ const pathCacheEvictBatch = 16
 // rather than parsed.
 const maxSessionFileBytes int64 = 1024 * 1024
 
+// readBoundedSessionFile opens path, stats the file descriptor (no extra
+// path-lookup syscall vs DirEntry.Info), and reads up to maxSessionFileBytes
+// + 1 bytes via io.LimitReader so an oversized file is rejected without
+// pulling its full contents into memory.
+//
+// Returns:
+//   - non-nil data and nil error: file size <= maxSessionFileBytes; caller
+//     gets the full contents.
+//   - nil data and non-nil error: open/stat/read failure OR the file
+//     exceeded the cap; caller skips the entry. The cap-exceeded case is
+//     surfaced as an error rather than a partial read so callers cannot
+//     accidentally json.Unmarshal a truncated payload.
+//
+// R237-PERF-7 (#676): replaces a DirEntry.Info() Stat + os.ReadFile pair
+// (which itself does Open + fstat + Read). One Open path-lookup + one
+// fstat (free, on the open fd) per session file is the cheapest path the
+// kernel offers; the prior approach did 1 stat-by-name + 1 stat-by-name
+// (inside ReadFile via os.OpenFile→openFile) + Read.
+func readBoundedSessionFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > maxSessionFileBytes {
+		return nil, fmt.Errorf("session file exceeds %d-byte cap (%d bytes)", maxSessionFileBytes, info.Size())
+	}
+	// LimitReader is defence-in-depth against a concurrent writer growing
+	// the file between Stat and Read. ReadAll grows organically; we cannot
+	// pre-size into io.ReadAll directly (it builds its own backing array),
+	// but the Open + LimitReader pair eliminates the wasted megabyte alloc
+	// the previous os.ReadFile path made when a corrupt file was skipped.
+	data, err := io.ReadAll(io.LimitReader(f, maxSessionFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxSessionFileBytes {
+		return nil, fmt.Errorf("session file grew past %d-byte cap mid-read", maxSessionFileBytes)
+	}
+	return data, nil
+}
+
 // NewScanner returns a fresh Scanner with empty caches. Used directly by
 // tests that need isolation; production callers use the package-level
 // wrappers which hit DefaultScanner.
@@ -329,11 +375,15 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 		// something in the Claude sessions dir, or disk corruption), skip
 		// it rather than allocating megabytes of data we will then try to
 		// parse as JSON. 1 MiB is ~100x the expected max size.
-		if info, ierr := entry.Info(); ierr == nil && info.Size() > maxSessionFileBytes {
-			continue
-		}
-
-		data, err := os.ReadFile(filepath.Join(sessDir, entry.Name()))
+		//
+		// R237-PERF-7 (#676): single-Open path. The previous DirEntry.Info()
+		// + os.ReadFile pair did one stat-by-name (Info on systems where the
+		// readdir entry didn't carry size metadata, e.g. Linux getdents64
+		// without DT_REG-with-size), then os.ReadFile re-Open + Stat-by-fd +
+		// Read. Open + Stat-by-fd + LimitReader collapses that into one
+		// path-lookup syscall per session file (50-200 sessions per dashboard
+		// scan in the wild).
+		data, err := readBoundedSessionFile(filepath.Join(sessDir, entry.Name()))
 		if err != nil {
 			continue
 		}
@@ -564,8 +614,46 @@ func sortByLastActive(indices []int, candidates []scanCandidate) {
 // calls this function, and a cross-package equivalence test pins the two
 // call sites together so a future change to Claude's scheme cannot be
 // applied to only one side (RNEW-002).
+//
+// R241-SEC-4 (#465): control bytes (< 0x20) in cwd are rejected by
+// stripping them before the '/' → '-' substitution. Hand-edited
+// persisted state (cron_jobs.json, sessions-index.json) can carry
+// embedded \t / \n / \r values that would otherwise leak into the
+// resulting filesystem path component, where downstream Stat/Open
+// calls produce confusingly-quoted error messages or — worse — succeed
+// on an attacker-prepared dir whose name happens to share the encoded
+// prefix. The encoding is lossy by design; an operator who legitimately
+// runs CWD with a literal newline in the path is not on the supported
+// matrix.
 func ClaudeProjectSlug(cwd string) string {
+	if hasControlByte(cwd) {
+		cwd = stripControlBytes(cwd)
+	}
 	return strings.ReplaceAll(cwd, "/", "-")
+}
+
+// hasControlByte returns true when s contains any byte < 0x20. Single
+// pass with no allocation when the string is clean (the common case).
+func hasControlByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 {
+			return true
+		}
+	}
+	return false
+}
+
+// stripControlBytes returns s with every byte < 0x20 removed. Allocates
+// only when called — hasControlByte gates this so the typical cwd
+// string never pays the copy.
+func stripControlBytes(s string) string {
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x20 {
+			b = append(b, s[i])
+		}
+	}
+	return string(b)
 }
 
 // projDirName is the package-internal alias retained for call-site brevity.

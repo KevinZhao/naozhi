@@ -205,3 +205,71 @@
 - [R240-CR-14] dashboard_send/session/cron file split — internal/server/dashboard_*.go
 - [R240-CR-15] runstore.go file split — internal/cron/runstore.go
 - [R240-ARCH-27] SessionRouter consumer interface relocate to consumer.go — internal/cron/scheduler.go:65-91
+
+## cron-cr-20260526-041255
+
+- [R20260526-GO-003] runDeadlineWatchdog nil-ctx 防御为死代码,production 永不 nil — internal/cli/process.go:800
+- [R20260526-GO-005] applyJitter 用 time.Now 而非 cfg.Clock 不可注入 — internal/cron/scheduler_run.go:932
+- [R20260526-GO-006] sanitizeImagesAligned 三段 nil-out 状态机正确但可读性偏低 — internal/cli/eventlog.go:182
+- [R20260526-GO-008] marshalRunPooled 内 buf.Reset 双调,冗余 — internal/cron/runstore.go:248
+- [R20260526-GO-009] nil-receiver-safe getter 与 panic-on-nil writer split 文档缺 — internal/cron/scheduler.go:696
+- [R20260526-GO-013] cronParser.Parse 在多 helper 内重复调用,无 cache — internal/cron/job.go:341
+- [R20260526-GO-014] redactPathsInCronError defer Cap>max 不 Reset 仅对称性 — internal/cron/scheduler_finish.go:500
+- [R20260526-GO-016] Stop+TriggerNow concurrent triggerWG.Add race 边界 — internal/cron/scheduler_jobs.go:872
+- [R20260526-GO-017] freshContextPreflightP0 ctx-check 与 Reset 间 race 设计取舍 — internal/cron/scheduler_run.go:292
+- [R20260526-GO-018] replyTracker.stop() 不 cancel rctx 局部 15s 阻塞 — internal/dispatch/dispatch.go:1242
+- [R20260526-GO-024] editLoop time.NewTimer(0) 可省略,可读性 — internal/dispatch/dispatch.go:1478
+- [R20260526-CR-002] sanitizeTranscriptDisplay 死代码已在 R250-CR-3 — internal/server/dashboard_cron_transcript.go:979
+- [R20260526-CR-004] KnownSessionIDs cache 存 map[string]bool 形状不一致 — internal/cron/scheduler_session.go:107
+- [R20260526-CR-005] containsSessionID cache rebuild race 写丢 — internal/cron/scheduler_session.go:66
+- [R20260526-CR-006] parseKiroMetadata 字段-by-字段构造而非 struct 转 — internal/cli/protocol_acp.go:1007
+- [R20260526-CR-010] findByPrefix 重命名后 godoc lock 注释已加 (重复) — internal/cron/scheduler_jobs.go:953
+- [R20260526-CR-011] 测试文件用 raw bidi runes 应用 \u escape (ST1018) — internal/cli/process_turn_test.go:52
+- [R20260526-CR-012] t.Skip 后 _ = 占位的 dead test 应删 — internal/cli/process_readshim_line_test.go:111
+- [R20260526-CR-013] encoded := unused write (SA4006) — internal/server/dashboard_memory_test.go:323
+- [R20260526-CR-014] nil ctx 测试 staticcheck SA1012 应用 ignore 注释 — internal/cron/run_deadline_watchdog_test.go:83
+- [R20260526-CR-015] recordResultP0WithSanitised callback 顺序 vs 磁盘 fsync — internal/cron/scheduler_finish.go:337
+- [R20260526-CR-016] AllowMissingSender 测试 gate 应 build-tag 隔离 — internal/dispatch/dispatch.go:373
+- [R20260526-CR-019] SetJobPrompt rollback 不全 (snapshot/restore precedent) — internal/cron/scheduler_jobs.go:601
+- [R20260526-PERF-001] shimSendLine pool 优化未生效 tmp slice 仍 alloc — internal/cli/process_shim_io.go:216
+- [R20260526-PERF-003] LookupSummaries len(sids)>1 sidSet 重建 cache hit — internal/discovery/scanner.go:933
+- [R20260526-PERF-004] InjectHistory taskStartByToolUse 过度 size hint — internal/cli/process_event_query.go:54
+- [R20260526-PERF-006] ResolveWorkspaces O(W*P) prefix scan 当前规模 acceptable — internal/project/manager.go:330
+- [R20260526-PERF-007] Scan cwdGroup 指针 alloc 改 map[string][]int — internal/discovery/scanner.go:389
+- [R20260526-PERF-008] notifySubscribers RLock 即使 subCount>0 cosmetic — internal/cli/eventlog.go:1402
+- [R20260526-SEC-001] handleAttachment 跨 session ACL forward-looking — internal/server/dashboard_send.go:999
+- [R20260526-SEC-002] cookieMAC 缺 per-session salt forward-looking — internal/server/dashboard_auth.go:153
+- [R20260526-SEC-003] loadOrCreateCookieSecret 不查 stateDir 父目录 mode — internal/server/server.go:293
+- [R20260526-SEC-004] shim state dir Chmod 不强制 (MkdirAll 不修已存在) — internal/shim/manager.go:202
+- [R20260526-SEC-005] Feishu token-only mode 缺 body integrity 校验 — internal/platform/feishu/transport_hook.go:97
+- [R20260526-SEC-006] node 远端 workspace 无 per-call HMAC envelope — internal/server/server.go:265
+- [R20260526-SEC-007] transcript 8MiB 单请求 IP 多路 DoS — internal/server/dashboard_cron_transcript.go:53
+- [R20260526-SEC-008] no-token mode WS-first uploadOwner 落 IP 共享 — internal/server/wshub_upgrade.go:130
+- [R20260526-SEC-010] filterShimEnv one-shot 不随 systemd setenv 更新 — internal/shim/manager.go:88
+- [R20260526-ARCH-001] Dispatcher 直接持 *cron.Scheduler 应抽 CronScheduler interface — internal/dispatch/dispatch.go:97
+- [R20260526-ARCH-002] Wrapper.ShimManager 公开可变指针 protocol+transport 捆死 — internal/cli/wrapper.go:49
+- [R20260526-ARCH-003] cron LastSessionID 双源同步策略分散 — internal/cron/scheduler_finish.go:399
+- [R20260526-ARCH-004] cron.SessionRouter 返回具体 *ManagedSession 抽象层泄漏 — internal/cron/scheduler.go:69
+- [R20260526-ARCH-005] Server 47 字段 god-object Phase 5 deferred — internal/server/server.go:57
+- [R20260526-ARCH-006] history factory 全局 init 注册表非显式 DI — internal/wireup/history_backends.go:1
+- [R20260526-ARCH-007] ErrXxx sentinel 散落,缺集中映射策略 — internal/cli/process.go:65
+- [R20260526-ARCH-008] stopBudget package var 与 marshalJobs 模式不一致 — internal/cron/scheduler.go:904
+- [R20260526-ARCH-009] sendCtx 与 spawn ctx 双预算 2x wall clock — internal/cron/scheduler_run.go:746
+- [R20260526-ARCH-010] notifyTarget Background 与 stopBudget 软依赖 — internal/cron/scheduler_notify.go:117
+- [R20260526-ARCH-011] Stop 三段 wait budget 串行可读性差 — internal/cron/scheduler.go:961
+- [R20260526-ARCH-012] Router 多 map 状态同步靠 godoc 漂移风险 — internal/session/router_core.go:277
+- [R20260526-ARCH-013] Process 大结构 IO/state/watchdog 应嵌套子结构 — internal/cli/process.go:163
+- [R20260526-ARCH-014] NewDispatcher Capabilities 与 legacy 双路并行 deprecation — internal/dispatch/dispatch.go:325
+- [R20260526-ARCH-015] cron 短路 platform="dashboard" 硬编码 边界违反 — internal/cron/scheduler_notify.go:73
+- [R20260526-ARCH-016] keyspec 新包 应承载 keyNamespaces session 还在 mirror — internal/keyspec/keyspec.go:1
+- [R20260526-ARCH-017] workDirCacheTTL 与 cronNotifyTimeout 30s 巧合并非 by-design — internal/cron/scheduler.go:432
+- [R20260526-ARCH-018] Process.SessionID 公开字段靠注释保 race 应 unexport — internal/cli/process.go:182
+- [R20260526-ARCH-019] NewWrapper 5s blocking probe 应迁 NewWrapperLazy — internal/cli/wrapper.go:64
+- [R20260526-ARCH-020] executeOpt 单函数 ~417 行 状态机化 — internal/cron/scheduler_run.go:491
+- [R20260526-ARCH-021] Server 12 handler 字段下放 routes.go local — internal/server/server.go:77
+- [R20260526-ARCH-022] validateKeyForShim 重复 session 验证应迁 keyspec — internal/shim/manager.go:35
+- [R20260526-ARCH-023] persist Observer 多消费者应 fan-out 而非 session 中转 — internal/eventlog/persist/persister.go:67
+- [R20260526-SEC-C01] loginPageHTML form action JS-disabled 走 GET Referer — internal/server/dashboard_auth.go:416
+- [R20260526-SEC-C02] wsAuthRetryAfterSeconds 60 与 burst 5 不一致 — internal/server/wshub_upgrade.go:36
+- [R20260526-SEC-C03] ClaudeProjectSlug 不 lowercase macOS APFS 边界 — internal/server/dashboard_cron_transcript.go:301
+- [R20260526-SEC-C04] validateRemoteWorkspace 不 cap 长度 defense-in-depth — internal/server/server.go:265

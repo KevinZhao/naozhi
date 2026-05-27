@@ -16,8 +16,8 @@ import (
 )
 
 // entry is a convenience JSON-producing helper used across the tests.
-// Generates a minimal cli.EventEntry-shape payload that the schema
-// EntryView decoder accepts.
+// Generates a minimal cli.EventEntry-shape payload (time/uuid/type/summary)
+// that schema.MarshalRecord accepts.
 func entry(t *testing.T, timeMS int64, uuid string) Entry {
 	t.Helper()
 	payload := map[string]any{
@@ -217,7 +217,7 @@ func TestPersister_SeqMonotonic(t *testing.T) {
 	defer cancel()
 	p.Flush(ctx)
 
-	idx, err := ReadAllIdx(IdxPath(dir, "k"))
+	idx, err := ReadAllIdx(filepath.Join(dir, KeyHash("k")+idxExt))
 	if err != nil {
 		t.Fatalf("ReadAllIdx: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestPersister_DropKey_RemovesFiles(t *testing.T) {
 	if _, err := os.Stat(LogPath(dir, "k")); err != nil {
 		t.Fatalf("log missing pre-drop: %v", err)
 	}
-	if _, err := os.Stat(IdxPath(dir, "k")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, KeyHash("k")+idxExt)); err != nil {
 		t.Fatalf("idx missing pre-drop: %v", err)
 	}
 
@@ -258,7 +258,7 @@ func TestPersister_DropKey_RemovesFiles(t *testing.T) {
 	if _, err := os.Stat(LogPath(dir, "k")); !os.IsNotExist(err) {
 		t.Errorf("log still exists after drop: err=%v", err)
 	}
-	if _, err := os.Stat(IdxPath(dir, "k")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, KeyHash("k")+idxExt)); !os.IsNotExist(err) {
 		t.Errorf("idx still exists after drop: err=%v", err)
 	}
 }
@@ -459,6 +459,65 @@ func TestPersister_WriterAlive_False_AfterStop(t *testing.T) {
 	if p.WriterAlive() {
 		t.Errorf("WriterAlive=true after Stop")
 	}
+}
+
+// TestPersister_WriterAlive_MatchesStatsLogic confirms the fast
+// path in WriterAlive() (which reads atomic / channel fields
+// directly to skip the Stats struct alloc — R250-PERF-24) returns
+// the same boolean as recomputing the predicate from a Stats
+// snapshot. We sample three quiescent states: post-Stop (false),
+// fresh (no drain yet), and post-Flush (drained recently).
+func TestPersister_WriterAlive_MatchesStatsLogic(t *testing.T) {
+	statsAlive := func(p *Persister) bool {
+		if p.closed.Load() {
+			return false
+		}
+		s := p.Stats()
+		if s.ChannelCap == 0 {
+			return false
+		}
+		notFull := s.ChannelDepth*5 < s.ChannelCap*4
+		if s.ChannelDepth == 0 {
+			return notFull
+		}
+		drainedRecently := s.LastDrainAgo > 0 && s.LastDrainAgo < 5*time.Second
+		return drainedRecently && notFull
+	}
+
+	t.Run("fresh", func(t *testing.T) {
+		p, _ := newTestPersister(t)
+		if got, want := p.WriterAlive(), statsAlive(p); got != want {
+			t.Errorf("WriterAlive=%v, stats-derived=%v", got, want)
+		}
+	})
+
+	t.Run("after_drain", func(t *testing.T) {
+		p, _ := newTestPersister(t)
+		sink := p.SinkFor("k")
+		sink([]Entry{entry(t, 1700000001000, "uuid-1")}, false)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		p.Flush(ctx)
+		if got, want := p.WriterAlive(), statsAlive(p); got != want {
+			t.Errorf("WriterAlive=%v, stats-derived=%v", got, want)
+		}
+		if !p.WriterAlive() {
+			t.Errorf("WriterAlive=false after drain (unexpected)")
+		}
+	})
+
+	t.Run("after_stop", func(t *testing.T) {
+		p, _ := newTestPersister(t)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = p.Stop(ctx)
+		if got, want := p.WriterAlive(), statsAlive(p); got != want {
+			t.Errorf("WriterAlive=%v, stats-derived=%v", got, want)
+		}
+		if p.WriterAlive() {
+			t.Errorf("WriterAlive=true after Stop")
+		}
+	})
 }
 
 // TestPersister_Rotate is the O(1) tail-cut path: enough entries to

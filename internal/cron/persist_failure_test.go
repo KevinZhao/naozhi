@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -237,18 +236,16 @@ func TestPersistFailure_SetJobPrompt(t *testing.T) {
 // in sync. Before the fix, the fields were overwritten and kept even when
 // disk write failed, causing dashboard → JSONL divergence across restarts.
 //
-// The test also asserts onExecute is NOT called on the failure path: the
-// broadcast would otherwise promote the not-persisted result to dashboard
-// viewers, which is exactly the divergence the rollback prevents.
+// Phase D (RFC §3.5) deleted the OnExecute hook; the rollback contract
+// is now observed purely through Job field reverts (LastResult /
+// LastError / LastSessionID stay at prior values). The dashboard never
+// promotes an un-persisted result because cron_run_ended only fires from
+// finishRun, which gates on jobPersistOK.
 func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 	dir := t.TempDir()
-	var broadcasts int32
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
-	s.SetOnExecute(func(id, result, errMsg string) {
-		atomic.AddInt32(&broadcasts, 1)
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -274,11 +271,12 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 
 	withFailingMarshal(t, s)
 
-	// R230C-CR-1 / R232-ARCH-2: tests now exercise the production path
-	// (recordResultP0WithSanitised) directly. The discriminating fields
-	// (LastErrorClass, RunCounters) get rolled back the same way as the
-	// four LastRunAt/LastResult/LastError/LastSessionID fields.
-	_, _, _ = s.recordResultP0WithSanitised(j, "new-result", "new-error", "new-sess", ErrClassSessionError, RunStateFailed)
+	// R230C-CR-1 / R232-ARCH-2 / R247-CR-14 (#586): tests exercise the
+	// production path (recordTerminalResult, formerly recordResultP0WithSanitised)
+	// directly. The discriminating fields (LastErrorClass, RunCounters) get
+	// rolled back the same way as the four
+	// LastRunAt/LastResult/LastError/LastSessionID fields.
+	_, _, _ = s.recordTerminalResult(j, "new-result", "new-error", "new-sess", ErrClassSessionError, RunStateFailed)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -295,25 +293,22 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 	if j.LastSessionID != "prior-sess" {
 		t.Errorf("LastSessionID not reverted: got %q, want %q", j.LastSessionID, "prior-sess")
 	}
-	if got := atomic.LoadInt32(&broadcasts); got != 0 {
-		t.Errorf("onExecute fired %d times on persist failure; expected 0 so dashboard doesn't promote un-persisted result", got)
-	}
 }
 
-// TestPersistFailure_RecordResultHappyPathBroadcasts is the positive
-// counterpart: when persistJobsLocked succeeds, recordResultP0WithSanitised must apply the
-// new values AND invoke onExecute so dashboard clients see the live update.
-// Without this counterpart a regression that accidentally always rolls back
-// (e.g. inverted error check) would pass the rollback test above.
-func TestPersistFailure_RecordResultHappyPathBroadcasts(t *testing.T) {
+// TestPersistFailure_RecordResultHappyPathApplies is the positive
+// counterpart: when persistJobsLocked succeeds, recordTerminalResult
+// must apply the new Job values. Without this counterpart a regression
+// that accidentally always rolls back (e.g. inverted error check) would
+// pass the rollback test above.
+//
+// Phase D (RFC §3.5) deleted the OnExecute broadcast hook; the assertion
+// now observes Job state alone — finishRun's runtelemetry path is
+// covered by run_p0_test.go's RunEndedEvent assertions.
+func TestPersistFailure_RecordResultHappyPathApplies(t *testing.T) {
 	dir := t.TempDir()
-	var broadcasts int32
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
-	})
-	s.SetOnExecute(func(id, result, errMsg string) {
-		atomic.AddInt32(&broadcasts, 1)
 	})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -333,11 +328,11 @@ func TestPersistFailure_RecordResultHappyPathBroadcasts(t *testing.T) {
 	s.jobs[j.ID] = j
 	s.mu.Unlock()
 
-	// Real marshaler — persist succeeds. R230C-CR-1: exercises the
-	// production path directly so a future change to recordResultP0
-	// can't silently rot a happy-path test that exercises a separate
-	// helper.
-	_, _, _ = s.recordResultP0WithSanitised(j, "fresh-result", "", "sess-1", ErrClassNone, RunStateSucceeded)
+	// Real marshaler — persist succeeds. R230C-CR-1 / R247-CR-14 (#586):
+	// exercises the production path directly (recordTerminalResult, formerly
+	// recordResultP0WithSanitised) so a future change can't silently rot a
+	// happy-path test that exercises a separate helper.
+	_, _, _ = s.recordTerminalResult(j, "fresh-result", "", "sess-1", ErrClassNone, RunStateSucceeded)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -347,9 +342,6 @@ func TestPersistFailure_RecordResultHappyPathBroadcasts(t *testing.T) {
 	}
 	if j.LastSessionID != "sess-1" {
 		t.Errorf("LastSessionID not applied: got %q, want %q", j.LastSessionID, "sess-1")
-	}
-	if got := atomic.LoadInt32(&broadcasts); got != 1 {
-		t.Errorf("onExecute fired %d times on happy path; expected 1", got)
 	}
 }
 

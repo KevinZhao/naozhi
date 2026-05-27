@@ -112,7 +112,15 @@ type processIface interface {
 	IsRunning() bool
 	Close()
 	Kill()
-	// Dashboard introspection
+	// Dashboard introspection.
+	//
+	// GetSessionID / GetState are flagged as unidiomatic by R219-CR-9
+	// (#665) — Go convention drops the `Get` prefix on accessors. The
+	// rename to SessionID() / State() is breaking (~12 callsites + the
+	// fakeProcess / TestProcess fakes + cli.Process itself) and is
+	// tracked for a coordinated cross-package change. Until it lands the
+	// names are pinned by TestProcessIfaceGetterRenamePlanned so a
+	// piecemeal rename of just one side cannot slip through unnoticed.
 	GetSessionID() string
 	GetState() cli.ProcessState
 	// DeathReason returns the process-level reason string recorded when the
@@ -242,17 +250,19 @@ type ManagedSession struct {
 	// atomic.Pointer[string] to match the backend/cliName/cliVersion pattern
 	// already established above.
 	workspace atomic.Pointer[string]
-	// backend/cliName/cliVersion are written at spawn time AND later by
-	// reconnectShims under r.mu (write), but read by Snapshot() without
-	// any lock (called via ListSessions which only holds RLock while
-	// collecting refs). Using atomic.Pointer[string] keeps the read/write
-	// race-free without round-tripping Snapshot through r.mu — type-safe
-	// (unlike atomic.Value which accepts any interface value), and Load
-	// returns nil when never stored so an explicit empty-string store is
-	// distinguishable from "untouched".
-	backend     atomic.Pointer[string] // backend ID ("claude" | "kiro"); empty = router default
-	cliName     atomic.Pointer[string] // "claude-code", "kiro" — set at creation from Wrapper
-	cliVersion  atomic.Pointer[string] // semver from --version
+	// cliIdentity packs backend / cliName / cliVersion into a single
+	// atomic.Pointer so Snapshot() (1 Hz × N tabs × N sessions hot path —
+	// see R215-ARCH-P2-7 / R219-PERF-3 / R222-PERF-7) reads all three with
+	// one atomic.Load instead of three sequential Loads. The fields are
+	// written together at every spawn / reconnect / restore site (each
+	// triple is "snapshot of the wrapper that owns this session"), so
+	// packing them is also closer to the actual invariant. Updaters use
+	// updateCLIIdentity (CAS loop) so partial updates from the legacy
+	// SetBackend / SetCLIName / SetCLIVersion paths still compose
+	// safely. Read paths go through Backend() / CLIName() / CLIVersion()
+	// for callers that need only one field, or loadCLIIdentity() for
+	// Snapshot which needs all three.
+	cliIdentity atomic.Pointer[cliIdentityBox]
 	deathReason atomic.Pointer[string] // why process died, empty if alive
 	// userLabel is an operator-set display name that overrides summary/last_prompt
 	// in the dashboard sidebar and header. Empty = unset, fall back to
@@ -307,6 +317,17 @@ type ManagedSession struct {
 	// attachProcessAndSnapshotPersisted for the publish/snapshot ordering.
 	// R231-CQ-6.
 	persistedSeededLen int
+
+	// persistedHistorySorted is true when persistedHistory is known to be
+	// sorted ascending by Time. Default false (zero value) keeps the legacy
+	// "sort on every read" behaviour for test fixtures that assign the
+	// slice directly; production mutations go through InjectHistory which
+	// computes monotonicity vs the existing tail and only flips the flag
+	// to true once a reader has paid the one-off sort. EventEntriesSince
+	// (1Hz dashboard push hot path × N tabs × M dead sessions) checks the
+	// flag and skips the stable sort once it lands true. Maintained under
+	// historyMu in lockstep with persistedHistory mutations. R237-PERF-12.
+	persistedHistorySorted bool
 
 	// prevSessionIDs tracks previous session IDs for this key (oldest → newest).
 	// Used on startup to load the full conversation chain from JSONL files.
@@ -413,24 +434,87 @@ func storeTotalCost(v *atomic.Uint64, cost float64) {
 	v.Store(math.Float64bits(cost))
 }
 
+// cliIdentityBox is the immutable triple stored in ManagedSession.cliIdentity.
+// Treated as a value type — every update swaps the whole pointer rather than
+// mutating fields in place, so readers always observe a consistent snapshot
+// (no torn cliName-vs-cliVersion read across a partial write).
+type cliIdentityBox struct {
+	backend    string // "" = router default
+	cliName    string // e.g. "claude-code", "kiro"
+	cliVersion string // semver from --version
+}
+
+// loadCLIIdentity returns a copy of the current backend/cliName/cliVersion
+// triple in one atomic Load. Returns the zero box (all fields "") when
+// the session was constructed bare and nothing has been set yet — callers
+// must treat that as "use router default", same as the legacy nil-pointer
+// path did.
+func (s *ManagedSession) loadCLIIdentity() cliIdentityBox {
+	if box := s.cliIdentity.Load(); box != nil {
+		return *box
+	}
+	return cliIdentityBox{}
+}
+
+// updateCLIIdentity is the CAS-loop primitive that all Set* helpers below
+// funnel through. mut takes the current box (zero value when unset) and
+// returns the desired next box; we retry until the CAS succeeds. This
+// keeps independent SetBackend / SetCLIName / SetCLIVersion calls
+// composable — concurrent writers from spawn / reconnect under r.mu plus
+// occasional shim-discovery writes don't drop fields. The fast path
+// short-circuits when mut returns an unchanged box, mirroring the
+// loadAtomicString convention (see textutil.LoadAtomicString docs).
+func (s *ManagedSession) updateCLIIdentity(mut func(cliIdentityBox) cliIdentityBox) {
+	for {
+		cur := s.cliIdentity.Load()
+		var curVal cliIdentityBox
+		if cur != nil {
+			curVal = *cur
+		}
+		next := mut(curVal)
+		if cur != nil && next == *cur {
+			return
+		}
+		nextCopy := next
+		if s.cliIdentity.CompareAndSwap(cur, &nextCopy) {
+			return
+		}
+	}
+}
+
 // Backend returns the backend ID ("" when the router default is in effect).
-func (s *ManagedSession) Backend() string { return loadAtomicString(&s.backend) }
+func (s *ManagedSession) Backend() string { return s.loadCLIIdentity().backend }
 
 // SetBackend records the backend ID for this session. Called at spawn time
 // and (rarely) by reconnectShims after a naozhi restart.
-func (s *ManagedSession) SetBackend(id string) { storeAtomicString(&s.backend, id) }
+func (s *ManagedSession) SetBackend(id string) {
+	s.updateCLIIdentity(func(cur cliIdentityBox) cliIdentityBox {
+		cur.backend = id
+		return cur
+	})
+}
 
 // CLIName returns the CLI display name (e.g. "claude-code", "kiro").
-func (s *ManagedSession) CLIName() string { return loadAtomicString(&s.cliName) }
+func (s *ManagedSession) CLIName() string { return s.loadCLIIdentity().cliName }
 
 // SetCLIName records the wrapper-provided CLI display name.
-func (s *ManagedSession) SetCLIName(name string) { storeAtomicString(&s.cliName, name) }
+func (s *ManagedSession) SetCLIName(name string) {
+	s.updateCLIIdentity(func(cur cliIdentityBox) cliIdentityBox {
+		cur.cliName = name
+		return cur
+	})
+}
 
 // CLIVersion returns the detected CLI version string.
-func (s *ManagedSession) CLIVersion() string { return loadAtomicString(&s.cliVersion) }
+func (s *ManagedSession) CLIVersion() string { return s.loadCLIIdentity().cliVersion }
 
 // SetCLIVersion records the wrapper-provided CLI version.
-func (s *ManagedSession) SetCLIVersion(v string) { storeAtomicString(&s.cliVersion, v) }
+func (s *ManagedSession) SetCLIVersion(v string) {
+	s.updateCLIIdentity(func(cur cliIdentityBox) cliIdentityBox {
+		cur.cliVersion = v
+		return cur
+	})
+}
 
 // UserLabel returns the operator-set display label ("" when unset).
 func (s *ManagedSession) UserLabel() string { return loadAtomicString(&s.userLabel) }
@@ -1064,22 +1148,48 @@ func (o InterruptOutcome) String() string {
 // Transport failures are logged at Warn here (rather than silently returned)
 // so operators do not need every caller to plumb their own error log; the
 // outcome return value still lets callers tune their user-facing text.
+//
+// Callers that need to inspect the underlying error (e.g. to errors.Is
+// against a specific transport sentinel for triage) should call
+// InterruptViaControlDetail instead — see R249-GO-18 (#916).
 func (s *ManagedSession) InterruptViaControl() InterruptOutcome {
+	outcome, _ := s.InterruptViaControlDetail()
+	return outcome
+}
+
+// InterruptViaControlDetail mirrors InterruptViaControl but additionally
+// returns the underlying error so callers can errors.Is against transport
+// sentinels (e.g. distinguish a write-broken socket from a generic protocol
+// error). Returned error semantics:
+//
+//   - InterruptSent       → nil
+//   - InterruptNoSession  → nil (no live process to fail against)
+//   - InterruptNoTurn     → cli.ErrNoActiveTurn
+//   - InterruptUnsupported → cli.ErrInterruptUnsupported
+//   - InterruptError      → the wrapped transport error (non-nil)
+//
+// R249-GO-18 (#916): pre-fix, InterruptError was opaque so cron / dispatch
+// could not distinguish "shim socket dead, retry useless" from "stdin
+// write returned EAGAIN, retry safe". Adding the err return lets each
+// caller errors.Is on specific sentinels without breaking the existing
+// outcome-only callers (those keep using InterruptViaControl, which now
+// delegates to this method).
+func (s *ManagedSession) InterruptViaControlDetail() (InterruptOutcome, error) {
 	proc := s.loadProcess()
 	if proc == nil || !proc.Alive() {
-		return InterruptNoSession
+		return InterruptNoSession, nil
 	}
 	err := proc.InterruptViaControl()
 	if err == nil {
-		return InterruptSent
+		return InterruptSent, nil
 	}
 	switch {
 	case errors.Is(err, cli.ErrNoActiveTurn):
-		return InterruptNoTurn
+		return InterruptNoTurn, err
 	case errors.Is(err, cli.ErrInterruptUnsupported):
 		// Caller decides whether to fall back; do not escalate to SIGINT
 		// silently because that would couple two different semantics.
-		return InterruptUnsupported
+		return InterruptUnsupported, err
 	default:
 		// Transport / write error. Process.InterruptViaControl has already
 		// rolled back the settle flags, so the next Send() will not spin
@@ -1087,7 +1197,7 @@ func (s *ManagedSession) InterruptViaControl() InterruptOutcome {
 		// is visible even to callers that treat non-Sent as "fall back".
 		slog.Warn("session interrupt via control_request failed",
 			"key", s.key, "err", err)
-		return InterruptError
+		return InterruptError, err
 	}
 }
 
@@ -1302,6 +1412,11 @@ func (s *ManagedSession) DeathReason() string {
 // snapshot_no_history_copy_test.go pins the contract.
 func (s *ManagedSession) Snapshot() SessionSnapshot {
 	s.parseKeyParts()
+	// R215-ARCH-P2-7: pull backend/cliName/cliVersion in one atomic Load
+	// instead of three sequential Loads — Snapshot is the 1 Hz × N tabs ×
+	// N sessions hot path, so collapsing redundant atomic reads here
+	// adds up at scale.
+	id := s.loadCLIIdentity()
 	snap := SessionSnapshot{
 		Key:         s.key,
 		Platform:    s.keyPlatform,
@@ -1312,9 +1427,9 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		LastActive:  s.LastActive().UnixMilli(),
 		CreatedAt:   s.createdAtMillis(),
 		Workspace:   s.Workspace(),
-		Backend:     s.Backend(),
-		CLIName:     s.CLIName(),
-		CLIVersion:  s.CLIVersion(),
+		Backend:     id.backend,
+		CLIName:     id.cliName,
+		CLIVersion:  id.cliVersion,
 		UserLabel:   s.UserLabel(),
 		LabelOrigin: s.LabelOrigin(),
 		// UI Round 5 R5-3: seed Model from persisted ManagedSession; the
@@ -1351,9 +1466,15 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		// after spawn until the first result event triggered a save).
 		liveModel := proc.Model()
 		if liveModel != "" {
-			// SetModel internally short-circuits when the value is unchanged,
-			// so the outer equality check would just duplicate that work.
-			s.SetModel(liveModel)
+			// R236-PERF-13 (#534): the previous comment claimed SetModel
+			// short-circuits internally — it does NOT. storeAtomicString
+			// always swaps the pointer, which dirties the cache line and
+			// at 1Hz × N tabs × M sessions costs an avoidable atomic
+			// store per poll on what is otherwise a pure-read path.
+			// Compare the cached value first and only mirror on change.
+			if cached := s.Model(); cached != liveModel {
+				s.SetModel(liveModel)
+			}
 			snap.Model = liveModel
 		} else {
 			snap.Model = s.Model()
@@ -1582,15 +1703,34 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	if proc != nil {
 		return proc.EventEntriesSince(afterMS)
 	}
-	var out []cli.EventEntry
+	// Skip the stable sort once the maintained invariant says
+	// persistedHistory is already in Time order. Steady-state dashboard
+	// polling (1Hz × N tabs × M dead sessions) used to pay this every
+	// call; the in-place sort under historyMu also blocks concurrent
+	// readers. While the flag is still false (initial state, or after an
+	// out-of-order InjectHistory) we promote to the write lock once, sort
+	// in place, set the flag, and downgrade — subsequent reads then take
+	// the cheap RLock-only path. R237-PERF-12.
 	s.historyMu.RLock()
+	if !s.persistedHistorySorted {
+		s.historyMu.RUnlock()
+		s.historyMu.Lock()
+		// Re-check under the write lock — another reader may have already
+		// sorted between the unlock and re-acquire.
+		if !s.persistedHistorySorted {
+			sortEntriesByTimeStable(s.persistedHistory)
+			s.persistedHistorySorted = true
+		}
+		s.historyMu.Unlock()
+		s.historyMu.RLock()
+	}
+	var out []cli.EventEntry
 	for _, e := range s.persistedHistory {
 		if e.Time > afterMS {
 			out = append(out, e)
 		}
 	}
 	s.historyMu.RUnlock()
-	sortEntriesByTimeStable(out)
 	return out
 }
 
@@ -1780,6 +1920,33 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	// The orphan ring is GC'd when the last reference (this closure)
 	// drops, so the extra append is a harmless no-op rather than a leak.
 	s.historyMu.Lock()
+	// Monotonicity check (R237-PERF-12): when persistedHistory is empty
+	// or already known sorted AND the appended batch is internally sorted
+	// w.r.t. the existing tail, the flag stays/becomes true and
+	// dead-session readers can skip the per-call stable sort. Out-of-order
+	// entries leave the flag false, falling back to the lazy sort-on-read
+	// path that EventEntriesSince still implements. Steady-state
+	// Send/result append is monotonic by construction (Append/AppendBatch
+	// stamp now), so the common path costs only this O(batch) scan.
+	if s.persistedHistorySorted || len(s.persistedHistory) == 0 {
+		monotonic := true
+		var prevTime int64
+		if n := len(s.persistedHistory); n > 0 {
+			prevTime = s.persistedHistory[n-1].Time
+		}
+		for _, e := range entries {
+			if e.Time < prevTime {
+				monotonic = false
+				break
+			}
+			prevTime = e.Time
+		}
+		if monotonic {
+			s.persistedHistorySorted = true
+		} else {
+			s.persistedHistorySorted = false
+		}
+	}
 	s.persistedHistory = append(s.persistedHistory, entries...)
 	if trimmed := len(s.persistedHistory) - maxPersistedHistory; trimmed > 0 {
 		s.persistedHistory = s.persistedHistory[trimmed:]
@@ -1805,19 +1972,33 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 		}
 	}
 	proc := s.loadProcess()
-	var forward []cli.EventEntry
+	// R237-PERF-6 (#667): capture only the bounds of the forward window
+	// under historyMu; defer the make+copy to AFTER Unlock so concurrent
+	// EventEntries / EventEntriesSince RLockers do not stall on a
+	// 500-entry replay's allocation+memcpy. Safety: subsequent
+	// InjectHistory calls cannot mutate slots the captured `tail` slice
+	// points at — append only writes past the current len, and cap-trim
+	// merely reslices the header. A reallocating append leaves the old
+	// backing array referenced by `tail` alive for GC; element data at
+	// [seededLen..end) is never overwritten in place anywhere in the
+	// codebase (verified by Grep on persistedHistory[ writes — only
+	// `s.persistedHistory = …` reslices the header). seededLen is
+	// committed under the lock so no second InjectHistory can re-forward
+	// the same entries.
+	var tail []cli.EventEntry
 	if proc != nil && s.persistedSeededLen < len(s.persistedHistory) {
-		// Defensive copy: the slice escapes the lock and proc.InjectHistory
-		// outlives historyMu, so handing it persistedHistory's backing array
-		// would race with subsequent appends.
-		tail := s.persistedHistory[s.persistedSeededLen:]
-		forward = make([]cli.EventEntry, len(tail))
-		copy(forward, tail)
+		tail = s.persistedHistory[s.persistedSeededLen:]
 		s.persistedSeededLen = len(s.persistedHistory)
 	}
 	s.historyMu.Unlock()
 
-	if len(forward) > 0 {
+	if len(tail) > 0 {
+		// Defensive copy outside historyMu: proc.InjectHistory consumes
+		// the slice and may outlive this call, while the caller's
+		// entries slice and `tail`'s backing array are owned by us — a
+		// fresh allocation severs both ties cleanly.
+		forward := make([]cli.EventEntry, len(tail))
+		copy(forward, tail)
 		proc.InjectHistory(forward)
 	}
 

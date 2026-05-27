@@ -28,6 +28,7 @@ import (
 	// new backend only requires editing internal/wireup.
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/sessionconst"
 )
 
 // ShutdownTimeout is the maximum time to wait for graceful shutdown
@@ -153,17 +154,22 @@ func exemptCapFor(kind string) int {
 // field is zero. Exported so other packages (tests, config validation, CLI
 // flag defaults) can reference the single source of truth instead of
 // re-typing the literal and drifting out of sync. R70-ARCH-H5.
+//
+// R222-ARCH-3: the source of truth lives in internal/sessionconst so
+// internal/config can read it without reverse-importing internal/session.
+// This file re-exports the names so existing call sites (session.DefaultTTL
+// etc.) keep compiling unchanged.
 const (
 	// DefaultMaxProcs is the concurrent-process cap applied when
 	// RouterConfig.MaxProcs is not set.
-	DefaultMaxProcs = 3
+	DefaultMaxProcs = sessionconst.DefaultMaxProcs
 	// DefaultTTL is the idle-session eviction threshold applied when
 	// RouterConfig.TTL is not set.
-	DefaultTTL = 30 * time.Minute
+	DefaultTTL = sessionconst.DefaultTTL
 	// DefaultPruneTTL is the "keep metadata for long-idle session" threshold
 	// applied when RouterConfig.PruneTTL is not set. Entries older than this
 	// are pruned from the store even when exempt.
-	DefaultPruneTTL = 72 * time.Hour
+	DefaultPruneTTL = sessionconst.DefaultPruneTTL
 )
 
 const (
@@ -520,6 +526,29 @@ type Router struct {
 	// no exposure.
 	excluders atomic.Pointer[[]SessionIDExcluder]
 
+	// pendingExcluders is the R242-ARCH-16 (#760) startup-window gate.
+	// When set (atomic.Bool == true), auto-chain readers SKIP the
+	// chain-attach decision entirely — both the spawn-path
+	// (maybeAttachAutoChainOnSpawn) and the startup backfill
+	// (runAutoChainBackfillOnce). cmd-side wiring is expected to
+	// SetPendingExcluders(true) at the top of router setup, register
+	// every SessionIDExcluder owner (cron Scheduler, sysession Manager,
+	// any future namespace), then SetPendingExcluders(false) to admit
+	// chain decisions. Default zero-value is `false` so callers that
+	// have not opted into the gate (older cmd wiring, tests) keep the
+	// pre-#760 behaviour: auto-chain reads run the moment the policy
+	// is configured.
+	//
+	// Skip-rather-than-block was chosen over a sync.Cond wait so a
+	// misconfigured cmd that forgets the SetPendingExcluders(false)
+	// call surfaces as "auto-chain didn't run" (visible in metrics
+	// and logs) instead of "every spawn deadlocks waiting for an
+	// event that never arrives". The cost of skipping is at most one
+	// startup-window spawn missing its auto-chain attach; cron /
+	// sysession do not register session IDs that early, so the
+	// observable diff is zero in production.
+	pendingExcluders atomic.Bool
+
 	// autoChainListJSONL is the listJSONL function injected into
 	// pickWorkspaceChain. Production wires discovery.ListWorkspaceJSONL;
 	// tests inject a fixture function that returns synthetic
@@ -527,21 +556,23 @@ type Router struct {
 	// NewRouter (config-time injection); not subject to lock contention.
 	autoChainListJSONL func(workspace string) []discovery.WorkspaceJSONL
 
-	// testHookBeforeSpawnPhase3 fires after spawnSession's auto-chain
-	// phase-2 candidate selection completes and BEFORE the phase-3
-	// re-validation lock is acquired (RFC §5.3.1). Exists so concurrent
-	// integration tests can pin TOCTOU race orderings without
-	// time.Sleep. Production builds leave it nil.
-	//
-	// Tests set this field directly. The hook runs synchronously, so
-	// blocking inside it stalls the spawn — test goroutines that need
-	// to inject excluder mutations during the gap close their wait
-	// channel inside the hook.
-	testHookBeforeSpawnPhase3 func()
+	// resolver is the shared KeyResolver instance, exposed via Resolver()
+	// so downstream consumers (Dispatcher, Hub, upstream wiring) can read
+	// the same instance instead of constructing their own — preventing the
+	// agents-config drift documented in R237-ARCH-12 (#604). nil when the
+	// caller did not opt into the singleton (legacy wiring builds its own
+	// resolver). Read-only after NewRouter; the underlying KeyResolver is
+	// itself immutable post-construction so concurrent readers are safe.
+	// 读写: core (init), Resolver() (read-only accessor)
+	resolver *KeyResolver
 
-	// testHookBeforeBackfillPhase3 mirrors the spawn hook for the
-	// startup backfill path (RFC §5.3.1). Fires after Phase 2 decision
-	// collection finishes and BEFORE Phase 3's r.mu apply lock.
+	// testHookBeforeSpawnPhase3 / testHookBeforeBackfillPhase3 are
+	// test-only TOCTOU race-pinning hooks (RFC §5.3.1). Production
+	// builds leave them nil. Trigger contracts and helper methods
+	// live in router_testhooks.go so this struct stays focused on
+	// production state. Tests set the fields directly. R245-ARCH-29
+	// (#882).
+	testHookBeforeSpawnPhase3    func()
 	testHookBeforeBackfillPhase3 func()
 }
 
@@ -836,6 +867,20 @@ type RouterConfig struct {
 	// instead.
 	EventLogDevMode bool
 
+	// EventLogPersister, when non-nil, is used as the router's event-log
+	// sink instead of constructing one from EventLogDir/EventLogGenerator/
+	// EventLogDevMode. This decouples SessionStore wiring from event-log
+	// persistence ownership: callers that own the Persister lifecycle
+	// (tests, alternative startups) can inject the same instance shared
+	// across multiple routers, or pre-configure observers and codecs that
+	// the bare RouterConfig fields don't expose. R239-ARCH-N.
+	//
+	// When this field is nil and EventLogDir is non-empty the router
+	// keeps the legacy behaviour of constructing the Persister itself,
+	// which preserves wire compatibility with existing cmd/naozhi
+	// callers.
+	EventLogPersister *persist.Persister
+
 	// AutoChainPolicy drives the workspace auto-chain feature
 	// (docs/rfc/auto-workspace-chain.md). nil disables the feature
 	// (Router falls back to disabledAutoChainPolicy). Production
@@ -847,6 +892,17 @@ type RouterConfig struct {
 	// Tests inject a fixture function so unit cases can synthesise
 	// JSONL listings without touching disk.
 	AutoChainListJSONL func(workspace string) []discovery.WorkspaceJSONL
+
+	// Resolver is the shared KeyResolver instance for this router.
+	// When set, callers (Dispatcher, Hub, upstream wiring) should fetch
+	// the singleton via Router.Resolver() instead of constructing fresh
+	// KeyResolver values from cfg.Agents — the latter caused config
+	// drift across the 4 historical construction sites
+	// (main.go upstream + buildServer + Dispatcher.cfg.Resolver +
+	// Hub.opts.Resolver). nil leaves Router.Resolver() returning nil so
+	// existing callers that already build their own resolver keep
+	// working (they just don't share). R237-ARCH-12 (#604).
+	Resolver *KeyResolver
 }
 
 // NewRouter creates a session router.
@@ -925,6 +981,7 @@ func NewRouter(cfg RouterConfig) *Router {
 		eventLogDir:        cfg.EventLogDir,
 		autoChainPolicy:    cfg.AutoChainPolicy,
 		autoChainListJSONL: cfg.AutoChainListJSONL,
+		resolver:           cfg.Resolver,
 	}
 	// Auto-chain defaults: nil policy → safely-disabled stub so the
 	// rest of the code can call r.autoChainPolicy.Enabled(...) without
@@ -945,7 +1002,18 @@ func NewRouter(cfg RouterConfig) *Router {
 	// Spin up the event-log persister BEFORE we touch the session
 	// store; the startup load path needs a live sink to attach
 	// to spawned ManagedSessions as they get restored.
-	if cfg.EventLogDir != "" {
+	//
+	// Two wire paths:
+	//   1. cfg.EventLogPersister != nil — caller-owned Persister wins.
+	//      Lets callers split SessionStore wiring from event-log
+	//      lifecycle (R239-ARCH-N).
+	//   2. cfg.EventLogPersister == nil && cfg.EventLogDir != "" —
+	//      legacy in-router construction; preserved for cmd/naozhi
+	//      and existing tests that pass only EventLogDir.
+	switch {
+	case cfg.EventLogPersister != nil:
+		r.eventLogPersister = cfg.EventLogPersister
+	case cfg.EventLogDir != "":
 		p, err := persist.NewPersister(persist.Options{
 			Dir:       cfg.EventLogDir,
 			Generator: cfg.EventLogGenerator,
@@ -1090,29 +1158,93 @@ func NewRouter(cfg RouterConfig) *Router {
 
 	// Async-load history for all suspended sessions so the dashboard
 	// shows conversation history without waiting for the next message.
-	//
-	// Tier 1: naozhilog (naozhi-native per-session log). When the
-	// event log persister is configured (r.eventLogDir != "") we
-	// LoadLatest from the local .log file. This tier preserves
-	// Images / ImagePaths / AskQuestion / agent-team linkage fields
-	// that Claude JSONL cannot provide.
-	//
-	// Tier 2: Claude CLI JSONL. Used when the local tier returns
-	// nothing (fresh deploy, user cleared events/). The walk is the
-	// same chain walker the reconnect path uses.
-	//
-	// Both tiers complete BEFORE the corresponding process's
-	// PersistSink is installed (via spawnSession / ReconnectShims),
-	// so replayed entries are tagged replayPhase=true and dropped by
-	// the Persister rather than re-persisted.
-	//
-	// historyLoadSem is shared across tier 1 and tier 2 so the cap
-	// expresses "total concurrent history-load disk I/O", not "10 per
-	// tier". Without this share the worst case was ~2× cap on a deploy
-	// that triggered both tiers (e.g. event-log persister enabled but
-	// some sessions only have Claude JSONL). R215-GO-P2-1.
+	// Extracted into startBackgroundHistoryLoaders for R217-ARCH-7 (#627)
+	// — the inline tier 1 / tier 2 blocks were ~165 lines and dominated
+	// the constructor's surface area; see the helper's godoc for the full
+	// tier ordering, shared-semaphore (R215-GO-P2-1), and
+	// shim-grace-window (R53-ARCH-001) contracts.
+	r.startBackgroundHistoryLoaders()
+
+	// R245-ARCH-46 (#906): the orphan sweep + attachment tracker are
+	// genuine background-lifecycle side effects (goroutine spawn / worker
+	// install). Funnel them through startBackgroundLifecycle so a future
+	// caller can opt out (tests construct a Router and want determinism)
+	// without losing the construction-time path used by production.
+	r.startBackgroundLifecycle()
+
+	r.backendIDs = computeBackendIDs(r.wrapper, r.wrappers, r.defaultBackend)
+
+	return r
+}
+
+// startBackgroundLifecycle launches the long-running side effects that
+// were previously executed inline at the tail of NewRouter:
+//
+//   - runOrphanSweep      — reaps <keyhash>.log files for sessions that
+//     no longer exist (RFC event-log-persistence §4.4).
+//   - startAttachmentTracker — installs the refcount worker that bumps
+//     attachment retention based on OnPersistedEntry events.
+//
+// Both are idempotent guard-checks against r.eventLogDir; calling this a
+// second time replays the same guards but does not double-spawn a sweep
+// goroutine that finished, and the tracker.NewTracker write to
+// r.attachmentTracker will overwrite the existing tracker reference if
+// any. This is fine for the production single-call path; tests that need
+// finer control should construct a Router directly without calling Start.
+//
+// NOTE: runAutoChainBackfillOnce is intentionally NOT moved here because
+// it must execute synchronously BEFORE the Tier 1 / Tier 2 history
+// goroutines spawn (TestNewRouter_AutoChainPrecedesTier2Loaders pins
+// this ordering). Treat it as part of construction, not a side effect.
+func (r *Router) startBackgroundLifecycle() {
+	r.runOrphanSweep()
+	r.startAttachmentTracker()
+}
+
+// startBackgroundHistoryLoaders launches the tier 1 / tier 2 history-load
+// goroutines for every restored session so the dashboard shows
+// conversation history without waiting for the next user turn.
+// Extracted from NewRouter for R217-ARCH-7 (#627) — keeps the constructor
+// readable and gives the tier ordering / shared-semaphore contract a
+// single named home.
+//
+// Tier 1 (naozhilog): when r.eventLogPersister is configured, LoadLatest
+// from the per-session naozhi-native log. Preserves Images / ImagePaths /
+// AskQuestion / agent-team linkage that Claude JSONL cannot represent.
+//
+// Tier 2 (Claude CLI JSONL): runs unconditionally when r.claudeDir is
+// set; the hasInjectedHistory check inside each goroutine skips work
+// when tier 1 already populated the session. Two sub-paths:
+//
+//  1. Non-shim-managed sessions: load immediately.
+//  2. Shim-managed sessions (shimKeys[key]==true): defer for
+//     shimReconnectGraceDelay so ReconnectShims can inject its own
+//     replay + JSONL history first; then backfill only when the
+//     session is still empty. Guards against R53-ARCH-001 — a
+//     short-lived shim that appears in shimManagedKeys() at startup
+//     but exits before ReconnectShims' second Discover, previously
+//     leaving the session with no history (skipped by path #1, missed
+//     by ReconnectShims) until the user sent a message.
+//
+// historyLoadSem is shared across both tiers so the cap expresses
+// "total concurrent history-load disk I/O", not "10 per tier"
+// (R215-GO-P2-1). Without this share the worst case was ~2× cap on
+// a deploy that triggered both tiers (event-log persister enabled but
+// some sessions only have Claude JSONL).
+//
+// Both tiers complete BEFORE the corresponding process's PersistSink is
+// installed (via spawnSession / ReconnectShims), so replayed entries
+// are tagged replayPhase=true and dropped by the Persister rather than
+// re-persisted.
+//
+// LOCK: must be invoked from NewRouter under construction (no
+// concurrent r.sessions writers); the helper ranges over r.sessions
+// without a lock because the publish-after-construct contract
+// guarantees no other goroutine can mutate the map at this point.
+func (r *Router) startBackgroundHistoryLoaders() {
 	historyLoadSem := make(chan struct{}, historyLoadConcurrency)
 
+	// Tier 1: naozhilog (in-process per-session log).
 	if r.eventLogPersister != nil {
 		sem := historyLoadSem
 		for _, s := range r.sessions {
@@ -1132,7 +1264,7 @@ func NewRouter(cfg RouterConfig) *Router {
 				}
 				// hasInjectedHistory guards against a concurrent
 				// ReconnectShims having already filled the session —
-				// we'd double-inject otherwise.
+				// double-inject otherwise.
 				if s.hasInjectedHistory() {
 					return
 				}
@@ -1144,134 +1276,99 @@ func NewRouter(cfg RouterConfig) *Router {
 		}
 	}
 
-	// Tier 2 (Claude CLI JSONL) — runs unconditionally; the
-	// hasInjectedHistory check inside each goroutine skips work when
-	// tier 1 already populated the session.
-	//
-	// Two sub-paths (unchanged from pre-eventlog behaviour):
-	//   1. Non-shim-managed sessions (default): load immediately.
-	//   2. Shim-managed sessions (shimKeys[key]==true): defer for
-	//      shimReconnectGraceDelay to let ReconnectShims inject its own
-	//      replay + JSONL history first; then backfill only if the session
-	//      is still empty. This guards against R53-ARCH-001 — a short-lived
-	//      shim that appears in shimManagedKeys() at startup but has
-	//      exited by the time ReconnectShims runs its second Discover,
-	//      previously leaving the session with no history (skipped by
-	//      path #1, missed by ReconnectShims) until the user sent a
-	//      message. The deferred backfill checks hasInjectedHistory()
-	//      so successful ReconnectShims runs do not get duplicated.
-	if r.claudeDir != "" {
-		shimKeys := r.shimManagedKeys()
-		// Shared with tier 1 above — see historyLoadSem rationale at the
-		// top of this block (R215-GO-P2-1: cap = total disk I/O, not per
-		// tier).
-		sem := historyLoadSem
-		for _, s := range r.sessions {
-			if s.getSessionID() == "" {
-				continue
-			}
-			deferred := shimKeys[s.key]
-			r.historyWg.Add(1)
-			go func() {
-				defer r.historyWg.Done()
-				if deferred {
-					// Wait for ReconnectShims to complete its first pass.
-					// historyCtx cancel (Shutdown) aborts the wait cleanly.
-					// R175-P3: use NewTimer + Stop instead of time.After —
-					// on fast shutdown (within shimReconnectGraceDelay) the
-					// time.After variant leaks a runtime timer per goroutine
-					// for the full grace window, and at startup we can have
-					// up to historyLoadConcurrency * #deferred-sessions
-					// goroutines parked here.
-					graceTimer := time.NewTimer(shimReconnectGraceDelay)
-					select {
-					case <-graceTimer.C:
-						// Fired — no Stop needed, timer channel already drained.
-					case <-r.historyCtx.Done():
-						if !graceTimer.Stop() {
-							<-graceTimer.C
-						}
-						return
-					}
-					// If ReconnectShims already populated history (happy
-					// path), skip the JSONL load to avoid duplicate entries.
-					if s.hasInjectedHistory() {
-						return
-					}
-					// Otherwise fall through: the shim disappeared between
-					// shimManagedKeys() and ReconnectShims' Discover, so we
-					// must backfill directly or the dashboard shows empty
-					// history until the next message.
-					// R172-ARCH-D10: counter sits AFTER the hasInjectedHistory
-					// short-circuit, so only the fallback branch increments it.
-					// A non-zero value flags the short-lived-shim race from
-					// R53-ARCH-001 — ReconnectShims' happy path must not move
-					// this number, or the signal inverts.
-					metrics.ShimReconnectGraceBackfillTotal.Add(1)
-					slog.Info("shim-managed session missing history after reconnect grace, falling back to JSONL load",
-						"key", s.key)
-				}
+	// Tier 2: Claude CLI JSONL.
+	if r.claudeDir == "" {
+		return
+	}
+	shimKeys := r.shimManagedKeys()
+	sem := historyLoadSem
+	for _, s := range r.sessions {
+		if s.getSessionID() == "" {
+			continue
+		}
+		deferred := shimKeys[s.key]
+		r.historyWg.Add(1)
+		go func() {
+			defer r.historyWg.Done()
+			if deferred {
+				// Wait for ReconnectShims to complete its first pass.
+				// historyCtx cancel (Shutdown) aborts the wait cleanly.
+				// R175-P3: NewTimer + Stop instead of time.After — on
+				// fast shutdown the time.After variant leaks a runtime
+				// timer per goroutine for the full grace window.
+				graceTimer := time.NewTimer(shimReconnectGraceDelay)
 				select {
-				case sem <- struct{}{}:
+				case <-graceTimer.C:
+					// Fired — no Stop needed, channel already drained.
 				case <-r.historyCtx.Done():
+					if !graceTimer.Stop() {
+						<-graceTimer.C
+					}
 					return
 				}
-				defer func() { <-sem }()
-
-				// Skip when tier 1 (naozhilog) already filled the
-				// session. Without this, a deploy with BOTH event-log
-				// persistence and a populated Claude JSONL would
-				// double-inject the first ~500 entries.
 				if s.hasInjectedHistory() {
 					return
 				}
+				// R172-ARCH-D10: counter sits AFTER the
+				// hasInjectedHistory short-circuit so only the fallback
+				// branch increments. A non-zero value flags the
+				// short-lived-shim race from R53-ARCH-001.
+				metrics.ShimReconnectGraceBackfillTotal.Add(1)
+				slog.Info("shim-managed session missing history after reconnect grace, falling back to JSONL load",
+					"key", s.key)
+			}
+			select {
+			case sem <- struct{}{}:
+			case <-r.historyCtx.Done():
+				return
+			}
+			defer func() { <-sem }()
 
-				// Build ordered list of all session IDs: prev chain + current.
-				// LoadHistoryChainTailCtx walks from newest→oldest and stops
-				// as soon as maxPersistedHistory entries are collected, so a
-				// 32-link chain typically opens only 1-2 JSONL files.
-				ids := make([]string, 0, len(s.prevSessionIDs)+1)
-				ids = append(ids, s.prevSessionIDs...)
-				ids = append(ids, s.getSessionID())
+			// Skip when tier 1 (naozhilog) already filled the session
+			// — without this, a deploy with both event-log persistence
+			// and a populated Claude JSONL would double-inject the
+			// first ~500 entries.
+			if s.hasInjectedHistory() {
+				return
+			}
 
-				allEntries := discovery.LoadHistoryChainTailCtx(
-					r.historyCtx, r.claudeDir, ids, s.Workspace(), maxPersistedHistory,
-				)
-				if len(allEntries) == 0 {
-					return
-				}
-				// Final check for the deferred path: ReconnectShims may have
-				// raced us between the grace timer and LoadHistory returning.
-				// InjectHistory appends (not replaces), so a double-inject
-				// shows duplicates in the sidebar.
-				if deferred && s.hasInjectedHistory() {
-					return
-				}
-				s.InjectHistory(allEntries)
-				slog.Info("loaded session history on startup", "key", s.key, "entries", len(allEntries), "chain", len(ids), "deferred", deferred)
-				r.notifyChange()
-			}()
-		}
+			// Build ordered list of all session IDs: prev chain + current.
+			// LoadHistoryChainTailCtx walks newest→oldest and stops as
+			// soon as maxPersistedHistory entries are collected, so a
+			// 32-link chain typically opens only 1-2 JSONL files.
+			ids := make([]string, 0, len(s.prevSessionIDs)+1)
+			ids = append(ids, s.prevSessionIDs...)
+			ids = append(ids, s.getSessionID())
+
+			allEntries := discovery.LoadHistoryChainTailCtx(
+				r.historyCtx, r.claudeDir, ids, s.Workspace(), maxPersistedHistory,
+			)
+			if len(allEntries) == 0 {
+				return
+			}
+			// Final check for the deferred path: ReconnectShims may
+			// have raced us between the grace timer and LoadHistory
+			// returning. InjectHistory appends, so a double-inject
+			// shows duplicates in the sidebar.
+			if deferred && s.hasInjectedHistory() {
+				return
+			}
+			s.InjectHistory(allEntries)
+			slog.Info("loaded session history on startup", "key", s.key, "entries", len(allEntries), "chain", len(ids), "deferred", deferred)
+			r.notifyChange()
+		}()
 	}
+}
 
-	// Reap <keyhash>.log files that don't correspond to any restored
-	// session AND are older than orphanSweepAge. See §4.4 of
-	// docs/rfc/event-log-persistence.md for the rationale; in short,
-	// DropKey failures + sessions.json rewrites can leave stranded
-	// logs that never get reclaimed otherwise.
-	r.runOrphanSweep()
-
-	// Attachment refcount tracker. See docs/rfc/attachment-refcount.md.
-	// Must be started AFTER r.sessions is populated so the resolver
-	// closure can see them; first OnPersistedEntry callback arrives
-	// when a live CLI produces a new EventEntry which cannot happen
-	// until callers call GetOrCreate, which can't happen until
-	// NewRouter returns.
-	r.startAttachmentTracker()
-
-	r.backendIDs = computeBackendIDs(r.wrapper, r.wrappers, r.defaultBackend)
-
-	return r
+// Start exposes the background-lifecycle hook so callers can defer the
+// side effects to a chosen moment. Today NewRouter still invokes the
+// hook eagerly so existing call sites are unchanged; future refactors
+// (tests, lazy boot) can construct a Router and call Start(ctx) when
+// they're ready. ctx is accepted for forward-compat — current sweepers
+// honour r.historyCtx, but a future implementation may shift to the
+// caller's context.
+func (r *Router) Start(_ context.Context) {
+	r.startBackgroundLifecycle()
 }
 
 // onChangeHolder wraps a callback so the atomic pointer Store site is an
@@ -1497,6 +1594,29 @@ var listRefsPool = sync.Pool{
 // correct boundary for pooling. ~50 sessions × ~280 B SessionSnapshot
 // = ~14 KB / call; 1 Hz × N tabs is acceptable.
 func (r *Router) ListSessions() []SessionSnapshot {
+	snaps, _ := r.ListSessionsWithVersion()
+	return snaps
+}
+
+// ListSessionsWithVersion returns the session snapshot slice paired
+// with the storeGen value sampled in the same r.mu.RLock epoch. The
+// dashboard's /api/sessions handler uses this so the response.version
+// field is exactly the version that produced the data — without it the
+// pre-existing handleList code did `Version()` then `ListSessions()`
+// in two separate critical sections, opening a small race where a
+// mutation landing between the two reads could publish data tagged
+// with a stale version (or vice versa) and make the dashboard either
+// skip a real refresh or repeat a render. R246-PERF-15 (#726).
+//
+// storeGen is atomic.Uint64 so the read inside r.mu.RLock is wait-
+// free; correctness depends only on the writer ordering: writers do
+// `r.mu.Lock(); ... ; storeGen.Add(1); r.mu.Unlock()` (see
+// router_cleanup.go and router_core mutators), so a reader holding
+// RLock observes a (sessions, gen) pair that any concurrent writer
+// produced atomically. Pre-existing ListSessions() now delegates here
+// to share the implementation; callers that don't need the version
+// keep the pre-R246-PERF-15 signature and pay no extra cost.
+func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	refsPtr := listRefsPool.Get().(*[]*ManagedSession)
 	refs := (*refsPtr)[:0]
 	r.mu.RLock()
@@ -1509,6 +1629,7 @@ func (r *Router) ListSessions() []SessionSnapshot {
 	for _, s := range r.sessions {
 		refs = append(refs, s)
 	}
+	version := r.storeGen.Load()
 	r.mu.RUnlock()
 
 	snapshots := make([]SessionSnapshot, len(refs))
@@ -1522,7 +1643,7 @@ func (r *Router) ListSessions() []SessionSnapshot {
 	}
 	*refsPtr = refs[:0]
 	listRefsPool.Put(refsPtr)
-	return snapshots
+	return snapshots, version
 }
 
 // GetSession returns the session for the given key, or nil.
@@ -1530,4 +1651,48 @@ func (r *Router) GetSession(key string) *ManagedSession {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.sessions[key]
+}
+
+// runHistoryTask launches fn in a goroutine tracked by r.historyWg,
+// parented on r.historyCtx. Refuses (returns false, no goroutine
+// spawned) when historyCtx is already cancelled — guards the late
+// Add(1) race against historyWg.Wait() that R232-GO-2 / R230-GO-1 /
+// R233-GO-1 patched inline.
+//
+// R222-ARCH-17 (#748): Router currently owns historyCtx/historyCancel/
+// historyWg directly; the full extraction (a HistorySubsystem with its
+// own context tree, owned alongside R222-ARCH-1 #383) is tracked
+// separately. This helper localises the spawn pattern so additional
+// subsystems do not bake more inline `historyWg.Add(1) ...
+// <-historyCtx.Done()` shapes into Router. Existing inline sites in
+// router_core / router_lifecycle that combine the spawn with a
+// concurrency semaphore + per-task timeout context remain in place;
+// they are documented at each site and will move with the larger
+// subsystem extraction.
+//
+// LOCK: callers must hold r.mu (read or write) when invoking, OR call
+// outside the lock when historyCtx is guaranteed live (NewRouter init,
+// early Start). The historyWg.Add(1) must be visible to Shutdown
+// before the goroutine begins observable work.
+func (r *Router) runHistoryTask(fn func(ctx context.Context)) bool {
+	r.historyWg.Add(1)
+	if r.historyCtx == nil {
+		// Test routers built by struct literal (skip NewRouter) get a
+		// never-cancelled background; production Router always wires
+		// historyCtx in NewRouter before any caller can reach here.
+		go func() {
+			defer r.historyWg.Done()
+			fn(context.Background())
+		}()
+		return true
+	}
+	if r.historyCtx.Err() != nil {
+		r.historyWg.Done()
+		return false
+	}
+	go func() {
+		defer r.historyWg.Done()
+		fn(r.historyCtx)
+	}()
+	return true
 }

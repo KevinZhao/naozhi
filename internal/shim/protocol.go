@@ -2,6 +2,7 @@ package shim
 
 import (
 	"encoding/json"
+	"unsafe"
 )
 
 // --- naozhi → shim ---
@@ -74,6 +75,43 @@ func intPtr(i int) *int { return &i }
 // R65-PERF-L-2.
 func (m *ServerMsg) MarshalLine() ([]byte, error) {
 	data, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+// MarshalStdoutLine builds the NDJSON envelope for a "stdout" frame directly
+// from the raw scanner bytes, skipping the intermediate `string(line)` copy
+// that the generic MarshalLine path would otherwise force.
+//
+// R67-PERF-3: the shim's readStdout hot path runs at every CLI stdout line
+// (5–50/s during active turns, ×N concurrent sessions). The previous code
+// did `string(line)` to populate ServerMsg.Line, then json.Marshal walked
+// that string a second time to produce the JSON-escaped output — i.e. two
+// passes over the byte content per line. By aliasing the scanner bytes into
+// a string header via unsafe.String we hand json.Marshal the same backing
+// memory the bufio.Scanner already owns, so there is zero extra alloc for
+// the line content itself. Output is byte-for-byte identical to
+// `(&ServerMsg{Type:"stdout",Seq:seq,Line:string(line)}).MarshalLine()`,
+// round-trip tested via ParseServerMsg.
+//
+// SAFETY: the returned []byte must be fully consumed (or copied into the
+// caller's enqueue buffer) BEFORE the caller advances bufio.Scanner. The
+// shim's enqueueWrite path satisfies this — it copies the slice into a
+// per-client channel before the next Scan().
+func MarshalStdoutLine(seq int64, line []byte) ([]byte, error) {
+	// unsafe.String produces a string header backed by `line`'s storage;
+	// json.Marshal only reads the string during this call and the result
+	// holds none of the borrowed bytes (the JSON encoder copies escaped
+	// runes into its output buffer). Aliasing is therefore confined to
+	// the synchronous Marshal call below.
+	var lineStr string
+	if len(line) > 0 {
+		lineStr = unsafe.String(&line[0], len(line))
+	}
+	m := ServerMsg{Type: "stdout", Seq: seq, Line: lineStr}
+	data, err := json.Marshal(&m)
 	if err != nil {
 		return nil, err
 	}

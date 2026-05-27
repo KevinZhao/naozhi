@@ -7,10 +7,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/ratelimit"
@@ -42,6 +45,26 @@ type AuthHandlers struct {
 	// cause across four review rounds: HMAC(secret, token) lacked any
 	// freshness input.
 	cookieGen string
+	// cookieGenSeq is an atomic counter mixed into cookieMAC alongside
+	// cookieGen. Bumping it (via RotateCookieGen) immediately invalidates
+	// every outstanding auth cookie because cookieMAC's HMAC input
+	// changes — even at-rest browsers carrying the old cookie value will
+	// fail constant-time compare on their next request and be
+	// re-challenged at /api/auth/login.
+	//
+	// R245-SEC-2 (#826): closes the hot-rotate gap. Pre-fix, cookieGen
+	// only changed at process restart, so a hot-reload of dashboardToken
+	// (or of any other secret-rotation event handlers added later) left
+	// existing cookies valid for the 24h MaxAge window. Per-process
+	// restart rotation still works (cookieGen seed continues to vary by
+	// time.Now().UnixNano() at construction); RotateCookieGen layers
+	// in-process freshness without disturbing the seed-once contract.
+	//
+	// atomic.Uint64 is zero-value safe so existing struct-literal
+	// fixtures (csrf_test.go, debug_pprof_test.go, etc.) keep working
+	// without changes. Read on the cookieMAC hot path is a single
+	// atomic load — same cost class as the existing cookieGen read.
+	cookieGenSeq atomic.Uint64
 	// loginLimiter is an O(1) LRU-backed per-IP limiter. At 10k attacking IPs
 	// the previous two-pass O(n) scan was done under a single mutex and could
 	// block legitimate logins; the ratelimit package does insertion, LRU
@@ -147,9 +170,14 @@ func (a *AuthHandlers) unauthDashAllow(ip string) bool {
 // R247-SEC-17: HMAC input now includes cookieGen so the MAC rotates on
 // every process restart (and any future hot-reload that bumps cookieGen)
 // even when stateDir / cookieSecret are stable. The serialised input uses
-// a length-prefixed framing (`token || \x00 || cookieGen`) so a malicious
-// (token, gen) split that concatenates to the same bytes cannot collide
-// with a legitimate split.
+// a length-prefixed framing (`token || \x00 || cookieGen || \x00 || seq`)
+// so a malicious (token, gen, seq) split that concatenates to the same
+// bytes cannot collide with a legitimate split.
+//
+// R245-SEC-2 (#826): cookieGenSeq is also mixed in so RotateCookieGen
+// produces a new MAC immediately, invalidating every outstanding cookie
+// without needing a process restart. The atomic load is the same cost
+// class as the prior plain-string read.
 func (a *AuthHandlers) cookieMAC() string {
 	if a.dashboardToken == "" {
 		return ""
@@ -158,7 +186,26 @@ func (a *AuthHandlers) cookieMAC() string {
 	mac.Write([]byte(a.dashboardToken))
 	mac.Write([]byte{0}) // domain separator: token || \x00 || cookieGen
 	mac.Write([]byte(a.cookieGen))
+	mac.Write([]byte{0}) // domain separator: cookieGen || \x00 || seq
+	var seqBuf [20]byte
+	mac.Write(strconv.AppendUint(seqBuf[:0], a.cookieGenSeq.Load(), 10))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// RotateCookieGen invalidates every outstanding auth cookie by bumping
+// the cookieGenSeq counter mixed into cookieMAC. Safe to call from any
+// goroutine — uses an atomic increment with no lock.
+//
+// R245-SEC-2 (#826): the rotation hook a future hot-reload handler must
+// invoke whenever the dashboard token (or any other auth-relevant
+// secret) changes. Without this call, a token rotation at runtime
+// leaves the prior token's cookies valid for the full 24h MaxAge
+// because cookieGen was only seeded once at construction. Calling
+// RotateCookieGen on the rotation event closes that window — every
+// browser carrying an old MAC fails the constant-time compare on its
+// next request and is sent back through /api/auth/login.
+func (a *AuthHandlers) RotateCookieGen() {
+	a.cookieGenSeq.Add(1)
 }
 
 // isAuthenticated checks auth without writing an error response. Used by
@@ -329,6 +376,65 @@ func (a *AuthHandlers) isSecure(r *http.Request) bool {
 	return a.trustedProxy && r.Header.Get("X-Forwarded-Proto") == "https"
 }
 
+// handleLoginNoScript is the form-action target for the login page's
+// `<form action="/api/auth/noscript" method="POST">`. The login flow is
+// fully JavaScript-driven (the JS submit handler intercepts and POSTs
+// JSON to /api/auth/login); a non-JS browser that hits Submit would
+// otherwise cause the form-encoded `token=…` body to be POSTed to
+// `/dashboard` and land in server access logs as part of the URL-decoded
+// body if any future middleware reads it.
+//
+// R243-SEC-15 (#800): defence-in-depth. Today no handler reads the form
+// body, but the browser still ships the token inside an unencrypted POST
+// frame (no TLS guarantee) and the proxy hop chain can log it. Routing
+// the no-JS path to this dedicated handler makes the contract explicit:
+// (a) we never read r.Body, so the token never enters server memory in
+// log-format; (b) we return a 400 with a clear "JavaScript required"
+// page so the operator knows what happened; (c) the response is plain
+// HTML so a screen-reader user can still see the failure mode.
+//
+// We do NOT parse the form body — the io.Copy(io.Discard, ...) on a
+// MaxBytesReader-bounded body drains and drops it without exposing it
+// to slog. ParseForm would otherwise stash key/value pairs in
+// r.PostForm where any debug handler could later dump them.
+func (a *AuthHandlers) handleLoginNoScript(w http.ResponseWriter, r *http.Request) {
+	// Bound + drain the body so the connection can be reused but the
+	// token bytes never enter a parsed map. MaxBytesReader caps at
+	// 1 KiB — same ceiling handleLogin uses for its JSON body. The
+	// drain is best-effort; closing without reading would also work
+	// but some proxies hold the request open expecting the body to be
+	// consumed. We deliberately ignore the read err — we already chose
+	// to discard the bytes regardless of content.
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Explicit 400 (not 405) so the operator's browser shows our
+	// message instead of the default ServeMux "Method Not Allowed".
+	w.WriteHeader(http.StatusBadRequest)
+	if _, err := w.Write([]byte(noScriptLoginHTML)); err != nil {
+		slog.Debug("noscript login write", "err", err)
+	}
+}
+
+// noScriptLoginHTML is the response body for handleLoginNoScript. Plain
+// static HTML — no embedded token, no embedded URL parameter, nothing
+// derivable from request input. Kept short to fit a single TCP frame.
+const noScriptLoginHTML = `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>naozhi — JavaScript required</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{background:#0a0a0a;color:#e0e0e0;font-family:-apple-system,sans-serif;padding:2rem;max-width:42rem;margin:0 auto}h1{font-size:1.25rem;margin-bottom:1rem}p{line-height:1.6;color:#ccc}a{color:#4a9eff}</style>
+</head><body>
+<h1>JavaScript required</h1>
+<p>The naozhi dashboard requires JavaScript to sign in. Please enable JavaScript and reload the login page.</p>
+<p><a href="/dashboard">Back to login</a></p>
+</body></html>`
+
 func (a *AuthHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// handleLogin sits outside requireAuth (it's the endpoint that GRANTS
 	// auth), so apply the same-origin gate manually. A cross-origin login
@@ -340,6 +446,27 @@ func (a *AuthHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("rejecting cross-origin login attempt",
 			"origin", r.Header.Get("Origin"), "host", r.Host)
 		http.Error(w, "cross-origin request refused", http.StatusForbidden)
+		return
+	}
+	// R247-SEC-25 (#528): when trustedProxy=true and X-Forwarded-For is
+	// missing or unparseable, a.clientIP(r) silently falls back to
+	// r.RemoteAddr — which under ALB/CloudFront is the proxy's single IP.
+	// Every legitimate XFF-less request would then share that one bucket,
+	// letting a single attacker burn the loginLimiter slot for every other
+	// XFF-less caller. In a properly configured trusted-proxy deployment
+	// the proxy MUST stamp XFF, so an XFF-less request is either a proxy
+	// misconfig or an attacker bypassing the proxy — either way, fail
+	// loud (400) so the operator notices, instead of degrading to a
+	// shared-bucket rate limit. Mirrors the AllowRequest gate on the
+	// general HTTP rate-limiter (R244-SEC-P3-3).
+	if !requestHasResolvableClientIP(r, a.trustedProxy) {
+		slog.Warn("login refused: trusted-proxy mode but X-Forwarded-For missing/unparseable",
+			"remote", r.RemoteAddr, "xff", r.Header.Get("X-Forwarded-For"))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		if _, err := w.Write([]byte(`{"error":"missing X-Forwarded-For header"}`)); err != nil {
+			slog.Debug("write XFF error response", "err", err)
+		}
 		return
 	}
 	ip := a.clientIP(r)
@@ -433,7 +560,7 @@ button:hover{background:#3a8eef}button:active{background:#2a7edf}
 <div class="login">
 <h1>naozhi</h1>
 <p>enter token to continue</p>
-<form id="login-form" action="/dashboard" method="POST" autocomplete="on">
+<form id="login-form" action="/api/auth/noscript" method="POST" autocomplete="on">
 <input type="text" name="username" autocomplete="username" value="naozhi" tabindex="-1" aria-hidden="true">
 <label for="token" style="position:absolute;left:-9999px">dashboard token</label>
 <input type="password" name="token" id="token" autocomplete="current-password" placeholder="dashboard token" aria-label="dashboard token" autofocus>

@@ -16,8 +16,8 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 )
@@ -159,6 +159,12 @@ func putJSONEnc(e *jsonEncBuf) {
 // CLIENT-SIDE CONTRACT documented on writeJSON applies to any string field
 // carried over a marshalPooled-encoded message: clients MUST render strings
 // via textContent (or DOMPurify) and never assign them to innerHTML.
+//
+// R238-SEC-5 (#821): if a future consumer renders a marshalPooled-encoded
+// payload via innerHTML (without DOMPurify), the unescaped `<`/`>`/`&`
+// preserved here become an XSS escalation. Such call sites MUST switch to
+// marshalEscaped instead — the contract is JSON-API-only; HTML-template render
+// paths require the escaped variant.
 func marshalPooled(v any) ([]byte, error) {
 	e := getJSONEnc()
 	defer putJSONEnc(e)
@@ -166,6 +172,40 @@ func marshalPooled(v any) ([]byte, error) {
 		return nil, err
 	}
 	raw := e.buf.Bytes()
+	if n := len(raw); n > 0 && raw[n-1] == '\n' {
+		raw = raw[:n-1]
+	}
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	return out, nil
+}
+
+// marshalEscaped is the HTML-safe counterpart to marshalPooled. R238-SEC-5
+// (#821) called out that the SetEscapeHTML(false) baked into jsonEncPool is
+// only safe under the writeJSON CLIENT-SIDE CONTRACT (no innerHTML without
+// DOMPurify); callers who cannot guarantee that contract — e.g. payloads that
+// are spliced into HTML templates, embedded inside <script type="application/
+// json">, or rendered via innerHTML on any non-DOMPurify path — MUST encode
+// via this helper instead.
+//
+// Implementation note: this is intentionally a fresh json.Encoder per call
+// (not a separate sync.Pool). The expected call sites for marshalEscaped are
+// rare, off-hot-path, and already paying for HTML-template rendering; pooling
+// an additional encoder type would invite the same future-mutation hazard
+// (TestSetEscapeHTMLFalse_ScopedToWriteJSONHelper documents) without measurable
+// payoff. If a future hot path needs the escaped form, introduce a second
+// pool with its own contract test rather than reusing jsonEncPool.
+func marshalEscaped(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	// SetEscapeHTML(true) is the json package default; we set it explicitly so
+	// readers of this site see the escape contract without chasing stdlib
+	// defaults, and so that a future stdlib change cannot silently invert it.
+	enc.SetEscapeHTML(true)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	raw := buf.Bytes()
 	if n := len(raw); n > 0 && raw[n-1] == '\n' {
 		raw = raw[:n-1]
 	}
@@ -328,13 +368,40 @@ func (s *Server) registerDashboard() {
 		s.sessionH.snapshotEnricher = s.hub.enrichSnapshot
 	}
 
-	// Wire sendH now that hub exists
+	// R247-ARCH-15 (#650): wire ProjectHandlers' baseCtx now that
+	// s.hub.ctx exists. New() constructs projectH before the hub so
+	// the prior implementation captured the lookup in a closure; this
+	// setter call replaces that closure-as-DI antipattern.
+	if s.projectH != nil {
+		s.projectH.SetBaseContext(s.hub.ctx)
+	}
+
+	// Wire sendH now that hub exists.
+	//
+	// R215-ARCH-P2-3 (#579): the upload-store cleanup goroutine is an
+	// app-lifecycle subsystem, not a Hub-internal one — its lifetime must
+	// follow the process, not the Hub's hot-reload boundary. A future Hub
+	// hot-reload (drain + replace) would otherwise prematurely cancel the
+	// cleanup loop and leak temp-file entries until the next process start.
+	// `s.appCtx` is wired by Server.Start before registerDashboard runs (see
+	// project_api_basectx_test.go's CTX1 pin); it is canceled only on full
+	// process shutdown. Falling back to s.hub.ctx is unsafe (semantics drift)
+	// and to context.Background is unsafe (no cancellation at all), so the
+	// nil-fallback below is purely defensive against tests that bypass Start.
 	uploads := newUploadStore()
-	uploads.StartCleanup(s.hub.ctx)
+	cleanupCtx := s.appCtx
+	if cleanupCtx == nil {
+		cleanupCtx = s.hub.ctx
+	}
+	uploads.StartCleanup(cleanupCtx)
 	s.hub.SetUploadStore(uploads)
 	s.sendH = &SendHandler{
-		nodeAccess:    s.nodeAccess,
-		hub:           s.hub,
+		nodeAccess: s.nodeAccess,
+		hub:        s.hub,
+		// router: SendRouter consumer-interface view of *session.Router.
+		// Closes the R215-ARCH-P1-4 (#566) Phase-2.5 cleanup so the handler
+		// no longer reaches its router via h.hub.router.* transits.
+		router:        s.hub.router,
 		uploadStore:   uploads,
 		uploadLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, s.auth.trustedProxy), // 10 uploads/min per IP
 		sendLimiter:   newIPLimiterWithProxy(rate.Every(2*time.Second), 30, s.auth.trustedProxy), // 30 sends/min per IP (burst 30)
@@ -348,7 +415,12 @@ func (s *Server) registerDashboard() {
 		s.hub.SetScratchPool(s.scratchPool)
 		s.scratchPool.StartSweeper()
 		s.scratchH = &ScratchHandler{
-			hub:       s.hub,
+			hub: s.hub,
+			// router: ScratchRouter consumer-interface view of
+			// *session.Router. Closes the R215-ARCH-P1-4 (#566) Phase-2.5
+			// cleanup so the handler no longer reaches its router via
+			// h.hub.router.* transits.
+			router:    s.hub.router,
 			pool:      s.scratchPool,
 			openLimit: newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.trustedProxy), // 5 opens/min per IP
 			agents:    s.agents,
@@ -358,38 +430,45 @@ func (s *Server) registerDashboard() {
 	// Push session list changes to WS clients
 	s.router.SetOnChange(func() { s.hub.BroadcastSessionsUpdate() })
 
-	// Push cron execution results to WS clients. cron_result is preserved
-	// for backward compatibility; new clients should subscribe to the
-	// run-started / run-ended pair (P0 cron-run-history) which covers every
-	// terminal state including skipped and canceled.
+	// Phase D (RFC §3.5): unified Run lifecycle wiring via
+	// runtelemetry.Broadcaster. cron and sysession each register the
+	// same hubBroadcaster; subsystem-specific WS payload selection
+	// happens inside hubBroadcaster.Broadcast{Started,Ended}.
+	//
+	// The legacy cron_result frame and its SetOnExecute hook were
+	// deleted in this phase — dashboard.js migrated the announce()
+	// to the cron_run_ended succeeded branch. Result text, when needed,
+	// is fetched via the GET /api/cron/jobs/<id>/runs/<runID> endpoint.
+	telemetry := newHubBroadcaster(s.hub)
 	if s.scheduler != nil {
-		s.scheduler.SetOnExecute(func(jobID, result, errMsg string) {
-			s.hub.BroadcastCronResult(jobID, result, errMsg)
-		})
-		s.scheduler.SetOnRunStarted(func(ev cron.RunStartedEvent) {
-			s.hub.BroadcastCronRunStarted(ev.JobID, ev.RunID, ev.StartedAt,
-				string(ev.Trigger), ev.SessionID, ev.Fresh)
-		})
-		s.scheduler.SetOnRunEnded(func(ev cron.RunEndedEvent) {
-			s.hub.BroadcastCronRunEnded(ev.JobID, ev.RunID, string(ev.State),
-				ev.StartedAt, ev.EndedAt, ev.DurationMS, ev.SessionID,
-				string(ev.ErrorClass), ev.ErrorMsg, string(ev.Trigger))
-		})
+		s.scheduler.SetTelemetry(telemetry)
 	}
-
-	// Push system-daemon Run events to WS clients (RFC §9.4).
-	// Manager.SetCallbacks accepts wiring after Manager.Start so this is
-	// safe even when sysession was constructed in main.go before the Hub
-	// existed.
+	// sysession.Manager keeps its own SetCallbacks API for now (its
+	// atomic.Pointer holder shape would need its own refactor); the
+	// callbacks here translate sysession.DaemonRun*Event into
+	// runtelemetry events and route through the same hubBroadcaster
+	// so the wire shape matches Phase D's unified path.
 	if s.sysessionMgr != nil {
 		s.sysessionMgr.SetCallbacks(
 			func(ev sysession.DaemonRunStartedEvent) {
-				s.hub.BroadcastDaemonRunStarted(ev.Name, ev.RunID, string(ev.Trigger), ev.StartedAt)
+				telemetry.BroadcastRunStarted(runtelemetry.RunStartedEvent{
+					Subsystem: runtelemetry.SubsystemSysession,
+					OwnerID:   ev.Name,
+					RunID:     ev.RunID,
+					Trigger:   runtelemetry.TriggerKind(ev.Trigger),
+					StartedAt: ev.StartedAt,
+				})
 			},
 			func(ev sysession.DaemonRunEndedEvent) {
-				s.hub.BroadcastDaemonRunEnded(ev.Name, ev.RunID,
-					string(ev.State), string(ev.ErrorClass),
-					string(ev.Trigger), ev.DurationMS)
+				telemetry.BroadcastRunEnded(runtelemetry.RunEndedEvent{
+					Subsystem:  runtelemetry.SubsystemSysession,
+					OwnerID:    ev.Name,
+					RunID:      ev.RunID,
+					State:      runtelemetry.RunState(ev.State),
+					DurationMS: ev.DurationMS,
+					Trigger:    runtelemetry.TriggerKind(ev.Trigger),
+					ErrorClass: runtelemetry.ErrorClass(ev.ErrorClass),
+				})
 			},
 		)
 	}
@@ -465,6 +544,13 @@ func (s *Server) registerDashboard() {
 
 	// Unauthenticated routes (login, static assets, WebSocket with own auth)
 	s.mux.HandleFunc("POST /api/auth/login", s.auth.handleLogin)
+	// R243-SEC-15 (#800): explicit no-JS form-action target. The login page
+	// posts JSON via fetch() when JavaScript is enabled; this handler exists
+	// so a JS-disabled browser's submit lands in a controlled drain-and-
+	// discard path instead of a raw "POST /dashboard" that would (a) get
+	// 405 from the GET-only mux entry above and (b) ship the form-encoded
+	// token through any logging middleware that reads request bodies.
+	s.mux.HandleFunc("POST /api/auth/noscript", s.auth.handleLoginNoScript)
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
 	s.mux.HandleFunc("GET /manifest.json", s.handleManifest)
 	s.mux.HandleFunc("GET /sw.js", s.handleSW)
@@ -542,7 +628,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// `require-sri-for font` is included as a no-op forward-compatibility
 	// hook: every shipping browser ignores the directive today, but if
 	// any vendor revives the proposal we get integrity enforcement for
-	// free without another CSP edit.
+	// free without another CSP edit. R247-SEC-23 (#518) closes on this
+	// pin alone; vendoring is the long-term mitigation tracked above as
+	// NEEDS-DESIGN. The TestDashboardCSP_KatexFontSRIForwardCompat
+	// regression test asserts the `font` token never gets dropped from
+	// require-sri-for during a future CSP refactor.
 	//
 	// R243-SEC-4 / R244-SEC-P2-4 [REPEAT-3]: extend the same forward-compat
 	// hook to `script` and `style` tokens. Today's CDN-loaded resources
@@ -555,6 +645,24 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// CDN code. Vendoring the assets via //go:embed remains the proper
 	// long-term mitigation; this is the cheap "no regression" gate while
 	// that work is queued (see R247-SEC-23 NEEDS-DESIGN comment above).
+	//
+	// R236-SEC-14 (#562) audit: `img-src ... data:` is intentional and
+	// kept. The dropdown-arrow CSS in `static/dashboard.html`
+	// (`.cron-sort-select`, `.freq-mode-select`, `.freq-extra`) ships
+	// inline `data:image/svg+xml` URIs as `background-image`, which the
+	// CSP spec routes through `img-src` even though the syntactic context
+	// is CSS. Stripping `data:` therefore breaks the cron / scheduler UI
+	// dropdowns. The pre-condition of the original SEC-14 concern —
+	// pairing with `'unsafe-inline'` to enable a data: exfil channel —
+	// requires an attacker-injected `<img src="data:...">` element; the
+	// audit (`grep -nE '<img\s[^>]*src="data:' static/`) finds zero such
+	// occurrences in the shipped HTML, and the regression test
+	// `TestDashboardCSP_DataImgAuditPinned` pins that absence so the
+	// actual exfil precondition cannot regress. Tightening to
+	// `'self' blob:` must be bundled with (a) replacing those CSS
+	// data-URIs with embedded SVG files served from /static and
+	// (b) eliminating `script-src 'unsafe-inline'` per R236-SEC-02 /
+	// #441 — see triage note on #562 for the bundled work.
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:; frame-src 'self' blob:; frame-ancestors 'none'; require-sri-for script style font")
 	// HSTS is only meaningful over TLS (RFC 6797 §7.2). Sending it on plain
 	// HTTP would still be honoured by browsers and can brick local HTTP

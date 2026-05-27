@@ -7,7 +7,28 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"unsafe"
 )
+
+// stringToBytesUnsafe aliases s's backing storage as a []byte without
+// allocating. The returned slice MUST be treated as read-only — Go strings
+// are immutable, so any mutation (including by the bytes-borrow recipient)
+// is undefined behaviour.
+//
+// Used on the ReadEvent hot path (#700 / R222-PERF-3): json.Unmarshal only
+// reads its input buffer, so handing it the aliased bytes saves the
+// per-event []byte(line) heap copy that was the dominant survivor on the
+// stream-json ingest path. Mirror of the symmetric encode-side trick in
+// shim/protocol.go MarshalStdoutLine.
+//
+// Returns nil for the empty string so callers don't accidentally pass a
+// zero-length slice with a nil StringData pointer to json.Unmarshal.
+func stringToBytesUnsafe(s string) []byte {
+	if len(s) == 0 {
+		return nil
+	}
+	return unsafe.Slice(unsafe.StringData(s), len(s))
+}
 
 // resumeIDRe accepts only characters that can legally appear in a Claude
 // session UUID (hex + hyphen). This is a defence-in-depth check at the CLI
@@ -169,6 +190,13 @@ func (p *ClaudeProtocol) Capabilities() Caps {
 // current turn with a `stop_reason=tool_use` or `end_turn` result event, and
 // returning to the ready state — without tearing down the session. Verified
 // against CLI 2.1.119.
+//
+// DEADCODE-4 (#1197): the legacy `controlRequestInterrupt` /
+// `controlRequestInterruptBody` struct types that used to back this
+// envelope via json.Marshal have been retired — the byte-template path
+// below is the single source of truth for the interrupt envelope shape.
+// New protocol-version variants should pair a typed shape with a real
+// caller rather than reintroducing orphan types.
 
 func (p *ClaudeProtocol) WriteInterrupt(w io.Writer, requestID string) error {
 	// R228-PERF-1: hand-build the static envelope and only json.Marshal the
@@ -212,7 +240,11 @@ func (p *ClaudeProtocol) WriteInterrupt(w io.Writer, requestID string) error {
 // graph it feeds).
 func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	var ev Event
-	if err := json.Unmarshal([]byte(line), &ev); err != nil {
+	// stringToBytesUnsafe avoids the per-event []byte(line) heap copy that
+	// the obvious []byte(line) cast would force. json.Unmarshal only reads
+	// its input, so aliasing the immutable string's storage is safe.
+	// R222-PERF-3 (#700).
+	if err := json.Unmarshal(stringToBytesUnsafe(line), &ev); err != nil {
 		return nil, false, err
 	}
 	// Skip hook events

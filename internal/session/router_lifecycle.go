@@ -29,7 +29,6 @@ import (
 	"github.com/naozhi/naozhi/internal/history/merged"
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
 	"github.com/naozhi/naozhi/internal/metrics"
-	"github.com/naozhi/naozhi/internal/shim"
 )
 
 // publishSessionLocked is the single funnel for installing a freshly-built
@@ -48,9 +47,34 @@ import (
 // entries) pass alreadyAttached=true so we do not double-attach.
 //
 // LOCK: caller must hold r.mu (write).
+//
+// Post-condition: s.loadHistorySource() returns non-nil. R215-ARCH-P2-2
+// asks for "ManagedSession constructor mandates history.Source injection".
+// Adding a true mandatory-arg constructor would force a sweep of 20+
+// `&ManagedSession{key:...}` test literals, so we instead enforce the
+// invariant at the single canonical insertion funnel: any path that
+// publishes a session into r.sessions through this helper is guaranteed
+// to leave it with a usable history source. attachHistorySource itself
+// is nil-safe (degrades to history.Noop) and the alreadyAttached branch
+// trusts the caller — the post-publish guard below catches the case
+// where alreadyAttached==true was set by mistake / the pre-attach path
+// silently skipped the SetHistorySource call. EventEntriesBeforeCtx's
+// disk fallback then degrades gracefully to "no entries" instead of
+// silently returning empty because src==nil short-circuits.
 func (r *Router) publishSessionLocked(key string, s *ManagedSession, alreadyAttached bool) {
 	if !alreadyAttached {
 		r.attachHistorySource(s)
+	}
+	if s.loadHistorySource() == nil {
+		// Defence-in-depth: alreadyAttached==true with no actual
+		// SetHistorySource call would otherwise silently leave the
+		// dashboard "history" drawer blank. Emit the diagnostic that
+		// would have been needed to debug it AND install a Noop so
+		// callers downstream of EventEntriesBeforeCtx don't have to
+		// nil-check.
+		slog.Error("publishSessionLocked: history source missing after attach — falling back to Noop",
+			"key", key, "alreadyAttached", alreadyAttached)
+		s.SetHistorySource(history.Noop{})
 	}
 	r.sessions[key] = s
 	r.indexAdd(key)
@@ -389,6 +413,16 @@ type spawnParams struct {
 // process spawn — a test can exercise the merge rules without standing up
 // wrappers or filesystems beyond what resolveResumeID already needs.
 //
+// CONTRACT (R222-ARCH-12 / #735): this function is the SINGLE source of
+// truth for workspace + backend + model + args + resumeID resolution.
+// Earlier rounds had the same precedence rules copy-pasted across
+// spawnSession / Resume / ResetAndRecreate; pinning the merge here keeps
+// reset/recreate/resume from drifting. Any new spawn-adjacent path
+// (Takeover, Reattach, etc.) MUST route through this function rather
+// than re-implement the precedence inline. workspace_resolver_contract_test.go
+// guards the invariant by asserting exactly one `workspace = opts.Workspace`
+// site survives in router_lifecycle.go.
+//
 // LOCK: caller must hold r.mu for writing.
 func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) spawnParams {
 	// Backend pick precedence (highest to lowest):
@@ -426,20 +460,15 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	wrapper, backendID := r.wrapperFor(reqBackend)
 
 	// Model merge: router default ← backend override ← per-request opts.
-	model := r.model
-	if bm, ok := r.backendModels[backendID]; ok && bm != "" {
-		model = bm
-	}
+	// Args: backend-scoped replacement wins over router-wide extraArgs, then
+	// per-request ExtraArgs is appended. REPLACE (not append) semantics for
+	// the backend level matches RouterConfig.BackendExtraArgs godoc
+	// (R53-ARCH-002). backendDefaultsFor consolidates the lookup that
+	// previously sat inline here and in router_shim drift detection
+	// (R222-ARCH-14, #739).
+	model, baseArgs := r.backendDefaultsFor(backendID)
 	if opts.Model != "" {
 		model = opts.Model
-	}
-
-	// Args: backend-scoped replacement wins over router-wide extraArgs, then
-	// per-request ExtraArgs is appended. REPLACE (not append) semantics for the
-	// backend level matches RouterConfig.BackendExtraArgs godoc (R53-ARCH-002).
-	baseArgs := r.extraArgs
-	if ba, ok := r.backendExtraArgs[backendID]; ok && len(ba) > 0 {
-		baseArgs = ba
 	}
 	args := make([]string, len(baseArgs))
 	copy(args, baseArgs)
@@ -628,8 +657,19 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	if r.spawningKeys == nil {
 		r.spawningKeys = make(map[string]chan struct{})
 	}
-	doneCh := make(chan struct{})
-	r.spawningKeys[key] = doneCh
+	// R62-GO-3 (#775): if a caller (e.g. ResetAndRecreate) pre-installed a
+	// guard channel before releasing r.mu, reuse that channel so the
+	// "spawn-in-flight" marker is continuous from the caller's unlock
+	// through this defer. Concurrent GetOrCreate parked on the guardCh
+	// will never observe a `inflight=false` window in r.spawningKeys[key]
+	// before this function's prologue, so it cannot race in and spawn its
+	// own session with mismatched opts. If no pre-existing entry, install
+	// a fresh per-spawn channel as before.
+	doneCh, reused := r.spawningKeys[key]
+	if !reused {
+		doneCh = make(chan struct{})
+		r.spawningKeys[key] = doneCh
+	}
 	defer func() {
 		r.mu.Lock()
 		r.markSpawnDoneLocked(key, doneCh)
@@ -1345,32 +1385,38 @@ func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 // socket path derived from KeyHash, so callers don't need to plumb a
 // shim.Manager reference through every Reset path. Returns quickly if
 // the socket was never created.
+//
+// R222-ARCH-2 (#711): the actual socket-path computation + filesystem
+// poll lives behind cli.WaitSocketGoneForKey so the session package no
+// longer reaches directly into internal/shim for socket naming. Keep
+// this thin shim (pun intended) so existing call sites stay unchanged
+// and the boolean return from cli is intentionally dropped — Reset
+// callers proceed regardless of whether the socket actually disappeared
+// (a stuck shim falls through to spawnSession's StartShim which
+// surfaces the "refusing to clobber" error to the operator).
 func waitSocketGoneForKey(key string, maxWait time.Duration) {
-	if key == "" {
-		return
-	}
-	socketPath := shim.SocketPath(shim.KeyHash(key))
-	shim.WaitSocketGone(socketPath, maxWait)
+	cli.WaitSocketGoneForKey(key, maxWait)
 }
 
 // ResetAndRecreate atomically resets a session and spawns a new one for the same key.
 // This avoids the race window between Reset and GetOrCreate where a concurrent
 // message could create a session with wrong opts.
 //
-// NOTE (R62-GO-3): ResetAndRecreate releases r.mu between session
-// teardown and respawn so proc.Close() can run without holding the
-// router mutex. A concurrent GetOrCreate arriving in that window
-// can win the race and spawn a fresh session with its own opts,
-// which may not match what the caller of ResetAndRecreate expected.
+// R62-GO-3 (#775) FIX: ResetAndRecreate now installs a guard channel in
+// r.spawningKeys[key] BEFORE releasing r.mu for proc.Close(). Concurrent
+// GetOrCreate callers parking in the (key not present, but inflight)
+// window will block on the guardCh until spawnSession's defer closes it
+// (whether spawn succeeded or failed). spawnSession's prologue reuses
+// an existing channel rather than overwriting it, so the guardCh is
+// continuously installed from this function's first unlock through
+// spawnSession's defer — no concurrent caller can observe "no session,
+// no inflight marker" and spawn its own with different opts.
 //
-// Mitigation: callers whose behavior depends on opts.Backend being
-// honored MUST treat ResetAndRecreate's returned session as a
-// best-effort — it guarantees "a fresh session exists" but not
-// "a fresh session with MY opts". The TOCTOU guard in spawnSession
-// returns existing sessions rather than stacking dup spawns, so the
-// invariant "exactly one live session per key" holds. Round 209's
-// SM1 (ResetAndDiscardOverride) is the atomic alternative when
-// opts fidelity matters.
+// Historical NOTE: prior to the #775 fix the gap allowed a concurrent
+// GetOrCreate to win and spawn with its own opts. Callers that needed
+// opts fidelity were directed to ResetAndDiscardOverride (R209 SM1).
+// With the guard in place, ResetAndRecreate now provides the same
+// "MY opts" guarantee for the simple reset+recreate case.
 func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, error) {
 	r.mu.Lock()
 
@@ -1398,6 +1444,18 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		r.storeGen.Add(1)
 
 		if proc != nil && proc.Alive() {
+			// R62-GO-3 (#775): install a guardCh in r.spawningKeys[key]
+			// BEFORE we release r.mu. Concurrent GetOrCreate that
+			// observes (no session, but inflight marker) will park on
+			// guardCh and not race in to spawn its own session with
+			// different opts. spawnSession below reuses this same
+			// channel and its defer closes+removes it.
+			if r.spawningKeys == nil {
+				r.spawningKeys = make(map[string]chan struct{})
+			}
+			if _, exists := r.spawningKeys[key]; !exists {
+				r.spawningKeys[key] = make(chan struct{})
+			}
 			r.mu.Unlock()
 			proc.Close()
 			// Same rationale as Router.Reset: make sure the shim

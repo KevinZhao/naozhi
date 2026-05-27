@@ -3,6 +3,7 @@ package sysession
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -117,6 +118,62 @@ func TestBuildExcerpt_NoTotalCap(t *testing.T) {
 	want := strings.TrimSpace(in)
 	if got != want {
 		t.Errorf("excerpt content drift; len got=%d want=%d", len(got), len(want))
+	}
+}
+
+// TestBuildExcerpt_MarkerSplitByLineCap pins R235-GO-4 (#1004): the
+// per-line cap (autoTitlerLineCapBytes) MUST NOT leave a literal
+// EXCERPT delimiter visible to the LLM, even when an attacker pads
+// the line so the marker straddles the cap. The previous shape did
+// the marker scrub as a final ReplaceAll on the rune-walk output —
+// once truncation cut "---BEGIN CONVERSATION EXCERPT---" between
+// "---BEGIN CONVERS" + "ATION EXCERPT---" the post-pass missed both
+// fragments and a real BEGIN delimiter survived in the prompt,
+// poisoning the structural boundary the system prompt relies on.
+//
+// The fix neutralises markers on the raw seed before truncation so
+// no cap split can re-emerge a partial marker. The placeholder is
+// shorter than either marker (16 vs 30/32 bytes) so the cap math
+// stays conservative.
+func TestBuildExcerpt_MarkerSplitByLineCap(t *testing.T) {
+	t.Parallel()
+	// Pad with enough leading bytes that the BEGIN marker straddles
+	// the autoTitlerLineCapBytes boundary. Pick a pad length ≥
+	// (cap - len(marker)/2) so the truncation point lands inside the
+	// marker text.
+	padLen := autoTitlerLineCapBytes - 10
+	pad := strings.Repeat("a", padLen)
+	seedBegin := pad + excerptBeginMarker + " trailing tail"
+	gotBegin := buildExcerpt(seedBegin)
+	if strings.Contains(gotBegin, excerptBeginMarker) {
+		t.Errorf("BEGIN marker survived in output despite line-cap split; got: %q", gotBegin)
+	}
+	if strings.Contains(gotBegin, "BEGIN CONVERSATION EXCERPT") {
+		// Even a partial-marker fragment is a structural-boundary risk.
+		// The replacement happens BEFORE truncation, so the cap should
+		// only ever see the inert placeholder fragments.
+		t.Errorf("BEGIN-marker substring survived in output: %q", gotBegin)
+	}
+
+	// Same shape for the END marker.
+	seedEnd := pad + excerptEndMarker + " trailing tail"
+	gotEnd := buildExcerpt(seedEnd)
+	if strings.Contains(gotEnd, excerptEndMarker) {
+		t.Errorf("END marker survived in output despite line-cap split; got: %q", gotEnd)
+	}
+	if strings.Contains(gotEnd, "END CONVERSATION EXCERPT") {
+		t.Errorf("END-marker substring survived in output: %q", gotEnd)
+	}
+
+	// Sanity: an inline marker on a short line still gets neutralised
+	// (existing Sec-MEDIUM-1 contract).
+	seedShort := excerptBeginMarker + " short tail"
+	gotShort := buildExcerpt(seedShort)
+	if strings.Contains(gotShort, excerptBeginMarker) {
+		t.Errorf("inline BEGIN marker survived without line-cap split: %q", gotShort)
+	}
+	if !strings.Contains(gotShort, excerptMarkerSafe) {
+		t.Errorf("expected placeholder %q in output, got: %q", excerptMarkerSafe, gotShort)
 	}
 }
 
@@ -350,6 +407,122 @@ func TestBuildExcerptFromHistory(t *testing.T) {
 	if got != want {
 		t.Errorf("buildExcerptFromHistory:\n got %q\nwant %q", got, want)
 	}
+}
+
+// TestBuildExcerptFromHistory_SoftCap verifies R238-GO-15 (#806):
+// thousands-of-turns sessions can no longer drive the builder past
+// autoTitlerExcerptSoftCapBytes.  We feed entries whose summed length
+// exceeds the cap and assert the result stays bounded and ends with the
+// truncation marker.
+func TestBuildExcerptFromHistory_SoftCap(t *testing.T) {
+	t.Parallel()
+	// Use a 4 KiB summary repeated enough times to exceed the 1 MiB cap.
+	const perEntry = 4 * 1024
+	bigChunk := strings.Repeat("a", perEntry)
+	// Want at least cap/perEntry + 8 entries so the loop hits the
+	// truncation path and keeps iterating with no further appends.
+	count := (autoTitlerExcerptSoftCapBytes / perEntry) + 8
+	entries := make([]cli.EventEntry, 0, count)
+	for i := 0; i < count; i++ {
+		entries = append(entries, cli.EventEntry{
+			Time: int64(i), Type: "user", Summary: bigChunk,
+		})
+	}
+	got := buildExcerptFromHistory(entries)
+	// Cap is a soft cap: result MUST NOT exceed cap + ellipsis bytes
+	// (the marker is appended once when the cap fires).
+	maxLen := autoTitlerExcerptSoftCapBytes + len("\n…")
+	if len(got) > maxLen {
+		t.Errorf("buildExcerptFromHistory exceeded soft cap: got %d bytes, max %d", len(got), maxLen)
+	}
+	// Truncation marker must be present so downstream review can spot
+	// the cut.  Confirms the break-on-cap branch fired.
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("expected truncation ellipsis at tail, got tail %q", got[max(0, len(got)-32):])
+	}
+}
+
+// TestEvictOldestHighwater_DropsOldestFirst verifies R238-GO-16 (#808)
+// hard-cap eviction order:  the helper must keep the most recently
+// renamed entries and drop the oldest ones first so the bounded-size
+// map still gates useful min_rename_interval decisions.
+func TestEvictOldestHighwater_DropsOldestFirst(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	m := map[string]autoTitlerHighwater{
+		"oldest":   {lastRenamedAt: now.Add(-3 * time.Hour)},
+		"middle":   {lastRenamedAt: now.Add(-2 * time.Hour)},
+		"recent":   {lastRenamedAt: now.Add(-1 * time.Hour)},
+		"freshest": {lastRenamedAt: now},
+	}
+	evictOldestHighwater(m, 2)
+	if len(m) != 2 {
+		t.Fatalf("expected len=2 after evict, got %d", len(m))
+	}
+	if _, ok := m["freshest"]; !ok {
+		t.Errorf("freshest must survive eviction")
+	}
+	if _, ok := m["recent"]; !ok {
+		t.Errorf("recent must survive eviction")
+	}
+	if _, ok := m["oldest"]; ok {
+		t.Errorf("oldest must be evicted first")
+	}
+}
+
+// TestEvictOldestHighwater_NoOpWhenUnderCap covers the fast-path:
+// when len(m) <= keep, no entry should be touched.
+func TestEvictOldestHighwater_NoOpWhenUnderCap(t *testing.T) {
+	t.Parallel()
+	m := map[string]autoTitlerHighwater{
+		"a": {lastRenamedAt: time.Now()},
+		"b": {lastRenamedAt: time.Now()},
+	}
+	evictOldestHighwater(m, 5)
+	if len(m) != 2 {
+		t.Errorf("expected unchanged len=2, got %d", len(m))
+	}
+}
+
+// TestCommitHighwater_HardCapEnforcedOnEarlyStop pins R238-GO-16 (#808):
+// even when earlyStop=true keeps blocking the regular prune path, a
+// long-running tick stream must NOT grow highwater past
+// autoTitlerHighwaterMaxEntries.  We seed an oversized map directly
+// then call commitHighwater with earlyStop=true and a single new write.
+func TestCommitHighwater_HardCapEnforcedOnEarlyStop(t *testing.T) {
+	t.Parallel()
+	a := &autoTitler{}
+	a.highwater.Store(&map[string]autoTitlerHighwater{})
+	// Seed past the cap so commitHighwater MUST evict.
+	overflow := autoTitlerHighwaterMaxEntries + 50
+	seed := make(map[string]autoTitlerHighwater, overflow)
+	for i := 0; i < overflow; i++ {
+		seed[fmtKey(i)] = autoTitlerHighwater{
+			lastRenamedAt: time.Unix(int64(i), 0),
+		}
+	}
+	a.highwater.Store(&seed)
+	// Single new write; earlyStop=true blocks the prune-by-observed
+	// path, so the only thing keeping the map bounded is the hard cap.
+	writes := map[string]autoTitlerHighwater{
+		"new-write": {lastRenamedAt: time.Now()},
+	}
+	a.commitHighwater(writes, nil, true)
+	got := *a.highwater.Load()
+	if len(got) > autoTitlerHighwaterMaxEntries {
+		t.Errorf("hard cap not enforced: got %d entries, max %d", len(got), autoTitlerHighwaterMaxEntries)
+	}
+	// The freshest write must survive; the oldest seeds must be gone.
+	if _, ok := got["new-write"]; !ok {
+		t.Errorf("most-recent write was evicted, expected to survive")
+	}
+	if _, ok := got[fmtKey(0)]; ok {
+		t.Errorf("oldest seed entry was not evicted")
+	}
+}
+
+func fmtKey(i int) string {
+	return "key-" + strconv.Itoa(i)
 }
 
 // TestAutoTitler_PromptIncludesAllUserTurns ensures the rename prompt

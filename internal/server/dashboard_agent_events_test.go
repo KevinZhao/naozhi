@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -134,7 +135,7 @@ func TestAgentEvents_Tombstone_404(t *testing.T) {
 	linker.SetContext(t.TempDir(), "bogus-session-uuid")
 	// Force a zero-retry Resolve so the test finishes fast.
 	linker.ConfigureForTest(1*1e6, 0, 1*1e6) // 1ms retryInterval, 0 retries, 1ms cacheTTL
-	info, _ := linker.Resolve("tmissing", "toolu_X", "ghost", "", 0)
+	info, _ := linker.Resolve(context.Background(), "tmissing", "toolu_X", "ghost", "", 0)
 	if info.Resolved != true || info.InternalAgentID != "" {
 		t.Fatalf("expected tombstone, got %+v", info)
 	}

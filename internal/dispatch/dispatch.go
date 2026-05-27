@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -74,6 +76,44 @@ type SessionGuard interface {
 	Release(key string)
 }
 
+// CronScheduler is the consumer-side seam that dispatch's slash-command
+// handlers (handleCronAdd / handleCronList / handleCronDel /
+// handleCronPause / handleCronResume) require. *cron.Scheduler satisfies
+// this interface implicitly by virtue of its existing public method set;
+// the abstraction exists so dispatch_test.go can stand up a fake without
+// constructing a real Scheduler + tempdir + persistence loop just to
+// exercise reply-text and error-classification branches.
+//
+// R250-ARCH-17 (#1178): Dispatcher.scheduler used to be the concrete
+// pointer *cron.Scheduler, which forced every test that wanted to assert
+// "scheduler is nil → no /cron processing" or "AddJob fails → user sees
+// a generic error" to either construct a full Scheduler or skip the
+// branch entirely. Mirrors the SessionRouter / cron.SessionRouter
+// precedent — dispatch declares the consumer surface, the concrete type
+// in another package implements it implicitly.
+//
+// Method set is the strict subset of cron.Scheduler that dispatch needs:
+// the four read paths (NextRun, ListJobs) and the four write paths
+// (AddJob, DeleteJob, PauseJob, ResumeJob). Future /cron sub-commands
+// must add their methods here AND keep cron.Scheduler in sync — the
+// implicit-satisfaction check fires at NewDispatcher's struct
+// initialisation, so a missing method is a compile-time error.
+//
+// The signature uses *cron.Job / []cron.Job to keep the field-level
+// access (j.ID / j.Schedule / j.Prompt / j.Paused) that the existing
+// handlers rely on. R250-ARCH-1 (#1164) is the deeper "remove the
+// internal/cron import from dispatch entirely" refactor that would
+// break Job into a dispatch-side projection; that work is tracked
+// separately and out of scope for the test-seam fix.
+type CronScheduler interface {
+	AddJob(j *cron.Job) error
+	NextRun(j *cron.Job) time.Time
+	ListJobs(plat, chatID string) []cron.Job
+	DeleteJob(idPrefix, plat, chatID string) (*cron.Job, error)
+	PauseJob(idPrefix, plat, chatID string) (*cron.Job, error)
+	ResumeJob(idPrefix, plat, chatID string) (*cron.Job, error)
+}
+
 // Dispatcher holds the dependencies needed to dispatch incoming IM messages
 // to the session router, handle slash commands, and stream results back.
 type Dispatcher struct {
@@ -94,7 +134,14 @@ type Dispatcher struct {
 	// session.AgentOpts maps.
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
-	scheduler     *cron.Scheduler
+	// scheduler is the cron-side consumer surface dispatch slash-commands
+	// need. *cron.Scheduler satisfies CronScheduler implicitly; tests
+	// inject a fake without constructing the real Scheduler + tempdir.
+	// R250-ARCH-17 (#1178). nil when cron is disabled at the operator
+	// level — every call site already gates on `d.scheduler != nil`,
+	// preserving the no-cron-feature exit path. (See dispatchCommand
+	// in commands.go for the gate.)
+	scheduler CronScheduler
 	// projectMgr is used by slash-command handlers for: (a) UX echo of
 	// the bound project's name from /new, /cd, /project; (b) /cd guard
 	// against workspace-fixed projects; (c) /new resolution of planner
@@ -202,8 +249,12 @@ type DispatcherConfig struct {
 	Platforms     map[string]platform.Platform
 	Agents        map[string]session.AgentOpts
 	AgentCommands map[string]string
-	Scheduler     *cron.Scheduler
-	ProjectMgr    *project.Manager
+	// Scheduler is the cron consumer surface. Production wiring passes
+	// *cron.Scheduler (which satisfies CronScheduler implicitly); test
+	// wiring may inject a fake. nil disables /cron commands at runtime.
+	// R250-ARCH-17 (#1178).
+	Scheduler  CronScheduler
+	ProjectMgr *project.Manager
 	// Resolver is the central (key, opts) derivation. Optional: when nil,
 	// NewDispatcher fabricates a fallback resolver from cfg.Agents and a
 	// DataSource derived from cfg.ProjectMgr (which may itself be nil for
@@ -323,6 +374,39 @@ type DispatcherConfig struct {
 // can opt out via DispatcherConfig.AllowMissingSender.
 var ErrSendWireupMissing = errors.New("dispatch: Capabilities.Send is required (set DispatcherConfig.Capabilities or DispatcherConfig.SendFn; tests may set AllowMissingSender)")
 
+// resolveOrFabricateKeyResolver returns the live KeyResolver Dispatcher
+// must hold. Precedence (single track — drift here = bug, no inline copy
+// elsewhere is permitted; see #543 R215-CR-P2-3):
+//
+//  1. cfg.Resolver — explicit caller-supplied singleton.
+//  2. cfg.Router.Resolver() — the Router-attached singleton from
+//     session.RouterConfig.Resolver (R237-ARCH-12 / #604) so Dispatcher /
+//     Hub / upstream see the same agents-config snapshot.
+//  3. Fabricate a fresh resolver from cfg.Agents and a project data
+//     source derived from cfg.ProjectMgr (nil-safe — NewKeyResolver and
+//     project.NewDataSource both accept nil inputs).
+//
+// All three branches return a non-nil *KeyResolver, so call sites
+// downstream of NewDispatcher can dereference d.resolver without a guard.
+// Adding a fourth branch (or copying this fallback chain into a
+// caller) is the legacy-double-track failure mode this helper exists
+// to prevent.
+func resolveOrFabricateKeyResolver(cfg DispatcherConfig) *session.KeyResolver {
+	if cfg.Resolver != nil {
+		return cfg.Resolver
+	}
+	if cfg.Router != nil {
+		if r := cfg.Router.Resolver(); r != nil {
+			return r
+		}
+	}
+	var data session.PlannerDataSource
+	if cfg.ProjectMgr != nil {
+		data = project.NewDataSource(cfg.ProjectMgr)
+	}
+	return session.NewKeyResolver(cfg.Agents, data)
+}
+
 // NewDispatcher constructs a Dispatcher from cfg. Returns
 // ErrSendWireupMissing when neither cfg.Capabilities (with non-noop Send)
 // nor cfg.SendFn is set and AllowMissingSender is false. R250-ARCH-12
@@ -334,14 +418,7 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	if cfg.Router != nil {
 		router = cfg.Router
 	}
-	resolver := cfg.Resolver
-	if resolver == nil {
-		var data session.PlannerDataSource
-		if cfg.ProjectMgr != nil {
-			data = project.NewDataSource(cfg.ProjectMgr)
-		}
-		resolver = session.NewKeyResolver(cfg.Agents, data)
-	}
+	resolver := resolveOrFabricateKeyResolver(cfg)
 	// Resolve Capabilities precedence:
 	//   1. cfg.Capabilities wins when set (preferred path);
 	//   2. otherwise, if any legacy *Fn closure is non-nil, wrap them in a
@@ -398,12 +475,24 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 			"takeover_fn_set", cfg.TakeoverFn != nil,
 			"reply_footer_fn_set", cfg.ReplyFooterFn != nil)
 	}
+	// Defend against the Go typed-nil-interface trap: production wiring
+	// passes Scheduler: *cron.Scheduler, and when cron is disabled that
+	// pointer is nil — but boxed into the CronScheduler interface it is
+	// not == nil. Every slash-command gate uses `d.scheduler != nil`,
+	// so we collapse the typed-nil here exactly once. R250-ARCH-17 (#1178).
+	scheduler := cfg.Scheduler
+	if scheduler != nil {
+		v := reflect.ValueOf(scheduler)
+		if v.Kind() == reflect.Pointer && v.IsNil() {
+			scheduler = nil
+		}
+	}
 	d := &Dispatcher{
 		router:                router,
 		platforms:             cfg.Platforms,
 		agents:                cfg.Agents,
 		agentCommands:         cfg.AgentCommands,
-		scheduler:             cfg.Scheduler,
+		scheduler:             scheduler,
 		projectMgr:            cfg.ProjectMgr,
 		resolver:              resolver,
 		guard:                 cfg.Guard,
@@ -777,10 +866,164 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 				lg.Error("ownerLoop reply panic recovered", "key", key, "panic", rr)
 			}
 		}()
-		notifyCtx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
+		// R247-ARCH-10 (#632): NotifyCtx centralises the "detach from
+		// parent because the turn ctx is already Done" pattern.
+		notifyCtx, cancel := NotifyCtx(nil, NotifyKindOwnerLoopPanic, platformReplyTimeout)
 		defer cancel()
 		d.replyText(notifyCtx, msg, "处理异常，请稍后重试。", nil)
 	}()
+}
+
+// resolveReplyCtx returns a context safe for an end-of-turn reply: when
+// ctx is already Done because of a shutdown-style cancellation
+// (context.Canceled), it returns a fresh NotifyCtx with the
+// shutdownReplyTimeout budget so the platform.Reply call can actually
+// land. Otherwise it returns ctx unchanged with a no-op cleanup.
+//
+// Centralising this swap removes the per-branch shutdown-ctx replacement
+// the previous sendAndReply / handleGetOrCreateError variants each
+// re-implemented (R242-GO-4, #550). Callers MUST defer cleanup() before
+// dispatching the reply or leak the timer goroutine on the swap path.
+//
+// Only context.Canceled triggers the swap. context.DeadlineExceeded is
+// treated as a legitimate per-turn timeout the caller asked for and is
+// not auto-extended — that would be silently lengthening a configured
+// budget. Pure ctx.Err() == nil short-circuits to the cheap "no swap"
+// branch so the helper costs nothing on the happy path.
+func resolveReplyCtx(ctx context.Context) (replyCtx context.Context, cleanup func()) {
+	if ctx == nil {
+		// nil parent: caller already lost its turn ctx. Mint a fresh
+		// shutdown-budget ctx so the reply can still land.
+		return NotifyCtx(nil, NotifyKindShutdown, shutdownReplyTimeout)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		// Happy path: cleanup is nil so callers using the
+		// `if cleanup != nil { defer cleanup() }` idiom skip the defer.
+		return ctx, nil
+	}
+	notifyCtx, cancel := NotifyCtx(ctx, NotifyKindShutdown, shutdownReplyTimeout)
+	return notifyCtx, cancel
+}
+
+// handleGetOrCreateError maps a router.GetOrCreate failure into the
+// user-facing reply ctx, an optional ctx.cancel cleanup, and a Chinese
+// error message. Pulled out of sendAndReply so the seven-stage main
+// path stays focused on the happy-path turn flow (R245-ARCH-39 / #894);
+// the per-sentinel switch is the part most likely to grow as new
+// session-spawn failure modes are added (e.g. backend-disabled, quota
+// exhausted) and now has a single home that unit tests can target
+// directly without standing up a full Dispatcher.
+//
+// cleanup is non-nil when this returns a fresh background ctx (the
+// shutdown / context.Canceled branch). Callers MUST defer it before
+// using replyCtx, or the timeout goroutine leaks.
+//
+// Error logging policy: shutdown-path cancellation is expected noise on
+// every restart and downgrades to Info so ops dashboards don't light up;
+// every other GetOrCreate failure stays at Error.
+func (d *Dispatcher) handleGetOrCreateError(
+	ctx context.Context,
+	err error,
+	lg *slog.Logger,
+) (replyCtx context.Context, cleanup func(), errMsg string) {
+	if errors.Is(err, context.Canceled) {
+		lg.Info("get session cancelled during shutdown", "err", err)
+	} else {
+		lg.Error("get session", "err", err)
+	}
+	switch {
+	case errors.Is(err, session.ErrMaxProcs):
+		errMsg = "当前处理已满，请稍后重试。"
+	case errors.Is(err, session.ErrMaxExemptSessions):
+		// R190-WRAP-M1: exempt-session cap means "too many projects/cron
+		// workers"; user /new won't clear it because the exempt counter
+		// is independent of user sessions. Tell the user explicitly so
+		// they contact the operator instead of looping on /new.
+		errMsg = "长时会话（planner/cron）已满，请联系管理员。"
+	case errors.Is(err, session.ErrNoCLIWrapper):
+		// R190-WRAP-M1: permanent config error; /new retry is hopeless.
+		// Surface a clear "ask operator" so IM users don't spin on it.
+		errMsg = "会话后端未配置，请联系管理员。"
+	case errors.Is(err, context.Canceled):
+		errMsg = "系统正在重启，请稍后重试。"
+	default:
+		errMsg = "会话创建失败，请发送 /new 重置后重试。"
+	}
+	// R242-GO-4 (#550): the shutdown-ctx swap is one helper, not a
+	// per-branch repeat. resolveReplyCtx returns ctx unchanged when no
+	// swap is needed (cheap), and a fresh NotifyCtx + cancel when ctx
+	// was canceled — without it the user-facing reply would silently
+	// drop at the platform layer (R188-CONC-M1).
+	replyCtx, cleanup = resolveReplyCtx(ctx)
+	return replyCtx, cleanup, errMsg
+}
+
+// handleSendError maps a Capabilities.Send failure into the user-facing
+// error reply, watchdog counter bumps, and metrics increments. Pulled
+// out of sendAndReply so the seven-stage main path stays focused on the
+// happy turn flow (R237-GO-4 / #624). The per-sentinel switch is the
+// part most likely to grow as new send-side failure modes are added
+// (e.g. backend disabled, model deprecated) and now has a single home
+// that unit tests can target without standing up a full Dispatcher.
+//
+// Caller has already entered the err != nil branch and consumed the
+// Send result; this method does NOT signal whether a reply was actually
+// delivered — failure to land the error reply is logged at Warn but
+// not surfaced.
+func (d *Dispatcher) handleSendError(
+	ctx context.Context,
+	err error,
+	key string,
+	msg platform.IncomingMessage,
+	p platform.Platform,
+	lg *slog.Logger,
+) {
+	d.replyErrorCount.Add(1)
+	dispatchReplyErrorTotal.Add(1)
+	lg.Error("send to claude", "err", err)
+	// IM path uses the timeout-aware helper (it renders the configured
+	// no-output / total durations in Chinese) and prepends a clock
+	// emoji for visibility on chat surfaces. Dashboard send path
+	// (server/errors_usermsg.go) calls usermsg.ForSendError directly
+	// so the timeout cases collapse to the generic "处理超时，请简化任务后重试。"
+	// — it has no per-session timeout configured. R249-DISPATCH-1 (#419)
+	// extracted usermsg.UserMessage so a new sentinel only registers
+	// once, instead of two parallel switches with cross-package
+	// "keep in sync" comments.
+	// /clear early-return mirrors the prior behaviour: the user just
+	// triggered the reset, so we suppress the extra "会话已重置" reply.
+	if errors.Is(err, cli.ErrSessionReset) {
+		return
+	}
+	// Watchdog counters stay in dispatch because they are owned by the
+	// IM-side configuration; the shared helper only renders text.
+	switch {
+	case errors.Is(err, cli.ErrNoOutputTimeout):
+		d.watchdogNoOutputKills.Add(1)
+	case errors.Is(err, cli.ErrTotalTimeout):
+		d.watchdogTotalKills.Add(1)
+	}
+	errMsg := usermsg.UserMessage(err, key, d.noOutputTimeout, d.totalTimeout)
+	// IM-only emoji decoration for the timeout cases. Other surfaces
+	// (dashboard send_ack) deliberately stay emoji-free.
+	if errors.Is(err, cli.ErrNoOutputTimeout) || errors.Is(err, cli.ErrTotalTimeout) {
+		errMsg = "⏱️ " + errMsg
+	}
+	// R242-GO-4 (#550): on shutdown the inbound ctx is already Done; the
+	// user-facing error reply must still land. resolveReplyCtx swaps in a
+	// fresh NotifyCtx with the shutdown budget when applicable; otherwise
+	// returns ctx unchanged with nil cleanup. Identical to the swap done
+	// in handleGetOrCreateError so the two error-reply paths share one
+	// truth.
+	replyCtx, cleanup := resolveReplyCtx(ctx)
+	if cleanup != nil {
+		defer cleanup()
+	}
+	if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, platformReplyMaxAttempts); err != nil {
+		d.sendFailCount.Add(1)
+		dispatchSendFailTotal.Add(1)
+		lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
+	}
 }
 
 // sendAndReply performs one turn: GetOrCreate session, send message, deliver reply.
@@ -817,41 +1060,9 @@ func (d *Dispatcher) sendAndReply(
 
 	sess, sessStatus, err := d.router.GetOrCreate(ctx, key, opts)
 	if err != nil {
-		// Shutdown-path cancellation is expected noise, not an alarm;
-		// downgrade to Info so ops dashboards don't light up on every
-		// restart. Unexpected failures stay at Error.
-		if errors.Is(err, context.Canceled) {
-			lg.Info("get session cancelled during shutdown", "err", err)
-		} else {
-			lg.Error("get session", "err", err)
-		}
-		var errMsg string
-		replyCtx := ctx
-		switch {
-		case errors.Is(err, session.ErrMaxProcs):
-			errMsg = "当前处理已满，请稍后重试。"
-		case errors.Is(err, session.ErrMaxExemptSessions):
-			// R190-WRAP-M1: exempt-session cap means "too many projects/cron
-			// workers"; user /new won't clear it because the exempt counter
-			// is independent of user sessions. Tell the user explicitly so
-			// they contact the operator instead of looping on /new.
-			errMsg = "长时会话（planner/cron）已满，请联系管理员。"
-		case errors.Is(err, session.ErrNoCLIWrapper):
-			// R190-WRAP-M1: permanent config error; /new retry is hopeless.
-			// Surface a clear "ask operator" so IM users don't spin on it.
-			errMsg = "会话后端未配置，请联系管理员。"
-		case errors.Is(err, context.Canceled):
-			errMsg = "系统正在重启，请稍后重试。"
-			// R188-CONC-M1: ctx is already Done on shutdown path; using it for
-			// the user-facing error reply silently drops the notification at
-			// the platform layer. Match the handleOwnerLoopPanic recovery
-			// pattern and use a fresh Background ctx with short timeout so the
-			// user actually sees the "restart, retry" message.
-			notifyCtx, cancel := context.WithTimeout(context.Background(), shutdownReplyTimeout)
-			defer cancel()
-			replyCtx = notifyCtx
-		default:
-			errMsg = "会话创建失败，请发送 /new 重置后重试。"
+		replyCtx, cleanup, errMsg := d.handleGetOrCreateError(ctx, err, lg)
+		if cleanup != nil {
+			defer cleanup()
 		}
 		d.replyText(replyCtx, msg, errMsg, lg)
 		return
@@ -875,42 +1086,7 @@ func (d *Dispatcher) sendAndReply(
 
 	result, err := d.caps.Send(ctx, key, sess, text, images, tracker.onEvent)
 	if err != nil {
-		d.replyErrorCount.Add(1)
-		dispatchReplyErrorTotal.Add(1)
-		lg.Error("send to claude", "err", err)
-		// IM path uses the timeout-aware helper (it renders the configured
-		// no-output / total durations in Chinese) and prepends a clock
-		// emoji for visibility on chat surfaces. Dashboard send path
-		// (server/errors_usermsg.go) calls usermsg.ForSendError directly
-		// so the timeout cases collapse to the generic "处理超时，请简化任务后重试。"
-		// — it has no per-session timeout configured. R249-DISPATCH-1 (#419)
-		// extracted usermsg.UserMessage so a new sentinel only registers
-		// once, instead of two parallel switches with cross-package
-		// "keep in sync" comments.
-		// /clear early-return mirrors the prior behaviour: the user just
-		// triggered the reset, so we suppress the extra "会话已重置" reply.
-		if errors.Is(err, cli.ErrSessionReset) {
-			return
-		}
-		// Watchdog counters stay in dispatch because they are owned by the
-		// IM-side configuration; the shared helper only renders text.
-		switch {
-		case errors.Is(err, cli.ErrNoOutputTimeout):
-			d.watchdogNoOutputKills.Add(1)
-		case errors.Is(err, cli.ErrTotalTimeout):
-			d.watchdogTotalKills.Add(1)
-		}
-		errMsg := usermsg.UserMessage(err, key, d.noOutputTimeout, d.totalTimeout)
-		// IM-only emoji decoration for the timeout cases. Other surfaces
-		// (dashboard send_ack) deliberately stay emoji-free.
-		if errors.Is(err, cli.ErrNoOutputTimeout) || errors.Is(err, cli.ErrTotalTimeout) {
-			errMsg = "⏱️ " + errMsg
-		}
-		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, platformReplyMaxAttempts); err != nil {
-			d.sendFailCount.Add(1)
-			dispatchSendFailTotal.Add(1)
-			lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
-		}
+		d.handleSendError(ctx, err, key, msg, p, lg)
 		return
 	}
 
@@ -934,27 +1110,12 @@ func (d *Dispatcher) sendAndReply(
 	// /health's lastReplySuccess go stale on otherwise-healthy sessions.
 	d.markReplySuccess()
 
-	replyText := localizeAPIError(result.Text)
-	// Head slot of a merge group: append a small chip so the user knows the
-	// single bot bubble covers N messages.
-	if result.MergedCount > 1 && replyText != "" {
-		replyText += fmt.Sprintf("\n\n*— 合并了 %d 条消息的回复*", result.MergedCount)
-	}
-	// Per-session ReplyFooter: when sess is non-nil we resolve the tag from
-	// sess.Backend(); when nil (cron edge case where the session has been
-	// pruned but the reply path still fires) Capabilities.ReplyFooter
-	// receives "" and the implementation falls back to the router default.
-	// NoopCapabilities returns "" so an unwired host yields no footer (same
-	// as the legacy nil-closure behaviour).
-	{
-		var backendID string
-		if sess != nil {
-			backendID = sess.Backend()
-		}
-		if footer := d.caps.ReplyFooter(backendID); footer != "" {
-			replyText += "\n\n— " + footer
-		}
-	}
+	// R219-CR-7 (#656): decorateReplyText folds the localize step, the
+	// merge-group chip, and the per-session ReplyFooter into one helper so
+	// sendAndReply isn't a 240-line linear stack of post-processing
+	// passes. Pure function on (result, sess) — easy to unit-test without
+	// spinning up a Dispatcher / Router / platform.
+	replyText := d.decorateReplyText(result, sess)
 	var outImages []platform.Image
 	imagePaths := cli.ExtractImagePaths(replyText)
 	if len(imagePaths) > 0 {
@@ -1020,6 +1181,47 @@ func (d *Dispatcher) sendAndReply(
 	}
 }
 
+// decorateReplyText post-processes the raw CLI result text for IM
+// delivery: localises Anthropic API errors to Chinese, appends the
+// merge-group chip when the head slot covers N messages, and appends
+// the per-session ReplyFooter (resolved from sess.Backend(), or the
+// router default when sess is nil — a cron edge case where the session
+// has been pruned but the reply path still fires).
+//
+// Extracted from sendAndReply for R219-CR-7 (#656). Keeping this as a
+// method on *Dispatcher (rather than a free function) gives the helper
+// access to d.caps.ReplyFooter without pushing the Capabilities
+// dependency through a parameter list.
+//
+// Returns the empty string when the input result.Text is empty AND no
+// footer applies — callers typically gate on `replyText != ""` before
+// dispatching to the platform, so an empty return is the existing
+// "nothing to send" sentinel.
+func (d *Dispatcher) decorateReplyText(result *cli.SendResult, sess *session.ManagedSession) string {
+	replyText := localizeAPIError(result.Text)
+	// Head slot of a merge group: append a small chip so the user knows the
+	// single bot bubble covers N messages.
+	if result.MergedCount > 1 && replyText != "" {
+		// R20260526-PERF-005: hot path on every merge-group head reply,
+		// avoid fmt.Sprintf's reflect/format overhead for a single int.
+		replyText += "\n\n*— 合并了 " + strconv.Itoa(result.MergedCount) + " 条消息的回复*"
+	}
+	// Per-session ReplyFooter: when sess is non-nil we resolve the tag from
+	// sess.Backend(); when nil (cron edge case where the session has been
+	// pruned but the reply path still fires) Capabilities.ReplyFooter
+	// receives "" and the implementation falls back to the router default.
+	// NoopCapabilities returns "" so an unwired host yields no footer (same
+	// as the legacy nil-closure behaviour).
+	var backendID string
+	if sess != nil {
+		backendID = sess.Backend()
+	}
+	if footer := d.caps.ReplyFooter(backendID); footer != "" {
+		replyText += "\n\n— " + footer
+	}
+	return replyText
+}
+
 // SendSplitReply sends a reply, splitting into multiple messages if too long.
 func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, chatID, text string) {
 	maxLen := p.MaxReplyLength()
@@ -1034,7 +1236,9 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 	total := len(chunks)
 	for i, chunk := range chunks {
 		if total > 1 {
-			chunk += fmt.Sprintf("\n— [%d/%d]", i+1, total)
+			// R20260526-PERF-005: per-chunk on every multi-chunk reply,
+			// strconv.Itoa avoids fmt.Sprintf's per-call alloc/format.
+			chunk += "\n— [" + strconv.Itoa(i+1) + "/" + strconv.Itoa(total) + "]"
 		}
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: chunk}, platformReplyMaxAttempts); err != nil {
 			d.sendFailCount.Add(1)
@@ -1239,7 +1443,11 @@ func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
 					"chat_id", chatID, "tool_use_id", aq.ToolUseID, "panic", r)
 			}
 		}()
-		rctx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
+		// R247-ARCH-10 (#632): card-send detach goes through NotifyCtx
+		// alongside the other dispatch sites. The card must outlive the
+		// originating turn so a near-deadline /new doesn't drop it
+		// mid-flight (R218-GO-1).
+		rctx, cancel := NotifyCtx(nil, NotifyKindAskQuestionCard, platformReplyTimeout)
 		defer cancel()
 
 		if sender, ok := platform.AsQuestionCardSender(p); ok {
@@ -1313,7 +1521,9 @@ func (t *replyTracker) sendTodoMessage(text string) {
 	t.lastTodoText = text
 
 	// R236-GO-1: detach from t.ctx so a near-deadline turn can still finish writing TodoWrite.
-	rctx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
+	// R247-ARCH-10 (#632): routed through NotifyCtx for parity with the
+	// other dispatch detached-reply sites.
+	rctx, cancel := NotifyCtx(t.ctx, NotifyKindTodoMessage, platformReplyTimeout)
 	defer cancel()
 	if _, err := t.p.Reply(rctx, platform.OutgoingMessage{ChatID: t.chatID, Text: text}); err != nil {
 		// R238-CR-5: previously slog.Debug — silent because R236-GO-1

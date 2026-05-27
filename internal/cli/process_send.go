@@ -120,17 +120,17 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 // callback fires from, so no events are lost.
 func (p *Process) Send(ctx context.Context, text string, images []ImageData, onEvent EventCallback) (*SendResult, error) {
 	p.mu.Lock()
-	if p.State == StateRunning {
+	if p.state == StateRunning {
 		p.mu.Unlock()
-		return nil, fmt.Errorf("process busy (state=%s): %w", p.State, ErrProcessBusy)
+		return nil, fmt.Errorf("process busy (state=%s): %w", p.state, ErrProcessBusy)
 	}
-	p.State = StateRunning
+	p.state = StateRunning
 	p.mu.Unlock()
 
 	defer func() {
 		p.mu.Lock()
-		if p.State == StateRunning {
-			p.State = StateReady
+		if p.state == StateRunning {
+			p.state = StateReady
 		}
 		p.mu.Unlock()
 	}()
@@ -225,8 +225,8 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 			// logEvent (called by readLoop) already skips init events.
 			if ev.Type == "system" && ev.SubType == "init" {
 				p.mu.Lock()
-				if p.SessionID == "" {
-					p.SessionID = ev.SessionID
+				if p.sessionID == "" {
+					p.sessionID = ev.SessionID
 				}
 				p.mu.Unlock()
 				// UI Round 5 R5-3: claude advertises the resolved model
@@ -258,8 +258,8 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 			// Result means this turn is done
 			if ev.Type == "result" {
 				p.mu.Lock()
-				if p.SessionID == "" {
-					p.SessionID = ev.SessionID
+				if p.sessionID == "" {
+					p.sessionID = ev.SessionID
 				}
 				p.mu.Unlock()
 				return &SendResult{
@@ -278,6 +278,25 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 			watchdog.Reset(checkInterval)
 		}
 	}
+}
+
+// clearInflightFlags resets the interrupt-bookkeeping atomics. Called when
+// the watchdog kills the CLI on a no-output / total-turn timeout — the
+// process is about to be in StateDead so any leftover interrupted/
+// interruptedRun flags can never be consumed by drainStaleEvents in this
+// process's lifetime, but a future Send on a recycled Process struct
+// (unlikely; routers spawn fresh) would otherwise burn the 500ms settle
+// window for a result event that will never arrive. R242-ARCH-27 (#770):
+// coordinates interruptedSettleWindow with runDeadlineWatchdog completion
+// so the two timers no longer leave inconsistent state behind. Held under
+// p.mu to match the Interrupt() / InterruptViaControl() locking contract
+// (those callers also Store under p.mu so a concurrent Interrupt and a
+// watchdog kill cannot race the flags into a torn state).
+func (p *Process) clearInflightFlags() {
+	p.mu.Lock()
+	p.interrupted.Store(false)
+	p.interruptedRun.Store(false)
+	p.mu.Unlock()
 }
 
 // handleWatchdogTick evaluates the no-output and total-turn deadlines for a
@@ -309,6 +328,12 @@ func (p *Process) handleWatchdogTick(
 		p.setDeathReason(DeathReasonNoOutputTimeout)
 		p.slogger().Error("watchdog: no output timeout", "timeout", noOutputDur)
 		p.Kill()
+		// R242-ARCH-27 (#770): clear inflight settle flags so the
+		// 500ms drainStaleEvents wait cannot fire against a
+		// watchdog-killed process whose result event will never
+		// arrive. See clearInflightFlags doc for the coordination
+		// rationale with interruptedSettleWindow.
+		p.clearInflightFlags()
 		return nil, fmt.Errorf("%w (%s)", ErrNoOutputTimeout, noOutputDur)
 	}
 	if now.Sub(turnStart) >= totalDur {
@@ -318,6 +343,7 @@ func (p *Process) handleWatchdogTick(
 		p.setDeathReason(DeathReasonTotalTimeout)
 		p.slogger().Error("watchdog: total timeout", "timeout", totalDur)
 		p.Kill()
+		p.clearInflightFlags()
 		return nil, fmt.Errorf("%w (%s)", ErrTotalTimeout, totalDur)
 	}
 	return nil, nil
@@ -335,7 +361,7 @@ func (p *Process) Interrupt() {
 	// drainStaleEvents would then skip the settle wait and the interrupted
 	// result event from the in-flight turn would leak into the next turn.
 	p.mu.Lock()
-	state := p.State
+	state := p.state
 	p.interrupted.Store(true)
 	if state == StateRunning {
 		p.interruptedRun.Store(true)
@@ -384,7 +410,7 @@ func (p *Process) InterruptViaControl() error {
 	// Send() flipping State to Running after our read cannot race us into
 	// "wrote control_request but skipped the settle flags".
 	p.mu.Lock()
-	state := p.State
+	state := p.state
 	if state == StateRunning {
 		p.interrupted.Store(true)
 		p.interruptedRun.Store(true)

@@ -1537,15 +1537,18 @@ func TestWriteStateFile_ChmodDir(t *testing.T) {
 // buffer would ErrTooLong and silently wedge stdout). We lower
 // maxWriteLineBytes for the test so the regression assertion completes
 // quickly; the production constant is 12 MB.
+//
+// R237-CR-4 (#701): the override flows through setMaxWriteLineBytes so the
+// per-recv read on the hot path is an atomic Load instead of an unsync'd
+// global read. This test was the only mutator under -race.
 func TestHandleClient_WriteOversize_Disconnects(t *testing.T) {
-	origLimit := maxWriteLineBytes
-	maxWriteLineBytes = 1024 // 1 KiB for the test
-	defer func() { maxWriteLineBytes = origLimit }()
+	origLimit := setMaxWriteLineBytes(1024) // 1 KiB for the test
+	defer setMaxWriteLineBytes(origLimit)
 
 	_, client, cleanup := setupShimServerWithClient(t)
 	defer cleanup()
 
-	oversize := strings.Repeat("A", maxWriteLineBytes+1)
+	oversize := strings.Repeat("A", int(maxWriteLineBytesValue())+1)
 	sendClientCmd(t, client, ClientMsg{Type: "write", Line: oversize})
 
 	// handleClient returns on oversize → defer chain closes the connection.

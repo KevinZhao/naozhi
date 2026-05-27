@@ -16,6 +16,18 @@ import (
 // dereference unconditionally; legacy DispatcherConfig.{SendFn,TakeoverFn,
 // ReplyFooterFn} closures are wrapped in an internal adapter for backward
 // compatibility. R243-ARCH-10.
+//
+// R245-ARCH-45 (#904): this interface IS the requested SessionFlow bundle.
+// Pre-bundle code injected three independent closures (SendFn / TakeoverFn /
+// ReplyFooterFn); tests had to mock each one and any reviewer reading
+// NewDispatcher had to track three separate nil checks. The bundle gives
+// callers and tests a single mock surface (server.serverCaps in production,
+// a stub Capabilities impl in tests). The legacy *Fn fields are retained as
+// Deprecated entries on DispatcherConfig only as a backward-compatibility
+// shim for the existing test fixtures; new wiring should populate
+// DispatcherConfig.Capabilities directly. GetOrCreate is not part of this
+// bundle on purpose — it lives on SessionRouter (the cfg.Router slot), which
+// already has its own one-interface mock surface.
 type Capabilities interface {
 	// Send forwards a turn payload to the session router after guard /
 	// queue gating has succeeded. Production wires

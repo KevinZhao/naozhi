@@ -5,8 +5,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/session"
 )
 
 // backendCapturingRouter is a minimal SessionRouter that records the
@@ -17,23 +15,23 @@ import (
 // no-ops because Sprint 6c only touches the GetOrCreate boundary.
 type backendCapturingRouter struct {
 	mu       sync.Mutex
-	captured []session.AgentOpts
+	captured []AgentOpts
 }
 
 func (r *backendCapturingRouter) RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string) {
 }
 func (r *backendCapturingRouter) Reset(key string) {}
-func (r *backendCapturingRouter) GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error) {
+func (r *backendCapturingRouter) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (Session, SessionStatus, error) {
 	r.mu.Lock()
 	r.captured = append(r.captured, opts)
 	r.mu.Unlock()
-	return nil, session.SessionExisting, context.Canceled
+	return nil, SessionExisting, context.Canceled
 }
 
-func (r *backendCapturingRouter) snapshot() []session.AgentOpts {
+func (r *backendCapturingRouter) snapshot() []AgentOpts {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]session.AgentOpts, len(r.captured))
+	out := make([]AgentOpts, len(r.captured))
 	copy(out, r.captured)
 	return out
 }

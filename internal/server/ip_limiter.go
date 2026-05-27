@@ -3,6 +3,7 @@ package server
 import (
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/ratelimit"
 	"golang.org/x/time/rate"
@@ -17,9 +18,53 @@ type ipLimiter struct {
 	trustedProxy bool
 }
 
+// defaultIPLimiterMaxKeys / defaultIPLimiterTTL pin the LRU cap + idle TTL
+// applied by newIPLimiterWithProxy when callers don't override via
+// newIPLimiterWithCap. R241-SEC-14 / #473: the previous shape passed
+// nothing, falling back to ratelimit.New defaults (1000 / 10m). Sibling
+// limiters in dashboard_auth (loginLimiter / wsUpgradeLimiter) explicitly
+// pin maxLoginLimiters=10000, so an attacker IP-flood that filled the
+// 1000-key LRU evicted older legit rate-limited entries while the auth
+// buckets stayed correctly sized — diverging DoS-hardening between paths
+// that face the same threat model. Lifting the default to 10000/1h aligns
+// every newIPLimiterWithProxy site with the auth limiters and keeps the
+// per-bucket worst-case memory at ~1.2 MiB (10k × ~120B entry).
+const (
+	defaultIPLimiterMaxKeys = 10_000
+	defaultIPLimiterTTL     = time.Hour
+)
+
 func newIPLimiterWithProxy(r rate.Limit, burst int, trustedProxy bool) *ipLimiter {
 	return &ipLimiter{
-		inner:        ratelimit.New(ratelimit.Config{Rate: r, Burst: burst}),
+		inner: ratelimit.New(ratelimit.Config{
+			Rate:    r,
+			Burst:   burst,
+			MaxKeys: defaultIPLimiterMaxKeys,
+			TTL:     defaultIPLimiterTTL,
+		}),
+		trustedProxy: trustedProxy,
+	}
+}
+
+// newIPLimiterWithCap is a sibling of newIPLimiterWithProxy that pins the
+// underlying ratelimit.Limiter MaxKeys (LRU cap) and TTL explicitly rather
+// than inheriting the package defaults (1000 / 10m). R242-SEC-8 / #636:
+// for endpoints that face DDoS-class abuse the implicit 1000-key LRU is a
+// soft cap — once full, every fresh attacker-IP evicts the oldest legit
+// entry and the rate-limited IPs come back unthrottled. Pinning a higher
+// MaxKeys raises the saturation floor before LRU eviction starts to
+// recycle still-active rate-limited keys, and pinning the TTL aligns
+// idle-key expiry with the 1 Hz dashboard cadence so transient pollers
+// don't accumulate as ghost entries. Pass MaxKeys=0/TTL=0 to fall back
+// to ratelimit defaults.
+func newIPLimiterWithCap(r rate.Limit, burst, maxKeys int, ttl time.Duration, trustedProxy bool) *ipLimiter {
+	return &ipLimiter{
+		inner: ratelimit.New(ratelimit.Config{
+			Rate:    r,
+			Burst:   burst,
+			MaxKeys: maxKeys,
+			TTL:     ttl,
+		}),
 		trustedProxy: trustedProxy,
 	}
 }

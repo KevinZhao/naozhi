@@ -181,6 +181,16 @@ func (r *Router) Cleanup() {
 		s          *ManagedSession
 		proc       processIface
 		lastActive time.Time
+		// state is captured once under r.mu RLock (R220-PERF-4) so pass-2
+		// avoids re-taking proc.mu.RLock for IsRunning/Alive while message
+		// processing on the hot Send path holds proc.mu.Lock. The state
+		// can be stale by pass-2 (proc may transition Running→Ready or
+		// die before classification), but staleness is acceptable: a
+		// transition to Ready makes us skip stuckKill (we'll catch it
+		// next tick on idle TTL), and a transition to Dead makes Alive()
+		// already-false anyway via the channel-close fast path used
+		// below.
+		state cli.ProcessState
 	}
 	candidates := make([]cand, 0, len(r.sessions)/2+1)
 	for key, s := range r.sessions {
@@ -191,7 +201,7 @@ func (r *Router) Cleanup() {
 		if proc == nil {
 			continue
 		}
-		candidates = append(candidates, cand{key, s, proc, s.LastActive()})
+		candidates = append(candidates, cand{key, s, proc, s.LastActive(), proc.GetState()})
 	}
 	ttl := r.ttl
 	totalTimeout := r.totalTimeout
@@ -207,11 +217,17 @@ func (r *Router) Cleanup() {
 	var stuckKill []expiredEntry
 	now := time.Now()
 	for _, c := range candidates {
-		alive := c.proc.Alive()
-		if !alive {
+		// R220-PERF-4: derive alive/running from the state captured in
+		// pass-1. StateDead is set lazily by Process.markExited via the
+		// done channel; Alive() still consults that channel as a
+		// fast-path so a proc that died strictly between pass-1 and
+		// pass-2 is still classified correctly. We keep the Alive()
+		// check (lock-free select on `done`) as the authoritative
+		// liveness gate.
+		if !c.proc.Alive() {
 			continue
 		}
-		running := c.proc.IsRunning()
+		running := c.state == cli.StateRunning
 
 		// Effective activity = max(session.lastActive, process.LastEventAt).
 		// lastActive is only refreshed at Send entry, so a single long-
@@ -256,6 +272,20 @@ func (r *Router) Cleanup() {
 
 	closedCount := 0
 	for _, e := range stuckKill {
+		// R217-CR-3: re-verify the session still holds the proc we
+		// classified as stuck. Pass-2 ran without r.mu (PID syscalls), so
+		// a concurrent spawnSession / resetLocked could have replaced
+		// s.process between the snapshot and now. Killing the originally-
+		// captured proc would still target a now-orphaned shim conn — a
+		// no-op in the steady state but it pollutes the deathReason
+		// (already stamped to "stuck_running" / "pid_gone" above) on the
+		// fresh ManagedSession the user is actively using. Skip when the
+		// session has moved on; the new proc gets its own chance next
+		// tick. shouldPrune already handles the orphan-process side; this
+		// just stops the false-positive kill bookkeeping.
+		if cur := e.s.loadProcess(); cur != nil && cur != e.proc {
+			continue
+		}
 		e.proc.Kill()
 		closedCount++
 	}

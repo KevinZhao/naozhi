@@ -57,6 +57,21 @@ let lastHistoryJSON = '';
 // re-hitting the server. Set by fetchSessions after a successful render;
 // consumed by the sidebar-search input oninput handler.
 let _lastSidebarData = null;
+// _lastSidebarHtml caches the last fully-built sidebar HTML string so
+// renderSidebar can skip the (expensive) `list.innerHTML = html` write
+// when the produced markup is byte-identical to what is already mounted.
+// 20 sessions × 1 Hz polling rebuilds the same string every tick when
+// nothing actually changed — comparing the produced string to the cache
+// is O(n) but fast (string equality short-circuits on length and runs in
+// native code), and skipping the assignment avoids a full sidebar reflow
+// + active-card detachment / re-resolve cycle. The cache is the only
+// consumer of the *output* — input fingerprinting is intentionally
+// avoided because the card HTML embeds many fields (selectedKey/Node,
+// unread counts, last_active text, project flags …) and any missed
+// field would cause stale-DOM bugs. Comparing the final string is
+// inherently correct: if it differs by a byte we re-render, if it
+// doesn't there is no observable change to apply. R33-UX1.
+let _lastSidebarHtml = null;
 let sessionPollTimer = null;
 let discoveredPollTimer = null;
 let discoveredItems = []; // discovered sessions, merged into sidebar
@@ -559,17 +574,33 @@ function renderSidebar(data) {
   // the header `+` button invokes. NOT emitted in filter mode — the
   // filter-specific empty state ('没有匹配的会话') already covers that path.
   if (!html && !filterActive) html = '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" onclick="createNewSession()">+ 开启你的第一个会话</button></div>';
-  list.innerHTML = html;
-  // Sidebar rebuild detached the previously-cached active card; re-resolve
-  // it against the fresh DOM so selector switches stay O(1) on the next
-  // click. No-op when nothing is selected (openCronPanel / previewDiscovered
-  // clear paths already reset _activeCardEl).
-  if (selectedKey) setActiveSessionCard(selectedKey, selectedNode);
-  // Restore scroll on the next frame so the browser finishes layout first;
-  // synchronous assignment after innerHTML can visibly jump on slow devices.
-  requestAnimationFrame(() => {
-    list.scrollTop = scrollTop;
-  });
+  // R33-UX1: skip the innerHTML write (and its full sidebar reflow) when
+  // the produced markup is byte-identical to what is already mounted.
+  // 20 sessions × 1 Hz polling cycle rebuilds the same string every tick
+  // whenever nothing has changed — the only thing the assignment did then
+  // was force a layout pass and detach `_activeCardEl`. Comparing strings
+  // is fast (length check short-circuits the common steady-state path
+  // when one item changed and the byte count differs anyway). If the
+  // strings match, the DOM is already correct: skip the write, the
+  // active-card re-resolve, and the scroll restoration (assigning the
+  // same value is a no-op but the rAF is still queued — so just bail).
+  if (html === _lastSidebarHtml) {
+    // Still refresh the history badge & home panel below — they read from
+    // allSessionsCache which was just refreshed regardless.
+  } else {
+    list.innerHTML = html;
+    _lastSidebarHtml = html;
+    // Sidebar rebuild detached the previously-cached active card; re-resolve
+    // it against the fresh DOM so selector switches stay O(1) on the next
+    // click. No-op when nothing is selected (openCronPanel / previewDiscovered
+    // clear paths already reset _activeCardEl).
+    if (selectedKey) setActiveSessionCard(selectedKey, selectedNode);
+    // Restore scroll on the next frame so the browser finishes layout first;
+    // synchronous assignment after innerHTML can visibly jump on slow devices.
+    requestAnimationFrame(() => {
+      list.scrollTop = scrollTop;
+    });
+  }
 
   // Update history badge (filesystem history sessions, deduplicated against workspace)
   const hBadge = document.getElementById('history-badge');
@@ -725,6 +756,15 @@ function matchProject(workspace) {
 // controls the visual fill. A single constant avoids the misleading dead ternary
 // that previously implied a per-state SVG difference.
 const STAR_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"/></svg>';
+// "Clawd" pixel mascot for claude-backend assistant turns. Sourced from
+// the Custom Brand Icons set, icon `cbi:claude-clawd`
+// (https://github.com/elax46/custom-brand-icons), licensed CC BY-NC-SA
+// 4.0. Naozhi ships under BSL 1.1 (non-commercial Additional Use Grant
+// through 2030-03-21), so the NC clause is compatible for the current
+// licensed term — see ATTRIBUTIONS.md. Fill flows from currentColor so
+// the rust hex lives once in dashboard.html as --nz-clawd-rust (CSS sets
+// .cc-clawd { color: var(--nz-clawd-rust) }) — no inline hex in JS.
+const CLAWD_SVG = '<svg class="cc-clawd" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="currentColor" d="M4.5 6h15v5H22v2h-2.5v3h-1v2H17v-2h-1v2h-1.5v-2h-5v2H8v-2H7v2H5.5v-2h-1v-3H2v-2h2.5ZM7 8v3h1V8Zm9 0v3h1V8Z"/></svg>';
 const GITHUB_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>';
 // Chevron: points down when expanded (`▾`-like), rotated 90deg via CSS
 // when collapsed so the same glyph serves both states.
@@ -2934,7 +2974,15 @@ function eventHtml(e, opts) {
   // CLI-synthesised interrupt marker: SIGINT-aborted turn, not user intent.
   if (e.type === 'user' && (raw === '[Request interrupted by user]' || raw === '[Request interrupted by user for tool use]')) return '';
   const icons = {init:'\u2699',system:'\u2699',user:'\u{1f464}',text:'\u2726',todo:'\u2630'};
-  const icon = icons[e.type] || '';
+  let icon = icons[e.type] || '';
+  // Assistant turns on the claude backend get the clawd mascot instead of
+  // the default \u2726 glyph. Other backends (kiro, gemini, ...) keep the glyph
+  // so each backend has a distinct visual identity in the transcript.
+  if (e.type === 'text') {
+    const sess = sessionsData[sid(selectedKey, selectedNode)] || {};
+    const backendID = sess.backend || sessionBackends[selectedKey] || (cliBackends && cliBackends.default) || '';
+    if (backendID === 'claude' || backendID === '') icon = CLAWD_SVG;
+  }
 
   // Strip redundant "[+N image(s)]" suffix when thumbnails are present
   let cleanRaw = e.detail || e.summary || '';
@@ -8352,9 +8400,15 @@ function inlineMd(s) {
     if (safe === '#') return text;
     return '<a href="' + escAttr(safe) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + text + '</a>';
   });
-  // Auto-link bare URLs not already inside an <a> tag
+  // Auto-link bare URLs not already inside an <a> tag.
+  // R243-SEC-11 (#797): strip a wider set of trailing punctuation —
+  // including `>`, `]`, `"` and `'` — before forming the anchor. escAttr
+  // already neutralises these inside the href attribute, but stripping
+  // here also keeps them out of the link's visible text where they would
+  // otherwise dangle past sentences like `see <https://x.y/z>` or
+  // `[link](https://x.y/z)`. Defence-in-depth, not the only barrier.
   s = s.replace(/(^|[^"'>])(https?:\/\/[^\s<)}\]]+)/g, function(_, prefix, url) {
-    var clean = url.replace(/[.,;:!?)]+$/, '');
+    var clean = url.replace(/[.,;:!?)>\]"']+$/, '');
     var trail = url.slice(clean.length);
     return prefix + '<a href="' + escAttr(clean) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + clean + '</a>' + trail;
   });
@@ -8948,17 +9002,10 @@ const wsm = {
         });
         break;
       }
-      case 'cron_result':
-        // RNEW-UX-010 — cron completion is a fire-and-forget background
-        // event; the only sighted signal is a badge count bump. Announce
-        // politely so AT users learn the job landed. P0 cron-run-history:
-        // cron_run_ended now drives the same refresh; keep cron_result for
-        // legacy compat (older naozhi backends still send only this).
-        announce('定时任务已完成');
-        // R221-FIX-P1-4: fetchCronJobs is async and rethrows on non-status
-        // errors; without .catch the WS dispatch sees an unhandled rejection.
-        fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
-        break;
+      // Phase D (RFC §3.5) deleted the legacy cron_result frame. The
+      // announce("定时任务已完成") moved to the cron_run_ended succeeded
+      // branch below; the list refetch was a strict subset of what the
+      // cron_run_ended branch already does.
       case 'cron_run_started':
         // P0 cron-run-history (RFC §7.2) — drive the "运行中 Xs" inline
         // badge without waiting for a list refetch. Optimistically patch
@@ -8977,6 +9024,13 @@ const wsm = {
         // hydrate from backend; the optimistic patch on the same row is
         // overwritten cleanly. fresh=false / fresh=true behave identically
         // here since the change set is JobID-scoped.
+        //
+        // Phase D (RFC §3.5) absorbed the legacy cron_result frame:
+        // gate the AT-user announce on the succeeded state so failed
+        // runs do not mis-speak success. cron_run_ended fires for every
+        // terminal state (succeeded / failed / skipped / timed_out /
+        // canceled) — only succeeded should celebrate.
+        if (msg && msg.state === 'succeeded') announce('定时任务已完成');
         cronApplyRunEnded(msg);
         fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
         // P2 cron-run-history (RFC §8.2) — refresh the timeline head
@@ -12156,6 +12210,12 @@ function getCronTimelineState(jobId) {
       loading: false,
       details: Object.create(null),
       lastMountAt: 0,       // 上次 mount 渲染的 ms 时戳；renderCronTimelineForSession 用来判 stale
+      // R243-PERF-12 (#817): cache the last innerHTML written by
+      // renderCronTimelinePanel so a no-op re-render (e.g. WS broadcast
+      // arrives but no run changed) skips the full innerHTML rewrite.
+      // Stored on the per-job state so it is reset together with
+      // runs/details when CRON_TIMELINE_FRESH_MS evicts the cache.
+      lastRenderedHtml: '',
     };
   }
   return cronTimelineState[jobId];
@@ -12668,7 +12728,23 @@ function renderCronTimelinePanel(jobId) {
   if (!host) return;
   const job = (cronJobs || []).find(x => x && x.id === jobId);
   const st = getCronTimelineState(jobId);
-  host.innerHTML = cronTimelineHtml(jobId, job, st);
+  // R243-PERF-12 (#817): identity-check the rendered HTML against the
+  // last paint for this job. cronTimelineHtml builds up to ~200 row
+  // strings on each call; when the WS poll fires and nothing changed
+  // (the common case at idle), the resulting HTML is byte-identical to
+  // the previous paint and re-assigning innerHTML would discard and
+  // rebuild every row's DOM nodes for nothing — including blowing away
+  // any in-flight katex/mermaid async-render placeholders inside
+  // expanded run details. A string-equality check is cheap (~1 µs for
+  // a 100 KB blob in V8) compared to the parse + DOM-rebuild cost it
+  // saves. The cache is stored on the per-job state so the
+  // CRON_TIMELINE_FRESH_MS eviction path naturally resets it.
+  const html = cronTimelineHtml(jobId, job, st);
+  if (html === st.lastRenderedHtml && host.innerHTML !== '') {
+    return;
+  }
+  st.lastRenderedHtml = html;
+  host.innerHTML = html;
   // result 走 renderMd 后会埋入 mermaid/katex 异步占位（mermaid-N / ktx-N），
   // 必须在 attach 到 DOM 后调用一次才能完成异步渲染。与 events bubble 路径
   // 的 stickEventsBottom / runPendingAsync 调用语义保持一致。
@@ -13314,7 +13390,13 @@ function renderCronTimelineForJob(jobId) {
     st.done = job.recent_runs.length < 10;
   }
   st.lastMountAt = Date.now();
-  host.innerHTML = cronTimelineHtml(jobId, job, st);
+  // Mount path: unconditional innerHTML rewrite (shell remount or
+  // first paint). Stash the result so the subsequent identity-check in
+  // renderCronTimelinePanel sees a non-empty baseline and short-circuits
+  // truly idempotent re-renders. R243-PERF-12 (#817).
+  const html = cronTimelineHtml(jobId, job, st);
+  st.lastRenderedHtml = html;
+  host.innerHTML = html;
   if (!job) {
     fetchCronJobs().then(() => {
       if (cronDetailJobId === jobId) renderCronTimelineForJob(jobId);

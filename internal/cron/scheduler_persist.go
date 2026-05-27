@@ -11,14 +11,72 @@ package cron
 import (
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// marshalEntriesPool reuses the []*Job snapshot slice that
+// marshalJobsLocked builds + sorts on every mutation. With ~10-50 jobs in
+// steady-state, the slice is the dominant transient alloc on the
+// finishRun → persist → save hot path (dashboard 1Hz mutations + every
+// cron tick's recordTerminalResult call land here). Pooling the slice
+// drops the per-call cap-len(jobs) backing-array allocation; the JSON
+// payload still allocates fresh because saveMarshaledSeq holds the bytes
+// across the async storeMu write so we can't reuse them.
+//
+// Slot capacity convention: pool returns a fresh slice when len(s.jobs)
+// exceeds the cap of the pooled slice; otherwise we reslice down to len
+// 0 and append. On Put we drop slices whose cap exceeds 4×maxJobsHardCap
+// (= 2000) so a one-time burst that grew the slice past steady-state
+// can't pin a multi-MB backing array forever. R247-PERF-11 (#551).
+var marshalEntriesPool = sync.Pool{
+	New: func() any {
+		// Default seed sized for the common 50-job case. Larger schedulers
+		// grow the slice on first use (regular append doubling) and the
+		// grown slice is what circulates through Put/Get afterwards.
+		s := make([]*Job, 0, 64)
+		return &s
+	},
+}
+
+// marshalEntriesCapDrop is the cap threshold above which Put refuses
+// to recycle a slice. Keeps the pool's working set bounded even after
+// a transient burst inflated one slot far past steady-state.
+const marshalEntriesCapDrop = 4 * maxJobsHardCap // 2000 *Job slots
+
+// putMarshalEntries returns the slice to the pool. Nil-checked so the
+// fallback path in marshalJobsLocked (where a brand-new slice was used
+// because the pool was empty) stays safe.
+func putMarshalEntries(s *[]*Job) {
+	if s == nil {
+		return
+	}
+	if cap(*s) > marshalEntriesCapDrop {
+		// Drop oversize slices instead of recycling so a one-off burst
+		// can't pin its inflated backing array via the pool. Leaving
+		// it for GC is cheaper than a sync.Pool with an unbounded high
+		// watermark.
+		return
+	}
+	// Zero out element pointers before return so the pool doesn't pin
+	// dead *Job pointers via stale slice slots (otherwise a deleted job
+	// would stay reachable until the next persist call overwrites the
+	// slot). Reset length to 0; cap is preserved so the next Get can
+	// append without realloc up to that cap.
+	for i := range *s {
+		(*s)[i] = nil
+	}
+	*s = (*s)[:0]
+	marshalEntriesPool.Put(s)
+}
 
 // marshalJobsFn is the signature of the JSON serializer used by
 // marshalJobsLocked. It is swapped via the per-Scheduler atomic.Pointer in
@@ -44,11 +102,26 @@ var defaultMarshalJobs = marshalJobsFn(json.Marshal)
 // is independent of s.jobs lifetime, so the caller can drop s.mu immediately.
 // The (*Job).entryID field is unexported and therefore invisible to Marshal,
 // so the runtime-only value never leaks into cron_jobs.json.
+//
+// R247-PERF-11 (#551): the entries snapshot slice is pulled from
+// marshalEntriesPool so the per-mutation cap-len(jobs) backing-array
+// allocation amortises across calls. The output []byte is still freshly
+// allocated each call because saveMarshaledSeq holds it across the
+// asynchronous storeMu write — pooling those bytes would race the
+// concurrent reader in saveMarshaledSeq.
 func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
-	entries := make([]*Job, 0, len(s.jobs))
+	entriesPtr := marshalEntriesPool.Get().(*[]*Job)
+	defer putMarshalEntries(entriesPtr)
+	entries := *entriesPtr
+	// Grow when the pooled slice's cap is below current job count. The pool
+	// circulates the grown slice so steady-state hits skip this branch.
+	if cap(entries) < len(s.jobs) {
+		entries = make([]*Job, 0, len(s.jobs))
+	}
 	for _, j := range s.jobs {
 		entries = append(entries, j)
 	}
+	*entriesPtr = entries
 	// Sort by ID for deterministic on-disk order. Map iteration is random, so
 	// identical in-memory state would produce diff-noisy JSON across saves —
 	// breaking git audit of backed-up cron_jobs.json and making post-incident
@@ -166,10 +239,17 @@ func (s *Scheduler) saveMarshaledSeq(data []byte, seq uint64) {
 	// sync.Once keeps the MkdirAll out of the per-mutation hot path; if the
 	// directory disappears later (operator rm -rf), WriteFileAtomic will
 	// surface ENOENT and the operator can recover by restarting.
+	//
+	// R238-SEC-10 (#830): MkdirAll skips perm changes on an existing dir;
+	// follow with Chmod(0o700) so a pre-existing 0o755 parent gets clamped.
+	// Mirror of the eager NewScheduler path.
 	s.storeDirOnce.Do(func() {
 		if dir := filepath.Dir(s.storePath); dir != "" && dir != "." {
 			if err := os.MkdirAll(dir, 0o700); err != nil {
 				slog.Warn("cron store parent dir mkdir failed", "err", err, "dir", dir)
+			}
+			if err := os.Chmod(dir, 0o700); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				slog.Warn("cron store parent dir chmod failed", "err", err, "dir", dir)
 			}
 		}
 	})

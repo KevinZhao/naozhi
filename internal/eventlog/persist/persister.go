@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -63,6 +64,51 @@ func putRecordBuf(buf *bytes.Buffer) {
 // so sizing up has no contention cost, only a one-time 64 KiB alloc
 // per active session.
 const logWriteBufSize = 64 * 1024
+
+// logBufPool reuses *bufio.Writer instances of capacity logWriteBufSize
+// across perKeyWriter create / close cycles. R249-PERF-21 (#995): without
+// pooling, every fresh writer (initial NewPersister attach, idle TTL
+// evict + respawn, post-rotate reattach) paid a 64 KiB heap allocation.
+// On a busy deployment with N sessions cycling through the writer cache
+// that is N × 64 KiB of churn the GC has to reclaim per cycle.
+//
+// The pool is safe because perKeyWriter.close() flushes before nilling
+// w.logBuf, and we Reset(io.Discard) on the way out so the pooled
+// instance carries no reference to the closed *os.File. The next
+// Reset(logFile) call on Get rebinds it to the fresh fd, clearing the
+// internal err field at the same time. Returning to the pool a writer
+// that grew past logWriteBufSize is impossible — bufio.Writer never
+// grows its buffer; capacity is fixed by NewWriterSize.
+var logBufPool = sync.Pool{
+	New: func() any {
+		// Bind to io.Discard initially; callers Reset(file) before use.
+		// Using Discard at construction means the pool fast-path on the
+		// very first Get of the program lifetime returns a usable
+		// writer rather than the New func returning nil and forcing
+		// an extra branch at the call site.
+		return bufio.NewWriterSize(io.Discard, logWriteBufSize)
+	},
+}
+
+// acquireLogBuf returns a *bufio.Writer rebound to file. The returned
+// writer's internal buffer capacity is exactly logWriteBufSize.
+func acquireLogBuf(file *os.File) *bufio.Writer {
+	bw := logBufPool.Get().(*bufio.Writer)
+	bw.Reset(file)
+	return bw
+}
+
+// releaseLogBuf returns a flushed bufio.Writer to the pool. Callers MUST
+// have already called Flush (or close()'s flush) — the pool slot is
+// rebound to io.Discard so any retained reference cannot accidentally
+// double-write to the original fd through the pooled writer.
+func releaseLogBuf(bw *bufio.Writer) {
+	if bw == nil {
+		return
+	}
+	bw.Reset(io.Discard)
+	logBufPool.Put(bw)
+}
 
 // Observer receives real-time counter increments from the Persister.
 // Implementations typically forward to expvar / Prometheus; the
@@ -357,8 +403,20 @@ func (p *Persister) SinkFor(key string) PersistSink {
 		default:
 			p.droppedCnt.Add(int64(len(entries)))
 			p.opts.Observer.OnDrop(len(entries))
+			// R250-ARCH-23 (#1184): include channel_used so operators
+			// can distinguish "writer goroutine wedged with N pending
+			// jobs" from "instantaneous burst overrun". Without this
+			// signal the drop log line tells you which key got starved
+			// but not how saturated the queue was at the moment the
+			// drop fired — the single most useful piece of context for
+			// diagnosing whether the writer is making progress at all.
+			// Full per-key fairness (drop additional batches from the
+			// same chatty key first) needs a per-key counter map and
+			// is a follow-up; the observable signal here unblocks
+			// operator triage today.
 			slog.Warn("event log persist: channel full; dropping batch",
 				"key", key, "count", len(entries),
+				"channel_used", len(p.in),
 				"channel_cap", cap(p.in))
 		}
 	}
@@ -494,15 +552,23 @@ func (p *Persister) WriterAlive() bool {
 	if p.closed.Load() {
 		return false
 	}
-	s := p.Stats()
-	if s.ChannelCap == 0 {
+	// Read fields directly instead of via Stats() to avoid the
+	// 80-byte struct allocation per /health probe. R250-PERF-24.
+	chanCap := cap(p.in)
+	if chanCap == 0 {
 		return false
 	}
-	notFull := s.ChannelDepth*5 < s.ChannelCap*4
-	if s.ChannelDepth == 0 {
+	chanDepth := len(p.in)
+	notFull := chanDepth*5 < chanCap*4
+	if chanDepth == 0 {
 		return notFull
 	}
-	drainedRecently := s.LastDrainAgo > 0 && s.LastDrainAgo < 5*time.Second
+	ns := p.lastDrainNS.Load()
+	if ns == 0 {
+		return false
+	}
+	lastAgo := p.opts.Clock().Sub(time.Unix(0, ns))
+	drainedRecently := lastAgo > 0 && lastAgo < 5*time.Second
 	return drainedRecently && notFull
 }
 
@@ -699,6 +765,16 @@ func (p *Persister) dropLocked(key, stem string) error {
 func (p *Persister) flushAllLocked() error {
 	var firstErr error
 	for k, w := range p.writers {
+		// R250-PERF-25 (#1128): w.flush() already short-circuits on
+		// !w.dirty, but at 100+ writers with most idle the per-call
+		// frame overhead (atomic loads, interface dispatch on the
+		// inlined-but-not-zero check) adds up. Skip the call entirely
+		// for clean writers — the dirty bit is only mutated on the
+		// run goroutine that already owns this iteration, so no
+		// synchronisation is needed.
+		if !w.dirty {
+			continue
+		}
 		if err := w.flush(p); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("flush %s: %w", k, err)
@@ -721,6 +797,16 @@ type flushCandidate struct {
 }
 
 func (p *Persister) tickFlush() {
+	// R250-PERF-6 (#1110): mirror the empty-writer guard already in
+	// tickIdleClose. Idle deployments (cron-only / dashboard-paused) hit
+	// this every FlushInterval/2 (≥10ms) and the empty-map walk + Clock
+	// vDSO call are pure overhead — at the default 100ms cadence that
+	// is ~864k context switches/day waking just to confirm zero writers.
+	// Safe without locking because tickFlush runs only on the run
+	// goroutine, the same goroutine that mutates p.writers.
+	if len(p.writers) == 0 {
+		return
+	}
 	now := p.opts.Clock()
 	// Collect-then-sort instead of a true heap: 1-200 typical writers
 	// per tick, sort.Slice is faster in practice than a container/heap
@@ -969,7 +1055,7 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 		key:          key,
 		stem:         stem,
 		logFile:      logFile,
-		logBuf:       bufio.NewWriterSize(logFile, logWriteBufSize),
+		logBuf:       acquireLogBuf(logFile), // R249-PERF-21 (#995): pool 64 KiB bufio.
 		idxWriter:    idxW,
 		logPath:      logPath,
 		idxPath:      idxPath,
@@ -1104,10 +1190,31 @@ func (w *perKeyWriter) flush(p *Persister) error {
 		// beyond the steady-state IdxStride*2 sizing. Without this
 		// guard the per-session writer permanently retains the
 		// peak capacity once an oversized batch has flowed through.
+		//
+		// R250-PERF-17 (#1120): idxScratch tracks the same growth pattern
+		// (selectForIdx writes kept entries into the caller-supplied
+		// scratch slice), so apply the matching shrink rule here. Without
+		// this, after a single InjectHistory burst every per-key writer
+		// pins a multi-KB scratch backing array for its lifetime; with
+		// 100+ active writers that's avoidable steady-state heap. The
+		// stride>1 gate matches the pendingIdx branch above — in the
+		// stride<=1 fast path idxScratch is never assigned (selectForIdx
+		// returns `pending` itself; see line 1102 guard) so there's
+		// nothing to shrink.
 		if p.opts.IdxStride > 1 && cap(w.pendingIdx) > p.opts.IdxStride*4 {
 			w.pendingIdx = make([]schema.IdxEntry, 0, p.opts.IdxStride*2)
 		} else {
 			w.pendingIdx = w.pendingIdx[:0]
+		}
+		// R250-PERF-17 (#1120): apply the same shrink rule to idxScratch.
+		// selectForIdx keeps `kept` pointing at the per-writer scratch
+		// (assigned to w.idxScratch above when stride > 1), so an
+		// InjectHistory burst inflates this slice's cap symmetrically with
+		// pendingIdx; without this reset, 100+ active writers would each
+		// pin a multi-KB scratch slice for the writer's lifetime even
+		// after returning to steady-state batch sizes.
+		if p.opts.IdxStride > 1 && cap(w.idxScratch) > p.opts.IdxStride*4 {
+			w.idxScratch = make([]schema.IdxEntry, 0, p.opts.IdxStride*2)
 		}
 	}
 	// Skip the fsync entirely when this flush did not append any idx
@@ -1144,6 +1251,12 @@ func (w *perKeyWriter) close() error {
 		if err := w.logBuf.Flush(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+		// R249-PERF-21 (#995): return the bufio.Writer to the pool so the
+		// 64 KiB buffer is reusable by the next perKeyWriter instead of
+		// being released to GC. releaseLogBuf rebinds to io.Discard so the
+		// nilled w.logBuf cannot accidentally route writes through the
+		// pooled instance later.
+		releaseLogBuf(w.logBuf)
 		w.logBuf = nil
 	}
 	if w.logFile != nil {

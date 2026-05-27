@@ -107,7 +107,7 @@ func TestProcess_IsRunning(t *testing.T) {
 		{StateDead, false},
 	}
 	for _, tc := range cases {
-		p := &Process{State: tc.state}
+		p := &Process{state: tc.state}
 		if got := p.IsRunning(); got != tc.want {
 			t.Errorf("state=%v: IsRunning() = %v, want %v", tc.state, got, tc.want)
 		}
@@ -154,7 +154,7 @@ func TestProcess_ReadLoop_SetsStateDeadOnCLIExited(t *testing.T) {
 	}
 
 	p.mu.Lock()
-	state := p.State
+	state := p.state
 	p.mu.Unlock()
 
 	if state != StateDead {
@@ -244,14 +244,14 @@ func TestProcess_StateTransitions(t *testing.T) {
 	t.Parallel()
 	p, srv := shimTestPair(&ClaudeProtocol{})
 
-	if p.State != StateSpawning {
-		t.Errorf("initial state = %v, want StateSpawning", p.State)
+	if p.state != StateSpawning {
+		t.Errorf("initial state = %v, want StateSpawning", p.state)
 	}
 
 	go p.readLoop()
 
 	// TRUE-time-delay (not migrated to testhelper.Eventually): readLoop
-	// does not mutate p.State before blocking on shimR.ReadBytes — only
+	// does not mutate p.state before blocking on shimR.ReadBytes — only
 	// startReadLoop() sets StateReady, and this test calls readLoop
 	// directly. No observable "loop is scheduled" signal exists, so we
 	// yield the scheduler briefly. Keep short; state mutations below
@@ -260,7 +260,7 @@ func TestProcess_StateTransitions(t *testing.T) {
 
 	// Simulate Send() acquiring lock: Ready → Running
 	p.mu.Lock()
-	p.State = StateRunning
+	p.state = StateRunning
 	p.mu.Unlock()
 
 	if !p.IsRunning() {
@@ -269,8 +269,8 @@ func TestProcess_StateTransitions(t *testing.T) {
 
 	// Simulate Send() completing: Running → Ready
 	p.mu.Lock()
-	if p.State == StateRunning {
-		p.State = StateReady
+	if p.state == StateRunning {
+		p.state = StateReady
 	}
 	p.mu.Unlock()
 
@@ -288,7 +288,7 @@ func TestProcess_StateTransitions(t *testing.T) {
 	}
 
 	p.mu.Lock()
-	final := p.State
+	final := p.state
 	p.mu.Unlock()
 
 	if final != StateDead {

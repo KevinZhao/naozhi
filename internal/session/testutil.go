@@ -49,7 +49,12 @@ type TestProcess struct {
 	StateVal       cli.ProcessState
 	AliveVal       bool
 	DeathReasonVal string
-	SendFunc       func(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+	// ModelVal lets snapshot tests drive proc.Model() without subclassing.
+	// Default "" matches the pre-R236-PERF-13 behaviour. Used by
+	// snapshot_setmodel_idempotent_test.go to assert Snapshot's mirror
+	// short-circuits when the cached model already equals proc.Model().
+	ModelVal string
+	SendFunc func(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
 }
 
 // NewTestProcess creates a TestProcess with an event log and ready state.
@@ -93,6 +98,9 @@ func (p *TestProcess) PassthroughDepth() int { return 0 }
 // TestProcess whose wrapper overrides this (or supply a real *cli.Process).
 func (p *TestProcess) SupportsPassthrough() bool { return false }
 
+// GetSessionID / GetState mirror the unidiomatic processIface method
+// names flagged by R219-CR-9 (#665). When the coordinated rename to
+// SessionID() / State() ships, these fakes flip in the same PR.
 func (p *TestProcess) GetSessionID() string              { return "" }
 func (p *TestProcess) GetState() cli.ProcessState        { return p.StateVal }
 func (p *TestProcess) DeathReason() string               { return p.DeathReasonVal }
@@ -125,7 +133,7 @@ func (p *TestProcess) TurnAgents() []cli.SubagentInfo { return p.EventLog.TurnAg
 func (p *TestProcess) ContextUsagePercent() float64       { return 0 }
 func (p *TestProcess) TurnDurationMs() int64              { return 0 }
 func (p *TestProcess) MeteringUsage() []cli.MeteringEntry { return nil }
-func (p *TestProcess) Model() string                      { return "" }
+func (p *TestProcess) Model() string                      { return p.ModelVal }
 
 // InjectSession inserts a session with the given TestProcess into the router.
 // For use in tests that need sessions without spawning real CLI processes.

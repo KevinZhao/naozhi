@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cron"
 	"golang.org/x/time/rate"
 )
 
@@ -100,6 +101,110 @@ func TestHandleTrigger_NilLimiter_PassThrough(t *testing.T) {
 	h.handleTrigger(w, req)
 	if w.Code == http.StatusTooManyRequests {
 		t.Fatalf("nil writeLimiter must not produce 429; got %d body=%q", w.Code, w.Body.String())
+	}
+}
+
+// TestHandleList_PerIPRateLimit pins R240-SEC-13 / #1045: GET /api/cron
+// MUST gate per-IP via listLimiter before fanning out scheduler reads
+// (ListAllJobsWithNextRun + RecentRuns(5) per job). A stolen dashboard
+// token without this gate could enumerate the entire cron config —
+// including full prompts up to 8 KiB × ~50 jobs — at unbounded rate.
+//
+// Burst=2 + rate.Every(time.Hour) means the third request inside the
+// test window MUST hit 429. The handler nil-guards scheduler so first
+// requests can pass through to the empty-list happy path; we just need
+// the limiter to reject the third request before reaching that path.
+func TestHandleList_PerIPRateLimit(t *testing.T) {
+	t.Parallel()
+	h := &CronHandlers{
+		listLimiter: newIPLimiterWithProxy(rate.Every(time.Hour), 2, false),
+	}
+
+	doReq := func() int {
+		req := httptest.NewRequest(http.MethodGet, "/api/cron", nil)
+		req.RemoteAddr = "10.1.2.3:5555"
+		w := httptest.NewRecorder()
+		h.handleList(w, req)
+		return w.Code
+	}
+
+	// First two requests should pass the limiter (burst=2). They will
+	// reach the scheduler-nil empty-list branch and return 200; either
+	// way they MUST NOT 429.
+	for i := 0; i < 2; i++ {
+		if got := doReq(); got == http.StatusTooManyRequests {
+			t.Fatalf("request %d 429ed early — burst budget exhausted prematurely", i+1)
+		}
+	}
+	// Third request MUST hit 429: limiter exhausted. Pins #1045 — a
+	// future refactor that drops the listLimiter gate would let a stolen
+	// token enumerate /api/cron at unbounded rate.
+	if got := doReq(); got != http.StatusTooManyRequests {
+		t.Fatalf("3rd /api/cron after burst exhaustion: got %d, want 429 Too Many Requests; #1045 list rate-limit gate may be missing", got)
+	}
+}
+
+// TestHandleList_NilLimiter_PassThrough mirrors TestHandleTrigger_NilLimiter_PassThrough
+// for handleList: nil listLimiter must NOT 429, otherwise hand-built
+// CronHandlers in unrelated tests would 429 spuriously. R240-SEC-13 / #1045.
+func TestHandleList_NilLimiter_PassThrough(t *testing.T) {
+	t.Parallel()
+	h := &CronHandlers{} // listLimiter nil
+
+	req := httptest.NewRequest(http.MethodGet, "/api/cron", nil)
+	w := httptest.NewRecorder()
+	h.handleList(w, req)
+	if w.Code == http.StatusTooManyRequests {
+		t.Fatalf("nil listLimiter must not produce 429; got %d body=%q", w.Code, w.Body.String())
+	}
+}
+
+// TestCronSummaryToView_PreservesOrderAndFields locks the wire-shape
+// contract for the recent_runs builder. R250-PERF-19 (#1122) replaced
+// `make([]cronRunSummaryView, 0, len(recent))` + `append` with
+// `make(..., len(recent))` + index assignment in handleList; the
+// assertion below pins that:
+//
+//   - the per-row mapping (RunID/State/Trigger/StartedAt/EndedAt/...)
+//     is unchanged regardless of which fill strategy a future refactor
+//     uses, and
+//   - the source ordering survives intact (a future bug that swapped to
+//     a parallel goroutine fan-out without sorting would fail this).
+//
+// We exercise cronSummaryToView directly rather than reaching through
+// handleList because this shape is the single contract the dashboard
+// consumes; handleList only reorders nothing on its own.
+func TestCronSummaryToView_PreservesOrderAndFields(t *testing.T) {
+	t.Parallel()
+	t0 := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
+	in := []cron.CronRunSummary{
+		{RunID: "aa00000000000001", State: "succeeded", StartedAt: t0, EndedAt: t0.Add(time.Second), DurationMS: 1000, SessionID: "s1"},
+		{RunID: "aa00000000000002", State: "failed", StartedAt: t0.Add(time.Minute), EndedAt: t0.Add(time.Minute + time.Second), DurationMS: 1000, ErrorClass: "exec"},
+		{RunID: "aa00000000000003", State: "running", StartedAt: t0.Add(2 * time.Minute)}, // EndedAt zero
+	}
+	out := make([]cronRunSummaryView, len(in))
+	for i, r := range in {
+		out[i] = cronSummaryToView(r)
+	}
+	if got := len(out); got != len(in) {
+		t.Fatalf("len(out) = %d, want %d", got, len(in))
+	}
+	for i, view := range out {
+		if view.RunID != in[i].RunID {
+			t.Errorf("out[%d].RunID = %q, want %q (order corruption)", i, view.RunID, in[i].RunID)
+		}
+		if view.State != string(in[i].State) {
+			t.Errorf("out[%d].State = %q, want %q", i, view.State, string(in[i].State))
+		}
+		if view.StartedAt != in[i].StartedAt.UnixMilli() {
+			t.Errorf("out[%d].StartedAt = %d, want %d", i, view.StartedAt, in[i].StartedAt.UnixMilli())
+		}
+	}
+	// Running run (index 2) MUST emit ended_at=0 — IsZero() guard suppresses
+	// the conversion. A bug that pre-allocates and forgets to reset would
+	// silently land Unix epoch (-62...) instead.
+	if out[2].EndedAt != 0 {
+		t.Errorf("running run EndedAt = %d, want 0 (zero time → omitted)", out[2].EndedAt)
 	}
 }
 

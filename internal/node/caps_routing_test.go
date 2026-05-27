@@ -212,16 +212,16 @@ func TestReverseServer_Register_PopulatesMetaCaps(t *testing.T) {
 	}
 }
 
-// TestNewReverseConn_LegacyEmptyCaps covers the legacy constructor:
-// older code paths and tests still call newReverseConn directly. They
-// must produce a connection whose Meta() reports an empty capability
-// set so HasCap() denies any non-empty cap query (so kiro routing
-// rejects them, claude routing accepts them).
+// TestNewReverseConn_LegacyEmptyCaps covers the legacy register path:
+// a node that connects without advertising capabilities (nil caps,
+// empty hostname) must produce a connection whose Meta() reports an
+// empty capability set so HasCap() denies any non-empty cap query (so
+// kiro routing rejects them, claude routing accepts them).
 //
 // As above we skip Close to keep the test free of a live websocket.
 func TestNewReverseConn_LegacyEmptyCaps(t *testing.T) {
 	t.Parallel()
-	rc := newReverseConn("legacy", "Legacy", "10.0.0.2", nil)
+	rc := newReverseConnWithMeta("legacy", "Legacy", "10.0.0.2", nil, nil, "")
 
 	meta := rc.Meta()
 	if meta == nil {

@@ -16,7 +16,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionconst"
 )
 
 // Config is the top-level naozhi configuration loaded from config.yaml.
@@ -405,8 +405,20 @@ func Load(path string) (*Config, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("config file %s is not a regular file", path)
 	}
-	if fi.Mode()&0o044 != 0 {
-		return nil, fmt.Errorf("config file %s is group/world-readable (mode %04o); restrict with: chmod 0600 %s",
+	// R237-SEC-8 / #654: align the fd-stat mask with the Lstat path's 0o077.
+	// The previous 0o044 only covered group-read + world-read, so a 0o650
+	// (group rwx + group-write only) symlink-swap target Lstat would have
+	// flagged via the wider mask still squeaked through this fd-stat
+	// re-check — a TOCTOU window where an attacker who can interrupt the
+	// Lstat→OpenFile gap with a symlink swap to a 0o650 file gets the file
+	// loaded into memory anyway. Widen to 0o077 so the two gates apply the
+	// SAME policy and the second check is a real backstop, not a narrower
+	// (and therefore weaker) one. Error string keeps "group/world-readable"
+	// because read-only is still the most common operator misstep; the
+	// extra coverage rejects rarer write/execute bits that have no business
+	// on a credential-bearing config file regardless of the read bit.
+	if fi.Mode()&0o077 != 0 {
+		return nil, fmt.Errorf("config file %s is group/world-accessible (mode %04o); restrict with: chmod 0600 %s",
 			path, fi.Mode().Perm(), path)
 	}
 	// Cap config reads at 1 MiB; the on-disk shape is ~hundreds of
@@ -479,7 +491,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Server.Addr = ":8080"
 	}
 	if cfg.Session.MaxProcs <= 0 {
-		cfg.Session.MaxProcs = session.DefaultMaxProcs
+		cfg.Session.MaxProcs = sessionconst.DefaultMaxProcs
 	}
 	if cfg.Session.TTL == "" {
 		cfg.Session.TTL = "30m"
@@ -1091,6 +1103,18 @@ var envExpansionDenyPrefixes = []string{
 	"GOOGLE_",
 	"OCI_",
 	"OPENAI_",
+	// Additional upstream-credential prefixes that have no legitimate
+	// naozhi-side config use. GITHUB_TOKEN / GH_TOKEN are matched as
+	// full names via this prefix (no partial suffixes follow). The
+	// OPENROUTER_ / MISTRAL_ / HUGGINGFACE_ / HUGGING_FACE_ prefixes
+	// guard against alternative-LLM provider keys that an operator
+	// might confuse with a generic alias slot. R240-SEC-16 / #1047.
+	"GITHUB_TOKEN",
+	"GH_TOKEN",
+	"OPENROUTER_",
+	"MISTRAL_",
+	"HUGGINGFACE_",
+	"HUGGING_FACE_",
 }
 
 // allowEnvExpansion reports whether key is safe to expand in config.yaml.
@@ -1121,6 +1145,16 @@ func allowEnvExpansion(key string) bool {
 // so the bad config surfaces loudly (literal "${ANTHROPIC_API_KEY}"
 // inside e.g. dashboard_token will fail containsEnvPlaceholder validation
 // at startup) rather than silently leaking the key.
+//
+// R237-SEC-4 / #637: an env value containing a newline (or other control
+// byte) was previously substituted raw into the YAML payload, so an
+// attacker who controlled an env var could inject arbitrary YAML keys —
+// e.g. `FOO=$'value\ndashboard_token: pwned'` would inject a
+// `dashboard_token` field even into a single-line scalar. Refuse to
+// expand any value that contains a control byte; the placeholder is left
+// intact so the bad config surfaces loudly via downstream validation
+// (containsEnvPlaceholder) rather than silently turning into a forged
+// config.
 func expandEnvVars(data []byte) []byte {
 	if !bytes.Contains(data, []byte("${")) {
 		return data
@@ -1131,10 +1165,33 @@ func expandEnvVars(data []byte) []byte {
 			return match
 		}
 		if val, ok := os.LookupEnv(key); ok {
+			if containsYAMLBreakingByte(val) {
+				return match
+			}
 			return []byte(val)
 		}
 		return match
 	})
+}
+
+// containsYAMLBreakingByte reports whether s contains any byte that, when
+// substituted raw into a YAML payload, could break the original token's
+// scope and inject a sibling/parent-level key. Newlines (\n, \r) are the
+// primary vector; other ASCII control bytes are refused defensively (they
+// have no legitimate place in a config scalar). Tab is treated as
+// breaking too — YAML 1.2 forbids tabs inside indentation, so a tab inside
+// an expanded value can confuse a downstream parser. R237-SEC-4 / #637.
+func containsYAMLBreakingByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b == '\n' || b == '\r' || b == '\t' {
+			return true
+		}
+		if b < 0x20 || b == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 func containsEnvPlaceholder(s string) bool {

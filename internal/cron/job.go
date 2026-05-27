@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -139,6 +140,16 @@ type Job struct {
 	RunCounters JobRunCounters `json:"run_counters,omitempty"`
 
 	entryID robfigcron.EntryID // runtime only, not persisted
+
+	// cachedPeriod is the precomputed schedule period (Next-Next delta), populated
+	// once per registerJob alongside entryID. The hot jitter path (#664 / R242-PERF-2)
+	// previously called schedulePeriodFromSched(sched, time.Now()) on every cron tick,
+	// running 2× sched.Next per jittered job per fire. Period only changes when
+	// Schedule mutates (UpdateJob path re-registers and recomputes); cache it on
+	// the Job to skip the per-tick recompute. Zero = unknown / not yet registered;
+	// callers fall back to the live computation in that case so test fixtures
+	// (which never call registerJob) keep working.
+	cachedPeriod time.Duration // runtime only, not persisted
 }
 
 // RunState 是单次 cron 执行的终态分类。运行中态不进 RunState（用 runInflight
@@ -208,23 +219,39 @@ const hexIDEntropyBytes = 8
 
 // generateHexID 返回 hexIDEntropyBytes 个 crypto/rand 字节的小写 hex 表示。
 // crypto/rand 在 Linux 下来自 getrandom(2)，失败仅在内核 entropy 池不
-// 可用的极端场景；视作不可恢复的环境错误，panic 等同于 fatal。
-func generateHexID() string {
+// 可用的极端场景；返回 error 让 caller 自行选择降级方式。
+//
+// R242-CR-14 (#706): 历史实现 panic("crypto/rand unavailable: ...")，会从
+// AddJob 的 caller stack 一路炸到 dashboard handler / IM 入口；进程级
+// crash 远比"这一次 add/run 失败"破坏性大。改返 error 后：
+//   - AddJob 把错误透传给 HTTP / IM caller，请求层失败可重试；
+//   - 周期 tick 路径（executeOpt / emitOverlapSkipped）log + 跳过该次
+//     执行，保留进程存活、下一 tick 自然恢复。
+//
+// 实现细节：Go 1.26 起 `crypto/rand.Read` 在 reader 失败时直接调
+// runtime fatal（go.dev/issue/66821），调用方拿不到 error。所以这里
+// 改用 io.ReadFull(rand.Reader, b) 直接读底层 Reader —— 如此 Read
+// 的 err 才会原样返回给我们，给 fault-injection 测试以及未来生产环境
+// 真正的 entropy 不足故障都留下处理路径。
+//
+// 测试需要 panic 等价语义时用 mustGenerateHexID（test helper），别在
+// 生产路径 catch error 后 panic —— 那等于把这次重构反向回去。
+func generateHexID() (string, error) {
 	b := make([]byte, hexIDEntropyBytes)
-	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand unavailable: " + err.Error())
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return "", fmt.Errorf("cron: crypto/rand unavailable: %w", err)
 	}
 	// R228-CR-9: hex.EncodeToString skips fmt's reflection path; matches
 	// textutil/uuid.go encoding style.
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }
 
 // generateRunID 返回 CronRun.RunID（16-char hex）。语义上独立于 jobID，
 // 共享 generateHexID 实现。
-func generateRunID() string { return generateHexID() }
+func generateRunID() (string, error) { return generateHexID() }
 
 // generateID 返回 cron Job.ID（16-char hex）。
-func generateID() string { return generateHexID() }
+func generateID() (string, error) { return generateHexID() }
 
 // MaxCronTitleLen 是 Job.Title 的字符上限（UTF-8 rune 计）。256 覆盖绝大多数
 // 人类可读名称，且与 dashboard 的 escAttr 线长相容。导出以便 server 包

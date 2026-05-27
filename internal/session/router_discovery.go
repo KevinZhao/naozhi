@@ -561,9 +561,17 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 	r.mu.Lock()
 	// If key already exists (e.g. re-takeover same CWD), close the old process
 	if s, ok := r.sessions[key]; ok {
+		// Decrement deltas mirror the resetLocked pattern: only sessions
+		// that were non-exempt AND alive contributed to activeCount, so
+		// only those need a -1. R220-PERF-1 fast path: replaces an O(n)
+		// countActive() recount that fired even when at most one session
+		// transitioned, which scaled poorly past ~500 sessions on Takeover
+		// hot paths.
 		if p := s.loadProcess(); p != nil && p.Alive() {
 			oldSession := s
 			proc := p
+			oldBackend := s.Backend()
+			oldExempt := s.exempt
 			r.mu.Unlock()
 			proc.Close()
 			// Takeover reuses the same key, so the next spawnSession below
@@ -579,6 +587,12 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 				r.unregisterSessionLocked(key, cur, true)
 				r.storeDirty = true
 				r.storeGen.Add(1)
+				if !oldExempt {
+					if r.activeCount.Add(-1) < 0 {
+						r.activeCount.Store(0)
+					}
+					metrics.RecordSessionActive(oldBackend, -1)
+				}
 			} else if cur != nil && cur.isAlive() {
 				// Concurrent GetOrCreate created a new session during Close();
 				// abort takeover rather than silently returning wrong session.
@@ -588,14 +602,16 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			// Implicit else: concurrent goroutine replaced the session with an exited
 			// one. Leave r.sessions[key] as-is — spawnSession below will overwrite
 			// it and call indexAdd, keeping the index consistent. No indexDel here
-			// because we are not removing from r.sessions.
+			// because we are not removing from r.sessions. The activeCount delta
+			// is also skipped because spawnSession will Store(+1) for the new
+			// process if applicable.
 		} else {
 			// Dead session branch: same keepBackendOverride=true rationale.
+			// Dead sessions weren't in activeCount, so no decrement is needed.
 			r.unregisterSessionLocked(key, s, true)
 			r.storeDirty = true
 			r.storeGen.Add(1)
 		}
-		r.countActive()
 	}
 	// Set workspace override for the chat key prefix. Must bump the dirty
 	// flag so the override is persisted; otherwise a crash before another

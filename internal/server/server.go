@@ -19,7 +19,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cron"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -28,7 +27,6 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 	"github.com/naozhi/naozhi/internal/transcribe"
-	"golang.org/x/time/rate"
 )
 
 const (
@@ -446,6 +444,16 @@ type ServerOptions struct {
 	// profile, then flip it back. R244-SEC-P3-1 [REPEAT-3].
 	DebugMode bool
 
+	// PublicTmpEnabled opts the __public_tmp__ pseudo-project in (R237-SEC-5,
+	// #646). When false (default) requests for that pseudo-project fall
+	// through to the regular "project not found" surface — closes the
+	// "any authed dashboard user can read /tmp" gap on multi-user
+	// deployments. Single-operator dashboards (the typical naozhi use)
+	// flip it on via `server.public_tmp_enabled: true` in config.yaml so
+	// chat-mentioned /tmp/... paths still resolve without first
+	// registering /tmp as a real project.
+	PublicTmpEnabled bool
+
 	// === Core dependencies (previously positional args of New) ===
 	//
 	// These fields were originally positional parameters on New(); they
@@ -488,38 +496,23 @@ func NewWithOptions(opts ServerOptions) *Server {
 	return buildServer(opts)
 }
 
-// New is the legacy positional-args constructor, retained so existing
-// call sites (especially tests) do not need mechanical updates. It
-// stuffs the positional args into ServerOptions (overriding any matching
-// fields the caller may have also set in opts) and delegates to
-// NewWithOptions. New callers should use NewWithOptions directly.
+// (Removed in R237-ARCH-14 / #614): the legacy positional-args
+// constructor `func New(addr, router, platforms, agents, agentCommands,
+// scheduler, backend, opts)` was retired once the dual-constructor pin
+// in new_options_test.go was rewritten to live entirely in terms of
+// NewWithOptions. The removal-condition spelled out in the prior godoc
+// header (`Deprecated: use NewWithOptions`) is now satisfied — there
+// are zero call sites in production (`cmd/`) and zero in tests, so the
+// shim has no remaining purpose.
 //
-// Deprecated: use NewWithOptions. Production (cmd/naozhi/main.go) already
-// calls NewWithOptions; this signature is kept to avoid churning ~20 test
-// call sites at once — they can migrate in-place at any future touch.
-// Gopls / staticcheck will flag new positional-style call sites so the
-// migration path stays discoverable.
-//
-// Removal condition (R214-CODE-4 / R224-CR-5): delete this wrapper once
-// every *_test.go in this package and its consumers calls NewWithOptions
-// directly. Track via `git grep -l "server.New("` returning zero hits.
-// New positional-style call sites should NOT be added — start with
-// NewWithOptions and let this function shrink to test-only legacy.
-func New(addr string, router *session.Router, platforms map[string]platform.Platform, agents map[string]session.AgentOpts, agentCommands map[string]string, scheduler *cron.Scheduler, backend string, opts ServerOptions) *Server {
-	opts.Addr = addr
-	opts.Router = router
-	opts.Platforms = platforms
-	opts.Agents = agents
-	opts.AgentCommands = agentCommands
-	opts.Scheduler = scheduler
-	opts.Backend = backend
-	return NewWithOptions(opts)
-}
+// TestServerNew_NotReintroduced (new_options_test.go) keeps drift from
+// re-adding `func New(addr string, ...)` in this file by source-scan
+// regression. Use NewWithOptions directly.
 
-// buildServer is the shared construction path used by both New and
-// NewWithOptions. Kept private so the two public entry points are the
-// only way to create a *Server, and their contracts can evolve
-// independently without leaking internal assembly details.
+// buildServer is the shared construction path used by NewWithOptions.
+// Kept private so the public entry point is the only way to create a
+// *Server, and its contract can evolve without leaking internal assembly
+// details.
 func buildServer(opts ServerOptions) *Server {
 	addr := opts.Addr
 	router := opts.Router
@@ -537,10 +530,12 @@ func buildServer(opts ServerOptions) *Server {
 	// session.Backend() at IM-reply time so a kiro session in a claude-default
 	// deployment gets [kiro] correctly.
 	tag := defaultTag
-	claudeDir := ""
-	if home, err := os.UserHomeDir(); err == nil {
-		claudeDir = filepath.Join(home, ".claude")
-	}
+	// R222-ARCH-9 / #724: env probe goes through the shared helper so the
+	// "where is ~/.claude" decision lives in one place (claude_paths.go).
+	// resolveClaudeDir returns "" when UserHomeDir fails, matching the
+	// previous inline shape exactly — downstream sites already nil-check
+	// claudeDir before joining or reading.
+	claudeDir := resolveClaudeDir()
 
 	nodes := opts.Nodes
 	if nodes == nil {
@@ -566,10 +561,20 @@ func buildServer(opts ServerOptions) *Server {
 	// fatal escalation. This pair-warn at least guarantees operators see
 	// the risk before an incident, mapping onto the TODO's "升级 warn 严重度"
 	// ask while preserving boot-compat.
+	//
+	// R237-SEC-9 / #658: the multi-user-intent + network-reachable branch
+	// upgrades from Warn to Error. The single-user/loopback branch stays
+	// Warn because that's the legitimate dev-laptop default. Error level
+	// (a) routes to stderr in slog default text handler, (b) shows up
+	// distinctly under journald PRIORITY filtering, and (c) trips alerting
+	// pipelines that ignore Warn. The boot itself is intentionally not
+	// failed — `naozhi doctor` remains the right place for hard-fail
+	// because operators can run it standalone before exposing the listener
+	// without burning a service-restart cycle on an upgrade.
 	if opts.AllowedRoot == "" {
 		slog.Warn("server.allowed_root is unset; dashboard /cd, cron WorkDir, and takeover CWD accept any absolute path — set allowed_root in config.yaml to restrict")
 		if opts.DashboardToken != "" && isPlaintextPublicAddr(opts.Addr) {
-			slog.Warn("HIGH: allowed_root unset on a token-protected, network-reachable dashboard — any authenticated user can set cron WorkDir to /etc or other system paths and let the CLI write there. Set server.allowed_root before exposing this listener.",
+			slog.Error("allowed_root unset on a token-protected, network-reachable dashboard — any authenticated user can set cron WorkDir to /etc or other system paths and let the CLI write there. Set server.allowed_root before exposing this listener; `naozhi doctor` will hard-fail this configuration.",
 				"addr", opts.Addr,
 			)
 		}
@@ -624,50 +629,13 @@ func buildServer(opts ServerOptions) *Server {
 		knownNodes:      knownNodes,
 		sysessionMgr:    opts.SysessionManager,
 
-		// Extracted handler groups
-		auth: &AuthHandlers{
-			dashboardToken:    opts.DashboardToken,
-			cookieSecret:      cookieSecret,
-			cookieGen:         cookieGen,
-			loginLimiter:      newLoginLimiter(),
-			wsUpgradeLimiter:  newWSUpgradeLimiter(),
-			unauthDashLimiter: newWSUpgradeLimiter(), // same bucket shape: 60/min sustained, 20 burst — fits human refresh cadence, blocks scanners. R230C-SEC-12.
-			trustedProxy:      opts.TrustedProxy,
-		},
-		cronH: &CronHandlers{
-			scheduler:   scheduler,
-			allowedRoot: opts.AllowedRoot,
-			claudeDir:   claudeDir,
-			// R222-SEC-3: per-IP limiter for /api/cron/runs and
-			// /api/cron/runs/{run_id}. 60 req/min/IP with burst 60 mirrors the
-			// per-minute pace the dashboard uses when paginating run history
-			// (one initial fetch + occasional refresh) and leaves enough
-			// headroom for the run-detail drawer to fan out a few sequential
-			// reads. A stolen token can otherwise enumerate the entire on-disk
-			// run history at unbounded rate, both burning IO and exposing
-			// per-job activity timing.
-			runsLimiter: newIPLimiterWithProxy(rate.Every(time.Second), 60, opts.TrustedProxy),
-			// R242-CR-3: per-IP limiter for the 1 Hz GET /api/cron poll.
-			// Dashboard tabs hit this endpoint roughly once per second
-			// each, and the per-call cost is O(N jobs × RecentRuns(5))
-			// of sync.Map loads + entry locks — cheap individually but
-			// unbounded under hostile parallelism. 2 req/s sustained
-			// with burst 30 leaves plenty of headroom for legit dashboard
-			// refresh bursts (tab switch + filter change) while capping
-			// a stolen token's steady-state poll rate.
-			listLimiter: newIPLimiterWithProxy(rate.Every(500*time.Millisecond), 30, opts.TrustedProxy),
-			// [R247-SEC-2 / R247-SEC-3] per-IP limiter shared by the
-			// cron write / control endpoints (trigger, preview). 30 req/min
-			// sustained with burst 6 — legitimate UI form-edit loops hit
-			// preview a handful of times per minute, while a stolen token
-			// is capped at one trigger every 2 s steady-state.
-			writeLimiter: newIPLimiterWithProxy(rate.Every(2*time.Second), 6, opts.TrustedProxy),
-		},
-		transcribeH: &TranscribeHandler{
-			transcriber:       opts.Transcriber,
-			transcribeLimiter: newIPLimiterWithProxy(rate.Every(12*time.Second), 5, opts.TrustedProxy), // 5 transcriptions/min per IP
-			sem:               make(chan struct{}, transcribeSemCap),
-		},
+		// Extracted handler groups (literals factored to build_handlers.go;
+		// #738 / R246-CR-004). Helper docstrings carry the limiter rationale
+		// that previously lived inline; buildServer keeps initialization
+		// order visible while shedding ~40 LOC of struct literals.
+		auth:        buildAuthHandlers(opts, cookieSecret, cookieGen),
+		cronH:       buildCronHandlers(opts, claudeDir),
+		transcribeH: buildTranscribeHandler(opts),
 	}
 
 	// Q1: the router's terminal-removal hook (Router.Reset/Remove; LRU
@@ -698,80 +666,38 @@ func buildServer(opts ServerOptions) *Server {
 	// and a parse error here just means the store starts empty. The
 	// store is only persisted when StateDir is configured — in-memory
 	// only otherwise (tests, ephemeral deployments).
-	var retiredStore *discovery.RetiredStore
-	if opts.StateDir != "" {
-		var err error
-		retiredStore, err = discovery.NewRetiredStore(filepath.Join(opts.StateDir, "history-retired.json"))
-		if err != nil {
-			slog.Warn("retired store load failed (degrades to last_active sort)", "err", err)
-		}
-	} else {
-		retiredStore, _ = discovery.NewRetiredStore("")
+	retiredStore, retiredErr := buildRetiredStoreWithErr(opts.StateDir)
+	if retiredErr != nil {
+		slog.Warn("retired store load failed (degrades to last_active sort)", "err", retiredErr)
 	}
 
 	s.nodeAccess = newNodeAccessor(&s.nodesMu, s.nodes, s.knownNodes)
+
+	hubBroadcast := func() {
+		if s.hub != nil {
+			s.hub.BroadcastSessionsUpdate()
+		}
+	}
 
 	s.nodeCache = node.NewCacheManager(
 		func() map[string]node.Conn {
 			return s.nodeAccess.NodesSnapshot()
 		},
-		func() {
-			if s.hub != nil {
-				s.hub.BroadcastSessionsUpdate()
-			}
-		},
+		hubBroadcast,
 	)
 
 	s.discoveryCache = newDiscoveryCache(claudeDir, s.router.ManagedExcludeSets, opts.ProjectManager)
 
 	// Wire extracted handler groups that depend on nodeAccess/nodeCache
-	s.discoveryH = &DiscoveryHandlers{
-		discoveryCache: s.discoveryCache,
-		nodeAccess:     s.nodeAccess,
-		nodeCache:      s.nodeCache,
-		claudeDir:      claudeDir,
-		router:         router,
-		allowedRoot:    opts.AllowedRoot,
-		defaultAgent:   agents["general"],
-		broadcast: func() {
-			if s.hub != nil {
-				s.hub.BroadcastSessionsUpdate()
-			}
-		},
-	}
-	s.projectH = &ProjectHandlers{
-		projectMgr: opts.ProjectManager,
-		router:     router,
-		resolver:   resolver,
-		nodeAccess: s.nodeAccess,
-		nodeCache:  s.nodeCache,
-		ctxFunc: func() context.Context {
-			if s.hub != nil {
-				return s.hub.ctx
-			}
-			return context.Background()
-		},
-		// S13: per-IP limiter for /api/projects/files/exists. 10/min
-		// matches the uploadLimiter cadence — both endpoints do
-		// filesystem I/O and belong to the same DoS class. Burst 10
-		// accommodates the dashboard's initial batch-render pass that
-		// can spawn several exists calls back-to-back when a session is
-		// opened with many file references.
-		filesExistsLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, opts.TrustedProxy),
-		// R247-SEC-7: per-IP limiter for PUT /api/projects/config. The
-		// handler persists ProjectConfig to disk and broadcasts a WS
-		// update to every subscribed dashboard client; without a gate
-		// any authenticated caller can drive unbounded disk + fan-out.
-		// 5/sec burst 5 ≈ 5×60=300/min — well above interactive editing
-		// (a single user saves config sub-second after each edit) but
-		// well below abuse rates a script could reach.
-		configPutLimiter: newIPLimiterWithProxy(rate.Every(200*time.Millisecond), 5, opts.TrustedProxy),
-	}
-	agentIDs := make([]string, 0, len(agents)+1)
-	agentIDs = append(agentIDs, "general")
-	for id := range agents {
-		agentIDs = append(agentIDs, id)
-	}
+	// (literals live in build_handlers.go; #738).
+	s.discoveryH = buildDiscoveryHandlers(opts, claudeDir, s.discoveryCache, s.nodeAccess, s.nodeCache, hubBroadcast)
+	// R247-ARCH-15 (#650): no closure here — ProjectHandlers stores
+	// baseCtx as a plain field that registerDashboard wires via
+	// SetBaseContext once `s.hub` exists. The two-phase construction
+	// is unchanged (Hub still doesn't exist at this point); only the
+	// DI shape moved from a captured closure to a direct field assign.
+	s.projectH = buildProjectHandlers(opts, resolver, s.nodeAccess, s.nodeCache)
+	agentIDs := agentIDList(agents)
 	s.sessionH = &SessionHandlers{
 		router:        router,
 		projectMgr:    opts.ProjectManager,
@@ -835,10 +761,7 @@ func buildServer(opts ServerOptions) *Server {
 	} else {
 		s.cliH = NewCLIBackendsHandler(router)
 	}
-	platNames := make(map[string]struct{}, len(platforms))
-	for name := range platforms {
-		platNames[name] = struct{}{}
-	}
+	platNames := platformNameSet(platforms)
 	s.healthH = &HealthHandler{
 		router:             router,
 		auth:               s.auth,
@@ -991,13 +914,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// termination happens upstream (ALB/CloudFront), in which case this
 	// listener binding to plaintext loopback is fine.
 	if s.dashboardToken != "" && !s.auth.trustedProxy && isPlaintextPublicAddr(s.addr) {
-		slog.Warn(
-			"dashboard token served over plaintext HTTP with no trusted proxy: "+
-				"bearer tokens and session cookies may be sniffed. "+
-				"Terminate TLS upstream and set server.trusted_proxy=true, "+
-				"or bind to 127.0.0.1 for local-only access.",
-			"addr", s.addr,
-		)
+		slog.Warn(plaintextDashboardTokenWarning, "addr", s.addr)
 	}
 	// No-auth mode on a publicly reachable address is the biggest footgun the
 	// operator can step into — every /api/* endpoint becomes world-reachable.
@@ -1026,6 +943,25 @@ func (s *Server) Start(ctx context.Context) error {
 		slog.Warn(reverseNodePlaintextWarning,
 			"addr", s.addr,
 		)
+	}
+	// R238-SEC-15 (#848): when trustedProxy=true, every per-IP rate limiter,
+	// per-IP audit slog field, and same-origin gate decision flows from the
+	// last X-Forwarded-For hop. If the upstream proxy does NOT strip
+	// client-supplied XFF headers before re-appending its own (or honours
+	// arbitrary-depth XFF without a hop-count limit), an attacker can spoof
+	// the source IP by sending `X-Forwarded-For: <victim>, <attacker>` —
+	// every per-IP gate then attributes the request to the victim's bucket.
+	// The fix MUST happen at the proxy (e.g. ALB/CloudFront drop-and-replace,
+	// nginx `real_ip_recursive on` with a trusted-proxy allowlist) — naozhi
+	// honouring the last XFF hop is by design once trustedProxy is set.
+	// Surface a one-shot info-level reminder at startup so an operator
+	// who flipped trustedProxy=true on a misconfigured upstream sees the
+	// requirement in the boot journal rather than discovering it via a
+	// rate-limiter bypass weeks later. Info-level (not Warn) because the
+	// configuration itself is legitimate — the warning is about the
+	// upstream contract, which we cannot verify from inside the process.
+	if s.auth.trustedProxy {
+		slog.Info(trustedProxyXFFReminder, "addr", s.addr)
 	}
 	slog.Info("server starting", "addr", s.addr)
 
@@ -1173,6 +1109,22 @@ func (s *Server) runRetiredStoreFlusher(ctx context.Context) {
 	}
 }
 
+// plaintextDashboardTokenWarning is the message logged when a token-protected
+// dashboard is served over plaintext HTTP with no trusted proxy. R217-SEC-8
+// (#602) extends the previous inline literal to spell out the /health attack
+// surface explicitly: an authenticated /health response carries workspace_id,
+// node status, version, system info, watchdog counters, and (when present)
+// dispatch + event-log + attachment-tracker stats. A passive sniffer on the
+// wire can therefore lift not only the bearer/cookie but also a deployment
+// fingerprint that aids targeting (e.g. node IDs, CLI version) without needing
+// to authenticate. Named const (not inline) so tests can pin the exact text
+// and a refactor that rewords one occurrence has a single source of truth.
+const plaintextDashboardTokenWarning = "dashboard token served over plaintext HTTP with no trusted proxy: " +
+	"bearer tokens and session cookies may be sniffed; authenticated /health responses " +
+	"also leak workspace_id, node status, version, and watchdog counters in the clear. " +
+	"Terminate TLS upstream and set server.trusted_proxy=true, " +
+	"or bind to 127.0.0.1 for local-only access."
+
 // noTokenOpenWarning is the message logged when the API accepts any caller
 // because dashboard_token is unset on a publicly reachable bind. Exposed as
 // a package-level var (not a const literal in the caller) so tests can
@@ -1198,6 +1150,18 @@ const reverseNodePlaintextWarning = "reverse-node /ws-node endpoint served over 
 	"the remote node and stream arbitrary session data into the primary. " +
 	"Terminate TLS upstream and set server.trusted_proxy=true, or bind to " +
 	"127.0.0.1 for local-only access."
+
+// trustedProxyXFFReminder is the startup info-level note emitted whenever
+// trusted_proxy=true. Pulled out so unit tests can pin the exact text and
+// future ops doc references can grep one source of truth. R238-SEC-15 (#848).
+const trustedProxyXFFReminder = "trusted_proxy=true: per-IP rate limiters, audit-log " +
+	"client_ip fields, and same-origin gates trust the last X-Forwarded-For hop. " +
+	"Ensure the upstream proxy (ALB/CloudFront/nginx) strips client-supplied XFF " +
+	"headers before appending its own, or applies a hop-count limit — otherwise " +
+	"a spoofed XFF can bypass per-IP rate limiting by attributing requests to a " +
+	"victim's bucket. naozhi cannot verify the upstream contract from inside the " +
+	"process; this reminder is one-shot at startup so the requirement is visible " +
+	"in the boot journal."
 
 // shouldWarnReverseNodePlaintext reports whether the /ws-node plaintext warning
 // should fire at Server.Start.

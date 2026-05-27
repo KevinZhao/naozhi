@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -82,6 +83,15 @@ type stringFieldPolicy struct {
 // The caller owns the length check (units differ: WorkDir/Prompt cap bytes,
 // Title caps runes, NotifyChatID caps bytes) and any field-specific extras
 // (validateCronWorkDir's filepath.IsAbs check). R219-CR-5.
+//
+// R250-PERF-22 (#1125): the IsLogInjectionRune set covers C1 (0x80..0x9F)
+// and assorted Unicode formatting codepoints (bidi, LS/PS) which all
+// encode in UTF-8 with at least one byte >= 0x80. An ASCII-only string —
+// the common case for absolute paths, schedule expressions, lowercase-hex
+// IDs — therefore cannot contain a hit, and the second `for _, r := range
+// s` decode pass is pure overhead. Track an `anyHighBit` flag during the
+// first byte loop and skip the rune walk when the input is provably
+// ASCII. Hot path on cron CREATE/PATCH validates 5+ fields per request.
 func validateStringField(s string, p stringFieldPolicy) error {
 	// R179-GO-P1: validate UTF-8 before the rune-range loop below. A
 	// `for _, r := range s` over broken UTF-8 silently produces utf8.RuneError
@@ -92,8 +102,13 @@ func validateStringField(s string, p stringFieldPolicy) error {
 	if !utf8.ValidString(s) {
 		return fmt.Errorf("%s contains invalid characters", p.name)
 	}
+	anyHighBit := false
 	for i := 0; i < len(s); i++ {
 		c := s[i]
+		if c >= 0x80 {
+			anyHighBit = true
+			continue
+		}
 		if c >= 0x20 && c != 0x7f {
 			continue
 		}
@@ -114,6 +129,14 @@ func validateStringField(s string, p stringFieldPolicy) error {
 			return fmt.Errorf("%s contains invalid characters", p.name)
 		}
 		return fmt.Errorf("%s contains invalid control characters", p.name)
+	}
+	// R250-PERF-22 (#1125): pure-ASCII fast path — IsLogInjectionRune cannot
+	// match any rune whose UTF-8 form is single-byte < 0x80, so the rune
+	// loop below has zero work to do when no high-bit byte was observed.
+	// Skips the second UTF-8 decode pass on the common case (absolute
+	// paths, cron schedules, lowercase-hex IDs).
+	if !anyHighBit {
+		return nil
 	}
 	// Reject Unicode bidi override / embedding / directional isolate
 	// characters (U+202A–U+202E, U+2066–U+2069) and Unicode line/paragraph
@@ -353,6 +376,33 @@ type cronRunsListResp struct {
 	NextBefore int64                `json:"next_before,omitempty"`
 }
 
+// cronPreviewResp is the wire shape returned by GET /api/cron/preview.
+// Replaces an inline map[string]any so the JSON encoder can cache the
+// reflect descriptor and field names are enforced at compile time
+// (R250-CR-25). The "valid: false" branch carries only Error; the
+// success branch carries Timezone (+ optional TimezoneLabel) and, when
+// the parser produced runs, NextRun and NextRuns. omitempty keeps the
+// on-the-wire shape identical to the previous map[string]any output —
+// dashboard.js cronPreviewJob still reads `valid` / `error` /
+// `timezone` / `timezone_label` / `next_run` / `next_runs` unchanged.
+type cronPreviewResp struct {
+	Valid         bool    `json:"valid"`
+	Error         string  `json:"error,omitempty"`
+	Timezone      string  `json:"timezone,omitempty"`
+	TimezoneLabel string  `json:"timezone_label,omitempty"`
+	NextRun       int64   `json:"next_run,omitempty"`
+	NextRuns      []int64 `json:"next_runs,omitempty"`
+}
+
+// cronUpdateResp is the wire shape returned by PATCH /api/cron. Replaces
+// an inline map[string]any so the field names are compile-checked
+// (R250-CR-24). Status is always "ok" on the success path; ID echoes the
+// canonical job ID resolved by UpdateJob.
+type cronUpdateResp struct {
+	Status string `json:"status"`
+	ID     string `json:"id"`
+}
+
 // validateCronBackend enforces the shared shape contract for the
 // dashboard-picked backend override on cron jobs:
 //   - empty is OK (router default fallback at execute time);
@@ -501,6 +551,188 @@ type CronHandlers struct {
 	// Nil-guarded so newCronHandlersForTest paths skip the gate; wiring
 	// lives in server.New. [R247-SEC-2 / R247-SEC-3]
 	writeLimiter *ipLimiter
+
+	// missedCache memoises HasMissedSchedule verdicts so the dashboard's
+	// 1 Hz handleList path doesn't re-Parse the cron expression for every
+	// job on every poll. Without the cache, robfig/cron's regexp NFA
+	// build runs N (jobs) × T (parallel tabs) times per second; with it,
+	// steady-state cost falls to N parses per missedCacheTTL because
+	// cache hits skip Parse entirely. The verdict depends on (Schedule,
+	// LastRunAt, startedAt) plus `now` modulo TTL — schedule edits and
+	// scheduler restarts invalidate via the composite key (see the
+	// missedScheduleVerdict helper); LastRunAt advances invalidate via
+	// the lastRunNanos guard so a job that just ran does not keep an
+	// outdated "missed" verdict for a full second. R245-PERF-4 (#857).
+	missedCacheMu sync.Mutex
+	missedCache   map[string]missedVerdict
+
+	// transcriptSem caps concurrent /api/cron/runs/{run_id}/transcript
+	// requests across the whole process. R243-SEC-12 (#798): each
+	// in-flight transcript holds a 256 KB bufio.Scanner buffer plus
+	// the LimitReader's 8 MB read budget, so the per-IP runsLimiter
+	// alone is not enough — N distinct authenticated operators can
+	// each saturate their own bucket and collectively park N×8 MB
+	// of file-mapped pages plus N×256 KB of scanner buffers in
+	// memory. The semaphore puts a process-wide ceiling on that
+	// concurrency so memory cannot grow unbounded with operator
+	// count. Excess requests receive 503 immediately, mirroring the
+	// transcribeSemCap pattern in dashboard_transcribe.go. Nil leaves
+	// the gate disabled (newCronHandlersForTest paths) so legacy
+	// hand-rolled fixtures keep compiling.
+	transcriptSem chan struct{}
+}
+
+// missedVerdict caches one HasMissedSchedule return tuple plus the inputs
+// that decide whether the entry is still valid. Stored under
+// CronHandlers.missedCache keyed by `jobID|schedule|startedNs` so a
+// schedule edit (UpdateJob) or scheduler restart invalidates by key
+// turnover (old keys become unreachable; the entry GCs away once the cap
+// rotates). LastRunAt is intentionally NOT in the key — instead, it lives
+// in the value as `lastRunNanos` so a tick that follows a fresh run
+// triggers a recompute without growing the keyspace. R245-PERF-4 (#857).
+type missedVerdict struct {
+	missed       bool
+	prevAt       time.Time
+	lastRunNanos int64
+	computedAt   time.Time
+}
+
+// missedCacheTTL is the freshness window for cached HasMissedSchedule
+// verdicts. 1 s matches the dashboard poll cadence — verdicts that are
+// up to one tick stale are equivalent to verdicts a parallel poller
+// would have just computed, which is the same staleness the human eye
+// sees on the rendered card anyway. R245-PERF-4 (#857).
+const missedCacheTTL = time.Second
+
+// missedCacheCap caps the cache size so a runtime UpdateJob storm (which
+// turns over the (jobID, schedule, startedAt) key on every edit) cannot
+// grow the map without bound. 2500 entries × ~120 bytes ≈ 300 KiB worst
+// case — comfortably within budget for a heartbeat-path data structure
+// and well above the practical N for a single naozhi instance. When the
+// cap is hit we drop the entire map and let it rebuild; a sweep would
+// pay map-iteration cost on a hot path for marginal benefit. R245-PERF-4
+// (#857).
+const missedCacheCap = 2500
+
+// missedScheduleVerdict returns HasMissedSchedule(j, now, startedAt) but
+// memoises the result for missedCacheTTL so the 1 Hz dashboard poll does
+// not re-Parse the cron expression on every job per tick. Cache hits skip
+// the regexp NFA build entirely; misses fall through to the cron package
+// and store the freshly computed tuple for the next poller. Safe to call
+// from concurrent goroutines (mu-protected map; map access is short and
+// uncontended in practice because handleList serialises per request, but
+// multiple parallel dashboard tabs each have their own request goroutine
+// and may overlap). R245-PERF-4 (#857).
+func (h *CronHandlers) missedScheduleVerdict(j *cron.Job, now, startedAt time.Time) (bool, time.Time) {
+	if j == nil {
+		return false, time.Time{}
+	}
+	startedNs := startedAt.UnixNano()
+	key := j.ID + "|" + j.Schedule + "|" + strconv.FormatInt(startedNs, 10)
+	lastRunNanos := j.LastRunAt.UnixNano()
+
+	h.missedCacheMu.Lock()
+	if h.missedCache != nil {
+		if v, ok := h.missedCache[key]; ok {
+			if v.lastRunNanos == lastRunNanos && now.Sub(v.computedAt) < missedCacheTTL {
+				h.missedCacheMu.Unlock()
+				return v.missed, v.prevAt
+			}
+		}
+	}
+	h.missedCacheMu.Unlock()
+
+	missed, prevAt := cron.HasMissedSchedule(j, now, startedAt)
+
+	h.missedCacheMu.Lock()
+	if h.missedCache == nil || len(h.missedCache) >= missedCacheCap {
+		// Lazy-init AND cap-reset use the same allocation: dropping the
+		// whole map at the cap is cheaper than walking it to evict the
+		// oldest entry, and the cap is large enough that a real workload
+		// (jobs-on-disk × handful-of-tabs) will not approach it.
+		h.missedCache = make(map[string]missedVerdict, 64)
+	}
+	h.missedCache[key] = missedVerdict{
+		missed:       missed,
+		prevAt:       prevAt,
+		lastRunNanos: lastRunNanos,
+		computedAt:   now,
+	}
+	h.missedCacheMu.Unlock()
+	return missed, prevAt
+}
+
+// recentRunsPerJob is the per-job RecentRuns cap embedded in handleList's
+// list response. Mirrors the literal previously inlined as
+// scheduler.RecentRuns(j.ID, 5) so the bounded fan-out helper carries the
+// same wire-shape contract the dashboard JS reads. Tooltip-bound; the
+// dashboard's per-job runs detail drawer uses GET /api/cron/runs for
+// richer pagination. R236-PERF-08 (#525).
+const recentRunsPerJob = 5
+
+// batchRecentRunsWorkers caps the concurrent RecentRuns goroutines spun up
+// by batchRecentRuns. Sized 8 so a single 1 Hz dashboard poll on a 50-job
+// install fans out across 8-way parallelism (≈ 6 jobs/worker, sub-ms wall
+// time once the runStore cache is warm) without flooding sync.Map.Load
+// contention or the Go scheduler with hundreds of short-lived goroutines.
+// Above ~16 readers the per-jobLock TryLock + recentCacheEntry.mu acquire
+// chain contends on Go runtime spinlocks and the marginal speedup goes
+// negative; 8 stays comfortably below that knee. R236-PERF-08 (#525).
+const batchRecentRunsWorkers = 8
+
+// batchRecentRuns fans out scheduler.RecentRuns lookups across at most
+// batchRecentRunsWorkers goroutines and returns one result per input job
+// in input-index order. Used by handleList to drop the previous N×serial
+// per-job lock acquire (the per-recentCacheEntry.mu chain) — under load,
+// 1 Hz polls on a 50-job install no longer stall behind the slowest
+// jobLock pass because at most W jobs queue at the runStore lock at any
+// instant.
+//
+// Result slice is always len(jobs); entries may be nil for jobs with no
+// run history. Caller is responsible for the nil-len check before
+// projecting cron summaries onto the wire shape.
+//
+// Single-call cost vs. inline serial loop:
+//   - Cold scheduler: serial = N × (warmCache + ringSnapshot); fan-out =
+//     ⌈N/W⌉ × max(per-job warmCache); typical 4-8× speedup at W=8.
+//   - Warm cache:    serial = N × ringSnapshot copy; fan-out = ⌈N/W⌉ ×
+//     ringSnapshot copy; modest (~3×) speedup but tail-latency improves.
+//
+// Nil-safe: when h.scheduler is nil the caller short-circuits earlier; we
+// also guard inside so a future caller can pass an empty jobs slice and
+// receive nil without panic.
+//
+// R236-PERF-08 (#525).
+func (h *CronHandlers) batchRecentRuns(jobs []cron.JobWithNextRun, n int) [][]cron.CronRunSummary {
+	if len(jobs) == 0 || h.scheduler == nil {
+		return nil
+	}
+	out := make([][]cron.CronRunSummary, len(jobs))
+	// Tasks queue: each worker pulls the next index and fans out to the
+	// scheduler. Channel-of-int keeps the work distribution self-balancing
+	// — a slow per-job lookup (cold cache, slow disk) does not pin a
+	// single worker on a single job while its peers idle.
+	tasks := make(chan int, len(jobs))
+	for i := range jobs {
+		tasks <- i
+	}
+	close(tasks)
+	workers := batchRecentRunsWorkers
+	if workers > len(jobs) {
+		workers = len(jobs)
+	}
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for idx := range tasks {
+				out[idx] = h.scheduler.RecentRuns(jobs[idx].Job.ID, n)
+			}
+		}()
+	}
+	wg.Wait()
+	return out
 }
 
 // GET /api/cron — list all cron jobs (unscoped, admin view).
@@ -527,8 +759,22 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	// yielding O(n) syscalls/atomics for an effectively-constant value.
 	now := time.Now()
 	startedAt := h.scheduler.StartedAt()
+
+	// R236-PERF-08 (#525): pre-fetch RecentRuns for every job in parallel
+	// so the 1 Hz dashboard poll's serial fan-out across N jobs does not
+	// stall behind the per-job recentCacheEntry.mu acquire chain. The
+	// previous shape called scheduler.RecentRuns inside the per-job loop
+	// below, so under load N tabs × N jobs × per-job lock acquire serialised
+	// the entire list response on the slowest jobLock / warmCache pass.
+	// The fan-out runs at most batchRecentRunsWorkers goroutines so the
+	// scheduler's runStore is not flooded with goroutines on a 200-job
+	// install (sync.Map.Load contention dominates above ~16 readers); the
+	// per-job result lands in a pre-sized slice keyed by job index so the
+	// main loop below sees a deterministic order with no map allocation.
+	recentByIdx := h.batchRecentRuns(jobs, recentRunsPerJob)
+
 	views := make([]cronJobView, 0, len(jobs))
-	for _, entry := range jobs {
+	for idx, entry := range jobs {
 		j := entry.Job
 		// Prompt 不截断：dashboard.js 客户端 fuzzy-search 依赖完整 prompt
 		// 内容（filterCronJobs 在 j.prompt 上做 substring match）。截断后
@@ -562,9 +808,12 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 		// missed-schedule 检测：cron-v2-polish §3.3 Increment C。
 		// 只对非 paused 的 job 判定——paused 的任务用户主动停了，错过
-		// 是预期行为不应告警。
+		// 是预期行为不应告警。R245-PERF-4 (#857): route through
+		// missedScheduleVerdict so the cron expression Parse is memoised
+		// across the 1 Hz dashboard poll cadence — N jobs × T tabs no
+		// longer fans out to N×T regexp NFA builds per second.
 		if !j.Paused {
-			if missed, prevAt := cron.HasMissedSchedule(&j, now, startedAt); missed {
+			if missed, prevAt := h.missedScheduleVerdict(&j, now, startedAt); missed {
 				v.Missed = true
 				v.MissedSince = prevAt.UnixMilli()
 			}
@@ -593,10 +842,23 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		// recent_runs: P1 — 5 条 newest-first 摘要给卡片 tooltip 用。
 		// 上限 5 是 wire 大小的折中：list response 总大小 = jobs × ~2KB。
 		// 详情页要更多用 GET /api/cron/runs.
-		if recent := h.scheduler.RecentRuns(j.ID, 5); len(recent) > 0 {
-			rv := make([]cronRunSummaryView, 0, len(recent))
-			for _, r := range recent {
-				rv = append(rv, cronSummaryToView(r))
+		//
+		// R250-PERF-19 (#1122): pre-extend rv to len(recent) and use index
+		// assignment in place of append. Skips the per-iteration cap/len
+		// bookkeeping the append builtin pays even when the backing array
+		// is already pre-sized — a 1Hz × N-tab × 50-job poll churns enough
+		// of these short slices that the saved bound checks add up.
+		//
+		// R236-PERF-08 (#525): the per-job RecentRuns lookup now lives in
+		// the bounded-fan-out pass above (batchRecentRuns). Read from the
+		// pre-fetched slice indexed by jobs[] position so this loop stays
+		// pure projection — no per-iter scheduler call, no per-iter mutex
+		// acquire — and the worst-case wall time is bounded by ⌈N/W⌉ × per-
+		// job lock cost rather than N × per-job lock cost.
+		if recent := recentByIdx[idx]; len(recent) > 0 {
+			rv := make([]cronRunSummaryView, len(recent))
+			for i, r := range recent {
+				rv[i] = cronSummaryToView(r)
 			}
 			v.RecentRuns = rv
 		}
@@ -632,6 +894,18 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, resp)
+}
+
+// httpErrPersistFailed writes the standard 500 body for the "in-memory
+// mutation succeeded but on-disk persist failed" case. The five cron
+// write handlers (create / delete / pause / resume / update) all surface
+// cron.ErrPersistFailed identically — same status, same wording with
+// only the verb differing — so the literal had drifted across five
+// copy-paste sites. Centralising the format keeps the wording in one
+// place and stops a future copy from accidentally diverging the
+// operator-visible string. R250-CR-20.
+func httpErrPersistFailed(w http.ResponseWriter, op string) {
+	http.Error(w, "job "+op+" but not persisted; please check server logs", http.StatusInternalServerError)
 }
 
 // POST /api/cron — create a new cron job from dashboard.
@@ -760,7 +1034,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// successful 2xx that won't survive a restart. R51-QUAL-001.
 		if errors.Is(err, cron.ErrPersistFailed) {
 			slog.Error("cron AddJob persisted in-memory but store write failed", "err", err, "id", job.ID)
-			http.Error(w, "job created but not persisted; please check server logs", http.StatusInternalServerError)
+			httpErrPersistFailed(w, "created")
 			return
 		}
 		// robfig/cron parser errors can mention internal field offsets and
@@ -813,7 +1087,7 @@ func (h *CronHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 			// 500 alerts the operator to inspect logs instead of treating
 			// the delete as quietly successful. R51-QUAL-001.
 			slog.Error("cron DeleteJobByID deletion not persisted", "err", err, "id", id)
-			http.Error(w, "job deleted but not persisted; please check server logs", http.StatusInternalServerError)
+			httpErrPersistFailed(w, "deleted")
 		default:
 			slog.Debug("cron delete failed", "err", err)
 			http.Error(w, "delete failed", http.StatusBadRequest)
@@ -860,7 +1134,7 @@ func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "job already paused", http.StatusConflict)
 		case errors.Is(err, cron.ErrPersistFailed):
 			slog.Error("cron PauseJobByID pause not persisted", "err", err, "id", req.ID)
-			http.Error(w, "job paused but not persisted; please check server logs", http.StatusInternalServerError)
+			httpErrPersistFailed(w, "paused")
 		default:
 			slog.Debug("cron pause failed", "err", err)
 			http.Error(w, "pause failed", http.StatusBadRequest)
@@ -905,7 +1179,7 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "job not paused", http.StatusConflict)
 		case errors.Is(err, cron.ErrPersistFailed):
 			slog.Error("cron ResumeJobByID resume not persisted", "err", err, "id", req.ID)
-			http.Error(w, "job resumed but not persisted; please check server logs", http.StatusInternalServerError)
+			httpErrPersistFailed(w, "resumed")
 		default:
 			slog.Debug("cron resume failed", "err", err)
 			http.Error(w, "resume failed", http.StatusBadRequest)
@@ -1038,24 +1312,22 @@ func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 		// and internal token names that help an attacker enumerate accepted
 		// grammar. Log the detail for operators instead.
 		slog.Debug("cron preview parse failed", "err", err)
-		writeJSON(w, map[string]any{"valid": false, "error": "invalid schedule expression"})
+		writeJSON(w, cronPreviewResp{Valid: false, Error: "invalid schedule expression"})
 		return
 	}
 
-	resp := map[string]any{
-		"valid":    true,
-		"timezone": tzName,
-	}
-	if tzLabel != "" {
-		resp["timezone_label"] = tzLabel
+	resp := cronPreviewResp{
+		Valid:         true,
+		Timezone:      tzName,
+		TimezoneLabel: tzLabel, // omitempty drops the empty-zone case
 	}
 	if len(runs) > 0 {
-		resp["next_run"] = runs[0].UnixMilli()
+		resp.NextRun = runs[0].UnixMilli()
 		nextRuns := make([]int64, len(runs))
 		for i, t := range runs {
 			nextRuns[i] = t.UnixMilli()
 		}
-		resp["next_runs"] = nextRuns
+		resp.NextRuns = nextRuns
 	}
 	writeJSON(w, resp)
 }
@@ -1237,7 +1509,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "job not found", http.StatusNotFound)
 		case errors.Is(err, cron.ErrPersistFailed):
 			slog.Error("cron UpdateJob update not persisted", "err", err, "id", id)
-			http.Error(w, "job updated but not persisted; please check server logs", http.StatusInternalServerError)
+			httpErrPersistFailed(w, "updated")
 		default:
 			// Sanitize: the underlying parser error can leak internal field
 			// names and offsets if the new schedule is rejected.
@@ -1248,7 +1520,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job updated via dashboard", "id", j.ID)
-	writeJSON(w, map[string]any{"status": "ok", "id": j.ID})
+	writeJSON(w, cronUpdateResp{Status: "ok", ID: j.ID})
 }
 
 // formatTZOffset renders a timezone label like "Asia/Shanghai (UTC+08:00)" or

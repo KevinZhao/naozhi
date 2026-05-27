@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -179,19 +180,22 @@ type Process struct {
 	cliPID        int  // CLI PID reported by shim hello
 	shimPID       int  // shim PID reported by shim hello; used by Kill() for SIGUSR2 fallback
 
-	// SessionID is protected by mu. External readers MUST use
-	// GetSessionID() rather than reading the field directly to avoid
-	// racing readLoop's transition writes (system/init / result events).
+	// sessionID and state are protected by mu. External readers MUST use
+	// GetSessionID() / GetState() rather than reading the field directly to
+	// avoid racing readLoop's transition writes (system/init / result
+	// events). Unexported (R237-GO-2 / #623) so cross-package callers
+	// cannot silently bypass the locking contract by direct field access;
+	// the existing accessors already cover every external read site.
 	// R225-GO-9.
-	SessionID string
-	State     ProcessState
-	// mu protects State / SessionID / onTurnDone. Read-only accessors
+	sessionID string
+	state     ProcessState
+	// mu protects state / sessionID / onTurnDone. Read-only accessors
 	// (GetState / IsRunning / GetSessionID) use RLock so concurrent
 	// ListSessions snapshots across N sessions and M tabs proceed in
 	// parallel instead of serialising through a single Mutex. Write paths
-	// (readLoop state transitions, Send State→Running, Interrupt
+	// (readLoop state transitions, Send state→Running, Interrupt
 	// snapshot-and-flag) continue to use Lock to preserve the existing
-	// "read State and set interrupted together under one lock" contract.
+	// "read state and set interrupted together under one lock" contract.
 	// R70-PERF-L3.
 	//
 	// totalCost is stored separately as an atomic.Uint64 (math.Float64bits)
@@ -204,6 +208,20 @@ type Process struct {
 	done     chan struct{}
 	killCh   chan struct{} // closed by Kill() to unblock readLoop
 	killOnce sync.Once
+
+	// lifecycleCtx is canceled when the process exits (readLoop returns,
+	// Kill() fires, or shim disconnects). Used to bind subagent-Resolve
+	// goroutines so a SIGTERM doesn't leave them spinning through the
+	// full retryLimit*retryInterval (≤ 3s) budget after the parent
+	// goroutine is gone. R218B-GO-3 (#644).
+	//
+	// Lazy-initialized via lifecycleCtxOnce on first lifecycleContext()
+	// call so legacy test fixtures that construct &Process{} (without
+	// newShimProcess) still work — the canceler watcher only spawns when
+	// at least one of done/killCh is non-nil.
+	lifecycleCtxOnce   sync.Once
+	lifecycleCtxValue  context.Context
+	lifecycleCtxCancel context.CancelFunc
 
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
@@ -444,6 +462,42 @@ func (p *Process) DeathReason() string {
 	return ""
 }
 
+// lifecycleContext returns a context tied to the process lifetime: it is
+// canceled when readLoop's `defer close(p.done)` fires, when Kill() closes
+// killCh, or when both channels are nil (test fixture path) — in the test
+// case the returned ctx is a never-canceled Background, since lifetime
+// signals don't exist.
+//
+// Lazy-init via sync.Once: the watcher goroutine only spawns on first call,
+// so legacy &Process{} test constructions that never invoke this method
+// pay zero cost. R218B-GO-3 (#644).
+//
+// Returned ctx is safe to share across goroutines; subagent Resolve callers
+// (process_readloop / InjectHistory) pass it directly to bind their work
+// to the process's life. Callers MUST NOT call the returned cancel function
+// — it's wired internally.
+func (p *Process) lifecycleContext() context.Context {
+	p.lifecycleCtxOnce.Do(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		p.lifecycleCtxValue = ctx
+		p.lifecycleCtxCancel = cancel
+		// Watcher: cancel when either lifetime signal closes. Both channels
+		// can be nil in legacy tests; nil-channel receives block forever in
+		// a select, so we degrade gracefully rather than panic.
+		if p.done == nil && p.killCh == nil {
+			return
+		}
+		go func() {
+			select {
+			case <-p.done:
+			case <-p.killCh:
+			}
+			cancel()
+		}()
+	})
+	return p.lifecycleCtxValue
+}
+
 // newShimProcess creates a Process connected to a shim.
 // The caller must call startReadLoop() after protocol Init.
 func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
@@ -456,7 +510,7 @@ func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 		caps:            ProtocolCaps(proto),
 		cliPID:          cliPID,
 		shimPID:         shimPID,
-		State:           StateSpawning,
+		state:           StateSpawning,
 		eventCh:         make(chan Event, 256),
 		done:            make(chan struct{}),
 		killCh:          make(chan struct{}),
@@ -491,7 +545,7 @@ func (p *Process) shimStdinWriter() io.Writer {
 // startReadLoop begins the shim message reader goroutine and heartbeat.
 func (p *Process) startReadLoop() {
 	p.mu.Lock()
-	p.State = StateReady
+	p.state = StateReady
 	p.mu.Unlock()
 	go p.readLoop()
 	go p.heartbeatLoop()
@@ -512,7 +566,7 @@ func (p *Process) Alive() bool {
 func (p *Process) IsRunning() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.State == StateRunning
+	return p.state == StateRunning
 }
 
 // Kill forcefully terminates the CLI process via shim.
@@ -686,7 +740,7 @@ func (p *Process) closeShimConn() {
 func (p *Process) GetState() ProcessState {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.State
+	return p.state
 }
 
 // SetOnTurnDone sets the callback invoked by readLoop when a result event
@@ -709,7 +763,7 @@ func (p *Process) SetOnTurnDone(fn func()) {
 func (p *Process) GetSessionID() string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.SessionID
+	return p.sessionID
 }
 
 // TotalCost returns the cumulative cost (lock-free via atomic.Uint64).

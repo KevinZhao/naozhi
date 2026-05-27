@@ -70,7 +70,7 @@ func (p *Process) InjectHistory(entries []EventEntry) {
 		// so the Resolve goroutine doesn't pin multi-KB strings until the
 		// resolveSem slot frees.
 		desc = textutil.TruncateRunes(desc, eventDetailMaxRunes)
-		go linker.Resolve(taskID, toolUseID, name, desc, wallclock)
+		go linker.Resolve(p.lifecycleContext(), taskID, toolUseID, name, desc, wallclock)
 	}
 	for _, e := range entries {
 		switch e.Type {
@@ -155,14 +155,19 @@ func (p *Process) SetCwdForLinker(cwd string) {
 	p.linker.mu.RLock()
 	session := p.linker.parentSessionID
 	p.linker.mu.RUnlock()
-	// On reconnect the wrapper populates proc.SessionID from
+	// On reconnect the wrapper populates proc.sessionID from
 	// handle.Hello.SessionID BEFORE the first live init event arrives —
 	// mirror that into the linker so Resolve works immediately on
 	// historical agent tasks replayed via InjectHistory. If readLoop
 	// later ingests an init with a different id, the normal SetContext
 	// call in the readLoop path updates it.
-	if session == "" && p.SessionID != "" {
-		session = p.SessionID
+	//
+	// Reads sessionID under p.mu via the GetSessionID accessor rather than
+	// the bare field so the cross-package locking contract still holds —
+	// wrapper.go's reconnect store path holds p.mu.Lock when populating
+	// sessionID, GetSessionID's RLock pairs with that.
+	if sid := p.GetSessionID(); session == "" && sid != "" {
+		session = sid
 	}
 	p.linker.SetContext(projectDir, session)
 }
@@ -227,6 +232,22 @@ func (p *Process) UserTurnCount() int64 {
 }
 
 // SubscribeEvents returns a notification channel and unsubscribe function.
+//
+// Prefer SubscribeEventsTyped for new callers: it returns an
+// EventSubscription value that bundles the (channel, cancel) pair so the
+// channel-close contract stays internal to the cli/eventlog package rather
+// than a cross-package convention each consumer must internalize
+// (R246-ARCH-12 / #792).
 func (p *Process) SubscribeEvents() (<-chan struct{}, func()) {
 	return p.eventLog.Subscribe()
+}
+
+// SubscribeEventsTyped is the typed form of SubscribeEvents per
+// R246-ARCH-12 / #792 (P0 subset). The returned EventSubscription owns
+// both the notify channel and the cancel callback, so cross-package
+// callers no longer need to know that the channel is closed by
+// CloseSubscribers / unsub -- they just hold the value and call Cancel()
+// when done.
+func (p *Process) SubscribeEventsTyped() EventSubscription {
+	return p.eventLog.SubscribeNew()
 }

@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -194,33 +196,10 @@ func (e *recentCacheEntry) ringSeed(rows []CronRunSummary, keepCount int) {
 	e.count = n
 }
 
-// User-configurable defaults — fallbacks when SchedulerConfig leaves
-// RunsKeepCount / RunsKeepWindow zero. Operators may raise / lower
-// them via SchedulerConfig at construction time; cron-run-history.md
-// §4.3 explains the 200 / 30d sizing rationale.
-const (
-	// DefaultRunsKeepCount caps per-job history at this many entries.
-	// 200 is the user-confirmed upper bound (cron-run-history.md §4.3 +
-	// chat conversation 2026-05-17).
-	DefaultRunsKeepCount = 200
-
-	// DefaultRunsKeepWindow ages out runs older than this even when the
-	// per-job count is below the cap. AND-with-OR semantics: a run is
-	// kept only when (count_rank ≤ keepCount) AND (age ≤ keepWindow);
-	// either condition false → trim.
-	DefaultRunsKeepWindow = 30 * 24 * time.Hour
-)
-
-// Hard limits — immutable per-record format invariants, not
-// operator-tunable. Changing them requires a schema bump because old
-// run.json files may exist on disk above the new cap.
-const (
-	// MaxRunRecordBytes caps a single CronRun JSON payload. The 4K rune
-	// cap on Result + 512-rune cap on ErrorMsg + 8K Prompt + ~512
-	// metadata add up to ~13 KiB worst case; 32 KiB leaves headroom.
-	// Reading a file larger than this returns ErrCorruptRun.
-	MaxRunRecordBytes = 32 * 1024
-)
+// User-configurable defaults (DefaultRunsKeepCount / DefaultRunsKeepWindow)
+// and hard schema caps (MaxRunRecordBytes) live in limits.go alongside the
+// other cron-trust-boundary constants — see R247-CR-12 / R247-CR-20 (#598)
+// for the rationale.
 
 // ErrCorruptRun is returned when a run JSON file fails to parse or
 // exceeds the size cap. Treated identically to "missing": list APIs
@@ -316,6 +295,16 @@ func IsValidID(s string) bool {
 // newRunStore constructs a runStore rooted at <storePath dir>/runs.
 // storePath="" disables the store (List returns empty, Append no-ops);
 // callers can pass a Scheduler in tests without wiring up a tempdir.
+//
+// R245-SEC-1 (#825): the root path is normalised via filepath.Abs +
+// filepath.Clean so a storePath containing `..` segments cannot escape
+// its data dir (e.g. "/data/x/../../etc/cron.json" would otherwise
+// produce a runs/ tree at "/data/x/../../etc/runs"). After mkdir, we
+// Lstat the result — if the runs dir is a symlink (or some other
+// non-directory), refuse to use the store: an operator-controlled
+// runs/ symlink could redirect the entire run-history tree at a
+// sensitive directory and any subsequent Append would write CronRun
+// JSON over arbitrary files.
 func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *runStore {
 	if storePath == "" {
 		return &runStore{disabled: true}
@@ -326,7 +315,16 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *run
 	if keepWindow <= 0 {
 		keepWindow = DefaultRunsKeepWindow
 	}
-	root := filepath.Join(filepath.Dir(storePath), "runs")
+	// filepath.Abs already cleans the path, normalising any `..` /  `.` /
+	// double-slash segments. If Abs fails (CWD missing — extremely rare
+	// outside containers in error states) fall back to Clean so we still
+	// remove `..` traversal even when we can't fully resolve.
+	storeAbs, err := filepath.Abs(storePath)
+	if err != nil {
+		slog.Warn("cron run: storePath Abs failed; falling back to Clean", "path", storePath, "err", err)
+		storeAbs = filepath.Clean(storePath)
+	}
+	root := filepath.Join(filepath.Dir(storeAbs), "runs")
 	// R234-SEC-4: 主动创建 runs/ 根目录并设 0o700。原先只在 Append 时
 	// 创建 runs/<jobID>/ 子目录用 0o700，而 runs/ 自身继承父目录权限
 	// （通常 0o755），同机器其他 OS 用户可枚举 jobID 列表，泄露 cron
@@ -334,6 +332,48 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *run
 	// 上 MkdirAll，不影响功能。
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		slog.Warn("cron run: mkdir root failed", "root", root, "err", err)
+	}
+	// R247-SEC-12 (#504): MkdirAll honours `perm` only on directories it
+	// actually creates — a pre-existing runs/ tree (e.g. laid down by a
+	// prior version with 0o755, or by an attacker who racd ahead of
+	// startup) keeps whatever mode it had. The directory carries cron
+	// run JSON files that include script source, env values, and stdout
+	// summaries; world-readable parent dirs leak both the existence of
+	// scheduled jobs and their content to other OS users on the same
+	// host. Chmod the leaf to the contractual 0o700 so a pre-created
+	// 0o755 / 0o777 dir is corrected on next startup. We log + continue
+	// rather than fail because operators sometimes run naozhi inside
+	// containers where the bind-mount root cannot be chmod'd by the
+	// running uid (NoNewPrivileges, read-only rootfs); a hard fail would
+	// brick the whole cron subsystem there. The Lstat check below is the
+	// authoritative symlink/non-directory guard that protects against
+	// the path-redirect attack — Chmod is only the perm-tightening step.
+	if fi, err := os.Lstat(root); err == nil && fi.Mode()&fs.ModeSymlink == 0 && fi.IsDir() {
+		if perm := fi.Mode().Perm(); perm != 0o700 {
+			if cerr := os.Chmod(root, 0o700); cerr != nil {
+				slog.Warn("cron run: chmod runs root to 0700 failed",
+					"root", root, "had_mode", perm.String(), "err", cerr)
+			} else {
+				slog.Info("cron run: corrected runs root mode to 0700",
+					"root", root, "had_mode", perm.String())
+			}
+		}
+	}
+	// R245-SEC-1 (#825): refuse to attach to a runs/ that is a symlink or
+	// other non-directory. MkdirAll does not error when the path already
+	// exists as a symlink to a directory, so without this Lstat an
+	// attacker (or accidental operator action) who pre-created
+	// `<dataDir>/runs` as a symlink to `/etc` would have all subsequent
+	// CronRun JSONs land outside the data dir. Lstat reports the link
+	// itself; we reject anything that's not a plain directory and disable
+	// the store so Append/List become safe no-ops rather than write to
+	// the wrong tree.
+	if fi, err := os.Lstat(root); err == nil {
+		if fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir() {
+			slog.Error("cron run: runs/ is a symlink or non-directory; disabling store",
+				"root", root, "mode", fi.Mode().String())
+			return &runStore{disabled: true}
+		}
 	}
 	return &runStore{
 		root:         root,
@@ -357,22 +397,40 @@ func (s *runStore) jobLock(jobID string) *sync.Mutex {
 	return actual.(*sync.Mutex)
 }
 
-// assertJobLockHeld panics when jobLock(jobID) is currently free, which
-// — outside concurrent tests — is the unambiguous signature of a caller
-// that violated the *Locked-suffix contract (forgot to acquire). Use
-// from helpers whose godoc says "caller must hold jobLock".
+// assertJobLockHeld logs a warning when jobLock(jobID) is currently free,
+// which — outside concurrent tests — is the unambiguous signature of a
+// caller that violated the *Locked-suffix contract (forgot to acquire).
+// Use from helpers whose godoc says "caller must hold jobLock".
 //
-// The check is best-effort: TryLock+Unlock is cheap (uncontended fast
-// path) and the panic message includes the jobID so failures point
+// R242-CR-11 (#696) / R242-CR-7 (#694): the historical implementation
+// `panic`'d on the contract miss. Two real production hazards:
+//
+//  1. skipAppendTrim called assertJobLockHeld BEFORE locking entry.mu, so
+//     a panic propagated up through Append's `defer lock.Unlock()` for
+//     jobLock and eventually crashed the process. The cron history path
+//     is supposed to be best-effort — RFC §4.2 says cron must NOT block
+//     on history failure — yet a contract bug elsewhere could still take
+//     the whole scheduler down.
+//  2. The TryLock+Unlock pair is observable contention from any goroutine
+//     legitimately holding the lock, plus any future caller that forgets
+//     to hold it gets a `panic` rather than a bounded recoverable log.
+//
+// The check is still best-effort: TryLock+Unlock is cheap (uncontended
+// fast path) and the warn message includes the jobID so failures point
 // straight at the offending caller. False negatives — another goroutine
 // holds the lock, our caller doesn't, TryLock fails so we miss the bug
 // — are accepted in exchange for catching the dominant "single-flight
-// test caller forgot to lock" failure mode reliably. R236-GO-03.
+// test caller forgot to lock" failure mode reliably. R236-GO-03 +
+// R242-CR-11 (#696) + R242-CR-7 (#694).
+//
+// Tests that want hard-fail-on-contract-miss can wrap the slog handler
+// to escalate; production stays alive.
 func (s *runStore) assertJobLockHeld(jobID string) {
 	lock := s.jobLock(jobID)
 	if lock.TryLock() {
 		lock.Unlock()
-		panic("cron runstore: jobLock(" + jobID + ") not held by caller; *Locked-suffix contract violated")
+		slog.Warn("cron runstore: jobLock not held by caller; *Locked-suffix contract violated",
+			"job_id", jobID)
 	}
 }
 
@@ -413,20 +471,22 @@ func (s *runStore) Append(run *CronRun) {
 		slog.Warn("cron run: skipping append with non-hex job_id", "job_id", run.JobID)
 		return
 	}
-	lock := s.jobLock(run.JobID)
-	lock.Lock()
-	defer lock.Unlock()
 
-	dir := filepath.Join(s.root, run.JobID)
-	if err := s.ensureJobDir(run.JobID, dir); err != nil {
-		slog.Warn("cron run: mkdir failed", "dir", dir, "err", err)
-		return
-	}
+	// R247-PERF-10 (#549): Marshal + over-cap shrink retry are pure CPU on
+	// the caller-owned *run; they do not touch any runStore-shared state.
+	// Hoisting them above jobLock keeps a slow JSON encode (CronRun can
+	// approach maxRunBytes for chatty jobs) from serialising a concurrent
+	// Append on the same jobID. WriteFileAtomic + cacheHeadPush + trim
+	// stay under jobLock — those are the steps that genuinely need
+	// per-job mutex serialisation. summarySrc rebinding to &shrunk on the
+	// over-cap path is preserved verbatim so the cache row stays in
+	// lockstep with the on-disk truncated record (#1079 / R250-GO-16).
 	data, err := marshalRunPooled(run)
 	if err != nil {
 		slog.Warn("cron run: marshal failed", "job_id", run.JobID, "run_id", run.RunID, "err", err)
 		return
 	}
+	summarySrc := run
 	if int64(len(data)) > s.maxRunBytes {
 		slog.Warn("cron run: payload exceeds size cap; truncating result/prompt and retrying",
 			"job_id", run.JobID, "run_id", run.RunID, "bytes", len(data), "cap", s.maxRunBytes)
@@ -438,6 +498,10 @@ func (s *runStore) Append(run *CronRun) {
 		shrunk.ErrorMsg = truncateWithSuffix(shrunk.ErrorMsg, maxRetryFieldRunes)
 		if data2, err2 := marshalRunPooled(&shrunk); err2 == nil && int64(len(data2)) <= s.maxRunBytes {
 			data = data2
+			// #1079: keep the cache push consistent with disk — the
+			// truncated record is what landed on disk, so the summary
+			// must reflect those truncated fields.
+			summarySrc = &shrunk
 		} else {
 			// R246-CR-250: previously this branch swallowed the failure
 			// silently — operators had no signal that a run record was
@@ -458,6 +522,16 @@ func (s *runStore) Append(run *CronRun) {
 			return
 		}
 	}
+
+	lock := s.jobLock(run.JobID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	dir := filepath.Join(s.root, run.JobID)
+	if err := s.ensureJobDir(run.JobID, dir); err != nil {
+		slog.Warn("cron run: mkdir failed", "dir", dir, "err", err)
+		return
+	}
 	path := filepath.Join(dir, run.RunID+".json")
 	if err := osutil.WriteFileAtomic(path, data, 0o600); err != nil {
 		slog.Warn("cron run: write failed", "path", path, "err", err, "disk_full", osutil.IsDiskFull(err))
@@ -467,7 +541,9 @@ func (s *runStore) Append(run *CronRun) {
 	// Append + Recent see consistent newest-first order. Cache may not
 	// yet be warm for this jobID — that's fine: cacheHeadPush is a no-op
 	// then, and the next Recent call will lazy-warm via warmCache.
-	s.cacheHeadPush(run.JobID, run.summary())
+	// #1079: summarySrc points at the truncated copy on the over-cap retry
+	// path so the cache row matches the on-disk truncated bytes.
+	s.cacheHeadPush(run.JobID, summarySrc.summary())
 	if s.enableTrimGC && !s.skipAppendTrim(run.JobID) {
 		s.trimJobLocked(run.JobID, time.Now())
 	}
@@ -549,8 +625,12 @@ const appendTrimBatch = 10
 
 // cacheHeadPush prepends summary to the recentCache for jobID. The
 // caller must hold jobLock(jobID) so the push is serialised against
-// concurrent Recent / List reads. No-op when the cache entry is not yet
-// warm (List/Recent will populate from disk on first miss).
+// concurrent Recent / List reads. No-op on the ring when the cache
+// entry is not yet warm — but we still LoadOrStore an empty placeholder
+// so the next cacheGet avoids the redundant LoadOrStore + alloc on its
+// own miss path. R246-GO-9 (#702): the pre-fix version returned silently
+// when Load missed, leaving cacheGet to allocate the recentCacheEntry
+// itself moments later.
 //
 // R242-GO-8 / R235-PERF-3 / R233-PERF-2: ring-buffer push in O(1).
 // The pre-ring implementation did `append([]T{x}, slice...)` (later
@@ -560,7 +640,13 @@ const appendTrimBatch = 10
 func (s *runStore) cacheHeadPush(jobID string, summary CronRunSummary) {
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
-		return
+		// Lazy-allocate the placeholder so cacheGet doesn't have to. The
+		// summary is NOT seeded into the placeholder ring: warm=false stays
+		// because warmCache must still read disk to pick up records that
+		// predate process start. Once warmCache lands, all subsequent
+		// cacheHeadPush calls observe warm=true and push into the ring.
+		actual, _ := s.recentCache.LoadOrStore(jobID, &recentCacheEntry{})
+		v = actual
 	}
 	entry := v.(*recentCacheEntry)
 	entry.mu.Lock()
@@ -627,6 +713,16 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 	// a defensive guard against a future warmCache change rather than a
 	// real disk-error fallback path.
 	s.warmCache(jobID)
+	// R247-GO-6 (#483): re-Load() after warmCache so a concurrent
+	// cacheInvalidate (DeleteJob path) that races between our initial
+	// LoadOrStore and warmCache's own LoadOrStore cannot leave us
+	// reading the stale `entry` reference whose `warm=false` will never
+	// be flipped — warmCache populated a DIFFERENT entry under the same
+	// jobID. Without this re-Load the result was a silent permanent
+	// (nil, false) miss until the next Append re-seeded the cache.
+	if v2, ok := s.recentCache.Load(jobID); ok {
+		entry = v2.(*recentCacheEntry)
+	}
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if !entry.warm {
@@ -650,9 +746,64 @@ func (s *runStore) warmCache(jobID string) {
 	if entry.warm {
 		return // another goroutine warmed it during our wait
 	}
-	rows := s.diskListNewestFirst(jobID, s.keepCount, time.Time{})
+	rows, corruptCount := s.diskListNewestFirst(jobID, s.keepCount, time.Time{})
 	entry.ringSeed(rows, s.keepCount)
 	entry.warm = true
+	if corruptCount > 0 {
+		slog.Warn("cron runstore warmCache skipped corrupt files",
+			"count", corruptCount, "dir", filepath.Join(s.root, jobID))
+	}
+}
+
+// cacheGetBefore is the before-cutoff variant of cacheGet. It serves a
+// before-filtered, newest-first slice from the cache only when the cache
+// is provably exhaustive — i.e. cache.count < keepCount, meaning every
+// on-disk row already lives in the ring and no entry has ever been
+// trimmed off the tail. In that regime the cache holds strictly the
+// same rows as a fresh disk scan, so a filter walk is correctness-
+// equivalent to diskListNewestFirst at zero ReadDir+ReadFile cost.
+//
+// Returns ok=false when count == keepCount (the cache may have shed
+// older entries via trim) — caller falls back to disk so pagination
+// beyond the cache horizon still works. Cold cache paths are NOT warmed
+// here: a cold-cache before-cutoff query is rare (dashboard typically
+// drives warm via a no-cutoff first page), so paying the warm cost on
+// the pagination path would add a ReadDir+per-file ReadFile to a query
+// that is already going to disk and reading it twice — once for warm,
+// once via the disk fallback. The warm path lazy-warms on the next
+// no-cutoff List call. R243-PERF-5 (#810).
+//
+// Caller must guard before.IsZero() == false; use cacheGet for the
+// no-cutoff fast path.
+func (s *runStore) cacheGetBefore(jobID string, limit int, before time.Time) ([]CronRunSummary, bool) {
+	v, ok := s.recentCache.Load(jobID)
+	if !ok {
+		return nil, false
+	}
+	entry := v.(*recentCacheEntry)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.warm {
+		return nil, false
+	}
+	// Exhaustive only when cache hasn't hit cap. count == keepCount
+	// means trimJobLocked may have evicted older rows that match the
+	// before cutoff; disk scan is the safe answer.
+	if entry.count >= s.keepCount {
+		return nil, false
+	}
+	out := make([]CronRunSummary, 0, limit)
+	for i := 0; i < entry.count && len(out) < limit; i++ {
+		r := entry.ringRead(i)
+		// diskListNewestFirst applies StartedAt strict-less-than the
+		// cutoff; mirror that here so cache and disk paths stay in
+		// lockstep on the equality boundary.
+		if !before.IsZero() && !r.StartedAt.Before(before) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, true
 }
 
 // cacheInvalidate forgets the cache entry for jobID. Used by DeleteJob.
@@ -686,34 +837,95 @@ func (s *runStore) List(jobID string, limit int, before time.Time) []CronRunSumm
 
 	// Cache fast-path: when before is zero (most common — Recent and the
 	// first paginated page) and the entry is warm, return without IO.
-	// before-cutoff queries always go to disk because the cache only
-	// holds keepCount newest; pagination beyond that needs the filtered
-	// scan. R220-PERF-1.
+	// R220-PERF-1.
 	if before.IsZero() {
 		if cached, ok := s.cacheGet(jobID, limit); ok {
 			return cached
 		}
+	} else {
+		// before-cutoff fast path (R243-PERF-5 / #810): when the cache
+		// has not yet hit keepCount the ring holds every on-disk row,
+		// so a filter walk over the cache is equivalent to a disk scan.
+		// Falls through to disk once count == keepCount because trim
+		// may have shed older rows the caller would otherwise miss.
+		if cached, ok := s.cacheGetBefore(jobID, limit, before); ok {
+			return cached
+		}
 	}
-	return s.diskListNewestFirst(jobID, limit, before)
+	rows, _ := s.diskListNewestFirst(jobID, limit, before)
+	return rows
 }
 
-// diskListNewestFirst is the on-disk variant of List, used by warmCache
-// and as the fall-through when cache is unavailable / before-cutoff is
-// set. Same return contract as List.
-func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time) []CronRunSummary {
+// runDirItem is a single .json entry that survived the filter pass in
+// scanSortedRunDir: regular file (not a dir / not a symlink), .json
+// suffix, IsValidID runID, Info() succeeded. Both diskListNewestFirst
+// (warmCache path) and trimJobLocked (Append GC path) consume the same
+// shape, so caching it once eliminates the duplicate ReadDir + filter +
+// Stat + sort that R239-PERF-5 (#871) flagged.
+type runDirItem struct {
+	path  string // absolute path including .json suffix; safe to os.Remove
+	runID string
+	mtime time.Time
+}
+
+// scanSortedRunDir reads runs/<jobID>/, filters out non-regular / non-hex
+// entries, Stat's each survivor, and returns the slice sorted newest
+// first (mtime DESC, runID DESC tie-break). The dir path is returned
+// alongside so callers can build paths or log without re-running
+// filepath.Join. err is fs.ErrNotExist when the job has never run; other
+// errors are surfaced verbatim so callers can decide whether to slog.
+//
+// R239-PERF-5 (#871): originally diskListNewestFirst and trimJobLocked
+// each open-coded the same scan loop + sort. On Append's hot path the
+// cold-cache scenario flowed (cacheGet → warmCache → diskListNewestFirst)
+// then later (Append → trimJobLocked), running ReadDir + Stat-per-entry
+// twice for the same directory. Sharing the scan keeps both paths in
+// lockstep (any sort-order or filter-policy change lands once) and
+// halves the ReadDir + per-entry Stat work — important on FUSE / NFS
+// where each e.Info() Stat is a separate round-trip.
+//
+// Sort policy:
+//   - mtime DESC: newer first; mtime ≈ WriteFileAtomic landing time, the
+//     coarse total order callers want. R235-PERF-17 keeps Time.Compare
+//     instead of UnixNano so wall-clock jumps / monotonic resets do not
+//     desync the ordering between trim and list paths (R236-QA-01).
+//   - runID DESC tie-break: when low-resolution filesystems collapse two
+//     concurrent atomic writes to the same nanosecond, ReadDir iteration
+//     order becomes load-bearing without a deterministic key — the
+//     pagination cutoff in diskListNewestFirst (StartedAt < before) and
+//     the cap cutoff in trimJobLocked (i < keepCount) would otherwise
+//     disagree about which equal-mtime record to drop, leaving a record
+//     visible in the list that trim deletes (or vice versa). runID is
+//     16-char random hex, so the tie-break is stable across processes
+//     and re-reads. R222-GO-5 / R235-GO-7.
+func (s *runStore) scanSortedRunDir(jobID string) ([]runDirItem, string, error) {
 	dir := filepath.Join(s.root, jobID)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			slog.Debug("cron run: list readdir", "dir", dir, "err", err)
+		return nil, dir, err
+	}
+	// R249-PERF-25 (#940): cap is bounded by min(len(entries), 2*keepCount).
+	// trimJobLocked keeps runs/<jobID>/ around keepCount entries (default
+	// 200) plus transient slack for in-progress writes. Sizing the slice
+	// to len(entries) over-allocates whenever the directory accumulates
+	// non-json orphans (atomic-write tmp files crashed mid-rename, hidden
+	// dotfiles, .DS_Store, operator scratch) — those entries are filtered
+	// in the loop below but still pay the initial alloc. The 2× factor
+	// gives headroom for a brief over-cap window between finishRun's
+	// Append and the subsequent trimJobLocked, while keepCount=0 (a
+	// disabled / mis-configured store) falls back to len(entries) so we
+	// don't degrade to a many-realloc growth curve. min(...) also handles
+	// the tiny-dir case where len(entries) < 2*keepCount and the cap
+	// equals the historical value — no regression for the warm steady
+	// state.
+	cap0 := len(entries)
+	if s.keepCount > 0 {
+		bound := 2 * s.keepCount
+		if bound < cap0 {
+			cap0 = bound
 		}
-		return nil
 	}
-	type item struct {
-		runID string
-		mtime time.Time
-	}
-	items := make([]item, 0, len(entries))
+	items := make([]runDirItem, 0, cap0)
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -735,45 +947,73 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 		if err != nil {
 			continue
 		}
-		items = append(items, item{runID: runID, mtime: info.ModTime()})
+		items = append(items, runDirItem{
+			path:  filepath.Join(dir, name),
+			runID: runID,
+			mtime: info.ModTime(),
+		})
 	}
-	// Sort by mtime desc; mtime tracks WriteFileAtomic landing. StartedAt
-	// inside the JSON is the real source of truth, but ReadDir + Stat is
-	// cheap; reading every JSON to sort by StartedAt would inflate list
-	// latency from O(N) stat to O(N) parse.
-	//
-	// R222-GO-5: when the underlying FS has low timestamp precision (FAT32 ≈
-	// 2 s, ext3 ≈ 1 s, tmpfs occasionally collapses concurrent atomic writes
-	// to the same nanosecond), two runs that complete in the same tick get
-	// identical mtimes and ReadDir's iteration order becomes load-bearing —
-	// flipping ordering on rerun and letting pagination cutoff (StartedAt <
-	// before) silently skip a record. Use runID as a deterministic secondary
-	// key: it's 16-char random hex, so the tie-breaker is stable across
-	// processes and re-reads even though it carries no time signal of its own.
-	slices.SortFunc(items, func(a, b item) int {
-		// mtime DESC: newer first. time.Time.Compare (Go 1.20+) returns
-		// -1/0/+1 in a single call vs. the prior Equal+After pair.
-		// R235-PERF-17.
+	slices.SortFunc(items, func(a, b runDirItem) int {
+		// mtime DESC: newer first. Time.Compare (Go 1.20+) instead of
+		// UnixNano so wall-clock jumps don't desync trim ↔ list ordering
+		// (R236-QA-01). R235-PERF-17.
 		if c := b.mtime.Compare(a.mtime); c != 0 {
 			return c
 		}
-		// Same mtime: runID DESC tie-break. R222-GO-5.
+		// Equal-mtime tie-break by runID DESC for cross-process stability.
+		// R222-GO-5.
 		return cmp.Compare(b.runID, a.runID)
 	})
+	return items, dir, nil
+}
+
+// diskListNewestFirst is the on-disk variant of List, used by warmCache
+// and as the fall-through when cache is unavailable / before-cutoff is
+// set. Returns the summary list and the count of corrupt/unreadable run
+// files skipped during the scan (R20260526-CR-018, #1227 — surfaces
+// silent skips so warmCache can emit a single aggregate log line).
+//
+// R239-PERF-5 (#871): scan + sort delegated to scanSortedRunDir so this
+// path stays in lockstep with trimJobLocked.
+func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time) ([]CronRunSummary, int) {
+	items, dir, err := s.scanSortedRunDir(jobID)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			slog.Debug("cron run: list readdir", "dir", dir, "err", err)
+		}
+		return nil, 0
+	}
 
 	out := make([]CronRunSummary, 0, limit)
+	corruptCount := 0
 	for _, it := range items {
 		if len(out) >= limit {
 			break
 		}
-		path := filepath.Join(dir, it.runID+".json")
-		// R245-PERF-9: skip readRun's Lstat — diskListNewestFirst's loop
-		// already filtered each DirEntry by ModeSymlink + IsValidID, so the
-		// IsRegular() recheck would just duplicate the syscall. One ReadFile
-		// instead of (Lstat + ReadFile) per listed run halves syscalls in
-		// the warmCache pass.
-		run, err := s.readRunNoLstat(path)
+		// R246-CR-008 (#745): pagination key consistency. The strict cutoff
+		// below filters on StartedAt; an earlier coarse mtime gate
+		// (`!it.mtime.Before(before)` skip) was unsafe in one direction —
+		// a long-running job with StartedAt < before but mtime (≈ EndedAt)
+		// ≥ before would be skipped here without ever reading the file,
+		// even though it should appear in the page. The previous comment
+		// dismissed the asymmetry as "rare in practice", but operators
+		// configuring ExecTimeout to span the pagination window (or any
+		// process restart that bumps mtime via re-touch) hits it
+		// silently — page truncation looked like "no older runs" instead
+		// of pagination skip. Drop the coarse gate; readRunNoLstat is
+		// cheap enough on the typical limit≤50 page that one ReadFile per
+		// candidate is acceptable for correctness here. Items are still
+		// sorted newest-first by mtime so the StartedAt strict filter
+		// applies to the correct prefix of candidates.
+		//
+		// R245-PERF-9: skip readRun's Lstat — scanSortedRunDir already
+		// filtered each DirEntry by ModeSymlink + IsValidID, so the
+		// IsRegular() recheck would just duplicate the syscall.
+		run, err := s.readRunNoLstat(it.path)
 		if err != nil {
+			if errors.Is(err, ErrCorruptRun) {
+				corruptCount++
+			}
 			continue
 		}
 		if !before.IsZero() && !run.StartedAt.Before(before) {
@@ -781,7 +1021,7 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 		}
 		out = append(out, run.summary())
 	}
-	return out
+	return out, corruptCount
 }
 
 // Recent returns the N most recent CronRunSummary entries for jobID
@@ -809,23 +1049,42 @@ func (s *runStore) Get(jobID, runID string) (*CronRun, error) {
 // readRun parses a single run file. Returns ErrCorruptRun on parse
 // failure or oversize; fs.ErrNotExist propagates unchanged.
 //
-// R235-SEC-5 / R242-GO-17: Lstat is intentionally used here (not Stat).
-// Stat would follow symlinks, which an attacker with write access to
-// runs/<jobID>/ could exploit by replacing a legitimate .json with a
-// symlink to /etc/passwd or another sensitive file. Lstat reports the
-// link itself, so the IsRegular() check below rejects the symlink before
-// ReadFile dereferences it. diskListNewestFirst / trimJobLocked already
-// skip symlinks during directory scans, but Get() arrives here directly
-// with a constructed path so this guard is the only barrier.
+// R235-SEC-5 / R242-GO-17 / R238-SEC-7 (#827): the original implementation
+// did Lstat + (cond) ReadFile, which left a TOCTOU window — between the
+// Lstat result observing a regular file and ReadFile opening the path,
+// an attacker with write access to runs/<jobID>/ could swap the entry
+// for a symlink and have ReadFile dereference a sensitive file. We close
+// the window by using OpenFile with O_NOFOLLOW (kernel refuses to follow
+// a final-component symlink, returning ELOOP) and Fstat'ing the resulting
+// fd: the bytes we read come from exactly the inode whose mode we just
+// validated as a regular file, regardless of any concurrent rename. The
+// guard is the only barrier between Get() and a malicious symlink because
+// Get() takes a caller-supplied runID that has not been ReadDir-filtered.
+// diskListNewestFirst / trimJobLocked already skip symlinks during their
+// directory scans, so they use readRunNoLstat to avoid paying for the
+// redundant fd validation.
 func (s *runStore) readRun(path string) (*CronRun, error) {
-	li, err := os.Lstat(path)
+	// openRunFile is platform-specialised: Unix uses O_NOFOLLOW for a
+	// kernel-atomic symlink refusal; Windows falls back to a Lstat-then-
+	// Open two-step (best-effort, since O_NOFOLLOW is Unix-only).
+	f, err := openRunFile(path)
 	if err != nil {
 		return nil, err
 	}
-	if !li.Mode().IsRegular() {
+	defer f.Close()
+	// Fstat on the fd returns metadata for the exact inode we have
+	// open — no second path lookup, no race window. Reject anything
+	// that's not a plain file: Open with O_NOFOLLOW already filtered
+	// symlinks, but a fifo/socket/device with the right name would
+	// still get past Open and only Fstat catches it.
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%w: not a regular file", ErrCorruptRun)
 	}
-	return s.parseRunBytes(path)
+	return s.parseRunFromFile(f, fi)
 }
 
 // readRunNoLstat is the loop-friendly variant of readRun for callers that
@@ -844,17 +1103,71 @@ func (s *runStore) readRunNoLstat(path string) (*CronRun, error) {
 	return s.parseRunBytes(path)
 }
 
-// parseRunBytes is the shared ReadFile + size-cap + json.Unmarshal tail used
-// by both readRun and readRunNoLstat. Centralising the byte-decode keeps
-// the over-cap and unmarshal-error wrapping paths identical regardless of
-// whether the caller paid for an Lstat guard.
+// parseRunBytes is the ReadFile + size-cap + json.Unmarshal tail used by
+// readRunNoLstat — callers that have already filtered the DirEntry by
+// type. Centralising the byte-decode keeps the over-cap and unmarshal-
+// error wrapping paths identical with parseRunFromFile.
 func (s *runStore) parseRunBytes(path string) (*CronRun, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(data)) > s.maxRunBytes {
-		return nil, fmt.Errorf("%w: %d bytes > %d cap", ErrCorruptRun, len(data), s.maxRunBytes)
+	return decodeRunBytes(data, s.maxRunBytes)
+}
+
+// parseRunFromFile reads the open fd's contents (bounded by maxRunBytes+1
+// so we can detect oversize without slurping arbitrary bytes) and decodes
+// the JSON. Used by readRun where the fd is the TOCTOU-safe handle. fi is
+// the Fstat result already validated as a regular file, used to size-hint
+// the buffer.
+func (s *runStore) parseRunFromFile(f *os.File, fi os.FileInfo) (*CronRun, error) {
+	// io.ReadAll grows incrementally; preallocate when fi.Size() is a
+	// reasonable hint. The cap+1 read pattern is irrelevant here because
+	// decodeRunBytes enforces the cap explicitly on the returned slice
+	// length, so even a regular file that grew between Stat and Read
+	// gets rejected by the size check.
+	size := fi.Size()
+	if size < 0 || size > s.maxRunBytes {
+		// Stat already says we're over cap — short-circuit before any
+		// ReadAll alloc. Match parseRunBytes's wrap exactly so callers
+		// can't tell the readRun vs readRunNoLstat path apart by error
+		// shape.
+		return nil, fmt.Errorf("%w: %d bytes > %d cap", ErrCorruptRun, size, s.maxRunBytes)
+	}
+	buf := make([]byte, 0, size)
+	data, err := readAllInto(f, buf)
+	if err != nil {
+		return nil, err
+	}
+	return decodeRunBytes(data, s.maxRunBytes)
+}
+
+// readAllInto reads f to EOF, appending into the supplied prefix-allocated
+// buffer. Mirrors io.ReadAll's loop but lets the caller pre-size based on
+// Fstat to avoid repeated re-grows on the typical ~2KB run record.
+func readAllInto(f *os.File, buf []byte) ([]byte, error) {
+	for {
+		if len(buf) == cap(buf) {
+			buf = append(buf, 0)[:len(buf)]
+		}
+		n, err := f.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return buf, nil
+			}
+			return buf, err
+		}
+	}
+}
+
+// decodeRunBytes enforces the size cap and json.Unmarshal step shared by
+// both file-based and bytes-based read paths. Extracted from parseRunBytes
+// so parseRunFromFile (the TOCTOU-safe path) can reuse the wrapping shape
+// without an extra ReadFile.
+func decodeRunBytes(data []byte, maxRunBytes int64) (*CronRun, error) {
+	if int64(len(data)) > maxRunBytes {
+		return nil, fmt.Errorf("%w: %d bytes > %d cap", ErrCorruptRun, len(data), maxRunBytes)
 	}
 	var run CronRun
 	if err := json.Unmarshal(data, &run); err != nil {
@@ -912,90 +1225,151 @@ func (s *runStore) DeleteJob(jobID string) {
 // jobs get capped by count; low-frequency jobs by window.
 func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	s.assertJobLockHeld(jobID)
-	dir := filepath.Join(s.root, jobID)
-	entries, err := os.ReadDir(dir)
+	// R236-PERF-12 (#532): cache-driven fast exit. trimJobLocked is invoked
+	// from Append's appendTrimBatch boundary path (every N appends as a
+	// background-drift safety net) AND from the cold-start trimAll pass.
+	// When the cache is warm and shows count strictly below keepCount, the
+	// cache enumerates every on-disk file (warmCache + jobLock-serialised
+	// Append guarantee that invariant). Combined with cache's oldest
+	// StartedAt being newer than the keepWindow cutoff, no file can possibly
+	// need removal, so the ReadDir + per-entry Stat in scanSortedRunDir is
+	// pure overhead. assertJobLockHeld above + entry.mu below prevent races
+	// with cacheHeadPush / Append. The check is purely additive: any path
+	// that would have entered the ReadDir branch still does (a cold cache
+	// or count >= keepCount falls through). Cache-trim reconciliation
+	// (cacheTrimAfterDisk) is intentionally skipped here — there was nothing
+	// to remove, so the cache is already in sync with disk.
+	if s.trimSkipFromCache(jobID, now) {
+		return
+	}
+	// R239-PERF-5 (#871): scan + sort delegated to scanSortedRunDir so the
+	// trim path is in lockstep with diskListNewestFirst (matching sort
+	// order, symlink filter, IsValidID guard) and the duplicate ReadDir +
+	// Stat-per-entry — expensive on FUSE/NFS — runs through one shared
+	// implementation rather than two open-coded copies that drifted on
+	// every R220/R222/R235/R236 review.
+	items, _, err := s.scanSortedRunDir(jobID)
 	if err != nil {
 		return
 	}
-	type item struct {
-		path  string
-		runID string
-		mtime time.Time
-	}
-	items := make([]item, 0, len(entries))
 	cutoff := now.Add(-s.keepWindow)
+	// items already sorted newest first (mtime DESC). Walk once to detect
+	// any expired entry — the first one not after cutoff means every
+	// later entry is also expired, so we can break early. The boolean
+	// feeds the "under-cap AND no expiry" fast path that returns without
+	// running the remove loop below.
 	anyExpired := false
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		// 跳过 symlink，与 diskListNewestFirst 对齐（path traversal 防御）。
-		if e.Type()&fs.ModeSymlink != 0 {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		runID := strings.TrimSuffix(name, ".json")
-		if !IsValidID(runID) {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
-		}
-		mtime := info.ModTime()
-		if !mtime.After(cutoff) {
+	for _, it := range items {
+		if !it.mtime.After(cutoff) {
 			anyExpired = true
+			break
 		}
-		items = append(items, item{
-			path:  filepath.Join(dir, name),
-			runID: runID,
-			mtime: mtime,
-		})
 	}
-	// Fast path: under cap AND nothing expired → no sort, no remove. The
-	// common case for healthy 5-min cron jobs that ride well under the
-	// 200-entry cap. R220-PERF-3.
+	// Fast path: under cap AND nothing expired → no remove. The common
+	// case for healthy 5-min cron jobs that ride well under the 200-entry
+	// cap. R220-PERF-3.
 	if len(items) <= s.keepCount && !anyExpired {
 		return
 	}
 	if len(items) == 0 {
 		return
 	}
-	// Sort newest first so rank checking is index-based. Same total order as
-	// diskListNewestFirst: mtime DESC, then runID DESC for the equal-mtime
-	// tiebreak — without the runID secondary key the trim cutoff
-	// (i < s.keepCount) and the list cutoff would disagree about which
-	// equal-mtime record to drop, leaving a window where a record visible
-	// in the list could be removed by trim. R235-GO-7.
-	slices.SortFunc(items, func(a, b item) int {
-		// R236-QA-01: use time.Time.Compare to mirror diskListNewestFirst
-		// exactly. UnixNano() can disagree with Time.Compare across wall
-		// clock jumps / monotonic-clock resets (e.g. ntp step) and would
-		// break the trim-cutoff / list-cutoff equality invariant noted
-		// above, leaving a record visible in the list that trim deletes
-		// (or vice versa). Time.Compare is the canonical total order.
-		if c := b.mtime.Compare(a.mtime); c != 0 {
-			return c
-		}
-		return cmp.Compare(b.runID, a.runID)
-	})
+	// R246-GO-20 (#712): collect the to-remove paths first under jobLock,
+	// then release the lock for the os.Remove syscall batch so concurrent
+	// Append for the same jobID can proceed during slow-FS removes (FUSE/
+	// NFS can take 10s of ms per Remove). Re-acquire jobLock before
+	// cacheTrimAfterDisk so the cache reconciliation stays serialised
+	// against cacheHeadPush as before.
+	//
+	// Safety: the snapshot is captured under lock so a concurrent Append
+	// landing during the unlocked window writes a fresh file with newer
+	// mtime which is by definition not in our toRemove slice — we never
+	// delete it. The fresh Append's cacheHeadPush also runs after our
+	// release, so the cache observes the new row before our reconcile;
+	// cacheTrimAfterDisk preserves rows that survived the cutoff (it
+	// counts survivors from the head, never reaching the new entry).
+	//
+	// items sorted newest first by scanSortedRunDir, so rank checking
+	// below is index-based. Sort policy / tie-break rationale lives on
+	// scanSortedRunDir's godoc; trim and list paths must observe the same
+	// total order or the cap cutoff (i < keepCount) and the list cutoff
+	// (StartedAt < before) disagree about which equal-mtime record to
+	// drop. R235-GO-7 / R236-QA-01.
+	toRemove := make([]string, 0, len(items))
 	for i, it := range items {
 		// Both conditions must hold to keep.
 		keep := i < s.keepCount && it.mtime.After(cutoff)
 		if keep {
 			continue
 		}
-		if err := os.Remove(it.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			slog.Debug("cron run: trim remove failed", "path", it.path, "err", err)
+		toRemove = append(toRemove, it.path)
+	}
+	if len(toRemove) > 0 {
+		lock := s.jobLock(jobID)
+		lock.Unlock()
+		for _, p := range toRemove {
+			if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				slog.Debug("cron run: trim remove failed", "path", p, "err", err)
+			}
 		}
+		lock.Lock()
 	}
 	// Cache may now point to deleted entries; reconcile by trimming the
 	// cache slice to the same (count + window) policy. We hold jobLock so
 	// concurrent Append's cacheHeadPush can't race.
 	s.cacheTrimAfterDisk(jobID, cutoff)
+}
+
+// trimSkipFromCache reports whether the cache state proves trimJobLocked
+// has no work to do, allowing the caller to skip ReadDir + per-entry Stat.
+// Returns true only when ALL of:
+//
+//   - cache is warm (so count + ring entries are authoritative);
+//   - cache.count < s.keepCount (so cache enumerates every on-disk file —
+//     a count == keepCount means trim may have shed older entries beyond
+//     the ring horizon and we can no longer be sure no extra file lingers);
+//   - oldest cached row's timestamp is strictly newer than the cutoff (so
+//     no window-based eviction is due).
+//
+// Caller MUST hold jobLock(jobID); the entry.mu acquisition here pairs
+// with cacheHeadPush / cacheTrimAfterDisk so a concurrent Append's
+// metadata mutation cannot race the read. R236-PERF-12 (#532).
+func (s *runStore) trimSkipFromCache(jobID string, now time.Time) bool {
+	v, ok := s.recentCache.Load(jobID)
+	if !ok {
+		return false
+	}
+	entry := v.(*recentCacheEntry)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.warm {
+		return false
+	}
+	// keepCount-margin: at count == keepCount the cache may have rotated
+	// older entries off the ring (they could still exist on disk because
+	// the previous trim might have failed or be pending). Stay strict.
+	if entry.count >= s.keepCount {
+		return false
+	}
+	// Empty cache → nothing on disk → nothing to trim. The trimJobLocked
+	// scanSortedRunDir branch returns at len(items) == 0, but skipping the
+	// syscall entirely is cheaper.
+	if entry.count == 0 {
+		return true
+	}
+	cutoff := now.Add(-s.keepWindow)
+	oldest := entry.ringRead(entry.count - 1)
+	ts := oldest.EndedAt
+	if ts.IsZero() {
+		ts = oldest.StartedAt
+	}
+	// Strict After: equal timestamps fall back to disk to avoid an off-by-one
+	// "boundary mtime gets evicted by the disk path but not the cache path"
+	// drift between trimJobLocked's mtime + cache's StartedAt approximation.
+	if !ts.After(cutoff) {
+		return false
+	}
+	return true
 }
 
 // cacheTrimAfterDisk reconciles the recentCache for jobID after on-disk
@@ -1049,18 +1423,24 @@ func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
 	if limit > entry.count {
 		limit = entry.count
 	}
-	survive := 0
-	for i := 0; i < limit; i++ {
+	// R249-PERF-9 (#930): the ring is newest-first by ts and the
+	// `ts.Before(cutoff)` predicate is monotone (once a row is older than
+	// cutoff every later row in the ring is also older), so the survive
+	// boundary is exactly the smallest index i where ringRead(i).ts is
+	// before cutoff — sort.Search territory. Linear scan walks up to
+	// keepCount=200 rows on every Append-driven trim; binary search
+	// collapses that to ~log2(200) ≈ 8 ringRead calls. Cosmetic cost
+	// (handleList runs at 1Hz × N tabs and trim fires once per Append),
+	// but the cleaner shape also documents the monotonicity contract
+	// future readers need to preserve when changing the cutoff predicate.
+	survive := sort.Search(limit, func(i int) bool {
 		r := entry.ringRead(i)
 		ts := r.EndedAt
 		if ts.IsZero() {
 			ts = r.StartedAt
 		}
-		if ts.Before(cutoff) {
-			break
-		}
-		survive++
-	}
+		return ts.Before(cutoff)
+	})
 	// Zero out the dropped slots to release any retained string fields.
 	c := cap(entry.ring)
 	if c > 0 {

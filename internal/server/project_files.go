@@ -95,10 +95,58 @@ const (
 //
 // The handler intercepts this name before the projectMgr lookup so a real
 // project named "__public_tmp__" on disk cannot accidentally shadow it.
+//
+// R237-SEC-5 (#646): the interception is gated by ProjectHandlers.publicTmpEnabled
+// — default false so multi-user deployments fall through to the normal
+// "project not found" surface. Single-operator setups flip it on via
+// `server.public_tmp_enabled: true` in config.yaml.
 const (
 	publicTmpProject = "__public_tmp__"
 	publicTmpRoot    = "/tmp"
 )
+
+// processEUID is the effective UID of the naozhi process. Captured once at
+// init so isPublicTmpForeignPrivate avoids a syscall per request. Geteuid()
+// on Linux is implemented as a cached read of the kernel's saved
+// task->cred->euid; calling it per-file is cheap, but caching keeps the
+// hot path syscall-free and lets tests override the value.
+var processEUID = uint32(os.Geteuid())
+
+// isPublicTmpForeignPrivate enforces R245-SEC-7 (#831): when the dashboard
+// previews a path under /tmp via the publicTmpProject pseudo-project, the
+// caller is trusted as "an authenticated dashboard user" but NOT as a
+// system-level user. /tmp on a multi-user host can hold mode-0600 files
+// owned by other UIDs (e.g. another operator's editor swap, an SSH socket,
+// a systemd-private cache) — naozhi runs with read access to those bytes
+// because Linux DAC permissions only check the *running process*, not the
+// dashboard caller. Reflecting them through the dashboard would let the
+// dashboard user trivially read another OS user's private files.
+//
+// Policy: refuse files whose mode bits indicate "owner-private" (no group /
+// world bits) AND whose owner UID differs from the naozhi process's EUID.
+// World/group-readable files (mode & 0o044 != 0) stay accessible — those
+// the kernel already considers safe to share. Files owned by the same UID
+// as naozhi are also fine: the operator running naozhi already owns them.
+//
+// The mode/UID pair is read from the FileInfo we already Lstat'd, so this
+// is a zero-syscall check on the hot path.
+func isPublicTmpForeignPrivate(info os.FileInfo) bool {
+	uid, ok := fileOwnerUID(info)
+	if !ok {
+		// Non-Unix or stub FileInfo (test fakes); be conservative and
+		// allow — the production build is always Linux where the
+		// assertion holds. A unit test that wants to assert the deny
+		// path supplies a real *syscall.Stat_t via os.Lstat on a
+		// fixture file.
+		return false
+	}
+	if uid == processEUID {
+		return false
+	}
+	// Owner-private == no group OR world read/exec/write bits.
+	const groupOrWorld = 0o077
+	return info.Mode().Perm()&groupOrWorld == 0
+}
 
 // textMimePrefixes identifies MIME types safe to return as UTF-8 text in
 // preview mode. http.DetectContentType tags source code as "text/plain" which
@@ -495,7 +543,7 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxExistsBody)
+	r = withMaxBytes(w, r, maxExistsBody)
 	var req existsReq
 	if err := decodeJSONBody(r, &req); err != nil {
 		slog.Debug("files exists: decode failed", "err", err)
@@ -513,7 +561,7 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 	// through the same resolveProjectFileWithRoot guard so symlink escape /
 	// path-traversal / credential-name rejection still apply.
 	rootPath := ""
-	if req.Project == publicTmpProject {
+	if req.Project == publicTmpProject && h.publicTmpEnabled {
 		rootPath = publicTmpRoot
 	} else {
 		// R183-SEC-M2: every other /api/projects path gates on validateProjectName
@@ -579,7 +627,24 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 			// text-only fallback.
 			break
 		}
-		results[rel] = statRelWithRoot(rootResolved, rel)
+		entry := statRelWithRoot(rootResolved, rel)
+		// R245-SEC-7 (#831): existence-probe parity with handleFileGet's
+		// foreign-private gate. Without this the dashboard could
+		// enumerate /tmp/<other-uid>/* via the batch-exists API even
+		// though handleFileGet refuses to serve the bytes — the
+		// {Exists, Size, Mime} fields alone leak presence + first-512-byte
+		// MIME signature. Re-Lstat the resolved entry so we evaluate
+		// owner/mode on the same inode the existence reply describes.
+		// Cost: at most one extra Lstat per /tmp probe; the production
+		// path is the project-root case where this branch is skipped.
+		if entry.Exists && req.Project == publicTmpProject {
+			if abs, rerr := resolveProjectFileWithRoot(rootResolved, rel); rerr == nil {
+				if info, lerr := os.Lstat(abs); lerr == nil && isPublicTmpForeignPrivate(info) {
+					entry = existsEntry{Exists: false}
+				}
+			}
+		}
+		results[rel] = entry
 	}
 
 	writeJSON(w, map[string]any{"results": results})
@@ -707,7 +772,7 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	// against /tmp instead of looking up a real project, but keep the same
 	// path-traversal / symlink-escape / credential-name guards downstream.
 	rootPath := ""
-	if project == publicTmpProject {
+	if project == publicTmpProject && h.publicTmpEnabled {
 		rootPath = publicTmpRoot
 	} else {
 		// R183-SEC-M2: same trust-boundary gate as handleFilesExists above.
@@ -762,6 +827,21 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// R245-SEC-7 (#831): publicTmpProject lets any authenticated dashboard
+	// user resolve absolute /tmp paths. Without this gate, a foreign UID's
+	// 0600 file (other operator's editor swap, systemd-private socket
+	// payload, …) flowed straight through because Linux DAC checks the
+	// naozhi *process* — which has read access — not the dashboard caller.
+	// Refuse owner-private files owned by a different UID; the same-UID
+	// case (operator's own /tmp output) and world/group-readable files
+	// stay accessible. Only applies to the publicTmpProject path; real
+	// projects are operator-registered roots whose contents the dashboard
+	// is by definition cleared to read.
+	if project == publicTmpProject && isPublicTmpForeignPrivate(info) {
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
 	// R230-SEC-5: defence-in-depth re-check that resolved still sits under
 	// the project root. resolveProjectFile already verified this once, but a
 	// concurrent rename(2) between EvalSymlinks (inside resolveProjectFile)
@@ -798,6 +878,46 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// R219-SEC-2 (#655) + R220-GO-2: open the file ONCE here, with O_NOFOLLOW,
+	// and plumb the resulting *os.File into the serve* helpers. Previously
+	// each helper (serveRender / servePreview / serveRaw / serveDownload) ran
+	// its own os.Open(resolved) AFTER the Lstat-after-resolve guard above —
+	// an attacker who could win a sub-millisecond race could swap the regular
+	// file for an unrelated regular file (different inode, same path) between
+	// Lstat and Open and have the swapped bytes streamed under the original
+	// path's authorization. O_NOFOLLOW closes the symlink-swap leg of the
+	// TOCTOU kernel-atomically; the fstat-IsRegular re-check below closes the
+	// "swap to non-regular file" leg. The remaining same-regular-different-
+	// inode swap is unavoidable without renameat2/openat2 but the impact
+	// shrinks to "attacker swaps File A's bytes with File B's bytes within
+	// the same workspace+sensitive-name guard set" — bounded by the
+	// authorization gate the request already passed.
+	f, err := openWorkspaceFile(resolved)
+	if err != nil {
+		// O_NOFOLLOW returns ELOOP on a final-component symlink. Collapse to
+		// 404 so attacker probing cannot distinguish "missing" from "swapped
+		// to symlink" — same contract as the Lstat-symlink branch above.
+		if !errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("project files: openWorkspaceFile IO failure",
+				"err", err,
+				"project", project)
+		}
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+	// fstat the fd so size/mtime/regular-mode reflect the SAME inode the
+	// helpers will read from. info from Lstat above is intentionally
+	// discarded for the body — it described a name, not a fd. A swap to a
+	// dir/socket/fifo between Lstat and Open is rejected here.
+	finfo, ferr := f.Stat()
+	if ferr != nil || finfo.IsDir() || !finfo.Mode().IsRegular() {
+		_ = f.Close()
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+	info = finfo
+	defer f.Close()
+
 	// ETag hashes (size, mtime-ns) so the header does not leak exact byte
 	// count or nanosecond modification timestamp to authenticated clients.
 	// Matches the attachment endpoint convention — see handleAttachment.
@@ -833,13 +953,13 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 
 	switch mode {
 	case "preview":
-		h.servePreview(w, resolved, info)
+		h.servePreview(w, f, resolved, info)
 	case "raw":
-		h.serveRaw(w, r, resolved, info)
+		h.serveRaw(w, r, f, resolved, info)
 	case "render":
-		h.serveRender(w, r, resolved, info)
+		h.serveRender(w, r, f, resolved, info)
 	case "download":
-		h.serveDownload(w, r, resolved, info)
+		h.serveDownload(w, r, f, resolved, info)
 	}
 }
 
@@ -890,7 +1010,7 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 // -html`, Playwright trace, pytest-html) and most SVG diagrams emit self-
 // contained single-file content and are unaffected. Relative-asset support is
 // B2, gated on actual user demand.
-func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, resolved string, info os.FileInfo) {
+func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, f *os.File, resolved string, info os.FileInfo) {
 	// R249-SEC-5: mirror servePreview / serveRaw / serveDownload — refuse
 	// credential-bearing names even when the bytes happen to sniff as
 	// text/html or image/svg+xml. Without this gate an attacker who can
@@ -907,12 +1027,9 @@ func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, re
 		return
 	}
 
-	f, err := os.Open(resolved)
-	if err != nil {
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "open failed"})
-		return
-	}
-	defer f.Close()
+	// R219-SEC-2 (#655): fd opened once by handleFileGet with O_NOFOLLOW and
+	// plumbed in; no second os.Open here so an inode-swap between Lstat and
+	// serve* cannot redirect the streamed bytes. Caller owns Close.
 
 	head := make([]byte, 512)
 	n, _ := io.ReadFull(f, head)
@@ -997,7 +1114,7 @@ func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, re
 // tools create/edit files arbitrarily — so raw innerHTML would be a stored-XSS
 // sink. dashboard.js currently uses `<pre><code>esc(content)</code></pre>`
 // with esc() HTML-escaping the payload, satisfying this contract. R71-SEC-L1.
-func (h *ProjectHandlers) servePreview(w http.ResponseWriter, resolved string, info os.FileInfo) {
+func (h *ProjectHandlers) servePreview(w http.ResponseWriter, f *os.File, resolved string, info os.FileInfo) {
 	// Mirror the serveDownload guard: a file like .netrc / .npmrc / id_rsa
 	// has a text MIME and would otherwise have its raw contents echoed in
 	// the JSON `content` field. The download path's credential allowlist
@@ -1025,12 +1142,8 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, resolved string, i
 		truncated = true
 	}
 
-	f, err := os.Open(resolved)
-	if err != nil {
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "open failed"})
-		return
-	}
-	defer f.Close()
+	// R219-SEC-2 (#655): fd plumbed in by handleFileGet. No second os.Open;
+	// caller owns Close.
 
 	// Read head for MIME detection first so we can refuse non-text quickly
 	// without allocating a full buffer for a potentially large binary.
@@ -1113,7 +1226,7 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, resolved string, i
 	})
 }
 
-func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resolved string, info os.FileInfo) {
+func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, f *os.File, resolved string, info os.FileInfo) {
 	// R246-SEC-2: enforce the same sensitive-name guard as servePreview /
 	// serveDownload. A file like .env / id_rsa / .npmrc sniffs to text/plain
 	// and would otherwise pass the isTextMime check below, exposing
@@ -1129,12 +1242,8 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 		return
 	}
 
-	f, err := os.Open(resolved)
-	if err != nil {
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "open failed"})
-		return
-	}
-	defer f.Close()
+	// R219-SEC-2 (#655): fd plumbed in by handleFileGet. No second os.Open;
+	// caller owns Close.
 
 	// Sniff MIME from file head so we don't hand the browser octet-stream for
 	// images; http.ServeContent reads content-type from w.Header() if set.
@@ -1191,11 +1300,11 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 	// download path so the browser / OS handler treats them as explicit
 	// attachments. R71-SEC-M2.
 	if mime == "application/pdf" {
-		// R186-QUAL-M1: serveDownload re-opens the file itself; release our fd
-		// first so we don't briefly hold two descriptors for the same file and
-		// the deferred Close above doesn't race with serveDownload's own defer.
-		_ = f.Close()
-		h.serveDownload(w, r, resolved, info)
+		// R219-SEC-2 (#655): handleFileGet now opens once and plumbs the fd
+		// through; serveDownload no longer re-opens, so we hand off the same
+		// *os.File directly. handleFileGet's deferred Close stays the sole
+		// owner — serveDownload only reads, never closes.
+		h.serveDownload(w, r, f, resolved, info)
 		return
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
@@ -1226,7 +1335,7 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 	http.ServeContent(w, r, filepath.Base(resolved), info.ModTime(), f)
 }
 
-func (h *ProjectHandlers) serveDownload(w http.ResponseWriter, r *http.Request, resolved string, info os.FileInfo) {
+func (h *ProjectHandlers) serveDownload(w http.ResponseWriter, r *http.Request, f *os.File, resolved string, info os.FileInfo) {
 	// SEC-009: deny credential-bearing files even on the explicit download
 	// path. servePreview already excludes .env via previewableByExt + the
 	// MIME guard, but download had no equivalent stop, letting authenticated
@@ -1237,12 +1346,17 @@ func (h *ProjectHandlers) serveDownload(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	f, err := os.Open(resolved)
-	if err != nil {
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "open failed"})
+	// R219-SEC-2 (#655): fd plumbed in by handleFileGet (or relayed from
+	// serveRaw's PDF branch). No second os.Open; ownership stays with the
+	// caller's deferred Close.
+	//
+	// serveRaw's PDF hand-off may have already advanced the fd reading the
+	// first 512 bytes for MIME sniffing; rewind so http.ServeContent streams
+	// from offset 0.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "seek failed"})
 		return
 	}
-	defer f.Close()
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", contentDisposition("attachment", resolved))

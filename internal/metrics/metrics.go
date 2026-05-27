@@ -255,6 +255,24 @@ var (
 	// R240-GO-4.
 	CronSendBudgetDoubledTotal = expvar.NewInt("naozhi_cron_send_budget_doubled_total")
 
+	// CronStopBudgetExceededGCTotal / CronStopBudgetExceededDrainTotal /
+	// CronStopBudgetExceededTriggerTotal count Scheduler.Stop() phases that
+	// blew through their per-phase budget. Three separate counters (rather
+	// than a labeled vector) keep the schema flat under expvar without a
+	// helper indirection. Pairs with the existing per-phase slog.Warn so
+	// operators tracking systemd TimeoutStopSec breaches can alert on
+	// rising deltas without grepping journalctl.
+	//
+	// Phase mapping:
+	//   - GC      : cold-start GC goroutine wait exceeded gcWaitBudget (5s)
+	//   - Drain   : cron.Stop() drain exceeded stopBudget (30s)
+	//   - Trigger : triggerWG.Wait remaining-budget slice exceeded
+	//
+	// R250-GO-20 (#1083). Mirrors the CronSendBudgetDoubledTotal precedent.
+	CronStopBudgetExceededGCTotal      = expvar.NewInt("naozhi_cron_stop_budget_exceeded_gc_total")
+	CronStopBudgetExceededDrainTotal   = expvar.NewInt("naozhi_cron_stop_budget_exceeded_drain_total")
+	CronStopBudgetExceededTriggerTotal = expvar.NewInt("naozhi_cron_stop_budget_exceeded_trigger_total")
+
 	// CronRunStartedTotal counts cron run starts (after CAS gate, before
 	// IM notify). Pairs with CronRunEndedTotal — the difference (modulo
 	// inflight) approximates "runs interrupted by panic / process crash".

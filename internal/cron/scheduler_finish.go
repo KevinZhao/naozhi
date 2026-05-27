@@ -6,8 +6,8 @@
 // query API (CurrentRun / ListRuns / RecentRuns / GetRun) live next to the
 // writers that produce the records — when the schema of CronRun changes,
 // readers and writers move together. No behaviour change. Methods stay on
-// *Scheduler so the s.mu / s.jobs / s.runStore / s.onExecute /
-// s.runningJobs fields remain accessible without exporting.
+// *Scheduler so the s.mu / s.jobs / s.runStore / s.runningJobs fields
+// remain accessible without exporting.
 
 package cron
 
@@ -132,6 +132,15 @@ type finishArgs struct {
 	prompt      string
 	workDir     string
 	fresh       bool
+	// finalizer 是 caller 栈上的 *runFinalizer。finishRun 在 emitRunEnded
+	// 之前调 finalizer.finalize() 让 CurrentRun(jobID) 与 broadcast 同步
+	// ok=false；caller 自己的 defer 也调一次作兜底（覆盖 jitter-window
+	// 早返路径）。done bool 保证两次调用只清理一次，并且因为 finalizer
+	// 是 per-run 栈对象，run-A 的 defer 只会看到 run-A 的 done=true，
+	// 永远不会动到 run-B 已抢占的 *runInflight 字段。emitOverlapSkipped
+	// 必须传 nil（它的 inflight gate 归并发 run 拥有，不应在 overlap
+	// 路径释放）。R246-GO-3 (#689).
+	finalizer *runFinalizer
 }
 
 // finishRun is the single terminal hook for every cron execution path.
@@ -178,7 +187,7 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	persistedErrMsg := a.errMsg
 	jobPersistOK := false
 	if !a.skipPersist {
-		persistedResult, persistedErrMsg, jobPersistOK = s.recordResultP0WithSanitised(a.job, a.result, a.errMsg, a.sessionID, a.errClass, a.state)
+		persistedResult, persistedErrMsg, jobPersistOK = s.recordTerminalResult(a.job, a.result, a.errMsg, a.sessionID, a.errClass, a.state)
 	} else {
 		persistedResult = sanitiseRunResult(persistedResult)
 		persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
@@ -201,6 +210,19 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	//   - skipPersist=false（这次 run 应该被记录）
 	//   - jobPersistOK=true（Job 端写盘成功；否则 disk-divergence 风险）
 	//   - runStore 启用
+	//
+	// R250-SEC-5 (#1094): a.prompt is the snapshot Job.Prompt at execute
+	// time. New jobs flow through containsCronUnsafe / validateCronPrompt
+	// at the dashboard / IM write edge AND a defence-in-depth scan inside
+	// loadJobs. But a cron_jobs.json predating those gates can carry a
+	// legacy Prompt with C0 / C1 / bidi runes — every CronRun.Prompt
+	// persisted thereafter inherits them, landing in operator-side log
+	// scrapers and SIEMs that read runs/<jobID>/<runID>.json directly.
+	// Run the same SanitizeForLog scrub at the persist boundary so the
+	// stored record matches what handleRunDetail (read-side) would produce.
+	// Idempotent on already-clean prompts; cheap relative to JSON marshal +
+	// fsync that immediately follow.
+	persistedPrompt := osutil.SanitizeForLog(a.prompt, MaxPromptBytes)
 	if !a.skipPersist && jobPersistOK && s.runStore != nil {
 		s.runStore.Append(&CronRun{
 			RunID:       a.runID,
@@ -211,7 +233,7 @@ func (s *Scheduler) finishRun(a finishArgs) {
 			EndedAt:     endedAt,
 			DurationMS:  durationMS,
 			SessionID:   a.sessionID,
-			Prompt:      a.prompt,
+			Prompt:      persistedPrompt,
 			WorkDir:     a.workDir,
 			Fresh:       a.fresh,
 			Result:      persistedResult,
@@ -228,6 +250,21 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// Broadcast last so server-side hub locks aren't held while we hold s.mu.
 	// ErrorMsg uses persistedErrMsg (post-redact, post-sanitise) — see the
 	// SECURITY note above for why a.errMsg is never used here.
+	//
+	// R246-GO-3 (#689): finalize before the broadcast so a dashboard list
+	// arriving concurrently with cron_run_ended observes CurrentRun(jobID)
+	// == ok:false rather than the stale runInflightView{Phase:Spawning}
+	// the defer would otherwise leave until executeOpt returns. The
+	// finalizer is per-run stack-local; finishRun fires it first, the
+	// executeOpt defer fires it second as a no-op (done flag set). Run-A's
+	// defer can NEVER reset run-B's freshly-installed metadata because
+	// run-A's done=true short-circuits run-A's defer regardless of whether
+	// a racing run-B has won the next CAS — the gate isolation comes from
+	// per-run finalizer identity, not from any atomic on *runInflight.
+	// emitOverlapSkipped passes nil here (its inflight gate belongs to
+	// the concurrent owning run we must not release).
+	a.finalizer.finalize()
+
 	s.emitRunEnded(RunEndedEvent{
 		JobID:      a.job.ID,
 		RunID:      a.runID,
@@ -285,8 +322,42 @@ func sanitiseRunErrMsg(s string) string {
 // synthesise a RunID + StartedAt locally; finishRun's skipPersist=true
 // short-circuit keeps the synthetic run off disk (it only exists in the
 // WS broadcast stream).
+//
+// R246-CR-013 (#747): kept as a named function despite having a single
+// call site (executeOpt's CAS-fail branch in scheduler_run.go) for two
+// reasons:
+//
+//  1. The 5-line synthesise-RunID + start + finish dance is a
+//     non-trivial composition over emitRunStarted + finishRun + a
+//     hand-built finishArgs literal. Inlining at the call site would
+//     bury the "skipped runs go through the same lifecycle as real
+//     runs" contract inside the executeOpt function, where it competes
+//     for attention with the run-success/error happy path.
+//  2. Future call sites are anticipated (not hypothetical): when other
+//     CAS-style guards land — e.g. a per-workspace cap that rejects
+//     spawn before reaching the per-job CAS, or a backpressure-driven
+//     manual skip — they will need the same "emit started+ended pair
+//     so subscriber timelines stay consistent" semantics. Having the
+//     helper avoid copy-pasting the 5-line dance across each future
+//     guard preserves the single-place edit point for the lifecycle
+//     contract (e.g. if RunEvent gains a new required field).
+//
+// Reviewers tempted to inline this back into executeOpt: please add the
+// new caller(s) first, then re-evaluate.
 func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
-	runID := generateRunID()
+	runID, err := generateRunID()
+	if err != nil {
+		// R242-CR-14 (#706): rand failure on the overlap-skipped path is
+		// already a degraded scenario — the actually-running execution still
+		// holds the inflight gate and will produce its own start/end pair.
+		// Suppressing the synthetic overlap event when we can't even mint
+		// its RunID is strictly better than panicking from the cron tick
+		// goroutine. Operators see the in-flight job's normal events; the
+		// missing overlap-skipped is purely informational.
+		slog.Error("cron: failed to generate run ID for overlap-skipped event; suppressing",
+			"job_id", j.ID, "trigger_now", viaTriggerNow, "err", err)
+		return
+	}
 	startedAt := time.Now()
 	trigger := TriggerScheduled
 	if viaTriggerNow {
@@ -305,7 +376,35 @@ func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 	})
 }
 
-// recordResultP0WithSanitised persists the terminal result (LastResult /
+// jobResultSnapshot captures the terminal-result-relevant Job fields
+// before recordTerminalResult mutates them, so a persistJobsLocked failure
+// can roll the in-memory Job state back to the pre-mutation values without
+// rebuilding the field list at the rollback site. R247-CR-14 (#586): the
+// previous inline anonymous-struct literal duplicated field types between
+// the snapshot capture and the rollback assignment, leaving every future
+// "add a field to LastFoo" change two coupled edits to keep in sync.
+//
+// restore re-applies the captured values to j; caller MUST hold s.mu so
+// the in-memory state stays serialised against concurrent readers.
+type jobResultSnapshot struct {
+	LastRunAt      time.Time
+	LastResult     string
+	LastError      string
+	LastErrorClass ErrorClass
+	LastSessionID  string
+	Counters       JobRunCounters
+}
+
+func (p jobResultSnapshot) restore(j *Job) {
+	j.LastRunAt = p.LastRunAt
+	j.LastResult = p.LastResult
+	j.LastError = p.LastError
+	j.LastErrorClass = p.LastErrorClass
+	j.LastSessionID = p.LastSessionID
+	j.RunCounters = p.Counters
+}
+
+// recordTerminalResult persists the terminal result (LastResult /
 // LastError / LastErrorClass / Counters) for non-skipPersist paths and
 // returns the post-sanitised (result, errMsg) pair so finishRun can reuse
 // the same byte content in the CronRun history record. The two outputs
@@ -334,7 +433,13 @@ func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 // therefore moot — only this single P0 path remains, and persist_failure_test
 // (the last "test stub" caller) already invokes this function directly.
 // Do NOT reintroduce a thinner wrapper without first checking those TODOs.
-func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState) (string, string, bool) {
+//
+// R247-CR-14 / R247-CR-15 (#586): renamed from recordResultP0WithSanitised
+// to drop the "P0" review-tag prefix that lost meaning once the dead
+// recordResult path was deleted (R220-GO-1). The rollback state now lives
+// in the named jobResultSnapshot struct above so a future "add a Last*
+// field" diff lands once on the type instead of three coupled edits.
+func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState) (string, string, bool) {
 	// truncateWithSuffix (limits.go) is the single source of truth for the
 	// rune-trim + …[truncated] suffix; both this path and sanitiseRunResult
 	// must produce byte-identical output so the skipPersist branch of
@@ -354,14 +459,14 @@ func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionI
 		s.mu.Unlock()
 		return result, errMsg, false
 	}
-	prev := struct {
-		LastRunAt      time.Time
-		LastResult     string
-		LastError      string
-		LastErrorClass ErrorClass
-		LastSessionID  string
-		Counters       JobRunCounters
-	}{j.LastRunAt, j.LastResult, j.LastError, j.LastErrorClass, j.LastSessionID, j.RunCounters}
+	prev := jobResultSnapshot{
+		LastRunAt:      j.LastRunAt,
+		LastResult:     j.LastResult,
+		LastError:      j.LastError,
+		LastErrorClass: j.LastErrorClass,
+		LastSessionID:  j.LastSessionID,
+		Counters:       j.RunCounters,
+	}
 
 	j.LastRunAt = time.Now()
 	j.LastResult = result
@@ -374,23 +479,12 @@ func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionI
 
 	save, perr := s.persistJobsLocked()
 	if perr != nil {
-		j.LastRunAt = prev.LastRunAt
-		j.LastResult = prev.LastResult
-		j.LastError = prev.LastError
-		j.LastErrorClass = prev.LastErrorClass
-		j.LastSessionID = prev.LastSessionID
-		j.RunCounters = prev.Counters
+		prev.restore(j)
 		s.mu.Unlock()
-		slog.Warn("cron: recordResultP0 persist failed; in-memory result reverted",
+		slog.Warn("cron: recordTerminalResult persist failed; in-memory result reverted",
 			"job_id", j.ID, "err", perr)
 		return result, errMsg, false
 	}
-	// Snapshot j.ID before releasing s.mu so the post-unlock onExecute
-	// callback does not depend on the implicit "Job.ID is immutable across
-	// concurrent DeleteJob" contract — that contract holds today (DeleteJob
-	// removes the entry from s.jobs but never mutates *Job in place), but
-	// pinning the value here makes future refactors safer. R235-GO-1.
-	jobID := j.ID
 	// R250-PERF-7: detect whether LastSessionID changed under the lock
 	// so we can invalidate the KnownSessionIDs TTL cache exactly when
 	// the persisted set has shifted. Comparing against the snapshot
@@ -403,9 +497,12 @@ func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionI
 		s.invalidateKnownSessionsCache()
 	}
 	save()
-	if fn := s.onExecute.Load(); fn != nil {
-		(*fn)(jobID, result, errMsg)
-	}
+	// Phase D (RFC §3.5): the legacy s.onExecute hook fired here to
+	// drive the cron_result WS frame, which dashboard.js consumed only
+	// for an `announce` + list refetch — both already covered by the
+	// cron_run_ended frame. The hook + BroadcastCronResult + cronResultMsg
+	// were deleted; the announce moved to dashboard.js's cron_run_ended
+	// succeeded branch.
 	return result, errMsg, true
 }
 
@@ -466,6 +563,18 @@ const redactPathsBuilderPoolMaxCap = 4 * maxRedactErrLen
 // `\\` / `//` followed by a non-`/` non-`\` host segment).
 func redactPathsInCronError(s string) string {
 	if s == "" {
+		return s
+	}
+	// Hot fast-path: short error-classifier strings ("context deadline
+	// exceeded", "dispatcher queue full") with no path-trigger byte never
+	// need truncation OR the Builder pool — return them aliased. The 256B
+	// cap is a defensive ceiling so an unexpectedly long no-path input
+	// still falls through to the byte-cap branch below; common cron error
+	// classes fit comfortably under this. R250-PERF-12 / #1115.
+	if len(s) <= redactFastPathMaxLen &&
+		strings.IndexByte(s, '/') < 0 &&
+		strings.IndexByte(s, '\\') < 0 &&
+		strings.IndexByte(s, '~') < 0 {
 		return s
 	}
 	// Byte-level cap, but split on a rune boundary — naked s[:maxRedactErrLen]

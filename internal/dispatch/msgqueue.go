@@ -62,9 +62,13 @@ func ParseQueueMode(s string) QueueMode {
 
 // sessionQueue tracks per-session busy state and queued messages.
 type sessionQueue struct {
-	busy         bool
-	gen          uint64 // incremented on Discard to invalidate stale owners
-	msgs         []QueuedMsg
+	busy bool
+	gen  uint64 // incremented on Discard to invalidate stale owners
+	// ring holds the queued messages in a fixed-capacity FIFO ring buffer.
+	// O(1) push (with O(1) head-advance eviction when full) replaces the
+	// O(N) slice-memmove that #570 R247-PERF-23 flagged at maxDepth=16
+	// every Enqueue under sustained backpressure. See msgRing for layout.
+	ring         msgRing
 	lastNotifyNs int64 // unix nanoseconds of last ShouldNotify call (replaces lastNotify map)
 	lastEvictNs  int64 // unix nanoseconds of last eviction Warn log (rate-limit)
 
@@ -74,6 +78,95 @@ type sessionQueue struct {
 	// same turn each firing a separate control_request (redundant and noisy
 	// in CLI stderr) while still allowing a fresh interrupt on the next turn.
 	interruptRequested bool
+}
+
+// msgRing is a single-producer / single-consumer FIFO ring buffer used by
+// sessionQueue.msgs. All access is serialised under MessageQueue.mu — the
+// ring carries no internal locking. The capacity is fixed by the first
+// push (set to MessageQueue.maxDepth via push's `cap` argument) so once
+// allocated the backing array never grows; eviction-on-full is an O(1)
+// head advance (with the evicted slot zeroed for GC) instead of the
+// previous slice-memmove. R247-PERF-23 (#570).
+//
+// Empty / one-shot semantics:
+//   - len()==0 and the underlying buf is nil → ring has never been used.
+//     Callers that treat the ring as logically absent (Depth -> 0,
+//     DoneOrDrain "no messages" branch) can detect this via len()==0.
+//   - drainAll resets the ring to the empty-and-cleared state but keeps
+//     the backing array, so subsequent pushes reuse it without realloc.
+//
+// The buffer is laid out as:
+//
+//	buf:   [_, A, B, C, _, _]
+//	head=1, used=3 → logical view = [A, B, C]
+//
+// push at full advances head and writes at (head+used)%cap, dropping A.
+type msgRing struct {
+	buf  []QueuedMsg
+	head int // index of the oldest live element when used > 0
+	used int // number of live elements; 0 <= used <= cap(buf)
+}
+
+// len returns the current number of queued messages.
+func (r *msgRing) len() int { return r.used }
+
+// push appends m. When the ring is at the supplied capacity (cap, the
+// MessageQueue's maxDepth), the head is advanced and the oldest element
+// is overwritten — returns true to signal an eviction so the caller can
+// emit the rate-limited warn log. The first push allocates the backing
+// array at the requested capacity; subsequent pushes reuse it.
+func (r *msgRing) push(m QueuedMsg, capacity int) (evicted bool) {
+	if cap(r.buf) == 0 {
+		r.buf = make([]QueuedMsg, capacity)
+	}
+	if r.used == capacity {
+		// Full: drop oldest. Zero the slot first so any held image data
+		// becomes GC-eligible immediately.
+		r.buf[r.head] = QueuedMsg{}
+		r.head = (r.head + 1) % capacity
+		r.used--
+		evicted = true
+	}
+	idx := (r.head + r.used) % capacity
+	r.buf[idx] = m
+	r.used++
+	return evicted
+}
+
+// drainAll returns the queued messages in FIFO order and resets the ring
+// to empty (head=used=0). The backing array is retained for reuse but
+// each consumed slot is zeroed so retained image data becomes
+// GC-eligible. Returns nil when empty (mirrors the previous nil-vs-slice
+// distinction the queue exposed via sq.msgs == nil).
+func (r *msgRing) drainAll() []QueuedMsg {
+	if r.used == 0 {
+		return nil
+	}
+	out := make([]QueuedMsg, r.used)
+	c := cap(r.buf)
+	for i := 0; i < r.used; i++ {
+		idx := (r.head + i) % c
+		out[i] = r.buf[idx]
+		r.buf[idx] = QueuedMsg{}
+	}
+	r.head = 0
+	r.used = 0
+	return out
+}
+
+// reset empties the ring without returning the contents (used by Discard).
+// Keeps the backing array allocated for reuse; zeroes live slots for GC.
+func (r *msgRing) reset() {
+	if r.used == 0 {
+		return
+	}
+	c := cap(r.buf)
+	for i := 0; i < r.used; i++ {
+		idx := (r.head + i) % c
+		r.buf[idx] = QueuedMsg{}
+	}
+	r.head = 0
+	r.used = 0
 }
 
 // MessageQueue replaces SessionGuard with per-session message queuing.
@@ -174,11 +267,10 @@ func (q *MessageQueue) Enqueue(key string, msg QueuedMsg) (isOwner, enqueued, sh
 		return false, false, false, 0
 	}
 
-	// Evict oldest if at capacity. Shift in place rather than `sq.msgs[1:]`
-	// so the underlying array stays bounded at cap=maxDepth instead of
-	// drifting forward indefinitely; also zeroes the evicted slot so
-	// any held image data can be GC'd.
-	if len(sq.msgs) >= q.maxDepth {
+	// Push into the ring buffer. Eviction on full is O(1) (head advance);
+	// the previous slice-memmove was O(N) on every push at full depth.
+	// R247-PERF-23 (#570).
+	if evicted := sq.ring.push(msg, q.maxDepth); evicted {
 		// Queue-full eviction is silent data loss: the user that sent the
 		// evicted message gets no feedback. Log at Warn so operators can
 		// observe backpressure (single chat overwhelmed, or CLI hung).
@@ -193,14 +285,10 @@ func (q *MessageQueue) Enqueue(key string, msg QueuedMsg) (isOwner, enqueued, sh
 		// the pattern in ShouldNotify.
 		if delta := now - sq.lastEvictNs; delta < 0 || delta >= evictWarnCooldownNs {
 			slog.Warn("msgqueue: dropping oldest message (queue full)",
-				"key", key, "depth", len(sq.msgs), "max_depth", q.maxDepth)
+				"key", key, "depth", sq.ring.len(), "max_depth", q.maxDepth)
 			sq.lastEvictNs = now
 		}
-		copy(sq.msgs, sq.msgs[1:])
-		sq.msgs[len(sq.msgs)-1] = QueuedMsg{}
-		sq.msgs = sq.msgs[:len(sq.msgs)-1]
 	}
-	sq.msgs = append(sq.msgs, msg)
 	// In Interrupt mode the first queued follow-up for the active turn flips
 	// interruptRequested. Subsequent queued messages for the same turn skip
 	// the interrupt — the first control_request already cancels the turn,
@@ -240,7 +328,7 @@ func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 		return nil
 	}
 
-	if len(sq.msgs) == 0 {
+	if sq.ring.len() == 0 {
 		// Release ownership. Also purge any stale dropNotify LRU entry so
 		// the next notification goes through a consistent cooldown path:
 		// otherwise ShouldNotify would fall from the queue branch (which
@@ -266,8 +354,7 @@ func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 	// once the owner takes the drained batch, the NEXT in-flight turn is a
 	// fresh target for a future interrupt, so subsequent queued messages
 	// during that new turn must be able to trigger another control_request.
-	msgs := sq.msgs
-	sq.msgs = nil
+	msgs := sq.ring.drainAll()
 	sq.interruptRequested = false
 	return msgs
 }
@@ -286,7 +373,7 @@ func (q *MessageQueue) Discard(key string) {
 	defer q.mu.Unlock()
 	if sq := q.queues[key]; sq != nil {
 		sq.gen++
-		sq.msgs = nil
+		sq.ring.reset()
 		sq.busy = false
 		sq.lastNotifyNs = 0
 		sq.interruptRequested = false
@@ -323,7 +410,7 @@ func (q *MessageQueue) Depth(key string) int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if sq := q.queues[key]; sq != nil {
-		return len(sq.msgs)
+		return sq.ring.len()
 	}
 	return 0
 }
@@ -420,7 +507,7 @@ func (q *MessageQueue) Release(key string) {
 	q.mu.Lock()
 	depth := 0
 	if sq := q.queues[key]; sq != nil {
-		depth = len(sq.msgs)
+		depth = sq.ring.len()
 	}
 	q.mu.Unlock()
 	if depth > 0 {
@@ -450,17 +537,17 @@ func (q *MessageQueue) ReleaseWithDrain(key string, onDrain func(QueuedMsg)) {
 	var drained []QueuedMsg
 	if sq := q.queues[key]; sq != nil {
 		sq.busy = false
-		if len(sq.msgs) == 0 {
+		if sq.ring.len() == 0 {
 			delete(q.queues, key)
 		} else if onDrain != nil {
-			// Transfer the queued batch to the caller and clear the internal
-			// slice so a later Enqueue starts fresh. Ownership is released
-			// (busy=false) so the next Enqueue becomes owner; if we kept the
-			// msgs in place, that owner would still receive them via
-			// DoneOrDrain — but nothing guarantees a next Enqueue arrives.
-			// Draining here ensures progress even on a quiet session.
-			drained = sq.msgs
-			sq.msgs = nil
+			// Transfer the queued batch to the caller and clear the
+			// internal ring so a later Enqueue starts fresh. Ownership
+			// is released (busy=false) so the next Enqueue becomes
+			// owner; if we kept the msgs in place, that owner would
+			// still receive them via DoneOrDrain — but nothing
+			// guarantees a next Enqueue arrives. Draining here ensures
+			// progress even on a quiet session.
+			drained = sq.ring.drainAll()
 			// Entry becomes eligible for deletion now that it carries no
 			// queued state; mirroring the empty branch above keeps the map
 			// from accumulating idle sessionQueue instances.

@@ -177,40 +177,107 @@ func TestEventLog_ReplayPhase_WithoutSink(t *testing.T) {
 	}
 }
 
-// TestEventLog_ReplayPhase_SinkSetFirst is the blocker-1 runtime
-// guard: if a caller violates the ordering contract by calling
-// SetPersistSink BEFORE InjectHistory, the replay-phase batches
-// must carry replayPhase=true so the Persister can drop them.
+// TestEventLog_ReplayPhase_NilResetsSinkReady locks in the
+// R20260526-GO-010 contract: SetPersistSink(nil) flips sinkReady
+// back to false so any subsequent SetPersistSink(real) re-enters
+// the pre-attach phase cleanly. Without this reset, a
+// "pause-persist → InjectHistory replay → resume-persist" sequence
+// would tag replay batches as live and the Persister would commit
+// duplicates to disk.
 //
-// Here we simulate the broken path by calling SetPersistSink first
-// and then attempting to "replay" via AppendBatch. Since sinkReady
-// flips to true the moment SetPersistSink is called, any AppendBatch
-// after it is ALIVE (not replay). That's intentional — the runtime
-// contract is "only Appends BEFORE SetPersistSink are replay". The
-// broken ordering is "caller Set before InjectHistory", which is
-// caught at the session.Router layer's own ordering contract test
-// via AST lint; runtime there depends on sinkReady being a monotonic
-// one-way flag.
-//
-// The test below verifies the monotonic flag: once sinkReady is
-// true, it never returns to false, even if SetPersistSink is called
-// with nil.
-func TestEventLog_ReplayPhase_MonotonicSinkReady(t *testing.T) {
+// The post-reinstall Append below MUST land with replayPhase=false
+// because SetPersistSink(real) flips sinkReady back to true atomically.
+// What the test really proves is that nil + real-install behaves like
+// a fresh EventLog — the install path's atomic Store(true) cancels
+// the nil path's Store(false) before any live Append observes it.
+func TestEventLog_ReplayPhase_NilResetsSinkReady(t *testing.T) {
 	l := NewEventLog(16)
 	c := &captureSink{}
 	l.SetPersistSink(c.asSink())
 
-	// Uninstall via nil.
+	// Uninstall via nil. After this call sinkReady MUST be false so a
+	// subsequent install enters the pre-attach phase.
 	l.SetPersistSink(nil)
+	if l.sinkReady.Load() {
+		t.Errorf("SetPersistSink(nil) did not reset sinkReady")
+	}
 
-	// Reinstall a fresh capture.
+	// Reinstall a fresh capture. The install path flips sinkReady
+	// back to true, so the next Append sees replayPhase=false.
 	c2 := &captureSink{}
 	l.SetPersistSink(c2.asSink())
+	if !l.sinkReady.Load() {
+		t.Errorf("SetPersistSink(real) after nil did not flip sinkReady=true")
+	}
 
 	l.Append(EventEntry{Type: "user", Summary: "post-reinstall"})
 	_, replay, _ := c2.lastBatch()
 	if replay {
-		t.Errorf("reinstalled sink received replayPhase=true; sinkReady regressed")
+		t.Errorf("post-reinstall live Append marked replayPhase=true")
+	}
+}
+
+// TestEventLog_SetPersistSinkNil_ThenInstall_ReplaysCorrectly
+// exercises the operationally-meaningful path the R20260526-GO-010
+// fix opens: pause persist via SetPersistSink(nil), feed a replay
+// batch (e.g. InjectHistory), then re-install the sink. The replay
+// batch fired between nil and re-install fires no sink (pointer is
+// nil); the batch fired AFTER re-install but during the new replay
+// phase MUST carry replayPhase=true so downstream persisters drop
+// the duplicate.
+//
+// The "pre-install replay" + "post-install live" boundary is the
+// inverse of this — exercised by TestEventLog_ReplayPhase_WithoutSink.
+// What this test adds is the toggle: sinkReady must be reset by
+// nil so that AppendBatchReplay-style use after re-install lands
+// with replayPhase=true. SetPersistSink(real) flips it back to true
+// before live Appends, so we use AppendBatchReplay (or its public
+// equivalent) to exercise the moment between sink re-attach and the
+// next live event — but since the public API doesn't expose a
+// "stay-replay" hook, we assert via the simpler invariant: after
+// SetPersistSink(nil) the field is false; after SetPersistSink(real)
+// the field is true again, no leftover state.
+func TestEventLog_SetPersistSinkNil_TogglesSinkReadyBoth(t *testing.T) {
+	l := NewEventLog(16)
+	if l.sinkReady.Load() {
+		t.Fatalf("fresh EventLog has sinkReady=true")
+	}
+
+	c1 := &captureSink{}
+	l.SetPersistSink(c1.asSink())
+	if !l.sinkReady.Load() {
+		t.Errorf("first install did not flip sinkReady=true")
+	}
+
+	l.SetPersistSink(nil)
+	if l.sinkReady.Load() {
+		t.Errorf("uninstall did not reset sinkReady=false")
+	}
+
+	c2 := &captureSink{}
+	l.SetPersistSink(c2.asSink())
+	if !l.sinkReady.Load() {
+		t.Errorf("re-install did not flip sinkReady back to true")
+	}
+}
+
+// TestEventLog_SetPersistSinkPair_NilBatchResetsSinkReady mirrors
+// the SetPersistSink(nil) reset behaviour for SetPersistSinkPair's
+// nil-batch uninstall path. R20260526-GO-010 symmetry: both clear
+// entrypoints must produce a clean pre-attach state for the next
+// install.
+func TestEventLog_SetPersistSinkPair_NilBatchResetsSinkReady(t *testing.T) {
+	l := NewEventLog(16)
+	batch := &captureSink{}
+	one := &captureSinkOne{}
+	l.SetPersistSinkPair(batch.asSink(), one.asSink())
+	if !l.sinkReady.Load() {
+		t.Fatalf("SetPersistSinkPair did not flip sinkReady=true")
+	}
+
+	l.SetPersistSinkPair(nil, nil)
+	if l.sinkReady.Load() {
+		t.Errorf("SetPersistSinkPair(nil, nil) did not reset sinkReady=false")
 	}
 }
 
@@ -303,6 +370,69 @@ func TestEventLog_ReplayInvokeTotal_PreSinkAttach(t *testing.T) {
 		if replay {
 			t.Errorf("batch %d carried replay=true post-attach", i)
 		}
+	}
+}
+
+// TestEventLog_SinkReady_LifecycleTransitions pins R242-ARCH-20 by
+// locking down the SinkReady() accessor — the diagnostic /health ports
+// the original review asked for. The state machine is:
+//
+//	construction          → SinkReady=false
+//	SetPersistSink(real)  → SinkReady=true
+//	SetPersistSink(nil)   → SinkReady=false (clear path)
+//	SetPersistSink(real2) → SinkReady=true
+//
+// Each transition is atomic with the persistSinkPtr Store inside
+// SetPersistSink (sink-first/ready-second on install, ready-first/sink-
+// second on clear — see the godoc on SetPersistSink for the asymmetry
+// proof). A regression that flipped sinkReady without the matching
+// pointer Store would either silently lose an event (sinkReady=true,
+// ptr=nil) or mis-tag a live event as replay (sinkReady=false,
+// ptr=real). The accessor lets /health detect both via the
+// SinkReady ↔ ReplayInvokeTotal pair.
+//
+// Also exercises the nil-receiver guard so /health request paths that
+// race a torn-down EventLog report "not ready" instead of panicking.
+func TestEventLog_SinkReady_LifecycleTransitions(t *testing.T) {
+	t.Parallel()
+
+	var nilLog *EventLog
+	if nilLog.SinkReady() {
+		t.Fatalf("SinkReady on nil receiver = true, want false")
+	}
+
+	l := NewEventLog(16)
+	if l.SinkReady() {
+		t.Fatalf("SinkReady at construction = true, want false")
+	}
+
+	c := &captureSink{}
+	l.SetPersistSink(c.asSink())
+	if !l.SinkReady() {
+		t.Fatalf("SinkReady after SetPersistSink(real) = false, want true")
+	}
+
+	// Clear path: ready must flip back to false so a subsequent
+	// SetPersistSink(real) re-enters the pre-attach phase cleanly.
+	// Without this, a "pause persist → re-install sink → InjectHistory"
+	// sequence would tag the replay batch replayPhase=false (live)
+	// per R20260526-GO-010.
+	l.SetPersistSink(nil)
+	if l.SinkReady() {
+		t.Fatalf("SinkReady after SetPersistSink(nil) = true, want false")
+	}
+
+	// Re-install: ready returns to true.
+	l.SetPersistSink(c.asSink())
+	if !l.SinkReady() {
+		t.Fatalf("SinkReady after re-install = false, want true")
+	}
+
+	// SetPersistSinkPair install path also flips ready=true.
+	l2 := NewEventLog(16)
+	l2.SetPersistSinkPair(c.asSink(), nil)
+	if !l2.SinkReady() {
+		t.Fatalf("SinkReady after SetPersistSinkPair = false, want true")
 	}
 }
 

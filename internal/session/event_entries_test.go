@@ -203,6 +203,71 @@ func TestSnapshotChainIDs_AllEmpty(t *testing.T) {
 	}
 }
 
+// TestEventEntriesSince_MonotonicInjectKeepsSortedFlag verifies the
+// R237-PERF-12 fast path: appending Time-monotonic batches via
+// InjectHistory marks the slice sorted so subsequent EventEntriesSince
+// reads can skip the per-call stable sort.
+func TestEventEntriesSince_MonotonicInjectKeepsSortedFlag(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.InjectHistory([]cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+		{Time: 300, Summary: "c"},
+	})
+	if !s.persistedHistorySorted {
+		t.Fatalf("monotonic InjectHistory should set persistedHistorySorted=true")
+	}
+	// Second monotonic batch (continuing the tail) keeps the flag.
+	s.InjectHistory([]cli.EventEntry{
+		{Time: 400, Summary: "d"},
+		{Time: 500, Summary: "e"},
+	})
+	if !s.persistedHistorySorted {
+		t.Fatalf("continued monotonic InjectHistory should keep flag true")
+	}
+	got := s.EventEntriesSince(150)
+	if len(got) != 4 {
+		t.Fatalf("len=%d want 4", len(got))
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i].Time < got[i-1].Time {
+			t.Errorf("result not sorted at i=%d", i)
+		}
+	}
+}
+
+// TestEventEntriesSince_OutOfOrderInjectClearsFlag verifies that an
+// InjectHistory batch breaking Time monotonicity flips the slice back to
+// "needs sort" so the next reader pays the one-off sort and rearms the
+// fast path.
+func TestEventEntriesSince_OutOfOrderInjectClearsFlag(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.InjectHistory([]cli.EventEntry{
+		{Time: 300, Summary: "c"},
+		{Time: 100, Summary: "a"}, // breaks order vs the previous entry
+		{Time: 200, Summary: "b"},
+	})
+	if s.persistedHistorySorted {
+		t.Fatalf("non-monotonic InjectHistory should leave persistedHistorySorted=false")
+	}
+	got := s.EventEntriesSince(0)
+	if len(got) != 3 {
+		t.Fatalf("len=%d want 3", len(got))
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i].Time < got[i-1].Time {
+			t.Errorf("EventEntriesSince must still return chronological output even when input was out of order")
+		}
+	}
+	// After the read sorted in-place, the flag must be true so future
+	// reads skip the sort.
+	if !s.persistedHistorySorted {
+		t.Errorf("post-read persistedHistorySorted should be true")
+	}
+}
+
 // TestHistorySource_ConcurrentSetAndRead pins the race-free contract on the
 // atomic.Pointer hand-off: SetHistorySource and EventEntriesBeforeCtx can
 // execute concurrently without a -race violation. Without atomic storage

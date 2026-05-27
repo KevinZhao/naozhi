@@ -168,3 +168,98 @@ func TestNewDispatcher_ResolverFabricatedWhenNil(t *testing.T) {
 		t.Fatal("explicit Resolver must be preserved, not replaced by a fresh fabrication")
 	}
 }
+
+// TestNewDispatcher_PrefersRouterResolver covers R237-ARCH-12 (#604):
+// when cfg.Resolver is unset and cfg.Router carries a Resolver via
+// RouterConfig.Resolver, NewDispatcher must adopt the router's
+// singleton instead of fabricating a parallel KeyResolver — that's
+// the central remediation for agents-config drift across the 4
+// historical construction sites.
+func TestNewDispatcher_PrefersRouterResolver(t *testing.T) {
+	t.Parallel()
+
+	shared := session.NewKeyResolver(map[string]session.AgentOpts{"general": {}}, nil)
+	router := session.NewRouter(session.RouterConfig{Resolver: shared})
+
+	d, err := NewDispatcher(DispatcherConfig{
+		Router:             router,
+		Agents:             map[string]session.AgentOpts{"general": {}},
+		AllowMissingSender: true,
+	})
+	if err != nil {
+		t.Fatalf("NewDispatcher: %v", err)
+	}
+	if d.resolver != shared {
+		t.Fatalf("Dispatcher.resolver = %p, want router-shared %p — router resolver was not adopted", d.resolver, shared)
+	}
+}
+
+// TestNewDispatcher_ResolverPrecedence pins the full 3-tier precedence
+// chain documented for R237-ARCH-12 (#604): explicit cfg.Resolver always
+// wins over the Router-attached singleton, and the fabricated fallback
+// only fires when neither is wired. Without this regression pin, a future
+// refactor could silently swap the order — explicit cfg.Resolver
+// disrespected (the test override pathway) or the Router singleton
+// re-fabricated (re-introducing drift) would each pass the existing
+// single-case tests but break a documented invariant.
+func TestNewDispatcher_ResolverPrecedence(t *testing.T) {
+	t.Parallel()
+
+	t.Run("explicit cfg.Resolver wins over router singleton", func(t *testing.T) {
+		t.Parallel()
+		routerOwned := session.NewKeyResolver(map[string]session.AgentOpts{"general": {}}, nil)
+		explicit := session.NewKeyResolver(map[string]session.AgentOpts{"general": {}}, nil)
+		if routerOwned == explicit {
+			t.Fatal("test setup invariant: routerOwned and explicit must be distinct instances")
+		}
+		router := session.NewRouter(session.RouterConfig{Resolver: routerOwned})
+
+		d, err := NewDispatcher(DispatcherConfig{
+			Router:             router,
+			Resolver:           explicit,
+			Agents:             map[string]session.AgentOpts{"general": {}},
+			AllowMissingSender: true,
+		})
+		if err != nil {
+			t.Fatalf("NewDispatcher: %v", err)
+		}
+		if d.resolver != explicit {
+			t.Fatalf("explicit cfg.Resolver lost to router singleton: got %p, want %p (router=%p)",
+				d.resolver, explicit, routerOwned)
+		}
+	})
+
+	t.Run("fabricated fallback only when both unwired", func(t *testing.T) {
+		t.Parallel()
+		// No cfg.Resolver, no cfg.Router → fabricated path.
+		d, err := NewDispatcher(DispatcherConfig{
+			Agents:             map[string]session.AgentOpts{"general": {}},
+			AllowMissingSender: true,
+		})
+		if err != nil {
+			t.Fatalf("NewDispatcher: %v", err)
+		}
+		if d.resolver == nil {
+			t.Fatal("fabricated fallback returned nil resolver")
+		}
+	})
+
+	t.Run("router without resolver still falls back to fabrication", func(t *testing.T) {
+		t.Parallel()
+		// Router that did NOT receive a Resolver in its config — the
+		// dispatcher should still construct a fresh fallback rather
+		// than panicking on the nil Router.Resolver() result.
+		router := session.NewRouter(session.RouterConfig{})
+		d, err := NewDispatcher(DispatcherConfig{
+			Router:             router,
+			Agents:             map[string]session.AgentOpts{"general": {}},
+			AllowMissingSender: true,
+		})
+		if err != nil {
+			t.Fatalf("NewDispatcher: %v", err)
+		}
+		if d.resolver == nil {
+			t.Fatal("nil router resolver should fall through to fabrication, not leave d.resolver=nil")
+		}
+	})
+}

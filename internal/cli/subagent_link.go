@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -224,9 +225,33 @@ func (l *SubagentLinker) ProjectSessionDir() string {
 	return filepath.Join(l.projectDir, l.parentSessionID)
 }
 
+// sleepOrCancel waits for d to elapse and returns true, or returns false
+// if ctx is canceled first. Used by Resolve's retry loop so process
+// shutdown observes at most one retryInterval (≤ 250ms) of delay rather
+// than the full retryLimit*retryInterval (≤ 3s) budget. R218B-GO-3 (#644).
+func sleepOrCancel(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // Resolve executes the 7-step algorithm in RFC §3.3.1.
 // Returns the LinkInfo and whether Resolve has reached a terminal verdict
 // (Resolved=true). Idempotent: once cached, subsequent calls are O(1).
+//
+// ctx (R218B-GO-3, #644): callers should pass a Process-lifetime context
+// so the up-to-3s retry budget collapses to near-zero on shutdown
+// (process exit / Kill / shim disconnect). Resolve checks ctx.Done()
+// at every retry sleep and at the resolveSem acquire arm; on cancel it
+// returns (LinkInfo{}, false) without writing any cache entry — a
+// subsequent attempt (e.g. a reattach into the same project) starts
+// fresh. Pass context.Background() in tests / synthetic callers that
+// don't need cancellation.
 //
 // Tombstones are cached so repeated Resolve attempts on a permanently-missing
 // task_id do not re-scan every poll.
@@ -238,7 +263,12 @@ func (l *SubagentLinker) ProjectSessionDir() string {
 // agentType match would always miss). The legacy scan stays as a fallback
 // for older CLI versions or sidechain agents whose filename convention
 // differs.
-func (l *SubagentLinker) Resolve(taskID, toolUseID, name, description string, agentToolUseMS int64) (LinkInfo, bool) {
+func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, description string, agentToolUseMS int64) (LinkInfo, bool) {
+	if ctx == nil {
+		// Defensive: no caller should pass nil, but a TODO!Background()
+		// gives the rest of the function a non-nil ctx to range over.
+		ctx = context.Background()
+	}
 	// Step 1: already resolved? (cheap fast path, no semaphore needed)
 	l.mu.RLock()
 	if info, ok := l.byTaskID[taskID]; ok {
@@ -290,6 +320,19 @@ func (l *SubagentLinker) Resolve(taskID, toolUseID, name, description string, ag
 		case <-t.C:
 			slog.Debug("agent_link: resolve semaphore full, dropping", "task_id", taskID)
 			return LinkInfo{}, false
+		case <-ctx.Done():
+			// R218B-GO-3 (#644): Process shutdown collapses the retry
+			// budget to near-zero so the parent goroutine can exit
+			// without waiting on a full sem queue. Stop the timer to
+			// drain its goroutine.
+			if !t.Stop() {
+				select {
+				case <-t.C:
+				default:
+				}
+			}
+			slog.Debug("agent_link: resolve canceled while waiting for semaphore", "task_id", taskID, "err", ctx.Err())
+			return LinkInfo{}, false
 		}
 	}
 
@@ -314,7 +357,10 @@ func (l *SubagentLinker) Resolve(taskID, toolUseID, name, description string, ag
 			if attempt == l.retryLimit {
 				break
 			}
-			time.Sleep(l.retryInterval)
+			if !sleepOrCancel(ctx, l.retryInterval) {
+				slog.Debug("agent_link: resolve canceled mid-retry (no candidates)", "task_id", taskID, "attempt", attempt, "err", ctx.Err())
+				return LinkInfo{}, false
+			}
 			continue
 		}
 
@@ -353,7 +399,10 @@ func (l *SubagentLinker) Resolve(taskID, toolUseID, name, description string, ag
 			if attempt == l.retryLimit {
 				break
 			}
-			time.Sleep(l.retryInterval)
+			if !sleepOrCancel(ctx, l.retryInterval) {
+				slog.Debug("agent_link: resolve canceled mid-retry (no filtered)", "task_id", taskID, "attempt", attempt, "err", ctx.Err())
+				return LinkInfo{}, false
+			}
 			continue
 		}
 

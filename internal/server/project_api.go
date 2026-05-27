@@ -71,7 +71,17 @@ type ProjectHandlers struct {
 	resolver   *session.KeyResolver
 	nodeAccess NodeAccessor
 	nodeCache  *node.CacheManager
-	ctxFunc    func() context.Context // returns hub.ctx or Background
+	// baseCtx is the long-lived context the planner-restart timeout
+	// derives from. R247-ARCH-15 (#650): replaces a `ctxFunc func()
+	// context.Context` closure that captured `*Server` indirectly
+	// through `s.hub.ctx`. The closure-as-DI antipattern made test
+	// substitution awkward — every test had to rebuild a closure. Now
+	// tests assign `h.baseCtx = ctx` directly. Production wiring
+	// happens via `SetBaseContext` from registerDashboard once
+	// `s.hub.ctx` exists. Nil falls back to Background in restartCtx
+	// so a handler cannot panic on an un-wired ProjectHandlers
+	// (matches the prior closure's `Background()` fallback).
+	baseCtx context.Context
 	// filesExistsLimiter caps how often a single authenticated caller can
 	// invoke /api/projects/files/exists. The endpoint fans out up to
 	// maxExistsPaths (100) filesystem stats per request with a
@@ -92,6 +102,61 @@ type ProjectHandlers struct {
 	// Nil-safe in tests; handleConfigPut guards with a nil check.
 	// R247-SEC-7.
 	configPutLimiter *ipLimiter
+	// publicTmpEnabled gates the __public_tmp__ pseudo-project (R237-SEC-5,
+	// #646). When false (default), any request naming publicTmpProject as
+	// the project field is rejected as "project not found" — same surface
+	// as a non-existent regular project. The single-operator dashboard
+	// model can flip this to true via server.public_tmp_enabled in
+	// config.yaml; multi-user deployments leave it off so an authenticated
+	// dashboard user cannot enumerate / preview arbitrary /tmp paths
+	// (other operators' editor swaps, systemd-private payloads, …) just
+	// because the naozhi process happens to have read access on Linux DAC.
+	publicTmpEnabled bool
+}
+
+// SetBaseContext wires the long-lived process context (typically
+// `Hub.ctx`) used by the planner-restart timeout. Called from
+// registerDashboard after the Hub is constructed. Pre-wiring tests
+// can assign `h.baseCtx` directly; this setter exists so production
+// callers don't need to reach into an unexported field. R247-ARCH-15
+// (#650).
+func (h *ProjectHandlers) SetBaseContext(ctx context.Context) {
+	h.baseCtx = ctx
+}
+
+// restartCtx returns the parent context for `handleRestartPlanner`'s
+// 30s timeout. Falls back to context.Background() when baseCtx has
+// not been wired (test paths that build ProjectHandlers by hand
+// without calling SetBaseContext). Mirrors the prior `ctxFunc`
+// closure's nil branch so behaviour is unchanged for existing call
+// sites. R247-ARCH-15 (#650).
+func (h *ProjectHandlers) restartCtx() context.Context {
+	if h.baseCtx != nil {
+		return h.baseCtx
+	}
+	return context.Background()
+}
+
+// projectsListEntry is the per-project element in GET /api/projects.
+// R247-PERF-6: replaces the prior `map[string]any{8 keys}` literal that
+// allocated one inner map + 8 interface{} boxing slots per project per
+// dashboard poll. The JSON shape pinned by TestDashboardJSON_Projects_
+// ShapeContract requires `git_remote_url` and `github` to always be
+// present (the dashboard JS reads them unconditionally), so neither
+// carries `omitempty` even though the empty/false zero values were
+// previously emitted via the map literal too. `Node` keeps `omitempty`
+// because the local-only path never sets it; the multi-node merge path
+// stamps "local" before serialise.
+type projectsListEntry struct {
+	Name         string                `json:"name"`
+	Path         string                `json:"path"`
+	Node         string                `json:"node,omitempty"`
+	PlannerState string                `json:"planner_state"`
+	PlannerModel string                `json:"planner_model"`
+	Config       project.ProjectConfig `json:"config"`
+	Favorite     bool                  `json:"favorite"`
+	GitRemoteURL string                `json:"git_remote_url"`
+	GitHub       bool                  `json:"github"`
 }
 
 // GET /api/projects — list all projects (local + remote).
@@ -102,7 +167,7 @@ func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	projects := h.projectMgr.All()
-	result := make([]map[string]any, 0, len(projects))
+	result := make([]projectsListEntry, 0, len(projects))
 	for _, p := range projects {
 		plannerKey := p.PlannerSessionKey()
 		plannerState := "none"
@@ -111,24 +176,24 @@ func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			plannerState = snap.State
 		}
 
-		result = append(result, map[string]any{
-			"name":           p.Name,
-			"path":           p.Path,
-			"planner_state":  plannerState,
-			"planner_model":  h.projectMgr.EffectivePlannerModel(p),
-			"config":         p.Config,
-			"favorite":       p.Config.Favorite,
-			"git_remote_url": redactGitRemoteURL(p.GitRemoteURL),
-			"github":         p.IsGitHub,
+		result = append(result, projectsListEntry{
+			Name:         p.Name,
+			Path:         p.Path,
+			PlannerState: plannerState,
+			PlannerModel: h.projectMgr.EffectivePlannerModel(p),
+			Config:       p.Config,
+			Favorite:     p.Config.Favorite,
+			GitRemoteURL: redactGitRemoteURL(p.GitRemoteURL),
+			GitHub:       p.IsGitHub,
 		})
 	}
 
 	// Merge remote projects
 	if h.nodeAccess.HasNodes() {
 		allProjects := make([]any, 0, len(result))
-		for _, r := range result {
-			r["node"] = "local"
-			allProjects = append(allProjects, r)
+		for i := range result {
+			result[i].Node = "local"
+			allProjects = append(allProjects, result[i])
 		}
 		cachedProjects := h.nodeCache.Projects()
 		for _, items := range cachedProjects {
@@ -186,7 +251,7 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 	// prompt); 64 KB is well above legitimate payloads and keeps both
 	// paths consistent so a remote proxy cannot be used to smuggle a
 	// larger body than the local handler would accept.
-	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	r = withMaxBytes(w, r, 64*1024)
 
 	// Remote node proxy
 	nodeID := r.URL.Query().Get("node")
@@ -367,12 +432,21 @@ func (h *ProjectHandlers) handlePlannerRestart(w http.ResponseWriter, r *http.Re
 			Workspace: p.Path,
 			Exempt:    true,
 		}
-		if prompt := h.projectMgr.EffectivePlannerPrompt(p); prompt != "" {
-			opts.ExtraArgs = []string{"--append-system-prompt", prompt}
+		// R215-SEC-P1-2 (#535): mirror the resolver path's spawn-boundary
+		// re-validation. EffectivePlannerPrompt re-reads from cached
+		// project.yaml / CLAUDE.md, neither of which guarantees the bytes
+		// still satisfy ValidateConfig — Claude's Write tool can mutate
+		// CLAUDE.md and the next planner restart would inherit the
+		// tampered prompt without this sanitiser. Drop the prompt entirely
+		// when sanitisation fails so the spawn falls through to "no
+		// planner system prompt" rather than feeding control bytes /
+		// oversize argv into the CLI subprocess.
+		if pp := session.SanitisePlannerPromptForSpawn(h.projectMgr.EffectivePlannerPrompt(p), p.Name); pp != "" {
+			opts.ExtraArgs = []string{"--append-system-prompt", pp}
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(h.ctxFunc(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(h.restartCtx(), 30*time.Second)
 	defer cancel()
 	if _, err := h.router.ResetAndRecreate(ctx, plannerKey, opts); err != nil {
 		slog.Error("planner restart failed", "project", name, "err", err)

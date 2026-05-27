@@ -21,13 +21,13 @@ func TestP1_FinishRunPersistsCronRun(t *testing.T) {
 		t.Fatal("runStore should be enabled when StorePath is set")
 	}
 
-	jobID := generateID()
+	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
 	s.jobs[jobID] = j
 	s.mu.Unlock()
 
-	runID := generateRunID()
+	runID := mustGenerateRunID()
 	startedAt := time.Now().Add(-5 * time.Second)
 	s.finishRun(finishArgs{
 		job: j, runID: runID, startedAt: startedAt, trigger: TriggerScheduled,
@@ -66,13 +66,13 @@ func TestP1_FinishRunSkipPersistDoesNotWriteHistory(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: storePath})
-	jobID := generateID()
+	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
 	s.jobs[jobID] = j
 	s.mu.Unlock()
 
-	runID := generateRunID()
+	runID := mustGenerateRunID()
 	s.finishRun(finishArgs{
 		job: j, runID: runID, startedAt: time.Now(), trigger: TriggerScheduled,
 		state: RunStateCanceled, errClass: ErrClassCanceled,
@@ -97,7 +97,7 @@ func TestP1_FinishRunSanitisationConsistency(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: storePath})
-	jobID := generateID()
+	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
 	s.jobs[jobID] = j
@@ -105,7 +105,7 @@ func TestP1_FinishRunSanitisationConsistency(t *testing.T) {
 
 	// Errors with absolute paths trigger redactPathsInCronError.
 	rawErr := "session error: open /etc/secret-config: permission denied"
-	runID := generateRunID()
+	runID := mustGenerateRunID()
 	s.finishRun(finishArgs{
 		job: j, runID: runID, startedAt: time.Now(), trigger: TriggerScheduled,
 		state: RunStateFailed, errClass: ErrClassSessionError, errMsg: rawErr,
@@ -138,7 +138,7 @@ func TestP1_DeleteJobByIDRemovesRunsSubtree(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: storePath})
-	jobID := generateID()
+	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
 	s.jobs[jobID] = j
@@ -146,7 +146,7 @@ func TestP1_DeleteJobByIDRemovesRunsSubtree(t *testing.T) {
 
 	// Append one run so the subtree exists.
 	s.finishRun(finishArgs{
-		job: j, runID: generateRunID(), startedAt: time.Now(),
+		job: j, runID: mustGenerateRunID(), startedAt: time.Now(),
 		trigger: TriggerScheduled, state: RunStateSucceeded, result: "x",
 	})
 	subtree := filepath.Join(tmp, "runs", jobID)
@@ -171,7 +171,7 @@ func TestP1_StartTrimAllReclaimsStaleRuns(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: storePath})
-	jobID := generateID()
+	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
 	s.jobs[jobID] = j
@@ -181,7 +181,7 @@ func TestP1_StartTrimAllReclaimsStaleRuns(t *testing.T) {
 	old := time.Now().Add(-60 * 24 * time.Hour)
 	for i := 0; i < 3; i++ {
 		s.finishRun(finishArgs{
-			job: j, runID: generateRunID(), startedAt: time.Now(),
+			job: j, runID: mustGenerateRunID(), startedAt: time.Now(),
 			trigger: TriggerScheduled, state: RunStateSucceeded, result: "x",
 		})
 	}
@@ -215,7 +215,7 @@ func TestP1_RecentRunsSurfacesNewestFirst(t *testing.T) {
 	tmp := t.TempDir()
 	storePath := filepath.Join(tmp, "cron_jobs.json")
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: storePath})
-	jobID := generateID()
+	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
 	s.jobs[jobID] = j
@@ -230,7 +230,7 @@ func TestP1_RecentRunsSurfacesNewestFirst(t *testing.T) {
 	}
 	recs := make([]rec, 0, 5)
 	for i := 0; i < 5; i++ {
-		runID := generateRunID()
+		runID := mustGenerateRunID()
 		s.finishRun(finishArgs{
 			job: j, runID: runID, startedAt: time.Now().Add(time.Duration(i) * time.Second),
 			trigger: TriggerScheduled, state: RunStateSucceeded, result: "x",
@@ -268,7 +268,7 @@ func TestP1_DisabledStoreNoOps(t *testing.T) {
 	if s.runStore == nil || !s.runStore.disabled {
 		t.Fatal("runStore should be disabled when StorePath is empty")
 	}
-	jobID := generateID()
+	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
 	s.jobs[jobID] = j
@@ -276,7 +276,7 @@ func TestP1_DisabledStoreNoOps(t *testing.T) {
 
 	// Should not panic.
 	s.finishRun(finishArgs{
-		job: j, runID: generateRunID(), startedAt: time.Now(),
+		job: j, runID: mustGenerateRunID(), startedAt: time.Now(),
 		trigger: TriggerScheduled, state: RunStateSucceeded, result: "x",
 	})
 	if rows := s.ListRuns(jobID, 10, time.Time{}); len(rows) != 0 {
@@ -298,7 +298,7 @@ func TestP1_ConcurrentFinishRunSerialised(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: &fakeRouter{}, StorePath: storePath})
 	// Disable trim so we can observe all writes.
 	s.runStore.enableTrimGC = false
-	jobID := generateID()
+	jobID := mustGenerateID()
 	j := &Job{ID: jobID, Schedule: "@every 5m"}
 	s.mu.Lock()
 	s.jobs[jobID] = j
@@ -311,7 +311,7 @@ func TestP1_ConcurrentFinishRunSerialised(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			s.finishRun(finishArgs{
-				job: j, runID: generateRunID(), startedAt: time.Now(),
+				job: j, runID: mustGenerateRunID(), startedAt: time.Now(),
 				trigger: TriggerScheduled, state: RunStateSucceeded, result: "x",
 			})
 		}()

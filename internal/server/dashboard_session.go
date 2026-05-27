@@ -240,24 +240,48 @@ func isUnknownRPCMethodErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "unknown method")
 }
 
-// cronStubChecker is the 1-method consumer interface SessionHandlers needs
-// from cron.Scheduler — handleEvents revives a dismissed cron stub when a
-// dashboard tab requests its event tail. Defined here so the server package
-// does not import cron's full type just for this single call. R228-ARCH-17.
-//
-// *cron.Scheduler satisfies this implicitly.
-type cronStubChecker interface {
-	EnsureStub(key string) bool
-}
-
-// cronSessionLister is the 1-method consumer interface used by
+// CronView is the consolidated narrow consumer interface the server
+// package needs from *cron.Scheduler. R242-ARCH-13 (#754) collapses three
+// previously-separate single-method shapes — cronHubOps (EnsureStub +
+// SetJobPrompt, used by the Hub's auto-save-prompt path), cronStubChecker
+// (EnsureStub, used by SessionHandlers.handleEvents to revive dismissed
+// cron stubs) and cronSessionLister (KnownSessionIDs, used by
 // loadHistorySessions to hide cron-spawned JSONLs from the catch-all
-// history panel.  *cron.Scheduler satisfies this via KnownSessionIDs.
-// Defined here (not as a thicker import of cron.Scheduler) for the
-// same reason as cronStubChecker — keep server's coupling to cron
-// minimal and easy to test with a fake.  R245-ARCH (cron+sys
-// hide-from-history).
-type cronSessionLister interface {
+// history panel) — into one interface so reviewers and test authors only
+// have to learn one shape.
+//
+// *cron.Scheduler satisfies CronView implicitly. Defined in the server
+// package (not in cron) so server's coupling to cron stays at the three
+// methods we actually call rather than the full Scheduler API. Lineage:
+// R228-ARCH-17 (cronStubChecker) → R232-ARCH-7 (cronHubOps) → R245-ARCH
+// (cronSessionLister) → R242-ARCH-13 (CronView).
+//
+// R242-ARCH-28 (#772): EnsureStub returns false in three distinct cases
+// that callers historically had to disambiguate by side-effect:
+//
+//	(a) the key isn't a `cron:` key at all (non-cron caller path —
+//	    legitimate no-op, not a failure);
+//	(b) the cron job ID parsed out of the key is unknown to the scheduler
+//	    (the job was deleted before the dashboard tab re-subscribed);
+//	(c) the job is known but stub-registration failed inside cron
+//	    (unexpected — should be slog'd by the cron implementation).
+//
+// All three currently surface as the same bool, so handleEvents /
+// handleSubscribe cannot tell "this is a non-cron key, behave normally"
+// from "this used to be a cron job, return 404". Today's callers fall
+// through to the existing nil-session 404 in case (b) which happens to
+// be correct, and case (c) is so rare that the absence of a structured
+// reason is acceptable; promoting EnsureStub to (ok bool, reason string)
+// is queued behind the cron→server interface tightening RFC because it
+// breaks every test mock + the *cron.Scheduler concrete signature, and
+// the production behaviour is already correct under the bool-only
+// contract. Reviewers picking up this comment: the proposal is in
+// `docs/review/batch3-B-r241-244-raw.md` under R242-ARCH-28; the
+// ambiguity is documented here so a future caller doesn't accidentally
+// add a bug-prone reason-by-deduction branch over the bool.
+type CronView interface {
+	EnsureStub(key string) bool
+	SetJobPrompt(jobID, prompt string) error
 	KnownSessionIDs() map[string]bool
 }
 
@@ -281,13 +305,20 @@ func (f historyFilter) SkipSessionID(sid string) bool {
 type SessionHandlers struct {
 	router     *session.Router
 	projectMgr *project.Manager
-	scheduler  cronStubChecker // optional; used by handleEvents to revive dismissed cron stubs
-	// cronSessions is the optional Scheduler-side lister consulted when
-	// building the history panel.  When nil, cron-spawned JSONLs are NOT
-	// filtered from history (degraded behaviour matches pre-R245). The
-	// underlying type is *cron.Scheduler in production; tests may inject
+	scheduler  CronView // optional; used by handleEvents to revive dismissed cron stubs (EnsureStub)
+	// cronSessions is the optional Scheduler-side view consulted when
+	// building the history panel via KnownSessionIDs(). When nil, cron-spawned
+	// JSONLs are NOT filtered from history (degraded behaviour matches pre-R245).
+	// The underlying type is *cron.Scheduler in production; tests may inject
 	// a stub. R245-ARCH (cron+sys hide-from-history).
-	cronSessions cronSessionLister
+	//
+	// scheduler and cronSessions remain two separate CronView fields rather
+	// than a single shared one because production wiring (server.go) must
+	// be allowed to nil either independently — e.g. to disable history
+	// filtering while keeping stub revival, or vice versa. Both are typed
+	// CronView so a single concrete *cron.Scheduler can satisfy both.
+	// R242-ARCH-13 (#754).
+	cronSessions CronView
 	// sysWorkDir is the absolute filesystem path used by sysession's
 	// transient claude -p Runner.  When non-empty, every JSONL under
 	// this workspace path is hidden from the history panel — AutoTitler
@@ -412,34 +443,89 @@ type SessionHandlers struct {
 }
 
 // GET /api/sessions
+//
+// R246-CR-002 split (#736): handleList previously combined cutoff filter +
+// state count + project mapping + summary lookup + stats build + node merge
+// + JSON shape selection in one ~300 line function. The body now orchestrates
+// focused helpers; each helper is independently testable and the per-helper
+// docstring states its mutation contract:
+//   - filterAndCountSnapshots — sidebar cutoff + scratch/cron/sys filter +
+//     running/ready counts in a single pass
+//   - fillProjectAndSummary  — workspace → project name + summaries-index
+//     lookup; mutates snapshots in place
+//   - buildSessionStats      — typed stats payload (no map[string]any boxing)
+//   - buildLocalResp         — single-node JSON shape
+//   - buildMultiNodeResp     — multi-node merge (live + cached) JSON shape
+//
+// Performance comments + race anchors stay on the helpers rather than this
+// orchestrator so reviewers don't have to hold the whole pipeline in their
+// head while reading a single concern.
 func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
-	// Read Version() BEFORE ListSessions(). storeGen is atomic, ListSessions
-	// takes an RLock: a mutation landing between List→ and →Version would
-	// otherwise publish data at gen N with version N+1, and the dashboard
-	// would skip the next poll (N+1 already seen) until a later mutation
-	// bumps to N+2 — effectively a "stale sessions" window of up to 1 poll.
-	// Reading version first makes the response's version field an ≤ bound
-	// on the data's freshness, so the dashboard never skips a real change.
-	//
-	// The reverse race is intentional: a mutation landing between Version
-	// and ListSessions produces data at gen N+1 tagged with version N. The
-	// next poll sees version N+1, re-reads, and catches up — at worst one
-	// poll of display lag. The alternate ordering would instead make a
-	// real-change poll look like a duplicate and skip the refresh until a
-	// later unrelated mutation, which operators perceive as "my send didn't
-	// update the UI". version ≤ data is the safer side. R60-GO-M3.
-	version := h.router.Version()
-	snapshots := h.router.ListSessions()
+	// R246-PERF-15 (#726): read snapshots and storeGen in a single
+	// r.mu.RLock epoch via ListSessionsWithVersion. The pre-existing
+	// two-call pattern (Version → ListSessions) intentionally chose
+	// version-first ordering as the "version ≤ data" safer side per
+	// R60-GO-M3 — under that ordering a mutation landing between the
+	// two reads produced data at gen N+1 tagged with version N, which
+	// the next poll (seeing N+1) would re-fetch and catch up on. The
+	// new tuple closes the window entirely: response.version is
+	// exactly the version that produced the snapshot slice, so the
+	// dashboard's version-gate neither skips a refresh nor repeats a
+	// render.
+	snapshots, version := h.router.ListSessionsWithVersion()
 
 	// Capture once so downstream cutoff / uptime bucket computations share a
 	// single vDSO call rather than the 2 previously paid per poll. R67-PERF-4.
 	now := time.Now()
 
-	// Keep dead sessions in the workspace sidebar for up to 24 hours. Merge
-	// the filter pass with running/ready accounting so we only walk the
-	// slice once — the dashboard polls this at 1 Hz × N tabs, and a full
-	// re-scan later in handleList was pure bookkeeping for state counts the
-	// filter pass could have computed in-place at zero extra cost.
+	snapshots, running, ready := filterAndCountSnapshots(snapshots, now)
+
+	// Overlay tailer-side agent metrics (RFC v4 §3.5.4). No-op when the
+	// hub tailer registry is empty or hasn't been wired — safe for tests
+	// that build SessionHandlers without a Hub.
+	if h.snapshotEnricher != nil {
+		for i := range snapshots {
+			h.snapshotEnricher(&snapshots[i])
+		}
+	}
+
+	h.fillProjectAndSummary(snapshots)
+
+	stats := h.buildSessionStats(now, version, running, ready)
+
+	// KnownNodes returns an immutable snapshot without acquiring the
+	// nodeAccess lock; NodesSnapshot does both. Single-node deployments
+	// (the common case) have len(knownNodes)==0 and never need the live
+	// snapshot — check KnownNodes first and short-circuit before paying
+	// the NodesSnapshot RLock + map alloc.
+	knownNodes := h.nodeAccess.KnownNodes()
+
+	if len(knownNodes) == 0 {
+		writeJSON(w, h.buildLocalResp(snapshots, stats))
+		return
+	}
+
+	writeJSON(w, h.buildMultiNodeResp(snapshots, stats, knownNodes))
+}
+
+// filterAndCountSnapshots walks the router snapshot exactly once to:
+//
+//  1. evict dead sessions whose LastActive is older than 24h (sidebar TTL),
+//  2. count running / ready sessions across ALL surviving entries (so the
+//     maxProcs pressure indicator stays correct even for scratch / cron /
+//     sys sessions that don't show up in the sidebar),
+//  3. drop scratch / cron / sys keys from the returned slice — those
+//     surfaces own dedicated dashboard panels (drawer / 「定时任务」 /
+//     System) and must not duplicate-render in the sidebar.
+//
+// The function compacts in place: the returned slice aliases the input
+// header but with len shrunk to the number of sidebar-eligible entries,
+// so callers must not retain the original header after this call.
+//
+// R246-CR-002 split (#736): previously inlined into handleList; the merged
+// filter+count pass (rather than two walks) was deliberate for hot-path
+// alloc reasons and the performance contract is preserved here.
+func filterAndCountSnapshots(snapshots []session.SessionSnapshot, now time.Time) ([]session.SessionSnapshot, int, int) {
 	cutoff24h := now.Add(-24 * time.Hour).UnixMilli()
 	var running, ready int
 	n := 0
@@ -468,29 +554,104 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		snapshots[n] = snap
 		n++
 	}
-	snapshots = snapshots[:n]
+	return snapshots[:n], running, ready
+}
 
-	// Overlay tailer-side agent metrics (RFC v4 §3.5.4). No-op when the
-	// hub tailer registry is empty or hasn't been wired — safe for tests
-	// that build SessionHandlers without a Hub.
-	if h.snapshotEnricher != nil {
-		for i := range snapshots {
-			h.snapshotEnricher(&snapshots[i])
-		}
+// workspacesPool reuses the []string scratch slice fillProjectAndSummary
+// + loadHistorySessions hand to ProjectManager.ResolveWorkspaces on every
+// /api/sessions poll (1 Hz × N tabs) and every history scan. R217-PERF-10
+// (#616): the previous per-call `make([]string, 0, len(snapshots))` showed
+// up in heap profiles on session-heavy dashboards. ResolveWorkspaces
+// reads the header inside its own RLock and never retains the backing
+// array, so a pool entry is safe to recycle once the call returns.
+//
+// Each pool entry is a *[]string so the runtime can elide the per-Get
+// alloc on the typed pointer wrapper too — directly pooling []string
+// would still alloc a new header on every Put because slice values are
+// non-pointer. The slice we hand out has cap >= the requested size and
+// len reset to 0; callers append fresh data and Put back the same
+// pointer. A grown slice (cap > 4096) is dropped on Put so a single
+// pathological request cannot inflate every pool entry's footprint.
+//
+// Concurrency: sync.Pool is safe; the per-tab calls never share a
+// borrowed slice. The cap-bounding contract on Put ensures the pool's
+// steady-state working-set stays bounded by the typical session count.
+var workspacesPool = sync.Pool{
+	New: func() any {
+		s := make([]string, 0, 32) // typical sidebar fits in this prefix
+		return &s
+	},
+}
+
+// borrowWorkspaces returns a recycled []string with cap >= want and len
+// 0. The returned slice header MUST be returned via returnWorkspaces;
+// callers that escape the slice into a struct field MUST copy first.
+func borrowWorkspaces(want int) *[]string {
+	p := workspacesPool.Get().(*[]string)
+	s := *p
+	if cap(s) < want {
+		// Grow once to the request size + slack rather than letting
+		// append's geometric growth stamp out a fresh backing array on
+		// each call. Bounded by the snapshot length so a deployment with
+		// thousands of sessions does not over-allocate.
+		s = make([]string, 0, want)
+	} else {
+		s = s[:0]
 	}
+	*p = s
+	return p
+}
 
-	// Fill project field from ProjectManager
+// returnWorkspaces hands the recycled slice back to the pool. Slices
+// whose backing array has been grown past the cap-bounding threshold are
+// dropped so a single oversized poll cannot inflate every pool entry's
+// retained footprint.
+func returnWorkspaces(p *[]string) {
+	if p == nil {
+		return
+	}
+	const maxRetainCap = 4096
+	if cap(*p) > maxRetainCap {
+		// Drop the oversized backing array; the pool will allocate a
+		// fresh small one on next Get via the New func above.
+		return
+	}
+	// Clear element references so the pool does not keep the workspace
+	// strings live past the request. Strings are interned by Go's
+	// compiler for short literals but workspace paths are dynamically
+	// constructed and would otherwise be GC-pinned via the pool.
+	s := *p
+	for i := range s {
+		s[i] = ""
+	}
+	*p = s[:0]
+	workspacesPool.Put(p)
+}
+
+// fillProjectAndSummary stamps each snapshot with its project name (from
+// ProjectManager + planner-key fallback) and any persisted Summary lookup
+// from sessions-index.json. Mutates snapshots in place.
+//
+// Splitting this out of handleList lets tests exercise project-name
+// resolution against a stub ProjectManager without spinning up the full
+// dashboard handler. R246-CR-002 (#736).
+func (h *SessionHandlers) fillProjectAndSummary(snapshots []session.SessionSnapshot) {
 	if h.projectMgr != nil {
-		// Pre-size to len(snapshots): the loop accepts at most one entry per
-		// session, so the slice never grows past this bound. Starting at nil
-		// made append log(N) growth-realloc through 0→1→2→4→…→n per poll,
-		// visible in heap profiles on session-heavy dashboards. R60-PERF-4.
-		workspaces := make([]string, 0, len(snapshots))
+		// Borrow a recycled []string scratch buffer to feed
+		// ResolveWorkspaces. R217-PERF-10 (#616): the previous per-call
+		// `make([]string, 0, len(snapshots))` showed up in heap profiles
+		// on session-heavy dashboards (1 Hz × N tabs). ResolveWorkspaces
+		// reads the header inside its own RLock and never retains the
+		// backing array, so the pool entry is safe to recycle on return.
+		wsPtr := borrowWorkspaces(len(snapshots))
+		defer returnWorkspaces(wsPtr)
+		workspaces := *wsPtr
 		for i := range snapshots {
 			if !project.IsPlannerKey(snapshots[i].Key) && snapshots[i].Workspace != "" {
 				workspaces = append(workspaces, snapshots[i].Workspace)
 			}
 		}
+		*wsPtr = workspaces
 		wsMap := h.projectMgr.ResolveWorkspaces(workspaces)
 
 		for i := range snapshots {
@@ -532,16 +693,16 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
 
+// buildSessionStats assembles the typed sessionStats payload that ships in
+// the GET /api/sessions response. The named-struct copy avoids the
+// map[string]any-style boxing the prior implementation paid on every 1 Hz
+// poll. R70-PERF-H1 / R68-PERF-H3 / R59-PERF-001 / R51-PERF-005 /
+// R49-PERF-STATS-STRUCT / R43-PERF-P43-1 / R54-PERF-001. Split out per
+// R246-CR-002 (#736).
+func (h *SessionHandlers) buildSessionStats(now time.Time, version uint64, running, ready int) sessionStats {
 	active, total := h.router.Stats()
-
-	// Build stats as a named struct (sessionStats). The immutable sub-struct
-	// (backend/cli/workspace/system/agents) is copied by value from
-	// h.staticStats — a single stack memmove, zero heap alloc. Dynamic
-	// counters + uptime + watchdog assign directly to struct fields so
-	// there is no per-poll map-literal + interface{} boxing like the prior
-	// map[string]any implementation. R70-PERF-H1 / R68-PERF-H3 / R59-PERF-001 /
-	// R51-PERF-005 / R49-PERF-STATS-STRUCT / R43-PERF-P43-1 / R54-PERF-001.
 	stats := sessionStats{
 		sessionStatsStatic: h.staticStats,
 		Active:             active,
@@ -556,19 +717,28 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			TotalKills:    h.watchdogTotal.Load(),
 		},
 	}
+	if projectList := h.buildProjectList(now); len(projectList) > 0 {
+		stats.Projects = projectList
+	}
+	return stats
+}
 
-	// Include project list for dashboard sidebar rendering.
-	// Pre-allocate the outer slice so the append loop doesn't trigger log(N)
-	// growth reallocs on projects-heavy dashboards. Entries are projectListEntry
-	// named-struct values (not map[string]any) so the hot 1 Hz poll path skips
-	// the inner-map + interface{} boxing overhead. R70-PERF-M1.
-	//
-	// R247-PERF-15 [REPEAT-3]: collapse N dashboard tabs polling at 1 Hz into
-	// one rebuild/sec via projectListCache. The 1s bucket is invisible to
-	// human operators (project CRUD is minute-scale) and avoids touching the
-	// project package with a version hook. The cached slice is read-only —
-	// see projectListSnapshot godoc for the alias contract that keeps
-	// concurrent reads race-free.
+// buildProjectList returns the dashboard sidebar's "Projects" panel data —
+// local projects (cached at 1s buckets via projectListLocalAt) plus any
+// remote-node projects forwarded through the node cache.
+//
+// Pre-allocate the outer slice so the append loop doesn't trigger log(N)
+// growth reallocs on projects-heavy dashboards. Entries are projectListEntry
+// named-struct values (not map[string]any) so the hot 1 Hz poll path skips
+// the inner-map + interface{} boxing overhead. R70-PERF-M1.
+//
+// R247-PERF-15 [REPEAT-3]: collapse N dashboard tabs polling at 1 Hz into
+// one rebuild/sec via projectListCache. The 1s bucket is invisible to
+// human operators (project CRUD is minute-scale) and avoids touching the
+// project package with a version hook. The cached slice is read-only —
+// see projectListSnapshot godoc for the alias contract that keeps
+// concurrent reads race-free. Split out per R246-CR-002 (#736).
+func (h *SessionHandlers) buildProjectList(now time.Time) []projectListEntry {
 	var projectList []projectListEntry
 	if h.projectMgr != nil {
 		projectList = h.projectListLocalAt(now)
@@ -579,80 +749,85 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	// (alias contract), so an append that fits the existing capacity would
 	// silently mutate every other reader's view. Building the merged slice
 	// fresh keeps the cached entry untouched. R247-PERF-15.
-	if h.nodeAccess.HasNodes() {
-		cachedProjects := h.nodeCache.Projects()
-		var remoteCount int
-		for _, items := range cachedProjects {
-			remoteCount += len(items)
-		}
-		if remoteCount > 0 {
-			merged := make([]projectListEntry, len(projectList), len(projectList)+remoteCount)
-			copy(merged, projectList)
-			projectList = merged
-		}
-		for _, items := range cachedProjects {
-			for _, item := range items {
-				name := strOrFallback(item, "name", "Name")
-				path := strOrFallback(item, "path", "Path")
-				nd, _ := item["node"].(string)
-				if name == "" {
-					continue
-				}
-				entry := projectListEntry{Name: name, Path: path, Node: nd}
-				if v, ok := item["favorite"].(bool); ok {
-					entry.Favorite = v
-				}
-				// Remote node may be running an older binary that hasn't
-				// redacted the URL yet — always run the redactor on data
-				// forwarded via the node cache so credentials never leak
-				// even if a peer node is behind on patches.
-				if v, ok := item["git_remote_url"].(string); ok && v != "" {
-					entry.GitRemoteURL = redactGitRemoteURL(v)
-				}
-				if v, ok := item["github"].(bool); ok {
-					entry.GitHub = v
-				}
-				// JSON numbers decode as float64 from map[string]any. Pull
-				// remote-node CreatedAt the same way; pre-feature peers won't
-				// emit the key, so the zero-value fallback keeps their
-				// projects at the very top of the sidebar (oldest by
-				// definition) until they upgrade and self-stamp.
-				if v, ok := item["created_at"].(float64); ok {
-					entry.CreatedAt = int64(v)
-				}
-				projectList = append(projectList, entry)
+	if !h.nodeAccess.HasNodes() {
+		return projectList
+	}
+	cachedProjects := h.nodeCache.Projects()
+	var remoteCount int
+	for _, items := range cachedProjects {
+		remoteCount += len(items)
+	}
+	if remoteCount > 0 {
+		merged := make([]projectListEntry, len(projectList), len(projectList)+remoteCount)
+		copy(merged, projectList)
+		projectList = merged
+	}
+	for _, items := range cachedProjects {
+		for _, item := range items {
+			name := strOrFallback(item, "name", "Name")
+			path := strOrFallback(item, "path", "Path")
+			nd, _ := item["node"].(string)
+			if name == "" {
+				continue
 			}
+			entry := projectListEntry{Name: name, Path: path, Node: nd}
+			if v, ok := item["favorite"].(bool); ok {
+				entry.Favorite = v
+			}
+			// Remote node may be running an older binary that hasn't
+			// redacted the URL yet — always run the redactor on data
+			// forwarded via the node cache so credentials never leak
+			// even if a peer node is behind on patches.
+			if v, ok := item["git_remote_url"].(string); ok && v != "" {
+				entry.GitRemoteURL = redactGitRemoteURL(v)
+			}
+			if v, ok := item["github"].(bool); ok {
+				entry.GitHub = v
+			}
+			// JSON numbers decode as float64 from map[string]any. Pull
+			// remote-node CreatedAt the same way; pre-feature peers won't
+			// emit the key, so the zero-value fallback keeps their
+			// projects at the very top of the sidebar (oldest by
+			// definition) until they upgrade and self-stamp.
+			if v, ok := item["created_at"].(float64); ok {
+				entry.CreatedAt = int64(v)
+			}
+			projectList = append(projectList, entry)
 		}
 	}
-	if len(projectList) > 0 {
-		stats.Projects = projectList
+	return projectList
+}
+
+// buildLocalResp constructs the single-node /api/sessions JSON shape.
+//
+// Use a named struct (sessionListLocalResp) instead of map[string]any
+// so the 1 Hz dashboard poll skips the map-bucket alloc + interface{}
+// boxing on every request. JSON output is byte-identical to the prior
+// map literal because the field tags + omitempty preserve key order
+// and the optional history_sessions semantics. R226-PERF-7. Split out
+// per R246-CR-002 (#736).
+func (h *SessionHandlers) buildLocalResp(snapshots []session.SessionSnapshot, stats sessionStats) sessionListLocalResp {
+	resp := sessionListLocalResp{
+		Sessions: snapshots,
+		Stats:    stats,
 	}
-
-	// KnownNodes returns an immutable snapshot without acquiring the
-	// nodeAccess lock; NodesSnapshot does both. Single-node deployments
-	// (the common case) have len(knownNodes)==0 and never need the live
-	// snapshot — check KnownNodes first and short-circuit before paying
-	// the NodesSnapshot RLock + map alloc.
-	knownNodes := h.nodeAccess.KnownNodes()
-
-	// No configured nodes at all: use simple single-node response format.
-	// Use a named struct (sessionListLocalResp) instead of map[string]any
-	// so the 1 Hz dashboard poll skips the map-bucket alloc + interface{}
-	// boxing on every request. JSON output is byte-identical to the prior
-	// map literal because the field tags + omitempty preserve key order
-	// and the optional history_sessions semantics. R226-PERF-7.
-	if len(knownNodes) == 0 {
-		resp := sessionListLocalResp{
-			Sessions: snapshots,
-			Stats:    stats,
-		}
-		if history := h.historySessions(); len(history) > 0 {
-			resp.HistorySessions = history
-		}
-		writeJSON(w, resp)
-		return
+	if history := h.historySessions(); len(history) > 0 {
+		resp.HistorySessions = history
 	}
+	return resp
+}
 
+// buildMultiNodeResp constructs the multi-node /api/sessions JSON shape.
+// Local sessions are tagged with Node="local"; remote-node sessions and
+// connection status are merged from the node cache + live nodesSnapshot.
+//
+// Use a named struct (sessionListMultiResp) instead of map[string]any
+// so the multi-node hot path mirrors the single-node optimisation: no
+// map-bucket alloc, no interface{} boxing of sessions/stats/nodes on
+// every 1 Hz poll. JSON output stays byte-identical because the
+// field tags preserve key names and history_sessions keeps omitempty.
+// R226-PERF-7. Split out per R246-CR-002 (#736).
+func (h *SessionHandlers) buildMultiNodeResp(snapshots []session.SessionSnapshot, stats sessionStats, knownNodes map[string]string) sessionListMultiResp {
 	// Multi-node path: now we actually need the live nodesSnapshot for
 	// connection status + fill-in. This acquires the nodeAccess lock.
 	nodesSnapshot := h.nodeAccess.NodesSnapshot()
@@ -702,12 +877,6 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Use a named struct (sessionListMultiResp) instead of map[string]any
-	// so the multi-node hot path mirrors the single-node optimisation: no
-	// map-bucket alloc, no interface{} boxing of sessions/stats/nodes on
-	// every 1 Hz poll. JSON output stays byte-identical because the
-	// field tags preserve key names and history_sessions keeps omitempty.
-	// R226-PERF-7.
 	resp := sessionListMultiResp{
 		Sessions: allSessions,
 		Stats:    stats,
@@ -716,7 +885,7 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	if history := h.historySessions(); len(history) > 0 {
 		resp.HistorySessions = history
 	}
-	writeJSON(w, resp)
+	return resp
 }
 
 // maxEventsPageLimit caps the per-request history slice so a malicious or
@@ -975,7 +1144,29 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		}
 		updated, err := nc.ProxySetSessionLabel(r.Context(), req.Key, label)
 		if err != nil {
-			slog.Warn("remote set session label failed", "node", req.Node, "key", req.Key, "err", err)
+			// R246-SEC-14 (#820): wrap node + key through SanitizeLogAttr
+			// before slog encodes them. ValidateSessionKey already rejects
+			// the bidi / C0 / C1 / zero-width classes that fragment slog
+			// attrs, but `req.Node` only travels through nodeAccess.LookupNode
+			// (which validates against the discovery directory, not the byte
+			// class) — a future node-id format change could re-open the gap.
+			// Aligning with the dispatch/commands.go:51 pattern keeps the
+			// audit-log surface uniform, so a regression in either validator
+			// cannot smuggle log-fragmentation bytes past slog's TextHandler.
+			//
+			// R246-SEC-14 (REPEAT-3, #820): the upstream node's err.Error()
+			// can echo attacker-influenced bytes verbatim — a malicious
+			// remote naozhi build could embed CR/LF or bidi runes in its
+			// RPC error string and fragment our local slog audit trail.
+			// Wrapping err.Error() through SanitizeLogAttr closes that
+			// hole; the upstream wrapper text already includes "unknown
+			// method:" / "rpc:" / etc. so legitimate diagnostic content
+			// survives sanitisation (only control + bidi + C1 are
+			// stripped).
+			slog.Warn("remote set session label failed",
+				"node", session.SanitizeLogAttr(req.Node),
+				"key", session.SanitizeLogAttr(req.Key),
+				"err", session.SanitizeLogAttr(err.Error()))
 			if isUnknownRPCMethodErr(err) {
 				http.Error(w, "remote node needs upgrade to support this action", http.StatusConflict)
 				return
@@ -990,7 +1181,12 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		// Parallel audit entry with the local-path slog.Info below so an
 		// operator grepping journalctl sees every label change regardless of
 		// which node owns the session. R64-GO-M3.
-		slog.Info("session label updated", "node", req.Node, "key", req.Key, "label_len", len(label))
+		// R246-SEC-14 (#820): defence-in-depth sanitiser on node + key,
+		// matches the warn-path branch above.
+		slog.Info("session label updated",
+			"node", session.SanitizeLogAttr(req.Node),
+			"key", session.SanitizeLogAttr(req.Key),
+			"label_len", len(label))
 		// Don't echo label — it is attacker-influenced text. Validation already
 		// ensured it is safe in storage, but reflecting user input in an HTTP
 		// body is a latent reflected-XSS vector if any future caller renders
@@ -1005,7 +1201,10 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	slog.Info("session label updated", "node", "local", "key", req.Key, "label_len", len(label))
+	// R246-SEC-14 (#820): SanitizeLogAttr on key matches the remote path so
+	// the audit-log byte class is uniform regardless of which branch fired.
+	slog.Info("session label updated", "node", "local",
+		"key", session.SanitizeLogAttr(req.Key), "label_len", len(label))
 	// Don't echo label — reflected-XSS precaution matches the remote-path
 	// above. Client patches its cache from its own optimistic value.
 	writeOK(w)
@@ -1471,13 +1670,19 @@ func (h *SessionHandlers) loadHistorySessions() []discovery.RecentSession {
 	}
 	all := discovery.RecentSessions(h.claudeDir, 200, 7*24*time.Hour, excludeIDs, filter)
 
-	// Resolve project names in batch.
+	// Resolve project names in batch.  R217-PERF-10 (#616): borrow the
+	// pooled []string scratch (same pool fillProjectAndSummary uses) so
+	// the history-scan path also stops paying a per-call workspaces alloc
+	// every time the 120s history TTL expires.
 	if h.projectMgr != nil && len(all) > 0 {
-		workspaces := make([]string, 0, len(all))
+		wsPtr := borrowWorkspaces(len(all))
+		workspaces := *wsPtr
 		for _, rs := range all {
 			workspaces = append(workspaces, rs.Workspace)
 		}
+		*wsPtr = workspaces
 		wsMap := h.projectMgr.ResolveWorkspaces(workspaces)
+		returnWorkspaces(wsPtr)
 		for i := range all {
 			all[i].Project = wsMap[all[i].Workspace]
 		}

@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,16 +10,57 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
+
+// realRouterAdapter wraps a real *session.Router into the post-Phase-B
+// cron.SessionRouter interface for integration tests that need the
+// router's stub-tracking semantics. Mirrors cmd/naozhi/cron_router_adapter.go
+// without re-using main's adapter (cmd/* is not importable from internal/*).
+type realRouterAdapter struct{ r *session.Router }
+
+func (a realRouterAdapter) RegisterCronStubWithChain(key, workspace, lastPrompt string, chain []string) {
+	a.r.RegisterCronStubWithChain(key, workspace, lastPrompt, chain)
+}
+func (a realRouterAdapter) Reset(key string) { a.r.Reset(key) }
+func (a realRouterAdapter) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (Session, SessionStatus, error) {
+	sess, st, err := a.r.GetOrCreate(ctx, key, session.AgentOpts{
+		Model: opts.Model, Workspace: opts.Workspace, Backend: opts.Backend,
+		Exempt: opts.Exempt, ExtraArgs: append([]string(nil), opts.ExtraArgs...),
+	})
+	if err != nil {
+		return nil, SessionStatus(int(st)), err
+	}
+	return realSessionAdapter{sess}, SessionStatus(int(st)), nil
+}
+
+type realSessionAdapter struct{ s *session.ManagedSession }
+
+func (s realSessionAdapter) Send(ctx context.Context, text string) (SendResult, error) {
+	r, err := s.s.Send(ctx, text, nil, nil)
+	if r == nil {
+		return SendResult{}, err
+	}
+	return SendResult{Text: r.Text, SessionID: r.SessionID}, err
+}
+func (s realSessionAdapter) SessionID() string {
+	if s.s == nil {
+		return ""
+	}
+	return s.s.SessionID()
+}
+func (s realSessionAdapter) InterruptViaControl() InterruptOutcome {
+	return InterruptOutcome(int(s.s.InterruptViaControl()))
+}
 
 func TestGenerateID(t *testing.T) {
 	t.Parallel()
-	id := generateID()
+	id := mustGenerateID()
 	if len(id) != 16 {
 		t.Errorf("expected 16 char ID, got %d: %q", len(id), id)
 	}
 	// Should be unique
-	id2 := generateID()
+	id2 := mustGenerateID()
 	if id == id2 {
 		t.Error("expected unique IDs")
 	}
@@ -261,9 +303,9 @@ func TestResolveAgent(t *testing.T) {
 		{"/unknown stuff", "general", "/unknown stuff"},
 	}
 	for _, tt := range tests {
-		agent, text := session.ResolveAgent(tt.text, cmds)
+		agent, text := resolveAgent(tt.text, cmds)
 		if agent != tt.wantAgent || text != tt.wantText {
-			t.Errorf("ResolveAgent(%q): got (%q, %q), want (%q, %q)", tt.text, agent, text, tt.wantAgent, tt.wantText)
+			t.Errorf("resolveAgent(%q): got (%q, %q), want (%q, %q)", tt.text, agent, text, tt.wantAgent, tt.wantText)
 		}
 	}
 }
@@ -493,7 +535,7 @@ func TestEnsureStub(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{})
 	s := NewScheduler(SchedulerConfig{
-		Router:  router,
+		Router:  realRouterAdapter{r: router},
 		MaxJobs: 10,
 	})
 	if err := s.Start(); err != nil {
@@ -505,7 +547,7 @@ func TestEnsureStub(t *testing.T) {
 	if err := s.AddJob(job); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	key := session.CronKey(job.ID)
+	key := sessionkey.CronKey(job.ID)
 
 	// AddJob already registers the stub; simulate sidebar "×" that removed it.
 	if !router.Remove(key) {
@@ -595,6 +637,38 @@ func TestNewScheduler_StoreParentDirHardenedEagerly(t *testing.T) {
 	}
 }
 
+// TestNewScheduler_StoreParentDirChmodsExisting covers R238-SEC-10 (#830):
+// when the parent data dir ALREADY EXISTS at a broader perm (0o755 from
+// XDG_CONFIG_HOME or a manual mkdir), MkdirAll is a no-op on the perm —
+// the broader bits persist and other local users can list the data dir's
+// contents (confirming cron_jobs.json's existence + mtime). The chmod
+// follow-up clamps the dir to 0o700 unconditionally at construction.
+func TestNewScheduler_StoreParentDirChmodsExisting(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "data")
+	// Pre-create the dir at 0o755 — emulates the operator running
+	// `mkdir -p ~/.config/naozhi` with default umask 022.
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatalf("pre-mkdir: %v", err)
+	}
+	// Defensive: umask may have stripped bits; force the broad perms.
+	if err := os.Chmod(parent, 0o755); err != nil {
+		t.Fatalf("pre-chmod: %v", err)
+	}
+	path := filepath.Join(parent, "cron.json")
+
+	_ = NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5})
+
+	fi, err := os.Stat(parent)
+	if err != nil {
+		t.Fatalf("stat parent dir: %v", err)
+	}
+	if got := fi.Mode().Perm(); got != 0o700 {
+		t.Errorf("parent dir perm = %o, want 0o700 (chmod must clamp pre-existing 0o755)", got)
+	}
+}
+
 func TestSchedulerPersistence(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -681,6 +755,53 @@ func TestRedactPathsInCronError_PoolRecycle(t *testing.T) {
 	gotLong := redactPathsInCronError(long)
 	if !strings.HasPrefix(gotLong, "open <path>: denied") {
 		t.Errorf("long path not redacted: got %q", gotLong)
+	}
+}
+
+// TestRedactPathsInCronError_FastPathNoAlloc pins R250-PERF-12 / #1115:
+// short error-classifier strings with no path-trigger byte must hit the
+// zero-alloc fast path — no truncate copy, no Builder pool. The aliased
+// return value must share the input's backing bytes (verified via the
+// allocs/op accounting from testing.AllocsPerRun, which tolerates one
+// alloc for the closure capture). Anything > 0 base allocs would mean a
+// regression back to the slow path.
+func TestRedactPathsInCronError_FastPathNoAlloc(t *testing.T) {
+	// No t.Parallel(): testing.AllocsPerRun panics if invoked from a
+	// parallel test (Go runtime needs exclusive GC quiescence to count).
+	in := "session error: context deadline exceeded"
+	got := redactPathsInCronError(in)
+	if got != in {
+		t.Fatalf("fast path must return input unchanged: got %q, want %q", got, in)
+	}
+	// AllocsPerRun returns the *additional* allocs caused by f beyond the
+	// closure overhead; for a true zero-alloc body this is 0.
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = redactPathsInCronError(in)
+	})
+	if allocs != 0 {
+		t.Errorf("fast path allocated %v times per run, want 0", allocs)
+	}
+}
+
+// TestRedactPathsInCronError_FastPathLengthBoundary pins the 256-byte
+// ceiling on the zero-alloc fast path: an input at exactly the cap with
+// no path triggers must still take the fast path; one byte over and a
+// no-path input falls through to the secondary IndexByte branch (also
+// returns input, just past the truncate guard). R250-PERF-12 / #1115.
+func TestRedactPathsInCronError_FastPathLengthBoundary(t *testing.T) {
+	t.Parallel()
+	atCap := strings.Repeat("a", redactFastPathMaxLen)
+	if got := redactPathsInCronError(atCap); got != atCap {
+		t.Errorf("at-cap input mutated: len(got)=%d, len(want)=%d", len(got), len(atCap))
+	}
+	overCap := strings.Repeat("b", redactFastPathMaxLen+1)
+	if got := redactPathsInCronError(overCap); got != overCap {
+		t.Errorf("over-cap no-path input mutated: len(got)=%d, len(want)=%d", len(got), len(overCap))
+	}
+	// Path triggers must always reach the slow path even when short.
+	withPath := "open /tmp/x: denied"
+	if got := redactPathsInCronError(withPath); got != "open <path>: denied" {
+		t.Errorf("short path not redacted: got %q", got)
 	}
 }
 
@@ -914,5 +1035,235 @@ func TestKnownSessionIDs_TTLCache(t *testing.T) {
 	rebuilt := s.KnownSessionIDs()
 	if !rebuilt["22222222-aaaa-bbbb-cccc-000000000002"] {
 		t.Errorf("invalidate+rebuild did not pick up new session id: %v", rebuilt)
+	}
+}
+
+// TestIsExcluded_FastPathSkipsCacheBuild verifies the R245-GO-4 fast path:
+// when IsExcluded hits via Job.LastSessionID on a cold cache, it MUST
+// short-circuit without populating the TTL snapshot — leaving the cache
+// cold so a subsequent KnownSessionIDs() call still rebuilds the full
+// set (jobs + runningJobs + runStore.Recent). The previous implementation
+// always built the full set, paying the O(jobs × recentCap) cost on every
+// spawn-time probe. (#844)
+func TestIsExcluded_FastPathSkipsCacheBuild(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := NewScheduler(SchedulerConfig{
+		StorePath: filepath.Join(dir, "cron.json"),
+		MaxJobs:   5,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+
+	job := &Job{Schedule: "@every 1h", Prompt: "p", Platform: "feishu", ChatID: "c", ChatType: "direct"}
+	if err := s.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	s.mu.Lock()
+	s.jobs[job.ID].LastSessionID = "fastpath-aaaa-bbbb-cccc-000000000001"
+	s.mu.Unlock()
+
+	// Cold cache assertion guard — invalidate ensures we start from cold
+	// regardless of any AddJob-side cache touches.
+	s.invalidateKnownSessionsCache()
+	s.knownSessionsCache.mu.Lock()
+	if s.knownSessionsCache.set != nil {
+		s.knownSessionsCache.mu.Unlock()
+		t.Fatalf("expected cold cache before fast-path probe")
+	}
+	s.knownSessionsCache.mu.Unlock()
+
+	// Fast-path hit (LastSessionID match). Must return true without
+	// populating the TTL cache.
+	if !s.IsExcluded("fastpath-aaaa-bbbb-cccc-000000000001") {
+		t.Fatalf("IsExcluded did not match seeded LastSessionID")
+	}
+	s.knownSessionsCache.mu.Lock()
+	cached := s.knownSessionsCache.set
+	s.knownSessionsCache.mu.Unlock()
+	if cached != nil {
+		t.Fatalf("fast-path hit must not populate TTL cache; got set with %d entries", len(cached))
+	}
+
+	// Probe a sessionID that is NOT in any cheap source — the slow path
+	// must run buildKnownSessionsSet and populate the cache.
+	if s.IsExcluded("never-existed-aaaa-bbbb-cccc-000000000099") {
+		t.Fatalf("IsExcluded matched an id that was never seen")
+	}
+	s.knownSessionsCache.mu.Lock()
+	cached = s.knownSessionsCache.set
+	s.knownSessionsCache.mu.Unlock()
+	if cached == nil {
+		t.Fatalf("slow path must populate TTL cache after full build")
+	}
+}
+
+// TestLookupKnownSessionID pins the named single-key probe API exposed by
+// R242-ARCH-23 (#767). Behaviour mirrors IsExcluded (same fast-path /
+// TTL-cache pipeline) but the named API removes the SessionIDExcluder
+// interface dispatch for in-package callers and matches the issue's
+// requested shape ("Expose LookupKnownSessionID(id) bool for direct set
+// lookup").
+func TestLookupKnownSessionID(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil_receiver_returns_false", func(t *testing.T) {
+		t.Parallel()
+		var s *Scheduler
+		if s.LookupKnownSessionID("any-id") {
+			t.Fatal("nil Scheduler must return false (mirrors IsExcluded contract)")
+		}
+	})
+
+	t.Run("empty_id_returns_false", func(t *testing.T) {
+		t.Parallel()
+		s := NewScheduler(SchedulerConfig{MaxJobs: 1})
+		if s.LookupKnownSessionID("") {
+			t.Fatal("empty sessionID must return false")
+		}
+	})
+
+	t.Run("hit_via_last_session_id_fast_path", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		s := NewScheduler(SchedulerConfig{
+			StorePath: filepath.Join(dir, "cron.json"),
+			MaxJobs:   5,
+		})
+		if err := s.Start(); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer s.Stop()
+
+		job := &Job{Schedule: "@every 1h", Prompt: "p", Platform: "feishu", ChatID: "c", ChatType: "direct"}
+		if err := s.AddJob(job); err != nil {
+			t.Fatalf("AddJob: %v", err)
+		}
+		s.mu.Lock()
+		s.jobs[job.ID].LastSessionID = "lookup-aaaa-bbbb-cccc-000000000001"
+		s.mu.Unlock()
+		s.invalidateKnownSessionsCache()
+
+		if !s.LookupKnownSessionID("lookup-aaaa-bbbb-cccc-000000000001") {
+			t.Fatal("LookupKnownSessionID did not match seeded LastSessionID")
+		}
+		// Mirror the IsExcluded fast-path contract: LastSessionID hit must NOT
+		// poison the TTL cache, so a follow-up KnownSessionIDs() still rebuilds
+		// the full set.
+		s.knownSessionsCache.mu.Lock()
+		cached := s.knownSessionsCache.set
+		s.knownSessionsCache.mu.Unlock()
+		if cached != nil {
+			t.Fatalf("fast-path hit must not populate TTL cache; got set with %d entries", len(cached))
+		}
+	})
+
+	t.Run("miss_returns_false", func(t *testing.T) {
+		t.Parallel()
+		s := NewScheduler(SchedulerConfig{MaxJobs: 5})
+		if s.LookupKnownSessionID("never-seen-aaaa-bbbb-cccc-000000000099") {
+			t.Fatal("LookupKnownSessionID matched an id that was never seen")
+		}
+	})
+
+	// IsExcluded and LookupKnownSessionID must agree on every input; the
+	// named API is purely a re-export of containsSessionID. A divergence
+	// would mean one of them grew a probe path the other does not. (#767)
+	t.Run("agrees_with_is_excluded", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		s := NewScheduler(SchedulerConfig{
+			StorePath: filepath.Join(dir, "cron.json"),
+			MaxJobs:   5,
+		})
+		if err := s.Start(); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer s.Stop()
+
+		job := &Job{Schedule: "@every 1h", Prompt: "p", Platform: "feishu", ChatID: "c", ChatType: "direct"}
+		if err := s.AddJob(job); err != nil {
+			t.Fatalf("AddJob: %v", err)
+		}
+		s.mu.Lock()
+		s.jobs[job.ID].LastSessionID = "agree-aaaa-bbbb-cccc-000000000003"
+		s.mu.Unlock()
+
+		probes := []string{
+			"agree-aaaa-bbbb-cccc-000000000003",   // hit
+			"missing-aaaa-bbbb-cccc-000000000099", // miss
+			"",                                    // empty
+		}
+		for _, p := range probes {
+			if got, want := s.LookupKnownSessionID(p), s.IsExcluded(p); got != want {
+				t.Errorf("LookupKnownSessionID(%q) = %v, IsExcluded(%q) = %v (must agree)", p, got, p, want)
+			}
+		}
+	})
+}
+
+// TestNewSchedulerNilRouterWarns verifies NewScheduler does not panic
+// when cfg.Router is nil and the resulting Scheduler stores a nil
+// router for the executeOpt-side guard (R20260526-GO-004) to pick up.
+//
+// We intentionally do NOT panic at construction because dozens of
+// in-tree tests build narrow fixtures via NewScheduler without a
+// router (persist_failure / scheduler / stop_budget / trigger_now);
+// they only exercise mutation paths that never reach executeOpt. The
+// log line surfaces misconfiguration in production where ticks do run.
+// R20260526-GO-023.
+func TestNewSchedulerNilRouterWarns(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("NewScheduler panicked on nil router: %v", r)
+		}
+	}()
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5})
+	if s == nil {
+		t.Fatalf("NewScheduler returned nil")
+	}
+	if s.router != nil {
+		t.Fatalf("expected nil router on the constructed scheduler, got %T", s.router)
+	}
+}
+
+// TestSchedulerStopIdempotent verifies repeat Stop() invocations are a
+// no-op (CAS-guarded) — they must not panic, double-run persistJobsLocked,
+// or attempt to allocate a second set of timers. R20260526-GO-007.
+//
+// Failure mode pre-fix: each Stop call re-entered the timer-allocating
+// branches and the persistJobsLocked path, racing the final marshaled
+// write against itself. Mirrors Start()'s `started` CAS.
+func TestSchedulerStopIdempotent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cron_jobs.json")
+	s := NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// First Stop drains as normal. Subsequent Stops MUST short-circuit
+	// via the stopped-CAS guard. Recover so a second-call panic surfaces
+	// as a test failure with full context rather than aborting the suite.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("repeat Stop() panicked: %v", r)
+		}
+	}()
+	s.Stop()
+	s.Stop()
+	s.Stop()
+
+	// stopped flag must be set; started flag set by Start remains so
+	// callers reading lifecycle state see the post-Stop snapshot.
+	if !s.stopped.Load() {
+		t.Fatalf("stopped flag not set after Stop()")
+	}
+	if !s.started.Load() {
+		t.Fatalf("started flag flipped by Stop()")
 	}
 }

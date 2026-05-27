@@ -6419,3 +6419,312 @@ func TestDashboardJS_ShowGitRemoteSchemeAllowlist(t *testing.T) {
 		t.Errorf("showGitRemote must lowercase the URL before scheme prefix probe")
 	}
 }
+
+// TestDashboardJS_R243Perf8_CronTickScopedTextUpdate pins R243-PERF-8 / #813:
+// the 1Hz running-cron tick MUST do a scoped text-node update (only the
+// `.cj-when` / `.cj-when-inline` elapsed labels on `.cj-row.is-running` rows)
+// instead of a full renderCronPanel rebuild. Pre-fix behaviour rebuilt the
+// entire cron list innerHTML every second, which scaled O(N) with the job
+// count just to advance the elapsed-seconds text.
+//
+// The contract is enforced at source-text level so a future refactor that
+// re-introduces renderCronPanel() inside the tick callback fails CI rather
+// than silently regressing a measurable jank hot path. We pin three
+// load-bearing shapes:
+//
+//  1. cronRunningTickPaintScoped exists and is the named scoped-update path.
+//  2. The setInterval callback inside ensureCronRunningTick calls it (and
+//     not renderCronPanel).
+//  3. The scoped-update body reaches for `.cj-row.is-running` rather than
+//     re-running the row template, and writes to `.cj-when` text via
+//     `.textContent = label` (the textContent assertion also reinforces the
+//     R71-SEC-L1 contract: cron prompts are user-controllable, so the tick
+//     MUST NOT splice them through innerHTML).
+func TestDashboardJS_R243Perf8_CronTickScopedTextUpdate(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// (1) The scoped-paint helper must exist by name; #813's fix lives there.
+	if !strings.Contains(js, "function cronRunningTickPaintScoped()") {
+		t.Errorf("dashboard.js: cronRunningTickPaintScoped() must exist as the scoped-update path (#813)")
+	}
+
+	// (2) The 1Hz tick callback must invoke the scoped path. We grep for the
+	// exact call site rather than parsing — the surrounding try/catch is
+	// load-bearing (we don't want a thrown DOM error to wedge the timer).
+	if !strings.Contains(js, "try { cronRunningTickPaintScoped(); } catch (_) {}") {
+		t.Errorf("dashboard.js: ensureCronRunningTick's setInterval body must call cronRunningTickPaintScoped() (#813)")
+	}
+
+	// (3) Regression guard: the tick callback must NOT call renderCronPanel
+	// directly. We can't forbid every renderCronPanel call site in the file
+	// (cronApplyRunStarted / cronApplyRunEnded legitimately do), but we can
+	// pin that no renderCronPanel() call appears inside the closing brace of
+	// the scoped helper or the tick callback's try/catch shape.
+	tickCallback := "try { cronRunningTickPaintScoped(); } catch (_) {}"
+	idx := strings.Index(js, tickCallback)
+	if idx < 0 {
+		t.Fatalf("dashboard.js: tick callback shape not found; preceding assertion should have caught this")
+	}
+	// Look backwards within ~400 bytes for a `}, 1000)` setInterval close
+	// and forwards within ~50 bytes — the callback is a single line, so a
+	// renderCronPanel() inside the same setInterval body would sit in this
+	// window.
+	start := idx - 400
+	if start < 0 {
+		start = 0
+	}
+	end := idx + 50
+	if end > len(js) {
+		end = len(js)
+	}
+	if strings.Contains(js[start:end], "renderCronPanel(") {
+		t.Errorf("dashboard.js: ensureCronRunningTick's setInterval body must NOT call renderCronPanel directly (#813 regression guard)")
+	}
+
+	// (4) The scoped helper must target `.cj-row.is-running` and write the
+	// elapsed label via textContent — pinning both the scope and the
+	// XSS-safe assignment. innerHTML on the same nodes would be a
+	// regression on R71-SEC-L1 because cron job prompts/titles can flow
+	// into adjacent fields.
+	if !strings.Contains(js, "host.querySelectorAll('.cj-row.is-running')") {
+		t.Errorf("dashboard.js: scoped tick must target '.cj-row.is-running' rows (#813)")
+	}
+	if !strings.Contains(js, "whenEl.textContent = label") {
+		t.Errorf("dashboard.js: scoped tick must write elapsed label via textContent on .cj-when (#813)")
+	}
+	if !strings.Contains(js, "inlineEl.textContent = label") {
+		t.Errorf("dashboard.js: scoped tick must write elapsed label via textContent on .cj-when-inline (#813)")
+	}
+}
+
+// TestDashboardJS_R243Perf8_CronTickPerformanceInvariants pins the secondary
+// invariants of the R243-PERF-8 / #813 fix that the primary contract test
+// (TestDashboardJS_R243Perf8_CronTickScopedTextUpdate) does not cover:
+//
+//  1. The scoped-paint helper builds an `id -> job` lookup Map BEFORE the
+//     row loop, so the per-row work is O(1) rather than O(N) on cronJobs.
+//     Pre-fix code that walked cronJobs.find() per row would scale O(N²)
+//     once N running rows were on screen and re-introduce the jank #813
+//     was filed about (just shifted from the renderCronPanel call into
+//     the per-row scan inside the tick).
+//  2. The timer's three stop-conditions (no running jobs / a session is
+//     selected / cron-list-items DOM unmounted) are still checked inside
+//     the setInterval body, not just at scheduling time. R220-FE-1 — a
+//     refactor that drops the in-callback check would let the timer keep
+//     firing across view transitions and amplify the regression #813's
+//     fix was meant to silence.
+//
+// Grouped into a separate test from the primary one so a #813 regression
+// surfaces with two distinct failure modes (text-update path vs perf
+// invariants) instead of one omnibus assertion bundle.
+func TestDashboardJS_R243Perf8_CronTickPerformanceInvariants(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// (1) O(1) lookup map. The exact shape `byId.set(j.id, j)` is what the
+	// per-row `byId.get(id)` reads — pinning both writes the contract that
+	// the helper builds the map once per tick and not per row.
+	if !strings.Contains(js, "const byId = new Map()") {
+		t.Errorf("dashboard.js: scoped tick must build O(1) id->job Map before the row loop (#813)")
+	}
+	if !strings.Contains(js, "byId.set(j.id, j)") {
+		t.Errorf("dashboard.js: scoped tick must populate byId via byId.set(j.id, j) (#813)")
+	}
+	if !strings.Contains(js, "byId.get(id)") {
+		t.Errorf("dashboard.js: scoped tick row loop must read jobs via byId.get(id), not Array.find (#813)")
+	}
+	// Negative pin: a pre-fix-style `cronJobs.find(...)` scan inside the
+	// scoped helper would re-introduce O(N²). The .find call exists
+	// elsewhere in the file (cronApplyRunStarted etc.) so we can't forbid
+	// it globally — instead pin that the named scoped function body does
+	// NOT contain `cronJobs.find(`.
+	const helperOpen = "function cronRunningTickPaintScoped()"
+	helperIdx := strings.Index(js, helperOpen)
+	if helperIdx < 0 {
+		t.Fatalf("dashboard.js: cronRunningTickPaintScoped() declaration missing — primary test should have caught this")
+	}
+	// Walk forward to the matching closing brace using a brace counter.
+	// Source-text balance is fine here — the helper is straight-line JS
+	// without templated strings whose braces would confuse the count.
+	body := js[helperIdx:]
+	depth := 0
+	end := -1
+	started := false
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '{':
+			depth++
+			started = true
+		case '}':
+			depth--
+			if started && depth == 0 {
+				end = i + 1
+				i = len(body) // break outer
+			}
+		}
+	}
+	if end < 0 {
+		t.Fatalf("dashboard.js: could not locate end of cronRunningTickPaintScoped body (brace mismatch?)")
+	}
+	helperBody := body[:end]
+	if strings.Contains(helperBody, "cronJobs.find(") {
+		t.Errorf("dashboard.js: scoped tick body must NOT use cronJobs.find — pre-fix O(N²) regression (#813)")
+	}
+
+	// (2) In-callback stop check. R220-FE-1 baseline: the setInterval body
+	// re-checks selectedKey and the cron-list-items DOM presence, and
+	// clears the interval when either trips. Pin both checks plus the
+	// clearInterval call so a refactor that drops them fails CI.
+	const stopCheck = "if (selectedKey || !document.getElementById('cron-list-items'))"
+	if !strings.Contains(js, stopCheck) {
+		t.Errorf("dashboard.js: tick body must re-check stop conditions inside setInterval — R220-FE-1 / #813")
+	}
+	if !strings.Contains(js, "clearInterval(cronRunningTickTimer)") {
+		t.Errorf("dashboard.js: tick stop must clearInterval(cronRunningTickTimer) — R220-FE-1 / #813")
+	}
+}
+
+// TestDashboardJS_R243Perf8_CronTickNoFullRepaintGuard is an additional
+// regression guard for R243-PERF-8 / #813. Distinct from the two earlier
+// tests, this one walks the entire ensureCronRunningTick function body and
+// asserts that NO renderCronPanel( call appears anywhere inside it — the
+// scheduling shape (setInterval(...)) AND the surrounding outer block
+// alike. A refactor that re-introduces a renderCronPanel call in either
+// the schedule-time check or the in-tick callback would silently undo the
+// scoped-update savings; this catches both shapes with one source-text walk.
+//
+// The two earlier tests pin the specific scoped-update path
+// (cronRunningTickPaintScoped) and its O(1) Map invariants; this one is the
+// catch-all "the tick must not full-repaint" property test, narrowly scoped
+// to the ensureCronRunningTick function body.
+func TestDashboardJS_R243Perf8_CronTickNoFullRepaintGuard(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	const fnOpen = "function ensureCronRunningTick()"
+	idx := strings.Index(js, fnOpen)
+	if idx < 0 {
+		t.Fatalf("dashboard.js: ensureCronRunningTick declaration missing (#813)")
+	}
+	body := js[idx:]
+	depth := 0
+	end := -1
+	started := false
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '{':
+			depth++
+			started = true
+		case '}':
+			depth--
+			if started && depth == 0 {
+				end = i + 1
+				i = len(body) // break
+			}
+		}
+	}
+	if end < 0 {
+		t.Fatalf("dashboard.js: could not balance braces in ensureCronRunningTick (#813)")
+	}
+	fnBody := body[:end]
+	if strings.Contains(fnBody, "renderCronPanel(") {
+		t.Errorf("dashboard.js: ensureCronRunningTick body must NOT call renderCronPanel — full-repaint regression (#813)")
+	}
+}
+
+// TestDashboardJS_R243Perf7_CronTimelineRefreshHeadDebounced pins
+// R243-PERF-7 / #812: bursty `cron_run_ended` WS events must funnel through
+// `cronTimelineRefreshHeadDebounced` (rAF-aligned, per-jobId coalesced) so
+// the head-of-timeline `fetchJSON + sort + innerHTML` cycle runs at most
+// once per visible frame per job, not once per network event. Pre-fix
+// behaviour wired the WS handler directly to `cronTimelineRefreshHead`,
+// turning a flurry of TriggerNow events / a job churning through retries
+// into N sequential full-rebuilds.
+//
+// We pin five load-bearing source-text shapes — the contract is multi-axis
+// (bookkeeping Set, rAF wrapper, key-by-jobId, single fetch, WS routing):
+//
+//  1. `cronTimelineRefreshHeadDebounced` exists by name (call site target).
+//  2. The dedupe Set `_cronTimelineRefreshScheduled` exists and is checked
+//     via `.has(jobId)` before scheduling — without this the rAF would
+//     still fire N times for N events.
+//  3. `requestAnimationFrame` is the scheduling primitive (with a
+//     setTimeout fallback for non-browser test contexts; both must be
+//     present so the contract is robust under jsdom-less environments).
+//  4. The wrapped call goes to `cronTimelineRefreshHead(jobId)` and the
+//     scheduling state is cleared inside the rAF callback so a subsequent
+//     event scheduled in the next frame is honoured.
+//  5. The WS handler that receives `cron_run_ended` calls the debounced
+//     wrapper, NOT `cronTimelineRefreshHead` directly. This is the actual
+//     fix — leaving the WS path on the unwrapped call would silently
+//     undo the debounce no matter how thorough the wrapper itself is.
+func TestDashboardJS_R243Perf7_CronTimelineRefreshHeadDebounced(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// (1) Wrapper exists.
+	if !strings.Contains(js, "function cronTimelineRefreshHeadDebounced(jobId)") {
+		t.Errorf("dashboard.js: cronTimelineRefreshHeadDebounced(jobId) must exist as the rAF-debounced wrapper (#812)")
+	}
+
+	// (2) Dedupe Set + per-jobId early return.
+	if !strings.Contains(js, "_cronTimelineRefreshScheduled = new Set()") {
+		t.Errorf("dashboard.js: _cronTimelineRefreshScheduled must be a Set keyed by jobId (#812)")
+	}
+	if !strings.Contains(js, "_cronTimelineRefreshScheduled.has(jobId)") {
+		t.Errorf("dashboard.js: debounced wrapper must check Set.has(jobId) before scheduling — coalescing relies on this gate (#812)")
+	}
+	if !strings.Contains(js, "_cronTimelineRefreshScheduled.add(jobId)") {
+		t.Errorf("dashboard.js: debounced wrapper must add jobId to scheduled-Set before rAF fire (#812)")
+	}
+	if !strings.Contains(js, "_cronTimelineRefreshScheduled.delete(jobId)") {
+		t.Errorf("dashboard.js: debounced wrapper must clear scheduled-Set inside rAF callback so the next frame's events go through (#812)")
+	}
+
+	// (3) requestAnimationFrame wrapper with setTimeout fallback. The
+	// fallback is load-bearing for unit tests / non-browser hosts where
+	// rAF may be undefined; it also caps the delay at ~16ms which is
+	// the rAF-equivalent worst case.
+	if !strings.Contains(js, "typeof requestAnimationFrame === 'function'") {
+		t.Errorf("dashboard.js: debounced wrapper must feature-detect requestAnimationFrame (#812)")
+	}
+	if !strings.Contains(js, "requestAnimationFrame") {
+		t.Errorf("dashboard.js: debounced wrapper must use requestAnimationFrame (#812)")
+	}
+	if !strings.Contains(js, "(cb) => setTimeout(cb, 16)") {
+		t.Errorf("dashboard.js: debounced wrapper must fall back to setTimeout(cb, 16) when rAF is unavailable (#812)")
+	}
+
+	// (4) Dispatched call lands on cronTimelineRefreshHead(jobId) inside
+	// the rAF callback. The order matters — clearing the scheduled-Set
+	// BEFORE invoking the fetcher means a new event arriving while the
+	// fetch is in flight will schedule another refresh (correct), while
+	// clearing AFTER would let one fetch swallow events that arrived
+	// during its own duration (subtle stale-tail bug).
+	if !strings.Contains(js, "cronTimelineRefreshHead(jobId).catch(() => {})") {
+		t.Errorf("dashboard.js: rAF callback must invoke cronTimelineRefreshHead(jobId).catch — fetcher entry point (#812)")
+	}
+
+	// (5) WS handler routing. The cron_run_ended branch must call the
+	// debounced wrapper, not the bare fetcher.
+	if !strings.Contains(js, "cronTimelineRefreshHeadDebounced(msg.job_id)") {
+		t.Errorf("dashboard.js: WS cron_run_ended handler must route through cronTimelineRefreshHeadDebounced(msg.job_id), not cronTimelineRefreshHead direct (#812)")
+	}
+}

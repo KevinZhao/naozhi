@@ -257,9 +257,16 @@ func validateCLIPath(cliPath string) {
 
 // detectVersion runs "<cli> --version" and parses the version string.
 // Uses a Background-derived 5s timeout — fine for test / single-backend
-// paths. Prefer detectVersionCtx when the caller has a shutdown context
-// (e.g. naozhi startup) so SIGTERM during probe doesn't block for the
-// full timeout.
+// paths. Production startup MUST go through NewWrapperLazy + Probe(ctx)
+// (R241-ARCH-1) so SIGTERM during probe never blocks for the full
+// timeout: the cmd/naozhi/main_init.go bootstrap already does this, and
+// the legacy NewWrapper → detectVersion path now only runs in tests.
+//
+// R246-ARCH-21 (#803): the per-backend 5s × N startup hang is closed by
+// the lazy-Probe migration above; this helper survives only because
+// in-package tests construct Wrappers without a shutdown ctx and would
+// otherwise force every test fixture to thread a context.Background
+// boilerplate. New callers MUST use NewWrapperLazy.
 func detectVersion(cliPath string) string {
 	return detectVersionCtx(context.Background(), cliPath)
 }
@@ -294,6 +301,18 @@ func detectVersionCtx(parent context.Context, cliPath string) string {
 // detect.go) rather than an inline switch so adding a future backend (e.g.
 // gemini-cli) is a single registry edit. Unknown backend ids fall back to
 // "claude" for the historical default-launcher behaviour. R225-CR-2.
+//
+// R249-SEC-7 (#920): when neither the well-known candidate paths nor
+// exec.LookPath resolve the binary, return "" instead of the bare basename
+// (e.g. "claude"). The bare-name path was reached at exec.Command time
+// which re-resolves through the live PATH; a PATH-poisoning vector (admin
+// misconfig prepending an attacker-writable directory, or a local
+// privilege-escalation chain that mutates the env between detect and
+// exec) would then run a malicious binary inside the shim spawn path.
+// Returning "" forces the caller through the empty-path branch — Probe
+// short-circuits, validateCLIPath stays silent, and exec.Command("")
+// surfaces a clear error at spawn time instead of silently launching
+// whatever happens to be on PATH at that moment.
 func detectCLI(backend string) string {
 	name, ok := knownBackendBinaries[backend]
 	if !ok {
@@ -310,7 +329,7 @@ func detectCLI(backend string) string {
 		return p
 	}
 
-	return name
+	return ""
 }
 
 // candidatePaths returns OS-specific install locations to probe.
@@ -443,12 +462,12 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 		return nil, fmt.Errorf("protocol init: %w", err)
 	}
 	if sessionID != "" {
-		proc.SessionID = sessionID
+		proc.sessionID = sessionID
 	}
 
 	// If shim already captured session_id from init event during startup
-	if handle.Hello.SessionID != "" && proc.SessionID == "" {
-		proc.SessionID = handle.Hello.SessionID
+	if handle.Hello.SessionID != "" && proc.sessionID == "" {
+		proc.sessionID = handle.Hello.SessionID
 	}
 
 	proc.startReadLoop()
@@ -506,7 +525,7 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	proc.InitLinker("")
 
 	if handle.Hello.SessionID != "" {
-		proc.SessionID = handle.Hello.SessionID
+		proc.sessionID = handle.Hello.SessionID
 	}
 
 	proc.startReadLoop()
@@ -518,12 +537,37 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	// calling Send() on this reattached process.
 	if isMidTurn(replays, proto) {
 		proc.mu.Lock()
-		proc.State = StateRunning
+		proc.state = StateRunning
 		proc.mu.Unlock()
 		proc.reconnectedMidTurn.Store(true)
 	}
 
 	return proc, replays, nil
+}
+
+// WaitSocketGoneForKey blocks until the shim socket associated with the
+// given session key disappears from the filesystem, or maxWait elapses.
+// Returns true when the socket is gone, false on timeout. Empty key is
+// treated as "nothing to wait for" and returns true immediately.
+//
+// R222-ARCH-2 (#711): this absorbs the shim.SocketPath / shim.KeyHash /
+// shim.WaitSocketGone trio behind a single cli-level helper so the
+// session package no longer needs to import internal/shim just to
+// compute a socket path. Lifecycle-side callers (Reset / ResetAndRecreate)
+// use this to ensure the previous shim has released its UNIX socket
+// before a fresh StartShim attempts to bind the same path; without the
+// wait the dial-first guard ("refusing to clobber") in shim/server.go
+// rejects the new bind and the user-visible reset stalls.
+//
+// Stateless: depends only on the global shim socket-naming convention
+// (XDG_RUNTIME_DIR + KeyHash), so a *Wrapper receiver is unnecessary —
+// callers reach this without plumbing a wrapper through Reset paths.
+func WaitSocketGoneForKey(key string, maxWait time.Duration) bool {
+	if key == "" {
+		return true
+	}
+	socketPath := shim.SocketPath(shim.KeyHash(key))
+	return shim.WaitSocketGone(socketPath, maxWait)
 }
 
 // isMidTurn checks replay events to determine if the CLI was mid-turn at
@@ -565,6 +609,16 @@ type shimLineReader struct {
 	proc *Process
 }
 
+// shimLineReaderMaxSkips caps the number of non-stdout/non-cli_exited shim
+// frames the Init handshake will silently swallow before bailing with an
+// error. Defends against a buggy or hostile shim that streams stderr / pong
+// frames forever during proto.Init: the surrounding LineReader interface
+// has no ctx parameter (R237-GO-6 / #633), so this is the structural
+// timeout. 4096 is generous enough to absorb the realistic burst of
+// transient ping / stderr lines a freshly-spawned CLI might emit before
+// its first stdout JSON event, while still bounding the DoS surface.
+const shimLineReaderMaxSkips = 4096
+
 // ReadLine returns the next CLI stdout line received over the shim
 // transport, blocking until either a stdout frame arrives or the shim
 // signals CLI exit.
@@ -600,6 +654,16 @@ type shimLineReader struct {
 func (r *shimLineReader) ReadLine() ([]byte, bool, error) {
 	// During Init, we need to read lines that come through the shim stdout wrapper.
 	// The shim sends {"type":"stdout","line":"..."} — we need to unwrap.
+	//
+	// R237-GO-6 (#633): bounded skip counter so a misbehaving shim that
+	// streams non-stdout/non-cli_exited frames forever cannot wedge the
+	// handshake. The LineReader interface has no ctx parameter (its only
+	// caller is Protocol.Init across both stream-json and ACP; widening
+	// the signature is breaking across both backends), so we enforce the
+	// upper bound locally here. On overflow we return eof=true + a
+	// descriptive error so Spawn's error path tears down the shim
+	// connection (Init failure goes through proc.Kill / handle.Close).
+	skipped := 0
 	for {
 		rawLine, err := r.proc.shimR.ReadBytes('\n')
 		if err != nil {
@@ -607,6 +671,10 @@ func (r *shimLineReader) ReadLine() ([]byte, bool, error) {
 		}
 		var msg shimMsg
 		if json.Unmarshal(rawLine, &msg) != nil {
+			skipped++
+			if skipped > shimLineReaderMaxSkips {
+				return nil, true, fmt.Errorf("shim sent %d unparseable frames during init without stdout", skipped)
+			}
 			continue
 		}
 		if msg.Type == "stdout" {
@@ -615,6 +683,11 @@ func (r *shimLineReader) ReadLine() ([]byte, bool, error) {
 		if msg.Type == "cli_exited" {
 			return nil, true, fmt.Errorf("cli exited during init")
 		}
-		// Skip other message types (stderr, pong, etc.) during init
+		// Skip other message types (stderr, pong, etc.) during init,
+		// but bound the loop so a forever-pinging shim cannot stall Init.
+		skipped++
+		if skipped > shimLineReaderMaxSkips {
+			return nil, true, fmt.Errorf("shim sent %d non-stdout frames during init without stdout (last type=%q)", skipped, msg.Type)
+		}
 	}
 }

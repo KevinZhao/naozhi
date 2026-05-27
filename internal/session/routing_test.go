@@ -620,3 +620,38 @@ func TestResolveForKey_HistoricalKeys(t *testing.T) {
 		}()
 	}
 }
+
+// TestRouter_Resolver_Singleton covers R237-ARCH-12 (#604): the Router
+// exposes the KeyResolver instance configured via RouterConfig.Resolver
+// so downstream consumers (Dispatcher, Hub, upstream wiring) read the
+// same agents-config snapshot instead of constructing parallel
+// resolvers that drift apart on edits.
+func TestRouter_Resolver_Singleton(t *testing.T) {
+	t.Parallel()
+	t.Run("nil router returns nil resolver", func(t *testing.T) {
+		t.Parallel()
+		var r *Router
+		if got := r.Resolver(); got != nil {
+			t.Errorf("(*Router)(nil).Resolver() = %v, want nil", got)
+		}
+	})
+	t.Run("unconfigured router returns nil", func(t *testing.T) {
+		t.Parallel()
+		r := &Router{}
+		if got := r.Resolver(); got != nil {
+			t.Errorf("zero Router.Resolver() = %v, want nil", got)
+		}
+	})
+	t.Run("configured router returns the same instance", func(t *testing.T) {
+		t.Parallel()
+		shared := NewKeyResolver(map[string]AgentOpts{"general": {}}, nil)
+		r := &Router{resolver: shared}
+		if got := r.Resolver(); got != shared {
+			t.Errorf("Router.Resolver() = %p, want %p (singleton identity)", got, shared)
+		}
+		// Calling twice returns the same pointer — hot path readers cache nothing.
+		if r.Resolver() != r.Resolver() {
+			t.Error("Router.Resolver() returned different instances on repeated calls")
+		}
+	})
+}

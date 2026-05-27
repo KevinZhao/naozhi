@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -36,7 +37,33 @@ const anonCookieName = "nz_anon"
 // HttpOnly, SameSite=Strict (matches the auth cookie; nz_anon is only read by
 // same-origin XHR so Lax offered no value and left a cross-site-GET window
 // open for any future GET handler that reads it), Secure gated by
-// auth.isSecure(r), 30-day MaxAge.
+// auth.isSecure(r), MaxAge=anonCookieMaxAgeSeconds.
+//
+// R247-SEC-15 / #514: MaxAge was 30 days, which kept the per-browser owner
+// label alive across token-mode toggles and service restarts that the
+// operator may have used to invalidate sessions. The cookie is NOT an auth
+// credential — it only disambiguates uploadOwner between co-NAT users —
+// but a stale owner label can still be claimed by an attacker who sniffed
+// the value over a non-TLS deployment (where the Secure flag is absent
+// because auth.isSecure(r)=false). 7 days is the upper bound a reasonable
+// dev-laptop user would expect for a "remember this tab" hint, and it
+// shrinks the post-token-rotation window 4×. The cookieGen-coupled
+// rotation that #514's proposal flags as the deeper fix is left for a
+// follow-up because it requires a dashboard_auth coupling change; this
+// commit just lowers the MaxAge floor where there is no design decision.
+//
+// R222-SEC-4 / #687: in multi-user mode (dashboardToken set) with no TLS
+// terminator on the request path, the previous Secure=false branch let a
+// same-network attacker sniff the cookie and bucket-collide future uploads.
+// We now force Secure=true whenever a dashboard token is configured, which
+// makes the browser refuse to ship the cookie over plaintext — fail-closed
+// rather than silently degrade. The single-user / no-token deployment is
+// unchanged: those operators legitimately run on http://127.0.0.1 and the
+// Secure-on-non-TLS combination would simply make the browser drop the
+// cookie, breaking upload disambiguation for nobody (single user, single
+// owner). The startup-time warning on server.go:931 already calls out the
+// "token + plaintext" misconfiguration so an operator running this combo
+// will see the cookies disappear and find the warning in the same log.
 func mintAnonCookie(w http.ResponseWriter, r *http.Request, auth *AuthHandlers) (string, error) {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
@@ -44,13 +71,27 @@ func mintAnonCookie(w http.ResponseWriter, r *http.Request, auth *AuthHandlers) 
 	}
 	val := hex.EncodeToString(buf[:])
 	secure := auth != nil && auth.isSecure(r)
+	// R222-SEC-4 / #687: force Secure when a dashboard token is configured —
+	// the operator has signalled multi-user intent, so plaintext sniff of the
+	// owner label is no longer an acceptable degradation. The browser will
+	// drop the cookie under HTTP, which is the desired fail-closed.
+	if !secure && auth != nil && auth.dashboardToken != "" {
+		secure = true
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name: anonCookieName, Value: val, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteStrictMode,
-		Secure: secure, MaxAge: 30 * 24 * 3600,
+		Secure: secure, MaxAge: anonCookieMaxAgeSeconds,
 	})
 	return val, nil
 }
+
+// anonCookieMaxAgeSeconds bounds the lifetime of the nz_anon owner label.
+// R247-SEC-15 / #514: lowered from 30 days to 7 to shrink the window in
+// which a stale label can be reused after a service restart, token-mode
+// toggle, or non-TLS sniff. Pulled out as a const so regression tests can
+// pin the value without parsing the cookie header.
+const anonCookieMaxAgeSeconds = 7 * 24 * 3600
 
 // Upload size ceilings. Images stay at the long-standing 10 MB; PDFs get
 // their own cap derived from Anthropic's 32 MB document-block limit — we
@@ -98,9 +139,17 @@ func rejectIfTooManyFields(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // SendHandler serves the HTTP send API, delegating to Hub for local sends.
+//
+// router is the consumer-side SendRouter view of *session.Router (see
+// consumer.go). resolveAttachmentWorkspace used to reach the router via
+// h.hub.router.* transits — R215-ARCH-P1-4 / #566 closes that Phase-2.5
+// cleanup item by declaring the dependency on this struct directly.
+// Wiring (dashboard.go) passes hub.router; tests can inject a stub
+// satisfying SendRouter.
 type SendHandler struct {
 	nodeAccess    NodeAccessor
 	hub           *Hub
+	router        SendRouter
 	uploadStore   *uploadStore
 	uploadLimiter *ipLimiter    // per-IP upload rate limiter (10/min)
 	sendLimiter   *ipLimiter    // per-IP send rate limiter (30/min)
@@ -134,44 +183,63 @@ func ownerKeyFromCookie(cookieValue string) string {
 // uploadOwner derives a stable owner key from auth cookie, Bearer token, or
 // (in no-token mode) a per-browser nz_anon cookie. RNEW-SEC-005: previously
 // no-token mode fell to clientIP(), so co-NAT User B could claim User A's
-// upload via TakeAll. Minting nz_anon gives each browser a distinct owner;
-// IP remains a last-resort fallback only when crypto/rand fails.
-func uploadOwner(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, trustedProxy bool) string {
+// upload via TakeAll. Minting nz_anon gives each browser a distinct owner.
+//
+// R247-SEC-8 (#501): the `ok=false` return signals "could not derive a
+// per-browser owner key" — typically because every credential path was
+// absent AND mintAnonCookie failed (crypto/rand exhausted on this kernel).
+// Callers must surface 503 (retry) so the client retries instead of being
+// silently bucketed alongside every other co-NAT browser via the legacy
+// IP fallback. The IP fallback was hashed in R246-SEC-8 to keep the key
+// shape uniform, but the underlying tenancy collision (User A's upload
+// claimable by User B at the same NAT) remained — returning ok=false
+// closes that hole at the API surface.
+func uploadOwner(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, trustedProxy bool) (string, bool) {
 	if c, err := r.Cookie(authCookieName); err == nil && c.Value != "" {
-		return ownerKeyFromCookie(c.Value)
+		return ownerKeyFromCookie(c.Value), true
 	}
 	if bearer := r.Header.Get("Authorization"); strings.HasPrefix(bearer, "Bearer ") {
 		if token := strings.TrimPrefix(bearer, "Bearer "); token != "" {
 			// R247-SEC-16: 128-bit (matches ownerKeyFromCookie); see godoc above.
 			sum := sha256.Sum256([]byte(token))
-			return hex.EncodeToString(sum[:16])
+			return hex.EncodeToString(sum[:16]), true
 		}
 	}
 	if c, err := r.Cookie(anonCookieName); err == nil && c.Value != "" {
-		return ownerKeyFromCookie(c.Value)
+		return ownerKeyFromCookie(c.Value), true
 	}
 	if w != nil {
 		val, err := mintAnonCookie(w, r, auth)
 		if err == nil {
-			return ownerKeyFromCookie(val)
+			return ownerKeyFromCookie(val), true
 		}
-		slog.Warn("uploadOwner: mintAnonCookie failed, falling back to client IP", "err", err)
+		slog.Warn("uploadOwner: mintAnonCookie failed; refusing to fall back to IP-derived owner key", "err", err)
 	}
-	// R246-SEC-8: route the IP fallback through ownerKeyFromCookie so the
-	// resulting key is the same SHA-256 hex shape the auth-cookie / Bearer /
-	// nz_anon paths produce. Previously a mintAnonCookie failure (crypto/rand
-	// exhausted) emitted a raw IPv4/IPv6 string that polluted ownerCounts
-	// alongside SHA-256 hex keys, breaking per-owner accounting and TakeAll
-	// scoping for the unlucky few requests that hit the fallback. Hashing also
-	// keeps raw IP literals out of the in-memory key set.
-	ip := clientIP(r, trustedProxy)
-	if ip == "" {
-		// Empty owner keys collide across all unauthenticated callers; mirror
-		// ip_limiter's _unknown_ sentinel so we still produce a stable
-		// (hashed) bucket rather than the empty string.
-		ip = "_unknown_"
+	// R247-SEC-8 (#501): on rand failure (or no ResponseWriter to mint into)
+	// we explicitly do NOT fall back to a clientIP-derived owner. Two
+	// co-NAT browsers would otherwise share the same SHA-256-hashed bucket,
+	// re-opening the TakeAll cross-tenant theft window that nz_anon was
+	// designed to close. Empty owner + ok=false signals to callers that
+	// they should respond 503 (retry) instead of pretending we minted a
+	// real key.
+	return "", false
+}
+
+// uploadOwnerOrFail wraps uploadOwner with the standard 503 response so
+// individual handlers don't repeat the writeJSONStatus boilerplate. Returns
+// owner + ok=true when a real per-browser key was minted/recovered; on
+// ok=false the caller MUST stop processing — the response has already been
+// written.
+func uploadOwnerOrFail(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, trustedProxy bool) (string, bool) {
+	owner, ok := uploadOwner(w, r, auth, trustedProxy)
+	if !ok {
+		// Service Unavailable + Retry-After hints the client/dashboard to
+		// retry on a fresh socket where /dev/urandom may have replenished.
+		// 30s mirrors the existing rate-limiter Retry-After convention.
+		w.Header().Set("Retry-After", "30")
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "could not derive upload owner; please retry"})
 	}
-	return ownerKeyFromCookie(ip)
+	return owner, ok
 }
 
 // parseAttachmentFile reads and validates a single multipart file. Images
@@ -222,18 +290,55 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 		return cli.Attachment{}, errors.New("failed to read uploaded file")
 	}
 	defer f.Close()
+
+	// R247-SEC-11 (#503): magic-byte sniff a 512-byte head BEFORE buffering
+	// the full body. The previous flow trusted `declared` to pick the size
+	// gate, so a caller asserting Content-Type: application/pdf could force
+	// a 32 MB allocation per request even when the body wasn't a PDF — the
+	// magic-byte recheck only ran AFTER io.ReadAll(LimitReader(... maxPDFBytes)).
+	// Sniffing the head first lets us collapse the buffer cap to maxImageBytes
+	// when the declared-PDF body doesn't actually start with %PDF-.
+	//
+	// We peek 512 bytes (http.DetectContentType's documented maximum) into
+	// a fixed-size buffer, sniff against the head, then resume reading the
+	// rest of the body via an io.MultiReader so the head is not lost.
+	const sniffLen = 512
+	head := make([]byte, sniffLen)
+	n, err := io.ReadFull(f, head)
+	switch {
+	case err == nil, errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		head = head[:n]
+	default:
+		slog.Debug("upload: head read failed", "err", err)
+		return cli.Attachment{}, errors.New("failed to read uploaded file")
+	}
+
 	// fh.Size comes from the Content-Disposition header (client-controlled).
 	// The size gate above rejects oversize uploads based on that header, but
 	// a lying client could understate size to bypass the gate. Wrap the
 	// reader in a LimitReader as a defence-in-depth byte cap, with a +1
 	// margin so we can detect overflow.
+	//
+	// R247-SEC-11: when the caller declared PDF but the head doesn't carry
+	// the %PDF- magic (or is too short to carry it), tighten the buffer cap
+	// to maxImageBytes. The downstream PDF branch will still reject the body
+	// for the same reason, but the runtime guarantee — peak in-memory bytes
+	// per request — now scales with the SNIFFED type, not the declared one.
+	headLooksPDF := len(head) >= 5 && bytes.Equal(head[:5], []byte("%PDF-"))
 	var sizeLimit int64
-	if isPDF {
+	switch {
+	case isPDF && headLooksPDF:
 		sizeLimit = maxPDFBytes
-	} else {
+	case isPDF && !headLooksPDF:
+		// Fail fast: a declared-PDF without the magic header cannot be
+		// a legitimate PDF, so allocating up to 32 MB to confirm what we
+		// already know is wasteful.
+		return cli.Attachment{}, fmt.Errorf("file does not look like a PDF")
+	default:
 		sizeLimit = maxImageBytes
 	}
-	data, err := io.ReadAll(io.LimitReader(f, sizeLimit+1))
+	body := io.MultiReader(bytes.NewReader(head), f)
+	data, err := io.ReadAll(io.LimitReader(body, sizeLimit+1))
 	if err != nil {
 		slog.Debug("upload: read multipart file failed", "err", err)
 		return cli.Attachment{}, errors.New("failed to read uploaded file")
@@ -269,19 +374,21 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 		}, nil
 	}
 
-	// Image path — preserve the pre-PDF allowlist and prefix guard. SVG is
-	// deliberately rejected: even though DetectContentType returns text/xml
-	// for SVG (which would already fall through the image/* prefix check),
-	// we allowlist the raster formats Claude actually accepts so a future
-	// sniffer change cannot silently let SVG + script payloads through.
-	if !strings.HasPrefix(declared, "image/") {
-		return cli.Attachment{}, fmt.Errorf("only image/* or application/pdf files are accepted")
-	}
+	// Image path — gate purely on the byte-sniffed `detected` MIME (R244-SEC-P2-1
+	// #886). Trusting `declared` (the client-supplied Content-Type) lets a caller
+	// either smuggle a non-image body past the image branch by claiming
+	// "image/png", or have a legitimate PNG rejected because the client sent
+	// "application/octet-stream". `http.DetectContentType` is the authoritative
+	// classifier; allowlist the raster formats Claude accepts so a future
+	// sniffer change cannot silently let SVG (text/xml) or any other oddity
+	// through. The `declared` value is still used above to pick the size gate
+	// (PDF gets a higher cap) — that is intentional defense-in-depth, not the
+	// final authority.
 	switch detected {
 	case "image/jpeg", "image/png", "image/gif", "image/webp":
 		// ok
 	default:
-		return cli.Attachment{}, fmt.Errorf("unsupported image format (jpeg/png/gif/webp only)")
+		return cli.Attachment{}, fmt.Errorf("only image/* or application/pdf files are accepted")
 	}
 	// R232-SEC-7 (#1002): defence-in-depth secondary magic scan. http.DetectContentType
 	// only inspects the leading bytes; a JFIF (or any image) header followed by an
@@ -625,7 +732,10 @@ func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	owner := uploadOwner(w, r, h.auth, h.trustedProxy)
+	owner, ok := uploadOwnerOrFail(w, r, h.auth, h.trustedProxy)
+	if !ok {
+		return
+	}
 	id, err := h.uploadStore.Put(owner, att)
 	if err != nil {
 		// Distinguish per-owner quota from global exhaustion so the client
@@ -748,7 +858,10 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	// nothing is consumed — the user can retry the whole batch after
 	// re-uploading instead of losing the earlier valid images silently.
 	// R37-CONCUR4.
-	owner := uploadOwner(w, r, h.auth, h.trustedProxy)
+	owner, ok := uploadOwnerOrFail(w, r, h.auth, h.trustedProxy)
+	if !ok {
+		return
+	}
 	if len(fileIDs) > 0 {
 		taken, err := h.uploadStore.TakeAll(fileIDs, owner)
 		if err != nil {
@@ -971,6 +1084,27 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 // expressed with forward slashes (the sole form seen in EventEntry.ImagePaths).
 // Kept separate from attachment.Dir so the HTTP layer's guard does not silently
 // loosen if attachment.Dir grows a platform-dependent separator someday.
+//
+// Cross-platform contract — R241-SEC-8 (#468):
+//
+//   - The trailing `/` is REQUIRED. handleAttachment compares against this
+//     literal via strings.HasPrefix on the POSIX-cleaned wire path, after
+//     rejecting any input containing a backslash or NUL byte
+//     (see handleAttachment's pre-clean above). The slash here is a wire-
+//     format separator (forward slash always, on every platform), NOT a
+//     filesystem separator — never substitute filepath.Separator here.
+//
+//   - Down-stream Joins must convert via filepath.FromSlash before passing
+//     the prefix-trimmed remainder to filepath.Join (see the attachRootAbs
+//     line that calls strings.TrimSuffix(attachmentDirPrefix, "/") inside
+//     filepath.Join). On Windows / on a hypothetical FS with a non-`/`
+//     separator, the FromSlash hop is what makes this prefix portable.
+//
+//   - Adding a backslash variant or making this prefix platform-conditional
+//     would BREAK the wire contract: every existing EventEntry.ImagePaths
+//     value on disk uses forward slashes regardless of host OS, and any
+//     mismatch with the HasPrefix gate either rejects legitimate paths
+//     (denial-of-service) or admits non-attachment paths (escape).
 const attachmentDirPrefix = ".naozhi/attachments/"
 
 // maxAttachmentBytes caps the per-response size. Images from the dashboard
@@ -981,6 +1115,54 @@ const attachmentDirPrefix = ".naozhi/attachments/"
 // for future raw-mode uploads while staying below the 50 MB project file
 // cap that serveRaw uses.
 const maxAttachmentBytes = 16 << 20
+
+// cleanAttachmentRelPath validates the workspace-relative attachment path
+// the dashboard sends in ?path=. Returns (cleaned, "") on accept and
+// ("", errMsg) on reject — errMsg is the same operator-facing string the
+// HTTP handler used to embed inline so JSON shape stays byte-for-byte
+// stable. Carved out of handleAttachment (R215-SEC-P2-3 / #536) so a unit
+// test can drive the path.Clean / filepath.Clean divergence guard
+// directly; the inline cleaning logic is preserved verbatim below.
+//
+// The second cleaner check is a no-op on Linux (path.Clean and
+// filepath.Clean agree) but rejects any input that round-trips
+// differently through the OS-aware cleaner — mac/Windows paths with
+// alternate separators or platform-specific dot handling. Documented as
+// defense-in-depth: the pre-clean already rejects backslash + IsAbs.
+func cleanAttachmentRelPath(relRaw string) (string, string) {
+	if len(relRaw) > 1024 {
+		return "", "path too long"
+	}
+	if strings.ContainsRune(relRaw, 0) {
+		return "", "invalid path"
+	}
+	if strings.ContainsRune(relRaw, '\\') || filepath.IsAbs(relRaw) {
+		return "", "invalid path"
+	}
+	// path.Clean (POSIX, forward-slash only) is correct for the wire
+	// shape we accept (we already rejected backslash + IsAbs above), and
+	// matches the forward-slash attachmentDirPrefix HasPrefix check
+	// below. EvalSymlinks + attachRootAbs HasPrefix below provides the
+	// authoritative containment check after Join.
+	cleaned := path.Clean(relRaw)
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
+		return "", "invalid path"
+	}
+	// R215-SEC-P2-3 (#536): defence-in-depth on non-Linux. On Linux
+	// path.Clean and filepath.Clean are identical so this guard is a
+	// no-op for legitimate input. On macOS / Windows the OS path
+	// semantics diverge from POSIX (case-insensitive FS, alternate
+	// separators, drive letters); even though the pre-clean rejects
+	// backslash + IsAbs, an OS-aware re-clean catches anything the POSIX
+	// cleaner missed. We require the two cleaners to agree on the same
+	// forward-slash representation — any divergence is rejected rather
+	// than silently accepted, since by definition it means the wire
+	// shape was not stable across the path/filepath boundary.
+	if osCleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(cleaned))); osCleaned != cleaned {
+		return "", "invalid path"
+	}
+	return cleaned, ""
+}
 
 // handleAttachment streams an on-disk inline image from the session
 // workspace attachment directory. Supersedes the data-URI thumbnail for
@@ -1013,40 +1195,12 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	// absolute paths, no traversal, no NUL. Mirrors resolveProjectFile's
 	// guard so a crafted `path` field cannot escape the attachment dir
 	// even if the workspace resolution below returns a path the user
-	// does not own.
-	if len(relRaw) > 1024 {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "path too long"})
-		return
-	}
-	if strings.ContainsRune(relRaw, 0) {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
-		return
-	}
-	if strings.ContainsRune(relRaw, '\\') || filepath.IsAbs(relRaw) {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
-		return
-	}
-	// path.Clean (POSIX, forward-slash only) is correct for the wire
-	// shape we accept (we already rejected backslash + IsAbs above), and
-	// matches the forward-slash attachmentDirPrefix HasPrefix check
-	// below. EvalSymlinks + attachRootAbs HasPrefix below provides the
-	// authoritative containment check after Join.
-	cleaned := path.Clean(relRaw)
-	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
-		return
-	}
-	// R215-SEC-P2-3: defence-in-depth on non-Linux. On Linux path.Clean and
-	// filepath.Clean are identical so this guard is a no-op. On macOS /
-	// Windows the OS path semantics diverge from POSIX (case-insensitive
-	// FS, alternate separators, drive letters); even though the pre-clean
-	// rejects backslash + IsAbs, an OS-aware re-clean catches anything the
-	// POSIX cleaner missed. We require the two cleaners to agree on the
-	// same forward-slash representation — any divergence is rejected
-	// rather than silently accepted, since by definition it means the
-	// wire shape was not stable across the path/filepath boundary.
-	if osCleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(cleaned))); osCleaned != cleaned {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
+	// does not own. The shape checks live in cleanAttachmentRelPath so a
+	// unit test can exercise the path.Clean / filepath.Clean divergence
+	// guard (R215-SEC-P2-3 / #536) without standing up the HTTP handler.
+	cleaned, errMsg := cleanAttachmentRelPath(relRaw)
+	if errMsg != "" {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": errMsg})
 		return
 	}
 	// Pin to attachment subtree — refuses /etc/passwd, /workspace/secret.env,
@@ -1066,7 +1220,7 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	// associated with the key, so a crafted workspace in the query would
 	// just be ignored.
 	var ws string
-	if sess := h.hub.router.GetSession(key); sess != nil {
+	if sess := h.router.GetSession(key); sess != nil {
 		ws = sess.Workspace()
 	}
 	if ws == "" {
@@ -1074,7 +1228,7 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		if idx := strings.LastIndexByte(key, ':'); idx > 0 {
 			chatKey = key[:idx]
 		}
-		ws = h.hub.router.GetWorkspace(chatKey)
+		ws = h.router.GetWorkspace(chatKey)
 	}
 	if ws == "" {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
@@ -1124,8 +1278,23 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(resolved)
+	// R249-SEC-3 (#917): close the Lstat→Open TOCTOU symlink-swap window.
+	// Between the Lstat above and an unconstrained os.Open, an attacker
+	// with write access to attachRootAbs could replace `resolved` with a
+	// symlink pointing outside the workspace. openWorkspaceFile uses
+	// O_NOFOLLOW on unix so a final-component symlink-swap fails atomically
+	// at the kernel boundary (ELOOP); the windows shim falls back to
+	// plain Open with the same residual posture as the rest of the codebase.
+	// Mirrors the R219-SEC-2 close already shipped for handleFileGet.
+	f, err := openWorkspaceFile(resolved)
 	if err != nil {
+		// Map symlink-trap errors and any other open failure to the same
+		// 404 the rest of the handler returns — "missing or escape attempt
+		// look identical" matches the dashboard contract.
+		if errors.Is(err, syscall.ELOOP) {
+			writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+			return
+		}
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "open failed"})
 		return
 	}

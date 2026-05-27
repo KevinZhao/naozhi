@@ -69,10 +69,21 @@ func IsPlannerKey(key string) bool {
 	return len(key) > len(ProjectKeyPrefix)+len(PlannerKeySuffix)
 }
 
-// PlannerNameFromKey extracts {name} from a planner key. Callers MUST
-// have verified IsPlannerKey first; passing a non-planner key is
-// undefined behaviour (the function panics on empty input via slice
-// bounds when the key is shorter than the prefix+suffix sum).
+// PlannerNameFromKey extracts {name} from a planner key. Returns the
+// empty string for any non-planner input (including keys shorter than
+// prefix+suffix, missing prefix/suffix, or the empty-name edge case
+// `project::planner`).
+//
+// R20260526-CR-009: previously the function sliced unconditionally and
+// would panic on `slice bounds out of range` when given a too-short
+// input. The godoc told callers to gate on IsPlannerKey first, but a
+// silent caller bug would crash with an uninformative runtime panic.
+// The self-defense IsPlannerKey gate makes the function total: well-
+// formed callers pay one extra HasPrefix+HasSuffix check (cheap), ill-
+// formed callers get a typed empty-string instead of a panic.
 func PlannerNameFromKey(key string) string {
+	if !IsPlannerKey(key) {
+		return ""
+	}
 	return key[len(ProjectKeyPrefix) : len(key)-len(PlannerKeySuffix)]
 }

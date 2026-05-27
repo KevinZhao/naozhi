@@ -17,6 +17,13 @@ import (
 // If session.SessionIDExcluder gains a method, this assertion makes the
 // breakage land here — next to the implementation — instead of at a
 // distant call site like router.AddSessionIDExcluder.
+//
+// SessionRouter is satisfied by cmd/naozhi.cronRouterAdapter (Phase B,
+// docs/rfc/cron-sysession-merge.md §3.3.3) — cron returns cron-local
+// Session / SessionStatus from GetOrCreate, *session.Router returns
+// *session.ManagedSession, so a direct `*session.Router` guard would
+// not compile. The adapter pins the SessionRouter contract via its own
+// `var _ cron.SessionRouter = cronRouterAdapter{}` at the call site.
 var _ session.SessionIDExcluder = (*Scheduler)(nil)
 
 // knownSessionIDsRecentCap bounds how many recent runs per job we walk
@@ -56,6 +63,33 @@ func (s *Scheduler) IsExcluded(sessionID string) bool {
 	return s.containsSessionID(sessionID)
 }
 
+// LookupKnownSessionID reports whether the given Claude sessionID belongs
+// to a cron-spawned run, using the same fast-path / TTL-cache pipeline as
+// IsExcluded but without going through the session.SessionIDExcluder
+// interface boundary. Callers that already hold a *Scheduler reference
+// (auto-workspace-chain spawn, dashboard history-panel filter,
+// containsSessionID-equivalent probes) avoid the per-call interface
+// dispatch + `if s == nil` short-circuit and read the named API exactly
+// as proposed in R242-ARCH-23 (#767). Returns false on the empty
+// sessionID for shape symmetry with IsExcluded.
+//
+// The cluster of related issues (R243-PERF-2 / R242-PERF-7) targeted the
+// pre-cache O(jobs × recentCap) rebuild that ran on every IsExcluded
+// probe. R245-GO-4 already collapsed that walk into containsSessionID's
+// fast path (LastSessionID + runningJobs lookup before any rebuild), so
+// the perf delta of LookupKnownSessionID over IsExcluded is microseconds
+// — the named API is the user-visible payoff.
+//
+// Safe to call on a nil Scheduler — returns false. The name mirrors
+// KnownSessionIDs (the bulk dashboard accessor) so future readers see
+// "Lookup" → single-key probe / "Known" → full set in one place.
+func (s *Scheduler) LookupKnownSessionID(sessionID string) bool {
+	if s == nil || sessionID == "" {
+		return false
+	}
+	return s.containsSessionID(sessionID)
+}
+
 // containsSessionID is the single-key probe variant of KnownSessionIDs.
 // Shares the TTL cache + invalidation contract — readers see the same
 // snapshot a concurrent KnownSessionIDs() caller would observe — but
@@ -63,6 +97,17 @@ func (s *Scheduler) IsExcluded(sessionID string) bool {
 // rebuild on the same conditions as KnownSessionIDs (cold cache or
 // TTL expired); the rebuilt set is then cached so subsequent IsExcluded
 // + KnownSessionIDs callers in the same window share work. R245-GO-4.
+//
+// Fast-path (cache cold, single-key probe): walk Job.LastSessionID under
+// s.mu RLock then s.runningJobs.Range — both are O(jobs) and avoid the
+// O(jobs × recentCap) runStore.Recent walk that buildKnownSessionsSet
+// would otherwise pay for. Only when neither cheap source matches do we
+// fall through to the full build (which still populates the TTL cache
+// so subsequent IsExcluded + KnownSessionIDs callers see the same
+// snapshot). The fast path is intentionally cache-bypassing: it does
+// not poison the cache with a partial set, so a subsequent
+// KnownSessionIDs() caller still gets the complete history. R245-GO-4
+// (#844).
 func (s *Scheduler) containsSessionID(sessionID string) bool {
 	s.knownSessionsCache.mu.Lock()
 	if s.knownSessionsCache.set != nil &&
@@ -73,6 +118,39 @@ func (s *Scheduler) containsSessionID(sessionID string) bool {
 	}
 	s.knownSessionsCache.mu.Unlock()
 
+	// Cold cache: cheap fast path before the O(jobs × recentCap) build.
+	// Most spawn-time IsExcluded probes target the *just-written*
+	// LastSessionID of an active or recently-finished job — both of
+	// these are reachable without touching runStore.Recent.
+	s.mu.RLock()
+	for _, j := range s.jobs {
+		if j.LastSessionID == sessionID {
+			s.mu.RUnlock()
+			return true
+		}
+	}
+	s.mu.RUnlock()
+
+	found := false
+	s.runningJobs.Range(func(_, v any) bool {
+		inf, ok := v.(*runInflight)
+		if !ok || inf == nil {
+			return true
+		}
+		view, running := inf.snapshot()
+		if running && view.SessionID == sessionID {
+			found = true
+			return false
+		}
+		return true
+	})
+	if found {
+		return true
+	}
+
+	// Not in the cheap sources — pay the full build and populate the
+	// TTL cache so subsequent callers (KnownSessionIDs at 1Hz from the
+	// dashboard) reuse this work.
 	set := s.buildKnownSessionsSet()
 
 	s.knownSessionsCache.mu.Lock()

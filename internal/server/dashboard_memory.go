@@ -28,9 +28,42 @@ type MemoryHandler struct {
 	projectsDir    string
 	currentProject string
 	limiter        *ipLimiter
+
+	// R242-SEC-7 (#635): cache the resolved-prefix at construction time so the
+	// runtime base used for both the lexical HasPrefix gate and the post-
+	// EvalSymlinks recheck is identical and immutable. Recomputing the prefix
+	// per-request from h.projectsDir is functionally equivalent (h.projectsDir
+	// is set once at construction and never mutated), but caching here pins
+	// the base as a property of the handler — future code that repoints
+	// projectsDir cannot drift the gates apart, and there's no chance the
+	// prefix is rebuilt under a partially-set field.
+	//
+	// resolvedPrefix already carries the trailing separator; resolvedPrefixNoSep
+	// is the same value with the trailing separator stripped, so a direct
+	// equality match with the projects root itself (resolved == prefixNoSep)
+	// stays accepted exactly as before.
+	resolvedPrefix      string
+	resolvedPrefixNoSep string
 }
 
 var memorySlugRE = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,64}$`)
+
+// memoryProjectDirRE locks the shape of a Claude `~/.claude/projects/<name>`
+// directory entry. Claude encodes the project path as `-` + slash-replaced
+// CWD, so legitimate names look like `-home-user-workspace-foo` — leading
+// dash, alnum + `_-.` thereafter, capped at a generous length.
+//
+// R241-SEC-6 (#467): defence in depth. tryRead joins the entry name into
+// the lookup path; even though we only iterate `os.ReadDir(projectsDir)`
+// (so an attacker would need write access to ~/.claude/projects to plant
+// a malicious entry), an entry whose name carried `..` separators or
+// embedded NUL / control bytes could still influence the resolved path
+// or pollute audit logs. Filtering at iteration time keeps every Join
+// input within the alphabet the encoder produces. Non-matching entries
+// are silently skipped — they cannot be Claude project dirs and any
+// memory file inside them would not be discoverable through the regular
+// lookup path either.
+var memoryProjectDirRE = regexp.MustCompile(`^-[a-zA-Z0-9_][a-zA-Z0-9._\-]{0,255}$`)
 
 // utf8BOM is defined as bytes (not a string literal) so a literal BOM never
 // appears in this Go source file — the compiler rejects mid-file BOM.
@@ -56,12 +89,12 @@ const (
 var errMemoryPathEscape = errors.New("path escapes projects dir")
 
 func NewMemoryHandler(trustedProxy bool) *MemoryHandler {
-	dir := os.Getenv("CLAUDE_PROJECTS_DIR")
-	if dir == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			dir = filepath.Join(home, ".claude", "projects")
-		}
-	}
+	// R222-ARCH-9 / #724: single-point env probe via resolveClaudeProjectsDir
+	// (was: inline CLAUDE_PROJECTS_DIR + UserHomeDir → filepath.Join). The
+	// helper preserves the original semantics exactly: honour the
+	// CLAUDE_PROJECTS_DIR override first, fall back to ~/.claude/projects,
+	// and return "" when both probe paths fail.
+	dir := resolveClaudeProjectsDir()
 	// R240-SEC-1: canonicalise projectsDir at construction. If the dir is itself
 	// reachable via a symlinked component (Docker bind-mount, AMI-customised
 	// layout, ~/.claude → /var/data/.claude on macOS), the prefix check inside
@@ -80,10 +113,17 @@ func NewMemoryHandler(trustedProxy bool) *MemoryHandler {
 		dir = filepath.Clean(dir)
 	}
 	cur := encodeCurrentProjectDir(dir)
+	prefixNoSep := strings.TrimRight(filepath.Clean(dir), string(filepath.Separator))
+	prefix := prefixNoSep
+	if prefix != "" {
+		prefix += string(filepath.Separator)
+	}
 	return &MemoryHandler{
-		projectsDir:    dir,
-		currentProject: cur,
-		limiter:        newIPLimiterWithProxy(memoryLimiterRate, memoryLimiterBurst, trustedProxy),
+		projectsDir:         dir,
+		currentProject:      cur,
+		limiter:             newIPLimiterWithProxy(memoryLimiterRate, memoryLimiterBurst, trustedProxy),
+		resolvedPrefix:      prefix,
+		resolvedPrefixNoSep: prefixNoSep,
 	}
 }
 
@@ -174,6 +214,15 @@ func (h *MemoryHandler) lookup(slug string) (memoryResponse, error) {
 		if !ent.IsDir() || ent.Name() == h.currentProject {
 			continue
 		}
+		// R241-SEC-6 (#467): skip entries whose names cannot be a
+		// Claude-encoded project dir. Disk-controlled names containing
+		// `..`, slashes, or control bytes would otherwise reach
+		// tryRead's filepath.Join and depend solely on the lexical
+		// HasPrefix check below to stay rooted. The regex is the first
+		// line of defence; the prefix + EvalSymlinks checks remain.
+		if !memoryProjectDirRE.MatchString(ent.Name()) {
+			continue
+		}
 		names = append(names, ent.Name())
 	}
 	sort.Strings(names)
@@ -192,13 +241,45 @@ func (h *MemoryHandler) lookup(slug string) (memoryResponse, error) {
 }
 
 func (h *MemoryHandler) tryRead(projectDir, slug string) (*memoryResponse, error) {
+	// R241-SEC-6 (#467): pin every Join input to the alphabet Claude's
+	// project-dir encoder produces (see encodeCurrentProjectDir). The
+	// only call sites pass either h.currentProject or an entry returned
+	// by os.ReadDir, but a future caller plumbing user input through
+	// projectDir would otherwise reach filepath.Join with no shape
+	// gate.
+	//
+	// Two failure modes, two response shapes — preserves the existing
+	// errMemoryPathEscape contract that callers already test:
+	//
+	//   • Name contains traversal/separator bytes ("..", "/", "\\") —
+	//     return errMemoryPathEscape so a deliberate attack-shaped
+	//     input is loud (matches the lexical-prefix check below).
+	//   • Name simply doesn't match the encoder alphabet (e.g. random
+	//     stray dirs disk-write planted, ent.Name() that didn't pass
+	//     the iteration filter for some other reason) — return
+	//     (nil, nil) the same way "slug not found" does, so a benign
+	//     non-Claude entry never surfaces an error to the dashboard.
+	if strings.Contains(projectDir, "..") ||
+		strings.ContainsAny(projectDir, `/\`) {
+		return nil, errMemoryPathEscape
+	}
+	if !memoryProjectDirRE.MatchString(projectDir) {
+		return nil, nil
+	}
 	full := filepath.Join(h.projectsDir, projectDir, "memory", slug+".md")
 	clean := filepath.Clean(full)
 
 	// Defence in depth: even though slug is regex-locked, re-verify the
 	// resolved path stays inside projectsDir.
-	prefix := strings.TrimRight(filepath.Clean(h.projectsDir), string(filepath.Separator)) + string(filepath.Separator)
-	prefixNoSep := strings.TrimRight(filepath.Clean(h.projectsDir), string(filepath.Separator))
+	//
+	// R242-SEC-7 (#635): use the construction-time cached prefix so the
+	// lexical gate and the post-EvalSymlinks recheck below share an
+	// identical, immutable base. Rebuilding the prefix per-request was
+	// functionally equivalent here (h.projectsDir is set once and never
+	// mutated) but kept the door open for a future caller mutating it,
+	// or for the two derivations to drift via filepath.Clean differences.
+	prefix := h.resolvedPrefix
+	prefixNoSep := h.resolvedPrefixNoSep
 	if !strings.HasPrefix(clean, prefix) {
 		return nil, errMemoryPathEscape
 	}

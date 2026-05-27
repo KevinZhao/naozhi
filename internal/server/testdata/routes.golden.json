@@ -10,6 +10,11 @@
     "handler_type": "*AuthHandlers"
   },
   {
+    "method": "POST",
+    "path": "/api/auth/noscript",
+    "handler_type": "*AuthHandlers"
+  },
+  {
     "method": "GET",
     "path": "/api/cli/backends",
     "handler_type": "*CLIBackendsHandler"

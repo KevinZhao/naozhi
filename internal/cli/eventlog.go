@@ -40,66 +40,6 @@ const setAgentInternalIDMaxScan = 50
 // between subscriber reads.
 const entriesSinceInitialCap = 16
 
-// entriesPoolMaxCap caps the capacity returned to entriesPool. Backing arrays
-// larger than the default ring (500 slots) are uncommon — the dashboard
-// pagination path only fetches `limit` entries at a time — and pooling them
-// would let one pathological session hold a multi-MB array forever.
-const entriesPoolMaxCap = 512
-
-// entriesPool reuses []EventEntry backing arrays across Entries / LastN
-// calls. R247-PERF-13 (REPEAT-3): each dashboard subscribe / history
-// snapshot allocates ~140KB (500 × ~280B EventEntry) per call; the
-// dashboard live-tail flow can call Entries() at >1Hz per session, so on
-// 50 active sessions the alloc bandwidth is meaningful.
-//
-// Lifetime contract: slices returned by Entries/LastN are valid until the
-// caller releases them via ReleaseEntriesSlice. Callers that retain the
-// slice across goroutine boundaries (e.g. into channels) MUST NOT release;
-// the slice will then be GC-reclaimed normally — no regression vs the
-// pre-pool behaviour. The Get path tolerates a smaller-than-needed pooled
-// slice by re-allocating, so a missed Release only forfeits the savings
-// for one call.
-var entriesPool = sync.Pool{
-	New: func() any {
-		// Default ring size matches defaultEventLogSize so the first call
-		// after pool warmup hits the common path without spilling.
-		s := make([]EventEntry, 0, defaultEventLogSize)
-		return &s
-	},
-}
-
-// getEntriesSlice returns a []EventEntry with cap >= n. The returned slice
-// is length n and contains zero values; callers fill it in place.
-func getEntriesSlice(n int) []EventEntry {
-	if n <= 0 {
-		return nil
-	}
-	sp := entriesPool.Get().(*[]EventEntry)
-	s := *sp
-	if cap(s) < n {
-		// Pool entry too small — drop it on the floor (let GC reclaim) and
-		// allocate exactly what we need. The next Get refills via New.
-		return make([]EventEntry, n)
-	}
-	return s[:n]
-}
-
-// ReleaseEntriesSlice returns a slice obtained from Entries/LastN to the
-// pool. Safe to call with nil; safe to call from any goroutine. Callers
-// MUST NOT touch the slice after release. Slices whose capacity exceeds
-// entriesPoolMaxCap are dropped to bound pool memory.
-func ReleaseEntriesSlice(s []EventEntry) {
-	if cap(s) == 0 || cap(s) > entriesPoolMaxCap {
-		return
-	}
-	// Zero entries before release so EventEntry's reference fields (strings,
-	// slices, *AskQuestion, *ToolCall) don't pin garbage past the caller's
-	// last use.
-	clear(s[:cap(s)])
-	s = s[:0]
-	entriesPool.Put(&s)
-}
-
 // imageDataURIPrefix is the required leading substring for every entry in
 // EventEntry.Images. Today the only producer is MakeThumbnail (process.go:853),
 // which always returns "data:image/jpeg;base64,..." or "". Future refactors
@@ -304,6 +244,21 @@ type subscriber struct {
 	ch        chan struct{} // buffered(1)
 	closeOnce sync.Once
 }
+
+// eventLogClosedCh is a process-wide pre-closed `chan struct{}` returned by
+// Subscribe when the EventLog has already been torn down (subsClosed=true).
+// R247-PERF-14 (#553): late-arriving subscribers during dashboard reconnect
+// storms used to allocate a fresh subscriber struct + buffered channel
+// pair just to immediately close it; sharing one pre-closed channel skips
+// both allocations on every post-close Subscribe. Receiving from a closed
+// channel always returns the zero value with ok=false, so the caller's
+// `select case <-notify: ok=false` arm still fires identically — and
+// because the channel has no senders, it is permanently safe to share.
+var eventLogClosedCh = func() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}()
 
 // EventLog is a thread-safe, bounded event log backed by a ring buffer.
 type EventLog struct {
@@ -524,9 +479,12 @@ type PersistSink func(entries []EventEntry, replayPhase bool)
 //
 // This method is the only public way to flip sinkReady to true.
 // Calling it twice replaces the sink (last-writer-wins); calling
-// it with nil "clears" the sink but does NOT flip sinkReady back
-// to false — operators who want a clean replay phase should create
-// a fresh EventLog rather than try to uninstall.
+// it with nil "clears" the sink AND flips sinkReady back to false
+// so that any subsequent SetPersistSink(real) re-enters the
+// pre-attach phase cleanly. R20260526-GO-010: without this reset,
+// a "pause persist → re-install sink → InjectHistory" sequence
+// would tag the replay batch replayPhase=false (live) and the
+// Persister would commit the duplicate history to disk.
 //
 // R224-GO-5 (closes TODO): the original review flagged a "race
 // window between sink Store and sinkReady Store where one entry
@@ -556,6 +514,14 @@ type PersistSink func(entries []EventEntry, replayPhase bool)
 // that runs once per session lifetime. Keep the asymmetry.
 func (l *EventLog) SetPersistSink(fn PersistSink) {
 	if fn == nil {
+		// Order: clear sinkReady FIRST so any concurrent Append racing
+		// the uninstall observes the pre-attach phase before the sink
+		// pointer goes nil. Storing the pointer first would open a
+		// window where invokePersistSink loads a non-nil pointer but
+		// reads sinkReady=true, then by the time it dispatches the
+		// pointer is nil — same shape as the inverted-order race
+		// documented in the install path. R20260526-GO-010.
+		l.sinkReady.Store(false)
 		l.persistSinkPtr.Store(nil)
 		// Clear any previously paired single-entry sink — leaving it
 		// installed would cause Append to fire the single-entry
@@ -603,7 +569,10 @@ func (l *EventLog) SetPersistSinkPair(batch PersistSink, single PersistSinkOne) 
 	if batch == nil {
 		// Treat a nil batch as "uninstall everything" so callers do not
 		// have to remember a separate clear sequence; mirrors
-		// SetPersistSink(nil) semantics.
+		// SetPersistSink(nil) semantics — including the sinkReady
+		// reset that lets a subsequent re-install enter the pre-attach
+		// phase cleanly. R20260526-GO-010.
+		l.sinkReady.Store(false)
 		l.persistSinkOnePtr.Store(nil)
 		l.persistSinkPtr.Store(nil)
 		return
@@ -705,6 +674,30 @@ func (l *EventLog) invokePersistSinkOne(entry EventEntry) bool {
 // the EventLog's construction.
 func (l *EventLog) ReplayInvokeTotal() int64 {
 	return l.replayInvokeTotal.Load()
+}
+
+// SinkReady reports whether SetPersistSink has wired a persistence hook
+// and toggled `sinkReady` to true. Designed for /health surfacing — pair
+// with ReplayInvokeTotal() so operators can distinguish "the sink simply
+// hasn't attached yet" (SinkReady=false, ReplayInvokeTotal frozen at the
+// InjectHistory replay total) from "the SetPersistSink-after-Append
+// ordering window opened in production" (SinkReady=true,
+// ReplayInvokeTotal still climbing — should be statistically impossible
+// under correct caller ordering).
+//
+// R242-ARCH-20 (closes the diagnostic surface the original review asked
+// for). The counter pair already covers the leak side; this accessor
+// closes the "is the sink up?" half so /health doesn't have to peek at
+// internal atomics.
+//
+// Safe to call from any goroutine. Returns false on a nil receiver so
+// /health request paths that observe a torn-down EventLog (rare, but
+// possible during shutdown) report "not ready" rather than panic.
+func (l *EventLog) SinkReady() bool {
+	if l == nil {
+		return false
+	}
+	return l.sinkReady.Load()
 }
 
 // stampUUID guarantees every appended EventEntry has a non-empty
@@ -914,12 +907,54 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 // forbidden (setting a second time replaces the first). Used by the
 // server-side tailer registry to stop tailers promptly once the parent
 // stream marks an agent task finished. nil clears.
+//
+// Prefer OnAgentTaskDone for new code: it returns a cancel func that
+// matches the Subscribe() idiom, so callback registration and channel
+// subscription share one mental model (R246-ARCH-20 / #802 P0 subset).
+// The set/clear semantics are unchanged here -- a future PR can promote
+// the field to a slice + EventFilter and unify the dispatch path itself.
 func (l *EventLog) SetOnAgentTaskDone(fn func(taskID, status string)) {
 	if fn == nil {
 		l.onAgentTaskDoneFn.Store(nil)
 		return
 	}
 	l.onAgentTaskDoneFn.Store(&fn)
+}
+
+// OnAgentTaskDone is the cancel-func form of SetOnAgentTaskDone per
+// R246-ARCH-20 / #802 (P0 subset). Registration shape now matches
+// Subscribe(): both return a cancel func that detaches the consumer
+// without the caller needing to remember "pass nil to clear".
+//
+// Multi-subscriber semantics still resolve to last-writer-wins because
+// the underlying single-pointer storage is unchanged in this P0 step --
+// the goal here is to unify the *registration idiom* so the eventlog
+// API surface stops asking callers to choose between Set/clear-via-nil
+// (callback channel) vs Subscribe/cancel (notification channel). A
+// follow-up PR can promote the storage to a []func + filter and the
+// idiom does not have to change again.
+//
+// The returned cancel is idempotent. If fn is nil, the call is a no-op
+// and the returned cancel is also a no-op (mirrors Subscribe's pre-
+// closed-channel-on-CloseSubscribers branch in spirit: callers can
+// safely defer cancel without conditional checks).
+func (l *EventLog) OnAgentTaskDone(fn func(taskID, status string)) func() {
+	if fn == nil {
+		return func() {}
+	}
+	stored := &fn
+	l.onAgentTaskDoneFn.Store(stored)
+	var cancelOnce sync.Once
+	return func() {
+		cancelOnce.Do(func() {
+			// CompareAndSwap so a later SetOnAgentTaskDone / OnAgentTaskDone
+			// caller's installed pointer is not clobbered by a stale cancel
+			// from this registration. Last-writer-wins is preserved without
+			// the cancel func acting as a delayed nil-clear on whatever the
+			// next consumer just installed.
+			l.onAgentTaskDoneFn.CompareAndSwap(stored, nil)
+		})
+	}
 }
 
 // loadAgentTaskDoneFn returns the current on-task-done callback so the
@@ -1243,20 +1278,12 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	// batch.
 	sinkAttached := l.persistSinkPtr.Load() != nil
 	captureForSink := sinkAttached && l.sinkReady.Load()
-	// R225-PERF-11: stamp UUIDs in-place *before* l.mu so the N
-	// crypto/rand.Read syscalls (getrandom, one per missing UUID) don't run
-	// under the write-lock. InjectHistory's 500-entry replay would otherwise
-	// hold l.mu across 500 syscalls during shim reconnect and starve every
-	// concurrent Append. Caller-set UUIDs (history replay) are preserved.
-	for i := range entries {
-		stampUUID(&entries[i])
-	}
-	// R214-PERF-5: when a persist sink is wired, build the fully-prepared
-	// sink slice OUTSIDE l.mu so the ~200KB copy on a 500-entry InjectHistory
-	// replay no longer pins the write-lock. The original code did
-	// `sinkCopy = append(sinkCopy, e)` inside the loop under l.mu; under heavy
-	// shim reconnect (drop + reconnect on transient network blip) every
-	// concurrent Append on the same EventLog blocked behind that copy.
+	// R225-PERF-11 + R249-PERF-16: single pre-lock pass that stamps UUIDs,
+	// applies the default Time, and sanitises image URIs. The N
+	// crypto/rand.Read syscalls (getrandom, one per missing UUID) and the
+	// ~200KB sinkCopy build for a 500-entry InjectHistory replay all happen
+	// outside the write-lock. Caller-set UUIDs (history replay) are preserved
+	// by stampUUID's no-op-on-non-empty contract.
 	//
 	// `sinkCopy` doubles as the inner-loop iteration source so per-entry
 	// stamping (default time, image sanitize) is also paid only once per
@@ -1266,23 +1293,28 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	// Fast path (!captureForSink): sinkCopy stays nil and the inner loop
 	// falls back to the historical "stamp inside lock" path. Test harnesses
 	// and the InjectHistory phase before the persister attaches don't pay
-	// for the extra 200KB allocation.
+	// for the extra 200KB allocation, but UUID stamping still runs here.
 	var sinkCopy []EventEntry
 	if captureForSink {
 		sinkCopy = make([]EventEntry, len(entries))
-		for i, e := range entries {
-			if e.Time == 0 {
-				e.Time = defaultTime
-			}
-			// S15 (Round 174): same enforcement as Append. Replays from
-			// history (InjectHistory → AppendBatch) should never contain
-			// non-image data URIs today, but defense-in-depth is trivially
-			// cheap and locks the contract to a single sink.
-			if len(e.Images) > 0 {
-				e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
-			}
-			sinkCopy[i] = e
+	}
+	for i := range entries {
+		stampUUID(&entries[i])
+		if !captureForSink {
+			continue
 		}
+		e := entries[i]
+		if e.Time == 0 {
+			e.Time = defaultTime
+		}
+		// S15 (Round 174): same enforcement as Append. Replays from
+		// history (InjectHistory → AppendBatch) should never contain
+		// non-image data URIs today, but defense-in-depth is trivially
+		// cheap and locks the contract to a single sink.
+		if len(e.Images) > 0 {
+			e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
+		}
+		sinkCopy[i] = e
 	}
 	l.mu.Lock()
 	for idx, e := range entries {
@@ -1399,6 +1431,33 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 // an O(N) scan to find + swap-to-end the leaving subscriber. closeOnce
 // on subscriber.ch keeps the "close exactly once" invariant safe across
 // the unsub-vs-CloseSubscribers race.
+//
+// RNEW-PERF-004 (#455) — DO-NOT-DO note: a tempting micro-optimisation
+// is to snapshot `l.subscribers` under RLock then drop the lock before
+// the per-channel send loop, on the theory that the non-blocking sends
+// no longer need lock protection. This is UNSAFE in the current design:
+// the unsub closure (Subscribe's returned cancel func) closes
+// `sub.ch` *outside* l.subMu.Lock — `closeOnce.Do(func() { close(sub.ch) })`
+// runs after the lock release at line ~1556 below. With a snapshot-
+// then-unlock notify, the following sequence panics:
+//
+//	notify: RLock; copy l.subscribers into local; RUnlock
+//	unsub:  Lock; remove sub from slice; Unlock; close(sub.ch)
+//	notify: select { case sub.ch <- struct{}{}: …  ← PANIC: send on closed
+//
+// Today's RLock-around-send blocks unsub.Lock until the iteration ends,
+// so close(sub.ch) cannot run while a notify still holds a reference to
+// the channel. Any future "snapshot then unlock" attempt MUST first move
+// the close into the lock AND ensure no in-flight notify can hold a
+// reference to a *subscriber that has been removed from l.subscribers
+// (e.g. via subscriber refcount drained under Lock, or by switching
+// from close(ch) to a separate atomic "dead" flag observed before send).
+// The current cost — RLock acquire/release per Append — is bounded by
+// the subCount==0 fast path: idle sessions skip subMu entirely, and the
+// reader-only RWMutex makes concurrent Appends across different sessions
+// fan out without serialising on a single Mutex. Issue #455 is filed at
+// MEDIUM/defense-in-depth and remains accepted as-is until the close-
+// timing rework lands.
 func (l *EventLog) notifySubscribers() {
 	if l.subCount.Load() == 0 {
 		return
@@ -1413,8 +1472,61 @@ func (l *EventLog) notifySubscribers() {
 	l.subMu.RUnlock()
 }
 
+// EventSubscription wraps an EventLog notification channel together with the
+// matching cancel func so callers no longer pass a bare `<-chan struct{}`
+// across package boundaries. R246-ARCH-12 / #792 (P0 subset): the raw channel
+// surface forced every cross-package consumer (server/wshub, upstream
+// connector, session/managed) to internalize EventLog's close semantics --
+// "channel closed exactly once by either Cancel or CloseSubscribers, do not
+// close it yourself, do not assume close ⇒ unsubscribe". Bundling the two
+// into one value gives the eventlog package a single point of contact and
+// lets the close contract stay an internal invariant of (*subscriber).closeOnce.
+//
+// Hot-path callers still consume Notify() directly inside their `select` --
+// the wrapper has zero allocation cost beyond the existing make-channel
+// inside Subscribe (the EventSubscription struct is stack-allocated by the
+// caller's register-as-named-result path). Callers that need to thread the
+// cancel callback into a defer chain or a peer-cleanup map continue to use
+// the legacy Subscribe() return shape.
+type EventSubscription struct {
+	notify <-chan struct{}
+	cancel func()
+}
+
+// Notify returns the channel that fires (non-blocking, buffered-1) on every
+// EventLog.Append. Callers consume it inside a `select` arm. The channel is
+// closed by Cancel() or by EventLog.CloseSubscribers when the underlying
+// Process dies -- callers MUST NOT close it themselves.
+func (s EventSubscription) Notify() <-chan struct{} { return s.notify }
+
+// Cancel detaches this subscription from the EventLog and closes Notify().
+// Idempotent: a second call is a no-op. Safe to call from any goroutine,
+// including after CloseSubscribers has fired (the subscriber's closeOnce
+// guard makes the close re-entry safe).
+func (s EventSubscription) Cancel() {
+	if s.cancel != nil {
+		s.cancel()
+	}
+}
+
+// SubscribeNew is the typed, package-encapsulated form of Subscribe.
+// Returns an EventSubscription that owns both the notify channel and the
+// cancel func, hiding (*subscriber).closeOnce semantics from cross-package
+// callers per R246-ARCH-12 / #792. New call sites should prefer this entry
+// point; Subscribe() is retained for the existing fleet of callers that
+// already correctly wire the (channel, func) pair.
+func (l *EventLog) SubscribeNew() EventSubscription {
+	ch, cancel := l.Subscribe()
+	return EventSubscription{notify: ch, cancel: cancel}
+}
+
 // Subscribe returns a notification channel and an unsubscribe function.
 // The channel receives a signal (non-blocking) whenever Append is called.
+//
+// Prefer SubscribeNew for new code: it returns an EventSubscription value
+// that bundles (channel, cancel) together so the channel-close contract
+// stays an internal invariant of the eventlog package rather than a
+// cross-package convention every caller must learn (R246-ARCH-12 / #792).
 //
 // If CloseSubscribers has already been called (process is dying), returns a
 // channel that is already closed so the caller's select-on-notify arm fires
@@ -1423,13 +1535,32 @@ func (l *EventLog) notifySubscribers() {
 // subscribers map and register a channel that nothing will ever close, so
 // the downstream eventPushLoop would hang on <-notify until Hub shutdown.
 func (l *EventLog) Subscribe() (<-chan struct{}, func()) {
-	sub := &subscriber{ch: make(chan struct{}, 1)}
+	// R247-PERF-14 (#553): hot-check subsClosed BEFORE allocating the
+	// subscriber struct + buffered channel. On dashboard reconnect storms
+	// during shutdown a single dying EventLog can absorb hundreds of
+	// late-arriving Subscribe attempts (each WS handshake registers a
+	// session-tail subscriber); pre-sub-close the make(chan) + struct
+	// literal would compose two heap allocations per call, only to be
+	// immediately discarded after the closeOnce close + return-shared-
+	// closed-channel hand-off below. The atomic counter is also load-only
+	// so this short-circuit costs nothing on the steady-state happy path.
+	//
+	// Read l.subsClosed via a quick Lock/Unlock — atomic.Bool would suffice
+	// but adding a third synchronization primitive next to subMu / subCount
+	// is more failure-mode surface than warranted; the cold-path lock is
+	// already taken on every Subscribe today. The shared eventLogClosedCh
+	// singleton is a package-level pre-closed chan struct{} so all post-
+	// close callers receive the same already-closed channel value rather
+	// than a freshly-allocated-then-closed one. The closeOnce contract is
+	// preserved by the no-op cancel func — callers MUST NOT close the
+	// returned channel themselves (documented on Subscribe) and the shared
+	// channel cannot be Cancelled twice into a double-close panic.
 	l.subMu.Lock()
 	if l.subsClosed {
 		l.subMu.Unlock()
-		sub.closeOnce.Do(func() { close(sub.ch) })
-		return sub.ch, func() {}
+		return eventLogClosedCh, func() {}
 	}
+	sub := &subscriber{ch: make(chan struct{}, 1)}
 	if l.subscribers == nil {
 		// R230C-PERF-12 / R239-PERF-9: pre-size the slice. CloseSubscribers
 		// nils out the slice so each Subscribe after a teardown allocates
@@ -1578,35 +1709,91 @@ func (l *EventLog) Count() int {
 // hot streaming path (k = 1-5 new events per notify) the constant savings are
 // small but the code path is simpler and avoids the arithmetic error surface
 // of two separate modular indexing expressions.
+//
+// R220-PERF-3 (#685): the in-place slices.Reverse runs OUTSIDE l.mu so an
+// initial subscribe with hundreds of matched entries cannot block a
+// concurrent Append. The reverse-buffer (`rev`) holds value-copied
+// EventEntry slots; once the scan returns we no longer touch l.entries
+// and the lock can be released. RUnlock is explicit (not deferred) so
+// the reverse touches the locally-owned slice only, shrinking the
+// reader-blocks-writer footprint from "RLock for the whole function"
+// to "RLock for the scan only".
 func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
+	return l.EntriesSinceAppend(nil, afterMS)
+}
+
+// EntriesSinceAppend is the buffer-reusing variant of EntriesSince. The
+// matched entries are appended into `dst` (re-sliced from `dst[:0]`); when
+// `dst` already has enough capacity (e.g. retrieved from a sync.Pool of
+// pre-grown buffers) no allocation occurs on the matched path.
+//
+// R249-PERF-18 (#937): dashboard streaming-tail callers fan out at
+// ~1Hz × N tabs × N sessions and the typical match count is 1-5 entries,
+// so the per-call allocation of a fresh `[]EventEntry` was the dominant
+// per-poll heap churn even though each slice itself was small. Mirrors
+// the LastNAppend / EntriesAppend pattern already used for full-ring reads.
+//
+// Pass dst[:0] when reusing a pooled buffer; passing nil falls back to
+// EntriesSince's allocate-lazily behaviour and returns nil when no entries
+// match (preserving the pre-existing API contract). Lifetime: the returned
+// slice is fully owned by the caller after the call returns; the EventLog
+// never retains a reference.
+func (l *EventLog) EntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEntry {
 	l.mu.RLock()
-	defer l.mu.RUnlock()
 	if l.count == 0 {
-		return nil
+		l.mu.RUnlock()
+		// Preserve the original "nil when no matches" return contract for
+		// dst==nil callers. Append-mode callers passing a pooled dst[:0]
+		// receive their own buffer back length-zero.
+		if dst == nil {
+			return nil
+		}
+		return dst[:0]
 	}
 	// First pass: collect matches in reverse order. Most calls match 0-5
 	// entries so we allocate lazily only when the first match is found.
-	var rev []EventEntry
+	//
+	// R249-PERF-17: hoist the modulo arithmetic out of the loop.
+	// Previously each iter recomputed `(l.head - l.count + i + l.maxSize) % l.maxSize`
+	// — a DIV per step. Walk backward from the newest slot with a cheap
+	// branch-on-wrap instead. ~5-10ns × notify wave on hot streaming path.
+	rev := dst[:0]
+	allocated := false
+	idx := l.head - 1
+	if idx < 0 {
+		idx += l.maxSize
+	}
 	for i := l.count - 1; i >= 0; i-- {
-		idx := (l.head - l.count + i + l.maxSize) % l.maxSize
 		if l.entries[idx].Time <= afterMS {
 			break
 		}
-		if rev == nil {
+		if !allocated && cap(rev) == 0 {
 			// Typical streaming match count is 1-5; cap at entriesSinceInitialCap
 			// so sessions with hundreds of buffered entries don't allocate a
 			// giant backing array on every notify. `append` will grow organically
-			// if the match count exceeds this hint.
+			// if the match count exceeds this hint. R249-PERF-18 (#937).
 			initialCap := l.count - i
 			if initialCap > entriesSinceInitialCap {
 				initialCap = entriesSinceInitialCap
 			}
 			rev = make([]EventEntry, 0, initialCap)
+			allocated = true
 		}
 		rev = append(rev, l.entries[idx])
+		idx--
+		if idx < 0 {
+			idx += l.maxSize
+		}
 	}
+	l.mu.RUnlock()
 	if len(rev) == 0 {
-		return nil
+		// Original EntriesSince returned nil when nothing matched; preserve
+		// that for the no-buffer caller. Pool callers with cap(dst)>0 keep
+		// their buffer length-zero so they can retain it for the next poll.
+		if dst == nil {
+			return nil
+		}
+		return rev
 	}
 	slices.Reverse(rev)
 	return rev
@@ -1620,13 +1807,29 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 // A beforeMS of 0 is treated as "no upper bound" (equivalent to LastN).
 // A non-positive limit returns nil.
 func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []EventEntry {
+	return l.EntriesBeforeAppend(nil, beforeMS, limit)
+}
+
+// EntriesBeforeAppend is the buffer-reusing variant of EntriesBefore.
+// See EntriesSinceAppend for the lifetime contract; semantics for
+// `beforeMS<=0` and `limit<=0` match EntriesBefore exactly. R249-PERF-18
+// (#937): wired alongside EntriesSinceAppend so dashboard pagination
+// callers can rotate a single sync.Pool[*[]EventEntry] across both
+// streaming-tail and load-earlier paths.
+func (l *EventLog) EntriesBeforeAppend(dst []EventEntry, beforeMS int64, limit int) []EventEntry {
 	if limit <= 0 {
-		return nil
+		if dst == nil {
+			return nil
+		}
+		return dst[:0]
 	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	if l.count == 0 {
-		return nil
+		if dst == nil {
+			return nil
+		}
+		return dst[:0]
 	}
 
 	// Walk backward from newest, skip entries whose Time >= beforeMS, collect
@@ -1641,27 +1844,46 @@ func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []EventEntry {
 	// Before this, EntriesBefore on a 500-entry ring with beforeMS pointing
 	// to the oldest page ran 500 iterations comparing timestamps; now it
 	// runs up to ~`skip`+`limit` iterations.
-	var rev []EventEntry
+	// R249-PERF-17: walk backward with hoisted index instead of recomputing
+	// (l.head - l.count + i + l.maxSize) % l.maxSize per iter. Same shape
+	// as EntriesSince — branch-on-wrap is one CMOV/cmp vs an IDIV.
+	rev := dst[:0]
+	allocated := false
 	crossed := beforeMS <= 0 // when beforeMS==0 treat as "no upper bound"
+	idx := l.head - 1
+	if idx < 0 {
+		idx += l.maxSize
+	}
 	for i := l.count - 1; i >= 0 && len(rev) < limit; i-- {
-		idx := (l.head - l.count + i + l.maxSize) % l.maxSize
 		if !crossed {
 			if l.entries[idx].Time >= beforeMS {
+				idx--
+				if idx < 0 {
+					idx += l.maxSize
+				}
 				continue
 			}
 			crossed = true
 		}
-		if rev == nil {
+		if !allocated && cap(rev) == 0 {
 			initialCap := limit
 			if remaining := i + 1; remaining < initialCap {
 				initialCap = remaining
 			}
 			rev = make([]EventEntry, 0, initialCap)
+			allocated = true
 		}
 		rev = append(rev, l.entries[idx])
+		idx--
+		if idx < 0 {
+			idx += l.maxSize
+		}
 	}
 	if len(rev) == 0 {
-		return nil
+		if dst == nil {
+			return nil
+		}
+		return rev
 	}
 	slices.Reverse(rev)
 	return rev

@@ -275,3 +275,31 @@ func (r *Router) CLIPath() string {
 	}
 	return r.wrapper.CLIPath
 }
+
+// backendDefaultsFor returns the merged (model, extraArgs) the router uses
+// when spawning under backendID. Precedence:
+//
+//	router-level r.model / r.extraArgs (base)
+//	← r.backendModels[backendID]   (replace, when non-empty)
+//	← r.backendExtraArgs[backendID] (replace, when non-empty)
+//
+// extraArgs is returned without copying — callers that mutate (append per-
+// request flags) must copy first; callers that only forward the slice may
+// use it directly.
+//
+// R222-ARCH-14 (#739): the same lookup pattern previously appeared inline
+// in resolveSpawnParamsLocked AND router_shim.classifyShimState (drift
+// detection). Centralising the merge here means a future migration to a
+// single Backend struct can change one helper instead of grep-replacing
+// across two hot paths.
+func (r *Router) backendDefaultsFor(backendID string) (string, []string) {
+	model := r.model
+	if bm, ok := r.backendModels[backendID]; ok && bm != "" {
+		model = bm
+	}
+	args := r.extraArgs
+	if ba, ok := r.backendExtraArgs[backendID]; ok && len(ba) > 0 {
+		args = ba
+	}
+	return model, args
+}

@@ -3,6 +3,7 @@ package cron
 import (
 	"errors"
 	"fmt"
+	"time"
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -97,9 +98,10 @@ const (
 
 	// MaxIDLen bounds cron job IDs flowing in via the IM `/cron <op> <id>`
 	// commands and the dashboard URL/JSON parameters. Generated IDs are
-	// 8-char hex (see scheduler.generateID); 64 bytes leaves slack for
-	// future ID schemes while preventing multi-MB inputs from propagating
-	// into log/error allocations on the miss path.
+	// 16-char hex (8 entropy bytes → hex.EncodeToString; see generateHexID
+	// / hexIDEntropyBytes in job.go); 64 bytes leaves slack for future ID
+	// schemes while preventing multi-MB inputs from propagating into
+	// log/error allocations on the miss path.
 	MaxIDLen = 64
 
 	// MaxScheduleBytes caps the schedule expression length. robfig/cron
@@ -133,10 +135,56 @@ const (
 	// (worst-case 4 bytes/rune). R230B-CR-5.
 	maxRedactErrLen = 2048
 
+	// redactFastPathMaxLen caps the input length for the zero-alloc
+	// fast-path in redactPathsInCronError: if the input is at or below
+	// this length AND contains no path-trigger byte, the function returns
+	// the aliased input without touching the truncate branch or the
+	// Builder pool. Sized to comfortably fit common cron error
+	// classifiers ("context deadline exceeded", "dispatcher queue full",
+	// "session not found") while keeping a defensive ceiling so an
+	// unexpectedly long no-path input still flows through the byte-cap
+	// branch. R250-PERF-12 / #1115.
+	redactFastPathMaxLen = 256
+
 	// previousTickMaxIter caps previousTickBefore's sched.Next loop. See
 	// the comment on previousTickBefore for the per-schedule-class
 	// derivation; 1000 leaves a ~3× safety margin over the worst legitimate
 	// case (~365 iterations for a daily schedule across DST/leap-month).
 	// R235-CR-10.
 	previousTickMaxIter = 1000
+)
+
+// CronRun history limits — collected here so a reader hunting for "how
+// big can a run record be / how many do we keep" finds a single spot
+// rather than chasing magic numbers across runstore.go. The constants
+// fall into two policy classes that we keep in separate const blocks
+// so a future SchedulerConfig knob change cannot accidentally relax a
+// hard schema cap. R247-CR-12 / R247-CR-20 (#598).
+
+// User-configurable defaults — fallbacks when SchedulerConfig leaves
+// RunsKeepCount / RunsKeepWindow zero. Operators may raise / lower
+// them via SchedulerConfig at construction time; cron-run-history.md
+// §4.3 explains the 200 / 30d sizing rationale.
+const (
+	// DefaultRunsKeepCount caps per-job history at this many entries.
+	// 200 is the user-confirmed upper bound (cron-run-history.md §4.3 +
+	// chat conversation 2026-05-17).
+	DefaultRunsKeepCount = 200
+
+	// DefaultRunsKeepWindow ages out runs older than this even when the
+	// per-job count is below the cap. AND-with-OR semantics: a run is
+	// kept only when (count_rank ≤ keepCount) AND (age ≤ keepWindow);
+	// either condition false → trim.
+	DefaultRunsKeepWindow = 30 * 24 * time.Hour
+)
+
+// Hard limits — immutable per-record format invariants, not
+// operator-tunable. Changing them requires a schema bump because old
+// run.json files may exist on disk above the new cap.
+const (
+	// MaxRunRecordBytes caps a single CronRun JSON payload. The 4K rune
+	// cap on Result + 512-rune cap on ErrorMsg + 8K Prompt + ~512
+	// metadata add up to ~13 KiB worst case; 32 KiB leaves headroom.
+	// Reading a file larger than this returns ErrCorruptRun.
+	MaxRunRecordBytes = 32 * 1024
 )

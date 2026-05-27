@@ -96,9 +96,16 @@ func RecentSessions(claudeDir string, limit int, maxAge time.Duration, excludeSe
 
 	cutoff := time.Now().Add(-maxAge).UnixMilli()
 
-	var all []RecentSession
-	// jsonlPaths maps sessionID → JSONL file path for deferred prompt extraction.
-	jsonlPaths := make(map[string]string)
+	// R247-PERF-16 (#561): preallocate based on directory count. Each
+	// project directory typically yields 1-5 sessions in the 7-day window;
+	// growing from nil through 1→2→4→8→16→32 doublings on a many-project
+	// dev box re-allocs the backing array 5+ times before steady state.
+	// The cap hint (one slot per project dir, growable when a project
+	// happens to have many sessions in window) eliminates the early
+	// doublings without over-committing — a project with zero matches
+	// just leaves slots unused, well-bounded by the entry count.
+	all := make([]RecentSession, 0, len(entries))
+	jsonlPaths := make(map[string]string, len(entries))
 
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -162,8 +169,15 @@ func RecentSessions(claudeDir string, limit int, maxAge time.Duration, excludeSe
 		return cmp.Compare(b.LastActive, a.LastActive)
 	})
 
-	// Deferred prompt extraction: only read JSONL for sessions that will be returned.
-	var result []RecentSession
+	// Deferred prompt extraction: only read JSONL for sessions that will
+	// be returned. Result is bounded by min(limit, len(all)); preallocate
+	// to that exact upper bound to skip the post-doubling churn on
+	// dashboard polls hitting `limit=50` against a many-session dataset.
+	resCap := len(all)
+	if limit > 0 && limit < resCap {
+		resCap = limit
+	}
+	result := make([]RecentSession, 0, resCap)
 	for i := range all {
 		if limit > 0 && len(result) >= limit {
 			break
@@ -247,7 +261,12 @@ func loadCachedDirEntry(projDir string) *dirFilesCacheEntry {
 	if err != nil {
 		return nil
 	}
-	var files []jsonlFileInfo
+	// Preallocate to len(dirEntries) so the typical projects directory
+	// (almost-all .jsonl files, rare hidden subdirs) lands every entry
+	// in the initial backing array. Slot waste from filtered-out non-jsonl
+	// entries is bounded by the directory entry count, well below the
+	// nil→1→2→4→… grow churn this avoids on every cache miss. R247-PERF-19.
+	files := make([]jsonlFileInfo, 0, len(dirEntries))
 	for _, de := range dirEntries {
 		name := de.Name()
 		if de.IsDir() || !strings.HasSuffix(name, ".jsonl") {

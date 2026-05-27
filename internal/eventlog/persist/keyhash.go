@@ -51,10 +51,14 @@ func LogPath(dir, key string) string {
 	return filepath.Join(dir, KeyHash(key)+logExt)
 }
 
-// IdxPath returns the full path to the <stem>.idx file for a key under dir.
-func IdxPath(dir, key string) string {
-	return filepath.Join(dir, KeyHash(key)+idxExt)
-}
+// DEADCODE-13 (#1206): IdxPath had no production callers — every
+// production path that needs the .idx file derives it from the bound
+// Persister's *idxFile, not from a freshly composed path. Tests that
+// need to peek at the on-disk .idx now inline
+// `filepath.Join(dir, KeyHash(key)+".idx")` (or use the unexported
+// `idxExt` constant inside this package). Re-exporting was a YAGNI
+// trap that misled callers into thinking idx file paths are part of
+// the public surface.
 
 // tmpLogPath / tmpIdxPath return rotate-staging paths for a given stem
 // and epoch. Epoch is usually time.Now().UnixNano() to disambiguate

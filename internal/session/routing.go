@@ -38,7 +38,7 @@ import (
 // load-time ValidateConfig). R215-SEC-P1-2.
 const maxPlannerPromptBytesAtSpawn = 8 * 1024
 
-// sanitisePlannerPromptForSpawn is defense-in-depth: re-validate the
+// SanitisePlannerPromptForSpawn is defense-in-depth: re-validate the
 // PlannerPrompt at the spawn-routing site before it crosses the trust
 // boundary into CLI argv (`--append-system-prompt <prompt>`). Returns ""
 // for any rejected input so the spawn falls through to "no planner
@@ -54,7 +54,19 @@ const maxPlannerPromptBytesAtSpawn = 8 * 1024
 // inject control bytes or oversize argv.
 //
 // Called from both ResolveForChat (chat-view planner) and
-// ResolveForPlannerKey (administrative planner restart). R215-SEC-P1-2.
+// ResolveForPlannerKey (administrative planner restart) in this
+// package. Exported (R215-SEC-P1-2 #535) so the server-package
+// handlePlannerRestart legacy fallback (resolver==nil test path) can
+// reuse the same sanitiser without rebuilding the policy in a second
+// place — the alternative was for that fallback to feed
+// EffectivePlannerPrompt straight into AgentOpts.ExtraArgs, which
+// bypasses the spawn-boundary check the resolver path enforces.
+func SanitisePlannerPromptForSpawn(prompt, projectName string) string {
+	return sanitisePlannerPromptForSpawn(prompt, projectName)
+}
+
+// sanitisePlannerPromptForSpawn is the unexported in-package implementation;
+// SanitisePlannerPromptForSpawn re-exports it for cross-package callers.
 func sanitisePlannerPromptForSpawn(prompt, projectName string) string {
 	if prompt == "" {
 		return ""
@@ -299,4 +311,43 @@ func (r *KeyResolver) KeyForChat(platform, chatType, chatID, agentID string) str
 		}
 	}
 	return SessionKey(platform, chatType, chatID, agentID)
+}
+
+// ProjectBindingForChat exposes the resolver's project lookup so dispatch
+// slash-command UX paths (/cd, /pwd echo, /new echo) can read the bound
+// project's name / workspace / planner config from the same source the
+// session-key derivation uses, instead of reaching for *project.Manager
+// independently. R218B-ARCH-2 (#648): pre-fix, dispatch held both
+// resolver and projectMgr — a concurrent BindChat / UnbindAllChat could
+// race the IM hot path's resolver-derived key against a stale
+// ProjectForChat read in the same handler. Funnelling read paths through
+// the resolver keeps the two sources reading the same snapshot from the
+// PlannerDataSource adapter.
+//
+// Returns ProjectBinding{Bound: false} when the resolver has no data
+// source wired (test/headless construction with NewKeyResolver(nil, nil))
+// or when the chat is genuinely unbound. Callers should branch on
+// b.Bound rather than nil-checking the resolver, mirroring the
+// ProjectBinding zero-value contract documented on PlannerDataSource.
+func (r *KeyResolver) ProjectBindingForChat(platform, chatType, chatID string) ProjectBinding {
+	if r.data == nil {
+		return ProjectBinding{}
+	}
+	return r.data.ProjectBinding(platform, chatType, chatID)
+}
+
+// Resolver returns the router's shared KeyResolver instance, or nil if
+// none was injected via RouterConfig.Resolver. Downstream consumers
+// (dispatch.NewDispatcher, server.Hub, upstream wiring) should prefer
+// this accessor over constructing their own KeyResolver from the same
+// (Agents, ProjectMgr) inputs — when the prior pattern was practiced
+// across all 4 historical construction sites, agent-config edits to one
+// resolver did not propagate to the others, producing the silent drift
+// documented in R237-ARCH-12 (#604). A non-nil return is safe for
+// concurrent reads: KeyResolver is immutable post-construction.
+func (r *Router) Resolver() *KeyResolver {
+	if r == nil {
+		return nil
+	}
+	return r.resolver
 }

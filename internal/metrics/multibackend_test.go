@@ -198,6 +198,50 @@ func TestLabelKey_EmptyCollapsesToEmpty(t *testing.T) {
 	}
 }
 
+// TestLabelKey_PipeInSegmentReplaced pins R246-SEC-6 (#809): the per-segment
+// clipper MUST replace any literal `|` with `_` because labelKey uses `|`
+// as the joined-tuple separator. Without this, two distinct tuples
+// ("a|b","c") and ("a","b|c") would serialize to the same expvar.Map key
+// "a|b|c" and silently merge — a metric correctness bug AND a trust-
+// boundary surprise when any label segment is operator/agent-controlled
+// (slack workspace name, backend ID, project slug, …).
+//
+// Pin both the unit-level shape (clipLabelSegment alone) and the
+// integration-level shape (labelKey on a 2-tuple where one element
+// contains `|`) so a regression at either layer is caught — a future
+// refactor that drops the replace inside clipLabelSegment but adds it
+// inside labelKey would still pass the unit test, and vice versa.
+func TestLabelKey_PipeInSegmentReplaced(t *testing.T) {
+	// Unit: clipLabelSegment must scrub `|`.
+	if got := clipLabelSegment("a|b"); got != "a_b" {
+		t.Errorf("clipLabelSegment(\"a|b\") = %q, want %q (R246-SEC-6)", got, "a_b")
+	}
+	// Multi-pipe: every `|` is replaced.
+	if got := clipLabelSegment("|a|b|"); got != "_a_b_" {
+		t.Errorf("clipLabelSegment(\"|a|b|\") = %q, want %q", got, "_a_b_")
+	}
+	// No-pipe fast path: untouched (also exercises the IndexByte short-circuit).
+	if got := clipLabelSegment("normal-id"); got != "normal-id" {
+		t.Errorf("clipLabelSegment(\"normal-id\") = %q, want unchanged", got)
+	}
+
+	// Integration: the two distinct tuples ("a|b","c") and ("a","b|c") must
+	// no longer collide. Pre-fix both joined to "a|b|c"; post-fix they
+	// produce "a_b|c" vs "a|b_c" — distinct expvar.Map buckets.
+	left := labelKey([]string{"a|b", "c"})
+	right := labelKey([]string{"a", "b|c"})
+	if left == right {
+		t.Errorf("collision: labelKey(\"a|b\",\"c\") == labelKey(\"a\",\"b|c\") = %q\n"+
+			"clipLabelSegment must replace `|` with `_` so the two tuples can't share a bucket.", left)
+	}
+	if left != "a_b|c" {
+		t.Errorf("left tuple = %q, want %q", left, "a_b|c")
+	}
+	if right != "a|b_c" {
+		t.Errorf("right tuple = %q, want %q", right, "a|b_c")
+	}
+}
+
 // TestLabeledCounter_JSONShape ensures the expvar.Map encoding stays
 // scrape-friendly: the top-level value must be a JSON object whose values
 // are JSON numbers, mirroring the legacy expvar.Int contract.

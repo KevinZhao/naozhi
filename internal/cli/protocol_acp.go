@@ -1,3 +1,14 @@
+// protocol_acp.go is the production ACP (Agent Client Protocol) backend
+// adapter. It is NOT a test/doc placeholder — internal/cli/backend's kiro
+// profile (profile_kiro.go) wires *ACPProtocol into every kiro-backed
+// session via Profile.NewProtocol, and TestProfile_Kiro_NewProtocol pins
+// that contract so a regression here would fail CI.
+//
+// R217-ARCH-9 (#629): the question "is this file production-active?" is
+// answered "yes, kiro backend"; do not build-tag this file out without
+// also retiring the kiro profile. Future ACP-flavoured backends (Gemini,
+// custom JSON-RPC peers) reuse this same adapter via the same Protocol
+// interface — extending behaviour belongs here, not in a parallel file.
 package cli
 
 import (
@@ -523,7 +534,9 @@ func (p *ACPProtocol) Capabilities() Caps {
 
 func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	var msg RPCMessage
-	if err := json.Unmarshal([]byte(line), &msg); err != nil {
+	// stringToBytesUnsafe avoids the per-event []byte(line) heap copy.
+	// R222-PERF-3 (#700) — see protocol_claude.go for the safety contract.
+	if err := json.Unmarshal(stringToBytesUnsafe(line), &msg); err != nil {
 		return nil, false, err
 	}
 
