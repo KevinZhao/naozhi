@@ -16,6 +16,29 @@ import (
 // path; production code never overrides it.
 var osExit = os.Exit
 
+// StopPolicyForceExit is the documented Stop-overflow strategy this
+// Manager honours: when the per-call ctx expires with daemons still in
+// flight, Stop fires OnHardFail (default os.Exit(2)). The process exits
+// rather than leaking goroutines that could touch a torn-down router.
+//
+// Why this is a string constant rather than a typed enum: cron uses
+// StopPolicyBudgetThenLeak (see internal/cron/scheduler.go) and the
+// divergence is a deliberate security decision (Sec-LOW-2 / RFC
+// system-session.md §5.2). sysession daemons run user-prompt-derived
+// strings through a CLI subprocess; a stuck goroutine touching a
+// torn-down router would risk echoing conversation excerpts into a
+// different session's reply path. cron deliveries pass through dispatch's
+// outbound retry which re-resolves the active session, so cron's
+// budget+leak strategy is safe. Aligning the two policies would
+// require reopening Sec-LOW-2; do not "harmonise" without revisiting it.
+//
+// Closes #1060 (R244-ARCH-7) — promotes the implicit decision (lived
+// only in Stop's godoc) to a typed constant operators can reference in
+// alerts / runbooks. NOT used in sysession's control flow today;
+// intentionally doc-only so future "let's check policy at runtime"
+// callers must add the comparison and its tests deliberately.
+const StopPolicyForceExit = "force_exit"
+
 // Config is the top-level sysession configuration handed to NewManager.
 // Mirrors the YAML shape under config.sysession (see RFC §7.5).
 type Config struct {
