@@ -817,6 +817,20 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		parent = context.Background()
 	}
 	stopCtx, stopCancel := context.WithCancel(parent)
+	// R20260527-PERF-14 (#1297): reject an operator-set NUL byte in
+	// AllowedRoot at startup. workDirCacheKeySuffix below precomputes
+	// "\x00" + cfg.AllowedRoot + "\x00" + allowedRootResolved as the
+	// cache-key tail; an embedded NUL would tokenise that key incorrectly
+	// and cause workDirResolveUnderRootCached to alias unrelated workDir
+	// inputs onto the same cache slot. NUL also has no legitimate place
+	// in a filesystem path on POSIX or Windows. Clear the AllowedRoot to
+	// fall through to "no root constraint" (the existing empty-string
+	// branch below) and log loud so the operator notices the misconfig.
+	if strings.ContainsRune(cfg.AllowedRoot, 0) {
+		slog.Error("cron.NewScheduler: cfg.AllowedRoot contains NUL byte; clearing to disable root constraint",
+			"allowed_root_len", len(cfg.AllowedRoot))
+		cfg.AllowedRoot = ""
+	}
 	// Resolve the allowed root once at construction; subsequent workDir
 	// checks skip the syscall chain for the root side. Empty result falls
 	// back to lazy resolution per-call.
