@@ -49,7 +49,7 @@ func TestDashboardJS_CronCompactPoll(t *testing.T) {
 	// 3. Editor open path routes through the refetch helper. We grep for
 	// the call site rather than the function definition so a future
 	// rename of editCronJob's body still keeps the wiring under test.
-	if !strings.Contains(js, "cronRefetchFullJob(id).then(job =>") {
+	if !strings.Contains(js, "cronRefetchFullJob(id).then(") {
 		t.Error("dashboard.js: editCronJob must `cronRefetchFullJob(id).then(...)` before " +
 			"opening the modal; otherwise saving a truncated cache row would silently " +
 			"persist 256 bytes back to disk (data-loss regression for #494).")
@@ -60,5 +60,62 @@ func TestDashboardJS_CronCompactPoll(t *testing.T) {
 		t.Error("dashboard.js: openCronDetail must call cronRefetchFullJob(jobId) so the " +
 			"drawer's 做什么 section shows the full prompt rather than the cached " +
 			"256-byte preview.")
+	}
+}
+
+// TestDashboardJS_CronRefetchFullJobFailSafe pins the data-loss-prevention
+// contract introduced as a follow-up to #494:
+//
+// cronRefetchFullJob historically returned the truncated cache row when the
+// network refetch failed. editCronJob then opened the modal pre-populated
+// with the 256-byte preview; clicking Save persisted the truncation back to
+// disk, silently destroying the user's data — the very scenario the editor
+// gate was added to prevent. The fix returns a tagged result
+// ({ok, reason}) and editCronJob refuses to open the editor on
+// reason='fetch'.
+//
+// This test enforces that contract so a future rename / refactor cannot
+// regress to "fall through to cached" semantics, and that editCronJob
+// continues to surface a Chinese toast distinguishing "missing job" from
+// "fetch failed" so the user can take the right next step.
+func TestDashboardJS_CronRefetchFullJobFailSafe(t *testing.T) {
+	t.Parallel()
+
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// The helper must return an {ok, reason} discriminator, NOT the bare
+	// cached object. The fetch-failure branch must explicitly land on
+	// reason='fetch' so callers can distinguish it from missing-job.
+	if !strings.Contains(js, `return { ok: false, reason: 'fetch' }`) {
+		t.Error("dashboard.js: cronRefetchFullJob must return { ok: false, reason: 'fetch' } " +
+			"on refetch failure; returning the truncated cached row would let " +
+			"editCronJob open the editor with a 256-byte preview and Save would " +
+			"silently destroy the user's data.")
+	}
+	if !strings.Contains(js, `return { ok: true, job: cached }`) {
+		t.Error("dashboard.js: cronRefetchFullJob must return { ok: true, job: cached } " +
+			"on the non-truncated cache hit so editCronJob's success branch reads " +
+			"job from a single discriminator shape.")
+	}
+
+	// editCronJob must refuse to open the editor on the fetch-failure
+	// branch, surfacing a distinct Chinese-language toast so the user
+	// understands why Save is not available right now.
+	if !strings.Contains(js, "无法获取完整 prompt") {
+		t.Error("dashboard.js: editCronJob must show the '无法获取完整 prompt' toast on " +
+			"the fetch-failure branch — it is the user-visible signal that the " +
+			"editor refused to open to prevent a truncated save.")
+	}
+	// The fetch-failure branch must short-circuit before any modal open.
+	// We grep for the early-return idiom so a future change that drops the
+	// guard fails the test loudly.
+	if !strings.Contains(js, "if (reason === 'fetch')") {
+		t.Error("dashboard.js: editCronJob must branch on reason === 'fetch' before " +
+			"opening the modal so a fetch failure no longer falls through to " +
+			"openCronEditModal with a truncated body.")
 	}
 }
