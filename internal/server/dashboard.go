@@ -628,7 +628,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// `require-sri-for font` is included as a no-op forward-compatibility
 	// hook: every shipping browser ignores the directive today, but if
 	// any vendor revives the proposal we get integrity enforcement for
-	// free without another CSP edit.
+	// free without another CSP edit. R247-SEC-23 (#518) closes on this
+	// pin alone; vendoring is the long-term mitigation tracked above as
+	// NEEDS-DESIGN. The TestDashboardCSP_KatexFontSRIForwardCompat
+	// regression test asserts the `font` token never gets dropped from
+	// require-sri-for during a future CSP refactor.
 	//
 	// R243-SEC-4 / R244-SEC-P2-4 [REPEAT-3]: extend the same forward-compat
 	// hook to `script` and `style` tokens. Today's CDN-loaded resources

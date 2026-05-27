@@ -335,16 +335,38 @@ func (s *Scheduler) deleteJobLocked(j *Job) {
 // pauseJobLocked transitions a job to Paused state under s.mu. Returns
 // ErrJobAlreadyPaused without mutation if the job is already paused so
 // the caller can map it to 409 Conflict. R219-CR-4.
-func (s *Scheduler) pauseJobLocked(j *Job) error {
+//
+// R236-QA-03 (#537): the historical implementation called s.cron.Remove
+// while holding s.mu, mirroring the lock-order risk that
+// ListAllJobsWithNextRun's godoc explicitly warns against — robfig/cron's
+// Remove takes c.runningMu and synchronously sends on the unbuffered
+// c.remove channel, so the caller's s.mu hold time bounded by however
+// long the cron run goroutine takes to come back to its select. The
+// in-memory mutation is now done under lock; the cron.Remove is hoisted
+// to a post-unlock callback callers must invoke (mirrors the
+// router.Reset move-out-of-deleteJobLocked pattern from R240-GO-1).
+//
+// All callers are now responsible for running the returned `cronCleanup`
+// closure AFTER releasing s.mu. cronCleanup is non-nil even on the no-op
+// path (j.entryID was zero), so callers can defer it unconditionally
+// without nil-checking. cronCleanup is idempotent — re-running it after
+// a successful first call is a no-op (the captured entryID is consumed
+// at the first call, so subsequent calls hit the entryID==0 fast path).
+func (s *Scheduler) pauseJobLocked(j *Job) (cronCleanup func(), err error) {
 	if j.Paused {
-		return fmt.Errorf("%w: id %q", ErrJobAlreadyPaused, j.ID)
+		return func() {}, fmt.Errorf("%w: id %q", ErrJobAlreadyPaused, j.ID)
 	}
-	if j.entryID != 0 {
-		s.cron.Remove(j.entryID)
-		j.entryID = 0
-	}
+	// Snapshot the entryID we'll remove from cron AFTER s.mu is released.
+	// Set j.entryID = 0 under lock so any concurrent ListAllJobsWithNextRun
+	// / NextRun / TriggerNow snapshotting the job sees the entry-removed
+	// state immediately, even before cron's internal table catches up.
+	captured := j.entryID
+	j.entryID = 0
 	j.Paused = true
-	return nil
+	if captured == 0 {
+		return func() {}, nil
+	}
+	return func() { s.cron.Remove(captured) }, nil
 }
 
 // resumeJobLocked transitions a paused job back to active under s.mu by
@@ -464,8 +486,27 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 }
 
 // PauseJobByID pauses a job by exact ID (unscoped, for dashboard use).
+//
+// R236-QA-03 (#537): cron.Remove is hoisted to postCleanup so s.mu is
+// released before the unbuffered c.remove channel send completes —
+// matches the lock-order discipline ListAllJobsWithNextRun's godoc
+// pins. The closure captures the cleanup func returned by
+// pauseJobLocked under s.mu so the entryID we're removing is the
+// exact one snapshotted at the in-memory mutation point (no
+// re-read race after Unlock).
 func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
-	return s.withJobByID(id, s.pauseJobLocked, nil)
+	var pauseCleanup func()
+	op := func(j *Job) error {
+		c, err := s.pauseJobLocked(j)
+		pauseCleanup = c
+		return err
+	}
+	postCleanup := func(_ *Job) {
+		if pauseCleanup != nil {
+			pauseCleanup()
+		}
+	}
+	return s.withJobByID(id, op, postCleanup)
 }
 
 // ResumeJobByID resumes a paused job by exact ID (unscoped, for dashboard use).
@@ -757,14 +798,26 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 		// live view never reflects an un-persisted mutation.
 		// pauseJobLocked failure here is best-effort: only logged, never
 		// suppresses the original perr returned to the caller. R243-GO-5.
+		// R236-QA-03 (#537): pauseJobLocked now returns a cron.Remove
+		// closure to be invoked AFTER s.mu is released. We discard
+		// pauseRollbackCleanup if the caller was already in a "no entry"
+		// state (e.g. paused with entryID==0), but always invoke it
+		// post-Unlock so the unbuffered c.remove channel send doesn't
+		// happen while we still hold the scheduler mutex.
 		j.Prompt = ""
+		var pauseRollbackCleanup func()
 		if waspaused && !j.Paused {
-			if rbErr := s.pauseJobLocked(j); rbErr != nil && !errors.Is(rbErr, ErrJobAlreadyPaused) {
+			c, rbErr := s.pauseJobLocked(j)
+			if rbErr != nil && !errors.Is(rbErr, ErrJobAlreadyPaused) {
 				slog.Warn("cron rollback after persist failure also failed",
 					"job_id", j.ID, "rollback_err", rbErr, "orig_err", perr)
 			}
+			pauseRollbackCleanup = c
 		}
 		s.mu.Unlock()
+		if pauseRollbackCleanup != nil {
+			pauseRollbackCleanup()
+		}
 		return perr
 	}
 	s.mu.Unlock()
@@ -947,8 +1000,23 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 }
 
 // PauseJob pauses a job by ID prefix.
+//
+// R236-QA-03 (#537): same lock-order pattern as PauseJobByID — the
+// cron.Remove returned by pauseJobLocked runs in postCleanup so the
+// unbuffered c.remove channel send doesn't happen under s.mu.
 func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
-	return s.withJobByPrefix(idPrefix, plat, chatID, s.pauseJobLocked, nil)
+	var pauseCleanup func()
+	op := func(j *Job) error {
+		c, err := s.pauseJobLocked(j)
+		pauseCleanup = c
+		return err
+	}
+	postCleanup := func(_ *Job) {
+		if pauseCleanup != nil {
+			pauseCleanup()
+		}
+	}
+	return s.withJobByPrefix(idPrefix, plat, chatID, op, postCleanup)
 }
 
 // ResumeJob resumes a paused job by ID prefix.
