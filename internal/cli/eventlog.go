@@ -1658,10 +1658,36 @@ func (l *EventLog) Count() int {
 // reader-blocks-writer footprint from "RLock for the whole function"
 // to "RLock for the scan only".
 func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
+	return l.EntriesSinceAppend(nil, afterMS)
+}
+
+// EntriesSinceAppend is the buffer-reusing variant of EntriesSince. The
+// matched entries are appended into `dst` (re-sliced from `dst[:0]`); when
+// `dst` already has enough capacity (e.g. retrieved from a sync.Pool of
+// pre-grown buffers) no allocation occurs on the matched path.
+//
+// R249-PERF-18 (#937): dashboard streaming-tail callers fan out at
+// ~1Hz × N tabs × N sessions and the typical match count is 1-5 entries,
+// so the per-call allocation of a fresh `[]EventEntry` was the dominant
+// per-poll heap churn even though each slice itself was small. Mirrors
+// the LastNAppend / EntriesAppend pattern already used for full-ring reads.
+//
+// Pass dst[:0] when reusing a pooled buffer; passing nil falls back to
+// EntriesSince's allocate-lazily behaviour and returns nil when no entries
+// match (preserving the pre-existing API contract). Lifetime: the returned
+// slice is fully owned by the caller after the call returns; the EventLog
+// never retains a reference.
+func (l *EventLog) EntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEntry {
 	l.mu.RLock()
 	if l.count == 0 {
 		l.mu.RUnlock()
-		return nil
+		// Preserve the original "nil when no matches" return contract for
+		// dst==nil callers. Append-mode callers passing a pooled dst[:0]
+		// receive their own buffer back length-zero.
+		if dst == nil {
+			return nil
+		}
+		return dst[:0]
 	}
 	// First pass: collect matches in reverse order. Most calls match 0-5
 	// entries so we allocate lazily only when the first match is found.
@@ -1670,7 +1696,8 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	// Previously each iter recomputed `(l.head - l.count + i + l.maxSize) % l.maxSize`
 	// — a DIV per step. Walk backward from the newest slot with a cheap
 	// branch-on-wrap instead. ~5-10ns × notify wave on hot streaming path.
-	var rev []EventEntry
+	rev := dst[:0]
+	allocated := false
 	idx := l.head - 1
 	if idx < 0 {
 		idx += l.maxSize
@@ -1679,16 +1706,17 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 		if l.entries[idx].Time <= afterMS {
 			break
 		}
-		if rev == nil {
+		if !allocated && cap(rev) == 0 {
 			// Typical streaming match count is 1-5; cap at entriesSinceInitialCap
 			// so sessions with hundreds of buffered entries don't allocate a
 			// giant backing array on every notify. `append` will grow organically
-			// if the match count exceeds this hint.
+			// if the match count exceeds this hint. R249-PERF-18 (#937).
 			initialCap := l.count - i
 			if initialCap > entriesSinceInitialCap {
 				initialCap = entriesSinceInitialCap
 			}
 			rev = make([]EventEntry, 0, initialCap)
+			allocated = true
 		}
 		rev = append(rev, l.entries[idx])
 		idx--
@@ -1698,7 +1726,13 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	}
 	l.mu.RUnlock()
 	if len(rev) == 0 {
-		return nil
+		// Original EntriesSince returned nil when nothing matched; preserve
+		// that for the no-buffer caller. Pool callers with cap(dst)>0 keep
+		// their buffer length-zero so they can retain it for the next poll.
+		if dst == nil {
+			return nil
+		}
+		return rev
 	}
 	slices.Reverse(rev)
 	return rev
@@ -1712,13 +1746,29 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 // A beforeMS of 0 is treated as "no upper bound" (equivalent to LastN).
 // A non-positive limit returns nil.
 func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []EventEntry {
+	return l.EntriesBeforeAppend(nil, beforeMS, limit)
+}
+
+// EntriesBeforeAppend is the buffer-reusing variant of EntriesBefore.
+// See EntriesSinceAppend for the lifetime contract; semantics for
+// `beforeMS<=0` and `limit<=0` match EntriesBefore exactly. R249-PERF-18
+// (#937): wired alongside EntriesSinceAppend so dashboard pagination
+// callers can rotate a single sync.Pool[*[]EventEntry] across both
+// streaming-tail and load-earlier paths.
+func (l *EventLog) EntriesBeforeAppend(dst []EventEntry, beforeMS int64, limit int) []EventEntry {
 	if limit <= 0 {
-		return nil
+		if dst == nil {
+			return nil
+		}
+		return dst[:0]
 	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	if l.count == 0 {
-		return nil
+		if dst == nil {
+			return nil
+		}
+		return dst[:0]
 	}
 
 	// Walk backward from newest, skip entries whose Time >= beforeMS, collect
@@ -1736,7 +1786,8 @@ func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []EventEntry {
 	// R249-PERF-17: walk backward with hoisted index instead of recomputing
 	// (l.head - l.count + i + l.maxSize) % l.maxSize per iter. Same shape
 	// as EntriesSince — branch-on-wrap is one CMOV/cmp vs an IDIV.
-	var rev []EventEntry
+	rev := dst[:0]
+	allocated := false
 	crossed := beforeMS <= 0 // when beforeMS==0 treat as "no upper bound"
 	idx := l.head - 1
 	if idx < 0 {
@@ -1753,12 +1804,13 @@ func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []EventEntry {
 			}
 			crossed = true
 		}
-		if rev == nil {
+		if !allocated && cap(rev) == 0 {
 			initialCap := limit
 			if remaining := i + 1; remaining < initialCap {
 				initialCap = remaining
 			}
 			rev = make([]EventEntry, 0, initialCap)
+			allocated = true
 		}
 		rev = append(rev, l.entries[idx])
 		idx--
@@ -1767,7 +1819,10 @@ func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []EventEntry {
 		}
 	}
 	if len(rev) == 0 {
-		return nil
+		if dst == nil {
+			return nil
+		}
+		return rev
 	}
 	slices.Reverse(rev)
 	return rev
