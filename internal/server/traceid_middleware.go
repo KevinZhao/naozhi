@@ -33,12 +33,15 @@ const traceIDHeader = "X-Request-ID"
 //     runs, so even an early-returning handler (auth deny, 429, panic)
 //     emits the correlation id back to the caller.
 //
-// This is the minimum-viable wiring for #677. Per-package logger
-// enrichment lives in the consuming package; this middleware just
-// guarantees an id exists on the ctx by the time the handler chain
-// starts running. The middleware lives in its own file (rather than
-// alongside withMaxBytes in middleware.go) so concurrent edits to the
-// body-cap middleware don't churn this commit.
+// Wired into the http.Server in server.go (Run) as the outermost
+// handler so every request — authed and unauthed alike — sees a
+// trace id on its ctx before any downstream middleware or handler
+// runs. Per-package logger enrichment (slog.Logger.With(...)) lives
+// in the consuming package; this middleware just guarantees an id
+// exists on the ctx by the time the handler chain starts running.
+// The middleware lives in its own file (rather than alongside
+// withMaxBytes in middleware.go) so concurrent edits to the
+// body-cap middleware don't churn this commit. R247-ARCH-20 / #677.
 func withTraceID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get(traceIDHeader)
