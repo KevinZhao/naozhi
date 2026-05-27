@@ -45,7 +45,7 @@ import (
 	// inside internal/session/router_core.go; importing wireup here
 	// keeps internal/session backend-agnostic and centralizes the
 	// per-backend init() trigger list in one explicit place.
-	_ "github.com/naozhi/naozhi/internal/wireup"
+	"github.com/naozhi/naozhi/internal/wireup"
 )
 
 var version = "dev"
@@ -736,61 +736,51 @@ func main() {
 	}
 	metrics.StartupPhasePlatformsMs.Set(time.Since(t0).Milliseconds())
 
-	// Cron Scheduler
+	// Cron + sysession orchestration moved into internal/wireup.WireSchedulers
+	// (#1031 R240-ARCH-12). main.go retains:
+	//   - notifyDefault configured-log (operator-facing visibility)
+	//   - StartupPhaseSchedulerMs metric (wireup pkg has no
+	//     internal/metrics dependency)
+	//   - sysession build error logging (wireup returns nil-Sysession on
+	//     build failure; main slog.Warn matches existing degraded-mode
+	//     contract)
 	cronLoc := cfg.ParseCronTimezone()
 	slog.Info("cron timezone", "location", cronLoc.String())
-	notifyDefault := cron.NotifyTarget{
-		Platform: cfg.Cron.NotifyDefault.Platform,
-		ChatID:   cfg.Cron.NotifyDefault.ChatID,
-	}
-	if notifyDefault.IsSet() {
-		// Log only the platform and a truncated chat_id suffix so log
-		// aggregators don't carry the full group/user identifier. The
-		// dashboard still exposes the full value to authenticated operators.
+	if cfg.Cron.NotifyDefault.Platform != "" && cfg.Cron.NotifyDefault.ChatID != "" {
+		// Log only platform and truncated chat_id suffix so log aggregators
+		// don't carry the full group/user identifier.
 		slog.Info("cron notify default configured",
-			"platform", notifyDefault.Platform,
-			"chat_id_suffix", chatIDSuffix(notifyDefault.ChatID))
+			"platform", cfg.Cron.NotifyDefault.Platform,
+			"chat_id_suffix", chatIDSuffix(cfg.Cron.NotifyDefault.ChatID))
 	}
-	scheduler := cron.NewScheduler(cron.SchedulerConfig{
-		Router:        cronRouterAdapter{r: router},
-		Platforms:     platforms,
-		Agents:        cronAgents,
-		AgentCommands: cfg.AgentCommands,
-		StorePath:     osutil.ExpandHome(cfg.Cron.StorePath),
-		MaxJobs:       cfg.Cron.MaxJobs,
-		ExecTimeout:   cfg.ParseExecutionTimeout(),
-		Location:      cronLoc,
-		NotifyDefault: notifyDefault,
-		AllowedRoot:   workspace,
-		JitterMax:     cfg.ParseCronJitterMax(),
-		ParentCtx:     ctx,
+	var sysBuildErr error
+	schedulers, err := wireup.WireSchedulers(wireup.SchedulersDeps{
+		Cfg:                  cfg,
+		Router:               router,
+		SessionRouterAdapter: cronRouterAdapter{r: router},
+		Platforms:            platforms,
+		Agents:               cronAgents,
+		Workspace:            workspace,
+		CronStorePath:        osutil.ExpandHome(cfg.Cron.StorePath),
+		ParentCtx:            ctx,
+		Telemetry:            nil, // wired post-Hub via dashboard.go SetTelemetry
+		BuildSysession: func() (*sysession.Manager, string, error) {
+			m, wd, e := buildSysessionManager(cfg, router, wrapper, storePath)
+			sysBuildErr = e // capture for slog below
+			return m, wd, e
+		},
 	})
-	if err := scheduler.Start(); err != nil {
+	if err != nil {
 		slog.Error("start cron scheduler", "err", err)
 		os.Exit(1)
 	}
+	if sysBuildErr != nil {
+		slog.Warn("sysession manager unavailable; daemons disabled", "err", sysBuildErr)
+	}
+	scheduler := schedulers.Cron
+	sysMgr := schedulers.Sysession
+	sysWorkDir := schedulers.SysessionWorkDir
 	metrics.StartupPhaseSchedulerMs.Set(time.Since(t0).Milliseconds())
-
-	// Auto-workspace-chain (docs/rfc/auto-workspace-chain.md §4.3):
-	// register cron Scheduler as a SessionIDExcluder so cron-spawned
-	// sessionIDs are never folded into a user session's
-	// prev_session_ids by the auto-chain spawn / backfill paths.
-	// sysession does not need an excluder — sysWorkDir lives outside
-	// any user workspace, so its JSONL files are excluded by path
-	// matching at the workspace level.
-	router.AddSessionIDExcluder(scheduler)
-
-	// Build the system-session (background daemon) Manager.  Disabled
-	// when cfg.Sysession.Enabled is false; degraded silently when the
-	// runner can't be initialised so a missing/broken claude binary
-	// doesn't break naozhi startup as a whole.
-	sysMgr, sysWorkDir, err := buildSysessionManager(cfg, router, wrapper, storePath)
-	if err != nil {
-		slog.Warn("sysession manager unavailable; daemons disabled", "err", err)
-	}
-	if sysMgr != nil {
-		sysMgr.Start(ctx)
-	}
 
 	// Configure remote nodes for multi-node aggregation
 	var nodes map[string]node.Conn
