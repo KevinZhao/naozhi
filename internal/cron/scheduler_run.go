@@ -849,15 +849,15 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// return.
 	{
 		s.mu.RLock()
-		cur, stillRegistered := s.jobs[j.ID]
-		paused := stillRegistered && cur.Paused
+		curCAS, stillRegisteredCAS := s.jobs[j.ID]
+		pausedCAS := stillRegisteredCAS && curCAS.Paused
 		s.mu.RUnlock()
-		if !stillRegistered {
+		if !stillRegisteredCAS {
 			slog.Debug("cron: job deleted between dispatch lookup and CAS, aborting run",
 				"job_id", j.ID, "trigger_now", viaTriggerNow)
 			return
 		}
-		if paused {
+		if pausedCAS {
 			slog.Debug("cron: job paused between dispatch lookup and CAS, aborting run",
 				"job_id", j.ID, "trigger_now", viaTriggerNow)
 			return
