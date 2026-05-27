@@ -1609,6 +1609,16 @@ func (s *runStore) trimSkipFromCache(jobID string, now time.Time) bool {
 // cacheTrimAfterDisk reconciles the recentCache for jobID after on-disk
 // trimJobLocked removed expired / over-cap entries. Called by trimJobLocked
 // only — caller holds jobLock(jobID).
+//
+// Allocation contract (R241-PERF-6 / #480): trims in place on the existing
+// ring backing array — no fresh `keep` slice. The pre-ring implementation
+// rebuilt a `keep := []CronRunSummary{...}` slice every call; with the
+// post-R221-FIX-P0-2 ring, ringSnapshot already returns fresh copies for
+// readers, so this path mutates entry.head / entry.count + zeroes dropped
+// slots without ever allocating. Hot-path zero-alloc property is load-
+// bearing: trimJobLocked fires from Append's appendTrimBatch boundary
+// (every 10 Appends) and the dashboard 1Hz dispatch path, so a per-call
+// alloc would amplify GC pressure linearly with cron tick rate.
 func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
