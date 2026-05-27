@@ -233,14 +233,10 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		var storedBase, currentArgs []string
 		if recWrapper != nil {
 			storedBase = stripResumeArgs(state.CLIArgs)
-			driftModel := r.model
-			if m, ok := r.backendModels[recBackendID]; ok && m != "" {
-				driftModel = m
-			}
-			driftArgs := r.extraArgs
-			if a, ok := r.backendExtraArgs[recBackendID]; ok && len(a) > 0 {
-				driftArgs = a
-			}
+			// backendDefaultsFor centralises the model/extraArgs lookup that
+			// otherwise duplicated the resolveSpawnParamsLocked logic
+			// (R222-ARCH-14, #739).
+			driftModel, driftArgs := r.backendDefaultsFor(recBackendID)
 			currentArgs = recWrapper.Protocol.BuildArgs(cli.SpawnOptions{
 				Model:     driftModel,
 				ExtraArgs: driftArgs,
