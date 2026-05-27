@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -298,6 +299,19 @@ const nonceTTL = 5 * time.Minute
 // heap budget. Legitimate traffic with 5-minute TTL is far below this cap.
 const maxSeenNonces = 50000
 
+// nonceEvictionBatch is the number of oldest entries removed by
+// evictOldestNonces when the map hits maxSeenNonces. R20260527122801-SEC-8
+// (#1332): without batch eviction, an attacker holding a leaked
+// verification_token can fill the map with unique nonces faster than the
+// cleanupNoncesTick (which only removes EXPIRED entries) sweeps it,
+// putting every legitimate event webhook on a 5-minute 429 cliff. By
+// evicting the oldest 1024 entries on cap-hit we trade a tiny replay
+// window for the older nonces (those entries were going to expire within
+// minutes anyway) for guaranteed forward progress under flood. Picked
+// 1024 ≈ 2% of cap so a sustained flood pays a steady eviction cost
+// rather than thrashing every insert.
+const nonceEvictionBatch = 1024
+
 // tokenFailCooldown bounds how long a failed tenant-access-token refresh is
 // cached so concurrent callers do not re-hit open.feishu.cn on every reply
 // when credentials are revoked. 5s balances operator-visible recovery time
@@ -392,6 +406,69 @@ func (f *Feishu) cleanupNoncesTick() {
 		}
 		return true
 	})
+}
+
+// evictOldestNonces removes up to nonceEvictionBatch entries from
+// seenNonces, preferring the ones whose stored expiry timestamp is
+// smallest (i.e. oldest / closest to natural expiry). R20260527122801-SEC-8
+// (#1332): when an attacker holding a leaked verification_token floods
+// the map with unique nonces, the cleanupNoncesTick ticker (which only
+// removes EXPIRED entries) cannot keep up, so legitimate webhooks 429
+// for up to nonceTTL. By making cap-hit a self-healing trigger that
+// reclaims headroom from the oldest-but-still-valid nonces, fresh
+// traffic keeps flowing. The replay-defense regression is bounded:
+// only nonces within the same nonceTTL window are evicted, so an
+// attacker who already saw the original event has at most a few
+// minutes to replay it before timestamp verification rejects the
+// payload outright.
+//
+// Returns the number of entries actually removed so callers can decide
+// whether to log a warning and whether the cap-check should re-pass.
+func (f *Feishu) evictOldestNonces() int {
+	type nonceEntry struct {
+		key    any
+		expiry int64
+	}
+	// Single Range pass: gather (key, expiry) pairs, sort by expiry, delete
+	// the smallest nonceEvictionBatch keys. sync.Map.Range is consistent
+	// w.r.t. live entries; concurrent inserts during the scan may be missed
+	// but those are necessarily fresh (high expiry) so excluding them only
+	// makes the eviction more aggressive on the genuinely-old set, which
+	// is the correct policy.
+	entries := make([]nonceEntry, 0, nonceEvictionBatch*2)
+	f.seenNonces.Range(func(k, v any) bool {
+		ts, ok := v.(int64)
+		if !ok {
+			// Cross-type entry (defensive): treat as evictable by giving it
+			// a sentinel expiry so it sorts to the front and gets cleared.
+			entries = append(entries, nonceEntry{key: k, expiry: 0})
+			return true
+		}
+		entries = append(entries, nonceEntry{key: k, expiry: ts})
+		return true
+	})
+	if len(entries) == 0 {
+		return 0
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].expiry < entries[j].expiry
+	})
+	limit := nonceEvictionBatch
+	if limit > len(entries) {
+		limit = len(entries)
+	}
+	deleted := 0
+	for i := 0; i < limit; i++ {
+		if _, loaded := f.seenNonces.LoadAndDelete(entries[i].key); loaded {
+			deleted++
+		}
+	}
+	if deleted > 0 {
+		if n := f.seenNoncesCount.Add(int64(-deleted)); n < 0 {
+			f.seenNoncesCount.Store(0)
+		}
+	}
+	return deleted
 }
 
 func (f *Feishu) Name() string { return "feishu" }
