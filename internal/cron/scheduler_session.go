@@ -245,12 +245,20 @@ func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
 
 	// Persisted history.  Walk recent runs per job (already cached
 	// inside runStore).  RunStore is nil only in tests.
+	//
+	// R20260527-PERF-6 (#1285): use RecentSessionIDs instead of Recent
+	// — the latter returns []CronRunSummary, allocating a defensive
+	// per-job slice copy of up to recentCap structs (each containing
+	// the trimmed Result up to ~4 KB) only to immediately discard
+	// every field except SessionID. With 50 jobs × 200 cap that was
+	// 10000 value-copies per cold rebuild; the new helper walks the
+	// recentCache ring under entry.mu and appends only the non-empty
+	// SessionID strings, dropping per-rebuild allocation by ~3 orders
+	// of magnitude.
 	if s.runStore != nil {
 		for _, jobID := range jobIDs {
-			for _, sum := range s.runStore.Recent(jobID, knownSessionIDsRecentCap) {
-				if sum.SessionID != "" {
-					out[sum.SessionID] = struct{}{}
-				}
+			for _, sid := range s.runStore.RecentSessionIDs(jobID, knownSessionIDsRecentCap) {
+				out[sid] = struct{}{}
 			}
 		}
 	}

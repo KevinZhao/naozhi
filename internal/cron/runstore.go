@@ -1056,6 +1056,76 @@ func (s *runStore) Recent(jobID string, n int) []CronRunSummary {
 	return s.List(jobID, n, time.Time{})
 }
 
+// RecentSessionIDs returns up to n session IDs from the most recent runs
+// for jobID, newest first. Empty SessionID rows are skipped. Hits the
+// recentCache directly when warm so no full CronRunSummary slice copy is
+// allocated; only the (small) non-empty SessionID strings are appended to
+// the returned slice.
+//
+// R20260527-PERF-6 (#1285): the only consumer is Scheduler.buildKnownSessionsSet
+// which previously did `s.runStore.Recent(jobID, recentCap)` per job and
+// only consumed the SessionID field. With ~50 jobs × 200 cap that is 10000
+// CronRunSummary value-copies per cold rebuild (each Result up to ~4 KB
+// trimmed). RecentSessionIDs returns a []string of (typical) ≤ 50 IDs
+// per job — orders of magnitude less data shuffled per rebuild.
+//
+// Cold-cache path: the returned slice is still derived from a full ring
+// warm via diskListNewestFirst (correctness > micro-allocation), but the
+// extra allocation only happens once per cold start; subsequent calls hit
+// the warm ring and skip both the disk read and the CronRunSummary copy.
+func (s *runStore) RecentSessionIDs(jobID string, n int) []string {
+	if s == nil || s.disabled || jobID == "" {
+		return nil
+	}
+	if !IsValidID(jobID) {
+		return nil
+	}
+	if n <= 0 {
+		n = 50
+	}
+	if n > DefaultRunsKeepCount {
+		n = DefaultRunsKeepCount
+	}
+
+	// Warm-cache fast path: walk the ring under entry.mu and collect
+	// only the SessionID strings, skipping empties. No CronRunSummary
+	// allocation, no ringSnapshot copy.
+	if v, ok := s.recentCache.Load(jobID); ok {
+		entry := v.(*recentCacheEntry)
+		entry.mu.Lock()
+		if entry.warm {
+			limit := n
+			if limit > entry.count {
+				limit = entry.count
+			}
+			out := make([]string, 0, limit)
+			for i := 0; i < limit; i++ {
+				if sid := entry.ringRead(i).SessionID; sid != "" {
+					out = append(out, sid)
+				}
+			}
+			entry.mu.Unlock()
+			return out
+		}
+		entry.mu.Unlock()
+	}
+
+	// Cold cache: warm via the canonical path, then walk again. We pay
+	// the CronRunSummary copy on cold once (rare) rather than open-code
+	// a parallel disk-list path.
+	summaries := s.List(jobID, n, time.Time{})
+	if len(summaries) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(summaries))
+	for i := range summaries {
+		if sid := summaries[i].SessionID; sid != "" {
+			out = append(out, sid)
+		}
+	}
+	return out
+}
+
 // Get returns the full CronRun for runID under jobID, or (nil, error)
 // when missing / corrupt. ErrCorruptRun signals "file present but
 // unusable" so the caller can render a "this run's record is broken"
