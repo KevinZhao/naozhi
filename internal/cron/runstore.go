@@ -333,6 +333,32 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *run
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		slog.Warn("cron run: mkdir root failed", "root", root, "err", err)
 	}
+	// R247-SEC-12 (#504): MkdirAll honours `perm` only on directories it
+	// actually creates — a pre-existing runs/ tree (e.g. laid down by a
+	// prior version with 0o755, or by an attacker who racd ahead of
+	// startup) keeps whatever mode it had. The directory carries cron
+	// run JSON files that include script source, env values, and stdout
+	// summaries; world-readable parent dirs leak both the existence of
+	// scheduled jobs and their content to other OS users on the same
+	// host. Chmod the leaf to the contractual 0o700 so a pre-created
+	// 0o755 / 0o777 dir is corrected on next startup. We log + continue
+	// rather than fail because operators sometimes run naozhi inside
+	// containers where the bind-mount root cannot be chmod'd by the
+	// running uid (NoNewPrivileges, read-only rootfs); a hard fail would
+	// brick the whole cron subsystem there. The Lstat check below is the
+	// authoritative symlink/non-directory guard that protects against
+	// the path-redirect attack — Chmod is only the perm-tightening step.
+	if fi, err := os.Lstat(root); err == nil && fi.Mode()&fs.ModeSymlink == 0 && fi.IsDir() {
+		if perm := fi.Mode().Perm(); perm != 0o700 {
+			if cerr := os.Chmod(root, 0o700); cerr != nil {
+				slog.Warn("cron run: chmod runs root to 0700 failed",
+					"root", root, "had_mode", perm.String(), "err", cerr)
+			} else {
+				slog.Info("cron run: corrected runs root mode to 0700",
+					"root", root, "had_mode", perm.String())
+			}
+		}
+	}
 	// R245-SEC-1 (#825): refuse to attach to a runs/ that is a symlink or
 	// other non-directory. MkdirAll does not error when the path already
 	// exists as a symlink to a directory, so without this Lstat an
