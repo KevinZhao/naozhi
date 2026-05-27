@@ -187,6 +187,16 @@ type Dispatcher struct {
 	// filesystem branch. Always non-nil after NewDispatcher.
 	imageReader ImageReader
 
+	// stopCtx is the long-lived process-shutdown signal context. The
+	// passthrough send branch detaches the per-webhook ctx (handlers
+	// return in seconds while LLM turns take minutes) but must still
+	// observe SIGTERM-driven graceful shutdown — without this binding the
+	// detached goroutine has no path to abort early during shutdown and
+	// only stops on its internal totalTimeout (5min). NewDispatcher seeds
+	// stopCtx from cfg.StopCtx (or context.Background() if nil) so call
+	// sites can dereference unconditionally. (#1320)
+	stopCtx context.Context
+
 	// Operational counters exposed via /health for triaging. Incremented
 	// atomically and never reset (monotonic since process start).
 	messageCount       atomic.Int64 // all non-slash-command IM messages accepted
@@ -341,6 +351,16 @@ type DispatcherConfig struct {
 	// Deprecated: prefer DispatcherConfig.Capabilities. See ReplyFooterFn
 	// for the consolidated removal trigger (#374).
 	TakeoverFn func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
+
+	// StopCtx is the long-lived process-shutdown signal context. Passed
+	// into Dispatcher so the passthrough goroutine launched per inbound
+	// message can observe SIGTERM-driven graceful shutdown rather than
+	// living its full totalTimeout independent of process lifecycle.
+	// Optional — when nil, NewDispatcher falls back to context.Background()
+	// (preserving the legacy never-cancels behaviour for headless / test
+	// wiring). Production wiring (server.Start) passes the long-lived
+	// service ctx so the passthrough send aborts on shutdown. (#1320)
+	StopCtx context.Context
 
 	// AllowMissingSender opts out of the constructor-time "Send must be
 	// wired" check. Test wiring that builds a Dispatcher without ever
@@ -536,6 +556,16 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	} else {
 		d.imageReader = osImageReader{}
 	}
+	// stopCtx defaults to context.Background() so headless / test wiring
+	// that omits cfg.StopCtx behaves like the legacy WithoutCancel branch
+	// (never cancels). Production wiring (server.Start) passes the long-
+	// lived service ctx so the passthrough goroutine aborts on shutdown.
+	// (#1320)
+	if cfg.StopCtx != nil {
+		d.stopCtx = cfg.StopCtx
+	} else {
+		d.stopCtx = context.Background()
+	}
 	return d, nil
 }
 
@@ -682,9 +712,18 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 			// Detach from the platform handler ctx: webhook handlers return
 			// in seconds while LLM turns take minutes. If we keep the caller
 			// ctx, handler-return cancels it and SendPassthrough bails early,
-			// leaking slots into the 5.5-min bail timer. Use WithoutCancel
-			// to preserve values (log fields, auth) without the cancellation.
-			sendCtx := context.WithoutCancel(ctx)
+			// leaking slots into the 5.5-min bail timer.
+			//
+			// R20260527122801-CR-6 (#1320): the original context.WithoutCancel
+			// dropped the cancellation source entirely — including the long-
+			// lived service ctx whose cancel signals graceful shutdown. The
+			// passthrough goroutine therefore had no path to abort on
+			// SIGTERM and only stopped on its internal totalTimeout (5min),
+			// pushing systemd TimeoutStopSec breaches at restart. Instead
+			// merge stopCtx (cancel source) with the webhook ctx (values
+			// source) so log attrs survive while shutdown still aborts the
+			// send.
+			sendCtx := mergeStopAndValues(d.stopCtx, ctx)
 			go d.sendAndReply(WithPassthrough(sendCtx), key, cleanText, images, agentID, opts, msg, lg, true)
 			// Ack arrival so the IM user sees a reaction/receipt. This is
 			// cheap and does not depend on the turn completing.

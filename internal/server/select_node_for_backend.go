@@ -36,7 +36,18 @@ import (
 // maxBackendIDLen mirrors send.go:263's per-request cap. Used by both
 // HTTP and WS dispatch entry points so a hostile client can't blow up
 // JSON / slog attrs with a 4 KB backend string.
-const maxBackendIDLen = 32
+//
+// R20260527122801-ARCH-8 (#1314): aligned to 64 to match
+// session/router_backend.go's maxBackendBytes. The previous 32-byte
+// server cap rejected legal 33–64 byte backend IDs at the dashboard /
+// HTTP-send boundary even though the router's own validateBackend
+// (charset+length) accepted them — so a 60-byte backend stored in
+// sessions.json could be routed through the cron path but not edited
+// from the dashboard. Widening the server cap to 64 closes the
+// asymmetry: both layers now share the same length contract. The DoS
+// concern motivating the 32-byte cap is unchanged at 64 bytes (still
+// 1/64 of the 4 KB JSON-attr inflation worst case).
+const maxBackendIDLen = 64
 
 // isValidBackendID reports whether s passes the per-request charset +
 // length gate shared by HTTP /api/sessions/send and WS handleRemoteSend.
