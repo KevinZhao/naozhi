@@ -412,13 +412,15 @@ func (p *Process) slogger() *slog.Logger {
 // Death reason labels. Kept as exported constants so session/router callers
 // can match without relying on stringly-typed literals that drift.
 const (
-	DeathReasonCLIExited       = "cli_exited"
-	DeathReasonShimEOF         = "shim_eof"
-	DeathReasonShimReadErr     = "shim_read_error"
-	DeathReasonReadLoopPanic   = "readloop_panic"
-	DeathReasonKilled          = "killed"
-	DeathReasonNoOutputTimeout = "no_output_timeout"
-	DeathReasonTotalTimeout    = "total_timeout"
+	DeathReasonCLIExited           = "cli_exited"
+	DeathReasonShimEOF             = "shim_eof"
+	DeathReasonShimReadErr         = "shim_read_error"
+	DeathReasonShimOversizeThenEOF = "shim_oversize_then_eof"
+	DeathReasonShimOversizeThenErr = "shim_oversize_then_read_error"
+	DeathReasonReadLoopPanic       = "readloop_panic"
+	DeathReasonKilled              = "killed"
+	DeathReasonNoOutputTimeout     = "no_output_timeout"
+	DeathReasonTotalTimeout        = "total_timeout"
 )
 
 // setDeathReason records the death reason if not already set. First writer wins
@@ -485,6 +487,14 @@ func (p *Process) lifecycleContext() context.Context {
 		// can be nil in legacy tests; nil-channel receives block forever in
 		// a select, so we degrade gracefully rather than panic.
 		if p.done == nil && p.killCh == nil {
+			// R20260527-GO-13 (#1289): no lifetime signal can ever
+			// fire, so leaving the context live would leak the
+			// cancel func + parent's child-pointer for the lifetime
+			// of the test. Cancel synchronously: callers that do
+			// `<-ctx.Done()` see an already-closed Done channel,
+			// which mirrors the "process is dead" semantics that
+			// the absent done/killCh would communicate anyway.
+			cancel()
 			return
 		}
 		go func() {

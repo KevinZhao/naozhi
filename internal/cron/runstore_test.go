@@ -812,12 +812,15 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 			wantCounter: 0, // not warm: counter untouched (R242-GO-8: cold ring stays nil)
 		},
 		{
+			// R20260527-PERF-24 (#1295): when both cap and window proofs
+			// hold the counter resets — there is no benefit to advancing
+			// toward an inevitable forced scan that will find no work.
 			name:        "warm + headroom + within window: skip",
 			entry:       makeHappyEntry(),
 			keepCount:   100,
 			keepWindow:  24 * time.Hour,
 			wantSkip:    true,
-			wantCounter: 1, // counter advanced toward batch trigger
+			wantCounter: 0, // both proofs hold → no need to track drift
 		},
 		{
 			name: "near keepCount cap: do not skip",
@@ -846,12 +849,32 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 			wantCounter: 0,
 		},
 		{
-			name:        "appendTrimBatch reached: force trim",
+			// R20260527-PERF-24 (#1295): when cap+window are both safe the
+			// appendTrimBatch boundary no longer forces a disk scan — the
+			// scan would find nothing to evict, so paying ReadDir+Stat
+			// every 10 calls was pure overhead. Counter resets so we
+			// don't accumulate phantom drift toward a forced no-op scan.
+			name:        "appendTrimBatch reached but cache clean: still skip",
 			entry:       newEntryFromRows([]CronRunSummary{{EndedAt: now}}, appendTrimBatch-1),
 			keepCount:   100,
 			keepWindow:  24 * time.Hour,
+			wantSkip:    true,
+			wantCounter: 0, // both proofs hold → reset, no force trim
+		},
+		{
+			// Boundary still forces a trim when window proof fails — the
+			// reason for the periodic forcing was age-based eviction for
+			// jobs that never approach keepCount; that behaviour is
+			// preserved when the cache cannot prove safety.
+			name: "appendTrimBatch reached + oldest beyond window: force trim",
+			entry: newEntryFromRows([]CronRunSummary{
+				{EndedAt: now.Add(-30 * time.Second)},
+				{EndedAt: now.Add(-2 * time.Hour)},
+			}, appendTrimBatch-1),
+			keepCount:   100,
+			keepWindow:  1 * time.Hour,
 			wantSkip:    false,
-			wantCounter: 0, // batch trigger resets counter
+			wantCounter: 0,
 		},
 	}
 

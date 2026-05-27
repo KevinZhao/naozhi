@@ -585,23 +585,22 @@ func (s *runStore) skipAppendTrim(jobID string) bool {
 	if !entry.warm {
 		return false
 	}
-	// Force a trim every appendTrimBatch Appends so window-based eviction
-	// still happens for jobs that never approach keepCount.
+	// R20260527-PERF-24 (#1295): perform the cache-headroom checks BEFORE
+	// the appendTrimBatch boundary. The prior order force-returned false on
+	// the boundary regardless of cap/window state, walking the runs/<jobID>/
+	// ReadDir+Stat tree every 10 Appends even when the cache could prove no
+	// candidate exists (steady-state: 1run/min × 50 jobs × 30 days = 14400
+	// wasted ReadDirs/day). The boundary is now only honoured when cap or
+	// window state is unprovable from cache alone.
 	entry.appendsSinceTrim++
-	if entry.appendsSinceTrim >= appendTrimBatch {
-		entry.appendsSinceTrim = 0
-		return false
-	}
 	// Plenty of headroom under count cap?  Cache reflects the on-disk
 	// newest-first ring (capped to keepCount), so entry.count is a safe
 	// upper bound on disk rows that survived the last trim.
-	if entry.count+appendTrimBatch >= s.keepCount {
-		entry.appendsSinceTrim = 0
-		return false
-	}
+	capSafe := entry.count+appendTrimBatch < s.keepCount
 	// Oldest cached row still inside keepWindow?  Use EndedAt to mirror
 	// trimJobLocked's mtime-based cutoff (cacheTrimAfterDisk also approximates
 	// mtime via EndedAt — keep these two paths consistent).
+	windowSafe := true
 	if entry.count > 0 {
 		oldest := entry.ringRead(entry.count - 1)
 		ts := oldest.EndedAt
@@ -610,11 +609,22 @@ func (s *runStore) skipAppendTrim(jobID string) bool {
 		}
 		cutoff := time.Now().Add(-s.keepWindow)
 		if !ts.After(cutoff) {
-			entry.appendsSinceTrim = 0
-			return false
+			windowSafe = false
 		}
 	}
-	return true
+	if capSafe && windowSafe {
+		// Both cache-state proofs hold — nothing for trimJobLocked to do
+		// even on the appendTrimBatch boundary. Reset the counter so we
+		// don't accumulate drift toward an inevitable forced scan that
+		// would still find no work.
+		entry.appendsSinceTrim = 0
+		return true
+	}
+	// One of the two cache proofs failed — there may be on-disk work for
+	// trimJobLocked. Run it now (resetting the counter); the appendTrimBatch
+	// boundary is irrelevant once we've already decided to scan.
+	entry.appendsSinceTrim = 0
+	return false
 }
 
 // appendTrimBatch is the maximum number of Append calls we'll let pass
@@ -1339,14 +1349,27 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 		toRemove = append(toRemove, it.path)
 	}
 	if len(toRemove) > 0 {
+		// R20260527-GO-9 (#1271): wrap the unlock window so the inner
+		// re-Lock fires from a deferred call. If os.Remove panics (FUSE
+		// quirks, syscall traps), the bare `lock.Lock()` after the loop
+		// would never execute, the function unwinds with the per-job lock
+		// in the UNLOCKED state, and the outer caller's defer Unlock then
+		// panics on "unlock of unlocked mutex" — masking the original
+		// trigger and corrupting the lock state for every subsequent
+		// Append on the same jobID. Wrapping the unlock window in a
+		// closure with `defer lock.Lock()` guarantees the lock is
+		// re-acquired before any panic propagates, preserving the
+		// outer caller's lock-held contract.
 		lock := s.jobLock(jobID)
-		lock.Unlock()
-		for _, p := range toRemove {
-			if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				slog.Debug("cron run: trim remove failed", "path", p, "err", err)
+		func() {
+			lock.Unlock()
+			defer lock.Lock()
+			for _, p := range toRemove {
+				if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					slog.Debug("cron run: trim remove failed", "path", p, "err", err)
+				}
 			}
-		}
-		lock.Lock()
+		}()
 	}
 	// Cache may now point to deleted entries; reconcile by trimming the
 	// cache slice to the same (count + window) policy. We hold jobLock so

@@ -215,18 +215,27 @@ func (p *Process) classifyEOF(readErr error, afterDrain bool, log *slog.Logger) 
 	closed := errors.Is(readErr, io.EOF) || errors.Is(readErr, net.ErrClosed)
 	if closed {
 		if afterDrain {
+			// R20260527-GO-19 (#1288): preserve the fact that a
+			// capExceeded oversize line preceded the EOF. Collapsing
+			// this into plain DeathReasonShimEOF hid the upstream
+			// shim-side overflow that triggered the close, making
+			// dashboard/health forensics ambiguous between "clean
+			// shim shutdown" and "shim died right after emitting
+			// >maxScannerBufBytes".
 			log.Info("readLoop: shim connection closed after oversize drain")
-		} else {
-			log.Info("readLoop: shim connection closed")
+			p.setDeathReason(DeathReasonShimOversizeThenEOF)
+			return
 		}
+		log.Info("readLoop: shim connection closed")
 		p.setDeathReason(DeathReasonShimEOF)
 		return
 	}
 	if afterDrain {
 		log.Warn("readLoop: shim read error after oversize drain", "err", readErr)
-	} else {
-		log.Warn("readLoop: shim read error", "err", readErr)
+		p.setDeathReason(DeathReasonShimOversizeThenErr)
+		return
 	}
+	log.Warn("readLoop: shim read error", "err", readErr)
 	p.setDeathReason(DeathReasonShimReadErr)
 }
 

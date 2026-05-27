@@ -65,6 +65,16 @@ const shutdownReplyTimeout = 5 * time.Second
 // guard-mode wiring (NewDispatcher's d.queue != nil vs d.guard fallback),
 // not a structural redundancy. Keep the interface; the cost is one extra
 // indirection on a path already dominated by queue.Enqueue / Release.
+//
+// R250-ARCH-7 (#1170): rediscovered the same collapse argument with new
+// framing — "MessageQueue already exposes SessionGuard's surface plus
+// more, the interface is a strict subset". Reaffirmed: the collapse
+// proposal still ignores fakeGuard's role. The structural-subset claim
+// is true but conflates implementation surface with consumer surface;
+// dispatch consumes 3 methods, while MessageQueue's full API
+// (Enqueue/DoneOrDrain/Discard/Cleanup/Depth/...) is irrelevant to
+// dispatch's busy-gating contract. Documenting the rejection here so
+// the next rediscovery has a single durable rebuttal to point at.
 type SessionGuard interface {
 	TryAcquire(key string) bool
 	ShouldSendWait(key string) bool

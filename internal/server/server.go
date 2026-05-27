@@ -401,6 +401,16 @@ var replyTagForBackendOnce sync.Once
 // New creates a new Server.
 // ServerOptions holds optional configuration for a Server.
 // All fields have zero-value defaults (empty string, nil, zero duration = disabled/unset).
+//
+// Resolution boundary (R247-ARCH-23, #681): every field below is the
+// post-Resolve view of config. The caller (cmd/naozhi/main.go) is responsible
+// for parsing config.yaml, expanding env vars, validating shape, and
+// materialising any derived state (resolved AllowedRoot, picked Backend
+// default, etc.) before constructing ServerOptions. Server.New therefore
+// never re-reads config.yaml or re-runs validation — it consumes the
+// resolved view as a stable input. Mirrors the RawConfig → ResolvedConfig
+// split proposed for internal/config: any new server field that needs a
+// derived value must take the derived form here, not the raw yaml shape.
 type ServerOptions struct {
 	WorkspaceID       string
 	WorkspaceName     string

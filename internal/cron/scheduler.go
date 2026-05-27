@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -572,13 +573,30 @@ type workDirResolveCacheEntry struct {
 	expiresAt time.Time
 }
 
+// workDirResolveCacheMaxEntries caps the number of resolved (workDir,
+// allowedRoot, allowedRootResolved) tuples retained in memory. A workDir
+// is operator-controlled (cron job WorkDir) and entries expire only on
+// read of the same key. Without a cap a buggy or hostile job-creation
+// path that varies WorkDir slightly per call (e.g. trailing slash, NFC vs
+// NFD, /./ insertion) would grow the map indefinitely. R20260527-SEC-4
+// (#1273): once the cap is hit, store sweeps expired entries first; if
+// that fails to free room (every entry still within TTL), the new write
+// is dropped — the cache is a hot-path optimisation, not a correctness
+// path, so missing a cache slot just defers to workDirResolveUnderRoot.
+//
+// 4096 sized to comfortably exceed defaultMaxJobs (256) × a few distinct
+// allowedRoots even with restart-time churn, while bounding worst-case
+// memory at ~1.5 MB (avg key+value ~ 384 bytes).
+const workDirResolveCacheMaxEntries = 4096
+
 // workDirResolveCache memoises positive workDirResolveUnderRoot results
 // keyed by raw (workDir,allowedRoot,allowedRootResolved) tuple. Negative
 // results bypass the cache. Concurrent-safe via sync.Map; entries expire
 // lazily on read so a wedged job does not pin stale resolutions
 // indefinitely. R247-PERF-24.
 type workDirResolveCache struct {
-	m sync.Map // map[string]workDirResolveCacheEntry
+	m     sync.Map     // map[string]workDirResolveCacheEntry
+	count atomic.Int64 // approximate live entries; allowed to drift slightly
 }
 
 // nowFn is overridable for tests so the TTL boundary can be exercised
@@ -594,16 +612,55 @@ func (c *workDirResolveCache) lookup(key string, now time.Time) (string, bool) {
 	e := v.(workDirResolveCacheEntry)
 	if !now.Before(e.expiresAt) {
 		// Expired — drop so the next miss path doesn't keep observing it.
-		c.m.Delete(key)
+		// LoadAndDelete keeps c.count in sync iff the entry was actually
+		// present (concurrent expirers won't double-decrement).
+		if _, deleted := c.m.LoadAndDelete(key); deleted {
+			c.count.Add(-1)
+		}
 		return "", false
 	}
 	return e.resolved, true
+}
+
+// sweepExpired walks the map once dropping any entry whose expiresAt has
+// passed. Called only on the over-cap branch of store; sync.Map.Range is
+// O(N) but bounded by workDirResolveCacheMaxEntries. Concurrent lookups
+// remain race-free — Range observes a consistent snapshot per Go's docs.
+func (c *workDirResolveCache) sweepExpired(now time.Time) {
+	c.m.Range(func(k, v any) bool {
+		e, ok := v.(workDirResolveCacheEntry)
+		if !ok || !now.Before(e.expiresAt) {
+			if _, deleted := c.m.LoadAndDelete(k); deleted {
+				c.count.Add(-1)
+			}
+		}
+		return true
+	})
 }
 
 func (c *workDirResolveCache) store(key, resolved string, now time.Time) {
 	if c == nil {
 		return
 	}
+	// Cap enforcement: when the map is at or above the cap, sweep expired
+	// entries first to make room. If sweep didn't free anything (every
+	// entry still warm), drop the new write — the cache is a perf
+	// optimisation; missing a slot only costs one extra
+	// workDirResolveUnderRoot call on the next tick.
+	if c.count.Load() >= workDirResolveCacheMaxEntries {
+		c.sweepExpired(now)
+		if c.count.Load() >= workDirResolveCacheMaxEntries {
+			return
+		}
+	}
+	if _, loaded := c.m.LoadOrStore(key, workDirResolveCacheEntry{
+		resolved:  resolved,
+		expiresAt: now.Add(workDirResolveCacheTTL),
+	}); !loaded {
+		c.count.Add(1)
+		return
+	}
+	// Existing entry — overwrite without changing the count.
 	c.m.Store(key, workDirResolveCacheEntry{
 		resolved:  resolved,
 		expiresAt: now.Add(workDirResolveCacheTTL),
@@ -790,13 +847,28 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 				robfigcron.SkipIfStillRunning(cronLogger),
 			),
 		),
-		jobs:                make(map[string]*Job),
-		chatJobCount:        make(map[chatJobKey]int),
-		jobsByChat:          make(map[chatJobKey][]*Job),
-		router:              cfg.Router,
-		platforms:           cfg.Platforms,
-		agents:              cfg.Agents,
-		agentCommands:       cfg.AgentCommands,
+		jobs:         make(map[string]*Job),
+		chatJobCount: make(map[chatJobKey]int),
+		jobsByChat:   make(map[chatJobKey][]*Job),
+		router:       cfg.Router,
+		// R241-ARCH-3 (#506): platforms / agents / agentCommands are documented
+		// as immutable after NewScheduler so notifyTarget + executeOpt can
+		// read them lock-free, but the constructor previously aliased the
+		// caller-supplied maps verbatim — leaving the immutability contract
+		// dependent on the caller's discipline. A late-binding wireup that
+		// re-assigned cfg.Platforms[plat] (legitimate at boot, dangerous
+		// post-Start) would race the lock-free reads in cron-package hot
+		// paths. maps.Clone severs the alias at construction so the
+		// post-Start contract is enforced by the receiver, not by caller
+		// trust. Cost: O(N) copy at construction (N ≤ 8 backends, ≤ 32
+		// agents, ≤ 32 commands in production); zero runtime overhead since
+		// the cron-package readers see the same map shape they always did.
+		// maps.Clone returns nil for nil input so callers that omit any of
+		// these fields (test fixtures, narrow integration tests) keep the
+		// prior nil-map semantics.
+		platforms:           maps.Clone(cfg.Platforms),
+		agents:              maps.Clone(cfg.Agents),
+		agentCommands:       maps.Clone(cfg.AgentCommands),
 		storePath:           cfg.StorePath,
 		maxJobs:             cfg.MaxJobs,
 		maxJobsPerChat:      maxPerChat,
