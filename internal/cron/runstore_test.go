@@ -846,12 +846,16 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 			wantCounter: 0,
 		},
 		{
-			name:        "appendTrimBatch reached: force trim",
+			// R20260527-PERF-24 (#1295): batch-trigger no longer forces a
+			// disk walk when the cache predicate says nothing needs
+			// evicting. counter still resets so the next probe runs on
+			// schedule.
+			name:        "appendTrimBatch reached but cache says no trim needed: skip",
 			entry:       newEntryFromRows([]CronRunSummary{{EndedAt: now}}, appendTrimBatch-1),
 			keepCount:   100,
 			keepWindow:  24 * time.Hour,
-			wantSkip:    false,
-			wantCounter: 0, // batch trigger resets counter
+			wantSkip:    true,
+			wantCounter: 0, // batch trigger still resets counter
 		},
 	}
 
