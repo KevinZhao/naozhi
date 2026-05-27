@@ -498,9 +498,17 @@ func main() {
 		// actionable (somebody hand-edited settings.json and broke it, or a
 		// rewrite-in-place writer crashed mid-flush) and should surface at
 		// Error so it shows up in the SLO log filter.
-		if errors.Is(err, fs.ErrNotExist) {
+		//
+		// R241-GO-4 (#490): ctx-cancel mid-retry returns ctx.Err() — Warn
+		// rather than Error so shutdown noise does not pollute the
+		// corruption alerting filter, while still surfacing the cancel
+		// cause to the operator.
+		switch {
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			slog.Warn("apply ~/.claude/settings.json env: aborted by ctx cancel", "err", err)
+		case errors.Is(err, fs.ErrNotExist):
 			slog.Warn("apply ~/.claude/settings.json env: file missing", "err", err)
-		} else {
+		default:
 			slog.Error("apply ~/.claude/settings.json env: read or parse failed", "err", err)
 		}
 	}
