@@ -35,15 +35,49 @@ func (g *Guard) TryAcquire(key string) bool {
 // channel; the window collapses N rapid attempts into a single notice.
 const waitReplyDedupeWindow = 3 * time.Second
 
+// lastWaitPruneThreshold is the lastWait map size at which ShouldSendWait
+// runs a single opportunistic sweep to drop entries older than the
+// dedupe-relevance horizon. Keeps the map bounded for paths that hit
+// ShouldSendWait without ever reaching Release (R217-GO-1 / #1306).
+const lastWaitPruneThreshold = 256
+
+// lastWaitStale is how old a lastWait entry must be before opportunistic
+// prune drops it. Anything past 10 × dedupe-window is stale w.r.t. a fresh
+// "please wait" decision; the timestamp would already let ShouldSendWait
+// fire the notice on the next call for that key.
+const lastWaitStale = 10 * waitReplyDedupeWindow
+
 // ShouldSendWait returns true if enough time has passed since the last
 // "please wait" reply for this key (avoids spamming the user).
+//
+// R217-GO-1 (#1306): paths that never call Release would otherwise grow
+// lastWait unbounded (one entry per unique key seen busy). When the map
+// crosses lastWaitPruneThreshold this method opportunistically drops
+// entries older than lastWaitStale before adding the new one — keeps
+// the map self-bounded without a dedicated sweeper goroutine. The walk
+// is linear in map size but only runs once size exceeds the threshold,
+// amortising to O(1) per call across normal load.
 func (g *Guard) ShouldSendWait(key string) bool {
 	g.waitMu.Lock()
 	defer g.waitMu.Unlock()
 	if time.Since(g.lastWait[key]) < waitReplyDedupeWindow {
 		return false
 	}
-	g.lastWait[key] = time.Now()
+	now := time.Now()
+	if len(g.lastWait) >= lastWaitPruneThreshold {
+		// One-shot O(N) sweep. The threshold keeps the amortised cost low;
+		// `cutoff` uses Add(-) so a backwards NTP step (now < entry ts)
+		// produces a future cutoff that fails the .Before comparison and
+		// leaves the entry alone — a fresh notice on its next call still
+		// short-circuits via the dedupe-window check above.
+		cutoff := now.Add(-lastWaitStale)
+		for k, ts := range g.lastWait {
+			if ts.Before(cutoff) {
+				delete(g.lastWait, k)
+			}
+		}
+	}
+	g.lastWait[key] = now
 	return true
 }
 
