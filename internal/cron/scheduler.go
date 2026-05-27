@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -790,13 +791,28 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 				robfigcron.SkipIfStillRunning(cronLogger),
 			),
 		),
-		jobs:                make(map[string]*Job),
-		chatJobCount:        make(map[chatJobKey]int),
-		jobsByChat:          make(map[chatJobKey][]*Job),
-		router:              cfg.Router,
-		platforms:           cfg.Platforms,
-		agents:              cfg.Agents,
-		agentCommands:       cfg.AgentCommands,
+		jobs:         make(map[string]*Job),
+		chatJobCount: make(map[chatJobKey]int),
+		jobsByChat:   make(map[chatJobKey][]*Job),
+		router:       cfg.Router,
+		// R241-ARCH-3 (#506): platforms / agents / agentCommands are documented
+		// as immutable after NewScheduler so notifyTarget + executeOpt can
+		// read them lock-free, but the constructor previously aliased the
+		// caller-supplied maps verbatim — leaving the immutability contract
+		// dependent on the caller's discipline. A late-binding wireup that
+		// re-assigned cfg.Platforms[plat] (legitimate at boot, dangerous
+		// post-Start) would race the lock-free reads in cron-package hot
+		// paths. maps.Clone severs the alias at construction so the
+		// post-Start contract is enforced by the receiver, not by caller
+		// trust. Cost: O(N) copy at construction (N ≤ 8 backends, ≤ 32
+		// agents, ≤ 32 commands in production); zero runtime overhead since
+		// the cron-package readers see the same map shape they always did.
+		// maps.Clone returns nil for nil input so callers that omit any of
+		// these fields (test fixtures, narrow integration tests) keep the
+		// prior nil-map semantics.
+		platforms:           maps.Clone(cfg.Platforms),
+		agents:              maps.Clone(cfg.Agents),
+		agentCommands:       maps.Clone(cfg.AgentCommands),
 		storePath:           cfg.StorePath,
 		maxJobs:             cfg.MaxJobs,
 		maxJobsPerChat:      maxPerChat,
