@@ -147,6 +147,17 @@ func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
 // match a single log line to a single dropped message instead of having
 // to reconstruct chunk boundaries from N independent warnings.
 func (s *Scheduler) notifyTarget(plat, chatID, text string) {
+	// R20260527122801-GO-014: short-circuit before SplitText alloc when
+	// stopCtx already cancelled — the parent goroutine may have been
+	// scheduled before Stop fired, so deliverNotice's triggerWG.Add(1)
+	// can land on a dead Scheduler and pay for SplitText's chunk walk
+	// of a long result before the existing replyCtx.Err() check at
+	// line ~188 catches it. The lower-level guard stays as the
+	// authoritative cancel observation; this is an early bail for
+	// the alloc.
+	if s.stopCtx != nil && s.stopCtx.Err() != nil {
+		return
+	}
 	p := s.platforms[plat]
 	if p == nil {
 		slog.Warn("cron notify: platform not found", "platform", plat)
