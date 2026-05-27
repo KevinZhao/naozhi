@@ -585,23 +585,22 @@ func (s *runStore) skipAppendTrim(jobID string) bool {
 	if !entry.warm {
 		return false
 	}
-	// Force a trim every appendTrimBatch Appends so window-based eviction
-	// still happens for jobs that never approach keepCount.
+	// R20260527-PERF-24 (#1295): perform the cache-headroom checks BEFORE
+	// the appendTrimBatch boundary. The prior order force-returned false on
+	// the boundary regardless of cap/window state, walking the runs/<jobID>/
+	// ReadDir+Stat tree every 10 Appends even when the cache could prove no
+	// candidate exists (steady-state: 1run/min × 50 jobs × 30 days = 14400
+	// wasted ReadDirs/day). The boundary is now only honoured when cap or
+	// window state is unprovable from cache alone.
 	entry.appendsSinceTrim++
-	if entry.appendsSinceTrim >= appendTrimBatch {
-		entry.appendsSinceTrim = 0
-		return false
-	}
 	// Plenty of headroom under count cap?  Cache reflects the on-disk
 	// newest-first ring (capped to keepCount), so entry.count is a safe
 	// upper bound on disk rows that survived the last trim.
-	if entry.count+appendTrimBatch >= s.keepCount {
-		entry.appendsSinceTrim = 0
-		return false
-	}
+	capSafe := entry.count+appendTrimBatch < s.keepCount
 	// Oldest cached row still inside keepWindow?  Use EndedAt to mirror
 	// trimJobLocked's mtime-based cutoff (cacheTrimAfterDisk also approximates
 	// mtime via EndedAt — keep these two paths consistent).
+	windowSafe := true
 	if entry.count > 0 {
 		oldest := entry.ringRead(entry.count - 1)
 		ts := oldest.EndedAt
@@ -610,11 +609,22 @@ func (s *runStore) skipAppendTrim(jobID string) bool {
 		}
 		cutoff := time.Now().Add(-s.keepWindow)
 		if !ts.After(cutoff) {
-			entry.appendsSinceTrim = 0
-			return false
+			windowSafe = false
 		}
 	}
-	return true
+	if capSafe && windowSafe {
+		// Both cache-state proofs hold — nothing for trimJobLocked to do
+		// even on the appendTrimBatch boundary. Reset the counter so we
+		// don't accumulate drift toward an inevitable forced scan that
+		// would still find no work.
+		entry.appendsSinceTrim = 0
+		return true
+	}
+	// One of the two cache proofs failed — there may be on-disk work for
+	// trimJobLocked. Run it now (resetting the counter); the appendTrimBatch
+	// boundary is irrelevant once we've already decided to scan.
+	entry.appendsSinceTrim = 0
+	return false
 }
 
 // appendTrimBatch is the maximum number of Append calls we'll let pass

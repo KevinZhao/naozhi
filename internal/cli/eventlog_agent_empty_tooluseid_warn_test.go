@@ -14,8 +14,10 @@ import (
 // the fix the anomaly was silent and the spawned->running advancement
 // simply never fired.
 func TestApplyEntryStateLocked_EmptyToolUseID_WarnLogged(t *testing.T) {
-	t.Parallel()
-
+	// No t.Parallel: production code logs via slog.Default(); we install a
+	// per-test JSONHandler over the package default. With t.Parallel another
+	// concurrent cli test (e.g. TestEventLog_TurnAgents) writes through the
+	// same default and races on the captured bytes.Buffer.
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
@@ -46,8 +48,7 @@ func TestApplyEntryStateLocked_EmptyToolUseID_WarnLogged(t *testing.T) {
 // agents with a populated ToolUseID must NOT trigger the warn, otherwise
 // every healthy turn floods journald.
 func TestApplyEntryStateLocked_NonEmptyToolUseID_NoWarn(t *testing.T) {
-	t.Parallel()
-
+	// No t.Parallel: see TestApplyEntryStateLocked_EmptyToolUseID_WarnLogged.
 	var buf bytes.Buffer
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
