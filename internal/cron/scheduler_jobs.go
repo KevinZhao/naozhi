@@ -1411,6 +1411,18 @@ func (s *Scheduler) registerJob(j *Job) error {
 // argument would land. Until then s.stopCtx remains a Scheduler
 // struct field (see scheduler.go godoc on the field's anti-pattern
 // rationale: robfig/cron callbacks have no ctx parameter slot).
+//
+// R20260527-COR-7 (#1299) panic-recovery boundary: this tick path does
+// NOT wrap executeJobIDIfLive in a recover() — it relies on
+// robfig/cron's Recover chain (NewScheduler installs
+// robfigcron.Recover(cronLogger) in the WithChain() args). The
+// TriggerNow path is the asymmetric case: it bypasses robfig's chain
+// entirely, so executeIfNotDeletedOrPaused has its own
+// recordTriggerNowPanic recover. A future refactor that splits the
+// dispatch boundary differently (e.g. routes tick callbacks through a
+// new entry that bypasses the chain) MUST add an explicit recover to
+// preserve the "panicking job fails loud once and the surrounding
+// goroutine still completes" contract that holds today.
 func (s *Scheduler) newCronTickCallback(jobID string) func() {
 	return func() {
 		s.executeJobIDIfLive(jobID, false /* viaTriggerNow */, "cron")
