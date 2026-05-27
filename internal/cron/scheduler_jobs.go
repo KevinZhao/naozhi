@@ -1071,8 +1071,11 @@ func (s *Scheduler) TriggerNow(id string) error {
 		// 走 executeOpt（可能引用已被清理的 session router / job 指针）。
 		// 相关测试：TestTriggerNow_EntryGoneReleasesWG（trigger_now_wg_done_test.go）。
 		// R192-CRON-B: cron-v2-polish §3.2 jitter。
-		entry := s.cron.Entry(entryID)
-		entryGone := entry.WrappedJob == nil
+		// R242-ARCH-29 (#774): route the WrappedJob == nil sentinel through
+		// cronEntryGone so the robfig/cron internal-struct shape stays
+		// behind one helper — a future lib bump that switches to a
+		// HasEntry / Lookup API lands once.
+		entryGone := s.cronEntryGone(entryID)
 		s.mu.RUnlock()
 		if entryGone {
 			go func() {
