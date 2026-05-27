@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -63,6 +64,51 @@ func putRecordBuf(buf *bytes.Buffer) {
 // so sizing up has no contention cost, only a one-time 64 KiB alloc
 // per active session.
 const logWriteBufSize = 64 * 1024
+
+// logBufPool reuses *bufio.Writer instances of capacity logWriteBufSize
+// across perKeyWriter create / close cycles. R249-PERF-21 (#995): without
+// pooling, every fresh writer (initial NewPersister attach, idle TTL
+// evict + respawn, post-rotate reattach) paid a 64 KiB heap allocation.
+// On a busy deployment with N sessions cycling through the writer cache
+// that is N × 64 KiB of churn the GC has to reclaim per cycle.
+//
+// The pool is safe because perKeyWriter.close() flushes before nilling
+// w.logBuf, and we Reset(io.Discard) on the way out so the pooled
+// instance carries no reference to the closed *os.File. The next
+// Reset(logFile) call on Get rebinds it to the fresh fd, clearing the
+// internal err field at the same time. Returning to the pool a writer
+// that grew past logWriteBufSize is impossible — bufio.Writer never
+// grows its buffer; capacity is fixed by NewWriterSize.
+var logBufPool = sync.Pool{
+	New: func() any {
+		// Bind to io.Discard initially; callers Reset(file) before use.
+		// Using Discard at construction means the pool fast-path on the
+		// very first Get of the program lifetime returns a usable
+		// writer rather than the New func returning nil and forcing
+		// an extra branch at the call site.
+		return bufio.NewWriterSize(io.Discard, logWriteBufSize)
+	},
+}
+
+// acquireLogBuf returns a *bufio.Writer rebound to file. The returned
+// writer's internal buffer capacity is exactly logWriteBufSize.
+func acquireLogBuf(file *os.File) *bufio.Writer {
+	bw := logBufPool.Get().(*bufio.Writer)
+	bw.Reset(file)
+	return bw
+}
+
+// releaseLogBuf returns a flushed bufio.Writer to the pool. Callers MUST
+// have already called Flush (or close()'s flush) — the pool slot is
+// rebound to io.Discard so any retained reference cannot accidentally
+// double-write to the original fd through the pooled writer.
+func releaseLogBuf(bw *bufio.Writer) {
+	if bw == nil {
+		return
+	}
+	bw.Reset(io.Discard)
+	logBufPool.Put(bw)
+}
 
 // Observer receives real-time counter increments from the Persister.
 // Implementations typically forward to expvar / Prometheus; the
@@ -999,7 +1045,7 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 		key:          key,
 		stem:         stem,
 		logFile:      logFile,
-		logBuf:       bufio.NewWriterSize(logFile, logWriteBufSize),
+		logBuf:       acquireLogBuf(logFile), // R249-PERF-21 (#995): pool 64 KiB bufio.
 		idxWriter:    idxW,
 		logPath:      logPath,
 		idxPath:      idxPath,
@@ -1195,6 +1241,12 @@ func (w *perKeyWriter) close() error {
 		if err := w.logBuf.Flush(); err != nil && firstErr == nil {
 			firstErr = err
 		}
+		// R249-PERF-21 (#995): return the bufio.Writer to the pool so the
+		// 64 KiB buffer is reusable by the next perKeyWriter instead of
+		// being released to GC. releaseLogBuf rebinds to io.Discard so the
+		// nilled w.logBuf cannot accidentally route writes through the
+		// pooled instance later.
+		releaseLogBuf(w.logBuf)
 		w.logBuf = nil
 	}
 	if w.logFile != nil {
