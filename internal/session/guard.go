@@ -35,6 +35,21 @@ func (g *Guard) TryAcquire(key string) bool {
 // channel; the window collapses N rapid attempts into a single notice.
 const waitReplyDedupeWindow = 3 * time.Second
 
+// lastWaitSweepThreshold triggers an opportunistic O(N) cleanup of the
+// lastWait map once it crosses this size. Entries are normally pruned by
+// Release, but TryAcquire-then-bail paths (busy queues that never reach
+// Release) can leak entries. The threshold is tuned for single-operator
+// deployments where steady-state chat count is well under 256; bursts
+// above that trigger the sweep, amortising to O(1) per ShouldSendWait
+// call under sustained load.
+const lastWaitSweepThreshold = 256
+
+// lastWaitStaleMultiplier defines stale-entry age relative to the dedupe
+// window. 10× gives us a comfortable margin: any entry older than this
+// can no longer affect ShouldSendWait's return value, so it is safe to
+// drop without changing observable behaviour.
+const lastWaitStaleMultiplier = 10
+
 // ShouldSendWait returns true if enough time has passed since the last
 // "please wait" reply for this key (avoids spamming the user).
 func (g *Guard) ShouldSendWait(key string) bool {
@@ -44,6 +59,18 @@ func (g *Guard) ShouldSendWait(key string) bool {
 		return false
 	}
 	g.lastWait[key] = time.Now()
+	// Opportunistic sweep: TryAcquire-then-bail paths leak entries because
+	// only Release deletes them. Once the map exceeds the threshold, drop
+	// entries older than 10× the dedupe window — they cannot affect future
+	// ShouldSendWait decisions and amortise the cost across busy bursts.
+	if len(g.lastWait) > lastWaitSweepThreshold {
+		cutoff := time.Now().Add(-lastWaitStaleMultiplier * waitReplyDedupeWindow)
+		for k, ts := range g.lastWait {
+			if ts.Before(cutoff) {
+				delete(g.lastWait, k)
+			}
+		}
+	}
 	return true
 }
 
