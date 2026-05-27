@@ -383,6 +383,19 @@ type Router struct {
 	// 读写: core (init), lifecycle (spawnSession write/close), shim (reconnect read)
 	spawningKeys map[string]chan struct{}
 
+	// shimStuckOnReset records keys whose most recent Reset /
+	// ResetAndRecreate observed waitSocketGoneForKey timing out (the shim
+	// socket was still bound after the 2s grace). The next GetOrCreate
+	// for the same key consults this flag and, on spawn failure, wraps
+	// the returned error with ErrShimStuck so the cron / dashboard caller
+	// can surface a distinct actionable error class to the operator
+	// instead of the generic ErrClassSessionError. The flag is consumed
+	// (deleted) on the very next GetOrCreate for the key — success or
+	// failure — so a subsequent retry gets a clean classification.
+	// 读写: lifecycle (Reset / ResetAndRecreate write; GetOrCreate read+delete)
+	// (#1324 — R20260527122801-CR-12)
+	shimStuckOnReset map[string]bool
+
 	// 读写: core (init), cleanup (saveIfDirty)
 	storePath string
 	// 读写: lifecycle (spawn/Reset/Rename mutations), shim (reconnect post-attach), discovery (label/register/takeover), cleanup (saveIfDirty consume)
@@ -976,6 +989,7 @@ func NewRouter(cfg RouterConfig) *Router {
 		knownIDs:           make(map[string]bool),
 		sessionIDToKey:     make(map[string]string),
 		spawningKeys:       make(map[string]chan struct{}),
+		shimStuckOnReset:   make(map[string]bool),
 		noOutputTimeout:    cfg.NoOutputTimeout,
 		totalTimeout:       cfg.TotalTimeout,
 		eventLogDir:        cfg.EventLogDir,

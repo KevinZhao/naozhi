@@ -482,13 +482,26 @@ func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
 }
 
 // validateSchedule checks if the cron expression is valid and respects the minimum interval.
-func validateSchedule(schedule string) error {
+//
+// loc is the timezone in which the schedule will eventually be evaluated by the
+// scheduler. R20260527122801-CR-7 (#1321): historically `time.Now()` (Local)
+// was used to seed the interval probe, while registerJob registers the entry
+// with WithLocation(s.location). On DST transitions or month-end "every N
+// months" forms the two reference frames disagree — a schedule could pass the
+// minCronInterval floor here but actually fire faster under cfg.Location.
+// Pass the scheduler's effective location so the validation seed and runtime
+// match. nil falls back to time.Local for the legacy free-standing path
+// (tests / pre-Scheduler bootstraps that don't have a location yet).
+func validateSchedule(schedule string, loc *time.Location) error {
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {
 		return err
 	}
+	if loc == nil {
+		loc = time.Local
+	}
 	// Check that the interval between the first two runs is at least minCronInterval.
-	now := time.Now()
+	now := time.Now().In(loc)
 	first := sched.Next(now)
 	second := sched.Next(first)
 	// R236-QA-07: drop the `interval > 0` guard. Previously a degenerate

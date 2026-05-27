@@ -166,6 +166,13 @@ func TestExecuteOpt_TriggerNowSkipsJitter(t *testing.T) {
 		Schedule: "@every 30m",
 		Prompt:   "hello",
 	}
+	// R20260527122801-CR-8 (#1322): executeOpt now post-CAS rechecks
+	// s.jobs[j.ID] to close the dispatch→CAS race window. Insert the job
+	// into the map so the recheck sees it as live; this test focuses on
+	// jitter-skip behaviour, not the registry lifecycle.
+	s.mu.Lock()
+	s.jobs[j.ID] = j
+	s.mu.Unlock()
 
 	done := make(chan struct{})
 	go func() {

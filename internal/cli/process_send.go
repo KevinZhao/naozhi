@@ -62,14 +62,37 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 			// decoder panics before they ever propagate up, so the outer
 			// wrapper was always dead code. The inner recover now logs via
 			// slog.Error so panic events are no longer silent.
-			var wg sync.WaitGroup
-			wg.Add(len(images))
-			for i, img := range images {
-				go func(i int, data []byte) {
-					defer wg.Done()
-					thumbs[i] = MakeThumbnail(data, 600)
-				}(i, img.Data)
+			//
+			// R247-PERF-21 (#569): cap goroutine spawn at thumbnailWorkerCap
+			// rather than spawning one per image. The previous "go per
+			// image" path paid 8KB stack × N for messages with many images
+			// (slack/discord uploads can carry 10+); the inner thumbSem
+			// cap=4 already serialises actual decode/encode work, so the
+			// extra goroutines past 4 just sat blocked on the sem channel.
+			// For N ≤ cap we keep one goroutine per image (no contention,
+			// matches prior latency); for N > cap we run a fixed worker
+			// pool of `cap` goroutines pulling indices from a channel —
+			// goroutine count stays bounded regardless of N, no behavioural
+			// change vs. thumbSem since both serialise to the same cap.
+			workerCount := len(images)
+			if workerCount > thumbnailWorkerCap {
+				workerCount = thumbnailWorkerCap
 			}
+			var wg sync.WaitGroup
+			wg.Add(workerCount)
+			jobs := make(chan int, len(images))
+			for w := 0; w < workerCount; w++ {
+				go func() {
+					defer wg.Done()
+					for i := range jobs {
+						thumbs[i] = MakeThumbnail(images[i].Data, 600)
+					}
+				}()
+			}
+			for i := range images {
+				jobs <- i
+			}
+			close(jobs)
 			wg.Wait()
 		}
 		// ImagePaths rides alongside Images so the dashboard can offer

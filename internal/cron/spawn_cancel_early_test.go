@@ -39,8 +39,11 @@ func TestR250GO15_SpawnCancelInvokedBeforeSendCtx(t *testing.T) {
 
 	// 3. The explicit cancel must come BEFORE sendCtx's WithTimeout call,
 	//    confirming the spawn timer is freed before the (long) Send phase
-	//    starts — the whole point of the fix.
-	idxSendCtx := strings.Index(src, "sendCtx, sendCancel := context.WithTimeout(s.stopCtx, jobTimeout)")
+	//    starts — the whole point of the fix. R20260527122801-CR-2 (#1311)
+	//    changed the sendCtx parent timeout from `jobTimeout` to a clamped
+	//    `sendBudget` value, so the assertion now matches the sendBudget
+	//    name; the structural ordering check below is unchanged.
+	idxSendCtx := strings.Index(src, "sendCtx, sendCancel := context.WithTimeout(s.stopCtx, sendBudget)")
 	if idxSendCtx < 0 {
 		t.Fatal("could not locate sendCtx WithTimeout — scheduler_run.go shape changed; revisit this test")
 	}

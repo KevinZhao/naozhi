@@ -261,12 +261,14 @@ func TestBuildMessageHandler_DedupDuplicateEventID(t *testing.T) {
 	}
 }
 
-func TestBuildMessageHandler_DedupEmptyEventIDNotFiltered(t *testing.T) {
+func TestBuildMessageHandler_DedupEmptyEventIDFallbackFilters(t *testing.T) {
 	p := &mockPlatform{}
 	srv := newTestServerWithScheduler(p)
 	handler := newTestDispatcher(srv).BuildHandler()
 
-	// empty EventID is never recorded by dedup
+	// Per #1310: empty EventID falls back to a composite dedup key
+	// (platform+chat+message+minute), so a same-minute retry is suppressed
+	// even when the adapter left EventID empty.
 	msg := platform.IncomingMessage{
 		Platform: "test",
 		EventID:  "",
@@ -274,10 +276,15 @@ func TestBuildMessageHandler_DedupEmptyEventIDNotFiltered(t *testing.T) {
 		Text:     "/cron",
 	}
 	handler(context.Background(), msg)
+	before := p.replyCount()
 	handler(context.Background(), msg)
+	after := p.replyCount()
 
-	if p.replyCount() < 2 {
-		t.Errorf("empty eventID should not deduplicate: got %d replies, want >= 2", p.replyCount())
+	if before == 0 {
+		t.Error("first call should produce a reply")
+	}
+	if after != before {
+		t.Errorf("retry with empty eventID must dedupe via fallback key: count went %d -> %d", before, after)
 	}
 }
 

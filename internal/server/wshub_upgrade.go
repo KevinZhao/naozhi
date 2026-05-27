@@ -76,6 +76,18 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// R20260527122801-SEC-2 / #1326: derive uploadOwner BEFORE
+	// upgrader.Upgrade because Set-Cookie headers cannot be added once
+	// the response is hijacked into a 101. In no-token mode without an
+	// existing nz_anon cookie we must mint one here; mint failure refuses
+	// the upgrade with 503 (matches HTTP uploadOwnerOrFail) so co-NAT
+	// clients can never share an IP-derived uploadOwner bucket.
+	ip := clientIP(r, h.trustedProxy)
+	uploadOwnerKey, preAuthenticated, ok := wsDeriveUploadOwner(w, r, h, ip)
+	if !ok {
+		return
+	}
+
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		// Capture origin + remote IP so operators can diagnose
@@ -92,7 +104,6 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// set it here with a different value, which masked the real cap since
 	// readPump re-applies wsMaxMessageSize on first iteration — remove the
 	// redundant setter to keep a single source of truth.
-	ip := clientIP(r, h.trustedProxy)
 	c := &wsClient{
 		conn: conn,
 		// Buffer holds outbound event frames (CLI output, subscription
@@ -116,29 +127,12 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		subGen:           make(map[string]uint64),
 		done:             make(chan struct{}),
 	}
-	if h.dashToken == "" {
+	// R20260527122801-SEC-2 / #1326: uploadOwner + initial-authenticated
+	// were resolved before Upgrade so any Set-Cookie minted there could
+	// ride the 101 response. Apply the cached results here.
+	c.uploadOwner = uploadOwnerKey
+	if preAuthenticated {
 		c.authenticated.Store(true)
-		// R233-SEC-10: prefer the per-browser nz_anon cookie over raw
-		// client IP so co-NAT users don't share an uploadOwner bucket and
-		// claim each other's TakeAll uploads. The HTTP path mints the
-		// cookie via uploadOwner→mintAnonCookie before any WS upgrade
-		// (dashboard JS hits /api/health → triggers uploadOwner derive in
-		// that flow); when the cookie is absent we fall back to client IP
-		// to preserve the prior contract — IP-fallback only loses
-		// disambiguation between co-NAT clients that have never made an
-		// HTTP request first, which is rare in practice.
-		if cookie, err := r.Cookie(anonCookieName); err == nil && cookie.Value != "" {
-			c.uploadOwner = ownerKeyFromCookie(cookie.Value)
-		} else {
-			c.uploadOwner = ip
-		}
-	} else if cookie, err := r.Cookie(authCookieName); err == nil {
-		if h.cookieMAC != "" && subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(h.cookieMAC)) == 1 {
-			c.authenticated.Store(true)
-			// Must use the same derivation as HTTP uploadOwner so files
-			// uploaded on one transport can be claimed on the other.
-			c.uploadOwner = ownerKeyFromCookie(cookie.Value)
-		}
 	}
 	// R229-SEC-8 / #1022: per-uploadOwner sub-cap. Reserve AFTER the
 	// owner derivation above so the bucket is keyed by the same value
@@ -178,6 +172,66 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	slotReleased = true
 	go func() { defer h.clientWG.Done(); c.writePump() }()
 	go func() { defer h.clientWG.Done(); c.readPump() }()
+}
+
+// wsDeriveUploadOwner runs the WS upgrade auth-cookie / nz_anon resolution
+// BEFORE upgrader.Upgrade so any minted Set-Cookie header rides the 101
+// response (after Upgrade the response is hijacked and headers can no
+// longer be added).
+//
+// Returns:
+//   - owner:           the uploadOwner key to assign to the new wsClient.
+//   - authenticated:   whether the client should start in the authenticated
+//     state (auth-cookie match in token mode, or no-token
+//     mode where every connection is implicitly authed).
+//   - ok:              false when the upgrade must be refused. The 503
+//     reply has already been written; callers must
+//     simply return.
+//
+// R20260527122801-SEC-2 (#1326): in no-token mode without an existing
+// nz_anon cookie this helper mints one and refuses the upgrade if the
+// system entropy source fails — mirroring HTTP uploadOwner's ok=false
+// contract so co-NAT clients never share an IP-derived owner bucket.
+// Test harnesses that wire NewHub without HubOptions.Auth retain the
+// legacy IP-fallback (those Hubs do not run uploadStore so the fallback
+// is not security-relevant).
+func wsDeriveUploadOwner(w http.ResponseWriter, r *http.Request, h *Hub, ip string) (owner string, authenticated bool, ok bool) {
+	if h.dashToken == "" {
+		// No-token mode: every connection is authenticated; uploadOwner
+		// derives from nz_anon (cookie or freshly minted).
+		if cookie, err := r.Cookie(anonCookieName); err == nil && cookie.Value != "" {
+			return ownerKeyFromCookie(cookie.Value), true, true
+		}
+		if h.auth != nil {
+			val, mintErr := mintAnonCookie(w, r, h.auth)
+			if mintErr != nil {
+				slog.Warn("ws upgrade: mintAnonCookie failed; refusing to fall back to IP-derived owner key",
+					"err", mintErr, "remote", ip)
+				w.Header().Set("Retry-After", "30")
+				http.Error(w, "could not derive upload owner; please retry", http.StatusServiceUnavailable)
+				return "", false, false
+			}
+			return ownerKeyFromCookie(val), true, true
+		}
+		// AuthHandlers not wired (test harness only). Preserve the
+		// legacy IP-fallback so unit tests that bypass NewHub continue
+		// to authenticate.
+		return ip, true, true
+	}
+	// Token mode: only the auth-cookie path is examined here. WS clients
+	// that present `Authorization: Bearer ...` (browser-side EventSource
+	// shim) authenticate via the inner handleAuth message, where token-
+	// hash → uploadOwner derivation runs. Until then the client stays
+	// unauthenticated with empty uploadOwner — that branch never reaches
+	// uploadStore.
+	if cookie, err := r.Cookie(authCookieName); err == nil {
+		if h.cookieMAC != "" && subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(h.cookieMAC)) == 1 {
+			// Must use the same derivation as HTTP uploadOwner so files
+			// uploaded on one transport can be claimed on the other.
+			return ownerKeyFromCookie(cookie.Value), true, true
+		}
+	}
+	return "", false, true
 }
 
 func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
