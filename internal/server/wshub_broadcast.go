@@ -17,8 +17,9 @@ import (
 //   - sessionsUpdateMsg: pre-marshaled byte literal
 //   - broadcastToAuthenticated / broadcastState / BroadcastSessionReady
 //   - BroadcastSessionsUpdate (debounced) + doBroadcastSessionsUpdate
-//   - BroadcastCronResult / BroadcastCronRunStarted / BroadcastCronRunEnded
-//     and their named WS payload structs
+//   - BroadcastCronRunStarted / BroadcastCronRunEnded and their named
+//     WS payload structs (cron_result wire frame deleted in Phase D —
+//     see cronRunStartedMsg / cronRunEndedMsg comment block below)
 //   - BroadcastDaemonRunStarted / BroadcastDaemonRunEnded
 //   - sanitizeHexIDForBroadcast (Job/Run hex-ID short-circuit)
 //   - DroppedMessages (atomic-counter accessor, broadcast-adjacent)
@@ -198,60 +199,16 @@ func (h *Hub) doBroadcastSessionsUpdate() {
 	h.broadcastToAuthenticated(data)
 }
 
-// cronResultMsg is the WS payload broadcast on cron job completion. Declared
-// as a named type (not an inline anonymous struct) so json/reflect caches the
-// type descriptor once across all calls.
-type cronResultMsg struct {
-	Type   string `json:"type"`
-	JobID  string `json:"job_id,omitempty"`
-	Result string `json:"result,omitempty"`
-	Error  string `json:"error,omitempty"`
-}
-
-// BroadcastCronResult notifies all connected WS clients that a cron job completed.
-func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
-	// R185-SEC-H2: scheduler generates jobID as 16-char hex today (8 entropy
-	// bytes → hex.EncodeToString; see cron.generateID / hexIDEntropyBytes),
-	// but if a future path ever surfaces a config-supplied / user-typed ID,
-	// bidi/C0 chars would reach the dashboard via a SetEscapeHTML(false)
-	// encoder. Sanitize defensively; result/errMsg are already scrubbed at
-	// recordResult (cron/scheduler_finish.go: truncateWithSuffix +
-	// SanitizeForLog). The cron.MaxIDLen cap mirrors the IM/dashboard input
-	// boundary so log lines stay bounded if a wider ID ever leaks through.
-	//
-	// R246-SEC-7: bring result / errMsg to defense-in-depth parity with the
-	// rest of the broadcast surface. recordResult is the only documented
-	// caller today, but cron_result is a public Hub method — a future caller
-	// (test fixture, external webhook bridge, mistakenly-rebased cron path
-	// before sanitisation) would otherwise route raw bidi / C1 / DEL bytes
-	// straight to authenticated dashboard clients via SetEscapeHTML(false)
-	// JSON. Apply the same SanitizeForLog cap used by BroadcastCronRunEnded
-	// at this site so the WS payload is independently safe regardless of
-	// upstream pre-sanitisation. The 4128-byte cap (4096 result runes +
-	// truncate-suffix slack) matches maxStoredResultRunes so already-sanitised
-	// inputs round-trip unchanged; oversized inputs (which would never reach
-	// us through the documented path) get truncated rather than dropped so
-	// the dashboard still surfaces a partial result.
-	const maxBroadcastResultBytes = 4128
-	const maxBroadcastErrorBytes = 4128
-	data, err := marshalPooled(cronResultMsg{
-		Type:   "cron_result",
-		JobID:  osutil.SanitizeForLog(jobID, cron.MaxIDLen),
-		Result: osutil.SanitizeForLog(result, maxBroadcastResultBytes),
-		Error:  osutil.SanitizeForLog(errMsg, maxBroadcastErrorBytes),
-	})
-	if err != nil {
-		return
-	}
-	h.broadcastToAuthenticated(data)
-}
-
-// cronRunStartedMsg / cronRunEndedMsg are P0 cron-run-history (RFC §7.2)
-// WS payloads. cron_result is preserved on the success path for backward
-// compatibility (clients that haven't migrated still see the result text);
-// new clients should subscribe to the run-started / run-ended pair, which
-// covers every terminal state including skipped/canceled where cron_result
-// historically did not fire.
+// cronRunStartedMsg / cronRunEndedMsg are the cron-run-history WS payloads.
+// Phase D (RFC §3.5) deleted the legacy cronResultMsg / BroadcastCronResult
+// pair: dashboard.js's cron_result subscription was a strict subset of its
+// cron_run_ended subscription (announce + fetchCronJobs + renderCronPanel),
+// and result text is fetched via /api/cron/jobs/<id>/runs/<runID> when
+// needed rather than carried inline on the success-path WS frame. The
+// announce("定时任务已完成") moved to dashboard.js's cron_run_ended
+// succeeded branch.
+//
+// New clients subscribe to the run-started / run-ended pair, which
 type cronRunStartedMsg struct {
 	Type      string `json:"type"`
 	JobID     string `json:"job_id"`

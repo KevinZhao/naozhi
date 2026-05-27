@@ -6,8 +6,8 @@
 // query API (CurrentRun / ListRuns / RecentRuns / GetRun) live next to the
 // writers that produce the records — when the schema of CronRun changes,
 // readers and writers move together. No behaviour change. Methods stay on
-// *Scheduler so the s.mu / s.jobs / s.runStore / s.onExecute /
-// s.runningJobs fields remain accessible without exporting.
+// *Scheduler so the s.mu / s.jobs / s.runStore / s.runningJobs fields
+// remain accessible without exporting.
 
 package cron
 
@@ -456,12 +456,6 @@ func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionI
 			"job_id", j.ID, "err", perr)
 		return result, errMsg, false
 	}
-	// Snapshot j.ID before releasing s.mu so the post-unlock onExecute
-	// callback does not depend on the implicit "Job.ID is immutable across
-	// concurrent DeleteJob" contract — that contract holds today (DeleteJob
-	// removes the entry from s.jobs but never mutates *Job in place), but
-	// pinning the value here makes future refactors safer. R235-GO-1.
-	jobID := j.ID
 	// R250-PERF-7: detect whether LastSessionID changed under the lock
 	// so we can invalidate the KnownSessionIDs TTL cache exactly when
 	// the persisted set has shifted. Comparing against the snapshot
@@ -474,9 +468,12 @@ func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionI
 		s.invalidateKnownSessionsCache()
 	}
 	save()
-	if fn := s.onExecute.Load(); fn != nil {
-		(*fn)(jobID, result, errMsg)
-	}
+	// Phase D (RFC §3.5): the legacy s.onExecute hook fired here to
+	// drive the cron_result WS frame, which dashboard.js consumed only
+	// for an `announce` + list refetch — both already covered by the
+	// cron_run_ended frame. The hook + BroadcastCronResult + cronResultMsg
+	// were deleted; the announce moved to dashboard.js's cron_run_ended
+	// succeeded branch.
 	return result, errMsg, true
 }
 

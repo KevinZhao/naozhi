@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,7 +10,48 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
+
+// realRouterAdapter wraps a real *session.Router into the post-Phase-B
+// cron.SessionRouter interface for integration tests that need the
+// router's stub-tracking semantics. Mirrors cmd/naozhi/cron_router_adapter.go
+// without re-using main's adapter (cmd/* is not importable from internal/*).
+type realRouterAdapter struct{ r *session.Router }
+
+func (a realRouterAdapter) RegisterCronStubWithChain(key, workspace, lastPrompt string, chain []string) {
+	a.r.RegisterCronStubWithChain(key, workspace, lastPrompt, chain)
+}
+func (a realRouterAdapter) Reset(key string) { a.r.Reset(key) }
+func (a realRouterAdapter) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (Session, SessionStatus, error) {
+	sess, st, err := a.r.GetOrCreate(ctx, key, session.AgentOpts{
+		Model: opts.Model, Workspace: opts.Workspace, Backend: opts.Backend,
+		Exempt: opts.Exempt, ExtraArgs: append([]string(nil), opts.ExtraArgs...),
+	})
+	if err != nil {
+		return nil, SessionStatus(int(st)), err
+	}
+	return realSessionAdapter{sess}, SessionStatus(int(st)), nil
+}
+
+type realSessionAdapter struct{ s *session.ManagedSession }
+
+func (s realSessionAdapter) Send(ctx context.Context, text string) (SendResult, error) {
+	r, err := s.s.Send(ctx, text, nil, nil)
+	if r == nil {
+		return SendResult{}, err
+	}
+	return SendResult{Text: r.Text, SessionID: r.SessionID}, err
+}
+func (s realSessionAdapter) SessionID() string {
+	if s.s == nil {
+		return ""
+	}
+	return s.s.SessionID()
+}
+func (s realSessionAdapter) InterruptViaControl() InterruptOutcome {
+	return InterruptOutcome(int(s.s.InterruptViaControl()))
+}
 
 func TestGenerateID(t *testing.T) {
 	t.Parallel()
@@ -261,9 +303,9 @@ func TestResolveAgent(t *testing.T) {
 		{"/unknown stuff", "general", "/unknown stuff"},
 	}
 	for _, tt := range tests {
-		agent, text := session.ResolveAgent(tt.text, cmds)
+		agent, text := resolveAgent(tt.text, cmds)
 		if agent != tt.wantAgent || text != tt.wantText {
-			t.Errorf("ResolveAgent(%q): got (%q, %q), want (%q, %q)", tt.text, agent, text, tt.wantAgent, tt.wantText)
+			t.Errorf("resolveAgent(%q): got (%q, %q), want (%q, %q)", tt.text, agent, text, tt.wantAgent, tt.wantText)
 		}
 	}
 }
@@ -493,7 +535,7 @@ func TestEnsureStub(t *testing.T) {
 	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{})
 	s := NewScheduler(SchedulerConfig{
-		Router:  router,
+		Router:  realRouterAdapter{r: router},
 		MaxJobs: 10,
 	})
 	if err := s.Start(); err != nil {
@@ -505,7 +547,7 @@ func TestEnsureStub(t *testing.T) {
 	if err := s.AddJob(job); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	key := session.CronKey(job.ID)
+	key := sessionkey.CronKey(job.ID)
 
 	// AddJob already registers the stub; simulate sidebar "×" that removed it.
 	if !router.Remove(key) {

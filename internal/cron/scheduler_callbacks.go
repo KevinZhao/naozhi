@@ -1,39 +1,35 @@
-// scheduler_callbacks.go: server-side callback registration + run-event
-// types + emit helpers + per-state metrics bump.
+// scheduler_callbacks.go: cron-side run-event types + emit helpers +
+// per-state metrics bumps.
 //
-// Split out of scheduler.go to keep the broadcast surface in one place
-// (event shape, register, emit, metric) for new event additions. No
-// behaviour change. Methods stay on *Scheduler so the s.onExecute /
-// s.onRunStarted / s.onRunEnded atomic.Pointer fields remain accessible
-// without exporting.
+// Phase D (RFC §3.5) collapsed three legacy SetOn* setters
+// (SetOnExecute / SetOnRunStarted / SetOnRunEnded) and their
+// atomic.Pointer storage into a single SchedulerConfig.Telemetry
+// (runtelemetry.Broadcaster) injected at construction. The cron-local
+// Run{Started,Ended}Event types are kept for two reasons:
+//   - cron internals (executeOpt / finishRun / emitOverlapSkipped)
+//     populate them with cron-specific fields (Trigger=cron.TriggerKind,
+//     ErrorClass=cron.ErrorClass) before translating to the wire
+//     runtelemetry.RunEndedEvent
+//   - the emit helpers are private (lowercase), so external callers
+//     reach the broadcast surface only through SchedulerConfig.Telemetry
+//     or SetTelemetry
+//
+// No behaviour change vs the pre-Phase-D pipeline: per-state metrics
+// still bump in finishRun, RunStarted still fires post-CAS pre-IO,
+// RunEnded still fires after persistence settles.
 
 package cron
 
 import (
-	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
-// OnExecuteFunc is called after a cron job finishes execution.
-// It receives the job ID, result text (or empty), and error message (or empty).
-type OnExecuteFunc func(jobID, result, errMsg string)
-
-// OnRunStartedFunc fires when a cron run enters the executing state.
-// Subscribers receive RunStartedEvent describing the snapshot. See
-// SetOnRunStarted for thread-safety / lifecycle contract.
-type OnRunStartedFunc func(RunStartedEvent)
-
-// OnRunEndedFunc fires when a cron run reaches a terminal state.
-// Subscribers receive RunEndedEvent describing the outcome. See
-// SetOnRunEnded for thread-safety / lifecycle contract.
-type OnRunEndedFunc func(RunEndedEvent)
-
-// RunStartedEvent is broadcast when a cron run enters the running state
-// (after CAS gate, before IM notify resolution). Consumers (Hub) marshal
-// to a WS message; the cron package itself never serialises — this keeps
-// the package free of server / wshub coupling.
+// RunStartedEvent is the cron-local payload for run-started. Translated
+// to runtelemetry.RunStartedEvent inside emitRunStarted before reaching
+// the broadcaster.
 type RunStartedEvent struct {
 	JobID     string
 	RunID     string
@@ -43,9 +39,8 @@ type RunStartedEvent struct {
 	Fresh     bool
 }
 
-// RunEndedEvent is broadcast when a cron run reaches a terminal state
-// (succeeded / failed / skipped / timed_out / canceled). EndedAt and
-// DurationMS reflect the wall-clock that record path observes.
+// RunEndedEvent is the cron-local payload for run-ended. Translated to
+// runtelemetry.RunEndedEvent inside emitRunEnded.
 type RunEndedEvent struct {
 	JobID      string
 	RunID      string
@@ -59,67 +54,59 @@ type RunEndedEvent struct {
 	Trigger    TriggerKind
 }
 
-// storeCallback is a generic helper that consolidates the SetOn* nil-check
-// + atomic store pattern shared by SetOnExecute / SetOnRunStarted /
-// SetOnRunEnded. R247-CR-7: pre-helper the three setters were 8-line
-// copies of the same nil-or-store-pointer dance; new RunEvent additions
-// either grew the same boilerplate or risked drifting (e.g. forgetting the
-// nil-clears-store branch).
+// SetTelemetry installs (or replaces) the broadcaster late, after
+// construction. Used by cmd/naozhi which builds Scheduler before the
+// Hub exists, then injects the broadcaster once dashboard.go finishes
+// wiring. Calling SetTelemetry is the only mutation path on s.telemetry
+// after NewScheduler; production uses it exactly once during boot, so
+// the plain assignment is uncontended.
 //
-// R230-GO-2 escape rationale (preserved): callers pass fn by value, the
-// helper takes &fn under its own stack frame, fn escapes to heap (1
-// alloc). Setters only fire at startup wiring (~1 call per Scheduler
-// instance per process lifetime), so the per-call allocation is
-// invisible. The alternative — atomic.Value with a wrapper struct, or a
-// dedicated holder struct — would either lose the typed Load() ergonomics
-// (Load returns *OnExecuteFunc directly) or balloon the API surface.
-// Document-and-accept rather than pessimize the read path.
-func storeCallback[T any](slot *atomic.Pointer[T], fn T, isNil func(T) bool) {
-	if isNil(fn) {
-		slot.Store(nil)
-		return
-	}
-	slot.Store(&fn)
+// Passing nil clears the broadcaster (returns to no-broadcast mode).
+func (s *Scheduler) SetTelemetry(b runtelemetry.Broadcaster) {
+	s.telemetry = b
 }
 
-// SetOnExecute registers a callback invoked after each cron job execution.
-func (s *Scheduler) SetOnExecute(fn OnExecuteFunc) {
-	storeCallback(&s.onExecute, fn, func(f OnExecuteFunc) bool { return f == nil })
-}
-
-// SetOnRunStarted registers a callback for the run-started broadcast event.
-// nil disables the broadcast (testing path / no-WS mode).
-func (s *Scheduler) SetOnRunStarted(fn OnRunStartedFunc) {
-	storeCallback(&s.onRunStarted, fn, func(f OnRunStartedFunc) bool { return f == nil })
-}
-
-// SetOnRunEnded registers a callback for the run-ended broadcast event.
-// Invoked for every terminal state including skipped/canceled — the
-// callback should distinguish via RunEndedEvent.State.
-func (s *Scheduler) SetOnRunEnded(fn OnRunEndedFunc) {
-	storeCallback(&s.onRunEnded, fn, func(f OnRunEndedFunc) bool { return f == nil })
-}
-
-// emitRunStarted invokes the registered server-side hook outside s.mu so
-// hub locks may be acquired by the handler without inversion risk. nil
-// hook = no broadcast (used by tests / no-WS deployments).
+// emitRunStarted translates a cron-local RunStartedEvent to the shared
+// runtelemetry shape and forwards through the configured broadcaster.
+// nil broadcaster (tests / no-WS) is silently dropped — the metric bump
+// happens unconditionally so dashboard counts stay accurate.
 //
-// R230C-GO-15: CronRunStartedTotal bumps here, not at the call sites, so
-// the counter cannot drift from the broadcast event count when a new emit
-// path lands. Metric advancement is independent of subscriber wiring (the
-// nil-hook fast path still bumps), matching the prior contract where both
-// executeOpt's normal path and emitOverlapSkipped each manually bumped.
+// R230C-GO-15: CronRunStartedTotal bumps here, not at the call sites,
+// so the counter cannot drift from the broadcast event count when a
+// new emit path lands.
 func (s *Scheduler) emitRunStarted(ev RunStartedEvent) {
 	metrics.CronRunStartedTotal.Add(1)
-	if fn := s.onRunStarted.Load(); fn != nil {
-		(*fn)(ev)
+	if s.telemetry == nil {
+		return
 	}
+	s.telemetry.BroadcastRunStarted(runtelemetry.RunStartedEvent{
+		Subsystem: runtelemetry.SubsystemCron,
+		OwnerID:   ev.JobID,
+		RunID:     ev.RunID,
+		Trigger:   runtelemetry.TriggerKind(ev.Trigger),
+		StartedAt: ev.StartedAt,
+		SessionID: ev.SessionID,
+		Fresh:     ev.Fresh,
+	})
 }
 
 func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
-	if fn := s.onRunEnded.Load(); fn != nil {
-		(*fn)(ev)
+	if s.telemetry == nil {
+		return
 	}
+	s.telemetry.BroadcastRunEnded(runtelemetry.RunEndedEvent{
+		Subsystem:  runtelemetry.SubsystemCron,
+		OwnerID:    ev.JobID,
+		RunID:      ev.RunID,
+		State:      runtelemetry.RunState(ev.State),
+		StartedAt:  ev.StartedAt,
+		EndedAt:    ev.EndedAt,
+		DurationMS: ev.DurationMS,
+		Trigger:    runtelemetry.TriggerKind(ev.Trigger),
+		SessionID:  ev.SessionID,
+		ErrorClass: runtelemetry.ErrorClass(ev.ErrorClass),
+		ErrorMsg:   ev.ErrorMsg,
+	})
 }
 
 // bumpRunStateMetrics increments the per-state counter for the terminal
