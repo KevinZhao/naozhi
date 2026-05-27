@@ -1263,6 +1263,20 @@ func (s *runStore) DeleteJob(jobID string) {
 // likely failure mode is "caller forgot to acquire" and that surfaces
 // reliably in single-flight test scenarios.
 //
+// R20260527-COR-4 (#1291) "Locked" suffix is NOT continuous-hold:
+// the os.Remove batch path below releases jobLock for slow-FS syscall
+// fan-out (R246-GO-20 / #712) and re-acquires it before the cache
+// reconciliation. The Locked suffix means "caller must hold on entry
+// AND on exit" — interior windows may release. Append's deferred
+// unlock contract still works because the Locked promise is restored
+// before this function returns. A panic inside the unlocked window
+// would surface as Append's deferred Unlock-on-non-held-lock panic
+// (we deliberately do NOT add a deferred re-acquire — sync.Mutex is
+// not re-entrant, so a re-acquire-on-panic would deadlock the panic
+// goroutine on its own resumption against the original recovered
+// caller). os.Remove on the std lib never panics on POSIX, so the
+// fail-loud path is acceptable.
+//
 // Policy: keep ALL runs satisfying BOTH (rank ≤ keepCount) AND
 // (age ≤ keepWindow). Either condition violated → delete. AND-vs-OR
 // is the user-confirmed choice in the RFC chat (§4.3): high-frequency

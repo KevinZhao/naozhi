@@ -518,6 +518,20 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 	// 写新 LastSessionID 并由下一轮 snap 自然带入；闭包路径只是兜底让
 	// sidebar 在失败后仍能渲染。仍需走 stillExists 校验：job 可能在
 	// Reset 与本回调间隔内被 DeleteJob 删掉，那种情况下 stub 不应再注册。
+	//
+	// R20260527-COR-12 (#1298) lock-pair contract：本函数对 s.jobs[snap.jobID]
+	// 做两次 RLock 读，对应两个时间点：
+	//
+	//   (a) refresh closure 内（line ~490）：失败回调晚于本函数返回，闭包
+	//       可能在数秒后才执行；那时 job 是否仍存在必须重读。
+	//   (b) 紧随 Reset 之后（line ~497）：post-Reset 防御 — Reset 已经清空
+	//       sessions/<key> 会话状态；如果 job 此刻已被 DeleteJob 删掉，
+	//       本函数必须返回 ok=false 防止后续 GetOrCreate 重建一个 cron:<id>
+	//       孤儿。
+	//
+	// 两次读独立、各自的 RLock 持锁窗口短小，且(a)只在(b)成功后才有机会
+	// 触发，所以"重复读 snap.jobID"是设计意图而非 bug。Reviewer 看到第二
+	// 次 RLock 时不要"合并优化"——会让(a)失去独立的 stillExists 检查。
 	refresh := func() {
 		s.mu.RLock()
 		_, exists := s.jobs[snap.jobID]
@@ -526,6 +540,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 			s.registerStubByValue(snap.jobID, snap.workDir, snap.prompt, snap.lastSessionID)
 		}
 	}
+	// (b) post-Reset 存在性检查 — 见上文 lock-pair contract。
 	s.mu.RLock()
 	_, stillExists := s.jobs[snap.jobID]
 	s.mu.RUnlock()

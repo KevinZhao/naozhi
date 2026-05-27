@@ -412,10 +412,39 @@ var replyTagForBackendOnce sync.Once
 // split proposed for internal/config: any new server field that needs a
 // derived value must take the derived form here, not the raw yaml shape.
 type ServerOptions struct {
-	WorkspaceID       string
-	WorkspaceName     string
-	AllowedRoot       string // restricts /cd to paths under this root
-	StateDir          string // directory for persistent state (cookie_secret, etc.)
+	WorkspaceID   string
+	WorkspaceName string
+	AllowedRoot   string // restricts /cd to paths under this root
+	// StateDir is the only naozhi-state directory the server constructor
+	// owns end-to-end: loadOrCreateCookieSecret writes cookie_secret here
+	// (0700 mkdir + 0600 file), buildRetiredStoreWithErr persists the
+	// retired-key ledger here, and warnIfStateDirLarge polls its size at
+	// startup. The other state directories naozhi keeps on disk are owned
+	// elsewhere by design — this comment anchors the split so a future
+	// state.Layout aggregator (R214-ARCH-11, #407) lands without having
+	// to rediscover the boundary:
+	//
+	//   - claudeDir (~/.claude)              → resolveClaudeDir() inside
+	//                                          this constructor; consumed
+	//                                          by takeover, history,
+	//                                          discovery, transcript.
+	//   - workspace cwd + storePath dir      → cmd/naozhi/main.go MkdirAlls
+	//                                          before calling NewWithOptions
+	//                                          and feeds them into Router.
+	//   - attachment / upload subtree        → workspace-relative
+	//                                          (.naozhi/attachments/),
+	//                                          per-session at write time.
+	//   - cron runs / shims                  → internal/cron + cli.Shim own
+	//                                          their own subdirectories
+	//                                          under the operator-supplied
+	//                                          root; the server side only
+	//                                          forwards paths.
+	//
+	// Empty StateDir is legal (test harnesses, ephemeral dev runs); the
+	// cookie secret falls back to in-memory and the retired-key store
+	// degrades to no-op. Operators get the canonical layout via the
+	// `--state-dir` flag / config.yaml `server.state_dir` field.
+	StateDir          string
 	NoOutputTimeout   time.Duration
 	TotalTimeout      time.Duration
 	QueueMaxDepth     int

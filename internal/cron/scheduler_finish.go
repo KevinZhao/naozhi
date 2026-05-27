@@ -622,6 +622,18 @@ func redactPathsInCronError(s string) string {
 		c := s[i]
 		// POSIX absolute path: leading '/' followed by a non-space/non-quote
 		// byte. Drive letter path C:\… also counts.
+		//
+		// R20260527-COR-10 (#1292): the `i+1 < len(s)` guard AND the explicit
+		// rejection of '/'-followed-by-' '/'\t'/'\n' are deliberate. They
+		// both treat a lone '/' (root dir reference, never a sensitive path)
+		// as a literal byte rather than a redact trigger. Cases that fall
+		// through unredacted as a result:
+		//   - '/' at end-of-string ("error: /") — bare root, no segments.
+		//   - '/' followed by whitespace/newline ("error: /\nnext" or
+		//     "/ matched") — same: no path segments to leak.
+		// These are not security-relevant because the bare root carries no
+		// per-host or per-user information. A multi-segment path like
+		// "/home/u" still triggers via s[i+1]='h' (non-space).
 		isPosix := c == '/' && i+1 < len(s) && s[i+1] != ' ' && s[i+1] != '\t' && s[i+1] != '\n'
 		isWin := i+2 < len(s) &&
 			((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) &&
