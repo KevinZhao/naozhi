@@ -21,11 +21,14 @@ func formatEventLine(ev cli.Event) string {
 			if block.Text == "" {
 				return ""
 			}
-			// Show first meaningful line of thinking, truncated
+			// Show first meaningful line of thinking, truncated. Strip ANSI /
+			// OSC / DCS escape bytes (#836) — thinking text occasionally
+			// echoes terminal output the model just observed, and those
+			// would render as garbled bytes inside the IM status banner.
 			first := textutil.FirstLine(block.Text)
-			return "💭 " + textutil.TruncateRunes(first, 50)
+			return "💭 " + textutil.TruncateRunes(stripANSI(first), 50)
 		case "tool_use":
-			return formatToolUse(block.Name, block.Input)
+			return stripANSI(formatToolUse(block.Name, block.Input))
 		}
 	}
 	return ""
