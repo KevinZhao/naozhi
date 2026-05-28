@@ -631,31 +631,38 @@ func watchdogInterruptTimeout() time.Duration {
 	return time.Duration(watchdogInterruptTimeoutAtomic.Load())
 }
 
-// runDeadlineWatchdog spawns a goroutine that waits on ctx and fires
-// sess.InterruptViaControl exactly when ctx ends with DeadlineExceeded.
-// The watchdog must run concurrently with sess.Send, NOT after — Send's
-// internal defer flips Process.State Running→Ready the instant ctx fires,
-// and InterruptViaControl gates on State==StateRunning, so calling it
+// runDeadlineWatchdog arranges for sess.InterruptViaControl to fire
+// exactly when ctx ends with DeadlineExceeded. The interrupt must run
+// concurrently with sess.Send, NOT after — Send's internal defer flips
+// Process.State Running→Ready the instant ctx fires, and
+// InterruptViaControl gates on State==StateRunning, so calling it
 // post-Send is dead code (returns ErrNoActiveTurn → outcome=no_turn).
 //
 // Channel contract (R249-CR-27): the returned channel has buffer=1 and
-// is intentionally NOT closed. The goroutine self-completes thanks to
-// buffer=1 — its single send never blocks, so the goroutine returns
+// is intentionally NOT closed. The publishing goroutine self-completes
+// thanks to buffer=1 — its single send never blocks, so it returns
 // regardless of whether the caller reads. The caller drains ch only to
 // observe the abort outcome (abort.fired / abort.outcome) for logging
 // and to ensure InterruptViaControl has finished before recording the
 // run state; failing to drain leaks the abortResult value, NOT the
-// goroutine, and is harmless for shutdown bookkeeping. Earlier godoc
-// said the caller "must drain" to keep the goroutine from outliving the
-// run — that was misleading, what actually matters is sequencing the
-// interrupt write before session.Reset on the next tick.
+// goroutine, and is harmless for shutdown bookkeeping.
 //
 // On the success / non-deadline error path the caller cancels ctx
-// explicitly; the watchdog observes ctx.Err()==Canceled, skips
-// InterruptViaControl, and returns abortResult{fired:false}.
+// explicitly; the publishing callback observes ctx.Err()==Canceled,
+// skips InterruptViaControl, and returns abortResult{fired:false}.
+//
+// R247-GO-12 (#492): we use context.AfterFunc rather than spawning a
+// long-lived `<-ctx.Done()` goroutine. With per-tick CAS-protected runs,
+// a 50-job @ 1Hz deployment otherwise holds ~50 watchdog goroutines
+// concurrently for the duration of every Send (up to jobTimeout). With
+// AfterFunc the runtime only spawns a goroutine when ctx ends — briefly,
+// to invoke the callback — so the steady-state in-flight watchdog
+// goroutine count drops from O(in-flight runs) to ~0. The deadline /
+// cancel semantics are preserved exactly: the callback inspects
+// ctx.Err() the same way the goroutine used to.
 func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan abortResult {
-	// R249-GO-3: defensive nil guard. A nil ctx would panic on <-ctx.Done()
-	// inside the goroutine; a nil sess would panic on InterruptViaControl
+	// R249-GO-3: defensive nil guard. A nil ctx would panic on
+	// context.AfterFunc; a nil sess would panic on InterruptViaControl
 	// when the deadline path fires. Both are caller bugs (production wires
 	// real values), but the cron run goroutine swallows panics via
 	// robfig/cron's recover chain elsewhere — here a panic would surface as
@@ -671,8 +678,7 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 		return ch
 	}
 	ch := make(chan abortResult, 1)
-	go func() {
-		<-ctx.Done()
+	context.AfterFunc(ctx, func() {
 		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			ch <- abortResult{}
 			return
@@ -701,7 +707,7 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 		case <-t.C:
 			ch <- abortResult{outcome: InterruptError, fired: true}
 		}
-	}()
+	})
 	return ch
 }
 
