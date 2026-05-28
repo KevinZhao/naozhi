@@ -946,6 +946,15 @@ func (h *Hub) Shutdown() {
 	h.userSendLimiters = nil
 	h.userSendLimitersStoreMu.Unlock()
 
+	// Drop the per-uploadOwner conn-count map so test harnesses that
+	// build/teardown many Hubs in one process don't accumulate stale
+	// owner→count entries through the Hub reference chain. Sibling to
+	// userSendLimiters above; same lifecycle constraint (post clientWG.Wait,
+	// no further reserveOwnerSlot/releaseOwnerSlot caller will run).
+	h.connCountByOwnerMu.Lock()
+	h.connCountByOwner = nil
+	h.connCountByOwnerMu.Unlock()
+
 	// Barrier: any TrackSend call that observed h.ctx.Err()==nil and was
 	// about to Add(1) is racing us. Holding sendTrackMu here forces it to
 	// complete either side of this line; once we mark sendClosed, any later

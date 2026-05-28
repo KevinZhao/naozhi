@@ -69,6 +69,12 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 
 	// Slow path: fragmented writes, use buffer.
 	w.buf.Write(data)
+	// io.Writer contract: when returning a non-nil error, n must reflect
+	// the count of input bytes already accepted by the writer. Tracking
+	// consumed bytes prevents callers from re-sending lines that the shim
+	// already received when an error fires partway through a multi-line
+	// Write.
+	consumed := 0
 	for {
 		line, err := w.buf.ReadBytes('\n')
 		if err != nil {
@@ -87,13 +93,18 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 			// doesn't concatenate fresh data onto a broken prefix the shim
 			// never received.
 			w.buf.Reset()
-			return 0, fmt.Errorf("%w: %d bytes > %d", ErrMessageTooLarge, len(line)-1, maxStdinLineBytes)
+			n := consumed + len(line)
+			if n > len(data) {
+				n = len(data)
+			}
+			return n, fmt.Errorf("%w: %d bytes > %d", ErrMessageTooLarge, len(line)-1, maxStdinLineBytes)
 		}
 		// A bare "\n" line (e.g. left-over from a previous Write that put
 		// back a partial residual starting with newline) skips the send
 		// path. The shim ignores blank lines but emitting them wastes a
 		// round-trip and pollutes the protocol stream.
 		if len(line) <= 1 {
+			consumed += len(line)
 			continue
 		}
 		// R245-PERF-1: same bytes-direct fast path as above — no
@@ -103,8 +114,13 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 			// already consumed, so leaving the remainder in the buffer would
 			// produce a corrupted stitched message on retry.
 			w.buf.Reset()
-			return 0, err
+			n := consumed + len(line)
+			if n > len(data) {
+				n = len(data)
+			}
+			return n, err
 		}
+		consumed += len(line)
 	}
 	return len(data), nil
 }

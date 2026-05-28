@@ -978,6 +978,9 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 					if e.DurationMS > 0 {
 						l.bgAgents[i].DurationMS = e.DurationMS
 					}
+					if e.ToolUses > 0 {
+						l.bgAgents[i].ToolUses = e.ToolUses
+					}
 					break
 				}
 			}
