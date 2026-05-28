@@ -40,7 +40,7 @@ func TestHandleAPISessions_StatsStructShape(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleList(w, req)
+	srv.sessionH.HandleList(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
@@ -129,7 +129,7 @@ func TestHandleAPISessions_StatsProjectsOmitemptyEmpty(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleList(w, req)
+	srv.sessionH.HandleList(w, req)
 
 	var resp map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
@@ -154,7 +154,7 @@ func TestHandleAPISessions_StatsStaticStructEmbedsFlatJSON(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleList(w, req)
+	srv.sessionH.HandleList(w, req)
 
 	body := w.Body.String()
 	// If embed is named, keys would be under "sessionStatsStatic":{...}.

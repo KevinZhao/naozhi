@@ -49,7 +49,7 @@ func TestSessionsList_CronFilteredOut(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleList(w, req)
+	srv.sessionH.HandleList(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
@@ -92,7 +92,7 @@ func TestSessionsList_CronFilteredOut(t *testing.T) {
 
 // TestSessionsList_CronFilterRespectsCronKeyPrefix guards against prefix
 // drift: any future addition to session.CronKeyPrefix must remain consistent
-// with the filter at handleList. The test injects a session whose key is
+// with the filter at HandleList. The test injects a session whose key is
 // exactly "{CronKeyPrefix}edge" and asserts it is filtered, so a refactor
 // that hardcodes "cron:" elsewhere would not silently bypass this filter.
 func TestSessionsList_CronFilterRespectsCronKeyPrefix(t *testing.T) {
@@ -103,7 +103,7 @@ func TestSessionsList_CronFilterRespectsCronKeyPrefix(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleList(w, req)
+	srv.sessionH.HandleList(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
 	}

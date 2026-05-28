@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 // countingCronSessions is a CronView stub that records how many times
@@ -50,31 +49,27 @@ func TestHistorySessions_KnownSessionIDsCachedAcross1HzPolls(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(claudeDir, "projects"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	srv.sessionH.claudeDir = claudeDir
+	srv.sessionH.SetClaudeDirForTest(claudeDir)
 
 	// Seed at least one JSONL so the discovery scan returns non-nil and
 	// the caller can distinguish "cold load" from "no claudeDir wired".
 	makeProjectDir(t, claudeDir, "00000000-1111-2222-3333-aaaaaaaaaaaa")
 
 	stub := &countingCronSessions{ids: map[string]bool{}}
-	srv.sessionH.cronSessions = stub
+	srv.sessionH.SetCronSessionsForTest(stub)
 
 	// Force a cold cache so the first historySessions() triggers a real
 	// FS scan + filter construction. Mirror the atomic so the wait-free
 	// fast path in historySessions() observes "expired". R040034-PERF-5
 	// (#1404).
-	srv.sessionH.historyCacheMu.Lock()
-	srv.sessionH.historyCache = nil
-	srv.sessionH.historyCacheTime = time.Time{}
-	srv.sessionH.historyCacheTimeUnixNano.Store(0)
-	srv.sessionH.historyCacheMu.Unlock()
+	srv.sessionH.ResetHistoryCacheForTest()
 
 	// 32 polls back-to-back. At 1Hz this is half a minute of dashboard
 	// activity, well below the 120s cacheTTL — every call after the
 	// first must be a cache hit.
 	const polls = 32
 	for i := 0; i < polls; i++ {
-		_ = srv.sessionH.historySessions()
+		_ = srv.sessionH.HistorySessionsForTest()
 	}
 
 	// Tolerate exactly one call (the cold-cache load). Two or more would

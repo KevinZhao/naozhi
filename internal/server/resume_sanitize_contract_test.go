@@ -53,10 +53,10 @@ func TestHandleResume_WorkspaceLogGoesThroughSanitizeForLog(t *testing.T) {
 func readDashboardSessionSource(t *testing.T) string {
 	t.Helper()
 	_, thisFile, _, _ := runtime.Caller(0)
-	p := filepath.Join(filepath.Dir(thisFile), "dashboard_session.go")
+	p := filepath.Join(filepath.Dir(thisFile), "../../internal/dashboard/session/handlers.go")
 	data, err := os.ReadFile(p)
 	if err != nil {
-		t.Fatalf("read dashboard_session.go: %v", err)
+		t.Fatalf("read handlers.go: %v", err)
 	}
 	return string(data)
 }

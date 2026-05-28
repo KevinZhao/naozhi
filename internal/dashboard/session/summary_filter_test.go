@@ -1,4 +1,4 @@
-package server
+package session
 
 import (
 	"os"
@@ -27,13 +27,13 @@ import (
 func TestLookupSummariesCached_FiltersAlreadySummarized(t *testing.T) {
 	t.Parallel()
 
-	src, err := os.ReadFile("dashboard_session.go")
+	src, err := os.ReadFile("handlers.go")
 	if err != nil {
-		t.Fatalf("read dashboard_session.go: %v", err)
+		t.Fatalf("read handlers.go: %v", err)
 	}
 	body := string(src)
 
-	startMarker := "func (h *SessionHandlers) lookupSummariesCached("
+	startMarker := "func (h *Handlers) lookupSummariesCached("
 	startIdx := strings.Index(body, startMarker)
 	if startIdx < 0 {
 		t.Fatalf("could not locate lookupSummariesCached function — has the symbol moved or been renamed?")

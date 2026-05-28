@@ -14,10 +14,13 @@
 file_size:
     # 9 个 > 800 行 + 2 个 500-800 行 = 11 个超 server 500 硬上限
     # ── 9 个 > 800 行 ──
-    - path: internal/server/dashboard_session.go
-      current: 1779                         # Phase 2 微改（dashproject import）
-      limit: 500
-      until_phase: 3e         # Phase 3e 抽完 dashboard/session/{list,events,interrupt,label}
+    # internal/server/dashboard_session.go: removed Phase 3e (PR #1441) — file
+    # moved to internal/dashboard/session/handlers.go. Closes-exemption trailer
+    # in commit message satisfies rule 5.
+    - path: internal/dashboard/session/handlers.go
+      current: 1873                         # Phase 3e 搬迁后实际行数；含 New ctor + Deps + getters
+      limit: 800
+      until_phase: "5"        # Phase 5 内部拆分（按 6 handler + history cache + retired store 分文件）
     # internal/server/project_files.go: removed Phase 2 (PR #1437) — file
     # moved to internal/dashboard/project/files.go. Closes-exemption trailer
     # in commit message satisfies rule 5. New dashboard/project/files.go
@@ -39,7 +42,7 @@ file_size:
       limit: 500
       until_phase: "1"
     - path: internal/server/server.go
-      current: 1366                         # master + prep + 3b + 3a + 3c + 3d imports (agentevents+cli+transcribe) + Phase 2 dashproject import
+      current: 1369                         # master + prep + 3b + 3a + 3c + 3d + 2 + 3e imports (agentevents+cli+transcribe+dashproject+session)
       limit: 500
       until_phase: "5"
     - path: internal/server/wshub.go        # v0.6.1 新增豁免：v0.4 时 514 不超线

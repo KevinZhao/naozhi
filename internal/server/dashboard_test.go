@@ -11,9 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 	"unicode/utf8"
 
+	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
@@ -26,7 +26,7 @@ func TestHandleAPISessionEvents_MissingKey(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/events", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleEvents(w, req)
+	srv.sessionH.HandleEvents(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
@@ -41,7 +41,7 @@ func TestHandleAPISessionEvents_SessionNotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/events?key=no-such-key", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleEvents(w, req)
+	srv.sessionH.HandleEvents(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
@@ -77,7 +77,7 @@ func TestHandleAPISessionEvents_RejectsInvalidKey(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet,
 				"/api/sessions/events?key="+url.QueryEscape(key), nil)
 			w := httptest.NewRecorder()
-			srv.sessionH.handleEvents(w, req)
+			srv.sessionH.HandleEvents(w, req)
 
 			if w.Code != http.StatusBadRequest {
 				t.Errorf("status = %d, want 400", w.Code)
@@ -114,7 +114,7 @@ func TestHandleAPISessionDelete_SetLabel_Interrupt_RejectInvalidKey(t *testing.T
 			raw, _ := json.Marshal(map[string]string{"key": key})
 			req := httptest.NewRequest(http.MethodDelete, "/api/sessions", bytes.NewReader(raw))
 			w := httptest.NewRecorder()
-			srv.sessionH.handleDelete(w, req)
+			srv.sessionH.HandleDelete(w, req)
 			if w.Code != http.StatusBadRequest {
 				t.Errorf("delete status = %d, want 400", w.Code)
 			}
@@ -126,7 +126,7 @@ func TestHandleAPISessionDelete_SetLabel_Interrupt_RejectInvalidKey(t *testing.T
 			u := "/api/sessions?key=" + url.QueryEscape(key)
 			req := httptest.NewRequest(http.MethodDelete, u, nil)
 			w := httptest.NewRecorder()
-			srv.sessionH.handleDelete(w, req)
+			srv.sessionH.HandleDelete(w, req)
 			if w.Code != http.StatusBadRequest {
 				t.Errorf("delete(query) status = %d, want 400", w.Code)
 			}
@@ -138,7 +138,7 @@ func TestHandleAPISessionDelete_SetLabel_Interrupt_RejectInvalidKey(t *testing.T
 			raw, _ := json.Marshal(map[string]string{"key": key, "label": "x"})
 			req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", bytes.NewReader(raw))
 			w := httptest.NewRecorder()
-			srv.sessionH.handleSetLabel(w, req)
+			srv.sessionH.HandleSetLabel(w, req)
 			if w.Code != http.StatusBadRequest {
 				t.Errorf("set_label status = %d, want 400", w.Code)
 			}
@@ -150,7 +150,7 @@ func TestHandleAPISessionDelete_SetLabel_Interrupt_RejectInvalidKey(t *testing.T
 			raw, _ := json.Marshal(map[string]string{"key": key})
 			req := httptest.NewRequest(http.MethodPost, "/api/sessions/interrupt", bytes.NewReader(raw))
 			w := httptest.NewRecorder()
-			srv.sessionH.handleInterrupt(w, req)
+			srv.sessionH.HandleInterrupt(w, req)
 			if w.Code != http.StatusBadRequest {
 				t.Errorf("interrupt status = %d, want 400", w.Code)
 			}
@@ -181,7 +181,7 @@ func TestHandleAPISessionEvents_LimitCapsInitialFetch(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/sessions/events?key="+key+"&limit=2", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleEvents(w, req)
+	srv.sessionH.HandleEvents(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -208,7 +208,7 @@ func TestHandleAPISessionEvents_BeforePaginatesBackwards(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/sessions/events?key="+key+"&before=3500&limit=10", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleEvents(w, req)
+	srv.sessionH.HandleEvents(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -235,7 +235,7 @@ func TestHandleAPISessionEvents_BeforeAndLimitPrefersNewest(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/sessions/events?key="+key+"&before=5000&limit=2", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleEvents(w, req)
+	srv.sessionH.HandleEvents(w, req)
 
 	var entries []cli.EventEntry
 	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
@@ -290,7 +290,7 @@ func TestHandleAPISessionEvents_BeforeFallsBackToHistorySource(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/sessions/events?key="+key+"&before=500&limit=10", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleEvents(w, req)
+	srv.sessionH.HandleEvents(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -328,7 +328,7 @@ func TestHandleAPISessionEvents_BeforeSkipsSourceWhenMemoryCovers(t *testing.T) 
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/sessions/events?key="+key+"&before=2500&limit=10", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleEvents(w, req)
+	srv.sessionH.HandleEvents(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -345,7 +345,7 @@ func TestHandleAPISessionEvents_InvalidBefore(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/sessions/events?key=test:d:u:general&before=not-a-number", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleEvents(w, req)
+	srv.sessionH.HandleEvents(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
@@ -360,7 +360,7 @@ func TestHandleAPISessionEvents_InvalidLimit(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet,
 			"/api/sessions/events?key=test:d:u:general&limit="+v, nil)
 		w := httptest.NewRecorder()
-		srv.sessionH.handleEvents(w, req)
+		srv.sessionH.HandleEvents(w, req)
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("limit=%q: status = %d, want 400", v, w.Code)
 		}
@@ -376,7 +376,7 @@ func TestHandleAPISessionEvents_LimitClampedAtMax(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/sessions/events?key=test:d:u:general&limit=10000", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleEvents(w, req)
+	srv.sessionH.HandleEvents(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -620,7 +620,7 @@ func TestHandleAPISessions_StatsIncludeAgentsAndWorkspace(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleList(w, req)
+	srv.sessionH.HandleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -764,7 +764,7 @@ func TestHandleAPISessions_NodeAggregation(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleList(w, req)
+	srv.sessionH.HandleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -864,7 +864,7 @@ func TestHandleSetLabel_OK(t *testing.T) {
 	body := `{"key":"` + key + `","label":"重构会话"}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.sessionH.handleSetLabel(w, req)
+	srv.sessionH.HandleSetLabel(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%q)", w.Code, w.Body.String())
@@ -884,7 +884,7 @@ func TestHandleSetLabel_EmptyClears(t *testing.T) {
 	body := `{"key":"` + key + `","label":""}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.sessionH.handleSetLabel(w, req)
+	srv.sessionH.HandleSetLabel(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -903,7 +903,7 @@ func TestHandleSetLabel_TooLong(t *testing.T) {
 	body := `{"key":"` + key + `","label":"` + label + `"}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.sessionH.handleSetLabel(w, req)
+	srv.sessionH.HandleSetLabel(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
@@ -920,7 +920,7 @@ func TestHandleSetLabel_ControlChar(t *testing.T) {
 	body := `{"key":"` + key + `","label":"line1\nline2"}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.sessionH.handleSetLabel(w, req)
+	srv.sessionH.HandleSetLabel(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
@@ -934,7 +934,7 @@ func TestHandleSetLabel_NotFound(t *testing.T) {
 	body := `{"key":"no:such:key","label":"x"}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.sessionH.handleSetLabel(w, req)
+	srv.sessionH.HandleSetLabel(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", w.Code)
@@ -948,7 +948,7 @@ func TestHandleSetLabel_MissingKey(t *testing.T) {
 	body := `{"label":"x"}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.sessionH.handleSetLabel(w, req)
+	srv.sessionH.HandleSetLabel(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", w.Code)
@@ -980,7 +980,7 @@ func TestHandleSetLabel_RemoteProxy(t *testing.T) {
 	body := `{"key":"feishu:direct:alice:general","node":"macbook","label":"remote-label"}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.sessionH.handleSetLabel(w, req)
+	srv.sessionH.HandleSetLabel(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%q)", w.Code, w.Body.String())
@@ -1013,7 +1013,7 @@ func TestHandleResume_LastPromptC1Sanitized(t *testing.T) {
 	body := `{"session_id":"12345678-1234-1234-1234-123456789abc","last_prompt":"hi\u0085there"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/resume", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.sessionH.handleResume(w, req)
+	srv.sessionH.HandleResume(w, req)
 
 	if w.Code == http.StatusBadRequest && strings.Contains(w.Body.String(), "invalid control characters") {
 		t.Fatalf("C1 byte should be sanitized, not 400'd: body=%q", w.Body.String())
@@ -1053,9 +1053,9 @@ func TestSanitizeResumeLastPrompt_RuneSafeTruncation(t *testing.T) {
 			want := "_" + tc.want
 			// textutil.TruncateAtRuneBoundary returns up to maxLen bytes ending
 			// at a rune boundary; for a sentinel "_" + body the cap is len(want).
-			got := sanitizeResumeLastPrompt(input, len(want))
+			got := dashsession.SanitizeResumeLastPrompt(input, len(want))
 			if got != want {
-				t.Errorf("sanitizeResumeLastPrompt(%q, %d) = %q, want %q",
+				t.Errorf("dashsession.SanitizeResumeLastPrompt(%q, %d) = %q, want %q",
 					input, len(want), got, want)
 			}
 			// Result must be valid UTF-8 even on the truncation branch.
@@ -1088,9 +1088,9 @@ func TestSanitizeResumeLastPrompt_Policy(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			got := sanitizeResumeLastPrompt(tc.in, 0)
+			got := dashsession.SanitizeResumeLastPrompt(tc.in, 0)
 			if got != tc.want {
-				t.Errorf("sanitizeResumeLastPrompt(%q) = %q, want %q", tc.in, got, tc.want)
+				t.Errorf("dashsession.SanitizeResumeLastPrompt(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -1105,7 +1105,7 @@ func TestHandleResume_LastPromptTabAllowed(t *testing.T) {
 	body := `{"session_id":"12345678-1234-1234-1234-123456789abc","last_prompt":"col1\tcol2"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/resume", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.sessionH.handleResume(w, req)
+	srv.sessionH.HandleResume(w, req)
 
 	// Accept any non-400 here (the resume path may go on to 200 or return a
 	// server-specific error depending on router state). The point is that
@@ -1115,45 +1115,7 @@ func TestHandleResume_LastPromptTabAllowed(t *testing.T) {
 	}
 }
 
-// TestUptimeString_CachesWithinSecondBucket locks down R65-PERF-L-1: two
-// calls within the same second return the same string and share the same
-// underlying snapshot pointer (no re-format).
-func TestUptimeString_CachesWithinSecondBucket(t *testing.T) {
-	// Start 5 seconds ago so rounding lands on a stable integer bucket.
-	h := &SessionHandlers{startedAt: time.Now().Add(-5 * time.Second)}
 
-	first := h.uptimeStringAt(time.Now())
-	snap1 := h.uptimeCache.Load()
-	if snap1 == nil {
-		t.Fatal("uptimeCache not populated after first call")
-	}
-	second := h.uptimeStringAt(time.Now())
-	snap2 := h.uptimeCache.Load()
-
-	if first != second {
-		t.Errorf("uptimeString within same bucket returned different values: %q vs %q", first, second)
-	}
-	if snap1 != snap2 {
-		t.Errorf("expected cached snapshot pointer to be reused within the same bucket")
-	}
-	if first == "" {
-		t.Error("expected non-empty uptime string")
-	}
-}
-
-// TestUptimeString_RotatesAcrossBuckets confirms the cache invalidates once
-// the integer-second bucket advances (startedAt pushed backwards simulates
-// the passage of time).
-func TestUptimeString_RotatesAcrossBuckets(t *testing.T) {
-	h := &SessionHandlers{startedAt: time.Now().Add(-1 * time.Second)}
-	first := h.uptimeStringAt(time.Now())
-	// Shift startedAt back so the bucket id increases by at least one second.
-	h.startedAt = h.startedAt.Add(-2 * time.Second)
-	second := h.uptimeStringAt(time.Now())
-	if first == second {
-		t.Errorf("expected uptime to advance after bucket rotation, both = %q", first)
-	}
-}
 
 // ─── R67 regressions ─────────────────────────────────────────────────────────
 
@@ -1239,34 +1201,26 @@ func TestHistorySessions_EmptyHistoryCached(t *testing.T) {
 	// Reset cache from the warm pass so the first test call is a real miss.
 	// Mirror the atomic alongside the time.Time so the wait-free fast path
 	// in historySessions() observes "expired" too. R040034-PERF-5 (#1404).
-	srv.sessionH.historyCacheMu.Lock()
-	srv.sessionH.historyCache = nil
-	srv.sessionH.historyCacheTime = time.Time{}
-	srv.sessionH.historyCacheTimeUnixNano.Store(0)
-	srv.sessionH.historyCacheMu.Unlock()
+	srv.sessionH.ResetHistoryCacheForTest()
 
 	// Empty claudeDir so loadHistorySessions naturally yields nil.
-	srv.sessionH.claudeDir = t.TempDir()
+	srv.sessionH.SetClaudeDirForTest(t.TempDir())
 
 	// First call: miss → loadHistorySessions → stores (nil, now()).
-	_ = srv.sessionH.historySessions()
+	_ = srv.sessionH.HistorySessionsForTest()
 
 	// Capture the cache time — the whole point of the fix is that it is
 	// NON-ZERO after a successful load of empty history.
-	srv.sessionH.historyCacheMu.Lock()
-	cacheTimeAfterFirst := srv.sessionH.historyCacheTime
-	srv.sessionH.historyCacheMu.Unlock()
+	cacheTimeAfterFirst := srv.sessionH.HistoryCacheTimeForTest()
 	if cacheTimeAfterFirst.IsZero() {
 		t.Fatal("historyCacheTime is zero after load — loadHistorySessions did not store the sentinel")
 	}
 
 	// Second immediate call: hit → must NOT update historyCacheTime
 	// because it is still within the 120s TTL window.
-	_ = srv.sessionH.historySessions()
+	_ = srv.sessionH.HistorySessionsForTest()
 
-	srv.sessionH.historyCacheMu.Lock()
-	cacheTimeAfterSecond := srv.sessionH.historyCacheTime
-	srv.sessionH.historyCacheMu.Unlock()
+	cacheTimeAfterSecond := srv.sessionH.HistoryCacheTimeForTest()
 	if !cacheTimeAfterSecond.Equal(cacheTimeAfterFirst) {
 		t.Errorf("empty-history cache was re-loaded — cacheTime changed from %v to %v", cacheTimeAfterFirst, cacheTimeAfterSecond)
 	}
@@ -1356,7 +1310,7 @@ func TestHandleDelete_AcceptsQueryAndBody(t *testing.T) {
 			}
 			req := httptest.NewRequest(http.MethodDelete, tc.url, body)
 			w := httptest.NewRecorder()
-			srv.sessionH.handleDelete(w, req)
+			srv.sessionH.HandleDelete(w, req)
 			if w.Code != tc.wantStatus {
 				t.Errorf("status = %d, want %d (body=%q)", w.Code, tc.wantStatus, w.Body.String())
 			}

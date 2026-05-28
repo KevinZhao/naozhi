@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/discovery"
 )
 
@@ -39,23 +40,19 @@ func TestSessionHandlers_RecordRetired_StampsHistory(t *testing.T) {
 
 	// Point the handler at the seeded claudeDir and clear the warm cache so
 	// loadHistorySessions runs against the test FS.
-	srv.sessionH.claudeDir = claudeDir
-	srv.sessionH.historyCacheMu.Lock()
-	srv.sessionH.historyCache = nil
-	srv.sessionH.historyCacheTime = time.Time{}
-	srv.sessionH.historyCacheTimeUnixNano.Store(0)
-	srv.sessionH.historyCacheMu.Unlock()
+	srv.sessionH.SetClaudeDirForTest(claudeDir)
+	srv.sessionH.ResetHistoryCacheForTest()
 
 	// Inject an in-memory retired-store and stamp the test session.
 	store, err := discovery.NewRetiredStore("")
 	if err != nil {
 		t.Fatalf("retired store: %v", err)
 	}
-	srv.sessionH.retiredStore = store
+	srv.sessionH.SetRetiredStoreForTest(store)
 	retired := time.UnixMilli(1700000050000)
 	store.MarkRetired(sid, retired)
 
-	got := srv.sessionH.historySessions()
+	got := srv.sessionH.HistorySessionsForTest()
 	if len(got) == 0 {
 		t.Fatalf("expected at least one history entry, got 0")
 	}
@@ -83,28 +80,24 @@ func TestSessionHandlers_RecordRetired_InvalidatesCache(t *testing.T) {
 	srv.sessionH.WaitWarmHistory()
 
 	store, _ := discovery.NewRetiredStore("")
-	srv.sessionH.retiredStore = store
+	srv.sessionH.SetRetiredStoreForTest(store)
 
 	// Pre-populate cache as fresh.
-	srv.sessionH.historyCacheMu.Lock()
-	srv.sessionH.historyCacheTime = time.Now()
-	srv.sessionH.historyCacheMu.Unlock()
+	srv.sessionH.SetHistoryCacheTimeForTest(time.Now())
 
 	srv.sessionH.RecordRetired("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 
-	srv.sessionH.historyCacheMu.Lock()
-	gotZero := srv.sessionH.historyCacheTime.IsZero()
-	srv.sessionH.historyCacheMu.Unlock()
+	gotZero := srv.sessionH.IsHistoryCacheTimeZeroForTest()
 	if !gotZero {
 		t.Fatalf("RecordRetired must zero historyCacheTime to force a reload")
 	}
 }
 
 // TestSessionHandlers_RecordRetired_EmptyStoreNoOp protects the nil-store
-// path: tests/deployments without a state dir construct SessionHandlers
+// path: tests/deployments without a state dir construct dashsession.Handlers
 // with retiredStore = nil, and RecordRetired must tolerate that.
 func TestSessionHandlers_RecordRetired_EmptyStoreNoOp(t *testing.T) {
-	h := &SessionHandlers{}
+	h := &dashsession.Handlers{}
 	// Must not panic.
 	h.RecordRetired("any")
 	h.FlushRetiredStore()
@@ -120,7 +113,8 @@ func TestSessionHandlers_FlushRetiredStore_Persists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("retired store: %v", err)
 	}
-	h := &SessionHandlers{retiredStore: store}
+	h := &dashsession.Handlers{}
+	h.SetRetiredStoreForTest(store)
 	h.RecordRetired("sid-1")
 	h.FlushRetiredStore()
 

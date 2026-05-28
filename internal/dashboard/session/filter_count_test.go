@@ -1,13 +1,13 @@
-package server
+package session
 
 import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/session"
+	sessionpkg "github.com/naozhi/naozhi/internal/session"
 )
 
-// TestFilterAndCountSnapshots pins the contract extracted from handleList in
+// TestFilterAndCountSnapshots pins the contract extracted from HandleList in
 // R246-CR-002 (#736). The merged filter+count walk must:
 //
 //  1. drop dead sessions whose LastActive is older than 24h,
@@ -25,7 +25,7 @@ func TestFilterAndCountSnapshots(t *testing.T) {
 	old := now.Add(-25 * time.Hour).UnixMilli()
 	recent := now.Add(-1 * time.Hour).UnixMilli()
 
-	in := []session.SessionSnapshot{
+	in := []sessionpkg.SessionSnapshot{
 		// Sidebar-eligible: kept + counted.
 		{Key: "feishu:p2p:alice", State: "running", LastActive: recent},
 		{Key: "feishu:p2p:bob", State: "ready", LastActive: recent},

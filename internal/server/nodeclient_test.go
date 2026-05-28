@@ -198,7 +198,7 @@ func TestHandleAPISessions_NoNodes(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleList(w, req)
+	srv.sessionH.HandleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -230,7 +230,7 @@ func TestHandleAPISessions_WithRemoteNodes(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleList(w, req)
+	srv.sessionH.HandleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -278,7 +278,7 @@ func TestHandleAPISessions_RemoteNodeError(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleList(w, req)
+	srv.sessionH.HandleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (should not fail entire request)", w.Code)
@@ -311,7 +311,7 @@ func TestHandleAPISessionEvents_RemoteNode(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/events?key=test:d:u:general&node=macbook", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleEvents(w, req)
+	srv.sessionH.HandleEvents(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -332,7 +332,7 @@ func TestHandleAPISessionEvents_UnknownNode(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/events?key=test:d:u:general&node=unknown", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleEvents(w, req)
+	srv.sessionH.HandleEvents(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)

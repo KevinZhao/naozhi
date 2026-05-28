@@ -1,4 +1,4 @@
-package server
+package session
 
 import (
 	"os"
@@ -20,7 +20,7 @@ import (
 //	...
 //	h.historyCache = all
 //
-// This test reads dashboard_session.go and asserts:
+// This test reads handlers.go and asserts:
 //
 //  1. h.historyCache is assigned from a RecentSessions call result
 //     (fresh allocation by the discovery package).
@@ -35,16 +35,16 @@ import (
 // return copies. Either way the change must be reviewed through
 // this audit item.
 func TestHistoryCache_AliasingInvariant(t *testing.T) {
-	src, err := os.ReadFile("dashboard_session.go")
+	src, err := os.ReadFile("handlers.go")
 	if err != nil {
-		t.Fatalf("read dashboard_session.go: %v", err)
+		t.Fatalf("read handlers.go: %v", err)
 	}
 	body := string(src)
 
 	// 1) Look up loadHistorySessions body.
-	startIdx := strings.Index(body, "func (h *SessionHandlers) loadHistorySessions()")
+	startIdx := strings.Index(body, "func (h *Handlers) loadHistorySessions()")
 	if startIdx < 0 {
-		t.Fatal("loadHistorySessions is no longer defined in dashboard_session.go. " +
+		t.Fatal("loadHistorySessions is no longer defined in handlers.go. " +
 			"If renamed, update this test; if removed, re-audit the cache refresh " +
 			"path for the R62-GO-5 aliasing invariant.")
 	}
@@ -71,7 +71,7 @@ func TestHistoryCache_AliasingInvariant(t *testing.T) {
 	appendRe := regexp.MustCompile(`append\(\s*h\.historyCache\b`)
 	if appendRe.MatchString(body) {
 		t.Error("`append(h.historyCache, ...)` pattern detected in " +
-			"dashboard_session.go. R62-GO-5: appending in place mutates the " +
+			"handlers.go. R62-GO-5: appending in place mutates the " +
 			"backing array that prior readers still alias; use a fresh slice " +
 			"(`all := ...; h.historyCache = all`) or shallow-copy before append.")
 	}
