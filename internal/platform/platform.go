@@ -291,6 +291,36 @@ func IsPermanent(err error) bool {
 	return errors.As(err, &pe) && pe.IsPermanent()
 }
 
+// TokenInvalidatedError is implemented by platform-specific errors that
+// indicate the cached auth token was rejected and has just been
+// invalidated. ReplyWithRetry uses this signal to (a) sleep briefly
+// before the next attempt so the freshly-issued token has time to
+// propagate at the upstream side, and (b) grant a one-shot extra retry
+// so the post-rotation attempt does not have to share the original
+// budget with attempts that all carried the same stale token. Modeled
+// after PermanentError; see RFC R83 / RETRY1 and issue #1339 for the
+// race that motivated this signal.
+type TokenInvalidatedError interface {
+	error
+	IsTokenInvalidated() bool
+}
+
+// IsTokenInvalidated walks the error chain and reports whether any
+// wrapped error signals that an auth token was just invalidated.
+// Returns false for nil.
+func IsTokenInvalidated(err error) bool {
+	var te TokenInvalidatedError
+	return errors.As(err, &te) && te.IsTokenInvalidated()
+}
+
+// tokenRotationDelay is the short pause inserted before a retry that
+// follows a token-invalidation error. It gives the upstream platform a
+// chance to register the freshly-issued token before the next request
+// presents it. 50 ms is small enough to be invisible to users on the
+// happy path (one-shot, only on token rotation) and large enough to
+// cover typical Feishu open-API replication windows. Issue #1339.
+const tokenRotationDelay = 50 * time.Millisecond
+
 // ReplyWithRetry calls p.Reply up to maxAttempts times with exponential backoff
 // starting at 500 ms, doubling each retry up to 4 s. It returns on the first
 // success. If all attempts fail the last error is returned.
@@ -303,12 +333,34 @@ func IsPermanent(err error) bool {
 // A PermanentError short-circuits the loop — retrying an "app disabled" or
 // "bot not in chat" error just burns time and amplifies load during an
 // outage without changing the outcome.
+//
+// A TokenInvalidatedError on attempt N is special-cased: the loop budget
+// is extended by one (capped, applied at most once per call) so the
+// post-rotation retry does not have to share its slot with attempts that
+// all carried the same stale token, and a short tokenRotationDelay is
+// inserted before that retry so the freshly-issued token has time to
+// propagate at the upstream side. Without this, a token rotation on
+// attempt 1 would consume two of three attempts to recover, leaving
+// only one shot for the actually-fresh-token request — which the
+// upstream might still reject in the millisecond window before
+// activation lands. Issue #1339.
 func ReplyWithRetry(ctx context.Context, p Platform, msg OutgoingMessage, maxAttempts int) (string, error) {
 	backoff := 500 * time.Millisecond
 	var lastErr error
-	for i := 0; i < maxAttempts; i++ {
+	tokenRotationGranted := false
+	rotationPendingFromAttempt := -1
+	limit := maxAttempts
+	for i := 0; i < limit; i++ {
 		if i > 0 {
 			wait := osutil.JitterBackoff(backoff)
+			// If the previous attempt invalidated a token, lengthen the
+			// pre-retry pause by tokenRotationDelay so the freshly-issued
+			// token has time to register upstream. Applied only to the
+			// retry that immediately follows the rotation.
+			if rotationPendingFromAttempt == i-1 {
+				wait += tokenRotationDelay
+				rotationPendingFromAttempt = -1
+			}
 			timer := time.NewTimer(wait)
 			select {
 			case <-ctx.Done():
@@ -331,7 +383,16 @@ func ReplyWithRetry(ctx context.Context, p Platform, msg OutgoingMessage, maxAtt
 				"platform", p.Name(), "chat", msg.ChatID, "attempt", i+1, "err", err)
 			return "", err
 		}
+		if IsTokenInvalidated(err) {
+			rotationPendingFromAttempt = i
+			if !tokenRotationGranted {
+				tokenRotationGranted = true
+				limit++
+				slog.Info("platform reply token-invalidated; granting one extra retry",
+					"platform", p.Name(), "chat", msg.ChatID, "attempt", i+1, "new_limit", limit)
+			}
+		}
 	}
-	slog.Error("platform reply failed after all attempts", "platform", p.Name(), "chat", msg.ChatID, "attempts", maxAttempts, "err", lastErr)
+	slog.Error("platform reply failed after all attempts", "platform", p.Name(), "chat", msg.ChatID, "attempts", limit, "err", lastErr)
 	return "", lastErr
 }
