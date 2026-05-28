@@ -104,6 +104,65 @@ func TestJobSnapshotCoversExecuteFields(t *testing.T) {
 	}
 }
 
+// TestSnapshotJobLockedMirrorsSnapshotJob is the R20260528-PERF-2 (#1351)
+// fold contract test. snapshotJobLocked is the lock-held variant
+// executeOpt's jitter block uses to fold the post-jitter recheck and
+// snapshot copy into one RLock window. Any divergence between the two
+// outputs would mean the jitter path observes a different view of *j
+// than the no-jitter path — silent semantic drift the existing
+// snapshotJob test would not catch since it only exercises the
+// public method.
+func TestSnapshotJobLockedMirrorsSnapshotJob(t *testing.T) {
+	tru := true
+	j := &Job{
+		ID:             "abcdef0123456789",
+		Schedule:       "@every 10m",
+		Prompt:         "fold-snapshot-prompt",
+		Platform:       "feishu",
+		ChatID:         "chat-fold",
+		WorkDir:        "/tmp/fold-snapshot",
+		Backend:        "claude",
+		NotifyPlatform: "feishu",
+		NotifyChatID:   "notify-fold",
+		Title:          "Fold Snapshot",
+		Notify:         &tru,
+		FreshContext:   true,
+	}
+
+	s := &Scheduler{}
+	viaPublic := s.snapshotJob(j)
+
+	// snapshotJobLocked requires the caller to hold s.mu — emulate
+	// executeOpt's jitter block by RLock straddling the call.
+	s.mu.RLock()
+	viaLocked := snapshotJobLocked(j)
+	s.mu.RUnlock()
+
+	if viaPublic.jobID != viaLocked.jobID ||
+		viaPublic.prompt != viaLocked.prompt ||
+		viaPublic.workDir != viaLocked.workDir ||
+		viaPublic.platName != viaLocked.platName ||
+		viaPublic.chatID != viaLocked.chatID ||
+		viaPublic.notifyPlat != viaLocked.notifyPlat ||
+		viaPublic.notifyChat != viaLocked.notifyChat ||
+		viaPublic.schedule != viaLocked.schedule ||
+		viaPublic.backend != viaLocked.backend ||
+		viaPublic.label != viaLocked.label ||
+		viaPublic.fresh != viaLocked.fresh ||
+		viaPublic.lastSessionID != viaLocked.lastSessionID {
+		t.Fatalf("snapshotJobLocked diverged from snapshotJob:\n  public=%+v\n  locked=%+v",
+			viaPublic, viaLocked)
+	}
+	// Each path must allocate a fresh *bool — sharing the pointer would
+	// let a UpdateJob race mid-execute, defeating the snapshot.
+	if viaPublic.notify == nil || viaLocked.notify == nil {
+		t.Fatal("both snapshots must populate notify")
+	}
+	if viaPublic.notify == j.Notify || viaLocked.notify == j.Notify {
+		t.Fatal("both snapshots must clone notify; aliasing breaks snapshot semantics")
+	}
+}
+
 // Compile-time anchor: make a future "where is jobSnapshot wired to
 // Job?" grep land here. R236-ARCH-19.
 var _ = (*Job)(nil)
