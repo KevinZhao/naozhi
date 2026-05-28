@@ -1,21 +1,17 @@
 package server
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
 
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/session"
@@ -91,263 +87,43 @@ func serveStaticWithETag(w http.ResponseWriter, r *http.Request, assetKey string
 	return false
 }
 
-// jsonEncBuf pairs a pooled bytes.Buffer with a json.Encoder bound to it.
-// Reused by writeJSON/writeJSONStatus so hot dashboard poll paths do not
-// allocate one encoder per HTTP response. Mirrors the shimSendBufPool idiom
-// in internal/cli/process.go.
-type jsonEncBuf struct {
-	buf *bytes.Buffer
-	enc *json.Encoder
-}
+// Phase 3-prep (server-split-phase4-design.md §6.5 Plan B):
+// the JSON-encoder pool, marshalPooled / marshalEscaped, and the
+// SetEscapeHTML(false) literal all moved to internal/dashboard/httputil so
+// future dashboard sub-packages (discovery / cron / project / auth ...) can
+// share them without re-importing internal/server. The thin wrappers below
+// keep server-package call sites working unchanged. The R245-SEC-13 contract
+// (SetEscapeHTML(false) lives at exactly one site) is now pinned by
+// TestSetEscapeHTMLFalseScopedToPackage in the new package, plus the
+// in-server TestSetEscapeHTMLFalse_ScopedToWriteJSONHelper scan asserts the
+// literal is now ABSENT from internal/server entirely.
 
-// jsonEncPool produces encoders with SetEscapeHTML(false) baked in. R243-SEC-10:
-// json.Encoder does not expose the escape-html bit at the type level, so there
-// is no compile-time guard preventing a future caller from doing
-// `e.enc.SetEscapeHTML(true)` on a borrowed encoder and silently breaking the
-// CLIENT-SIDE CONTRACT documented above writeJSON. The contract is pinned at
-// test time by TestJSONEncPool_HTMLEscapingDisabled, which encodes `<>&` and
-// asserts the literal bytes (not `<`/`>`/`&`) appear in both the
-// writeJSON and marshalPooled wire formats. If you add a new code path that
-// borrows from this pool, do NOT mutate `e.enc` configuration — make a fresh
-// encoder if you need different settings, or extend the contract test to cover
-// the new mode explicitly.
-//
-// R245-SEC-13 (#842): the SetEscapeHTML(false) literal must NOT appear in
-// any other internal/server source file, even via a hand-rolled encoder
-// outside this pool. TestSetEscapeHTMLFalse_ScopedToWriteJSONHelper scans
-// every non-test .go in the package and fails CI if a fresh encoder anywhere
-// flips the bit on an HTML-template render path. Allow-list lives in that
-// test (currently dashboard.go only); update both the test and this comment
-// in the same change if a new JSON-API helper genuinely needs to host the
-// call.
-var jsonEncPool = sync.Pool{
-	New: func() any {
-		buf := new(bytes.Buffer)
-		enc := json.NewEncoder(buf)
-		enc.SetEscapeHTML(false)
-		return &jsonEncBuf{buf: buf, enc: enc}
-	},
-}
+// marshalPooled forwards to httputil.MarshalPooled. See that helper for the
+// CLIENT-SIDE rendering contract carried over the wire format.
+func marshalPooled(v any) ([]byte, error) { return httputil.MarshalPooled(v) }
 
-// jsonEncBufMaxCap caps the buffer we return to the pool so a one-off large
-// response (e.g. 2MB sessions snapshot) does not permanently pin that capacity.
-const jsonEncBufMaxCap = 256 * 1024
+// marshalEscaped forwards to httputil.MarshalEscaped — the HTML-safe variant
+// for payloads spliced into HTML templates / innerHTML render paths.
+func marshalEscaped(v any) ([]byte, error) { return httputil.MarshalEscaped(v) }
 
-// getJSONEnc returns a pooled encoder. The returned encoder always has HTML
-// escaping disabled; callers MUST NOT mutate its configuration (see
-// jsonEncPool godoc for the invariant pinned by
-// TestJSONEncPool_HTMLEscapingDisabled). R243-SEC-10.
-func getJSONEnc() *jsonEncBuf {
-	e := jsonEncPool.Get().(*jsonEncBuf)
-	e.buf.Reset()
-	return e
-}
-
-func putJSONEnc(e *jsonEncBuf) {
-	if e.buf.Cap() > jsonEncBufMaxCap {
-		return
-	}
-	jsonEncPool.Put(e)
-}
-
-// marshalPooled marshals v via the pooled encoder and copies the result into a
-// fresh []byte. Callers who would otherwise call json.Marshal on a hot path
-// (WS event fanout, session_state broadcasts) use this to avoid the per-call
-// encodeState allocation. Returned slice is safe to share/outlive the pool.
-//
-// HTML escaping is disabled on the pooled encoder (see jsonEncPool); the same
-// CLIENT-SIDE CONTRACT documented on writeJSON applies to any string field
-// carried over a marshalPooled-encoded message: clients MUST render strings
-// via textContent (or DOMPurify) and never assign them to innerHTML.
-//
-// R238-SEC-5 (#821): if a future consumer renders a marshalPooled-encoded
-// payload via innerHTML (without DOMPurify), the unescaped `<`/`>`/`&`
-// preserved here become an XSS escalation. Such call sites MUST switch to
-// marshalEscaped instead — the contract is JSON-API-only; HTML-template render
-// paths require the escaped variant.
-func marshalPooled(v any) ([]byte, error) {
-	e := getJSONEnc()
-	defer putJSONEnc(e)
-	if err := e.enc.Encode(v); err != nil {
-		return nil, err
-	}
-	raw := e.buf.Bytes()
-	if n := len(raw); n > 0 && raw[n-1] == '\n' {
-		raw = raw[:n-1]
-	}
-	out := make([]byte, len(raw))
-	copy(out, raw)
-	return out, nil
-}
-
-// marshalEscaped is the HTML-safe counterpart to marshalPooled. R238-SEC-5
-// (#821) called out that the SetEscapeHTML(false) baked into jsonEncPool is
-// only safe under the writeJSON CLIENT-SIDE CONTRACT (no innerHTML without
-// DOMPurify); callers who cannot guarantee that contract — e.g. payloads that
-// are spliced into HTML templates, embedded inside <script type="application/
-// json">, or rendered via innerHTML on any non-DOMPurify path — MUST encode
-// via this helper instead.
-//
-// Implementation note: this is intentionally a fresh json.Encoder per call
-// (not a separate sync.Pool). The expected call sites for marshalEscaped are
-// rare, off-hot-path, and already paying for HTML-template rendering; pooling
-// an additional encoder type would invite the same future-mutation hazard
-// (TestSetEscapeHTMLFalse_ScopedToWriteJSONHelper documents) without measurable
-// payoff. If a future hot path needs the escaped form, introduce a second
-// pool with its own contract test rather than reusing jsonEncPool.
-func marshalEscaped(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	// SetEscapeHTML(true) is the json package default; we set it explicitly so
-	// readers of this site see the escape contract without chasing stdlib
-	// defaults, and so that a future stdlib change cannot silently invert it.
-	enc.SetEscapeHTML(true)
-	if err := enc.Encode(v); err != nil {
-		return nil, err
-	}
-	raw := buf.Bytes()
-	if n := len(raw); n > 0 && raw[n-1] == '\n' {
-		raw = raw[:n-1]
-	}
-	out := make([]byte, len(raw))
-	copy(out, raw)
-	return out, nil
-}
-
-// writeJSON sets the Content-Type header and encodes v as JSON to w.
-// Logs errors at debug level since HTTP write failures are common after
-// client disconnects, but JSON marshal failures indicate bugs.
-// For non-200 status codes, use writeJSONStatus instead.
-//
-// HTML escaping is disabled so dashboard responses preserve `<`, `>`, `&`
-// literally — every client consumer uses `textContent` or structured
-// rendering, and the default escape just bloats responses and makes raw
-// API output (curl / log dumps) hard to diff.
-//
-// CLIENT-SIDE CONTRACT (R71-SEC-L1): because SetEscapeHTML is disabled,
-// any string field in the response that carries content controllable by the
-// CLI / tool output / workspace files (e.g. `content` in servePreview,
-// `last_prompt`, `summary`, `detail`) MUST be rendered through `textContent`
-// in dashboard.js, OR — if rich rendering is required — passed through
-// DOMPurify / a whitelist renderer before any innerHTML assignment. A future
-// consumer that adds `el.innerHTML = resp.content` without DOMPurify would
-// immediately become a stored-XSS vector (file contents are user-writable
-// via `/api/sessions/send` + tool writes). When introducing a new response
-// field destined for innerHTML, route it through a dedicated helper or the
-// CSP `sandbox` iframe path instead of relaxing this rule.
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	// X-Content-Type-Options: nosniff prevents legacy browsers from MIME-sniffing
-	// JSON responses as HTML/JS. Cheap defence-in-depth against any future path
-	// that accidentally produces HTML-looking content via SetEscapeHTML(false).
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// Cache-Control: no-store prevents shared proxies / browser back-forward
-	// cache from retaining dashboard JSON responses (last_prompt / PID / cost /
-	// auth cookie ack). Responses are authenticated per-request and carry
-	// time-varying session state, so any intermediary cache is a correctness
-	// hazard — a second user on the same cache would see the first user's
-	// snapshot. R58-PERF-001.
-	w.Header().Set("Cache-Control", "no-store")
-	e := getJSONEnc()
-	defer putJSONEnc(e)
-	if err := e.enc.Encode(v); err != nil {
-		slog.Debug("write json response", "err", err)
-		return
-	}
-	if _, err := w.Write(e.buf.Bytes()); err != nil {
-		slog.Debug("write json response", "err", err)
-	}
-}
-
-// jsonOKBody is the pre-marshaled body for the common `{"status":"ok"}`
-// acknowledgement reply. 20+ dashboard endpoints used to allocate a
-// `map[string]string{"status":"ok"}` + run it through the JSON encoder on every
-// success response; those hot paths now call writeOK which just copies these
-// bytes verbatim (plus a trailing `\n` to match the encoder's NDJSON framing).
-// R64-PERF-M4.
-var jsonOKBody = []byte("{\"status\":\"ok\"}\n")
-
-// writeOK writes the pre-marshaled `{"status":"ok"}` body with the same headers
-// as writeJSON. Use this in preference to writeJSON for fixed ack replies so
-// success paths skip the pooled encoder dance entirely.
-func writeOK(w http.ResponseWriter) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-store")
-	if _, err := w.Write(jsonOKBody); err != nil {
-		slog.Debug("write json response", "err", err)
-	}
-}
-
-// decodeJSONBody reads r.Body into memory and unmarshals it into dst.
-//
-// Callers MUST have wrapped r.Body with http.MaxBytesReader beforehand so an
-// oversize client cannot force unbounded io.ReadAll; the 15+ JSON POST
-// handlers in this package all follow that pattern. RNEW-PERF-001: compared
-// with json.NewDecoder(r.Body).Decode(dst), this variant avoids the 4 KiB
-// bufio.Reader the stdlib Decoder wraps around every request body — bodies
-// are already ≤ a few MiB and fit comfortably in a single []byte. We feed
-// those bytes into a json.Decoder via bytes.Reader (no internal buffering)
-// purely to enable DisallowUnknownFields below.
-//
-// Error semantics match Decoder.Decode closely: unmarshal errors, empty
-// body (io.EOF equivalent → json.Unmarshal returns "unexpected end of JSON
-// input"), and MaxBytesError all surface as a single error value the
-// caller can log/return as 400. Callers that previously wrote specific
-// 413 responses from MaxBytesReader must still check errors.As against
-// *http.MaxBytesError; they already do today.
-//
-// R20260527122801-SEC-5 (#1329): the helper now sets DisallowUnknownFields
-// on the decoder. Mass-assignment hygiene — if a future patch adds a new
-// sensitive field to a struct (e.g. `Privileged bool`) before the
-// dashboard exposes it, attackers cannot blind-POST it through any
-// endpoint that decodes via this helper. Callers receive a 400-class
-// json error ("json: unknown field …") and surface it like any other
-// malformed body.
+// writeJSON / writeOK / decodeJSONBody / writeJSONStatus / errEmptyJSONBody
+// thin-wrap httputil. The CLIENT-SIDE rendering contract (R71-SEC-L1 /
+// R243-SEC-10), the cache-control headers (R58-PERF-001), and the
+// DisallowUnknownFields mass-assignment guard (R20260527122801-SEC-5) all
+// live in the package godoc on the underlying helper.
+func writeJSON(w http.ResponseWriter, v any) { httputil.WriteJSON(w, v) }
+func writeOK(w http.ResponseWriter)          { httputil.WriteOK(w) }
 func decodeJSONBody(r *http.Request, dst any) error {
-	// net/http closes the body after the handler returns, but closing here
-	// is still correct for future non-HTTP callers (test mocks, potential
-	// reverse-RPC adapters) and keeps the body-lifecycle contract local to
-	// this helper.
-	defer r.Body.Close()
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return err
-	}
-	if len(body) == 0 {
-		// Distinguishing empty-body from malformed-JSON lets handlers emit
-		// a more actionable 400 than the default "unexpected end of JSON
-		// input" that json.Unmarshal would otherwise produce.
-		return errEmptyJSONBody
-	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	return dec.Decode(dst)
+	return httputil.DecodeJSONBody(r, dst)
 }
-
-// errEmptyJSONBody is returned by decodeJSONBody when the request has a zero-
-// length body. Callers can errors.Is against it to emit a specific message
-// instead of the generic JSON parse error.
-var errEmptyJSONBody = errors.New("empty request body")
-
-// writeJSONStatus is like writeJSON but writes a non-200 HTTP status code.
-// Content-Type must be set before WriteHeader, so this helper ensures
-// the correct ordering: Set header → WriteHeader → Encode body.
 func writeJSONStatus(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
-	e := getJSONEnc()
-	defer putJSONEnc(e)
-	if err := e.enc.Encode(v); err != nil {
-		slog.Debug("write json response", "err", err)
-		return
-	}
-	if _, err := w.Write(e.buf.Bytes()); err != nil {
-		slog.Debug("write json response", "err", err)
-	}
+	httputil.WriteJSONStatus(w, status, v)
 }
+
+// errEmptyJSONBody is the package-local re-export so existing
+// `errors.Is(err, errEmptyJSONBody)` call sites compile unchanged. The actual
+// sentinel is httputil.ErrEmptyJSONBody.
+var errEmptyJSONBody = httputil.ErrEmptyJSONBody
 
 func (s *Server) registerDashboard() {
 	s.hub = NewHub(HubOptions{

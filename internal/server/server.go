@@ -19,6 +19,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -33,11 +34,11 @@ const (
 	defaultDedupCapacity = 10000
 
 	// maxRequestBodyBytes is the per-handler request-body read limit applied
-	// via http.MaxBytesReader. 1 MiB is well above the largest JSON payload
-	// any handler legitimately accepts, but safely below typical DoS-attempt
-	// sizes. All dashboard mutation handlers must use this constant so the
-	// limit is adjusted in one place.
-	maxRequestBodyBytes = 1 << 20
+	// via http.MaxBytesReader. The single source of truth lives in
+	// internal/dashboard/httputil so dashboard sub-packages can share the
+	// limit without re-importing internal/server. Phase 3-prep
+	// (server-split-phase4-design.md §6.5 Plan B).
+	maxRequestBodyBytes = httputil.MaxRequestBodyBytes
 )
 
 // Server is the HTTP entry point for Naozhi.
