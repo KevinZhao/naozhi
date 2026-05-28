@@ -92,6 +92,37 @@ func TestClaudeProtocol_BuildArgs_NoResume(t *testing.T) {
 	}
 }
 
+// TestClaudeProtocol_BuildArgs_PermissionModeDefault locks the zero-value
+// behaviour for R215-SEC-P1-1 / #531: the legacy --dangerously-skip-permissions
+// flag is still emitted when SpawnOptions.PermissionMode is unset, so existing
+// callers see no behavioural change. Standard mode (the new opt-in) omits it.
+func TestClaudeProtocol_BuildArgs_PermissionModeDefault(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	args := p.BuildArgs(SpawnOptions{Model: "sonnet"})
+	got := false
+	for _, a := range args {
+		if a == "--dangerously-skip-permissions" {
+			got = true
+			break
+		}
+	}
+	if !got {
+		t.Errorf("PermissionModeDefault: expected --dangerously-skip-permissions, got %v", args)
+	}
+}
+
+func TestClaudeProtocol_BuildArgs_PermissionModeStandard(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	args := p.BuildArgs(SpawnOptions{Model: "sonnet", PermissionMode: PermissionModeStandard})
+	for _, a := range args {
+		if a == "--dangerously-skip-permissions" {
+			t.Errorf("PermissionModeStandard: --dangerously-skip-permissions leaked into argv: %v", args)
+		}
+	}
+}
+
 func TestClaudeProtocol_WriteMessage(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
