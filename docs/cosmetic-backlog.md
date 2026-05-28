@@ -317,3 +317,22 @@
 - [R20260527122801-SEC-9] feishu token-only 模式 hash-DoS hardening (production warn) — internal/platform/feishu/transport_hook.go:107
 - [R20260527122801-SEC-10] WSDropped multitenant 警示加到 validateConfig — internal/server/wshub.go:155
 - [R20260527122801-SEC-11] cron executeOpt nil-router 兜底位置(应在 inflight CAS 之前) — internal/cron/scheduler_run.go:739
+
+## cron-cr-20260528-040034 cosmetic
+
+- [R040034-PERF-9] cron decodeRunBytes 无 sync.Pool decode pool — internal/cron/runstore.go:1407
+- [R040034-PERF-11] fillProjectAndSummary 空 projectMgr 仍 walk workspaces — internal/server/dashboard_session.go:639
+- [R040034-PERF-14] slogPrintfLogger.Printf TrimRight/Contains 每行 alloc — internal/cron/scheduler.go:1572
+- [R040034-PERF-22] cron.EnsureStub 每 WS handleSubscribe 取 RLock 读 3 字段 — internal/cron/scheduler.go:1156
+- [R040034-PERF-24] daemonRunStartedMsg SanitizeForLog 即使 hard-coded enum name 也跑 — internal/server/wshub_broadcast.go:343
+- [R040034-CR-6] autoTitler buildExcerptFromHistory 截断溢出 cap 3 字节 — internal/sysession/auto_titler.go:498
+- [R040034-PERF-25] dashboard.go marshalPooled 出口 alloc 不可避免 — internal/server/dashboard.go:178
+- [R040034-PERF-15] router_core.go ListSessionsWithVersion N×Snapshot 每 session 重锁 — internal/session/router_core.go:1633
+- [R040034-PERF-16] dashboard_session.go loadHistorySessions 全量重建 — internal/server/dashboard_session.go:1656
+- [R040034-PERF-2] cli/passthrough.go removeSlotByID memmove 而非 swap-truncate — internal/cli/passthrough.go:263
+- [R040034-PERF-19] cron/runstore.go ensureJobDir 在 jobLock 内 MkdirAll — internal/cron/runstore.go:475
+- [R040034-PERF-20] sanitizeResumeLastPrompt strings.Map 总返新串 — internal/server/dashboard_session.go:43
+- [R040034-PERF-21] cron/runstore.go assertJobLockHeld 生产路径 TryLock — internal/cron/runstore.go:457
+- [R040034-PERF-10] cron cleanupRunningJobIfIdle Load 装箱 — internal/cron/scheduler_run.go:174
+- [R040034-PERF-7] eventlog persister tickFlush.clear 全 backing array — internal/eventlog/persist/persister.go:886
+- [R040034-SEC-5] feishu transport_hook RemoteAddr 未走 trustedProxy — internal/platform/feishu/transport_hook.go:87

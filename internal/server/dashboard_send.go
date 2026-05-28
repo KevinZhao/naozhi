@@ -1422,19 +1422,29 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildAttachmentETagSeed builds the SHA-256 input for the attachment ETag.
-// Format: "<size>|<mtime-millis>" appended into dst. Caller passes a stack
-// buffer slice header so the hot path stays allocation-free (R224-PERF-4).
+// Format: "<size>|<mtime-millis>|<process-salt>" appended into dst. Caller
+// passes a stack buffer slice header so the hot path stays allocation-free
+// (R224-PERF-4).
 //
 // R20260527122801-SEC-14: millisecond precision (was UnixNano). Nanoseconds
 // gave an authenticated attacker an extra 30 bits of (size, mtime) entropy
 // to brute-force per object via repeated If-None-Match probes. Milliseconds
 // still distinguish every real attachment write — filesystem mtime updates
 // land at human-message cadence, well above 1ms granularity — so cache
-// effectiveness is unaffected. Existing on-the-wire ETags will rotate once
-// (clients perform one conditional revalidate) and resume normal caching.
+// effectiveness is unaffected.
+//
+// R040034-SEC-3: mix in fileETagSalt (per-process 32-byte secret, shared with
+// project_files ETags). Without the salt the only inputs were (size, mtime-
+// millis) — an authenticated attacker can pre-image those for a target user's
+// attachment in <2^96 work and use If-None-Match / 304-vs-200 distinguishers
+// to confirm guesses. The salt rotates per process restart, defeating any
+// off-line precomputation. ETags rotate once on deploy (one conditional
+// revalidate per client) and resume normal caching.
 func buildAttachmentETagSeed(dst []byte, size int64, mtime time.Time) []byte {
 	dst = strconv.AppendInt(dst, size, 10)
 	dst = append(dst, '|')
 	dst = strconv.AppendInt(dst, mtime.UnixMilli(), 10)
+	dst = append(dst, '|')
+	dst = append(dst, fileETagSalt...)
 	return dst
 }

@@ -1724,7 +1724,11 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 		s.historyMu.Unlock()
 		s.historyMu.RLock()
 	}
-	var out []cli.EventEntry
+	// Pre-size the result to len(persistedHistory) to avoid 9 reallocations
+	// growing 1→2→…→512 on the dashboard's 1Hz × N-tab × dead-session poll
+	// (afterMS=0 returns the entire ring). The cap is bounded by the ring
+	// size (default 500) so over-allocation is acceptable.
+	out := make([]cli.EventEntry, 0, len(s.persistedHistory))
 	for _, e := range s.persistedHistory {
 		if e.Time > afterMS {
 			out = append(out, e)
