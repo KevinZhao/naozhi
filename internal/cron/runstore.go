@@ -568,6 +568,23 @@ func (s *runStore) Append(run *CronRun) {
 	// under jobLock so the cache + trim cadence keep their per-job
 	// serialisation contract.
 	dir := filepath.Join(s.root, run.JobID)
+	// R247-GO-8 (#484): defense-in-depth path-containment check before
+	// MkdirAll. IsValidID above already rejects `..` / `/` characters in
+	// run.JobID (hex-only), so a malicious value cannot escape s.root via
+	// the join — but the asymmetry vs readRun's Lstat-based root guard
+	// invited future regressions when a new caller path bypassed
+	// IsValidID. Mirror the read-side guard by computing
+	// filepath.Rel(s.root, dir) and rejecting any rel that escapes the
+	// root. Cheap (pure path manipulation, no syscall) and only fires the
+	// reject branch if a future change to ID validation slips a `..`
+	// segment through. R247-GO-8.
+	if rel, relErr := filepath.Rel(s.root, dir); relErr != nil ||
+		rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		slog.Error("cron run: refusing append outside runs root",
+			"root", s.root, "dir", dir, "rel", rel, "err", relErr,
+			"job_id", run.JobID, "run_id", run.RunID)
+		return
+	}
 	if err := s.ensureJobDir(run.JobID, dir); err != nil {
 		slog.Warn("cron run: mkdir failed", "dir", dir, "err", err)
 		return
