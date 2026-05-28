@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"encoding/json"

@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"encoding/json"
@@ -8,7 +8,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/naozhi/naozhi/internal/cron"
+	cronpkg "github.com/naozhi/naozhi/internal/cron"
 )
 
 // TestTruncatePromptUTF8 pins the byte-cap + rune-boundary contract for
@@ -139,11 +139,11 @@ func TestTruncatePromptUTF8_MultiByteRuneBoundary(t *testing.T) {
 func TestHandleList_CompactMode(t *testing.T) {
 	t.Parallel()
 
-	sched := cron.NewScheduler(cron.SchedulerConfig{})
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{})
 	// 8 KiB prompt — same scale as the issue's bandwidth example, padded
 	// past the 256-byte compact cap so truncation is visible.
 	bigPrompt := strings.Repeat("xy", 4096)
-	if err := sched.AddJob(&cron.Job{
+	if err := sched.AddJob(&cronpkg.Job{
 		ID:       "aa00000000000001",
 		Schedule: "*/10 * * * *",
 		Prompt:   bigPrompt,
@@ -153,12 +153,12 @@ func TestHandleList_CompactMode(t *testing.T) {
 		t.Fatalf("AddJob: %v", err)
 	}
 
-	h := &CronHandlers{scheduler: sched}
+	h := &Handlers{scheduler: sched}
 
 	hit := func(query string) cronListResp {
 		req := httptest.NewRequest(http.MethodGet, "/api/cron"+query, nil)
 		w := httptest.NewRecorder()
-		h.handleList(w, req)
+		h.HandleList(w, req)
 		if w.Code != http.StatusOK {
 			t.Fatalf("query %q: status %d, body=%s", query, w.Code, w.Body.String())
 		}
@@ -215,14 +215,14 @@ func TestHandleList_CompactMode(t *testing.T) {
 func TestHandleList_CompactBandwidthBound(t *testing.T) {
 	t.Parallel()
 
-	sched := cron.NewScheduler(cron.SchedulerConfig{})
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{})
 	const N = 5 // small N keeps the test fast; the wire-shape pin is per-job
 	bigPrompt := strings.Repeat("z", 8192)
 	for i := 0; i < N; i++ {
-		// IDs must satisfy cron.IsValidID (16 lowercase hex). Construct
+		// IDs must satisfy cronpkg.IsValidID (16 lowercase hex). Construct
 		// one per-iteration so the scheduler accepts all N inserts.
 		id := "aa00000000000a0" + string(rune('1'+i))
-		if err := sched.AddJob(&cron.Job{
+		if err := sched.AddJob(&cronpkg.Job{
 			ID:       id,
 			Schedule: "*/10 * * * *",
 			Prompt:   bigPrompt,
@@ -233,10 +233,10 @@ func TestHandleList_CompactBandwidthBound(t *testing.T) {
 		}
 	}
 
-	h := &CronHandlers{scheduler: sched}
+	h := &Handlers{scheduler: sched}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron?compact=1", nil)
 	w := httptest.NewRecorder()
-	h.handleList(w, req)
+	h.HandleList(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d body=%s", w.Code, w.Body.String())
 	}

@@ -262,7 +262,7 @@ var serverFieldType = map[string]string{
 	"discoveryH":        "*discovery.Handlers",
 	"projectH":          "*dashproject.Handlers",
 	"transcribeH":       "*transcribe.Handler",
-	"cronH":             "*CronHandlers",
+	"cronH":             "*dashcron.Handlers",
 	"scratchH":          "*scratch.Handler",
 	"memoryH":           "*memory.Handler",
 	"healthH":           "*HealthHandler",

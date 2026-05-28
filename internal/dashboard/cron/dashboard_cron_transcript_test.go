@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"encoding/json"
@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cron"
+	cronpkg "github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
 )
 
@@ -22,7 +22,7 @@ import (
 // `<claudeDir>/projects/<slug(workdir)>/<sessionID>.jsonl` matching the
 // real CLI's layout so the handler's path-resolution logic exercises end
 // to end without mocks.
-func fixtureRunWithJSONL(t *testing.T, jsonlLines []string) (h *CronHandlers, jobID, runID, claudeDir string) {
+func fixtureRunWithJSONL(t *testing.T, jsonlLines []string) (h *Handlers, jobID, runID, claudeDir string) {
 	t.Helper()
 
 	tmp := t.TempDir()
@@ -33,10 +33,10 @@ func fixtureRunWithJSONL(t *testing.T, jsonlLines []string) (h *CronHandlers, jo
 		t.Fatalf("mkdir workdir: %v", err)
 	}
 
-	sched := cron.NewScheduler(cron.SchedulerConfig{StorePath: storePath})
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath})
 
 	// Persist a job so runStore.Get can resolve it.
-	job := cron.Job{
+	job := cronpkg.Job{
 		ID:       strings.Repeat("a", 16),
 		Schedule: "@every 1h",
 		Prompt:   "transcript fixture",
@@ -61,11 +61,11 @@ func fixtureRunWithJSONL(t *testing.T, jsonlLines []string) (h *CronHandlers, jo
 	now := time.Now().UTC()
 	startedAt := now.Add(-2 * time.Minute)
 	endedAt := now
-	runRec := cron.CronRun{
+	runRec := cronpkg.CronRun{
 		RunID:      runID,
 		JobID:      jobID,
-		State:      cron.RunStateSucceeded,
-		Trigger:    cron.TriggerScheduled,
+		State:      cronpkg.RunStateSucceeded,
+		Trigger:    cronpkg.TriggerScheduled,
 		StartedAt:  startedAt,
 		EndedAt:    endedAt,
 		DurationMS: endedAt.Sub(startedAt).Milliseconds(),
@@ -91,7 +91,7 @@ func fixtureRunWithJSONL(t *testing.T, jsonlLines []string) (h *CronHandlers, jo
 		t.Fatalf("write jsonl: %v", err)
 	}
 
-	h = &CronHandlers{
+	h = &Handlers{
 		scheduler: sched,
 		claudeDir: claudeDir,
 	}
@@ -101,11 +101,11 @@ func fixtureRunWithJSONL(t *testing.T, jsonlLines []string) (h *CronHandlers, jo
 // callTranscript runs the handler through the same path-param plumbing
 // the real router uses (PathValue on the request). Keeping the
 // contract-test in lock step with how production wires the URL.
-func callTranscript(h *CronHandlers, jobID, runID string) *httptest.ResponseRecorder {
+func callTranscript(h *Handlers, jobID, runID string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/transcript?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()
-	h.handleRunTranscript(w, req)
+	h.HandleRunTranscript(w, req)
 	return w
 }
 
@@ -167,7 +167,7 @@ func TestTranscript_FallbackMissing_NoSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read run: %v", err)
 	}
-	var rec cron.CronRun
+	var rec cronpkg.CronRun
 	if err := json.Unmarshal(data, &rec); err != nil {
 		t.Fatalf("unmarshal run: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestTranscript_RejectsCrossJobID(t *testing.T) {
 
 func TestTranscript_RejectsNonHexIDs(t *testing.T) {
 	t.Parallel()
-	h := &CronHandlers{scheduler: cron.NewScheduler(cron.SchedulerConfig{})}
+	h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{})}
 	cases := []struct{ runID, jobID string }{
 		{"GGGG", "aaaaaaaaaaaaaaaa"},                   // invalid run_id
 		{"aaaaaaaaaaaaaaaa", "GGGG"},                   // invalid job_id
@@ -447,8 +447,8 @@ func TestTranscript_HappyPath_ClaudeDirContainsSymlink(t *testing.T) {
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		t.Fatalf("mkdir workdir: %v", err)
 	}
-	sched := cron.NewScheduler(cron.SchedulerConfig{StorePath: storePath})
-	job := cron.Job{
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath})
+	job := cronpkg.Job{
 		ID:       strings.Repeat("a", 16),
 		Schedule: "@every 1h",
 		Prompt:   "fixture",
@@ -466,11 +466,11 @@ func TestTranscript_HappyPath_ClaudeDirContainsSymlink(t *testing.T) {
 		t.Fatalf("mkdir runs: %v", err)
 	}
 	now := time.Now().UTC()
-	run := cron.CronRun{
+	run := cronpkg.CronRun{
 		RunID:      runID,
 		JobID:      jobID,
-		State:      cron.RunStateSucceeded,
-		Trigger:    cron.TriggerScheduled,
+		State:      cronpkg.RunStateSucceeded,
+		Trigger:    cronpkg.TriggerScheduled,
 		StartedAt:  now.Add(-2 * time.Minute),
 		EndedAt:    now,
 		DurationMS: 2 * 60 * 1000,
@@ -495,7 +495,7 @@ func TestTranscript_HappyPath_ClaudeDirContainsSymlink(t *testing.T) {
 
 	// Handler points at the symlinked claudeDir — the prefix check must
 	// resolve both sides identically before comparing.
-	h := &CronHandlers{scheduler: sched, claudeDir: link}
+	h := &Handlers{scheduler: sched, claudeDir: link}
 	w := callTranscript(h, jobID, runID)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
@@ -512,21 +512,6 @@ func TestTranscript_HappyPath_ClaudeDirContainsSymlink(t *testing.T) {
 	}
 }
 
-// TestTranscript_BugfixWiring asserts the route is registered and the
-// claudeDir field is populated on production wiring (smoke).
-func TestTranscript_RouteIsRegistered(t *testing.T) {
-	t.Parallel()
-	srv := newTestServerWithScheduler(&mockPlatform{})
-	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+strings.Repeat("a", 16)+"/transcript?job_id="+strings.Repeat("b", 16), nil)
-	w := httptest.NewRecorder()
-	srv.mux.ServeHTTP(w, req)
-	// Either 200 (lucky run hit) or 404 (no such run) — both prove
-	// the route resolves; 405/404-mux-not-found would mean we didn't
-	// register the handler.
-	if w.Code == http.StatusMethodNotAllowed {
-		t.Fatalf("route not registered: %d", w.Code)
-	}
-}
 
 // TestFlattenUserEvent_PreallocCapacity pins R241-PERF-7: per-line slice
 // allocation must match the actual turn count exactly. The prior
@@ -1196,7 +1181,7 @@ func TestTranscript_ConcurrencyCap_503WhenAllSlotsBusy(t *testing.T) {
 }
 
 // TestTranscript_ConcurrencyCap_ReleasesSlotOnReturn pins the defer-release
-// contract: handleRunTranscript must release its semaphore slot on every
+// contract: HandleRunTranscript must release its semaphore slot on every
 // return path so a transient burst doesn't permanently shrink the
 // transcriptConcurrencyCap budget. We acquire cap-1 slots manually,
 // run a real request through the handler (which acquires the last slot

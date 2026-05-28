@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"errors"
@@ -7,24 +7,25 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	cronpkg "github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // runIDLenLimit caps the run_id query parameter length. Run IDs and job
 // IDs share the same generator class (hex with headroom for future
 // entropy bumps) and the same on-disk JSON store, so they share the
-// cron.MaxIDLen constant. R230B-CR-1: previously a separate const was
+// cronpkg.MaxIDLen constant. R230B-CR-1: previously a separate const was
 // kept "in case of divergence", but no concrete plan exists for run IDs
 // to grow longer than job IDs, and two parallel constants drifted in
 // review with no source of truth. Reuse one constant; revisit if a real
 // divergence requirement appears.
-const runIDLenLimit = cron.MaxIDLen
+const runIDLenLimit = cronpkg.MaxIDLen
 
 // GET /api/cron/runs?job_id=&limit=&before=
 //
 // Returns CronRun summaries for one job, newest first. limit default 50,
-// clamped to [1, cron.DefaultRunsKeepCount]. before is unix-ms; only runs
+// clamped to [1, cronpkg.DefaultRunsKeepCount]. before is unix-ms; only runs
 // strictly older than that timestamp are returned (paging cursor).
 //
 // Response shape:
@@ -35,20 +36,20 @@ const runIDLenLimit = cron.MaxIDLen
 //	}
 //
 // Authenticated; no per-job ACL beyond the global dashboard auth gate
-// (mirrors handleList's policy).
-func (h *CronHandlers) handleRunsList(w http.ResponseWriter, r *http.Request) {
+// (mirrors HandleList's policy).
+func (h *Handlers) HandleRunsList(w http.ResponseWriter, r *http.Request) {
 	// R222-SEC-3: gate per-IP before any scheduler / FS work so an attacker
 	// holding a stolen dashboard token cannot enumerate the run history at
 	// unbounded rate. Nil-guarded for hand-built tests.
 	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
 		return
 	}
 	if h.scheduler == nil {
 		// R230B-CR-3: same byte shape as the map[string]any fast path —
 		// `{"runs":[]}`. Explicit empty slice keeps json.Marshal off the
 		// nil → "null" rendering branch.
-		writeJSON(w, cronRunsListResp{Runs: []cronRunSummaryView{}})
+		httputil.WriteJSON(w, cronRunsListResp{Runs: []cronRunSummaryView{}})
 		return
 	}
 	jobID := r.URL.Query().Get("job_id")
@@ -60,7 +61,7 @@ func (h *CronHandlers) handleRunsList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "job_id too long", http.StatusBadRequest)
 		return
 	}
-	if !cron.IsValidID(jobID) {
+	if !cronpkg.IsValidID(jobID) {
 		http.Error(w, "job_id must be lowercase hex", http.StatusBadRequest)
 		return
 	}
@@ -75,8 +76,8 @@ func (h *CronHandlers) handleRunsList(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
 			return
 		}
-		if n > cron.DefaultRunsKeepCount {
-			n = cron.DefaultRunsKeepCount
+		if n > cronpkg.DefaultRunsKeepCount {
+			n = cronpkg.DefaultRunsKeepCount
 		}
 		limit = n
 	}
@@ -110,7 +111,7 @@ func (h *CronHandlers) handleRunsList(w http.ResponseWriter, r *http.Request) {
 	if len(out) == limit && len(out) > 0 {
 		resp.NextBefore = out[len(out)-1].StartedAt
 	}
-	writeJSON(w, resp)
+	httputil.WriteJSON(w, resp)
 }
 
 // GET /api/cron/runs/{run_id}?job_id=...
@@ -118,13 +119,13 @@ func (h *CronHandlers) handleRunsList(w http.ResponseWriter, r *http.Request) {
 // Returns the full CronRun (Prompt + Result + ErrorMsg). 404 when missing,
 // 500 with "corrupt record" message when the file exists but fails to
 // parse / exceeds size cap. Used by the dashboard detail drawer.
-func (h *CronHandlers) handleRunDetail(w http.ResponseWriter, r *http.Request) {
-	// R222-SEC-3: same per-IP gate as handleRunsList. Detail reads also do
+func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
+	// R222-SEC-3: same per-IP gate as HandleRunsList. Detail reads also do
 	// FS I/O (read JSON file from disk) so they share the limiter and
 	// budget, not separate buckets — a single bucket prevents bypass-via-
 	// alternate-endpoint when both URLs share an identical token.
 	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
 		return
 	}
 	if h.scheduler == nil {
@@ -143,7 +144,7 @@ func (h *CronHandlers) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "run_id too long", http.StatusBadRequest)
 		return
 	}
-	if !cron.IsValidID(runID) {
+	if !cronpkg.IsValidID(runID) {
 		http.Error(w, "run_id must be lowercase hex", http.StatusBadRequest)
 		return
 	}
@@ -156,13 +157,13 @@ func (h *CronHandlers) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "job_id too long", http.StatusBadRequest)
 		return
 	}
-	if !cron.IsValidID(jobID) {
+	if !cronpkg.IsValidID(jobID) {
 		http.Error(w, "job_id must be lowercase hex", http.StatusBadRequest)
 		return
 	}
 	run, err := h.scheduler.GetRun(jobID, runID)
 	if err != nil {
-		if errors.Is(err, cron.ErrCorruptRun) {
+		if errors.Is(err, cronpkg.ErrCorruptRun) {
 			slog.Warn("cron run record corrupt", "job_id", jobID, "run_id", runID, "err", err)
 			http.Error(w, "run record corrupt", http.StatusInternalServerError)
 			return
@@ -187,7 +188,7 @@ func (h *CronHandlers) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		StartedAt:   run.StartedAt.UnixMilli(),
 		DurationMS:  run.DurationMS,
 		SessionID:   run.SessionID,
-		Prompt:      osutil.SanitizeForLog(run.Prompt, cron.MaxPromptBytes),
+		Prompt:      osutil.SanitizeForLog(run.Prompt, cronpkg.MaxPromptBytes),
 		WorkDir:     osutil.SanitizeForLog(run.WorkDir, maxCronWorkDirBytesDashboard),
 		Fresh:       run.Fresh,
 		Result:      run.Result,
@@ -198,5 +199,5 @@ func (h *CronHandlers) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 	if !run.EndedAt.IsZero() {
 		out.EndedAt = run.EndedAt.UnixMilli()
 	}
-	writeJSON(w, out)
+	httputil.WriteJSON(w, out)
 }

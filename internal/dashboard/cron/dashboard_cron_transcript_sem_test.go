@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"context"
@@ -16,19 +16,19 @@ import (
 // concurrency.
 //
 // The test fills the semaphore by hand (no real cron run needed) and
-// drives a HEAD-shaped request through handleRunTranscript; the
+// drives a HEAD-shaped request through HandleRunTranscript; the
 // response status pins the 503 path.
 func TestHandleRunTranscript_SemaphoreFastFails503(t *testing.T) {
 	// Cap of 1 keeps the test fast — fill the slot ourselves so the
 	// next call has to take the default branch.
-	h := &CronHandlers{
+	h := &Handlers{
 		transcriptSem: make(chan struct{}, 1),
 	}
 	h.transcriptSem <- struct{}{} // slot full
 
 	r := httptest.NewRequest("GET", "/api/cron/runs/r1/transcript?job_id=j1", nil)
 	w := httptest.NewRecorder()
-	h.handleRunTranscript(w, r)
+	h.HandleRunTranscript(w, r)
 
 	if got, want := w.Code, 503; got != want {
 		t.Fatalf("status = %d, want %d (transcript-busy fast-fail)", got, want)
@@ -45,11 +45,11 @@ func TestHandleRunTranscript_SemaphoreFastFails503(t *testing.T) {
 // must NOT hit the "transcript busy" path — that confirms the
 // nil-guard short-circuits before sem acquisition.
 func TestHandleRunTranscript_NilSemaphoreSkipsGate(t *testing.T) {
-	h := &CronHandlers{} // transcriptSem nil → gate disabled
+	h := &Handlers{} // transcriptSem nil → gate disabled
 
 	r := httptest.NewRequest("GET", "/api/cron/runs/r1/transcript?job_id=j1", nil)
 	w := httptest.NewRecorder()
-	h.handleRunTranscript(w, r)
+	h.HandleRunTranscript(w, r)
 
 	// scheduler is nil → 501 "cron not configured", NOT 503 "busy".
 	// The exact 501 path proves the sem gate did not fire.
@@ -66,7 +66,7 @@ func TestHandleRunTranscript_NilSemaphoreSkipsGate(t *testing.T) {
 // again. Without the defer, every request would leak a slot and the
 // gate would lock up after `cap` requests.
 func TestHandleRunTranscript_SemaphoreReleasedOnReturn(t *testing.T) {
-	h := &CronHandlers{
+	h := &Handlers{
 		transcriptSem: make(chan struct{}, 1),
 	}
 
@@ -74,7 +74,7 @@ func TestHandleRunTranscript_SemaphoreReleasedOnReturn(t *testing.T) {
 	// nil scheduler). On return the defer must release the slot.
 	r := httptest.NewRequest("GET", "/api/cron/runs/r1/transcript?job_id=j1", nil)
 	w := httptest.NewRecorder()
-	h.handleRunTranscript(w, r)
+	h.HandleRunTranscript(w, r)
 
 	// Second call must be able to acquire — confirms the slot was
 	// released. We probe via a non-blocking send on the channel.
@@ -93,7 +93,7 @@ func TestHandleRunTranscript_SemaphoreReleasedOnReturn(t *testing.T) {
 // `default:` and a `<-ctx.Done():` arm so this path is reachable on
 // pre-cancelled requests.
 func TestHandleRunTranscript_RequestCancelDuringFullSem(t *testing.T) {
-	h := &CronHandlers{
+	h := &Handlers{
 		transcriptSem: make(chan struct{}, 1),
 	}
 	h.transcriptSem <- struct{}{} // slot full
@@ -102,7 +102,7 @@ func TestHandleRunTranscript_RequestCancelDuringFullSem(t *testing.T) {
 	cancel() // pre-cancel
 	r := httptest.NewRequest("GET", "/api/cron/runs/r1/transcript?job_id=j1", nil).WithContext(ctx)
 	w := httptest.NewRecorder()
-	h.handleRunTranscript(w, r)
+	h.HandleRunTranscript(w, r)
 
 	if got, want := w.Code, 503; got != want {
 		t.Fatalf("status = %d, want %d (cancelled+full → busy)", got, want)

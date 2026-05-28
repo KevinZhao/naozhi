@@ -1,13 +1,13 @@
-package server
+package cron
 
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cron"
+	cronpkg "github.com/naozhi/naozhi/internal/cron"
 )
 
 // TestBatchRecentRuns_OrderingAndEmpty pins R236-PERF-08 (#525): the
-// bounded-fan-out helper that handleList uses to pre-fetch RecentRuns
+// bounded-fan-out helper that HandleList uses to pre-fetch RecentRuns
 // for every job MUST preserve input ordering (so the per-job index used
 // downstream maps to the right job) and MUST handle the trivial inputs
 // (empty jobs, nil scheduler) without panic. The helper is the
@@ -18,20 +18,20 @@ func TestBatchRecentRuns_OrderingAndEmpty(t *testing.T) {
 	t.Parallel()
 
 	// Empty input — must return nil without touching scheduler.
-	h := &CronHandlers{scheduler: cron.NewScheduler(cron.SchedulerConfig{})}
+	h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{})}
 	if got := h.batchRecentRuns(nil, recentRunsPerJob); got != nil {
 		t.Fatalf("batchRecentRuns(nil): expected nil, got %v", got)
 	}
-	if got := h.batchRecentRuns([]cron.JobWithNextRun{}, recentRunsPerJob); got != nil {
+	if got := h.batchRecentRuns([]cronpkg.JobWithNextRun{}, recentRunsPerJob); got != nil {
 		t.Fatalf("batchRecentRuns(empty): expected nil, got %v", got)
 	}
 
 	// Nil scheduler — must return nil without panic. Mirrors the handler
 	// contract for the empty-list fast path so the per-job loop's
 	// recentByIdx[idx] read does not deref a nil scheduler indirectly.
-	hNil := &CronHandlers{scheduler: nil}
-	if got := hNil.batchRecentRuns([]cron.JobWithNextRun{
-		{Job: cron.Job{ID: "aa00000000000001"}},
+	hNil := &Handlers{scheduler: nil}
+	if got := hNil.batchRecentRuns([]cronpkg.JobWithNextRun{
+		{Job: cronpkg.Job{ID: "aa00000000000001"}},
 	}, recentRunsPerJob); got != nil {
 		t.Fatalf("batchRecentRuns(nil scheduler): expected nil, got %v", got)
 	}
@@ -39,13 +39,13 @@ func TestBatchRecentRuns_OrderingAndEmpty(t *testing.T) {
 	// Ordering preservation: with a real scheduler that has no run
 	// history the helper still returns one entry per input job (each
 	// nil/empty slice). The length contract is the half of the wire
-	// shape that handleList relies on — out[idx] for jobs[idx] — and
+	// shape that HandleList relies on — out[idx] for jobs[idx] — and
 	// it must hold even when no job has any runs.
-	jobs := []cron.JobWithNextRun{
-		{Job: cron.Job{ID: "aa00000000000001"}},
-		{Job: cron.Job{ID: "bb00000000000002"}},
-		{Job: cron.Job{ID: "cc00000000000003"}},
-		{Job: cron.Job{ID: "dd00000000000004"}},
+	jobs := []cronpkg.JobWithNextRun{
+		{Job: cronpkg.Job{ID: "aa00000000000001"}},
+		{Job: cronpkg.Job{ID: "bb00000000000002"}},
+		{Job: cronpkg.Job{ID: "cc00000000000003"}},
+		{Job: cronpkg.Job{ID: "dd00000000000004"}},
 	}
 	out := h.batchRecentRuns(jobs, recentRunsPerJob)
 	if len(out) != len(jobs) {

@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"encoding/json"
@@ -35,7 +35,7 @@ func TestTranscript_FreshTrue_DropsInvalidTimestamp(t *testing.T) {
 	h, jobID, runID, _ := fixtureRunWithJSONLFresh(t, true, lines)
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/transcript?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
-	h.handleRunTranscript(w, req)
+	h.HandleRunTranscript(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())

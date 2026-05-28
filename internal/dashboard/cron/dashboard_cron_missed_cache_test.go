@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"os"
@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cron"
+	cronpkg "github.com/naozhi/naozhi/internal/cron"
 )
 
 // TestMissedScheduleVerdict_CachesAcrossPolls pins R245-PERF-4 (#857):
 // the cache must serve a second call within missedCacheTTL without
-// re-running cron.HasMissedSchedule, and the cached verdict must agree
+// re-running cronpkg.HasMissedSchedule, and the cached verdict must agree
 // with the canonical function. We assert both halves: agreement on the
 // first call (proves we are not silently flipping verdicts) and
 // agreement on the second call (proves cache hits round-trip the same
@@ -25,17 +25,17 @@ import (
 func TestMissedScheduleVerdict_CachesAcrossPolls(t *testing.T) {
 	t.Parallel()
 
-	h := &CronHandlers{}
+	h := &Handlers{}
 	now := time.Now()
 	startedAt := now.Add(-2 * time.Hour) // long past suppression window
-	j := &cron.Job{
+	j := &cronpkg.Job{
 		ID:        "job-cached-once",
 		Schedule:  "@every 1m",
 		CreatedAt: now.Add(-1 * time.Hour),
 	}
 
 	missed1, prev1 := h.missedScheduleVerdict(j, now, startedAt)
-	wantMissed, wantPrev := cron.HasMissedSchedule(j, now, startedAt)
+	wantMissed, wantPrev := cronpkg.HasMissedSchedule(j, now, startedAt)
 	if missed1 != wantMissed {
 		t.Errorf("first call missed = %v, want %v (verdict diverges from canonical)", missed1, wantMissed)
 	}
@@ -68,10 +68,10 @@ func TestMissedScheduleVerdict_CachesAcrossPolls(t *testing.T) {
 func TestMissedScheduleVerdict_LastRunAtChangeInvalidates(t *testing.T) {
 	t.Parallel()
 
-	h := &CronHandlers{}
+	h := &Handlers{}
 	now := time.Now()
 	startedAt := now.Add(-2 * time.Hour)
-	j := &cron.Job{
+	j := &cronpkg.Job{
 		ID:        "job-lastrun-flips",
 		Schedule:  "@every 1m",
 		CreatedAt: now.Add(-1 * time.Hour),
@@ -101,7 +101,7 @@ func TestMissedScheduleVerdict_LastRunAtChangeInvalidates(t *testing.T) {
 // pointer.
 func TestMissedScheduleVerdict_NilJob(t *testing.T) {
 	t.Parallel()
-	h := &CronHandlers{}
+	h := &Handlers{}
 	missed, prev := h.missedScheduleVerdict(nil, time.Now(), time.Now())
 	if missed || !prev.IsZero() {
 		t.Errorf("nil job: got (%v, %v), want (false, zero)", missed, prev)
@@ -109,8 +109,8 @@ func TestMissedScheduleVerdict_NilJob(t *testing.T) {
 }
 
 // TestHandleList_RoutesThroughMissedScheduleVerdict pins R250-PERF-3
-// (#1107): the 1 Hz dashboard poll path in handleList must call the
-// memoising wrapper missedScheduleVerdict, NOT cron.HasMissedSchedule
+// (#1107): the 1 Hz dashboard poll path in HandleList must call the
+// memoising wrapper missedScheduleVerdict, NOT cronpkg.HasMissedSchedule
 // directly. A contributor refactoring the loop body could plausibly
 // "simplify" by inlining the canonical call — silently regressing the
 // cache and re-introducing N×T regexp NFA builds per second under
@@ -118,28 +118,28 @@ func TestMissedScheduleVerdict_NilJob(t *testing.T) {
 // source-pin guards the wiring at the only caller that matters.
 //
 // We grep dashboard_cron.go for the literal invocation rather than
-// instrumenting the runtime path because handleList depends on a fully
-// wired CronHandlers (scheduler, cron.Service, store, etc.) that the
+// instrumenting the runtime path because HandleList depends on a fully
+// wired Handlers (scheduler, cronpkg.Service, store, etc.) that the
 // existing newCronHandlersForTest fixtures only partially assemble. A
 // source-pin is sufficient because the call site is single and short:
-// any divergence — `cron.HasMissedSchedule(&j, now, startedAt)` instead
+// any divergence — `cronpkg.HasMissedSchedule(&j, now, startedAt)` instead
 // of `h.missedScheduleVerdict(&j, now, startedAt)` — would fail the
 // substring search and force the contributor to update the test
 // alongside the source.
 func TestHandleList_RoutesThroughMissedScheduleVerdict(t *testing.T) {
 	t.Parallel()
-	src, err := os.ReadFile("dashboard_cron.go")
+	src, err := os.ReadFile("handlers.go")
 	if err != nil {
-		t.Fatalf("read dashboard_cron.go: %v", err)
+		t.Fatalf("read handlers.go: %v", err)
 	}
 	source := string(src)
 
-	// Locate the handleList function body. The function declaration is
+	// Locate the HandleList function body. The function declaration is
 	// the unambiguous anchor; we slice from it to the next top-level
 	// `func ` to avoid matching unrelated calls elsewhere in the file.
-	listIdx := strings.Index(source, "func (h *CronHandlers) handleList(")
+	listIdx := strings.Index(source, "func (h *Handlers) HandleList(")
 	if listIdx < 0 {
-		t.Fatal("handleList function not found in dashboard_cron.go — test anchor moved, update before relaxing the check")
+		t.Fatal("HandleList function not found in handlers.go — test anchor moved, update before relaxing the check")
 	}
 	rest := source[listIdx:]
 	end := strings.Index(rest[1:], "\nfunc ")
@@ -150,13 +150,13 @@ func TestHandleList_RoutesThroughMissedScheduleVerdict(t *testing.T) {
 
 	// The 1Hz hot path must route through the cached helper.
 	if !strings.Contains(body, "h.missedScheduleVerdict(&j, now, startedAt)") {
-		t.Error("handleList must call h.missedScheduleVerdict(&j, now, startedAt) — bypassing the cache via cron.HasMissedSchedule directly silently re-introduces R250-PERF-3 / R245-PERF-4 (#1107 / #857): N jobs × T tabs × 1 Hz fans out to N×T regexp NFA builds per second")
+		t.Error("HandleList must call h.missedScheduleVerdict(&j, now, startedAt) — bypassing the cache via cronpkg.HasMissedSchedule directly silently re-introduces R250-PERF-3 / R245-PERF-4 (#1107 / #857): N jobs × T tabs × 1 Hz fans out to N×T regexp NFA builds per second")
 	}
-	// Defence in depth: handleList must NOT call cron.HasMissedSchedule
+	// Defence in depth: HandleList must NOT call cronpkg.HasMissedSchedule
 	// directly — the only caller of the canonical function is the
 	// wrapper itself (line ~718 of this file).
-	if strings.Contains(body, "cron.HasMissedSchedule(") {
-		t.Error("handleList must not call cron.HasMissedSchedule directly — route through h.missedScheduleVerdict so the cache short-circuits the regex Parse on poll storms (#1107)")
+	if strings.Contains(body, "cronpkg.HasMissedSchedule(") {
+		t.Error("HandleList must not call cronpkg.HasMissedSchedule directly — route through h.missedScheduleVerdict so the cache short-circuits the regex Parse on poll storms (#1107)")
 	}
 }
 
@@ -168,7 +168,7 @@ func TestHandleList_RoutesThroughMissedScheduleVerdict(t *testing.T) {
 func TestMissedScheduleVerdict_EvictsOldestOnOverflow(t *testing.T) {
 	t.Parallel()
 
-	h := &CronHandlers{}
+	h := &Handlers{}
 	now := time.Now()
 
 	// Pre-seed the cache up to the cap with computedAt timestamps spread
@@ -193,7 +193,7 @@ func TestMissedScheduleVerdict_EvictsOldestOnOverflow(t *testing.T) {
 	// One more verdict push — the cap branch should evict the oldest
 	// decile and insert the fresh entry.
 	startedAt := now.Add(-2 * time.Hour)
-	j := &cron.Job{ID: "overflow-trigger", Schedule: "@every 1m", CreatedAt: now.Add(-1 * time.Hour)}
+	j := &cronpkg.Job{ID: "overflow-trigger", Schedule: "@every 1m", CreatedAt: now.Add(-1 * time.Hour)}
 	h.missedScheduleVerdict(j, now, startedAt)
 
 	h.missedCacheMu.Lock()

@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"errors"
@@ -13,7 +13,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	cronpkg "github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -35,9 +36,9 @@ const maxNotifyChatIDLen = 256
 // same on-disk cron_jobs.json schema, so the limits must stay in lockstep —
 // see internal/cron/limits.go. R216-CR-1.
 const (
-	maxCronPromptBytesDashboard   = cron.MaxPromptBytes
-	maxCronIDLenDashboard         = cron.MaxIDLen
-	maxCronScheduleBytesDashboard = cron.MaxScheduleBytes
+	maxCronPromptBytesDashboard   = cronpkg.MaxPromptBytes
+	maxCronIDLenDashboard         = cronpkg.MaxIDLen
+	maxCronScheduleBytesDashboard = cronpkg.MaxScheduleBytes
 )
 
 // maxCronWorkDirBytesDashboard caps the raw work_dir string before it reaches
@@ -212,8 +213,8 @@ func validateCronScheduleChars(schedule string) error {
 }
 
 // cronRunSummaryView is the JSON shape for a single cron run summary.
-// Shared between handleList (recent-run preview embedded in the cron
-// dashboard list) and handleRunsList (per-job paginated history).
+// Shared between HandleList (recent-run preview embedded in the cron
+// dashboard list) and HandleRunsList (per-job paginated history).
 // Both wire shapes must stay in lockstep, so the type is package-level
 // rather than declared twice in handler bodies.
 type cronRunSummaryView struct {
@@ -227,11 +228,11 @@ type cronRunSummaryView struct {
 	ErrorClass string `json:"error_class,omitempty"`
 }
 
-// cronSummaryToView projects a cron.CronRunSummary into the wire shape used
-// by handleList's recent_runs preview and handleRunsList's paginated history.
+// cronSummaryToView projects a cronpkg.CronRunSummary into the wire shape used
+// by HandleList's recent_runs preview and HandleRunsList's paginated history.
 // R233-CR-3: the two callers had identical conversion blocks and would
 // silently diverge if a future field were added in only one place.
-func cronSummaryToView(r cron.CronRunSummary) cronRunSummaryView {
+func cronSummaryToView(r cronpkg.CronRunSummary) cronRunSummaryView {
 	row := cronRunSummaryView{
 		RunID:      r.RunID,
 		State:      string(r.State),
@@ -282,7 +283,7 @@ type cronCurrentRunView struct {
 	SessionID string `json:"session_id,omitempty"`
 }
 
-// cronRunCountersView mirrors cron.RunCounters for the dashboard. Field
+// cronRunCountersView mirrors cronpkg.RunCounters for the dashboard. Field
 // order tracks RunCounters so JSON wire keys cannot diverge silently.
 type cronRunCountersView struct {
 	Total     int64 `json:"total,omitempty"`
@@ -318,7 +319,7 @@ type cronRunDetailView struct {
 
 // cronJobView is the per-job element inside cronListResp.Jobs. Promoted to
 // package-level (R230B-CR-3) so cronListResp can reference it; the previous
-// inline-typed declaration kept it locked inside handleList.
+// inline-typed declaration kept it locked inside HandleList.
 type cronJobView struct {
 	ID             string `json:"id"`
 	Schedule       string `json:"schedule"`
@@ -375,7 +376,7 @@ type cronJobView struct {
 // any cached client view, small enough that 50 jobs × 256 B = 12 KiB
 // total per poll instead of the prior 50 × 8 KiB = 400 KiB worst case.
 //
-// Truncation is done in handleList against the rendered byte length, but
+// Truncation is done in HandleList against the rendered byte length, but
 // we clip on a UTF-8 boundary so a multi-byte rune at the cap can't end
 // up half-decoded by JSON consumers. Tests pin this contract — see
 // TestHandleList_Compact_TruncatesPromptOnRune.
@@ -445,7 +446,7 @@ type cronUpdateResp struct {
 	ID     string `json:"id"`
 }
 
-// validateCronBackend enforces the shared shape contract for the
+// ValidateCronBackend enforces the shared shape contract for the
 // dashboard-picked backend override on cron jobs:
 //   - empty is OK (router default fallback at execute time);
 //   - length <= maxBackendIDLen bytes;
@@ -463,7 +464,7 @@ type cronUpdateResp struct {
 // caller cannot confuse the two surfaces. The relaxation is forward-
 // compatible: any backend ID validated under the older subset still
 // satisfies isValidBackendID's superset.
-func validateCronBackend(backend string) error {
+func ValidateCronBackend(backend string) error {
 	if backend == "" {
 		return nil
 	}
@@ -509,8 +510,8 @@ func validateCronTitle(title string) error {
 	if title == "" {
 		return nil
 	}
-	if n := utf8.RuneCountInString(title); n > cron.MaxCronTitleLen {
-		return fmt.Errorf("title exceeds %d-rune limit", cron.MaxCronTitleLen)
+	if n := utf8.RuneCountInString(title); n > cronpkg.MaxCronTitleLen {
+		return fmt.Errorf("title exceeds %d-rune limit", cronpkg.MaxCronTitleLen)
 	}
 	return validateStringField(title, stringFieldPolicy{name: "title", allowTab: true, disallowLF: true})
 }
@@ -528,19 +529,19 @@ func validateCronTitle(title string) error {
 // validateCronTitle's explicit '\r' branch. R230-CQ-19.
 //
 // R250-ARCH-27 (#1188): the size + UTF-8 + C0/C1/bidi/LS/PS scan is
-// delegated to cron.ValidatePromptStrict so the dashboard HTTP edge and
+// delegated to cronpkg.ValidatePromptStrict so the dashboard HTTP edge and
 // the IM `/cron …` slash-command edge cannot drift apart in policy. The
 // dashboard adds a single extra rule on top — reject CR — because the
 // IM path enters via stream-json which json-quotes the value and never
 // surfaces it raw to log pipelines, whereas a dashboard-authored prompt
 // can flow into operator-facing dump tools where CR matters.
 func validateCronPrompt(prompt string) error {
-	// cron.ValidatePromptStrict enforces the size cap (cron.MaxPromptBytes,
+	// cronpkg.ValidatePromptStrict enforces the size cap (cronpkg.MaxPromptBytes,
 	// equal to maxCronPromptBytesDashboard), UTF-8 validity, C0/DEL/C1
 	// rejection, and the bidi/LS/PS rune walk. Any byte-level concern
 	// shared between dashboard + IM lives there now; the only check this
 	// function still owns is the dashboard-specific CR rejection below.
-	if err := cron.ValidatePromptStrict(prompt); err != nil {
+	if err := cronpkg.ValidatePromptStrict(prompt); err != nil {
 		return err
 	}
 	if strings.ContainsRune(prompt, '\r') {
@@ -549,11 +550,11 @@ func validateCronPrompt(prompt string) error {
 	return nil
 }
 
-// CronHandlers groups the cron job management API endpoints.
-type CronHandlers struct {
-	scheduler   *cron.Scheduler
+// Handlers groups the cron job management API endpoints.
+type Handlers struct {
+	scheduler   *cronpkg.Scheduler
 	allowedRoot string
-	// claudeDir is the absolute path to ~/.claude. Used by handleRunTranscript
+	// claudeDir is the absolute path to ~/.claude. Used by HandleRunTranscript
 	// to locate the JSONL conversation file for a given run's session_id.
 	// Empty disables the transcript endpoint (returns fallback:"missing").
 	// cron-dashboard-redesign P2a §4.4.3.
@@ -566,9 +567,9 @@ type CronHandlers struct {
 	// rate. R222-SEC-3.
 	//
 	// Nil-guarded so tests built via newCronHandlersForTest (and other
-	// hand-rolled CronHandlers instances) skip the gate; wiring lives in
+	// hand-rolled Handlers instances) skip the gate; wiring lives in
 	// server.New.
-	runsLimiter *ipLimiter
+	runsLimiter IPLimiter
 
 	// listLimiter caps GET /api/cron — the dashboard's primary 1 Hz
 	// polling endpoint. R242-CR-3: the runs/transcript endpoints are
@@ -588,11 +589,11 @@ type CronHandlers struct {
 	//
 	// Nil-guarded just like runsLimiter so newCronHandlersForTest paths
 	// skip the gate. Wiring lives in server.New.
-	listLimiter *ipLimiter
+	listLimiter IPLimiter
 
 	// transcriptLimiter caps per-IP rate for the transcript endpoint
-	// specifically. R250-SEC-7 (#1096): handleRunTranscript previously
-	// shared runsLimiter with handleRunsList / handleRunDetail; the
+	// specifically. R250-SEC-7 (#1096): HandleRunTranscript previously
+	// shared runsLimiter with HandleRunsList / HandleRunDetail; the
 	// transcript path is dramatically more expensive (EvalSymlinks ×2,
 	// 8 MB LimitReader + 256 KB scanner buffer + per-line json.Unmarshal
 	// + flattenJSONLEvent) so a single attacker can spam the cheaper
@@ -608,7 +609,7 @@ type CronHandlers struct {
 	// occasional double-tap (drawer open → close → re-open) without
 	// tripping. Nil-guarded just like runsLimiter so
 	// newCronHandlersForTest paths skip the gate.
-	transcriptLimiter *ipLimiter
+	transcriptLimiter IPLimiter
 
 	// writeLimiter caps per-IP rate of authenticated cron-write/control
 	// endpoints that fan out side-effects beyond a cheap read:
@@ -628,10 +629,10 @@ type CronHandlers struct {
 	//
 	// Nil-guarded so newCronHandlersForTest paths skip the gate; wiring
 	// lives in server.New. [R247-SEC-2 / R247-SEC-3]
-	writeLimiter *ipLimiter
+	writeLimiter IPLimiter
 
 	// missedCache memoises HasMissedSchedule verdicts so the dashboard's
-	// 1 Hz handleList path doesn't re-Parse the cron expression for every
+	// 1 Hz HandleList path doesn't re-Parse the cron expression for every
 	// job on every poll. Without the cache, robfig/cron's regexp NFA
 	// build runs N (jobs) × T (parallel tabs) times per second; with it,
 	// steady-state cost falls to N parses per missedCacheTTL because
@@ -658,11 +659,17 @@ type CronHandlers struct {
 	// the gate disabled (newCronHandlersForTest paths) so legacy
 	// hand-rolled fixtures keep compiling.
 	transcriptSem chan struct{}
+
+	// validateWS / classifyWSErr inject internal/server's validateWorkspace
+	// + classifyWorkspaceErr helpers without reverse-importing server.
+	// Phase 1 (server-split-phase4-design.md §6.5 Plan B). Both nil-safe.
+	validateWS    func(ws, root string) (string, error)
+	classifyWSErr func(err error) (int, string)
 }
 
 // missedVerdict caches one HasMissedSchedule return tuple plus the inputs
 // that decide whether the entry is still valid. Stored under
-// CronHandlers.missedCache keyed by `jobID|schedule|startedNs` so a
+// Handlers.missedCache keyed by `jobID|schedule|startedNs` so a
 // schedule edit (UpdateJob) or scheduler restart invalidates by key
 // turnover (old keys become unreachable; the entry GCs away once the cap
 // rotates). LastRunAt is intentionally NOT in the key — instead, it lives
@@ -710,10 +717,10 @@ const missedCacheEvictRatio = 10
 // the regexp NFA build entirely; misses fall through to the cron package
 // and store the freshly computed tuple for the next poller. Safe to call
 // from concurrent goroutines (mu-protected map; map access is short and
-// uncontended in practice because handleList serialises per request, but
+// uncontended in practice because HandleList serialises per request, but
 // multiple parallel dashboard tabs each have their own request goroutine
 // and may overlap). R245-PERF-4 (#857).
-func (h *CronHandlers) missedScheduleVerdict(j *cron.Job, now, startedAt time.Time) (bool, time.Time) {
+func (h *Handlers) missedScheduleVerdict(j *cronpkg.Job, now, startedAt time.Time) (bool, time.Time) {
 	if j == nil {
 		return false, time.Time{}
 	}
@@ -732,7 +739,7 @@ func (h *CronHandlers) missedScheduleVerdict(j *cron.Job, now, startedAt time.Ti
 	}
 	h.missedCacheMu.Unlock()
 
-	missed, prevAt := cron.HasMissedSchedule(j, now, startedAt)
+	missed, prevAt := cronpkg.HasMissedSchedule(j, now, startedAt)
 
 	h.missedCacheMu.Lock()
 	if h.missedCache == nil {
@@ -792,7 +799,7 @@ func evictOldestMissedCache(m map[string]missedVerdict) {
 	}
 }
 
-// recentRunsPerJob is the per-job RecentRuns cap embedded in handleList's
+// recentRunsPerJob is the per-job RecentRuns cap embedded in HandleList's
 // list response. Mirrors the literal previously inlined as
 // scheduler.RecentRuns(j.ID, 5) so the bounded fan-out helper carries the
 // same wire-shape contract the dashboard JS reads. Tooltip-bound; the
@@ -812,7 +819,7 @@ const batchRecentRunsWorkers = 8
 
 // batchRecentRuns fans out scheduler.RecentRuns lookups across at most
 // batchRecentRunsWorkers goroutines and returns one result per input job
-// in input-index order. Used by handleList to drop the previous N×serial
+// in input-index order. Used by HandleList to drop the previous N×serial
 // per-job lock acquire (the per-recentCacheEntry.mu chain) — under load,
 // 1 Hz polls on a 50-job install no longer stall behind the slowest
 // jobLock pass because at most W jobs queue at the runStore lock at any
@@ -833,11 +840,11 @@ const batchRecentRunsWorkers = 8
 // receive nil without panic.
 //
 // R236-PERF-08 (#525).
-func (h *CronHandlers) batchRecentRuns(jobs []cron.JobWithNextRun, n int) [][]cron.CronRunSummary {
+func (h *Handlers) batchRecentRuns(jobs []cronpkg.JobWithNextRun, n int) [][]cronpkg.CronRunSummary {
 	if len(jobs) == 0 || h.scheduler == nil {
 		return nil
 	}
-	out := make([][]cron.CronRunSummary, len(jobs))
+	out := make([][]cronpkg.CronRunSummary, len(jobs))
 	// Tasks queue: each worker pulls the next index and fans out to the
 	// scheduler. Channel-of-int keeps the work distribution self-balancing
 	// — a slow per-job lookup (cold cache, slow disk) does not pin a
@@ -873,20 +880,20 @@ func (h *CronHandlers) batchRecentRuns(jobs []cron.JobWithNextRun, n int) [][]cr
 // shape for any out-of-tree consumer pre-dating the compact mode.
 // Dashboard.js poll path passes compact=1; the editor/drawer detail view
 // fetches a single full job via the existing GET path with compact off.
-func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	// R242-CR-3: gate per-IP before the scheduler/FS work so a stolen
 	// dashboard token cannot enumerate the job list (with embedded
 	// RecentRuns(5) per job) at unbounded rate. Mirrors runsLimiter
-	// usage in handleRunsList. Nil-guarded for hand-built tests.
+	// usage in HandleRunsList. Nil-guarded for hand-built tests.
 	if h.listLimiter != nil && !h.listLimiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron list rate limit exceeded"})
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron list rate limit exceeded"})
 		return
 	}
 	if h.scheduler == nil {
 		// R230B-CR-3: keep wire shape `{"jobs":[]}` byte-equal to the prior
 		// map[string]any{"jobs": []any{}} fast path. Explicit empty slice
 		// (not nil) so json.Marshal emits `[]` rather than `null`.
-		writeJSON(w, cronListResp{Jobs: []cronJobView{}})
+		httputil.WriteJSON(w, cronListResp{Jobs: []cronJobView{}})
 		return
 	}
 
@@ -1072,13 +1079,13 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			ChatID:   def.ChatID,
 		}
 	}
-	writeJSON(w, resp)
+	httputil.WriteJSON(w, resp)
 }
 
 // httpErrPersistFailed writes the standard 500 body for the "in-memory
 // mutation succeeded but on-disk persist failed" case. The five cron
 // write handlers (create / delete / pause / resume / update) all surface
-// cron.ErrPersistFailed identically — same status, same wording with
+// cronpkg.ErrPersistFailed identically — same status, same wording with
 // only the verb differing — so the literal had drifted across five
 // copy-paste sites. Centralising the format keeps the wording in one
 // place and stops a future copy from accidentally diverging the
@@ -1093,12 +1100,17 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 // token; the operator-facing string preserves the verb so existing log
 // scrapers or smoke tests pinning the wording stay green.
 func httpErrPersistFailed(w http.ResponseWriter, op string) {
-	errResp(w, http.StatusInternalServerError, "persist_failed",
-		"job "+op+" but not persisted; please check server logs")
+	httputil.WriteJSONStatus(w, http.StatusInternalServerError, struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}{
+		Error: "job " + op + " but not persisted; please check server logs",
+		Code:  "persist_failed",
+	})
 }
 
 // POST /api/cron — create a new cron job from dashboard.
-func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
@@ -1115,11 +1127,11 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		FreshContext   bool   `json:"fresh_context,omitempty"`
 		// Backend pins the CLI backend for this job ("" = router default).
 		// Per docs/rfc/multi-backend.md §9 cron RPC contract. Validated
-		// by validateCronBackend to match the send.go shape contract.
+		// by ValidateCronBackend to match the send.go shape contract.
 		Backend string `json:"backend,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64 KB
-	if err := decodeJSONBody(r, &req); err != nil {
+	if err := httputil.DecodeJSONBody(r, &req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
@@ -1134,7 +1146,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// Cap schedule length before handing to validateSchedule → robfig/cron
 	// parser. MaxBytesReader caps the whole body at 64 KB, but within that
 	// envelope a single 63 KB schedule field would still reach the parser
-	// and force per-field regex work. Mirrors handlePreview (line 381).
+	// and force per-field regex work. Mirrors HandlePreview (line 381).
 	if len(req.Schedule) > maxCronScheduleBytesDashboard {
 		http.Error(w, "schedule too long", http.StatusBadRequest)
 		return
@@ -1147,7 +1159,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := validateCronBackend(req.Backend); err != nil {
+	if err := ValidateCronBackend(req.Backend); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -1160,9 +1172,13 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		validated, err := validateWorkspace(req.WorkDir, h.allowedRoot)
+		if h.validateWS == nil {
+			http.Error(w, "cron work_dir validation not wired", http.StatusInternalServerError)
+			return
+		}
+		validated, err := h.validateWS(req.WorkDir, h.allowedRoot)
 		if err != nil {
-			status, msg := classifyWorkspaceErr(err)
+			status, msg := h.classifyWSErr(err)
 			slog.Debug("cron work_dir validation failed", "err", err)
 			http.Error(w, msg, status)
 			return
@@ -1200,7 +1216,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job := &cron.Job{
+	job := &cronpkg.Job{
 		Schedule:       req.Schedule,
 		Prompt:         req.Prompt,
 		Title:          req.Title,
@@ -1221,7 +1237,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// store) failed; surface it as 500 so operators see the persistence
 		// gap instead of the dashboard silently treating the create as a
 		// successful 2xx that won't survive a restart. R51-QUAL-001.
-		if errors.Is(err, cron.ErrPersistFailed) {
+		if errors.Is(err, cronpkg.ErrPersistFailed) {
 			slog.Error("cron AddJob persisted in-memory but store write failed", "err", err, "id", job.ID)
 			httpErrPersistFailed(w, "created")
 			return
@@ -1235,11 +1251,11 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job created via dashboard", "id", job.ID, "schedule", job.Schedule)
-	writeJSON(w, cronCreateResp{ID: job.ID})
+	httputil.WriteJSON(w, cronCreateResp{ID: job.ID})
 }
 
 // DELETE /api/cron?id=xxx — delete a cron job by exact ID.
-func (h *CronHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
@@ -1260,7 +1276,7 @@ func (h *CronHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 	// [R250-SEC-1] Shape gate before id reaches scheduler/slog: keeps log
 	// attributes free of newlines/control bytes that would inject forged
 	// records into the operator log when the lookup misses.
-	if !cron.IsValidID(id) {
+	if !cronpkg.IsValidID(id) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
@@ -1268,9 +1284,9 @@ func (h *CronHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 	j, err := h.scheduler.DeleteJobByID(id)
 	if err != nil {
 		switch {
-		case errors.Is(err, cron.ErrJobNotFound):
+		case errors.Is(err, cronpkg.ErrJobNotFound):
 			http.Error(w, "job not found", http.StatusNotFound)
-		case errors.Is(err, cron.ErrPersistFailed):
+		case errors.Is(err, cronpkg.ErrPersistFailed):
 			// In-memory + cron entry deletion already happened, but the
 			// store write failed — a restart would replay the deleted job.
 			// 500 alerts the operator to inspect logs instead of treating
@@ -1285,11 +1301,11 @@ func (h *CronHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job deleted via dashboard", "id", j.ID)
-	writeOK(w)
+	httputil.WriteOK(w)
 }
 
 // POST /api/cron/pause — pause a cron job by exact ID.
-func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
 	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
@@ -1299,29 +1315,29 @@ func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
 		ID string `json:"id"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KB
-	if err := decodeJSONBody(r, &req); err != nil || req.ID == "" {
+	if err := httputil.DecodeJSONBody(r, &req); err != nil || req.ID == "" {
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
-	// Mirror handleDelete's guard so oversized IDs don't drag slog attrs up
+	// Mirror HandleDelete's guard so oversized IDs don't drag slog attrs up
 	// to KB-scale strings on failure/success paths. R64-SEC-1.
 	if len(req.ID) > maxCronIDLenDashboard {
 		http.Error(w, "id too long", http.StatusBadRequest)
 		return
 	}
 	// [R250-SEC-1] Shape gate before id reaches scheduler/slog.
-	if !cron.IsValidID(req.ID) {
+	if !cronpkg.IsValidID(req.ID) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
 
 	if _, err := h.scheduler.PauseJobByID(req.ID); err != nil {
 		switch {
-		case errors.Is(err, cron.ErrJobNotFound):
+		case errors.Is(err, cronpkg.ErrJobNotFound):
 			http.Error(w, "job not found", http.StatusNotFound)
-		case errors.Is(err, cron.ErrJobAlreadyPaused):
+		case errors.Is(err, cronpkg.ErrJobAlreadyPaused):
 			http.Error(w, "job already paused", http.StatusConflict)
-		case errors.Is(err, cron.ErrPersistFailed):
+		case errors.Is(err, cronpkg.ErrPersistFailed):
 			slog.Error("cron PauseJobByID pause not persisted", "err", err, "id", req.ID)
 			httpErrPersistFailed(w, "paused")
 		default:
@@ -1332,11 +1348,11 @@ func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job paused via dashboard", "id", req.ID)
-	writeOK(w)
+	httputil.WriteOK(w)
 }
 
 // POST /api/cron/resume — resume a paused cron job by exact ID.
-func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
@@ -1346,7 +1362,7 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		ID string `json:"id"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KB
-	if err := decodeJSONBody(r, &req); err != nil || req.ID == "" {
+	if err := httputil.DecodeJSONBody(r, &req); err != nil || req.ID == "" {
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
@@ -1355,18 +1371,18 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// [R250-SEC-1] Shape gate before id reaches scheduler/slog.
-	if !cron.IsValidID(req.ID) {
+	if !cronpkg.IsValidID(req.ID) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
 
 	if _, err := h.scheduler.ResumeJobByID(req.ID); err != nil {
 		switch {
-		case errors.Is(err, cron.ErrJobNotFound):
+		case errors.Is(err, cronpkg.ErrJobNotFound):
 			http.Error(w, "job not found", http.StatusNotFound)
-		case errors.Is(err, cron.ErrJobNotPaused):
+		case errors.Is(err, cronpkg.ErrJobNotPaused):
 			http.Error(w, "job not paused", http.StatusConflict)
-		case errors.Is(err, cron.ErrPersistFailed):
+		case errors.Is(err, cronpkg.ErrPersistFailed):
 			slog.Error("cron ResumeJobByID resume not persisted", "err", err, "id", req.ID)
 			httpErrPersistFailed(w, "resumed")
 		default:
@@ -1377,17 +1393,17 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job resumed via dashboard", "id", req.ID)
-	writeOK(w)
+	httputil.WriteOK(w)
 }
 
 // POST /api/cron/trigger — manually trigger a cron job execution (for debugging).
-func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandleTrigger(w http.ResponseWriter, r *http.Request) {
 	// [R247-SEC-2] Per-IP rate limit: each call spawns the cron job's
 	// claude CLI subprocess and may emit IM notifications; without this
 	// gate a stolen dashboard token could loop-trigger jobs to amplify
 	// CPU/IM-quota damage. Nil-guarded for hand-built test handlers.
 	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
 		return
 	}
 	if h.scheduler == nil {
@@ -1399,7 +1415,7 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		ID string `json:"id"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
-	if err := decodeJSONBody(r, &req); err != nil {
+	if err := httputil.DecodeJSONBody(r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -1412,18 +1428,18 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// [R250-SEC-1] Shape gate before id reaches scheduler/slog.
-	if !cron.IsValidID(req.ID) {
+	if !cronpkg.IsValidID(req.ID) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
 
 	if err := h.scheduler.TriggerNow(req.ID); err != nil {
 		switch {
-		case errors.Is(err, cron.ErrJobNotFound):
+		case errors.Is(err, cronpkg.ErrJobNotFound):
 			http.Error(w, "job not found", http.StatusNotFound)
-		case errors.Is(err, cron.ErrJobPaused):
+		case errors.Is(err, cronpkg.ErrJobPaused):
 			http.Error(w, "job is paused", http.StatusConflict)
-		case errors.Is(err, cron.ErrJobNoPrompt):
+		case errors.Is(err, cronpkg.ErrJobNoPrompt):
 			http.Error(w, "job has no prompt", http.StatusUnprocessableEntity)
 		default:
 			slog.Debug("cron trigger failed", "err", err)
@@ -1433,20 +1449,20 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job triggered manually", "id", req.ID)
-	writeJSON(w, map[string]string{"status": "triggered"})
+	httputil.WriteJSON(w, map[string]string{"status": "triggered"})
 }
 
 // GET /api/cron/preview?schedule=...&count=N — validate schedule and return
 // the next N run times. count defaults to 1 and is clamped to [1, 10] so the
 // UI can show a multi-run preview without giving callers an unbounded knob.
-func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 	// [R247-SEC-3] Per-IP rate limit. Although preview is read-only and
 	// cheaper than trigger, it is not a heartbeat endpoint — each call
 	// runs the cron parser plus N=1..10 next-run computations, so an
 	// unbounded loop from a stolen token still burns CPU. Share the cron
 	// write/control bucket to keep the per-IP control surface uniform.
 	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
 		return
 	}
 	schedule := r.URL.Query().Get("schedule")
@@ -1488,7 +1504,7 @@ func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 	// PreviewScheduleN / Location are nil-receiver-safe (R219-CR-6); the
 	// nil path computes in UTC for tests / dashboard bootstrap before the
 	// scheduler is wired, matching the behaviour of the deleted
-	// cron.PreviewSchedule package-level helper.
+	// cronpkg.PreviewSchedule package-level helper.
 	runs, err := h.scheduler.PreviewScheduleN(schedule, count)
 	loc := h.scheduler.Location()
 	tzName := loc.String()
@@ -1501,7 +1517,7 @@ func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 		// and internal token names that help an attacker enumerate accepted
 		// grammar. Log the detail for operators instead.
 		slog.Debug("cron preview parse failed", "err", err)
-		writeJSON(w, cronPreviewResp{Valid: false, Error: "invalid schedule expression"})
+		httputil.WriteJSON(w, cronPreviewResp{Valid: false, Error: "invalid schedule expression"})
 		return
 	}
 
@@ -1518,10 +1534,10 @@ func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.NextRuns = nextRuns
 	}
-	writeJSON(w, resp)
+	httputil.WriteJSON(w, resp)
 }
 
-// handleUpdate (PATCH /api/cron) lives in dashboard_cron_update.go — moved out
+// HandleUpdate (PATCH /api/cron) lives in dashboard_cron_update.go — moved out
 // of this file in #1281 because it was the largest function in the cron HTTP
 // surface (203 lines).
 
@@ -1547,7 +1563,48 @@ func formatTZOffset(ianaName string, offsetSeconds int) string {
 	return fmt.Sprintf("%s (UTC%+03d:%02d)", ianaName, hours, minutes)
 }
 
-// handleRunsList and handleRunDetail (plus the runIDLenLimit constant) live
+// HandleRunsList and HandleRunDetail (plus the runIDLenLimit constant) live
 // in dashboard_cron_runs.go — those are the read-only "history drawer"
 // endpoints, separate from the CRUD surface that owns this file. R20260527-
 // ARCH-14 (#1281).
+
+// HasRunsLimiter / HasListLimiter / HasWriteLimiter expose nil-state of
+// the corresponding limiter for server's boot-time invariant check.
+// Phase 1 (server-split-phase4-design.md §6.5 Plan B).
+func (h *Handlers) HasRunsLimiter() bool  { return h.runsLimiter != nil }
+func (h *Handlers) HasListLimiter() bool  { return h.listLimiter != nil }
+func (h *Handlers) HasWriteLimiter() bool { return h.writeLimiter != nil }
+
+// Deps bundles all wiring for New. Phase 1.
+type Deps struct {
+	Scheduler         *cronpkg.Scheduler
+	AllowedRoot       string
+	ClaudeDir         string
+	RunsLimiter       IPLimiter
+	ListLimiter       IPLimiter
+	TranscriptLimiter IPLimiter
+	WriteLimiter      IPLimiter
+	TranscriptSemCap  int
+	ValidateWS        func(ws, root string) (string, error)
+	ClassifyWSErr     func(err error) (int, string)
+}
+
+// New constructs a Handlers from injected deps.
+func New(d Deps) *Handlers {
+	var sem chan struct{}
+	if d.TranscriptSemCap > 0 {
+		sem = make(chan struct{}, d.TranscriptSemCap)
+	}
+	return &Handlers{
+		scheduler:         d.Scheduler,
+		allowedRoot:       d.AllowedRoot,
+		claudeDir:         d.ClaudeDir,
+		runsLimiter:       d.RunsLimiter,
+		listLimiter:       d.ListLimiter,
+		transcriptLimiter: d.TranscriptLimiter,
+		writeLimiter:      d.WriteLimiter,
+		transcriptSem:     sem,
+		validateWS:        d.ValidateWS,
+		classifyWSErr:     d.ClassifyWSErr,
+	}
+}

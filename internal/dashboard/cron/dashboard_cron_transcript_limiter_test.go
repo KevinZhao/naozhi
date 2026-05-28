@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"encoding/json"
@@ -6,9 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
-	"golang.org/x/time/rate"
 )
 
 // TestHandleRunTranscript_UsesTranscriptLimiterNotRunsLimiter pins R250-SEC-7
@@ -25,20 +23,20 @@ import (
 func TestHandleRunTranscript_UsesTranscriptLimiterNotRunsLimiter(t *testing.T) {
 	t.Parallel()
 
-	h := &CronHandlers{
+	h := &Handlers{
 		// runsLimiter: huge budget so we know any 429 below MUST come
 		// from the transcriptLimiter, not from a shared-bucket spillover.
-		runsLimiter: newIPLimiterWithProxy(rate.Every(time.Microsecond), 1000, false),
+		runsLimiter: alwaysAllowLimiter{},
 		// transcriptLimiter: burst=1 so the second call is guaranteed
 		// to 429.
-		transcriptLimiter: newIPLimiterWithProxy(rate.Every(time.Hour), 1, false),
+		transcriptLimiter: newPerIPBurstNLimiter(1),
 	}
 
 	doReq := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/r1/transcript?job_id=j1", nil)
 		req.RemoteAddr = "10.1.2.3:5555"
 		w := httptest.NewRecorder()
-		h.handleRunTranscript(w, req)
+		h.HandleRunTranscript(w, req)
 		return w
 	}
 
@@ -66,7 +64,7 @@ func TestHandleRunTranscript_UsesTranscriptLimiterNotRunsLimiter(t *testing.T) {
 }
 
 // TestHandleRunTranscript_NilTranscriptLimiterFallsBackToRunsLimiter pins
-// the nil-guard fallback: legacy hand-rolled CronHandlers fixtures
+// the nil-guard fallback: legacy hand-rolled Handlers fixtures
 // (newCronHandlersForTest paths that haven't been updated to wire a
 // transcriptLimiter) keep the previous behaviour — runsLimiter gates the
 // endpoint. Without the fallback, those fixtures would lose all rate
@@ -74,16 +72,16 @@ func TestHandleRunTranscript_UsesTranscriptLimiterNotRunsLimiter(t *testing.T) {
 func TestHandleRunTranscript_NilTranscriptLimiterFallsBackToRunsLimiter(t *testing.T) {
 	t.Parallel()
 
-	h := &CronHandlers{
+	h := &Handlers{
 		// transcriptLimiter intentionally nil — fallback path.
-		runsLimiter: newIPLimiterWithProxy(rate.Every(time.Hour), 1, false),
+		runsLimiter: newPerIPBurstNLimiter(1),
 	}
 
 	doReq := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/r1/transcript?job_id=j1", nil)
 		req.RemoteAddr = "10.1.2.3:5555"
 		w := httptest.NewRecorder()
-		h.handleRunTranscript(w, req)
+		h.HandleRunTranscript(w, req)
 		return w
 	}
 

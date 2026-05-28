@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"encoding/json"
@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cron"
+	cronpkg "github.com/naozhi/naozhi/internal/cron"
 )
 
 // TestTranscript_RejectsWorkDirWithC0 pins R242-SEC-14 (#649): when the
@@ -55,12 +55,12 @@ func TestTranscript_RejectsWorkDirWithC0(t *testing.T) {
 				t.Fatalf("mkdir workdir: %v", err)
 			}
 
-			sched := cron.NewScheduler(cron.SchedulerConfig{StorePath: storePath})
+			sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath})
 
 			// Add a clean job — its WorkDir is harmless. The injection point
 			// is the persisted run record below, which simulates an
 			// older-naozhi disk file with a tampered WorkDir.
-			job := cron.Job{
+			job := cronpkg.Job{
 				ID:       strings.Repeat("a", 16),
 				Schedule: "@every 1h",
 				Prompt:   "fixture",
@@ -82,11 +82,11 @@ func TestTranscript_RejectsWorkDirWithC0(t *testing.T) {
 				t.Fatalf("mkdir runs: %v", err)
 			}
 			now := time.Now().UTC()
-			runRec := cron.CronRun{
+			runRec := cronpkg.CronRun{
 				RunID:      runID,
 				JobID:      jobID,
-				State:      cron.RunStateSucceeded,
-				Trigger:    cron.TriggerScheduled,
+				State:      cronpkg.RunStateSucceeded,
+				Trigger:    cronpkg.TriggerScheduled,
 				StartedAt:  now.Add(-time.Minute),
 				EndedAt:    now,
 				DurationMS: 60_000,
@@ -101,7 +101,7 @@ func TestTranscript_RejectsWorkDirWithC0(t *testing.T) {
 				t.Fatalf("write run json: %v", err)
 			}
 
-			h := &CronHandlers{scheduler: sched, claudeDir: claudeDir}
+			h := &Handlers{scheduler: sched, claudeDir: claudeDir}
 			w := callTranscript(h, jobID, runID)
 
 			if w.Code != http.StatusOK {
