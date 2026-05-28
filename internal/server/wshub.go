@@ -204,8 +204,17 @@ type Hub struct {
 	// hot-reloading dashToken at runtime is not supported and would
 	// silently leave this hash stale — restart naozhi to rotate.
 	dashTokenHash [32]byte
-	cookieMAC     string // HMAC-derived cookie value (different from dashToken)
-	guard         *session.Guard
+	// cookieMAC returns the current HMAC-derived auth cookie value
+	// (different from dashToken). Stored as a getter callback rather than
+	// a cached string so RotateCookieGen invalidations propagate to the
+	// WS upgrade comparison without requiring a Hub rebuild — the HTTP
+	// path already calls auth.cookieMAC() per request, and the WS path
+	// now matches that contract. R040034-SEC-1 (#1398). When opts
+	// .CookieMACFn is unset (legacy tests that pass only opts.CookieMAC),
+	// NewHub installs a closure returning that constant so the existing
+	// test signature keeps compiling without a getter dependency.
+	cookieMAC func() string
+	guard     *session.Guard
 	// NEEDS-DESIGN R242-GO-10: 与其他 Hub 依赖一致改抽 MessageEnqueuer interface；
 	// 当前直接耦合 *dispatch.MessageQueue 具体类型。
 	queue      *dispatch.MessageQueue // per-key FIFO queue for dashboard sends
@@ -395,16 +404,28 @@ type Hub struct {
 
 // HubOptions holds configuration for a Hub.
 type HubOptions struct {
-	Router     *session.Router
-	Agents     map[string]session.AgentOpts
-	AgentCmds  map[string]string
-	DashToken  string
-	CookieMAC  string
-	Guard      *session.Guard
-	Queue      *dispatch.MessageQueue
-	Nodes      map[string]node.Conn
-	NodesMu    *sync.RWMutex
-	ProjectMgr *project.Manager
+	Router    *session.Router
+	Agents    map[string]session.AgentOpts
+	AgentCmds map[string]string
+	DashToken string
+	// CookieMAC is the static auth-cookie HMAC value used by tests that
+	// construct a Hub without wiring AuthHandlers. Production callers
+	// should set CookieMACFn instead so RotateCookieGen rotations
+	// propagate to the WS comparison. R040034-SEC-1 (#1398).
+	CookieMAC string
+	// CookieMACFn, when non-nil, is preferred over CookieMAC: NewHub
+	// stores the callback directly so each WS upgrade reads the current
+	// auth.cookieMAC() value rather than a snapshot taken at server boot.
+	// Without this, a future hot-reload that bumps cookieGenSeq would
+	// invalidate HTTP cookies but leave WS upgrades accepting the
+	// pre-rotation cookie until the process restarts. R040034-SEC-1
+	// (#1398).
+	CookieMACFn func() string
+	Guard       *session.Guard
+	Queue       *dispatch.MessageQueue
+	Nodes       map[string]node.Conn
+	NodesMu     *sync.RWMutex
+	ProjectMgr  *project.Manager
 	// Resolver, when non-nil, centralises session-key → opts derivation
 	// for sessionOptsFor / buildSessionOpts. Wired by server.Start so
 	// WS subscribe / send paths share the same planner-binding
@@ -445,6 +466,18 @@ func NewHub(opts HubOptions) *Hub {
 		parent = context.Background()
 	}
 	ctx, cancel := context.WithCancel(parent)
+	// Resolve cookieMAC into a getter closure. Prefer the live
+	// CookieMACFn callback so RotateCookieGen rotations reach
+	// wsDeriveUploadOwner without a Hub rebuild (R040034-SEC-1 / #1398).
+	// Fall back to the static CookieMAC string for tests that don't wire
+	// AuthHandlers; nil-safe-empty when neither is set so the WS upgrade
+	// path's `h.cookieMAC() != ""` guard still rejects empty-MAC compares
+	// instead of panicking on a nil callback.
+	cookieMACFn := opts.CookieMACFn
+	if cookieMACFn == nil {
+		staticMAC := opts.CookieMAC
+		cookieMACFn = func() string { return staticMAC }
+	}
 	h := &Hub{
 		clients:          make(map[*wsClient]struct{}),
 		subscriberCount:  make(map[string]int),
@@ -452,7 +485,7 @@ func NewHub(opts HubOptions) *Hub {
 		agents:           opts.Agents,
 		agentCmds:        opts.AgentCmds,
 		dashToken:        opts.DashToken,
-		cookieMAC:        opts.CookieMAC,
+		cookieMAC:        cookieMACFn,
 		guard:            opts.Guard,
 		queue:            opts.Queue,
 		nodes:            opts.Nodes,
