@@ -255,16 +255,16 @@ func handlerTypeOf(e ast.Expr) string {
 // snapshot diff will rewrite this map AND testdata/routes.golden.json
 // in lockstep.
 var serverFieldType = map[string]string{
-	"cliH":              "*CLIBackendsHandler",
+	"cliH":              "*cli.Handler",
 	"sessionH":          "*SessionHandlers",
-	"agentEventsH":      "*AgentEventsHandlers",
+	"agentEventsH":      "*agentevents.Handler",
 	"sendH":             "*SendHandler",
 	"discoveryH":        "*discovery.Handlers",
 	"projectH":          "*ProjectHandlers",
-	"transcribeH":       "*TranscribeHandler",
+	"transcribeH":       "*transcribe.Handler",
 	"cronH":             "*CronHandlers",
-	"scratchH":          "*ScratchHandler",
-	"memoryH":           "*MemoryHandler",
+	"scratchH":          "*scratch.Handler",
+	"memoryH":           "*memory.Handler",
 	"healthH":           "*HealthHandler",
 	"auth":              "*auth.Handlers",
 	"hub":               "*Hub",

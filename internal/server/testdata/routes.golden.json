@@ -17,7 +17,7 @@
   {
     "method": "GET",
     "path": "/api/cli/backends",
-    "handler_type": "*CLIBackendsHandler"
+    "handler_type": "*cli.Handler"
   },
   {
     "method": "DELETE",
@@ -112,7 +112,7 @@
   {
     "method": "GET",
     "path": "/api/memory/{slug}",
-    "handler_type": "*MemoryHandler"
+    "handler_type": "*memory.Handler"
   },
   {
     "method": "GET",
@@ -157,17 +157,17 @@
   {
     "method": "POST",
     "path": "/api/scratch/open",
-    "handler_type": "*ScratchHandler"
+    "handler_type": "*scratch.Handler"
   },
   {
     "method": "DELETE",
     "path": "/api/scratch/{id}",
-    "handler_type": "*ScratchHandler"
+    "handler_type": "*scratch.Handler"
   },
   {
     "method": "POST",
     "path": "/api/scratch/{id}/promote",
-    "handler_type": "*ScratchHandler"
+    "handler_type": "*scratch.Handler"
   },
   {
     "method": "DELETE",
@@ -182,7 +182,7 @@
   {
     "method": "GET",
     "path": "/api/sessions/agent_events",
-    "handler_type": "*AgentEventsHandlers"
+    "handler_type": "*agentevents.Handler"
   },
   {
     "method": "GET",
@@ -217,7 +217,7 @@
   {
     "method": "GET",
     "path": "/api/sessions/tool_result",
-    "handler_type": "*AgentEventsHandlers"
+    "handler_type": "*agentevents.Handler"
   },
   {
     "method": "POST",
@@ -237,7 +237,7 @@
   {
     "method": "POST",
     "path": "/api/transcribe",
-    "handler_type": "*TranscribeHandler"
+    "handler_type": "*transcribe.Handler"
   },
   {
     "method": "GET",

@@ -17,6 +17,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/agentevents"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cron"
@@ -29,7 +34,7 @@ import (
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
-	"github.com/naozhi/naozhi/internal/transcribe"
+	transcribepkg "github.com/naozhi/naozhi/internal/transcribe"
 )
 
 const (
@@ -59,7 +64,7 @@ const (
 //
 // R250-ARCH-11 (#1174): scope clarification — the annotation tracks
 // access to *this struct field*, not usage of the field's underlying
-// type. So `agentEventsH *AgentEventsHandlers` lists only `server.go,
+// type. So `agentEventsH *agentevents.Handler` lists only `server.go,
 // dashboard.go` (the two files that read/write `s.agentEventsH`), even
 // though `dashboard_agent_events.go` defines methods on
 // `*AgentEventsHandlers`. Method definitions on the underlying type
@@ -91,17 +96,17 @@ type Server struct {
 	// ── Phase 5: → routes.go local variables ───────────
 	auth         *auth.Handlers        // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
 	cronH        *CronHandlers        // 读写: server.go, dashboard.go
-	transcribeH  *TranscribeHandler   // 读写: dashboard.go (ctor only in server.go)
+	transcribeH  *transcribe.Handler   // 读写: dashboard.go (ctor only in server.go)
 	nodeAccess   *nodeAccessor        // 读写: server.go, dashboard.go
 	discoveryH   *discovery.Handlers  // 读写: server.go, dashboard.go (Phase 3b 搬到 internal/dashboard/discovery)
 	projectH     *ProjectHandlers     // 读写: server.go, dashboard.go
 	sessionH     *SessionHandlers     // 读写: server.go, dashboard.go
 	healthH      *HealthHandler       // 读写: server.go (ctor only)
 	sendH        *SendHandler         // 读写: dashboard.go (ctor only in server.go)
-	cliH         *CLIBackendsHandler  // 读写: server.go, dashboard.go
-	scratchH     *ScratchHandler      // 读写: dashboard.go (ctor only in server.go)
-	memoryH      *MemoryHandler       // 读写: dashboard.go (ctor only in server.go)
-	agentEventsH *AgentEventsHandlers // 读写: server.go, dashboard.go
+	cliH         *cli.Handler  // 读写: server.go, dashboard.go
+	scratchH     *scratch.Handler      // 读写: dashboard.go (ctor only in server.go)
+	memoryH      *memory.Handler       // 读写: dashboard.go (ctor only in server.go)
+	agentEventsH *agentevents.Handler // 读写: server.go, dashboard.go
 
 	// ── Phase 5: → NewHub Options ──────────────────────
 	dedup           *platform.Dedup              // 读写: server.go (ctor only)
@@ -472,7 +477,7 @@ type ServerOptions struct {
 	ProjectManager    *project.Manager
 	Nodes             map[string]node.Conn
 	ReverseNodeServer *node.ReverseServer
-	Transcriber       transcribe.Service
+	Transcriber       transcribepkg.Service
 	OnReady           func() // called after the listener is bound and serving
 	// StartupCtx, when set, is threaded into blocking init probes (e.g.
 	// cli.DetectBackendsCtx's --version subprocess) so SIGTERM during naozhi
@@ -796,10 +801,10 @@ func buildServer(opts ServerOptions) *Server {
 	router.SetOnSessionRetired(func(_ string, sessionID string) {
 		s.sessionH.RecordRetired(sessionID)
 	})
-	s.agentEventsH = &AgentEventsHandlers{
-		router:     router,
-		nodeAccess: s.nodeAccess,
-	}
+	s.agentEventsH = agentevents.New(agentevents.Deps{
+		Router:     router,
+		NodeAccess: s.nodeAccess,
+	})
 
 	// Scratch pool (ephemeral aside sessions). Bound to the same router so
 	// scratches flow through the standard spawn/send/event path as managed
@@ -810,12 +815,12 @@ func buildServer(opts ServerOptions) *Server {
 	s.scratchPool = session.NewScratchPool(router, session.DefaultScratchMax, session.DefaultScratchTTL)
 	// Thread StartupCtx into the --version probe so SIGTERM during
 	// startup aborts promptly (R55-QUAL-004). Nil ctx falls back to
-	// NewCLIBackendsHandler's Background-derived path via the delegating
+	// cli.NewCLIBackendsHandler's Background-derived path via the delegating
 	// public ctor (keeps test/headless callers working).
 	if opts.StartupCtx != nil {
-		s.cliH = NewCLIBackendsHandlerCtx(opts.StartupCtx, router)
+		s.cliH = cli.NewCLIBackendsHandlerCtx(opts.StartupCtx, router)
 	} else {
-		s.cliH = NewCLIBackendsHandler(router)
+		s.cliH = cli.NewCLIBackendsHandler(router)
 	}
 	platNames := platformNameSet(platforms)
 	s.healthH = &HealthHandler{

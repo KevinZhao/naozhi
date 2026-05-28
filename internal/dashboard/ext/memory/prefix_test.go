@@ -1,4 +1,4 @@
-package server
+package memory
 
 import (
 	"path/filepath"
@@ -20,7 +20,7 @@ func TestMemoryHandler_ResolvedPrefixCachedAtConstruction(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 
-	// memoryTestHandler mirrors NewMemoryHandler's prefix derivation so the
+	// memoryTestHandler mirrors New's prefix derivation so the
 	// fields populate the same way production code would.
 	h := memoryTestHandler(t, dir, "")
 

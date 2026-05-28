@@ -26,7 +26,7 @@ func newScratchTestServer(t *testing.T) *Server {
 	if srv.scratchH == nil {
 		t.Fatal("expected scratch handler to be wired by registerDashboard")
 	}
-	srv.scratchH.openLimit = nil
+	srv.scratchH.SetOpenLimitForTest(nil)
 	return srv
 }
 
@@ -38,7 +38,7 @@ func TestScratchOpen_Happy(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.handleOpen(w, req)
+	srv.scratchH.HandleOpen(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
@@ -70,7 +70,7 @@ func TestScratchOpen_MissingQuote(t *testing.T) {
 		strings.NewReader(`{"source_key":"feishu:direct:alice:general"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.handleOpen(w, req)
+	srv.scratchH.HandleOpen(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
@@ -82,7 +82,7 @@ func TestScratchOpen_UnknownSource(t *testing.T) {
 		strings.NewReader(`{"source_key":"no:such:chat:general","quote":"hi"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.handleOpen(w, req)
+	srv.scratchH.HandleOpen(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
@@ -98,7 +98,7 @@ func TestScratchOpen_SourceIsScratchRefused(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.handleOpen(w, req)
+	srv.scratchH.HandleOpen(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
@@ -111,7 +111,7 @@ func TestScratchOpen_InvalidSourceKey(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.handleOpen(w, req)
+	srv.scratchH.HandleOpen(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
@@ -122,7 +122,7 @@ func TestScratchDelete_InvalidID(t *testing.T) {
 	req := httptest.NewRequest(http.MethodDelete, "/api/scratch/short", nil)
 	req.SetPathValue("id", "short")
 	w := httptest.NewRecorder()
-	srv.scratchH.handleDelete(w, req)
+	srv.scratchH.HandleDelete(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
@@ -136,7 +136,7 @@ func TestScratchDelete_UnknownReturns204(t *testing.T) {
 		"/api/scratch/00000000000000000000000000000000", nil)
 	req.SetPathValue("id", "00000000000000000000000000000000")
 	w := httptest.NewRecorder()
-	srv.scratchH.handleDelete(w, req)
+	srv.scratchH.HandleDelete(w, req)
 	if w.Code != http.StatusNoContent {
 		t.Errorf("status = %d, want 204", w.Code)
 	}
@@ -156,7 +156,7 @@ func TestScratchDelete_Known(t *testing.T) {
 	req := httptest.NewRequest(http.MethodDelete, "/api/scratch/"+sc.ID, nil)
 	req.SetPathValue("id", sc.ID)
 	w := httptest.NewRecorder()
-	srv.scratchH.handleDelete(w, req)
+	srv.scratchH.HandleDelete(w, req)
 	if w.Code != http.StatusNoContent {
 		t.Errorf("status = %d, want 204", w.Code)
 	}
@@ -184,7 +184,7 @@ func TestScratchPromote_RenamesSession(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/"+sc.ID+"/promote", nil)
 	req.SetPathValue("id", sc.ID)
 	w := httptest.NewRecorder()
-	srv.scratchH.handlePromote(w, req)
+	srv.scratchH.HandlePromote(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
@@ -215,7 +215,7 @@ func TestScratchPromote_UnknownID(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/"+id+"/promote", nil)
 	req.SetPathValue("id", id)
 	w := httptest.NewRecorder()
-	srv.scratchH.handlePromote(w, req)
+	srv.scratchH.HandlePromote(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
@@ -242,7 +242,7 @@ func TestScratchListFilteredFromSessions(t *testing.T) {
 
 // TestScratchOpen_InjectsSurroundingContext seeds the source session's
 // event log with a handful of turns surrounding a quoted user message and
-// verifies handleOpen pulls neighbours into the scratch via the new
+// verifies HandleOpen pulls neighbours into the scratch via the new
 // context fields. Drives the end-to-end path rather than unit testing
 // the renderer in isolation.
 func TestScratchOpen_InjectsSurroundingContext(t *testing.T) {
@@ -261,7 +261,7 @@ func TestScratchOpen_InjectsSurroundingContext(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.handleOpen(w, req)
+	srv.scratchH.HandleOpen(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
@@ -323,7 +323,7 @@ func TestScratchOpen_TurnCountClamped(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.handleOpen(w, req)
+	srv.scratchH.HandleOpen(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}
@@ -362,7 +362,7 @@ func TestScratchOpen_NoTimestampFallback(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/scratch/open", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.scratchH.handleOpen(w, req)
+	srv.scratchH.HandleOpen(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())

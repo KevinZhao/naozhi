@@ -1,4 +1,4 @@
-package server
+package scratch
 
 import (
 	"context"
@@ -11,12 +11,13 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
-// ScratchHandler serves the /api/scratch/* endpoints used by the dashboard
+// Handler serves the /api/scratch/* endpoints used by the dashboard
 // "aside" drawer: a preview-pane chat seeded with quoted context from the
 // main transcript, kept out of the sidebar, and torn down on close or TTL.
 //
@@ -25,11 +26,11 @@ import (
 // transits — R215-ARCH-P1-4 / #566 closes that Phase-2.5 cleanup item by
 // declaring the dependency on this struct directly. Wiring (dashboard.go)
 // passes hub.router; tests can inject a stub satisfying ScratchRouter.
-type ScratchHandler struct {
-	hub       *Hub
+type Handler struct {
+	broadcaster Broadcaster
 	router    ScratchRouter
 	pool      *session.ScratchPool
-	openLimit *ipLimiter
+	openLimit IPLimiter
 	agents    map[string]session.AgentOpts
 }
 
@@ -54,26 +55,26 @@ type openResponse struct {
 	SourceMessageID  string `json:"source_message_id,omitempty"`
 }
 
-// handleOpen creates a scratch session seeded with the quote.
+// HandleOpen creates a scratch session seeded with the quote.
 //
 // Auth is inherited from the router mux (all /api/scratch/* live behind
 // requireAuth). A per-IP limiter throttles creation so a script on an
 // authenticated session cannot exhaust the scratch pool or the CLI process
 // budget via a tight loop.
-func (h *ScratchHandler) handleOpen(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 	if h.openLimit != nil && !h.openLimit.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "open rate limit exceeded"})
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "open rate limit exceeded"})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
 	var req openRequest
-	if err := decodeJSONBody(r, &req); err != nil {
+	if err := httputil.DecodeJSONBody(r, &req); err != nil {
 		slog.Debug("scratch open: invalid JSON", "err", err)
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
 	if req.Quote == "" {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "quote is required"})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "quote is required"})
 		return
 	}
 	// R177-SEC-11: the pool sanitizer collapses empty quotes but doesn't
@@ -82,7 +83,7 @@ func (h *ScratchHandler) handleOpen(w http.ResponseWriter, r *http.Request) {
 	// that echoes it; scrub at the trust boundary to match the last_prompt
 	// / cron_prompt policy.
 	if !utf8.ValidString(req.Quote) {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "quote contains invalid characters"})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "quote contains invalid characters"})
 		return
 	}
 	// R181-GO-P2-3: rune name `ch` instead of `r` to avoid shadowing
@@ -90,14 +91,14 @@ func (h *ScratchHandler) handleOpen(w http.ResponseWriter, r *http.Request) {
 	// this loop would silently typecheck against the rune.
 	for _, ch := range req.Quote {
 		if osutil.IsLogInjectionRune(ch) {
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "quote contains invalid characters"})
+			httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "quote contains invalid characters"})
 			return
 		}
 	}
 	// Validate the source key at the trust boundary before it is indexed into
 	// logs or fed to GetSession — mirrors the IM ValidateSessionKey gate.
 	if err := session.ValidateSessionKey(req.SourceKey); err != nil {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid source_key"})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid source_key"})
 		return
 	}
 	// Source session must exist. Without this the pool happily spawns a
@@ -105,14 +106,14 @@ func (h *ScratchHandler) handleOpen(w http.ResponseWriter, r *http.Request) {
 	// silently miss; the user sees a confused "what was I quoting?" aside.
 	src := h.router.GetSession(req.SourceKey)
 	if src == nil {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "source session not found"})
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "source session not found"})
 		return
 	}
 
 	// Scratches must not be opened against another scratch (stacking asides
 	// would quickly saturate the pool and serves no product need).
 	if sessionkey.IsScratchKey(req.SourceKey) {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "cannot open scratch from another scratch"})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "cannot open scratch from another scratch"})
 		return
 	}
 
@@ -161,12 +162,12 @@ func (h *ScratchHandler) handleOpen(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, session.ErrQuoteEmpty):
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "quote is empty after sanitization"})
+			httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "quote is empty after sanitization"})
 		case errors.Is(err, session.ErrScratchPoolFull):
-			writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "scratch pool full"})
+			httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "scratch pool full"})
 		default:
 			slog.Warn("scratch open failed", "err", err, "source_key", session.SanitizeLogAttr(req.SourceKey))
-			writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "failed to open scratch"})
+			httputil.WriteJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "failed to open scratch"})
 		}
 		return
 	}
@@ -180,7 +181,7 @@ func (h *ScratchHandler) handleOpen(w http.ResponseWriter, r *http.Request) {
 		"context_turns", sc.ContextTurns, // post-filter + budget, actually rendered
 		"context_truncated", sc.ContextTrunc,
 	)
-	writeJSON(w, openResponse{
+	httputil.WriteJSON(w, openResponse{
 		ScratchID:        sc.ID,
 		Key:              sc.Key,
 		AgentID:          agentID,
@@ -249,13 +250,13 @@ func collectScratchContext(ctx context.Context, sess *session.ManagedSession, so
 	return before, after
 }
 
-// handleDelete tears down a scratch by ID. Idempotent — unknown IDs return
+// HandleDelete tears down a scratch by ID. Idempotent — unknown IDs return
 // 204 so a client retry after the TTL sweeper already killed the scratch
 // does not surface as an error in the UI.
-func (h *ScratchHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !isValidScratchID(id) {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid scratch id"})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid scratch id"})
 		return
 	}
 	if err := h.pool.Close(id); err != nil && !errors.Is(err, session.ErrScratchNotFound) {
@@ -269,7 +270,7 @@ type promoteResponse struct {
 	Key string `json:"key"`
 }
 
-// handlePromote converts a live scratch into a regular session: the running
+// HandlePromote converts a live scratch into a regular session: the running
 // CLI process gets adopted under a new session key (4-segment, visible in
 // the sidebar) and the scratch metadata is detached from the pool without
 // killing the process. The UI replaces the drawer with the new session.
@@ -281,10 +282,10 @@ type promoteResponse struct {
 // first removes the scratch from the sweep set atomically. If the rename
 // then fails (collision, validation) we still own the process on sc.Key
 // and must clean it up manually via router.Remove to avoid an orphan.
-func (h *ScratchHandler) handlePromote(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandlePromote(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !isValidScratchID(id) {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid scratch id"})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid scratch id"})
 		return
 	}
 	// Detach first so the sweeper's (pool mu → router mu) path cannot race
@@ -292,7 +293,7 @@ func (h *ScratchHandler) handlePromote(w http.ResponseWriter, r *http.Request) {
 	// entirely our responsibility until RenameSession or Remove lands.
 	sc, err := h.pool.Detach(id)
 	if err != nil {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "scratch not found"})
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "scratch not found"})
 		return
 	}
 	// Build the promoted key from the source session key so the UX ties back
@@ -303,17 +304,17 @@ func (h *ScratchHandler) handlePromote(w http.ResponseWriter, r *http.Request) {
 	srcParts := strings.SplitN(sc.SourceKey, ":", 4)
 	if len(srcParts) != 4 {
 		// Shouldn't happen: open-time ValidateSessionKey + the 4-split guard
-		// in handleOpen already reject malformed sources. Treat as a
+		// in HandleOpen already reject malformed sources. Treat as a
 		// defensive programming error, kill the orphan, and report.
 		h.router.Remove(sc.Key)
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "source key malformed"})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "source key malformed"})
 		return
 	}
 	short, err := shortPromoteSuffix()
 	if err != nil {
 		slog.Warn("promote suffix generation failed", "err", err)
 		h.router.Remove(sc.Key)
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "failed to promote"})
+		httputil.WriteJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "failed to promote"})
 		return
 	}
 	newAgent := "aside-" + short
@@ -328,12 +329,12 @@ func (h *ScratchHandler) handlePromote(w http.ResponseWriter, r *http.Request) {
 		// case shouldn't happen post-Detach but handling it keeps us
 		// orphan-free under any future refactor that changes visibility).
 		h.router.Remove(sc.Key)
-		writeJSONStatus(w, http.StatusConflict, map[string]string{"error": "scratch unavailable"})
+		httputil.WriteJSONStatus(w, http.StatusConflict, map[string]string{"error": "scratch unavailable"})
 		return
 	}
-	h.hub.BroadcastSessionsUpdate()
+	h.broadcaster.BroadcastSessionsUpdate()
 	slog.Info("scratch promoted", "id", id, "new_key", newKey)
-	writeJSON(w, promoteResponse{Key: newKey})
+	httputil.WriteJSON(w, promoteResponse{Key: newKey})
 }
 
 // isValidScratchID checks that id is a 32-char lowercase hex string —
@@ -372,3 +373,35 @@ func shortPromoteSuffix() (string, error) {
 	}
 	return hex.EncodeToString(buf[:]), nil
 }
+
+// Deps bundles all wiring for New. Phase 3c (server-split-phase4-design.md
+// §6.5 Plan B): exported ctor so internal/server can construct without
+// needing access to unexported fields.
+type Deps struct {
+	Broadcaster Broadcaster
+	Router      ScratchRouter
+	Pool        *session.ScratchPool
+	OpenLimit   IPLimiter
+	Agents      map[string]session.AgentOpts
+}
+
+// New constructs a Handler from injected deps.
+func New(d Deps) *Handler {
+	return &Handler{
+		broadcaster: d.Broadcaster,
+		router:      d.Router,
+		pool:        d.Pool,
+		openLimit:   d.OpenLimit,
+		agents:      d.Agents,
+	}
+}
+
+// SetOpenLimitForTest is a test-only setter that lets server-package
+// integration tests bypass the open-rate gate. NOT for production use —
+// the field is otherwise immutable after New().
+func (h *Handler) SetOpenLimitForTest(l IPLimiter) { h.openLimit = l }
+
+// RouterIsWired reports whether the scratch handler's router field has
+// been wired. Phase 3c — exposed for the server-package wiring-regression
+// test that pins registerDashboard to install a non-nil ScratchRouter.
+func (h *Handler) RouterIsWired() bool { return h.router != nil }

@@ -11,6 +11,8 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
@@ -210,17 +212,13 @@ func (s *Server) registerDashboard() {
 	if s.scratchPool != nil {
 		s.hub.SetScratchPool(s.scratchPool)
 		s.scratchPool.StartSweeper()
-		s.scratchH = &ScratchHandler{
-			hub: s.hub,
-			// router: ScratchRouter consumer-interface view of
-			// *session.Router. Closes the R215-ARCH-P1-4 (#566) Phase-2.5
-			// cleanup so the handler no longer reaches its router via
-			// h.hub.router.* transits.
-			router:    s.hub.router,
-			pool:      s.scratchPool,
-			openLimit: newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.TrustedProxy), // 5 opens/min per IP
-			agents:    s.agents,
-		}
+		s.scratchH = scratch.New(scratch.Deps{
+			Broadcaster: s.hub,
+			Router:      s.hub.router,
+			Pool:        s.scratchPool,
+			OpenLimit:   newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.TrustedProxy),
+			Agents:      s.agents,
+		})
 	}
 
 	// Push session list changes to WS clients
@@ -271,11 +269,11 @@ func (s *Server) registerDashboard() {
 
 	// Authenticated API routes
 	auth := s.auth.RequireAuth
-	s.mux.HandleFunc("GET /api/cli/backends", auth(s.cliH.handle))
+	s.mux.HandleFunc("GET /api/cli/backends", auth(s.cliH.Handle))
 	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.handleList))
 	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.handleEvents))
-	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.handleAgentEvents))
-	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.handleToolResult))
+	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.HandleAgentEvents))
+	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.HandleToolResult))
 	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
 	s.mux.HandleFunc("POST /api/sessions/upload", auth(s.sendH.handleUpload))
 	s.mux.HandleFunc("GET /api/sessions/attachment", auth(s.sendH.handleAttachment))
@@ -299,7 +297,7 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("POST /api/projects/favorite", auth(s.projectH.handleFavoriteToggle))
 	s.mux.HandleFunc("POST /api/projects/files/exists", auth(s.projectH.handleFilesExists))
 	s.mux.HandleFunc("GET /api/projects/file", auth(s.projectH.handleFileGet))
-	s.mux.HandleFunc("POST /api/transcribe", auth(s.transcribeH.handleTranscribe))
+	s.mux.HandleFunc("POST /api/transcribe", auth(s.transcribeH.HandleTranscribe))
 	s.mux.HandleFunc("GET /api/cron", auth(s.cronH.handleList))
 	s.mux.HandleFunc("POST /api/cron", auth(s.cronH.handleCreate))
 	s.mux.HandleFunc("PATCH /api/cron", auth(s.cronH.handleUpdate))
@@ -331,17 +329,17 @@ func (s *Server) registerDashboard() {
 		s.registerExpvar()
 	}
 	if s.scratchH != nil {
-		s.mux.HandleFunc("POST /api/scratch/open", auth(s.scratchH.handleOpen))
-		s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(s.scratchH.handlePromote))
-		s.mux.HandleFunc("DELETE /api/scratch/{id}", auth(s.scratchH.handleDelete))
+		s.mux.HandleFunc("POST /api/scratch/open", auth(s.scratchH.HandleOpen))
+		s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(s.scratchH.HandlePromote))
+		s.mux.HandleFunc("DELETE /api/scratch/{id}", auth(s.scratchH.HandleDelete))
 	}
 	// memory link preview (docs/rfc/memory-link-rendering.md): exposes
 	// ~/.claude/projects/<scope>/memory/<slug>.md to the dashboard inlineMd
 	// renderer so [[slug]] tokens become hover-previewable cards.
 	if s.memoryH == nil {
-		s.memoryH = NewMemoryHandler(s.auth.TrustedProxy)
+		s.memoryH = memory.New(resolveClaudeProjectsDir(), newIPLimiterWithProxy(memory.MemoryLimiterRate, memory.MemoryLimiterBurst, s.auth.TrustedProxy))
 	}
-	s.mux.HandleFunc("GET /api/memory/{slug}", auth(s.memoryH.handleGet))
+	s.mux.HandleFunc("GET /api/memory/{slug}", auth(s.memoryH.HandleGet))
 
 	// Unauthenticated routes (login, static assets, WebSocket with own auth)
 	s.mux.HandleFunc("POST /api/auth/login", s.auth.HandleLogin)

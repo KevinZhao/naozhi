@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	dashdiscovery "github.com/naozhi/naozhi/internal/dashboard/discovery"
 	"github.com/naozhi/naozhi/internal/discovery"
@@ -134,12 +135,12 @@ const (
 // Both backstops are defence-in-depth: a stolen token plus a large audio
 // payload would otherwise drive unbounded CPU + outbound API spend on
 // whichever transcribe service is wired.
-func buildTranscribeHandler(opts ServerOptions) *TranscribeHandler {
-	return &TranscribeHandler{
-		transcriber:       opts.Transcriber,
-		transcribeLimiter: newIPLimiterWithProxy(rate.Every(12*time.Second), 5, opts.TrustedProxy),
-		sem:               make(chan struct{}, transcribeSemCap),
-	}
+func buildTranscribeHandler(opts ServerOptions) *transcribe.Handler {
+	return transcribe.New(transcribe.Deps{
+		Transcriber: opts.Transcriber,
+		Limiter:     newIPLimiterWithProxy(rate.Every(12*time.Second), 5, opts.TrustedProxy),
+		SemCap:      transcribe.TranscribeSemCap,
+	})
 }
 
 // buildRetiredStoreWithErr constructs the discovery.RetiredStore eagerly so
