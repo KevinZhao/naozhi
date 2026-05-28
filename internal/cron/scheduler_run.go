@@ -179,7 +179,8 @@ func (s *Scheduler) cleanupRunningJobIfIdle(jobID string) bool {
 	inf, ok := v.(*runInflight)
 	if !ok || inf == nil {
 		// Defensive: an unexpected map value type implies the package
-		// invariant was violated upstream. LoadAndDelete still cleans it.
+		// invariant was violated upstream.
+		//
 		// R040034-GO-7 (#1392): bump severity to slog.Error so the
 		// invariant violation surfaces in journalctl. The previous
 		// silent sweep meant a future regression that stored the wrong
@@ -187,9 +188,16 @@ func (s *Scheduler) cleanupRunningJobIfIdle(jobID string) bool {
 		// snapshot, a stale closure, etc.) would be cleaned up without
 		// any operator-visible signal until downstream code paths
 		// observed the missing in-flight metadata.
+		//
+		// R260528-BUG-11: use CompareAndDelete on the observed v (not
+		// LoadAndDelete on the jobID) so a concurrent jobInflight that
+		// already replaced this stale entry with a fresh *runInflight
+		// is not collateral damage. Mirrors the normal-path
+		// CompareAndDelete below to keep both branches TOCTOU-safe
+		// under the same single-flight contract.
 		slog.Error("cron: runningJobs holds unexpected value type; sweeping",
 			"job_id", jobID, "type", fmt.Sprintf("%T", v))
-		s.runningJobs.LoadAndDelete(jobID)
+		s.runningJobs.CompareAndDelete(jobID, v)
 		return true
 	}
 	if inf.running.Load() {
