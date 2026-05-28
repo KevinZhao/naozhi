@@ -1,4 +1,4 @@
-package server
+package httputil
 
 import (
 	"net/http/httptest"
@@ -13,7 +13,7 @@ import (
 // R64-PERF-M4 regression.
 func TestWriteOK(t *testing.T) {
 	w := httptest.NewRecorder()
-	writeOK(w)
+	WriteOK(w)
 
 	if got, want := w.Code, 200; got != want {
 		t.Errorf("status = %d, want %d", got, want)
@@ -36,14 +36,13 @@ func TestWriteOK(t *testing.T) {
 	}
 }
 
-// TestWriteJSON_SetsNoStoreCache locks the R58-PERF-001 contract that
+// TestWriteJSONSetsNoStoreCache locks the R58-PERF-001 contract that
 // authenticated dashboard JSON responses carry Cache-Control: no-store, so no
 // intermediate proxy or browser bfcache retains last_prompt / PID / cost state
-// that would leak to the next user on the same cache. Exercised via writeJSON
-// (a small opaque payload is enough — we only care about headers).
-func TestWriteJSON_SetsNoStoreCache(t *testing.T) {
+// that would leak to the next user on the same cache.
+func TestWriteJSONSetsNoStoreCache(t *testing.T) {
 	w := httptest.NewRecorder()
-	writeJSON(w, map[string]string{"hello": "world"})
+	WriteJSON(w, map[string]string{"hello": "world"})
 
 	if got, want := w.Header().Get("Cache-Control"), "no-store"; got != want {
 		t.Errorf("Cache-Control = %q, want %q", got, want)
@@ -56,12 +55,12 @@ func TestWriteJSON_SetsNoStoreCache(t *testing.T) {
 	}
 }
 
-// TestWriteJSONStatus_SetsNoStoreCache mirrors TestWriteJSON_SetsNoStoreCache
+// TestWriteJSONStatusSetsNoStoreCache mirrors TestWriteJSONSetsNoStoreCache
 // for the non-200 path; error responses can still contain auth-sensitive
 // context (e.g. session keys in validation failures) and must not be cached.
-func TestWriteJSONStatus_SetsNoStoreCache(t *testing.T) {
+func TestWriteJSONStatusSetsNoStoreCache(t *testing.T) {
 	w := httptest.NewRecorder()
-	writeJSONStatus(w, 400, map[string]string{"error": "bad request"})
+	WriteJSONStatus(w, 400, map[string]string{"error": "bad request"})
 
 	if got, want := w.Code, 400; got != want {
 		t.Errorf("status = %d, want %d", got, want)
@@ -71,11 +70,11 @@ func TestWriteJSONStatus_SetsNoStoreCache(t *testing.T) {
 	}
 }
 
-// TestJSONEncPool_HTMLEscapingDisabled pins the SetEscapeHTML(false) contract
-// on every encoder drawn from jsonEncPool — both writeJSON's HTTP path and
-// marshalPooled's WS fanout path — so a future caller that flips the pool
+// TestJSONEncPoolHTMLEscapingDisabled pins the SetEscapeHTML(false) contract
+// on every encoder drawn from jsonEncPool — both WriteJSON's HTTP path and
+// MarshalPooled's WS fanout path — so a future caller that flips the pool
 // factory or mutates a borrowed encoder fails CI rather than silently
-// breaking the curl-friendliness contract documented above writeJSON and the
+// breaking the curl-friendliness contract documented above WriteJSON and the
 // dashboard-renderer expectation that `<` / `>` / `&` arrive literally so
 // textContent / DOMPurify can guard them at render time.
 //
@@ -89,16 +88,11 @@ func TestWriteJSONStatus_SetsNoStoreCache(t *testing.T) {
 // R243-SEC-10: jsonEncPool is configured at sync.Pool init and there is no
 // compile-time guard against a future change relaxing the bit; this test is
 // the contract pin.
-func TestJSONEncPool_HTMLEscapingDisabled(t *testing.T) {
+func TestJSONEncPoolHTMLEscapingDisabled(t *testing.T) {
 	probe := map[string]string{
 		"v": "<a href=\"x\">&</a>",
 	}
 	literals := []string{"<", ">", "&"}
-	// JSON `\uXXXX` escape forms — built via byte literals so the asserted
-	// strings are guaranteed to be 6-byte ASCII sequences (backslash, 'u',
-	// 4 hex digits) rather than their rendered runes. If we wrote the
-	// literal in source, a tool that decodes Go escapes would turn it back
-	// into the rune and the assertion would silently invert.
 	escLT := string([]byte{'\\', 'u', '0', '0', '3', 'c'})
 	escGT := string([]byte{'\\', 'u', '0', '0', '3', 'e'})
 	escAmp := string([]byte{'\\', 'u', '0', '0', '2', '6'})
@@ -117,76 +111,61 @@ func TestJSONEncPool_HTMLEscapingDisabled(t *testing.T) {
 		}
 	}
 
-	// writeJSON path.
 	w := httptest.NewRecorder()
-	writeJSON(w, probe)
-	check("writeJSON body", w.Body.String())
+	WriteJSON(w, probe)
+	check("WriteJSON body", w.Body.String())
 
-	// marshalPooled path (drains the same pool; used by WS fanout).
-	raw, err := marshalPooled(probe)
+	raw, err := MarshalPooled(probe)
 	if err != nil {
-		t.Fatalf("marshalPooled: %v", err)
+		t.Fatalf("MarshalPooled: %v", err)
 	}
-	check("marshalPooled body", string(raw))
+	check("MarshalPooled body", string(raw))
 }
 
-// TestMarshalEscaped_HTMLEscapingEnabled pins R238-SEC-5 (#821): marshalEscaped
-// is the HTML-safe counterpart to marshalPooled. Future call sites that splice
+// TestMarshalEscapedHTMLEscapingEnabled pins R238-SEC-5 (#821): MarshalEscaped
+// is the HTML-safe counterpart to MarshalPooled. Future call sites that splice
 // JSON into HTML templates / innerHTML-without-DOMPurify paths MUST use this
 // helper, and a regression that flipped its escape bit would silently re-open
-// the XSS escalation that motivated providing the helper. We assert the
-// JSON-`\uXXXX` form for `<`/`>`/`&` is in the wire and the literal bytes are
-// absent — the inverse of TestJSONEncPool_HTMLEscapingDisabled.
-func TestMarshalEscaped_HTMLEscapingEnabled(t *testing.T) {
+// the XSS escalation that motivated providing the helper.
+func TestMarshalEscapedHTMLEscapingEnabled(t *testing.T) {
 	probe := map[string]string{
 		"v": "<a href=\"x\">&</a>",
 	}
-	raw, err := marshalEscaped(probe)
+	raw, err := MarshalEscaped(probe)
 	if err != nil {
-		t.Fatalf("marshalEscaped: %v", err)
+		t.Fatalf("MarshalEscaped: %v", err)
 	}
 	body := string(raw)
 
-	// Escaped forms must appear.
 	escLT := string([]byte{'\\', 'u', '0', '0', '3', 'c'})
 	escGT := string([]byte{'\\', 'u', '0', '0', '3', 'e'})
 	escAmp := string([]byte{'\\', 'u', '0', '0', '2', '6'})
 	for _, esc := range []string{escLT, escGT, escAmp} {
 		if !strings.Contains(body, esc) {
-			t.Errorf("marshalEscaped body missing escape %q (HTML escaping unexpectedly disabled?): %q", esc, body)
+			t.Errorf("MarshalEscaped body missing escape %q (HTML escaping unexpectedly disabled?): %q", esc, body)
 		}
 	}
-	// Raw `<` / `>` chars must NOT appear (the `&` literal can leak via
-	// the JSON quoting of the surrounding `"` so we only check `<` / `>`
-	// for unescaped presence — the escape forms above are the load-bearing
-	// assertion). Asserting `<`/`>` literals are absent is the inverse of
-	// TestJSONEncPool_HTMLEscapingDisabled and pins the bit.
 	for _, lit := range []string{"<", ">"} {
 		if strings.Contains(body, lit) {
-			t.Errorf("marshalEscaped body contains raw %q — SetEscapeHTML(true) regressed: %q", lit, body)
+			t.Errorf("MarshalEscaped body contains raw %q — SetEscapeHTML(true) regressed: %q", lit, body)
 		}
 	}
 }
 
-// TestSetEscapeHTMLFalse_ScopedToWriteJSONHelper pins R245-SEC-13 (#842).
-//
-// After Phase 3-prep (server-split-phase4-design.md §6.5 Plan B) the
-// SetEscapeHTML(false) call site moved to internal/dashboard/httputil. Inside
-// internal/server the literal must now be ABSENT entirely — every JSON
-// helper here forwards through httputil. A future endpoint that hand-rolls
-// its own pooled encoder and flips the bit on an HTML-template render path
-// would re-open the REPEAT-2 escalation chain (raw `<` / `>` / `&` flowing
-// into innerHTML without DOMPurify); fail the build instead.
-//
-// The httputil package carries its own scoped scan
-// (TestSetEscapeHTMLFalseScopedToPackage) pinning the call to httputil.go.
+// TestSetEscapeHTMLFalseScopedToPackage pins R245-SEC-13 (#842): inside this
+// package, SetEscapeHTML(false) must live exclusively in httputil.go. A
+// future helper that hand-rolls its own pooled encoder and flips the bit on
+// an HTML-template render path would re-open the REPEAT-2 escalation chain
+// (raw `<` / `>` / `&` flowing into innerHTML without DOMPurify); fail the
+// build instead.
 //
 // The check scans non-test .go files in the package directory directly,
-// stripping line and block comments before substring-matching so godoc
-// references to the contract (project_files.go, wshub_*, dashboard_send.go)
-// don't trip the lint. Tests are excluded so the probe in
-// TestJSONEncPool_HTMLEscapingDisabled can mention the symbol freely.
-func TestSetEscapeHTMLFalse_ScopedToWriteJSONHelper(t *testing.T) {
+// stripping line and block comments before substring-matching so existing
+// godoc references to the contract don't trip the lint. Tests are excluded
+// so the probe in TestJSONEncPoolHTMLEscapingDisabled can mention the symbol
+// freely.
+func TestSetEscapeHTMLFalseScopedToPackage(t *testing.T) {
+	const allowedFile = "httputil.go"
 	const needle = "SetEscapeHTML(false)"
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -200,26 +179,26 @@ func TestSetEscapeHTMLFalse_ScopedToWriteJSONHelper(t *testing.T) {
 		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
+		if name == allowedFile {
+			continue
+		}
 		body, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatalf("ReadFile %s: %v", name, err)
 		}
 		if containsCodeOccurrence(string(body), needle) {
-			t.Errorf("%s contains SetEscapeHTML(false) in code; after Phase 3-prep this call site "+
-				"lives exclusively in internal/dashboard/httputil. HTML-template render paths must "+
-				"escape; if a new JSON-API helper truly needs the unescaped form, host it in "+
-				"httputil.go and update its TestSetEscapeHTMLFalseScopedToPackage allow-list "+
-				"with the rationale.",
-				name)
+			t.Errorf("%s contains SetEscapeHTML(false) in code; the contract pins this call to %s "+
+				"(WriteJSON / MarshalPooled). HTML-template render paths must escape; if a new "+
+				"JSON-API helper truly needs the unescaped form, host it in %s alongside "+
+				"the existing helpers and update this test's allowed-file list with the rationale.",
+				name, allowedFile, allowedFile)
 		}
 	}
 }
 
 // containsCodeOccurrence reports whether needle appears in src outside any
 // // line comment or /* … */ block comment. Source-text (not Go AST) so
-// the test stays trivially auditable; the comment stripper handles the
-// in-tree shapes (line comments at any column; block comments span lines)
-// without pulling in go/parser.
+// the test stays trivially auditable.
 func containsCodeOccurrence(src, needle string) bool {
 	var b strings.Builder
 	b.Grow(len(src))
@@ -251,8 +230,6 @@ func containsCodeOccurrence(src, needle string) bool {
 			continue
 		}
 		if i+1 < len(src) && src[i] == '/' && src[i+1] == '/' {
-			// Line comment: skip to end of line, preserve the newline so
-			// line counts (and any subsequent code on the next line) line up.
 			for i < len(src) && src[i] != '\n' {
 				i++
 			}

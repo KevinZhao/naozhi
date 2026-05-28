@@ -1,6 +1,6 @@
 # lint-server-handlers exemptions
 #
-# 数据来源：origin/master HEAD 5788207b (2026-05-28 实测)
+# 数据来源：origin/master HEAD 5a7f04aa (2026-05-28 实测，含 Phase 4b PRs)
 # 配套：docs/design/server-split-phase4-design.md v0.6.1 §6.2.0.4 + §0 事实速查表
 #
 # 规则：
@@ -8,7 +8,8 @@
 # - dashboard 子包文件硬上限 800（v0.6.1 暂无此条目）
 # - 每条 until_phase 标到具体 phase；该 phase merge 时 PR commit 必须含
 #   "Closes-exemption: <file>" trailer，否则 rule 5 (stale_exemption) fail
-# - 豁免清单只在 Phase 0 一次性建立，后续 phase 不允许新增条目
+# - 豁免清单只在 Phase 0 一次性建立，后续 phase 不允许新增条目；但 baseline
+#   `current` 必须随 master 漂移更新（preflight 必检 — 见 §6.2.0.4）
 
 file_size:
     # 9 个 > 800 行 + 2 个 500-800 行 = 11 个超 server 500 硬上限
@@ -22,11 +23,11 @@ file_size:
       limit: 500
       until_phase: "2"
     - path: internal/server/dashboard_send.go
-      current: 1468
+      current: 1504                         # 2026-05-28 master 漂移 +36
       limit: 500
       until_phase: 3f
     - path: internal/server/dashboard_cron.go
-      current: 1536
+      current: 1553                         # 2026-05-28 master 漂移 +17
       limit: 500
       until_phase: "1"
     - path: internal/server/dashboard_cron_transcript.go
@@ -34,7 +35,7 @@ file_size:
       limit: 500
       until_phase: "1"
     - path: internal/server/server.go
-      current: 1334
+      current: 1358                         # 2026-05-28 master 1357 + Phase 3-prep import line +1
       limit: 500
       until_phase: "5"
     - path: internal/server/wshub.go        # v0.6.1 新增豁免：v0.4 时 514 不超线
@@ -42,7 +43,7 @@ file_size:
       limit: 500
       until_phase: 4b
     - path: internal/server/dashboard.go    # v0.6.1 新增豁免：v0.4 时 731 不超线
-      current: 863
+      current: 863                          # 2026-05-28 master 基线；本 phase-prep 后将降至 639
       limit: 500
       until_phase: "5"
     - path: internal/server/agent_tailer.go # v0.6.1 新增豁免：v0.4 时 655 不超线
