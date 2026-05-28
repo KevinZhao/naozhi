@@ -357,9 +357,18 @@ func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	// cheap strings.Contains over the raw line is sufficient; full parse
 	// still runs for genuine assistant / user / result frames where the
 	// payload is needed downstream.
-	if strings.Contains(line, `"hook_started"`) ||
-		strings.Contains(line, `"hook_response"`) ||
-		strings.Contains(line, `"control_response"`) {
+	//
+	// R260528-GO-16: anchor the substring to the JSON key context so a
+	// user message containing the literal magic word ("hook_started",
+	// "control_response") in its body cannot trigger a false-positive
+	// skip. The CLI emits these as `"subtype":"hook_started"` /
+	// `"type":"control_response"` so requiring the colon-prefix sticks
+	// the match to the JSON key boundary; assistant text content can
+	// still mention the word verbatim and round-trips through
+	// json.Unmarshal as before.
+	if strings.Contains(line, `:"hook_started"`) ||
+		strings.Contains(line, `:"hook_response"`) ||
+		strings.Contains(line, `:"control_response"`) {
 		return nil, false, nil
 	}
 	var ev Event
