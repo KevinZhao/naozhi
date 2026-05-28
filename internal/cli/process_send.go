@@ -437,11 +437,19 @@ func (p *Process) InterruptViaControl() error {
 	// Snapshot state and pre-commit the atomics under p.mu so a concurrent
 	// Send() flipping State to Running after our read cannot race us into
 	// "wrote control_request but skipped the settle flags".
+	//
+	// R260528-BUG-4: use CompareAndSwap rather than unconditional Store
+	// so we can tell — at write-failure rollback time — which flags WE
+	// actually set vs. which were already true via a concurrent
+	// Interrupt(). Unconditional Store(false) on rollback would clobber
+	// the concurrent Interrupt()'s state and lose the settle hint that
+	// path needs.
+	var iSet, rSet bool
 	p.mu.Lock()
 	state := p.state
 	if state == StateRunning {
-		p.interrupted.Store(true)
-		p.interruptedRun.Store(true)
+		iSet = p.interrupted.CompareAndSwap(false, true)
+		rSet = p.interruptedRun.CompareAndSwap(false, true)
 	}
 	p.mu.Unlock()
 	// No turn in flight → nothing to interrupt. Do NOT write the
@@ -457,19 +465,18 @@ func (p *Process) InterruptViaControl() error {
 	reqID := "naozhi-int-" + strconv.FormatInt(p.interruptSeq.Add(1), 10)
 	if err := p.protocol.WriteInterrupt(p.shimStdinWriter(), reqID); err != nil {
 		// Write failed: no control_request reached the CLI, so there is no
-		// trailing result event to drain. Roll the settle flags back
-		// explicitly; leaving them set would cost every subsequent Send()
-		// a 500ms settle timeout until the process is recycled.
-		//
-		// Safe against a concurrent real Interrupt() that set the flags
-		// between our Store above and this rollback: in that case we'd
-		// momentarily underreport, but Interrupt() also writes via shim
-		// `interrupt` (SIGINT), and if THAT write succeeded its own
-		// semantics apply on the next Send. Mis-clearing here is no worse
-		// than the SIGINT path itself failing — both converge on the same
-		// "no stale result to drain" state.
-		p.interrupted.Store(false)
-		p.interruptedRun.Store(false)
+		// trailing result event to drain. Roll back ONLY the flags we
+		// just CAS'd from false→true — a concurrent real Interrupt()
+		// that won the CAS race owns the flag and its rollback (if any)
+		// is its own concern. Pre-fix this branch unconditionally
+		// Store(false), which clobbered a concurrent Interrupt()'s
+		// flags and dropped the settle hint that path needs.
+		if iSet {
+			p.interrupted.Store(false)
+		}
+		if rSet {
+			p.interruptedRun.Store(false)
+		}
 		return fmt.Errorf("write interrupt control_request: %w", err)
 	}
 	return nil
