@@ -730,15 +730,18 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 			ch <- abortResult{}
 			return
 		}
-		// R236-GO-09 (#507): InterruptViaControl can block indefinitely
-		// when the protocol channel is wedged (kernel-blocked stdin
-		// write, control_request never acked). Bound it so the caller
-		// always observes a result on abortCh and finishRun runs —
-		// otherwise inflight.running stays true and every subsequent
-		// tick silently skips the job. The done channel is buffered=1
-		// so the inner goroutine never blocks on send: it returns
-		// whenever InterruptViaControl finishes, even after the timeout
-		// branch has already published an InterruptError outcome.
+		// R236-GO-09 (#507) / R247-GO-5 (#476) / R246-GO-6: InterruptViaControl
+		// can block indefinitely when the protocol channel is wedged
+		// (kernel-blocked stdin write, control_request never acked). Bound
+		// it so the caller always observes a result on abortCh and
+		// finishRun runs — otherwise inflight.running stays true and every
+		// subsequent tick silently skips the job AND the wrapper goroutine
+		// holds the abortCh slot past Stop's stopBudget during scheduler
+		// shutdown (the systemd TimeoutStopSec failure mode the R247-GO-5
+		// anchor explicitly cited). The done channel is buffered=1 so the
+		// inner goroutine never blocks on send: it returns whenever
+		// InterruptViaControl finishes, even after the timeout branch has
+		// already published an InterruptError outcome.
 		done := make(chan InterruptOutcome, 1)
 		go func() {
 			done <- sess.InterruptViaControl()

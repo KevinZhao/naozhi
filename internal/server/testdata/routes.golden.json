@@ -251,8 +251,18 @@
   },
   {
     "method": "GET",
+    "path": "/livez",
+    "handler_type": "*HealthHandler"
+  },
+  {
+    "method": "GET",
     "path": "/manifest.json",
     "handler_type": "*Server"
+  },
+  {
+    "method": "GET",
+    "path": "/readyz",
+    "handler_type": "*HealthHandler"
   },
   {
     "method": "GET",

@@ -177,6 +177,84 @@ type replayLeakObserver struct {
 
 func (o *replayLeakObserver) OnReplayLeak(n int) { o.count += n }
 
+// countingObserver is the contract-test fake for the Observer interface.
+// Each method bumps a counter so TestPersister_ObserverWiring_*
+// can verify the persist run loop / sink closure invokes Observer at the
+// right life-cycle points without depending on metrics package internals.
+type countingObserver struct {
+	mu                                                         sync.Mutex
+	written, dropped, fsyncs, malformed, replayLeak, totalEnts int
+}
+
+func (o *countingObserver) OnWrite(n int) {
+	o.mu.Lock()
+	o.written++
+	o.totalEnts += n
+	o.mu.Unlock()
+}
+func (o *countingObserver) OnDrop(n int) {
+	o.mu.Lock()
+	o.dropped += n
+	o.mu.Unlock()
+}
+func (o *countingObserver) OnFsync() {
+	o.mu.Lock()
+	o.fsyncs++
+	o.mu.Unlock()
+}
+func (o *countingObserver) OnMalformed() {
+	o.mu.Lock()
+	o.malformed++
+	o.mu.Unlock()
+}
+func (o *countingObserver) OnReplayLeak(n int) {
+	o.mu.Lock()
+	o.replayLeak += n
+	o.mu.Unlock()
+}
+func (o *countingObserver) snapshot() (written, dropped, fsyncs int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.written, o.dropped, o.fsyncs
+}
+
+// TestPersister_ObserverWiring_OnWriteOnFsync pins the R250-ARCH-8 / #1171
+// contract: once a real Observer is plugged into Options.Observer, the
+// persister calls OnWrite when entries reach disk AND OnFsync when Flush
+// runs. The session layer's eventLogMetricsObserver depends on this; if
+// some future refactor drops one of the call sites the metrics path goes
+// silent without anyone noticing, so the wiring is pinned at this leaf.
+func TestPersister_ObserverWiring_OnWriteOnFsync(t *testing.T) {
+	t.Parallel()
+	obs := &countingObserver{}
+	p, _ := newTestPersister(t, func(o *Options) {
+		o.Observer = obs
+	})
+	defer func() {
+		_ = p.Stop(context.Background())
+	}()
+
+	sink := p.SinkFor("dashboard:direct:alice:general")
+	sink([]Entry{entry(t, 1, "u1"), entry(t, 2, "u2")}, false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := p.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	written, dropped, fsyncs := obs.snapshot()
+	if written == 0 {
+		t.Errorf("OnWrite never invoked; metrics path is dead")
+	}
+	if fsyncs == 0 {
+		t.Errorf("OnFsync never invoked; flush metrics dead")
+	}
+	if dropped != 0 {
+		t.Errorf("unexpected drops in steady-state path: %d", dropped)
+	}
+}
+
 // TestPersister_FullChannel_Drops exercises the non-blocking drop
 // path. We use a tiny buffer and don't drain — the second send should
 // hit `default` and count as dropped.
@@ -711,6 +789,62 @@ func TestCollectFlushCandidates_AdaptiveSkipsUnderHighWriterCount(t *testing.T) 
 	}
 	if got := len(small.collectFlushCandidates(now)); got != 5 {
 		t.Errorf("small writer-set should flush all 5 at age=250ms, got %d", got)
+	}
+}
+
+// TestPersister_PressureAndAccept pins the R244-ARCH-2 / #1057
+// observability surface: callers can probe ingest backpressure without
+// waiting for OnDrop. Pressure() reflects the in-channel queue depth as a
+// 0..1 ratio; Accept() returns true while there is meaningful slack.
+func TestPersister_PressureAndAccept(t *testing.T) {
+	t.Parallel()
+
+	// Empty queue: Pressure 0, Accept true.
+	p, _ := newTestPersister(t)
+	defer func() {
+		_ = p.Stop(context.Background())
+	}()
+	if got := p.Pressure(); got != 0 {
+		t.Errorf("empty Pressure() = %v, want 0", got)
+	}
+	if !p.Accept() {
+		t.Error("empty Accept() = false, want true")
+	}
+
+	// Fill ~half the buffer by sending direct batchJobs.
+	half := cap(p.in) / 2
+	for i := 0; i < half; i++ {
+		select {
+		case p.in <- batchJob{Key: "k", Stem: "s", Entries: nil}:
+		default:
+			t.Fatalf("could not enqueue at i=%d", i)
+		}
+	}
+	pr := p.Pressure()
+	if pr <= 0.3 || pr >= 0.7 {
+		t.Errorf("half-full Pressure() = %v, want roughly 0.5", pr)
+	}
+	if !p.Accept() {
+		t.Error("half-full Accept() = false, want true (slack remaining)")
+	}
+
+	// Closed persister: Pressure 0, Accept false (uniform "do not produce").
+	closed := &Persister{}
+	closed.closed.Store(true)
+	if got := closed.Pressure(); got != 0 {
+		t.Errorf("closed Pressure() = %v, want 0", got)
+	}
+	if closed.Accept() {
+		t.Error("closed Accept() = true, want false")
+	}
+
+	// Nil receiver: same defensive behaviour.
+	var nilP *Persister
+	if got := nilP.Pressure(); got != 0 {
+		t.Errorf("nil Pressure() = %v, want 0", got)
+	}
+	if nilP.Accept() {
+		t.Error("nil Accept() = true, want false")
 	}
 }
 

@@ -209,7 +209,18 @@ func wsDeriveUploadOwner(w http.ResponseWriter, r *http.Request, h *Hub, ip stri
 	if h.dashToken == "" {
 		// No-token mode: every connection is authenticated; uploadOwner
 		// derives from nz_anon (cookie or freshly minted).
-		if cookie, err := r.Cookie(anonCookieName); err == nil && cookie.Value != "" {
+		//
+		// R236-SEC-06 (#485): only honour the inbound cookie when it
+		// matches mintAnonCookie's wire shape (32 lowercase-hex chars).
+		// An attacker on a shared NAT can set the nz_anon cookie to any
+		// value via JS / a manual request, and ownerKeyFromCookie would
+		// happily hash arbitrary bytes into a stable bucket. A malformed
+		// value falls through to mint a fresh server-issued label so the
+		// uploadOwner is always rooted in 16 bytes the server generated
+		// and never in attacker-supplied content. Legitimately-minted
+		// cookies pass the check unchanged so existing browser sessions
+		// keep their bucket across the upgrade.
+		if cookie, err := r.Cookie(anonCookieName); err == nil && isValidAnonCookieValue(cookie.Value) {
 			return ownerKeyFromCookie(cookie.Value), true, true
 		}
 		if h.auth != nil {

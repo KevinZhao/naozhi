@@ -727,6 +727,19 @@ func workDirResolveCacheKey(workDir, allowedRoot, allowedRootResolved string) st
 // Returned path is filepath.Clean'd (EvalSymlinks already does that).
 // On the empty-workDir / empty-root short-circuit returns ("", true)
 // so the caller leaves opts.Workspace untouched (router default applies).
+//
+// SHARED-ALGORITHM-WITH-SERVER (R20260527122801-ARCH-4 / #1316):
+// internal/server/server.go's validateWorkspace mirrors this exact algorithm
+// (EvalSymlinks(workDir) → EvalSymlinks(allowedRoot) → equality-or-prefix
+// check). The two implementations diverge only in error shape: server
+// returns sentinel errors so the HTTP layer can map status codes; cron
+// returns (resolved, ok) because the dispatcher path treats both
+// "rejected" and "no constraint" as "leave opts.Workspace untouched".
+// Both must move together if the algorithm changes — a fix on one side
+// silently re-opens the symlink-swap escape on the other. The next
+// dedup pass should hoist this to internal/osutil or a new
+// internal/workspace package; until then the cron→server cross-reference
+// here and in server.go's validateWorkspace godoc is the contract.
 // workDirResolveUnderRootCached is the Scheduler-scoped variant that
 // memoises positive results in s.workDirCache. The pure
 // workDirResolveUnderRoot below stays the canonical correctness path —

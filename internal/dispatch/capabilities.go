@@ -82,6 +82,81 @@ func (NoopCapabilities) Takeover(context.Context, string, string, session.AgentO
 // ReplyFooter returns "" (no footer appended).
 func (NoopCapabilities) ReplyFooter(string) string { return "" }
 
+// MessageSender narrows Capabilities to the single required Send hook. The
+// Capabilities interface mixes a contract-required method (Send — panics if
+// missing) with two contract-optional ones (Takeover / ReplyFooter — both
+// have noop defaults). Splitting the required surface lets future
+// consumers / tests depend on the smallest seam they actually need without
+// implementing the full bundle.
+//
+// R248-ARCH-1 (#373): every Capabilities also satisfies MessageSender, so
+// the existing host wireup keeps working. New call sites that only forward
+// turns may type-assert or accept MessageSender directly.
+type MessageSender interface {
+	Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+}
+
+// TakeoverHook isolates the optional first-message takeover probe so a host
+// that does not adopt external Claude sessions does not have to provide a
+// stub method just to silence an interface satisfier check. R248-ARCH-1.
+type TakeoverHook interface {
+	Takeover(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
+}
+
+// ReplyFooterHook isolates the optional reply tag suffix used by the IM
+// reply path. R248-ARCH-1.
+type ReplyFooterHook interface {
+	ReplyFooter(backendID string) string
+}
+
+// Compile-time guarantee that the existing Capabilities interface still
+// satisfies all three facets — the docstring "Capabilities IS the bundle"
+// is enforced by the language rather than a comment that can drift.
+var (
+	_ MessageSender   = (Capabilities)(nil)
+	_ TakeoverHook    = (Capabilities)(nil)
+	_ ReplyFooterHook = (Capabilities)(nil)
+)
+
+// SessionView is the narrow read-only seam over *session.ManagedSession
+// that the dispatch send path actually consumes. The existing
+// MessageSender.Send still takes the concrete pointer for back-compat
+// (changing the signature is breaking; the rewire is tracked separately),
+// but new dispatch-internal helpers should accept SessionView so test
+// fakes need not stitch together the full ~30 method ManagedSession
+// surface to exercise a code path.
+//
+// R260528-ARCH-5 (#1366): the existing seam (`Send(... sess *session.ManagedSession ...)`)
+// is virtual — fakes cannot synthesise an internal struct, so dispatch
+// tests cannot drive Send without dragging a Router graph along. Adding
+// SessionView as an additive interface lets callers within dispatch
+// narrow at their own pace; any new Send overloads or wrapper layers
+// should declare SessionView rather than the concrete pointer so the
+// satisfier requirement stays stable across future ManagedSession
+// internal-field churn.
+//
+// *session.ManagedSession satisfies SessionView implicitly via the
+// existing exported accessors. A satisfier var pins the contract so a
+// future rename / removal surfaces here in CI.
+type SessionView interface {
+	// SessionID returns the active CLI session identifier (the protocol's
+	// session token). Used by dispatch-side logging / dedup keys.
+	SessionID() string
+	// Backend returns the backend identifier (e.g. "claude" / "kiro") the
+	// session was spawned against. Empty for legacy stores predating the
+	// Backend field.
+	Backend() string
+	// InterruptViaControl asks the session's underlying CLI to abort the
+	// in-flight turn via an in-band stream-json control_request. Returns
+	// the outcome enum (Sent / NoSession / NoTurn / Unsupported / Error)
+	// matching ManagedSession.InterruptViaControl.
+	InterruptViaControl() session.InterruptOutcome
+}
+
+// Compile-time guarantee that *session.ManagedSession satisfies
+// SessionView. See SessionView docstring for the rationale.
+var _ SessionView = (*session.ManagedSession)(nil)
+
 // closureCapabilities adapts the legacy SendFn / TakeoverFn / ReplyFooterFn
 // closures into a Capabilities implementation. Used internally by
 // NewDispatcher when callers populate the Deprecated *Fn fields instead of

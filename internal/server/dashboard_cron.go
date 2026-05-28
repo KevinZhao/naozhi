@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -515,21 +516,37 @@ func validateCronTitle(title string) error {
 }
 
 // validateCronPrompt allows Tab and LF (multi-paragraph playbooks) but
-// stringFieldPolicy with allowLF=true still rejects \r (CR). That asymmetry
-// is intentional: prompts are written into cron_jobs.json as JSON-quoted
-// strings (json.Marshal escapes \n inside the quoted value, so NDJSON
-// framing on the wire stays intact), but a bare CR would still survive the
-// JSON encode and later corrupt `tail -f` / `journalctl` views by carriage-
-// returning over the previous log line — a log-poisoning surface unrelated
-// to wire framing. There is no legitimate reason for an authored prompt to
-// contain CR (Linux line endings are LF, dashboard textareas normalise
-// CRLF→LF before submit), so rejecting it here is cheap defence-in-depth
-// matching validateCronTitle's explicit '\r' branch. R230-CQ-19.
+// rejects CR. That asymmetry is intentional: prompts are written into
+// cron_jobs.json as JSON-quoted strings (json.Marshal escapes \n inside
+// the quoted value, so NDJSON framing on the wire stays intact), but a
+// bare CR would still survive the JSON encode and later corrupt `tail -f`
+// / `journalctl` views by carriage-returning over the previous log line —
+// a log-poisoning surface unrelated to wire framing. There is no
+// legitimate reason for an authored prompt to contain CR (Linux line
+// endings are LF, dashboard textareas normalise CRLF→LF before submit),
+// so rejecting it here is cheap defence-in-depth matching
+// validateCronTitle's explicit '\r' branch. R230-CQ-19.
+//
+// R250-ARCH-27 (#1188): the size + UTF-8 + C0/C1/bidi/LS/PS scan is
+// delegated to cron.ValidatePromptStrict so the dashboard HTTP edge and
+// the IM `/cron …` slash-command edge cannot drift apart in policy. The
+// dashboard adds a single extra rule on top — reject CR — because the
+// IM path enters via stream-json which json-quotes the value and never
+// surfaces it raw to log pipelines, whereas a dashboard-authored prompt
+// can flow into operator-facing dump tools where CR matters.
 func validateCronPrompt(prompt string) error {
-	if len(prompt) > maxCronPromptBytesDashboard {
-		return fmt.Errorf("prompt exceeds %d-byte limit", maxCronPromptBytesDashboard)
+	// cron.ValidatePromptStrict enforces the size cap (cron.MaxPromptBytes,
+	// equal to maxCronPromptBytesDashboard), UTF-8 validity, C0/DEL/C1
+	// rejection, and the bidi/LS/PS rune walk. Any byte-level concern
+	// shared between dashboard + IM lives there now; the only check this
+	// function still owns is the dashboard-specific CR rejection below.
+	if err := cron.ValidatePromptStrict(prompt); err != nil {
+		return err
 	}
-	return validateStringField(prompt, stringFieldPolicy{name: "prompt", allowTab: true, allowLF: true})
+	if strings.ContainsRune(prompt, '\r') {
+		return fmt.Errorf("prompt contains invalid control characters")
+	}
+	return nil
 }
 
 // CronHandlers groups the cron job management API endpoints.

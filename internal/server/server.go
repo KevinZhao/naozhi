@@ -44,14 +44,28 @@ const (
 //
 // Field-block contract (server-split-phase4-design.md §五 / §六.6):
 // Each field below carries `// 读写: <files>` to indicate which non-test
-// files in this package access it. New fields MUST add this annotation.
-// Phase 4-5 will redistribute most of these into wshub Options, dashboard
-// sub-packages, or routes.go locals. Verification rule:
+// files in this package access this Server-struct field via the `s.X`
+// receiver path. New fields MUST add this annotation. Phase 4-5 will
+// redistribute most of these into wshub Options, dashboard sub-packages,
+// or routes.go locals. Verification rule:
 //
 //	awk '/^type Server struct/,/^}$/' server.go | grep -cE '^\s+[a-zA-Z_]+ '
 //
 // must equal the field count documented in
 // docs/design/server-split-phase4-baseline.md §2 (currently 47).
+//
+// R250-ARCH-11 (#1174): scope clarification — the annotation tracks
+// access to *this struct field*, not usage of the field's underlying
+// type. So `agentEventsH *AgentEventsHandlers` lists only `server.go,
+// dashboard.go` (the two files that read/write `s.agentEventsH`), even
+// though `dashboard_agent_events.go` defines methods on
+// `*AgentEventsHandlers`. Method definitions on the underlying type
+// are intentionally out of scope: they don't access the Server field
+// and therefore can't be invalidated by a future field-level refactor
+// (renaming or moving `s.agentEventsH`). A type-usage tracker would
+// be a separate verifier; this contract stays scoped to receiver-path
+// reads/writes so the annotation diff stays localised when handlers
+// are split out per Phase 5.
 type Server struct {
 	// ── HTTP entry (Phase 5: keep) ─────────────────────
 	addr      string          // 读写: server.go
@@ -947,6 +961,15 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	s.mux.HandleFunc("GET /health", s.healthH.handleHealth)
+	// R247-ARCH-1 (#609): K8s-style probe split. /livez is a no-deps "process
+	// alive" check; /readyz gates on minimal wiring (router non-nil) without
+	// the rich auth-only stats /health surfaces. Orchestrators (K8s, ECS,
+	// Nomad, ALB target groups) can now point liveness at /livez and
+	// readiness at /readyz without parsing the JSON shape, and a wedged
+	// dependency drops the pod from rotation instead of triggering a
+	// restart loop.
+	s.mux.HandleFunc("GET /livez", s.healthH.handleLivez)
+	s.mux.HandleFunc("GET /readyz", s.healthH.handleReadyz)
 	s.appCtx = ctx
 	s.discoveryH.appCtx = ctx
 	s.registerDashboard()

@@ -144,8 +144,19 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 const maxExtraArgsBytes = 128 * 1024
 
 // capExtraArgsBytes guards against a runaway caller (or accumulated stacked
-// scratch contexts) producing an argv that exceeds ARG_MAX. Returns the input
-// unchanged when within the cap; logs and returns nil when over.
+// scratch contexts) producing an argv that exceeds ARG_MAX. After the byte cap
+// it also strips dangerous CLI-behaviour-altering flags (R219-SEC-1 / #653)
+// that should never be smuggled in via ExtraArgs — a Claude CLI sub-flag
+// repurposed by an attacker-controlled prompt or a misconfigured agent could
+// mount attacker-supplied MCP servers, expand the file-read sandbox, or
+// disable the permission gate. The naozhi spawn pipeline already sets these
+// flags itself when needed (--dangerously-skip-permissions in BuildArgs,
+// --append-system-prompt by router/scratch via dedicated sites), so any
+// occurrence inside ExtraArgs is by definition a duplicate or an injection.
+//
+// Returns the input unchanged when within the cap and free of disallowed
+// flags; logs and returns nil when the byte cap is exceeded; logs and returns
+// a filtered copy when only flag stripping is needed.
 func capExtraArgsBytes(extra []string) []string {
 	total := 0
 	for _, a := range extra {
@@ -156,7 +167,96 @@ func capExtraArgsBytes(extra []string) []string {
 			return nil
 		}
 	}
-	return extra
+	return filterDeniedFlags(extra)
+}
+
+// deniedExtraFlags lists Claude/ACP CLI flags that callers must not be able
+// to inject through opts.ExtraArgs. The denial covers both the bare form
+// (`--name value`) and the equals form (`--name=value`); when the bare form
+// fires we also drop the immediately-following element so the orphaned value
+// does not slide into argv as a free-standing token.
+//
+// Allowlist would be safer in principle but a closed enumeration is brittle
+// against legitimate operator additions (e.g. `--debug`); the denylist
+// approach pins the known-dangerous surface enumerated in R219-SEC-1 +
+// R217-SEC-1 while leaving the rest of the CLI's flag surface available.
+// Callers needing one of these flags must wire it through a dedicated
+// SpawnOptions field that BuildArgs renders explicitly, not the catch-all
+// ExtraArgs slice.
+var deniedExtraFlags = map[string]struct{}{
+	"--mcp-config":                   {}, // loads attacker-controlled MCP server defs
+	"--add-dir":                      {}, // expands file-read sandbox
+	"--dangerously-skip-permissions": {}, // BuildArgs already controls this
+	"--append-system-prompt":         {}, // router/scratch own this site
+	"--system-prompt":                {}, // hard override of system prompt
+	"--setting-sources":              {}, // BuildArgs pins "" to disable hooks
+	"--settings":                     {}, // BuildArgs owns settings file
+	"--resume":                       {}, // BuildArgs owns ResumeID validation
+	"--allowed-tools":                {}, // permission allowlist override
+	"--disallowed-tools":             {}, // permission allowlist override
+	"--permission-mode":              {}, // SpawnOptions.PermissionMode owns this
+	"--permission-prompt-tool":       {}, // permission gate plumbing
+}
+
+// filterDeniedFlags returns extra with any deniedExtraFlags occurrences (and
+// their attached values) removed. When nothing is filtered, the input slice
+// is returned unchanged so the no-op case avoids the allocation.
+func filterDeniedFlags(extra []string) []string {
+	// Cheap pre-scan: only allocate when at least one match exists.
+	hit := false
+	for _, a := range extra {
+		if isDeniedFlag(a) {
+			hit = true
+			break
+		}
+	}
+	if !hit {
+		return extra
+	}
+	out := make([]string, 0, len(extra))
+	dropped := 0
+	for i := 0; i < len(extra); i++ {
+		a := extra[i]
+		// `--name=value` form: deny by prefix match before '='.
+		if eq := strings.IndexByte(a, '='); eq > 0 && strings.HasPrefix(a, "--") {
+			if _, bad := deniedExtraFlags[a[:eq]]; bad {
+				dropped++
+				continue
+			}
+		}
+		// `--name value` form: deny the flag and skip the following value
+		// element if present and not itself a flag (which would imply the
+		// next token is another flag and the current one was a boolean).
+		if _, bad := deniedExtraFlags[a]; bad {
+			dropped++
+			if i+1 < len(extra) && !strings.HasPrefix(extra[i+1], "-") {
+				i++
+				dropped++
+			}
+			continue
+		}
+		out = append(out, a)
+	}
+	if dropped > 0 {
+		slog.Warn("cli: ExtraArgs contained denied flags; stripped",
+			"dropped", dropped, "kept", len(out))
+	}
+	return out
+}
+
+// isDeniedFlag returns true when a is a denied flag in either bare or
+// equals form. Centralised so the pre-scan and the filter loop share the
+// same predicate without re-implementing the equals-split.
+func isDeniedFlag(a string) bool {
+	if !strings.HasPrefix(a, "--") {
+		return false
+	}
+	if eq := strings.IndexByte(a, '='); eq > 0 {
+		_, bad := deniedExtraFlags[a[:eq]]
+		return bad
+	}
+	_, bad := deniedExtraFlags[a]
+	return bad
 }
 
 func (p *ClaudeProtocol) Init(_ *JSONRW, _, _ string) (string, error) {
