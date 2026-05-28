@@ -699,6 +699,33 @@ func watchdogInterruptTimeout() time.Duration {
 // On the success / non-deadline error path the caller cancels ctx
 // explicitly; the watchdog observes ctx.Err()==Canceled, skips
 // InterruptViaControl, and returns abortResult{fired:false}.
+//
+// Inner-goroutine accumulation bound (R040034-GO-4 / #1390): on the
+// `t.C` deadline branch below, the inner `go func() { done <- sess.
+// InterruptViaControl() }()` may outlive the watchdog if InterruptViaControl
+// itself wedges (kernel-blocked stdin write, control_request never
+// acked). The wedge clears on the next session.Reset call, so:
+//
+//   - fresh-context jobs (Job.FreshContext == true): bounded at 1
+//     leaked goroutine per job per Reset cycle → at most 1 leaked
+//     goroutine in steady state because each tick Reset's at the
+//     start. Garbage-collected before the next deadline window.
+//   - persistent-context jobs (Job.FreshContext == false): the session
+//     is reused across ticks without an automatic Reset, so each
+//     deadline-fired-then-wedged tick adds one goroutine. Worst case
+//     is a job whose CLI consistently wedges its stdin write — the
+//     count grows linearly until the operator restarts the session
+//     (manual /reset, dashboard kill, or scheduler.Stop). The
+//     CronWatchdogInterruptTimeoutTotal metric makes this visible:
+//     a non-zero rate signals "investigate the wedged backend",
+//     not "scale memory".
+//
+// A future hardening pass could thread s.stopCtx into the inner
+// goroutine so Scheduler.Stop drains every wedged Interrupt; today
+// the metric+log path is judged sufficient because the wedge is
+// already an actionable backend bug rather than a normal failure
+// mode. R040034-GO-4 documents the bound; it is not a separate
+// regression.
 func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan abortResult {
 	// R249-GO-3: defensive nil guard. A nil ctx would panic on <-ctx.Done()
 	// inside the goroutine; a nil sess would panic on InterruptViaControl
