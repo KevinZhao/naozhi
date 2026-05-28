@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -159,6 +160,50 @@ func TestShouldNotify_RateLimits(t *testing.T) {
 	}
 	if q.ShouldNotify("k1") {
 		t.Fatal("immediate second call should return false")
+	}
+}
+
+// TestShouldNotify_ConcurrentRLockFastPath exercises the R20260528-PERF-19
+// (#1358) fast-path: many goroutines hammering ShouldNotify on the same
+// already-cooled-down key. -race covers the RLock→RUnlock→Lock window
+// against concurrent slow-path mutations; the test then verifies that
+// after the storm exactly one notify can have fired (the cooldown is
+// active for everyone after the first observer).
+func TestShouldNotify_ConcurrentRLockFastPath(t *testing.T) {
+	t.Parallel()
+	q := NewMessageQueue(10, 0)
+
+	// Prime the queue branch: Enqueue makes a sessionQueue in q.queues,
+	// then ShouldNotify publishes lastNotifyNs so subsequent calls take
+	// the cooldown-active fast path.
+	q.Enqueue("k", QueuedMsg{Text: "owner"})
+	if !q.ShouldNotify("k") {
+		t.Fatal("first ShouldNotify should fire (cooldown empty)")
+	}
+
+	// Storm: 64 goroutines × 100 calls — every call should see the
+	// cooldown active and return false via the RLock fast path. The race
+	// detector catches any read-write order violation if an internal
+	// mutation slips out from under the read lock.
+	const goroutines = 64
+	const perGo = 100
+	var fired atomic.Int32
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < perGo; j++ {
+				if q.ShouldNotify("k") {
+					fired.Add(1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := fired.Load(); got != 0 {
+		t.Fatalf("fired = %d during cooldown window, want 0 (fast-path must observe cooldown)", got)
 	}
 }
 
