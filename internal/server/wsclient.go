@@ -215,8 +215,16 @@ func (c *wsClient) SendRaw(data []byte) {
 		// the hub mutex when broadcasting to slow clients. Both per-client
 		// and hub-wide counters bump so /health can report totals without
 		// scanning the clients map under RLock.
+		//
+		// R040034-GO-10 (#1396): production wires hub via NewHub, but unit
+		// tests sometimes build a wsClient directly without a Hub. Guard
+		// the hub-wide counter so the test fixture doesn't NPE; the
+		// per-client counter still advances so the slow-client close
+		// gate below works regardless of hub presence.
 		n := c.dropped.Add(1)
-		c.hub.droppedTotal.Add(1)
+		if c.hub != nil {
+			c.hub.droppedTotal.Add(1)
+		}
 		// Safety net: a permanently-slow client silently falling arbitrarily
 		// behind is worse than a forced reconnect. Once cumulative drops
 		// cross wsDropThreshold, close the connection so the browser side
