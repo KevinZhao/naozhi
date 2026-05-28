@@ -4584,6 +4584,65 @@ func TestDashboardJS_R110P2_CronRunNowButton(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_R110P2_CronCardV3LayoutAnchor pins the v3 cron-row
+// layout that closes R110-P2 (#447) "card cluttered with title + cwd +
+// expr + log + buttons". The v3 row replaced the v2 stack with a 4-zone
+// grid:
+//
+//	.cj-dot       — leading status pill (paused/error/running/idle)
+//	.cj-main      — title + sub-row (schedule chip + icons + last-run chip)
+//	.cj-when      — right-aligned next-run / elapsed / paused label
+//	.cj-actions   — run + ⋯ menu trigger
+//
+// Plus a `.cj-stats` badge on rows with stats.total > 0 that hovers a
+// 5-dot recent-runs strip (the "底部可折叠最近 5 次执行结果绿/红/黄点阵"
+// the issue proposed; placed inline rather than below to match the
+// 1-row density goal).
+//
+// Without this anchor, a future "let's restore the v2 card" refactor
+// can land silently. The R110P2_CronRunNowButton test only asserts the
+// run button exists; it does not pin the surrounding zone structure.
+func TestDashboardJS_R110P2_CronCardV3LayoutAnchor(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// Each of the four v3 zones must appear in cronJobCardHtml's output
+	// template (as a quoted class string the renderer concatenates).
+	for _, zone := range []string{
+		`'<span class="cj-dot"`,
+		`'<div class="cj-main">'`,
+		`'<div class="cj-actions">'`,
+	} {
+		if !strings.Contains(js, zone) {
+			t.Errorf("R110-P2 (#447): cronJobCardHtml missing v3 zone marker %q — "+
+				"the high-density 4-column row replaces the cluttered v2 card; "+
+				"reverting to a stack regresses the UX rotation explicitly fixed "+
+				"in this round.", zone)
+		}
+	}
+	// .cj-when is conditional (empty rows render `<div class="cj-when"></div>`)
+	// so we anchor the class token rather than a specific opening string.
+	if !strings.Contains(js, `class="cj-when`) {
+		t.Error("R110-P2 (#447): cronJobCardHtml missing .cj-when zone — the right-aligned next-run/elapsed/paused column is core to the v3 density goal")
+	}
+
+	// The recent-runs 5-dot strip closes the issue's "底部可折叠最近 5 次"
+	// proposal. The render lives in cronStatsBadgeHtml; we verify the
+	// helper exists and its 5-element slice / reverse / dot template
+	// stays in place. A refactor that drops the strip would visibly
+	// regress the dashboard's at-a-glance health snapshot.
+	if !strings.Contains(js, "function cronStatsBadgeHtml(j)") {
+		t.Fatal("R110-P2 (#447): cronStatsBadgeHtml helper missing — recent-runs strip is the issue's '点阵' deliverable")
+	}
+	if !strings.Contains(js, "j.recent_runs.slice(0, 5).reverse()") {
+		t.Error("R110-P2 (#447): cronStatsBadgeHtml must take last-5 reversed for chronological strip — order/length flip would silently break the trend visualization")
+	}
+}
+
 // TestDashboardJS_FetchEventsConcurrencyGuard pins the R166 fix that added an
 // in-flight guard to fetchEvents. The 1 s setInterval driver plus the
 // on-demand `full` fetch (session switch / WS fallback / reconnect) could
