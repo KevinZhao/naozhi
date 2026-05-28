@@ -37,14 +37,10 @@ func TestClaudeProtocol_ReadEvent_SubstringFastPath_SkipsBeforeUnmarshal(t *test
 // TestClaudeProtocol_ReadEvent_FastPath_DoesNotEatRealAssistant ensures
 // the fast-path's substring check does not over-match: assistant frames
 // whose payload happens to mention the skip tokens as data must still
-// flow through the full unmarshal path. The skip tokens only appear at
-// the wire's `type` / `subtype` slot for true skip frames; a benign
-// substring elsewhere should not trigger the skip — but in practice
-// there is no legitimate reason for an assistant frame to contain
-// "hook_started" verbatim. The risk is theoretical only; this test
-// pins the current minimal-fix behaviour so a future regression to
-// e.g. tighter `\"type\":\"hook_started\"` matching is a deliberate
-// choice rather than an accident.
+// flow through the full unmarshal path. R260528-GO-16 anchored the
+// match to the JSON key context (`:"hook_started"` etc.) so assistant
+// text containing the literal magic word no longer triggers a false
+// skip — see TestReadEventFastPathFalsePositive below.
 func TestClaudeProtocol_ReadEvent_FastPath_NormalAssistantPasses(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
@@ -58,5 +54,40 @@ func TestClaudeProtocol_ReadEvent_FastPath_NormalAssistantPasses(t *testing.T) {
 	}
 	if len(evs) != 1 || evs[0].Type != "assistant" {
 		t.Errorf("expected 1 assistant event, got %+v", evs)
+	}
+}
+
+// TestReadEventFastPathFalsePositive (R260528-GO-16) pins the JSON-key
+// anchoring of the substring fast-path. An assistant frame whose text
+// content contains the literal token "hook_started" / "hook_response" /
+// "control_response" must NOT be skipped — only the wire-level
+// `"subtype":"hook_started"` / `"type":"control_response"` keys count.
+// Pre-fix, strings.Contains(line, `"hook_started"`) matched the quoted
+// substring inside the message body and silently dropped the user's
+// turn; the fix anchored the check to `:"hook_started"` so the colon
+// boundary forces a JSON-key match.
+func TestReadEventFastPathFalsePositive(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	cases := []string{
+		// Assistant text quoting the magic word verbatim.
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"the \"hook_started\" event fires when ..."}]}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"see \"hook_response\" doc"}]}}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"matches \"control_response\" semantics"}]}}`,
+		// User echo containing the token (e.g. asking the agent about it).
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"what is \"hook_started\"?"}]}}`,
+	}
+	for _, line := range cases {
+		evs, done, err := p.ReadEvent(line)
+		if err != nil {
+			t.Errorf("ReadEvent err=%v for line=%q", err, line)
+			continue
+		}
+		if done {
+			t.Errorf("non-result frame should not be done: line=%q", line)
+		}
+		if len(evs) == 0 {
+			t.Errorf("frame must NOT be skipped — token is in user/assistant text, not a JSON key. line=%q", line)
+		}
 	}
 }
