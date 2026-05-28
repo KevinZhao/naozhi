@@ -25,8 +25,8 @@
 | 维度 | v0.6 实测值 | v0.4 写过 | v0.5 写过 | 备注 |
 |---|---|---|---|---|
 | Server struct 字段 | **47** | 47 | 47 | 一致 |
-| Hub struct 字段 | **47** | 37 | 43 | v0.6 同步 master：3 个月新增 4 字段（auth/subscriberCount/legacySendInvokes/debounceClosedFast）|
-| Hub 字段块数 | **7** | 6 | 7 | 一致（lifecycle 3 / subscriber 10 / broadcast 6 / send 6 / shared 14 / tailer 3 / cache 5）|
+| Hub struct 字段 | **49** | 37 | 43 | v0.6 47 / v0.6.1 47 / Phase 4b-hub-sync (2026-05-28) 校准到 49：master 新增 authClients (PR #1409) + enforceCaps (PR #1401) + userSendLimiters 类型 map → *sync.Map (PR #1357) |
+| Hub 字段块数 | **7** | 6 | 7 | 一致（Phase 4b-hub-sync 校准：lifecycle 3 / subscriber 12 / broadcast 6 / send 6 / shared 14 / tailer 3 / cache 5 = 49）|
 | server 包行数（不含测试）| **21313** | 17156 | 17156 | v0.6 同步 master：3 个月涨 24% |
 | server 包行数（含测试）| **53487** | 38836 | 38836 | v0.6 同步 master |
 | server 包文件数（不含测试）| **58** | 40 | 40 | v0.6 同步 master |
@@ -82,7 +82,7 @@ server 包行数:  含测试 53487 行 / 206 文件
   dashboard_auth.go            583
 
 Server struct: 47 字段（baseline 实测，13 个是 12 个 handler 引用）
-Hub struct:    47 字段（baseline §3 实测；v0.4 baseline 写 37，3 个月新增 10 字段；按职责分 7 块见 §五）
+Hub struct:    49 字段（Phase 4b-hub-sync 校准；v0.4 baseline 37 / v0.6 47 / Phase 4b-hub-sync 49；按职责分 7 块见 §五）
 路由注册总数: 51 条（dashboard.go::registerDashboard 单点；v0.4 时 50 条）
 Hub.queue 字段：直接耦合 *dispatch.MessageQueue（R242-GO-10 拖了 5 轮）
 
@@ -103,7 +103,7 @@ handler-group 化第一轮（`auth/cronH/sessionH/projectH/discoveryH/transcribe
 |---|---|---|---|
 | 1 | server 包瘦身 | ≤ 5000 行（不含测试）/ ≤ 15 个非测试文件 | `wc -l $(ls internal/server/*.go \| grep -v _test.go)` |
 | 2 | Server struct 字段瘦身 | **47 → ≤ 12** 字段（减 74%） | `awk '/^type Server struct/,/^}$/' internal/server/server.go \| grep -E '^\s+[a-zA-Z_]+ ' \| wc -l` |
-| 3 | Hub 字段整理 | **47 字段维持不变**（v0.6 实测；v0.4 baseline 写 37 漏数 10 个；按 §五 7 块分组组织；本次不删字段，仅整理） | 同上脚本针对 wshub.go |
+| 3 | Hub 字段整理 | **49 字段维持不变**（Phase 4b-hub-sync 校准；v0.6 47 / Phase 4b-hub-sync 加 authClients/enforceCaps + userSendLimiters 类型 → *sync.Map；按 §五 7 块分组组织；本次不删字段，仅整理） | 同上脚本针对 wshub.go |
 | 4 | 跨包依赖减耦合 | 每个 PR 减少 `s.X` 跨包字段引用数 ≥ 5 | `grep -c "deps.\|s\." per-PR diff 报告` |
 | 5 | Hub.queue 接口化 | 关闭 R242-GO-10；MessageEnqueuer 单接口（5 方法）+ var _ 编译期 gate | `var _ wshub.MessageEnqueuer = (*MessageQueue)(nil)` |
 | 6 | 零行为变更 | 51 路由路径不变；WS 协议字段不变 | `routes_snapshot_test.go` golden 对齐 |
@@ -576,7 +576,7 @@ v0.2 写"Phase 4 可与 1-3 并行" — 措辞误。Phase 1-3 引用 `*server.Hu
 
 #### 0.1 字段读写注解
 - `Server struct` **47 字段**加 `// 读写: <files>` 注释（v0.6 校准；v0.4 时仍沿用 v0.2 时代的"28+"粗估，v0.6 实测 47 替换；详 §0 速查表）
-- `Hub struct` **47 字段**加 `// 读写: <files>` 注释（按 §五 7 块字段分组组织；v0.4 baseline 写 37 漏数 10 个，v0.6 实测 47 替换；详 §0 速查表）
+- `Hub struct` **49 字段**加 `// 读写: <files>` 注释（按 §五 7 块字段分组组织；v0.4 37 / v0.6 47 / Phase 4b-hub-sync 49；详 §0 速查表）
 
 #### 0.2 接口定义
 - `internal/wshub/types.go`：`MessageEnqueuer`（先放 server 包等 Phase 4a 一起搬）
@@ -896,7 +896,7 @@ git commit -m "phase 1: dashboard/cron godoc + gofmt polish"
 #### 4a：Hub 骨架 + 字段块定型
 
 - 创建 `internal/wshub/` 包结构（hub.go / types.go）
-- Hub struct 按 §五 7 块字段顺序排好（**47 字段**）；ctor `NewHub(opts HubOptions)` 完成
+- Hub struct 按 §五 7 块字段顺序排好（**49 字段** — Phase 4b-hub-sync 校准）；ctor `NewHub(opts HubOptions)` 完成
 - 5 个方法分文件壳（hub_subscribe.go / hub_broadcast.go / hub_send.go / hub_agent.go / hub_eventpush.go）每个仅含 1-2 个 placeholder 方法 + godoc 头
 - Shutdown 骨架（lifecycle 块跨块写）+ `hub_concurrency_test.go` 骨架（仅 1 个测试 case）
 - linter **rule 3a** 启用 warn 模式校验 godoc 头存在性（v0.6 显式：用 3a 不是 3b）
@@ -1274,7 +1274,7 @@ baseline `go test -race -count=1 ./...` ≈ 300s。Phase 4 完成后预期：
 | 单文件 1000+ 行数量 | **6 个**（v0.6；v0.4 时 5 个） — dashboard_session/project_files/dashboard_send/dashboard_cron/dashboard_cron_transcript/server | 0 个 | 解 god file |
 | 单文件 800+ 行数量 | **9 个**（v0.6；v0.4 时 6 个） — 上述 6 + wshub.go(902) / dashboard.go(852) / agent_tailer.go(827) | 0 个 | 长效防膨胀 |
 | Server struct 字段 | 47 | ≤ 12 | -74% 跨包字段引用 |
-| Hub struct 字段 | **47**（v0.6） | ≤ 40 | -15% |
+| Hub struct 字段 | **49**（Phase 4b-hub-sync） | ≤ 40 | -18% |
 | 跨包小接口数量 | ~3 个（HubRouter / cronHubOps / 等） | ~12 个（每 dashboard 子包 2-3 个） | 测试 mock 难度 -60% |
 | 并行开发上限 | 1（任意 dashboard PR 撞同一文件） | 6+（6 个独立子包 + wshub） | 并行度 6× |
 | dashboard 新功能 PR 平均冲突时间 | 30-90 min（实测过去 3 个月） | < 10 min | 月省 ~5-10 工程小时 |
