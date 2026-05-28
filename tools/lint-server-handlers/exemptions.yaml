@@ -55,7 +55,7 @@ file_size:
       limit: 500
       until_phase: 4b
     - path: internal/server/dashboard.go    # v0.6.1 新增豁免：v0.4 时 731 不超线
-      current: 863                          # 2026-05-28 master 基线；本 phase-prep 后将降至 639
+      current: 642                          # 2026-05-28 静态 handler 包级化（PR #1444）后实际行数；rule 2 仅看是否 grow，缩减不需要豁免数值同步但保持 yaml 真实
       limit: 500
       until_phase: "5"
     - path: internal/server/agent_tailer.go # v0.6.1 新增豁免：v0.4 时 655 不超线
@@ -71,16 +71,16 @@ file_size:
     # moved to internal/dashboard/auth/handlers.go. Closes-exemption trailer
     # in commit message satisfies rule 5.
 
-# Phase 0 baseline 锁定的 8 个 Server.handle* 方法（rule 1: handle_decl）
+# Phase 0 baseline 锁定的 Server.handle* 方法（rule 1: handle_decl）
 # 新增的 (s *Server) handle* 方法 → linter fail
 # v0.6.1 校准：origin/master HEAD 5788207b 比 v0.4 baseline 多 1 个
 # (handlePlannerStats，#1349 加入)
+# 2026-05-28 静态资源清理：4 个零状态 handler（handleAgentViewJS / handleDashboardJS
+# / handleManifest / handleSW）转为包级 func，从 baseline 移除。剩 4 个 *Server
+# handler 待 Phase 5 处理（handleDashboard / handleClearLabelOrigin /
+# handlePlannerStats / handleSystemDaemons —— 这些都依赖 s.X 字段）。
 handle_baseline:
-    - Server.handleAgentViewJS
     - Server.handleClearLabelOrigin
     - Server.handleDashboard
-    - Server.handleDashboardJS
-    - Server.handleManifest
     - Server.handlePlannerStats     # v0.6.1 新增：PR #1349 引入
-    - Server.handleSW
     - Server.handleSystemDaemons
