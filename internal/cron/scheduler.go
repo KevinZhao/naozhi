@@ -218,6 +218,12 @@ type SchedulerConfig struct {
 	// values fall back to defaultCronSlowThreshold so callers that omit
 	// the field keep the prior behaviour. R241-ARCH-11 (#519).
 	SlowThreshold time.Duration
+	// StopBudget overrides defaultStopBudget when > 0. Per-Scheduler
+	// override exists so parallel tests (t.Parallel + multiple Scheduler
+	// instances) can shorten the budget without racing each other through
+	// a shared package-level var. Zero / negative values fall back to
+	// defaultStopBudget. R260528-BUG-5.
+	StopBudget time.Duration
 	// AllowNilRouter opts the constructor out of the boot-time
 	// "router required" slog.Error contract added in R241-ARCH-6 (#510).
 	// Production wiring (cmd/naozhi) always sets Router; this flag exists
@@ -326,6 +332,13 @@ type Scheduler struct {
 	// zero/negative reads fall through to defaultCronSlowThreshold at the
 	// callsite. Immutable after NewScheduler returns. R241-ARCH-11 (#519).
 	slowThreshold time.Duration
+	// stopBudget is the per-Scheduler overall deadline used by Stop() /
+	// drainCronStop / drainTriggerWG. See SchedulerConfig.StopBudget;
+	// zero never reached at runtime because NewScheduler defaults to
+	// defaultStopBudget. WithStopBudget mutates this field directly so a
+	// `withShortStopBudget(t, 50ms)` on one Scheduler instance does not
+	// race a sibling Stop on another instance. R260528-BUG-5.
+	stopBudget time.Duration
 	// routerNilOnce ensures registerStubByValue logs the "router missing"
 	// slog.Error at most once per Scheduler lifetime, so a router-less
 	// test fixture (or a deployment that legitimately opted into
@@ -776,6 +789,12 @@ func (cfg *SchedulerConfig) applyDefaults() {
 	if cfg.ExecTimeout <= 0 {
 		cfg.ExecTimeout = defaultExecTimeout
 	}
+	// R260528-BUG-5: per-instance stop budget; <=0 falls back to the
+	// package-level default so callers that omit the field keep the prior
+	// behaviour.
+	if cfg.StopBudget <= 0 {
+		cfg.StopBudget = defaultStopBudget
+	}
 	if cfg.Location == nil {
 		cfg.Location = time.Local
 	}
@@ -899,6 +918,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		workDirCacheKeySuffix: "\x00" + cfg.AllowedRoot + "\x00" + allowedRootResolved,
 		jitterMax:             cfg.JitterMax,
 		slowThreshold:         cfg.SlowThreshold,
+		stopBudget:            cfg.StopBudget,
 		stopCtx:               stopCtx,
 		stopCancel:            stopCancel,
 		runStore:              newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
@@ -1227,13 +1247,17 @@ const defaultStopBudget = 30 * time.Second
 // a package-level var — package vars under t.Parallel races silently.
 const gcWaitBudget = 5 * time.Second
 
-// stopBudget is the active stop budget used by Scheduler.Stop(). Tests
-// MUST mutate it only through the WithStopBudget seam in
-// scheduler_testutil_test.go so the var swap is paired with a
-// t.Cleanup restore — direct writes from t.Parallel tests would race
-// a concurrent Stop on another Scheduler instance with real
-// wall-clock timeouts.
-var stopBudget = defaultStopBudget
+// R260528-BUG-5: stopBudget moved off the package-level var onto
+// *Scheduler.stopBudget so two Schedulers in parallel tests no longer
+// share the same global. The package var version made
+// `withShortStopBudget(t, 50ms)` on one Scheduler observable to a
+// concurrent Stop() on a sibling Scheduler — under -race + t.Parallel
+// the sibling would clip its real-wall-clock 30s budget to 50ms and
+// surface intermittent shutdown-budget breach metrics. Per-instance
+// field is set from cfg.StopBudget (defaults to defaultStopBudget) at
+// NewScheduler time. WithStopBudget testutil now mutates s.stopBudget
+// instead of the global; existing call sites in stop_budget_test.go
+// keep their signature.
 
 // (R248-DEADCODE-24 / #1216) WithStopBudget moved to
 // scheduler_testutil_test.go: it is test-only and previously living in
@@ -1374,7 +1398,7 @@ func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
 	// is the explicit, documented pattern. The first select still uses
 	// the NewTimer so we can defer-Stop it on the early-drain path.
 	stopStart = time.Now()
-	deadline := time.NewTimer(stopBudget)
+	deadline := time.NewTimer(s.stopBudget)
 	defer deadline.Stop()
 
 	select {
@@ -1384,7 +1408,7 @@ func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
 		// R250-GO-20 (#1083): see GC counter rationale above.
 		metrics.CronStopBudgetExceededDrainTotal.Add(1)
 		slog.Warn("cron scheduler: stop deadline exceeded before cron.Stop drained, proceeding",
-			"budget", stopBudget)
+			"budget", s.stopBudget)
 	}
 	return deadlineHit, stopStart
 }
@@ -1438,7 +1462,7 @@ func (s *Scheduler) drainTriggerWG(stopStart time.Time) {
 	// from time.After is unreachable for explicit Stop. Mirror the
 	// first select's NewTimer + defer Stop pattern (line ~820) so
 	// both halves of Stop release timer state deterministically.
-	remaining := stopBudget - time.Since(stopStart)
+	remaining := s.stopBudget - time.Since(stopStart)
 	if remaining < time.Millisecond {
 		remaining = time.Millisecond
 	}
@@ -1450,7 +1474,7 @@ func (s *Scheduler) drainTriggerWG(stopStart time.Time) {
 		// R250-GO-20 (#1083): see GC counter rationale above.
 		metrics.CronStopBudgetExceededTriggerTotal.Add(1)
 		slog.Warn("cron scheduler: stop deadline exceeded during triggerWG wait, proceeding",
-			"budget", stopBudget, "remaining_ms", remaining.Milliseconds())
+			"budget", s.stopBudget, "remaining_ms", remaining.Milliseconds())
 	}
 }
 

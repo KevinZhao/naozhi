@@ -27,27 +27,25 @@ import (
 	"time"
 )
 
-// withShortStopBudget shortens stopBudget for the duration of a test and
-// restores the original on cleanup. R247-CR-18: routed through
-// WithStopBudget so the var swap + restore stays paired in one place,
-// and future migration to a Scheduler-field design only touches that
-// helper. Test-side override is safe because we run these tests
-// serially relative to other cron tests that call Stop — no
-// cron_test.go uses t.Parallel around Scheduler lifecycle.
-func withShortStopBudget(t *testing.T, d time.Duration) {
+// withShortStopBudget shortens s.stopBudget for the duration of a test
+// and restores the original on cleanup. R247-CR-18: routed through
+// WithStopBudget so the swap + restore stays paired in one place.
+// R260528-BUG-5: now takes a *Scheduler and mutates the per-instance
+// field; parallel tests with multiple Scheduler instances no longer
+// race on shared package-level state.
+func withShortStopBudget(t *testing.T, s *Scheduler, d time.Duration) {
 	t.Helper()
-	t.Cleanup(WithStopBudget(d))
+	t.Cleanup(WithStopBudget(s, d))
 }
 
 func TestStop_BudgetCapsTotalDuration(t *testing.T) {
-	withShortStopBudget(t, 80*time.Millisecond)
-
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{
 		StorePath:   filepath.Join(dir, "cron.json"),
 		MaxJobs:     5,
 		ExecTimeout: time.Hour, // worst-case prod value — proves we do not use this
 	})
+	withShortStopBudget(t, s, 80*time.Millisecond)
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -72,19 +70,18 @@ func TestStop_BudgetCapsTotalDuration(t *testing.T) {
 	// (slack for scheduler jitter on slow CI). If the old per-wait
 	// doubling crept back this would regress to ≥1h+5s.
 	if elapsed > 400*time.Millisecond {
-		t.Errorf("Stop took %v, want < 400ms (budget=%v)", elapsed, stopBudget)
+		t.Errorf("Stop took %v, want < 400ms (budget=%v)", elapsed, s.stopBudget)
 	}
 }
 
 func TestStop_BudgetRunsSaveJobsEvenOnTimeout(t *testing.T) {
-	withShortStopBudget(t, 50*time.Millisecond)
-
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
 	s := NewScheduler(SchedulerConfig{
 		StorePath: path,
 		MaxJobs:   5,
 	})
+	withShortStopBudget(t, s, 50*time.Millisecond)
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -128,13 +125,12 @@ func TestStop_BudgetRunsSaveJobsEvenOnTimeout(t *testing.T) {
 func TestStop_FastPathDrainsCleanly(t *testing.T) {
 	// Sanity: when nothing holds triggerWG the Stop path returns
 	// basically immediately and budget does not affect elapsed time.
-	withShortStopBudget(t, 5*time.Second)
-
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
 	})
+	withShortStopBudget(t, s, 5*time.Second)
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -154,13 +150,12 @@ func TestStop_FastPathDrainsCleanly(t *testing.T) {
 // accidental second Stop) still works. WaitGroup counter staying >0
 // after Stop is tolerable because the host process is about to exit.
 func TestStop_ConcurrentTriggerWGNotLostOnBudget(t *testing.T) {
-	withShortStopBudget(t, 30*time.Millisecond)
-
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
 	})
+	withShortStopBudget(t, s, 30*time.Millisecond)
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
