@@ -1,4 +1,4 @@
-package server
+package project
 
 import (
 	"context"
@@ -9,12 +9,13 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// redactGitRemoteURL strips embedded userinfo (user:password@) from a git
+// RedactGitRemoteURL strips embedded userinfo (user:password@) from a git
 // remote URL before exposing it over the dashboard API. `.git/config` often
 // stores credentials like https://user:pat@github.com/org/repo when the user
 // originally cloned with a token; surfacing that verbatim in JSON responses
@@ -25,7 +26,7 @@ import (
 // unchanged. Returning "" for those would make the dashboard lose the clone
 // URL for every SSH-cloned project, which is a worse failure mode than the
 // theoretical "userinfo in an unparseable form" edge case.
-func redactGitRemoteURL(raw string) string {
+func RedactGitRemoteURL(raw string) string {
 	if raw == "" {
 		return ""
 	}
@@ -59,8 +60,8 @@ func validateProjectName(name string) error {
 	return project.ValidateProjectName(name)
 }
 
-// ProjectHandlers groups the project management API endpoints.
-type ProjectHandlers struct {
+// Handlers groups the project management API endpoints.
+type Handlers struct {
 	projectMgr *project.Manager
 	router     *session.Router
 	// resolver centralises planner-view opts (docs/rfc/key-resolver.md
@@ -79,7 +80,7 @@ type ProjectHandlers struct {
 	// tests assign `h.baseCtx = ctx` directly. Production wiring
 	// happens via `SetBaseContext` from registerDashboard once
 	// `s.hub.ctx` exists. Nil falls back to Background in restartCtx
-	// so a handler cannot panic on an un-wired ProjectHandlers
+	// so a handler cannot panic on an un-wired Handlers
 	// (matches the prior closure's `Background()` fallback).
 	baseCtx context.Context
 	// filesExistsLimiter caps how often a single authenticated caller can
@@ -90,18 +91,18 @@ type ProjectHandlers struct {
 	// (NFS mounts, gigantic monorepos, symlink loops). Mirrors the
 	// uploadLimiter policy (6s period × 10 burst ≈ 10/min) since both
 	// endpoints do filesystem I/O and belong to the same DoS class.
-	// Nil in tests that build ProjectHandlers by hand; handleFilesExists
+	// Nil in tests that build Handlers by hand; HandleFilesExists
 	// guards with a nil check so the limiter is optional. S13.
-	filesExistsLimiter *ipLimiter
+	filesExistsLimiter IPLimiter
 	// configPutLimiter caps PUT /api/projects/config writes per IP. The
 	// handler persists ProjectConfig to disk and broadcasts a WS update
 	// fan-out to every subscribed dashboard client; an unmetered post-auth
 	// caller can therefore drive disk I/O + N×WS fan-out at line rate.
 	// 5/sec burst 5 ≈ 5×60=300/min — well above interactive UX (a human
 	// only saves config sub-second after edit) but below abuse rates.
-	// Nil-safe in tests; handleConfigPut guards with a nil check.
+	// Nil-safe in tests; HandleConfigPut guards with a nil check.
 	// R247-SEC-7.
-	configPutLimiter *ipLimiter
+	configPutLimiter IPLimiter
 	// publicTmpEnabled gates the __public_tmp__ pseudo-project (R237-SEC-5,
 	// #646). When false (default), any request naming publicTmpProject as
 	// the project field is rejected as "project not found" — same surface
@@ -114,23 +115,51 @@ type ProjectHandlers struct {
 	publicTmpEnabled bool
 }
 
+// Deps bundles all wiring for New. Phase 2 (server-split-phase4-design.md
+// §6.5 Plan B): exported ctor so internal/server's buildProjectHandlers
+// can construct without needing access to unexported fields.
+type Deps struct {
+	ProjectMgr         *project.Manager
+	Router             *session.Router
+	Resolver           *session.KeyResolver
+	NodeAccess         NodeAccessor
+	NodeCache          *node.CacheManager
+	FilesExistsLimiter IPLimiter
+	ConfigPutLimiter   IPLimiter
+	PublicTmpEnabled   bool
+}
+
+// New constructs a Handlers from injected deps.
+func New(d Deps) *Handlers {
+	return &Handlers{
+		projectMgr:         d.ProjectMgr,
+		router:             d.Router,
+		resolver:           d.Resolver,
+		nodeAccess:         d.NodeAccess,
+		nodeCache:          d.NodeCache,
+		filesExistsLimiter: d.FilesExistsLimiter,
+		configPutLimiter:   d.ConfigPutLimiter,
+		publicTmpEnabled:   d.PublicTmpEnabled,
+	}
+}
+
 // SetBaseContext wires the long-lived process context (typically
 // `Hub.ctx`) used by the planner-restart timeout. Called from
 // registerDashboard after the Hub is constructed. Pre-wiring tests
 // can assign `h.baseCtx` directly; this setter exists so production
 // callers don't need to reach into an unexported field. R247-ARCH-15
 // (#650).
-func (h *ProjectHandlers) SetBaseContext(ctx context.Context) {
+func (h *Handlers) SetBaseContext(ctx context.Context) {
 	h.baseCtx = ctx
 }
 
 // restartCtx returns the parent context for `handleRestartPlanner`'s
 // 30s timeout. Falls back to context.Background() when baseCtx has
-// not been wired (test paths that build ProjectHandlers by hand
+// not been wired (test paths that build Handlers by hand
 // without calling SetBaseContext). Mirrors the prior `ctxFunc`
 // closure's nil branch so behaviour is unchanged for existing call
 // sites. R247-ARCH-15 (#650).
-func (h *ProjectHandlers) restartCtx() context.Context {
+func (h *Handlers) restartCtx() context.Context {
 	if h.baseCtx != nil {
 		return h.baseCtx
 	}
@@ -160,9 +189,9 @@ type projectsListEntry struct {
 }
 
 // GET /api/projects — list all projects (local + remote).
-func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	if h.projectMgr == nil {
-		writeJSON(w, []any{})
+		httputil.WriteJSON(w, []any{})
 		return
 	}
 
@@ -183,7 +212,7 @@ func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			PlannerModel: h.projectMgr.EffectivePlannerModel(p),
 			Config:       p.Config,
 			Favorite:     p.Config.Favorite,
-			GitRemoteURL: redactGitRemoteURL(p.GitRemoteURL),
+			GitRemoteURL: RedactGitRemoteURL(p.GitRemoteURL),
 			GitHub:       p.IsGitHub,
 		})
 	}
@@ -201,15 +230,15 @@ func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 				allProjects = append(allProjects, item)
 			}
 		}
-		writeJSON(w, allProjects)
+		httputil.WriteJSON(w, allProjects)
 		return
 	}
 
-	writeJSON(w, result)
+	httputil.WriteJSON(w, result)
 }
 
 // GET /api/projects/config?name=...
-func (h *ProjectHandlers) handleConfigGet(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandleConfigGet(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if err := validateProjectName(name); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -226,18 +255,18 @@ func (h *ProjectHandlers) handleConfigGet(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	writeJSON(w, p.Config)
+	httputil.WriteJSON(w, p.Config)
 }
 
 // PUT /api/projects/config?name=...
-func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandleConfigPut(w http.ResponseWriter, r *http.Request) {
 	// R247-SEC-7: cap per-IP rate before any work — disk write +
 	// dashboard-wide WS fan-out is otherwise rate-unlimited for any
 	// authenticated caller. Same nil-guard convention as filesExistsLimiter
-	// so tests that build ProjectHandlers by hand still pass.
+	// so tests that build Handlers by hand still pass.
 	if h.configPutLimiter != nil && !h.configPutLimiter.AllowRequest(r) {
 		w.Header().Set("Retry-After", "1")
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "config update rate limit exceeded"})
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "config update rate limit exceeded"})
 		return
 	}
 	name := r.URL.Query().Get("name")
@@ -270,7 +299,7 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
-		writeOK(w)
+		httputil.WriteOK(w)
 		return
 	}
 
@@ -280,7 +309,7 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 	}
 
 	var cfg project.ProjectConfig
-	if err := decodeJSONBody(r, &cfg); err != nil {
+	if err := httputil.DecodeJSONBody(r, &cfg); err != nil {
 		// Fixed error string: echoing err.Error() leaks the decoder's field
 		// names / offsets which help schema enumeration.
 		slog.Debug("project config: decode failed", "err", err, "project", name)
@@ -313,11 +342,11 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	writeOK(w)
+	httputil.WriteOK(w)
 }
 
 // POST /api/projects/favorite?name=...&favorite=true|false
-func (h *ProjectHandlers) handleFavoriteToggle(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandleFavoriteToggle(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if err := validateProjectName(name); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -348,7 +377,7 @@ func (h *ProjectHandlers) handleFavoriteToggle(w http.ResponseWriter, r *http.Re
 		if h.router != nil {
 			h.router.BumpVersion()
 		}
-		writeJSON(w, map[string]any{"status": "ok", "favorite": favorite})
+		httputil.WriteJSON(w, map[string]any{"status": "ok", "favorite": favorite})
 		return
 	}
 
@@ -372,11 +401,11 @@ func (h *ProjectHandlers) handleFavoriteToggle(w http.ResponseWriter, r *http.Re
 	if h.router != nil {
 		h.router.BumpVersion()
 	}
-	writeJSON(w, map[string]any{"status": "ok", "favorite": favorite})
+	httputil.WriteJSON(w, map[string]any{"status": "ok", "favorite": favorite})
 }
 
 // POST /api/projects/planner/restart?name=...
-func (h *ProjectHandlers) handlePlannerRestart(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandlePlannerRestart(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if err := validateProjectName(name); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -395,7 +424,7 @@ func (h *ProjectHandlers) handlePlannerRestart(w http.ResponseWriter, r *http.Re
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
-		writeJSON(w, map[string]string{"status": "restarting"})
+		httputil.WriteJSON(w, map[string]string{"status": "restarting"})
 		return
 	}
 
@@ -455,5 +484,14 @@ func (h *ProjectHandlers) handlePlannerRestart(w http.ResponseWriter, r *http.Re
 	}
 	slog.Info("planner restarted", "project", name)
 
-	writeJSON(w, map[string]string{"status": "restarted"})
+	httputil.WriteJSON(w, map[string]string{"status": "restarted"})
+}
+
+// HasFilesExistsLimiter reports whether the FilesExistsLimiter has been
+// wired. Phase 2 (server-split-phase4-design.md §6.5 Plan B) — exposed for
+// the server-package integration test that pins server.New must wire a
+// non-nil limiter (S13). Direct field access is prevented because the
+// field is unexported.
+func (h *Handlers) HasFilesExistsLimiter() bool {
+	return h.filesExistsLimiter != nil
 }

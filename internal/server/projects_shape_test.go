@@ -31,7 +31,7 @@ import (
 //     and note it in RNEW-ARCH-401.
 //
 // Scope: top-level is an array (not an object), so only per-project keys
-// are enforced. redactGitRemoteURL is separately tested — we only pin
+// are enforced. dashproject.RedactGitRemoteURL is separately tested — we only pin
 // presence of git_remote_url, not its value.
 func TestDashboardJSON_Projects_ShapeContract(t *testing.T) {
 	// Materialize a temp workspace with one demo project so handleList walks
@@ -66,7 +66,7 @@ func TestDashboardJSON_Projects_ShapeContract(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/projects", nil)
 	w := httptest.NewRecorder()
-	srv.projectH.handleList(w, req)
+	srv.projectH.HandleList(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}

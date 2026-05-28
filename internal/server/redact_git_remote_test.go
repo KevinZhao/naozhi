@@ -5,10 +5,12 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 )
 
 // TestRedactGitRemoteURL_StripsUserinfo covers the happy-path contracts
-// redactGitRemoteURL has been shipping since the Round 46 PAT-leak fix.
+// dashproject.RedactGitRemoteURL has been shipping since the Round 46 PAT-leak fix.
 // Pin them as a table so future refactors (e.g. switching url.Parse for a
 // custom scanner to handle broken URLs) cannot silently regress.
 func TestRedactGitRemoteURL_StripsUserinfo(t *testing.T) {
@@ -45,15 +47,15 @@ func TestRedactGitRemoteURL_StripsUserinfo(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := redactGitRemoteURL(tc.in)
+			got := dashproject.RedactGitRemoteURL(tc.in)
 			if got != tc.want {
-				t.Errorf("redactGitRemoteURL(%q) = %q, want %q", tc.in, got, tc.want)
+				t.Errorf("dashproject.RedactGitRemoteURL(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 			// Any output that still contains "ghp_", "glpat-", or "Bearer " is
 			// a credential leak regardless of the happy-path expectation.
 			for _, marker := range []string{"ghp_", "glpat-", "Bearer "} {
 				if strings.Contains(got, marker) {
-					t.Errorf("redactGitRemoteURL(%q) = %q contains credential marker %q",
+					t.Errorf("dashproject.RedactGitRemoteURL(%q) = %q contains credential marker %q",
 						tc.in, got, marker)
 				}
 			}
@@ -64,13 +66,13 @@ func TestRedactGitRemoteURL_StripsUserinfo(t *testing.T) {
 // TestRedactGitRemoteURL_NodeCacheForwardIsRedacted is the R47-DESIGN-REMOTE-
 // NODE-GIT-CREDENTIAL pin: every field we lift out of the node cache (which
 // comes from a remote peer that may be running an older binary without its
-// own redaction pass) MUST be passed through redactGitRemoteURL before
+// own redaction pass) MUST be passed through dashproject.RedactGitRemoteURL before
 // landing in a dashboard JSON response.
 //
 // Today only `git_remote_url` is transferred — the source-level test below
 // reads dashboard_session.go and asserts two invariants:
 //
-//  1. The merge loop still calls redactGitRemoteURL on the `git_remote_url`
+//  1. The merge loop still calls dashproject.RedactGitRemoteURL on the `git_remote_url`
 //     field read from `item`.
 //  2. No other "known credential-bearing fields" have been added to the
 //     merge loop without a redactor. The current risk list: anything
@@ -88,13 +90,13 @@ func TestRedactGitRemoteURL_NodeCacheForwardIsRedacted(t *testing.T) {
 		t.Fatalf("read dashboard_session.go: %v", err)
 	}
 
-	// 1) redactGitRemoteURL must still wrap the node-cache git_remote_url
+	// 1) dashproject.RedactGitRemoteURL must still wrap the node-cache git_remote_url
 	// extraction. If someone "simplifies" it to a direct assignment, the
 	// remote-peer-behind-on-patches scenario re-opens the PAT leak.
 	redactedRead := regexp.MustCompile(
-		`item\["git_remote_url"\]\.\(string\)[\s\S]{0,120}redactGitRemoteURL\(`)
+		`item\["git_remote_url"\]\.\(string\)[\s\S]{0,120}dashproject.RedactGitRemoteURL\(`)
 	if !redactedRead.Match(src) {
-		t.Error("dashboard_session.go no longer runs redactGitRemoteURL on the " +
+		t.Error("dashboard_session.go no longer runs dashproject.RedactGitRemoteURL on the " +
 			"node-cache forwarded `git_remote_url` field. R47-DESIGN-REMOTE-NODE-" +
 			"GIT-CREDENTIAL: remote nodes may be older binaries that have not " +
 			"redacted their own outputs; the primary MUST always scrub credentials " +

@@ -260,7 +260,7 @@ var serverFieldType = map[string]string{
 	"agentEventsH":      "*agentevents.Handler",
 	"sendH":             "*SendHandler",
 	"discoveryH":        "*discovery.Handlers",
-	"projectH":          "*ProjectHandlers",
+	"projectH":          "*dashproject.Handlers",
 	"transcribeH":       "*transcribe.Handler",
 	"cronH":             "*CronHandlers",
 	"scratchH":          "*scratch.Handler",

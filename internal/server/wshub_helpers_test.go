@@ -6,6 +6,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/project"
 )
 
 // TestCapHistoryBatch locks in R68-PERF-H1: eventPushLoop must truncate
@@ -67,9 +68,9 @@ func TestValidateProjectName(t *testing.T) {
 		{"empty rejected", "", false},
 		{"simple ASCII", "myproj", true},
 		{"Chinese passes", "项目甲", true},
-		{"128 bytes exact", string(make([]byte, maxProjectNameLen)), false}, // NUL chars reject
-		{"128 printable exact", repeatByte('a', maxProjectNameLen), true},
-		{"129 bytes rejected", repeatByte('a', maxProjectNameLen+1), false},
+		{"128 bytes exact", string(make([]byte, project.MaxProjectNameBytes)), false}, // NUL chars reject
+		{"128 printable exact", repeatByte('a', project.MaxProjectNameBytes), true},
+		{"129 bytes rejected", repeatByte('a', project.MaxProjectNameBytes+1), false},
 		{"NUL rejected", "foo\x00bar", false},
 		{"LF rejected", "foo\nbar", false},
 		{"CR rejected", "foo\rbar", false},
@@ -79,7 +80,7 @@ func TestValidateProjectName(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := validateProjectName(c.in)
+			err := project.ValidateProjectName(c.in)
 			if c.ok && err != nil {
 				t.Errorf("unexpected err: %v", err)
 			}

@@ -1,4 +1,4 @@
-package server
+package project
 
 import (
 	"context"
@@ -19,11 +19,12 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// fileETagSalt is a per-process random byte string mixed into the ETag
-// hash for handleFileGet. R214-SEC-4 (issue #418): the original
+// FileETagSalt is a per-process random byte string mixed into the ETag
+// hash for HandleFileGet. R214-SEC-4 (issue #418): the original
 // sha256(size||mtime)[:8] form was theoretically probe-able — an
 // authenticated caller who could enumerate (size, mtime) candidates
 // could submit each as If-None-Match against a known path and use the
@@ -45,7 +46,7 @@ import (
 // failures during normal operation are pathologically rare (<1 in
 // millions of years on modern Linux) so a single Read at init is the
 // right ergonomic.
-var fileETagSalt = func() []byte {
+var FileETagSalt = func() []byte {
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		// crypto/rand init failure is fatal: serving ETags without salt
@@ -54,7 +55,7 @@ var fileETagSalt = func() []byte {
 		// handles in-flight rand.Read failures (errUploadStoreFull),
 		// only escalated because we cannot return an error from a
 		// package-level var initialiser.
-		panic("crypto/rand unavailable for fileETagSalt: " + err.Error())
+		panic("crypto/rand unavailable for FileETagSalt: " + err.Error())
 	}
 	return b[:]
 }()
@@ -96,7 +97,7 @@ const (
 // The handler intercepts this name before the projectMgr lookup so a real
 // project named "__public_tmp__" on disk cannot accidentally shadow it.
 //
-// R237-SEC-5 (#646): the interception is gated by ProjectHandlers.publicTmpEnabled
+// R237-SEC-5 (#646): the interception is gated by Handlers.publicTmpEnabled
 // — default false so multi-user deployments fall through to the normal
 // "project not found" surface. Single-operator setups flip it on via
 // `server.public_tmp_enabled: true` in config.yaml.
@@ -382,7 +383,7 @@ func resolveProjectFile(projectPath, rel string) (string, error) {
 
 // resolveProjectFileWithRoot is the inner half of resolveProjectFile: it
 // accepts an already-resolved project root so callers iterating over many
-// paths (e.g. handleFilesExists, which does up to 100 stats per request)
+// paths (e.g. HandleFilesExists, which does up to 100 stats per request)
 // don't re-EvalSymlinks the same root for every call. Callers who only
 // resolve one path should use resolveProjectFile. R59-PERF-M3.
 func resolveProjectFileWithRoot(rootResolved, rel string) (string, error) {
@@ -589,33 +590,33 @@ func contentDisposition(kind, resolved string) string {
 // get a "preview / download" button pair. Paths that don't resolve or fall
 // outside the workspace come back as {exists:false} rather than an error, so
 // the frontend can treat validation as a cheap yes/no.
-func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 	// S13: Rate-limit before any work to cap the cost a single authenticated
 	// caller can impose. The endpoint fans out up to maxExistsPaths (100)
 	// filesystem stats per request with a fileStatTimeout (2s) budget; without
 	// this gate a post-auth attacker targeting deep NFS mounts, symlink loops,
 	// or gigantic directory trees can tie up worker goroutines. Nil-guarded for
-	// tests that build ProjectHandlers by hand via newProjectHandlersForTest;
-	// wiring lives in server.New (see ProjectHandlers.filesExistsLimiter godoc).
+	// tests that build Handlers by hand via newProjectHandlersForTest;
+	// wiring lives in server.New (see Handlers.filesExistsLimiter godoc).
 	if h.filesExistsLimiter != nil && !h.filesExistsLimiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "files/exists rate limit exceeded"})
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "files/exists rate limit exceeded"})
 		return
 	}
 	if h.projectMgr == nil {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
 		return
 	}
 
 	r = withMaxBytes(w, r, maxExistsBody)
 	var req existsReq
-	if err := decodeJSONBody(r, &req); err != nil {
+	if err := httputil.DecodeJSONBody(r, &req); err != nil {
 		slog.Debug("files exists: decode failed", "err", err)
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
 
 	if req.Project == "" {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project is required"})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project is required"})
 		return
 	}
 	// __public_tmp__ pseudo-project routes /tmp/... preview without a real
@@ -628,28 +629,28 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 		rootPath = publicTmpRoot
 	} else {
 		// R183-SEC-M2: every other /api/projects path gates on validateProjectName
-		// before touching projectMgr; handleFilesExists previously passed raw
+		// before touching projectMgr; HandleFilesExists previously passed raw
 		// req.Project straight into the map lookup. The miss path is currently
 		// silent, but one future slog.Debug("project not found", ...) is enough
 		// to open a log-injection hole. Enforce the trust-boundary policy up front.
 		if err := validateProjectName(req.Project); err != nil {
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
+			httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
 			return
 		}
 	}
 	if len(req.Paths) == 0 {
-		writeJSON(w, map[string]any{"results": map[string]existsEntry{}})
+		httputil.WriteJSON(w, map[string]any{"results": map[string]existsEntry{}})
 		return
 	}
 	if len(req.Paths) > maxExistsPaths {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("too many paths (max %d)", maxExistsPaths)})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("too many paths (max %d)", maxExistsPaths)})
 		return
 	}
 
 	if rootPath == "" {
 		p := h.projectMgr.Get(req.Project)
 		if p == nil {
-			writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+			httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
 			return
 		}
 		rootPath = p.Path
@@ -669,7 +670,7 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 	// on Linux which would bind path resolution to the process CWD.
 	// R61-GO-1.
 	if rootPath == "" {
-		writeJSON(w, map[string]any{"results": map[string]existsEntry{}})
+		httputil.WriteJSON(w, map[string]any{"results": map[string]existsEntry{}})
 		return
 	}
 	rootResolved, err := filepath.EvalSymlinks(rootPath)
@@ -677,7 +678,7 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 		// Treat an unresolvable project root as "nothing exists" so the
 		// frontend renders plain text fallback. Matching the existing
 		// contract: errors collapse to {exists:false}.
-		writeJSON(w, map[string]any{"results": map[string]existsEntry{}})
+		httputil.WriteJSON(w, map[string]any{"results": map[string]existsEntry{}})
 		return
 	}
 
@@ -691,10 +692,10 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 			break
 		}
 		entry := statRelWithRoot(rootResolved, rel)
-		// R245-SEC-7 (#831): existence-probe parity with handleFileGet's
+		// R245-SEC-7 (#831): existence-probe parity with HandleFileGet's
 		// foreign-private gate. Without this the dashboard could
 		// enumerate /tmp/<other-uid>/* via the batch-exists API even
-		// though handleFileGet refuses to serve the bytes — the
+		// though HandleFileGet refuses to serve the bytes — the
 		// {Exists, Size, Mime} fields alone leak presence + first-512-byte
 		// MIME signature. Re-Lstat the resolved entry so we evaluate
 		// owner/mode on the same inode the existence reply describes.
@@ -717,7 +718,7 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 		results[rel] = entry
 	}
 
-	writeJSON(w, map[string]any{"results": results})
+	httputil.WriteJSON(w, map[string]any{"results": results})
 }
 
 // statRelWithRoot stats a single project-relative path and returns the
@@ -815,12 +816,12 @@ func mimeFromExtOnly(resolved string) (string, bool) {
 //     Content-Disposition=attachment. No body size cap (but http.ServeContent
 //     handles Range so the client can resume).
 //
-// ETag is sha256(size||mtime||fileETagSalt)[:12] in all modes. 304 on
+// ETag is sha256(size||mtime||FileETagSalt)[:12] in all modes. 304 on
 // If-None-Match. The per-process salt prevents probe-based recovery of
-// (size, mtime) — see fileETagSalt godoc.
-func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) {
+// (size, mtime) — see FileETagSalt godoc.
+func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 	if h.projectMgr == nil {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
 		return
 	}
 
@@ -831,11 +832,11 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 		mode = "preview"
 	}
 	if mode != "preview" && mode != "raw" && mode != "download" && mode != "render" {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid mode"})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid mode"})
 		return
 	}
 	if project == "" || path == "" {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project and path are required"})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project and path are required"})
 		return
 	}
 	// __public_tmp__ pseudo-project: see publicTmpProject godoc. Resolve
@@ -845,15 +846,15 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	if project == publicTmpProject && h.publicTmpEnabled {
 		rootPath = publicTmpRoot
 	} else {
-		// R183-SEC-M2: same trust-boundary gate as handleFilesExists above.
+		// R183-SEC-M2: same trust-boundary gate as HandleFilesExists above.
 		if err := validateProjectName(project); err != nil {
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
+			httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
 			return
 		}
 
 		p := h.projectMgr.Get(project)
 		if p == nil {
-			writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+			httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
 			return
 		}
 		rootPath = p.Path
@@ -881,7 +882,7 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 				"err", err,
 				"project", project)
 		}
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
 
@@ -893,7 +894,7 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	// Reject as 404 to match the rest of the not-found / escape contract.
 	info, err := os.Lstat(resolved)
 	if err != nil || info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
 
@@ -908,7 +909,7 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	// projects are operator-registered roots whose contents the dashboard
 	// is by definition cleared to read.
 	if project == publicTmpProject && isPublicTmpForeignPrivate(info) {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
 
@@ -919,7 +920,7 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	// sockets reflect IPC payload, core dumps contain process memory,
 	// PID files leak process structure. See publicTmpDeniedSuffixes.
 	if project == publicTmpProject && isPublicTmpDeniedName(resolved) {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
 
@@ -950,12 +951,12 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 				"project", project,
 				"path", path)
 		}
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
 	if resolved != rootResolved &&
 		!strings.HasPrefix(resolved, rootResolved+string(filepath.Separator)) {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
 
@@ -973,17 +974,17 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	// shrinks to "attacker swaps File A's bytes with File B's bytes within
 	// the same workspace+sensitive-name guard set" — bounded by the
 	// authorization gate the request already passed.
-	f, err := openWorkspaceFile(resolved)
+	f, err := OpenWorkspaceFile(resolved)
 	if err != nil {
 		// O_NOFOLLOW returns ELOOP on a final-component symlink. Collapse to
 		// 404 so attacker probing cannot distinguish "missing" from "swapped
 		// to symlink" — same contract as the Lstat-symlink branch above.
 		if !errors.Is(err, fs.ErrNotExist) {
-			slog.Warn("project files: openWorkspaceFile IO failure",
+			slog.Warn("project files: OpenWorkspaceFile IO failure",
 				"err", err,
 				"project", project)
 		}
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
 	// fstat the fd so size/mtime/regular-mode reflect the SAME inode the
@@ -993,7 +994,7 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	finfo, ferr := f.Stat()
 	if ferr != nil || finfo.IsDir() || !finfo.Mode().IsRegular() {
 		_ = f.Close()
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
 	info = finfo
@@ -1006,7 +1007,7 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	// R224-PERF-4: same strconv-into-stack-buffer trick as dashboard_send's
 	// handleAttachment to skip fmt.Sprintf's reflection path.
 	//
-	// R214-SEC-4 (issue #418): mix in fileETagSalt (per-process random 32
+	// R214-SEC-4 (issue #418): mix in FileETagSalt (per-process random 32
 	// bytes) so the ETag bytes cannot be precomputed from candidate
 	// (size, mtime) tuples. Without the salt an authenticated caller could
 	// probe for the file's exact size+mtime via an If-None-Match oracle —
@@ -1019,7 +1020,7 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	etagSeed = append(etagSeed, '|')
 	etagSeed = strconv.AppendInt(etagSeed, info.ModTime().UnixNano(), 10)
 	etagSeed = append(etagSeed, '|')
-	etagSeed = append(etagSeed, fileETagSalt...)
+	etagSeed = append(etagSeed, FileETagSalt...)
 	etagSum := sha256.Sum256(etagSeed)
 	etag := `"` + hex.EncodeToString(etagSum[:12]) + `"`
 	if inm := r.Header.Get("If-None-Match"); inm != "" && inm == etag {
@@ -1091,7 +1092,7 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 // -html`, Playwright trace, pytest-html) and most SVG diagrams emit self-
 // contained single-file content and are unaffected. Relative-asset support is
 // B2, gated on actual user demand.
-func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, f *os.File, resolved string, info os.FileInfo) {
+func (h *Handlers) serveRender(w http.ResponseWriter, r *http.Request, f *os.File, resolved string, info os.FileInfo) {
 	// R249-SEC-5: mirror servePreview / serveRaw / serveDownload — refuse
 	// credential-bearing names even when the bytes happen to sniff as
 	// text/html or image/svg+xml. Without this gate an attacker who can
@@ -1100,15 +1101,15 @@ func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, f 
 	// blocking it. The sensitive list is full-path scanned so subtree
 	// stashes like `secrets/db.yaml` or `.ssh/known_hosts` are caught.
 	if isSensitiveDownloadPath(resolved) {
-		writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": "render blocked for sensitive file name"})
+		httputil.WriteJSONStatus(w, http.StatusForbidden, map[string]string{"error": "render blocked for sensitive file name"})
 		return
 	}
 	if info.Size() > maxRawBytes {
-		writeJSONStatus(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "file too large for inline render; use download mode"})
+		httputil.WriteJSONStatus(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "file too large for inline render; use download mode"})
 		return
 	}
 
-	// R219-SEC-2 (#655): fd opened once by handleFileGet with O_NOFOLLOW and
+	// R219-SEC-2 (#655): fd opened once by HandleFileGet with O_NOFOLLOW and
 	// plumbed in; no second os.Open here so an inode-swap between Lstat and
 	// serve* cannot redirect the streamed bytes. Caller owns Close.
 
@@ -1129,12 +1130,12 @@ func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, f 
 	// sniff, so an attacker cannot reach this branch with non-SVG bytes by
 	// renaming a .html file to .svg — the extension is authoritative for SVG.
 	if base != "text/html" && base != "application/xhtml+xml" && base != "image/svg+xml" {
-		writeJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "render mode supports HTML and SVG only; use preview/raw/download for other types"})
+		httputil.WriteJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "render mode supports HTML and SVG only; use preview/raw/download for other types"})
 		return
 	}
 
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "seek failed"})
+		httputil.WriteJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "seek failed"})
 		return
 	}
 
@@ -1177,7 +1178,7 @@ func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, f 
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	// Workspace bytes must not sit in shared proxy caches under no-auth
-	// deployments. handleFileGet already wrote Cache-Control: private,
+	// deployments. HandleFileGet already wrote Cache-Control: private,
 	// max-age=60 + ETag before dispatching; a no-store response with a
 	// validator is semantically inconsistent, so we drop the ETag too.
 	// Blob-URL consumers on the client re-fetch cheaply; no 304 needed.
@@ -1189,13 +1190,13 @@ func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, f 
 
 // servePreview returns the first ~maxPreviewBytes of a workspace file as JSON
 // so the dashboard drawer can render it with syntax highlighting. The `content`
-// field flows through writeJSON with SetEscapeHTML disabled, so the CLIENT
+// field flows through httputil.WriteJSON with SetEscapeHTML disabled, so the CLIENT
 // MUST assign it via `textContent` or pass it through DOMPurify/a whitelist
 // renderer before `innerHTML`. File contents are user-writable — Claude CLI
 // tools create/edit files arbitrarily — so raw innerHTML would be a stored-XSS
 // sink. dashboard.js currently uses `<pre><code>esc(content)</code></pre>`
 // with esc() HTML-escaping the payload, satisfying this contract. R71-SEC-L1.
-func (h *ProjectHandlers) servePreview(w http.ResponseWriter, f *os.File, resolved string, info os.FileInfo) {
+func (h *Handlers) servePreview(w http.ResponseWriter, f *os.File, resolved string, info os.FileInfo) {
 	// Mirror the serveDownload guard: a file like .netrc / .npmrc / id_rsa
 	// has a text MIME and would otherwise have its raw contents echoed in
 	// the JSON `content` field. The download path's credential allowlist
@@ -1205,7 +1206,7 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, f *os.File, resolv
 	// like `secrets/db.yaml` or `.ssh/known_hosts` no longer slip past the
 	// basename-only check.
 	if isSensitiveDownloadPath(resolved) {
-		writeJSON(w, map[string]any{
+		httputil.WriteJSON(w, map[string]any{
 			"content":   "",
 			"size":      info.Size(),
 			"mime":      "application/octet-stream",
@@ -1223,7 +1224,7 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, f *os.File, resolv
 		truncated = true
 	}
 
-	// R219-SEC-2 (#655): fd plumbed in by handleFileGet. No second os.Open;
+	// R219-SEC-2 (#655): fd plumbed in by HandleFileGet. No second os.Open;
 	// caller owns Close.
 
 	// Read head for MIME detection first so we can refuse non-text quickly
@@ -1237,7 +1238,7 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, f *os.File, resolv
 		// Not text — clients should switch to raw/download mode. Return a
 		// structured response so the drawer can render "binary file, please
 		// download" without a second round-trip.
-		writeJSON(w, map[string]any{
+		httputil.WriteJSON(w, map[string]any{
 			"content":   "",
 			"size":      size,
 			"mime":      mime,
@@ -1247,7 +1248,7 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, f *os.File, resolv
 		return
 	}
 	// R176-SEC-H3: text/html files MUST NOT flow through the preview JSON
-	// content path. writeJSON disables HTML escaping (SetEscapeHTML(false),
+	// content path. httputil.WriteJSON disables HTML escaping (SetEscapeHTML(false),
 	// dashboard.go), so any <script> bytes in the workspace file land
 	// verbatim inside the response JSON — the dashboard currently uses
 	// `<pre><code>esc(content)</code></pre>` which is safe, but that is a
@@ -1267,7 +1268,7 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, f *os.File, resolv
 	if strings.HasPrefix(mime, "text/html") ||
 		strings.HasPrefix(mime, "application/xhtml") ||
 		strings.HasPrefix(mime, "application/xml") || strings.HasPrefix(mime, "text/xml") {
-		writeJSON(w, map[string]any{
+		httputil.WriteJSON(w, map[string]any{
 			"content":   "",
 			"size":      size,
 			"mime":      mime,
@@ -1279,13 +1280,13 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, f *os.File, resolv
 
 	// Re-read from start; head may be <512 if file is tiny.
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "seek failed"})
+		httputil.WriteJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "seek failed"})
 		return
 	}
 	buf := make([]byte, readSize)
 	read, err := io.ReadFull(f, buf)
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "read failed"})
+		httputil.WriteJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "read failed"})
 		return
 	}
 	buf = buf[:read]
@@ -1298,7 +1299,7 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, f *os.File, resolv
 		content = strings.ToValidUTF8(content, "\uFFFD")
 	}
 
-	writeJSON(w, map[string]any{
+	httputil.WriteJSON(w, map[string]any{
 		"content":   content,
 		"size":      size,
 		"mime":      mime,
@@ -1307,7 +1308,7 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, f *os.File, resolv
 	})
 }
 
-func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, f *os.File, resolved string, info os.FileInfo) {
+func (h *Handlers) serveRaw(w http.ResponseWriter, r *http.Request, f *os.File, resolved string, info os.FileInfo) {
 	// R246-SEC-2: enforce the same sensitive-name guard as servePreview /
 	// serveDownload. A file like .env / id_rsa / .npmrc sniffs to text/plain
 	// and would otherwise pass the isTextMime check below, exposing
@@ -1315,15 +1316,15 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, f *os
 	// R247-SEC-10: full-path scan so e.g. `.ssh/foo` is rejected even when
 	// the basename is innocuous.
 	if isSensitiveDownloadPath(resolved) {
-		writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": "preview blocked for sensitive file name"})
+		httputil.WriteJSONStatus(w, http.StatusForbidden, map[string]string{"error": "preview blocked for sensitive file name"})
 		return
 	}
 	if info.Size() > maxRawBytes {
-		writeJSONStatus(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "file too large for inline preview; use download mode"})
+		httputil.WriteJSONStatus(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "file too large for inline preview; use download mode"})
 		return
 	}
 
-	// R219-SEC-2 (#655): fd plumbed in by handleFileGet. No second os.Open;
+	// R219-SEC-2 (#655): fd plumbed in by HandleFileGet. No second os.Open;
 	// caller owns Close.
 
 	// Sniff MIME from file head so we don't hand the browser octet-stream for
@@ -1335,7 +1336,7 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, f *os
 		// Refuse: force the client into download mode rather than streaming
 		// arbitrary binary as "inline". Otherwise a .exe linked from a
 		// workspace could auto-execute in IE-likes / old Safari.
-		writeJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "mime not supported for inline preview"})
+		httputil.WriteJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "mime not supported for inline preview"})
 		return
 	}
 	// text/html is same-origin HTML served from the dashboard. Firefox
@@ -1370,7 +1371,7 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, f *os
 		// through the sanitised renderer (servePreview / dashboard.js
 		// renderMd) and never as a direct opaque inline doc.
 		strings.HasPrefix(mime, "text/markdown") {
-		writeJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "inline preview disabled for this type; use download mode"})
+		httputil.WriteJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "inline preview disabled for this type; use download mode"})
 		return
 	}
 	// PDFs can embed JavaScript that Adobe Reader (as an external plugin)
@@ -1381,15 +1382,15 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, f *os
 	// download path so the browser / OS handler treats them as explicit
 	// attachments. R71-SEC-M2.
 	if mime == "application/pdf" {
-		// R219-SEC-2 (#655): handleFileGet now opens once and plumbs the fd
+		// R219-SEC-2 (#655): HandleFileGet now opens once and plumbs the fd
 		// through; serveDownload no longer re-opens, so we hand off the same
-		// *os.File directly. handleFileGet's deferred Close stays the sole
+		// *os.File directly. HandleFileGet's deferred Close stays the sole
 		// owner — serveDownload only reads, never closes.
 		h.serveDownload(w, r, f, resolved, info)
 		return
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "seek failed"})
+		httputil.WriteJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "seek failed"})
 		return
 	}
 
@@ -1416,18 +1417,18 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, f *os
 	http.ServeContent(w, r, filepath.Base(resolved), info.ModTime(), f)
 }
 
-func (h *ProjectHandlers) serveDownload(w http.ResponseWriter, r *http.Request, f *os.File, resolved string, info os.FileInfo) {
+func (h *Handlers) serveDownload(w http.ResponseWriter, r *http.Request, f *os.File, resolved string, info os.FileInfo) {
 	// SEC-009: deny credential-bearing files even on the explicit download
 	// path. servePreview already excludes .env via previewableByExt + the
 	// MIME guard, but download had no equivalent stop, letting authenticated
 	// users pull .env / .netrc / *.pem out of any workspace.
 	// R247-SEC-10: full-path scan blocks `secrets/db.yaml`, `.ssh/foo` etc.
 	if isSensitiveDownloadPath(resolved) {
-		writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": "file type not downloadable"})
+		httputil.WriteJSONStatus(w, http.StatusForbidden, map[string]string{"error": "file type not downloadable"})
 		return
 	}
 
-	// R219-SEC-2 (#655): fd plumbed in by handleFileGet (or relayed from
+	// R219-SEC-2 (#655): fd plumbed in by HandleFileGet (or relayed from
 	// serveRaw's PDF branch). No second os.Open; ownership stays with the
 	// caller's deferred Close.
 	//
@@ -1435,7 +1436,7 @@ func (h *ProjectHandlers) serveDownload(w http.ResponseWriter, r *http.Request, 
 	// first 512 bytes for MIME sniffing; rewind so http.ServeContent streams
 	// from offset 0.
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "seek failed"})
+		httputil.WriteJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "seek failed"})
 		return
 	}
 

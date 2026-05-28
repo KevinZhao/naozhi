@@ -11,8 +11,8 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
@@ -34,7 +34,6 @@ var dashboardJS embed.FS
 
 //go:embed static/agent_view.js
 var agentViewJS embed.FS
-
 
 // staticAssetETags holds precomputed strong-form ETags for embedded dashboard
 // assets. cron-dashboard-redesign P0 §6 — combined with the existing
@@ -285,18 +284,18 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /api/discovered/preview", auth(s.discoveryH.HandlePreview))
 	s.mux.HandleFunc("POST /api/discovered/takeover", auth(s.discoveryH.HandleTakeover))
 	s.mux.HandleFunc("POST /api/discovered/close", auth(s.discoveryH.HandleClose))
-	s.mux.HandleFunc("GET /api/projects", auth(s.projectH.handleList))
-	s.mux.HandleFunc("GET /api/projects/config", auth(s.projectH.handleConfigGet))
-	s.mux.HandleFunc("PUT /api/projects/config", auth(s.projectH.handleConfigPut))
-	s.mux.HandleFunc("POST /api/projects/planner/restart", auth(s.projectH.handlePlannerRestart))
+	s.mux.HandleFunc("GET /api/projects", auth(s.projectH.HandleList))
+	s.mux.HandleFunc("GET /api/projects/config", auth(s.projectH.HandleConfigGet))
+	s.mux.HandleFunc("PUT /api/projects/config", auth(s.projectH.HandleConfigPut))
+	s.mux.HandleFunc("POST /api/projects/planner/restart", auth(s.projectH.HandlePlannerRestart))
 	// Issue #452 (PLANNER-STATS-1) part-1: process-resource probe so the
 	// dashboard can show RSS / goroutine / planner-fan-out trends without
 	// reaching the loopback-only /api/debug/vars expvar surface. Per-CLI
 	// per-process RSS is the part-2 follow-up; see dashboard_planner_stats.go.
 	s.mux.HandleFunc("GET /api/planner/stats", auth(s.handlePlannerStats))
-	s.mux.HandleFunc("POST /api/projects/favorite", auth(s.projectH.handleFavoriteToggle))
-	s.mux.HandleFunc("POST /api/projects/files/exists", auth(s.projectH.handleFilesExists))
-	s.mux.HandleFunc("GET /api/projects/file", auth(s.projectH.handleFileGet))
+	s.mux.HandleFunc("POST /api/projects/favorite", auth(s.projectH.HandleFavoriteToggle))
+	s.mux.HandleFunc("POST /api/projects/files/exists", auth(s.projectH.HandleFilesExists))
+	s.mux.HandleFunc("GET /api/projects/file", auth(s.projectH.HandleFileGet))
 	s.mux.HandleFunc("POST /api/transcribe", auth(s.transcribeH.HandleTranscribe))
 	s.mux.HandleFunc("GET /api/cron", auth(s.cronH.handleList))
 	s.mux.HandleFunc("POST /api/cron", auth(s.cronH.handleCreate))

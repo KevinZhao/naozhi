@@ -17,16 +17,17 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
-	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
-	"github.com/naozhi/naozhi/internal/dashboard/ext/agentevents"
-	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
-	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
-	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/dashboard/discovery"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/agentevents"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -95,18 +96,18 @@ type Server struct {
 
 	// ── Phase 5: → routes.go local variables ───────────
 	auth         *auth.Handlers        // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
-	cronH        *CronHandlers        // 读写: server.go, dashboard.go
+	cronH        *CronHandlers         // 读写: server.go, dashboard.go
 	transcribeH  *transcribe.Handler   // 读写: dashboard.go (ctor only in server.go)
-	nodeAccess   *nodeAccessor        // 读写: server.go, dashboard.go
-	discoveryH   *discovery.Handlers  // 读写: server.go, dashboard.go (Phase 3b 搬到 internal/dashboard/discovery)
-	projectH     *ProjectHandlers     // 读写: server.go, dashboard.go
-	sessionH     *SessionHandlers     // 读写: server.go, dashboard.go
-	healthH      *HealthHandler       // 读写: server.go (ctor only)
-	sendH        *SendHandler         // 读写: dashboard.go (ctor only in server.go)
-	cliH         *cli.Handler  // 读写: server.go, dashboard.go
+	nodeAccess   *nodeAccessor         // 读写: server.go, dashboard.go
+	discoveryH   *discovery.Handlers   // 读写: server.go, dashboard.go (Phase 3b 搬到 internal/dashboard/discovery)
+	projectH     *dashproject.Handlers // 读写: server.go, dashboard.go
+	sessionH     *SessionHandlers      // 读写: server.go, dashboard.go
+	healthH      *HealthHandler        // 读写: server.go (ctor only)
+	sendH        *SendHandler          // 读写: dashboard.go (ctor only in server.go)
+	cliH         *cli.Handler          // 读写: server.go, dashboard.go
 	scratchH     *scratch.Handler      // 读写: dashboard.go (ctor only in server.go)
 	memoryH      *memory.Handler       // 读写: dashboard.go (ctor only in server.go)
-	agentEventsH *agentevents.Handler // 读写: server.go, dashboard.go
+	agentEventsH *agentevents.Handler  // 读写: server.go, dashboard.go
 
 	// ── Phase 5: → NewHub Options ──────────────────────
 	dedup           *platform.Dedup              // 读写: server.go (ctor only)

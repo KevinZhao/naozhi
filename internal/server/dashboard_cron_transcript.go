@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -538,12 +539,12 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// openWorkspaceFile passes O_NOFOLLOW on unix; a final-component
+	// dashproject.OpenWorkspaceFile passes O_NOFOLLOW on unix; a final-component
 	// symlink swap therefore fails atomically at the kernel boundary
 	// with ELOOP. Collapse ELOOP and any other open failure to the same
 	// "missing" downgrade so attacker probing cannot distinguish a real
 	// missing JSONL from a swap-then-blocked attempt.
-	f, err := openWorkspaceFile(resolved)
+	f, err := dashproject.OpenWorkspaceFile(resolved)
 	if err != nil {
 		resp.Fallback = "missing"
 		writeJSON(w, resp)

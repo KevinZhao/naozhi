@@ -1,4 +1,4 @@
-package server
+package project
 
 import (
 	"bytes"
@@ -83,16 +83,16 @@ func TestHandleFileGet_PublicTmpDeniesSensitiveNames(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// handleFileGet must 404.
+			// HandleFileGet must 404.
 			req := httptest.NewRequest(http.MethodGet,
 				"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=preview", nil)
 			w := httptest.NewRecorder()
-			h.handleFileGet(w, req)
+			h.HandleFileGet(w, req)
 			if w.Code != http.StatusNotFound {
 				t.Errorf("name-denied file must 404, got %d body=%s", w.Code, w.Body.String())
 			}
 
-			// handleFilesExists batch probe must hide it too.
+			// HandleFilesExists batch probe must hide it too.
 			body, _ := json.Marshal(existsReq{
 				Project: publicTmpProject,
 				Paths:   []string{rel},
@@ -101,7 +101,7 @@ func TestHandleFileGet_PublicTmpDeniesSensitiveNames(t *testing.T) {
 				bytes.NewReader(body))
 			pr.Header.Set("Content-Type", "application/json")
 			pw := httptest.NewRecorder()
-			h.handleFilesExists(pw, pr)
+			h.HandleFilesExists(pw, pr)
 			if pw.Code != http.StatusOK {
 				t.Fatalf("exists status = %d body=%s", pw.Code, pw.Body.String())
 			}

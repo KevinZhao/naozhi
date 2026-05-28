@@ -1,4 +1,4 @@
-package server
+package project
 
 import (
 	"context"
@@ -9,10 +9,10 @@ import (
 // `restartCtx` falls back to context.Background() when SetBaseContext
 // has not been wired. R247-ARCH-15 (#650): the prior `ctxFunc` closure
 // returned Background when `s.hub` was nil; the new field-based design
-// must preserve that fallback so test paths that build ProjectHandlers
+// must preserve that fallback so test paths that build Handlers
 // by hand (without going through registerDashboard) keep working.
 func TestProjectHandlers_RestartCtx_NilFallback(t *testing.T) {
-	h := &ProjectHandlers{}
+	h := &Handlers{}
 	got := h.restartCtx()
 	if got == nil {
 		t.Fatal("restartCtx() returned nil — must fall back to Background")
@@ -32,7 +32,7 @@ func TestProjectHandlers_RestartCtx_NilFallback(t *testing.T) {
 // (the long-lived process context) into the planner-restart timeout
 // once the Hub finishes constructing.
 func TestProjectHandlers_SetBaseContext(t *testing.T) {
-	h := &ProjectHandlers{}
+	h := &Handlers{}
 	type ctxKey struct{}
 	want := context.WithValue(context.Background(), ctxKey{}, "marker")
 	h.SetBaseContext(want)
@@ -52,7 +52,7 @@ func TestProjectHandlers_SetBaseContext(t *testing.T) {
 // must observe that so an in-flight ResetAndRecreate aborts instead
 // of running the full 30s deadline past process exit.
 func TestProjectHandlers_SetBaseContext_CancelPropagates(t *testing.T) {
-	h := &ProjectHandlers{}
+	h := &Handlers{}
 	parent, cancel := context.WithCancel(context.Background())
 	h.SetBaseContext(parent)
 

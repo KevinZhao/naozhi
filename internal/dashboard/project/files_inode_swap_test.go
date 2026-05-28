@@ -1,6 +1,7 @@
-package server
+package project
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,7 +11,7 @@ import (
 )
 
 // TestHandleFileGet_OpenOnce_NoFollowSymlink pins R219-SEC-2 / R220-GO-2
-// (#655): handleFileGet now opens the file once with O_NOFOLLOW BEFORE
+// (#655): HandleFileGet now opens the file once with O_NOFOLLOW BEFORE
 // dispatching to serve* helpers, and serve* helpers use the plumbed-in fd
 // instead of running their own os.Open(resolved).
 //
@@ -57,12 +58,12 @@ func TestHandleFileGet_OpenOnce_NoFollowSymlink(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet,
 				"/api/projects/file?project="+projName+"&path=swapped.txt&mode="+mode, nil)
 			w := httptest.NewRecorder()
-			h.handleFileGet(w, req)
+			h.HandleFileGet(w, req)
 			if w.Code != http.StatusNotFound {
 				t.Fatalf("mode=%s: status = %d, want 404 — symlink final component must be refused before any open follows", mode, w.Code)
 			}
 			body := w.Body.Bytes()
-			if len(body) > 0 && containsBytes(body, leakBytes) {
+			if len(body) > 0 && bytes.Contains(body, leakBytes) {
 				t.Fatalf("mode=%s: response body contains symlink-target bytes %q — open followed the symlink, R219-SEC-2 regression", mode, leakBytes)
 			}
 		})
@@ -70,7 +71,7 @@ func TestHandleFileGet_OpenOnce_NoFollowSymlink(t *testing.T) {
 }
 
 // TestHandleFileGet_OpenOnce_DispatchPasses_FD pins the structural
-// invariant: handleFileGet opens once with openWorkspaceFile and the
+// invariant: HandleFileGet opens once with openWorkspaceFile and the
 // serve* helpers do not re-open. Implemented as a smoke test that round-
 // trips a regular file through every mode under the in-memory fixture
 // — if any helper still ran a second os.Open(resolved), the change would
@@ -89,7 +90,7 @@ func TestHandleFileGet_OpenOnce_DispatchPasses_FD(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet,
 				"/api/projects/file?project="+projName+"&path=canary.txt&mode="+mode, nil)
 			w := httptest.NewRecorder()
-			h.handleFileGet(w, req)
+			h.HandleFileGet(w, req)
 			if w.Code != http.StatusOK {
 				t.Fatalf("mode=%s: status = %d, want 200 (canary round-trip broken — fd plumbing regression)", mode, w.Code)
 			}

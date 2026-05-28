@@ -8,6 +8,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	dashdiscovery "github.com/naozhi/naozhi/internal/dashboard/discovery"
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -230,17 +231,17 @@ func buildProjectHandlers(
 	resolver *session.KeyResolver,
 	nodeAccess *nodeAccessor,
 	nodeCache *node.CacheManager,
-) *ProjectHandlers {
-	return &ProjectHandlers{
-		projectMgr:         opts.ProjectManager,
-		router:             opts.Router,
-		resolver:           resolver,
-		nodeAccess:         nodeAccess,
-		nodeCache:          nodeCache,
-		filesExistsLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, opts.TrustedProxy),
-		configPutLimiter:   newIPLimiterWithProxy(rate.Every(200*time.Millisecond), 5, opts.TrustedProxy),
-		publicTmpEnabled:   opts.PublicTmpEnabled,
-	}
+) *dashproject.Handlers {
+	return dashproject.New(dashproject.Deps{
+		ProjectMgr:         opts.ProjectManager,
+		Router:             opts.Router,
+		Resolver:           resolver,
+		NodeAccess:         nodeAccess,
+		NodeCache:          nodeCache,
+		FilesExistsLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, opts.TrustedProxy),
+		ConfigPutLimiter:   newIPLimiterWithProxy(rate.Every(200*time.Millisecond), 5, opts.TrustedProxy),
+		PublicTmpEnabled:   opts.PublicTmpEnabled,
+	})
 }
 
 // agentIDList returns ["general"] followed by the configured agent IDs.
