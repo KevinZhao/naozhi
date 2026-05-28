@@ -1030,11 +1030,17 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			// remote sends. Fallback (test / bootstrap paths where hub is
 			// nil) uses a bounded timeout rather than Background so the
 			// goroutine cannot outlive the handler by more than the RPC.
+			//
+			// R260528-SEC-5: even when the hub is alive we cap the per-RPC
+			// deadline at 60s. Without this cap a hung remote node leaks
+			// a goroutine + sendWG slot for the entire process lifetime,
+			// since hub.ctx only cancels on shutdown. Inheriting hub.ctx
+			// preserves the shutdown-cancel behaviour while bounding the
+			// worst-case RPC duration.
 			var ctx context.Context
 			var cancel context.CancelFunc
 			if h.hub != nil {
-				ctx = h.hub.ctx
-				cancel = func() {}
+				ctx, cancel = context.WithTimeout(h.hub.ctx, 60*time.Second)
 			} else {
 				ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 			}
