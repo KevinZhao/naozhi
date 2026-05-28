@@ -785,6 +785,25 @@ func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*Shim
 		conn.Close()
 		return nil, fmt.Errorf("unexpected message type: %s", hello.Type)
 	}
+	// RNEW-ARCH-403 (#427): reject hellos whose ProtocolVersion is outside
+	// the [MinSupportedProtocolVersion, ProtocolVersion] band. Older
+	// builds of this binary silently kept whatever shape the shim
+	// declared, so a forward-rolled shim shipping a wire-incompatible v2
+	// frame would survive the attach handshake and only blow up later
+	// when readLoop hit an unknown field shape — masking the deploy-skew
+	// root cause behind a JSON parse error mid-session. Hello carries
+	// ProtocolVersion=0 from pre-versioning shims; treat 0 as v1
+	// (matches connect_test.go's existing fixture and the shim sender
+	// in server.go which always populates the field today).
+	helloVer := hello.ProtocolVersion
+	if helloVer == 0 {
+		helloVer = 1
+	}
+	if helloVer < MinSupportedProtocolVersion || helloVer > ProtocolVersion {
+		conn.Close()
+		return nil, fmt.Errorf("shim protocol_version %d outside supported [%d,%d]; check naozhi/shim binary skew",
+			helloVer, MinSupportedProtocolVersion, ProtocolVersion)
+	}
 
 	return &ShimHandle{
 		Conn:       conn,
