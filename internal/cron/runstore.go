@@ -794,11 +794,13 @@ const appendTrimBatch = 10
 // when Load missed, leaving cacheGet to allocate the recentCacheEntry
 // itself moments later.
 //
-// R242-GO-8 / R235-PERF-3 / R233-PERF-2: ring-buffer push in O(1).
+// R242-GO-8 / R235-PERF-3 / R233-PERF-2 (#556): ring-buffer push in O(1).
 // The pre-ring implementation did `append([]T{x}, slice...)` (later
 // `append + copy + index`) which shifted up to keepCount-1 entries on
 // every Append — at keepCount=200 that was 200× the per-push work the
-// 1Hz cron + dashboard poll path actually needs.
+// 1Hz cron + dashboard poll path actually needs. ringPushHead below is
+// the O(1) implementation that landed via R243-PERF-4; #556 was the
+// repeat finding before the cluster was wired up.
 func (s *runStore) cacheHeadPush(jobID string, summary CronRunSummary) {
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
