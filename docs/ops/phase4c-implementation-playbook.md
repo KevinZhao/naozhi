@@ -37,6 +37,28 @@ grep "wshub.go" tools/lint-server-handlers/exemptions.yaml
 gh run list --branch master --limit 3
 ```
 
+## 1.1 Pre-flight checklist（每 phase 必跑）
+
+```bash
+# 1. 同步 master + 切新分支
+git fetch origin master
+git checkout -B server-split/phase4c origin/master
+
+# 2. 实测最新行数（master 涨速 ~20%/4 月，必须重测）
+for f in internal/server/agent_tailer.go internal/server/wshub_eventpush*.go internal/server/wshub_agent.go; do
+  echo "$f: $(wc -l < $f) lines"
+done
+
+# 3. 更新 exemptions.yaml current 字段到搬迁前最新值
+
+# 4. baseline build/test 必须绿
+go build ./... && go test -race -count=1 ./internal/wshub/
+
+# 5. 实测搬迁前的 lint 噪音 baseline + race test 时间
+go run ./tools/lint-server-handlers/ 2>&1 | tail -2
+time go test -race -count=1 -timeout=300s ./internal/wshub/ ./internal/server/...
+```
+
 ## 2. 搬迁顺序
 
 ### Step 1: agent_tailer 类型搬迁

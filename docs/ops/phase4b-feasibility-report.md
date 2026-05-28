@@ -17,23 +17,33 @@
 
 **实际代码核对发现**：step 1（搬 wsClient）**不能独立完成**。
 
-### 依赖闭环
+### 依赖闭环（2026-05-28 实测校准）
 
 ```
-wsClient.readPump  →  c.hub.queue.Enqueue (send 块)
-                  →  c.hub.router.GetSession (HubRouter 方法)
-                  →  c.hub.scheduler.HasJob (CronView 方法)
-                  →  c.hub.handleAuth (subscribe 块)
-                  →  c.hub.broadcastSessionsUpdate (broadcast 块)
-                  →  c.hub.dropHistoryMarshalCache (cache 块)
-                  →  ...约 30+ 方法跨 5 个块
+wsClient.readPump 引用 c.hub.* 实测 10 个方法：
+  c.hub.allowSendForOwner       (rate-limit/cache 块)
+  c.hub.droppedTotal            (send 块)
+  c.hub.handleAgentSubscribe    (agent tailer 块)
+  c.hub.handleAgentUnsubscribe  (agent tailer 块)
+  c.hub.handleAuth              (subscribe 块)
+  c.hub.handleInterrupt         (subscribe 块)
+  c.hub.handleSend              (send 块)
+  c.hub.handleSubscribe         (subscribe 块)
+  c.hub.handleUnsubscribe       (subscribe 块)
+  c.hub.unregister              (subscribe 块)
 
-要让 wshub.wsClient.readPump 编译，wshub.Hub 必须先有上述全部方法。
+要让 wshub.wsClient.readPump 编译，wshub.Hub 必须先有上述 10 个方法。
 ```
 
 **结论**：step 1 (wsClient) 与 step 3 (subscribe) / step 4 (broadcast) /
 step 5 (send) **强耦合**，必须同步搬。playbook 7 步序在概念上正确，但
-实际不能逐步独立 build/test 绿——除非用 type alias 桥接（见下）。
+实际不能逐步独立 build/test 绿——必须**合并 step 1+3+4+5 成一刀**，或
+用 type alias 桥接（见下）。
+
+**修订**：之前文档写"30+ 方法"是估算夸大；2026-05-28 实测仅 10 个。
+真实工作量：单次 AI 会话**可能能完成** Phase 4b1+4b2 合并刀（wsClient
++ subscribe 块方法 + HubRouter 接口，~1000-1200 行），但 Phase 4b3
+（send + cache + 调用方切换 + race count=100 测试）仍需独立 PR。
 
 ## 2. 真实工作量
 
