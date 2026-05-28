@@ -413,8 +413,20 @@ type SessionHandlers struct {
 	// corruption indistinguishable from a classic data race.
 	historyCache     []discovery.RecentSession
 	historyCacheTime time.Time
-	historyCacheMu   sync.Mutex
-	historyFlight    singleflight.Group
+	// historyCacheTimeUnixNano mirrors historyCacheTime.UnixNano() for
+	// wait-free TTL checks on the hot path. R040034-PERF-5 (#1404):
+	// historySessions() previously locked twice on each follower poll —
+	// once on the fast-path TTL check and again inside the singleflight
+	// closure for re-check. With this atomic mirror the fast-path TTL
+	// check is wait-free and the flight closure skips its mutex entirely.
+	// The lock is now only acquired when we actually need to read the
+	// cached slice (fresh-cache hit) or install a new one (load path).
+	// Writers MUST keep this atomic in sync with historyCacheTime under
+	// historyCacheMu so concurrent fast-path readers cannot observe the
+	// atomic say "fresh" while the slice has not yet been installed.
+	historyCacheTimeUnixNano atomic.Int64
+	historyCacheMu           sync.Mutex
+	historyFlight            singleflight.Group
 	// warmHistoryWg tracks the WarmHistoryCache goroutine so callers (server
 	// shutdown) can wait for the background FS scan to finish before tearing
 	// down h.claudeDir-dependent state. R64-GO-M1.
@@ -833,11 +845,16 @@ func (h *SessionHandlers) buildMultiNodeResp(snapshots []session.SessionSnapshot
 	// connection status + fill-in. This acquires the nodeAccess lock.
 	nodesSnapshot := h.nodeAccess.NodesSnapshot()
 
-	// Multi-node: tag local sessions and merge with cached remote sessions
+	// Multi-node: tag local sessions and merge with cached remote sessions.
+	// R040034-PERF-3 (#1402): box *SessionSnapshot (pointer) into the []any
+	// rather than the value type — Go iface holds word-sized pointer payloads
+	// inline, but a 280 B struct value forces a heap copy on every box (50
+	// sessions × 1 Hz/tab pre-fix). JSON output is byte-identical because
+	// json.Marshal dereferences pointer-to-struct identically to the value.
 	allSessions := make([]any, 0, len(snapshots))
 	for i := range snapshots {
 		snapshots[i].Node = "local"
-		allSessions = append(allSessions, snapshots[i])
+		allSessions = append(allSessions, &snapshots[i])
 	}
 
 	localName := h.workspaceName
@@ -1361,33 +1378,50 @@ func (h *SessionHandlers) historySessions() []discovery.RecentSession {
 	}
 
 	const cacheTTL = 120 * time.Second
-	h.historyCacheMu.Lock()
-	if time.Since(h.historyCacheTime) < cacheTTL {
-		cached := h.historyCache
-		h.historyCacheMu.Unlock()
-		return cached
-	}
-	h.historyCacheMu.Unlock()
 
-	v, _, _ := h.historyFlight.Do("history", func() (any, error) {
-		// Re-check under lock — a prior leader could have populated the
-		// cache between our expiry detection and this closure running.
-		// Mirrors the double-check pattern in lookupSummariesCached so
-		// tail callers at a TTL boundary don't each pay an FS scan.
-		// R64-GO-M2.
-		//
-		// Use historyCacheTime.IsZero() (not historyCache != nil) to
-		// determine cache population: an "empty-history" deployment
-		// legitimately stores a nil slice on every load, which was then
-		// misclassified as "not cached" and drove a redundant FS scan
-		// every TTL window. R67-GO-5.
+	// R040034-PERF-5 (#1404): wait-free fast-path TTL check via the atomic
+	// mirror; the lock is taken only when the TTL check passes and we need
+	// a consistent slice header read. Old code locked unconditionally even
+	// for the cold (TTL-expired) path that subsequently dropped through
+	// to singleflight without using the cached slice at all.
+	if ns := h.historyCacheTimeUnixNano.Load(); ns != 0 && time.Since(time.Unix(0, ns)) < cacheTTL {
 		h.historyCacheMu.Lock()
+		// Re-confirm under lock — between Load() and Lock() a writer could
+		// have invalidated the cache (InvalidateHistoryCache writes 0).
+		// Without this re-check we could return a stale slice header that
+		// was being concurrently nilled out.
 		if !h.historyCacheTime.IsZero() && time.Since(h.historyCacheTime) < cacheTTL {
 			cached := h.historyCache
 			h.historyCacheMu.Unlock()
-			return cached, nil
+			return cached
 		}
 		h.historyCacheMu.Unlock()
+	}
+
+	v, _, _ := h.historyFlight.Do("history", func() (any, error) {
+		// Re-check via the atomic — a prior leader could have populated
+		// the cache between our expiry detection and this closure running.
+		// Mirrors the double-check pattern in lookupSummariesCached so
+		// tail callers at a TTL boundary don't each pay an FS scan.
+		// R64-GO-M2 + R040034-PERF-5 (#1404): the re-check is now
+		// wait-free and only escalates to a lock if the atomic says
+		// "fresh"; the prior implementation took historyCacheMu twice
+		// per fan-out wave (fast-path + flight closure).
+		//
+		// Use historyCacheTimeUnixNano.Load()!=0 (not historyCache != nil)
+		// to determine cache population: an "empty-history" deployment
+		// legitimately stores a nil slice on every load, which was then
+		// misclassified as "not cached" and drove a redundant FS scan
+		// every TTL window. R67-GO-5.
+		if ns := h.historyCacheTimeUnixNano.Load(); ns != 0 && time.Since(time.Unix(0, ns)) < cacheTTL {
+			h.historyCacheMu.Lock()
+			if !h.historyCacheTime.IsZero() && time.Since(h.historyCacheTime) < cacheTTL {
+				cached := h.historyCache
+				h.historyCacheMu.Unlock()
+				return cached, nil
+			}
+			h.historyCacheMu.Unlock()
+		}
 		return h.loadHistorySessions(), nil
 	})
 
@@ -1557,6 +1591,10 @@ func (h *SessionHandlers) InvalidateHistoryCache() {
 	h.historyCacheMu.Lock()
 	h.historyCache = nil
 	h.historyCacheTime = time.Time{}
+	// R040034-PERF-5 (#1404): keep the atomic mirror in lockstep with the
+	// canonical historyCacheTime so wait-free fast-path readers see the
+	// invalidation immediately (Store=0 ⇔ time.Time{}).
+	h.historyCacheTimeUnixNano.Store(0)
 	h.historyCacheMu.Unlock()
 }
 
@@ -1727,8 +1765,13 @@ func (h *SessionHandlers) loadHistorySessions() []discovery.RecentSession {
 	}
 
 	h.historyCacheMu.Lock()
+	now := time.Now()
 	h.historyCache = all
-	h.historyCacheTime = time.Now()
+	h.historyCacheTime = now
+	// R040034-PERF-5 (#1404): mirror update under the lock so wait-free
+	// readers can never observe atomic-fresh while h.historyCache is
+	// still pointing at the old (or nil) slice.
+	h.historyCacheTimeUnixNano.Store(now.UnixNano())
 	h.historyCacheMu.Unlock()
 
 	return all

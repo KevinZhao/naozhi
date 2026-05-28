@@ -65,14 +65,33 @@ var broadcastClientSnapPool = sync.Pool{
 // clients a loop under RLock still serialises `register`/`unregister` behind
 // every broadcast; snapshotting removes that contention amplifier and the
 // backing slice is reused via sync.Pool so steady-state broadcasts are zero-alloc.
+//
+// R040034-PERF-23 (#1409): iterate the h.authClients mirror instead of
+// scanning h.clients with a per-element c.authenticated.Load() filter.
+// cron's run-started/ended fan-out paid one O(N_clients) walk per broadcast
+// wave even when most connections were still pre-auth (no-token mode is the
+// only path that bypasses handleAuth — tokens routes flip authenticated only
+// after the inner auth message exchanges). The mirror is updated under h.mu
+// alongside h.clients (register / markAuthenticated / unregister / Shutdown)
+// so the two stay consistent. Hand-rolled test hubs that bypass NewHub leave
+// h.authClients nil; the nil-guard falls back to the legacy filter loop so
+// pre-existing fixtures observe no behaviour change.
 func (h *Hub) broadcastToAuthenticated(data []byte) {
 	snapPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
 	snap := (*snapPtr)[:0]
 
 	h.mu.RLock()
-	for c := range h.clients {
-		if c.authenticated.Load() {
+	if h.authClients != nil {
+		for c := range h.authClients {
 			snap = append(snap, c)
+		}
+	} else {
+		// Legacy fallback for hand-rolled hubs that do not initialise
+		// authClients. Production hubs always go through NewHub.
+		for c := range h.clients {
+			if c.authenticated.Load() {
+				snap = append(snap, c)
+			}
 		}
 	}
 	h.mu.RUnlock()

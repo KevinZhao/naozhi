@@ -1707,10 +1707,14 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	// persistedHistory is already in Time order. Steady-state dashboard
 	// polling (1Hz × N tabs × M dead sessions) used to pay this every
 	// call; the in-place sort under historyMu also blocks concurrent
-	// readers. While the flag is still false (initial state, or after an
-	// out-of-order InjectHistory) we promote to the write lock once, sort
-	// in place, set the flag, and downgrade — subsequent reads then take
-	// the cheap RLock-only path. R237-PERF-12.
+	// readers. R237-PERF-12.
+	//
+	// R040034-PERF-6 (#1405): production mutations now sort eagerly in
+	// InjectHistory under the existing write lock, so this fallback only
+	// fires for test fixtures that assign s.persistedHistory directly and
+	// leave the flag false. Promote to the write lock once, sort in place,
+	// set the flag, and downgrade — subsequent reads then take the cheap
+	// RLock-only path.
 	s.historyMu.RLock()
 	if !s.persistedHistorySorted {
 		s.historyMu.RUnlock()
@@ -1993,6 +1997,39 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	if proc != nil && s.persistedSeededLen < len(s.persistedHistory) {
 		tail = s.persistedHistory[s.persistedSeededLen:]
 		s.persistedSeededLen = len(s.persistedHistory)
+	}
+	// R040034-PERF-6 (#1405): proc==nil branch is the only path that ever
+	// reads persistedHistory directly (live procs serve their own EventLog
+	// ring), so when proc is absent we can sort eagerly under the write
+	// lock we already hold instead of deferring to the first
+	// EventEntriesSince/Before reader. The deferred path took
+	// historyMu.Lock on the WS push hot path and blocked concurrent
+	// RLockers for an O(n log n) sort over up to 500 entries; absorbing
+	// the cost here keeps reader fast-path RLock-only forever after.
+	//
+	// Gated on proc==nil to preserve the seededLen contract: when proc is
+	// attached, persistedSeededLen indexes into a stable [0..n) prefix
+	// that proc has already been seeded with — permuting persistedHistory
+	// in place would invalidate that pointer and cause duplicate or
+	// dropped tail forwarding (see attachProcessAndSnapshotPersisted /
+	// adoptProcessAlreadySeeded). With proc==nil, persistedSeededLen has
+	// either been reset to 0 (attach(nil) path) or will be on the next
+	// attach via attachProcessAndSnapshotPersisted's snapshot-rebuild, so
+	// reordering is safe.
+	//
+	// Sort lands on a fresh backing array, NOT in place: a prior
+	// InjectHistory call may have captured a `tail` slice into the
+	// existing backing array and released historyMu before its deferred
+	// make+copy ran (R237-PERF-6). Permuting the shared backing array in
+	// place would race that copy. Allocating fresh leaves the old array
+	// alive for GC — its contents stay readable and unchanged for any
+	// outstanding tail reader.
+	if proc == nil && !s.persistedHistorySorted && len(s.persistedHistory) > 1 {
+		sorted := make([]cli.EventEntry, len(s.persistedHistory))
+		copy(sorted, s.persistedHistory)
+		sortEntriesByTimeStable(sorted)
+		s.persistedHistory = sorted
+		s.persistedHistorySorted = true
 	}
 	s.historyMu.Unlock()
 

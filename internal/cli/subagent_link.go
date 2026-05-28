@@ -44,6 +44,40 @@ var agentHexRe = regexp.MustCompile(`^[A-Za-z0-9]{8,64}$`)
 // agents accumulate hundreds of parked goroutines per session.
 const maxConcurrentResolves = 8
 
+// resolveWorkerCount and resolveQueueDepth size the dispatch pool used by
+// DispatchResolve. R214-PERF-6 (#415): readLoop and InjectHistory previously
+// did `go linker.Resolve(...)` for every system.task_started event, so a
+// burst of 10+ task_started events (multi-agent turn) spawned 10+ goroutines
+// that lived 0–3 s each waiting on resolveSem and the retry loop.
+//
+// The pool replaces the goroutine-per-event pattern with a fixed set of
+// long-lived workers consuming a bounded queue. Sizing notes:
+//   - workers: 4 — enough headroom for parallel agent turns without
+//     starving on a single slow Resolve, well under the resolveSem cap of
+//     8 so concurrent Resolves still benefit from the existing back-pressure.
+//   - queue depth: 16 — soaks bursty task_started replays (shim reconnect
+//     can fan in dozens at once); deeper would just delay the "queue full"
+//     fallback warning that signals a malformed CLI stream.
+//
+// Queue full → DispatchResolve falls back to inline Resolve with a warning
+// (per the issue's proposal) so we never silently drop a task_started.
+const (
+	resolveWorkerCount = 4
+	resolveQueueDepth  = 16
+)
+
+// resolveJob carries one Resolve invocation across the dispatch queue. The
+// fields mirror Resolve's argument list verbatim so workers can splat them
+// without the closure-allocation cost of capturing locals at the call site.
+type resolveJob struct {
+	ctx              context.Context
+	taskID           string
+	toolUseID        string
+	name             string
+	description      string
+	agentToolUseTime int64
+}
+
 // staleAgentReuseSlack is the lookback grace window applied when comparing
 // an agent jsonl's first-row timestamp to the parent's Agent tool_use
 // timestamp during candidate filtering. If the jsonl row predates the
@@ -78,6 +112,16 @@ type SubagentLinker struct {
 	// resolveSem bounds concurrent Resolve goroutines. Buffered channel
 	// acts as a counting semaphore: acquire by sending, release by receiving.
 	resolveSem chan struct{}
+
+	// resolveJobs carries dispatched Resolve invocations to the long-lived
+	// worker pool started by DispatchResolve. Buffered with resolveQueueDepth.
+	// nil until first DispatchResolve call (lazy init).
+	resolveJobs chan resolveJob
+
+	// resolvePoolOnce guards lazy creation of the worker pool. The pool
+	// inherits the caller's first ctx as its lifetime so workers exit when
+	// the owning Process dies (via Process.lifecycleContext()).
+	resolvePoolOnce sync.Once
 
 	// inflightTasks tracks taskIDs whose Resolve goroutine is already
 	// running (or about to start). Callers (notifyLinker on the readLoop
@@ -239,6 +283,81 @@ func (l *SubagentLinker) TryMarkResolveInflight(taskID string) bool {
 	}
 	_, loaded := l.inflightTasks.LoadOrStore(taskID, struct{}{})
 	return !loaded
+}
+
+// DispatchResolve enqueues a Resolve invocation onto the long-lived worker
+// pool instead of spawning a fresh goroutine per call. R214-PERF-6 (#415):
+// the previous pattern (`go linker.Resolve(...)`) allocated one goroutine
+// per system.task_started event — 5–10 per multi-agent turn, each parking on
+// resolveSem for up to 3 s. The pool collapses that to resolveWorkerCount
+// workers consuming a bounded queue.
+//
+// Behaviour on a full queue: fall back to inline Resolve with a warning
+// (per the issue's proposal). Inline fallback preserves "no event silently
+// dropped" semantics; the warning gives operators a signal that the CLI is
+// emitting task_started faster than the pool can drain — which would only
+// happen under a pathological multi-agent burst far beyond observed loads.
+//
+// First call lazily starts resolveWorkerCount workers tied to ctx. Subsequent
+// callers' ctx values are still honored per-job (each job carries its own
+// ctx for the actual Resolve call); the pool-wide ctx only governs worker
+// lifetime. Callers should pass the same long-lived ctx (Process.
+// lifecycleContext()) to avoid the pool outliving the owning process.
+//
+// Empty taskID is a no-op — the upstream callers already short-circuit on
+// empty taskID before reaching us, so this is defence in depth.
+func (l *SubagentLinker) DispatchResolve(ctx context.Context, taskID, toolUseID, name, description string, agentToolUseMS int64) {
+	if taskID == "" {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	l.resolvePoolOnce.Do(func() {
+		l.resolveJobs = make(chan resolveJob, resolveQueueDepth)
+		for i := 0; i < resolveWorkerCount; i++ {
+			go l.resolveWorker(ctx)
+		}
+	})
+	job := resolveJob{
+		ctx:              ctx,
+		taskID:           taskID,
+		toolUseID:        toolUseID,
+		name:             name,
+		description:      description,
+		agentToolUseTime: agentToolUseMS,
+	}
+	select {
+	case l.resolveJobs <- job:
+		return
+	default:
+		// Queue full: fall back to inline Resolve in a goroutine so the
+		// readLoop doesn't block on the up-to-3-s retry budget. Logging at
+		// Warn level (not Debug) because a saturated queue means upstream
+		// is producing task_started faster than 4 workers × ~3s budget can
+		// drain — the operator should investigate.
+		slog.Warn("agent_link: resolve queue full, falling back to inline goroutine",
+			"task_id", taskID, "queue_depth", resolveQueueDepth)
+		go l.Resolve(ctx, taskID, toolUseID, name, description, agentToolUseMS)
+	}
+}
+
+// resolveWorker is the long-lived consumer for the dispatch queue. Exits
+// when ctx is canceled (process shutdown). Workers do not panic-recover —
+// Resolve already returns errors via the cache and slog; an unrecovered
+// panic would surface in the test/operator log loud and clear.
+func (l *SubagentLinker) resolveWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job, ok := <-l.resolveJobs:
+			if !ok {
+				return
+			}
+			l.Resolve(job.ctx, job.taskID, job.toolUseID, job.name, job.description, job.agentToolUseTime)
+		}
+	}
 }
 
 // clearResolveInflight is the unexported pair to TryMarkResolveInflight.

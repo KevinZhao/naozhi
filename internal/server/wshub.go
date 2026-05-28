@@ -182,6 +182,21 @@ type Hub struct {
 	// Lock-free atomic so the hot send path stays uncontested.
 	legacySendInvokes atomic.Int64
 	clients           map[*wsClient]struct{}
+	// authClients mirrors clients filtered to those whose authenticated
+	// flag is true. broadcastToAuthenticated iterates this smaller map
+	// instead of walking every connected client × calling
+	// c.authenticated.Load() per element. R040034-PERF-23 (#1409): cron's
+	// run-started/ended pair fan-out at N concurrent jobs paid one
+	// O(N_clients) scan per broadcast wave even though most clients
+	// weren't yet authenticated (e.g. brand-new connections still in the
+	// auth handshake). Updated under h.mu alongside h.clients so the two
+	// stay consistent: register inserts when c.authenticated is already
+	// true (the wsDeriveUploadOwner pre-auth path); markAuthenticated
+	// inserts when handleAuth flips the flag on success; unregister
+	// always removes regardless of state. authenticated is monotonic
+	// (only ever true→true; no logout path) so we never need a "remove
+	// on deauth" hook.
+	authClients map[*wsClient]struct{}
 	// subscriberCount tracks per-key subscriber count for the
 	// maxSubscribersPerKey cap (R246-PERF-4 / #716). Without this, the
 	// cap check in handleSubscribe scanned every connected client × every
@@ -191,6 +206,19 @@ type Hub struct {
 	// the two stay consistent. Read-only outside of subscribe/unsubscribe
 	// paths; cleared on Shutdown.
 	subscriberCount map[string]int
+	// enforceCaps is the explicit gate for the per-key subscriber cap and
+	// the per-client subscription cap. NewHub sets it to true alongside
+	// initialising subscriberCount. Hand-rolled test hubs that bypass
+	// NewHub leave it false so the cap checks short-circuit instead of
+	// firing against an uninitialised counter. R040034-SEC-6 (#1401):
+	// the previous code keyed the same gate off `subscriberCount == nil`,
+	// which read like a defensive nil-guard but was actually load-bearing
+	// — a future refactor that allocated subscriberCount eagerly without
+	// understanding the gating contract could silently activate caps in
+	// every test fixture. The explicit bool documents intent at the
+	// use-site: production wiring sets enforceCaps=true; bypass-NewHub
+	// tests leave it false. Read under h.mu like subscriberCount.
+	enforceCaps bool
 	// router is the HubRouter subset (consumer.go). *session.Router
 	// satisfies this interface implicitly; kept as an interface so
 	// tests can inject a fake and a future Router sub-aggregation
@@ -480,7 +508,9 @@ func NewHub(opts HubOptions) *Hub {
 	}
 	h := &Hub{
 		clients:          make(map[*wsClient]struct{}),
+		authClients:      make(map[*wsClient]struct{}),
 		subscriberCount:  make(map[string]int),
+		enforceCaps:      true,
 		router:           opts.Router,
 		agents:           opts.Agents,
 		agentCmds:        opts.AgentCmds,
@@ -622,6 +652,39 @@ func (h *Hub) allowSendForOwner(owner string) bool {
 func (h *Hub) register(c *wsClient) {
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
+	// R040034-PERF-23 (#1409): wsDeriveUploadOwner pre-auth flips
+	// c.authenticated.Store(true) BEFORE register(c) runs (no-token mode
+	// or matching auth-cookie path), so any preauthenticated client must
+	// land in authClients here. Token-mode clients arrive unauthenticated
+	// and join via markAuthenticated when handleAuth succeeds. Hand-rolled
+	// test hubs that allocate &Hub{} directly leave authClients nil; the
+	// nil-guard preserves the legacy behaviour.
+	if h.authClients != nil && c.authenticated.Load() {
+		h.authClients[c] = struct{}{}
+	}
+	h.mu.Unlock()
+}
+
+// markAuthenticated inserts c into the authClients mirror after handleAuth
+// flips c.authenticated to true. Calling this with the auth state already
+// stored is the contract — c.authenticated.Load() must be true at this
+// point so broadcastToAuthenticated cannot iterate stale entries. Nil
+// authClients (hand-rolled test hubs) is a defensive no-op so legacy
+// fixtures continue to work; production hubs always allocate the map in
+// NewHub. R040034-PERF-23 (#1409).
+func (h *Hub) markAuthenticated(c *wsClient) {
+	h.mu.Lock()
+	// Re-check under the lock that the client is still registered: a
+	// race between unregister and a delayed handleAuth (the readPump
+	// arm processed an auth frame just before the conn closed) would
+	// otherwise reinsert a torn-down client into authClients and pin it
+	// for the next broadcast. Membership in h.clients is the single
+	// source of truth for "this client is alive enough to broadcast to".
+	if h.authClients != nil {
+		if _, ok := h.clients[c]; ok {
+			h.authClients[c] = struct{}{}
+		}
+	}
 	h.mu.Unlock()
 }
 
@@ -644,6 +707,13 @@ func (h *Hub) unregister(c *wsClient) {
 	var unsubs []func()
 	if _, ok := h.clients[c]; ok {
 		delete(h.clients, c)
+		// R040034-PERF-23 (#1409): keep authClients consistent with the
+		// authoritative h.clients map. delete on a missing key is a
+		// well-defined no-op so the unconditional delete handles both the
+		// authenticated and (rare) never-authenticated disconnect paths.
+		if h.authClients != nil {
+			delete(h.authClients, c)
+		}
 		if n := len(c.subscriptions); n > 0 {
 			unsubs = make([]func(), 0, n)
 			for key, unsub := range c.subscriptions {
@@ -909,6 +979,15 @@ func (h *Hub) Shutdown() {
 	// above so the per-key counts are mechanically zero. R246-PERF-4 (#716).
 	for k := range h.subscriberCount {
 		delete(h.subscriberCount, k)
+	}
+	// R040034-PERF-23 (#1409): drain authClients alongside h.clients so a
+	// post-Shutdown broadcast (already racing the cancel/Wait barrier)
+	// cannot iterate stale wsClient pointers. Empty map preserved (vs
+	// nilling) so any straggler markAuthenticated call goes through the
+	// h.clients membership check above and short-circuits on the empty
+	// clients map.
+	for c := range h.authClients {
+		delete(h.authClients, c)
 	}
 	h.mu.Unlock()
 	for _, unsub := range unsubs {
