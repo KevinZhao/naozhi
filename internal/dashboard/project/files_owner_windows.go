@@ -1,6 +1,6 @@
 //go:build windows
 
-package server
+package project
 
 import "os"
 

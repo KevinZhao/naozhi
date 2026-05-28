@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/attachment"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
@@ -1342,12 +1343,12 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	// R249-SEC-3 (#917): close the Lstat→Open TOCTOU symlink-swap window.
 	// Between the Lstat above and an unconstrained os.Open, an attacker
 	// with write access to attachRootAbs could replace `resolved` with a
-	// symlink pointing outside the workspace. openWorkspaceFile uses
+	// symlink pointing outside the workspace. dashproject.OpenWorkspaceFile uses
 	// O_NOFOLLOW on unix so a final-component symlink-swap fails atomically
 	// at the kernel boundary (ELOOP); the windows shim falls back to
 	// plain Open with the same residual posture as the rest of the codebase.
 	// Mirrors the R219-SEC-2 close already shipped for handleFileGet.
-	f, err := openWorkspaceFile(resolved)
+	f, err := dashproject.OpenWorkspaceFile(resolved)
 	if err != nil {
 		// Map symlink-trap errors and any other open failure to the same
 		// 404 the rest of the handler returns — "missing or escape attempt
@@ -1494,7 +1495,7 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 // land at human-message cadence, well above 1ms granularity — so cache
 // effectiveness is unaffected.
 //
-// R040034-SEC-3: mix in fileETagSalt (per-process 32-byte secret, shared with
+// R040034-SEC-3: mix in dashproject.FileETagSalt (per-process 32-byte secret, shared with
 // project_files ETags). Without the salt the only inputs were (size, mtime-
 // millis) — an authenticated attacker can pre-image those for a target user's
 // attachment in <2^96 work and use If-None-Match / 304-vs-200 distinguishers
@@ -1506,6 +1507,6 @@ func buildAttachmentETagSeed(dst []byte, size int64, mtime time.Time) []byte {
 	dst = append(dst, '|')
 	dst = strconv.AppendInt(dst, mtime.UnixMilli(), 10)
 	dst = append(dst, '|')
-	dst = append(dst, fileETagSalt...)
+	dst = append(dst, dashproject.FileETagSalt...)
 	return dst
 }

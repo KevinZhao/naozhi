@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
@@ -368,7 +369,7 @@ type SessionHandlers struct {
 	// projectListCache memoises the projectList slice built in handleList at
 	// 1-second resolution, sharing one rebuild across N dashboard tabs polling
 	// at 1 Hz. Each tab opening adds (len(projects) ≤ ~50) projectListEntry
-	// allocations + redactGitRemoteURL calls per second; with the cache N tabs
+	// allocations + dashproject.RedactGitRemoteURL calls per second; with the cache N tabs
 	// collapse to 1 rebuild/s instead of N. The cached slice is read-only —
 	// handleList copies the header into stats.Projects, never mutating it —
 	// so multiple readers can safely share the same backing array within a
@@ -792,7 +793,7 @@ func (h *SessionHandlers) buildProjectList(now time.Time) []projectListEntry {
 			// forwarded via the node cache so credentials never leak
 			// even if a peer node is behind on patches.
 			if v, ok := item["git_remote_url"].(string); ok && v != "" {
-				entry.GitRemoteURL = redactGitRemoteURL(v)
+				entry.GitRemoteURL = dashproject.RedactGitRemoteURL(v)
 			}
 			if v, ok := item["github"].(bool); ok {
 				entry.GitHub = v
@@ -1504,7 +1505,7 @@ func (h *SessionHandlers) projectListLocalAt(now time.Time) []projectListEntry {
 			// dashboard client. Round 46 redacted /api/projects but missed
 			// this path — /api/sessions is polled every few seconds, so
 			// the leak is actually larger here.
-			GitRemoteURL: redactGitRemoteURL(p.GitRemoteURL),
+			GitRemoteURL: dashproject.RedactGitRemoteURL(p.GitRemoteURL),
 			GitHub:       p.IsGitHub,
 		})
 	}

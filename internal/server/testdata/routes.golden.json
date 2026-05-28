@@ -122,37 +122,37 @@
   {
     "method": "GET",
     "path": "/api/projects",
-    "handler_type": "*ProjectHandlers"
+    "handler_type": "*dashproject.Handlers"
   },
   {
     "method": "GET",
     "path": "/api/projects/config",
-    "handler_type": "*ProjectHandlers"
+    "handler_type": "*dashproject.Handlers"
   },
   {
     "method": "PUT",
     "path": "/api/projects/config",
-    "handler_type": "*ProjectHandlers"
+    "handler_type": "*dashproject.Handlers"
   },
   {
     "method": "POST",
     "path": "/api/projects/favorite",
-    "handler_type": "*ProjectHandlers"
+    "handler_type": "*dashproject.Handlers"
   },
   {
     "method": "GET",
     "path": "/api/projects/file",
-    "handler_type": "*ProjectHandlers"
+    "handler_type": "*dashproject.Handlers"
   },
   {
     "method": "POST",
     "path": "/api/projects/files/exists",
-    "handler_type": "*ProjectHandlers"
+    "handler_type": "*dashproject.Handlers"
   },
   {
     "method": "POST",
     "path": "/api/projects/planner/restart",
-    "handler_type": "*ProjectHandlers"
+    "handler_type": "*dashproject.Handlers"
   },
   {
     "method": "POST",

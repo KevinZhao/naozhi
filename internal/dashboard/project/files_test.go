@@ -1,4 +1,4 @@
-package server
+package project
 
 import (
 	"bytes"
@@ -12,18 +12,15 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
-	"golang.org/x/time/rate"
 
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/session"
 )
 
-// newProjectHandlersForTest builds a ProjectHandlers pointed at a temp
+// newProjectHandlersForTest builds a Handlers pointed at a temp
 // workspace with CLAUDE.md + optional extra files.  Returns (handlers,
 // project name, root dir) so tests can construct request URLs.
-func newProjectHandlersForTest(t *testing.T, files map[string]string) (*ProjectHandlers, string, string) {
+func newProjectHandlersForTest(t *testing.T, files map[string]string) (*Handlers, string, string) {
 	t.Helper()
 	root := t.TempDir()
 	projDir := filepath.Join(root, "demo")
@@ -49,7 +46,7 @@ func newProjectHandlersForTest(t *testing.T, files map[string]string) (*ProjectH
 	if err := mgr.Scan(); err != nil {
 		t.Fatal(err)
 	}
-	return &ProjectHandlers{projectMgr: mgr}, "demo", projDir
+	return &Handlers{projectMgr: mgr}, "demo", projDir
 }
 
 // ─── resolveProjectFile ───────────────────────────────────────────────────────
@@ -402,7 +399,7 @@ func TestContentDisposition(t *testing.T) {
 	}
 }
 
-// ─── handleFilesExists ────────────────────────────────────────────────────────
+// ─── HandleFilesExists ────────────────────────────────────────────────────────
 
 func TestHandleFilesExists_Batch(t *testing.T) {
 	h, proj, _ := newProjectHandlersForTest(t, map[string]string{
@@ -422,7 +419,7 @@ func TestHandleFilesExists_Batch(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	h.handleFilesExists(w, req)
+	h.HandleFilesExists(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
@@ -459,7 +456,7 @@ func TestHandleFilesExists_UnknownProject(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	h.handleFilesExists(w, req)
+	h.HandleFilesExists(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
@@ -475,7 +472,7 @@ func TestHandleFilesExists_TooManyPaths(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	h.handleFilesExists(w, req)
+	h.HandleFilesExists(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
@@ -485,7 +482,7 @@ func TestHandleFilesExists_InvalidJSON(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", strings.NewReader("not json"))
 	w := httptest.NewRecorder()
-	h.handleFilesExists(w, req)
+	h.HandleFilesExists(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
@@ -495,7 +492,7 @@ func TestHandleFilesExists_InvalidJSON(t *testing.T) {
 // without an explicit opt-in the __public_tmp__ pseudo-project must be
 // indistinguishable from a missing project — closes the "any authed
 // dashboard user can read /tmp" gap on multi-user deployments. The
-// symmetric handleFileGet branch is exercised by the same default below.
+// symmetric HandleFileGet branch is exercised by the same default below.
 func TestHandlePublicTmp_DisabledByDefault(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
 	// publicTmpEnabled left at its zero value (false).
@@ -508,7 +505,7 @@ func TestHandlePublicTmp_DisabledByDefault(t *testing.T) {
 		"/api/projects/files/exists", bytes.NewReader(body))
 	existsHTTP.Header.Set("Content-Type", "application/json")
 	existsW := httptest.NewRecorder()
-	h.handleFilesExists(existsW, existsHTTP)
+	h.HandleFilesExists(existsW, existsHTTP)
 	if existsW.Code != http.StatusNotFound {
 		t.Errorf("exists default-disabled status = %d, want 404 body=%s",
 			existsW.Code, existsW.Body.String())
@@ -517,7 +514,7 @@ func TestHandlePublicTmp_DisabledByDefault(t *testing.T) {
 	getReq := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+publicTmpProject+"&path=any.txt&mode=preview", nil)
 	getW := httptest.NewRecorder()
-	h.handleFileGet(getW, getReq)
+	h.HandleFileGet(getW, getReq)
 	if getW.Code != http.StatusNotFound {
 		t.Errorf("get default-disabled status = %d, want 404 body=%s",
 			getW.Code, getW.Body.String())
@@ -562,7 +559,7 @@ func TestHandleFilesExists_PublicTmp(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	h.handleFilesExists(w, req)
+	h.HandleFilesExists(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
@@ -609,7 +606,7 @@ func TestHandleFileGet_PublicTmpPreview(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=preview", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
@@ -632,7 +629,7 @@ func TestHandleFileGet_PublicTmpRejectsTraversal(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+publicTmpProject+"&path=../etc/passwd&mode=preview", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 for traversal", w.Code)
 	}
@@ -672,7 +669,7 @@ func TestHandleFileGet_PublicTmpRejectsCredential(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=download", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403 for credential download", w.Code)
 	}
@@ -725,13 +722,13 @@ func TestHandleFileGet_PublicTmpRejectsForeignPrivate(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=preview", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("foreign-UID 0600 file must be 404, got %d body=%s", w.Code, w.Body.String())
 	}
 
-	// Existence-probe parity: handleFilesExists must mirror the gate so
+	// Existence-probe parity: HandleFilesExists must mirror the gate so
 	// the dashboard can't enumerate /tmp/<other-uid>/* via the batch API.
 	body, _ := json.Marshal(existsReq{
 		Project: publicTmpProject,
@@ -740,7 +737,7 @@ func TestHandleFileGet_PublicTmpRejectsForeignPrivate(t *testing.T) {
 	probeReq := httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", bytes.NewReader(body))
 	probeReq.Header.Set("Content-Type", "application/json")
 	probeW := httptest.NewRecorder()
-	h.handleFilesExists(probeW, probeReq)
+	h.HandleFilesExists(probeW, probeReq)
 	if probeW.Code != http.StatusOK {
 		t.Fatalf("exists probe status = %d body=%s", probeW.Code, probeW.Body.String())
 	}
@@ -761,7 +758,7 @@ func TestHandleFileGet_PublicTmpRejectsForeignPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	w2 := httptest.NewRecorder()
-	h.handleFileGet(w2,
+	h.HandleFileGet(w2,
 		httptest.NewRequest(http.MethodGet,
 			"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=preview", nil))
 	if w2.Code != http.StatusOK {
@@ -781,7 +778,7 @@ func TestHandleFileGet_PublicTmpRejectsForeignPrivate(t *testing.T) {
 func TestHandleFilesExists_RateLimit(t *testing.T) {
 	t.Parallel()
 	h, proj, _ := newProjectHandlersForTest(t, map[string]string{"a.txt": "hi"})
-	h.filesExistsLimiter = newIPLimiterWithProxy(rate.Every(time.Hour), 1, false)
+	h.filesExistsLimiter = newPerIPBurst1Limiter()
 
 	body, _ := json.Marshal(existsReq{Project: proj, Paths: []string{"a.txt"}})
 	mkReq := func() *http.Request {
@@ -793,7 +790,7 @@ func TestHandleFilesExists_RateLimit(t *testing.T) {
 
 	// First request consumes the burst slot and succeeds.
 	w1 := httptest.NewRecorder()
-	h.handleFilesExists(w1, mkReq())
+	h.HandleFilesExists(w1, mkReq())
 	if w1.Code != http.StatusOK {
 		t.Fatalf("first request: status = %d, want 200 (body=%q)",
 			w1.Code, strings.TrimSpace(w1.Body.String()))
@@ -803,7 +800,7 @@ func TestHandleFilesExists_RateLimit(t *testing.T) {
 	// filesystem I/O starts; the 429 must carry the JSON error so curl /
 	// dashboard clients can distinguish rate-limit from other 4xx classes.
 	w2 := httptest.NewRecorder()
-	h.handleFilesExists(w2, mkReq())
+	h.HandleFilesExists(w2, mkReq())
 	if w2.Code != http.StatusTooManyRequests {
 		t.Fatalf("second request: status = %d, want 429 (body=%q)",
 			w2.Code, strings.TrimSpace(w2.Body.String()))
@@ -821,43 +818,16 @@ func TestHandleFilesExists_RateLimit(t *testing.T) {
 	r3 := mkReq()
 	r3.RemoteAddr = "10.0.0.8:54321"
 	w3 := httptest.NewRecorder()
-	h.handleFilesExists(w3, r3)
+	h.HandleFilesExists(w3, r3)
 	if w3.Code != http.StatusOK {
 		t.Fatalf("third request (different IP): status = %d, want 200 (body=%q)",
 			w3.Code, strings.TrimSpace(w3.Body.String()))
 	}
 }
 
-// TestProjectHandlers_FilesExistsLimiter_Wired locks the S13 wiring: server.New
-// must install a non-nil filesExistsLimiter on ProjectHandlers so the
-// production path has DoS protection out of the box. Without this contract a
-// refactor that drops the newIPLimiterWithProxy call in server.go would leave
-// the handler technically correct but unprotected — regressions like that have
-// shipped before (see R59-PERF-M3 where resolveProjectFile was called per
-// path). We verify by inspecting the struct field on a minimally-configured
-// Server, not by probing the rate-limiter timing (which would be flaky).
-func TestProjectHandlers_FilesExistsLimiter_Wired(t *testing.T) {
-	t.Parallel()
-	router := session.NewRouter(session.RouterConfig{})
-	srv := NewWithOptions(ServerOptions{
-		Addr:   ":0",
-		Router: router,
-	})
-	if srv == nil {
-		t.Fatal("NewWithOptions returned nil")
-	}
-	if srv.projectH == nil {
-		t.Fatal("projectH must be constructed even with nil ProjectManager")
-	}
-	if srv.projectH.filesExistsLimiter == nil {
-		t.Error("server.New must wire ProjectHandlers.filesExistsLimiter (S13); " +
-			"a nil limiter leaves /api/projects/files/exists unprotected against DoS")
-	}
-}
-
 // TestHandleFilesExists_NilLimiterBypasses locks the optional-wiring contract.
 // newProjectHandlersForTest builds a handler with no limiter; the nil-guard in
-// handleFilesExists keeps those tests green without forcing every test to wire
+// HandleFilesExists keeps those tests green without forcing every test to wire
 // a limiter. A regression that flips the nil-guard to a fail-closed check
 // would break newProjectHandlersForTest silently for every future test.
 func TestHandleFilesExists_NilLimiterBypasses(t *testing.T) {
@@ -874,7 +844,7 @@ func TestHandleFilesExists_NilLimiterBypasses(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		req.RemoteAddr = "10.0.0.9:54321"
 		w := httptest.NewRecorder()
-		h.handleFilesExists(w, req)
+		h.HandleFilesExists(w, req)
 		if w.Code != http.StatusOK {
 			t.Fatalf("req %d: status = %d, want 200 (body=%q)",
 				i, w.Code, strings.TrimSpace(w.Body.String()))
@@ -882,7 +852,7 @@ func TestHandleFilesExists_NilLimiterBypasses(t *testing.T) {
 	}
 }
 
-// ─── handleFileGet: preview ───────────────────────────────────────────────────
+// ─── HandleFileGet: preview ───────────────────────────────────────────────────
 
 func TestHandleFileGet_PreviewText(t *testing.T) {
 	h, proj, _ := newProjectHandlersForTest(t, map[string]string{
@@ -891,7 +861,7 @@ func TestHandleFileGet_PreviewText(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=src/foo.go&mode=preview", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
@@ -925,7 +895,7 @@ func TestHandleFileGet_PreviewBinary(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=logo.png&mode=preview", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
@@ -948,7 +918,7 @@ func TestHandleFileGet_PreviewTruncation(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=big.txt&mode=preview", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
 	}
@@ -974,7 +944,7 @@ func TestHandleFileGet_PreviewInvalidUTF8(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=bad.txt&mode=preview", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
 	}
@@ -988,7 +958,7 @@ func TestHandleFileGet_PreviewInvalidUTF8(t *testing.T) {
 
 // TestHandleFileGet_PreviewRejectsHTML covers R176-SEC-H3: an .html file
 // in the workspace previously flowed through the preview JSON content
-// path (`isTextMime("text/html") == true`), and `writeJSON` has
+// path (`isTextMime("text/html") == true`), and `httputil.WriteJSON` has
 // `SetEscapeHTML(false)`. The dashboard renderer uses `esc()` today but
 // the JS-side defense is one regression away from stored XSS. The
 // server-side contract must refuse text/html for preview — clients
@@ -1003,7 +973,7 @@ func TestHandleFileGet_PreviewRejectsHTML(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=report.html&mode=preview", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 with binary=true payload", w.Code)
@@ -1060,7 +1030,7 @@ func TestHandleFileGet_PreviewRejectsXHTMLXMLVariants(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet,
 				"/api/projects/file?project="+proj+"&path="+tc.path+"&mode=preview", nil)
 			w := httptest.NewRecorder()
-			h.handleFileGet(w, req)
+			h.HandleFileGet(w, req)
 			if w.Code != http.StatusOK {
 				t.Fatalf("preview status = %d, want 200 with binary=true payload", w.Code)
 			}
@@ -1078,7 +1048,7 @@ func TestHandleFileGet_PreviewRejectsXHTMLXMLVariants(t *testing.T) {
 			rawReq := httptest.NewRequest(http.MethodGet,
 				"/api/projects/file?project="+proj+"&path="+tc.path+"&mode=raw", nil)
 			rawW := httptest.NewRecorder()
-			h.handleFileGet(rawW, rawReq)
+			h.HandleFileGet(rawW, rawReq)
 			if rawW.Code != http.StatusUnsupportedMediaType {
 				t.Errorf("raw status = %d, want 415 (XML must not be served inline)", rawW.Code)
 			}
@@ -1086,7 +1056,7 @@ func TestHandleFileGet_PreviewRejectsXHTMLXMLVariants(t *testing.T) {
 	}
 }
 
-// ─── handleFileGet: raw ───────────────────────────────────────────────────────
+// ─── HandleFileGet: raw ───────────────────────────────────────────────────────
 
 func TestHandleFileGet_RawImage(t *testing.T) {
 	png := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d}
@@ -1097,7 +1067,7 @@ func TestHandleFileGet_RawImage(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=logo.png&mode=raw", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
 	}
@@ -1125,13 +1095,13 @@ func TestHandleFileGet_RawRejectsBinary(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=blob.bin&mode=raw", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusUnsupportedMediaType {
 		t.Errorf("status = %d, want 415", w.Code)
 	}
 }
 
-// ─── handleFileGet: render (HTML sandboxed preview) ──────────────────────────
+// ─── HandleFileGet: render (HTML sandboxed preview) ──────────────────────────
 
 // TestHandleFileGet_RenderHTML pins the B1 contract: mode=render on a
 // workspace .html file serves the bytes in a form that CANNOT render inline
@@ -1150,7 +1120,7 @@ func TestHandleFileGet_RenderHTML(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=coverage.html&mode=render", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%q)", w.Code, w.Body.String())
@@ -1235,7 +1205,7 @@ func TestHandleFileGet_RenderHTMLWithBOM(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=bom.html&mode=render", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("BOM-prefixed .html: status = %d, want 200", w.Code)
 	}
@@ -1276,7 +1246,7 @@ func TestHandleFileGet_RenderRejectsNonAllowed(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet,
 				"/api/projects/file?project="+proj+"&path="+tc.path+"&mode=render", nil)
 			w := httptest.NewRecorder()
-			h.handleFileGet(w, req)
+			h.HandleFileGet(w, req)
 			if w.Code != http.StatusUnsupportedMediaType {
 				t.Errorf("status = %d, want 415 (render allowlist is HTML/XHTML/SVG only)", w.Code)
 			}
@@ -1316,7 +1286,7 @@ func TestHandleFileGet_RenderRejectsSensitive(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet,
 				"/api/projects/file?project="+proj+"&path="+tc.path+"&mode=render", nil)
 			w := httptest.NewRecorder()
-			h.handleFileGet(w, req)
+			h.HandleFileGet(w, req)
 			if w.Code != http.StatusForbidden {
 				t.Errorf("status = %d, want 403 (render must refuse sensitive paths regardless of MIME)", w.Code)
 			}
@@ -1344,7 +1314,7 @@ func TestHandleFileGet_RenderSVG(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=diagram.svg&mode=render", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%q)", w.Code, w.Body.String())
@@ -1398,7 +1368,7 @@ func TestHandleFileGet_RenderSVGSpoofedExt(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=fake.svg&mode=render", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200 — extension authority pins .svg → image/svg+xml", w.Code)
 	}
@@ -1420,7 +1390,7 @@ func TestHandleFileGet_RenderEmptyHTML(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=empty.html&mode=render", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	// 200 is the accepted contract; any other status deserves a look.
 	if w.Code != http.StatusOK {
 		t.Errorf("empty .html: status = %d, want 200", w.Code)
@@ -1446,7 +1416,7 @@ func TestHandleFileGet_RenderTooLarge(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=huge.html&mode=render", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("status = %d, want 413", w.Code)
 	}
@@ -1461,13 +1431,13 @@ func TestHandleFileGet_RenderInvalidMode(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=a.html&mode=rendr", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 for typo'd mode", w.Code)
 	}
 }
 
-// ─── handleFileGet: download ──────────────────────────────────────────────────
+// ─── HandleFileGet: download ──────────────────────────────────────────────────
 
 func TestHandleFileGet_Download(t *testing.T) {
 	h, proj, _ := newProjectHandlersForTest(t, map[string]string{
@@ -1476,7 +1446,7 @@ func TestHandleFileGet_Download(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=weird%20file.txt&mode=download", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
 	}
@@ -1492,7 +1462,7 @@ func TestHandleFileGet_Download(t *testing.T) {
 	}
 }
 
-// ─── handleFileGet: ETag / 304 ────────────────────────────────────────────────
+// ─── HandleFileGet: ETag / 304 ────────────────────────────────────────────────
 
 func TestHandleFileGet_ETag304(t *testing.T) {
 	h, proj, _ := newProjectHandlersForTest(t, map[string]string{
@@ -1503,7 +1473,7 @@ func TestHandleFileGet_ETag304(t *testing.T) {
 	req1 := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=a.txt&mode=preview", nil)
 	w1 := httptest.NewRecorder()
-	h.handleFileGet(w1, req1)
+	h.HandleFileGet(w1, req1)
 	etag := w1.Header().Get("ETag")
 	if etag == "" {
 		t.Fatal("first response missing ETag")
@@ -1514,7 +1484,7 @@ func TestHandleFileGet_ETag304(t *testing.T) {
 		"/api/projects/file?project="+proj+"&path=a.txt&mode=preview", nil)
 	req2.Header.Set("If-None-Match", etag)
 	w2 := httptest.NewRecorder()
-	h.handleFileGet(w2, req2)
+	h.HandleFileGet(w2, req2)
 	if w2.Code != http.StatusNotModified {
 		t.Errorf("status = %d, want 304", w2.Code)
 	}
@@ -1524,7 +1494,7 @@ func TestHandleFileGet_ETag304(t *testing.T) {
 }
 
 // TestHandleFileGet_ETagIncludesSalt regresses R214-SEC-4 (issue #418):
-// the wire-visible ETag must depend on fileETagSalt, not just (size,
+// the wire-visible ETag must depend on FileETagSalt, not just (size,
 // mtime). We assert this by recomputing the unsalted hash that the old
 // implementation produced and confirming it is NOT equal to the
 // returned ETag — if some future refactor accidentally drops the salt
@@ -1537,14 +1507,14 @@ func TestHandleFileGet_ETagIncludesSalt(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=a.txt&mode=preview", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	gotETag := w.Header().Get("ETag")
 	if gotETag == "" {
 		t.Fatal("missing ETag")
 	}
 
 	// Recompute what the legacy unsalted form would have produced. If
-	// fileETagSalt regresses to zero-bytes (or is dropped from the
+	// FileETagSalt regresses to zero-bytes (or is dropped from the
 	// hash input) the wire ETag will collide with this value — a
 	// deterministic recovery oracle for size+mtime.
 	info, err := os.Stat(filepath.Join(projDir, "a.txt"))
@@ -1560,7 +1530,7 @@ func TestHandleFileGet_ETagIncludesSalt(t *testing.T) {
 	legacy8 := `"` + hex.EncodeToString(legacySum[:8]) + `"`
 	legacy12 := `"` + hex.EncodeToString(legacySum[:12]) + `"`
 	if gotETag == legacy8 || gotETag == legacy12 {
-		t.Errorf("ETag %q matches the unsalted hash — fileETagSalt regressed; size+mtime are now probe-recoverable", gotETag)
+		t.Errorf("ETag %q matches the unsalted hash — FileETagSalt regressed; size+mtime are now probe-recoverable", gotETag)
 	}
 }
 
@@ -1571,29 +1541,29 @@ func TestHandleFileGet_ETagIncludesSalt(t *testing.T) {
 // so this can only regress via someone replacing the var with a
 // constant — assert by entropy.
 func TestHandleFileGet_ETagSalt_NonZero(t *testing.T) {
-	if len(fileETagSalt) < 16 {
-		t.Fatalf("fileETagSalt must be at least 16 bytes; got %d", len(fileETagSalt))
+	if len(FileETagSalt) < 16 {
+		t.Fatalf("FileETagSalt must be at least 16 bytes; got %d", len(FileETagSalt))
 	}
 	allZero := true
-	for _, b := range fileETagSalt {
+	for _, b := range FileETagSalt {
 		if b != 0 {
 			allZero = false
 			break
 		}
 	}
 	if allZero {
-		t.Error("fileETagSalt is all zeros — crypto/rand init failed silently or var was replaced with a literal")
+		t.Error("FileETagSalt is all zeros — crypto/rand init failed silently or var was replaced with a literal")
 	}
 }
 
-// ─── handleFileGet: error paths ───────────────────────────────────────────────
+// ─── HandleFileGet: error paths ───────────────────────────────────────────────
 
 func TestHandleFileGet_Missing(t *testing.T) {
 	h, proj, _ := newProjectHandlersForTest(t, nil)
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=nope.txt&mode=preview", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
@@ -1604,7 +1574,7 @@ func TestHandleFileGet_Traversal(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=../../etc/passwd&mode=preview", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
@@ -1615,7 +1585,7 @@ func TestHandleFileGet_InvalidMode(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=a.txt&mode=bogus", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
@@ -1629,7 +1599,7 @@ func TestHandleFileGet_Directory(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=sub&mode=preview", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 for directory", w.Code)
 	}
@@ -1686,7 +1656,7 @@ func TestHandleFileGet_RejectsSymlinkAtResolvedPath(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/projects/file?project="+proj+"&path=target.txt&mode=preview", nil)
 	w := httptest.NewRecorder()
-	h.handleFileGet(w, req)
+	h.HandleFileGet(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("legitimate symlink resolution should succeed, got %d body=%s",
 			w.Code, w.Body.String())
