@@ -699,6 +699,18 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 		case outcome := <-done:
 			ch <- abortResult{outcome: outcome, fired: true}
 		case <-t.C:
+			// R20260527122801-SEC-3 (#1327): the inner goroutine above
+			// is still parked on InterruptViaControl and will outlive
+			// this watchdog goroutine until the wedged stdin write
+			// unblocks (typically on the next session.Reset; for non-
+			// fresh jobs that may never happen on its own). Surface the
+			// event via a metric + Warn log so operators can alert on
+			// rising deltas rather than discovering it via slow goroutine
+			// growth. The metric lives next to other cron counters in
+			// internal/metrics so the dashboard wireup is identical.
+			metrics.CronWatchdogInterruptTimeoutTotal.Add(1)
+			slog.Warn("cron watchdog: InterruptViaControl timeout exceeded; inner goroutine parked until session reset",
+				"timeout", watchdogInterruptTimeout())
 			ch <- abortResult{outcome: InterruptError, fired: true}
 		}
 	}()

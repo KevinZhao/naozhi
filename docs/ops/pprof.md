@@ -148,6 +148,7 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_cron_run_skipped_total` | skipped 终态计数（overlap_skipped / paused_concurrent） | 持续涨 = 上一轮没跑完下一轮就来了；调长 schedule 或缩 prompt |
 | `naozhi_cron_run_timed_out_total` | timed_out 终态计数（DeadlineExceeded） | 涨 = 接近 jobTimeout 边界；对比 cron_execution_slow_total 看是否同因 |
 | `naozhi_cron_run_canceled_total` | canceled 终态计数（context.Canceled，shutdown / job 删除中途） | 重启高峰短时涨正常；稳态非零 = job 频繁被删/recreate |
+| `naozhi_cron_watchdog_interrupt_timeout_total` | cron deadline-watchdog 触发后 `InterruptViaControl` 在 `watchdogInterruptTimeoutDefault`（3s）内未返回的累计次数（R20260527122801-SEC-3 / #1327） | 非零 = stdin 写入 wedged，inner goroutine 卡到下次 `session.Reset` 才放行；和 `naozhi_shim_restart_total` 对照判断 reconcile 是否清理；持续涨需要排查 shim 健康 |
 | `naozhi_auto_chain_spawn_attach_total` | 新建 session 路径自动接 chain 的次数（docs/rfc/auto-workspace-chain.md） | 上线初期会随每次新会话上涨；稳态后跟随用户开新会话节奏 |
 | `naozhi_auto_chain_backfill_attach_total` | 启动一次性回填给 prev 为空的 session 接 chain 的次数 | 仅在进程启动后短时涨；持续非零 = backfill 被错误重入 |
 | `naozhi_auto_chain_backfill_skipped_no_workspace_total` | 回填阶段因 workspace 字段为空跳过的 session 数 | 高 = sessions.json 大量 legacy 条目缺 workspace；考虑迁移 |
