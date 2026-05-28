@@ -59,7 +59,7 @@ file_size:
       limit: 500
       until_phase: "5"
     - path: internal/server/agent_tailer.go # v0.6.1 新增豁免：v0.4 时 655 不超线
-      current: 772                          # 2026-05-28 sync.Pool helpers 抽到 agent_tailer_pools.go (Phase 4c-prep)
+      current: 695                          # 2026-05-28 路径检验 helper 抽到 agent_tailer_pathcheck.go (Phase 4c-prep)
       limit: 500
       until_phase: 4c
     # ── 2 个 500-800 行（v0.6.1 新增） ──
