@@ -457,7 +457,12 @@ type Scheduler struct {
 	// concurrent persist hot-path readers under -race. Initialised to
 	// defaultMarshalJobs in NewScheduler. Lifted from a package-level
 	// var so the seam stops being a global and parallel tests can no
-	// longer leak a stub across schedulers. R250-ARCH-14.
+	// longer leak a stub across schedulers. R250-ARCH-14 closes
+	// R242-CR-5 (#693) / R246-ARCH-18 / R247-CR-19 (#599) — the older
+	// anchors all describe the same package-level mutable seam this
+	// per-Scheduler atomic.Pointer field replaced; pinned by
+	// TestMarshalJobs_PerSchedulerIsolation in
+	// marshal_jobs_per_scheduler_test.go.
 	marshalJobs atomic.Pointer[marshalJobsFn]
 }
 
