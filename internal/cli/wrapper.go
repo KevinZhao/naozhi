@@ -26,7 +26,38 @@ type SpawnOptions struct {
 	WorkingDir      string
 	NoOutputTimeout time.Duration // kill process if no output for this long
 	TotalTimeout    time.Duration // kill process if total turn exceeds this
+
+	// PermissionMode controls how the Claude CLI handles tool permissions.
+	// Zero value (PermissionModeDefault) preserves the legacy behaviour of
+	// passing `--dangerously-skip-permissions` to the CLI — required by the
+	// stream-json long-lived process model where the user has no opportunity
+	// to interactively approve a permission prompt mid-turn. Multi-tenant /
+	// untrusted-caller deployments can opt out via PermissionModeStandard,
+	// which omits the flag and lets the CLI's own permission prompt fire
+	// (which will block the session, by design). R215-SEC-P1-1 / #531.
+	//
+	// Only ClaudeProtocol consumes this field today; ACP backends ignore it.
+	PermissionMode PermissionMode
 }
+
+// PermissionMode selects how a Claude-CLI spawn handles tool permissions.
+// See SpawnOptions.PermissionMode godoc.
+type PermissionMode uint8
+
+const (
+	// PermissionModeDefault keeps the legacy --dangerously-skip-permissions
+	// flag on the Claude CLI argv. This is the only mode compatible with
+	// naozhi's headless `-p` long-lived process model today; switching off
+	// the flag stalls the turn on the first permission prompt because the
+	// CLI has no interactive surface in that mode. Zero value so existing
+	// callers continue to spawn with the flag, no migration required.
+	PermissionModeDefault PermissionMode = 0
+	// PermissionModeStandard omits --dangerously-skip-permissions, deferring
+	// to the Claude CLI's built-in permission prompts. Intended for
+	// multi-tenant / untrusted deployments where the operator accepts the
+	// stalled-turn cost in exchange for tool-call review. R215-SEC-P1-1.
+	PermissionModeStandard PermissionMode = 1
+)
 
 // Wrapper manages spawning CLI processes via shim.
 //

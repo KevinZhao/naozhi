@@ -62,7 +62,7 @@ func (r *Router) maybeAttachAutoChainOnSpawn(
 	// the owner subsystem (cron Scheduler / sysession Manager / future)
 	// has not announced its IDs yet. Skip the attach decision entirely
 	// in that window so the candidate list cannot be polluted; cmd
-	// flips the gate via SetPendingExcluders(false) after every owner
+	// flips the gate via setPendingExcluders(false) after every owner
 	// has registered. The early bail also saves a router-mu round-trip
 	// on every spawn during startup.
 	if r.excludersPending() {
@@ -146,25 +146,11 @@ func (r *Router) extraExcluders() []SessionIDExcluder {
 	return *cur
 }
 
-// RunAutoChainBackfillOnce is the exported follow-up trigger paired with
-// SetPendingExcluders. cmd-side wiring calls SetPendingExcluders(true)
-// at the top of router setup (which causes the NewRouter-internal
-// runAutoChainBackfillOnce to skip), registers every excluder owner,
-// flips the gate via SetPendingExcluders(false), and finally calls
-// RunAutoChainBackfillOnce here to drive backfill against the
-// fully-populated excluder set. Idempotent on the no-policy path —
-// returns immediately when autoChainPolicy is nil. Routers that do
-// not opt into the gate ignore this method entirely; the original
-// NewRouter-internal call already ran their backfill.
-func (r *Router) RunAutoChainBackfillOnce() {
-	r.runAutoChainBackfillOnce()
-}
-
-// SetPendingExcluders flips the R242-ARCH-16 (#760) startup-window gate.
-// Set true at the top of cmd-side router wiring BEFORE registering the
-// first SessionIDExcluder; flip false after every owner (cron Scheduler,
-// sysession Manager, any future namespace) has called
-// AddSessionIDExcluder. While true, auto-chain readers
+// setPendingExcluders flips the R242-ARCH-16 (#760) startup-window gate.
+// Intended for cmd-side wiring: set true at the top of router setup
+// BEFORE registering the first SessionIDExcluder; flip false after every
+// owner (cron Scheduler, sysession Manager, any future namespace) has
+// called AddSessionIDExcluder. While true, auto-chain readers
 // (maybeAttachAutoChainOnSpawn, runAutoChainBackfillOnce) skip the
 // chain-attach decision entirely so an internal sessionID owned by a
 // not-yet-registered subsystem cannot leak into a user-visible chain.
@@ -175,15 +161,20 @@ func (r *Router) RunAutoChainBackfillOnce() {
 //
 // Default value is false (gate disabled), so existing test routers and
 // pre-#760 cmd wiring keep their behaviour. Idempotent — calling
-// SetPendingExcluders(false) when already false is a no-op.
-func (r *Router) SetPendingExcluders(pending bool) {
+// setPendingExcluders(false) when already false is a no-op.
+//
+// R260528-ARCH-3 (#1364): unexported because no cmd-side wiring uses
+// the gate today. Tests in the same package pin the contract via
+// the unexported entry point; if a future cmd actually wants the gate,
+// re-export here in tandem with the wireup change.
+func (r *Router) setPendingExcluders(pending bool) {
 	r.pendingExcluders.Store(pending)
 }
 
 // excludersPending reports whether the startup-window gate is set.
 // Intentionally unexported: callers in this package consult the flag
-// at the top of every auto-chain read path; external packages flip it
-// via SetPendingExcluders.
+// at the top of every auto-chain read path; the package-internal
+// setPendingExcluders flips it.
 func (r *Router) excludersPending() bool {
 	return r.pendingExcluders.Load()
 }
@@ -310,15 +301,17 @@ func (r *Router) runAutoChainBackfillOnce() {
 	}
 	// R242-ARCH-16 (#760): startup-window gate. NewRouter is the sole
 	// caller of this function, and the cmd-side wiring sequence is
-	// "construct router → SetPendingExcluders(true) → register every
-	// excluder → SetPendingExcluders(false) → ...". When the gate is
-	// set we skip backfill so internal IDs that haven't been announced
-	// yet cannot leak into a backfilled chain. cmd is responsible for
-	// scheduling a follow-up backfill once the gate is down — see
-	// the SetPendingExcluders / RunAutoChainBackfillOnce pair on
-	// Router. (Today no operator opts into the gate so backfill keeps
+	// "construct router → setPendingExcluders(true) → register every
+	// excluder → setPendingExcluders(false) → runAutoChainBackfillOnce".
+	// When the gate is set we skip backfill so internal IDs that haven't
+	// been announced yet cannot leak into a backfilled chain. cmd is
+	// responsible for scheduling a follow-up backfill once the gate is
+	// down. (Today no operator opts into the gate so backfill keeps
 	// running synchronously inside NewRouter; the gate is defence-in-
-	// depth for future cmd wiring that adds a third excluder owner.)
+	// depth for future cmd wiring that adds a third excluder owner.
+	// R260528-ARCH-3 (#1364): gate methods are unexported because no
+	// production wiring uses them yet; tests pin the contract via the
+	// internal entry point.)
 	if r.excludersPending() {
 		slog.Info("auto-chain backfill: skipped (excluders pending — cmd has not yet flipped the startup gate)")
 		return

@@ -88,7 +88,17 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 		// (see filterReplayEvent).
 		"--replay-user-messages",
 		"--setting-sources", "", // disable standard settings to avoid hook loops
-		"--dangerously-skip-permissions",
+	}
+	// R215-SEC-P1-1 / #531: --dangerously-skip-permissions used to be
+	// hard-coded above. It is required by naozhi's `-p` long-lived process
+	// model (headless mode has no interactive prompt surface), so the
+	// zero-value PermissionModeDefault keeps emitting it — every existing
+	// caller stays bit-identical. Multi-tenant / untrusted deployments opt
+	// out per-spawn by setting opts.PermissionMode = PermissionModeStandard,
+	// which omits the flag and accepts that the turn will stall on the
+	// first permission prompt.
+	if opts.PermissionMode == PermissionModeDefault {
+		args = append(args, "--dangerously-skip-permissions")
 	}
 	if p.SettingsFile != "" {
 		args = append(args, "--settings", p.SettingsFile)

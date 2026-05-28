@@ -688,8 +688,55 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 }
 
 // ResumeJobByID resumes a paused job by exact ID (unscoped, for dashboard use).
+//
+// R20260526-GO-001 (#1226): registerJob mutates j.entryID + j.cachedPeriod
+// before resumeJobLocked flips j.Paused, so a persistJobsLocked failure
+// after op-success would leave in-memory state with a live cron entry +
+// Paused=false while disk still shows Paused=true — restart would then
+// re-register the schedule on top of the surviving runtime entry,
+// producing a double-fire. Capture the pre-op state under s.mu and
+// install a rollback that removes the cron entry and restores
+// (entryID, cachedPeriod, Paused) so the in-memory view matches the
+// un-persisted disk view. Mirrors PauseJobByID's rollback contract.
 func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
-	return s.withJobByID(id, s.resumeJobLocked, nil)
+	var prevEntryID robfigcron.EntryID
+	var prevCachedPeriod time.Duration
+	var prevPaused bool
+	var captured bool
+	op := func(j *Job) error {
+		// Snapshot under s.mu so the rollback restores the exact pre-op
+		// view; resumeJobLocked → registerJob mutates entryID +
+		// cachedPeriod only after this read so a concurrent reader can
+		// never observe a torn write.
+		prevEntryID = j.entryID
+		prevCachedPeriod = j.cachedPeriod
+		prevPaused = j.Paused
+		captured = true
+		return s.resumeJobLocked(j)
+	}
+	rollback := func(j *Job) {
+		// Only restore if op actually ran and captured the pre-op view —
+		// guards against a future refactor that might invoke rollback on
+		// the "op never ran" path.
+		if !captured {
+			return
+		}
+		// resumeJobLocked succeeded means registerJob registered a new
+		// cron entry; remove it so the in-memory cron table matches the
+		// "still paused" disk view. Use the freshly-registered entryID
+		// (j.entryID), not prevEntryID — the latter is the pre-resume
+		// value we're about to restore for j.entryID.
+		if j.entryID != 0 {
+			s.cron.Remove(j.entryID)
+		}
+		j.entryID = prevEntryID
+		j.cachedPeriod = prevCachedPeriod
+		j.Paused = prevPaused
+	}
+	return s.withJobByIDOpt(id, withJobByIDOpts{
+		op:                   op,
+		rollbackOnPersistErr: rollback,
+	})
 }
 
 // JobUpdate captures fields a dashboard user may edit on an existing cron

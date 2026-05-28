@@ -254,6 +254,14 @@ type Persister struct {
 	// first call and stay grown for the process lifetime.
 	// R249-PERF-19.
 	flushCands []flushCandidate
+	// lastFlushCount is the number of slots in flushCands that were
+	// actually populated on the most recent tick. R040034-PERF-7 (#1406):
+	// the prior `clear(p.flushCands)` zeroed every slot up to len, so a
+	// one-off burst that grew the slice to N kept memzeroing N pointers
+	// every 100 ms tick even when the current candidate count was 0.
+	// Tracking the last-used length lets us clear just the slots we
+	// actually touched. Run-goroutine only — no synchronisation needed.
+	lastFlushCount int
 }
 
 // batchJob is the internal queue element. Key is the original
@@ -883,7 +891,20 @@ func (p *Persister) collectFlushCandidates(now time.Time) []flushCandidate {
 	// Drop pointer references from the previous tick before reuse so
 	// dropped/idle-closed writers can be GC'd while this slice holds
 	// the only remaining reference; then truncate to len=0 keeping cap.
-	clear(p.flushCands)
+	//
+	// R040034-PERF-7 (#1406): only zero the slots the previous tick
+	// actually populated (lastFlushCount), not the full backing array.
+	// Without this, after a one-off burst grew flushCands to cap=N,
+	// every subsequent FlushInterval/2 (~100ms) tick memzeros N pointer
+	// slots even when the current candidate count is 0. Bounded by the
+	// slice header so a shrunk slice can never index past its own len.
+	if p.lastFlushCount > 0 {
+		n := p.lastFlushCount
+		if n > cap(p.flushCands) {
+			n = cap(p.flushCands)
+		}
+		clear(p.flushCands[:n])
+	}
 	cands := p.flushCands[:0]
 	for k, w := range p.writers {
 		if !w.dirty {
@@ -900,8 +921,10 @@ func (p *Persister) collectFlushCandidates(now time.Time) []flushCandidate {
 		})
 	}
 	// Stash the (possibly grown) backing array back so the next tick
-	// inherits the larger cap.
+	// inherits the larger cap. Remember how many slots we just used
+	// so the next tick can clear exactly that many — not the full cap.
 	p.flushCands = cands
+	p.lastFlushCount = len(cands)
 	return cands
 }
 

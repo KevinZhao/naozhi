@@ -315,6 +315,16 @@ type Scheduler struct {
 	// after NewScheduler returns, so AddJob can read it lock-free.
 	maxJobsPerChat int
 	execTimeout    time.Duration
+	// stopBudget is the per-instance Stop() budget snapshotted from the
+	// package-level default at NewScheduler. R249-CR-3 (#947): moving the
+	// budget off a package-level var onto the Scheduler instance removes
+	// the t.Parallel race where two tests overlapping a short-budget Stop
+	// on different *Scheduler would clobber each other's budget swap.
+	// Field is read on the Stop() goroutine only, after construction; no
+	// atomic is needed (writers are confined to NewScheduler + the test
+	// seam WithStopBudgetField, which the same test must serialise via
+	// t.Cleanup).
+	stopBudget time.Duration
 	// location is the timezone used to interpret schedule expressions and to
 	// compute preview/next-run times exposed via the dashboard.
 	location *time.Location
@@ -927,13 +937,17 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		// maps.Clone returns nil for nil input so callers that omit any of
 		// these fields (test fixtures, narrow integration tests) keep the
 		// prior nil-map semantics.
-		platforms:           maps.Clone(cfg.Platforms),
-		agents:              maps.Clone(cfg.Agents),
-		agentCommands:       maps.Clone(cfg.AgentCommands),
-		storePath:           cfg.StorePath,
-		maxJobs:             cfg.MaxJobs,
-		maxJobsPerChat:      maxPerChat,
-		execTimeout:         cfg.ExecTimeout,
+		platforms:      maps.Clone(cfg.Platforms),
+		agents:         maps.Clone(cfg.Agents),
+		agentCommands:  maps.Clone(cfg.AgentCommands),
+		storePath:      cfg.StorePath,
+		maxJobs:        cfg.MaxJobs,
+		maxJobsPerChat: maxPerChat,
+		execTimeout:    cfg.ExecTimeout,
+		// R249-CR-3 (#947): snapshot the package-level default into a
+		// per-instance field so tests in t.Parallel can override their
+		// own Scheduler's budget without racing each other on a global.
+		stopBudget:          stopBudget,
 		location:            loc,
 		notifyDefault:       cfg.NotifyDefault,
 		allowedRoot:         cfg.AllowedRoot,
@@ -1421,7 +1435,14 @@ func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
 	// is the explicit, documented pattern. The first select still uses
 	// the NewTimer so we can defer-Stop it on the early-drain path.
 	stopStart = time.Now()
-	deadline := time.NewTimer(stopBudget)
+	// R249-CR-3 (#947): read the per-instance budget. Falls back to the
+	// package-level default when the field is the zero value — e.g. tests
+	// that hand-construct *Scheduler without going through NewScheduler.
+	budget := s.stopBudget
+	if budget <= 0 {
+		budget = stopBudget
+	}
+	deadline := time.NewTimer(budget)
 	defer deadline.Stop()
 
 	select {
@@ -1431,7 +1452,7 @@ func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
 		// R250-GO-20 (#1083): see GC counter rationale above.
 		metrics.CronStopBudgetExceededDrainTotal.Add(1)
 		slog.Warn("cron scheduler: stop deadline exceeded before cron.Stop drained, proceeding",
-			"budget", stopBudget)
+			"budget", budget)
 	}
 	return deadlineHit, stopStart
 }
@@ -1488,7 +1509,14 @@ func (s *Scheduler) drainTriggerWG(stopStart time.Time) {
 	// from time.After is unreachable for explicit Stop. Mirror the
 	// first select's NewTimer + defer Stop pattern (line ~820) so
 	// both halves of Stop release timer state deterministically.
-	remaining := stopBudget - time.Since(stopStart)
+	// R249-CR-3 (#947): same per-instance budget read as drainCronStop;
+	// must match — keeping a single overall ceiling across both halves
+	// of Stop is the contract drainCronStop's godoc pins.
+	budget := s.stopBudget
+	if budget <= 0 {
+		budget = stopBudget
+	}
+	remaining := budget - time.Since(stopStart)
 	if remaining < time.Millisecond {
 		remaining = time.Millisecond
 	}
@@ -1500,7 +1528,7 @@ func (s *Scheduler) drainTriggerWG(stopStart time.Time) {
 		// R250-GO-20 (#1083): see GC counter rationale above.
 		metrics.CronStopBudgetExceededTriggerTotal.Add(1)
 		slog.Warn("cron scheduler: stop deadline exceeded during triggerWG wait, proceeding",
-			"budget", stopBudget, "remaining_ms", remaining.Milliseconds())
+			"budget", budget, "remaining_ms", remaining.Milliseconds())
 	}
 }
 

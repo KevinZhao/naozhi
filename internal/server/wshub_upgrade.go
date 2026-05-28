@@ -235,7 +235,14 @@ func wsDeriveUploadOwner(w http.ResponseWriter, r *http.Request, h *Hub, ip stri
 	// unauthenticated with empty uploadOwner — that branch never reaches
 	// uploadStore.
 	if cookie, err := r.Cookie(authCookieName); err == nil {
-		if h.cookieMAC != "" && subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(h.cookieMAC)) == 1 {
+		// R040034-SEC-1 (#1398): h.cookieMAC is a getter callback so
+		// RotateCookieGen invalidations reach this branch on the next
+		// upgrade — previously the Hub cached opts.CookieMAC at
+		// construction, leaving WS upgrades accepting pre-rotation
+		// cookies until the process restarted. Local var so the
+		// constant-time compare and the empty-guard read the same value.
+		mac := h.cookieMAC()
+		if mac != "" && subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(mac)) == 1 {
 			// Must use the same derivation as HTTP uploadOwner so files
 			// uploaded on one transport can be claimed on the other.
 			return ownerKeyFromCookie(cookie.Value), true, true

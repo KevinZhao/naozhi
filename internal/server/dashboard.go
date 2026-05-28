@@ -351,11 +351,16 @@ func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 
 func (s *Server) registerDashboard() {
 	s.hub = NewHub(HubOptions{
-		Router:           s.router,
-		Agents:           s.agents,
-		AgentCmds:        s.agentCommands,
-		DashToken:        s.dashboardToken,
-		CookieMAC:        s.auth.cookieMAC(),
+		Router:    s.router,
+		Agents:    s.agents,
+		AgentCmds: s.agentCommands,
+		DashToken: s.dashboardToken,
+		// R040034-SEC-1 (#1398): pass the live getter rather than a
+		// snapshot so a future hot-reload that invokes RotateCookieGen
+		// invalidates WS upgrades on the next handshake instead of
+		// continuing to accept pre-rotation cookies until restart. The
+		// HTTP path already calls auth.cookieMAC() per request.
+		CookieMACFn:      s.auth.cookieMAC,
 		Guard:            s.sessionGuard,
 		Queue:            s.msgQueue,
 		Nodes:            s.nodes,

@@ -573,6 +573,26 @@ type CronHandlers struct {
 	// skip the gate. Wiring lives in server.New.
 	listLimiter *ipLimiter
 
+	// transcriptLimiter caps per-IP rate for the transcript endpoint
+	// specifically. R250-SEC-7 (#1096): handleRunTranscript previously
+	// shared runsLimiter with handleRunsList / handleRunDetail; the
+	// transcript path is dramatically more expensive (EvalSymlinks ×2,
+	// 8 MB LimitReader + 256 KB scanner buffer + per-line json.Unmarshal
+	// + flattenJSONLEvent) so a single attacker can spam the cheaper
+	// runs-list endpoint into 429 starvation by saturating the shared
+	// bucket via transcript reads, AND vice versa. Splitting the gate
+	// gives transcripts their own budget so a transcript flood cannot
+	// starve the dashboard's runs visibility.
+	//
+	// 6/min sustained × burst 12 — a legitimate operator rarely opens
+	// more than one transcript drawer per minute (the UI fans out a
+	// single transcript fetch per drawer open), so 6/min is generous
+	// while still capping a stolen-token attacker. Burst 12 absorbs the
+	// occasional double-tap (drawer open → close → re-open) without
+	// tripping. Nil-guarded just like runsLimiter so
+	// newCronHandlersForTest paths skip the gate.
+	transcriptLimiter *ipLimiter
+
 	// writeLimiter caps per-IP rate of authenticated cron-write/control
 	// endpoints that fan out side-effects beyond a cheap read:
 	//
@@ -879,6 +899,25 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	// main loop below sees a deterministic order with no map allocation.
 	recentByIdx := h.batchRecentRuns(jobs, recentRunsPerJob)
 
+	// R250-PERF-16 (#1119): allocate the cronRunSummaryView storage once
+	// for the whole list response instead of paying a fresh
+	// `make([]cronRunSummaryView, len(recent))` per job. The per-job
+	// slices below are sub-slices of this single backing array, which
+	// drops N allocations of 5×~120 bytes to 1 allocation of N×5×~120
+	// bytes. JSON encoder treats sub-slices as independent arrays so the
+	// wire shape is unchanged. The backing array is sized to the sum of
+	// per-job lens (≤ N × recentRunsPerJob); empty recent[idx] entries
+	// contribute 0 and stay nil on v.RecentRuns.
+	totalRecent := 0
+	for _, r := range recentByIdx {
+		totalRecent += len(r)
+	}
+	var recentBacking []cronRunSummaryView
+	if totalRecent > 0 {
+		recentBacking = make([]cronRunSummaryView, totalRecent)
+	}
+	recentBackingNext := 0
+
 	views := make([]cronJobView, 0, len(jobs))
 	for idx, entry := range jobs {
 		j := entry.Job
@@ -972,7 +1011,14 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		// acquire — and the worst-case wall time is bounded by ⌈N/W⌉ × per-
 		// job lock cost rather than N × per-job lock cost.
 		if recent := recentByIdx[idx]; len(recent) > 0 {
-			rv := make([]cronRunSummaryView, len(recent))
+			// R250-PERF-16 (#1119): carve a sub-slice out of the
+			// pre-allocated recentBacking instead of paying a per-job
+			// `make`. This is the only writer into [start:end] for this
+			// response so the sub-slice is logically independent.
+			start := recentBackingNext
+			end := start + len(recent)
+			rv := recentBacking[start:end:end]
+			recentBackingNext = end
 			for i, r := range recent {
 				rv[i] = cronSummaryToView(r)
 			}
@@ -1020,8 +1066,18 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 // copy-paste sites. Centralising the format keeps the wording in one
 // place and stops a future copy from accidentally diverging the
 // operator-visible string. R250-CR-20.
+//
+// R20260527-ARCH-2 (#1274): migrated from http.Error (text/plain) to the
+// errResp envelope. The five cron write handlers were the highest-value
+// trivially-migratable callers because they share a single helper, so
+// flipping the helper drops five sites at once and lets dashboard.js
+// read `body.error` consistently for cron persist-failure paths instead
+// of branching on Content-Type. Code is the stable "persist_failed"
+// token; the operator-facing string preserves the verb so existing log
+// scrapers or smoke tests pinning the wording stay green.
 func httpErrPersistFailed(w http.ResponseWriter, op string) {
-	http.Error(w, "job "+op+" but not persisted; please check server logs", http.StatusInternalServerError)
+	errResp(w, http.StatusInternalServerError, "persist_failed",
+		"job "+op+" but not persisted; please check server logs")
 }
 
 // POST /api/cron — create a new cron job from dashboard.

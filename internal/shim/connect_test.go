@@ -180,6 +180,36 @@ func TestConnect_UnexpectedMessageType(t *testing.T) {
 	}
 }
 
+// TestConnect_RejectsHelloProtocolVersionTooNew locks RNEW-ARCH-403 (#427):
+// when a forward-rolled shim ships a wire-incompatible v=ProtocolVersion+1
+// hello, naozhi must refuse the attach handshake immediately rather than
+// returning a half-installed handle that blows up later in readLoop.
+func TestConnect_RejectsHelloProtocolVersionTooNew(t *testing.T) {
+	srv := newFakeShimServer(t)
+	defer srv.cleanup()
+
+	srv.handleOnce(func(conn net.Conn) {
+		conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+		bufio.NewReader(conn).ReadBytes('\n')             //nolint:errcheck
+		hello := ServerMsg{
+			Type:            "hello",
+			ShimPID:         os.Getpid(),
+			CLIPID:          os.Getpid() + 1,
+			CLIAlive:        boolPtr(true),
+			ProtocolVersion: ProtocolVersion + 1,
+		}
+		data, _ := hello.MarshalLine()
+		conn.Write(data) //nolint:errcheck
+	})
+
+	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
+	token := []byte("some-32-byte-token-padded!!!!!!!")
+	_, err := m.connect(srv.path, token, 0)
+	if err == nil {
+		t.Fatal("expected error for too-new protocol_version, got nil")
+	}
+}
+
 func TestConnect_BadJSON_HelloLine(t *testing.T) {
 	srv := newFakeShimServer(t)
 	defer srv.cleanup()

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -195,8 +196,25 @@ func ownerKeyFromCookie(cookieValue string) string {
 // claimable by User B at the same NAT) remained — returning ok=false
 // closes that hole at the API surface.
 func uploadOwner(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, trustedProxy bool) (string, bool) {
-	if c, err := r.Cookie(authCookieName); err == nil && c.Value != "" {
-		return ownerKeyFromCookie(c.Value), true
+	// R040034-SEC-2 (#1399): the auth-cookie branch must verify the
+	// cookie value matches the current cookieMAC before deriving an
+	// owner key. Without the gate, a caller carrying both a Bearer
+	// header (which authenticates them) and a stale-or-forged
+	// `nz_auth=AAA` cookie would have their uploadOwner derived from
+	// the cookie because the cookie branch runs first — letting one
+	// authenticated identity bucket-shift across separate upload quota
+	// namespaces by tweaking the cookie value. Constant-time compare
+	// rejects forged values; we then fall through to the Bearer or
+	// nz_anon branches so the caller still gets a stable owner key from
+	// their actual credential. When auth is nil (test harness without
+	// AuthHandlers wired) or cookieMAC() returns "" (no-token mode where
+	// no auth cookie should ever be honoured) the cookie branch is
+	// skipped entirely — same fail-closed posture as a forged value.
+	if c, err := r.Cookie(authCookieName); err == nil && c.Value != "" && auth != nil {
+		if mac := auth.cookieMAC(); mac != "" &&
+			subtle.ConstantTimeCompare([]byte(c.Value), []byte(mac)) == 1 {
+			return ownerKeyFromCookie(c.Value), true
+		}
 	}
 	if bearer := r.Header.Get("Authorization"); strings.HasPrefix(bearer, "Bearer ") {
 		if token := strings.TrimPrefix(bearer, "Bearer "); token != "" {
