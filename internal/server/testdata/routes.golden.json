@@ -257,7 +257,7 @@
   {
     "method": "GET",
     "path": "/manifest.json",
-    "handler_type": "*Server"
+    "handler_type": "http.HandlerFunc"
   },
   {
     "method": "GET",
@@ -267,17 +267,17 @@
   {
     "method": "GET",
     "path": "/static/agent_view.js",
-    "handler_type": "*Server"
+    "handler_type": "http.HandlerFunc"
   },
   {
     "method": "GET",
     "path": "/static/dashboard.js",
-    "handler_type": "*Server"
+    "handler_type": "http.HandlerFunc"
   },
   {
     "method": "GET",
     "path": "/sw.js",
-    "handler_type": "*Server"
+    "handler_type": "http.HandlerFunc"
   },
   {
     "method": "GET",
