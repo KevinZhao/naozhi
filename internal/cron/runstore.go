@@ -37,6 +37,29 @@ import (
 // (Scheduler.storeMu) is NOT shared with this store: the two write to
 // different files and serialising would only inflate latency.
 //
+// R238-ARCH-12 (#755) proposed extracting runStore into its own
+// internal/cron/runs sub-package so runstore.go (~830 LOC) and its
+// independent lock hierarchy stop bloating the cron package surface.
+// Deferred — extraction would force a sweep across:
+//
+//   - The 30+ test files in internal/cron/ that touch runStore
+//     internals (jobLock, recentCacheEntry, ringPushHead, etc.).
+//   - Scheduler fields (runStore + persistence wiring) that would
+//     need a public Store interface plus an adapter for the
+//     skipAppendTrim → trimJobLocked → cacheTrimAfterDisk back-edges.
+//   - The CronRun / CronRunSummary value types currently shared
+//     between scheduler.go (run construction) and runstore.go
+//     (persistence) — extracting would force these into a third
+//     shared package or duplicate the schema.
+//
+// The sub-package split is tracked in the broader cron-sysession-merge
+// refactor (RFC docs/rfc/cron-sysession-merge.md Phase D-prep): the
+// extraction is gated on the runtelemetry common-event-layer landing,
+// without which runstore.go's slog/metrics calls would have to
+// re-import cron just to talk back. Until then the file is well-
+// modularised within cron via the lock-hierarchy comment above and
+// scheduler_persist.go owning the cross-store coordination.
+//
 // Lock hierarchy（R234-GO-7 文档化锁层级）：
 //
 //	Scheduler.s.mu  >  runStore.jobLock(jobID)  >  recentCacheEntry.mu
