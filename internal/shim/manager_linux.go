@@ -173,6 +173,23 @@ func verifyCLIExeMatch(cliPID int, wantCLIPath string) (string, error) {
 // disables the exe gate (test harnesses + Darwin-only callers that don't
 // know the path); production wires StartShimWithBackend's resolved path.
 func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int, wantCLIPath string) {
+	// PF1 (#399): the cgroup move is best-effort — every failure mode below
+	// logs and continues, never returning to the caller. A panic here used
+	// to escape into StartShim and propagate out before the caller's
+	// `m.shims[key] = handle` insertion ran, leaving a live shim that the
+	// manager could no longer track or shut down (orphan). All concrete
+	// failures the body can encounter (busctl exit, /proc readlink, sudo
+	// missing) are already non-panicking, but the recover is a structural
+	// guarantee: any future regression — nil-deref on a refactored helper,
+	// out-of-memory inside fmt.Sprintf, etc. — degrades to "log + continue"
+	// rather than "leaked shim". Mirrors the recover wrappers already used
+	// on other best-effort goroutines in this package.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("moveToShimsCgroup: recovered from panic; shim/CLI not adopted into cgroup",
+				"shim_pid", shimPID, "cli_pid", cliPID, "panic", r)
+		}
+	}()
 	scopeName := fmt.Sprintf("naozhi-shim-%d.scope", shimPID)
 
 	// Build PID list for the scope
