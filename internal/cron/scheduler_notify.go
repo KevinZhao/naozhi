@@ -119,6 +119,24 @@ const cronNotifyTimeout = 30 * time.Second
 // notifyTarget and dispatch's reply paths share a single source of
 // truth instead of mirrored "KEEP-IN-SYNC" copies.
 
+// cronNotifyMaxChunks bounds how many chunks notifyTarget will attempt
+// to deliver from a single CronRun result. R236-SEC-15 (#568): the
+// composite worst case is chunks × PlatformReplyMaxAttempts × per-attempt
+// platformReplyTimeout, which can exceed cronNotifyTimeout (30s) when
+// a chatty job emits many small chunks under a slow platform. The
+// existing replyCtx.Err() check inside the loop already cuts off mid-
+// flush on deadline, but a hard chunk cap (1) bounds the worst-case
+// alloc / per-chunk slog volume on success and (2) makes the eventual
+// truncated payload a known shape rather than "whatever fit in 30s".
+//
+// 5 was picked as the smallest value that comfortably covers realistic
+// cron output (a single 4-page result at platform.DefaultMaxReplyLen
+// chunks to ~3-4 messages on Feishu/iOS). Operators with chronically
+// long results should lean on the dashboard run-detail panel rather
+// than IM as the surface of record; the truncation WARN below makes
+// the cap visible so it doesn't silently drop output.
+const cronNotifyMaxChunks = 5
+
 // resolveNotifyTarget picks the IM destination for this execution's
 // completion notice. Priority:
 //  1. Per-job NotifyPlatform/NotifyChatID (always honored when both set).
@@ -298,6 +316,21 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		maxLen = platform.DefaultMaxReplyLen
 	}
 	chunks := platform.SplitText(text, maxLen)
+	// R236-SEC-15 (#568): cap the chunk count before the loop. The
+	// composite chunks × retries × per-attempt budget can otherwise
+	// exceed cronNotifyTimeout when a chatty job lands on a slow
+	// platform; capping makes the worst case bounded and surfaces the
+	// truncation in slog so operators see the dropped tail.
+	totalChunks := len(chunks)
+	dropped := 0
+	if totalChunks > cronNotifyMaxChunks {
+		dropped = totalChunks - cronNotifyMaxChunks
+		chunks = chunks[:cronNotifyMaxChunks]
+		slog.Warn("cron notify: chunk count exceeds cap; tail dropped",
+			"platform", plat, "chat", chatID,
+			"total", totalChunks, "cap", cronNotifyMaxChunks,
+			"dropped", dropped)
+	}
 	delivered := 0
 	for i, chunk := range chunks {
 		// R235-GO-5: short-circuit on the shared replyCtx deadline so a long
