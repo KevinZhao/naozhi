@@ -84,6 +84,38 @@ type ProcessSender interface {
 	InterruptViaControl() error
 }
 
+// ProcessEventReader is the second facet of the planned processIface split
+// (R242-ARCH-4 / R20260527122801-ARCH-10, #1319). It exposes the read-side
+// of the in-process EventLog ring — the methods Snapshot / dashboard
+// pagination / cron history fan-out / discovery already consume but which
+// are presently entangled with lifecycle / identity / metering on the wider
+// processIface god-interface.
+//
+// Pure additive split. processIface embeds ProcessEventReader so the
+// concrete *cli.Process implementation and testutil.TestProcess fakes keep
+// satisfying both interfaces unchanged. Callers ready to narrow can switch
+// from processIface (~25 methods) to ProcessEventReader (~5) one site at
+// a time.
+type ProcessEventReader interface {
+	// EventEntries returns a defensive copy of every entry currently in
+	// the live EventLog ring (chronological order). Used by the dashboard
+	// "full history" path before pagination cut over to EventEntriesBefore.
+	EventEntries() []cli.EventEntry
+	// EventLastN returns the last N entries (chronological). Used by IM
+	// reply rendering to assemble the trailing thinking / tool_use chain.
+	EventLastN(n int) []cli.EventEntry
+	// EventEntriesSince returns entries with Time > afterMS, used by the
+	// dashboard 1Hz incremental poll path.
+	EventEntriesSince(afterMS int64) []cli.EventEntry
+	// EventEntriesBefore returns up to `limit` entries with Time < beforeMS
+	// drawn from the live ring (chronological). Used by the dashboard
+	// pagination handler when a tab scrolls back past the in-memory tail.
+	EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry
+	// LastEventAt returns the wall-clock time of the most recent live event
+	// appended to the EventLog, or zero when nothing has arrived yet.
+	LastEventAt() time.Time
+}
+
 // processIface abstracts the CLI process lifecycle methods used across the
 // session-aware code paths. Despite the package name, callers extend beyond
 // internal/session itself: internal/server (Hub broadcast + dashboard
@@ -164,6 +196,16 @@ type processIface interface {
 	// UI Round 5 R5-3.
 	Model() string
 }
+
+// Compile-time guarantee that ProcessEventReader is a strict subset of
+// processIface — every concrete implementation of processIface (production
+// *cli.Process, test fakes) automatically satisfies ProcessEventReader so
+// callers can narrow without an adapter. Pinning this with a var keeps
+// drift from creeping in if either interface evolves. R20260527122801-ARCH-10
+// (#1319): future facet rounds (ProcessLifecycle / ProcessIdentity) will
+// follow this same pattern — define the narrow facet, prove subset by
+// satisfaction var, narrow consumers one site at a time.
+var _ ProcessEventReader = (processIface)(nil)
 
 // processBox wraps processIface for use with atomic.Pointer (which
 // requires a concrete type).
