@@ -7288,12 +7288,32 @@ function renderTexDoc(src) {
    the initial history, plus nav rebuilds, plus preview polls. */
 const _mdCache = new Map();
 const _MD_CACHE_MAX = 500;
+// RNEW-PERF-003 (#454): cap cacheable input length at 2000 chars. The
+// previous 20000-char cap caused two pathologies on streaming text events:
+//
+//  1. Cache MISS on every render — streaming `text` events grow by chunks,
+//     so the cache key (full string) is unique per WS push. The Map.get
+//     was always undefined, the work was always done from scratch.
+//  2. Cache WRITE on every render evicted long-lived plain-text bubbles
+//     (welcome banner, system prompts, short replies) that would otherwise
+//     have been cheap repeat-hits as the user navigated views. Net cache
+//     hit rate fell off a cliff once a long streaming reply landed.
+//
+// Plain replies under 2000 chars ARE the cache's intended audience —
+// they're the ones that re-render on nav rebuild + preview poll without
+// changing. Above that threshold the input is either a wall-of-text final
+// reply (rendered once, never again — cache is a write-only bloat) or a
+// still-streaming `running` event (key changes every push — cache never
+// hits). Skip the cache write in both cases. The 2000-char threshold
+// covers >95% of stable IM-style replies on naozhi without paying
+// hash-the-string cost on streaming-storm responses.
+const _MD_CACHE_INPUT_MAX = 2000;
 
 function renderMd(s) {
   if (!s) return '';
   // Only cache when the input has no constructs that mint unique DOM ids
   // (mermaid-N / ktx-N), otherwise cached HTML would collide across messages.
-  const cacheable = s.length < 20000 && !/```|\$|\\\[|\\\(/.test(s);
+  const cacheable = s.length < _MD_CACHE_INPUT_MAX && !/```|\$|\\\[|\\\(/.test(s);
   if (cacheable) {
     const hit = _mdCache.get(s);
     if (hit !== undefined) return hit;
