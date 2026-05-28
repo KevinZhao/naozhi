@@ -22,6 +22,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -548,7 +549,7 @@ func filterAndCountSnapshots(snapshots []session.SessionSnapshot, now time.Time)
 		// are naozhi-internal infrastructure surfaced via the System drawer
 		// (docs/rfc/system-session.md §9.2). None of them belong in the
 		// sidebar listing.
-		if session.IsScratchKey(snap.Key) || session.IsCronKey(snap.Key) || session.IsSysKey(snap.Key) {
+		if sessionkey.IsScratchKey(snap.Key) || sessionkey.IsCronKey(snap.Key) || sessionkey.IsSysKey(snap.Key) {
 			continue
 		}
 		snapshots[n] = snap

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/discovery"
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // fakeCronSessions is a stub CronView used to verify the dashboard's
@@ -187,7 +187,7 @@ func TestHistoryFilter_NilCronSessionsDegrades(t *testing.T) {
 // the planner UI. See #1212 for the deletion rationale.
 func TestDashboardListingFilter_ContractRoundtrip(t *testing.T) {
 	hiddenInSidebar := func(key string) bool {
-		return session.IsScratchKey(key) || session.IsCronKey(key) || session.IsSysKey(key)
+		return sessionkey.IsScratchKey(key) || sessionkey.IsCronKey(key) || sessionkey.IsSysKey(key)
 	}
 	for _, k := range []string{"cron:job-1", "sys:auto-titler", "scratch:abc:general:general"} {
 		if !hiddenInSidebar(k) {

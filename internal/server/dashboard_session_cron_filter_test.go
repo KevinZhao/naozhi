@@ -9,6 +9,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // TestSessionsList_CronFilteredOut pins the cron-panel-consolidation RFC's
@@ -37,11 +38,11 @@ func TestSessionsList_CronFilteredOut(t *testing.T) {
 	srv.router.InjectSession(imKey, imProc)
 
 	// Two cron stubs — must be filtered out of sessions[] but counted in stats.
-	cronReadyKey := session.CronKey("job-ready")
+	cronReadyKey := sessionkey.CronKey("job-ready")
 	cronReadyProc := session.NewTestProcess()
 	srv.router.InjectSession(cronReadyKey, cronReadyProc)
 
-	cronRunningKey := session.CronKey("job-running")
+	cronRunningKey := sessionkey.CronKey("job-running")
 	cronRunningProc := session.NewTestProcess()
 	cronRunningProc.StateVal = cli.StateRunning
 	srv.router.InjectSession(cronRunningKey, cronRunningProc)
