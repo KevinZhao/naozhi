@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -648,11 +649,23 @@ const missedCacheTTL = time.Second
 // turns over the (jobID, schedule, startedAt) key on every edit) cannot
 // grow the map without bound. 2500 entries × ~120 bytes ≈ 300 KiB worst
 // case — comfortably within budget for a heartbeat-path data structure
-// and well above the practical N for a single naozhi instance. When the
-// cap is hit we drop the entire map and let it rebuild; a sweep would
-// pay map-iteration cost on a hot path for marginal benefit. R245-PERF-4
-// (#857).
+// and well above the practical N for a single naozhi instance. On
+// overflow we evict the oldest missedCacheEvictRatio fraction of entries
+// (LRU by computedAt) instead of dropping the entire map: a UpdateJob
+// burst now keeps the warm long-lived jobs cached while the churned
+// edit-key tails get reaped, so a cold restart no longer pays N×Parse
+// for the surviving heartbeat fleet. R260528-PERF-5 (#1352).
 const missedCacheCap = 2500
+
+// missedCacheEvictRatio is the fraction of oldest-by-computedAt entries
+// shed when missedCache hits missedCacheCap. 10% (250 of 2500) keeps the
+// eviction sweep amortised — overflow runs at most once per 250 inserts
+// so the sort+delete cost is dominated by the cache-hit fast path. We
+// pick "drop bottom decile" rather than a true list+map LRU because the
+// existing struct already records computedAt and a simple sort avoids
+// adding a second index just for cap-reset on a rarely-hit branch.
+// R260528-PERF-5 (#1352).
+const missedCacheEvictRatio = 10
 
 // missedScheduleVerdict returns HasMissedSchedule(j, now, startedAt) but
 // memoises the result for missedCacheTTL so the 1 Hz dashboard poll does
@@ -685,12 +698,15 @@ func (h *CronHandlers) missedScheduleVerdict(j *cron.Job, now, startedAt time.Ti
 	missed, prevAt := cron.HasMissedSchedule(j, now, startedAt)
 
 	h.missedCacheMu.Lock()
-	if h.missedCache == nil || len(h.missedCache) >= missedCacheCap {
-		// Lazy-init AND cap-reset use the same allocation: dropping the
-		// whole map at the cap is cheaper than walking it to evict the
-		// oldest entry, and the cap is large enough that a real workload
-		// (jobs-on-disk × handful-of-tabs) will not approach it.
+	if h.missedCache == nil {
 		h.missedCache = make(map[string]missedVerdict, 64)
+	} else if len(h.missedCache) >= missedCacheCap {
+		// Cap reached: shed the oldest decile by computedAt instead of
+		// dropping the entire map. A UpdateJob burst churns a few keys
+		// per edit but the long-lived heartbeat-fleet entries should
+		// survive so cold-restart Parse cost stays at zero. R260528-PERF-5
+		// (#1352).
+		evictOldestMissedCache(h.missedCache)
 	}
 	h.missedCache[key] = missedVerdict{
 		missed:       missed,
@@ -700,6 +716,43 @@ func (h *CronHandlers) missedScheduleVerdict(j *cron.Job, now, startedAt time.Ti
 	}
 	h.missedCacheMu.Unlock()
 	return missed, prevAt
+}
+
+// evictOldestMissedCache drops the oldest 1/missedCacheEvictRatio fraction
+// of entries (by computedAt ascending) from m so a steady-state UpdateJob
+// burst does not blow the cap. Caller holds h.missedCacheMu. We collect
+// (key, computedAt) tuples in one pass, sort by computedAt, then delete
+// the chosen prefix — O(N log N) on overflow but called at most once per
+// (cap/ratio) inserts so amortised cost is O(log N) per insert. Drop
+// count is clamped to >=1 so the path always frees space for the new
+// entry; if m is somehow tiny (test path) we still make room without
+// nuking everything. R260528-PERF-5 (#1352).
+func evictOldestMissedCache(m map[string]missedVerdict) {
+	n := len(m)
+	if n == 0 {
+		return
+	}
+	drop := n / missedCacheEvictRatio
+	if drop < 1 {
+		drop = 1
+	}
+	if drop > n {
+		drop = n
+	}
+	type kt struct {
+		k string
+		t time.Time
+	}
+	entries := make([]kt, 0, n)
+	for k, v := range m {
+		entries = append(entries, kt{k: k, t: v.computedAt})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].t.Before(entries[j].t)
+	})
+	for i := 0; i < drop; i++ {
+		delete(m, entries[i].k)
+	}
 }
 
 // recentRunsPerJob is the per-job RecentRuns cap embedded in handleList's

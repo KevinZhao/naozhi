@@ -520,15 +520,20 @@ func (p *Process) lifecycleContext() context.Context {
 func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 	proto Protocol, cliPID, shimPID int, noOutputTimeout, totalTimeout time.Duration) *Process {
 	p := &Process{
-		shimConn:        conn,
-		shimR:           reader,
-		shimW:           writer,
-		protocol:        proto,
-		caps:            ProtocolCaps(proto),
-		cliPID:          cliPID,
-		shimPID:         shimPID,
-		state:           StateSpawning,
-		eventCh:         make(chan Event, 256),
+		shimConn: conn,
+		shimR:    reader,
+		shimW:    writer,
+		protocol: proto,
+		caps:     ProtocolCaps(proto),
+		cliPID:   cliPID,
+		shimPID:  shimPID,
+		state:    StateSpawning,
+		// R260528-PERF-9 (#1355): bumped 256→1024 so a TeamCreate fan-out
+		// (8 subagents × ~5 events/s, plus tool_use sub-block bursts) cannot
+		// fill the buffer before Send() drains it. Drops here force Send into
+		// the findResultSince ring-scan fallback which costs more under load
+		// than the extra ~24KB of backing array (1024 × ~24B Event header).
+		eventCh:         make(chan Event, 1024),
 		done:            make(chan struct{}),
 		killCh:          make(chan struct{}),
 		noOutputTimeout: noOutputTimeout,

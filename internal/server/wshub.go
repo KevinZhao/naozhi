@@ -360,14 +360,27 @@ type Hub struct {
 	// fan-out contract.
 	historyMarshalCache *historyMarshalCache
 
-	// userSendLimitersMu + userSendLimiters bucket the WS "send" budget by
-	// uploadOwner (cookie-MAC / token-hash / IP fallback) instead of
-	// per-connection so a single user holding N tabs cannot multiply the
-	// burst budget N×. The wsClient.sendLimiter is still the per-conn
-	// floor — both must Allow() before the message is processed.
-	// R244-SEC-P2-3 / #888.
-	userSendLimitersMu sync.Mutex
-	userSendLimiters   map[string]*rate.Limiter
+	// userSendLimiters buckets the WS "send" budget by uploadOwner
+	// (cookie-MAC / token-hash / IP fallback) instead of per-connection so
+	// a single user holding N tabs cannot multiply the burst budget N×.
+	// The wsClient.sendLimiter is still the per-conn floor — both must
+	// Allow() before the message is processed. R244-SEC-P2-3 / #888.
+	//
+	// R260528-PERF-18 (#1357): switched from `map[string]*rate.Limiter`
+	// guarded by a single sync.Mutex to a sync.Map so the steady-state
+	// path (limiter already exists for owner) is a lock-free Load. The
+	// previous shape serialised every WS send across all owners through
+	// userSendLimitersMu — at 500 conns × 5 sends/s = 2500 acquisitions/s
+	// the map lookup itself was on the hot path under one mutex, blocking
+	// concurrent sends from unrelated users.
+	//
+	// nil pointer == "not enabled" preserves the legacy nil-guard
+	// behaviour for hand-built Hubs that bypass NewHub. Shutdown swaps
+	// the pointer to nil under userSendLimitersStoreMu so in-flight
+	// allowSendForOwner callers either observe the live map or the nil
+	// fall-through; no torn state.
+	userSendLimitersStoreMu sync.RWMutex
+	userSendLimiters        *sync.Map // map[string]*rate.Limiter
 
 	// connCountByOwnerMu + connCountByOwner enforce a per-uploadOwner WS
 	// connection sub-cap (maxConnsPerOwner) on top of the global
@@ -474,7 +487,9 @@ func NewHub(opts HubOptions) *Hub {
 	h.historyMarshalCache = newHistoryMarshalCache()
 	// R244-SEC-P2-3 / #888: per-uploadOwner send-budget map. Initialised
 	// here so allowSendForOwner can lookup-or-create without a sync.Once.
-	h.userSendLimiters = make(map[string]*rate.Limiter)
+	// R260528-PERF-18 (#1357): sync.Map keyed by owner string lets the
+	// steady-state Allow() path skip a global mutex on every WS send.
+	h.userSendLimiters = &sync.Map{}
 	// R229-SEC-8 / #1022: per-uploadOwner connection counter so a single
 	// token cannot monopolise the global maxWSConns pool.
 	h.connCountByOwner = make(map[string]int)
@@ -541,22 +556,34 @@ func (h *Hub) SetScratchPool(p *session.ScratchPool) { h.scratchPool = p }
 // N tabs, the per-user bucket caps the aggregate at the same 5 burst /
 // 1 sustained sps regardless of tab count, while the per-conn floor
 // still limits a single rogue tab.
+//
+// R260528-PERF-18 (#1357): the steady-state path (limiter already exists
+// for the owner) does a lock-free sync.Map.Load. The map pointer is
+// guarded by an RWMutex to serialise Shutdown's nil-store with in-flight
+// callers; the read-side critical section does nothing but copy the
+// pointer so the lock contention is bounded by Shutdown frequency, not
+// by send throughput. Previously every send acquired one process-wide
+// sync.Mutex which serialised all owners' sends through a single queue.
 func (h *Hub) allowSendForOwner(owner string) bool {
 	if h == nil || owner == "" {
 		return true
 	}
-	h.userSendLimitersMu.Lock()
-	if h.userSendLimiters == nil {
-		h.userSendLimitersMu.Unlock()
+	h.userSendLimitersStoreMu.RLock()
+	m := h.userSendLimiters
+	h.userSendLimitersStoreMu.RUnlock()
+	if m == nil {
 		return true
 	}
-	lim, ok := h.userSendLimiters[owner]
-	if !ok {
-		lim = rate.NewLimiter(rate.Every(time.Second), 5)
-		h.userSendLimiters[owner] = lim
+	if v, ok := m.Load(owner); ok {
+		return v.(*rate.Limiter).Allow()
 	}
-	h.userSendLimitersMu.Unlock()
-	return lim.Allow()
+	// Race: another goroutine may have created the limiter for this
+	// owner in parallel. LoadOrStore returns the canonical value, so
+	// the speculative NewLimiter is discarded on collision. NewLimiter
+	// is a small struct alloc — far cheaper than holding a process-wide
+	// mutex across the rate.NewLimiter call.
+	v, _ := m.LoadOrStore(owner, rate.NewLimiter(rate.Every(time.Second), 5))
+	return v.(*rate.Limiter).Allow()
 }
 
 func (h *Hub) register(c *wsClient) {
@@ -639,8 +666,32 @@ func (h *Hub) unregister(c *wsClient) {
 	}
 	h.nodesMu.RUnlock()
 
-	for _, conn := range nodes {
-		conn.RemoveClient(c)
+	// R260528-PERF-11 (#1356): fan-out RemoveClient across nodes in
+	// parallel so a 5-node deployment pays max(RTT) instead of sum(RTT)
+	// per disconnect. WS reconnect storms (mobile sleep/wake, dashboard
+	// tab swap) used to amortise N×RTT through this serial loop while
+	// holding the readPump goroutine open; for N=5 nodes that is 5
+	// sequential RPCs every disconnect. We block on the WaitGroup so
+	// Shutdown's nodes.Close() in the documented ordering still runs
+	// strictly after every in-flight RemoveClient call returns — the
+	// readPump's defer calls unregister synchronously, so clientWG.Wait
+	// in Shutdown still observes the full removal completing.
+	//
+	// Single-node deployments skip the goroutine spawn (no fan-out
+	// benefit) to keep the steady-state path identical to before.
+	if len(nodes) == 1 {
+		nodes[0].RemoveClient(c)
+	} else {
+		var wg sync.WaitGroup
+		wg.Add(len(nodes))
+		for _, conn := range nodes {
+			conn := conn
+			go func() {
+				defer wg.Done()
+				conn.RemoveClient(c)
+			}()
+		}
+		wg.Wait()
 	}
 	// Clear pointer references before returning to the pool so disconnected
 	// node.Conn instances stay GC-eligible. Reset length to zero so the next
@@ -887,9 +938,13 @@ func (h *Hub) Shutdown() {
 	// R244-SEC-P2-3 / #888: drop the per-uploadOwner limiter map so the
 	// rate.Limiter values can be GC'd after Hub teardown (test harnesses
 	// that build and tear down many Hubs in one process).
-	h.userSendLimitersMu.Lock()
+	// R260528-PERF-18 (#1357): the map is a sync.Map; nilling the pointer
+	// under userSendLimitersStoreMu serialises with in-flight
+	// allowSendForOwner callers — they observe either the live map or the
+	// nil fall-through, never a torn pointer.
+	h.userSendLimitersStoreMu.Lock()
 	h.userSendLimiters = nil
-	h.userSendLimitersMu.Unlock()
+	h.userSendLimitersStoreMu.Unlock()
 
 	// Barrier: any TrackSend call that observed h.ctx.Err()==nil and was
 	// about to Add(1) is racing us. Holding sendTrackMu here forces it to

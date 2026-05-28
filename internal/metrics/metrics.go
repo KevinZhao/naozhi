@@ -301,6 +301,23 @@ var (
 	// no `_total` suffix so the doc-sync regex treats it as a gauge.
 	CronRunInflight = expvar.NewInt("naozhi_cron_run_inflight")
 
+	// CronWatchdogInterruptTimeoutTotal counts cron deadline-watchdog
+	// timeouts where InterruptViaControl did not return inside
+	// watchdogInterruptTimeoutDefault (3s). Each tick is a smoking gun for
+	// a wedged stdin write to the CLI shim — the inner goroutine in
+	// runDeadlineWatchdog publishes its result whenever
+	// InterruptViaControl finally unblocks (typically on the next
+	// session.Reset), but until then it stays parked, and a busy job that
+	// keeps timing out can stack inner goroutines per run. R20260527122801-SEC-3
+	// (#1327): pre-counter, the timeout fired silently — the only signal
+	// was a slow-rising goroutine count or a Reset on the next fresh tick.
+	// Operators wanting to alert on wedged shims now have a direct delta
+	// to compare against naozhi_shim_restart_total. The fired-but-
+	// successful path (InterruptViaControl returned non-nil before the
+	// timer) is NOT counted here — it bumps the regular CronRun*Total
+	// counters via finishRun's normal terminal classification.
+	CronWatchdogInterruptTimeoutTotal = expvar.NewInt("naozhi_cron_watchdog_interrupt_timeout_total")
+
 	// --- Startup phase timing gauges (RNEW-OPS-414) -----------------------
 	//
 	// Cold-start observability: historically the only signal operators had
