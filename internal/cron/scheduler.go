@@ -279,6 +279,22 @@ type Scheduler struct {
 	// dynamic backend/agent registration ever lands, switch to
 	// atomic.Pointer[map[...]] swap-on-write so reads stay lock-free without
 	// racing the writer.
+	//
+	// R219-ARCH-8 (#670) proposed replacing this map with a `Notifier
+	// interface { Notify(ctx, plat, chatID, text) error }` so cron stops
+	// calling platform.Reply / MaxReplyLength / SplitText directly and
+	// goes through dispatch.replyText's unified error handling. Deferred:
+	// the refactor entangles with deliverNotice's chunked send loop
+	// (SplitText needs MaxReplyLength → per-chunk Reply), the per-target
+	// retry budget, and the four call sites in scheduler_notify.go +
+	// scheduler_run.go that compose the chunk loop with formatCronNotice
+	// + per-target ctx. Wrapping in a Notifier without breaking
+	// per-chunk error reporting requires either pushing chunking into
+	// the Notifier (adds a per-platform-config dependency the dispatch
+	// layer doesn't have today) or surfacing chunk metadata back to cron
+	// (multi-error contract). RFC cron-sysession-merge Phase E covers
+	// this within the larger dispatch unification — leaving #670 to
+	// land alongside that work rather than fragmenting the contract.
 	platforms     map[string]platform.Platform
 	agents        map[string]AgentOpts
 	agentCommands map[string]string
