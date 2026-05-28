@@ -290,8 +290,20 @@ type claudeContentBlock struct {
 
 // GET /api/cron/runs/{run_id}/transcript?job_id=<jid>
 func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Request) {
-	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
+	// R250-SEC-7 (#1096): use the dedicated transcriptLimiter rather
+	// than the shared runsLimiter. The transcript path fans out far
+	// more I/O than the runs-list endpoint (EvalSymlinks ×2 + 8 MB
+	// LimitReader + 256 KB scanner buffer + per-line json.Unmarshal +
+	// flattenJSONLEvent) so sharing one bucket lets either endpoint
+	// starve the other under load. Fall back to runsLimiter for older
+	// hand-rolled CronHandlers fixtures (newCronHandlersForTest) that
+	// haven't been wired with a transcriptLimiter.
+	limiter := h.transcriptLimiter
+	if limiter == nil {
+		limiter = h.runsLimiter
+	}
+	if limiter != nil && !limiter.AllowRequest(r) {
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron transcript rate limit exceeded"})
 		return
 	}
 	// R243-SEC-12 (#798): cap concurrent in-flight transcript reads.

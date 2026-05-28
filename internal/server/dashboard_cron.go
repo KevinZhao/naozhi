@@ -573,6 +573,26 @@ type CronHandlers struct {
 	// skip the gate. Wiring lives in server.New.
 	listLimiter *ipLimiter
 
+	// transcriptLimiter caps per-IP rate for the transcript endpoint
+	// specifically. R250-SEC-7 (#1096): handleRunTranscript previously
+	// shared runsLimiter with handleRunsList / handleRunDetail; the
+	// transcript path is dramatically more expensive (EvalSymlinks ×2,
+	// 8 MB LimitReader + 256 KB scanner buffer + per-line json.Unmarshal
+	// + flattenJSONLEvent) so a single attacker can spam the cheaper
+	// runs-list endpoint into 429 starvation by saturating the shared
+	// bucket via transcript reads, AND vice versa. Splitting the gate
+	// gives transcripts their own budget so a transcript flood cannot
+	// starve the dashboard's runs visibility.
+	//
+	// 6/min sustained × burst 12 — a legitimate operator rarely opens
+	// more than one transcript drawer per minute (the UI fans out a
+	// single transcript fetch per drawer open), so 6/min is generous
+	// while still capping a stolen-token attacker. Burst 12 absorbs the
+	// occasional double-tap (drawer open → close → re-open) without
+	// tripping. Nil-guarded just like runsLimiter so
+	// newCronHandlersForTest paths skip the gate.
+	transcriptLimiter *ipLimiter
+
 	// writeLimiter caps per-IP rate of authenticated cron-write/control
 	// endpoints that fan out side-effects beyond a cheap read:
 	//
