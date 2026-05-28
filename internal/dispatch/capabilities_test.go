@@ -79,6 +79,20 @@ func TestNoopCapabilities_DefaultsForTakeoverAndReplyFooter(t *testing.T) {
 	}
 }
 
+// TestSessionView_ManagedSessionSatisfies is a compile-pinned guarantee
+// that R260528-ARCH-5 (#1366) — the additive SessionView seam over
+// *session.ManagedSession — keeps tracking the production type. A future
+// rename of SessionID / Backend / InterruptViaControl on ManagedSession
+// would surface here in CI rather than only at the satisfier var that
+// has fewer eyeballs.
+func TestSessionView_ManagedSessionSatisfies(t *testing.T) {
+	t.Parallel()
+	var view SessionView = (*session.ManagedSession)(nil)
+	defer func() { _ = recover() }() // nil-receiver method calls panic; we only need compile-time satisfier
+	_ = view.SessionID()
+	_ = view.Backend()
+}
+
 // TestCapabilities_FacetSubsetting is a compile-pinned guarantee that the
 // R248-ARCH-1 (#373) facet split stays back-compat: every Capabilities
 // implementation still satisfies the narrower MessageSender / TakeoverHook /

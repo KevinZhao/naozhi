@@ -118,6 +118,45 @@ var (
 	_ ReplyFooterHook = (Capabilities)(nil)
 )
 
+// SessionView is the narrow read-only seam over *session.ManagedSession
+// that the dispatch send path actually consumes. The existing
+// MessageSender.Send still takes the concrete pointer for back-compat
+// (changing the signature is breaking; the rewire is tracked separately),
+// but new dispatch-internal helpers should accept SessionView so test
+// fakes need not stitch together the full ~30 method ManagedSession
+// surface to exercise a code path.
+//
+// R260528-ARCH-5 (#1366): the existing seam (`Send(... sess *session.ManagedSession ...)`)
+// is virtual — fakes cannot synthesise an internal struct, so dispatch
+// tests cannot drive Send without dragging a Router graph along. Adding
+// SessionView as an additive interface lets callers within dispatch
+// narrow at their own pace; any new Send overloads or wrapper layers
+// should declare SessionView rather than the concrete pointer so the
+// satisfier requirement stays stable across future ManagedSession
+// internal-field churn.
+//
+// *session.ManagedSession satisfies SessionView implicitly via the
+// existing exported accessors. A satisfier var pins the contract so a
+// future rename / removal surfaces here in CI.
+type SessionView interface {
+	// SessionID returns the active CLI session identifier (the protocol's
+	// session token). Used by dispatch-side logging / dedup keys.
+	SessionID() string
+	// Backend returns the backend identifier (e.g. "claude" / "kiro") the
+	// session was spawned against. Empty for legacy stores predating the
+	// Backend field.
+	Backend() string
+	// InterruptViaControl asks the session's underlying CLI to abort the
+	// in-flight turn via an in-band stream-json control_request. Returns
+	// the outcome enum (Sent / NoSession / NoTurn / Unsupported / Error)
+	// matching ManagedSession.InterruptViaControl.
+	InterruptViaControl() session.InterruptOutcome
+}
+
+// Compile-time guarantee that *session.ManagedSession satisfies
+// SessionView. See SessionView docstring for the rationale.
+var _ SessionView = (*session.ManagedSession)(nil)
+
 // closureCapabilities adapts the legacy SendFn / TakeoverFn / ReplyFooterFn
 // closures into a Capabilities implementation. Used internally by
 // NewDispatcher when callers populate the Deprecated *Fn fields instead of
