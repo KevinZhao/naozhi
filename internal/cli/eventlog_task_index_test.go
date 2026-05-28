@@ -89,6 +89,48 @@ func TestEventLog_TaskIndex_StaleProgressNoMatch(t *testing.T) {
 	}
 }
 
+// R240-PERF-2 (#1041): the toolUseIndex sidecar must be seeded on the
+// agent Append so task_start can hit O(1).
+func TestEventLog_ToolUseIndex_TaskStartO1(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(40)
+
+	// Append 5 agents back-to-back, each with a unique tool_use_id.
+	for i := 0; i < 5; i++ {
+		l.Append(EventEntry{Type: "agent", Subagent: "ag" + strconv.Itoa(i), ToolUseID: "tu_" + strconv.Itoa(i)})
+	}
+	l.mu.Lock()
+	if got := len(l.toolUseIndex); got != 5 {
+		l.mu.Unlock()
+		t.Fatalf("toolUseIndex size after 5 agents = %d, want 5", got)
+	}
+	l.mu.Unlock()
+
+	// task_start for the *last* one should still resolve via the sidecar
+	// (linear scan would also work, but this proves the sidecar is wired).
+	l.Append(EventEntry{Type: "task_start", TaskID: "task_4", ToolUseID: "tu_4", Time: 17})
+	got := l.Subagents()
+	if got[4].TaskID != "task_4" || got[4].Status != "running" {
+		t.Fatalf("task_start did not link tu_4: %+v", got[4])
+	}
+	// And taskIndex was seeded too.
+	l.mu.Lock()
+	if ref, ok := l.taskIndex["task_4"]; !ok || ref.background || ref.index != 4 {
+		l.mu.Unlock()
+		t.Fatalf("taskIndex[task_4] = %+v ok=%v", ref, ok)
+	}
+	l.mu.Unlock()
+
+	// Result clears the toolUseIndex sidecar.
+	l.Append(EventEntry{Type: "result"})
+	l.mu.Lock()
+	if len(l.toolUseIndex) != 0 {
+		l.mu.Unlock()
+		t.Fatalf("toolUseIndex after result = %d, want 0", len(l.toolUseIndex))
+	}
+	l.mu.Unlock()
+}
+
 // Background agent must be reachable through the same sidecar.
 func TestEventLog_TaskIndex_BackgroundRoute(t *testing.T) {
 	t.Parallel()

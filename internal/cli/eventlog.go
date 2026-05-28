@@ -266,6 +266,12 @@ type EventLog struct {
 	// Protected by mu.
 	taskIndex map[string]subagentRef
 
+	// R240-PERF-2 (#1041): twin sidecar keyed by ToolUseID, populated on
+	// the "agent" Append so a task_start can resolve its slot in O(1)
+	// instead of scanning turnAgents+bgAgents. Same lifecycle as
+	// taskIndex — reset alongside the slice clear.
+	toolUseIndex map[string]subagentRef
+
 	// turnAgentCount mirrors len(turnAgents)+len(bgAgents) for lock-free
 	// reads from the ManagedSession.Snapshot hot path. Most sessions sit at
 	// zero outside an active subagent turn; the dashboard polls Snapshot at
@@ -751,8 +757,20 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 		}
 		if e.Background {
 			l.bgAgents = append(l.bgAgents, info)
+			if e.ToolUseID != "" {
+				if l.toolUseIndex == nil {
+					l.toolUseIndex = make(map[string]subagentRef, 8)
+				}
+				l.toolUseIndex[e.ToolUseID] = subagentRef{background: true, index: len(l.bgAgents) - 1}
+			}
 		} else {
 			l.turnAgents = append(l.turnAgents, info)
+			if e.ToolUseID != "" {
+				if l.toolUseIndex == nil {
+					l.toolUseIndex = make(map[string]subagentRef, 8)
+				}
+				l.toolUseIndex[e.ToolUseID] = subagentRef{background: false, index: len(l.turnAgents) - 1}
+			}
 		}
 		l.turnAgentCount.Store(int32(len(l.turnAgents) + len(l.bgAgents)))
 	case "task_start":
@@ -765,6 +783,32 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 		// R260528-PERF-6 (#1353): seed taskIndex sidecar so the
 		// task_progress/task_done arms can find the SubagentInfo by TaskID
 		// without scanning turnAgents/bgAgents linearly.
+		// R240-PERF-2 (#1041): same ToolUseID→ref sidecar avoids the
+		// linear scan here too. Falls through to the legacy scan when the
+		// sidecar misses (e.g. agent entry was injected via AppendBatch
+		// history replay before the sidecar was populated).
+		if e.ToolUseID != "" {
+			if ref, ok := l.toolUseIndex[e.ToolUseID]; ok {
+				var slice []SubagentInfo
+				if ref.background {
+					slice = l.bgAgents
+				} else {
+					slice = l.turnAgents
+				}
+				if ref.index < len(slice) && slice[ref.index].ToolUseID == e.ToolUseID {
+					slice[ref.index].TaskID = e.TaskID
+					slice[ref.index].Status = "running"
+					slice[ref.index].StartedAtMS = e.Time
+					if e.TaskID != "" {
+						if l.taskIndex == nil {
+							l.taskIndex = make(map[string]subagentRef, 8)
+						}
+						l.taskIndex[e.TaskID] = ref
+					}
+					return false, pendingTaskDone{}
+				}
+			}
+		}
 		for i := range l.turnAgents {
 			if l.turnAgents[i].ToolUseID != "" && l.turnAgents[i].ToolUseID == e.ToolUseID {
 				l.turnAgents[i].TaskID = e.TaskID
@@ -927,15 +971,22 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 		} else {
 			l.bgAgents = l.bgAgents[:0]
 		}
-		// R260528-PERF-6 (#1353): reset sidecar in lockstep with the
-		// slices it indexes. Drop the map when it grew past the typical
-		// turn cap so a fan-out turn doesn't pin the bucket array; small
-		// maps reuse via Go-1.21+ runtime mapclear.
+		// R260528-PERF-6 (#1353) / R240-PERF-2 (#1041): reset sidecars
+		// in lockstep with the slices they index. Drop the map when it
+		// grew past the typical turn cap so a fan-out turn doesn't pin
+		// the bucket array; small maps reuse via Go-1.21+ runtime mapclear.
 		if len(l.taskIndex) > subagentTurnRetainCap {
 			l.taskIndex = nil
 		} else {
 			for k := range l.taskIndex {
 				delete(l.taskIndex, k)
+			}
+		}
+		if len(l.toolUseIndex) > subagentTurnRetainCap {
+			l.toolUseIndex = nil
+		} else {
+			for k := range l.toolUseIndex {
+				delete(l.toolUseIndex, k)
 			}
 		}
 		// Most non-agent turns leave turnAgentCount at zero already;
