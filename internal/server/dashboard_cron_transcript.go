@@ -503,10 +503,16 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Lstat to reject non-regular files (FIFO, device, dir-with-name
-	// matching). Then open + Fstat for TOCTOU defence: the swap could
-	// happen between Lstat and Open, but the post-open Fstat catches
-	// it because we re-check the type after the file descriptor is
-	// already bound to an inode.
+	// matching). Then open with O_NOFOLLOW + Fstat for TOCTOU defence:
+	// the symlink-swap could happen between Lstat and Open, and a plain
+	// os.Open would silently follow the swapped symlink and stream bytes
+	// from outside the projects subtree under the original path's
+	// authorisation. R249-SEC-4 (#918) closes that window the same way
+	// handleFileGet / handleAttachment already do — see the R219-SEC-2 /
+	// R249-SEC-3 prior art in project_files.go and dashboard_send.go.
+	// The post-open Fstat re-check still catches a same-inode swap to a
+	// non-regular file (the residual TOCTOU after O_NOFOLLOW eliminates
+	// the symlink leg).
 	li, err := os.Lstat(resolved)
 	if err != nil {
 		resp.Fallback = "missing"
@@ -520,7 +526,12 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	f, err := os.Open(resolved) // #nosec G304 -- path validated above
+	// openWorkspaceFile passes O_NOFOLLOW on unix; a final-component
+	// symlink swap therefore fails atomically at the kernel boundary
+	// with ELOOP. Collapse ELOOP and any other open failure to the same
+	// "missing" downgrade so attacker probing cannot distinguish a real
+	// missing JSONL from a swap-then-blocked attempt.
+	f, err := openWorkspaceFile(resolved)
 	if err != nil {
 		resp.Fallback = "missing"
 		writeJSON(w, resp)
