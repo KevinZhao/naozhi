@@ -32,6 +32,14 @@ import (
 // matches the dashboard's display cap. Operators with very busy crons
 // (more than recentCap distinct SessionIDs in 7 days) accept that older
 // rotations may briefly resurface in history until their JSONL ages out.
+//
+// R247-PERF-3 (#529): the per-call O(jobs × recentCap) rebuild flagged
+// in the original anchor is now collapsed by the knownSessionsCache TTL
+// snapshot (see KnownSessionIDs / containsSessionID). Both the
+// dashboard 1Hz path and the spawn-time IsExcluded probe read from the
+// same cached set, so this cap only governs the cold-cache rebuild
+// frequency. The constant stays here so future tuning lives at the
+// boundary it actually controls.
 const knownSessionIDsRecentCap = 200
 
 // IsExcluded reports whether the given Claude sessionID belongs to a
