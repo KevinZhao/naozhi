@@ -5,20 +5,53 @@
 > **前置**：Phase 4c 全部已 merged
 > **范围**：抽 6 个 dashboard 子包到 `internal/dashboard/`
 
-## 0. Phase 1-3f 总览
+## 0.0 Pre-flight checklist（每 phase 必跑）
+
+任何 Phase 1-3f 实施前必跑——避免 master 持续涨导致 baseline 漂移：
+
+```bash
+# 1. 同步 master + 切新分支
+git fetch origin master
+git checkout -B server-split/phase<N> origin/master
+
+# 2. 实测受影响文件最新行数，更新 exemptions.yaml current 字段
+for f in internal/server/dashboard_<domain>*.go; do
+  echo "$f: $(wc -l < $f) lines"
+done
+
+# 3. baseline build/test 必须绿
+go build ./... && go test -race -count=1 ./internal/server/...
+
+# 4. 实测搬迁前的 lint 噪音 baseline
+go run ./tools/lint-server-handlers/ 2>&1 | tail -2
+
+# 5. 记录搬迁前的 race test 时间（验收 gate 用）
+time go test -race -count=1 -timeout=300s ./internal/server/...
+```
+
+**关键**：master 涨速 4 个月内 ~20% 是常态。设计稿 v0.6.1 §6.1 行数估值
+是 v0.6.1 当时实测，但 master 仍在涨——**以实施前实测为准**。
+
+---
+
+## 0.1 Phase 1-3f 总览
 
 按 v0.6.1 §6.1 phase 表，6 个 dashboard 子包按业务域抽出：
 
 | Phase | 子包 | 范围 | 预估行数（不含测试）| 风险 |
 |---|---|---|---|---|
-| 1 | dashboard/cron | dashboard_cron + cron_transcript + 21 view types | 2810 | 中 |
-| 2 | dashboard/project | project_api + project_files | 1830 | 中 |
-| 3a | dashboard/auth | dashboard_auth + csrf | 600 | 低 |
-| 3b | dashboard/discovery | dashboard_discovered + takeover | 450 | 低 |
-| 3c | dashboard/ext | scratch + memory | 700 | 低 |
-| 3d | dashboard/ext | agent_events + cli + transcribe + system | 700 | 低 |
-| 3e | dashboard/session | list + events + interrupt + label | 1000 | 中 |
-| 3f | dashboard/session | send + upload + attachment + agent_tailer + upload_store | 1500 | **高**（含 send 路径）|
+| 1 | dashboard/cron | dashboard_cron + cron_transcript + runs + update | **3382**（v0.6.1 实测 2026-05-28；v0.6.1 设计稿写 2810 是 4 个月前的旧值）| 中 |
+| 2 | dashboard/project | project_api + project_files | 2091（实测；设计稿 1830）| 中 |
+| 3a | dashboard/auth | dashboard_auth + csrf | ~600 | 低 |
+| 3b | dashboard/discovery | dashboard_discovered + takeover | ~450 | 低 |
+| 3c | dashboard/ext | scratch + memory | ~700 | 低 |
+| 3d | dashboard/ext | agent_events + cli + transcribe + system | ~700 | 低 |
+| 3e | dashboard/session | list + events + interrupt + label | ~1000 | 中 |
+| 3f | dashboard/session | send + upload + attachment + agent_tailer + upload_store | ~1500 | **高**（含 send 路径）|
+
+**重要**：每个 phase 实施前必跑 §0 pre-flight checklist 实测最新行数；
+master 涨速 4 个月内 ~20% 是常态。设计稿 v0.6.1 §6.1 行数估值是 v0.6.1
+当时实测，但 master 仍在涨——以实施前实测为准。
 
 **核心原则**（v0.6.1 §四.3 不搬业务逻辑、只搬位置）：
 - 每个 phase PR 必须满足"机械搬迁"（git diff 中实质代码变化 ≤ 5 行/handler）

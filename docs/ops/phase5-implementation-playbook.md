@@ -31,6 +31,25 @@ yq '.file_size[].path' tools/lint-server-handlers/exemptions.yaml
 go test -race -count=1 ./...
 ```
 
+## 1.1 Pre-flight checklist（必跑）
+
+```bash
+# 1. 切新分支
+git fetch origin master && git checkout -B server-split/phase5 origin/master
+
+# 2. 实测 Server struct 当前字段数（应仍是 47——master 4 个月内可能涨）
+awk '/^type Server struct/,/^}$/' internal/server/server.go | grep -cE "^\s+[a-z]"
+
+# 3. 实测保留 12 字段 + 搬走 35 字段全部命中（v0.6.1 §6.6 字段去向表）
+#    见本 playbook §2 的字段对账脚本
+
+# 4. baseline 跑全仓 race test
+time go test -race -count=1 -timeout=600s ./...
+
+# 5. 跑 mutex profile baseline（Phase 5 最终入档需要 before/after 对比）
+# 详见 §3 Step 10
+```
+
 ## 2. 47 个字段的搬迁（按 v0.6.1 §6.6）
 
 ### 保留 12 个 Server struct 字段
