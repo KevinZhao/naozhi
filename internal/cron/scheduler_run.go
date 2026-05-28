@@ -18,6 +18,7 @@ package cron
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	mrand "math/rand/v2"
 	"path/filepath"
@@ -179,6 +180,15 @@ func (s *Scheduler) cleanupRunningJobIfIdle(jobID string) bool {
 	if !ok || inf == nil {
 		// Defensive: an unexpected map value type implies the package
 		// invariant was violated upstream. LoadAndDelete still cleans it.
+		// R040034-GO-7 (#1392): bump severity to slog.Error so the
+		// invariant violation surfaces in journalctl. The previous
+		// silent sweep meant a future regression that stored the wrong
+		// type into runningJobs (a refactor returning a value-typed
+		// snapshot, a stale closure, etc.) would be cleaned up without
+		// any operator-visible signal until downstream code paths
+		// observed the missing in-flight metadata.
+		slog.Error("cron: runningJobs holds unexpected value type; sweeping",
+			"job_id", jobID, "type", fmt.Sprintf("%T", v))
 		s.runningJobs.LoadAndDelete(jobID)
 		return true
 	}
