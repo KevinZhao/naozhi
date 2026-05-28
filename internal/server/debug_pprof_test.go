@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 )
 
 // TestIsLoopbackRemote_PerAddrShape pins the host-parse semantics the
@@ -173,11 +175,8 @@ func TestPprof_LoopbackAuthenticatedNamedProfile(t *testing.T) {
 // full router/hub initialization because pprof doesn't touch them.
 func newPprofTestServer(t *testing.T, token string) *Server {
 	t.Helper()
-	auth := &AuthHandlers{
-		dashboardToken: token,
-		cookieSecret:   []byte("test-cookie-secret"),
-		loginLimiter:   newLoginLimiter(),
-	}
+	auth_ := auth.New(token, []byte("test-cookie-secret"), "", false)
+	auth := auth_
 	s := &Server{
 		mux:  http.NewServeMux(),
 		auth: auth,

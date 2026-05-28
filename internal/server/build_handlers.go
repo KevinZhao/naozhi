@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	dashdiscovery "github.com/naozhi/naozhi/internal/dashboard/discovery"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
@@ -34,16 +35,8 @@ import (
 // reuses the same shape as wsUpgradeLimiter — same scanner-blocking
 // envelope works for both unauthenticated dashboard probes and WS
 // upgrades. R230C-SEC-12.
-func buildAuthHandlers(opts ServerOptions, cookieSecret []byte, cookieGen string) *AuthHandlers {
-	return &AuthHandlers{
-		dashboardToken:    opts.DashboardToken,
-		cookieSecret:      cookieSecret,
-		cookieGen:         cookieGen,
-		loginLimiter:      newLoginLimiter(),
-		wsUpgradeLimiter:  newWSUpgradeLimiter(),
-		unauthDashLimiter: newWSUpgradeLimiter(),
-		trustedProxy:      opts.TrustedProxy,
-	}
+func buildAuthHandlers(opts ServerOptions, cookieSecret []byte, cookieGen string) *auth.Handlers {
+	return auth.New(opts.DashboardToken, cookieSecret, cookieGen, opts.TrustedProxy)
 }
 
 // buildCronHandlers constructs CronHandlers with the three per-IP limiters

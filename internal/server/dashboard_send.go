@@ -24,6 +24,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/attachment"
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -69,7 +70,7 @@ func isValidAnonCookieValue(v string) bool {
 // HttpOnly, SameSite=Strict (matches the auth cookie; nz_anon is only read by
 // same-origin XHR so Lax offered no value and left a cross-site-GET window
 // open for any future GET handler that reads it), Secure gated by
-// auth.isSecure(r), MaxAge=anonCookieMaxAgeSeconds.
+// auth.IsSecure(r), MaxAge=anonCookieMaxAgeSeconds.
 //
 // R247-SEC-15 / #514: MaxAge was 30 days, which kept the per-browser owner
 // label alive across token-mode toggles and service restarts that the
@@ -77,7 +78,7 @@ func isValidAnonCookieValue(v string) bool {
 // credential — it only disambiguates uploadOwner between co-NAT users —
 // but a stale owner label can still be claimed by an attacker who sniffed
 // the value over a non-TLS deployment (where the Secure flag is absent
-// because auth.isSecure(r)=false). 7 days is the upper bound a reasonable
+// because auth.IsSecure(r)=false). 7 days is the upper bound a reasonable
 // dev-laptop user would expect for a "remember this tab" hint, and it
 // shrinks the post-token-rotation window 4×. The cookieGen-coupled
 // rotation that #514's proposal flags as the deeper fix is left for a
@@ -96,18 +97,18 @@ func isValidAnonCookieValue(v string) bool {
 // owner). The startup-time warning on server.go:931 already calls out the
 // "token + plaintext" misconfiguration so an operator running this combo
 // will see the cookies disappear and find the warning in the same log.
-func mintAnonCookie(w http.ResponseWriter, r *http.Request, auth *AuthHandlers) (string, error) {
+func mintAnonCookie(w http.ResponseWriter, r *http.Request, ah *auth.Handlers) (string, error) {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", fmt.Errorf("read random bytes: %w", err)
 	}
 	val := hex.EncodeToString(buf[:])
-	secure := auth != nil && auth.isSecure(r)
+	secure := ah != nil && ah.IsSecure(r)
 	// R222-SEC-4 / #687: force Secure when a dashboard token is configured —
 	// the operator has signalled multi-user intent, so plaintext sniff of the
 	// owner label is no longer an acceptable degradation. The browser will
 	// drop the cookie under HTTP, which is the desired fail-closed.
-	if !secure && auth != nil && auth.dashboardToken != "" {
+	if !secure && ah != nil && ah.DashboardToken != "" {
 		secure = true
 	}
 	http.SetCookie(w, &http.Cookie{
@@ -183,10 +184,10 @@ type SendHandler struct {
 	hub           *Hub
 	router        SendRouter
 	uploadStore   *uploadStore
-	uploadLimiter *ipLimiter    // per-IP upload rate limiter (10/min)
-	sendLimiter   *ipLimiter    // per-IP send rate limiter (30/min)
-	auth          *AuthHandlers // for isSecure(r) when minting the nz_anon cookie in no-token mode
-	trustedProxy  bool          // whether to trust X-Forwarded-For for client IP
+	uploadLimiter *ipLimiter     // per-IP upload rate limiter (10/min)
+	sendLimiter   *ipLimiter     // per-IP send rate limiter (30/min)
+	auth          *auth.Handlers // for isSecure(r) when minting the nz_anon cookie in no-token mode
+	trustedProxy  bool           // whether to trust X-Forwarded-For for client IP
 }
 
 // ownerKeyFromCookie returns a stable owner key derived from an HMAC
@@ -226,7 +227,7 @@ func ownerKeyFromCookie(cookieValue string) string {
 // shape uniform, but the underlying tenancy collision (User A's upload
 // claimable by User B at the same NAT) remained — returning ok=false
 // closes that hole at the API surface.
-func uploadOwner(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, trustedProxy bool) (string, bool) {
+func uploadOwner(w http.ResponseWriter, r *http.Request, ah *auth.Handlers, trustedProxy bool) (string, bool) {
 	// R040034-SEC-2 (#1399): the auth-cookie branch must verify the
 	// cookie value matches the current cookieMAC before deriving an
 	// owner key. Without the gate, a caller carrying both a Bearer
@@ -241,8 +242,8 @@ func uploadOwner(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, tru
 	// AuthHandlers wired) or cookieMAC() returns "" (no-token mode where
 	// no auth cookie should ever be honoured) the cookie branch is
 	// skipped entirely — same fail-closed posture as a forged value.
-	if c, err := r.Cookie(authCookieName); err == nil && c.Value != "" && auth != nil {
-		if mac := auth.cookieMAC(); mac != "" &&
+	if c, err := r.Cookie(auth.AuthCookieName); err == nil && c.Value != "" && ah != nil {
+		if mac := ah.CookieMAC(); mac != "" &&
 			subtle.ConstantTimeCompare([]byte(c.Value), []byte(mac)) == 1 {
 			return ownerKeyFromCookie(c.Value), true
 		}
@@ -263,7 +264,7 @@ func uploadOwner(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, tru
 		return ownerKeyFromCookie(c.Value), true
 	}
 	if w != nil {
-		val, err := mintAnonCookie(w, r, auth)
+		val, err := mintAnonCookie(w, r, ah)
 		if err == nil {
 			return ownerKeyFromCookie(val), true
 		}
@@ -284,8 +285,8 @@ func uploadOwner(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, tru
 // owner + ok=true when a real per-browser key was minted/recovered; on
 // ok=false the caller MUST stop processing — the response has already been
 // written.
-func uploadOwnerOrFail(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, trustedProxy bool) (string, bool) {
-	owner, ok := uploadOwner(w, r, auth, trustedProxy)
+func uploadOwnerOrFail(w http.ResponseWriter, r *http.Request, ah *auth.Handlers, trustedProxy bool) (string, bool) {
+	owner, ok := uploadOwner(w, r, ah, trustedProxy)
 	if !ok {
 		// Service Unavailable + Retry-After hints the client/dashboard to
 		// retry on a fresh socket where /dev/urandom may have replenished.

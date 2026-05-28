@@ -1,4 +1,4 @@
-package server
+package auth
 
 import (
 	"net/http"
@@ -6,11 +6,11 @@ import (
 	"strings"
 )
 
-// isSafeMethod reports whether the HTTP method is safe per RFC 7231 §4.2.1
+// IsSafeMethod reports whether the HTTP method is safe per RFC 7231 §4.2.1
 // — i.e. is expected to have no state-changing side effects. The CSRF
 // Origin gate only applies to mutating methods so that GET prefetches,
 // HEAD probes, and CORS preflight OPTIONS from any origin keep working.
-func isSafeMethod(m string) bool {
+func IsSafeMethod(m string) bool {
 	switch m {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return true
@@ -18,21 +18,21 @@ func isSafeMethod(m string) bool {
 	return false
 }
 
-// requestHost returns the effective host the browser (or trusted proxy)
-// addressed this request at. When trustedProxy is set and the
+// RequestHost returns the effective host the browser (or trusted proxy)
+// addressed this request at. When TrustedProxy is set and the
 // X-Forwarded-Host header is present, we pick the LAST value from the
 // (possibly comma-separated) list — the one appended by the trusted
 // proxy itself, which cannot be spoofed by the client. Otherwise we
 // trust r.Host directly.
 //
 // R236-SEC-03: previously we took the FIRST value, which under
-// trustedProxy=true deployments behind ALB/CloudFront let an attacker
+// TrustedProxy=true deployments behind ALB/CloudFront let an attacker
 // prepend `X-Forwarded-Host: attacker.com` so the proxy-appended real
 // host became the second entry — the CSRF Origin gate would then match
 // `Origin: attacker.com` against `attacker.com` and let the cross-site
 // write through. Mirrors netutil.ClientIP's last-XFF semantics so both
 // gates trust the same boundary.
-func requestHost(r *http.Request, trustedProxy bool) string {
+func RequestHost(r *http.Request, trustedProxy bool) string {
 	host := r.Host
 	if trustedProxy {
 		if fwd := r.Header.Get("X-Forwarded-Host"); fwd != "" {
@@ -49,14 +49,14 @@ func requestHost(r *http.Request, trustedProxy bool) string {
 	return host
 }
 
-// sameOriginOK reports whether the Origin (or Referer fallback) header
+// SameOriginOK reports whether the Origin (or Referer fallback) header
 // identifies the same host naozhi is serving on. Missing Origin AND
 // Referer is treated as "not a browser navigation" (curl, server-to-server
 // scripts) and passes — those callers don't suffer CSRF in the first place
 // because they don't carry session cookies from a victim's browser.
 //
 // The caller must restrict this check to state-changing methods (see
-// isSafeMethod); applying it to GET would break direct-URL navigation
+// IsSafeMethod); applying it to GET would break direct-URL navigation
 // from bookmarks and external links where browsers routinely omit Origin.
 //
 // R31-SEC1 / R26-SEC1 / R58-SEC-001 / R60-SEC-001 defense-in-depth:
@@ -65,7 +65,7 @@ func requestHost(r *http.Request, trustedProxy bool) string {
 // — this gate closes that gap at the HTTP layer.
 //
 // Scheme is intentionally not compared. The auth cookie is issued without
-// a Domain attribute (handleLogin sets only Path/HttpOnly/Secure/SameSite),
+// a Domain attribute (HandleLogin sets only Path/HttpOnly/Secure/SameSite),
 // so the browser only sends it back to the exact request host; SameSite=Strict
 // additionally prevents cross-site requests from carrying it. A sibling-origin
 // attacker who somehow forces a same-host scheme downgrade still cannot get
@@ -73,8 +73,8 @@ func requestHost(r *http.Request, trustedProxy bool) string {
 // no real protection while breaking deployments where the CDN→origin hop is
 // HTTP-only and X-Forwarded-Proto reaches naozhi as http even on HTTPS
 // viewer traffic.
-func sameOriginOK(r *http.Request, trustedProxy bool) bool {
-	host := requestHost(r, trustedProxy)
+func SameOriginOK(r *http.Request, trustedProxy bool) bool {
+	host := RequestHost(r, trustedProxy)
 	if host == "" {
 		// Defensive: unknown Host means we can't validate Origin against
 		// anything. Refuse the write to fail closed.

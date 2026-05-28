@@ -7,6 +7,7 @@ import (
 	pprofhandler "net/http/pprof"
 	"strconv"
 	"strings"
+
 )
 
 // parsePositiveSeconds parses a `seconds=` pprof query parameter; returns 0
@@ -112,10 +113,10 @@ func (s *Server) registerPprof() {
 	// Mux pattern with trailing slash registers a subtree — every path
 	// beginning with /api/debug/pprof/ resolves here. The auth
 	// middleware enforces bearer/cookie + same-origin guard.
-	s.mux.HandleFunc("GET /api/debug/pprof/", s.auth.requireAuth(handler))
+	s.mux.HandleFunc("GET /api/debug/pprof/", s.auth.RequireAuth(handler))
 	// Also cover the bare /api/debug/pprof without trailing slash so
 	// operators who forget the slash get a redirect rather than 404.
-	s.mux.HandleFunc("GET /api/debug/pprof", s.auth.requireAuth(handler))
+	s.mux.HandleFunc("GET /api/debug/pprof", s.auth.RequireAuth(handler))
 }
 
 // isLoopbackRemote reports whether a net/http Request.RemoteAddr is a

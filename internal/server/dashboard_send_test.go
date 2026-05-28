@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 )
 
 // TestBuildAttachmentETagSeed_MillisecondPrecision pins R20260527122801-SEC-14:
@@ -147,7 +149,7 @@ func TestUploadOwnerOrFail_503OnFailure(t *testing.T) {
 // network attacker on a non-TLS deployment could sniff the per-browser owner
 // label and steal pending uploads via TakeAll.
 //
-// We construct an AuthHandlers literal with only dashboardToken populated;
+// We construct an auth.Handlers literal with only dashboardToken populated;
 // isSecure(r) returns false because r.TLS==nil and trustedProxy==false, so
 // the legacy `secure` branch would have produced Secure=false. Asserting
 // got.Secure==true therefore directly exercises the new force-Secure path.
@@ -156,7 +158,7 @@ func TestMintAnonCookie_ForcesSecureInMultiUserMode(t *testing.T) {
 	r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
 	r.RemoteAddr = "203.0.113.5:40000"
 	w := httptest.NewRecorder()
-	auth := &AuthHandlers{dashboardToken: "deploy-token"}
+	auth := auth.New("deploy-token", nil, "", false)
 	if _, err := mintAnonCookie(w, r, auth); err != nil {
 		t.Fatalf("mintAnonCookie returned error: %v", err)
 	}
@@ -186,7 +188,7 @@ func TestMintAnonCookie_NoForceSecureInSingleUserMode(t *testing.T) {
 	r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
 	r.RemoteAddr = "127.0.0.1:40000"
 	w := httptest.NewRecorder()
-	auth := &AuthHandlers{} // no dashboardToken, single-user mode
+	auth := auth.New("", nil, "", false) // no dashboardToken, single-user mode
 	if _, err := mintAnonCookie(w, r, auth); err != nil {
 		t.Fatalf("mintAnonCookie returned error: %v", err)
 	}

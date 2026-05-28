@@ -63,5 +63,5 @@ func (s *Server) registerExpvar() {
 		expvar.Handler().ServeHTTP(w, r)
 	})
 
-	s.mux.HandleFunc("GET /api/debug/vars", s.auth.requireAuth(handler))
+	s.mux.HandleFunc("GET /api/debug/vars", s.auth.RequireAuth(handler))
 }

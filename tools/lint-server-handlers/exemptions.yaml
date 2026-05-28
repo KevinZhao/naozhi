@@ -23,7 +23,7 @@ file_size:
       limit: 500
       until_phase: "2"
     - path: internal/server/dashboard_send.go
-      current: 1510                         # 2026-05-28 master 漂移 +42（含 #1432 修订）
+      current: 1511                         # 2026-05-28 master + Phase 3a 微改（auth 包 import）
       limit: 500
       until_phase: 3f
     - path: internal/server/dashboard_cron.go
@@ -35,11 +35,11 @@ file_size:
       limit: 500
       until_phase: "1"
     - path: internal/server/server.go
-      current: 1359                         # 2026-05-28 master + prep + 3b import line
+      current: 1360                         # 2026-05-28 master + prep + 3b + 3a auth import
       limit: 500
       until_phase: "5"
     - path: internal/server/wshub.go        # v0.6.1 新增豁免：v0.4 时 514 不超线
-      current: 1106                         # 2026-05-28 master 实测（Phase 0a 加 godoc 表后 master 持续涨）
+      current: 1107                         # 2026-05-28 master + Phase 3a auth import
       limit: 500
       until_phase: 4b
     - path: internal/server/dashboard.go    # v0.6.1 新增豁免：v0.4 时 731 不超线
@@ -55,10 +55,9 @@ file_size:
       current: 704
       limit: 500
       until_phase: 3f
-    - path: internal/server/dashboard_auth.go
-      current: 583
-      limit: 500
-      until_phase: 3a
+    # internal/server/dashboard_auth.go: removed Phase 3a (PR #1436) — file
+    # moved to internal/dashboard/auth/handlers.go. Closes-exemption trailer
+    # in commit message satisfies rule 5.
 
 # Phase 0 baseline 锁定的 8 个 Server.handle* 方法（rule 1: handle_decl）
 # 新增的 (s *Server) handle* 方法 → linter fail

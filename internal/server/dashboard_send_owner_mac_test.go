@@ -8,25 +8,23 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 )
 
-// helperMakeAuth returns an AuthHandlers whose cookieMAC() yields a
+// helperMakeAuth returns an auth.Handlers whose cookieMAC() yields a
 // deterministic value derived from token + a fixed cookieGen + seq=0.
 // Used by the cookie-MAC verification tests to obtain a "valid" cookie
 // value while still being able to construct different forged values.
-func helperMakeAuth(token, secret, gen string) *AuthHandlers {
-	return &AuthHandlers{
-		dashboardToken: token,
-		cookieSecret:   []byte(secret),
-		cookieGen:      gen,
-		// cookieGenSeq starts at 0 by default — we don't bump it so the
-		// MAC stays stable across the test for repeatable assertions.
-	}
+func helperMakeAuth(token, secret, gen string) *auth.Handlers {
+	// Phase 3a: cookieSecret / cookieGen are unexported; auth.New takes them
+	// as ctor params + trustedProxy=false default for these test fixtures.
+	return auth.New(token, []byte(secret), gen, false)
 }
 
-// computeMAC mirrors AuthHandlers.cookieMAC's wire format so tests can
+// computeMAC mirrors auth.Handlers.CookieMAC's wire format so tests can
 // pre-compute the legitimate cookie value and a forged sibling without
-// reaching into the AuthHandlers internals. Mirrors the format documented
+// reaching into the auth.Handlers internals. Mirrors the format documented
 // at dashboard_auth.go cookieMAC().
 func computeMAC(t *testing.T, token, secret, gen string) string {
 	t.Helper()
@@ -52,7 +50,7 @@ func computeMAC(t *testing.T, token, secret, gen string) string {
 //   - When the cookie value does NOT match (forgery / stale rotation),
 //     the cookie branch falls through and the Bearer fallback wins.
 //
-// Tests construct AuthHandlers manually (not via NewAuthHandlers) to
+// Tests construct auth.Handlers manually (not via NewAuthHandlers) to
 // avoid pulling in the full server bring-up; the cookieMAC() method
 // only depends on the four exported fields we set.
 func TestUploadOwner_RejectsForgedAuthCookie(t *testing.T) {
@@ -62,11 +60,11 @@ func TestUploadOwner_RejectsForgedAuthCookie(t *testing.T) {
 	const secret = "cookie-secret-1234567890abcdef"
 	const gen = "cookie-gen-stable"
 
-	auth := helperMakeAuth(token, secret, gen)
+	ah := helperMakeAuth(token, secret, gen)
 	validMAC := computeMAC(t, token, secret, gen)
-	if got := auth.cookieMAC(); got != validMAC {
+	if got := ah.CookieMAC(); got != validMAC {
 		t.Fatalf("test wiring: helperMakeAuth produced cookieMAC %q, want %q — "+
-			"computeMAC and AuthHandlers.cookieMAC drifted", got, validMAC)
+			"computeMAC and auth.Handlers.CookieMAC drifted", got, validMAC)
 	}
 
 	// Bearer-only baseline: no auth cookie present, only Bearer. Owner
@@ -77,7 +75,7 @@ func TestUploadOwner_RejectsForgedAuthCookie(t *testing.T) {
 		t.Parallel()
 		r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
 		r.Header.Set("Authorization", "Bearer "+token)
-		owner, ok := uploadOwner(httptest.NewRecorder(), r, auth, false)
+		owner, ok := uploadOwner(httptest.NewRecorder(), r, ah, false)
 		if !ok || owner == "" {
 			t.Fatalf("Bearer-only path failed: ok=%v owner=%q", ok, owner)
 		}
@@ -95,11 +93,11 @@ func TestUploadOwner_RejectsForgedAuthCookie(t *testing.T) {
 		t.Parallel()
 		r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
 		r.AddCookie(&http.Cookie{
-			Name:  authCookieName,
+			Name:  auth.AuthCookieName,
 			Value: "AAAforgedAAAA" + strings.Repeat("0", 40),
 		})
 		r.Header.Set("Authorization", "Bearer "+token)
-		owner, ok := uploadOwner(httptest.NewRecorder(), r, auth, false)
+		owner, ok := uploadOwner(httptest.NewRecorder(), r, ah, false)
 		if !ok || owner == "" {
 			t.Fatalf("forged-cookie + Bearer path failed: ok=%v owner=%q", ok, owner)
 		}
@@ -119,10 +117,10 @@ func TestUploadOwner_RejectsForgedAuthCookie(t *testing.T) {
 		t.Parallel()
 		r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
 		r.AddCookie(&http.Cookie{
-			Name:  authCookieName,
+			Name:  auth.AuthCookieName,
 			Value: validMAC,
 		})
-		owner, ok := uploadOwner(httptest.NewRecorder(), r, auth, false)
+		owner, ok := uploadOwner(httptest.NewRecorder(), r, ah, false)
 		if !ok || owner == "" {
 			t.Fatalf("valid-cookie path failed: ok=%v owner=%q", ok, owner)
 		}
@@ -143,15 +141,15 @@ func TestUploadOwner_RejectsForgedAuthCookie(t *testing.T) {
 func TestUploadOwner_NoTokenMode_AuthCookieIgnored(t *testing.T) {
 	t.Parallel()
 
-	auth := &AuthHandlers{} // no token → cookieMAC() returns ""
+	ah := auth.New("", nil, "", false) // no token → CookieMAC() returns ""
 
 	r := httptest.NewRequest("POST", "/api/sessions/upload", nil)
 	r.AddCookie(&http.Cookie{
-		Name:  authCookieName,
+		Name:  auth.AuthCookieName,
 		Value: "anything-can-go-here",
 	})
 	w := httptest.NewRecorder()
-	owner, ok := uploadOwner(w, r, auth, false)
+	owner, ok := uploadOwner(w, r, ah, false)
 	if !ok || owner == "" {
 		t.Fatalf("no-token-mode path failed: ok=%v owner=%q", ok, owner)
 	}

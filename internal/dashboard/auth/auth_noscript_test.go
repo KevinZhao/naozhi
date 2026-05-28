@@ -1,4 +1,4 @@
-package server
+package auth
 
 import (
 	"net/http"
@@ -21,10 +21,10 @@ import (
 func TestHandleLoginNoScript(t *testing.T) {
 	t.Parallel()
 
-	a := &AuthHandlers{
-		dashboardToken: "secret",
+	a := &Handlers{
+		DashboardToken: "secret",
 		cookieSecret:   []byte("cookie"),
-		loginLimiter:   newLoginLimiter(),
+		loginLimiter:   NewLoginLimiter(),
 	}
 
 	// A real no-JS browser submits the form url-encoded with the token
@@ -37,7 +37,7 @@ func TestHandleLoginNoScript(t *testing.T) {
 	r.Host = "naozhi.example"
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
-	a.handleLoginNoScript(w, r)
+	a.HandleLoginNoScript(w, r)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)

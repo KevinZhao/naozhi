@@ -14,6 +14,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
@@ -131,7 +132,7 @@ func TestWS_AuthCookiePreAuth(t *testing.T) {
 
 	// Dial with valid HMAC cookie — simulates iOS where localStorage is empty but cookie persists
 	header := http.Header{}
-	header.Set("Cookie", authCookieName+"="+testCookieMAC("secret"))
+	header.Set("Cookie", auth.AuthCookieName+"="+testCookieMAC("secret"))
 	conn, _, err := websocket.DefaultDialer.Dial(url, header)
 	if err != nil {
 		t.Fatalf("ws dial: %v", err)

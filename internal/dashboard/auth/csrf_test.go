@@ -1,4 +1,4 @@
-package server
+package auth
 
 import (
 	"net/http"
@@ -14,25 +14,25 @@ func TestIsSafeMethod(t *testing.T) {
 	safe := []string{http.MethodGet, http.MethodHead, http.MethodOptions}
 	unsafe := []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch}
 	for _, m := range safe {
-		if !isSafeMethod(m) {
-			t.Errorf("isSafeMethod(%q) = false, want true", m)
+		if !IsSafeMethod(m) {
+			t.Errorf("IsSafeMethod(%q) = false, want true", m)
 		}
 	}
 	for _, m := range unsafe {
-		if isSafeMethod(m) {
-			t.Errorf("isSafeMethod(%q) = true, want false", m)
+		if IsSafeMethod(m) {
+			t.Errorf("IsSafeMethod(%q) = true, want false", m)
 		}
 	}
 }
 
 // TestRequestHost covers the X-Forwarded-Host honoring path behind the
-// trustedProxy flag and the r.Host fallback otherwise.
+// TrustedProxy flag and the r.Host fallback otherwise.
 func TestRequestHost(t *testing.T) {
 	cases := []struct {
 		name         string
 		host         string
 		fwd          string
-		trustedProxy bool
+		TrustedProxy bool
 		want         string
 	}{
 		{"no_proxy_plain_host", "naozhi.example:8180", "", false, "naozhi.example:8180"},
@@ -47,7 +47,7 @@ func TestRequestHost(t *testing.T) {
 		// R236-SEC-03 attacker scenario: client prepends
 		// X-Forwarded-Host: attacker.com before the request reaches
 		// the trusted proxy; the proxy then appends the real host.
-		// requestHost must return the proxy-appended last entry so
+		// RequestHost must return the proxy-appended last entry so
 		// the CSRF Origin gate compares against the genuine host,
 		// not the attacker-controlled prefix.
 		{"trusted_proxy_attacker_prepended", "internal", "attacker.com, real-host.example", true, "real-host.example"},
@@ -59,8 +59,8 @@ func TestRequestHost(t *testing.T) {
 			if tc.fwd != "" {
 				r.Header.Set("X-Forwarded-Host", tc.fwd)
 			}
-			if got := requestHost(r, tc.trustedProxy); got != tc.want {
-				t.Errorf("requestHost = %q, want %q", got, tc.want)
+			if got := RequestHost(r, tc.TrustedProxy); got != tc.want {
+				t.Errorf("RequestHost = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -68,14 +68,14 @@ func TestRequestHost(t *testing.T) {
 
 // TestSameOriginOK exercises the full decision matrix of the CSRF Origin
 // gate — same-origin, cross-origin, missing-Origin (Referer fallback),
-// "null" opaque origins, and trustedProxy X-Forwarded-Host pass-through.
+// "null" opaque origins, and TrustedProxy X-Forwarded-Host pass-through.
 //
 // This is a regression test for R26-SEC1 / R31-SEC1 / R58-SEC-001 /
 // R60-SEC-001: SameSite=Strict cookies do not block a sibling-subdomain
 // attacker (evil.naozhi-host.example → naozhi-host.example), so we close
 // that gap at the HTTP layer and lock the behavior here.
 //
-// Scheme is intentionally not compared — see sameOriginOK doc. The HTTPS
+// Scheme is intentionally not compared — see SameOriginOK doc. The HTTPS
 // downgrade gate added in [R247-SEC-1] was reverted because the auth
 // cookie is host-scoped (no Domain attribute) so the browser will not
 // attach it to a scheme-downgraded sibling request in the first place,
@@ -89,7 +89,7 @@ func TestSameOriginOK(t *testing.T) {
 		referer      string
 		host         string
 		fwdHost      string
-		trustedProxy bool
+		TrustedProxy bool
 		want         bool
 	}{
 		{"same_origin_match", "http://" + host, "", host, "", false, true},
@@ -120,21 +120,21 @@ func TestSameOriginOK(t *testing.T) {
 			if tc.fwdHost != "" {
 				r.Header.Set("X-Forwarded-Host", tc.fwdHost)
 			}
-			if got := sameOriginOK(r, tc.trustedProxy); got != tc.want {
-				t.Errorf("sameOriginOK = %v, want %v (origin=%q referer=%q host=%q fwd=%q proxy=%v)",
-					got, tc.want, tc.origin, tc.referer, tc.host, tc.fwdHost, tc.trustedProxy)
+			if got := SameOriginOK(r, tc.TrustedProxy); got != tc.want {
+				t.Errorf("SameOriginOK = %v, want %v (origin=%q referer=%q host=%q fwd=%q proxy=%v)",
+					got, tc.want, tc.origin, tc.referer, tc.host, tc.fwdHost, tc.TrustedProxy)
 			}
 		})
 	}
 }
 
-// TestRequireAuth_CSRFGate verifies that requireAuth rejects mutating
+// TestRequireAuth_CSRFGate verifies that RequireAuth rejects mutating
 // cross-origin requests even when the session cookie is valid — closing
 // the same-registrable-domain CSRF gap that SameSite=Strict does not cover.
 // Safe methods (GET) must still pass so bookmarks and external links work.
 func TestRequireAuth_CSRFGate(t *testing.T) {
-	a := &AuthHandlers{dashboardToken: ""} // empty token => isAuthenticated=true, so we isolate the Origin gate
-	handler := a.requireAuth(func(w http.ResponseWriter, _ *http.Request) {
+	a := &Handlers{DashboardToken: ""} // empty token => IsAuthenticated=true, so we isolate the Origin gate
+	handler := a.RequireAuth(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -168,15 +168,15 @@ func TestRequireAuth_CSRFGate(t *testing.T) {
 }
 
 // TestHandleLogin_CSRFGate verifies the same-origin gate inside
-// handleLogin (which sits OUTSIDE requireAuth because it is the endpoint
+// HandleLogin (which sits OUTSIDE RequireAuth because it is the endpoint
 // that grants auth in the first place). A cross-origin login POST must be
 // refused before the token is even compared, so a misconfigured proxy
 // cannot leak the dashboard token via a preflight or reflected error body.
 func TestHandleLogin_CSRFGate(t *testing.T) {
-	a := &AuthHandlers{
-		dashboardToken: "secret",
+	a := &Handlers{
+		DashboardToken: "secret",
 		cookieSecret:   []byte("cookie"),
-		loginLimiter:   newLoginLimiter(),
+		loginLimiter:   NewLoginLimiter(),
 	}
 	r := httptest.NewRequest(http.MethodPost, "http://naozhi.example/api/auth/login",
 		strings.NewReader(`{"token":"secret"}`))
@@ -184,7 +184,7 @@ func TestHandleLogin_CSRFGate(t *testing.T) {
 	r.Header.Set("Origin", "http://evil.example")
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	a.handleLogin(w, r)
+	a.HandleLogin(w, r)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin login: status = %d, want %d (body=%q)",
 			w.Code, http.StatusForbidden, strings.TrimSpace(w.Body.String()))

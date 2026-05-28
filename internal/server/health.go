@@ -11,13 +11,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
 // HealthHandler serves the /health endpoint with system status information.
 type HealthHandler struct {
 	router        *session.Router
-	auth          *AuthHandlers
+	auth          *auth.Handlers
 	startedAt     time.Time
 	workspaceID   string
 	workspaceName string
@@ -239,13 +240,13 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Status: "ok",
 		Uptime: time.Since(h.startedAt).Round(time.Second).String(),
 	}
-	if !h.auth.isAuthenticated(r) {
+	if !h.auth.IsAuthenticated(r) {
 		// R246-SEC-11 (#819): per-IP cap so an attacker scanning across
 		// time cannot enumerate uptime to fingerprint deploy/restart
 		// cadence. unauthDashAllow returns true when the limiter is not
 		// wired (test harness without server.New) so this stays a no-op
 		// for fixtures that bypass the bucket.
-		if h.auth != nil && !h.auth.unauthDashAllow(clientIP(r, h.auth.trustedProxy)) {
+		if h.auth != nil && !h.auth.UnauthDashAllow(clientIP(r, h.auth.TrustedProxy)) {
 			w.Header().Set("Retry-After", "60")
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
 			return

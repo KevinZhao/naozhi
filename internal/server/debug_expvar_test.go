@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 )
 
 // TestExpvar_RequiresAuth pins that /api/debug/vars sits behind requireAuth.
@@ -118,11 +120,8 @@ func TestExpvar_LoopbackAuthenticatedServesJSON(t *testing.T) {
 
 func newExpvarTestServer(t *testing.T, token string) *Server {
 	t.Helper()
-	auth := &AuthHandlers{
-		dashboardToken: token,
-		cookieSecret:   []byte("test-cookie-secret"),
-		loginLimiter:   newLoginLimiter(),
-	}
+	auth_ := auth.New(token, []byte("test-cookie-secret"), "", false)
+	auth := auth_
 	s := &Server{
 		mux:  http.NewServeMux(),
 		auth: auth,

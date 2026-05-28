@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/time/rate"
 
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
@@ -245,7 +246,7 @@ type Hub struct {
 	// (different from dashToken). Stored as a getter callback rather than
 	// a cached string so RotateCookieGen invalidations propagate to the
 	// WS upgrade comparison without requiring a Hub rebuild — the HTTP
-	// path already calls auth.cookieMAC() per request, and the WS path
+	// path already calls auth.CookieMAC() per request, and the WS path
 	// now matches that contract. R040034-SEC-1 (#1398). When opts
 	// .CookieMACFn is unset (legacy tests that pass only opts.CookieMAC),
 	// NewHub installs a closure returning that constant so the existing
@@ -332,7 +333,7 @@ type Hub struct {
 	// older test harnesses that wire NewHub without HubOptions.Auth
 	// retain the legacy IP-fallback shape (those Hubs do not run
 	// uploadStore so the fallback is not security-relevant).
-	auth     *AuthHandlers
+	auth     *auth.Handlers
 	upgrader websocket.Upgrader
 
 	debounceMu    sync.Mutex
@@ -452,7 +453,7 @@ type HubOptions struct {
 	CookieMAC string
 	// CookieMACFn, when non-nil, is preferred over CookieMAC: NewHub
 	// stores the callback directly so each WS upgrade reads the current
-	// auth.cookieMAC() value rather than a snapshot taken at server boot.
+	// auth.CookieMAC() value rather than a snapshot taken at server boot.
 	// Without this, a future hot-reload that bumps cookieGenSeq would
 	// invalidate HTTP cookies but leave WS upgrades accepting the
 	// pre-rotation cookie until the process restarts. R040034-SEC-1
@@ -476,7 +477,7 @@ type HubOptions struct {
 	// Auth, when non-nil, is used by HandleUpgrade to mint a per-browser
 	// nz_anon cookie in no-token mode so WS upload owner derivation
 	// mirrors the HTTP path. R20260527122801-SEC-2 / #1326.
-	Auth *AuthHandlers
+	Auth *auth.Handlers
 	// ParentCtx is the application-level context whose cancellation must
 	// propagate to the Hub. When set, NewHub derives h.ctx via
 	// context.WithCancel(ParentCtx) so that parent-ctx cancel tears down
@@ -508,7 +509,7 @@ func NewHub(opts HubOptions) *Hub {
 	// wsDeriveUploadOwner without a Hub rebuild (R040034-SEC-1 / #1398).
 	// Fall back to the static CookieMAC string for tests that don't wire
 	// AuthHandlers; nil-safe-empty when neither is set so the WS upgrade
-	// path's `h.cookieMAC() != ""` guard still rejects empty-MAC compares
+	// path's `h.CookieMAC() != ""` guard still rejects empty-MAC compares
 	// instead of panicking on a nil callback.
 	cookieMACFn := opts.CookieMACFn
 	if cookieMACFn == nil {
@@ -540,12 +541,12 @@ func NewHub(opts HubOptions) *Hub {
 		cancel:           cancel,
 	}
 	h.upgrader = websocket.Upgrader{
-		// Delegate to the shared sameOriginOK helper so WS upgrade and the
+		// Delegate to the shared auth.SameOriginOK helper so WS upgrade and the
 		// HTTP requireAuth CSRF gate stay in lockstep. The helper already
 		// treats empty Origin as permitted (same-origin browsers omit it,
 		// non-browser callers don't carry cookies), honours trustedProxy's
 		// X-Forwarded-Host fallback, and rejects the opaque "null" origin.
-		CheckOrigin:     func(r *http.Request) bool { return sameOriginOK(r, h.trustedProxy) },
+		CheckOrigin:     func(r *http.Request) bool { return auth.SameOriginOK(r, h.trustedProxy) },
 		ReadBufferSize:  8192,
 		WriteBufferSize: 8192,
 	}

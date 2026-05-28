@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/discovery"
@@ -88,7 +89,7 @@ type Server struct {
 	nodesMu           sync.RWMutex         // 读写: server.go, dashboard.go (shared with Hub.nodesMu)
 
 	// ── Phase 5: → routes.go local variables ───────────
-	auth         *AuthHandlers        // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
+	auth         *auth.Handlers        // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
 	cronH        *CronHandlers        // 读写: server.go, dashboard.go
 	transcribeH  *TranscribeHandler   // 读写: dashboard.go (ctor only in server.go)
 	nodeAccess   *nodeAccessor        // 读写: server.go, dashboard.go
@@ -984,17 +985,17 @@ func (s *Server) Start(ctx context.Context) error {
 	// `trustedProxy=true` is the operator's explicit statement that TLS
 	// termination happens upstream (ALB/CloudFront), in which case this
 	// listener binding to plaintext loopback is fine.
-	if s.dashboardToken != "" && !s.auth.trustedProxy && isPlaintextPublicAddr(s.addr) {
+	if s.dashboardToken != "" && !s.auth.TrustedProxy && isPlaintextPublicAddr(s.addr) {
 		slog.Warn(plaintextDashboardTokenWarning, "addr", s.addr)
 	}
 	// No-auth mode on a publicly reachable address is the biggest footgun the
 	// operator can step into — every /api/* endpoint becomes world-reachable.
 	// Decision logic extracted to shouldWarnNoTokenOpen for unit-test coverage;
 	// see R60-SEC-006 / R70-SEC-M1 in the helper's docstring.
-	if shouldWarnNoTokenOpen(s.dashboardToken, s.addr, s.auth.trustedProxy) {
+	if shouldWarnNoTokenOpen(s.dashboardToken, s.addr, s.auth.TrustedProxy) {
 		slog.Warn(noTokenOpenWarning,
 			"addr", s.addr,
-			"trusted_proxy", s.auth.trustedProxy,
+			"trusted_proxy", s.auth.TrustedProxy,
 		)
 	} else if s.dashboardToken == "" {
 		// Loopback + no token is the "local dev" happy path, but if a systemd
@@ -1010,7 +1011,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// terminator upstream. Passive sniffers on the path can lift the token and
 	// impersonate the remote node. Mirror the dashboard token warning so the
 	// operator sees the same shape of signal in the startup journal. R176-SEC-MED.
-	if shouldWarnReverseNodePlaintext(s.reverseNodeServer != nil, s.auth.trustedProxy, s.addr) {
+	if shouldWarnReverseNodePlaintext(s.reverseNodeServer != nil, s.auth.TrustedProxy, s.addr) {
 		slog.Warn(reverseNodePlaintextWarning,
 			"addr", s.addr,
 		)
@@ -1031,7 +1032,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// rate-limiter bypass weeks later. Info-level (not Warn) because the
 	// configuration itself is legitimate — the warning is about the
 	// upstream contract, which we cannot verify from inside the process.
-	if s.auth.trustedProxy {
+	if s.auth.TrustedProxy {
 		slog.Info(trustedProxyXFFReminder, "addr", s.addr)
 	}
 	slog.Info("server starting", "addr", s.addr)
