@@ -1,7 +1,9 @@
 package server
 
 import (
+	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,6 +105,58 @@ func TestMissedScheduleVerdict_NilJob(t *testing.T) {
 	missed, prev := h.missedScheduleVerdict(nil, time.Now(), time.Now())
 	if missed || !prev.IsZero() {
 		t.Errorf("nil job: got (%v, %v), want (false, zero)", missed, prev)
+	}
+}
+
+// TestHandleList_RoutesThroughMissedScheduleVerdict pins R250-PERF-3
+// (#1107): the 1 Hz dashboard poll path in handleList must call the
+// memoising wrapper missedScheduleVerdict, NOT cron.HasMissedSchedule
+// directly. A contributor refactoring the loop body could plausibly
+// "simplify" by inlining the canonical call — silently regressing the
+// cache and re-introducing N×T regexp NFA builds per second under
+// load. The unit tests above already pin the wrapper's behaviour; this
+// source-pin guards the wiring at the only caller that matters.
+//
+// We grep dashboard_cron.go for the literal invocation rather than
+// instrumenting the runtime path because handleList depends on a fully
+// wired CronHandlers (scheduler, cron.Service, store, etc.) that the
+// existing newCronHandlersForTest fixtures only partially assemble. A
+// source-pin is sufficient because the call site is single and short:
+// any divergence — `cron.HasMissedSchedule(&j, now, startedAt)` instead
+// of `h.missedScheduleVerdict(&j, now, startedAt)` — would fail the
+// substring search and force the contributor to update the test
+// alongside the source.
+func TestHandleList_RoutesThroughMissedScheduleVerdict(t *testing.T) {
+	t.Parallel()
+	src, err := os.ReadFile("dashboard_cron.go")
+	if err != nil {
+		t.Fatalf("read dashboard_cron.go: %v", err)
+	}
+	source := string(src)
+
+	// Locate the handleList function body. The function declaration is
+	// the unambiguous anchor; we slice from it to the next top-level
+	// `func ` to avoid matching unrelated calls elsewhere in the file.
+	listIdx := strings.Index(source, "func (h *CronHandlers) handleList(")
+	if listIdx < 0 {
+		t.Fatal("handleList function not found in dashboard_cron.go — test anchor moved, update before relaxing the check")
+	}
+	rest := source[listIdx:]
+	end := strings.Index(rest[1:], "\nfunc ")
+	if end < 0 {
+		end = len(rest)
+	}
+	body := rest[:end]
+
+	// The 1Hz hot path must route through the cached helper.
+	if !strings.Contains(body, "h.missedScheduleVerdict(&j, now, startedAt)") {
+		t.Error("handleList must call h.missedScheduleVerdict(&j, now, startedAt) — bypassing the cache via cron.HasMissedSchedule directly silently re-introduces R250-PERF-3 / R245-PERF-4 (#1107 / #857): N jobs × T tabs × 1 Hz fans out to N×T regexp NFA builds per second")
+	}
+	// Defence in depth: handleList must NOT call cron.HasMissedSchedule
+	// directly — the only caller of the canonical function is the
+	// wrapper itself (line ~718 of this file).
+	if strings.Contains(body, "cron.HasMissedSchedule(") {
+		t.Error("handleList must not call cron.HasMissedSchedule directly — route through h.missedScheduleVerdict so the cache short-circuits the regex Parse on poll storms (#1107)")
 	}
 }
 
