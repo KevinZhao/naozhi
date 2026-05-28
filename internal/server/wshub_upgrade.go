@@ -296,6 +296,15 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 			slog.Debug("ws auth: no-token mode, authenticating unconditionally")
 		}
 		c.authenticated.Store(true)
+		// R040034-PERF-23 (#1409): mirror the auth flip into h.authClients
+		// so broadcastToAuthenticated can iterate the mirror directly
+		// instead of filtering every connected client × per-element
+		// authenticated.Load(). The Store above must precede the mirror
+		// write so a concurrent broadcast that observes the mirror entry
+		// also observes a true authenticated flag (defence-in-depth: the
+		// broadcast no longer reads the flag, but other call sites
+		// covering wsclient.go still do).
+		h.markAuthenticated(c)
 		// Derive uploadOwner from the provided token so WS token-auth enforces
 		// the same per-owner upload quota as HTTP Bearer auth. Without this,
 		// a WS-token-authed client could bypass maxUploadPerOwner because
