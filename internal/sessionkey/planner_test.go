@@ -1,4 +1,4 @@
-package keyspec
+package sessionkey
 
 import "testing"
 
@@ -10,7 +10,8 @@ import "testing"
 // drift via cross-import scaffolding. Co-locating the assertion with
 // the source of truth here makes the contract local: a literal
 // change here requires updating the project + session callers in
-// the same commit.
+// the same commit. R040034-ARCH-2 (#1412): consolidated from the
+// former internal/keyspec package.
 func TestPlannerKeyFor_FormatLocked(t *testing.T) {
 	if got := PlannerKeyFor("foo"); got != "project:foo:planner" {
 		t.Errorf("PlannerKeyFor(foo) = %q, want %q", got, "project:foo:planner")

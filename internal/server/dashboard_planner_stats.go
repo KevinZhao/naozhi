@@ -34,7 +34,7 @@ import (
 	"runtime"
 	"sort"
 
-	"github.com/naozhi/naozhi/internal/keyspec"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // plannerStatsResponse is the JSON wire shape for GET /api/planner/stats.
@@ -103,7 +103,7 @@ func (s *Server) handlePlannerStats(w http.ResponseWriter, _ *http.Request) {
 		// stats consistent with what the sidebar shows. No additional
 		// router lock acquired.
 		for _, snap := range s.router.ListSessions() {
-			if keyspec.IsPlannerKey(snap.Key) {
+			if sessionkey.IsPlannerKey(snap.Key) {
 				resp.PlannerKeys = append(resp.PlannerKeys, snap.Key)
 			}
 		}
