@@ -1,6 +1,17 @@
 # server 包拆分 Phase 4 设计稿
 
-> **状态**：设计稿 v0.6.1（2026-05-28），已应用 v0.1/v0.2/v0.3/v0.4/v0.5/v0.6 共 11 轮独立 reviewer 反馈。**v0.6.1 是 v0.6 第 7 轮 review 的 9 项内部一致性修订**。**Phase 0 实施前等最后一次 sign-off**。
+> **状态**：设计稿 v0.6.2（2026-05-28），已应用 v0.1/v0.2/v0.3/v0.4/v0.5/v0.6 共 11 轮独立 reviewer 反馈 + Phase 1-3 实施反馈。**v0.6.2 整合 Phase 1-3 实施过程发现的两个 Go 硬约束（method-receiver 同包 + 测试 unexported 同包），phase1/2/3a 必须接受 ≥ 1500 行单刀**（详 §6.2）。
+>
+> **已实施进度（截至 2026-05-28 多轮 PR 后）**：
+> - ✅ Phase 0/0a/0b（设计 + lint rules + 字段注解 + 包契约）
+> - ✅ Phase 3-prep（httputil 子包升格）
+> - ✅ Phase 1（cron）、Phase 2（project）
+> - ✅ Phase 3a（auth）、3b（discovery）、3c（scratch+memory）、3d（agentevents+cli+transcribe）、3e（session）
+> - ✅ Phase 4a 骨架 + 4b-router（HubRouter 接口）+ 4b-hub-sync（49 字段）
+> - ⏸️ Phase 4b 真实方法搬迁（详 [4b hand-off](../ops/phase4b-handoff-2026-05-28.md) 附录 B 实测对账表）
+> - ⏸️ Phase 3f / 4c / 5 待启动（依赖 4b）
+>
+> **本会话另外完成的物理切分（15 个独立 PR，#1444-#1458）**：dashboard.go / server.go / dashboard_send.go / agent_tailer.go / send.go 内部 helper 抽到独立文件。**累计 server 包减小 1937 行**，agent_tailer.go 永久退出超 500 行硬上限名单。详 [4b hand-off](../ops/phase4b-handoff-2026-05-28.md) 附录 B。
 >
 > **v0.6 摘要**：v0.5 自身 9 项不一致整改（Hub 字段在 §一/§二/§五/§九.1/§7.3 多处不同步、PR 数 11 vs 13 在 4 处不一致、§7.3 观察期算式仍用 11 phase 等）+ 同步 origin/master 实测数据（server 包从 17156→**21313** 行 / Hub 字段从 37→**47** / 超线文件从 6→**9** 个 / Phase 4 范围从 3550→**5198** 行不含测试）+ **§0 新增事实速查表**（防多处数字漂移的根治）。
 >
@@ -43,7 +54,7 @@
 | ROI gate 实测结果 | **6/6 文件超线（17-32 PRs/90d）→ gate 通过** | — | 同 v0.6 | v0.5 起 |
 | 观察期总长（不含重叠）| **12 phase × 7 + Phase 5→final × 14 = 98 自然日** | — | 11×7=77 (§7.3) / 13×7=91 (§6.1) | v0.5 §7.3 错算；v0.6 修为 91（含 13 phase × 7）；v0.6.1 加 Phase 5 → final 14 天双倍观察期（mutex pprof 数据），共 98 天 |
 | 实施起点 | **Phase 0 merge + ROI gate 当场通过** | T+14d 决策 | 同 v0.6 | v0.5 起 |
-| Server.handle* 方法基线数 | **7** | — | — | v0.6 实测；exemptions.yaml `handle_baseline` 钉死 |
+| Server.handle* 方法基线数 | **4** | — | — | v0.6 实测 8 → 2026-05-28 PR #1444 静态 handler 包级化后 4；exemptions.yaml `handle_baseline` 钉死 |
 
 <!-- fact-table:end -->
 
@@ -1447,6 +1458,7 @@ Phase 0 PR description 必须含两条：
 | v0.5 | 2026-05-28 | v0.4 第五轮深度 review 11 项整改：A. Hub 字段从 37 重数为 43（漏 6：debounceFire / historyMarshalCache / userSendLimiters* / connCountByOwner*）+ §五新增第 7 块 rate-limit/cache；B. §6.7 scratchPool 三角钉死（自管 sweeper / Server 不持字段 / NewHub Options 注入）；C. §五 lifecycle 块跨块写豁免（Shutdown/Start/NewHub 写所有块，关键词 LIFECYCLE-METHOD 标注）；D. §6.3 双 commit 与 routes_snapshot 同步契约（commit a 必须含 golden 更新）；E. ROI gate 改历史可回测指标（git log 90d unique PR 数，Phase 0 merge 后立即决策，废除 14 天等待）；F. 节奏从"9-10 周"改"13-15 周"含观察期 + §7.3 重叠豁免按风险分档；G. Phase 4 拆 4a/4b/4c（骨架/方法搬迁/收尾，每刀 ≤ 2400 行）；H. linter rule 5 stale_exemption 反向依赖保护（git tag 比对 + Closes-exemption commit trailer）；I. linter rule 3 拆 3a/3b（Phase 0 文本扫描 / Phase 4 中段 AST 对账）；J. Hub.mu 锁监测承诺（Phase 5 完工跑 mutex pprof + 入档 docs/ops/lock-profile-2026-XX.md）；K. §十二.1 显式 Phase 7 业务逻辑提取层路径声明 |
 | v0.6 | 2026-05-28 | v0.5 第六轮 review 9 项整改（**多处不一致**）+ 同步到 origin/master 最新 HEAD `44a10e8d` 实测数据。N1：§一 Hub 37→47 同步；N2：PR 数 11→13 同步到 §六/§十/§十一；N3：§7.3 观察期算式 11×7=77 → 13×7=91 + 加 4a/4b/4c 行；N4：§7.1 tag 列表加 server-split-phase4a/4b/4c；N5：§9.1 Phase 4b 验收 gate 单独列出（race count=100 不再笼统挂"Phase 4"）；N6：§6.7 scratchPool 主 ctx 注入显式化（NewScratchPool(ctx, ...) 接 main ctx）；N7：§6.5 4a 验收 gate 显式用 rule 3a / 4b 用 rule 3b；N8：§6.2.0.1 字段数 28→47/47；N9：§十一结论同步 v0.5 ROI gate 立即决策。**重大事实更新**：Hub 字段 43→47（v0.5 漏 4 个：auth/subscriberCount/legacySendInvokes/debounceClosedFast）；server 包从 17156→21313 行；超线文件从 6→9 个；exemptions.yaml 加 wshub.go/dashboard.go/agent_tailer.go 三个新条目；Phase 4 范围从 3550→5198 行不含测试。**§0 新增事实速查表 + 修订纪律**——根治 v0.5 多处数字漂移痼疾 |
 | v0.6.1 | 2026-05-28 | v0.6 第 7 轮 review 9 项内部一致性修订（速查表自身的副作用）：N1 baseline §3 笔误"8 块"→"7 块"（实际枚举 7 块）；N2 §五代码示例"rate-limit / cache (5, v0.5 新增块)"→"v0.5 起识别"（避免误导）；N3 §十一收益表加"server 包文件数 58→≤15"+"800+ 行 9 个"两行（与 §一对称）；**N4 critical：exemptions.yaml limit 全部 800→500**（v0.6 模板与 §9.2 硬上限矛盾会让 linter 误豁免；改正后 server 包文件 limit:500 / dashboard 子包 limit:800）+ 新增 send.go / dashboard_auth.go 两个 500-800 条目（共 11 条）；N5 §6.2.0.1 措辞校准；N6 §7.3 加 Phase 5 → final 14 天独立观察期 + 总观察期 91→98 天；N7 §6.0 行数例外改 4b/4c（4a 700 行不超线，无例外）；N8 §9.1 验收清单 Phase 4a/4b/4c 改为引用 §6.5 锚点（避免双处维护漂移）；N9 §0 加 lint rule 6 备做承诺（扫 markdown 关键数字 token 与速查表对账，Phase 0 跟随 RFC，否则纪律 1-4 全靠人维护是 v0.5 痼疾的复演）|
+| v0.6.2 | 2026-05-28 | Phase 1-3 实施反馈整合 + 状态行升级：①**Phase 1-3 实施发现两个 Go 硬约束**——method-receiver 同包 + 测试 unexported 同包，phase1/2/3a 必须接受 ≥1500 行单刀（phase4b/4c 早因方法-同包约束走例外，phase1/2/3a 补登保持纪律对称）；②**已实施进度**：Phase 0/0a/0b/3-prep/1/2/3a/3b/3c/3d/3e/4a/4b-router/4b-hub-sync 全部 merged；4b 真实方法搬迁/3f/4c/5 待启动；③**handle\_baseline 8→4**（PR #1444 静态资源 4 个零状态 handler 转包级 func）；④**本会话另起 15 个独立物理切分 PR (#1444-#1458)**：dashboard.go/server.go/dashboard_send.go/agent_tailer.go/send.go 内部 helper 抽到独立文件，累计 server 包减小 1937 行（agent_tailer.go 永久退出超线名单）|
 
 ### v0.2 整改追溯（按 reviewer 反馈映射）
 
@@ -1458,6 +1470,15 @@ Phase 0 PR description 必须含两条：
 | 阻断 4：Phase 3 单 PR 5650 行违反节奏 | §六：切 3a/3b/3c/3d/3e/3f 共 6 PR，每 ≤ 1500 行 |
 | 阻断 5：回滚 / 灰度 / CI 预算缺失 | §七 / §八 / §九.3 三章 |
 | 工程 reviewer：机会成本未算清 | §十一：成本-收益量化 + 替代方案对比 + 反转条件 |
+
+### v0.6.2 整改追溯（按 Phase 1-3 实施反馈 + 状态行升级）
+
+| 反馈 / 实测 | v0.6.2 修订位置 |
+|---|---|
+| **Phase 1-3 实施发现两个 Go 硬约束**（method-receiver 同包 + 测试 unexported 同包，phase1/2/3a 必须接受 ≥1500 行单刀；phase4b/4c 早因方法-同包约束走例外，phase1/2/3a 补登保持纪律对称）| §6.2 line 535 加 "v0.6.2 修订" 段落 |
+| **Phase 0/0a/0b/3-prep/1/2/3a-3e/4a/4b-router/4b-hub-sync 全部 merged**——状态行从"等最后一次 sign-off"升级为"已实施进度" | 头部状态行（line 3）增列实施进度清单 + 链接到 4b hand-off 附录 B |
+| **Server.handle\* baseline 数 8→4**（PR #1444 静态资源 4 个零状态 handler 转包级 func，handle_baseline 从 8 减到 4）| §0 速查表 line 57 改为"**4**"，备注 PR #1444 来源 |
+| **本会话另起 15 个独立物理切分 PR（#1444-#1458）**：dashboard.go / server.go / dashboard_send.go / agent_tailer.go / send.go 内部 helper 抽到独立文件，累计 server 包减小 1937 行（agent_tailer.go 永久退出超线名单）| 头部状态行附加段落，详 [4b hand-off](../ops/phase4b-handoff-2026-05-28.md) 附录 B 列表 |
 
 ### v0.6.1 整改追溯（按 v0.6 第 7 轮 reviewer 反馈映射）
 
