@@ -311,8 +311,19 @@ func NewManager(cfg Config) (*Manager, error) {
 }
 
 // Start launches one goroutine per enabled daemon.  Start is idempotent
-// (calling it twice is a logic error in calling code, but we panic
-// rather than silently double-spawn).
+// — a second call returns silently after logging a warning, matching
+// cron.Scheduler.Start's CAS-gate pattern (internal/cron/scheduler.go).
+//
+// Originally a second Start panicked on the theory that double-Start was
+// a logic bug worth crashing on. In practice the calling-code paths
+// that wire NewManager + Start (cmd/naozhi orchestration, embedded
+// supervisors, integration tests that re-use a Manager) can take
+// multiple legitimate routes to a second Start — a hot reload that
+// re-resolves config but reuses the Manager, a shim restart that races
+// the new process's wiring with the old supervisor's lingering Start
+// call, a test harness that asserts NewManager + Start in two helpers
+// and chains both. Crashing the process for a benign double-call is a
+// strictly worse failure mode than logging-and-skipping. Issue #1377.
 //
 // Returns immediately; daemons run asynchronously.  Callers should
 // invoke Stop during shutdown.
@@ -337,7 +348,10 @@ func (m *Manager) Start(parent context.Context) {
 		startedThisCall = true
 	})
 	if !startedThisCall {
-		panic("sysession: Manager.Start called twice")
+		// Issue #1377: second Start is a no-op rather than a panic.
+		// sync.Once already guarantees the body ran exactly once; we
+		// just log so the operator can spot misconfigured callers.
+		slog.Warn("sysession: Manager.Start called more than once; ignoring (idempotent)")
 	}
 }
 
