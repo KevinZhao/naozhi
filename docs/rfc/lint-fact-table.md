@@ -217,10 +217,29 @@ Phase 0 完工后切 fail：
 
 - [ ] `tools/lint-fact-table/main.go` 实装（~400 行）
 - [ ] testdata 含 3 个 case（valid / invalid_token / missing_table）
-- [ ] CI 集成 mode=warn
-- [ ] server-split-phase4-design.md §0 加 `<!-- fact-table:start ... -->` 包围
-- [ ] 文档：`docs/ops/lint-fact-table-usage.md`（≤ 100 行用法说明）
-- [ ] Phase 0a PR description 含 `lint-rule-6 RFC: docs/rfc/lint-fact-table.md`
+- [x] CI 集成 mode=warn（`.github/workflows/ci.yml` lint-fact-table job）
+- [x] server-split-phase4-design.md §0 加 `<!-- fact-table:start ... -->` 包围
+- [x] Makefile `lint-fact-table` / `lint-fact-table-fail` targets
+- [x] Phase 0a PR description 含 `lint-rule-6 RFC: docs/rfc/lint-fact-table.md`
+
+## 8.1 v1 实装状态（2026-05-28 Phase 0-LFT 落地）
+
+- ✅ tools/lint-fact-table/main.go ~510 行 + main_test.go 7 个单元测试 PASS
+- ✅ testdata 3 个 case（valid_doc / invalid_token / missing_table）全 PASS
+- ⚠️ 真实 design v0.6.1 跑 7 个 token_drift false positive（启发式过激进）
+- ✅ CI mode=warn 不阻塞 PR；7 个 noise 给作者提示
+
+## 8.2 v2 fine-tune backlog
+
+| 启发式问题 | 真实例子 | v2 修复 |
+|---|---|---|
+| nearestKeyContext 跨段落 | 介绍段 `**21313**` 错配 Server 字段 key | 加最近 5 粗体 token 反向回溯 |
+| normValue 不处理修饰文字 | `**47 → ≤ 12**` / `**47 字段维持不变**` | strip-trailing-text 模式 |
+| value-type ambiguous | `**≤ 40**` (Hub) 错配 "Server ≤ 12" | 加 value-type signature 比对 |
+| 阈值 vs 事实 | `**500 行**` 是 server 包硬上限 | 加 "threshold" 白名单标注 |
+| 描述性数字 | `**默认 7 天观察期**` | normValue 处理"默认 N 天" 模式 |
+
+CI 走 `continue-on-error: true`，本 v1 不阻塞 PR。v2 PR 精化启发式。
 
 ---
 
