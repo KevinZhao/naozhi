@@ -191,6 +191,19 @@ type Hub struct {
 	// the two stay consistent. Read-only outside of subscribe/unsubscribe
 	// paths; cleared on Shutdown.
 	subscriberCount map[string]int
+	// enforceCaps is the explicit gate for the per-key subscriber cap and
+	// the per-client subscription cap. NewHub sets it to true alongside
+	// initialising subscriberCount. Hand-rolled test hubs that bypass
+	// NewHub leave it false so the cap checks short-circuit instead of
+	// firing against an uninitialised counter. R040034-SEC-6 (#1401):
+	// the previous code keyed the same gate off `subscriberCount == nil`,
+	// which read like a defensive nil-guard but was actually load-bearing
+	// — a future refactor that allocated subscriberCount eagerly without
+	// understanding the gating contract could silently activate caps in
+	// every test fixture. The explicit bool documents intent at the
+	// use-site: production wiring sets enforceCaps=true; bypass-NewHub
+	// tests leave it false. Read under h.mu like subscriberCount.
+	enforceCaps bool
 	// router is the HubRouter subset (consumer.go). *session.Router
 	// satisfies this interface implicitly; kept as an interface so
 	// tests can inject a fake and a future Router sub-aggregation
@@ -448,6 +461,7 @@ func NewHub(opts HubOptions) *Hub {
 	h := &Hub{
 		clients:          make(map[*wsClient]struct{}),
 		subscriberCount:  make(map[string]int),
+		enforceCaps:      true,
 		router:           opts.Router,
 		agents:           opts.Agents,
 		agentCmds:        opts.AgentCmds,
