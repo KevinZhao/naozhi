@@ -22,6 +22,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // sendWithBroadcast wraps sess.Send with dashboard state broadcasts.
@@ -488,7 +489,7 @@ func (h *Hub) handleOwnerLoopPanic(key string, onAsyncError func(string), r any)
 // pattern is the only mechanism preventing the sweeper from evicting a
 // scratch that is about to receive its first send — do not remove it.
 func (h *Hub) sessionOptsFor(key string) session.AgentOpts {
-	if h.scratchPool != nil && session.IsScratchKey(key) {
+	if h.scratchPool != nil && sessionkey.IsScratchKey(key) {
 		if opts, ok := h.scratchPool.OptsForKey(key); ok {
 			return opts
 		}
@@ -520,8 +521,8 @@ func (h *Hub) runTurn(key, text string, images []cli.ImageData, onAsyncError fun
 
 	if _, err := h.sendWithBroadcast(h.ctx, key, sess, text, images, nil); err != nil {
 		slog.Error("send: send", "key", key, "err", err)
-	} else if h.scheduler != nil && session.IsCronKey(key) {
-		if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, session.CronKeyPrefix), text); err != nil {
+	} else if h.scheduler != nil && sessionkey.IsCronKey(key) {
+		if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, sessionkey.CronKeyPrefix), text); err != nil {
 			slog.Warn("send: set cron prompt", "key", key, "err", err)
 		}
 	}
@@ -562,8 +563,8 @@ func (h *Hub) runTurnPassthrough(key, text string, images []cli.ImageData, prior
 		if onAsyncError != nil {
 			onAsyncError(asyncErrorMessage(err))
 		}
-	} else if h.scheduler != nil && session.IsCronKey(key) {
-		if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, session.CronKeyPrefix), text); err != nil {
+	} else if h.scheduler != nil && sessionkey.IsCronKey(key) {
+		if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, sessionkey.CronKeyPrefix), text); err != nil {
 			slog.Warn("passthrough: set cron prompt", "key", key, "err", err)
 		}
 	}
