@@ -134,6 +134,13 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 				"key", key, "panic", fmt.Sprintf("%v", r))
 			slog.Debug("panic in ws eventPushLoop: stack",
 				"key", key, "stack", string(debug.Stack()))
+			// Without closing the connection, the panicked subscription
+			// would linger: subscriptions[key]/subGen[key] stay set,
+			// subscriberCount[key] is not decremented, and the per-key cap
+			// (maxSubscribersPerKey) eventually traps further subscribes
+			// from the same client. Closing done unblocks readPump/
+			// writePump, which run unregister and tear down all subs.
+			c.closeDone()
 		}
 	}()
 	for {
@@ -325,6 +332,15 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 		if oldUnsub != nil {
 			oldUnsub()
 		}
+
+		// Re-wire the subagent linker tailer for this session: a client
+		// that subscribed BEFORE the first process spawn (HasProcess==false
+		// branch in completeSubscribe) never reached maybeWireLinkerTailer,
+		// and the linker is created lazily on spawn. Without this call,
+		// the only client subscribed via the suspended path would never
+		// receive subagent transcripts from the freshly-spawned process.
+		// Idempotent — guarded by wiredLinkers.
+		h.maybeWireLinkerTailer(key, currentSess)
 
 		*notify = newNotify
 		return true, currentSess
