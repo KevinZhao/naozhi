@@ -171,6 +171,22 @@ type subagentRef struct {
 	index      int
 }
 
+// agentRingPos pins the ring-buffer slots that hold the "agent" and
+// "task_start" entries for one ToolUseID, so SetAgentInternalID can reach
+// them in O(1). -1 means "not yet appended" (the agent entry typically
+// lands first; task_start arrives 0-200ms later via system.task_started).
+// The pair is enough because SetAgentInternalID writes exactly those two
+// entry types — no other ring entry needs the InternalAgentID/JSONLPath/
+// FirstPromptID linkage. R260528-PERF-22 (#1360).
+type agentRingPos struct {
+	agentIdx     int
+	taskStartIdx int
+}
+
+// noAgentRingPos is the zero value used for fresh map inserts: both
+// slots unknown.
+var noAgentRingPos = agentRingPos{agentIdx: -1, taskStartIdx: -1}
+
 // SubagentInfo holds display information about an active sub-agent in the current turn.
 // Fields below "Background" are added by RFC v4 agent-team-ui §3.2.2 to surface
 // per-agent linkage (task_id/tool_use_id), lifecycle status, and aggregator
@@ -303,6 +319,20 @@ type EventLog struct {
 	// instead of scanning turnAgents+bgAgents. Same lifecycle as
 	// taskIndex — reset alongside the slice clear.
 	toolUseIndex map[string]subagentRef
+
+	// R260528-PERF-22 (#1360): ring-buffer position sidecar keyed by
+	// ToolUseID for the "agent" + "task_start" pair, so SetAgentInternalID
+	// can reach the two slots in O(1) instead of scanning the last
+	// setAgentInternalIDMaxScan ring slots under wlock per linker resolve.
+	// A TeamCreate fan-out spawns 8 subagents and the linker resolves them
+	// in serial; under the legacy walk each resolve held wlock long enough
+	// to back-pressure concurrent Append/Subscribe traffic. Same lifecycle
+	// as toolUseIndex — populated on the agent/task_start Append, reset on
+	// result/user alongside the slice clear. Indices may go stale if the
+	// ring rotates (rare: maxSize=500 vs typical turn <=200 events), so
+	// the consumer re-validates Type+ToolUseID at the indexed slot before
+	// writing and falls back to the bounded scan on miss.
+	agentRingByToolUse map[string]agentRingPos
 
 	// turnAgentCount mirrors len(turnAgents)+len(bgAgents) for lock-free
 	// reads from the ManagedSession.Snapshot hot path. Most sessions sit at
@@ -1024,6 +1054,19 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 				delete(l.toolUseIndex, k)
 			}
 		}
+		// R260528-PERF-22 (#1360): reset alongside sibling sidecars.
+		// A turn boundary makes prior ring positions semantically dead —
+		// any later ToolUseID rebind would land on a fresh "agent"
+		// Append that re-seeds the entry above. Drop the map when it
+		// grew past the typical fan-out cap so a TeamCreate with 8+
+		// subagents doesn't pin the bucket array indefinitely.
+		if len(l.agentRingByToolUse) > subagentTurnRetainCap {
+			l.agentRingByToolUse = nil
+		} else {
+			for k := range l.agentRingByToolUse {
+				delete(l.agentRingByToolUse, k)
+			}
+		}
 		// Most non-agent turns leave turnAgentCount at zero already;
 		// skipping the redundant atomic Store avoids cache-coherence
 		// traffic on every result event in agent-free workloads.
@@ -1135,6 +1178,37 @@ func (l *EventLog) fireOneTaskDoneCallback(pending pendingTaskDone) {
 	fn(pending.TaskID, pending.Status)
 }
 
+// recordAgentRingPosLocked stores the ring index of an agent / task_start
+// entry that was just appended (slot = ringIdx) so SetAgentInternalID can
+// hop straight to it. Caller MUST hold l.mu and have already advanced
+// l.head past the slot. Skips entries with empty ToolUseID (those have no
+// linker-resolved payload to backfill anyway). R260528-PERF-22 (#1360).
+//
+// The map is created lazily because most sessions never spawn an agent;
+// allocating an empty map per EventLog would burn ~64B per idle session
+// across the 50-500-session deployments naozhi targets.
+func (l *EventLog) recordAgentRingPosLocked(entryType, toolUseID string, ringIdx int) {
+	if toolUseID == "" {
+		return
+	}
+	if entryType != "agent" && entryType != "task_start" {
+		return
+	}
+	if l.agentRingByToolUse == nil {
+		l.agentRingByToolUse = make(map[string]agentRingPos, 8)
+	}
+	pos, ok := l.agentRingByToolUse[toolUseID]
+	if !ok {
+		pos = noAgentRingPos
+	}
+	if entryType == "agent" {
+		pos.agentIdx = ringIdx
+	} else {
+		pos.taskStartIdx = ringIdx
+	}
+	l.agentRingByToolUse[toolUseID] = pos
+}
+
 // SetAgentInternalID writes the SubagentLinker-resolved linkage back into
 // the most recent matching "agent" / "task_start" EventEntry and the live
 // SubagentInfo. Called from the Linker's OnResolve callback.
@@ -1166,21 +1240,63 @@ func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, fir
 		}
 	}
 
-	// Backfill ring-buffer entries so future persistHistory / Entries /
-	// EntriesSince reads carry the linkage. Walk backwards — the matching
-	// "agent" and "task_start" entries are almost always among the last N
-	// entries (single turn). R225-PERF-13: cap the scan depth at
-	// setAgentInternalIDMaxScan and break once both expected entries (one
-	// "agent" + one "task_start" with this ToolUseID) have been backfilled,
-	// so the wlock isn't held for an O(maxSize) scan across all 500
-	// ring-buffer slots while every Append call is queued behind it.
+	// R260528-PERF-22 (#1360): O(1) ring-slot lookup via the
+	// agentRingByToolUse sidecar. Every "agent" and "task_start"
+	// Append/AppendBatch call records its ring index here, so the
+	// linker's OnResolve callback no longer walks up to 50 ring slots
+	// under wlock per resolve. A TeamCreate fan-out with 8 subagents
+	// previously paid 8×O(50)=400 slot reads holding the write lock;
+	// this collapses to two direct slot writes. The legacy bounded
+	// scan stays as the fallback path so callers that lost the sidecar
+	// (entry replayed via injectHistory before this PR's deploy, or
+	// the rare ring-rotation case where the agent slot was overwritten
+	// before resolve) keep working unchanged.
+	var foundAgent, foundTaskStart bool
+	if pos, ok := l.agentRingByToolUse[toolUseID]; ok {
+		if pos.agentIdx >= 0 && pos.agentIdx < l.maxSize {
+			e := &l.entries[pos.agentIdx]
+			// Re-validate Type+ToolUseID at the indexed slot so a
+			// concurrent ring rotation that overwrote the original
+			// "agent" entry with an unrelated event cannot leak the
+			// linker payload into the wrong row.
+			if e.Type == "agent" && e.ToolUseID == toolUseID {
+				e.InternalAgentID = internalAgentID
+				e.JSONLPath = jsonlPath
+				e.FirstPromptID = firstPromptID
+				foundAgent = true
+			}
+		}
+		if pos.taskStartIdx >= 0 && pos.taskStartIdx < l.maxSize {
+			e := &l.entries[pos.taskStartIdx]
+			if e.Type == "task_start" && e.ToolUseID == toolUseID {
+				e.InternalAgentID = internalAgentID
+				e.JSONLPath = jsonlPath
+				e.FirstPromptID = firstPromptID
+				foundTaskStart = true
+			}
+		}
+		if foundAgent && foundTaskStart {
+			return
+		}
+	}
+
+	// Fallback: bounded reverse scan for entries the sidecar did not
+	// pin (e.g. a legacy persisted-history replay before the sidecar
+	// was wired, or a stale entry whose ring slot got overwritten by
+	// a turn-spanning event burst). R225-PERF-13: cap at
+	// setAgentInternalIDMaxScan and break once both expected entries
+	// (one "agent" + one "task_start" with this ToolUseID) have been
+	// backfilled so the wlock isn't held for an O(maxSize) walk while
+	// every Append call queues behind it.
 	start := (l.head - l.count + l.maxSize) % l.maxSize
 	scanLimit := l.count
 	if scanLimit > setAgentInternalIDMaxScan {
 		scanLimit = setAgentInternalIDMaxScan
 	}
-	var foundAgent, foundTaskStart bool
 	for i := 0; i < scanLimit; i++ {
+		if foundAgent && foundTaskStart {
+			break
+		}
 		idx := (start + l.count - 1 - i) % l.maxSize
 		e := &l.entries[idx]
 		if e.ToolUseID != toolUseID {
@@ -1203,9 +1319,6 @@ func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, fir
 		e.InternalAgentID = internalAgentID
 		e.JSONLPath = jsonlPath
 		e.FirstPromptID = firstPromptID
-		if foundAgent && foundTaskStart {
-			break
-		}
 	}
 }
 
@@ -1242,11 +1355,17 @@ func (l *EventLog) Append(e EventEntry) {
 	if len(e.Images) > 0 {
 		e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
 	}
+	ringIdx := l.head
 	l.entries[l.head] = e
 	l.head = (l.head + 1) % l.maxSize
 	if l.count < l.maxSize {
 		l.count++
 	}
+	// R260528-PERF-22 (#1360): pin the ring slot for agent/task_start so
+	// the linker's OnResolve callback can hop straight here without the
+	// 50-slot reverse scan under wlock. Cheap no-op for the >99% of
+	// entries whose Type is neither "agent" nor "task_start".
+	l.recordAgentRingPosLocked(e.Type, e.ToolUseID, ringIdx)
 
 	// Skip the switch dispatch + per-call frame for entry types that
 	// fall through applyEntryStateLocked's default arm with zero work
@@ -1473,10 +1592,17 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 			l.entries[l.head] = e
 			ePtr = &l.entries[l.head]
 		}
+		ringIdx := l.head
 		l.head = (l.head + 1) % l.maxSize
 		if l.count < l.maxSize {
 			l.count++
 		}
+		// R260528-PERF-22 (#1360): pin agent/task_start ring slots so
+		// the SubagentLinker's OnResolve can backfill in O(1). Recorded
+		// on the replay path too — InjectHistory replays agent/task_start
+		// entries that may still be linker-pending after shim reconnect,
+		// and the next live SetAgentInternalID call needs to reach them.
+		l.recordAgentRingPosLocked(ePtr.Type, ePtr.ToolUseID, ringIdx)
 
 		// Skip applyEntryStateLocked for entries whose Type is not one of
 		// the 6 cases the function actually handles. InjectHistory's
