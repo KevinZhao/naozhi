@@ -1,14 +1,17 @@
 // Hub manages WebSocket client connections and event subscriptions.
 //
 // Field-block contract (server-split-phase4-design v0.6.1 §五):
-// **47 fields organized in 7 blocks**.
+// **49 fields organized in 7 blocks** (Phase 4b-hub-sync 同步 master：
+// v0.6.1 47 字段 → 实测 49；新增 authClients / enforceCaps；userSendLimiters
+// 类型从 map → *sync.Map）。
 // Phase 4a 骨架并存：本 struct 是 server.Hub 的目标镜像。骨架阶段
 // NewHub 仅初始化字段（不启动 readPump goroutine），Shutdown 完成
 // lifecycle 块跨块写协调链路；其他 hub_*.go 文件含 placeholder 方法
 // 满足 rule 3a marker 校验。Phase 4b 起接管实际方法实装。
 //
-// 加法核对：lifecycle 3 + subscriber 10 + broadcast 6 + send 6 +
-// shared 14 + tailer 3 + cache 5 = 47 ✓
+// 加法核对：lifecycle 3 + subscriber 12 + broadcast 6 + send 6 +
+// shared 14 + tailer 3 + cache 5 = 49 ✓
+// （subscriber 块从 10 → 12：authClients + enforceCaps）
 //
 // 方法严格按文件分块（hub_broadcast.go 只 WRITE broadcast block + READ
 // shared deps；其余同理）。CI lint rule 3a 验证文件 godoc 头含 WRITES
@@ -27,10 +30,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"golang.org/x/time/rate"
 )
 
-// Hub is the Phase 4 抽包目标 struct——47 字段镜像 server.Hub。Phase 4a
+// Hub is the Phase 4 抽包目标 struct——49 字段镜像 server.Hub（Phase 4b-hub-sync 校准）。Phase 4a
 // 骨架阶段：字段定义 + NewHub 初始化 + Shutdown 协调链路。方法实装留
 // Phase 4b。
 type Hub struct {
@@ -39,8 +41,9 @@ type Hub struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// ── subscriber registry (10) ────────────────────────
+	// ── subscriber registry (12) ────────────────────────
 	clients          map[*wsClient]struct{}
+	authClients      map[*wsClient]struct{} // R260528-PERF / #1409: authenticated client mirror for broadcastToAuthenticated
 	connCount        atomic.Int64
 	subscriberCount  map[string]int
 	clientWG         sync.WaitGroup
@@ -50,6 +53,7 @@ type Hub struct {
 	dashTokenHash    [32]byte
 	cookieMAC        string
 	trustedProxy     bool
+	enforceCaps      bool // R260528 / #1401: explicit gate for per-key subscriber cap
 
 	// ── broadcast (6) ──────────────────────────────────
 	debounceMu         sync.Mutex
@@ -89,11 +93,11 @@ type Hub struct {
 	wiredLinkers   map[any]struct{}
 
 	// ── rate-limit / cache (5) ─────────────────────────
-	historyMarshalCache any // *historyMarshalCache in Phase 4b
-	userSendLimitersMu  sync.Mutex
-	userSendLimiters    map[string]*rate.Limiter
-	connCountByOwnerMu  sync.Mutex
-	connCountByOwner    map[string]int
+	historyMarshalCache     any // *historyMarshalCache in Phase 4b
+	userSendLimitersStoreMu sync.Mutex
+	userSendLimiters        *sync.Map // R260528-PERF-18 #1357: keyed by owner string, lock-free Allow() steady-state
+	connCountByOwnerMu      sync.Mutex
+	connCountByOwner        map[string]int
 }
 
 // wsClient is the Phase 4a placeholder for server.wsClient. Phase 4b
@@ -121,9 +125,17 @@ type HubOptions struct {
 	WSAuthLimiter    func(ip string) bool
 	WSUpgradeLimiter func(ip string) bool
 	Auth             Auth
-	Scheduler        CronView
-	ScratchPool      ScratchOps
-	UploadStore      UploadOps
+	// EnforceCaps gates per-key subscriber cap enforcement (R260528 / #1401).
+	// Production must keep true; test harnesses may set false to bypass
+	// the maxSubscribersPerKey + dropMarshalCache early-out path.
+	// Zero value (false) here is misleading—NewHub defaults to true unless
+	// caller explicitly opts out via EnforceCapsExplicit pattern. For now
+	// the simpler approach: NewHub always sets true, tests overwrite via
+	// h.enforceCaps = false directly.
+	EnforceCaps bool
+	Scheduler   CronView
+	ScratchPool ScratchOps
+	UploadStore UploadOps
 	// ParentCtx is the application-level context whose cancellation must
 	// propagate to the Hub. When set, NewHub derives h.ctx via
 	// context.WithCancel(ParentCtx) so that parent-ctx cancel tears down
@@ -156,11 +168,13 @@ func NewHub(opts HubOptions) *Hub {
 
 		// subscriber
 		clients:          make(map[*wsClient]struct{}),
+		authClients:      make(map[*wsClient]struct{}),
 		subscriberCount:  make(map[string]int),
 		wsAuthLimiter:    opts.WSAuthLimiter,
 		wsUpgradeLimiter: opts.WSUpgradeLimiter,
 		cookieMAC:        opts.CookieMAC,
 		trustedProxy:     opts.TrustedProxy,
+		enforceCaps:      true, // 默认启用 cap 强制；test 可显式 opts.EnforceCaps=false 关闭
 
 		// shared deps
 		router:      opts.Router,
@@ -180,7 +194,7 @@ func NewHub(opts HubOptions) *Hub {
 		uploadStore: opts.UploadStore,
 
 		// rate-limit / cache
-		userSendLimiters: make(map[string]*rate.Limiter),
+		userSendLimiters: &sync.Map{},
 		connCountByOwner: make(map[string]int),
 
 		// agent tailer
