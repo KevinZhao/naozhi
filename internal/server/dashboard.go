@@ -350,8 +350,8 @@ func (s *Server) registerDashboard() {
 	// token through any logging middleware that reads request bodies.
 	s.mux.HandleFunc("POST /api/auth/noscript", s.auth.HandleLoginNoScript)
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
-	s.mux.HandleFunc("GET /manifest.json", s.handleManifest)
-	s.mux.HandleFunc("GET /sw.js", s.handleSW)
+	s.mux.HandleFunc("GET /manifest.json", handleManifest)
+	s.mux.HandleFunc("GET /sw.js", handleSW)
 	// R20260527122801-SEC-4 (#1328): the dashboard JS modules embed the
 	// list of authenticated API endpoints, the cron polling cadence, and
 	// the dashboard's client-side schema. Serving them to unauthenticated
@@ -361,8 +361,8 @@ func (s *Server) registerDashboard() {
 	// deployments where requireAuth is a pass-through) can fetch them.
 	// The login page itself loads no JS from /static/, so wrapping these
 	// does not break the unauthenticated bootstrap.
-	s.mux.HandleFunc("GET /static/dashboard.js", auth(s.handleDashboardJS))
-	s.mux.HandleFunc("GET /static/agent_view.js", auth(s.handleAgentViewJS))
+	s.mux.HandleFunc("GET /static/dashboard.js", auth(handleDashboardJS))
+	s.mux.HandleFunc("GET /static/agent_view.js", auth(handleAgentViewJS))
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
 	if s.reverseNodeServer != nil {
 		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
@@ -500,7 +500,14 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
+// handleManifest / handleSW / handleDashboardJS / handleAgentViewJS serve
+// the dashboard's static asset bundle (PWA manifest, service worker,
+// dashboard SPA, agent-view module). All four are pure embed.FS readers
+// with no Server-instance state, so they live as package-level functions
+// rather than *Server methods. This drops 4 entries from the
+// handle_baseline lint allow-list (8 → 4) without changing routing
+// behaviour. R-static-handlers (2026-05-28).
+func handleManifest(w http.ResponseWriter, r *http.Request) {
 	data, err := manifestJSON.ReadFile("static/manifest.json")
 	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -514,7 +521,7 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleSW(w http.ResponseWriter, r *http.Request) {
+func handleSW(w http.ResponseWriter, r *http.Request) {
 	data, err := swJS.ReadFile("static/sw.js")
 	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -529,7 +536,7 @@ func (s *Server) handleSW(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleDashboardJS(w http.ResponseWriter, r *http.Request) {
+func handleDashboardJS(w http.ResponseWriter, r *http.Request) {
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -549,7 +556,7 @@ func (s *Server) handleDashboardJS(w http.ResponseWriter, r *http.Request) {
 // handleAgentViewJS serves static/agent_view.js — the RFC v4 agent-team-ui
 // dashboard module. Mirrors handleDashboardJS for caching/CSP headers so
 // the two scripts behave identically in the browser cache.
-func (s *Server) handleAgentViewJS(w http.ResponseWriter, r *http.Request) {
+func handleAgentViewJS(w http.ResponseWriter, r *http.Request) {
 	data, err := agentViewJS.ReadFile("static/agent_view.js")
 	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)

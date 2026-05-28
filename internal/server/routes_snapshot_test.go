@@ -215,9 +215,17 @@ func handlerTypeOf(e ast.Expr) string {
 	}
 	sel, ok := e.(*ast.SelectorExpr)
 	if !ok {
-		// Bare identifier — likely a top-level func or var. No clean
-		// type info statically.
+		// Bare identifier — package-level func or var. The static-handler
+		// cleanup (2026-05-28) converted handleManifest / handleSW /
+		// handleDashboardJS / handleAgentViewJS to package-level funcs;
+		// they all have type http.HandlerFunc. Map known package-level
+		// route handlers to a stable identifier so the golden file pins
+		// them; unknown bare idents still fail loudly via the "<bare:..>"
+		// fallback.
 		if id, ok := e.(*ast.Ident); ok {
+			if t, ok := packageFuncType[id.Name]; ok {
+				return t
+			}
 			return "<bare:" + id.Name + ">"
 		}
 		return "<unknown>"
@@ -254,6 +262,22 @@ func handlerTypeOf(e ast.Expr) string {
 // Phase 4-5 will move these handler types into sub-packages; that PR's
 // snapshot diff will rewrite this map AND testdata/routes.golden.json
 // in lockstep.
+// packageFuncType maps package-level route-handler function names → stable
+// type identifier. Used when the handler expression in mux.HandleFunc is a
+// bare identifier (no receiver). Keep in sync with package-level handle*
+// funcs in dashboard.go.
+//
+// 2026-05-28 (R-static-handlers): 4 zero-state static-asset handlers were
+// converted from *Server methods to package-level funcs of type
+// http.HandlerFunc. Listing them here pins their handler_type in the
+// golden snapshot.
+var packageFuncType = map[string]string{
+	"handleManifest":    "http.HandlerFunc",
+	"handleSW":          "http.HandlerFunc",
+	"handleDashboardJS": "http.HandlerFunc",
+	"handleAgentViewJS": "http.HandlerFunc",
+}
+
 var serverFieldType = map[string]string{
 	"cliH":              "*cli.Handler",
 	"sessionH":          "*dashsession.Handlers",
