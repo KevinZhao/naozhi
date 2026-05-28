@@ -55,7 +55,7 @@ file_size:
       limit: 500
       until_phase: 4b
     - path: internal/server/dashboard.go    # v0.6.1 新增豁免：v0.4 时 731 不超线
-      current: 863                          # 2026-05-28 master 基线；本 phase-prep 后将降至 639
+      current: 642                          # 2026-05-28 静态 handler 包级化（PR #1444）后实际行数；rule 2 仅看是否 grow，缩减不需要豁免数值同步但保持 yaml 真实
       limit: 500
       until_phase: "5"
     - path: internal/server/agent_tailer.go # v0.6.1 新增豁免：v0.4 时 655 不超线
