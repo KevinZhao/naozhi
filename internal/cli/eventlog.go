@@ -1721,6 +1721,24 @@ func (l *EventLog) EntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEn
 		}
 		return dst[:0]
 	}
+	// R260528-PERF-3: peek the newest slot under RLock and short-circuit
+	// when its Time <= afterMS. The ring is in chronological insertion
+	// order so head-1 is the most recent entry; if it isn't strictly
+	// newer than the caller's cursor, no entry can be. Idle dashboard
+	// poll (1Hz × N tabs × N sessions) was paying a full ring walk —
+	// up to maxSize entries — every tick despite a single comparison
+	// being able to answer the question.
+	newestIdx := l.head - 1
+	if newestIdx < 0 {
+		newestIdx += l.maxSize
+	}
+	if l.entries[newestIdx].Time <= afterMS {
+		l.mu.RUnlock()
+		if dst == nil {
+			return nil
+		}
+		return dst[:0]
+	}
 	// First pass: collect matches in reverse order. Most calls match 0-5
 	// entries so we allocate lazily only when the first match is found.
 	//
@@ -1730,10 +1748,7 @@ func (l *EventLog) EntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEn
 	// branch-on-wrap instead. ~5-10ns × notify wave on hot streaming path.
 	rev := dst[:0]
 	allocated := false
-	idx := l.head - 1
-	if idx < 0 {
-		idx += l.maxSize
-	}
+	idx := newestIdx
 	for i := l.count - 1; i >= 0; i-- {
 		if l.entries[idx].Time <= afterMS {
 			break
