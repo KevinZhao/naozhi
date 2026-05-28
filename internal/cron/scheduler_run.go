@@ -341,6 +341,16 @@ func formatCronNotice(label, body string) string {
 	if strings.IndexByte(label, ']') >= 0 {
 		label = strings.ReplaceAll(label, "]", "］")
 	}
+	// R260528-SEC-8: markdown link-syntax `[`, `(`, `)` were not escaped
+	// in label or body. Slack / Discord / Feishu rich-card renderers parse
+	// `[text](url)` as a clickable link, so a body containing
+	// `Click [here](http://attacker)` (or a label with `[evil`) would
+	// surface as a hijackable hyperlink. Substitute the full-width
+	// counterparts U+FF3B / U+FF08 / U+FF09 — visually similar but never
+	// bracket-matched by any markdown parser. IndexByte fast-paths keep
+	// the common ASCII-clean case alloc-free.
+	label = escapeCronMarkdownPunct(label)
+	body = escapeCronMarkdownPunct(body)
 	// R247-PERF-7 (#539): strings.Builder skips fmt.Sprintf's reflection
 	// walk over the already-bounded label/body inputs. Pre-grow once so
 	// the underlying buffer covers the largest plausible payload (label is
@@ -354,6 +364,27 @@ func formatCronNotice(label, body string) string {
 	b.WriteString(cronNoticeMid)
 	b.WriteString(body)
 	return b.String()
+}
+
+// escapeCronMarkdownPunct replaces the markdown link-syntax characters
+// `[`, `(`, `)` with full-width visually-similar codepoints
+// (U+FF3B / U+FF08 / U+FF09) so an attacker-controlled cron Title or
+// result body cannot smuggle `[text](url)` clickable links into the IM
+// notice. Pairs with the `]` -> `］` substitution above (R250-SEC-6) to
+// cover all four characters of the markdown link grammar. Each replace
+// is gated by IndexByte so a clean ASCII payload stays alloc-free.
+// R260528-SEC-8.
+func escapeCronMarkdownPunct(s string) string {
+	if strings.IndexByte(s, '[') >= 0 {
+		s = strings.ReplaceAll(s, "[", "［")
+	}
+	if strings.IndexByte(s, '(') >= 0 {
+		s = strings.ReplaceAll(s, "(", "（")
+	}
+	if strings.IndexByte(s, ')') >= 0 {
+		s = strings.ReplaceAll(s, ")", "）")
+	}
+	return s
 }
 
 // labelOrID returns the IM-notice display label: snap.label when populated,
