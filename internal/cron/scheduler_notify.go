@@ -191,6 +191,17 @@ func (s *Scheduler) resolveNotifyDecision(platName, chatID, notifyPlat, notifyCh
 // deliverNotice sends a result/error message to the resolved target.
 // No-op when target is unset or the platform is not registered.
 //
+// R242-GO-14 (#575): caller is the cron-tick goroutine (or
+// freshContextPreflightP0's error path); we Add(1) to triggerWG and spawn
+// notifyTarget on a child goroutine. Stop() drains triggerWG with the
+// stopBudget (~30s, see scheduler.go Stop CONTRACT) and notifyTarget's
+// replyCtx is parented on s.stopCtx, so an in-flight notify is implicitly
+// "drained" by Stop's wait — there is no separate notify-drain channel.
+// The cron-tick goroutine itself does NOT block on this call (we return
+// once the goroutine is spawned), but it DOES contribute to the same
+// triggerWG that bounds shutdown. Callers must not assume completion-by-
+// return; observability lives in slog only.
+//
 // R242-GO-13: delivery is dispatched on a goroutine tracked by triggerWG.
 // Previously synchronous: the cron-tick callback (or freshContextPreflightP0
 // error path) blocked on the IM reply chain (chunk × retry × per-call HTTP),
