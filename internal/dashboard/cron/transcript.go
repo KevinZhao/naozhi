@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"bufio"
@@ -15,8 +15,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
-	"github.com/naozhi/naozhi/internal/cron"
+	cronpkg "github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
@@ -122,7 +123,7 @@ const (
 	// ahead of "now" should still appear in the live transcript view.
 	transcriptRunningSlackMS int64 = 5_000
 
-	// transcriptConcurrencyCap caps concurrent in-flight handleRunTranscript
+	// transcriptConcurrencyCap caps concurrent in-flight HandleRunTranscript
 	// handlers process-wide. R243-SEC-12 (#798): the existing per-IP
 	// runsLimiter (60/s burst) bounds the per-source rate, but every
 	// authenticated operator still owns a 60/s budget — so N operators
@@ -141,7 +142,7 @@ const (
 )
 
 // transcriptSem is the package-level concurrency gate for
-// handleRunTranscript. Buffered channel with capacity
+// HandleRunTranscript. Buffered channel with capacity
 // transcriptConcurrencyCap implements a semaphore: send-on-channel
 // acquires a slot; receive releases it. The non-blocking acquire (select
 // default) returns 503 immediately under saturation rather than queuing
@@ -149,7 +150,7 @@ const (
 // live-tab refresh on every other run.
 //
 // Package-level init keeps this self-contained inside the transcript
-// source file; CronHandlers itself does not need a new field, so the
+// source file; Handlers itself does not need a new field, so the
 // gate stays orthogonal to the existing per-IP runsLimiter wiring and
 // the construction call sites in build_handlers.go are untouched.
 var transcriptSem = make(chan struct{}, transcriptConcurrencyCap)
@@ -219,8 +220,8 @@ type transcriptTokens struct {
 // for stable React-style keys when diffing live updates.
 //
 // CLIENT-SIDE CONTRACT (R249-SEC-8 / #921): the Input field is forwarded
-// as raw JSON bytes from the CLI's tool_use payload. writeJSON disables
-// SetEscapeHTML (see dashboard.go writeJSON R71-SEC-L1 godoc), so any
+// as raw JSON bytes from the CLI's tool_use payload. httputil.WriteJSON disables
+// SetEscapeHTML (see dashboard.go httputil.WriteJSON R71-SEC-L1 godoc), so any
 // `<`, `>`, `&` literals embedded in the original tool input survive
 // onto the wire verbatim. Today's dashboard.js renders Input via
 // JSON.stringify + esc() before assembling DOM, which is safe; a future
@@ -290,21 +291,21 @@ type claudeContentBlock struct {
 }
 
 // GET /api/cron/runs/{run_id}/transcript?job_id=<jid>
-func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 	// R250-SEC-7 (#1096): use the dedicated transcriptLimiter rather
 	// than the shared runsLimiter. The transcript path fans out far
 	// more I/O than the runs-list endpoint (EvalSymlinks ×2 + 8 MB
 	// LimitReader + 256 KB scanner buffer + per-line json.Unmarshal +
 	// flattenJSONLEvent) so sharing one bucket lets either endpoint
 	// starve the other under load. Fall back to runsLimiter for older
-	// hand-rolled CronHandlers fixtures (newCronHandlersForTest) that
+	// hand-rolled Handlers fixtures (newCronHandlersForTest) that
 	// haven't been wired with a transcriptLimiter.
 	limiter := h.transcriptLimiter
 	if limiter == nil {
 		limiter = h.runsLimiter
 	}
 	if limiter != nil && !limiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron transcript rate limit exceeded"})
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron transcript rate limit exceeded"})
 		return
 	}
 	// R243-SEC-12 (#798): cap concurrent in-flight transcript reads.
@@ -320,17 +321,17 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	// (handlers built without a scheduler can still exercise the
 	// busy fast-fail path); a 503 here also short-circuits the
 	// scheduler lookup, which is mildly cheaper than the reverse
-	// ordering. Nil-guarded so older hand-rolled CronHandlers
+	// ordering. Nil-guarded so older hand-rolled Handlers
 	// fixtures (newCronHandlersForTest) skip the gate.
 	if h.transcriptSem != nil {
 		select {
 		case h.transcriptSem <- struct{}{}:
 			defer func() { <-h.transcriptSem }()
 		case <-r.Context().Done():
-			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcript busy"})
+			httputil.WriteJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcript busy"})
 			return
 		default:
-			writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcript busy"})
+			httputil.WriteJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcript busy"})
 			return
 		}
 	}
@@ -349,7 +350,7 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	case transcriptSem <- struct{}{}:
 		defer func() { <-transcriptSem }()
 	default:
-		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcript busy"})
+		httputil.WriteJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcript busy"})
 		return
 	}
 
@@ -360,7 +361,7 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 
 	run, err := h.scheduler.GetRun(jobID, runID)
 	if err != nil {
-		if errors.Is(err, cron.ErrCorruptRun) {
+		if errors.Is(err, cronpkg.ErrCorruptRun) {
 			slog.Warn("cron transcript: run record corrupt", "job_id", jobID, "run_id", runID, "err", err)
 			http.Error(w, "run record corrupt", http.StatusInternalServerError)
 			return
@@ -390,7 +391,7 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	// Bail early into "missing" downgrade for the common no-session case.
 	if run.SessionID == "" || h.claudeDir == "" || run.WorkDir == "" {
 		resp.Fallback = "missing"
-		writeJSON(w, resp)
+		httputil.WriteJSON(w, resp)
 		return
 	}
 	if !discovery.IsValidSessionID(run.SessionID) {
@@ -400,14 +401,14 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		// touching the filesystem at all.
 		slog.Warn("cron transcript: skipping non-UUID session_id", "job_id", jobID, "run_id", runID)
 		resp.Fallback = "missing"
-		writeJSON(w, resp)
+		httputil.WriteJSON(w, resp)
 		return
 	}
 	if !filepath.IsAbs(run.WorkDir) {
 		// Cron job validation rejects relative WorkDir at write time;
 		// guard here too because old persisted runs predate that gate.
 		resp.Fallback = "missing"
-		writeJSON(w, resp)
+		httputil.WriteJSON(w, resp)
 		return
 	}
 	// R236-SEC-13: defence in depth before ClaudeProjectSlug encodes
@@ -423,7 +424,7 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	if !utf8.ValidString(run.WorkDir) {
 		slog.Warn("cron transcript: rejecting non-UTF8 WorkDir", "job_id", jobID, "run_id", runID)
 		resp.Fallback = "missing"
-		writeJSON(w, resp)
+		httputil.WriteJSON(w, resp)
 		return
 	}
 	// R242-SEC-14: IsLogInjectionRune covers C1 / bidi / LS-PS but
@@ -440,7 +441,7 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		if r < 0x20 || r == 0x7f || osutil.IsLogInjectionRune(r) {
 			slog.Warn("cron transcript: rejecting WorkDir with control rune", "job_id", jobID, "run_id", runID)
 			resp.Fallback = "missing"
-			writeJSON(w, resp)
+			httputil.WriteJSON(w, resp)
 			return
 		}
 	}
@@ -455,12 +456,12 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			resp.Fallback = "missing"
-			writeJSON(w, resp)
+			httputil.WriteJSON(w, resp)
 			return
 		}
 		slog.Warn("cron transcript: evalsymlinks failed", "path", jsonlPath, "err", err)
 		resp.Fallback = "missing"
-		writeJSON(w, resp)
+		httputil.WriteJSON(w, resp)
 		return
 	}
 	// Both the resolved JSONL path AND the claudeDir+projects root must be
@@ -485,7 +486,7 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 			slog.Warn("cron transcript: allowedRoot evalsymlinks failed",
 				"root", allowedRoot, "err", rrErr)
 			resp.Fallback = "missing"
-			writeJSON(w, resp)
+			httputil.WriteJSON(w, resp)
 			return
 		}
 		resolvedRoot = allowedRoot
@@ -511,7 +512,7 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		!sameFileAncestor(resolved, resolvedRoot) {
 		slog.Warn("cron transcript: path escape attempt", "raw", jsonlPath, "resolved", resolved, "claudeDir", h.claudeDir, "allowedRoot", resolvedRoot)
 		resp.Fallback = "missing"
-		writeJSON(w, resp)
+		httputil.WriteJSON(w, resp)
 		return
 	}
 
@@ -529,13 +530,13 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	li, err := os.Lstat(resolved)
 	if err != nil {
 		resp.Fallback = "missing"
-		writeJSON(w, resp)
+		httputil.WriteJSON(w, resp)
 		return
 	}
 	if !li.Mode().IsRegular() {
 		slog.Warn("cron transcript: non-regular file rejected", "path", resolved, "mode", li.Mode())
 		resp.Fallback = "missing"
-		writeJSON(w, resp)
+		httputil.WriteJSON(w, resp)
 		return
 	}
 
@@ -547,14 +548,14 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	f, err := dashproject.OpenWorkspaceFile(resolved)
 	if err != nil {
 		resp.Fallback = "missing"
-		writeJSON(w, resp)
+		httputil.WriteJSON(w, resp)
 		return
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil || !fi.Mode().IsRegular() {
 		resp.Fallback = "missing"
-		writeJSON(w, resp)
+		httputil.WriteJSON(w, resp)
 		return
 	}
 	// R249-SEC-4 (#918): TOCTOU inode recheck. The Lstat above resolved
@@ -570,7 +571,7 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	if !os.SameFile(li, fi) {
 		slog.Warn("cron transcript: inode swap detected post-open", "path", resolved)
 		resp.Fallback = "missing"
-		writeJSON(w, resp)
+		httputil.WriteJSON(w, resp)
 		return
 	}
 
@@ -775,11 +776,11 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		resp.Fallback = "raw"
 	}
 
-	writeJSON(w, resp)
+	httputil.WriteJSON(w, resp)
 }
 
 // parseRunPathParams extracts run_id (path) + job_id (query) and
-// validates both. Centralised so handleRunDetail and handleRunTranscript
+// validates both. Centralised so HandleRunDetail and HandleRunTranscript
 // share the exact same gate.
 func parseRunPathParams(w http.ResponseWriter, r *http.Request) (runID, jobID string, ok bool) {
 	runID = r.PathValue("run_id")
@@ -791,7 +792,7 @@ func parseRunPathParams(w http.ResponseWriter, r *http.Request) (runID, jobID st
 		http.Error(w, "run_id too long", http.StatusBadRequest)
 		return "", "", false
 	}
-	if !cron.IsValidID(runID) {
+	if !cronpkg.IsValidID(runID) {
 		http.Error(w, "run_id must be lowercase hex", http.StatusBadRequest)
 		return "", "", false
 	}
@@ -804,7 +805,7 @@ func parseRunPathParams(w http.ResponseWriter, r *http.Request) (runID, jobID st
 		http.Error(w, "job_id too long", http.StatusBadRequest)
 		return "", "", false
 	}
-	if !cron.IsValidID(jobID) {
+	if !cronpkg.IsValidID(jobID) {
 		http.Error(w, "job_id must be lowercase hex", http.StatusBadRequest)
 		return "", "", false
 	}
@@ -817,7 +818,7 @@ func parseRunPathParams(w http.ResponseWriter, r *http.Request) (runID, jobID st
 // tool_result rendering survives — calling SanitizeForLog directly would
 // map those to '_' and destroy formatting in the dashboard's <pre> sink.
 //
-// R243-SEC-5: handleRunDetail runs Prompt/WorkDir through the strict
+// R243-SEC-5: HandleRunDetail runs Prompt/WorkDir through the strict
 // SanitizeForLog before wire-encode; the JSONL transcript path skipped
 // sanitisation entirely, so a JSONL file with bidi overrides could reach
 // the dashboard verbatim and corrupt visual ordering despite esc()-then-

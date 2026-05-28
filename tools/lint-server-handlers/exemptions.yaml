@@ -33,16 +33,21 @@ file_size:
       current: 1512                         # 2026-05-28 master + Phase 3a auth import + Phase 2 dashproject import
       limit: 500
       until_phase: 3f
-    - path: internal/server/dashboard_cron.go
-      current: 1553                         # 2026-05-28 master 漂移 +17
-      limit: 500
-      until_phase: "1"
-    - path: internal/server/dashboard_cron_transcript.go
-      current: 1437                         # Phase 2 微改（dashproject import）
-      limit: 500
-      until_phase: "1"
+    # internal/server/dashboard_cron.go: removed Phase 1 (PR #1438) — file
+    # moved to internal/dashboard/cron/handlers.go. Closes-exemption trailer
+    # in commit message satisfies rule 5.
+    # internal/server/dashboard_cron_transcript.go: removed Phase 1 — file
+    # moved to internal/dashboard/cron/transcript.go.
+    - path: internal/dashboard/cron/handlers.go
+      current: 1628                         # Phase 1 搬迁后实际行数；含 New ctor + Deps + getter
+      limit: 800
+      until_phase: "5"        # Phase 5 内部拆分（按 11 handler 分文件）
+    - path: internal/dashboard/cron/transcript.go
+      current: 1438                         # Phase 1 搬迁后实际行数
+      limit: 800
+      until_phase: "5"        # Phase 5 内部拆分
     - path: internal/server/server.go
-      current: 1369                         # master + prep + 3b + 3a + 3c + 3d + 2 + 3e imports (agentevents+cli+transcribe+dashproject+session)
+      current: 1370                         # master + prep + 3b + 3a + 3c + 3d + 2 + 3e + 1 imports (agentevents+cli+transcribe+dashproject+session+dashcron)
       limit: 500
       until_phase: "5"
     - path: internal/server/wshub.go        # v0.6.1 新增豁免：v0.4 时 514 不超线

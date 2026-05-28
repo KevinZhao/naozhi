@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"encoding/json"
@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cron"
+	cronpkg "github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
 )
 
@@ -21,7 +21,7 @@ import (
 // Forking rather than expanding fixtureRunWithJSONL's signature keeps
 // existing call sites unchanged — every TestTranscript_* helper still
 // reads as "default = fresh=false (the leaky case we filter against)".
-func fixtureRunWithJSONLFresh(t *testing.T, fresh bool, jsonlLines []string) (h *CronHandlers, jobID, runID, claudeDir string) {
+func fixtureRunWithJSONLFresh(t *testing.T, fresh bool, jsonlLines []string) (h *Handlers, jobID, runID, claudeDir string) {
 	t.Helper()
 
 	tmp := t.TempDir()
@@ -32,8 +32,8 @@ func fixtureRunWithJSONLFresh(t *testing.T, fresh bool, jsonlLines []string) (h 
 		t.Fatalf("mkdir workdir: %v", err)
 	}
 
-	sched := cron.NewScheduler(cron.SchedulerConfig{StorePath: storePath})
-	job := cron.Job{
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath})
+	job := cronpkg.Job{
 		ID:       strings.Repeat("a", 16),
 		Schedule: "@every 1h",
 		Prompt:   "transcript fixture",
@@ -54,11 +54,11 @@ func fixtureRunWithJSONLFresh(t *testing.T, fresh bool, jsonlLines []string) (h 
 	now := time.Now().UTC()
 	startedAt := now.Add(-2 * time.Minute)
 	endedAt := now
-	runRec := cron.CronRun{
+	runRec := cronpkg.CronRun{
 		RunID:      runID,
 		JobID:      jobID,
-		State:      cron.RunStateSucceeded,
-		Trigger:    cron.TriggerScheduled,
+		State:      cronpkg.RunStateSucceeded,
+		Trigger:    cronpkg.TriggerScheduled,
 		StartedAt:  startedAt,
 		EndedAt:    endedAt,
 		DurationMS: endedAt.Sub(startedAt).Milliseconds(),
@@ -84,7 +84,7 @@ func fixtureRunWithJSONLFresh(t *testing.T, fresh bool, jsonlLines []string) (h 
 		t.Fatalf("write jsonl: %v", err)
 	}
 
-	h = &CronHandlers{
+	h = &Handlers{
 		scheduler: sched,
 		claudeDir: claudeDir,
 	}
@@ -103,7 +103,7 @@ func fixtureRunWithJSONLFresh(t *testing.T, fresh bool, jsonlLines []string) (h 
 //
 // Pairs with TestTranscript_FreshFalse_DropsTimestampLessEvents which
 // pins the negative half. Together they lock both branches of the
-// `else if !run.Fresh { continue }` gate in handleRunTranscript.
+// `else if !run.Fresh { continue }` gate in HandleRunTranscript.
 func TestTranscript_FreshTrue_KeepsTimestampLessEvents(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
@@ -122,7 +122,7 @@ func TestTranscript_FreshTrue_KeepsTimestampLessEvents(t *testing.T) {
 	h, jobID, runID, _ := fixtureRunWithJSONLFresh(t, true, lines)
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/transcript?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
-	h.handleRunTranscript(w, req)
+	h.HandleRunTranscript(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
@@ -167,8 +167,8 @@ func TestTranscript_FreshFalse_BoundaryEndExclusive(t *testing.T) {
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		t.Fatalf("mkdir workdir: %v", err)
 	}
-	sched := cron.NewScheduler(cron.SchedulerConfig{StorePath: storePath})
-	job := cron.Job{
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath})
+	job := cronpkg.Job{
 		ID:       strings.Repeat("c", 16),
 		Schedule: "@every 1h",
 		Prompt:   "boundary fixture",
@@ -186,11 +186,11 @@ func TestTranscript_FreshFalse_BoundaryEndExclusive(t *testing.T) {
 	// timestamp can exactly match endedAt on the wire.
 	startedAt := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
 	endedAt := time.Date(2025, 1, 1, 12, 5, 0, 0, time.UTC)
-	runRec := cron.CronRun{
+	runRec := cronpkg.CronRun{
 		RunID:      runID,
 		JobID:      jobID,
-		State:      cron.RunStateSucceeded,
-		Trigger:    cron.TriggerScheduled,
+		State:      cronpkg.RunStateSucceeded,
+		Trigger:    cronpkg.TriggerScheduled,
 		StartedAt:  startedAt,
 		EndedAt:    endedAt,
 		DurationMS: endedAt.Sub(startedAt).Milliseconds(),
@@ -228,11 +228,11 @@ func TestTranscript_FreshFalse_BoundaryEndExclusive(t *testing.T) {
 		t.Fatalf("write jsonl: %v", err)
 	}
 
-	h := &CronHandlers{scheduler: sched, claudeDir: claudeDir}
+	h := &Handlers{scheduler: sched, claudeDir: claudeDir}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/transcript?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()
-	h.handleRunTranscript(w, req)
+	h.HandleRunTranscript(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
@@ -277,8 +277,8 @@ func TestTranscript_FreshTrue_BoundaryEndInclusive(t *testing.T) {
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		t.Fatalf("mkdir workdir: %v", err)
 	}
-	sched := cron.NewScheduler(cron.SchedulerConfig{StorePath: storePath})
-	job := cron.Job{
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{StorePath: storePath})
+	job := cronpkg.Job{
 		ID:       strings.Repeat("e", 16),
 		Schedule: "@every 1h",
 		Prompt:   "boundary fixture fresh",
@@ -293,11 +293,11 @@ func TestTranscript_FreshTrue_BoundaryEndInclusive(t *testing.T) {
 	runID := strings.Repeat("f", 16)
 	startedAt := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
 	endedAt := time.Date(2025, 1, 1, 12, 5, 0, 0, time.UTC)
-	runRec := cron.CronRun{
+	runRec := cronpkg.CronRun{
 		RunID:      runID,
 		JobID:      jobID,
-		State:      cron.RunStateSucceeded,
-		Trigger:    cron.TriggerScheduled,
+		State:      cronpkg.RunStateSucceeded,
+		Trigger:    cronpkg.TriggerScheduled,
 		StartedAt:  startedAt,
 		EndedAt:    endedAt,
 		DurationMS: endedAt.Sub(startedAt).Milliseconds(),
@@ -327,11 +327,11 @@ func TestTranscript_FreshTrue_BoundaryEndInclusive(t *testing.T) {
 		t.Fatalf("write jsonl: %v", err)
 	}
 
-	h := &CronHandlers{scheduler: sched, claudeDir: claudeDir}
+	h := &Handlers{scheduler: sched, claudeDir: claudeDir}
 	req := httptest.NewRequest(http.MethodGet, "/api/cron/runs/"+runID+"/transcript?job_id="+jobID, nil)
 	req.SetPathValue("run_id", runID)
 	w := httptest.NewRecorder()
-	h.handleRunTranscript(w, req)
+	h.HandleRunTranscript(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())

@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"net/http"
@@ -7,8 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cron"
-	"golang.org/x/time/rate"
+	cronpkg "github.com/naozhi/naozhi/internal/cron"
 )
 
 func TestFormatTZOffset(t *testing.T) {
@@ -57,8 +56,8 @@ func TestHandleTrigger_PerIPRateLimit(t *testing.T) {
 	// recharge during the test loop), the third is forced to 429. We
 	// pick rate.Every(time.Hour) so the sustained refill is irrelevant
 	// over the test's microsecond-scale duration; only burst matters.
-	h := &CronHandlers{
-		writeLimiter: newIPLimiterWithProxy(rate.Every(time.Hour), 2, false),
+	h := &Handlers{
+		writeLimiter: newPerIPBurstNLimiter(2),
 	}
 
 	body := `{"id":"deadbeefdeadbeef"}`
@@ -67,7 +66,7 @@ func TestHandleTrigger_PerIPRateLimit(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		req.RemoteAddr = "10.1.2.3:5555"
 		w := httptest.NewRecorder()
-		h.handleTrigger(w, req)
+		h.HandleTrigger(w, req)
 		return w.Code
 	}
 
@@ -81,24 +80,24 @@ func TestHandleTrigger_PerIPRateLimit(t *testing.T) {
 	}
 	// Third request MUST hit 429: limiter exhausted, no recharge in
 	// test window. Fail loudly if a future refactor drops the
-	// writeLimiter gate at the top of handleTrigger.
+	// writeLimiter gate at the top of HandleTrigger.
 	if got := doReq(); got != http.StatusTooManyRequests {
 		t.Fatalf("3rd trigger after burst exhaustion: got %d, want 429 Too Many Requests; #1007 trigger rate-limit gate may be missing", got)
 	}
 }
 
 // TestHandleTrigger_NilLimiter_PassThrough sanity check: when no
-// writeLimiter is wired (test handler / forgotten injection), handleTrigger
+// writeLimiter is wired (test handler / forgotten injection), HandleTrigger
 // must NOT 429 — it nil-guards and falls through. Otherwise hand-built
-// CronHandlers in unrelated tests would 429 spuriously.
+// Handlers in unrelated tests would 429 spuriously.
 func TestHandleTrigger_NilLimiter_PassThrough(t *testing.T) {
 	t.Parallel()
-	h := &CronHandlers{} // writeLimiter nil
+	h := &Handlers{} // writeLimiter nil
 
 	req := httptest.NewRequest(http.MethodPost, "/api/cron/trigger", strings.NewReader(`{"id":"deadbeef"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	h.handleTrigger(w, req)
+	h.HandleTrigger(w, req)
 	if w.Code == http.StatusTooManyRequests {
 		t.Fatalf("nil writeLimiter must not produce 429; got %d body=%q", w.Code, w.Body.String())
 	}
@@ -116,15 +115,15 @@ func TestHandleTrigger_NilLimiter_PassThrough(t *testing.T) {
 // the limiter to reject the third request before reaching that path.
 func TestHandleList_PerIPRateLimit(t *testing.T) {
 	t.Parallel()
-	h := &CronHandlers{
-		listLimiter: newIPLimiterWithProxy(rate.Every(time.Hour), 2, false),
+	h := &Handlers{
+		listLimiter: newPerIPBurstNLimiter(2),
 	}
 
 	doReq := func() int {
 		req := httptest.NewRequest(http.MethodGet, "/api/cron", nil)
 		req.RemoteAddr = "10.1.2.3:5555"
 		w := httptest.NewRecorder()
-		h.handleList(w, req)
+		h.HandleList(w, req)
 		return w.Code
 	}
 
@@ -145,15 +144,15 @@ func TestHandleList_PerIPRateLimit(t *testing.T) {
 }
 
 // TestHandleList_NilLimiter_PassThrough mirrors TestHandleTrigger_NilLimiter_PassThrough
-// for handleList: nil listLimiter must NOT 429, otherwise hand-built
-// CronHandlers in unrelated tests would 429 spuriously. R240-SEC-13 / #1045.
+// for HandleList: nil listLimiter must NOT 429, otherwise hand-built
+// Handlers in unrelated tests would 429 spuriously. R240-SEC-13 / #1045.
 func TestHandleList_NilLimiter_PassThrough(t *testing.T) {
 	t.Parallel()
-	h := &CronHandlers{} // listLimiter nil
+	h := &Handlers{} // listLimiter nil
 
 	req := httptest.NewRequest(http.MethodGet, "/api/cron", nil)
 	w := httptest.NewRecorder()
-	h.handleList(w, req)
+	h.HandleList(w, req)
 	if w.Code == http.StatusTooManyRequests {
 		t.Fatalf("nil listLimiter must not produce 429; got %d body=%q", w.Code, w.Body.String())
 	}
@@ -162,7 +161,7 @@ func TestHandleList_NilLimiter_PassThrough(t *testing.T) {
 // TestCronSummaryToView_PreservesOrderAndFields locks the wire-shape
 // contract for the recent_runs builder. R250-PERF-19 (#1122) replaced
 // `make([]cronRunSummaryView, 0, len(recent))` + `append` with
-// `make(..., len(recent))` + index assignment in handleList; the
+// `make(..., len(recent))` + index assignment in HandleList; the
 // assertion below pins that:
 //
 //   - the per-row mapping (RunID/State/Trigger/StartedAt/EndedAt/...)
@@ -172,12 +171,12 @@ func TestHandleList_NilLimiter_PassThrough(t *testing.T) {
 //     a parallel goroutine fan-out without sorting would fail this).
 //
 // We exercise cronSummaryToView directly rather than reaching through
-// handleList because this shape is the single contract the dashboard
-// consumes; handleList only reorders nothing on its own.
+// HandleList because this shape is the single contract the dashboard
+// consumes; HandleList only reorders nothing on its own.
 func TestCronSummaryToView_PreservesOrderAndFields(t *testing.T) {
 	t.Parallel()
 	t0 := time.Date(2026, 5, 26, 12, 0, 0, 0, time.UTC)
-	in := []cron.CronRunSummary{
+	in := []cronpkg.CronRunSummary{
 		{RunID: "aa00000000000001", State: "succeeded", StartedAt: t0, EndedAt: t0.Add(time.Second), DurationMS: 1000, SessionID: "s1"},
 		{RunID: "aa00000000000002", State: "failed", StartedAt: t0.Add(time.Minute), EndedAt: t0.Add(time.Minute + time.Second), DurationMS: 1000, ErrorClass: "exec"},
 		{RunID: "aa00000000000003", State: "running", StartedAt: t0.Add(2 * time.Minute)}, // EndedAt zero

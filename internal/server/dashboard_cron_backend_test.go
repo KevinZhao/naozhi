@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 )
 
 // TestValidateCronBackend_Standalone exercises the unit-level validator
@@ -51,9 +53,9 @@ func TestValidateCronBackend_Standalone(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := validateCronBackend(tc.input)
+			err := dashcron.ValidateCronBackend(tc.input)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("validateCronBackend(%q) err = %v, wantErr = %v", tc.input, err, tc.wantErr)
+				t.Fatalf("dashcron.ValidateCronBackend(%q) err = %v, wantErr = %v", tc.input, err, tc.wantErr)
 			}
 		})
 	}

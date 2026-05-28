@@ -1,6 +1,6 @@
-package server
+package cron
 
-// File extracted from dashboard_cron.go (#1281) — handleUpdate is the largest
+// File extracted from dashboard_cron.go (#1281) — HandleUpdate is the largest
 // function in the cron HTTP surface (203 lines) and gates every PATCH /api/cron
 // request through six independent validation passes (id shape, body decode,
 // per-field rune scrub, work_dir workspace check, notify-target coherency,
@@ -12,12 +12,13 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	cronpkg "github.com/naozhi/naozhi/internal/cron"
 )
 
-// handleUpdate is the PATCH /api/cron endpoint. See dashboard_cron.go for the
+// HandleUpdate is the PATCH /api/cron endpoint. See dashboard_cron.go for the
 // shared validateCron* helpers and cronUpdateResp wire shape.
-func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
@@ -33,7 +34,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// [R250-SEC-1] Shape gate before id reaches scheduler/slog.
-	if !cron.IsValidID(id) {
+	if !cronpkg.IsValidID(id) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
@@ -56,7 +57,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		Backend *string `json:"backend,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
-	if err := decodeJSONBody(r, &req); err != nil {
+	if err := httputil.DecodeJSONBody(r, &req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
@@ -89,7 +90,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.Backend != nil {
-		if err := validateCronBackend(*req.Backend); err != nil {
+		if err := ValidateCronBackend(*req.Backend); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -97,15 +98,19 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	// Re-validate workspace against allowedRoot; a cleared WorkDir is
 	// accepted as-is and will fall back to the router default. 403 matches
-	// handleCreate and the send handler for boundary violations.
+	// HandleCreate and the send handler for boundary violations.
 	if req.WorkDir != nil && *req.WorkDir != "" {
 		if err := validateCronWorkDir(*req.WorkDir); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		validated, err := validateWorkspace(*req.WorkDir, h.allowedRoot)
+		if h.validateWS == nil {
+			http.Error(w, "cron work_dir validation not wired", http.StatusInternalServerError)
+			return
+		}
+		validated, err := h.validateWS(*req.WorkDir, h.allowedRoot)
 		if err != nil {
-			status, msg := classifyWorkspaceErr(err)
+			status, msg := h.classifyWSErr(err)
 			slog.Debug("cron work_dir validation failed", "err", err)
 			http.Error(w, msg, status)
 			return
@@ -114,7 +119,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Guard: notify=true with no effective target would silently drop
-	// notifications. Mirror the handleCreate check.
+	// notifications. Mirror the HandleCreate check.
 	if req.Notify != nil && *req.Notify {
 		perJobSet := req.NotifyPlatform != nil && *req.NotifyPlatform != "" &&
 			req.NotifyChatID != nil && *req.NotifyChatID != ""
@@ -173,7 +178,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	j, err := h.scheduler.UpdateJob(id, cron.JobUpdate{
+	j, err := h.scheduler.UpdateJob(id, cronpkg.JobUpdate{
 		Schedule:       req.Schedule,
 		Prompt:         req.Prompt,
 		Title:          req.Title,
@@ -186,12 +191,12 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		switch {
-		case errors.Is(err, cron.ErrJobNotFound):
+		case errors.Is(err, cronpkg.ErrJobNotFound):
 			// Fixed string (not err.Error()) to stay consistent with
-			// handleDelete and guard against future ErrJobNotFound variants
+			// HandleDelete and guard against future ErrJobNotFound variants
 			// that carry a wrapped ID.
 			http.Error(w, "job not found", http.StatusNotFound)
-		case errors.Is(err, cron.ErrPersistFailed):
+		case errors.Is(err, cronpkg.ErrPersistFailed):
 			slog.Error("cron UpdateJob update not persisted", "err", err, "id", id)
 			httpErrPersistFailed(w, "updated")
 		default:
@@ -204,5 +209,5 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job updated via dashboard", "id", j.ID)
-	writeJSON(w, cronUpdateResp{Status: "ok", ID: j.ID})
+	httputil.WriteJSON(w, cronUpdateResp{Status: "ok", ID: j.ID})
 }

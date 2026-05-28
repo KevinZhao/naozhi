@@ -5,9 +5,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
+	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	dashdiscovery "github.com/naozhi/naozhi/internal/dashboard/discovery"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
@@ -74,41 +75,37 @@ func buildAuthHandlers(opts ServerOptions, cookieSecret []byte, cookieGen string
 // to 8192 and cronLimiterTTL pins idle expiry at 5 minutes, which is
 // well above the 1 Hz poll cadence yet short enough that a transient
 // scanner does not occupy a slot for the full 10-minute default.
-func buildCronHandlers(opts ServerOptions, claudeDir string) *CronHandlers {
-	return &CronHandlers{
-		scheduler:   opts.Scheduler,
-		allowedRoot: opts.AllowedRoot,
-		claudeDir:   claudeDir,
-		runsLimiter: newIPLimiterWithCap(
+func buildCronHandlers(opts ServerOptions, claudeDir string) *dashcron.Handlers {
+	return dashcron.New(dashcron.Deps{
+		Scheduler:   opts.Scheduler,
+		AllowedRoot: opts.AllowedRoot,
+		ClaudeDir:   claudeDir,
+		RunsLimiter: newIPLimiterWithCap(
 			rate.Every(time.Second), 60,
 			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
 		),
-		listLimiter: newIPLimiterWithCap(
+		ListLimiter: newIPLimiterWithCap(
 			rate.Every(500*time.Millisecond), 30,
 			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
 		),
-		writeLimiter: newIPLimiterWithCap(
+		WriteLimiter: newIPLimiterWithCap(
 			rate.Every(2*time.Second), 6,
 			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
 		),
-		// R250-SEC-7 (#1096): dedicated transcript bucket so a transcript
-		// flood from one IP cannot starve the dashboard's runs-list
-		// visibility (and vice versa). Sustained 6/min with burst 12 —
-		// see CronHandlers.transcriptLimiter godoc for rationale.
-		transcriptLimiter: newIPLimiterWithCap(
+		TranscriptLimiter: newIPLimiterWithCap(
 			rate.Every(10*time.Second), 12,
 			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
 		),
-		// R243-SEC-12 (#798): process-wide concurrency ceiling for
-		// /api/cron/runs/{run_id}/transcript. The per-IP runsLimiter
-		// gates request rate but not in-flight memory; without this
-		// semaphore N operators each saturating their bucket can park
-		// N × (8 MB LimitReader + 256 KB scanner buffer) in resident
-		// memory. See transcriptSemCap commentary for the cap
-		// rationale.
-		transcriptSem: make(chan struct{}, transcriptSemCap),
-	}
+		TranscriptSemCap: cronTranscriptSemCap,
+		ValidateWS:       validateWorkspace,
+		ClassifyWSErr:    classifyWorkspaceErr,
+	})
 }
+
+// cronTranscriptSemCap caps in-flight cron transcript reads. Renamed from
+// server-package transcribeSemCap to disambiguate; the audio transcribe
+// path keeps its own semaphore. Phase 1.
+const cronTranscriptSemCap = 8
 
 // cronLimiterMaxKeys / cronLimiterTTL pin the LRU cap + idle TTL for the
 // three cron-handler limiters. R242-SEC-8 / #636: previously the buckets

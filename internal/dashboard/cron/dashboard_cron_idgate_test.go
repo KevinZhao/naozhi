@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"bytes"
@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cron"
+	cronpkg "github.com/naozhi/naozhi/internal/cron"
 )
 
 // TestCronWriteHandlers_IDShapeGate locks R250-SEC-1: the 5 cron write
@@ -53,8 +53,8 @@ func TestCronWriteHandlers_IDShapeGate(t *testing.T) {
 	// test would fail loudly if the production helper accidentally became
 	// permissive in the future.
 	for _, tc := range bad {
-		if cron.IsValidID(tc.id) {
-			t.Fatalf("test fixture %q is unexpectedly considered valid by cron.IsValidID; tighten test data", tc.id)
+		if cronpkg.IsValidID(tc.id) {
+			t.Fatalf("test fixture %q is unexpectedly considered valid by cronpkg.IsValidID; tighten test data", tc.id)
 		}
 	}
 
@@ -64,7 +64,7 @@ func TestCronWriteHandlers_IDShapeGate(t *testing.T) {
 		path        string
 		body        func(id string) string // empty means use query string
 		queryKey    string                 // when body is empty
-		invoke      func(h *CronHandlers, w http.ResponseWriter, r *http.Request)
+		invoke      func(h *Handlers, w http.ResponseWriter, r *http.Request)
 		contentType string
 	}
 
@@ -74,7 +74,7 @@ func TestCronWriteHandlers_IDShapeGate(t *testing.T) {
 			method:   http.MethodDelete,
 			path:     "/api/cron",
 			queryKey: "id",
-			invoke:   func(h *CronHandlers, w http.ResponseWriter, r *http.Request) { h.handleDelete(w, r) },
+			invoke:   func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.HandleDelete(w, r) },
 		},
 		{
 			name:        "pause_body_id",
@@ -82,7 +82,7 @@ func TestCronWriteHandlers_IDShapeGate(t *testing.T) {
 			path:        "/api/cron/pause",
 			body:        func(id string) string { return `{"id":` + jsonQuote(id) + `}` },
 			contentType: "application/json",
-			invoke:      func(h *CronHandlers, w http.ResponseWriter, r *http.Request) { h.handlePause(w, r) },
+			invoke:      func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.HandlePause(w, r) },
 		},
 		{
 			name:        "resume_body_id",
@@ -90,7 +90,7 @@ func TestCronWriteHandlers_IDShapeGate(t *testing.T) {
 			path:        "/api/cron/resume",
 			body:        func(id string) string { return `{"id":` + jsonQuote(id) + `}` },
 			contentType: "application/json",
-			invoke:      func(h *CronHandlers, w http.ResponseWriter, r *http.Request) { h.handleResume(w, r) },
+			invoke:      func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.HandleResume(w, r) },
 		},
 		{
 			name:        "trigger_body_id",
@@ -98,14 +98,14 @@ func TestCronWriteHandlers_IDShapeGate(t *testing.T) {
 			path:        "/api/cron/trigger",
 			body:        func(id string) string { return `{"id":` + jsonQuote(id) + `}` },
 			contentType: "application/json",
-			invoke:      func(h *CronHandlers, w http.ResponseWriter, r *http.Request) { h.handleTrigger(w, r) },
+			invoke:      func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.HandleTrigger(w, r) },
 		},
 		{
 			name:     "update_query_id",
 			method:   http.MethodPatch,
 			path:     "/api/cron",
 			queryKey: "id",
-			invoke:   func(h *CronHandlers, w http.ResponseWriter, r *http.Request) { h.handleUpdate(w, r) },
+			invoke:   func(h *Handlers, w http.ResponseWriter, r *http.Request) { h.HandleUpdate(w, r) },
 		},
 	}
 
@@ -122,7 +122,7 @@ func TestCronWriteHandlers_IDShapeGate(t *testing.T) {
 				var logBuf bytes.Buffer
 				logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-				h := &CronHandlers{scheduler: cron.NewScheduler(cron.SchedulerConfig{})}
+				h := &Handlers{scheduler: cronpkg.NewScheduler(cronpkg.SchedulerConfig{})}
 
 				var req *http.Request
 				if hc.body != nil {

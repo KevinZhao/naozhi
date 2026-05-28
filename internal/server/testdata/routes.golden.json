@@ -22,57 +22,57 @@
   {
     "method": "DELETE",
     "path": "/api/cron",
-    "handler_type": "*CronHandlers"
+    "handler_type": "*dashcron.Handlers"
   },
   {
     "method": "GET",
     "path": "/api/cron",
-    "handler_type": "*CronHandlers"
+    "handler_type": "*dashcron.Handlers"
   },
   {
     "method": "PATCH",
     "path": "/api/cron",
-    "handler_type": "*CronHandlers"
+    "handler_type": "*dashcron.Handlers"
   },
   {
     "method": "POST",
     "path": "/api/cron",
-    "handler_type": "*CronHandlers"
+    "handler_type": "*dashcron.Handlers"
   },
   {
     "method": "POST",
     "path": "/api/cron/pause",
-    "handler_type": "*CronHandlers"
+    "handler_type": "*dashcron.Handlers"
   },
   {
     "method": "GET",
     "path": "/api/cron/preview",
-    "handler_type": "*CronHandlers"
+    "handler_type": "*dashcron.Handlers"
   },
   {
     "method": "POST",
     "path": "/api/cron/resume",
-    "handler_type": "*CronHandlers"
+    "handler_type": "*dashcron.Handlers"
   },
   {
     "method": "GET",
     "path": "/api/cron/runs",
-    "handler_type": "*CronHandlers"
+    "handler_type": "*dashcron.Handlers"
   },
   {
     "method": "GET",
     "path": "/api/cron/runs/{run_id}",
-    "handler_type": "*CronHandlers"
+    "handler_type": "*dashcron.Handlers"
   },
   {
     "method": "GET",
     "path": "/api/cron/runs/{run_id}/transcript",
-    "handler_type": "*CronHandlers"
+    "handler_type": "*dashcron.Handlers"
   },
   {
     "method": "POST",
     "path": "/api/cron/trigger",
-    "handler_type": "*CronHandlers"
+    "handler_type": "*dashcron.Handlers"
   },
   {
     "method": "GET",

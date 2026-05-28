@@ -20,6 +20,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
+	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/discovery"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/agentevents"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
@@ -97,7 +98,7 @@ type Server struct {
 
 	// ── Phase 5: → routes.go local variables ───────────
 	auth         *auth.Handlers        // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
-	cronH        *CronHandlers         // 读写: server.go, dashboard.go
+	cronH        *dashcron.Handlers    // 读写: server.go, dashboard.go
 	transcribeH  *transcribe.Handler   // 读写: dashboard.go (ctor only in server.go)
 	nodeAccess   *nodeAccessor         // 读写: server.go, dashboard.go
 	discoveryH   *discovery.Handlers   // 读写: server.go, dashboard.go (Phase 3b 搬到 internal/dashboard/discovery)
@@ -886,16 +887,16 @@ func buildServer(opts ServerOptions) *Server {
 	// of the cron HTTP surface, so silent unlimited-rate downgrade is
 	// unacceptable.
 	if s.scheduler != nil && s.cronH != nil {
-		if s.cronH.runsLimiter == nil {
+		if !s.cronH.HasRunsLimiter() {
 			panic("server: runsLimiter must be non-nil when scheduler is wired")
 		}
-		if s.cronH.listLimiter == nil {
+		if !s.cronH.HasListLimiter() {
 			panic("server: listLimiter must be non-nil when scheduler is wired")
 		}
 		// [R247-SEC-2 / R247-SEC-3] writeLimiter gates trigger + preview;
 		// silent unlimited-rate downgrade would expose CLI-spawn /
 		// IM-notify amplification, so fail-fast at construction.
-		if s.cronH.writeLimiter == nil {
+		if !s.cronH.HasWriteLimiter() {
 			panic("server: writeLimiter must be non-nil when scheduler is wired")
 		}
 	}

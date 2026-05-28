@@ -1,13 +1,11 @@
-package server
+package cron
 
 import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
-	"golang.org/x/time/rate"
 )
 
 // TestHandleList_429ResponseShape pins R242-CR-3 (#691): when GET /api/cron
@@ -24,15 +22,15 @@ func TestHandleList_429ResponseShape(t *testing.T) {
 	t.Parallel()
 
 	// Burst=1 so the second call is guaranteed to 429.
-	h := &CronHandlers{
-		listLimiter: newIPLimiterWithProxy(rate.Every(time.Hour), 1, false),
+	h := &Handlers{
+		listLimiter: newPerIPBurstNLimiter(1),
 	}
 
 	doReq := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/api/cron", nil)
 		req.RemoteAddr = "10.1.2.3:5555"
 		w := httptest.NewRecorder()
-		h.handleList(w, req)
+		h.HandleList(w, req)
 		return w
 	}
 	_ = doReq() // burn the burst

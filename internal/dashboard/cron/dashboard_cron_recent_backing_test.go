@@ -1,11 +1,11 @@
-package server
+package cron
 
 import (
 	"testing"
 )
 
 // TestRecentRunsBacking_SubSliceIndependence pins R250-PERF-16 (#1119):
-// handleList carves per-job RecentRuns slices out of a single shared
+// HandleList carves per-job RecentRuns slices out of a single shared
 // backing array sized to the total recent-run count. The transformation
 // MUST preserve two invariants:
 //
@@ -16,7 +16,7 @@ import (
 //     overflow lands in a fresh backing array rather than overwriting
 //     the next job's data.
 //
-// We model the carving inline (the helper logic lives in handleList's
+// We model the carving inline (the helper logic lives in HandleList's
 // loop body, not a separately-callable function); the assertion below
 // would catch a regression that drops the cap argument and lets a
 // future append() corrupt cross-job storage.

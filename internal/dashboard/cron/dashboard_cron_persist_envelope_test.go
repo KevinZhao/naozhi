@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"encoding/json"
@@ -11,7 +11,7 @@ import (
 // TestHTTPErrPersistFailed_JSONEnvelope pins R20260527-ARCH-2 (#1274):
 // httpErrPersistFailed used to write a text/plain http.Error body; the
 // five cron write handlers (create/delete/pause/resume/update) all
-// surface cron.ErrPersistFailed through this helper, so dashboard.js
+// surface cronpkg.ErrPersistFailed through this helper, so dashboard.js
 // would have to branch on Content-Type to read the message. The helper
 // now writes the unified errResp envelope so the entire cron persist-
 // failure surface ships JSON {error, code} consistently.

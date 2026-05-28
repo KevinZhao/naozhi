@@ -1,4 +1,4 @@
-package server
+package cron
 
 import (
 	"net/http"
@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cron"
+	cronpkg "github.com/naozhi/naozhi/internal/cron"
 )
 
 // TestHandleCreate_NotifyHalfSetRejected pins R242-SEC-11 (#640): a
 // partial notify-target (one field set, the other blank) must be rejected
-// at handleCreate before the job lands on disk. Pre-fix, the gate used
+// at HandleCreate before the job lands on disk. Pre-fix, the gate used
 // `&&` which let "platform-only" or "chat_id-only" requests fall through
 // to NotifyDefault, silently routing the job to the global fallback target
 // (or the wrong chat). The fix gates with `||` (at least one side set
@@ -22,11 +22,11 @@ import (
 // future refactor that drops the gate would produce a measurable diff.
 func TestHandleCreate_NotifyHalfSetRejected(t *testing.T) {
 	t.Parallel()
-	// scheduler must be non-nil so handleCreate proceeds past the
+	// scheduler must be non-nil so HandleCreate proceeds past the
 	// "cron not configured" 501 short-circuit. Empty config is fine —
 	// the test only cares about pre-persist validation, so we never
 	// reach AddJob.
-	sched := cron.NewScheduler(cron.SchedulerConfig{})
+	sched := cronpkg.NewScheduler(cronpkg.SchedulerConfig{})
 
 	type tc struct {
 		name      string
@@ -56,14 +56,14 @@ func TestHandleCreate_NotifyHalfSetRejected(t *testing.T) {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			h := &CronHandlers{scheduler: sched}
+			h := &Handlers{scheduler: sched}
 			body := `{"schedule":"* * * * *","prompt":"hi","notify_platform":` +
 				jsonStr(c.platform) + `,"notify_chat_id":` + jsonStr(c.chatID) + `}`
 			req := httptest.NewRequest(http.MethodPost, "/api/cron",
 				strings.NewReader(body))
 			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
-			h.handleCreate(w, req)
+			h.HandleCreate(w, req)
 			if w.Code != c.wantStaus {
 				t.Fatalf("got %d, want %d; body=%q", w.Code, c.wantStaus, w.Body.String())
 			}
