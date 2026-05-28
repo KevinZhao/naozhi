@@ -558,8 +558,8 @@ func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 }
 
 // workDirResolveCacheTTL caps how long a positive workDirResolveUnderRoot
-// result may be reused before re-running EvalSymlinks. R247-PERF-24:
-// long-lived schedulers re-evaluate the same per-job workDir every tick;
+// result may be reused before re-running EvalSymlinks. R247-PERF-24
+// (#572): long-lived schedulers re-evaluate the same per-job workDir every tick;
 // each call costs Lstat+Readlink per path component plus the same chain
 // for allowedRoot. A short TTL collapses the hot-path syscall load on
 // fast-firing jobs while still bounding the TOCTOU window the per-call
