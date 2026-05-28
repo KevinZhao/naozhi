@@ -702,6 +702,54 @@ func (s *ManagedSession) SnapshotPrevSessionOrigins() []string {
 	return out
 }
 
+// SnapshotPrevSessionIDs returns a defensive copy of the prevSessionIDs
+// chain (oldest → newest). Read-only callers in router_*.go can use this
+// instead of reaching into s.prevSessionIDs directly under historyMu —
+// the accessor formalises the boundary required before splitting Router
+// into sub-aggregates (R215-ARCH-P1-1, #545). Returns nil when the chain
+// is empty (matches SnapshotPrevSessionOrigins shape).
+func (s *ManagedSession) SnapshotPrevSessionIDs() []string {
+	s.historyMu.RLock()
+	defer s.historyMu.RUnlock()
+	if len(s.prevSessionIDs) == 0 {
+		return nil
+	}
+	return slices.Clone(s.prevSessionIDs)
+}
+
+// ReplacePrevSessionIDs swaps the prevSessionIDs chain wholesale and
+// returns the replaced length. The supplied slice is cloned so the caller
+// can reuse / mutate its argument. Origins are NOT touched here —
+// SetPrevSessionOrigins is the dedicated path for parallel origin
+// alignment and runs its own drift checks. Callers that need both must
+// invoke ReplacePrevSessionIDs first then SetPrevSessionOrigins so the
+// length-drift detector sees the post-replace baseline. R215-ARCH-P1-1.
+func (s *ManagedSession) ReplacePrevSessionIDs(ids []string) {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if len(ids) == 0 {
+		s.prevSessionIDs = nil
+		return
+	}
+	s.prevSessionIDs = slices.Clone(ids)
+}
+
+// SnapshotPersistedHistory returns a defensive copy of the persistedHistory
+// ring. The result is safe to mutate without affecting the session. Returns
+// nil when the ring is empty so callers don't pay a zero-length alloc.
+// R215-ARCH-P1-1: pre-requisite accessor for splitting Router into
+// sub-aggregates without leaking ManagedSession internals.
+func (s *ManagedSession) SnapshotPersistedHistory() []cli.EventEntry {
+	s.historyMu.RLock()
+	defer s.historyMu.RUnlock()
+	if len(s.persistedHistory) == 0 {
+		return nil
+	}
+	out := make([]cli.EventEntry, len(s.persistedHistory))
+	copy(out, s.persistedHistory)
+	return out
+}
+
 // loadProcess returns the currently attached processIface, or nil when
 // the session is detached (paused, reclaimed, or never spawned).
 //
