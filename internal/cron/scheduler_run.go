@@ -1299,10 +1299,28 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			// stopCtx cancel races a near-deadline tick — surface it so
 			// operators have a signal that an interrupt attempt happened
 			// during the cancel path.
-			lg.Info("cron send cancelled",
-				"err", err,
-				"abort_fired", abort.fired,
-				"abort_outcome", abort.outcome)
+			//
+			// R242-GO-7 (#555): mirror the DeadlineExceeded branch below —
+			// when the watchdog fired but the interrupt did not land
+			// (outcome neither InterruptSent nor InterruptUnsupported), the
+			// in-flight turn may still be wedged at session level even
+			// though the cron run is recorded as cancelled. Operators need
+			// the Warn signal to investigate transport-level breakage in
+			// the same shape as the deadline path; otherwise a "fired-but-
+			// silent" interrupt during a cancel-deadline race is buried at
+			// Info severity and slips past log alerts.
+			if abort.fired && abort.outcome != InterruptSent &&
+				abort.outcome != InterruptUnsupported {
+				lg.Warn("cron send cancelled; interrupt did not land",
+					"err", err,
+					"abort_fired", abort.fired,
+					"abort_outcome", abort.outcome)
+			} else {
+				lg.Info("cron send cancelled",
+					"err", err,
+					"abort_fired", abort.fired,
+					"abort_outcome", abort.outcome)
+			}
 			s.finishRun(finishArgs{
 				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
 				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
