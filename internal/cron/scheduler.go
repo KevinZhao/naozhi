@@ -1032,6 +1032,18 @@ func (s *Scheduler) Start() error {
 	// 历史读回来给 dashboard 显示。
 	type stubRow struct{ id, workDir, prompt, lastSessionID string }
 	var stubs []stubRow
+	// R250-ARCH-26 (#1187): enforce s.maxJobs cap during restore so an
+	// operator who lowered MaxJobs in config.yaml after the on-disk store
+	// already exceeded the new cap doesn't silently load every persisted
+	// job. addJobAcquiringLock is the only other code path that checks the
+	// cap; without this gate the runtime cap was advisory at best (the next
+	// AddJob would fail at len(s.jobs)+1 > maxJobs but the over-cap entries
+	// already loaded would keep running). Skipped jobs stay on disk so an
+	// operator can recover them by raising the cap and restarting; they are
+	// NOT removed from cron_jobs.json by the next persist (Start does not
+	// trigger a save unless a CRUD mutation lands). A WARN per skipped job
+	// names the ID + schedule so the operator sees which jobs were dropped.
+	skippedOverCap := 0
 	for _, j := range restored {
 		// Reject persisted jobs whose WorkDir escapes the configured
 		// sandbox. Replaying an on-disk tampered entry must not grant
@@ -1040,6 +1052,16 @@ func (s *Scheduler) Start() error {
 		if s.allowedRoot != "" && j.WorkDir != "" && !workDirUnderRoot(j.WorkDir, s.allowedRoot, s.allowedRootResolved) {
 			slog.Warn("cron job work_dir outside allowed_root; skipping",
 				"job_id", j.ID, "work_dir", j.WorkDir)
+			continue
+		}
+		// R250-ARCH-26 (#1187): refuse to register beyond s.maxJobs. The
+		// check fires AFTER the workDir filter so the operator's quota
+		// counts only sandbox-valid jobs (a sandbox-rejected entry should
+		// not consume a cap slot).
+		if len(s.jobs) >= s.maxJobs {
+			slog.Warn("cron job over maxJobs cap; skipping (raise cron.MaxJobs to restore)",
+				"job_id", j.ID, "schedule", j.Schedule, "cap", s.maxJobs)
+			skippedOverCap++
 			continue
 		}
 		if j.Paused {
@@ -1062,6 +1084,10 @@ func (s *Scheduler) Start() error {
 	}
 	jobCount := len(s.jobs)
 	s.mu.Unlock()
+	if skippedOverCap > 0 {
+		slog.Warn("cron Start: jobs skipped due to maxJobs cap; remaining entries are still on disk",
+			"skipped", skippedOverCap, "loaded", jobCount, "cap", s.maxJobs)
+	}
 	// Register dashboard stub sessions after releasing the lock; the router's
 	// notifyChange callback must not re-enter scheduler state. Use snapshotted
 	// values (not the *Job pointer) so a concurrent UpdateJob mutating the map
