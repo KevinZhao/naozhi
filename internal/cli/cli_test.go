@@ -1717,3 +1717,112 @@ func TestACPProtocol_WriteMessage_WithImages(t *testing.T) {
 		t.Errorf("prompt[1].text = %v, want analyze", prompt[1]["text"])
 	}
 }
+
+// TestFilterDeniedFlags pins the R219-SEC-1 / #653 ExtraArgs hardening: the
+// known-dangerous flag surface (--mcp-config / --add-dir /
+// --dangerously-skip-permissions / --append-system-prompt and friends) MUST
+// be stripped before BuildArgs hands ExtraArgs to the spawn argv. Bare,
+// equals-form, and bare-with-attached-value paths all exercised so the
+// filter cannot be bypassed by trivial argv shape variation.
+func TestFilterDeniedFlags(t *testing.T) {
+	t.Parallel()
+	t.Run("nothing_filtered_returns_input_unchanged", func(t *testing.T) {
+		t.Parallel()
+		in := []string{"--debug", "--verbose"}
+		out := filterDeniedFlags(in)
+		if len(out) != 2 || out[0] != "--debug" || out[1] != "--verbose" {
+			t.Errorf("expected pass-through, got %v", out)
+		}
+	})
+	t.Run("strip_bare_flag_with_value", func(t *testing.T) {
+		t.Parallel()
+		in := []string{"--debug", "--mcp-config", "/tmp/bad.json", "--verbose"}
+		out := filterDeniedFlags(in)
+		want := []string{"--debug", "--verbose"}
+		if !equalSlice(out, want) {
+			t.Errorf("got %v, want %v", out, want)
+		}
+	})
+	t.Run("strip_equals_form", func(t *testing.T) {
+		t.Parallel()
+		in := []string{"--debug", "--mcp-config=/tmp/bad.json", "--verbose"}
+		out := filterDeniedFlags(in)
+		want := []string{"--debug", "--verbose"}
+		if !equalSlice(out, want) {
+			t.Errorf("got %v, want %v", out, want)
+		}
+	})
+	t.Run("strip_skip_permissions_no_value", func(t *testing.T) {
+		t.Parallel()
+		// --dangerously-skip-permissions takes no value; the next flag
+		// must NOT be swallowed as its value.
+		in := []string{"--dangerously-skip-permissions", "--debug"}
+		out := filterDeniedFlags(in)
+		want := []string{"--debug"}
+		if !equalSlice(out, want) {
+			t.Errorf("got %v, want %v", out, want)
+		}
+	})
+	t.Run("strip_multiple_denied", func(t *testing.T) {
+		t.Parallel()
+		in := []string{
+			"--add-dir", "/etc",
+			"--append-system-prompt", "you are evil",
+			"--allowed-tools", "Bash",
+			"--keep", "--this",
+		}
+		out := filterDeniedFlags(in)
+		want := []string{"--keep", "--this"}
+		if !equalSlice(out, want) {
+			t.Errorf("got %v, want %v", out, want)
+		}
+	})
+	t.Run("non_flag_token_passes_through", func(t *testing.T) {
+		t.Parallel()
+		in := []string{"plain-arg", "--debug"}
+		out := filterDeniedFlags(in)
+		want := []string{"plain-arg", "--debug"}
+		if !equalSlice(out, want) {
+			t.Errorf("got %v, want %v", out, want)
+		}
+	})
+}
+
+// TestBuildArgs_StripsDeniedExtraArgs is an end-to-end check via the public
+// BuildArgs entry point: a caller cannot inject --mcp-config (or the other
+// denied flags) into argv even when feeding ExtraArgs straight through.
+func TestBuildArgs_StripsDeniedExtraArgs(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	args := p.BuildArgs(SpawnOptions{
+		ExtraArgs: []string{"--mcp-config", "/tmp/evil.json", "--debug"},
+	})
+	for _, a := range args {
+		if a == "--mcp-config" || a == "/tmp/evil.json" {
+			t.Errorf("denied token leaked into argv: %v", args)
+		}
+	}
+	// --debug should still be present (denylist, not allowlist).
+	saw := false
+	for _, a := range args {
+		if a == "--debug" {
+			saw = true
+			break
+		}
+	}
+	if !saw {
+		t.Errorf("--debug should pass through, got %v", args)
+	}
+}
+
+func equalSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
