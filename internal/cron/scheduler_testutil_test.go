@@ -26,3 +26,20 @@ func WithStopBudget(d time.Duration) func() {
 	stopBudget = d
 	return func() { stopBudget = orig }
 }
+
+// WithStopBudgetField overrides the per-instance Scheduler.stopBudget
+// directly and returns a restore func for t.Cleanup. Prefer this over
+// WithStopBudget when the *Scheduler already exists — it keeps the
+// budget swap local to one instance, so t.Parallel tests on separate
+// Schedulers cannot race each other on the package-level var.
+//
+// R249-CR-3 (#947): NewScheduler now snapshots the package-level
+// stopBudget into a per-instance field, completing the long-term
+// direction flagged on gcWaitBudget. This seam exposes that field swap
+// to tests so they no longer need to reach for the package-level
+// back-channel post-construction.
+func WithStopBudgetField(s *Scheduler, d time.Duration) func() {
+	orig := s.stopBudget
+	s.stopBudget = d
+	return func() { s.stopBudget = orig }
+}
