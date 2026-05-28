@@ -344,6 +344,21 @@ func sanitiseRunErrMsg(s string) string {
 //
 // Reviewers tempted to inline this back into executeOpt: please add the
 // new caller(s) first, then re-evaluate.
+//
+// R241-ARCH-13 (#521) proposed a lite-path (metric-only + single WS
+// event) on the CAS-fail fast path to relieve hub lock pressure under
+// bursty triggers. Won't-fix: the started→ended pair is load-bearing
+// for subscriber state machines (dashboard run timeline, history-panel
+// indexers, drawer rendering). Dropping the started frame would leave
+// the dashboard with an "ended without started" frame that subscribers
+// either drop (silent UX regression) or render as an orphan (misleading
+// "skipped from nowhere" pill). The metric-only variant cannot replace
+// the WS event without breaking the subscriber contract, and combining
+// the two events into a single composite event would force a schema
+// change in the cron WS protocol — disproportionate to the savings on
+// a path that fires only when CAS already lost (i.e. the in-flight run
+// is paying the dominant cost). Hub lock pressure is bounded by the
+// per-job CAS itself: at most one overlap-skipped per tick per job.
 func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 	s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassOverlapSkipped, "previous run still in flight", "overlap-skipped")
 }
