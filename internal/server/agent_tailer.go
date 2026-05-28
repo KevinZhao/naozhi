@@ -541,12 +541,17 @@ func (t *agentTailer) pollOnce() bool {
 		slog.Debug("agent_tailer: tail error", "key", t.key, "task", t.taskID, "err", err)
 	}
 
+	// Capture wall clock outside the lock so the vDSO call does not extend
+	// the per-tailer critical section. R040034-PERF-8 (#1407): every µs the
+	// lock is held serialises concurrent attach/detach against the
+	// per-tailer broadcast.
+	now := time.Now()
+
 	t.mu.Lock()
 	if t.closed {
 		t.mu.Unlock()
 		return false
 	}
-	now := time.Now()
 	if len(events) > 0 {
 		t.lastActive = now
 		// Buffer for late subscribers (bounded — 500 events). Past the cap
@@ -577,6 +582,25 @@ func (t *agentTailer) pollOnce() bool {
 			t.buffered = t.buffered[:n]
 		}
 	}
+	t.mu.Unlock()
+
+	// R040034-PERF-8 (#1407): take a SECOND brief lock for the subs+meta
+	// snapshot + idle/refCount read rather than holding through the
+	// buffer-mutation block. Splitting the window lets concurrent
+	// attach/detach (which also need t.mu) interleave between the two,
+	// reducing worst-case lock-hold latency on busy tailers. The
+	// subs/meta+idle snapshot is independent of the buffer mutation: it
+	// captures whoever is currently attached at this poll boundary, which
+	// is what we want for the upcoming fan-out and for the
+	// idle && refCount==0 close decision below.
+	//
+	// IMPORTANT: idle and refCount must be read in the SAME critical
+	// section as the t.subs snapshot, otherwise an attach landing between
+	// the two locks could leave us seeing refCount==0 alongside a
+	// just-populated subs slice — wrongly closing a tailer that has a
+	// fresh subscriber. The single second-lock window keeps these reads
+	// consistent.
+	//
 	// Snapshot subs only when there are events to fan out — idle ticks
 	// otherwise paid an O(N) map copy per poll for nothing. Also skip when
 	// there are events but nobody is subscribed (silent buffer-only mode):
@@ -594,6 +618,7 @@ func (t *agentTailer) pollOnce() bool {
 	var subs []*wsClient
 	var subsHandle tailerSubsHandle
 	var meta node.AgentMetaPatch
+	t.mu.Lock()
 	if len(events) > 0 && len(t.subs) > 0 {
 		subs, subsHandle = acquireTailerSubsSlice(len(t.subs))
 		for c := range t.subs {
@@ -601,10 +626,10 @@ func (t *agentTailer) pollOnce() bool {
 		}
 		meta = t.meta
 	}
-	defer releaseTailerSubsSlice(subs, subsHandle)
 	idle := now.Sub(t.lastActive) > agentTailerIdleGrace
 	refCount := t.refCount.Load()
 	t.mu.Unlock()
+	defer releaseTailerSubsSlice(subs, subsHandle)
 
 	// Broadcast new events. R231-PERF-5 / R232-PERF-2 / R233-PERF-* family:
 	// when more than one subscriber is attached, marshal each frame once
@@ -695,9 +720,13 @@ func (t *agentTailer) pollOnce() bool {
 }
 
 // updateMetaFromEventLocked refreshes meta counters from a single event.
-// `now` is the wall clock captured by the caller under t.mu so all events
-// in a single pollOnce share one DurationMS reading and avoid per-event
-// time.Since vDSO calls. R228-PERF-4.
+// `now` is the wall clock captured by the caller — currently outside the
+// lock per R040034-PERF-8 (#1407) so the vDSO call does not extend the
+// per-tailer critical section — but all events in a single pollOnce share
+// one reading so DurationMS is consistent and per-event time.Since vDSO
+// calls are avoided. The caller still holds t.mu when invoking this
+// helper so the meta writes themselves remain mutually exclusive with
+// MetaSnapshot readers. R228-PERF-4.
 func (t *agentTailer) updateMetaFromEventLocked(e cli.EventEntry, now time.Time) {
 	switch e.Type {
 	case "tool_use":
