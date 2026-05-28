@@ -77,6 +77,16 @@ func (s *Scheduler) AddJob(j *Job) error {
 			return err
 		}
 	}
+	// R250-CR-8 (#1141): defence-in-depth — IM dispatch and dashboard
+	// handlers validate WorkDir/Backend/Notify* before calling AddJob,
+	// but a future internal caller reaching AddJob directly would
+	// otherwise persist arbitrary bytes. The same caps loadJobs already
+	// applies on the read path now run on the write path too, so no
+	// hand-crafted in-memory job reaches cron_jobs.json with a multi-KB
+	// WorkDir or log-injection bytes in NotifyChatID.
+	if err := validateJobFields(j); err != nil {
+		return err
+	}
 
 	// addJobAcquiringLock runs under s.mu (defer Unlock). Splitting the locked
 	// section into a helper means every early-return path goes through
