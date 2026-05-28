@@ -594,6 +594,21 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 // in cmd/naozhi/cron_router_adapter.go casts session.InterruptOutcome
 // → cron.InterruptOutcome via a numeric cast, with an init() panic
 // pinning the ordinals.
+//
+// R238-ARCH-20 (#787) proposed renaming deadlineInterrupter →
+// RunInterrupter and switching abortResult to a fresh InterruptResult
+// enum to "break the dependency on session.InterruptOutcome". The
+// decoupling is already complete: the cron-local InterruptOutcome above
+// (defined in agent_opts.go) is the public type; cron does NOT import
+// session.InterruptOutcome anywhere in production code (the last
+// reverse import was eliminated by R20260527122801-ARCH-1, see the
+// banner in scheduler_session.go). The proposed rename is a cosmetic
+// preference rather than an architectural fix; deferring keeps the
+// type name aligned with the concept "deadline-driven interrupt"
+// across godoc / metrics / tests, and avoids a sweep across N test
+// files. The fired-vs-success ambiguity flagged in the issue is
+// addressed by abortResult.fired's godoc above (success path is
+// fired=false; only the watchdog firing sets fired=true).
 type abortResult struct {
 	outcome InterruptOutcome
 	fired   bool
@@ -1081,21 +1096,23 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// `lg` instead of `log` to avoid shadowing the standard `log` package
 	// imported at the top of the file (R60-GO-M2).
 	//
-	// R238-PERF-2 / R245-PERF-7 (#849, #858): one slog.With per execution
-	// allocates a 4-attr Logger handler chain. We deliberately keep this
-	// pattern despite the alloc: (a) the chain is reused 20+ times below
-	// (success Info + send-deadline Warn + session-error Error + the
-	// finishRun routing fan-out), so amortised cost per use is sub-µs;
-	// (b) Caching on *Job would require invalidation on every
-	// SetJobPlatform / SetJobChatID mutation — a correctness liability
-	// disproportionate to ~200 ns saved per cron tick; (c) Caching on
-	// *runInflight or jobSnapshot is per-execution scope, identical to
-	// the local `lg` and only adds an indirection. Lazy build via
-	// sync.Once would not help because line below unconditionally
-	// triggers the alloc on first .Info call. The cron-tick path's hot
-	// allocs are dominated by snapshot copy + CLI subprocess spawn —
-	// optimising the logger here would not move the needle. Leave the
-	// alloc; document the rationale so future reviewers don't reopen it.
+	// R238-PERF-2 / R245-PERF-7 / R242-PERF-3 (#849, #858, #666): one
+	// slog.With per execution allocates a 4-attr Logger handler chain. We
+	// deliberately keep this pattern despite the alloc: (a) the chain is
+	// reused 20+ times below (success Info + send-deadline Warn +
+	// session-error Error + the finishRun routing fan-out), so amortised
+	// cost per use is sub-µs; (b) Caching on *Job would require
+	// invalidation on every SetJobPlatform / SetJobChatID mutation — a
+	// correctness liability disproportionate to ~200 ns saved per cron
+	// tick; (c) Caching on *runInflight or jobSnapshot is per-execution
+	// scope, identical to the local `lg` and only adds an indirection.
+	// Lazy build via sync.Once would not help because line below
+	// unconditionally triggers the alloc on first .Info call. The
+	// cron-tick path's hot allocs are dominated by snapshot copy + CLI
+	// subprocess spawn — optimising the logger here would not move the
+	// needle. Leave the alloc; document the rationale so future reviewers
+	// don't reopen it. #666 is the latest [REPEAT-N] — closing as
+	// won't-fix-by-design.
 	lg := slog.With("job_id", snap.jobID, "platform", snap.platName, "chat", snap.chatID, "run_id", runID)
 	lg.Info("cron job executing", "prompt_len", len(snap.prompt))
 

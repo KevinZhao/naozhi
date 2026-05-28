@@ -37,6 +37,29 @@ import (
 // (Scheduler.storeMu) is NOT shared with this store: the two write to
 // different files and serialising would only inflate latency.
 //
+// R238-ARCH-12 (#755) proposed extracting runStore into its own
+// internal/cron/runs sub-package so runstore.go (~830 LOC) and its
+// independent lock hierarchy stop bloating the cron package surface.
+// Deferred — extraction would force a sweep across:
+//
+//   - The 30+ test files in internal/cron/ that touch runStore
+//     internals (jobLock, recentCacheEntry, ringPushHead, etc.).
+//   - Scheduler fields (runStore + persistence wiring) that would
+//     need a public Store interface plus an adapter for the
+//     skipAppendTrim → trimJobLocked → cacheTrimAfterDisk back-edges.
+//   - The CronRun / CronRunSummary value types currently shared
+//     between scheduler.go (run construction) and runstore.go
+//     (persistence) — extracting would force these into a third
+//     shared package or duplicate the schema.
+//
+// The sub-package split is tracked in the broader cron-sysession-merge
+// refactor (RFC docs/rfc/cron-sysession-merge.md Phase D-prep): the
+// extraction is gated on the runtelemetry common-event-layer landing,
+// without which runstore.go's slog/metrics calls would have to
+// re-import cron just to talk back. Until then the file is well-
+// modularised within cron via the lock-hierarchy comment above and
+// scheduler_persist.go owning the cross-store coordination.
+//
 // Lock hierarchy（R234-GO-7 文档化锁层级）：
 //
 //	Scheduler.s.mu  >  runStore.jobLock(jobID)  >  recentCacheEntry.mu
@@ -721,6 +744,19 @@ func (s *runStore) Append(run *CronRun) {
 // against a fresh Append's WriteFileAtomic. Today the sole caller is
 // Append (runstore.go:252) which acquires jobLock at line 213; any future
 // helper must do the same. R239-GO-5.
+//
+// R245-PERF-14 (#863) proposed converting appendsSinceTrim to atomic.Int32
+// to skip entry.mu on the no-race fast path. Won't-fix: the threshold-
+// gate is the cheapest of the four checks below — entry.warm,
+// entry.count, oldest-row.EndedAt all require entry.mu since they read
+// the ring state, and ringRead derives from cap(ring) which is mutated
+// by ringSeed under the same mutex. Atomicising just the counter would
+// not let us release entry.mu, so the lock-elision premise of the
+// proposal does not hold without a much larger redesign (split the
+// counter from the ring state, double-buffer the ring, etc.). The
+// existing jobLock + entry.mu pair runs in <100ns on the warm path
+// already; the remaining cost is dominated by ringRead's modulo, not
+// the lock itself.
 func (s *runStore) skipAppendTrim(jobID string) bool {
 	// Race-detector friendly contract assertion: panics when jobLock is
 	// currently free, the unambiguous signature of a caller that forgot to
@@ -794,11 +830,13 @@ const appendTrimBatch = 10
 // when Load missed, leaving cacheGet to allocate the recentCacheEntry
 // itself moments later.
 //
-// R242-GO-8 / R235-PERF-3 / R233-PERF-2: ring-buffer push in O(1).
+// R242-GO-8 / R235-PERF-3 / R233-PERF-2 (#556): ring-buffer push in O(1).
 // The pre-ring implementation did `append([]T{x}, slice...)` (later
 // `append + copy + index`) which shifted up to keepCount-1 entries on
 // every Append — at keepCount=200 that was 200× the per-push work the
-// 1Hz cron + dashboard poll path actually needs.
+// 1Hz cron + dashboard poll path actually needs. ringPushHead below is
+// the O(1) implementation that landed via R243-PERF-4; #556 was the
+// repeat finding before the cluster was wired up.
 func (s *runStore) cacheHeadPush(jobID string, summary CronRunSummary) {
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
@@ -1220,6 +1258,19 @@ func (s *runStore) scanSortedRunDir(jobID string) ([]runDirItem, string, error) 
 //     unsafe gate after operators reported phantom "no older runs"
 //     truncation; the strict StartedAt filter is the only correct one
 //     and the per-candidate ReadFile is the cost of correctness here.
+//   - R260528-PERF-20 / #1359 ("mtime ceiling gate when mtime < before")
+//     is the symmetric variant: in steady-state cron jobs (run-time
+//     much smaller than the pagination window) StartedAt ≈ EndedAt ≈
+//     mtime, so an mtime < before pre-filter would skip the ReadFile
+//     for files that the strict StartedAt filter would also drop. Same
+//     won't-fix as #682 / #522: the asymmetry is one-directional —
+//     mtime > StartedAt is possible (long runs, fsnotify-touched files,
+//     filesystem mtime drift on restart), so a coarse mtime gate would
+//     still suppress legitimately-paginatable rows. Maintaining a
+//     metadata index sidecar adds a second consistency surface that
+//     warmCache + trimJobLocked + gc would all need to honour; the
+//     correctness cost outweighs the per-page IO saving on a path that
+//     already serves cache-warm pages without disk IO via cacheGet.
 //   - The regression scenario is locked in by
 //     TestRunStore_DiskList_BeforeStartedAtMtimeDivergence in
 //     runstore_test.go; any future re-introduction of an mtime gate
@@ -1675,6 +1726,14 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 // Caller MUST hold jobLock(jobID); the entry.mu acquisition here pairs
 // with cacheHeadPush / cacheTrimAfterDisk so a concurrent Append's
 // metadata mutation cannot race the read. R236-PERF-12 (#532).
+//
+// R242-PERF-10 (#674) is the same root and is closed by this fast path:
+// trimJobLocked.scanSortedRunDir is bypassed entirely when the cache can
+// prove no candidate exists. The proposal "derive trim decision from
+// cache length" is realised by the count + oldest-row checks above —
+// length is necessary but not sufficient because a warm cache with
+// count==keepCount could still hide expired older rows on disk; we keep
+// the strict "<keepCount" guard for safety.
 func (s *runStore) trimSkipFromCache(jobID string, now time.Time) bool {
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {

@@ -70,6 +70,16 @@ var ErrPersistFailed = errors.New("cron: persist jobs failed")
 // graph. Any new s.router.X() call requires extending this interface, which
 // makes accidental surface-area growth a compile error instead of a silent
 // regression.
+//
+// R238-ARCH-7 (#752) is closed by the current shape: GetOrCreate already
+// returns cron-local types (Session interface + SessionStatus) — see
+// agent_opts.go for the Send/SessionID/InterruptViaControl method set —
+// so cron does NOT transitively depend on *session.ManagedSession. The
+// production wireup wraps the concrete session in cronSessionAdapter
+// (cmd/naozhi/cron_router_adapter.go); the InterruptOutcome ordinal pin
+// + the SessionRouter compile-time guard live there too. The cron
+// package no longer imports internal/session in production code (last
+// reverse import eliminated by R20260527122801-ARCH-1).
 type SessionRouter interface {
 	// RegisterCronStubWithChain creates (or refreshes) a suspended exempt
 	// session entry so the cron job shows up in the dashboard sidebar before
@@ -279,6 +289,22 @@ type Scheduler struct {
 	// dynamic backend/agent registration ever lands, switch to
 	// atomic.Pointer[map[...]] swap-on-write so reads stay lock-free without
 	// racing the writer.
+	//
+	// R219-ARCH-8 (#670) proposed replacing this map with a `Notifier
+	// interface { Notify(ctx, plat, chatID, text) error }` so cron stops
+	// calling platform.Reply / MaxReplyLength / SplitText directly and
+	// goes through dispatch.replyText's unified error handling. Deferred:
+	// the refactor entangles with deliverNotice's chunked send loop
+	// (SplitText needs MaxReplyLength → per-chunk Reply), the per-target
+	// retry budget, and the four call sites in scheduler_notify.go +
+	// scheduler_run.go that compose the chunk loop with formatCronNotice
+	// + per-target ctx. Wrapping in a Notifier without breaking
+	// per-chunk error reporting requires either pushing chunking into
+	// the Notifier (adds a per-platform-config dependency the dispatch
+	// layer doesn't have today) or surfacing chunk metadata back to cron
+	// (multi-error contract). RFC cron-sysession-merge Phase E covers
+	// this within the larger dispatch unification — leaving #670 to
+	// land alongside that work rather than fragmenting the contract.
 	platforms     map[string]platform.Platform
 	agents        map[string]AgentOpts
 	agentCommands map[string]string
@@ -1415,8 +1441,9 @@ func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
 // must skip this phase entirely when drainCronStop's deadlineHit is true so
 // the budget is honoured as a single overall ceiling.
 //
-// R222-GO-10: when the deadline pre-empts triggerDone, the wrapper goroutine
-// started by `go func() { s.triggerWG.Wait(); close(...) }` stays parked on
+// R222-GO-10 / R217-GO-5 / R44 (#606): when the deadline pre-empts
+// triggerDone, the wrapper goroutine started by
+// `go func() { s.triggerWG.Wait(); close(...) }` stays parked on
 // triggerWG.Wait — exactly the intentional-orphan path documented in the
 // Stop CONTRACT block. Reclaim happens when the OS tears the process down.
 // We deliberately do NOT add a sync.Once / chan-cancel reclaim path here:
@@ -1424,6 +1451,8 @@ func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
 // single-shot (Stop is terminal). A goroutine-leak detector running in
 // tests that shorten stopBudget to milliseconds will surface this orphan;
 // tests that care should plumb a non-stuck deliverNotice fake instead.
+// #606 is the [REPEAT-N] reaffirm of this design — keeping the issue
+// reference here so future reviewers see the lineage at a glance.
 //
 // Bound triggerWG.Wait with the *remaining* share of the same budget:
 // manual TriggerNow respects stopCtx via execute(), and R243-SEC-14

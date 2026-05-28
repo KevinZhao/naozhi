@@ -212,3 +212,59 @@ func TestHasMissedSchedule_DailySchedule_StartupSuppression(t *testing.T) {
 		t.Fatalf("startup suppression (5×24h window) must swallow missed flag even for 10-day-stale LastRunAt (startedAt=%v)", startedAt)
 	}
 }
+
+// TestHasMissedScheduleCached_MatchesUncached 验证 cached 变体在缓存命中
+// (cachedSched 非 nil) 时与 HasMissedSchedule 返回完全一致的结果，且在
+// 缓存未命中 (cachedSched nil) 时回落到 cronParser.Parse 路径。R241-PERF-3
+// (#477)：保证替换 dashboard 1Hz handleList 的 HasMissedSchedule 调用为
+// HasMissedScheduleCached 后行为不变。
+func TestHasMissedScheduleCached_MatchesUncached(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+	startedAt := now.Add(-10 * time.Hour) // 绕过抑制窗口
+	cases := []struct {
+		name string
+		job  *Job
+	}{
+		{"recent_run_no_miss", &Job{Schedule: "@every 30m", CreatedAt: now.Add(-24 * time.Hour), LastRunAt: now.Add(-20 * time.Minute)}},
+		{"stale_run_miss", &Job{Schedule: "@every 30m", CreatedAt: now.Add(-24 * time.Hour), LastRunAt: now.Add(-3 * time.Hour)}},
+		{"never_run_recent_create_no_miss", &Job{Schedule: "@every 30m", CreatedAt: now.Add(-5 * time.Minute)}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name+"_cold_cache", func(t *testing.T) {
+			t.Parallel()
+			// cachedSched nil → falls back to parse, must equal HasMissedSchedule
+			gotMissed, gotPrev := HasMissedScheduleCached(tc.job, now, startedAt)
+			wantMissed, wantPrev := HasMissedSchedule(tc.job, now, startedAt)
+			if gotMissed != wantMissed || !gotPrev.Equal(wantPrev) {
+				t.Fatalf("cold cache divergence: got=(%v,%v) want=(%v,%v)", gotMissed, gotPrev, wantMissed, wantPrev)
+			}
+		})
+		t.Run(tc.name+"_warm_cache", func(t *testing.T) {
+			t.Parallel()
+			// Pre-populate cachedSched manually (registerJob normally does this).
+			sched, err := cronParser.Parse(tc.job.Schedule)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			warmJob := *tc.job
+			warmJob.cachedSched = sched
+			gotMissed, gotPrev := HasMissedScheduleCached(&warmJob, now, startedAt)
+			wantMissed, wantPrev := HasMissedSchedule(tc.job, now, startedAt)
+			if gotMissed != wantMissed || !gotPrev.Equal(wantPrev) {
+				t.Fatalf("warm cache divergence: got=(%v,%v) want=(%v,%v)", gotMissed, gotPrev, wantMissed, wantPrev)
+			}
+		})
+	}
+}
+
+// TestHasMissedScheduleCached_NilJob 验证 nil 输入不 panic（与
+// HasMissedSchedule 同样的保守降级）。
+func TestHasMissedScheduleCached_NilJob(t *testing.T) {
+	t.Parallel()
+	missed, prev := HasMissedScheduleCached(nil, time.Now(), time.Time{})
+	if missed || !prev.IsZero() {
+		t.Fatalf("nil job should return (false, zero); got (%v, %v)", missed, prev)
+	}
+}
