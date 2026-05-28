@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // blockingInterrupter is a deadlineInterrupter test stub that blocks
@@ -62,6 +64,39 @@ func TestRunDeadlineWatchdog_TimeoutOnWedgedInterrupt(t *testing.T) {
 
 	if got := bi.calls.Load(); got != 1 {
 		t.Fatalf("InterruptViaControl call count = %d, want 1", got)
+	}
+}
+
+// TestRunDeadlineWatchdog_TimeoutBumpsMetric is the regression test for
+// R20260527122801-SEC-3 (#1327). The watchdog timeout branch publishes
+// CronWatchdogInterruptTimeoutTotal so operators can alert on wedged
+// InterruptViaControl events; pre-fix the timeout fired silently and the
+// only signal was a slow-rising goroutine count. NOT t.Parallel() —
+// mutates the package-level watchdogInterruptTimeoutAtomic and reads the
+// shared metric counter (which other tests may also touch but only via
+// strict deltas around this test).
+func TestRunDeadlineWatchdog_TimeoutBumpsMetric(t *testing.T) {
+	prev := watchdogInterruptTimeoutAtomic.Load()
+	watchdogInterruptTimeoutAtomic.Store(int64(50 * time.Millisecond))
+	defer watchdogInterruptTimeoutAtomic.Store(prev)
+
+	before := metrics.CronWatchdogInterruptTimeoutTotal.Value()
+
+	bi := &blockingInterrupter{release: make(chan struct{}), outcome: InterruptSent}
+	defer close(bi.release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+
+	abort := <-runDeadlineWatchdog(ctx, bi)
+	if !abort.fired || abort.outcome != InterruptError {
+		t.Fatalf("abort = {fired:%v outcome:%v}, want {fired:true outcome:InterruptError}",
+			abort.fired, abort.outcome)
+	}
+
+	after := metrics.CronWatchdogInterruptTimeoutTotal.Value()
+	if got := after - before; got != 1 {
+		t.Fatalf("CronWatchdogInterruptTimeoutTotal delta = %d, want 1 (single timeout event)", got)
 	}
 }
 

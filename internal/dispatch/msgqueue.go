@@ -174,9 +174,13 @@ func (r *msgRing) reset() {
 // instead of being dropped. The owner goroutine drains the queue after
 // each turn completes.
 //
-// Thread-safe: all methods acquire mu.
+// Thread-safe: all mutating methods acquire mu (write lock); ShouldNotify's
+// fast cooldown-active path takes mu.RLock() only — see R20260528-PERF-19
+// (#1358). Switching from sync.Mutex to sync.RWMutex is non-breaking
+// because RWMutex.Lock/Unlock match Mutex's surface; existing call sites
+// that use Lock continue to serialise correctly.
 type MessageQueue struct {
-	mu           sync.Mutex
+	mu           sync.RWMutex
 	queues       map[string]*sessionQueue
 	maxDepth     int
 	collectDelay time.Duration
@@ -427,16 +431,58 @@ func (q *MessageQueue) CollectDelay() time.Duration {
 // Must not leak map entries: the drop-path cooldown uses a bounded list+map
 // LRU so chat A's notify does not silence chat B's without unbounded growth
 // on the maxDepth<=0 code path. All operations here are O(1).
+//
+// R20260528-PERF-19 (#1358): the cooldown-active fast path takes mu.RLock
+// only. The vast majority of busy-chat ShouldNotify calls land in the
+// "still inside the 3s cooldown" branch — that observation has no side
+// effects (no timestamp update, no LRU mutation), so a read lock is
+// sufficient and concurrent IM messages on different chats no longer
+// serialise on the write lock. Cooldown-expired or cold-key paths fall
+// through to the original Lock+Unlock branch where mutation happens.
+// Read-then-write is racy with another goroutine racing to Lock between
+// our RUnlock and Lock: the second goroutine may also see the cooldown
+// expired under RLock and both will try to fire the notify. The Lock
+// branch re-checks the cooldown under the write lock, so the second
+// goroutine observes the just-published timestamp and silently returns
+// false — at most one extra observation per cooldown window per key,
+// which the user-facing semantics already tolerate (the cooldown is
+// "approximately 3s", not strictly monotonic).
 func (q *MessageQueue) ShouldNotify(key string) bool {
 	const cooldown = int64(3 * time.Second)
-	q.mu.Lock()
-	defer q.mu.Unlock()
 	now := time.Now().UnixNano()
+
+	// Fast path: RLock-only probe. Returns false (no notify) when the
+	// cooldown is clearly active. Returns from the read-lock window so
+	// we do not promote to the write lock for the common busy-chat case.
+	q.mu.RLock()
 	if sq, ok := q.queues[key]; ok {
 		// Guard against NTP backwards-step: if now < lastNotifyNs the int64
 		// subtraction yields a negative value which is < positive cooldown,
 		// silencing notifications indefinitely. Treat any non-monotonic
-		// jump as "cooldown satisfied" and reset the anchor.
+		// jump as "cooldown satisfied" and fall through to the slow path
+		// where the anchor gets reset under the write lock.
+		if delta := now - sq.lastNotifyNs; delta >= 0 && delta < cooldown {
+			q.mu.RUnlock()
+			return false
+		}
+	} else if elem, ok := q.dropNotifyIndex[key]; ok {
+		entry := elem.Value.(*dropNotifyEntry)
+		if delta := now - entry.ts; delta >= 0 && delta < cooldown {
+			q.mu.RUnlock()
+			return false
+		}
+	}
+	q.mu.RUnlock()
+
+	// Slow path: the cooldown is expired (or the key is cold). Acquire
+	// the write lock and re-check under it before mutating; a sibling
+	// goroutine may have raced through the same RUnlock→Lock window and
+	// already published a fresh timestamp, in which case we observe the
+	// new value and return false. At-most-one-extra-fire-per-window is
+	// the bounded race outcome — see method godoc above.
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if sq, ok := q.queues[key]; ok {
 		if delta := now - sq.lastNotifyNs; delta >= 0 && delta < cooldown {
 			return false
 		}

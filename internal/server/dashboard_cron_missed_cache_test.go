@@ -1,6 +1,7 @@
 package server
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -105,20 +106,28 @@ func TestMissedScheduleVerdict_NilJob(t *testing.T) {
 	}
 }
 
-// TestMissedScheduleVerdict_CapResetsOnOverflow verifies the cap-reset
-// guard so a burst of (jobID, schedule, startedAt) churn cannot grow
-// the cache beyond missedCacheCap. The reset path drops the entire
-// map and rebuilds it with the new entry — cheaper than per-call
-// eviction on the heartbeat path.
-func TestMissedScheduleVerdict_CapResetsOnOverflow(t *testing.T) {
+// TestMissedScheduleVerdict_EvictsOldestOnOverflow verifies the LRU-by-
+// computedAt eviction path: a burst that hits missedCacheCap must shed
+// roughly the oldest decile of entries (R260528-PERF-5 / #1352) — not
+// drop the entire map — so the warm long-lived heartbeat fleet survives
+// a UpdateJob churn burst and the next poll does not pay N×Parse.
+func TestMissedScheduleVerdict_EvictsOldestOnOverflow(t *testing.T) {
 	t.Parallel()
 
 	h := &CronHandlers{}
-	// Pre-seed the cache up to the cap with synthetic entries.
+	now := time.Now()
+
+	// Pre-seed the cache up to the cap with computedAt timestamps spread
+	// across a deterministic ordering: index 0 is the oldest, index
+	// missedCacheCap-1 is the newest. The eviction sweep should target
+	// the low-index entries.
 	h.missedCacheMu.Lock()
 	h.missedCache = make(map[string]missedVerdict, missedCacheCap)
 	for i := 0; i < missedCacheCap; i++ {
-		h.missedCache[string(rune('a'+i%26))+"|x|"+time.Now().String()+":"+string(rune(i%128))] = missedVerdict{}
+		key := "k|x|" + strconv.Itoa(i)
+		h.missedCache[key] = missedVerdict{
+			computedAt: now.Add(time.Duration(i) * time.Microsecond),
+		}
 	}
 	preLen := len(h.missedCache)
 	h.missedCacheMu.Unlock()
@@ -127,19 +136,35 @@ func TestMissedScheduleVerdict_CapResetsOnOverflow(t *testing.T) {
 		t.Fatalf("setup: cache size = %d, want %d", preLen, missedCacheCap)
 	}
 
-	// One more verdict push — the cap branch should fire and reset.
-	now := time.Now()
+	// One more verdict push — the cap branch should evict the oldest
+	// decile and insert the fresh entry.
 	startedAt := now.Add(-2 * time.Hour)
 	j := &cron.Job{ID: "overflow-trigger", Schedule: "@every 1m", CreatedAt: now.Add(-1 * time.Hour)}
 	h.missedScheduleVerdict(j, now, startedAt)
 
 	h.missedCacheMu.Lock()
+	defer h.missedCacheMu.Unlock()
 	postLen := len(h.missedCache)
-	h.missedCacheMu.Unlock()
-	if postLen >= missedCacheCap {
-		t.Errorf("cap reset failed: cache size = %d, want < %d after overflow trigger", postLen, missedCacheCap)
+
+	// After eviction: cap - drop + 1 (the new entry). drop ~= cap/ratio.
+	wantDrop := missedCacheCap / missedCacheEvictRatio
+	wantLen := missedCacheCap - wantDrop + 1
+	if postLen != wantLen {
+		t.Errorf("post-eviction cache size = %d, want %d (cap=%d, drop=%d, +1 fresh)",
+			postLen, wantLen, missedCacheCap, wantDrop)
 	}
-	if postLen != 1 {
-		t.Errorf("cap reset path: cache size = %d, want exactly 1 fresh entry", postLen)
+	if postLen >= missedCacheCap {
+		t.Errorf("cap eviction failed: cache size = %d, want < %d", postLen, missedCacheCap)
+	}
+
+	// The oldest decile must be gone; the newest decile must have
+	// survived. Sample both ends to prove LRU-by-computedAt was honoured.
+	oldestKey := "k|x|0"
+	if _, stillThere := h.missedCache[oldestKey]; stillThere {
+		t.Errorf("oldest entry %q survived eviction; LRU-by-computedAt order broken", oldestKey)
+	}
+	newestKey := "k|x|" + strconv.Itoa(missedCacheCap-1)
+	if _, stillThere := h.missedCache[newestKey]; !stillThere {
+		t.Errorf("newest entry %q evicted; LRU-by-computedAt order broken", newestKey)
 	}
 }

@@ -414,6 +414,17 @@ func (s jobSnapshot) labelOrID() string {
 func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return snapshotJobLocked(j)
+}
+
+// snapshotJobLocked is the lock-held variant of snapshotJob: callers MUST
+// hold s.mu (read or write). Used by executeOpt's jitter-window block to
+// fold the post-jitter `cur.Paused` recheck and the snapshot copy into a
+// single RLock window — eliminates the back-to-back RLock pair flagged in
+// R20260528-PERF-2 (#1351). Kept as a free function (rather than a method
+// on *Scheduler) so the dependency on the caller's RLock is documented at
+// the call site and the helper cannot accidentally re-acquire the lock.
+func snapshotJobLocked(j *Job) jobSnapshot {
 	snap := jobSnapshot{
 		prompt:        j.Prompt,
 		workDir:       j.WorkDir,
@@ -741,6 +752,18 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 		case outcome := <-done:
 			ch <- abortResult{outcome: outcome, fired: true}
 		case <-t.C:
+			// R20260527122801-SEC-3 (#1327): the inner goroutine above
+			// is still parked on InterruptViaControl and will outlive
+			// this watchdog goroutine until the wedged stdin write
+			// unblocks (typically on the next session.Reset; for non-
+			// fresh jobs that may never happen on its own). Surface the
+			// event via a metric + Warn log so operators can alert on
+			// rising deltas rather than discovering it via slow goroutine
+			// growth. The metric lives next to other cron counters in
+			// internal/metrics so the dashboard wireup is identical.
+			metrics.CronWatchdogInterruptTimeoutTotal.Add(1)
+			slog.Warn("cron watchdog: InterruptViaControl timeout exceeded; inner goroutine parked until session reset",
+				"timeout", watchdogInterruptTimeout())
 			ch <- abortResult{outcome: InterruptError, fired: true}
 		}
 	}()
@@ -967,6 +990,16 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// without the lock was redundant and -race-suspect.
 	// CronRunStartedTotal bumps inside emitRunStarted (R230C-GO-15).
 
+	// snap is populated either inside the jitter block (folded RLock with
+	// the post-jitter recheck — R20260528-PERF-2 / #1351) or by the
+	// fall-through snapshotJob() call below. snapTaken tracks which path
+	// won so we never double-snapshot — taking it twice would risk the
+	// second read seeing a fresher UpdateJob than the recheck observed,
+	// silently violating the "post-jitter snapshot reflects the same
+	// instant the recheck verified" contract.
+	var snap jobSnapshot
+	var snapTaken bool
+
 	// Apply jitter after CAS, before snapshot. After-CAS so concurrent overlap
 	// triggers are rejected immediately. Before-snapshot so an UpdateJob that
 	// lands during the jitter window still lets the subsequent snapshot read
@@ -1026,9 +1059,22 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		// snapshotJob reads under s.mu so a stale dereference is
 		// impossible after Delete (the field reads return the last-known
 		// values and we never use them past this point).
+		//
+		// R20260528-PERF-2 (#1351): the snapshot copy is also taken under
+		// the SAME RLock when the recheck passes — see snapshotJobLocked.
+		// This eliminates the immediately-following second RLock the
+		// pre-fix code paid via s.snapshotJob(j). The
+		// `cur, stillRegistered` / `paused := ...` literal pattern stays
+		// in this brace scope so
+		// TestExecuteOpt_JitterPausedReCheck_SourceAnchor in jitter_test.go
+		// continues to lock down the recheck against silent removal.
 		s.mu.RLock()
 		cur, stillRegistered := s.jobs[j.ID]
 		paused := stillRegistered && cur.Paused
+		if stillRegistered && !paused {
+			snap = snapshotJobLocked(j)
+			snapTaken = true
+		}
 		s.mu.RUnlock()
 		if !stillRegistered {
 			slog.Debug("cron: job deleted during jitter window, aborting run",
@@ -1044,8 +1090,12 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 
 	// Snapshot mutable Job fields once under s.mu so the rest of the
 	// execution can run lock-free; concurrent SetJobPrompt/UpdateJob land
-	// for the next tick rather than racing this in-flight result.
-	snap := s.snapshotJob(j)
+	// for the next tick rather than racing this in-flight result. The
+	// jitter-enabled path already populated snap inside the recheck's
+	// RLock window — skip the redundant call here.
+	if !snapTaken {
+		snap = s.snapshotJob(j)
+	}
 	inflight.setFresh(snap.fresh)
 
 	// Resolve the effective notification target. Returns empty struct
