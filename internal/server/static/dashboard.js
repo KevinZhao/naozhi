@@ -154,6 +154,55 @@ function lsRemove(key) { try { localStorage.removeItem(LS_PREFIX + key); } catch
 // persisted state across 17 call sites is riskier than the double-prefix
 // quirk it would fix. Revisit when LS_SCHEMA is bumped.
 
+// THEME-1 (#453) — theme cycler. The dashboard was GitHub-Dark hardcoded
+// before this; users with a light-mode preference (or who want to follow
+// OS) now get a 3-state toggle in the sidebar header. State is persisted
+// to localStorage('nz_theme') as 'light' / 'dark' / 'auto' (default).
+// The inline early-paint applier in dashboard.html sets data-theme before
+// stylesheet evaluation to avoid FOUC; this helper updates the same
+// attribute + writes localStorage on each click. CSS handles the rest
+// via :root[data-theme="..."] token overrides — no class toggling, no
+// per-element repaint needed. Note: we deliberately do NOT use the
+// LS_PREFIX'd lsSet here because the early-paint script reads the raw
+// 'nz_theme' key directly (no JSON wrapper, no prefix) for minimum work
+// in the critical path.
+const THEME_LS_KEY = 'nz_theme';
+const THEME_ORDER = ['auto', 'light', 'dark'];
+const THEME_LABELS = { auto: '跟随系统', light: '浅色', dark: '深色' };
+function getCurrentTheme() {
+  try {
+    const t = localStorage.getItem(THEME_LS_KEY);
+    if (THEME_ORDER.indexOf(t) >= 0) return t;
+  } catch (_) {}
+  return 'auto';
+}
+function applyTheme(theme) {
+  if (THEME_ORDER.indexOf(theme) < 0) theme = 'auto';
+  document.documentElement.setAttribute('data-theme', theme);
+  try { localStorage.setItem(THEME_LS_KEY, theme); } catch (_) {}
+  const btn = document.getElementById('btn-theme');
+  if (btn) {
+    const label = THEME_LABELS[theme] || '跟随系统';
+    btn.title = '切换主题 (当前: ' + label + ')';
+    btn.setAttribute('aria-label', '切换主题，当前: ' + label);
+    btn.dataset.themeMode = theme;
+  }
+}
+function cycleTheme() {
+  const cur = getCurrentTheme();
+  const next = THEME_ORDER[(THEME_ORDER.indexOf(cur) + 1) % THEME_ORDER.length];
+  applyTheme(next);
+  if (typeof showToast === 'function') {
+    showToast('主题: ' + (THEME_LABELS[next] || next), 'info', 1200);
+  }
+}
+// Wire title/aria on first load so the button reflects the persisted
+// state (the inline early-paint script already set data-theme; this
+// just syncs the visible affordances).
+document.addEventListener('DOMContentLoaded', function () {
+  applyTheme(getCurrentTheme());
+});
+
 function getToken() { return ''; }
 function setToken(t) { /* token stored in HttpOnly cookie only */ }
 
