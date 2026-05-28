@@ -686,8 +686,29 @@ func (p *Persister) run() {
 
 // shutdownAll closes every writer, fsyncing first so we don't lose a
 // debounce window's worth of data on a clean Stop.
+//
+// R040034-PERF-13 (#1408): the per-writer flush+close pair issues two
+// fsyncs (log + idx) — at 5-20 ms each on a slow SSD, 100+ writers ×
+// 2 fsyncs serialised would block Stop for 1-4 s. Parallelise across a
+// small worker pool so the shutdown-budget caller observes the slowest
+// writer's pair instead of the sum. Each *perKeyWriter is independent
+// (distinct fds, distinct buffers; no aliasing through Persister), and
+// the only Persister state mutated inside flush()/close() is the
+// fsyncCnt atomic + the thread-safe Observer (godoc on Observer
+// requires non-blocking + thread-safe). Writers live on the run
+// goroutine's owned p.writers map — we iterate to a slice first so
+// fan-out doesn't touch the map concurrently with the parallel work.
 func (p *Persister) shutdownAll() {
+	if len(p.writers) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(p.writers))
+	ws := make([]*perKeyWriter, 0, len(p.writers))
 	for k, w := range p.writers {
+		keys = append(keys, k)
+		ws = append(ws, w)
+	}
+	p.parallelFsync(keys, ws, func(k string, w *perKeyWriter) {
 		if err := w.flush(p); err != nil {
 			slog.Warn("event log persist: flush on shutdown failed",
 				"key", k, "err", err)
@@ -696,8 +717,74 @@ func (p *Persister) shutdownAll() {
 			slog.Warn("event log persist: close on shutdown failed",
 				"key", k, "err", err)
 		}
+	})
+	for _, k := range keys {
 		delete(p.writers, k)
 	}
+}
+
+// parallelFsyncMaxWorkers caps the worker-pool size used by
+// shutdownAll / flushAllLocked. Each worker may sit blocked in fsync
+// for tens of ms on slow disks, so a small pool is intentional —
+// 8-way parallelism reduces the ~2N fsync wall time to ~N/8 with a
+// bounded number of in-flight kernel writeback paths. Auto-sized
+// down to len(writers) when fewer writers are present so a single-
+// writer flush stays serial (no WaitGroup overhead).
+const parallelFsyncMaxWorkers = 8
+
+// parallelFsyncWorkers is the writable hook tests use to pin a
+// single worker for deterministic ordering, or 0 to use the default
+// auto-sizing up to parallelFsyncMaxWorkers. Production callers
+// leave it at 0.
+var parallelFsyncWorkers = 0
+
+// parallelFsync fans `fn` over (keys[i], ws[i]) using a bounded
+// worker pool. Single-entry input skips the WaitGroup entirely so
+// the typical "1-2 active sessions on Stop" footprint stays cheap.
+// Each fn call runs concurrently with at most workers-1 others; the
+// caller MUST guarantee that fn does not mutate any state shared
+// across writer indices (per-writer fields are safe; persister-
+// global state must already be atomic / mutex-guarded — see godoc
+// on shutdownAll for the audit). Joins all workers before returning
+// so the caller can safely mutate the writers map afterward.
+func (p *Persister) parallelFsync(keys []string, ws []*perKeyWriter, fn func(string, *perKeyWriter)) {
+	n := len(ws)
+	if n == 0 {
+		return
+	}
+	if n == 1 {
+		fn(keys[0], ws[0])
+		return
+	}
+	workers := parallelFsyncWorkers
+	if workers <= 0 {
+		workers = parallelFsyncMaxWorkers
+	}
+	if workers > n {
+		workers = n
+	}
+	if workers == 1 {
+		for i := range ws {
+			fn(keys[i], ws[i])
+		}
+		return
+	}
+	var idx atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for {
+				i := idx.Add(1) - 1
+				if i >= int64(n) {
+					return
+				}
+				fn(keys[i], ws[i])
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func (p *Persister) handleOp(o op) {
@@ -806,24 +893,43 @@ func (p *Persister) removeKeyFiles(stem string) error {
 }
 
 func (p *Persister) flushAllLocked() error {
-	var firstErr error
+	// R250-PERF-25 (#1128): pre-filter dirty writers so the fan-out
+	// payload is only the actual fsync workload. The dirty bit is
+	// only mutated on the run goroutine that owns this iteration so
+	// no synchronisation is needed for the read.
+	if len(p.writers) == 0 {
+		return nil
+	}
+	dirtyKeys := make([]string, 0, len(p.writers))
+	dirtyWs := make([]*perKeyWriter, 0, len(p.writers))
 	for k, w := range p.writers {
-		// R250-PERF-25 (#1128): w.flush() already short-circuits on
-		// !w.dirty, but at 100+ writers with most idle the per-call
-		// frame overhead (atomic loads, interface dispatch on the
-		// inlined-but-not-zero check) adds up. Skip the call entirely
-		// for clean writers — the dirty bit is only mutated on the
-		// run goroutine that already owns this iteration, so no
-		// synchronisation is needed.
 		if !w.dirty {
 			continue
 		}
+		dirtyKeys = append(dirtyKeys, k)
+		dirtyWs = append(dirtyWs, w)
+	}
+	if len(dirtyWs) == 0 {
+		return nil
+	}
+	// R040034-PERF-13 (#1408): parallel-flush dirty writers via a
+	// bounded worker pool. Same independence-of-state argument as
+	// shutdownAll — see godoc above for the audit. firstErr is
+	// recorded under errMu so concurrent writers racing to lose can
+	// still surface a single representative error to the caller.
+	var (
+		errMu    sync.Mutex
+		firstErr error
+	)
+	p.parallelFsync(dirtyKeys, dirtyWs, func(k string, w *perKeyWriter) {
 		if err := w.flush(p); err != nil {
+			errMu.Lock()
 			if firstErr == nil {
 				firstErr = fmt.Errorf("flush %s: %w", k, err)
 			}
+			errMu.Unlock()
 		}
-	}
+	})
 	return firstErr
 }
 
