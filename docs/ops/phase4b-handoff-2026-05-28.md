@@ -203,3 +203,88 @@ SOP"），但**不应在本会话尝试 ~2400 行物理搬迁**。
 | (本 PR) | 文档 | 4b hand-off 报告 |
 
 **总计 +4500+ 行 inserts，全部 merged，CI 全绿**。
+
+---
+
+## 附录 B：wshub 子包实测对账表（2026-05-28 重新核验）
+
+**目的**：本附录是对 `internal/wshub/` 子包**实际状态**的精确清点，
+给下次接手 4b 的人一个不需要重新调研的起点。本次会话另起 14 个独立
+物理切分 PR（#1444-#1457），全部**零侵入** `internal/wshub/`，所以
+此表与本会话开始时一致——4b 实质工作仍未完成。
+
+### 当前 internal/wshub/ 文件清单
+
+| 文件 | 行数 | 状态 | 来源 |
+|---|---|---|---|
+| `hub.go` | 276 | ✅ **真实**：49 字段 Hub struct + NewHub ctor + Shutdown 协调 | #1393 (4a) + #1429 (4b-hub-sync) |
+| `types.go` | 95 | ✅ **真实**：HubRouter 14-method interface | #1427 (4b-router) |
+| `hub_subscribe.go` | 32 | ❌ **placeholder**：Register/Unregister stub | #1393 |
+| `hub_send.go` | 35 | ⚠️ **半实**：TrackSend / DoneSend 真实但仅是基础闸门，无 sessionSend / ownerLoop / runTurn | #1393 |
+| `hub_broadcast.go` | 22 | ❌ **placeholder**：BroadcastSessionsUpdate 仅检 debounceClosedFast 返回 | #1393 |
+| `hub_agent.go` | 24 | ❌ **placeholder**：SubscribeAgent / UnsubscribeAgent stub | #1393 |
+| `hub_eventpush.go` | 16 | ❌ **placeholder**：startEventPushLoop stub | #1393 |
+| `hub_concurrency_test.go` | 158 | ✅ **真实**：仅测试已搬走的 TrackSend 等 | #1393 |
+
+### 仍在 server 包的 *Hub method（待 4b 真实搬迁）
+
+| 文件 | 行数（master 最新）| 范围 |
+|---|---|---|
+| `internal/server/wshub.go` | 1107 | Hub 主体（被 wshub.Hub 镜像但 method 未搬）|
+| `internal/server/wshub_subscribe.go` | 429 | 订阅相关 *Hub method |
+| `internal/server/wshub_send.go` | 419 | send 路径 *Hub method |
+| `internal/server/wshub_broadcast.go` | 414 | broadcast/debounce *Hub method |
+| `internal/server/wshub_eventpush.go` | 410 | event push loop *Hub method |
+| `internal/server/wshub_upgrade.go` | 348 | WS upgrade *Hub method |
+| `internal/server/wsclient.go` | 474 | wsClient struct + 方法 |
+| **总计** | **~3601 行** | + ~30 个 _test.go 文件 |
+
+注：3601 行比 §2 表的 ~2400 行高——因为本附录把 wshub.go 主体本身
+也算进来了；§2 表只算 wshub_*.go 子文件。两者不冲突，看你统计口径。
+
+### 给接手者的两步确认（≤ 5 分钟）
+
+```bash
+# 1. 看 placeholder 长什么样：grep 看 _ = 标记数
+grep -c "_ = \|placeholder" internal/wshub/hub_*.go
+
+# 2. 看 master 实际 Hub method 数（在 server 包仍未搬走）
+grep -rE "^func \(h \*Hub\)" internal/server/ | wc -l
+```
+
+预期输出：
+- `hub_subscribe.go: 5`、`hub_broadcast.go: 2`、`hub_agent.go: 6`、
+  `hub_eventpush.go: 3`、`hub_send.go: 2`（placeholder 数）
+- master *Hub method 数 ~70+（具体数字按 master 漂移）
+
+### 本会话其他 14 个 PR 的影响（明示零侵入）
+
+| PR 范围 | 改的文件 | 是否触及 wshub 子包 |
+|---|---|---|
+| #1444 / #1448 | dashboard.go (-184) + static_assets.go | ❌ 无 |
+| #1445 | server.go ServerOptions (-123) + server_options.go | ❌ 无 |
+| #1446 | dashboard_send.go anon cookie (-117) + send_anon_cookie.go | ❌ 无 |
+| #1447 | agent_tailer.go pools (-123) + agent_tailer_pools.go | ❌ 无 |
+| #1449 | dashboard_send.go attachment validate (-272) + send_attachment_validate.go | ❌ 无 |
+| #1450 | agent_tailer.go path check (-77) + agent_tailer_pathcheck.go | ❌ 无 |
+| #1451 | send.go serverCaps (-61) + send_dispatch_adapter.go | ❌ 无 |
+| #1452 | server.go validate (-164) + server_validate.go | ❌ 无 |
+| #1453 | agent_tailer.go registry (-339) + agent_tailer_registry.go | ❌ 无 |
+| #1454 (OPEN) | server.go cookie (-84) + server_cookie.go | ❌ 无 |
+| #1455 (OPEN) | dashboard_send.go persist (-126) + send_persist.go | ❌ 无 |
+| #1456 (OPEN) | send.go ownerLoop (-87) + send_owner_loop.go | ❌ 无 |
+| #1457 (OPEN) | server.go warnings (-90) + server_warnings.go | ❌ 无 |
+
+**结论**：本会话 14 PR **完全没有动 wshub 子包**——它们都是非 4b 范围
+的物理切分。Phase 4b 的接手 SOP（playbook step 1-7）现在依然完整可用，
+不需要因为本会话的工作而修订。
+
+### 给接手者的关键链接
+
+- 主 playbook：`docs/ops/phase4b-implementation-playbook.md`
+- feasibility report：`docs/ops/phase4b-feasibility-report.md`
+- 设计稿 §6.5 Plan B：`docs/design/server-split-phase4-design.md`
+
+> **接手者须知**：playbook step 1-7 是**严格序列依赖**，不可跳步、
+> 不可乱序。Step 1+2（wsClient + HubRouter type）必须作为单一 ~600 行
+> PR 一次性完成，否则 build 不过。这是 Phase 4b 真正的入口阻塞点。
