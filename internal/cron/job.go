@@ -10,6 +10,7 @@ import (
 
 	robfigcron "github.com/robfig/cron/v3"
 
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
@@ -164,30 +165,41 @@ type Job struct {
 
 // RunState 是单次 cron 执行的终态分类。运行中态不进 RunState（用 runInflight
 // 表达），只有进入持久化路径的 run 才会带 State。
-type RunState string
+//
+// R20260527122801-ARCH-2 (#1317): 该类型现在是
+// runtelemetry.RunState 的 type alias，与 sysession 共享同一个 wire
+// vocabulary。emitRunStarted/emitRunEnded 内部从 cron.RunState 转
+// runtelemetry.RunState 的 cast 退化成 no-op；测试 / 调用方代码
+// 不需要改。新增 RunState 应加在 runtelemetry/state.go 单一来源处，
+// 这里通过 alias 自动继承。
+type RunState = runtelemetry.RunState
 
 const (
-	RunStateSucceeded RunState = "succeeded"
-	RunStateFailed    RunState = "failed"
-	RunStateSkipped   RunState = "skipped"
-	RunStateTimedOut  RunState = "timed_out"
-	RunStateCanceled  RunState = "canceled"
+	RunStateSucceeded = runtelemetry.RunStateSucceeded
+	RunStateFailed    = runtelemetry.RunStateFailed
+	RunStateSkipped   = runtelemetry.RunStateSkipped
+	RunStateTimedOut  = runtelemetry.RunStateTimedOut
+	RunStateCanceled  = runtelemetry.RunStateCanceled
 )
 
 // TriggerKind 标识 run 的触发来源。manual = TriggerNow，scheduled = robfig
 // tick，catchup 给未来 missed-schedule 重跑保留位（P3）。
-type TriggerKind string
+//
+// R20260527122801-ARCH-2 (#1317): 同 RunState 一样，本类型是
+// runtelemetry.TriggerKind 的 type alias。emit* 路径里的 cast 退
+// 化成 no-op；新 trigger value 加在 runtelemetry 单一来源处。
+type TriggerKind = runtelemetry.TriggerKind
 
 const (
-	TriggerScheduled TriggerKind = "scheduled"
-	TriggerManual    TriggerKind = "manual"
+	TriggerScheduled = runtelemetry.TriggerScheduled
+	TriggerManual    = runtelemetry.TriggerManual
 	// TriggerCatchup is reserved for the missed-schedule replay path (P3,
 	// not yet implemented). No production code emits it today; consumers
 	// should treat unknown trigger strings as forward-compatible.
 	// R235-CR-13: do NOT reference this value from production code paths
 	// until the missed-schedule replay design is settled — adding stray
 	// emit sites now would freeze a wire format that may still change.
-	TriggerCatchup TriggerKind = "catchup"
+	TriggerCatchup = runtelemetry.TriggerCatchup
 )
 
 // ErrorClass 是 cron run 错误的机器可读分类。executeOpt 各失败分支映射到
