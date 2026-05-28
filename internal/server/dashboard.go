@@ -269,11 +269,11 @@ func (s *Server) registerDashboard() {
 
 	// Authenticated API routes
 	auth := s.auth.RequireAuth
-	s.mux.HandleFunc("GET /api/cli/backends", auth(s.cliH.handle))
+	s.mux.HandleFunc("GET /api/cli/backends", auth(s.cliH.Handle))
 	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.handleList))
 	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.handleEvents))
-	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.handleAgentEvents))
-	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.handleToolResult))
+	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.HandleAgentEvents))
+	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.HandleToolResult))
 	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
 	s.mux.HandleFunc("POST /api/sessions/upload", auth(s.sendH.handleUpload))
 	s.mux.HandleFunc("GET /api/sessions/attachment", auth(s.sendH.handleAttachment))
@@ -297,7 +297,7 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("POST /api/projects/favorite", auth(s.projectH.handleFavoriteToggle))
 	s.mux.HandleFunc("POST /api/projects/files/exists", auth(s.projectH.handleFilesExists))
 	s.mux.HandleFunc("GET /api/projects/file", auth(s.projectH.handleFileGet))
-	s.mux.HandleFunc("POST /api/transcribe", auth(s.transcribeH.handleTranscribe))
+	s.mux.HandleFunc("POST /api/transcribe", auth(s.transcribeH.HandleTranscribe))
 	s.mux.HandleFunc("GET /api/cron", auth(s.cronH.handleList))
 	s.mux.HandleFunc("POST /api/cron", auth(s.cronH.handleCreate))
 	s.mux.HandleFunc("PATCH /api/cron", auth(s.cronH.handleUpdate))

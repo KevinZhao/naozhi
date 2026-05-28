@@ -1,4 +1,4 @@
-package server
+package transcribe
 
 import (
 	"context"
@@ -8,37 +8,38 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
-	"github.com/naozhi/naozhi/internal/transcribe"
+	transcribepkg "github.com/naozhi/naozhi/internal/transcribe"
 )
 
-// transcribeSemCap is the maximum number of concurrent ffmpeg transcriptions.
+// TranscribeSemCap is the maximum number of concurrent ffmpeg transcriptions.
 // Exceeded requests receive 503 immediately to prevent CPU/memory DoS.
-const transcribeSemCap = 3
+const TranscribeSemCap = 3
 
 // transcribeWallClockCap bounds the wall-clock lifetime of a single Transcribe
 // call (R247-SEC-6, #499). The underlying ffmpeg decode stage relies on
 // ctx-cancel propagation (no `-t` argv flag), so a crafted audio stream
 // that loops indefinitely inside libavformat could otherwise occupy a
-// transcribeSemCap slot until the outer HTTP request context cancels —
+// TranscribeSemCap slot until the outer HTTP request context cancels —
 // which for a long client connection may be effectively never. 10 minutes
 // matches the proposal in #499 and is well above the 10 MB upload cap ×
 // realistic decode throughput, so it cannot fire on legitimate audio.
 const transcribeWallClockCap = 10 * time.Minute
 
-// TranscribeHandler handles the audio transcription API endpoint.
-type TranscribeHandler struct {
-	transcriber       transcribe.Service
-	transcribeLimiter *ipLimiter    // per-IP transcribe rate limiter (5/min)
-	sem               chan struct{} // concurrency limiter (capacity transcribeSemCap)
+// Handler handles the audio transcription API endpoint.
+type Handler struct {
+	transcriber       transcribepkg.Service
+	transcribeLimiter IPLimiter    // per-IP transcribe rate limiter (5/min)
+	sem               chan struct{} // concurrency limiter (capacity TranscribeSemCap)
 }
 
-// handleTranscribe accepts an audio file upload and returns transcribed text.
+// HandleTranscribe accepts an audio file upload and returns transcribed text.
 // POST /api/transcribe  (multipart/form-data, field "audio")
-func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleTranscribe(w http.ResponseWriter, r *http.Request) {
 	if h.transcribeLimiter != nil && !h.transcribeLimiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "transcribe rate limit exceeded"})
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "transcribe rate limit exceeded"})
 		return
 	}
 	if h.transcriber == nil {
@@ -51,10 +52,10 @@ func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Requ
 	case h.sem <- struct{}{}:
 		defer func() { <-h.sem }()
 	case <-r.Context().Done():
-		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcribe busy"})
+		httputil.WriteJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcribe busy"})
 		return
 	default:
-		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcribe busy"})
+		httputil.WriteJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcribe busy"})
 		return
 	}
 
@@ -139,7 +140,7 @@ func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Requ
 		mimeType = "audio/ogg"
 	}
 	// R247-SEC-6 (#499): bound the decode stage with a wall-clock cap so
-	// a crafted audio cannot pin a transcribeSemCap slot indefinitely.
+	// a crafted audio cannot pin a TranscribeSemCap slot indefinitely.
 	tctx, tcancel := context.WithTimeout(r.Context(), transcribeWallClockCap)
 	defer tcancel()
 	text, err := h.transcriber.Transcribe(tctx, data, mimeType)
@@ -171,5 +172,25 @@ func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Requ
 
 	slog.Info("transcribe ok", "text_len", len(text), "mime", mimeType, "size", len(data))
 
-	writeJSON(w, map[string]string{"text": text})
+	httputil.WriteJSON(w, map[string]string{"text": text})
+}
+
+// Deps bundles all wiring for New. Phase 3d.
+type Deps struct {
+	Transcriber transcribepkg.Service
+	Limiter     IPLimiter
+	SemCap      int
+}
+
+// New constructs a Handler from injected deps.
+func New(d Deps) *Handler {
+	var sem chan struct{}
+	if d.SemCap > 0 {
+		sem = make(chan struct{}, d.SemCap)
+	}
+	return &Handler{
+		transcriber:       d.Transcriber,
+		transcribeLimiter: d.Limiter,
+		sem:               sem,
+	}
 }
