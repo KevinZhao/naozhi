@@ -168,6 +168,56 @@ type healthResp struct {
 	*healthAuthSection
 }
 
+// handleLivez serves /livez — Kubernetes-style liveness probe. Returns
+// 200 if the process is alive (i.e. this goroutine got scheduled and the
+// HTTP serve loop is running). NEVER touches dependencies (router, hub,
+// CLI, eventlog) so a backed-up dependency cannot cause a liveness failure
+// and trigger a restart loop. Always unauthenticated; the response body is
+// the static literal "ok\n" so an attacker scanning the endpoint cannot
+// fingerprint the deployment beyond "naozhi is up". R247-ARCH-1 (#609).
+//
+// Restart loop hazard: every K8s probe cycle that observes a non-200 here
+// kills the process. Anything that can wedge under load (cron, transcript
+// store, eventlog drain) must therefore stay OUT of this handler — those
+// concerns belong on /readyz where a temporary not-ready merely removes
+// the pod from the load-balancer rotation without restarting it.
+func (h *HealthHandler) handleLivez(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte("ok\n"))
+}
+
+// handleReadyz serves /readyz — Kubernetes-style readiness probe. Returns
+// 200 only when the process is ready to accept traffic: HTTP listener
+// bound (implicit — this handler is registered after Start) and the
+// router has finished its startup wiring (hub != nil). When not ready,
+// returns 503 with a short reason so operators tailing the probe history
+// see why traffic was blackholed. Like /livez, never returns the rich
+// stats / version / sub-objects so an unauthenticated probe cannot
+// fingerprint the binary beyond "ready"/"not ready". R247-ARCH-1 (#609).
+//
+// Why this is separate from /livez: a wedged dependency (eventlog drain
+// stuck, scheduler restart panic loop) should drop the pod from the LB
+// rotation but NOT trigger a kill — readiness expresses "send me traffic"
+// while liveness expresses "I'm alive at all". Conflating them turns a
+// transient dep wobble into a restart storm. The split mirrors the
+// k8s probe contract every orchestrator (k8s, ECS, Nomad, ALB target
+// groups via separate health-check paths) understands natively.
+func (h *HealthHandler) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	// Router presence is the minimal "wired" check — Start() bolts every
+	// handler onto a non-nil router before the listener accepts traffic,
+	// so router==nil here means the constructor partially-initialised
+	// HealthHandler (test harness) and the probe should fail closed.
+	if h.router == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("not ready: router unavailable\n"))
+		return
+	}
+	_, _ = w.Write([]byte("ready\n"))
+}
+
 // handleHealth serves /health with a two-tier response:
 //
 //   - Unauthenticated probes: status + uptime only. Intentionally cheap so

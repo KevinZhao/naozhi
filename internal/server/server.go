@@ -947,6 +947,15 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	s.mux.HandleFunc("GET /health", s.healthH.handleHealth)
+	// R247-ARCH-1 (#609): K8s-style probe split. /livez is a no-deps "process
+	// alive" check; /readyz gates on minimal wiring (router non-nil) without
+	// the rich auth-only stats /health surfaces. Orchestrators (K8s, ECS,
+	// Nomad, ALB target groups) can now point liveness at /livez and
+	// readiness at /readyz without parsing the JSON shape, and a wedged
+	// dependency drops the pod from rotation instead of triggering a
+	// restart loop.
+	s.mux.HandleFunc("GET /livez", s.healthH.handleLivez)
+	s.mux.HandleFunc("GET /readyz", s.healthH.handleReadyz)
 	s.appCtx = ctx
 	s.discoveryH.appCtx = ctx
 	s.registerDashboard()
