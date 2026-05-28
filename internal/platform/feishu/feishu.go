@@ -183,6 +183,17 @@ func (e *APIError) IsTokenExpired() bool {
 	return false
 }
 
+// IsTokenInvalidated implements platform.TokenInvalidatedError. Returns
+// true for the same codes as IsTokenExpired — when one of these errors
+// flows out of Feishu.Reply the cached access token has just been
+// cleared by maybeInvalidateOnTokenError, so ReplyWithRetry can grant
+// one extra retry with a propagation pause to give the next attempt a
+// fresh token that the upstream has had a chance to register. Issue
+// #1339.
+func (e *APIError) IsTokenInvalidated() bool {
+	return e.IsTokenExpired()
+}
+
 // Config holds Feishu app credentials.
 type Config struct {
 	AppID             string `yaml:"app_id"`
