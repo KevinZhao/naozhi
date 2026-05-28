@@ -43,6 +43,7 @@ func TestSessionHandlers_RecordRetired_StampsHistory(t *testing.T) {
 	srv.sessionH.historyCacheMu.Lock()
 	srv.sessionH.historyCache = nil
 	srv.sessionH.historyCacheTime = time.Time{}
+	srv.sessionH.historyCacheTimeUnixNano.Store(0)
 	srv.sessionH.historyCacheMu.Unlock()
 
 	// Inject an in-memory retired-store and stamp the test session.
