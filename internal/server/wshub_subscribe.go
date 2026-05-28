@@ -1,3 +1,14 @@
+// File-block contract (server-split-phase4-design v0.6.1 §五):
+//
+//	WRITES:     subscriber block (clients / connCount / subscriberCount /
+//	            clientWG / wsAuthLimiter / wsUpgradeLimiter / upgrader /
+//	            dashTokenHash / cookieMAC / trustedProxy)
+//	READS:      shared deps block (read-only after ctor)
+//	READS-ALSO: send block (sendClosed only — close client must drain
+//	            pending sends; lifecycle-coordinated)
+//
+// Phase 4b 起 rule 3b 升级到 AST 字段访问对账时，会校验本文件方法体
+// 真的只 WRITE subscriber 块字段；当前 Phase 0b 仅 marker 存在性。
 package server
 
 import (

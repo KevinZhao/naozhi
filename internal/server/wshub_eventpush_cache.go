@@ -1,3 +1,10 @@
+// File-block contract (server-split-phase4-design v0.6.1 §五):
+//
+//	WRITES:     rate-limit/cache block (historyMarshalCache only)
+//	READS:      none beyond historyMarshalCache itself; pure helper file
+//
+// 此文件实装 historyMarshalCache 的 sync.Map 抽象——单字段块持有，无
+// cross-block dependency。Phase 4b rule 3b 对账时是最简单的一类。
 package server
 
 import (

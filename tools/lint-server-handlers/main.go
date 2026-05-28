@@ -10,8 +10,17 @@
 //     Existing over-limit files are listed in exemptions.yaml with an
 //     `until_phase` field; the linter ignores them until the listed
 //     phase has merged. New files are always checked.
-//   - Rule 3 (field_block) — Phase 4 prerequisite, not yet implemented.
-//   - Rule 4 (iface_match) — Phase 1 prerequisite, not yet implemented.
+//   - Rule 3a (field_block markers, Phase 0 必交付): wshub_*.go godoc
+//     头必须含 Field-block contract / WRITES: / READS-ALSO: /
+//     LIFECYCLE-METHOD 标注。文本扫描，不做语义分析。
+//   - Rule 3b (field_block AST, Phase 4b 前) — TODO: 字段访问对账
+//     与 §五 7 块归属表 + 跨方法追踪。
+//   - Rule 4 (iface_match, Phase 0 框架 / Phase 1 前完整): 实现侧
+//     godoc 中的 satisfies: 注释必须在 consumer-contracts.md 有对应
+//     条目。Phase 0b 骨架仅扫接口名出现性；Phase 1 前升级 method-set 对账。
+//   - Rule 5 (stale_exemption, Phase 0 框架 / Phase 1 前完整): exemptions
+//     条目反向依赖检查。Phase 0b 骨架仅检查文件存在；Phase 1 前补 git
+//     tag 比对 + 行数比对 + Closes-exemption commit trailer 校验。
 //
 // Modes:
 //
@@ -139,10 +148,19 @@ func main() {
 		vs = append(vs, scanFileSize(*dashboardPkg, 800, exemptFiles)...)
 	}
 
-	// Rule 3 / 4: TODO Phase 4 / Phase 1 prerequisite (skeleton only).
-	// Print a one-liner so operators see the gap.
+	// Rule 3a (Phase 0b 必交付): field_block godoc 标注扫描
+	vs = append(vs, scanFieldBlockMarkers(*serverPkg)...)
+
+	// Rule 4 (Phase 0b 框架, Phase 1 前完整): iface_match
+	// 扫整仓 internal/ + cmd/ — 任何 godoc 含 satisfies: 注释的文件
+	vs = append(vs, scanIfaceMatch([]string{"internal", "cmd"})...)
+
+	// Rule 5 (Phase 0b 框架, Phase 1 前完整): stale_exemption
+	vs = append(vs, scanStaleExemption(exempts)...)
+
+	// Verbose mode: announce remaining skeleton work
 	if os.Getenv("LINT_VERBOSE") == "1" {
-		fmt.Fprintln(os.Stderr, "lint-server-handlers: rules 3 (field_block) and 4 (iface_match) are SKELETONS; full implementation due before Phase 4 merge / Phase 1 merge respectively (server-split-phase4-design.md §六.2.0.4)")
+		fmt.Fprintln(os.Stderr, "lint-server-handlers: rule 3b (AST field_block) due Phase 4b; rule 4 method-set 对账 + rule 5 git tag 对账 due Phase 1 (server-split-phase4-design.md v0.6.1 §六.2.0.4)")
 	}
 
 	if *sarif {
@@ -323,7 +341,7 @@ func emitText(vs []Violation) {
 // Actions consume this with codeql/upload-sarif. Keeping the producer
 // inline avoids pulling sarif-go (1k-line dep) for one report shape.
 func emitSARIF(vs []Violation) {
-	const head = `{"$schema":"https://docs.oasis-open.org/sarif/sarif/v2.1.0/cos02/schemas/sarif-schema-2.1.0.json","version":"2.1.0","runs":[{"tool":{"driver":{"name":"lint-server-handlers","informationUri":"https://github.com/naozhi/naozhi/blob/master/docs/design/server-split-phase4-design.md","rules":[{"id":"handle_decl"},{"id":"file_size"}]}},"results":[`
+	const head = `{"$schema":"https://docs.oasis-open.org/sarif/sarif/v2.1.0/cos02/schemas/sarif-schema-2.1.0.json","version":"2.1.0","runs":[{"tool":{"driver":{"name":"lint-server-handlers","informationUri":"https://github.com/naozhi/naozhi/blob/master/docs/design/server-split-phase4-design.md","rules":[{"id":"handle_decl"},{"id":"file_size"},{"id":"field_block"},{"id":"iface_match"},{"id":"stale_exemption"}]}},"results":[`
 	const tail = `]}]}`
 	var sb strings.Builder
 	sb.WriteString(head)
