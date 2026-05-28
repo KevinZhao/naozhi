@@ -1,3 +1,11 @@
+// File-block contract (server-split-phase4-design v0.6.1 §五):
+//
+//	WRITES:     none (interface declarations + var _ binding only)
+//	READS:      none
+//
+// Phase 4 抽包后这文件搬到 internal/wshub/types.go；其内容是接口定义而
+// 非方法——rule 3a/3b 的字段块对账对它不适用，但 marker 仍需声明
+// 以满足 Phase 0b 的 marker-existence gate。
 package server
 
 import (

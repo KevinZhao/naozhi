@@ -1,3 +1,10 @@
+// File-block contract (server-split-phase4-design v0.6.1 §五):
+//
+//	WRITES:     agent tailer block (tailers / wiredLinkersMu / wiredLinkers)
+//	READS:      shared deps block (router for session resolution)
+//
+// Phase 4b 起 rule 3b 升级到 AST 字段访问对账时，会校验本文件方法体
+// 的字段访问匹配本契约；当前 Phase 0b 仅 marker 存在性。
 package server
 
 import (

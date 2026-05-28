@@ -23,17 +23,27 @@ import (
 func TestSendCtxParentedOnStopCtx(t *testing.T) {
 	t.Parallel()
 	src := readSchedulerRunSource(t)
-	// Allow either order of the two args; gofmt always reorders to
-	// (parent, jobTimeout) so the literal substring is stable, but be
-	// explicit about both halves so a reformat that introduces newlines
-	// inside the call still passes.
-	if !strings.Contains(src, "context.WithTimeout(s.stopCtx, jobTimeout)") {
-		t.Errorf("scheduler_run.go must parent sendCtx on s.stopCtx;\n" +
-			"see issue #790 / #500 — Background() parent leaks Send past Stop()")
+	// R20260527122801-CR-2 (#1311) clamps sendCtx to a remaining-budget
+	// duration named `sendBudget`; before the clamp it was `jobTimeout`.
+	// Pin the actual sendCtx assignment line so a future refactor that
+	// re-uses jobTimeout for the spawn ctx but accidentally re-parents
+	// sendCtx on Background still trips this test. The historical
+	// substring `context.WithTimeout(s.stopCtx, jobTimeout)` only matched
+	// the spawn ctx (line ~1058), letting an inverted sendCtx slip
+	// through silently.
+	const sendCtxLine = "sendCtx, sendCancel := context.WithTimeout(s.stopCtx, sendBudget)"
+	if !strings.Contains(src, sendCtxLine) {
+		t.Errorf("scheduler_run.go must parent sendCtx on s.stopCtx;\n"+
+			"want substring %q\n"+
+			"see issue #790 / #500 — Background() parent leaks Send past Stop()",
+			sendCtxLine)
 	}
-	if strings.Contains(src, "context.WithTimeout(context.Background(), jobTimeout)") {
+	// Belt-and-braces: any sendCtx assignment using context.Background as
+	// parent is a regression regardless of the duration variable name.
+	if strings.Contains(src, "sendCtx, sendCancel := context.WithTimeout(context.Background()") ||
+		strings.Contains(src, "sendCtx, _ := context.WithTimeout(context.Background()") {
 		t.Errorf("scheduler_run.go still uses context.Background() for sendCtx; " +
-			"R238-GO-4 regression — must be s.stopCtx")
+			"R238-GO-4 / #500 regression — must be s.stopCtx")
 	}
 }
 

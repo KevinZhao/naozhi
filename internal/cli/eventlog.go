@@ -138,6 +138,16 @@ func sanitizeImagesAligned(imgs, paths []string) ([]string, []string) {
 // surface.
 type EventEntry = clievent.EventEntry
 
+// subagentRef points to a SubagentInfo entry inside either turnAgents or
+// bgAgents. The taskIndex sidecar uses this to skip the O(N) range-scan in
+// applyEntryStateLocked's task_progress / task_done arms when a TeamCreate
+// fan-out has spawned 8+ subagents emitting 5+ progress events/s each.
+// R260528-PERF-6 (#1353).
+type subagentRef struct {
+	background bool // true ⇒ index into bgAgents, false ⇒ turnAgents
+	index      int
+}
+
 // SubagentInfo holds display information about an active sub-agent in the current turn.
 // Fields below "Background" are added by RFC v4 agent-team-ui §3.2.2 to surface
 // per-agent linkage (task_id/tool_use_id), lifecycle status, and aggregator
@@ -246,6 +256,21 @@ type EventLog struct {
 	// Per-turn sub-agent tracking: reset on "result"/"user" events.
 	turnAgents []SubagentInfo // foreground agents in current turn; protected by mu
 	bgAgents   []SubagentInfo // background (run_in_background) agents; cleared on turn boundaries like turnAgents; protected by mu
+
+	// R260528-PERF-6 (#1353): sidecar lookup for applyEntryStateLocked
+	// task_progress / task_done O(1) match. Populated on task_start
+	// (taskID first becomes known there); cleared on result/user alongside
+	// the turnAgents/bgAgents reset. Indexes into either turnAgents
+	// (background=false) or bgAgents (background=true). Indexes are stable
+	// for a turn because the slices only grow via append between resets.
+	// Protected by mu.
+	taskIndex map[string]subagentRef
+
+	// R240-PERF-2 (#1041): twin sidecar keyed by ToolUseID, populated on
+	// the "agent" Append so a task_start can resolve its slot in O(1)
+	// instead of scanning turnAgents+bgAgents. Same lifecycle as
+	// taskIndex — reset alongside the slice clear.
+	toolUseIndex map[string]subagentRef
 
 	// turnAgentCount mirrors len(turnAgents)+len(bgAgents) for lock-free
 	// reads from the ManagedSession.Snapshot hot path. Most sessions sit at
@@ -732,8 +757,20 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 		}
 		if e.Background {
 			l.bgAgents = append(l.bgAgents, info)
+			if e.ToolUseID != "" {
+				if l.toolUseIndex == nil {
+					l.toolUseIndex = make(map[string]subagentRef, 8)
+				}
+				l.toolUseIndex[e.ToolUseID] = subagentRef{background: true, index: len(l.bgAgents) - 1}
+			}
 		} else {
 			l.turnAgents = append(l.turnAgents, info)
+			if e.ToolUseID != "" {
+				if l.toolUseIndex == nil {
+					l.toolUseIndex = make(map[string]subagentRef, 8)
+				}
+				l.toolUseIndex[e.ToolUseID] = subagentRef{background: false, index: len(l.turnAgents) - 1}
+			}
 		}
 		l.turnAgentCount.Store(int32(len(l.turnAgents) + len(l.bgAgents)))
 	case "task_start":
@@ -742,11 +779,47 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 		// carries the same id). RFC §3.2 deliberately skips InternalAgentID
 		// here — SubagentLinker.Resolve is async and fills it via
 		// SetAgentInternalID below once the on-disk jsonl is located.
+		//
+		// R260528-PERF-6 (#1353): seed taskIndex sidecar so the
+		// task_progress/task_done arms can find the SubagentInfo by TaskID
+		// without scanning turnAgents/bgAgents linearly.
+		// R240-PERF-2 (#1041): same ToolUseID→ref sidecar avoids the
+		// linear scan here too. Falls through to the legacy scan when the
+		// sidecar misses (e.g. agent entry was injected via AppendBatch
+		// history replay before the sidecar was populated).
+		if e.ToolUseID != "" {
+			if ref, ok := l.toolUseIndex[e.ToolUseID]; ok {
+				var slice []SubagentInfo
+				if ref.background {
+					slice = l.bgAgents
+				} else {
+					slice = l.turnAgents
+				}
+				if ref.index < len(slice) && slice[ref.index].ToolUseID == e.ToolUseID {
+					slice[ref.index].TaskID = e.TaskID
+					slice[ref.index].Status = "running"
+					slice[ref.index].StartedAtMS = e.Time
+					if e.TaskID != "" {
+						if l.taskIndex == nil {
+							l.taskIndex = make(map[string]subagentRef, 8)
+						}
+						l.taskIndex[e.TaskID] = ref
+					}
+					return false, pendingTaskDone{}
+				}
+			}
+		}
 		for i := range l.turnAgents {
 			if l.turnAgents[i].ToolUseID != "" && l.turnAgents[i].ToolUseID == e.ToolUseID {
 				l.turnAgents[i].TaskID = e.TaskID
 				l.turnAgents[i].Status = "running"
 				l.turnAgents[i].StartedAtMS = e.Time
+				if e.TaskID != "" {
+					if l.taskIndex == nil {
+						l.taskIndex = make(map[string]subagentRef, 8)
+					}
+					l.taskIndex[e.TaskID] = subagentRef{background: false, index: i}
+				}
 				return false, pendingTaskDone{}
 			}
 		}
@@ -755,6 +828,12 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 				l.bgAgents[i].TaskID = e.TaskID
 				l.bgAgents[i].Status = "running"
 				l.bgAgents[i].StartedAtMS = e.Time
+				if e.TaskID != "" {
+					if l.taskIndex == nil {
+						l.taskIndex = make(map[string]subagentRef, 8)
+					}
+					l.taskIndex[e.TaskID] = subagentRef{background: true, index: i}
+				}
 				return false, pendingTaskDone{}
 			}
 		}
@@ -762,6 +841,35 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 		// Update live counters from the parent stream. Aggregator in
 		// agent_tailer.go may also push meta, but the parent stream is
 		// authoritative for totals when present.
+		//
+		// R260528-PERF-6 (#1353): O(1) sidecar lookup. Ref index is stable
+		// for the turn — turnAgents/bgAgents only grow via append between
+		// result/user resets, never reorder. Falls through to the linear
+		// scan if the sidecar is stale (e.g. taskIndex reset by an
+		// out-of-order result before a stray progress event).
+		if ref, ok := l.taskIndex[e.TaskID]; ok && e.TaskID != "" {
+			var slice []SubagentInfo
+			if ref.background {
+				slice = l.bgAgents
+			} else {
+				slice = l.turnAgents
+			}
+			if ref.index < len(slice) && slice[ref.index].TaskID == e.TaskID {
+				if e.LastTool != "" {
+					slice[ref.index].LastTool = e.LastTool
+				}
+				if e.ToolUses > 0 {
+					slice[ref.index].ToolUses = e.ToolUses
+				}
+				if e.DurationMS > 0 {
+					slice[ref.index].DurationMS = e.DurationMS
+				}
+				return false, pendingTaskDone{}
+			}
+		}
+		// Fallback linear scan preserves byte-identical behaviour for
+		// out-of-order progress events whose task_start did not seed the
+		// sidecar (TaskID then was "", or already cleared on result reset).
 		for i := range l.turnAgents {
 			if l.turnAgents[i].TaskID != "" && l.turnAgents[i].TaskID == e.TaskID {
 				if e.LastTool != "" {
@@ -776,9 +884,6 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 				return false, pendingTaskDone{}
 			}
 		}
-		// task_started/task_done both consult bgAgents on miss; mirror
-		// that fallback here so background-agent progress events are
-		// not silently dropped on the floor.
 		for i := range l.bgAgents {
 			if l.bgAgents[i].TaskID != "" && l.bgAgents[i].TaskID == e.TaskID {
 				if e.LastTool != "" {
@@ -799,17 +904,39 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 			status = "completed"
 		}
 		matched := false
-		for i := range l.turnAgents {
-			if l.turnAgents[i].TaskID != "" && l.turnAgents[i].TaskID == e.TaskID {
-				l.turnAgents[i].Status = status
+		// R260528-PERF-6 (#1353): O(1) sidecar lookup before the scan.
+		if ref, ok := l.taskIndex[e.TaskID]; ok && e.TaskID != "" {
+			var slice []SubagentInfo
+			if ref.background {
+				slice = l.bgAgents
+			} else {
+				slice = l.turnAgents
+			}
+			if ref.index < len(slice) && slice[ref.index].TaskID == e.TaskID {
+				slice[ref.index].Status = status
 				if e.DurationMS > 0 {
-					l.turnAgents[i].DurationMS = e.DurationMS
+					slice[ref.index].DurationMS = e.DurationMS
 				}
 				if e.ToolUses > 0 {
-					l.turnAgents[i].ToolUses = e.ToolUses
+					slice[ref.index].ToolUses = e.ToolUses
 				}
+				delete(l.taskIndex, e.TaskID)
 				matched = true
-				break
+			}
+		}
+		if !matched {
+			for i := range l.turnAgents {
+				if l.turnAgents[i].TaskID != "" && l.turnAgents[i].TaskID == e.TaskID {
+					l.turnAgents[i].Status = status
+					if e.DurationMS > 0 {
+						l.turnAgents[i].DurationMS = e.DurationMS
+					}
+					if e.ToolUses > 0 {
+						l.turnAgents[i].ToolUses = e.ToolUses
+					}
+					matched = true
+					break
+				}
 			}
 		}
 		if !matched {
@@ -843,6 +970,24 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 			l.bgAgents = nil
 		} else {
 			l.bgAgents = l.bgAgents[:0]
+		}
+		// R260528-PERF-6 (#1353) / R240-PERF-2 (#1041): reset sidecars
+		// in lockstep with the slices they index. Drop the map when it
+		// grew past the typical turn cap so a fan-out turn doesn't pin
+		// the bucket array; small maps reuse via Go-1.21+ runtime mapclear.
+		if len(l.taskIndex) > subagentTurnRetainCap {
+			l.taskIndex = nil
+		} else {
+			for k := range l.taskIndex {
+				delete(l.taskIndex, k)
+			}
+		}
+		if len(l.toolUseIndex) > subagentTurnRetainCap {
+			l.toolUseIndex = nil
+		} else {
+			for k := range l.toolUseIndex {
+				delete(l.toolUseIndex, k)
+			}
 		}
 		// Most non-agent turns leave turnAgentCount at zero already;
 		// skipping the redundant atomic Store avoids cache-coherence
