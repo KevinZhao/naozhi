@@ -1987,34 +1987,39 @@ func (l *EventLog) EntriesBeforeAppend(dst []EventEntry, beforeMS int64, limit i
 	// up to `limit` matches into a reverse buffer. Single pass keeps the code
 	// symmetric with EntriesSince.
 	//
-	// Fast path: once we've seen an entry with Time < beforeMS, all earlier
-	// entries in the ring also satisfy Time < beforeMS (entries are stored
-	// in insertion/chronological order and Time is monotonic-ish from Append).
-	// Switch from "skip then match" to "collect greedily" mode to avoid
-	// re-evaluating the Time >= beforeMS condition for the remaining tail.
-	// Before this, EntriesBefore on a 500-entry ring with beforeMS pointing
-	// to the oldest page ran 500 iterations comparing timestamps; now it
-	// runs up to ~`skip`+`limit` iterations.
+	// R040034-CHANGES (#1383 review): the previous "crossed" fast-path
+	// assumed entries are stored in monotonically-non-decreasing Time
+	// order, switching from per-entry filter to "collect greedily" once
+	// the first sub-beforeMS entry was seen. That assumption is too strong:
+	// Append/AppendBatch accept caller-supplied Time values (only stamping
+	// defaultTime for Time==0), and live + AppendBatchReplay can interleave
+	// during InjectHistory replay. A late high-Time entry behind an
+	// earlier low-Time entry would let the fast-path emit it as if it
+	// satisfied Time < beforeMS — a false positive that handed a stale
+	// page to the dashboard.
+	//
+	// Per-entry filter is now the only mode. Walk cost is O(count) in
+	// the worst case (500-entry ring) but EntriesBefore is the dashboard
+	// "load earlier" path, only invoked on user scroll / paginate, far
+	// from any hot path. The earlier optimisation traded correctness for
+	// a bound that almost no caller observed.
+	//
 	// R249-PERF-17: walk backward with hoisted index instead of recomputing
 	// (l.head - l.count + i + l.maxSize) % l.maxSize per iter. Same shape
 	// as EntriesSince — branch-on-wrap is one CMOV/cmp vs an IDIV.
 	rev := dst[:0]
 	allocated := false
-	crossed := beforeMS <= 0 // when beforeMS==0 treat as "no upper bound"
 	idx := l.head - 1
 	if idx < 0 {
 		idx += l.maxSize
 	}
 	for i := l.count - 1; i >= 0 && len(rev) < limit; i-- {
-		if !crossed {
-			if l.entries[idx].Time >= beforeMS {
-				idx--
-				if idx < 0 {
-					idx += l.maxSize
-				}
-				continue
+		if beforeMS > 0 && l.entries[idx].Time >= beforeMS {
+			idx--
+			if idx < 0 {
+				idx += l.maxSize
 			}
-			crossed = true
+			continue
 		}
 		if !allocated && cap(rev) == 0 {
 			initialCap := limit
