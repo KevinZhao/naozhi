@@ -1057,6 +1057,15 @@ func (d *Dispatcher) handleSendError(
 	p platform.Platform,
 	lg *slog.Logger,
 ) {
+	// /clear early-return mirrors the prior behaviour: the user just
+	// triggered the reset, so we suppress the extra "会话已重置" reply.
+	// R260528-GO-2: ErrSessionReset is a control-flow signal from the
+	// user (/new /clear), not an error — bail before bumping the
+	// /health error counters so idle sessions don't pollute reply-error
+	// metrics.
+	if errors.Is(err, cli.ErrSessionReset) {
+		return
+	}
 	d.replyErrorCount.Add(1)
 	dispatchReplyErrorTotal.Add(1)
 	lg.Error("send to claude", "err", err)
@@ -1069,11 +1078,6 @@ func (d *Dispatcher) handleSendError(
 	// extracted usermsg.UserMessage so a new sentinel only registers
 	// once, instead of two parallel switches with cross-package
 	// "keep in sync" comments.
-	// /clear early-return mirrors the prior behaviour: the user just
-	// triggered the reset, so we suppress the extra "会话已重置" reply.
-	if errors.Is(err, cli.ErrSessionReset) {
-		return
-	}
 	// Watchdog counters stay in dispatch because they are owned by the
 	// IM-side configuration; the shared helper only renders text.
 	switch {
