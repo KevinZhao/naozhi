@@ -118,6 +118,21 @@ func releaseLogBuf(bw *bufio.Writer) {
 // All methods are called from the single writer goroutine or from
 // the PersistSink closure — implementations MUST be non-blocking
 // and thread-safe.
+//
+// Wiring contract (R250-ARCH-8 / #1171): the Observer interface is
+// defined here so persist has zero dependency on the metrics layer, but
+// the **only** production implementation lives in
+// internal/session/eventlog_metrics.go (eventLogMetricsObserver), wired
+// in by session.NewRouter via Options.Observer. Adding a new persister
+// site (e.g. /api/admin/eventlog or a planner-local persister) MUST
+// either pass the same eventLogMetricsObserver instance or accept that
+// metrics will silently fall through to noopObserver — the persist
+// package cannot enforce that wiring at compile time. The
+// TestPersister_ObserverWiring_OnWriteOnFsync contract test pins the
+// "OnWrite is called when an entry reaches disk and OnFsync is called
+// during Flush" invariant so a future Observer-method addition that
+// breaks the metrics path surfaces immediately rather than during a
+// production drop investigation.
 type Observer interface {
 	// OnWrite is called once per EventEntry that reaches disk.
 	OnWrite(n int)

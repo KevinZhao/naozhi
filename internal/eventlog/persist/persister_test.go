@@ -177,6 +177,84 @@ type replayLeakObserver struct {
 
 func (o *replayLeakObserver) OnReplayLeak(n int) { o.count += n }
 
+// countingObserver is the contract-test fake for the Observer interface.
+// Each method bumps a counter so TestPersister_ObserverWiring_*
+// can verify the persist run loop / sink closure invokes Observer at the
+// right life-cycle points without depending on metrics package internals.
+type countingObserver struct {
+	mu                                                         sync.Mutex
+	written, dropped, fsyncs, malformed, replayLeak, totalEnts int
+}
+
+func (o *countingObserver) OnWrite(n int) {
+	o.mu.Lock()
+	o.written++
+	o.totalEnts += n
+	o.mu.Unlock()
+}
+func (o *countingObserver) OnDrop(n int) {
+	o.mu.Lock()
+	o.dropped += n
+	o.mu.Unlock()
+}
+func (o *countingObserver) OnFsync() {
+	o.mu.Lock()
+	o.fsyncs++
+	o.mu.Unlock()
+}
+func (o *countingObserver) OnMalformed() {
+	o.mu.Lock()
+	o.malformed++
+	o.mu.Unlock()
+}
+func (o *countingObserver) OnReplayLeak(n int) {
+	o.mu.Lock()
+	o.replayLeak += n
+	o.mu.Unlock()
+}
+func (o *countingObserver) snapshot() (written, dropped, fsyncs int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.written, o.dropped, o.fsyncs
+}
+
+// TestPersister_ObserverWiring_OnWriteOnFsync pins the R250-ARCH-8 / #1171
+// contract: once a real Observer is plugged into Options.Observer, the
+// persister calls OnWrite when entries reach disk AND OnFsync when Flush
+// runs. The session layer's eventLogMetricsObserver depends on this; if
+// some future refactor drops one of the call sites the metrics path goes
+// silent without anyone noticing, so the wiring is pinned at this leaf.
+func TestPersister_ObserverWiring_OnWriteOnFsync(t *testing.T) {
+	t.Parallel()
+	obs := &countingObserver{}
+	p, _ := newTestPersister(t, func(o *Options) {
+		o.Observer = obs
+	})
+	defer func() {
+		_ = p.Stop(context.Background())
+	}()
+
+	sink := p.SinkFor("dashboard:direct:alice:general")
+	sink([]Entry{entry(t, 1, "u1"), entry(t, 2, "u2")}, false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := p.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	written, dropped, fsyncs := obs.snapshot()
+	if written == 0 {
+		t.Errorf("OnWrite never invoked; metrics path is dead")
+	}
+	if fsyncs == 0 {
+		t.Errorf("OnFsync never invoked; flush metrics dead")
+	}
+	if dropped != 0 {
+		t.Errorf("unexpected drops in steady-state path: %d", dropped)
+	}
+}
+
 // TestPersister_FullChannel_Drops exercises the non-blocking drop
 // path. We use a tiny buffer and don't drain — the second send should
 // hit `default` and count as dropped.
