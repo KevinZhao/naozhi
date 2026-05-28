@@ -249,11 +249,20 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 
 			lastOutput = time.Now()
 
-			// Capture session ID from first init event.
+			// Capture session ID from init event.
 			// logEvent (called by readLoop) already skips init events.
+			//
+			// CLI2 (#393): always overwrite when ev.SessionID is non-empty
+			// instead of only-set-when-empty. After --resume the CLI emits a
+			// fresh init carrying the new (forked) session_id; the previous
+			// "first-non-empty" guard pinned p.sessionID to the original ID
+			// and the field went stale relative to the underlying CLI's view.
+			// Init always carries a valid session_id, so the empty-check on
+			// ev.SessionID is just a paranoia guard against future protocol
+			// regressions.
 			if ev.Type == "system" && ev.SubType == "init" {
 				p.mu.Lock()
-				if p.sessionID == "" {
+				if ev.SessionID != "" {
 					p.sessionID = ev.SessionID
 				}
 				p.mu.Unlock()
@@ -285,8 +294,12 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 
 			// Result means this turn is done
 			if ev.Type == "result" {
+				// CLI2 (#393): mirror the init-path fix — accept any
+				// non-empty session_id so --resume's new ID is recorded
+				// even if the init event was missed (e.g. dropped by a
+				// downstream channel buffer).
 				p.mu.Lock()
-				if p.sessionID == "" {
+				if ev.SessionID != "" {
 					p.sessionID = ev.SessionID
 				}
 				p.mu.Unlock()

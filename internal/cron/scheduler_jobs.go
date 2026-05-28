@@ -77,13 +77,23 @@ func (s *Scheduler) AddJob(j *Job) error {
 			return err
 		}
 	}
+	// R250-CR-8 (#1141): defence-in-depth — IM dispatch and dashboard
+	// handlers validate WorkDir/Backend/Notify* before calling AddJob,
+	// but a future internal caller reaching AddJob directly would
+	// otherwise persist arbitrary bytes. The same caps loadJobs already
+	// applies on the read path now run on the write path too, so no
+	// hand-crafted in-memory job reaches cron_jobs.json with a multi-KB
+	// WorkDir or log-injection bytes in NotifyChatID.
+	if err := validateJobFields(j); err != nil {
+		return err
+	}
 
 	// addJobAcquiringLock runs under s.mu (defer Unlock). Splitting the locked
 	// section into a helper means every early-return path goes through
 	// defer and removes the prior pattern of 4 manual s.mu.Unlock() calls
 	// (R228-GO-2): adding a new validation step inside the locked section
 	// no longer risks leaking a held mutex on the new error path.
-	save, perr := s.addJobAcquiringLock(j)
+	save, stub, perr := s.addJobAcquiringLock(j)
 	if perr != nil {
 		// addJobAcquiringLock may surface either a pre-mutation error (capacity
 		// rejection — no save returned) or a post-mutation persist error
@@ -94,8 +104,30 @@ func (s *Scheduler) AddJob(j *Job) error {
 		return perr
 	}
 	save()
-	s.registerStubFromJob(j)
+	// R250-GO-5 (#1068): use the snapshotted fields captured under s.mu
+	// instead of re-reading *j after lock release. UpdateJob / SetJobPrompt
+	// already follow this pattern (see scheduler.go:1163-1165 R232-CR-12);
+	// AddJob was the lone outlier passing the bare *Job pointer to
+	// registerStubFromJob, so a concurrent UpdateJob targeting the same id
+	// could race the stub-register's reads of WorkDir/Prompt/LastSessionID.
+	// The new-ID race is bounded today (no other caller has seen it yet)
+	// but the snapshot rule is meant as a uniform invariant — making AddJob
+	// comply removes the structural drift hazard a future refactor could
+	// turn into a real race.
+	s.registerStubByValue(stub.id, stub.workDir, stub.prompt, stub.lastSessionID)
 	return nil
+}
+
+// addJobStubFields bundles the lock-held snapshot of the fields AddJob
+// passes to registerStubByValue. Captured inside addJobAcquiringLock under
+// s.mu so a concurrent UpdateJob / SetJobPrompt cannot mutate them between
+// addJobAcquiringLock returning and AddJob calling registerStubByValue.
+// R250-GO-5 (#1068).
+type addJobStubFields struct {
+	id            string
+	workDir       string
+	prompt        string
+	lastSessionID string
 }
 
 // addJobAcquiringLock performs the AddJob mutation. Unlike the
@@ -106,12 +138,12 @@ func (s *Scheduler) AddJob(j *Job) error {
 // this package denotes "caller already holds s.mu", which AddJob's helper
 // does not satisfy. The new name keeps the contract obvious at the
 // call-site.
-func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
+func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), addJobStubFields, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if len(s.jobs) >= s.maxJobs {
-		return nil, fmt.Errorf("max cron jobs reached (%d)", s.maxJobs)
+		return nil, addJobStubFields{}, fmt.Errorf("max cron jobs reached (%d)", s.maxJobs)
 	}
 
 	// Per-chat limit to prevent one chat from exhausting global quota.
@@ -125,7 +157,7 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 	// TestChatJobCount_TracksJobsByChat.
 	chatKey := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
 	if s.chatJobCount[chatKey] >= s.maxJobsPerChat {
-		return nil, fmt.Errorf("per-chat cron limit reached (%d)", s.maxJobsPerChat)
+		return nil, addJobStubFields{}, fmt.Errorf("per-chat cron limit reached (%d)", s.maxJobsPerChat)
 	}
 
 	id, err := generateID()
@@ -134,7 +166,7 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 		// 公共入口（dashboard / IM 创建任务），失败应表现为 add 请求拒绝
 		// 而非进程 panic。10 次重试圈仅对 ID 碰撞有意义；rand 整体失效
 		// 时所有重试都会复现同一错误，提早 bail 比循环 10 次更诚实。
-		return nil, fmt.Errorf("cron: generate job id: %w", err)
+		return nil, addJobStubFields{}, fmt.Errorf("cron: generate job id: %w", err)
 	}
 	j.ID = id
 	// Retry on unlikely ID collision. Bound the loop so a hypothetical
@@ -165,7 +197,7 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 		retryID, retryErr := generateID()
 		if retryErr != nil {
 			// 同上：rand 中途失效，提早返回比继续循环更诚实。
-			return nil, fmt.Errorf("cron: regenerate job id (retry %d): %w", i+1, retryErr)
+			return nil, addJobStubFields{}, fmt.Errorf("cron: regenerate job id (retry %d): %w", i+1, retryErr)
 		}
 		if retryID == prevID {
 			// Deterministic generator: same ID twice in a row is conclusive
@@ -173,19 +205,19 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 			// remaining retries; the final error would be identical.
 			slog.Error("cron: deterministic ID generator detected; bailing early",
 				"attempt", i+1, "id", retryID)
-			return nil, fmt.Errorf("cron: deterministic ID generator (id %q repeated)", retryID)
+			return nil, addJobStubFields{}, fmt.Errorf("cron: deterministic ID generator (id %q repeated)", retryID)
 		}
 		prevID = retryID
 		j.ID = retryID
 	}
 	if _, exists := s.jobs[j.ID]; exists {
-		return nil, fmt.Errorf("cron: failed to generate unique job ID after 10 attempts")
+		return nil, addJobStubFields{}, fmt.Errorf("cron: failed to generate unique job ID after 10 attempts")
 	}
 	j.CreatedAt = time.Now()
 
 	if !j.Paused {
 		if err := s.registerJob(j); err != nil {
-			return nil, err
+			return nil, addJobStubFields{}, err
 		}
 	}
 	s.jobs[j.ID] = j
@@ -224,9 +256,20 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 		// cleanup is needed. resetRouterStub on a never-registered
 		// key would be a no-op anyway.
 		s.deleteJobLocked(j)
-		return nil, perr
+		return nil, addJobStubFields{}, perr
 	}
-	return save, nil
+	// R250-GO-5 (#1068): snapshot the fields registerStubByValue reads under
+	// s.mu so AddJob can call it without re-reading *j after lock release.
+	// Mirrors UpdateJob (scheduler_jobs.go ~L955) and SetJobPrompt's value-
+	// pass pattern; closes the documented "passing *Job after lock release"
+	// drift hazard from R232-CR-12 (scheduler.go:1163-1165).
+	stub := addJobStubFields{
+		id:            j.ID,
+		workDir:       j.WorkDir,
+		prompt:        j.Prompt,
+		lastSessionID: j.LastSessionID,
+	}
+	return save, stub, nil
 }
 
 // PerChatJobCount returns the number of jobs registered against the
@@ -517,6 +560,22 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 // 均满足该不变量：失败检查放在所有写入之前。新增 op 时 reviewer 必须验
 // 证：op 函数体内任意 return non-nil 路径之前没有 j.X = ... 写入；如果
 // op 需要先尝试再回滚，应在 op 内部完成回滚后再 return。
+// withJobByIDOpts knobs:
+//
+//   - op: in-lock mutation (must satisfy "all-or-nothing" — see contract
+//     above). nil for pure-lookup callers.
+//   - postCleanup: out-of-lock side effect (router.Reset, runStore.DeleteJob)
+//     that runs UNCONDITIONALLY whenever op succeeded — even when
+//     persistJobsLocked returned an error and rollbackOnPersistErr is nil.
+//     Use this shape ONLY when the in-lock mutation is already past the
+//     point of no return (DeleteJobByID's deleteJobLocked drops the *Job
+//     from s.jobs irreversibly). For mutations where on-disk state is the
+//     authoritative outcome (Pause/Resume), pair op with rollbackOnPersistErr
+//     and leave postCleanup nil. R250-CR-16 (#1149).
+//   - rollbackOnPersistErr: in-lock undo of the op's mutation when
+//     persistJobsLocked fails. When non-nil and persist fails, this
+//     restores *j BEFORE the snapshot copy and skips postCleanup so the
+//     caller observes "no change applied".
 type withJobByIDOpts struct {
 	op                   func(j *Job) error
 	postCleanup          func(j *Job)
@@ -584,6 +643,21 @@ func (s *Scheduler) withJobByIDOpt(id string, opts withJobByIDOpts) (*Job, error
 	if rolledBack {
 		return nil, perr
 	}
+	// R250-CR-16 (#1149): postCleanup runs UNCONDITIONALLY here — i.e.
+	// even when persistJobsLocked returned perr != nil (without a paired
+	// rollbackOnPersistErr hook). This is INTENTIONAL for DeleteJobByID:
+	// deleteJobLocked already ran inside the locked section and dropped
+	// the *Job from s.jobs, so the in-memory state is already past the
+	// point of no return. The runStore.DeleteJob cleanup MUST run even
+	// when the cron_jobs.json marshal failed; otherwise runs/<jobID>/
+	// would leak entries for a job nobody can address again from the
+	// dashboard (R238-GO-3). PauseJobByID / ResumeJobByID pass nil
+	// postCleanup so this branch is a no-op for them — the asymmetry
+	// is by design, not by accident. Future maintainers adding a new
+	// withJobByID-shaped op MUST decide explicitly: cleanup after
+	// success-only (use rollbackOnPersistErr to undo on failure) vs
+	// cleanup-regardless (the DeleteJob shape, where the in-memory
+	// mutation is already irreversibly applied).
 	if opts.postCleanup != nil {
 		opts.postCleanup(&snapshot)
 	}
