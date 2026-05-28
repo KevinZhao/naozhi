@@ -243,6 +243,17 @@ func loadJobs(path string) (map[string]*Job, error) {
 				"path", path, "cron_id", j.ID, "platform_bytes", len(j.NotifyPlatform))
 			continue
 		}
+		// R260528-BUG-8: refuse silent overwrite when the same ID appears
+		// twice. validateCronJob / AddJob never produces a duplicate, but
+		// a hand-edited cron_jobs.json (or a botched merge tool) could. The
+		// previous `m[j.ID] = j` quietly dropped whichever entry came first
+		// — masking the corruption while the second-occurrence wins. Keep
+		// the first occurrence + slog.Warn so operators see the dup at boot.
+		if _, dup := m[j.ID]; dup {
+			slog.Warn("cron store: dropping duplicate job ID",
+				"path", path, "cron_id", j.ID)
+			continue
+		}
 		m[j.ID] = j
 	}
 	slog.Info("loaded cron store", "count", len(m), "path", path)
