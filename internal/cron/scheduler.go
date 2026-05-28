@@ -70,6 +70,16 @@ var ErrPersistFailed = errors.New("cron: persist jobs failed")
 // graph. Any new s.router.X() call requires extending this interface, which
 // makes accidental surface-area growth a compile error instead of a silent
 // regression.
+//
+// R238-ARCH-7 (#752) is closed by the current shape: GetOrCreate already
+// returns cron-local types (Session interface + SessionStatus) — see
+// agent_opts.go for the Send/SessionID/InterruptViaControl method set —
+// so cron does NOT transitively depend on *session.ManagedSession. The
+// production wireup wraps the concrete session in cronSessionAdapter
+// (cmd/naozhi/cron_router_adapter.go); the InterruptOutcome ordinal pin
+// + the SessionRouter compile-time guard live there too. The cron
+// package no longer imports internal/session in production code (last
+// reverse import eliminated by R20260527122801-ARCH-1).
 type SessionRouter interface {
 	// RegisterCronStubWithChain creates (or refreshes) a suspended exempt
 	// session entry so the cron job shows up in the dashboard sidebar before
