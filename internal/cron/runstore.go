@@ -1677,6 +1677,14 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 // Caller MUST hold jobLock(jobID); the entry.mu acquisition here pairs
 // with cacheHeadPush / cacheTrimAfterDisk so a concurrent Append's
 // metadata mutation cannot race the read. R236-PERF-12 (#532).
+//
+// R242-PERF-10 (#674) is the same root and is closed by this fast path:
+// trimJobLocked.scanSortedRunDir is bypassed entirely when the cache can
+// prove no candidate exists. The proposal "derive trim decision from
+// cache length" is realised by the count + oldest-row checks above —
+// length is necessary but not sufficient because a warm cache with
+// count==keepCount could still hide expired older rows on disk; we keep
+// the strict "<keepCount" guard for safety.
 func (s *runStore) trimSkipFromCache(jobID string, now time.Time) bool {
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
