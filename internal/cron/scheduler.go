@@ -285,10 +285,18 @@ type Scheduler struct {
 	// platforms / agents / agentCommands are populated from SchedulerConfig
 	// at NewScheduler and treated as immutable thereafter — notifyTarget
 	// reads platforms without s.mu and executeOpt reads agents without
-	// s.mu. A future caller must NOT mutate these maps in place; if
-	// dynamic backend/agent registration ever lands, switch to
-	// atomic.Pointer[map[...]] swap-on-write so reads stay lock-free without
-	// racing the writer.
+	// s.mu.
+	//
+	// R040034-GO-6 (#1391): the immutability contract is enforced
+	// structurally via atomic.Pointer[map[...]] swap-on-write rather than
+	// by docstring. NewScheduler clones the caller-supplied maps (severing
+	// the alias) and Stores the pointer once; readers Load() the pointer
+	// and treat the resulting map as read-only. If dynamic registration
+	// ever lands, the writer must build a fresh map and Swap so existing
+	// readers continue to see their snapshot. The per-Scheduler atomic
+	// pointer mirrors the pattern already used for marshalJobs / telemetry
+	// / runInflight, keeping the lock-free read invariant that -race can
+	// observe instead of relying on caller discipline.
 	//
 	// R219-ARCH-8 (#670) proposed replacing this map with a `Notifier
 	// interface { Notify(ctx, plat, chatID, text) error }` so cron stops
@@ -305,9 +313,9 @@ type Scheduler struct {
 	// (multi-error contract). RFC cron-sysession-merge Phase E covers
 	// this within the larger dispatch unification — leaving #670 to
 	// land alongside that work rather than fragmenting the contract.
-	platforms     map[string]platform.Platform
-	agents        map[string]AgentOpts
-	agentCommands map[string]string
+	platforms     atomic.Pointer[map[string]platform.Platform]
+	agents        atomic.Pointer[map[string]AgentOpts]
+	agentCommands atomic.Pointer[map[string]string]
 	storePath     string
 	maxJobs       int
 	// maxJobsPerChat is the resolved per-chat cap: SchedulerConfig
@@ -924,12 +932,12 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		// trust. Cost: O(N) copy at construction (N ≤ 8 backends, ≤ 32
 		// agents, ≤ 32 commands in production); zero runtime overhead since
 		// the cron-package readers see the same map shape they always did.
-		// maps.Clone returns nil for nil input so callers that omit any of
-		// these fields (test fixtures, narrow integration tests) keep the
-		// prior nil-map semantics.
-		platforms:           maps.Clone(cfg.Platforms),
-		agents:              maps.Clone(cfg.Agents),
-		agentCommands:       maps.Clone(cfg.AgentCommands),
+		// R040034-GO-6 (#1391): the cloned maps are stored into per-field
+		// atomic.Pointer below so the immutability contract is enforced
+		// by the type, not by docstring. Constructor body assigns the
+		// pointers via Store() after the struct literal so future
+		// dynamic-registration calls can Swap a freshly-built map without
+		// racing the lock-free readers.
 		storePath:           cfg.StorePath,
 		maxJobs:             cfg.MaxJobs,
 		maxJobsPerChat:      maxPerChat,
@@ -950,6 +958,27 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		stopCancel:            stopCancel,
 		runStore:              newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
 	}
+	// R040034-GO-6 (#1391): store cloned platforms / agents / agentCommands
+	// maps into the per-field atomic.Pointer so notifyTarget + executeOpt
+	// can Load() them lock-free. maps.Clone returns nil for nil input;
+	// always store a non-nil empty map so Load().<deref> never panics on a
+	// caller that omitted the field. Future dynamic-registration callers
+	// must build a fresh map and Swap() — never mutate the loaded map.
+	clonedPlatforms := maps.Clone(cfg.Platforms)
+	if clonedPlatforms == nil {
+		clonedPlatforms = map[string]platform.Platform{}
+	}
+	s.platforms.Store(&clonedPlatforms)
+	clonedAgents := maps.Clone(cfg.Agents)
+	if clonedAgents == nil {
+		clonedAgents = map[string]AgentOpts{}
+	}
+	s.agents.Store(&clonedAgents)
+	clonedCommands := maps.Clone(cfg.AgentCommands)
+	if clonedCommands == nil {
+		clonedCommands = map[string]string{}
+	}
+	s.agentCommands.Store(&clonedCommands)
 	// R250-ARCH-14: initialise the per-Scheduler marshal seam so the
 	// hot path in marshalJobsLocked finds defaultMarshalJobs instead of
 	// nil. Tests swap a failing stub via withFailingMarshal.

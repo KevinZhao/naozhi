@@ -283,7 +283,17 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	if s.stopCtx != nil && s.stopCtx.Err() != nil {
 		return
 	}
-	p := s.platforms[plat]
+	// R040034-GO-6 (#1391): platforms is an atomic.Pointer[map[...]] —
+	// Load() once and treat the resulting map as read-only. nil-pointer
+	// guard matches the prior nil-map behaviour in case Load races a
+	// constructor that hasn't yet Stored the cloned map (impossible
+	// today; defensive for future SetPlatforms / dynamic registration).
+	platsPtr := s.platforms.Load()
+	if platsPtr == nil {
+		slog.Warn("cron notify: platform not found", "platform", plat)
+		return
+	}
+	p := (*platsPtr)[plat]
 	if p == nil {
 		slog.Warn("cron notify: platform not found", "platform", plat)
 		return

@@ -833,11 +833,16 @@ func (h *SessionHandlers) buildMultiNodeResp(snapshots []session.SessionSnapshot
 	// connection status + fill-in. This acquires the nodeAccess lock.
 	nodesSnapshot := h.nodeAccess.NodesSnapshot()
 
-	// Multi-node: tag local sessions and merge with cached remote sessions
+	// Multi-node: tag local sessions and merge with cached remote sessions.
+	// R040034-PERF-3 (#1402): box *SessionSnapshot (pointer) into the []any
+	// rather than the value type — Go iface holds word-sized pointer payloads
+	// inline, but a 280 B struct value forces a heap copy on every box (50
+	// sessions × 1 Hz/tab pre-fix). JSON output is byte-identical because
+	// json.Marshal dereferences pointer-to-struct identically to the value.
 	allSessions := make([]any, 0, len(snapshots))
 	for i := range snapshots {
 		snapshots[i].Node = "local"
-		allSessions = append(allSessions, snapshots[i])
+		allSessions = append(allSessions, &snapshots[i])
 	}
 
 	localName := h.workspaceName

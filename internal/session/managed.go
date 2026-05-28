@@ -1707,10 +1707,14 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	// persistedHistory is already in Time order. Steady-state dashboard
 	// polling (1Hz × N tabs × M dead sessions) used to pay this every
 	// call; the in-place sort under historyMu also blocks concurrent
-	// readers. While the flag is still false (initial state, or after an
-	// out-of-order InjectHistory) we promote to the write lock once, sort
-	// in place, set the flag, and downgrade — subsequent reads then take
-	// the cheap RLock-only path. R237-PERF-12.
+	// readers. R237-PERF-12.
+	//
+	// R040034-PERF-6 (#1405): production mutations now sort eagerly in
+	// InjectHistory under the existing write lock, so this fallback only
+	// fires for test fixtures that assign s.persistedHistory directly and
+	// leave the flag false. Promote to the write lock once, sort in place,
+	// set the flag, and downgrade — subsequent reads then take the cheap
+	// RLock-only path.
 	s.historyMu.RLock()
 	if !s.persistedHistorySorted {
 		s.historyMu.RUnlock()
@@ -1952,6 +1956,17 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 		}
 	}
 	s.persistedHistory = append(s.persistedHistory, entries...)
+	// R040034-PERF-6 (#1405): when the append left persistedHistory in an
+	// out-of-order state, sort it eagerly under the write lock we already
+	// hold rather than deferring to the first EventEntriesSince/Before
+	// reader. The deferred path took historyMu.Lock on the WS push hot path
+	// and blocked concurrent EventEntries / EventEntriesSince RLockers for
+	// the duration of an O(n log n) sort over up to 500 entries; absorbing
+	// it here keeps the reader fast-path RLock-only forever after.
+	if !s.persistedHistorySorted && len(s.persistedHistory) > 1 {
+		sortEntriesByTimeStable(s.persistedHistory)
+		s.persistedHistorySorted = true
+	}
 	if trimmed := len(s.persistedHistory) - maxPersistedHistory; trimmed > 0 {
 		s.persistedHistory = s.persistedHistory[trimmed:]
 		// Cap-trim shifts the prefix backwards; clamp seededLen so it keeps
