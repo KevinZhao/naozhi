@@ -17,10 +17,12 @@
 package wshub
 
 import (
+	"context"
 	"net/http"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/session"
 )
 
 // MessageEnqueuer is the *dispatch.MessageQueue subset Hub depends on for
@@ -38,10 +40,34 @@ type MessageEnqueuer interface {
 	CollectDelay() time.Duration
 }
 
-// HubRouter is the session.Router subset Hub depends on. Phase 4b 起从
-// server.HubRouter 完整搬过来。
+// HubRouter is the *session.Router subset *Hub consumes on the WebSocket
+// subscribe / send / interrupt paths.
+//
+// satisfies-by: *session.Router (implicitly via Go structural typing;
+// guarded at CI time by internal/session/contract_test.go).
+//
+// Method list = direct h.router.* calls in wshub*.go and send.go. 14
+// methods total — under the "rethink at >15" threshold from
+// docs/rfc/consumer-interfaces.md §7.2.
+//
+// Phase 4b-router 搬迁（2026-05-28）：本接口从 internal/server/consumer.go
+// 完整搬到本包。server.HubRouter 改为 type alias `= wshub.HubRouter` 保持
+// 向后兼容，server 包内的 *Server 字段 / handler 字段类型不需要改。
 type HubRouter interface {
-	Version() uint64
+	GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
+	GetSession(key string) *session.ManagedSession
+	Remove(key string) bool
+	RenameSession(oldKey, newKey string) bool
+	ResetAndDiscardOverride(key string)
+	GetWorkspace(chatKey string) string
+	SetWorkspace(chatKey, path string)
+	SetSessionBackend(key, backend string)
+	DefaultWorkspace() string
+	RegisterForResume(key, sessionID, workspace, lastPrompt string) (effectiveKey string)
+	InterruptSession(key string) bool
+	InterruptSessionSafe(key string) session.InterruptOutcome
+	InterruptSessionViaControl(key string) session.InterruptOutcome
+	NotifyIdle()
 }
 
 // CronView is the cron.Scheduler subset Hub uses for cron stub revival

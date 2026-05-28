@@ -14,7 +14,7 @@ file_size:
     # 9 个 > 800 行 + 2 个 500-800 行 = 11 个超 server 500 硬上限
     # ── 9 个 > 800 行 ──
     - path: internal/server/dashboard_session.go
-      current: 1714
+      current: 1778
       limit: 500
       until_phase: 3e         # Phase 3e 抽完 dashboard/session/{list,events,interrupt,label}
     - path: internal/server/project_files.go
@@ -22,15 +22,15 @@ file_size:
       limit: 500
       until_phase: "2"
     - path: internal/server/dashboard_send.go
-      current: 1440
+      current: 1468
       limit: 500
       until_phase: 3f
     - path: internal/server/dashboard_cron.go
-      current: 1427
+      current: 1536
       limit: 500
       until_phase: "1"
     - path: internal/server/dashboard_cron_transcript.go
-      current: 1424
+      current: 1436
       limit: 500
       until_phase: "1"
     - path: internal/server/server.go
@@ -38,15 +38,15 @@ file_size:
       limit: 500
       until_phase: "5"
     - path: internal/server/wshub.go        # v0.6.1 新增豁免：v0.4 时 514 不超线
-      current: 921                          # Phase 0a 加 godoc 表 7 块对账
+      current: 1106                         # 2026-05-28 master 实测（Phase 0a 加 godoc 表后 master 持续涨）
       limit: 500
       until_phase: 4b
     - path: internal/server/dashboard.go    # v0.6.1 新增豁免：v0.4 时 731 不超线
-      current: 858
+      current: 863
       limit: 500
       until_phase: "5"
     - path: internal/server/agent_tailer.go # v0.6.1 新增豁免：v0.4 时 655 不超线
-      current: 807
+      current: 836                          # 2026-05-28 master 实测
       limit: 500
       until_phase: 4c
     # ── 2 个 500-800 行（v0.6.1 新增） ──
