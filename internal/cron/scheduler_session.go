@@ -117,6 +117,18 @@ func (s *Scheduler) containsSessionID(sessionID string) bool {
 	// Most spawn-time IsExcluded probes target the *just-written*
 	// LastSessionID of an active or recently-finished job — both of
 	// these are reachable without touching runStore.Recent.
+	//
+	// R20260527-PERF-5 (#1294) proposed a parallel `lastSessionIDs
+	// map[string]struct{}` updated synchronously in recordTerminalResult
+	// to avoid the s.jobs walk under RLock. Deferred: the full proposal
+	// requires hooking every LastSessionID mutation site (DeleteJobByID,
+	// SetJobWorkDir clear path, recordTerminalResult, snapshot replays)
+	// AND a ttl cache invalidation tie-in with knownSessionsCache. The
+	// O(jobs) walk is RLock-only with an early-break on first match
+	// (typical case <50 jobs, ≤10ns/iter), and the auto-workspace-chain
+	// caller is rate-limited by user message frequency — paying ~500ns
+	// per probe is acceptable until the broader R250-PERF-7 cache
+	// refactor lands. Tracking via the issue title.
 	s.mu.RLock()
 	for _, j := range s.jobs {
 		if j.LastSessionID == sessionID {
