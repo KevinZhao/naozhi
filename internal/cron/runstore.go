@@ -537,12 +537,60 @@ func (s *runStore) Append(run *CronRun) {
 	// per-job mutex serialisation. summarySrc rebinding to &shrunk on the
 	// over-cap path is preserved verbatim so the cache row stays in
 	// lockstep with the on-disk truncated record (#1079 / R250-GO-16).
-	data, err := marshalRunPooled(run)
-	if err != nil {
-		slog.Warn("cron run: marshal failed", "job_id", run.JobID, "run_id", run.RunID, "err", err)
-		return
-	}
+	//
+	// R250-PERF-8 (#1111): pre-flight string-length sum BEFORE the first
+	// marshal. The dominant size contributors are Result/Prompt/ErrorMsg
+	// (each potentially many KB on chatty jobs); when their byte sum alone
+	// already overshoots maxRunBytes minus a small fixed-fields headroom,
+	// we KNOW the first marshal would just be discarded so the retry path
+	// runs. Skip straight to the truncate variant in that case — saves
+	// one full json.Marshal on the rare-but-expensive over-cap path. The
+	// cheap len() sum is O(1) per field; a stray small-fields-but-large-
+	// metadata edge falls through to the original two-marshal path so
+	// correctness is preserved (the post-marshal len(data) > maxRunBytes
+	// gate below remains the authoritative check).
+	const fixedFieldsHeadroom = 1024
+	preflightOverCap := s.maxRunBytes > fixedFieldsHeadroom &&
+		int64(len(run.Result)+len(run.Prompt)+len(run.ErrorMsg)) >
+			s.maxRunBytes-fixedFieldsHeadroom
+	var data []byte
+	var err error
 	summarySrc := run
+	if preflightOverCap {
+		// Skip the speculative first marshal; produce the truncated copy
+		// directly. We still emit the same warn line so existing log-based
+		// alerting on "payload exceeds size cap" stays calibrated.
+		slog.Warn("cron run: payload exceeds size cap; truncating result/prompt and retrying",
+			"job_id", run.JobID, "run_id", run.RunID,
+			"preflight_bytes", len(run.Result)+len(run.Prompt)+len(run.ErrorMsg),
+			"cap", s.maxRunBytes)
+		shrunk := *run
+		shrunk.Result = truncateWithSuffix(shrunk.Result, maxRetryFieldRunes)
+		shrunk.Prompt = truncateWithSuffix(shrunk.Prompt, maxRetryFieldRunes)
+		shrunk.ErrorMsg = truncateWithSuffix(shrunk.ErrorMsg, maxRetryFieldRunes)
+		data2, err2 := marshalRunPooled(&shrunk)
+		if err2 != nil || int64(len(data2)) > s.maxRunBytes {
+			retryBytes := -1
+			if err2 == nil {
+				retryBytes = len(data2)
+			}
+			slog.Warn("cron run: retry marshal also exceeded cap; run record dropped",
+				"job_id", run.JobID,
+				"run_id", run.RunID,
+				"retry_err", err2,
+				"retry_bytes", retryBytes,
+				"cap", s.maxRunBytes)
+			return
+		}
+		data = data2
+		summarySrc = &shrunk
+	} else {
+		data, err = marshalRunPooled(run)
+		if err != nil {
+			slog.Warn("cron run: marshal failed", "job_id", run.JobID, "run_id", run.RunID, "err", err)
+			return
+		}
+	}
 	if int64(len(data)) > s.maxRunBytes {
 		slog.Warn("cron run: payload exceeds size cap; truncating result/prompt and retrying",
 			"job_id", run.JobID, "run_id", run.RunID, "bytes", len(data), "cap", s.maxRunBytes)
