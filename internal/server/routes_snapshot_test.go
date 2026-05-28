@@ -266,7 +266,7 @@ var serverFieldType = map[string]string{
 	"scratchH":          "*ScratchHandler",
 	"memoryH":           "*MemoryHandler",
 	"healthH":           "*HealthHandler",
-	"auth":              "*AuthHandlers",
+	"auth":              "*auth.Handlers",
 	"hub":               "*Hub",
 	"reverseNodeServer": "*node.ReverseServer",
 }

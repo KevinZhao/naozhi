@@ -1,4 +1,4 @@
-package server
+package auth
 
 import (
 	"net/http"
@@ -17,10 +17,10 @@ import (
 // force the rate-limit branch, independently of wall-clock timing.
 func TestHandleLogin_Sets429AndRetryAfterOnRateLimit(t *testing.T) {
 	t.Parallel()
-	a := &AuthHandlers{
-		dashboardToken: "secret",
+	a := &Handlers{
+		DashboardToken: "secret",
 		cookieSecret:   []byte("cookie"),
-		loginLimiter:   newLoginLimiter(),
+		loginLimiter:   NewLoginLimiter(),
 	}
 
 	const sameOriginIP = "10.0.0.42:54321"
@@ -35,7 +35,7 @@ func TestHandleLogin_Sets429AndRetryAfterOnRateLimit(t *testing.T) {
 		r.RemoteAddr = sameOriginIP
 		r.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
-		a.handleLogin(w, r)
+		a.HandleLogin(w, r)
 		if w.Code != http.StatusUnauthorized {
 			t.Fatalf("burst req %d: status = %d, want 401 (body=%q)",
 				i, w.Code, strings.TrimSpace(w.Body.String()))
@@ -52,7 +52,7 @@ func TestHandleLogin_Sets429AndRetryAfterOnRateLimit(t *testing.T) {
 	r.RemoteAddr = sameOriginIP
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	a.handleLogin(w, r)
+	a.HandleLogin(w, r)
 
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("post-burst status = %d, want 429 (body=%q)",

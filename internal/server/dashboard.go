@@ -33,7 +33,6 @@ var dashboardJS embed.FS
 //go:embed static/agent_view.js
 var agentViewJS embed.FS
 
-const authCookieName = "naozhi_auth"
 
 // staticAssetETags holds precomputed strong-form ETags for embedded dashboard
 // assets. cron-dashboard-redesign P0 §6 — combined with the existing
@@ -135,8 +134,8 @@ func (s *Server) registerDashboard() {
 		// snapshot so a future hot-reload that invokes RotateCookieGen
 		// invalidates WS upgrades on the next handshake instead of
 		// continuing to accept pre-rotation cookies until restart. The
-		// HTTP path already calls auth.cookieMAC() per request.
-		CookieMACFn:      s.auth.cookieMAC,
+		// HTTP path already calls auth.CookieMAC() per request.
+		CookieMACFn:      s.auth.CookieMAC,
 		Guard:            s.sessionGuard,
 		Queue:            s.msgQueue,
 		Nodes:            s.nodes,
@@ -144,9 +143,9 @@ func (s *Server) registerDashboard() {
 		ProjectMgr:       s.projectMgr,
 		Resolver:         s.resolver,
 		AllowedRoot:      s.allowedRoot,
-		TrustedProxy:     s.auth.trustedProxy,
-		WSAuthLimiter:    s.auth.loginAllow,
-		WSUpgradeLimiter: s.auth.wsUpgradeAllow,
+		TrustedProxy:     s.auth.TrustedProxy,
+		WSAuthLimiter:    s.auth.LoginAllow,
+		WSUpgradeLimiter: s.auth.WSUpgradeAllow,
 		// R20260527122801-SEC-2 / #1326: forward AuthHandlers so
 		// HandleUpgrade can mint nz_anon (and refuse upgrade if mint
 		// fails) instead of falling back to clientIP for uploadOwner.
@@ -200,10 +199,10 @@ func (s *Server) registerDashboard() {
 		// no longer reaches its router via h.hub.router.* transits.
 		router:        s.hub.router,
 		uploadStore:   uploads,
-		uploadLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, s.auth.trustedProxy), // 10 uploads/min per IP
-		sendLimiter:   newIPLimiterWithProxy(rate.Every(2*time.Second), 30, s.auth.trustedProxy), // 30 sends/min per IP (burst 30)
+		uploadLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, s.auth.TrustedProxy), // 10 uploads/min per IP
+		sendLimiter:   newIPLimiterWithProxy(rate.Every(2*time.Second), 30, s.auth.TrustedProxy), // 30 sends/min per IP (burst 30)
 		auth:          s.auth,
-		trustedProxy:  s.auth.trustedProxy,
+		trustedProxy:  s.auth.TrustedProxy,
 	}
 
 	// Scratch (ephemeral aside) API. Pool was constructed in New(); wire it
@@ -219,7 +218,7 @@ func (s *Server) registerDashboard() {
 			// h.hub.router.* transits.
 			router:    s.hub.router,
 			pool:      s.scratchPool,
-			openLimit: newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.trustedProxy), // 5 opens/min per IP
+			openLimit: newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.TrustedProxy), // 5 opens/min per IP
 			agents:    s.agents,
 		}
 	}
@@ -271,7 +270,7 @@ func (s *Server) registerDashboard() {
 	}
 
 	// Authenticated API routes
-	auth := s.auth.requireAuth
+	auth := s.auth.RequireAuth
 	s.mux.HandleFunc("GET /api/cli/backends", auth(s.cliH.handle))
 	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.handleList))
 	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.handleEvents))
@@ -318,7 +317,7 @@ func (s *Server) registerDashboard() {
 	// system-session daemons (docs/rfc/system-session.md §9.2/§9.3)
 	s.mux.HandleFunc("GET /api/system/daemons", auth(s.handleSystemDaemons))
 	s.mux.HandleFunc("POST /api/system/labels/clear-origin", auth(s.handleClearLabelOrigin))
-	s.mux.HandleFunc("POST /api/auth/logout", auth(s.auth.handleLogout))
+	s.mux.HandleFunc("POST /api/auth/logout", auth(s.auth.HandleLogout))
 	// pprof / expvar debug endpoints: auth-gated + loopback-only AND
 	// gated behind server.debug_mode (default false) so a leaked dashboard
 	// token cannot enumerate goroutine stacks (which embed file paths +
@@ -340,19 +339,19 @@ func (s *Server) registerDashboard() {
 	// ~/.claude/projects/<scope>/memory/<slug>.md to the dashboard inlineMd
 	// renderer so [[slug]] tokens become hover-previewable cards.
 	if s.memoryH == nil {
-		s.memoryH = NewMemoryHandler(s.auth.trustedProxy)
+		s.memoryH = NewMemoryHandler(s.auth.TrustedProxy)
 	}
 	s.mux.HandleFunc("GET /api/memory/{slug}", auth(s.memoryH.handleGet))
 
 	// Unauthenticated routes (login, static assets, WebSocket with own auth)
-	s.mux.HandleFunc("POST /api/auth/login", s.auth.handleLogin)
+	s.mux.HandleFunc("POST /api/auth/login", s.auth.HandleLogin)
 	// R243-SEC-15 (#800): explicit no-JS form-action target. The login page
 	// posts JSON via fetch() when JavaScript is enabled; this handler exists
 	// so a JS-disabled browser's submit lands in a controlled drain-and-
 	// discard path instead of a raw "POST /dashboard" that would (a) get
 	// 405 from the GET-only mux entry above and (b) ship the form-encoded
 	// token through any logging middleware that reads request bodies.
-	s.mux.HandleFunc("POST /api/auth/noscript", s.auth.handleLoginNoScript)
+	s.mux.HandleFunc("POST /api/auth/noscript", s.auth.HandleLoginNoScript)
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
 	s.mux.HandleFunc("GET /manifest.json", s.handleManifest)
 	s.mux.HandleFunc("GET /sw.js", s.handleSW)
@@ -374,19 +373,19 @@ func (s *Server) registerDashboard() {
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	if s.dashboardToken != "" && !s.auth.isAuthenticated(r) {
+	if s.dashboardToken != "" && !s.auth.IsAuthenticated(r) {
 		// R230C-SEC-12: rate-limit unauthenticated GETs so a scanner cannot
 		// repeatedly hammer the login template renderer (CSP+HTML+cookie
 		// crypto path) and fingerprint deployments. Same 60/min×20 burst
 		// budget as wsUpgradeLimiter accommodates real users (tab-reload,
 		// mobile-wake, multiple browser windows) while limiting sustained
 		// abuse. Authenticated users are unaffected.
-		if !s.auth.unauthDashAllow(clientIP(r, s.auth.trustedProxy)) {
+		if !s.auth.UnauthDashAllow(clientIP(r, s.auth.TrustedProxy)) {
 			w.Header().Set("Retry-After", "60")
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
 			return
 		}
-		s.auth.serveLoginPage(w, r)
+		s.auth.ServeLoginPage(w, r)
 		return
 	}
 	data, err := dashboardHTML.ReadFile("static/dashboard.html")
@@ -479,7 +478,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// HTTP would still be honoured by browsers and can brick local HTTP
 	// loopback access for a year. Gate on the same isSecure() helper the
 	// auth cookie Secure flag uses, so behaviour is consistent.
-	if s.auth.isSecure(r) {
+	if s.auth.IsSecure(r) {
 		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 	}
 	w.Header().Set("X-Frame-Options", "DENY")

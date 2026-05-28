@@ -2,17 +2,17 @@
   {
     "method": "POST",
     "path": "/api/auth/login",
-    "handler_type": "*AuthHandlers"
+    "handler_type": "*auth.Handlers"
   },
   {
     "method": "POST",
     "path": "/api/auth/logout",
-    "handler_type": "*AuthHandlers"
+    "handler_type": "*auth.Handlers"
   },
   {
     "method": "POST",
     "path": "/api/auth/noscript",
-    "handler_type": "*AuthHandlers"
+    "handler_type": "*auth.Handlers"
   },
   {
     "method": "GET",

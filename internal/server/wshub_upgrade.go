@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 )
@@ -245,7 +246,7 @@ func wsDeriveUploadOwner(w http.ResponseWriter, r *http.Request, h *Hub, ip stri
 	// hash → uploadOwner derivation runs. Until then the client stays
 	// unauthenticated with empty uploadOwner — that branch never reaches
 	// uploadStore.
-	if cookie, err := r.Cookie(authCookieName); err == nil {
+	if cookie, err := r.Cookie(auth.AuthCookieName); err == nil {
 		// R040034-SEC-1 (#1398): h.cookieMAC is a getter callback so
 		// RotateCookieGen invalidations reach this branch on the next
 		// upgrade — previously the Hub cached opts.CookieMAC at

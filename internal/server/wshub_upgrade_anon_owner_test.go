@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 )
 
 // TestWSDeriveUploadOwner_NoTokenMintsAnonCookie pins R20260527122801-SEC-2
@@ -15,7 +17,7 @@ import (
 // nz_anon closes on the HTTP path.
 func TestWSDeriveUploadOwner_NoTokenMintsAnonCookie(t *testing.T) {
 	t.Parallel()
-	h := &Hub{auth: &AuthHandlers{}} // dashToken == "" → no-token mode
+	h := &Hub{auth: &auth.Handlers{}} // dashToken == "" → no-token mode
 	r := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	r.RemoteAddr = "10.0.0.1:1234" // co-NAT IP we explicitly do NOT want returned
 	w := httptest.NewRecorder()
@@ -57,7 +59,7 @@ func TestWSDeriveUploadOwner_NoTokenMintsAnonCookie(t *testing.T) {
 // instead of minting a fresh cookie + bucket on every WS upgrade.
 func TestWSDeriveUploadOwner_ExistingAnonCookieReused(t *testing.T) {
 	t.Parallel()
-	h := &Hub{auth: &AuthHandlers{}}
+	h := &Hub{auth: &auth.Handlers{}}
 	r := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	r.AddCookie(&http.Cookie{Name: anonCookieName, Value: "deadbeefcafebabe0011223344556677"})
 	w := httptest.NewRecorder()
@@ -81,7 +83,7 @@ func TestWSDeriveUploadOwner_ExistingAnonCookieReused(t *testing.T) {
 // TestWSDeriveUploadOwner_NilAuthFallsBackToIPForTests preserves the
 // test-harness escape valve: NewHub callers that do not wire HubOptions.
 // Auth (older unit fixtures) keep the legacy IP-fallback so they can
-// authenticate without setting up a full AuthHandlers. Production wiring
+// authenticate without setting up a full auth.Handlers. Production wiring
 // always passes Auth, so the SEC-2 fix takes effect there.
 func TestWSDeriveUploadOwner_NilAuthFallsBackToIPForTests(t *testing.T) {
 	t.Parallel()

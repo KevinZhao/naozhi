@@ -1,4 +1,4 @@
-package server
+package auth
 
 import (
 	"net/http"
@@ -8,10 +8,10 @@ import (
 )
 
 // TestHandleLogin_NoTokenConfiguredRejects pins R220-SEC-2: when
-// dashboardToken is empty (operator did not configure auth) the login
+// DashboardToken is empty (operator did not configure auth) the login
 // endpoint must reject submissions with 401 just like the
 // configured-but-wrong path. Previously the handler short-circuited
-// via `if a.dashboardToken == "" || !matched` which let the empty-token
+// via `if a.DashboardToken == "" || !matched` which let the empty-token
 // branch return faster than the matched-evaluation branch — a remote
 // timing probe could distinguish "no token configured" from "token
 // configured, but wrong". The fix combines both checks via bitwise AND
@@ -25,7 +25,7 @@ func TestHandleLogin_NoTokenConfiguredRejects(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name           string
-		dashboardToken string
+		DashboardToken string
 		submitted      string
 		wantStatus     int
 	}{
@@ -36,10 +36,10 @@ func TestHandleLogin_NoTokenConfiguredRejects(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			a := &AuthHandlers{
-				dashboardToken: tc.dashboardToken,
+			a := &Handlers{
+				DashboardToken: tc.DashboardToken,
 				cookieSecret:   []byte("cookie"),
-				loginLimiter:   newLoginLimiter(),
+				loginLimiter:   NewLoginLimiter(),
 			}
 			body := `{"token":"` + tc.submitted + `"}`
 			r := httptest.NewRequest(http.MethodPost, "http://naozhi.example/api/auth/login",
@@ -47,7 +47,7 @@ func TestHandleLogin_NoTokenConfiguredRejects(t *testing.T) {
 			r.Host = "naozhi.example"
 			r.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
-			a.handleLogin(w, r)
+			a.HandleLogin(w, r)
 			if w.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d (body=%q)",
 					w.Code, tc.wantStatus, strings.TrimSpace(w.Body.String()))
