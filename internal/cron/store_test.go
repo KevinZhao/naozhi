@@ -58,3 +58,68 @@ func TestLoadJobs_NilEntry(t *testing.T) {
 		t.Fatalf("valid job %q missing from loaded map", validID)
 	}
 }
+
+// TestLoadJobsDuplicateIDWarn pins R260528-BUG-8: a hand-edited
+// cron_jobs.json carrying two Job entries with the same ID must keep
+// the first occurrence and drop the rest. Pre-fix, the loop's
+// `m[j.ID] = j` silently let the second entry overwrite the first,
+// masking the duplicate from operators while quietly losing whichever
+// version came earlier in the file.
+func TestLoadJobsDuplicateIDWarn(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "cron_jobs.json")
+
+	dupID := mustGenerateID()
+	first := &Job{
+		ID:        dupID,
+		Schedule:  "@every 1m",
+		Prompt:    "first wins",
+		Platform:  "feishu",
+		ChatID:    "chat-A",
+		ChatType:  "private",
+		CreatedBy: "tester",
+	}
+	second := &Job{
+		ID:        dupID,
+		Schedule:  "@every 5m",
+		Prompt:    "second loses",
+		Platform:  "feishu",
+		ChatID:    "chat-B",
+		ChatType:  "private",
+		CreatedBy: "tester",
+	}
+	firstBytes, err := json.Marshal(first)
+	if err != nil {
+		t.Fatalf("marshal first: %v", err)
+	}
+	secondBytes, err := json.Marshal(second)
+	if err != nil {
+		t.Fatalf("marshal second: %v", err)
+	}
+	payload := []byte("[" + string(firstBytes) + "," + string(secondBytes) + "]")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatalf("write store: %v", err)
+	}
+
+	m, err := loadJobs(path)
+	if err != nil {
+		t.Fatalf("loadJobs: %v", err)
+	}
+	if got, want := len(m), 1; got != want {
+		t.Fatalf("loaded jobs = %d, want %d (duplicate IDs must collapse)", got, want)
+	}
+	got, ok := m[dupID]
+	if !ok {
+		t.Fatalf("dupID %q missing from loaded map", dupID)
+	}
+	if got.Prompt != "first wins" {
+		t.Errorf("loaded job prompt = %q, want %q (first occurrence must win)",
+			got.Prompt, "first wins")
+	}
+	if got.ChatID != "chat-A" {
+		t.Errorf("loaded job chat_id = %q, want %q (first occurrence must win)",
+			got.ChatID, "chat-A")
+	}
+}
