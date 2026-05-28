@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -334,7 +335,15 @@ func IsValidID(s string) bool {
 // runs/ symlink could redirect the entire run-history tree at a
 // sensitive directory and any subsequent Append would write CronRun
 // JSON over arbitrary files.
-func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *runStore {
+//
+// R241-ARCH-8 (#512): optional maxBytesOpt overrides the default
+// MaxRunRecordBytes per-record cap. Passing it brings constructor
+// signature in parity with keepCount / keepWindow, both of which are
+// already tunable. Variadic keeps the existing 3-arg call sites in
+// scheduler.go and tests source-compatible — a missing or non-positive
+// value falls back to MaxRunRecordBytes so the production caller sees
+// no behaviour change.
+func newRunStore(storePath string, keepCount int, keepWindow time.Duration, maxBytesOpt ...int64) *runStore {
 	if storePath == "" {
 		return &runStore{disabled: true}
 	}
@@ -343,6 +352,10 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *run
 	}
 	if keepWindow <= 0 {
 		keepWindow = DefaultRunsKeepWindow
+	}
+	maxBytes := int64(MaxRunRecordBytes)
+	if len(maxBytesOpt) > 0 && maxBytesOpt[0] > 0 {
+		maxBytes = maxBytesOpt[0]
 	}
 	// filepath.Abs already cleans the path, normalising any `..` /  `.` /
 	// double-slash segments. If Abs fails (CWD missing — extremely rare
@@ -408,7 +421,7 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *run
 		root:         root,
 		keepCount:    keepCount,
 		keepWindow:   keepWindow,
-		maxRunBytes:  MaxRunRecordBytes,
+		maxRunBytes:  maxBytes,
 		enableTrimGC: true,
 	}
 }
@@ -454,7 +467,21 @@ func (s *runStore) jobLock(jobID string) *sync.Mutex {
 //
 // Tests that want hard-fail-on-contract-miss can wrap the slog handler
 // to escalate; production stays alive.
+//
+// R249-CR-18 (#961): the TryLock+Unlock pair costs ~30 ns on the Append
+// hot path (skipAppendTrim + trimJobLocked both call this on every
+// invocation) and is a pure best-effort check — false negatives are
+// already accepted, the production warn path has fired exactly zero
+// times since R242-CR-11 / R242-CR-7 replaced the original panic. Gate
+// the lock probe behind testing.Testing() so production processes pay
+// only the function-call overhead while `go test` still gets the
+// contract assertion. The field-name + signature stay so future
+// callers' godoc references and any test fixtures that look up the
+// method via reflection continue to work.
 func (s *runStore) assertJobLockHeld(jobID string) {
+	if !testing.Testing() {
+		return
+	}
 	lock := s.jobLock(jobID)
 	if lock.TryLock() {
 		lock.Unlock()
@@ -510,12 +537,60 @@ func (s *runStore) Append(run *CronRun) {
 	// per-job mutex serialisation. summarySrc rebinding to &shrunk on the
 	// over-cap path is preserved verbatim so the cache row stays in
 	// lockstep with the on-disk truncated record (#1079 / R250-GO-16).
-	data, err := marshalRunPooled(run)
-	if err != nil {
-		slog.Warn("cron run: marshal failed", "job_id", run.JobID, "run_id", run.RunID, "err", err)
-		return
-	}
+	//
+	// R250-PERF-8 (#1111): pre-flight string-length sum BEFORE the first
+	// marshal. The dominant size contributors are Result/Prompt/ErrorMsg
+	// (each potentially many KB on chatty jobs); when their byte sum alone
+	// already overshoots maxRunBytes minus a small fixed-fields headroom,
+	// we KNOW the first marshal would just be discarded so the retry path
+	// runs. Skip straight to the truncate variant in that case — saves
+	// one full json.Marshal on the rare-but-expensive over-cap path. The
+	// cheap len() sum is O(1) per field; a stray small-fields-but-large-
+	// metadata edge falls through to the original two-marshal path so
+	// correctness is preserved (the post-marshal len(data) > maxRunBytes
+	// gate below remains the authoritative check).
+	const fixedFieldsHeadroom = 1024
+	preflightOverCap := s.maxRunBytes > fixedFieldsHeadroom &&
+		int64(len(run.Result)+len(run.Prompt)+len(run.ErrorMsg)) >
+			s.maxRunBytes-fixedFieldsHeadroom
+	var data []byte
+	var err error
 	summarySrc := run
+	if preflightOverCap {
+		// Skip the speculative first marshal; produce the truncated copy
+		// directly. We still emit the same warn line so existing log-based
+		// alerting on "payload exceeds size cap" stays calibrated.
+		slog.Warn("cron run: payload exceeds size cap; truncating result/prompt and retrying",
+			"job_id", run.JobID, "run_id", run.RunID,
+			"preflight_bytes", len(run.Result)+len(run.Prompt)+len(run.ErrorMsg),
+			"cap", s.maxRunBytes)
+		shrunk := *run
+		shrunk.Result = truncateWithSuffix(shrunk.Result, maxRetryFieldRunes)
+		shrunk.Prompt = truncateWithSuffix(shrunk.Prompt, maxRetryFieldRunes)
+		shrunk.ErrorMsg = truncateWithSuffix(shrunk.ErrorMsg, maxRetryFieldRunes)
+		data2, err2 := marshalRunPooled(&shrunk)
+		if err2 != nil || int64(len(data2)) > s.maxRunBytes {
+			retryBytes := -1
+			if err2 == nil {
+				retryBytes = len(data2)
+			}
+			slog.Warn("cron run: retry marshal also exceeded cap; run record dropped",
+				"job_id", run.JobID,
+				"run_id", run.RunID,
+				"retry_err", err2,
+				"retry_bytes", retryBytes,
+				"cap", s.maxRunBytes)
+			return
+		}
+		data = data2
+		summarySrc = &shrunk
+	} else {
+		data, err = marshalRunPooled(run)
+		if err != nil {
+			slog.Warn("cron run: marshal failed", "job_id", run.JobID, "run_id", run.RunID, "err", err)
+			return
+		}
+	}
 	if int64(len(data)) > s.maxRunBytes {
 		slog.Warn("cron run: payload exceeds size cap; truncating result/prompt and retrying",
 			"job_id", run.JobID, "run_id", run.RunID, "bytes", len(data), "cap", s.maxRunBytes)

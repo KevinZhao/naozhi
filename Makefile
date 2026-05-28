@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 BINARY  := naozhi
 MAIN    := ./cmd/naozhi/
 
-.PHONY: build vet test lint vuln deploy release clean lint-server lint-server-fail
+.PHONY: build vet test lint vuln deploy release clean lint-server lint-server-fail lint-fact-table lint-fact-table-fail
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags='$(LDFLAGS)' -o bin/$(BINARY) $(MAIN)
@@ -36,6 +36,19 @@ lint-server:
 
 lint-server-fail:
 	go run ./tools/lint-server-handlers -mode fail
+
+# fact-table drift detection (server-split-phase4-design.md v0.6.1 §0 纪律 5).
+# 扫 design / RFC markdown 中的关键数字 token 与 speech 表对账，漂移即报。
+# warn mode: 不卡 PR；Phase 5 完工后切 lint-fact-table-fail。
+lint-fact-table:
+	go run ./tools/lint-fact-table -mode warn \
+		docs/design/server-split-phase4-design.md \
+		docs/design/server-split-phase4-baseline.md
+
+lint-fact-table-fail:
+	go run ./tools/lint-fact-table -mode fail \
+		docs/design/server-split-phase4-design.md \
+		docs/design/server-split-phase4-baseline.md
 
 # Cross-compile all supported platforms. Windows omitted: internal/shim
 # depends on POSIX-only syscalls (Kill, Setsid) not present on windows/*.

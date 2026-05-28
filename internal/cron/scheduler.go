@@ -457,7 +457,12 @@ type Scheduler struct {
 	// concurrent persist hot-path readers under -race. Initialised to
 	// defaultMarshalJobs in NewScheduler. Lifted from a package-level
 	// var so the seam stops being a global and parallel tests can no
-	// longer leak a stub across schedulers. R250-ARCH-14.
+	// longer leak a stub across schedulers. R250-ARCH-14 closes
+	// R242-CR-5 (#693) / R246-ARCH-18 / R247-CR-19 (#599) — the older
+	// anchors all describe the same package-level mutable seam this
+	// per-Scheduler atomic.Pointer field replaced; pinned by
+	// TestMarshalJobs_PerSchedulerIsolation in
+	// marshal_jobs_per_scheduler_test.go.
 	marshalJobs atomic.Pointer[marshalJobsFn]
 }
 
@@ -553,8 +558,8 @@ func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 }
 
 // workDirResolveCacheTTL caps how long a positive workDirResolveUnderRoot
-// result may be reused before re-running EvalSymlinks. R247-PERF-24:
-// long-lived schedulers re-evaluate the same per-job workDir every tick;
+// result may be reused before re-running EvalSymlinks. R247-PERF-24
+// (#572): long-lived schedulers re-evaluate the same per-job workDir every tick;
 // each call costs Lstat+Readlink per path component plus the same chain
 // for allowedRoot. A short TTL collapses the hot-path syscall load on
 // fast-firing jobs while still bounding the TOCTOU window the per-call
@@ -781,6 +786,38 @@ func (cfg *SchedulerConfig) applyDefaults() {
 	}
 }
 
+// resolveAllowedRoot sanitises cfg.AllowedRoot (clearing NUL-bearing values
+// loud) and returns the EvalSymlinks-resolved form for the sanitised root.
+// Empty result on either side means "no root constraint" — the empty-string
+// branch in workDirResolveUnderRoot then short-circuits the per-call check.
+//
+// Split out from NewScheduler under R241-ARCH-10 (#517) so the constructor
+// body reads as a near-flat field mirror. Kept off of applyDefaults because
+// EvalSymlinks is a syscall and applyDefaults is documented as pure /
+// idempotent / safe to call from tests.
+//
+// R20260527-PERF-14 (#1297) (preserved): an operator-set NUL byte in
+// AllowedRoot would tokenise workDirCacheKeySuffix incorrectly and cause
+// workDirResolveUnderRootCached to alias unrelated workDir inputs onto the
+// same cache slot. NUL also has no legitimate place in a filesystem path on
+// POSIX or Windows. The AllowedRoot is cleared so workDir checks fall
+// through to "no root constraint", with a loud slog.Error to surface the
+// misconfig.
+func (cfg *SchedulerConfig) resolveAllowedRoot() string {
+	if strings.ContainsRune(cfg.AllowedRoot, 0) {
+		slog.Error("cron.NewScheduler: cfg.AllowedRoot contains NUL byte; clearing to disable root constraint",
+			"allowed_root_len", len(cfg.AllowedRoot))
+		cfg.AllowedRoot = ""
+	}
+	if cfg.AllowedRoot == "" {
+		return ""
+	}
+	if r, err := filepath.EvalSymlinks(cfg.AllowedRoot); err == nil {
+		return r
+	}
+	return ""
+}
+
 func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	// R20260526-GO-023 / R241-ARCH-6 (#510): surface missing router wiring
 	// at construction so the misconfiguration shows up at boot rather than
@@ -817,29 +854,13 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		parent = context.Background()
 	}
 	stopCtx, stopCancel := context.WithCancel(parent)
-	// R20260527-PERF-14 (#1297): reject an operator-set NUL byte in
-	// AllowedRoot at startup. workDirCacheKeySuffix below precomputes
-	// "\x00" + cfg.AllowedRoot + "\x00" + allowedRootResolved as the
-	// cache-key tail; an embedded NUL would tokenise that key incorrectly
-	// and cause workDirResolveUnderRootCached to alias unrelated workDir
-	// inputs onto the same cache slot. NUL also has no legitimate place
-	// in a filesystem path on POSIX or Windows. Clear the AllowedRoot to
-	// fall through to "no root constraint" (the existing empty-string
-	// branch below) and log loud so the operator notices the misconfig.
-	if strings.ContainsRune(cfg.AllowedRoot, 0) {
-		slog.Error("cron.NewScheduler: cfg.AllowedRoot contains NUL byte; clearing to disable root constraint",
-			"allowed_root_len", len(cfg.AllowedRoot))
-		cfg.AllowedRoot = ""
-	}
-	// Resolve the allowed root once at construction; subsequent workDir
-	// checks skip the syscall chain for the root side. Empty result falls
-	// back to lazy resolution per-call.
-	var allowedRootResolved string
-	if cfg.AllowedRoot != "" {
-		if r, err := filepath.EvalSymlinks(cfg.AllowedRoot); err == nil {
-			allowedRootResolved = r
-		}
-	}
+	// R241-ARCH-10 (#517): NUL-byte sanitisation + EvalSymlinks resolution
+	// of AllowedRoot is now folded behind one helper so NewScheduler reads
+	// as a flat field-mirror. The helper mutates cfg.AllowedRoot in place
+	// (clearing it on NUL detection) and returns the symlink-resolved
+	// path. Kept separate from applyDefaults because EvalSymlinks is a
+	// syscall and applyDefaults is documented as pure / idempotent.
+	allowedRootResolved := cfg.resolveAllowedRoot()
 	cronLogger := robfigcron.PrintfLogger(slogPrintfLogger{})
 	// applyDefaults guarantees Location is non-nil (defaults to time.Local).
 	loc := cfg.Location

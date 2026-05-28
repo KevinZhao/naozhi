@@ -1,3 +1,13 @@
+// File-block contract (server-split-phase4-design v0.6.1 §五):
+//
+//	WRITES:     subscriber block (clients / connCount / clientWG /
+//	            wsAuthLimiter / wsUpgradeLimiter / upgrader / dashTokenHash /
+//	            cookieMAC / trustedProxy) +
+//	            rate-limit/cache block (connCountByOwnerMu / connCountByOwner)
+//	READS:      shared deps block (dashToken / auth)
+//
+// Phase 4b 起 rule 3b 升级到 AST 字段访问对账时，会校验本文件方法体
+// 的字段访问匹配本契约；当前 Phase 0b 仅 marker 存在性。
 package server
 
 import (

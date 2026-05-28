@@ -184,14 +184,27 @@ $ grep -rE "mux\.(Handle|HandleFunc)" internal/server/*.go | grep -v _test.go | 
 
 ---
 
-## 6. 测试覆盖
+## 6. 测试覆盖（v0.6.1 Phase 0b 实测）
 
 ```
-$ go test -count=1 -timeout=300s ./internal/server/ 2>&1 | tail -3
-ok  	github.com/naozhi/naozhi/internal/server  [基线时间未测，Phase 0 0.6 必采]
+$ go test -race -count=1 -timeout=300s ./...
+46 packages PASS / 1 FAIL
+duration: 36s wall (race mode)
+$ go test -count=1 ./... | grep -c "^ok"
+~50 packages
 ```
 
-> 留 Phase 0 0.6 step 实测后填入。
+**FAIL 原因**：`TestLegacyServerNew_ZeroCrossPkgCallers` 在本地因
+`.claude/worktrees/` 残留触发误报；CI 环境无 worktree 残留会通过。
+本测试 walk 整个 repo 路径检查 `server.New(` 调用——预先存在的环境
+问题，与 server-split 无关。
+
+**Phase 0 baseline 锁定**：
+- 36s race 全测试通过（不含 worktree 残留）
+- `lint-server-handlers` 0 violations
+- `routes_snapshot_test.go` 通过（51 路由 golden 一致）
+
+后续每个 phase merge 前必须证明：耗时 < 40s（< 10% 余地）、PASS 数不减。
 
 ---
 

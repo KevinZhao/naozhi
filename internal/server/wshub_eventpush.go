@@ -1,3 +1,11 @@
+// File-block contract (server-split-phase4-design v0.6.1 §五):
+//
+//	WRITES:     rate-limit/cache block (historyMarshalCache for replay cache)
+//	READS:      shared deps block (read-only after ctor) + subscriber block
+//	            (clients for fanout) + lifecycle block (ctx for cancel)
+//
+// Phase 4b 起 rule 3b 升级到 AST 字段访问对账时，会校验本文件方法体
+// 的字段访问匹配本契约；当前 Phase 0b 仅 marker 存在性。
 package server
 
 import (

@@ -79,6 +79,22 @@ type SubagentLinker struct {
 	// acts as a counting semaphore: acquire by sending, release by receiving.
 	resolveSem chan struct{}
 
+	// inflightTasks tracks taskIDs whose Resolve goroutine is already
+	// running (or about to start). Callers (notifyLinker on the readLoop
+	// hot path, InjectHistory replay) use TryMarkResolveInflight to skip
+	// the goroutine spawn for duplicate task_started events the CLI emits
+	// across reconnects/replays. Without this, every replayed
+	// task_started for the same task_id would schedule a fresh goroutine
+	// that hits the existing Query fast-path inside Resolve and returns —
+	// wasted scheduler work + closure allocation. R260528-PERF-7 (#1354).
+	//
+	// sync.Map is the right shape: writes happen at the readLoop
+	// goroutine's pace (one per unique task_id, never more than ~32 per
+	// turn), reads happen on every task_started event. LoadOrStore is
+	// the atomic "claim if absent" primitive we need; the slice in the
+	// hotter Append/Subscribe paths can keep its own RLock.
+	inflightTasks sync.Map // map[taskID]struct{}
+
 	// Tunable via tests. Defaults: 250ms * 12 = 3s grace; 200ms dir cache.
 	retryInterval time.Duration
 	retryLimit    int
@@ -199,6 +215,44 @@ func (l *SubagentLinker) QueryOrResolveFast(taskID string) (LinkInfo, bool) {
 	return info, ok
 }
 
+// TryMarkResolveInflight atomically claims the in-flight slot for taskID.
+// Returns ok=true on first claim; subsequent callers for the same taskID
+// receive ok=false and SHOULD skip spawning their Resolve goroutine. The
+// claim is cleared by Resolve's defer once the resolution completes (or
+// times out / is cancelled). R260528-PERF-7 (#1354): without this gate,
+// burst-replayed task_started events (shim reconnect, dashboard
+// snapshot-history fan-in) each spawn a goroutine that promptly bails on
+// Query's fast path — wasted scheduler work and a transient stack
+// footprint roughly equal to (replay_size × 8KB) per turn.
+//
+// Empty taskID returns ok=false so callers don't accumulate empty-key
+// inflight entries; the production caller already short-circuits on
+// taskID == "" earlier so this is defence-in-depth.
+//
+// Idempotent: re-entering with a taskID whose claim was cleared (the
+// previous Resolve completed) succeeds again, so a late-arriving
+// duplicate after a successful resolution still gets a chance to
+// re-trigger if Query's resolved-cache was somehow evicted.
+func (l *SubagentLinker) TryMarkResolveInflight(taskID string) bool {
+	if taskID == "" {
+		return false
+	}
+	_, loaded := l.inflightTasks.LoadOrStore(taskID, struct{}{})
+	return !loaded
+}
+
+// clearResolveInflight is the unexported pair to TryMarkResolveInflight.
+// Resolve calls it via defer once the resolution completes so a future
+// task_started for the same taskID can re-claim if needed (eg the cache
+// got evicted, or the prior attempt produced a tombstone the caller
+// wants to retry against a fresh disk state). Safe on empty taskID.
+func (l *SubagentLinker) clearResolveInflight(taskID string) {
+	if taskID == "" {
+		return
+	}
+	l.inflightTasks.Delete(taskID)
+}
+
 // ConfigureForTest overrides the default grace/poll/cache timings so tests
 // reach terminal verdicts in milliseconds rather than 3+ seconds. Not meant
 // for production callers — the private fields it mutates are the same ones
@@ -269,6 +323,14 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 		// gives the rest of the function a non-nil ctx to range over.
 		ctx = context.Background()
 	}
+	// R260528-PERF-7 (#1354): clear the in-flight claim on every exit
+	// path so a duplicate task_started for the same taskID arriving after
+	// this Resolve returns (success / tombstone / cancellation) can
+	// re-claim. Callers (notifyLinker, InjectHistory.kick) use
+	// TryMarkResolveInflight as a goroutine-spawn gate; clearing here is
+	// the unique pair-up. Safe-to-call when no claim was made (empty
+	// taskID short-circuits inside the helper).
+	defer l.clearResolveInflight(taskID)
 	// Step 1: already resolved? (cheap fast path, no semaphore needed)
 	l.mu.RLock()
 	if info, ok := l.byTaskID[taskID]; ok {

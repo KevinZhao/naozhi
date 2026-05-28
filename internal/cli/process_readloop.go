@@ -689,6 +689,18 @@ func (p *Process) notifyLinker(ev Event, nowMS int64, isSystemInit bool) {
 	if info, ok := linker.Query(taskID); ok && info.Resolved {
 		return
 	}
+	// R260528-PERF-7 (#1354): in-flight dedup. The Query check above only
+	// catches *resolved* taskIDs; while a Resolve goroutine is mid-poll
+	// (250 ms × 12 retries = up to 3 s grace window), the byTaskID map
+	// stays empty for that taskID. Without this gate, every duplicate
+	// task_started in that 3s window — which the CLI emits across
+	// progress envelopes and shim reconnect replays — schedules a fresh
+	// goroutine that promptly re-bails inside Resolve. TryMarkResolveInflight
+	// makes the dedup explicit at the readLoop hot path, eliminating the
+	// goroutine schedule + closure allocation for the duplicates.
+	if !linker.TryMarkResolveInflight(taskID) {
+		return
+	}
 	// task_started.description is "<name>: <prompt body>" for
 	// teammates; for sub-agents it's just the prompt. The
 	// linker's fast path works either way; trimming to the

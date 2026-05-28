@@ -1,6 +1,6 @@
 package cron
 
-// R247-PERF-24 regression tests. workDirResolveCache must:
+// R247-PERF-24 (#572) regression tests. workDirResolveCache must:
 //   - serve a positive resolution from the in-memory map without the
 //     pure helper running EvalSymlinks on the second call;
 //   - expire entries after workDirResolveCacheTTL so a symlink retarget
