@@ -37,7 +37,7 @@ func TestR218BGO3_ResolveRespectsCtxCancelDuringRetrySleep(t *testing.T) {
 	}()
 
 	start := time.Now()
-	info, resolved := l.Resolve(ctx, taskID, "toolu_X", name, "", time.Now().UnixMilli())
+	info, resolved := l.Resolve(ctx, taskID, "toolu_X", name, time.Now().UnixMilli())
 	elapsed := time.Since(start)
 
 	// Cancel must short-circuit Resolve well below the full retry budget.
@@ -93,7 +93,7 @@ func TestR218BGO3_ResolveRespectsCtxCancelOnSemaphoreAcquire(t *testing.T) {
 		start := time.Now()
 		// Use a name that would also fail the fast-path lookup so we'd
 		// reach the sem acquire arm.
-		_, ok := l.Resolve(ctx, "tsem", "toolu_S", "missing", "", time.Now().UnixMilli())
+		_, ok := l.Resolve(ctx, "tsem", "toolu_S", "missing", time.Now().UnixMilli())
 		elapsed = time.Since(start)
 		resolved = ok
 	}()

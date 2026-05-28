@@ -263,7 +263,7 @@ func sleepOrCancel(ctx context.Context, d time.Duration) bool {
 // agentType match would always miss). The legacy scan stays as a fallback
 // for older CLI versions or sidechain agents whose filename convention
 // differs.
-func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, description string, agentToolUseMS int64) (LinkInfo, bool) {
+func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name string, agentToolUseMS int64) (LinkInfo, bool) {
 	if ctx == nil {
 		// Defensive: no caller should pass nil, but a TODO!Background()
 		// gives the rest of the function a non-nil ctx to range over.

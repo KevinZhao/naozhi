@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
-	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // shimMsg is a minimal struct for parsing shim protocol messages in readLoop.
@@ -712,12 +711,10 @@ func (p *Process) notifyLinker(ev Event, nowMS int64, isSystemInit bool) {
 	// rune-decode loop avoids the per-event utf8 scan on the readLoop hot
 	// path. Cut at the nearest rune boundary so any operator-side dump of
 	// the value remains valid UTF-8.
-	const maxResolveDescBytes = 8000
-	desc := ev.Description
-	if len(desc) > maxResolveDescBytes {
-		desc = desc[:textutil.TruncateAtRuneBoundary(desc, maxResolveDescBytes)]
-	}
-	go linker.Resolve(p.lifecycleContext(), taskID, toolUseID, name, desc, nowMS)
+	// R260528-GO-1: Resolve dropped its dead description parameter; the
+	// truncate-before-closure block (formerly R225-CR-10 / R230B-PERF-7)
+	// guarded a goroutine leak that no longer exists.
+	go linker.Resolve(p.lifecycleContext(), taskID, toolUseID, name, nowMS)
 }
 
 // deliverEvent runs the post-EventLog dispatch arm of dispatchProtocolEvent:

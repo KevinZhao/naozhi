@@ -12,8 +12,6 @@ package cli
 
 import (
 	"time"
-
-	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // InjectHistory pre-populates the event log with historical entries. Also
@@ -57,7 +55,10 @@ func (p *Process) InjectHistory(entries []EventEntry) {
 			taskStartByToolUse[e.ToolUseID] = e
 		}
 	}
-	kick := func(taskID, toolUseID, name, desc string, wallclock int64) {
+	// R260528-GO-1: Resolve dropped its dead description parameter — kick
+	// no longer needs the summary string. Removes the per-replay
+	// TruncateRunes allocation as well.
+	kick := func(taskID, toolUseID, name string, wallclock int64) {
 		if taskID == "" {
 			return
 		}
@@ -75,11 +76,7 @@ func (p *Process) InjectHistory(entries []EventEntry) {
 		if info, ok := linker.Query(taskID); ok && info.Resolved {
 			return
 		}
-		// R225-CR-10: cap description (matches process_readloop hot path)
-		// so the Resolve goroutine doesn't pin multi-KB strings until the
-		// resolveSem slot frees.
-		desc = textutil.TruncateRunes(desc, eventDetailMaxRunes)
-		go linker.Resolve(p.lifecycleContext(), taskID, toolUseID, name, desc, wallclock)
+		go linker.Resolve(p.lifecycleContext(), taskID, toolUseID, name, wallclock)
 	}
 	for _, e := range entries {
 		switch e.Type {
@@ -95,7 +92,7 @@ func (p *Process) InjectHistory(entries []EventEntry) {
 			if name == "" {
 				name = e.TeamName
 			}
-			kick(ts.TaskID, e.ToolUseID, name, e.Summary, e.Time)
+			kick(ts.TaskID, e.ToolUseID, name, e.Time)
 		case "task_start", "task_progress":
 			// Orphan task path — the originating agent entry was evicted
 			// from the ring buffer before the replay window. Without this
@@ -107,7 +104,7 @@ func (p *Process) InjectHistory(entries []EventEntry) {
 			if e.TaskID == "" || e.InternalAgentID != "" {
 				continue
 			}
-			kick(e.TaskID, e.ToolUseID, e.Subagent, e.Summary, e.Time)
+			kick(e.TaskID, e.ToolUseID, e.Subagent, e.Time)
 		}
 	}
 }
