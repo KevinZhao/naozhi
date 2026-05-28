@@ -647,8 +647,32 @@ func (h *Hub) unregister(c *wsClient) {
 	}
 	h.nodesMu.RUnlock()
 
-	for _, conn := range nodes {
-		conn.RemoveClient(c)
+	// R260528-PERF-11 (#1356): fan-out RemoveClient across nodes in
+	// parallel so a 5-node deployment pays max(RTT) instead of sum(RTT)
+	// per disconnect. WS reconnect storms (mobile sleep/wake, dashboard
+	// tab swap) used to amortise N×RTT through this serial loop while
+	// holding the readPump goroutine open; for N=5 nodes that is 5
+	// sequential RPCs every disconnect. We block on the WaitGroup so
+	// Shutdown's nodes.Close() in the documented ordering still runs
+	// strictly after every in-flight RemoveClient call returns — the
+	// readPump's defer calls unregister synchronously, so clientWG.Wait
+	// in Shutdown still observes the full removal completing.
+	//
+	// Single-node deployments skip the goroutine spawn (no fan-out
+	// benefit) to keep the steady-state path identical to before.
+	if len(nodes) == 1 {
+		nodes[0].RemoveClient(c)
+	} else {
+		var wg sync.WaitGroup
+		wg.Add(len(nodes))
+		for _, conn := range nodes {
+			conn := conn
+			go func() {
+				defer wg.Done()
+				conn.RemoveClient(c)
+			}()
+		}
+		wg.Wait()
 	}
 	// Clear pointer references before returning to the pool so disconnected
 	// node.Conn instances stay GC-eligible. Reset length to zero so the next
