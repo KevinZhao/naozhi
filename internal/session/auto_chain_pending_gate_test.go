@@ -19,18 +19,18 @@ func TestPendingExcluders_DefaultFalse(t *testing.T) {
 	}
 }
 
-// TestSetPendingExcluders_FlipBoth pins SetPendingExcluders as a plain
+// TestSetPendingExcluders_FlipBoth pins setPendingExcluders as a plain
 // atomic toggle. Used by cmd-side wiring as set(true) → register
-// excluders → set(false) → RunAutoChainBackfillOnce.
+// excluders → set(false) → runAutoChainBackfillOnce.
 func TestSetPendingExcluders_FlipBoth(t *testing.T) {
 	r := makeRouterForAutoChain(t)
-	r.SetPendingExcluders(true)
+	r.setPendingExcluders(true)
 	if !r.excludersPending() {
-		t.Fatal("after SetPendingExcluders(true), excludersPending() must report true")
+		t.Fatal("after setPendingExcluders(true), excludersPending() must report true")
 	}
-	r.SetPendingExcluders(false)
+	r.setPendingExcluders(false)
 	if r.excludersPending() {
-		t.Fatal("after SetPendingExcluders(false), excludersPending() must report false")
+		t.Fatal("after setPendingExcluders(false), excludersPending() must report false")
 	}
 }
 
@@ -41,7 +41,7 @@ func TestSetPendingExcluders_FlipBoth(t *testing.T) {
 // internal sessionID into a user-facing prev_session_ids chain.
 func TestRunAutoChainBackfillOnce_SkipsWhenPending(t *testing.T) {
 	r := makeRouterForAutoChain(t)
-	r.SetPendingExcluders(true)
+	r.setPendingExcluders(true)
 
 	now := time.Now()
 	ws := "/home/test/ws"
@@ -67,9 +67,9 @@ func TestRunAutoChainBackfillOnce_SkipsWhenPending(t *testing.T) {
 		t.Fatalf("backfill ran while gate was set: chain=%v want=[%s]", got, target)
 	}
 
-	// Flip gate down and re-run via the exported trigger.
-	r.SetPendingExcluders(false)
-	r.RunAutoChainBackfillOnce()
+	// Flip gate down and re-run.
+	r.setPendingExcluders(false)
+	r.runAutoChainBackfillOnce()
 
 	got := s.SnapshotChainIDs()
 	want := []string{candidate, target}
@@ -115,7 +115,7 @@ func TestMaybeAttachAutoChainOnSpawn_SkipsWhenPending(t *testing.T) {
 	}
 
 	// Gate up → attach must skip and return nil.
-	r.SetPendingExcluders(true)
+	r.setPendingExcluders(true)
 	got = r.maybeAttachAutoChainOnSpawn(
 		"dashboard:direct:user:general",
 		ws,

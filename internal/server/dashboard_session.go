@@ -1605,11 +1605,32 @@ func (h *SessionHandlers) lookupSummariesCached(snapshots []session.SessionSnaps
 		}
 		h.summaryCacheMu.Unlock()
 
+		// R040034-PERF-4 (#1403): only ask discovery.LookupSummaries
+		// for sessions that don't already carry a Summary on the
+		// snapshot. Snapshots whose Summary is already populated (from
+		// proc.LastResponseSummary or an earlier sessions-index hit)
+		// would otherwise pay an unnecessary projDir grouping + index
+		// read on every cache miss tick. The fill loop in
+		// fillSessionSummariesFromIndex is no-op-on-empty for missing
+		// keys (it only writes when summaryMap[id] != ""), so dropping
+		// the already-summarised snapshots from the lookup input keeps
+		// the wire output identical — those snapshots keep their
+		// existing Summary value untouched. Most polls hit the 30s
+		// cache and never reach this closure; on a cold miss we shrink
+		// the per-session fan-out from O(N_sessions) to
+		// O(N_new_sessions). Allocate the map at the worst-case size
+		// so the rare poll right after a workspace switch (where
+		// every snapshot has Summary == "") doesn't pay map-rehash
+		// growth — the trim is on the steady-state side.
 		sessionWorkspaces := make(map[string]string, len(snapshots))
 		for _, snap := range snapshots {
-			if snap.SessionID != "" && snap.Workspace != "" {
-				sessionWorkspaces[snap.SessionID] = snap.Workspace
+			if snap.SessionID == "" || snap.Workspace == "" {
+				continue
 			}
+			if snap.Summary != "" {
+				continue
+			}
+			sessionWorkspaces[snap.SessionID] = snap.Workspace
 		}
 		fresh := discovery.LookupSummaries(h.claudeDir, sessionWorkspaces)
 

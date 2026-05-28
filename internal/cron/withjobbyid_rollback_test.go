@@ -66,6 +66,63 @@ func TestPauseJobByID_RollbackOnPersistFailure(t *testing.T) {
 	}
 }
 
+// TestResumeJobByID_RollbackOnPersistFailure pins R20260526-GO-001 (#1226):
+// resumeJobLocked → registerJob mutates j.entryID + j.cachedPeriod and then
+// flips j.Paused=false BEFORE persistJobsLocked runs. A persist failure
+// after that op-success path used to leave in-memory state with a live
+// cron entry + Paused=false while disk still showed Paused=true — the
+// next process restart would replay the paused-on-disk view onto the
+// live entry, double-firing the schedule. After the rollback fix,
+// in-memory state matches the un-persisted disk view on every persist
+// failure.
+func TestResumeJobByID_RollbackOnPersistFailure(t *testing.T) {
+	s, id := newTestSchedulerForPersist(t)
+	// The seed creates Paused=true with no cron entry, so a persist-fail
+	// Resume here is the exact pre-op view we want to assert against.
+	s.mu.RLock()
+	j := s.jobs[id]
+	if j == nil {
+		s.mu.RUnlock()
+		t.Fatalf("job %q missing from s.jobs", id)
+	}
+	preEntryID := j.entryID
+	preCachedPeriod := j.cachedPeriod
+	prePaused := j.Paused
+	s.mu.RUnlock()
+
+	if !prePaused {
+		t.Fatalf("seed precondition violated: Paused=false")
+	}
+	if preEntryID != 0 {
+		t.Fatalf("seed precondition violated: entryID=%v want 0 (paused jobs hold no entry)", preEntryID)
+	}
+
+	withFailingMarshal(t, s)
+
+	_, err := s.ResumeJobByID(id)
+	if !errors.Is(err, ErrPersistFailed) {
+		t.Fatalf("ResumeJobByID err = %v, want ErrPersistFailed", err)
+	}
+
+	// In-memory state must be rolled back to the pre-op view: still
+	// paused, entryID cleared, cachedPeriod restored.
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	got := s.jobs[id]
+	if got == nil {
+		t.Fatalf("job %q vanished after rolled-back ResumeJobByID", id)
+	}
+	if !got.Paused {
+		t.Fatalf("rollback failed: Paused=false; want true (matches un-persisted disk)")
+	}
+	if got.entryID != preEntryID {
+		t.Fatalf("rollback failed: entryID=%v want %v", got.entryID, preEntryID)
+	}
+	if got.cachedPeriod != preCachedPeriod {
+		t.Fatalf("rollback failed: cachedPeriod=%v want %v", got.cachedPeriod, preCachedPeriod)
+	}
+}
+
 // TestPauseJobByID_RollbackKeepsCronEntryAlive is the operator-visible
 // counterpart: after a rolled-back Pause, the cron entry that
 // pauseJobLocked would have torn down via cron.Remove (in postCleanup)

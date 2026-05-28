@@ -21,7 +21,10 @@
 //   - recentFilterAsExcluder  — adapter so cron/sys can implement
 //     discovery.RecentSessionsFilter once and
 //     flow into both auto-chain and history-panel
-//     filtering (Arch-MINOR-2).
+//     filtering (Arch-MINOR-2). Unexported asExcluder
+//     wraps the concrete adapter; production wiring
+//     uses *cron.Scheduler directly today, so only
+//     the adapter tests reach this seam.
 //   - GlobalAutoChainPolicy   — the production policy struct, populated by
 //     cmd/naozhi/main.go from cfg.Session.AutoChain.
 package session
@@ -142,14 +145,25 @@ func (a recentFilterAsExcluder) IsExcluded(id string) bool {
 	return a.f.SkipSessionID(id)
 }
 
-// AsExcluder is the public factory used by cmd/naozhi wiring:
+// asExcluder wraps a discovery.RecentSessionsFilter as a
+// SessionIDExcluder. Originally exported as the cmd-side factory of
+// record (godoc once read "router.AddSessionIDExcluder(session.AsExcluder(scheduler))"),
+// but production wiring ended up calling AddSessionIDExcluder with the
+// scheduler directly — *cron.Scheduler satisfies SessionIDExcluder on
+// its own. No production caller exists; only the same-package adapter
+// tests reach this entry point.
 //
-//	router.AddSessionIDExcluder(session.AsExcluder(scheduler))
+// Unexported in tandem with the auto-chain pending-gate cleanup
+// (R260528-ARCH-3 / #1364) so the package's surface advertises only
+// the contracts that production wiring actually uses. Tests pin
+// behaviour via the lower-case form; if a future cmd wires through a
+// pure RecentSessionsFilter, re-export here in tandem with that
+// wireup change.
 //
 // scheduler must satisfy discovery.RecentSessionsFilter. Returning
 // SessionIDExcluder (not the concrete adapter) keeps the seam stable
 // across future changes.
-func AsExcluder(f discovery.RecentSessionsFilter) SessionIDExcluder {
+func asExcluder(f discovery.RecentSessionsFilter) SessionIDExcluder {
 	return recentFilterAsExcluder{f: f}
 }
 

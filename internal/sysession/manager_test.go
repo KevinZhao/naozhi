@@ -122,6 +122,50 @@ func TestManager_DisabledIsNoOp(t *testing.T) {
 	}
 }
 
+// TestManager_StartIdempotent pins R260528-ARCH-16 (#1377): a second
+// Start call must NOT panic — instead it logs a Warn and returns.
+// Aligns sysession with cron.Scheduler's CAS-idempotent Start contract
+// so embedders that wrap naozhi as a library cannot kill the process by
+// double-starting (see godoc on Manager.Start for the rationale). The
+// fact that Stop afterwards still drains both calls is what makes this
+// safe rather than just "panic deferred".
+func TestManager_StartIdempotent(t *testing.T) {
+	d := &signalDaemon{name: "auto-titler"}
+	withRegistry(t, []builtinDaemonFactory{
+		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
+	})
+
+	router := newFakeRouter()
+	pulse, tickFn := pulseTicker()
+	_ = pulse
+	m, err := NewManager(Config{
+		Enabled:     true,
+		TickTimeout: 100 * time.Millisecond,
+		Router:      router,
+		Daemons: map[string]DaemonRuntimeConfig{
+			"auto-titler": {Enabled: true, Tick: 50 * time.Millisecond},
+		},
+		NewTicker: tickFn,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// First Start spawns goroutines.
+	m.Start(ctx)
+	// Second Start MUST be a no-op (was: panic).
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Start called twice panicked: %v (must be idempotent)", r)
+		}
+	}()
+	m.Start(ctx)
+	m.Stop(context.Background())
+}
+
 func TestManager_NewRequiresRouterWhenEnabled(t *testing.T) {
 	// Pass through the same mutex other Manager tests use so the race
 	// detector sees a happens-before edge with their builtinDaemons

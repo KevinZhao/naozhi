@@ -310,11 +310,22 @@ func NewManager(cfg Config) (*Manager, error) {
 	return m, nil
 }
 
-// Start launches one goroutine per enabled daemon.  Start is idempotent
-// (calling it twice is a logic error in calling code, but we panic
-// rather than silently double-spawn).
+// Start launches one goroutine per enabled daemon. Start is idempotent:
+// the second and subsequent calls are no-ops — sync.Once guards the
+// goroutine spawn and a Warn line records the redundant call so an
+// embedder mis-wiring is still visible without process-killing
+// semantics.
 //
-// Returns immediately; daemons run asynchronously.  Callers should
+// R260528-ARCH-16 (#1377): pre-fix this panic'd on the second call.
+// That diverged from cron.Scheduler.Start (CAS-idempotent, returns nil
+// on the second call) and made embedders that wrap naozhi as a library
+// fragile: a parent restarting only the network layer could trigger
+// SIGABRT here despite the wrapper having no clean way to coordinate
+// the start lifecycle. Aligning with the cron CAS pattern keeps the
+// "logic error in calling code" loud (slog.Warn) without taking the
+// host process down.
+//
+// Returns immediately; daemons run asynchronously. Callers should
 // invoke Stop during shutdown.
 func (m *Manager) Start(parent context.Context) {
 	if !m.enabled {
@@ -337,7 +348,7 @@ func (m *Manager) Start(parent context.Context) {
 		startedThisCall = true
 	})
 	if !startedThisCall {
-		panic("sysession: Manager.Start called twice")
+		slog.Warn("sysession: Manager.Start called more than once (idempotent no-op)")
 	}
 }
 

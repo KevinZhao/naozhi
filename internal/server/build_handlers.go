@@ -94,6 +94,14 @@ func buildCronHandlers(opts ServerOptions, claudeDir string) *CronHandlers {
 			rate.Every(2*time.Second), 6,
 			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
 		),
+		// R250-SEC-7 (#1096): dedicated transcript bucket so a transcript
+		// flood from one IP cannot starve the dashboard's runs-list
+		// visibility (and vice versa). Sustained 6/min with burst 12 —
+		// see CronHandlers.transcriptLimiter godoc for rationale.
+		transcriptLimiter: newIPLimiterWithCap(
+			rate.Every(10*time.Second), 12,
+			cronLimiterMaxKeys, cronLimiterTTL, opts.TrustedProxy,
+		),
 		// R243-SEC-12 (#798): process-wide concurrency ceiling for
 		// /api/cron/runs/{run_id}/transcript. The per-IP runsLimiter
 		// gates request rate but not in-flight memory; without this
