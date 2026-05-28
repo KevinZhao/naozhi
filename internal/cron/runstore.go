@@ -1089,6 +1089,21 @@ func (s *runStore) scanSortedRunDir(jobID string) ([]runDirItem, string, error) 
 		if err != nil {
 			continue
 		}
+		// R236-SEC-04 (#489): some filesystems (FUSE, certain tmpfs / NFS
+		// configurations) return DT_UNKNOWN from getdents, which Go surfaces
+		// as e.Type() == 0. The earlier ModeSymlink check on e.Type() then
+		// silently passes a symlink through; trim's downstream os.Remove and
+		// list's readRunNoLstat would follow it. e.Info() above just ran
+		// Lstat (the documented behaviour for DirEntry.Info on a Type with
+		// no cached d_type), so the resulting FileInfo's Mode is the
+		// authoritative kind. Re-check ModeSymlink + IsRegular here to close
+		// the DT_UNKNOWN bypass; the cost is zero on filesystems that fill
+		// d_type (the e.Type() check already handled them) and amounts to
+		// one extra Mode-bit comparison on the slow-FS path that already
+		// paid an Lstat above.
+		if mode := info.Mode(); mode&fs.ModeSymlink != 0 || !mode.IsRegular() {
+			continue
+		}
 		items = append(items, runDirItem{
 			path:  filepath.Join(dir, name),
 			runID: runID,
@@ -1766,6 +1781,22 @@ func (s *runStore) trimAllCtx(ctx context.Context, now time.Time) {
 		}
 		jobID := e.Name()
 		if !IsValidID(jobID) {
+			continue
+		}
+		// R236-SEC-04 (#489): DT_UNKNOWN bypass on FUSE/tmpfs/NFS surfaces
+		// from e.Type() as 0, so a symlink pointing at /etc/cron.d (or any
+		// directory the running uid can ReadDir) would slip past the
+		// e.Type() ModeSymlink check above and trimJobUnderLock would
+		// recurse into it. Defer to e.Info() (a real Lstat) for the
+		// authoritative mode and skip anything that isn't a plain
+		// directory. This costs one Lstat per top-level entry on the
+		// trimAll cold pass — bounded by maxJobsHardCap=500 — vs the
+		// defense-in-depth payoff of closing the symlink-bypass window.
+		info, infoErr := e.Info()
+		if infoErr != nil {
+			continue
+		}
+		if mode := info.Mode(); mode&fs.ModeSymlink != 0 || !mode.IsDir() {
 			continue
 		}
 		s.trimJobUnderLock(jobID, now)
