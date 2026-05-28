@@ -182,24 +182,49 @@ func (s *Scheduler) cleanupRunningJobIfIdle(jobID string) bool {
 		s.runningJobs.LoadAndDelete(jobID)
 		return true
 	}
-	if inf.running.Load() {
-		// In-flight execute() goroutine still holds the pointer and is
-		// about to releaseRun(); skip — leaking THIS one entry until the
-		// next DeleteJob sweep is cheaper than risking a CAS-gate split
-		// against a (vanishingly rare) ID-reuse collision.
+	// R040034-GO-3 (#1389): close the split-CAS gate window. The previous
+	// shape (`if inf.running.Load() { return }; CompareAndDelete`) had a
+	// race because Load + CompareAndDelete are not atomic with respect to
+	// a concurrent executeOpt's `running.CompareAndSwap(false, true)`:
+	//
+	//  - cleanup observes running == false
+	//  - concurrent executeOpt CAS-wins running false→true; starts running
+	//  - cleanup CompareAndDelete succeeds (pointer matches) and removes
+	//    the now-active entry from the map
+	//  - next jobInflight call LoadOrStores a FRESH *runInflight whose
+	//    own running gate is independent of the one already in flight
+	//  - a second executeOpt CAS-wins on the fresh gate → double execute
+	//
+	// The CompareAndDelete-on-pointer guard documented by R20260527-GO-2
+	// (#1270) only blocks the *substitution* case (different pointer
+	// already in the map), not the same-pointer flip we just walked
+	// through. Fix: claim the running gate via CAS first. If we lose the
+	// CAS, executeOpt is already in flight on this inf — bail. If we win,
+	// no executeOpt can take the gate behind our back; CompareAndDelete
+	// then drops the entry safely and we release the gate. The post-
+	// release Store(false) is a no-op for any new caller because the map
+	// entry is gone — the next jobInflight LoadOrStores a fresh
+	// *runInflight whose gate starts at false anyway, so the released
+	// slot cannot leak ownership across the boundary.
+	if !inf.running.CompareAndSwap(false, true) {
+		// In-flight execute() goroutine holds the gate; cleanup MUST not
+		// touch the map or we risk dropping a now-active entry. Leak
+		// THIS entry until executeOpt's deferred releaseRun + the next
+		// DeleteJob sweep — bounded at maxJobsHardCap=500 worst case.
 		return false
 	}
-	// R20260527-GO-2 (#1270): use CompareAndDelete on the *runInflight
-	// pointer rather than LoadAndDelete on the key. The Load+LoadAndDelete
-	// pair is non-atomic — between the running.Load() check and the
-	// LoadAndDelete, a concurrent executeOpt for an ID-reused jobID can
-	// CompareAndSwap the gate to true and we'd then drop the now-active
-	// entry. The next jobInflight call would LoadOrStore a fresh
-	// *runInflight, leaving two goroutines holding distinct gate pointers
-	// for the same jobID → double execution. CompareAndDelete only
-	// succeeds when the map still holds OUR observed inf pointer; if a
-	// fresh entry was stored it leaves the new one alone.
+	// We own the gate. The map still holds inf (we just CAS-won the gate
+	// on the inf we Load()ed). CompareAndDelete is now guaranteed to
+	// succeed against the same pointer, but use it anyway as
+	// defence-in-depth: a future change that adds a substitution path
+	// (e.g. forced reset on schedule update) would corrupt LoadAndDelete
+	// silently while CompareAndDelete still surfaces "did not match".
 	s.runningJobs.CompareAndDelete(jobID, inf)
+	// Release the gate so any GC tracker / test harness still holding the
+	// pointer observes the documented "idle when not in flight" invariant.
+	// No production caller observes this transition (the map entry is
+	// gone), so the Store is purely for the orphan-pointer view.
+	inf.running.Store(false)
 	return true
 }
 
