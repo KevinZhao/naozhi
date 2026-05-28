@@ -82,6 +82,42 @@ func (NoopCapabilities) Takeover(context.Context, string, string, session.AgentO
 // ReplyFooter returns "" (no footer appended).
 func (NoopCapabilities) ReplyFooter(string) string { return "" }
 
+// MessageSender narrows Capabilities to the single required Send hook. The
+// Capabilities interface mixes a contract-required method (Send — panics if
+// missing) with two contract-optional ones (Takeover / ReplyFooter — both
+// have noop defaults). Splitting the required surface lets future
+// consumers / tests depend on the smallest seam they actually need without
+// implementing the full bundle.
+//
+// R248-ARCH-1 (#373): every Capabilities also satisfies MessageSender, so
+// the existing host wireup keeps working. New call sites that only forward
+// turns may type-assert or accept MessageSender directly.
+type MessageSender interface {
+	Send(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+}
+
+// TakeoverHook isolates the optional first-message takeover probe so a host
+// that does not adopt external Claude sessions does not have to provide a
+// stub method just to silence an interface satisfier check. R248-ARCH-1.
+type TakeoverHook interface {
+	Takeover(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
+}
+
+// ReplyFooterHook isolates the optional reply tag suffix used by the IM
+// reply path. R248-ARCH-1.
+type ReplyFooterHook interface {
+	ReplyFooter(backendID string) string
+}
+
+// Compile-time guarantee that the existing Capabilities interface still
+// satisfies all three facets — the docstring "Capabilities IS the bundle"
+// is enforced by the language rather than a comment that can drift.
+var (
+	_ MessageSender   = (Capabilities)(nil)
+	_ TakeoverHook    = (Capabilities)(nil)
+	_ ReplyFooterHook = (Capabilities)(nil)
+)
+
 // closureCapabilities adapts the legacy SendFn / TakeoverFn / ReplyFooterFn
 // closures into a Capabilities implementation. Used internally by
 // NewDispatcher when callers populate the Deprecated *Fn fields instead of
