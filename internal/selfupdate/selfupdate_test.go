@@ -360,3 +360,43 @@ func TestFetchFile_RejectsNonHTTPS(t *testing.T) {
 		t.Errorf("expected dest to NOT be created, stat err = %v", statErr)
 	}
 }
+
+// TestFetchFile_RejectsBadSchemeShapes anchors R247-SEC-5 (#497): the
+// belt-and-suspenders parsed-scheme check after http.NewRequestWithContext
+// rejects schemes the prefix gate already covers AND any future regression
+// where a caller pre-strips the scheme. Each case must fail before the
+// staging file is touched.
+func TestFetchFile_RejectsBadSchemeShapes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"plain_http", "http://example.invalid/asset"},
+		{"ftp_scheme", "ftp://example.invalid/asset"},
+		{"file_scheme", "file:///etc/passwd"},
+		{"empty_url", ""},
+		{"scheme_only", "https://"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dest := filepath.Join(dir, "asset_"+c.name)
+			err := fetchFile(context.Background(), c.url, dest, maxBinaryBytes)
+			if err == nil {
+				t.Fatalf("expected %q to be rejected", c.url)
+			}
+			// Either the prefix gate or the post-parse scheme gate (or
+			// the request builder for malformed input like the empty URL)
+			// must trip. Just assert the staging file is never created so
+			// the rejection always happens BEFORE we touch the network or
+			// the disk.
+			if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+				t.Errorf("expected dest to NOT be created, stat err = %v", statErr)
+			}
+		})
+	}
+}
