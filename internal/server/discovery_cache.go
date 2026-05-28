@@ -233,3 +233,11 @@ func (dc *discoveryCache) snapshot() []discovery.DiscoveredSession {
 	copy(out, dc.sessions)
 	return out
 }
+
+// Snapshot is the exported alias used by internal/dashboard/discovery via the
+// CacheView interface. Phase 3b (server-split-phase4-design.md §6.5 Plan B).
+func (dc *discoveryCache) Snapshot() []discovery.DiscoveredSession { return dc.snapshot() }
+
+// EvictPID is the exported alias used by internal/dashboard/discovery via the
+// CacheView interface. Phase 3b.
+func (dc *discoveryCache) EvictPID(pid int) { dc.evictPID(pid) }
