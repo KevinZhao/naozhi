@@ -62,6 +62,73 @@ func ValidatePromptStrict(prompt string) error {
 	return nil
 }
 
+// MaxWorkDirLen caps Job.WorkDir on the AddJob write path. 4 KiB matches the
+// de-facto Linux PATH_MAX × small slack; longer values cannot legitimately
+// reach a real filesystem and would just inflate every "could not chdir"
+// slog line. Mirrors the same cap loadJobs (store.go ~L232) already applies
+// on the read path. R250-CR-8 (#1141).
+const MaxWorkDirLen = 4096
+
+// MaxBackendLen caps Job.Backend on the AddJob write path. The session-side
+// validateBackend already gates shape-invalid input, but cron's defence-in-
+// depth bound also caps the bytes that flow into Job.Backend before any
+// session code sees them. 64 covers every backend ID we ship today
+// ("claude" / "kiro" / future short tags) with comfortable slack.
+// R250-CR-8 (#1141).
+const MaxBackendLen = 64
+
+// MaxNotifyTargetLen caps Job.NotifyPlatform / Job.NotifyChatID on the
+// AddJob write path. Both fields flow into the cronJobView dashboard
+// broadcast and into platform-side webhook URLs; a hand-crafted internal
+// caller bypassing the dashboard validators could otherwise smuggle a
+// multi-MB string here. R250-CR-8 (#1141).
+const MaxNotifyTargetLen = 256
+
+// validateJobFields enforces the AddJob defence-in-depth policy that mirrors
+// loadJobs's read-side validation (store.go) so an internal caller bypassing
+// the dashboard validators (commands.go ParseCronAdd / validateCron* in
+// internal/server) cannot persist arbitrary Prompt / WorkDir / Backend /
+// Notify* bytes into cron_jobs.json. Title and Prompt are already enforced
+// inline in AddJob; this helper covers the remaining fields the dashboard
+// validates but the scheduler-level entry previously took on trust.
+//
+// Empty values are allowed because the dashboard creates jobs with optional
+// WorkDir / Backend / Notify* fields zero. The policy only rejects values
+// that exceed the cap or smuggle log-injection / non-UTF-8 bytes.
+//
+// R250-CR-8 (#1141): defence-in-depth — IM dispatch (commands.go
+// ParseCronAdd) and dashboard handlers (validateCron*) validate before
+// calling AddJob, but a future internal caller (or test fixture) reaching
+// AddJob directly would otherwise persist arbitrary bytes for these fields.
+// Kept exported so test fixtures and IM dispatch can share the same policy.
+func validateJobFields(j *Job) error {
+	if len(j.WorkDir) > MaxWorkDirLen {
+		return fmt.Errorf("cron: work_dir too long: %d bytes > %d cap", len(j.WorkDir), MaxWorkDirLen)
+	}
+	if !utf8.ValidString(j.WorkDir) || containsCronUnsafe(j.WorkDir) {
+		return fmt.Errorf("cron: work_dir contains invalid bytes")
+	}
+	if len(j.Backend) > MaxBackendLen {
+		return fmt.Errorf("cron: backend too long: %d bytes > %d cap", len(j.Backend), MaxBackendLen)
+	}
+	if !utf8.ValidString(j.Backend) || containsCronUnsafe(j.Backend) {
+		return fmt.Errorf("cron: backend contains invalid bytes")
+	}
+	if len(j.NotifyPlatform) > MaxNotifyTargetLen {
+		return fmt.Errorf("cron: notify_platform too long: %d bytes > %d cap", len(j.NotifyPlatform), MaxNotifyTargetLen)
+	}
+	if !utf8.ValidString(j.NotifyPlatform) || containsCronUnsafe(j.NotifyPlatform) {
+		return fmt.Errorf("cron: notify_platform contains invalid bytes")
+	}
+	if len(j.NotifyChatID) > MaxNotifyTargetLen {
+		return fmt.Errorf("cron: notify_chat_id too long: %d bytes > %d cap", len(j.NotifyChatID), MaxNotifyTargetLen)
+	}
+	if !utf8.ValidString(j.NotifyChatID) || containsCronUnsafe(j.NotifyChatID) {
+		return fmt.Errorf("cron: notify_chat_id contains invalid bytes")
+	}
+	return nil
+}
+
 // truncatedSuffix marks where truncateWithSuffix cut a string that exceeded
 // the rune budget. Centralised so any downstream byte-cap can compensate for
 // its byte length (see truncateWithSuffix call sites that pass

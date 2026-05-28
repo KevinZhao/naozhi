@@ -291,6 +291,14 @@ func (s *Scheduler) finishRun(a finishArgs) {
 // the way out. R232-PERF-9 / R234-CR-1.
 func sanitiseRunResult(s string) string {
 	s = truncateWithSuffix(s, maxStoredResultRunes)
+	// R234-SEC-7 (#1006): scrub well-known secret-prefix patterns
+	// (sk-ant-, ghp_, AKIA, …) BEFORE SanitizeForLog so a leaked token in
+	// Claude output never lands on disk or the dashboard WS broadcast.
+	// Idempotent: the [REDACTED] marker does not start with any registered
+	// prefix, so re-running the redactor on a previously-scrubbed string
+	// is a no-op. Mirrors redactPathsInCronError's call ordering on the
+	// errMsg path (see recordTerminalResult below).
+	s = redactSecretsInResult(s)
 	return osutil.SanitizeForLog(s, maxStoredResultRunes+len(truncatedSuffix))
 }
 
@@ -471,6 +479,15 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 	// finishRun and the disk record never disagree on visible content.
 	// R234-CR-1 consolidated three open-coded copies into the helper.
 	result = truncateWithSuffix(result, maxStoredResultRunes)
+	// R234-SEC-7 (#1006): scrub well-known secret-prefix patterns
+	// (sk-ant-, ghp_, AKIA, …) before the final SanitizeForLog so plaintext
+	// tokens in Claude output do not flow into Job.LastResult →
+	// cron_jobs.json or the dashboard WS broadcast. Mirrors the
+	// redactPathsInCronError path-redaction step that already runs on the
+	// errMsg branch — same ordering invariant: redact, THEN log-injection
+	// scrub, so a token's surrounding text still has its control bytes
+	// stripped.
+	result = redactSecretsInResult(result)
 	errMsg = redactPathsInCronError(errMsg)
 	// Extend SanitizeForLog's byte cap by the suffix length so an
 	// already-truncated result keeps the trailing marker intact;

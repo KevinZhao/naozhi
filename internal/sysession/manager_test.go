@@ -166,6 +166,47 @@ func TestManager_StartIdempotent(t *testing.T) {
 	m.Stop(context.Background())
 }
 
+// TestManager_StartNilCtxFallsBack pins R260528-ARCH-13 (#1374): a nil
+// parent ctx must NOT panic deep inside context.WithCancel. Manager.Start
+// falls back to context.Background() with a Warn so library embedders
+// that accidentally forward a zero-value ctx still come up cleanly. The
+// subsequent Stop must drain via the package-internal cancelP rather than
+// the original parent.
+func TestManager_StartNilCtxFallsBack(t *testing.T) {
+	d := &signalDaemon{name: "auto-titler"}
+	withRegistry(t, []builtinDaemonFactory{
+		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
+	})
+
+	router := newFakeRouter()
+	_, tickFn := pulseTicker()
+	m, err := NewManager(Config{
+		Enabled:     true,
+		TickTimeout: 100 * time.Millisecond,
+		Router:      router,
+		Daemons: map[string]DaemonRuntimeConfig{
+			"auto-titler": {Enabled: true, Tick: 50 * time.Millisecond},
+		},
+		NewTicker: tickFn,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Start(nil) panicked: %v (must fall back to Background)", r)
+		}
+	}()
+	//nolint:staticcheck // SA1012 intentional: pin nil-ctx defensive fallback.
+	m.Start(nil)
+	// Stop must still drain cleanly via the internal cancelP — proves the
+	// goroutines are tied to a real ctx (not the nil parent).
+	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	m.Stop(stopCtx)
+}
+
 func TestManager_NewRequiresRouterWhenEnabled(t *testing.T) {
 	// Pass through the same mutex other Manager tests use so the race
 	// detector sees a happens-before edge with their builtinDaemons

@@ -6728,3 +6728,102 @@ func TestDashboardJS_R243Perf7_CronTimelineRefreshHeadDebounced(t *testing.T) {
 		t.Errorf("dashboard.js: WS cron_run_ended handler must route through cronTimelineRefreshHeadDebounced(msg.job_id), not cronTimelineRefreshHead direct (#812)")
 	}
 }
+
+// TestDashboardJS_RenderMdXSSContract pins the R172-SEC-H1 (#436) audit:
+// every LLM-text path through renderMd / inlineMd / renderTable must
+// run through esc() / escAttr() / safeUrl() before reaching innerHTML so
+// a malicious markdown payload (e.g. `[click](javascript:alert(1))`,
+// `<img src=x onerror=alert(1)>`) cannot execute script in the dashboard
+// origin. The escape primitives themselves already exist; the risk is
+// regression — a future contributor adding a new render branch and
+// forgetting the esc() wrap, or relaxing safeUrl() to accept javascript:
+// URLs again. This test pins the load-bearing wraps so a regression
+// fails CI rather than silently shipping an XSS surface.
+//
+// We deliberately test for the *presence* of the load-bearing escape
+// wraps as substrings rather than executing the JS in a headless
+// browser; a string-match is enough because the file is statically
+// readable embed.FS content and the wraps are short, syntactically
+// distinctive, and would be hard to refactor away by accident.
+func TestDashboardJS_RenderMdXSSContract(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// (1) safeUrl() must reject any URL whose scheme is not http(s) or
+	// a fragment-only `#...`. The current allowlist regex is the
+	// load-bearing line — pin it so a future "let me add mailto:" or
+	// "let me allow `/foo`" patch fails this assertion. RNEW-SEC-007.
+	if !strings.Contains(js, "if (/^(https?:|#)/i.test(trimmed)) return trimmed;") {
+		t.Error("safeUrl must keep its strict (https?:|#) allowlist — relaxing it (e.g. allowing mailto:, /, ?) would let a malicious markdown link sneak past the scheme gate (R172-SEC-H1 / #436)")
+	}
+	// safeUrl's fall-through must return a literal '#' so a rejected
+	// URL emits a no-op anchor instead of the original payload.
+	safeUrlIdx := strings.Index(js, "function safeUrl(u)")
+	if safeUrlIdx < 0 {
+		t.Fatal("safeUrl function not found in dashboard.js")
+	}
+	rest := js[safeUrlIdx:]
+	end := strings.Index(rest[1:], "\nfunction ")
+	if end < 0 {
+		end = len(rest)
+	}
+	body := rest[:end]
+	if !strings.Contains(body, "return '#';") {
+		t.Error("safeUrl must fall through to `return '#';` for any unsafe scheme (javascript:, data:, vbscript:, …) so renderMd anchors emit a no-op href instead of the raw payload (R172-SEC-H1 / #436)")
+	}
+
+	// (2) inlineMd's markdown-link branch `[text](url)` must run the
+	// captured URL through safeUrl() AND escAttr() before splicing into
+	// the href attribute. Either omission re-opens the XSS surface:
+	//   - skipping safeUrl() lets `javascript:alert(1)` survive into href;
+	//   - skipping escAttr() lets a `"` in the URL break out of the
+	//     attribute even when the scheme is benign.
+	// We pin the exact substring shape used today; a refactor that keeps
+	// the safety properties but reshapes the call site can update both
+	// the source and the test in lockstep.
+	if !strings.Contains(js, "const safe = safeUrl(url);") {
+		t.Error("inlineMd's [text](url) branch must call safeUrl(url) before emitting the anchor — without it, `[click](javascript:alert(1))` would render an executable href (R172-SEC-H1 / #436)")
+	}
+	if !strings.Contains(js, `'<a href="' + escAttr(safe)`) {
+		t.Error("inlineMd's [text](url) branch must wrap the safeUrl()'d href with escAttr() before splicing — a `\"` in the URL would otherwise break out of the attribute even when the scheme is benign (R172-SEC-H1 / #436)")
+	}
+
+	// (3) Auto-linker (bare URL → <a>) must also escAttr() the captured
+	// URL into the href attribute. This path runs AFTER esc(s) so the
+	// captured URL has its `&` already entity-encoded, but `"` / `'`
+	// inside the URL would still escape the attribute without escAttr.
+	if !strings.Contains(js, `'<a href="' + escAttr(clean)`) {
+		t.Error("auto-linker must wrap the cleaned URL with escAttr() before splicing into href — defence in depth against attribute-break (R172-SEC-H1 / #436)")
+	}
+
+	// (4) Fenced code block ``` ... ``` must run the code body through
+	// esc() before splicing into <code>. A regression here lets an LLM
+	// that emits a code fence containing literal `<script>...</script>`
+	// inject script into the page even though the *visual* contract is
+	// "show the source verbatim". This is the single highest-impact
+	// escape in renderMdUncached.
+	if !strings.Contains(js, "<code' + langAttr + '>' + esc(code) + '</code>") {
+		t.Error("renderMdUncached fenced-code branch must wrap the code body with esc() — a ```...``` block containing `<script>` would otherwise execute (R172-SEC-H1 / #436)")
+	}
+
+	// (5) Inline code spans (`...`) must esc() the captured content at
+	// stash-time so the final \x00CODE\d+\x00 → <code class="md-code">
+	// substitution emits already-escaped HTML. The stash regex is the
+	// canonical single-line pattern; pin the esc() call inside it.
+	if !strings.Contains(js, "codeTokens.push(esc(c));") {
+		t.Error("inlineMd's `code` span stash must esc() the captured body before token replacement — a `<script>foo</script>` inside backticks would otherwise execute (R172-SEC-H1 / #436)")
+	}
+
+	// (6) The bold/italic regex passes operate on already-esc()'d
+	// content. The security comment in dashboard.js explicitly warns
+	// future contributors not to reorder. Pin the comment so a
+	// well-meaning refactor that runs bold/italic BEFORE esc() trips
+	// this test before it ships.
+	if !strings.Contains(js, "bold/italic regex must run AFTER esc(s)") {
+		t.Error("inlineMd's SECURITY CONTRACT comment for bold/italic must remain — it documents the invariant that bold/italic .+? captures span already-escaped HTML, and reordering would re-introduce XSS (R172-SEC-H1 / #436)")
+	}
+}

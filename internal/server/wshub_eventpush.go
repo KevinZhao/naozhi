@@ -94,10 +94,42 @@ func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []cli.Even
 		// uncached path so behaviour is identical to pre-R214-PERF-4.
 		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
 	}
+	// R249-PERF-30 (#944): single-subscriber fast path. The marshal
+	// cache only pays off when ≥2 pushLoops share the same (key,
+	// fingerprint) wave — for one tab on the session every notify
+	// advances lastTime, so the fingerprint always misses and the
+	// per-key sync.Map.Load + marshalCacheEntry.mu round-trip is pure
+	// overhead. A short h.mu.RLock + map lookup is cheaper than that
+	// round-trip on a hit AND avoids the slot-allocation cost on the
+	// first miss for a short-lived single-tab session. When
+	// singleSubscriber returns false (count != 1, or counter unwired
+	// in test harnesses) we fall through to the cached path so
+	// behaviour for the multi-tab fan-out case is unchanged.
+	if h.singleSubscriber(key) {
+		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
+	}
 	data, _, err := h.historyMarshalCache.getOrMarshal(key, lastTime, entries, func() ([]byte, error) {
 		return marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
 	})
 	return data, err
+}
+
+// singleSubscriber reports whether `key` has exactly one subscriber.
+// Returns false when the count is 0 (key being torn down or never
+// registered) so the caller's fast-path is gated on the strict
+// "single tab" definition only — multi-tab broadcasts AND the
+// transient "no subscribers" window both flow through the cached
+// path. h.mu is RLocked just long enough to read the counter; the
+// rest of the WS push hot path takes no other lock so this is the
+// only contention point added by the fast-path. R249-PERF-30 (#944).
+func (h *Hub) singleSubscriber(key string) bool {
+	if h.subscriberCount == nil {
+		return false
+	}
+	h.mu.RLock()
+	n := h.subscriberCount[key]
+	h.mu.RUnlock()
+	return n == 1
 }
 
 // eventPushLoop is the per-subscription pump that reads EventLog notifications

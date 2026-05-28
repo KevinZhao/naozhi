@@ -362,6 +362,62 @@ func TestProcess_Send_CapturesSessionID(t *testing.T) {
 	}
 }
 
+// TestProcess_Send_UpdatesSessionIDAfterResume pins CLI2 (#393): after a
+// --resume flips the underlying CLI's session_id, the next Send observes a
+// fresh init/result carrying the new id and p.sessionID must follow. The
+// pre-fix guard `if p.sessionID == ""` pinned the field to whatever the
+// first Send recorded and let it go stale relative to the CLI's view.
+func TestProcess_Send_UpdatesSessionIDAfterResume(t *testing.T) {
+	p, srv := shimTestPair(&ClaudeProtocol{})
+	startServerDrain(srv)
+	p.startReadLoop()
+
+	// First Send establishes the original session_id.
+	done1 := make(chan error, 1)
+	go func() {
+		_, err := p.Send(context.Background(), "hello", nil, nil)
+		done1 <- err
+	}()
+	testhelper.Eventually(t, func() bool { return p.GetState() == StateRunning }, time.Second,
+		"first Send did not reach StateRunning")
+	srv.SendStdout(`{"type":"system","subtype":"init","session_id":"sess-original"}`)
+	srv.SendStdout(`{"type":"result","result":"done","session_id":"sess-original"}`)
+	select {
+	case err := <-done1:
+		if err != nil {
+			t.Fatalf("first Send error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first Send timed out")
+	}
+	if got := p.GetSessionID(); got != "sess-original" {
+		t.Fatalf("after first Send: SessionID = %q, want sess-original", got)
+	}
+
+	// Second Send: simulate a --resume that the CLI honours by emitting a
+	// fresh init carrying a different session_id (the resumed/forked id).
+	done2 := make(chan error, 1)
+	go func() {
+		_, err := p.Send(context.Background(), "follow-up", nil, nil)
+		done2 <- err
+	}()
+	testhelper.Eventually(t, func() bool { return p.GetState() == StateRunning }, time.Second,
+		"second Send did not reach StateRunning")
+	srv.SendStdout(`{"type":"system","subtype":"init","session_id":"sess-resumed"}`)
+	srv.SendStdout(`{"type":"result","result":"done","session_id":"sess-resumed"}`)
+	select {
+	case err := <-done2:
+		if err != nil {
+			t.Fatalf("second Send error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second Send timed out")
+	}
+	if got := p.GetSessionID(); got != "sess-resumed" {
+		t.Errorf("after --resume Send: SessionID = %q, want sess-resumed (pre-fix would still be sess-original)", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Send — onEvent callback for thinking block
 // ---------------------------------------------------------------------------
