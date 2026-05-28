@@ -51,6 +51,23 @@ jobs:
       - name: Run lint-server-handlers (warn mode)
         run: make lint-server
 
+  # design doc fact-table drift (lint-fact-table).
+  # Phase 0 起 warn mode 监控 server-split-phase4-design v0.6.1 §0 速查表
+  # 与正文粗体 token 漂移；Phase 5 完工后切 fail mode。
+  # See docs/rfc/lint-fact-table.md.
+  lint-fact-table:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run lint-fact-table (warn mode)
+        run: make lint-fact-table
+
   vuln:
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -20,6 +20,8 @@
 >
 > 数据来源：[baseline](server-split-phase4-baseline.md) §1-§5 / §9（origin/master HEAD `44a10e8d` 2026-05-28 实测）。
 
+<!-- fact-table:start name="server-split-phase4-design" -->
+
 | 维度 | v0.6 实测值 | v0.4 写过 | v0.5 写过 | 备注 |
 |---|---|---|---|---|
 | Server struct 字段 | **47** | 47 | 47 | 一致 |
@@ -42,6 +44,8 @@
 | 观察期总长（不含重叠）| **12 phase × 7 + Phase 5→final × 14 = 98 自然日** | — | 11×7=77 (§7.3) / 13×7=91 (§6.1) | v0.5 §7.3 错算；v0.6 修为 91（含 13 phase × 7）；v0.6.1 加 Phase 5 → final 14 天双倍观察期（mutex pprof 数据），共 98 天 |
 | 实施起点 | **Phase 0 merge + ROI gate 当场通过** | T+14d 决策 | 同 v0.6 | v0.5 起 |
 | Server.handle* 方法基线数 | **7** | — | — | v0.6 实测；exemptions.yaml `handle_baseline` 钉死 |
+
+<!-- fact-table:end -->
 
 **修订纪律**（**v0.6 钉死，写进 §十三 评审签字**）：
 
