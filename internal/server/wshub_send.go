@@ -154,6 +154,20 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	// sessionSend accepted (or reset-processed) the request — files must stay on disk.
 	// Below this point wsRollback must NOT be invoked: documentation only,
 	// no further branches reference it.
+	//
+	// R040034-GO-8 (#1394): on the reset branch (`/clear` or `/new`) the
+	// turn that uploaded these PDFs was discarded by sessionSend, so no
+	// session entry references the persisted bytes. We deliberately keep
+	// the files instead of rolling back because:
+	//   1. Audit — the workspace's attachments/ tree still records the
+	//      user upload; ops can correlate it with logs even though the
+	//      message itself was reset away.
+	//   2. Next-message reuse — a user who hits /clear by mistake and
+	//      immediately re-attaches the same PDF benefits from the upload
+	//      already living in the workspace; the next /send dedups via
+	//      content hash without a re-upload round trip.
+	// The attachments GC sweeper handles eventual cleanup for refs that
+	// no session ever picks up; that's the audit-bounded case.
 	_ = wsRollback
 	if reset {
 		// /clear or /new — HTTP path reports "reset"; keep the WS path in sync so
