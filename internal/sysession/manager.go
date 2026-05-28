@@ -327,9 +327,23 @@ func NewManager(cfg Config) (*Manager, error) {
 //
 // Returns immediately; daemons run asynchronously. Callers should
 // invoke Stop during shutdown.
+//
+// R260528-ARCH-13 (#1374): a nil parent ctx used to panic deep inside
+// context.WithCancel (which requires non-nil parent per its contract).
+// The wireup path (internal/wireup/schedulers.go) already passes a real
+// ctx, but library embedders that forward a zero-value ctx through
+// helper layers would crash with an unhelpful stack. Fall back to
+// context.Background() with a Warn so the misuse is loud but the daemon
+// goroutines still come up — the eventual Stop(stopCtx) cancels via
+// m.cancelP regardless of which parent was used at Start.
 func (m *Manager) Start(parent context.Context) {
 	if !m.enabled {
 		return
+	}
+	if parent == nil {
+		slog.Warn("sysession: Manager.Start called with nil parent ctx; falling back to context.Background — caller wiring bug",
+			"hint", "shutdown still works via Stop(stopCtx); see #1374")
+		parent = context.Background()
 	}
 	startedThisCall := false
 	m.startOnce.Do(func() {
