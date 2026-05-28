@@ -1415,8 +1415,9 @@ func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
 // must skip this phase entirely when drainCronStop's deadlineHit is true so
 // the budget is honoured as a single overall ceiling.
 //
-// R222-GO-10: when the deadline pre-empts triggerDone, the wrapper goroutine
-// started by `go func() { s.triggerWG.Wait(); close(...) }` stays parked on
+// R222-GO-10 / R217-GO-5 / R44 (#606): when the deadline pre-empts
+// triggerDone, the wrapper goroutine started by
+// `go func() { s.triggerWG.Wait(); close(...) }` stays parked on
 // triggerWG.Wait — exactly the intentional-orphan path documented in the
 // Stop CONTRACT block. Reclaim happens when the OS tears the process down.
 // We deliberately do NOT add a sync.Once / chan-cancel reclaim path here:
@@ -1424,6 +1425,8 @@ func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
 // single-shot (Stop is terminal). A goroutine-leak detector running in
 // tests that shorten stopBudget to milliseconds will surface this orphan;
 // tests that care should plumb a non-stuck deliverNotice fake instead.
+// #606 is the [REPEAT-N] reaffirm of this design — keeping the issue
+// reference here so future reviewers see the lineage at a glance.
 //
 // Bound triggerWG.Wait with the *remaining* share of the same budget:
 // manual TriggerNow respects stopCtx via execute(), and R243-SEC-14
