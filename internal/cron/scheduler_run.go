@@ -594,6 +594,21 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 // in cmd/naozhi/cron_router_adapter.go casts session.InterruptOutcome
 // → cron.InterruptOutcome via a numeric cast, with an init() panic
 // pinning the ordinals.
+//
+// R238-ARCH-20 (#787) proposed renaming deadlineInterrupter →
+// RunInterrupter and switching abortResult to a fresh InterruptResult
+// enum to "break the dependency on session.InterruptOutcome". The
+// decoupling is already complete: the cron-local InterruptOutcome above
+// (defined in agent_opts.go) is the public type; cron does NOT import
+// session.InterruptOutcome anywhere in production code (the last
+// reverse import was eliminated by R20260527122801-ARCH-1, see the
+// banner in scheduler_session.go). The proposed rename is a cosmetic
+// preference rather than an architectural fix; deferring keeps the
+// type name aligned with the concept "deadline-driven interrupt"
+// across godoc / metrics / tests, and avoids a sweep across N test
+// files. The fired-vs-success ambiguity flagged in the issue is
+// addressed by abortResult.fired's godoc above (success path is
+// fired=false; only the watchdog firing sets fired=true).
 type abortResult struct {
 	outcome InterruptOutcome
 	fired   bool
