@@ -6,7 +6,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/naozhi/naozhi/internal/keyspec"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
@@ -42,8 +41,10 @@ const (
 	CronKeyPrefix = sessionkey.CronKeyPrefix
 	// ProjectKeyPrefix is used for project-scoped planner sessions. Key
 	// shape is "project:{name}:planner" — see internal/project.IsPlannerKey.
-	// Canonical declaration lives in internal/keyspec.ProjectKeyPrefix.
-	ProjectKeyPrefix = keyspec.ProjectKeyPrefix
+	// Canonical declaration lives in internal/sessionkey.ProjectKeyPrefix
+	// (R040034-ARCH-2 / #1412 consolidated the former internal/keyspec leaf
+	// into sessionkey so cron / sys / scratch / project share one owner).
+	ProjectKeyPrefix = sessionkey.ProjectKeyPrefix
 	// SysKeyPrefix re-exports sessionkey.SysKeyPrefix.
 	SysKeyPrefix = sessionkey.SysKeyPrefix
 )
@@ -145,33 +146,35 @@ func IsSysKey(key string) bool { return sessionkey.IsSysKey(key) }
 // key shape. Kept unexported because external callers should continue
 // to use internal/project's public API. KeyResolver needs to construct
 // planner keys without importing project (reverse dependency), so the
-// session package delegates to internal/keyspec for the canonical
+// session package delegates to internal/sessionkey for the canonical
 // constructor — that package is zero-dep so any consumer can take it
 // without an import cycle.
 //
 // R239-ARCH-G (#900): pre-extraction this function held the literal
 // "project:{name}:planner" in two places (here and in internal/project)
 // kept in sync only via cross-module hardcoded tests. The literal now
-// lives once in internal/keyspec.PlannerKeyFor; both call sites
-// delegate.
+// lives once in internal/sessionkey.PlannerKeyFor; both call sites
+// delegate. R040034-ARCH-2 (#1412): the canonical declaration moved
+// from the former internal/keyspec into sessionkey so the project
+// prefix lives next to cron/sys/scratch.
 func plannerKeyFor(name string) string {
-	return keyspec.PlannerKeyFor(name)
+	return sessionkey.PlannerKeyFor(name)
 }
 
 // isPlannerKey is the session-package local accessor for planner-key
-// detection. Delegates to internal/keyspec.IsPlannerKey so the
+// detection. Delegates to internal/sessionkey.IsPlannerKey so the
 // "project:" + ":planner" + non-empty-name rule is encoded exactly
-// once. R239-ARCH-G (#900).
+// once. R239-ARCH-G (#900) / R040034-ARCH-2 (#1412).
 func isPlannerKey(key string) bool {
-	return keyspec.IsPlannerKey(key)
+	return sessionkey.IsPlannerKey(key)
 }
 
 // plannerNameFromKey extracts {name} from "project:{name}:planner". Callers
 // must have verified isPlannerKey(key) first; otherwise behaviour is undefined.
-// R239-ARCH-G (#900): delegates to internal/keyspec.PlannerNameFromKey so
-// the slice math lives once.
+// R239-ARCH-G (#900) / R040034-ARCH-2 (#1412): delegates to
+// internal/sessionkey.PlannerNameFromKey so the slice math lives once.
 func plannerNameFromKey(key string) string {
-	return keyspec.PlannerNameFromKey(key)
+	return sessionkey.PlannerNameFromKey(key)
 }
 
 // ValidateSessionKey rejects session keys that contain control bytes, non-UTF-8

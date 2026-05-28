@@ -1237,9 +1237,12 @@ func TestHistorySessions_EmptyHistoryCached(t *testing.T) {
 	srv.sessionH.WaitWarmHistory()
 
 	// Reset cache from the warm pass so the first test call is a real miss.
+	// Mirror the atomic alongside the time.Time so the wait-free fast path
+	// in historySessions() observes "expired" too. R040034-PERF-5 (#1404).
 	srv.sessionH.historyCacheMu.Lock()
 	srv.sessionH.historyCache = nil
 	srv.sessionH.historyCacheTime = time.Time{}
+	srv.sessionH.historyCacheTimeUnixNano.Store(0)
 	srv.sessionH.historyCacheMu.Unlock()
 
 	// Empty claudeDir so loadHistorySessions naturally yields nil.

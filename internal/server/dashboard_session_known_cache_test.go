@@ -60,10 +60,13 @@ func TestHistorySessions_KnownSessionIDsCachedAcross1HzPolls(t *testing.T) {
 	srv.sessionH.cronSessions = stub
 
 	// Force a cold cache so the first historySessions() triggers a real
-	// FS scan + filter construction.
+	// FS scan + filter construction. Mirror the atomic so the wait-free
+	// fast path in historySessions() observes "expired". R040034-PERF-5
+	// (#1404).
 	srv.sessionH.historyCacheMu.Lock()
 	srv.sessionH.historyCache = nil
 	srv.sessionH.historyCacheTime = time.Time{}
+	srv.sessionH.historyCacheTimeUnixNano.Store(0)
 	srv.sessionH.historyCacheMu.Unlock()
 
 	// 32 polls back-to-back. At 1Hz this is half a minute of dashboard

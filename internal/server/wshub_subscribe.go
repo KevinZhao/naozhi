@@ -101,12 +101,14 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	// scan was O(N_clients) on cold keys (counter near 0) because the
 	// loop only breaks at the upper cap, not at the lower bound.
 	_, alreadySub := c.subscriptions[key]
-	// Hand-rolled Hubs from older tests can skip NewHub and leave the
-	// counter map nil; in that case a check against the nil map yields 0
-	// (always under cap) and the post-install increment below skips the
-	// nil map. The cap is then unenforced in those tests but production
-	// callers always go through NewHub.
-	if !alreadySub && h.subscriberCount != nil && h.subscriberCount[key] >= maxSubscribersPerKey {
+	// R040034-SEC-6 (#1401): gate the cap on the explicit h.enforceCaps
+	// bool rather than on `subscriberCount == nil`. Production hubs go
+	// through NewHub which sets enforceCaps=true and allocates the
+	// counter; hand-rolled test hubs leave both fields zero and skip cap
+	// enforcement. The explicit bool documents the contract at the
+	// call-site so a future refactor cannot silently activate caps in
+	// every test fixture by eagerly initialising the map.
+	if !alreadySub && h.enforceCaps && h.subscriberCount[key] >= maxSubscribersPerKey {
 		h.mu.Unlock()
 		c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "too many subscribers for key"})
 		return
@@ -123,7 +125,7 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	// real unsub. If we return via the "session not found" path below, we
 	// clear the reservation before returning.
 	c.subscriptions[key] = func() {}
-	if !alreadySub && h.subscriberCount != nil {
+	if !alreadySub && h.enforceCaps {
 		h.subscriberCount[key]++
 	}
 	h.mu.Unlock()
@@ -341,7 +343,7 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 		// entry deleted) means we were the last subscriber, so the cache slot
 		// is unreachable. The pre-counter implementation walked h.clients
 		// here — O(N_clients) under h.mu on every dashboard tab close.
-		dropMarshalCache = h.subscriberCount == nil || h.subscriberCount[key] == 0
+		dropMarshalCache = !h.enforceCaps || h.subscriberCount[key] == 0
 	}
 	h.mu.Unlock()
 	if dropMarshalCache && h.historyMarshalCache != nil {
@@ -354,9 +356,14 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 // entry once it hits zero, so the map size mirrors the number of distinct
 // keys that currently have at least one subscriber. Caller MUST hold h.mu.
 //
-// Defensive against pre-counter Hubs (subscriberCount == nil): the cap check
-// in handleSubscribe falls through to "0 < cap" when the map is missing, so
-// this helper is a safe no-op rather than a panic. R246-PERF-4 (#716).
+// Defensive against pre-counter Hubs: the cap check in handleSubscribe
+// short-circuits via h.enforceCaps when the counter is unwired, so this
+// helper is a safe no-op rather than a panic. R246-PERF-4 (#716);
+// R040034-SEC-6 (#1401) explicit-bool gate. The data-presence check
+// (subscriberCount == nil) is retained alongside enforceCaps so a hand-
+// rolled test fixture that populated the map directly without flipping
+// enforceCaps still mutates the map correctly — the gate decides whether
+// to ENFORCE the cap, not whether the map exists.
 func (h *Hub) decSubscriberCountLocked(key string) {
 	if h.subscriberCount == nil {
 		return

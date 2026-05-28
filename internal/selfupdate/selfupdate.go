@@ -108,6 +108,32 @@ func LatestRelease(ctx context.Context) (*Release, error) {
 	}, nil
 }
 
+// pinSha256EnvVar names the env var an operator can set to pin the expected
+// SHA-256 of checksums.txt itself. R238-SEC-4 (#815) defense-in-depth: the
+// existing flow verifies the binary's SHA-256 against checksums.txt, but a
+// leaked GitHub token lets an attacker swap BOTH files in lock-step, so the
+// fetched checksums.txt is no stronger than the leaked-token threat model.
+//
+// When the operator pre-pins the expected checksums.txt hash (recorded
+// out-of-band — e.g. by manually fetching it once on a trusted host and
+// noting the SHA-256), we re-verify the live download against that pin
+// before parsing. A token-driven swap of both files now also requires the
+// attacker to compromise the operator's pinning store, which is a strict
+// upgrade over "just exfiltrate the GitHub token".
+//
+// Empty / unset → behaviour unchanged (best-effort SHA-256 chain to
+// checksums.txt). Operators who care can set the var; a fully-signed
+// release flow (cosign / Sigstore) is the proper long-term fix and is
+// tracked separately under the same issue.
+const pinSha256EnvVar = "NAOZHI_UPGRADE_PIN_SHA256"
+
+// pinSha256HexRe matches a 64-char hex SHA-256 digest. Used to reject a
+// malformed env var early so the operator sees a clear error instead of a
+// silent fallback. Lowercased for the comparison; the regex is
+// case-insensitive so operators copy/pasting from a tool that emitted
+// uppercase hex still get the pin honoured.
+var pinSha256HexRe = regexp.MustCompile(`^[A-Fa-f0-9]{64}$`)
+
 // Download fetches the binary and checksums.txt into dir, verifies the
 // SHA-256 checksum, and returns the path to the downloaded binary.
 //
@@ -117,6 +143,11 @@ func LatestRelease(ctx context.Context) (*Release, error) {
 // process — even though tmp dirs are created 0700 today, defense-in-depth
 // means the file mode itself never claims "this is ready to execute"
 // before we've confirmed integrity.
+//
+// R238-SEC-4 (#815): when NAOZHI_UPGRADE_PIN_SHA256 is set, checksums.txt
+// must match that pinned hash before we trust its contents. This guards
+// against a leaked GitHub token swapping both files in lock-step. The pin
+// is a TOFU stopgap pending a proper signing flow (cosign / Sigstore).
 func Download(ctx context.Context, rel *Release, dir string) (binPath string, err error) {
 	asset := assetName()
 	binPath = filepath.Join(dir, asset)
@@ -128,6 +159,13 @@ func Download(ctx context.Context, rel *Release, dir string) (binPath string, er
 	if err := fetchFile(ctx, rel.SumURL, sumPath, maxChecksumBytes); err != nil {
 		return "", fmt.Errorf("download checksums: %w", err)
 	}
+	// R238-SEC-4 (#815): verify the operator-pinned hash of checksums.txt
+	// before we let verifyChecksum parse it. Pin must come BEFORE the
+	// checksum chain because a tampered checksums.txt would otherwise
+	// happily verify a tampered binary.
+	if err := verifyPinnedChecksumsFile(sumPath); err != nil {
+		return "", err
+	}
 	if err := verifyChecksum(binPath, sumPath, asset); err != nil {
 		return "", err
 	}
@@ -137,6 +175,39 @@ func Download(ctx context.Context, rel *Release, dir string) (binPath string, er
 		return "", fmt.Errorf("chmod verified binary: %w", err)
 	}
 	return binPath, nil
+}
+
+// verifyPinnedChecksumsFile enforces the optional NAOZHI_UPGRADE_PIN_SHA256
+// pin on checksums.txt. R238-SEC-4 (#815). Returns nil when the pin is
+// unset (current default — ie behaviour unchanged for existing operators).
+//
+// A non-empty but malformed pin returns an error rather than silently
+// downgrading; this is the safer failure mode (operator sees the typo,
+// fixes it, retries) versus accidentally bypassing a pin the operator
+// believes is active.
+func verifyPinnedChecksumsFile(sumPath string) error {
+	pin := strings.TrimSpace(os.Getenv(pinSha256EnvVar))
+	if pin == "" {
+		return nil
+	}
+	if !pinSha256HexRe.MatchString(pin) {
+		return fmt.Errorf("selfupdate: %s set but not a 64-char hex SHA-256: %q", pinSha256EnvVar, pin)
+	}
+	data, err := os.ReadFile(sumPath)
+	if err != nil {
+		return fmt.Errorf("selfupdate: read checksums.txt for pin verify: %w", err)
+	}
+	h := sha256.Sum256(data)
+	actual := hex.EncodeToString(h[:])
+	// Constant-time compare on lowercased values so operators using
+	// uppercase pins still match. The pinSha256HexRe already constrained
+	// the input to hex, so ToLower is byte-safe (no UTF-8 surprises).
+	expected := strings.ToLower(pin)
+	if subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) != 1 {
+		return fmt.Errorf("selfupdate: checksums.txt SHA-256 %s does not match pinned %s — refusing upgrade",
+			actual, expected)
+	}
+	return nil
 }
 
 // stagingPattern is the os.CreateTemp pattern Replace uses for the
