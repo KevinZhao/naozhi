@@ -317,3 +317,13 @@
 - [R20260527122801-SEC-9] feishu token-only 模式 hash-DoS hardening (production warn) — internal/platform/feishu/transport_hook.go:107
 - [R20260527122801-SEC-10] WSDropped multitenant 警示加到 validateConfig — internal/server/wshub.go:155
 - [R20260527122801-SEC-11] cron executeOpt nil-router 兜底位置(应在 inflight CAS 之前) — internal/cron/scheduler_run.go:739
+
+<!-- cron-cr-20260528-005525 append (R260528 全面 review) -->
+- [R260528-SEC-6] url_verification timestamp 严格 verify by-design — 已 missing-only 豁免 — internal/platform/feishu/transport_hook.go:85
+- [R260528-BUG-6] cronSessionAdapter c.s nil-check 假设性 — godoc 已声明 always non-nil — cmd/naozhi/cron_router_adapter.go:130
+- [R260528-GO-13] OnResolve subscriber list 无 cancel func — 当前单调用方 — internal/cli/subagent_link.go:150
+- [R260528-GO-14] eventLogClosedCh singleton 通道 cancel noop — observability cosmetic — internal/cli/eventlog.go:196
+- [R260528-GO-19] Subscribe subsClosed singleton aliasing footgun — godoc only — internal/cli/eventlog.go:1518
+- [R260528-PERF-12] notifySubscribers subCount.Load 与 map check 合并 — micro-opt — internal/cli/eventlog.go:1421
+- [R260528-PERF-23] dispatchProtocolEvent time.Now 惰性 — micro-opt — internal/cli/process_readloop.go:523
+- [R260528-ARCH-19] AllowNilRouter + routerNilOnce 改 noopRouter — test escape hatch cleanup — internal/cron/scheduler.go:222
