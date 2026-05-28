@@ -200,11 +200,28 @@ type Options struct {
 }
 
 // Default tuning knobs. See Options godoc for rationale.
+//
+// R20260527122801-PERF-5 (#1336 partial): raised DefaultChannelBuffer
+// from 1024 → 4096. The original 1024 cap was sized for ~20 active
+// sessions; in steady-state with 50+ concurrent dashboards each
+// flushing 50-event batches the burst arrival could near-saturate the
+// channel and trip the drop telemetry path (handleBatch → droppedCnt).
+// 4× headroom absorbs the 50×50 burst (~2500 batches) without
+// architectural change. The full fan-out fix proposed in #1336
+// (N writer goroutines via KeyHash mod N) is preserved as a follow-up
+// when the singleton drain rate itself becomes the bottleneck — at
+// 4096 cap that's ~10× further out than the prior cap allowed.
+//
+// Memory cost: each batchJob is ~120 B (slice header + key + 50 entry
+// pointers); 4096 slots × 120 B ≈ 500 KB worst-case in-flight, which
+// is dominated by the EventEntry payloads referenced from the slots
+// (those exist with or without buffering). Raising the cap therefore
+// only buys headroom for the queue depth, not new resident memory.
 const (
 	DefaultMaxFileBytes   int64         = 100 * 1024 * 1024 // 100 MiB
 	DefaultFlushInterval  time.Duration = 200 * time.Millisecond
 	DefaultIdleCloseAfter time.Duration = 10 * time.Minute
-	DefaultChannelBuffer                = 1024
+	DefaultChannelBuffer                = 4096
 )
 
 // Persister owns the single writer goroutine that fan-ins batches
@@ -800,7 +817,8 @@ func (p *Persister) handleOp(o op) {
 		// asynchronous file-removal phase. On slow filesystems
 		// (FUSE/NFS) the os.Remove pair could stall the writer
 		// goroutine for 100s of ms, blocking every concurrent Append
-		// draining p.in (cap 1024 then drops with telemetry). Once the
+		// draining p.in (cap DefaultChannelBuffer; drops with telemetry
+		// once full). Once the
 		// map entry is gone any concurrent SinkFor reaches the empty
 		// map and proceeds normally; the unlinks racing the next
 		// possible recreation are handled by the same key-stem
