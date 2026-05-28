@@ -714,6 +714,62 @@ func TestCollectFlushCandidates_AdaptiveSkipsUnderHighWriterCount(t *testing.T) 
 	}
 }
 
+// TestPersister_PressureAndAccept pins the R244-ARCH-2 / #1057
+// observability surface: callers can probe ingest backpressure without
+// waiting for OnDrop. Pressure() reflects the in-channel queue depth as a
+// 0..1 ratio; Accept() returns true while there is meaningful slack.
+func TestPersister_PressureAndAccept(t *testing.T) {
+	t.Parallel()
+
+	// Empty queue: Pressure 0, Accept true.
+	p, _ := newTestPersister(t)
+	defer func() {
+		_ = p.Stop(context.Background())
+	}()
+	if got := p.Pressure(); got != 0 {
+		t.Errorf("empty Pressure() = %v, want 0", got)
+	}
+	if !p.Accept() {
+		t.Error("empty Accept() = false, want true")
+	}
+
+	// Fill ~half the buffer by sending direct batchJobs.
+	half := cap(p.in) / 2
+	for i := 0; i < half; i++ {
+		select {
+		case p.in <- batchJob{Key: "k", Stem: "s", Entries: nil}:
+		default:
+			t.Fatalf("could not enqueue at i=%d", i)
+		}
+	}
+	pr := p.Pressure()
+	if pr <= 0.3 || pr >= 0.7 {
+		t.Errorf("half-full Pressure() = %v, want roughly 0.5", pr)
+	}
+	if !p.Accept() {
+		t.Error("half-full Accept() = false, want true (slack remaining)")
+	}
+
+	// Closed persister: Pressure 0, Accept false (uniform "do not produce").
+	closed := &Persister{}
+	closed.closed.Store(true)
+	if got := closed.Pressure(); got != 0 {
+		t.Errorf("closed Pressure() = %v, want 0", got)
+	}
+	if closed.Accept() {
+		t.Error("closed Accept() = true, want false")
+	}
+
+	// Nil receiver: same defensive behaviour.
+	var nilP *Persister
+	if got := nilP.Pressure(); got != 0 {
+		t.Errorf("nil Pressure() = %v, want 0", got)
+	}
+	if nilP.Accept() {
+		t.Error("nil Accept() = true, want false")
+	}
+}
+
 // Sanity compile check — prevents an unused atomic import from
 // going unnoticed while we're iterating.
 var _ = atomic.Int64{}

@@ -78,6 +78,20 @@ func putMarshalEntries(s *[]*Job) {
 	marshalEntriesPool.Put(s)
 }
 
+// jobIDCmpForSort is the package-level comparator slices.SortFunc uses inside
+// marshalJobsLocked. Hoisted out of the call site (was an inline closure
+// literal) so the per-mutation persist hot path does not allocate the
+// closure header on every invocation. R20260527122801-PERF-2 (#1340) partial:
+// the broader proposal moves the entire sort/marshal out of the s.mu Write
+// critical section by value-copying *Job into entries; that requires a
+// deeper refactor of the rollback contract (callers expect marshal errors
+// synchronously to roll back in-memory mutation), so this commit lands
+// the alloc-trim half — reduces persistJobsLocked allocs/op without
+// touching the lock-vs-marshal-error invariant.
+func jobIDCmpForSort(a, b *Job) int {
+	return cmp.Compare(a.ID, b.ID)
+}
+
 // marshalJobsFn is the signature of the JSON serializer used by
 // marshalJobsLocked. It is swapped via the per-Scheduler atomic.Pointer in
 // tests (see withFailingMarshal) to exercise persist-failure paths without
@@ -152,7 +166,13 @@ func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
 	// caller reads jobs.json on a fresh install before any AddJob).
 	// Single-job operator setups + the entire test suite hit this path.
 	if len(entries) > 1 {
-		slices.SortFunc(entries, func(a, b *Job) int { return cmp.Compare(a.ID, b.ID) })
+		// R20260527122801-PERF-2 (#1340): use a package-level comparator
+		// rather than a closure literal — closures over no captures still
+		// allocate a fresh function header per call, and at dashboard 1Hz ×
+		// every persist mutation that adds bytes/op + GC pressure that the
+		// pooled-slice optimisation above is otherwise eliminating. The
+		// behaviour is identical (cmp.Compare on Job.ID).
+		slices.SortFunc(entries, jobIDCmpForSort)
 	}
 	fn := s.marshalJobs.Load()
 	if fn == nil {

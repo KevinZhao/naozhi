@@ -390,6 +390,54 @@ func (p *Persister) FS() FSDetection {
 	return p.fs
 }
 
+// Pressure reports the current ingest channel utilisation as a value in
+// [0, 1] where 0 means "drained" and 1 means "full, next SinkFor send will
+// drop". Callers (session router, /health, future planners) can probe this
+// to back off proactively instead of discovering backpressure post-hoc via
+// the OnDrop counter.
+//
+// R244-ARCH-2 (#1057): the PersistSink closure used to be the only signal
+// path, and OnDrop fires only AFTER an entry is already lost. Pressure() is
+// safe to call from any goroutine — len(chan)/cap(chan) are racy by design
+// but the value is advisory and bounded, so a torn read at most under- or
+// over-states utilisation by one slot.
+//
+// Returns 0 on a nil receiver or a closed persister so callers do not
+// special-case those states (a stopped persister exerts zero ingest
+// pressure on the producer and freshly-handed-out closures may already be
+// in flight).
+func (p *Persister) Pressure() float64 {
+	if p == nil || p.closed.Load() {
+		return 0
+	}
+	c := cap(p.in)
+	if c == 0 {
+		return 0
+	}
+	return float64(len(p.in)) / float64(c)
+}
+
+// Accept reports whether the next SinkFor send would have non-trivial
+// capacity. Returns true when Pressure() < 0.95 — i.e. there is at least a
+// 5% slot margin remaining. Producers that can defer (e.g. cold-start
+// history backfill, low-priority telemetry) should consult Accept() and
+// retry later rather than racing into the OnDrop path.
+//
+// R244-ARCH-2 (#1057): paired with Pressure() so callers without a
+// floating-point comparison threshold (e.g. dashboard health badges) can
+// branch on a boolean without having to open-code the 0.95 constant.
+//
+// Like Pressure, Accept is advisory: a true result does not guarantee the
+// subsequent send will not race against another producer to fill the
+// remaining slack. False on a nil receiver or closed persister so callers
+// uniformly treat unavailable backends as "do not produce".
+func (p *Persister) Accept() bool {
+	if p == nil || p.closed.Load() {
+		return false
+	}
+	return p.Pressure() < 0.95
+}
+
 // SinkFor builds a PersistSink closure for a specific session key.
 // Callers (session.Router.spawnSession) pass the returned closure to
 // cli.EventLog.SetPersistSink AFTER any InjectHistory completes — see
