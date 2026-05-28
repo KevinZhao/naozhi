@@ -1,49 +1,74 @@
+# lint-server-handlers exemptions
+#
+# 数据来源：origin/master HEAD 5788207b (2026-05-28 实测)
+# 配套：docs/design/server-split-phase4-design.md v0.6.1 §6.2.0.4 + §0 事实速查表
+#
+# 规则：
+# - server 包文件硬上限 limit:500（不是 800）— 见 §9.2 file_size budget
+# - dashboard 子包文件硬上限 800（v0.6.1 暂无此条目）
+# - 每条 until_phase 标到具体 phase；该 phase merge 时 PR commit 必须含
+#   "Closes-exemption: <file>" trailer，否则 rule 5 (stale_exemption) fail
+# - 豁免清单只在 Phase 0 一次性建立，后续 phase 不允许新增条目
+
 file_size:
+    # 9 个 > 800 行 + 2 个 500-800 行 = 11 个超 server 500 硬上限
+    # ── 9 个 > 800 行 ──
     - path: internal/server/dashboard_session.go
-      current: 1514
-      limit: 800
-      until_phase: 3e
-    - path: internal/server/dashboard_cron.go
-      current: 1418
-      limit: 800
-      until_phase: "1"
-    - path: internal/server/server.go
-      current: 1309
+      current: 1714
       limit: 500
-      until_phase: "5"
+      until_phase: 3e         # Phase 3e 抽完 dashboard/session/{list,events,interrupt,label}
     - path: internal/server/project_files.go
-      current: 1302
+      current: 1632
       limit: 500
       until_phase: "2"
     - path: internal/server/dashboard_send.go
-      current: 1214
-      limit: 800
+      current: 1440
+      limit: 500
       until_phase: 3f
-    - path: internal/server/dashboard_cron_transcript.go
-      current: 909
-      limit: 800
+    - path: internal/server/dashboard_cron.go
+      current: 1427
+      limit: 500
       until_phase: "1"
-    - path: internal/server/dashboard.go
-      current: 731
+    - path: internal/server/dashboard_cron_transcript.go
+      current: 1424
+      limit: 500
+      until_phase: "1"
+    - path: internal/server/server.go
+      current: 1334
       limit: 500
       until_phase: "5"
+    - path: internal/server/wshub.go        # v0.6.1 新增豁免：v0.4 时 514 不超线
+      current: 921                          # Phase 0a 加 godoc 表 7 块对账
+      limit: 500
+      until_phase: 4b
+    - path: internal/server/dashboard.go    # v0.6.1 新增豁免：v0.4 时 731 不超线
+      current: 858
+      limit: 500
+      until_phase: "5"
+    - path: internal/server/agent_tailer.go # v0.6.1 新增豁免：v0.4 时 655 不超线
+      current: 807
+      limit: 500
+      until_phase: 4c
+    # ── 2 个 500-800 行（v0.6.1 新增） ──
     - path: internal/server/send.go
-      current: 699
+      current: 704
       limit: 500
       until_phase: 3f
-    - path: internal/server/agent_tailer.go
-      current: 655
+    - path: internal/server/dashboard_auth.go
+      current: 583
       limit: 500
-      until_phase: "4"
-    - path: internal/server/wshub.go
-      current: 579
-      limit: 500
-      until_phase: "4"
+      until_phase: 3a
+
+# Phase 0 baseline 锁定的 8 个 Server.handle* 方法（rule 1: handle_decl）
+# 新增的 (s *Server) handle* 方法 → linter fail
+# v0.6.1 校准：origin/master HEAD 5788207b 比 v0.4 baseline 多 1 个
+# (handlePlannerStats，#1349 加入)
 handle_baseline:
     - Server.handleAgentViewJS
     - Server.handleClearLabelOrigin
     - Server.handleDashboard
     - Server.handleDashboardJS
     - Server.handleManifest
+    - Server.handlePlannerStats     # v0.6.1 新增：PR #1349 引入
     - Server.handleSW
     - Server.handleSystemDaemons
