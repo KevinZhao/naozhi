@@ -3,8 +3,6 @@ package server
 import (
 	"sync"
 	"testing"
-
-	"golang.org/x/time/rate"
 )
 
 // TestAllowSendForOwner_NTabsShareBudget pins R244-SEC-P2-3 / #888: the
@@ -16,7 +14,7 @@ import (
 // single-tab ceiling.
 func TestAllowSendForOwner_NTabsShareBudget(t *testing.T) {
 	h := &Hub{
-		userSendLimiters: make(map[string]*rate.Limiter),
+		userSendLimiters: &sync.Map{},
 	}
 
 	const owner = "owner-A"
@@ -42,7 +40,7 @@ func TestAllowSendForOwner_NTabsShareBudget(t *testing.T) {
 // throttle does not depend on user-A's recent traffic.
 func TestAllowSendForOwner_OwnersIndependent(t *testing.T) {
 	h := &Hub{
-		userSendLimiters: make(map[string]*rate.Limiter),
+		userSendLimiters: &sync.Map{},
 	}
 
 	// Drain owner A.
@@ -68,7 +66,7 @@ func TestAllowSendForOwner_OwnersIndependent(t *testing.T) {
 // flows. The per-conn sendLimiter is the only gate in that path.
 func TestAllowSendForOwner_EmptyOwnerSkipsGate(t *testing.T) {
 	h := &Hub{
-		userSendLimiters: make(map[string]*rate.Limiter),
+		userSendLimiters: &sync.Map{},
 	}
 	for i := 0; i < 100; i++ {
 		if !h.allowSendForOwner("") {
@@ -93,7 +91,7 @@ func TestAllowSendForOwner_NilMapNoCrash(t *testing.T) {
 // detection is enabled by `go test -race`.
 func TestAllowSendForOwner_ConcurrentAccess(t *testing.T) {
 	h := &Hub{
-		userSendLimiters: make(map[string]*rate.Limiter),
+		userSendLimiters: &sync.Map{},
 	}
 
 	var wg sync.WaitGroup
