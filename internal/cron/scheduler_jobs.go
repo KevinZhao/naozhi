@@ -142,22 +142,40 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), error) {
 	// or a /dev/urandom failure path) cannot spin AddJob under s.mu and
 	// stall the whole scheduler. 10 attempts of 8-byte hex IDs is well
 	// beyond any realistic collision rate for maxJobsHardCap=500.
+	//
+	// R247-GO-13 (#493): the original loop emitted Warn on every retry to
+	// surface deterministic-generator regressions early. The collision-on-
+	// real-rand probability is vanishingly small (~ 500/2^64 per call);
+	// emitting 10 Warns is an unambiguous deterministic-generator signal
+	// already, but it floods logs with redundant lines. Trim the noise:
+	// log Warn once on the first collision (still flags the regression),
+	// detect "same ID twice in a row" as definitive proof of a broken
+	// generator and bail immediately at Error (faster signal, no further
+	// log spam), and let the final fall-through error carry the post-loop
+	// fail signal for the rare case where 10 distinct IDs all collided
+	// against existing jobs.
+	prevID := j.ID
 	for i := 0; i < 10; i++ {
 		if _, exists := s.jobs[j.ID]; !exists {
 			break
 		}
-		// R238-CR-15: surface every retry rather than only the final failure.
-		// A degenerate generateID (mock injection or /dev/urandom stall) would
-		// otherwise stay silent until attempt 10 produces the
-		// "failed to generate unique job ID" error; logging each collision lets
-		// operators see the pattern (same ID repeating) before users hit
-		// AddJob errors.
-		slog.Warn("cron: job ID collision, retrying", "attempt", i+1, "job_id", j.ID)
+		if i == 0 {
+			slog.Warn("cron: job ID collision, retrying", "attempt", i+1, "job_id", j.ID)
+		}
 		retryID, retryErr := generateID()
 		if retryErr != nil {
 			// 同上：rand 中途失效，提早返回比继续循环更诚实。
 			return nil, fmt.Errorf("cron: regenerate job id (retry %d): %w", i+1, retryErr)
 		}
+		if retryID == prevID {
+			// Deterministic generator: same ID twice in a row is conclusive
+			// evidence the source is not random. No point exhausting the
+			// remaining retries; the final error would be identical.
+			slog.Error("cron: deterministic ID generator detected; bailing early",
+				"attempt", i+1, "id", retryID)
+			return nil, fmt.Errorf("cron: deterministic ID generator (id %q repeated)", retryID)
+		}
+		prevID = retryID
 		j.ID = retryID
 	}
 	if _, exists := s.jobs[j.ID]; exists {

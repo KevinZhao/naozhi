@@ -511,6 +511,11 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /api/projects/config", auth(s.projectH.handleConfigGet))
 	s.mux.HandleFunc("PUT /api/projects/config", auth(s.projectH.handleConfigPut))
 	s.mux.HandleFunc("POST /api/projects/planner/restart", auth(s.projectH.handlePlannerRestart))
+	// Issue #452 (PLANNER-STATS-1) part-1: process-resource probe so the
+	// dashboard can show RSS / goroutine / planner-fan-out trends without
+	// reaching the loopback-only /api/debug/vars expvar surface. Per-CLI
+	// per-process RSS is the part-2 follow-up; see dashboard_planner_stats.go.
+	s.mux.HandleFunc("GET /api/planner/stats", auth(s.handlePlannerStats))
 	s.mux.HandleFunc("POST /api/projects/favorite", auth(s.projectH.handleFavoriteToggle))
 	s.mux.HandleFunc("POST /api/projects/files/exists", auth(s.projectH.handleFilesExists))
 	s.mux.HandleFunc("GET /api/projects/file", auth(s.projectH.handleFileGet))
@@ -832,18 +837,19 @@ func buildSessionOpts(key string, resolver *session.KeyResolver, agents map[stri
 	opts := agents[agentID]
 	if project.IsPlannerKey(key) {
 		opts.Exempt = true // planner sessions are always exempt, regardless of project config
-		if projectMgr != nil {
-			pParts := strings.SplitN(key, ":", 3)
-			if len(pParts) == 3 {
-				if p := projectMgr.Get(pParts[1]); p != nil {
-					opts.Workspace = p.Path
-					if m := projectMgr.EffectivePlannerModel(p); m != "" {
-						opts.Model = m
-					}
-					if prompt := projectMgr.EffectivePlannerPrompt(p); prompt != "" {
-						opts.ExtraArgs = append(opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)],
-							"--append-system-prompt", prompt)
-					}
+		// Reuse `parts` from the SplitN(key, ":", 4) above: planner keys have
+		// the shape "project:<name>:planner" so parts[1] is the project name.
+		// IsPlannerKey already proved len(key)>len("project::planner") so the
+		// 4-segment SplitN yields ≥3 elements whenever this branch fires.
+		if projectMgr != nil && len(parts) >= 3 {
+			if p := projectMgr.Get(parts[1]); p != nil {
+				opts.Workspace = p.Path
+				if m := projectMgr.EffectivePlannerModel(p); m != "" {
+					opts.Model = m
+				}
+				if prompt := projectMgr.EffectivePlannerPrompt(p); prompt != "" {
+					opts.ExtraArgs = append(opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)],
+						"--append-system-prompt", prompt)
 				}
 			}
 		}

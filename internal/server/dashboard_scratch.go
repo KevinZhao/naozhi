@@ -13,6 +13,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // ScratchHandler serves the /api/scratch/* endpoints used by the dashboard
@@ -110,7 +111,7 @@ func (h *ScratchHandler) handleOpen(w http.ResponseWriter, r *http.Request) {
 
 	// Scratches must not be opened against another scratch (stacking asides
 	// would quickly saturate the pool and serves no product need).
-	if session.IsScratchKey(req.SourceKey) {
+	if sessionkey.IsScratchKey(req.SourceKey) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "cannot open scratch from another scratch"})
 		return
 	}

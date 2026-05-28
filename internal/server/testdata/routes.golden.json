@@ -116,6 +116,11 @@
   },
   {
     "method": "GET",
+    "path": "/api/planner/stats",
+    "handler_type": "*Server"
+  },
+  {
+    "method": "GET",
     "path": "/api/projects",
     "handler_type": "*ProjectHandlers"
   },

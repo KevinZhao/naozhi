@@ -568,6 +568,23 @@ func (s *runStore) Append(run *CronRun) {
 	// under jobLock so the cache + trim cadence keep their per-job
 	// serialisation contract.
 	dir := filepath.Join(s.root, run.JobID)
+	// R247-GO-8 (#484): defense-in-depth path-containment check before
+	// MkdirAll. IsValidID above already rejects `..` / `/` characters in
+	// run.JobID (hex-only), so a malicious value cannot escape s.root via
+	// the join — but the asymmetry vs readRun's Lstat-based root guard
+	// invited future regressions when a new caller path bypassed
+	// IsValidID. Mirror the read-side guard by computing
+	// filepath.Rel(s.root, dir) and rejecting any rel that escapes the
+	// root. Cheap (pure path manipulation, no syscall) and only fires the
+	// reject branch if a future change to ID validation slips a `..`
+	// segment through. R247-GO-8.
+	if rel, relErr := filepath.Rel(s.root, dir); relErr != nil ||
+		rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		slog.Error("cron run: refusing append outside runs root",
+			"root", s.root, "dir", dir, "rel", rel, "err", relErr,
+			"job_id", run.JobID, "run_id", run.RunID)
+		return
+	}
 	if err := s.ensureJobDir(run.JobID, dir); err != nil {
 		slog.Warn("cron run: mkdir failed", "dir", dir, "err", err)
 		return
@@ -1070,6 +1087,21 @@ func (s *runStore) scanSortedRunDir(jobID string) ([]runDirItem, string, error) 
 		}
 		info, err := e.Info()
 		if err != nil {
+			continue
+		}
+		// R236-SEC-04 (#489): some filesystems (FUSE, certain tmpfs / NFS
+		// configurations) return DT_UNKNOWN from getdents, which Go surfaces
+		// as e.Type() == 0. The earlier ModeSymlink check on e.Type() then
+		// silently passes a symlink through; trim's downstream os.Remove and
+		// list's readRunNoLstat would follow it. e.Info() above just ran
+		// Lstat (the documented behaviour for DirEntry.Info on a Type with
+		// no cached d_type), so the resulting FileInfo's Mode is the
+		// authoritative kind. Re-check ModeSymlink + IsRegular here to close
+		// the DT_UNKNOWN bypass; the cost is zero on filesystems that fill
+		// d_type (the e.Type() check already handled them) and amounts to
+		// one extra Mode-bit comparison on the slow-FS path that already
+		// paid an Lstat above.
+		if mode := info.Mode(); mode&fs.ModeSymlink != 0 || !mode.IsRegular() {
 			continue
 		}
 		items = append(items, runDirItem{
@@ -1749,6 +1781,22 @@ func (s *runStore) trimAllCtx(ctx context.Context, now time.Time) {
 		}
 		jobID := e.Name()
 		if !IsValidID(jobID) {
+			continue
+		}
+		// R236-SEC-04 (#489): DT_UNKNOWN bypass on FUSE/tmpfs/NFS surfaces
+		// from e.Type() as 0, so a symlink pointing at /etc/cron.d (or any
+		// directory the running uid can ReadDir) would slip past the
+		// e.Type() ModeSymlink check above and trimJobUnderLock would
+		// recurse into it. Defer to e.Info() (a real Lstat) for the
+		// authoritative mode and skip anything that isn't a plain
+		// directory. This costs one Lstat per top-level entry on the
+		// trimAll cold pass — bounded by maxJobsHardCap=500 — vs the
+		// defense-in-depth payoff of closing the symlink-bypass window.
+		info, infoErr := e.Info()
+		if infoErr != nil {
+			continue
+		}
+		if mode := info.Mode(); mode&fs.ModeSymlink != 0 || !mode.IsDir() {
 			continue
 		}
 		s.trimJobUnderLock(jobID, now)

@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // TestWaitForReattach_DoneCloses verifies the helper exits promptly when
@@ -56,8 +58,13 @@ func TestWaitForReattach_ReconnectThenDone(t *testing.T) {
 		close(doneCh)
 	}()
 
-	// Give the helper a moment to drain acceptCh and call spawn.
-	time.Sleep(20 * time.Millisecond)
+	// TEST1 (#395): wait for spawn to fire before closing s.done so the
+	// test exercises the "reconnect THEN done" ordering deterministically.
+	// Eventually replaces the previous time.Sleep(20ms) so slow CI runs
+	// produce a clear diagnostic instead of a silent ordering race.
+	testhelper.Eventually(t, func() bool {
+		return spawnCalls.Load() == 1
+	}, 2*time.Second, "spawn never fired after acceptCh delivery")
 	close(s.done)
 
 	select {

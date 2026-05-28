@@ -11,6 +11,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // newScratchTestServer wires a newTestServer with a live ScratchPool + handler,
@@ -54,7 +55,7 @@ func TestScratchOpen_Happy(t *testing.T) {
 	if len(resp.ScratchID) != 32 {
 		t.Errorf("scratch id length = %d", len(resp.ScratchID))
 	}
-	if !strings.HasPrefix(resp.Key, session.ScratchKeyPrefix) {
+	if !strings.HasPrefix(resp.Key, sessionkey.ScratchKeyPrefix) {
 		t.Errorf("key missing prefix: %q", resp.Key)
 	}
 	if resp.QuoteTruncated {

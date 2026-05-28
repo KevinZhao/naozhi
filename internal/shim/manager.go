@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // shimReadyMsg carries the result of the shim's ready-line scan back to
@@ -79,6 +80,14 @@ func validateKeyForShim(k string) error {
 // exit; not a configuration problem.
 var ErrMaxShims = errors.New("max shims reached")
 
+// ErrStateDirQuotaExceeded is returned by StartShim when the configured
+// state-dir quota would be exceeded by spawning another shim. Distinct
+// sentinel so callers can surface a more actionable error message
+// (operator action: clean ~/.naozhi/shims, raise quota) versus
+// ErrMaxShims (transient: another session must exit). RNEW-OPS-415
+// (#456) minimal slice; matches the existing osutil scan error API.
+var ErrStateDirQuotaExceeded = errors.New("shim state dir quota exceeded")
+
 // Manager manages shim process lifecycle: starting, discovering, and reconnecting.
 type Manager struct {
 	stateDir        string
@@ -98,6 +107,10 @@ type Manager struct {
 	// injected later via systemctl set-environment or os.Setenv will NOT
 	// propagate to newly-spawned shims until naozhi itself is restarted.
 	shimEnv []string
+
+	// stateDirQuotaBytes mirrors ManagerConfig.StateDirQuotaBytes; 0
+	// disables the gate. RNEW-OPS-415 (#456).
+	stateDirQuotaBytes int64
 
 	mu           sync.Mutex
 	shims        map[string]*ShimHandle // key → active shim handle
@@ -175,6 +188,17 @@ type ManagerConfig struct {
 	// StartShim returns ErrMaxShims when at the cap; Reconnect bypasses
 	// this gate (it only attaches to already-running processes).
 	MaxShims int
+
+	// StateDirQuotaBytes caps the on-disk size of StateDir before
+	// StartShim refuses to spawn new shims. Zero (the default) disables
+	// the quota gate so legacy callers see no behaviour change.
+	//
+	// RNEW-OPS-415 (#456) minimal slice: prevents per-shim state files
+	// (each ≤4 KiB but 50 active shims × restart loops can multiply)
+	// from filling ~/.naozhi when an operator forgets to set ulimit on
+	// the data dir. Reconnect still bypasses the gate — quota's job is
+	// to brake new growth, not strand already-running shims.
+	StateDirQuotaBytes int64
 }
 
 // NewManager creates a shim manager.
@@ -221,18 +245,47 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	}
 
 	return &Manager{
-		stateDir:        cfg.StateDir,
-		cliPath:         cfg.CLIPath,
-		idleTimeout:     cfg.IdleTimeout,
-		watchdogTimeout: cfg.WatchdogTimeout,
-		bufferSize:      cfg.BufferSize,
-		maxBufBytes:     cfg.MaxBufBytes,
-		maxShims:        cfg.MaxShims,
-		naozhiBin:       naozhiBin,
-		shimEnv:         filterShimEnv(os.Environ()),
-		shims:           make(map[string]*ShimHandle),
-		reconnectKM:     make(map[string]*sync.Mutex),
+		stateDir:           cfg.StateDir,
+		cliPath:            cfg.CLIPath,
+		idleTimeout:        cfg.IdleTimeout,
+		watchdogTimeout:    cfg.WatchdogTimeout,
+		bufferSize:         cfg.BufferSize,
+		maxBufBytes:        cfg.MaxBufBytes,
+		maxShims:           cfg.MaxShims,
+		stateDirQuotaBytes: cfg.StateDirQuotaBytes,
+		naozhiBin:          naozhiBin,
+		shimEnv:            filterShimEnv(os.Environ()),
+		shims:              make(map[string]*ShimHandle),
+		reconnectKM:        make(map[string]*sync.Mutex),
 	}, nil
+}
+
+// checkStateDirQuota returns ErrStateDirQuotaExceeded when StateDirSize(stateDir)
+// already exceeds the configured quota. Quota of 0 disables the gate.
+// A scan error is treated as "fail open" (no quota enforced) so first-run
+// systems with no state dir, or transient i/o issues, do not block spawn.
+// The truncation sentinel from osutil returns a lower bound — if even the
+// lower bound exceeds quota, that is itself a quota violation, so we use
+// the returned size regardless.
+//
+// Pulled out as a method (not inline) so tests can dial the quota via
+// ManagerConfig and exercise the gate without spawning a real shim.
+// RNEW-OPS-415 (#456) minimal slice.
+func (m *Manager) checkStateDirQuota() error {
+	if m.stateDirQuotaBytes <= 0 {
+		return nil
+	}
+	size, err := osutil.StateDirSize(m.stateDir)
+	if err != nil && !errors.Is(err, osutil.ErrStateDirScanTruncated) {
+		// Either the dir is missing (first run) or unreadable. Either
+		// way, do not block shim spawn on a diagnostic walk.
+		return nil
+	}
+	if size >= m.stateDirQuotaBytes {
+		return fmt.Errorf("%w: %d ≥ %d bytes in %s",
+			ErrStateDirQuotaExceeded, size, m.stateDirQuotaBytes, m.stateDir)
+	}
+	return nil
 }
 
 // reconnectKey returns (and lazily creates) the per-key mutex used by
@@ -379,6 +432,17 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	}
 	if cliPath == "" {
 		cliPath = m.cliPath
+	}
+	// RNEW-OPS-415 (#456): refuse to spawn when StateDir is already over
+	// the configured quota. Performed BEFORE the slot reservation so the
+	// caller sees the quota error directly without contending for a
+	// pendingShims slot that would only be released. Quota=0 disables
+	// the gate (legacy default). The walk reuses StateDirSize's
+	// budget/truncation handling — a truncated scan returns a lower
+	// bound, which we treat as "fail open" to avoid jamming startup
+	// when the dir is unscannable.
+	if err := m.checkStateDirQuota(); err != nil {
+		return nil, err
 	}
 	// Reserve a slot atomically to prevent TOCTOU race with concurrent callers
 	m.mu.Lock()
