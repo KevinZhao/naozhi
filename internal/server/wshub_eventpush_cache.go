@@ -50,6 +50,18 @@ type marshalCacheEntry struct {
 	data            []byte
 }
 
+// marshalCacheEntryPool recycles loser allocations on the cold-miss path.
+// R040034-GO-11 (#1397): when a fan-out wave hits a missing key with N
+// goroutines, only one of them can win the LoadOrStore; the rest were
+// previously throwing their freshly allocated *marshalCacheEntry onto the
+// GC. The pool lets losers return their entry for the next cold miss.
+// Note: only entries that were never stored (lost the LoadOrStore race)
+// are returned to the pool — entries that became visible to readers are
+// never reused, since a concurrent slot() may still hold a pointer to them.
+var marshalCacheEntryPool = sync.Pool{
+	New: func() any { return &marshalCacheEntry{} },
+}
+
 // historyMarshalCache is the per-session marshal coalescer.
 //
 // R250-PERF-28 (#1131): the entries map lives in a sync.Map so the
@@ -74,17 +86,30 @@ func newHistoryMarshalCache() *historyMarshalCache {
 //
 // R250-PERF-28 (#1131): sync.Map's LoadOrStore lets repeated cache hits
 // for the same key skip the lock-on-read penalty the prior plain-map +
-// top-level mutex paid. The first caller for a missing key still
-// performs an alloc (the &marshalCacheEntry{} literal) even when the
-// store is unnecessary because some other caller raced ahead — that
-// alloc escapes only on the cold path. sync.Map's amortised cost is
-// designed for "many readers, few stable keys" which mirrors the WS
-// fan-out shape (N tabs / one session for the duration of the chat).
+// top-level mutex paid.
+//
+// R040034-GO-11 (#1397): on a cold-miss fan-out (N goroutines racing on
+// the same missing key) we now grab the candidate from marshalCacheEntryPool
+// instead of `new`-ing every time. Losers (LoadOrStore returned an existing
+// entry) reset and return their candidate to the pool for the next cold
+// miss. This keeps the steady-state alloc rate at ~1 entry per distinct
+// session key rather than ~N per cold-miss wave.
 func (c *historyMarshalCache) slot(key string) *marshalCacheEntry {
 	if v, ok := c.entries.Load(key); ok {
 		return v.(*marshalCacheEntry)
 	}
-	e, _ := c.entries.LoadOrStore(key, &marshalCacheEntry{})
+	candidate := marshalCacheEntryPool.Get().(*marshalCacheEntry)
+	e, loaded := c.entries.LoadOrStore(key, candidate)
+	if loaded {
+		// Lost the race; recycle the unused candidate. Reset is cheap and
+		// guards against accidental reuse of stale fingerprint/data fields
+		// if a future code path leaks state into a freshly-Got entry.
+		candidate.lastTime = 0
+		candidate.latestEntryTime = 0
+		candidate.count = 0
+		candidate.data = nil
+		marshalCacheEntryPool.Put(candidate)
+	}
 	return e.(*marshalCacheEntry)
 }
 
