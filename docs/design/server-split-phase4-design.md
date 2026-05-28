@@ -521,10 +521,22 @@ func (h *Hub) Shutdown(ctx context.Context) error { ... }
 
 ### 6.0 PR 切分原则
 
-- ≤ 1500 行 / PR（reviewer 友好阈值；**Phase 4b（~2000）/ 4c（~1700）例外**，详 §6.5；4a 700 行不超线，无例外需要）
+- ≤ 1500 行 / PR（reviewer 友好阈值）
+- **行数例外列表**（每条都因 method-receiver 必须同包导致一刀必须搬走整个 struct + 全部 method + 同包测试）：
+  - Phase 4b ~2000 行（详 §6.5）
+  - Phase 4c ~1700 行（详 §6.5）
+  - **Phase 1 ~7400 行（生产 3399 + 测试 ~4000）**：CronHandlers struct + 11 method 横跨 4 文件（dashboard_cron/runs/transcript/update），17 个测试文件用 `&CronHandlers{...}` 字面量访问 unexported 字段，必须同步搬到子包以保留同包访问。reviewer 应按"4 文件 × handler"分块审查
+  - **Phase 2 ~3700 行（生产 2091 + 测试 ~1600）**：ProjectHandlers struct + 13 method 横跨 project_api.go / project_files.go + 8 测试文件
+  - **Phase 3a ~2100 行（生产 583 + 测试 ~700 + 84 处 server 包 call site 改动）**：AuthHandlers struct + 13 method
 - 单 PR 自洽：build / test / vet / gofmt / routes_snapshot 全绿
-- 双 commit 中**每个 commit 独立 build/test 绿**（详 §6.3 双 commit 与 routes_snapshot 同步契约）
+- 双 commit 中**每个 commit 独立 build/test 绿**（详 §6.3 双 commit 与 routes_snapshot 同步契约）。**phase1/2/3a 例外建议双 commit 拆分：commit 1 = 生产代码 + struct 升格 + server 包调整；commit 2 = 测试搬迁 + golden + baseline**
 - 序列依赖最小化：3a/3b/3c 之间无依赖；3e 依赖 3a-3d 全部完成（共享 dashboard 子包入口）
+
+> v0.6.2 修订（2026-05-28）：phase1/2/3a 起初按 ≤ 1500 行规划，phase3b 实施后发现两个 Go 硬约束让大刀不可避免：
+> 1. **method-receiver 同包约束**：method 必须在类型定义包，搬 struct 必须连带搬走所有 method
+> 2. **测试 unexported 同包约束**：现有测试用 `&Handler{...}` 字面量访问 unexported 字段；搬 struct 必须连带搬测试，否则要把字段全部导出（污染 public API surface）
+>
+> phase4b/4c 早就因为方法-同包约束走例外（v0.6.1 §6.5）；phase1/2/3a 补登例外条款保持纪律对称。phase3b 之所以小（533 行）是因为它的 4 handler 只在单文件 + 测试不访问 unexported 字段——是 dashboard 子包搬迁中的特例，不能据此估算 phase1/2/3a。
 
 ### 6.1 Phase 表
 
