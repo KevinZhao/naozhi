@@ -27,7 +27,7 @@ func TestLinker_Query_R241PERF5_CacheFastPath(t *testing.T) {
 
 	const taskID = "t_fastpath"
 	// Prime the cache via a regular Resolve so byTaskID has the entry.
-	if _, ok := l.Resolve(context.Background(), taskID, "toolu_F", "fastpath-1", "", toolUseTime); !ok {
+	if _, ok := l.Resolve(context.Background(), taskID, "toolu_F", "fastpath-1", toolUseTime); !ok {
 		t.Fatalf("Resolve did not converge; cache not primed")
 	}
 	// Query must return the cached entry with Resolved=true so the
