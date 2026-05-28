@@ -460,7 +460,11 @@ func evictOldestHighwater(m map[string]autoTitlerHighwater, keep int) {
 		case a.t.After(b.t):
 			return 1
 		default:
-			return 0
+			// R260528-BUG-9: deterministic tie-break by key ordering.
+			// Pre-fix returned 0 on tied timestamps and Go's randomised
+			// map iteration picked the eviction set at random, surfacing
+			// as flaky tests + arbitrary tenant eviction in production.
+			return cmp.Compare(a.k, b.k)
 		}
 	})
 	for i := 0; i < excess; i++ {

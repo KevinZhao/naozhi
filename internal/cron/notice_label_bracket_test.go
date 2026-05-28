@@ -5,15 +5,14 @@ import (
 	"testing"
 )
 
-// TestFormatCronNotice_StripsCloseBracketInLabel pins R250-SEC-6 (#1095):
-// label 中的 `]` 必须替换为全角 `］`，避免 cronNoticePrefixFmt 模板
-// "[Cron %s] %s" 被攻击者借 Title 内嵌 `]` 提前闭合。无此处理时一个
-// 形如 "evil](http://attacker)" 的 Title 在 markdown-aware IM channel
-// 渲染下会折叠成可点链接：`[Cron evil](http://attacker) ...`。
+// TestFormatCronNotice_StripsCloseBracketInLabel pins R250-SEC-6 (#1095)
+// + R260528-SEC-8: label 中的 markdown link-syntax 字符 `]` `[` `(` `)`
+// 必须替换为全角等价物，避免 cronNoticePrefixFmt 模板 "[Cron %s] %s"
+// 被攻击者借 Title 内嵌 `](http://attacker)` 折叠成可点链接。
 //
 // 防御深度：dashboard 的 validateCronTitle 拦截 bidi / C0 控制字符，
-// 但 ASCII `]` 是合法字符不会被拒；操作员手编 cron_jobs.json 也能
-// 走到这里。所以在格式化时强制替换是底线。
+// 但 ASCII `]` `[` `(` `)` 都是合法字符不会被拒；操作员手编
+// cron_jobs.json 也能走到这里。所以在格式化时强制替换是底线。
 func TestFormatCronNotice_StripsCloseBracketInLabel(t *testing.T) {
 	t.Parallel()
 
@@ -38,9 +37,14 @@ func TestFormatCronNotice_StripsCloseBracketInLabel(t *testing.T) {
 		t.Errorf("formatCronNotice 末尾应保留 `] body`，得到 %q", got)
 	}
 
-	// 原始 label 中的 `(` 等其它内容应该保留——本修复只针对 `]`。
-	if !strings.Contains(got, "(http://attacker)") {
-		t.Errorf("formatCronNotice 不应改写 `]` 之外的 label 字符: %q", got)
+	// R260528-SEC-8: label 中的 `(` `)` 也必须被替换为全角等价物，
+	// 否则 markdown 渲染器仍可能把残留的 `(http://attacker)` 配成
+	// link target。原 ASCII 括号必须不再出现在 label 段。
+	if strings.Contains(got, "(http://attacker)") {
+		t.Errorf("formatCronNotice 必须替换 label 中的 `(` `)`: %q", got)
+	}
+	if !strings.Contains(got, "（http://attacker）") {
+		t.Errorf("formatCronNotice 应将 label 中的 `(` `)` 替换为全角 `（` `）`: %q", got)
 	}
 }
 
@@ -54,5 +58,53 @@ func TestFormatCronNotice_NoBracketInLabelUnchanged(t *testing.T) {
 	want := "[Cron daily-review] body"
 	if got != want {
 		t.Errorf("formatCronNotice(%q, body) = %q, want %q", label, got, want)
+	}
+}
+
+// TestFormatCronNoticeBodyMarkdownEscape pins R260528-SEC-8: body containing
+// markdown link-syntax characters `[` `(` `)` must be rewritten to their
+// full-width equivalents so a sanitised-but-still-attacker-controlled run
+// result cannot smuggle `[click](http://attacker)` clickable links into the
+// IM card. body is already SanitizeForLog'd on the success path, but the
+// log-sanitiser only scrubs C0/C1/bidi controls — ASCII brackets pass
+// through, so without this escape an LLM-controlled prompt that emits
+// markdown links would see them rendered live in Slack/Discord/Feishu.
+func TestFormatCronNoticeBodyMarkdownEscape(t *testing.T) {
+	t.Parallel()
+
+	body := "click [here](http://attacker) to win"
+	got := formatCronNotice("ok", body)
+
+	// None of `[` `(` `)` from the body should survive in the output.
+	if strings.ContainsAny(got, "[(") {
+		// `]` test stays separate — the template emits one trailing `]`.
+		// Strip the template `]` from the prefix `[Cron ok]` for the
+		// `[` check by scanning beyond the template-known prefix bytes.
+	}
+	// Body-portion check: the output is "[Cron ok] " + escaped body.
+	// Slice past the template prefix bytes to inspect just the body.
+	const prefix = "[Cron ok] "
+	if !strings.HasPrefix(got, prefix) {
+		t.Fatalf("formatCronNotice prefix mismatch: %q", got)
+	}
+	bodyOut := got[len(prefix):]
+	if strings.ContainsRune(bodyOut, '[') {
+		t.Errorf("body still contains `[`: %q", bodyOut)
+	}
+	if strings.ContainsRune(bodyOut, ']') {
+		t.Errorf("body still contains `]`: %q", bodyOut)
+	}
+	if strings.ContainsRune(bodyOut, '(') {
+		t.Errorf("body still contains `(`: %q", bodyOut)
+	}
+	if strings.ContainsRune(bodyOut, ')') {
+		t.Errorf("body still contains `)`: %q", bodyOut)
+	}
+	// The full-width replacements must show up.
+	if !strings.Contains(bodyOut, "［here］") {
+		t.Errorf("body should contain full-width `［here］`: %q", bodyOut)
+	}
+	if !strings.Contains(bodyOut, "（http://attacker）") {
+		t.Errorf("body should contain full-width `（http://attacker）`: %q", bodyOut)
 	}
 }
