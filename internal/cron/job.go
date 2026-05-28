@@ -225,8 +225,19 @@ const (
 	// scheduler). Subscribers see a started→ended pair so dashboard
 	// "running" counters stay consistent. R20260527122801-CR-13 (#1323).
 	ErrClassRouterMissing ErrorClass = "router_missing"
-	// reserved; not yet emitted by any execute path
+	// ErrClassPausedConcurrent fires when the post-CAS recheck sees the
+	// job switched to Paused between the dispatch lookup and the inflight
+	// CAS. R040034-CR-1 (#1410): previously the recheck silently dropped
+	// the run with only a Debug log, leaving subscriber timelines with a
+	// gap in the 1-2µs cross-lock window. Now mirrors the router-missing
+	// precedent and emits a synthetic started→ended pair so dashboards
+	// see consistent lifecycle frames.
 	ErrClassPausedConcurrent ErrorClass = "paused_concurrent"
+	// ErrClassDeletedConcurrent fires when the post-CAS recheck sees the
+	// job removed from s.jobs between the dispatch lookup and the
+	// inflight CAS. R040034-CR-1 (#1410): paired with PausedConcurrent so
+	// the two cross-lock-window outcomes are distinguishable on the wire.
+	ErrClassDeletedConcurrent ErrorClass = "deleted_concurrent"
 	// ErrClassPanic is reserved for the future panic-recovery path
 	// (P3, not yet implemented); finishRun does not emit it today.
 	ErrClassPanic ErrorClass = "panic"
