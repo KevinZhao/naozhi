@@ -85,9 +85,9 @@ func TestRedactGitRemoteURL_StripsUserinfo(t *testing.T) {
 // — either path forces the change to be reviewed through this audit item
 // instead of silently leaking PATs.
 func TestRedactGitRemoteURL_NodeCacheForwardIsRedacted(t *testing.T) {
-	src, err := os.ReadFile("dashboard_session.go")
+	src, err := os.ReadFile("../dashboard/session/handlers.go")
 	if err != nil {
-		t.Fatalf("read dashboard_session.go: %v", err)
+		t.Fatalf("read handlers.go: %v", err)
 	}
 
 	// 1) dashproject.RedactGitRemoteURL must still wrap the node-cache git_remote_url

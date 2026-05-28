@@ -172,12 +172,12 @@
   {
     "method": "DELETE",
     "path": "/api/sessions",
-    "handler_type": "*SessionHandlers"
+    "handler_type": "*dashsession.Handlers"
   },
   {
     "method": "GET",
     "path": "/api/sessions",
-    "handler_type": "*SessionHandlers"
+    "handler_type": "*dashsession.Handlers"
   },
   {
     "method": "GET",
@@ -192,22 +192,22 @@
   {
     "method": "GET",
     "path": "/api/sessions/events",
-    "handler_type": "*SessionHandlers"
+    "handler_type": "*dashsession.Handlers"
   },
   {
     "method": "POST",
     "path": "/api/sessions/interrupt",
-    "handler_type": "*SessionHandlers"
+    "handler_type": "*dashsession.Handlers"
   },
   {
     "method": "PATCH",
     "path": "/api/sessions/label",
-    "handler_type": "*SessionHandlers"
+    "handler_type": "*dashsession.Handlers"
   },
   {
     "method": "POST",
     "path": "/api/sessions/resume",
-    "handler_type": "*SessionHandlers"
+    "handler_type": "*dashsession.Handlers"
   },
   {
     "method": "POST",

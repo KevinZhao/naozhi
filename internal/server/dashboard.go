@@ -162,7 +162,7 @@ func (s *Server) registerDashboard() {
 	// Route /api/sessions snapshot enrichment through the hub's tailer
 	// registry now that both exist. RFC v4 agent-team-ui §3.5.4.
 	if s.sessionH != nil {
-		s.sessionH.snapshotEnricher = s.hub.enrichSnapshot
+		s.sessionH.SetSnapshotEnricher(s.hub.enrichSnapshot)
 	}
 
 	// R247-ARCH-15 (#650): wire ProjectHandlers' baseCtx now that
@@ -269,17 +269,17 @@ func (s *Server) registerDashboard() {
 	// Authenticated API routes
 	auth := s.auth.RequireAuth
 	s.mux.HandleFunc("GET /api/cli/backends", auth(s.cliH.Handle))
-	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.handleList))
-	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.handleEvents))
+	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.HandleList))
+	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.HandleEvents))
 	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.HandleAgentEvents))
 	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.HandleToolResult))
 	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
 	s.mux.HandleFunc("POST /api/sessions/upload", auth(s.sendH.handleUpload))
 	s.mux.HandleFunc("GET /api/sessions/attachment", auth(s.sendH.handleAttachment))
-	s.mux.HandleFunc("DELETE /api/sessions", auth(s.sessionH.handleDelete))
-	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.handleResume))
-	s.mux.HandleFunc("POST /api/sessions/interrupt", auth(s.sessionH.handleInterrupt))
-	s.mux.HandleFunc("PATCH /api/sessions/label", auth(s.sessionH.handleSetLabel))
+	s.mux.HandleFunc("DELETE /api/sessions", auth(s.sessionH.HandleDelete))
+	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.HandleResume))
+	s.mux.HandleFunc("POST /api/sessions/interrupt", auth(s.sessionH.HandleInterrupt))
+	s.mux.HandleFunc("PATCH /api/sessions/label", auth(s.sessionH.HandleSetLabel))
 	s.mux.HandleFunc("GET /api/discovered", auth(s.discoveryH.HandleList))
 	s.mux.HandleFunc("GET /api/discovered/preview", auth(s.discoveryH.HandlePreview))
 	s.mux.HandleFunc("POST /api/discovered/takeover", auth(s.discoveryH.HandleTakeover))

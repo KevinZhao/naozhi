@@ -102,7 +102,7 @@ func TestStats_VersionTagPresent(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleList(w, req)
+	srv.sessionH.HandleList(w, req)
 
 	var resp map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
@@ -146,7 +146,7 @@ func TestStats_VersionTagOmittedWhenUnset(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleList(w, req)
+	srv.sessionH.HandleList(w, req)
 
 	var resp map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {

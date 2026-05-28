@@ -19,9 +19,9 @@ import (
 // targeted at the specific regression.
 func TestHandleSetLabel_BothPathsUseWriteOK(t *testing.T) {
 	t.Parallel()
-	src, err := os.ReadFile("dashboard_session.go")
+	src, err := os.ReadFile("../dashboard/session/handlers.go")
 	if err != nil {
-		t.Fatalf("read dashboard_session.go: %v", err)
+		t.Fatalf("read handlers.go: %v", err)
 	}
 	text := string(src)
 

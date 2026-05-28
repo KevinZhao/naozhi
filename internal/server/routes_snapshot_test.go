@@ -256,7 +256,7 @@ func handlerTypeOf(e ast.Expr) string {
 // in lockstep.
 var serverFieldType = map[string]string{
 	"cliH":              "*cli.Handler",
-	"sessionH":          "*SessionHandlers",
+	"sessionH":          "*dashsession.Handlers",
 	"agentEventsH":      "*agentevents.Handler",
 	"sendH":             "*SendHandler",
 	"discoveryH":        "*discovery.Handlers",

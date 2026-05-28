@@ -28,6 +28,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/transcribe"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
+	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -101,7 +102,7 @@ type Server struct {
 	nodeAccess   *nodeAccessor         // 读写: server.go, dashboard.go
 	discoveryH   *discovery.Handlers   // 读写: server.go, dashboard.go (Phase 3b 搬到 internal/dashboard/discovery)
 	projectH     *dashproject.Handlers // 读写: server.go, dashboard.go
-	sessionH     *SessionHandlers      // 读写: server.go, dashboard.go
+	sessionH     *dashsession.Handlers // 读写: server.go, dashboard.go
 	healthH      *HealthHandler        // 读写: server.go (ctor only)
 	sendH        *SendHandler          // 读写: dashboard.go (ctor only in server.go)
 	cliH         *cli.Handler          // 读写: server.go, dashboard.go
@@ -760,28 +761,30 @@ func buildServer(opts ServerOptions) *Server {
 	// DI shape moved from a captured closure to a direct field assign.
 	s.projectH = buildProjectHandlers(opts, resolver, s.nodeAccess, s.nodeCache)
 	agentIDs := agentIDList(agents)
-	s.sessionH = &SessionHandlers{
-		router:        router,
-		projectMgr:    opts.ProjectManager,
-		scheduler:     scheduler,
-		cronSessions:  scheduler, // *cron.Scheduler implements cronSessionLister via KnownSessionIDs
-		sysWorkDir:    opts.SysWorkDir,
-		claudeDir:     claudeDir,
-		allowedRoot:   opts.AllowedRoot,
-		agents:        agents,
-		agentIDs:      agentIDs,
-		nodeAccess:    s.nodeAccess,
-		nodeCache:     s.nodeCache,
-		startedAt:     s.startedAt,
-		backendTag:    tag,
-		workspaceID:   opts.WorkspaceID,
-		workspaceName: opts.WorkspaceName,
-		versionTag:    opts.Version,
-		watchdogNoOut: &s.watchdogNoOutputKills,
-		watchdogTotal: &s.watchdogTotalKills,
-		retiredStore:  retiredStore,
-	}
-	s.sessionH.initStaticStats()
+	s.sessionH = dashsession.New(dashsession.Deps{
+		Router:        router,
+		ProjectMgr:    opts.ProjectManager,
+		Scheduler:     scheduler,
+		CronSessions:  scheduler,
+		SysWorkDir:    opts.SysWorkDir,
+		ClaudeDir:     claudeDir,
+		AllowedRoot:   opts.AllowedRoot,
+		Agents:        agents,
+		AgentIDs:      agentIDs,
+		NodeAccess:    s.nodeAccess,
+		NodeCache:     s.nodeCache,
+		StartedAt:     s.startedAt,
+		BackendTag:    tag,
+		WorkspaceID:   opts.WorkspaceID,
+		WorkspaceName: opts.WorkspaceName,
+		VersionTag:    opts.Version,
+		WatchdogNoOut: &s.watchdogNoOutputKills,
+		WatchdogTotal: &s.watchdogTotalKills,
+		RetiredStore:  retiredStore,
+		ValidateWS:    validateWorkspace,
+		SystemInfoFn:  systemInfo,
+	})
+	s.sessionH.InitStaticStats()
 	s.sessionH.WarmHistoryCache()
 	// Replay SetOnKeyRetired now that sessionH exists, fanning out to both
 	// msgQueue.Cleanup and InvalidateHistoryCache. See the rationale at the
@@ -1083,7 +1086,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// so the cap pressure described in NewRetiredStoreWithCap rarely
 	// matters on a normal operator. Stops via ctx.Done in the shutdown
 	// goroutine below.
-	if s.sessionH != nil && s.sessionH.retiredStore != nil {
+	if s.sessionH != nil && s.sessionH.RetiredStorePresent() {
 		go s.runRetiredStoreFlusher(ctx)
 	}
 
@@ -1192,7 +1195,7 @@ func (s *Server) runRetiredStoreFlusher(ctx context.Context) {
 			s.sessionH.FlushRetiredStore()
 		case <-pruneTicker.C:
 			cutoffMs := time.Now().Add(-retiredStorePruneCutoff).UnixMilli()
-			s.sessionH.retiredStore.Prune(cutoffMs)
+			s.sessionH.PruneRetiredStore(cutoffMs)
 		}
 	}
 }

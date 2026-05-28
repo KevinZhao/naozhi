@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -72,7 +71,7 @@ func TestLoadHistorySessions_HidesCronSessionIDs(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(claudeDir, "projects"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	srv.sessionH.claudeDir = claudeDir
+	srv.sessionH.SetClaudeDirForTest(claudeDir)
 
 	// One visible user session, one cron-spawned session.
 	visibleSID := "11111111-2222-3333-4444-000000000001"
@@ -81,15 +80,12 @@ func TestLoadHistorySessions_HidesCronSessionIDs(t *testing.T) {
 	makeProjectDir(t, claudeDir, cronSID)
 
 	// Inject the stub cron lister.
-	srv.sessionH.cronSessions = fakeCronSessions{ids: map[string]bool{cronSID: true}}
+	srv.sessionH.SetCronSessionsForTest(fakeCronSessions{ids: map[string]bool{cronSID: true}})
 
 	// Reset cache so the load triggers a real FS scan.
-	srv.sessionH.historyCacheMu.Lock()
-	srv.sessionH.historyCache = nil
-	srv.sessionH.historyCacheTime = time.Time{}
-	srv.sessionH.historyCacheMu.Unlock()
+	srv.sessionH.ResetHistoryCacheForTest()
 
-	got := srv.sessionH.loadHistorySessions()
+	got := srv.sessionH.LoadHistorySessionsForTest()
 
 	var sawVisible, sawCron bool
 	for _, rs := range got {
@@ -119,19 +115,16 @@ func TestLoadHistorySessions_HidesSysWorkspace(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(claudeDir, "projects"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	srv.sessionH.claudeDir = claudeDir
+	srv.sessionH.SetClaudeDirForTest(claudeDir)
 
 	sysSID := "ffffffff-1111-2222-3333-000000000099"
 	sysWS, _ := makeProjectDir(t, claudeDir, sysSID)
 
-	srv.sessionH.sysWorkDir = sysWS
+	srv.sessionH.SetSysWorkDirForTest(sysWS)
 
-	srv.sessionH.historyCacheMu.Lock()
-	srv.sessionH.historyCache = nil
-	srv.sessionH.historyCacheTime = time.Time{}
-	srv.sessionH.historyCacheMu.Unlock()
+	srv.sessionH.ResetHistoryCacheForTest()
 
-	got := srv.sessionH.loadHistorySessions()
+	got := srv.sessionH.LoadHistorySessionsForTest()
 	for _, rs := range got {
 		if rs.SessionID == sysSID {
 			t.Errorf("sys-sessions JSONL leaked into history (workspace=%s): %+v", sysWS, rs)
@@ -150,19 +143,16 @@ func TestHistoryFilter_NilCronSessionsDegrades(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(claudeDir, "projects"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	srv.sessionH.claudeDir = claudeDir
-	srv.sessionH.cronSessions = nil
-	srv.sessionH.sysWorkDir = ""
+	srv.sessionH.SetClaudeDirForTest(claudeDir)
+	srv.sessionH.SetCronSessionsForTest(nil)
+	srv.sessionH.SetSysWorkDirForTest("")
 
 	visibleSID := "ffffffff-eeee-dddd-cccc-000000000777"
 	makeProjectDir(t, claudeDir, visibleSID)
 
-	srv.sessionH.historyCacheMu.Lock()
-	srv.sessionH.historyCache = nil
-	srv.sessionH.historyCacheTime = time.Time{}
-	srv.sessionH.historyCacheMu.Unlock()
+	srv.sessionH.ResetHistoryCacheForTest()
 
-	got := srv.sessionH.loadHistorySessions()
+	got := srv.sessionH.LoadHistorySessionsForTest()
 	var saw bool
 	for _, rs := range got {
 		if rs.SessionID == visibleSID {

@@ -231,7 +231,7 @@ func TestScratchListFilteredFromSessions(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.sessionH.handleList(w, req)
+	srv.sessionH.HandleList(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
 	}

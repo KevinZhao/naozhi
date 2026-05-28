@@ -1,15 +1,15 @@
-package server
+package session
 
 import (
 	"strings"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/session"
+	sessionpkg "github.com/naozhi/naozhi/internal/session"
 )
 
 // TestSetLabel_LogAttrsRunSanitizeLogAttr pins R246-SEC-14 (#820): the
-// audit-log slog calls in handleSetLabel must wrap req.Node / req.Key
-// through session.SanitizeLogAttr before they reach slog.TextHandler,
+// audit-log slog calls in HandleSetLabel must wrap req.Node / req.Key
+// through sessionpkg.SanitizeLogAttr before they reach slog.TextHandler,
 // mirroring dispatch/commands.go:51's pattern. We can't easily intercept
 // slog itself in a unit test (the package re-creates the global handler
 // each run), so we cover the contract at the sanitiser level: every
@@ -19,7 +19,7 @@ import (
 // the safety because the sanitised string is the only thing it ever
 // sees.
 //
-// This test is intentionally a near-duplicate of session.SanitizeLogAttr's
+// This test is intentionally a near-duplicate of sessionpkg.SanitizeLogAttr's
 // own coverage in internal/session/managed_test.go — the duplication is
 // deliberate: it pins the SERVER-SIDE call-site contract independently
 // of the session package's internal tests, so a future SanitizeLogAttr
@@ -47,8 +47,8 @@ func TestSetLabel_LogAttrsRunSanitizeLogAttr(t *testing.T) {
 	keyLike := "feishu:c2c:U_oc_abc:agent_general\x1b" + string(dangerous) + "\nnext attr"
 	nodeLike := "node-east-1\r\nfake_attr=evil"
 
-	cleanKey := session.SanitizeLogAttr(keyLike)
-	cleanNode := session.SanitizeLogAttr(nodeLike)
+	cleanKey := sessionpkg.SanitizeLogAttr(keyLike)
+	cleanNode := sessionpkg.SanitizeLogAttr(nodeLike)
 
 	for _, r := range dangerous {
 		if strings.ContainsRune(cleanKey, r) {
