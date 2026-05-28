@@ -199,6 +199,27 @@ func (s *Scheduler) cleanupRunningJobIfIdle(jobID string) bool {
 	// for the same jobID → double execution. CompareAndDelete only
 	// succeeds when the map still holds OUR observed inf pointer; if a
 	// fresh entry was stored it leaves the new one alone.
+	//
+	// R040034-CHANGES (#1416 review) — KNOWN narrow remaining window:
+	// CompareAndDelete-on-pointer closes Load+CompareAndDelete TOCTOU
+	// for the case where the map has already been swapped to a fresh
+	// *runInflight by a racing AddJob+jobInflight. It does NOT close the
+	// adjacent window where executeOpt has already done
+	//   inflight := s.jobInflight(j.ID)          // gets old *runInflight
+	// at scheduler_run.go ~line 867 just before this cleanup runs;
+	// cleanup then deletes the map entry + the still-CAS=false old gate
+	// (releaseRun has executed), and executeOpt's CompareAndSwap on
+	// the orphaned old gate succeeds. A second executeOpt for the same
+	// jobID will then LoadOrStore a fresh *runInflight via jobInflight
+	// and CAS-win on it too → two goroutines hold distinct gates for
+	// one jobID. We accept this remaining window because it requires:
+	//   (i)  DeleteJob racing TriggerNow on the same job ID, AND
+	//   (ii) ID reuse on a fresh AddJob landing within microseconds,
+	// and crypto/rand 8-byte (2^64) ID space makes (ii) ~2^-32 over
+	// the entire process lifetime at maxJobsHardCap=500 working set.
+	// A future tightening would add a per-jobID lock around the
+	// jobInflight Load → CAS pair in executeOpt; deferred until
+	// telemetry indicates the window is operationally reachable.
 	s.runningJobs.CompareAndDelete(jobID, inf)
 	return true
 }
