@@ -1151,10 +1151,16 @@ function sessionTypeTag(cliName, entrypoint) {
 // tag emitted by session.SessionKey in internal/session/managed.go) to the
 // user-facing Chinese label shown on the IM-origin badge. Adding a new IM
 // platform means extending this map PLUS picking a CSS variant in
-// dashboard.html `.sc-origin.kind-*`. Non-IM prefixes (dashboard, local,
+// dashboard.html `.sc-origin.kind-*` PLUS wiring the adapter in
+// cmd/naozhi/main.go initPlatforms — see R230-ARCH-11 (#1021) for the
+// `GET /api/platforms` proposal that would let the dashboard hydrate this
+// list at boot instead of hardcoding it. Non-IM prefixes (dashboard, local,
 // cron, scratch_*, planner) intentionally do NOT appear here — originBadgeInfo
 // returns null for them so those sessions don't grow a misleading "外部
-// 来源" chip.
+// 来源" chip. The two dashboard-local sources of truth (this map and the
+// `.sc-origin.kind-*` CSS) are cross-checked by
+// TestDashboardJS_R230ARCH11_PlatformOriginsAndCSSStayInSync so a partial
+// addition fails CI.
 const PLATFORM_ORIGINS = {
   feishu:  { name: '飞书',    kind: 'feishu' },
   slack:   { name: 'Slack',   kind: 'slack' },

@@ -2580,6 +2580,90 @@ func TestDashboardJS_R110P3_OriginBadgeHelper(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_R230ARCH11_PlatformOriginsAndCSSStayInSync pins
+// R230-ARCH-11 (#1021): adding a new IM platform requires synchronous
+// edits across four sites (adapter package, cmd/naozhi/main.go
+// initPlatforms, dashboard.js PLATFORM_ORIGINS, dashboard.html
+// .sc-origin.kind-* CSS variant). The proposed long-term fix is a
+// `GET /api/platforms` endpoint that hydrates the front-end map at
+// boot — that work is NEEDS-DESIGN.
+//
+// As a smaller immediate guardrail this test cross-checks the two
+// dashboard-local sources of truth: every PLATFORM_ORIGINS key in
+// dashboard.js must have a matching `.sc-origin.kind-<key>` rule in
+// dashboard.html, and vice-versa. A contributor who adds a new
+// platform to one side but forgets the other gets an immediate signal
+// (instead of "chip renders without brand color, looks fine on the
+// dev's screen, ships broken"). Backend wiring is still NOT covered
+// here — that delta is what motivates #1021.
+func TestDashboardJS_R230ARCH11_PlatformOriginsAndCSSStayInSync(t *testing.T) {
+	t.Parallel()
+	jsBytes, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	htmlBytes, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+
+	// Extract platform keys from dashboard.js PLATFORM_ORIGINS literal.
+	// The map's literal shape is:
+	//   const PLATFORM_ORIGINS = {
+	//     feishu:  { name: '飞书',    kind: 'feishu' },
+	//     ...
+	//   };
+	// Match `<key>:` lines inside the literal block.
+	jsStr := string(jsBytes)
+	startTok := "const PLATFORM_ORIGINS = {"
+	startIdx := strings.Index(jsStr, startTok)
+	if startIdx < 0 {
+		t.Fatal("PLATFORM_ORIGINS literal not found in dashboard.js")
+	}
+	tail := jsStr[startIdx+len(startTok):]
+	endIdx := strings.Index(tail, "};")
+	if endIdx < 0 {
+		t.Fatal("PLATFORM_ORIGINS literal has no closing }; in dashboard.js")
+	}
+	body := tail[:endIdx]
+	keyRe := regexp.MustCompile(`(?m)^\s*([a-z0-9_]+)\s*:\s*\{`)
+	matches := keyRe.FindAllStringSubmatch(body, -1)
+	if len(matches) == 0 {
+		t.Fatal("PLATFORM_ORIGINS body has no recognizable platform keys")
+	}
+	jsKeys := make(map[string]bool, len(matches))
+	for _, m := range matches {
+		jsKeys[m[1]] = true
+	}
+
+	// Extract `.sc-origin.kind-<key>` rules from dashboard.html.
+	htmlStr := string(htmlBytes)
+	cssRe := regexp.MustCompile(`\.sc-origin\.kind-([a-z0-9_]+)\b`)
+	cssMatches := cssRe.FindAllStringSubmatch(htmlStr, -1)
+	cssKeys := make(map[string]bool, len(cssMatches))
+	for _, m := range cssMatches {
+		cssKeys[m[1]] = true
+	}
+
+	// Forward direction: every JS key has a CSS variant.
+	for k := range jsKeys {
+		if !cssKeys[k] {
+			t.Errorf("R230-ARCH-11 (#1021): PLATFORM_ORIGINS key %q in dashboard.js "+
+				"has no matching `.sc-origin.kind-%s` rule in dashboard.html — chip "+
+				"will render without brand color. Add the CSS variant or remove the "+
+				"PLATFORM_ORIGINS entry.", k, k)
+		}
+	}
+	// Reverse direction: every CSS variant has a JS key.
+	for k := range cssKeys {
+		if !jsKeys[k] {
+			t.Errorf("R230-ARCH-11 (#1021): `.sc-origin.kind-%s` rule in dashboard.html "+
+				"has no matching PLATFORM_ORIGINS entry in dashboard.js — orphan CSS. "+
+				"Either add the JS entry or drop the CSS variant.", k)
+		}
+	}
+}
+
 // TestDashboardHTML_R110P3_OriginBadgeStyles pins the CSS hooks
 // originBadgeHtml relies on: the base `.sc-origin` structure rule plus one
 // variant per IM platform (.sc-origin.kind-feishu / slack / discord /
