@@ -334,7 +334,15 @@ func IsValidID(s string) bool {
 // runs/ symlink could redirect the entire run-history tree at a
 // sensitive directory and any subsequent Append would write CronRun
 // JSON over arbitrary files.
-func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *runStore {
+//
+// R241-ARCH-8 (#512): optional maxBytesOpt overrides the default
+// MaxRunRecordBytes per-record cap. Passing it brings constructor
+// signature in parity with keepCount / keepWindow, both of which are
+// already tunable. Variadic keeps the existing 3-arg call sites in
+// scheduler.go and tests source-compatible — a missing or non-positive
+// value falls back to MaxRunRecordBytes so the production caller sees
+// no behaviour change.
+func newRunStore(storePath string, keepCount int, keepWindow time.Duration, maxBytesOpt ...int64) *runStore {
 	if storePath == "" {
 		return &runStore{disabled: true}
 	}
@@ -343,6 +351,10 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *run
 	}
 	if keepWindow <= 0 {
 		keepWindow = DefaultRunsKeepWindow
+	}
+	maxBytes := int64(MaxRunRecordBytes)
+	if len(maxBytesOpt) > 0 && maxBytesOpt[0] > 0 {
+		maxBytes = maxBytesOpt[0]
 	}
 	// filepath.Abs already cleans the path, normalising any `..` /  `.` /
 	// double-slash segments. If Abs fails (CWD missing — extremely rare
@@ -408,7 +420,7 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *run
 		root:         root,
 		keepCount:    keepCount,
 		keepWindow:   keepWindow,
-		maxRunBytes:  MaxRunRecordBytes,
+		maxRunBytes:  maxBytes,
 		enableTrimGC: true,
 	}
 }
