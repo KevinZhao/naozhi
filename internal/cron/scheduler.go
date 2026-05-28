@@ -1013,8 +1013,19 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	if cfg.StorePath != "" {
 		s.storeDirOnce.Do(func() {
 			if dir := filepath.Dir(cfg.StorePath); dir != "" && dir != "." {
+				// R040034-GO-9 (#1395): bump MkdirAll failure severity
+				// from Warn → Error. NewScheduler can't return an error
+				// (no breaking the constructor signature), but a failed
+				// MkdirAll guarantees the next saveMarshaledSeq will
+				// ENOENT on WriteFileAtomic — operators previously saw
+				// a runtime "save cron store" error several minutes
+				// after boot rather than a clean boot-time signal. The
+				// Chmod fail-on-existing path stays Warn because a
+				// pre-existing dir at the wrong perms is recoverable
+				// (operator chmod) without losing persistence.
 				if err := os.MkdirAll(dir, 0o700); err != nil {
-					slog.Warn("cron store parent dir mkdir failed (eager)", "err", err, "dir", dir)
+					slog.Error("cron store parent dir mkdir failed; persistence will fail at first save",
+						"err", err, "dir", dir)
 				}
 				if err := os.Chmod(dir, 0o700); err != nil && !errors.Is(err, fs.ErrNotExist) {
 					slog.Warn("cron store parent dir chmod failed (eager)", "err", err, "dir", dir)
