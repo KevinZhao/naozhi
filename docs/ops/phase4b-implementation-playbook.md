@@ -29,9 +29,43 @@ go build ./internal/wshub/
 # 3. linter rule 3a 已实装（不报 wshub.go 缺 marker）
 go run ./tools/lint-server-handlers/
 
-# 4. master 上 wshub.go 含 921 行（含 godoc 字段表）
+# 4. master 上 wshub.go 含 1018 行（含 godoc 字段表 + 后续 master commits）
+#    实施前必须实测，因为 master 持续涨；exemptions.yaml current 字段
+#    必须先更新到搬迁前最新值，否则 linter 持续报 file_size grew
 wc -l internal/server/wshub.go
 ```
+
+## 1.1 Pre-flight checklist（v0.6.1 验证 2026-05-28 后新增）
+
+任何 Phase X 实施前必跑——避免 master 持续涨导致 baseline 漂移：
+
+```bash
+# 1. 同步 master 最新
+git fetch origin master
+git checkout -B server-split/phase<X> origin/master
+
+# 2. 实测所有受影响文件最新行数，更新 exemptions.yaml current 字段
+#    （搬迁前的最新值，不是搬迁后的目标值）
+for f in internal/server/wshub.go internal/server/wshub_*.go internal/server/wsclient.go; do
+  echo "$f: $(wc -l < $f) lines"
+done
+# 把当前数字写到 tools/lint-server-handlers/exemptions.yaml current 字段
+
+# 3. baseline build/test 必须绿
+go build ./...
+go test -race -count=1 ./internal/wshub/
+
+# 4. 实测搬迁前的 lint 噪音 baseline（搬迁不应增加 violation 数）
+go run ./tools/lint-server-handlers/ 2>&1 | grep -c "violation" || true
+go run ./tools/lint-fact-table/ docs/design/server-split-phase4-design.md 2>&1 | grep -c "violation" || true
+
+# 5. 记录搬迁前的 race test 时间（验收 gate 用）
+time go test -race -count=1 -timeout=300s ./internal/server/... ./internal/wshub/...
+```
+
+**为什么必跑**：master 持续涨；2026-05-28 实测 wshub.go 从 921 涨到
+1018（+97 行）。如果不先更新 baseline 就开始搬，linter 报"file grew"
+会污染 PR diff 评估。
 
 ## 2. 类型搬迁顺序（依赖图）
 
@@ -94,8 +128,8 @@ grep -c "type wsClient struct" internal/server/  # 必须 0
 
 **文件**：`internal/wshub/types.go`（覆盖 Phase 4a placeholder）
 
-**方法**：把 `internal/server/consumer.go` 的 HubRouter 接口（~30 方法）
-完整搬到 wshub/types.go。consumer.go 改为 type alias：
+**方法**：把 `internal/server/consumer.go` 的 HubRouter 接口（**14 方法**
+实测）完整搬到 wshub/types.go。consumer.go 改为 type alias：
 ```go
 type HubRouter = wshub.HubRouter
 ```
@@ -179,7 +213,7 @@ go test -race -count=1 ./...  # 全仓 race test
 ### Step 7: 清理
 
 **文件**：
-- 删 `internal/server/wshub.go`（921 行）
+- 删 `internal/server/wshub.go`（1018 行 master HEAD；实施前实测最新行数）
 - 删 `internal/server/consumer.go` 中已搬走的接口
 - 更新 `tools/lint-server-handlers/exemptions.yaml`：
   - 删除 `internal/server/wshub.go` 条目（until_phase: 4b）
