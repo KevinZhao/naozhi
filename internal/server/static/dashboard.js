@@ -13968,33 +13968,35 @@ async function cronTriggerNow(id) {
 }
 
 async function cronPause(id) {
+  // RNEW-UX-003 (#444): fetchJSON wraps fetch with AbortController + 10s
+  // timeout so a NAT-dropped TCP connection no longer hangs the pause
+  // button silently. err.status carries the HTTP status for the existing
+  // showAPIError surface; thrown errors without err.status are network
+  // failures and route to showNetworkError.
   try {
     const headers = { 'Content-Type': 'application/json' };
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch('/api/cron/pause', { method: 'POST', headers, body: JSON.stringify({ id }) });
-    if (!r.ok) {
-      const raw = await r.text().catch(() => '');
-      showAPIError('暂停定时任务', r.status, raw);
-      return;
-    }
+    await fetchJSON('/api/cron/pause', { method: 'POST', headers, body: JSON.stringify({ id }) });
     fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
-  } catch (e) { showNetworkError('暂停定时任务', e); }
+  } catch (e) {
+    if (e && e.status) { showAPIError('暂停定时任务', e.status, (e.message || '').slice(0, 500)); return; }
+    showNetworkError('暂停定时任务', e);
+  }
 }
 
 async function cronResume(id) {
+  // RNEW-UX-003 (#444): see cronPause godoc for fetchJSON migration rationale.
   try {
     const headers = { 'Content-Type': 'application/json' };
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch('/api/cron/resume', { method: 'POST', headers, body: JSON.stringify({ id }) });
-    if (!r.ok) {
-      const raw = await r.text().catch(() => '');
-      showAPIError('恢复定时任务', r.status, raw);
-      return;
-    }
+    await fetchJSON('/api/cron/resume', { method: 'POST', headers, body: JSON.stringify({ id }) });
     fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
-  } catch (e) { showNetworkError('恢复定时任务', e); }
+  } catch (e) {
+    if (e && e.status) { showAPIError('恢复定时任务', e.status, (e.message || '').slice(0, 500)); return; }
+    showNetworkError('恢复定时任务', e);
+  }
 }
 
 async function cronDelete(id) {
@@ -14040,16 +14042,15 @@ async function cronDelete(id) {
     countdownSecs: 3,
   });
   if (!ok) return;
+  // RNEW-UX-003 (#444): fetchJSON wraps fetch with AbortController + 10s
+  // timeout so a NAT-dropped TCP connection no longer hangs the destructive
+  // delete flow silently. The button is already disabled by the modal
+  // confirm flow above so a deterministic timeout is the right surface.
   try {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch('/api/cron?id=' + encodeURIComponent(id), { method: 'DELETE', headers });
-    if (!r.ok) {
-      const raw = await r.text().catch(() => '');
-      showAPIError('删除定时任务', r.status, raw);
-      return;
-    }
+    await fetchJSON('/api/cron?id=' + encodeURIComponent(id), { method: 'DELETE', headers });
     // R220-FE-2: 释放该 job 在前端持有的 timeline 状态（runs / details / pagination
     // 游标 / fetched 标记），避免 cronTimelineState 累积已删除 job 的内存。
     if (cronTimelineState[id]) delete cronTimelineState[id];
@@ -14062,7 +14063,10 @@ async function cronDelete(id) {
       cronDetailJobId = null;
     }
     fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
-  } catch (e) { showNetworkError('删除定时任务', e); }
+  } catch (e) {
+    if (e && e.status) { showAPIError('删除定时任务', e.status, (e.message || '').slice(0, 500)); return; }
+    showNetworkError('删除定时任务', e);
+  }
 }
 
 // cronRefetchFullJob refills `cronJobs[i].prompt` for a single job from
@@ -15357,20 +15361,17 @@ initSidebarSearch();
     const cached = memCache.get(slug);
     if (cached === NOT_FOUND) return null;
     if (cached) return cached;
+    // RNEW-UX-003 (#444): fetchJSON wraps fetch with AbortController +
+    // 10s timeout. Memory popovers are click-to-open so a hung backend
+    // (NAT idle drop) leaves the user staring at a never-resolving
+    // popover; fetchJSON guarantees a deterministic failure path that
+    // returns `undefined` (preserves caller's "transient — retry next
+    // hover" semantics).
     try {
-      const r = await fetch('/api/memory/' + encodeURIComponent(slug), {
+      const data = await fetchJSON('/api/memory/' + encodeURIComponent(slug), {
         headers: typeof authHeaders === 'function' ? authHeaders() : {},
       });
-      if (r.status === 404 || r.status === 400) {
-        memCache.set(slug, NOT_FOUND);
-        markBroken(slug);
-        return null;
-      }
-      if (!r.ok) {
-        return undefined;
-      }
-      const data = await r.json();
-      if (!data.found) {
+      if (!data || !data.found) {
         memCache.set(slug, NOT_FOUND);
         markBroken(slug);
         return null;
@@ -15378,6 +15379,14 @@ initSidebarSearch();
       memCache.set(slug, data);
       return data;
     } catch (e) {
+      // 404/400 — slug missing/invalid; cache the negative so we don't
+      // re-fetch on every hover. fetchJSON's err.status surfaces the
+      // server status so the callsite can branch.
+      if (e && (e.status === 404 || e.status === 400)) {
+        memCache.set(slug, NOT_FOUND);
+        markBroken(slug);
+        return null;
+      }
       return undefined;
     }
   }
