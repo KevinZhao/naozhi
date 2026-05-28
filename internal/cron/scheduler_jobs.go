@@ -1324,10 +1324,12 @@ func (s *Scheduler) TriggerNow(id string) error {
 		entryGone := s.cronEntryGoneLocked(entryID)
 		s.mu.RUnlock()
 		if entryGone {
-			go func() {
-				defer s.triggerWG.Done()
-				slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "job_id", id, "entry_id", entryID)
-			}()
+			// R260528-BUG-17: spawning a goroutine here just to log + WG.Done
+			// burned ~8 KiB of stack and a scheduler-runtime hand-off for
+			// no asynchronous work. Inline the sentinel so the
+			// triggerWG.Add(1) above unwinds on the calling goroutine.
+			s.triggerWG.Done()
+			slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "job_id", id, "entry_id", entryID)
 		} else {
 			go func() {
 				defer s.triggerWG.Done()
