@@ -1,4 +1,4 @@
-package server
+package memory
 
 import (
 	"bytes"
@@ -10,9 +10,11 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 )
 
-// MemoryHandler serves GET /api/memory/{slug} for the dashboard "wiki link"
+// Handler serves GET /api/memory/{slug} for the dashboard "wiki link"
 // preview. Claude's auto-memory uses [[slug]] cross-references in stored
 // memory files (and occasionally leaks them into chat output); the dashboard
 // inlineMd renderer turns them into hover cards backed by this endpoint.
@@ -24,10 +26,10 @@ import (
 // Path safety: the slug is validated against memorySlugRE (alphanumeric / _ / -,
 // 1-64 chars) and the resolved path is re-checked with strings.HasPrefix on
 // projectsDir; both gates must pass before we read.
-type MemoryHandler struct {
+type Handler struct {
 	projectsDir    string
 	currentProject string
-	limiter        *ipLimiter
+	limiter        IPLimiter
 
 	// R242-SEC-7 (#635): cache the resolved-prefix at construction time so the
 	// runtime base used for both the lexical HasPrefix gate and the post-
@@ -70,8 +72,8 @@ var memoryProjectDirRE = regexp.MustCompile(`^-[a-zA-Z0-9_][a-zA-Z0-9._\-]{0,255
 var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 
 const (
-	memoryLimiterRate  = 10
-	memoryLimiterBurst = 20
+	MemoryLimiterRate  = 10
+	MemoryLimiterBurst = 20
 
 	// maxMemoryFileBytes caps the size of a single memory .md read. Auto-memory
 	// slugs are normally small (front-matter + a few KB of narrative); a
@@ -88,13 +90,15 @@ const (
 
 var errMemoryPathEscape = errors.New("path escapes projects dir")
 
-func NewMemoryHandler(trustedProxy bool) *MemoryHandler {
-	// R222-ARCH-9 / #724: single-point env probe via resolveClaudeProjectsDir
-	// (was: inline CLAUDE_PROJECTS_DIR + UserHomeDir → filepath.Join). The
-	// helper preserves the original semantics exactly: honour the
-	// CLAUDE_PROJECTS_DIR override first, fall back to ~/.claude/projects,
-	// and return "" when both probe paths fail.
-	dir := resolveClaudeProjectsDir()
+// New constructs a memory Handler.
+//
+// Phase 3c (server-split-phase4-design.md §6.5 Plan B): projectsDir +
+// limiter are now injected from the server package so this sub-package
+// doesn't reverse-import internal/server's resolveClaudeProjectsDir or
+// newIPLimiterWithProxy. server.New computes the resolved+symlink-followed
+// path once at boot and passes it here.
+func New(projectsDir string, limiter IPLimiter) *Handler {
+	dir := projectsDir
 	// R240-SEC-1: canonicalise projectsDir at construction. If the dir is itself
 	// reachable via a symlinked component (Docker bind-mount, AMI-customised
 	// layout, ~/.claude → /var/data/.claude on macOS), the prefix check inside
@@ -118,10 +122,10 @@ func NewMemoryHandler(trustedProxy bool) *MemoryHandler {
 	if prefix != "" {
 		prefix += string(filepath.Separator)
 	}
-	return &MemoryHandler{
+	return &Handler{
 		projectsDir:         dir,
 		currentProject:      cur,
-		limiter:             newIPLimiterWithProxy(memoryLimiterRate, memoryLimiterBurst, trustedProxy),
+		limiter:             limiter,
 		resolvedPrefix:      prefix,
 		resolvedPrefixNoSep: prefixNoSep,
 	}
@@ -161,36 +165,36 @@ type memoryResponse struct {
 	Truncated bool `json:"truncated,omitempty"`
 }
 
-func (h *MemoryHandler) handleGet(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleGet(w http.ResponseWriter, r *http.Request) {
 	if !h.limiter.AllowRequest(r) {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
 		return
 	}
 	slug := r.PathValue("slug")
 	if !memorySlugRE.MatchString(slug) {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid_slug"})
+		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid_slug"})
 		return
 	}
 	if h.projectsDir == "" {
 		w.Header().Set("Cache-Control", "private, max-age=30")
-		writeJSON(w, memoryResponse{Found: false, Slug: slug})
+		httputil.WriteJSON(w, memoryResponse{Found: false, Slug: slug})
 		return
 	}
 
 	resp, err := h.lookup(slug)
 	if err != nil {
 		if errors.Is(err, errMemoryPathEscape) {
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid_slug"})
+			httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid_slug"})
 			return
 		}
-		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "io"})
+		httputil.WriteJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "io"})
 		return
 	}
 	w.Header().Set("Cache-Control", "private, max-age=30")
-	writeJSON(w, resp)
+	httputil.WriteJSON(w, resp)
 }
 
-func (h *MemoryHandler) lookup(slug string) (memoryResponse, error) {
+func (h *Handler) lookup(slug string) (memoryResponse, error) {
 	if h.currentProject != "" {
 		hit, err := h.tryRead(h.currentProject, slug)
 		if err != nil {
@@ -240,7 +244,7 @@ func (h *MemoryHandler) lookup(slug string) (memoryResponse, error) {
 	return memoryResponse{Found: false, Slug: slug}, nil
 }
 
-func (h *MemoryHandler) tryRead(projectDir, slug string) (*memoryResponse, error) {
+func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
 	// R241-SEC-6 (#467): pin every Join input to the alphabet Claude's
 	// project-dir encoder produces (see encodeCurrentProjectDir). The
 	// only call sites pass either h.currentProject or an entry returned

@@ -1,4 +1,4 @@
-package server
+package memory
 
 import (
 	"encoding/json"
@@ -9,18 +9,17 @@ import (
 	"strings"
 	"testing"
 
-	"golang.org/x/time/rate"
 )
 
 // memoryTestHandler builds a handler with a temp projects dir + permissive
 // limiter so tests don't false-positive on rate limits.
 //
-// projectsDir is canonicalised the same way NewMemoryHandler does it — without
+// projectsDir is canonicalised the same way New does it — without
 // this, on macOS t.TempDir() returns /var/folders/... which is a symlink to
 // /private/var/folders/...; tryRead's EvalSymlinks resolves the leaf to the
 // /private/var/... form, and the prefix check (which compares against the
 // unresolved root) rejects every legitimate read.
-func memoryTestHandler(t *testing.T, projectsDir, currentProject string) *MemoryHandler {
+func memoryTestHandler(t *testing.T, projectsDir, currentProject string) *Handler {
 	t.Helper()
 	if projectsDir != "" {
 		if r, err := filepath.EvalSymlinks(projectsDir); err == nil {
@@ -36,10 +35,10 @@ func memoryTestHandler(t *testing.T, projectsDir, currentProject string) *Memory
 	if prefix != "" {
 		prefix += string(filepath.Separator)
 	}
-	return &MemoryHandler{
+	return &Handler{
 		projectsDir:         projectsDir,
 		currentProject:      currentProject,
-		limiter:             newIPLimiterWithProxy(rate.Inf, 1, false),
+		limiter:             alwaysAllowLimiter{},
 		resolvedPrefix:      prefix,
 		resolvedPrefixNoSep: prefixNoSep,
 	}
@@ -59,10 +58,10 @@ func writeMemoryFile(t *testing.T, projectsDir, project, slug, content string) {
 
 // callMemoryHandler runs the handler against an httptest recorder using
 // http.ServeMux so PathValue("slug") populates correctly.
-func callMemoryHandler(t *testing.T, h *MemoryHandler, slug string) (*httptest.ResponseRecorder, memoryResponse, map[string]string) {
+func callMemoryHandler(t *testing.T, h *Handler, slug string) (*httptest.ResponseRecorder, memoryResponse, map[string]string) {
 	t.Helper()
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/memory/{slug}", h.handleGet)
+	mux.HandleFunc("GET /api/memory/{slug}", h.HandleGet)
 	req := httptest.NewRequest(http.MethodGet, "/api/memory/"+slug, nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
@@ -168,13 +167,13 @@ func TestMemoryHandler_RejectsInvalidSlug(t *testing.T) {
 	}
 	for _, slug := range cases {
 		t.Run(slug, func(t *testing.T) {
-			// mux strips empty path values so we cannot hit handleGet
+			// mux strips empty path values so we cannot hit HandleGet
 			// directly via mux for these — invoke handler with a manual
 			// request that already has the PathValue set.
 			req := httptest.NewRequest(http.MethodGet, "/api/memory/x", nil)
 			req.SetPathValue("slug", slug)
 			w := httptest.NewRecorder()
-			h.handleGet(w, req)
+			h.HandleGet(w, req)
 			if w.Code != http.StatusBadRequest {
 				t.Errorf("slug %q: status = %d, want 400 (body=%s)",
 					slug, w.Code, w.Body.String())
@@ -198,7 +197,7 @@ func TestMemoryHandler_PathEscapeBlockedAtRegex(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/memory/x", nil)
 	req.SetPathValue("slug", "../secret")
 	w := httptest.NewRecorder()
-	h.handleGet(w, req)
+	h.HandleGet(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}

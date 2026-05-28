@@ -11,6 +11,8 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
@@ -210,17 +212,13 @@ func (s *Server) registerDashboard() {
 	if s.scratchPool != nil {
 		s.hub.SetScratchPool(s.scratchPool)
 		s.scratchPool.StartSweeper()
-		s.scratchH = &ScratchHandler{
-			hub: s.hub,
-			// router: ScratchRouter consumer-interface view of
-			// *session.Router. Closes the R215-ARCH-P1-4 (#566) Phase-2.5
-			// cleanup so the handler no longer reaches its router via
-			// h.hub.router.* transits.
-			router:    s.hub.router,
-			pool:      s.scratchPool,
-			openLimit: newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.TrustedProxy), // 5 opens/min per IP
-			agents:    s.agents,
-		}
+		s.scratchH = scratch.New(scratch.Deps{
+			Broadcaster: s.hub,
+			Router:      s.hub.router,
+			Pool:        s.scratchPool,
+			OpenLimit:   newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.TrustedProxy),
+			Agents:      s.agents,
+		})
 	}
 
 	// Push session list changes to WS clients
@@ -331,17 +329,17 @@ func (s *Server) registerDashboard() {
 		s.registerExpvar()
 	}
 	if s.scratchH != nil {
-		s.mux.HandleFunc("POST /api/scratch/open", auth(s.scratchH.handleOpen))
-		s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(s.scratchH.handlePromote))
-		s.mux.HandleFunc("DELETE /api/scratch/{id}", auth(s.scratchH.handleDelete))
+		s.mux.HandleFunc("POST /api/scratch/open", auth(s.scratchH.HandleOpen))
+		s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(s.scratchH.HandlePromote))
+		s.mux.HandleFunc("DELETE /api/scratch/{id}", auth(s.scratchH.HandleDelete))
 	}
 	// memory link preview (docs/rfc/memory-link-rendering.md): exposes
 	// ~/.claude/projects/<scope>/memory/<slug>.md to the dashboard inlineMd
 	// renderer so [[slug]] tokens become hover-previewable cards.
 	if s.memoryH == nil {
-		s.memoryH = NewMemoryHandler(s.auth.TrustedProxy)
+		s.memoryH = memory.New(resolveClaudeProjectsDir(), newIPLimiterWithProxy(memory.MemoryLimiterRate, memory.MemoryLimiterBurst, s.auth.TrustedProxy))
 	}
-	s.mux.HandleFunc("GET /api/memory/{slug}", auth(s.memoryH.handleGet))
+	s.mux.HandleFunc("GET /api/memory/{slug}", auth(s.memoryH.HandleGet))
 
 	// Unauthenticated routes (login, static assets, WebSocket with own auth)
 	s.mux.HandleFunc("POST /api/auth/login", s.auth.HandleLogin)

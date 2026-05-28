@@ -112,7 +112,7 @@
   {
     "method": "GET",
     "path": "/api/memory/{slug}",
-    "handler_type": "*MemoryHandler"
+    "handler_type": "*memory.Handler"
   },
   {
     "method": "GET",
@@ -157,17 +157,17 @@
   {
     "method": "POST",
     "path": "/api/scratch/open",
-    "handler_type": "*ScratchHandler"
+    "handler_type": "*scratch.Handler"
   },
   {
     "method": "DELETE",
     "path": "/api/scratch/{id}",
-    "handler_type": "*ScratchHandler"
+    "handler_type": "*scratch.Handler"
   },
   {
     "method": "POST",
     "path": "/api/scratch/{id}/promote",
-    "handler_type": "*ScratchHandler"
+    "handler_type": "*scratch.Handler"
   },
   {
     "method": "DELETE",

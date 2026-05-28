@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
+	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cron"
@@ -99,8 +101,8 @@ type Server struct {
 	healthH      *HealthHandler       // 读写: server.go (ctor only)
 	sendH        *SendHandler         // 读写: dashboard.go (ctor only in server.go)
 	cliH         *CLIBackendsHandler  // 读写: server.go, dashboard.go
-	scratchH     *ScratchHandler      // 读写: dashboard.go (ctor only in server.go)
-	memoryH      *MemoryHandler       // 读写: dashboard.go (ctor only in server.go)
+	scratchH     *scratch.Handler      // 读写: dashboard.go (ctor only in server.go)
+	memoryH      *memory.Handler       // 读写: dashboard.go (ctor only in server.go)
 	agentEventsH *AgentEventsHandlers // 读写: server.go, dashboard.go
 
 	// ── Phase 5: → NewHub Options ──────────────────────
