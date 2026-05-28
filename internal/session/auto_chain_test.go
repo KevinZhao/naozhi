@@ -329,11 +329,11 @@ func TestRecentFilterAsExcluder_NilFilterReturnsFalse(t *testing.T) {
 	}
 }
 
-func TestAsExcluder_PublicFactory(t *testing.T) {
+func TestAsExcluder_FactoryWraps(t *testing.T) {
 	f := &fakeFilter{skipIDs: map[string]bool{"x": true}}
-	e := AsExcluder(f)
+	e := asExcluder(f)
 	if !e.IsExcluded("x") {
-		t.Fatal("AsExcluder(f) should forward SkipSessionID(x)=true")
+		t.Fatal("asExcluder(f) should forward SkipSessionID(x)=true")
 	}
 }
 
