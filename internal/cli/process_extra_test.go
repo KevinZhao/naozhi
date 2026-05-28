@@ -594,6 +594,51 @@ func TestProcess_InterruptViaControl_Running_SetsFlagsAndWrites(t *testing.T) {
 	}
 }
 
+// TestInterruptViaControlConcurrentSetterNotClobbered (R260528-BUG-4)
+// pins the CAS-based rollback. Pre-fix, a write-fail rollback ran
+// p.interrupted.Store(false) + p.interruptedRun.Store(false)
+// unconditionally, which clobbered a concurrent Interrupt() that had
+// just Stored(true) on the same flags. The fix records which flags
+// the InterruptViaControl call ITSELF flipped (CompareAndSwap from
+// false→true) and only rolls those back on write failure; flags
+// already true via a sibling Interrupt() are preserved.
+//
+// We simulate the race deterministically: pre-set both flags to true
+// (as a concurrent Interrupt() would), drive InterruptViaControl
+// with a failing protocol, and assert the flags survive the rollback.
+func TestInterruptViaControlConcurrentSetterNotClobbered(t *testing.T) {
+	wantErr := errors.New("simulated shim write failure")
+	p, srv := shimTestPair(&claudeWithFailingInterrupt{err: wantErr})
+	startServerDrain(srv)
+	p.startReadLoop()
+	defer p.Kill()
+
+	p.mu.Lock()
+	p.state = StateRunning
+	p.mu.Unlock()
+	// Concurrent Interrupt() winning the race — both flags already true
+	// before InterruptViaControl runs. The CAS attempts inside the
+	// method must observe the flags as already-true and skip the rollback.
+	p.interrupted.Store(true)
+	p.interruptedRun.Store(true)
+
+	err := p.InterruptViaControl()
+	if err == nil {
+		t.Fatal("expected write failure to surface as error")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("err = %v, want wrapped %v", err, wantErr)
+	}
+	// The concurrent Interrupt()'s flags MUST survive — the rollback
+	// only owns flags THIS call's CAS flipped from false→true.
+	if !p.interrupted.Load() {
+		t.Error("interrupted was clobbered: concurrent Interrupt()'s flag lost on rollback")
+	}
+	if !p.interruptedRun.Load() {
+		t.Error("interruptedRun was clobbered: concurrent Interrupt()'s flag lost on rollback")
+	}
+}
+
 // Regression test for P0-1: a failed WriteInterrupt must roll the settle
 // flags back so the next Send()'s drainStaleEvents does not burn the 500ms
 // settle budget waiting for a result that will never arrive.
