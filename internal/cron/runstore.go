@@ -898,22 +898,34 @@ func (s *runStore) warmCacheLocked(jobID string) int {
 }
 
 // cacheGetBefore is the before-cutoff variant of cacheGet. It serves a
-// before-filtered, newest-first slice from the cache only when the cache
-// is provably exhaustive — i.e. cache.count < keepCount, meaning every
-// on-disk row already lives in the ring and no entry has ever been
-// trimmed off the tail. In that regime the cache holds strictly the
-// same rows as a fresh disk scan, so a filter walk is correctness-
-// equivalent to diskListNewestFirst at zero ReadDir+ReadFile cost.
+// before-filtered, newest-first slice from the cache when one of two
+// safety conditions holds:
 //
-// Returns ok=false when count == keepCount (the cache may have shed
-// older entries via trim) — caller falls back to disk so pagination
-// beyond the cache horizon still works. Cold cache paths are NOT warmed
-// here: a cold-cache before-cutoff query is rare (dashboard typically
-// drives warm via a no-cutoff first page), so paying the warm cost on
-// the pagination path would add a ReadDir+per-file ReadFile to a query
-// that is already going to disk and reading it twice — once for warm,
-// once via the disk fallback. The warm path lazy-warms on the next
-// no-cutoff List call. R243-PERF-5 (#810).
+//  1. cache.count < keepCount: cache has never hit the trim horizon, so
+//     every on-disk row already lives in the ring. Filter walk is
+//     correctness-equivalent to diskListNewestFirst.
+//
+//  2. cache.count == keepCount AND the page filled (len(out) == limit)
+//     strictly before reaching the oldest ring slot. R242-PERF-9
+//     (#672): cache holds the newest keepCount rows so any trim-evicted
+//     disk row is strictly older than every cached row; the newest-
+//     first top-`limit` page is therefore a prefix of the cache walk.
+//     The bail-out case is "page didn't fill" or "page filled exactly
+//     at the oldest slot" — in both we cannot prove disk wouldn't
+//     contribute a fresher-than-trim-horizon match (a row whose mtime
+//     was between cache.oldest.mtime and the cutoff but which trim
+//     hasn't yet reconciled into cache because Append + trim are
+//     two-phase). Falling through to disk preserves correctness.
+//
+// Returns ok=false when neither condition holds — caller falls back to
+// disk so pagination beyond the cache horizon still works. Cold cache
+// paths are NOT warmed here: a cold-cache before-cutoff query is rare
+// (dashboard typically drives warm via a no-cutoff first page), so
+// paying the warm cost on the pagination path would add a ReadDir +
+// per-file ReadFile to a query that is already going to disk and
+// reading it twice — once for warm, once via the disk fallback. The
+// warm path lazy-warms on the next no-cutoff List call. R243-PERF-5
+// (#810).
 //
 // Caller must guard before.IsZero() == false; use cacheGet for the
 // no-cutoff fast path.
@@ -928,14 +940,16 @@ func (s *runStore) cacheGetBefore(jobID string, limit int, before time.Time) ([]
 	if !entry.warm {
 		return nil, false
 	}
-	// Exhaustive only when cache hasn't hit cap. count == keepCount
-	// means trimJobLocked may have evicted older rows that match the
-	// before cutoff; disk scan is the safe answer.
-	if entry.count >= s.keepCount {
-		return nil, false
-	}
+	exhaustive := entry.count < s.keepCount
 	out := make([]CronRunSummary, 0, limit)
+	// walked tracks how far we advanced in the ring. Used by the
+	// non-exhaustive (count == keepCount) safety check below: filling
+	// the page strictly before the last slot proves that the page is
+	// already the newest-first top-`limit` and disk-only rows would all
+	// be older than the last collected row.
+	walked := 0
 	for i := 0; i < entry.count && len(out) < limit; i++ {
+		walked = i + 1
 		r := entry.ringRead(i)
 		// diskListNewestFirst applies StartedAt strict-less-than the
 		// cutoff; mirror that here so cache and disk paths stay in
@@ -945,7 +959,15 @@ func (s *runStore) cacheGetBefore(jobID string, limit int, before time.Time) ([]
 		}
 		out = append(out, r)
 	}
-	return out, true
+	if exhaustive {
+		return out, true
+	}
+	// Non-exhaustive ring: only trust the result if the page filled
+	// before we touched the oldest slot.
+	if len(out) == limit && walked < entry.count {
+		return out, true
+	}
+	return nil, false
 }
 
 // cacheInvalidate forgets the cache entry for jobID. Used by DeleteJob.
