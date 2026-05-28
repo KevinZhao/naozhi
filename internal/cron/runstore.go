@@ -721,6 +721,19 @@ func (s *runStore) Append(run *CronRun) {
 // against a fresh Append's WriteFileAtomic. Today the sole caller is
 // Append (runstore.go:252) which acquires jobLock at line 213; any future
 // helper must do the same. R239-GO-5.
+//
+// R245-PERF-14 (#863) proposed converting appendsSinceTrim to atomic.Int32
+// to skip entry.mu on the no-race fast path. Won't-fix: the threshold-
+// gate is the cheapest of the four checks below — entry.warm,
+// entry.count, oldest-row.EndedAt all require entry.mu since they read
+// the ring state, and ringRead derives from cap(ring) which is mutated
+// by ringSeed under the same mutex. Atomicising just the counter would
+// not let us release entry.mu, so the lock-elision premise of the
+// proposal does not hold without a much larger redesign (split the
+// counter from the ring state, double-buffer the ring, etc.). The
+// existing jobLock + entry.mu pair runs in <100ns on the warm path
+// already; the remaining cost is dominated by ringRead's modulo, not
+// the lock itself.
 func (s *runStore) skipAppendTrim(jobID string) bool {
 	// Race-detector friendly contract assertion: panics when jobLock is
 	// currently free, the unambiguous signature of a caller that forgot to
