@@ -3,6 +3,10 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -120,5 +124,62 @@ func TestDashboardCSP_FrameSrcBlob(t *testing.T) {
 	// directive only listed `font`).
 	if !strings.Contains(csp, "require-sri-for script style font") {
 		t.Errorf("CSP must include `require-sri-for script style font` as forward-compat SRI gate (R243-SEC-4 / R244-SEC-P2-4), got %q", csp)
+	}
+}
+
+// TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow caps the inline event
+// handler surface in static/dashboard.html (R236-SEC-02 / #479, also tracked
+// as #922). The dashboard CSP still ships `script-src 'unsafe-inline'`
+// because the static HTML contains a fixed set of `onclick=` attributes on
+// header buttons (sidebar search, history, new session, cron panel,
+// sidebar-search-clear, ns-trigger, sidebar-toggle resizer). Migrating to
+// hash/nonce CSP requires moving those handlers into dashboard.js as
+// addEventListener bindings.
+//
+// This test does NOT remove `'unsafe-inline'` (that is the NEEDS-DESIGN
+// bundle on #441 / #479). Instead it pins the current surface count so a
+// future feature that adds yet another inline handler trips a visible
+// failure and the author has to consider whether to keep growing the
+// 'unsafe-inline' justification. It also asserts no `onload=` /
+// `onerror=` attributes exist (those are the more dangerous inline handler
+// classes — neither is present today, so the gate is "stays at zero").
+func TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow(t *testing.T) {
+	t.Parallel()
+
+	_, self, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	htmlPath := filepath.Join(filepath.Dir(self), "static", "dashboard.html")
+	body, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", htmlPath, err)
+	}
+	html := string(body)
+
+	// Cap on `onclick=` attributes. Current count is 7 (R236-SEC-02 audit
+	// 2026-05-28). Assert ≤ 7 so the migration debt does not silently grow
+	// while #479 sits in NEEDS-DESIGN. If a contributor needs to bump the
+	// cap, the right move is to first migrate one of the existing handlers
+	// to addEventListener — then bump the cap below as a no-op.
+	const inlineOnclickCap = 7
+	onclickRe := regexp.MustCompile(`\bonclick\s*=`)
+	got := len(onclickRe.FindAllStringIndex(html, -1))
+	if got > inlineOnclickCap {
+		t.Errorf("R236-SEC-02 (#479): static/dashboard.html has %d inline `onclick=` attributes, "+
+			"cap is %d. Migrate one to addEventListener in dashboard.js before adding more, "+
+			"or this test bumps the cap as part of the same change. Goal: drive count to 0 "+
+			"so script-src 'unsafe-inline' can be dropped (#441 / #479 / #922 bundle).",
+			got, inlineOnclickCap)
+	}
+
+	// Stricter cap: dangerous inline handlers stay at zero. `onload` and
+	// `onerror` on <img>/<script>/<iframe> tags can fire on any successful
+	// load and are the easiest XSS vector even with `unsafe-inline`.
+	for _, attr := range []string{"onload=", "onerror=", "onfocus=", "onmouseover="} {
+		if strings.Contains(html, attr) {
+			t.Errorf("static/dashboard.html contains inline `%s` handler — "+
+				"these auto-fire and are higher-risk than onclick (R236-SEC-02 #479)", attr)
+		}
 	}
 }
