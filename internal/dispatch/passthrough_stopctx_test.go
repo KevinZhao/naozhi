@@ -104,18 +104,30 @@ func TestMergeStopAndValues_NilValuesSrcAllowed(t *testing.T) {
 	}
 }
 
-// TestMergeStopAndValues_NilCancelSrcPanics enforces the documented
-// contract that the cancel source MUST be non-nil. Silent fallback to
-// Background here would mask wireup bugs — production must always pass
-// the long-lived service ctx.
-func TestMergeStopAndValues_NilCancelSrcPanics(t *testing.T) {
+// TestMergeStopAndValues_NilCancelSrcFallsBackToBackground pins the
+// R260528-GO-11 degraded-fallback contract. Pre-fix, nil cancelSrc
+// panicked — but NewDispatcher always seeds stopCtx so the panic was
+// dead code; if a future code path ever does pass nil, we'd rather
+// surface a slog.Error and degrade to context.Background() than crash
+// the dispatcher mid-flight. The dispatcher_stopctx_wireup_test.go
+// boot-time check still guarantees production wiring is non-nil.
+func TestMergeStopAndValues_NilCancelSrcFallsBackToBackground(t *testing.T) {
 	t.Parallel()
 	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic on nil cancelSrc")
+		if r := recover(); r != nil {
+			t.Errorf("nil cancelSrc must NOT panic post-R260528-GO-11; got panic=%v", r)
 		}
 	}()
-	_ = mergeStopAndValues(nil, context.Background())
+	merged := mergeStopAndValues(nil, context.Background())
+	if merged == nil {
+		t.Fatal("merged ctx must be non-nil even with nil cancelSrc")
+	}
+	// context.Background()'s Done() returns nil and Err() returns nil
+	// — both valid signals meaning "never cancels". Just confirm Err
+	// is nil so the in-flight send proceeds rather than aborting.
+	if err := merged.Err(); err != nil {
+		t.Errorf("merged.Err() = %v, want nil (Background never cancels)", err)
+	}
 }
 
 // TestMergeStopAndValues_DeadlineFromCancelSrc verifies the merged ctx
