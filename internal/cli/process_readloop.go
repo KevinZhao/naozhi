@@ -729,7 +729,12 @@ func (p *Process) notifyLinker(ev Event, nowMS int64, isSystemInit bool) {
 	if len(desc) > maxResolveDescBytes {
 		desc = desc[:textutil.TruncateAtRuneBoundary(desc, maxResolveDescBytes)]
 	}
-	go linker.Resolve(p.lifecycleContext(), taskID, toolUseID, name, desc, nowMS)
+	// R214-PERF-6 (#415): hand off to the linker's worker pool instead of
+	// spawning a per-event goroutine. Multi-agent turns previously emitted
+	// 5–10 task_started events that each spawned a goroutine parked on
+	// resolveSem for up to 3 s; the pool collapses that to a fixed worker
+	// set with bounded queue + inline-fallback on overflow.
+	linker.DispatchResolve(p.lifecycleContext(), taskID, toolUseID, name, desc, nowMS)
 }
 
 // deliverEvent runs the post-EventLog dispatch arm of dispatchProtocolEvent:

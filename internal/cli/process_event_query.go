@@ -90,7 +90,11 @@ func (p *Process) InjectHistory(entries []EventEntry) {
 		// so the Resolve goroutine doesn't pin multi-KB strings until the
 		// resolveSem slot frees.
 		desc = textutil.TruncateRunes(desc, eventDetailMaxRunes)
-		go linker.Resolve(p.lifecycleContext(), taskID, toolUseID, name, desc, wallclock)
+		// R214-PERF-6 (#415): use the linker's bounded dispatch pool
+		// rather than spawning a per-event goroutine. InjectHistory's
+		// replay can fan in dozens of task_started entries on shim
+		// reconnect; the pool keeps that bounded.
+		linker.DispatchResolve(p.lifecycleContext(), taskID, toolUseID, name, desc, wallclock)
 	}
 	for _, e := range entries {
 		switch e.Type {
