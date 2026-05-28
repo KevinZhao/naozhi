@@ -7,6 +7,60 @@ import (
 	"testing"
 )
 
+// TestDashboardCSP_ConnectSrcSelfOnly locks the R243-SEC / R249-SEC posture
+// against the H2 / #441 companion ask: do NOT relax `connect-src 'self'` to
+// `connect-src 'self' wss:`. The companion proposal in #441 reads "tighten"
+// but listing `wss:` actually *widens* the directive — `'self'` already
+// covers the same-origin ws:// + wss:// upgrade implicitly (browsers pick
+// the scheme to match the page), while explicit `wss:` accepts WebSocket
+// connections to **any** origin. That re-opens an XS-Leak / data-exfil
+// channel for any future DOM-XSS that lands on the dashboard.
+//
+// We pin this explicitly so a reviewer following #441's wording cannot
+// silently land the over-permissive form. The exact substring is the only
+// load-bearing assertion; the directive ordering inside the header value
+// is irrelevant for browser CSP parsing but the substring lookup keeps
+// the test robust against unrelated reorderings.
+func TestDashboardCSP_ConnectSrcSelfOnly(t *testing.T) {
+	s := newTestServer(&mockPlatform{})
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	w := httptest.NewRecorder()
+	s.handleDashboard(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy header missing on /dashboard")
+	}
+
+	// Must still carry connect-src 'self' (otherwise default-src kicks in,
+	// and a future default-src tweak would silently widen the connect
+	// surface).
+	if !strings.Contains(csp, "connect-src 'self'") {
+		t.Errorf("CSP must carry connect-src 'self' so same-origin ws/wss are accepted via the implicit scheme match, got %q", csp)
+	}
+
+	// Must NOT widen connect-src to listing wss: (or ws:) explicitly.
+	// Either of those tokens accepts cross-origin WebSocket endpoints,
+	// which is exactly the XS-Leak / exfil hole that a future DOM-XSS
+	// could ride out of the dashboard origin. #441 / R249 / R243 / R236
+	// — wording in the proposal reads "tighten" but the proposed change
+	// is a widening; pin the safer form here.
+	for _, bad := range []string{
+		"connect-src 'self' wss:",
+		"connect-src 'self' ws:",
+		"connect-src 'self' ws: wss:",
+		"connect-src 'self' wss: ws:",
+	} {
+		if strings.Contains(csp, bad) {
+			t.Errorf("CSP must not widen connect-src to explicit wss:/ws: scheme listing — that lets cross-origin WebSocket endpoints accept dashboard data exfil. got %q (matched %q)", csp, bad)
+		}
+	}
+}
+
 // TestDashboardCSP_FrameSrcBlob locks the regression that broke workspace .html
 // preview: dashboard.js renderSandboxedBlob fetches workspace HTML, wraps the
 // bytes in a Blob({type:'text/html'}), and points a sandboxed iframe at the

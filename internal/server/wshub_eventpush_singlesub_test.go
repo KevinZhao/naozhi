@@ -1,0 +1,97 @@
+package server
+
+import (
+	"sync"
+	"testing"
+
+	"github.com/naozhi/naozhi/internal/cli"
+)
+
+// R249-PERF-30 (#944): pins the single-subscriber fast path that skips
+// the marshal cache when only one tab is subscribed to a session key.
+// The cache exists to coalesce N marshalPooled calls across N
+// concurrent pushLoops on the same notify wave; for a single tab every
+// notify advances lastTime so the fingerprint always misses and the
+// cache slot allocation + per-key mutex round-trip is pure overhead.
+
+func TestSingleSubscriberFastPath_BypassesCache(t *testing.T) {
+	h := &Hub{
+		mu:                  sync.RWMutex{},
+		historyMarshalCache: newHistoryMarshalCache(),
+		subscriberCount:     map[string]int{"only-tab": 1},
+	}
+	entries := []cli.EventEntry{{Time: 1, Type: "user"}}
+	if _, err := h.marshalHistoryFrame("only-tab", 0, entries); err != nil {
+		t.Fatalf("marshalHistoryFrame: %v", err)
+	}
+	// Cache MUST stay cold: the fast path returns marshalPooled bytes
+	// directly without touching historyMarshalCache. If a future
+	// refactor accidentally re-routes through getOrMarshal the slot
+	// would be populated and this assertion would catch the regression.
+	if _, ok := h.historyMarshalCache.entries.Load("only-tab"); ok {
+		t.Fatal("R249-PERF-30 regression: marshalHistoryFrame populated " +
+			"historyMarshalCache slot for a single-subscriber key — fast path is " +
+			"supposed to skip the cache entirely so the per-key mutex round-trip " +
+			"is avoided for the lone tab.")
+	}
+}
+
+func TestSingleSubscriberFastPath_MultiSubStillUsesCache(t *testing.T) {
+	// With 2+ subscribers the cache MUST still be consulted so multi-tab
+	// fan-out keeps coalescing the marshal call. Otherwise the R214-PERF-4
+	// optimisation (which #944 explicitly preserves) would silently
+	// regress.
+	h := &Hub{
+		mu:                  sync.RWMutex{},
+		historyMarshalCache: newHistoryMarshalCache(),
+		subscriberCount:     map[string]int{"two-tabs": 2},
+	}
+	entries := []cli.EventEntry{{Time: 1, Type: "user"}}
+	if _, err := h.marshalHistoryFrame("two-tabs", 0, entries); err != nil {
+		t.Fatalf("marshalHistoryFrame: %v", err)
+	}
+	if _, ok := h.historyMarshalCache.entries.Load("two-tabs"); !ok {
+		t.Fatal("R249-PERF-30 wiring regression: marshalHistoryFrame " +
+			"failed to populate historyMarshalCache for a 2-subscriber key " +
+			"— multi-tab fan-out lost its coalescing fast path (R214-PERF-4).")
+	}
+}
+
+func TestSingleSubscriber_ReportsCorrectCount(t *testing.T) {
+	tests := []struct {
+		name  string
+		count int
+		want  bool
+	}{
+		{"zero", 0, false},
+		{"one", 1, true},
+		{"two", 2, false},
+		{"many", 50, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Hub{
+				mu:              sync.RWMutex{},
+				subscriberCount: map[string]int{"k": tc.count},
+			}
+			if got := h.singleSubscriber("k"); got != tc.want {
+				t.Fatalf("singleSubscriber(count=%d) = %v; want %v",
+					tc.count, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSingleSubscriber_NilCounterFallsThroughToCache(t *testing.T) {
+	// Test fixtures that build a Hub without subscriberCount must
+	// continue to use the cached path — the fast-path gate is strictly
+	// additive, never bypasses the legacy behaviour, and never panics
+	// on the nil map. R040034-style hand-built Hubs in older tests
+	// still rely on this contract.
+	h := &Hub{}
+	if got := h.singleSubscriber("any"); got {
+		t.Fatal("nil subscriberCount must report singleSubscriber=false " +
+			"(force the legacy cached path); reporting true would panic on the " +
+			"nil map read.")
+	}
+}
