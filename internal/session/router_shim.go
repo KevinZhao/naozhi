@@ -396,11 +396,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 						name = strings.TrimSpace(name[:i])
 					}
 					taskID, toolUseID := ev.TaskID, ev.ToolUseID
-					// R260528-GO-1: SubagentLinker.Resolve dropped its
-					// dead description parameter; the local desc binding
-					// no longer needs to be threaded through. Comment
-					// retained because the wallclock=0 reasoning still
-					// applies.
+					desc := ev.Description
 					// R224-GO-3: pass 0 instead of time.Now().UnixMilli().
 					// subagent_link.Resolve uses agentToolUseMS to filter
 					// out subagent jsonl files whose first row predates
@@ -426,7 +422,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 					// other guards (sessionID match, toolUseID dedup,
 					// per-jsonl modtime ordering) still apply.
 					wallclock := int64(0)
-					go linker.Resolve(parentCtx, taskID, toolUseID, name, wallclock)
+					go linker.Resolve(parentCtx, taskID, toolUseID, name, desc, wallclock)
 				}
 			}
 		}

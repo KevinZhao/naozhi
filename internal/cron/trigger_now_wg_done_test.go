@@ -10,56 +10,57 @@ import (
 )
 
 // TestTriggerNow_BothBranchesReleaseWGInGoroutine is a source-level regression
-// gate for CRON4 (Round 174) refined under R260528-BUG-17.
+// gate for CRON4 (Round 174).
 //
-// Original CRON4 contract required all three release sites to defer Done()
-// inside a spawned goroutine for "symmetry" so Stop()'s triggerWG.Wait()
-// could not observe a misordered counter. R260528-BUG-17 reconsidered the
-// entryGone branch: it does zero asynchronous work (one slog.Debug call),
-// so spawning a goroutine just to log + Done burned ~8 KiB stack + a
-// scheduler-runtime hand-off for nothing, and the inline Done runs on
-// TriggerNow's own caller goroutine BEFORE TriggerNow returns — Stop() that
-// sees the counter at zero already saw a fully-released TriggerNow.
+// Prior to this round, the `entryID != 0 && entry.WrappedJob == nil` branch
+// of TriggerNow called s.triggerWG.Done() synchronously on the caller's
+// goroutine before returning. This was logically correct for the immediate
+// caller, but asymmetric with the sibling branches (WrappedJob != nil,
+// entryID == 0) which both defer Done() inside a spawned goroutine. The
+// asymmetry made it possible in principle for Stop()'s triggerWG.Wait() to
+// observe the counter at zero between TriggerNow's Add(1) and the spawned
+// goroutine of the other branches — a concern that grows every time someone
+// adds a new code path around the WG reservation.
 //
-// Updated contract: the two work-doing branches (WrappedJob != nil; entryID
-// == 0) MUST defer Done() inside a spawned goroutine because executeOpt
-// lives there and is intentionally async. The entryGone branch MAY release
-// inline because it does no work after Done. Bare top-level
-// s.triggerWG.Done() outside the entryGone branch is still rejected.
+// Contract: every release of the reserved WG slot MUST happen via `defer
+// s.triggerWG.Done()` inside a `go func() { ... }()` spawned in the function
+// body. Synchronous `s.triggerWG.Done()` calls are forbidden.
+//
+// This test scans the function body textually so a future refactor that
+// removes one of the goroutines re-introduces the asymmetry and fails
+// here explicitly, directing the reader to this godoc.
 func TestTriggerNow_BothBranchesReleaseWGInGoroutine(t *testing.T) {
 	t.Parallel()
 
 	body := readTriggerNowBody(t)
 
-	// Two `go func()` spawn sites required for the work-doing paths
-	// (WrappedJob != nil + entryID == 0). The entryGone fallback no longer
-	// spawns under R260528-BUG-17.
+	// Structural contract: exactly three `go func()` spawn sites inside
+	// TriggerNow. Two in the `entryID != 0` block (WrappedJob != nil, and
+	// the entry-gone fallback), one in the `entryID == 0` block. Any
+	// regression that collapses one of the entryID != 0 branches into a
+	// synchronous Done() will drop this count to two and fail.
 	spawnCount := strings.Count(body, "go func()")
-	if spawnCount != 2 {
-		t.Errorf("TriggerNow must spawn exactly 2 `go func()` calls (one per work-doing WG release path), got %d.\n"+
-			"See godoc on this test for the CRON4 / R260528-BUG-17 background.\nBody:\n%s",
+	if spawnCount != 3 {
+		t.Errorf("TriggerNow must spawn exactly 3 `go func()` calls (one per WG release path), got %d.\n"+
+			"See godoc on this test for the CRON4 background.\nBody:\n%s",
 			spawnCount, body)
 	}
 
-	// Each work-doing branch must defer-Done inside its goroutine.
+	// Defense against "spawn the goroutine but call Done synchronously":
+	// every release must appear as `defer s.triggerWG.Done()`, never a
+	// bare `s.triggerWG.Done()` at top-level.
 	deferDoneCount := strings.Count(body, "defer s.triggerWG.Done()")
-	if deferDoneCount != 2 {
-		t.Errorf("TriggerNow must release triggerWG via `defer s.triggerWG.Done()` in each spawned goroutine (2 expected), got %d.\nBody:\n%s",
+	if deferDoneCount != 3 {
+		t.Errorf("TriggerNow must release triggerWG via `defer s.triggerWG.Done()` in each spawned goroutine (3 expected), got %d.\nBody:\n%s",
 			deferDoneCount, body)
 	}
 
-	// The entryGone branch is the only legal home for an inline
-	// `s.triggerWG.Done()`. Confirm exactly one bare top-level call so a
-	// future refactor that drops it (regressing back to a goroutine spawn
-	// or removing Done entirely) trips the count and the reader is pointed
-	// here. The match pattern keys on the surrounding indentation
-	// produced by gofmt — three tabs of nesting (function → if entryID
-	// != 0 → if entryGone) — so it cannot accidentally match a goroutine
-	// body's defer Done at deeper indentation.
-	bareDoneCount := strings.Count(body, "\n\t\t\ts.triggerWG.Done()")
-	if bareDoneCount != 1 {
-		t.Errorf("TriggerNow must contain exactly 1 inline `s.triggerWG.Done()` (entryGone branch under R260528-BUG-17), got %d.\nBody:\n%s",
-			bareDoneCount, body)
+	// Explicitly reject the pre-fix shape: a bare `s.triggerWG.Done()`
+	// call outside a `defer` at top level. The "defer" prefix precludes
+	// matching `defer s.triggerWG.Done()`.
+	if strings.Contains(body, "\n\t\ts.triggerWG.Done()") {
+		t.Errorf("TriggerNow contains a synchronous `s.triggerWG.Done()` call — CRON4 regression. " +
+			"Release the WG slot from a spawned goroutine instead.")
 	}
 }
 
