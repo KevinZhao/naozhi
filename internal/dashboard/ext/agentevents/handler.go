@@ -1,4 +1,4 @@
-package server
+package agentevents
 
 import (
 	"io"
@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
@@ -52,7 +53,7 @@ const (
 	toolResultMaxBytes  = 16 << 20 // 16 MB
 )
 
-// AgentEventsHandlers hosts the agent-team endpoints. Kept separate from
+// Handler hosts the agent-team endpoints. Kept separate from
 // SessionHandlers so the auth middleware wiring in dashboard.go stays grep-able.
 //
 // linkerFor is injected so tests can stub the router/ManagedSession lookup
@@ -66,7 +67,7 @@ const (
 // future backends without a *cli.SubagentLinker can supply a noop without
 // inventing a fake concrete pointer. *cli.SubagentLinker satisfies the
 // interface implicitly; existing tests pass it directly.
-type AgentEventsHandlers struct {
+type Handler struct {
 	router     *session.Router
 	nodeAccess NodeAccessor
 	linkerFor  func(key string) agentlink.AgentLinker
@@ -75,7 +76,7 @@ type AgentEventsHandlers struct {
 // linkerForSession is the default lookup — ManagedSession → *cli.Process
 // → SubagentLinker. Returns nil when the session is missing, dead, or
 // backed by a non-claude process type.
-func (h *AgentEventsHandlers) linkerForSession(key string) agentlink.AgentLinker {
+func (h *Handler) linkerForSession(key string) agentlink.AgentLinker {
 	if h.linkerFor != nil {
 		return h.linkerFor(key)
 	}
@@ -94,7 +95,7 @@ func (h *AgentEventsHandlers) linkerForSession(key string) agentlink.AgentLinker
 	return concrete
 }
 
-func (h *AgentEventsHandlers) handleAgentEvents(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleAgentEvents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	key := q.Get("key")
 	if err := session.ValidateSessionKey(key); err != nil {
@@ -196,10 +197,10 @@ func (h *AgentEventsHandlers) handleAgentEvents(w http.ResponseWriter, r *http.R
 		http.Error(w, "transcript read error", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, entries)
+	httputil.WriteJSON(w, entries)
 }
 
-func (h *AgentEventsHandlers) handleToolResult(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) HandleToolResult(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	key := q.Get("key")
 	if err := session.ValidateSessionKey(key); err != nil {
@@ -273,5 +274,19 @@ func (h *AgentEventsHandlers) handleToolResult(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Cache-Control", "no-store")
 	if _, err := io.Copy(w, f); err != nil {
 		slog.Debug("tool_result: copy truncated", "err", err)
+	}
+}
+
+// Deps bundles all wiring for New. Phase 3d.
+type Deps struct {
+	Router     *session.Router
+	NodeAccess NodeAccessor
+}
+
+// New constructs a Handler from injected deps.
+func New(d Deps) *Handler {
+	return &Handler{
+		router:     d.Router,
+		nodeAccess: d.NodeAccess,
 	}
 }

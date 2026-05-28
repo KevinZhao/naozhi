@@ -1,4 +1,4 @@
-package server
+package agentevents
 
 import (
 	"context"
@@ -84,7 +84,7 @@ func TestAgentEvents_Happy(t *testing.T) {
 		Subagent:        "worker",
 	}})
 
-	h := &AgentEventsHandlers{
+	h := &Handler{
 		linkerFor: func(k string) agentlink.AgentLinker {
 			if k != testAgentEventsKey {
 				return nil
@@ -94,7 +94,7 @@ func TestAgentEvents_Happy(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	h.handleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t1", "", ""))
+	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t1", "", ""))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -110,11 +110,11 @@ func TestAgentEvents_Happy(t *testing.T) {
 func TestAgentEvents_Pending_WhenLinkerUnaware(t *testing.T) {
 	t.Parallel()
 	linker := cli.NewSubagentLinker()
-	h := &AgentEventsHandlers{
+	h := &Handler{
 		linkerFor: func(k string) agentlink.AgentLinker { return linker },
 	}
 	w := httptest.NewRecorder()
-	h.handleAgentEvents(w, agentEventsReq(testAgentEventsKey, "tunknown", "", ""))
+	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "tunknown", "", ""))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status=%d want 202", w.Code)
 	}
@@ -140,11 +140,11 @@ func TestAgentEvents_Tombstone_404(t *testing.T) {
 		t.Fatalf("expected tombstone, got %+v", info)
 	}
 
-	h := &AgentEventsHandlers{
+	h := &Handler{
 		linkerFor: func(k string) agentlink.AgentLinker { return linker },
 	}
 	w := httptest.NewRecorder()
-	h.handleAgentEvents(w, agentEventsReq(testAgentEventsKey, "tmissing", "", ""))
+	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "tmissing", "", ""))
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status=%d want 404", w.Code)
 	}
@@ -152,11 +152,11 @@ func TestAgentEvents_Tombstone_404(t *testing.T) {
 
 func TestAgentEvents_InvalidKey_400(t *testing.T) {
 	t.Parallel()
-	h := &AgentEventsHandlers{
+	h := &Handler{
 		linkerFor: func(k string) agentlink.AgentLinker { return cli.NewSubagentLinker() },
 	}
 	w := httptest.NewRecorder()
-	h.handleAgentEvents(w, agentEventsReq("", "t1", "", ""))
+	h.HandleAgentEvents(w, agentEventsReq("", "t1", "", ""))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d want 400", w.Code)
 	}
@@ -164,11 +164,11 @@ func TestAgentEvents_InvalidKey_400(t *testing.T) {
 
 func TestAgentEvents_InvalidTaskID_400(t *testing.T) {
 	t.Parallel()
-	h := &AgentEventsHandlers{
+	h := &Handler{
 		linkerFor: func(k string) agentlink.AgentLinker { return cli.NewSubagentLinker() },
 	}
 	w := httptest.NewRecorder()
-	h.handleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t/../escape", "", ""))
+	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "t/../escape", "", ""))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d want 400", w.Code)
 	}
@@ -190,13 +190,13 @@ func TestAgentEvents_AfterFilter(t *testing.T) {
 		JSONLPath:       path,
 	}})
 
-	h := &AgentEventsHandlers{
+	h := &Handler{
 		linkerFor: func(k string) agentlink.AgentLinker { return linker },
 	}
 	// after=2026-05-10T10:00:03Z → only line2 should remain. Parse as ms.
 	// 2026-05-10T10:00:03Z = 1778407203000
 	w := httptest.NewRecorder()
-	h.handleAgentEvents(w, agentEventsReq(testAgentEventsKey, "ta", "1778407203000", ""))
+	h.HandleAgentEvents(w, agentEventsReq(testAgentEventsKey, "ta", "1778407203000", ""))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -224,13 +224,13 @@ func TestToolResult_Happy(t *testing.T) {
 	// Split the tempdir into (projectDir, sessionID) so ProjectSessionDir returns projectSession.
 	linker.SetContext(filepath.Dir(projectSession), filepath.Base(projectSession))
 
-	h := &AgentEventsHandlers{
+	h := &Handler{
 		linkerFor: func(k string) agentlink.AgentLinker { return linker },
 	}
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/sessions/tool_result?key="+testAgentEventsKey+"&path=tool-results/abc12.txt", nil)
 	w := httptest.NewRecorder()
-	h.handleToolResult(w, req)
+	h.HandleToolResult(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -242,7 +242,7 @@ func TestToolResult_Happy(t *testing.T) {
 
 func TestToolResult_PathTraversal_400(t *testing.T) {
 	t.Parallel()
-	h := &AgentEventsHandlers{
+	h := &Handler{
 		linkerFor: func(k string) agentlink.AgentLinker { return cli.NewSubagentLinker() },
 	}
 	for _, p := range []string{
@@ -259,7 +259,7 @@ func TestToolResult_PathTraversal_400(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet,
 			"/api/sessions/tool_result?"+q.Encode(), nil)
 		w := httptest.NewRecorder()
-		h.handleToolResult(w, req)
+		h.HandleToolResult(w, req)
 		if w.Code == http.StatusOK {
 			t.Errorf("path=%q accepted (code=%d)", p, w.Code)
 		}
@@ -268,13 +268,13 @@ func TestToolResult_PathTraversal_400(t *testing.T) {
 
 func TestToolResult_NoLinker_404(t *testing.T) {
 	t.Parallel()
-	h := &AgentEventsHandlers{
+	h := &Handler{
 		linkerFor: func(k string) agentlink.AgentLinker { return nil },
 	}
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/sessions/tool_result?key="+testAgentEventsKey+"&path=tool-results/abc12.txt", nil)
 	w := httptest.NewRecorder()
-	h.handleToolResult(w, req)
+	h.HandleToolResult(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status=%d want 404", w.Code)
 	}
@@ -299,13 +299,13 @@ func TestToolResult_Oversize_413(t *testing.T) {
 
 	linker := cli.NewSubagentLinker()
 	linker.SetContext(filepath.Dir(projectSession), filepath.Base(projectSession))
-	h := &AgentEventsHandlers{
+	h := &Handler{
 		linkerFor: func(k string) agentlink.AgentLinker { return linker },
 	}
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/sessions/tool_result?key="+testAgentEventsKey+"&path=tool-results/big.txt", nil)
 	w := httptest.NewRecorder()
-	h.handleToolResult(w, req)
+	h.HandleToolResult(w, req)
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("status=%d want 413", w.Code)
 	}
@@ -343,7 +343,7 @@ func TestLinkerForSession_TypedNilGuard(t *testing.T) {
 	// the linkerForSession guard is designed for.
 	router.InjectSession(testAgentEventsKey, session.NewTestProcess())
 
-	h := &AgentEventsHandlers{router: router}
+	h := &Handler{router: router}
 
 	// Direct check: linkerForSession converts typed-nil → untyped nil so
 	// callers can use the idiomatic `if linker == nil` form.
@@ -361,7 +361,7 @@ func TestLinkerForSession_TypedNilGuard(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/sessions/agent_events?key="+testAgentEventsKey+"&task_id=tabc", nil)
 	w := httptest.NewRecorder()
-	h.handleAgentEvents(w, req)
+	h.HandleAgentEvents(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("HTTP status = %d, want 404; the typed-nil-promoted linker "+
 			"would slip past the nil guard and either reach linker.QueryOrResolveFast "+

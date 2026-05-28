@@ -1,4 +1,4 @@
-package server
+package transcribe
 
 import (
 	"bytes"
@@ -59,7 +59,7 @@ func newTranscribeRequestForSanitize(t *testing.T, audio []byte, declaredMIME st
 // TestHandleTranscribe_SanitisesLogInjectionRunes pins R247-SEC-18 (#516):
 // the dashboard handler must scrub IsLogInjectionRune codepoints (C1
 // controls, bidi overrides/isolates, LS/PS) from the transcribed text
-// before writeJSON serialises it onto the wire. We feed a stub
+// before httputil.WriteJSON serialises it onto the wire. We feed a stub
 // transcriber that returns text containing one rune from each class plus
 // an ASCII control byte; the response body must contain no surviving
 // bytes from those classes.
@@ -74,14 +74,14 @@ func TestHandleTranscribe_SanitisesLogInjectionRunes(t *testing.T) {
 	// literally would put a real line separator inside the source file
 	// which is awkward for editors and diff tools.
 	dirty := "hello‮world⁨x yz"
-	h := &TranscribeHandler{
+	h := &Handler{
 		transcriber: stubTranscriberSanitize{out: dirty},
 		sem:         make(chan struct{}, 1),
 	}
 
 	req := newTranscribeRequestForSanitize(t, oggMagicForSanitizeTest, "audio/ogg")
 	rec := httptest.NewRecorder()
-	h.handleTranscribe(rec, req)
+	h.HandleTranscribe(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%q", rec.Code, rec.Body.String())
