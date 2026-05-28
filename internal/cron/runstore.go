@@ -1222,6 +1222,19 @@ func (s *runStore) scanSortedRunDir(jobID string) ([]runDirItem, string, error) 
 //     unsafe gate after operators reported phantom "no older runs"
 //     truncation; the strict StartedAt filter is the only correct one
 //     and the per-candidate ReadFile is the cost of correctness here.
+//   - R260528-PERF-20 / #1359 ("mtime ceiling gate when mtime < before")
+//     is the symmetric variant: in steady-state cron jobs (run-time
+//     much smaller than the pagination window) StartedAt ≈ EndedAt ≈
+//     mtime, so an mtime < before pre-filter would skip the ReadFile
+//     for files that the strict StartedAt filter would also drop. Same
+//     won't-fix as #682 / #522: the asymmetry is one-directional —
+//     mtime > StartedAt is possible (long runs, fsnotify-touched files,
+//     filesystem mtime drift on restart), so a coarse mtime gate would
+//     still suppress legitimately-paginatable rows. Maintaining a
+//     metadata index sidecar adds a second consistency surface that
+//     warmCache + trimJobLocked + gc would all need to honour; the
+//     correctness cost outweighs the per-page IO saving on a path that
+//     already serves cache-warm pages without disk IO via cacheGet.
 //   - The regression scenario is locked in by
 //     TestRunStore_DiskList_BeforeStartedAtMtimeDivergence in
 //     runstore_test.go; any future re-introduction of an mtime gate
