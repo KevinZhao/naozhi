@@ -64,7 +64,7 @@ file_size:
       until_phase: 4c
     # ── 2 个 500-800 行（v0.6.1 新增） ──
     - path: internal/server/send.go
-      current: 643                          # 2026-05-28 serverCaps adapter 抽到 send_dispatch_adapter.go (Phase 3f-prep)
+      current: 556                          # 2026-05-28 ownerLoop + handleOwnerLoopPanic 抽到 send_owner_loop.go (Phase 3f-prep)
       limit: 500
       until_phase: 3f
     # internal/server/dashboard_auth.go: removed Phase 3a (PR #1436) — file
