@@ -1396,8 +1396,15 @@ func (s *Scheduler) registerJob(j *Job) error {
 	// full jitterMax window).
 	if sched := s.cron.Entry(entryID).Schedule; sched != nil {
 		j.cachedPeriod = schedulePeriodFromSched(sched, time.Now())
+		// R241-PERF-3 (#477): stash the parsed schedule alongside cachedPeriod
+		// so dashboard handleList's HasMissedSchedule fanout (1Hz × N jobs)
+		// can call HasMissedScheduleCached instead of cronParser.Parse on
+		// every tick. Lifetime mirrors cachedPeriod — UpdateJob's Schedule
+		// branch calls registerJob again so the cache stays in lockstep.
+		j.cachedSched = sched
 	} else {
 		j.cachedPeriod = 0
+		j.cachedSched = nil
 	}
 	return nil
 }

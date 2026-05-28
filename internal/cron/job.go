@@ -150,6 +150,16 @@ type Job struct {
 	// callers fall back to the live computation in that case so test fixtures
 	// (which never call registerJob) keep working.
 	cachedPeriod time.Duration // runtime only, not persisted
+
+	// cachedSched is the parsed robfigcron.Schedule, populated alongside
+	// cachedPeriod by registerJob. Lets HasMissedScheduleCached (the cron-
+	// pkg helper exposed for dashboard handleList — R241-PERF-3 / #477)
+	// skip the cronParser.Parse regex on every 1Hz tick. nil = unknown /
+	// not yet registered; HasMissedScheduleCached falls back to the
+	// classic HasMissedSchedule path which re-parses on every call.
+	// Test fixtures that build Job by hand (without registerJob) keep
+	// working through that fallback.
+	cachedSched robfigcron.Schedule // runtime only, not persisted
 }
 
 // RunState 是单次 cron 执行的终态分类。运行中态不进 RunState（用 runInflight
@@ -456,12 +466,42 @@ func previousTickBeforeFromSched(sched robfigcron.Schedule, period time.Duration
 //
 // 关联：docs/rfc/cron-v2-polish.md §3.3 Increment C。
 func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
+	return hasMissedScheduleImpl(j, nil, now, startedAt)
+}
+
+// HasMissedScheduleCached is the alloc-free variant of HasMissedSchedule for
+// the dashboard 1Hz handleList fanout (R241-PERF-3 / #477). When the caller
+// holds a *Job whose registerJob has run, j.cachedSched is non-nil and the
+// helper skips the cronParser.Parse regex (the dominant cost at 50 jobs/s).
+// Falls back to the parse path when the cache is cold (test fixtures, jobs
+// loaded via JSON without registerJob, transient registerJob failure) so
+// behaviour matches HasMissedSchedule on every input.
+//
+// The parse-saving optimisation is otherwise identical to HasMissedSchedule:
+// same suppression window, same period derivation, same prev-tick guard,
+// same return shape. Document changes there propagate here.
+func HasMissedScheduleCached(j *Job, now, startedAt time.Time) (bool, time.Time) {
 	if j == nil {
 		return false, time.Time{}
 	}
-	sched, err := cronParser.Parse(j.Schedule)
-	if err != nil {
+	return hasMissedScheduleImpl(j, j.cachedSched, now, startedAt)
+}
+
+// hasMissedScheduleImpl is the shared body of HasMissedSchedule and
+// HasMissedScheduleCached. cached, when non-nil, lets the caller skip the
+// regex parse; on cold cache the caller passes nil and we fall through to
+// cronParser.Parse so test fixtures keep working.
+func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, now, startedAt time.Time) (bool, time.Time) {
+	if j == nil {
 		return false, time.Time{}
+	}
+	sched := cached
+	if sched == nil {
+		var err error
+		sched, err = cronParser.Parse(j.Schedule)
+		if err != nil {
+			return false, time.Time{}
+		}
 	}
 	period := schedulePeriodFromSched(sched, now)
 	if period <= 0 {
