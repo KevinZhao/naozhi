@@ -61,8 +61,15 @@ func loadJobs(path string) (map[string]*Job, error) {
 			slog.Warn("cron store path is a symlink; refusing to follow", "path", path)
 			return nil, fmt.Errorf("cron store path is a symlink, refusing to follow")
 		}
-		// Treat any non-NotExist open failure as a hard error: the file
-		// exists in some form and we cannot prove it is not a symlink.
+		// R241-SEC-9 (#469): Treat any non-NotExist open failure as a
+		// hard error. The earlier shape Lstat'd the path and only Warn'd
+		// on non-NotExist Lstat failures (FUSE pseudo-EBUSY etc.) before
+		// continuing to os.Open, leaving a symlink-bypass window. Now
+		// the only success path is a clean OpenFile(O_NOFOLLOW), so any
+		// error other than ErrNotExist must abort the load —
+		// continuation would risk reading attacker-substituted bytes or
+		// (worse) succeeding with an empty []*Job that the next persist
+		// silently writes back, clobbering the operator's real jobs.
 		// ErrNotExist remains the "no file = empty jobs" path.
 		slog.Warn("open cron store failed", "path", path, "err", err)
 		return nil, fmt.Errorf("open cron store: %w", err)

@@ -88,6 +88,17 @@ func putMarshalEntries(s *[]*Job) {
 // R250-ARCH-14: lifted from a package-level var to a *Scheduler field so a
 // failing-marshal test in one parallel run cannot leak into another scheduler
 // instance, and so the test seam no longer pokes a hole through prod surface.
+//
+// R250-ARCH-14 closes the cluster of older anchors that all flagged the same
+// package-level-mutable shape:
+//   - R242-CR-5 (#693): "atomic.Pointer pkg-level mutable via init() — DI field"
+//   - R246-ARCH-18 / R247-CR-19 (#599): "test seam loaded via init()"
+//
+// The current shape stores defaultMarshalJobs as a package-level var that is
+// read-only after init (so we can take its address without per-Scheduler
+// allocation) and the *Scheduler initialiser does Store(&defaultMarshalJobs).
+// Per-Scheduler atomic.Pointer.Swap is what tests use; no init() seam, no
+// global mutation. Pinned by TestMarshalJobs_PerSchedulerIsolation.
 type marshalJobsFn func(any) ([]byte, error)
 
 // defaultMarshalJobs is the production serializer plumbed into every

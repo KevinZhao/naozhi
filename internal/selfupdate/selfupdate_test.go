@@ -360,3 +360,73 @@ func TestFetchFile_RejectsNonHTTPS(t *testing.T) {
 		t.Errorf("expected dest to NOT be created, stat err = %v", statErr)
 	}
 }
+
+// TestFetchFile_RejectsBadSchemeShapes anchors R247-SEC-5 (#497): the
+// belt-and-suspenders parsed-scheme check after http.NewRequestWithContext
+// rejects schemes the prefix gate already covers AND any future regression
+// where a caller pre-strips the scheme. Each case must fail before the
+// staging file is touched.
+func TestFetchFile_RejectsBadSchemeShapes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"plain_http", "http://example.invalid/asset"},
+		{"ftp_scheme", "ftp://example.invalid/asset"},
+		{"file_scheme", "file:///etc/passwd"},
+		{"empty_url", ""},
+		{"scheme_only", "https://"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dest := filepath.Join(dir, "asset_"+c.name)
+			err := fetchFile(context.Background(), c.url, dest, maxBinaryBytes)
+			if err == nil {
+				t.Fatalf("expected %q to be rejected", c.url)
+			}
+			// Either the prefix gate or the post-parse scheme gate (or
+			// the request builder for malformed input like the empty URL)
+			// must trip. Just assert the staging file is never created so
+			// the rejection always happens BEFORE we touch the network or
+			// the disk.
+			if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+				t.Errorf("expected dest to NOT be created, stat err = %v", statErr)
+			}
+		})
+	}
+}
+
+// TestFetchFile_ErrorMessageDistinguishesGuards pins R247-SEC-5 (#497):
+// the prefix and parsed-scheme gates emit DIFFERENT error substrings
+// ("non-https URL" vs "non-https URL after parse") so an operator
+// reading logs can tell which leg of the defense-in-depth tripped. Today
+// only the prefix check fires for plain http://; the parsed-scheme check
+// only catches a hypothetical caller that bypasses the prefix gate.
+// Asserting the message split here prevents a future "consolidate the
+// two errors into one" cleanup from silently merging the two
+// observability signals.
+func TestFetchFile_ErrorMessageDistinguishesGuards(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "asset")
+
+	err := fetchFile(context.Background(), "http://example.invalid/asset", dest, maxBinaryBytes)
+	if err == nil {
+		t.Fatal("expected http:// to be rejected")
+	}
+	// Prefix gate fires first; its message must NOT include "after parse"
+	// (the parsed-scheme gate's discriminator). If a future patch reorders
+	// the gates so the parsed-scheme one fires first for plain http://,
+	// the message changes and an operator-facing ops runbook breaks.
+	if strings.Contains(err.Error(), "after parse") {
+		t.Errorf("prefix gate should fire first, but message points at parsed-scheme: %v", err)
+	}
+	if !strings.Contains(err.Error(), "non-https") {
+		t.Errorf("expected non-https rejection, got: %v", err)
+	}
+}

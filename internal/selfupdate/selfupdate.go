@@ -332,6 +332,18 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 	if err != nil {
 		return fmt.Errorf("build fetch request: %w", err)
 	}
+	// R247-SEC-5 (#497): belt-and-suspenders check on the parsed URL scheme.
+	// The HasPrefix gate above rejects mixed-case schemes ("HTTPS://...")
+	// which Go's URL parser would otherwise normalise to scheme=https. That
+	// case is harmless — the prefix check is strictly stricter than the
+	// scheme check — but a parsed-scheme assertion documents the invariant
+	// at the canonical point CheckRedirect uses, mirrors the redirect
+	// guard's check shape, and survives any future relaxation of the prefix
+	// gate (e.g. a caller that pre-validates scheme separately and trims
+	// the `https://` literal before calling). Defense in depth.
+	if req.URL == nil || req.URL.Scheme != "https" {
+		return fmt.Errorf("selfupdate: refused non-https URL after parse: %s", fetchURL)
+	}
 	// Pin every hop to github.com / *.github.com so a hostile redirect cannot
 	// pivot the binary or checksums.txt download to an attacker-controlled
 	// host. Without this guard the SHA-256 verification is no longer
