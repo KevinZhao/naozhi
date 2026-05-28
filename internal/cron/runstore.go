@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -466,7 +467,21 @@ func (s *runStore) jobLock(jobID string) *sync.Mutex {
 //
 // Tests that want hard-fail-on-contract-miss can wrap the slog handler
 // to escalate; production stays alive.
+//
+// R249-CR-18 (#961): the TryLock+Unlock pair costs ~30 ns on the Append
+// hot path (skipAppendTrim + trimJobLocked both call this on every
+// invocation) and is a pure best-effort check — false negatives are
+// already accepted, the production warn path has fired exactly zero
+// times since R242-CR-11 / R242-CR-7 replaced the original panic. Gate
+// the lock probe behind testing.Testing() so production processes pay
+// only the function-call overhead while `go test` still gets the
+// contract assertion. The field-name + signature stay so future
+// callers' godoc references and any test fixtures that look up the
+// method via reflection continue to work.
 func (s *runStore) assertJobLockHeld(jobID string) {
+	if !testing.Testing() {
+		return
+	}
 	lock := s.jobLock(jobID)
 	if lock.TryLock() {
 		lock.Unlock()

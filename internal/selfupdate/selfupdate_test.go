@@ -400,3 +400,33 @@ func TestFetchFile_RejectsBadSchemeShapes(t *testing.T) {
 		})
 	}
 }
+
+// TestFetchFile_ErrorMessageDistinguishesGuards pins R247-SEC-5 (#497):
+// the prefix and parsed-scheme gates emit DIFFERENT error substrings
+// ("non-https URL" vs "non-https URL after parse") so an operator
+// reading logs can tell which leg of the defense-in-depth tripped. Today
+// only the prefix check fires for plain http://; the parsed-scheme check
+// only catches a hypothetical caller that bypasses the prefix gate.
+// Asserting the message split here prevents a future "consolidate the
+// two errors into one" cleanup from silently merging the two
+// observability signals.
+func TestFetchFile_ErrorMessageDistinguishesGuards(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "asset")
+
+	err := fetchFile(context.Background(), "http://example.invalid/asset", dest, maxBinaryBytes)
+	if err == nil {
+		t.Fatal("expected http:// to be rejected")
+	}
+	// Prefix gate fires first; its message must NOT include "after parse"
+	// (the parsed-scheme gate's discriminator). If a future patch reorders
+	// the gates so the parsed-scheme one fires first for plain http://,
+	// the message changes and an operator-facing ops runbook breaks.
+	if strings.Contains(err.Error(), "after parse") {
+		t.Errorf("prefix gate should fire first, but message points at parsed-scheme: %v", err)
+	}
+	if !strings.Contains(err.Error(), "non-https") {
+		t.Errorf("expected non-https rejection, got: %v", err)
+	}
+}
