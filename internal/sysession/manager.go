@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // osExit was previously the default Stop deadline-exceeded exit hook,
@@ -690,7 +692,19 @@ func (m *Manager) recordRun(rec *daemonRecord, runID string, trigger DaemonTrigg
 		Stats:      flattenTickReport(report),
 	}
 	if err != nil {
-		dr.ErrorMsg = err.Error()
+		// R260528-BUG-21: belt-and-braces sanitisation on the persisted
+		// error message. runner.go already SanitizeForLog's stderr before
+		// fmt.Errorf wraps it (see "sysession: runner stderr" path), but
+		// other err sources reaching recordRun (timeouts, panics-as-error,
+		// validation errors carrying user-supplied strings) bypass that
+		// hop, so a control rune or oversized payload can land in the
+		// run-history JSONL and propagate to the dashboard / log via the
+		// DaemonRunEnded callback. Sanitise here as the centralised gate.
+		// 1024 cap matches the dashboard run-history line budget — long
+		// enough to preserve the meaningful tail of a wrapped error chain
+		// without letting a misbehaving daemon write multi-KB strings to
+		// every run record.
+		dr.ErrorMsg = osutil.SanitizeForLog(err.Error(), 1024)
 	}
 	rec.runs.Append(dr)
 

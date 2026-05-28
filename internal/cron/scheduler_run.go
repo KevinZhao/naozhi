@@ -179,7 +179,8 @@ func (s *Scheduler) cleanupRunningJobIfIdle(jobID string) bool {
 	inf, ok := v.(*runInflight)
 	if !ok || inf == nil {
 		// Defensive: an unexpected map value type implies the package
-		// invariant was violated upstream. LoadAndDelete still cleans it.
+		// invariant was violated upstream.
+		//
 		// R040034-GO-7 (#1392): bump severity to slog.Error so the
 		// invariant violation surfaces in journalctl. The previous
 		// silent sweep meant a future regression that stored the wrong
@@ -187,9 +188,16 @@ func (s *Scheduler) cleanupRunningJobIfIdle(jobID string) bool {
 		// snapshot, a stale closure, etc.) would be cleaned up without
 		// any operator-visible signal until downstream code paths
 		// observed the missing in-flight metadata.
+		//
+		// R260528-BUG-11: use CompareAndDelete on the observed v (not
+		// LoadAndDelete on the jobID) so a concurrent jobInflight that
+		// already replaced this stale entry with a fresh *runInflight
+		// is not collateral damage. Mirrors the normal-path
+		// CompareAndDelete below to keep both branches TOCTOU-safe
+		// under the same single-flight contract.
 		slog.Error("cron: runningJobs holds unexpected value type; sweeping",
 			"job_id", jobID, "type", fmt.Sprintf("%T", v))
-		s.runningJobs.LoadAndDelete(jobID)
+		s.runningJobs.CompareAndDelete(jobID, v)
 		return true
 	}
 	if inf.running.Load() {
@@ -367,6 +375,16 @@ func formatCronNotice(label, body string) string {
 	if strings.IndexByte(label, ']') >= 0 {
 		label = strings.ReplaceAll(label, "]", "］")
 	}
+	// R260528-SEC-8: markdown link-syntax `[`, `(`, `)` were not escaped
+	// in label or body. Slack / Discord / Feishu rich-card renderers parse
+	// `[text](url)` as a clickable link, so a body containing
+	// `Click [here](http://attacker)` (or a label with `[evil`) would
+	// surface as a hijackable hyperlink. Substitute the full-width
+	// counterparts U+FF3B / U+FF08 / U+FF09 — visually similar but never
+	// bracket-matched by any markdown parser. IndexByte fast-paths keep
+	// the common ASCII-clean case alloc-free.
+	label = escapeCronMarkdownPunct(label)
+	body = escapeCronMarkdownPunct(body)
 	// R247-PERF-7 (#539): strings.Builder skips fmt.Sprintf's reflection
 	// walk over the already-bounded label/body inputs. Pre-grow once so
 	// the underlying buffer covers the largest plausible payload (label is
@@ -380,6 +398,33 @@ func formatCronNotice(label, body string) string {
 	b.WriteString(cronNoticeMid)
 	b.WriteString(body)
 	return b.String()
+}
+
+// escapeCronMarkdownPunct replaces the markdown link-syntax characters
+// `[`, `]`, `(`, `)` with full-width visually-similar codepoints
+// (U+FF3B / U+FF3D / U+FF08 / U+FF09) so an attacker-controlled cron
+// Title or result body cannot smuggle `[text](url)` clickable links
+// into the IM notice. Each replace is gated by IndexByte so a clean
+// ASCII payload stays alloc-free. R260528-SEC-8.
+//
+// label callers run the `]` substitution at line 341 (R250-SEC-6) before
+// reaching here; the duplicate `]` work is idempotent (the second pass
+// finds no `]` left and skips). Body callers rely on this helper to
+// strip `]` since the label-side gate skips them.
+func escapeCronMarkdownPunct(s string) string {
+	if strings.IndexByte(s, '[') >= 0 {
+		s = strings.ReplaceAll(s, "[", "［")
+	}
+	if strings.IndexByte(s, ']') >= 0 {
+		s = strings.ReplaceAll(s, "]", "］")
+	}
+	if strings.IndexByte(s, '(') >= 0 {
+		s = strings.ReplaceAll(s, "(", "（")
+	}
+	if strings.IndexByte(s, ')') >= 0 {
+		s = strings.ReplaceAll(s, ")", "）")
+	}
+	return s
 }
 
 // labelOrID returns the IM-notice display label: snap.label when populated,

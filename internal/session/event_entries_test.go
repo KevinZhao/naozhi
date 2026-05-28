@@ -268,6 +268,47 @@ func TestEventEntriesSince_OutOfOrderInjectSortsEagerly(t *testing.T) {
 	}
 }
 
+// TestEventEntriesSinceDeadSessionShortCircuit pins the dead-session fast
+// path: when persistedHistorySorted=true and the latest entry's Time is
+// already <= afterMS, EventEntriesSince must return nil without scanning
+// the whole slice. Mirrors the steady-state idle dashboard poll where
+// every dead-session tab calls in once a second with afterMS = last seen.
+// R260528-PERF-4.
+func TestEventEntriesSinceDeadSessionShortCircuit(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+		{Time: 300, Summary: "c"},
+	}
+	s.persistedHistorySorted = true
+
+	// afterMS == last.Time → no entries strictly newer.
+	if got := s.EventEntriesSince(300); got != nil {
+		t.Fatalf("afterMS==last.Time: got %v want nil", got)
+	}
+	// afterMS > last.Time → still nothing.
+	if got := s.EventEntriesSince(500); got != nil {
+		t.Fatalf("afterMS>last.Time: got %v want nil", got)
+	}
+	// afterMS < last.Time → must still return the suffix.
+	got := s.EventEntriesSince(150)
+	if len(got) != 2 || got[0].Time != 200 || got[1].Time != 300 {
+		t.Fatalf("afterMS<last.Time: got %+v want [200 300]", got)
+	}
+
+	// Empty history → nil regardless of sorted flag.
+	empty := &ManagedSession{key: "k2"}
+	if got := empty.EventEntriesSince(0); got != nil {
+		t.Fatalf("empty: got %v want nil", got)
+	}
+	empty.persistedHistorySorted = true
+	if got := empty.EventEntriesSince(0); got != nil {
+		t.Fatalf("empty sorted: got %v want nil", got)
+	}
+}
+
 // TestHistorySource_ConcurrentSetAndRead pins the race-free contract on the
 // atomic.Pointer hand-off: SetHistorySource and EventEntriesBeforeCtx can
 // execute concurrently without a -race violation. Without atomic storage

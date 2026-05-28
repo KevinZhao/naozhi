@@ -1806,6 +1806,15 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	// set the flag, and downgrade — subsequent reads then take the cheap
 	// RLock-only path.
 	s.historyMu.RLock()
+	// Fast path: empty history needs no work; when sorted, the last entry
+	// holds the max Time so we can skip the linear scan if it's already
+	// <= afterMS. Idle dashboard poll (afterMS = last seen) on dead
+	// sessions used to scan the entire persistedHistory every tick even
+	// though every entry was older than afterMS. R260528-PERF-4.
+	if n := len(s.persistedHistory); n == 0 || (s.persistedHistorySorted && s.persistedHistory[n-1].Time <= afterMS) {
+		s.historyMu.RUnlock()
+		return nil
+	}
 	if !s.persistedHistorySorted {
 		s.historyMu.RUnlock()
 		s.historyMu.Lock()
@@ -1817,6 +1826,14 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 		}
 		s.historyMu.Unlock()
 		s.historyMu.RLock()
+		// Re-check the short-circuit now that we're sorted — the sort
+		// could only have rearranged entries, not added new ones, but
+		// take the same fast exit if last.Time <= afterMS to avoid the
+		// scan-and-allocate on the steady-state poll.
+		if n := len(s.persistedHistory); n == 0 || s.persistedHistory[n-1].Time <= afterMS {
+			s.historyMu.RUnlock()
+			return nil
+		}
 	}
 	// Pre-size the result to len(persistedHistory) to avoid 9 reallocations
 	// growing 1→2→…→512 on the dashboard's 1Hz × N-tab × dead-session poll

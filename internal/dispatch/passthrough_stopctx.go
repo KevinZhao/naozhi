@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"log/slog"
 	"time"
 )
 
@@ -17,9 +18,13 @@ import (
 // signal — leaving sendAndReply only stoppable by its internal timer.
 //
 // Caller contract:
-//   - cancelSrc must be the long-lived service ctx (typically
+//   - cancelSrc should be the long-lived service ctx (typically
 //     dispatcher.stopCtx, which NewDispatcher seeds from
-//     DispatcherConfig.StopCtx). nil cancelSrc panics.
+//     DispatcherConfig.StopCtx). NewDispatcher's constructor swap
+//     guarantees this is always non-nil for production wiring; if a
+//     test or future path ever passes nil, we log + degrade to
+//     context.Background() rather than panic — the panic was a dead
+//     defence (R260528-GO-11).
 //   - valuesSrc carries the per-request slog attrs / auth values from
 //     the webhook handler. nil valuesSrc treats it as "no values" — Value
 //     lookups still consult cancelSrc as a final fallback so attrs the
@@ -29,7 +34,11 @@ import (
 // (#1320)
 func mergeStopAndValues(cancelSrc, valuesSrc context.Context) context.Context {
 	if cancelSrc == nil {
-		panic("dispatch: mergeStopAndValues cancelSrc must be non-nil")
+		// Dead defence in normal flow (NewDispatcher seeds stopCtx);
+		// degrade gracefully so an unexpected test wiring or future
+		// caller bug doesn't crash the dispatcher. R260528-GO-11.
+		slog.Error("dispatch: mergeStopAndValues nil cancelSrc, falling back to Background")
+		cancelSrc = context.Background()
 	}
 	if valuesSrc == nil {
 		valuesSrc = context.Background()
