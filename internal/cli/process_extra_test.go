@@ -1107,12 +1107,19 @@ func TestProcess_ReadLoop_Pong(t *testing.T) {
 	srv.writer.Flush()             //nolint:errcheck
 	srv.mu.Unlock()
 
-	time.Sleep(50 * time.Millisecond)
-	// Verify pongRecv received the signal
+	// TEST1 (#395): poll for the pong signal instead of sleeping a fixed
+	// 50ms. pongRecv is a buffered(1) chan that readLoop sends into the
+	// moment the pong frame parses, so a 200ms upper bound gives slow CI
+	// runners ample headroom while a happy-path run exits in microseconds.
+	// On timeout the select silently falls through (matches the original
+	// "might already have been consumed" semantics for shaved-down test
+	// runs), so the test continues to assert the readLoop-exit contract
+	// even when the pong race is lost — the prior wall-clock sleep was a
+	// best-effort observation, not a hard precondition.
 	select {
 	case <-p.pongRecv:
 		// Signal received
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(200 * time.Millisecond):
 		// pongRecv is buffered(1) — might already have been consumed
 	}
 	srv.SendCLIExited(0)
