@@ -829,6 +829,20 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 // runs/<jobID>/ directory and parsing each .json file. Holds the per-job
 // disk lock so a concurrent Append can't race the warm pass.
 //
+// Post-condition (R241-CR-6 / #486): on return, the cache entry's
+// warm flag is true REGARDLESS of disk outcome — diskListNewestFirst
+// folds ReadDir failures into a nil rows + 0 corruptCount return, and
+// ringSeed installs an empty ring; warm=true is set unconditionally
+// before the inner Unlock. This intentionally caches the absence of
+// runs (or a transient disk error) for the jobLock+entry.mu window so
+// a 1Hz dashboard poller does not re-ReadDir the same failing
+// directory on every call. A subsequent Append always invalidates +
+// re-warms via cacheHeadPush + warmCacheLocked, so a transient ENOENT
+// during process startup self-heals on the first persisted run. The
+// "post-warm `if !entry.warm { return nil, false }`" guard in cacheGet
+// is therefore a defensive belt for a future warmCache change rather
+// than a real disk-error fallback path.
+//
 // R236-PERF-09 (#527, partial): the corrupt-file slog.Warn was hoisted
 // past lock release so a slow stderr / structured-log shipper can't
 // extend the jobLock + entry.mu window that blocks concurrent Append
@@ -1157,6 +1171,71 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 // hits cache on warm path. R220-PERF-1.
 func (s *runStore) Recent(jobID string, n int) []CronRunSummary {
 	return s.List(jobID, n, time.Time{})
+}
+
+// RecentSessionIDs returns up to n distinct non-empty SessionID strings from
+// the newest-first run history for jobID. Functionally equivalent to walking
+// `Recent(jobID, n)` and reading the SessionID field of each entry, but avoids
+// the per-row CronRunSummary value-copy that Recent's defensive `ringSnapshot`
+// makes (CronRunSummary embeds Result []byte up to ~4 KB plus several
+// allocated string fields). On the buildKnownSessionsSet hot path
+// (#1285 / R20260527-PERF-6) the caller only needs the session IDs and a
+// 50-job × 200-cap walk over Recent copies up to 10 000 summary structs of
+// pure overhead. Cache-warm fast path stays O(min(n, count)) under entry.mu;
+// cold path falls back to disk via List+filter so we never silently miss a
+// session ID that lives only on disk.
+//
+// Returns a fresh slice; safe to retain. Empty (non-nil) when the job has
+// never run or every recent run lacks a SessionID. Limit clamping mirrors
+// Recent / List.
+func (s *runStore) RecentSessionIDs(jobID string, n int) []string {
+	if s == nil || s.disabled || jobID == "" {
+		return nil
+	}
+	if !IsValidID(jobID) {
+		return nil
+	}
+	if n <= 0 {
+		n = 50
+	}
+	if n > DefaultRunsKeepCount {
+		n = DefaultRunsKeepCount
+	}
+	// Cache-warm fast path: read SessionIDs directly off the ring under
+	// entry.mu without materialising a CronRunSummary slice. Mirrors the
+	// before=zero branch of List → cacheGet but skips ringSnapshot's
+	// per-row value copy.
+	if v, ok := s.recentCache.Load(jobID); ok {
+		entry := v.(*recentCacheEntry)
+		entry.mu.Lock()
+		if entry.warm {
+			limit := n
+			if limit > entry.count {
+				limit = entry.count
+			}
+			out := make([]string, 0, limit)
+			for i := 0; i < limit; i++ {
+				if sid := entry.ringRead(i).SessionID; sid != "" {
+					out = append(out, sid)
+				}
+			}
+			entry.mu.Unlock()
+			return out
+		}
+		entry.mu.Unlock()
+	}
+	// Cold path: fall back to the cached/disk Recent walk. We pay the
+	// per-row copy here but cold misses are rare (warmCache lazy-fills on
+	// first List/Recent), so the steady-state allocation profile is the
+	// fast path above.
+	rows := s.List(jobID, n, time.Time{})
+	out := make([]string, 0, len(rows))
+	for i := range rows {
+		if sid := rows[i].SessionID; sid != "" {
+			out = append(out, sid)
+		}
+	}
+	return out
 }
 
 // Get returns the full CronRun for runID under jobID, or (nil, error)
@@ -1530,6 +1609,16 @@ func (s *runStore) trimSkipFromCache(jobID string, now time.Time) bool {
 // cacheTrimAfterDisk reconciles the recentCache for jobID after on-disk
 // trimJobLocked removed expired / over-cap entries. Called by trimJobLocked
 // only — caller holds jobLock(jobID).
+//
+// Allocation contract (R241-PERF-6 / #480): trims in place on the existing
+// ring backing array — no fresh `keep` slice. The pre-ring implementation
+// rebuilt a `keep := []CronRunSummary{...}` slice every call; with the
+// post-R221-FIX-P0-2 ring, ringSnapshot already returns fresh copies for
+// readers, so this path mutates entry.head / entry.count + zeroes dropped
+// slots without ever allocating. Hot-path zero-alloc property is load-
+// bearing: trimJobLocked fires from Append's appendTrimBatch boundary
+// (every 10 Appends) and the dashboard 1Hz dispatch path, so a per-call
+// alloc would amplify GC pressure linearly with cron tick rate.
 func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {

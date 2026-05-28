@@ -25,6 +25,76 @@ type NotifyTarget struct {
 // IsSet reports whether both fields are populated.
 func (n NotifyTarget) IsSet() bool { return n.Platform != "" && n.ChatID != "" }
 
+// NotifySource enumerates which branch of resolveNotifyDecision selected
+// the target. R241-ARCH-12 (#520): the 5-branch decision tree was
+// inline-opaque — callers (dashboard, debug logging) could not inspect
+// why a particular target was selected. Returning the source alongside
+// the target lets diagnostic surfaces explain the resolution without
+// duplicating the priority ladder logic.
+type NotifySource int
+
+const (
+	// NotifySourceNone — no target selected. Either notify==false (explicit
+	// disable), notify==true with no default configured, or notify==nil
+	// with a non-IM platName ("dashboard") / empty fields.
+	NotifySourceNone NotifySource = iota
+
+	// NotifySourceExplicitDisable — notify==false short-circuited above
+	// every other branch.
+	NotifySourceExplicitDisable
+
+	// NotifySourcePerJobOverride — both NotifyPlatform and NotifyChatID
+	// are set on the job; this overrides any default and any source-chat
+	// fallback regardless of notify tristate.
+	NotifySourcePerJobOverride
+
+	// NotifySourceDefault — notify==true selected the scheduler-wide
+	// notify_default target.
+	NotifySourceDefault
+
+	// NotifySourceDefaultMissing — notify==true but no default configured;
+	// no target produced and a Warn was emitted (caller must NOT log it
+	// twice).
+	NotifySourceDefaultMissing
+
+	// NotifySourceLegacySourceChat — notify==nil (unset) and platName/chatID
+	// are non-empty IM coords; legacy behaviour: reply to source chat.
+	NotifySourceLegacySourceChat
+
+	// NotifySourceDashboardSilent — notify==nil and platName=="dashboard";
+	// dashboard-created jobs stay silent unless an explicit target is set.
+	NotifySourceDashboardSilent
+)
+
+// String returns a stable lower_snake identifier suitable for slog keys
+// and dashboard tooltips. Stable across versions — dashboards may match
+// on these strings.
+func (s NotifySource) String() string {
+	switch s {
+	case NotifySourceExplicitDisable:
+		return "explicit_disable"
+	case NotifySourcePerJobOverride:
+		return "per_job_override"
+	case NotifySourceDefault:
+		return "default"
+	case NotifySourceDefaultMissing:
+		return "default_missing"
+	case NotifySourceLegacySourceChat:
+		return "legacy_source_chat"
+	case NotifySourceDashboardSilent:
+		return "dashboard_silent"
+	default:
+		return "none"
+	}
+}
+
+// NotifyDecision pairs the resolved NotifyTarget with the source branch
+// that produced it. R241-ARCH-12 (#520).
+type NotifyDecision struct {
+	Target NotifyTarget
+	Source NotifySource
+}
+
 // cronNotifyTimeout is the per-target send budget for cron-driven IM replies.
 // Distinct from dispatch.platformReplyTimeout (15s) because cron flushes can
 // chunk large outputs across multiple ReplyWithRetry calls under cron.Stop's
@@ -56,27 +126,50 @@ const cronNotifyTimeout = 30 * time.Second
 //  3. notify==false disables delivery even for IM-created jobs.
 //  4. notify==nil (unset) preserves legacy behavior: IM-created jobs reply
 //     to their own source chat; dashboard-created jobs stay silent.
+//
+// Thin wrapper around resolveNotifyDecision; preserved as the historical
+// caller surface so existing call sites remain a single map lookup. New
+// callers wanting to inspect *which branch* selected the target should
+// call resolveNotifyDecision directly. R241-ARCH-12 (#520).
 func (s *Scheduler) resolveNotifyTarget(platName, chatID, notifyPlat, notifyChat string, notify *bool) NotifyTarget {
+	return s.resolveNotifyDecision(platName, chatID, notifyPlat, notifyChat, notify).Target
+}
+
+// resolveNotifyDecision exposes both the chosen NotifyTarget and the
+// branch (NotifySource) that selected it. The 5-branch decision tree
+// was previously inline-opaque (R241-ARCH-12, #520); callers that want
+// to debug "why did this run go silent / fan out to dashboard" can now
+// log decision.Source rather than recomputing the priority ladder.
+//
+// Behaviour mirrors the previous resolveNotifyTarget exactly — including
+// the slog.Warn for "enabled but no target", which still fires only on
+// the NotifySourceDefaultMissing branch so the warning frequency does
+// not change. Callers MUST NOT re-emit a warning when they observe
+// NotifySourceDefaultMissing.
+func (s *Scheduler) resolveNotifyDecision(platName, chatID, notifyPlat, notifyChat string, notify *bool) NotifyDecision {
 	// Explicit disable wins over everything.
 	if notify != nil && !*notify {
-		return NotifyTarget{}
+		return NotifyDecision{Source: NotifySourceExplicitDisable}
 	}
 
 	// Per-job override always wins when fully specified.
 	if notifyPlat != "" && notifyChat != "" {
-		return NotifyTarget{Platform: notifyPlat, ChatID: notifyChat}
+		return NotifyDecision{
+			Target: NotifyTarget{Platform: notifyPlat, ChatID: notifyChat},
+			Source: NotifySourcePerJobOverride,
+		}
 	}
 
 	// Explicit enable: fall back to scheduler default.
 	if notify != nil && *notify {
 		if s.notifyDefault.IsSet() {
-			return s.notifyDefault
+			return NotifyDecision{Target: s.notifyDefault, Source: NotifySourceDefault}
 		}
 		// Enabled but no target anywhere — log once per run so users notice
 		// misconfiguration instead of silently dropping notifications.
 		slog.Warn("cron notify enabled but no target configured",
 			"hint", "set cron.notify_default.platform + chat_id, or provide per-job notify_platform + notify_chat_id")
-		return NotifyTarget{}
+		return NotifyDecision{Source: NotifySourceDefaultMissing}
 	}
 
 	// Legacy default (notify==nil): IM-created jobs reply to their source chat.
@@ -84,12 +177,15 @@ func (s *Scheduler) resolveNotifyTarget(platName, chatID, notifyPlat, notifyChat
 	// registered IM platform — short-circuit here so notifyTarget doesn't
 	// fire a per-tick "platform not found" WARN for every dashboard job.
 	if platName == "dashboard" {
-		return NotifyTarget{}
+		return NotifyDecision{Source: NotifySourceDashboardSilent}
 	}
 	if platName != "" && chatID != "" {
-		return NotifyTarget{Platform: platName, ChatID: chatID}
+		return NotifyDecision{
+			Target: NotifyTarget{Platform: platName, ChatID: chatID},
+			Source: NotifySourceLegacySourceChat,
+		}
 	}
-	return NotifyTarget{}
+	return NotifyDecision{Source: NotifySourceNone}
 }
 
 // deliverNotice sends a result/error message to the resolved target.

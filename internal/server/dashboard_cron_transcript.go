@@ -533,6 +533,22 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, resp)
 		return
 	}
+	// R249-SEC-4 (#918): TOCTOU inode recheck. The Lstat above resolved
+	// the dirent to a regular-file inode, then a hostile symlink swap
+	// (filename → /etc/shadow) could in theory race the os.Open call
+	// before the file descriptor binds. Mode().IsRegular() on the open
+	// fd catches a swap-to-dir/FIFO but NOT a swap to another regular
+	// file outside the projects subtree. os.SameFile checks the device
+	// + inode pair so a successful match guarantees the open descriptor
+	// references the exact inode Lstat validated under the path-escape
+	// guard above. Mismatch ⇒ swap raced; fall back to "missing" rather
+	// than read potentially exfiltrated bytes.
+	if !os.SameFile(li, fi) {
+		slog.Warn("cron transcript: inode swap detected post-open", "path", resolved)
+		resp.Fallback = "missing"
+		writeJSON(w, resp)
+		return
+	}
 
 	// Time window: only emit turns whose timestamp falls between
 	// run.StartedAt and run.EndedAt. fresh=false runs share a JSONL
@@ -652,6 +668,20 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		} else if !run.Fresh {
 			// Shared JSONL + no timestamp ⇒ cannot attribute to this
 			// run; skip rather than leak adjacent-run state.
+			continue
+		} else if ev.Timestamp != "" {
+			// R250-SEC-8 (#1097): ts==0 but the source timestamp string
+			// is non-empty means parseISO8601MS rejected the input. Even
+			// for fresh=true (this run owns the JSONL exclusively) an
+			// unparseable timestamp signals either disk corruption or a
+			// hand-written / hostile JSONL entry that an operator with
+			// workspace write access could craft to surface across every
+			// run's transcript drawer. Align parse-failure with the
+			// empty-timestamp skip policy already used for fresh=false:
+			// drop rather than include. Empty ev.Timestamp (legitimate
+			// CLI shapes like "queue-operation" without a timestamp) is
+			// preserved on the fresh=true branch so existing metadata
+			// continues to flow through.
 			continue
 		}
 		newTurns, addedTokens, addedToolCalls, isParsed := flattenJSONLEvent(&ev, ts, len(turns))
