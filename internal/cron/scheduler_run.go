@@ -1131,23 +1131,12 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	ctx, spawnCancel := context.WithTimeout(s.stopCtx, jobTimeout)
 	defer spawnCancel()
 
-	// R040034-GO-6 (#1391): s.agentCommands / s.agents are
-	// atomic.Pointer[map[...]] — the immutability contract is enforced by
-	// the type, not the docstring. Load() once per executeOpt call so the
-	// resolveAgent + opts lookup observe the same snapshot even if a
-	// future SetAgents API Swap()s mid-call. nil-pointer guard mirrors
-	// the prior nil-map semantics for tests that omit cfg.AgentCommands /
-	// cfg.Agents.
-	var commandsMap map[string]string
-	if p := s.agentCommands.Load(); p != nil {
-		commandsMap = *p
-	}
-	var agentsMap map[string]AgentOpts
-	if p := s.agents.Load(); p != nil {
-		agentsMap = *p
-	}
-	agentID, cleanText := resolveAgent(snap.prompt, commandsMap)
-	opts := cloneAgentOpts(agentsMap[agentID])
+	// s.agentCommands and s.agents are assigned once at scheduler
+	// construction (cfg.AgentCommands / cfg.Agents) and never mutated;
+	// reading them without s.mu is safe. If a future SetAgents API is
+	// introduced both reads must move under s.mu.
+	agentID, cleanText := resolveAgent(snap.prompt, s.agentCommands)
+	opts := cloneAgentOpts(s.agents[agentID])
 	opts.Exempt = true // cron sessions must not count toward maxProcs or evict user sessions
 	// Sprint 6c (docs/rfc/multi-backend.md §9): per-job backend override.
 	// Empty snap.backend leaves opts.Backend untouched ("" already routes
