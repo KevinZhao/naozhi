@@ -9,13 +9,13 @@ import (
 )
 
 // TestMarshalJobs_PerSchedulerIsolation pins R239-GO-7 (#867) /
-// R250-ARCH-14: the marshalJobs seam MUST be per-Scheduler, not a
-// package-level global. The historical layout used a `var marshalJobs
-// atomic.Pointer` that withFailingMarshal swapped wholesale; two parallel
-// tests installing different stubs would clobber each other and the
-// observed behaviour depended on goroutine scheduling. The current layout
-// holds the atomic.Pointer on Scheduler so each test's stub stays scoped
-// to its own instance.
+// R250-ARCH-14 / R242-CR-5 (#693) / R247-CR-19 (#599): the marshalJobs
+// seam MUST be per-Scheduler, not a package-level global. The historical
+// layout used a `var marshalJobs atomic.Pointer` that withFailingMarshal
+// swapped wholesale; two parallel tests installing different stubs would
+// clobber each other and the observed behaviour depended on goroutine
+// scheduling. The current layout holds the atomic.Pointer on Scheduler so
+// each test's stub stays scoped to its own instance.
 //
 // Test plan:
 //

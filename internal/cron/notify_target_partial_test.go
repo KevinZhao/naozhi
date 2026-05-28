@@ -111,6 +111,11 @@ func TestR250CR18_NotifyTargetAbortsOnFirstChunkFailure(t *testing.T) {
 
 // TestR250CR18_NotifyTargetAllSucceedSendsAll verifies the happy path is
 // untouched: when every Reply succeeds, every chunk is delivered.
+//
+// R236-SEC-15 (#568) introduced cronNotifyMaxChunks; this test uses an
+// input that produces fewer chunks than the cap so the assertion still
+// reads as "every chunk SplitText emits is delivered". The dedicated
+// cap-truncation regression lives in notify_target_chunk_cap_test.go.
 func TestR250CR18_NotifyTargetAllSucceedSendsAll(t *testing.T) {
 	t.Parallel()
 	// failAt larger than chunk count -> never fails.
@@ -118,10 +123,14 @@ func TestR250CR18_NotifyTargetAllSucceedSendsAll(t *testing.T) {
 	s := &Scheduler{
 		platforms: map[string]platform.Platform{"fake-notify": fp},
 	}
-	long := buildDistinctChunks(10, 8)
+	// 3 chunks stays comfortably under cronNotifyMaxChunks (=5).
+	long := buildDistinctChunks(3, 8)
 	s.notifyTarget("fake-notify", "chat-x", long)
 	// All chunks SplitText produces should have been Reply'd at least once.
 	chunks := platform.SplitText(long, 8)
+	if len(chunks) > cronNotifyMaxChunks {
+		t.Fatalf("test fixture: chunk count %d exceeds cap %d; rewrite test to stay under cap", len(chunks), cronNotifyMaxChunks)
+	}
 	if got := fp.uniqueChunks(); got != len(chunks) {
 		t.Errorf("unique chunks attempted = %d, want %d (success path must send every chunk)", got, len(chunks))
 	}
