@@ -1,3 +1,26 @@
+// File eventlog.go hosts the IN-MEMORY ring-buffer leg of the three
+// "eventlog" packages identified by R237-ARCH-13 (#610). Disambiguation
+// reminder for reviewers — see the same anchor in cli/doc.go and
+// internal/eventlog/persist/doc.go for the full picture:
+//
+//   - THIS file (cli.EventLog) — IN-MEMORY ring buffer + PersistSink
+//     contract. Producer of every event. Owns EventEntry / SubagentInfo /
+//     PersistSink (the cli-side closure type, distinct from
+//     persist.PersistSink).
+//   - internal/eventlog/persist — ON-DISK writer consuming from
+//     cli.EventLog via the PersistSink closure.
+//   - internal/eventlog/schema — wire format types shared by persist +
+//     replay readers. Strictly upstream of cli.
+//   - internal/history/naozhilog — REPLAY reader for the files persist
+//     wrote.
+//
+// R237-ARCH-13 proposes the long-term rename to
+// internal/eventlog/{ring, persist, replay} so package names match
+// data-flow positions. Until that lands: do NOT collapse references
+// between cli.PersistSink and persist.PersistSink — the bridge in
+// internal/session/eventlog_bridge.go is the only place that translates
+// between them.
+
 package cli
 
 import (
@@ -210,6 +233,15 @@ var eventLogClosedCh = func() <-chan struct{} {
 }()
 
 // EventLog is a thread-safe, bounded event log backed by a ring buffer.
+//
+// Position in the data flow (R237-ARCH-13): EventLog is the IN-MEMORY
+// "ring" leg. Append/AppendBatch are the only producers; subscribers
+// (dashboard live-tail, agent_tailer, persist sink) are pure consumers.
+// The on-disk persistence layer is internal/eventlog/persist; readers
+// of historical data come back through internal/history/naozhilog. See
+// the file header above and cli/doc.go for the full three-package map
+// — this struct does NOT do disk I/O and MUST NOT grow code paths that
+// would force callers to wait on fsync.
 type EventLog struct {
 	mu      sync.RWMutex
 	entries []EventEntry // ring buffer, pre-allocated to maxSize
