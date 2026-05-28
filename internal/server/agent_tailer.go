@@ -304,16 +304,36 @@ func (r *tailerRegistry) snapshotTailers(dst []*agentTailer) []*agentTailer {
 
 // jsonlPathUnderAllowedRoot returns true when jsonlPath is anchored under
 // allowedRoot. Pure prefix check is unsafe ("/var/foo" prefix-matches
-// "/var/fooBar"), so anchor on the cleaned root + os.PathSeparator. Symlinks
-// are not resolved here: ensureTailer's caller (the Linker OnResolve handler)
-// already operates on CLI-emitted paths inside the workspace; this guard is
-// defence-in-depth, not a TOCTOU-safe gate. R232-SEC-14.
+// "/var/fooBar"), so anchor on the cleaned root + os.PathSeparator. This
+// guard is defence-in-depth (ensureTailer's caller already operates on
+// CLI-emitted paths under the workspace), not a TOCTOU-safe gate.
+// R232-SEC-14.
+//
+// R260528-SEC-3: also EvalSymlinks both sides before the prefix check to
+// align with the dashboard_cron_transcript handler's stricter pattern.
+// macOS canonicalises /var → /private/var, and any host where allowedRoot
+// contains a symlinked component (Docker bind-mounts, AMI-customised
+// layouts) drifts under EvalSymlinks; without the symmetric resolve the
+// prefix check would reject every legitimate path on those hosts.
+// EvalSymlinks failures fall through to the original (cleaned) value
+// rather than reject — a broken symlink in the resolved chain or a
+// path-not-yet-materialised must not turn the lexical HasPrefix gate
+// into a hard production deny.
 func jsonlPathUnderAllowedRoot(jsonlPath, allowedRoot string) bool {
 	abs := filepath.Clean(jsonlPath)
 	if !filepath.IsAbs(abs) {
 		return false
 	}
 	root := filepath.Clean(allowedRoot)
+	// EvalSymlinks of root + abs to align with transcript handler. Failure
+	// (path missing, broken chain, permission denied) keeps the original
+	// cleaned value so a transient FS state never produces a false reject.
+	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolvedRoot
+	}
+	if resolvedAbs, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolvedAbs
+	}
 	if abs == root {
 		return false
 	}
