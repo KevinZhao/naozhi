@@ -30,7 +30,7 @@ file_size:
       limit: 800
       until_phase: "5"        # Phase 5 内部拆分（每个 serve* / handle* 一个文件）
     - path: internal/server/dashboard_send.go
-      current: 1123                         # 2026-05-28 attachment validation 抽到 send_attachment_validate.go (Phase 3f-prep)，dashboard_send.go 累计缩减 389 行
+      current: 997                          # 2026-05-28 persistFileRefs 抽到 send_persist.go (Phase 3f-prep)，dashboard_send.go 累计缩减 515 行
       limit: 500
       until_phase: 3f
     # internal/server/dashboard_cron.go: removed Phase 1 (PR #1438) — file
