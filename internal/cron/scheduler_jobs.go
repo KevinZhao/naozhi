@@ -560,6 +560,22 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 // 均满足该不变量：失败检查放在所有写入之前。新增 op 时 reviewer 必须验
 // 证：op 函数体内任意 return non-nil 路径之前没有 j.X = ... 写入；如果
 // op 需要先尝试再回滚，应在 op 内部完成回滚后再 return。
+// withJobByIDOpts knobs:
+//
+//   - op: in-lock mutation (must satisfy "all-or-nothing" — see contract
+//     above). nil for pure-lookup callers.
+//   - postCleanup: out-of-lock side effect (router.Reset, runStore.DeleteJob)
+//     that runs UNCONDITIONALLY whenever op succeeded — even when
+//     persistJobsLocked returned an error and rollbackOnPersistErr is nil.
+//     Use this shape ONLY when the in-lock mutation is already past the
+//     point of no return (DeleteJobByID's deleteJobLocked drops the *Job
+//     from s.jobs irreversibly). For mutations where on-disk state is the
+//     authoritative outcome (Pause/Resume), pair op with rollbackOnPersistErr
+//     and leave postCleanup nil. R250-CR-16 (#1149).
+//   - rollbackOnPersistErr: in-lock undo of the op's mutation when
+//     persistJobsLocked fails. When non-nil and persist fails, this
+//     restores *j BEFORE the snapshot copy and skips postCleanup so the
+//     caller observes "no change applied".
 type withJobByIDOpts struct {
 	op                   func(j *Job) error
 	postCleanup          func(j *Job)
@@ -627,6 +643,21 @@ func (s *Scheduler) withJobByIDOpt(id string, opts withJobByIDOpts) (*Job, error
 	if rolledBack {
 		return nil, perr
 	}
+	// R250-CR-16 (#1149): postCleanup runs UNCONDITIONALLY here — i.e.
+	// even when persistJobsLocked returned perr != nil (without a paired
+	// rollbackOnPersistErr hook). This is INTENTIONAL for DeleteJobByID:
+	// deleteJobLocked already ran inside the locked section and dropped
+	// the *Job from s.jobs, so the in-memory state is already past the
+	// point of no return. The runStore.DeleteJob cleanup MUST run even
+	// when the cron_jobs.json marshal failed; otherwise runs/<jobID>/
+	// would leak entries for a job nobody can address again from the
+	// dashboard (R238-GO-3). PauseJobByID / ResumeJobByID pass nil
+	// postCleanup so this branch is a no-op for them — the asymmetry
+	// is by design, not by accident. Future maintainers adding a new
+	// withJobByID-shaped op MUST decide explicitly: cleanup after
+	// success-only (use rollbackOnPersistErr to undo on failure) vs
+	// cleanup-regardless (the DeleteJob shape, where the in-memory
+	// mutation is already irreversibly applied).
 	if opts.postCleanup != nil {
 		opts.postCleanup(&snapshot)
 	}
