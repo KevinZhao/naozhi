@@ -237,11 +237,14 @@ func TestEventEntriesSince_MonotonicInjectKeepsSortedFlag(t *testing.T) {
 	}
 }
 
-// TestEventEntriesSince_OutOfOrderInjectClearsFlag verifies that an
-// InjectHistory batch breaking Time monotonicity flips the slice back to
-// "needs sort" so the next reader pays the one-off sort and rearms the
-// fast path.
-func TestEventEntriesSince_OutOfOrderInjectClearsFlag(t *testing.T) {
+// TestEventEntriesSince_OutOfOrderInjectSortsEagerly verifies that an
+// InjectHistory batch breaking Time monotonicity sorts persistedHistory
+// eagerly under the existing write lock (R040034-PERF-6 / #1405) instead
+// of deferring the sort to the first reader. The reader fast-path is
+// then RLock-only forever after, eliminating the historyMu.Lock window
+// that used to block concurrent EventEntries / EventEntriesSince
+// callers on the WS push hot path.
+func TestEventEntriesSince_OutOfOrderInjectSortsEagerly(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
 	s.InjectHistory([]cli.EventEntry{
@@ -249,8 +252,10 @@ func TestEventEntriesSince_OutOfOrderInjectClearsFlag(t *testing.T) {
 		{Time: 100, Summary: "a"}, // breaks order vs the previous entry
 		{Time: 200, Summary: "b"},
 	})
-	if s.persistedHistorySorted {
-		t.Fatalf("non-monotonic InjectHistory should leave persistedHistorySorted=false")
+	// Post-fix: flag is true immediately after InjectHistory because the
+	// eager-sort path absorbed the cost under the write lock.
+	if !s.persistedHistorySorted {
+		t.Fatalf("non-monotonic InjectHistory should sort eagerly and leave persistedHistorySorted=true")
 	}
 	got := s.EventEntriesSince(0)
 	if len(got) != 3 {
@@ -260,11 +265,6 @@ func TestEventEntriesSince_OutOfOrderInjectClearsFlag(t *testing.T) {
 		if got[i].Time < got[i-1].Time {
 			t.Errorf("EventEntriesSince must still return chronological output even when input was out of order")
 		}
-	}
-	// After the read sorted in-place, the flag must be true so future
-	// reads skip the sort.
-	if !s.persistedHistorySorted {
-		t.Errorf("post-read persistedHistorySorted should be true")
 	}
 }
 
