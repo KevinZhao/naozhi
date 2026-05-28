@@ -198,9 +198,15 @@ function cycleTheme() {
 }
 // Wire title/aria on first load so the button reflects the persisted
 // state (the inline early-paint script already set data-theme; this
-// just syncs the visible affordances).
+// just syncs the visible affordances). Also wire the click handler via
+// addEventListener instead of an inline onclick="" so the theme toggle
+// doesn't push the dashboard CSP migration backwards (cap+1 → 8 inline
+// handlers; goal in #441 / #479 / #922 is to drive the count to 0 so
+// script-src 'unsafe-inline' can be dropped).
 document.addEventListener('DOMContentLoaded', function () {
   applyTheme(getCurrentTheme());
+  const btn = document.getElementById('btn-theme');
+  if (btn) btn.addEventListener('click', cycleTheme);
 });
 
 function getToken() { return ''; }
