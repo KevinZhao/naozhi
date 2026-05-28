@@ -272,6 +272,14 @@ const hexIDEntropyBytes = 8
 // 的 err 才会原样返回给我们，给 fault-injection 测试以及未来生产环境
 // 真正的 entropy 不足故障都留下处理路径。
 //
+// CANONICAL-HEX-ID-PATTERN (R20260527122801-ARCH-7 / #1313): cron 是首个
+// 切到 io.ReadFull(rand.Reader, b) 的子系统。其它生成 hex ID 的
+// 子系统（internal/sysession/run.go、internal/server/dashboard_send.go、
+// internal/session/scratch.go 等）目前仍调用旧 rand.Read，Go 1.26 entropy
+// 不足时会 fatal 整个进程。下次共享重构应抽 osutil.GenerateHexID +
+// MustGenerateHexID 把所有点迁移到这个 pattern；在那之前，本函数是
+// shape 参考，修改时（输出宽度 / 错误格式）需通知其它子系统同步。
+//
 // 测试需要 panic 等价语义时用 mustGenerateHexID（test helper），别在
 // 生产路径 catch error 后 panic —— 那等于把这次重构反向回去。
 func generateHexID() (string, error) {
