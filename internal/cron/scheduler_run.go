@@ -401,16 +401,22 @@ func formatCronNotice(label, body string) string {
 }
 
 // escapeCronMarkdownPunct replaces the markdown link-syntax characters
-// `[`, `(`, `)` with full-width visually-similar codepoints
-// (U+FF3B / U+FF08 / U+FF09) so an attacker-controlled cron Title or
-// result body cannot smuggle `[text](url)` clickable links into the IM
-// notice. Pairs with the `]` -> `］` substitution above (R250-SEC-6) to
-// cover all four characters of the markdown link grammar. Each replace
-// is gated by IndexByte so a clean ASCII payload stays alloc-free.
-// R260528-SEC-8.
+// `[`, `]`, `(`, `)` with full-width visually-similar codepoints
+// (U+FF3B / U+FF3D / U+FF08 / U+FF09) so an attacker-controlled cron
+// Title or result body cannot smuggle `[text](url)` clickable links
+// into the IM notice. Each replace is gated by IndexByte so a clean
+// ASCII payload stays alloc-free. R260528-SEC-8.
+//
+// label callers run the `]` substitution at line 341 (R250-SEC-6) before
+// reaching here; the duplicate `]` work is idempotent (the second pass
+// finds no `]` left and skips). Body callers rely on this helper to
+// strip `]` since the label-side gate skips them.
 func escapeCronMarkdownPunct(s string) string {
 	if strings.IndexByte(s, '[') >= 0 {
 		s = strings.ReplaceAll(s, "[", "［")
+	}
+	if strings.IndexByte(s, ']') >= 0 {
+		s = strings.ReplaceAll(s, "]", "］")
 	}
 	if strings.IndexByte(s, '(') >= 0 {
 		s = strings.ReplaceAll(s, "(", "（")

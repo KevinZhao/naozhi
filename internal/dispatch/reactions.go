@@ -23,15 +23,28 @@ const reactionAckTimeout = 3 * time.Second
 // — the caller falls back to the rate-limited text notice, and the user
 // still learns their message was received.
 func (d *Dispatcher) ackQueuedWithReaction(ctx context.Context, msg platform.IncomingMessage, lg *slog.Logger) bool {
+	// R260528-BUG-22: emit a Debug trace at every false-return arm so the
+	// "fell back to text" decision is investigable from logs alone.
+	// Pre-fix only the AddReaction error arm logged; the platform-not-
+	// reactor / no-MessageID / no-platform paths fell back silently and
+	// any "why didn't I get a reaction?" investigation had to bisect
+	// through code reading instead of grep.
+	useLg := lg
+	if useLg == nil {
+		useLg = slog.Default()
+	}
 	if msg.MessageID == "" {
+		useLg.Debug("ack queued reaction skipped", "reason", "no_message_id")
 		return false
 	}
 	p := d.platforms[msg.Platform]
 	if p == nil {
+		useLg.Debug("ack queued reaction skipped", "reason", "no_platform", "platform", msg.Platform)
 		return false
 	}
 	reactor, ok := platform.AsReactor(p)
 	if !ok {
+		useLg.Debug("ack queued reaction skipped", "reason", "platform_not_reactor", "platform", msg.Platform)
 		return false
 	}
 	// Derive a bounded context so a stalled reaction API can't hold up the
@@ -41,10 +54,7 @@ func (d *Dispatcher) ackQueuedWithReaction(ctx context.Context, msg platform.Inc
 	if err := reactor.AddReaction(rctx, msg.MessageID, platform.ReactionQueued); err != nil {
 		// R230-CQ-3: align nil-handling with clearQueuedReactions — fall back to
 		// slog.Default() so a missing logger never silently drops the failure.
-		if lg == nil {
-			lg = slog.Default()
-		}
-		lg.Debug("add queued reaction failed, falling back to text", "err", err)
+		useLg.Debug("ack queued reaction skipped", "reason", "api_error", "err", err)
 		return false
 	}
 	return true
