@@ -75,6 +75,17 @@ func (p *Process) InjectHistory(entries []EventEntry) {
 		if info, ok := linker.Query(taskID); ok && info.Resolved {
 			return
 		}
+		// R260528-PERF-7 (#1354): also skip if a Resolve goroutine is
+		// already in-flight for this taskID. InjectHistory's per-entry
+		// `seen` map dedupes within a single batch, but two adjacent
+		// InjectHistory calls (server reconnect → replay-then-tail) can
+		// race on the same taskID and each escape into the goroutine
+		// fork before the first completes. The cross-batch in-flight
+		// gate is the canonical dedup; the local `seen` map remains as
+		// a cheap intra-batch fast path (less hashing per kick).
+		if !linker.TryMarkResolveInflight(taskID) {
+			return
+		}
 		// R225-CR-10: cap description (matches process_readloop hot path)
 		// so the Resolve goroutine doesn't pin multi-KB strings until the
 		// resolveSem slot frees.
