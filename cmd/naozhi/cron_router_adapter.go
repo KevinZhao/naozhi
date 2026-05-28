@@ -29,6 +29,15 @@ import (
 // cronSessionAdapter.InterruptViaControl below; init() panic crashes
 // the binary at boot instead. Panic message includes actual ordinals
 // so on-call can diagnose without re-running.
+//
+// R260528-GO-18: also pin cron.SessionStatus against session.SessionStatus.
+// GetOrCreate above does cron.SessionStatus(int(st)) without any value
+// guard, so a future iota reorder on either side would silently misreport
+// the session-creation kind to dispatcher run-history without test
+// coverage catching it. cron.SessionStatus's godoc concedes "the only
+// observable break is misreporting in tests" — but production telemetry
+// on inflight broadcasts also keys off this value, so a panic-at-boot
+// pin is the right level of protection. Cheap (3 int compares at init).
 func init() {
 	if int(cron.InterruptSent) != int(session.InterruptSent) ||
 		int(cron.InterruptNoSession) != int(session.InterruptNoSession) ||
@@ -44,6 +53,18 @@ func init() {
 			cron.InterruptNoTurn, session.InterruptNoTurn,
 			cron.InterruptUnsupported, session.InterruptUnsupported,
 			cron.InterruptError, session.InterruptError,
+		))
+	}
+	if int(cron.SessionExisting) != int(session.SessionExisting) ||
+		int(cron.SessionResumed) != int(session.SessionResumed) ||
+		int(cron.SessionNew) != int(session.SessionNew) {
+		panic(fmt.Sprintf(
+			"cron.SessionStatus ordinals diverged from session.SessionStatus: "+
+				"Existing(c=%d s=%d) Resumed(c=%d s=%d) New(c=%d s=%d) — "+
+				"update cron_router_adapter.go",
+			cron.SessionExisting, session.SessionExisting,
+			cron.SessionResumed, session.SessionResumed,
+			cron.SessionNew, session.SessionNew,
 		))
 	}
 }
