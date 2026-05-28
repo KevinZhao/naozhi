@@ -315,30 +315,69 @@ func (r *tailerRegistry) snapshotTailers(dst []*agentTailer) []*agentTailer {
 // contains a symlinked component (Docker bind-mounts, AMI-customised
 // layouts) drifts under EvalSymlinks; without the symmetric resolve the
 // prefix check would reject every legitimate path on those hosts.
-// EvalSymlinks failures fall through to the original (cleaned) value
-// rather than reject — a broken symlink in the resolved chain or a
-// path-not-yet-materialised must not turn the lexical HasPrefix gate
-// into a hard production deny.
+//
+// R260528-SEC-3 followup (PR #1383 review): EvalSymlinks fails on paths
+// that don't yet exist (the "tail-before-write" case where the CLI emits
+// a JSONLPath ahead of the first write hitting disk). If only one side
+// resolves — typically the allowedRoot does, the not-yet-existing
+// jsonlPath does not — the asymmetric resolve flips a legitimate path
+// into a HasPrefix mismatch. Walk up jsonlPath's parents to find the
+// nearest existing ancestor, EvalSymlinks that, then re-join the
+// unresolved tail. Both sides end up in the same canonical-form world
+// and the prefix check holds whether or not the leaf has been created.
 func jsonlPathUnderAllowedRoot(jsonlPath, allowedRoot string) bool {
 	abs := filepath.Clean(jsonlPath)
 	if !filepath.IsAbs(abs) {
 		return false
 	}
 	root := filepath.Clean(allowedRoot)
-	// EvalSymlinks of root + abs to align with transcript handler. Failure
-	// (path missing, broken chain, permission denied) keeps the original
-	// cleaned value so a transient FS state never produces a false reject.
 	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
 		root = resolvedRoot
 	}
-	if resolvedAbs, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = resolvedAbs
-	}
+	abs = resolveExistingAncestor(abs)
 	if abs == root {
 		return false
 	}
 	prefix := root + string(filepath.Separator)
 	return strings.HasPrefix(abs, prefix)
+}
+
+// resolveExistingAncestor returns the input cleaned + symlink-resolved as
+// far as the filesystem permits. If the leaf doesn't exist, walks parents
+// until one does, EvalSymlinks that, then re-joins the unresolved tail.
+// This keeps "path not yet materialised" callers (CLI emitting a
+// JSONLPath before the first write lands) on the same canonical-form
+// surface as the resolved allowedRoot, so a symlink anywhere on the
+// allowedRoot side cannot produce a one-sided canonicalisation that
+// flips a legitimate jsonlPath into a HasPrefix mismatch.
+//
+// Falls through to the cleaned input when no ancestor resolves
+// (constructed paths under a non-existent mountpoint, etc.) so the
+// historical lexical HasPrefix behaviour is preserved as a last resort.
+func resolveExistingAncestor(abs string) string {
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved
+	}
+	parent := abs
+	tail := ""
+	for {
+		next := filepath.Dir(parent)
+		if next == parent {
+			// Hit filesystem root without finding an existing ancestor;
+			// give up and return the original cleaned value.
+			return abs
+		}
+		base := filepath.Base(parent)
+		if tail == "" {
+			tail = base
+		} else {
+			tail = filepath.Join(base, tail)
+		}
+		parent = next
+		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+			return filepath.Join(resolved, tail)
+		}
+	}
 }
 
 // ensureTailer is called by the Linker OnResolve callback or by an

@@ -86,3 +86,67 @@ func TestJsonlPathUnderAllowedRootSymlinkResolution(t *testing.T) {
 		t.Errorf("jsonlPath==allowedRoot wrongly accepted")
 	}
 }
+
+// TestJsonlPathUnderAllowedRoot_NonExistentLeafThroughSymlinkedRoot pins
+// the R260528-SEC-3 followup contract (PR #1383 review CHANGES finding):
+// the asymmetric resolve where `allowedRoot` evaluates to a different
+// canonical form than `jsonlPath` simply because the leaf doesn't exist
+// must not flip a legitimate path into a HasPrefix mismatch.
+//
+// macOS reproduces this naturally because `/var/folders/.../<temp>` is a
+// symlink to `/private/var/folders/.../<temp>`. We force the same shape
+// here on every OS by routing allowedRoot through a symlink whose target
+// is a sibling-named real directory; the unresolved jsonlPath retains
+// the symlink form while the resolved allowedRoot canonicalises through
+// the link, and the pre-fix code rejected the legitimate path.
+//
+// The progressive parent-resolve (resolveExistingAncestor) closes the
+// asymmetry: jsonlPath's nearest existing ancestor canonicalises through
+// the same symlink so both sides land in the resolved-form world before
+// the prefix check.
+func TestJsonlPathUnderAllowedRoot_NonExistentLeafThroughSymlinkedRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on windows")
+	}
+	t.Parallel()
+	tmp := t.TempDir()
+
+	// Real layout: <tmp>/real/projects exists.
+	realProjects := filepath.Join(tmp, "real", "projects")
+	if err := os.MkdirAll(realProjects, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	// Linked layout: <tmp>/linked → <tmp>/real (so <tmp>/linked/projects
+	// is the symlink-traversed path operators wire as allowedRoot).
+	if err := os.Symlink(filepath.Join(tmp, "real"), filepath.Join(tmp, "linked")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+
+	// Operator-supplied allowedRoot uses the symlink form.
+	allowed := filepath.Join(tmp, "linked", "projects")
+	// jsonlPath references a session that hasn't materialised yet, also
+	// expressed via the symlink form so EvalSymlinks(jsonlPath) fails on
+	// the leaf "future/session.jsonl" segment.
+	jsonlPath := filepath.Join(tmp, "linked", "projects", "future", "session.jsonl")
+
+	if !jsonlPathUnderAllowedRoot(jsonlPath, allowed) {
+		t.Errorf("non-existent jsonlPath inside symlinked allowedRoot wrongly rejected\n  jsonlPath=%q\n  allowedRoot=%q",
+			jsonlPath, allowed)
+	}
+
+	// And the inverse — allowedRoot as the resolved real form, jsonlPath
+	// via the symlink + non-existent leaf. Pre-fix this is the macOS CI
+	// shape that produced the original failure.
+	if !jsonlPathUnderAllowedRoot(jsonlPath, realProjects) {
+		t.Errorf("non-existent jsonlPath via symlink rejected against real allowedRoot\n  jsonlPath=%q\n  allowedRoot=%q",
+			jsonlPath, realProjects)
+	}
+
+	// Negative: a non-existent path OUTSIDE the allowedRoot must still
+	// reject — the parent walk only canonicalises the prefix, it doesn't
+	// allow the path to escape.
+	outside := filepath.Join(tmp, "elsewhere", "future", "session.jsonl")
+	if jsonlPathUnderAllowedRoot(outside, allowed) {
+		t.Errorf("non-existent jsonlPath outside allowedRoot wrongly accepted: %q", outside)
+	}
+}
