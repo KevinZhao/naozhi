@@ -1171,7 +1171,7 @@ func TestHandlePreview_RejectsInvalidNodeID(t *testing.T) {
 	u := "/api/discovered/preview?session_id=12345678-1234-1234-1234-123456789abc&node=bad%0Anode"
 	req := httptest.NewRequest(http.MethodGet, u, nil)
 	w := httptest.NewRecorder()
-	srv.discoveryH.handlePreview(w, req)
+	srv.discoveryH.HandlePreview(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 (body=%q)", w.Code, w.Body.String())
@@ -1188,12 +1188,12 @@ func TestHandleTakeover_RejectsTraversalCWD(t *testing.T) {
 	// Inject a non-empty claudeDir so the R67-SEC-4 "discovery not
 	// available" early return does not fire; we're targeting the CWD
 	// gate specifically. Using t.TempDir() to avoid touching real state.
-	srv.discoveryH.claudeDir = t.TempDir()
+	srv.discoveryH.SetClaudeDirForTest(t.TempDir())
 
 	body := `{"pid":99999,"session_id":"12345678-1234-1234-1234-123456789abc","cwd":"/home/../etc","proc_start_time":1234}`
 	req := httptest.NewRequest(http.MethodPost, "/api/discovered/takeover", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.discoveryH.handleTakeover(w, req)
+	srv.discoveryH.HandleTakeover(w, req)
 
 	// Without the fix, this traversal would either pass (allowedRoot empty)
 	// or be rejected much later. The fix returns 400 at the validation gate
@@ -1209,12 +1209,12 @@ func TestHandleTakeover_RejectsTraversalCWD(t *testing.T) {
 // handler must return 503 like handleClose does.
 func TestHandleTakeover_NoClaudeDirRefuses(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
-	srv.discoveryH.claudeDir = "" // simulate "discovery not available"
+	srv.discoveryH.SetClaudeDirForTest("") // simulate "discovery not available"
 
 	body := `{"pid":1,"session_id":"12345678-1234-1234-1234-123456789abc","cwd":"/tmp","proc_start_time":1}`
 	req := httptest.NewRequest(http.MethodPost, "/api/discovered/takeover", strings.NewReader(body))
 	w := httptest.NewRecorder()
-	srv.discoveryH.handleTakeover(w, req)
+	srv.discoveryH.HandleTakeover(w, req)
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503 (body=%q)", w.Code, w.Body.String())

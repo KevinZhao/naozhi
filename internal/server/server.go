@@ -19,6 +19,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/dashboard/discovery"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
@@ -91,7 +92,7 @@ type Server struct {
 	cronH        *CronHandlers        // 读写: server.go, dashboard.go
 	transcribeH  *TranscribeHandler   // 读写: dashboard.go (ctor only in server.go)
 	nodeAccess   *nodeAccessor        // 读写: server.go, dashboard.go
-	discoveryH   *DiscoveryHandlers   // 读写: server.go, dashboard.go
+	discoveryH   *discovery.Handlers  // 读写: server.go, dashboard.go (Phase 3b 搬到 internal/dashboard/discovery)
 	projectH     *ProjectHandlers     // 读写: server.go, dashboard.go
 	sessionH     *SessionHandlers     // 读写: server.go, dashboard.go
 	healthH      *HealthHandler       // 读写: server.go (ctor only)
@@ -972,7 +973,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mux.HandleFunc("GET /livez", s.healthH.handleLivez)
 	s.mux.HandleFunc("GET /readyz", s.healthH.handleReadyz)
 	s.appCtx = ctx
-	s.discoveryH.appCtx = ctx
+	s.discoveryH.SetAppContext(ctx)
 	s.registerDashboard()
 	s.nodeCache.StartLoop(ctx)
 	s.discoveryCache.startLoop(ctx)

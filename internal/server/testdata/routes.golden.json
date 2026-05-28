@@ -92,22 +92,22 @@
   {
     "method": "GET",
     "path": "/api/discovered",
-    "handler_type": "*DiscoveryHandlers"
+    "handler_type": "*discovery.Handlers"
   },
   {
     "method": "POST",
     "path": "/api/discovered/close",
-    "handler_type": "*DiscoveryHandlers"
+    "handler_type": "*discovery.Handlers"
   },
   {
     "method": "GET",
     "path": "/api/discovered/preview",
-    "handler_type": "*DiscoveryHandlers"
+    "handler_type": "*discovery.Handlers"
   },
   {
     "method": "POST",
     "path": "/api/discovered/takeover",
-    "handler_type": "*DiscoveryHandlers"
+    "handler_type": "*discovery.Handlers"
   },
   {
     "method": "GET",

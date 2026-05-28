@@ -1,9 +1,11 @@
 package server
 
 import (
+	"context"
 	"path/filepath"
 	"time"
 
+	dashdiscovery "github.com/naozhi/naozhi/internal/dashboard/discovery"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -166,6 +168,11 @@ func buildRetiredStoreWithErr(stateDir string) (*discovery.RetiredStore, error) 
 // behind the dashboard discovery endpoints. broadcast is invoked when the
 // cache observes a change so subscribed dashboard clients receive fresh
 // state without a manual refresh.
+//
+// Phase 3b (server-split-phase4-design.md §6.5 Plan B): the handler group
+// lives in internal/dashboard/discovery; this helper bridges server-package
+// private types (validateWorkspace, verifyProcIdentity, *session.Router)
+// into the small interface surface the sub-package consumes.
 func buildDiscoveryHandlers(
 	opts ServerOptions,
 	claudeDir string,
@@ -173,17 +180,31 @@ func buildDiscoveryHandlers(
 	nodeAccess *nodeAccessor,
 	nodeCache *node.CacheManager,
 	broadcast func(),
-) *DiscoveryHandlers {
-	return &DiscoveryHandlers{
-		discoveryCache: cache,
-		nodeAccess:     nodeAccess,
-		nodeCache:      nodeCache,
-		claudeDir:      claudeDir,
-		router:         opts.Router,
-		allowedRoot:    opts.AllowedRoot,
-		defaultAgent:   opts.Agents["general"],
-		broadcast:      broadcast,
-	}
+) *dashdiscovery.Handlers {
+	return dashdiscovery.New(dashdiscovery.Deps{
+		Cache:        cache,
+		NodeAccess:   nodeAccess,
+		NodeCache:    nodeCache,
+		ClaudeDir:    claudeDir,
+		Router:       routerTakeoverAdapter{r: opts.Router},
+		AllowedRoot:  opts.AllowedRoot,
+		DefaultAgent: opts.Agents["general"],
+		Broadcast:    broadcast,
+		ValidateWS:   validateWorkspace,
+		VerifyProcID: verifyProcIdentity,
+	})
+}
+
+// routerTakeoverAdapter narrows *session.Router's Takeover return shape
+// (`*ManagedSession, error`) to the `error`-only signature the discovery
+// sub-package consumes. Discovery handlers ignore the *ManagedSession; the
+// adapter discards it here so the interface in dashdiscovery.SessionRouter
+// can stay tiny and not transitively re-export internal/session types.
+type routerTakeoverAdapter struct{ r *session.Router }
+
+func (a routerTakeoverAdapter) Takeover(ctx context.Context, key, sessionID, cwd string, opts session.AgentOpts) error {
+	_, err := a.r.Takeover(ctx, key, sessionID, cwd, opts)
+	return err
 }
 
 // buildProjectHandlers wires the dashboard project-config + project-files

@@ -1,4 +1,25 @@
-package server
+// Package discovery hosts the dashboard endpoints that surface external
+// Claude CLI sessions running on this host (and on connected nodes) and
+// allow operators to take them over or close them under naozhi management.
+//
+// Phase 3b (server-split-phase4-design.md §6.5 Plan B): handlers moved
+// here from internal/server/dashboard_discovered.go. The DiscoveryHandlers
+// type was already a self-contained struct in master with a small Deps
+// surface — this PR mostly relocates the file and inverts a couple of
+// server-package private dependencies into injected closures so the
+// sub-package compiles standalone:
+//
+//   - ValidateWorkspace / VerifyProcIdentity inject as func parameters
+//     (DI; small interface surface — see Handlers struct below)
+//   - DiscoveryCacheView interface replaces the *server.discoveryCache
+//     direct field (snapshot + evictPID are the only methods used)
+//   - NodeAccessor interface is duplicated locally (subset of server.NodeAccessor)
+//     so we don't reverse-import internal/server
+//
+// The 4 handlers (handleList / handlePreview / handleTakeover / handleClose)
+// continue to satisfy the existing route table in
+// internal/server/dashboard.go::registerDashboard via *DiscoveryHandlers.
+package discovery
 
 import (
 	"context"
@@ -9,28 +30,110 @@ import (
 	"syscall"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// DiscoveryHandlers groups the discovered-session and takeover API endpoints.
-type DiscoveryHandlers struct {
-	appCtx         context.Context // server lifecycle context, used for background cleanup
-	discoveryCache *discoveryCache
-	nodeAccess     NodeAccessor
-	nodeCache      *node.CacheManager
-	claudeDir      string
-	router         *session.Router
-	allowedRoot    string
-	defaultAgent   session.AgentOpts // agents["general"]
-	broadcast      func()            // hub.BroadcastSessionsUpdate
+// CacheView is the subset of *server.discoveryCache that this package needs.
+// Defining it as a small interface here (per "accept interfaces" idiom) keeps
+// the dependency direction one-way: server implements, discovery consumes.
+type CacheView interface {
+	Snapshot() []discovery.DiscoveredSession
+	EvictPID(pid int)
 }
 
-// GET /api/discovered — list discovered external CLI sessions.
-func (h *DiscoveryHandlers) handleList(w http.ResponseWriter, r *http.Request) {
-	sessions := h.discoveryCache.snapshot()
+// NodeAccessor is the same subset of server.NodeAccessor used by
+// DiscoveryHandlers — duplicated locally so we don't reverse-import server.
+// The two interfaces stay structurally identical; nodeAccessor in server
+// satisfies both.
+type NodeAccessor interface {
+	HasNodes() bool
+	LookupNode(w http.ResponseWriter, id string) (node.Conn, bool)
+}
+
+// SessionRouter is the subset of *session.Router this package calls.
+// Defined as an interface so future test doubles do not need a full Router.
+// Takeover's first return is dropped (*session.ManagedSession is unused by
+// these handlers — they only care about success/failure) so we use a
+// distinct method name + an adapter at the wiring site, avoiding a
+// circular dependency on internal/session for the named return type.
+type SessionRouter interface {
+	Takeover(ctx context.Context, key, sessionID, cwd string, opts session.AgentOpts) error
+}
+
+// Handlers groups the discovered-session and takeover API endpoints.
+//
+// Lifecycle:
+//   - constructed once via New() in internal/server/build_handlers.go
+//     before the server context is available
+//   - SetAppContext(ctx) is called from server.go after registerDashboard
+//     so background takeover/close goroutines can outlive the request
+//     ctx but be cancelled at process shutdown
+type Handlers struct {
+	appCtx          context.Context // server lifecycle context, set via SetAppContext
+	cache           CacheView
+	nodeAccess      NodeAccessor
+	nodeCache       *node.CacheManager
+	claudeDir       string
+	router          SessionRouter
+	allowedRoot     string
+	defaultAgent    session.AgentOpts // agents["general"]
+	broadcast       func()            // hub.BroadcastSessionsUpdate
+	validateWS      func(ws, root string) (string, error)
+	verifyProcIdent func(pid int, expectedStartTime uint64) bool
+}
+
+// Deps bundles all wiring. Constructor takes a single struct so future
+// additions don't break call sites.
+type Deps struct {
+	Cache        CacheView
+	NodeAccess   NodeAccessor
+	NodeCache    *node.CacheManager
+	ClaudeDir    string
+	Router       SessionRouter
+	AllowedRoot  string
+	DefaultAgent session.AgentOpts
+	Broadcast    func()
+	ValidateWS   func(ws, root string) (string, error)
+	VerifyProcID func(pid int, expectedStartTime uint64) bool
+}
+
+// New constructs a Handlers from injected deps.
+func New(d Deps) *Handlers {
+	return &Handlers{
+		cache:           d.Cache,
+		nodeAccess:      d.NodeAccess,
+		nodeCache:       d.NodeCache,
+		claudeDir:       d.ClaudeDir,
+		router:          d.Router,
+		allowedRoot:     d.AllowedRoot,
+		defaultAgent:    d.DefaultAgent,
+		broadcast:       d.Broadcast,
+		validateWS:      d.ValidateWS,
+		verifyProcIdent: d.VerifyProcID,
+	}
+}
+
+// SetAppContext is called once after the server context is available.
+// Background takeover/close goroutines use this so they outlive the
+// request and only die at process shutdown.
+func (h *Handlers) SetAppContext(ctx context.Context) {
+	h.appCtx = ctx
+}
+
+// SetClaudeDirForTest swaps claudeDir for tests that previously poked the
+// unexported field directly. NOT for production use — the field is
+// otherwise immutable after New().
+func (h *Handlers) SetClaudeDirForTest(dir string) {
+	h.claudeDir = dir
+}
+
+// HandleList serves GET /api/discovered — list discovered external CLI sessions.
+func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
+	sessions := h.cache.Snapshot()
 
 	// Merge remote discovered sessions
 	if h.nodeAccess.HasNodes() {
@@ -47,19 +150,20 @@ func (h *DiscoveryHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 				allDiscovered = append(allDiscovered, item)
 			}
 		}
-		writeJSON(w, allDiscovered)
+		httputil.WriteJSON(w, allDiscovered)
 		return
 	}
 
-	writeJSON(w, sessions)
+	httputil.WriteJSON(w, sessions)
 }
 
-// GET /api/discovered/preview — preview a discovered session's history.
-func (h *DiscoveryHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
+// HandlePreview serves GET /api/discovered/preview — preview a discovered
+// session's history.
+func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.URL.Query().Get("session_id")
 	nodeID := r.URL.Query().Get("node")
 	if sessionID == "" || !discovery.IsValidSessionID(sessionID) {
-		writeJSON(w, []any{})
+		httputil.WriteJSON(w, []any{})
 		return
 	}
 
@@ -82,13 +186,13 @@ func (h *DiscoveryHandlers) handlePreview(w http.ResponseWriter, r *http.Request
 		if entries == nil {
 			entries = []cli.EventEntry{}
 		}
-		writeJSON(w, entries)
+		httputil.WriteJSON(w, entries)
 		return
 	}
 
 	// Local
 	if h.claudeDir == "" {
-		writeJSON(w, []any{})
+		httputil.WriteJSON(w, []any{})
 		return
 	}
 
@@ -101,11 +205,12 @@ func (h *DiscoveryHandlers) handlePreview(w http.ResponseWriter, r *http.Request
 		entries = []cli.EventEntry{}
 	}
 
-	writeJSON(w, entries)
+	httputil.WriteJSON(w, entries)
 }
 
-// POST /api/discovered/takeover — kill an external CLI process and resume its session.
-func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Request) {
+// HandleTakeover serves POST /api/discovered/takeover — kill an external CLI
+// process and resume its session.
+func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		PID           int    `json:"pid"`
 		SessionID     string `json:"session_id"`
@@ -113,8 +218,8 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 		ProcStartTime uint64 `json:"proc_start_time"`
 		Node          string `json:"node"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-	if err := decodeJSONBody(r, &req); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
+	if err := httputil.DecodeJSONBody(r, &req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -135,7 +240,7 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
-		writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": remoteKey, "node": req.Node})
+		httputil.WriteJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": remoteKey, "node": req.Node})
 		return
 	}
 
@@ -151,7 +256,7 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "discovery not available", http.StatusServiceUnavailable)
 		return
 	}
-	cached := h.discoveryCache.snapshot()
+	cached := h.cache.Snapshot()
 	pidFound := false
 	for _, d := range cached {
 		if d.PID == req.PID && d.SessionID == req.SessionID {
@@ -175,15 +280,15 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 		// filepath.Clean — Clean collapses `/home/../etc` into `/etc`
 		// silently, so a pure post-Clean check would let traversal slip
 		// through as a now-canonical absolute path when allowedRoot is
-		// empty (single-user default). validateRemoteWorkspace encodes
-		// the same rules used on the remote-proxy path. R67-SEC-7.
-		if err := validateRemoteWorkspace(cwd); err != nil {
+		// empty (single-user default). session.ValidateRemoteWorkspacePath
+		// encodes the same rules used on the remote-proxy path. R67-SEC-7.
+		if err := session.ValidateRemoteWorkspacePath(cwd); err != nil {
 			http.Error(w, "invalid cwd", http.StatusBadRequest)
 			return
 		}
 		cwd = filepath.Clean(cwd)
 		if h.allowedRoot != "" {
-			if _, err := validateWorkspace(cwd, h.allowedRoot); err != nil {
+			if _, err := h.validateWS(cwd, h.allowedRoot); err != nil {
 				http.Error(w, "cwd outside allowed root", http.StatusBadRequest)
 				return
 			}
@@ -200,7 +305,7 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 	}
 	alive := osutil.PidAlive(req.PID)
 	if alive {
-		if !verifyProcIdentity(req.PID, req.ProcStartTime) {
+		if !h.verifyProcIdent(req.PID, req.ProcStartTime) {
 			http.Error(w, "process identity changed (PID reused)", http.StatusConflict)
 			return
 		}
@@ -216,7 +321,7 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 	// Immediately remove the killed PID from the discovery cache so the
 	// frontend's fetchSessions() call (triggered right after the 202 response)
 	// won't see the stale entry and re-render the old card in the sidebar.
-	h.discoveryCache.evictPID(req.PID)
+	h.cache.EvictPID(req.PID)
 
 	// Capture locals for the background goroutine.
 	pid := req.PID
@@ -235,7 +340,7 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 
 		// Takeover via router — use Background context so the spawned process
 		// outlives the HTTP request.
-		_, err := router.Takeover(h.appCtx, key, sessionID, cwd, session.AgentOpts{
+		err := router.Takeover(h.appCtx, key, sessionID, cwd, session.AgentOpts{
 			Model:     agentOpts.Model,
 			ExtraArgs: agentOpts.ExtraArgs,
 		})
@@ -253,11 +358,12 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 		}
 	}()
 
-	writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": key})
+	httputil.WriteJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": key})
 }
 
-// POST /api/discovered/close — kill an external CLI process without resuming its session.
-func (h *DiscoveryHandlers) handleClose(w http.ResponseWriter, r *http.Request) {
+// HandleClose serves POST /api/discovered/close — kill an external CLI process
+// without resuming its session.
+func (h *Handlers) HandleClose(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		PID           int    `json:"pid"`
 		SessionID     string `json:"session_id"`
@@ -265,8 +371,8 @@ func (h *DiscoveryHandlers) handleClose(w http.ResponseWriter, r *http.Request) 
 		ProcStartTime uint64 `json:"proc_start_time"`
 		Node          string `json:"node"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-	if err := decodeJSONBody(r, &req); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, httputil.MaxRequestBodyBytes)
+	if err := httputil.DecodeJSONBody(r, &req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -286,7 +392,7 @@ func (h *DiscoveryHandlers) handleClose(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
-		writeOK(w)
+		httputil.WriteOK(w)
 		return
 	}
 
@@ -299,7 +405,7 @@ func (h *DiscoveryHandlers) handleClose(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "discovery not available", http.StatusServiceUnavailable)
 		return
 	}
-	cached := h.discoveryCache.snapshot()
+	cached := h.cache.Snapshot()
 	var found *discovery.DiscoveredSession
 	for i := range cached {
 		if cached[i].PID == req.PID {
@@ -325,7 +431,7 @@ func (h *DiscoveryHandlers) handleClose(w http.ResponseWriter, r *http.Request) 
 	// just do cleanup.  Otherwise verify PID identity and send SIGTERM.
 	alive := osutil.PidAlive(req.PID)
 	if alive {
-		if !verifyProcIdentity(req.PID, req.ProcStartTime) {
+		if !h.verifyProcIdent(req.PID, req.ProcStartTime) {
 			http.Error(w, "process identity changed (PID reused)", http.StatusConflict)
 			return
 		}
@@ -342,7 +448,7 @@ func (h *DiscoveryHandlers) handleClose(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Evict from cache immediately so the frontend won't see the stale entry.
-	h.discoveryCache.evictPID(req.PID)
+	h.cache.EvictPID(req.PID)
 
 	// Background cleanup: wait for exit, SIGKILL if stuck, remove stale files.
 	pid := req.PID
@@ -358,5 +464,5 @@ func (h *DiscoveryHandlers) handleClose(w http.ResponseWriter, r *http.Request) 
 		}
 	}()
 
-	writeOK(w)
+	httputil.WriteOK(w)
 }
