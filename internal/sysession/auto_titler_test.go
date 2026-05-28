@@ -470,6 +470,68 @@ func TestEvictOldestHighwater_DropsOldestFirst(t *testing.T) {
 	}
 }
 
+// TestEvictOldestHighwaterTieBreakDeterministic pins R260528-BUG-9: when
+// two entries share lastRenamedAt the eviction must be deterministic
+// across runs — pre-fix the slices.SortFunc returned 0 on ties and Go's
+// randomised map iteration order picked the survivor at random, which
+// surfaced as flaky tests and arbitrary tenant eviction in production.
+// We seed five entries with identical timestamps and assert the same
+// keys survive on every iteration.
+func TestEvictOldestHighwaterTieBreakDeterministic(t *testing.T) {
+	t.Parallel()
+	mkSeed := func() map[string]autoTitlerHighwater {
+		ts := time.Unix(1_700_000_000, 0)
+		// Wide alphabet so map iteration order would otherwise pick
+		// different keys on different runs.
+		return map[string]autoTitlerHighwater{
+			"alpha":   {lastRenamedAt: ts},
+			"bravo":   {lastRenamedAt: ts},
+			"charlie": {lastRenamedAt: ts},
+			"delta":   {lastRenamedAt: ts},
+			"echo":    {lastRenamedAt: ts},
+		}
+	}
+	const keep = 2
+	// Run many iterations — Go's map iteration randomisation seeds per
+	// range so even within a single test pass the order changes; the
+	// determinism assertion holds only because the sort tie-break uses
+	// the key, not the iteration order.
+	const iterations = 200
+	var firstSurvivors map[string]struct{}
+	for i := 0; i < iterations; i++ {
+		m := mkSeed()
+		evictOldestHighwater(m, keep)
+		if len(m) != keep {
+			t.Fatalf("iter %d: len=%d want %d", i, len(m), keep)
+		}
+		survivors := make(map[string]struct{}, len(m))
+		for k := range m {
+			survivors[k] = struct{}{}
+		}
+		if firstSurvivors == nil {
+			firstSurvivors = survivors
+			continue
+		}
+		if len(survivors) != len(firstSurvivors) {
+			t.Fatalf("iter %d: survivor set size diverged", i)
+		}
+		for k := range survivors {
+			if _, ok := firstSurvivors[k]; !ok {
+				t.Errorf("iter %d: non-deterministic eviction — survivor %q not in first run %v",
+					i, k, firstSurvivors)
+			}
+		}
+	}
+	// With ascending key tie-break, the two largest keys must survive
+	// (oldest-first eviction drops the smallest keys when timestamps tie).
+	if _, ok := firstSurvivors["delta"]; !ok {
+		t.Errorf("expected 'delta' to survive (largest key not yet evicted), got %v", firstSurvivors)
+	}
+	if _, ok := firstSurvivors["echo"]; !ok {
+		t.Errorf("expected 'echo' to survive (largest key), got %v", firstSurvivors)
+	}
+}
+
 // TestEvictOldestHighwater_NoOpWhenUnderCap covers the fast-path:
 // when len(m) <= keep, no entry should be touched.
 func TestEvictOldestHighwater_NoOpWhenUnderCap(t *testing.T) {
