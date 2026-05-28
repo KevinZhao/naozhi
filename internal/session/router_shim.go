@@ -569,6 +569,21 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 	if reconnected > 0 {
 		r.notifyChange()
 		slog.Info("shim reconnect complete", "count", reconnected)
+		// SM2 (#394): defensive activeCount reconciliation. spawnSession
+		// runs concurrent to ReconnectShims and both Add(1) under r.mu;
+		// historically a same-key race between the two could drift the
+		// counter by ±1, surfacing later as a spurious ErrMaxProcs until
+		// the next Cleanup self-heals via countActive(). Calling
+		// countActive() here on the post-reconcile aggregate keeps the
+		// O(N) walk off the per-spawn fast path while still converging
+		// the counter to truth at every reconcile tick (>=1 reconnected).
+		// pendingSpawns isn't reset because in-flight Spawns still need
+		// their reservation — countActive only restores the visible
+		// activeCount; pendingSpawns is decremented by the slot's RAII
+		// release in Spawn's defer.
+		r.mu.Lock()
+		r.countActive()
+		r.mu.Unlock()
 	}
 }
 
