@@ -261,6 +261,18 @@ func (s *Scheduler) persistJobsLocked() (func(), error) {
 // is logged so operators can correlate with cron persist gaps; once the
 // disk recovers the next mutation's save will land naturally because the
 // gate is still pinned to the pre-disk-full seq.
+//
+// FSYNC-COST-PROFILE (R20260527122801-PERF-1 / #1333): each mutation lands
+// here synchronously, so finishRun + AddJob + UpdateJob each pay one
+// WriteFileAtomic = ~4 syscalls + 2× fsync (data + dir) per call. On NFS /
+// EBS / slow SSD the per-call latency reaches seconds and serialises every
+// concurrent mutator on storeMu. The staleness gate above lets multiple
+// mutations coalesce naturally only when storeMu is contended; the
+// proposed full fix (200ms storeMu-batched debounce + once-only SyncDir)
+// requires changing the contract above so callers do not assume "save()
+// returned ⇒ on disk before next mutation reads cron_jobs.json". Tracked
+// as needs-design under #1333; until then operators on slow disks should
+// pin maxJobs lower so the per-mutation fsync × N traffic stays bounded.
 func (s *Scheduler) saveMarshaledSeq(data []byte, seq uint64) {
 	s.storeMu.Lock()
 	defer s.storeMu.Unlock()
