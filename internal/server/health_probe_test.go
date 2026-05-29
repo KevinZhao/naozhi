@@ -51,3 +51,28 @@ func TestHealthProbe_TypeIsClosure(t *testing.T) {
 	auth := &healthAuthSection{}
 	p(auth) // call must not panic
 }
+
+// TestSubsystemProbes_FanOutNilRouterIsNoOp pins the contract that
+// handleHealth's fan-out over subsystemProbes() (#1052) leaves the
+// auth-section untouched when the handler has a nil router — the exact
+// shape the unauthenticated / test-harness path relies on. This guards
+// the wiring step: a regression that made any registered probe write a
+// non-nil pointer unconditionally would flip the omitempty section into
+// the JSON output and break the byte-identical wire contract.
+func TestSubsystemProbes_FanOutNilRouterIsNoOp(t *testing.T) {
+	h := &HealthHandler{} // router nil
+	probes := h.subsystemProbes()
+	if len(probes) == 0 {
+		t.Fatal("subsystemProbes must register at least one probe")
+	}
+	auth := &healthAuthSection{}
+	for _, probe := range probes {
+		probe(auth)
+	}
+	if auth.EventLog != nil {
+		t.Errorf("EventLog must stay nil under nil router, got %+v", auth.EventLog)
+	}
+	if auth.AttachmentTracker != nil {
+		t.Errorf("AttachmentTracker must stay nil under nil router, got %+v", auth.AttachmentTracker)
+	}
+}

@@ -300,35 +300,15 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	auth.Platforms = platStatus
 
-	if el := h.router.EventLogStats(); el.Enabled {
-		auth.EventLog = &healthEventLogStats{
-			Dir:            el.Dir,
-			WriterAlive:    el.WriterAlive,
-			ChannelDepth:   el.ChannelDepth,
-			ChannelCap:     el.ChannelCap,
-			LastDrainMsAgo: el.LastDrainMsAgo,
-			Written:        el.Written,
-			Dropped:        el.Dropped,
-			Fsyncs:         el.Fsyncs,
-			Malformed:      el.Malformed,
-			ReplayLeak:     el.ReplayLeak,
-			FSType:         el.FSType,
-			FSSupported:    el.FSSupported,
-		}
-	}
-
-	if at := h.router.AttachmentTrackerStats(); at.Enabled {
-		auth.AttachmentTracker = &healthAttachTrackStats{
-			WriterAlive:  at.WriterAlive,
-			ChannelDepth: at.ChannelDepth,
-			ChannelCap:   at.ChannelCap,
-			LastDrainMs:  at.LastDrainMs,
-			Pending:      at.Pending,
-			Written:      at.Written,
-			Cleared:      at.Cleared,
-			Dropped:      at.Dropped,
-			Errors:       at.Errors,
-		}
+	// R247-ARCH-12 (#1052): the eventlog / attachment-tracker sub-sections
+	// route through the HealthProbe factories defined in health_probe.go
+	// instead of inlining the field-by-field copy here. The factories are
+	// the single source of truth for each subsystem's wire mapping and
+	// keep the disabled-as-noop (nil pointer → omitempty) contract, so the
+	// JSON output stays byte-identical to the prior inline form. This is
+	// the follow-up wiring step the factory godoc deferred at introduction.
+	for _, probe := range h.subsystemProbes() {
+		probe(auth)
 	}
 
 	resp.healthAuthSection = auth
