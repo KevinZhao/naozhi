@@ -2708,6 +2708,34 @@ function renderEvents(events) {
   }
 }
 
+// trimEventsScroll bounds the live DOM (#398): drop oldest top children once the
+// scroller exceeds MAX_LIVE_DOM_EVENTS. Preserves a pinned "load earlier" button
+// (it always lives at the top) and advances oldestFetchedEventTime so a later
+// loadEarlierEvents re-fetches whatever we just evicted instead of leaving a gap.
+function trimEventsScroll(el) {
+  if (!el) return;
+  // Count rendered event bubbles only; dividers/buttons are cheap and ride along.
+  let bubbles = el.querySelectorAll(':scope > .event').length;
+  if (bubbles <= MAX_LIVE_DOM_EVENTS) return;
+  const btn = document.getElementById('earlier-events-btn');
+  let node = el.firstChild;
+  while (node && bubbles > MAX_LIVE_DOM_EVENTS) {
+    const next = node.nextSibling;
+    if (node === btn) { node = next; continue; }
+    const isBubble = node.nodeType === 1 && node.classList && node.classList.contains('event');
+    if (isBubble) {
+      const t = parseInt(node.getAttribute('data-time') || '0', 10);
+      if (t && t > oldestFetchedEventTime) oldestFetchedEventTime = t;
+      bubbles--;
+    }
+    el.removeChild(node);
+    node = next;
+  }
+  // The tail no longer starts at the true session head, so make "load earlier"
+  // available even if the initial page was short.
+  ensureEarlierButton();
+}
+
 function appendEvents(events) {
   const el = document.getElementById('events-scroll');
   if (!el) return;
@@ -2733,6 +2761,9 @@ function appendEvents(events) {
     if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
     if (e.type === 'user') sawUser = true;
   });
+  // Bound the live DOM before scroll/scan so a long streaming session can't
+  // grow #events-scroll without limit and OOM the tab (#398).
+  trimEventsScroll(el);
   if (sawUser) stickEventsBottom();
   else if (wasBottom) el.scrollTop = el.scrollHeight;
   runPendingAsync();
@@ -7061,6 +7092,17 @@ const EVENT_DIVIDER_GAP_MS = 5 * 60 * 1000;
 // regardless (maxEventsPageLimit) so 100-500 is the effective window.
 const INITIAL_HISTORY_LIMIT = 100;
 const EARLIER_PAGE_LIMIT = 100;
+
+// UX3 (#398): the live-push path (appendEvents) does insertAdjacentHTML('beforeend')
+// once per event with no upper bound, so a long-running session that streams
+// thousands of events grows #events-scroll without limit and eventually OOMs the
+// tab. The historical-load path is already paginated (INITIAL_HISTORY_LIMIT +
+// "load earlier"); this cap is the live half of the same budget. We keep a
+// generous tail (matching a few "load earlier" pages) and trim the oldest DOM
+// nodes from the top once exceeded. Trimming only drops rendered DOM — the
+// server still holds full history, and "load earlier" re-fetches if the operator
+// scrolls back up. Mirrors the existing CRON_LIVE_MAX_EVENTS top-trim precedent.
+const MAX_LIVE_DOM_EVENTS = 600;
 
 // cron-live RFC §5: cron live 容器内最多保留 200 条事件。后端
 // EventEntriesSince(after) 不受 50 条上限约束（After>0 时 Limit 被忽略），

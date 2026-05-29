@@ -706,60 +706,27 @@ func ParseCronAdd(args string) (schedule, prompt string, err error) {
 		return "", "", fmt.Errorf("missing closing quote for schedule")
 	}
 	schedule = rest
-	// Bound schedule length before handing to the parser: robfig/cron splits
-	// on whitespace and runs regex per field, so a multi-KB schedule would
-	// force measurable parser work even though it's guaranteed to fail. The
-	// dashboard preview handler enforces the same 256-byte cap.
-	if len(schedule) > maxCronScheduleBytes {
-		return "", "", fmt.Errorf("schedule too long (max %d bytes)", maxCronScheduleBytes)
-	}
-	// Control chars in schedule would persist verbatim into cron_jobs.json
-	// and could corrupt NDJSON framing when the job's prompt replays through
-	// shim stdin. Printable + space + tab is sufficient for every valid cron
-	// expression the robfig/cron parser accepts.
-	for i := 0; i < len(schedule); i++ {
-		c := schedule[i]
-		if c == 0 || (c < 0x20 && c != '\t') || c == 0x7f {
-			return "", "", fmt.Errorf("schedule contains invalid control characters")
-		}
-	}
-	// R190-SEC-M2: rune-level catch for C1 controls / bidi overrides / LS/PS
-	// that byte-level loop above misses (all >= 0x20 in UTF-8 encoding).
-	// Mirrors dashboard's validateCronPrompt (dashboard_cron.go:194).
-	for _, r := range schedule {
-		if osutil.IsLogInjectionRune(r) {
-			return "", "", fmt.Errorf("schedule contains invalid unicode control characters")
-		}
+	// R20260527122801-ARCH-3 (#1315): delegate the schedule size + UTF-8 +
+	// C0/DEL/C1/bidi/LS/PS scan to cron.ValidateScheduleChars so the IM
+	// `/cron add` edge and the dashboard validateCronScheduleChars edge share
+	// one policy. Previously this hand-wrote a byte loop + rune loop that
+	// could silently drift from the dashboard copy when a new forbidden
+	// character was added on one side only.
+	if err := cron.ValidateScheduleChars(schedule); err != nil {
+		return "", "", err
 	}
 	prompt = strings.TrimSpace(tail)
-	if prompt == "" {
-		return "", "", fmt.Errorf("prompt cannot be empty")
-	}
-	if len(prompt) > maxCronPromptBytes {
-		return "", "", fmt.Errorf("prompt too long (max %d bytes)", maxCronPromptBytes)
-	}
-	// Reject the same control-character set the dashboard rejects: null bytes
-	// are silently truncated by execve, CR poisons tail -f / journalctl by
-	// overwriting the current log line, and C1 / bidi runes corrupt terminal
-	// rendering. LF is allowed — cron prompts reach the CLI via stdin as a
-	// stream-json user message where json.Marshal escapes embedded newlines,
-	// so multi-line playbook prompts are framing-safe. Tab is allowed for
-	// indented examples. Mirrors server.validateCronPrompt (dashboard_cron.go).
-	for i := 0; i < len(prompt); i++ {
-		c := prompt[i]
-		if c == 0 || (c < 0x20 && c != '\t' && c != '\n') || c == 0x7f {
-			return "", "", fmt.Errorf("prompt contains invalid control characters")
-		}
-	}
-	// R190-SEC-M2: rune-level catch for C1 controls / bidi overrides / LS/PS.
-	// Matches server.validateCronPrompt second-pass scan so IM and dashboard
-	// ingress enforce the same policy. Unicode bidi overrides would corrupt
-	// any terminal-based log viewer that renders the prompt (journalctl,
-	// the dashboard activity feed, etc.).
-	for _, r := range prompt {
-		if osutil.IsLogInjectionRune(r) {
-			return "", "", fmt.Errorf("prompt contains invalid unicode control characters")
-		}
+	// R20260527122801-ARCH-3 (#1315): delegate the prompt empty/size/UTF-8/
+	// C0/DEL/C1/bidi/LS/PS scan to cron.ValidatePromptStrict — the same helper
+	// the dashboard validateCronPrompt and Scheduler.SetJobPrompt call — so IM
+	// and dashboard ingress can never diverge. Null bytes are truncated by
+	// execve, C1/bidi runes corrupt terminal log viewers; LF and Tab stay
+	// allowed for multi-line / indented playbooks (json.Marshal escapes them
+	// on the stream-json wire). Unlike the dashboard, the IM edge does not
+	// additionally reject CR because IM prompts never surface raw to log
+	// pipelines.
+	if err := cron.ValidatePromptStrict(prompt); err != nil {
+		return "", "", err
 	}
 	return schedule, prompt, nil
 }
