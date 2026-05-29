@@ -67,8 +67,8 @@
 //     "PersistSink" in persist (persist.PersistSink takes
 //     persist.Entry) are deliberately distinct types; the
 //     bridge in session/eventlog_bridge.go translates between
-//     them. See PersistSink godoc in eventlog.go for the
-//     full ARCH-4 anchor.
+//     them. See PersistSink godoc in eventlog_persist.go for
+//     the full ARCH-4 anchor.
 //
 //   - SubagentLinker — subagent_link.go +
 //     subagent_transcript.go: resolves "internal_agent_id" for
@@ -93,13 +93,15 @@
 //
 // # File-size hot spots
 //
-// process.go and eventlog.go each exceed 1k lines and host
-// multiple sub-domains; the architecture review TODOs above are
-// the long-term remediation. Smaller PRs can land focussed
-// extractions (e.g. moving image/thumbnail to a payload package)
-// without breaking the public surface — Process consumers
-// outside this package use the methods on Process, not the
-// underlying helpers.
+// The two former god-files have been split by responsibility:
+// process.go (ARCH-PROCESS-SPLIT) into 6 process_*.go files and
+// eventlog.go (ARCH-EVENTLOG-SPLIT) into 6 eventlog_*.go files —
+// see the per-group file maps below. Each owning file now sits
+// well under 1k lines. Further extractions (e.g. moving
+// image/thumbnail to a payload package) can land as focussed PRs
+// without breaking the public surface — Process consumers outside
+// this package use the methods on Process, not the underlying
+// helpers.
 //
 // # process_*.go file map (R243-ARCH-21)
 //
@@ -142,6 +144,36 @@
 // localised godoc patches (this commit) over partial extractions
 // that would leave method receivers split across multiple
 // packages mid-refactor.
+//
+// # eventlog_*.go file map (ARCH-EVENTLOG-SPLIT)
+//
+// The in-memory EventLog is split across 6 non-test eventlog_*.go
+// files (move-only, zero semantic change; see
+// docs/rfc/eventlog-split.md). As with process_*.go, reviewers
+// MUST treat the per-file headers as authoritative:
+//
+//   - eventlog.go — EventLog struct, ring-buffer constants, the
+//     EventEntry alias, and NewEventLog. Owns the type
+//     declaration; everything else hangs off methods on
+//     *EventLog.
+//   - eventlog_append.go — write path: Append / AppendBatch,
+//     ring-buffer eviction, summary-cache + atomic-counter
+//     updates, and the image-sanitize helper.
+//   - eventlog_agents.go — per-turn subagent tracking
+//     (applyEntryStateLocked, the O(1) taskIndex / toolUseIndex /
+//     agentRingByToolUse sidecars), task_done callbacks, and the
+//     TurnAgents / Subagents / BgSubagents accessors.
+//   - eventlog_persist.go — the PersistSink / PersistSinkOne
+//     contract, SetPersistSink(Pair), the invoke fan-out, and the
+//     replay-phase guard atomics.
+//   - eventlog_subscribe.go — subscriber broadcast (Subscribe /
+//     SubscribeNew / notifySubscribers / CloseSubscribers) plus
+//     the EventSubscription handle, guarded by subMu independently
+//     of the ring-buffer l.mu.
+//   - eventlog_query.go — read path: Entries / LastN /
+//     EntriesSince / EntriesBefore (and their *Append
+//     buffer-reuse variants), Count, and the lock-free summary
+//     accessors.
 //
 // # Public surface
 //
