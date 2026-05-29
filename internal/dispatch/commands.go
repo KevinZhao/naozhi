@@ -686,11 +686,13 @@ var smartQuoteNormalizer = strings.NewReplacer(
 // Cron input bounds are shared with the dashboard HTTP path; see
 // internal/cron/limits.go for rationale. Aliased here to avoid renaming
 // every existing call site. R216-CR-1.
-const (
-	maxCronPromptBytes   = cron.MaxPromptBytes
-	maxCronIDLen         = cron.MaxIDLen
-	maxCronScheduleBytes = cron.MaxScheduleBytes
-)
+//
+// R20260527122801-ARCH-3 (#1315): the prompt/schedule byte caps moved into
+// cron.ValidatePromptStrict / cron.ValidateScheduleChars (which ParseCronAdd
+// now delegates to), so the prior maxCronPromptBytes / maxCronScheduleBytes
+// aliases became dead. Only the ID-length alias survives — it still guards the
+// `/cron <op> <id>` token in validateCronJobIDArg.
+const maxCronIDLen = cron.MaxIDLen
 
 // ParseCronAdd parses the args of /cron add: "schedule" prompt
 func ParseCronAdd(args string) (schedule, prompt string, err error) {
