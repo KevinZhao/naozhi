@@ -196,7 +196,30 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entries, err := discovery.LoadHistory(h.claudeDir, sessionID, "")
+	// cwd is an optional optimisation hint. When present and valid it lets
+	// LoadHistory resolve the JSONL via an O(1) os.Stat on the CWD-derived
+	// path, bypassing the findSessionJSONL fallback scan AND its 60s
+	// negative-result cache. The negative cache is what made interactive
+	// preview flake: a single miss (card shown during the noJSONLGrace window
+	// before the JSONL flushed, or while claude renamed it during history
+	// compaction) poisons every preview for that session for 60s, rendering a
+	// blank "暂无会话历史" splash that "fixes itself" only once the TTL
+	// expires. The CWD direct-stat lookup runs before the cache check, so a
+	// fresh poll picks the conversation up the instant it lands on disk.
+	//
+	// A stale/invalid hint degrades to "" (full scan) rather than erroring —
+	// cwd never widens the result set, it only short-circuits the lookup.
+	// Reject traversal / control-byte payloads so a crafted cwd cannot probe
+	// arbitrary projDirName slugs (defense-in-depth; matches the takeover path
+	// which validates CWD the same way).
+	cwd := r.URL.Query().Get("cwd")
+	if cwd != "" {
+		if err := session.ValidateRemoteWorkspacePath(cwd); err != nil {
+			cwd = ""
+		}
+	}
+
+	entries, err := discovery.LoadHistory(h.claudeDir, sessionID, cwd)
 	if err != nil {
 		slog.Warn("preview load history", "session_id", sessionID, "err", err)
 		entries = nil

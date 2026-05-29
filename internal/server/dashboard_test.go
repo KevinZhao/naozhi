@@ -8,13 +8,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
-	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
 	"github.com/naozhi/naozhi/internal/cli"
+	dashsession "github.com/naozhi/naozhi/internal/dashboard/session"
+	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -1115,8 +1117,6 @@ func TestHandleResume_LastPromptTabAllowed(t *testing.T) {
 	}
 }
 
-
-
 // ─── R67 regressions ─────────────────────────────────────────────────────────
 
 // TestHandlePreview_RejectsInvalidNodeID locks down R67-SEC-2: the preview
@@ -1137,6 +1137,85 @@ func TestHandlePreview_RejectsInvalidNodeID(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400 (body=%q)", w.Code, w.Body.String())
+	}
+}
+
+// writePreviewJSONL drops a minimal one-line user JSONL at the CWD-derived
+// path under claudeDir so HandlePreview's local branch can resolve it. Returns
+// the session id it wrote.
+func writePreviewJSONL(t *testing.T, claudeDir, cwd, content string) string {
+	t.Helper()
+	sessionID := "12345678-1234-1234-1234-123456789abc"
+	projDir := filepath.Join(claudeDir, "projects", discovery.ClaudeProjectSlug(cwd))
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":` +
+		mustJSON(t, content) + `}}`
+	if err := os.WriteFile(filepath.Join(projDir, sessionID+".jsonl"), []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return sessionID
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestHandlePreview_CWDHintResolvesContent locks down the preview-flake fix:
+// a valid `cwd` query param lets the handler resolve the JSONL via the O(1)
+// CWD-derived path, returning the session content. This is the path that
+// bypasses findSessionJSONL's 60s negative cache — the cache that made
+// interactive preview intermittently render a blank "暂无会话历史" splash.
+func TestHandlePreview_CWDHintResolvesContent(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	claudeDir := t.TempDir()
+	srv.discoveryH.SetClaudeDirForTest(claudeDir)
+
+	cwd := filepath.Join(t.TempDir(), "preview-proj")
+	sessionID := writePreviewJSONL(t, claudeDir, cwd, "hello preview")
+
+	u := "/api/discovered/preview?session_id=" + sessionID + "&cwd=" + url.QueryEscape(cwd)
+	req := httptest.NewRequest(http.MethodGet, u, nil)
+	w := httptest.NewRecorder()
+	srv.discoveryH.HandlePreview(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%q)", w.Code, w.Body.String())
+	}
+	var entries []cli.EventEntry
+	if err := json.Unmarshal(w.Body.Bytes(), &entries); err != nil {
+		t.Fatalf("decode body: %v (body=%q)", err, w.Body.String())
+	}
+	if len(entries) != 1 || entries[0].Summary != "hello preview" {
+		t.Fatalf("entries = %+v, want one entry summarised %q", entries, "hello preview")
+	}
+}
+
+// TestHandlePreview_InvalidCWDDegradesGracefully confirms a hostile cwd hint
+// (path traversal) is dropped to "" rather than erroring or being used to
+// probe arbitrary projDirName slugs. The handler still returns 200 with an
+// empty list (no JSONL resolvable without the real cwd), never a 4xx/5xx.
+func TestHandlePreview_InvalidCWDDegradesGracefully(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	srv.discoveryH.SetClaudeDirForTest(t.TempDir())
+
+	u := "/api/discovered/preview?session_id=12345678-1234-1234-1234-123456789abc&cwd=" +
+		url.QueryEscape("/home/../etc")
+	req := httptest.NewRequest(http.MethodGet, u, nil)
+	w := httptest.NewRecorder()
+	srv.discoveryH.HandlePreview(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (invalid cwd must degrade, not error; body=%q)", w.Code, w.Body.String())
+	}
+	if strings.TrimSpace(w.Body.String()) != "[]" {
+		t.Errorf("body = %q, want empty array", w.Body.String())
 	}
 }
 
