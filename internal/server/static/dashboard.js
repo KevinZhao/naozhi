@@ -1613,22 +1613,26 @@ async function resumeRecentById(sessionId, workspace, lastPrompt) {
     await fetchSessions();
 
     selectSession(key, 'local');
-    previewRecentSession(key, sessionId);
+    previewRecentSession(key, sessionId, workspace);
   } catch (e) {
     showNetworkError('恢复会话', e);
   }
 }
 
-async function previewRecentSession(expectedKey, sessionId) {
+async function previewRecentSession(expectedKey, sessionId, cwd) {
   try {
     const headers = {};
     const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
+    // Pass cwd (the resumed session's workspace) so the backend hits the
+    // O(1) CWD-derived path lookup and skips the findSessionJSONL negative
+    // cache — see previewDiscovered for the full rationale.
+    const cwdParam = cwd ? '&cwd=' + encodeURIComponent(cwd) : '';
     // RNEW-UX-003: 5s timeout — this is a best-effort snapshot after
     // resume; if the backend stalls, drop the preview rather than hang.
     let entries;
     try {
-      entries = await fetchJSON('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId), { headers, timeoutMs: 5000 });
+      entries = await fetchJSON('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId) + cwdParam, { headers, timeoutMs: 5000 });
     } catch (err) {
       if (err.status) return;
       throw err;
@@ -10068,6 +10072,13 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
 
   try {
     const nodeParam = node ? '&node=' + encodeURIComponent(node) : '';
+    // Pass cwd so the backend resolves the JSONL via an O(1) os.Stat on the
+    // CWD-derived path instead of the fallback scan + its 60s negative cache.
+    // Without this hint a single transient miss (card shown before the JSONL
+    // flushed, or while claude renamed it during compaction) poisons preview
+    // for the full TTL, leaving a blank splash that only "fixes itself" once
+    // the cache expires.
+    const cwdParam = cwd ? '&cwd=' + encodeURIComponent(cwd) : '';
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
@@ -10076,7 +10087,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     // "加载中..." splash indefinitely.
     let events;
     try {
-      events = await fetchJSON('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId) + nodeParam, { headers, timeoutMs: 10000 });
+      events = await fetchJSON('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId) + nodeParam + cwdParam, { headers, timeoutMs: 10000 });
     } catch (err) {
       const errText = err.message || '';
       const el0 = document.getElementById('events-scroll');
@@ -10101,7 +10112,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
         const headers2 = {};
         const t2 = getToken();
         if (t2) headers2['Authorization'] = 'Bearer ' + t2;
-        const r2 = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(capturedSid) + nodeParam, { headers: headers2 });
+        const r2 = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(capturedSid) + nodeParam + cwdParam, { headers: headers2 });
         if (!r2.ok) return;
         const all = await r2.json();
         if (all.length <= previewEventCount) return;
