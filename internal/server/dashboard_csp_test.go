@@ -101,6 +101,31 @@ func TestDashboardCSP_BaseURIAndFormAction(t *testing.T) {
 	}
 }
 
+// TestDashboardCSP_ObjectSrcNone pins the R249-SEC-9 (#922) explicit plugin
+// lockdown: object-src 'none' forbids <object>/<embed>/<applet>, a legacy
+// script-execution vector that default-src 'self' would still permit for
+// same-origin sources. The dashboard ships zero plugin elements, so the
+// strict 'none' form is correct and dropping it is a pure regression.
+func TestDashboardCSP_ObjectSrcNone(t *testing.T) {
+	s := newTestServer(&mockPlatform{})
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	w := httptest.NewRecorder()
+	s.handleDashboard(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy header missing on /dashboard")
+	}
+	if !strings.Contains(csp, "object-src 'none'") {
+		t.Errorf("CSP must carry object-src 'none' (#922): plugin embeds are a legacy "+
+			"script-execution vector default-src 'self' does not lock down. got %q", csp)
+	}
+}
+
 // TestDashboardCSP_FrameSrcBlob locks the regression that broke workspace .html
 // preview: dashboard.js renderSandboxedBlob fetches workspace HTML, wraps the
 // bytes in a Blob({type:'text/html'}), and points a sandboxed iframe at the
