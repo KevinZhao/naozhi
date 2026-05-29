@@ -86,6 +86,16 @@ func (p *Process) drainStaleEvents(ctx context.Context) error {
 	wasInterrupted := p.interrupted.Swap(false)
 	wasRunning := p.interruptedRun.Swap(false)
 	p.mu.Unlock()
+
+	// Backing storage is a stack-allocated [4]Event array — post-cutoff events
+	// during an interrupt are rare (typically 0-1, occasionally 2-3 from
+	// in-flight stream-json blocks). `holdback := holdbackArr[:0]` starts with
+	// cap=4, so the common post-interrupt shape appends without heap allocation;
+	// append promotes to the heap only when >4 post-cutoff events stack up,
+	// which has never been observed in practice. R64-PERF-M7.
+	var holdbackArr [4]Event
+	holdback := holdbackArr[:0]
+
 	if wasInterrupted {
 		// Only wait for the interrupted result if the CLI was actively
 		// processing a turn when Interrupt() was called. An idle process
@@ -102,21 +112,22 @@ func (p *Process) drainStaleEvents(ctx context.Context) error {
 						goto drain
 					}
 					if ev.recvAt.After(cutoff) {
-						// Event produced after we entered drain belongs to the
-						// new turn. Try to put it back (buffered channel may
-						// have room); if the channel is already full we fall
-						// back to findResultSince which reads from EventLog.
-						// Mirror the warn in the post-drain holdback re-enqueue
-						// (line 179) so operators see both drop sites symmetrically
-						// — without it the interrupted-settle drop is silent.
-						select {
-						case p.eventCh <- ev:
-						default:
-							slog.Warn("drainStaleEvents: eventCh full during interrupted-settle, dropped fresh event",
-								"type", ev.Type, "session", ev.SessionID)
-						}
-						goto drain
+						// Event produced after we entered the settle window
+						// belongs to the *new* turn. R29-DES1 (#773): the old
+						// code re-enqueued it and `goto drain` immediately —
+						// abandoning the settle wait. But the interrupted
+						// result event may still be in flight; if it arrives
+						// after drain's non-blocking sweep empties the channel
+						// it leaks into the new turn's output. Instead, hold
+						// the fresh event aside and KEEP waiting for the
+						// interrupted result (or the settle timeout) so it is
+						// reliably absorbed. Held events are re-enqueued for
+						// the live consumer at the end of drain.
+						holdback = append(holdback, ev)
+						continue
 					}
+					// Pre-cutoff non-result event from the interrupted turn —
+					// drop it (drained) and keep waiting for the result.
 				case <-settle.C:
 					slog.Debug("send: settle timeout, no stale result")
 					goto drain
@@ -137,14 +148,8 @@ drain:
 	// turn as if they were current — producing phantom tool_use/assistant
 	// events from the prior turn.
 	//
-	// Backing storage is a stack-allocated [4]Event array — post-cutoff events
-	// during an interrupt are rare (typically 0-1, occasionally 2-3 from
-	// in-flight stream-json blocks). `holdback := holdbackArr[:0]` starts with
-	// cap=4, so the common post-interrupt shape appends without heap allocation;
-	// append promotes to the heap only when >4 post-cutoff events stack up,
-	// which has never been observed in practice. R64-PERF-M7.
-	var holdbackArr [4]Event
-	holdback := holdbackArr[:0]
+	// holdback may already carry fresh events captured during the settle
+	// window above (R29-DES1 / #773); we keep appending to the same slice.
 	for {
 		select {
 		case <-ctx.Done():

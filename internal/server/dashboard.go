@@ -403,7 +403,26 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// data-URIs with embedded SVG files served from /static and
 	// (b) eliminating `script-src 'unsafe-inline'` per R236-SEC-02 /
 	// #441 — see triage note on #562 for the bundled work.
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:; frame-src 'self' blob:; frame-ancestors 'none'; require-sri-for script style font")
+	// R242-SEC-1 / R249-SEC-9 (#605, #922) interim hardening: while the full
+	// strict-dynamic+nonce migration that lets us drop `'unsafe-inline'` from
+	// script-src is tracked NEEDS-DESIGN, three additive directives close real
+	// attack surface today without touching the inline-handler surface:
+	//   - `object-src 'none'`: explicitly forbids <object>/<embed>/<applet>
+	//     plugin embeds (a legacy script-execution vector that default-src
+	//     'self' would still permit for same-origin sources). The dashboard
+	//     ships zero such elements, so 'none' is the strict, recommended lock.
+	//   - `base-uri 'none'`: a single injected `<base href>` would otherwise
+	//     re-root every relative URL (including the `/static/dashboard.js`
+	//     and `/static/agent_view.js` script tags) at an attacker origin,
+	//     turning any HTML-injection into script substitution even with the
+	//     existing script-src allowlist. We never use a <base> element, so
+	//     'none' is safe.
+	//   - `form-action 'self'`: the dashboard's only <form> (quick-ask) does
+	//     `event.preventDefault()` and submits via fetch, so it never POSTs
+	//     to an action target; pinning to 'self' stops an injected form from
+	//     exfiltrating to a foreign origin. Mirrors the login page's
+	//     explicit form-action discipline (R243-SEC-15 / #800).
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font")
 	// HSTS is only meaningful over TLS (RFC 6797 §7.2). Sending it on plain
 	// HTTP would still be honoured by browsers and can brick local HTTP
 	// loopback access for a year. Gate on the same isSecure() helper the

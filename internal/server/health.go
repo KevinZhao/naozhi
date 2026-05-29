@@ -266,23 +266,6 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		},
 		CLIAvailable: cliAvailable(h.router.CLIPath()),
 	}
-	if h.hubDropped != nil {
-		n := h.hubDropped()
-		auth.WSDropped = &n
-	}
-	if h.dispatcherMetrics != nil {
-		msgs, replyErrs, sendFails, lastReply := h.dispatcherMetrics()
-		d := &healthDispatchStats{
-			MessageCount:    msgs,
-			ReplyErrorCount: replyErrs,
-			SendFailCount:   sendFails,
-		}
-		if !lastReply.IsZero() {
-			d.LastReplySuccessAt = lastReply.UTC().Format(time.RFC3339)
-			d.LastReplySuccessAgo = time.Since(lastReply).Round(time.Second).String()
-		}
-		auth.Dispatch = d
-	}
 	if kn := h.nodeAccess.KnownNodes(); len(kn) > 0 {
 		nodeStatus := make(map[string]string, len(kn))
 		for id := range kn {
@@ -300,35 +283,17 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	auth.Platforms = platStatus
 
-	if el := h.router.EventLogStats(); el.Enabled {
-		auth.EventLog = &healthEventLogStats{
-			Dir:            el.Dir,
-			WriterAlive:    el.WriterAlive,
-			ChannelDepth:   el.ChannelDepth,
-			ChannelCap:     el.ChannelCap,
-			LastDrainMsAgo: el.LastDrainMsAgo,
-			Written:        el.Written,
-			Dropped:        el.Dropped,
-			Fsyncs:         el.Fsyncs,
-			Malformed:      el.Malformed,
-			ReplayLeak:     el.ReplayLeak,
-			FSType:         el.FSType,
-			FSSupported:    el.FSSupported,
-		}
-	}
-
-	if at := h.router.AttachmentTrackerStats(); at.Enabled {
-		auth.AttachmentTracker = &healthAttachTrackStats{
-			WriterAlive:  at.WriterAlive,
-			ChannelDepth: at.ChannelDepth,
-			ChannelCap:   at.ChannelCap,
-			LastDrainMs:  at.LastDrainMs,
-			Pending:      at.Pending,
-			Written:      at.Written,
-			Cleared:      at.Cleared,
-			Dropped:      at.Dropped,
-			Errors:       at.Errors,
-		}
+	// R247-ARCH-12 (#1052): the per-subsystem auth-section fields
+	// (ws_dropped, dispatch, eventlog, attachment_tracker) route through
+	// the HealthProbe factories defined in health_probe.go instead of
+	// inlining each field copy here. The factories are the single source
+	// of truth for each subsystem's wire mapping and keep the
+	// disabled-as-noop (nil pointer / nil closure → omitempty) contract,
+	// so the JSON output stays byte-identical to the prior inline form.
+	// Top-level fields that read many HealthHandler-private values at once
+	// (sessions / system / nodes / platforms / watchdog) remain inline.
+	for _, probe := range h.subsystemProbes() {
+		probe(auth)
 	}
 
 	resp.healthAuthSection = auth
