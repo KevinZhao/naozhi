@@ -14,7 +14,12 @@ import (
 // the pool is reused (cap preserved, contents zeroed). Allocations stay
 // bounded across many marshalJobsLocked calls.
 func TestMarshalEntriesPool_RecyclesUnderCap(t *testing.T) {
-	t.Parallel()
+	// NOT t.Parallel(): this test donates a slice into the process-global
+	// marshalEntriesPool and then reads the recycled slice's backing array.
+	// Parallel tests that hit marshalJobsLocked (e.g. AddJob) concurrently
+	// Get the same slice and append/zero it — a data race on the shared
+	// backing array. Running serially keeps pool inspection out of the
+	// concurrent window. R247-PERF-11 (#551) flaky-race fix.
 
 	// Seed the pool with a known slice so we can detect reuse — sync.Pool
 	// is best-effort, so we drain everything in the pool first by Getting
@@ -40,7 +45,10 @@ func TestMarshalEntriesPool_RecyclesUnderCap(t *testing.T) {
 // pointers via stale slice slots. A leaked *Job past DeleteJob would
 // delay GC and confuse memory profilers.
 func TestMarshalEntriesPool_ZeroesOnPut(t *testing.T) {
-	t.Parallel()
+	// NOT t.Parallel(): reads the donated slice's backing array after
+	// putMarshalEntries hands it to the shared global pool, which races a
+	// concurrent Get+write from parallel marshalJobsLocked callers. See
+	// TestMarshalEntriesPool_RecyclesUnderCap. R247-PERF-11 (#551).
 
 	j := &Job{ID: "abc"}
 	s := []*Job{j}
@@ -58,7 +66,9 @@ func TestMarshalEntriesPool_ZeroesOnPut(t *testing.T) {
 // TestMarshalEntriesPool_DropsOversize prevents a one-time burst from
 // pinning a multi-MB backing array forever via the pool.
 func TestMarshalEntriesPool_DropsOversize(t *testing.T) {
-	t.Parallel()
+	// NOT t.Parallel(): Gets from and reads the shared global pool's slot
+	// caps, which races concurrent Get+write from parallel marshalJobsLocked
+	// callers. See TestMarshalEntriesPool_RecyclesUnderCap. R247-PERF-11 (#551).
 
 	// Build a slice well above the cap-drop threshold.
 	oversize := make([]*Job, 0, marshalEntriesCapDrop+1)
