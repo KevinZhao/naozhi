@@ -2,7 +2,9 @@ package server
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -53,9 +55,11 @@ var wshubLockOrderFiles = []string{
 //	   the file and the relevant lock sites moved to siblings, so
 //	   the scan now covers every wshub_*.go that owns Hub or push
 //	   logic — see wshubLockOrderFiles.)
-//	B. eventlog.go (internal/cli) must not import internal/server —
-//	   if it did, a direct h.mu access from a subMu-holding callback
-//	   would become possible without this test catching it.
+//	B. the eventlog*.go files (internal/cli) must not import
+//	   internal/server — if any did, a direct h.mu access from a
+//	   subMu-holding callback would become possible without this test
+//	   catching it. ARCH-EVENTLOG-SPLIT spread EventLog across siblings,
+//	   so the scan globs every eventlog*.go (mirrors part A / PR #327).
 //	C. The LOCK ORDER CONTRACT comment stays in Shutdown's godoc so
 //	   future readers follow the chain back to this audit item.
 //
@@ -112,19 +116,37 @@ func TestHubShutdown_LockOrderInvariant(t *testing.T) {
 		}
 	}
 
-	// B) eventlog.go in internal/cli must not import internal/server.
-	// A circular-ish import would also fail to compile, but a thin
-	// bridge via an interface would slip through compile and still
-	// break the invariant. We check the import list explicitly.
-	eventlogPath := "../cli/eventlog.go"
-	if _, statErr := os.Stat(eventlogPath); statErr == nil {
-		eventlogSrc, err := os.ReadFile(eventlogPath)
-		if err == nil {
-			if regexp.MustCompile(`"github\.com/naozhi/naozhi/internal/server"`).Match(eventlogSrc) {
-				t.Error("internal/cli/eventlog.go imports internal/server. R35-REL2: " +
-					"EventLog must never reach into Hub state, or a subMu-holding " +
-					"callback could trigger h.mu acquisition and deadlock Shutdown.")
-			}
+	// B) the eventlog*.go files in internal/cli must not import
+	// internal/server. A circular-ish import would also fail to compile,
+	// but a thin bridge via an interface would slip through compile and
+	// still break the invariant. We check the import list explicitly.
+	//
+	// ARCH-EVENTLOG-SPLIT moved PersistSink + the rest of EventLog out of
+	// the single eventlog.go into sibling files (eventlog_persist.go,
+	// eventlog_subscribe.go, …); like part A's PR #327 widening, the scan
+	// now globs every eventlog*.go so the no-import invariant still holds
+	// if a subMu-holding callback is added in any of them.
+	serverImportRe := regexp.MustCompile(`"github\.com/naozhi/naozhi/internal/server"`)
+	eventlogFiles, globErr := filepath.Glob("../cli/eventlog*.go")
+	if globErr != nil {
+		t.Fatalf("glob ../cli/eventlog*.go: %v", globErr)
+	}
+	if len(eventlogFiles) == 0 {
+		t.Fatal("no ../cli/eventlog*.go files found; R35-REL2 import guard would " +
+			"silently pass — verify the path before trusting this test")
+	}
+	for _, path := range eventlogFiles {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if serverImportRe.Match(src) {
+			t.Errorf("%s imports internal/server. R35-REL2: "+
+				"EventLog must never reach into Hub state, or a subMu-holding "+
+				"callback could trigger h.mu acquisition and deadlock Shutdown.", path)
 		}
 	}
 }

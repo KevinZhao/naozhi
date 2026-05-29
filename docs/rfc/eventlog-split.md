@@ -1,12 +1,27 @@
 # RFC: cli/EventLog 文件分拆(ARCH-EVENTLOG-SPLIT)
 
-> **状态**: Draft v1(待评审)
+> **状态**: Implemented (v1.1 — 单 commit move-only 落地,build/vet/test-race 全绿,符号集 63 项零增减)
 > **作者**: naozhi team
 > **创建**: 2026-05-29
+> **修订**: 2026-05-29(v1.1: 落地实施记录,见 §0)
 > **范围**: `internal/cli/eventlog.go`(2289 行) → 按职责拆成 6 个文件;**零语义改动**
 > **关联代码**: `internal/cli/eventlog.go`、`internal/cli/event.go`、`internal/session/eventlog_bridge.go`、`internal/eventlog/persist/persister.go`
 > **先例**: `docs/rfc/process-split.md`(ARCH-PROCESS-SPLIT,Implemented v3)、`docs/rfc/managed-session-split.md`(ARCH-MANAGED-SPLIT,Implemented v2.3) —— **同一手法,同一约束清单**
 > **解锁**: R67-PERF-1(ReadEvent/Append alloc 热路径优化的阅读瓶颈)、未来 `EventReader` / `EventWriter` facet 接口拆分
+
+---
+
+## 0. 修订历史
+
+### v1.1(2026-05-29)— 落地实施记录(Implemented)
+
+`internal/cli/eventlog.go` 2289 行 → 6 文件,**单 commit move-only**(对齐 `674055fa` managed.go 拆分的 `[move-only]` 手法,避免 process-split v3 的"中间 commit 不可 build"问题)。落地后行数:eventlog.go 287 / agents 693 / append 456 / query 365 / persist 300 / subscribe 260。
+
+- **符号集零增减**:`grep -hoE '^(func|type|const|var) …'` 拼接 6 个生产文件与原文件 diff 为空(63 项一致),func 总数稳定 47、`*EventLog` 方法稳定 39。
+- **测试零改动**:eventlog 无 source-introspecting 测试(§3 预判正确),7 个 `eventlog_*_test.go` 全走导出 API,搬迁后不改一行。这是本拆分比 managed-split(被 2 个 `os.ReadFile` 测试证伪)更干净之处。
+- **import 自动收窄**:`goimports -w` 逐文件裁剪;留守 eventlog.go 从 6 import 降到 3(`sync`/`sync/atomic`/`clievent`)。
+- **验证**:`go build ./...` + `go vet ./internal/cli/...` + `go test -race ./internal/cli/...` 全绿;下游消费者 `session` / `eventlog/persist` / `server` build+vet+test-race 全绿。
+- **实施手法**:用 Python splitter 按"anchor 行 + 前导注释块"切分,先 assert 无损重建原文件再写出,规避 managed-split 教训②(sed 行范围错位漏搬闭合括号)。
 
 ---
 
