@@ -33,9 +33,9 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			pattern: `metrics\.SessionCreateTotal\.Add\(1\)`,
 		},
 		{
-			// router-split (Phase 1): evictOldest moved to router_lifecycle.go.
+			// router-split (#1375): evictOldest moved to router_capacity.go.
 			name:    "SessionEvictTotal fires in evictOldest success path",
-			path:    "../session/router_lifecycle.go",
+			path:    "../session/router_capacity.go",
 			pattern: `metrics\.SessionEvictTotal\.Add\(1\)`,
 		},
 		{
