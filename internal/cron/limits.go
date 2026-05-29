@@ -62,6 +62,62 @@ func ValidatePromptStrict(prompt string) error {
 	return nil
 }
 
+// ErrInvalidSchedule is returned by ValidateScheduleChars when a schedule
+// expression fails the shared char policy (size cap / UTF-8 / C0 / DEL / C1 /
+// bidi / LS / PS). Sentinel form so the IM dispatch ParseCronAdd path and the
+// dashboard validateCronScheduleChars edge can errors.Is and surface a stable
+// message instead of string-matching.
+var ErrInvalidSchedule = errors.New("cron: invalid schedule")
+
+// ValidateScheduleChars enforces the shared character + size policy for a cron
+// schedule expression before it reaches robfig/cron's parser. Both the IM
+// `/cron add` slash-command edge (dispatch.ParseCronAdd) and the dashboard
+// HTTP edge (validateCronScheduleChars) call this so the two surfaces cannot
+// silently drift apart when a new forbidden character is added on one side
+// only. R20260527122801-ARCH-3 (#1315).
+//
+// Policy:
+//   - len ≤ MaxScheduleBytes
+//   - utf8.ValidString
+//   - no C0 controls and no DEL (0x7f); unlike prompts, schedules forbid
+//     tab/newline too — robfig/cron expressions are whitespace-separated
+//     single-line tokens, so an embedded \t or \n is always malformed and
+//     could persist verbatim into cron_jobs.json / corrupt NDJSON framing
+//   - no rune flagged by osutil.IsLogInjectionRune (C1 / bidi / LS / PS)
+//
+// Returns a wrapped ErrInvalidSchedule so callers can distinguish from
+// parse-failure errors. Empty schedule is rejected here so a single call
+// replaces the prior hand-written byte+rune loops on both edges.
+func ValidateScheduleChars(schedule string) error {
+	if len(schedule) > MaxScheduleBytes {
+		return fmt.Errorf("%w: exceeds %d-byte limit", ErrInvalidSchedule, MaxScheduleBytes)
+	}
+	if !utf8.ValidString(schedule) {
+		return fmt.Errorf("%w: contains invalid UTF-8", ErrInvalidSchedule)
+	}
+	anyHighBit := false
+	for i := 0; i < len(schedule); i++ {
+		c := schedule[i]
+		if c >= 0x80 {
+			anyHighBit = true
+			continue
+		}
+		if c >= 0x20 && c != 0x7f {
+			continue
+		}
+		return fmt.Errorf("%w: contains control characters", ErrInvalidSchedule)
+	}
+	if !anyHighBit {
+		return nil
+	}
+	for _, r := range schedule {
+		if osutil.IsLogInjectionRune(r) {
+			return fmt.Errorf("%w: contains unicode control characters", ErrInvalidSchedule)
+		}
+	}
+	return nil
+}
+
 // MaxWorkDirLen caps Job.WorkDir on the AddJob write path. 4 KiB matches the
 // de-facto Linux PATH_MAX × small slack; longer values cannot legitimately
 // reach a real filesystem and would just inflate every "could not chdir"

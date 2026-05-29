@@ -1,6 +1,8 @@
 package server
 
 import (
+	"time"
+
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -11,12 +13,12 @@ import (
 // attachment_tracker, …) lives next to its owner instead of being
 // inlined in one giant handler. R247-ARCH-12 (#647).
 //
-// First-wave scope: this commit introduces only the type and the
-// default eventlog / attachment-tracker probe factories. Wiring them
-// into handleHealth (replacing the inline fan-out) is deferred to a
-// follow-up commit so the wire-shape regression surface is minimal at
-// this step — reviewers can verify the factories produce byte-identical
-// snapshots to the inline form before any integration work lands.
+// Scope: the type plus the default eventlog / attachment-tracker probe
+// factories. handleHealth now fans out over subsystemProbes() instead of
+// inlining the per-subsystem field copy (#1052) — the factories are the
+// single source of truth for each subsystem's wire mapping. The
+// migration kept the JSON output byte-identical to the prior inline form
+// (covered by the health-shape regression tests).
 //
 // Wire-shape contract: probes MUST keep the JSON output byte-identical
 // to the prior inline form so existing dashboard / monitoring callers
@@ -67,6 +69,73 @@ func EventLogHealthProbe(router *session.Router) HealthProbe {
 			FSType:         el.FSType,
 			FSSupported:    el.FSSupported,
 		}
+	}
+}
+
+// subsystemProbes returns the ordered list of HealthProbe closures the
+// authenticated /health handler fans out over to populate per-subsystem
+// auth-section fields. Centralising the registration here (next to the
+// factories) means adding a new subsystem probe is a one-line edit in
+// this file rather than another inline block in handleHealth. The order
+// is irrelevant to the JSON output (each probe writes a distinct field)
+// but is kept stable (eventlog, then attachment-tracker) to match the
+// prior inline ordering for anyone diffing the handler. R247-ARCH-12
+// (#1052).
+//
+// Nil-safe: each factory's returned closure no-ops when its router is
+// nil or the subsystem is disabled, so a HealthHandler built by a test
+// harness without a live router fans out harmlessly.
+func (h *HealthHandler) subsystemProbes() []HealthProbe {
+	return []HealthProbe{
+		wsDroppedHealthProbe(h.hubDropped),
+		dispatchHealthProbe(h.dispatcherMetrics),
+		EventLogHealthProbe(h.router),
+		AttachmentTrackerHealthProbe(h.router),
+	}
+}
+
+// wsDroppedHealthProbe returns a HealthProbe that populates the
+// ws_dropped auth-section field from the hub's DroppedMessages counter.
+// The counter is surfaced via an injected closure (hubDropped) rather
+// than a direct hub reference so HealthHandler stays free of an upward
+// dependency on the Hub. Nil closure (test harness without a wired hub)
+// leaves WSDropped nil so omitempty keeps the field out of the JSON,
+// matching the prior inline `if h.hubDropped != nil` guard exactly.
+// R247-ARCH-12 (#1052).
+func wsDroppedHealthProbe(hubDropped func() int64) HealthProbe {
+	return func(auth *healthAuthSection) {
+		if auth == nil || hubDropped == nil {
+			return
+		}
+		n := hubDropped()
+		auth.WSDropped = &n
+	}
+}
+
+// dispatchHealthProbe returns a HealthProbe that populates the dispatch
+// auth-section sub-object from the injected dispatcherMetrics closure
+// (message/replyError/sendFail counts + last successful reply time).
+// Wire shape is byte-identical to the prior inline form: the closure is
+// only invoked when non-nil, the last-reply timestamp fields are emitted
+// (RFC3339 + humanised "ago") only when a reply has actually succeeded,
+// and a nil closure leaves Dispatch nil so omitempty omits the object.
+// R247-ARCH-12 (#1052).
+func dispatchHealthProbe(metrics func() (int64, int64, int64, time.Time)) HealthProbe {
+	return func(auth *healthAuthSection) {
+		if auth == nil || metrics == nil {
+			return
+		}
+		msgs, replyErrs, sendFails, lastReply := metrics()
+		d := &healthDispatchStats{
+			MessageCount:    msgs,
+			ReplyErrorCount: replyErrs,
+			SendFailCount:   sendFails,
+		}
+		if !lastReply.IsZero() {
+			d.LastReplySuccessAt = lastReply.UTC().Format(time.RFC3339)
+			d.LastReplySuccessAgo = time.Since(lastReply).Round(time.Second).String()
+		}
+		auth.Dispatch = d
 	}
 }
 

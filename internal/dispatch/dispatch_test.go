@@ -171,6 +171,13 @@ func TestParseCronAdd(t *testing.T) {
 		{"no quote", `@every 30m check`, "", "", true},
 		{"missing close quote", `"@every 30m check`, "", "", true},
 		{"empty prompt", `"@every 30m" `, "", "", true},
+		// R20260527122801-ARCH-3 (#1315): schedule + prompt validation is now
+		// delegated to cron.ValidateScheduleChars / cron.ValidatePromptStrict.
+		// These cases pin that the shared validators are actually wired through
+		// ParseCronAdd so the IM edge cannot drift from the dashboard edge.
+		{"schedule control char", "\"@every \x0030m\" check", "", "", true},
+		{"prompt control char", "\"@every 30m\" che\x00ck", "", "", true},
+		{"prompt bidi override", "\"@every 30m\" che‮ck", "", "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

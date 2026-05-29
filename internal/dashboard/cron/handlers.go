@@ -13,8 +13,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -209,7 +209,13 @@ func validateNotifyTarget(platform, chatID string) error {
 // across every user-controlled string entering scheduler paths.
 // R177-SEC-9.
 func validateCronScheduleChars(schedule string) error {
-	return validateStringField(schedule, stringFieldPolicy{name: "schedule", collapseErrors: true})
+	// R20260527122801-ARCH-3 (#1315): delegate to cronpkg.ValidateScheduleChars
+	// so this dashboard edge and the IM dispatch.ParseCronAdd edge share one
+	// policy and cannot drift when a forbidden character is added on one side
+	// only. The shared helper also enforces MaxScheduleBytes; the explicit
+	// length guards at the call sites stay as cheap early-outs but are now
+	// redundant with the helper's own cap.
+	return cronpkg.ValidateScheduleChars(schedule)
 }
 
 // cronRunSummaryView is the JSON shape for a single cron run summary.

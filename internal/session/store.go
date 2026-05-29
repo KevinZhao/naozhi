@@ -12,6 +12,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/datadir"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -220,7 +221,11 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 		return nil
 	}
 	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0700); err != nil {
+		// R250-ARCH-13 (#1175): shared dir policy (MkdirAll 0700 +
+		// symlink/non-dir guard + perm-tightening chmod) instead of a bare
+		// MkdirAll, so the session store inherits the same hardening the
+		// cron run store already had.
+		if err := datadir.EnsureDir(dir); err != nil {
 			return fmt.Errorf("create store directory: %w", err)
 		}
 	}
@@ -404,7 +409,8 @@ func saveKnownIDs(storePath string, ids map[string]bool) error {
 		return nil
 	}
 	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0700); err != nil {
+		// R250-ARCH-13 (#1175): shared dir policy — see saveStore.
+		if err := datadir.EnsureDir(dir); err != nil {
 			return fmt.Errorf("create known IDs directory: %w", err)
 		}
 	}
