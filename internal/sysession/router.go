@@ -1,9 +1,28 @@
 package sysession
 
 import (
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session"
 )
+
+// SystemEventEntry is the sysession-local mirror of the ≤4 event-record
+// fields AutoTitler actually reads (Type / Summary). It exists so the
+// daemon-facing SystemSessionRouter interface no longer has to import
+// internal/cli purely for the EventEntriesForKey return type
+// (R260528-ARCH-9 / #1370). The cli→SystemEventEntry conversion is
+// confined to the single adapter in router_adapter.go, which is the one
+// file in this package that still touches internal/cli.
+//
+// Field names intentionally track cli.EventEntry (Type, Summary) so the
+// adapter is a trivial field copy; if a future daemon needs more fields,
+// widen this struct and the adapter together.
+type SystemEventEntry struct {
+	// Type mirrors cli.EventEntry.Type ("user", "text", "tool_use", …).
+	// AutoTitler filters on Type == "user".
+	Type string
+	// Summary mirrors cli.EventEntry.Summary — the brief per-turn text
+	// AutoTitler stitches into the rename excerpt.
+	Summary string
+}
 
 // SystemSessionRouter is the minimal slice of session.Router that the
 // sysession package depends on.  Defined here (consumer-side) so:
@@ -58,17 +77,11 @@ type SystemSessionRouter interface {
 	// Returns the live process's EventLog when the session is alive,
 	// otherwise the persisted history slice.
 	//
-	// NEEDS-DESIGN (R242-ARCH-24, tracked [~] in docs/TODO.md): the
-	// []cli.EventEntry return type is the only thing forcing this
-	// consumer-side interface to import internal/cli. AutoTitler uses
-	// ≤4 fields per entry (Type, Text, IsUser, Created) so a
-	// sysession-local SystemEventEntry mirror + adapter at
-	// SystemSessionRouter.EventEntriesForKey would let sysession drop
-	// the cli import entirely. Deferred until R243-ARCH-12 (EventStore
-	// interface unification) lands so the mirror shape can be derived
-	// from the central EventStore type rather than coined ad-hoc here.
-	// Doing it twice (once now, once when EventStore lands) would only
-	// churn AutoTitler tests, which is exactly the cost the [~]
-	// godoc-only checkpoint is meant to defer.
-	EventEntriesForKey(key string) []cli.EventEntry
+	// R260528-ARCH-9 (#1370): the return type is the sysession-local
+	// SystemEventEntry mirror, not cli.EventEntry, so this daemon-facing
+	// interface no longer imports internal/cli. The concrete
+	// *session.Router (which returns []cli.EventEntry) is bridged in via
+	// the routerAdapter in router_adapter.go — the only file in this
+	// package still importing internal/cli.
+	EventEntriesForKey(key string) []SystemEventEntry
 }

@@ -66,8 +66,11 @@ type Config struct {
 	Runner Runner
 
 	// Router is the session router subset the daemons need.  Required
-	// when Enabled.
-	Router SystemSessionRouter
+	// when Enabled.  Accepts the producer-side RawSystemSessionRouter
+	// (satisfied directly by *session.Router); NewManager wraps it into
+	// the cli-free SystemSessionRouter the daemons consume
+	// (R260528-ARCH-9 / #1370).
+	Router RawSystemSessionRouter
 
 	// Daemons is the per-daemon config map.  Key is daemon name (must
 	// match an entry in builtinDaemons).  Value carries enable flag +
@@ -270,6 +273,11 @@ func NewManager(cfg Config) (*Manager, error) {
 	if cfg.Router == nil {
 		return nil, fmt.Errorf("sysession: NewManager requires Router when enabled")
 	}
+	// Adapt the producer-side router into the cli-free daemon-facing
+	// interface once; every daemon below gets the wrapped form so none
+	// of the daemon code path references internal/cli (R260528-ARCH-9 /
+	// #1370).
+	daemonRouter := wrapRouter(cfg.Router)
 
 	// Single timestamp shared by every daemonRecord on this Manager
 	// instance — Manager represents one process start, so all daemons
@@ -282,7 +290,7 @@ func NewManager(cfg Config) (*Manager, error) {
 			continue
 		}
 		deps := DaemonDeps{
-			Router: cfg.Router,
+			Router: daemonRouter,
 			Runner: cfg.Runner,
 			Cfg:    runtime.Specific,
 		}
