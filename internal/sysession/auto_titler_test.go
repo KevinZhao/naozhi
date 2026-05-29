@@ -263,7 +263,7 @@ func TestAutoTitler_CandidateFilter(t *testing.T) {
 			t.Parallel()
 			router := newSnapshotFakeRouter([]session.SessionSnapshot{c.snap})
 			runner := &fakeRunner{resp: c.runnerResp}
-			a, err := newAutoTitler(DaemonDeps{Router: router, Runner: runner})
+			a, err := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
 			if err != nil {
 				t.Fatalf("newAutoTitler: %v", err)
 			}
@@ -306,7 +306,7 @@ func TestAutoTitler_PromptStructure(t *testing.T) {
 	})
 	captured := make(chan string, 1)
 	runner := &capturingRunner{captured: captured, resp: "工作流改 docker"}
-	a, _ := newAutoTitler(DaemonDeps{Router: router, Runner: runner})
+	a, _ := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
 	if _, err := a.Tick(context.Background()); err != nil {
 		t.Fatalf("Tick err: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestAutoTitler_RaceWindowDeferralIsValidationError(t *testing.T) {
 	})
 	router.rejectAuto.Store(true)
 	runner := &fakeRunner{resp: "新标题"}
-	a, _ := newAutoTitler(DaemonDeps{Router: router, Runner: runner})
+	a, _ := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
 	_, err := a.Tick(context.Background())
 	if !errors.Is(err, ErrValidation) {
 		t.Errorf("err = %v, want wrapped ErrValidation", err)
@@ -358,7 +358,7 @@ func TestAutoTitler_HighwaterPreventsRapidRename(t *testing.T) {
 	}
 	router := newSnapshotFakeRouter([]session.SessionSnapshot{snap})
 	runner := &fakeRunner{resp: "first title"}
-	a, _ := newAutoTitler(DaemonDeps{Router: router, Runner: runner})
+	a, _ := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
 
 	// First tick: renames.
 	rep, err := a.Tick(context.Background())
@@ -390,17 +390,17 @@ func TestAutoTitler_HighwaterPreventsRapidRename(t *testing.T) {
 // text, thinking, tool_use and other event types.
 func TestBuildExcerptFromHistory(t *testing.T) {
 	t.Parallel()
-	entries := []cli.EventEntry{
-		{Time: 100, Type: "user", Summary: "第一个问题"},
-		{Time: 110, Type: "text", Summary: "助手回复 A"},
-		{Time: 120, Type: "thinking", Summary: "思考"},
-		{Time: 130, Type: "tool_use", Summary: "Read file"},
-		{Time: 200, Type: "user", Summary: "第二个问题"},
-		{Time: 210, Type: "text", Summary: "助手回复 B"},
-		{Time: 300, Type: "user", Summary: "第三个问题"},
+	entries := []SystemEventEntry{
+		{Type: "user", Summary: "第一个问题"},
+		{Type: "text", Summary: "助手回复 A"},
+		{Type: "thinking", Summary: "思考"},
+		{Type: "tool_use", Summary: "Read file"},
+		{Type: "user", Summary: "第二个问题"},
+		{Type: "text", Summary: "助手回复 B"},
+		{Type: "user", Summary: "第三个问题"},
 		// Empty user summary should be skipped, not blank-line
 		// pollute the output.
-		{Time: 310, Type: "user", Summary: "  "},
+		{Type: "user", Summary: "  "},
 	}
 	got := buildExcerptFromHistory(entries)
 	want := "第一个问题\n第二个问题\n第三个问题"
@@ -422,10 +422,10 @@ func TestBuildExcerptFromHistory_SoftCap(t *testing.T) {
 	// Want at least cap/perEntry + 8 entries so the loop hits the
 	// truncation path and keeps iterating with no further appends.
 	count := (autoTitlerExcerptSoftCapBytes / perEntry) + 8
-	entries := make([]cli.EventEntry, 0, count)
+	entries := make([]SystemEventEntry, 0, count)
 	for i := 0; i < count; i++ {
-		entries = append(entries, cli.EventEntry{
-			Time: int64(i), Type: "user", Summary: bigChunk,
+		entries = append(entries, SystemEventEntry{
+			Type: "user", Summary: bigChunk,
 		})
 	}
 	got := buildExcerptFromHistory(entries)
@@ -613,7 +613,7 @@ func TestAutoTitler_PromptIncludesAllUserTurns(t *testing.T) {
 
 	captured := make(chan string, 1)
 	runner := &capturingRunner{captured: captured, resp: "部署流程讨论"}
-	a, _ := newAutoTitler(DaemonDeps{Router: router, Runner: runner})
+	a, _ := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
 	if _, err := a.Tick(context.Background()); err != nil {
 		t.Fatalf("Tick err: %v", err)
 	}
@@ -657,7 +657,7 @@ func TestAutoTitler_LongConversationNotTruncated(t *testing.T) {
 
 	captured := make(chan string, 1)
 	runner := &capturingRunner{captured: captured, resp: "长对话标题"}
-	a, _ := newAutoTitler(DaemonDeps{Router: router, Runner: runner})
+	a, _ := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: runner})
 	if _, err := a.Tick(context.Background()); err != nil {
 		t.Fatalf("Tick err: %v", err)
 	}
@@ -716,7 +716,7 @@ func TestAutoTitler_BatchPerTickClamp(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			d, err := newAutoTitler(DaemonDeps{
-				Router: newFakeRouter(),
+				Router: wrapRouter(newFakeRouter()),
 				Runner: &capturingRunner{},
 			})
 			if err != nil {

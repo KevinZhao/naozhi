@@ -11,7 +11,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -486,7 +485,7 @@ func evictOldestHighwater(m map[string]autoTitlerHighwater, keep int) {
 // usage past the daemon's budget.  We stop appending once the cap is
 // reached and tag the truncation with a single "…" marker so a
 // downstream operator reviewing the prompt can tell content was clipped.
-func buildExcerptFromHistory(entries []cli.EventEntry) string {
+func buildExcerptFromHistory(entries []SystemEventEntry) string {
 	if len(entries) == 0 {
 		return ""
 	}
