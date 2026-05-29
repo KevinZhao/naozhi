@@ -131,33 +131,34 @@ func TestFilterEnv_MixedExactAndPrefix(t *testing.T) {
 
 // TestFilterEnv_PassesBackendSelectors guards against the regression
 // that took down AutoTitler in production:  with `--setting-sources ""`
-// the CLI doesn't load settings.json, so the backend selectors must
-// flow through env or claude -p falls back to direct-Anthropic OAuth
-// and dies with "Not logged in" on every Tick.
+// the CLI doesn't load settings.json, so the NON-SECRET backend
+// selectors / endpoints / model pins must flow through env or claude -p
+// falls back to direct-Anthropic OAuth and dies with "Not logged in" on
+// every Tick.
+//
+// Raw credential material is NOT asserted here — it is backend-gated;
+// see TestFilterEnv_CredsGatedByBackend (R040034-SEC-4 / #1400).
 func TestFilterEnv_PassesBackendSelectors(t *testing.T) {
 	keys := []string{
 		"CLAUDE_CODE_USE_BEDROCK",
 		"CLAUDE_CODE_USE_VERTEX",
 		"CLAUDE_CODE_SKIP_BEDROCK_AUTH",
-		"ANTHROPIC_API_KEY",
-		"ANTHROPIC_AUTH_TOKEN",
 		"ANTHROPIC_BASE_URL",
 		"ANTHROPIC_BEDROCK_BASE_URL",
 		"AWS_REGION",
 		"AWS_DEFAULT_REGION",
 		"AWS_PROFILE",
-		"AWS_ACCESS_KEY_ID",
-		"AWS_SECRET_ACCESS_KEY",
-		"AWS_SESSION_TOKEN",
 		"ANTHROPIC_VERTEX_PROJECT_ID",
 		"CLOUD_ML_REGION",
-		"GOOGLE_APPLICATION_CREDENTIALS",
 		"ANTHROPIC_MODEL",
 		"ANTHROPIC_SMALL_FAST_MODEL",
 		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
 		"ANTHROPIC_DEFAULT_SONNET_MODEL",
 		"ANTHROPIC_DEFAULT_OPUS_MODEL",
 	}
+	// CLAUDE_CODE_USE_BEDROCK="marker-..." is truthy, so the gate selects
+	// the Bedrock backend; that's irrelevant here since we only assert
+	// non-secret keys, which pass under every backend.
 	for _, k := range keys {
 		t.Setenv(k, "marker-"+k)
 	}
@@ -168,6 +169,94 @@ func TestFilterEnv_PassesBackendSelectors(t *testing.T) {
 		if !containsKV(got, want) {
 			t.Errorf("backend selector %s missing from passthrough; got=%v", k, got)
 		}
+	}
+}
+
+// TestFilterEnv_CredsGatedByBackend is the R040034-SEC-4 (#1400) gate:
+// only the detected backend's raw credentials pass; sibling-backend
+// secrets are stripped even when a broad prefix allowlist would have
+// re-admitted them.
+func TestFilterEnv_CredsGatedByBackend(t *testing.T) {
+	type cred struct{ key, val string }
+	anthropic := []cred{
+		{"ANTHROPIC_API_KEY", "sk-ant-xxx"},
+		{"ANTHROPIC_AUTH_TOKEN", "tok-yyy"},
+	}
+	aws := []cred{
+		{"AWS_ACCESS_KEY_ID", "AKIA000"},
+		{"AWS_SECRET_ACCESS_KEY", "secret000"},
+		{"AWS_SESSION_TOKEN", "sess000"},
+	}
+	vertex := []cred{
+		{"GOOGLE_APPLICATION_CREDENTIALS", "/etc/gcp/sa.json"},
+	}
+
+	cases := []struct {
+		name      string
+		selectors map[string]string
+		// production-shaped prefix allowlist that must NOT defeat the gate
+		allowlist []string
+		want      []cred // creds expected present
+		absent    []cred // creds expected stripped
+	}{
+		{
+			name:      "default direct anthropic",
+			selectors: nil,
+			allowlist: []string{"ANTHROPIC_", "AWS_"},
+			want:      anthropic,
+			absent:    append(append([]cred{}, aws...), vertex...),
+		},
+		{
+			name:      "bedrock drops anthropic+google keeps aws",
+			selectors: map[string]string{"CLAUDE_CODE_USE_BEDROCK": "1"},
+			allowlist: []string{"ANTHROPIC_", "AWS_"},
+			want:      aws,
+			absent:    append(append([]cred{}, anthropic...), vertex...),
+		},
+		{
+			name:      "vertex keeps google drops rest",
+			selectors: map[string]string{"CLAUDE_CODE_USE_VERTEX": "true"},
+			allowlist: []string{"ANTHROPIC_", "AWS_"},
+			want:      vertex,
+			absent:    append(append([]cred{}, anthropic...), aws...),
+		},
+		{
+			name: "bedrock=0 falls back to anthropic",
+			selectors: map[string]string{
+				"CLAUDE_CODE_USE_BEDROCK": "0",
+			},
+			allowlist: nil,
+			want:      anthropic,
+			absent:    append(append([]cred{}, aws...), vertex...),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PATH", "/foo")
+			t.Setenv("HOME", "/h")
+			// Clear all selectors first so cases don't leak into each other.
+			t.Setenv("CLAUDE_CODE_USE_BEDROCK", "")
+			t.Setenv("CLAUDE_CODE_USE_VERTEX", "")
+			for k, v := range tc.selectors {
+				t.Setenv(k, v)
+			}
+			for _, c := range append(append(append([]cred{}, anthropic...), aws...), vertex...) {
+				t.Setenv(c.key, c.val)
+			}
+
+			env := filterEnv(tc.allowlist)
+			for _, c := range tc.want {
+				if !envContains(env, c.key, c.val) {
+					t.Errorf("%s: active-backend cred %s must pass", tc.name, c.key)
+				}
+			}
+			for _, c := range tc.absent {
+				if envHasKey(env, c.key) {
+					t.Errorf("%s: inactive-backend cred %s leaked", tc.name, c.key)
+				}
+			}
+		})
 	}
 }
 
