@@ -166,17 +166,17 @@ func TestInterrupt_ConcurrentSendRace(t *testing.T) {
 func TestInterrupt_IdleBranchSendCancelContract_SourceLevel(t *testing.T) {
 	t.Parallel()
 	_, thisFile, _, _ := runtime.Caller(0)
-	src := filepath.Join(filepath.Dir(thisFile), "managed.go")
+	src := filepath.Join(filepath.Dir(thisFile), "managed_send.go")
 	data, err := os.ReadFile(src)
 	if err != nil {
-		t.Fatalf("read managed.go: %v", err)
+		t.Fatalf("read managed_send.go: %v", err)
 	}
 	body := string(data)
 
 	const sig = "func (s *ManagedSession) Interrupt() bool {"
 	start := strings.Index(body, sig)
 	if start < 0 {
-		t.Fatalf("could not locate Interrupt() in managed.go")
+		t.Fatalf("could not locate Interrupt() in managed_send.go")
 	}
 	rest := body[start:]
 	end := strings.Index(rest, "\n}\n")
