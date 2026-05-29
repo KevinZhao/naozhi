@@ -266,23 +266,6 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		},
 		CLIAvailable: cliAvailable(h.router.CLIPath()),
 	}
-	if h.hubDropped != nil {
-		n := h.hubDropped()
-		auth.WSDropped = &n
-	}
-	if h.dispatcherMetrics != nil {
-		msgs, replyErrs, sendFails, lastReply := h.dispatcherMetrics()
-		d := &healthDispatchStats{
-			MessageCount:    msgs,
-			ReplyErrorCount: replyErrs,
-			SendFailCount:   sendFails,
-		}
-		if !lastReply.IsZero() {
-			d.LastReplySuccessAt = lastReply.UTC().Format(time.RFC3339)
-			d.LastReplySuccessAgo = time.Since(lastReply).Round(time.Second).String()
-		}
-		auth.Dispatch = d
-	}
 	if kn := h.nodeAccess.KnownNodes(); len(kn) > 0 {
 		nodeStatus := make(map[string]string, len(kn))
 		for id := range kn {

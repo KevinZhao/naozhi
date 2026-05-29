@@ -11984,6 +11984,20 @@ function appendEventsToContainer(el, events) {
     el.insertAdjacentHTML('beforeend', h);
     if (t) prevT = t;
   });
+  // #398-sibling: onCronLiveEvent caps the data model at CRON_LIVE_MAX_EVENTS
+  // (events.shift) but the incremental push only ever appends here, so the
+  // container DOM grew unbounded across a long cron run. Trim the oldest
+  // .event bubbles from the top to keep the DOM in sync with the data cap.
+  let bubbles = el.querySelectorAll(':scope > .event').length;
+  if (bubbles > CRON_LIVE_MAX_EVENTS) {
+    let node = el.firstChild;
+    while (node && bubbles > CRON_LIVE_MAX_EVENTS) {
+      const next = node.nextSibling;
+      if (node.nodeType === 1 && node.classList && node.classList.contains('event')) bubbles--;
+      el.removeChild(node);
+      node = next;
+    }
+  }
   if (wasBottom) el.scrollTop = el.scrollHeight;
 }
 

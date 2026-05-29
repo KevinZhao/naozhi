@@ -43,4 +43,14 @@ func TestDashboardJS_LiveEventDOMCap(t *testing.T) {
 			"declaring the cap without enforcing it on the live-push path leaves the " +
 			"unbounded-DOM OOM unfixed.")
 	}
+
+	// The cron-live container has the sibling bug: onCronLiveEvent caps the
+	// data model at CRON_LIVE_MAX_EVENTS but appendEventsToContainer only
+	// appended, so its DOM grew unbounded. Pin that the container append
+	// path now trims against the same ceiling.
+	if !strings.Contains(js, "bubbles > CRON_LIVE_MAX_EVENTS") {
+		t.Error("dashboard.js: appendEventsToContainer must trim oldest .event nodes " +
+			"against CRON_LIVE_MAX_EVENTS (#398): the data model already shifts at the " +
+			"cap, so the DOM must too or a long cron run OOMs the tab.")
+	}
 }
