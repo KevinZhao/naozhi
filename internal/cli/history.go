@@ -30,6 +30,7 @@ package cli
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 )
 
@@ -112,6 +113,14 @@ type HistoryFactoryFn func(s HistorySessionView, deps HistoryWiring) HistorySour
 var (
 	historyFactoryMu       sync.RWMutex
 	historyFactoryRegistry = map[string]HistoryFactoryFn{}
+
+	// missingFactoryWarned dedups the "no history factory" Warn so a
+	// per-call NewHistorySource (the lookup runs on every history page,
+	// R240-ARCH-28) emits at most one line per offending backend ID.
+	// R249-ARCH-9 (#975): a dropped wireup blank-import used to degrade
+	// silently to NoopHistorySource — no signal that history was missing.
+	missingFactoryMu     sync.Mutex
+	missingFactoryWarned = map[string]bool{}
 )
 
 // RegisterHistoryFactory binds a backend ID to its history-source
@@ -129,6 +138,28 @@ func RegisterHistoryFactory(backendID string, fn HistoryFactoryFn) {
 	historyFactoryMu.Lock()
 	defer historyFactoryMu.Unlock()
 	historyFactoryRegistry[backendID] = fn
+}
+
+// warnMissingHistoryFactory logs a one-time Warn for a non-empty backend ID
+// that has no registered history factory (likely a missing wireup
+// blank-import). Empty IDs are the router-default case and never warn.
+// R249-ARCH-9 (#975).
+func warnMissingHistoryFactory(backendID string) {
+	if backendID == "" {
+		return
+	}
+	missingFactoryMu.Lock()
+	already := missingFactoryWarned[backendID]
+	if !already {
+		missingFactoryWarned[backendID] = true
+	}
+	missingFactoryMu.Unlock()
+	if already {
+		return
+	}
+	slog.Warn("cli: no history factory registered for backend; history will be empty",
+		"backend", backendID,
+		"hint", "ensure the backend's history package is blank-imported via internal/wireup")
 }
 
 // pickHistoryFactory looks up the factory for a backend ID. Returns nil
@@ -164,6 +195,15 @@ func (w *Wrapper) NewHistorySource(s HistorySessionView, deps HistoryWiring) His
 	}
 	fn := pickHistoryFactory(w.BackendID)
 	if fn == nil {
+		// R249-ARCH-9 (#975): a non-empty BackendID with no registered
+		// factory means its wireup blank-import is missing (or its init()
+		// failed to register). The old path silently returned Noop, so a
+		// dropped wireup line manifested only as "history is mysteriously
+		// empty" with no operator-visible cause. Warn once per backend so
+		// the misconfiguration is diagnosable without spamming the per-page
+		// hot path. Empty BackendID is the legitimate router-default case
+		// and stays silent.
+		warnMissingHistoryFactory(w.BackendID)
 		return NoopHistorySource{}
 	}
 	src := fn(s, deps)
