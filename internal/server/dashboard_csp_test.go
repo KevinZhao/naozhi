@@ -65,6 +65,42 @@ func TestDashboardCSP_ConnectSrcSelfOnly(t *testing.T) {
 	}
 }
 
+// TestDashboardCSP_BaseURIAndFormAction pins the R242-SEC-1 / R249-SEC-9
+// (#605, #922) interim hardening that lands ahead of the full nonce migration:
+//   - base-uri 'none' stops an injected <base href> from re-rooting the
+//     relative /static/*.js script tags at an attacker origin (script
+//     substitution even within the existing script-src allowlist).
+//   - form-action 'self' stops an injected form from POSTing dashboard data
+//     to a foreign origin; the only real form submits via fetch + preventDefault.
+//
+// Both are additive (no behaviour change for the shipped page) so dropping
+// either is a pure security regression — pin them here.
+func TestDashboardCSP_BaseURIAndFormAction(t *testing.T) {
+	s := newTestServer(&mockPlatform{})
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	w := httptest.NewRecorder()
+	s.handleDashboard(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy header missing on /dashboard")
+	}
+
+	if !strings.Contains(csp, "base-uri 'none'") {
+		t.Errorf("CSP must carry base-uri 'none' (#605/#922): without it an injected "+
+			"<base href> re-roots the relative /static/*.js script tags at an attacker "+
+			"origin. got %q", csp)
+	}
+	if !strings.Contains(csp, "form-action 'self'") {
+		t.Errorf("CSP must carry form-action 'self' (#605/#922): without it an injected "+
+			"form can exfiltrate dashboard data to a foreign origin. got %q", csp)
+	}
+}
+
 // TestDashboardCSP_FrameSrcBlob locks the regression that broke workspace .html
 // preview: dashboard.js renderSandboxedBlob fetches workspace HTML, wraps the
 // bytes in a Blob({type:'text/html'}), and points a sandboxed iframe at the
