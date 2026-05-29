@@ -44,14 +44,15 @@ import (
 func TestReattachProcessNoCallback_ContractContext(t *testing.T) {
 	t.Parallel()
 	// Scan router_shim.go — the only production file that should reference
-	// the no-callback variant outside of its own definition in managed.go.
+	// the no-callback variant outside of its own definition in
+	// managed_lifecycle.go (moved from managed.go in ARCH-MANAGED-SPLIT).
 	// (The router-split refactor moved the shim-reconnect path here; prior
 	// to that the call lived in router.go.)
 	routerShimSrc, err := os.ReadFile("router_shim.go")
 	if err != nil {
 		t.Fatalf("read router_shim.go: %v", err)
 	}
-	managedSrc, err := os.ReadFile("managed.go")
+	managedSrc, err := os.ReadFile("managed_lifecycle.go")
 	if err != nil {
 		t.Fatalf("read managed.go: %v", err)
 	}
@@ -60,7 +61,7 @@ func TestReattachProcessNoCallback_ContractContext(t *testing.T) {
 	// call). A typo / rename would break the contract because the
 	// docstring lives with the symbol.
 	if !regexp.MustCompile(`func \(s \*ManagedSession\) ReattachProcessNoCallback\(`).Match(managedSrc) {
-		t.Fatal("ReattachProcessNoCallback is no longer defined in managed.go. " +
+		t.Fatal("ReattachProcessNoCallback is no longer defined in managed_lifecycle.go. " +
 			"If it was renamed, update this contract test; if it was removed, " +
 			"R31-REL1 is trivially closed but re-review the shim-reconnect path " +
 			"for the replacement.")
@@ -83,8 +84,8 @@ func TestReattachProcessNoCallback_ContractContext(t *testing.T) {
 		if strings.HasSuffix(name, "_test.go") {
 			continue // this test itself counts toward test-only usage, exempt
 		}
-		if name == "managed.go" {
-			continue // definition file
+		if name == "managed_lifecycle.go" {
+			continue // definition file (moved from managed.go in ARCH-MANAGED-SPLIT Phase 2)
 		}
 		data, err := os.ReadFile(name)
 		if err != nil {
