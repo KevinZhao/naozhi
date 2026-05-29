@@ -26,6 +26,7 @@
 | [event-log-persistence.md](event-log-persistence.md) | v3 GA 就绪 | 2026-05-10 | EventLog 磁盘持久化，图片与历史事件跨重启可见 |
 | [key-resolver.md](key-resolver.md) | Phase 1-6 已实装（PR #9）；Phase 7 dashboard buildSessionOpts 待 | 2026-05-14 | ARCH3：收敛 planner/agent session key 派生；chat-view / planner-view 双接口（v2 修 v1 漏掉 #6/#7 不继承 defaults 的语义；Phase 6 删 dispatch 侧 legacy nil-resolver 分支） |
 | [learning-system.md](learning-system.md) | 设计提案 | 2026-04-14 | 会话结束触发的闭环自学习（skills/MEMORY/USER） |
+| [managed-session-split.md](managed-session-split.md) | Implemented (v2.3) | 2026-05-29 | ARCH-MANAGED-SPLIT：`session/managed.go`(2262 行 / 76 func)按职责拆 6 份，纯文件移动零语义改动（identity/lifecycle/send/history/query），与 router 家族风格对称；解 churn 单文件第 3 高的冲突面 + 解锁 ProcessSender/EventReader facet 拆分。5 phase 全部落地 build/vet/test-race 全绿、func 计数稳定 76；实施中发现 §6"测试零改动"被 2 个 source-introspecting 测试证伪（已修文件名字面量，断言意图不变）。同 process-split 手法 |
 | [message-queue.md](message-queue.md) | 设计提案（未实现） | 2026-04-14 | 替代 sessionGuard 丢消息的 per-session 消息队列策略 |
 | [multi-backend.md](multi-backend.md) | 设计提案 v2（基于实测修订） | 2026-05-18 | Claude + Kiro 多 backend 切换/并存：backend.Profile 抽象、kirojsonl 历史、ACP cancel notification、reverse cap 路由、per-session ReplyTag、Dashboard §8 26 项 UI 差异化规约 |
 | [multi-backend-validation.md](multi-backend-validation.md) | Phase 0 实测报告 | 2026-05-18 | V1-V12 验证点的脚本、原始输出与 2 个真 bug 复现（multi-backend.md 的支撑材料） |
