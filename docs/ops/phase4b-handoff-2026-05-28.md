@@ -288,3 +288,76 @@ grep -rE "^func \(h \*Hub\)" internal/server/ | wc -l
 > **接手者须知**：playbook step 1-7 是**严格序列依赖**，不可跳步、
 > 不可乱序。Step 1+2（wsClient + HubRouter type）必须作为单一 ~600 行
 > PR 一次性完成，否则 build 不过。这是 Phase 4b 真正的入口阻塞点。
+
+---
+
+## 附录 C：2026-05-29 真实迁移 checkpoint（wshub 包首次编译通过）
+
+> **分支**：`server-split/phase4b-real`（已推 origin，**WIP，未 merge**）
+> **commit**：`503518ab` WIP(phase4b)
+> **里程碑**：`internal/wshub` 包 `go build` 通过（exit 0）——Phase 4b
+> 历史首次。之前所有尝试都止步依赖闭包分析，从未真正编译过 wshub。
+
+### 本 checkpoint 已完成（在隔离 worktree，主树零污染）
+
+1. **真原子单元 = 21 文件，不是 17**。Plan agent 发现原 hand-off 的 17-
+   文件清单漏了 4 个 *Hub 方法宿主：`send.go` / `send_owner_loop.go` /
+   `select_node_for_backend.go` / `send_persist.go`。Go 的 method-receiver
+   同包约束强制它们随 Hub 一起搬。
+2. 21 文件 `git mv` server→wshub + `package server`→`package wshub`。
+3. 删 8 个 placeholder（hub.go / 5×hub_*.go / hub_concurrency_test.go +
+   types.go 的 4 个占位接口）。**关键陷阱**：types.go 占位 `CronView`
+   是 1-method (HasJob)，与 cronview.go 真定义 3-method
+   (EnsureStub/SetJobPrompt/KnownSessionIDs) 同名但语义不同——Hub.scheduler
+   用后者。占位 ScratchOps/UploadOps/Auth 零引用（Hub 用具体类型）。
+4. `consumer.go` 删自引用 alias `type HubRouter = wshub.HubRouter`。
+5. **出边闭包是收敛的，不发散**——最终 12 个出边纯函数复制到
+   `wshub_helpers.go` + `wshub_anon_cookie.go`：asyncErrorMessage /
+   imageExtForMime / buildSessionOpts / validateWorkspace(+pathErrReason+4
+   sentinel) / clientIP / hasPersistableAttachment / isUnknownRPCMethodErr
+   / isValidNodeID / validateRemoteWorkspace / nz_anon cookie 三件套。
+6. 唯一双向 split point `resolveAttachmentWorkspace(hub,...)` → 转为导出
+   方法 `(h *Hub) ResolveAttachmentWorkspace`。
+7. `marshalPooled` → `httputil.MarshalPooled`（31 处，httputil 同源已存在）。
+8. 小写 `sendWithBroadcast` → 导出 `SendWithBroadcast`（唯一被 cluster 外
+   调用的小写 Hub 方法）。
+
+### 剩余工作（精确清单，server 包尚未 build 通过）
+
+**根本障碍（比 mechanical prefixing 更深）**：server 包的 `SendHandler`
+struct 持有 `uploadStore *uploadStore` + `router SendRouter` 字段，而
+`uploadStore` / `SendRouter` 搬到 wshub 后是 **unexported**，server 包跨
+包不可命名。两条出路（需设计决策，非机械替换）：
+- (a) 把 `SendHandler` 整体（dashboard_send.go 的 upload/attachment 面）
+  也搬进 wshub；或
+- (b) 在 wshub 导出 `UploadStore` / `SendRouter` 类型 + 重构 SendHandler。
+
+其余机械工作：
+1. server 包 **56 处** cluster 类型引用加 `wshub.` 前缀
+   （Hub→*wshub.Hub / NewHub→wshub.NewHub / HubOptions 等）。
+   文件：dashboard.go / dashboard_send.go / server.go / sessions_bus.go /
+   hub_broadcaster.go / send_dispatch_adapter.go（均需 import wshub）。
+2. server 侧删自己的 `resolveAttachmentWorkspace`，改调
+   `h.hub.ResolveAttachmentWorkspace`。
+3. `(s *Server) sendWithBroadcast` bridge 移回 server 包新文件，
+   调 `h.hub.SendWithBroadcast`。
+4. `s.hub.ctx`（dashboard.go 4 处）/ `s.hub.router`（2 处）私有字段访问
+   → 在 wshub 加导出 accessor（如 `Ctx()` / `Router()`）。
+5. **~25 个白盒 _test.go 搬到 wshub 包**（测 unexported：wsClient /
+   uploadStore / tailerRegistry / sessionSend / ownerLoop 等）。
+6. 验收：`go build ./...` 全绿 + `go test -race -count=100 ./internal/wshub/`。
+
+### 接力起点
+
+```bash
+git fetch origin server-split/phase4b-real
+git worktree add /tmp/p4b server-split/phase4b-real
+cd /tmp/p4b
+go build ./internal/wshub/   # 应 exit 0（已通过）
+go build ./internal/server/  # 56 处 undefined: Hub/NewHub/... 从这里开始
+```
+
+**评估**：本 checkpoint 证明迁移闭包有界、wshub 可独立编译。剩余是
+server 包反向边（56 处）+ SendHandler 架构决策 (a)/(b) + 测试搬迁 +
+race 验证。仍建议人工专项完成（§9 选项 A），但起点已从"零"前进到
+"wshub 编译通过 + 精确剩余清单"。
