@@ -936,6 +936,68 @@ func TestRun_BackoffLogic_DialsOnFailure(t *testing.T) {
 	}
 }
 
+// TestRun_BackoffGauge_TracksReconnectState verifies the R172-ARCH-D10
+// gauge (connectorBackoffMillis) is published and advances as the Run()
+// loop walks the reconnect backoff schedule on repeated dial failures.
+// The gauge starts at 1000ms (1s floor) and doubles after each failed
+// attempt's sleep, so after at least two failed attempts the gauge must
+// have moved above the initial 1s floor.
+func TestRun_BackoffGauge_TracksReconnectState(t *testing.T) {
+	connSeen := make(chan struct{}, 20)
+	srv := newFakeServer(t, func(conn *websocket.Conn) {
+		defer conn.Close()
+		select {
+		case connSeen <- struct{}{}:
+		default:
+		}
+		// Close immediately to force the next attempt onto the backoff path.
+	})
+	defer srv.Close()
+
+	cfg := &config.UpstreamConfig{URL: wsURL(srv), NodeID: "n", Token: "t"}
+	c := New(cfg, makeRouter(), nil, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	go c.Run(ctx)
+
+	// The gauge is published under its expvar name and seeded to the 1s
+	// floor on Run() entry. Confirm the var is registered and non-zero
+	// (the exact value races with the backoff doubling below, so we only
+	// assert it has been Set at all).
+	deadline0 := time.Now().Add(2 * time.Second)
+	for connectorBackoffMillis.Value() == 0 && time.Now().Before(deadline0) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if connectorBackoffMillis.Value() == 0 {
+		t.Fatalf("backoff gauge never published a non-zero value")
+	}
+
+	// Wait for at least two dial attempts so the loop has doubled the
+	// backoff past the 1s floor at least once.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-connSeen:
+		case <-time.After(4 * time.Second):
+			t.Fatalf("timeout waiting for connection attempt %d", i+1)
+		}
+	}
+
+	// After the second failed attempt the gauge should have advanced
+	// beyond the 1s floor (1000 → 2000 → ...). Poll briefly since the
+	// Set happens after the sleep timer fires.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if connectorBackoffMillis.Value() > 1000 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("backoff gauge = %d, want > 1000 after repeated failures",
+		connectorBackoffMillis.Value())
+}
+
 // ---- handleRequest: update_config with real project manager ----
 
 func TestHandleRequest_UpdateConfig_WithMgr(t *testing.T) {
