@@ -12,8 +12,9 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // HandleUpdate is the PATCH /api/cron endpoint. See dashboard_cron.go for the
@@ -197,17 +198,17 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 			// that carry a wrapped ID.
 			http.Error(w, "job not found", http.StatusNotFound)
 		case errors.Is(err, cronpkg.ErrPersistFailed):
-			slog.Error("cron UpdateJob update not persisted", "err", err, "id", id)
+			slog.Error("cron UpdateJob update not persisted", "err", err, "id", osutil.SanitizeForLog(id, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "updated")
 		default:
 			// Sanitize: the underlying parser error can leak internal field
 			// names and offsets if the new schedule is rejected.
-			slog.Warn("cron UpdateJob rejected", "err", err, "id", id)
+			slog.Warn("cron UpdateJob rejected", "err", err, "id", osutil.SanitizeForLog(id, cronpkg.MaxIDLen))
 			http.Error(w, "invalid update payload", http.StatusBadRequest)
 		}
 		return
 	}
 
-	slog.Info("cron job updated via dashboard", "id", j.ID)
+	slog.Info("cron job updated via dashboard", "id", osutil.SanitizeForLog(j.ID, cronpkg.MaxIDLen))
 	httputil.WriteJSON(w, cronUpdateResp{Status: "ok", ID: j.ID})
 }
