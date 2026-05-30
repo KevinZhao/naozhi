@@ -6360,8 +6360,22 @@ function buildHomeHealthLines(stats) {
   const ready = typeof stats.ready === 'number' ? stats.ready : 0;
   const total = typeof stats.total === 'number' ? stats.total : 0;
   let line1 = '运行 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total;
+  // Capacity headroom: surface the live-process count against the configured
+  // session.max_procs cap so operators can see how close the deployment is to
+  // spawn backpressure (R110-P1 "服务健康" — claude 子进程 / 容量). Only when
+  // max_procs is a positive number; running+ready approximates the live-CLI
+  // count (the two non-suspended states that hold a child process). Tagged
+  // 'warn' once usage crosses 80% so the strip flips color before the cap
+  // starts evicting sessions.
+  const maxProcs = typeof stats.max_procs === 'number' ? stats.max_procs : 0;
+  let line1Kind = 'info';
+  if (maxProcs > 0) {
+    const live = running + ready;
+    line1 += ' · 容量 ' + live + '/' + maxProcs;
+    if (live >= maxProcs * 0.8) line1Kind = 'warn';
+  }
   if (stats.uptime) line1 += ' · 运行 ' + stats.uptime;
-  lines.push({ text: line1, kind: 'info' });
+  lines.push({ text: line1, kind: line1Kind });
   // Line 2: CLI identity. Helpful when operators have multiple naozhi
   // deployments on different CLI versions.
   if (stats.cli_name) {

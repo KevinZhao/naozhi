@@ -4149,6 +4149,10 @@ func TestDashboardJS_R110P1_HomePanelHealth(t *testing.T) {
 		`if (stats.cli_name) {`,
 		`if (totalKills > 0) {`,
 		`kind: 'warn',`,
+		// Capacity headroom against session.max_procs — flips line-1 to warn
+		// at >=80% so operators see backpressure approaching before evictions.
+		`line1 += ' · 容量 ' + live + '/' + maxProcs;`,
+		`if (live >= maxProcs * 0.8) line1Kind = 'warn';`,
 	} {
 		if !strings.Contains(js, fragment) {
 			t.Errorf("buildHomeHealthLines body missing contract fragment %q", fragment)
