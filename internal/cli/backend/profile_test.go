@@ -18,14 +18,24 @@ func withCleanRegistry(t *testing.T, fn func()) {
 	registryMu.Lock()
 	savedRegistry := registry
 	savedOrder := nextOrder
+	savedOnce := defaultsOnce
 	registry = map[string]registryEntry{}
 	nextOrder = 0
+	// R239-ARCH-F: reset defaultsOnce alongside the registry. Without this,
+	// a test that exercises EnsureDefaults (which gates on defaultsOnce)
+	// becomes order-dependent: if any earlier test in the same `go test`
+	// run already tripped the once, EnsureDefaults silently no-ops against
+	// the freshly-cleaned registry and the body sees an empty registry it
+	// expected to be populated. Pointer swap (not value copy) keeps go vet
+	// happy; Cleanup restores the saved once for any non-isolated callers.
+	defaultsOnce = &sync.Once{}
 	registryMu.Unlock()
 
 	t.Cleanup(func() {
 		registryMu.Lock()
 		registry = savedRegistry
 		nextOrder = savedOrder
+		defaultsOnce = savedOnce
 		registryMu.Unlock()
 	})
 
@@ -237,6 +247,31 @@ func TestEnsureDefaults_IdempotentAndConcurrent(t *testing.T) {
 		EnsureDefaults()
 		if got := len(All()); got != 2 {
 			t.Errorf("repeat EnsureDefaults registered extra: All() len = %d; want 2", got)
+		}
+	})
+}
+
+// TestEnsureDefaults_CleanRegistryResetsOnce is the regression guard for
+// R239-ARCH-F: withCleanRegistry must hand each block a fresh defaultsOnce,
+// otherwise EnsureDefaults inside the block is a no-op whenever an earlier
+// test (or this very test's first phase) already tripped the package once.
+func TestEnsureDefaults_CleanRegistryResetsOnce(t *testing.T) {
+	// Phase 1: trip the once in one isolated block.
+	withCleanRegistry(t, func() {
+		EnsureDefaults()
+		if got := len(All()); got != 2 {
+			t.Fatalf("phase 1 EnsureDefaults: All() len = %d; want 2", got)
+		}
+	})
+	// Phase 2: a second isolated block must STILL bootstrap from empty,
+	// proving the once was reset rather than carried over as "done".
+	withCleanRegistry(t, func() {
+		if got := len(All()); got != 0 {
+			t.Fatalf("phase 2 starts non-empty: All() len = %d; want 0", got)
+		}
+		EnsureDefaults()
+		if got := len(All()); got != 2 {
+			t.Fatalf("phase 2 EnsureDefaults no-op (stale once): All() len = %d; want 2", got)
 		}
 	})
 }

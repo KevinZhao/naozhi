@@ -143,10 +143,13 @@ var (
 	registry   = map[string]registryEntry{}
 	nextOrder  int
 
-	// defaultsOnce serialises EnsureDefaults across goroutines. Safe to
-	// reset under tests via withCleanRegistry (profile_test.go) so a
-	// fresh test can re-bootstrap deterministically.
-	defaultsOnce sync.Once
+	// defaultsOnce serialises EnsureDefaults across goroutines. A pointer
+	// (not a value) so tests can atomically swap in a fresh Once via
+	// withCleanRegistry (profile_test.go) without copying a sync.Once —
+	// copying a Once trips go vet's copylock and would carry a stale "done"
+	// flag into the cleaned registry, making EnsureDefaults tests
+	// order-dependent. R239-ARCH-F.
+	defaultsOnce = &sync.Once{}
 )
 
 // Register adds a Profile to the registry. Panics on duplicate ID — there
