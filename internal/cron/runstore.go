@@ -182,6 +182,25 @@ func (e *recentCacheEntry) ringRead(i int) CronRunSummary {
 	return e.ring[(e.head+i)%cap(e.ring)]
 }
 
+// ringReadSessionID returns just the SessionID of the i-th newest entry
+// (0 = newest) without copying the whole CronRunSummary out of the ring.
+// Caller holds entry.mu and must ensure 0 ≤ i < entry.count.
+//
+// #1285 follow-up: RecentSessionIDs exists specifically to avoid the
+// per-row CronRunSummary value copy (the struct embeds Result []byte up to
+// ~4 KB plus several string fields), but its warm fast path still went
+// through ringRead(i).SessionID — copying the entire summary out of the
+// ring just to read one string field. Reading the field in place keeps the
+// warm path's promise of O(min(n,count)) string reads with no per-row
+// struct copy on the buildKnownSessionsSet cold-rebuild hot path
+// (50 jobs × 200-cap walk).
+func (e *recentCacheEntry) ringReadSessionID(i int) string {
+	if cap(e.ring) == 0 {
+		return ""
+	}
+	return e.ring[(e.head+i)%cap(e.ring)].SessionID
+}
+
 // ringSnapshot returns a fresh newest-first slice of up to limit entries.
 // Caller holds entry.mu. limit ≤ 0 or limit > count returns count entries.
 func (e *recentCacheEntry) ringSnapshot(limit int) []CronRunSummary {
@@ -1384,7 +1403,10 @@ func (s *runStore) RecentSessionIDs(jobID string, n int) []string {
 			}
 			out := make([]string, 0, limit)
 			for i := 0; i < limit; i++ {
-				if sid := entry.ringRead(i).SessionID; sid != "" {
+				// #1285 follow-up: read the SessionID field in place rather
+				// than copying the whole CronRunSummary out of the ring — the
+				// entire point of RecentSessionIDs is to skip that per-row copy.
+				if sid := entry.ringReadSessionID(i); sid != "" {
 					out = append(out, sid)
 				}
 			}
