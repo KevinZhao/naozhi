@@ -516,7 +516,20 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// to avoid deadlock (sync.RWMutex is not reentrant).
 		// (onTurnDone was already bound before the JSONL-load window
 		// to avoid missing early result events.)
-		sess.ReattachProcessNoCallback(proc, state.SessionID)
+		//
+		// R51-CONCUR-002 (#750): use the TryLock-guarded variant so a Send()
+		// still unwinding on the just-died process (holding sendMu) is not
+		// raced by the storeProcess swap + deathReason.Store(""). TryLock is
+		// non-blocking, so it does not violate the sendMu→r.mu ordering the
+		// caller is bound by. If a Send is in flight, abort this reconnect;
+		// the 30s reconcile tick retries once sendMu is free.
+		if !sess.tryReattachProcessNoCallback(proc, state.SessionID) {
+			r.mu.Unlock()
+			proc.Close()
+			slog.Info("shim reconnect deferred: send in flight on session",
+				"key", state.Key)
+			continue
+		}
 		// Record the backend + wrapper-provided CLI identity so the
 		// dashboard snapshot reflects the actual backend post-reconnect,
 		// even for sessions restored from a pre-multi-backend store.
