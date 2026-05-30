@@ -333,10 +333,10 @@ func extractFirstPrompt(path string) string {
 		if len(line) == 0 || !bytes.Contains(line, []byte(`"type"`)) {
 			continue
 		}
-		var hl struct {
-			Type    string          `json:"type"`
-			Message json.RawMessage `json:"message"`
-		}
+		// Reuse the package's canonical JSONL line schema (history.go)
+		// instead of re-declaring the type/message shape inline. The extra
+		// Timestamp/UUID fields are simply ignored here. (#1478)
+		var hl historyLine
 		if json.Unmarshal(line, &hl) != nil || hl.Type != "user" {
 			continue
 		}
