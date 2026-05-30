@@ -255,6 +255,20 @@ var (
 	// R240-GO-4.
 	CronSendBudgetDoubledTotal = expvar.NewInt("naozhi_cron_send_budget_doubled_total")
 
+	// CronNotifyPartialTotal counts cron completion-notice deliveries that
+	// stopped before all chunks were sent — either because the per-target
+	// replyCtx deadline (cronNotifyTimeout, default 30s) was reached
+	// mid-loop, or because a chunk's ReplyWithRetry failed and the loop
+	// aborted to avoid interleaving the remaining chunks with foreign
+	// messages. Monotonic; pairs with the existing per-event slog.Warn in
+	// scheduler_notify.go's notifyTarget. A rising delta tells operators
+	// that IM recipients are seeing truncated cron output (slow/failing
+	// webhook) so they should lean on the dashboard run-detail panel as the
+	// surface of record. Distinct from the hard chunk-cap WARN
+	// (cronNotifyMaxChunks), which is a deterministic truncation rather than
+	// a delivery-time failure. R249-CR-26 (#966).
+	CronNotifyPartialTotal = expvar.NewInt("naozhi_cron_notify_partial_total")
+
 	// CronStopBudgetExceededGCTotal / CronStopBudgetExceededDrainTotal /
 	// CronStopBudgetExceededTriggerTotal count Scheduler.Stop() phases that
 	// blew through their per-phase budget. Three separate counters (rather

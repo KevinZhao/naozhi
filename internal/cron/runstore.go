@@ -122,6 +122,48 @@ type runStore struct {
 	// disk" from "EACCES / IO error, investigate the storage backend".
 	writeFailedDiskFullTotal atomic.Int64
 	writeFailedOtherTotal    atomic.Int64
+
+	// historyDropTotal counts CronRun records that Append dropped entirely
+	// because even the truncated retry payload still exceeded maxRunBytes
+	// (or the retry marshal itself failed). R249-CR-21 (#964): the drop
+	// path previously only slog.Warn'd, so operators had no numeric signal
+	// and could not triangulate started/ended/dropped. Same package-local
+	// counter pattern as writeFailed*Total — surfaced via HistoryDropTotal
+	// for /health + tests. CronRunStartedTotal − CronRunEndedTotal should
+	// reconcile against this drop count when a run finished but produced no
+	// history row.
+	historyDropTotal atomic.Int64
+
+	// cacheStaleEvictionTotal counts recentCache rows that cacheTrimAfterDisk
+	// evicted using its EndedAt/StartedAt time-source approximation rather
+	// than the authoritative disk mtime trimJobLocked uses. R249-CR-19 (#962):
+	// the < ~1s pathological divergence between the two time sources was
+	// godoc-documented but had no runtime observability. A non-trivial,
+	// growing delta here (relative to disk-side trims) is the signal that the
+	// approximation is evicting cache rows whose disk files are still kept —
+	// the exact divergence the godoc warned about.
+	cacheStaleEvictionTotal atomic.Int64
+}
+
+// HistoryDropTotal returns the cumulative count of CronRun records Append
+// dropped because the truncated retry payload still exceeded maxRunBytes.
+// Monotonically non-decreasing; returns 0 when s is nil or disabled.
+// R249-CR-21 (#964).
+func (s *runStore) HistoryDropTotal() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.historyDropTotal.Load()
+}
+
+// CacheStaleEvictionTotal returns the cumulative count of recentCache rows
+// evicted by cacheTrimAfterDisk's approximate time source. Monotonically
+// non-decreasing; returns 0 when s is nil or disabled. R249-CR-19 (#962).
+func (s *runStore) CacheStaleEvictionTotal() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.cacheStaleEvictionTotal.Load()
 }
 
 // WriteFailedTotals returns the cumulative count of CronRun WriteFileAtomic
@@ -169,6 +211,22 @@ type recentCacheEntry struct {
 	appendsSinceTrim int
 }
 
+// ringCapZeroWarnOnce ensures the cap=0 self-heal branch in ringRead /
+// ringSnapshot logs exactly once per process. R249-ARCH-13 (#979): the
+// defensive cap=0 guard previously returned silently, so a future regression
+// that mutated count>0 while leaving cap(ring)==0 (bypassing ringSeed) would
+// surface only as mysteriously-empty dashboard lists with no log trace. A
+// single warn points the next reader straight at the contract violation
+// without spamming the log on a hot read path.
+var ringCapZeroWarnOnce sync.Once
+
+func warnRingCapZero(site string) {
+	ringCapZeroWarnOnce.Do(func() {
+		slog.Warn("cron runstore: recentCache ring cap=0 on read; self-healing to empty (ringSeed bypass regression?)",
+			"site", site)
+	})
+}
+
 // ringRead returns the i-th newest entry (0 = newest). Caller holds entry.mu
 // and must ensure 0 ≤ i < entry.count.
 func (e *recentCacheEntry) ringRead(i int) CronRunSummary {
@@ -177,6 +235,8 @@ func (e *recentCacheEntry) ringRead(i int) CronRunSummary {
 	// Avoids integer divide-by-zero panic on a regression path that bypasses
 	// ringSeed (e.g. an unwarmed entry mutated by future code). [BREAKING-LOCAL]
 	if cap(e.ring) == 0 {
+		// R249-ARCH-13 (#979): warn once so the silent self-heal is auditable.
+		warnRingCapZero("ringRead")
 		return CronRunSummary{}
 	}
 	return e.ring[(e.head+i)%cap(e.ring)]
@@ -188,6 +248,12 @@ func (e *recentCacheEntry) ringSnapshot(limit int) []CronRunSummary {
 	// R247-GO-4: see ringRead — guard cap=0 + count>0 regression and the
 	// degenerate count==0 fast path (no allocation needed). [BREAKING-LOCAL]
 	if cap(e.ring) == 0 || e.count == 0 {
+		// R249-ARCH-13 (#979): warn once when cap=0 *despite* a populated
+		// count — that is the bypass regression. The count==0 case is the
+		// benign empty-cache fast path and stays silent.
+		if cap(e.ring) == 0 && e.count > 0 {
+			warnRingCapZero("ringSnapshot")
+		}
 		return nil
 	}
 	if limit <= 0 || limit > e.count {
@@ -597,6 +663,9 @@ func (s *runStore) Append(run *CronRun) {
 			if err2 == nil {
 				retryBytes = len(data2)
 			}
+			// R249-CR-21 (#964): bump the package-local drop counter so the
+			// loss is observable as a metric, not just a log line.
+			s.historyDropTotal.Add(1)
 			slog.Warn("cron run: retry marshal also exceeded cap; run record dropped",
 				"job_id", run.JobID,
 				"run_id", run.RunID,
@@ -640,6 +709,9 @@ func (s *runStore) Append(run *CronRun) {
 			if err2 == nil {
 				retryBytes = len(data2)
 			}
+			// R249-CR-21 (#964): mirror the preflight drop counter so both
+			// drop paths feed the same metric.
+			s.historyDropTotal.Add(1)
 			slog.Warn("cron run: retry marshal also exceeded cap; run record dropped",
 				"job_id", run.JobID,
 				"run_id", run.RunID,
@@ -1851,6 +1923,14 @@ func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
 		}
 		return ts.Before(cutoff)
 	})
+	// R249-CR-19 (#962): record how many rows this approximate-time-source
+	// trim evicted so operators can watch the divergence the godoc above
+	// documents. survive < entry.count means the cache dropped rows based on
+	// EndedAt/StartedAt rather than disk mtime; a growing delta vs disk-side
+	// trims is the signal the approximation is mispredicting.
+	if survive < entry.count {
+		s.cacheStaleEvictionTotal.Add(int64(entry.count - survive))
+	}
 	// Zero out the dropped slots to release any retained string fields.
 	c := cap(entry.ring)
 	if c > 0 {

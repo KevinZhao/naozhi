@@ -417,6 +417,27 @@ type cronNotifyDefaultView struct {
 	ChatID   string `json:"chat_id"`
 }
 
+// maskNotifyChatID redacts the global cron.notify_default chat_id before it is
+// surfaced in the list response.
+//
+// R243-SEC-7 (#789): the raw chat_id was previously sent verbatim to every
+// authenticated dashboard user. In a multi-operator deployment that leaks the
+// notification target (e.g. a private Feishu chat open_id) to operators who
+// have no business knowing it. We still want the UI to render helpful copy
+// like "notifications go to feishu (oc_…1234)", so we keep a short prefix and
+// suffix hint and replace the middle with an ellipsis. Short IDs (<=8 runes)
+// are fully masked since there is nothing left to hint with safely.
+func maskNotifyChatID(id string) string {
+	if id == "" {
+		return ""
+	}
+	r := []rune(id)
+	if len(r) <= 8 {
+		return strings.Repeat("•", len(r))
+	}
+	return string(r[:4]) + "…" + string(r[len(r)-4:])
+}
+
 // cronRunsListResp is the wire shape returned by GET /api/cron/runs —
 // per-job paginated history. NextBefore is omitted when the page is
 // partial, matching the previous map[string]any behaviour.
@@ -1077,12 +1098,18 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	}
 	if def := h.scheduler.NotifyDefault(); def.IsSet() {
 		// Expose the configured default so the UI can render helpful copy
-		// like "notifications go to feishu (oc_xxx)" instead of just a
-		// blank toggle. chat_id is already considered semi-public (appears
-		// in message metadata) so surfacing it here is not a leak.
+		// like "notifications go to feishu (oc_…1234)" instead of just a
+		// blank toggle.
+		//
+		// R243-SEC-7 (#789): the raw chat_id is NOT semi-public — in a
+		// multi-operator deployment it is the private notification target
+		// of whoever configured cron.notify_default, and every authenticated
+		// dashboard user previously received it verbatim. Mask it down to a
+		// prefix/suffix hint so the UI affordance survives without leaking
+		// the full identifier cross-tenant.
 		resp.NotifyDefault = &cronNotifyDefaultView{
 			Platform: def.Platform,
-			ChatID:   def.ChatID,
+			ChatID:   maskNotifyChatID(def.ChatID),
 		}
 	}
 	httputil.WriteJSON(w, resp)

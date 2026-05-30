@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/limits"
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
@@ -337,6 +338,9 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		// chunk list cannot run past cronNotifyTimeout when each ReplyWithRetry
 		// (limits.PlatformReplyMaxAttempts × per-attempt budget) consumes the budget mid-loop.
 		if err := replyCtx.Err(); err != nil {
+			// R249-CR-26 (#966): record partial delivery so a rising delta
+			// surfaces "IM recipients are seeing truncated cron output".
+			metrics.CronNotifyPartialTotal.Add(1)
 			slog.Warn("cron notify target deadline reached; remaining chunks dropped",
 				"platform", plat, "chat", chatID, "err", err,
 				"sent", delivered, "remaining", len(chunks)-i)
@@ -351,6 +355,12 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 			// the meantime, so partial delivery is worse than a clean
 			// truncation. Aggregate the count into a single WARN so log
 			// readers can match one line to one dropped notify.
+			//
+			// R249-CR-26 (#966): same partial-delivery counter as the
+			// deadline branch above — operators alert on the aggregate
+			// rather than distinguishing deadline-vs-failure (the WARN
+			// carries that detail for the journalctl drill-down).
+			metrics.CronNotifyPartialTotal.Add(1)
 			slog.Warn("cron notify partial: chunks dropped after send failure",
 				"platform", plat, "chat", chatID, "err", err,
 				"delivered", delivered, "total", len(chunks),
