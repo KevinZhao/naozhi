@@ -36,6 +36,26 @@ type discoveryCache struct {
 	evictedPIDs map[int]time.Time
 }
 
+// evictGrace is the window during which a recently-evicted PID is filtered
+// out of full-scan results so a takeover-in-flight session isn't re-added
+// before WaitAndCleanup finishes. Past this window the entry is pruned.
+const evictGrace = 60 * time.Second
+
+// pruneExpiredEvictionsLocked deletes evictedPIDs entries older than
+// evictGrace. Callers must hold dc.mu (write lock). Centralised so both
+// the full-scan path (refresh) and the short-circuit path (tryShortCircuit)
+// expire stale entries — previously only refresh() pruned, so in the common
+// steady state where tryShortCircuit() returns true the map grew without
+// bound and a stale entry could wrongly filter out a brand-new session that
+// reused the same PID number after the grace window.
+func (dc *discoveryCache) pruneExpiredEvictionsLocked(now time.Time) {
+	for pid, evictedAt := range dc.evictedPIDs {
+		if now.Sub(evictedAt) > evictGrace {
+			delete(dc.evictedPIDs, pid)
+		}
+	}
+}
+
 func newDiscoveryCache(claudeDir string, getExclude func() (map[int]bool, map[string]bool, map[string]bool), projectMgr *project.Manager) *discoveryCache {
 	return &discoveryCache{
 		claudeDir:   claudeDir,
@@ -141,13 +161,8 @@ func (dc *discoveryCache) refresh() {
 
 	// Filter out recently-evicted PIDs and store the final result.
 	now := time.Now()
-	const evictGrace = 60 * time.Second
 	dc.mu.Lock()
-	for pid, evictedAt := range dc.evictedPIDs {
-		if now.Sub(evictedAt) > evictGrace {
-			delete(dc.evictedPIDs, pid)
-		}
-	}
+	dc.pruneExpiredEvictionsLocked(now)
 	if len(dc.evictedPIDs) > 0 {
 		filtered := sessions[:0:0]
 		for _, s := range sessions {
@@ -194,12 +209,23 @@ func (dc *discoveryCache) tryShortCircuit() bool {
 	// (lastActive, state, summary, lastPrompt) may have changed because the
 	// CLI keeps writing to JSONL files.  Do a lightweight refresh that only
 	// stats files and hits the mtime-based caches.
+	now := time.Now()
 	if len(cached) > 0 {
 		updated := make([]discovery.DiscoveredSession, len(cached))
 		copy(updated, cached)
 		discovery.RefreshDynamic(dc.claudeDir, updated)
 		dc.mu.Lock()
 		dc.sessions = updated
+		dc.pruneExpiredEvictionsLocked(now)
+		dc.mu.Unlock()
+	} else {
+		// No cached sessions to refresh, but the eviction-grace map still
+		// needs expiry on this path — otherwise a steady state that always
+		// short-circuits would never prune evictedPIDs (full-scan refresh
+		// is the only other pruner). Bounds the map and prevents a stale
+		// entry from filtering a future PID-reusing session.
+		dc.mu.Lock()
+		dc.pruneExpiredEvictionsLocked(now)
 		dc.mu.Unlock()
 	}
 
