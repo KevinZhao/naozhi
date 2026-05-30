@@ -778,6 +778,20 @@ func workDirResolveUnderRoot(workDir, allowedRoot, allowedRootResolved string) (
 		// than silently re-create the sandbox escape.
 		return "", false
 	}
+	return resolvedPathUnderRoot(resolved, allowedRoot, allowedRootResolved)
+}
+
+// resolvedPathUnderRoot is the EvalSymlinks(allowedRoot)→equality-or-prefix
+// tail of the SHARED-ALGORITHM-WITH-SERVER check, extracted (R20260527122801-
+// ARCH-4 / #1316) so the cron and server twins now share a single named seam
+// rather than two inline copies of the root-resolution + prefix comparison.
+// resolved is the already-EvalSymlinks'd workDir; the caller owns the
+// workDir-side resolution because the (resolved, ok) vs sentinel-error shape
+// is the only thing that legitimately diverges between cron and server. The
+// next dedup pass lifts THIS function to internal/osutil / internal/workspace
+// — keeping the resolution + comparison in one helper is the prerequisite the
+// cross-package move was blocked on.
+func resolvedPathUnderRoot(resolved, allowedRoot, allowedRootResolved string) (string, bool) {
 	rootResolved, err := filepath.EvalSymlinks(allowedRoot)
 	if err != nil {
 		// Fall back to the construction-time cached resolution. If neither
