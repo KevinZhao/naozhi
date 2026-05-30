@@ -79,11 +79,18 @@ func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
 // with Send() which holds sendMu then calls onSessionID → router.mu.
 //
 // SAFETY CONSTRAINT: this function must only be called when Send() cannot be
-// in flight for this session (e.g., during ReconnectShims at startup, or while
-// the session's process is known-dead). If Send() were concurrently executing,
-// the deathReason.Store("") here could silently erase a diagnostic death reason
-// that Send() just set. The lack of sendMu makes this a logical race on the
-// deathReason value, even though each individual Store is atomic.
+// in flight for this session. Two callers satisfy this:
+//   - ReconnectShims at startup, before any Send can have begun.
+//   - The runtime reconcile loop (router_shim.go), which acquires sess.sendMu
+//     via TryLock BEFORE r.mu and holds it across this call — see #750. If
+//     that TryLock fails a Send is in flight and the session is skipped.
+//
+// If Send() were concurrently executing, the deathReason.Store("") here could
+// silently erase a diagnostic death reason that Send() just set, and the
+// process pointer swap would publish a fresh process from under the in-flight
+// Send. The lack of an internal sendMu acquisition makes that a logical race
+// even though each individual Store is atomic — hence the caller-side contract
+// above.
 func (s *ManagedSession) ReattachProcessNoCallback(proc processIface, sessionID string) {
 	snapshot := s.attachProcessAndSnapshotPersisted(proc)
 	s.setSessionID(sessionID)

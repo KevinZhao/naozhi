@@ -4216,7 +4216,8 @@ func TestDashboardJS_R110P1_HomePanelStats(t *testing.T) {
 		`new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime()`,
 		`typeof s.last_active === 'number' && s.last_active >= dayStart`,
 		`typeof s.total_cost === 'number' && isFinite(s.total_cost)`,
-		`return { todayActive: todayActive, totalCost: totalCost };`,
+		`typeof s.message_count === 'number' && isFinite(s.message_count)`,
+		`return { todayActive: todayActive, totalCost: totalCost, totalPrompts: totalPrompts };`,
 	} {
 		if !strings.Contains(js, fragment) {
 			t.Errorf("computeHomeStats body missing contract fragment %q", fragment)
@@ -4266,7 +4267,7 @@ func TestDashboardJS_R110P1_HomePanelStats(t *testing.T) {
 		t.Error("stats strip must render BEFORE the session list — reverse order would push the list below the fold on short viewports")
 	}
 	// Chinese labels — operators should see Chinese copy.
-	for _, want := range []string{"今日活跃会话", "累计花费"} {
+	for _, want := range []string{"今日活跃会话", "累计 prompt", "累计花费"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renderRecentSessionsPanel stats strip missing Chinese label %q", want)
 		}
@@ -4296,11 +4297,11 @@ func TestDashboardHTML_R110P1_HomePanelStatsStyles(t *testing.T) {
 		}
 	}
 
-	// 2-column grid is the intended layout (today active + cost). Anchor
-	// the declaration inside the .recent-panel-stats rule so a future
+	// 3-column grid is the intended layout (today active + prompts + cost).
+	// Anchor the declaration inside the .recent-panel-stats rule so a future
 	// single-column reflow would trip the check.
-	if ok, _ := regexp.MatchString(`\.recent-panel-stats\{[^}]*grid-template-columns:1fr 1fr`, css); !ok {
-		t.Error(".recent-panel-stats must be a 2-column grid (today active + total cost)")
+	if ok, _ := regexp.MatchString(`\.recent-panel-stats\{[^}]*grid-template-columns:1fr 1fr 1fr`, css); !ok {
+		t.Error(".recent-panel-stats must be a 3-column grid (today active + prompts + total cost)")
 	}
 	// Tabular-nums on the stat value so numbers align optically when
 	// count of active sessions crosses digit boundaries (1 → 10).

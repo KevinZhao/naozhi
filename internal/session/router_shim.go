@@ -499,6 +499,30 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			}
 		}
 
+		// R51-CONCUR-002 (#750): ReattachProcessNoCallback below mutates
+		// deathReason / the active process pointer WITHOUT sendMu. At startup
+		// that is safe (no Send can be in flight yet), but this same loop runs
+		// every reconcile tick at runtime. A Send() that began before its
+		// process died is still holding sendMu inside handleSendError, writing
+		// deathReason and a result into the old process — concurrently with the
+		// Store(""), session-ID swap and process swap here. That is a logical
+		// race (each Store is atomic, but the reattach can clobber a diagnostic
+		// deathReason and publish a fresh process from under the in-flight Send).
+		//
+		// Fix: take sess.sendMu BEFORE r.mu so the in-flight Send has fully
+		// drained before we reattach, satisfying the documented safety
+		// constraint on ReattachProcessNoCallback. The lock order (sendMu →
+		// r.mu) matches Send()'s own order (managed_send.go), so there is no
+		// ABBA deadlock. We TryLock rather than Lock so a long-running turn
+		// (sendMu held for a whole turn) does not stall the reconcile loop —
+		// if a Send is in flight, this session is by definition still "alive"
+		// from the user's perspective, so we simply skip it and retry on the
+		// next tick.
+		if !sess.sendMu.TryLock() {
+			proc.Close()
+			slog.Info("shim reconnect deferred: send in flight, retry next tick", "key", state.Key)
+			continue
+		}
 		// TOCTOU guard: re-check under lock that the session hasn't been replaced
 		// by a concurrent spawnSession while we were replaying history (lock was
 		// released). Then atomically attach the process under the same lock hold
@@ -508,6 +532,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		currentSess := r.sessions[state.Key]
 		if currentSess != sess || (currentSess != nil && currentSess.isAlive()) {
 			r.mu.Unlock()
+			sess.sendMu.Unlock()
 			proc.Close()
 			slog.Info("shim reconnect aborted: session replaced concurrently", "key", state.Key)
 			continue
@@ -517,6 +542,12 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// to avoid deadlock (sync.RWMutex is not reentrant).
 		// (onTurnDone was already bound before the JSONL-load window
 		// to avoid missing early result events.)
+		//
+		// Safe to call the no-sendMu variant: we hold sess.sendMu (acquired
+		// above the r.mu.Lock), satisfying its "no Send in flight" contract
+		// (#750). We cannot call ReattachProcess here because that re-acquires
+		// sendMu (non-reentrant deadlock) and fires onSessionID → r.mu (which
+		// we hold).
 		sess.ReattachProcessNoCallback(proc, state.SessionID)
 		// Record the backend + wrapper-provided CLI identity so the
 		// dashboard snapshot reflects the actual backend post-reconnect,
@@ -548,6 +579,11 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		r.storeDirty = true
 		r.storeGen.Add(1)
 		r.mu.Unlock()
+		// Release sendMu only after r.mu so the (sendMu → r.mu) acquisition
+		// order is mirrored on the way out; the reattach + tracking writes
+		// above all completed while both were held, so no in-flight Send can
+		// observe a half-attached session. R51-CONCUR-002 (#750).
+		sess.sendMu.Unlock()
 
 		// Event-log persist sink goes last so the InjectHistory +
 		// shim replay above land with sinkReady=false (replayPhase=true
