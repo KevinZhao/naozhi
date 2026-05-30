@@ -133,6 +133,16 @@ type runStore struct {
 	// reconcile against this drop count when a run finished but produced no
 	// history row.
 	historyDropTotal atomic.Int64
+
+	// cacheStaleEvictionTotal counts recentCache rows that cacheTrimAfterDisk
+	// evicted using its EndedAt/StartedAt time-source approximation rather
+	// than the authoritative disk mtime trimJobLocked uses. R249-CR-19 (#962):
+	// the < ~1s pathological divergence between the two time sources was
+	// godoc-documented but had no runtime observability. A non-trivial,
+	// growing delta here (relative to disk-side trims) is the signal that the
+	// approximation is evicting cache rows whose disk files are still kept —
+	// the exact divergence the godoc warned about.
+	cacheStaleEvictionTotal atomic.Int64
 }
 
 // HistoryDropTotal returns the cumulative count of CronRun records Append
@@ -144,6 +154,16 @@ func (s *runStore) HistoryDropTotal() int64 {
 		return 0
 	}
 	return s.historyDropTotal.Load()
+}
+
+// CacheStaleEvictionTotal returns the cumulative count of recentCache rows
+// evicted by cacheTrimAfterDisk's approximate time source. Monotonically
+// non-decreasing; returns 0 when s is nil or disabled. R249-CR-19 (#962).
+func (s *runStore) CacheStaleEvictionTotal() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.cacheStaleEvictionTotal.Load()
 }
 
 // WriteFailedTotals returns the cumulative count of CronRun WriteFileAtomic
@@ -1903,6 +1923,14 @@ func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
 		}
 		return ts.Before(cutoff)
 	})
+	// R249-CR-19 (#962): record how many rows this approximate-time-source
+	// trim evicted so operators can watch the divergence the godoc above
+	// documents. survive < entry.count means the cache dropped rows based on
+	// EndedAt/StartedAt rather than disk mtime; a growing delta vs disk-side
+	// trims is the signal the approximation is mispredicting.
+	if survive < entry.count {
+		s.cacheStaleEvictionTotal.Add(int64(entry.count - survive))
+	}
 	// Zero out the dropped slots to release any retained string fields.
 	c := cap(entry.ring)
 	if c > 0 {
