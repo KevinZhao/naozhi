@@ -792,6 +792,48 @@ func TestShouldNotify_DropPath_Eviction(t *testing.T) {
 	}
 }
 
+// TestShouldNotify_DropPath_BackPointerConsistent pins the R249-PERF-12 (#932)
+// refactor invariant: dropNotifyIndex maps directly to *dropNotifyEntry and each
+// entry's elem back-pointer must always reference the live list element, so the
+// LRU stays in lock-step with the map across refresh and eviction.
+func TestShouldNotify_DropPath_BackPointerConsistent(t *testing.T) {
+	q := NewMessageQueue(0, 0)
+	q.ShouldNotify("a")
+	q.ShouldNotify("b")
+
+	q.mu.Lock()
+	for key, entry := range q.dropNotifyIndex {
+		if entry.elem == nil {
+			t.Fatalf("entry %q has nil elem back-pointer", key)
+		}
+		if got := entry.elem.Value.(*dropNotifyEntry); got != entry {
+			t.Fatalf("entry %q elem points at a different entry", key)
+		}
+		if entry.key != key {
+			t.Fatalf("index key %q != entry.key %q", key, entry.key)
+		}
+	}
+	q.mu.Unlock()
+
+	// Fill to capacity then overflow; the eviction must drop exactly one key
+	// and keep the map and list the same size (no dangling back-pointers).
+	for i := 0; i < dropNotifyMaxKeys; i++ {
+		q.ShouldNotify(fmt.Sprintf("fill-%d", i))
+	}
+	q.mu.Lock()
+	if q.dropNotifyLRU.Len() != len(q.dropNotifyIndex) {
+		t.Fatalf("LRU/index size mismatch after overflow: %d vs %d",
+			q.dropNotifyLRU.Len(), len(q.dropNotifyIndex))
+	}
+	for e := q.dropNotifyLRU.Front(); e != nil; e = e.Next() {
+		entry := e.Value.(*dropNotifyEntry)
+		if q.dropNotifyIndex[entry.key] != entry {
+			t.Fatalf("list entry %q missing/stale in index", entry.key)
+		}
+	}
+	q.mu.Unlock()
+}
+
 // ---------------------------------------------------------------------------
 // CollectDelay / ShouldSendWait
 // ---------------------------------------------------------------------------
