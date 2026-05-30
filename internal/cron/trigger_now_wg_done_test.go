@@ -64,6 +64,27 @@ func TestTriggerNow_BothBranchesReleaseWGInGoroutine(t *testing.T) {
 	}
 }
 
+// TestTriggerNow_EntryGoneLogSanitizesID pins R250-SEC-9 (#1098): the
+// entry-gone Debug log in TriggerNow must route the raw caller-supplied id
+// through osutil.SanitizeForLog so a future caller that bypasses IsValidID
+// cannot inject control bytes / newlines into journalctl. A plain
+// `"job_id", id` slog attribute does NOT escape control runes, so the
+// sanitiser is the defence-in-depth seam. Source-scan so a refactor that
+// drops the wrapper fails here explicitly.
+func TestTriggerNow_EntryGoneLogSanitizesID(t *testing.T) {
+	t.Parallel()
+
+	body := readTriggerNowBody(t)
+
+	if strings.Contains(body, `"job_id", id,`) {
+		t.Errorf("TriggerNow logs the raw `id` (\"job_id\", id) — R250-SEC-9 regression. " +
+			"Wrap it in osutil.SanitizeForLog(id, MaxIDLen) so control bytes cannot reach journalctl.")
+	}
+	if !strings.Contains(body, "osutil.SanitizeForLog(id, MaxIDLen)") {
+		t.Errorf("TriggerNow entry-gone log must use osutil.SanitizeForLog(id, MaxIDLen) (R250-SEC-9 / #1098).\nBody:\n%s", body)
+	}
+}
+
 // readTriggerNowBody locates the TriggerNow method in scheduler_jobs.go and
 // returns its body text (between the function header and the matching
 // closing brace). Intentionally keeps the lexer simple — brace counting

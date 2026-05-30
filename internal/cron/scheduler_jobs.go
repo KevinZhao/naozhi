@@ -22,6 +22,8 @@ import (
 	"unicode/utf8"
 
 	robfigcron "github.com/robfig/cron/v3"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // listSnapshotPair pairs a Job value-copy with its robfig/cron entry ID
@@ -1447,7 +1449,12 @@ func (s *Scheduler) TriggerNow(id string) error {
 		if entryGone {
 			go func() {
 				defer s.triggerWG.Done()
-				slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "job_id", id, "entry_id", entryID)
+				// R250-SEC-9 (#1098): the raw caller-supplied id reaches
+				// this log on the entry-gone path; sanitise it so a future
+				// caller that bypasses IsValidID cannot inject control bytes
+				// / newlines into journalctl. Matches the SanitizeForLog
+				// pattern used by the dashboard handlers (defence-in-depth).
+				slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "job_id", osutil.SanitizeForLog(id, MaxIDLen), "entry_id", entryID)
 			}()
 		} else {
 			go func() {
