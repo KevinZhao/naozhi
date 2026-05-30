@@ -222,15 +222,24 @@ func isKnownBackendID(id string) bool {
 }
 
 // backendDisplayName maps a backend config value to its user-facing name.
+//
+// R239-ARCH-K: sources DisplayName from knownBackends — the documented
+// "single source of truth for what backends this cli build supports" — so
+// adding a backend to that table is the ONLY edit needed; the prior
+// hardcoded switch silently returned the raw id for any backend that was
+// added to knownBackends but not mirrored here. Empty/legacy ids are
+// normalised to "claude" first so callers that pass a raw config value
+// (not just the post-normalize id) keep hitting the canonical entry.
+// Unknown ids fall through to the raw value, matching the previous default
+// arm.
 func backendDisplayName(backend string) string {
-	switch backend {
-	case "kiro":
-		return "kiro"
-	case "", "claude":
-		return "claude-code"
-	default:
-		return backend
+	id := normalizeBackendID(backend)
+	for _, b := range knownBackends {
+		if b.ID == id {
+			return b.DisplayName
+		}
 	}
+	return backend
 }
 
 // normalizeBackendID collapses empty/legacy aliases to the canonical ID.

@@ -183,6 +183,29 @@ func TestNewWrapper_DisplayNameMatchesNormalizedID(t *testing.T) {
 	}
 }
 
+// TestBackendDisplayName_SourcedFromKnownBackends pins the R239-ARCH-K
+// contract: backendDisplayName derives every label from the knownBackends
+// table rather than a parallel hardcoded switch. The pre-fix switch would
+// drift — a backend added to knownBackends but not to the switch rendered
+// as its raw id. This test fails loudly if anyone reintroduces that gap.
+func TestBackendDisplayName_SourcedFromKnownBackends(t *testing.T) {
+	t.Parallel()
+	for _, b := range knownBackends {
+		if got := backendDisplayName(b.ID); got != b.DisplayName {
+			t.Errorf("backendDisplayName(%q) = %q, want knownBackends DisplayName %q",
+				b.ID, got, b.DisplayName)
+		}
+	}
+	// Empty/legacy alias normalises to claude.
+	if got := backendDisplayName(""); got != "claude-code" {
+		t.Errorf(`backendDisplayName("") = %q, want "claude-code"`, got)
+	}
+	// Unknown id falls through to the raw value (matches prior default arm).
+	if got := backendDisplayName("totally-unknown"); got != "totally-unknown" {
+		t.Errorf(`backendDisplayName("totally-unknown") = %q, want raw passthrough`, got)
+	}
+}
+
 func TestNewWrapper_UnavailableBinaryLeavesVersionEmpty(t *testing.T) {
 	t.Parallel()
 	// Use an absolute path that cannot exist so detectVersion's exec.Command
