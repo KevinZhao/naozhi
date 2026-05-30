@@ -12,8 +12,8 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/time/rate"
 
-	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
@@ -598,13 +598,15 @@ func NewHub(opts HubOptions) *Hub {
 }
 
 // SetScheduler sets the cron scheduler for auto-saving prompts on first send.
-// Accepts the concrete *cron.Scheduler (production wiring) — the field type
-// is the narrower CronView interface so the Hub never sees the rest of the
-// scheduler API. R242-ARCH-13 (#754): the previous file-local cronHubOps
-// interface has been collapsed into the package-level CronView (see
-// dashboard_session.go) shared with SessionHandlers — fewer micro-interfaces
-// to learn, identical method-set against *cron.Scheduler.
-func (h *Hub) SetScheduler(s *cron.Scheduler) { h.scheduler = s }
+// Accepts the narrow CronView interface rather than the concrete
+// *cron.Scheduler so wshub.go no longer imports the cron package at all —
+// the Hub only ever needed the CronView method-set, and taking the concrete
+// type here was the last residual cron coupling in this file. R260528-ARCH-10
+// (#1371): server's coupling to cron shrinks to the CronView contract; the
+// production *cron.Scheduler satisfies CronView implicitly so the sole caller
+// (dashboard.go) is unchanged. R242-ARCH-13 (#754): CronView is the
+// package-level consumer interface shared with SessionHandlers.
+func (h *Hub) SetScheduler(s CronView) { h.scheduler = s }
 
 // SetUploadStore wires the upload store used by WS sends to resolve file_ids
 // that were pre-uploaded via POST /api/sessions/upload.
