@@ -9,16 +9,91 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/node"
 )
+
+// sinceCursor tracks the streaming watermark for streamEvents. It exists to
+// fix R20260530-GO-1 (#1481): EventEntriesSince(t) returns only entries with
+// Time strictly > t, so a live Append that lands in the SAME wall-clock
+// millisecond as the tail of an already-delivered batch — but arrives in a
+// LATER notify wave — was silently dropped (its Time == watermark). The cursor
+// queries inclusively of the watermark millisecond (queryAfter == watermark-1)
+// and dedups by UUID: every EventLog entry is stamped with a unique 32-hex
+// UUID, so an entry re-returned at the watermark millisecond is delivered only
+// if its UUID was not already sent. sentAtWM holds exactly the UUIDs delivered
+// at Time == watermark.
+type sinceCursor struct {
+	watermark int64
+	sentAtWM  map[string]struct{}
+}
+
+func newSinceCursor() *sinceCursor {
+	return &sinceCursor{sentAtWM: make(map[string]struct{})}
+}
+
+// reset rewinds the cursor to the pre-subscribe state. Used on session pointer
+// swap (e.g. /new): a replaced session has a fresh event log whose wall-clock
+// timestamps can predate the old watermark (NTP jumps or fast /new), so the
+// first notify after a swap must deliver the full new history.
+func (s *sinceCursor) reset() {
+	s.watermark = 0
+	clear(s.sentAtWM)
+}
+
+// queryAfter returns the afterMS to pass to EventEntriesSince. Subtracting one
+// re-admits the watermark millisecond; filter then drops the dupes. When the
+// watermark is 0 (initial / post-reset) this is -1, i.e. "everything".
+func (s *sinceCursor) queryAfter() int64 {
+	return s.watermark - 1
+}
+
+// filter drops entries at the watermark millisecond that were already
+// delivered. Entries with Time > watermark are always new. The input slice's
+// backing array is reused in place (the write index never overtakes the read
+// index), so no extra allocation occurs on the hot streaming path.
+func (s *sinceCursor) filter(cand []cli.EventEntry) []cli.EventEntry {
+	out := cand[:0]
+	for _, e := range cand {
+		if e.Time == s.watermark {
+			if _, dup := s.sentAtWM[e.UUID]; dup {
+				continue
+			}
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// advance records that the given entries were delivered. Entries are
+// chronological, so the last one carries the new high-water timestamp. When
+// the watermark moves forward the dedup set is rebuilt for the new trailing
+// millisecond; same-millisecond redeliveries accumulate into it.
+func (s *sinceCursor) advance(delivered []cli.EventEntry) {
+	if len(delivered) == 0 {
+		return
+	}
+	newWM := delivered[len(delivered)-1].Time
+	if newWM != s.watermark {
+		s.watermark = newWM
+		clear(s.sentAtWM)
+	}
+	for _, e := range delivered {
+		if e.Time == s.watermark {
+			s.sentAtWM[e.UUID] = struct{}{}
+		}
+	}
+}
 
 func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error, key string, notify <-chan struct{}) {
 	sess := c.router.GetSession(key)
 	if sess == nil {
 		return
 	}
-	var lastTime int64
 	var lastState string
+	// R20260530-GO-1 (#1481): see sinceCursor — guards against same-millisecond
+	// events being dropped across notify waves.
+	csr := newSinceCursor()
 	for {
 		select {
 		case _, ok := <-notify:
@@ -48,22 +123,25 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 			}
 			// Re-fetch session in case it was replaced (e.g. via /new). A
 			// replaced session has a fresh event log whose wall-clock
-			// timestamps can be earlier than the old lastTime (NTP jumps or
+			// timestamps can be earlier than the old watermark (NTP jumps or
 			// fast /new), causing EntriesSince to drop the new session's
-			// first events. Reset lastTime on pointer change so the first
+			// first events. Reset the cursor on pointer change so the first
 			// notify after a swap delivers the full new history.
 			if cur := c.router.GetSession(key); cur != nil && cur != sess {
 				sess = cur
-				lastTime = 0
 				lastState = ""
+				csr.reset()
 			}
-			entries := sess.EventEntriesSince(lastTime)
+			// Query inclusively of the watermark millisecond, then dedup by
+			// UUID so same-millisecond events arriving in a later notify wave
+			// are still delivered exactly once. See sinceCursor.
+			cand := sess.EventEntriesSince(csr.queryAfter())
+			entries := csr.filter(cand)
 			if len(entries) > 0 {
 				if err := writeJSON(node.ReverseMsg{Type: "events", Key: key, Events: entries}); err != nil {
 					return
 				}
-				// entries are chronological; last entry has the highest timestamp
-				lastTime = entries[len(entries)-1].Time
+				csr.advance(entries)
 			}
 			// Only push session_state when it actually changes.
 			// RNEW-005 invariant: sess is non-nil here. It was nil-checked

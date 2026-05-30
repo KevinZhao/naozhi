@@ -202,48 +202,34 @@ func (s *Server) registerDashboard() {
 	// Authenticated API routes
 	auth := s.auth.RequireAuth
 	s.mux.HandleFunc("GET /api/cli/backends", auth(s.cliH.Handle))
-	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.HandleList))
-	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.HandleEvents))
-	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.HandleAgentEvents))
-	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.HandleToolResult))
-	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
-	s.mux.HandleFunc("POST /api/sessions/upload", auth(s.sendH.handleUpload))
-	s.mux.HandleFunc("GET /api/sessions/attachment", auth(s.sendH.handleAttachment))
-	s.mux.HandleFunc("DELETE /api/sessions", auth(s.sessionH.HandleDelete))
-	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.HandleResume))
-	s.mux.HandleFunc("POST /api/sessions/interrupt", auth(s.sessionH.HandleInterrupt))
-	s.mux.HandleFunc("PATCH /api/sessions/label", auth(s.sessionH.HandleSetLabel))
-	s.mux.HandleFunc("GET /api/discovered", auth(s.discoveryH.HandleList))
-	s.mux.HandleFunc("GET /api/discovered/preview", auth(s.discoveryH.HandlePreview))
-	s.mux.HandleFunc("POST /api/discovered/takeover", auth(s.discoveryH.HandleTakeover))
-	s.mux.HandleFunc("POST /api/discovered/close", auth(s.discoveryH.HandleClose))
-	s.mux.HandleFunc("GET /api/projects", auth(s.projectH.HandleList))
-	s.mux.HandleFunc("GET /api/projects/config", auth(s.projectH.HandleConfigGet))
-	s.mux.HandleFunc("PUT /api/projects/config", auth(s.projectH.HandleConfigPut))
-	s.mux.HandleFunc("POST /api/projects/planner/restart", auth(s.projectH.HandlePlannerRestart))
+	// R237-ARCH-2 (#573) / R260528-ARCH-6 (#1367) incremental slice: the
+	// cohesive session-CRUD route group is extracted into its own helper so
+	// registerDashboard shrinks toward the routes.go split the issues call
+	// for. Behaviour is identical — the routes_snapshot AST gate scans
+	// dashboard.go as a whole, so moving these calls into a same-file helper
+	// keeps the golden snapshot byte-for-byte stable.
+	s.registerSessionRoutes(auth)
+	// R260528-ARCH-6 (#1367) incremental slice: the discovered-session route
+	// group (list/preview/takeover/close) extracted into its own same-file
+	// helper, continuing the registerDashboard god-function decomposition.
+	s.registerDiscoveredRoutes(auth)
+	// R237-ARCH-2 (#573) incremental slice: the project route group
+	// (*dashproject.Handlers) extracted into its own same-file helper,
+	// further shrinking registerDashboard's 60+ HandleFunc body. The
+	// /api/planner/stats probe stays inline below because it is a *Server
+	// method, not a projectH handler.
+	s.registerProjectRoutes(auth)
 	// Issue #452 (PLANNER-STATS-1) part-1: process-resource probe so the
 	// dashboard can show RSS / goroutine / planner-fan-out trends without
 	// reaching the loopback-only /api/debug/vars expvar surface. Per-CLI
 	// per-process RSS is the part-2 follow-up; see dashboard_planner_stats.go.
 	s.mux.HandleFunc("GET /api/planner/stats", auth(s.handlePlannerStats))
-	s.mux.HandleFunc("POST /api/projects/favorite", auth(s.projectH.HandleFavoriteToggle))
-	s.mux.HandleFunc("POST /api/projects/files/exists", auth(s.projectH.HandleFilesExists))
-	s.mux.HandleFunc("GET /api/projects/file", auth(s.projectH.HandleFileGet))
 	s.mux.HandleFunc("POST /api/transcribe", auth(s.transcribeH.HandleTranscribe))
-	s.mux.HandleFunc("GET /api/cron", auth(s.cronH.HandleList))
-	s.mux.HandleFunc("POST /api/cron", auth(s.cronH.HandleCreate))
-	s.mux.HandleFunc("PATCH /api/cron", auth(s.cronH.HandleUpdate))
-	s.mux.HandleFunc("DELETE /api/cron", auth(s.cronH.HandleDelete))
-	s.mux.HandleFunc("POST /api/cron/pause", auth(s.cronH.HandlePause))
-	s.mux.HandleFunc("POST /api/cron/resume", auth(s.cronH.HandleResume))
-	s.mux.HandleFunc("POST /api/cron/trigger", auth(s.cronH.HandleTrigger))
-	s.mux.HandleFunc("GET /api/cron/preview", auth(s.cronH.HandlePreview))
-	// P1 cron-run-history: per-job execution history.
-	s.mux.HandleFunc("GET /api/cron/runs", auth(s.cronH.HandleRunsList))
-	s.mux.HandleFunc("GET /api/cron/runs/{run_id}", auth(s.cronH.HandleRunDetail))
-	// cron-dashboard-redesign P2a §4.4.3 — transcript endpoint. Path
-	// param mirrors handleRunDetail; same per-IP rate limit applies.
-	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/transcript", auth(s.cronH.HandleRunTranscript))
+	// R260528-ARCH-6 (#1367) incremental slice: the cron route group (CRUD +
+	// pause/resume/trigger/preview + run-history) is extracted into its own
+	// same-file helper, the exact "拆 cron handlers" step the issue names.
+	// Same-file means the routes_snapshot AST gate stays stable.
+	s.registerCronRoutes(auth)
 	// system-session daemons (docs/rfc/system-session.md §9.2/§9.3)
 	s.mux.HandleFunc("GET /api/system/daemons", auth(s.handleSystemDaemons))
 	s.mux.HandleFunc("POST /api/system/labels/clear-origin", auth(s.handleClearLabelOrigin))
@@ -260,11 +246,10 @@ func (s *Server) registerDashboard() {
 		s.registerPprof()
 		s.registerExpvar()
 	}
-	if s.scratchH != nil {
-		s.mux.HandleFunc("POST /api/scratch/open", auth(s.scratchH.HandleOpen))
-		s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(s.scratchH.HandlePromote))
-		s.mux.HandleFunc("DELETE /api/scratch/{id}", auth(s.scratchH.HandleDelete))
-	}
+	// R260528-ARCH-6 (#1367) incremental slice: the scratch-drawer route group
+	// extracted into its own same-file helper (which keeps the original
+	// nil-guard) to further trim registerDashboard.
+	s.registerScratchRoutes(auth)
 	// memory link preview (docs/rfc/memory-link-rendering.md): exposes
 	// ~/.claude/projects/<scope>/memory/<slug>.md to the dashboard inlineMd
 	// renderer so [[slug]] tokens become hover-previewable cards.
@@ -300,6 +285,94 @@ func (s *Server) registerDashboard() {
 	if s.reverseNodeServer != nil {
 		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
 	}
+}
+
+// registerSessionRoutes wires the session-CRUD route group (list / events /
+// agent_events / tool_result / send / upload / attachment / delete / resume /
+// interrupt / label). Split out of registerDashboard as the first concrete
+// slice of the R237-ARCH-2 (#573) god-function decomposition. `auth` is the
+// RequireAuth wrapper captured by the caller so every route here stays
+// authenticated. Behaviour is byte-identical to the inline block it replaced.
+func (s *Server) registerSessionRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
+	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.HandleList))
+	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.HandleEvents))
+	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.HandleAgentEvents))
+	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.HandleToolResult))
+	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
+	s.mux.HandleFunc("POST /api/sessions/upload", auth(s.sendH.handleUpload))
+	s.mux.HandleFunc("GET /api/sessions/attachment", auth(s.sendH.handleAttachment))
+	s.mux.HandleFunc("DELETE /api/sessions", auth(s.sessionH.HandleDelete))
+	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.HandleResume))
+	s.mux.HandleFunc("POST /api/sessions/interrupt", auth(s.sessionH.HandleInterrupt))
+	s.mux.HandleFunc("PATCH /api/sessions/label", auth(s.sessionH.HandleSetLabel))
+}
+
+// registerScratchRoutes wires the scratch-drawer route group (open / promote /
+// delete) when the scratch handler is configured. Extracted from
+// registerDashboard as a further slice of the R260528-ARCH-6 (#1367)
+// god-function decomposition. The nil-guard is preserved here verbatim so
+// deployments without a scratch pool register no scratch routes, exactly as
+// before.
+func (s *Server) registerScratchRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
+	if s.scratchH == nil {
+		return
+	}
+	s.mux.HandleFunc("POST /api/scratch/open", auth(s.scratchH.HandleOpen))
+	s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(s.scratchH.HandlePromote))
+	s.mux.HandleFunc("DELETE /api/scratch/{id}", auth(s.scratchH.HandleDelete))
+}
+
+// registerProjectRoutes wires the project route group (list / config get+put /
+// planner restart / favorite toggle / files-exists / file get). Extracted from
+// registerDashboard as a further slice of the R237-ARCH-2 (#573) god-function
+// decomposition. All handlers are *dashproject.Handlers methods; the
+// /api/planner/stats probe is deliberately left inline at the call site
+// because it is a *Server method, keeping this helper a single-owner group.
+// http.ServeMux matches by distinct path, so consolidating the registrations
+// here (the favorite/files routes previously sat after planner/stats) does not
+// change routing behaviour.
+func (s *Server) registerProjectRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
+	s.mux.HandleFunc("GET /api/projects", auth(s.projectH.HandleList))
+	s.mux.HandleFunc("GET /api/projects/config", auth(s.projectH.HandleConfigGet))
+	s.mux.HandleFunc("PUT /api/projects/config", auth(s.projectH.HandleConfigPut))
+	s.mux.HandleFunc("POST /api/projects/planner/restart", auth(s.projectH.HandlePlannerRestart))
+	s.mux.HandleFunc("POST /api/projects/favorite", auth(s.projectH.HandleFavoriteToggle))
+	s.mux.HandleFunc("POST /api/projects/files/exists", auth(s.projectH.HandleFilesExists))
+	s.mux.HandleFunc("GET /api/projects/file", auth(s.projectH.HandleFileGet))
+}
+
+// registerDiscoveredRoutes wires the discovered-session route group
+// (list / preview / takeover / close). Extracted from registerDashboard as a
+// further slice of the R260528-ARCH-6 (#1367) god-package decomposition.
+// `auth` is the caller's RequireAuth wrapper; behaviour is byte-identical to
+// the inline block it replaced.
+func (s *Server) registerDiscoveredRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
+	s.mux.HandleFunc("GET /api/discovered", auth(s.discoveryH.HandleList))
+	s.mux.HandleFunc("GET /api/discovered/preview", auth(s.discoveryH.HandlePreview))
+	s.mux.HandleFunc("POST /api/discovered/takeover", auth(s.discoveryH.HandleTakeover))
+	s.mux.HandleFunc("POST /api/discovered/close", auth(s.discoveryH.HandleClose))
+}
+
+// registerCronRoutes wires the cron route group (CRUD + pause/resume/trigger/
+// preview + run-history + transcript). Split out of registerDashboard as the
+// first concrete slice of the R260528-ARCH-6 (#1367) "拆 cron handlers" step.
+// `auth` is the caller's RequireAuth wrapper. Behaviour is byte-identical to
+// the inline block it replaced.
+func (s *Server) registerCronRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
+	s.mux.HandleFunc("GET /api/cron", auth(s.cronH.HandleList))
+	s.mux.HandleFunc("POST /api/cron", auth(s.cronH.HandleCreate))
+	s.mux.HandleFunc("PATCH /api/cron", auth(s.cronH.HandleUpdate))
+	s.mux.HandleFunc("DELETE /api/cron", auth(s.cronH.HandleDelete))
+	s.mux.HandleFunc("POST /api/cron/pause", auth(s.cronH.HandlePause))
+	s.mux.HandleFunc("POST /api/cron/resume", auth(s.cronH.HandleResume))
+	s.mux.HandleFunc("POST /api/cron/trigger", auth(s.cronH.HandleTrigger))
+	s.mux.HandleFunc("GET /api/cron/preview", auth(s.cronH.HandlePreview))
+	// P1 cron-run-history: per-job execution history.
+	s.mux.HandleFunc("GET /api/cron/runs", auth(s.cronH.HandleRunsList))
+	s.mux.HandleFunc("GET /api/cron/runs/{run_id}", auth(s.cronH.HandleRunDetail))
+	// cron-dashboard-redesign P2a §4.4.3 — transcript endpoint. Path
+	// param mirrors handleRunDetail; same per-IP rate limit applies.
+	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/transcript", auth(s.cronH.HandleRunTranscript))
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {

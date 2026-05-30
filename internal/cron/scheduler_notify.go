@@ -294,7 +294,7 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	if text == "" {
 		return
 	}
-	p := s.platforms[plat]
+	p := s.configMaps().platforms[plat]
 	if p == nil {
 		slog.Warn("cron notify: platform not found", "platform", plat)
 		return

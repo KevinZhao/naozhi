@@ -230,6 +230,80 @@ func TestSource_LoadBefore_ZeroBeforeMS(t *testing.T) {
 	}
 }
 
+// TestSource_LoadBefore_IdxSeekMatchesFullScan is the R20260530-PERF-1
+// (#1485) regression: the idx-seek fast path must return byte-for-byte the
+// same page as the full-scan fallback. We write a log large enough that the
+// sparse idx (IdxStride=2 from newPersister) has many entries, then compare
+// loadBeforeViaIdx against loadBeforeFullScan across a sweep of (beforeMS,
+// limit) windows. A drift between the two — e.g. an off-by-one in the
+// back-up-by-slots seek math — fails here.
+func TestSource_LoadBefore_IdxSeekMatchesFullScan(t *testing.T) {
+	p, src, sink, _ := newPersister(t, "k")
+	const n = 60
+	for i := 0; i < n; i++ {
+		persistOne(t, sink, cli.EventEntry{
+			UUID:    "uuid-" + rune2hex(i),
+			Time:    int64(1000 + i), // distinct ms so ordering is unambiguous
+			Type:    "user",
+			Summary: rune2hex(i),
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = p.Flush(ctx)
+
+	bg := context.Background()
+	for _, before := range []int64{1005, 1020, 1037, 1055, 1060, 1100} {
+		for _, limit := range []int{1, 3, 10, 100} {
+			idxGot, ok, err := src.loadBeforeViaIdx(bg, before, limit)
+			if err != nil {
+				t.Fatalf("loadBeforeViaIdx(before=%d,limit=%d): %v", before, limit, err)
+			}
+			fullGot, err := src.loadBeforeFullScan(bg, before, limit)
+			if err != nil {
+				t.Fatalf("loadBeforeFullScan(before=%d,limit=%d): %v", before, limit, err)
+			}
+			// When the idx path declines (ok==false) the public LoadBefore
+			// would use the full scan, so only compare when idx produced a
+			// result. Either way the public result must equal full scan.
+			if ok {
+				if !equalTimes(idxGot, fullGot) {
+					t.Errorf("idx vs full mismatch before=%d limit=%d: idx=%v full=%v",
+						before, limit, times(idxGot), times(fullGot))
+				}
+			}
+			pub, err := src.LoadBefore(bg, before, limit)
+			if err != nil {
+				t.Fatalf("LoadBefore(before=%d,limit=%d): %v", before, limit, err)
+			}
+			if !equalTimes(pub, fullGot) {
+				t.Errorf("public LoadBefore vs full mismatch before=%d limit=%d: pub=%v full=%v",
+					before, limit, times(pub), times(fullGot))
+			}
+		}
+	}
+}
+
+func times(es []cli.EventEntry) []int64 {
+	out := make([]int64, len(es))
+	for i, e := range es {
+		out[i] = e.Time
+	}
+	return out
+}
+
+func equalTimes(a, b []cli.EventEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Time != b[i].Time || a[i].UUID != b[i].UUID {
+			return false
+		}
+	}
+	return true
+}
+
 // TestSource_DisabledConfig: empty dir returns nil without error.
 // Used by deployments that opt out of event-log persistence (e.g.
 // stateless test harnesses).

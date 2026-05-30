@@ -2014,6 +2014,22 @@ func (s *runStore) trimAllCtx(ctx context.Context, now time.Time) {
 			continue
 		}
 		s.trimJobUnderLock(jobID, now)
+		// R250-PERF-9 (#1112): pre-warm the recentCache for this job in the
+		// same cold-start goroutine, right after trim settled its on-disk
+		// state. Without this, the FIRST dashboard RecentRuns poll after a
+		// process restart cold-warms every entry serially on the request
+		// path (ReadDir + per-file Lstat + ReadFile + json.Unmarshal up to
+		// keepCount per job) — multi-second first-poll latency operators see
+		// when the dashboard reconnects. warmCacheLocked is idempotent (skips
+		// when entry.warm) so a concurrent Append-driven warm that already
+		// fired is a cheap no-op here. The extra per-job ReadDir at startup
+		// is off the hot path and bounded by maxJobsHardCap. Cancelling the
+		// GC ctx between jobs (checked at loop top) also short-circuits
+		// remaining warms, so Stop stays prompt.
+		if warmCorrupt := s.warmCacheLocked(jobID); warmCorrupt > 0 {
+			slog.Warn("cron runstore: cold-start warm skipped corrupt files",
+				"count", warmCorrupt, "dir", filepath.Join(s.root, jobID))
+		}
 	}
 }
 

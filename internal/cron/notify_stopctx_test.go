@@ -56,9 +56,11 @@ func TestR243SEC14_NotifyTargetCancelsOnStopCtx(t *testing.T) {
 	fp := newFakeBlockingPlatform(64)
 	stopCtx, stopCancel := context.WithCancel(context.Background())
 	s := &Scheduler{
-		platforms: map[string]platform.Platform{"fake-block": fp},
-		stopCtx:   stopCtx,
+		stopCtx: stopCtx,
 	}
+	s.configMapsPtr.Store(&cronConfigMaps{
+		platforms: map[string]platform.Platform{"fake-block": fp},
+	})
 
 	done := make(chan struct{})
 	go func() {
@@ -100,9 +102,11 @@ func TestR243SEC14_NotifyTargetNilStopCtxFallback(t *testing.T) {
 	// this test is just "does not panic / nil-deref".
 	fp := &fakePartialPlatform{failAt: 1000, maxLen: 64}
 	s := &Scheduler{
-		platforms: map[string]platform.Platform{"fake-notify": fp},
 		// stopCtx intentionally unset
 	}
+	s.configMapsPtr.Store(&cronConfigMaps{
+		platforms: map[string]platform.Platform{"fake-notify": fp},
+	})
 	s.notifyTarget("fake-notify", "chat-x", "hello world")
 	if fp.uniqueChunks() == 0 {
 		t.Errorf("notifyTarget with nil stopCtx should still send chunks; got 0")
