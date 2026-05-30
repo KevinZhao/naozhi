@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -65,5 +66,32 @@ func TestTryShortCircuit_PrunesEvictionsWithoutCachedSessions(t *testing.T) {
 	}
 	if _, ok := dc.evictedPIDs[42]; ok {
 		t.Errorf("short-circuit path must prune the expired eviction entry")
+	}
+}
+
+// TestSnapshot_EmptyIsNonNilAndMarshalsToArray pins that the empty-cache
+// fast path returns a non-nil, zero-length, zero-cap slice that JSON-encodes
+// to `[]` (not `null`) so the discovery dashboard wire shape is unchanged
+// while avoiding a per-poll allocation.
+func TestSnapshot_EmptyIsNonNilAndMarshalsToArray(t *testing.T) {
+	t.Parallel()
+
+	dc := newDiscoveryCache("", nil, nil)
+	out := dc.snapshot()
+	if out == nil {
+		t.Fatalf("snapshot() returned nil; want non-nil empty slice")
+	}
+	if len(out) != 0 {
+		t.Fatalf("snapshot() len = %d; want 0", len(out))
+	}
+	if cap(out) != 0 {
+		t.Fatalf("snapshot() cap = %d; want 0 so callers cannot append into the shared backing array", cap(out))
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(b) != "[]" {
+		t.Fatalf("empty snapshot marshalled to %q; want %q", b, "[]")
 	}
 }

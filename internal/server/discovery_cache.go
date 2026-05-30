@@ -251,10 +251,23 @@ func (dc *discoveryCache) evictPID(pid int) {
 	dc.evictedPIDs[pid] = time.Now()
 }
 
+// emptyDiscoveredSessions is a shared zero-length, non-nil slice returned by
+// snapshot() when the cache is empty. It avoids a per-call make([]…, 0)
+// allocation on the discovery dashboard's ~1 Hz poll path (Snapshot is hit
+// several times per /api/discovered request, multiplied by every open tab),
+// which is the common case before any local CLI session is discovered.
+// Non-nil is required so the JSON encoder emits `[]` rather than `null`,
+// matching the populated-cache wire shape the front-end expects. The slice
+// has cap 0 so no caller can append into the shared backing array.
+var emptyDiscoveredSessions = make([]discovery.DiscoveredSession, 0)
+
 // snapshot returns a copy of the cached discovered sessions.
 func (dc *discoveryCache) snapshot() []discovery.DiscoveredSession {
 	dc.mu.RLock()
 	defer dc.mu.RUnlock()
+	if len(dc.sessions) == 0 {
+		return emptyDiscoveredSessions
+	}
 	out := make([]discovery.DiscoveredSession, len(dc.sessions))
 	copy(out, dc.sessions)
 	return out
