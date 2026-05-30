@@ -548,6 +548,12 @@ func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *Handlers) HandleLogout(w http.ResponseWriter, r *http.Request) {
+	// S9 (#389): clearing the browser cookie alone left the underlying MAC
+	// valid for the full 24h MaxAge — a stolen cookie replayed freely after
+	// logout. Bump cookieGenSeq so the issued MAC no longer authenticates;
+	// IsAuthenticated's constant-time compare now fails for any outstanding
+	// cookie, making logout a real server-side revocation.
+	a.RotateCookieGen()
 	http.SetCookie(w, &http.Cookie{
 		Name:     AuthCookieName,
 		Value:    "",
