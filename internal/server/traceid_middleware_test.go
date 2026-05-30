@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/ctxutil"
@@ -58,5 +59,61 @@ func TestWithTraceID_RespectsInbound(t *testing.T) {
 	}
 	if got := rec.Header().Get(traceIDHeader); got != upstream {
 		t.Fatalf("response header = %q; want %q (mirror)", got, upstream)
+	}
+}
+
+// TestWithTraceID_RejectsUnsafeInbound — an oversized or control-byte-laden
+// upstream id must not be reflected verbatim into the ctx / response header;
+// the middleware mints a fresh 16-hex id instead so a malicious or
+// misconfigured proxy cannot bloat correlated logs or smuggle control bytes.
+func TestWithTraceID_RejectsUnsafeInbound(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"too_long":     strings.Repeat("a", maxInboundTraceIDLen+1),
+		"crlf":         "abc\r\ninjected",
+		"control_byte": "abc\x00def",
+		"del":          "abc\x7fdef",
+	}
+	for name, inbound := range cases {
+		inbound := inbound
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var seen string
+			h := withTraceID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen = ctxutil.TraceID(r.Context())
+			}))
+			req := httptest.NewRequest(http.MethodGet, "/x", nil)
+			req.Header.Set(traceIDHeader, inbound)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if seen == inbound {
+				t.Fatalf("unsafe inbound id was propagated verbatim: %q", inbound)
+			}
+			if len(seen) != 16 {
+				t.Fatalf("expected a freshly minted 16-hex id, got %q (len %d)", seen, len(seen))
+			}
+			if got := rec.Header().Get(traceIDHeader); got != seen {
+				t.Fatalf("response header %q != ctx id %q", got, seen)
+			}
+		})
+	}
+}
+
+// TestAcceptInboundTraceID pins the accept/reject predicate directly.
+func TestAcceptInboundTraceID(t *testing.T) {
+	t.Parallel()
+	accept := []string{"abc123", "550e8400-e29b-41d4-a716-446655440000", strings.Repeat("x", maxInboundTraceIDLen)}
+	reject := []string{"", strings.Repeat("x", maxInboundTraceIDLen+1), "a\nb", "a\tb", "a\x00b"}
+	for _, s := range accept {
+		if !acceptInboundTraceID(s) {
+			t.Errorf("acceptInboundTraceID(%q) = false; want true", s)
+		}
+	}
+	for _, s := range reject {
+		if acceptInboundTraceID(s) {
+			t.Errorf("acceptInboundTraceID(%q) = true; want false", s)
+		}
 	}
 }

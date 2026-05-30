@@ -13,6 +13,33 @@ import (
 // instead of overwriting with a fresh value.
 const traceIDHeader = "X-Request-ID"
 
+// maxInboundTraceIDLen caps how long an upstream-supplied X-Request-ID may
+// be before we discard it and mint our own. An inbound id is opaque and
+// flows into a structured-log field plus the echoed response header; an
+// attacker (or a misbehaving proxy) could otherwise stamp a multi-kilobyte
+// value that bloats every correlated log line and the response header. ALB,
+// nginx, and the common UUID/hex conventions all stay well under 128 chars,
+// so the cap never rejects a legitimately stamped id.
+const maxInboundTraceIDLen = 128
+
+// acceptInboundTraceID reports whether an upstream X-Request-ID is safe to
+// propagate verbatim. We honour the de-facto correlation header but only
+// when it is non-empty, within the length cap, and free of control bytes
+// (so it cannot smuggle CR/LF into log records or downstream sinks even if
+// a future writer is less strict than net/http's header sanitiser). On
+// rejection the caller mints a fresh id instead.
+func acceptInboundTraceID(id string) bool {
+	if id == "" || len(id) > maxInboundTraceIDLen {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < 0x20 || id[i] == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 // withTraceID is an HTTP middleware (R247-ARCH-20, #677) that ensures
 // every request carries a trace id in its context and the response
 // echoes the same id back to the client.
@@ -20,11 +47,13 @@ const traceIDHeader = "X-Request-ID"
 // Behaviour:
 //
 //   - If the inbound request already has X-Request-ID set, we respect
-//     it (use case: load-balancer / sidecar already stamped one). An
-//     incoming id is treated as opaque — we do *not* validate the
-//     length / charset because we never reflect it into a query, only
-//     into a structured-log field and a response header that mirrors
-//     it byte-for-byte.
+//     it (use case: load-balancer / sidecar already stamped one) as long
+//     as it passes acceptInboundTraceID — non-empty, within
+//     maxInboundTraceIDLen, and free of control bytes. The id flows into
+//     a structured-log field and an echoed response header, so an
+//     oversized or control-byte-laden value would otherwise bloat every
+//     correlated log line or risk header/log smuggling. A rejected id is
+//     replaced with a freshly minted one.
 //   - Otherwise we mint a 16-hex-char id via ctxutil.NewTraceID.
 //   - The id is stamped into the request ctx so any downstream handler
 //     (or anything reachable through ctx) can call ctxutil.TraceID(ctx)
@@ -45,7 +74,7 @@ const traceIDHeader = "X-Request-ID"
 func withTraceID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get(traceIDHeader)
-		if id == "" {
+		if !acceptInboundTraceID(id) {
 			id = ctxutil.NewTraceID()
 		}
 		if id != "" {
