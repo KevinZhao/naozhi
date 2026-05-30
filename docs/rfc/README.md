@@ -16,6 +16,7 @@
 | [askuser-question.md](askuser-question.md) | Proposal | 2026-05-10 | CC `AskUserQuestion` 工具在 `-p` 模式下的替代交互方案 |
 | [auto-workspace-chain.md](auto-workspace-chain.md) | Draft v3（双独立评审通过） | 2026-05-23 | 同 workspace 多 session 自动接 prev_session_ids 让 dashboard 翻历史能跨 sessionID；启动一次性回填 + spawn 自动接，默认开启可配置 |
 | [attachment-refcount.md](attachment-refcount.md) | v1 MVP 已落地（GC cron 待启用） | 2026-05-10 | 大图跨 TTL 可见：attachment 引用计数与双 TTL GC |
+| [direct-user-settings.md](direct-user-settings.md) | Draft v2（architect 评审通过修订；security 评审中） | 2026-05-30 | naozhi spawn cc 改 `--setting-sources user` 直接加载 `~/.claude/settings.json`，删 override 副本 + env 白名单，使 naozhi cc 与命令行 cc 行为一致、单一配置源；保留 `applyClaudeEnvSettings`（父进程 Bedrock 鉴权）与 sysession Runner 的 `--setting-sources ""`（防 AutoTitler 死循环） |
 | [codex-backend.md](codex-backend.md) | 设计提案 Draft v1（未实测） | 2026-05-20 | OpenAI Codex CLI 作为第三个 backend：走 `codex app-server` JSON-RPC 2.0 over stdio（**非** `codex proto` / `exec --json` / `mcp-server`），新增 `protocol_codex.go` + `profile_codex.go` + `codexjsonl` 历史 source；待跑 Phase 0 V1-V12 实测后升 v2 |
 | [consumer-interfaces.md](consumer-interfaces.md) | Proposal v2 | 2026-05-11 | ARCH-CONSUMER-IF：dispatch/hub/upstream 以消费端小接口替换 `*session.Router` 具体指针（v1 因方法清单虚构已重写） |
 | [cron-v2-polish.md](cron-v2-polish.md) | 设计提案（未实现） | 2026-05-09 | Cron 面板 5 项增量打磨（name/jitter/missed/sort/next-run） |

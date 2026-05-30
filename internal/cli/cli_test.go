@@ -400,88 +400,60 @@ func TestClaudeProtocol_Init(t *testing.T) {
 	}
 }
 
-// TestClaudeProtocol_BuildArgs_RefreshSettings verifies BuildArgs invokes the
-// RefreshSettings hook and adopts its returned path. This is the spawn-time
-// refresh that lets edits to ~/.claude/settings.json reach dashboard / cron /
-// IM-spawned sessions without restarting naozhi.
-func TestClaudeProtocol_BuildArgs_RefreshSettings(t *testing.T) {
+// TestBuildArgs_SettingSourcesUser pins docs/rfc/direct-user-settings.md PR1:
+// naozhi-spawned cc loads ~/.claude/settings.json directly, so BuildArgs must
+// emit `--setting-sources user` (NOT the historical "") and must NOT inject a
+// `--settings <override>` file. On the old code this test fails (the value was
+// "" and an override path was appended); on the new code it passes.
+func TestBuildArgs_SettingSourcesUser(t *testing.T) {
 	t.Parallel()
-	calls := 0
-	p := &ClaudeProtocol{
-		SettingsFile:    "/old/path.json",
-		RefreshSettings: func() string { calls++; return "/new/path.json" },
-	}
+	p := &ClaudeProtocol{}
 	args := p.BuildArgs(SpawnOptions{})
 
-	if calls != 1 {
-		t.Fatalf("RefreshSettings called %d times, want 1", calls)
-	}
-	if p.SettingsFile != "/new/path.json" {
-		t.Errorf("SettingsFile = %q, want /new/path.json", p.SettingsFile)
-	}
-	var foundNew bool
+	var foundUser bool
 	for i, a := range args {
-		if a == "--settings" && i+1 < len(args) && args[i+1] == "/new/path.json" {
-			foundNew = true
+		if a == "--setting-sources" {
+			if i+1 >= len(args) {
+				t.Fatalf("--setting-sources has no value: %v", args)
+			}
+			if args[i+1] != "user" {
+				t.Errorf("--setting-sources = %q, want \"user\": %v", args[i+1], args)
+			}
+			foundUser = true
 		}
-		if a == "/old/path.json" {
-			t.Errorf("stale path leaked into argv: %v", args)
+		if a == "--settings" {
+			t.Errorf("BuildArgs must not inject --settings override file: %v", args)
 		}
 	}
-	if !foundNew {
-		t.Errorf("--settings /new/path.json missing from argv: %v", args)
+	if !foundUser {
+		t.Errorf("--setting-sources missing from argv: %v", args)
 	}
 }
 
-// TestClaudeProtocol_BuildArgs_RefreshSettings_EmptyKeepsPrior verifies the
-// "refresh failed" contract: when RefreshSettings returns "" (e.g. concurrent
-// rewriter made the read race), the prior SettingsFile must survive so
-// authentication keeps working with the last known-good override.
-func TestClaudeProtocol_BuildArgs_RefreshSettings_EmptyKeepsPrior(t *testing.T) {
+// TestClaudeProtocol_Clone_Independent verifies Clone returns a usable
+// ClaudeProtocol. The struct carries no per-spawn state any more (settings
+// plumbing was removed in direct-user-settings PR1) — it is an empty struct,
+// so a pointer-identity check is meaningless (Go may give all zero-size
+// allocations the same address). We only guard against Clone returning nil or
+// the wrong concrete type, and that the clone still builds the user-settings
+// argv.
+func TestClaudeProtocol_Clone_Independent(t *testing.T) {
 	t.Parallel()
-	p := &ClaudeProtocol{
-		SettingsFile:    "/known/good.json",
-		RefreshSettings: func() string { return "" },
+	src := &ClaudeProtocol{}
+	raw := src.Clone()
+	clone, ok := raw.(*ClaudeProtocol)
+	if !ok || clone == nil {
+		t.Fatalf("Clone returned %T (nil=%v), want non-nil *ClaudeProtocol", raw, clone == nil)
 	}
-	args := p.BuildArgs(SpawnOptions{})
-	if p.SettingsFile != "/known/good.json" {
-		t.Errorf("SettingsFile = %q, want /known/good.json", p.SettingsFile)
-	}
+	args := clone.BuildArgs(SpawnOptions{})
 	var found bool
 	for i, a := range args {
-		if a == "--settings" && i+1 < len(args) && args[i+1] == "/known/good.json" {
+		if a == "--setting-sources" && i+1 < len(args) && args[i+1] == "user" {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("known-good path missing from argv: %v", args)
-	}
-}
-
-// TestClaudeProtocol_Clone_PropagatesRefreshSettings ensures Clone copies the
-// refresher hook. wrapper.Spawn calls Clone to get an independent per-spawn
-// protocol; without propagation the cloned instance has no way to refresh and
-// silently regresses to the bug fixed here.
-func TestClaudeProtocol_Clone_PropagatesRefreshSettings(t *testing.T) {
-	t.Parallel()
-	calls := 0
-	src := &ClaudeProtocol{
-		SettingsFile:    "/initial.json",
-		RefreshSettings: func() string { calls++; return "/refreshed.json" },
-	}
-	clone := src.Clone().(*ClaudeProtocol)
-	if clone.RefreshSettings == nil {
-		t.Fatal("Clone dropped RefreshSettings")
-	}
-	_ = clone.BuildArgs(SpawnOptions{})
-	if calls != 1 {
-		t.Errorf("clone refresher not invoked, calls=%d", calls)
-	}
-	if clone.SettingsFile != "/refreshed.json" {
-		t.Errorf("clone SettingsFile = %q, want /refreshed.json", clone.SettingsFile)
-	}
-	if src.SettingsFile != "/initial.json" {
-		t.Errorf("source SettingsFile mutated by clone: %q", src.SettingsFile)
+		t.Errorf("clone BuildArgs missing --setting-sources user: %v", args)
 	}
 }
 

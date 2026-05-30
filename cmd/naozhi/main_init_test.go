@@ -101,7 +101,7 @@ func TestInitBackendWrappers_NoUsableBackend(t *testing.T) {
 			Backend: "ghost-backend-1",
 		},
 	}
-	bws, ok := initBackendWrappers(context.Background(), cfg, nil, "", func() string { return "" })
+	bws, ok := initBackendWrappers(context.Background(), cfg, nil)
 	if ok {
 		t.Fatalf("expected ok=false when every backend ID is unknown; got ok=true with Default=%v", bws.Default)
 	}
@@ -205,7 +205,7 @@ func TestInitBackendWrappers_DefaultIDPropagated(t *testing.T) {
 			Backend: "claude",
 		},
 	}
-	bws, _ := initBackendWrappers(context.Background(), cfg, nil, "", func() string { return "" })
+	bws, _ := initBackendWrappers(context.Background(), cfg, nil)
 	if bws.DefaultID != cfg.DefaultBackendID() {
 		t.Fatalf("DefaultID drift: helper=%q cfg.DefaultBackendID=%q",
 			bws.DefaultID, cfg.DefaultBackendID())

@@ -1,18 +1,23 @@
 // File: main_claude_settings.go
 //
-// Phase 5-prep / R-cmd-claude-settings-extract (2026-05-28):
-// 把 main.go 中"Claude settings 处理 + naozhi callback hook 滤镜"区段抽
-// 到独立文件。**纯物理切分，逐字保留原代码、零行为变化**。
+// Claude settings handling for the naozhi parent process.
 //
-// 抽出的内容（全部按 main.go line 53-452 原貌）：
+// docs/rfc/direct-user-settings.md PR1 (2026-05-30): naozhi-spawned cc now
+// loads ~/.claude/settings.json directly via `--setting-sources user`, so the
+// settings-override copy (writeClaudeSettingsOverride) and the naozhi-callback
+// hook filter (filterHooks / isNaozhiCallbackHook / sanitizeLogCmd / addrPort /
+// loopbackV4Re) were removed — hook feedback-loop protection lives at naozhi's
+// HTTP entry auth instead.
+//
+// What remains here is the **parent-process env injection** path (RFC §7.1),
+// which is independent of cc's --setting-sources and still required so naozhi
+// itself (transcribe → Bedrock) and the sysession Runner inherit the
+// settings.json env block:
 //   - claudeEnvAllowedPrefixes / awsEnvDenyList 白/黑名单
 //   - settingsErrSeverity enum + claudeSettingsErrSeverity 分类器
 //   - readClaudeSettingsRaw / readJSONWithRetry 文件读取（带重试）
 //   - filterClaudeEnv / matchesAnyPrefix 环境变量过滤
 //   - applyClaudeEnvSettings 父进程 env 注入（保留 shell 优先权）
-//   - writeClaudeSettingsOverride 生成 ~/.naozhi/claude-settings.json
-//   - addrPort / filterHooks / sanitizeLogCmd / loopbackV4Re /
-//     isNaozhiCallbackHook hook 回调滤镜
 package main
 
 import (
@@ -24,11 +29,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // claudeEnvAllowedPrefixes restricts which env vars from
@@ -143,12 +145,13 @@ func readJSONWithRetry(ctx context.Context, path string, attempts int, sleep tim
 // logged at WARN once per call so operators can spot a malicious or misconfigured
 // ~/.claude/settings.json.
 //
-// Used by both applyClaudeEnvSettings (parent-process env injection) and
-// writeClaudeSettingsOverride (child --settings file emission) so the two paths
-// can never disagree on which keys are propagated. Historically AWS_PROFILE
-// leaked into the override file (bypassing the parent deny list) and overrode
-// the proxy-based bedrock auth chain; routing both paths through this helper
-// closes that gap.
+// Used by applyClaudeEnvSettings (parent-process env injection). The
+// awsEnvDenyList guards naozhi's own AWS auth source (transcribe → Bedrock,
+// sysession Runner) against an auth-source override smuggled in via the
+// settings.json env block. cc child processes no longer go through this path:
+// post direct-user-settings PR1 they read settings.json directly via
+// `--setting-sources user`, so the parent-env view and the cc-env view of the
+// same settings.json may differ (RFC §7.1, documented intentional asymmetry).
 func filterClaudeEnv(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for k, v := range in {
@@ -212,220 +215,6 @@ func matchesAnyPrefix(s string, prefixes []string) bool {
 				return true
 			}
 		} else if s == p {
-			return true
-		}
-	}
-	return false
-}
-
-// writeClaudeSettingsOverride generates ~/.naozhi/claude-settings.json by copying
-// ~/.claude/settings.json verbatim, but filtering out only the hook entries that
-// would call back into naozhi (causing infinite loops). Safe hooks such as
-// formatters and linters are preserved as-is.
-//
-// Returns the file path on success. On transient read/parse failures (common when
-// Claude CLI is concurrently rewriting settings.json), RETAINS any existing
-// ~/.naozhi/claude-settings.json from a prior successful run instead of overwriting
-// it with `{}` — that empty file would strip the `env` block and break Bedrock auth
-// for every spawned CLI process (the whole reason for --setting-sources "").
-func writeClaudeSettingsOverride(ctx context.Context, serverAddr string) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	dir := filepath.Join(home, ".naozhi")
-	path := filepath.Join(dir, "claude-settings.json")
-
-	data, err := readClaudeSettingsRaw(ctx)
-	if err != nil {
-		// Read/parse failed. Do NOT overwrite an existing override — the last
-		// known-good copy still lets Claude CLI authenticate. Report via logs so
-		// the operator notices the degraded mode.
-		//
-		// R236-QA-13: file-missing is the normal first-run state and stays at
-		// Warn; corrupt-JSON / unreadable means somebody actively broke the
-		// settings file and gets logged at Error so it surfaces in alerting.
-		if errors.Is(err, fs.ErrNotExist) {
-			slog.Warn("read ~/.claude/settings.json: file missing; keeping previous override", "err", err)
-		} else {
-			slog.Error("read ~/.claude/settings.json: corrupt or unreadable; keeping previous override", "err", err)
-		}
-		if _, statErr := os.Stat(path); statErr == nil {
-			return path
-		}
-		// No prior override exists either. Fall through to writing an empty
-		// object so --settings has *something* to point at; Claude will then
-		// complain loudly ("Not logged in") and the log warn above is the clue.
-		data = []byte("{}")
-	}
-
-	var settings map[string]json.RawMessage
-	if err := json.Unmarshal(data, &settings); err != nil {
-		// data came from readClaudeSettingsRaw which validates JSON, so this
-		// path only fires on the {} fallback or a non-object top level.
-		settings = make(map[string]json.RawMessage)
-	}
-	if settings == nil {
-		settings = make(map[string]json.RawMessage)
-	}
-
-	port := addrPort(serverAddr)
-	if hooksRaw, ok := settings["hooks"]; ok {
-		settings["hooks"] = filterHooks(hooksRaw, port)
-	}
-
-	// Filter env section through the same allowlist+deny+value-safety check
-	// applied to the parent process. Without this, keys like AWS_PROFILE that
-	// applyClaudeEnvSettings refuses can still leak into spawned claude via the
-	// override file, silently overriding the proxy-based bedrock auth chain.
-	if envRaw, ok := settings["env"]; ok {
-		var envMap map[string]string
-		if err := json.Unmarshal(envRaw, &envMap); err == nil {
-			filtered := filterClaudeEnv(envMap)
-			if filteredRaw, err := json.Marshal(filtered); err == nil {
-				settings["env"] = filteredRaw
-			}
-		}
-	}
-
-	out, err := json.Marshal(settings)
-	if err != nil {
-		return ""
-	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return ""
-	}
-	// Atomic write: claude reads this file on startup; a truncated write
-	// could cause it to launch with empty config and disable hook filtering,
-	// risking feedback loops.
-	if err := osutil.WriteFileAtomic(path, out, 0600); err != nil {
-		return ""
-	}
-	return path
-}
-
-// addrPort extracts the port number string from a listen address like ":8180" or "0.0.0.0:8180".
-func addrPort(addr string) string {
-	if i := strings.LastIndex(addr, ":"); i >= 0 {
-		return addr[i+1:]
-	}
-	return addr
-}
-
-// filterHooks returns hooksRaw with any individual hook entries that would call back
-// into naozhi removed. It works at the entry level: a group loses only its dangerous
-// entries; if all entries in a group are removed the whole group is dropped.
-// If parsing fails, returns an empty hooks object to be safe.
-func filterHooks(hooksRaw json.RawMessage, serverPort string) json.RawMessage {
-	// hooks shape: map[eventName] → []{ "matcher":..., "hooks": []{ "type":..., "command":... } }
-	var byEvent map[string][]map[string]json.RawMessage
-	if err := json.Unmarshal(hooksRaw, &byEvent); err != nil {
-		empty, _ := json.Marshal(map[string]any{})
-		return empty
-	}
-
-	changed := false
-	for eventName, groups := range byEvent {
-		var keptGroups []map[string]json.RawMessage
-		for _, group := range groups {
-			entriesRaw, ok := group["hooks"]
-			if !ok {
-				keptGroups = append(keptGroups, group)
-				continue
-			}
-			var entries []map[string]json.RawMessage
-			if err := json.Unmarshal(entriesRaw, &entries); err != nil {
-				keptGroups = append(keptGroups, group)
-				continue
-			}
-			var safeEntries []map[string]json.RawMessage
-			for _, e := range entries {
-				var cmd string
-				if raw, ok := e["command"]; ok {
-					_ = json.Unmarshal(raw, &cmd)
-				}
-				if isNaozhiCallbackHook(cmd, serverPort) {
-					changed = true
-					slog.Info("dropping hook to prevent naozhi callback loop", "event", eventName, "command", sanitizeLogCmd(cmd))
-				} else {
-					safeEntries = append(safeEntries, e)
-				}
-			}
-			if len(safeEntries) == 0 {
-				changed = true
-				continue // drop group entirely
-			}
-			if len(safeEntries) != len(entries) {
-				changed = true
-				newRaw, err := json.Marshal(safeEntries)
-				if err != nil {
-					continue // skip corrupted group
-				}
-				group["hooks"] = newRaw
-			}
-			keptGroups = append(keptGroups, group)
-		}
-		byEvent[eventName] = keptGroups
-	}
-
-	if !changed {
-		return hooksRaw
-	}
-	out, _ := json.Marshal(byEvent)
-	return out
-}
-
-// sanitizeLogCmd scrubs control characters from a hook command string so
-// attacker-controlled content in ~/.claude/settings.json cannot inject fake
-// log lines (newlines, ANSI escapes) when log.format is text. Also truncates
-// to 80 chars so the log line stays readable.
-func sanitizeLogCmd(cmd string) string {
-	if len(cmd) > 80 {
-		cmd = cmd[:80] + "..."
-	}
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return '.'
-		}
-		return r
-	}, cmd)
-}
-
-// loopbackV4Re matches a 127/8 IPv4 dotted-quad followed by ":<port>" so a
-// substring like "version 127." or a hostname containing "foo127.example.com"
-// does not produce a false positive. The leading boundary requires a non-
-// digit / non-dot prefix (or the start of the string) so the digits cannot
-// be a tail of some other number. R236-QA-20 (#544).
-var loopbackV4Re = regexp.MustCompile(`(^|[^0-9a-z.])127\.\d{1,3}\.\d{1,3}\.\d{1,3}:`)
-
-// isNaozhiCallbackHook reports whether a hook command appears to call back into
-// naozhi's HTTP server (which would cause an infinite loop).
-// It matches: any mention of "naozhi", or an HTTP call to localhost/127.0.0.1 on
-// naozhi's listen port.
-func isNaozhiCallbackHook(cmd, port string) bool {
-	if cmd == "" {
-		return false
-	}
-	lower := strings.ToLower(cmd)
-	if strings.Contains(lower, "naozhi") {
-		return true
-	}
-	if port != "" {
-		for _, host := range []string{"localhost", "127.0.0.1", "0.0.0.0", "[::1]", "::1"} {
-			if strings.Contains(lower, host+":"+port) {
-				return true
-			}
-		}
-		// Match any 127.x.x.x:port address (entire 127/8 loopback block).
-		// R236-QA-20 (#544): the historical substring check
-		// `strings.Contains(lower, "127.")` produced false positives on any
-		// command containing the literal "127." even in unrelated contexts
-		// (e.g. "version 127." or hostnames such as "foo127.example.com")
-		// provided the same command also mentioned ":<port>" somewhere.
-		// The regex requires a real dotted-quad shape next to the port
-		// boundary so legitimate hooks survive while real loopback URLs
-		// keep firing.
-		if loopbackV4Re.MatchString(lower) && strings.Contains(lower, ":"+port) {
 			return true
 		}
 	}

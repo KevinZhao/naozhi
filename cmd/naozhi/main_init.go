@@ -72,8 +72,6 @@ func initBackendWrappers(
 	ctx context.Context,
 	cfg *config.Config,
 	shimMgr *shim.Manager,
-	settingsFile string,
-	refreshSettings func() string,
 ) (backendWrappers, bool) {
 	backendsCfg := cfg.EnabledBackends()
 	defaultBackend := cfg.DefaultBackendID()
@@ -98,10 +96,7 @@ func initBackendWrappers(
 				continue
 			}
 		}
-		proto := profile.NewProtocol(backend.ProtocolDeps{
-			SettingsFile:    settingsFile,
-			RefreshSettings: refreshSettings,
-		})
+		proto := profile.NewProtocol(backend.ProtocolDeps{})
 		// DEADCODE-6 / R241-ARCH-1: use NewWrapperLazy + Probe(ctx) so a hung
 		// `<cli> --version` cannot pin startup for the full 5 s when SIGTERM
 		// arrives mid-init. NewWrapper is the legacy synchronous form (still

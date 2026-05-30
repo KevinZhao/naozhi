@@ -250,32 +250,14 @@ func TestProfile_NewProtocol_Claude(t *testing.T) {
 			t.Fatal("claude profile NewProtocol is nil")
 		}
 
-		// Verify settings plumbing forwards through.
-		called := false
-		deps := ProtocolDeps{
-			SettingsFile: "/tmp/override.json",
-			RefreshSettings: func() string {
-				called = true
-				return "/tmp/refresh.json"
-			},
-		}
-		proto := p.NewProtocol(deps)
+		// direct-user-settings PR1: ProtocolDeps is empty (the settings
+		// override plumbing was removed; cc loads ~/.claude/settings.json
+		// directly via --setting-sources user). NewProtocol must still build
+		// a usable ClaudeProtocol from the empty deps.
+		proto := p.NewProtocol(ProtocolDeps{})
 
-		claudeProto, ok := proto.(*cli.ClaudeProtocol)
-		if !ok {
+		if _, ok := proto.(*cli.ClaudeProtocol); !ok {
 			t.Fatalf("claude NewProtocol returned %T; want *cli.ClaudeProtocol", proto)
-		}
-		if claudeProto.SettingsFile != "/tmp/override.json" {
-			t.Errorf("SettingsFile = %q; want %q", claudeProto.SettingsFile, "/tmp/override.json")
-		}
-		if claudeProto.RefreshSettings == nil {
-			t.Fatal("RefreshSettings was not propagated")
-		}
-		if got := claudeProto.RefreshSettings(); got != "/tmp/refresh.json" {
-			t.Errorf("RefreshSettings() = %q; want %q", got, "/tmp/refresh.json")
-		}
-		if !called {
-			t.Error("RefreshSettings closure was not invoked")
 		}
 		if proto.Name() != "stream-json" {
 			t.Errorf("claude protocol Name() = %q; want %q", proto.Name(), "stream-json")
@@ -293,10 +275,7 @@ func TestProfile_NewProtocol_Kiro(t *testing.T) {
 		}
 
 		// Kiro ignores ProtocolDeps but accept any value without panicking.
-		proto := p.NewProtocol(ProtocolDeps{
-			SettingsFile:    "/should/be/ignored.json",
-			RefreshSettings: func() string { return "ignored" },
-		})
+		proto := p.NewProtocol(ProtocolDeps{})
 
 		if _, ok := proto.(*cli.ACPProtocol); !ok {
 			t.Fatalf("kiro NewProtocol returned %T; want *cli.ACPProtocol", proto)
