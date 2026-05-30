@@ -6,6 +6,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/limits"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // coalescePrefix is the header injected before the burst-coalesced messages to
@@ -54,12 +55,14 @@ func CoalesceMessages(msgs []QueuedMsg) (string, []cli.ImageData) {
 		// Defense in depth: per-message cap is enforced at every ingress
 		// path (WS handleSend, HTTP dashboard_send, IM platform adapters),
 		// but if any new ingress ever skips the cap, this guard ensures a
-		// single oversized message cannot reach CLI stdin. Truncate at the
-		// byte boundary; a trailing partial UTF-8 rune is harmless to the
-		// CLI prompt. R61-GO-5.
+		// single oversized message cannot reach CLI stdin. Truncate at a
+		// rune boundary so we never emit a half UTF-8 codepoint (which
+		// json.Marshal would rewrite to U+FFFD, corrupting the last char).
+		// R61-GO-5 / R20260530-COR-4.
 		t := msgs[0].Text
 		if len(t) > maxCoalescedTextBytes {
-			t = t[:maxCoalescedTextBytes] + "\n[系统] 内容已截断。\n"
+			cut := textutil.TruncateAtRuneBoundary(t, maxCoalescedTextBytes)
+			t = t[:cut] + "\n[系统] 内容已截断。\n"
 		}
 		return t, msgs[0].Images
 	}

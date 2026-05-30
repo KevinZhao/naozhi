@@ -10,8 +10,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/session/agentlink"
 )
@@ -254,7 +255,20 @@ func (h *Handler) HandleToolResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := os.Stat(resolved)
+	// Open without following a final-component symlink so the bytes streamed
+	// below come from the same inode we validate via Fstat — closing the
+	// symlink-swap TOCTOU between EvalSymlinks and open. O_NOFOLLOW yields
+	// ELOOP on a swapped-in symlink; fold every open error (missing, ELOOP,
+	// IO) to 404 so "missing" and "escape attempt" look identical.
+	f, err := dashproject.OpenWorkspaceFile(resolved)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	// Fstat the fd so size/IsDir reflect the SAME inode we will read from,
+	// not a name that may have been swapped after EvalSymlinks.
+	info, err := f.Stat()
 	if err != nil || info.IsDir() {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -263,12 +277,6 @@ func (h *Handler) HandleToolResult(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	f, err := os.Open(resolved)
-	if err != nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	defer f.Close()
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")

@@ -568,5 +568,30 @@ func TestPassthrough_DeadProcess_FastReject(t *testing.T) {
 	}
 }
 
+// TestRemoveSlotByID_ZerosTail verifies R20260530-COR-3: after removing a slot
+// the now-unused tail element of the backing array is set to nil so the dropped
+// *sendSlot does not stay reachable until overwritten, while FIFO order of the
+// remaining slots is preserved.
+func TestRemoveSlotByID_ZerosTail(t *testing.T) {
+	s1 := &sendSlot{id: 1}
+	s2 := &sendSlot{id: 2}
+	s3 := &sendSlot{id: 3}
+	p := &Process{pendingSlots: []*sendSlot{s1, s2, s3}}
+
+	p.removeSlotByID(2) // remove from the middle
+
+	// FIFO order preserved among survivors.
+	if len(p.pendingSlots) != 2 || p.pendingSlots[0].id != 1 || p.pendingSlots[1].id != 3 {
+		t.Fatalf("pendingSlots = %+v, want ids [1 3]", p.pendingSlots)
+	}
+
+	// Tail of the backing array must be nil — inspect via reslice to the
+	// original capacity so the freed slot is observable.
+	full := p.pendingSlots[:cap(p.pendingSlots)]
+	if got := full[2]; got != nil {
+		t.Errorf("backing tail = %+v, want nil (dangling slot ref)", got)
+	}
+}
+
 // Silence unused imports when test file compiles without exercising them.
 var _ = net.Pipe

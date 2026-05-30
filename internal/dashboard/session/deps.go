@@ -6,7 +6,6 @@ package session
 
 import (
 	"net/http"
-	"net/url"
 
 	"github.com/naozhi/naozhi/internal/node"
 )
@@ -32,24 +31,4 @@ func strOrFallback(m map[string]any, key, fallback string) string {
 	}
 	v, _ := m[fallback].(string)
 	return v
-}
-
-// redactGitRemoteURL strips embedded userinfo (user:password@) from a git
-// remote URL. Phase 3e duplicated from internal/server/project_api.go's
-// redactGitRemoteURL — once Phase 2 (PR #1437) merges, the canonical home
-// becomes dashproject.RedactGitRemoteURL and this helper can be removed
-// in favour of an import. Until then, keeping a local copy avoids a
-// cross-PR circular dependency.
-func redactGitRemoteURL(raw string) string {
-	if raw == "" {
-		return ""
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme == "" {
-		return raw
-	}
-	if u.User != nil {
-		u.User = nil
-	}
-	return u.String()
 }

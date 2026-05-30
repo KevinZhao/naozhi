@@ -100,14 +100,15 @@ func (s *Source) LoadLatest(ctx context.Context, limit int) ([]cli.EventEntry, e
 // beforeMS (unix ms), in chronological order. Used by the dashboard
 // "load earlier" pagination path via MergedSource.LoadBefore.
 //
-// Implementation:
-//   - Read the idx sparse index and use it to seek near the target
-//     timestamp, avoiding a full-file scan for large logs.
-//   - Walk forward from the idx-seek point, decoding records and
-//     collecting those with Time < beforeMS until we have `limit`
-//     or exhaust the file.
-//   - If the idx seek produced more than `limit` candidates, truncate
-//     to the `limit` newest.
+// Implementation (current):
+//   - Full-scan via readAllEntries, then filter to records with
+//     Time < beforeMS and keep the `limit` newest. This is a plain
+//     linear pass over the whole log file — the same cost as
+//     LoadLatest — and is acceptable while logs are rotate-capped at
+//     ~100 MiB (< 200ms scan on ext4/gp3).
+//   - TODO: use the idx sparse index to seek near beforeMS and walk
+//     forward from there, avoiding the full-file scan on large logs.
+//     Tracked separately; not implemented here.
 //
 // beforeMS <= 0 is treated as "no upper bound" and falls through to
 // LoadLatest's behavior.
@@ -158,7 +159,13 @@ func (s *Source) readAllEntries(ctx context.Context) ([]cli.EventEntry, error) {
 	defer f.Close()
 
 	br := bufio.NewReaderSize(f, 64*1024)
-	var out []cli.EventEntry
+	// Pre-allocate to the in-memory ring upper bound so the per-record
+	// append loop (up to ~500 entries) avoids the repeated doubling
+	// reallocations of a nil-start slice. 512 ≈ persistedHistory ring cap
+	// (LoadLatest's limit ≈ 500); over-shooting reads still grow normally.
+	// R20260530-PERF-3.
+	const estEntries = 512
+	out := make([]cli.EventEntry, 0, estEntries)
 
 	for {
 		if err := ctx.Err(); err != nil {
