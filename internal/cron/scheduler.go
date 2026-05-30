@@ -333,9 +333,20 @@ type Scheduler struct {
 	// (multi-error contract). RFC cron-sysession-merge Phase E covers
 	// this within the larger dispatch unification — leaving #670 to
 	// land alongside that work rather than fragmenting the contract.
-	platforms     map[string]platform.Platform
-	agents        map[string]AgentOpts
-	agentCommands map[string]string
+	// R249-ARCH-27 (#991): platforms / agents / agentCommands are bundled
+	// behind a single atomic.Pointer[cronConfigMaps] instead of three bare
+	// map fields. They are write-once at NewScheduler today and read
+	// lock-free by notifyTarget / executeOpt; the prior shape leaned on a
+	// documentation-only "do not mutate in place" contract that a future
+	// dynamic-backend / hot-reload caller could silently break (data race
+	// vs the lock-free readers). Wrapping the trio in one immutable struct
+	// behind atomic.Pointer pre-pays that retrofit: a hot-reload writer
+	// Store()s a freshly built *cronConfigMaps (copy-on-write) while readers
+	// Load() a consistent snapshot of all three maps together — no torn read
+	// across the platforms/agents/agentCommands boundary, no per-field lock.
+	// Until that writer lands the pointer is set once and never swapped, so
+	// the runtime cost is one extra pointer indirection on the read path.
+	configMapsPtr atomic.Pointer[cronConfigMaps]
 	storePath     string
 	maxJobs       int
 	// maxJobsPerChat is the resolved per-chat cap: SchedulerConfig
@@ -869,6 +880,39 @@ func (cfg *SchedulerConfig) resolveAllowedRoot() string {
 	return ""
 }
 
+// cronConfigMaps bundles the three write-once-then-immutable config maps so
+// a single atomic.Pointer can publish them as one consistent snapshot (see
+// the configMapsPtr field godoc, R249-ARCH-27 / #991): readers Load() the
+// pointer and treat the maps as read-only; a future hot-reload writer
+// rebuilds a fresh *cronConfigMaps (copy-on-write) and Store()s it, so no
+// reader ever observes a torn cross-map state and no per-field lock is
+// needed.
+type cronConfigMaps struct {
+	platforms     map[string]platform.Platform
+	agents        map[string]AgentOpts
+	agentCommands map[string]string
+}
+
+// emptyConfigMaps is the non-nil zero-value snapshot returned by
+// configMaps() for a hand-constructed *Scheduler (test fixtures) that never
+// Store()d a pointer. All three maps are nil; indexing a nil map is a safe
+// zero-value read, exactly mirroring the prior bare-nil-field semantics so
+// callers like notifyTarget keep working without a NewScheduler round-trip.
+var emptyConfigMaps = &cronConfigMaps{}
+
+// configMaps returns the current immutable config-map snapshot. Never nil:
+// NewScheduler always Store()s a populated *cronConfigMaps; a *Scheduler
+// built directly via &Scheduler{} (tests) gets emptyConfigMaps so the
+// lock-free readers (notifyTarget / executeOpt) never nil-deref. The maps
+// inside may be nil when the caller omitted them — maps.Clone(nil) == nil —
+// but indexing a nil map is a safe zero-value read.
+func (s *Scheduler) configMaps() *cronConfigMaps {
+	if cm := s.configMapsPtr.Load(); cm != nil {
+		return cm
+	}
+	return emptyConfigMaps
+}
+
 func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	// R20260526-GO-023 / R241-ARCH-6 (#510): surface missing router wiring
 	// at construction so the misconfiguration shows up at boot rather than
@@ -937,24 +981,21 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		chatJobCount: make(map[chatJobKey]int),
 		jobsByChat:   make(map[chatJobKey][]*Job),
 		router:       cfg.Router,
-		// R241-ARCH-3 (#506): platforms / agents / agentCommands are documented
-		// as immutable after NewScheduler so notifyTarget + executeOpt can
-		// read them lock-free, but the constructor previously aliased the
-		// caller-supplied maps verbatim — leaving the immutability contract
-		// dependent on the caller's discipline. A late-binding wireup that
-		// re-assigned cfg.Platforms[plat] (legitimate at boot, dangerous
-		// post-Start) would race the lock-free reads in cron-package hot
-		// paths. maps.Clone severs the alias at construction so the
-		// post-Start contract is enforced by the receiver, not by caller
-		// trust. Cost: O(N) copy at construction (N ≤ 8 backends, ≤ 32
-		// agents, ≤ 32 commands in production); zero runtime overhead since
-		// the cron-package readers see the same map shape they always did.
-		// maps.Clone returns nil for nil input so callers that omit any of
-		// these fields (test fixtures, narrow integration tests) keep the
-		// prior nil-map semantics.
-		platforms:      maps.Clone(cfg.Platforms),
-		agents:         maps.Clone(cfg.Agents),
-		agentCommands:  maps.Clone(cfg.AgentCommands),
+		// R241-ARCH-3 (#506) + R249-ARCH-27 (#991): platforms / agents /
+		// agentCommands are documented as immutable after NewScheduler so
+		// notifyTarget + executeOpt can read them lock-free. The constructor
+		// previously aliased the caller-supplied maps verbatim — leaving the
+		// immutability contract dependent on the caller's discipline. A
+		// late-binding wireup that re-assigned cfg.Platforms[plat]
+		// (legitimate at boot, dangerous post-Start) would race the lock-free
+		// reads in cron-package hot paths. maps.Clone severs the alias at
+		// construction so the contract is enforced by the receiver, not by
+		// caller trust; the cloned trio is then published as one immutable
+		// *cronConfigMaps via configMapsPtr.Store below so readers Load() a
+		// consistent cross-map snapshot. maps.Clone returns nil for nil input
+		// so callers that omit any of these fields (test fixtures, narrow
+		// integration tests) keep the prior nil-map semantics — indexing a
+		// nil map is a safe zero-value read.
 		storePath:      cfg.StorePath,
 		maxJobs:        cfg.MaxJobs,
 		maxJobsPerChat: maxPerChat,
@@ -983,6 +1024,16 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	// hot path in marshalJobsLocked finds defaultMarshalJobs instead of
 	// nil. Tests swap a failing stub via withFailingMarshal.
 	s.marshalJobs.Store(&defaultMarshalJobs)
+	// R249-ARCH-27 (#991): publish the cloned config maps as one immutable
+	// snapshot. maps.Clone severs the alias to the caller-supplied maps so
+	// post-Start mutation of cfg.* cannot race the lock-free readers; the
+	// atomic.Pointer makes a future hot-reload swap race-free without
+	// retrofitting every read site. Set once here, never swapped today.
+	s.configMapsPtr.Store(&cronConfigMaps{
+		platforms:     maps.Clone(cfg.Platforms),
+		agents:        maps.Clone(cfg.Agents),
+		agentCommands: maps.Clone(cfg.AgentCommands),
+	})
 	// R20260527-GO-1: install the broadcaster via atomic.Pointer so
 	// later SetTelemetry calls are race-free vs the cron-dispatch read
 	// path in emitRunStarted / emitRunEnded. nil cfg.Telemetry leaves

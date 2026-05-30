@@ -91,9 +91,10 @@ func TestR250CR18_NotifyTargetAbortsOnFirstChunkFailure(t *testing.T) {
 	// Force SplitText to chop the input into many chunks by setting maxLen to
 	// 8 chars and supplying ~80 chars of distinct ASCII so chunks > 1.
 	fp := &fakePartialPlatform{failAt: 2, maxLen: 8}
-	s := &Scheduler{
+	s := &Scheduler{}
+	s.configMapsPtr.Store(&cronConfigMaps{
 		platforms: map[string]platform.Platform{"fake-notify": fp},
-	}
+	})
 	// 80 chars of ASCII -> SplitText with maxLen=8 yields 10 chunks. Even if
 	// SplitText changes behaviour, we only need >= 4 chunks to make the
 	// abort assertion meaningful (failAt=2 + abort means total Reply calls
@@ -120,9 +121,10 @@ func TestR250CR18_NotifyTargetAbortsOnFirstChunkFailure(t *testing.T) {
 func TestR249CR26_NotifyTargetPartialMetric(t *testing.T) {
 	before := metrics.CronNotifyPartialTotal.Value()
 	fp := &fakePartialPlatform{failAt: 2, maxLen: 8}
-	s := &Scheduler{
+	s := &Scheduler{}
+	s.configMapsPtr.Store(&cronConfigMaps{
 		platforms: map[string]platform.Platform{"fake-notify": fp},
-	}
+	})
 	long := buildDistinctChunks(10, 8)
 	s.notifyTarget("fake-notify", "chat-x", long)
 	if delta := metrics.CronNotifyPartialTotal.Value() - before; delta < 1 {
@@ -141,9 +143,10 @@ func TestR250CR18_NotifyTargetAllSucceedSendsAll(t *testing.T) {
 	t.Parallel()
 	// failAt larger than chunk count -> never fails.
 	fp := &fakePartialPlatform{failAt: 1000, maxLen: 8}
-	s := &Scheduler{
+	s := &Scheduler{}
+	s.configMapsPtr.Store(&cronConfigMaps{
 		platforms: map[string]platform.Platform{"fake-notify": fp},
-	}
+	})
 	// 3 chunks stays comfortably under cronNotifyMaxChunks (=5).
 	long := buildDistinctChunks(3, 8)
 	s.notifyTarget("fake-notify", "chat-x", long)

@@ -153,6 +153,41 @@ func TestEventLog_SinkFires_AppendBatch(t *testing.T) {
 	}
 }
 
+// TestEventLog_AppendBatchReplay_NeverPersistsAfterSinkReady is the
+// R20260530-COR-1 (#1482) regression: a late AppendBatchReplay that runs
+// AFTER the persist sink has flipped sinkReady=true (reconnect/reattach
+// ordering) must NOT push the replayed historical entries to the sink.
+// Doing so would re-persist already-written JSONL turns. The replay
+// contract is gated on isReplay, independent of sinkReady.
+func TestEventLog_AppendBatchReplay_NeverPersistsAfterSinkReady(t *testing.T) {
+	l := NewEventLog(16)
+	c := &captureSink{}
+	// Sink attached and ready (sinkReady=true).
+	l.SetPersistSink(c.asSink())
+	// Replay historical entries — this simulates a late InjectHistory after
+	// the persister already flipped sinkReady=true.
+	l.AppendBatchReplay([]EventEntry{
+		{Type: "user", Summary: "old-1"},
+		{Type: "text", Summary: "old-2"},
+	})
+	if c.batchCount() != 0 {
+		batch, replay, _ := c.lastBatch()
+		t.Fatalf("replay batch leaked to persist sink: calls=%d batch=%+v replayPhase=%v", c.batchCount(), batch, replay)
+	}
+	// A subsequent live AppendBatch must still persist normally.
+	l.AppendBatch([]EventEntry{{Type: "user", Summary: "live"}})
+	if c.batchCount() != 1 {
+		t.Fatalf("live batch after replay should persist exactly once, got %d calls", c.batchCount())
+	}
+	batch, replay, _ := c.lastBatch()
+	if replay {
+		t.Errorf("live batch tagged replayPhase=true")
+	}
+	if len(batch) != 1 || batch[0].Summary != "live" {
+		t.Errorf("live batch corrupted: %+v", batch)
+	}
+}
+
 // TestEventLog_ReplayPhase_WithoutSink: calls before SetPersistSink
 // don't fire the sink at all (sink Load returns nil). This is the
 // SetPersistSink-ordering contract's positive path.

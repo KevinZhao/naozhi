@@ -211,6 +211,21 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	//   - jobPersistOK=true（Job 端写盘成功；否则 disk-divergence 风险）
 	//   - runStore 启用
 	//
+	// R249-ARCH-28 (#992) 两步写盘的崩溃语义（非事务，无法在文件化存储下
+	// 做真原子，故此处明确契约 + 由 TestPersistOrdering_RunsNeverDivergeAheadOfJob
+	// 钉死）：
+	//   1. recordTerminalResult 先把 Job 字段（含 LastSessionID）写入
+	//      cron_jobs.json，成功才返回 jobPersistOK=true。
+	//   2. 仅当 jobPersistOK=true 才调用 runStore.Append 写
+	//      runs/<jobID>/<runID>.json。
+	// 这把 divergence 钳到唯一一个安全方向——崩溃只可能发生在 (1) 成功、
+	// (2) 尚未落盘之间，结果是「cron_jobs.json 的 RunCounters/LastSessionID
+	// 领先一条，runs/ 缺最新一条」。dashboard list 读 Job 字段、timeline 读
+	// CronRun：此方向下 list 可能多报一次成功而 timeline 暂缺该行，是
+	// over-report（可观测、可自愈：下次 run 重新对齐），而非 under-report。
+	// 反方向（runs/ 有记录但 Job 端无对应计数）在结构上不可能发生——Append
+	// 被 jobPersistOK gate 卡死，绝不先于 Job 持久化执行。
+	//
 	// R250-SEC-5 (#1094): a.prompt is the snapshot Job.Prompt at execute
 	// time. New jobs flow through containsCronUnsafe / validateCronPrompt
 	// at the dashboard / IM write edge AND a defence-in-depth scan inside
