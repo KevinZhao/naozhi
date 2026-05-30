@@ -33,7 +33,6 @@ package cron
 
 import (
 	"strings"
-	"unicode"
 )
 
 // secretPrefix names the well-known token prefixes redactSecretsInResult
@@ -138,14 +137,23 @@ func redactSecretsInResult(s string) string {
 // isSecretTokenByte reports whether b is a legal continuation byte of a
 // secret tail. Tokens we redact are alphanumerics + `-` + `_`; anything
 // else (whitespace, punctuation, control) terminates the run.
+//
+// All accepted bytes are ASCII, so the check is a set of direct byte-range
+// comparisons. The earlier form converted to rune and called
+// unicode.IsDigit, which does a range-table lookup — pure overhead on a
+// per-byte scan that runs over every cron Result on every tick (this is
+// the inner loop of redactSecretsInResult). Behaviour is identical:
+// unicode.IsDigit only returns true for ASCII '0'..'9' here because the
+// input is a single byte (r < 256) and the only digit code points below
+// 256 are the ASCII digits. R260528-PERF-25 (#1361) adjacent io/scan hot
+// path.
 func isSecretTokenByte(b byte) bool {
-	r := rune(b)
 	switch {
-	case unicode.IsDigit(r):
+	case b >= '0' && b <= '9':
 		return true
-	case r >= 'a' && r <= 'z':
+	case b >= 'a' && b <= 'z':
 		return true
-	case r >= 'A' && r <= 'Z':
+	case b >= 'A' && b <= 'Z':
 		return true
 	case b == '-' || b == '_':
 		return true
