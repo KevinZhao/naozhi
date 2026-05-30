@@ -1698,6 +1698,20 @@ type slogPrintfLogger struct{}
 const cronPanicMarker = "panic"
 
 func (slogPrintfLogger) Printf(format string, args ...any) {
+	// R249-PERF-10 (#931): gate on slog.Enabled before paying for
+	// fmt.Sprintf + strings.TrimRight + strings.Contains. Every line this
+	// logger emits lands at Warn or Error (see type godoc + cronPanicMarker
+	// branch below), so if the handler discards Warn it also discards Error's
+	// less-severe sibling only when Warn>Error in ordering — which it is NOT:
+	// slog levels order Error(8) > Warn(4). The minimum level we ever emit is
+	// Warn, so when Warn is disabled the Error branch can still fire; we
+	// therefore bail only when BOTH are disabled. In the common production
+	// case (handler at Info/Warn) this is a no-op gate; under a handler raised
+	// above Error it skips the per-line formatting churn entirely.
+	if !slog.Default().Enabled(context.Background(), slog.LevelWarn) &&
+		!slog.Default().Enabled(context.Background(), slog.LevelError) {
+		return
+	}
 	// R250-CR-15 (#1148): skip fmt.Sprintf when there are no args. Saves
 	// an alloc per emitted line and avoids passing untrusted format
 	// verbs through the formatter (robfig/cron's PrintfLogger.Error and
