@@ -211,6 +211,16 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	//   - jobPersistOK=true（Job 端写盘成功；否则 disk-divergence 风险）
 	//   - runStore 启用
 	//
+	// R249-ARCH-28 (#992): cron_jobs.json (Job.LastSessionID/LastResult) 与
+	// runs/<jobID>/<runID>.json 是两条独立写路径，二者之间没有真正的事务。
+	// 这里用 jobPersistOK 把 CronRun Append gate 在 Job 端写盘成功之后——
+	// Job 端失败时 recordTerminalResult 已回滚内存字段并返回 false，于是
+	// 这条 run 既不进 cron_jobs.json 也不进 runs/ tree，timeline 与 list
+	// 同步缺失而非 diverge。仍存在的窗口：Job 端写盘成功、进程在 Append
+	// 之前 crash——此时 cron_jobs.json 领先 runs/ 一条；这是"同步可见或
+	// Job 端领先"的弱保证，已由 TestR249ARCH28_FinishRunNoRunRecordOn
+	// JobPersistFailure 钉住 gate 行为。真正的两步事务抽象留待 needs-design。
+	//
 	// R250-SEC-5 (#1094): a.prompt is the snapshot Job.Prompt at execute
 	// time. New jobs flow through containsCronUnsafe / validateCronPrompt
 	// at the dashboard / IM write edge AND a defence-in-depth scan inside
