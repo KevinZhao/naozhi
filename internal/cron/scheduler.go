@@ -1090,7 +1090,21 @@ func (s *Scheduler) StartedAt() time.Time {
 // runner). The CAS guard runs *before* startedAtNanos.Store so a
 // double-Start does not reshape the missed-schedule suppression
 // window mid-flight.
+//
+// R249-ARCH-19 (#984): a Scheduler is single-use — Stop() cancels
+// stopCtx and drains the worker goroutines but does NOT reset the
+// `started` latch, so a Start() after Stop() previously slid through
+// the `started.CompareAndSwap(false, true)` failure branch and returned
+// nil. That silently signalled "started OK" to the caller while the
+// runner stayed dead (cron.Start was never re-invoked, stopCtx is
+// already cancelled so every dispatch short-circuits). Reject the
+// Stop-then-Start sequence explicitly: a `stopped` Scheduler returns an
+// error so the operator sees the misuse instead of a phantom-running
+// instance. Construct a fresh Scheduler to restart.
 func (s *Scheduler) Start() error {
+	if s.stopped.Load() {
+		return fmt.Errorf("cron scheduler: Start after Stop; construct a new Scheduler to restart")
+	}
 	if !s.started.CompareAndSwap(false, true) {
 		return nil
 	}
