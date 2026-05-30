@@ -338,19 +338,40 @@ func (t *agentTailer) finalize(status string) {
 			status = "completed"
 		}
 		m := meta
+		metaMsg := node.ServerMsg{
+			Type:      "agent_meta",
+			Key:       t.key,
+			TaskID:    t.taskID,
+			AgentMeta: &m,
+		}
+		doneMsg := node.ServerMsg{
+			Type:   "agent_done",
+			Key:    t.key,
+			TaskID: t.taskID,
+			Status: status,
+		}
+		// Mirror pollOnce: for a multi-tab fan-out marshal each terminal
+		// frame once and SendRaw, rather than paying the json.Marshal
+		// reflect cost per subscriber. The single-subscriber case keeps the
+		// SendJSON shortcut; a marshal error falls back to per-sub SendJSON.
+		if len(subs) == 1 {
+			subs[0].SendJSON(metaMsg)
+			subs[0].SendJSON(doneMsg)
+			return
+		}
+		metaData, metaErr := marshalPooled(metaMsg)
+		doneData, doneErr := marshalPooled(doneMsg)
 		for _, c := range subs {
-			c.SendJSON(node.ServerMsg{
-				Type:      "agent_meta",
-				Key:       t.key,
-				TaskID:    t.taskID,
-				AgentMeta: &m,
-			})
-			c.SendJSON(node.ServerMsg{
-				Type:   "agent_done",
-				Key:    t.key,
-				TaskID: t.taskID,
-				Status: status,
-			})
+			if metaErr != nil {
+				c.SendJSON(metaMsg)
+			} else {
+				c.SendRaw(metaData)
+			}
+			if doneErr != nil {
+				c.SendJSON(doneMsg)
+			} else {
+				c.SendRaw(doneData)
+			}
 		}
 	})
 }

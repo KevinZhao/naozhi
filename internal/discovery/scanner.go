@@ -419,15 +419,21 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 		// window, which is the bug this guard fixes. The grace window keeps
 		// genuinely-fresh CLI starts (claude /, sdk-cli) visible during the
 		// 1-2 s before they flush their first message to disk.
-		jsonlPath := findJSONLPath(claudeDir, sf.CWD, sf.SessionID)
-		if jsonlPath == "" {
+		// One Stat answers both the no-JSONL grace gate (existence) and
+		// lastActive (mtime). Previously findJSONLPath + jsonlMtime Stat'd
+		// the same path twice per candidate. lastActive falls back to the
+		// process start time when no JSONL exists yet, matching jsonlMtime.
+		jsonlPath := filepath.Join(claudeDir, "projects", projDirName(sf.CWD), sf.SessionID+".jsonl")
+		la := sf.StartedAt
+		if fi, err := os.Stat(jsonlPath); err != nil {
 			startedAt := time.UnixMilli(sf.StartedAt)
 			if !startedAt.IsZero() && time.Since(startedAt) > noJSONLGrace {
 				continue
 			}
+		} else {
+			la = fi.ModTime().UnixMilli()
 		}
 
-		la := jsonlMtime(claudeDir, sf.CWD, sf.SessionID, sf.StartedAt)
 		candidates = append(candidates, scanCandidate{sf: sf, lastActive: la})
 	}
 
@@ -689,10 +695,11 @@ type sessionsIndexEntry struct {
 // extractLastPrompt reads the JSONL file backwards to find the last user message.
 // Results are cached by (path, mtime) to avoid re-reading 512KB every scan cycle.
 func (s *Scanner) extractLastPrompt(claudeDir, cwd, sessionID string) string {
-	path := findJSONLPath(claudeDir, cwd, sessionID)
-	if path == "" {
-		return ""
-	}
+	// Single Stat resolves both existence and mtime. Previously this went
+	// through findJSONLPath (one Stat to confirm the file exists) and then
+	// immediately Stat'd the same path again for the cache key — two
+	// syscalls on one path per candidate, every scan cycle.
+	path := filepath.Join(claudeDir, "projects", projDirName(cwd), sessionID+".jsonl")
 	fi, err := os.Stat(path)
 	if err != nil {
 		return ""

@@ -424,6 +424,66 @@ func TestMarshalStdoutLine_WireEquivalent(t *testing.T) {
 	}
 }
 
+// TestMarshalReplayLine_WireEquivalent mirrors the stdout fast-path guard for
+// the reconnect replay frame: MarshalReplayLine must be byte-identical to the
+// generic MarshalLine() path so the replaying client decodes it the same as a
+// string-copied frame would.
+func TestMarshalReplayLine_WireEquivalent(t *testing.T) {
+	cases := []struct {
+		name string
+		seq  int64
+		line string
+	}{
+		{"ascii", 1, `{"type":"assistant","text":"hello"}`},
+		{"escaped", 42, "line with \"quote\" and \\ backslash and \nnewline"},
+		{"utf8", 99, `{"text":"中文 🚀 ñ"}`},
+		{"empty", 7, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fast, err := MarshalReplayLine(tc.seq, []byte(tc.line))
+			if err != nil {
+				t.Fatalf("MarshalReplayLine err: %v", err)
+			}
+			ref := ServerMsg{Type: "replay", Seq: tc.seq, Line: tc.line}
+			slow, err := ref.MarshalLine()
+			if err != nil {
+				t.Fatalf("MarshalLine err: %v", err)
+			}
+			if string(fast) != string(slow) {
+				t.Fatalf("wire mismatch:\n fast=%q\n slow=%q", fast, slow)
+			}
+			parsed, err := ParseServerMsg(fast)
+			if err != nil {
+				t.Fatalf("ParseServerMsg: %v", err)
+			}
+			if parsed.Type != "replay" || parsed.Seq != tc.seq || parsed.Line != tc.line {
+				t.Fatalf("roundtrip mismatch: got %+v want seq=%d line=%q",
+					parsed, tc.seq, tc.line)
+			}
+		})
+	}
+}
+
+// TestMarshalReplayLine_NoBufferAlias guards the same aliasing contract as the
+// stdout counterpart: the returned frame must not retain a pointer into the
+// caller's `line` buffer.
+func TestMarshalReplayLine_NoBufferAlias(t *testing.T) {
+	line := []byte(`{"k":"v"}`)
+	data, err := MarshalReplayLine(5, line)
+	if err != nil {
+		t.Fatalf("MarshalReplayLine err: %v", err)
+	}
+	snapshot := append([]byte(nil), data...)
+	for i := range line {
+		line[i] = 'X'
+	}
+	if string(data) != string(snapshot) {
+		t.Fatalf("wire frame aliased into caller buffer:\n before=%q\n after =%q",
+			snapshot, data)
+	}
+}
+
 // TestMarshalStdoutLine_NoBufferAlias guards the unsafe.String aliasing
 // contract: MarshalStdoutLine must NOT return a slice that retains a
 // pointer into the caller's `line` buffer. Otherwise mutating `line`
