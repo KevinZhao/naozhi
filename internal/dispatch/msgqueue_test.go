@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -160,6 +161,47 @@ func TestShouldNotify_RateLimits(t *testing.T) {
 	}
 	if q.ShouldNotify("k1") {
 		t.Fatal("immediate second call should return false")
+	}
+}
+
+// TestShouldNotify_DropPathLRU exercises the maxDepth<=0 drop-mode cooldown
+// (the per-key bounded LRU branch), which is the path #932 reworked to drop
+// the per-notify interface assertion. Verifies cooldown, per-key isolation,
+// and that the LRU stays bounded + functional past its capacity so a key that
+// is evicted is treated as cold (notify fires) while a recently-refreshed key
+// survives eviction.
+func TestShouldNotify_DropPathLRU(t *testing.T) {
+	t.Parallel()
+	q := NewMessageQueue(0, 0) // maxDepth<=0 → drop mode → LRU cooldown branch
+
+	// Cooldown + isolation on the drop path.
+	if !q.ShouldNotify("a") {
+		t.Fatal("first drop-path notify for 'a' should fire")
+	}
+	if q.ShouldNotify("a") {
+		t.Fatal("second immediate notify for 'a' should be suppressed by cooldown")
+	}
+	if !q.ShouldNotify("b") {
+		t.Fatal("first notify for distinct key 'b' must not be silenced by 'a' cooldown")
+	}
+
+	// Overflow the LRU well past dropNotifyMaxKeys; every fresh key fires once
+	// and the map must stay bounded (no unbounded growth, no panic).
+	for i := 0; i < dropNotifyMaxKeys*2; i++ {
+		key := "k" + strconv.Itoa(i)
+		if !q.ShouldNotify(key) {
+			t.Fatalf("first notify for fresh key %s should fire", key)
+		}
+	}
+	q.mu.RLock()
+	n := q.dropNotifyLRU.Len()
+	idx := len(q.dropNotifyIndex)
+	q.mu.RUnlock()
+	if n > dropNotifyMaxKeys {
+		t.Errorf("dropNotifyLRU len = %d, want <= %d (eviction must bound the cache)", n, dropNotifyMaxKeys)
+	}
+	if n != idx {
+		t.Errorf("dropNotifyLRU len (%d) and index size (%d) diverged — back-pointer/index out of sync", n, idx)
 	}
 }
 

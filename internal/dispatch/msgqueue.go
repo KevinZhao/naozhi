@@ -196,14 +196,19 @@ type MessageQueue struct {
 	// recent insertion/update; back holds the least recent. This yields O(1)
 	// insert, refresh, and evict — critical since ShouldNotify runs under
 	// mu on the IM hot path.
-	dropNotifyLRU   *list.List               // element.Value = *dropNotifyEntry
-	dropNotifyIndex map[string]*list.Element // key → list element
+	dropNotifyLRU   *list.List                  // ordering only; element.Value = *dropNotifyEntry
+	dropNotifyIndex map[string]*dropNotifyEntry // key → entry (entry.elem points back into the list)
 }
 
-// dropNotifyEntry is a single LRU entry: key + last notify nanos.
+// dropNotifyEntry is a single LRU entry: key + last notify nanos. It also holds
+// its own *list.Element so the hot ShouldNotify path can read ts and run
+// MoveToFront/Remove without the `elem.Value.(*dropNotifyEntry)` interface
+// assertion that the previous map[string]*list.Element layout forced on every
+// drop-mode notify under q.mu. R249-PERF-12 (#932).
 type dropNotifyEntry struct {
-	key string
-	ts  int64
+	key  string
+	ts   int64
+	elem *list.Element // back-pointer into dropNotifyLRU for O(1) move/remove
 }
 
 // dropNotifyMaxKeys bounds dropNotifyTimes; oldest entry is evicted on insert
@@ -225,7 +230,7 @@ func NewMessageQueueWithMode(maxDepth int, collectDelay time.Duration, mode Queu
 		collectDelay:    collectDelay,
 		mode:            mode,
 		dropNotifyLRU:   list.New(),
-		dropNotifyIndex: make(map[string]*list.Element),
+		dropNotifyIndex: make(map[string]*dropNotifyEntry),
 	}
 }
 
@@ -347,8 +352,8 @@ func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 		// first interrupt of the next turn.
 		sq.interruptRequested = false
 		delete(q.queues, key)
-		if elem, ok := q.dropNotifyIndex[key]; ok {
-			q.dropNotifyLRU.Remove(elem)
+		if entry, ok := q.dropNotifyIndex[key]; ok {
+			q.dropNotifyLRU.Remove(entry.elem)
 			delete(q.dropNotifyIndex, key)
 		}
 		return nil
@@ -386,8 +391,8 @@ func (q *MessageQueue) Discard(key string) {
 	// (chat entered via /new after being idle for >3s) would otherwise keep
 	// its stale timestamp and silence the first legitimate notify after
 	// Discard. Safe to delete even if no entry exists.
-	if elem, ok := q.dropNotifyIndex[key]; ok {
-		q.dropNotifyLRU.Remove(elem)
+	if entry, ok := q.dropNotifyIndex[key]; ok {
+		q.dropNotifyLRU.Remove(entry.elem)
 		delete(q.dropNotifyIndex, key)
 	}
 }
@@ -403,8 +408,8 @@ func (q *MessageQueue) Cleanup(key string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	delete(q.queues, key)
-	if elem, ok := q.dropNotifyIndex[key]; ok {
-		q.dropNotifyLRU.Remove(elem)
+	if entry, ok := q.dropNotifyIndex[key]; ok {
+		q.dropNotifyLRU.Remove(entry.elem)
 		delete(q.dropNotifyIndex, key)
 	}
 }
@@ -465,8 +470,9 @@ func (q *MessageQueue) ShouldNotify(key string) bool {
 			q.mu.RUnlock()
 			return false
 		}
-	} else if elem, ok := q.dropNotifyIndex[key]; ok {
-		entry := elem.Value.(*dropNotifyEntry)
+	} else if entry, ok := q.dropNotifyIndex[key]; ok {
+		// No interface assertion: dropNotifyIndex now maps straight to
+		// *dropNotifyEntry (#932), so the cooldown read is a plain field load.
 		if delta := now - entry.ts; delta >= 0 && delta < cooldown {
 			q.mu.RUnlock()
 			return false
@@ -490,26 +496,30 @@ func (q *MessageQueue) ShouldNotify(key string) bool {
 		return true
 	}
 	// No queue entry — per-key cooldown via bounded LRU.
-	if elem, ok := q.dropNotifyIndex[key]; ok {
-		entry := elem.Value.(*dropNotifyEntry)
+	if entry, ok := q.dropNotifyIndex[key]; ok {
 		if delta := now - entry.ts; delta >= 0 && delta < cooldown {
 			return false
 		}
 		entry.ts = now
-		// Refresh LRU ordering — most-recently used to front.
-		q.dropNotifyLRU.MoveToFront(elem)
+		// Refresh LRU ordering — most-recently used to front. Uses the
+		// entry's own back-pointer so we skip the elem.Value type assertion.
+		q.dropNotifyLRU.MoveToFront(entry.elem)
 		return true
 	}
-	// Insert new entry; evict the LRU tail if at capacity.
+	// Insert new entry; evict the LRU tail if at capacity. The list element's
+	// Value still holds the *dropNotifyEntry so eviction can recover the key
+	// for the reverse delete; only the cold once-per-eviction path pays that
+	// single assertion now, never the per-notify hot path.
 	if q.dropNotifyLRU.Len() >= dropNotifyMaxKeys {
 		if oldest := q.dropNotifyLRU.Back(); oldest != nil {
-			entry := oldest.Value.(*dropNotifyEntry)
-			delete(q.dropNotifyIndex, entry.key)
+			evicted := oldest.Value.(*dropNotifyEntry)
+			delete(q.dropNotifyIndex, evicted.key)
 			q.dropNotifyLRU.Remove(oldest)
 		}
 	}
-	elem := q.dropNotifyLRU.PushFront(&dropNotifyEntry{key: key, ts: now})
-	q.dropNotifyIndex[key] = elem
+	entry := &dropNotifyEntry{key: key, ts: now}
+	entry.elem = q.dropNotifyLRU.PushFront(entry)
+	q.dropNotifyIndex[key] = entry
 	return true
 }
 
