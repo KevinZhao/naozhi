@@ -211,6 +211,13 @@ func handlerTypeOf(e ast.Expr) string {
 			if inner, ok := sel.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "auth" {
 				return "*AuthHandlers"
 			}
+			// e.g. s.reverseNodeTLSGate(s.reverseNodeServer) — the #1026 TLS
+			// precondition wrapper is transparent to the snapshot: report the
+			// wrapped handler's type so the route still pins to
+			// *node.ReverseServer.
+			if sel.Sel.Name == "reverseNodeTLSGate" {
+				return handlerTypeOf(call.Args[0])
+			}
 		}
 	}
 	sel, ok := e.(*ast.SelectorExpr)

@@ -298,8 +298,41 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /static/agent_view.js", auth(handleAgentViewJS))
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
 	if s.reverseNodeServer != nil {
-		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
+		s.mux.Handle("GET /ws-node", s.reverseNodeTLSGate(s.reverseNodeServer))
 	}
+}
+
+// reverseNodeTLSGate wraps the /ws-node upgrade so the WebSocket handshake is
+// rejected before Upgrade unless the transport is confidential. The reverse-node
+// protocol authenticates with a node token in its first message and then streams
+// cross-node session payloads; over plaintext ws:// a passive listener captures
+// the token and replays it to impersonate the node (#1026, R226-SEC-3).
+//
+// "Confidential" means either:
+//   - the request arrived over TLS (r.TLS != nil), or
+//   - trusted_proxy=true and the proxy set X-Forwarded-Proto: https
+//     (ALB/CloudFront terminating TLS upstream) — same signal the auth cookie
+//     Secure flag and HSTS header already gate on (s.auth.IsSecure), or
+//   - the connection is loopback (UDS / 127.0.0.1 / ::1), where the token
+//     never leaves the host and cannot be sniffed on the wire.
+//
+// Operators running a trusted intranet without TLS can keep the old behaviour
+// by fronting naozhi with a TLS-terminating proxy and trusted_proxy=true, which
+// is the documented deployment for any non-loopback bind. The startup warning
+// (reverseNodePlaintextWarning) already flags the insecure case at boot; this
+// gate turns the warning into an enforced precondition so a misconfigured
+// deployment fails closed instead of silently leaking tokens.
+func (s *Server) reverseNodeTLSGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.auth.IsSecure(r) && !isLoopbackRemote(r.RemoteAddr) {
+			slog.Warn("rejecting plaintext /ws-node upgrade",
+				"client_ip", clientIP(r, s.auth.TrustedProxy),
+				"reason", "node token would be sent in cleartext; terminate TLS upstream and set trusted_proxy=true, or bind loopback")
+			http.Error(w, "reverse-node WebSocket requires TLS (or a loopback bind)", http.StatusUpgradeRequired)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
