@@ -825,6 +825,60 @@ func TestDashboardJS_BubbleActionsHoverOnly(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_RetryButton pins the R110-P3 hover-toolbar 重试 slice: a
+// refill-to-input button surfaced on long USER bubbles only. It must share
+// the same isLong gate as copy/ask, carry the .hover-only reveal class, and
+// wire to refillEventToInput which drops the prompt back into #msg-input via
+// setMsgValue (the Claude-Code interrupt-refill UX). Assistant bubbles must
+// NOT get the retry button — only a user prompt is meaningful to resend.
+func TestDashboardJS_RetryButton(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+	if !strings.Contains(js, "const retryBtn = isLong && e.type === 'user'\n    ? '<button class=\"event-retry-btn hover-only\"") {
+		t.Error("retry button must gate on isLong AND user type only AND always carry the .hover-only class")
+	}
+	if !strings.Contains(js, `onclick="refillEventToInput(this)"`) {
+		t.Error("retry button must wire to refillEventToInput")
+	}
+	if !strings.Contains(js, "function refillEventToInput(btn)") {
+		t.Error("dashboard.js missing refillEventToInput(btn) helper")
+	}
+	// The helper must actually load the text into the input via setMsgValue
+	// (not just copy to clipboard) — that's what distinguishes 重试 from 复制.
+	rfIdx := strings.Index(js, "function refillEventToInput(btn)")
+	if rfIdx >= 0 {
+		body := js[rfIdx:min(rfIdx+1200, len(js))]
+		if !strings.Contains(body, "setMsgValue(input, text)") {
+			t.Error("refillEventToInput must call setMsgValue(input, text) to load the prompt into #msg-input")
+		}
+		if !strings.Contains(body, "getElementById('msg-input')") {
+			t.Error("refillEventToInput must target #msg-input")
+		}
+	}
+}
+
+// TestDashboardHTML_RetryButtonHoverOnly mirrors the copy/ask hover CSS for
+// the ↻ 重试 button so all three bubble actions reveal together on hover /
+// keyboard focus and stay hidden otherwise.
+func TestDashboardHTML_RetryButtonHoverOnly(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(data)
+	if !strings.Contains(html, ".event-retry-btn.hover-only{opacity:0}") {
+		t.Error(".event-retry-btn.hover-only must default to opacity:0 until hover")
+	}
+	if !strings.Contains(html, ".event:hover .event-retry-btn.hover-only,.event-retry-btn.hover-only:focus-visible{opacity:1}") {
+		t.Error("hover + focus-visible rules must lift the retry-button opacity for both mouse and keyboard users")
+	}
+}
+
 // TestDashboardHTML_CopyButtonHoverOnly pins the hover-reveal CSS for the
 // short-bubble variant. Three invariants: base `.event-copy-btn` class
 // still renders (for the permanently-visible long bubbles), `.hover-only`

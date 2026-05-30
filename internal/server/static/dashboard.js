@@ -3266,11 +3266,21 @@ function eventHtml(e, opts) {
   const askBtn = isLong && e.type === 'text'
     ? '<button class="event-ask-btn hover-only" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" onclick="askAside(this)" title="基于此内容追问">↗ 追问</button>'
     : '';
+  // R110-P3 hover toolbar (retry slice): on long *user* bubbles surface a
+  // 重试 button that refills the original prompt back into #msg-input for
+  // editing + resend — reuses the Claude-Code interrupt-refill UX (see
+  // setMsgValue path in interruptSession) so a typo'd or under-specified
+  // prompt is one click from a do-over instead of retype-from-scratch.
+  // Gated to user bubbles only (assistant text isn't a prompt to resend)
+  // and to the same isLong threshold as copy so short bubbles stay calm.
+  const retryBtn = isLong && e.type === 'user'
+    ? '<button class="event-retry-btn hover-only" data-raw="' + escAttr(cleanRaw) + '" onclick="refillEventToInput(this)" title="把这条消息填回输入框以便修改重发" aria-label="重试这条消息">↻ 重试</button>'
+    : '';
 
   const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';
   return '<div class="event ' + esc(e.type||'') + '"' + timeAttr + '>' +
     '<span class="event-icon">' + icon + '</span>' +
-    '<div class="event-content">' + content + imgHtml + copyBtn + askBtn + '</div></div>';
+    '<div class="event-content">' + content + imgHtml + copyBtn + retryBtn + askBtn + '</div></div>';
 }
 
 // Expose the bubble renderer for agent_view.js (RFC v4 agent-team-ui §3.6).
@@ -6791,6 +6801,35 @@ function downloadCodeBlock(btn) {
 function copyEventContent(btn) {
   const text = btn.dataset.raw || btn.closest('.event').querySelector('.event-content').textContent;
   copyWithFeedback(btn, text);
+}
+
+// refillEventToInput (R110-P3 hover toolbar 重试) drops a past user prompt
+// back into #msg-input so the operator can tweak + resend it. Mirrors the
+// interrupt-refill path: focus the box, move the caret to the end, and sync
+// the per-session draft so the text survives a re-render. Unlike the
+// interrupt path it OVERWRITES any current input — the explicit 重试 click is
+// a deliberate "use this prompt" gesture, so silently dropping it when the
+// box is non-empty would feel broken. A toast confirms the load.
+function refillEventToInput(btn) {
+  const text = btn.dataset.raw ||
+    (btn.closest('.event') && btn.closest('.event').querySelector('.event-content')
+      ? btn.closest('.event').querySelector('.event-content').textContent
+      : '');
+  if (!text) return;
+  const input = document.getElementById('msg-input');
+  if (!input) return;
+  setMsgValue(input, text);
+  if (selectedKey) sessionDrafts[selectedKey] = text;
+  try {
+    input.focus();
+    const range = document.createRange();
+    range.selectNodeContents(input);
+    range.collapse(false);
+    const sel = window.getSelection();
+    if (sel) { sel.removeAllRanges(); sel.addRange(range); }
+    input.scrollIntoView({ block: 'nearest' });
+  } catch (_) {}
+  showToast('已填回输入框，可修改后重发', 'info');
 }
 
 function shortPath(p) {
