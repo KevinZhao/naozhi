@@ -337,3 +337,10 @@
 - [R040034-PERF-7] eventlog persister tickFlush.clear 全 backing array — internal/eventlog/persist/persister.go:886
 - [R040034-SEC-5] feishu transport_hook RemoteAddr 未走 trustedProxy — internal/platform/feishu/transport_hook.go:87
 - [R0530-ARCH-2] wireup/schedulers.go godoc 称留 metrics.Set 给调用方"避免引入 internal/metrics 依赖",但本包已 import cron/session 而二者均 import metrics,理由不成立 — internal/wireup/schedulers.go:125
+- [R20260530-GO-2] marshalResult 编码错误路径丢 buffer 改用 Reset+Put 更省 — internal/upstream/connector.go:483
+- [R20260530-COR-cosmetic-1] FirstLine 入口 TrimSpace 后内部 blank-skip 循环为冗余死代码(输出正确,仅可简化) — internal/textutil/firstline.go:29
+- [R20260530-COR-cosmetic-2] redact_secrets 文档称 longest-prefix 实为首个 slice-order 匹配(无 prefix 互含故无害,仅措辞误导) — internal/cron/redact_secrets.go:54
+- [R20260530-SEC-cosmetic-1] wshub skeleton CheckOrigin return true(无生产 caller,Phase4b 迁移时须换 SameOriginOK 否则成 CSWSH) — internal/wshub/hub.go:206
+- [R20260530-ARCH-cosmetic-1] cron_router_adapter init() 手工枚举 8 个 enum 序数等式不可扩展(planner 落地时应提升为共享 leaf enum) — cmd/naozhi/cron_router_adapter.go:41
+- [R20260530-ARCH-cosmetic-2] main() 仍是 580 行 god-function(corpus R260528-ARCH-4 称 1300 行已 stale,可重核数字) — cmd/naozhi/main.go:45
+- [R20260530-ARCH-cosmetic-3] internal/server 仍 12.7K LOC/56 文件单包(corpus R260528-ARCH-6 称 21K/200 文件已 stale,提取进行中) — internal/server
