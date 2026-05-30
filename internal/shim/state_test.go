@@ -241,6 +241,62 @@ func TestReadState_SchemaVersionEqualToMaxAccepted(t *testing.T) {
 	}
 }
 
+func TestWriteState_StampsSchemaVersionWhenZero(t *testing.T) {
+	// R227-ARCH-6: a caller that does not set SchemaVersion (the common
+	// production path — Manager builds State without touching it) must end
+	// up with the current schema version stamped on disk. Otherwise every
+	// file carries schema_version=0 (omitempty) and the
+	// "schema_version > max → refuse" forward-compat gate is inert: an
+	// older naozhi would read a newer naozhi's file without complaint.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auto_stamp.json")
+
+	// Note: SchemaVersion deliberately left at its zero value.
+	in := State{
+		ShimPID:   1,
+		Socket:    "/tmp/s.sock",
+		AuthToken: "dA==",
+		Key:       "k",
+	}
+	if err := WriteStateFile(path, in); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadStateFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SchemaVersion != currentSchemaVersion {
+		t.Errorf("auto-stamped SchemaVersion = %d, want %d", got.SchemaVersion, currentSchemaVersion)
+	}
+
+	// The marker must also be present in the on-disk JSON, not just inferred
+	// on read.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"schema_version"`) {
+		t.Errorf("on-disk JSON missing schema_version key: %s", raw)
+	}
+}
+
+func TestShimVersionConstants_CompatMatrix(t *testing.T) {
+	// R227-ARCH-6 contract: pin the version-axis relationship so a future
+	// bump that forgets to advance currentSchemaVersion alongside
+	// maxSupportedSchemaVersion (or vice versa) fails loudly here.
+	if currentSchemaVersion > maxSupportedSchemaVersion {
+		t.Errorf("currentSchemaVersion (%d) must not exceed maxSupportedSchemaVersion (%d): "+
+			"a build cannot write a schema it cannot read",
+			currentSchemaVersion, maxSupportedSchemaVersion)
+	}
+	if currentSchemaVersion < 1 {
+		t.Errorf("currentSchemaVersion = %d, want >= 1 (zero means 'absent/v1' on the wire)", currentSchemaVersion)
+	}
+	if stateVersion < 1 {
+		t.Errorf("stateVersion = %d, want >= 1", stateVersion)
+	}
+}
+
 func TestReadStateFile_NotFound(t *testing.T) {
 	_, err := ReadStateFile("/nonexistent/path/state.json")
 	if err == nil {

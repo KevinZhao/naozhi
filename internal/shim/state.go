@@ -49,14 +49,43 @@ type State struct {
 	BufferCount     int      `json:"buffer_count"`
 }
 
-const stateVersion = 1
+// Shim version constants (R227-ARCH-6).
+//
+// Three independent version axes coexist; the compat matrix below is the
+// single authoritative reference so a rolling deploy / zero-downtime
+// restart has a documented contract instead of three undocumented consts:
+//
+//	const                    file/wire    bump when                         enforced by
+//	──────────────────────── ──────────── ───────────────────────────────── ──────────────────────
+//	ProtocolVersion          wire (hello) ClientMsg/ServerMsg JSON reshaped  shim handshake
+//	  (protocol.go)                        in a non-tolerable way            (MinSupportedProtocolVersion)
+//	stateVersion             state file   hard, incompatible state layout   ReadStateFile (!= reject)
+//	currentSchemaVersion     state file   major-breaking schema change      ReadStateFile (> reject)
+//	  (advisory, forward-compat)           (additive fields use omitempty)
+//
+// Today every axis sits at 1. The state file carries BOTH stateVersion
+// (hard gate) and SchemaVersion (advisory forward-compat gate); see the
+// State godoc for the difference.
+const (
+	// stateVersion is the hard state-layout gate. Readers reject a file
+	// whose Version != stateVersion outright.
+	stateVersion = 1
 
-// maxSupportedSchemaVersion is the largest SchemaVersion this naozhi
-// build knows how to read. A state file claiming a higher version
-// may contain fields / semantics this binary doesn't understand,
-// so Reader REFUSES to parse it rather than silently dropping data.
-// Bump this when the schema grows a new forward-compatible field.
-const maxSupportedSchemaVersion = 1
+	// currentSchemaVersion is the advisory forward-compat schema marker
+	// stamped into every state file this build writes (see WriteStateFile).
+	// Stamping it — rather than leaving it zero — is what lets an OLDER
+	// naozhi reading a NEWER naozhi's file trip the maxSupportedSchemaVersion
+	// gate below; without the stamp the forward-compat protection is inert.
+	currentSchemaVersion = 1
+
+	// maxSupportedSchemaVersion is the largest SchemaVersion this naozhi
+	// build knows how to read. A state file claiming a higher version
+	// may contain fields / semantics this binary doesn't understand,
+	// so Reader REFUSES to parse it rather than silently dropping data.
+	// Bump this (and currentSchemaVersion) when the schema grows a new
+	// breaking field.
+	maxSupportedSchemaVersion = 1
+)
 
 // WriteStateFile atomically writes the state to path with mode 0600.
 //
@@ -80,6 +109,16 @@ const maxSupportedSchemaVersion = 1
 // stores tolerate 0750).
 func WriteStateFile(path string, state State) error {
 	state.Version = stateVersion
+	// Stamp the advisory forward-compat marker so the file actually carries
+	// the schema version this build produces. Without this, every writer
+	// left SchemaVersion at 0 (omitempty) and the ReadStateFile
+	// "schema_version > max → refuse" gate could never fire on a rolling
+	// deploy — an older naozhi would happily read a newer naozhi's file.
+	// Callers that explicitly set a non-zero SchemaVersion (e.g. tests
+	// simulating a future writer) are respected.
+	if state.SchemaVersion == 0 {
+		state.SchemaVersion = currentSchemaVersion
+	}
 	data, err := json.MarshalIndent(state, "", "    ")
 	if err != nil {
 		return fmt.Errorf("marshal state: %w", err)
