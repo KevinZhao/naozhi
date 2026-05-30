@@ -202,6 +202,18 @@ type Config struct {
 	VerificationToken string `yaml:"verification_token"`
 	EncryptKey        string `yaml:"encrypt_key"`
 	MaxReplyLen       int    `yaml:"max_reply_length"`
+
+	// RequireEncryptKey, when true, makes webhook-mode Start() fail fast if
+	// encrypt_key is unset. R244-SEC-P1-3 (#877): verification_token-only mode
+	// authenticates only a static shared secret in the request body with no
+	// per-payload HMAC, so anyone who learns the token can forge arbitrary
+	// events (nonce+timestamp replay defenses still apply, but a freshly
+	// crafted payload with a valid nonce sails through). Production operators
+	// who want the documented threat model enforced rather than merely warned
+	// can set this to opt into the stricter posture. Defaults false so
+	// existing token-only deployments keep working — the breaking-fast
+	// behaviour is opt-in. [BREAKING-LOCAL only when explicitly enabled.]
+	RequireEncryptKey bool `yaml:"require_encrypt_key"`
 }
 
 // Feishu implements the Platform and RunnablePlatform interfaces.
@@ -537,11 +549,18 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 	}
 	// VerificationToken-only mode relies on a plaintext shared secret in the
 	// request body; if that token ever leaks, events can be forged without
-	// access to the EncryptKey HMAC. Surface a startup warning so operators
-	// know to configure EncryptKey as well. Not fatal — existing v1-only
-	// deployments remain functional.
+	// access to the EncryptKey HMAC. R244-SEC-P1-3 (#877): operators who set
+	// require_encrypt_key get a hard fail-fast (the documented threat model
+	// enforced); everyone else gets a startup warning so the regression is at
+	// least visible. Not fatal by default — existing v1-only deployments
+	// remain functional.
 	if f.cfg.EncryptKey == "" {
-		slog.Warn("feishu webhook: verification_token-only mode is less secure than encrypt_key HMAC — configure encrypt_key for defence-in-depth")
+		if f.cfg.RequireEncryptKey {
+			return fmt.Errorf("feishu webhook: require_encrypt_key is set but encrypt_key is empty — " +
+				"verification_token-only mode has no per-payload HMAC, so a leaked token forges events; " +
+				"configure encrypt_key or unset require_encrypt_key to accept the weaker posture")
+		}
+		slog.Warn("feishu webhook: verification_token-only mode is less secure than encrypt_key HMAC — configure encrypt_key for defence-in-depth (set require_encrypt_key: true to enforce)")
 	}
 	slog.Info("feishu using webhook mode")
 	return nil

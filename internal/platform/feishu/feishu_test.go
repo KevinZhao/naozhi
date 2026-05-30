@@ -105,6 +105,59 @@ func TestStartWebhookRejectsMissingAuth(t *testing.T) {
 	}
 }
 
+// TestStartWebhookRequireEncryptKeyFailFast pins R244-SEC-P1-3 (#877): when
+// require_encrypt_key is set but encrypt_key is empty, webhook-mode Start()
+// must fail fast rather than silently degrade to token-only auth (which has
+// no per-payload HMAC, so a leaked token forges events).
+func TestStartWebhookRequireEncryptKeyFailFast(t *testing.T) {
+	t.Parallel()
+	f := New(Config{
+		AppID:             "id",
+		ConnectionMode:    "webhook",
+		VerificationToken: "test-token",
+		RequireEncryptKey: true,
+		// EncryptKey deliberately empty.
+	}, nil)
+	noop := func(context.Context, platform.IncomingMessage) {}
+	if err := f.Start(noop); err == nil {
+		t.Fatal("Start() should fail fast when require_encrypt_key is set but encrypt_key is empty")
+	}
+}
+
+// TestStartWebhookRequireEncryptKeySatisfied confirms the inverse: with
+// require_encrypt_key set AND encrypt_key supplied, Start() proceeds.
+func TestStartWebhookRequireEncryptKeySatisfied(t *testing.T) {
+	t.Parallel()
+	f := New(Config{
+		AppID:             "id",
+		ConnectionMode:    "webhook",
+		VerificationToken: "test-token",
+		EncryptKey:        "an-encrypt-key",
+		RequireEncryptKey: true,
+	}, nil)
+	noop := func(context.Context, platform.IncomingMessage) {}
+	if err := f.Start(noop); err != nil {
+		t.Fatalf("Start() with encrypt_key present should succeed, got %v", err)
+	}
+}
+
+// TestStartWebhookTokenOnlyDefaultAllowed confirms the default (opt-out)
+// posture is unchanged: token-only mode without require_encrypt_key still
+// starts (warning-only), so existing deployments are not broken.
+func TestStartWebhookTokenOnlyDefaultAllowed(t *testing.T) {
+	t.Parallel()
+	f := New(Config{
+		AppID:             "id",
+		ConnectionMode:    "webhook",
+		VerificationToken: "test-token",
+		// RequireEncryptKey defaults false, EncryptKey empty.
+	}, nil)
+	noop := func(context.Context, platform.IncomingMessage) {}
+	if err := f.Start(noop); err != nil {
+		t.Fatalf("token-only Start() without require_encrypt_key should succeed, got %v", err)
+	}
+}
+
 func TestStopNoop(t *testing.T) {
 	t.Parallel()
 	f := New(Config{AppID: "id", ConnectionMode: "webhook"}, nil)
