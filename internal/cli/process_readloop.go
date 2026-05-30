@@ -576,14 +576,23 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 			return false
 		}
 		// No owners claim this result. Under passthrough this means
-		// either (a) an abort with no claimed slots, handled above,
-		// or (b) stray result during reconnect. Either way skip
-		// legacy eventCh; dashboard EventLog already has the entry.
+		// either (a) an abort with no claimed slots, or (b) a true
+		// stray/reconnect result.
+		//
+		// (a) abort: log it here and skip the legacy path — the abort
+		//     errors were already fired above, so there is nothing for
+		//     deliverEvent / the legacy eventCh consumer to do.
 		if ev.SubType == "error_during_execution" {
 			p.logEventAt(ev, nowMS)
 			return false
 		}
-		// Fall through to legacy path only for true stray results.
+		// (b) true stray result (reconnect with no active Send): #1483 —
+		//     do NOT skip; fall through so the unconditional
+		//     p.logEventAt at the bottom of this function records the
+		//     turn-complete entry in EventLog. Returning false here would
+		//     silently drop it from the dashboard transcript, since under
+		//     passthrough no legacy eventCh consumer is guaranteed to
+		//     append it.
 	}
 
 	// SubagentLinker plumbing for RFC v4 agent-team-ui.

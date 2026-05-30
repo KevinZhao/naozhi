@@ -284,6 +284,16 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	if s.stopCtx != nil && s.stopCtx.Err() != nil {
 		return
 	}
+	// R20260527-PERF-1 (#1116): empty text is a no-op. deliverNotice already
+	// guards its async path, but notifyTarget is also reachable directly
+	// (in-package call sites + future callers) where platform.SplitText("",
+	// maxLen) returns [""] and the loop below would burn one
+	// limits.PlatformReplyMaxAttempts retry budget pushing a zero-byte chunk.
+	// Short-circuit here so the empty-text contract holds at this layer too,
+	// independent of how the caller reached us.
+	if text == "" {
+		return
+	}
 	p := s.platforms[plat]
 	if p == nil {
 		slog.Warn("cron notify: platform not found", "platform", plat)

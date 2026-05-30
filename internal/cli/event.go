@@ -231,6 +231,23 @@ func (m *AssistantMessage) UnmarshalJSON(data []byte) error {
 			m.Content = blocks
 			return nil
 		}
+		// Strict array decode failed (e.g. a single malformed block from a
+		// backend emitting a new shape). Rather than discarding the whole
+		// message, decode element-by-element and keep the blocks that parse.
+		var rawBlocks []json.RawMessage
+		if err := json.Unmarshal(raw.Content, &rawBlocks); err == nil {
+			blocks = blocks[:0]
+			for _, rb := range rawBlocks {
+				var b ContentBlock
+				if err := json.Unmarshal(rb, &b); err == nil {
+					blocks = append(blocks, b)
+				}
+			}
+			if len(blocks) > 0 {
+				m.Content = blocks
+				return nil
+			}
+		}
 	case '"':
 		var text string
 		if err := json.Unmarshal(raw.Content, &text); err == nil {

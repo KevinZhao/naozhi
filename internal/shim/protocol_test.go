@@ -352,6 +352,64 @@ func TestProtocolVersion_Constant(t *testing.T) {
 	}
 }
 
+// TestShimVersionConstants_Coherence is the cross-constant contract test
+// flagged by R227-ARCH-6 (#1016): the shim carries three independently
+// bumped version constants — ProtocolVersion (wire), stateVersion (state
+// file) and maxSupportedSchemaVersion (advisory schema). No single test
+// pinned the invariants that relate them, so a careless bump of one
+// without the others becomes a silent time-bomb after a zero-downtime
+// restart. In particular, manager.go accepts a hello iff
+// MinSupportedProtocolVersion <= helloVer <= ProtocolVersion; if a future
+// edit advanced MinSupportedProtocolVersion past ProtocolVersion the
+// acceptance band would collapse to empty and EVERY connection would be
+// rejected with no compile-time signal. This test makes that footgun a CI
+// failure instead. When a constant is intentionally bumped, update the
+// epoch baselines here in the same commit — that edit IS the compat-matrix
+// changelog until docs/rfc/shim-versioning.md lands.
+func TestShimVersionConstants_Coherence(t *testing.T) {
+	// Acceptance band must be non-empty: a hello in
+	// [MinSupportedProtocolVersion, ProtocolVersion] is what manager.go
+	// requires before it will speak to a peer.
+	if MinSupportedProtocolVersion > ProtocolVersion {
+		t.Fatalf("acceptance band empty: MinSupportedProtocolVersion=%d > ProtocolVersion=%d — every hello would be rejected",
+			MinSupportedProtocolVersion, ProtocolVersion)
+	}
+	// Versions are monotonic positive epochs; 0 is reserved for the
+	// pre-versioning sentinel (manager.go treats hello v0 as v1) and must
+	// never be a current epoch.
+	if ProtocolVersion < 1 {
+		t.Errorf("ProtocolVersion=%d must be >= 1 (0 is the pre-versioning sentinel)", ProtocolVersion)
+	}
+	if MinSupportedProtocolVersion < 1 {
+		t.Errorf("MinSupportedProtocolVersion=%d must be >= 1", MinSupportedProtocolVersion)
+	}
+	if stateVersion < 1 {
+		t.Errorf("stateVersion=%d must be >= 1", stateVersion)
+	}
+	// maxSupportedSchemaVersion is the largest advisory schema this binary
+	// will load; a value below 1 would reject the v1 baseline state files
+	// the current writer produces (state.go writes SchemaVersion implicitly
+	// as the v1 epoch).
+	if maxSupportedSchemaVersion < 1 {
+		t.Errorf("maxSupportedSchemaVersion=%d must be >= 1 or current-epoch state files become unloadable", maxSupportedSchemaVersion)
+	}
+	// Epoch baselines: pinned so an intentional bump forces a deliberate
+	// edit here (the interim compat matrix). Distinct constants are pinned
+	// distinctly so the failure message names exactly which epoch advanced.
+	if ProtocolVersion != 1 {
+		t.Errorf("ProtocolVersion epoch = %d, want 1 (bump intentionally + update compat matrix)", ProtocolVersion)
+	}
+	if MinSupportedProtocolVersion != 1 {
+		t.Errorf("MinSupportedProtocolVersion epoch = %d, want 1", MinSupportedProtocolVersion)
+	}
+	if stateVersion != 1 {
+		t.Errorf("stateVersion epoch = %d, want 1", stateVersion)
+	}
+	if maxSupportedSchemaVersion != 1 {
+		t.Errorf("maxSupportedSchemaVersion epoch = %d, want 1", maxSupportedSchemaVersion)
+	}
+}
+
 // TestServerMsg_MarshalLine_NewlineTerminated locks down R65-PERF-L-2: the
 // returned slice ends with exactly one '\n', so callers can enqueue it
 // directly without a second append that would trigger a growslice copy on

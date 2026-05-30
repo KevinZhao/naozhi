@@ -222,15 +222,28 @@ func isKnownBackendID(id string) bool {
 }
 
 // backendDisplayName maps a backend config value to its user-facing name.
+//
+// R239-ARCH-K (#907): the display label is sourced from detect.go's
+// knownBackends slice — the single source of truth for "what backends this
+// cli build supports" — instead of a parallel hardcoded switch that drifts
+// out of sync the moment someone edits one table but not the other. Adding
+// a backend (e.g. gemini) is now a single knownBackends edit; this function
+// needs no change. (The fully-decoupled backend.Register registry the issue
+// proposes is still blocked on the cli/backend import cycle #1034; collapsing
+// this in-package mirror is the non-breaking step available today.)
+//
+// The input is normalized first so case variants ("Kiro"/"KIRO") and the
+// empty/legacy alias (""→"claude") resolve to the same canonical entry,
+// preserving the R228-ARCH-15 contract. Unknown ids fall back to the raw
+// (normalized) value, matching the previous default arm.
 func backendDisplayName(backend string) string {
-	switch backend {
-	case "kiro":
-		return "kiro"
-	case "", "claude":
-		return "claude-code"
-	default:
-		return backend
+	id := normalizeBackendID(backend)
+	for _, b := range knownBackends {
+		if b.ID == id {
+			return b.DisplayName
+		}
 	}
+	return id
 }
 
 // normalizeBackendID collapses empty/legacy aliases to the canonical ID.

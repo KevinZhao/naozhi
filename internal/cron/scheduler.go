@@ -17,6 +17,7 @@ import (
 	robfigcron "github.com/robfig/cron/v3"
 
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -257,9 +258,36 @@ type chatJobKey struct {
 }
 
 // Scheduler manages cron jobs and executes them on schedule.
+//
+// Field-access discipline (mirrors the `// 读写:` annotation pattern from
+// session/router_core.go, whose absence here was flagged by R250-ARCH-4
+// / #1167): the fields below fall into four lifetime classes —
+//   - Lifecycle: cron / stopCtx / stopCancel / started / stopped /
+//     startedAtNanos / triggerWG / gcWG — written once at NewScheduler /
+//     Start / Stop, otherwise read-only or atomic.
+//   - Immutable-after-construction config: router / platforms / agents /
+//     agentCommands / location / notifyDefault / allowedRoot* /
+//     jitterMax / slowThreshold / execTimeout / maxJobs / maxJobsPerChat
+//     / storePath / stopBudget — set in NewScheduler, never reassigned, so
+//     reads are lock-free.
+//   - mu-guarded mutable state: jobs / chatJobCount / jobsByChat — all
+//     reads and writes hold s.mu (RLock for reads, Lock for writes); the
+//     three maps are mutated together so they never drift.
+//   - Independently-synchronised state: runningJobs (sync.Map) /
+//     telemetry (atomic.Pointer) / store* (storeMu / storeDirOnce /
+//     saveSeq) / routerNilOnce — each carries its own primitive and does
+//     NOT rely on s.mu.
+//
+// Per-field godoc below stays authoritative; this block is the index.
 type Scheduler struct {
 	cron *robfigcron.Cron
-	mu   sync.RWMutex
+	// mu guards the jobs / chatJobCount / jobsByChat trio (RLock reads,
+	// Lock writes). It does NOT cover the immutable-config fields (read
+	// lock-free) nor the independently-synchronised fields (runningJobs /
+	// telemetry / store* / *Once), each of which carries its own primitive.
+	mu sync.RWMutex
+	// 读写: 全部读写持 s.mu（读 RLock / 写 Lock）。jobs / chatJobCount /
+	// jobsByChat 三者在同一把锁下同步变更，不会相互漂移。
 	jobs map[string]*Job
 	// chatJobCount tracks the number of jobs per (Platform, ChatID) chat.
 	// Maintained synchronously with s.jobs writes under s.mu so the
@@ -728,18 +756,16 @@ func workDirResolveCacheKey(workDir, allowedRoot, allowedRootResolved string) st
 // On the empty-workDir / empty-root short-circuit returns ("", true)
 // so the caller leaves opts.Workspace untouched (router default applies).
 //
-// SHARED-ALGORITHM-WITH-SERVER (R20260527122801-ARCH-4 / #1316):
-// internal/server/server.go's validateWorkspace mirrors this exact algorithm
-// (EvalSymlinks(workDir) → EvalSymlinks(allowedRoot) → equality-or-prefix
-// check). The two implementations diverge only in error shape: server
-// returns sentinel errors so the HTTP layer can map status codes; cron
-// returns (resolved, ok) because the dispatcher path treats both
-// "rejected" and "no constraint" as "leave opts.Workspace untouched".
-// Both must move together if the algorithm changes — a fix on one side
-// silently re-opens the symlink-swap escape on the other. The next
-// dedup pass should hoist this to internal/osutil or a new
-// internal/workspace package; until then the cron→server cross-reference
-// here and in server.go's validateWorkspace godoc is the contract.
+// SHARED-ALGORITHM-WITH-SERVER (R20260527122801-ARCH-4 / #1316): the
+// EvalSymlinks(workDir) → EvalSymlinks(allowedRoot) → equality-or-prefix
+// algorithm has been hoisted to osutil.ResolveWorkspaceUnderRoot, so cron and
+// the server's validateWorkspace now share one canonical containment + resolve
+// path. workDirResolveUnderRoot below is a thin adapter that keeps cron's
+// (resolved, ok) shape (the dispatcher treats both "rejected" and "no
+// constraint" as "leave opts.Workspace untouched"); the server wraps the same
+// helper to map sentinel errors onto HTTP status codes. A fix to the
+// containment rule now lands in osutil and cannot silently drift between the
+// two call sites.
 // workDirResolveUnderRootCached is the Scheduler-scoped variant that
 // memoises positive results in s.workDirCache. The pure
 // workDirResolveUnderRoot below stays the canonical correctness path —
@@ -765,42 +791,18 @@ func (s *Scheduler) workDirResolveUnderRootCached(workDir string) (string, bool)
 	return resolved, ok
 }
 
+// workDirResolveUnderRoot delegates the EvalSymlinks → resolve-root → prefix
+// algorithm to osutil.ResolveWorkspaceUnderRoot. R20260527122801-ARCH-4 (#1316):
+// previously this function open-coded the same algorithm as the server's
+// validateWorkspace; both copies could drift and silently re-open the
+// symlink-swap escape on whichever side a fix missed. The shared helper is now
+// the single canonical containment + resolve path; cron keeps the (resolved,
+// ok) shape here (dispatcher treats both "rejected" and "no constraint" as
+// "leave opts.Workspace untouched") while the server layer wraps the same
+// helper to map sentinel errors onto HTTP status codes.
 func workDirResolveUnderRoot(workDir, allowedRoot, allowedRootResolved string) (string, bool) {
-	if workDir == "" || allowedRoot == "" {
-		return "", true // empty WorkDir uses router default; empty root = disabled
-	}
-	if !filepath.IsAbs(workDir) {
-		return "", false
-	}
-	resolved, err := filepath.EvalSymlinks(workDir)
-	if err != nil {
-		// Missing directory / permission denied — refuse to execute rather
-		// than silently re-create the sandbox escape.
-		return "", false
-	}
-	rootResolved, err := filepath.EvalSymlinks(allowedRoot)
-	if err != nil {
-		// Fall back to the construction-time cached resolution. If neither
-		// the per-call EvalSymlinks nor the cache produced a resolved path,
-		// hard-reject — comparing the symlink-resolved workDir against the
-		// raw allowedRoot string opens a TOCTOU/symlink escape window:
-		// allowedRoot="/data/workspace" might resolve to
-		// "/mnt/disk0/workspace", in which case a raw-prefix compare against
-		// "/data/workspace" would either reject every legitimate child OR
-		// (if a subsequent rename swapped the symlink target) admit a
-		// path under an attacker-controlled tree. R243-SEC-9 (#795).
-		if allowedRootResolved == "" {
-			return "", false
-		}
-		rootResolved = allowedRootResolved
-	}
-	if resolved == rootResolved {
-		return resolved, true
-	}
-	if strings.HasPrefix(resolved, rootResolved+string(filepath.Separator)) {
-		return resolved, true
-	}
-	return "", false
+	return osutil.ResolveWorkspaceUnderRoot(
+		workDir, allowedRoot, allowedRootResolved, filepath.EvalSymlinks)
 }
 
 // NewScheduler creates a scheduler. Call Start() to begin.
