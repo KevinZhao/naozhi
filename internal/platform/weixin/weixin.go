@@ -51,6 +51,12 @@ type Config struct {
 	Token       string
 	BaseURL     string
 	MaxReplyLen int
+	// AllowUnauthenticated acknowledges that the iLink long-poll response
+	// carries no inbound HMAC — TLS is the only authenticity guarantee, so a
+	// DNS/MITM attacker on a hostile network can inject forged messages into
+	// CLI stdin (R214-SEC-1). Start() hard-fails unless this is true so the
+	// operator consciously accepts the threat model. Default false.
+	AllowUnauthenticated bool
 }
 
 // Weixin implements Platform and RunnablePlatform via iLink Bot long-poll.
@@ -167,6 +173,14 @@ func (w *Weixin) Start(handler platform.MessageHandler) error {
 	// http://localhost / 127.0.0.1 / [::1] stay allowed for local dev mocks.
 	if err := validateBaseURLScheme(w.cfg.BaseURL); err != nil {
 		return err
+	}
+	// R214-SEC-1: the iLink poll response has no inbound HMAC; TLS is the only
+	// authenticity guarantee. On a hostile network (DNS hijack / MITM proxy)
+	// forged messages can be injected into CLI stdin. Require an explicit
+	// opt-in so operators consciously accept this weaker threat model rather
+	// than silently trusting the transport.
+	if !w.cfg.AllowUnauthenticated {
+		return fmt.Errorf("weixin: iLink long-poll has no inbound HMAC (TLS-only authenticity); set weixin.allow_unauthenticated: true to opt in to the unauthenticated transport threat model")
 	}
 	w.startMu.Lock()
 	if w.started {

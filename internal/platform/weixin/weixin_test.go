@@ -90,7 +90,7 @@ func TestStartStop(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	w := New(Config{Token: "tok", BaseURL: srv.URL})
+	w := New(Config{Token: "tok", BaseURL: srv.URL, AllowUnauthenticated: true})
 
 	handler := func(_ context.Context, _ platform.IncomingMessage) {}
 
@@ -105,6 +105,25 @@ func TestStartStop(t *testing.T) {
 
 	if err := w.Stop(); err != nil {
 		t.Fatalf("Stop() error: %v", err)
+	}
+}
+
+// TestStartRejectsUnauthenticatedWithoutOptIn pins R214-SEC-1: the iLink
+// long-poll has no inbound HMAC, so Start() must hard-fail unless the operator
+// explicitly opts in via allow_unauthenticated.
+func TestStartRejectsUnauthenticatedWithoutOptIn(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0})
+	}))
+	defer srv.Close()
+
+	// AllowUnauthenticated deliberately omitted (false).
+	w := New(Config{Token: "tok", BaseURL: srv.URL})
+	handler := func(_ context.Context, _ platform.IncomingMessage) {}
+	if err := w.Start(handler); err == nil {
+		w.Stop()
+		t.Fatal("Start() should hard-fail without allow_unauthenticated opt-in (R214-SEC-1)")
 	}
 }
 
@@ -141,7 +160,7 @@ func TestReply_WithContextToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	w := New(Config{Token: "tok", BaseURL: srv.URL})
+	w := New(Config{Token: "tok", BaseURL: srv.URL, AllowUnauthenticated: true})
 	// Pre-cache a context token
 	w.contextTokens.Store("user123", &tokenEntry{token: "ctx-tok-abc", updatedNs: time.Now().UnixNano()})
 
@@ -190,7 +209,7 @@ func TestPollLoop_ReceivesMessages(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	w := New(Config{Token: "tok", BaseURL: srv.URL})
+	w := New(Config{Token: "tok", BaseURL: srv.URL, AllowUnauthenticated: true})
 
 	var received atomic.Int32
 	var receivedMsg platform.IncomingMessage
@@ -273,7 +292,7 @@ func TestPollLoop_SkipsBotMessages(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	w := New(Config{Token: "tok", BaseURL: srv.URL})
+	w := New(Config{Token: "tok", BaseURL: srv.URL, AllowUnauthenticated: true})
 	var received atomic.Int32
 	handler := func(_ context.Context, _ platform.IncomingMessage) {
 		received.Add(1)
