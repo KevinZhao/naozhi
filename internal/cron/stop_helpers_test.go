@@ -7,7 +7,6 @@ package cron
 
 import (
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -125,17 +124,10 @@ func TestWaitGCDrain_BoundedByBudget(t *testing.T) {
 		<-hold
 	}()
 
-	// Capture the metric counter before; the timeout branch must bump it.
-	var seen atomic.Bool
-	go func() {
-		// Sanity: just ensures the helper returns before our test deadline.
-		// gcWaitBudget is 5s in production; we tolerate that here because
-		// changing it would require either a test seam (var override) or
-		// faking gcWG's wait, both of which exceed the scope of this
-		// targeted helper test. Skip if CI is too time-constrained.
-		_ = seen
-	}()
-
+	// gcWaitBudget is 5s in production; this test tolerates that wall-clock
+	// because shortening it would require either a test seam (var override)
+	// or faking gcWG's wait, both of which exceed the scope of this targeted
+	// helper test. Skip if CI is too time-constrained.
 	if testing.Short() {
 		t.Skip("waitGCDrain budget test waits up to gcWaitBudget=5s; skip in -short")
 	}
