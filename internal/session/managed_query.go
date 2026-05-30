@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -661,19 +660,14 @@ func costUnitForBackend(backendID string) string {
 	if backendID == "" {
 		backendID = "claude"
 	}
-	// Lazy bootstrap pattern (matches server.replyTagForBackend): production
-	// wires backend.RegisterDefaults() in cmd/naozhi/main.go before any
-	// session is constructed. Tests that build a Snapshot without calling
-	// RegisterDefaults would otherwise see backend.Get return false and lose
-	// the unit — costUnitForBackendOnce ensures one-shot lazy registration so
-	// tests stay green. Guard with a registry-empty check so we cooperate
-	// with sibling tests (server pkg withDefaultBackends) that already
-	// pre-registered, rather than panicking on duplicate Register.
-	costUnitForBackendOnce.Do(func() {
-		if len(backend.All()) == 0 {
-			backend.RegisterDefaults()
-		}
-	})
+	// Registry bootstrap: production wires backend.RegisterDefaults() in
+	// cmd/naozhi/main.go before any session is constructed; tests that build a
+	// Snapshot without that wiring would otherwise see backend.Get return false
+	// and lose the unit. Route through the package's blessed idempotent,
+	// concurrency-safe entry point (backend.EnsureDefaults) instead of an
+	// ad-hoc local sync.Once + emptiness-check that lazily mutated the global
+	// registry from inside a session query helper (R239-ARCH-D, #890).
+	backend.EnsureDefaults()
 	if p, ok := backend.Get(backendID); ok {
 		return p.CostUnit
 	}
@@ -682,5 +676,3 @@ func costUnitForBackend(backendID string) string {
 	// hide the cost cell rather than render a misleading unit.
 	return ""
 }
-
-var costUnitForBackendOnce sync.Once
