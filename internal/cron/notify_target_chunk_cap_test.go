@@ -26,9 +26,10 @@ func TestR236SEC15_NotifyTargetCapsChunkCount(t *testing.T) {
 	// abort. maxLen=8 keeps SplitText boundaries deterministic with
 	// buildDistinctChunks.
 	fp := &fakePartialPlatform{failAt: 1000, maxLen: 8}
-	s := &Scheduler{
+	s := &Scheduler{}
+	s.configMapsPtr.Store(&cronConfigMaps{
 		platforms: map[string]platform.Platform{"fake-notify": fp},
-	}
+	})
 	// Build 10 distinct chunks; cap is 5.
 	long := buildDistinctChunks(10, 8)
 	totalChunks := len(platform.SplitText(long, 8))
@@ -50,9 +51,10 @@ func TestR236SEC15_NotifyTargetCapsChunkCount(t *testing.T) {
 func TestR236SEC15_NotifyTargetUnderCapSendsAll(t *testing.T) {
 	t.Parallel()
 	fp := &fakePartialPlatform{failAt: 1000, maxLen: 8}
-	s := &Scheduler{
+	s := &Scheduler{}
+	s.configMapsPtr.Store(&cronConfigMaps{
 		platforms: map[string]platform.Platform{"fake-notify": fp},
-	}
+	})
 	// 3 chunks (< cap=5).
 	short := buildDistinctChunks(3, 8)
 	chunks := platform.SplitText(short, 8)

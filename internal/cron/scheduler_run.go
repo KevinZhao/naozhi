@@ -1330,12 +1330,15 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	ctx, spawnCancel := context.WithTimeout(s.stopCtx, jobTimeout)
 	defer spawnCancel()
 
-	// s.agentCommands and s.agents are assigned once at scheduler
-	// construction (cfg.AgentCommands / cfg.Agents) and never mutated;
-	// reading them without s.mu is safe. If a future SetAgents API is
-	// introduced both reads must move under s.mu.
-	agentID, cleanText := resolveAgent(snap.prompt, s.agentCommands)
-	opts := cloneAgentOpts(s.agents[agentID])
+	// agentCommands and agents are published once at scheduler construction
+	// (cfg.AgentCommands / cfg.Agents) via configMapsPtr and never swapped
+	// today; reading them lock-free through configMaps() is safe. A future
+	// SetAgents/hot-reload API Store()s a fresh *cronConfigMaps so this read
+	// stays race-free without moving under s.mu (R249-ARCH-27 / #991). Load
+	// the snapshot once so both reads see the same generation.
+	cm := s.configMaps()
+	agentID, cleanText := resolveAgent(snap.prompt, cm.agentCommands)
+	opts := cloneAgentOpts(cm.agents[agentID])
 	opts.Exempt = true // cron sessions must not count toward maxProcs or evict user sessions
 	// Sprint 6c (docs/rfc/multi-backend.md §9): per-job backend override.
 	// Empty snap.backend leaves opts.Backend untouched ("" already routes
