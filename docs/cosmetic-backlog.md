@@ -336,3 +336,4 @@
 - [R040034-PERF-10] cron cleanupRunningJobIfIdle Load 装箱 — internal/cron/scheduler_run.go:174
 - [R040034-PERF-7] eventlog persister tickFlush.clear 全 backing array — internal/eventlog/persist/persister.go:886
 - [R040034-SEC-5] feishu transport_hook RemoteAddr 未走 trustedProxy — internal/platform/feishu/transport_hook.go:87
+- [R0530-ARCH-2] wireup/schedulers.go godoc 称留 metrics.Set 给调用方"避免引入 internal/metrics 依赖",但本包已 import cron/session 而二者均 import metrics,理由不成立 — internal/wireup/schedulers.go:125

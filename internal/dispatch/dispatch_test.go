@@ -294,6 +294,68 @@ func TestDispatchCommand_New_NamedAgent(t *testing.T) {
 	}
 }
 
+// TestResolveAgentToken pins the two-stage resolution shared by both
+// handleNewCommand branches (R0530-CR-1): exact lowercase key lookup, then
+// EqualFold scan over stored (possibly mixed-case) values.
+func TestResolveAgentToken(t *testing.T) {
+	fp := &fakePlatform{}
+	d := newTestDispatcher(fp, nil)
+	d.agentCommands = map[string]string{"review": "ReviewerBot", "ops": "ops-agent"}
+
+	cases := []struct {
+		token  string
+		wantID string
+		wantOK bool
+	}{
+		{"review", "ReviewerBot", true},      // exact key hit
+		{"reviewerbot", "ReviewerBot", true}, // EqualFold value hit (lowercased input)
+		{"ops-agent", "ops-agent", true},     // EqualFold value hit, same case
+		{"ops", "ops-agent", true},           // exact key hit
+		{"nope", "", false},                  // miss
+	}
+	for _, tc := range cases {
+		gotID, gotOK := d.resolveAgentToken(tc.token)
+		if gotOK != tc.wantOK || gotID != tc.wantID {
+			t.Errorf("resolveAgentToken(%q) = (%q, %v), want (%q, %v)",
+				tc.token, gotID, gotOK, tc.wantID, tc.wantOK)
+		}
+	}
+}
+
+// TestDispatchCommand_New_ProjectBound_MixedCaseAgent is the R0530-CR-1
+// regression guard: in a project-bound chat, "/new <Agent>" with a
+// mixed-case agent ID must resolve via the EqualFold fallback and reset
+// the session — previously the bound branch did exact-key-only lookup and
+// replied "未知的 agent" while the unbound branch resolved fine.
+func TestDispatchCommand_New_ProjectBound_MixedCaseAgent(t *testing.T) {
+	fp := &fakePlatform{}
+	d := newTestDispatcher(fp, nil)
+	d.queue = NewMessageQueue(5, 0)
+	// agentCommands keys are lowercased by applyDefaults; values keep the
+	// operator-supplied (mixed) case.
+	d.agentCommands = map[string]string{"review": "ReviewerBot"}
+	// Project-bound resolver: the chat resolves to a bound project.
+	d.resolver = session.NewKeyResolver(
+		map[string]session.AgentOpts{"general": {}, "ReviewerBot": {}},
+		&parityDataSource{binding: session.ProjectBinding{
+			Bound: true, Name: "demo", WorkspaceDir: "/srv/demo",
+		}},
+	)
+
+	// User types the agent in its stored mixed case, which the lowercasing
+	// in handleNewCommand turns into "reviewerbot" — only the EqualFold
+	// fallback can map that back to "ReviewerBot".
+	d.dispatchCommand(context.Background(), incomingMsg("/new"), "/new ReviewerBot", slog.Default())
+
+	reply := fp.lastReply()
+	if strings.Contains(reply, "未知") {
+		t.Fatalf("project-bound /new <mixed-case agent> wrongly rejected: %q", reply)
+	}
+	if !strings.Contains(reply, "重置") || !strings.Contains(reply, "ReviewerBot") {
+		t.Errorf("expected reset confirmation for ReviewerBot, got %q", reply)
+	}
+}
+
 func TestNormalizeSlashCommand(t *testing.T) {
 	t.Parallel()
 	cases := []struct{ in, want string }{
