@@ -308,7 +308,15 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	// must agree, otherwise the loop would append into a nil slice or the
 	// post-unlock dispatch would receive an empty copy from a non-replay
 	// batch.
-	sinkAttached := l.persistSinkPtr.Load() != nil
+	// R20260530-COR-1 (#1482): replay-phase batches (AppendBatchReplay,
+	// InjectHistory) must NEVER be captured into sinkCopy nor pushed to the
+	// persist sink. The persister only drops them while sinkReady==false; if
+	// a reattach flips sinkReady=true *before* a late InjectHistory runs
+	// (reconnect/reattach ordering), every replayed historical entry would be
+	// re-persisted, duplicating already-written JSONL turns. Gate on
+	// !isReplay here so the replay contract holds regardless of sinkReady —
+	// this mirrors the unconditional applyEntryStateLocked skip at :398.
+	sinkAttached := !isReplay && l.persistSinkPtr.Load() != nil
 	captureForSink := sinkAttached && l.sinkReady.Load()
 	// R225-PERF-11 + R249-PERF-16: single pre-lock pass that stamps UUIDs,
 	// applies the default Time, and sanitises image URIs. The N
@@ -447,7 +455,14 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	// post-stamp, post-sanitize entries in the SAME order they were
 	// committed to the ring buffer — critical for the Persister's
 	// write-order guarantees.
-	l.invokePersistSink(sinkCopy)
+	//
+	// R20260530-COR-1 (#1482): replay batches never feed the persist sink
+	// (sinkCopy is nil because captureForSink gates on !isReplay above).
+	// Skip the call outright so a late InjectHistory cannot re-persist
+	// already-written history even if sinkReady has already flipped true.
+	if !isReplay {
+		l.invokePersistSink(sinkCopy)
+	}
 
 	l.notifySubscribers()
 }
