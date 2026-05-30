@@ -131,6 +131,14 @@ type Server struct {
 	watchdogNoOutputKills atomic.Int64 // 读写: server.go (exposed via /health and /api/sessions)
 	watchdogTotalKills    atomic.Int64 // 读写: server.go
 
+	// shutdownComplete closes once Start's shutdown goroutine has finished
+	// draining in-flight HTTP requests (srv.Shutdown returned). Exposed via
+	// ShutdownComplete() so the process-level shutdown sequencer can block on
+	// the real HTTP-drain barrier before tearing down router state, instead
+	// of racing router.Shutdown() against handlers still observing the
+	// session map. S11 / R194-COR. 读写: server.go (ctor + Start + accessor)
+	shutdownComplete chan struct{}
+
 	// ── Phase 5: pending evaluation (delete after grep verifies no usage) ─
 	platforms  map[string]platform.Platform // 读写: server.go (likely routes-registration-only)
 	backendTag string                       // 读写: server.go (ctor only; copied into SessionHandlers; v0.4 §六.6 待评估 → dispatch.BackendTag())
@@ -291,12 +299,13 @@ func buildServer(opts ServerOptions) *Server {
 	resolver := session.NewKeyResolver(agents, project.NewDataSource(opts.ProjectManager))
 
 	s := &Server{
-		addr:         addr,
-		mux:          http.NewServeMux(),
-		platforms:    platforms,
-		router:       router,
-		dedup:        platform.NewDedup(defaultDedupCapacity),
-		sessionGuard: session.NewGuard(),
+		addr:             addr,
+		mux:              http.NewServeMux(),
+		shutdownComplete: make(chan struct{}),
+		platforms:        platforms,
+		router:           router,
+		dedup:            platform.NewDedup(defaultDedupCapacity),
+		sessionGuard:     session.NewGuard(),
 		msgQueue: dispatch.NewMessageQueueWithMode(
 			opts.QueueMaxDepth,
 			opts.QueueCollectDelay,
@@ -719,7 +728,11 @@ func (s *Server) Start(ctx context.Context) error {
 		go s.runRetiredStoreFlusher(ctx)
 	}
 
-	shutdownComplete := make(chan struct{})
+	// Reuse the channel allocated at construction so ShutdownComplete() (which
+	// callers may read before Start runs) and the goroutine below observe the
+	// same channel. S11: this is the HTTP-drain barrier the process shutdown
+	// sequencer blocks on before router.Shutdown().
+	shutdownComplete := s.shutdownComplete
 	go func() {
 		<-ctx.Done()
 		slog.Info("shutting down server")
@@ -787,6 +800,20 @@ func (s *Server) Start(ctx context.Context) error {
 		<-shutdownComplete
 	}
 	return err
+}
+
+// ShutdownComplete returns a channel that closes once Start's shutdown
+// goroutine has finished draining in-flight HTTP requests (srv.Shutdown
+// returned). It is the synchronization barrier S11 (R194-COR) requires:
+// the process-level shutdown sequencer in cmd/naozhi cancels the shared
+// ctx (which triggers the HTTP drain) and then blocks on this channel
+// before calling router.Shutdown(). Without the barrier, router.Shutdown
+// races the drain and an in-flight GetOrCreate/Send handler can observe a
+// half-cleaned session map. The channel is allocated at construction so a
+// caller may obtain it before Start runs; it never closes if Start is
+// never invoked.
+func (s *Server) ShutdownComplete() <-chan struct{} {
+	return s.shutdownComplete
 }
 
 // retiredStoreFlushInterval is how often runRetiredStoreFlusher writes

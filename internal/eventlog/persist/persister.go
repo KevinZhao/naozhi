@@ -519,12 +519,16 @@ func (p *Persister) DropKey(ctx context.Context, key string) error {
 		return ErrPersisterClosed
 	}
 	done := make(chan error, 1)
-	job := batchJob{Key: key, Stem: KeyHash(key), Entries: nil /* drop signal */}
+	// R250-PERF-18 (#1121): the drop signal travels through opCh, which only
+	// needs the hashed stem (key + done are carried as separate op fields).
+	// Computing the stem into a local avoids materialising a throwaway
+	// batchJob whose Key/Entries fields were never read on this path.
+	stem := KeyHash(key)
 	// Use the pass-through op channel instead of the batch channel so
 	// drops don't get coalesced with pending writes. Implemented as a
 	// dedicated method on the writer goroutine via opCh below.
 	select {
-	case p.opCh <- op{kind: opDrop, key: key, stem: job.Stem, done: done}:
+	case p.opCh <- op{kind: opDrop, key: key, stem: stem, done: done}:
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-p.closeCh:

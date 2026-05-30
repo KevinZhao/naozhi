@@ -1604,6 +1604,14 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	lg.Info("cron job completed",
 		"result_len", len(result.Text),
 		"elapsed_ms", elapsed.Milliseconds())
+	// OBS1 (#392): record the full success-path latency distribution, not
+	// just the slow-tail count below. The histogram buckets straddle
+	// slowThreshold so the two signals stay consistent (anything past 30s
+	// lands in the same tail buckets the slow counter alerts on). Observed
+	// here rather than in finishRun for the same reason as the slow counter:
+	// only success-path latency is meaningful — error/timeout paths are
+	// classified by the CronRun*Total state counters instead.
+	metrics.ObserveCronExecutionDuration(elapsed.Milliseconds())
 	slowThreshold := s.slowThreshold
 	if slowThreshold <= 0 {
 		slowThreshold = defaultCronSlowThreshold

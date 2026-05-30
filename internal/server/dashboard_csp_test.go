@@ -188,6 +188,63 @@ func TestDashboardCSP_FrameSrcBlob(t *testing.T) {
 	}
 }
 
+// TestDashboardCSP_JsdelivrNpmPathScoped pins R242-SEC-2 (#607): every
+// `cdn.jsdelivr.net` source expression in the dashboard CSP must carry the
+// `/npm/` path prefix so the CDN scope can only load assets under the npm
+// subtree (mermaid + KaTeX live there), not arbitrary follow-on resources
+// from other jsdelivr path namespaces (`/gh/<attacker>/<repo>`, `/combine/`
+// bundle endpoints, etc.). A bare `https://cdn.jsdelivr.net` host-source
+// re-opens that surface, so the test fails if any directive lists the host
+// without the `/npm/` path segment.
+//
+// CSP3 §6.6.2.6 path-part matching: a trailing-slash path in a host-source
+// matches every URL whose path begins with that prefix, so all three shipped
+// CDN URLs (`/npm/mermaid@…`, `/npm/katex@…/dist/katex.min.js`, the KaTeX
+// stylesheet + its `/npm/katex@…/dist/fonts/*` woff2 files) still load.
+func TestDashboardCSP_JsdelivrNpmPathScoped(t *testing.T) {
+	s := newTestServer(&mockPlatform{})
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	w := httptest.NewRecorder()
+	s.handleDashboard(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy header missing on /dashboard")
+	}
+
+	// The CDN must only ever appear scoped to /npm/. Tokenise on whitespace
+	// so a host-source that ends exactly at `cdn.jsdelivr.net` (no path) is
+	// caught regardless of which directive it sits in.
+	for _, tok := range strings.Fields(csp) {
+		if !strings.Contains(tok, "cdn.jsdelivr.net") {
+			continue
+		}
+		if !strings.HasPrefix(tok, "https://cdn.jsdelivr.net/npm/") {
+			t.Errorf("R242-SEC-2 (#607): CSP source %q references cdn.jsdelivr.net "+
+				"without the /npm/ path prefix — the CDN scope must be pinned to "+
+				"https://cdn.jsdelivr.net/npm/ so a non-npm jsdelivr path cannot "+
+				"bootstrap an arbitrary follow-on load. got CSP %q", tok, csp)
+		}
+	}
+
+	// Positive: the three directives that legitimately pull from the CDN must
+	// each carry the npm-scoped source.
+	for _, want := range []string{
+		"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/",
+		"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/",
+		"font-src 'self' https://cdn.jsdelivr.net/npm/",
+	} {
+		if !strings.Contains(csp, want) {
+			t.Errorf("R242-SEC-2 (#607): CSP must carry %q so KaTeX/mermaid still "+
+				"load from the npm-scoped CDN, got %q", want, csp)
+		}
+	}
+}
+
 // TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow caps the inline event
 // handler surface in static/dashboard.html (R236-SEC-02 / #479, also tracked
 // as #922). The dashboard CSP still ships `script-src 'unsafe-inline'`
