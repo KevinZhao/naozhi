@@ -11,20 +11,20 @@ import (
 // human-convention safety constraint documented on ReattachProcessNoCallback:
 //
 //	SAFETY CONSTRAINT: this function must only be called when Send() cannot be
-//	in flight for this session (e.g., during ReconnectShims at startup, or
-//	while the session's process is known-dead). If Send() were concurrently
-//	executing, the deathReason.Store("") here could silently erase a
-//	diagnostic death reason that Send() just set.
+//	in flight for this session. If Send() were concurrently executing, the
+//	deathReason.Store("") here could silently erase a diagnostic death reason
+//	that Send() just set, and the process swap would publish a fresh process
+//	from under the in-flight Send.
 //
-// The constraint cannot be enforced with a runtime assertion — taking sendMu
-// inside ReattachProcessNoCallback would violate the documented sendMu→r.mu
-// lock ordering and risk ABBA deadlock. Instead, pin the invariant at source
-// level: ReattachProcessNoCallback must have exactly one production caller
-// (the shim-reconnect path in router_shim.go since the router-split refactor;
-// originally in router.go), and that caller must be preceded by an
-// `isAlive()` guard that aborts if the session is still live. Any new
-// caller — or any removal of the guard — must be reviewed through this
-// audit item.
+// The constraint cannot be enforced from inside ReattachProcessNoCallback —
+// taking sendMu there would violate the documented sendMu→r.mu lock ordering
+// and risk ABBA deadlock. Instead, pin the invariant at source level: the
+// single production caller (the shim-reconnect path in router_shim.go) must
+// (a) be preceded by an `isAlive()` guard that aborts if the session is still
+// live, and (b) hold sess.sendMu across the call — acquired via TryLock BEFORE
+// r.mu so the (sendMu → r.mu) order matches Send() with no ABBA risk (#750).
+// Any new caller — or any removal of either guard — must be reviewed through
+// this audit item.
 //
 // The test is deliberately strict: it reads the whole session package, lists
 // every `ReattachProcessNoCallback(` call site (excluding the definition
@@ -118,18 +118,34 @@ func TestReattachProcessNoCallback_ContractContext(t *testing.T) {
 	if callIdx < 0 {
 		t.Fatal("ReattachProcessNoCallback call not found in router_shim.go despite the earlier grep")
 	}
-	windowStart := callIdx - 500
+	// Window widened to 1600 bytes: the #750 fix added a multi-line comment
+	// block plus the sendMu.TryLock() guard above the isAlive()/r.mu.Lock()
+	// pair, pushing them further from the call site than the original 500.
+	windowStart := callIdx - 1600
 	if windowStart < 0 {
 		windowStart = 0
 	}
 	window := routerStr[windowStart:callIdx]
 	if !strings.Contains(window, ".isAlive()") {
 		t.Error("ReattachProcessNoCallback call in router_shim.go is no longer preceded " +
-			"by an isAlive() guard within ~500 bytes. R31-REL1: the sendMu-waiver " +
+			"by an isAlive() guard within ~1600 bytes. R31-REL1: the sendMu-waiver " +
 			"depends on the session being known-dead before Reattach. Either " +
 			"restore the `if currentSess.isAlive() { abort }` gate, or switch to " +
 			"ReattachProcess (the sendMu-aware variant) if a live-session reattach " +
 			"is actually desired.")
+	}
+
+	// #750: the call must also be guarded by sess.sendMu so an in-flight Send
+	// cannot race the deathReason/process swap. The canonical shape acquires
+	// it via TryLock before r.mu.Lock(). Removing this re-opens the logical
+	// race the issue describes.
+	if !strings.Contains(window, "sendMu.TryLock()") {
+		t.Error("ReattachProcessNoCallback call in router_shim.go is no longer preceded " +
+			"by a sess.sendMu.TryLock() guard within ~1600 bytes. R51-CONCUR-002 (#750): " +
+			"the reattach mutates deathReason and the active process pointer; without " +
+			"holding sendMu an in-flight Send racing on the dying process can clobber " +
+			"those writes. Re-add the TryLock guard (acquired BEFORE r.mu to keep the " +
+			"sendMu→r.mu order) or switch to the sendMu-aware ReattachProcess variant.")
 	}
 
 	// 4) The call must be made while holding r.mu. Check that r.mu.Lock()
