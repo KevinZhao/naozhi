@@ -569,6 +569,14 @@ type Router struct {
 	// NewRouter (config-time injection); not subject to lock contention.
 	autoChainListJSONL func(workspace string) []discovery.WorkspaceJSONL
 
+	// historyLoader loads a session's persisted JSONL history tail across
+	// a prev_session_ids chain. Production wires discovery.LoadHistoryChainTailCtx;
+	// tests inject a fixture that returns synthetic entries without touching
+	// disk, decoupling session unit tests from the full discovery chain
+	// (ARCH-SESS-1, #458). Never nil after NewRouter (defaults to the
+	// discovery implementation). Read-only after NewRouter.
+	historyLoader HistoryLoader
+
 	// resolver is the shared KeyResolver instance, exposed via Resolver()
 	// so downstream consumers (Dispatcher, Hub, upstream wiring) can read
 	// the same instance instead of constructing their own — preventing the
@@ -815,6 +823,26 @@ func (r *Router) indexDel(key string) {
 // the per-spawn RefreshSettings hook re-loads each turn). Operators
 // editing config.yaml should expect the changes to take effect only on
 // the next process start; see docs/ops/naozhi-deploy-skill.md.
+// HistoryLoader abstracts loading a session's persisted JSONL history tail
+// across a prev_session_ids chain. The Router depends on this interface
+// rather than calling discovery.LoadHistoryChainTailCtx directly, so unit
+// tests can inject a fixture without wiring the whole discovery chain
+// (ARCH-SESS-1, #458). The production implementation is discoveryHistoryLoader.
+type HistoryLoader interface {
+	// LoadHistoryChainTail walks the JSONL files for ids (newest→oldest)
+	// under claudeDir/cwd and returns up to limit entries. ctx cancellation
+	// aborts the load promptly.
+	LoadHistoryChainTail(ctx context.Context, claudeDir string, ids []string, cwd string, limit int) []cli.EventEntry
+}
+
+// discoveryHistoryLoader is the production HistoryLoader backed by the
+// discovery package. Stateless; the zero value is ready to use.
+type discoveryHistoryLoader struct{}
+
+func (discoveryHistoryLoader) LoadHistoryChainTail(ctx context.Context, claudeDir string, ids []string, cwd string, limit int) []cli.EventEntry {
+	return discovery.LoadHistoryChainTailCtx(ctx, claudeDir, ids, cwd, limit)
+}
+
 type RouterConfig struct {
 	// Wrapper is the legacy single-backend field. If Wrappers is nil/empty
 	// this wrapper is used for every session.
@@ -906,6 +934,13 @@ type RouterConfig struct {
 	// JSONL listings without touching disk.
 	AutoChainListJSONL func(workspace string) []discovery.WorkspaceJSONL
 
+	// HistoryLoader loads a session's persisted JSONL history tail across
+	// a prev_session_ids chain. nil falls back to the production
+	// discovery.LoadHistoryChainTailCtx implementation. Tests inject a
+	// fixture so session unit cases can supply synthetic history entries
+	// without mocking the whole discovery chain (ARCH-SESS-1, #458).
+	HistoryLoader HistoryLoader
+
 	// Resolver is the shared KeyResolver instance for this router.
 	// When set, callers (Dispatcher, Hub, upstream wiring) should fetch
 	// the singleton via Router.Resolver() instead of constructing fresh
@@ -995,7 +1030,13 @@ func NewRouter(cfg RouterConfig) *Router {
 		eventLogDir:        cfg.EventLogDir,
 		autoChainPolicy:    cfg.AutoChainPolicy,
 		autoChainListJSONL: cfg.AutoChainListJSONL,
+		historyLoader:      cfg.HistoryLoader,
 		resolver:           cfg.Resolver,
+	}
+	// nil HistoryLoader → production discovery-backed implementation so the
+	// rest of the router can call r.historyLoader unconditionally (#458).
+	if r.historyLoader == nil {
+		r.historyLoader = discoveryHistoryLoader{}
 	}
 	// Auto-chain defaults: nil policy → safely-disabled stub so the
 	// rest of the code can call r.autoChainPolicy.Enabled(...) without
@@ -1354,7 +1395,7 @@ func (r *Router) startBackgroundHistoryLoaders() {
 			ids = append(ids, s.prevSessionIDs...)
 			ids = append(ids, s.getSessionID())
 
-			allEntries := discovery.LoadHistoryChainTailCtx(
+			allEntries := r.historyLoader.LoadHistoryChainTail(
 				r.historyCtx, r.claudeDir, ids, s.Workspace(), maxPersistedHistory,
 			)
 			if len(allEntries) == 0 {

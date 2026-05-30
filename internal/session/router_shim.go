@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
@@ -287,7 +286,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				func() {
 					histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 					defer histCancel()
-					histEntries := discovery.LoadHistoryChainTailCtx(
+					histEntries := r.historyLoader.LoadHistoryChainTail(
 						histCtx, r.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
 					)
 					if len(histEntries) > 0 {
@@ -485,7 +484,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			// Bounded budget (maxPersistedHistory) and the inner
 			// shimReconnectTimeout still protect against hung storage.
 			histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
-			histEntries := discovery.LoadHistoryChainTailCtx(
+			histEntries := r.historyLoader.LoadHistoryChainTail(
 				histCtx, r.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
 			)
 			histCancel()

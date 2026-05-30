@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/history/merged"
@@ -1051,7 +1050,7 @@ func (r *Router) loadResumeHistoryOnSpawn(
 			stop := context.AfterFunc(ctx, histCancel)
 			defer stop()
 		}
-		allEntries := discovery.LoadHistoryChainTailCtx(
+		allEntries := r.historyLoader.LoadHistoryChainTail(
 			histCtx, r.claudeDir, ids, workspace, maxPersistedHistory,
 		)
 		if len(allEntries) > 0 {

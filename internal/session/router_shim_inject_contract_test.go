@@ -33,8 +33,11 @@ func TestShimReconnect_NoDoubleInjectContract(t *testing.T) {
 	routerStr := string(src)
 
 	// Locate the JSONL-load block: the load site is uniquely identified by
-	// the LoadHistoryChainTailCtx + claudeDir guard pair. Walk every guard
-	// in the file and verify the fix invariants near each one.
+	// the LoadHistoryChainTail + claudeDir guard pair. Walk every guard
+	// in the file and verify the fix invariants near each one. Since #458
+	// the load goes through the injected r.historyLoader.LoadHistoryChainTail
+	// rather than discovery.LoadHistoryChainTailCtx; matching the shorter
+	// "LoadHistoryChainTail" substring keeps the pin stable across both.
 	const guard = "if r.claudeDir != \"\""
 	idx := 0
 	checked := 0
@@ -44,14 +47,14 @@ func TestShimReconnect_NoDoubleInjectContract(t *testing.T) {
 			break
 		}
 		blockStart := idx + off
-		// Scan forward at most 1500 bytes for the matching LoadHistoryChainTailCtx
+		// Scan forward at most 1500 bytes for the matching LoadHistoryChainTail
 		// — this is the JSONL-load shape we care about.
 		windowEnd := blockStart + 1500
 		if windowEnd > len(routerStr) {
 			windowEnd = len(routerStr)
 		}
 		block := routerStr[blockStart:windowEnd]
-		if !strings.Contains(block, "LoadHistoryChainTailCtx") {
+		if !strings.Contains(block, "LoadHistoryChainTail") {
 			idx = blockStart + len(guard)
 			continue
 		}
@@ -97,7 +100,7 @@ func TestShimReconnect_NoDoubleInjectContract(t *testing.T) {
 
 	if checked == 0 {
 		t.Fatal("router_shim.go has no JSONL-load block matching the " +
-			"`if r.claudeDir != \"\"` + LoadHistoryChainTailCtx shape. " +
+			"`if r.claudeDir != \"\"` + LoadHistoryChainTail shape. " +
 			"If the load site moved, update this contract test to find " +
 			"its new shape.")
 	}
