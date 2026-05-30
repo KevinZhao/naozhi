@@ -157,6 +157,62 @@ func TestInterrupt_ConcurrentSendRace(t *testing.T) {
 	}
 }
 
+// TestFireSendCancel_SkipsStaleProcBinding pins SM3 (#381): when the
+// in-flight Send bound its cancel func to process A but a concurrent
+// spawnSession has since swapped the live process to B, an Interrupt that
+// observes B must NOT fire A's cancel (cancelling A's ctx is a no-op against
+// B and would mislead the caller into thinking the live turn was aborted).
+func TestFireSendCancel_SkipsStaleProcBinding(t *testing.T) {
+	t.Parallel()
+
+	procA := NewTestProcess()
+	procB := NewTestProcess()
+
+	s := &ManagedSession{key: "sm3-stale"}
+
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var cancelled bool
+	wrapped := context.CancelFunc(func() { cancelled = true })
+	// Send bound the cancel func to procA.
+	s.sendCancel.Store(&cancelBox{cancel: wrapped, proc: procA})
+
+	// Interrupt observed the live process as procB (post-swap). The stale
+	// binding (procA) must be skipped.
+	s.fireSendCancel(procB)
+	if cancelled {
+		t.Error("fireSendCancel fired a cancel bound to a replaced process " +
+			"(SM3/#381 regression): stale ctx cancel is a no-op against the " +
+			"live process and must be skipped")
+	}
+
+	// When the live process matches the binding, the cancel must fire.
+	s.fireSendCancel(procA)
+	if !cancelled {
+		t.Error("fireSendCancel did not fire cancel when live process matched " +
+			"the bound process")
+	}
+}
+
+// TestFireSendCancel_FiresUnboundBox pins the box.proc==nil window: Send has
+// stored the cancel box but not yet reached loadProcess. An Interrupt in this
+// window should still fire — the turn is about to run on the live process.
+func TestFireSendCancel_FiresUnboundBox(t *testing.T) {
+	t.Parallel()
+
+	proc := NewTestProcess()
+	s := &ManagedSession{key: "sm3-unbound"}
+
+	var cancelled bool
+	s.sendCancel.Store(&cancelBox{cancel: context.CancelFunc(func() { cancelled = true })})
+
+	s.fireSendCancel(proc)
+	if !cancelled {
+		t.Error("fireSendCancel skipped an unbound (proc==nil) cancel box; the " +
+			"turn is about to run on the live process and must be cancellable")
+	}
+}
+
 // TestInterrupt_IdleBranchSendCancelContract_SourceLevel is a static
 // guard on the fix location. It verifies the dead-process early-return
 // inside Interrupt() loads sendCancel and invokes it. A future edit that
@@ -193,23 +249,39 @@ func TestInterrupt_IdleBranchSendCancelContract_SourceLevel(t *testing.T) {
 	}
 	deadBranch := fn[:pivot]
 
-	// The dead branch must contain a sendCancel.Load() + invocation so a
-	// Send() blocked on ctx.Done() is unblocked even when the process
-	// went dead/idle between Send storing sendCancel and Interrupt
-	// reading loadProcess.
-	if !strings.Contains(deadBranch, "sendCancel.Load()") {
-		t.Error("Interrupt() dead-branch does not load sendCancel — " +
+	// The dead branch must fire the in-flight Send's cancel so a Send()
+	// blocked on ctx.Done() is unblocked even when the process went
+	// dead/idle between Send storing sendCancel and Interrupt reading
+	// loadProcess. SM3 (#381) moved the sendCancel.Load() + invoke into
+	// the fireSendCancel helper (which also guards against a stale proc
+	// binding), so the dead branch now delegates to it.
+	if !strings.Contains(deadBranch, "fireSendCancel(") {
+		t.Error("Interrupt() dead-branch does not call fireSendCancel — " +
 			"RNEW-006 regression. A Send() blocked on ctx.Done() will " +
 			"hang forever when proc becomes !Alive between Send's " +
 			"sendCancel.Store and Interrupt's loadProcess.")
 	}
-	// Must also invoke the loaded cancel. Loose suffix match `cancel)()`
-	// accepts both the current `(*cancel)()` pointer-deref form and a
-	// future refactor that stores CancelFunc directly (`cancel)()` would
-	// still appear as part of `(*cancel)()` or a renamed local). A stale
-	// check like `_ = s.sendCancel.Load()` would pass the Load grep above
-	// but not this one.
-	if !strings.Contains(deadBranch, "cancel)()") {
-		t.Error("Interrupt() dead-branch loads sendCancel but never invokes it")
+
+	// fireSendCancel itself must load sendCancel and invoke the cancel.
+	// A future edit that hollows out the helper reopens RNEW-006 without
+	// failing any favourably-scheduled behavioural test.
+	const fireSig = "func (s *ManagedSession) fireSendCancel("
+	fstart := strings.Index(body, fireSig)
+	if fstart < 0 {
+		t.Fatalf("could not locate fireSendCancel() in managed_send.go")
+	}
+	frest := body[fstart:]
+	fend := strings.Index(frest, "\n}\n")
+	if fend < 0 {
+		t.Fatalf("could not locate fireSendCancel() body end")
+	}
+	fireBody := frest[:fend]
+	if !strings.Contains(fireBody, "sendCancel.Load()") {
+		t.Error("fireSendCancel does not load sendCancel — RNEW-006 regression")
+	}
+	// Must also invoke the loaded cancel. `box.cancel()` is the current
+	// form; a loose `cancel()` match also tolerates a renamed local.
+	if !strings.Contains(fireBody, "cancel()") {
+		t.Error("fireSendCancel loads sendCancel but never invokes the cancel func")
 	}
 }

@@ -577,8 +577,21 @@ func validateSchedule(schedule string, loc *time.Location) error {
 		loc = time.Local
 	}
 	// Check that the interval between the first two runs is at least minCronInterval.
-	now := time.Now().In(loc)
-	first := sched.Next(now)
+	//
+	// R249-CR-22 (#965): seed the interval probe from a FIXED reference instant
+	// rather than time.Now(). With time.Now() the two-Next probe occasionally
+	// straddled a DST transition — e.g. a spring-forward run made a genuine
+	// every-5-minutes schedule appear ~1h apart (or a fall-back run inflated an
+	// hourly schedule), so the minCronInterval floor would mis-classify the
+	// interval depending on the wall-clock minute the operator happened to save
+	// the job. A fixed mid-January noon is DST-quiet in every IANA zone (no zone
+	// transitions occur at 2024-01-15 12:00 local), so the probe measures the
+	// schedule's intrinsic interval deterministically. Anchored in loc so the
+	// validation frame still matches the runtime WithLocation(loc) registration
+	// (#1321): the date is interpreted in the operator's timezone, only the
+	// instant is pinned away from transition boundaries.
+	ref := time.Date(2024, time.January, 15, 12, 0, 0, 0, loc)
+	first := sched.Next(ref)
 	second := sched.Next(first)
 	// R236-QA-07: drop the `interval > 0` guard. Previously a degenerate
 	// schedule whose second tick equaled (or preceded) the first — interval
