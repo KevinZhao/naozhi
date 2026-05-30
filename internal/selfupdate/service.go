@@ -1,11 +1,13 @@
 package selfupdate
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
 	"sync"
+	"time"
 )
 
 // resolveTrustedBin returns an absolute path to a known system binary,
@@ -74,10 +76,10 @@ func trustedBinCache(name string) *binCacheEntry {
 // RestartService attempts to restart the naozhi system service after a
 // binary replacement. On Linux it calls systemctl; on macOS it reloads
 // the launchd plist. A non-running service is a no-op (not an error).
-func RestartService() error {
+func RestartService(ctx context.Context) error {
 	switch runtime.GOOS {
 	case "linux":
-		return restartSystemd()
+		return restartSystemd(ctx)
 	case "darwin":
 		return restartLaunchd()
 	default:
@@ -85,11 +87,24 @@ func RestartService() error {
 	}
 }
 
+// systemdUnitActive reports whether `systemctl is-active --quiet naozhi`
+// exits 0. Indirected through a var so tests can simulate a unit that is
+// "activating" for a while and then flips to "active". Production wiring is
+// the real systemctl call.
+//
+// Test hygiene: this is mutable package state with no lock. Tests that swap
+// it (and tests that exercise ServiceRunning/waitServiceActive, which read
+// it) MUST NOT call t.Parallel(), or they race each other. Same convention
+// the download-helper tests in this package already follow.
+var systemdUnitActive = func() bool {
+	return exec.Command(resolveTrustedBin("systemctl"), "is-active", "--quiet", "naozhi").Run() == nil
+}
+
 // ServiceRunning reports whether the naozhi service is currently active.
 func ServiceRunning() bool {
 	switch runtime.GOOS {
 	case "linux":
-		return exec.Command(resolveTrustedBin("systemctl"), "is-active", "--quiet", "naozhi").Run() == nil
+		return systemdUnitActive()
 	case "darwin":
 		out, err := exec.Command(resolveTrustedBin("launchctl"), "list", launchdLabel).Output()
 		return err == nil && len(out) > 0
@@ -105,16 +120,68 @@ const LaunchdLabel = "com.naozhi.naozhi"
 // keep unexported alias so internal helpers stay readable
 const launchdLabel = LaunchdLabel
 
-func restartSystemd() error {
+// restartConfirmTimeout bounds how long restartSystemd waits for the unit to
+// report active again after issuing an async restart. naozhi's unit is
+// Type=notify, so "active" means the process called sd_notify(READY=1) — which
+// it does right after the HTTP server starts listening. On a loaded host the
+// cold-start replay (shim reconnect, history, cron) can take a while, so this
+// is generous; it only bounds the *confirmation*, not the restart itself.
+var restartConfirmTimeout = 3 * time.Minute
+
+// restartConfirmInterval is how often waitServiceActive polls is-active.
+var restartConfirmInterval = 2 * time.Second
+
+func restartSystemd(ctx context.Context) error {
 	// Only restart if the unit is currently active — avoid starting a stopped
 	// service as a side-effect of upgrade.
 	if !ServiceRunning() {
 		return nil
 	}
-	if out, err := exec.Command(resolveTrustedBin("systemctl"), "restart", "naozhi").CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl restart naozhi: %w\n%s", err, out)
+	// --no-block: return as soon as systemd accepts the job, instead of
+	// blocking until the unit reaches "active". A synchronous `systemctl
+	// restart` waits for sd_notify(READY=1) up to TimeoutStartSec; naozhi's
+	// cold start can exceed that on a loaded host, so the blocking form
+	// reports a spurious non-zero exit even though the service comes up fine.
+	// That false failure is what made `naozhi upgrade` roll back a healthy
+	// v0.0.27 binary. We confirm liveness ourselves below instead.
+	if out, err := exec.Command(resolveTrustedBin("systemctl"), "restart", "--no-block", "naozhi").CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl restart --no-block naozhi: %w\n%s", err, out)
 	}
-	return nil
+	return waitServiceActive(ctx, restartConfirmTimeout)
+}
+
+// waitServiceActive polls `systemctl is-active` until the unit is active, the
+// timeout elapses, or ctx is cancelled. A timeout/cancel is reported as an
+// error so the caller can surface it, but callers MUST NOT treat it as a
+// reason to roll back the binary: the new binary is already verified and
+// executable, and systemd's Restart=always will keep bringing it up. A slow
+// confirmation is not a corrupt install.
+func waitServiceActive(ctx context.Context, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		// is-active exits 0 only in the "active" state; "activating"
+		// (Type=notify before READY=1) and "failed" both exit non-zero, so a
+		// true result here means the unit finished starting.
+		if systemdUnitActive() {
+			return nil
+		}
+		// Clamp the sleep to whatever time is left so a large poll interval
+		// can never push the return past the deadline (and a timeout shorter
+		// than one interval is still honored).
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("service did not become active within %s after restart (it may still be starting; check `systemctl status naozhi`)", timeout)
+		}
+		sleep := restartConfirmInterval
+		if sleep > remaining {
+			sleep = remaining
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("restart confirmation interrupted: %w", ctx.Err())
+		case <-time.After(sleep):
+		}
+	}
 }
 
 func restartLaunchd() error {

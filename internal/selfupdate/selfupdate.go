@@ -281,12 +281,41 @@ func Replace(newBin, installPath string) (backupPath string, err error) {
 		}
 		return "", errors.Join(errs...)
 	}
+
+	// Success path: force the installed binary executable. Do NOT rely on
+	// copyFile having preserved 0755 — copyFile opens the staging file with
+	// the *source* mode, and the downloaded binary can legitimately be 0600
+	// (fetchFile writes 0600; Download chmods it 0755 only after checksum
+	// verification, and on a loaded host that chmod has been observed not to
+	// stick before the stage copy reads st.Mode()). A umask can also strip
+	// bits off the OpenFile request. Either way an un-executable install
+	// makes systemd fail with 203/EXEC — the v0.0.27 upgrade outage. One
+	// explicit chmod here removes all of that dependence.
+	if err := os.Chmod(installPath, 0o755); err != nil {
+		// The new binary is in place but not executable. Restore the backup
+		// so the service keeps running the old (working) binary.
+		errs := []error{fmt.Errorf("chmod installed binary 0755: %w", err)}
+		if rerr := copyFile(backupPath, installPath); rerr != nil {
+			errs = append(errs, fmt.Errorf("restore backup after chmod failure: %w", rerr))
+		} else {
+			if cerr := os.Chmod(installPath, 0o755); cerr != nil {
+				errs = append(errs, fmt.Errorf("chmod restored binary: %w", cerr))
+			}
+			_ = os.Remove(backupPath)
+		}
+		return "", errors.Join(errs...)
+	}
 	return backupPath, nil
 }
 
 // Rollback restores backupPath → installPath and removes the backup file.
 // The backup is created with 0600 mode (see copyFileBackup) so we chmod
 // the restored binary back to 0755 to keep it executable for systemd.
+//
+// As of the v0.0.27 fix the upgrade flow no longer auto-rolls-back on a
+// restart-confirmation timeout (a slow Type=notify cold start is not a bad
+// binary). Rollback is retained as the explicit recovery primitive an
+// operator can invoke when an upgrade genuinely needs reverting.
 func Rollback(installPath, backupPath string) error {
 	if err := copyFile(backupPath, installPath); err != nil {
 		return fmt.Errorf("rollback restore: %w", err)
