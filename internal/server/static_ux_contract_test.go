@@ -4179,11 +4179,12 @@ func TestDashboardHTML_R110P1_HomePanelHealthStyles(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_R110P1_HomePanelStats pins the Round 147 contract for
-// the Home-panel stats strip. Round 146 landed the "最近会话" list; this
-// round adds two aggregate metrics (today active + total cost) computed
-// pure-client-side from allSessionsCache. Prompts and tokens are deferred
-// because they need backend aggregation.
+// TestDashboardJS_R110P1_HomePanelStats pins the Round 147 + #445 contract
+// for the Home-panel stats strip. Round 146 landed the "最近会话" list; this
+// strip adds three aggregate metrics (today active + processed prompts +
+// total cost) computed pure-client-side from allSessionsCache. Only the
+// cumulative token total is deferred — it needs a backend event-log
+// aggregator (no per-session token field in the snapshot).
 //
 // Three structural invariants:
 //
@@ -4216,7 +4217,8 @@ func TestDashboardJS_R110P1_HomePanelStats(t *testing.T) {
 		`new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime()`,
 		`typeof s.last_active === 'number' && s.last_active >= dayStart`,
 		`typeof s.total_cost === 'number' && isFinite(s.total_cost)`,
-		`return { todayActive: todayActive, totalCost: totalCost };`,
+		`typeof s.message_count === 'number' && isFinite(s.message_count)`,
+		`return { todayActive: todayActive, totalCost: totalCost, promptCount: promptCount };`,
 	} {
 		if !strings.Contains(js, fragment) {
 			t.Errorf("computeHomeStats body missing contract fragment %q", fragment)
@@ -4266,7 +4268,7 @@ func TestDashboardJS_R110P1_HomePanelStats(t *testing.T) {
 		t.Error("stats strip must render BEFORE the session list — reverse order would push the list below the fold on short viewports")
 	}
 	// Chinese labels — operators should see Chinese copy.
-	for _, want := range []string{"今日活跃会话", "累计花费"} {
+	for _, want := range []string{"今日活跃会话", "已处理 prompt", "累计花费"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renderRecentSessionsPanel stats strip missing Chinese label %q", want)
 		}
@@ -4296,11 +4298,11 @@ func TestDashboardHTML_R110P1_HomePanelStatsStyles(t *testing.T) {
 		}
 	}
 
-	// 2-column grid is the intended layout (today active + cost). Anchor
-	// the declaration inside the .recent-panel-stats rule so a future
-	// single-column reflow would trip the check.
-	if ok, _ := regexp.MatchString(`\.recent-panel-stats\{[^}]*grid-template-columns:1fr 1fr`, css); !ok {
-		t.Error(".recent-panel-stats must be a 2-column grid (today active + total cost)")
+	// 3-column grid is the intended layout (today active + processed prompts
+	// + cost). Anchor the declaration inside the .recent-panel-stats rule so
+	// a future single-column reflow would trip the check.
+	if ok, _ := regexp.MatchString(`\.recent-panel-stats\{[^}]*grid-template-columns:1fr 1fr 1fr`, css); !ok {
+		t.Error(".recent-panel-stats must be a 3-column grid (today active + processed prompts + total cost)")
 	}
 	// Tabular-nums on the stat value so numbers align optically when
 	// count of active sessions crosses digit boundaries (1 → 10).

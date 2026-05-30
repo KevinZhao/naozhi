@@ -6282,11 +6282,11 @@ function mainEmptyHtml() {
 // on the idle Home panel. Pure function so a contract test can exercise the
 // "today" boundary and cost summation without driving the DOM.
 //
-// Scope is deliberately conservative: the TODO lists 4 metrics (today active
-// / prompts processed / tokens / cost), but prompts and tokens require an
-// event-log scan or a backend aggregator that doesn't exist yet. The two
-// metrics here (today active count, total cost) are already shipped in
-// /api/sessions per-session fields.
+// Scope: the TODO lists 4 metrics (today active / prompts processed / tokens
+// / cost). Three of them ride on per-session fields ALREADY shipped in
+// /api/sessions, so they're computed client-side here. The fourth (cumulative
+// token count) is the only one still needing a backend event-log aggregator
+// (no per-session token total in the snapshot), so it stays deferred.
 //
 //   todayActive — sessions whose last_active >= local-midnight today. Uses
 //                 the JS Date constructor so the user's browser timezone
@@ -6294,9 +6294,13 @@ function mainEmptyHtml() {
 //   totalCost   — sum of s.total_cost across all cached sessions (not gated
 //                 by today, because a cron-heavy workspace accumulates cost
 //                 overnight and wiping at midnight would hide it).
+//   promptCount — sum of s.message_count (cumulative user-turn count the
+//                 router tracks per session, serialized as message_count).
+//                 Same all-time scope as totalCost: a running total of
+//                 prompts the deployment has processed, not a today gate.
 //
-// Input shape tolerant: missing last_active / total_cost on a session
-// contributes zero / is skipped rather than NaN-poisoning the totals.
+// Input shape tolerant: missing last_active / total_cost / message_count on a
+// session contributes zero / is skipped rather than NaN-poisoning the totals.
 function computeHomeStats(items, nowMs) {
   const arr = Array.isArray(items) ? items : [];
   const now = typeof nowMs === 'number' ? nowMs : Date.now();
@@ -6304,12 +6308,14 @@ function computeHomeStats(items, nowMs) {
   const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime();
   let todayActive = 0;
   let totalCost = 0;
+  let promptCount = 0;
   for (const s of arr) {
     if (!s) continue;
     if (typeof s.last_active === 'number' && s.last_active >= dayStart) todayActive++;
     if (typeof s.total_cost === 'number' && isFinite(s.total_cost)) totalCost += s.total_cost;
+    if (typeof s.message_count === 'number' && isFinite(s.message_count)) promptCount += s.message_count;
   }
-  return { todayActive: todayActive, totalCost: totalCost };
+  return { todayActive: todayActive, totalCost: totalCost, promptCount: promptCount };
 }
 
 // formatHomeCost keeps the $/precision format close to the session card's
@@ -6415,15 +6421,20 @@ function renderRecentSessionsPanel() {
       (ago ? '<span class="recent-time">' + esc(ago) + '</span>' : '') +
       '</button>';
   }).join('');
-  // R110-P1 Home stats strip (Round 147): today-active + total cost. Rendered
-  // above the list so operators see a cumulative signal before scanning the
-  // session rows. Prompts and tokens need backend aggregation — omitted here.
+  // R110-P1 Home stats strip (Round 147 + #445): today-active + processed
+  // prompts + total cost. Rendered above the list so operators see a
+  // cumulative signal before scanning the session rows. The cumulative token
+  // total still needs a backend event-log aggregator — omitted here.
   const stats = computeHomeStats(items, Date.now());
   const statsHtml =
     '<div class="recent-panel-stats" role="group" aria-label="今日概览">' +
       '<div class="recent-stat">' +
         '<div class="recent-stat-value">' + stats.todayActive + '</div>' +
         '<div class="recent-stat-label">今日活跃会话</div>' +
+      '</div>' +
+      '<div class="recent-stat">' +
+        '<div class="recent-stat-value">' + stats.promptCount + '</div>' +
+        '<div class="recent-stat-label">已处理 prompt</div>' +
       '</div>' +
       '<div class="recent-stat">' +
         '<div class="recent-stat-value">' + esc(formatHomeCost(stats.totalCost)) + '</div>' +
