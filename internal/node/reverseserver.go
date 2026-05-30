@@ -3,6 +3,7 @@ package node
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"expvar"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -16,6 +17,23 @@ import (
 	"github.com/naozhi/naozhi/internal/ratelimit"
 	"golang.org/x/time/rate"
 )
+
+// insecureReverseUpgradeTotal counts reverse-node WS upgrades accepted
+// over plain HTTP from a non-loopback host — i.e. connections where the
+// bearer token rides the first frame in cleartext, observable to any
+// passive on-path party (R226-SEC-3 / R229-SEC-5, #1026).
+//
+// The existing warnInsecureReverseUpgradeOnce log fires at most once per
+// process to avoid reconnect-storm log floods, which means an operator
+// who tails the journal after the first event sees nothing further and
+// has no way to gauge ongoing exposure. This monotonic expvar gauge fills
+// that gap: it is published on /debug/vars (the dashboard's existing
+// expvar endpoint) so a sustained non-zero delta is an actionable signal
+// that TLS is still missing in front of /ws-node. Counter semantics
+// (Add(1)) match the metric's "how many cleartext-token upgrades have we
+// accepted" question; a zero value means every reverse upgrade arrived
+// over TLS or from loopback.
+var insecureReverseUpgradeTotal = expvar.NewInt("naozhi_node_insecure_reverse_upgrade_total")
 
 // truncateLabelUTF8 truncates s to at most max bytes while preserving UTF-8
 // validity and stripping log-injection codepoints. Raw byte truncation is
@@ -96,6 +114,11 @@ var reverseUpgrader = websocket.Upgrader{
 		// existing private-network deployments don't break, but make the
 		// origin-spoof exposure visible in logs. Operators who want to
 		// silence this should put TLS in front of /ws-node.
+		//
+		// Bump the monotonic counter on every such upgrade (not just the
+		// first) so /debug/vars reflects ongoing cleartext-token exposure
+		// even after the once-guarded warn has already fired (#1026).
+		insecureReverseUpgradeTotal.Add(1)
 		warnInsecureReverseUpgradeOnce(r.Host)
 		return true
 	},

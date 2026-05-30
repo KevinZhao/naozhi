@@ -231,6 +231,7 @@ func (c *Connector) loadPreviewFunc() previewFn {
 // fire so operators can still see each failure reason.
 func (c *Connector) Run(ctx context.Context) {
 	backoff := time.Second
+	connectorBackoffMillis.Set(backoff.Milliseconds())
 	consecutiveFailures := 0
 	circuitTripped := false
 	for {
@@ -254,6 +255,7 @@ func (c *Connector) Run(ctx context.Context) {
 			// Reset backoff after a successful session so reconnect
 			// after sleep/restart is fast (1s) rather than up to 30s.
 			backoff = time.Second
+			connectorBackoffMillis.Set(backoff.Milliseconds())
 		} else {
 			consecutiveFailures++
 			if consecutiveFailures >= circuitBreakerThreshold {
@@ -266,6 +268,7 @@ func (c *Connector) Run(ctx context.Context) {
 				}
 				if backoff < circuitBreakerBackoff {
 					backoff = circuitBreakerBackoff
+					connectorBackoffMillis.Set(backoff.Milliseconds())
 				}
 			}
 		}
@@ -284,6 +287,7 @@ func (c *Connector) Run(ctx context.Context) {
 			// clears it.
 			if backoff < circuitBreakerBackoff {
 				backoff = min(backoff*2, reconnectBackoffCeiling)
+				connectorBackoffMillis.Set(backoff.Milliseconds())
 			}
 		}
 	}
