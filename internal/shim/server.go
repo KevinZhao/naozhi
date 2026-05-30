@@ -877,7 +877,14 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	// Replay buffered lines directly (still not the active client, no duplication)
 	lines := s.buffer.LinesSince(attachMsg.Seq)
 	for _, l := range lines {
-		writeMsg(conn, ServerMsg{Type: "replay", Seq: l.seq, Line: string(l.data)})
+		// MarshalReplayLine aliases l.data (stable for the entry's life, see
+		// RingBuffer.Push/LinesSince) only across the synchronous marshal, and
+		// writeRaw writes the frame before the next iteration — no copy needed.
+		data, err := MarshalReplayLine(l.seq, l.data)
+		if err != nil {
+			continue
+		}
+		writeRaw(conn, data)
 	}
 	writeMsg(conn, ServerMsg{Type: "replay_done", Count: len(lines)})
 
@@ -1184,6 +1191,14 @@ func writeMsg(conn net.Conn, msg ServerMsg) {
 	if err != nil {
 		return
 	}
+	writeRaw(conn, data)
+}
+
+// writeRaw writes a pre-marshaled NDJSON frame with the same 10s write
+// deadline guard as writeMsg. Split out so the reconnect replay loop can feed
+// MarshalReplayLine's zero-copy output without re-stringifying each buffered
+// line through a ServerMsg.
+func writeRaw(conn net.Conn, data []byte) {
 	// If SetWriteDeadline fails (conn already closed by defer teardown), skip
 	// the write. Without a deadline, a stalled client could pin the single-
 	// client semaphore slot indefinitely — the point of the deadline is to

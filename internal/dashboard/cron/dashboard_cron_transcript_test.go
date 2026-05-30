@@ -512,7 +512,6 @@ func TestTranscript_HappyPath_ClaudeDirContainsSymlink(t *testing.T) {
 	}
 }
 
-
 // TestFlattenUserEvent_PreallocCapacity pins R241-PERF-7: per-line slice
 // allocation must match the actual turn count exactly. The prior
 // implementation hard-coded `make([]transcriptTurn, 0, 2)` which over-
@@ -1135,35 +1134,28 @@ func TestFlattenAssistantEvent_AssistantFirstThenSequentialIndices(t *testing.T)
 }
 
 // TestTranscript_ConcurrencyCap_503WhenAllSlotsBusy pins R243-SEC-12 (#798):
-// when transcriptSem is saturated (every transcriptConcurrencyCap slot
-// held by an in-flight handler), arriving requests must receive 503
-// "transcript busy" immediately — NOT 200 with a partial payload, and
-// NOT a queued wait. The non-blocking acquire is the load-shedding gate
-// that bounds peak resident bytes (cap × 8 MB LimitReader + cap ×
-// 256 KB Scanner buffer) under multi-operator load.
+// when the per-Handlers transcriptSem is saturated (every slot held by
+// an in-flight handler), arriving requests must receive 503 "transcript
+// busy" immediately — NOT 200 with a partial payload, and NOT a queued
+// wait. The non-blocking acquire is the load-shedding gate that bounds
+// peak resident bytes (cap × 8 MB LimitReader + cap × 256 KB Scanner
+// buffer) under multi-operator load.
 //
-// Test approach: directly fill the package-level transcriptSem channel
-// to the cap, then call the handler with a known-good fixture and
-// verify it returns 503. We restore the channel state via defer so
-// subsequent parallel tests don't observe a saturated semaphore. NOT
-// t.Parallel() because this test mutates package-global state.
+// Test approach: wire a cap-1 instance semaphore on the fixture handler,
+// fill its single slot, then call the handler with a known-good fixture
+// and verify it returns 503 instead of the real 200 payload. The
+// semaphore is per-Handlers so this no longer mutates package-global
+// state — kept non-parallel only for symmetry with the sibling tests.
 func TestTranscript_ConcurrencyCap_503WhenAllSlotsBusy(t *testing.T) {
-	// Saturate the package-level semaphore so the handler's non-blocking
-	// acquire takes the default branch.
-	for i := 0; i < transcriptConcurrencyCap; i++ {
-		transcriptSem <- struct{}{}
-	}
-	// Drain on exit so other tests aren't blocked by leaked slots.
-	defer func() {
-		for i := 0; i < transcriptConcurrencyCap; i++ {
-			<-transcriptSem
-		}
-	}()
-
 	now := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
 	h, jobID, runID, _ := fixtureRunWithJSONL(t, []string{
 		`{"type":"user","timestamp":"` + now + `","message":{"role":"user","content":"x"}}`,
 	})
+
+	// Wire a cap-1 instance gate and saturate it so the handler's
+	// non-blocking acquire takes the default (busy) branch.
+	h.transcriptSem = make(chan struct{}, 1)
+	h.transcriptSem <- struct{}{}
 
 	w := callTranscript(h, jobID, runID)
 	if w.Code != http.StatusServiceUnavailable {
@@ -1182,29 +1174,21 @@ func TestTranscript_ConcurrencyCap_503WhenAllSlotsBusy(t *testing.T) {
 
 // TestTranscript_ConcurrencyCap_ReleasesSlotOnReturn pins the defer-release
 // contract: HandleRunTranscript must release its semaphore slot on every
-// return path so a transient burst doesn't permanently shrink the
-// transcriptConcurrencyCap budget. We acquire cap-1 slots manually,
-// run a real request through the handler (which acquires the last slot
-// and must release it on return), then verify a follow-up request can
-// still acquire — i.e. the slot count returned to capacity. NOT
-// t.Parallel() because this test mutates package-global state.
+// return path so a transient burst doesn't permanently shrink the gate's
+// budget. We run a real request through a cap-1 instance gate (the
+// handler acquires the only slot and must release it on return), then
+// verify a follow-up acquire still succeeds — i.e. the slot returned to
+// the pool. Per-Handlers gate, so no package-global mutation.
 func TestTranscript_ConcurrencyCap_ReleasesSlotOnReturn(t *testing.T) {
-	// Hold cap-1 slots so the handler under test takes the LAST slot.
-	for i := 0; i < transcriptConcurrencyCap-1; i++ {
-		transcriptSem <- struct{}{}
-	}
-	defer func() {
-		for i := 0; i < transcriptConcurrencyCap-1; i++ {
-			<-transcriptSem
-		}
-	}()
-
 	now := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
 	h, jobID, runID, _ := fixtureRunWithJSONL(t, []string{
 		`{"type":"user","timestamp":"` + now + `","message":{"role":"user","content":"hi"}}`,
 	})
 
-	// First request must succeed (cap-1 held + 1 acquired = cap, no overflow).
+	// Cap-1 gate: the handler under test must take and release the only slot.
+	h.transcriptSem = make(chan struct{}, 1)
+
+	// First request must succeed (acquires the slot, releases on return).
 	w := callTranscript(h, jobID, runID)
 	if w.Code != http.StatusOK {
 		t.Fatalf("first call status = %d body=%s", w.Code, w.Body.String())
@@ -1214,12 +1198,10 @@ func TestTranscript_ConcurrencyCap_ReleasesSlotOnReturn(t *testing.T) {
 	// Confirm by attempting a non-blocking acquire — if the slot is
 	// available, this select takes the case branch.
 	select {
-	case transcriptSem <- struct{}{}:
-		// Got the released slot back. Return it so we don't leak across
-		// tests; the deferred drain above only counts cap-1 receives.
-		<-transcriptSem
+	case h.transcriptSem <- struct{}{}:
+		<-h.transcriptSem
 	default:
-		t.Errorf("handler did not release its semaphore slot on return — "+
-			"defer release contract broken; transcriptSem at cap=%d", len(transcriptSem))
+		t.Errorf("handler did not release its semaphore slot on return — " +
+			"defer release contract broken")
 	}
 }

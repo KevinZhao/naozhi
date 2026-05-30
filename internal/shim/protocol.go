@@ -118,6 +118,36 @@ func MarshalStdoutLine(seq int64, line []byte) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
+// MarshalReplayLine builds the NDJSON envelope for a "replay" frame directly
+// from the buffered line bytes, skipping the `string(line)` copy the generic
+// MarshalLine path forces. Mirrors MarshalStdoutLine but stamps Type "replay"
+// + the supplied Seq, for the reconnect buffer-replay loop.
+//
+// On a 10k-line ring a single reconnect would otherwise copy every buffered
+// line into a string just to feed json.Marshal a second pass; aliasing the
+// stable ring bytes via unsafe.String removes that per-line alloc.
+//
+// SAFETY: the returned []byte aliases `line` only for the duration of the
+// synchronous json.Marshal below (the encoder copies escaped runes into its
+// own output buffer, so the result borrows nothing). The replay caller writes
+// the frame synchronously via conn.Write before advancing to the next buffered
+// line, and the RingBuffer's LinesSince hands back stable copies that outlive
+// the loop — so the borrowed bytes cannot be mutated mid-marshal. Output is
+// byte-for-byte identical to
+// `(&ServerMsg{Type:"replay",Seq:seq,Line:string(line)}).MarshalLine()`.
+func MarshalReplayLine(seq int64, line []byte) ([]byte, error) {
+	var lineStr string
+	if len(line) > 0 {
+		lineStr = unsafe.String(&line[0], len(line))
+	}
+	m := ServerMsg{Type: "replay", Seq: seq, Line: lineStr}
+	data, err := json.Marshal(&m)
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
 // ParseClientMsg parses a single NDJSON line into a ClientMsg.
 func ParseClientMsg(line []byte) (ClientMsg, error) {
 	var msg ClientMsg

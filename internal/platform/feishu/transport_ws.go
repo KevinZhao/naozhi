@@ -311,9 +311,20 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 				"size", len(text))
 			return parsedEvent{}, false
 		}
-		for _, m := range msg.Mentions {
-			if m.Key != nil {
-				text = strings.ReplaceAll(text, *m.Key, "")
+		// Strip all @-mention tokens in a single pass, mirroring the
+		// webhook path in transport_hook.go. Previously each ReplaceAll
+		// allocated a fresh string and copied the whole text; a group
+		// message with multiple @ users did that N times. WS is the
+		// default transport, so it carries the bulk of inbound traffic.
+		if len(msg.Mentions) > 0 {
+			pairs := make([]string, 0, len(msg.Mentions)*2)
+			for _, m := range msg.Mentions {
+				if m.Key != nil {
+					pairs = append(pairs, *m.Key, "")
+				}
+			}
+			if len(pairs) > 0 {
+				text = strings.NewReplacer(pairs...).Replace(text)
 			}
 		}
 		text = strings.TrimSpace(text)

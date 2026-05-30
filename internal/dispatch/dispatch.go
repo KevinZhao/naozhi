@@ -692,8 +692,11 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 
 		// Convert platform images to CLI image data
 		var images []cli.ImageData
-		for _, img := range msg.Images {
-			images = append(images, cli.ImageData{Data: img.Data, MimeType: img.MimeType})
+		if len(msg.Images) > 0 {
+			images = make([]cli.ImageData, 0, len(msg.Images))
+			for _, img := range msg.Images {
+				images = append(images, cli.ImageData{Data: img.Data, MimeType: img.MimeType})
+			}
 		}
 
 		// Passthrough mode: direct dispatch — every message gets its own
