@@ -1060,7 +1060,19 @@ func (s *Scheduler) NotifyDefault() NotifyTarget {
 
 // StartedAt 返回 Scheduler 最近一次 Start() 的时刻。用于 missed-schedule
 // 检测的启动抑制窗口。未 Start 前返回零值。
+//
+// Safe to call on a nil *Scheduler: returns the zero time. R249-CR-11
+// (#955): NotifyDefault()'s godoc already advertised StartedAt() as part
+// of the nil-safe read-accessor family used by the dashboard during the
+// bootstrap window, but the method dereferenced s.startedAtNanos with no
+// nil guard — a documented-but-unenforced contract. The dashboard reads
+// these three accessors (Location / NotifyDefault / StartedAt) together to
+// render a placeholder before the scheduler is wired, so a nil receiver on
+// one of them must not panic while the other two return safely.
 func (s *Scheduler) StartedAt() time.Time {
+	if s == nil {
+		return time.Time{}
+	}
 	ns := s.startedAtNanos.Load()
 	if ns == 0 {
 		return time.Time{}
