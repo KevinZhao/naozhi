@@ -596,6 +596,30 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(), "工作目录不可达，本次执行已跳过。"))
 		return noopRefresh, false
 	}
+	// CRON1 / R194 (#401) — fresh-context atomicity invariant.
+	//
+	// Reset(key) here and the caller's subsequent GetOrCreate(key) (executeOpt
+	// line ~1321) are two separate s.router (r.mu) acquisitions. A concurrent
+	// rebuild landing in the gap could resurrect the cron:<jobID> session with
+	// stale opts, bypassing fresh semantics. The router does not (yet) expose
+	// an atomic ResetAndGetOrCreate primitive, so correctness rests on a
+	// documented single-writer invariant rather than a lock:
+	//
+	//   (1) cron↔cron: executeOpt is serialized per jobID by the inflight CAS
+	//       gate (inflight.running.CompareAndSwap, executeOpt line ~947). A
+	//       scheduled tick and a concurrent TriggerNow for the SAME job cannot
+	//       both reach this Reset — the loser short-circuits at the CAS. This
+	//       half is enforced in-package and pinned by the contract test in
+	//       fresh_context_reset_atomic_test.go.
+	//
+	//   (2) cron↔external: the cron:<jobID> session-key namespace
+	//       (sessionkey.CronKey) is reserved for the scheduler. Dashboard /
+	//       IM sends route to channel-scoped keys (feishu:..., dashboard:...),
+	//       never to a cron: key, so no external GetOrCreate races this Reset.
+	//
+	// If a future feature lets users send directly into a cron:<jobID>
+	// session, invariant (2) breaks and this MUST migrate to a router-level
+	// ResetAndGetOrCreate atomic primitive (issue #401 Option A).
 	s.router.Reset(args.key)
 	lg.Info("cron fresh context: session reset before run")
 	// R239-PERF-13: refresh 闭包改用 snap 固化值直接调 registerStubByValue，
