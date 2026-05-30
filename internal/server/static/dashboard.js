@@ -3266,14 +3266,17 @@ function eventHtml(e, opts) {
   const askBtn = isLong && e.type === 'text'
     ? '<button class="event-ask-btn hover-only" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" onclick="askAside(this)" title="基于此内容追问">↗ 追问</button>'
     : '';
-  // R110-P3 hover toolbar (retry slice): on long *user* bubbles surface a
-  // 重试 button that refills the original prompt back into #msg-input for
-  // editing + resend — reuses the Claude-Code interrupt-refill UX (see
-  // setMsgValue path in interruptSession) so a typo'd or under-specified
-  // prompt is one click from a do-over instead of retype-from-scratch.
-  // Gated to user bubbles only (assistant text isn't a prompt to resend)
-  // and to the same isLong threshold as copy so short bubbles stay calm.
-  const retryBtn = isLong && e.type === 'user'
+  // R110-P3 hover toolbar (retry slice): on *user* bubbles surface a 重试
+  // button that refills the original prompt back into #msg-input for editing
+  // + resend — reuses the Claude-Code interrupt-refill UX (see setMsgValue
+  // path in interruptSession) so a typo'd or under-specified prompt is one
+  // click from a do-over instead of retype-from-scratch. Gated to user bubbles
+  // only (assistant text isn't a prompt to resend). Unlike copy/ask it does
+  // NOT require isLong: short one-liners ("再试一次" / "用中文") are exactly the
+  // prompts most worth a quick re-fire, and they're the cheapest to retype
+  // by hand — so withholding the button on short bubbles would hide it where
+  // it's most useful. Empty bubbles still get nothing (cleanRaw guard).
+  const retryBtn = !!cleanRaw && e.type === 'user'
     ? '<button class="event-retry-btn hover-only" data-raw="' + escAttr(cleanRaw) + '" onclick="refillEventToInput(this)" title="把这条消息填回输入框以便修改重发" aria-label="重试这条消息">↻ 重试</button>'
     : '';
 

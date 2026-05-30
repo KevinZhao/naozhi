@@ -838,8 +838,8 @@ func TestDashboardJS_RetryButton(t *testing.T) {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
 	js := string(data)
-	if !strings.Contains(js, "const retryBtn = isLong && e.type === 'user'\n    ? '<button class=\"event-retry-btn hover-only\"") {
-		t.Error("retry button must gate on isLong AND user type only AND always carry the .hover-only class")
+	if !strings.Contains(js, "const retryBtn = !!cleanRaw && e.type === 'user'\n    ? '<button class=\"event-retry-btn hover-only\"") {
+		t.Error("retry button must gate on non-empty user bubbles (no isLong requirement) AND always carry the .hover-only class")
 	}
 	if !strings.Contains(js, `onclick="refillEventToInput(this)"`) {
 		t.Error("retry button must wire to refillEventToInput")
