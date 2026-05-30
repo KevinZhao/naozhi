@@ -16,9 +16,10 @@ import (
 func TestNotifyTargetEmptyTextNoSend(t *testing.T) {
 	t.Parallel()
 	fp := &fakePartialPlatform{failAt: 1000, maxLen: 8}
-	s := &Scheduler{
+	s := &Scheduler{}
+	s.configMapsPtr.Store(&cronConfigMaps{
 		platforms: map[string]platform.Platform{"fake-notify": fp},
-	}
+	})
 
 	s.notifyTarget("fake-notify", "chat-x", "")
 
@@ -35,9 +36,10 @@ func TestNotifyTargetEmptyTextNoSend(t *testing.T) {
 func TestNotifyTargetNonEmptyStillSends(t *testing.T) {
 	t.Parallel()
 	fp := &fakePartialPlatform{failAt: 1000, maxLen: 8}
-	s := &Scheduler{
+	s := &Scheduler{}
+	s.configMapsPtr.Store(&cronConfigMaps{
 		platforms: map[string]platform.Platform{"fake-notify": fp},
-	}
+	})
 
 	s.notifyTarget("fake-notify", "chat-x", "hi")
 
