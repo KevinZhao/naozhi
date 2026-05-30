@@ -209,10 +209,10 @@ func (s *Server) registerDashboard() {
 	// dashboard.go as a whole, so moving these calls into a same-file helper
 	// keeps the golden snapshot byte-for-byte stable.
 	s.registerSessionRoutes(auth)
-	s.mux.HandleFunc("GET /api/discovered", auth(s.discoveryH.HandleList))
-	s.mux.HandleFunc("GET /api/discovered/preview", auth(s.discoveryH.HandlePreview))
-	s.mux.HandleFunc("POST /api/discovered/takeover", auth(s.discoveryH.HandleTakeover))
-	s.mux.HandleFunc("POST /api/discovered/close", auth(s.discoveryH.HandleClose))
+	// R260528-ARCH-6 (#1367) incremental slice: the discovered-session route
+	// group (list/preview/takeover/close) extracted into its own same-file
+	// helper, continuing the registerDashboard god-function decomposition.
+	s.registerDiscoveredRoutes(auth)
 	s.mux.HandleFunc("GET /api/projects", auth(s.projectH.HandleList))
 	s.mux.HandleFunc("GET /api/projects/config", auth(s.projectH.HandleConfigGet))
 	s.mux.HandleFunc("PUT /api/projects/config", auth(s.projectH.HandleConfigPut))
@@ -307,6 +307,18 @@ func (s *Server) registerSessionRoutes(auth func(http.HandlerFunc) http.HandlerF
 	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.HandleResume))
 	s.mux.HandleFunc("POST /api/sessions/interrupt", auth(s.sessionH.HandleInterrupt))
 	s.mux.HandleFunc("PATCH /api/sessions/label", auth(s.sessionH.HandleSetLabel))
+}
+
+// registerDiscoveredRoutes wires the discovered-session route group
+// (list / preview / takeover / close). Extracted from registerDashboard as a
+// further slice of the R260528-ARCH-6 (#1367) god-package decomposition.
+// `auth` is the caller's RequireAuth wrapper; behaviour is byte-identical to
+// the inline block it replaced.
+func (s *Server) registerDiscoveredRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
+	s.mux.HandleFunc("GET /api/discovered", auth(s.discoveryH.HandleList))
+	s.mux.HandleFunc("GET /api/discovered/preview", auth(s.discoveryH.HandlePreview))
+	s.mux.HandleFunc("POST /api/discovered/takeover", auth(s.discoveryH.HandleTakeover))
+	s.mux.HandleFunc("POST /api/discovered/close", auth(s.discoveryH.HandleClose))
 }
 
 // registerCronRoutes wires the cron route group (CRUD + pause/resume/trigger/
