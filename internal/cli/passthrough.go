@@ -260,7 +260,12 @@ func (p *Process) removeSlotByID(id uint64) {
 	defer p.slotsMu.Unlock()
 	for i, s := range p.pendingSlots {
 		if s.id == id {
-			p.pendingSlots = append(p.pendingSlots[:i], p.pendingSlots[i+1:]...)
+			old := p.pendingSlots
+			p.pendingSlots = append(old[:i], old[i+1:]...)
+			// Zero the now-unused tail element so GC can reclaim the
+			// dropped slot reference instead of leaving it dangling in
+			// the backing array until overwritten.
+			old[len(old)-1] = nil
 			return
 		}
 	}
