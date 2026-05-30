@@ -247,6 +247,35 @@ func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.Incomin
 	d.replyText(ctx, msg, help, nil)
 }
 
+// resolveAgentToken maps a user-supplied /new <agent> token to a stored
+// agent ID. agentToReset is expected already lowercased (handleNewCommand
+// normalizes it). Resolution is two-stage:
+//
+//  1. exact lookup against agentCommands keys (keys are pre-normalized to
+//     lowercase in applyDefaults);
+//  2. EqualFold scan over the stored values — operator-supplied agent IDs
+//     may legitimately carry mixed case (e.g. "ReviewerBot"), so a user
+//     typing "/new ReviewerBot" still resolves even though the lookup key
+//     was lowercased (R250-CR-26).
+//
+// R0530-CR-1: both the project-bound and unbound branches of
+// handleNewCommand share this helper so the EqualFold fallback can't drift
+// out of one branch — previously only the unbound branch had stage 2, so
+// "/new ReviewerBot" worked in unbound chats but returned "未知的 agent"
+// in project-bound chats. The linear scan stays — agentCommands is a small
+// operator-curated map, not a hot path.
+func (d *Dispatcher) resolveAgentToken(agentToReset string) (string, bool) {
+	if id, ok := d.agentCommands[agentToReset]; ok {
+		return id, true
+	}
+	for _, id := range d.agentCommands {
+		if strings.EqualFold(id, agentToReset) {
+			return id, true
+		}
+	}
+	return "", false
+}
+
 func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) {
 	agentToReset := ""
 	if parts := strings.SplitN(trimmed, " ", 2); len(parts) > 1 {
@@ -273,7 +302,10 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 			d.discardQueue(plannerKey)
 			d.replyText(ctx, msg, "项目 "+b.Name+" 的 planner 已重置。", log)
 		} else {
-			if id, ok := d.agentCommands[agentToReset]; ok {
+			// R0530-CR-1: resolve via the shared helper so this branch gets
+			// the same EqualFold fallback the unbound branch has — otherwise
+			// "/new ReviewerBot" resolves in unbound chats but not here.
+			if id, ok := d.resolveAgentToken(agentToReset); ok {
 				key := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, id)
 				d.router.Reset(key)
 				d.discardQueue(key)
@@ -290,41 +322,27 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 
 	agentID := "general"
 	if agentToReset != "" {
-		if id, ok := d.agentCommands[agentToReset]; ok {
+		// R250-CR-26 / R0530-CR-1: resolve via the shared helper (exact key
+		// lookup then EqualFold value scan) so mixed-case operator agent IDs
+		// like "ReviewerBot" resolve regardless of bound/unbound branch.
+		if id, ok := d.resolveAgentToken(agentToReset); ok {
 			agentID = id
 		} else {
-			// R250-CR-26: agentToReset was lowercased above (line 251); the
-			// stored values in agentCommands are operator-supplied agent IDs
-			// which may legitimately carry mixed case (e.g. "ReviewerBot").
-			// Use EqualFold so a user typing "/new ReviewerBot" still resets
-			// the right session even though the lookup-key path normalizes
-			// to lowercase. The linear scan stays — agentCommands is a small
-			// operator-curated map, not a hot path.
-			found := false
-			for _, id := range d.agentCommands {
-				if strings.EqualFold(id, agentToReset) {
-					agentID = id
-					found = true
-					break
+			// R187-SEC-M1: agentToReset is user IM input, sanitize before
+			// echo back to avoid bidi-override visual spoofing.
+			errMsg := "未知的 agent: " + osutil.SanitizeForLog(agentToReset, 64)
+			if len(d.agentCommands) > 0 {
+				// R190-MAP-L1: sort so the hint line is stable across
+				// calls; otherwise the "可用:" list shuffles randomly.
+				names := make([]string, 0, len(d.agentCommands))
+				for cmd := range d.agentCommands {
+					names = append(names, cmd)
 				}
+				slices.Sort(names)
+				errMsg += "\n可用: " + strings.Join(names, ", ")
 			}
-			if !found {
-				// R187-SEC-M1: agentToReset is user IM input, sanitize before
-				// echo back to avoid bidi-override visual spoofing.
-				errMsg := "未知的 agent: " + osutil.SanitizeForLog(agentToReset, 64)
-				if len(d.agentCommands) > 0 {
-					// R190-MAP-L1: sort so the hint line is stable across
-					// calls; otherwise the "可用:" list shuffles randomly.
-					names := make([]string, 0, len(d.agentCommands))
-					for cmd := range d.agentCommands {
-						names = append(names, cmd)
-					}
-					slices.Sort(names)
-					errMsg += "\n可用: " + strings.Join(names, ", ")
-				}
-				d.replyText(ctx, msg, errMsg, log)
-				return
-			}
+			d.replyText(ctx, msg, errMsg, log)
+			return
 		}
 	}
 	key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
