@@ -42,40 +42,24 @@ func stringToBytesUnsafe(s string) []byte {
 var resumeIDRe = regexp.MustCompile(`^[A-Za-z0-9-]{1,128}$`)
 
 // ClaudeProtocol implements Protocol for Claude CLI's stream-json format.
-type ClaudeProtocol struct {
-	// SettingsFile is passed to --settings <file>. When non-empty, standard setting
-	// sources are disabled (--setting-sources "") and this file is loaded instead.
-	// Use writeClaudeSettingsOverride() to generate a filtered copy of user settings
-	// that strips hooks calling back into naozhi.
-	SettingsFile string
-
-	// RefreshSettings, when non-nil, is invoked at the start of every BuildArgs
-	// call and its return value (if non-empty) replaces SettingsFile for that
-	// spawn. This lets the override file track edits to ~/.claude/settings.json
-	// at session-spawn granularity, instead of being frozen at naozhi startup.
-	// Returning "" indicates "refresh failed; keep the existing SettingsFile" —
-	// callers that hit a read race or IO error should not nuke the prior path
-	// because the last known-good override still authenticates Bedrock.
-	//
-	// Clone propagates this field so per-spawn copies retain refresh ability.
-	RefreshSettings func() string
-}
+//
+// The spawned claude reads ~/.claude/settings.json directly via
+// `--setting-sources user` (see BuildArgs), so naozhi-spawned cc behaves
+// identically to a command-line cc: single config source, zero extra
+// naozhi-side config, no settings-override copy to maintain. The historical
+// `--setting-sources "" + --settings <override>` path (writeClaudeSettingsOverride
+// / filterHooks) was removed in docs/rfc/direct-user-settings.md PR1. Hook
+// feedback-loop protection now lives at naozhi's HTTP entry auth (webhook
+// signing + dashboard token), not by filtering the user's settings file.
+type ClaudeProtocol struct{}
 
 func (p *ClaudeProtocol) Name() string { return "stream-json" }
 
 func (p *ClaudeProtocol) Clone() Protocol {
-	return &ClaudeProtocol{
-		SettingsFile:    p.SettingsFile,
-		RefreshSettings: p.RefreshSettings,
-	}
+	return &ClaudeProtocol{}
 }
 
 func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
-	if p.RefreshSettings != nil {
-		if path := p.RefreshSettings(); path != "" {
-			p.SettingsFile = path
-		}
-	}
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
@@ -87,7 +71,12 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 		// Safe to always enable: replay events are filtered out of EventLog
 		// (see filterReplayEvent).
 		"--replay-user-messages",
-		"--setting-sources", "", // disable standard settings to avoid hook loops
+		// Load the user's ~/.claude/settings.json directly so naozhi-spawned
+		// cc matches command-line cc (single config source, no override copy).
+		// docs/rfc/direct-user-settings.md PR1. Note: sysession Runner keeps
+		// `--setting-sources ""` (it has no entry-auth and AutoTitler could
+		// dead-loop on host hooks — see runner.go).
+		"--setting-sources", "user",
 	}
 	// R215-SEC-P1-1 / #531: --dangerously-skip-permissions used to be
 	// hard-coded above. It is required by naozhi's `-p` long-lived process
@@ -99,9 +88,6 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	// first permission prompt.
 	if opts.PermissionMode == PermissionModeDefault {
 		args = append(args, "--dangerously-skip-permissions")
-	}
-	if p.SettingsFile != "" {
-		args = append(args, "--settings", p.SettingsFile)
 	}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
@@ -189,8 +175,8 @@ var deniedExtraFlags = map[string]struct{}{
 	"--dangerously-skip-permissions": {}, // BuildArgs already controls this
 	"--append-system-prompt":         {}, // router/scratch own this site
 	"--system-prompt":                {}, // hard override of system prompt
-	"--setting-sources":              {}, // BuildArgs pins "" to disable hooks
-	"--settings":                     {}, // BuildArgs owns settings file
+	"--setting-sources":              {}, // BuildArgs pins "user" (load ~/.claude/settings.json)
+	"--settings":                     {}, // naozhi no longer injects a settings override file
 	"--resume":                       {}, // BuildArgs owns ResumeID validation
 	"--allowed-tools":                {}, // permission allowlist override
 	"--disallowed-tools":             {}, // permission allowlist override

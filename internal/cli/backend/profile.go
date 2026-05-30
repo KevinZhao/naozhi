@@ -115,21 +115,14 @@ type Profile struct {
 }
 
 // ProtocolDeps bundles dependencies needed to construct certain protocols.
-// Most fields are claude-specific (settings file plumbing); ACP profiles
-// can ignore them.
-type ProtocolDeps struct {
-	// SettingsFile is the path to a filtered claude settings.json override
-	// (with hooks calling back into naozhi stripped). Empty for protocols
-	// that don't honor it.
-	SettingsFile string
-
-	// RefreshSettings, when non-nil, is invoked at the start of every
-	// BuildArgs call. Returning a non-empty path swaps SettingsFile for
-	// the next spawn; returning "" means "keep the prior value, refresh
-	// transiently failed" — the caller must NOT clear an existing path
-	// just because refresh failed (Bedrock auth would break).
-	RefreshSettings func() string
-}
+//
+// It is currently empty: the claude backend used to carry a filtered
+// settings-override file path here, but PR1 of
+// docs/rfc/direct-user-settings.md switched claude to `--setting-sources user`
+// (cc reads ~/.claude/settings.json directly), removing the override plumbing.
+// The struct is retained as the NewProtocol parameter so adding future
+// per-spawn dependencies does not change every backend's factory signature.
+type ProtocolDeps struct{}
 
 // registryEntry pairs a Profile with its registration order so All()
 // can return profiles in the order Register was called.

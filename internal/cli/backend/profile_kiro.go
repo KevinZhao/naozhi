@@ -8,8 +8,8 @@ import (
 
 // kiroProfile returns the Profile describing Amazon's kiro CLI. It speaks
 // JSON-RPC 2.0 (Agent Client Protocol) and so it constructs a fresh
-// ACPProtocol per session. ProtocolDeps.SettingsFile / RefreshSettings are
-// ignored — ACP does not honor a claude-style settings override.
+// ACPProtocol per session. ProtocolDeps is ignored — ACP does not honor a
+// claude-style settings override.
 //
 // RequiredNodeCaps lists "acp" so that reverse-node routing (per
 // internal/server/select_node_for_backend.go) can reject hosts that do not

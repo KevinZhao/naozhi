@@ -120,7 +120,13 @@ func main() {
 			slog.Error("apply ~/.claude/settings.json env: read or parse failed", "err", err)
 		}
 	}
-	settingsFile := writeClaudeSettingsOverride(ctx, cfg.Server.Addr)
+	// docs/rfc/direct-user-settings.md PR1: naozhi-spawned cc now loads
+	// ~/.claude/settings.json directly via `--setting-sources user` (set in
+	// cli.ClaudeProtocol.BuildArgs). No settings-override copy is generated;
+	// the parent-process env injection above (applyClaudeEnvSettings) is the
+	// only remaining settings.json consumer in main (it feeds transcribe +
+	// sysession Runner Bedrock auth, see RFC §7.1).
+	slog.Info("claude settings: loading user settings directly", "mode", "user")
 
 	// Register the cli/backend.Profile registry with the built-in profiles
 	// (claude + kiro) before any consumer (discovery, main, server) looks
@@ -151,18 +157,11 @@ func main() {
 	}
 
 	// CQ1 (#396): backend wrapper construction + default selection extracted
-	// to initBackendWrappers. RefreshSettings closes over cfg.Server.Addr so
-	// every spawn regenerates ~/.naozhi/claude-settings.json from the live
-	// ~/.claude/settings.json. Without this, edits made after naozhi start
-	// (adding ANTHROPIC_BEDROCK_BASE_URL, swapping models, etc.) are
-	// invisible to dashboard / cron / IM-spawned sessions until restart.
-	// claude profile copies these into its own ProtocolDeps; kiro profile
-	// ignores them (and Sprint 6a seeds BackendID="kiro" inside the kiro
-	// profile factory itself).
-	serverAddr := cfg.Server.Addr
-	bws, ok := initBackendWrappers(ctx, cfg, shimMgr, settingsFile, func() string {
-		return writeClaudeSettingsOverride(ctx, serverAddr)
-	})
+	// to initBackendWrappers. Post direct-user-settings PR1 there is no
+	// settings-override path to plumb: the claude profile spawns cc with
+	// `--setting-sources user` so live edits to ~/.claude/settings.json are
+	// re-read by cc on every spawn with no naozhi involvement.
+	bws, ok := initBackendWrappers(ctx, cfg, shimMgr)
 	if !ok {
 		if bws.Default == nil {
 			slog.Error("no usable cli backend configured")
