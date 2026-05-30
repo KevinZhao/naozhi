@@ -1029,7 +1029,10 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	// Pass the snapshotted value (via result) to registerStub so a concurrent
 	// SetJobPrompt cannot tear the Prompt/WorkDir pointers we read.
 	s.registerStubFromJob(&result)
-	slog.Info("cron job updated", "job_id", id,
+	// R250-SEC-9 (#1098): sanitise the caller-supplied id on the success
+	// path too — UpdateJob takes a raw id and a future caller that skips
+	// IsValidID must not be able to inject control bytes into journalctl.
+	slog.Info("cron job updated", "job_id", osutil.SanitizeForLog(id, MaxIDLen),
 		"schedule_changed", upd.Schedule != nil,
 		"prompt_changed", upd.Prompt != nil,
 		"workdir_changed", upd.WorkDir != nil,
@@ -1128,7 +1131,9 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	// empty-prompt state from the initial AddJob until the next executeJob
 	// tick rebuilds it.
 	s.registerStubByValue(id, stubWorkDir, prompt, stubLastSession)
-	slog.Info("cron job prompt set", "job_id", id, "prompt_len", len(prompt))
+	// R250-SEC-9 (#1098): same defence-in-depth as UpdateJob — sanitise the
+	// raw caller-supplied id before it reaches journalctl.
+	slog.Info("cron job prompt set", "job_id", osutil.SanitizeForLog(id, MaxIDLen), "prompt_len", len(prompt))
 	return nil
 }
 
