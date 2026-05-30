@@ -213,18 +213,17 @@ func (s *Server) registerDashboard() {
 	// group (list/preview/takeover/close) extracted into its own same-file
 	// helper, continuing the registerDashboard god-function decomposition.
 	s.registerDiscoveredRoutes(auth)
-	s.mux.HandleFunc("GET /api/projects", auth(s.projectH.HandleList))
-	s.mux.HandleFunc("GET /api/projects/config", auth(s.projectH.HandleConfigGet))
-	s.mux.HandleFunc("PUT /api/projects/config", auth(s.projectH.HandleConfigPut))
-	s.mux.HandleFunc("POST /api/projects/planner/restart", auth(s.projectH.HandlePlannerRestart))
+	// R237-ARCH-2 (#573) incremental slice: the project route group
+	// (*dashproject.Handlers) extracted into its own same-file helper,
+	// further shrinking registerDashboard's 60+ HandleFunc body. The
+	// /api/planner/stats probe stays inline below because it is a *Server
+	// method, not a projectH handler.
+	s.registerProjectRoutes(auth)
 	// Issue #452 (PLANNER-STATS-1) part-1: process-resource probe so the
 	// dashboard can show RSS / goroutine / planner-fan-out trends without
 	// reaching the loopback-only /api/debug/vars expvar surface. Per-CLI
 	// per-process RSS is the part-2 follow-up; see dashboard_planner_stats.go.
 	s.mux.HandleFunc("GET /api/planner/stats", auth(s.handlePlannerStats))
-	s.mux.HandleFunc("POST /api/projects/favorite", auth(s.projectH.HandleFavoriteToggle))
-	s.mux.HandleFunc("POST /api/projects/files/exists", auth(s.projectH.HandleFilesExists))
-	s.mux.HandleFunc("GET /api/projects/file", auth(s.projectH.HandleFileGet))
 	s.mux.HandleFunc("POST /api/transcribe", auth(s.transcribeH.HandleTranscribe))
 	// R260528-ARCH-6 (#1367) incremental slice: the cron route group (CRUD +
 	// pause/resume/trigger/preview + run-history) is extracted into its own
@@ -307,6 +306,25 @@ func (s *Server) registerSessionRoutes(auth func(http.HandlerFunc) http.HandlerF
 	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.HandleResume))
 	s.mux.HandleFunc("POST /api/sessions/interrupt", auth(s.sessionH.HandleInterrupt))
 	s.mux.HandleFunc("PATCH /api/sessions/label", auth(s.sessionH.HandleSetLabel))
+}
+
+// registerProjectRoutes wires the project route group (list / config get+put /
+// planner restart / favorite toggle / files-exists / file get). Extracted from
+// registerDashboard as a further slice of the R237-ARCH-2 (#573) god-function
+// decomposition. All handlers are *dashproject.Handlers methods; the
+// /api/planner/stats probe is deliberately left inline at the call site
+// because it is a *Server method, keeping this helper a single-owner group.
+// http.ServeMux matches by distinct path, so consolidating the registrations
+// here (the favorite/files routes previously sat after planner/stats) does not
+// change routing behaviour.
+func (s *Server) registerProjectRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
+	s.mux.HandleFunc("GET /api/projects", auth(s.projectH.HandleList))
+	s.mux.HandleFunc("GET /api/projects/config", auth(s.projectH.HandleConfigGet))
+	s.mux.HandleFunc("PUT /api/projects/config", auth(s.projectH.HandleConfigPut))
+	s.mux.HandleFunc("POST /api/projects/planner/restart", auth(s.projectH.HandlePlannerRestart))
+	s.mux.HandleFunc("POST /api/projects/favorite", auth(s.projectH.HandleFavoriteToggle))
+	s.mux.HandleFunc("POST /api/projects/files/exists", auth(s.projectH.HandleFilesExists))
+	s.mux.HandleFunc("GET /api/projects/file", auth(s.projectH.HandleFileGet))
 }
 
 // registerDiscoveredRoutes wires the discovered-session route group
