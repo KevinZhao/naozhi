@@ -86,7 +86,9 @@ func TestStartAlreadyStarted(t *testing.T) {
 	t.Parallel()
 	// Webhook mode requires verification_token or encrypt_key — supply one
 	// so Start() reaches the idempotency guard we're exercising here.
-	f := New(Config{AppID: "id", ConnectionMode: "webhook", VerificationToken: "test-token"}, nil)
+	// AllowTokenOnly opts in to token-only mode so Start() does not fail fast
+	// before reaching the idempotency guard (R244-SEC-P1-3).
+	f := New(Config{AppID: "id", ConnectionMode: "webhook", VerificationToken: "test-token", AllowTokenOnly: true}, nil)
 	noop := func(context.Context, platform.IncomingMessage) {}
 	if err := f.Start(noop); err != nil {
 		t.Fatalf("first Start() error = %v", err)
@@ -102,6 +104,29 @@ func TestStartWebhookRejectsMissingAuth(t *testing.T) {
 	noop := func(context.Context, platform.IncomingMessage) {}
 	if err := f.Start(noop); err == nil {
 		t.Fatal("Start() should refuse webhook mode without token or encrypt_key")
+	}
+}
+
+// TestStartWebhookRejectsTokenOnlyWithoutOptIn asserts the R244-SEC-P1-3
+// fail-fast: verification_token-only mode (no encrypt_key HMAC) must be
+// refused unless the operator explicitly opts in via AllowTokenOnly.
+func TestStartWebhookRejectsTokenOnlyWithoutOptIn(t *testing.T) {
+	t.Parallel()
+	f := New(Config{AppID: "id", ConnectionMode: "webhook", VerificationToken: "tok"}, nil)
+	noop := func(context.Context, platform.IncomingMessage) {}
+	if err := f.Start(noop); err == nil {
+		t.Fatal("Start() should fail fast in token-only mode without allow_token_only opt-in")
+	}
+}
+
+// TestStartWebhookAllowsTokenOnlyWithOptIn confirms the opt-in escape hatch:
+// once AllowTokenOnly is set, token-only mode starts (with a warning).
+func TestStartWebhookAllowsTokenOnlyWithOptIn(t *testing.T) {
+	t.Parallel()
+	f := New(Config{AppID: "id", ConnectionMode: "webhook", VerificationToken: "tok", AllowTokenOnly: true}, nil)
+	noop := func(context.Context, platform.IncomingMessage) {}
+	if err := f.Start(noop); err != nil {
+		t.Fatalf("Start() with allow_token_only should succeed, got %v", err)
 	}
 }
 

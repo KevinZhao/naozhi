@@ -201,7 +201,14 @@ type Config struct {
 	ConnectionMode    string `yaml:"connection_mode"` // "websocket" (default) | "webhook"
 	VerificationToken string `yaml:"verification_token"`
 	EncryptKey        string `yaml:"encrypt_key"`
-	MaxReplyLen       int    `yaml:"max_reply_length"`
+	// AllowTokenOnly opts in to the weaker verification_token-only webhook
+	// mode (no encrypt_key HMAC). Without encrypt_key there is no per-request
+	// content signature — an attacker who learns the plaintext token can forge
+	// or replay arbitrary events (only timestamp freshness + nonce replay
+	// defence apply). When EncryptKey is empty this flag must be true or
+	// Start() fails fast (R244-SEC-P1-3). Default false = secure-by-default.
+	AllowTokenOnly bool `yaml:"allow_token_only"`
+	MaxReplyLen    int  `yaml:"max_reply_length"`
 }
 
 // Feishu implements the Platform and RunnablePlatform interfaces.
@@ -537,11 +544,15 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 	}
 	// VerificationToken-only mode relies on a plaintext shared secret in the
 	// request body; if that token ever leaks, events can be forged without
-	// access to the EncryptKey HMAC. Surface a startup warning so operators
-	// know to configure EncryptKey as well. Not fatal — existing v1-only
-	// deployments remain functional.
+	// access to the EncryptKey HMAC (no per-request content signature, only
+	// timestamp freshness + nonce replay defence). Fail fast by default and
+	// require an explicit opt-in so operators consciously accept the weaker
+	// threat model (R244-SEC-P1-3).
 	if f.cfg.EncryptKey == "" {
-		slog.Warn("feishu webhook: verification_token-only mode is less secure than encrypt_key HMAC — configure encrypt_key for defence-in-depth")
+		if !f.cfg.AllowTokenOnly {
+			return fmt.Errorf("feishu webhook: verification_token-only mode has no HMAC content signature — configure encrypt_key, or set feishu.allow_token_only: true to opt in to the weaker threat model")
+		}
+		slog.Warn("feishu webhook: verification_token-only mode is less secure than encrypt_key HMAC — a leaked token allows event forgery; configure encrypt_key for defence-in-depth")
 	}
 	slog.Info("feishu using webhook mode")
 	return nil
