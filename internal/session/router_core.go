@@ -819,8 +819,9 @@ func (r *Router) indexDel(key string) {
 // immutable — fields like Wrapper / Wrappers / Workspace / StorePath
 // / ClaudeDir are sampled into r.* state and never re-read. R230-ARCH-8:
 // changing any of these at runtime requires `systemctl restart naozhi`
-// (with the deliberate exception of `~/.claude/settings.json` which
-// the per-spawn RefreshSettings hook re-loads each turn). Operators
+// (with the deliberate exception of `~/.claude/settings.json`, which cc
+// re-reads itself on every spawn via `--setting-sources user` — see
+// docs/rfc/direct-user-settings.md). Operators
 // editing config.yaml should expect the changes to take effect only on
 // the next process start; see docs/ops/naozhi-deploy-skill.md.
 // HistoryLoader abstracts loading a session's persisted JSONL history tail

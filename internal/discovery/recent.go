@@ -313,8 +313,20 @@ func recentFromJSONLFiles(projDir, workspace string, exclude map[string]bool) []
 	return out
 }
 
+// firstPromptScanBudget bounds how many bytes of *normal* (sub-cap) lines
+// extractFirstPrompt will accumulate before giving up on finding the first
+// user prompt. The first real text turn lands within the first few KB on any
+// normal transcript, so this only trips on a head full of large non-user
+// turns. Oversized lines are drained by readJSONLLine without counting
+// against this budget (draining is pure I/O, no unmarshal), so a head of
+// inline-image lines is skipped cheaply rather than instantly exhausting it.
+const firstPromptScanBudget = 512 * 1024
+
 // extractFirstPrompt reads the first user message from a JSONL file.
-// Only reads up to 64KB from the head to stay fast.
+// Scans at most firstPromptScanBudget bytes from the head to stay fast, and
+// uses readJSONLLine so a leading oversized inline-image line is skipped
+// rather than aborting the scan (which is why the sidebar preview used to be
+// blank for image-heavy sessions).
 func extractFirstPrompt(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
@@ -322,30 +334,29 @@ func extractFirstPrompt(path string) string {
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 16*1024), 64*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		// Fast pre-filter: skip lines that can't be user messages.
-		// This avoids json.Unmarshal on every line. The subsequent Unmarshal
-		// is the authoritative check; this just eliminates obvious non-matches.
-		if len(line) == 0 || !bytes.Contains(line, []byte(`"type"`)) {
-			continue
+	r := bufio.NewReaderSize(f, 16*1024)
+	var scanned int
+	for {
+		line, oversized, rerr := readJSONLLine(r)
+		scanned += len(line)
+		// Fast pre-filter: skip lines that can't be user messages. This
+		// avoids json.Unmarshal on every line; the Unmarshal below is the
+		// authoritative check. Oversized lines carry no first-prompt text.
+		if len(line) > 0 && !oversized && bytes.Contains(line, []byte(`"type"`)) {
+			// Reuse the package's canonical JSONL line schema (history.go)
+			// instead of re-declaring the type/message shape inline. The
+			// extra Timestamp/UUID fields are simply ignored here. (#1478)
+			var hl historyLine
+			if json.Unmarshal(line, &hl) == nil && hl.Type == "user" {
+				if text := extractUserText(hl.Message); text != "" {
+					return SanitizePromptForTransport(textutil.TruncateRunes(text, 120))
+				}
+			}
 		}
-		// Reuse the package's canonical JSONL line schema (history.go)
-		// instead of re-declaring the type/message shape inline. The extra
-		// Timestamp/UUID fields are simply ignored here. (#1478)
-		var hl historyLine
-		if json.Unmarshal(line, &hl) != nil || hl.Type != "user" {
-			continue
-		}
-		text := extractUserText(hl.Message)
-		if text != "" {
-			return SanitizePromptForTransport(textutil.TruncateRunes(text, 120))
+		if rerr != nil || scanned > firstPromptScanBudget {
+			return ""
 		}
 	}
-	return ""
 }
 
 // ---------------------------------------------------------------------------

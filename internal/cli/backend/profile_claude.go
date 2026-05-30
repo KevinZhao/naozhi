@@ -22,11 +22,8 @@ func claudeProfile() Profile {
 		DefaultBinary: "claude",
 		DefaultTag:    "cc",
 		ChipColor:     "#7c5cff", // accent purple, mirrors --nz-accent default token
-		NewProtocol: func(d ProtocolDeps) cli.Protocol {
-			return &cli.ClaudeProtocol{
-				SettingsFile:    d.SettingsFile,
-				RefreshSettings: d.RefreshSettings,
-			}
+		NewProtocol: func(_ ProtocolDeps) cli.Protocol {
+			return &cli.ClaudeProtocol{}
 		},
 		DetectInProc: func(cmdline string) bool {
 			return strings.Contains(cmdline, "claude") && !strings.Contains(cmdline, "kiro")
