@@ -6704,7 +6704,18 @@ const _codeLangBareName = {
 
 function _codeBlockInfo(btn) {
   const wrap = btn.closest('.md-code-wrap');
-  const codeEl = wrap && wrap.querySelector('code');
+  if (!wrap) return { code: '', lang: '' };
+  // Path-list blocks (.md-pathlist) render one <code> per line instead of a
+  // single <pre><code>, so copy must join every row's text — querySelector
+  // alone would copy just the first path. file-ref button injection may also
+  // nest extra <code> inside .fr-slot, so scope to the row's first <code>.
+  if (wrap.classList.contains('md-pathlist')) {
+    const code = Array.from(wrap.querySelectorAll('.md-pathline'))
+      .map(row => { const c = row.querySelector('code'); return c ? c.textContent : ''; })
+      .join('\n');
+    return { code, lang: '' };
+  }
+  const codeEl = wrap.querySelector('code');
   const code = codeEl ? codeEl.textContent : '';
   const lang = (codeEl && codeEl.getAttribute('data-lang') || '').toLowerCase();
   return { code, lang };
@@ -7459,6 +7470,50 @@ const FILE_REF_WITH_SLASH = /^(?:\.\.?\/|\/)?(?!https?:)[^\s:]+(?:\/[^\s:]+)+(?:
 const FILE_REF_BARE_WITH_LINE = /^(?!https?:)[^\s:\/]+\.[A-Za-z0-9_]+:\d+(?:-\d+)?$/;
 function isFileRefCandidate(text) {
   return FILE_REF_WITH_SLASH.test(text) || FILE_REF_BARE_WITH_LINE.test(text);
+}
+
+// Every path-list line's basename must carry a file extension (a `.ext` tail).
+// isFileRefCandidate alone is too loose for whole-block classification:
+// dependency lists (`@angular/core`), module paths (`github.com/gin-gonic/gin`),
+// REST routes (`/api/v1/users`), and fractions/dates (`1/2`, `2024/01/02`) all
+// match the slash-shaped path regex line-for-line and would hijack a legit
+// no-language code block. Real file paths — including every case this fix
+// targets — end in an extension, so this is a cheap high-signal gate that drops
+// those false positives without losing the screenshot scenario (`.html` lists).
+// Trailing `:line` suffixes are stripped by splitPathLine before this runs.
+const FILE_REF_HAS_EXT = /\.[A-Za-z0-9]+$/;
+
+// fencedPathList decides whether a language-less fenced code block is in fact
+// a plain list of file paths (one per line). AI replies frequently dump
+// generated/affected files inside a ``` fence — those paths are invisible to
+// the inline file-ref scanner because it skips <pre> content. When EVERY
+// non-empty line is a path candidate whose basename has an extension (and there
+// are at least two such lines, so a single stray path stays verbatim) we return
+// the trimmed lines so the caller can render them as clickable rows. Returns
+// null otherwise, leaving the verbatim-code path untouched. Requiring all lines
+// to match keeps real code blocks out: any block with one prose/code/extension-
+// less line fails the test.
+//
+// Known non-goal: lines with trailing punctuation (`foo.md。`) or inline
+// backtick wrapping are not normalized here — they'd resolve to a non-existent
+// path and silently get no button. Stripping trailing punctuation risks eating
+// real filename chars, so that is left to a future pass rather than widening
+// the blast radius of this fix.
+function fencedPathList(code) {
+  const lines = code.split('\n');
+  const paths = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line === '') continue;        // blank lines are tolerated as spacing
+    if (line.length > 512) return null;
+    if (!isFileRefCandidate(line)) return null;
+    const { path } = splitPathLine(line);
+    const base = path.slice(path.lastIndexOf('/') + 1);
+    if (!FILE_REF_HAS_EXT.test(base)) return null; // no extension → not a file list
+    paths.push(line);
+  }
+  if (paths.length < 2) return null;  // single path: leave as-is, not a "list"
+  return paths;
 }
 
 // expandBraces expands a single `{a,b,c}` group in a path candidate into its
@@ -8269,6 +8324,25 @@ function renderMdUncached(s) {
       // still surfaces the source instead of crashing the bubble.
       if (lang === 'math' || lang === 'latex' || lang === 'tex') {
         return '<div class="md-math-display">' + renderKatex(code, true) + '</div>';
+      }
+      // Path-list fence: a language-less block whose every non-empty line is a
+      // file-path literal (the shape AI emits when it lists generated files,
+      // e.g. a "here are the files I created" reply). Inside <pre><code> these
+      // paths are invisible to scanEventForFileRefs (which deliberately skips
+      // fenced blocks — see its `code.closest('pre')` guard), so they never get
+      // preview/download buttons. Render each line as its own non-<pre> <code>
+      // inside the wrap so the file-ref scanner can attach buttons, while the
+      // whole block keeps a single copy button. Requiring EVERY line to be a
+      // path candidate keeps real code blocks (which always carry at least one
+      // non-path line) on the verbatim path.
+      const pathLines = lang === '' ? fencedPathList(code) : null;
+      if (pathLines) {
+        const rows = pathLines.map(p => '<div class="md-pathline"><code>' + esc(p) + '</code></div>').join('');
+        return '<div class="md-code-wrap md-pathlist">' + rows +
+          '<div class="md-code-actions">' +
+            '<button class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)" aria-label="Copy file paths">copy</button>' +
+          '</div>' +
+          '</div>';
       }
       const langAttr = lang ? ' data-lang="' + escAttr(lang) + '"' : '';
       return '<div class="md-code-wrap"><pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre>' +

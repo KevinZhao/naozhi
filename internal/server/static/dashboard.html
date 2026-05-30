@@ -769,6 +769,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .md-code-btn{background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:4px;color:var(--nz-text-mute);font-size:11px;padding:2px 8px;cursor:pointer;line-height:1.6;font-family:inherit;transition:color .15s,border-color .15s,background .15s}
 .md-code-btn:hover{background:var(--nz-border);color:var(--nz-text);border-color:var(--nz-accent)}
 .md-copy-btn.copied{color:var(--nz-green);border-color:var(--nz-green)}
+/* Path-list fence: a ```-block whose every line is a file path. Rendered as
+   clickable rows (each <code> picks up a preview/download button via the
+   inline file-ref scanner) instead of verbatim <pre> text. */
+.md-pathlist{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;padding:10px 12px;margin:8px 0;overflow-x:auto;display:flex;flex-direction:column;gap:4px}
+.md-pathline{font-size:13px;line-height:1.6}
+.md-pathline code{font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;color:#e6edf3;white-space:pre}
 .md-code{background:var(--nz-border);color:#e6edf3;padding:1px 5px;border-radius:4px;font-size:13px;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace}
 .md-h1,.md-h2,.md-h3,.md-h4{display:block;color:var(--nz-text-strong);margin:8px 0 4px}
 .md-h1{font-size:16px}.md-h2{font-size:15px}.md-h3{font-size:14px}
