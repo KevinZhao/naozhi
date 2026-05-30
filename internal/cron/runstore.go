@@ -122,6 +122,28 @@ type runStore struct {
 	// disk" from "EACCES / IO error, investigate the storage backend".
 	writeFailedDiskFullTotal atomic.Int64
 	writeFailedOtherTotal    atomic.Int64
+
+	// historyDropTotal counts CronRun records that Append dropped entirely
+	// because even the truncated retry payload still exceeded maxRunBytes
+	// (or the retry marshal itself failed). R249-CR-21 (#964): the drop
+	// path previously only slog.Warn'd, so operators had no numeric signal
+	// and could not triangulate started/ended/dropped. Same package-local
+	// counter pattern as writeFailed*Total — surfaced via HistoryDropTotal
+	// for /health + tests. CronRunStartedTotal − CronRunEndedTotal should
+	// reconcile against this drop count when a run finished but produced no
+	// history row.
+	historyDropTotal atomic.Int64
+}
+
+// HistoryDropTotal returns the cumulative count of CronRun records Append
+// dropped because the truncated retry payload still exceeded maxRunBytes.
+// Monotonically non-decreasing; returns 0 when s is nil or disabled.
+// R249-CR-21 (#964).
+func (s *runStore) HistoryDropTotal() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.historyDropTotal.Load()
 }
 
 // WriteFailedTotals returns the cumulative count of CronRun WriteFileAtomic
@@ -621,6 +643,9 @@ func (s *runStore) Append(run *CronRun) {
 			if err2 == nil {
 				retryBytes = len(data2)
 			}
+			// R249-CR-21 (#964): bump the package-local drop counter so the
+			// loss is observable as a metric, not just a log line.
+			s.historyDropTotal.Add(1)
 			slog.Warn("cron run: retry marshal also exceeded cap; run record dropped",
 				"job_id", run.JobID,
 				"run_id", run.RunID,
@@ -664,6 +689,9 @@ func (s *runStore) Append(run *CronRun) {
 			if err2 == nil {
 				retryBytes = len(data2)
 			}
+			// R249-CR-21 (#964): mirror the preflight drop counter so both
+			// drop paths feed the same metric.
+			s.historyDropTotal.Add(1)
 			slog.Warn("cron run: retry marshal also exceeded cap; run record dropped",
 				"job_id", run.JobID,
 				"run_id", run.RunID,
