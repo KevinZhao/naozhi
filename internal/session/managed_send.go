@@ -137,7 +137,14 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	defer s.sendMu.Unlock()
 
 	ctx, cancel := context.WithCancel(ctx)
-	s.sendCancel.Store(&cancel)
+	// Store the cancel func with proc=nil first: the turn is about to run on
+	// whatever loadProcess returns below, so a concurrent Interrupt in this
+	// window should still fire (it targets the live process). Once proc is
+	// known we re-store the box with proc bound, so a later Interrupt fired
+	// after a spawnSession swap can detect the mismatch and skip the stale
+	// cancel rather than no-op against the new process (SM3 / #381).
+	box := &cancelBox{cancel: cancel}
+	s.sendCancel.Store(box)
 	defer func() {
 		s.sendCancel.Store(nil)
 		cancel()
@@ -156,6 +163,10 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	if proc == nil {
 		return nil, fmt.Errorf("session %s: %w", s.key, ErrNoActiveProcess)
 	}
+	// Bind the loaded process into the cancel box so Interrupt() can tell
+	// whether the cancel func it holds still targets the live process.
+	// Re-store (not mutate) because Interrupt reads the box lock-free.
+	s.sendCancel.Store(&cancelBox{cancel: cancel, proc: proc})
 
 	// lastActivity tracking is handled lock-free by EventLog.Append via its
 	// cached lastActivitySummary; Snapshot() reads that value when the process
@@ -194,18 +205,34 @@ func (s *ManagedSession) Interrupt() bool {
 	proc := s.loadProcess()
 	if proc == nil || !proc.Alive() {
 		// Still cancel in case Send is blocked on ctx.Done().
-		if cancel := s.sendCancel.Load(); cancel != nil {
-			(*cancel)()
-		}
+		s.fireSendCancel(proc)
 		return false
 	}
 
 	proc.Interrupt()
 
-	if cancel := s.sendCancel.Load(); cancel != nil {
-		(*cancel)()
-	}
+	s.fireSendCancel(proc)
 	return true
+}
+
+// fireSendCancel cancels the in-flight Send()'s context, but only when the
+// cancel func still targets the live process (or is not yet bound to any
+// process — the box.proc==nil window inside Send before loadProcess). SM3
+// (#381): a concurrent spawnSession may have replaced the process pointer
+// after Send stored its cancel func; cancelling that stale ctx is a no-op
+// against the new live process, so we skip it rather than report a misleading
+// success. live is the process Interrupt just observed via loadProcess.
+func (s *ManagedSession) fireSendCancel(live processIface) {
+	box := s.sendCancel.Load()
+	if box == nil || box.cancel == nil {
+		return
+	}
+	// box.proc == nil → Send stored the box but has not bound a process yet;
+	// the turn will run on the current live process, so the cancel is valid.
+	// box.proc == live → the cancel targets the same process we observed.
+	if box.proc == nil || box.proc == live {
+		box.cancel()
+	}
 }
 
 // InterruptOutcome describes what happened on an InterruptViaControl call.

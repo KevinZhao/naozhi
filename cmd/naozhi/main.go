@@ -540,6 +540,19 @@ func main() {
 			schedT0 := time.Now()
 			scheduler.Stop()
 			slog.Info("shutdown phase complete", "phase", "scheduler", "ms", time.Since(schedT0).Milliseconds())
+			// S11 (R194-COR): block on the real HTTP-drain barrier before
+			// tearing down the router. cancel() above triggers Server.Start's
+			// shutdown goroutine (srv.Shutdown 30s drain); ShutdownComplete
+			// closes only after that drain returns, i.e. after every in-flight
+			// GetOrCreate/Send handler has finished. Sequencing router.Shutdown
+			// after this point guarantees no handler observes a half-cleaned
+			// session map. On the server-error/server-exit paths Start has
+			// already returned, so the channel is already closed and this is a
+			// no-op. The drain has its own 30s ctx; this wait inherits that
+			// bound rather than blocking forever.
+			drainT0 := time.Now()
+			<-srv.ShutdownComplete()
+			slog.Info("shutdown phase complete", "phase", "http-drain", "ms", time.Since(drainT0).Milliseconds())
 			routerT0 := time.Now()
 			router.Shutdown()
 			slog.Info("shutdown phase complete", "phase", "router", "ms", time.Since(routerT0).Milliseconds())
