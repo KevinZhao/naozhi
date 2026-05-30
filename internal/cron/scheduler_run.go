@@ -1572,24 +1572,28 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	s.deliverNotice(notifyTo, replyText)
 }
 
-// applyJitter 在执行 cron job 前引入一段随机延迟，用来把"整点共振起跑"的
-// CPU / API 峰值打散。窗口上界 = min(jitterMax, period/4)：
-//   - 5m 周期 → 最多抖 75s（不蚕食 1m 节奏）
-//   - 30m 周期 → 最多抖 7m30s
-//   - 1h+ 周期 → 抖满 jitterMax（默认 2m）
+// applyJitter introduces a short random delay before running a cron job to
+// spread out the "top-of-the-hour resonance" CPU / API spike. Window upper
+// bound = min(jitterMax, period/4):
+//   - 5m period  → jitter up to 75s (doesn't eat into the 1m cadence)
+//   - 30m period → jitter up to 7m30s
+//   - 1h+ period → jitter up to the full jitterMax (default 2m)
 //
-// 无法解析 schedule 或 period<=0 时用 jitterMax 兜底。抖动尊重 ctx：
-// Stop() / 进程关机期间 stopCtx 取消 → 立即返回（不再执行 job）。
+// Falls back to jitterMax when the schedule cannot be parsed or period<=0.
+// The jitter respects ctx: when stopCtx is canceled during Stop() / process
+// shutdown it returns immediately (the job is not run).
 //
-// 用 math/rand/v2（per-goroutine 安全且无全局锁），安全性不敏感：
-// 这里的随机只影响启动时刻分布，不是密码学用途。
+// Uses math/rand/v2 (per-goroutine safe, no global lock); not security
+// sensitive — the randomness only shapes the start-time distribution and is
+// not a cryptographic use.
 //
-// R246-GO-22: NewTimer/defer Stop 在每次 tick 都分配 *time.Timer，
-// 当前规模（~100 timer/min @ 100 jobs * 1Hz）成本可忽略，无需优化。
-// 未来若 job 数突破 ~5000/min（≈ 80 alloc/s）再考虑 sync.Pool[*time.Timer]
-// 或退化到 runtime.timeSleep 直接路径；提前优化只会让控制流更晦涩。
-// time.After(d) 同样会 alloc *Timer 但不能被 Stop()，ctx 取消时会泄漏到
-// 触发点为止，不适合此处。
+// R246-GO-22: NewTimer/defer Stop allocates a *time.Timer on every tick. At
+// the current scale (~100 timer/min @ 100 jobs * 1Hz) the cost is negligible
+// and not worth optimising. If job count ever exceeds ~5000/min (≈ 80
+// alloc/s), consider sync.Pool[*time.Timer] or dropping to the
+// runtime.timeSleep direct path; optimising earlier only obscures the control
+// flow. time.After(d) also allocs a *Timer but cannot be Stop()'d — on ctx
+// cancellation it leaks until it fires, so it is unsuitable here.
 func applyJitter(ctx context.Context, schedule string, jitterMax time.Duration) {
 	if jitterMax <= 0 {
 		return
