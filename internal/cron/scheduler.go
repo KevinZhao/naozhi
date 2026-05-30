@@ -258,9 +258,36 @@ type chatJobKey struct {
 }
 
 // Scheduler manages cron jobs and executes them on schedule.
+//
+// Field-access discipline (mirrors the `// 读写:` annotation pattern from
+// session/router_core.go, whose absence here was flagged by R250-ARCH-4
+// / #1167): the fields below fall into four lifetime classes —
+//   - Lifecycle: cron / stopCtx / stopCancel / started / stopped /
+//     startedAtNanos / triggerWG / gcWG — written once at NewScheduler /
+//     Start / Stop, otherwise read-only or atomic.
+//   - Immutable-after-construction config: router / platforms / agents /
+//     agentCommands / location / notifyDefault / allowedRoot* /
+//     jitterMax / slowThreshold / execTimeout / maxJobs / maxJobsPerChat
+//     / storePath / stopBudget — set in NewScheduler, never reassigned, so
+//     reads are lock-free.
+//   - mu-guarded mutable state: jobs / chatJobCount / jobsByChat — all
+//     reads and writes hold s.mu (RLock for reads, Lock for writes); the
+//     three maps are mutated together so they never drift.
+//   - Independently-synchronised state: runningJobs (sync.Map) /
+//     telemetry (atomic.Pointer) / store* (storeMu / storeDirOnce /
+//     saveSeq) / routerNilOnce — each carries its own primitive and does
+//     NOT rely on s.mu.
+//
+// Per-field godoc below stays authoritative; this block is the index.
 type Scheduler struct {
 	cron *robfigcron.Cron
-	mu   sync.RWMutex
+	// mu guards the jobs / chatJobCount / jobsByChat trio (RLock reads,
+	// Lock writes). It does NOT cover the immutable-config fields (read
+	// lock-free) nor the independently-synchronised fields (runningJobs /
+	// telemetry / store* / *Once), each of which carries its own primitive.
+	mu sync.RWMutex
+	// 读写: 全部读写持 s.mu（读 RLock / 写 Lock）。jobs / chatJobCount /
+	// jobsByChat 三者在同一把锁下同步变更，不会相互漂移。
 	jobs map[string]*Job
 	// chatJobCount tracks the number of jobs per (Platform, ChatID) chat.
 	// Maintained synchronously with s.jobs writes under s.mu so the
