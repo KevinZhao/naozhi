@@ -246,11 +246,10 @@ func (s *Server) registerDashboard() {
 		s.registerPprof()
 		s.registerExpvar()
 	}
-	if s.scratchH != nil {
-		s.mux.HandleFunc("POST /api/scratch/open", auth(s.scratchH.HandleOpen))
-		s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(s.scratchH.HandlePromote))
-		s.mux.HandleFunc("DELETE /api/scratch/{id}", auth(s.scratchH.HandleDelete))
-	}
+	// R260528-ARCH-6 (#1367) incremental slice: the scratch-drawer route group
+	// extracted into its own same-file helper (which keeps the original
+	// nil-guard) to further trim registerDashboard.
+	s.registerScratchRoutes(auth)
 	// memory link preview (docs/rfc/memory-link-rendering.md): exposes
 	// ~/.claude/projects/<scope>/memory/<slug>.md to the dashboard inlineMd
 	// renderer so [[slug]] tokens become hover-previewable cards.
@@ -306,6 +305,21 @@ func (s *Server) registerSessionRoutes(auth func(http.HandlerFunc) http.HandlerF
 	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.HandleResume))
 	s.mux.HandleFunc("POST /api/sessions/interrupt", auth(s.sessionH.HandleInterrupt))
 	s.mux.HandleFunc("PATCH /api/sessions/label", auth(s.sessionH.HandleSetLabel))
+}
+
+// registerScratchRoutes wires the scratch-drawer route group (open / promote /
+// delete) when the scratch handler is configured. Extracted from
+// registerDashboard as a further slice of the R260528-ARCH-6 (#1367)
+// god-function decomposition. The nil-guard is preserved here verbatim so
+// deployments without a scratch pool register no scratch routes, exactly as
+// before.
+func (s *Server) registerScratchRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
+	if s.scratchH == nil {
+		return
+	}
+	s.mux.HandleFunc("POST /api/scratch/open", auth(s.scratchH.HandleOpen))
+	s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(s.scratchH.HandlePromote))
+	s.mux.HandleFunc("DELETE /api/scratch/{id}", auth(s.scratchH.HandleDelete))
 }
 
 // registerProjectRoutes wires the project route group (list / config get+put /
