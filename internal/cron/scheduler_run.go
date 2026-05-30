@@ -929,6 +929,107 @@ func classifyExecError(err error, defaultClass ErrorClass) (RunState, ErrorClass
 	return RunStateFailed, defaultClass
 }
 
+// applyJitterAndRecheck performs the post-CAS jitter sleep and the
+// post-jitter delete/pause recheck for a scheduled (non-TriggerNow) run with
+// jitter enabled. Extracted verbatim from executeOpt under R249-CR-1 (#945) /
+// R238-ARCH-2 (#734) so the run path reads as a sequence of named phases
+// rather than one ~340-line state machine; behaviour is unchanged.
+//
+// Returns:
+//   - snap / snapTaken: when the recheck passes, snap is the under-RLock
+//     snapshot of j and snapTaken is true so the caller skips the redundant
+//     fall-through snapshotJob. On the abort paths snapTaken is false.
+//   - abort: true means a DeleteJob / PauseJobByID landed during the jitter
+//     window; the caller MUST return immediately (the deferred finalizer
+//     releases the inflight CAS + gauge). The aborting slog.Debug is emitted
+//     here so the caller's branch stays a bare `return`.
+//
+// Caller contract: only invoked when !viaTriggerNow && s.jitterMax > 0, and
+// after inflight metadata is populated (so setPhase(PhaseJittering) is the
+// correct transition).
+func (s *Scheduler) applyJitterAndRecheck(j *Job, runID string, inflight *runInflight) (snap jobSnapshot, snapTaken bool, abort bool) {
+	inflight.setPhase(PhaseJittering)
+	// R250-GO-1: snapshot Schedule under s.mu.RLock so a concurrent
+	// UpdateJob mutating j.Schedule doesn't race with applyJitter's
+	// read. Mirrors the pattern used for the cur.Paused check below.
+	//
+	// R250-CR-14 (#1147): also snapshot j.entryID so we can fetch the
+	// already-parsed robfigcron.Schedule via s.cron.Entry(entryID)
+	// instead of re-parsing the schedule string inside applyJitter.
+	// cronParser.Parse uses regex + struct alloc; on every tick of every
+	// jittered job this was wasted work since robfig/cron already holds
+	// the parsed Schedule for dispatch. Fall back to the string-parse
+	// path (applyJitter) if entryID is 0 (job not yet registered, e.g.
+	// tests) or if the entry has been removed concurrently (DeleteJob
+	// races) — the parse-fallback preserves the historical behaviour.
+	s.mu.RLock()
+	schedStr := j.Schedule
+	entryID := j.entryID
+	cachedPeriod := j.cachedPeriod
+	var parsedSched robfigcron.Schedule
+	if entryID != 0 && cachedPeriod <= 0 {
+		// R242-PERF-2 (#664): only fetch the parsed Schedule for the live
+		// computation when the cache is cold. registerJob populates
+		// cachedPeriod alongside entryID, so production runs hit the
+		// pre-computed branch and skip both the s.cron.Entry RLock-friendly
+		// lookup and the 2× sched.Next that schedulePeriodFromSched runs.
+		parsedSched = s.cron.Entry(entryID).Schedule
+	}
+	s.mu.RUnlock()
+	switch {
+	case cachedPeriod > 0:
+		// R242-PERF-2 (#664): hot path — period was cached at registerJob
+		// time, no per-tick parsing or sched.Next needed.
+		jitterSleep(s.stopCtx, cachedPeriod, s.jitterMax)
+	case parsedSched != nil:
+		applyJitterSched(s.stopCtx, parsedSched, s.jitterMax)
+	default:
+		applyJitter(s.stopCtx, schedStr, s.jitterMax)
+	}
+
+	// R220-GO-3 + R246-GO-7: a DeleteJob OR a PauseJobByID that lands
+	// during the jitter window must abort the run before we spawn /
+	// send. The registerJob closure has a paused-check upstream of
+	// executeOpt, but it runs *before* the jitter wait — a Pause that
+	// lands inside the (default up-to-30s) jitter window would
+	// otherwise leak through and violate the "Paused job must not run"
+	// invariant. DeleteJob also leaves the inflight CAS still held
+	// until we finish — blocking TriggerNow for the same id with an
+	// "already running" overlap skip; the early return below releases
+	// it via the deferred inflight.running.Store(false) above.
+	// snapshotJob reads under s.mu so a stale dereference is
+	// impossible after Delete (the field reads return the last-known
+	// values and we never use them past this point).
+	//
+	// R20260528-PERF-2 (#1351): the snapshot copy is also taken under
+	// the SAME RLock when the recheck passes — see snapshotJobLocked.
+	// This eliminates the immediately-following second RLock the
+	// pre-fix code paid via s.snapshotJob(j). The
+	// `cur, stillRegistered` / `paused := ...` literal pattern stays
+	// in this scope so
+	// TestExecuteOpt_JitterPausedReCheck_SourceAnchor in jitter_test.go
+	// continues to lock down the recheck against silent removal.
+	s.mu.RLock()
+	cur, stillRegistered := s.jobs[j.ID]
+	paused := stillRegistered && cur.Paused
+	if stillRegistered && !paused {
+		snap = snapshotJobLocked(j)
+		snapTaken = true
+	}
+	s.mu.RUnlock()
+	if !stillRegistered {
+		slog.Debug("cron: job deleted during jitter window, aborting run",
+			"job_id", j.ID, "run_id", runID)
+		return jobSnapshot{}, false, true
+	}
+	if paused {
+		slog.Debug("cron: job paused during jitter window, aborting run",
+			"job_id", j.ID, "run_id", runID)
+		return jobSnapshot{}, false, true
+	}
+	return snap, snapTaken, false
+}
+
 func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// R20260526-GO-004: hot-path self-defence against a nil router. The
 	// companion R20260526-GO-023 already logs at construction when
@@ -1099,83 +1200,9 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// operator expectation). TriggerNow skips jitter to preserve the
 	// "run now = run now" semantics.
 	if !viaTriggerNow && s.jitterMax > 0 {
-		inflight.setPhase(PhaseJittering)
-		// R250-GO-1: snapshot Schedule under s.mu.RLock so a concurrent
-		// UpdateJob mutating j.Schedule doesn't race with applyJitter's
-		// read. Mirrors the pattern used for the cur.Paused check below.
-		//
-		// R250-CR-14 (#1147): also snapshot j.entryID so we can fetch the
-		// already-parsed robfigcron.Schedule via s.cron.Entry(entryID)
-		// instead of re-parsing the schedule string inside applyJitter.
-		// cronParser.Parse uses regex + struct alloc; on every tick of every
-		// jittered job this was wasted work since robfig/cron already holds
-		// the parsed Schedule for dispatch. Fall back to the string-parse
-		// path (applyJitter) if entryID is 0 (job not yet registered, e.g.
-		// tests) or if the entry has been removed concurrently (DeleteJob
-		// races) — the parse-fallback preserves the historical behaviour.
-		s.mu.RLock()
-		schedStr := j.Schedule
-		entryID := j.entryID
-		cachedPeriod := j.cachedPeriod
-		var parsedSched robfigcron.Schedule
-		if entryID != 0 && cachedPeriod <= 0 {
-			// R242-PERF-2 (#664): only fetch the parsed Schedule for the live
-			// computation when the cache is cold. registerJob populates
-			// cachedPeriod alongside entryID, so production runs hit the
-			// pre-computed branch and skip both the s.cron.Entry RLock-friendly
-			// lookup and the 2× sched.Next that schedulePeriodFromSched runs.
-			parsedSched = s.cron.Entry(entryID).Schedule
-		}
-		s.mu.RUnlock()
-		switch {
-		case cachedPeriod > 0:
-			// R242-PERF-2 (#664): hot path — period was cached at registerJob
-			// time, no per-tick parsing or sched.Next needed.
-			jitterSleep(s.stopCtx, cachedPeriod, s.jitterMax)
-		case parsedSched != nil:
-			applyJitterSched(s.stopCtx, parsedSched, s.jitterMax)
-		default:
-			applyJitter(s.stopCtx, schedStr, s.jitterMax)
-		}
-
-		// R220-GO-3 + R246-GO-7: a DeleteJob OR a PauseJobByID that lands
-		// during the jitter window must abort the run before we spawn /
-		// send. The registerJob closure has a paused-check upstream of
-		// executeOpt, but it runs *before* the jitter wait — a Pause that
-		// lands inside the (default up-to-30s) jitter window would
-		// otherwise leak through and violate the "Paused job must not run"
-		// invariant. DeleteJob also leaves the inflight CAS still held
-		// until we finish — blocking TriggerNow for the same id with an
-		// "already running" overlap skip; the early return below releases
-		// it via the deferred inflight.running.Store(false) above.
-		// snapshotJob reads under s.mu so a stale dereference is
-		// impossible after Delete (the field reads return the last-known
-		// values and we never use them past this point).
-		//
-		// R20260528-PERF-2 (#1351): the snapshot copy is also taken under
-		// the SAME RLock when the recheck passes — see snapshotJobLocked.
-		// This eliminates the immediately-following second RLock the
-		// pre-fix code paid via s.snapshotJob(j). The
-		// `cur, stillRegistered` / `paused := ...` literal pattern stays
-		// in this brace scope so
-		// TestExecuteOpt_JitterPausedReCheck_SourceAnchor in jitter_test.go
-		// continues to lock down the recheck against silent removal.
-		s.mu.RLock()
-		cur, stillRegistered := s.jobs[j.ID]
-		paused := stillRegistered && cur.Paused
-		if stillRegistered && !paused {
-			snap = snapshotJobLocked(j)
-			snapTaken = true
-		}
-		s.mu.RUnlock()
-		if !stillRegistered {
-			slog.Debug("cron: job deleted during jitter window, aborting run",
-				"job_id", j.ID, "run_id", runID)
-			return
-		}
-		if paused {
-			slog.Debug("cron: job paused during jitter window, aborting run",
-				"job_id", j.ID, "run_id", runID)
+		var abort bool
+		snap, snapTaken, abort = s.applyJitterAndRecheck(j, runID, inflight)
+		if abort {
 			return
 		}
 	}
