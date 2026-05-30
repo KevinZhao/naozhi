@@ -169,6 +169,22 @@ type recentCacheEntry struct {
 	appendsSinceTrim int
 }
 
+// ringCapZeroWarnOnce ensures the cap=0 self-heal branch in ringRead /
+// ringSnapshot logs exactly once per process. R249-ARCH-13 (#979): the
+// defensive cap=0 guard previously returned silently, so a future regression
+// that mutated count>0 while leaving cap(ring)==0 (bypassing ringSeed) would
+// surface only as mysteriously-empty dashboard lists with no log trace. A
+// single warn points the next reader straight at the contract violation
+// without spamming the log on a hot read path.
+var ringCapZeroWarnOnce sync.Once
+
+func warnRingCapZero(site string) {
+	ringCapZeroWarnOnce.Do(func() {
+		slog.Warn("cron runstore: recentCache ring cap=0 on read; self-healing to empty (ringSeed bypass regression?)",
+			"site", site)
+	})
+}
+
 // ringRead returns the i-th newest entry (0 = newest). Caller holds entry.mu
 // and must ensure 0 ≤ i < entry.count.
 func (e *recentCacheEntry) ringRead(i int) CronRunSummary {
@@ -177,6 +193,8 @@ func (e *recentCacheEntry) ringRead(i int) CronRunSummary {
 	// Avoids integer divide-by-zero panic on a regression path that bypasses
 	// ringSeed (e.g. an unwarmed entry mutated by future code). [BREAKING-LOCAL]
 	if cap(e.ring) == 0 {
+		// R249-ARCH-13 (#979): warn once so the silent self-heal is auditable.
+		warnRingCapZero("ringRead")
 		return CronRunSummary{}
 	}
 	return e.ring[(e.head+i)%cap(e.ring)]
@@ -188,6 +206,12 @@ func (e *recentCacheEntry) ringSnapshot(limit int) []CronRunSummary {
 	// R247-GO-4: see ringRead — guard cap=0 + count>0 regression and the
 	// degenerate count==0 fast path (no allocation needed). [BREAKING-LOCAL]
 	if cap(e.ring) == 0 || e.count == 0 {
+		// R249-ARCH-13 (#979): warn once when cap=0 *despite* a populated
+		// count — that is the bypass regression. The count==0 case is the
+		// benign empty-cache fast path and stays silent.
+		if cap(e.ring) == 0 && e.count > 0 {
+			warnRingCapZero("ringSnapshot")
+		}
 		return nil
 	}
 	if limit <= 0 || limit > e.count {
