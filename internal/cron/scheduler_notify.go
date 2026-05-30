@@ -283,6 +283,17 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	if s.stopCtx != nil && s.stopCtx.Err() != nil {
 		return
 	}
+	// R250-PERF-13 (#1116): empty text is a no-op at the send layer too.
+	// deliverNotice already short-circuits empty notices before triggerWG.Add,
+	// but notifyTarget is also reachable directly (tests + any future caller),
+	// and platform.SplitText("", maxLen) returns [""] — a single empty chunk
+	// that would otherwise consume one full limits.PlatformReplyMaxAttempts
+	// retry budget against the platform on a zero-byte message. Guarding here
+	// keeps the no-op contract local to the function the chunk loop lives in
+	// rather than depending on every caller pre-filtering.
+	if text == "" {
+		return
+	}
 	p := s.platforms[plat]
 	if p == nil {
 		slog.Warn("cron notify: platform not found", "platform", plat)
