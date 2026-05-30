@@ -202,17 +202,13 @@ func (s *Server) registerDashboard() {
 	// Authenticated API routes
 	auth := s.auth.RequireAuth
 	s.mux.HandleFunc("GET /api/cli/backends", auth(s.cliH.Handle))
-	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.HandleList))
-	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.HandleEvents))
-	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.HandleAgentEvents))
-	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.HandleToolResult))
-	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
-	s.mux.HandleFunc("POST /api/sessions/upload", auth(s.sendH.handleUpload))
-	s.mux.HandleFunc("GET /api/sessions/attachment", auth(s.sendH.handleAttachment))
-	s.mux.HandleFunc("DELETE /api/sessions", auth(s.sessionH.HandleDelete))
-	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.HandleResume))
-	s.mux.HandleFunc("POST /api/sessions/interrupt", auth(s.sessionH.HandleInterrupt))
-	s.mux.HandleFunc("PATCH /api/sessions/label", auth(s.sessionH.HandleSetLabel))
+	// R237-ARCH-2 (#573) / R260528-ARCH-6 (#1367) incremental slice: the
+	// cohesive session-CRUD route group is extracted into its own helper so
+	// registerDashboard shrinks toward the routes.go split the issues call
+	// for. Behaviour is identical — the routes_snapshot AST gate scans
+	// dashboard.go as a whole, so moving these calls into a same-file helper
+	// keeps the golden snapshot byte-for-byte stable.
+	s.registerSessionRoutes(auth)
 	s.mux.HandleFunc("GET /api/discovered", auth(s.discoveryH.HandleList))
 	s.mux.HandleFunc("GET /api/discovered/preview", auth(s.discoveryH.HandlePreview))
 	s.mux.HandleFunc("POST /api/discovered/takeover", auth(s.discoveryH.HandleTakeover))
@@ -230,20 +226,11 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("POST /api/projects/files/exists", auth(s.projectH.HandleFilesExists))
 	s.mux.HandleFunc("GET /api/projects/file", auth(s.projectH.HandleFileGet))
 	s.mux.HandleFunc("POST /api/transcribe", auth(s.transcribeH.HandleTranscribe))
-	s.mux.HandleFunc("GET /api/cron", auth(s.cronH.HandleList))
-	s.mux.HandleFunc("POST /api/cron", auth(s.cronH.HandleCreate))
-	s.mux.HandleFunc("PATCH /api/cron", auth(s.cronH.HandleUpdate))
-	s.mux.HandleFunc("DELETE /api/cron", auth(s.cronH.HandleDelete))
-	s.mux.HandleFunc("POST /api/cron/pause", auth(s.cronH.HandlePause))
-	s.mux.HandleFunc("POST /api/cron/resume", auth(s.cronH.HandleResume))
-	s.mux.HandleFunc("POST /api/cron/trigger", auth(s.cronH.HandleTrigger))
-	s.mux.HandleFunc("GET /api/cron/preview", auth(s.cronH.HandlePreview))
-	// P1 cron-run-history: per-job execution history.
-	s.mux.HandleFunc("GET /api/cron/runs", auth(s.cronH.HandleRunsList))
-	s.mux.HandleFunc("GET /api/cron/runs/{run_id}", auth(s.cronH.HandleRunDetail))
-	// cron-dashboard-redesign P2a §4.4.3 — transcript endpoint. Path
-	// param mirrors handleRunDetail; same per-IP rate limit applies.
-	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/transcript", auth(s.cronH.HandleRunTranscript))
+	// R260528-ARCH-6 (#1367) incremental slice: the cron route group (CRUD +
+	// pause/resume/trigger/preview + run-history) is extracted into its own
+	// same-file helper, the exact "拆 cron handlers" step the issue names.
+	// Same-file means the routes_snapshot AST gate stays stable.
+	s.registerCronRoutes(auth)
 	// system-session daemons (docs/rfc/system-session.md §9.2/§9.3)
 	s.mux.HandleFunc("GET /api/system/daemons", auth(s.handleSystemDaemons))
 	s.mux.HandleFunc("POST /api/system/labels/clear-origin", auth(s.handleClearLabelOrigin))
@@ -300,6 +287,48 @@ func (s *Server) registerDashboard() {
 	if s.reverseNodeServer != nil {
 		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
 	}
+}
+
+// registerSessionRoutes wires the session-CRUD route group (list / events /
+// agent_events / tool_result / send / upload / attachment / delete / resume /
+// interrupt / label). Split out of registerDashboard as the first concrete
+// slice of the R237-ARCH-2 (#573) god-function decomposition. `auth` is the
+// RequireAuth wrapper captured by the caller so every route here stays
+// authenticated. Behaviour is byte-identical to the inline block it replaced.
+func (s *Server) registerSessionRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
+	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.HandleList))
+	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.HandleEvents))
+	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.HandleAgentEvents))
+	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.HandleToolResult))
+	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
+	s.mux.HandleFunc("POST /api/sessions/upload", auth(s.sendH.handleUpload))
+	s.mux.HandleFunc("GET /api/sessions/attachment", auth(s.sendH.handleAttachment))
+	s.mux.HandleFunc("DELETE /api/sessions", auth(s.sessionH.HandleDelete))
+	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.HandleResume))
+	s.mux.HandleFunc("POST /api/sessions/interrupt", auth(s.sessionH.HandleInterrupt))
+	s.mux.HandleFunc("PATCH /api/sessions/label", auth(s.sessionH.HandleSetLabel))
+}
+
+// registerCronRoutes wires the cron route group (CRUD + pause/resume/trigger/
+// preview + run-history + transcript). Split out of registerDashboard as the
+// first concrete slice of the R260528-ARCH-6 (#1367) "拆 cron handlers" step.
+// `auth` is the caller's RequireAuth wrapper. Behaviour is byte-identical to
+// the inline block it replaced.
+func (s *Server) registerCronRoutes(auth func(http.HandlerFunc) http.HandlerFunc) {
+	s.mux.HandleFunc("GET /api/cron", auth(s.cronH.HandleList))
+	s.mux.HandleFunc("POST /api/cron", auth(s.cronH.HandleCreate))
+	s.mux.HandleFunc("PATCH /api/cron", auth(s.cronH.HandleUpdate))
+	s.mux.HandleFunc("DELETE /api/cron", auth(s.cronH.HandleDelete))
+	s.mux.HandleFunc("POST /api/cron/pause", auth(s.cronH.HandlePause))
+	s.mux.HandleFunc("POST /api/cron/resume", auth(s.cronH.HandleResume))
+	s.mux.HandleFunc("POST /api/cron/trigger", auth(s.cronH.HandleTrigger))
+	s.mux.HandleFunc("GET /api/cron/preview", auth(s.cronH.HandlePreview))
+	// P1 cron-run-history: per-job execution history.
+	s.mux.HandleFunc("GET /api/cron/runs", auth(s.cronH.HandleRunsList))
+	s.mux.HandleFunc("GET /api/cron/runs/{run_id}", auth(s.cronH.HandleRunDetail))
+	// cron-dashboard-redesign P2a §4.4.3 — transcript endpoint. Path
+	// param mirrors handleRunDetail; same per-IP rate limit applies.
+	s.mux.HandleFunc("GET /api/cron/runs/{run_id}/transcript", auth(s.cronH.HandleRunTranscript))
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
