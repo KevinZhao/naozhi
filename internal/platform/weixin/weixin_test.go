@@ -379,3 +379,61 @@ func TestRandomWechatUIN(t *testing.T) {
 		seen[v] = true
 	}
 }
+
+// TestValidateBaseURLScheme covers the R235-SEC-1 / R214-SEC-1 (#417)
+// transport gate: https is allowed, loopback http is allowed (dev mocks),
+// and non-loopback http is rejected because the no-HMAC long-poll body has
+// no authenticity anchor other than TLS.
+func TestValidateBaseURLScheme(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{"empty defaults to https", "", false},
+		{"https ok", "https://ilinkai.weixin.qq.com", false},
+		{"http localhost ok", "http://localhost:8080", false},
+		{"http loopback ip ok", "http://127.0.0.1:9000", false},
+		{"http ipv6 loopback ok", "http://[::1]:9000", false},
+		{"http public host rejected", "http://evil.example.com", true},
+		{"http public ip rejected", "http://203.0.113.5", true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateBaseURLScheme(tc.url)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateBaseURLScheme(%q) err=%v, wantErr=%v", tc.url, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestBaseURLIsTLS locks in the R214-SEC-1 (#417) startup-posture classifier:
+// only an approved loopback http:// relay reports non-TLS; https and the
+// empty default report TLS.
+func TestBaseURLIsTLS(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		url    string
+		wantTL bool
+	}{
+		{"empty default https", "", true},
+		{"https", "https://ilinkai.weixin.qq.com", true},
+		{"loopback http", "http://127.0.0.1:9000", false},
+		{"localhost http", "http://localhost:8080", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := New(Config{Token: "tok", BaseURL: tc.url})
+			if got := w.baseURLIsTLS(); got != tc.wantTL {
+				t.Errorf("baseURLIsTLS(%q) = %v, want %v", tc.url, got, tc.wantTL)
+			}
+		})
+	}
+}

@@ -273,6 +273,16 @@ func (s *Scheduler) persistJobsLocked() (func(), error) {
 // returned ⇒ on disk before next mutation reads cron_jobs.json". Tracked
 // as needs-design under #1333; until then operators on slow disks should
 // pin maxJobs lower so the per-mutation fsync × N traffic stays bounded.
+//
+// RES2 (#400) is the parity-with-session.saveIfDirty framing of the same
+// deferral: adopting a single saveLoop goroutine + dirty flag would trade
+// the synchronous "save() returned ⇒ on disk" determinism (which the
+// rollback contract in persistJobsLocked's godoc relies on) for amortised
+// async writes. Won't-fix as a standalone change because R58 already
+// hoisted WriteFileAtomic out of s.mu (the save-closure pattern) so cron
+// is no longer hot enough to justify losing the determinism; the async
+// loop is gated on the same contract change as #1333 above, not adopted
+// independently. Kept issue-backed so the parity ask has a tracker.
 func (s *Scheduler) saveMarshaledSeq(data []byte, seq uint64) {
 	s.storeMu.Lock()
 	defer s.storeMu.Unlock()
