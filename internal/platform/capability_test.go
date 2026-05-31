@@ -51,6 +51,35 @@ func TestAsCapability_GenericMatchesNamedHelpers(t *testing.T) {
 	}
 }
 
+// interimPlat additionally satisfies InterimMessageCapable.
+type interimPlat struct{ fakePlat }
+
+func (interimPlat) SupportsInterimMessages() bool { return true }
+
+// TestSupportsInterimMessages_UnifiedDiscriminator pins R214-ARCH-2 (#402):
+// SupportsInterimMessages now routes through the same AsCapability[T]
+// discriminator and the named InterimMessageCapable interface as the other
+// optional capabilities, rather than an inline anonymous type-assert.
+func TestSupportsInterimMessages_UnifiedDiscriminator(t *testing.T) {
+	var capable Platform = interimPlat{}
+	var plain Platform = fakePlat{}
+
+	if !SupportsInterimMessages(capable) {
+		t.Error("SupportsInterimMessages = false on a capable platform")
+	}
+	if SupportsInterimMessages(plain) {
+		t.Error("SupportsInterimMessages = true on a platform without the capability")
+	}
+
+	// The helper and the generic discriminator must agree on detection.
+	if _, ok := AsCapability[InterimMessageCapable](capable); !ok {
+		t.Error("AsCapability[InterimMessageCapable] returned ok=false on a capable platform")
+	}
+	if _, ok := AsCapability[InterimMessageCapable](plain); ok {
+		t.Error("AsCapability[InterimMessageCapable] returned ok=true on a plain platform")
+	}
+}
+
 // TestAsCapability_NewCapabilityNoHelperNeeded asserts that adding a
 // brand-new capability interface does NOT require a corresponding AsX
 // helper — AsCapability[T] suffices. Pin via a locally-declared

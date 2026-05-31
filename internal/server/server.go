@@ -49,9 +49,17 @@ const (
 // Field-block contract (server-split-phase4-design.md §五 / §六.6):
 // Each field below carries `// 读写: <files>` to indicate which non-test
 // files in this package access this Server-struct field via the `s.X`
-// receiver path. New fields MUST add this annotation. Phase 4-5 will
-// redistribute most of these into wshub Options, dashboard sub-packages,
-// or routes.go locals. Verification rule:
+// receiver path. New fields MUST add this annotation.
+//
+// R250-ARCH-22 (#1183): the section dividers below group fields by their
+// current functional role (HTTP entry / core deps / handlers / …), NOT by a
+// planned future disposition. Earlier revisions tagged each group with a
+// "Phase 5: → routes.go locals / NewHub Options / metrics package" target;
+// those tags had drifted (categories no longer matched reality) and were only
+// load-bearing as a refactor-that-never-came. Treat this field list as the
+// canonical current shape: when a field genuinely moves out, delete it here in
+// the same change rather than pre-annotating an intended destination.
+// Verification rule:
 //
 //	awk '/^type Server struct/,/^}$/' server.go | grep -cE '^\s+[a-zA-Z_]+ '
 //
@@ -71,25 +79,25 @@ const (
 // reads/writes so the annotation diff stays localised when handlers
 // are split out per Phase 5.
 type Server struct {
-	// ── HTTP entry (Phase 5: keep) ─────────────────────
+	// ── HTTP entry ─────────────────────────────────────
 	addr      string          // 读写: server.go
 	mux       *http.ServeMux  // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
 	startedAt time.Time       // 读写: server.go
 	onReady   func()          // 读写: server.go (called after listener is bound)
 	appCtx    context.Context // 读写: server.go, dashboard.go (HubOptions.ParentCtx)
 
-	// ── core deps (Phase 5: keep) ──────────────────────
+	// ── core deps ──────────────────────────────────────
 	router     *session.Router  // 读写: server.go, dashboard.go, dashboard_system.go, send.go, takeover.go, consumer.go
 	scheduler  *cron.Scheduler  // 读写: server.go, dashboard.go, dashboard_cron.go, dashboard_cron_transcript.go, wshub.go
 	hub        *Hub             // 读写: server.go, dashboard.go, send.go (WebSocket hub)
 	projectMgr *project.Manager // 读写: server.go, dashboard.go, project_api.go, project_files.go
 
-	// ── multi-node (Phase 5: keep) ─────────────────────
+	// ── multi-node ─────────────────────────────────────
 	nodes             map[string]node.Conn // 读写: server.go, dashboard.go
 	reverseNodeServer *node.ReverseServer  // 读写: server.go, dashboard.go
 	nodesMu           sync.RWMutex         // 读写: server.go, dashboard.go (shared with Hub.nodesMu)
 
-	// ── Phase 5: → routes.go local variables ───────────
+	// ── dashboard / API handler groups ─────────────────
 	auth         *auth.Handlers        // 读写: server.go, dashboard.go, debug_expvar.go, debug_pprof.go
 	cronH        *dashcron.Handlers    // 读写: server.go, dashboard.go
 	transcribeH  *transcribe.Handler   // 读写: dashboard.go (ctor only in server.go)
@@ -104,7 +112,7 @@ type Server struct {
 	memoryH      *memory.Handler       // 读写: dashboard.go (ctor only in server.go)
 	agentEventsH *agentevents.Handler  // 读写: server.go, dashboard.go
 
-	// ── Phase 5: → NewHub Options ──────────────────────
+	// ── send / dispatch wiring ─────────────────────────
 	dedup           *platform.Dedup              // 读写: server.go (ctor only)
 	sessionGuard    *session.Guard               // 读写: server.go, dashboard.go
 	msgQueue        *dispatch.MessageQueue       // 读写: server.go, dashboard.go (R242-GO-10: → wshub.MessageEnqueuer interface)
@@ -115,19 +123,20 @@ type Server struct {
 	noOutputTimeout time.Duration                // 读写: server.go (timeout error messages)
 	totalTimeout    time.Duration                // 读写: server.go
 
-	// ── Phase 5: → dashboard/* sub-packages ────────────
+	// ── on-disk paths / caches / sysession ─────────────
 	claudeDir      string               // 读写: server.go, takeover.go, discovery_cache.go, dashboard_cron_transcript.go, dashboard_discovered.go, dashboard_session.go
 	workspaceName  string               // 读写: server.go (ctor only; copied into SessionHandlers/HealthHandler)
 	discoveryCache *discoveryCache      // 读写: server.go (background-cached local discovery results)
 	scratchPool    *session.ScratchPool // 读写: server.go, dashboard.go, wshub.go (ephemeral aside sessions for preview drawer)
 	sysessionMgr   *sysession.Manager   // 读写: dashboard.go, dashboard_system.go (system-daemon Tick scheduling)
 
-	// ── Phase 5: → server-internal reorg ───────────────
+	// ── modes / resolver / node cache ──────────────────
 	debugMode bool                 // 读写: dashboard.go (gates /api/debug/pprof and /api/debug/vars; R244-SEC-P3-1)
+	headless  bool                 // 读写: send.go (explicit no-hub mode; gates the nil-hub send fallback — R248-ARCH-9 #379)
 	resolver  *session.KeyResolver // 读写: server.go, dashboard.go (session-key → opts derivation; → routes.go local)
 	nodeCache *node.CacheManager   // 读写: server.go (background-cached remote node data; → server/nodecache.go)
 
-	// ── Phase 5: → metrics package ─────────────────────
+	// ── watchdog counters ──────────────────────────────
 	watchdogNoOutputKills atomic.Int64 // 读写: server.go (exposed via /health and /api/sessions)
 	watchdogTotalKills    atomic.Int64 // 读写: server.go
 
@@ -139,7 +148,7 @@ type Server struct {
 	// session map. S11 / R194-COR. 读写: server.go (ctor + Start + accessor)
 	shutdownComplete chan struct{}
 
-	// ── Phase 5: pending evaluation (delete after grep verifies no usage) ─
+	// ── candidates for removal (verify no usage, then delete) ──
 	platforms  map[string]platform.Platform // 读写: server.go (likely routes-registration-only)
 	backendTag string                       // 读写: server.go (ctor only; copied into SessionHandlers; v0.4 §六.6 待评估 → dispatch.BackendTag())
 	knownNodes map[string]string            // 读写: server.go (configured node IDs → display names; merge into nodes map)
@@ -323,6 +332,7 @@ func buildServer(opts ServerOptions) *Server {
 		totalTimeout:    opts.TotalTimeout,
 		dashboardToken:  opts.DashboardToken,
 		debugMode:       opts.DebugMode,
+		headless:        opts.Headless,
 		onReady:         opts.OnReady,
 		projectMgr:      opts.ProjectManager,
 		resolver:        resolver,

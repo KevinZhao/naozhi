@@ -41,7 +41,8 @@ import (
 type serverCaps struct{ s *Server }
 
 // Send forwards to Server.sendWithBroadcast (delegates to Hub when
-// registered, falls back to sess.Send for headless mode). Tracks
+// registered, falls back to sess.Send only for Headless Servers — a
+// non-headless Server with no hub panics; see send.go). Tracks
 // dashboard "running"/"ready" transitions; see send.go top docstring.
 //
 // The 1-line forward is intentional — see serverCaps godoc for why we

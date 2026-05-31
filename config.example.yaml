@@ -85,7 +85,8 @@ cli:
   #    path: "~/.local/bin/kiro-cli"
   #    # Model ID forwarded as `kiro-cli acp --model <id>` at spawn time.
   #    # List available IDs with: kiro-cli chat --list-models
-  #    # Common values (kiro 2.3.0): auto, claude-opus-4.7, claude-sonnet-4.6,
+  #    # Common values (kiro 2.3.0): auto, claude-opus-4.8 (preview),
+  #    # claude-opus-4.7 (preview), claude-opus-4.6, claude-sonnet-4.6,
   #    # claude-haiku-4.5, deepseek-3.2, glm-5, qwen3-coder-next.
   #    # Omit / leave empty => kiro picks its own default ("auto").
   #    model: "claude-sonnet-4.6"
