@@ -193,6 +193,87 @@ func TestListAllJobsWithNextRun_NextRunByEntryID(t *testing.T) {
 	}
 }
 
+// TestNextRun_LockOrderAndResult guards the #1117 lock-order fix: NextRun
+// resolves entryID under s.mu.RLock, releases s.mu, then calls
+// s.cron.Entry() lock-free. The test asserts the observable result is
+// unchanged (registered job → future NextRun; unregistered/zero-entry job
+// → zero time) and that concurrent NextRun + CRUD is race-clean under -race
+// (a regression that re-took s.mu across cron.Entry would still pass the
+// value checks but the -race build pins the lock discipline against a
+// future cron.Entry that calls back into scheduler state).
+func TestNextRun_LockOrderAndResult(t *testing.T) {
+	dir := t.TempDir()
+	s := NewScheduler(SchedulerConfig{
+		StorePath: filepath.Join(dir, "cron.json"),
+		MaxJobs:   8,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(s.Stop)
+
+	active := &Job{
+		Schedule: "@every 1h",
+		Prompt:   "p",
+		Platform: "feishu",
+		ChatID:   "chat",
+		ChatType: "direct",
+	}
+	if err := s.AddJob(active); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	if got := s.NextRun(active); got.IsZero() {
+		t.Fatalf("NextRun(active) is zero, want a scheduled future time")
+	}
+
+	// A Job that never flowed through this scheduler (entryID 0, unknown ID)
+	// must return the zero time, not a misleading next run.
+	stray := &Job{ID: "deadbeefdeadbeef", Schedule: "@every 1h"}
+	if got := s.NextRun(stray); !got.IsZero() {
+		t.Fatalf("NextRun(stray) = %v, want zero", got)
+	}
+	if got := s.NextRun(nil); !got.IsZero() {
+		t.Fatalf("NextRun(nil) = %v, want zero", got)
+	}
+
+	// Concurrent NextRun while CRUD mutates the scheduler — must not deadlock
+	// or race. AddJob/DeleteJob take s.mu.Lock + cron mutations; NextRun now
+	// reads cron.Entry outside s.mu, so the two no longer contend in an
+	// inverted order.
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 64; j++ {
+				_ = s.NextRun(active)
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < 16; j++ {
+			tmp := &Job{
+				Schedule: "@every 2h",
+				Prompt:   "tmp",
+				Platform: "feishu",
+				ChatID:   "chat2",
+				ChatType: "direct",
+			}
+			if err := s.AddJob(tmp); err != nil {
+				t.Errorf("concurrent AddJob: %v", err)
+				return
+			}
+			if _, err := s.DeleteJobByID(tmp.ID); err != nil {
+				t.Errorf("concurrent DeleteJobByID: %v", err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+}
+
 // TestWithJobByID_ReturnsValueCopy guards R242-GO-3 (#548). The pointer
 // returned from DeleteJobByID/PauseJobByID/ResumeJobByID must NOT share
 // memory with the live *Job in s.jobs — caller mutations on the returned

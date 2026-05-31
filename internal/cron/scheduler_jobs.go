@@ -1357,14 +1357,27 @@ func (s *Scheduler) NextRun(j *Job) time.Time {
 	if j == nil {
 		return time.Time{}
 	}
+	// R250-PERF-14-adjacent lock-order fix (#1117): resolve entryID under
+	// s.mu.RLock, then RELEASE s.mu before calling s.cron.Entry(). Entry()
+	// is implemented as `for _, e := range c.Entries()` and Entries()
+	// round-trips through the dispatcher's snapshot channel guarded by
+	// robfig/cron's runningMu. Holding s.mu across that call inverts the
+	// lock order the cron dispatch path takes (cron-internal → execute →
+	// recordResult → s.mu.Lock) — the exact discipline
+	// ListAllJobsWithNextRun's godoc documents and follows. NextRun was the
+	// one straggler still calling cron.Entry inside s.mu; aligning it
+	// removes the latent deadlock window without changing the observable
+	// result (entryID is the source-of-truth snapshot; a concurrent Remove
+	// that lands after the unlock yields a zero Entry.Next, which is the
+	// same "no live schedule" answer the in-lock path produced).
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	entryID := j.entryID
 	if entryID == 0 && j.ID != "" {
 		if live, ok := s.jobs[j.ID]; ok {
 			entryID = live.entryID
 		}
 	}
+	s.mu.RUnlock()
 	if entryID == 0 {
 		return time.Time{}
 	}
