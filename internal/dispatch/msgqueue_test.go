@@ -285,6 +285,75 @@ func TestRelease_DrainsQueuedMessages(t *testing.T) {
 	}
 }
 
+// TestRelease_StrandHandlerDrains locks in the R37-REL1 (#769) fix: when a
+// strand handler is registered, the plain SessionGuard Release path must
+// recover messages that landed via a concurrent IM-side Enqueue rather than
+// parking them until a (possibly never-arriving) next Enqueue.
+func TestRelease_StrandHandlerDrains(t *testing.T) {
+	t.Parallel()
+	q := NewMessageQueue(10, 0)
+
+	var recovered []string
+	q.SetStrandHandler(func(key string, m QueuedMsg) {
+		if key != "k1" {
+			t.Errorf("strand handler key = %q, want k1", key)
+		}
+		recovered = append(recovered, m.Text)
+	})
+
+	// Dashboard Guard path holds the session while two IM messages land.
+	if !q.TryAcquire("k1") {
+		t.Fatal("TryAcquire should succeed on idle key")
+	}
+	if _, enqueued, _, _ := q.Enqueue("k1", QueuedMsg{Text: "A"}); !enqueued {
+		t.Fatal("A should be enqueued during busy window")
+	}
+	if _, enqueued, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"}); !enqueued {
+		t.Fatal("B should be enqueued during busy window")
+	}
+
+	// Plain Release (the SessionGuard contract) must now drain via the handler.
+	q.Release("k1")
+
+	if len(recovered) != 2 || recovered[0] != "A" || recovered[1] != "B" {
+		t.Fatalf("recovered = %v, want [A B]", recovered)
+	}
+	if d := q.Depth("k1"); d != 0 {
+		t.Fatalf("Depth = %d, want 0 after strand drain", d)
+	}
+	if !q.TryAcquire("k1") {
+		t.Fatal("TryAcquire should succeed after strand drain")
+	}
+}
+
+// TestRelease_NoStrandHandlerParks confirms the legacy contract still holds
+// when no handler is registered: messages stay parked (not lost, not drained)
+// and a later Enqueue owner sweeps them via DoneOrDrain.
+func TestRelease_NoStrandHandlerParks(t *testing.T) {
+	t.Parallel()
+	q := NewMessageQueue(10, 0)
+
+	if !q.TryAcquire("k1") {
+		t.Fatal("TryAcquire should succeed on idle key")
+	}
+	if _, enqueued, _, _ := q.Enqueue("k1", QueuedMsg{Text: "A"}); !enqueued {
+		t.Fatal("A should be enqueued during busy window")
+	}
+
+	q.Release("k1") // no handler → park in place
+
+	// Message is still queued, key is idle. A new Enqueue becomes owner and
+	// DoneOrDrain hands back the parked message.
+	isOwner, _, _, gen := q.Enqueue("k1", QueuedMsg{Text: "B"})
+	if !isOwner {
+		t.Fatal("post-Release Enqueue should become owner on idle key")
+	}
+	drained := q.DoneOrDrain("k1", gen)
+	if len(drained) != 1 || drained[0].Text != "A" {
+		t.Fatalf("drained = %v, want [A] (parked message recovered by new owner)", drained)
+	}
+}
+
 func TestLastNotify_CleanedOnDrain(t *testing.T) {
 	t.Parallel()
 	q := NewMessageQueue(10, 0)
