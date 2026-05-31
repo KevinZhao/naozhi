@@ -24,24 +24,24 @@ import (
 	robfigcron "github.com/robfig/cron/v3"
 )
 
-// listSnapshotPair pairs a Job value-copy with its robfig/cron entry ID
-// during ListAllJobsWithNextRun's two-phase snapshot. Defined at package
-// scope (not inside the function body) so sync.Pool below can reference
-// the type. R247-PERF-4 (#530).
-type listSnapshotPair struct {
-	job     Job
-	entryID robfigcron.EntryID
-}
-
-// listPairsPool reuses the transient []listSnapshotPair scratch slice
-// allocated once per ListAllJobsWithNextRun call. Dashboard polls at 1Hz
-// across multiple tabs so the call frequency × jobs-per-call dominates
-// the cron CRUD path's allocator pressure. Get returns a zero-length
-// slice with potentially non-zero capacity — callers must reset length
-// (`:0`) when they Put it back. R247-PERF-4 (#530).
-var listPairsPool = sync.Pool{
+// listEntryIDsPool reuses the transient []robfigcron.EntryID scratch slice
+// recorded during ListAllJobsWithNextRun's two-phase snapshot. Dashboard
+// polls at 1Hz across multiple tabs so the call frequency × jobs-per-call
+// dominates the cron CRUD path's allocator pressure. Get returns a
+// zero-length slice with potentially non-zero capacity — callers must
+// reset length (`:0`) when they Put it back. R247-PERF-4 (#530).
+//
+// R250-PERF-15 (#1118): previously this pooled a []listSnapshotPair whose
+// element embedded a full Job value-copy (~300B incl. RunCounters), so the
+// snapshot copied every Job twice — once into the pooled scratch under
+// RLock, then again into the caller-owned result slice. With N jobs × N
+// tabs × 1Hz that wasted ~750KB/s of GC churn on the redundant copy. We
+// now copy each Job exactly once (directly into result under RLock) and the
+// pooled scratch holds only the cheap entryID (8 bytes) needed to patch
+// NextRun after s.cron.Entries() runs lock-free.
+var listEntryIDsPool = sync.Pool{
 	New: func() any {
-		s := make([]listSnapshotPair, 0, 64)
+		s := make([]robfigcron.EntryID, 0, 64)
 		return &s
 	},
 }
@@ -335,33 +335,40 @@ type JobWithNextRun struct {
 // a single mutex acquisition, which matters when the dashboard list API
 // polls at 1 Hz with 50 jobs registered.
 func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
-	// R247-PERF-4 (#530): the dashboard list endpoint polls this at 1Hz
-	// across N open tabs, so we pool the two transient containers
-	// (pairs scratch + EntryID-keyed nextRun map) to keep per-poll
-	// alloc count flat as job count grows. The result slice is owned by
-	// the caller and stays heap-resident, so it is NOT pooled.
-	pairsPtr := listPairsPool.Get().(*[]listSnapshotPair)
-	pairs := (*pairsPtr)[:0]
+	// R247-PERF-4 (#530) / R250-PERF-15 (#1118): the dashboard list endpoint
+	// polls this at 1Hz across N open tabs, so we pool the two transient
+	// containers (entryID scratch + EntryID-keyed nextRun map) to keep
+	// per-poll alloc count flat as job count grows. The result slice is owned
+	// by the caller and stays heap-resident, so it is NOT pooled — and each
+	// Job is copied straight into it under RLock so there is no second copy.
+	idsPtr := listEntryIDsPool.Get().(*[]robfigcron.EntryID)
+	ids := (*idsPtr)[:0]
 	defer func() {
 		// Reset length but keep capacity so the next call skips the make.
-		*pairsPtr = pairs[:0]
-		listPairsPool.Put(pairsPtr)
+		*idsPtr = ids[:0]
+		listEntryIDsPool.Put(idsPtr)
 	}()
 
+	var result []JobWithNextRun
 	s.mu.RLock()
-	if cap(pairs) < len(s.jobs) {
-		pairs = make([]listSnapshotPair, 0, len(s.jobs))
+	if cap(ids) < len(s.jobs) {
+		ids = make([]robfigcron.EntryID, 0, len(s.jobs))
 	}
+	result = make([]JobWithNextRun, 0, len(s.jobs))
 	for _, j := range s.jobs {
-		pairs = append(pairs, listSnapshotPair{job: *j, entryID: j.entryID})
+		// Single Job copy: directly into the caller-owned result. NextRun is
+		// patched in by index below once Entries() has been read lock-free.
+		result = append(result, JobWithNextRun{Job: *j})
+		ids = append(ids, j.entryID)
 	}
 	s.mu.RUnlock()
 
 	// Single Entries() snapshot → entryID-keyed map. The map is pooled and
 	// `clear()`-ed before re-Put so stale keys from a previous larger
 	// snapshot do not leak into a smaller current one. The alternative —
-	// re-walking Entries per pair — is O(N²) and re-acquires runningMu per
-	// Entry() call.
+	// re-walking Entries per job — is O(N²) and re-acquires runningMu per
+	// Entry() call. Called outside s.mu to avoid inverting the lock order
+	// the cron dispatcher takes (cron-internal → execute → s.mu.Lock).
 	entries := s.cron.Entries()
 	nextByIDPtr := listNextByIDPool.Get().(*map[robfigcron.EntryID]time.Time)
 	nextByID := *nextByIDPtr
@@ -374,13 +381,10 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 		nextByID[e.ID] = e.Next
 	}
 
-	result := make([]JobWithNextRun, 0, len(pairs))
-	for _, p := range pairs {
-		var next time.Time
-		if p.entryID != 0 {
-			next = nextByID[p.entryID]
+	for i, id := range ids {
+		if id != 0 {
+			result[i].NextRun = nextByID[id]
 		}
-		result = append(result, JobWithNextRun{Job: p.job, NextRun: next})
 	}
 	return result
 }

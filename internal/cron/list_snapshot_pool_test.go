@@ -1,9 +1,10 @@
 // list_snapshot_pool_test.go: regression coverage for two cron-list snapshot
 // invariants that pair across the same code surface (scheduler_jobs.go).
 //
-//   - R247-PERF-4 (#530): ListAllJobsWithNextRun pools its transient pairs
-//     slice + nextByID map. The pool must be reset cleanly between calls so
-//     a "second poll" sees no leakage from the first.
+//   - R247-PERF-4 (#530) / R250-PERF-15 (#1118): ListAllJobsWithNextRun
+//     pools its transient entryID slice + nextByID map. The pool must be
+//     reset cleanly between calls so a "second poll" sees no leakage from
+//     the first.
 //   - R242-GO-3 (#548): withJobByID returns a value-copy *Job. A caller
 //     that mutates the returned pointer's fields must NOT influence the
 //     scheduler's in-memory state (the live *Job in s.jobs).
@@ -26,7 +27,7 @@ import (
 // `clear(nextByID)` before Put, a smaller second snapshot could observe
 // stale EntryID keys from a larger first snapshot — but that map is
 // keyed by entryID returned from `s.cron.Entries()` so a stale key is
-// unreachable from `pairs`. This test pins that property as a regression
+// unreachable from the recorded entryID slice. This test pins that property as a regression
 // guard so future refactors don't reintroduce a leak via a different key
 // shape (e.g. switching to job ID).
 func TestListAllJobsWithNextRun_PoolReusable(t *testing.T) {
@@ -82,6 +83,114 @@ func TestListAllJobsWithNextRun_PoolReusable(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestListAllJobsWithNextRun_ValueCopyIsolated guards R250-PERF-15 (#1118).
+// The single-copy refactor (Job copied straight into the result slice under
+// RLock instead of being copied twice via a pooled scratch) must preserve
+// the value-copy isolation: a caller mutating a returned JobWithNextRun.Job
+// must NOT corrupt the scheduler's live in-memory *Job. A regression that
+// stored the *Job pointer (or aliased the pooled scratch) would surface as
+// the live Title changing here.
+func TestListAllJobsWithNextRun_ValueCopyIsolated(t *testing.T) {
+	dir := t.TempDir()
+	s := NewScheduler(SchedulerConfig{
+		StorePath: filepath.Join(dir, "cron.json"),
+		MaxJobs:   8,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(s.Stop)
+
+	j := &Job{
+		Schedule: "@every 1h",
+		Prompt:   "p",
+		Platform: "feishu",
+		ChatID:   "chat",
+		ChatType: "direct",
+		Title:    "original",
+		Paused:   true,
+	}
+	if err := s.AddJob(j); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+
+	snap := s.ListAllJobsWithNextRun()
+	if len(snap) != 1 {
+		t.Fatalf("snapshot len = %d, want 1", len(snap))
+	}
+	// Mutate the returned value-copy's Job. With single-copy-into-result
+	// semantics this is still a distinct Job value, so the live state must
+	// be untouched.
+	snap[0].Job.Title = "tampered-by-caller"
+	snap[0].Job.RunCounters.Total = 99999
+
+	again := s.ListAllJobsWithNextRun()
+	if len(again) != 1 {
+		t.Fatalf("second snapshot len = %d, want 1", len(again))
+	}
+	if again[0].Job.Title != "original" {
+		t.Fatalf("live Title = %q, want %q (caller mutation leaked into in-memory state)",
+			again[0].Job.Title, "original")
+	}
+	if again[0].Job.RunCounters.Total != 0 {
+		t.Fatalf("live RunCounters.Total = %d, want 0 (caller mutation leaked)",
+			again[0].Job.RunCounters.Total)
+	}
+}
+
+// TestListAllJobsWithNextRun_NextRunByEntryID guards that the index-based
+// NextRun patch (R250-PERF-15 #1118) still aligns each result row with the
+// correct robfig/cron entry. A non-paused job is registered (so it has a
+// live entry with a future Next) and must surface a non-zero NextRun, while
+// a paused job (entryID 0, no cron entry) must surface the zero time.
+func TestListAllJobsWithNextRun_NextRunByEntryID(t *testing.T) {
+	dir := t.TempDir()
+	s := NewScheduler(SchedulerConfig{
+		StorePath: filepath.Join(dir, "cron.json"),
+		MaxJobs:   8,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(s.Stop)
+
+	active := &Job{
+		Schedule: "@every 1h",
+		Prompt:   "active",
+		Platform: "feishu",
+		ChatID:   "chat",
+		ChatType: "direct",
+		Title:    "active-job",
+	}
+	if err := s.AddJob(active); err != nil {
+		t.Fatalf("AddJob active: %v", err)
+	}
+	paused := &Job{
+		Schedule: "@every 1h",
+		Prompt:   "paused",
+		Platform: "feishu",
+		ChatID:   "chat",
+		ChatType: "direct",
+		Title:    "paused-job",
+		Paused:   true,
+	}
+	if err := s.AddJob(paused); err != nil {
+		t.Fatalf("AddJob paused: %v", err)
+	}
+
+	snap := s.ListAllJobsWithNextRun()
+	byTitle := map[string]JobWithNextRun{}
+	for _, jr := range snap {
+		byTitle[jr.Job.Title] = jr
+	}
+	if got := byTitle["active-job"]; got.NextRun.IsZero() {
+		t.Fatalf("active job NextRun is zero, want a scheduled future time")
+	}
+	if got := byTitle["paused-job"]; !got.NextRun.IsZero() {
+		t.Fatalf("paused job NextRun = %v, want zero (no live cron entry)", got.NextRun)
+	}
 }
 
 // TestWithJobByID_ReturnsValueCopy guards R242-GO-3 (#548). The pointer
