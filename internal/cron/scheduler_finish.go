@@ -605,7 +605,7 @@ const redactPathsBuilderPoolMaxCap = 4 * maxRedactErrLen
 // is invoked on every execution and the regex cost would dominate the
 // redaction budget.
 //
-// SCOPE — UNC paths are out of scope. R239-GO-9.
+// SCOPE — UNC paths are out of scope. R239-GO-9 / R249-CR-8 (#952).
 // Detection covers three forms: POSIX `/abs`, Windows drive `C:\…` /
 // `C:/…`, and home-relative `~/`. Microsoft UNC paths (`\\server\share`
 // and the rare `//server/share` POSIX-style equivalent that some Windows
@@ -618,6 +618,11 @@ const redactPathsBuilderPoolMaxCap = 4 * maxRedactErrLen
 // deployments may surface UNC strings unredacted; redaction of those
 // forms is a future enhancement (would require a new branch matching
 // `\\` / `//` followed by a non-`/` non-`\` host segment).
+//
+// NEEDS-DESIGN — tracked at GitHub #952 so this deferred enhancement
+// carries the same issue-backed paper trail as the other cron NEEDS-DESIGN
+// items (R241-PERF-9 / #482 etc.), rather than living only as an inline
+// "future enhancement" comment with no tracker. R249-CR-8 (#952).
 func redactPathsInCronError(s string) string {
 	if s == "" {
 		return s
