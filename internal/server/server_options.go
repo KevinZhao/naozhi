@@ -102,6 +102,15 @@ type ServerOptions struct {
 	// profile, then flip it back. R244-SEC-P3-1 [REPEAT-3].
 	DebugMode bool
 
+	// Headless declares that this Server is wired without a dashboard Hub on
+	// purpose (test harnesses, headless tools that drive the send path
+	// directly). It makes the nil-hub send fallback an explicit mode rather
+	// than something inferred from `s.hub == nil`: with Headless=false (the
+	// production default) Server.sendWithBroadcast fails loud when the hub is
+	// missing, so a wiring regression panics at the send site instead of
+	// silently routing through the no-broadcast fallback. R248-ARCH-9 (#379).
+	Headless bool
+
 	// PublicTmpEnabled opts the __public_tmp__ pseudo-project in (R237-SEC-5,
 	// #646). When false (default) requests for that pseudo-project fall
 	// through to the regular "project not found" surface — closes the

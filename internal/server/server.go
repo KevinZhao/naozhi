@@ -124,6 +124,7 @@ type Server struct {
 
 	// ── Phase 5: → server-internal reorg ───────────────
 	debugMode bool                 // 读写: dashboard.go (gates /api/debug/pprof and /api/debug/vars; R244-SEC-P3-1)
+	headless  bool                 // 读写: send.go (explicit no-hub mode; gates the nil-hub send fallback — R248-ARCH-9 #379)
 	resolver  *session.KeyResolver // 读写: server.go, dashboard.go (session-key → opts derivation; → routes.go local)
 	nodeCache *node.CacheManager   // 读写: server.go (background-cached remote node data; → server/nodecache.go)
 
@@ -323,6 +324,7 @@ func buildServer(opts ServerOptions) *Server {
 		totalTimeout:    opts.TotalTimeout,
 		dashboardToken:  opts.DashboardToken,
 		debugMode:       opts.DebugMode,
+		headless:        opts.Headless,
 		onReady:         opts.OnReady,
 		projectMgr:      opts.ProjectManager,
 		resolver:        resolver,

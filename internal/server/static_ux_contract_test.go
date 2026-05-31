@@ -4216,7 +4216,12 @@ func TestDashboardJS_R110P1_HomePanelStats(t *testing.T) {
 		`new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime()`,
 		`typeof s.last_active === 'number' && s.last_active >= dayStart`,
 		`typeof s.total_cost === 'number' && isFinite(s.total_cost)`,
-		`return { todayActive: todayActive, totalCost: totalCost };`,
+		// #445: prompt count sums per-session message_count (already in the
+		// snapshot) so the "已处理 prompt" card no longer needs the deferred
+		// /api/stats/aggregate backend. Guard >0 so the omitempty-absent (0)
+		// case stays a no-op rather than NaN-poisoning.
+		`typeof s.message_count === 'number' && isFinite(s.message_count) && s.message_count > 0`,
+		`return { todayActive: todayActive, totalCost: totalCost, totalPrompts: totalPrompts };`,
 	} {
 		if !strings.Contains(js, fragment) {
 			t.Errorf("computeHomeStats body missing contract fragment %q", fragment)
@@ -4265,11 +4270,18 @@ func TestDashboardJS_R110P1_HomePanelStats(t *testing.T) {
 	if statsHtmlIdx > 0 && listHtmlIdx > 0 && statsHtmlIdx > listHtmlIdx {
 		t.Error("stats strip must render BEFORE the session list — reverse order would push the list below the fold on short viewports")
 	}
-	// Chinese labels — operators should see Chinese copy.
-	for _, want := range []string{"今日活跃会话", "累计花费"} {
+	// Chinese labels — operators should see Chinese copy. "已处理 prompt"
+	// is the #445 third card sourced from aggregated message_count.
+	for _, want := range []string{"今日活跃会话", "已处理 prompt", "累计花费"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renderRecentSessionsPanel stats strip missing Chinese label %q", want)
 		}
+	}
+	// #445: the prompt-count card must read stats.totalPrompts (the new
+	// aggregate) rather than re-deriving a constant — a regression that
+	// dropped the field would render `undefined`.
+	if !strings.Contains(body, "stats.totalPrompts") {
+		t.Error("renderRecentSessionsPanel must render stats.totalPrompts in the 已处理 prompt card")
 	}
 }
 
