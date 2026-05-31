@@ -775,15 +775,24 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 	var prevEntryID robfigcron.EntryID
 	var prevCachedPeriod time.Duration
+	var prevCachedSched robfigcron.Schedule
 	var prevPaused bool
 	var captured bool
+	// CR-1 (R250531-CR-1): entryID to remove AFTER withJobByIDOpt returns
+	// (i.e. after s.mu is released). rollback runs under s.mu; calling
+	// s.cron.Remove there causes a lock-order inversion — robfig/cron.Remove
+	// sends on the unbuffered c.remove channel which can only be drained by
+	// the cron-tick goroutine, and that goroutine calls executeJobIDIfLive →
+	// s.mu.RLock. Pattern mirrors PauseJobByID's pauseCleanup hoist (#537).
+	var removeEntryID robfigcron.EntryID
 	op := func(j *Job) error {
 		// Snapshot under s.mu so the rollback restores the exact pre-op
 		// view; resumeJobLocked → registerJob mutates entryID +
-		// cachedPeriod only after this read so a concurrent reader can
-		// never observe a torn write.
+		// cachedPeriod + cachedSched only after this read so a concurrent
+		// reader can never observe a torn write.
 		prevEntryID = j.entryID
 		prevCachedPeriod = j.cachedPeriod
+		prevCachedSched = j.cachedSched // CR-3 (R250531-CR-3): snapshot cachedSched
 		prevPaused = j.Paused
 		captured = true
 		return s.resumeJobLocked(j)
@@ -795,22 +804,29 @@ func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 		if !captured {
 			return
 		}
-		// resumeJobLocked succeeded means registerJob registered a new
-		// cron entry; remove it so the in-memory cron table matches the
-		// "still paused" disk view. Use the freshly-registered entryID
-		// (j.entryID), not prevEntryID — the latter is the pre-resume
-		// value we're about to restore for j.entryID.
-		if j.entryID != 0 {
-			s.cron.Remove(j.entryID)
-		}
+		// CR-1: capture the freshly-registered entryID for removal OUTSIDE
+		// s.mu. Do NOT call s.cron.Remove here — we are under s.mu and
+		// cron.Remove sends on an unbuffered channel drained only by the
+		// cron-tick goroutine that itself acquires s.mu.RLock → deadlock.
+		removeEntryID = j.entryID
 		j.entryID = prevEntryID
 		j.cachedPeriod = prevCachedPeriod
+		j.cachedSched = prevCachedSched // CR-3: restore cachedSched
 		j.Paused = prevPaused
 	}
-	return s.withJobByIDOpt(id, withJobByIDOpts{
+	snap, err := s.withJobByIDOpt(id, withJobByIDOpts{
 		op:                   op,
 		rollbackOnPersistErr: rollback,
 	})
+	// CR-1: remove the orphaned cron entry now that s.mu is released.
+	// removeEntryID is non-zero only when rollback fired (persist failed
+	// after op succeeded and registered a new entry). The zero check is
+	// defensive; robfig/cron.Remove(0) is a no-op, but being explicit
+	// makes the intent clear.
+	if removeEntryID != 0 {
+		s.cron.Remove(removeEntryID)
+	}
+	return snap, err
 }
 
 // JobUpdate captures fields a dashboard user may edit on an existing cron
@@ -1238,13 +1254,14 @@ func (s *Scheduler) withJobByPrefix(
 	postCleanup func(j *Job),
 ) (*Job, error) {
 	var save func()
-	var j *Job
+	var snapshot Job
 	var findErr, opErr, perr error
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		j, findErr = s.findByPrefixLocked(idPrefix, plat, chatID)
-		if findErr != nil {
+		j, err := s.findByPrefixLocked(idPrefix, plat, chatID)
+		if err != nil {
+			findErr = err
 			return
 		}
 		if op != nil {
@@ -1254,6 +1271,11 @@ func (s *Scheduler) withJobByPrefix(
 			}
 		}
 		save, perr = s.persistJobsLocked()
+		// R242-GO-3 mirror (#548): value-copy under s.mu so postCleanup and
+		// the caller read a stable Job even if a concurrent UpdateJob /
+		// SetJobPrompt mutates the live *j right after Unlock. Matches
+		// withJobByIDOpt's "snapshot = *j" pattern. [R250531-CR-2]
+		snapshot = *j
 	}()
 
 	if findErr != nil {
@@ -1263,13 +1285,13 @@ func (s *Scheduler) withJobByPrefix(
 		return nil, opErr
 	}
 	if postCleanup != nil {
-		postCleanup(j)
+		postCleanup(&snapshot)
 	}
 	if perr != nil {
 		return nil, perr
 	}
 	save()
-	return j, nil
+	return &snapshot, nil
 }
 
 // DeleteJob removes a job by ID prefix (scoped to the given chat).
