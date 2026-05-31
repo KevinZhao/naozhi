@@ -213,7 +213,12 @@ func (r *Router) Cleanup() {
 	stuckThreshold := 2 * totalTimeout
 
 	// ── Pass 2: classify outside the lock (may perform PID syscalls) ─
-	var expired []expiredEntry
+	// R20260531A-PERF-6: pre-allocate expired to len(candidates) cap so
+	// the append loop below never needs to grow the backing array. In the
+	// common steady-state case (most sessions are active) the slice stays
+	// empty and we only paid for one allocation; in the worst case (all
+	// sessions expire at once) we avoid O(log n) realloc rounds.
+	expired := make([]expiredEntry, 0, len(candidates))
 	var stuckKill []expiredEntry
 	now := time.Now()
 	for _, c := range candidates {
