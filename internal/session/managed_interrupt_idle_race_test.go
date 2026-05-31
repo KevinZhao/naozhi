@@ -213,6 +213,33 @@ func TestFireSendCancel_FiresUnboundBox(t *testing.T) {
 	}
 }
 
+// TestFireSendCancel_FiresOnNilLiveWithBoundProc pins R030056-GO-001: when
+// Interrupt observes no live process (proc==nil → fireSendCancel(nil), see
+// managed_send.go Interrupt dead branch) but a Send has already bound its
+// cancel box to a now-dead process A, the cancel MUST still fire. The old
+// guard (box.proc==nil || box.proc==live) was false on both clauses here
+// (box.proc==procA != nil, live==nil), so the in-flight Send would block on
+// ctx.Done() forever — exactly the "proc died, Interrupt sees nil" scenario.
+func TestFireSendCancel_FiresOnNilLiveWithBoundProc(t *testing.T) {
+	t.Parallel()
+
+	procA := NewTestProcess()
+	s := &ManagedSession{key: "r030056-nil-live"}
+
+	var cancelled bool
+	wrapped := context.CancelFunc(func() { cancelled = true })
+	// Send bound the cancel func to procA (now dead). procA != nil.
+	s.sendCancel.Store(&cancelBox{cancel: wrapped, proc: procA})
+
+	// Interrupt observed no live process (loadProcess returned nil).
+	s.fireSendCancel(nil)
+	if !cancelled {
+		t.Error("fireSendCancel(nil) skipped a cancel bound to a now-dead " +
+			"process (R030056-GO-001 regression): with no live process there " +
+			"is no stale-binding risk and the in-flight Send must be unblocked")
+	}
+}
+
 // TestInterrupt_IdleBranchSendCancelContract_SourceLevel is a static
 // guard on the fix location. It verifies the dead-process early-return
 // inside Interrupt() loads sendCancel and invokes it. A future edit that

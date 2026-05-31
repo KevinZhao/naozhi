@@ -222,6 +222,12 @@ func (s *ManagedSession) Interrupt() bool {
 // after Send stored its cancel func; cancelling that stale ctx is a no-op
 // against the new live process, so we skip it rather than report a misleading
 // success. live is the process Interrupt just observed via loadProcess.
+//
+// R030056-GO-001: live==nil means Interrupt observed no live process (the
+// process died or was never stored). In that case there is no "new live
+// process" the stale-binding guard protects against — a Send still blocked on
+// ctx.Done() must be unblocked regardless of which (now-dead) process its
+// cancel box was bound to. Skipping it here would strand that Send forever.
 func (s *ManagedSession) fireSendCancel(live processIface) {
 	box := s.sendCancel.Load()
 	if box == nil || box.cancel == nil {
@@ -230,7 +236,9 @@ func (s *ManagedSession) fireSendCancel(live processIface) {
 	// box.proc == nil → Send stored the box but has not bound a process yet;
 	// the turn will run on the current live process, so the cancel is valid.
 	// box.proc == live → the cancel targets the same process we observed.
-	if box.proc == nil || box.proc == live {
+	// live == nil → no live process exists, so there is no stale-binding risk;
+	// fire to unblock any in-flight Send waiting on ctx.Done().
+	if box.proc == nil || box.proc == live || live == nil {
 		box.cancel()
 	}
 }
