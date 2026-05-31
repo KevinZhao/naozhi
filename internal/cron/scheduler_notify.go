@@ -305,6 +305,13 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		// usable from narrow unit tests.
 		parent = context.Background()
 	}
+	// R249-ARCH-23 (#987): cronNotifyTimeout is the OUTER per-target ceiling.
+	// The INNER retry budget is limits.PlatformReplyMaxAttempts (inside each
+	// ReplyWithRetry below), shared with dispatch. The composite worst case for
+	// a multi-chunk flush is cronNotifyMaxChunks × PlatformReplyMaxAttempts ×
+	// per-attempt platformReplyTimeout; replyCtx (bound here) and the
+	// replyCtx.Err() check in the loop cut it off so it cannot outrun the
+	// per-target deadline. See the budget table at the top of tuning.go.
 	replyCtx, replyCancel := context.WithTimeout(parent, cronNotifyTimeout)
 	defer replyCancel()
 	maxLen := p.MaxReplyLength()
