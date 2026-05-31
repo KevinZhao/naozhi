@@ -7490,22 +7490,44 @@ function isFileRefCandidate(text) {
 // Trailing `:line` suffixes are stripped by splitPathLine before this runs.
 const FILE_REF_HAS_EXT = /\.[A-Za-z0-9]+$/;
 
+// splitPathNote separates a fenced path line into its path candidate and a
+// trailing human annotation. AI replies commonly tag path lines with inline
+// notes — `语文/...诊断.md   ← 待生成`, `bar.html  # 答案`, `foo.go (new)` —
+// where the note is set off from the path by whitespace. A real file path never
+// contains whitespace (isFileRefCandidate rejects spaces), so the first
+// whitespace-delimited token IS the path candidate and everything after the gap
+// is a note we preserve for display but exclude from the <code> body (so copy +
+// the file-ref scanner see the bare path). Returns {path, note}; note is '' when
+// the line is a lone path.
+function splitPathNote(line) {
+  const m = line.match(/^(\S+)(?:\s+(.*\S))?\s*$/);
+  if (!m) return { path: line, note: '' };
+  return { path: m[1], note: m[2] || '' };
+}
+
 // fencedPathList decides whether a language-less fenced code block is in fact
 // a plain list of file paths (one per line). AI replies frequently dump
 // generated/affected files inside a ``` fence — those paths are invisible to
 // the inline file-ref scanner because it skips <pre> content. When EVERY
-// non-empty line is a path candidate whose basename has an extension (and there
-// are at least two such lines, so a single stray path stays verbatim) we return
-// the trimmed lines so the caller can render them as clickable rows. Returns
-// null otherwise, leaving the verbatim-code path untouched. Requiring all lines
-// to match keeps real code blocks out: any block with one prose/code/extension-
-// less line fails the test.
+// non-empty line is a path candidate whose basename has an extension we return
+// the parsed rows ({path, note}) so the caller can render them as clickable
+// rows. Returns null otherwise, leaving the verbatim-code path untouched.
+// Requiring all lines to match keeps real code blocks out: any block with one
+// prose/code/extension-less line fails the test.
 //
-// Known non-goal: lines with trailing punctuation (`foo.md。`) or inline
-// backtick wrapping are not normalized here — they'd resolve to a non-existent
-// path and silently get no button. Stripping trailing punctuation risks eating
-// real filename chars, so that is left to a future pass rather than widening
-// the blast radius of this fix.
+// A single path line is accepted (one generated file inside a ``` fence is a
+// very common AI shape). The isFileRefCandidate + FILE_REF_HAS_EXT double gate
+// plus the server-side existence check (a non-file that slips through resolves
+// to {exists:false} and silently gets no button) make a lone-line list safe;
+// the old "≥2 lines" guard left every single-file fence button-less.
+//
+// Trailing annotations (`foo.md   ← 待生成`) are stripped via splitPathNote so
+// the note no longer breaks isFileRefCandidate (which rejects whitespace). The
+// note is carried through for display but kept out of the path.
+//
+// Known non-goal: lines with trailing punctuation glued to the path
+// (`foo.md。`) or inline backtick wrapping are not normalized here — they'd
+// resolve to a non-existent path and silently get no button.
 function fencedPathList(code) {
   const lines = code.split('\n');
   const paths = [];
@@ -7513,13 +7535,14 @@ function fencedPathList(code) {
     const line = raw.trim();
     if (line === '') continue;        // blank lines are tolerated as spacing
     if (line.length > 512) return null;
-    if (!isFileRefCandidate(line)) return null;
-    const { path } = splitPathLine(line);
-    const base = path.slice(path.lastIndexOf('/') + 1);
+    const { path, note } = splitPathNote(line);
+    if (!isFileRefCandidate(path)) return null;
+    const { path: bare } = splitPathLine(path);
+    const base = bare.slice(bare.lastIndexOf('/') + 1);
     if (!FILE_REF_HAS_EXT.test(base)) return null; // no extension → not a file list
-    paths.push(line);
+    paths.push({ path, note });
   }
-  if (paths.length < 2) return null;  // single path: leave as-is, not a "list"
+  if (paths.length < 1) return null;  // empty fence: nothing to render
   return paths;
 }
 
@@ -8344,7 +8367,16 @@ function renderMdUncached(s) {
       // non-path line) on the verbatim path.
       const pathLines = lang === '' ? fencedPathList(code) : null;
       if (pathLines) {
-        const rows = pathLines.map(p => '<div class="md-pathline"><code>' + esc(p) + '</code></div>').join('');
+        // Each row is {path, note}. The path goes in <code> so the file-ref
+        // scanner + copy see only the bare path; the optional note renders as
+        // a dimmed sibling span outside the <code> so it is visible but never
+        // folded into the path the exists-check queries.
+        const rows = pathLines.map(p => {
+          const noteHtml = p.note
+            ? '<span class="md-pathnote">' + esc(p.note) + '</span>'
+            : '';
+          return '<div class="md-pathline"><code>' + esc(p.path) + '</code>' + noteHtml + '</div>';
+        }).join('');
         return '<div class="md-code-wrap md-pathlist">' + rows +
           '<div class="md-code-actions">' +
             '<button class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)" aria-label="Copy file paths">copy</button>' +
@@ -8661,7 +8693,48 @@ function inlineMd(s) {
     // behaviour) because the substituted tags are naozhi-controlled and
     // cannot contain unescaped attacker content (each bold/italic/code
     // substitution already used `esc()`'d capture groups).
-    if (safe === '#') return text;
+    if (safe === '#') {
+      // Local-file link: claude CLI routinely emits generated files as
+      // markdown links `[数学/专题/foo.html](数学/专题/foo.html)` rather than
+      // backtick code. safeUrl rejects the non-http target (→ '#'), so the
+      // anchor branch is skipped and the link would collapse to plain text —
+      // invisible to scanEventForFileRefs (which only walks <code>/.md-code).
+      // Re-render a path-shaped target as inline <code> so the file-ref
+      // scanner attaches the same [↗ preview][↓ download] buttons it gives
+      // backtick paths. `url` is already esc()'d (esc ran above), so embed it
+      // directly; scanEventForFileRefs reads code.textContent (browser-decoded
+      // back to the real path) when calling the exists API. Display uses the
+      // path itself rather than `text` so the user sees which file resolves —
+      // and so the scanner's textContent is the path, not a friendly label.
+      //
+      // The `url` capture is NOT raw text — earlier inlineMd passes have already
+      // tokenized it. Two classes of contamination must be rejected before the
+      // target can be embedded in <code>:
+      //   1. naozhi-injected markup: the bold/italic passes run before this and
+      //      splice <strong>/<em> spans into the capture when the target itself
+      //      contains `**`/`*` (e.g. `[a](**x**/y.html)`). A real file path
+      //      never contains `<`, so reject any `<`-bearing target.
+      //   2. tokenizer placeholders: the backtick-code and inline-math passes
+      //      replace `` `x` ``/`$x$` with \x00CODE<n>\x00 / \x00KTX<n>\x00
+      //      sentinels. \x00 is non-whitespace/non-colon so it slips through
+      //      isFileRefCandidate, and the restore passes that run AFTER this one
+      //      would rewrite the sentinel into a nested <code>/<span> inside our
+      //      new <code> — malformed HTML plus a corrupted path for the scanner.
+      //      Reject any \x00-bearing target.
+      // Finally require a real extension (the same FILE_REF_HAS_EXT gate
+      // fencedPathList applies) so slash-shaped non-files — dates `2024/01/02`,
+      // fractions `1/2`, doc slugs without an extension — don't hijack the link
+      // into a bogus file ref with the author's label discarded.
+      const target = url.trim();
+      if (target.indexOf('<') === -1 && target.indexOf('\x00') === -1 && isFileRefCandidate(target)) {
+        const { path: bare } = splitPathLine(target);
+        const base = bare.slice(bare.lastIndexOf('/') + 1);
+        if (FILE_REF_HAS_EXT.test(base)) {
+          return '<code class="md-code">' + target + '</code>';
+        }
+      }
+      return text;
+    }
     return '<a href="' + escAttr(safe) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + text + '</a>';
   });
   // Auto-link bare URLs not already inside an <a> tag.
