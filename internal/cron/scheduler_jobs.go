@@ -1338,16 +1338,24 @@ func (s *Scheduler) Location() *time.Location {
 // Error precedence (preserved from the originals):
 //   - find miss      → (nil, find err)
 //   - op error       → (nil, op err)        ; persist + postCleanup skipped
-//   - persist error  → (nil, persist err)   ; postCleanup ALREADY ran
+//   - persist error  → (nil, persist err)   ; postCleanup skipped when rollback fires
 //   - success        → (*Job, nil)
+//
+// rollbackOnPersistErr mirrors withJobByIDOpt's contract: when non-nil and
+// persistJobsLocked returns an error, the helper calls it under s.mu (before
+// snapshotting) so in-memory state reverts to match the un-persisted disk
+// view, and postCleanup is skipped so cron.Remove / router.Reset side-effects
+// don't fire for a rolled-back mutation.
 func (s *Scheduler) withJobByPrefix(
 	idPrefix, plat, chatID string,
 	op func(j *Job) error,
 	postCleanup func(j *Job),
+	rollbackOnPersistErr func(j *Job),
 ) (*Job, error) {
 	var save func()
 	var snapshot Job
 	var findErr, opErr, perr error
+	var rolledBack bool
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -1363,6 +1371,14 @@ func (s *Scheduler) withJobByPrefix(
 			}
 		}
 		save, perr = s.persistJobsLocked()
+		// R20260531A-GO-002/BUG-4: mirror withJobByIDOpt's rollback contract.
+		// When persist fails after op succeeded, restore in-memory state to
+		// match the un-persisted disk view. Run rollback before snapshot so
+		// the caller observes "no change applied".
+		if perr != nil && rollbackOnPersistErr != nil {
+			rollbackOnPersistErr(j)
+			rolledBack = true
+		}
 		// R242-GO-3 mirror (#548): value-copy under s.mu so postCleanup and
 		// the caller read a stable Job even if a concurrent UpdateJob /
 		// SetJobPrompt mutates the live *j right after Unlock. Matches
@@ -1375,6 +1391,13 @@ func (s *Scheduler) withJobByPrefix(
 	}
 	if opErr != nil {
 		return nil, opErr
+	}
+	// R20260531A-GO-002/BUG-4: on rollback, skip postCleanup — its side
+	// effects (cron.Remove for Pause, etc.) reflect a mutation that is no
+	// longer in effect. Return perr so the caller surfaces the persist
+	// failure.
+	if rolledBack {
+		return nil, perr
 	}
 	if postCleanup != nil {
 		postCleanup(&snapshot)
@@ -1409,6 +1432,7 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 			}
 			s.cleanupRunningJobIfIdle(j.ID)
 		},
+		nil, // no rollback: deleteJobLocked is past the point of no return
 	)
 }
 
@@ -1417,9 +1441,22 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 // R236-QA-03 (#537): same lock-order pattern as PauseJobByID — the
 // cron.Remove returned by pauseJobLocked runs in postCleanup so the
 // unbuffered c.remove channel send doesn't happen under s.mu.
+//
+// R20260531A-BUG-4: mirrors PauseJobByID's rollback contract. When
+// persistJobsLocked fails after pauseJobLocked mutated (j.Paused=true,
+// j.entryID=0), the rollback restores the pre-op state so that
+// in-memory and on-disk views stay aligned — preventing a double-fire
+// on restart. postCleanup (cron.Remove hoist) is skipped on rollback
+// so the cron entry stays alive for the still-active job.
 func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 	var pauseCleanup func()
+	var prevEntryID robfigcron.EntryID
+	var prevPaused bool
+	var captured bool
 	op := func(j *Job) error {
+		prevEntryID = j.entryID
+		prevPaused = j.Paused
+		captured = true
 		c, err := s.pauseJobLocked(j)
 		pauseCleanup = c
 		return err
@@ -1429,12 +1466,65 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 			pauseCleanup()
 		}
 	}
-	return s.withJobByPrefix(idPrefix, plat, chatID, op, postCleanup)
+	rollback := func(j *Job) {
+		if !captured {
+			return
+		}
+		j.entryID = prevEntryID
+		j.Paused = prevPaused
+		// Drop pauseCleanup so the cron.Remove hoist cannot fire even if
+		// a future refactor reorders the flow — mirrors PauseJobByID.
+		pauseCleanup = nil
+	}
+	return s.withJobByPrefix(idPrefix, plat, chatID, op, postCleanup, rollback)
 }
 
 // ResumeJob resumes a paused job by ID prefix.
+//
+// R20260531A-GO-002: mirrors ResumeJobByID's rollback contract. When
+// persistJobsLocked fails after resumeJobLocked → registerJob mutated
+// (j.entryID/cachedPeriod/cachedSched/Paused), the rollback restores
+// the pre-op state under s.mu; s.cron.Remove is deferred to after the
+// lock is released to avoid the lock-order inversion documented in
+// ResumeJobByID (CR-1 / R250531-CR-1).
 func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
-	return s.withJobByPrefix(idPrefix, plat, chatID, s.resumeJobLocked, nil)
+	var prevEntryID robfigcron.EntryID
+	var prevCachedPeriod time.Duration
+	var prevCachedSched robfigcron.Schedule
+	var prevPaused bool
+	var captured bool
+	var removeEntryID robfigcron.EntryID
+	op := func(j *Job) error {
+		prevEntryID = j.entryID
+		prevCachedPeriod = j.cachedPeriod
+		prevCachedSched = j.cachedSched
+		prevPaused = j.Paused
+		captured = true
+		return s.resumeJobLocked(j)
+	}
+	rollback := func(j *Job) {
+		if !captured {
+			return
+		}
+		// Capture the newly-registered entryID for removal OUTSIDE s.mu.
+		// Do NOT call s.cron.Remove here — we are under s.mu and cron.Remove
+		// sends on an unbuffered channel drained only by the cron-tick
+		// goroutine that itself acquires s.mu.RLock → deadlock. Mirrors
+		// ResumeJobByID's CR-1 hoist pattern.
+		removeEntryID = j.entryID
+		j.entryID = prevEntryID
+		j.cachedPeriod = prevCachedPeriod
+		j.cachedSched = prevCachedSched
+		j.Paused = prevPaused
+	}
+	snap, err := s.withJobByPrefix(idPrefix, plat, chatID, op, nil, rollback)
+	// Remove the orphaned cron entry now that s.mu is released.
+	// removeEntryID is non-zero only when rollback fired (persist failed
+	// after registerJob added a new entry). Mirrors ResumeJobByID's CR-1.
+	if removeEntryID != 0 {
+		s.cron.Remove(removeEntryID)
+	}
+	return snap, err
 }
 
 // NextRun returns the next scheduled run time for a job. R247-GO-9
