@@ -144,22 +144,14 @@ func (h *Hub) marshalBroadcastAuth(v any) {
 // so the final state must also reach everyone — otherwise clients not subscribed
 // to this session would see a stale "running" dot in the sidebar forever.
 func (h *Hub) broadcastState(key, state, reason string) {
-	data, err := marshalPooled(node.ServerMsg{Type: "session_state", Key: key, State: state, Reason: reason})
-	if err != nil {
-		return
-	}
-	h.broadcastToAuthenticated(data)
+	h.marshalBroadcastAuth(node.ServerMsg{Type: "session_state", Key: key, State: state, Reason: reason})
 }
 
 // BroadcastSessionReady sends a session_state "running" to ALL authenticated clients
 // so they can auto-subscribe. Unlike broadcastState, this is not limited to already-
 // subscribed clients — needed for new sessions where nobody is subscribed yet.
 func (h *Hub) BroadcastSessionReady(key string) {
-	data, err := marshalPooled(node.ServerMsg{Type: "session_state", Key: key, State: "running"})
-	if err != nil {
-		return
-	}
-	h.broadcastToAuthenticated(data)
+	h.marshalBroadcastAuth(node.ServerMsg{Type: "session_state", Key: key, State: "running"})
 }
 
 // BroadcastSessionsUpdate debounces notifications: resets a 50ms timer on each
@@ -287,7 +279,7 @@ func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, 
 	// so once it returns true we can skip SanitizeForLog (slow path allocates
 	// a strings.Map output even on the no-op branch when len > 0). Untrusted
 	// or shape-mismatched input still falls through to the sanitiser.
-	data, err := marshalPooled(cronRunStartedMsg{
+	h.marshalBroadcastAuth(cronRunStartedMsg{
 		Type:      "cron_run_started",
 		JobID:     sanitizeHexIDForBroadcast(jobID, 64),
 		RunID:     sanitizeHexIDForBroadcast(runID, 64),
@@ -296,10 +288,6 @@ func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, 
 		SessionID: osutil.SanitizeForLog(sessionID, 128),
 		Fresh:     fresh,
 	})
-	if err != nil {
-		return
-	}
-	h.broadcastToAuthenticated(data)
 }
 
 // BroadcastCronRunEnded emits cron_run_ended for every terminal state
@@ -313,7 +301,7 @@ func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, ended
 	// and shields a future code path that derives them from external config
 	// (e.g. webhook trigger names) from log/payload injection. R221-FIX-P2-7.
 	// R222-PERF-15: see sanitizeHexIDForBroadcast — hex IDs short-circuit.
-	data, err := marshalPooled(cronRunEndedMsg{
+	h.marshalBroadcastAuth(cronRunEndedMsg{
 		Type:       "cron_run_ended",
 		JobID:      sanitizeHexIDForBroadcast(jobID, 64),
 		RunID:      sanitizeHexIDForBroadcast(runID, 64),
@@ -326,10 +314,6 @@ func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, ended
 		ErrorMsg:   errMsg,
 		Trigger:    osutil.SanitizeForLog(trigger, 32),
 	})
-	if err != nil {
-		return
-	}
-	h.broadcastToAuthenticated(data)
 }
 
 // broadcastSessionSystemEvent pushes a synthetic `system`-type event frame to
@@ -456,23 +440,19 @@ type daemonRunEndedMsg struct {
 // config or pass through external content; sanitising at the broadcast
 // boundary keeps us safe regardless.
 func (h *Hub) BroadcastDaemonRunStarted(name, runID, trigger string, startedAt time.Time) {
-	data, err := marshalPooled(daemonRunStartedMsg{
+	h.marshalBroadcastAuth(daemonRunStartedMsg{
 		Type:      "daemon_run_started",
 		Name:      osutil.SanitizeForLog(name, 64),
 		RunID:     sanitizeHexIDForBroadcast(runID, 64),
 		Trigger:   osutil.SanitizeForLog(trigger, 32),
 		StartedAt: startedAt.UnixMilli(),
 	})
-	if err != nil {
-		return
-	}
-	h.broadcastToAuthenticated(data)
 }
 
 // BroadcastDaemonRunEnded emits daemon_run_ended.  ErrorMsg is
 // intentionally absent — see daemonRunEndedMsg above.
 func (h *Hub) BroadcastDaemonRunEnded(name, runID, state, errClass, trigger string, durationMS int64) {
-	data, err := marshalPooled(daemonRunEndedMsg{
+	h.marshalBroadcastAuth(daemonRunEndedMsg{
 		Type:       "daemon_run_ended",
 		Name:       osutil.SanitizeForLog(name, 64),
 		RunID:      sanitizeHexIDForBroadcast(runID, 64),
@@ -481,10 +461,6 @@ func (h *Hub) BroadcastDaemonRunEnded(name, runID, state, errClass, trigger stri
 		ErrorClass: osutil.SanitizeForLog(errClass, 64),
 		Trigger:    osutil.SanitizeForLog(trigger, 32),
 	})
-	if err != nil {
-		return
-	}
-	h.broadcastToAuthenticated(data)
 }
 
 // sanitizeHexIDForBroadcast returns id unchanged when it matches the
