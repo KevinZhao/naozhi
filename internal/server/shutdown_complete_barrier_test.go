@@ -60,11 +60,17 @@ func TestShutdownComplete_ClosesOnlyAfterDrain(t *testing.T) {
 	}
 
 	// Cancelling ctx triggers the drain; the barrier closes once it returns.
+	// The drain has its own session.ShutdownTimeout budget (30s); the test
+	// waits that plus headroom so a slow CI scheduler running this in parallel
+	// with the rest of the server suite cannot trip a too-tight literal 10s cap
+	// (R030056-GO-004: the prior 10s constant flaked under parallel load while
+	// passing in isolation). The barrier closes near-instantly for this empty
+	// session map; the generous ceiling only guards against scheduler stalls.
 	cancel()
 	select {
 	case <-srv.ShutdownComplete():
-	case <-time.After(10 * time.Second):
-		t.Fatal("ShutdownComplete did not close within 10s after ctx cancel — drain barrier never fired")
+	case <-time.After(session.ShutdownTimeout + 5*time.Second):
+		t.Fatal("ShutdownComplete did not close after ctx cancel — drain barrier never fired")
 	}
 
 	// Start itself must also have returned.
