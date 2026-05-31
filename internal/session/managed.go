@@ -105,6 +105,34 @@ type ProcessEventReader interface {
 	LastEventAt() time.Time
 }
 
+// ProcessLifecycle is the third facet of the planned processIface split
+// (R176-ARCH-M2 / R214-ARCH-8, #430), following the ProcessSender and
+// ProcessEventReader precedent. It exposes the liveness + teardown subset
+// that Router.Cleanup, evictOldest, Remove/Reset and the shim reconciler
+// consume — the parts entangled with event-read / identity / metering on
+// the wider processIface god-interface.
+//
+// Pure additive split. processIface embeds ProcessLifecycle so the concrete
+// *cli.Process implementation and testutil.TestProcess fakes keep satisfying
+// both interfaces unchanged. Callers ready to narrow can switch from
+// processIface (~25 methods) to ProcessLifecycle (4) one site at a time —
+// e.g. the ACP/Gemini backend onboarding the issue is gated on no longer
+// needs to mock the full god-interface just to prove liveness behaviour.
+type ProcessLifecycle interface {
+	// Alive reports whether the underlying CLI/shim process handle is still
+	// usable (not Closed/Killed). Lock-free poll.
+	Alive() bool
+	// IsRunning reports whether a turn is actively streaming. Distinct from
+	// Alive: a session can be Alive (process up) but not Running (idle).
+	IsRunning() bool
+	// Close releases the process handle gracefully (drains the shim socket
+	// on the normal path). Idempotent.
+	Close()
+	// Kill force-terminates the process. Used by the stuck-session watchdog
+	// when Close's graceful path cannot reclaim the slot.
+	Kill()
+}
+
 // processIface abstracts the CLI process lifecycle methods used across the
 // session-aware code paths. Despite the package name, callers extend beyond
 // internal/session itself: internal/server (Hub broadcast + dashboard

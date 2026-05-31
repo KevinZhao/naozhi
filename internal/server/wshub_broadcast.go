@@ -11,6 +11,7 @@
 package server
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -39,11 +40,25 @@ import (
 // debounceTimer / debounceFirst / debounceClosed / clients / mu /
 // droppedTotal. This file is pure code-relocation — no behaviour change.
 
-// Pre-marshaled static message body. A plain byte literal avoids paying
-// a json.Marshal on package init and removes the nominal panic branch
-// (the struct has only a Type string field so Marshal cannot fail). The
-// shape must stay exactly in sync with node.ServerMsg JSON encoding.
-var sessionsUpdateMsg = []byte(`{"type":"sessions_update"}`)
+// Pre-marshaled static message body, derived ONCE from node.ServerMsg at
+// package init so it can never drift from the wire schema. R243-ARCH-24
+// (#869) incremental slice: the previous hand-written byte literal was a
+// second, unverified source of truth for the sessions_update frame and
+// carried a "must stay exactly in sync" comment — exactly the scattered-
+// wire-struct hazard the issue flags. Deriving from the struct keeps the
+// zero-alloc broadcast hot path (still a single shared []byte) while making
+// node.ServerMsg the only authority. All fields are omitempty so the result
+// is `{"type":"sessions_update"}`; marshalSessionsUpdate panics on the
+// impossible Marshal error rather than shipping a malformed/empty frame.
+var sessionsUpdateMsg = marshalSessionsUpdate()
+
+func marshalSessionsUpdate() []byte {
+	data, err := json.Marshal(node.ServerMsg{Type: "sessions_update"})
+	if err != nil {
+		panic("server: marshal sessions_update frame: " + err.Error())
+	}
+	return data
+}
 
 // broadcastClientSnapPool reuses the []*wsClient backing array across
 // broadcasts so high-frequency session_state / sessions_update traffic does

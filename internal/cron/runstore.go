@@ -1330,18 +1330,28 @@ func (s *runStore) scanSortedRunDir(jobID string) ([]runDirItem, string, error) 
 			mtime: info.ModTime(),
 		})
 	}
-	slices.SortFunc(items, func(a, b runDirItem) int {
-		// mtime DESC: newer first. Time.Compare (Go 1.20+) instead of
-		// UnixNano so wall-clock jumps don't desync trim ↔ list ordering
-		// (R236-QA-01). R235-PERF-17.
-		if c := b.mtime.Compare(a.mtime); c != 0 {
-			return c
-		}
-		// Equal-mtime tie-break by runID DESC for cross-process stability.
-		// R222-GO-5.
-		return cmp.Compare(b.runID, a.runID)
-	})
+	slices.SortFunc(items, runDirItemNewestFirst)
 	return items, dir, nil
+}
+
+// runDirItemNewestFirst is the shared comparator for scanSortedRunDir's
+// mtime-DESC ordering. Hoisted out of the call site to a package-level
+// function so it is NOT reallocated as a fresh closure header on every
+// scan: scanSortedRunDir runs on both the trim (Append GC) path and the
+// cold-cache list/warm path, so at process restart with N jobs it fires
+// 2×N times, each previously allocating a no-capture closure. Mirrors the
+// R20260527122801-PERF-2 (#1340) fix that lifted jobIDCmpForSort out of
+// marshalJobsLocked for the same reason — behaviour is identical.
+func runDirItemNewestFirst(a, b runDirItem) int {
+	// mtime DESC: newer first. Time.Compare (Go 1.20+) instead of
+	// UnixNano so wall-clock jumps don't desync trim ↔ list ordering
+	// (R236-QA-01). R235-PERF-17.
+	if c := b.mtime.Compare(a.mtime); c != 0 {
+		return c
+	}
+	// Equal-mtime tie-break by runID DESC for cross-process stability.
+	// R222-GO-5.
+	return cmp.Compare(b.runID, a.runID)
 }
 
 // diskListNewestFirst is the on-disk variant of List, used by warmCache
