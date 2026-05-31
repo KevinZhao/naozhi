@@ -84,17 +84,21 @@ func isValidNodeID(id string) bool {
 }
 
 func (a *nodeAccessor) LookupNode(w http.ResponseWriter, id string) (node.Conn, bool) {
+	// R20260531A-ARCH-5: use errResp (JSON envelope) instead of http.Error
+	// (text/plain) so all node-accessor errors are consistent with the rest
+	// of the API surface. Codes use a closed vocabulary so clients can branch
+	// without string-matching the message.
 	if len(id) > maxNodeIDBytes {
-		http.Error(w, "node id too long", http.StatusBadRequest)
+		errResp(w, http.StatusBadRequest, "node_id_too_long", "node id exceeds maximum length")
 		return nil, false
 	}
 	if !isValidNodeID(id) {
-		http.Error(w, "invalid node id", http.StatusBadRequest)
+		errResp(w, http.StatusBadRequest, "invalid_node_id", "node id contains invalid characters")
 		return nil, false
 	}
 	nc, ok := a.GetNode(id)
 	if !ok {
-		http.Error(w, "unknown node", http.StatusBadRequest)
+		errResp(w, http.StatusBadRequest, "unknown_node", "unknown node")
 		return nil, false
 	}
 	return nc, true
