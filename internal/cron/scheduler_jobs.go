@@ -24,24 +24,24 @@ import (
 	robfigcron "github.com/robfig/cron/v3"
 )
 
-// listSnapshotPair pairs a Job value-copy with its robfig/cron entry ID
-// during ListAllJobsWithNextRun's two-phase snapshot. Defined at package
-// scope (not inside the function body) so sync.Pool below can reference
-// the type. R247-PERF-4 (#530).
-type listSnapshotPair struct {
-	job     Job
-	entryID robfigcron.EntryID
-}
-
-// listPairsPool reuses the transient []listSnapshotPair scratch slice
-// allocated once per ListAllJobsWithNextRun call. Dashboard polls at 1Hz
-// across multiple tabs so the call frequency × jobs-per-call dominates
-// the cron CRUD path's allocator pressure. Get returns a zero-length
-// slice with potentially non-zero capacity — callers must reset length
-// (`:0`) when they Put it back. R247-PERF-4 (#530).
-var listPairsPool = sync.Pool{
+// listEntryIDsPool reuses the transient []robfigcron.EntryID scratch slice
+// recorded during ListAllJobsWithNextRun's two-phase snapshot. Dashboard
+// polls at 1Hz across multiple tabs so the call frequency × jobs-per-call
+// dominates the cron CRUD path's allocator pressure. Get returns a
+// zero-length slice with potentially non-zero capacity — callers must
+// reset length (`:0`) when they Put it back. R247-PERF-4 (#530).
+//
+// R250-PERF-15 (#1118): previously this pooled a []listSnapshotPair whose
+// element embedded a full Job value-copy (~300B incl. RunCounters), so the
+// snapshot copied every Job twice — once into the pooled scratch under
+// RLock, then again into the caller-owned result slice. With N jobs × N
+// tabs × 1Hz that wasted ~750KB/s of GC churn on the redundant copy. We
+// now copy each Job exactly once (directly into result under RLock) and the
+// pooled scratch holds only the cheap entryID (8 bytes) needed to patch
+// NextRun after s.cron.Entries() runs lock-free.
+var listEntryIDsPool = sync.Pool{
 	New: func() any {
-		s := make([]listSnapshotPair, 0, 64)
+		s := make([]robfigcron.EntryID, 0, 64)
 		return &s
 	},
 }
@@ -335,33 +335,40 @@ type JobWithNextRun struct {
 // a single mutex acquisition, which matters when the dashboard list API
 // polls at 1 Hz with 50 jobs registered.
 func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
-	// R247-PERF-4 (#530): the dashboard list endpoint polls this at 1Hz
-	// across N open tabs, so we pool the two transient containers
-	// (pairs scratch + EntryID-keyed nextRun map) to keep per-poll
-	// alloc count flat as job count grows. The result slice is owned by
-	// the caller and stays heap-resident, so it is NOT pooled.
-	pairsPtr := listPairsPool.Get().(*[]listSnapshotPair)
-	pairs := (*pairsPtr)[:0]
+	// R247-PERF-4 (#530) / R250-PERF-15 (#1118): the dashboard list endpoint
+	// polls this at 1Hz across N open tabs, so we pool the two transient
+	// containers (entryID scratch + EntryID-keyed nextRun map) to keep
+	// per-poll alloc count flat as job count grows. The result slice is owned
+	// by the caller and stays heap-resident, so it is NOT pooled — and each
+	// Job is copied straight into it under RLock so there is no second copy.
+	idsPtr := listEntryIDsPool.Get().(*[]robfigcron.EntryID)
+	ids := (*idsPtr)[:0]
 	defer func() {
 		// Reset length but keep capacity so the next call skips the make.
-		*pairsPtr = pairs[:0]
-		listPairsPool.Put(pairsPtr)
+		*idsPtr = ids[:0]
+		listEntryIDsPool.Put(idsPtr)
 	}()
 
+	var result []JobWithNextRun
 	s.mu.RLock()
-	if cap(pairs) < len(s.jobs) {
-		pairs = make([]listSnapshotPair, 0, len(s.jobs))
+	if cap(ids) < len(s.jobs) {
+		ids = make([]robfigcron.EntryID, 0, len(s.jobs))
 	}
+	result = make([]JobWithNextRun, 0, len(s.jobs))
 	for _, j := range s.jobs {
-		pairs = append(pairs, listSnapshotPair{job: *j, entryID: j.entryID})
+		// Single Job copy: directly into the caller-owned result. NextRun is
+		// patched in by index below once Entries() has been read lock-free.
+		result = append(result, JobWithNextRun{Job: *j})
+		ids = append(ids, j.entryID)
 	}
 	s.mu.RUnlock()
 
 	// Single Entries() snapshot → entryID-keyed map. The map is pooled and
 	// `clear()`-ed before re-Put so stale keys from a previous larger
 	// snapshot do not leak into a smaller current one. The alternative —
-	// re-walking Entries per pair — is O(N²) and re-acquires runningMu per
-	// Entry() call.
+	// re-walking Entries per job — is O(N²) and re-acquires runningMu per
+	// Entry() call. Called outside s.mu to avoid inverting the lock order
+	// the cron dispatcher takes (cron-internal → execute → s.mu.Lock).
 	entries := s.cron.Entries()
 	nextByIDPtr := listNextByIDPool.Get().(*map[robfigcron.EntryID]time.Time)
 	nextByID := *nextByIDPtr
@@ -374,13 +381,10 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 		nextByID[e.ID] = e.Next
 	}
 
-	result := make([]JobWithNextRun, 0, len(pairs))
-	for _, p := range pairs {
-		var next time.Time
-		if p.entryID != 0 {
-			next = nextByID[p.entryID]
+	for i, id := range ids {
+		if id != 0 {
+			result[i].NextRun = nextByID[id]
 		}
-		result = append(result, JobWithNextRun{Job: p.job, NextRun: next})
 	}
 	return result
 }
@@ -1238,14 +1242,15 @@ func (s *Scheduler) PreviewScheduleN(schedule string, n int) ([]time.Time, error
 // Safe to call on a nil *Scheduler: returns UTC (matches previewLocation's
 // nil branch so dashboard preview / Location calls stay in agreement during
 // the bootstrap window when scheduler is not yet wired). R219-CR-6.
+//
+// #835 (dup-code): the resolution (nil→UTC, unset→Local, else configured)
+// was previously open-coded identically to previewLocation, so a future
+// change to the nil/unset fallback policy had to be made in two places or
+// the two timezone-decision points would silently diverge — exactly the
+// "dashboard preview / Location stay in agreement" invariant this godoc
+// promises. Delegate to the single source of truth.
 func (s *Scheduler) Location() *time.Location {
-	if s == nil {
-		return time.UTC
-	}
-	if s.location == nil {
-		return time.Local
-	}
-	return s.location
+	return s.previewLocation()
 }
 
 // withJobByPrefix is the IM-prefix counterpart to withJobByID. It collapses
@@ -1400,14 +1405,31 @@ func (s *Scheduler) NextRun(j *Job) time.Time {
 	if j == nil {
 		return time.Time{}
 	}
+	// R250-PERF-14-adjacent lock-order fix (#1117): resolve entryID under
+	// s.mu.RLock, then RELEASE s.mu before calling s.cron.Entry(). Entry()
+	// is implemented as `for _, e := range c.Entries()` and Entries()
+	// round-trips through the dispatcher's snapshot channel guarded by
+	// robfig/cron's runningMu. Holding s.mu across that call inverts the
+	// lock order the cron dispatch path takes (cron-internal → execute →
+	// recordResult → s.mu.Lock) — the exact discipline
+	// ListAllJobsWithNextRun's godoc documents and follows. NextRun was a
+	// straggler still calling cron.Entry inside s.mu; aligning it with the
+	// release-before-Entries discipline removes the lock-ordering
+	// inconsistency without changing the observable result (entryID is the
+	// source-of-truth snapshot; a concurrent Remove that lands after the
+	// unlock yields a zero Entry.Next, the same "no live schedule" answer
+	// the in-lock path produced). TriggerNow intentionally keeps its
+	// cross-lock (see R250-GO-2 there) because it needs a single consistent
+	// instant for the entry-gone check against a racing DeleteJob; NextRun
+	// only reads Entry.Next so it has no such consistency requirement.
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	entryID := j.entryID
 	if entryID == 0 && j.ID != "" {
 		if live, ok := s.jobs[j.ID]; ok {
 			entryID = live.entryID
 		}
 	}
+	s.mu.RUnlock()
 	if entryID == 0 {
 		return time.Time{}
 	}
@@ -1468,9 +1490,13 @@ func (s *Scheduler) TriggerNow(id string) error {
 	// R250-GO-2: hold s.mu.RLock across s.cron.Entry(entryID) and the
 	// WrappedJob nil check so a concurrent DeleteJob (which calls
 	// s.cron.Remove under s.mu.Lock) cannot observe entryID-in-flight
-	// while we're mid-lookup. NextRun (above) already uses the same
-	// cross-lock pattern; cron's internal lock cannot call back into
-	// scheduler code, so cross-lock holding is safe.
+	// while we're mid-lookup. cron's internal lock cannot call back into
+	// scheduler code, so cross-lock holding is safe here. (NextRun no
+	// longer cross-locks — #1117 moved its cron.Entry read outside s.mu to
+	// align with ListAllJobsWithNextRun's release-before-Entries
+	// discipline; TriggerNow keeps the cross-lock because it needs the
+	// entry-gone check and the s.mu RLock to observe a single consistent
+	// instant against a racing DeleteJob.)
 	if entryID != 0 {
 		// TriggerNow 不再通过 cron chain 的 WrappedJob.Run()——因为我们要跳过
 		// jitter（用户显式 "run now" 期望立刻跑）。改为直接 executeOpt(..., true)。

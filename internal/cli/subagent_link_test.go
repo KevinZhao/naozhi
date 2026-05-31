@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -425,5 +426,61 @@ func TestReadFirstLineMeta_OversizedFirstLine(t *testing.T) {
 	}
 	if _, err := readFirstLineMeta(path); err != errFirstLineTooLong {
 		t.Errorf("got err=%v, want errFirstLineTooLong", err)
+	}
+}
+
+// TestAppendNamedLink_CapsHistory pins R250531-PERF-4: byName[name] must not
+// grow without bound. After many appends for the same agent name, the slice
+// is trimmed to maxNamedLinkHistory most-recent entries, and same-name
+// respawn detection still sees the newest distinct FirstPromptIDs.
+func TestAppendNamedLink_CapsHistory(t *testing.T) {
+	t.Parallel()
+	l := NewSubagentLinker()
+	const name = "orchestrator"
+	total := maxNamedLinkHistory*4 + 7
+	l.mu.Lock()
+	for i := 0; i < total; i++ {
+		l.appendNamedLink(name, LinkInfo{
+			InternalAgentID: "agent-" + strconv.Itoa(i),
+			Name:            name,
+			FirstPromptID:   "p" + strconv.Itoa(i),
+			Resolved:        true,
+		})
+	}
+	got := l.byName[name]
+	l.mu.Unlock()
+
+	if len(got) != maxNamedLinkHistory {
+		t.Fatalf("byName[%q] len = %d, want %d (capped)", name, len(got), maxNamedLinkHistory)
+	}
+	// The retained window must be the most-recent entries, in order.
+	wantFirst := "p" + strconv.Itoa(total-maxNamedLinkHistory)
+	wantLast := "p" + strconv.Itoa(total-1)
+	if got[0].FirstPromptID != wantFirst {
+		t.Errorf("oldest retained FirstPromptID = %q, want %q", got[0].FirstPromptID, wantFirst)
+	}
+	if got[len(got)-1].FirstPromptID != wantLast {
+		t.Errorf("newest retained FirstPromptID = %q, want %q", got[len(got)-1].FirstPromptID, wantLast)
+	}
+	// Capacity must not run away either — the in-place copy-down keeps the
+	// backing array bounded rather than reallocating ever-larger arrays.
+	if c := cap(got); c > maxNamedLinkHistory*2 {
+		t.Errorf("byName[%q] cap = %d grew unbounded (want <= %d)", name, c, maxNamedLinkHistory*2)
+	}
+}
+
+// TestAppendNamedLink_BelowCapKeepsAll verifies the common case (fewer than
+// the cap) retains every entry untouched.
+func TestAppendNamedLink_BelowCapKeepsAll(t *testing.T) {
+	t.Parallel()
+	l := NewSubagentLinker()
+	l.mu.Lock()
+	for i := 0; i < 5; i++ {
+		l.appendNamedLink("worker", LinkInfo{FirstPromptID: "p" + strconv.Itoa(i)})
+	}
+	got := l.byName["worker"]
+	l.mu.Unlock()
+	if len(got) != 5 {
+		t.Fatalf("len = %d, want 5", len(got))
 	}
 }
