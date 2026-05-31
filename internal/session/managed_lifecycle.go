@@ -96,6 +96,34 @@ func (s *ManagedSession) ReattachProcessNoCallback(proc processIface, sessionID 
 	}
 }
 
+// tryReattachProcessNoCallback is the runtime-reconcile-safe variant of
+// ReattachProcessNoCallback. It guards the swap behind a *non-blocking*
+// sendMu.TryLock so the documented SAFETY CONSTRAINT (no in-flight Send) is
+// enforced rather than merely assumed.
+//
+// R51-CONCUR-002 (#750): StartShimReconcileLoop calls reconnectShims every
+// 30s and, while holding r.mu, reattaches a fresh process to a dead session.
+// The earlier isAlive() guard rejects sessions whose process is still alive,
+// but a Send() may still hold sendMu while unwinding on a process that has
+// just died — and ReattachProcessNoCallback's storeProcess swap +
+// deathReason.Store("") would then race that Send's timeout/death write
+// (a logical race: each store is atomic, but the pair is not coordinated).
+//
+// TryLock is the right primitive here: a *blocking* sendMu.Lock would violate
+// the sendMu→r.mu lock ordering (the caller already holds r.mu) and risk an
+// ABBA deadlock against Send→onSessionID→r.mu. TryLock never blocks, so it
+// cannot deadlock; if it fails, a Send is genuinely in flight and the caller
+// skips this session — the next reconcile tick (30s) retries once the Send
+// has released sendMu. Returns true when the reattach completed.
+func (s *ManagedSession) tryReattachProcessNoCallback(proc processIface, sessionID string) bool {
+	if !s.sendMu.TryLock() {
+		return false
+	}
+	defer s.sendMu.Unlock()
+	s.ReattachProcessNoCallback(proc, sessionID)
+	return true
+}
+
 // adoptProcessAlreadySeeded publishes proc and marks the entire current
 // persistedHistory as already-seeded into proc.EventLog. Used by Rename /
 // takeover paths where the proc was running under a different ManagedSession

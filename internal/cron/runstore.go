@@ -596,6 +596,26 @@ func (s *runStore) ensureJobDir(jobID, dir string) error {
 		// 不写入 cache：让下次 Append 重试。
 		return err
 	}
+	// R249-ARCH-10 (#976): the newly created runs/<jobID>/ subdirectory entry
+	// lives in the runs/ root and is not durable until the root is fsynced.
+	// WriteFileAtomic later fsyncs the file's immediate parent (runs/<jobID>/)
+	// but never its grandparent, so a crash after Append could leave the run
+	// record on disk while the directory entry pointing at its parent dir is
+	// lost — the record becomes orphaned/unreadable on recovery. Fsync the
+	// runs/ root once per fresh subdir creation to close the gap. SyncDir
+	// swallows soft errors (e.g. FUSE backends that reject directory fsync),
+	// so this never blocks Append on filesystems lacking the capability.
+	// Best-effort: only run on the cache-miss (first-time) path, so the
+	// steady-state fast-path above stays syscall-free.
+	if s.root != "" {
+		if err := osutil.SyncDir(s.root); err != nil {
+			// Non-fatal: the subdir + its first record still landed; only
+			// crash-durability of the directory entry is degraded. Log so
+			// operators can correlate "runs dir fsync skipped" with any
+			// post-crash missing-history reports.
+			slog.Debug("cron run: runs root fsync skipped", "root", s.root, "err", err)
+		}
+	}
 	s.jobDirEnsured.Store(jobID, struct{}{})
 	return nil
 }
