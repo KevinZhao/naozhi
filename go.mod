@@ -32,6 +32,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.36.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.42.1 // indirect
 	github.com/aws/smithy-go v1.25.1 // indirect
-	github.com/gogo/protobuf v1.3.2 // indirect
+	github.com/gogo/protobuf v1.3.3-0.20221024144010-f67b8970b736 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
 )
