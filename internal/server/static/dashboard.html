@@ -1072,6 +1072,11 @@ body.nz-view-assets .asset-main{display:flex}
   .container{display:block;height:100%;overflow:hidden}
   /* Activity Bar -> fixed bottom tab bar; rail rows become horizontal nav. */
   .activity-bar{position:fixed;left:0;right:0;bottom:0;top:auto;width:100%;height:auto;flex-direction:row;border-right:none;border-top:1px solid var(--nz-border);padding:4px 0 max(4px,env(safe-area-inset-bottom));z-index:30;justify-content:space-around}
+  /* In an open conversation, hide the bottom tab bar and reclaim its space so
+     the chat history gets full height. The ← back button in the main header
+     returns to the session list, where the tab bar reappears. */
+  body.mobile-chat-view .activity-bar{display:none}
+  body.mobile-chat-view .main{padding-bottom:0}
   .ab-nav{width:auto;flex:1;max-width:120px;height:46px}
   .ab-nav.active::before{left:50%;top:auto;bottom:-4px;transform:translateX(-50%);width:24px;height:3px;border-radius:2px 2px 0 0}
   /* Asset panels: full-screen drawers like the chat sidebar/main. The reader
