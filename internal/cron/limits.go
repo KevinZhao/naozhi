@@ -89,6 +89,9 @@ var ErrInvalidSchedule = errors.New("cron: invalid schedule")
 // parse-failure errors. Empty schedule is rejected here so a single call
 // replaces the prior hand-written byte+rune loops on both edges.
 func ValidateScheduleChars(schedule string) error {
+	if len(schedule) == 0 {
+		return fmt.Errorf("%w: must not be empty", ErrInvalidSchedule)
+	}
 	if len(schedule) > MaxScheduleBytes {
 		return fmt.Errorf("%w: exceeds %d-byte limit", ErrInvalidSchedule, MaxScheduleBytes)
 	}
