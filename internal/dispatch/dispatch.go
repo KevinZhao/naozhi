@@ -158,7 +158,14 @@ type Dispatcher struct {
 	// legacy duplicate-routing branches that R-key-resolver collapsed
 	// will quietly come back.  Any new ProjectForChat / EffectivePlanner*
 	// read on the hot path should fail review.
-	projectMgr *project.Manager
+	//
+	// ARCH-DISP-1 (#457): typed as the ProjectStore consumer interface
+	// (consumer.go) rather than *project.Manager so slash-command handler
+	// tests can inject a fake binding store. *project.Manager satisfies it
+	// implicitly; NewDispatcher assigns cfg.ProjectMgr directly. nil when
+	// projects.root is unconfigured — every handler gates on
+	// `d.projectMgr == nil` first (see handleProjectCommand).
+	projectMgr ProjectStore
 	// resolver centralises (key, opts) derivation for the IM and slash-
 	// command paths. NewDispatcher guarantees this field is non-nil — when
 	// callers don't supply a resolver the constructor fabricates a project-
@@ -511,13 +518,22 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 			scheduler = nil
 		}
 	}
+	// ARCH-DISP-1 (#457): same typed-nil-interface trap for ProjectStore.
+	// cfg.ProjectMgr is a concrete *project.Manager; a nil pointer boxed
+	// into the ProjectStore field is != nil, which would defeat every
+	// `d.projectMgr == nil` gate (handleProjectCommand / /cd / /new).
+	// Collapse it to a true nil interface here, mirroring scheduler above.
+	var projectStore ProjectStore
+	if cfg.ProjectMgr != nil {
+		projectStore = cfg.ProjectMgr
+	}
 	d := &Dispatcher{
 		router:                router,
 		platforms:             cfg.Platforms,
 		agents:                cfg.Agents,
 		agentCommands:         cfg.AgentCommands,
 		scheduler:             scheduler,
-		projectMgr:            cfg.ProjectMgr,
+		projectMgr:            projectStore,
 		resolver:              resolver,
 		guard:                 cfg.Guard,
 		queue:                 cfg.Queue,
