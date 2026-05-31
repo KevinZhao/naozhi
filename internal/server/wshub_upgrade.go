@@ -254,10 +254,19 @@ func wsDeriveUploadOwner(w http.ResponseWriter, r *http.Request, h *Hub, ip stri
 		// cookies until the process restarted. Local var so the
 		// constant-time compare and the empty-guard read the same value.
 		mac := h.cookieMAC()
-		if mac != "" && subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(mac)) == 1 {
-			// Must use the same derivation as HTTP uploadOwner so files
-			// uploaded on one transport can be claimed on the other.
-			return ownerKeyFromCookie(cookie.Value), true, true
+		// R20260531A-SEC-11: pre-hash both sides to a fixed 32-byte digest
+		// so subtle.ConstantTimeCompare always receives equal-length slices.
+		// Without this, differing cookie/MAC lengths cause an immediate 0
+		// return, leaking the expected MAC length via timing. Mirrors the
+		// handleAuth token path (~line 305) which already applies this pattern.
+		if mac != "" {
+			cookieHash := sha256.Sum256([]byte(cookie.Value))
+			macHash := sha256.Sum256([]byte(mac))
+			if subtle.ConstantTimeCompare(cookieHash[:], macHash[:]) == 1 {
+				// Must use the same derivation as HTTP uploadOwner so files
+				// uploaded on one transport can be claimed on the other.
+				return ownerKeyFromCookie(cookie.Value), true, true
+			}
 		}
 	}
 	return "", false, true
