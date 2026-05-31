@@ -209,6 +209,16 @@ type recentCacheEntry struct {
 	// cache shows we're well under keepCount. Reset to 0 by Append after
 	// calling trimJobLocked. R232-PERF-8.
 	appendsSinceTrim int
+	// runIDs is the set of RunIDs currently present in the ring. cacheHeadPush
+	// consults it for an O(1) duplicate check instead of an O(count) linear
+	// ring scan on every Append (#1517). It is maintained in lockstep with the
+	// ring under entry.mu: ringSeed rebuilds it, ringPushHead inserts the new
+	// RunID (and deletes the evicted oldest when the ring is full). The dedup
+	// is needed because a warmCache ringSeed can interleave between an Append's
+	// WriteFileAtomic and its matching cacheHeadPush (R20260527122801-PERF-4 /
+	// #1335), seeding a RunID ahead of its own late push. nil until the first
+	// ringSeed allocates it.
+	runIDs map[string]struct{}
 }
 
 // ringCapZeroWarnOnce ensures the cap=0 self-heal branch in ringRead /
@@ -286,9 +296,20 @@ func (e *recentCacheEntry) ringPushHead(summary CronRunSummary) {
 		// regardless of count.
 		e.ring = e.ring[:c]
 	}
+	if e.count == c {
+		// Ring full: the slot we're about to overwrite holds the oldest
+		// entry, which is being evicted. Drop it from the RunID set so the
+		// O(1) dedup index (#1517) stays in lockstep with the ring.
+		if e.runIDs != nil {
+			delete(e.runIDs, e.ring[e.head].RunID)
+		}
+	}
 	e.ring[e.head] = summary
 	if e.count < c {
 		e.count++
+	}
+	if e.runIDs != nil {
+		e.runIDs[summary.RunID] = struct{}{}
 	}
 }
 
@@ -313,6 +334,17 @@ func (e *recentCacheEntry) ringSeed(rows []CronRunSummary, keepCount int) {
 	copy(e.ring[:n], rows[:n])
 	e.head = 0
 	e.count = n
+	// Rebuild the RunID dedup index (#1517) from the freshly-seeded rows so
+	// the next cacheHeadPush can do an O(1) membership test against this
+	// snapshot instead of an O(count) linear scan.
+	if e.runIDs == nil {
+		e.runIDs = make(map[string]struct{}, n)
+	} else {
+		clear(e.runIDs)
+	}
+	for i := 0; i < n; i++ {
+		e.runIDs[e.ring[i].RunID] = struct{}{}
+	}
 }
 
 // User-configurable defaults (DefaultRunsKeepCount / DefaultRunsKeepWindow)
@@ -973,15 +1005,19 @@ func (s *runStore) cacheHeadPush(jobID string, summary CronRunSummary) {
 	// such that warmCache reads the freshly-renamed file(s) from disk and
 	// seeds them into the ring BEFORE the matching cacheHeadPush re-acquires
 	// the lock to push. Without dedup, that interleaving would land the
-	// same RunID twice in the ring. We scan the ring for an existing
-	// matching RunID — head-only dedup is insufficient because warmCache
-	// can seed multiple concurrently-written rows ahead of any of their
-	// late-arriving pushes (e.g. ring [Y,X], then X's late push would
-	// otherwise dup since head==Y). Cost is O(count) but the interleave
-	// is rare and the ring is small (default keepCount=200); the dedup
-	// fires only on the contended path, so amortised cost stays flat.
-	for i := 0; i < entry.count; i++ {
-		if entry.ringRead(i).RunID == summary.RunID {
+	// same RunID twice in the ring. Head-only dedup is insufficient because
+	// warmCache can seed multiple concurrently-written rows ahead of any of
+	// their late-arriving pushes (e.g. ring [Y,X], then X's late push would
+	// otherwise dup since head==Y).
+	//
+	// #1517: the dedup is now an O(1) map membership test against entry.runIDs
+	// (maintained in lockstep with the ring by ringSeed / ringPushHead) instead
+	// of the previous O(count) linear ring scan on every Append. Steady state
+	// (1Hz × N jobs) drops from O(count) string comparisons per push to a
+	// single map lookup. The runIDs index is allocated by ringSeed, which a
+	// warm cache always ran first; guard against a nil index defensively.
+	if entry.runIDs != nil {
+		if _, dup := entry.runIDs[summary.RunID]; dup {
 			return
 		}
 	}
@@ -1330,18 +1366,28 @@ func (s *runStore) scanSortedRunDir(jobID string) ([]runDirItem, string, error) 
 			mtime: info.ModTime(),
 		})
 	}
-	slices.SortFunc(items, func(a, b runDirItem) int {
-		// mtime DESC: newer first. Time.Compare (Go 1.20+) instead of
-		// UnixNano so wall-clock jumps don't desync trim ↔ list ordering
-		// (R236-QA-01). R235-PERF-17.
-		if c := b.mtime.Compare(a.mtime); c != 0 {
-			return c
-		}
-		// Equal-mtime tie-break by runID DESC for cross-process stability.
-		// R222-GO-5.
-		return cmp.Compare(b.runID, a.runID)
-	})
+	slices.SortFunc(items, runDirItemNewestFirst)
 	return items, dir, nil
+}
+
+// runDirItemNewestFirst is the shared comparator for scanSortedRunDir's
+// mtime-DESC ordering. Hoisted out of the call site to a package-level
+// function so it is NOT reallocated as a fresh closure header on every
+// scan: scanSortedRunDir runs on both the trim (Append GC) path and the
+// cold-cache list/warm path, so at process restart with N jobs it fires
+// 2×N times, each previously allocating a no-capture closure. Mirrors the
+// R20260527122801-PERF-2 (#1340) fix that lifted jobIDCmpForSort out of
+// marshalJobsLocked for the same reason — behaviour is identical.
+func runDirItemNewestFirst(a, b runDirItem) int {
+	// mtime DESC: newer first. Time.Compare (Go 1.20+) instead of
+	// UnixNano so wall-clock jumps don't desync trim ↔ list ordering
+	// (R236-QA-01). R235-PERF-17.
+	if c := b.mtime.Compare(a.mtime); c != 0 {
+		return c
+	}
+	// Equal-mtime tie-break by runID DESC for cross-process stability.
+	// R222-GO-5.
+	return cmp.Compare(b.runID, a.runID)
 }
 
 // diskListNewestFirst is the on-disk variant of List, used by warmCache
@@ -1391,6 +1437,23 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 		return nil, 0
 	}
 
+	// R247-PERF-9 (#540) / R249-PERF-7 (#928): the no-cutoff warm path
+	// (before.IsZero) reads up to keepCount candidates — on a cold cache
+	// that is keepCount × ReadFile + UnmarshalJSON serialised under
+	// jobLock. Since every surviving candidate is read in this regime
+	// (no early break: limit == keepCount when warmCache drives the call,
+	// and the StartedAt filter never trims a zero cutoff), the decode is
+	// embarrassingly parallel: fan the ReadFile+Unmarshal out across a
+	// bounded worker pool and reassemble in newest-first order. The
+	// per-job mtime sort already fixed the order, so a position-indexed
+	// result slice preserves it regardless of completion order. The
+	// before-cutoff (pagination) path keeps the serial early-break: it
+	// stops at the first `limit` matches and parallelising would over-read
+	// past the page boundary.
+	if before.IsZero() && len(items) > diskDecodeParallelThreshold {
+		return s.decodeRunsParallel(items, limit)
+	}
+
 	out := make([]CronRunSummary, 0, limit)
 	corruptCount := 0
 	for _, it := range items {
@@ -1427,6 +1490,84 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 			continue
 		}
 		out = append(out, run.summary())
+	}
+	return out, corruptCount
+}
+
+// diskDecodeParallelThreshold is the candidate count above which
+// diskListNewestFirst fans the no-cutoff decode out across a worker pool.
+// Below it the goroutine + channel plumbing costs more than the serial
+// ReadFile loop saves, so the warm-but-small (≤ this many runs) job stays
+// on the serial path. Sized so a typical handful-of-runs job never spins
+// up workers.
+const diskDecodeParallelThreshold = 16
+
+// diskDecodeWorkers caps the concurrent ReadFile+Unmarshal fan-out used by
+// decodeRunsParallel. Bounded so a 50-job cold-start prewarm storm cannot
+// open 50 × keepCount file descriptors at once — each job's warm holds its
+// jobLock, so the bound is per-job and the global fd ceiling is
+// maxConcurrentWarm × diskDecodeWorkers, not N × keepCount.
+const diskDecodeWorkers = 8
+
+// decodeRunsParallel reads + decodes the supplied newest-first items across
+// a bounded worker pool and returns the summaries in the SAME newest-first
+// order plus the count of corrupt/unreadable files skipped. Order is
+// preserved by writing each decode into a position-indexed scratch slice
+// (items is already mtime-sorted by scanSortedRunDir), so completion order
+// is irrelevant. Only called from the before.IsZero path where every
+// candidate up to limit is wanted, so there is no early-break to honour.
+func (s *runStore) decodeRunsParallel(items []runDirItem, limit int) ([]CronRunSummary, int) {
+	n := len(items)
+	if n > limit {
+		// before.IsZero means no StartedAt filter drops rows, so the first
+		// `limit` (newest) candidates are exactly the answer — decode only
+		// those rather than the whole directory.
+		n = limit
+	}
+	type slot struct {
+		summary CronRunSummary
+		ok      bool
+		corrupt bool
+	}
+	slots := make([]slot, n)
+	workers := diskDecodeWorkers
+	if workers > n {
+		workers = n
+	}
+	idx := make(chan int, n)
+	for i := 0; i < n; i++ {
+		idx <- i
+	}
+	close(idx)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for i := range idx {
+				run, err := s.readRunNoLstat(items[i].path)
+				if err != nil {
+					if errors.Is(err, ErrCorruptRun) {
+						slots[i].corrupt = true
+					}
+					continue
+				}
+				slots[i].summary = run.summary()
+				slots[i].ok = true
+			}
+		}()
+	}
+	wg.Wait()
+
+	out := make([]CronRunSummary, 0, n)
+	corruptCount := 0
+	for i := range slots {
+		if slots[i].corrupt {
+			corruptCount++
+		}
+		if slots[i].ok {
+			out = append(out, slots[i].summary)
+		}
 	}
 	return out, corruptCount
 }

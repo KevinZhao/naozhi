@@ -10,6 +10,10 @@
 Description=Naozhi - Claude Code IM Gateway
 After=network-online.target
 Wants=network-online.target
+# StartLimit* belong in [Unit] (systemd v230+); in [Service] they are ignored
+# with a warning, so crash-loop rate-limiting silently never triggers.
+StartLimitIntervalSec=60s
+StartLimitBurst=5
 
 [Service]
 # Type=notify + WatchdogSec: naozhi (main.go) calls sd_notify("READY=1")
@@ -25,8 +29,6 @@ WorkingDirectory=/home/ec2-user/naozhi
 ExecStart=/home/ec2-user/naozhi/bin/naozhi --config /home/ec2-user/naozhi/config.yaml
 Restart=always
 RestartSec=5
-StartLimitInterval=60s
-StartLimitBurst=5
 
 # Shim process survival: only kill main process on stop, never SIGKILL the cgroup.
 # Shims are moved to /sys/fs/cgroup/naozhi-shims/ and must survive service restarts.

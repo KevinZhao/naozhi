@@ -7688,6 +7688,30 @@ function _fileRefCacheSet(key, value) {
   _filePathCache.set(key, { v: value, t: Date.now() });
 }
 
+// fileRefCode produces the inline <code> element that the file-ref scanner
+// (scanEventForFileRefs, which walks `code, .md-code`) recognises as a path so
+// it can attach [↗ preview][↓ download] buttons. Centralising the markup here
+// keeps the three callsites (markdown-link rescue, CODE-token restore,
+// fencedPathList row) in lockstep: a future change to the tag/class/attrs (e.g.
+// adding data-file-ref) lands in one place instead of three divergent string
+// literals where missing one would silently drop that path shape's buttons.
+//
+// Escaping contract: this helper does NOT escape `inner` — every callsite is
+// responsible for its own escaping/guarding (esc(), tokenizer guards, or the
+// `<`/`\x00` rejection in the link rescue). The helper only owns the wrapper.
+//
+// className: defaults to "md-code" (the inline-code pill used by backtick spans
+// and the link rescue). fencedPathList passes "" to keep a bare <code>: the
+// `.md-pathline code` CSS deliberately omits the .md-code pill background/
+// padding/border-radius, so tagging those rows with .md-code would visibly turn
+// each clean path row into a pill. Both shapes are still caught by the scanner's
+// `code, .md-code` selector, so the buttons attach either way.
+function fileRefCode(inner, className) {
+  const cls = className === undefined ? 'md-code' : className;
+  return cls ? '<code class="' + cls + '">' + inner + '</code>'
+             : '<code>' + inner + '</code>';
+}
+
 // scanEventForFileRefs walks .event-content <code> descendants of a freshly-
 // inserted event bubble and wraps any path-shaped literals in a .file-ref
 // span with data-* attrs so verification + button injection can run async.
@@ -8391,7 +8415,7 @@ function renderMdUncached(s) {
           const noteHtml = p.note
             ? '<span class="md-pathnote">' + esc(p.note) + '</span>'
             : '';
-          return '<div class="md-pathline"><code>' + esc(p.path) + '</code>' + noteHtml + '</div>';
+          return '<div class="md-pathline">' + fileRefCode(esc(p.path), '') + noteHtml + '</div>';
         }).join('');
         return '<div class="md-code-wrap md-pathlist">' + rows +
           '<div class="md-code-actions">' +
@@ -8746,7 +8770,7 @@ function inlineMd(s) {
         const { path: bare } = splitPathLine(target);
         const base = bare.slice(bare.lastIndexOf('/') + 1);
         if (FILE_REF_HAS_EXT.test(base)) {
-          return '<code class="md-code">' + target + '</code>';
+          return fileRefCode(target);
         }
       }
       return text;
@@ -8772,7 +8796,7 @@ function inlineMd(s) {
   // Restore code tokens last — their contents were esc()'d at capture time.
   if (codeTokens.length > 0) {
     s = s.replace(/\x00CODE(\d+)\x00/g, function(_, idx) {
-      return '<code class="md-code">' + codeTokens[+idx] + '</code>';
+      return fileRefCode(codeTokens[+idx]);
     });
   }
   return s;

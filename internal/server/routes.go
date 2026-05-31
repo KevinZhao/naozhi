@@ -181,7 +181,7 @@ func (s *Server) registerDashboard() {
 					Subsystem: runtelemetry.SubsystemSysession,
 					OwnerID:   ev.Name,
 					RunID:     ev.RunID,
-					Trigger:   runtelemetry.TriggerKind(ev.Trigger),
+					Trigger:   mapSysessionTrigger(ev.Trigger),
 					StartedAt: ev.StartedAt,
 				})
 			},
@@ -190,10 +190,10 @@ func (s *Server) registerDashboard() {
 					Subsystem:  runtelemetry.SubsystemSysession,
 					OwnerID:    ev.Name,
 					RunID:      ev.RunID,
-					State:      runtelemetry.RunState(ev.State),
+					State:      mapSysessionRunState(ev.State),
 					DurationMS: ev.DurationMS,
-					Trigger:    runtelemetry.TriggerKind(ev.Trigger),
-					ErrorClass: runtelemetry.ErrorClass(ev.ErrorClass),
+					Trigger:    mapSysessionTrigger(ev.Trigger),
+					ErrorClass: mapSysessionErrorClass(ev.ErrorClass),
 				})
 			},
 		)
@@ -206,7 +206,7 @@ func (s *Server) registerDashboard() {
 	// cohesive session-CRUD route group is extracted into its own helper so
 	// registerDashboard shrinks toward the routes.go split the issues call
 	// for. Behaviour is identical — the routes_snapshot AST gate scans
-	// dashboard.go as a whole, so moving these calls into a same-file helper
+	// routes.go as a whole, so moving these calls into a same-file helper
 	// keeps the golden snapshot byte-for-byte stable.
 	s.registerSessionRoutes(auth)
 	// R260528-ARCH-6 (#1367) incremental slice: the discovered-session route

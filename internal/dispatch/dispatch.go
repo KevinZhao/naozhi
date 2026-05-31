@@ -158,7 +158,14 @@ type Dispatcher struct {
 	// legacy duplicate-routing branches that R-key-resolver collapsed
 	// will quietly come back.  Any new ProjectForChat / EffectivePlanner*
 	// read on the hot path should fail review.
-	projectMgr *project.Manager
+	//
+	// ARCH-DISP-1 (#457): typed as the ProjectStore consumer interface
+	// (consumer.go) rather than *project.Manager so slash-command handler
+	// tests can inject a fake binding store. *project.Manager satisfies it
+	// implicitly; NewDispatcher assigns cfg.ProjectMgr directly. nil when
+	// projects.root is unconfigured — every handler gates on
+	// `d.projectMgr == nil` first (see handleProjectCommand).
+	projectMgr ProjectStore
 	// resolver centralises (key, opts) derivation for the IM and slash-
 	// command paths. NewDispatcher guarantees this field is non-nil — when
 	// callers don't supply a resolver the constructor fabricates a project-
@@ -511,13 +518,22 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 			scheduler = nil
 		}
 	}
+	// ARCH-DISP-1 (#457): same typed-nil-interface trap for ProjectStore.
+	// cfg.ProjectMgr is a concrete *project.Manager; a nil pointer boxed
+	// into the ProjectStore field is != nil, which would defeat every
+	// `d.projectMgr == nil` gate (handleProjectCommand / /cd / /new).
+	// Collapse it to a true nil interface here, mirroring scheduler above.
+	var projectStore ProjectStore
+	if cfg.ProjectMgr != nil {
+		projectStore = cfg.ProjectMgr
+	}
 	d := &Dispatcher{
 		router:                router,
 		platforms:             cfg.Platforms,
 		agents:                cfg.Agents,
 		agentCommands:         cfg.AgentCommands,
 		scheduler:             scheduler,
-		projectMgr:            cfg.ProjectMgr,
+		projectMgr:            projectStore,
 		resolver:              resolver,
 		guard:                 cfg.Guard,
 		queue:                 cfg.Queue,
@@ -988,11 +1004,12 @@ func resolveReplyCtx(ctx context.Context) (replyCtx context.Context, cleanup fun
 // handleGetOrCreateError maps a router.GetOrCreate failure into the
 // user-facing reply ctx, an optional ctx.cancel cleanup, and a Chinese
 // error message. Pulled out of sendAndReply so the seven-stage main
-// path stays focused on the happy-path turn flow (R245-ARCH-39 / #894);
-// the per-sentinel switch is the part most likely to grow as new
-// session-spawn failure modes are added (e.g. backend-disabled, quota
-// exhausted) and now has a single home that unit tests can target
-// directly without standing up a full Dispatcher.
+// path stays focused on the happy-path turn flow (R245-ARCH-39 / #894).
+// The sentinel → Chinese-message mapping is delegated to
+// usermsg.ForSendError (R20260531-ARCH-1) so it cannot drift from the
+// WS send_ack path; this helper only owns the log-level and reply-ctx
+// (shutdown-swap) policy, which unit tests can target directly without
+// standing up a full Dispatcher.
 //
 // cleanup is non-nil when this returns a fresh background ctx (the
 // shutdown / context.Canceled branch). Callers MUST defer it before
@@ -1011,24 +1028,16 @@ func (d *Dispatcher) handleGetOrCreateError(
 	} else {
 		lg.Error("get session", "err", err)
 	}
-	switch {
-	case errors.Is(err, session.ErrMaxProcs):
-		errMsg = "当前处理已满，请稍后重试。"
-	case errors.Is(err, session.ErrMaxExemptSessions):
-		// R190-WRAP-M1: exempt-session cap means "too many projects/cron
-		// workers"; user /new won't clear it because the exempt counter
-		// is independent of user sessions. Tell the user explicitly so
-		// they contact the operator instead of looping on /new.
-		errMsg = "长时会话（planner/cron）已满，请联系管理员。"
-	case errors.Is(err, session.ErrNoCLIWrapper):
-		// R190-WRAP-M1: permanent config error; /new retry is hopeless.
-		// Surface a clear "ask operator" so IM users don't spin on it.
-		errMsg = "会话后端未配置，请联系管理员。"
-	case errors.Is(err, context.Canceled):
-		errMsg = "系统正在重启，请稍后重试。"
-	default:
-		errMsg = "会话创建失败，请发送 /new 重置后重试。"
-	}
+	// R20260531-ARCH-1 (#754 follow-up): the per-sentinel switch here
+	// duplicated usermsg.ForSendError's mapping for ErrMaxProcs /
+	// ErrMaxExemptSessions / ErrNoCLIWrapper / context.Canceled, drifting
+	// from it over time. Delegate to the shared classifier so a new
+	// session-side sentinel only needs registering once (in usermsg).
+	// The empty key keeps the regular (non-cron) phrasing; GetOrCreate
+	// failures are not the cron-namespace ErrNoActiveProcess case that
+	// would want the key. Unknown errors fall through to ForSendError's
+	// generic "/new 重置" hint (was a near-identical literal here).
+	errMsg = usermsg.ForSendError(err, "")
 	// R242-GO-4 (#550): the shutdown-ctx swap is one helper, not a
 	// per-branch repeat. resolveReplyCtx returns ctx unchanged when no
 	// swap is needed (cheap), and a fresh NotifyCtx + cancel when ctx

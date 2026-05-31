@@ -11,6 +11,7 @@
 package server
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -39,11 +40,25 @@ import (
 // debounceTimer / debounceFirst / debounceClosed / clients / mu /
 // droppedTotal. This file is pure code-relocation — no behaviour change.
 
-// Pre-marshaled static message body. A plain byte literal avoids paying
-// a json.Marshal on package init and removes the nominal panic branch
-// (the struct has only a Type string field so Marshal cannot fail). The
-// shape must stay exactly in sync with node.ServerMsg JSON encoding.
-var sessionsUpdateMsg = []byte(`{"type":"sessions_update"}`)
+// Pre-marshaled static message body, derived ONCE from node.ServerMsg at
+// package init so it can never drift from the wire schema. R243-ARCH-24
+// (#869) incremental slice: the previous hand-written byte literal was a
+// second, unverified source of truth for the sessions_update frame and
+// carried a "must stay exactly in sync" comment — exactly the scattered-
+// wire-struct hazard the issue flags. Deriving from the struct keeps the
+// zero-alloc broadcast hot path (still a single shared []byte) while making
+// node.ServerMsg the only authority. All fields are omitempty so the result
+// is `{"type":"sessions_update"}`; marshalSessionsUpdate panics on the
+// impossible Marshal error rather than shipping a malformed/empty frame.
+var sessionsUpdateMsg = marshalSessionsUpdate()
+
+func marshalSessionsUpdate() []byte {
+	data, err := json.Marshal(node.ServerMsg{Type: "sessions_update"})
+	if err != nil {
+		panic("server: marshal sessions_update frame: " + err.Error())
+	}
+	return data
+}
 
 // broadcastClientSnapPool reuses the []*wsClient backing array across
 // broadcasts so high-frequency session_state / sessions_update traffic does
@@ -58,6 +73,30 @@ var broadcastClientSnapPool = sync.Pool{
 		s := make([]*wsClient, 0, 32)
 		return &s
 	},
+}
+
+// releaseBroadcastSnap returns a client snapshot to broadcastClientSnapPool
+// after a fan-out completes. It (1) nils every *wsClient slot so a
+// disconnected client can be GC'd before the backing array is reused
+// (R59-PERF-L1), and (2) drops oversized backing arrays rather than pinning
+// them in the pool — replacing them with a fresh small slice so a single
+// "big broadcast" cannot permanently deplete a pool slot (R58-PERF-005).
+//
+// R243-ARCH-2 (#459 server-domain slice): broadcastToAuthenticated and
+// broadcastSessionSystemEvent repeated this identical clear→cap-check→Put
+// tail; consolidating it keeps the two fan-out paths' pool discipline in
+// one place so a future tweak (e.g. the cap threshold) can't drift between
+// them. Pure code-relocation — no behaviour change.
+func releaseBroadcastSnap(snapPtr *[]*wsClient, snap []*wsClient) {
+	for i := range snap {
+		snap[i] = nil
+	}
+	if cap(snap) <= broadcastSnapPoolMaxCap {
+		*snapPtr = snap[:0]
+	} else {
+		*snapPtr = make([]*wsClient, 0, 32)
+	}
+	broadcastClientSnapPool.Put(snapPtr)
 }
 
 // broadcastToAuthenticated sends raw data to all authenticated WebSocket clients.
@@ -100,27 +139,23 @@ func (h *Hub) broadcastToAuthenticated(data []byte) {
 	for _, c := range snap {
 		c.SendRaw(data)
 	}
-	// Clear *wsClient pointers so a disconnected client can be GC'd before
-	// the snap slice is returned to the caller / dropped. Clearing happens
-	// on both paths: for the pool-eligible path it prevents stale pointers
-	// surviving in the pooled backing array until the next Get; for the
-	// oversized path it releases references now instead of waiting for the
-	// long-lived parent goroutine's stack frame to unwind. R59-PERF-L1.
-	for i := range snap {
-		snap[i] = nil
+	releaseBroadcastSnap(snapPtr, snap)
+}
+
+// marshalBroadcastAuth consolidates the marshal→err-guard→fan-out tail shared
+// by every "broadcast to all authenticated clients" producer (session_state,
+// cron/daemon run-started/ended). R243-ARCH-15 (#845) incremental slice: these
+// six call sites previously repeated the identical `data, err := marshalPooled
+// (v); if err != nil { return }; h.broadcastToAuthenticated(data)` triple. A
+// marshal failure is swallowed (matching the prior behaviour) because the WS
+// payload structs are fixed-shape and cannot fail json.Marshal in practice;
+// dropping the frame is preferable to panicking the producer goroutine.
+func (h *Hub) marshalBroadcastAuth(v any) {
+	data, err := marshalPooled(v)
+	if err != nil {
+		return
 	}
-	// Oversized snapshots (e.g. after a one-off broadcast to 5000 clients)
-	// would pin an arbitrarily large backing array if returned to the pool.
-	// Drop the slice but still return the pointer header with a fresh small
-	// backing array so the pool slot is not permanently depleted — otherwise
-	// a single "big broadcast" would shrink the pool by one slot until
-	// process exit. R58-PERF-005.
-	if cap(snap) <= broadcastSnapPoolMaxCap {
-		*snapPtr = snap[:0]
-	} else {
-		*snapPtr = make([]*wsClient, 0, 32)
-	}
-	broadcastClientSnapPool.Put(snapPtr)
+	h.broadcastToAuthenticated(data)
 }
 
 // broadcastState sends a session_state message to ALL authenticated clients.
@@ -128,22 +163,14 @@ func (h *Hub) broadcastToAuthenticated(data []byte) {
 // so the final state must also reach everyone — otherwise clients not subscribed
 // to this session would see a stale "running" dot in the sidebar forever.
 func (h *Hub) broadcastState(key, state, reason string) {
-	data, err := marshalPooled(node.ServerMsg{Type: "session_state", Key: key, State: state, Reason: reason})
-	if err != nil {
-		return
-	}
-	h.broadcastToAuthenticated(data)
+	h.marshalBroadcastAuth(node.ServerMsg{Type: "session_state", Key: key, State: state, Reason: reason})
 }
 
 // BroadcastSessionReady sends a session_state "running" to ALL authenticated clients
 // so they can auto-subscribe. Unlike broadcastState, this is not limited to already-
 // subscribed clients — needed for new sessions where nobody is subscribed yet.
 func (h *Hub) BroadcastSessionReady(key string) {
-	data, err := marshalPooled(node.ServerMsg{Type: "session_state", Key: key, State: "running"})
-	if err != nil {
-		return
-	}
-	h.broadcastToAuthenticated(data)
+	h.marshalBroadcastAuth(node.ServerMsg{Type: "session_state", Key: key, State: "running"})
 }
 
 // BroadcastSessionsUpdate debounces notifications: resets a 50ms timer on each
@@ -271,7 +298,7 @@ func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, 
 	// so once it returns true we can skip SanitizeForLog (slow path allocates
 	// a strings.Map output even on the no-op branch when len > 0). Untrusted
 	// or shape-mismatched input still falls through to the sanitiser.
-	data, err := marshalPooled(cronRunStartedMsg{
+	h.marshalBroadcastAuth(cronRunStartedMsg{
 		Type:      "cron_run_started",
 		JobID:     sanitizeHexIDForBroadcast(jobID, 64),
 		RunID:     sanitizeHexIDForBroadcast(runID, 64),
@@ -280,10 +307,6 @@ func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, 
 		SessionID: osutil.SanitizeForLog(sessionID, 128),
 		Fresh:     fresh,
 	})
-	if err != nil {
-		return
-	}
-	h.broadcastToAuthenticated(data)
 }
 
 // BroadcastCronRunEnded emits cron_run_ended for every terminal state
@@ -297,7 +320,7 @@ func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, ended
 	// and shields a future code path that derives them from external config
 	// (e.g. webhook trigger names) from log/payload injection. R221-FIX-P2-7.
 	// R222-PERF-15: see sanitizeHexIDForBroadcast — hex IDs short-circuit.
-	data, err := marshalPooled(cronRunEndedMsg{
+	h.marshalBroadcastAuth(cronRunEndedMsg{
 		Type:       "cron_run_ended",
 		JobID:      sanitizeHexIDForBroadcast(jobID, 64),
 		RunID:      sanitizeHexIDForBroadcast(runID, 64),
@@ -310,10 +333,6 @@ func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, ended
 		ErrorMsg:   errMsg,
 		Trigger:    osutil.SanitizeForLog(trigger, 32),
 	})
-	if err != nil {
-		return
-	}
-	h.broadcastToAuthenticated(data)
 }
 
 // broadcastSessionSystemEvent pushes a synthetic `system`-type event frame to
@@ -374,15 +393,7 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 		}
 	}
 
-	for i := range snap {
-		snap[i] = nil
-	}
-	if cap(snap) <= broadcastSnapPoolMaxCap {
-		*snapPtr = snap[:0]
-	} else {
-		*snapPtr = make([]*wsClient, 0, 32)
-	}
-	broadcastClientSnapPool.Put(snapPtr)
+	releaseBroadcastSnap(snapPtr, snap)
 }
 
 // DroppedMessages returns the total number of messages dropped across all
@@ -440,23 +451,19 @@ type daemonRunEndedMsg struct {
 // config or pass through external content; sanitising at the broadcast
 // boundary keeps us safe regardless.
 func (h *Hub) BroadcastDaemonRunStarted(name, runID, trigger string, startedAt time.Time) {
-	data, err := marshalPooled(daemonRunStartedMsg{
+	h.marshalBroadcastAuth(daemonRunStartedMsg{
 		Type:      "daemon_run_started",
 		Name:      osutil.SanitizeForLog(name, 64),
 		RunID:     sanitizeHexIDForBroadcast(runID, 64),
 		Trigger:   osutil.SanitizeForLog(trigger, 32),
 		StartedAt: startedAt.UnixMilli(),
 	})
-	if err != nil {
-		return
-	}
-	h.broadcastToAuthenticated(data)
 }
 
 // BroadcastDaemonRunEnded emits daemon_run_ended.  ErrorMsg is
 // intentionally absent — see daemonRunEndedMsg above.
 func (h *Hub) BroadcastDaemonRunEnded(name, runID, state, errClass, trigger string, durationMS int64) {
-	data, err := marshalPooled(daemonRunEndedMsg{
+	h.marshalBroadcastAuth(daemonRunEndedMsg{
 		Type:       "daemon_run_ended",
 		Name:       osutil.SanitizeForLog(name, 64),
 		RunID:      sanitizeHexIDForBroadcast(runID, 64),
@@ -465,10 +472,6 @@ func (h *Hub) BroadcastDaemonRunEnded(name, runID, state, errClass, trigger stri
 		ErrorClass: osutil.SanitizeForLog(errClass, 64),
 		Trigger:    osutil.SanitizeForLog(trigger, 32),
 	})
-	if err != nil {
-		return
-	}
-	h.broadcastToAuthenticated(data)
 }
 
 // sanitizeHexIDForBroadcast returns id unchanged when it matches the
