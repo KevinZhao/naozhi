@@ -181,7 +181,7 @@ func (s *Server) registerDashboard() {
 					Subsystem: runtelemetry.SubsystemSysession,
 					OwnerID:   ev.Name,
 					RunID:     ev.RunID,
-					Trigger:   runtelemetry.TriggerKind(ev.Trigger),
+					Trigger:   mapSysessionTrigger(ev.Trigger),
 					StartedAt: ev.StartedAt,
 				})
 			},
@@ -190,10 +190,10 @@ func (s *Server) registerDashboard() {
 					Subsystem:  runtelemetry.SubsystemSysession,
 					OwnerID:    ev.Name,
 					RunID:      ev.RunID,
-					State:      runtelemetry.RunState(ev.State),
+					State:      mapSysessionRunState(ev.State),
 					DurationMS: ev.DurationMS,
-					Trigger:    runtelemetry.TriggerKind(ev.Trigger),
-					ErrorClass: runtelemetry.ErrorClass(ev.ErrorClass),
+					Trigger:    mapSysessionTrigger(ev.Trigger),
+					ErrorClass: mapSysessionErrorClass(ev.ErrorClass),
 				})
 			},
 		)
