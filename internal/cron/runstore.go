@@ -1603,17 +1603,41 @@ func (s *runStore) parseRunFromFile(f *os.File, fi os.FileInfo) (*CronRun, error
 // buffer. Mirrors io.ReadAll's loop but lets the caller pre-size based on
 // Fstat to avoid repeated re-grows on the typical ~2KB run record.
 func readAllInto(f *os.File, buf []byte) ([]byte, error) {
+	return readAllIntoReader(f, buf)
+}
+
+// readAllIntoReader is the testable core of readAllInto. It accepts an
+// io.Reader so unit tests can inject a fake reader that repeatedly returns
+// (0, nil) to exercise the zero-progress guard (R171023-CR-007).
+//
+// The guard breaks out of the loop after zeroProgressLimit consecutive
+// (0, nil) reads so the function does not hang on io.Reader implementations
+// that are contractually allowed to return (0, nil) (e.g., certain FUSE
+// file systems). os.File on Linux follows POSIX and will not do this in
+// practice, but defence-in-depth applies here.
+const zeroProgressLimit = 2
+
+func readAllIntoReader(r io.Reader, buf []byte) ([]byte, error) {
+	zeroCount := 0
 	for {
 		if len(buf) == cap(buf) {
 			buf = append(buf, 0)[:len(buf)]
 		}
-		n, err := f.Read(buf[len(buf):cap(buf)])
+		n, err := r.Read(buf[len(buf):cap(buf)])
 		buf = buf[:len(buf)+n]
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return buf, nil
 			}
 			return buf, err
+		}
+		if n == 0 {
+			zeroCount++
+			if zeroCount >= zeroProgressLimit {
+				return buf, io.ErrNoProgress
+			}
+		} else {
+			zeroCount = 0
 		}
 	}
 }

@@ -1271,7 +1271,7 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		// gap instead of the dashboard silently treating the create as a
 		// successful 2xx that won't survive a restart. R51-QUAL-001.
 		if errors.Is(err, cronpkg.ErrPersistFailed) {
-			slog.Error("cron AddJob persisted in-memory but store write failed", "err", err, "id", job.ID)
+			slog.Error("cron AddJob persisted in-memory but store write failed", "err", err, "id", osutil.SanitizeForLog(job.ID, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "created")
 			return
 		}
@@ -1283,7 +1283,7 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("cron job created via dashboard", "id", job.ID, "schedule", job.Schedule)
+	slog.Info("cron job created via dashboard", "id", osutil.SanitizeForLog(job.ID, cronpkg.MaxIDLen), "schedule", job.Schedule)
 	httputil.WriteJSON(w, cronCreateResp{ID: job.ID})
 }
 
@@ -1324,7 +1324,7 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 			// store write failed — a restart would replay the deleted job.
 			// 500 alerts the operator to inspect logs instead of treating
 			// the delete as quietly successful. R51-QUAL-001.
-			slog.Error("cron DeleteJobByID deletion not persisted", "err", err, "id", id)
+			slog.Error("cron DeleteJobByID deletion not persisted", "err", err, "id", osutil.SanitizeForLog(id, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "deleted")
 		default:
 			slog.Debug("cron delete failed", "err", err)
@@ -1333,7 +1333,7 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("cron job deleted via dashboard", "id", j.ID)
+	slog.Info("cron job deleted via dashboard", "id", osutil.SanitizeForLog(j.ID, cronpkg.MaxIDLen))
 	httputil.WriteOK(w)
 }
 
@@ -1371,7 +1371,7 @@ func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, cronpkg.ErrJobAlreadyPaused):
 			http.Error(w, "job already paused", http.StatusConflict)
 		case errors.Is(err, cronpkg.ErrPersistFailed):
-			slog.Error("cron PauseJobByID pause not persisted", "err", err, "id", req.ID)
+			slog.Error("cron PauseJobByID pause not persisted", "err", err, "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "paused")
 		default:
 			slog.Debug("cron pause failed", "err", err)
@@ -1380,7 +1380,7 @@ func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("cron job paused via dashboard", "id", req.ID)
+	slog.Info("cron job paused via dashboard", "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 	httputil.WriteOK(w)
 }
 
@@ -1416,7 +1416,7 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, cronpkg.ErrJobNotPaused):
 			http.Error(w, "job not paused", http.StatusConflict)
 		case errors.Is(err, cronpkg.ErrPersistFailed):
-			slog.Error("cron ResumeJobByID resume not persisted", "err", err, "id", req.ID)
+			slog.Error("cron ResumeJobByID resume not persisted", "err", err, "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "resumed")
 		default:
 			slog.Debug("cron resume failed", "err", err)
@@ -1425,7 +1425,7 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("cron job resumed via dashboard", "id", req.ID)
+	slog.Info("cron job resumed via dashboard", "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 	httputil.WriteOK(w)
 }
 
@@ -1481,7 +1481,7 @@ func (h *Handlers) HandleTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("cron job triggered manually", "id", req.ID)
+	slog.Info("cron job triggered manually", "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 	httputil.WriteJSON(w, map[string]string{"status": "triggered"})
 }
 

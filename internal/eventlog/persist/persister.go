@@ -1043,8 +1043,9 @@ func (p *Persister) tickFlush() {
 	}
 	now := p.opts.Clock()
 	// Collect-then-sort instead of a true heap: 1-200 typical writers
-	// per tick, sort.Slice is faster in practice than a container/heap
-	// init+pop loop at that N. The slice itself is allocated once per
+	// per tick, slices.SortFunc is faster in practice than a container/heap
+	// init+pop loop at that N, and avoids the closure-boxing alloc that
+	// sort.Slice causes. The slice itself is allocated once per
 	// tick — see flushCandidatePool below if profiling later indicates
 	// this matters.
 	cands := p.collectFlushCandidates(now)
