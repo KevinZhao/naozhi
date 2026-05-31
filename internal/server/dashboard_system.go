@@ -15,7 +15,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -61,11 +60,13 @@ type clearLabelOriginRequest struct {
 // keys, 404 when the key is unknown.
 func (s *Server) handleClearLabelOrigin(w http.ResponseWriter, r *http.Request) {
 	// Cap the body so a multi-MB hostile payload cannot be buffered
-	// before json.Decoder surfaces an error; mirrors every other
-	// dashboard mutation endpoint.
+	// before the decoder surfaces an error; mirrors every other
+	// dashboard mutation endpoint. decodeJSONBody does NOT set its own
+	// MaxBytesReader (it relies on callers wrapping r.Body), and adds the
+	// package-wide DisallowUnknownFields mass-assignment guard.
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	var req clearLabelOriginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
