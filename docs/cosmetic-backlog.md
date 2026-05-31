@@ -356,3 +356,11 @@
 - [R250531-ARCH-05] registry.Typed[T] 已建但 0 生产采用(按迁移策略为有意) — internal/registry/registry.go
 - [R250531-SEC-8] feishu VerificationToken 比较后 raw token 留在 GC heap(理论内存泄露) — internal/platform/feishu/transport_hook.go:117
 - [R250531-SEC-10] APIError.Error() 的 e.Msg 用 %q 而非 SanitizeForLog(已防日志注入,仅一致性) — internal/platform/feishu/feishu.go:128
+- [R20260531-GO-5] server.go:465 fallback 用 deprecated cli.NewCLIBackendsHandler;已有 ctor 显式分支,churn-only — internal/server/server.go:465
+- [R20260531-GO-7] NotifyCtx parent 参数刻意丢弃(预留未来 trace 传播),签名误导但有意 — internal/dispatch/notify_ctx.go:54
+- [R20260531-QUAL-1] releaseRun 生产死代码,godoc "MUST" 与 runFinalizer 实际路径矛盾(仅测试用) — internal/cron/runinflight.go:342
+- [R20260531-QUAL-3] runstore.go 注释称 CronRunSummary embeds Result []byte,实际无此字段(stale 量化论证) — internal/cron/runstore.go:1430
+- [R20260531-QUAL-6] isSecretTokenByte 用 rune(b) cast 处理任意字节,ASCII token 无误但 intent/impl 不符 — internal/cron/redact_secrets.go:147
+- [R20260531-PERF-6] Snapshot 无条件 proc.TurnAgents() 拷贝,零 subagent 时可先查 count 跳过(Process 未暴露 TurnAgentCount,需先加方法) — internal/session/managed_query.go:217
+- [R20260531-ARCH-3] cron SessionStatus 三值靠 iota 顺序匹配 session,已被 cron_router_adapter init panic 覆盖,仅文档措辞待对齐 — internal/cron/agent_opts.go:36
+- [R20260531-ARCH-5] cron 测试包反向 import session,可改用包内 fakeRouter 强化"生产零依赖"不变量 — internal/cron/scheduler_test.go:12
