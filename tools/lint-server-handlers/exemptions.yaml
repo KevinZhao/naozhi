@@ -54,7 +54,7 @@ file_size:
       current: 1107                         # 2026-05-28 master + Phase 3a auth import
       limit: 500
       until_phase: 4b
-    - path: internal/server/dashboard.go    # v0.6.1 新增豁免：v0.4 时 731 不超线
+    - path: internal/server/routes.go         # v0.6.1 新增豁免：v0.4 时 731 不超线
       current: 575                          # 2026-05-28 embed.FS + ETag helper 抽到 static_assets.go (Phase 5-prep)
       limit: 500
       until_phase: "5"

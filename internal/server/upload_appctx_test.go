@@ -28,9 +28,9 @@ func TestUploadCleanup_UsesAppCtxNotHubCtx(t *testing.T) {
 	}
 	dir := filepath.Dir(self)
 
-	src, err := os.ReadFile(filepath.Join(dir, "dashboard.go"))
+	src, err := os.ReadFile(filepath.Join(dir, "routes.go"))
 	if err != nil {
-		t.Fatalf("read dashboard.go: %v", err)
+		t.Fatalf("read routes.go: %v", err)
 	}
 	body := string(src)
 
@@ -38,12 +38,12 @@ func TestUploadCleanup_UsesAppCtxNotHubCtx(t *testing.T) {
 	// `s.hub.ctx` next to StartCleanup would mean the Hub-lifecycle
 	// regression returned.
 	if !strings.Contains(body, "uploads.StartCleanup(cleanupCtx)") {
-		t.Error("dashboard.go: uploads.StartCleanup must be invoked with the resolved " +
+		t.Error("routes.go: uploads.StartCleanup must be invoked with the resolved " +
 			"cleanupCtx variable so its derivation (s.appCtx, not s.hub.ctx) is " +
 			"locally visible — see R215-ARCH-P2-3 (#579)")
 	}
 	if !strings.Contains(body, "cleanupCtx := s.appCtx") {
-		t.Error("dashboard.go: cleanupCtx must be initialised from s.appCtx so the " +
+		t.Error("routes.go: cleanupCtx must be initialised from s.appCtx so the " +
 			"upload-cleanup goroutine survives a Hub hot-reload — R215-ARCH-P2-3 (#579)")
 	}
 	// Defensive: confirm the legacy s.hub.ctx wiring for StartCleanup
@@ -51,7 +51,7 @@ func TestUploadCleanup_UsesAppCtxNotHubCtx(t *testing.T) {
 	// so other intentional s.hub.ctx uses (eg. SetBaseContext, R247-ARCH-15)
 	// continue to compile cleanly.
 	if strings.Contains(body, "uploads.StartCleanup(s.hub.ctx)") {
-		t.Error("dashboard.go: legacy uploads.StartCleanup(s.hub.ctx) returned — " +
+		t.Error("routes.go: legacy uploads.StartCleanup(s.hub.ctx) returned — " +
 			"upload cleanup must follow app ctx (#579)")
 	}
 }

@@ -206,7 +206,7 @@ func (s *Server) registerDashboard() {
 	// cohesive session-CRUD route group is extracted into its own helper so
 	// registerDashboard shrinks toward the routes.go split the issues call
 	// for. Behaviour is identical — the routes_snapshot AST gate scans
-	// dashboard.go as a whole, so moving these calls into a same-file helper
+	// routes.go as a whole, so moving these calls into a same-file helper
 	// keeps the golden snapshot byte-for-byte stable.
 	s.registerSessionRoutes(auth)
 	// R260528-ARCH-6 (#1367) incremental slice: the discovered-session route
