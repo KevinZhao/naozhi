@@ -1650,6 +1650,22 @@ func (s *Scheduler) newCronTickCallback(jobID string) func() {
 
 // findByPrefixLocked finds a job by ID prefix scoped to a specific chat.
 //
+// RETURNS (R249-CR-6, #950): exactly one of —
+//   - (job, nil)                      the prefix uniquely identifies one job
+//     in the (plat, chatID) scope.
+//   - (nil, ErrJobNotFound)           no job in the scope matches the prefix,
+//     OR a full-length ID exists but in a different chat scope (the foreign
+//     job is masked as NotFound so callers can't probe its existence by ID).
+//   - (nil, ErrAmbiguousPrefix)       a short prefix (typically 1-2 chars from
+//     the IM-typed `naozhi cron pause <prefix>` flow) matches ≥2 jobs in the
+//     scope; the wrapped message lists the colliding IDs so the operator can
+//     disambiguate. Callers should errors.Is-check this and surface a
+//     "please disambiguate" hint rather than treating it as NotFound.
+//
+// COMPLEXITY: the partial-prefix scan is linear in the number of jobs in the
+// target chat (s.jobsByChat[chat]), bounded by maxJobsPerChat — NOT the full
+// s.jobs table. The full-ID fast path below is O(1).
+//
 // LOCK: caller MUST hold s.mu (read or write). The body iterates the
 // per-chat slice from s.jobsByChat directly without taking the mutex;
 // every in-tree caller (DeleteJob / PauseJob / ResumeJob) already holds
