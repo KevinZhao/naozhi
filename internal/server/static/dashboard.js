@@ -7125,6 +7125,13 @@ const MAX_LIVE_DOM_EVENTS = 600;
 // truncatedCount 并用容器顶部的提示告知操作员。
 const CRON_LIVE_MAX_EVENTS = 200;
 
+// 当 cron live 收到的事件全被 INTERNAL_EVENT_TYPES 过滤光（parallel agent
+// team 整段是 agent / task_* / tool_use），渲这条占位而非留空 innerHTML，
+// 否则 CSS .cdl-events:empty::before 会误报"暂无事件"。.cdl-agent-only 类名
+// 供 appendEventsToContainer 在追加真实事件前识别并清除占位。
+const CRON_LIVE_AGENT_ONLY_HTML =
+  '<div class="empty-state cdl-agent-only">本轮仅有 agent / 工具活动，正文消息请在任务结束后查看历史详情</div>';
+
 // formatTimeShort returns a chat-style label for a divider: today -> HH:MM,
 // yesterday -> "昨天 HH:MM", within a week -> "周三 HH:MM", older -> "M-D HH:MM",
 // different year -> "YYYY-M-D HH:MM".
@@ -12046,7 +12053,18 @@ function repaintCronLive() {
   }
   const events = wsm.cronLive.events || [];
   const display = processEventsForDisplay(events);
-  el.innerHTML = renderEventsWithDividers(display, 0);
+  const html = renderEventsWithDividers(display, 0);
+  if (html) {
+    el.innerHTML = html;
+  } else if (events.length > 0) {
+    // 事件到了但全被 INTERNAL_EVENT_TYPES 过滤光（典型 parallel agent team：
+    // 整段都是 agent / task_* / tool_use）。若留空 innerHTML，CSS
+    // .cdl-events:empty::before 会误报"暂无事件"，与顶部"已折叠 N 条"自相矛盾。
+    // 渲染占位文案，对齐主面板 appendEvents 的同款兜底。
+    el.innerHTML = CRON_LIVE_AGENT_ONLY_HTML;
+  } else {
+    el.innerHTML = '';
+  }
   el.scrollTop = el.scrollHeight;
   updateCronLiveTruncated();
   setCronLiveStatus(wsm.cronLive.status);
@@ -12058,6 +12076,9 @@ function repaintCronLive() {
 function appendEventsToContainer(el, events) {
   if (!el) return;
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  // 若容器当前只挂着 agent-only 占位（repaintCronLive 渲过），在追加真实
+  // 事件前清掉它，避免占位与事件并存。lastDividerTime 等读取也不会被它干扰。
+  if (el.querySelector('.cdl-agent-only')) el.innerHTML = '';
   let prevT = lastDividerTime(el);
   events.forEach(e => {
     if (isInternalEvent(e)) return;
