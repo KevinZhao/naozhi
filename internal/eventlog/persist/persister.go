@@ -11,7 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1060,8 +1060,9 @@ func (p *Persister) tickFlush() {
 	}
 	now := p.opts.Clock()
 	// Collect-then-sort instead of a true heap: 1-200 typical writers
-	// per tick, sort.Slice is faster in practice than a container/heap
-	// init+pop loop at that N. The slice itself is allocated once per
+	// per tick, slices.SortFunc is faster in practice than a container/heap
+	// init+pop loop at that N, and avoids the closure-boxing alloc that
+	// sort.Slice causes. The slice itself is allocated once per
 	// tick — see flushCandidatePool below if profiling later indicates
 	// this matters.
 	cands := p.collectFlushCandidates(now)
@@ -1124,8 +1125,8 @@ func (p *Persister) collectFlushCandidates(now time.Time) []flushCandidate {
 		cands = append(cands, flushCandidate{key: k, w: w})
 	}
 	if len(cands) > 1 {
-		sort.Slice(cands, func(i, j int) bool {
-			return cands[i].w.firstDirtyAt.Before(cands[j].w.firstDirtyAt)
+		slices.SortFunc(cands, func(a, b flushCandidate) int {
+			return a.w.firstDirtyAt.Compare(b.w.firstDirtyAt)
 		})
 	}
 	// Stash the (possibly grown) backing array back so the next tick
@@ -1217,6 +1218,7 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	// cursor on the underlying slice).
 	encBuf := recordBufPool.Get().(*bytes.Buffer)
 	defer putRecordBuf(encBuf)
+	var written int
 	for _, e := range job.Entries {
 		rec := schema.NewEntry(w.nextSeq, e.JSON)
 		encBuf.Reset()
@@ -1257,8 +1259,11 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 		w.bytes += n
 		w.nextSeq++
 		w.entriesSinceIdxWrite++
-		p.writtenCnt.Add(1)
-		p.opts.Observer.OnWrite(1)
+		written++
+	}
+	if written > 0 {
+		p.writtenCnt.Add(int64(written))
+		p.opts.Observer.OnWrite(written)
 	}
 	if !w.dirty {
 		w.dirty = true

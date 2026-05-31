@@ -65,6 +65,46 @@ func TestRedactSecretsInResult_Patterns(t *testing.T) {
 	}
 }
 
+// TestRedactSecretsInResult_NewPrefixes verifies the three additional
+// prefixes added in R164930-SEC-3 (sk-proj-, github_pat_, hf_) are
+// redacted, and that short hf_ values below minTail are left intact.
+func TestRedactSecretsInResult_NewPrefixes(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "OpenAI project key",
+			in:   "key sk-proj-abcdefghij1234567890 used",
+			want: "key [REDACTED] used",
+		},
+		{
+			name: "GitHub fine-grained PAT",
+			in:   "token github_pat_11ABCDEFG0abcdefghij1234567890 rejected",
+			want: "token [REDACTED] rejected",
+		},
+		{
+			name: "HuggingFace token",
+			in:   "auth hf_abcdefghij1234567890abcdef ok",
+			want: "auth [REDACTED] ok",
+		},
+		{
+			name: "hf_ short tail not redacted",
+			in:   "see hf_short for details",
+			want: "see hf_short for details",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactSecretsInResult(tc.in)
+			if got != tc.want {
+				t.Errorf("redactSecretsInResult(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRedactSecretsInResult_Negative ensures benign Claude output is
 // returned aliased (no allocation, no spurious matches). R234-SEC-7
 // (#1006).

@@ -187,7 +187,7 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	persistedErrMsg := a.errMsg
 	jobPersistOK := false
 	if !a.skipPersist {
-		persistedResult, persistedErrMsg, jobPersistOK = s.recordTerminalResult(a.job, a.result, a.errMsg, a.sessionID, a.errClass, a.state)
+		persistedResult, persistedErrMsg, jobPersistOK = s.recordTerminalResult(a.job, a.result, a.errMsg, a.sessionID, a.errClass, a.state, endedAt)
 	} else {
 		persistedResult = sanitiseRunResult(persistedResult)
 		persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
@@ -487,7 +487,7 @@ func (p jobResultSnapshot) restore(j *Job) {
 // recordResult path was deleted (R220-GO-1). The rollback state now lives
 // in the named jobResultSnapshot struct above so a future "add a Last*
 // field" diff lands once on the type instead of three coupled edits.
-func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState) (string, string, bool) {
+func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState, endedAt time.Time) (string, string, bool) {
 	// truncateWithSuffix (limits.go) is the single source of truth for the
 	// rune-trim + …[truncated] suffix; both this path and sanitiseRunResult
 	// must produce byte-identical output so the skipPersist branch of
@@ -525,7 +525,7 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 		Counters:       j.RunCounters,
 	}
 
-	j.LastRunAt = time.Now()
+	j.LastRunAt = endedAt
 	j.LastResult = result
 	j.LastError = errMsg
 	j.LastErrorClass = errClass

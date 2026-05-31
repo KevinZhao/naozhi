@@ -39,13 +39,18 @@ func TestDashboardJS_FencedPathList_Contract(t *testing.T) {
 	body := rest[:end]
 
 	// 2. It must reuse the candidate matcher (so Unicode paths inherit the
-	// same Unicode-safe regex) and require >= 2 lines so a lone path stays
-	// verbatim rather than being demoted to a one-item "list".
+	// same Unicode-safe regex). A single path line is now accepted (a lone
+	// generated file inside a ``` fence is a very common AI shape); the
+	// double gate (isFileRefCandidate + FILE_REF_HAS_EXT) plus the server-side
+	// existence check keep a single-line list from misrendering prose.
 	if !strings.Contains(body, "isFileRefCandidate(") {
 		t.Error("fencedPathList must reuse isFileRefCandidate so non-ASCII paths are matched by the same Unicode-safe regex")
 	}
-	if !strings.Contains(body, "paths.length < 2") {
-		t.Error("fencedPathList must require at least 2 path lines — a single path is not a list and should render verbatim")
+	if strings.Contains(body, "paths.length < 2") {
+		t.Error("fencedPathList must NOT require >= 2 path lines — that left every single-file fence button-less; a lone path with an extension is a valid one-item list")
+	}
+	if !strings.Contains(body, "paths.length < 1") {
+		t.Error("fencedPathList must still bail on an empty fence (paths.length < 1)")
 	}
 	// The extension gate is what keeps dependency/module/REST/fraction lists
 	// (every line matches the slash-path regex but carries no `.ext`) from

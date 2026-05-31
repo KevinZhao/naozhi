@@ -499,15 +499,16 @@ func buildExcerptFromHistory(entries []SystemEventEntry) string {
 			continue
 		}
 		// Reserve 1 byte for the leading newline (when sb is non-empty)
-		// plus the rune width of the trailing "…" marker so the cap is
-		// never exceeded on the wire.  We compare against the projected
-		// post-write size to avoid the off-by-one where a single
-		// oversized entry would slip through because the pre-write
-		// length was still under the cap.
+		// plus the rune width of the trailing "…" marker (3 bytes, UTF-8
+		// U+2026) so the cap is never exceeded on the wire.  We compare
+		// against the projected post-write size to avoid the off-by-one
+		// where a single oversized entry would slip through because the
+		// pre-write length was still under the cap.
 		need := len(s)
 		if sb.Len() > 0 {
 			need++ // newline
 		}
+		need += utf8.RuneLen('…') // 3 bytes for the truncation marker
 		if sb.Len()+need > autoTitlerExcerptSoftCapBytes {
 			// Tag truncation with a single ellipsis so the LLM sees a
 			// visible cut.  The line-cap pass downstream tolerates the
