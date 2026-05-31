@@ -1391,6 +1391,23 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 		return nil, 0
 	}
 
+	// R247-PERF-9 (#540) / R249-PERF-7 (#928): the no-cutoff warm path
+	// (before.IsZero) reads up to keepCount candidates — on a cold cache
+	// that is keepCount × ReadFile + UnmarshalJSON serialised under
+	// jobLock. Since every surviving candidate is read in this regime
+	// (no early break: limit == keepCount when warmCache drives the call,
+	// and the StartedAt filter never trims a zero cutoff), the decode is
+	// embarrassingly parallel: fan the ReadFile+Unmarshal out across a
+	// bounded worker pool and reassemble in newest-first order. The
+	// per-job mtime sort already fixed the order, so a position-indexed
+	// result slice preserves it regardless of completion order. The
+	// before-cutoff (pagination) path keeps the serial early-break: it
+	// stops at the first `limit` matches and parallelising would over-read
+	// past the page boundary.
+	if before.IsZero() && len(items) > diskDecodeParallelThreshold {
+		return s.decodeRunsParallel(items, limit)
+	}
+
 	out := make([]CronRunSummary, 0, limit)
 	corruptCount := 0
 	for _, it := range items {
@@ -1427,6 +1444,84 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 			continue
 		}
 		out = append(out, run.summary())
+	}
+	return out, corruptCount
+}
+
+// diskDecodeParallelThreshold is the candidate count above which
+// diskListNewestFirst fans the no-cutoff decode out across a worker pool.
+// Below it the goroutine + channel plumbing costs more than the serial
+// ReadFile loop saves, so the warm-but-small (≤ this many runs) job stays
+// on the serial path. Sized so a typical handful-of-runs job never spins
+// up workers.
+const diskDecodeParallelThreshold = 16
+
+// diskDecodeWorkers caps the concurrent ReadFile+Unmarshal fan-out used by
+// decodeRunsParallel. Bounded so a 50-job cold-start prewarm storm cannot
+// open 50 × keepCount file descriptors at once — each job's warm holds its
+// jobLock, so the bound is per-job and the global fd ceiling is
+// maxConcurrentWarm × diskDecodeWorkers, not N × keepCount.
+const diskDecodeWorkers = 8
+
+// decodeRunsParallel reads + decodes the supplied newest-first items across
+// a bounded worker pool and returns the summaries in the SAME newest-first
+// order plus the count of corrupt/unreadable files skipped. Order is
+// preserved by writing each decode into a position-indexed scratch slice
+// (items is already mtime-sorted by scanSortedRunDir), so completion order
+// is irrelevant. Only called from the before.IsZero path where every
+// candidate up to limit is wanted, so there is no early-break to honour.
+func (s *runStore) decodeRunsParallel(items []runDirItem, limit int) ([]CronRunSummary, int) {
+	n := len(items)
+	if n > limit {
+		// before.IsZero means no StartedAt filter drops rows, so the first
+		// `limit` (newest) candidates are exactly the answer — decode only
+		// those rather than the whole directory.
+		n = limit
+	}
+	type slot struct {
+		summary CronRunSummary
+		ok      bool
+		corrupt bool
+	}
+	slots := make([]slot, n)
+	workers := diskDecodeWorkers
+	if workers > n {
+		workers = n
+	}
+	idx := make(chan int, n)
+	for i := 0; i < n; i++ {
+		idx <- i
+	}
+	close(idx)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for i := range idx {
+				run, err := s.readRunNoLstat(items[i].path)
+				if err != nil {
+					if errors.Is(err, ErrCorruptRun) {
+						slots[i].corrupt = true
+					}
+					continue
+				}
+				slots[i].summary = run.summary()
+				slots[i].ok = true
+			}
+		}()
+	}
+	wg.Wait()
+
+	out := make([]CronRunSummary, 0, n)
+	corruptCount := 0
+	for i := range slots {
+		if slots[i].corrupt {
+			corruptCount++
+		}
+		if slots[i].ok {
+			out = append(out, slots[i].summary)
+		}
 	}
 	return out, corruptCount
 }

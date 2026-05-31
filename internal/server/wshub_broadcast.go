@@ -123,6 +123,22 @@ func (h *Hub) broadcastToAuthenticated(data []byte) {
 	broadcastClientSnapPool.Put(snapPtr)
 }
 
+// marshalBroadcastAuth consolidates the marshal→err-guard→fan-out tail shared
+// by every "broadcast to all authenticated clients" producer (session_state,
+// cron/daemon run-started/ended). R243-ARCH-15 (#845) incremental slice: these
+// six call sites previously repeated the identical `data, err := marshalPooled
+// (v); if err != nil { return }; h.broadcastToAuthenticated(data)` triple. A
+// marshal failure is swallowed (matching the prior behaviour) because the WS
+// payload structs are fixed-shape and cannot fail json.Marshal in practice;
+// dropping the frame is preferable to panicking the producer goroutine.
+func (h *Hub) marshalBroadcastAuth(v any) {
+	data, err := marshalPooled(v)
+	if err != nil {
+		return
+	}
+	h.broadcastToAuthenticated(data)
+}
+
 // broadcastState sends a session_state message to ALL authenticated clients.
 // This mirrors BroadcastSessionReady: the "running" start is sent to everyone,
 // so the final state must also reach everyone — otherwise clients not subscribed
