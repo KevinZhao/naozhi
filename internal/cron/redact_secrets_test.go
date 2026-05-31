@@ -130,6 +130,67 @@ func TestRedactSecretsInResult_NewPrefixes(t *testing.T) {
 	}
 }
 
+// TestRedactSecretsInResult_GCP verifies the GCP / Google OAuth access
+// token prefix (ya29.) added in R20260531-SEC-5 is redacted, including the
+// base64url body that follows the dot, and that short tails / bare prefix
+// prose are left intact. [R20260531-SEC-5].
+func TestRedactSecretsInResult_GCP(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "GCP access token",
+			in:   "Authorization: Bearer ya29.AAAA0123456789abcdef-_ZZ done",
+			want: "Authorization: Bearer [REDACTED] done",
+		},
+		{
+			name: "GCP token at line start",
+			in:   "ya29.a0AfH6SMBx1234567890abcdef rejected",
+			want: "[REDACTED] rejected",
+		},
+		{
+			name: "ya29. short tail not redacted",
+			in:   "ya29.short here",
+			want: "ya29.short here",
+		},
+		{
+			name: "bare ya29 prefix prose not redacted",
+			in:   "the ya29. prefix marks Google OAuth tokens",
+			want: "the ya29. prefix marks Google OAuth tokens",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactSecretsInResult(tc.in)
+			if got != tc.want {
+				t.Errorf("redactSecretsInResult(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSanitiseRunErrMsg_RedactsSecrets is the integration coverage for the
+// error path: sanitiseRunErrMsg must scrub well-known secret prefixes so a
+// leaked token in an error string (LastError) never lands on disk or the
+// dashboard WS broadcast. [R20260531-SEC-8].
+func TestSanitiseRunErrMsg_RedactsSecrets(t *testing.T) {
+	cases := []string{
+		"exec failed: auth header sk-ant-api03-abcdef0123456789 rejected",
+		"git push denied with ghp_abcdef0123456789 token",
+	}
+	for _, in := range cases {
+		got := sanitiseRunErrMsg(in)
+		if strings.Contains(got, "sk-ant-") || strings.Contains(got, "ghp_") {
+			t.Errorf("sanitiseRunErrMsg left token intact for %q → %q", in, got)
+		}
+		if !strings.Contains(got, "[REDACTED]") {
+			t.Errorf("sanitiseRunErrMsg did not insert [REDACTED] for %q → %q", in, got)
+		}
+	}
+}
+
 // TestRedactSecretsInResult_Negative ensures benign Claude output is
 // returned aliased (no allocation, no spurious matches). R234-SEC-7
 // (#1006).
@@ -188,6 +249,7 @@ func TestMayContainSecretPrefix_FirstBytes(t *testing.T) {
 		"ghp_abcdef0123456789",
 		"AKIAIOSFODNN7EXAMPLE",
 		"xoxb-1234567890",
+		"ya29.AAAA0123456789abcdef",
 	}
 	for _, in := range truthy {
 		if !mayContainSecretPrefix(in) {

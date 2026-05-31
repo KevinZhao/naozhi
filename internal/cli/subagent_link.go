@@ -114,8 +114,19 @@ func (l *SubagentLinker) appendNamedLink(name string, info LinkInfo) {
 	cur = append(cur, info)
 	if len(cur) > maxNamedLinkHistory {
 		// Drop the oldest entries; keep the newest maxNamedLinkHistory.
-		n := copy(cur, cur[len(cur)-maxNamedLinkHistory:])
-		cur = cur[:n]
+		// If the backing array has grown far beyond the cap (e.g. a slice
+		// that ballooned to 256 before this trim), the in-place copy-down
+		// keeps the whole oversized backing array alive for the session's
+		// lifetime. Re-allocate a tightly-sized array in that case so the
+		// oversized backing store can be garbage-collected. R20260531-CR-004.
+		if cap(cur) > maxNamedLinkHistory*2 {
+			trimmed := make([]LinkInfo, maxNamedLinkHistory)
+			copy(trimmed, cur[len(cur)-maxNamedLinkHistory:])
+			cur = trimmed
+		} else {
+			n := copy(cur, cur[len(cur)-maxNamedLinkHistory:])
+			cur = cur[:n]
+		}
 	}
 	l.byName[name] = cur
 }

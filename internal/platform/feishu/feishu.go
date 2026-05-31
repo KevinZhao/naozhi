@@ -705,6 +705,17 @@ func (f *Feishu) maybeRefreshBotInfo() {
 		// Another goroutine won the CAS and is already (re)fetching.
 		return
 	}
+	// R20260531-CR-003: Stop() cancels stopCtx (735) then blocks on
+	// f.wg.Wait() (751). If we win the CAS concurrently with that Wait,
+	// calling wg.Add(1) after the counter already drained to 0 — followed
+	// by the goroutine's defer wg.Done() — would drive the counter negative
+	// and panic. Re-check the cancellation here, after the CAS and before
+	// Add: once stopCtx is cancelled we skip the self-heal entirely. The
+	// stamp is already advanced (harmless: at most one fewer refetch), and
+	// the degraded "any @" match already returned for the caller.
+	if f.stopCtx.Err() != nil {
+		return
+	}
 	f.wg.Add(1)
 	go func() {
 		defer f.wg.Done()
