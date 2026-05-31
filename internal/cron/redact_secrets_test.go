@@ -54,6 +54,31 @@ func TestRedactSecretsInResult_Patterns(t *testing.T) {
 			in:   "ghp_abcdef0123456789 and AKIAIOSFODNN7EXAMPLE",
 			want: "[REDACTED] and [REDACTED]",
 		},
+		{
+			name: "OpenAI project key",
+			in:   "export OPENAI_API_KEY=sk-proj-abcdef0123456789ABCDEF done",
+			want: "export OPENAI_API_KEY=[REDACTED] done",
+		},
+		{
+			name: "OpenAI legacy key",
+			in:   "key sk-abcdefghij0123456789ABCDEFGHIJ0123456789xyz here",
+			want: "key [REDACTED] here",
+		},
+		{
+			name: "HuggingFace token",
+			in:   "HF_TOKEN=hf_abcdefghij0123456789 set",
+			want: "HF_TOKEN=[REDACTED] set",
+		},
+		{
+			name: "npm token",
+			in:   "//registry: npm_abcdefghij0123456789 used",
+			want: "//registry: [REDACTED] used",
+		},
+		{
+			name: "sk-ant beats sk- fallback",
+			in:   "sk-ant-api03-abcDEF123 ok",
+			want: "[REDACTED] ok",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -120,6 +145,11 @@ func TestRedactSecretsInResult_Negative(t *testing.T) {
 		"the prefix sk-ant- is reserved",
 		"see ghp_ for personal access tokens",
 		"AKIA is the AWS marker",
+		// sk- legacy: short tail under minTail (40) must not be redacted,
+		// so ordinary "sk-" prose / short identifiers stay intact.
+		"sk-abc is not a key",
+		"use sk-short123 placeholder",
+		"hf_ and npm_ are reserved prefixes",
 	}
 	for _, in := range cases {
 		got := redactSecretsInResult(in)
@@ -142,6 +172,37 @@ func TestRedactSecretsInResult_Idempotent(t *testing.T) {
 	}
 	if strings.Contains(once, "sk-ant-") || strings.Contains(once, "ghp_") {
 		t.Fatalf("redactor left a known prefix intact: %q", once)
+	}
+}
+
+// TestMayContainSecretPrefix_FirstBytes verifies the fast-path pre-scan
+// recognises the first byte of every registered prefix family — in
+// particular the newly added 'h' (hf_) and 'n' (npm_) which would
+// otherwise short-circuit to false and disable redaction.
+// [R030056-SEC-005].
+func TestMayContainSecretPrefix_FirstBytes(t *testing.T) {
+	truthy := []string{
+		"hf_abcdefghij0123456789",
+		"npm_abcdefghij0123456789",
+		"sk-proj-abcdef0123456789ABCDEF",
+		"ghp_abcdef0123456789",
+		"AKIAIOSFODNN7EXAMPLE",
+		"xoxb-1234567890",
+	}
+	for _, in := range truthy {
+		if !mayContainSecretPrefix(in) {
+			t.Errorf("mayContainSecretPrefix(%q) = false, want true", in)
+		}
+	}
+	falsy := []string{
+		"",
+		"plai du", // no s/g/A/x/h/n first bytes
+		"402",
+	}
+	for _, in := range falsy {
+		if mayContainSecretPrefix(in) {
+			t.Errorf("mayContainSecretPrefix(%q) = true, want false", in)
+		}
 	}
 }
 

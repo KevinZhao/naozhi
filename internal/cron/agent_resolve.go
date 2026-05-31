@@ -11,8 +11,11 @@ import "strings"
 // and inlining it removes the last cron → session production import
 // edge that wasn't a reverse interface implementation. session also
 // keeps its own copy for dispatch / server callers; if either copy
-// changes semantics, the test in scheduler_test.go pins the cron
-// behaviour.
+// changes semantics, agent_resolve_parity_test.go (#1506) asserts
+// cron.resolveAgent == session.ResolveAgent over a table and fails the
+// build, forcing both forks to be reconciled. The parity test imports
+// session only as a _test dependency, so the production fork stays
+// import-free.
 func resolveAgent(text string, agentCommands map[string]string) (agentID, cleanText string) {
 	if !strings.HasPrefix(text, "/") {
 		return "general", text

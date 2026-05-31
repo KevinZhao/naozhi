@@ -553,6 +553,21 @@ func buildServer(opts ServerOptions) *Server {
 
 // Start registers routes and begins serving.
 func (s *Server) Start(ctx context.Context) error {
+	// R030056-GO-002: Start has several early-return error paths (dispatch
+	// wireup, platform Start, net.Listen) that run BEFORE the shutdown
+	// goroutine — the sole closer of s.shutdownComplete — is spawned. The
+	// process-level shutdown sequencer (cmd/naozhi runShutdown) blocks
+	// unconditionally on ShutdownComplete() in its server-error path, so any
+	// of those early returns would deadlock the whole shutdown. Guard with a
+	// defer that closes the channel unless the shutdown goroutine took
+	// ownership (shutdownClosed=true). close() must happen exactly once: once
+	// the goroutine is spawned it becomes the only closer.
+	shutdownClosed := false
+	defer func() {
+		if !shutdownClosed {
+			close(s.shutdownComplete)
+		}
+	}()
 	// Resolver is constructed in buildServer and reused across the
 	// dispatch / hub / project-api surfaces. docs/rfc/key-resolver.md
 	// Phase 4.
@@ -743,6 +758,9 @@ func (s *Server) Start(ctx context.Context) error {
 	// same channel. S11: this is the HTTP-drain barrier the process shutdown
 	// sequencer blocks on before router.Shutdown().
 	shutdownComplete := s.shutdownComplete
+	// The shutdown goroutine is now the sole owner/closer of shutdownComplete;
+	// suppress the early-return defer above so close() happens exactly once.
+	shutdownClosed = true
 	go func() {
 		<-ctx.Done()
 		slog.Info("shutting down server")
@@ -821,7 +839,10 @@ func (s *Server) Start(ctx context.Context) error {
 // races the drain and an in-flight GetOrCreate/Send handler can observe a
 // half-cleaned session map. The channel is allocated at construction so a
 // caller may obtain it before Start runs; it never closes if Start is
-// never invoked.
+// never invoked. R030056-GO-002: if Start returns an error early (dispatch
+// wireup, platform Start, or net.Listen — all before the shutdown goroutine
+// is spawned), a defer in Start closes the channel so the process-level
+// shutdown sequencer's unconditional receive does not deadlock.
 func (s *Server) ShutdownComplete() <-chan struct{} {
 	return s.shutdownComplete
 }

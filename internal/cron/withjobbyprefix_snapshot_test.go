@@ -3,7 +3,6 @@ package cron
 import (
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"testing"
 )
 
@@ -107,7 +106,6 @@ func TestWithJobByPrefix_SnapshotRaceDeleteJob(t *testing.T) {
 	// goroutines operate on the same *Job pointer — the race detector flags
 	// concurrent string writes against the reads inside withJobByPrefix.
 	var wg sync.WaitGroup
-	var raceDetected atomic.Bool
 
 	wg.Add(1)
 	go func() {
@@ -135,7 +133,6 @@ func TestWithJobByPrefix_SnapshotRaceDeleteJob(t *testing.T) {
 			if _, err := s.PauseJob(j.ID[:4], "feishu", "chat1"); err != nil {
 				_ = err
 			}
-			_ = raceDetected
 		}
 	}
 
