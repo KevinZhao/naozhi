@@ -75,6 +75,30 @@ var broadcastClientSnapPool = sync.Pool{
 	},
 }
 
+// releaseBroadcastSnap returns a client snapshot to broadcastClientSnapPool
+// after a fan-out completes. It (1) nils every *wsClient slot so a
+// disconnected client can be GC'd before the backing array is reused
+// (R59-PERF-L1), and (2) drops oversized backing arrays rather than pinning
+// them in the pool — replacing them with a fresh small slice so a single
+// "big broadcast" cannot permanently deplete a pool slot (R58-PERF-005).
+//
+// R243-ARCH-2 (#459 server-domain slice): broadcastToAuthenticated and
+// broadcastSessionSystemEvent repeated this identical clear→cap-check→Put
+// tail; consolidating it keeps the two fan-out paths' pool discipline in
+// one place so a future tweak (e.g. the cap threshold) can't drift between
+// them. Pure code-relocation — no behaviour change.
+func releaseBroadcastSnap(snapPtr *[]*wsClient, snap []*wsClient) {
+	for i := range snap {
+		snap[i] = nil
+	}
+	if cap(snap) <= broadcastSnapPoolMaxCap {
+		*snapPtr = snap[:0]
+	} else {
+		*snapPtr = make([]*wsClient, 0, 32)
+	}
+	broadcastClientSnapPool.Put(snapPtr)
+}
+
 // broadcastToAuthenticated sends raw data to all authenticated WebSocket clients.
 // Takes a pointer snapshot under RLock and releases the lock before the per-
 // client channel sends. SendRaw itself is non-blocking, but with hundreds of
@@ -115,27 +139,7 @@ func (h *Hub) broadcastToAuthenticated(data []byte) {
 	for _, c := range snap {
 		c.SendRaw(data)
 	}
-	// Clear *wsClient pointers so a disconnected client can be GC'd before
-	// the snap slice is returned to the caller / dropped. Clearing happens
-	// on both paths: for the pool-eligible path it prevents stale pointers
-	// surviving in the pooled backing array until the next Get; for the
-	// oversized path it releases references now instead of waiting for the
-	// long-lived parent goroutine's stack frame to unwind. R59-PERF-L1.
-	for i := range snap {
-		snap[i] = nil
-	}
-	// Oversized snapshots (e.g. after a one-off broadcast to 5000 clients)
-	// would pin an arbitrarily large backing array if returned to the pool.
-	// Drop the slice but still return the pointer header with a fresh small
-	// backing array so the pool slot is not permanently depleted — otherwise
-	// a single "big broadcast" would shrink the pool by one slot until
-	// process exit. R58-PERF-005.
-	if cap(snap) <= broadcastSnapPoolMaxCap {
-		*snapPtr = snap[:0]
-	} else {
-		*snapPtr = make([]*wsClient, 0, 32)
-	}
-	broadcastClientSnapPool.Put(snapPtr)
+	releaseBroadcastSnap(snapPtr, snap)
 }
 
 // marshalBroadcastAuth consolidates the marshal→err-guard→fan-out tail shared
@@ -389,15 +393,7 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 		}
 	}
 
-	for i := range snap {
-		snap[i] = nil
-	}
-	if cap(snap) <= broadcastSnapPoolMaxCap {
-		*snapPtr = snap[:0]
-	} else {
-		*snapPtr = make([]*wsClient, 0, 32)
-	}
-	broadcastClientSnapPool.Put(snapPtr)
+	releaseBroadcastSnap(snapPtr, snap)
 }
 
 // DroppedMessages returns the total number of messages dropped across all
