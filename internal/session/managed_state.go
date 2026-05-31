@@ -61,8 +61,13 @@ func (m ManagedState) String() string {
 
 // ManagedState derives the session's lifecycle state from its current fields.
 // Single source of truth for the inference that consumers previously
-// open-coded (R176-ARCH-N4 / #432). Lock-free: reads only atomic fields plus
-// the immutable `exempt` flag.
+// open-coded (R176-ARCH-N4 / #432).
+//
+// Locking: this method is NOT lock-free. The final fallback branch calls
+// hasInjectedHistory(), which acquires s.historyMu.RLock(). Callers must
+// not hold a higher-layer lock (e.g. router.mu) when invoking this method;
+// doing so would invert the established r.mu → historyMu lock order and
+// cause a deadlock.
 //
 // Precedence:
 //  1. exempt wins (planner/scratch are badged distinctly regardless of proc),
