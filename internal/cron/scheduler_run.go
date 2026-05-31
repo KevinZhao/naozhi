@@ -332,6 +332,16 @@ const (
 	cronNoticeMid    = "] "
 )
 
+// cronMarkdownPunctReplacer is a package-level Replacer for escapeCronMarkdownPunct.
+// Constructed once to avoid per-call allocation; Replace performs a single
+// pass over the input string. R164930-PERF-4.
+var cronMarkdownPunctReplacer = strings.NewReplacer(
+	"[", "［", // U+FF3B
+	"]", "］", // U+FF3D
+	"(", "（", // U+FF08
+	")", "）", // U+FF09
+)
+
 // formatCronNotice renders the IM-notice line cron jobs send through
 // deliverNotice. label is the snap.labelOrID() result (job title or
 // fallback ID); body is the human-readable suffix already in the
@@ -356,33 +366,16 @@ func formatCronNotice(label, body string) string {
 	// at AddJob/UpdateJob — a 4× rune→byte budget is more than enough for
 	// CJK / emoji to round-trip through SanitizeForLog without truncation.
 	label = osutil.SanitizeForLog(label, MaxCronTitleLen*4)
-	// R250-SEC-6 (#1095): the cronNoticePrefixFmt template is "[Cron %s] %s",
-	// so a `]` byte inside the label silently terminates the bracket prefix
-	// from an IM renderer's view. Markdown-aware channels (Slack / Discord
-	// / Feishu rich-card extensions) would let a Title like
-	// `evil](evil-link) [Cron real` collapse the prefix into a clickable
-	// link target. validateCronTitle blocks bidi / C0 controls but ASCII
-	// `]` slips through. Belt-and-braces: replace `]` with the full-width
-	// closing bracket U+FF3D, visually similar but never bracket-matched
-	// by markdown parsers. Prefix invariant `[Cron <label>]` is preserved
-	// because we substitute inside label, never at the template `]`.
-	//
-	// R20260527122801-PERF-15: skip ReplaceAll alloc when label has no
-	// ']' — common case for ASCII titles. ReplaceAll always walks the
-	// string and may reallocate even when nothing matches; IndexByte is
-	// a single SIMD-accelerated scan so the fast path is essentially
-	// free on the hot tick path.
-	if strings.IndexByte(label, ']') >= 0 {
-		label = strings.ReplaceAll(label, "]", "］")
-	}
-	// R260528-SEC-8: markdown link-syntax `[`, `(`, `)` were not escaped
-	// in label or body. Slack / Discord / Feishu rich-card renderers parse
-	// `[text](url)` as a clickable link, so a body containing
-	// `Click [here](http://attacker)` (or a label with `[evil`) would
-	// surface as a hijackable hyperlink. Substitute the full-width
-	// counterparts U+FF3B / U+FF08 / U+FF09 — visually similar but never
-	// bracket-matched by any markdown parser. IndexByte fast-paths keep
-	// the common ASCII-clean case alloc-free.
+	// R250-SEC-6 (#1095) + R260528-SEC-8: replace markdown link-syntax
+	// characters `[` `]` `(` `)` in label and body with full-width
+	// visually-similar codepoints (U+FF3B / U+FF3D / U+FF08 / U+FF09).
+	// This prevents an attacker-controlled Title or result body from
+	// smuggling `[text](url)` clickable links into IM notices.
+	// validateCronTitle blocks bidi / C0 controls but ASCII punctuation
+	// passes through, so the substitution here is the safety bottom line.
+	// R164930-PERF-4/5: escapeCronMarkdownPunct now performs a single-pass
+	// Replacer with an IndexAny fast-path; the redundant pre-scan for `]`
+	// that previously ran at this call site has been removed.
 	label = escapeCronMarkdownPunct(label)
 	body = escapeCronMarkdownPunct(body)
 	// R247-PERF-7 (#539): strings.Builder skips fmt.Sprintf's reflection
@@ -404,27 +397,18 @@ func formatCronNotice(label, body string) string {
 // `[`, `]`, `(`, `)` with full-width visually-similar codepoints
 // (U+FF3B / U+FF3D / U+FF08 / U+FF09) so an attacker-controlled cron
 // Title or result body cannot smuggle `[text](url)` clickable links
-// into the IM notice. Each replace is gated by IndexByte so a clean
-// ASCII payload stays alloc-free. R260528-SEC-8.
+// into the IM notice. R260528-SEC-8.
 //
-// label callers run the `]` substitution at line 341 (R250-SEC-6) before
-// reaching here; the duplicate `]` work is idempotent (the second pass
-// finds no `]` left and skips). Body callers rely on this helper to
-// strip `]` since the label-side gate skips them.
+// R164930-PERF-4/5: single-pass implementation using a package-level
+// strings.Replacer (cronMarkdownPunctReplacer). An IndexAny fast-path
+// avoids any allocation on the common ASCII-clean case; when substitution
+// is required the Replacer performs exactly one scan + one output
+// allocation instead of the previous up-to-4-scan / 4-alloc loop.
 func escapeCronMarkdownPunct(s string) string {
-	if strings.IndexByte(s, '[') >= 0 {
-		s = strings.ReplaceAll(s, "[", "［")
+	if strings.IndexAny(s, "[]()") < 0 {
+		return s
 	}
-	if strings.IndexByte(s, ']') >= 0 {
-		s = strings.ReplaceAll(s, "]", "］")
-	}
-	if strings.IndexByte(s, '(') >= 0 {
-		s = strings.ReplaceAll(s, "(", "（")
-	}
-	if strings.IndexByte(s, ')') >= 0 {
-		s = strings.ReplaceAll(s, ")", "）")
-	}
-	return s
+	return cronMarkdownPunctReplacer.Replace(s)
 }
 
 // labelOrID returns the IM-notice display label: snap.label when populated,
