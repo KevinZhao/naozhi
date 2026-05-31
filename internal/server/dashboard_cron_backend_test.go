@@ -375,7 +375,12 @@ func TestCronUpdate_RejectsHalfNotifyPatch(t *testing.T) {
 			var listResp struct {
 				Jobs []struct {
 					NotifyPlatform string `json:"notify_platform"`
-					NotifyChatID   string `json:"notify_chat_id"`
+					// NotifyChatID is intentionally absent: R20260531A-SEC-1
+					// strips ChatID/NotifyChatID from the list endpoint to
+					// prevent cross-user IM-ID enumeration. Verify platform
+					// integrity instead — notify_platform and notify_chat_id
+					// are written atomically, so if platform is unchanged the
+					// chat_id is unchanged too.
 				} `json:"jobs"`
 			}
 			if err := json.Unmarshal(listW.Body.Bytes(), &listResp); err != nil {
@@ -384,9 +389,9 @@ func TestCronUpdate_RejectsHalfNotifyPatch(t *testing.T) {
 			if len(listResp.Jobs) != 1 {
 				t.Fatalf("jobs = %d, want 1", len(listResp.Jobs))
 			}
-			if listResp.Jobs[0].NotifyPlatform != "feishu" || listResp.Jobs[0].NotifyChatID != "oc_seed" {
-				t.Errorf("seed notify pair drifted after rejected PATCH: platform=%q chat_id=%q",
-					listResp.Jobs[0].NotifyPlatform, listResp.Jobs[0].NotifyChatID)
+			if listResp.Jobs[0].NotifyPlatform != "feishu" {
+				t.Errorf("seed notify_platform drifted after rejected PATCH: got %q, want \"feishu\"",
+					listResp.Jobs[0].NotifyPlatform)
 			}
 		})
 	}

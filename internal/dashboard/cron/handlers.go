@@ -992,13 +992,16 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			PromptTruncated: truncated,
 			Title:           j.Title,
 			Platform:        j.Platform,
-			ChatID:          j.ChatID,
+			// R20260531A-SEC-1 (#1498): ChatID and NotifyChatID are IM
+			// identifiers that must not be exposed to all authenticated users
+			// in a multi-operator deployment. List view strips both fields;
+			// they are available only via the per-job edit form (create/update
+			// handlers), which requires explicit write intent.
 			CreatedBy:       j.CreatedBy,
 			CreatedAt:       j.CreatedAt.UnixMilli(),
 			Paused:          j.Paused,
 			WorkDir:         j.WorkDir,
 			NotifyPlatform:  j.NotifyPlatform,
-			NotifyChatID:    j.NotifyChatID,
 			LastResult:      j.LastResult,
 			LastError:       j.LastError,
 			LastErrorClass:  string(j.LastErrorClass),
