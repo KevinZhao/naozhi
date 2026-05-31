@@ -352,8 +352,11 @@ func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	// the match to the JSON key boundary; assistant text content can
 	// still mention the word verbatim and round-trips through
 	// json.Unmarshal as before.
-	if strings.Contains(line, `:"hook_started"`) ||
-		strings.Contains(line, `:"hook_response"`) ||
+	// :"hook_ covers both :"hook_started" and :"hook_response" while
+	// keeping the colon-anchor that prevents false positives in user text
+	// (R260528-GO-16). control_response has no common prefix with hook_ so
+	// it is checked separately. [R250531-PERF-9]
+	if strings.Contains(line, `:"hook_`) ||
 		strings.Contains(line, `:"control_response"`) {
 		return nil, false, nil
 	}
