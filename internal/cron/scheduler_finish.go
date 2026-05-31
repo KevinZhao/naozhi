@@ -323,6 +323,11 @@ func sanitiseRunResult(s string) string {
 // flow into WS broadcasts and must not leak filesystem paths.
 func sanitiseRunErrMsg(s string) string {
 	s = redactPathsInCronError(s)
+	// R20260531-SEC-8: scrub well-known secret-prefix patterns BEFORE
+	// SanitizeForLog so a leaked token in an error string (LastError) never
+	// lands on disk (cron_jobs.json) or the dashboard WS broadcast. Mirrors
+	// sanitiseRunResult's call ordering on the success path.
+	s = redactSecretsInResult(s)
 	return osutil.SanitizeForLog(s, maxCronErrMsgRunes)
 }
 

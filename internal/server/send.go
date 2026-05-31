@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -445,10 +446,8 @@ func (h *Hub) runTurn(key, text string, images []cli.ImageData, onAsyncError fun
 
 	if _, err := h.sendWithBroadcast(h.ctx, key, sess, text, images, nil); err != nil {
 		slog.Error("send: send", "key", key, "err", err)
-	} else if h.scheduler != nil && sessionkey.IsCronKey(key) {
-		if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, sessionkey.CronKeyPrefix), text); err != nil {
-			slog.Warn("send: set cron prompt", "key", key, "err", err)
-		}
+	} else {
+		h.autoSaveCronPrompt("send", key, text)
 	}
 	slog.Debug("send: turn complete", "key", key, "elapsed_ms", time.Since(sendStart).Milliseconds())
 }
@@ -487,12 +486,28 @@ func (h *Hub) runTurnPassthrough(key, text string, images []cli.ImageData, prior
 		if onAsyncError != nil {
 			onAsyncError(asyncErrorMessage(err))
 		}
-	} else if h.scheduler != nil && sessionkey.IsCronKey(key) {
-		if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, sessionkey.CronKeyPrefix), text); err != nil {
-			slog.Warn("passthrough: set cron prompt", "key", key, "err", err)
-		}
+	} else {
+		h.autoSaveCronPrompt("passthrough", key, text)
 	}
 	slog.Debug("passthrough: turn complete", "key", key, "elapsed_ms", time.Since(sendStart).Milliseconds())
+}
+
+// autoSaveCronPrompt persists the just-sent text as the cron job's prompt on
+// a successful turn (IM auto-save). It is a no-op for non-cron keys or when no
+// scheduler is wired.
+//
+// ErrPromptAlreadySet is benign here: after the first turn the job already has
+// a prompt, so every later turn would return that sentinel and — without this
+// filter — spam Warn once per turn. R20260531-CR-001: suppress only that
+// sentinel; every other SetJobPrompt failure still logs at Warn.
+func (h *Hub) autoSaveCronPrompt(phase, key, text string) {
+	if h.scheduler == nil || !sessionkey.IsCronKey(key) {
+		return
+	}
+	jobID := strings.TrimPrefix(key, sessionkey.CronKeyPrefix)
+	if err := h.scheduler.SetJobPrompt(jobID, text); err != nil && !errors.Is(err, cron.ErrPromptAlreadySet) {
+		slog.Warn(phase+": set cron prompt", "key", key, "err", err)
+	}
 }
 
 // Deprecated: sessionSend with a configured MessageQueue handles all production

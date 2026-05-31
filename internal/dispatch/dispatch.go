@@ -1004,11 +1004,12 @@ func resolveReplyCtx(ctx context.Context) (replyCtx context.Context, cleanup fun
 // handleGetOrCreateError maps a router.GetOrCreate failure into the
 // user-facing reply ctx, an optional ctx.cancel cleanup, and a Chinese
 // error message. Pulled out of sendAndReply so the seven-stage main
-// path stays focused on the happy-path turn flow (R245-ARCH-39 / #894);
-// the per-sentinel switch is the part most likely to grow as new
-// session-spawn failure modes are added (e.g. backend-disabled, quota
-// exhausted) and now has a single home that unit tests can target
-// directly without standing up a full Dispatcher.
+// path stays focused on the happy-path turn flow (R245-ARCH-39 / #894).
+// The sentinel → Chinese-message mapping is delegated to
+// usermsg.ForSendError (R20260531-ARCH-1) so it cannot drift from the
+// WS send_ack path; this helper only owns the log-level and reply-ctx
+// (shutdown-swap) policy, which unit tests can target directly without
+// standing up a full Dispatcher.
 //
 // cleanup is non-nil when this returns a fresh background ctx (the
 // shutdown / context.Canceled branch). Callers MUST defer it before
@@ -1027,24 +1028,16 @@ func (d *Dispatcher) handleGetOrCreateError(
 	} else {
 		lg.Error("get session", "err", err)
 	}
-	switch {
-	case errors.Is(err, session.ErrMaxProcs):
-		errMsg = "当前处理已满，请稍后重试。"
-	case errors.Is(err, session.ErrMaxExemptSessions):
-		// R190-WRAP-M1: exempt-session cap means "too many projects/cron
-		// workers"; user /new won't clear it because the exempt counter
-		// is independent of user sessions. Tell the user explicitly so
-		// they contact the operator instead of looping on /new.
-		errMsg = "长时会话（planner/cron）已满，请联系管理员。"
-	case errors.Is(err, session.ErrNoCLIWrapper):
-		// R190-WRAP-M1: permanent config error; /new retry is hopeless.
-		// Surface a clear "ask operator" so IM users don't spin on it.
-		errMsg = "会话后端未配置，请联系管理员。"
-	case errors.Is(err, context.Canceled):
-		errMsg = "系统正在重启，请稍后重试。"
-	default:
-		errMsg = "会话创建失败，请发送 /new 重置后重试。"
-	}
+	// R20260531-ARCH-1 (#754 follow-up): the per-sentinel switch here
+	// duplicated usermsg.ForSendError's mapping for ErrMaxProcs /
+	// ErrMaxExemptSessions / ErrNoCLIWrapper / context.Canceled, drifting
+	// from it over time. Delegate to the shared classifier so a new
+	// session-side sentinel only needs registering once (in usermsg).
+	// The empty key keeps the regular (non-cron) phrasing; GetOrCreate
+	// failures are not the cron-namespace ErrNoActiveProcess case that
+	// would want the key. Unknown errors fall through to ForSendError's
+	// generic "/new 重置" hint (was a near-identical literal here).
+	errMsg = usermsg.ForSendError(err, "")
 	// R242-GO-4 (#550): the shutdown-ctx swap is one helper, not a
 	// per-branch repeat. resolveReplyCtx returns ctx unchanged when no
 	// swap is needed (cheap), and a fresh NotifyCtx + cancel when ctx
