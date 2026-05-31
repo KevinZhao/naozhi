@@ -1928,6 +1928,7 @@ function selectSession(key, node) {
   lastEventTime = 0;
   lastRenderedEventTime = 0;
   oldestFetchedEventTime = 0;
+  _autoPageBackCount = 0; // reset the blank-page recovery budget per session
   mobileEnterChat();
   stopPreviewPolling();
   const activeCard = setActiveSessionCard(key, node);
@@ -2512,6 +2513,45 @@ async function fetchEvents(full) {
 //
 // Idempotent: calls bail out while a prior fetch is in flight.
 let _earlierLoading = false;
+
+// _autoPageBackCount bounds the frontend safety net for the "parallel agent
+// team ate my history" bug. The server's visible-aware initial read
+// (EventLastNVisibleCtx) already keeps the first page non-blank for local
+// sessions, but a few paths still can't guarantee it — remote nodes (their
+// reverse-RPC fetch predates the visible-aware read), disk-exhausted sessions,
+// or a precision gap where a visible-typed entry still renders to empty HTML.
+// When the rendered page is blank despite events existing, maybeAutoPageBack
+// transparently pages backward (reusing loadEarlierEvents + the
+// oldestFetchedEventTime cursor) up to AUTO_PAGEBACK_MAX times so the operator
+// sees real messages instead of the "该会话最近仅有 agent 活动" placeholder.
+// The counter resets on every session switch (selectSession).
+let _autoPageBackCount = 0;
+const AUTO_PAGEBACK_MAX = 3;
+
+// maybeAutoPageBack fires one bounded loadEarlierEvents when the events pane
+// rendered blank (every event was internal-filtered). Stops once a real bubble
+// appears, the cap is reached, or pagination reports it's exhausted. Safe to
+// call when no placeholder is showing — it no-ops unless the scroller has zero
+// `.event` children.
+function maybeAutoPageBack() {
+  const el = document.getElementById('events-scroll');
+  if (!el) return;
+  // A visible bubble already rendered — nothing to recover.
+  if (el.querySelector('.event')) { _autoPageBackCount = 0; return; }
+  if (_autoPageBackCount >= AUTO_PAGEBACK_MAX) return;
+  if (_earlierLoading) return;
+  if (!oldestFetchedEventTime) return; // no cursor → cannot page back
+  _autoPageBackCount++;
+  // loadEarlierEvents prepends older events and, when they include a visible
+  // bubble, the placeholder is removed by prependEvents. If the new page is
+  // still all-internal, chain another attempt (still bounded by the counter).
+  Promise.resolve(loadEarlierEvents()).then(() => {
+    const ev = document.getElementById('events-scroll');
+    if (ev && !ev.querySelector('.event')) maybeAutoPageBack();
+    else _autoPageBackCount = 0;
+  });
+}
+
 async function loadEarlierEvents() {
   if (_earlierLoading || !selectedKey) return;
   const el = document.getElementById('events-scroll');
@@ -2710,6 +2750,11 @@ function renderEvents(events) {
   if (!restoreScrollPos(selectedKey, selectedNode)) {
     stickEventsBottom();
   }
+  // Safety net: if the page rendered to the all-internal placeholder (no
+  // visible bubble) but events exist, transparently page back to real
+  // messages. Bounded by AUTO_PAGEBACK_MAX. Covers the paths the server-side
+  // visible-aware read can't (remote nodes, disk-exhausted sessions).
+  if (!html && events.length > 0) maybeAutoPageBack();
 }
 
 // trimEventsScroll bounds the live DOM (#398): drop oldest top children once the
@@ -9628,6 +9673,10 @@ const wsm = {
       if (!restoreScrollPos(selectedKey, selectedNode)) {
         stickEventsBottom();
       }
+      // Safety net: blank page despite events existing → page back to real
+      // messages (bounded). Twin of renderEvents' maybeAutoPageBack call;
+      // covers remote nodes whose subscribe predates the visible-aware read.
+      if (!html && events.length > 0) maybeAutoPageBack();
     } else {
       const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
       // Remove stale "no events yet" before processing incremental events

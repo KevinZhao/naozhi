@@ -206,6 +206,14 @@ func (p *Process) EventLastN(n int) []EventEntry {
 	return p.eventLog.LastN(n)
 }
 
+// EventLastNVisible returns a contiguous tail of the event log carrying at
+// least visibleTarget visible entries (or up to maxTotal entries, whichever
+// trips first). See EventLog.LastNVisible for the full contract — this is the
+// thin Process-level forwarder used by the dashboard initial-subscribe path.
+func (p *Process) EventLastNVisible(visibleTarget, maxTotal int) []EventEntry {
+	return p.eventLog.LastNVisible(visibleTarget, maxTotal)
+}
+
 // EventEntriesSince returns event log entries after the given unix ms timestamp.
 func (p *Process) EventEntriesSince(afterMS int64) []EventEntry {
 	return p.eventLog.EntriesSince(afterMS)
