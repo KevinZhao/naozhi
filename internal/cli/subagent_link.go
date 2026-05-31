@@ -93,6 +93,33 @@ type resolveJob struct {
 // step 5 cross-check.
 const staleAgentReuseSlack = 10 * time.Second
 
+// maxNamedLinkHistory caps how many resolved LinkInfo records the linker
+// retains per agent name in byName. byName is only consulted for same-name
+// respawn detection (Resolve step 7b), which needs nothing more than a small
+// window of recent FirstPromptIDs to spot a duplicate-name reuse. Long-lived
+// sessions that reinvoke the same agent type ("orchestrator", …) hundreds of
+// turns over would otherwise grow byName[name] without bound — one LinkInfo
+// per resolved task, leaking ~steady-state memory for the process lifetime.
+// Keeping the most recent N preserves the detection semantics (we still hold
+// the latest distinct promptIDs) while bounding the slice. R250531-PERF-4.
+const maxNamedLinkHistory = 32
+
+// appendNamedLink appends info to the byName slice for name, trimming the
+// slice to at most maxNamedLinkHistory most-recent entries. Trimming reuses
+// the tail in place (copy down) so the backing array does not grow unbounded
+// across the hundreds of appends a long session accumulates. Caller must hold
+// l.mu as a write lock.
+func (l *SubagentLinker) appendNamedLink(name string, info LinkInfo) {
+	cur := l.byName[name]
+	cur = append(cur, info)
+	if len(cur) > maxNamedLinkHistory {
+		// Drop the oldest entries; keep the newest maxNamedLinkHistory.
+		n := copy(cur, cur[len(cur)-maxNamedLinkHistory:])
+		cur = cur[:n]
+	}
+	l.byName[name] = cur
+}
+
 type SubagentLinker struct {
 	mu              sync.RWMutex
 	byTaskID        map[string]LinkInfo
@@ -649,7 +676,7 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 	if toolUseID != "" {
 		l.byToolUseID[toolUseID] = info
 	}
-	l.byName[name] = append(l.byName[name], info)
+	l.appendNamedLink(name, info)
 	l.fireCallbacksDropLock(taskID, toolUseID, info.InternalAgentID)
 	return info, true
 }
@@ -720,7 +747,7 @@ func (l *SubagentLinker) resolveByTaskIDFast(taskID, toolUseID, subagentDir, ses
 		l.byToolUseID[toolUseID] = info
 	}
 	if name != "" {
-		l.byName[name] = append(l.byName[name], info)
+		l.appendNamedLink(name, info)
 	}
 	l.fireCallbacksDropLock(taskID, toolUseID, info.InternalAgentID)
 	l.mu.Unlock()
@@ -789,7 +816,7 @@ func (l *SubagentLinker) SeedFromHistory(entries []EventEntry) {
 			}
 		}
 		if e.Subagent != "" {
-			l.byName[e.Subagent] = append(l.byName[e.Subagent], info)
+			l.appendNamedLink(e.Subagent, info)
 		}
 	}
 }
