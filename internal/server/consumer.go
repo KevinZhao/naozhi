@@ -20,6 +20,8 @@
 package server
 
 import (
+	"time"
+
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/wshub"
 )
@@ -67,4 +69,34 @@ type ScratchRouter interface {
 type SendRouter interface {
 	GetSession(key string) *session.ManagedSession
 	GetWorkspace(chatKey string) string
+}
+
+// HubBroadcaster names the broadcast / fan-out facet of *Hub — the
+// "push a frame to authenticated WS clients" surface that producers
+// (router SetOnChange, send paths, cron / sysession run-lifecycle hooks,
+// node register/deregister) reach for, distinct from the connection-pool
+// and subscribe/send machinery the rest of the Hub owns.
+//
+// R237-ARCH-10: the Hub mixes ConnPool / Broadcaster / SendPath /
+// AgentLinker concerns across 22+ fields. A field-level struct split is
+// gated by the wshub.go field-block lint contract (no field reordering),
+// so this is the additive first slice: a *named consumer interface* that
+// pins the Broadcaster facet's public method set. It lets the broadcast
+// surface be reasoned about, faked in tests, and eventually carved onto a
+// dedicated sub-struct without touching call sites today. *Hub satisfies
+// it structurally; consumer_contract_test.go guards the binding so a
+// signature drift breaks the build.
+//
+// Narrower per-consumer subsets already exist and remain the preferred
+// dependency for code that only needs part of this surface
+// (SessionsBus.Publish wraps BroadcastSessionsUpdate; scratch.Broadcaster
+// is the single-method nudge). HubBroadcaster is the full producer-facing
+// facet, not a replacement for those.
+type HubBroadcaster interface {
+	BroadcastSessionReady(key string)
+	BroadcastSessionsUpdate()
+	BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, trigger, sessionID string, fresh bool)
+	BroadcastCronRunEnded(jobID, runID, state string, startedAt, endedAt time.Time, durationMS int64, sessionID, errClass, errMsg, trigger string)
+	BroadcastDaemonRunStarted(name, runID, trigger string, startedAt time.Time)
+	BroadcastDaemonRunEnded(name, runID, state, errClass, trigger string, durationMS int64)
 }
