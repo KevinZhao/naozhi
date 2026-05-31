@@ -5262,6 +5262,68 @@ func TestDashboardJS_LoadEarlierFallbackWhenAllInternal(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_CronLiveAgentOnlyPlaceholder pins the cron-live sibling of
+// the LoadEarlierFallback bug. A "Daily Code Review" cron runs a parallel
+// agent team whose entire event stream is agent / task_* / tool_use — all in
+// INTERNAL_EVENT_TYPES. repaintCronLive used to blindly assign the
+// render output to innerHTML, so a fully-filtered batch left the #cron-live-events
+// container empty. CSS .cdl-events:empty::before then printed "暂无事件"
+// while the "已折叠 N 条更早事件" banner stayed visible — two contradictory
+// states at once. The fix mirrors appendEvents: when events exist but render
+// to nothing, show a placeholder instead of a blank pane.
+func TestDashboardJS_CronLiveAgentOnlyPlaceholder(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// 1) The placeholder constant must exist and carry the .cdl-agent-only
+	//    class that appendEventsToContainer keys off to clear it before
+	//    appending real events.
+	if !strings.Contains(js, "CRON_LIVE_AGENT_ONLY_HTML") {
+		t.Error("dashboard.js missing CRON_LIVE_AGENT_ONLY_HTML — cron live needs the same all-filtered fallback as the main transcript")
+	}
+	if !strings.Contains(js, "cdl-agent-only") {
+		t.Error("CRON_LIVE_AGENT_ONLY_HTML must carry the .cdl-agent-only class so appendEventsToContainer can detect and clear the placeholder before appending real events")
+	}
+
+	// 2) repaintCronLive must branch on the rendered html being empty while
+	//    events.length > 0 — the exact condition the bug reproduced under.
+	//    Scan the function body so unrelated edits don't trip the assertion.
+	rcIdx := strings.Index(js, "function repaintCronLive() {")
+	if rcIdx < 0 {
+		t.Fatal("could not locate repaintCronLive in dashboard.js")
+	}
+	rcEnd := strings.Index(js[rcIdx:], "\n}\n")
+	if rcEnd < 0 || rcEnd > 4096 {
+		t.Fatalf("could not locate repaintCronLive end brace within 4 KiB (endIdx=%d)", rcEnd)
+	}
+	body := js[rcIdx : rcIdx+rcEnd]
+	if !strings.Contains(body, "else if (events.length > 0)") {
+		t.Error("repaintCronLive must render the placeholder when events exist but every one was internal-filtered — otherwise CSS :empty::before contradicts the truncated banner")
+	}
+	if !strings.Contains(body, "CRON_LIVE_AGENT_ONLY_HTML") {
+		t.Error("repaintCronLive must assign CRON_LIVE_AGENT_ONLY_HTML in its all-filtered branch")
+	}
+
+	// 3) appendEventsToContainer must clear a lingering placeholder before
+	//    appending real events, so the two never coexist.
+	apIdx := strings.Index(js, "function appendEventsToContainer(el, events) {")
+	if apIdx < 0 {
+		t.Fatal("could not locate appendEventsToContainer in dashboard.js")
+	}
+	apEnd := strings.Index(js[apIdx:], "\n}\n")
+	if apEnd < 0 || apEnd > 4096 {
+		t.Fatalf("could not locate appendEventsToContainer end brace within 4 KiB (endIdx=%d)", apEnd)
+	}
+	apBody := js[apIdx : apIdx+apEnd]
+	if !strings.Contains(apBody, ".cdl-agent-only") {
+		t.Error("appendEventsToContainer must clear the .cdl-agent-only placeholder before appending real events so placeholder + events never coexist")
+	}
+}
+
 // TestDashboardJS_SandboxedBlobRender pins the sandbox-render client contract.
 // Originally written for HTML preview; now covers SVG too since both file
 // types share renderSandboxedBlob — they're the only workspace document types
