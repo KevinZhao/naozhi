@@ -11,7 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1107,8 +1107,8 @@ func (p *Persister) collectFlushCandidates(now time.Time) []flushCandidate {
 		cands = append(cands, flushCandidate{key: k, w: w})
 	}
 	if len(cands) > 1 {
-		sort.Slice(cands, func(i, j int) bool {
-			return cands[i].w.firstDirtyAt.Before(cands[j].w.firstDirtyAt)
+		slices.SortFunc(cands, func(a, b flushCandidate) int {
+			return a.w.firstDirtyAt.Compare(b.w.firstDirtyAt)
 		})
 	}
 	// Stash the (possibly grown) backing array back so the next tick
