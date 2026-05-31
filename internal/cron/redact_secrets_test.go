@@ -130,6 +130,26 @@ func TestRedactSecretsInResult_NewPrefixes(t *testing.T) {
 	}
 }
 
+// TestSanitiseRunErrMsg_RedactsSecrets is the integration coverage for the
+// error path: sanitiseRunErrMsg must scrub well-known secret prefixes so a
+// leaked token in an error string (LastError) never lands on disk or the
+// dashboard WS broadcast. [R20260531-SEC-8].
+func TestSanitiseRunErrMsg_RedactsSecrets(t *testing.T) {
+	cases := []string{
+		"exec failed: auth header sk-ant-api03-abcdef0123456789 rejected",
+		"git push denied with ghp_abcdef0123456789 token",
+	}
+	for _, in := range cases {
+		got := sanitiseRunErrMsg(in)
+		if strings.Contains(got, "sk-ant-") || strings.Contains(got, "ghp_") {
+			t.Errorf("sanitiseRunErrMsg left token intact for %q → %q", in, got)
+		}
+		if !strings.Contains(got, "[REDACTED]") {
+			t.Errorf("sanitiseRunErrMsg did not insert [REDACTED] for %q → %q", in, got)
+		}
+	}
+}
+
 // TestRedactSecretsInResult_Negative ensures benign Claude output is
 // returned aliased (no allocation, no spurious matches). R234-SEC-7
 // (#1006).
