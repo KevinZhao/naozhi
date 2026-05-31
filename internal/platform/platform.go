@@ -56,14 +56,24 @@ type Platform interface {
 	MaxReplyLength() int
 }
 
+// InterimMessageCapable is an optional capability: platforms that can deliver
+// interim notifications (e.g. "thinking...", "new session") before the final
+// reply implement it. Platforms like WeChat iLink use single-use reply tokens
+// and deliberately omit it.
+//
+// R214-ARCH-2 (#402): promoted from an inline anonymous interface to a named
+// capability so it discovers through the same AsCapability[T] discriminator
+// (R239-ARCH-H) as Reactor / QuestionCardSender — one capability-extension
+// pattern instead of a bespoke per-capability type-assert.
+type InterimMessageCapable interface {
+	SupportsInterimMessages() bool
+}
+
 // SupportsInterimMessages reports whether a platform can handle interim
-// notifications (e.g. "thinking...", "new session") before the final reply.
-// Platforms like WeChat iLink use single-use reply tokens and should return false.
+// notifications before the final reply. Defaults to false (opt-in) for
+// platforms that do not implement InterimMessageCapable.
 func SupportsInterimMessages(p Platform) bool {
-	type interim interface {
-		SupportsInterimMessages() bool
-	}
-	if i, ok := p.(interim); ok {
+	if i, ok := AsCapability[InterimMessageCapable](p); ok {
 		return i.SupportsInterimMessages()
 	}
 	return false // default: not supported (opt-in)
