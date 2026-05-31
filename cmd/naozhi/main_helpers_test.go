@@ -67,17 +67,17 @@ func TestMain_DispatchesDiagnosticSubcommands(t *testing.T) {
 // that collapses or renames the wiring would silently break those
 // commands; this test catches it.
 //
-// Reading dashboard.go source instead of reflection keeps the
+// Reading routes.go source instead of reflection keeps the
 // contract narrow: a caller that moves the wiring elsewhere just
 // needs to update the test's expected file/token pair.
 func TestDashboardWiring_RegistersPprof(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("../../internal/server/dashboard.go")
+	data, err := os.ReadFile("../../internal/server/routes.go")
 	if err != nil {
-		t.Fatalf("read dashboard.go: %v", err)
+		t.Fatalf("read routes.go: %v", err)
 	}
 	src := string(data)
 	if !strings.Contains(src, "s.registerPprof()") {
-		t.Error("internal/server/dashboard.go must call s.registerPprof() during server startup — docs/ops/pprof.md depends on it")
+		t.Error("internal/server/routes.go must call s.registerPprof() during server startup — docs/ops/pprof.md depends on it")
 	}
 }

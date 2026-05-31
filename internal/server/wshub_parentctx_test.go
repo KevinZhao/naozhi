@@ -178,12 +178,12 @@ func TestServer_AppCtxWiredToHub(t *testing.T) {
 		t.Error("server.go: Server struct must declare appCtx context.Context field")
 	}
 
-	dashSrc, err := os.ReadFile(filepath.Join(dir, "dashboard.go"))
+	dashSrc, err := os.ReadFile(filepath.Join(dir, "routes.go"))
 	if err != nil {
-		t.Fatalf("read dashboard.go: %v", err)
+		t.Fatalf("read routes.go: %v", err)
 	}
 	if !strings.Contains(string(dashSrc), "ParentCtx: s.appCtx") {
-		t.Error("dashboard.go: registerDashboard must forward s.appCtx into " +
+		t.Error("routes.go: registerDashboard must forward s.appCtx into " +
 			"HubOptions.ParentCtx (CTX1 wiring)")
 	}
 }

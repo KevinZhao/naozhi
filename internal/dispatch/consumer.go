@@ -23,6 +23,7 @@ package dispatch
 import (
 	"context"
 
+	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -40,4 +41,28 @@ type SessionRouter interface {
 	SetWorkspace(chatKey, path string)
 	InterruptSessionViaControl(key string) session.InterruptOutcome
 	NotifyIdle()
+}
+
+// ProjectStore is the subset of *project.Manager that Dispatcher's slash-
+// command handlers use (/project, /cd, /new project-echo). Declared here
+// (ARCH-DISP-1, #457) so the slash-command tests can inject a fake binding
+// store without standing up a real project.Manager (projects.root dir +
+// on-disk binding file). *project.Manager satisfies this implicitly via
+// structural typing; internal/project/contract_test.go (or the
+// compile-time pin in NewDispatcher) catches signature drift.
+//
+// Method list derived from `grep 'd\.projectMgr\.' internal/dispatch/`
+// (5 distinct methods). Adding a new projectMgr call from dispatch
+// requires extending this interface, keeping growth visible in review.
+//
+// Return types stay *project.Project / []*project.Project — the value
+// type, not the manager — so the handlers keep reading proj.Name /
+// proj.Path. Mirrors SessionRouter returning session.AgentOpts: the
+// decoupling that matters is the manager method set, not the leaf value.
+type ProjectStore interface {
+	Get(name string) *project.Project
+	All() []*project.Project
+	ProjectForChat(platform, chatType, chatID string) *project.Project
+	BindChat(projectName, platform, chatType, chatID string) error
+	UnbindAllChat(platform, chatType, chatID string) error
 }
