@@ -92,6 +92,24 @@ func TestBroadcastSessionSystemEvent_SkipsNonSubscribers(t *testing.T) {
 	}
 }
 
+// TestBroadcastSessionSystemEvent_NoSubscribersNoop verifies the
+// snapshot-before-marshal fast path: a failure on a session nobody is watching
+// must not deliver anything (and must not panic). The single connected client
+// is subscribed to a DIFFERENT key, so the target key has zero subscribers.
+func TestBroadcastSessionSystemEvent_NoSubscribersNoop(t *testing.T) {
+	hub, _ := newTestHub("tok")
+	t.Cleanup(hub.Shutdown)
+
+	c, out := newCapturedClient(t, hub)
+	registerSub(hub, c, "feishu:p2p:elsewhere")
+
+	hub.broadcastSessionSystemEvent("node1:p2p:unwatched", "发送失败：x")
+
+	if _, ok := recvMsg(t, out); ok {
+		t.Fatal("a session with no subscribers should deliver nothing")
+	}
+}
+
 // TestBroadcastSessionSystemEvent_EmptyArgsNoop guards the early return so an
 // empty key or summary cannot emit a malformed frame.
 func TestBroadcastSessionSystemEvent_EmptyArgsNoop(t *testing.T) {

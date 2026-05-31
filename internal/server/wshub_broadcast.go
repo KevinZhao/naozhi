@@ -334,15 +334,12 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 	if key == "" || summary == "" {
 		return
 	}
-	ev := cli.EventEntry{
-		Time:    time.Now().UnixMilli(),
-		Type:    "system",
-		Summary: summary,
-	}
-	data, err := marshalPooled(node.ServerMsg{Type: "event", Key: key, Event: &ev})
-	if err != nil {
-		return
-	}
+	// Snapshot the session's subscribers BEFORE marshalling. Remote/background
+	// sessions frequently have nobody watching when a send/interrupt fails —
+	// in that case there is nothing to deliver, so paying the marshalPooled
+	// reflect cost + a pooled-buffer round trip would be pure waste. The
+	// subscriber scan is cheap (one map lookup per authenticated client) and
+	// the common no-subscriber case now returns before any allocation.
 	snapPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
 	snap := (*snapPtr)[:0]
 	h.mu.RLock()
@@ -364,9 +361,19 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 	}
 	h.mu.RUnlock()
 
-	for _, c := range snap {
-		c.SendRaw(data)
+	if len(snap) > 0 {
+		ev := cli.EventEntry{
+			Time:    time.Now().UnixMilli(),
+			Type:    "system",
+			Summary: summary,
+		}
+		if data, err := marshalPooled(node.ServerMsg{Type: "event", Key: key, Event: &ev}); err == nil {
+			for _, c := range snap {
+				c.SendRaw(data)
+			}
+		}
 	}
+
 	for i := range snap {
 		snap[i] = nil
 	}
