@@ -344,3 +344,15 @@
 - [R20260530-ARCH-cosmetic-1] cron_router_adapter init() 手工枚举 8 个 enum 序数等式不可扩展(planner 落地时应提升为共享 leaf enum) — cmd/naozhi/cron_router_adapter.go:41
 - [R20260530-ARCH-cosmetic-2] main() 仍是 580 行 god-function(corpus R260528-ARCH-4 称 1300 行已 stale,可重核数字) — cmd/naozhi/main.go:45
 - [R20260530-ARCH-cosmetic-3] internal/server 仍 12.7K LOC/56 文件单包(corpus R260528-ARCH-6 称 21K/200 文件已 stale,提取进行中) — internal/server
+
+## cron-cr-20260531
+
+- [R250531-GO-3] releaseRun 死代码:被 runinflight_test.go 引用但生产路径已被 runFinalizer 取代 — internal/cron/runinflight.go:377
+- [R250531-GO-6] redactPathsBuilderPool 注释误述 strings.Builder.Reset() 语义(实际保留 backing buffer) — internal/cron/scheduler_finish.go:655
+- [R250531-CR-10] appendMarshalBufPool 与 redactPathsBuilderPool 两处 pool defer 的 Reset 语义注释不一致 — internal/cron/runstore.go:352
+- [R250531-PERF-13] notifySubscribers 有订阅者时每次 Append 取 subMu.RLock(已有 subCount==0 快路径) — internal/cli/eventlog_subscribe.go:95
+- [R250531-PERF-15] SinkFor batchJob.Key 按值复制入队列(key 串 ≤64B) — internal/eventlog/persist/persister.go:489
+- [R250531-ARCH-03] sysession 对 internal/session 仅半解耦(cli 已镜像 session 未镜像) — internal/sysession/auto_titler.go:14
+- [R250531-ARCH-05] registry.Typed[T] 已建但 0 生产采用(按迁移策略为有意) — internal/registry/registry.go
+- [R250531-SEC-8] feishu VerificationToken 比较后 raw token 留在 GC heap(理论内存泄露) — internal/platform/feishu/transport_hook.go:117
+- [R250531-SEC-10] APIError.Error() 的 e.Msg 用 %q 而非 SanitizeForLog(已防日志注入,仅一致性) — internal/platform/feishu/feishu.go:128

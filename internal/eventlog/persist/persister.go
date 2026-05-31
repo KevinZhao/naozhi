@@ -1201,6 +1201,7 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	// cursor on the underlying slice).
 	encBuf := recordBufPool.Get().(*bytes.Buffer)
 	defer putRecordBuf(encBuf)
+	var written int
 	for _, e := range job.Entries {
 		rec := schema.NewEntry(w.nextSeq, e.JSON)
 		encBuf.Reset()
@@ -1241,8 +1242,11 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 		w.bytes += n
 		w.nextSeq++
 		w.entriesSinceIdxWrite++
-		p.writtenCnt.Add(1)
-		p.opts.Observer.OnWrite(1)
+		written++
+	}
+	if written > 0 {
+		p.writtenCnt.Add(int64(written))
+		p.opts.Observer.OnWrite(written)
 	}
 	if !w.dirty {
 		w.dirty = true
