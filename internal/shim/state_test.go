@@ -289,9 +289,33 @@ func TestRemoveStateFile(t *testing.T) {
 		t.Error("file should have been removed")
 	}
 
-	// Calling on nonexistent must not panic
+	// Calling on nonexistent must not panic (and must NOT attempt a dir
+	// fsync, since nothing was removed — #406 symmetry). The missing-parent
+	// case exercises the os.Remove-error early return.
 	RemoveStateFile(path)
 	RemoveStateFile("/nonexistent/never/existed.json")
+}
+
+// TestRemoveStateFile_FsyncsDir checks the #406 durability-symmetry fix: a
+// state file written via the atomic write path is removed cleanly and the
+// removal does not error even though RemoveStateFile now fsyncs the parent
+// directory. SyncDir degrades gracefully on filesystems that reject dir
+// fsync (tmpfs/FUSE), so this must pass regardless of the temp-dir backend.
+func TestRemoveStateFile_FsyncsDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shim-abc.json")
+
+	if err := WriteStateFile(path, State{ShimPID: 1, Socket: "/tmp/s.sock", AuthToken: "dA==", Key: "k"}); err != nil {
+		t.Fatalf("WriteStateFile: %v", err)
+	}
+	RemoveStateFile(path)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("state file should be gone after RemoveStateFile; stat err = %v", err)
+	}
+	// Parent dir must still be a usable directory afterwards.
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		t.Fatalf("parent dir unusable after removal: err=%v", err)
+	}
 }
 
 func TestGenerateToken(t *testing.T) {

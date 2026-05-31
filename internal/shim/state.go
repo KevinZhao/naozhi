@@ -133,8 +133,18 @@ func ReadStateFile(path string) (State, error) {
 }
 
 // RemoveStateFile removes the state file and ignores not-found errors.
+//
+// The write path (WriteStateFile → osutil.WriteFileAtomic) fsyncs the parent
+// directory so a freshly-written state survives a crash; the removal path must
+// be symmetric (#406). Without the directory fsync, an unlink that purges a
+// stale/zombie record could be lost on power loss, so restart discovery would
+// re-find the same dead shim. fsync the parent after a successful removal;
+// osutil.SyncDir degrades gracefully on EPERM/EINVAL (FUSE/older fs / tmpfs).
 func RemoveStateFile(path string) {
-	_ = os.Remove(path)
+	if err := os.Remove(path); err != nil {
+		return // not-found or other error: nothing durably changed to fsync
+	}
+	_ = osutil.SyncDir(filepath.Dir(path))
 }
 
 // GenerateToken creates a cryptographically random token for shim authentication.
