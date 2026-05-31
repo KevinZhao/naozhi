@@ -61,7 +61,8 @@ type secretPrefix struct {
 // Covered providers: Anthropic (`sk-ant-`), OpenAI project + legacy
 // (`sk-proj-` / `sk-`), GitHub PAT/OAuth (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`),
 // GitLab (`glpat-`), AWS access keys (`AKIA`/`ASIA`), Slack
-// (`xoxb-`/`xoxp-`/`xoxa-`/`xoxs-`), HuggingFace (`hf_`), npm (`npm_`).
+// (`xoxb-`/`xoxp-`/`xoxa-`/`xoxs-`), HuggingFace (`hf_`), npm (`npm_`),
+// GCP / Google OAuth access tokens (`ya29.`).
 var secretPrefixes = []secretPrefix{
 	// Anthropic API keys (`sk-ant-…`). The post-prefix tail is variable
 	// length and may include hyphens, so minTail is generous.
@@ -96,6 +97,10 @@ var secretPrefixes = []secretPrefix{
 	{prefix: "xoxs-", minTail: 16},
 	// HuggingFace tokens (`hf_…`).
 	{prefix: "hf_", minTail: 16},
+	// GCP / Google OAuth access tokens (`ya29.…`). The `.` is part of the
+	// prefix; the base64url body that follows (alphanumerics + `-`/`_`) is
+	// consumed by isSecretTokenByte as the tail.
+	{prefix: "ya29.", minTail: 16},
 }
 
 // secretRedactedMarker replaces matched secret bytes. Distinct from
@@ -177,10 +182,11 @@ func isSecretTokenByte(b byte) bool {
 // skip the full prefix walk + string Builder allocation.
 func mayContainSecretPrefix(s string) bool {
 	// First-byte set: 's' (sk-…), 'g' (ghp_/gho_/…/glpat-), 'A' (AKIA/ASIA),
-	// 'x' (xoxb-/…), 'h' (hf_), 'n' (npm_). Keep in sync with secretPrefixes.
+	// 'x' (xoxb-/…), 'h' (hf_), 'n' (npm_), 'y' (ya29.). Keep in sync with
+	// secretPrefixes.
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
-		case 's', 'g', 'A', 'x', 'h', 'n':
+		case 's', 'g', 'A', 'x', 'h', 'n', 'y':
 			return true
 		}
 	}

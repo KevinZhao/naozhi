@@ -552,6 +552,12 @@ func buildServer(opts ServerOptions) *Server {
 }
 
 // Start registers routes and begins serving.
+// listenTCP is the listener factory Start uses to bind its socket. It is a
+// package var (defaulting to net.Listen) purely so tests can inject a
+// listener whose Accept fails post-bind, exercising the srv.Serve-error
+// drain path (R20260531-GO-001) without racing a real socket close.
+var listenTCP = net.Listen
+
 func (s *Server) Start(ctx context.Context) error {
 	// R030056-GO-002: Start has several early-return error paths (dispatch
 	// wireup, platform Start, net.Listen) that run BEFORE the shutdown
@@ -645,12 +651,26 @@ func (s *Server) Start(ctx context.Context) error {
 	// restart loop.
 	s.mux.HandleFunc("GET /livez", s.healthH.handleLivez)
 	s.mux.HandleFunc("GET /readyz", s.healthH.handleReadyz)
-	s.appCtx = ctx
-	s.discoveryH.SetAppContext(ctx)
+	// R20260531-GO-001: derive a cancelable child of the caller ctx and use
+	// it for every long-lived background loop AND the shutdown goroutine
+	// below. The shutdown goroutine is the sole closer of shutdownComplete
+	// and blocks on serveCtx.Done(); on a normal SIGTERM the parent ctx
+	// cancels (propagating to serveCtx), and on a srv.Serve error the
+	// Serve-error path cancels serveCtx directly. Both routes wake the loops
+	// (so discoveryCache.Wait() etc. return) and the shutdown goroutine,
+	// which then closes shutdownComplete. Without a single cancel source the
+	// loops would stay alive on the Serve-error path and the goroutine's
+	// discoveryCache.Wait() would block forever, deadlocking any reader of
+	// ShutdownComplete().
+	serveCtx, serveCancel := context.WithCancel(ctx)
+	defer serveCancel()
+
+	s.appCtx = serveCtx
+	s.discoveryH.SetAppContext(serveCtx)
 	s.registerDashboard()
-	s.nodeCache.StartLoop(ctx)
-	s.discoveryCache.startLoop(ctx)
-	s.startProjectScanLoop(ctx)
+	s.nodeCache.StartLoop(serveCtx)
+	s.discoveryCache.startLoop(serveCtx)
+	s.startProjectScanLoop(serveCtx)
 	// Warn if we're serving a token-protected dashboard over plaintext with no
 	// trusted proxy in front — Bearer tokens and auth cookies would traverse
 	// the wire in the clear, subject to passive sniffing on shared networks.
@@ -709,7 +729,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	slog.Info("server starting", "addr", s.addr)
 
-	ln, err := net.Listen("tcp", s.addr)
+	ln, err := listenTCP("tcp", s.addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.addr, err)
 	}
@@ -747,10 +767,10 @@ func (s *Server) Start(ctx context.Context) error {
 	// fsync churn modest under burst close-many sessions UX. Prune
 	// drops entries older than 14 days (= 2× the 7-day history window)
 	// so the cap pressure described in NewRetiredStoreWithCap rarely
-	// matters on a normal operator. Stops via ctx.Done in the shutdown
+	// matters on a normal operator. Stops via serveCtx.Done in the shutdown
 	// goroutine below.
 	if s.sessionH != nil && s.sessionH.RetiredStorePresent() {
-		go s.runRetiredStoreFlusher(ctx)
+		go s.runRetiredStoreFlusher(serveCtx)
 	}
 
 	// Reuse the channel allocated at construction so ShutdownComplete() (which
@@ -762,7 +782,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// suppress the early-return defer above so close() happens exactly once.
 	shutdownClosed = true
 	go func() {
-		<-ctx.Done()
+		<-serveCtx.Done()
 		slog.Info("shutting down server")
 
 		// Shutdown WebSocket hub
@@ -815,16 +835,22 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	err = srv.Serve(ln)
-	// If ListenAndServe failed for a non-shutdown reason (e.g. port conflict),
-	// return immediately instead of blocking — the shutdown goroutine is still
-	// waiting on ctx.Done and shutdownComplete will never close.
+	// If Serve failed for a non-shutdown reason (e.g. accept loop failure),
+	// the parent ctx may never be cancelled — the shutdown goroutine would
+	// then block forever on serveCtx.Done() and shutdownComplete would never
+	// close, deadlocking any caller that reads ShutdownComplete(). Cancel
+	// serveCtx here so the goroutine wakes, runs the drain sequence, and
+	// closes shutdownComplete; then wait for it before returning the error.
+	// R20260531-GO-001.
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		serveCancel()
+		<-shutdownComplete
 		return err
 	}
 	// Wait for the shutdown goroutine to finish draining connections.
 	select {
 	case <-shutdownComplete:
-	case <-ctx.Done():
+	case <-serveCtx.Done():
 		<-shutdownComplete
 	}
 	return err

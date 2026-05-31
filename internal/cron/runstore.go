@@ -209,6 +209,16 @@ type recentCacheEntry struct {
 	// cache shows we're well under keepCount. Reset to 0 by Append after
 	// calling trimJobLocked. R232-PERF-8.
 	appendsSinceTrim int
+	// runIDs is the set of RunIDs currently present in the ring. cacheHeadPush
+	// consults it for an O(1) duplicate check instead of an O(count) linear
+	// ring scan on every Append (#1517). It is maintained in lockstep with the
+	// ring under entry.mu: ringSeed rebuilds it, ringPushHead inserts the new
+	// RunID (and deletes the evicted oldest when the ring is full). The dedup
+	// is needed because a warmCache ringSeed can interleave between an Append's
+	// WriteFileAtomic and its matching cacheHeadPush (R20260527122801-PERF-4 /
+	// #1335), seeding a RunID ahead of its own late push. nil until the first
+	// ringSeed allocates it.
+	runIDs map[string]struct{}
 }
 
 // ringCapZeroWarnOnce ensures the cap=0 self-heal branch in ringRead /
@@ -286,9 +296,20 @@ func (e *recentCacheEntry) ringPushHead(summary CronRunSummary) {
 		// regardless of count.
 		e.ring = e.ring[:c]
 	}
+	if e.count == c {
+		// Ring full: the slot we're about to overwrite holds the oldest
+		// entry, which is being evicted. Drop it from the RunID set so the
+		// O(1) dedup index (#1517) stays in lockstep with the ring.
+		if e.runIDs != nil {
+			delete(e.runIDs, e.ring[e.head].RunID)
+		}
+	}
 	e.ring[e.head] = summary
 	if e.count < c {
 		e.count++
+	}
+	if e.runIDs != nil {
+		e.runIDs[summary.RunID] = struct{}{}
 	}
 }
 
@@ -313,6 +334,17 @@ func (e *recentCacheEntry) ringSeed(rows []CronRunSummary, keepCount int) {
 	copy(e.ring[:n], rows[:n])
 	e.head = 0
 	e.count = n
+	// Rebuild the RunID dedup index (#1517) from the freshly-seeded rows so
+	// the next cacheHeadPush can do an O(1) membership test against this
+	// snapshot instead of an O(count) linear scan.
+	if e.runIDs == nil {
+		e.runIDs = make(map[string]struct{}, n)
+	} else {
+		clear(e.runIDs)
+	}
+	for i := 0; i < n; i++ {
+		e.runIDs[e.ring[i].RunID] = struct{}{}
+	}
 }
 
 // User-configurable defaults (DefaultRunsKeepCount / DefaultRunsKeepWindow)
@@ -973,15 +1005,19 @@ func (s *runStore) cacheHeadPush(jobID string, summary CronRunSummary) {
 	// such that warmCache reads the freshly-renamed file(s) from disk and
 	// seeds them into the ring BEFORE the matching cacheHeadPush re-acquires
 	// the lock to push. Without dedup, that interleaving would land the
-	// same RunID twice in the ring. We scan the ring for an existing
-	// matching RunID — head-only dedup is insufficient because warmCache
-	// can seed multiple concurrently-written rows ahead of any of their
-	// late-arriving pushes (e.g. ring [Y,X], then X's late push would
-	// otherwise dup since head==Y). Cost is O(count) but the interleave
-	// is rare and the ring is small (default keepCount=200); the dedup
-	// fires only on the contended path, so amortised cost stays flat.
-	for i := 0; i < entry.count; i++ {
-		if entry.ringRead(i).RunID == summary.RunID {
+	// same RunID twice in the ring. Head-only dedup is insufficient because
+	// warmCache can seed multiple concurrently-written rows ahead of any of
+	// their late-arriving pushes (e.g. ring [Y,X], then X's late push would
+	// otherwise dup since head==Y).
+	//
+	// #1517: the dedup is now an O(1) map membership test against entry.runIDs
+	// (maintained in lockstep with the ring by ringSeed / ringPushHead) instead
+	// of the previous O(count) linear ring scan on every Append. Steady state
+	// (1Hz × N jobs) drops from O(count) string comparisons per push to a
+	// single map lookup. The runIDs index is allocated by ringSeed, which a
+	// warm cache always ran first; guard against a nil index defensively.
+	if entry.runIDs != nil {
+		if _, dup := entry.runIDs[summary.RunID]; dup {
 			return
 		}
 	}
