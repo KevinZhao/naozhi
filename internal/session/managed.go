@@ -157,10 +157,9 @@ type processIface interface {
 	// live on ProcessSender (R242-GO-12, first facet split). Embed it
 	// rather than duplicate.
 	ProcessSender
-	Alive() bool
-	IsRunning() bool
-	Close()
-	Kill()
+	// Alive / IsRunning / Close / Kill live on ProcessLifecycle (R176-ARCH-M2
+	// facet split, #430). Embed it rather than duplicate.
+	ProcessLifecycle
 	// Dashboard introspection.
 	//
 	// GetSessionID / GetState are flagged as unidiomatic by R219-CR-9
@@ -223,6 +222,14 @@ type processIface interface {
 // follow this same pattern — define the narrow facet, prove subset by
 // satisfaction var, narrow consumers one site at a time.
 var _ ProcessEventReader = (processIface)(nil)
+
+// Compile-time guarantee that ProcessLifecycle is a strict subset of
+// processIface (R176-ARCH-M2 facet split, #430). Mirrors the
+// ProcessEventReader pin above so a future edit that drops one of
+// Alive/IsRunning/Close/Kill from processIface — or changes a signature on
+// either side — fails the package build instead of silently desyncing the
+// facet from the god-interface.
+var _ ProcessLifecycle = (processIface)(nil)
 
 // processBox wraps processIface for use with atomic.Pointer (which
 // requires a concrete type).
