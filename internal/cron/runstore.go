@@ -592,6 +592,21 @@ func (s *runStore) ensureJobDir(jobID, dir string) error {
 	if _, ok := s.jobDirEnsured.Load(jobID); ok {
 		return nil
 	}
+	// R250531-SEC-4 (#1504): mirror the runs/ root Lstat guard (newRunStore,
+	// line ~502) on the per-job subdir. MkdirAll does NOT error when dir
+	// already exists as a symlink to a directory, so a local attacker who
+	// pre-created runs/<hexJobID> as a symlink to /tmp/evil/ before the first
+	// Append would have this job's run records land outside s.root. The
+	// filepath.Rel guard at the call site is a pure path check that does not
+	// follow on-disk symlinks, so it cannot catch this. Lstat reports the
+	// link itself; reject anything that exists but is not a plain directory.
+	if fi, err := os.Lstat(dir); err == nil {
+		if fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir() {
+			slog.Error("cron run: per-job runs dir is a symlink or non-directory; refusing append",
+				"dir", dir, "mode", fi.Mode().String(), "job_id", jobID)
+			return fmt.Errorf("cron run: per-job dir %q is not a plain directory", dir)
+		}
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		// 不写入 cache：让下次 Append 重试。
 		return err

@@ -52,6 +52,17 @@ var ErrJobPaused = errors.New("cron: job is paused")
 // HTTP 422 (vs 400) instead of relying on string matching.
 var ErrJobNoPrompt = errors.New("cron: job has no prompt")
 
+// ErrPromptAlreadySet is returned by SetJobPrompt when the target job already
+// has a non-empty prompt. SetJobPrompt only auto-fills the FIRST prompt on a
+// dashboard-created (paused, empty-prompt) job; it deliberately does NOT
+// overwrite an existing prompt — that is UpdateJob's job. Previously this was
+// a silent `return nil`, so a caller intending to edit an existing prompt got
+// a 200 with no change (R250531-CR-8 / #1503). The sentinel makes the no-op
+// observable: IM auto-save callers treat it as benign (the prompt was already
+// captured on a prior turn), while any caller that actually meant to mutate
+// should route through UpdateJob and can map this to HTTP 409 Conflict.
+var ErrPromptAlreadySet = errors.New("cron: job already has a prompt; use UpdateJob to change it")
+
 // ErrPersistFailed is returned by mutation APIs (AddJob/DeleteJob/Update/
 // Pause/Resume/SetJobPrompt) when the post-mutation JSON serialisation fails.
 // The in-memory state has already been changed and cannot be rolled back —

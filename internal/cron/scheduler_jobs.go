@@ -1080,8 +1080,15 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	return &result, nil
 }
 
-// SetJobPrompt updates a job's prompt. If the job was paused with an empty
+// SetJobPrompt sets a job's FIRST prompt. If the job was paused with an empty
 // prompt (created from dashboard), it also unpauses and registers the schedule.
+//
+// Contract: this is an auto-fill-once operation, NOT a general update. If the
+// job already has a non-empty prompt it returns ErrPromptAlreadySet and does
+// not mutate anything — callers that want to CHANGE an existing prompt must use
+// UpdateJob. The sentinel replaces the previous silent `return nil` (#1503) so
+// the no-op is observable; IM auto-save paths treat ErrPromptAlreadySet as
+// benign, HTTP/dashboard callers may map it to 409 Conflict.
 //
 // Both IM (Hub.runTurn / runTurnPassthrough) and dashboard wshub paths land
 // here. The dashboard already validates via server.validateCronPrompt at the
@@ -1116,7 +1123,13 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	}
 	if j.Prompt != "" {
 		s.mu.Unlock()
-		return nil // already has a prompt, no-op
+		// R250531-CR-8 (#1503): the prompt is already set. SetJobPrompt only
+		// auto-fills the first prompt; it never overwrites. Previously this
+		// silently returned nil (200 OK, no change), which misled any caller
+		// trying to edit an existing prompt. Return a sentinel so the no-op is
+		// observable — IM auto-save callers treat it as benign, dashboard /
+		// API callers can map it to 409 and route real edits through UpdateJob.
+		return ErrPromptAlreadySet
 	}
 
 	j.Prompt = prompt

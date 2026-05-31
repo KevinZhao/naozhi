@@ -1,8 +1,10 @@
 package sysession
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -767,5 +769,126 @@ func TestAutoTitler_BatchPerTickClamp(t *testing.T) {
 				t.Fatalf("batchPerTick = %d, want %d", a.batchPerTick, tc.want)
 			}
 		})
+	}
+}
+
+// TestAutoTitler_MistypedKnobWarnsAndKeepsDefault asserts R250531-ARCH-01
+// (#1505): a daemon knob supplied with the wrong dynamic type (e.g. int64
+// vs the expected int) must NOT silently retain the default — it logs a
+// slog.Warn naming the key + want/got types so the misconfiguration is
+// diagnosable from logs. The default value is still retained (we never
+// coerce an attacker/operator-controlled wrong type).
+func TestAutoTitler_MistypedKnobWarnsAndKeepsDefault(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     DaemonConfig
+		wantKey string // substring expected in the warn log
+	}{
+		{
+			name:    "min_user_turns int64 instead of int",
+			cfg:     DaemonConfig{"min_user_turns": int64(7)},
+			wantKey: "min_user_turns",
+		},
+		{
+			name:    "batch_per_tick float64 instead of int",
+			cfg:     DaemonConfig{"batch_per_tick": float64(50)},
+			wantKey: "batch_per_tick",
+		},
+		{
+			name:    "min_rename_interval int instead of Duration",
+			cfg:     DaemonConfig{"min_rename_interval": 30},
+			wantKey: "min_rename_interval",
+		},
+		{
+			name:    "include_group_chat string instead of bool",
+			cfg:     DaemonConfig{"include_group_chat": "true"},
+			wantKey: "include_group_chat",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			defer slog.SetDefault(prev)
+
+			d, err := newAutoTitler(DaemonDeps{
+				Router: wrapRouter(newFakeRouter()),
+				Runner: &capturingRunner{},
+			})
+			if err != nil {
+				t.Fatalf("newAutoTitler: %v", err)
+			}
+			a := d.(*autoTitler)
+
+			// Snapshot defaults so we can assert the mistyped value did
+			// not get applied.
+			gotMinTurns := a.minUserTurns
+			gotInterval := a.minRenameInterval
+			gotBatch := a.batchPerTick
+			gotGroup := a.includeGroupChat
+
+			if err := a.Configure(tc.cfg); err != nil {
+				t.Fatalf("Configure: %v", err)
+			}
+
+			if a.minUserTurns != gotMinTurns || a.minRenameInterval != gotInterval ||
+				a.batchPerTick != gotBatch || a.includeGroupChat != gotGroup {
+				t.Fatalf("mistyped knob mutated config: %+v", a)
+			}
+
+			logged := buf.String()
+			if !strings.Contains(logged, "mistyped daemon knob") {
+				t.Fatalf("expected mistyped-knob warning, got log: %q", logged)
+			}
+			if !strings.Contains(logged, tc.wantKey) {
+				t.Fatalf("warning missing key %q, got log: %q", tc.wantKey, logged)
+			}
+		})
+	}
+}
+
+// TestAutoTitler_CorrectlyTypedKnobsApplyNoWarn is the negative companion
+// to TestAutoTitler_MistypedKnobWarnsAndKeepsDefault: correctly-typed
+// knobs must apply AND emit no mistyped-knob warning.
+func TestAutoTitler_CorrectlyTypedKnobsApplyNoWarn(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	d, err := newAutoTitler(DaemonDeps{
+		Router: wrapRouter(newFakeRouter()),
+		Runner: &capturingRunner{},
+	})
+	if err != nil {
+		t.Fatalf("newAutoTitler: %v", err)
+	}
+	a := d.(*autoTitler)
+
+	cfg := DaemonConfig{
+		"min_user_turns":      9,
+		"min_rename_interval": 42 * time.Minute,
+		"batch_per_tick":      7,
+		"include_group_chat":  true,
+	}
+	if err := a.Configure(cfg); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	if a.minUserTurns != 9 {
+		t.Fatalf("minUserTurns = %d, want 9", a.minUserTurns)
+	}
+	if a.minRenameInterval != 42*time.Minute {
+		t.Fatalf("minRenameInterval = %v, want 42m", a.minRenameInterval)
+	}
+	if a.batchPerTick != 7 {
+		t.Fatalf("batchPerTick = %d, want 7", a.batchPerTick)
+	}
+	if !a.includeGroupChat {
+		t.Fatalf("includeGroupChat = false, want true")
+	}
+	if strings.Contains(buf.String(), "mistyped daemon knob") {
+		t.Fatalf("unexpected mistyped-knob warning for valid cfg: %q", buf.String())
 	}
 }
