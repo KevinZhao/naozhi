@@ -225,6 +225,11 @@ type Feishu struct {
 	tokenMu     sync.RWMutex
 	tokenGroup  singleflight.Group
 
+	// botInfoSF merges concurrent lazy bot-info re-fetches (maybeRefreshBotInfo)
+	// so a burst of group mentions while open_id is still unknown collapses to
+	// a single bot/v3/info call. R229-ARCH-19 (#1009).
+	botInfoSF singleflight.Group
+
 	// Token refresh circuit breaker: if the upstream token endpoint returns
 	// an error (e.g. app_secret revoked), subsequent refresh attempts within
 	// tokenFailCooldown are short-circuited to the cached error. Prevents
@@ -277,11 +282,19 @@ type Feishu struct {
 	// the mention check degrades to the legacy "any @ means mentioned" rule
 	// (mirror of slack/discord's warn-and-continue on AuthTest failure).
 	//
-	// Guarded by botInfoMu: written once in Start(), read on every inbound
-	// group message. RWMutex chosen over sync.Once+atomic.Value because
-	// future work might want to refresh on rotation; for now it's write-once.
-	botInfoMu sync.RWMutex
-	botOpenID string
+	// Guarded by botInfoMu: written in Start() and by the lazy self-heal
+	// re-fetch (maybeRefreshBotInfo), read on every inbound group message.
+	//
+	// R229-ARCH-19 (#1009): the Start()-time fetch is best-effort and
+	// time-boxed at 5s. If it failed, isBotMentioned would stay in the loose
+	// "any @ = hit" fallback for the entire process lifetime, which lets an
+	// ambient @other-bot mention in a group falsely wake this bot. To tighten
+	// that window without breaking the degraded-startup contract, the degraded
+	// branch triggers a rate-limited background re-fetch so the bot's open_id
+	// self-heals and subsequent group mentions match strictly.
+	botInfoMu          sync.RWMutex
+	botOpenID          string
+	lastBotInfoFetchNs int64 // unix nanos of the last (Start or lazy) fetch attempt; rate-limits self-heal
 }
 
 // New creates a Feishu platform adapter. transcriber may be nil to disable voice.
@@ -530,6 +543,10 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 	func() {
 		fetchCtx, cancelFetch := context.WithTimeout(f.stopCtx, 5*time.Second)
 		defer cancelFetch()
+		// Stamp the attempt time so the lazy self-heal path (maybeRefreshBotInfo)
+		// honours botInfoRefreshCooldown relative to this Start() fetch rather
+		// than firing on the very first group mention. R229-ARCH-19 (#1009).
+		atomic.StoreInt64(&f.lastBotInfoFetchNs, time.Now().UnixNano())
 		if err := f.fetchBotInfo(fetchCtx); err != nil {
 			slog.Warn("feishu fetch bot info failed — group mention filtering will fall back to 'any mention' (less precise)",
 				"err", err)
@@ -637,6 +654,13 @@ func (f *Feishu) isBotMentioned(count int, openIDAt func(i int) string) bool {
 		// Degraded mode: any mention counts. Matches legacy behaviour so a
 		// failed Start() doesn't silently drop responses for DM-heavy users
 		// who don't care about group precision.
+		//
+		// R229-ARCH-19 (#1009): kick a rate-limited background re-fetch so the
+		// open_id self-heals — once it lands, the next group mention matches
+		// strictly instead of falling through this loose "any @" path forever.
+		if count > 0 {
+			f.maybeRefreshBotInfo()
+		}
 		return count > 0
 	}
 	for i := 0; i < count; i++ {
@@ -645,6 +669,59 @@ func (f *Feishu) isBotMentioned(count int, openIDAt func(i int) string) bool {
 		}
 	}
 	return false
+}
+
+// botInfoRefreshCooldown rate-limits the lazy self-heal re-fetch so a sustained
+// stream of group mentions while open_id is unknown can't hammer bot/v3/info.
+// 1 minute is short enough that a transient Start()-time failure recovers within
+// the first follow-up burst, long enough that a hard failure (revoked app) does
+// not generate a per-message API call. R229-ARCH-19 (#1009).
+const botInfoRefreshCooldown = time.Minute
+
+// maybeRefreshBotInfo kicks a rate-limited, singleflight-merged background
+// re-fetch of the bot's open_id when isBotMentioned is operating in the
+// degraded "any @" fallback (open_id unknown). Non-blocking: the inbound
+// message handler returns immediately on the loose match for this delivery,
+// and a *subsequent* group mention benefits from the now-populated open_id
+// (strict matching). Tracked on f.wg so Stop() waits for the in-flight fetch.
+// R229-ARCH-19 (#1009).
+func (f *Feishu) maybeRefreshBotInfo() {
+	// stopCtx is nil only for directly-constructed test fixtures (the
+	// production New() always seeds it). Without it there's no lifecycle
+	// to anchor the fetch context to, so skip the self-heal entirely —
+	// the degraded "any @" match already returned for the caller.
+	if f.stopCtx == nil {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := atomic.LoadInt64(&f.lastBotInfoFetchNs)
+	// delta < 0 guards an NTP step backwards (same pattern as the dispatch
+	// eviction-warn cooldown): re-anchor and allow the fetch rather than
+	// wedging the cooldown forever.
+	if delta := now - last; delta >= 0 && delta < int64(botInfoRefreshCooldown) {
+		return
+	}
+	if !atomic.CompareAndSwapInt64(&f.lastBotInfoFetchNs, last, now) {
+		// Another goroutine won the CAS and is already (re)fetching.
+		return
+	}
+	f.wg.Add(1)
+	go func() {
+		defer f.wg.Done()
+		// singleflight collapses overlapping re-fetches; the key is constant
+		// because there's a single bot identity per adapter.
+		_, _, _ = f.botInfoSF.Do("bot_info", func() (any, error) {
+			ctx, cancel := context.WithTimeout(f.stopCtx, 5*time.Second)
+			defer cancel()
+			if err := f.fetchBotInfo(ctx); err != nil {
+				slog.Warn("feishu lazy bot info re-fetch failed — group mention filtering stays in 'any @' fallback",
+					"err", err)
+				return nil, err
+			}
+			slog.Info("feishu bot open_id self-healed via lazy re-fetch — group mentions now matched strictly")
+			return nil, nil
+		})
+	}()
 }
 
 // Stop implements RunnablePlatform. Stops WebSocket connection.

@@ -205,6 +205,33 @@ type MessageQueue struct {
 	// map lookup.
 	dropNotifyLRU   *list.List                  // element.Value = *dropNotifyEntry
 	dropNotifyIndex map[string]*dropNotifyEntry // key → entry
+
+	// onStranded, when non-nil, is invoked by Release for every message that
+	// was parked in the ring at release time (FIFO order, outside q.mu). It
+	// closes R37-REL1 (#769): the SessionGuard Release path (Dashboard/WS)
+	// used to leave messages that landed via a concurrent IM-side Enqueue
+	// stranded until the *next* Enqueue happened to make a new owner; on a
+	// quiet key that next Enqueue might never arrive, silently losing the
+	// message. With a handler registered, Release drains those messages back
+	// through the dispatcher so they get processed even when no follow-up
+	// IM message is coming. nil preserves the legacy park-in-place contract
+	// (used by tests and Guard-only deployments without a re-dispatch path).
+	onStranded func(key string, msg QueuedMsg)
+}
+
+// SetStrandHandler registers the callback Release uses to recover messages
+// that were parked by a concurrent IM-side Enqueue while a SessionGuard
+// caller (Dashboard/WS) held the key. Passing nil restores the legacy
+// "leave parked for the next Enqueue owner" behaviour. R37-REL1 (#769).
+//
+// The handler is invoked once per stranded message, in FIFO order, after
+// q.mu has been released and the key marked idle — so the callback may
+// safely re-enter Enqueue without re-entrant locking, mirroring
+// ReleaseWithDrain's delivery contract.
+func (q *MessageQueue) SetStrandHandler(fn func(key string, msg QueuedMsg)) {
+	q.mu.Lock()
+	q.onStranded = fn
+	q.mu.Unlock()
 }
 
 // dropNotifyEntry is a single LRU entry: key + last notify nanos. elem links
@@ -542,32 +569,44 @@ func (q *MessageQueue) ShouldSendWait(key string) bool {
 	return q.ShouldNotify(key)
 }
 
-// Release implements SessionGuard. Releases ownership without draining
-// — internally it calls ReleaseWithDrain(key, nil), which clears the
-// busy flag but leaves any queued messages parked in the sessionQueue
-// for a future Enqueue owner to consume via DoneOrDrain.  This is the
-// SessionGuard-compatible path; it is *not* a drain failure.
+// Release implements SessionGuard. Releases ownership for key.
 //
-// R37-REL1: if messages landed during the busy window (concurrent
-// Enqueue while Dashboard/WS Guard held the session), they would
-// otherwise be stuck until the next Enqueue re-entered the queue.
-// Callers that can process the drained batch should use
-// ReleaseWithDrain instead.
+// R37-REL1 (#769): if messages landed during the busy window (a concurrent
+// Enqueue while a Dashboard/WS Guard caller held the session), they would
+// otherwise be parked in the ring until the *next* Enqueue happened to
+// become a new owner and sweep them via DoneOrDrain — on a quiet key that
+// next Enqueue may never arrive, silently stranding the message. When a
+// strand handler is registered (SetStrandHandler), Release drains those
+// parked messages back through the handler so they are processed even with
+// no follow-up IM message. Without a handler the legacy park-in-place
+// contract is preserved (messages stay for a future Enqueue owner), and a
+// Warn is logged so the silent-loss condition stays observable.
 func (q *MessageQueue) Release(key string) {
-	// Peek depth under the lock so we can warn callers about stranded messages
-	// without changing Release's no-drain contract. Without this log the only
-	// signal is a silent "queue appears to lose messages" user report.
+	// Snapshot the strand handler + pending depth under the lock so the
+	// decision (drain vs park) reflects a consistent view. Enqueue callers
+	// racing this unlock can shift the real depth, which is acceptable: a
+	// message that arrives after the snapshot lands on the now-idle key and
+	// either becomes owner or re-queues normally.
 	q.mu.Lock()
+	handler := q.onStranded
 	depth := 0
 	if sq := q.queues[key]; sq != nil {
 		depth = sq.ring.len()
 	}
 	q.mu.Unlock()
+
+	if handler != nil {
+		// Recover stranded messages through the dispatcher's re-dispatch
+		// path. ReleaseWithDrain clears the ring + marks the key idle before
+		// invoking onDrain, so the handler can safely re-enter Enqueue.
+		q.ReleaseWithDrain(key, func(m QueuedMsg) { handler(key, m) })
+		return
+	}
+
 	if depth > 0 {
-		// `pending` is a lock-release snapshot — Enqueue callers racing this
-		// unlock can shift the real depth. Accurate enough for "a caller
-		// stranded N+ messages" triage.
-		slog.Warn("msgqueue release with pending messages, use ReleaseWithDrain to avoid strand",
+		// No handler: keep the no-drain contract but make the strand visible.
+		// pending_snapshot is a lock-release snapshot (see above).
+		slog.Warn("msgqueue release with pending messages and no strand handler, message may be stranded until next Enqueue",
 			"key", key, "pending_snapshot", depth)
 	}
 	q.ReleaseWithDrain(key, nil)

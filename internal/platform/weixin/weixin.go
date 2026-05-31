@@ -136,6 +136,24 @@ func validateBaseURLScheme(baseURL string) error {
 	return fmt.Errorf("weixin base_url must use https:// (got %q); the iLink poll response carries no HMAC, so TLS is the only authenticity guarantee", baseURL)
 }
 
+// baseURLIsTLS reports whether the configured relay reaches iLink over TLS.
+// Empty base_url defaults to the hard-coded https:// endpoint (api.go), so
+// it is TLS. Only a validateBaseURLScheme-approved loopback http:// URL is
+// non-TLS — for which authenticity has neither TLS nor HMAC backing.
+// R214-SEC-1 (#417).
+func (w *Weixin) baseURLIsTLS() bool {
+	if w.cfg.BaseURL == "" {
+		return true // defaultBaseURL is https://
+	}
+	u, err := url.Parse(w.cfg.BaseURL)
+	if err != nil {
+		// validateBaseURLScheme already gate-kept Start; an unparseable URL
+		// can't have reached here. Treat as non-TLS defensively.
+		return false
+	}
+	return strings.EqualFold(u.Scheme, "https")
+}
+
 // New creates a WeChat platform adapter.
 func New(cfg Config) *Weixin {
 	if cfg.MaxReplyLen <= 0 {
@@ -167,6 +185,19 @@ func (w *Weixin) Start(handler platform.MessageHandler) error {
 	// http://localhost / 127.0.0.1 / [::1] stay allowed for local dev mocks.
 	if err := validateBaseURLScheme(w.cfg.BaseURL); err != nil {
 		return err
+	}
+	// R214-SEC-1 (#417): the iLink long-poll body carries no inbound HMAC —
+	// authenticity rests entirely on the transport. Surface that posture at
+	// startup so an operator auditing journalctl sees the trust assumption
+	// explicitly rather than having to read the package doc. When the
+	// configured relay is a non-HTTPS loopback mock the TLS anchor is gone
+	// too, so warn louder: that mode is for local development only and MUST
+	// NOT face untrusted networks.
+	if w.baseURLIsTLS() {
+		slog.Info("weixin: inbound long-poll has no HMAC; authenticity relies on TLS to the iLink relay (see package threat model)")
+	} else {
+		slog.Warn("weixin: relay base_url is non-HTTPS loopback — NO TLS and NO HMAC; dev-only, do not expose to untrusted networks",
+			"base_url", w.cfg.BaseURL)
 	}
 	w.startMu.Lock()
 	if w.started {

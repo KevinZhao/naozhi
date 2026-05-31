@@ -1676,6 +1676,29 @@ func decodeRunBytes(data []byte, maxRunBytes int64) (*CronRun, error) {
 // Scheduler.DeleteJobByID/DeleteJob. Idempotent: missing dir is a no-op.
 // Does NOT delete ~/.claude/projects/<cwd>/<session_id>.jsonl files —
 // those are user-facing claude session logs (RFC §2.3).
+//
+// CROSS-STORE ORDERING & CRASH RECOVERY (R242-ARCH-19 / #762):
+// runs/ and cron_jobs.json are physically separate files with NO atomic
+// transaction spanning both. The delete sequence in withJobByPrefix is:
+//
+//	(1) deleteJobLocked(j) drops the job from the in-memory map under s.mu;
+//	(2) persistJobsLocked() marshals that post-delete snapshot under s.mu;
+//	(3) postCleanup runs runStore.DeleteJob (this function) lock-free;
+//	(4) save() lands the marshaled cron_jobs.json.
+//
+// So runs/<jobID>/ is removed at (3) BEFORE the job's absence is durably
+// written at (4). The only crash window is between (3) and (4): runs/ is
+// already gone but cron_jobs.json still lists the job. Recovery is benign
+// and self-healing — on restart the job reloads with an empty history,
+// re-schedules, and its first run repopulates runs/<jobID>/. The reverse
+// ordering (write cron_jobs.json first, then remove runs/) was rejected
+// because a crash in that window would orphan a runs/<jobID>/ subtree for a
+// job no longer in cron_jobs.json, which trimAll never reclaims (it only
+// trims dirs of *known* jobs) — a strictly worse leak than the transient
+// empty-history above. We therefore keep "remove runs/ first" and document
+// the recoverable window here rather than add a two-phase commit. R238-GO-3
+// also relies on this: DeleteJob fires even when (4)'s persist later fails,
+// so a persist failure does not leak runs/ on disk.
 func (s *runStore) DeleteJob(jobID string) {
 	if s == nil || s.disabled || jobID == "" {
 		return
