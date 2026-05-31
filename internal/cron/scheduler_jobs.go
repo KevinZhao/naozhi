@@ -320,6 +320,55 @@ type JobWithNextRun struct {
 	NextRun time.Time
 }
 
+// ListJobsWithNextRun returns the jobs for a specific chat plus each job's
+// next scheduled run — the chat-narrowed twin of ListAllJobsWithNextRun.
+//
+// R249-CR-12 (#956): ListJobs returns chat-scoped []Job WITHOUT NextRun, while
+// ListAllJobsWithNextRun returns NextRun but for EVERY job. A caller wanting
+// "this chat's jobs + their NextRun" previously had to call the all-jobs
+// variant and filter — paying an O(allJobs) walk to render an O(jobs-in-chat)
+// list. This helper closes that asymmetry: it walks the jobsByChat bucket
+// (O(jobs-in-chat)) and patches NextRun in.
+//
+// Lock strategy mirrors ListAllJobsWithNextRun: snapshot (Job copy, entryID)
+// under s.mu.RLock, release s.mu, then read s.cron.Entries() lock-free to
+// avoid inverting the cron dispatcher's lock order (cron-internal → execute →
+// s.mu.Lock). The result slice is always non-nil (empty bucket → `[]`) for
+// wire-format symmetry with ListJobs / ListAllJobsWithNextRun.
+func (s *Scheduler) ListJobsWithNextRun(plat, chatID string) []JobWithNextRun {
+	s.mu.RLock()
+	bucket := s.jobsByChat[chatJobKey{Platform: plat, ChatID: chatID}]
+	result := make([]JobWithNextRun, 0, len(bucket))
+	ids := make([]robfigcron.EntryID, 0, len(bucket))
+	for _, j := range bucket {
+		result = append(result, JobWithNextRun{Job: *j})
+		ids = append(ids, j.entryID)
+	}
+	s.mu.RUnlock()
+
+	if len(result) == 0 {
+		return result
+	}
+
+	// Single Entries() snapshot read outside s.mu (lock-order safe). For the
+	// small per-chat bucket a direct linear lookup is cheaper than building a
+	// map; entryID 0 means the job is not registered with cron (paused) and
+	// keeps the zero NextRun.
+	entries := s.cron.Entries()
+	for i, id := range ids {
+		if id == 0 {
+			continue
+		}
+		for _, e := range entries {
+			if e.ID == id {
+				result[i].NextRun = e.Next
+				break
+			}
+		}
+	}
+	return result
+}
+
 // ListAllJobsWithNextRun returns every job plus its next scheduled run.
 // Lock strategy: snapshot (*Job, entryID) under s.mu.RLock, release s.mu, then
 // call s.cron.Entries() without holding s.mu. Calling cron.Entries inside

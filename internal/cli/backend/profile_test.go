@@ -13,19 +13,30 @@ import (
 // Tests that exercise registration order or duplicate-panic semantics need
 // this; pure read-only tests against RegisterDefaults can also use it for
 // isolation.
+//
+// defaultsOnce is reset to a fresh sync.Once alongside the registry so a
+// test that calls EnsureDefaults() inside the clean block actually
+// re-bootstraps. Without this reset the block would inherit a fired
+// defaultsOnce from an earlier test (or production init), making
+// EnsureDefaults a silent no-op against the empty registry — the test
+// would then observe All() len 0 purely as a function of run order
+// (#895: test isolation must not depend on which test fires the Once first).
 func withCleanRegistry(t *testing.T, fn func()) {
 	t.Helper()
 	registryMu.Lock()
 	savedRegistry := registry
 	savedOrder := nextOrder
+	savedOnce := defaultsOnce
 	registry = map[string]registryEntry{}
 	nextOrder = 0
+	defaultsOnce = sync.Once{}
 	registryMu.Unlock()
 
 	t.Cleanup(func() {
 		registryMu.Lock()
 		registry = savedRegistry
 		nextOrder = savedOrder
+		defaultsOnce = savedOnce
 		registryMu.Unlock()
 	})
 
@@ -237,6 +248,34 @@ func TestEnsureDefaults_IdempotentAndConcurrent(t *testing.T) {
 		EnsureDefaults()
 		if got := len(All()); got != 2 {
 			t.Errorf("repeat EnsureDefaults registered extra: All() len = %d; want 2", got)
+		}
+	})
+}
+
+// TestEnsureDefaults_CleanRegistryReBootstraps guards the test-isolation
+// fix in #895: a clean-registry block must re-bootstrap via EnsureDefaults
+// regardless of whether defaultsOnce already fired in production init or an
+// earlier test. We fire EnsureDefaults() OUTSIDE the clean block first to
+// trip the package-level Once, then assert that inside withCleanRegistry the
+// defaults re-register. Pre-fix (defaultsOnce not reset) this observed
+// All() len 0 — a run-order-dependent failure.
+func TestEnsureDefaults_CleanRegistryReBootstraps(t *testing.T) {
+	// Trip the global Once outside the clean block (idempotent / safe).
+	EnsureDefaults()
+
+	withCleanRegistry(t, func() {
+		if got := len(All()); got != 0 {
+			t.Fatalf("clean registry should start empty; All() len = %d", got)
+		}
+		EnsureDefaults()
+		if got := len(All()); got != 2 {
+			t.Fatalf("EnsureDefaults inside clean registry did not re-bootstrap: All() len = %d; want 2 (defaultsOnce reset missing?)", got)
+		}
+		if _, ok := Get("claude"); !ok {
+			t.Error("claude missing after re-bootstrap")
+		}
+		if _, ok := Get("kiro"); !ok {
+			t.Error("kiro missing after re-bootstrap")
 		}
 	})
 }
