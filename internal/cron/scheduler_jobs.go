@@ -1364,12 +1364,16 @@ func (s *Scheduler) NextRun(j *Job) time.Time {
 	// robfig/cron's runningMu. Holding s.mu across that call inverts the
 	// lock order the cron dispatch path takes (cron-internal → execute →
 	// recordResult → s.mu.Lock) — the exact discipline
-	// ListAllJobsWithNextRun's godoc documents and follows. NextRun was the
-	// one straggler still calling cron.Entry inside s.mu; aligning it
-	// removes the latent deadlock window without changing the observable
-	// result (entryID is the source-of-truth snapshot; a concurrent Remove
-	// that lands after the unlock yields a zero Entry.Next, which is the
-	// same "no live schedule" answer the in-lock path produced).
+	// ListAllJobsWithNextRun's godoc documents and follows. NextRun was a
+	// straggler still calling cron.Entry inside s.mu; aligning it with the
+	// release-before-Entries discipline removes the lock-ordering
+	// inconsistency without changing the observable result (entryID is the
+	// source-of-truth snapshot; a concurrent Remove that lands after the
+	// unlock yields a zero Entry.Next, the same "no live schedule" answer
+	// the in-lock path produced). TriggerNow intentionally keeps its
+	// cross-lock (see R250-GO-2 there) because it needs a single consistent
+	// instant for the entry-gone check against a racing DeleteJob; NextRun
+	// only reads Entry.Next so it has no such consistency requirement.
 	s.mu.RLock()
 	entryID := j.entryID
 	if entryID == 0 && j.ID != "" {
@@ -1438,9 +1442,13 @@ func (s *Scheduler) TriggerNow(id string) error {
 	// R250-GO-2: hold s.mu.RLock across s.cron.Entry(entryID) and the
 	// WrappedJob nil check so a concurrent DeleteJob (which calls
 	// s.cron.Remove under s.mu.Lock) cannot observe entryID-in-flight
-	// while we're mid-lookup. NextRun (above) already uses the same
-	// cross-lock pattern; cron's internal lock cannot call back into
-	// scheduler code, so cross-lock holding is safe.
+	// while we're mid-lookup. cron's internal lock cannot call back into
+	// scheduler code, so cross-lock holding is safe here. (NextRun no
+	// longer cross-locks — #1117 moved its cron.Entry read outside s.mu to
+	// align with ListAllJobsWithNextRun's release-before-Entries
+	// discipline; TriggerNow keeps the cross-lock because it needs the
+	// entry-gone check and the s.mu RLock to observe a single consistent
+	// instant against a racing DeleteJob.)
 	if entryID != 0 {
 		// TriggerNow 不再通过 cron chain 的 WrappedJob.Run()——因为我们要跳过
 		// jitter（用户显式 "run now" 期望立刻跑）。改为直接 executeOpt(..., true)。
