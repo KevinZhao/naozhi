@@ -1254,13 +1254,14 @@ func (s *Scheduler) withJobByPrefix(
 	postCleanup func(j *Job),
 ) (*Job, error) {
 	var save func()
-	var j *Job
+	var snapshot Job
 	var findErr, opErr, perr error
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		j, findErr = s.findByPrefixLocked(idPrefix, plat, chatID)
-		if findErr != nil {
+		j, err := s.findByPrefixLocked(idPrefix, plat, chatID)
+		if err != nil {
+			findErr = err
 			return
 		}
 		if op != nil {
@@ -1270,6 +1271,11 @@ func (s *Scheduler) withJobByPrefix(
 			}
 		}
 		save, perr = s.persistJobsLocked()
+		// R242-GO-3 mirror (#548): value-copy under s.mu so postCleanup and
+		// the caller read a stable Job even if a concurrent UpdateJob /
+		// SetJobPrompt mutates the live *j right after Unlock. Matches
+		// withJobByIDOpt's "snapshot = *j" pattern. [R250531-CR-2]
+		snapshot = *j
 	}()
 
 	if findErr != nil {
@@ -1279,13 +1285,13 @@ func (s *Scheduler) withJobByPrefix(
 		return nil, opErr
 	}
 	if postCleanup != nil {
-		postCleanup(j)
+		postCleanup(&snapshot)
 	}
 	if perr != nil {
 		return nil, perr
 	}
 	save()
-	return j, nil
+	return &snapshot, nil
 }
 
 // DeleteJob removes a job by ID prefix (scoped to the given chat).
