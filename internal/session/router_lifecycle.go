@@ -930,7 +930,7 @@ func (r *Router) installFreshSessionLocked(
 
 	r.storeDirty = true
 	r.storeGen.Add(1)
-	slog.Info("session spawned", "key", key, "active", r.activeCount.Load(), "exempt", exempt)
+	logSessionLifecycle("spawned", key, "active", r.activeCount.Load(), "exempt", exempt)
 	// OBS2: counter bumped inside the write-lock so it reflects the authoritative
 	// "spawn succeeded" point (past both TOCTOU guards, past storeProcess). Exempt
 	// sessions are excluded — they don't consume a normal session slot and
@@ -1183,7 +1183,7 @@ func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 	}
 	r.mu.Unlock()
 
-	slog.Info("session reset", "key", key)
+	logSessionLifecycle("reset", key)
 	r.notifyKeyRetired(key, sessionID)
 	r.notifyChange()
 }

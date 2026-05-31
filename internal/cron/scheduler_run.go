@@ -34,46 +34,9 @@ import (
 	robfigcron "github.com/robfig/cron/v3"
 )
 
-// defaultCronSlowThreshold is the wall-clock budget beyond which a
-// successful cron execution is counted as "slow"
-// (metrics.CronExecutionSlowTotal). 30s is picked as an order-of-magnitude
-// above a typical interactive agent turn; jobs that regularly tip over are
-// candidates for timeout / workflow inspection. R208-OBS1.
-//
-// R241-ARCH-11 (#519): the threshold is now per-Scheduler-configurable
-// via SchedulerConfig.SlowThreshold so deployments running with
-// ExecTimeout=300s do not flood operators with a daily slow-alert per
-// successful long job. The package const stays as the default — callers
-// that omit SlowThreshold (or pass 0/negative) keep the legacy 30s
-// behaviour. Production wiring (cmd/naozhi) reads cron.slow_threshold
-// from config so operators can raise the threshold without recompiling.
-const defaultCronSlowThreshold = 30 * time.Second
-
-// spawnElapsedWarnRatio is the fraction of jobTimeout the spawn phase
-// (router.GetOrCreate) is allowed to consume before we emit the
-// "send budget exceeds job/2" warning + bump CronSendBudgetDoubledTotal.
-//
-// 0.5 chosen because once spawn alone has consumed half the per-run
-// budget, the in-flight wall clock can reach ~2*jobTimeout (spawn +
-// fresh-budget Send), which is the doubling pattern operators of 300s+
-// jobs need a runbook signal for. Lower the ratio (e.g. 0.4) to surface
-// near-doubling earlier; raise (e.g. 0.7) to suppress noise on cold
-// fresh-context runs that legitimately spawn slowly. R247-CR-28.
-const spawnElapsedWarnRatio = 0.5
-
-// minSendBudget is the lower bound on the per-run send-phase context budget
-// when spawn already consumed most of jobTimeout. R20260527122801-CR-2 (#1311):
-// historically sendCtx used the full jobTimeout regardless of how long spawn
-// took, so a 5min jobTimeout could yield ~10min wall-clock + jitter in the
-// worst case (spawn ~5min then send another ~5min). Operators reported
-// systemd TimeoutStopSec being exceeded as a result. We now clamp sendCtx
-// to (jobTimeout - time.Since(spawnStart)), bounded below by minSendBudget so
-// a flaky cold-start spawn doesn't immediately turn into a "send timed out"
-// without operator signal — the historical concern documented at the
-// sendCtx assignment below. 30s is enough for a single Send round-trip on
-// a healthy CLI; the spawnElapsedWarnRatio warn already alerts operators
-// when spawn is eating the budget.
-const minSendBudget = 30 * time.Second
+// defaultCronSlowThreshold, spawnElapsedWarnRatio and minSendBudget are
+// defined in tuning.go (R249-CR-16, #959), which collects all cron tuning
+// knobs into one place with an operator-facing raise/lower table.
 
 // executeIfNotDeletedOrPaused is the TriggerNow dispatch entry. It looks
 // up the freshest *Job under s.mu.RLock, then — only if still present and

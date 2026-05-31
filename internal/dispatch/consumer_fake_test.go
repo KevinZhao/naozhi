@@ -5,8 +5,97 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
+
+// Compile-time pin (ARCH-DISP-1, #457): the production *project.Manager
+// must satisfy the ProjectStore consumer interface. If a method signature
+// drifts on either side, this line fails to compile in the dispatch
+// package's own test build, before any consumer wiring runs.
+var _ ProjectStore = (*project.Manager)(nil)
+
+// fakeProjectStore is a minimal ProjectStore for slash-command handler
+// tests. Like fakeSessionRouter, unconfigured methods panic so an
+// unexpected code path surfaces immediately.
+type fakeProjectStore struct {
+	get            func(name string) *project.Project
+	all            func() []*project.Project
+	projectForChat func(platform, chatType, chatID string) *project.Project
+	bindChat       func(projectName, platform, chatType, chatID string) error
+	unbindAllChat  func(platform, chatType, chatID string) error
+}
+
+func (f *fakeProjectStore) Get(name string) *project.Project {
+	if f.get == nil {
+		panic("fakeProjectStore.Get not configured")
+	}
+	return f.get(name)
+}
+
+func (f *fakeProjectStore) All() []*project.Project {
+	if f.all == nil {
+		panic("fakeProjectStore.All not configured")
+	}
+	return f.all()
+}
+
+func (f *fakeProjectStore) ProjectForChat(platform, chatType, chatID string) *project.Project {
+	if f.projectForChat == nil {
+		panic("fakeProjectStore.ProjectForChat not configured")
+	}
+	return f.projectForChat(platform, chatType, chatID)
+}
+
+func (f *fakeProjectStore) BindChat(projectName, platform, chatType, chatID string) error {
+	if f.bindChat == nil {
+		panic("fakeProjectStore.BindChat not configured")
+	}
+	return f.bindChat(projectName, platform, chatType, chatID)
+}
+
+func (f *fakeProjectStore) UnbindAllChat(platform, chatType, chatID string) error {
+	if f.unbindAllChat == nil {
+		panic("fakeProjectStore.UnbindAllChat not configured")
+	}
+	return f.unbindAllChat(platform, chatType, chatID)
+}
+
+// TestDispatcher_AcceptsFakeProjectStore proves the ProjectStore seam
+// (ARCH-DISP-1, #457) lets slash-command tests inject a fake binding
+// store without standing up a real project.Manager (projects.root dir +
+// binding file). It exercises the read path (ProjectForChat) end-to-end
+// through the interface field.
+func TestDispatcher_AcceptsFakeProjectStore(t *testing.T) {
+	t.Parallel()
+
+	want := &project.Project{Name: "demo", Path: "/tmp/demo"}
+	fake := &fakeProjectStore{
+		projectForChat: func(_, _, _ string) *project.Project { return want },
+	}
+	var _ ProjectStore = fake
+
+	d := &Dispatcher{projectMgr: fake}
+	if got := d.projectMgr.ProjectForChat("im", "direct", "u1"); got != want {
+		t.Errorf("expected injected project %v, got %v", want, got)
+	}
+}
+
+// TestNewDispatcher_NilProjectMgrStaysUntypedNil pins the typed-nil fix
+// for ProjectStore (ARCH-DISP-1, #457): cfg.ProjectMgr is a concrete
+// *project.Manager, so a nil value boxed into the interface field would
+// be != nil and defeat every `d.projectMgr == nil` gate. NewDispatcher
+// must collapse it to untyped nil.
+func TestNewDispatcher_NilProjectMgrStaysUntypedNil(t *testing.T) {
+	t.Parallel()
+	d, err := NewDispatcher(DispatcherConfig{ProjectMgr: nil, AllowMissingSender: true})
+	if err != nil {
+		t.Fatalf("NewDispatcher: %v", err)
+	}
+	if d.projectMgr != nil {
+		t.Fatal("Dispatcher.projectMgr should be untyped nil when cfg.ProjectMgr is nil; typed-nil trap reintroduced")
+	}
+}
 
 // fakeSessionRouter is a minimal SessionRouter implementation for
 // Dispatcher tests. Methods marked "not configured" panic so a test

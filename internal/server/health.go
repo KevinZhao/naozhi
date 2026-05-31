@@ -242,8 +242,11 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		// wired (test harness without server.New) so this stays a no-op
 		// for fixtures that bypass the bucket.
 		if h.auth != nil && !h.auth.UnauthDashAllow(clientIP(r, h.auth.TrustedProxy)) {
-			w.Header().Set("Retry-After", "60")
-			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			// JSON envelope (errRespRetry, R247-ARCH-3 / #612 / #451) keeps the
+			// /health error path consistent with its writeJSON success path and
+			// carries retry_after in the body for fetch wrappers that drop the
+			// Retry-After header. errRespRetry also sets the header itself.
+			errRespRetry(w, http.StatusTooManyRequests, "rate_limited", "too many requests", 60)
 			return
 		}
 		writeJSON(w, resp)

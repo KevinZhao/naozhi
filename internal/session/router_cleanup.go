@@ -87,7 +87,7 @@ func (r *Router) Remove(key string) bool {
 		r.mu.Unlock()
 	}
 
-	slog.Info("session removed", "key", key)
+	logSessionLifecycle("removed", key)
 	r.notifyKeyRetired(key, retiredSessionID)
 	r.notifyChange()
 	return true
@@ -264,7 +264,7 @@ func (r *Router) Cleanup() {
 
 		// Normal idle TTL expiry.
 		if now.Sub(effective) > ttl {
-			slog.Info("session expired", "key", c.key, "idle", now.Sub(effective))
+			logSessionLifecycle("expired", c.key, "idle", now.Sub(effective))
 			storeAtomicString(&c.s.deathReason, "idle_timeout")
 			expired = append(expired, expiredEntry{c.s, c.key, c.proc})
 		}

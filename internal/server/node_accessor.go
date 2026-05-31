@@ -83,18 +83,23 @@ func isValidNodeID(id string) bool {
 	return true
 }
 
+// LookupNode error replies use the unified errEnvelope JSON shape (errResp,
+// R247-ARCH-3 / #612 / #451) rather than text/plain http.Error. Every caller
+// is a dashboard JSON API handler (discovery / project / session /
+// agentevents) whose front-end reads `body.error`; emitting JSON with a
+// stable `code` lets the UI branch and localize without parsing English copy.
 func (a *nodeAccessor) LookupNode(w http.ResponseWriter, id string) (node.Conn, bool) {
 	if len(id) > maxNodeIDBytes {
-		http.Error(w, "node id too long", http.StatusBadRequest)
+		errResp(w, http.StatusBadRequest, "node_id_too_long", "node id too long")
 		return nil, false
 	}
 	if !isValidNodeID(id) {
-		http.Error(w, "invalid node id", http.StatusBadRequest)
+		errResp(w, http.StatusBadRequest, "node_id_invalid", "invalid node id")
 		return nil, false
 	}
 	nc, ok := a.GetNode(id)
 	if !ok {
-		http.Error(w, "unknown node", http.StatusBadRequest)
+		errResp(w, http.StatusBadRequest, "node_unknown", "unknown node")
 		return nil, false
 	}
 	return nc, true

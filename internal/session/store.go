@@ -475,8 +475,24 @@ func saveWorkspaceOverrides(storePath string, overrides map[string]string) error
 		return nil
 	}
 	if len(overrides) == 0 {
-		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			slog.Warn("remove empty workspace overrides file", "path", path, "err", err)
+		removed := true
+		if err := os.Remove(path); err != nil {
+			removed = false
+			if !errors.Is(err, fs.ErrNotExist) {
+				slog.Warn("remove empty workspace overrides file", "path", path, "err", err)
+			}
+		}
+		// Crash-durability parity with the WriteFileAtomic path below
+		// (#673): the rename path fsyncs the parent directory so the new
+		// state survives a crash, but an unlink left the directory entry
+		// un-fsynced — after a power loss the deleted overrides file could
+		// resurrect, re-applying overrides the user just cleared. fsync the
+		// parent so the removal is as durable as a write. SyncDir already
+		// degrades gracefully on EPERM/EINVAL (FUSE/older fs).
+		if removed {
+			if err := osutil.SyncDir(filepath.Dir(path)); err != nil {
+				slog.Warn("fsync dir after workspace overrides removal", "path", path, "err", err)
+			}
 		}
 		return nil
 	}

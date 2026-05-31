@@ -140,6 +140,97 @@ type Protocol interface {
 	HandleEvent(w io.Writer, ev Event) (handled bool)
 }
 
+// ProtocolCore is the protocol-agnostic subset of Protocol that every
+// backend (Claude stream-json, ACP JSON-RPC, a future Gemini protocol)
+// can implement without degrading to a noop or panic. It is an ADDITIVE
+// facet split of the Protocol god-interface (R219-ARCH-6, #668): the
+// methods listed here are the seven that carry no stream-json-specific
+// semantics —
+//
+//	Name / Clone / BuildArgs / Init / WriteMessage / ReadEvent / HandleEvent
+//
+// The four passthrough-flavoured methods that the issue flags as
+// "stream-json-only" (WriteUserMessageLocked, WriteInterrupt,
+// SupportsPriority, SupportsReplay) live on ProtocolPassthroughExt below.
+// ACP's implementations of those degrade (WriteUserMessageLocked falls
+// back to WriteMessage; WriteInterrupt returns ErrInterruptUnsupported;
+// SupportsPriority/SupportsReplay return false), which is exactly the
+// "noop or panic" smell R219-ARCH-6 calls out.
+//
+// This facet is introduced WITHOUT shrinking Protocol: the full
+// interface still embeds both facets (see the redefinition note on
+// Protocol), so no existing caller, implementation, or test changes.
+// New consumers that only ingest/parse events (e.g. a transcript
+// re-player, or a protocol-detection probe) can depend on ProtocolCore
+// and stay forward-compatible with backends that never grew the
+// passthrough surface. The compile-time pins below guarantee
+// ProtocolCore + ProtocolPassthroughExt remain a strict partition of
+// Protocol, so a method rename/removal on either side fails the build.
+type ProtocolCore interface {
+	// Name returns the protocol identifier (e.g., "stream-json", "acp").
+	Name() string
+
+	// Clone returns a fresh Protocol instance for a new process.
+	Clone() Protocol
+
+	// BuildArgs returns CLI arguments to launch the agent in this protocol mode.
+	BuildArgs(opts SpawnOptions) []string
+
+	// Init performs any handshake required after process spawn but before readLoop.
+	Init(rw *JSONRW, resumeID string, cwd string) (sessionID string, err error)
+
+	// WriteMessage writes a user message (with optional images) to the agent's stdin.
+	WriteMessage(w io.Writer, text string, images []ImageData) error
+
+	// ReadEvent parses a single NDJSON line from stdout into zero or more
+	// unified Events.
+	ReadEvent(line string) (events []Event, done bool, err error)
+
+	// HandleEvent allows the protocol to react to events.
+	HandleEvent(w io.Writer, ev Event) (handled bool)
+}
+
+// ProtocolPassthroughExt is the stream-json-specific surface that
+// R219-ARCH-6 (#668) identifies as leaking into the core Protocol
+// interface. ACP implementations degrade these to noop / fallback /
+// ErrInterruptUnsupported. It is split out additively as the complement
+// of ProtocolCore; the compile-time pins below tie both facets back to
+// Protocol so the partition cannot silently drift.
+//
+// A future refactor may shrink Protocol to embed ProtocolCore only and
+// move passthrough wiring behind a `p.(ProtocolPassthroughExt)` type
+// assertion (the breaking step the issue proposes). This facet makes
+// that seam available now without forcing the breaking change.
+type ProtocolPassthroughExt interface {
+	// WriteUserMessageLocked is the passthrough-aware writer (caller holds
+	// the per-process stdin write lock). ACP ignores the extras and
+	// degrades to WriteMessage.
+	WriteUserMessageLocked(w io.Writer, uuid, text string, images []ImageData, priority string) error
+
+	// SupportsPriority reports whether this protocol forwards a top-level
+	// "priority" field to the backing agent.
+	SupportsPriority() bool
+
+	// SupportsReplay reports whether the backing agent echoes stdin user
+	// messages as replay events.
+	SupportsReplay() bool
+
+	// WriteInterrupt writes an in-band interrupt request to stdin.
+	// Protocols without stdin-level interrupt return ErrInterruptUnsupported.
+	WriteInterrupt(w io.Writer, requestID string) error
+}
+
+// Compile-time guarantees that ProtocolCore and ProtocolPassthroughExt
+// are each a strict subset of Protocol (R219-ARCH-6 facet split, #668).
+// Mirrors the var _ subset pins used by the session-package facet split
+// in #430. A signature change or method removal on either facet — or on
+// Protocol — fails the package build instead of letting the facets
+// silently desync from the god-interface they partition.
+var (
+	_ ProtocolCore           = (Protocol)(nil)
+	_ ProtocolPassthroughExt = (Protocol)(nil)
+)
+
 // Caps aggregates Protocol capabilities in a single type so consumers
 // can feature-route via a single accessor instead of individual
 // SupportsX() methods sprinkled everywhere. The struct is value-copy

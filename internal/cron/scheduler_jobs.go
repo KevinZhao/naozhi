@@ -320,6 +320,55 @@ type JobWithNextRun struct {
 	NextRun time.Time
 }
 
+// ListJobsWithNextRun returns the jobs for a specific chat plus each job's
+// next scheduled run — the chat-narrowed twin of ListAllJobsWithNextRun.
+//
+// R249-CR-12 (#956): ListJobs returns chat-scoped []Job WITHOUT NextRun, while
+// ListAllJobsWithNextRun returns NextRun but for EVERY job. A caller wanting
+// "this chat's jobs + their NextRun" previously had to call the all-jobs
+// variant and filter — paying an O(allJobs) walk to render an O(jobs-in-chat)
+// list. This helper closes that asymmetry: it walks the jobsByChat bucket
+// (O(jobs-in-chat)) and patches NextRun in.
+//
+// Lock strategy mirrors ListAllJobsWithNextRun: snapshot (Job copy, entryID)
+// under s.mu.RLock, release s.mu, then read s.cron.Entries() lock-free to
+// avoid inverting the cron dispatcher's lock order (cron-internal → execute →
+// s.mu.Lock). The result slice is always non-nil (empty bucket → `[]`) for
+// wire-format symmetry with ListJobs / ListAllJobsWithNextRun.
+func (s *Scheduler) ListJobsWithNextRun(plat, chatID string) []JobWithNextRun {
+	s.mu.RLock()
+	bucket := s.jobsByChat[chatJobKey{Platform: plat, ChatID: chatID}]
+	result := make([]JobWithNextRun, 0, len(bucket))
+	ids := make([]robfigcron.EntryID, 0, len(bucket))
+	for _, j := range bucket {
+		result = append(result, JobWithNextRun{Job: *j})
+		ids = append(ids, j.entryID)
+	}
+	s.mu.RUnlock()
+
+	if len(result) == 0 {
+		return result
+	}
+
+	// Single Entries() snapshot read outside s.mu (lock-order safe). For the
+	// small per-chat bucket a direct linear lookup is cheaper than building a
+	// map; entryID 0 means the job is not registered with cron (paused) and
+	// keeps the zero NextRun.
+	entries := s.cron.Entries()
+	for i, id := range ids {
+		if id == 0 {
+			continue
+		}
+		for _, e := range entries {
+			if e.ID == id {
+				result[i].NextRun = e.Next
+				break
+			}
+		}
+	}
+	return result
+}
+
 // ListAllJobsWithNextRun returns every job plus its next scheduled run.
 // Lock strategy: snapshot (*Job, entryID) under s.mu.RLock, release s.mu, then
 // call s.cron.Entries() without holding s.mu. Calling cron.Entries inside
@@ -1662,6 +1711,22 @@ func (s *Scheduler) newCronTickCallback(jobID string) func() {
 }
 
 // findByPrefixLocked finds a job by ID prefix scoped to a specific chat.
+//
+// RETURNS (R249-CR-6, #950): exactly one of —
+//   - (job, nil)                      the prefix uniquely identifies one job
+//     in the (plat, chatID) scope.
+//   - (nil, ErrJobNotFound)           no job in the scope matches the prefix,
+//     OR a full-length ID exists but in a different chat scope (the foreign
+//     job is masked as NotFound so callers can't probe its existence by ID).
+//   - (nil, ErrAmbiguousPrefix)       a short prefix (typically 1-2 chars from
+//     the IM-typed `naozhi cron pause <prefix>` flow) matches ≥2 jobs in the
+//     scope; the wrapped message lists the colliding IDs so the operator can
+//     disambiguate. Callers should errors.Is-check this and surface a
+//     "please disambiguate" hint rather than treating it as NotFound.
+//
+// COMPLEXITY: the partial-prefix scan is linear in the number of jobs in the
+// target chat (s.jobsByChat[chat]), bounded by maxJobsPerChat — NOT the full
+// s.jobs table. The full-ID fast path below is O(1).
 //
 // LOCK: caller MUST hold s.mu (read or write). The body iterates the
 // per-chat slice from s.jobsByChat directly without taking the mutex;

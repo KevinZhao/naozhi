@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 )
 
 // Handler serves GET /api/memory/{slug} for the dashboard "wiki link"
@@ -339,7 +340,15 @@ func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
 // truncated=false. Errors (including os.ErrNotExist) propagate unchanged so
 // the caller's existing branches keep working.
 func readCappedMemoryFile(path string, capBytes int64) ([]byte, bool, error) {
-	f, err := os.Open(path)
+	// R20260531-SEC-5: open with O_NOFOLLOW (via OpenWorkspaceFile) instead
+	// of os.Open. The caller resolves `path` through filepath.EvalSymlinks and
+	// re-checks the projects-dir prefix, but a plain os.Open here leaves a
+	// TOCTOU window in which an attacker swaps the final component for a
+	// symlink between that check and this open. OpenWorkspaceFile refuses a
+	// final-component symlink kernel-atomically. os.ErrNotExist still
+	// propagates unchanged (callers collapse it to "slug not found"); an
+	// ELOOP symlink-swap surfaces as a generic error and fails closed.
+	f, err := dashproject.OpenWorkspaceFile(path)
 	if err != nil {
 		return nil, false, err
 	}

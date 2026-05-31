@@ -6294,9 +6294,17 @@ function mainEmptyHtml() {
 //   totalCost   — sum of s.total_cost across all cached sessions (not gated
 //                 by today, because a cron-heavy workspace accumulates cost
 //                 overnight and wiping at midnight would hide it).
+//   totalPrompts — sum of s.message_count across all cached sessions. The
+//                 SessionSnapshot already ships message_count (the cumulative
+//                 "user" turn count observed by the live process event log),
+//                 so the "已处理 prompt 数" card (R110-P1 #445) is derivable
+//                 client-side without the deferred /api/stats/aggregate
+//                 backend scan. Cumulative tokens still need that backend
+//                 endpoint (no per-session token field exists yet), so the
+//                 token card stays out of scope here.
 //
-// Input shape tolerant: missing last_active / total_cost on a session
-// contributes zero / is skipped rather than NaN-poisoning the totals.
+// Input shape tolerant: missing last_active / total_cost / message_count on a
+// session contributes zero / is skipped rather than NaN-poisoning the totals.
 function computeHomeStats(items, nowMs) {
   const arr = Array.isArray(items) ? items : [];
   const now = typeof nowMs === 'number' ? nowMs : Date.now();
@@ -6304,12 +6312,14 @@ function computeHomeStats(items, nowMs) {
   const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime();
   let todayActive = 0;
   let totalCost = 0;
+  let totalPrompts = 0;
   for (const s of arr) {
     if (!s) continue;
     if (typeof s.last_active === 'number' && s.last_active >= dayStart) todayActive++;
     if (typeof s.total_cost === 'number' && isFinite(s.total_cost)) totalCost += s.total_cost;
+    if (typeof s.message_count === 'number' && isFinite(s.message_count) && s.message_count > 0) totalPrompts += s.message_count;
   }
-  return { todayActive: todayActive, totalCost: totalCost };
+  return { todayActive: todayActive, totalCost: totalCost, totalPrompts: totalPrompts };
 }
 
 // formatHomeCost keeps the $/precision format close to the session card's
@@ -6415,15 +6425,21 @@ function renderRecentSessionsPanel() {
       (ago ? '<span class="recent-time">' + esc(ago) + '</span>' : '') +
       '</button>';
   }).join('');
-  // R110-P1 Home stats strip (Round 147): today-active + total cost. Rendered
-  // above the list so operators see a cumulative signal before scanning the
-  // session rows. Prompts and tokens need backend aggregation — omitted here.
+  // R110-P1 Home stats strip (Round 147 + #445): today-active + processed
+  // prompts + total cost. Rendered above the list so operators see a
+  // cumulative signal before scanning the session rows. The prompt count
+  // sums per-session message_count (already in the snapshot); cumulative
+  // tokens still need the deferred /api/stats/aggregate backend scan.
   const stats = computeHomeStats(items, Date.now());
   const statsHtml =
     '<div class="recent-panel-stats" role="group" aria-label="今日概览">' +
       '<div class="recent-stat">' +
         '<div class="recent-stat-value">' + stats.todayActive + '</div>' +
         '<div class="recent-stat-label">今日活跃会话</div>' +
+      '</div>' +
+      '<div class="recent-stat">' +
+        '<div class="recent-stat-value">' + stats.totalPrompts + '</div>' +
+        '<div class="recent-stat-label">已处理 prompt</div>' +
       '</div>' +
       '<div class="recent-stat">' +
         '<div class="recent-stat-value">' + esc(formatHomeCost(stats.totalCost)) + '</div>' +
