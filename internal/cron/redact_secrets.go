@@ -61,12 +61,16 @@ var secretPrefixes = []secretPrefix{
 	// Anthropic API keys (`sk-ant-…`). The post-prefix tail is variable
 	// length and may include hyphens, so minTail is generous.
 	{prefix: "sk-ant-", minTail: 8},
+	// OpenAI project keys (`sk-proj-…`). Tail is variable length.
+	{prefix: "sk-proj-", minTail: 16},
 	// GitHub PATs / fine-grained tokens / OAuth.
 	{prefix: "ghp_", minTail: 16},
 	{prefix: "gho_", minTail: 16},
 	{prefix: "ghu_", minTail: 16},
 	{prefix: "ghs_", minTail: 16},
 	{prefix: "ghr_", minTail: 16},
+	// GitHub fine-grained personal access tokens (`github_pat_…`).
+	{prefix: "github_pat_", minTail: 16},
 	// GitLab personal-access tokens.
 	{prefix: "glpat-", minTail: 16},
 	// AWS access key IDs (`AKIA…` / `ASIA…` for STS). Always 16 base32
@@ -78,6 +82,8 @@ var secretPrefixes = []secretPrefix{
 	{prefix: "xoxp-", minTail: 16},
 	{prefix: "xoxa-", minTail: 16},
 	{prefix: "xoxs-", minTail: 16},
+	// HuggingFace tokens (`hf_…`).
+	{prefix: "hf_", minTail: 16},
 }
 
 // secretRedactedMarker replaces matched secret bytes. Distinct from
@@ -158,10 +164,10 @@ func isSecretTokenByte(b byte) bool {
 // of any registered prefix appears in s. Lets the common no-secret path
 // skip the full prefix walk + string Builder allocation.
 func mayContainSecretPrefix(s string) bool {
-	// First-byte set: 's', 'g', 'A', 'x'.
+	// First-byte set: 's', 'g', 'A', 'x', 'h'.
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
-		case 's', 'g', 'A', 'x':
+		case 's', 'g', 'A', 'x', 'h':
 			return true
 		}
 	}

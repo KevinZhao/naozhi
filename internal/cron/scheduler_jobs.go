@@ -960,6 +960,31 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 			return nil, err
 		}
 	}
+	// R171023-SEC-10: UpdateJob is a public Scheduler entry point. The
+	// dashboard PATCH handler validates NotifyPlatform/NotifyChatID at the
+	// HTTP edge, but a non-dashboard caller (test, CLI, future IM op) can
+	// reach UpdateJob directly and bypass those checks. Mirror the same
+	// length + UTF-8 + containsCronUnsafe guards that validateJobFields
+	// applies on the AddJob path so cron_jobs.json cannot receive oversized
+	// or log-injection bytes via this path.
+	if upd.NotifyPlatform != nil {
+		v := *upd.NotifyPlatform
+		if len(v) > MaxNotifyTargetLen {
+			return nil, fmt.Errorf("cron: notify_platform too long: %d bytes > %d cap", len(v), MaxNotifyTargetLen)
+		}
+		if !utf8.ValidString(v) || containsCronUnsafe(v) {
+			return nil, fmt.Errorf("cron: notify_platform contains invalid bytes")
+		}
+	}
+	if upd.NotifyChatID != nil {
+		v := *upd.NotifyChatID
+		if len(v) > MaxNotifyTargetLen {
+			return nil, fmt.Errorf("cron: notify_chat_id too long: %d bytes > %d cap", len(v), MaxNotifyTargetLen)
+		}
+		if !utf8.ValidString(v) || containsCronUnsafe(v) {
+			return nil, fmt.Errorf("cron: notify_chat_id contains invalid bytes")
+		}
+	}
 
 	// R239-GO-4: critical section uses defer Unlock so any future return
 	// path added inside this block stays correctly unlocked. The closure

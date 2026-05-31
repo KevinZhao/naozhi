@@ -429,16 +429,46 @@ func TestBuildExcerptFromHistory_SoftCap(t *testing.T) {
 		})
 	}
 	got := buildExcerptFromHistory(entries)
-	// Cap is a soft cap: result MUST NOT exceed cap + ellipsis bytes
-	// (the marker is appended once when the cap fires).
-	maxLen := autoTitlerExcerptSoftCapBytes + len("\n…")
-	if len(got) > maxLen {
-		t.Errorf("buildExcerptFromHistory exceeded soft cap: got %d bytes, max %d", len(got), maxLen)
+	// After R171023-CR-004 the "…" byte width is included in the need
+	// calculation, so the result must stay within the soft cap exactly.
+	if len(got) > autoTitlerExcerptSoftCapBytes {
+		t.Errorf("buildExcerptFromHistory exceeded soft cap: got %d bytes, max %d", len(got), autoTitlerExcerptSoftCapBytes)
 	}
 	// Truncation marker must be present so downstream review can spot
 	// the cut.  Confirms the break-on-cap branch fired.
 	if !strings.HasSuffix(got, "…") {
 		t.Errorf("expected truncation ellipsis at tail, got tail %q", got[max(0, len(got)-32):])
+	}
+}
+
+// TestBuildExcerptFromHistory_SoftCapBoundary locks R171023-CR-004: the "…"
+// rune width (3 bytes) must be included in the need calculation so the
+// builder never writes past autoTitlerExcerptSoftCapBytes.  We construct an
+// input whose last entry, if fully appended, would push the buffer to exactly
+// cap+1, triggering truncation.  After truncation the result must be
+// ≤ autoTitlerExcerptSoftCapBytes and end with "…".
+func TestBuildExcerptFromHistory_SoftCapBoundary(t *testing.T) {
+	t.Parallel()
+
+	const cap = autoTitlerExcerptSoftCapBytes
+	// First entry fills the buffer to cap-4 bytes (leaves exactly 4 bytes
+	// of headroom: 1 newline + 3 for "…").
+	fill := strings.Repeat("x", cap-4)
+	// Second entry is 1 byte — newline + entry would be 2 bytes which,
+	// together with the 3-byte "…", sums to 5, exceeding the 4-byte
+	// headroom and triggering truncation.
+	entries := []SystemEventEntry{
+		{Type: "user", Summary: fill},
+		{Type: "user", Summary: "y"},
+	}
+
+	got := buildExcerptFromHistory(entries)
+
+	if len(got) > cap {
+		t.Errorf("result length %d exceeds soft cap %d (R171023-CR-004)", len(got), cap)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("expected truncation ellipsis at tail, got %q", got[max(0, len(got)-16):])
 	}
 }
 
