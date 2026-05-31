@@ -4308,11 +4308,11 @@ func TestDashboardHTML_R110P1_HomePanelStatsStyles(t *testing.T) {
 		}
 	}
 
-	// 2-column grid is the intended layout (today active + cost). Anchor
-	// the declaration inside the .recent-panel-stats rule so a future
-	// single-column reflow would trip the check.
-	if ok, _ := regexp.MatchString(`\.recent-panel-stats\{[^}]*grid-template-columns:1fr 1fr`, css); !ok {
-		t.Error(".recent-panel-stats must be a 2-column grid (today active + total cost)")
+	// 3-column grid is the intended layout (today active + prompt count +
+	// total cost). Anchor the declaration inside the .recent-panel-stats
+	// rule so a future single-column reflow would trip the check.
+	if ok, _ := regexp.MatchString(`\.recent-panel-stats\{[^}]*grid-template-columns:repeat\(3,1fr\)`, css); !ok {
+		t.Error(".recent-panel-stats must be a 3-column grid (today active + prompt count + total cost)")
 	}
 	// Tabular-nums on the stat value so numbers align optically when
 	// count of active sessions crosses digit boundaries (1 → 10).
