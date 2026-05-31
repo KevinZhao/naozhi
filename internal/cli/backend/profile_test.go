@@ -26,7 +26,14 @@ func withCleanRegistry(t *testing.T, fn func()) {
 	registryMu.Lock()
 	savedRegistry := registry
 	savedOrder := nextOrder
-	savedOnce := defaultsOnce
+	// Snapshot whether the saved registry already holds the defaults; this
+	// stands in for "defaultsOnce has fired" — every production fire path
+	// routes through EnsureDefaults/RegisterDefaults, both of which populate
+	// claude+kiro. We restore the Once to a matching fired/unfired state on
+	// cleanup (a sync.Once cannot be copied — copylocks — so we rebuild it).
+	_, savedHasClaude := savedRegistry["claude"]
+	_, savedHasKiro := savedRegistry["kiro"]
+	savedOnceFired := savedHasClaude && savedHasKiro
 	registry = map[string]registryEntry{}
 	nextOrder = 0
 	defaultsOnce = sync.Once{}
@@ -36,7 +43,15 @@ func withCleanRegistry(t *testing.T, fn func()) {
 		registryMu.Lock()
 		registry = savedRegistry
 		nextOrder = savedOrder
-		defaultsOnce = savedOnce
+		// Reset to a fresh Once in place (assigning a zero-value literal is
+		// not a copylocks violation), then — if the saved registry was
+		// already bootstrapped — fire it with a no-op so a later
+		// EnsureDefaults stays a no-op against the restored (populated)
+		// registry rather than panicking on duplicate.
+		defaultsOnce = sync.Once{}
+		if savedOnceFired {
+			defaultsOnce.Do(func() {})
+		}
 		registryMu.Unlock()
 	})
 
