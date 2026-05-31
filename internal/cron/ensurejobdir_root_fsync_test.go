@@ -82,3 +82,41 @@ func TestEnsureJobDir_RetriesAfterFailure(t *testing.T) {
 		t.Fatal("cache must not be populated after a MkdirAll failure (would block retry)")
 	}
 }
+
+// TestEnsureJobDir_RejectsPreplantedSymlink pins R250531-SEC-4 (#1504): a local
+// attacker who pre-creates runs/<jobID> as a symlink pointing outside s.root
+// (before the job's first Append) must NOT be able to redirect run-record
+// writes there. MkdirAll silently succeeds on an existing symlink-to-dir, so
+// ensureJobDir must Lstat the per-job dir and refuse non-directory entries,
+// mirroring the runs/ root guard in newRunStore.
+func TestEnsureJobDir_RejectsPreplantedSymlink(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t, 10, 0)
+
+	// Attacker-controlled destination outside the runs root.
+	evil := t.TempDir()
+
+	jobID := "deadbeefdeadbeef"
+	dir := filepath.Join(s.root, jobID)
+	if err := os.Symlink(evil, dir); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	err := s.ensureJobDir(jobID, dir)
+	if err == nil {
+		t.Fatal("ensureJobDir must reject a pre-planted symlink per-job dir")
+	}
+
+	// The redirect target must stay empty: nothing should have been written
+	// through the symlink, and the cache must not be poisoned.
+	entries, rerr := os.ReadDir(evil)
+	if rerr != nil {
+		t.Fatalf("read evil dir: %v", rerr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("symlink target was written through: %d entries", len(entries))
+	}
+	if _, ok := s.jobDirEnsured.Load(jobID); ok {
+		t.Fatal("cache must not be populated after rejecting a symlink dir")
+	}
+}
