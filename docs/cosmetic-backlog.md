@@ -364,3 +364,9 @@
 - [R20260531-PERF-6] Snapshot 无条件 proc.TurnAgents() 拷贝,零 subagent 时可先查 count 跳过(Process 未暴露 TurnAgentCount,需先加方法) — internal/session/managed_query.go:217
 - [R20260531-ARCH-3] cron SessionStatus 三值靠 iota 顺序匹配 session,已被 cron_router_adapter init panic 覆盖,仅文档措辞待对齐 — internal/cron/agent_opts.go:36
 - [R20260531-ARCH-5] cron 测试包反向 import session,可改用包内 fakeRouter 强化"生产零依赖"不变量 — internal/cron/scheduler_test.go:12
+- [R20260531A-SEC-4] deniedExtraFlags 用 denylist 而非 allowlist — internal/cli/protocol_claude.go:172 (注释明确 R219-SEC-1 有意决策)
+- [R20260531A-SEC-9] resolveExistingAncestor TOCTOU 窗口 — internal/server/agent_tailer_pathcheck.go:69 (注释标 defence-in-depth 有意)
+- [R20260531A-SEC-13] cron list 暴露 work_dir 绝对路径给认证用户 — internal/dashboard/cron/handlers.go:999 (P3, 与 #1498 同源)
+- [R20260531A-SEC-7] publicTmpEnabled 无启动告警 — internal/dashboard/project/files.go:103
+- [R20260531A-ARCH-6] dashboard 错误响应 http.Error/errResp 混用 31 站点 — internal/server (R247-ARCH-3 已规划分批迁移)
+- [R20260531A-PERF-12] filterDeniedFlags 命中时两次遍历 ExtraArgs — internal/cli/protocol_claude.go:190 (非热路径)
