@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestListAllJobsWithNextRun_PoolReusable poll-loops the dashboard list
@@ -272,6 +273,45 @@ func TestNextRun_LockOrderAndResult(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+// TestLocationMatchesPreviewLocation guards the #835 dup-code consolidation:
+// Location() now delegates to previewLocation() so the timezone-decision
+// policy lives in one place. This pins that the two stay byte-identical
+// across all three receiver states (nil → UTC, unset → Local, configured)
+// so a future change to one can't silently diverge from the other — the
+// "dashboard preview / Location stay in agreement" invariant.
+func TestLocationMatchesPreviewLocation(t *testing.T) {
+	// nil receiver
+	var nilS *Scheduler
+	if got, want := nilS.Location(), nilS.previewLocation(); got != want {
+		t.Fatalf("nil receiver: Location()=%v previewLocation()=%v", got, want)
+	}
+	if nilS.Location() != time.UTC {
+		t.Fatalf("nil receiver Location() = %v, want UTC", nilS.Location())
+	}
+
+	// unset location → time.Local
+	sUnset := &Scheduler{}
+	if got, want := sUnset.Location(), sUnset.previewLocation(); got != want {
+		t.Fatalf("unset location: Location()=%v previewLocation()=%v", got, want)
+	}
+	if sUnset.Location() != time.Local {
+		t.Fatalf("unset location Location() = %v, want time.Local", sUnset.Location())
+	}
+
+	// configured location wins
+	tokyo, err := time.LoadLocation("Asia/Tokyo")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	sCfg := &Scheduler{location: tokyo}
+	if got, want := sCfg.Location(), sCfg.previewLocation(); got != want {
+		t.Fatalf("configured: Location()=%v previewLocation()=%v", got, want)
+	}
+	if sCfg.Location() != tokyo {
+		t.Fatalf("configured Location() = %v, want %v", sCfg.Location(), tokyo)
+	}
 }
 
 // TestWithJobByID_ReturnsValueCopy guards R242-GO-3 (#548). The pointer

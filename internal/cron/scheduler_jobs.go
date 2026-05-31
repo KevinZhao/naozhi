@@ -1201,14 +1201,15 @@ func (s *Scheduler) PreviewScheduleN(schedule string, n int) ([]time.Time, error
 // Safe to call on a nil *Scheduler: returns UTC (matches previewLocation's
 // nil branch so dashboard preview / Location calls stay in agreement during
 // the bootstrap window when scheduler is not yet wired). R219-CR-6.
+//
+// #835 (dup-code): the resolution (nil→UTC, unset→Local, else configured)
+// was previously open-coded identically to previewLocation, so a future
+// change to the nil/unset fallback policy had to be made in two places or
+// the two timezone-decision points would silently diverge — exactly the
+// "dashboard preview / Location stay in agreement" invariant this godoc
+// promises. Delegate to the single source of truth.
 func (s *Scheduler) Location() *time.Location {
-	if s == nil {
-		return time.UTC
-	}
-	if s.location == nil {
-		return time.Local
-	}
-	return s.location
+	return s.previewLocation()
 }
 
 // withJobByPrefix is the IM-prefix counterpart to withJobByID. It collapses
