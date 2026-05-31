@@ -50,3 +50,31 @@ func (r *Router) GetWorkspace(chatKey string) string {
 	}
 	return r.workspace
 }
+
+// WorkspaceRoots returns the deduplicated set of workspace roots this
+// router knows about: the default workspace plus every per-chat
+// override value. The attachment-gc daemon unions this with bound
+// project paths to find every <root>/.naozhi/attachments dir to sweep
+// (docs/rfc/attachment-gc-daemon.md §4.4). Roots are returned raw (not
+// symlink-resolved) — the caller normalises + dedupes across sources.
+func (r *Router) WorkspaceRoots() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	seen := make(map[string]struct{}, len(r.workspaceOverrides)+1)
+	out := make([]string, 0, len(r.workspaceOverrides)+1)
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	add(r.workspace)
+	for _, ws := range r.workspaceOverrides {
+		add(ws)
+	}
+	return out
+}

@@ -51,6 +51,9 @@ type DaemonDeps struct {
 	Router SystemSessionRouter
 	Runner Runner
 	Cfg    DaemonConfig
+	// WorkspaceRoots is non-nil only for daemons that sweep workspace
+	// attachment dirs (attachment-gc). Other daemons ignore it.
+	WorkspaceRoots WorkspaceRootLister
 }
 
 // builtinDaemons is the immutable list of compiled-in daemons.  Order
@@ -65,6 +68,12 @@ var builtinDaemons = []builtinDaemonFactory{
 		Name: "auto-titler",
 		Build: func(deps DaemonDeps) (Daemon, error) {
 			return newAutoTitler(deps)
+		},
+	},
+	{
+		Name: "attachment-gc",
+		Build: func(deps DaemonDeps) (Daemon, error) {
+			return newAttachmentGC(deps)
 		},
 	},
 }
