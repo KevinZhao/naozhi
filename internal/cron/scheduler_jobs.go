@@ -1493,8 +1493,68 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 }
 
 // ResumeJob resumes a paused job by ID prefix.
+//
+// R20260531070014-CR-2: mirror ResumeJobByID's rollbackOnPersistErr contract
+// (#1226). resumeJobLocked → registerJob mutates j.entryID + j.cachedPeriod +
+// j.cachedSched and then flips j.Paused=false BEFORE persistJobsLocked runs.
+// A persist failure after that op-success path would leave in-memory state with
+// a live cron entry + Paused=false while disk still shows Paused=true — on
+// restart the scheduler re-registers the schedule on top of the surviving
+// runtime entry, producing a double-fire. Capture the pre-op state under s.mu
+// and install a rollback that removes the cron entry and restores
+// (entryID, cachedPeriod, cachedSched, Paused) so in-memory matches disk.
+//
+// Lock-order: rollback runs under s.mu; calling s.cron.Remove there would
+// send on the unbuffered c.remove channel drained only by the cron-tick
+// goroutine, which itself calls s.mu.RLock → deadlock. Mirror ResumeJobByID's
+// removeEntryID pattern: capture the freshly-registered entryID inside the
+// rollback closure and call s.cron.Remove AFTER withJobByPrefix returns
+// (s.mu released).
 func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
-	return s.withJobByPrefix(idPrefix, plat, chatID, s.resumeJobLocked, nil)
+	var prevEntryID robfigcron.EntryID
+	var prevCachedPeriod time.Duration
+	var prevCachedSched robfigcron.Schedule
+	var prevPaused bool
+	var captured bool
+	// removeEntryID is non-zero only when rollback fired; cron.Remove must
+	// be called after withJobByPrefix returns (s.mu released) to avoid
+	// the lock-order inversion described above.
+	var removeEntryID robfigcron.EntryID
+	op := func(j *Job) error {
+		// Snapshot under s.mu so the rollback restores the exact pre-op
+		// view; resumeJobLocked → registerJob mutates entryID +
+		// cachedPeriod + cachedSched only after this read.
+		prevEntryID = j.entryID
+		prevCachedPeriod = j.cachedPeriod
+		prevCachedSched = j.cachedSched
+		prevPaused = j.Paused
+		captured = true
+		return s.resumeJobLocked(j)
+	}
+	rollback := func(j *Job) {
+		// Only restore if op actually ran and captured the pre-op view.
+		if !captured {
+			return
+		}
+		// Capture the freshly-registered entryID for removal OUTSIDE s.mu.
+		// Do NOT call s.cron.Remove here — we are under s.mu and cron.Remove
+		// sends on an unbuffered channel drained only by the cron-tick goroutine
+		// that itself acquires s.mu.RLock → deadlock.
+		removeEntryID = j.entryID
+		j.entryID = prevEntryID
+		j.cachedPeriod = prevCachedPeriod
+		j.cachedSched = prevCachedSched
+		j.Paused = prevPaused
+	}
+	snap, err := s.withJobByPrefix(idPrefix, plat, chatID, op, nil, rollback)
+	// Remove the orphaned cron entry now that s.mu is released. removeEntryID
+	// is non-zero only when rollback fired (persist failed after op succeeded
+	// and registered a new entry). robfig/cron.Remove(0) is a no-op, but being
+	// explicit about the guard makes the intent clear.
+	if removeEntryID != 0 {
+		s.cron.Remove(removeEntryID)
+	}
+	return snap, err
 }
 
 // NextRun returns the next scheduled run time for a job. R247-GO-9
