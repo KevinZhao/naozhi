@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>资产浏览器 移动端 Mockup — naozhi dashboard</title>
+<!--
+  cc-asset-browser RFC §3.6 移动端界面 mockup。
+  方案：底部 Tab Bar（Activity Bar 的移动塌缩）+ 资产全屏 + kind 顶部横向 tab + 原文全屏抽屉。
+  复用 naozhi 移动端既有范式：sidebar 全屏切换 / fv-drawer width:100% / safe-area-inset。
+  配色复用 dashboard.html 的 --nz-* token。纯静态、无依赖，仅作设计评审。
+  外层用一个手机外框模拟 ~390px 视口；真实实现走 @media(max-width:768px)。
+-->
+<style>
+:root{
+  --nz-bg-0:#0d1117;--nz-bg-1:#161b22;--nz-bg-2:#21262d;--nz-border:#30363d;
+  --nz-text:#c9d1d9;--nz-text-strong:#f0f6fc;--nz-text-mute:#8b949e;
+  --nz-text-dim:#6e7681;--nz-text-faint:#484f58;
+  --nz-accent:#58a6ff;--nz-blue:#1f6feb;--nz-green:#3fb950;
+  --nz-red:#da3633;--nz-amber:#d29922;--nz-clawd-rust:#d97757;
+  --nz-focus:#58a6ff;
+  --nz-font-mono:'SF Mono',SFMono-Regular,ui-monospace,Consolas,'Liberation Mono',Menlo,monospace;
+}
+:root[data-theme="light"]{
+  --nz-bg-0:#ffffff;--nz-bg-1:#f6f8fa;--nz-bg-2:#eaeef2;--nz-border:#d0d7de;
+  --nz-text:#1f2328;--nz-text-strong:#0d1117;--nz-text-mute:#656d76;
+  --nz-text-dim:#8b949e;--nz-text-faint:#afb8c1;
+  --nz-accent:#0969da;--nz-blue:#0969da;--nz-green:#1a7f37;
+  --nz-red:#cf222e;--nz-amber:#9a6700;--nz-focus:#0969da;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif;background:#05070b;color:var(--nz-text);font-size:15px;line-height:1.5;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:24px 12px 60px;gap:16px}
+:focus-visible{outline:2px solid var(--nz-focus);outline-offset:2px}
+
+.caption{color:#8b949e;font-size:13px;text-align:center;max-width:420px;line-height:1.7}
+.caption b{color:#f0f6fc}
+.caption button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px;font-family:inherit;margin:0 4px}
+
+/* ===== 手机外框（模拟视口，真实走 @media） ===== */
+.phone{width:390px;max-width:100%;height:780px;background:var(--nz-bg-0);border:10px solid #1c2128;border-radius:38px;overflow:hidden;position:relative;box-shadow:0 18px 50px rgba(0,0,0,.55);display:flex;flex-direction:column}
+.notch{position:absolute;top:0;left:50%;transform:translateX(-50%);width:150px;height:26px;background:#1c2128;border-radius:0 0 16px 16px;z-index:60}
+
+/* ===== 顶栏 ===== */
+.topbar{flex-shrink:0;padding:34px 16px 10px;border-bottom:1px solid var(--nz-border);display:flex;align-items:center;gap:10px}
+.topbar h1{font-size:17px;color:var(--nz-text-strong);font-weight:600}
+.topbar .sp{flex:1}
+.topbar .scope{font-size:10px;color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:999px;padding:2px 8px;display:inline-flex;align-items:center;gap:4px}
+.topbar .scope .dot{width:5px;height:5px;border-radius:50%;background:var(--nz-green)}
+.topbar .ic{background:none;border:none;color:var(--nz-text-mute);cursor:pointer;width:30px;height:30px;display:flex;align-items:center;justify-content:center}
+.topbar .ic svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2}
+
+/* ===== kind 横向 tab（可横滑） ===== */
+.kind-tabs{flex-shrink:0;display:flex;gap:6px;padding:9px 12px;overflow-x:auto;border-bottom:1px solid var(--nz-border);scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.kind-tabs::-webkit-scrollbar{display:none}
+.kind-tab{flex-shrink:0;padding:6px 13px;border-radius:999px;font-size:13px;color:var(--nz-text-mute);cursor:pointer;border:1px solid var(--nz-border);white-space:nowrap;background:var(--nz-bg-1);display:flex;align-items:center;gap:5px}
+.kind-tab.active{background:var(--nz-accent);color:#fff;border-color:var(--nz-accent)}
+.kind-tab .kc{font-size:10px;opacity:.8;font-variant-numeric:tabular-nums}
+
+/* ===== 搜索 ===== */
+.search{flex-shrink:0;display:flex;align-items:center;gap:8px;margin:9px 12px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:9px;padding:8px 11px}
+.search svg{width:15px;height:15px;stroke:var(--nz-text-dim);fill:none;stroke-width:2}
+.search input{flex:1;background:none;border:none;color:var(--nz-text);font-family:inherit;font-size:14px;outline:none}
+
+/* ===== 列表 ===== */
+.list{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.grp{display:flex;align-items:center;gap:8px;padding:9px 14px;font-size:12px;color:var(--nz-text-mute);background:var(--nz-bg-0);position:sticky;top:0;cursor:pointer;user-select:none;border-bottom:1px solid var(--nz-bg-2);z-index:1}
+.grp .chev{width:12px;height:12px;stroke:var(--nz-text-dim);fill:none;stroke-width:2.2;transition:transform .15s;flex-shrink:0}
+.grp.collapsed .chev{transform:rotate(-90deg)}
+.grp .gl{font-weight:600;color:var(--nz-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.grp .src-chip{font-size:10px;padding:1px 7px;border-radius:999px;border:1px solid var(--nz-border);flex-shrink:0}
+.src-user{color:var(--nz-green);border-color:rgba(63,185,80,.4)!important}
+.src-project{color:var(--nz-accent);border-color:rgba(88,166,255,.4)!important}
+.src-plugin{color:var(--nz-clawd-rust);border-color:rgba(217,119,87,.4)!important}
+.grp .gcount{margin-left:auto;font-size:11px;color:var(--nz-text-dim);font-variant-numeric:tabular-nums;flex-shrink:0}
+.grp-items.collapsed{display:none}
+.row{display:flex;flex-direction:column;gap:3px;padding:11px 14px 11px 22px;border-bottom:1px solid var(--nz-bg-2);cursor:pointer;border-left:3px solid transparent}
+.row:active{background:var(--nz-bg-1)}
+.row .rname{font-size:14px;color:var(--nz-text-strong);font-weight:500;font-family:var(--nz-font-mono);word-break:break-all}
+.row .rdesc{font-size:12px;color:var(--nz-text-mute);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.row .nodesc{color:var(--nz-text-faint);font-style:italic}
+.row .chev-r{align-self:flex-end;margin-top:-18px;color:var(--nz-text-faint)}
+
+/* plugins 卡片 */
+.cards{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
+.card{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:10px;padding:13px}
+.card h3{font-size:14px;color:var(--nz-text-strong);font-family:var(--nz-font-mono);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.card .ver{font-size:10px;color:var(--nz-text-mute);background:var(--nz-bg-2);border-radius:4px;padding:1px 6px}
+.card .repo{font-size:11px;color:var(--nz-accent);margin-top:5px;word-break:break-all}
+.card .meta{font-size:10px;color:var(--nz-text-dim);margin-top:6px}
+.card .counts{margin-top:9px;display:flex;gap:6px;flex-wrap:wrap}
+.card .counts .c{font-size:11px;background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:999px;padding:2px 9px;color:var(--nz-text)}
+.card .counts .c b{color:var(--nz-accent)}
+
+/* ===== 底部 Tab Bar（Activity Bar 的移动塌缩） ===== */
+.tabbar{flex-shrink:0;display:flex;border-top:1px solid var(--nz-border);background:var(--nz-bg-1);padding-bottom:env(safe-area-inset-bottom)}
+.tabbar button{flex:1;background:none;border:none;color:var(--nz-text-mute);cursor:pointer;padding:8px 0 10px;display:flex;flex-direction:column;align-items:center;gap:3px;font-size:10px;position:relative}
+.tabbar button svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.7}
+.tabbar button.active{color:var(--nz-accent)}
+.tabbar button.soon{opacity:.4}
+.tabbar button .tb-badge{position:absolute;top:4px;left:50%;margin-left:4px;min-width:15px;height:15px;padding:0 3px;border-radius:8px;background:var(--nz-blue);color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center}
+
+/* ===== 原文全屏抽屉（复用 fv-drawer width:100% 移动范式） ===== */
+.sheet{position:absolute;inset:0;background:var(--nz-bg-0);z-index:50;display:flex;flex-direction:column;transform:translateX(100%);transition:transform .24s ease}
+.sheet.open{transform:translateX(0)}
+.sheet-head{flex-shrink:0;padding:34px 14px 10px;border-bottom:1px solid var(--nz-border);display:flex;align-items:center;gap:10px}
+.sheet-head .back{background:none;border:none;color:var(--nz-accent);cursor:pointer;display:flex;align-items:center;gap:4px;font-size:14px;font-family:inherit;flex-shrink:0}
+.sheet-head .back svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2.2}
+.sheet-head .st{flex:1;min-width:0}
+.sheet-head .stitle{font-size:15px;color:var(--nz-text-strong);font-weight:600;font-family:var(--nz-font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sheet-head .ssub{font-size:11px;color:var(--nz-text-dim);font-family:var(--nz-font-mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sheet-body{flex:1;overflow-y:auto;padding:14px;-webkit-overflow-scrolling:touch}
+.sheet-body .from{display:inline-block;font-size:11px;color:var(--nz-clawd-rust);background:rgba(217,119,87,.12);border:1px solid rgba(217,119,87,.35);border-radius:999px;padding:2px 9px;margin-bottom:12px}
+.sheet-body .fm{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-left:3px solid var(--nz-accent);border-radius:6px;padding:10px 12px;font-family:var(--nz-font-mono);font-size:12px;color:var(--nz-text-mute);margin-bottom:14px;white-space:pre-wrap}
+.sheet-body .fm .k{color:var(--nz-accent)}
+.sheet-body .md h1{font-size:18px;color:var(--nz-text-strong);margin:0 0 10px}
+.sheet-body .md h2{font-size:15px;color:var(--nz-text-strong);margin:15px 0 6px}
+.sheet-body .md p{font-size:13px;margin:0 0 10px;color:var(--nz-text)}
+.sheet-body .md ul{margin:0 0 10px 18px;font-size:13px}
+.sheet-body .md code{font-family:var(--nz-font-mono);font-size:12px;background:var(--nz-bg-2);border-radius:4px;padding:1px 5px}
+.sheet-body .anchor-note{font-size:11px;color:var(--nz-amber);background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.3);border-radius:6px;padding:7px 10px;margin-bottom:12px}
+.sheet-body pre.raw{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;padding:12px;font-family:var(--nz-font-mono);font-size:12px;overflow-x:auto;white-space:pre;line-height:1.6}
+.sheet-body pre.raw .hl{background:rgba(210,153,34,.22);display:block;margin:0 -12px;padding:0 12px;border-left:3px solid var(--nz-amber)}
+</style>
+</head>
+<body>
+
+<div class="caption">
+  <b>资产浏览器 · 移动端</b>（cc-asset-browser RFC §3.6）<br>
+  底部 Tab Bar（竖条的移动塌缩）· 资产全屏 · kind 顶部横滑 tab · 原文全屏滑入<br>
+  <button onclick="toggleTheme()">切换明/暗</button>
+  <span style="color:var(--nz-text-faint)">真实实现走 @media(max-width:768px)，复用 sidebar 全屏 + fv-drawer 范式</span>
+</div>
+
+<div class="phone">
+  <div class="notch"></div>
+
+  <!-- 顶栏 -->
+  <div class="topbar">
+    <h1>已安装资产</h1>
+    <span class="sp"></span>
+    <span class="scope"><span class="dot"></span>本节点</span>
+    <button class="ic" title="刷新" onclick="render()">
+      <svg viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.5 9a9 9 0 0114.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0020.5 15"/></svg>
+    </button>
+  </div>
+
+  <!-- kind tab -->
+  <div class="kind-tabs" id="kindTabs">
+    <div class="kind-tab active" data-tab="skill">Skills <span class="kc">806</span></div>
+    <div class="kind-tab" data-tab="plugin">Plugins <span class="kc">4</span></div>
+    <div class="kind-tab" data-tab="agent">Agents <span class="kc">64</span></div>
+    <div class="kind-tab" data-tab="command">Commands <span class="kc">81</span></div>
+    <div class="kind-tab" data-tab="hook">Hooks <span class="kc">7</span></div>
+    <div class="kind-tab" data-tab="mcp">MCP <span class="kc">5</span></div>
+    <div class="kind-tab" data-tab="memory">Memory <span class="kc">28</span></div>
+  </div>
+
+  <!-- 搜索 -->
+  <label class="search">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <input id="q" placeholder="搜索 name…" oninput="render()">
+  </label>
+
+  <!-- 列表 / 卡片 -->
+  <div class="list" id="list"></div>
+  <div class="cards" id="cards" style="display:none"></div>
+
+  <!-- 底部 Tab Bar -->
+  <nav class="tabbar">
+    <button onclick="mobileNav('chat')">
+      <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+      <span class="tb-badge">3</span>会话
+    </button>
+    <button class="active">
+      <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      资产
+    </button>
+    <button class="soon" onclick="alert('（mockup）定时任务：后续迁移')">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 1.5"/><path d="M5 3L2 6"/><path d="M22 6l-3-3"/></svg>
+      定时
+    </button>
+    <button class="soon" onclick="alert('（mockup）历史：后续迁移')">
+      <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 109-9 9.75 9.75 0 00-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>
+      历史
+    </button>
+  </nav>
+
+  <!-- 原文全屏抽屉 -->
+  <div class="sheet" id="sheet">
+    <div class="sheet-head">
+      <button class="back" onclick="closeSheet()"><svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"/></svg>返回</button>
+      <div class="st"><div class="stitle" id="sTitle">—</div><div class="ssub" id="sSub"></div></div>
+    </div>
+    <div class="sheet-body" id="sBody"></div>
+  </div>
+
+</div>
+
+<script>
+const DATA={
+  skill:{groups:[
+    {src:'user',label:'用户级',chip:'~/.claude/skills',collapsed:false,items:[
+      {name:'learned',desc:'自动沉淀的项目模式与编码习惯',rel:'skills/learned/SKILL.md'},
+    ]},
+    {src:'project',label:'项目级',chip:'naozhi/.claude',collapsed:false,items:[
+      {name:'dev-workflow',desc:'功能必走设计+独立评审；bug fix 按 ≤20行/≤3文件分流；发布走 tag→Release',rel:'.claude/skills/dev-workflow/SKILL.md'},
+      {name:'triage-findings',desc:'把 review 发现分类为 BLOCKER/重要/建议并整合到 TODO',rel:'.claude/skills/triage-findings/SKILL.md'},
+    ]},
+    {src:'plugin',label:'ecc@ecc',chip:'plugin',collapsed:true,count:249,items:[
+      {name:'deep-research',desc:'Deep research harness — fan-out web searches, fetch, adversarially verify, synthesize.',rel:'skills/deep-research/SKILL.md',from:'ecc@ecc'},
+      {name:'code-review',desc:'Review local diff or GitHub PR for correctness & cleanups.',rel:'skills/code-review/SKILL.md',from:'ecc@ecc'},
+      {name:'malformed-example',desc:'',rel:'skills/malformed-example/SKILL.md',from:'ecc@ecc',nodesc:true},
+    ]},
+  ]},
+  agent:{groups:[{src:'plugin',label:'ecc@ecc',chip:'plugin',collapsed:false,count:64,items:[
+    {name:'architect',desc:'System design, scalability, technical decisions.',rel:'agents/architect.md',from:'ecc@ecc'},
+    {name:'go-reviewer',desc:'Idiomatic Go, concurrency, error handling.',rel:'agents/go-reviewer.md',from:'ecc@ecc'},
+  ]}]},
+  command:{groups:[{src:'plugin',label:'ecc@ecc',chip:'plugin',collapsed:false,count:81,items:[
+    {name:'code-review',desc:'Code review — local changes or GitHub PR',rel:'commands/code-review.md',from:'ecc@ecc'},
+    {name:'plan',desc:'Restate requirements, assess risks, create plan.',rel:'commands/plan.md',from:'ecc@ecc'},
+  ]}]},
+  hook:{groups:[{src:'plugin',label:'ecc@ecc',chip:'plugin',collapsed:false,count:7,items:[
+    {name:'pre:bash:dispatcher',desc:'PreToolUse Bash — quality/tmux/push/GateGuard 预检分发',rel:'hooks/hooks.json',from:'ecc@ecc',anchor:'pre:bash:dispatcher'},
+    {name:'pre:write:doc-warning',desc:'PreToolUse Write — 文档创建前 fact-forcing',rel:'hooks/hooks.json',from:'ecc@ecc',anchor:'pre:write:doc-warning'},
+  ]}]},
+  mcp:{groups:[{src:'user',label:'用户级',chip:'~/.claude/.mcp.json',collapsed:false,items:[
+    {name:'playwright',desc:'npx · 浏览器自动化',rel:'.mcp.json',anchor:'playwright'},
+    {name:'context7',desc:'最新库文档与代码示例',rel:'.mcp.json',anchor:'context7'},
+    {name:'github',desc:'GitHub PR/issue/repo 操作',rel:'.mcp.json',anchor:'github'},
+  ]}]},
+  memory:{groups:[{src:'user',label:'项目 memory · naozhi',chip:'projects/…/memory',collapsed:false,items:[
+    {name:'project_group_chat_policy',desc:'群聊默认 mention_only；私聊不变',rel:'memory/project_group_chat_policy.md'},
+    {name:'feedback_deploy_systemctl',desc:'部署用 sudo systemctl restart naozhi',rel:'memory/feedback_deploy_systemctl.md'},
+  ]}]},
+};
+const PLUGINS=[
+  {id:'ecc@ecc',ver:'2.0.0-rc.1',repo:'github:affaan-m/everything-claude-code',scope:'user',at:'2026-05-30',sha:'64cd1ba',counts:{skill:249,agent:64,command:81,hook:7}},
+  {id:'gopls-lsp@claude-plugins-official',ver:'1.0.0',repo:'github:anthropics/claude-plugins-official',scope:'user',at:'2026-03-18',sha:'6b70f99',counts:{}},
+  {id:'frontend-design@claude-plugins-official',ver:'unknown',repo:'github:anthropics/claude-plugins-official',scope:'user',at:'2026-04-03',sha:'',counts:{skill:1}},
+];
+const RAW={'dev-workflow':{fm:'name: dev-workflow\ndescription: 功能开发走设计+独立评审\nmetadata:\n  scope: project',
+  md:'<h1>Dev Workflow</h1><p>项目级开发流程 skill。</p><h2>功能开发</h2><ul><li>必走 <code>设计 → 独立评审 → 实现</code></li><li>bug fix 按 ≤20行/≤3文件 清单分流</li></ul><h2>发布</h2><p>走 <code>tag → Release → naozhi upgrade</code></p>'}};
+
+let curTab='skill';
+function flat(tab){const q=document.getElementById('q').value.trim().toLowerCase();const s=DATA[tab]||{groups:[]};
+  return s.groups.map(g=>({...g,items:g.items.filter(it=>!q||it.name.toLowerCase().includes(q)||(it.desc||'').toLowerCase().includes(q))})).filter(g=>g.items.length||!q);}
+function render(){
+  const list=document.getElementById('list'),cards=document.getElementById('cards');
+  if(curTab==='plugin'){list.style.display='none';cards.style.display='flex';
+    cards.innerHTML=PLUGINS.map(p=>{const c=Object.entries(p.counts).map(([k,v])=>`<span class="c"><b>${v}</b> ${k}</span>`).join('')||'<span class="c" style="color:var(--nz-text-dim)">无内容资产</span>';
+      return `<div class="card"><h3>${p.id.split('@')[0]} <span class="ver">${p.ver}</span></h3><div class="repo">${p.repo}</div><div class="meta">${p.id.split('@')[1]} · ${p.scope} · ${p.at}${p.sha?' · '+p.sha:''}</div><div class="counts">${c}</div></div>`;}).join('');return;}
+  cards.style.display='none';list.style.display='block';
+  list.innerHTML=flat(curTab).map((g,gi)=>{
+    const head=`<div class="grp ${g.collapsed?'collapsed':''}" onclick="toggleGrp(${gi})"><svg class="chev" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg><span class="gl">${g.label}</span><span class="src-chip src-${g.src}">${g.chip}</span><span class="gcount">${g.count||g.items.length}</span></div>`;
+    const rows=`<div class="grp-items ${g.collapsed?'collapsed':''}">`+g.items.map(it=>{
+      const d=it.nodesc?`<div class="rdesc nodesc">（无 frontmatter — 名取目录名）</div>`:`<div class="rdesc">${it.desc||''}</div>`;
+      return `<div class="row" onclick='openSheet(${JSON.stringify(it).replace(/'/g,"&#39;")})'><div class="rname">${it.name}</div>${d}</div>`;}).join('')+`</div>`;
+    return head+rows;}).join('');
+}
+function toggleGrp(gi){const g=DATA[curTab].groups[gi];g.collapsed=!g.collapsed;render();}
+function openSheet(it){
+  document.getElementById('sTitle').textContent=it.name;
+  document.getElementById('sSub').textContent=it.rel+(it.anchor?' › '+it.anchor:'');
+  const b=document.getElementById('sBody');
+  let html=it.from?`<span class="from">来自 ${it.from}</span>`:'';
+  if(it.anchor){html+=`<div class="anchor-note">该资产在含多条目的文件中，返回整文件并高亮 <code>${it.anchor}</code></div>`+
+    `<pre class="raw">{\n  "hooks": {\n    "PreToolUse": [\n<span class="hl">      { "id": "${it.anchor}",\n        "matcher": "Bash",\n        "description": "${it.desc}" },</span>\n      { "id": "...其它..." }\n    ]\n  }\n}</pre>`;
+  }else{const raw=RAW[it.name]||{fm:`name: ${it.name}\ndescription: ${it.desc||'(无)'}`,md:`<p style="color:var(--nz-text-mute)">（mockup：加载 /api/cc/assets/raw 原文）</p>`};
+    html+=`<div class="fm">${raw.fm.replace(/^([\w-]+):/gm,'<span class="k">$1</span>:')}</div><div class="md">${raw.md}</div>`;}
+  b.innerHTML=html;
+  document.getElementById('sheet').classList.add('open');
+}
+function closeSheet(){document.getElementById('sheet').classList.remove('open');}
+function mobileNav(v){if(v==='chat')alert('（mockup）切到会话视图：全屏换成会话列表。本稿聚焦资产。');}
+document.getElementById('kindTabs').addEventListener('click',e=>{const t=e.target.closest('.kind-tab');if(!t)return;
+  document.querySelectorAll('.kind-tab').forEach(x=>x.classList.remove('active'));t.classList.add('active');curTab=t.dataset.tab;document.getElementById('q').value='';render();});
+function toggleTheme(){const r=document.documentElement;r.dataset.theme=r.dataset.theme==='light'?'':'light';}
+render();
+</script>
+</body>
+</html>

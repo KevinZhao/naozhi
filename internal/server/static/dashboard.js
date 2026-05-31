@@ -207,6 +207,21 @@ document.addEventListener('DOMContentLoaded', function () {
   applyTheme(getCurrentTheme());
   const btn = document.getElementById('btn-theme');
   if (btn) btn.addEventListener('click', cycleTheme);
+  // Activity-bar view switch (cc-asset-browser). Wired here (not inline
+  // onclick) to keep the script-src inline-handler surface from growing
+  // (R236-SEC-02 cap). Toggles body.nz-view-assets which swaps the chat
+  // sidebar/main for the asset panels in place — no popup.
+  const navChat = document.getElementById('abnav-chat');
+  const navAssets = document.getElementById('abnav-assets');
+  function setActivityView(view) {
+    const assets = view === 'assets';
+    if (navChat) { navChat.classList.toggle('active', !assets); navChat.setAttribute('aria-pressed', String(!assets)); }
+    if (navAssets) { navAssets.classList.toggle('active', assets); navAssets.setAttribute('aria-pressed', String(assets)); }
+    if (assets) { if (window.nzAssetView) window.nzAssetView.show(); }
+    else { if (window.nzAssetView) window.nzAssetView.hide(); }
+  }
+  if (navChat) navChat.addEventListener('click', function () { setActivityView('chat'); });
+  if (navAssets) navAssets.addEventListener('click', function () { setActivityView('assets'); });
 });
 
 function getToken() { return ''; }

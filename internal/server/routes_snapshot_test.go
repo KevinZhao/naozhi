@@ -272,10 +272,11 @@ func handlerTypeOf(e ast.Expr) string {
 // http.HandlerFunc. Listing them here pins their handler_type in the
 // golden snapshot.
 var packageFuncType = map[string]string{
-	"handleManifest":    "http.HandlerFunc",
-	"handleSW":          "http.HandlerFunc",
-	"handleDashboardJS": "http.HandlerFunc",
-	"handleAgentViewJS": "http.HandlerFunc",
+	"handleManifest":       "http.HandlerFunc",
+	"handleSW":             "http.HandlerFunc",
+	"handleDashboardJS":    "http.HandlerFunc",
+	"handleAgentViewJS":    "http.HandlerFunc",
+	"handleAssetBrowserJS": "http.HandlerFunc",
 }
 
 var serverFieldType = map[string]string{
@@ -289,6 +290,7 @@ var serverFieldType = map[string]string{
 	"cronH":             "*dashcron.Handlers",
 	"scratchH":          "*scratch.Handler",
 	"memoryH":           "*memory.Handler",
+	"ccAssetsH":         "*extccassets.Handler",
 	"healthH":           "*HealthHandler",
 	"auth":              "*auth.Handlers",
 	"hub":               "*Hub",
