@@ -649,12 +649,14 @@ func buildSessionOpts(key string, resolver *session.KeyResolver, agents map[stri
 	opts := agents[agentID]
 	if project.IsPlannerKey(key) {
 		opts.Exempt = true // planner sessions are always exempt, regardless of project config
-		// Reuse `parts` from the SplitN(key, ":", 4) above: planner keys have
-		// the shape "project:<name>:planner" so parts[1] is the project name.
-		// IsPlannerKey already proved len(key)>len("project::planner") so the
-		// 4-segment SplitN yields ≥3 elements whenever this branch fires.
-		if projectMgr != nil && len(parts) >= 3 {
-			if p := projectMgr.Get(parts[1]); p != nil {
+		// R20260531-QUAL-4: extract the project name by stripping the fixed
+		// "project:" prefix and ":planner" suffix — the exact inverse of
+		// PlannerKeyFor. SplitN(key, ":", 4)[1] would truncate a name that
+		// itself contains ':' (dir "my:proj" → "my"), silently breaking
+		// projectMgr.Get and leaving planner opts unconfigured.
+		name := strings.TrimSuffix(strings.TrimPrefix(key, "project:"), ":planner")
+		if projectMgr != nil {
+			if p := projectMgr.Get(name); p != nil {
 				opts.Workspace = p.Path
 				if m := projectMgr.EffectivePlannerModel(p); m != "" {
 					opts.Model = m
