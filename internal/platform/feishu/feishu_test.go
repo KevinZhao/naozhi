@@ -84,9 +84,10 @@ var _ platform.RunnablePlatform = (*Feishu)(nil)
 
 func TestStartAlreadyStarted(t *testing.T) {
 	t.Parallel()
-	// Webhook mode requires verification_token or encrypt_key — supply one
-	// so Start() reaches the idempotency guard we're exercising here.
-	f := New(Config{AppID: "id", ConnectionMode: "webhook", VerificationToken: "test-token"}, nil)
+	// Webhook mode requires verification_token or encrypt_key — supply an
+	// encrypt_key (the secure HMAC path) so Start() reaches the idempotency
+	// guard we're exercising here without tripping the SEC-1 token-only gate.
+	f := New(Config{AppID: "id", ConnectionMode: "webhook", EncryptKey: "test-key"}, nil)
 	noop := func(context.Context, platform.IncomingMessage) {}
 	if err := f.Start(noop); err != nil {
 		t.Fatalf("first Start() error = %v", err)
@@ -102,6 +103,50 @@ func TestStartWebhookRejectsMissingAuth(t *testing.T) {
 	noop := func(context.Context, platform.IncomingMessage) {}
 	if err := f.Start(noop); err == nil {
 		t.Fatal("Start() should refuse webhook mode without token or encrypt_key")
+	}
+}
+
+// TestStartWebhookRejectsTokenOnlyWithoutOptIn covers R250531-SEC-1 (#1507):
+// verification_token-only webhook mode (no encrypt_key HMAC) is replay/
+// forgery-prone, so Start() must refuse unless allow_insecure_webhook is
+// explicitly set.
+func TestStartWebhookRejectsTokenOnlyWithoutOptIn(t *testing.T) {
+	t.Parallel()
+	f := New(Config{AppID: "id", ConnectionMode: "webhook", VerificationToken: "test-token"}, nil)
+	noop := func(context.Context, platform.IncomingMessage) {}
+	err := f.Start(noop)
+	if err == nil {
+		t.Fatal("Start() should refuse token-only webhook without allow_insecure_webhook")
+	}
+	if !strings.Contains(err.Error(), "allow_insecure_webhook") {
+		t.Fatalf("error should mention the opt-in flag, got: %v", err)
+	}
+}
+
+// TestStartWebhookTokenOnlyAllowedWithOptIn asserts the explicit opt-in
+// escape hatch still lets legacy token-only deployments run.
+func TestStartWebhookTokenOnlyAllowedWithOptIn(t *testing.T) {
+	t.Parallel()
+	f := New(Config{
+		AppID:                "id",
+		ConnectionMode:       "webhook",
+		VerificationToken:    "test-token",
+		AllowInsecureWebhook: true,
+	}, nil)
+	noop := func(context.Context, platform.IncomingMessage) {}
+	if err := f.Start(noop); err != nil {
+		t.Fatalf("Start() with allow_insecure_webhook should succeed, got: %v", err)
+	}
+}
+
+// TestStartWebhookEncryptKeyNeedsNoOptIn confirms the secure encrypt_key
+// path is unaffected by the SEC-1 gate.
+func TestStartWebhookEncryptKeyNeedsNoOptIn(t *testing.T) {
+	t.Parallel()
+	f := New(Config{AppID: "id", ConnectionMode: "webhook", EncryptKey: "test-key"}, nil)
+	noop := func(context.Context, platform.IncomingMessage) {}
+	if err := f.Start(noop); err != nil {
+		t.Fatalf("Start() with encrypt_key should succeed, got: %v", err)
 	}
 }
 

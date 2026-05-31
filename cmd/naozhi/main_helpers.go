@@ -52,12 +52,13 @@ func initPlatforms(cfg *config.Config, stt transcribe.Service) (map[string]platf
 	platforms := make(map[string]platform.Platform)
 	if cfg.Platforms.Feishu != nil {
 		f := feishu.New(feishu.Config{
-			AppID:             cfg.Platforms.Feishu.AppID,
-			AppSecret:         cfg.Platforms.Feishu.AppSecret,
-			ConnectionMode:    cfg.Platforms.Feishu.ConnectionMode,
-			VerificationToken: cfg.Platforms.Feishu.VerificationToken,
-			EncryptKey:        cfg.Platforms.Feishu.EncryptKey,
-			MaxReplyLen:       cfg.Platforms.Feishu.MaxReplyLength,
+			AppID:                cfg.Platforms.Feishu.AppID,
+			AppSecret:            cfg.Platforms.Feishu.AppSecret,
+			ConnectionMode:       cfg.Platforms.Feishu.ConnectionMode,
+			VerificationToken:    cfg.Platforms.Feishu.VerificationToken,
+			EncryptKey:           cfg.Platforms.Feishu.EncryptKey,
+			MaxReplyLen:          cfg.Platforms.Feishu.MaxReplyLength,
+			AllowInsecureWebhook: cfg.Platforms.Feishu.AllowInsecureWebhook,
 		}, stt)
 		platforms["feishu"] = f
 	}

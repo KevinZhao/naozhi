@@ -202,6 +202,17 @@ type Config struct {
 	VerificationToken string `yaml:"verification_token"`
 	EncryptKey        string `yaml:"encrypt_key"`
 	MaxReplyLen       int    `yaml:"max_reply_length"`
+
+	// AllowInsecureWebhook opts in to the verification_token-only webhook
+	// mode (no encrypt_key HMAC). R250531-SEC-1 (#1507): token-only mode
+	// authenticates solely on a plaintext shared secret carried in the
+	// request body, so a passive observer (CDN/TLS-inspection proxy/log
+	// leak) who sees the token can forge/replay events within the 5min
+	// timestamp window. We therefore refuse to start a webhook with
+	// encrypt_key unset UNLESS the operator explicitly sets this flag,
+	// making the weaker posture a conscious, audited choice rather than a
+	// silent default. encrypt_key (HMAC) remains the recommended config.
+	AllowInsecureWebhook bool `yaml:"allow_insecure_webhook"`
 }
 
 // Feishu implements the Platform and RunnablePlatform interfaces.
@@ -536,12 +547,18 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 		return fmt.Errorf("feishu webhook mode requires verification_token or encrypt_key to be configured")
 	}
 	// VerificationToken-only mode relies on a plaintext shared secret in the
-	// request body; if that token ever leaks, events can be forged without
-	// access to the EncryptKey HMAC. Surface a startup warning so operators
-	// know to configure EncryptKey as well. Not fatal — existing v1-only
-	// deployments remain functional.
+	// request body; if that token ever leaks (CDN/TLS-inspection proxy/log
+	// leak), events can be forged or replayed within the 5min timestamp
+	// window without access to the EncryptKey HMAC. R250531-SEC-1 (#1507):
+	// refuse to start a public webhook in this weaker posture unless the
+	// operator explicitly opts in via allow_insecure_webhook. The default
+	// (secure) path requires encrypt_key for HMAC defence-in-depth.
 	if f.cfg.EncryptKey == "" {
-		slog.Warn("feishu webhook: verification_token-only mode is less secure than encrypt_key HMAC — configure encrypt_key for defence-in-depth")
+		if !f.cfg.AllowInsecureWebhook {
+			return fmt.Errorf("feishu webhook: verification_token-only mode has no HMAC and is replay/forgery-prone if the token leaks; " +
+				"configure encrypt_key (recommended) or set allow_insecure_webhook: true to accept this risk")
+		}
+		slog.Warn("feishu webhook: running in verification_token-only mode (allow_insecure_webhook=true) — no encrypt_key HMAC; events are replay/forgery-prone if the token leaks")
 	}
 	slog.Info("feishu using webhook mode")
 	return nil

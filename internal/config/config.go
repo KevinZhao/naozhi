@@ -245,6 +245,12 @@ type FeishuConfig struct {
 	VerificationToken string `yaml:"verification_token"`
 	EncryptKey        string `yaml:"encrypt_key"`
 	MaxReplyLength    int    `yaml:"max_reply_length"`
+	// AllowInsecureWebhook opts in to verification_token-only webhook mode
+	// (no encrypt_key HMAC). R250531-SEC-1 (#1507): without this flag, a
+	// webhook configured with only verification_token refuses to start
+	// because plaintext-token-only auth is replay/forgery-prone if the
+	// token leaks. encrypt_key (HMAC) is the recommended secure config.
+	AllowInsecureWebhook bool `yaml:"allow_insecure_webhook"`
 }
 
 type CronConfig struct {
