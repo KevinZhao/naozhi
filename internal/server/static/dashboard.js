@@ -8700,15 +8700,31 @@ function inlineMd(s) {
       // path itself rather than `text` so the user sees which file resolves —
       // and so the scanner's textContent is the path, not a friendly label.
       //
-      // SECURITY: bold/italic passes run before this and can splice naozhi's
-      // own <strong>/<em> spans into the `url` capture when the target itself
-      // contains `**`/`*` (e.g. `[a](**x**/y.html)`). Those tags are esc()'d
-      // and naozhi-controlled, but a real file path never contains `<`. Reject
-      // any `<`-bearing target so injected markup can never reach the <code>
-      // body — and fall back to the existing plain-text behaviour.
+      // The `url` capture is NOT raw text — earlier inlineMd passes have already
+      // tokenized it. Two classes of contamination must be rejected before the
+      // target can be embedded in <code>:
+      //   1. naozhi-injected markup: the bold/italic passes run before this and
+      //      splice <strong>/<em> spans into the capture when the target itself
+      //      contains `**`/`*` (e.g. `[a](**x**/y.html)`). A real file path
+      //      never contains `<`, so reject any `<`-bearing target.
+      //   2. tokenizer placeholders: the backtick-code and inline-math passes
+      //      replace `` `x` ``/`$x$` with \x00CODE<n>\x00 / \x00KTX<n>\x00
+      //      sentinels. \x00 is non-whitespace/non-colon so it slips through
+      //      isFileRefCandidate, and the restore passes that run AFTER this one
+      //      would rewrite the sentinel into a nested <code>/<span> inside our
+      //      new <code> — malformed HTML plus a corrupted path for the scanner.
+      //      Reject any \x00-bearing target.
+      // Finally require a real extension (the same FILE_REF_HAS_EXT gate
+      // fencedPathList applies) so slash-shaped non-files — dates `2024/01/02`,
+      // fractions `1/2`, doc slugs without an extension — don't hijack the link
+      // into a bogus file ref with the author's label discarded.
       const target = url.trim();
-      if (target.indexOf('<') === -1 && isFileRefCandidate(target)) {
-        return '<code class="md-code">' + target + '</code>';
+      if (target.indexOf('<') === -1 && target.indexOf('\x00') === -1 && isFileRefCandidate(target)) {
+        const { path: bare } = splitPathLine(target);
+        const base = bare.slice(bare.lastIndexOf('/') + 1);
+        if (FILE_REF_HAS_EXT.test(base)) {
+          return '<code class="md-code">' + target + '</code>';
+        }
       }
       return text;
     }

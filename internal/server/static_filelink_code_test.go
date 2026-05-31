@@ -62,6 +62,26 @@ func TestDashboardJS_LocalFileLink_RendersAsCode(t *testing.T) {
 		t.Error("local-file-link fix must reject any target containing '<' (target.indexOf('<') === -1) before rendering <code> — otherwise bold/italic-injected <strong>/<em> spans from the url capture could reach the code body")
 	}
 
+	// 3b. SECURITY: the `url` capture is already tokenized by earlier inlineMd
+	//     passes — backtick-code → \x00CODE<n>\x00 and inline-math → \x00KTX<n>\x00.
+	//     \x00 is non-whitespace/non-colon so it slips through isFileRefCandidate;
+	//     the restore passes that run AFTER the link pass would then rewrite the
+	//     sentinel into a nested <code>/<span> inside the rescue <code> (malformed
+	//     HTML + a corrupted path the scanner reads). The branch must reject any
+	//     \x00-bearing target. Pin the guard.
+	if !strings.Contains(seg, `target.indexOf('\x00') === -1`) {
+		t.Error("local-file-link fix must reject any target containing a \\x00 tokenizer sentinel (target.indexOf('\\x00') === -1) — otherwise backtick/math placeholders in the url capture expand into nested <code>/<span> inside the rescue <code>")
+	}
+
+	// 3c. The rescue must apply the same FILE_REF_HAS_EXT extension gate that
+	//     fencedPathList uses, so slash-shaped non-files (dates `2024/01/02`,
+	//     fractions `1/2`, extension-less doc slugs) don't hijack the link into a
+	//     bogus file ref with the author's label discarded. Without this the
+	//     link branch and fencedPathList have inconsistent acceptance sets.
+	if !strings.Contains(seg, "FILE_REF_HAS_EXT.test(base)") {
+		t.Error("local-file-link fix must gate on FILE_REF_HAS_EXT.test(base) (the same extension check fencedPathList applies) so dates/fractions/extension-less slugs aren't hijacked into a file ref with the label discarded")
+	}
+
 	// 4. The fix must live strictly inside the `safe === '#'` rejected branch —
 	//    it must not perturb the accepted-URL anchor render. Assert the anchor
 	//    branch still emits an <a class=\"md-link\">.
