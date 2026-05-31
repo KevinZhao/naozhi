@@ -125,6 +125,11 @@ func TestReplace_And_Rollback(t *testing.T) {
 	if string(got) != "new binary" {
 		t.Errorf("after Replace, installPath = %q, want %q", got, "new binary")
 	}
+	if fi, err := os.Stat(installPath); err != nil {
+		t.Fatalf("stat installPath: %v", err)
+	} else if fi.Mode().Perm()&0o111 == 0 {
+		t.Errorf("installed binary is not executable: mode %o", fi.Mode().Perm())
+	}
 	bak, _ := os.ReadFile(backupPath)
 	if string(bak) != "old binary" {
 		t.Errorf("backup = %q, want %q", bak, "old binary")
@@ -139,6 +144,49 @@ func TestReplace_And_Rollback(t *testing.T) {
 	}
 	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
 		t.Errorf("backup file should be removed after Rollback")
+	}
+}
+
+// TestReplace_ForcesExecutableFromNonExecutableSource is the regression test
+// for the v0.0.27 upgrade outage: when the source binary is NOT executable
+// (0600 — the mode fetchFile writes before Download's post-verify chmod, a
+// state that has been observed to reach Replace on a loaded host), Replace
+// must still leave the installed binary executable. copyFile clones the
+// source mode, so without the explicit success-path chmod the install lands
+// at 0600 and systemd fails with 203/EXEC.
+//
+// On the pre-fix code this fails (installed mode is 0600); on the fixed code
+// the install is 0755.
+func TestReplace_ForcesExecutableFromNonExecutableSource(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	installPath := filepath.Join(dir, "naozhi")
+	if err := os.WriteFile(installPath, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Source binary is owner-only, non-executable — mimics the downloaded
+	// asset before (or without) the post-checksum chmod.
+	newBin := filepath.Join(dir, "naozhi-new")
+	if err := os.WriteFile(newBin, []byte("new binary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	backupPath, err := Replace(newBin, installPath)
+	if err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(backupPath) })
+
+	fi, err := os.Stat(installPath)
+	if err != nil {
+		t.Fatalf("stat installPath: %v", err)
+	}
+	if fi.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("installed binary not executable despite non-exec source: mode %o (regression: 203/EXEC)", fi.Mode().Perm())
+	}
+	if got, _ := os.ReadFile(installPath); string(got) != "new binary" {
+		t.Errorf("installPath content = %q, want %q", got, "new binary")
 	}
 }
 

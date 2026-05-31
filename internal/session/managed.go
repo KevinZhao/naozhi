@@ -223,6 +223,24 @@ var _ ProcessEventReader = (processIface)(nil)
 // process-lifecycle work. The wrapper stays.
 type processBox struct{ p processIface }
 
+// cancelBox binds a Send()'s context cancel func to the process pointer that
+// Send loaded for that turn. Interrupt() consults it so it only fires cancel
+// when the live process still matches the one the in-flight Send targets.
+//
+// SM3 (#381): Send() stores the cancel func before loadProcess(); in the
+// narrow window where a concurrent spawnSession replaces the process pointer,
+// a bare cancel func could target the previous process's ctx — cancelling it
+// is a no-op against the new live process, silently weakening Interrupt. By
+// recording the bound process here, Interrupt skips a stale cancel (whose
+// proc no longer matches the live process) and reports failure instead of a
+// misleading success. nil proc means "not yet bound to a process" (Send has
+// stored the box but not reached loadProcess yet) — Interrupt still fires it
+// because that turn is about to run on the current live process.
+type cancelBox struct {
+	cancel context.CancelFunc
+	proc   processIface
+}
+
 // ManagedSession wraps a claude CLI process with session metadata.
 type ManagedSession struct {
 	key string
@@ -269,10 +287,13 @@ type ManagedSession struct {
 	keyChatID   string
 	keyAgentID  string
 
-	process    atomic.Pointer[processBox] // stores *processBox; use loadProcess/storeProcess
-	sendMu     sync.Mutex                 // serializes messages to the same session
-	historyMu  sync.RWMutex               // protects persistedHistory reads/writes (independent of sendMu)
-	sendCancel atomic.Pointer[context.CancelFunc]
+	process   atomic.Pointer[processBox] // stores *processBox; use loadProcess/storeProcess
+	sendMu    sync.Mutex                 // serializes messages to the same session
+	historyMu sync.RWMutex               // protects persistedHistory reads/writes (independent of sendMu)
+	// sendCancel holds the in-flight Send()'s cancel func bound to the process
+	// it targets (see cancelBox). Bound so Interrupt() can skip a cancel whose
+	// process has been replaced by a concurrent spawnSession (SM3 / #381).
+	sendCancel atomic.Pointer[cancelBox]
 	// workspace is the effective cwd at spawn time. Writers hold r.mu in the
 	// router (spawnSession / RegisterCronStub / SetWorkspace), but Snapshot()
 	// is called from Hub handlers WITHOUT r.mu (see wshub.go:466, 520). Direct

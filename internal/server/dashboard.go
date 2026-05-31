@@ -495,7 +495,21 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	//     to an action target; pinning to 'self' stops an injected form from
 	//     exfiltrating to a foreign origin. Mirrors the login page's
 	//     explicit form-action discipline (R243-SEC-15 / #800).
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font")
+	// R242-SEC-2 (#607): narrow every `cdn.jsdelivr.net` source expression to
+	// the `/npm/` path prefix. A CSP host-source with a trailing-slash path
+	// matches only URLs whose path starts with that prefix (CSP3 §6.6.2.6
+	// path-part matching), so the dashboard can still pull
+	// `…/npm/mermaid@…`, `…/npm/katex@…/dist/katex.min.js`, the KaTeX
+	// stylesheet, and its `@font-face` woff2 files (all under `/npm/`), while
+	// the CDN scope can no longer bootstrap an arbitrary follow-on load from a
+	// non-`/npm/` jsdelivr path (e.g. `/gh/<attacker>/<repo>` user content or
+	// `/combine/` bundle endpoints). This shrinks the script-src CDN surface
+	// without the breaking strict-dynamic+nonce migration that drops
+	// `'unsafe-inline'`, which stays NEEDS-DESIGN (it is mutually exclusive
+	// with the dashboard's inline-handler reliance — browsers ignore
+	// `'unsafe-inline'` once `strict-dynamic` is present). require-sri-for
+	// script continues to pin every CDN script to its integrity hash.
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/; font-src 'self' https://cdn.jsdelivr.net/npm/; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font")
 	// HSTS is only meaningful over TLS (RFC 6797 §7.2). Sending it on plain
 	// HTTP would still be honoured by browsers and can brick local HTTP
 	// loopback access for a year. Gate on the same isSecure() helper the

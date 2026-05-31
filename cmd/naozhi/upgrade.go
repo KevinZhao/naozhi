@@ -87,24 +87,44 @@ Flags:
 	}
 
 	// 6. Restart service (unless skipped or not running).
+	//
+	// We deliberately do NOT roll back the binary when the restart step
+	// returns an error. The binary is already SHA-256 verified and made
+	// executable by Replace, so a restart problem is almost always a slow
+	// cold start (Type=notify + a loaded host taking longer than
+	// TimeoutStartSec to send READY=1) rather than a bad binary. Rolling
+	// back a healthy binary on that false signal is exactly what broke the
+	// v0.0.27 upgrade. systemd's Restart=always keeps bringing the new
+	// binary up; the operator just needs to be told to check on it.
 	serviceWasRunning := selfupdate.ServiceRunning()
+	restartWarned := false
 	if !*noRestart && serviceWasRunning {
 		fmt.Printf("Restarting service…\n")
-		if err := selfupdate.RestartService(); err != nil {
-			// Upgrade succeeded but restart failed — roll back and report.
-			fmt.Fprintf(os.Stderr, "error: service restart failed: %v\n", err)
-			fmt.Fprintf(os.Stderr, "Rolling back binary…\n")
-			if rbErr := selfupdate.Rollback(selfPath, backupPath); rbErr != nil {
-				fatalf("rollback failed: %v (original binary backed up at %s)\n", rbErr, backupPath)
-			}
-			fatalf("upgrade rolled back; fix the service issue and retry\n")
+		if err := selfupdate.RestartService(ctx); err != nil {
+			restartWarned = true
+			fmt.Fprintf(os.Stderr, "\nwarning: service restart could not be confirmed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "The new binary IS installed and verified. naozhi may still be starting\n")
+			fmt.Fprintf(os.Stderr, "(slow cold start) OR may be failing to start. Check which:\n")
+			fmt.Fprintf(os.Stderr, "    systemctl status naozhi\n")
+			fmt.Fprintf(os.Stderr, "    journalctl -u naozhi -n 50 --no-pager\n")
+			// The backup is a 0600, non-executable copy of the PRIOR binary
+			// (copyFileBackup), so a bare `cp` back reproduces the 203/EXEC
+			// failure — the restore MUST re-apply the executable bit. There is
+			// no `naozhi upgrade --tag` to downgrade with, so spell out the
+			// manual path explicitly.
+			fmt.Fprintf(os.Stderr, "To roll back to the previous binary:\n")
+			fmt.Fprintf(os.Stderr, "    sudo cp %s %s && sudo chmod 0755 %s && sudo systemctl restart naozhi\n",
+				backupPath, selfPath, selfPath)
 		}
 	} else if !serviceWasRunning {
 		fmt.Printf("Service not running — skipping restart.\n")
 	}
 
-	// 7. Clean up backup on success.
-	_ = os.Remove(backupPath)
+	// 7. Clean up backup on success. Keep it when the restart was not
+	// confirmed so the operator has a manual rollback artifact.
+	if !restartWarned {
+		_ = os.Remove(backupPath)
+	}
 
 	fmt.Printf("\n✓ naozhi upgraded to %s\n", rel.Tag)
 
