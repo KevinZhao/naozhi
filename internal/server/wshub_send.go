@@ -24,6 +24,12 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
+// remoteNodeProxyTimeout bounds a single proxied interrupt/send RPC to an
+// owning peer node before the dashboard goroutine gives up. R244-ARCH-16
+// (#1054): named so the value is greppable and tunable in one place instead
+// of being a bare `10*time.Second` literal duplicated across the proxy sites.
+const remoteNodeProxyTimeout = 10 * time.Second
+
 // File: wshub_send.go
 //
 // Dashboard-side send / interrupt handling extracted from wshub.go (R243-ARCH-2
@@ -262,7 +268,7 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 					Error: "internal error"})
 			}
 		}()
-		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
+		ctx, cancel := context.WithTimeout(h.ctx, remoteNodeProxyTimeout)
 		defer cancel()
 		interrupted, err := nc.ProxyInterruptSession(ctx, capturedKey)
 		if err != nil {
@@ -403,7 +409,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 					Error: "internal error"})
 			}
 		}()
-		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
+		ctx, cancel := context.WithTimeout(h.ctx, remoteNodeProxyTimeout)
 		defer cancel()
 		if err := nc.Send(ctx, capturedKey, msg.Text, msg.Workspace); err != nil {
 			// R217-CR-5 (#641): symmetric sanitisation with the interrupt
