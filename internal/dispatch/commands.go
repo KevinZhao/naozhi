@@ -206,11 +206,19 @@ func (d *Dispatcher) handleUrgentCommand(ctx context.Context, msg platform.Incom
 	// Spawn in its own goroutine like regular passthrough sends — sendAndReply
 	// will handle GetOrCreate + reply. The priority field is threaded through
 	// dispatch → SendPassthrough via ctx + the priorityCtxKey extension.
-	// Use context.WithoutCancel so the platform handler returning early does
-	// not cancel the in-flight LLM turn (matches the regular passthrough
-	// path in dispatch.go:319). Values from ctx (logger fields, tracing)
-	// remain available to the spawned goroutine.
-	go d.sendAndReply(WithUrgent(WithPassthrough(context.WithoutCancel(ctx))), key, text, nil, agentID, opts, msg, log, false)
+	//
+	// R20260531070014-ARCH-3: use mergeStopAndValues(d.stopCtx, ctx) rather
+	// than the bare context.WithoutCancel(ctx) previously used here. The
+	// regular passthrough path (dispatch.go) migrated from WithoutCancel to
+	// mergeStopAndValues in #1320 so that detached goroutines abort on SIGTERM
+	// instead of running through their full internal totalTimeout and causing
+	// systemd TimeoutStopSec breaches. /urgent had re-introduced the old
+	// pattern, meaning /urgent goroutines were the only remaining path that
+	// could not be stopped on graceful shutdown.
+	// cancelSrc = d.stopCtx  → goroutine aborts when the service shuts down.
+	// valuesSrc = ctx         → per-request slog attrs / auth values survive.
+	sendCtx := mergeStopAndValues(d.stopCtx, ctx)
+	go d.sendAndReply(WithUrgent(WithPassthrough(sendCtx)), key, text, nil, agentID, opts, msg, log, false)
 }
 
 func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.IncomingMessage) {

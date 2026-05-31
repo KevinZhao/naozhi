@@ -364,3 +364,7 @@
 - [R20260531-PERF-6] Snapshot 无条件 proc.TurnAgents() 拷贝,零 subagent 时可先查 count 跳过(Process 未暴露 TurnAgentCount,需先加方法) — internal/session/managed_query.go:217
 - [R20260531-ARCH-3] cron SessionStatus 三值靠 iota 顺序匹配 session,已被 cron_router_adapter init panic 覆盖,仅文档措辞待对齐 — internal/cron/agent_opts.go:36
 - [R20260531-ARCH-5] cron 测试包反向 import session,可改用包内 fakeRouter 强化"生产零依赖"不变量 — internal/cron/scheduler_test.go:12
+- [R20260531070014-GO-4] strings.Builder.Reset() 注释关于 backing slice 释放行为描述不准确 — internal/cron/scheduler_finish.go:660
+- [R20260531070014-GO-9] mayContainSecretPrefix 注释 'g' 分支列举遗漏 github_pat_ — internal/cron/redact_secrets.go:183
+- [R20260531070014-CR-3] ManagedState 方法名与返回类型同名，建议 rename LifecycleState() — internal/session/managed_state.go:76
+- [R20260531070014-CR-8] tuning.go 操作符表 defaultCronSlowThreshold 行 Markdown 单元格对齐错位 — internal/cron/tuning.go:15

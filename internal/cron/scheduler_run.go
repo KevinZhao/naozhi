@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -1592,7 +1593,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// 否则未截断 / 未脱敏的 claude 输出会绕过所有保护落到 IM 渠道
 	// （prompt-injection / IM 富文本指令 / 巨量响应耗尽队列）。
 	// finishRun 在持久化路径已做过同样处理，这里复用相同管线。
-	replyText := formatCronNotice(snap.labelOrID(), sanitiseRunResult(result.Text))
+	//
+	// R20260531070014-ARCH-1: claude -p 可 exit 0 但 result.Text 为
+	// API-error envelope（含 request ID / 内部 hostname / 泄漏 cred）。
+	// dispatch IM 路径已通过 localizeAPIError（封装 apierr.Localize）防护；
+	// cron 成功路径之前完全绕过此保护。先 sanitise（截断/脱敏）再 localize
+	// （本地化/隐藏敏感 envelope），顺序以隐私优先。
+	replyText := formatCronNotice(snap.labelOrID(), apierr.Localize(sanitiseRunResult(result.Text)))
 	s.deliverNotice(notifyTo, replyText)
 }
 
