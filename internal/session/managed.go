@@ -133,6 +133,28 @@ type ProcessLifecycle interface {
 	Kill()
 }
 
+// HistoryInjector is the fourth facet of the planned processIface split
+// (R176-ARCH-M2 / R214-ARCH-8, #430). It exposes the prev-session history
+// replay seam that Router.attachHistorySource / InjectHistory and the
+// auto-chain resume path consume on spawn, plus the subagent-roster read
+// the turn-agent fan-out uses. Splitting it out lets the history-injection
+// unit tests mock just these two methods instead of the full ~25-method
+// god-interface.
+//
+// Pure additive split — processIface embeds HistoryInjector so *cli.Process
+// and testutil.TestProcess keep satisfying both unchanged.
+type HistoryInjector interface {
+	// InjectHistory replays prior-session EventEntries into the process's
+	// EventLog before the first live turn so dashboard/IM history renders
+	// continuously across a resume. Called once, under the spawn path,
+	// before SetPersistSink flips sinkReady true.
+	InjectHistory(entries []cli.EventEntry)
+	// TurnAgents returns the subagent roster the process has observed this
+	// turn (task_started → agent linkage). Feeds the dashboard agent-team
+	// view; empty for backends without a subagent concept.
+	TurnAgents() []cli.SubagentInfo
+}
+
 // processIface abstracts the CLI process lifecycle methods used across the
 // session-aware code paths. Despite the package name, callers extend beyond
 // internal/session itself: internal/server (Hub broadcast + dashboard
@@ -199,8 +221,9 @@ type processIface interface {
 	ProtocolName() string
 	SubscribeEvents() (<-chan struct{}, func())
 	PID() int
-	InjectHistory(entries []cli.EventEntry)
-	TurnAgents() []cli.SubagentInfo
+	// InjectHistory / TurnAgents live on HistoryInjector (R176-ARCH-M2
+	// facet split, #430). Embed it rather than duplicate.
+	HistoryInjector
 	// Normalize-layer accessors (docs/rfc/multi-backend.md §8.8). kiro fills
 	// these from _kiro.dev/metadata; claude leaves zero values until an
 	// estimator lands. Lock-free.
@@ -230,6 +253,11 @@ var _ ProcessEventReader = (processIface)(nil)
 // either side — fails the package build instead of silently desyncing the
 // facet from the god-interface.
 var _ ProcessLifecycle = (processIface)(nil)
+
+// Compile-time guarantee that HistoryInjector is a strict subset of
+// processIface (R176-ARCH-M2 facet split, #430). Same drift-guard role as
+// the ProcessEventReader / ProcessLifecycle pins above.
+var _ HistoryInjector = (processIface)(nil)
 
 // processBox wraps processIface for use with atomic.Pointer (which
 // requires a concrete type).
