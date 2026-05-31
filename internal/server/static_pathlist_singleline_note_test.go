@@ -77,17 +77,21 @@ func TestDashboardJS_FencedPathList_SingleLineAndNote(t *testing.T) {
 		t.Fatal("pathLines.map render expression not found")
 	}
 	seg := js[mapIdx:renderIdx]
-	if !strings.Contains(seg, "p.path") {
-		t.Error("render branch must put p.path inside the row <code> so the file-ref scanner + copy see the bare path")
+	// The path goes through the shared fileRefCode helper (#1512) with an empty
+	// class so the row keeps a bare <code> (the .md-pathline code CSS, no pill)
+	// while the file-ref scanner + copy still see only the bare path.
+	if !strings.Contains(seg, "fileRefCode(esc(p.path), '')") {
+		t.Error("render branch must put the path inside the row via fileRefCode(esc(p.path), '') so the file-ref scanner + copy see the bare path")
 	}
 	if !strings.Contains(seg, "md-pathnote") {
 		t.Error("render branch must emit a .md-pathnote span for p.note so the annotation is visible but kept outside the <code> body")
 	}
 	// The note span must be a sibling of <code>, not nested inside it. The
-	// emitted row concatenates the closed <code> followed by the note span, so
-	// pin the `'</code>' + noteHtml` shape (note appended AFTER the code closes).
-	if !strings.Contains(seg, "'</code>' + noteHtml") {
-		t.Error("the row must append the note span AFTER '</code>' (as a sibling) so the note is never folded into the path the exists-check queries")
+	// emitted row concatenates the helper-produced <code> followed by the note
+	// span, so pin the `fileRefCode(...) + noteHtml` shape (note appended AFTER
+	// the code closes, never folded into the path the exists-check queries).
+	if !strings.Contains(seg, "fileRefCode(esc(p.path), '') + noteHtml") {
+		t.Error("the row must append the note span AFTER the fileRefCode <code> (as a sibling) so the note is never folded into the path the exists-check queries")
 	}
 }
 
