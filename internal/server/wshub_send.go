@@ -402,11 +402,23 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 			// carry control bytes / bidi overrides; route through
 			// osutil.SanitizeForLog to keep journald + dashboard tail
 			// rendering safe.
-			slog.Error("remote ws send failed", "node", nodeID, "key", capturedKey, "err", osutil.SanitizeForLog(err.Error(), 512))
+			sanitized := osutil.SanitizeForLog(err.Error(), 512)
+			slog.Error("remote ws send failed", "node", nodeID, "key", capturedKey, "err", sanitized)
 			// Do not surface the raw err: transport-level messages can leak
 			// internal host/port/auth details back to authenticated browser
 			// clients. Operators still see the detail in the slog above.
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: "remote send failed"})
+			// R176-ARCH-NX (#433): parity with the remote→primary direction
+			// (upstream/connector_rpc.go injects LogSystemEvent on send
+			// failure). The send_ack above reaches only the originating tab;
+			// fan the failure out to every dashboard subscribed to this
+			// remote session so a second operator watching the conversation
+			// sees the message did not land instead of a silent stall. The
+			// remote session's EventLog lives on the node, so we cannot append
+			// locally — broadcast over the same `event` frame remote events
+			// already use. summary is the sanitised form (no raw transport
+			// detail) for the same leak reason as the send_ack above.
+			h.broadcastSessionSystemEvent(capturedKey, "发送失败："+sanitized)
 		} else {
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "accepted", Key: capturedKey, Node: nodeID})
 			// Refresh the remote subscription so the connector re-creates

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -313,6 +314,68 @@ func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, ended
 		return
 	}
 	h.broadcastToAuthenticated(data)
+}
+
+// broadcastSessionSystemEvent pushes a synthetic `system`-type event frame to
+// every authenticated client currently subscribed to `key`. R176-ARCH-NX
+// (#433): the primary→remote send path previously surfaced a remote-send
+// failure ONLY to the originating client via send_ack, while the symmetric
+// remote→primary path (upstream/connector_rpc.go) injects a LogSystemEvent that
+// reaches every dashboard subscribed to the session. This restores parity for
+// remote sessions, whose EventLog lives on the remote node and so cannot be
+// appended to locally — instead we fan the failure out over the same WS
+// `event` frame that streamed remote events already use, scoped to subscribers
+// of that key so it is not cross-tenant noise.
+//
+// summary is caller-sanitised (osutil.SanitizeForLog) before reaching here —
+// it is broadcast verbatim to subscribed dashboards and would otherwise be a
+// log/terminal-injection primitive, mirroring the connector_rpc.go contract.
+func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
+	if key == "" || summary == "" {
+		return
+	}
+	ev := cli.EventEntry{
+		Time:    time.Now().UnixMilli(),
+		Type:    "system",
+		Summary: summary,
+	}
+	data, err := marshalPooled(node.ServerMsg{Type: "event", Key: key, Event: &ev})
+	if err != nil {
+		return
+	}
+	snapPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
+	snap := (*snapPtr)[:0]
+	h.mu.RLock()
+	if h.authClients != nil {
+		for c := range h.authClients {
+			if _, ok := c.subscriptions[key]; ok {
+				snap = append(snap, c)
+			}
+		}
+	} else {
+		for c := range h.clients {
+			if !c.authenticated.Load() {
+				continue
+			}
+			if _, ok := c.subscriptions[key]; ok {
+				snap = append(snap, c)
+			}
+		}
+	}
+	h.mu.RUnlock()
+
+	for _, c := range snap {
+		c.SendRaw(data)
+	}
+	for i := range snap {
+		snap[i] = nil
+	}
+	if cap(snap) <= broadcastSnapPoolMaxCap {
+		*snapPtr = snap[:0]
+	} else {
+		*snapPtr = make([]*wsClient, 0, 32)
+	}
+	broadcastClientSnapPool.Put(snapPtr)
 }
 
 // DroppedMessages returns the total number of messages dropped across all
