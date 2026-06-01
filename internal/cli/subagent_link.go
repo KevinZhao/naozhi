@@ -834,28 +834,16 @@ func (l *SubagentLinker) SeedFromHistory(entries []EventEntry) {
 	}
 }
 
-// claudeProjectsRootOnce caches the result of os.UserHomeDir so repeated
-// calls from resolveProjectDir and SeedFromHistory on the hot readLoop path
-// do not pay a syscall each time. The home directory never changes within a
-// process lifetime. [R112714-PERF-2]
-var (
-	claudeProjectsRootOnce  sync.Once
-	claudeProjectsRootValue string
-)
-
 // claudeProjectsRoot returns ~/.claude/projects exactly as resolveProjectDir
 // derives it. Kept as a separate helper so SeedFromHistory's prefix check
 // stays in lockstep with Resolve's path construction; changing one without
 // the other would either let a bogus path through or reject valid entries.
 func claudeProjectsRoot() string {
-	claudeProjectsRootOnce.Do(func() {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			home = os.Getenv("HOME")
-		}
-		claudeProjectsRootValue = filepath.Join(home, ".claude", "projects")
-	})
-	return claudeProjectsRootValue
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = os.Getenv("HOME")
+	}
+	return filepath.Join(home, ".claude", "projects")
 }
 
 // fireCallbacksDropLock runs every registered callback OUTSIDE the main mu

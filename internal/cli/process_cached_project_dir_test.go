@@ -37,8 +37,8 @@ func TestProcess_cachedProjectDir_empty(t *testing.T) {
 	}
 }
 
-// TestClaudeProjectsRoot_consistency verifies the sync.Once cache is
-// consistent with a fresh call deriving from os.UserHomeDir.
+// TestClaudeProjectsRoot_consistency verifies claudeProjectsRoot derives
+// from os.UserHomeDir correctly and is consistent across calls.
 func TestClaudeProjectsRoot_consistency(t *testing.T) {
 	t.Parallel()
 	got := claudeProjectsRoot()
@@ -47,8 +47,8 @@ func TestClaudeProjectsRoot_consistency(t *testing.T) {
 	if got != want {
 		t.Errorf("claudeProjectsRoot() = %q, want %q", got, want)
 	}
-	// Second call must return the same cached value.
+	// Two consecutive calls with the same HOME must agree.
 	if got2 := claudeProjectsRoot(); got2 != got {
-		t.Errorf("claudeProjectsRoot() not idempotent: %q vs %q", got, got2)
+		t.Errorf("claudeProjectsRoot() inconsistent: %q vs %q", got, got2)
 	}
 }
