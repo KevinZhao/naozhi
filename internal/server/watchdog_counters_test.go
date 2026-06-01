@@ -33,9 +33,15 @@ func TestWatchdogCountersPtrsAlias(t *testing.T) {
 		t.Errorf("total leaked after noOutput bump = %d, want 5", got)
 	}
 
-	// Returned pointers are stable across calls (same backing field).
-	if w.noOutPtr() != w.noOutPtr() {
-		t.Error("noOutPtr returned different addresses across calls")
+	// Returned pointers are stable across calls and alias the backing field.
+	// R112714-GO-1: compare against &w.noOutput / &w.total (different
+	// expressions) rather than calling noOutPtr() twice (SA4000 flags
+	// self-comparison as always-false).
+	if w.noOutPtr() != &w.noOutput {
+		t.Error("noOutPtr does not alias &w.noOutput")
+	}
+	if w.totalPtr() != &w.total {
+		t.Error("totalPtr does not alias &w.total")
 	}
 }
 
