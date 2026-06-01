@@ -33,7 +33,6 @@ package cron
 
 import (
 	"strings"
-	"unicode"
 )
 
 // secretPrefix names the well-known token prefixes redactSecretsInResult
@@ -162,13 +161,12 @@ func redactSecretsInResult(s string) string {
 // secret tail. Tokens we redact are alphanumerics + `-` + `_`; anything
 // else (whitespace, punctuation, control) terminates the run.
 func isSecretTokenByte(b byte) bool {
-	r := rune(b)
 	switch {
-	case unicode.IsDigit(r):
+	case b >= '0' && b <= '9':
 		return true
-	case r >= 'a' && r <= 'z':
+	case b >= 'a' && b <= 'z':
 		return true
-	case r >= 'A' && r <= 'Z':
+	case b >= 'A' && b <= 'Z':
 		return true
 	case b == '-' || b == '_':
 		return true
