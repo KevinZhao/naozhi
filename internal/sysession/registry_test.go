@@ -54,3 +54,37 @@ func TestValidateBuiltinDaemonNames(t *testing.T) {
 	}()
 	validateBuiltinDaemonNames()
 }
+
+// TestBuiltinDaemonsSliceLiteralInvariant pins the R244-ARCH-18 (#1055)
+// decision in code: sysession registers its daemons via the static
+// builtinDaemons slice literal, NOT cli/history's blank-import + init()
+// registry. The registry must therefore be a non-empty, eagerly-populated
+// slice at package-init time — no init()-driven late registration. If a
+// future change moves sysession onto an init()-based registry (e.g. when
+// R244-ARCH-4 / #1058 unifies the registry story), this test should be
+// updated deliberately alongside the registry.go anchor, not silently.
+//
+// NOT t.Parallel(): same registryTestMu happens-before contract as the
+// sibling tests that swap builtinDaemons via withRegistry.
+func TestBuiltinDaemonsSliceLiteralInvariant(t *testing.T) {
+	registryTestMu.Lock()
+	defer registryTestMu.Unlock()
+	if len(builtinDaemons) == 0 {
+		t.Fatal("builtinDaemons slice literal must be eagerly populated at " +
+			"package init (R244-ARCH-18/#1055): the registry is a static slice, " +
+			"not an init()-driven map — an empty slice at test time means a daemon " +
+			"registration regressed to a lazy/blank-import path")
+	}
+	// Every entry must carry a non-nil Build factory and a name that the
+	// kebab-case validator accepts — the slice literal is the single source
+	// of truth, so a malformed entry can only come from an edit to the
+	// literal itself, never from an out-of-package init().
+	for i, f := range builtinDaemons {
+		if f.Build == nil {
+			t.Errorf("builtinDaemons[%d] (%q) has nil Build factory", i, f.Name)
+		}
+		if err := validateDaemonName(f.Name); err != nil {
+			t.Errorf("builtinDaemons[%d] name %q invalid: %v", i, f.Name, err)
+		}
+	}
+}

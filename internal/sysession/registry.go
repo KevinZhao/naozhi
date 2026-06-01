@@ -63,6 +63,36 @@ type DaemonDeps struct {
 //
 // Phase 1 is shipped with AutoTitler only.  TransientSweeper / other
 // future daemons land in Phase 2 (RFC §12).
+//
+// R244-ARCH-18 (#1055) — why a slice literal here, NOT cli/history's
+// blank-import + init()-registry pattern:
+//
+// cli/history uses RegisterHistoryFactory from each backend package's
+// init() for two reasons that DO NOT apply to sysession (see
+// internal/cli/history.go godoc):
+//
+//  1. Cycle avoidance. internal/history/claudejsonl imports internal/cli
+//     for cli.EventEntry; if cli registered backends by importing them
+//     the build would cycle. sysession's daemons (auto-titler,
+//     attachment-gc) are ALL compiled into this same package — there is
+//     no peer package to import, hence no cycle to break.
+//  2. Out-of-package extensibility. history backends each live in their
+//     own package so a new one lands as a single new file with an
+//     init() block. sysession has no out-of-package daemon contract;
+//     adding one is an in-package slice append (see the registration
+//     steps on builtinDaemonFactory).
+//
+// A blank-import registry would buy nothing here (no cycle, no external
+// backends) while costing the static, grep-able, test-swappable
+// (withRegistry) slice the Manager tests rely on. The holistic
+// "unified Registry across cron daemons / platforms / backends / wireup"
+// question is tracked separately under R244-ARCH-4 (#1058, still open);
+// sysession deliberately stays on the slice literal until that design
+// lands rather than pre-committing one side of it. This anchor exists so
+// the style divergence stops being re-flagged as an accidental
+// inconsistency — it is a deliberate, locally-correct choice (mirrors the
+// StopPolicyForceExit / #1060 "promote the implicit decision to a
+// documented anchor" precedent in manager.go).
 var builtinDaemons = []builtinDaemonFactory{
 	{
 		Name: "auto-titler",
