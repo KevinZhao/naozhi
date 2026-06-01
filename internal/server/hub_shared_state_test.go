@@ -15,7 +15,7 @@ import (
 // "Hub independent struct" direction) fails loudly here instead of silently
 // splitting the lock and racing the nodes map.
 func TestHubSharesServerNodesState(t *testing.T) {
-	s := newTestServer(newMockPlatform())
+	s := newTestServer(&mockPlatform{})
 	if s.hub == nil {
 		t.Fatal("registerDashboard did not wire a Hub")
 	}
@@ -40,7 +40,7 @@ func TestHubSharesServerNodesState(t *testing.T) {
 // pool (constructed only on the New()/Start() path), keeping the assertion
 // honest rather than vacuous.
 func TestHubScratchPoolWiredFromServer(t *testing.T) {
-	s := newTestServer(newMockPlatform())
+	s := newTestServer(&mockPlatform{})
 	if s.scratchPool == nil {
 		t.Skip("bare test server has no scratchPool wired")
 	}
