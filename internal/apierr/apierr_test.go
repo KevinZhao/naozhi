@@ -57,6 +57,24 @@ func TestLocalize(t *testing.T) {
 			input:       "Error: git push: remote rejected — forbidden by branch protection",
 			passThrough: true,
 		},
+		// GO-1 regression: tool stderr starting with "Error:" must NOT be
+		// treated as an API-error envelope, even when the body contains
+		// keywords like timeout/connection/network/authentication.
+		{
+			name:        "ssh connection timeout stderr passes through",
+			input:       "Error: ssh: connect to host github.com port 22: Connection timed out",
+			passThrough: true,
+		},
+		{
+			name:        "git network error stderr passes through",
+			input:       "Error: git clone: network error: connection reset",
+			passThrough: true,
+		},
+		{
+			name:        "git authentication failure stderr passes through",
+			input:       "Error: authentication failed for 'https://github.com/user/repo'",
+			passThrough: true,
+		},
 		{
 			name:        "non-envelope prose containing rate limit passes through",
 			input:       "Sure — here is how rate limits work in HTTP…",
@@ -72,9 +90,17 @@ func TestLocalize(t *testing.T) {
 			input:       "Here is the analysis you requested.",
 			passThrough: true,
 		},
+		// GO-1: a bare "Error:" prefix is no longer treated as an API
+		// envelope. Anthropic rate-limit envelopes always carry the
+		// canonical "API Error" prefix, which is still localized below.
 		{
-			name:       "error colon prefix with rate_limit",
-			input:      "Error: rate_limit_exceeded",
+			name:        "error colon prefix with rate_limit passes through",
+			input:       "Error: rate_limit_exceeded",
+			passThrough: true,
+		},
+		{
+			name:       "anthropic api error prefix rate_limit localized",
+			input:      "Anthropic API Error: rate_limit_exceeded",
 			wantPrefix: "⏱️ Claude API 调用过于频繁",
 		},
 		{
