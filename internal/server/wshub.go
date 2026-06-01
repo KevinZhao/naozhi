@@ -511,7 +511,18 @@ type HubOptions struct {
 	// WS subscribe / send paths share the same planner-binding
 	// precedence as the IM dispatch path. Nil falls back to the legacy
 	// inlined merge.
-	Resolver         *session.KeyResolver
+	Resolver *session.KeyResolver
+	// Scheduler is the optional cron-side hook (CronView) wired at
+	// construction. Production callers pass s.scheduler here; nil keeps the
+	// auto-save-prompt / stub-revival hooks dormant for tests. R176-ARCH-M3
+	// (#431): moved into HubOptions so the prior SetScheduler post-construction
+	// setter (and its call-order-vs-Start race) is gone.
+	Scheduler CronView
+	// ScratchPool lets sessionOptsFor resolve AgentOpts for ephemeral scratch
+	// keys. Constructed in Server.New (before NewHub), so it is wired at
+	// construction rather than via a post-hoc SetScratchPool setter.
+	// R176-ARCH-M3 (#431).
+	ScratchPool      *session.ScratchPool
 	AllowedRoot      string
 	TrustedProxy     bool
 	WSAuthLimiter    func(ip string) bool
@@ -573,6 +584,8 @@ func NewHub(opts HubOptions) *Hub {
 		nodesMu:          opts.NodesMu,
 		projectMgr:       opts.ProjectMgr,
 		resolver:         opts.Resolver,
+		scheduler:        opts.Scheduler,
+		scratchPool:      opts.ScratchPool,
 		allowedRoot:      opts.AllowedRoot,
 		trustedProxy:     opts.TrustedProxy,
 		wsAuthLimiter:    opts.WSAuthLimiter,
@@ -644,25 +657,13 @@ func NewHub(opts HubOptions) *Hub {
 	return h
 }
 
-// SetScheduler sets the cron scheduler for auto-saving prompts on first send.
-// Accepts the narrow CronView interface rather than the concrete
-// *cron.Scheduler so wshub.go no longer imports the cron package at all —
-// the Hub only ever needed the CronView method-set, and taking the concrete
-// type here was the last residual cron coupling in this file. R260528-ARCH-10
-// (#1371): server's coupling to cron shrinks to the CronView contract; the
-// production *cron.Scheduler satisfies CronView implicitly so the sole caller
-// (dashboard.go) is unchanged. R242-ARCH-13 (#754): CronView is the
-// package-level consumer interface shared with SessionHandlers.
-func (h *Hub) SetScheduler(s CronView) { h.scheduler = s }
-
 // SetUploadStore wires the upload store used by WS sends to resolve file_ids
-// that were pre-uploaded via POST /api/sessions/upload.
+// that were pre-uploaded via POST /api/sessions/upload. Kept as a
+// post-construction setter (unlike Scheduler/ScratchPool which moved into
+// HubOptions in R176-ARCH-M3 #431) because the upload store's cleanup loop is
+// bound to the app-lifecycle ctx and is therefore created after the Hub exists
+// — see registerDashboard's R215-ARCH-P2-3 (#579) note.
 func (h *Hub) SetUploadStore(s *uploadStore) { h.uploadStore = s }
-
-// SetScratchPool wires the ephemeral-session pool so sessionOptsFor can
-// resolve AgentOpts for scratch keys without touching the sidebar-visible
-// router state.
-func (h *Hub) SetScratchPool(p *session.ScratchPool) { h.scratchPool = p }
 
 // allowSendForOwner returns whether the per-user (uploadOwner-keyed) send
 // budget admits another "send" message. The per-connection
