@@ -558,15 +558,29 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 	var picked metaEntry
 	var pickedFirst firstLineMeta
 
+	// Step 5 scratch type — hoisted so candidates/filtered slices can be
+	// reused across retry attempts with [:0] instead of re-allocating each
+	// iteration. [R112714-PERF-3]
+	type scored struct {
+		entry   metaEntry
+		first   firstLineMeta
+		modTime time.Time
+		size    int64
+	}
+	var candidates []metaEntry
+	var filtered []scored
+
 	// Steps 2-4: scan, filter by agentType, retry while empty.
 	for attempt := 0; attempt <= l.retryLimit; attempt++ {
 		entries := l.scanMetaFiles(subagentDir)
-		// Allocate fresh — entries is the cached dirCache slice (see
-		// scanMetaFiles); the prior `entries[:0:0]` trick reused its
-		// header but always re-allocated on first append, so it offered
-		// no advantage and obscured the relationship between the cache
-		// slice and the per-attempt working slice.
-		candidates := make([]metaEntry, 0, len(entries))
+		// Reuse the hoisted slices: reset to zero length, keep backing
+		// array from the previous attempt to avoid re-allocating on each
+		// retry. Grow to len(entries) capacity only on the first pass or
+		// when the directory grew since the last scan.
+		candidates = candidates[:0]
+		if cap(candidates) < len(entries) {
+			candidates = make([]metaEntry, 0, len(entries))
+		}
 		for _, e := range entries {
 			if e.agentType == name {
 				candidates = append(candidates, e)
@@ -584,13 +598,10 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 		}
 
 		// Step 5: per-candidate stat + first-line sessionId & timestamp cross-check.
-		type scored struct {
-			entry   metaEntry
-			first   firstLineMeta
-			modTime time.Time
-			size    int64
+		filtered = filtered[:0]
+		if cap(filtered) < len(candidates) {
+			filtered = make([]scored, 0, len(candidates))
 		}
-		filtered := make([]scored, 0, len(candidates))
 		for _, cand := range candidates {
 			st, err := os.Stat(cand.jsonlPath)
 			if err != nil || st.Size() == 0 {
