@@ -95,11 +95,11 @@ func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubj
 	paused := ok && cur.Paused
 	s.mu.RUnlock()
 	if !ok {
-		slog.Debug(logSubject+": job deleted before execute, skipping", "job_id", jobID)
+		slog.Debug("job deleted before execute, skipping", "subject", logSubject, "job_id", jobID)
 		return
 	}
 	if paused {
-		slog.Debug(logSubject+": job paused concurrently, skipping", "job_id", jobID)
+		slog.Debug("job paused concurrently, skipping", "subject", logSubject, "job_id", jobID)
 		return
 	}
 	s.executeOpt(cur, viaTriggerNow)
