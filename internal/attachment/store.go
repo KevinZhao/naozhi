@@ -417,6 +417,9 @@ func GCWithRefs(ctx context.Context, workspace string, opts GCOptions) (GCResult
 		return res, fmt.Errorf("read %s: %w", root, err)
 	}
 
+	if opts.Now.IsZero() {
+		opts.Now = time.Now()
+	}
 	now := opts.Now
 	uploadCutoff := now.UTC().Add(-opts.UploadTTL)
 	refCutoffMS := now.Add(-opts.RefTTL).UnixMilli()
