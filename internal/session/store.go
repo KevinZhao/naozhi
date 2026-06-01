@@ -216,6 +216,82 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	}, true
 }
 
+// equalStoreEntry reports whether two storeEntry values are field-for-field
+// identical, including the slice fields that make `==` illegal. Used by the
+// per-session marshal cache (R20260531A-PERF-2) to decide whether the cached
+// JSON encoding can be reused.
+func equalStoreEntry(a, b storeEntry) bool {
+	return a.Key == b.Key &&
+		a.SessionID == b.SessionID &&
+		a.TotalCost == b.TotalCost &&
+		a.Workspace == b.Workspace &&
+		a.Backend == b.Backend &&
+		a.LastActive == b.LastActive &&
+		a.CreatedAt == b.CreatedAt &&
+		a.UserLabel == b.UserLabel &&
+		a.LabelOrigin == b.LabelOrigin &&
+		a.Model == b.Model &&
+		slices.Equal(a.PrevSessionIDs, b.PrevSessionIDs) &&
+		slices.Equal(a.PrevSessionOrigins, b.PrevSessionOrigins)
+}
+
+// encodeStoreEntryCached returns the JSON object encoding for s's current
+// storeEntry, reusing the per-session memo when the entry is unchanged since
+// the last save. Returns (_, false) when the session is skipped from
+// persistence (delegating to sessionToStoreEntry). The returned slice is owned
+// by the cache and must NOT be mutated by the caller (marshalStoreEntries only
+// appends a copy of the bytes into the output buffer).
+//
+// CONTRACT mirrors sessionToStoreEntry: callers MUST hold no Router-level lock.
+// The cache pointer itself is only touched on the save path, which is
+// single-goroutine (cleanup loop), so no synchronisation is needed for it.
+func encodeStoreEntryCached(s *ManagedSession) ([]byte, bool) {
+	entry, ok := sessionToStoreEntry(s)
+	if !ok {
+		return nil, false
+	}
+	if c := s.storeMarshalCache.Load(); c != nil && equalStoreEntry(c.entry, entry) {
+		return c.data, true
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		// A storeEntry is plain JSON-safe scalars + string slices; Marshal
+		// cannot fail in practice. Drop the cache and signal skip rather than
+		// poison the whole save with one bad entry.
+		s.storeMarshalCache.Store(nil)
+		return nil, false
+	}
+	s.storeMarshalCache.Store(&storeEntryCache{entry: entry, data: data})
+	return data, true
+}
+
+// marshalStoreEntries builds the sessions.json array body by concatenating
+// each persisted session's cached object encoding. Equivalent on-the-wire to
+// json.Marshal([]storeEntry{...}) but skips re-encoding sessions whose
+// persisted state is unchanged (R20260531A-PERF-2 / #1523).
+//
+// Iteration order is non-deterministic (Go map), matching the previous
+// json.Marshal(entries) behaviour where entries were appended in map-range
+// order; loadStore is order-insensitive (keys into a map).
+func marshalStoreEntries(sessions map[string]*ManagedSession) ([]byte, error) {
+	buf := make([]byte, 0, 256*len(sessions))
+	buf = append(buf, '[')
+	first := true
+	for _, s := range sessions {
+		data, ok := encodeStoreEntryCached(s)
+		if !ok {
+			continue
+		}
+		if !first {
+			buf = append(buf, ',')
+		}
+		first = false
+		buf = append(buf, data...)
+	}
+	buf = append(buf, ']')
+	return buf, nil
+}
+
 func saveStore(path string, sessions map[string]*ManagedSession) error {
 	if path == "" {
 		return nil
@@ -230,16 +306,14 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 		}
 	}
 
-	entries := make([]storeEntry, 0, len(sessions))
-	for _, s := range sessions {
-		entry, ok := sessionToStoreEntry(s)
-		if !ok {
-			continue
-		}
-		entries = append(entries, entry)
-	}
-
-	data, err := json.Marshal(entries)
+	// R20260531A-PERF-2 (#1523): assemble the JSON array from per-session
+	// cached object encodings instead of re-marshalling the whole []storeEntry
+	// every 30s tick. Each session memoizes its last (entry → JSON) pair; a
+	// session whose persisted fields are unchanged since the previous save
+	// reuses its cached bytes and pays zero marshal cost. On a steady-state
+	// deployment only the sessions that saw traffic in the last window are
+	// re-encoded, turning the per-tick marshal from O(N) into O(changed).
+	data, err := marshalStoreEntries(sessions)
 	if err != nil {
 		return fmt.Errorf("marshal session store: %w", err)
 	}

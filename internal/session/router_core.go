@@ -1129,70 +1129,7 @@ func NewRouter(cfg RouterConfig) *Router {
 					"hint", "sys entries should never persist; possible sessions.json tampering")
 				continue
 			}
-			// Resolve the wrapper that owned this session's backend so the
-			// snapshot carries the correct CLI identity even after a pure
-			// restore (no shim reconnect). Pre-multi-backend entries have
-			// empty Backend and fall back to the router default.
-			restoreWrapper, restoreBackendID := r.wrapperFor(entry.Backend)
-			cliName, cliVersion := r.CLIName(), r.CLIVersion()
-			if restoreWrapper != nil {
-				cliName = restoreWrapper.CLIName
-				cliVersion = restoreWrapper.CLIVersion
-			}
-			s := &ManagedSession{
-				key:                key,
-				prevSessionIDs:     entry.PrevSessionIDs,
-				prevSessionOrigins: entry.PrevSessionOrigins,
-				exempt:             isExemptKey(key),
-			}
-			storeTotalCost(&s.totalCost, entry.TotalCost)
-			s.setWorkspace(entry.Workspace)
-			s.SetBackend(restoreBackendID)
-			s.SetCLIName(cliName)
-			s.SetCLIVersion(cliVersion)
-			if entry.UserLabel != "" {
-				s.SetUserLabel(entry.UserLabel)
-			}
-			// LabelOrigin restore: empty in pre-v2.1 stores is treated as
-			// "user" by daemons (RFC §7.3 / §13), so we don't synthesise a
-			// default here — leaving the field at "" preserves the legacy
-			// "human-set" semantics. Only persist explicit non-empty origin.
-			if entry.LabelOrigin != "" {
-				s.setLabelOrigin(entry.LabelOrigin)
-			}
-			// UI Round 5 R5-3: seed model from persisted store so the
-			// dashboard immediately renders "claude-opus-4.7" / etc on
-			// post-restart reattach, before the first new turn re-emits
-			// system/init.
-			if entry.Model != "" {
-				s.SetModel(entry.Model)
-			}
-			s.setSessionID(entry.SessionID)
-			if entry.LastActive != 0 {
-				s.lastActive.Store(entry.LastActive)
-			}
-			// Sidebar order anchor: prefer the persisted CreatedAt, fall back
-			// to LastActive for pre-feature stores so the upgraded binary keeps
-			// older sessions in roughly their previous relative order. If both
-			// are zero (very first save loop after a brand-new key), stamp now
-			// so the entry still gets a stable comparator key.
-			switch {
-			case entry.CreatedAt != 0:
-				s.createdAt.Store(entry.CreatedAt)
-			case entry.LastActive != 0:
-				s.createdAt.Store(entry.LastActive)
-			default:
-				s.initCreatedAtIfUnset()
-			}
-			// R215-ARCH-P2-2: publishSessionLocked funnels the
-			// attachHistorySource + map insert + index update so the
-			// invariant is a property of the publish step, not five
-			// copy-paste sites.
-			r.publishSessionLocked(key, s, false)
-			r.trackSessionID(entry.SessionID)
-			if entry.SessionID != "" {
-				r.sessionIDToKey[entry.SessionID] = key
-			}
+			r.restoreSessionFromEntry(key, entry)
 		}
 	}
 
@@ -1231,6 +1168,84 @@ func NewRouter(cfg RouterConfig) *Router {
 	r.backendIDs = computeBackendIDs(r.wrapper, r.wrappers, r.defaultBackend)
 
 	return r
+}
+
+// restoreSessionFromEntry rebuilds a single persisted ManagedSession from its
+// on-disk storeEntry and publishes it into the router's maps + indexes.
+// Extracted verbatim from NewRouter's restore loop (R20260531A-ARCH-4 / #1528):
+// the ~65-line per-entry body dominated the constructor's surface area and was
+// untestable in isolation. The caller still owns the IsSysKey skip guard and
+// the loadStore range; this helper is pure construction-time wiring and changes
+// no behaviour.
+//
+// LOCK: must be invoked from NewRouter under construction (no concurrent
+// r.sessions writers); publishSessionLocked + the sessionIDToKey write assume
+// exclusive access, which the publish-after-construct contract guarantees.
+func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
+	// Resolve the wrapper that owned this session's backend so the
+	// snapshot carries the correct CLI identity even after a pure
+	// restore (no shim reconnect). Pre-multi-backend entries have
+	// empty Backend and fall back to the router default.
+	restoreWrapper, restoreBackendID := r.wrapperFor(entry.Backend)
+	cliName, cliVersion := r.CLIName(), r.CLIVersion()
+	if restoreWrapper != nil {
+		cliName = restoreWrapper.CLIName
+		cliVersion = restoreWrapper.CLIVersion
+	}
+	s := &ManagedSession{
+		key:                key,
+		prevSessionIDs:     entry.PrevSessionIDs,
+		prevSessionOrigins: entry.PrevSessionOrigins,
+		exempt:             isExemptKey(key),
+	}
+	storeTotalCost(&s.totalCost, entry.TotalCost)
+	s.setWorkspace(entry.Workspace)
+	s.SetBackend(restoreBackendID)
+	s.SetCLIName(cliName)
+	s.SetCLIVersion(cliVersion)
+	if entry.UserLabel != "" {
+		s.SetUserLabel(entry.UserLabel)
+	}
+	// LabelOrigin restore: empty in pre-v2.1 stores is treated as
+	// "user" by daemons (RFC §7.3 / §13), so we don't synthesise a
+	// default here — leaving the field at "" preserves the legacy
+	// "human-set" semantics. Only persist explicit non-empty origin.
+	if entry.LabelOrigin != "" {
+		s.setLabelOrigin(entry.LabelOrigin)
+	}
+	// UI Round 5 R5-3: seed model from persisted store so the
+	// dashboard immediately renders "claude-opus-4.7" / etc on
+	// post-restart reattach, before the first new turn re-emits
+	// system/init.
+	if entry.Model != "" {
+		s.SetModel(entry.Model)
+	}
+	s.setSessionID(entry.SessionID)
+	if entry.LastActive != 0 {
+		s.lastActive.Store(entry.LastActive)
+	}
+	// Sidebar order anchor: prefer the persisted CreatedAt, fall back
+	// to LastActive for pre-feature stores so the upgraded binary keeps
+	// older sessions in roughly their previous relative order. If both
+	// are zero (very first save loop after a brand-new key), stamp now
+	// so the entry still gets a stable comparator key.
+	switch {
+	case entry.CreatedAt != 0:
+		s.createdAt.Store(entry.CreatedAt)
+	case entry.LastActive != 0:
+		s.createdAt.Store(entry.LastActive)
+	default:
+		s.initCreatedAtIfUnset()
+	}
+	// R215-ARCH-P2-2: publishSessionLocked funnels the
+	// attachHistorySource + map insert + index update so the
+	// invariant is a property of the publish step, not five
+	// copy-paste sites.
+	r.publishSessionLocked(key, s, false)
+	r.trackSessionID(entry.SessionID)
+	if entry.SessionID != "" {
+		r.sessionIDToKey[entry.SessionID] = key
+	}
 }
 
 // startBackgroundLifecycle launches the long-running side effects that

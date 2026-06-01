@@ -482,6 +482,32 @@ type ManagedSession struct {
 	// may reset it after the session is reachable. atomic.Pointer makes the
 	// hand-off race-free without requiring historyMu on every read.
 	historySource atomic.Pointer[historySourceBox]
+
+	// storeMarshalCache memoizes the last (storeEntry → JSON) result for this
+	// session so saveStore can skip re-marshalling a session whose persisted
+	// fields are unchanged since the previous save. R20260531A-PERF-2 (#1523):
+	// the periodic 30s saveIfDirty tick previously re-marshalled every entry
+	// even though, on a typical deployment, only the handful of sessions that
+	// received traffic in the last window actually changed. Idle sessions now
+	// hit the cache and pay zero marshal cost. The cache is keyed on the
+	// storeEntry value itself (compared with ==) so any persisted-field change
+	// — LastActive, cost, label, model, workspace, session chain — invalidates
+	// it without per-mutation-site bookkeeping (equality checked with
+	// equalStoreEntry, since storeEntry carries slice fields). The save path
+	// (saveStore) holds no Router lock; saveIfDirty/Cleanup serialise through
+	// the cleanup-loop goroutine, but Shutdown also calls saveStore, so the
+	// cache is an atomic.Pointer to stay race-free if a final shutdown save
+	// overlaps an in-flight periodic save on the same session.
+	storeMarshalCache atomic.Pointer[storeEntryCache]
+}
+
+// storeEntryCache is the per-session memo described on
+// ManagedSession.storeMarshalCache. entry is the storeEntry that produced
+// data; data is its standalone JSON object encoding (NOT array-wrapped) ready
+// to be concatenated into the sessions.json array.
+type storeEntryCache struct {
+	entry storeEntry
+	data  []byte
 }
 
 // historySourceBox wraps history.Source so atomic.Pointer can store it.
