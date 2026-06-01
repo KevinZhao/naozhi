@@ -14,7 +14,7 @@ package agentlink
 import "github.com/naozhi/naozhi/internal/cli"
 
 // The four consuming concerns are declared as three single-responsibility
-// interfaces (R248-ARCH-4 #402 part c). AgentLinker embeds all three so the
+// interfaces (R248-ARCH-4 #375 part c). AgentLinker embeds all three so the
 // existing wiredLinkers map-key and the *cli.SubagentLinker producer are
 // unaffected; call sites that only need one facet (e.g. a path anchor, or a
 // resolve subscription) can depend on the narrower interface instead of the
