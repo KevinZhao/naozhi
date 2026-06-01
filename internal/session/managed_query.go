@@ -796,18 +796,27 @@ func costUnitForBackend(backendID string) string {
 	if backendID == "" {
 		backendID = "claude"
 	}
-	// Lazy bootstrap pattern (matches server.replyTagForBackend): production
-	// wires backend.RegisterDefaults() in cmd/naozhi/main.go before any
-	// session is constructed. Tests that build a Snapshot without calling
-	// RegisterDefaults would otherwise see backend.Get return false and lose
-	// the unit — costUnitForBackendOnce ensures one-shot lazy registration so
-	// tests stay green. Guard with a registry-empty check so we cooperate
-	// with sibling tests (server pkg withDefaultBackends) that already
-	// pre-registered, rather than panicking on duplicate Register.
+	// Fast path: production wires backend.RegisterDefaults() (via
+	// wireup.RegisterCLIBackends) before any session is constructed, so the
+	// lookup normally succeeds without touching the lazy-bootstrap below.
+	if p, ok := backend.Get(backendID); ok {
+		return p.CostUnit
+	}
+	// Lazy bootstrap (R239-ARCH-D / #890): tests that build a Snapshot
+	// without calling RegisterDefaults would otherwise see backend.Get
+	// return false and lose the unit. We only bootstrap when the registry is
+	// completely empty — a partially-populated registry (sibling test
+	// registered a custom backend but not the defaults) must NOT trigger a
+	// RegisterDefaults that would panic on the duplicate custom ID. The
+	// recover guards the residual race where wireup.RegisterCLIBackends runs
+	// concurrently between the empty-check and RegisterDefaults: a duplicate
+	// panic there is benign (the registry ends up populated either way).
 	costUnitForBackendOnce.Do(func() {
-		if len(backend.All()) == 0 {
-			backend.RegisterDefaults()
+		if len(backend.All()) != 0 {
+			return
 		}
+		defer func() { _ = recover() }()
+		backend.RegisterDefaults()
 	})
 	if p, ok := backend.Get(backendID); ok {
 		return p.CostUnit
