@@ -84,6 +84,69 @@ func (l *EventLog) LastNAppend(dst []EventEntry, n int) []EventEntry {
 	return dst
 }
 
+// LastNVisible returns the tail of the ring as a CONTIGUOUS chronological
+// slice (internal events included) chosen so that the slice contains at least
+// `visibleTarget` visible entries — i.e. entries IsVisibleEntry reports true
+// for. The walk stops at the first of:
+//
+//   - the slice holds >= visibleTarget visible entries, OR
+//   - the slice length reaches maxTotal (a cost ceiling — when the tail is
+//     dominated by a parallel agent team's tool_use / task_progress flood the
+//     visible count may end up below the target), OR
+//   - the whole ring has been scanned.
+//
+// Why a contiguous run rather than only the visible entries: the dashboard's
+// initial render rebuilds turnState by scanning the history backward for the
+// last turn boundary, and the running banner ("正在使用 X") is reconstructed
+// from the interleaved tool_use / task_* events. Dropping the internal events
+// here would leave the banner blank on first paint. The dashboard still
+// filters them out of the transcript via processEventsForDisplay; they ride
+// along purely to seed turn state.
+//
+// visibleTarget <= 0 falls back to LastN(maxTotal) semantics (no visible
+// accounting). maxTotal <= 0 is treated as "the whole ring".
+//
+// The earliest Time in the returned slice is the cursor a caller uses to
+// continue paginating into the disk tier (EventEntriesBeforeCtx) when the ring
+// alone could not satisfy visibleTarget.
+func (l *EventLog) LastNVisible(visibleTarget, maxTotal int) []EventEntry {
+	l.mu.RLock()
+	count := l.count
+	if count == 0 {
+		l.mu.RUnlock()
+		return nil
+	}
+	limit := maxTotal
+	if limit <= 0 || limit > count {
+		limit = count
+	}
+	// Walk backward from the newest slot, branch-on-wrap (no per-step modulo),
+	// collecting into a reverse buffer until a stop condition trips.
+	rev := make([]EventEntry, 0, limit)
+	visible := 0
+	idx := l.head - 1
+	if idx < 0 {
+		idx += l.maxSize
+	}
+	for i := 0; i < count && len(rev) < limit; i++ {
+		e := l.entries[idx]
+		rev = append(rev, e)
+		if IsVisibleEntry(e) {
+			visible++
+			if visibleTarget > 0 && visible >= visibleTarget {
+				break
+			}
+		}
+		idx--
+		if idx < 0 {
+			idx += l.maxSize
+		}
+	}
+	l.mu.RUnlock()
+	slices.Reverse(rev)
+	return rev
+}
+
 // Count returns the current number of valid entries (0..maxSize).
 // Useful for sync.Pool-backed callers that want to right-size their
 // scratch buffer before a LastNAppend call.

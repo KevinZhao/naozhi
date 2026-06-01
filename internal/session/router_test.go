@@ -129,6 +129,32 @@ func (f *fakeProcess) EventLastN(n int) []cli.EventEntry {
 	copy(cp, entries)
 	return cp
 }
+func (f *fakeProcess) EventLastNVisible(visibleTarget, maxTotal int) []cli.EventEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := len(f.entries)
+	if n == 0 {
+		return nil
+	}
+	limit := maxTotal
+	if limit <= 0 || limit > n {
+		limit = n
+	}
+	visible := 0
+	start := n
+	for i := n - 1; i >= 0 && (n-i) <= limit; i-- {
+		start = i
+		if cli.IsVisibleEntry(f.entries[i]) {
+			visible++
+			if visibleTarget > 0 && visible >= visibleTarget {
+				break
+			}
+		}
+	}
+	cp := make([]cli.EventEntry, n-start)
+	copy(cp, f.entries[start:])
+	return cp
+}
 func (f *fakeProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
