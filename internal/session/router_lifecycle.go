@@ -822,19 +822,43 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		metrics.AutoChainSpawnAttachTotal.Add(1)
 	}
 
-	r.loadResumeHistoryOnSpawn(ctx, s, key, resumeID, workspace, prevIDs, oldHistory)
-
-	// RFC §3.2.2 ordering contract: SetPersistSink ONLY after every
-	// InjectHistory call above has completed. Any remaining bulk
-	// history injection for this session happens later via the
-	// NewRouter startup goroutine, which uses s.InjectHistory; the
-	// AppendBatch that flows through must carry replayPhase=true
-	// because sinkReady was still false when those entries were
-	// appended. Persister drops them (see RFC §3.2.3 runtime guard).
-	r.installPersistSink(proc, key)
+	// R242-ARCH-11 (#733): the resume-history load and the persist-sink
+	// install are sequenced by bindNewSessionHistory so the
+	// "InjectHistory-then-SetPersistSink" ordering contract lives in one
+	// named API rather than relying on adjacent call sites staying in the
+	// right order. Reordering these two now requires editing the helper,
+	// where the ordering is asserted and documented.
+	r.bindNewSessionHistory(ctx, s, proc, key, resumeID, workspace, prevIDs, oldHistory)
 
 	r.notifyChange()
 	return s, nil
+}
+
+// bindNewSessionHistory loads the resume-history chain into a freshly-spawned
+// session and THEN installs the event-log persist sink, in that exact order.
+//
+// R242-ARCH-11 (#733): SetPersistSink (via installPersistSink) must run only
+// AFTER every InjectHistory call for the session has completed — otherwise the
+// bulk replay entries are written back to disk instead of being recognised as
+// replayPhase=true and dropped (RFC §3.2.2 / §3.2.3). Previously this ordering
+// was held together only by two adjacent statements in spawnSession plus a
+// comment; this helper makes the contract a single named call so the two steps
+// cannot be reordered or interleaved by accident.
+//
+// LOCK: must NOT be called with r.mu held — loadResumeHistoryOnSpawn injects
+// history under historyMu and the lock order is r.mu → historyMu.
+func (r *Router) bindNewSessionHistory(
+	ctx context.Context,
+	s *ManagedSession,
+	proc *cli.Process,
+	key string,
+	resumeID string,
+	workspace string,
+	prevIDs []string,
+	oldHistory []cli.EventEntry,
+) {
+	r.loadResumeHistoryOnSpawn(ctx, s, key, resumeID, workspace, prevIDs, oldHistory)
+	r.installPersistSink(proc, key)
 }
 
 // installFreshSessionLocked attaches a freshly-spawned process to the
