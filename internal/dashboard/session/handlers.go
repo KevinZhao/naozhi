@@ -294,8 +294,8 @@ type CronView = cronview.CronView
 // constructs each scan.  Snapshots the cron-known set + sys workspace
 // once per call so the in-loop predicate is O(1) per session.
 type historyFilter struct {
-	skipWorkspace string          // sys-sessions absolute path; "" disables
-	skipSessions  map[string]bool // cron known IDs; nil disables
+	skipWorkspace string              // sys-sessions absolute path; "" disables
+	skipSessions  map[string]struct{} // cron known IDs; nil disables. READ-ONLY: shared cache snapshot (#1544).
 }
 
 func (f historyFilter) SkipWorkspace(ws string) bool {
@@ -303,7 +303,11 @@ func (f historyFilter) SkipWorkspace(ws string) bool {
 }
 
 func (f historyFilter) SkipSessionID(sid string) bool {
-	return f.skipSessions != nil && f.skipSessions[sid]
+	if f.skipSessions == nil {
+		return false
+	}
+	_, ok := f.skipSessions[sid]
+	return ok
 }
 
 // Handlers groups the session list, events, delete, and resume API endpoints.
