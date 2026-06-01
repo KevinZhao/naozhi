@@ -96,7 +96,7 @@ func (a *attachmentGC) Configure(cfg DaemonConfig) error {
 	if v, ok := cfg["per_root_cap"].(int); ok && v > 0 {
 		a.perRootCap = v
 	}
-	if v, ok := cfg["meta_grace"].(time.Duration); ok && v > 0 {
+	if v, ok := cfg["meta_grace"].(time.Duration); ok {
 		a.metaGrace = v
 	}
 	if v, ok := cfg["dry_run"].(bool); ok {
