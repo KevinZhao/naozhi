@@ -186,32 +186,75 @@ func MarshalRecordInto(buf *bytes.Buffer, r *Record) ([]byte, error) {
 		return nil, fmt.Errorf("marshal record: nil buffer")
 	}
 	startLen := buf.Len()
-	enc := json.NewEncoder(buf)
-	// Match MarshalRecord's default escape behaviour (json.Marshal
-	// escapes <, >, &). Existing on-disk records already carry these
-	// escapes, so flipping SetEscapeHTML(false) here would diverge
-	// from MarshalRecord output and cause the byte-identity tests in
-	// schema/record_test.go to fail. Keep the default.
-	if err := enc.Encode(r); err != nil {
-		// Roll back any bytes the encoder wrote before failing so the
-		// pooled buffer is in a known state for the caller's next op.
-		buf.Truncate(startLen)
+	// R20260531070014-PERF-3 (#1537): json.NewEncoder allocates an
+	// encodeState (reflection scratch) on every call. handleBatch drives
+	// this per entry on the persist hot path, so we borrow a pooled
+	// encoder (bound to its own scratch buffer) instead of building a
+	// fresh one each time. The encoder cannot be retargeted to `buf`
+	// (encoding/json.Encoder has no Reset), so it writes into its own
+	// pooled buffer and we copy the finished body into the caller's
+	// `buf` — that copy is the JSON-body copy the persist tier needs
+	// anyway (see #1524), so the only cost amortised away here is the
+	// per-call encodeState alloc.
+	enc := recordEncPool.Get().(*recordEnc)
+	enc.buf.Reset()
+	// Escape behaviour is preserved from the pre-pool implementation
+	// (json.NewEncoder default = HTML escaping ON). The on-disk format is
+	// consumed only via UnmarshalRecord, so escaped (<) and raw (<)
+	// bytes decode identically; #1537 only swaps the encoder allocation
+	// strategy and must not change existing entry-record output.
+	if err := enc.enc.Encode(r); err != nil {
+		putRecordEnc(enc)
 		return nil, fmt.Errorf("marshal record: %w", err)
 	}
 	// Encode appended bytes plus a trailing '\n'. Strip the newline so
 	// the returned slice matches MarshalRecord exactly — the framing
 	// layer adds its own '\n' separator.
-	all := buf.Bytes()
-	if n := len(all); n > startLen && all[n-1] == '\n' {
-		buf.Truncate(n - 1)
-	}
-	body := buf.Bytes()[startLen:]
-	if len(body) > MaxRecordBytes {
-		buf.Truncate(startLen)
+	enc.buf.Truncate(enc.buf.Len() - 1) // Encode always appends one '\n'
+	if enc.buf.Len() > MaxRecordBytes {
+		size := enc.buf.Len()
+		putRecordEnc(enc)
 		return nil, fmt.Errorf("record seq=%d size=%d: %w",
-			r.Seq, len(body), ErrRecordTooLarge)
+			r.Seq, size, ErrRecordTooLarge)
 	}
-	return body, nil
+	// Copy the encoded body into the caller's buffer so the returned
+	// slice survives the pooled encoder going back into recordEncPool.
+	buf.Write(enc.buf.Bytes())
+	putRecordEnc(enc)
+	return buf.Bytes()[startLen:], nil
+}
+
+// recordEnc pairs a bytes.Buffer with a json.Encoder bound to it so the
+// encodeState reflection scratch is reused across MarshalRecordInto
+// calls. Mirrors the bridgeEncPool idiom in
+// internal/session/eventlog_bridge.go. R20260531070014-PERF-3 (#1537).
+type recordEnc struct {
+	buf *bytes.Buffer
+	enc *json.Encoder
+}
+
+var recordEncPool = sync.Pool{
+	New: func() any {
+		buf := bytes.NewBuffer(make([]byte, 0, 4*1024))
+		// Default escape behaviour (HTML escaping ON) — preserves the
+		// pre-pool MarshalRecordInto output. See its body comment.
+		return &recordEnc{buf: buf, enc: json.NewEncoder(buf)}
+	},
+}
+
+// recordEncMaxCap caps buffer reuse so a one-off oversize record does not
+// permanently pin a large heap allocation in the pool.
+const recordEncMaxCap = 64 * 1024
+
+func putRecordEnc(e *recordEnc) {
+	if e == nil {
+		return
+	}
+	if e.buf.Cap() > recordEncMaxCap {
+		return
+	}
+	e.buf.Reset()
+	recordEncPool.Put(e)
 }
 
 // UnmarshalRecord parses a single JSON-encoded record. Returns
