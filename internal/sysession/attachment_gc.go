@@ -38,10 +38,12 @@ const (
 	attachmentGCDefaultRefTTL     = attachment.DefaultRefTTL // 30d
 	attachmentGCDefaultPerRootCap = 500
 	attachmentGCDefaultMetaGrace  = 5 * time.Minute
-	// attachmentGCMinTick floors the configured tick so a misconfigured
+	// AttachmentGCMinTick floors the configured tick so a misconfigured
 	// short interval (e.g. 30s) cannot make the daemon re-walk every
 	// attachment dir continuously. GC is low-frequency by nature.
-	attachmentGCMinTick = time.Hour
+	// Wiring layers (e.g. cmd/naozhi/main_helpers.go) should reference
+	// this constant instead of inlining time.Hour.
+	AttachmentGCMinTick = time.Hour
 )
 
 // attachmentGC is the refcount-aware attachment reaper daemon. It owns
