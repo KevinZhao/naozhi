@@ -17,7 +17,10 @@
 // Design: single interface per consumer (cron.SessionRouter is the
 // existing precedent). See docs/rfc/consumer-interfaces.md §3.4 for
 // why we do NOT split into Lifecycle/Reader/Controller sub-interfaces
-// at this size (8 methods).
+// at this size (8 methods). The "as long as it stays small" caveat is
+// machine-enforced by consumer_method_count_test.go: growth past 8
+// methods trips a test that points back at the Lookup/Lifecycle/Mutator
+// split tracked in R246-ARCH-11 (#791).
 package dispatch
 
 import (
