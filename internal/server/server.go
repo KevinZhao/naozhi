@@ -911,28 +911,8 @@ const (
 	retiredStorePruneCutoff   = 14 * 24 * time.Hour
 )
 
-// runRetiredStoreFlusher writes the retired-store to disk every
-// retiredStoreFlushInterval and prunes stale entries every
-// retiredStorePruneInterval. Stops on ctx.Done; the shutdown goroutine
-// invokes a final FlushRetiredStore so the most recent retirement event
-// survives a clean shutdown.
-func (s *Server) runRetiredStoreFlusher(ctx context.Context) {
-	flushTicker := time.NewTicker(retiredStoreFlushInterval)
-	defer flushTicker.Stop()
-	pruneTicker := time.NewTicker(retiredStorePruneInterval)
-	defer pruneTicker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-flushTicker.C:
-			s.sessionH.FlushRetiredStore()
-		case <-pruneTicker.C:
-			cutoffMs := time.Now().Add(-retiredStorePruneCutoff).UnixMilli()
-			s.sessionH.PruneRetiredStore(cutoffMs)
-		}
-	}
-}
+// runRetiredStoreFlusher + startProjectScanLoop + removedProjectNames moved to
+// server_loops.go (Phase-3 physical split, ARCH1 / #387).
 
 // plaintextDashboardTokenWarning is the message logged when a token-protected
 // dashboard is served over plaintext HTTP with no trusted proxy. R217-SEC-8
@@ -964,75 +944,6 @@ const noTokenOpenWarning = "no dashboard_token configured on a non-loopback bind
 	"Either set server.dashboard_token, bind to 127.0.0.1 for single-user use, " +
 	"or set server.trusted_proxy=true with an upstream that enforces access control."
 
-// reverseNodePlaintextWarning / trustedProxyXFFReminder consts +
-// shouldWarnReverseNodePlaintext / shouldWarnNoTokenOpen / isPlaintextPublicAddr
-// helpers moved to server_warnings.go (Phase 5-prep, 2026-05-28).
-
-// removedProjectNames returns the project names present in old but absent in
-// current — i.e. the projects deleted between two consecutive scans. It is the
-// pure decision rule extracted from startProjectScanLoop (ARCH-SVR-2 / #460):
-// no Router, Hub, or logging is touched, so it can be exercised directly in a
-// unit test rather than only through the 60s ticker goroutine. The caller is
-// responsible for the side effects (orphaned-planner removal, WS broadcast),
-// which remain the server adapter's concern.
-func removedProjectNames(old, current map[string]struct{}) []string {
-	if len(old) == 0 {
-		return nil
-	}
-	var removed []string
-	for name := range old {
-		if _, ok := current[name]; !ok {
-			removed = append(removed, name)
-		}
-	}
-	return removed
-}
-
-// startProjectScanLoop periodically rescans the projects root for added or
-// removed subdirectories and cleans up orphaned planner sessions for removed
-// projects.
-func (s *Server) startProjectScanLoop(ctx context.Context) {
-	if s.projectMgr == nil {
-		return
-	}
-	go func() {
-		ticker := time.NewTicker(session.ProjectScanInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				oldNames := s.projectMgr.ProjectNames()
-				if err := s.projectMgr.Scan(); err != nil {
-					s.log().Warn("project rescan", "err", err)
-					continue
-				}
-				newNames := s.projectMgr.ProjectNames()
-
-				// Detect removed projects and clean up orphaned planner
-				// sessions. The set-diff is the pure business rule (which
-				// projects disappeared) and lives in removedProjectNames so
-				// it is unit-testable without a Router/Hub — the first
-				// concrete slice of ARCH-SVR-2 (#460) "sink business logic
-				// out of server". The router/hub side effects below stay in
-				// the server layer because they are the HTTP/WS adapter's job.
-				removed := removedProjectNames(oldNames, newNames)
-				changed := len(oldNames) != len(newNames)
-				for _, name := range removed {
-					changed = true
-					plannerKey := project.PlannerKeyFor(name)
-					if s.router.Remove(plannerKey) {
-						s.log().Info("removed orphaned planner", "project", name)
-					}
-				}
-				if changed {
-					s.log().Info("project list changed", "count", len(newNames))
-					if s.hub != nil {
-						s.hub.BroadcastSessionsUpdate()
-					}
-				}
-			}
-		}
-	}()
-}
+	// reverseNodePlaintextWarning / trustedProxyXFFReminder consts +
+	// shouldWarnReverseNodePlaintext / shouldWarnNoTokenOpen / isPlaintextPublicAddr
+	// helpers moved to server_warnings.go (Phase 5-prep, 2026-05-28).
