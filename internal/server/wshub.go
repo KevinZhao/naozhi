@@ -137,6 +137,25 @@ const (
 // 只 WRITE broadcast block + READ shared deps；其余同理）。CI lint
 // rule 3 (field_block) 验证此约束。lifecycle 块跨块写豁免（v0.6.1 §五）：
 // NewHub / Shutdown / Start 用 LIFECYCLE-METHOD godoc 关键词显式标注。
+//
+// NEEDS-DESIGN R248-ARCH-6 (#376) — struct extraction anchor:
+// PR #327 split wshub.go into per-block files but kept the god-struct with
+// every method on *Hub. The next modularization stage extracts three
+// cohesive sub-structs out of the field-block map above (one issue each):
+//
+//	SubscriberRegistry  ← subscriber block (clients / connCount /
+//	                      subscriberCount / clientWG) — register/unregister
+//	                      fanout surface.
+//	BroadcastDispatcher ← broadcast block (debounceMu/Timer/First/Closed/
+//	                      ClosedFast/Fire) + droppedTotal — debounce-throttled
+//	                      sessions:update fanout.
+//	SendCoordinator     ← send block (queue / sendWG / sendTrackMu /
+//	                      sendClosed) — owner-loop + TrackSend lifecycle.
+//
+// Receivers stay on *Hub until each extraction lands; this anchor exists so
+// future PRs widen the same map instead of reinventing the boundary. Do NOT
+// extract opportunistically — each carries its own lock-ordering contract
+// (see shutdown_lock_order_test.go) and must land as a reviewed issue.
 type Hub struct {
 	mu sync.RWMutex
 	// connCount mirrors len(h.clients) for the unauthenticated connection
