@@ -343,9 +343,14 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 			// R249-CR-26 (#966): record partial delivery so a rising delta
 			// surfaces "IM recipients are seeing truncated cron output".
 			metrics.CronNotifyPartialTotal.Add(1)
+			// R236-SEC-15 follow-up: fold the cap-dropped tail (`dropped`)
+			// into the remaining count. `chunks` was already truncated to
+			// cronNotifyMaxChunks above, so `len(chunks)-i` alone would
+			// undercount what the recipient never saw — operators reading
+			// this WARN must see the full undelivered tail.
 			slog.Warn("cron notify target deadline reached; remaining chunks dropped",
 				"platform", plat, "chat", chatID, "err", err,
-				"sent", delivered, "remaining", len(chunks)-i)
+				"sent", delivered, "remaining", len(chunks)-i+dropped)
 			return
 		}
 		if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
@@ -363,9 +368,14 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 			// rather than distinguishing deadline-vs-failure (the WARN
 			// carries that detail for the journalctl drill-down).
 			metrics.CronNotifyPartialTotal.Add(1)
+			// R236-SEC-15 follow-up: report the ORIGINAL chunk count
+			// (len(chunks)+dropped) as total so the WARN reflects every
+			// chunk the recipient was supposed to receive, not just the
+			// post-cap subset. Without this a cap-truncated message that
+			// then fails mid-send under-reports the true loss.
 			slog.Warn("cron notify partial: chunks dropped after send failure",
 				"platform", plat, "chat", chatID, "err", err,
-				"delivered", delivered, "total", len(chunks),
+				"delivered", delivered, "total", len(chunks)+dropped,
 				"failed_index", i)
 			return
 		}
