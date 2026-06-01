@@ -672,6 +672,20 @@ type Handlers struct {
 	missedCacheMu sync.Mutex
 	missedCache   map[string]missedVerdict
 
+	// tzLabelMu guards the memoised timezone label below. HandleList runs
+	// at the dashboard's 1 Hz poll cadence × parallel tabs and re-rendered
+	// formatTZOffset (an fmt.Sprintf) on every request even though the
+	// label only changes when the zone offset changes. The scheduler's
+	// *time.Location is fixed at construction, but the offset returned by
+	// now.In(loc).Zone() still flips across DST transitions, so the cache
+	// is keyed on (locName, offset) — NOT on loc.String() alone — to stay
+	// correct across DST boundaries. R103901-PERF-10.
+	tzLabelMu     sync.Mutex
+	tzLabelLoc    string
+	tzLabelOffset int
+	tzLabelCached string
+	tzLabelHasVal bool
+
 	// transcriptSem caps concurrent /api/cron/runs/{run_id}/transcript
 	// requests across the whole process. R243-SEC-12 (#798): each
 	// in-flight transcript holds a 256 KB bufio.Scanner buffer plus
@@ -1085,7 +1099,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	// syscall on every list request.
 	name, offset := now.In(loc).Zone()
 	locName := loc.String()
-	tzLabel := formatTZOffset(locName, offset)
+	tzLabel := h.cachedTZLabel(locName, offset)
 
 	// R230B-CR-3: named struct in place of map[string]any keeps the json
 	// encoder on the cached reflect path (one-time alloc) and lets the wire
@@ -1599,6 +1613,26 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 // The integer-division approach would produce "UTC-05:-30" for fractional
 // negative offsets because the sub-hour remainder inherits the sign;
 // abs() the minute component to keep the format well-formed.
+// cachedTZLabel returns formatTZOffset(locName, offset), memoising the result
+// so the dashboard's 1 Hz HandleList poll does not re-run fmt.Sprintf on every
+// request. The cache is keyed on (locName, offset): the scheduler location is
+// fixed at construction, but a fixed location's offset still flips across DST
+// transitions, so keying on the offset (not locName alone) keeps the label
+// correct across DST boundaries. R103901-PERF-10.
+func (h *Handlers) cachedTZLabel(locName string, offset int) string {
+	h.tzLabelMu.Lock()
+	defer h.tzLabelMu.Unlock()
+	if h.tzLabelHasVal && h.tzLabelLoc == locName && h.tzLabelOffset == offset {
+		return h.tzLabelCached
+	}
+	label := formatTZOffset(locName, offset)
+	h.tzLabelLoc = locName
+	h.tzLabelOffset = offset
+	h.tzLabelCached = label
+	h.tzLabelHasVal = true
+	return label
+}
+
 func formatTZOffset(ianaName string, offsetSeconds int) string {
 	hours := offsetSeconds / 3600
 	minutes := (offsetSeconds % 3600) / 60
