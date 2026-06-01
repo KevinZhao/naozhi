@@ -1262,22 +1262,19 @@ func (d *Dispatcher) sendAndReply(
 	var outImages []platform.Image
 	imagePaths := cli.ExtractImagePaths(replyText)
 	if len(imagePaths) > 0 {
-		// One pass through replyText for all paths: previously the per-path
-		// strings.ReplaceAll loop scanned the whole message text N times,
-		// turning a multi-image reply into O(N * len(replyText)). Building
-		// a single Replacer keeps it O(len(replyText)). Each path is always
-		// added to replacePairs (even when ReadFile fails) so the user-visible
-		// behaviour matches the prior strings.ReplaceAll loop where every
-		// extracted path got rewritten to "[图片]" regardless of read success.
-		replacePairs := make([]string, 0, 2*len(imagePaths))
+		// R112714-PERF-8: use strings.ReplaceAll loop instead of
+		// strings.NewReplacer. ExtractImagePaths returns at most a handful of
+		// paths per reply (typically 1-2), so the per-call trie allocation in
+		// strings.NewReplacer costs more than N simple verbatim scans. Each
+		// path is always replaced (even when ReadFile fails) so user-visible
+		// behaviour is unchanged: every extracted path becomes "[图片]".
 		for _, path := range imagePaths {
 			data, err := d.imageReader.ReadFile(path)
 			if err == nil {
 				outImages = append(outImages, platform.Image{Data: data, MimeType: cli.MimeFromPath(path)})
 			}
-			replacePairs = append(replacePairs, path, "[图片]")
+			replyText = strings.ReplaceAll(replyText, path, "[图片]")
 		}
-		replyText = strings.NewReplacer(replacePairs...).Replace(replyText)
 	}
 
 	tracker.waitReady(ctx)
