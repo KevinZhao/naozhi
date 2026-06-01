@@ -487,6 +487,58 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	return out
 }
 
+// EventEntriesSinceAppend is the buffer-reusing variant of EventEntriesSince
+// for the dead-session (persistedHistory) path. When the session has a live
+// process the call falls through to proc.EventEntriesSince which always
+// allocates (ProcessEventReader interface does not expose an append variant —
+// adding it would require updating cli.Process, TestProcess, and all fakes;
+// that cross-layer change is deferred). R112714-PERF-11.
+//
+// Callers that poll at 1Hz per N WS tabs (backfillSubscriberEvents) can pass
+// a per-client dst buffer so the common incremental case (0-5 new entries on
+// a dead session) appends into existing capacity instead of allocating.
+// Ownership: the caller must not retain dst across calls; the returned slice
+// shares backing array with dst.
+func (s *ManagedSession) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS int64) []cli.EventEntry {
+	proc := s.loadProcess()
+	if proc != nil {
+		// Live path: interface has no append variant; fall back to allocating.
+		return append(dst, proc.EventEntriesSince(afterMS)...)
+	}
+	s.historyMu.RLock()
+	if n := len(s.persistedHistory); n == 0 || (s.persistedHistorySorted && s.persistedHistory[n-1].Time <= afterMS) {
+		s.historyMu.RUnlock()
+		if len(dst) == 0 {
+			return nil
+		}
+		return dst[:0]
+	}
+	if !s.persistedHistorySorted {
+		s.historyMu.RUnlock()
+		s.historyMu.Lock()
+		if !s.persistedHistorySorted {
+			sortEntriesByTimeStable(s.persistedHistory)
+			s.persistedHistorySorted = true
+		}
+		s.historyMu.Unlock()
+		s.historyMu.RLock()
+		if n := len(s.persistedHistory); n == 0 || s.persistedHistory[n-1].Time <= afterMS {
+			s.historyMu.RUnlock()
+			if len(dst) == 0 {
+				return nil
+			}
+			return dst[:0]
+		}
+	}
+	for _, e := range s.persistedHistory {
+		if e.Time > afterMS {
+			dst = append(dst, e)
+		}
+	}
+	s.historyMu.RUnlock()
+	return dst
+}
+
 // EventEntriesBefore returns up to `limit` entries with Time < beforeMS
 // drawn from the in-memory log (live process ring or persistedHistory).
 // Entries are returned in chronological order.

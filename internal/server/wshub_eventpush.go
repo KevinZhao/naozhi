@@ -267,7 +267,13 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 // to retry from the same lastTime on the next notify, which is what the
 // helper now does for both call sites.
 func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.ManagedSession, lastTime int64) (int64, bool) {
-	entries := sess.EventEntriesSince(lastTime)
+	// R112714-PERF-11: use EventEntriesSinceAppend so the dead-session path
+	// (persistedHistory) can reuse a buffer. Live-session path still allocates
+	// because ProcessEventReader.EventEntriesSince has no append variant
+	// (adding it would touch cli.Process + all fakes — deferred). Passing nil
+	// here matches the prior EventEntriesSince(nil) behaviour; callers that
+	// want per-client buffer reuse can pass a pre-allocated dst instead.
+	entries := sess.EventEntriesSinceAppend(nil, lastTime)
 	if len(entries) == 0 {
 		return lastTime, true
 	}
