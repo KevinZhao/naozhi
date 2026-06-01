@@ -16,13 +16,14 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/cronview"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
+	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	sessionpkg "github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -189,8 +190,8 @@ type nodeStatusEntry struct {
 // before. R226-PERF-7.
 type sessionListLocalResp struct {
 	Sessions        []sessionpkg.SessionSnapshot `json:"sessions"`
-	Stats           sessionStats              `json:"stats"`
-	HistorySessions []discovery.RecentSession `json:"history_sessions,omitempty"`
+	Stats           sessionStats                 `json:"stats"`
+	HistorySessions []discovery.RecentSession    `json:"history_sessions,omitempty"`
 }
 
 // sessionListMultiResp is the /api/sessions response shape for multi-node
@@ -282,11 +283,12 @@ func isUnknownRPCMethodErr(err error) bool {
 // `docs/review/batch3-B-r241-244-raw.md` under R242-ARCH-28; the
 // ambiguity is documented here so a future caller doesn't accidentally
 // add a bug-prone reason-by-deduction branch over the bool.
-type CronView interface {
-	EnsureStub(key string) bool
-	SetJobPrompt(jobID, prompt string) error
-	KnownSessionIDs() map[string]bool
-}
+//
+// R20260531070014-ARCH-2 (#1536): the interface body was byte-identical to
+// internal/server/cronview.go. Both now alias the single canonical
+// definition in the leaf package internal/dashboard/cronview, so the shape
+// can no longer drift between the two consumers.
+type CronView = cronview.CronView
 
 // historyFilter is the discovery.RecentSessionsFilter loadHistorySessions
 // constructs each scan.  Snapshots the cron-known set + sys workspace
