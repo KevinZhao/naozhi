@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -818,8 +818,8 @@ func evictOldestMissedCache(m map[string]missedVerdict) {
 	for k, v := range m {
 		entries = append(entries, kt{k: k, t: v.computedAt})
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].t.Before(entries[j].t)
+	slices.SortFunc(entries, func(a, b kt) int {
+		return a.t.Compare(b.t)
 	})
 	for i := 0; i < drop; i++ {
 		delete(m, entries[i].k)
