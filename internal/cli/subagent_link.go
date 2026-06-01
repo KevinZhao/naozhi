@@ -888,12 +888,15 @@ func claudeProjectsRoot() string {
 // mu acquisition, so the dispatch order is well-defined.
 func (l *SubagentLinker) fireCallbacksDropLock(taskID, toolUseID, internalAgentID string) {
 	l.onResolveMu.Lock()
+	// Skip make+copy when no callbacks are registered — the common case
+	// during early startup and in test linkers. [R112714-PERF-5]
+	if len(l.onResolveFns) == 0 {
+		l.onResolveMu.Unlock()
+		return
+	}
 	fns := make([]func(string, string, string), len(l.onResolveFns))
 	copy(fns, l.onResolveFns)
 	l.onResolveMu.Unlock()
-	if len(fns) == 0 {
-		return
-	}
 	l.mu.Unlock()
 	// Re-acquire l.mu via defer so a panicking callback still leaves
 	// l.mu Locked when the stack unwinds — otherwise the caller's own
