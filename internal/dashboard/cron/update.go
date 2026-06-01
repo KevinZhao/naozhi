@@ -44,11 +44,17 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 	// Sending "work_dir": "" explicitly clears the override; omitting the key
 	// leaves the existing value alone.
 	var req struct {
-		Schedule       *string `json:"schedule,omitempty"`
-		Prompt         *string `json:"prompt,omitempty"`
-		Title          *string `json:"title,omitempty"`
-		WorkDir        *string `json:"work_dir,omitempty"`
-		Notify         *bool   `json:"notify,omitempty"`
+		Schedule *string `json:"schedule,omitempty"`
+		Prompt   *string `json:"prompt,omitempty"`
+		Title    *string `json:"title,omitempty"`
+		WorkDir  *string `json:"work_dir,omitempty"`
+		Notify   *bool   `json:"notify,omitempty"`
+		// NotifyClear wires the scheduler's reset-to-nil opt-in (JobUpdate.
+		// NotifyClear, R249-CR-15 #958) onto the HTTP surface. Pointer-to-true
+		// resets Job.Notify back to legacy-default (inherit scheduler policy);
+		// nil or pointer-to-false is a no-op. Without this field the reset path
+		// was unreachable over HTTP. [R103901-GO-1]
+		NotifyClear    *bool   `json:"notify_clear,omitempty"`
 		NotifyPlatform *string `json:"notify_platform,omitempty"`
 		NotifyChatID   *string `json:"notify_chat_id,omitempty"`
 		FreshContext   *bool   `json:"fresh_context,omitempty"`
@@ -63,7 +69,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Schedule == nil && req.Prompt == nil && req.Title == nil && req.WorkDir == nil &&
-		req.Notify == nil && req.NotifyPlatform == nil && req.NotifyChatID == nil &&
+		req.Notify == nil && req.NotifyClear == nil && req.NotifyPlatform == nil && req.NotifyChatID == nil &&
 		req.FreshContext == nil && req.Backend == nil {
 		writeCronErr(w, http.StatusBadRequest, "at least one field must be provided")
 		return
@@ -185,6 +191,7 @@ func (h *Handlers) HandleUpdate(w http.ResponseWriter, r *http.Request) {
 		Title:          req.Title,
 		WorkDir:        req.WorkDir,
 		Notify:         req.Notify,
+		NotifyClear:    req.NotifyClear,
 		NotifyPlatform: req.NotifyPlatform,
 		NotifyChatID:   req.NotifyChatID,
 		FreshContext:   req.FreshContext,

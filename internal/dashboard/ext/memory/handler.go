@@ -322,13 +322,16 @@ func (h *Handler) tryRead(projectDir, slug string) (*memoryResponse, error) {
 		return nil, err
 	}
 	meta, body := parseMemoryFrontmatter(raw)
+	// R103901-SEC-4: memory files are Claude-CLI-authored and can absorb
+	// attacker-influenced workspace content, so scrub control / bidi runes
+	// out of every free-text field before it reaches the dashboard wire.
 	resp := &memoryResponse{
 		Found:       true,
 		Slug:        slug,
-		Name:        meta.name,
-		Description: meta.description,
+		Name:        sanitizeWireText(meta.name),
+		Description: sanitizeWireText(meta.description),
 		Type:        meta.typ,
-		Body:        body,
+		Body:        sanitizeWireText(body),
 		Truncated:   truncated,
 	}
 	return resp, nil

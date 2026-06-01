@@ -1382,13 +1382,21 @@ func truncateRunes(s string, maxBytes int) string {
 // Stat error (root deleted mid-flight, permission denied, broken chain) so a
 // failed ancestor probe never weakens the byte-wise gate's negative result.
 func sameFileAncestor(resolved, root string) bool {
-	rootInfo, err := os.Stat(root)
+	// R103901-SEC-8: Lstat (not Stat) so a symlink at the final path
+	// component is never followed when probing inode identity. Both args
+	// arrive already EvalSymlinks-resolved, so on the normal path Lstat and
+	// Stat return identical inode info and SameFile semantics are unchanged
+	// (including case-insensitive FS matching, which folds in the kernel
+	// dir lookup, not the final-component follow). Lstat closes the
+	// defence-in-depth gap where a crafted root/final-component symlink
+	// could otherwise let SameFile match a target outside the subtree.
+	rootInfo, err := os.Lstat(root)
 	if err != nil {
 		return false
 	}
 	cur := filepath.Clean(resolved)
 	for {
-		info, err := os.Stat(cur)
+		info, err := os.Lstat(cur)
 		if err == nil && os.SameFile(info, rootInfo) {
 			return true
 		}

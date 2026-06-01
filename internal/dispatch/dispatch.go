@@ -1341,7 +1341,12 @@ func (d *Dispatcher) sendAndReply(
 // dispatching to the platform, so an empty return is the existing
 // "nothing to send" sentinel.
 func (d *Dispatcher) decorateReplyText(result *cli.SendResult, sess *session.ManagedSession) string {
-	replyText := localizeAPIError(result.Text)
+	// R103901-CODE-1: scrub well-known credential token shapes (sk-ant-, ghp_,
+	// AKIA, …) BEFORE localising the API error, mirroring the cron notify
+	// path (scheduler_run.go: sanitise → localize, privacy-first ordering).
+	// Without this a Claude reply that echoes a plaintext token would land
+	// verbatim on the IM channel.
+	replyText := localizeAPIError(cron.RedactSecrets(result.Text))
 	// Head slot of a merge group: append a small chip so the user knows the
 	// single bot bubble covers N messages.
 	if result.MergedCount > 1 && replyText != "" {

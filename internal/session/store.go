@@ -275,7 +275,10 @@ func encodeStoreEntryCached(s *ManagedSession) ([]byte, bool) {
 	if err != nil {
 		// A storeEntry is plain JSON-safe scalars + string slices; Marshal
 		// cannot fail in practice. Drop the cache and signal skip rather than
-		// poison the whole save with one bad entry.
+		// poison the whole save with one bad entry. [R103901-CODE-6] Log the
+		// drop so an operator can see that this session has silently stopped
+		// being persisted instead of it vanishing without a trace.
+		slog.Error("encodeStoreEntryCached: marshal failed, session dropped from persistence", "key", s.key, "err", err)
 		s.storeMarshalCache.Store(nil)
 		return nil, false
 	}
