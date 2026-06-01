@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -62,6 +63,42 @@ func TestDispatcher_DecorateReplyText_Components(t *testing.T) {
 			t.Errorf("got %q, must not contain merge chip on empty text", got)
 		}
 	})
+}
+
+// TestDispatcher_DecorateReplyText_RedactsSecrets covers R103901-CODE-1:
+// a Claude reply that echoes a plaintext credential must be scrubbed
+// before it reaches the IM channel, mirroring the cron notify path. The
+// expected output is asserted against cron.RedactSecrets so the dispatch
+// path stays bit-identical to the shared redactor.
+func TestDispatcher_DecorateReplyText_RedactsSecrets(t *testing.T) {
+	d := &Dispatcher{caps: NoopCapabilities{}}
+
+	cases := []struct {
+		name  string
+		token string
+	}{
+		{"anthropic", "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWx"},
+		{"github_pat", "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"},
+		{"aws_access_key", "AKIAIOSFODNN7EXAMPLE"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := "your key is " + tc.token + " keep it safe"
+			got := d.decorateReplyText(&cli.SendResult{Text: raw}, nil)
+			if strings.Contains(got, tc.token) {
+				t.Fatalf("reply text leaked secret %q: got %q", tc.token, got)
+			}
+			if !strings.Contains(got, "[REDACTED]") {
+				t.Errorf("expected [REDACTED] marker, got %q", got)
+			}
+			// NoopCapabilities adds no footer, so the dispatch output must
+			// match the shared redactor exactly (localizeAPIError is a
+			// no-op on non-error text).
+			if want := cron.RedactSecrets(raw); got != want {
+				t.Errorf("dispatch redaction diverged from cron.RedactSecrets:\n got=%q\nwant=%q", got, want)
+			}
+		})
+	}
 }
 
 // TestDispatcher_DecorateReplyText_NilCapsIsPanic just documents that

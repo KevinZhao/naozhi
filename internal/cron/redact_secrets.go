@@ -115,6 +115,10 @@ const secretRedactedMarker = "[REDACTED]"
 // Idempotent: a second pass over an already-redacted string finds no
 // prefix because `[REDACTED]` itself does not start with any registered
 // marker.
+// RedactSecrets scrubs known credential token shapes (sk-ant-, ghp_, AKIA, …) from s.
+// Exported so IM dispatch can share the exact same redaction the cron notify path uses.
+func RedactSecrets(s string) string { return redactSecretsInResult(s) }
+
 func redactSecretsInResult(s string) string {
 	if s == "" {
 		return s
