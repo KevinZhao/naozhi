@@ -95,11 +95,11 @@ func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubj
 	paused := ok && cur.Paused
 	s.mu.RUnlock()
 	if !ok {
-		slog.Debug(logSubject+": job deleted before execute, skipping", "job_id", jobID)
+		slog.Debug("job deleted before execute, skipping", "subject", logSubject, "job_id", jobID)
 		return
 	}
 	if paused {
-		slog.Debug(logSubject+": job paused concurrently, skipping", "job_id", jobID)
+		slog.Debug("job paused concurrently, skipping", "subject", logSubject, "job_id", jobID)
 		return
 	}
 	s.executeOpt(cur, viaTriggerNow)
@@ -369,7 +369,7 @@ func formatCronNotice(label, body string) string {
 // is required the Replacer performs exactly one scan + one output
 // allocation instead of the previous up-to-4-scan / 4-alloc loop.
 func escapeCronMarkdownPunct(s string) string {
-	if strings.IndexAny(s, "[]()") < 0 {
+	if !strings.ContainsAny(s, "[]()") {
 		return s
 	}
 	return cronMarkdownPunctReplacer.Replace(s)
