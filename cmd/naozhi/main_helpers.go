@@ -403,10 +403,10 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		// Tick floor for the low-frequency attachment-gc sweeper: a
 		// misconfigured short tick would re-walk every attachment dir
 		// continuously. GC is fine running hourly at most.
-		if name == "attachment-gc" && tick < time.Hour {
-			slog.Warn("sysession: attachment-gc tick below 1h floor; clamping",
-				"requested", tick, "floor", time.Hour)
-			tick = time.Hour
+		if name == "attachment-gc" && tick < sysession.AttachmentGCMinTick {
+			slog.Warn("sysession: attachment-gc tick below floor; clamping",
+				"requested", tick, "floor", sysession.AttachmentGCMinTick)
+			tick = sysession.AttachmentGCMinTick
 		}
 
 		daemons[name] = sysession.DaemonRuntimeConfig{
