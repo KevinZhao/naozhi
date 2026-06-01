@@ -117,11 +117,11 @@ type Server struct {
 	// ── send / dispatch wiring ─────────────────────────
 	dedup           *platform.Dedup              // 读写: server.go (ctor only)
 	sessionGuard    *session.Guard               // 读写: server.go, dashboard.go
-	msgQueue        *dispatch.MessageQueue       // 读写: server.go, dashboard.go (R242-GO-10: → wshub.MessageEnqueuer interface)
+	msgQueue        *dispatch.MessageQueue       // 读写: server.go, dashboard.go
 	agents          map[string]session.AgentOpts // 读写: server.go, dashboard.go, dashboard_session.go
 	agentCommands   map[string]string            // 读写: server.go, dashboard.go
 	dashboardToken  string                       // 读写: server.go, dashboard.go, dashboard_auth.go
-	allowedRoot     string                       // 读写: server.go, dashboard.go (also Hub.allowedRoot — merge in Phase 4)
+	allowedRoot     string                       // 读写: server.go, dashboard.go (also Hub.allowedRoot)
 	noOutputTimeout time.Duration                // 读写: server.go (timeout error messages)
 	totalTimeout    time.Duration                // 读写: server.go
 
@@ -135,8 +135,8 @@ type Server struct {
 	// ── modes / resolver / node cache ──────────────────
 	debugMode bool                 // 读写: dashboard.go (gates /api/debug/pprof and /api/debug/vars; R244-SEC-P3-1)
 	headless  bool                 // 读写: send.go (explicit no-hub mode; gates the nil-hub send fallback — R248-ARCH-9 #379)
-	resolver  *session.KeyResolver // 读写: server.go, dashboard.go (session-key → opts derivation; → routes.go local)
-	nodeCache *node.CacheManager   // 读写: server.go (background-cached remote node data; → server/nodecache.go)
+	resolver  *session.KeyResolver // 读写: server.go, dashboard.go (session-key → opts derivation)
+	nodeCache *node.CacheManager   // 读写: server.go (background-cached remote node data)
 
 	// ── watchdog counters ──────────────────────────────
 	watchdogNoOutputKills atomic.Int64 // 读写: server.go (exposed via /health and /api/sessions)
@@ -152,8 +152,8 @@ type Server struct {
 
 	// ── candidates for removal (verify no usage, then delete) ──
 	platforms  map[string]platform.Platform // 读写: server.go (likely routes-registration-only)
-	backendTag string                       // 读写: server.go (ctor only; copied into SessionHandlers; v0.4 §六.6 待评估 → dispatch.BackendTag())
-	knownNodes map[string]string            // 读写: server.go (configured node IDs → display names; merge into nodes map)
+	backendTag string                       // 读写: server.go (ctor only; copied into SessionHandlers)
+	knownNodes map[string]string            // 读写: server.go (configured node IDs → display names)
 }
 
 // Workspace 验证 helpers (validateWorkspace / classifyWorkspaceErr /
