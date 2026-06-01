@@ -629,16 +629,38 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 //     persistJobsLocked fails. When non-nil and persist fails, this
 //     restores *j BEFORE the snapshot copy and skips postCleanup so the
 //     caller observes "no change applied".
+//
+// R249-ARCH-20 (#985): op and the two side-effect hooks share the bare
+// `func(*Job)` / `func(*Job) error` shape, so a reviewer eyeballing a call
+// site had nothing but argument position to tell an in-lock mutation apart
+// from an out-of-lock cleanup. Naming them (lockedJobOp returns an error and
+// runs UNDER s.mu; jobSideEffect returns nothing and runs lock-free) makes the
+// two roles self-documenting and lets the compiler flag a swapped op-vs-cleanup
+// argument (an error-returning closure can no longer be passed where a
+// jobSideEffect is expected, and vice versa). Behaviour is unchanged — Go
+// closures still satisfy these named types by assignability at every call
+// site, so no call-site edits were needed.
+type (
+	// lockedJobOp is the in-lock mutation withJobByID(Opt) / withJobByPrefix
+	// run while holding s.mu. It MUST be all-or-nothing: on a non-nil error
+	// return it must leave *j unmutated (see the op contract godoc above).
+	lockedJobOp func(j *Job) error
+	// jobSideEffect is an out-of-lock hook (postCleanup / rollbackOnPersistErr).
+	// It runs after s.mu is released (postCleanup) or as the in-lock undo of a
+	// failed persist (rollbackOnPersistErr), and returns nothing.
+	jobSideEffect func(j *Job)
+)
+
 type withJobByIDOpts struct {
-	op                   func(j *Job) error
-	postCleanup          func(j *Job)
-	rollbackOnPersistErr func(j *Job)
+	op                   lockedJobOp
+	postCleanup          jobSideEffect
+	rollbackOnPersistErr jobSideEffect
 }
 
 func (s *Scheduler) withJobByID(
 	id string,
-	op func(j *Job) error,
-	postCleanup func(j *Job),
+	op lockedJobOp,
+	postCleanup jobSideEffect,
 ) (*Job, error) {
 	return s.withJobByIDOpt(id, withJobByIDOpts{op: op, postCleanup: postCleanup})
 }

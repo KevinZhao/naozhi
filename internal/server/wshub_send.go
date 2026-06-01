@@ -30,6 +30,21 @@ import (
 // of being a bare `10*time.Second` literal duplicated across the proxy sites.
 const remoteNodeProxyTimeout = 10 * time.Second
 
+// lookupNode resolves a node ID to its Conn under the shared nodes mutex.
+// R176-ARCH-M3 / ARCH4 (#384): the Hub's only access to the Server-shared
+// nodes map is this single read-locked by-ID lookup, repeated verbatim at the
+// remote interrupt / subscribe / unsubscribe sites. Funnelling all three
+// through one helper keeps the raw `h.nodesMu.RLock(); h.nodes[id]; RUnlock()`
+// triple in exactly one place — the prerequisite shape for swapping the shared
+// *sync.RWMutex for a real node-registry abstraction without re-touching every
+// call site. Callers MUST still validate the ID with isValidNodeID first.
+func (h *Hub) lookupNode(id string) (node.Conn, bool) {
+	h.nodesMu.RLock()
+	nc, ok := h.nodes[id]
+	h.nodesMu.RUnlock()
+	return nc, ok
+}
+
 // File: wshub_send.go
 //
 // Dashboard-side send / interrupt handling extracted from wshub.go (R243-ARCH-2
@@ -230,9 +245,7 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 	nodeID := msg.Node
-	h.nodesMu.RLock()
-	nc, ok := h.nodes[nodeID]
-	h.nodesMu.RUnlock()
+	nc, ok := h.lookupNode(nodeID)
 	if !ok {
 		slog.Debug("ws interrupt: unknown node", "node", nodeID)
 		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "unknown node"})

@@ -1,10 +1,14 @@
-// Package agentlink defines the narrow interface server consumes when it
+// Package agentlink defines the narrow interfaces server consumes when it
 // reaches into a session's agent-linking layer. The Claude CLI backend
-// satisfies it via *cli.SubagentLinker today; future backends (ACP, Gemini
+// satisfies them via *cli.SubagentLinker today; future backends (ACP, Gemini
 // CLI) can plug a noop implementation so the dashboard agent-team UI does
 // not need conditional nil branches per backend type.
 //
-// History / motivation: docs/TODO.md R239-ARCH-I.
+// The consumer surface is expressed as three single-responsibility facets
+// (Notifier / Resolver / PathProvider) composed into AgentLinker, so a call
+// site that only needs one concern can depend on the narrower facet.
+//
+// History / motivation: docs/TODO.md R239-ARCH-I, R248-ARCH-4 (#375).
 package agentlink
 
 import "github.com/naozhi/naozhi/internal/cli"

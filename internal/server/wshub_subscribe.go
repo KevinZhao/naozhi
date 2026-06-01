@@ -450,9 +450,7 @@ func (h *Hub) handleRemoteSubscribe(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "error", Key: msg.Key, Error: "unknown node"})
 		return
 	}
-	h.nodesMu.RLock()
-	conn, ok := h.nodes[msg.Node]
-	h.nodesMu.RUnlock()
+	conn, ok := h.lookupNode(msg.Node)
 	if !ok {
 		// Do not echo the client-supplied node ID in the error: a careless
 		// JS consumer rendering the field via innerHTML would turn a crafted
@@ -471,9 +469,7 @@ func (h *Hub) handleRemoteUnsubscribe(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "unsubscribed", Key: msg.Key})
 		return
 	}
-	h.nodesMu.RLock()
-	conn, ok := h.nodes[msg.Node]
-	h.nodesMu.RUnlock()
+	conn, ok := h.lookupNode(msg.Node)
 	if !ok {
 		c.SendJSON(node.ServerMsg{Type: "unsubscribed", Key: msg.Key, Node: msg.Node})
 		return

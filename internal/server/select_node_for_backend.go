@@ -167,8 +167,7 @@ func selectNodeForBackend(lookup nodeLookup, targetNode, backendID string) (node
 type hubNodeLookup struct{ h *Hub }
 
 func (l hubNodeLookup) GetNode(id string) (node.Conn, bool) {
-	l.h.nodesMu.RLock()
-	nc, ok := l.h.nodes[id]
-	l.h.nodesMu.RUnlock()
-	return nc, ok
+	// ARCH4 (#384): defer to Hub.lookupNode so every by-ID read of the
+	// Server-shared nodes map goes through the single mutex-access helper.
+	return l.h.lookupNode(id)
 }
