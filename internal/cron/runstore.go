@@ -511,9 +511,10 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration, maxB
 }
 
 // jobLock returns a *sync.Mutex unique to jobID. Lazily allocated and
-// never reclaimed (entries are bounded by maxJobsHardCap; a deleted job
-// races a concurrent Append on the very same ID is the same edge handled
-// by the runningJobs sync.Map).
+// reclaimed by DeleteJob (R249-ARCH-3 / #971), so the live set tracks the
+// live job set rather than every jobID that has ever existed; a deleted job
+// racing a concurrent Append on the very same ID is the same edge handled
+// by the runningJobs sync.Map.
 func (s *runStore) jobLock(jobID string) *sync.Mutex {
 	if v, ok := s.jobLocks.Load(jobID); ok {
 		return v.(*sync.Mutex)
@@ -1192,8 +1193,15 @@ func (s *runStore) List(jobID string, limit int, before time.Time) []CronRunSumm
 	if limit <= 0 {
 		limit = 50
 	}
-	if limit > DefaultRunsKeepCount {
-		limit = DefaultRunsKeepCount
+	// R249-ARCH-1 (#969): clamp to the configured retention cap, not the
+	// package default. SchedulerConfig.RunsKeepCount is now plumbed into
+	// s.keepCount (NewScheduler → newRunStore), so an operator who raised
+	// retention above DefaultRunsKeepCount (200) must be able to page the
+	// extra rows; the old hardcoded clamp silently truncated every query at
+	// 200. s.keepCount is always > 0 for an enabled store, so when retention
+	// is left at the default this is identical to the prior behaviour.
+	if limit > s.keepCount {
+		limit = s.keepCount
 	}
 
 	// Cache fast-path: when before is zero (most common — Recent and the
@@ -1567,8 +1575,12 @@ func (s *runStore) RecentSessionIDs(jobID string, n int) []string {
 	if n <= 0 {
 		n = 50
 	}
-	if n > DefaultRunsKeepCount {
-		n = DefaultRunsKeepCount
+	// R249-ARCH-1 (#969): clamp to the configured retention cap (s.keepCount)
+	// rather than the hardcoded DefaultRunsKeepCount, mirroring List. Honours
+	// an operator-raised RunsKeepCount; identical to prior behaviour when
+	// retention is left at the default.
+	if n > s.keepCount {
+		n = s.keepCount
 	}
 	// Cache-warm fast path: read SessionIDs directly off the ring under
 	// entry.mu without materialising a CronRunSummary slice. Mirrors the
@@ -1822,6 +1834,17 @@ func (s *runStore) DeleteJob(jobID string) {
 	// silently miss the mkdir).
 	s.jobDirEnsured.Delete(jobID)
 	s.cacheInvalidate(jobID)
+	// R249-ARCH-3 (#971): reclaim the per-job *sync.Mutex too. jobLock's
+	// godoc claimed the jobLocks set is "bounded by maxJobsHardCap", but —
+	// unlike runningJobs which is swept on DeleteJob (R242-ARCH-15) — these
+	// entries were never reclaimed, so a long-lived deployment that creates
+	// and deletes thousands of jobs grows the map without limit. Deleting
+	// under the held lock is safe: a concurrent caller that already loaded
+	// THIS mutex still serialises on it; one that loads after the Delete
+	// gets a fresh mutex, which is the same "deleted job races a concurrent
+	// Append on the same ID" edge the godoc already documents (and which is
+	// benign because the runs/ subtree is gone and the job left s.jobs).
+	s.jobLocks.Delete(jobID)
 }
 
 // trimJobLocked enforces the per-job retention policy. Caller must hold

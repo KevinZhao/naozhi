@@ -45,28 +45,59 @@ type BackendInfo struct {
 	// DetectBackendsCtx directly will observe nil and must treat every
 	// feature as false (the safest degrade). R225-CR-7.
 	Features map[string]bool `json:"features,omitempty"`
+
+	// defaultBinary is the executable name detectCLI probes when callers
+	// don't pass an explicit CLIPath. It is the cli-side mirror of
+	// backend.Profile.DefaultBinary (the cli package can't import
+	// internal/cli/backend — cycle). Carried on the knownBackends slice
+	// rather than a parallel map so adding a backend is a single-row edit
+	// in one table instead of two hand-synced tables (#408). Unexported +
+	// unexported so the dashboard wire contract (BackendInfo JSON) stays a
+	// pure detection-result struct and gains no probe-internal field
+	// (encoding/json never emits unexported fields).
+	defaultBinary string
 }
 
 // knownBackends enumerates every backend naozhi can drive, in preferred
 // default order. New backends (e.g. gemini-cli) get appended here once their
 // Protocol implementation lands.
+//
+// R0601-ARCH (#408): the default-binary mirror that used to live in a
+// parallel knownBackendBinaries map now rides on each row's unexported
+// defaultBinary field, so adding a backend is a single-row edit in this one
+// table instead of two hand-synced tables. The cli package still can't
+// import internal/cli/backend (cycle), so this remains the cli-side mirror
+// of backend.Profile.{ID,DefaultBinary}; backend/profile_*.go stays the
+// authoritative source for everything else (DisplayName, Features, …) and the
+// drift guard in detect_backend_mirror_test.go pins ID+binary parity in CI.
 var knownBackends = []BackendInfo{
-	{ID: "claude", DisplayName: "claude-code", Protocol: "stream-json"},
-	{ID: "kiro", DisplayName: "kiro", Protocol: "acp"},
+	{ID: "claude", DisplayName: "claude-code", Protocol: "stream-json", defaultBinary: "claude"},
+	{ID: "kiro", DisplayName: "kiro", Protocol: "acp", defaultBinary: "kiro-cli"},
 }
 
-// knownBackendBinaries maps backend.ID → default executable name detectCLI
-// probes when callers don't pass an explicit CLIPath. Kept beside
-// knownBackends rather than as a field on BackendInfo because BackendInfo's
-// JSON shape is consumed by the dashboard and adding an unrelated field
-// would broaden the wire contract. The cli package can't import
-// internal/cli/backend (cycle), so this is the cli-side mirror of
-// backend.Profile.DefaultBinary; backend/profile_*.go remains the
-// authoritative source for everything else (DisplayName, Features, etc.).
-// R225-CR-2.
-var knownBackendBinaries = map[string]string{
-	"claude": "claude",
-	"kiro":   "kiro-cli",
+// lookupBackend returns the knownBackends row for the given ID and whether it
+// was found. It is the single scan point over the knownBackends table so the
+// ID-keyed accessors (knownBackendBinary / isKnownBackendID / backendDisplayName)
+// share one source of truth instead of each open-coding the same loop. #408.
+func lookupBackend(id string) (BackendInfo, bool) {
+	for _, b := range knownBackends {
+		if b.ID == id {
+			return b, true
+		}
+	}
+	return BackendInfo{}, false
+}
+
+// knownBackendBinary returns the default executable name detectCLI probes for
+// the given backend ID, sourced from the knownBackends table. The second
+// return reports whether the ID is a known backend; callers fall back to the
+// "claude" launcher for unknown IDs (historical default-launcher behaviour).
+func knownBackendBinary(id string) (string, bool) {
+	b, ok := lookupBackend(id)
+	if !ok {
+		return "", false
+	}
+	return b.defaultBinary, true
 }
 
 // DetectBackendsCtx probes the filesystem and $PATH for each known backend

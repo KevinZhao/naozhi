@@ -13,6 +13,15 @@ package cli
 var (
 	// ExportedKnownBackends mirrors the unexported knownBackends slice.
 	ExportedKnownBackends = knownBackends
-	// ExportedKnownBackendBinaries mirrors the unexported knownBackendBinaries map.
-	ExportedKnownBackendBinaries = knownBackendBinaries
+	// ExportedKnownBackendBinaries derives the ID→default-binary map from the
+	// knownBackends table. #408 collapsed the former standalone
+	// knownBackendBinaries map into a per-row defaultBinary field; this bridge
+	// reconstructs the map shape the drift guard asserts against.
+	ExportedKnownBackendBinaries = func() map[string]string {
+		m := make(map[string]string, len(knownBackends))
+		for _, b := range knownBackends {
+			m[b.ID] = b.defaultBinary
+		}
+		return m
+	}()
 )

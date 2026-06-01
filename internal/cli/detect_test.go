@@ -130,7 +130,7 @@ func TestDetectCLI_NoBareNamePathPoisoning(t *testing.T) {
 	// basename — that is the historical regression path.
 	for _, b := range knownBackends {
 		got := detectCLI(b.ID)
-		bin := knownBackendBinaries[b.ID]
+		bin := b.defaultBinary
 		if got == bin {
 			t.Errorf("backend %q: detectCLI returned bare basename %q; "+
 				"PATH-poisoning vector — must be \"\" or absolute path",

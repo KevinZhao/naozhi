@@ -2,26 +2,27 @@ package cli_test
 
 // Drift guard for the cli-side backend mirror — R0530-ARCH-3 (related: #408).
 //
-// internal/cli/detect.go keeps two hand-maintained tables, knownBackends and
-// knownBackendBinaries, that mirror the authoritative backend.Profile registry
+// internal/cli/detect.go keeps the hand-maintained knownBackends table, whose
+// per-row ID + defaultBinary mirror the authoritative backend.Profile registry
 // in internal/cli/backend (backend.All()). The mirror exists only because the
 // backend package imports cli, so cli cannot import backend back without an
 // import cycle; until that cycle is broken (OPEN issue #408, needs-design — a
 // dedicated backendreg subpackage that both cli and backend can import), the
 // cli side must restate ID + DefaultBinary by hand.
 //
-// Hand mirrors rot silently: adding a backend means editing three places
-// (a profile_<id>.go, knownBackends, knownBackendBinaries) with no compile-time
-// link between them. A missed edit degrades at runtime (the new backend is
-// simply never probed) instead of failing the build. This test turns any such
-// drift into a CI failure by asserting the cli mirror's ID/binary sets are
-// exactly the backend.Profile registry's sets.
+// #408 follow-up: the former parallel knownBackendBinaries map was merged into
+// the knownBackends table (each row now carries an unexported defaultBinary
+// field), so adding a backend is one row edit here plus the profile_<id>.go —
+// no longer two hand-synced cli tables. A missed edit still degrades at runtime
+// (the new backend is simply never probed) instead of failing the build, so
+// this test turns any such drift into a CI failure by asserting the cli mirror's
+// ID/binary sets are exactly the backend.Profile registry's sets.
 //
 // This test lives in package cli_test (not package cli) precisely so it can
-// import internal/cli/backend without the cycle; it reaches knownBackends /
-// knownBackendBinaries through the test-only export bridge in
-// detect_backend_mirror_export_test.go. Delete both files once #408 lands and
-// the mirror is gone.
+// import internal/cli/backend without the cycle; it reaches the knownBackends
+// table (and the binary map derived from it) through the test-only export
+// bridge in detect_backend_mirror_export_test.go. Delete both files once #408
+// lands and the mirror is gone.
 
 import (
 	"sort"
