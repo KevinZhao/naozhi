@@ -205,3 +205,32 @@ func TestGC_IgnoresNonDateDirectories(t *testing.T) {
 		t.Errorf("stray dir should remain, got %v", err)
 	}
 }
+
+func TestGCWithRefs_RejectsZeroNow(t *testing.T) {
+	ws := t.TempDir()
+
+	// Plant a real attachment so we can verify nothing gets deleted.
+	got, err := Persist(ws, []byte("%PDF-1.4\nfake"), ".pdf", Meta{
+		OrigName: "test.pdf",
+	})
+	if err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+
+	// Call with zero time.Time — must return error, not delete anything.
+	n, err := GCWithRefs(ws, 24*time.Hour, 7*24*time.Hour, time.Time{})
+	if err == nil {
+		t.Fatal("expected error for zero now, got nil")
+	}
+	if !strings.Contains(err.Error(), "now must not be zero") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("removed=%d want=0 when now is zero", n)
+	}
+
+	// File must still be present.
+	if _, statErr := os.Stat(got.AbsPath); statErr != nil {
+		t.Errorf("attachment should not have been deleted, stat err=%v", statErr)
+	}
+}

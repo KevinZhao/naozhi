@@ -407,6 +407,9 @@ func GCWithRefs(workspace string, uploadTTL, refTTL time.Duration, now time.Time
 	if workspace == "" {
 		return 0, ErrWorkspaceRequired
 	}
+	if now.IsZero() {
+		return 0, fmt.Errorf("attachment: GCWithRefs now must not be zero")
+	}
 	root := filepath.Join(workspace, Dir)
 	dayEntries, err := os.ReadDir(root)
 	if err != nil {
