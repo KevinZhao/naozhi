@@ -895,8 +895,21 @@ func (cfg *SchedulerConfig) resolveAllowedRoot() string {
 	}
 	if r, err := filepath.EvalSymlinks(cfg.AllowedRoot); err == nil {
 		return r
+	} else {
+		// R112714-LOGIC-4: EvalSymlinks failed (e.g. path does not exist yet,
+		// or is a dangling symlink). Silently returning "" disabled the
+		// allowed-root sandbox for the entire scheduler lifetime with no
+		// operator-visible signal. Log a warning and fall back to the raw
+		// string: bare string comparison is weaker than symlink-resolved
+		// comparison (symlinks under AllowedRoot could escape the check) but
+		// it is strictly better than disabling the constraint entirely.
+		// Operators should fix the root path; the warning makes the misconfig
+		// visible in logs at startup.
+		slog.Warn("cron.NewScheduler: filepath.EvalSymlinks failed for AllowedRoot; "+
+			"using raw path (symlinks under this root may bypass the constraint)",
+			"allowed_root", cfg.AllowedRoot, "err", err)
+		return cfg.AllowedRoot
 	}
-	return ""
 }
 
 // cronConfigMaps bundles the three write-once-then-immutable config maps so
