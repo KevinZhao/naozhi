@@ -17,6 +17,16 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
+// Voice-pipeline user-facing notices. Centralised as named constants
+// (R247-ARCH-19, #631) so the platform layer no longer scatters inline
+// user-facing literals across the audio handler — a single source of
+// truth here is the seam the future i18n catalog (internal/i18n) hooks
+// into without re-grepping the adapter body.
+const (
+	msgVoiceDownloadFailed   = "[语音消息下载失败，请重试]"
+	msgVoiceTranscribeFailed = "[语音消息转写失败，请发送文字消息]"
+)
+
 // parsedEvent holds the result of parsing a Feishu SDK event.
 type parsedEvent struct {
 	Msg       platform.IncomingMessage
@@ -188,7 +198,7 @@ func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandle
 		// content (file_key in audio messages). Sanitize before slog.
 		slog.Error("feishu download audio failed", "err", err,
 			"key", osutil.SanitizeForLog(fileKey, 128))
-		f.replyError(ctx, msg.ChatID, "[语音消息下载失败，请重试]")
+		f.replyError(ctx, msg.ChatID, msgVoiceDownloadFailed)
 		return
 	}
 
@@ -198,7 +208,7 @@ func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandle
 	text, err := f.transcriber.Transcribe(transcribeCtx, data, mime)
 	if err != nil {
 		slog.Error("feishu transcribe failed", "err", err, "mime", mime, "size", len(data))
-		f.replyError(ctx, msg.ChatID, "[语音消息转写失败，请发送文字消息]")
+		f.replyError(ctx, msg.ChatID, msgVoiceTranscribeFailed)
 		return
 	}
 
