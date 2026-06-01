@@ -1251,7 +1251,16 @@ var shimEnvAllowedPrefixes = []string{
 	//                                   redirectable interpreters)
 	"GOPATH=", "GOROOT=", "GOBIN=",
 	"CARGO_HOME=", "RUSTUP_HOME=",
-	"NODE_ENV=", "NPM_",
+	"NODE_ENV=",
+	// NPM_CONFIG_* can redirect npm's global-root / prefix / cache,
+	// enabling RCE-class module-hijack attacks. Use an explicit allowlist
+	// instead of the bare "NPM_" prefix. [R112714-ARCH-2]
+	//   NPM_CONFIG_REGISTRY — registry URL redirect, no code execution path.
+	//   NPM_TOKEN           — registry authentication token.
+	// Explicitly excluded: NPM_CONFIG_PREFIX, NPM_CONFIG_GLOBALCONFIG,
+	// NPM_CONFIG_CACHE, NPM_CONFIG_TMP — all redirect writable paths that
+	// npm uses to resolve packages or run lifecycle scripts.
+	"NPM_CONFIG_REGISTRY=", "NPM_TOKEN=",
 	"PYTHONDONTWRITEBYTECODE=", "PYTHONUNBUFFERED=",
 	"CONDA_PREFIX=", "CONDA_DEFAULT_ENV=", "CONDA_SHLVL=",
 	"JAVA_HOME=",
