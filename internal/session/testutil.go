@@ -107,6 +107,9 @@ func (p *TestProcess) DeathReason() string               { return p.DeathReasonV
 func (p *TestProcess) TotalCost() float64                { return 0 }
 func (p *TestProcess) EventEntries() []cli.EventEntry    { return p.EventLog.Entries() }
 func (p *TestProcess) EventLastN(n int) []cli.EventEntry { return p.EventLog.LastN(n) }
+func (p *TestProcess) EventLastNVisible(visibleTarget, maxTotal int) []cli.EventEntry {
+	return p.EventLog.LastNVisible(visibleTarget, maxTotal)
+}
 func (p *TestProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	return p.EventLog.EntriesSince(afterMS)
 }

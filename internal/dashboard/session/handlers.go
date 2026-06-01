@@ -1038,11 +1038,32 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 			// miss events it just streamed through.
 			entries = entries[len(entries)-limit:]
 		}
-	case beforeStr != "" || limit > 0:
+	case beforeStr == "" && limit > 0:
+		// Initial page (limit only, no `before` cursor): mirror the WS
+		// subscribe handshake's visible-aware read. A plain tail-N could be
+		// entirely internal events (parallel agent team) and render to the
+		// blank "该会话最近仅有 agent 活动" placeholder. Walk ring-then-disk
+		// until the page carries enough real chat bubbles. This branch is the
+		// HTTP-fallback twin of completeSubscribe's msg.Limit>0 case.
+		visTarget := limit
+		if visTarget > sessionpkg.DefaultVisibleTarget {
+			visTarget = sessionpkg.DefaultVisibleTarget
+		}
+		// maxTotal=0 lets the reader use its own ceiling (ring size) rather
+		// than the client's page-size hint, so visible bubbles sitting beyond
+		// `limit` positions under an internal flood are still surfaced. The
+		// result is still bounded by maxEventsPageLimit (== ring size).
+		entries = sess.EventLastNVisibleCtx(r.Context(), visTarget, 0)
+	case beforeStr != "":
 		pageLimit := limit
 		if pageLimit == 0 {
 			pageLimit = maxEventsPageLimit
 		}
+		// "Load earlier" pagination: walk strictly backward by time. This must
+		// stay a plain time-ordered page — applying the visible-aware reader
+		// here would skip past internal events the operator is paging toward,
+		// breaking the load-earlier cursor contract.
+		//
 		// EventEntriesBeforeCtx falls back to the backend's history.Source
 		// (JSONL for claude) when the in-memory log no longer contains entries
 		// older than `before`. The request context propagates into disk I/O
