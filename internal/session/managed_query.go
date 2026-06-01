@@ -554,6 +554,137 @@ func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int
 	return entries
 }
 
+// countVisibleEntries returns how many entries the dashboard would render as
+// chat bubbles (the inverse of the INTERNAL_EVENT_TYPES filter). Shared by the
+// visible-aware reader below.
+func countVisibleEntries(entries []cli.EventEntry) int {
+	n := 0
+	for i := range entries {
+		if cli.IsVisibleEntry(entries[i]) {
+			n++
+		}
+	}
+	return n
+}
+
+// EventLastNVisibleCtx is the initial-history entry point for the dashboard.
+// It returns the tail of the session's history guaranteed to carry enough
+// VISIBLE entries (chat bubbles) that the dashboard's initial render never
+// degrades to the blank "该会话最近仅有 agent 活动" placeholder — the symptom
+// of a parallel agent team flooding the trailing window with internal events.
+//
+// Two tiers, mirroring EventEntriesBeforeCtx's memory-then-disk strategy:
+//
+//  1. Memory tier: the live ring (Process.EventLastNVisible) or, for a
+//     suspended/dead session, the tail of persistedHistory. The memory slice
+//     is a contiguous run so the dashboard can rebuild turnState / the running
+//     banner from the interleaved internal events.
+//  2. Disk tier: when the ring alone can't reach visibleTarget (the 500-entry
+//     ring is entirely internal — exactly the bug scenario), walk backward
+//     through the backend's history.Source one page at a time, prepending
+//     older entries until the combined visible count reaches the target or a
+//     page/total/byte ceiling trips.
+//
+// The two tiers never overlap: disk is queried strictly older than the
+// earliest in-memory Time, reusing the non-merging contract documented on
+// EventEntriesBeforeCtx, so no dedup is required. Non-claude backends carry a
+// Noop source and simply return the memory tier.
+//
+// visibleTarget <= 0 falls back to a plain EventLastN(maxTotal). The ctx
+// bounds disk I/O — callers on the WS subscribe handshake pass a short
+// timeout so a slow filesystem can't stall the first frame.
+func (s *ManagedSession) EventLastNVisibleCtx(ctx context.Context, visibleTarget, maxTotal int) []cli.EventEntry {
+	if maxTotal <= 0 {
+		maxTotal = maxVisibleTotal
+	}
+	// Memory tier: contiguous tail carrying up to visibleTarget visible entries.
+	var mem []cli.EventEntry
+	if proc := s.loadProcess(); proc != nil {
+		mem = proc.EventLastNVisible(visibleTarget, maxTotal)
+	} else {
+		mem = s.persistedHistoryTailVisible(visibleTarget, maxTotal)
+	}
+
+	if visibleTarget <= 0 {
+		return mem
+	}
+	vis := countVisibleEntries(mem)
+	if vis >= visibleTarget || len(mem) >= maxTotal {
+		return mem
+	}
+
+	// Disk tier: the ring couldn't satisfy the target. Page backward through
+	// the durable source, strictly older than the earliest in-memory entry.
+	src := s.loadHistorySource()
+	if src == nil {
+		return mem
+	}
+	before := int64(0)
+	if len(mem) > 0 {
+		before = mem[0].Time
+	}
+	var older []cli.EventEntry
+	for page := 0; page < maxVisibleDiskPages && vis < visibleTarget; page++ {
+		if ctx.Err() != nil {
+			break
+		}
+		chunk, err := src.LoadBefore(ctx, before, visibleDiskPageSize)
+		if err != nil {
+			slog.Warn("visible history source load failed", "key", s.key, "err", err)
+			break
+		}
+		if len(chunk) == 0 {
+			break // disk exhausted
+		}
+		sortEntriesByTimeStable(chunk)
+		// chunk is chronological and strictly older than `before`; prepend it
+		// ahead of everything collected so far.
+		older = append(chunk, older...)
+		vis += countVisibleEntries(chunk)
+		before = chunk[0].Time
+		if len(older)+len(mem) >= maxTotal {
+			break // total payload ceiling
+		}
+	}
+	if len(older) == 0 {
+		return mem
+	}
+	return append(older, mem...)
+}
+
+// persistedHistoryTailVisible returns a contiguous tail of persistedHistory
+// carrying at least visibleTarget visible entries (or up to maxTotal entries).
+// The no-process analogue of EventLog.LastNVisible. Read-only copy under the
+// history lock.
+func (s *ManagedSession) persistedHistoryTailVisible(visibleTarget, maxTotal int) []cli.EventEntry {
+	s.historyMu.RLock()
+	defer s.historyMu.RUnlock()
+	n := len(s.persistedHistory)
+	if n == 0 {
+		return nil
+	}
+	limit := maxTotal
+	if limit <= 0 || limit > n {
+		limit = n
+	}
+	// Walk backward from the newest entry until we have visibleTarget visible
+	// entries or hit the length ceiling.
+	visible := 0
+	start := n // exclusive lower bound of the tail we keep
+	for i := n - 1; i >= 0 && (n-i) <= limit; i-- {
+		start = i
+		if cli.IsVisibleEntry(s.persistedHistory[i]) {
+			visible++
+			if visibleTarget > 0 && visible >= visibleTarget {
+				break
+			}
+		}
+	}
+	out := make([]cli.EventEntry, n-start)
+	copy(out, s.persistedHistory[start:])
+	return out
+}
+
 // SubscribeEvents subscribes to event log notifications for this session.
 // If the session has no process, returns a closed channel and a no-op unsubscribe.
 func (s *ManagedSession) SubscribeEvents() (<-chan struct{}, func()) {

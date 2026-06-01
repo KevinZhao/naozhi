@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/naozhi/naozhi/internal/assets"
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
@@ -112,6 +113,16 @@ type Profile struct {
 	// Missing key == false. Adding a new feature: extend the keys list in
 	// dashboard.js featureForCurrent + every Profile that supports it.
 	Features map[string]bool
+
+	// AssetProvider, when non-nil, exposes this backend's installed assets
+	// (skills/plugins/agents/...) to the dashboard asset browser read-only.
+	// The on-disk layout is fully encapsulated in the implementation —
+	// Profile stays a capability description, unaware of any backend's
+	// directory shape. nil = no asset view (dashboard hides the entry).
+	// Injected post-registration via AttachAssetProvider from the neutral
+	// server layer (the lightweight backend package must not import the
+	// file-scanning ccassets package). RFC docs/rfc/cc-asset-browser.md §3.1.
+	AssetProvider assets.Provider
 }
 
 // ProtocolDeps bundles dependencies needed to construct certain protocols.
@@ -166,6 +177,24 @@ func Get(id string) (Profile, bool) {
 		return Profile{}, false
 	}
 	return e.profile, true
+}
+
+// AttachAssetProvider sets the AssetProvider on an already-registered Profile.
+// Returns false if id is unknown. Deliberate post-registration mutator: the
+// lightweight backend package must NOT import the file-scanning ccassets
+// package (that would re-create an import cycle). A neutral top-level layer
+// (server wiring) that legitimately imports both calls this after
+// RegisterDefaults. RFC docs/rfc/cc-asset-browser.md §3.0/§3.1.
+func AttachAssetProvider(id string, p assets.Provider) bool {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	e, ok := registry[id]
+	if !ok {
+		return false
+	}
+	e.profile.AssetProvider = p
+	registry[id] = e
+	return true
 }
 
 // All returns every registered Profile in registration order. The slice

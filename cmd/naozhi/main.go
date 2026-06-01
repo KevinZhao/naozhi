@@ -372,7 +372,7 @@ func main() {
 		ParentCtx:            ctx,
 		Telemetry:            nil, // wired post-Hub via dashboard.go SetTelemetry
 		BuildSysession: func() (*sysession.Manager, string, error) {
-			m, wd, e := buildSysessionManager(cfg, router, wrapper, storePath)
+			m, wd, e := buildSysessionManager(cfg, router, projectMgr, wrapper, storePath)
 			sysBuildErr = e // capture for slog below
 			return m, wd, e
 		},

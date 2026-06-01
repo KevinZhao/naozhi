@@ -1,6 +1,8 @@
 package apierr_test
 
 import (
+	"context"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -121,5 +123,63 @@ func TestLocalize(t *testing.T) {
 				t.Errorf("localized output must not embed raw error text:\n%q", got)
 			}
 		})
+	}
+}
+
+// capturingHandler is a minimal slog.Handler that collects all logged
+// key-value pairs so tests can assert on log content without involving
+// real log output.
+type capturingHandler struct {
+	attrs []slog.Attr
+}
+
+func (h *capturingHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+func (h *capturingHandler) WithGroup(_ string) slog.Handler              { return h }
+func (h *capturingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	n := &capturingHandler{attrs: append(h.attrs[:len(h.attrs):len(h.attrs)], attrs...)}
+	return n
+}
+func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	r.Attrs(func(a slog.Attr) bool {
+		h.attrs = append(h.attrs, a)
+		return true
+	})
+	return nil
+}
+
+// TestLocalizeDoesNotLogRawSecret verifies that slog.Warn inside Localize
+// never records the raw envelope text, which may contain sk-ant- API keys,
+// request_ids, or internal hostnames (R20260601-SEC-1).
+func TestLocalizeDoesNotLogRawSecret(t *testing.T) {
+	t.Parallel()
+
+	// Install a capturing handler for the duration of this test.
+	handler := &capturingHandler{}
+	orig := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	secret := "sk-ant-api03-supersecretkey12345"
+	envelope := "API Error: invalid_api_key - " + secret + " (request_id: req_abc123, host: api-internal.anthropic.com)"
+
+	got := apierr.Localize(envelope)
+
+	// Return value must be the friendly message, not the raw envelope.
+	if !strings.HasPrefix(got, "🔑") {
+		t.Fatalf("expected friendly message, got %q", got)
+	}
+
+	// None of the logged attribute values must contain the secret or raw envelope.
+	for _, attr := range handler.attrs {
+		v := attr.Value.String()
+		if strings.Contains(v, secret) {
+			t.Errorf("slog attribute %q contains secret key: %q", attr.Key, v)
+		}
+		if strings.Contains(v, "request_id") {
+			t.Errorf("slog attribute %q contains request_id: %q", attr.Key, v)
+		}
+		if strings.Contains(v, "api-internal") {
+			t.Errorf("slog attribute %q contains internal hostname: %q", attr.Key, v)
+		}
 	}
 }

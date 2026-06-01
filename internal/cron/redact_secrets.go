@@ -178,15 +178,14 @@ func isSecretTokenByte(b byte) bool {
 // mayContainSecretPrefix is a fast pre-scan: returns false if no first byte
 // of any registered prefix appears in s. Lets the common no-secret path
 // skip the full prefix walk + string Builder allocation.
+//
+// First-byte set: 's' (sk-…), 'g' (ghp_/gho_/…/glpat-), 'A' (AKIA/ASIA),
+// 'x' (xoxb-/…), 'h' (hf_), 'n' (npm_), 'y' (ya29.). Keep in sync with
+// secretPrefixes.
+//
+// strings.IndexAny uses a SIMD-backed byteset scan on amd64/arm64 and is
+// semantically equivalent to the previous hand-written byte-switch loop
+// (R20260601-PERF-1 / R20260601-PERF-10).
 func mayContainSecretPrefix(s string) bool {
-	// First-byte set: 's' (sk-…), 'g' (ghp_/gho_/…/glpat-), 'A' (AKIA/ASIA),
-	// 'x' (xoxb-/…), 'h' (hf_), 'n' (npm_), 'y' (ya29.). Keep in sync with
-	// secretPrefixes.
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case 's', 'g', 'A', 'x', 'h', 'n', 'y':
-			return true
-		}
-	}
-	return false
+	return strings.IndexAny(s, "sgAxhny") >= 0
 }

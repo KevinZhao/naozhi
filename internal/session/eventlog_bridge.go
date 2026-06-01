@@ -148,23 +148,34 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 		// ~10ns/call defer frame setup cost on the multi-entry hot path
 		// (5-20 entries × N sessions × ≥5/s). The pool-cap guard is the
 		// same as the single-entry fast path above.
+		//
+		// R20260531A-PERF-3 (#1524): the persist sink now copies the
+		// bytes it retains (it owns a pooled per-batch arena), so the
+		// bridge no longer pays a make([]byte)+copy per entry. We encode
+		// every entry into ONE pooled buffer (without Resetting between
+		// entries) and hand persist a borrowed sub-slice per entry. The
+		// sub-slices stay valid until persisterSink returns, after which
+		// eb goes back to the pool. Offsets are resolved after the encode
+		// pass because the buffer may grow (and move) mid-loop.
+		eb.buf.Reset()
+		type span struct{ start, end int }
+		spans := make([]span, 0, len(entries))
+		times := make([]int64, 0, len(entries))
 		for _, e := range entries {
-			eb.buf.Reset()
+			start := eb.buf.Len()
 			if err := eb.enc.Encode(e); err != nil {
 				slog.Warn("eventlog bridge: marshal entry failed",
 					"uuid", e.UUID, "type", e.Type, "err", err)
+				eb.buf.Truncate(start) // drop the partial encode
 				continue
 			}
-			raw := eb.buf.Bytes()
-			if n := len(raw); n > 0 && raw[n-1] == '\n' {
-				raw = raw[:n-1]
+			end := eb.buf.Len()
+			// json.Encoder appends a trailing '\n'; strip it from the span.
+			if end > start && eb.buf.Bytes()[end-1] == '\n' {
+				end--
 			}
-			// Copy out of the pooled buffer so caller can hold the
-			// bytes past Put. PersistSink contract permits sink to
-			// retain entries.
-			buf := make([]byte, len(raw))
-			copy(buf, raw)
-			out = append(out, persist.Entry{JSON: buf, TimeMS: e.Time})
+			spans = append(spans, span{start: start, end: end})
+			times = append(times, e.Time)
 
 			// Refcount bump for every attachment path the entry
 			// carries. Replay batches are excluded — replay happens
@@ -176,13 +187,22 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 				attachTracker.OnPersistedEntry(keyhash, e.ImagePaths, e.Time)
 			}
 		}
+		if len(spans) == 0 {
+			if eb.buf.Cap() <= bridgeEncMaxCap {
+				bridgeEncPool.Put(eb)
+			}
+			return
+		}
+		all := eb.buf.Bytes()
+		for i, sp := range spans {
+			out = append(out, persist.Entry{JSON: all[sp.start:sp.end], TimeMS: times[i]})
+		}
+		// persisterSink copies the borrowed bytes synchronously (it owns a
+		// pooled arena), so eb is safe to return only AFTER it returns.
+		persisterSink(out, replayPhase)
 		if eb.buf.Cap() <= bridgeEncMaxCap {
 			bridgeEncPool.Put(eb)
 		}
-		if len(out) == 0 {
-			return
-		}
-		persisterSink(out, replayPhase)
 	}
 }
 
@@ -209,17 +229,20 @@ func persistOneEntry(persisterSink persist.PersistSink, attachTracker *tracker.T
 	if n := len(raw); n > 0 && raw[n-1] == '\n' {
 		raw = raw[:n-1]
 	}
-	buf := make([]byte, len(raw))
-	copy(buf, raw)
-	if eb.buf.Cap() <= bridgeEncMaxCap {
-		bridgeEncPool.Put(eb)
-	}
+	// R20260531A-PERF-3 (#1524): persisterSink copies the bytes it
+	// retains (it owns a pooled per-batch arena), so we hand it the
+	// borrowed pooled-encoder slice directly instead of make([]byte)+copy.
+	// eb is returned to the pool only AFTER persisterSink returns, because
+	// raw aliases eb.buf's backing array until then.
 	var stackArr [1]persist.Entry
-	out := append(stackArr[:0], persist.Entry{JSON: buf, TimeMS: e.Time})
+	out := append(stackArr[:0], persist.Entry{JSON: raw, TimeMS: e.Time})
 	if !replayPhase && attachTracker != nil && keyhash != "" && len(e.ImagePaths) > 0 {
 		attachTracker.OnPersistedEntry(keyhash, e.ImagePaths, e.Time)
 	}
 	persisterSink(out, replayPhase)
+	if eb.buf.Cap() <= bridgeEncMaxCap {
+		bridgeEncPool.Put(eb)
+	}
 }
 
 // newEventLogSinkOne is the cli.PersistSinkOne counterpart to

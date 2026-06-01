@@ -77,6 +77,14 @@ type Config struct {
 	// tick interval + daemon-specific knobs.
 	Daemons map[string]DaemonRuntimeConfig
 
+	// WorkspaceRoots enumerates the distinct workspace roots the
+	// attachment-gc daemon sweeps. Optional — only the attachment-gc
+	// daemon consumes it; nil disables that daemon's work (it logs and
+	// no-ops). Wired in cmd/naozhi from router default workspace +
+	// per-chat overrides + project paths (docs/rfc/attachment-gc-daemon.md
+	// §4.4). Kept out of Router because it spans router + project manager.
+	WorkspaceRoots WorkspaceRootLister
+
 	// OnRunStarted / OnRunEnded receive run lifecycle events for
 	// dashboard WS broadcast.  Both nil-safe; either may be nil
 	// independently.  Manager invokes them outside any Manager-internal
@@ -109,9 +117,18 @@ type Config struct {
 // every built-in daemon understands.  Daemon-specific fields are
 // passed via Daemons[name].Specific (DaemonConfig).
 type DaemonRuntimeConfig struct {
-	Enabled  bool
-	Tick     time.Duration
-	Specific DaemonConfig
+	Enabled bool
+	Tick    time.Duration
+	// RunOnStart makes runDaemonLoop fire one Tick immediately at
+	// startup, BEFORE the initial jitter + ticker loop. Without it a
+	// daemon's first Tick lands one full tick interval later (plus
+	// jitter), and a process that restarts more often than the tick
+	// interval may never tick at all. Low-frequency sweeper daemons
+	// (e.g. attachment-gc at 6h) need this; high-frequency daemons
+	// (auto-titler at 30s) generally don't. See
+	// docs/rfc/attachment-gc-daemon.md §4.6-3.
+	RunOnStart bool
+	Specific   DaemonConfig
 }
 
 const (
@@ -171,6 +188,10 @@ type daemonRecord struct {
 
 	// runs holds the per-daemon ring buffer of completed DaemonRuns.
 	runs *runRing
+
+	// runOnStart mirrors DaemonRuntimeConfig.RunOnStart: fire one Tick
+	// at startup before the jitter+ticker loop. See DaemonRuntimeConfig.
+	runOnStart bool
 }
 
 // Manager runs all daemons.  Lifecycle:
@@ -290,9 +311,10 @@ func NewManager(cfg Config) (*Manager, error) {
 			continue
 		}
 		deps := DaemonDeps{
-			Router: daemonRouter,
-			Runner: cfg.Runner,
-			Cfg:    runtime.Specific,
+			Router:         daemonRouter,
+			Runner:         cfg.Runner,
+			Cfg:            runtime.Specific,
+			WorkspaceRoots: cfg.WorkspaceRoots,
 		}
 		d, err := factory.Build(deps)
 		if err != nil {
@@ -315,6 +337,7 @@ func NewManager(cfg Config) (*Manager, error) {
 			tick:             tick,
 			processStartedAt: now,
 			runs:             newRunRing(),
+			runOnStart:       runtime.RunOnStart,
 		})
 	}
 	return m, nil
@@ -576,6 +599,22 @@ type DaemonStatus struct {
 // case doesn't leak the timer past goroutine exit.  RFC v2.1 §5.1.
 func (m *Manager) runDaemonLoop(rec *daemonRecord) {
 	defer m.wg.Done()
+
+	// RunOnStart: fire one Tick immediately, before the jitter+ticker
+	// loop. Low-frequency sweepers (attachment-gc) need a deterministic
+	// startup run so a process that restarts more often than its tick
+	// interval still makes progress. Honour ctx + breaker first so a
+	// cancelled/disabled daemon doesn't tick. See DaemonRuntimeConfig.
+	if rec.runOnStart {
+		select {
+		case <-m.ctx.Done():
+			return
+		default:
+		}
+		if !rec.disabled.Load() {
+			m.runOnce(rec, DaemonTriggerScheduled)
+		}
+	}
 
 	// Jitter range = [0, tick).  Done before the first tick so daemons
 	// with similar tick periods (e.g. two daemons both at 30s) don't

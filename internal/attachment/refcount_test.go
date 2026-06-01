@@ -1,6 +1,7 @@
 package attachment
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -9,6 +10,18 @@ import (
 	"testing"
 	"time"
 )
+
+// gcRefs is the test shim for the production GCWithRefs(ctx, ws, opts)
+// signature with the standard 7d/30d TTLs. Returns removed count for
+// the legacy (removed, err) assertion style most tests use.
+func gcRefs(ws string, uploadTTL, refTTL time.Duration, now time.Time) (int, error) {
+	res, err := GCWithRefs(context.Background(), ws, GCOptions{
+		UploadTTL: uploadTTL,
+		RefTTL:    refTTL,
+		Now:       now,
+	})
+	return res.Removed, err
+}
 
 // TestMeta_AddReference_IdempotentSorted exercises the primary entry
 // point the tracker uses. A bump of the same keyhash must not grow
@@ -174,7 +187,7 @@ func TestGCWithRefs_KeepsReferenced(t *testing.T) {
 	}
 	payload, _ := fixturePersisted(t, ws, now.AddDate(0, 0, -10).Format("2006-01-02"), "keep1", meta)
 
-	removed, err := GCWithRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
+	removed, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
 	if err != nil {
 		t.Fatalf("GCWithRefs: %v", err)
 	}
@@ -194,7 +207,7 @@ func TestGCWithRefs_RemovesExpiredAndUnreferenced(t *testing.T) {
 	meta := Meta{UploadedAt: now.AddDate(0, 0, -10)} // no refs
 	payload, metaPath := fixturePersisted(t, ws, now.AddDate(0, 0, -10).Format("2006-01-02"), "reap1", meta)
 
-	removed, err := GCWithRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
+	removed, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
 	if err != nil {
 		t.Fatalf("GCWithRefs: %v", err)
 	}
@@ -222,7 +235,7 @@ func TestGCWithRefs_RemovesRefsElapsed(t *testing.T) {
 	}
 	payload, _ := fixturePersisted(t, ws, now.AddDate(0, 0, -40).Format("2006-01-02"), "reap2", meta)
 
-	removed, err := GCWithRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
+	removed, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
 	if err != nil {
 		t.Fatalf("GCWithRefs: %v", err)
 	}
@@ -242,7 +255,7 @@ func TestGCWithRefs_KeepsFresh(t *testing.T) {
 	meta := Meta{UploadedAt: now.AddDate(0, 0, -1)} // 1 day old, no refs
 	payload, _ := fixturePersisted(t, ws, now.AddDate(0, 0, -1).Format("2006-01-02"), "fresh", meta)
 
-	removed, err := GCWithRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
+	removed, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
 	if err != nil {
 		t.Fatalf("GCWithRefs: %v", err)
 	}
@@ -272,7 +285,7 @@ func TestGCWithRefs_LegacyMetaNoNewFields(t *testing.T) {
 		0o600,
 	)
 
-	removed, err := GCWithRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
+	removed, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
 	if err != nil {
 		t.Fatalf("GCWithRefs: %v", err)
 	}
@@ -294,7 +307,7 @@ func TestGCWithRefs_MissingMeta(t *testing.T) {
 	os.WriteFile(payload, []byte("b"), 0o600)
 	// No .meta sibling.
 
-	removed, err := GCWithRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
+	removed, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
 	if err != nil {
 		t.Fatalf("GCWithRefs: %v", err)
 	}
@@ -312,7 +325,7 @@ func TestGCWithRefs_PrunesEmptyDayDirs(t *testing.T) {
 	date := now.AddDate(0, 0, -10).Format("2006-01-02")
 	fixturePersisted(t, ws, date, "reap", meta)
 
-	_, err := GCWithRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
+	_, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +340,7 @@ func TestGCWithRefs_PrunesEmptyDayDirs(t *testing.T) {
 // tick on a fresh deployment.
 func TestGCWithRefs_WorkspaceEmpty(t *testing.T) {
 	ws := t.TempDir()
-	removed, err := GCWithRefs(ws, 7*24*time.Hour, 30*24*time.Hour, time.Now())
+	removed, err := gcRefs(ws, 7*24*time.Hour, 30*24*time.Hour, time.Now())
 	if err != nil {
 		t.Fatalf("err on empty ws: %v", err)
 	}
@@ -339,7 +352,7 @@ func TestGCWithRefs_WorkspaceEmpty(t *testing.T) {
 // TestGCWithRefs_RequiresWorkspace rejects empty workspace with
 // the documented sentinel.
 func TestGCWithRefs_RequiresWorkspace(t *testing.T) {
-	_, err := GCWithRefs("", time.Hour, time.Hour, time.Now())
+	_, err := gcRefs("", time.Hour, time.Hour, time.Now())
 	if !errors.Is(err, ErrWorkspaceRequired) {
 		t.Errorf("err=%v, want ErrWorkspaceRequired", err)
 	}
