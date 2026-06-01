@@ -906,10 +906,10 @@ func TestKnownSessionIDs_AggregatesFromJobs(t *testing.T) {
 	s.mu.Unlock()
 
 	got := s.KnownSessionIDs()
-	if !got["11111111-aaaa-bbbb-cccc-000000000001"] {
+	if _, ok := got["11111111-aaaa-bbbb-cccc-000000000001"]; !ok {
 		t.Errorf("LastSessionID from job1 missing: %v", got)
 	}
-	if got[""] {
+	if _, ok := got[""]; ok {
 		t.Errorf("empty LastSessionID must not be added to set: %v", got)
 	}
 }
@@ -998,7 +998,7 @@ func TestKnownSessionIDs_TTLCache(t *testing.T) {
 
 	// First call populates cache.
 	first := s.KnownSessionIDs()
-	if !first["11111111-aaaa-bbbb-cccc-000000000001"] {
+	if _, ok := first["11111111-aaaa-bbbb-cccc-000000000001"]; !ok {
 		t.Fatalf("first call missing seeded session id: %v", first)
 	}
 
@@ -1016,10 +1016,10 @@ func TestKnownSessionIDs_TTLCache(t *testing.T) {
 	s.mu.Unlock()
 
 	cached := s.KnownSessionIDs()
-	if !cached["11111111-aaaa-bbbb-cccc-000000000001"] {
+	if _, ok := cached["11111111-aaaa-bbbb-cccc-000000000001"]; !ok {
 		t.Errorf("TTL cache did not serve stale snapshot: %v", cached)
 	}
-	if cached["22222222-aaaa-bbbb-cccc-000000000002"] {
+	if _, ok := cached["22222222-aaaa-bbbb-cccc-000000000002"]; ok {
 		t.Errorf("fresh value leaked into TTL window: %v", cached)
 	}
 
@@ -1033,7 +1033,7 @@ func TestKnownSessionIDs_TTLCache(t *testing.T) {
 	// Explicit invalidation drops the snapshot; the next call rebuilds.
 	s.invalidateKnownSessionsCache()
 	rebuilt := s.KnownSessionIDs()
-	if !rebuilt["22222222-aaaa-bbbb-cccc-000000000002"] {
+	if _, ok := rebuilt["22222222-aaaa-bbbb-cccc-000000000002"]; !ok {
 		t.Errorf("invalidate+rebuild did not pick up new session id: %v", rebuilt)
 	}
 }

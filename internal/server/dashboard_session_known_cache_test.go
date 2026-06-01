@@ -16,11 +16,13 @@ type countingCronSessions struct {
 	ids   map[string]bool
 }
 
-func (c *countingCronSessions) KnownSessionIDs() map[string]bool {
+func (c *countingCronSessions) KnownSessionIDs() map[string]struct{} {
 	c.calls.Add(1)
-	out := make(map[string]bool, len(c.ids))
+	out := make(map[string]struct{}, len(c.ids))
 	for k, v := range c.ids {
-		out[k] = v
+		if v {
+			out[k] = struct{}{}
+		}
 	}
 	return out
 }

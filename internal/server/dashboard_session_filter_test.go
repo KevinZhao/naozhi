@@ -18,10 +18,12 @@ type fakeCronSessions struct {
 	ids map[string]bool
 }
 
-func (f fakeCronSessions) KnownSessionIDs() map[string]bool {
-	out := make(map[string]bool, len(f.ids))
+func (f fakeCronSessions) KnownSessionIDs() map[string]struct{} {
+	out := make(map[string]struct{}, len(f.ids))
 	for k, v := range f.ids {
-		out[k] = v
+		if v {
+			out[k] = struct{}{}
+		}
 	}
 	return out
 }

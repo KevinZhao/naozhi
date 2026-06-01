@@ -189,31 +189,35 @@ func (s *Scheduler) containsSessionID(sessionID string) bool {
 //   - All in-flight runs (s.runningJobs sync.Map; one per active run).
 //   - The last knownSessionIDsRecentCap runs per job from runStore.
 //
-// Result is a fresh map; safe to retain.  TTL-cached for
-// knownSessionsCacheTTL so dashboard 1Hz pollers do not pay the
-// O(jobs × recentCap) build cost on every call. Invalidated on
-// LastSessionID writes and runStore.Append. Returns an empty
-// (non-nil) map when there are no jobs.
+// The returned map is READ-ONLY and shared: callers MUST NOT mutate or
+// persist it. The set is published once by buildKnownSessionsSet and then
+// only ever replaced wholesale (never mutated in place) or dropped by
+// invalidateKnownSessionsCache, so handing out the cached map directly is
+// race-free for read-only consumers. TTL-cached for knownSessionsCacheTTL
+// so dashboard 1Hz pollers do not pay the O(jobs × recentCap) build cost —
+// nor an O(N) clone — on every call. Invalidated on LastSessionID writes
+// and runStore.Append. Returns an empty (non-nil) map when there are no jobs.
+//
+// R20260601-PERF-1 (#1544): the previous shape cloned the cached set into a
+// fresh map[string]bool on every call (including warm cache hits) to honour
+// a "safe to retain" contract. The only production consumer (dashboard
+// historyFilter.SkipSessionID) is read-only, so the contract was tightened
+// to read-only and the per-call O(N) allocation+copy on the /api/sessions
+// 1Hz hot path was removed.
 //
 // Safe to call on a nil Scheduler — returns empty map.  R245-ARCH
 // (cron+sys hide-from-history); R250-PERF-7 (TTL cache).
-func (s *Scheduler) KnownSessionIDs() map[string]bool {
+func (s *Scheduler) KnownSessionIDs() map[string]struct{} {
 	if s == nil {
-		return map[string]bool{}
+		return map[string]struct{}{}
 	}
 
 	s.knownSessionsCache.mu.Lock()
 	if s.knownSessionsCache.set != nil &&
 		time.Since(s.knownSessionsCache.generatedAt) < knownSessionsCacheTTL {
-		// Clone to honour the "safe to retain" contract — callers may
-		// mutate or persist the returned map.
 		cached := s.knownSessionsCache.set
 		s.knownSessionsCache.mu.Unlock()
-		out := make(map[string]bool, len(cached))
-		for id := range cached {
-			out[id] = true
-		}
-		return out
+		return cached
 	}
 	s.knownSessionsCache.mu.Unlock()
 
@@ -224,11 +228,7 @@ func (s *Scheduler) KnownSessionIDs() map[string]bool {
 	s.knownSessionsCache.generatedAt = time.Now()
 	s.knownSessionsCache.mu.Unlock()
 
-	out := make(map[string]bool, len(set))
-	for id := range set {
-		out[id] = true
-	}
-	return out
+	return set
 }
 
 // buildKnownSessionsSet does the actual O(jobs × recentCap) walk that
