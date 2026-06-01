@@ -211,6 +211,48 @@ func TestRingBuffer_OversizeDropCreatesSeqHole(t *testing.T) {
 	}
 }
 
+func TestRingBuffer_LinesSince_BoundaryAcrossWraparound(t *testing.T) {
+	// LinesSince now binary-searches the first matching logical index instead
+	// of scanning every stored entry. Correctness hinges on the logical window
+	// [0,count) being in strictly-increasing seq order even when the physical
+	// ring has wrapped (head < oldest index). Fill past capacity to force a
+	// wraparound, then probe every afterSeq cut point — including ones below
+	// the oldest retained seq and at/above the newest — and assert the slice
+	// is exactly the entries with seq > afterSeq, in ascending order.
+	const cap = 4
+	b := NewRingBuffer(cap, 1<<20)
+	for i := 1; i <= 6; i++ { // seq 1..6; ring wraps, retains seq 3,4,5,6
+		b.Push([]byte(fmt.Sprintf("L%d", i)))
+	}
+	if got := b.Count(); got != cap {
+		t.Fatalf("Count = %d, want %d", got, cap)
+	}
+
+	cases := []struct {
+		after    int64
+		wantSeqs []int64
+	}{
+		{0, []int64{3, 4, 5, 6}}, // afterSeq below oldest retained -> all
+		{2, []int64{3, 4, 5, 6}}, // 1,2 already evicted; still all retained
+		{3, []int64{4, 5, 6}},
+		{4, []int64{5, 6}},
+		{5, []int64{6}},
+		{6, nil}, // caught up to newest
+		{9, nil}, // future seq
+	}
+	for _, tc := range cases {
+		got := b.LinesSince(tc.after)
+		if len(got) != len(tc.wantSeqs) {
+			t.Fatalf("LinesSince(%d) returned %d lines, want %d", tc.after, len(got), len(tc.wantSeqs))
+		}
+		for i, want := range tc.wantSeqs {
+			if got[i].seq != want {
+				t.Errorf("LinesSince(%d)[%d].seq = %d, want %d", tc.after, i, got[i].seq, want)
+			}
+		}
+	}
+}
+
 func TestRingBuffer_PushDataCopied(t *testing.T) {
 	// Push must copy data, so mutating original after push has no effect
 	b := NewRingBuffer(5, 1024)

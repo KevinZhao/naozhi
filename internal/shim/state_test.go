@@ -1,7 +1,9 @@
 package shim
 
 import (
+	"bytes"
 	"encoding/base64"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -214,6 +216,32 @@ func TestReadState_SchemaVersionExceedsMaxRejected(t *testing.T) {
 	if got.ShimPID != 0 || got.Socket != "" || got.AuthToken != "" || got.Key != "" ||
 		got.Version != 0 || got.SchemaVersion != 0 || got.CLIArgs != nil {
 		t.Errorf("on schema rejection, returned State must be zero value; got %+v", got)
+	}
+}
+
+func TestReadState_SchemaVersionExceedsMaxLogsWarn(t *testing.T) {
+	// The struct-level "Versioning contract" godoc says readers SHOULD log a
+	// warning AND refuse to reconnect when SchemaVersion > theirMax. The
+	// refuse half is covered above; this asserts the warn breadcrumb is
+	// actually emitted so a downgraded binary leaves an operator-visible
+	// trace instead of a silent reconnect failure.
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "future_warn.json")
+	payload := `{"version":1,"schema_version":2,"shim_pid":1,"socket":"/tmp/s.sock","auth_token":"dA==","key":"k"}`
+	if err := os.WriteFile(path, []byte(payload), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadStateFile(path); err == nil {
+		t.Fatal("expected error for schema_version > max, got nil")
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "newer naozhi") || !strings.Contains(logged, "observed_schema_version=2") {
+		t.Errorf("expected a warn naming the newer-naozhi schema mismatch, got: %q", logged)
 	}
 }
 

@@ -6426,12 +6426,32 @@ function buildHomeHealthLines(stats) {
   let line1 = '运行 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total;
   if (stats.uptime) line1 += ' · 运行 ' + stats.uptime;
   lines.push({ text: line1, kind: 'info' });
+  // claude 子进程容量 (R110-P1 #445 "claude 子进程数"): max_procs ships in the
+  // /api/sessions stats static block already, so surface live-vs-capacity
+  // without the deferred /api/stats backend scan. Only when max_procs > 0
+  // (a 0/missing cap means "uncapped" — no ratio to show). Warn when the
+  // pool is saturated so operators notice spawn back-pressure.
+  const maxProcs = typeof stats.max_procs === 'number' ? stats.max_procs : 0;
+  if (maxProcs > 0) {
+    lines.push({
+      text: 'claude 子进程 ' + running + '/' + maxProcs,
+      kind: running >= maxProcs ? 'warn' : 'info',
+    });
+  }
   // Line 2: CLI identity. Helpful when operators have multiple naozhi
   // deployments on different CLI versions.
   if (stats.cli_name) {
     let cli = stats.cli_name;
     if (stats.cli_version) cli += ' ' + stats.cli_version;
     lines.push({ text: cli, kind: 'info' });
+  }
+  // naozhi build tag (R110-P1 #445 service-health): version_tag already ships
+  // in the /api/sessions stats block (omitempty when the -X ldflag is unset)
+  // and the backend struct doc promises a "naozhi v1.2.3-dirty" footer that
+  // was never wired client-side. Surface it so operators can confirm the
+  // running build straight from the Home health strip.
+  if (stats.version_tag) {
+    lines.push({ text: 'naozhi ' + stats.version_tag, kind: 'info' });
   }
   // Multi-Backend RFC §8.3 D22: when ≥2 backends are configured, show a
   // one-liner summarizing per-backend availability + version. The rich
