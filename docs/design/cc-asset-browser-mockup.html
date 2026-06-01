@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>资产浏览器 Mockup（Activity Bar 模式）— naozhi dashboard</title>
+<!--
+  cc-asset-browser RFC §3.6 界面 mockup —— v2 布局：Activity Bar 模式（路 B）。
+  最左竖条(Activity Bar)切换 sidebar 内容；资产视图 = sidebar 列表 + 右侧原文抽屉。
+  配色/字号复用 dashboard.html 的 --nz-* token。纯静态、无依赖，仅作设计评审。
+-->
+<style>
+:root{
+  --nz-bg-0:#0d1117;--nz-bg-1:#161b22;--nz-bg-2:#21262d;--nz-border:#30363d;
+  --nz-text:#c9d1d9;--nz-text-strong:#f0f6fc;--nz-text-mute:#8b949e;
+  --nz-text-dim:#6e7681;--nz-text-faint:#484f58;
+  --nz-accent:#58a6ff;--nz-blue:#1f6feb;--nz-green:#3fb950;
+  --nz-red:#da3633;--nz-amber:#d29922;--nz-clawd-rust:#d97757;
+  --nz-focus:#58a6ff;
+  --nz-font-mono:'SF Mono',SFMono-Regular,ui-monospace,Consolas,'Liberation Mono',Menlo,monospace;
+}
+:root[data-theme="light"]{
+  --nz-bg-0:#ffffff;--nz-bg-1:#f6f8fa;--nz-bg-2:#eaeef2;--nz-border:#d0d7de;
+  --nz-text:#1f2328;--nz-text-strong:#0d1117;--nz-text-mute:#656d76;
+  --nz-text-dim:#8b949e;--nz-text-faint:#afb8c1;
+  --nz-accent:#0969da;--nz-blue:#0969da;--nz-green:#1a7f37;
+  --nz-red:#cf222e;--nz-amber:#9a6700;--nz-focus:#0969da;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei','Noto Sans CJK SC',sans-serif;background:var(--nz-bg-0);color:var(--nz-text);font-size:15px;line-height:1.5}
+:focus-visible{outline:2px solid var(--nz-focus);outline-offset:2px;border-radius:4px}
+
+.app{display:flex;height:100dvh;width:100%;overflow:hidden}
+
+/* ============ Activity Bar（最左竖条，本次设计核心） ============ */
+.activity-bar{flex-shrink:0;width:56px;background:var(--nz-bg-1);border-right:1px solid var(--nz-border);display:flex;flex-direction:column;align-items:center;padding:10px 0;gap:4px}
+.ab-logo{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--nz-accent),var(--nz-clawd-rust));display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:14px;margin-bottom:8px;flex-shrink:0}
+.ab-item{position:relative;width:42px;height:42px;border-radius:10px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--nz-text-mute);border:none;background:none;transition:background .15s,color .15s}
+.ab-item svg{width:21px;height:21px;stroke:currentColor;fill:none;stroke-width:1.7}
+.ab-item:hover{background:var(--nz-bg-2);color:var(--nz-text)}
+.ab-item.active{color:var(--nz-text-strong)}
+.ab-item.active::before{content:"";position:absolute;left:-10px;top:50%;transform:translateY(-50%);width:3px;height:22px;background:var(--nz-accent);border-radius:0 2px 2px 0}
+.ab-item.active{background:var(--nz-bg-2)}
+.ab-item .ab-badge{position:absolute;top:5px;right:5px;min-width:15px;height:15px;padding:0 3px;border-radius:8px;background:var(--nz-blue);color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center;font-variant-numeric:tabular-nums}
+/* 后续迁移：降透明 + soon 角标 */
+.ab-item.soon{opacity:.38;cursor:default}
+.ab-item.soon:hover{background:none;color:var(--nz-text-mute)}
+.ab-sep{width:24px;height:1px;background:var(--nz-border);margin:6px 0}
+.ab-spacer{flex:1}
+.ab-tooltip{position:absolute;left:52px;top:50%;transform:translateY(-50%);background:var(--nz-bg-2);border:1px solid var(--nz-border);color:var(--nz-text);font-size:12px;padding:3px 8px;border-radius:6px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .12s;z-index:30}
+.ab-item:hover .ab-tooltip{opacity:1}
+
+/* ============ Sidebar（被 Activity Bar 切换内容；这里展示「资产视图」） ============ */
+.sidebar{flex-shrink:0;width:340px;border-right:1px solid var(--nz-border);display:flex;flex-direction:column;background:var(--nz-bg-0);min-width:0}
+.sb-head{flex-shrink:0;padding:12px 14px 8px;border-bottom:1px solid var(--nz-border)}
+.sb-title-row{display:flex;align-items:center;gap:8px}
+.sb-title-row h1{font-size:16px;color:var(--nz-text-strong);font-weight:600}
+.sb-title-row .sp{flex:1}
+.sb-refresh{background:none;border:1px solid var(--nz-border);color:var(--nz-text-mute);border-radius:6px;width:28px;height:28px;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.sb-refresh svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2}
+.sb-refresh:hover{color:var(--nz-accent);border-color:var(--nz-accent)}
+.sb-scope{margin-top:7px;font-size:11px;color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:999px;padding:2px 9px;display:inline-flex;align-items:center;gap:5px}
+.sb-scope .dot{width:6px;height:6px;border-radius:50%;background:var(--nz-green)}
+
+/* kind 横向 tab（替代第二根竖条，避免双竖条视觉重） */
+.kind-tabs{flex-shrink:0;display:flex;gap:2px;padding:8px 10px;overflow-x:auto;border-bottom:1px solid var(--nz-border);scrollbar-width:none}
+.kind-tabs::-webkit-scrollbar{display:none}
+.kind-tab{flex-shrink:0;padding:5px 10px;border-radius:7px;font-size:13px;color:var(--nz-text-mute);cursor:pointer;border:1px solid transparent;white-space:nowrap;display:flex;align-items:center;gap:5px}
+.kind-tab:hover{background:var(--nz-bg-1);color:var(--nz-text)}
+.kind-tab.active{background:var(--nz-bg-2);color:var(--nz-text-strong);border-color:var(--nz-border)}
+.kind-tab .kc{font-size:10px;color:var(--nz-text-dim);font-variant-numeric:tabular-nums}
+.kind-tab.active .kc{color:var(--nz-text-mute)}
+
+.sb-search{flex-shrink:0;display:flex;align-items:center;gap:7px;margin:8px 12px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:7px;padding:6px 10px}
+.sb-search svg{width:14px;height:14px;stroke:var(--nz-text-dim);fill:none;stroke-width:2}
+.sb-search input{flex:1;background:none;border:none;color:var(--nz-text);font-family:inherit;font-size:13px;outline:none}
+
+.sb-list{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent}
+
+.grp{display:flex;align-items:center;gap:8px;padding:7px 14px;font-size:12px;color:var(--nz-text-mute);background:var(--nz-bg-0);position:sticky;top:0;cursor:pointer;user-select:none;border-bottom:1px solid var(--nz-bg-2);z-index:1}
+.grp .chev{width:11px;height:11px;stroke:var(--nz-text-dim);fill:none;stroke-width:2.2;transition:transform .15s;flex-shrink:0}
+.grp.collapsed .chev{transform:rotate(-90deg)}
+.grp .gl{font-weight:600;color:var(--nz-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.grp .src-chip{font-size:10px;padding:1px 6px;border-radius:999px;border:1px solid var(--nz-border);flex-shrink:0}
+.src-user{color:var(--nz-green);border-color:rgba(63,185,80,.4)!important}
+.src-project{color:var(--nz-accent);border-color:rgba(88,166,255,.4)!important}
+.src-plugin{color:var(--nz-clawd-rust);border-color:rgba(217,119,87,.4)!important}
+.grp .gcount{margin-left:auto;font-size:11px;color:var(--nz-text-dim);font-variant-numeric:tabular-nums;flex-shrink:0}
+.grp-items.collapsed{display:none}
+
+.row{display:flex;flex-direction:column;gap:2px;padding:9px 14px 9px 24px;border-bottom:1px solid var(--nz-bg-2);cursor:pointer;border-left:3px solid transparent}
+.row:hover{background:var(--nz-bg-1)}
+.row.active{background:#1f2937;border-left-color:var(--nz-accent)}
+:root[data-theme="light"] .row.active{background:#ddf4ff}
+.row .rname{font-size:13px;color:var(--nz-text-strong);font-weight:500;font-family:var(--nz-font-mono);word-break:break-all}
+.row .rdesc{font-size:12px;color:var(--nz-text-mute);display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden}
+.row .nodesc{color:var(--nz-text-faint);font-style:italic}
+
+/* ============ Main（主对话区占位；资产原文用右侧抽屉，不顶掉对话） ============ */
+.main{flex:1;display:flex;flex-direction:column;min-width:0;position:relative;background:var(--nz-bg-0)}
+.main-head{flex-shrink:0;padding:10px 18px;border-bottom:1px solid var(--nz-border);display:flex;align-items:center;gap:8px;color:var(--nz-text-mute);font-size:13px}
+.main-placeholder{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--nz-text-faint);gap:10px;text-align:center;padding:24px}
+.main-placeholder svg{width:42px;height:42px;stroke:var(--nz-text-faint);fill:none;stroke-width:1.4}
+.main-placeholder .hint{font-size:13px;line-height:1.7;max-width:340px}
+
+/* 右侧原文抽屉（复用 naozhi fv-drawer 范式） */
+.drawer{position:absolute;top:0;right:0;bottom:0;width:min(560px,62%);background:var(--nz-bg-0);border-left:1px solid var(--nz-border);box-shadow:-8px 0 24px rgba(1,4,9,.4);display:flex;flex-direction:column;transform:translateX(100%);transition:transform .22s ease}
+.drawer.open{transform:translateX(0)}
+.drawer-head{flex-shrink:0;padding:12px 16px;border-bottom:1px solid var(--nz-border);display:flex;align-items:flex-start;gap:10px}
+.drawer-head .dt{flex:1;min-width:0}
+.drawer-head .dtitle{font-size:15px;color:var(--nz-text-strong);font-weight:600;font-family:var(--nz-font-mono);word-break:break-all}
+.drawer-head .dsub{margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.drawer-head .from{font-size:11px;color:var(--nz-clawd-rust);background:rgba(217,119,87,.12);border:1px solid rgba(217,119,87,.35);border-radius:999px;padding:2px 9px}
+.drawer-head .rel{font-size:11px;color:var(--nz-text-dim);font-family:var(--nz-font-mono);word-break:break-all}
+.drawer-head .x{background:none;border:none;color:var(--nz-text-mute);font-size:22px;cursor:pointer;line-height:1;padding:0 2px;flex-shrink:0}
+.drawer-head .x:hover{color:var(--nz-text-strong)}
+.drawer-body{flex:1;overflow-y:auto;padding:16px}
+.drawer-body .fm{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-left:3px solid var(--nz-accent);border-radius:6px;padding:10px 12px;font-family:var(--nz-font-mono);font-size:12px;color:var(--nz-text-mute);margin-bottom:14px;white-space:pre-wrap}
+.drawer-body .fm .k{color:var(--nz-accent)}
+.drawer-body .md h1{font-size:18px;color:var(--nz-text-strong);margin:0 0 10px}
+.drawer-body .md h2{font-size:15px;color:var(--nz-text-strong);margin:16px 0 6px}
+.drawer-body .md p{font-size:13px;margin:0 0 10px;color:var(--nz-text)}
+.drawer-body .md ul{margin:0 0 10px 18px;font-size:13px}
+.drawer-body .md li{margin-bottom:3px}
+.drawer-body .md code{font-family:var(--nz-font-mono);font-size:12px;background:var(--nz-bg-2);border-radius:4px;padding:1px 5px}
+/* hook 的 anchor 高亮（评审 C：整文件 + 客户端锚点） */
+.drawer-body .anchor-note{font-size:11px;color:var(--nz-amber);background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.3);border-radius:6px;padding:7px 10px;margin-bottom:12px}
+.drawer-body pre.raw{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;padding:12px;font-family:var(--nz-font-mono);font-size:12px;color:var(--nz-text);overflow-x:auto;white-space:pre;line-height:1.6}
+.drawer-body pre.raw .hl{background:rgba(210,153,34,.22);display:block;margin:0 -12px;padding:0 12px;border-left:3px solid var(--nz-amber)}
+
+/* plugins 卡片视图 */
+.cards{padding:12px;display:flex;flex-direction:column;gap:10px;overflow-y:auto}
+.card{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:9px;padding:12px}
+.card h3{font-size:13px;color:var(--nz-text-strong);font-family:var(--nz-font-mono);display:flex;align-items:center;gap:8px}
+.card .ver{font-size:10px;color:var(--nz-text-mute);background:var(--nz-bg-2);border-radius:4px;padding:1px 6px;font-variant-numeric:tabular-nums}
+.card .repo{font-size:11px;color:var(--nz-accent);margin-top:5px;word-break:break-all}
+.card .meta{font-size:10px;color:var(--nz-text-dim);margin-top:6px}
+.card .counts{margin-top:8px;display:flex;gap:5px;flex-wrap:wrap}
+.card .counts .c{font-size:10px;background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:999px;padding:2px 8px;color:var(--nz-text)}
+.card .counts .c b{color:var(--nz-accent)}
+
+/* 顶部 mock 说明条 */
+.mock-bar{position:fixed;left:0;right:0;bottom:0;background:var(--nz-bg-1);border-top:1px solid var(--nz-border);padding:6px 14px;font-size:11px;color:var(--nz-text-mute);display:flex;gap:14px;align-items:center;z-index:40}
+.mock-bar b{color:var(--nz-text-strong)}
+.mock-bar .sp{flex:1}
+.mock-bar button{background:var(--nz-bg-2);border:1px solid var(--nz-border);color:var(--nz-text);border-radius:5px;padding:3px 9px;cursor:pointer;font-size:11px;font-family:inherit}
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ============ Activity Bar ============ -->
+  <nav class="activity-bar" aria-label="主导航">
+    <div class="ab-logo">脑</div>
+
+    <button class="ab-item" data-view="chat" onclick="switchView('chat')">
+      <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+      <span class="ab-badge">3</span>
+      <span class="ab-tooltip">会话</span>
+    </button>
+
+    <button class="ab-item active" data-view="assets" onclick="switchView('assets')">
+      <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      <span class="ab-tooltip">已安装资产</span>
+    </button>
+
+    <div class="ab-sep"></div>
+
+    <!-- 后续迁移示意（首期仍在 header，竖条留位） -->
+    <button class="ab-item soon">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 1.5"/><path d="M5 3L2 6"/><path d="M22 6l-3-3"/></svg>
+      <span class="ab-tooltip">定时任务（后续迁移）</span>
+    </button>
+    <button class="ab-item soon">
+      <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 109-9 9.75 9.75 0 00-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>
+      <span class="ab-tooltip">历史会话（后续迁移）</span>
+    </button>
+
+    <div class="ab-spacer"></div>
+    <button class="ab-item" onclick="toggleTheme()">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></svg>
+      <span class="ab-tooltip">切换主题</span>
+    </button>
+  </nav>
+
+  <!-- ============ Sidebar：资产视图 ============ -->
+  <aside class="sidebar">
+    <div class="sb-head">
+      <div class="sb-title-row">
+        <h1>已安装资产</h1>
+        <span class="sp"></span>
+        <button class="sb-refresh" title="刷新（强制重扫，对应纯事件驱动的手动失效）" onclick="render()">
+          <svg viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.5 9a9 9 0 0114.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0020.5 15"/></svg>
+        </button>
+      </div>
+      <span class="sb-scope"><span class="dot"></span>本节点 · ~/.claude · naozhi</span>
+    </div>
+
+    <div class="kind-tabs" id="kindTabs">
+      <div class="kind-tab active" data-tab="skill">Skills <span class="kc">806</span></div>
+      <div class="kind-tab" data-tab="plugin">Plugins <span class="kc">4</span></div>
+      <div class="kind-tab" data-tab="agent">Agents <span class="kc">64</span></div>
+      <div class="kind-tab" data-tab="command">Commands <span class="kc">81</span></div>
+      <div class="kind-tab" data-tab="hook">Hooks <span class="kc">7</span></div>
+      <div class="kind-tab" data-tab="mcp">MCP <span class="kc">5</span></div>
+      <div class="kind-tab" data-tab="memory">Memory <span class="kc">28</span></div>
+    </div>
+
+    <label class="sb-search">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input id="q" placeholder="搜索 name…（前端过滤）" oninput="render()">
+    </label>
+
+    <div class="sb-list" id="list"></div>
+    <div class="cards" id="cards" style="display:none"></div>
+  </aside>
+
+  <!-- ============ Main：主对话区占位 + 原文抽屉 ============ -->
+  <main class="main">
+    <div class="main-head">主对话区 — 资产原文在右侧抽屉打开，不打断对话</div>
+    <div class="main-placeholder">
+      <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+      <div class="hint">左侧竖条切换「会话 / 资产」视图。<br>当前为<b>资产视图</b>：点 sidebar 中任一资产，原文从右侧滑出。</div>
+    </div>
+
+    <aside class="drawer" id="drawer">
+      <div class="drawer-head">
+        <div class="dt">
+          <div class="dtitle" id="dTitle">—</div>
+          <div class="dsub" id="dSub"></div>
+        </div>
+        <button class="x" onclick="closeDrawer()" title="关闭">&times;</button>
+      </div>
+      <div class="drawer-body" id="dBody"></div>
+    </aside>
+  </main>
+
+</div>
+
+<div class="mock-bar">
+  <b>资产浏览器 Mockup · Activity Bar 模式（路 B）</b>
+  <span>竖条切 sidebar 视图 · 原文走右侧抽屉 · 配色复用 --nz-* token</span>
+  <span class="sp"></span>
+  <button onclick="toggleTheme()">切换明/暗</button>
+</div>
+
+<script>
+const DATA = {
+  skill:{groups:[
+    {src:'user',label:'用户级',chip:'~/.claude/skills',collapsed:false,items:[
+      {name:'learned',desc:'自动沉淀的项目模式与编码习惯',rel:'skills/learned/SKILL.md'},
+    ]},
+    {src:'project',label:'项目级',chip:'naozhi/.claude',collapsed:false,items:[
+      {name:'dev-workflow',desc:'功能必走设计+独立评审；bug fix 按 ≤20行/≤3文件分流；发布走 tag→Release',rel:'.claude/skills/dev-workflow/SKILL.md'},
+      {name:'triage-findings',desc:'把 review 发现分类为 BLOCKER/重要/建议并整合到 TODO',rel:'.claude/skills/triage-findings/SKILL.md'},
+    ]},
+    {src:'plugin',label:'ecc@ecc',chip:'plugin',collapsed:true,count:249,items:[
+      {name:'deep-research',desc:'Deep research harness — fan-out web searches, fetch, adversarially verify, synthesize.',rel:'skills/deep-research/SKILL.md',from:'ecc@ecc'},
+      {name:'code-review',desc:'Review local diff or GitHub PR for correctness & cleanups.',rel:'skills/code-review/SKILL.md',from:'ecc@ecc'},
+      {name:'malformed-example',desc:'',rel:'skills/malformed-example/SKILL.md',from:'ecc@ecc',nodesc:true},
+    ]},
+    {src:'plugin',label:'frontend-design@claude-plugins-official',chip:'plugin',collapsed:true,count:1,items:[
+      {name:'frontend-design',desc:'Distinctive, production-grade frontend interfaces.',rel:'skills/frontend-design/SKILL.md',from:'frontend-design@claude-plugins-official'},
+    ]},
+  ]},
+  agent:{groups:[
+    {src:'plugin',label:'ecc@ecc',chip:'plugin',collapsed:false,count:64,items:[
+      {name:'architect',desc:'System design, scalability, technical decisions.',rel:'agents/architect.md',from:'ecc@ecc'},
+      {name:'go-reviewer',desc:'Idiomatic Go, concurrency, error handling.',rel:'agents/go-reviewer.md',from:'ecc@ecc'},
+    ]},
+  ]},
+  command:{groups:[
+    {src:'plugin',label:'ecc@ecc',chip:'plugin',collapsed:false,count:81,items:[
+      {name:'code-review',desc:'Code review — local changes or GitHub PR',rel:'commands/code-review.md',from:'ecc@ecc'},
+      {name:'plan',desc:'Restate requirements, assess risks, create plan.',rel:'commands/plan.md',from:'ecc@ecc'},
+    ]},
+  ]},
+  hook:{groups:[
+    {src:'plugin',label:'ecc@ecc',chip:'plugin',collapsed:false,count:7,items:[
+      {name:'pre:bash:dispatcher',desc:'PreToolUse Bash — quality/tmux/push/GateGuard 预检分发',rel:'hooks/hooks.json',from:'ecc@ecc',anchor:'pre:bash:dispatcher'},
+      {name:'pre:write:doc-warning',desc:'PreToolUse Write — 文档创建前 fact-forcing',rel:'hooks/hooks.json',from:'ecc@ecc',anchor:'pre:write:doc-warning'},
+    ]},
+  ]},
+  mcp:{groups:[
+    {src:'user',label:'用户级',chip:'~/.claude/.mcp.json',collapsed:false,items:[
+      {name:'playwright',desc:'npx · 浏览器自动化',rel:'.mcp.json',anchor:'playwright'},
+      {name:'context7',desc:'最新库文档与代码示例',rel:'.mcp.json',anchor:'context7'},
+      {name:'github',desc:'GitHub PR/issue/repo 操作',rel:'.mcp.json',anchor:'github'},
+    ]},
+  ]},
+  memory:{groups:[
+    {src:'user',label:'项目 memory · naozhi',chip:'projects/…naozhi/memory',collapsed:false,items:[
+      {name:'project_group_chat_policy',desc:'群聊默认 mention_only；私聊不变',rel:'memory/project_group_chat_policy.md'},
+      {name:'feedback_deploy_systemctl',desc:'部署用 sudo systemctl restart naozhi',rel:'memory/feedback_deploy_systemctl.md'},
+    ]},
+  ]},
+};
+const PLUGINS=[
+  {id:'ecc@ecc',ver:'2.0.0-rc.1',repo:'github:affaan-m/everything-claude-code',scope:'user',at:'2026-05-30',sha:'64cd1ba',counts:{skill:249,agent:64,command:81,hook:7}},
+  {id:'gopls-lsp@claude-plugins-official',ver:'1.0.0',repo:'github:anthropics/claude-plugins-official',scope:'user',at:'2026-03-18',sha:'6b70f99',counts:{}},
+  {id:'frontend-design@claude-plugins-official',ver:'unknown',repo:'github:anthropics/claude-plugins-official',scope:'user',at:'2026-04-03',sha:'',counts:{skill:1}},
+  {id:'math-olympiad@claude-plugins-official',ver:'unknown',repo:'github:anthropics/claude-plugins-official',scope:'user',at:'2026-05-24',sha:'',counts:{skill:1}},
+];
+const RAW={
+  'dev-workflow':{fm:'name: dev-workflow\ndescription: 功能开发走设计+独立评审\nmetadata:\n  scope: project',
+    md:'<h1>Dev Workflow</h1><p>项目级开发流程 skill。</p><h2>功能开发</h2><ul><li>必走 <code>设计 → 独立评审 → 实现</code></li><li>bug fix 按 ≤20行/≤3文件/无风险 清单分流</li></ul><h2>发布</h2><p>走 <code>tag → GitHub Release → naozhi upgrade</code></p>'},
+};
+
+let curTab='skill', curSel=null;
+
+function switchView(v){
+  document.querySelectorAll('.ab-item[data-view]').forEach(x=>x.classList.toggle('active',x.dataset.view===v));
+  // mockup：仅资产视图有内容；点"会话"只演示竖条高亮切换
+  if(v==='chat'){ alert('（mockup）切到会话视图：sidebar 会换成会话列表，main 显示对话。\n本稿聚焦资产视图。');
+    document.querySelectorAll('.ab-item[data-view]').forEach(x=>x.classList.toggle('active',x.dataset.view==='assets')); }
+}
+
+function flat(tab){
+  const q=document.getElementById('q').value.trim().toLowerCase();
+  const src=DATA[tab]||{groups:[]};
+  return src.groups.map(g=>({...g,items:g.items.filter(it=>!q||it.name.toLowerCase().includes(q)||(it.desc||'').toLowerCase().includes(q))})).filter(g=>g.items.length||!q);
+}
+
+function render(){
+  const list=document.getElementById('list'),cards=document.getElementById('cards');
+  if(curTab==='plugin'){
+    list.style.display='none';cards.style.display='flex';
+    cards.innerHTML=PLUGINS.map(p=>{
+      const c=Object.entries(p.counts).map(([k,v])=>`<span class="c"><b>${v}</b> ${k}</span>`).join('')||'<span class="c" style="color:var(--nz-text-dim)">无内容资产</span>';
+      return `<div class="card"><h3>${p.id.split('@')[0]} <span class="ver">${p.ver}</span></h3><div class="repo">${p.repo}</div><div class="meta">${p.id.split('@')[1]} · ${p.scope} · 装于 ${p.at}${p.sha?' · '+p.sha:''}</div><div class="counts">${c}</div></div>`;
+    }).join('');
+    return;
+  }
+  cards.style.display='none';list.style.display='block';
+  const groups=flat(curTab);
+  list.innerHTML=groups.map((g,gi)=>{
+    const head=`<div class="grp ${g.collapsed?'collapsed':''}" onclick="toggleGrp(${gi})"><svg class="chev" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg><span class="gl">${g.label}</span><span class="src-chip src-${g.src}">${g.chip}</span><span class="gcount">${g.count||g.items.length}</span></div>`;
+    const rows=`<div class="grp-items ${g.collapsed?'collapsed':''}">`+g.items.map(it=>{
+      const d=it.nodesc?`<div class="rdesc nodesc">（无 frontmatter — 名取目录名）</div>`:`<div class="rdesc">${it.desc||''}</div>`;
+      return `<div class="row ${curSel===it.name?'active':''}" onclick='sel(${JSON.stringify(it).replace(/'/g,"&#39;")})'><div class="rname">${it.name}</div>${d}</div>`;
+    }).join('')+`</div>`;
+    return head+rows;
+  }).join('');
+}
+function toggleGrp(gi){const g=DATA[curTab].groups[gi];g.collapsed=!g.collapsed;render();}
+
+function sel(it){
+  curSel=it.name;render();
+  document.getElementById('dTitle').textContent=it.name;
+  document.getElementById('dSub').innerHTML=(it.from?`<span class="from">来自 ${it.from}</span>`:'')+`<span class="rel">${it.rel}${it.anchor?' › '+it.anchor:''}</span>`;
+  const body=document.getElementById('dBody');
+  if(it.anchor){ // hook/mcp：整文件 + 锚点高亮（评审 C）
+    body.innerHTML=`<div class="anchor-note">该资产位于含多条目的文件（${it.rel}），返回整文件并高亮定位到 <code>${it.anchor}</code></div>`+
+      `<pre class="raw">{\n  "hooks": {\n    "PreToolUse": [\n<span class="hl">      { "id": "${it.anchor}",\n        "matcher": "Bash",\n        "description": "${it.desc}" },</span>\n      { "id": "...其它条目..." }\n    ]\n  }\n}</pre>`;
+  }else{
+    const raw=RAW[it.name]||{fm:`name: ${it.name}\ndescription: ${it.desc||'(无)'}`,md:`<p style="color:var(--nz-text-mute)">（mockup：此处加载 <code>/api/cc/assets/raw</code> 原文，复用 dashboard inlineMd 渲染）</p>`};
+    body.innerHTML=`<div class="fm">${raw.fm.replace(/^([\w-]+):/gm,'<span class="k">$1</span>:')}</div><div class="md">${raw.md}</div>`;
+  }
+  document.getElementById('drawer').classList.add('open');
+}
+function closeDrawer(){document.getElementById('drawer').classList.remove('open');curSel=null;render();}
+
+document.getElementById('kindTabs').addEventListener('click',e=>{
+  const t=e.target.closest('.kind-tab');if(!t)return;
+  document.querySelectorAll('.kind-tab').forEach(x=>x.classList.remove('active'));
+  t.classList.add('active');curTab=t.dataset.tab;curSel=null;
+  document.getElementById('q').value='';closeDrawer();render();
+});
+function toggleTheme(){const r=document.documentElement;r.dataset.theme=r.dataset.theme==='light'?'':'light';}
+render();
+</script>
+</body>
+</html>

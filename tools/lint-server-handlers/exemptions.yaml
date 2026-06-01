@@ -55,7 +55,7 @@ file_size:
       limit: 500
       until_phase: 4b
     - path: internal/server/routes.go         # v0.6.1 新增豁免：v0.4 时 731 不超线
-      current: 575                          # 2026-05-28 embed.FS + ETag helper 抽到 static_assets.go (Phase 5-prep)
+      current: 707                          # 2026-06-01 merge master(575) + cc-asset-browser 路由调用+静态 JS handler；主体逻辑在 dashboard_ccassets.go
       limit: 500
       until_phase: "5"
     - path: internal/server/agent_tailer.go # v0.6.1 新增豁免：v0.4 时 655 不超线

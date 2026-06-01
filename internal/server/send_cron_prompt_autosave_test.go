@@ -20,8 +20,8 @@ type fakeCronPromptSaver struct {
 	calls      int
 }
 
-func (f *fakeCronPromptSaver) EnsureStub(string) bool           { return false }
-func (f *fakeCronPromptSaver) KnownSessionIDs() map[string]bool { return nil }
+func (f *fakeCronPromptSaver) EnsureStub(string) bool               { return false }
+func (f *fakeCronPromptSaver) KnownSessionIDs() map[string]struct{} { return nil }
 func (f *fakeCronPromptSaver) SetJobPrompt(jobID, prompt string) error {
 	f.calls++
 	f.lastJobID = jobID

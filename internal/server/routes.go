@@ -258,6 +258,10 @@ func (s *Server) registerDashboard() {
 	}
 	s.mux.HandleFunc("GET /api/memory/{slug}", auth(s.memoryH.HandleGet))
 
+	// Installed-asset browser (docs/rfc/cc-asset-browser.md): wiring lives in
+	// dashboard_ccassets.go to keep this file from growing.
+	s.registerAssetBrowserRoutes(auth)
+
 	// Unauthenticated routes (login, static assets, WebSocket with own auth)
 	s.mux.HandleFunc("POST /api/auth/login", s.auth.HandleLogin)
 	// R243-SEC-15 (#800): explicit no-JS form-action target. The login page
@@ -281,6 +285,7 @@ func (s *Server) registerDashboard() {
 	// does not break the unauthenticated bootstrap.
 	s.mux.HandleFunc("GET /static/dashboard.js", auth(handleDashboardJS))
 	s.mux.HandleFunc("GET /static/agent_view.js", auth(handleAgentViewJS))
+	s.mux.HandleFunc("GET /static/asset_browser.js", auth(handleAssetBrowserJS))
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
 	if s.reverseNodeServer != nil {
 		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
@@ -610,6 +615,36 @@ func handleAgentViewJS(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("agent_view js write", "err", err)
 	}
+}
+
+// handleAssetBrowserJS serves static/asset_browser.js — the cc-asset-browser
+// dashboard module (RFC docs/rfc/cc-asset-browser.md). Mirrors handleAgentViewJS.
+func handleAssetBrowserJS(w http.ResponseWriter, r *http.Request) {
+	data, err := assetBrowserJS.ReadFile("static/asset_browser.js")
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "asset_browser.js") {
+		return
+	}
+	if _, err := w.Write(data); err != nil {
+		slog.Debug("asset_browser js write", "err", err)
+	}
+}
+
+// strOrFallback extracts a string from a map, trying the primary key first then the fallback.
+// Used to handle remote nodes that may send Go-default JSON keys (e.g. "Name") instead of
+// tagged lowercase keys (e.g. "name").
+func strOrFallback(m map[string]any, key, fallback string) string {
+	if v, ok := m[key].(string); ok && v != "" {
+		return v
+	}
+	v, _ := m[fallback].(string)
+	return v
 }
 
 // buildSessionOpts resolves agent config and planner overrides for a
