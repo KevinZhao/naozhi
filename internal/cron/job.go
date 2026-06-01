@@ -490,8 +490,12 @@ func previousTickBefore(schedule string, now time.Time) time.Time {
 }
 
 // schedulePeriodFromSched 同 schedulePeriod，但接受已解析的 robfigcron.Schedule，
-// 避免在 HasMissedSchedule 路径上重复 Parse。schedulePeriod 是公开签名（其他包
-// 测试有用），保留不动。R238-PERF-2。
+// 避免在 HasMissedSchedule 路径上重复 Parse。R238-PERF-2。
+//
+// R250-CR-6 (#1139): schedulePeriod 是包内 unexported 帮助函数（不是“公开
+// 签名”——没有跨包消费者）。当前唯一生产调用点是 applyJitter（scheduler_run.go
+// 的 entryID==0 fallback 路径），加上包内 jitter_test.go。保留它是因为字符串
+// 入口仍被 fallback 路径使用，并非“其他包测试有用”——旧注释的措辞已纠正。
 func schedulePeriodFromSched(sched robfigcron.Schedule, now time.Time) time.Duration {
 	first := sched.Next(now)
 	second := sched.Next(first)
