@@ -29,6 +29,7 @@ package naozhilog
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -37,6 +38,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
@@ -182,16 +184,18 @@ func (s *Source) loadBeforeViaIdx(ctx context.Context, beforeMS int64, limit int
 	}
 
 	// Find the first idx entry at/after beforeMS. idx is ByteOff-ordered
-	// and TimeMS weakly monotonic, so a linear scan from the end is cheap
-	// (idx has <= ~2000 entries) and robust against the rare non-strict
-	// TimeMS ties.
-	boundary := len(idx) // index of first idx slot with TimeMS >= beforeMS
-	for i := len(idx) - 1; i >= 0; i-- {
-		if idx[i].TimeMS < beforeMS {
-			break
-		}
-		boundary = i
-	}
+	// with weakly-monotonic TimeMS. R112714-PERF-12: use binary search
+	// (O(log n)) instead of the previous linear reverse scan (O(n)).
+	// slices.BinarySearchFunc returns the first position where the
+	// comparator is not negative, i.e. the first entry with TimeMS >=
+	// beforeMS. On weakly-monotonic data this finds the correct boundary
+	// (ties resolve to the leftmost tie, which is strictly safe: we may
+	// start decoding a few records earlier than strictly necessary, which
+	// is always correct — the decode-filter pass discards any record with
+	// Time >= beforeMS regardless).
+	boundary, _ := slices.BinarySearchFunc(idx, beforeMS, func(e schema.IdxEntry, target int64) int {
+		return cmp.Compare(e.TimeMS, target)
+	})
 	if boundary == 0 {
 		// Even the oldest indexed record is already >= beforeMS. There may
 		// still be un-indexed records before the first idx entry (the idx

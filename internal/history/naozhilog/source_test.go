@@ -342,6 +342,53 @@ func TestSource_ContextCancel(t *testing.T) {
 	}
 }
 
+// TestSource_LoadBefore_BinarySearchBoundary verifies that the binary-search
+// idx boundary (R112714-PERF-12) produces results equivalent to the full-scan
+// path for a range of beforeMS values, including at the exact timestamp of a
+// record (boundary = coincident) and just before/after it.
+func TestSource_LoadBefore_BinarySearchBoundary(t *testing.T) {
+	p, src, sink, _ := newPersister(t, "k2")
+	// Write 20 records with distinct timestamps so boundary tests are unambiguous.
+	for i := 0; i < 20; i++ {
+		persistOne(t, sink, cli.EventEntry{
+			UUID:    "bsearch-" + rune2hex(i),
+			Time:    int64(2000 + i*10), // 2000, 2010, …, 2190
+			Type:    "user",
+			Summary: rune2hex(i),
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = p.Flush(ctx)
+
+	bg := context.Background()
+	for _, tc := range []struct {
+		before int64
+		limit  int
+	}{
+		{2000, 5},  // exact lower bound
+		{2001, 5},  // just after lower bound
+		{2050, 5},  // mid range
+		{2099, 5},  // between records
+		{2100, 5},  // exact mid boundary
+		{2191, 10}, // just above all records
+		{9999, 20}, // far future
+	} {
+		fullGot, err := src.loadBeforeFullScan(bg, tc.before, tc.limit)
+		if err != nil {
+			t.Fatalf("loadBeforeFullScan(before=%d,limit=%d): %v", tc.before, tc.limit, err)
+		}
+		idxGot, ok, err := src.loadBeforeViaIdx(bg, tc.before, tc.limit)
+		if err != nil {
+			t.Fatalf("loadBeforeViaIdx(before=%d,limit=%d): %v", tc.before, tc.limit, err)
+		}
+		if ok && !equalTimes(idxGot, fullGot) {
+			t.Errorf("binary-search boundary mismatch before=%d limit=%d: idx=%v full=%v",
+				tc.before, tc.limit, times(idxGot), times(fullGot))
+		}
+	}
+}
+
 // rune2hex is a tiny helper so test entries can have distinct UUIDs
 // without pulling crypto/rand into the test path.
 func rune2hex(i int) string {
