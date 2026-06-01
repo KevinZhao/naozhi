@@ -471,6 +471,11 @@ func schedulePeriod(schedule string, now time.Time) time.Duration {
 // 窗口乘 3 是为了应对 DST / 月份 / 闰年这类非等间隔形态（每月 29 日
 // 在 2 月可能 "跳 31 天"），给足裕量。每次 Next 是 O(1)，循环最多跑
 // 3-5 次，开销可忽略。无法解析的 schedule 返回零值 time。
+//
+// R249-CR-10 (#954): 这是包内 unexported 的字符串入口帮助函数，唯一调用者是
+// missed_test.go——生产路径全部走 previousTickBeforeFromSched（HasMissedSchedule
+// 已 Parse 一次后复用 sched，避免重复正则）。保留它是为了让测试能用字符串
+// schedule 直测回推逻辑，并非有跨包消费者（unexported 不可能被其他包用）。
 func previousTickBefore(schedule string, now time.Time) time.Time {
 	// R246-PERF-4: previously this called schedulePeriod(schedule, now)
 	// which re-Parses the same expression we already parsed above.
