@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,22 +21,42 @@ import (
 // HTTPClient is an HTTP client for a remote naozhi instance.
 type HTTPClient struct {
 	ID          string
-	URL         string // e.g. "http://10.0.0.2:8180"
+	URL         string // e.g. "http://10.0.0.2:8180"; cleaned by validatePeerURL
 	Token       string // dashboard bearer token
 	displayName string
 	httpClient  *http.Client
+
+	// urlErr is non-nil when the configured URL failed validatePeerURL at
+	// construction (bad scheme, no host, or link-local/IMDS target). doRequest
+	// short-circuits on it so a Bearer-token-carrying request never leaves the
+	// host toward an unvalidated/unsafe target. R20260601-SEC-2 (#1548).
+	urlErr error
 
 	relayMu sync.Mutex
 	relay   *wsRelay
 }
 
-// NewHTTPClient creates an HTTPClient with a 10s timeout.
-func NewHTTPClient(id, url, token, displayName string) *HTTPClient {
+// NewHTTPClient creates an HTTPClient with a 10s timeout. The peer URL is
+// screened by validatePeerURL: an http/https absolute URL whose host is not
+// link-local is accepted (loopback + RFC1918 are allowed for local/LAN
+// multi-node bridging). An invalid/unsafe URL does not panic — it is recorded
+// and every request via this client fails cleanly with that error, so a
+// tampered config cannot turn the dashboard token into an SSRF probe.
+func NewHTTPClient(id, rawURL, token, displayName string) *HTTPClient {
+	cleanURL, urlErr := validatePeerURL(rawURL)
+	if urlErr != nil {
+		// Preserve the operator-supplied string for diagnostics/RemoteAddr,
+		// but doRequest will refuse to use it.
+		cleanURL = strings.TrimSpace(rawURL)
+		slog.Error("node peer URL rejected; client disabled",
+			"node", id, "url", rawURL, "err", urlErr)
+	}
 	return &HTTPClient{
 		ID:          id,
-		URL:         url,
+		URL:         cleanURL,
 		Token:       token,
 		displayName: displayName,
+		urlErr:      urlErr,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
@@ -60,6 +82,9 @@ func NewHTTPClient(id, url, token, displayName string) *HTTPClient {
 }
 
 func (n *HTTPClient) doRequest(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+	if n.urlErr != nil {
+		return nil, fmt.Errorf("node %s: refusing request to unvalidated peer URL: %w", n.ID, n.urlErr)
+	}
 	req, err := http.NewRequestWithContext(ctx, method, n.URL+path, body)
 	if err != nil {
 		return nil, err

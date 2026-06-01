@@ -265,6 +265,15 @@ type Feishu struct {
 	// consistency: at worst we accept a few extra entries between the
 	// check and increment, which is bounded and harmless.
 	seenNoncesCount atomic.Int64
+	// nonceEvictMu serializes evictOldestNonces so concurrent cap-hit
+	// goroutines cannot each run an independent Range+decrement pass. Without
+	// it, overlapping evictions split the seenNoncesCount adjustment across
+	// goroutines and the counter can transiently dip below the map's real size
+	// (or negative), letting a subsequent Add(1) read a value under the cap and
+	// bypass the eviction gate. Holding this mutex makes eviction-and-recount a
+	// single critical section that resets the counter to the map's actual size.
+	// R20260531070014-SEC-4 (#1534).
+	nonceEvictMu sync.Mutex
 
 	// reactionIDs caches (messageID + emoji_type) -> reactionCacheEntry returned
 	// by the create-reaction API, so RemoveReaction can later target the correct
@@ -460,6 +469,16 @@ func (f *Feishu) cleanupNoncesTick() {
 // Returns the number of entries actually removed so callers can decide
 // whether to log a warning and whether the cap-check should re-pass.
 func (f *Feishu) evictOldestNonces() int {
+	// R20260531070014-SEC-4 (#1534): serialize eviction so concurrent cap-hit
+	// goroutines cannot each gather an overlapping Range snapshot and split the
+	// seenNoncesCount decrement, which previously let the counter dip below the
+	// map's true size (or negative) and lapse the cap guard. Inside the lock we
+	// evict, then resync seenNoncesCount to the map's actual live size so the
+	// counter is exact on exit regardless of how many keys other (now-blocked)
+	// callers had reserved.
+	f.nonceEvictMu.Lock()
+	defer f.nonceEvictMu.Unlock()
+
 	type nonceEntry struct {
 		key    any
 		expiry int64
@@ -499,9 +518,21 @@ func (f *Feishu) evictOldestNonces() int {
 		}
 	}
 	if deleted > 0 {
-		if n := f.seenNoncesCount.Add(int64(-deleted)); n < 0 {
-			f.seenNoncesCount.Store(0)
-		}
+		// Resync the counter to the map's actual live size rather than doing a
+		// relative Add(-deleted). Under the nonceEvictMu lock this is the only
+		// goroutine mutating via eviction, but inserts/replay-undo (Add ±1) and
+		// the cleanup ticker (Add(-deleted)) still run concurrently, so a
+		// relative decrement here could compound with those into a count that
+		// drifts below the real map size. Counting live entries makes the
+		// counter exact at exit and keeps the cap guard honest. The extra Range
+		// is bounded (only on cap-hit, batched ≥nonceEvictionBatch apart) so the
+		// O(n) cost is amortized. R20260531070014-SEC-4 (#1534).
+		live := int64(0)
+		f.seenNonces.Range(func(_, _ any) bool {
+			live++
+			return true
+		})
+		f.seenNoncesCount.Store(live)
 	}
 	return deleted
 }

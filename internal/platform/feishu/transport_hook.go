@@ -198,8 +198,18 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 					// or a sync.Map quirk under contention), fall back to the
 					// 429 surface so memory stays bounded.
 					if n := f.seenNoncesCount.Add(1); n > maxSeenNonces {
+						// R20260531070014-SEC-4 (#1534): evictOldestNonces resyncs
+						// seenNoncesCount to the map's actual live size under a
+						// mutex, which discards this goroutine's speculative +1
+						// reservation. Re-apply the +1 AFTER eviction returns so the
+						// counter still reserves a slot for the LoadOrStore below
+						// and the post-evict cap re-check sees this in-flight insert.
+						// Doing the recount inside evict (rather than a racy relative
+						// Add) is what keeps the counter from dipping below the real
+						// map size under concurrent cap-hit goroutines.
 						evicted := f.evictOldestNonces()
-						if evicted == 0 || f.seenNoncesCount.Load() >= maxSeenNonces {
+						postEvict := f.seenNoncesCount.Add(1)
+						if evicted == 0 || postEvict > maxSeenNonces {
 							f.seenNoncesCount.Add(-1)
 							slog.Warn("feishu webhook nonce map at cap, dropping request",
 								"cap", maxSeenNonces, "evicted", evicted)

@@ -18,6 +18,7 @@ import (
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/discovery"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/agentevents"
+	extccassets "github.com/naozhi/naozhi/internal/dashboard/ext/ccassets"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/cli"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/memory"
 	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
@@ -110,6 +111,7 @@ type Server struct {
 	cliH         *cli.Handler          // 读写: server.go, dashboard.go
 	scratchH     *scratch.Handler      // 读写: dashboard.go (ctor only in server.go)
 	memoryH      *memory.Handler       // 读写: dashboard.go (ctor only in server.go)
+	ccAssetsH    *extccassets.Handler  // 读写: dashboard.go (ctor only in server.go)
 	agentEventsH *agentevents.Handler  // 读写: server.go, dashboard.go
 
 	// ── send / dispatch wiring ─────────────────────────

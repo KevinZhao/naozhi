@@ -271,6 +271,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/asset_browser.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/dashboard.js",
     "handler_type": "http.HandlerFunc"
   },

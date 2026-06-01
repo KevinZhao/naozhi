@@ -215,6 +215,13 @@ func (r *wsRelay) ensureConnected() error {
 }
 
 func (r *wsRelay) connect() error {
+	// R20260601-SEC-2 (#1548): the relay dials n.URL as ws://wss:// and writes
+	// the dashboard token over it — the same SSRF surface doRequest guards. If
+	// the peer URL failed validation at construction, refuse to dial so the
+	// token never goes to an unvalidated/link-local target.
+	if r.node.urlErr != nil {
+		return fmt.Errorf("relay %s: refusing to dial unvalidated peer URL: %w", r.node.ID, r.node.urlErr)
+	}
 	// Use CutPrefix to avoid mid-URL mismatches: a host like
 	// "example.com/path-with-http://" would otherwise be mangled. Order
 	// matters — CutPrefix("https://") must come first since "http://" is

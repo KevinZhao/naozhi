@@ -12,6 +12,7 @@
 package server
 
 import (
+	"context"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -20,6 +21,36 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
+
+// initialHistoryDiskTimeout bounds the disk-tier walk EventLastNVisibleCtx may
+// perform during a subscribe handshake. The visible-aware reader falls back to
+// reverse-scanning JSONL when the in-memory ring is entirely internal events
+// (a parallel agent team flooded the tail); a slow filesystem must not stall
+// the WS first frame, so the disk fallback is capped at this deadline. On
+// timeout the reader returns whatever it gathered so far (memory tier at
+// minimum) and the dashboard's auto-page-back safety net covers the rest.
+const initialHistoryDiskTimeout = 2 * time.Second
+
+// initialVisibleHistory reads the visible-aware initial history slice for a
+// subscribe handshake, bounding the disk-tier fallback with a deadline derived
+// from the Hub context so shutdown still cancels it promptly.
+func (h *Hub) initialVisibleHistory(sess *session.ManagedSession, limit int) []cli.EventEntry {
+	target := limit
+	if target <= 0 || target > session.DefaultVisibleTarget {
+		// The client's INITIAL_HISTORY_LIMIT (100) is a page-size hint, not a
+		// visible-bubble target; clamp the visible goal to DefaultVisibleTarget
+		// so we don't over-walk disk chasing 100 visible bubbles.
+		target = session.DefaultVisibleTarget
+	}
+	// maxTotal=0 → the reader uses its own ceiling (maxVisibleTotal == ring
+	// size). Passing `limit` here would cap the walk at the client's page-size
+	// hint and strand the visible bubbles that sit beyond it under an internal
+	// flood — exactly the bug. The payload can grow to the ring/page ceiling,
+	// which is the pre-existing maxEventsPageLimit bound anyway.
+	ctx, cancel := context.WithTimeout(h.ctx, initialHistoryDiskTimeout)
+	defer cancel()
+	return sess.EventLastNVisibleCtx(ctx, target, 0)
+}
 
 // File: wshub_subscribe.go
 //
@@ -184,7 +215,10 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		case msg.After > 0:
 			entries = sess.EventEntriesSince(msg.After)
 		case msg.Limit > 0:
-			entries = sess.EventLastN(msg.Limit)
+			// Visible-aware initial page: a suspended session whose persisted
+			// tail is all internal events (parallel agent team) would otherwise
+			// hand the dashboard a page that renders to the blank placeholder.
+			entries = h.initialVisibleHistory(sess, msg.Limit)
 		default:
 			entries = sess.EventLastN(0)
 		}
@@ -256,7 +290,14 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		// Initial subscribe asks for the last `limit` events only — this is
 		// the dashboard pagination fast path. Clients walk further back via
 		// HTTP /api/sessions/events?before=.. rather than resubscribing.
-		entries = sess.EventLastN(msg.Limit)
+		//
+		// Visible-aware: when a parallel agent team has filled the trailing
+		// `limit` events with internal tool_use / task_progress entries, a
+		// plain EventLastN(limit) returns a page that the dashboard filters
+		// down to nothing and renders as the blank "该会话最近仅有 agent
+		// 活动" placeholder. EventLastNVisibleCtx keeps walking (ring, then
+		// disk) until the page carries real chat bubbles.
+		entries = h.initialVisibleHistory(sess, msg.Limit)
 	default:
 		// Legacy path: send everything the log remembers. Kept so older
 		// clients (and the node-to-node relay) still see full history.
