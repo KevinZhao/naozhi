@@ -52,6 +52,24 @@ func readCappedFile(path string, label string) ([]byte, error) {
 	return data, nil
 }
 
+// preserveCorruptFile renames a file that failed to JSON-parse to a
+// timestamped ".corrupt.<ts>" sibling so the next atomic save does not
+// silently overwrite it, keeping the bad bytes available for forensic
+// analysis. parseErr is the original unmarshal error (logged for context).
+// Used by every loader in this package — sessions.json, known IDs, and
+// workspace overrides — so a partial-write / disk-corruption event leaves a
+// consistent, recoverable breadcrumb across all three sidecar stores (#673).
+func preserveCorruptFile(path, label string, parseErr error) {
+	corruptPath := path + ".corrupt." + time.Now().Format("20060102-150405")
+	if renameErr := os.Rename(path, corruptPath); renameErr != nil {
+		slog.Warn("parse "+label+" failed; could not rename corrupt file",
+			"err", parseErr, "rename_err", renameErr, "path", path)
+		return
+	}
+	slog.Warn("parse "+label+" failed; corrupt file preserved",
+		"err", parseErr, "corrupt_path", corruptPath)
+}
+
 type storeEntry struct {
 	Key            string   `json:"key"`
 	SessionID      string   `json:"session_id"`
@@ -417,16 +435,7 @@ func loadStore(path string) map[string]*storeEntry {
 
 	var entries []storeEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
-		// Preserve the corrupt file for forensic analysis so the next save
-		// does not silently overwrite it.
-		corruptPath := path + ".corrupt." + time.Now().Format("20060102-150405")
-		if renameErr := os.Rename(path, corruptPath); renameErr != nil {
-			slog.Warn("parse session store failed; could not rename corrupt file",
-				"err", err, "rename_err", renameErr, "path", path)
-		} else {
-			slog.Warn("parse session store failed; corrupt file preserved",
-				"err", err, "corrupt_path", corruptPath)
-		}
+		preserveCorruptFile(path, "session store", err)
 		return nil
 	}
 
@@ -465,7 +474,8 @@ func loadKnownIDs(storePath string) map[string]bool {
 	}
 	var ids []string
 	if err := json.Unmarshal(data, &ids); err != nil {
-		slog.Warn("parse known session IDs failed", "err", err)
+		// #673: preserve the corrupt file (see loadStore / loadWorkspaceOverrides).
+		preserveCorruptFile(path, "known session IDs", err)
 		return nil
 	}
 	m := make(map[string]bool, len(ids))
@@ -532,7 +542,11 @@ func loadWorkspaceOverrides(storePath string) map[string]string {
 	}
 	var m map[string]string
 	if err := json.Unmarshal(data, &m); err != nil {
-		slog.Warn("parse workspace overrides failed", "err", err)
+		// #673: preserve the corrupt file rather than silently discarding it.
+		// The next saveWorkspaceOverrides would otherwise overwrite the bad
+		// bytes, hiding a partial-write / corruption event an operator needs
+		// to investigate — and matching the sessions.json loader's behaviour.
+		preserveCorruptFile(path, "workspace overrides", err)
 		return nil
 	}
 	if len(m) > 0 {
