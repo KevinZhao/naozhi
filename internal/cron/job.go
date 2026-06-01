@@ -299,6 +299,47 @@ func generateRunID() (string, error) { return generateHexID() }
 // generateID 返回 cron Job.ID（16-char hex）。
 func generateID() (string, error) { return generateHexID() }
 
+// IsValidID reports whether s is a valid cron / cron-run identifier:
+// a non-empty lowercase hex string of at most 64 bytes. Currently job
+// and run IDs are generated as 16 hex chars; the 64-byte upper bound
+// is held in reserve for a future schema bump.
+//
+// Accepts (returns true):
+//   - "0123456789abcdef"               — canonical 16-char job/run ID
+//   - "abc123"                         — short lowercase hex
+//   - strings.Repeat("a", 64)          — at the 64-byte boundary
+//
+// Rejects (returns false):
+//   - ""                               — empty
+//   - "ABC123"                         — uppercase hex (lowercase only)
+//   - "abc-123" / "abc.tmp" / "abc~"   — non-hex chars (rejects temp
+//     files, backups, .DS_Store, etc. that may appear in runs/<jobID>/)
+//   - "../etc/passwd"                  — path traversal characters
+//   - strings.Repeat("a", 65)          — exceeds the 64-byte ceiling
+//
+// 在 store 入口（parse / list / append / detail handler）做边界校验，
+// 防止 runs/<jobID>/ 下意外文件名（temp file、备份）污染 List 输出，
+// 也允许 HTTP 层在请求入口直接拒绝非法 ID 而不必下沉到磁盘 IO。
+// R221-FIX-P1-2 + R234-CR-10（godoc 改写为输入形态描述，不再引用
+// 私有的 generateRunID / generateID）+ R249-CR-23（补 Accepts/Rejects
+// 示例，明确大写 hex 一律拒绝）。
+//
+// R249-ARCH-26 (#990): co-located with generateID / generateRunID here in
+// job.go (the ID-spec home) rather than runstore.go — store / parse / HTTP
+// callers all consume it, so its home is the ID schema, not the run store.
+func IsValidID(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 // MaxCronTitleLen 是 Job.Title 的字符上限（UTF-8 rune 计）。256 覆盖绝大多数
 // 人类可读名称，且与 dashboard 的 escAttr 线长相容。导出以便 server 包
 // 在 handler 层复用同一上限，避免两处数字不同步漂移。
@@ -430,6 +471,11 @@ func schedulePeriod(schedule string, now time.Time) time.Duration {
 // 窗口乘 3 是为了应对 DST / 月份 / 闰年这类非等间隔形态（每月 29 日
 // 在 2 月可能 "跳 31 天"），给足裕量。每次 Next 是 O(1)，循环最多跑
 // 3-5 次，开销可忽略。无法解析的 schedule 返回零值 time。
+//
+// R249-CR-10 (#954): 这是包内 unexported 的字符串入口帮助函数，唯一调用者是
+// missed_test.go——生产路径全部走 previousTickBeforeFromSched（HasMissedSchedule
+// 已 Parse 一次后复用 sched，避免重复正则）。保留它是为了让测试能用字符串
+// schedule 直测回推逻辑，并非有跨包消费者（unexported 不可能被其他包用）。
 func previousTickBefore(schedule string, now time.Time) time.Time {
 	// R246-PERF-4: previously this called schedulePeriod(schedule, now)
 	// which re-Parses the same expression we already parsed above.
@@ -449,8 +495,12 @@ func previousTickBefore(schedule string, now time.Time) time.Time {
 }
 
 // schedulePeriodFromSched 同 schedulePeriod，但接受已解析的 robfigcron.Schedule，
-// 避免在 HasMissedSchedule 路径上重复 Parse。schedulePeriod 是公开签名（其他包
-// 测试有用），保留不动。R238-PERF-2。
+// 避免在 HasMissedSchedule 路径上重复 Parse。R238-PERF-2。
+//
+// R250-CR-6 (#1139): schedulePeriod 是包内 unexported 帮助函数（不是“公开
+// 签名”——没有跨包消费者）。当前唯一生产调用点是 applyJitter（scheduler_run.go
+// 的 entryID==0 fallback 路径），加上包内 jitter_test.go。保留它是因为字符串
+// 入口仍被 fallback 路径使用，并非“其他包测试有用”——旧注释的措辞已纠正。
 func schedulePeriodFromSched(sched robfigcron.Schedule, now time.Time) time.Duration {
 	first := sched.Next(now)
 	second := sched.Next(first)

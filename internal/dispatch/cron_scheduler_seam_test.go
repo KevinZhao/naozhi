@@ -2,6 +2,9 @@ package dispatch
 
 import (
 	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -136,5 +139,57 @@ func TestFakeCronScheduler_RecordsCalls(t *testing.T) {
 	}
 	if j, err := fake.ResumeJob("xyz", "feishu", "chatX"); err != nil || j.ID != "xyz" {
 		t.Errorf("ResumeJob happy-path: got (%v, %v), want (&{ID:xyz}, nil)", j, err)
+	}
+}
+
+// TestHandleCronAdd_PromptVsScheduleErrorReply pins the #631-adjacent /
+// R20260531-ARCH-2 fix on the create path: handleCronAdd must not collapse a
+// prompt-policy rejection into the "请检查定时表达式格式" schedule message.
+// A user whose schedule parsed fine but whose prompt was rejected
+// (ValidatePromptStrict → ErrInvalidPrompt) gets a prompt-specific hint;
+// every other AddJob failure keeps the generic schedule message. Raw
+// err.Error() must never appear in the reply.
+func TestHandleCronAdd_PromptVsScheduleErrorReply(t *testing.T) {
+	cases := []struct {
+		name       string
+		addJobErr  error
+		wantSubstr string
+		notSubstr  string
+	}{
+		{
+			name:       "invalid_prompt",
+			addJobErr:  fmt.Errorf("wrapped: %w", cron.ErrInvalidPrompt),
+			wantSubstr: "任务内容不合法",
+			notSubstr:  "定时表达式",
+		},
+		{
+			name:       "capacity_or_schedule_falls_back",
+			addJobErr:  errors.New("per-chat cron limit reached (10)"),
+			wantSubstr: "请检查定时表达式格式",
+			notSubstr:  "per-chat", // raw err.Error() must not leak
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			fp := &fakePlatform{}
+			d := newTestDispatcher(fp, nil)
+			d.scheduler = &fakeCronScheduler{addJobErr: c.addJobErr}
+
+			var got string
+			reply := func(s string) { got = s }
+			d.handleCronAdd(
+				incomingMsg(`/cron add "@every 30m" do something`),
+				[]string{"/cron", "add", `"@every 30m" do something`},
+				reply,
+				slog.Default(),
+			)
+			if !strings.Contains(got, c.wantSubstr) {
+				t.Errorf("reply = %q, want substring %q", got, c.wantSubstr)
+			}
+			if c.notSubstr != "" && strings.Contains(got, c.notSubstr) {
+				t.Errorf("reply = %q must NOT contain %q", got, c.notSubstr)
+			}
+		})
 	}
 }

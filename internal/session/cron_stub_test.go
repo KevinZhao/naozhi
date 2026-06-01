@@ -2,6 +2,7 @@ package session
 
 import (
 	"slices"
+	"strconv"
 	"testing"
 )
 
@@ -248,5 +249,37 @@ func TestRegisterCronStubWithChain_NilChainLeavesExistingChain(t *testing.T) {
 	r.mu.RUnlock()
 	if !slices.Equal(s.prevSessionIDs, []string{"sess-keep"}) {
 		t.Errorf("nil chain wiped existing prevSessionIDs: got %v", s.prevSessionIDs)
+	}
+}
+
+// TestRegisterCronStub_OverSubQuotaStillRegisters pins the R242-ARCH-2
+// (#720) stub-path behaviour: the per-namespace exempt sub-quota gate
+// lives in spawnSession, but stub registration never spawns a process, so
+// it must NOT hard-reject when the cron bucket is already at its cap.
+// Dropping an over-quota cron stub would lose its history chain and break
+// the dashboard event panel; the fix only logs the over-quota condition.
+// This test guards that every stub past the cap still installs.
+func TestRegisterCronStub_OverSubQuotaStillRegisters(t *testing.T) {
+	t.Parallel()
+	r := newTestRouter(3)
+
+	// Register one more stub than the cron sub-quota allows. Each stub is
+	// alive (exempt, no process) so countExemptByKind counts it.
+	total := maxCronExempt + 3
+	for i := 0; i < total; i++ {
+		key := "cron:job-over-" + strconv.Itoa(i)
+		r.RegisterCronStub(key, "/w", "p")
+	}
+
+	r.mu.RLock()
+	got := 0
+	for k := range r.sessions {
+		if exemptKind(k) == "cron" {
+			got++
+		}
+	}
+	r.mu.RUnlock()
+	if got != total {
+		t.Fatalf("over-quota cron stubs were dropped: registered %d, want %d", got, total)
 	}
 }

@@ -77,10 +77,13 @@ func TestLocalizeAPIError(t *testing.T) {
 			wantPrefix: "",
 		},
 		{
-			name:        "error colon prefix with rate_limit",
-			input:       "Error: rate_limit_exceeded",
-			wantPrefix:  "⏱️ Claude API 调用过于频繁",
-			shouldMatch: true,
+			// GO-1: a bare "Error:" prefix is no longer treated as an API
+			// envelope (tool stderr like "Error: ssh: ... Connection timed
+			// out" must pass through). Anthropic rate-limit envelopes carry
+			// the canonical "API Error" prefix, exercised above.
+			name:       "error colon prefix with rate_limit passes through",
+			input:      "Error: rate_limit_exceeded",
+			wantPrefix: "",
 		},
 		{
 			name:       "long non-envelope reply passes through (prefix heuristic)",

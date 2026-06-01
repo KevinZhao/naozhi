@@ -375,6 +375,8 @@
 - [R20260601-CR-3] meta_grace 未经 YAML 暴露，operator 无法调 — internal/config/config.go:331
 - [R20260601-SEC-2] apierr.Localize default 分支转发原始信封(已 narrow case，cron 路径已脱敏) — internal/apierr/apierr.go:82
 - [R20260601-GO-COSM] attachment-gc Configure error 字符串混中文，惯用 Go error 应英文 — internal/sysession/attachment_gc.go:106
+- [R20260601-PERF-13] redactPathsInCronError 三次独立 strings.IndexByte 扫描,可合并单次 — internal/cron/scheduler_finish.go:641
+- [R20260601-PERF-15] ringSeed 手动循环清零尾部 ring 槽,可用 clear() 内建(memclr,GC-aware) — internal/cron/runstore.go:320
 - [R20260601-SEC-12] cron notice 未转义 <> 角括号(假设 Feishu markdown 渲染 HTML 标签) — internal/cron/scheduler_run.go:302
 - [R20260601-SEC-9] feishu accessToken 明文驻留内存(Go string 固有限制,无法安全清零) — internal/platform/feishu/feishu.go:223
 - [R20260601-SEC-11] reverseserver msg.NodeID 未在构造期校验字符集(防御性) — internal/node/reverseserver.go:396
