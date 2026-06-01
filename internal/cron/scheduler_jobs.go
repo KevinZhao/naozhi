@@ -1263,76 +1263,93 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 		return fmt.Errorf("prompt too large: %d bytes (cap %d)", len(prompt), MaxPromptBytes)
 	}
 
-	s.mu.Lock()
-
-	j, ok := s.jobs[id]
-	if !ok {
-		s.mu.Unlock()
-		return fmt.Errorf("%w: id %q", ErrJobNotFound, id)
+	// R112714-LOGIC-2: the previous code used s.mu.Lock() without defer,
+	// relying on 5 explicit Unlock() calls across all return paths. A panic
+	// inside resumeJobLocked (→ registerJob → AddFunc) would skip every
+	// explicit Unlock, permanently locking the mutex. Wrap the critical
+	// section in an IIFE with defer s.mu.Unlock() so the lock is always
+	// released regardless of panics. The IIFE returns (save, pauseCleanup,
+	// stubFields, err); save() and pauseCleanup() run post-unlock so the
+	// cron.Remove channel send (pauseCleanup) stays outside s.mu.
+	// All early-return semantics are preserved via the IIFE's return values.
+	type stubFields struct {
+		workDir     string
+		lastSession string
 	}
-	if j.Prompt != "" {
-		s.mu.Unlock()
-		// R250531-CR-8 (#1503): the prompt is already set. SetJobPrompt only
-		// auto-fills the first prompt; it never overwrites. Previously this
-		// silently returned nil (200 OK, no change), which misled any caller
-		// trying to edit an existing prompt. Return a sentinel so the no-op is
-		// observable — IM auto-save callers treat it as benign, dashboard /
-		// API callers can map it to 409 and route real edits through UpdateJob.
-		return ErrPromptAlreadySet
-	}
+	save, pauseRollbackCleanup, stub, err := func() (func(), func(), stubFields, error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	j.Prompt = prompt
-	// R246-CR-247: capture identity fields under lock so the stub refresh
-	// below reads stable values even if a concurrent UpdateJob mutates *Job
-	// after the IIFE's deferred Unlock fires. Mirrors AddJob / UpdateJob.
-	stubWorkDir := j.WorkDir
-	stubLastSession := j.LastSessionID
-	waspaused := j.Paused
-	if j.Paused {
-		// Delegate unpause to the shared helper so the registerJob + Paused
-		// flag transition stays consistent with PauseJob/ResumeJob/UpdateJob
-		// paths. R226-CR-16.
-		if err := s.resumeJobLocked(j); err != nil {
-			j.Prompt = "" // rollback: Prompt was empty before this call
-			s.mu.Unlock()
-			return err
+		j, ok := s.jobs[id]
+		if !ok {
+			return nil, nil, stubFields{}, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 		}
-	}
-	save, perr := s.persistJobsLocked()
-	if perr != nil {
-		// Rollback in-memory state before releasing the lock so the
-		// live view never reflects an un-persisted mutation.
-		// pauseJobLocked failure here is best-effort: only logged, never
-		// suppresses the original perr returned to the caller. R243-GO-5.
-		// R236-QA-03 (#537): pauseJobLocked now returns a cron.Remove
-		// closure to be invoked AFTER s.mu is released. We discard
-		// pauseRollbackCleanup if the caller was already in a "no entry"
-		// state (e.g. paused with entryID==0), but always invoke it
-		// post-Unlock so the unbuffered c.remove channel send doesn't
-		// happen while we still hold the scheduler mutex.
-		j.Prompt = ""
-		var pauseRollbackCleanup func()
-		if waspaused && !j.Paused {
-			c, rbErr := s.pauseJobLocked(j)
-			if rbErr != nil && !errors.Is(rbErr, ErrJobAlreadyPaused) {
-				slog.Warn("cron rollback after persist failure also failed",
-					"job_id", j.ID, "rollback_err", rbErr, "orig_err", perr)
+		if j.Prompt != "" {
+			// R250531-CR-8 (#1503): the prompt is already set. SetJobPrompt only
+			// auto-fills the first prompt; it never overwrites. Previously this
+			// silently returned nil (200 OK, no change), which misled any caller
+			// trying to edit an existing prompt. Return a sentinel so the no-op is
+			// observable — IM auto-save callers treat it as benign, dashboard /
+			// API callers can map it to 409 and route real edits through UpdateJob.
+			return nil, nil, stubFields{}, ErrPromptAlreadySet
+		}
+
+		j.Prompt = prompt
+		// R246-CR-247: capture identity fields under lock so the stub refresh
+		// below reads stable values even if a concurrent UpdateJob mutates *Job
+		// after the IIFE's deferred Unlock fires. Mirrors AddJob / UpdateJob.
+		sf := stubFields{workDir: j.WorkDir, lastSession: j.LastSessionID}
+		waspaused := j.Paused
+		if j.Paused {
+			// Delegate unpause to the shared helper so the registerJob + Paused
+			// flag transition stays consistent with PauseJob/ResumeJob/UpdateJob
+			// paths. R226-CR-16.
+			if err := s.resumeJobLocked(j); err != nil {
+				j.Prompt = "" // rollback: Prompt was empty before this call
+				return nil, nil, stubFields{}, err
 			}
-			pauseRollbackCleanup = c
 		}
-		s.mu.Unlock()
-		if pauseRollbackCleanup != nil {
-			pauseRollbackCleanup()
+		saveFn, perr := s.persistJobsLocked()
+		if perr != nil {
+			// Rollback in-memory state before releasing the lock so the
+			// live view never reflects an un-persisted mutation.
+			// pauseJobLocked failure here is best-effort: only logged, never
+			// suppresses the original perr returned to the caller. R243-GO-5.
+			// R236-QA-03 (#537): pauseJobLocked now returns a cron.Remove
+			// closure to be invoked AFTER s.mu is released. We discard
+			// pauseRollbackCleanup if the caller was already in a "no entry"
+			// state (e.g. paused with entryID==0), but always invoke it
+			// post-Unlock so the unbuffered c.remove channel send doesn't
+			// happen while we still hold the scheduler mutex.
+			j.Prompt = ""
+			var cleanupFn func()
+			if waspaused && !j.Paused {
+				c, rbErr := s.pauseJobLocked(j)
+				if rbErr != nil && !errors.Is(rbErr, ErrJobAlreadyPaused) {
+					slog.Warn("cron rollback after persist failure also failed",
+						"job_id", j.ID, "rollback_err", rbErr, "orig_err", perr)
+				}
+				cleanupFn = c
+			}
+			return nil, cleanupFn, stubFields{}, perr
 		}
-		return perr
+		return saveFn, nil, sf, nil
+	}()
+
+	// Run cron.Remove cleanup outside s.mu — pauseRollbackCleanup sends on
+	// the unbuffered c.remove channel (R236-QA-03 / #537).
+	if pauseRollbackCleanup != nil {
+		pauseRollbackCleanup()
 	}
-	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
 	save()
 	// R246-CR-247: refresh the router stub so the dashboard sidebar
 	// immediately reflects the new prompt. Without this, the stub keeps the
 	// empty-prompt state from the initial AddJob until the next executeJob
 	// tick rebuilds it.
-	s.registerStubByValue(id, stubWorkDir, prompt, stubLastSession)
+	s.registerStubByValue(id, stub.workDir, prompt, stub.lastSession)
 	slog.Info("cron job prompt set", "job_id", id, "prompt_len", len(prompt))
 	return nil
 }
