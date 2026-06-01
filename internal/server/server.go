@@ -197,6 +197,20 @@ func replyTagForBackend(id string) string {
 
 var replyTagForBackendOnce sync.Once
 
+// log returns the Server's component logger. When no logger was injected via
+// ServerOptions.Logger it falls back to slog.Default(), so call sites can move
+// off the bare slog.* package functions onto an injectable seam (R247-ARCH-4 /
+// #620) without forcing every caller — or test — to supply one. This is the
+// first concrete migration step: new structured logging in the server package
+// should go through s.log() so a future change can inject a component-scoped
+// (and test-swappable) logger instead of reading the process global.
+func (s *Server) log() *slog.Logger {
+	if s.logger != nil {
+		return s.logger
+	}
+	return slog.Default()
+}
+
 // New creates a new Server.
 // ServerOptions lives in server_options.go (Phase 5-prep, 2026-05-28).
 
@@ -971,7 +985,7 @@ func (s *Server) startProjectScanLoop(ctx context.Context) {
 			case <-ticker.C:
 				oldNames := s.projectMgr.ProjectNames()
 				if err := s.projectMgr.Scan(); err != nil {
-					slog.Warn("project rescan", "err", err)
+					s.log().Warn("project rescan", "err", err)
 					continue
 				}
 				newNames := s.projectMgr.ProjectNames()
@@ -983,12 +997,12 @@ func (s *Server) startProjectScanLoop(ctx context.Context) {
 						changed = true
 						plannerKey := project.PlannerKeyFor(name)
 						if s.router.Remove(plannerKey) {
-							slog.Info("removed orphaned planner", "project", name)
+							s.log().Info("removed orphaned planner", "project", name)
 						}
 					}
 				}
 				if changed {
-					slog.Info("project list changed", "count", len(newNames))
+					s.log().Info("project list changed", "count", len(newNames))
 					if s.hub != nil {
 						s.hub.BroadcastSessionsUpdate()
 					}

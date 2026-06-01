@@ -7,6 +7,7 @@ package server
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cron"
@@ -150,4 +151,15 @@ type ServerOptions struct {
 	// the user's "recent sessions" list. Empty disables the filter
 	// (matches the behaviour when sysession is disabled). R245-ARCH.
 	SysWorkDir string
+
+	// Logger is the component logger the Server derives all of its
+	// structured logging from. When nil the Server falls back to
+	// slog.Default() so existing callers (and the slog.SetDefault contract
+	// in cmd/naozhi/main.go) keep working unchanged. Injecting a logger
+	// here is the first concrete step of R247-ARCH-4 (#620): packages take
+	// a *slog.Logger in their constructor and derive a component-scoped
+	// child via slog.With("component", ...) instead of reading the process
+	// global directly, which is what blocks t.Parallel across tests that
+	// swap the default. SetDefault stays in main only for legacy callers.
+	Logger *slog.Logger
 }
