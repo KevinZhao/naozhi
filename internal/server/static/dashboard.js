@@ -6426,6 +6426,18 @@ function buildHomeHealthLines(stats) {
   let line1 = '运行 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total;
   if (stats.uptime) line1 += ' · 运行 ' + stats.uptime;
   lines.push({ text: line1, kind: 'info' });
+  // claude 子进程容量 (R110-P1 #445 "claude 子进程数"): max_procs ships in the
+  // /api/sessions stats static block already, so surface live-vs-capacity
+  // without the deferred /api/stats backend scan. Only when max_procs > 0
+  // (a 0/missing cap means "uncapped" — no ratio to show). Warn when the
+  // pool is saturated so operators notice spawn back-pressure.
+  const maxProcs = typeof stats.max_procs === 'number' ? stats.max_procs : 0;
+  if (maxProcs > 0) {
+    lines.push({
+      text: 'claude 子进程 ' + running + '/' + maxProcs,
+      kind: running >= maxProcs ? 'warn' : 'info',
+    });
+  }
   // Line 2: CLI identity. Helpful when operators have multiple naozhi
   // deployments on different CLI versions.
   if (stats.cli_name) {
