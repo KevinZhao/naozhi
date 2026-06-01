@@ -30,11 +30,22 @@ type JobIMContext struct {
 	CreatedBy string
 }
 
-// NewJob constructs a Job ready to hand to Scheduler.AddJob from the
-// (schedule, prompt) pair plus the IM-channel context that originated it.
-// Centralising this constructor prevents cross-package callers (dispatch,
-// dashboard, IM command handlers) from spelling out the cron.Job{} struct
-// literal — a Job field rename today breaks every literal call site.
+// NewJob constructs an IM-originated Job ready to hand to Scheduler.AddJob
+// from the (schedule, prompt) pair plus the IM-channel context that
+// originated it. It populates ONLY the six fields an IM `/cron` command can
+// supply (Schedule/Prompt + Platform/ChatID/ChatType/CreatedBy); every other
+// Job field stays zero-valued.
+//
+// R250-CR-9 (#1142): this is NOT a single-source-of-construction
+// choke point for the whole Job struct. The dashboard handleCreate path sets
+// Title / WorkDir / Backend / Notify* / FreshContext / Paused — fields NewJob
+// does not accept — so it legitimately builds a cron.Job literal directly.
+// The earlier godoc overclaimed that NewJob "prevents every literal call
+// site"; in practice only the IM-command surface flows through here. Keep
+// the constructor focused on the IM field subset rather than growing a
+// god-constructor that re-lists the full 14-field schema; a Job field rename
+// still requires touching the dashboard literal, which is the intended
+// boundary (dashboard owns its own field-set validation).
 //
 // CreatedAt is intentionally NOT stamped here: AddJob is the choke point
 // that owns Job persistence and needs a single coherent timestamp source.
