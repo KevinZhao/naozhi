@@ -35,6 +35,7 @@ package cronview
 // cron→server interface tightening RFC because it breaks every test mock and
 // the *cron.Scheduler concrete signature; the bool-only contract is already
 // behaviourally correct. R242-ARCH-28 (#772).
+//
 // KnownSessionIDs returns a READ-ONLY set of cron-spawned Claude session
 // IDs; consumers must not mutate or persist it (R20260601-PERF-1 / #1544).
 type CronView interface {
