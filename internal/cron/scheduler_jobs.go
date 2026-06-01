@@ -629,16 +629,38 @@ func (s *Scheduler) resumeJobLocked(j *Job) error {
 //     persistJobsLocked fails. When non-nil and persist fails, this
 //     restores *j BEFORE the snapshot copy and skips postCleanup so the
 //     caller observes "no change applied".
+//
+// R249-ARCH-20 (#985): op and the two side-effect hooks share the bare
+// `func(*Job)` / `func(*Job) error` shape, so a reviewer eyeballing a call
+// site had nothing but argument position to tell an in-lock mutation apart
+// from an out-of-lock cleanup. Naming them (lockedJobOp returns an error and
+// runs UNDER s.mu; jobSideEffect returns nothing and runs lock-free) makes the
+// two roles self-documenting and lets the compiler flag a swapped op-vs-cleanup
+// argument (an error-returning closure can no longer be passed where a
+// jobSideEffect is expected, and vice versa). Behaviour is unchanged — Go
+// closures still satisfy these named types by assignability at every call
+// site, so no call-site edits were needed.
+type (
+	// lockedJobOp is the in-lock mutation withJobByID(Opt) / withJobByPrefix
+	// run while holding s.mu. It MUST be all-or-nothing: on a non-nil error
+	// return it must leave *j unmutated (see the op contract godoc above).
+	lockedJobOp func(j *Job) error
+	// jobSideEffect is an out-of-lock hook (postCleanup / rollbackOnPersistErr).
+	// It runs after s.mu is released (postCleanup) or as the in-lock undo of a
+	// failed persist (rollbackOnPersistErr), and returns nothing.
+	jobSideEffect func(j *Job)
+)
+
 type withJobByIDOpts struct {
-	op                   func(j *Job) error
-	postCleanup          func(j *Job)
-	rollbackOnPersistErr func(j *Job)
+	op                   lockedJobOp
+	postCleanup          jobSideEffect
+	rollbackOnPersistErr jobSideEffect
 }
 
 func (s *Scheduler) withJobByID(
 	id string,
-	op func(j *Job) error,
-	postCleanup func(j *Job),
+	op lockedJobOp,
+	postCleanup jobSideEffect,
 ) (*Job, error) {
 	return s.withJobByIDOpt(id, withJobByIDOpts{op: op, postCleanup: postCleanup})
 }
@@ -892,14 +914,23 @@ type JobUpdate struct {
 	// Notify sets Job.Notify when non-nil. nil leaves the field unchanged;
 	// pointer-to-true/false writes the explicit tri-state.
 	//
-	// R227-CONFIG-1: there's no API to reset Job.Notify back to legacy-default
-	// (nil) once a value has been set. Callers wanting that effect must
-	// either (a) toggle between true and false explicitly (the typical UX
-	// path), or (b) edit cron_jobs.json off-line and restart. Promoting
-	// JobUpdate.Notify to a tri-state-with-reset enum is a deferred design
-	// decision — the wire format would have to grow a fourth state ("clear")
-	// and several /api/cron consumers would need migration.
+	// R227-CONFIG-1 / R249-CR-15 (#958): use NotifyClear (below) to reset
+	// Job.Notify back to legacy-default (nil) once a value has been set.
+	// The clear is kept on a separate bool flag rather than overloading
+	// Notify with a fourth state so the wire format and existing
+	// /api/cron consumers stay source-compatible — a nil Notify still
+	// means "leave unchanged", a non-nil Notify still writes the explicit
+	// tri-state, and only the additive NotifyClear flag opts into the
+	// reset-to-nil behaviour.
 	Notify *bool
+	// NotifyClear, when set to a pointer-to-true, resets Job.Notify back to
+	// nil (legacy-default: inherit the scheduler-wide notify policy). nil or
+	// pointer-to-false is a no-op. Applied AFTER Notify so a caller that sets
+	// both gets the clear (defensive: the dashboard never sends both, but
+	// "clear wins" is the least-surprising precedence — an explicit reset
+	// request should not be silently overridden by a stale Notify value in
+	// the same patch). R249-CR-15 (#958).
+	NotifyClear *bool
 	// NotifyPlatform / NotifyChatID behave like Prompt / WorkDir: nil keeps
 	// the existing value, a pointer to "" clears it.
 	NotifyPlatform *string
@@ -952,6 +983,11 @@ func (upd JobUpdate) applyTo(j *Job) {
 	if upd.Notify != nil {
 		v := *upd.Notify
 		j.Notify = &v
+	}
+	// R249-CR-15 (#958): reset-to-nil opt-in. Applied after Notify so an
+	// explicit clear request wins if a caller (incorrectly) sends both.
+	if upd.NotifyClear != nil && *upd.NotifyClear {
+		j.Notify = nil
 	}
 	if upd.NotifyPlatform != nil {
 		j.NotifyPlatform = *upd.NotifyPlatform
@@ -1358,13 +1394,13 @@ func (s *Scheduler) Location() *time.Location {
 //     *j BEFORE the snapshot copy and skips postCleanup so the caller observes
 //     "no change applied". nil for callers (DeleteJob) that do not need it.
 type withJobByPrefixOpts struct {
-	rollbackOnPersistErr func(j *Job)
+	rollbackOnPersistErr jobSideEffect // R249-ARCH-20 (#985)
 }
 
 func (s *Scheduler) withJobByPrefix(
 	idPrefix, plat, chatID string,
-	op func(j *Job) error,
-	postCleanup func(j *Job),
+	op lockedJobOp,
+	postCleanup jobSideEffect,
 	opts withJobByPrefixOpts,
 ) (*Job, error) {
 	rollback := opts.rollbackOnPersistErr

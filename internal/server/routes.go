@@ -69,13 +69,19 @@ func (s *Server) registerDashboard() {
 		// invalidates WS upgrades on the next handshake instead of
 		// continuing to accept pre-rotation cookies until restart. The
 		// HTTP path already calls auth.CookieMAC() per request.
-		CookieMACFn:      s.auth.CookieMAC,
-		Guard:            s.sessionGuard,
-		Queue:            s.msgQueue,
-		Nodes:            s.nodes,
-		NodesMu:          &s.nodesMu,
-		ProjectMgr:       s.projectMgr,
-		Resolver:         s.resolver,
+		CookieMACFn: s.auth.CookieMAC,
+		Guard:       s.sessionGuard,
+		Queue:       s.msgQueue,
+		Nodes:       s.nodes,
+		NodesMu:     &s.nodesMu,
+		ProjectMgr:  s.projectMgr,
+		Resolver:    s.resolver,
+		// R176-ARCH-M3 (#431): Scheduler/ScratchPool wired at construction
+		// instead of via post-NewHub SetX setters. Both deps are built in
+		// Server.New (before registerDashboard), so passing them here removes
+		// the SetScheduler/SetScratchPool call-order-vs-Start race window.
+		Scheduler:        s.scheduler,
+		ScratchPool:      s.scratchPool,
 		AllowedRoot:      s.allowedRoot,
 		TrustedProxy:     s.auth.TrustedProxy,
 		WSAuthLimiter:    s.auth.LoginAllow,
@@ -90,7 +96,6 @@ func (s *Server) registerDashboard() {
 		// Start() is harmless — NewHub falls back to Background().
 		ParentCtx: s.appCtx,
 	})
-	s.hub.SetScheduler(s.scheduler)
 
 	// Route /api/sessions snapshot enrichment through the hub's tailer
 	// registry now that both exist. RFC v4 agent-team-ui §3.5.4.
@@ -139,10 +144,10 @@ func (s *Server) registerDashboard() {
 		trustedProxy:  s.auth.TrustedProxy,
 	}
 
-	// Scratch (ephemeral aside) API. Pool was constructed in New(); wire it
-	// through the hub (for sessionOptsFor lookup) and start the TTL sweeper.
+	// Scratch (ephemeral aside) API. Pool was constructed in New() and is now
+	// wired into the Hub via HubOptions.ScratchPool above (R176-ARCH-M3 #431);
+	// here we only start the TTL sweeper and mount the scratch handler.
 	if s.scratchPool != nil {
-		s.hub.SetScratchPool(s.scratchPool)
 		s.scratchPool.StartSweeper()
 		s.scratchH = scratch.New(scratch.Deps{
 			Broadcaster: s.hub,

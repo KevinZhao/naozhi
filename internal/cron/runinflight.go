@@ -125,10 +125,17 @@ func phaseFromString(s string) runPhase {
 	}
 }
 
-// runInflightView 既是 snapshot() 的返回值类型，也是 atomic.Pointer 内部
+// RunInflightView 既是 snapshot() 的返回值类型，也是 atomic.Pointer 内部
 // 的存储类型。两职合一保证写入快照与读取快照字节布局一致；snapshot
 // 直接解引用 Load 得到的指针返回。
-type runInflightView struct {
+//
+// R249-ARCH-16 (#982): the canonical type is now the EXPORTED RunInflightView
+// so the public Scheduler.CurrentRun method does not surface an unexported
+// return type (golint unexported-return). The lowercase runInflightView below
+// is a type alias kept so the dense internal call sites (atomic.Pointer,
+// snapshot, populate) read unchanged — alias resolution means both spell the
+// exact same type, so there is zero behaviour or layout change.
+type RunInflightView struct {
 	RunID     string
 	StartedAt time.Time
 	Phase     string
@@ -136,6 +143,10 @@ type runInflightView struct {
 	SessionID string
 	Fresh     bool
 }
+
+// runInflightView is the internal alias for RunInflightView. Aliased rather
+// than renamed package-wide so the hot internal paths stay terse. R249-ARCH-16.
+type runInflightView = RunInflightView
 
 // runFinalizer is a per-run, stack-local cleanup gate. executeOpt creates
 // one immediately after it wins the inflight.running CAS and threads the

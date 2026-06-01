@@ -23,6 +23,7 @@ package session_test
 import (
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/server"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/upstream"
@@ -45,4 +46,13 @@ var (
 	_ server.HubRouter       = (*session.Router)(nil)
 	_ upstream.SessionRouter = (*session.Router)(nil)
 )
+
+// dispatch.ProjectStore is the other consumer interface dispatch declares
+// (ARCH-DISP-1 #457). consumer.go relied on a runtime assignment in
+// NewDispatcher to catch *project.Manager drift; pin it here too so a
+// project.Manager signature change surfaces as one CI compile error
+// alongside the SessionRouter pins instead of only at wiring time.
+// R260528-ARCH-21 (#1380): consumer-interface drift guard.
+var _ dispatch.ProjectStore = (*project.Manager)(nil)
+
 var _ = cron.SessionRouter(nil) // keep cron import alive for godoc cross-ref

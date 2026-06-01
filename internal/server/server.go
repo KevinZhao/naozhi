@@ -729,7 +729,16 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.auth.TrustedProxy {
 		slog.Info(trustedProxyXFFReminder, "addr", s.addr)
 	}
-	slog.Info("server starting", "addr", s.addr)
+	// R244-ARCH-16 (#1054): surface the server's effective turn timeouts at
+	// startup so an operator can confirm the active values from journalctl
+	// without reading config or hitting /health. These two are the only
+	// operator-tunable timeouts the Server owns; other package-internal
+	// intervals (debounce / poll / TTL) stay greppable in their own files.
+	slog.Info("server starting",
+		"addr", s.addr,
+		"no_output_timeout", s.noOutputTimeout,
+		"total_timeout", s.totalTimeout,
+	)
 
 	ln, err := listenTCP("tcp", s.addr)
 	if err != nil {

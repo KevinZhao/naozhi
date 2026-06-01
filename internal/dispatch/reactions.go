@@ -42,7 +42,7 @@ func (d *Dispatcher) ackQueuedWithReaction(ctx context.Context, msg platform.Inc
 		useLg.Debug("ack queued reaction skipped", "reason", "no_platform", "platform", msg.Platform)
 		return false
 	}
-	reactor, ok := platform.AsReactor(p)
+	reactor, ok := platform.AsCapability[platform.Reactor](p)
 	if !ok {
 		useLg.Debug("ack queued reaction skipped", "reason", "platform_not_reactor", "platform", msg.Platform)
 		return false
@@ -89,7 +89,7 @@ func (d *Dispatcher) clearQueuedReactions(ctx context.Context, platformName stri
 	if p == nil {
 		return
 	}
-	reactor, ok := platform.AsReactor(p)
+	reactor, ok := platform.AsCapability[platform.Reactor](p)
 	if !ok {
 		return
 	}

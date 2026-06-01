@@ -102,6 +102,73 @@ func TestLoadStoreInvalidJSON(t *testing.T) {
 	}
 }
 
+// corruptSiblingCount returns how many ".corrupt.*" siblings exist for the
+// given base path in its directory.
+func corruptSiblingCount(t *testing.T, basePath string) int {
+	t.Helper()
+	matches, err := filepath.Glob(basePath + ".corrupt.*")
+	if err != nil {
+		t.Fatalf("glob corrupt siblings: %v", err)
+	}
+	return len(matches)
+}
+
+func TestLoadStore_CorruptFilePreserved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadStore(path); got != nil {
+		t.Errorf("loadStore(corrupt) = %v, want nil", got)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("corrupt store should be renamed away from %s, stat err = %v", path, err)
+	}
+	if n := corruptSiblingCount(t, path); n != 1 {
+		t.Errorf("want exactly 1 preserved corrupt sessions.json, got %d", n)
+	}
+}
+
+// #673: loadWorkspaceOverrides and loadKnownIDs previously discarded a
+// corrupt file silently, letting the next atomic save overwrite the bad
+// bytes. They now preserve the file the same way loadStore does so a
+// partial-write / corruption event leaves a forensic breadcrumb.
+func TestLoadWorkspaceOverrides_CorruptFilePreserved(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "sessions.json")
+	ovPath := workspaceOverridesPath(storePath)
+	if err := os.WriteFile(ovPath, []byte("][garbage"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadWorkspaceOverrides(storePath); got != nil {
+		t.Errorf("loadWorkspaceOverrides(corrupt) = %v, want nil", got)
+	}
+	if _, err := os.Stat(ovPath); !os.IsNotExist(err) {
+		t.Errorf("corrupt overrides should be renamed away, stat err = %v", err)
+	}
+	if n := corruptSiblingCount(t, ovPath); n != 1 {
+		t.Errorf("want exactly 1 preserved corrupt workspace-overrides, got %d", n)
+	}
+}
+
+func TestLoadKnownIDs_CorruptFilePreserved(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "sessions.json")
+	idsPath := knownIDsPath(storePath)
+	if err := os.WriteFile(idsPath, []byte("not an array"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadKnownIDs(storePath); got != nil {
+		t.Errorf("loadKnownIDs(corrupt) = %v, want nil", got)
+	}
+	if _, err := os.Stat(idsPath); !os.IsNotExist(err) {
+		t.Errorf("corrupt known-IDs should be renamed away, stat err = %v", err)
+	}
+	if n := corruptSiblingCount(t, idsPath); n != 1 {
+		t.Errorf("want exactly 1 preserved corrupt session-ids, got %d", n)
+	}
+}
+
 func TestSaveAndLoadPrevSessionIDs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sessions.json")
