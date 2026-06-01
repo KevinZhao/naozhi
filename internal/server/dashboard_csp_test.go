@@ -301,3 +301,82 @@ func TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow(t *testing.T) {
 		}
 	}
 }
+
+// TestDashboardCSP_ScriptSrcUnsafeInlineMigrationGate pins the R20260531A-SEC-10
+// (#1526) single-point invariant on the `script-src 'unsafe-inline'` posture.
+// Modelled on TestSetEscapeHTMLFalseScopedToPackage: lock the *current* state so
+// a refactor cannot silently land the half-migrated, worst-of-both-worlds form.
+//
+// Two coupled invariants:
+//
+//  1. script-src today still carries `'unsafe-inline'`. The dashboard ships a
+//     fixed set of inline `onclick=` handlers (see
+//     TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow), so dropping
+//     `'unsafe-inline'` *without* first migrating those handlers to
+//     addEventListener would brick every header button. This asserts the
+//     directive is present so an accidental removal fails loudly.
+//
+//  2. script-src does NOT yet carry `nonce-` or `strict-dynamic`. The full
+//     migration is NEEDS-DESIGN (#441 / #479 / #922). Crucially, per CSP3
+//     browsers *ignore* `'unsafe-inline'` once `nonce-`/`strict-dynamic` is
+//     present — so landing a nonce alongside the still-present `'unsafe-inline'`
+//     would silently disable the inline handlers (a functional break) while
+//     looking "more secure". This gate forces the nonce migration to drop
+//     `'unsafe-inline'` in the *same* change: adding nonce/strict-dynamic trips
+//     invariant (1)'s sibling failure here until `'unsafe-inline'` is removed,
+//     making the two changes atomic.
+//
+// This test deliberately does NOT remove `'unsafe-inline'` — that is the
+// NEEDS-DESIGN migration. It only fences the current state against silent drift.
+func TestDashboardCSP_ScriptSrcUnsafeInlineMigrationGate(t *testing.T) {
+	s := newTestServer(&mockPlatform{})
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	w := httptest.NewRecorder()
+	s.handleDashboard(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy header missing on /dashboard")
+	}
+
+	// Isolate the script-src directive so the assertions below cannot be
+	// satisfied (or tripped) by tokens that live in style-src / img-src / etc.
+	var scriptSrc string
+	for _, dir := range strings.Split(csp, ";") {
+		dir = strings.TrimSpace(dir)
+		if strings.HasPrefix(dir, "script-src ") || dir == "script-src" {
+			scriptSrc = dir
+			break
+		}
+	}
+	if scriptSrc == "" {
+		t.Fatalf("CSP missing script-src directive, got %q", csp)
+	}
+
+	// Invariant (1): current state ships 'unsafe-inline'.
+	if !strings.Contains(scriptSrc, "'unsafe-inline'") {
+		t.Errorf("R20260531A-SEC-10 (#1526): script-src dropped `'unsafe-inline'` while the "+
+			"dashboard still ships inline onclick= handlers — every header button breaks. "+
+			"Removing it must be bundled with migrating those handlers to addEventListener "+
+			"(#441 / #479 / #922). got script-src %q", scriptSrc)
+	}
+
+	// Invariant (2): nonce/strict-dynamic must NOT coexist with 'unsafe-inline'.
+	// Their presence here means a partial migration landed that silently
+	// disables the inline handlers (CSP3 ignores 'unsafe-inline' once a nonce
+	// or strict-dynamic appears). The migration must drop 'unsafe-inline' in
+	// the same change.
+	for _, tok := range []string{"'nonce-", "'strict-dynamic'", "nonce-"} {
+		if strings.Contains(scriptSrc, tok) {
+			t.Errorf("R20260531A-SEC-10 (#1526): script-src introduced %q while still listing "+
+				"`'unsafe-inline'` — per CSP3 the browser now ignores `'unsafe-inline'`, "+
+				"silently breaking the dashboard's inline onclick handlers. The nonce/"+
+				"strict-dynamic migration MUST remove `'unsafe-inline'` (and migrate the "+
+				"inline handlers) in the same change. got script-src %q", tok, scriptSrc)
+		}
+	}
+}

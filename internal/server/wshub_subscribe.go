@@ -14,6 +14,7 @@ package server
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -158,6 +159,9 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	c.subscriptions[key] = func() {}
 	if !alreadySub && h.enforceCaps {
 		h.subscriberCount[key]++
+		// Keep the lock-free mirror (read by singleSubscriber off the WS
+		// push hot path) in step with the map. R20260531A-PERF-1 (#1522).
+		h.setSubscriberCountFast(key, h.subscriberCount[key])
 	}
 	h.mu.Unlock()
 
@@ -412,9 +416,27 @@ func (h *Hub) decSubscriberCountLocked(key string) {
 	n := h.subscriberCount[key]
 	if n <= 1 {
 		delete(h.subscriberCount, key)
+		h.subscriberCountFast.Delete(key)
 		return
 	}
 	h.subscriberCount[key] = n - 1
+	h.setSubscriberCountFast(key, n-1)
+}
+
+// setSubscriberCountFast mirrors subscriberCount[key]=n into the lock-free
+// subscriberCountFast map so singleSubscriber can read the per-key
+// population without h.mu. Caller MUST hold h.mu (it is invoked only from
+// the subscriberCount write paths). The mirror is keyed by string and holds
+// *atomic.Int32 so concurrent lock-free readers get a value-consistent load
+// even while a writer is updating a different key. R20260531A-PERF-1 (#1522).
+func (h *Hub) setSubscriberCountFast(key string, n int) {
+	if v, ok := h.subscriberCountFast.Load(key); ok {
+		v.(*atomic.Int32).Store(int32(n))
+		return
+	}
+	var ctr atomic.Int32
+	ctr.Store(int32(n))
+	h.subscriberCountFast.Store(key, &ctr)
 }
 
 // ─── Remote node handlers ────────────────────────────────────────────────────

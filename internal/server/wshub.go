@@ -206,6 +206,26 @@ type Hub struct {
 	// the two stay consistent. Read-only outside of subscribe/unsubscribe
 	// paths; cleared on Shutdown.
 	subscriberCount map[string]int
+	// subscriberCountFast mirrors subscriberCount as a lock-free
+	// sync.Map[string]*atomic.Int32 so the WS event-push hot path
+	// (singleSubscriber, called once per EventLog notify wave per
+	// subscribed client) can read the per-key population WITHOUT taking
+	// h.mu. R20260531A-PERF-1 (#1522): the prior singleSubscriber took
+	// h.mu.RLock on every push, contending with subscribe/unsubscribe
+	// writers on the same mutex at 5-50 events/s × N sessions.
+	//
+	// The map[string]int above stays the source of truth (it backs the
+	// AST-pinned per-key cap check and the unsubscribe drop-cache gate,
+	// both of which already run under h.mu). Every mutation of
+	// subscriberCount goes through bumpSubscriberCountLocked /
+	// decSubscriberCountLocked / the Shutdown bulk-clear, each of which
+	// keeps this mirror in step under h.mu. The lock-free reader may
+	// observe a value that is at most one writer-critical-section stale,
+	// which is acceptable for a fast-path heuristic: a wrong "single"
+	// verdict only routes a push through (or around) the marshal cache,
+	// never affecting correctness — the multi-tab fan-out still produces
+	// byte-identical frames either way.
+	subscriberCountFast sync.Map // key string -> *atomic.Int32
 	// enforceCaps is the explicit gate for the per-key subscriber cap
 	// (maxSubscribersPerKey, gates wshub_subscribe.go:111 and the
 	// dropMarshalCache early-out at wshub_subscribe.go:346). NewHub sets
@@ -990,6 +1010,8 @@ func (h *Hub) Shutdown() {
 	// above so the per-key counts are mechanically zero. R246-PERF-4 (#716).
 	for k := range h.subscriberCount {
 		delete(h.subscriberCount, k)
+		// R20260531A-PERF-1 (#1522): keep the lock-free mirror in step.
+		h.subscriberCountFast.Delete(k)
 	}
 	// R040034-PERF-23 (#1409): drain authClients alongside h.clients so a
 	// post-Shutdown broadcast (already racing the cancel/Wait barrier)

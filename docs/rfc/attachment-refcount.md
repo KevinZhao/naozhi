@@ -1,6 +1,6 @@
 # Attachment 引用计数(大图跨 TTL 可见)
 
-> **状态**: v1 MVP 已落地(Phase 6E-1 ~ 6E-4 + 集成测试完成,GC cron caller 待运维启用)
+> **状态**: v1 MVP 已落地;GC 由 attachment-gc daemon 自动运行(见 `docs/rfc/attachment-gc-daemon.md`;daemon 默认关闭 + dry_run,待运维启用)
 > **作者**: naozhi team
 > **创建**: 2026-05-10
 > **依赖 / 前置**: `docs/rfc/event-log-persistence.md`(父 RFC)的 Phase 1-5 已于 Round 202 落地,本 RFC 在同一 session 内接续完成。

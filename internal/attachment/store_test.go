@@ -1,6 +1,7 @@
 package attachment
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -138,6 +139,22 @@ func TestRemove_SilentOnMissing(t *testing.T) {
 	Remove("/nonexistent/path/that/was/never/there.pdf")
 }
 
+// The TestGC_* tests below exercise the legacy-fallback path of
+// GCWithRefs: attachments with NO .meta sidecar, decided purely by the
+// date-directory upload-TTL heuristic. The standalone legacy GC()
+// function was removed (docs/rfc/attachment-gc-daemon.md §3.1) — its
+// behaviour is a strict subset of GCWithRefs's meta==nil branch, so
+// these cases now run through the production reaper.
+
+func legacyGC(ws string, ttl time.Duration, now time.Time) (int, error) {
+	res, err := GCWithRefs(context.Background(), ws, GCOptions{
+		UploadTTL: ttl,
+		RefTTL:    DefaultRefTTL,
+		Now:       now,
+	})
+	return res.Removed, err
+}
+
 func TestGC_DropsOldDatesKeepsRecent(t *testing.T) {
 	ws := t.TempDir()
 	// Seed an old + a recent date dir.
@@ -150,7 +167,7 @@ func TestGC_DropsOldDatesKeepsRecent(t *testing.T) {
 	if err := os.MkdirAll(newDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Drop marker files so we can verify the sweep.
+	// Drop marker files (no .meta) so we exercise the legacy-fallback.
 	if err := os.WriteFile(filepath.Join(oldDir, "x.pdf"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -160,26 +177,28 @@ func TestGC_DropsOldDatesKeepsRecent(t *testing.T) {
 
 	// Cutoff: anything older than 7 days from 2026-05-06 should die.
 	now := time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC)
-	n, err := GC(ws, 7*24*time.Hour, now)
+	n, err := legacyGC(ws, 7*24*time.Hour, now)
 	if err != nil {
-		t.Fatalf("GC: %v", err)
+		t.Fatalf("GCWithRefs: %v", err)
 	}
 	if n != 1 {
 		t.Errorf("removed=%d want=1", n)
 	}
+	// Old day dir should be pruned once its single payload is gone.
 	if _, err := os.Stat(oldDir); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("old dir should be gone")
 	}
-	if _, err := os.Stat(newDir); err != nil {
-		t.Errorf("recent dir should remain, got %v", err)
+	// Recent payload + its dir survive.
+	if _, err := os.Stat(filepath.Join(newDir, "y.pdf")); err != nil {
+		t.Errorf("recent payload should remain, got %v", err)
 	}
 }
 
 func TestGC_NoAttachmentDirIsNotAnError(t *testing.T) {
 	ws := t.TempDir()
-	n, err := GC(ws, time.Hour, time.Now())
+	n, err := legacyGC(ws, time.Hour, time.Now())
 	if err != nil {
-		t.Errorf("GC on empty workspace returned err=%v", err)
+		t.Errorf("GCWithRefs on empty workspace returned err=%v", err)
 	}
 	if n != 0 {
 		t.Errorf("removed=%d want=0", n)
@@ -194,9 +213,9 @@ func TestGC_IgnoresNonDateDirectories(t *testing.T) {
 	if err := os.MkdirAll(strayDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	n, err := GC(ws, time.Hour, time.Now().Add(1000*time.Hour))
+	n, err := legacyGC(ws, time.Hour, time.Now().Add(1000*time.Hour))
 	if err != nil {
-		t.Fatalf("GC: %v", err)
+		t.Fatalf("GCWithRefs: %v", err)
 	}
 	if n != 0 {
 		t.Errorf("removed=%d want=0", n)

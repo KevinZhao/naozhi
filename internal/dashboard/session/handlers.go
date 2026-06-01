@@ -17,6 +17,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/cronview"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/discovery"
@@ -282,11 +283,12 @@ func isUnknownRPCMethodErr(err error) bool {
 // `docs/review/batch3-B-r241-244-raw.md` under R242-ARCH-28; the
 // ambiguity is documented here so a future caller doesn't accidentally
 // add a bug-prone reason-by-deduction branch over the bool.
-type CronView interface {
-	EnsureStub(key string) bool
-	SetJobPrompt(jobID, prompt string) error
-	KnownSessionIDs() map[string]bool
-}
+//
+// R20260531070014-ARCH-2 (#1536): the interface body was byte-identical to
+// internal/server/cronview.go. Both now alias the single canonical
+// definition in the leaf package internal/dashboard/cronview, so the shape
+// can no longer drift between the two consumers.
+type CronView = cronview.CronView
 
 // historyFilter is the discovery.RecentSessionsFilter loadHistorySessions
 // constructs each scan.  Snapshots the cron-known set + sys workspace

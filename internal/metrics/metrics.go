@@ -232,6 +232,35 @@ var (
 	// same: investigate disk latency / writer stall.
 	AttachmentRefDropTotal = expvar.NewInt("naozhi_attachment_ref_drop_total")
 
+	// AttachmentGCReapedTotal counts attachment payloads actually
+	// deleted by the attachment-gc daemon (live mode only; dry-run
+	// increments AttachmentGCWouldReap* instead). See
+	// docs/rfc/attachment-gc-daemon.md §6.
+	AttachmentGCReapedTotal = expvar.NewInt("naozhi_attachment_gc_reaped_total")
+
+	// AttachmentGCWouldReapLegacyTotal / NoRefs / Expired bucket the
+	// would-remove decisions by reason so operators can read the risk
+	// composition of a dry-run before flipping dry_run off (RFC §6 E4):
+	//   - legacy_no_meta: no sidecar, decided by date-dir TTL (safe-ish)
+	//   - meta_no_refs:   sidecar but no refs — MAY be a not-yet-bumped
+	//                     active reference (high-risk bucket)
+	//   - refs_expired:   referenced once, last ref past refTTL (safe)
+	// Populated in both dry-run and live mode for observability.
+	AttachmentGCWouldReapLegacyTotal  = expvar.NewInt("naozhi_attachment_gc_would_reap_legacy_total")
+	AttachmentGCWouldReapNoRefsTotal  = expvar.NewInt("naozhi_attachment_gc_would_reap_no_refs_total")
+	AttachmentGCWouldReapExpiredTotal = expvar.NewInt("naozhi_attachment_gc_would_reap_expired_total")
+
+	// AttachmentGCSweepTotal counts attachment-gc daemon Tick
+	// invocations (success + error). A flat counter is the operator's
+	// proof the GC is actually running on its cadence.
+	AttachmentGCSweepTotal = expvar.NewInt("naozhi_attachment_gc_sweep_total")
+
+	// AttachmentGCErrorTotal counts WORKSPACE-LEVEL GC errors (a single
+	// root's GCWithRefs returned err, i.e. ReadDir failed). Per-FILE
+	// remove failures are logged but NOT counted here — they do not
+	// abort the sweep. RFC §6.
+	AttachmentGCErrorTotal = expvar.NewInt("naozhi_attachment_gc_error_total")
+
 	// CronExecutionSlowTotal counts cron executions that exceeded
 	// cronSlowThreshold wall-clock — a poor-man's histogram for R208-OBS1
 	// residual. Counter is monotonic (never resets); correlate with

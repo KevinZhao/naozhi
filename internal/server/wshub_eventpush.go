@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -119,17 +120,28 @@ func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []cli.Even
 // registered) so the caller's fast-path is gated on the strict
 // "single tab" definition only — multi-tab broadcasts AND the
 // transient "no subscribers" window both flow through the cached
-// path. h.mu is RLocked just long enough to read the counter; the
-// rest of the WS push hot path takes no other lock so this is the
-// only contention point added by the fast-path. R249-PERF-30 (#944).
+// path. R249-PERF-30 (#944).
+//
+// R20260531A-PERF-1 (#1522): read the lock-free subscriberCountFast
+// mirror instead of taking h.mu.RLock. This call fires once per
+// EventLog notify wave per subscribed client (5-50 events/s × N
+// sessions), so the old RLock contended with subscribe/unsubscribe
+// writers on h.mu for what is purely a fast-path heuristic. The mirror
+// is maintained under h.mu by every subscriberCount mutation, so the
+// lock-free load is at most one writer-critical-section stale — a wrong
+// verdict only changes whether this push uses the marshal cache, never
+// the emitted bytes. nil gate retained for hand-built test hubs that
+// skip NewHub (subscriberCount left nil): they get the same
+// "false / use cached path" behaviour as before.
 func (h *Hub) singleSubscriber(key string) bool {
 	if h.subscriberCount == nil {
 		return false
 	}
-	h.mu.RLock()
-	n := h.subscriberCount[key]
-	h.mu.RUnlock()
-	return n == 1
+	v, ok := h.subscriberCountFast.Load(key)
+	if !ok {
+		return false
+	}
+	return v.(*atomic.Int32).Load() == 1
 }
 
 // eventPushLoop is the per-subscription pump that reads EventLog notifications
