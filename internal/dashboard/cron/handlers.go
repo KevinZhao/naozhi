@@ -1525,20 +1525,22 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
 		return
 	}
+	// [R112714-SEC-6] All validation error paths use writeCronErr so the
+	// client reads body.error uniformly (previously http.Error text/plain).
 	schedule := r.URL.Query().Get("schedule")
 	if schedule == "" {
-		http.Error(w, "schedule is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "schedule is required")
 		return
 	}
 	// Cap schedule length so the cron parser (regex + split) cannot be DoS'd
 	// with a megabyte-scale query parameter. Real cron expressions are far
 	// below this limit; robfig/cron rejects extremely long descriptors anyway.
 	if len(schedule) > maxCronScheduleBytesDashboard {
-		http.Error(w, "schedule too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "schedule too long")
 		return
 	}
 	if err := validateCronScheduleChars(schedule); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1547,12 +1549,12 @@ func (h *Handlers) HandlePreview(w http.ResponseWriter, r *http.Request) {
 		// Reject obviously huge inputs before Atoi so an attacker cannot force
 		// us to decode a multi-kilobyte digit string.
 		if len(raw) > 3 {
-			http.Error(w, "count must be a positive integer", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "count must be a positive integer")
 			return
 		}
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 1 {
-			http.Error(w, "count must be a positive integer", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "count must be a positive integer")
 			return
 		}
 		if n > 10 {
