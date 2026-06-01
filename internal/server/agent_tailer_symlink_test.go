@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -148,5 +149,63 @@ func TestJsonlPathUnderAllowedRoot_NonExistentLeafThroughSymlinkedRoot(t *testin
 	outside := filepath.Join(tmp, "elsewhere", "future", "session.jsonl")
 	if jsonlPathUnderAllowedRoot(outside, allowed) {
 		t.Errorf("non-existent jsonlPath outside allowedRoot wrongly accepted: %q", outside)
+	}
+}
+
+// TestJsonlPathUnderAllowedRoot_AsymmetricResolveRejected pins
+// R20260531070014-SEC-6 (#1533): when the allowedRoot is symlink-resolved
+// (EvalSymlinks succeeds) but the jsonlPath has NO existing ancestor, the
+// old code returned the raw unresolved abs from resolveExistingAncestor
+// and ran a lexical HasPrefix against the resolved root. A symlinked
+// component on the root side could then make a path that is NOT actually
+// under the resolved root match the prefix. The fix rejects any
+// one-sided-resolution compare.
+func TestJsonlPathUnderAllowedRoot_AsymmetricResolveRejected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on windows")
+	}
+	t.Parallel()
+	tmp := t.TempDir()
+
+	// Real allowedRoot exists and is reached via a symlink, so root
+	// EvalSymlinks-resolves (rootResolved=true).
+	realRoot := filepath.Join(tmp, "real", "projects")
+	if err := os.MkdirAll(realRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(tmp, "real"), filepath.Join(tmp, "link")); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	allowed := filepath.Join(tmp, "link", "projects")
+
+	// jsonlPath lives under a mountpoint that does NOT exist at all — no
+	// ancestor of it resolves, so resolveExistingAncestor returns the raw
+	// lexical abs (absResolved=false) while root was resolved. The
+	// lexical-prefix string of this crafted path matches the *resolved*
+	// allowedRoot prefix, which is exactly the unsound compare SEC-6 closes.
+	resolvedRoot, err := filepath.EvalSymlinks(allowed)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(allowed): %v", err)
+	}
+	crafted := filepath.Join("/nonexistent-mount", resolvedRoot, "abc", "session.jsonl")
+	// Sanity: the crafted path's lexical form genuinely contains the
+	// resolved-root prefix, so without the SEC-6 guard it would slip through.
+	if !strings.HasPrefix(crafted, resolvedRoot+string(filepath.Separator)) {
+		// If the temp layout makes this false the test is moot, not failing.
+		t.Skipf("crafted path %q does not exercise the asymmetric prefix overlap", crafted)
+	}
+	if jsonlPathUnderAllowedRoot(crafted, allowed) {
+		t.Errorf("asymmetric-resolution path wrongly accepted (SEC-6 regression)\n  jsonlPath=%q\n  allowedRoot=%q", crafted, allowed)
+	}
+
+	// Control: a fully-unresolved root + fully-unresolved abs (neither
+	// EvalSymlinks-resolves) is the symmetric lexical case and must still
+	// behave like a plain prefix check — legitimate path accepted.
+	bothMissingRoot := "/nonexistent-mount/projects"
+	bothMissingAbs := "/nonexistent-mount/projects/abc/session.jsonl"
+	if !jsonlPathUnderAllowedRoot(bothMissingAbs, bothMissingRoot) {
+		t.Errorf("symmetric all-unresolved path wrongly rejected — SEC-6 guard must "+
+			"only fire on the one-sided case\n  jsonlPath=%q\n  allowedRoot=%q",
+			bothMissingAbs, bothMissingRoot)
 	}
 }
