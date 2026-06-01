@@ -50,18 +50,23 @@ func (s *Scheduler) CurrentRun(jobID string) (RunInflightView, bool) {
 // nil. The dashboard list endpoint and detail endpoint both go through
 // this method so the runs/ schema stays opaque to server/.
 func (s *Scheduler) ListRuns(jobID string, limit int, before time.Time) []CronRunSummary {
-	if s == nil || s.runStore == nil {
+	if s == nil {
 		return nil
 	}
+	// R249-ARCH-29 (#993): no `s.runStore == nil` guard. newRunStore always
+	// returns a non-nil *runStore (disabled:true when StorePath is empty),
+	// and *runStore.List is itself nil-receiver + disabled safe, so the
+	// caller-side nil check duplicated the store's own internal guard.
 	return s.runStore.List(jobID, limit, before)
 }
 
 // RecentRuns is the convenience wrapper for the cron list view's
 // recent_runs field. Cap is enforced inside ListRuns.
 func (s *Scheduler) RecentRuns(jobID string, n int) []CronRunSummary {
-	if s == nil || s.runStore == nil {
+	if s == nil {
 		return nil
 	}
+	// R249-ARCH-29 (#993): runStore is always non-nil; Recent is nil-safe.
 	return s.runStore.Recent(jobID, n)
 }
 
@@ -69,9 +74,11 @@ func (s *Scheduler) RecentRuns(jobID string, n int) []CronRunSummary {
 // (nil, fs.ErrNotExist) when missing; (nil, ErrCorruptRun) when present
 // but unusable. Server layer maps these to 404 / 500 respectively.
 func (s *Scheduler) GetRun(jobID, runID string) (*CronRun, error) {
-	if s == nil || s.runStore == nil {
+	if s == nil {
 		return nil, fs.ErrNotExist
 	}
+	// R249-ARCH-29 (#993): runStore is always non-nil; Get is nil-safe and
+	// returns fs.ErrNotExist when disabled.
 	return s.runStore.Get(jobID, runID)
 }
 
@@ -232,7 +239,10 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// Idempotent on already-clean prompts; cheap relative to JSON marshal +
 	// fsync that immediately follow.
 	persistedPrompt := osutil.SanitizeForLog(a.prompt, MaxPromptBytes)
-	if !a.skipPersist && jobPersistOK && s.runStore != nil {
+	// R249-ARCH-29 (#993): runStore is always non-nil; Append is itself
+	// disabled-safe (no-ops when StorePath is empty), so the gate is just
+	// skipPersist + jobPersistOK.
+	if !a.skipPersist && jobPersistOK {
 		s.runStore.Append(&CronRun{
 			RunID:       a.runID,
 			JobID:       a.job.ID,

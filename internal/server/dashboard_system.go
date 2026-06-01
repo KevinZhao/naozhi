@@ -67,16 +67,16 @@ func (s *Server) handleClearLabelOrigin(w http.ResponseWriter, r *http.Request) 
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	var req clearLabelOriginRequest
 	if err := decodeJSONBody(r, &req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		errResp(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
 		return
 	}
 	req.Key = strings.TrimSpace(req.Key)
 	if req.Key == "" {
-		http.Error(w, "missing key", http.StatusBadRequest)
+		errResp(w, http.StatusBadRequest, "missing_key", "missing key")
 		return
 	}
 	if err := session.ValidateSessionKey(req.Key); err != nil {
-		http.Error(w, "invalid key", http.StatusBadRequest)
+		errResp(w, http.StatusBadRequest, "invalid_key", "invalid key")
 		return
 	}
 	// Session-level rule: this endpoint is for IM sessions, not the
@@ -85,11 +85,11 @@ func (s *Server) handleClearLabelOrigin(w http.ResponseWriter, r *http.Request) 
 	// all).  Reject early to give a clear error rather than letting the
 	// router silently no-op on a stub that can't carry a user label.
 	if session.IsReservedNamespace(req.Key) {
-		http.Error(w, "label-origin only applies to user sessions", http.StatusBadRequest)
+		errResp(w, http.StatusBadRequest, "reserved_namespace", "label-origin only applies to user sessions")
 		return
 	}
 	if !s.router.ClearUserLabelOrigin(req.Key) {
-		http.NotFound(w, r)
+		errResp(w, http.StatusNotFound, "not_found", "unknown session key")
 		return
 	}
 	// R246-SEC-3 [BREAKING-LOCAL]: writeOK matches the {"status":"ok"} body

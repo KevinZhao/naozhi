@@ -1283,7 +1283,11 @@ func (s *Scheduler) Start() error {
 	// retention-policy violators that accumulated while this process was
 	// down. 异步执行避免在 jobs 多/历史目录大时阻塞 Start 返回（每个 job
 	// 一次 ReadDir + N 次 Remove）。
-	if s.runStore != nil {
+	// R249-ARCH-29 (#993): runStore is always non-nil; gate the cold-start
+	// GC goroutine on the store's own disabled flag (the single source of
+	// "persistence off") rather than the redundant `!= nil` check, so we
+	// don't spin up a goroutine that would immediately no-op in trimAllCtx.
+	if s.runStore != nil && !s.runStore.disabled {
 		s.gcWG.Add(1)
 		go func() {
 			defer s.gcWG.Done()

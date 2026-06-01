@@ -268,11 +268,12 @@ func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
 	// every cold buildKnownSessionsSet rebuild without changing semantics —
 	// the cold disk fallback path is still funneled through the same
 	// cache+disk walk Recent uses.
-	if s.runStore != nil {
-		for _, jobID := range jobIDs {
-			for _, sid := range s.runStore.RecentSessionIDs(jobID, knownSessionIDsRecentCap) {
-				out[sid] = struct{}{}
-			}
+	// R249-ARCH-29 (#993): runStore is always non-nil (newRunStore returns
+	// &runStore{disabled:true} when StorePath is empty) and RecentSessionIDs
+	// is nil-receiver + disabled safe, so no caller-side nil guard is needed.
+	for _, jobID := range jobIDs {
+		for _, sid := range s.runStore.RecentSessionIDs(jobID, knownSessionIDsRecentCap) {
+			out[sid] = struct{}{}
 		}
 	}
 

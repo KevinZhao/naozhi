@@ -767,9 +767,9 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 		// runningJobs.
 		func(j *Job) {
 			s.resetRouterStub(j.ID)
-			if s.runStore != nil {
-				s.runStore.DeleteJob(j.ID)
-			}
+			// R249-ARCH-29 (#993): runStore is always non-nil; DeleteJob is
+			// itself nil-receiver + disabled safe, so drop the caller guard.
+			s.runStore.DeleteJob(j.ID)
 			s.cleanupRunningJobIfIdle(j.ID)
 		},
 	)
@@ -1479,9 +1479,9 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 		// entry points.
 		func(j *Job) {
 			s.resetRouterStub(j.ID)
-			if s.runStore != nil {
-				s.runStore.DeleteJob(j.ID)
-			}
+			// R249-ARCH-29 (#993): runStore is always non-nil; DeleteJob is
+			// itself nil-receiver + disabled safe, so drop the caller guard.
+			s.runStore.DeleteJob(j.ID)
 			s.cleanupRunningJobIfIdle(j.ID)
 		},
 		withJobByPrefixOpts{},
