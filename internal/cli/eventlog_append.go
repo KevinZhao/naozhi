@@ -390,7 +390,20 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 		// on the replay path too — InjectHistory replays agent/task_start
 		// entries that may still be linker-pending after shim reconnect,
 		// and the next live SetAgentInternalID call needs to reach them.
-		l.recordAgentRingPosLocked(ePtr.Type, ePtr.ToolUseID, ringIdx)
+		//
+		// R20260601-PERF-9 (#1549): gate the call inline. A 500-entry
+		// InjectHistory replay is dominated by assistant_text/tool_use rows;
+		// recordAgentRingPosLocked early-returns for those, but the
+		// unconditional call still costs 500 function-call frames + the
+		// type compare under l.mu, stalling concurrent Append (readLoop hot
+		// path). Hoisting the agent/task_start test out front lets the
+		// common case skip the call entirely while preserving the replay
+		// sidecar contract for the rare agent/task_start rows. The map is
+		// only mutable under l.mu, so the write must stay inside the lock —
+		// only the now-rare entries pay for it.
+		if ePtr.Type == "agent" || ePtr.Type == "task_start" {
+			l.recordAgentRingPosLocked(ePtr.Type, ePtr.ToolUseID, ringIdx)
+		}
 
 		// Skip applyEntryStateLocked for entries whose Type is not one of
 		// the 6 cases the function actually handles. InjectHistory's
