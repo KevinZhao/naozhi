@@ -1394,13 +1394,13 @@ func (s *Scheduler) Location() *time.Location {
 //     *j BEFORE the snapshot copy and skips postCleanup so the caller observes
 //     "no change applied". nil for callers (DeleteJob) that do not need it.
 type withJobByPrefixOpts struct {
-	rollbackOnPersistErr func(j *Job)
+	rollbackOnPersistErr jobSideEffect // R249-ARCH-20 (#985)
 }
 
 func (s *Scheduler) withJobByPrefix(
 	idPrefix, plat, chatID string,
-	op func(j *Job) error,
-	postCleanup func(j *Job),
+	op lockedJobOp,
+	postCleanup jobSideEffect,
 	opts withJobByPrefixOpts,
 ) (*Job, error) {
 	rollback := opts.rollbackOnPersistErr
