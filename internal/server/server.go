@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
@@ -65,7 +64,8 @@ const (
 //	awk '/^type Server struct/,/^}$/' server.go | grep -cE '^\s+[a-zA-Z_]+ '
 //
 // must equal the field count documented in
-// docs/design/server-split-phase4-baseline.md §2 (currently 47).
+// docs/design/server-split-phase4-baseline.md §2 (currently 48 — the
+// logger field was added for R247-ARCH-4 / #620 logger injection).
 //
 // R250-ARCH-11 (#1174): scope clarification — the annotation tracks
 // access to *this struct field*, not usage of the field's underlying
@@ -86,6 +86,7 @@ type Server struct {
 	startedAt time.Time       // 读写: server.go
 	onReady   func()          // 读写: server.go (called after listener is bound)
 	appCtx    context.Context // 读写: server.go, dashboard.go (HubOptions.ParentCtx)
+	logger    *slog.Logger    // 读写: server.go (R247-ARCH-4 #620 injected component logger; nil → slog.Default via s.log())
 
 	// ── core deps ──────────────────────────────────────
 	router     *session.Router  // 读写: server.go, dashboard.go, dashboard_system.go, send.go, takeover.go, consumer.go
@@ -139,8 +140,11 @@ type Server struct {
 	nodeCache *node.CacheManager   // 读写: server.go (background-cached remote node data)
 
 	// ── watchdog counters ──────────────────────────────
-	watchdogNoOutputKills atomic.Int64 // 读写: server.go (exposed via /health and /api/sessions)
-	watchdogTotalKills    atomic.Int64 // 读写: server.go
+	// watchdog groups the no-output / total watchdog-kill counters into one
+	// cohesive observability unit (R243-ARCH-7 / #838). Exposed via /health
+	// and /api/sessions; incremented by the dispatch watchdog through the
+	// *atomic.Int64 handles returned by noOutPtr()/totalPtr().
+	watchdog watchdogCounters
 
 	// shutdownComplete closes once Start's shutdown goroutine has finished
 	// draining in-flight HTTP requests (srv.Shutdown returned). Exposed via
@@ -323,6 +327,7 @@ func buildServer(opts ServerOptions) *Server {
 			dispatch.ParseQueueMode(opts.QueueMode),
 		),
 		startedAt:       time.Now(),
+		logger:          opts.Logger,
 		agents:          agents,
 		agentCommands:   agentCommands,
 		scheduler:       scheduler,
@@ -428,8 +433,8 @@ func buildServer(opts ServerOptions) *Server {
 		WorkspaceID:   opts.WorkspaceID,
 		WorkspaceName: opts.WorkspaceName,
 		VersionTag:    opts.Version,
-		WatchdogNoOut: &s.watchdogNoOutputKills,
-		WatchdogTotal: &s.watchdogTotalKills,
+		WatchdogNoOut: s.watchdog.noOutPtr(),
+		WatchdogTotal: s.watchdog.totalPtr(),
 		RetiredStore:  retiredStore,
 		ValidateWS:    validateWorkspace,
 		SystemInfoFn:  systemInfo,
@@ -488,8 +493,8 @@ func buildServer(opts ServerOptions) *Server {
 		totalTimeout:       opts.TotalTimeout,
 		noOutputTimeoutStr: opts.NoOutputTimeout.String(),
 		totalTimeoutStr:    opts.TotalTimeout.String(),
-		watchdogNoOut:      &s.watchdogNoOutputKills,
-		watchdogTotal:      &s.watchdogTotalKills,
+		watchdogNoOut:      s.watchdog.noOutPtr(),
+		watchdogTotal:      s.watchdog.totalPtr(),
 		nodeAccess:         s.nodeAccess,
 		platforms:          platNames,
 		hubDropped: func() int64 {
@@ -595,8 +600,8 @@ func (s *Server) Start(ctx context.Context) error {
 		Capabilities:          serverCaps{s: s},
 		NoOutputTimeout:       s.noOutputTimeout,
 		TotalTimeout:          s.totalTimeout,
-		WatchdogNoOutputKills: &s.watchdogNoOutputKills,
-		WatchdogTotalKills:    &s.watchdogTotalKills,
+		WatchdogNoOutputKills: s.watchdog.noOutPtr(),
+		WatchdogTotalKills:    s.watchdog.totalPtr(),
 		// R20260527122801-CR-6 (#1320): plumb the long-lived service ctx into
 		// dispatch so the passthrough send goroutine observes graceful
 		// shutdown rather than ignoring SIGTERM until its 5min internal

@@ -123,8 +123,8 @@ func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
 		},
 		NoOutputTimeout:       srv.noOutputTimeout,
 		TotalTimeout:          srv.totalTimeout,
-		WatchdogNoOutputKills: &srv.watchdogNoOutputKills,
-		WatchdogTotalKills:    &srv.watchdogTotalKills,
+		WatchdogNoOutputKills: srv.watchdog.noOutPtr(),
+		WatchdogTotalKills:    srv.watchdog.totalPtr(),
 	})
 	if err != nil {
 		// Test helper passes a real SendFn so wireup never fails. Panic
