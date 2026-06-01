@@ -6445,6 +6445,14 @@ function buildHomeHealthLines(stats) {
     if (stats.cli_version) cli += ' ' + stats.cli_version;
     lines.push({ text: cli, kind: 'info' });
   }
+  // naozhi build tag (R110-P1 #445 service-health): version_tag already ships
+  // in the /api/sessions stats block (omitempty when the -X ldflag is unset)
+  // and the backend struct doc promises a "naozhi v1.2.3-dirty" footer that
+  // was never wired client-side. Surface it so operators can confirm the
+  // running build straight from the Home health strip.
+  if (stats.version_tag) {
+    lines.push({ text: 'naozhi ' + stats.version_tag, kind: 'info' });
+  }
   // Multi-Backend RFC §8.3 D22: when ≥2 backends are configured, show a
   // one-liner summarizing per-backend availability + version. The rich
   // per-feature table lives in the doctor status panel (built by

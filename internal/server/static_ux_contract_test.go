@@ -4159,6 +4159,9 @@ func TestDashboardJS_R110P1_HomePanelHealth(t *testing.T) {
 		// max_procs > 0 so an uncapped pool shows no ratio.
 		`const maxProcs = typeof stats.max_procs === 'number' ? stats.max_procs : 0;`,
 		`text: 'claude 子进程 ' + running + '/' + maxProcs,`,
+		// R110-P1 #445: naozhi build-tag service-health line.
+		`if (stats.version_tag) {`,
+		`lines.push({ text: 'naozhi ' + stats.version_tag, kind: 'info' });`,
 	} {
 		if !strings.Contains(js, fragment) {
 			t.Errorf("buildHomeHealthLines body missing contract fragment %q", fragment)
