@@ -1,5 +1,16 @@
 package server
 
+// DO NOT add more positive regex-based source-grep assertions to this file.
+//
+// TEST2 (#388): this file has grown past 7,000 lines of source-grep regex
+// contracts. Each assertion that greps dashboard.js / index.html source text
+// locks an implementation detail, so a benign DOM rearrange trips dozens of
+// failures and erodes the contract's signal (reviewers start editing tests to
+// make them pass). New UX contracts belong in browser-level E2E (test/e2e/)
+// or httptest handler tests that assert observable behaviour, not source
+// fragments. Forbid-list assertions (asserting a string is ABSENT) may stay
+// here; positive source-grep assertions should not grow.
+
 import (
 	"regexp"
 	"strconv"
