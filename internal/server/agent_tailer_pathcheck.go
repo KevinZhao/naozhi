@@ -43,10 +43,29 @@ func jsonlPathUnderAllowedRoot(jsonlPath, allowedRoot string) bool {
 		return false
 	}
 	root := filepath.Clean(allowedRoot)
+	rootResolved := false
 	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
 		root = resolvedRoot
+		rootResolved = true
 	}
-	abs = resolveExistingAncestor(abs)
+	abs, absResolved := resolveExistingAncestor(abs)
+	// R20260531070014-SEC-6 (#1533): if NO ancestor of abs resolved, abs is
+	// still the raw lexical input while root may have been canonicalised by
+	// EvalSymlinks. A lexical HasPrefix between a resolved root and an
+	// unresolved abs is unsound — a symlinked component on the root side can
+	// make a path that is NOT actually under the allowed root match the
+	// prefix (the 'tail-before-write' TOCTOU window for agent transcript
+	// paths). Only the symmetric case is safe:
+	//   - both resolved        → both canonical, prefix check sound
+	//   - both unresolved       → both lexical, prefix check sound
+	// When only one side resolved we cannot compare them, so reject. This is
+	// defence-in-depth on CLI-emitted workspace paths, so rejecting the rare
+	// "allowedRoot has a symlink AND the entire tail mountpoint is absent"
+	// case is acceptable — such a path cannot correspond to a real file
+	// under the resolved root anyway.
+	if absResolved != rootResolved {
+		return false
+	}
 	if abs == root {
 		return false
 	}
@@ -63,12 +82,16 @@ func jsonlPathUnderAllowedRoot(jsonlPath, allowedRoot string) bool {
 // allowedRoot side cannot produce a one-sided canonicalisation that
 // flips a legitimate jsonlPath into a HasPrefix mismatch.
 //
-// Falls through to the cleaned input when no ancestor resolves
-// (constructed paths under a non-existent mountpoint, etc.) so the
-// historical lexical HasPrefix behaviour is preserved as a last resort.
-func resolveExistingAncestor(abs string) string {
+// Returns (path, resolved). resolved reports whether ANY ancestor (the
+// leaf itself or a parent up the chain) was successfully EvalSymlinks'd.
+// When no ancestor resolves (constructed paths under a non-existent
+// mountpoint, etc.) it returns the cleaned input with resolved=false so the
+// caller can detect the asymmetric-canonicalisation hazard rather than
+// silently falling back to an unsound lexical prefix check against a
+// resolved root. R20260531070014-SEC-6 (#1533).
+func resolveExistingAncestor(abs string) (string, bool) {
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		return resolved
+		return resolved, true
 	}
 	parent := abs
 	tail := ""
@@ -76,8 +99,9 @@ func resolveExistingAncestor(abs string) string {
 		next := filepath.Dir(parent)
 		if next == parent {
 			// Hit filesystem root without finding an existing ancestor;
-			// give up and return the original cleaned value.
-			return abs
+			// give up and return the original cleaned value, flagged
+			// unresolved so the caller rejects the asymmetric compare.
+			return abs, false
 		}
 		base := filepath.Base(parent)
 		if tail == "" {
@@ -87,7 +111,7 @@ func resolveExistingAncestor(abs string) string {
 		}
 		parent = next
 		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
-			return filepath.Join(resolved, tail)
+			return filepath.Join(resolved, tail), true
 		}
 	}
 }
