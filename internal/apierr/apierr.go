@@ -63,7 +63,7 @@ func Localize(text string) string {
 		friendly = "⏱️ Claude API 调用过于频繁，请稍候一分钟再试。"
 	case strings.Contains(lower, "overloaded"):
 		friendly = "🌊 Claude 服务当前负载较高，请稍后重试。"
-	case strings.Contains(lower, "invalid_api_key") || strings.Contains(lower, "authentication"):
+	case strings.Contains(lower, "invalid_api_key") || strings.Contains(lower, "authentication_error"):
 		friendly = "🔑 Claude API 密钥无效或已过期，请联系管理员检查配置。"
 	case strings.Contains(lower, "insufficient_quota") || strings.Contains(lower, "credit balance") || strings.Contains(lower, "billing"):
 		friendly = "💳 Claude API 额度已用尽，请联系管理员充值后重试。"
