@@ -330,19 +330,29 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	// entry — the ring-buffer write inside the lock simply assigns the
 	// pre-prepared struct without re-running sanitize/default-time logic.
 	//
-	// Fast path (!captureForSink): sinkCopy stays nil and the inner loop
-	// falls back to the historical "stamp inside lock" path. Test harnesses
-	// and the InjectHistory phase before the persister attaches don't pay
-	// for the extra 200KB allocation, but UUID stamping still runs here.
-	var sinkCopy []EventEntry
+	// Fast path (!captureForSink): sinkCopy stays nil, but the per-entry
+	// preprocessing (default Time + image sanitize) still runs here in a
+	// `prepared` buffer so the write-lock section only assigns pre-built
+	// structs. R103901-PERF-7: the prior shape left the !captureForSink
+	// branch running sanitizeImagesAligned (a string scan) + the Time
+	// assignment *inside* l.mu, bloating lock-hold time for test harnesses
+	// and the InjectHistory replay phase before the persister attaches —
+	// exactly the 500-entry replay hot path the captureForSink branch was
+	// already optimised for. We mirror that optimisation here. The prepared
+	// buffer (rather than mutating `entries[i]` in place) preserves the
+	// historical contract that the caller's slice is untouched beyond the
+	// UUID stamp that stampUUID already applies in place.
+	var (
+		sinkCopy []EventEntry
+		prepared []EventEntry
+	)
 	if captureForSink {
 		sinkCopy = make([]EventEntry, len(entries))
+	} else {
+		prepared = make([]EventEntry, len(entries))
 	}
 	for i := range entries {
 		stampUUID(&entries[i])
-		if !captureForSink {
-			continue
-		}
 		e := entries[i]
 		if e.Time == 0 {
 			e.Time = defaultTime
@@ -354,32 +364,29 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 		if len(e.Images) > 0 {
 			e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
 		}
-		sinkCopy[i] = e
+		if captureForSink {
+			sinkCopy[i] = e
+		} else {
+			prepared[i] = e
+		}
 	}
 	l.mu.Lock()
-	for idx, e := range entries {
-		// R20260527122801-PERF-7: when captureForSink is true the entry
-		// has already been fully prepared in sinkCopy[idx] above. Write
-		// it directly into the ring slot and rebind ePtr to that slot
-		// so the downstream state-tracking code reads from the canonical
-		// store without paying a second per-entry struct copy through
-		// the range-loop local. The prior shape (`e = sinkCopy[idx];
-		// l.entries[l.head] = e`) cost two EventEntry value copies on
-		// the InjectHistory hot path (500× per shim reconnect).
+	for idx := range entries {
+		// R20260527122801-PERF-7 + R103901-PERF-7: both branches have
+		// already fully prepared the entry (UUID stamp, default Time, image
+		// sanitize) in the pre-lock loop — sinkCopy[idx] when capturing for
+		// the persist sink, prepared[idx] otherwise. Write it directly into
+		// the ring slot and rebind ePtr to that slot so the downstream
+		// state-tracking code reads from the canonical store without paying a
+		// second per-entry struct copy through a range-loop local, and
+		// without running sanitizeImagesAligned (a string scan) inside l.mu.
 		var ePtr *EventEntry
 		if captureForSink {
 			l.entries[l.head] = sinkCopy[idx]
-			ePtr = &l.entries[l.head]
 		} else {
-			if e.Time == 0 {
-				e.Time = defaultTime
-			}
-			if len(e.Images) > 0 {
-				e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
-			}
-			l.entries[l.head] = e
-			ePtr = &l.entries[l.head]
+			l.entries[l.head] = prepared[idx]
 		}
+		ePtr = &l.entries[l.head]
 		ringIdx := l.head
 		l.head = (l.head + 1) % l.maxSize
 		if l.count < l.maxSize {
