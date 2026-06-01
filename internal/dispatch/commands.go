@@ -435,6 +435,20 @@ func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string,
 		// that can fragment journald structured fields.
 		log.Warn("cron AddJob rejected", "err", err,
 			"schedule", osutil.SanitizeForLog(job.Schedule, 256))
+		// AddJob fails for distinct reasons (bad schedule, prompt policy
+		// violation, per-chat/global job limit). Collapsing them all into
+		// "请检查定时表达式格式" misleads a user whose schedule was fine but
+		// whose prompt was rejected — the same class of bug R20260531-ARCH-2
+		// fixed for the del/pause/resume handlers via cronMutationErrReply.
+		// CodeInvalidPrompt is the one cause that carries a sentinel through
+		// AddJob (ValidatePromptStrict → ErrInvalidPrompt); steer those to a
+		// prompt-specific hint. Raw err.Error() is never echoed (it can leak
+		// the normalized schedule / parser internals); the detail is already
+		// logged above for operator triage.
+		if cron.ClassifyError(err) == cron.CodeInvalidPrompt {
+			reply("创建失败：任务内容不合法（为空、过长或含控制字符）")
+			return
+		}
 		reply("创建失败：请检查定时表达式格式")
 		return
 	}
