@@ -941,16 +941,27 @@ func (p *Persister) drainInChannel() {
 	// drain may pull dozens of queued batches in a tight burst.
 	// R216-PERF-7. Each handleBatch reuses the same captured `now` so a
 	// burst of 50 batches needs only one vDSO call. R222-PERF-12.
+	//
+	// R20260531A-PERF-9 (#1525): a single Clock() read for the whole
+	// drain would stamp every writer's lastActivity with the pre-drain
+	// instant. A long burst (50+ batches) can take long enough that a
+	// writer touched late in the drain looks idle to tickIdleClose and
+	// gets closed prematurely. Cap that staleness by refreshing `now`
+	// every drainClockRefreshEvery batches — still far cheaper than one
+	// Clock() per batch, but bounds the lastActivity lag.
 	var now time.Time
 	drained := false
+	sinceRefresh := 0
 	for {
 		select {
 		case job := <-p.in:
-			if !drained {
+			if !drained || sinceRefresh >= drainClockRefreshEvery {
 				now = p.opts.Clock()
+				sinceRefresh = 0
 			}
 			p.handleBatch(job, now)
 			drained = true
+			sinceRefresh++
 		default:
 			if drained {
 				p.lastDrainNS.Store(now.UnixNano())
@@ -959,6 +970,14 @@ func (p *Persister) drainInChannel() {
 		}
 	}
 }
+
+// drainClockRefreshEvery bounds how stale the `now` captured in
+// drainInChannel may become: every N batches the drain re-reads the
+// clock so a long burst cannot stamp late writers with the pre-drain
+// instant and trip tickIdleClose. 16 keeps the vDSO call rate ~16x
+// lower than per-batch while capping staleness to a handful of batches'
+// worth of work. R20260531A-PERF-9 (#1525).
+const drainClockRefreshEvery = 16
 
 // dropInMemoryLocked closes the per-key writer (if open) and removes its
 // map entry. Runs on the writer goroutine — must NOT touch the
