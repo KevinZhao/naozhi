@@ -115,6 +115,22 @@ func TestLocalize(t *testing.T) {
 			input:      "API Error: overloaded_error: The API is temporarily overloaded (request_id: req_abc123, host: api-internal.anthropic.com)",
 			wantPrefix: "🌊 Claude 服务当前负载较高",
 		},
+		// R20260601-GO-2: "authentication" narrowed to "authentication_error".
+		// A proxy error merely containing the word "authentication" must NOT
+		// be mis-localized as an API-key failure. It is still an "API Error:"
+		// envelope, so it falls through to the generic default message (per
+		// the SEC-2 hardening that no longer forwards the raw envelope) — the
+		// key assertion is that it is NOT the 🔑 key-failure copy.
+		{
+			name:       "proxy authentication message is NOT mis-localized as key failure (R20260601-GO-2)",
+			input:      "API Error: authentication required by proxy",
+			wantPrefix: "⚠️ Claude API 返回了一个未识别的错误",
+		},
+		{
+			name:       "authentication_error code is still localized (R20260601-GO-2)",
+			input:      "API Error: authentication_error: invalid x-api-key",
+			wantPrefix: "🔑 Claude API 密钥无效",
+		},
 	}
 
 	for _, tc := range tests {
