@@ -1347,19 +1347,27 @@ func (s *Scheduler) Location() *time.Location {
 //   - persist error  → (nil, persist err)   ; postCleanup ALREADY ran
 //     (unless rollbackOnPersistErr is set — then postCleanup is skipped)
 //   - success        → (*Job, nil)
+//
+// withJobByPrefixOpts bundles the optional knobs withJobByPrefix accepts,
+// mirroring withJobByIDOpts so the IM-prefix path stays symmetric with the
+// exact-ID path. A struct (instead of a variadic) gives compile-time
+// protection: callers cannot silently pass more than one rollback hook.
+//
+//   - rollbackOnPersistErr: in-lock undo of the op's mutation when
+//     persistJobsLocked fails. When non-nil and persist fails, this restores
+//     *j BEFORE the snapshot copy and skips postCleanup so the caller observes
+//     "no change applied". nil for callers (DeleteJob) that do not need it.
+type withJobByPrefixOpts struct {
+	rollbackOnPersistErr func(j *Job)
+}
+
 func (s *Scheduler) withJobByPrefix(
 	idPrefix, plat, chatID string,
 	op func(j *Job) error,
 	postCleanup func(j *Job),
-	rollbackOnPersistErr ...func(j *Job),
+	opts withJobByPrefixOpts,
 ) (*Job, error) {
-	// Unpack optional variadic rollback (at most one element; callers that do
-	// not need rollback omit the argument entirely, keeping the call sites
-	// unchanged).
-	var rollback func(j *Job)
-	if len(rollbackOnPersistErr) > 0 {
-		rollback = rollbackOnPersistErr[0]
-	}
+	rollback := opts.rollbackOnPersistErr
 
 	var save func()
 	var snapshot Job
@@ -1440,6 +1448,7 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 			}
 			s.cleanupRunningJobIfIdle(j.ID)
 		},
+		withJobByPrefixOpts{},
 	)
 }
 
@@ -1489,7 +1498,9 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 		// must stay alive since the pause was not persisted).
 		pauseCleanup = nil
 	}
-	return s.withJobByPrefix(idPrefix, plat, chatID, op, postCleanup, rollback)
+	return s.withJobByPrefix(idPrefix, plat, chatID, op, postCleanup, withJobByPrefixOpts{
+		rollbackOnPersistErr: rollback,
+	})
 }
 
 // ResumeJob resumes a paused job by ID prefix.
@@ -1546,7 +1557,9 @@ func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
 		j.cachedSched = prevCachedSched
 		j.Paused = prevPaused
 	}
-	snap, err := s.withJobByPrefix(idPrefix, plat, chatID, op, nil, rollback)
+	snap, err := s.withJobByPrefix(idPrefix, plat, chatID, op, nil, withJobByPrefixOpts{
+		rollbackOnPersistErr: rollback,
+	})
 	// Remove the orphaned cron entry now that s.mu is released. removeEntryID
 	// is non-zero only when rollback fired (persist failed after op succeeded
 	// and registered a new entry). robfig/cron.Remove(0) is a no-op, but being
