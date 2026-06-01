@@ -924,8 +924,12 @@ func (l *SubagentLinker) fireCallbacksDropLock(taskID, toolUseID, internalAgentI
 // to the write lock and double-check (another goroutine may have
 // populated the cache between our RUnlock and Lock).
 func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
+	// Snapshot now once to avoid two separate time.Now() syscalls for the
+	// TTL check in the RLock fast-path and the write-lock double-check.
+	// [R112714-PERF-9]
+	now := time.Now()
 	l.mu.RLock()
-	if !l.dirCache.at.IsZero() && time.Since(l.dirCache.at) < l.cacheTTL {
+	if !l.dirCache.at.IsZero() && now.Sub(l.dirCache.at) < l.cacheTTL {
 		entries := l.dirCache.entries
 		l.mu.RUnlock()
 		return entries
@@ -937,7 +941,7 @@ func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
 	// Double-check: another goroutine may have populated the cache
 	// between our RUnlock and Lock. The TTL still applies so a stale
 	// entry from before the gap is correctly rejected.
-	if !l.dirCache.at.IsZero() && time.Since(l.dirCache.at) < l.cacheTTL {
+	if !l.dirCache.at.IsZero() && now.Sub(l.dirCache.at) < l.cacheTTL {
 		return l.dirCache.entries
 	}
 	if l.scanHook != nil {
