@@ -414,11 +414,25 @@ func (a *Handlers) clientIP(r *http.Request) string {
 // IsSecure returns true if the connection is over TLS.
 // When TrustedProxy is enabled, also trusts the X-Forwarded-Proto header
 // (set by ALB/CloudFront). Without TrustedProxy, only trusts r.TLS.
+//
+// X-Forwarded-Proto may be a comma-separated chain (proto1, proto2) when
+// multiple proxies prepend their own value; only the last hop (the proxy
+// directly in front of naozhi, which we trust via TrustedProxy) is
+// authoritative. A client-injected leading value must never be honoured,
+// so we take the final segment. Per RFC 7239 §5.4 the scheme token is
+// case-insensitive (Nginx may emit "HTTPS"), so compare with EqualFold.
 func (a *Handlers) IsSecure(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	return a.TrustedProxy && r.Header.Get("X-Forwarded-Proto") == "https"
+	if !a.TrustedProxy {
+		return false
+	}
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if i := strings.LastIndexByte(proto, ','); i >= 0 {
+		proto = proto[i+1:]
+	}
+	return strings.EqualFold(strings.TrimSpace(proto), "https")
 }
 
 // HandleLoginNoScript is the form-action target for the login page's

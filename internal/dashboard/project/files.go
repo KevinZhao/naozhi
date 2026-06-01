@@ -134,12 +134,14 @@ var processEUID = uint32(os.Geteuid())
 func isPublicTmpForeignPrivate(info os.FileInfo) bool {
 	uid, ok := fileOwnerUID(info)
 	if !ok {
-		// Non-Unix or stub FileInfo (test fakes); be conservative and
-		// allow — the production build is always Linux where the
-		// assertion holds. A unit test that wants to assert the deny
-		// path supplies a real *syscall.Stat_t via os.Lstat on a
-		// fixture file.
-		return false
+		// Non-Unix or stub FileInfo (test fakes): we cannot read the
+		// owner UID, so this security gate fails closed — treat the
+		// file as foreign-private and refuse it (deny by default).
+		// The production build is always Linux where ok is always true,
+		// so this branch never fires in production. A unit test that
+		// wants to exercise the deny path supplies a real *syscall.Stat_t
+		// via os.Lstat on a fixture file.
+		return true
 	}
 	if uid == processEUID {
 		return false
