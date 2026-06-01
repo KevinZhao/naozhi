@@ -418,7 +418,6 @@ func GCWithRefs(ctx context.Context, workspace string, opts GCOptions) (GCResult
 	}
 
 	now := opts.Now
-	nowMS := now.UnixMilli()
 	uploadCutoff := now.UTC().Add(-opts.UploadTTL)
 	refCutoffMS := now.Add(-opts.RefTTL).UnixMilli()
 
@@ -471,7 +470,7 @@ func GCWithRefs(ctx context.Context, workspace string, opts GCOptions) (GCResult
 			abs := filepath.Join(dayPath, name)
 			metaPath := metaPathFor(abs)
 
-			keep, reason, err := shouldKeepAttachment(metaPath, dayTime, uploadCutoff, refCutoffMS, nowMS)
+			keep, reason, err := shouldKeepAttachment(metaPath, dayTime, uploadCutoff, refCutoffMS)
 			if err != nil {
 				slog.Warn("attachment GC: keep-decision failed",
 					"path", abs, "err", err)
@@ -557,7 +556,7 @@ func GCWithRefs(ctx context.Context, workspace string, opts GCOptions) (GCResult
 // back to the date-directory parse time for upload-age (the actual
 // upload time is unrecoverable without the sidecar) and assume no
 // references.
-func shouldKeepAttachment(metaPath string, dayTime time.Time, uploadCutoff time.Time, refCutoffMS int64, nowMS int64) (bool, ReapReason, error) {
+func shouldKeepAttachment(metaPath string, dayTime time.Time, uploadCutoff time.Time, refCutoffMS int64) (bool, ReapReason, error) {
 	meta, err := loadMetaFile(metaPath)
 	if err != nil {
 		return false, "", err
