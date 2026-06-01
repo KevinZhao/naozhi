@@ -523,13 +523,17 @@ func (t *Tracker) flushDue() {
 		return
 	}
 	now := t.opts.Clock()
+	deleted := 0
 	for k, v := range t.pending {
 		if v.flushAt.After(now) {
 			continue
 		}
 		t.applyBump(k, v)
 		delete(t.pending, k)
-		t.pendingSize.Add(-1)
+		deleted++
+	}
+	if deleted > 0 {
+		t.pendingSize.Add(-int64(deleted))
 	}
 }
 
@@ -539,10 +543,14 @@ func (t *Tracker) flushAll() {
 	if len(t.pending) == 0 {
 		return
 	}
+	deleted := 0
 	for k, v := range t.pending {
 		t.applyBump(k, v)
 		delete(t.pending, k)
-		t.pendingSize.Add(-1)
+		deleted++
+	}
+	if deleted > 0 {
+		t.pendingSize.Add(-int64(deleted))
 	}
 }
 

@@ -73,7 +73,6 @@ func Localize(text string) string {
 	}
 	lowerPrefix := strings.ToLower(prefix)
 	isEnvelope := strings.HasPrefix(lowerPrefix, "api error") ||
-		strings.HasPrefix(lowerPrefix, "error:") ||
 		strings.HasPrefix(lowerPrefix, "anthropic api error")
 	if !isEnvelope {
 		return text
@@ -106,7 +105,7 @@ func Localize(text string) string {
 	case strings.Contains(lower, "network") || strings.Contains(lower, "connection"):
 		friendly = "🌐 与 Claude API 的网络连接出现问题，请稍后重试。"
 	default:
-		return text
+		friendly = "⚠️ Claude API 返回了一个未识别的错误，已记录日志，请联系管理员。"
 	}
 
 	// Log only non-sensitive diagnostics: error category and envelope length.
