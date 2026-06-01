@@ -892,14 +892,23 @@ type JobUpdate struct {
 	// Notify sets Job.Notify when non-nil. nil leaves the field unchanged;
 	// pointer-to-true/false writes the explicit tri-state.
 	//
-	// R227-CONFIG-1: there's no API to reset Job.Notify back to legacy-default
-	// (nil) once a value has been set. Callers wanting that effect must
-	// either (a) toggle between true and false explicitly (the typical UX
-	// path), or (b) edit cron_jobs.json off-line and restart. Promoting
-	// JobUpdate.Notify to a tri-state-with-reset enum is a deferred design
-	// decision — the wire format would have to grow a fourth state ("clear")
-	// and several /api/cron consumers would need migration.
+	// R227-CONFIG-1 / R249-CR-15 (#958): use NotifyClear (below) to reset
+	// Job.Notify back to legacy-default (nil) once a value has been set.
+	// The clear is kept on a separate bool flag rather than overloading
+	// Notify with a fourth state so the wire format and existing
+	// /api/cron consumers stay source-compatible — a nil Notify still
+	// means "leave unchanged", a non-nil Notify still writes the explicit
+	// tri-state, and only the additive NotifyClear flag opts into the
+	// reset-to-nil behaviour.
 	Notify *bool
+	// NotifyClear, when set to a pointer-to-true, resets Job.Notify back to
+	// nil (legacy-default: inherit the scheduler-wide notify policy). nil or
+	// pointer-to-false is a no-op. Applied AFTER Notify so a caller that sets
+	// both gets the clear (defensive: the dashboard never sends both, but
+	// "clear wins" is the least-surprising precedence — an explicit reset
+	// request should not be silently overridden by a stale Notify value in
+	// the same patch). R249-CR-15 (#958).
+	NotifyClear *bool
 	// NotifyPlatform / NotifyChatID behave like Prompt / WorkDir: nil keeps
 	// the existing value, a pointer to "" clears it.
 	NotifyPlatform *string
@@ -952,6 +961,11 @@ func (upd JobUpdate) applyTo(j *Job) {
 	if upd.Notify != nil {
 		v := *upd.Notify
 		j.Notify = &v
+	}
+	// R249-CR-15 (#958): reset-to-nil opt-in. Applied after Notify so an
+	// explicit clear request wins if a caller (incorrectly) sends both.
+	if upd.NotifyClear != nil && *upd.NotifyClear {
+		j.Notify = nil
 	}
 	if upd.NotifyPlatform != nil {
 		j.NotifyPlatform = *upd.NotifyPlatform
