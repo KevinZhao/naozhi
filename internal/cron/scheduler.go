@@ -52,6 +52,17 @@ var ErrJobPaused = errors.New("cron: job is paused")
 // HTTP 422 (vs 400) instead of relying on string matching.
 var ErrJobNoPrompt = errors.New("cron: job has no prompt")
 
+// ErrPromptAlreadySet is returned by SetJobPrompt when the target job already
+// has a non-empty prompt. SetJobPrompt only auto-fills the FIRST prompt on a
+// dashboard-created (paused, empty-prompt) job; it deliberately does NOT
+// overwrite an existing prompt — that is UpdateJob's job. Previously this was
+// a silent `return nil`, so a caller intending to edit an existing prompt got
+// a 200 with no change (R250531-CR-8 / #1503). The sentinel makes the no-op
+// observable: IM auto-save callers treat it as benign (the prompt was already
+// captured on a prior turn), while any caller that actually meant to mutate
+// should route through UpdateJob and can map this to HTTP 409 Conflict.
+var ErrPromptAlreadySet = errors.New("cron: job already has a prompt; use UpdateJob to change it")
+
 // ErrPersistFailed is returned by mutation APIs (AddJob/DeleteJob/Update/
 // Pause/Resume/SetJobPrompt) when the post-mutation JSON serialisation fails.
 // The in-memory state has already been changed and cannot be rolled back —
@@ -62,6 +73,14 @@ var ErrJobNoPrompt = errors.New("cron: job has no prompt")
 // marshal error, causing DeleteJob to "succeed" via the API while the
 // deletion never reached disk — a restart replayed the deleted job.
 var ErrPersistFailed = errors.New("cron: persist jobs failed")
+
+// ErrSchedulerStopped is returned by Start() when the scheduler has already
+// been Stop()'d. Stop() documents that the instance is single-shot — its
+// budget-exceed paths intentionally leak wrapper goroutines because no reuse
+// is expected; reviving a stopped instance would accumulate those orphans
+// across lifecycles. R249-ARCH-19 (#984): sentinel so callers can errors.Is
+// and distinguish "already stopped" from a transient loadJobs failure.
+var ErrSchedulerStopped = errors.New("cron: scheduler already stopped")
 
 // SessionRouter is the subset of session.Router that the cron Scheduler
 // actually consumes. Declaring it here (consumer-side interface, Go idiom)
@@ -1142,6 +1161,20 @@ func (s *Scheduler) StartedAt() time.Time {
 // double-Start does not reshape the missed-schedule suppression
 // window mid-flight.
 func (s *Scheduler) Start() error {
+	// R249-ARCH-19 (#984): refuse to (re)start once Stop() has latched. The
+	// Stop() godoc documents that triggerWG / gcWG / runDeadlineWatchdog
+	// wrapper goroutines are intentionally leaked on budget-exceed precisely
+	// because "Scheduler is not reusable". A Stop-then-Start sequence would
+	// re-enter loadJobs + cron.Start + cold-start GC on an instance whose
+	// stopCtx is already cancelled, accumulating those orphan goroutines
+	// across lifecycles until OOM. The started CAS below blocks the common
+	// double-Start, but it does NOT block Start-after-Stop when a prior
+	// Start failed at loadJobs and reset started=false. Gate on stopped here
+	// so a Stopped instance can never be revived. ErrSchedulerStopped lets
+	// callers distinguish "already stopped" from a transient load failure.
+	if s.stopped.Load() {
+		return ErrSchedulerStopped
+	}
 	if !s.started.CompareAndSwap(false, true) {
 		return nil
 	}

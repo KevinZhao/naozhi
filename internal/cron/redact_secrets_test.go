@@ -54,6 +54,31 @@ func TestRedactSecretsInResult_Patterns(t *testing.T) {
 			in:   "ghp_abcdef0123456789 and AKIAIOSFODNN7EXAMPLE",
 			want: "[REDACTED] and [REDACTED]",
 		},
+		{
+			name: "OpenAI project key",
+			in:   "export OPENAI_API_KEY=sk-proj-abcdef0123456789ABCDEF done",
+			want: "export OPENAI_API_KEY=[REDACTED] done",
+		},
+		{
+			name: "OpenAI legacy key",
+			in:   "key sk-abcdefghij0123456789ABCDEFGHIJ0123456789xyz here",
+			want: "key [REDACTED] here",
+		},
+		{
+			name: "HuggingFace token",
+			in:   "HF_TOKEN=hf_abcdefghij0123456789 set",
+			want: "HF_TOKEN=[REDACTED] set",
+		},
+		{
+			name: "npm token",
+			in:   "//registry: npm_abcdefghij0123456789 used",
+			want: "//registry: [REDACTED] used",
+		},
+		{
+			name: "sk-ant beats sk- fallback",
+			in:   "sk-ant-api03-abcDEF123 ok",
+			want: "[REDACTED] ok",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -62,6 +87,107 @@ func TestRedactSecretsInResult_Patterns(t *testing.T) {
 				t.Errorf("redactSecretsInResult(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRedactSecretsInResult_NewPrefixes verifies the three additional
+// prefixes added in R164930-SEC-3 (sk-proj-, github_pat_, hf_) are
+// redacted, and that short hf_ values below minTail are left intact.
+func TestRedactSecretsInResult_NewPrefixes(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "OpenAI project key",
+			in:   "key sk-proj-abcdefghij1234567890 used",
+			want: "key [REDACTED] used",
+		},
+		{
+			name: "GitHub fine-grained PAT",
+			in:   "token github_pat_11ABCDEFG0abcdefghij1234567890 rejected",
+			want: "token [REDACTED] rejected",
+		},
+		{
+			name: "HuggingFace token",
+			in:   "auth hf_abcdefghij1234567890abcdef ok",
+			want: "auth [REDACTED] ok",
+		},
+		{
+			name: "hf_ short tail not redacted",
+			in:   "see hf_short for details",
+			want: "see hf_short for details",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactSecretsInResult(tc.in)
+			if got != tc.want {
+				t.Errorf("redactSecretsInResult(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRedactSecretsInResult_GCP verifies the GCP / Google OAuth access
+// token prefix (ya29.) added in R20260531-SEC-5 is redacted, including the
+// base64url body that follows the dot, and that short tails / bare prefix
+// prose are left intact. [R20260531-SEC-5].
+func TestRedactSecretsInResult_GCP(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "GCP access token",
+			in:   "Authorization: Bearer ya29.AAAA0123456789abcdef-_ZZ done",
+			want: "Authorization: Bearer [REDACTED] done",
+		},
+		{
+			name: "GCP token at line start",
+			in:   "ya29.a0AfH6SMBx1234567890abcdef rejected",
+			want: "[REDACTED] rejected",
+		},
+		{
+			name: "ya29. short tail not redacted",
+			in:   "ya29.short here",
+			want: "ya29.short here",
+		},
+		{
+			name: "bare ya29 prefix prose not redacted",
+			in:   "the ya29. prefix marks Google OAuth tokens",
+			want: "the ya29. prefix marks Google OAuth tokens",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactSecretsInResult(tc.in)
+			if got != tc.want {
+				t.Errorf("redactSecretsInResult(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSanitiseRunErrMsg_RedactsSecrets is the integration coverage for the
+// error path: sanitiseRunErrMsg must scrub well-known secret prefixes so a
+// leaked token in an error string (LastError) never lands on disk or the
+// dashboard WS broadcast. [R20260531-SEC-8].
+func TestSanitiseRunErrMsg_RedactsSecrets(t *testing.T) {
+	cases := []string{
+		"exec failed: auth header sk-ant-api03-abcdef0123456789 rejected",
+		"git push denied with ghp_abcdef0123456789 token",
+	}
+	for _, in := range cases {
+		got := sanitiseRunErrMsg(in)
+		if strings.Contains(got, "sk-ant-") || strings.Contains(got, "ghp_") {
+			t.Errorf("sanitiseRunErrMsg left token intact for %q → %q", in, got)
+		}
+		if !strings.Contains(got, "[REDACTED]") {
+			t.Errorf("sanitiseRunErrMsg did not insert [REDACTED] for %q → %q", in, got)
+		}
 	}
 }
 
@@ -80,6 +206,11 @@ func TestRedactSecretsInResult_Negative(t *testing.T) {
 		"the prefix sk-ant- is reserved",
 		"see ghp_ for personal access tokens",
 		"AKIA is the AWS marker",
+		// sk- legacy: short tail under minTail (40) must not be redacted,
+		// so ordinary "sk-" prose / short identifiers stay intact.
+		"sk-abc is not a key",
+		"use sk-short123 placeholder",
+		"hf_ and npm_ are reserved prefixes",
 	}
 	for _, in := range cases {
 		got := redactSecretsInResult(in)
@@ -102,6 +233,38 @@ func TestRedactSecretsInResult_Idempotent(t *testing.T) {
 	}
 	if strings.Contains(once, "sk-ant-") || strings.Contains(once, "ghp_") {
 		t.Fatalf("redactor left a known prefix intact: %q", once)
+	}
+}
+
+// TestMayContainSecretPrefix_FirstBytes verifies the fast-path pre-scan
+// recognises the first byte of every registered prefix family — in
+// particular the newly added 'h' (hf_) and 'n' (npm_) which would
+// otherwise short-circuit to false and disable redaction.
+// [R030056-SEC-005].
+func TestMayContainSecretPrefix_FirstBytes(t *testing.T) {
+	truthy := []string{
+		"hf_abcdefghij0123456789",
+		"npm_abcdefghij0123456789",
+		"sk-proj-abcdef0123456789ABCDEF",
+		"ghp_abcdef0123456789",
+		"AKIAIOSFODNN7EXAMPLE",
+		"xoxb-1234567890",
+		"ya29.AAAA0123456789abcdef",
+	}
+	for _, in := range truthy {
+		if !mayContainSecretPrefix(in) {
+			t.Errorf("mayContainSecretPrefix(%q) = false, want true", in)
+		}
+	}
+	falsy := []string{
+		"",
+		"plai du", // no s/g/A/x/h/n first bytes
+		"402",
+	}
+	for _, in := range falsy {
+		if mayContainSecretPrefix(in) {
+			t.Errorf("mayContainSecretPrefix(%q) = true, want false", in)
+		}
 	}
 }
 

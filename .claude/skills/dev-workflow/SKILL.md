@@ -201,7 +201,7 @@ task arrives
 - Project-scoped skills live under `.claude/skills/` and are tracked in git (whitelisted in `.gitignore`). Edits to a skill follow the same worktree → review → PR loop as code.
 - Worktrees live under `.claude/worktrees/<name>/` and are ignored. Use `EnterWorktree` (or `git worktree add`) — never branch by editing the existing checkout in place.
 - Large designs go in `docs/rfc/`, indexed in `docs/rfc/README.md`
-- Outstanding work tracked in **GitHub Issues** (`label:priority:p0,priority:p1,priority:p2 is:open`); `docs/TODO.md` was deleted 2026-05-26 after the migration — do NOT recreate it. `docs/TODO-changelog.md` / `docs/TODO_ARCHIVE.md` are historical reference only.
+- Outstanding work tracked in **GitHub Issues** (`label:priority:p0,priority:p1,priority:p2 is:open`); `docs/TODO.md` was deleted 2026-05-26 after the migration — do NOT recreate it. The historical `docs/TODO_*.md` archives were removed 2026-05-30; old R-anchors are recoverable via `git log -S` against the repo history.
 - Cosmetic / godoc / naming suggestions go to `docs/cosmetic-backlog.md`, not issues
 - Review findings flow: review agent → `docs/review/R{N}-raw.md` → `triage-findings` skill → issues / cosmetic-backlog / discarded
 - Local restart after a build during development: `sudo systemctl restart naozhi` (see `docs/ops/naozhi-deploy-skill.md`); never hand-kill the process

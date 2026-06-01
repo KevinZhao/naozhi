@@ -19,6 +19,7 @@
 package attachment
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -302,86 +303,83 @@ func Remove(absPath string) {
 	}
 }
 
-// GC is the legacy day-directory reaper: it drops an entire
-// <workspace>/.naozhi/attachments/<date>/ subtree once the day is
-// more than ttl old. Retained for back-compat with callers that
-// haven't migrated to GCWithRefs; does NOT consult .meta files and
-// therefore cannot honour ReferencingKeyHashes / LastReferencedAt.
-//
-// Prefer GCWithRefs for new call sites. This function is kept so
-// naozhi deployments with no event log persistence (EventLogDir "")
-// still have a functional GC path — the tracker never writes meta
-// updates there, so per-file per-ref logic would be equivalent to
-// the legacy code anyway.
-//
-// Errors on individual removes are logged but do not abort the
-// sweep — a single permission-denied entry should not leave the
-// rest of the backlog untouched.
-func GC(workspace string, ttl time.Duration, now time.Time) (int, error) {
-	if workspace == "" {
-		return 0, ErrWorkspaceRequired
-	}
-	root := filepath.Join(workspace, Dir)
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("read %s: %w", root, err)
-	}
-	cutoff := now.UTC().Add(-ttl)
-	removed := 0
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		t, err := time.Parse("2006-01-02", e.Name())
-		if err != nil {
-			// Non-date-formatted directory (operator footprint, partial
-			// earlier naozhi version, etc.) — leave it alone.
-			continue
-		}
-		// t is midnight of that day UTC; add 24h so we only delete a day
-		// once it has fully elapsed past the cutoff. Prevents a 7-day TTL
-		// from silently being 6 days at 00:00 UTC.
-		if t.Add(24 * time.Hour).Before(cutoff) {
-			p := filepath.Join(root, e.Name())
-			// Lstat (not Stat) so we can detect a symlink whose target
-			// points outside the attachment root. os.RemoveAll follows
-			// symlinked *directories* on Linux, so a date-named symlink
-			// dropped into the attachments root could delete arbitrary
-			// operator data. Refuse to touch any non-directory entry we
-			// see after ReadDir said it was a dir — the only explanation
-			// is a TOCTOU swap or a tampered filesystem.
-			if li, lerr := os.Lstat(p); lerr != nil {
-				slog.Warn("attachment GC: lstat failed", "dir", p, "err", lerr)
-				continue
-			} else if li.Mode()&os.ModeSymlink != 0 || !li.IsDir() {
-				slog.Warn("attachment GC: refusing to remove non-directory entry",
-					"dir", p, "mode", li.Mode().String())
-				continue
-			}
-			if err := os.RemoveAll(p); err != nil {
-				slog.Warn("attachment GC: remove failed", "dir", p, "err", err)
-				continue
-			}
-			removed++
-		}
-	}
-	return removed, nil
-}
-
 // DefaultRefTTL is the second time-bound applied by GCWithRefs:
 // files referenced by at least one session's event log survive this
 // long past their last observed reference even if UploadedAt is
 // older than uploadTTL. The 30-day default is conservative enough
 // that a user returning to a session after a long gap still sees
-// their images; operators can tighten it via cron job arguments.
+// their images; operators can tighten it via the attachment-gc
+// daemon config (see docs/rfc/attachment-gc-daemon.md).
 const DefaultRefTTL = 30 * 24 * time.Hour
 
-// GCWithRefs is the refcount-aware reaper (see RFC §3.3). For every
-// image / PDF file under <workspace>/.naozhi/attachments/<date>/
-// it reads the sibling .meta sidecar and keeps the file when:
+// ReapReason classifies why a payload was reaped (or would be, in
+// dry-run). The attachment-gc daemon buckets dry-run counts by reason
+// so operators can tell "safe to delete legacy files" apart from
+// "tracker has not bumped this yet" before flipping dry_run off.
+// See docs/rfc/attachment-gc-daemon.md §6 (E4).
+type ReapReason string
+
+const (
+	// ReasonLegacyNoMeta: no .meta sidecar; decided purely by the
+	// date-directory upload-TTL heuristic. Generally safe to delete.
+	ReasonLegacyNoMeta ReapReason = "legacy_no_meta"
+	// ReasonMetaNoRefs: .meta exists but no ReferencingKeyHashes.
+	// Could be genuinely unreferenced OR the tracker simply has not
+	// bumped it yet — the high-risk bucket operators must weigh.
+	ReasonMetaNoRefs ReapReason = "meta_no_refs"
+	// ReasonRefsExpired: referenced once but LastReferencedAt is past
+	// refTTL. Long-unreferenced; safe to delete.
+	ReasonRefsExpired ReapReason = "refs_expired"
+)
+
+// GCOptions controls a single GCWithRefs sweep over one workspace.
+type GCOptions struct {
+	// UploadTTL: files younger than this (by UploadedAt, or date-dir
+	// for legacy) are always kept.
+	UploadTTL time.Duration
+	// RefTTL: referenced files survive this long past LastReferencedAt
+	// even when older than UploadTTL.
+	RefTTL time.Duration
+	// Now is the reference clock (injected for deterministic tests).
+	Now time.Time
+	// MaxRemove caps payloads removed in this sweep (per-root budget,
+	// RFC §4.6-2). 0 means unlimited. When the cap is hit the sweep
+	// returns early; the daemon's round-robin cursor ensures other
+	// roots get serviced next tick.
+	MaxRemove int
+	// MetaGrace: skip any payload whose .meta sidecar was modified
+	// within this window (RFC §10 F2). Closes the race where a bump
+	// just landed but GC read a pre-bump snapshot. 0 disables.
+	MetaGrace time.Duration
+	// DryRun: decide keep/delete and bucket-count would-removes, but
+	// do NOT touch disk. RFC §6.
+	DryRun bool
+}
+
+// GCResult reports the outcome of one GCWithRefs sweep.
+type GCResult struct {
+	// Removed is the number of payloads deleted (0 in dry-run).
+	Removed int
+	// WouldRemove counts payloads that WOULD be deleted, bucketed by
+	// reason. Populated in both dry-run and live mode (in live mode it
+	// mirrors the reap reasons for observability).
+	WouldRemove map[ReapReason]int
+	// Stopped is true when the sweep returned early because MaxRemove
+	// was hit (more work remains for the next tick).
+	Stopped bool
+}
+
+func (r *GCResult) bump(reason ReapReason) {
+	if r.WouldRemove == nil {
+		r.WouldRemove = make(map[ReapReason]int, 3)
+	}
+	r.WouldRemove[reason]++
+}
+
+// GCWithRefs is the refcount-aware reaper (see RFC §3.3 +
+// docs/rfc/attachment-gc-daemon.md). For every image / PDF file under
+// <workspace>/.naozhi/attachments/<date>/ it reads the sibling .meta
+// sidecar and keeps the file when:
 //
 //	( now - UploadedAt        <  uploadTTL )
 //	OR
@@ -389,44 +387,51 @@ const DefaultRefTTL = 30 * 24 * time.Hour
 //	  now - UnixMilli(LastReferencedAt) < refTTL )
 //
 // Files without a .meta sidecar fall back to the date-directory
-// mtime for the upload-TTL check and are treated as unreferenced —
-// the upload-TTL branch alone decides them. That mirrors legacy GC
+// NAME (parsed via time.Parse, NOT filesystem mtime) for the
+// upload-TTL check and are treated as unreferenced — the upload-TTL
+// branch alone decides them. That mirrors the removed legacy GC
 // behaviour for migration.
 //
 // Empty date directories are pruned after the per-file sweep so the
 // top-level directory listing stays tidy.
 //
-// Returns the number of files removed (not the number of records
-// touched). Errors on individual files are logged + skipped so a
-// permission problem on one attachment doesn't stop the sweep.
+// ctx is honoured at both the day-directory and per-file granularity
+// so a large backlog cannot wedge the caller (the attachment-gc
+// daemon's Tick context / shutdown). On cancellation it returns the
+// partial result with ctx.Err().
 //
-// Callers: the attachment-gc cron job in cmd/naozhi/main.go. The
-// tracker (internal/attachment/tracker) runs separately — it only
-// WRITES refcount data, it never deletes.
-func GCWithRefs(workspace string, uploadTTL, refTTL time.Duration, now time.Time) (int, error) {
+// Callers: the attachment-gc daemon (internal/sysession). The tracker
+// (internal/attachment/tracker) runs separately — it only WRITES
+// refcount data, it never deletes.
+func GCWithRefs(ctx context.Context, workspace string, opts GCOptions) (GCResult, error) {
+	var res GCResult
 	if workspace == "" {
-		return 0, ErrWorkspaceRequired
+		return res, ErrWorkspaceRequired
 	}
 	root := filepath.Join(workspace, Dir)
 	dayEntries, err := os.ReadDir(root)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return 0, nil
+			return res, nil
 		}
-		return 0, fmt.Errorf("read %s: %w", root, err)
+		return res, fmt.Errorf("read %s: %w", root, err)
 	}
 
+	now := opts.Now
 	nowMS := now.UnixMilli()
-	uploadCutoff := now.UTC().Add(-uploadTTL)
-	refCutoffMS := now.Add(-refTTL).UnixMilli()
+	uploadCutoff := now.UTC().Add(-opts.UploadTTL)
+	refCutoffMS := now.Add(-opts.RefTTL).UnixMilli()
 
-	removed := 0
 	for _, de := range dayEntries {
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
 		if !de.IsDir() {
 			continue
 		}
-		// Refuse to follow a symlinked date directory; same reasoning
-		// as the legacy GC.
+		// Refuse to follow a symlinked date directory: os.Remove on a
+		// symlinked dir / TOCTOU swap could otherwise reach outside the
+		// attachment root.
 		dayPath := filepath.Join(root, de.Name())
 		li, lerr := os.Lstat(dayPath)
 		if lerr != nil || li.Mode()&os.ModeSymlink != 0 || !li.IsDir() {
@@ -448,13 +453,13 @@ func GCWithRefs(workspace string, uploadTTL, refTTL time.Duration, now time.Time
 				"dir", dayPath, "err", err)
 			continue
 		}
-		// First pass: decide per-file keep/delete.
+		// Per-file keep/delete pass.
 		kept := 0
 		for _, fe := range fileEntries {
+			if err := ctx.Err(); err != nil {
+				return res, err
+			}
 			if fe.IsDir() {
-				// No nested directories expected; Lstat + skip so a
-				// rogue symlink can't cause an os.Remove to eat
-				// upstream data.
 				continue
 			}
 			name := fe.Name()
@@ -464,8 +469,9 @@ func GCWithRefs(workspace string, uploadTTL, refTTL time.Duration, now time.Time
 				continue
 			}
 			abs := filepath.Join(dayPath, name)
+			metaPath := metaPathFor(abs)
 
-			keep, err := shouldKeepAttachment(abs, dayTime, uploadCutoff, refCutoffMS, nowMS)
+			keep, reason, err := shouldKeepAttachment(metaPath, dayTime, uploadCutoff, refCutoffMS, nowMS)
 			if err != nil {
 				slog.Warn("attachment GC: keep-decision failed",
 					"path", abs, "err", err)
@@ -478,46 +484,83 @@ func GCWithRefs(workspace string, uploadTTL, refTTL time.Duration, now time.Time
 				kept++
 				continue
 			}
-			// Remove payload + .meta. Errors only logged.
+
+			// F2: skip payloads whose .meta was just touched by the
+			// tracker — a bump may have landed after we'd otherwise
+			// have read a pre-bump snapshot. Retain this round.
+			if opts.MetaGrace > 0 {
+				if mi, merr := os.Stat(metaPath); merr == nil &&
+					now.Sub(mi.ModTime()) < opts.MetaGrace {
+					kept++
+					continue
+				}
+			}
+
+			// Count the would-remove for observability / dry-run.
+			res.bump(reason)
+
+			if opts.DryRun {
+				slog.Info("attachment GC: would remove",
+					"path", abs, "reason", string(reason),
+					"day", de.Name())
+				// dry-run does not delete and does not count toward the
+				// real MaxRemove budget — it reports the full picture.
+				continue
+			}
+
+			// Live delete. F1: remove .meta FIRST, then payload. If the
+			// tracker races an UpdateMetaFile in the window, loadMetaFile
+			// returns (nil,nil) → UpdateMetaFile's m==nil branch refuses
+			// to recreate the sidecar, so we cannot leave an orphan meta.
+			// A leftover payload (if we die between the two removes) is
+			// reaped next sweep via the legacy-fallback path.
+			if err := os.Remove(metaPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				slog.Warn("attachment GC: remove meta failed",
+					"path", metaPath, "err", err)
+			}
 			if err := os.Remove(abs); err != nil {
 				slog.Warn("attachment GC: remove payload failed",
 					"path", abs, "err", err)
 				continue
 			}
-			metaPath := metaPathFor(abs)
-			if err := os.Remove(metaPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				slog.Warn("attachment GC: remove meta failed",
-					"path", metaPath, "err", err)
+			slog.Info("attachment GC: removed",
+				"path", abs, "reason", string(reason))
+			res.Removed++
+
+			if opts.MaxRemove > 0 && res.Removed >= opts.MaxRemove {
+				res.Stopped = true
+				return res, nil
 			}
-			removed++
 		}
 
 		// Prune empty day directories opportunistically. Only when the
 		// day is older than uploadTTL — a freshly uploaded day that
-		// happens to end up empty after GC (unusual) should stay on
-		// disk in case subsequent uploads land there.
-		if kept == 0 && dayTime.Add(24*time.Hour).Before(uploadCutoff) {
+		// happens to end up empty (unusual) stays on disk for incoming
+		// uploads. INVARIANT (RFC §10 F3): this only ever touches dirs
+		// >= uploadTTL old, which by construction never equals today's
+		// Persist target dir — do not relax this condition.
+		if kept == 0 && !opts.DryRun && dayTime.Add(24*time.Hour).Before(uploadCutoff) {
 			if err := os.Remove(dayPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				slog.Debug("attachment GC: empty day dir remove failed",
 					"dir", dayPath, "err", err)
 			}
 		}
 	}
-	return removed, nil
+	return res, nil
 }
 
 // shouldKeepAttachment applies the double-TTL rule. See GCWithRefs
-// godoc for the precise formula.
+// godoc for the precise formula. Returns (keep, reapReason, err);
+// reapReason is meaningful only when keep==false.
 //
 // Missing .meta: the attachment predates the refcount RFC. We fall
 // back to the date-directory parse time for upload-age (the actual
 // upload time is unrecoverable without the sidecar) and assume no
-// references — same as legacy GC behaviour.
-func shouldKeepAttachment(absPath string, dayTime time.Time, uploadCutoff time.Time, refCutoffMS int64, nowMS int64) (bool, error) {
-	metaPath := metaPathFor(absPath)
+// references.
+func shouldKeepAttachment(metaPath string, dayTime time.Time, uploadCutoff time.Time, refCutoffMS int64, nowMS int64) (bool, ReapReason, error) {
 	meta, err := loadMetaFile(metaPath)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 
 	// Upload-age decision.
@@ -545,12 +588,21 @@ func shouldKeepAttachment(absPath string, dayTime time.Time, uploadCutoff time.T
 
 	// Keep when either bound still holds.
 	if !uploadOld {
-		return true, nil
+		return true, "", nil
 	}
 	if hasRefs && refRecent {
-		return true, nil
+		return true, "", nil
 	}
-	return false, nil
+
+	// Reaping — classify why for the dry-run buckets (RFC §6 E4).
+	switch {
+	case meta == nil:
+		return false, ReasonLegacyNoMeta, nil
+	case hasRefs: // refs exist but expired (refRecent was false)
+		return false, ReasonRefsExpired, nil
+	default:
+		return false, ReasonMetaNoRefs, nil
+	}
 }
 
 // loadMetaFile reads + parses a single .meta sidecar. Missing files

@@ -187,7 +187,7 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	persistedErrMsg := a.errMsg
 	jobPersistOK := false
 	if !a.skipPersist {
-		persistedResult, persistedErrMsg, jobPersistOK = s.recordTerminalResult(a.job, a.result, a.errMsg, a.sessionID, a.errClass, a.state)
+		persistedResult, persistedErrMsg, jobPersistOK = s.recordTerminalResult(a.job, a.result, a.errMsg, a.sessionID, a.errClass, a.state, endedAt)
 	} else {
 		persistedResult = sanitiseRunResult(persistedResult)
 		persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
@@ -323,6 +323,11 @@ func sanitiseRunResult(s string) string {
 // flow into WS broadcasts and must not leak filesystem paths.
 func sanitiseRunErrMsg(s string) string {
 	s = redactPathsInCronError(s)
+	// R20260531-SEC-8: scrub well-known secret-prefix patterns BEFORE
+	// SanitizeForLog so a leaked token in an error string (LastError) never
+	// lands on disk (cron_jobs.json) or the dashboard WS broadcast. Mirrors
+	// sanitiseRunResult's call ordering on the success path.
+	s = redactSecretsInResult(s)
 	return osutil.SanitizeForLog(s, maxCronErrMsgRunes)
 }
 
@@ -487,7 +492,7 @@ func (p jobResultSnapshot) restore(j *Job) {
 // recordResult path was deleted (R220-GO-1). The rollback state now lives
 // in the named jobResultSnapshot struct above so a future "add a Last*
 // field" diff lands once on the type instead of three coupled edits.
-func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState) (string, string, bool) {
+func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState, endedAt time.Time) (string, string, bool) {
 	// truncateWithSuffix (limits.go) is the single source of truth for the
 	// rune-trim + …[truncated] suffix; both this path and sanitiseRunResult
 	// must produce byte-identical output so the skipPersist branch of
@@ -525,7 +530,7 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 		Counters:       j.RunCounters,
 	}
 
-	j.LastRunAt = time.Now()
+	j.LastRunAt = endedAt
 	j.LastResult = result
 	j.LastError = errMsg
 	j.LastErrorClass = errClass
@@ -605,7 +610,7 @@ const redactPathsBuilderPoolMaxCap = 4 * maxRedactErrLen
 // is invoked on every execution and the regex cost would dominate the
 // redaction budget.
 //
-// SCOPE — UNC paths are out of scope. R239-GO-9.
+// SCOPE — UNC paths are out of scope. R239-GO-9 / R249-CR-8 (#952).
 // Detection covers three forms: POSIX `/abs`, Windows drive `C:\…` /
 // `C:/…`, and home-relative `~/`. Microsoft UNC paths (`\\server\share`
 // and the rare `//server/share` POSIX-style equivalent that some Windows
@@ -618,6 +623,11 @@ const redactPathsBuilderPoolMaxCap = 4 * maxRedactErrLen
 // deployments may surface UNC strings unredacted; redaction of those
 // forms is a future enhancement (would require a new branch matching
 // `\\` / `//` followed by a non-`/` non-`\` host segment).
+//
+// NEEDS-DESIGN — tracked at GitHub #952 so this deferred enhancement
+// carries the same issue-backed paper trail as the other cron NEEDS-DESIGN
+// items (R241-PERF-9 / #482 etc.), rather than living only as an inline
+// "future enhancement" comment with no tracker. R249-CR-8 (#952).
 func redactPathsInCronError(s string) string {
 	if s == "" {
 		return s

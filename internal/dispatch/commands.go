@@ -206,11 +206,19 @@ func (d *Dispatcher) handleUrgentCommand(ctx context.Context, msg platform.Incom
 	// Spawn in its own goroutine like regular passthrough sends — sendAndReply
 	// will handle GetOrCreate + reply. The priority field is threaded through
 	// dispatch → SendPassthrough via ctx + the priorityCtxKey extension.
-	// Use context.WithoutCancel so the platform handler returning early does
-	// not cancel the in-flight LLM turn (matches the regular passthrough
-	// path in dispatch.go:319). Values from ctx (logger fields, tracing)
-	// remain available to the spawned goroutine.
-	go d.sendAndReply(WithUrgent(WithPassthrough(context.WithoutCancel(ctx))), key, text, nil, agentID, opts, msg, log, false)
+	//
+	// R20260531070014-ARCH-3: use mergeStopAndValues(d.stopCtx, ctx) rather
+	// than the bare context.WithoutCancel(ctx) previously used here. The
+	// regular passthrough path (dispatch.go) migrated from WithoutCancel to
+	// mergeStopAndValues in #1320 so that detached goroutines abort on SIGTERM
+	// instead of running through their full internal totalTimeout and causing
+	// systemd TimeoutStopSec breaches. /urgent had re-introduced the old
+	// pattern, meaning /urgent goroutines were the only remaining path that
+	// could not be stopped on graceful shutdown.
+	// cancelSrc = d.stopCtx  → goroutine aborts when the service shuts down.
+	// valuesSrc = ctx         → per-request slog attrs / auth values survive.
+	sendCtx := mergeStopAndValues(d.stopCtx, ctx)
+	go d.sendAndReply(WithUrgent(WithPassthrough(sendCtx)), key, text, nil, agentID, opts, msg, log, false)
 }
 
 func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.IncomingMessage) {
@@ -461,6 +469,31 @@ func (d *Dispatcher) handleCronList(msg platform.IncomingMessage, reply func(str
 	reply(sb.String())
 }
 
+// cronMutationErrReply maps a /cron del|pause|resume failure to a specific
+// user-facing reply via cron.ClassifyError. R20260531-ARCH-2: the prior
+// handlers collapsed every error into one "请确认 ID 正确" string, so an
+// ambiguous-prefix match (multiple jobs) misleadingly told the user the ID
+// was wrong instead of "type a longer ID to disambiguate", and a
+// pause/resume state conflict was indistinguishable from a bad ID.
+//
+// Raw err.Error() is never echoed (it leaks normalized ID form / lock
+// annotations); the caller still logs the raw error at Warn. verb is the
+// Chinese action label ("删除" / "暂停" / "恢复") used in the generic fallback.
+func cronMutationErrReply(verb string, err error) string {
+	switch cron.ClassifyError(err) {
+	case cron.CodeAmbiguousPrefix:
+		return "ID 前缀匹配到多个任务，请输入更长的 ID 以消歧。"
+	case cron.CodeJobAlreadyPaused:
+		return "该任务已处于暂停状态。"
+	case cron.CodeJobNotPaused:
+		return "该任务未处于暂停状态，无需恢复。"
+	case cron.CodeJobNotFound:
+		return verb + "失败：未找到该 ID 对应的任务，请确认 ID 正确。"
+	default:
+		return verb + "失败：请确认 ID 正确。"
+	}
+}
+
 // handleCronDel implements /cron del <id>.
 func (d *Dispatcher) handleCronDel(msg platform.IncomingMessage, parts []string, reply func(string), log *slog.Logger) {
 	if !validateCronIDArg(parts, "del", reply) {
@@ -472,7 +505,7 @@ func (d *Dispatcher) handleCronDel(msg platform.IncomingMessage, parts []string,
 		// (normalized ID form, lock annotations). Dashboard already
 		// sanitises analogous handlers. Log raw, reply generic.
 		log.Warn("cron DeleteJob failed", "err", err, "id_prefix", parts[2])
-		reply("删除失败：请确认 ID 正确")
+		reply(cronMutationErrReply("删除", err))
 		return
 	}
 	reply(fmt.Sprintf("Job %s 已删除。", j.ID))
@@ -487,7 +520,7 @@ func (d *Dispatcher) handleCronPause(msg platform.IncomingMessage, parts []strin
 	j, err := d.scheduler.PauseJob(parts[2], msg.Platform, msg.ChatID)
 	if err != nil {
 		log.Warn("cron PauseJob failed", "err", err, "id_prefix", parts[2])
-		reply("暂停失败：请确认 ID 正确或任务是否已暂停")
+		reply(cronMutationErrReply("暂停", err))
 		return
 	}
 	reply(fmt.Sprintf("Job %s 已暂停。", j.ID))
@@ -502,7 +535,7 @@ func (d *Dispatcher) handleCronResume(msg platform.IncomingMessage, parts []stri
 	j, err := d.scheduler.ResumeJob(parts[2], msg.Platform, msg.ChatID)
 	if err != nil {
 		log.Warn("cron ResumeJob failed", "err", err, "id_prefix", parts[2])
-		reply("恢复失败：请确认 ID 正确或任务是否已暂停")
+		reply(cronMutationErrReply("恢复", err))
 		return
 	}
 	next := d.scheduler.NextRun(j)

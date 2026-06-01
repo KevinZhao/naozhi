@@ -57,16 +57,33 @@ type secretPrefix struct {
 // guidance (#1006) and the established external secret-scanner conventions
 // (GitHub Advanced Security, AWS Trusted Advisor); operators with
 // additional in-house token schemes can extend the list at the same point.
+//
+// Covered providers: Anthropic (`sk-ant-`), OpenAI project + legacy
+// (`sk-proj-` / `sk-`), GitHub PAT/OAuth (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`),
+// GitLab (`glpat-`), AWS access keys (`AKIA`/`ASIA`), Slack
+// (`xoxb-`/`xoxp-`/`xoxa-`/`xoxs-`), HuggingFace (`hf_`), npm (`npm_`),
+// GCP / Google OAuth access tokens (`ya29.`).
 var secretPrefixes = []secretPrefix{
 	// Anthropic API keys (`sk-ant-…`). The post-prefix tail is variable
 	// length and may include hyphens, so minTail is generous.
 	{prefix: "sk-ant-", minTail: 8},
+	// OpenAI project keys (`sk-proj-…`). Placed before the bare `sk-`
+	// fallback so the longer prefix matches first.
+	{prefix: "sk-proj-", minTail: 16},
+	// OpenAI legacy keys (`sk-…`, ~48 chars). Large minTail avoids
+	// redacting the bare "sk-" substring in ordinary prose. Kept last
+	// among the sk- family so sk-ant-/sk-proj- win the longest match.
+	{prefix: "sk-", minTail: 40},
+	// npm automation / publish tokens (`npm_…`).
+	{prefix: "npm_", minTail: 16},
 	// GitHub PATs / fine-grained tokens / OAuth.
 	{prefix: "ghp_", minTail: 16},
 	{prefix: "gho_", minTail: 16},
 	{prefix: "ghu_", minTail: 16},
 	{prefix: "ghs_", minTail: 16},
 	{prefix: "ghr_", minTail: 16},
+	// GitHub fine-grained personal access tokens (`github_pat_…`).
+	{prefix: "github_pat_", minTail: 16},
 	// GitLab personal-access tokens.
 	{prefix: "glpat-", minTail: 16},
 	// AWS access key IDs (`AKIA…` / `ASIA…` for STS). Always 16 base32
@@ -78,6 +95,12 @@ var secretPrefixes = []secretPrefix{
 	{prefix: "xoxp-", minTail: 16},
 	{prefix: "xoxa-", minTail: 16},
 	{prefix: "xoxs-", minTail: 16},
+	// HuggingFace tokens (`hf_…`).
+	{prefix: "hf_", minTail: 16},
+	// GCP / Google OAuth access tokens (`ya29.…`). The `.` is part of the
+	// prefix; the base64url body that follows (alphanumerics + `-`/`_`) is
+	// consumed by isSecretTokenByte as the tail.
+	{prefix: "ya29.", minTail: 16},
 }
 
 // secretRedactedMarker replaces matched secret bytes. Distinct from
@@ -98,9 +121,9 @@ func redactSecretsInResult(s string) string {
 		return s
 	}
 	// Cheap early-bail: scan once for any first byte of a prefix. Most
-	// cron output never contains an `s` / `g` / `A` followed by the
-	// remaining prefix bytes; in that case the function aliases the input
-	// without allocating.
+	// cron output never contains an `s` / `g` / `A` / `x` / `h` / `n`
+	// followed by the remaining prefix bytes; in that case the function
+	// aliases the input without allocating.
 	if !mayContainSecretPrefix(s) {
 		return s
 	}
@@ -158,10 +181,12 @@ func isSecretTokenByte(b byte) bool {
 // of any registered prefix appears in s. Lets the common no-secret path
 // skip the full prefix walk + string Builder allocation.
 func mayContainSecretPrefix(s string) bool {
-	// First-byte set: 's', 'g', 'A', 'x'.
+	// First-byte set: 's' (sk-…), 'g' (ghp_/gho_/…/glpat-), 'A' (AKIA/ASIA),
+	// 'x' (xoxb-/…), 'h' (hf_), 'n' (npm_), 'y' (ya29.). Keep in sync with
+	// secretPrefixes.
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
-		case 's', 'g', 'A', 'x':
+		case 's', 'g', 'A', 'x', 'h', 'n', 'y':
 			return true
 		}
 	}

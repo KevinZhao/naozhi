@@ -166,6 +166,38 @@ func TestTailer_AttachReplaysBufferedEvents(t *testing.T) {
 	}
 }
 
+// TestTailer_AttachEmptyBufferNoReplay: attaching before any transcript line
+// has landed (empty buffer) must succeed and emit no agent_event replay. Guards
+// the R249-PERF-4 (#926) follow-up short-circuit that skips the buffer pool
+// Get/Put when len(t.buffered)==0 — the subscriber still attaches, it just has
+// nothing to replay yet (live events arrive via the next pollOnce fan-out).
+func TestTailer_AttachEmptyBufferNoReplay(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := writeJSONL(t, dir, "later", false)
+
+	r := newTailerRegistry(nil)
+	defer r.Shutdown()
+
+	if _, ok := r.ensureTailer("k", "t1", "toolu", path); !ok {
+		t.Fatal("ensureTailer failed")
+	}
+
+	// Attach WITHOUT driving pollOnce first, so t.buffered is empty.
+	c, out := newCapturedClient(t, nil)
+	if !r.attach(tailerKey{"k", "t1"}, c) {
+		t.Fatal("attach returned false on empty buffer")
+	}
+
+	// No agent_event (and no agent_meta, since meta is zero) should arrive.
+	select {
+	case msg := <-out:
+		t.Fatalf("unexpected frame on empty-buffer attach: type=%q", msg.Type)
+	case <-time.After(150 * time.Millisecond):
+		// expected: silence
+	}
+}
+
 // TestTailer_CloseTaskFiresAgentDone: parent-stream task_done triggers
 // closeTask, which must fan an agent_done frame to all remaining
 // subscribers and evict the tailer from the registry.

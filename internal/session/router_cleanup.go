@@ -87,7 +87,7 @@ func (r *Router) Remove(key string) bool {
 		r.mu.Unlock()
 	}
 
-	slog.Info("session removed", "key", key)
+	logSessionLifecycle("removed", key)
 	r.notifyKeyRetired(key, retiredSessionID)
 	r.notifyChange()
 	return true
@@ -264,7 +264,7 @@ func (r *Router) Cleanup() {
 
 		// Normal idle TTL expiry.
 		if now.Sub(effective) > ttl {
-			slog.Info("session expired", "key", c.key, "idle", now.Sub(effective))
+			logSessionLifecycle("expired", c.key, "idle", now.Sub(effective))
 			storeAtomicString(&c.s.deathReason, "idle_timeout")
 			expired = append(expired, expiredEntry{c.s, c.key, c.proc})
 		}
@@ -527,10 +527,18 @@ func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, a
 // Also persists knownIDs on the same throttle as Cleanup so crashes between
 // Cleanup ticks do not discard newly discovered session IDs.
 func (r *Router) saveIfDirty() {
-	r.mu.Lock()
+	// R20260531070014-PERF-9 (#1535): the snapshot phase only READS r.sessions /
+	// r.workspaceOverrides / r.knownIDs and the dirty flags, so take the cheaper
+	// RLock here instead of the exclusive Lock. The hot GetOrCreate / Send paths
+	// that contend on r.mu can now proceed concurrently with the O(N) map copy
+	// (they only need the write lock briefly to register a session); previously
+	// the whole copy serialised against them. The single mutation in this path —
+	// committing knownIDsSavedAt — is promoted to a short write-locked section
+	// below, only when a knownIDs save is actually due.
+	r.mu.RLock()
 	knownIDsDue := r.knownIDsDirty && time.Since(r.knownIDsSavedAt) >= knownIDsSaveInterval
 	if !r.storeDirty && !r.wsOverridesDirty && !knownIDsDue {
-		r.mu.Unlock()
+		r.mu.RUnlock()
 		return
 	}
 	var sessionsCopy map[string]*ManagedSession
@@ -555,15 +563,27 @@ func (r *Router) saveIfDirty() {
 			knownIDsCopy[id] = true
 		}
 		snapshotKnownIDsGen = r.knownIDsGen
-		// Commit savedAt under r.mu so a concurrent Cleanup tick
-		// re-checking the throttle skips — both paths share the same
-		// .tmp target file and torn writes cannot be recovered.
-		r.knownIDsSavedAt = time.Now()
 	}
 	storePath := r.storePath
 	snapshotGen := r.storeGen.Load()
 	snapshotWsGen := r.wsOverridesGen.Load()
-	r.mu.Unlock()
+	r.mu.RUnlock()
+
+	if knownIDsDue {
+		// Commit savedAt under the write lock so a concurrent Cleanup tick
+		// re-checking the throttle skips — both paths share the same .tmp
+		// target file and torn writes cannot be recovered. Re-verify the
+		// throttle under the exclusive lock so two saveIfDirty/Cleanup ticks
+		// racing past the RLock check do not both stamp + double-write.
+		r.mu.Lock()
+		if r.knownIDsDirty && time.Since(r.knownIDsSavedAt) >= knownIDsSaveInterval {
+			r.knownIDsSavedAt = time.Now()
+		} else {
+			// Lost the race; another tick already claimed this save window.
+			knownIDsCopy = nil
+		}
+		r.mu.Unlock()
+	}
 
 	if sessionsCopy != nil {
 		if err := saveStore(storePath, sessionsCopy); err != nil {

@@ -188,6 +188,63 @@ func TestDashboardCSP_FrameSrcBlob(t *testing.T) {
 	}
 }
 
+// TestDashboardCSP_JsdelivrNpmPathScoped pins R242-SEC-2 (#607): every
+// `cdn.jsdelivr.net` source expression in the dashboard CSP must carry the
+// `/npm/` path prefix so the CDN scope can only load assets under the npm
+// subtree (mermaid + KaTeX live there), not arbitrary follow-on resources
+// from other jsdelivr path namespaces (`/gh/<attacker>/<repo>`, `/combine/`
+// bundle endpoints, etc.). A bare `https://cdn.jsdelivr.net` host-source
+// re-opens that surface, so the test fails if any directive lists the host
+// without the `/npm/` path segment.
+//
+// CSP3 §6.6.2.6 path-part matching: a trailing-slash path in a host-source
+// matches every URL whose path begins with that prefix, so all three shipped
+// CDN URLs (`/npm/mermaid@…`, `/npm/katex@…/dist/katex.min.js`, the KaTeX
+// stylesheet + its `/npm/katex@…/dist/fonts/*` woff2 files) still load.
+func TestDashboardCSP_JsdelivrNpmPathScoped(t *testing.T) {
+	s := newTestServer(&mockPlatform{})
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	w := httptest.NewRecorder()
+	s.handleDashboard(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy header missing on /dashboard")
+	}
+
+	// The CDN must only ever appear scoped to /npm/. Tokenise on whitespace
+	// so a host-source that ends exactly at `cdn.jsdelivr.net` (no path) is
+	// caught regardless of which directive it sits in.
+	for _, tok := range strings.Fields(csp) {
+		if !strings.Contains(tok, "cdn.jsdelivr.net") {
+			continue
+		}
+		if !strings.HasPrefix(tok, "https://cdn.jsdelivr.net/npm/") {
+			t.Errorf("R242-SEC-2 (#607): CSP source %q references cdn.jsdelivr.net "+
+				"without the /npm/ path prefix — the CDN scope must be pinned to "+
+				"https://cdn.jsdelivr.net/npm/ so a non-npm jsdelivr path cannot "+
+				"bootstrap an arbitrary follow-on load. got CSP %q", tok, csp)
+		}
+	}
+
+	// Positive: the three directives that legitimately pull from the CDN must
+	// each carry the npm-scoped source.
+	for _, want := range []string{
+		"script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/",
+		"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/",
+		"font-src 'self' https://cdn.jsdelivr.net/npm/",
+	} {
+		if !strings.Contains(csp, want) {
+			t.Errorf("R242-SEC-2 (#607): CSP must carry %q so KaTeX/mermaid still "+
+				"load from the npm-scoped CDN, got %q", want, csp)
+		}
+	}
+}
+
 // TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow caps the inline event
 // handler surface in static/dashboard.html (R236-SEC-02 / #479, also tracked
 // as #922). The dashboard CSP still ships `script-src 'unsafe-inline'`
@@ -241,6 +298,85 @@ func TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow(t *testing.T) {
 		if strings.Contains(html, attr) {
 			t.Errorf("static/dashboard.html contains inline `%s` handler — "+
 				"these auto-fire and are higher-risk than onclick (R236-SEC-02 #479)", attr)
+		}
+	}
+}
+
+// TestDashboardCSP_ScriptSrcUnsafeInlineMigrationGate pins the R20260531A-SEC-10
+// (#1526) single-point invariant on the `script-src 'unsafe-inline'` posture.
+// Modelled on TestSetEscapeHTMLFalseScopedToPackage: lock the *current* state so
+// a refactor cannot silently land the half-migrated, worst-of-both-worlds form.
+//
+// Two coupled invariants:
+//
+//  1. script-src today still carries `'unsafe-inline'`. The dashboard ships a
+//     fixed set of inline `onclick=` handlers (see
+//     TestDashboardCSP_InlineHandlerSurfaceDoesNotGrow), so dropping
+//     `'unsafe-inline'` *without* first migrating those handlers to
+//     addEventListener would brick every header button. This asserts the
+//     directive is present so an accidental removal fails loudly.
+//
+//  2. script-src does NOT yet carry `nonce-` or `strict-dynamic`. The full
+//     migration is NEEDS-DESIGN (#441 / #479 / #922). Crucially, per CSP3
+//     browsers *ignore* `'unsafe-inline'` once `nonce-`/`strict-dynamic` is
+//     present — so landing a nonce alongside the still-present `'unsafe-inline'`
+//     would silently disable the inline handlers (a functional break) while
+//     looking "more secure". This gate forces the nonce migration to drop
+//     `'unsafe-inline'` in the *same* change: adding nonce/strict-dynamic trips
+//     invariant (1)'s sibling failure here until `'unsafe-inline'` is removed,
+//     making the two changes atomic.
+//
+// This test deliberately does NOT remove `'unsafe-inline'` — that is the
+// NEEDS-DESIGN migration. It only fences the current state against silent drift.
+func TestDashboardCSP_ScriptSrcUnsafeInlineMigrationGate(t *testing.T) {
+	s := newTestServer(&mockPlatform{})
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	w := httptest.NewRecorder()
+	s.handleDashboard(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy header missing on /dashboard")
+	}
+
+	// Isolate the script-src directive so the assertions below cannot be
+	// satisfied (or tripped) by tokens that live in style-src / img-src / etc.
+	var scriptSrc string
+	for _, dir := range strings.Split(csp, ";") {
+		dir = strings.TrimSpace(dir)
+		if strings.HasPrefix(dir, "script-src ") || dir == "script-src" {
+			scriptSrc = dir
+			break
+		}
+	}
+	if scriptSrc == "" {
+		t.Fatalf("CSP missing script-src directive, got %q", csp)
+	}
+
+	// Invariant (1): current state ships 'unsafe-inline'.
+	if !strings.Contains(scriptSrc, "'unsafe-inline'") {
+		t.Errorf("R20260531A-SEC-10 (#1526): script-src dropped `'unsafe-inline'` while the "+
+			"dashboard still ships inline onclick= handlers — every header button breaks. "+
+			"Removing it must be bundled with migrating those handlers to addEventListener "+
+			"(#441 / #479 / #922). got script-src %q", scriptSrc)
+	}
+
+	// Invariant (2): nonce/strict-dynamic must NOT coexist with 'unsafe-inline'.
+	// Their presence here means a partial migration landed that silently
+	// disables the inline handlers (CSP3 ignores 'unsafe-inline' once a nonce
+	// or strict-dynamic appears). The migration must drop 'unsafe-inline' in
+	// the same change.
+	for _, tok := range []string{"'nonce-", "'strict-dynamic'", "nonce-"} {
+		if strings.Contains(scriptSrc, tok) {
+			t.Errorf("R20260531A-SEC-10 (#1526): script-src introduced %q while still listing "+
+				"`'unsafe-inline'` — per CSP3 the browser now ignores `'unsafe-inline'`, "+
+				"silently breaking the dashboard's inline onclick handlers. The nonce/"+
+				"strict-dynamic migration MUST remove `'unsafe-inline'` (and migrate the "+
+				"inline handlers) in the same change. got script-src %q", tok, scriptSrc)
 		}
 	}
 }

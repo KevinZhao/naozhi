@@ -105,6 +105,56 @@ type ProcessEventReader interface {
 	LastEventAt() time.Time
 }
 
+// ProcessLifecycle is the third facet of the planned processIface split
+// (R176-ARCH-M2 / R214-ARCH-8, #430), following the ProcessSender and
+// ProcessEventReader precedent. It exposes the liveness + teardown subset
+// that Router.Cleanup, evictOldest, Remove/Reset and the shim reconciler
+// consume — the parts entangled with event-read / identity / metering on
+// the wider processIface god-interface.
+//
+// Pure additive split. processIface embeds ProcessLifecycle so the concrete
+// *cli.Process implementation and testutil.TestProcess fakes keep satisfying
+// both interfaces unchanged. Callers ready to narrow can switch from
+// processIface (~25 methods) to ProcessLifecycle (4) one site at a time —
+// e.g. the ACP/Gemini backend onboarding the issue is gated on no longer
+// needs to mock the full god-interface just to prove liveness behaviour.
+type ProcessLifecycle interface {
+	// Alive reports whether the underlying CLI/shim process handle is still
+	// usable (not Closed/Killed). Lock-free poll.
+	Alive() bool
+	// IsRunning reports whether a turn is actively streaming. Distinct from
+	// Alive: a session can be Alive (process up) but not Running (idle).
+	IsRunning() bool
+	// Close releases the process handle gracefully (drains the shim socket
+	// on the normal path). Idempotent.
+	Close()
+	// Kill force-terminates the process. Used by the stuck-session watchdog
+	// when Close's graceful path cannot reclaim the slot.
+	Kill()
+}
+
+// HistoryInjector is the fourth facet of the planned processIface split
+// (R176-ARCH-M2 / R214-ARCH-8, #430). It exposes the prev-session history
+// replay seam that Router.attachHistorySource / InjectHistory and the
+// auto-chain resume path consume on spawn, plus the subagent-roster read
+// the turn-agent fan-out uses. Splitting it out lets the history-injection
+// unit tests mock just these two methods instead of the full ~25-method
+// god-interface.
+//
+// Pure additive split — processIface embeds HistoryInjector so *cli.Process
+// and testutil.TestProcess keep satisfying both unchanged.
+type HistoryInjector interface {
+	// InjectHistory replays prior-session EventEntries into the process's
+	// EventLog before the first live turn so dashboard/IM history renders
+	// continuously across a resume. Called once, under the spawn path,
+	// before SetPersistSink flips sinkReady true.
+	InjectHistory(entries []cli.EventEntry)
+	// TurnAgents returns the subagent roster the process has observed this
+	// turn (task_started → agent linkage). Feeds the dashboard agent-team
+	// view; empty for backends without a subagent concept.
+	TurnAgents() []cli.SubagentInfo
+}
+
 // processIface abstracts the CLI process lifecycle methods used across the
 // session-aware code paths. Despite the package name, callers extend beyond
 // internal/session itself: internal/server (Hub broadcast + dashboard
@@ -129,10 +179,9 @@ type processIface interface {
 	// live on ProcessSender (R242-GO-12, first facet split). Embed it
 	// rather than duplicate.
 	ProcessSender
-	Alive() bool
-	IsRunning() bool
-	Close()
-	Kill()
+	// Alive / IsRunning / Close / Kill live on ProcessLifecycle (R176-ARCH-M2
+	// facet split, #430). Embed it rather than duplicate.
+	ProcessLifecycle
 	// Dashboard introspection.
 	//
 	// GetSessionID / GetState are flagged as unidiomatic by R219-CR-9
@@ -172,8 +221,9 @@ type processIface interface {
 	ProtocolName() string
 	SubscribeEvents() (<-chan struct{}, func())
 	PID() int
-	InjectHistory(entries []cli.EventEntry)
-	TurnAgents() []cli.SubagentInfo
+	// InjectHistory / TurnAgents live on HistoryInjector (R176-ARCH-M2
+	// facet split, #430). Embed it rather than duplicate.
+	HistoryInjector
 	// Normalize-layer accessors (docs/rfc/multi-backend.md §8.8). kiro fills
 	// these from _kiro.dev/metadata; claude leaves zero values until an
 	// estimator lands. Lock-free.
@@ -195,6 +245,19 @@ type processIface interface {
 // follow this same pattern — define the narrow facet, prove subset by
 // satisfaction var, narrow consumers one site at a time.
 var _ ProcessEventReader = (processIface)(nil)
+
+// Compile-time guarantee that ProcessLifecycle is a strict subset of
+// processIface (R176-ARCH-M2 facet split, #430). Mirrors the
+// ProcessEventReader pin above so a future edit that drops one of
+// Alive/IsRunning/Close/Kill from processIface — or changes a signature on
+// either side — fails the package build instead of silently desyncing the
+// facet from the god-interface.
+var _ ProcessLifecycle = (processIface)(nil)
+
+// Compile-time guarantee that HistoryInjector is a strict subset of
+// processIface (R176-ARCH-M2 facet split, #430). Same drift-guard role as
+// the ProcessEventReader / ProcessLifecycle pins above.
+var _ HistoryInjector = (processIface)(nil)
 
 // processBox wraps processIface for use with atomic.Pointer (which
 // requires a concrete type).
@@ -222,6 +285,24 @@ var _ ProcessEventReader = (processIface)(nil)
 // 16-byte alloc per call is dwarfed by the surrounding goroutine and
 // process-lifecycle work. The wrapper stays.
 type processBox struct{ p processIface }
+
+// cancelBox binds a Send()'s context cancel func to the process pointer that
+// Send loaded for that turn. Interrupt() consults it so it only fires cancel
+// when the live process still matches the one the in-flight Send targets.
+//
+// SM3 (#381): Send() stores the cancel func before loadProcess(); in the
+// narrow window where a concurrent spawnSession replaces the process pointer,
+// a bare cancel func could target the previous process's ctx — cancelling it
+// is a no-op against the new live process, silently weakening Interrupt. By
+// recording the bound process here, Interrupt skips a stale cancel (whose
+// proc no longer matches the live process) and reports failure instead of a
+// misleading success. nil proc means "not yet bound to a process" (Send has
+// stored the box but not reached loadProcess yet) — Interrupt still fires it
+// because that turn is about to run on the current live process.
+type cancelBox struct {
+	cancel context.CancelFunc
+	proc   processIface
+}
 
 // ManagedSession wraps a claude CLI process with session metadata.
 type ManagedSession struct {
@@ -269,10 +350,13 @@ type ManagedSession struct {
 	keyChatID   string
 	keyAgentID  string
 
-	process    atomic.Pointer[processBox] // stores *processBox; use loadProcess/storeProcess
-	sendMu     sync.Mutex                 // serializes messages to the same session
-	historyMu  sync.RWMutex               // protects persistedHistory reads/writes (independent of sendMu)
-	sendCancel atomic.Pointer[context.CancelFunc]
+	process   atomic.Pointer[processBox] // stores *processBox; use loadProcess/storeProcess
+	sendMu    sync.Mutex                 // serializes messages to the same session
+	historyMu sync.RWMutex               // protects persistedHistory reads/writes (independent of sendMu)
+	// sendCancel holds the in-flight Send()'s cancel func bound to the process
+	// it targets (see cancelBox). Bound so Interrupt() can skip a cancel whose
+	// process has been replaced by a concurrent spawnSession (SM3 / #381).
+	sendCancel atomic.Pointer[cancelBox]
 	// workspace is the effective cwd at spawn time. Writers hold r.mu in the
 	// router (spawnSession / RegisterCronStub / SetWorkspace), but Snapshot()
 	// is called from Hub handlers WITHOUT r.mu (see wshub.go:466, 520). Direct
@@ -398,6 +482,32 @@ type ManagedSession struct {
 	// may reset it after the session is reachable. atomic.Pointer makes the
 	// hand-off race-free without requiring historyMu on every read.
 	historySource atomic.Pointer[historySourceBox]
+
+	// storeMarshalCache memoizes the last (storeEntry → JSON) result for this
+	// session so saveStore can skip re-marshalling a session whose persisted
+	// fields are unchanged since the previous save. R20260531A-PERF-2 (#1523):
+	// the periodic 30s saveIfDirty tick previously re-marshalled every entry
+	// even though, on a typical deployment, only the handful of sessions that
+	// received traffic in the last window actually changed. Idle sessions now
+	// hit the cache and pay zero marshal cost. The cache is keyed on the
+	// storeEntry value itself (compared with ==) so any persisted-field change
+	// — LastActive, cost, label, model, workspace, session chain — invalidates
+	// it without per-mutation-site bookkeeping (equality checked with
+	// equalStoreEntry, since storeEntry carries slice fields). The save path
+	// (saveStore) holds no Router lock; saveIfDirty/Cleanup serialise through
+	// the cleanup-loop goroutine, but Shutdown also calls saveStore, so the
+	// cache is an atomic.Pointer to stay race-free if a final shutdown save
+	// overlaps an in-flight periodic save on the same session.
+	storeMarshalCache atomic.Pointer[storeEntryCache]
+}
+
+// storeEntryCache is the per-session memo described on
+// ManagedSession.storeMarshalCache. entry is the storeEntry that produced
+// data; data is its standalone JSON object encoding (NOT array-wrapped) ready
+// to be concatenated into the sessions.json array.
+type storeEntryCache struct {
+	entry storeEntry
+	data  []byte
 }
 
 // historySourceBox wraps history.Source so atomic.Pointer can store it.

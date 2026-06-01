@@ -54,8 +54,8 @@ file_size:
       current: 1107                         # 2026-05-28 master + Phase 3a auth import
       limit: 500
       until_phase: 4b
-    - path: internal/server/dashboard.go    # v0.6.1 新增豁免：v0.4 时 731 不超线
-      current: 691                          # 2026-05-31 baseline 漂移更新（§6.2.0.4）：master 已 667；cc-asset-browser 路由调用+静态 JS handler +24，主体逻辑已抽到 dashboard_ccassets.go
+    - path: internal/server/routes.go         # v0.6.1 新增豁免：v0.4 时 731 不超线
+      current: 707                          # 2026-06-01 merge master(575) + cc-asset-browser 路由调用+静态 JS handler；主体逻辑在 dashboard_ccassets.go
       limit: 500
       until_phase: "5"
     - path: internal/server/agent_tailer.go # v0.6.1 新增豁免：v0.4 时 655 不超线
@@ -64,7 +64,7 @@ file_size:
       until_phase: 4c
     # ── 2 个 500-800 行（v0.6.1 新增） ──
     - path: internal/server/send.go
-      current: 556                          # 2026-05-28 ownerLoop + handleOwnerLoopPanic 抽到 send_owner_loop.go (Phase 3f-prep)
+      current: 567                          # 2026-05-31 R248-ARCH-9 (#379) headless 显式模式 + nil-hub fail-loud 守卫 + 文档
       limit: 500
       until_phase: 3f
     # internal/server/dashboard_auth.go: removed Phase 3a (PR #1436) — file

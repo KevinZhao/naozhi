@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/apierr"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
@@ -34,46 +35,9 @@ import (
 	robfigcron "github.com/robfig/cron/v3"
 )
 
-// defaultCronSlowThreshold is the wall-clock budget beyond which a
-// successful cron execution is counted as "slow"
-// (metrics.CronExecutionSlowTotal). 30s is picked as an order-of-magnitude
-// above a typical interactive agent turn; jobs that regularly tip over are
-// candidates for timeout / workflow inspection. R208-OBS1.
-//
-// R241-ARCH-11 (#519): the threshold is now per-Scheduler-configurable
-// via SchedulerConfig.SlowThreshold so deployments running with
-// ExecTimeout=300s do not flood operators with a daily slow-alert per
-// successful long job. The package const stays as the default — callers
-// that omit SlowThreshold (or pass 0/negative) keep the legacy 30s
-// behaviour. Production wiring (cmd/naozhi) reads cron.slow_threshold
-// from config so operators can raise the threshold without recompiling.
-const defaultCronSlowThreshold = 30 * time.Second
-
-// spawnElapsedWarnRatio is the fraction of jobTimeout the spawn phase
-// (router.GetOrCreate) is allowed to consume before we emit the
-// "send budget exceeds job/2" warning + bump CronSendBudgetDoubledTotal.
-//
-// 0.5 chosen because once spawn alone has consumed half the per-run
-// budget, the in-flight wall clock can reach ~2*jobTimeout (spawn +
-// fresh-budget Send), which is the doubling pattern operators of 300s+
-// jobs need a runbook signal for. Lower the ratio (e.g. 0.4) to surface
-// near-doubling earlier; raise (e.g. 0.7) to suppress noise on cold
-// fresh-context runs that legitimately spawn slowly. R247-CR-28.
-const spawnElapsedWarnRatio = 0.5
-
-// minSendBudget is the lower bound on the per-run send-phase context budget
-// when spawn already consumed most of jobTimeout. R20260527122801-CR-2 (#1311):
-// historically sendCtx used the full jobTimeout regardless of how long spawn
-// took, so a 5min jobTimeout could yield ~10min wall-clock + jitter in the
-// worst case (spawn ~5min then send another ~5min). Operators reported
-// systemd TimeoutStopSec being exceeded as a result. We now clamp sendCtx
-// to (jobTimeout - time.Since(spawnStart)), bounded below by minSendBudget so
-// a flaky cold-start spawn doesn't immediately turn into a "send timed out"
-// without operator signal — the historical concern documented at the
-// sendCtx assignment below. 30s is enough for a single Send round-trip on
-// a healthy CLI; the spawnElapsedWarnRatio warn already alerts operators
-// when spawn is eating the budget.
-const minSendBudget = 30 * time.Second
+// defaultCronSlowThreshold, spawnElapsedWarnRatio and minSendBudget are
+// defined in tuning.go (R249-CR-16, #959), which collects all cron tuning
+// knobs into one place with an operator-facing raise/lower table.
 
 // executeIfNotDeletedOrPaused is the TriggerNow dispatch entry. It looks
 // up the freshest *Job under s.mu.RLock, then — only if still present and
@@ -332,6 +296,16 @@ const (
 	cronNoticeMid    = "] "
 )
 
+// cronMarkdownPunctReplacer is a package-level Replacer for escapeCronMarkdownPunct.
+// Constructed once to avoid per-call allocation; Replace performs a single
+// pass over the input string. R164930-PERF-4.
+var cronMarkdownPunctReplacer = strings.NewReplacer(
+	"[", "［", // U+FF3B
+	"]", "］", // U+FF3D
+	"(", "（", // U+FF08
+	")", "）", // U+FF09
+)
+
 // formatCronNotice renders the IM-notice line cron jobs send through
 // deliverNotice. label is the snap.labelOrID() result (job title or
 // fallback ID); body is the human-readable suffix already in the
@@ -356,33 +330,16 @@ func formatCronNotice(label, body string) string {
 	// at AddJob/UpdateJob — a 4× rune→byte budget is more than enough for
 	// CJK / emoji to round-trip through SanitizeForLog without truncation.
 	label = osutil.SanitizeForLog(label, MaxCronTitleLen*4)
-	// R250-SEC-6 (#1095): the cronNoticePrefixFmt template is "[Cron %s] %s",
-	// so a `]` byte inside the label silently terminates the bracket prefix
-	// from an IM renderer's view. Markdown-aware channels (Slack / Discord
-	// / Feishu rich-card extensions) would let a Title like
-	// `evil](evil-link) [Cron real` collapse the prefix into a clickable
-	// link target. validateCronTitle blocks bidi / C0 controls but ASCII
-	// `]` slips through. Belt-and-braces: replace `]` with the full-width
-	// closing bracket U+FF3D, visually similar but never bracket-matched
-	// by markdown parsers. Prefix invariant `[Cron <label>]` is preserved
-	// because we substitute inside label, never at the template `]`.
-	//
-	// R20260527122801-PERF-15: skip ReplaceAll alloc when label has no
-	// ']' — common case for ASCII titles. ReplaceAll always walks the
-	// string and may reallocate even when nothing matches; IndexByte is
-	// a single SIMD-accelerated scan so the fast path is essentially
-	// free on the hot tick path.
-	if strings.IndexByte(label, ']') >= 0 {
-		label = strings.ReplaceAll(label, "]", "］")
-	}
-	// R260528-SEC-8: markdown link-syntax `[`, `(`, `)` were not escaped
-	// in label or body. Slack / Discord / Feishu rich-card renderers parse
-	// `[text](url)` as a clickable link, so a body containing
-	// `Click [here](http://attacker)` (or a label with `[evil`) would
-	// surface as a hijackable hyperlink. Substitute the full-width
-	// counterparts U+FF3B / U+FF08 / U+FF09 — visually similar but never
-	// bracket-matched by any markdown parser. IndexByte fast-paths keep
-	// the common ASCII-clean case alloc-free.
+	// R250-SEC-6 (#1095) + R260528-SEC-8: replace markdown link-syntax
+	// characters `[` `]` `(` `)` in label and body with full-width
+	// visually-similar codepoints (U+FF3B / U+FF3D / U+FF08 / U+FF09).
+	// This prevents an attacker-controlled Title or result body from
+	// smuggling `[text](url)` clickable links into IM notices.
+	// validateCronTitle blocks bidi / C0 controls but ASCII punctuation
+	// passes through, so the substitution here is the safety bottom line.
+	// R164930-PERF-4/5: escapeCronMarkdownPunct now performs a single-pass
+	// Replacer with an IndexAny fast-path; the redundant pre-scan for `]`
+	// that previously ran at this call site has been removed.
 	label = escapeCronMarkdownPunct(label)
 	body = escapeCronMarkdownPunct(body)
 	// R247-PERF-7 (#539): strings.Builder skips fmt.Sprintf's reflection
@@ -404,27 +361,18 @@ func formatCronNotice(label, body string) string {
 // `[`, `]`, `(`, `)` with full-width visually-similar codepoints
 // (U+FF3B / U+FF3D / U+FF08 / U+FF09) so an attacker-controlled cron
 // Title or result body cannot smuggle `[text](url)` clickable links
-// into the IM notice. Each replace is gated by IndexByte so a clean
-// ASCII payload stays alloc-free. R260528-SEC-8.
+// into the IM notice. R260528-SEC-8.
 //
-// label callers run the `]` substitution at line 341 (R250-SEC-6) before
-// reaching here; the duplicate `]` work is idempotent (the second pass
-// finds no `]` left and skips). Body callers rely on this helper to
-// strip `]` since the label-side gate skips them.
+// R164930-PERF-4/5: single-pass implementation using a package-level
+// strings.Replacer (cronMarkdownPunctReplacer). An IndexAny fast-path
+// avoids any allocation on the common ASCII-clean case; when substitution
+// is required the Replacer performs exactly one scan + one output
+// allocation instead of the previous up-to-4-scan / 4-alloc loop.
 func escapeCronMarkdownPunct(s string) string {
-	if strings.IndexByte(s, '[') >= 0 {
-		s = strings.ReplaceAll(s, "[", "［")
+	if strings.IndexAny(s, "[]()") < 0 {
+		return s
 	}
-	if strings.IndexByte(s, ']') >= 0 {
-		s = strings.ReplaceAll(s, "]", "］")
-	}
-	if strings.IndexByte(s, '(') >= 0 {
-		s = strings.ReplaceAll(s, "(", "（")
-	}
-	if strings.IndexByte(s, ')') >= 0 {
-		s = strings.ReplaceAll(s, ")", "）")
-	}
-	return s
+	return cronMarkdownPunctReplacer.Replace(s)
 }
 
 // labelOrID returns the IM-notice display label: snap.label when populated,
@@ -1604,6 +1552,14 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	lg.Info("cron job completed",
 		"result_len", len(result.Text),
 		"elapsed_ms", elapsed.Milliseconds())
+	// OBS1 (#392): record the full success-path latency distribution, not
+	// just the slow-tail count below. The histogram buckets straddle
+	// slowThreshold so the two signals stay consistent (anything past 30s
+	// lands in the same tail buckets the slow counter alerts on). Observed
+	// here rather than in finishRun for the same reason as the slow counter:
+	// only success-path latency is meaningful — error/timeout paths are
+	// classified by the CronRun*Total state counters instead.
+	metrics.ObserveCronExecutionDuration(elapsed.Milliseconds())
 	slowThreshold := s.slowThreshold
 	if slowThreshold <= 0 {
 		slowThreshold = defaultCronSlowThreshold
@@ -1637,7 +1593,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// 否则未截断 / 未脱敏的 claude 输出会绕过所有保护落到 IM 渠道
 	// （prompt-injection / IM 富文本指令 / 巨量响应耗尽队列）。
 	// finishRun 在持久化路径已做过同样处理，这里复用相同管线。
-	replyText := formatCronNotice(snap.labelOrID(), sanitiseRunResult(result.Text))
+	//
+	// R20260531070014-ARCH-1: claude -p 可 exit 0 但 result.Text 为
+	// API-error envelope（含 request ID / 内部 hostname / 泄漏 cred）。
+	// dispatch IM 路径已通过 localizeAPIError（封装 apierr.Localize）防护；
+	// cron 成功路径之前完全绕过此保护。先 sanitise（截断/脱敏）再 localize
+	// （本地化/隐藏敏感 envelope），顺序以隐私优先。
+	replyText := formatCronNotice(snap.labelOrID(), apierr.Localize(sanitiseRunResult(result.Text)))
 	s.deliverNotice(notifyTo, replyText)
 }
 

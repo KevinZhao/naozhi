@@ -469,11 +469,15 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 			return nil
 		}
 	}
-	// Pre-size the result to len(persistedHistory) to avoid 9 reallocations
-	// growing 1→2→…→512 on the dashboard's 1Hz × N-tab × dead-session poll
-	// (afterMS=0 returns the entire ring). The cap is bounded by the ring
-	// size (default 500) so over-allocation is acceptable.
-	out := make([]cli.EventEntry, 0, len(s.persistedHistory))
+	// R20260531-PERF-1: small initial cap and let append grow naturally.
+	// The steady-state dashboard poll (1Hz × N-tab × dead-session) is an
+	// incremental query with a recent afterMS that matches only the last
+	// handful of entries, so presizing to len(persistedHistory) (up to the
+	// full ring, default 500) over-allocates ~500 slots per poll for a
+	// 0-5-entry result. afterMS=0 full replay still happens (e.g. first
+	// load of a dead session) and will pay a few reallocations growing past
+	// 16, but that path is rare; we trade it for the common case.
+	out := make([]cli.EventEntry, 0, 16)
 	for _, e := range s.persistedHistory {
 		if e.Time > afterMS {
 			out = append(out, e)

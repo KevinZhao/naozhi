@@ -214,8 +214,22 @@ func (r *tailerRegistry) attach(tk tailerKey, c *wsClient) bool {
 	// copy-out under lock is unchanged — we still snapshot the ring
 	// here so the replay loop below runs lock-free; only the
 	// destination slice is now reused across calls.
-	buffered, bufferedHandle := acquireTailerBufferedSlice(len(t.buffered))
-	buffered = append(buffered, t.buffered...)
+	//
+	// R249-PERF-4 (#926) follow-up: skip the pool Get/Put + empty append
+	// entirely when there is nothing buffered yet. This is the common
+	// case for a fresh subscriber attaching to a tailer that just
+	// started (Linker.OnResolve fires the ensureTailer before any
+	// transcript line lands) or one whose buffer was reaped — there is
+	// no copy to make and no replay to do, so the only effect of the
+	// pool dance would be churning a pool slot under a high subscribe
+	// rate. meta is still snapshotted under the lock so the late-meta
+	// nudge below stays correct.
+	var buffered []cli.EventEntry
+	var bufferedHandle tailerBufferedHandle
+	if len(t.buffered) > 0 {
+		buffered, bufferedHandle = acquireTailerBufferedSlice(len(t.buffered))
+		buffered = append(buffered, t.buffered...)
+	}
 	meta := t.meta
 	t.mu.Unlock()
 
@@ -225,6 +239,8 @@ func (r *tailerRegistry) attach(tk tailerKey, c *wsClient) bool {
 	// the slice without a copy; releaseTailerBufferedSlice zero-clears
 	// each EventEntry before returning the slice so the pool does not
 	// pin Images / ToolCall / Message pointers across calls.
+	// releaseTailerBufferedSlice is nil-handle-safe so the empty-buffer
+	// short-circuit above (which leaves bufferedHandle zero) is a no-op.
 	defer releaseTailerBufferedSlice(buffered, bufferedHandle)
 	for i := range buffered {
 		e := buffered[i]

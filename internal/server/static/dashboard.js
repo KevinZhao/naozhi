@@ -6309,9 +6309,17 @@ function mainEmptyHtml() {
 //   totalCost   — sum of s.total_cost across all cached sessions (not gated
 //                 by today, because a cron-heavy workspace accumulates cost
 //                 overnight and wiping at midnight would hide it).
+//   totalPrompts — sum of s.message_count across all cached sessions. The
+//                 SessionSnapshot already ships message_count (the cumulative
+//                 "user" turn count observed by the live process event log),
+//                 so the "已处理 prompt 数" card (R110-P1 #445) is derivable
+//                 client-side without the deferred /api/stats/aggregate
+//                 backend scan. Cumulative tokens still need that backend
+//                 endpoint (no per-session token field exists yet), so the
+//                 token card stays out of scope here.
 //
-// Input shape tolerant: missing last_active / total_cost on a session
-// contributes zero / is skipped rather than NaN-poisoning the totals.
+// Input shape tolerant: missing last_active / total_cost / message_count on a
+// session contributes zero / is skipped rather than NaN-poisoning the totals.
 function computeHomeStats(items, nowMs) {
   const arr = Array.isArray(items) ? items : [];
   const now = typeof nowMs === 'number' ? nowMs : Date.now();
@@ -6319,12 +6327,14 @@ function computeHomeStats(items, nowMs) {
   const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime();
   let todayActive = 0;
   let totalCost = 0;
+  let totalPrompts = 0;
   for (const s of arr) {
     if (!s) continue;
     if (typeof s.last_active === 'number' && s.last_active >= dayStart) todayActive++;
     if (typeof s.total_cost === 'number' && isFinite(s.total_cost)) totalCost += s.total_cost;
+    if (typeof s.message_count === 'number' && isFinite(s.message_count) && s.message_count > 0) totalPrompts += s.message_count;
   }
-  return { todayActive: todayActive, totalCost: totalCost };
+  return { todayActive: todayActive, totalCost: totalCost, totalPrompts: totalPrompts };
 }
 
 // formatHomeCost keeps the $/precision format close to the session card's
@@ -6430,15 +6440,21 @@ function renderRecentSessionsPanel() {
       (ago ? '<span class="recent-time">' + esc(ago) + '</span>' : '') +
       '</button>';
   }).join('');
-  // R110-P1 Home stats strip (Round 147): today-active + total cost. Rendered
-  // above the list so operators see a cumulative signal before scanning the
-  // session rows. Prompts and tokens need backend aggregation — omitted here.
+  // R110-P1 Home stats strip (Round 147 + #445): today-active + processed
+  // prompts + total cost. Rendered above the list so operators see a
+  // cumulative signal before scanning the session rows. The prompt count
+  // sums per-session message_count (already in the snapshot); cumulative
+  // tokens still need the deferred /api/stats/aggregate backend scan.
   const stats = computeHomeStats(items, Date.now());
   const statsHtml =
     '<div class="recent-panel-stats" role="group" aria-label="今日概览">' +
       '<div class="recent-stat">' +
         '<div class="recent-stat-value">' + stats.todayActive + '</div>' +
         '<div class="recent-stat-label">今日活跃会话</div>' +
+      '</div>' +
+      '<div class="recent-stat">' +
+        '<div class="recent-stat-value">' + stats.totalPrompts + '</div>' +
+        '<div class="recent-stat-label">已处理 prompt</div>' +
       '</div>' +
       '<div class="recent-stat">' +
         '<div class="recent-stat-value">' + esc(formatHomeCost(stats.totalCost)) + '</div>' +
@@ -7140,6 +7156,13 @@ const MAX_LIVE_DOM_EVENTS = 600;
 // truncatedCount 并用容器顶部的提示告知操作员。
 const CRON_LIVE_MAX_EVENTS = 200;
 
+// 当 cron live 收到的事件全被 INTERNAL_EVENT_TYPES 过滤光（parallel agent
+// team 整段是 agent / task_* / tool_use），渲这条占位而非留空 innerHTML，
+// 否则 CSS .cdl-events:empty::before 会误报"暂无事件"。.cdl-agent-only 类名
+// 供 appendEventsToContainer 在追加真实事件前识别并清除占位。
+const CRON_LIVE_AGENT_ONLY_HTML =
+  '<div class="empty-state cdl-agent-only">本轮仅有 agent / 工具活动，正文消息请在任务结束后查看历史详情</div>';
+
 // formatTimeShort returns a chat-style label for a divider: today -> HH:MM,
 // yesterday -> "昨天 HH:MM", within a week -> "周三 HH:MM", older -> "M-D HH:MM",
 // different year -> "YYYY-M-D HH:MM".
@@ -7498,22 +7521,44 @@ function isFileRefCandidate(text) {
 // Trailing `:line` suffixes are stripped by splitPathLine before this runs.
 const FILE_REF_HAS_EXT = /\.[A-Za-z0-9]+$/;
 
+// splitPathNote separates a fenced path line into its path candidate and a
+// trailing human annotation. AI replies commonly tag path lines with inline
+// notes — `语文/...诊断.md   ← 待生成`, `bar.html  # 答案`, `foo.go (new)` —
+// where the note is set off from the path by whitespace. A real file path never
+// contains whitespace (isFileRefCandidate rejects spaces), so the first
+// whitespace-delimited token IS the path candidate and everything after the gap
+// is a note we preserve for display but exclude from the <code> body (so copy +
+// the file-ref scanner see the bare path). Returns {path, note}; note is '' when
+// the line is a lone path.
+function splitPathNote(line) {
+  const m = line.match(/^(\S+)(?:\s+(.*\S))?\s*$/);
+  if (!m) return { path: line, note: '' };
+  return { path: m[1], note: m[2] || '' };
+}
+
 // fencedPathList decides whether a language-less fenced code block is in fact
 // a plain list of file paths (one per line). AI replies frequently dump
 // generated/affected files inside a ``` fence — those paths are invisible to
 // the inline file-ref scanner because it skips <pre> content. When EVERY
-// non-empty line is a path candidate whose basename has an extension (and there
-// are at least two such lines, so a single stray path stays verbatim) we return
-// the trimmed lines so the caller can render them as clickable rows. Returns
-// null otherwise, leaving the verbatim-code path untouched. Requiring all lines
-// to match keeps real code blocks out: any block with one prose/code/extension-
-// less line fails the test.
+// non-empty line is a path candidate whose basename has an extension we return
+// the parsed rows ({path, note}) so the caller can render them as clickable
+// rows. Returns null otherwise, leaving the verbatim-code path untouched.
+// Requiring all lines to match keeps real code blocks out: any block with one
+// prose/code/extension-less line fails the test.
 //
-// Known non-goal: lines with trailing punctuation (`foo.md。`) or inline
-// backtick wrapping are not normalized here — they'd resolve to a non-existent
-// path and silently get no button. Stripping trailing punctuation risks eating
-// real filename chars, so that is left to a future pass rather than widening
-// the blast radius of this fix.
+// A single path line is accepted (one generated file inside a ``` fence is a
+// very common AI shape). The isFileRefCandidate + FILE_REF_HAS_EXT double gate
+// plus the server-side existence check (a non-file that slips through resolves
+// to {exists:false} and silently gets no button) make a lone-line list safe;
+// the old "≥2 lines" guard left every single-file fence button-less.
+//
+// Trailing annotations (`foo.md   ← 待生成`) are stripped via splitPathNote so
+// the note no longer breaks isFileRefCandidate (which rejects whitespace). The
+// note is carried through for display but kept out of the path.
+//
+// Known non-goal: lines with trailing punctuation glued to the path
+// (`foo.md。`) or inline backtick wrapping are not normalized here — they'd
+// resolve to a non-existent path and silently get no button.
 function fencedPathList(code) {
   const lines = code.split('\n');
   const paths = [];
@@ -7521,13 +7566,14 @@ function fencedPathList(code) {
     const line = raw.trim();
     if (line === '') continue;        // blank lines are tolerated as spacing
     if (line.length > 512) return null;
-    if (!isFileRefCandidate(line)) return null;
-    const { path } = splitPathLine(line);
-    const base = path.slice(path.lastIndexOf('/') + 1);
+    const { path, note } = splitPathNote(line);
+    if (!isFileRefCandidate(path)) return null;
+    const { path: bare } = splitPathLine(path);
+    const base = bare.slice(bare.lastIndexOf('/') + 1);
     if (!FILE_REF_HAS_EXT.test(base)) return null; // no extension → not a file list
-    paths.push(line);
+    paths.push({ path, note });
   }
-  if (paths.length < 2) return null;  // single path: leave as-is, not a "list"
+  if (paths.length < 1) return null;  // empty fence: nothing to render
   return paths;
 }
 
@@ -7655,6 +7701,30 @@ function _fileRefCacheSet(key, value) {
     _filePathCache.delete(firstKey);
   }
   _filePathCache.set(key, { v: value, t: Date.now() });
+}
+
+// fileRefCode produces the inline <code> element that the file-ref scanner
+// (scanEventForFileRefs, which walks `code, .md-code`) recognises as a path so
+// it can attach [↗ preview][↓ download] buttons. Centralising the markup here
+// keeps the three callsites (markdown-link rescue, CODE-token restore,
+// fencedPathList row) in lockstep: a future change to the tag/class/attrs (e.g.
+// adding data-file-ref) lands in one place instead of three divergent string
+// literals where missing one would silently drop that path shape's buttons.
+//
+// Escaping contract: this helper does NOT escape `inner` — every callsite is
+// responsible for its own escaping/guarding (esc(), tokenizer guards, or the
+// `<`/`\x00` rejection in the link rescue). The helper only owns the wrapper.
+//
+// className: defaults to "md-code" (the inline-code pill used by backtick spans
+// and the link rescue). fencedPathList passes "" to keep a bare <code>: the
+// `.md-pathline code` CSS deliberately omits the .md-code pill background/
+// padding/border-radius, so tagging those rows with .md-code would visibly turn
+// each clean path row into a pill. Both shapes are still caught by the scanner's
+// `code, .md-code` selector, so the buttons attach either way.
+function fileRefCode(inner, className) {
+  const cls = className === undefined ? 'md-code' : className;
+  return cls ? '<code class="' + cls + '">' + inner + '</code>'
+             : '<code>' + inner + '</code>';
 }
 
 // scanEventForFileRefs walks .event-content <code> descendants of a freshly-
@@ -8352,7 +8422,16 @@ function renderMdUncached(s) {
       // non-path line) on the verbatim path.
       const pathLines = lang === '' ? fencedPathList(code) : null;
       if (pathLines) {
-        const rows = pathLines.map(p => '<div class="md-pathline"><code>' + esc(p) + '</code></div>').join('');
+        // Each row is {path, note}. The path goes in <code> so the file-ref
+        // scanner + copy see only the bare path; the optional note renders as
+        // a dimmed sibling span outside the <code> so it is visible but never
+        // folded into the path the exists-check queries.
+        const rows = pathLines.map(p => {
+          const noteHtml = p.note
+            ? '<span class="md-pathnote">' + esc(p.note) + '</span>'
+            : '';
+          return '<div class="md-pathline">' + fileRefCode(esc(p.path), '') + noteHtml + '</div>';
+        }).join('');
         return '<div class="md-code-wrap md-pathlist">' + rows +
           '<div class="md-code-actions">' +
             '<button class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)" aria-label="Copy file paths">copy</button>' +
@@ -8669,7 +8748,48 @@ function inlineMd(s) {
     // behaviour) because the substituted tags are naozhi-controlled and
     // cannot contain unescaped attacker content (each bold/italic/code
     // substitution already used `esc()`'d capture groups).
-    if (safe === '#') return text;
+    if (safe === '#') {
+      // Local-file link: claude CLI routinely emits generated files as
+      // markdown links `[数学/专题/foo.html](数学/专题/foo.html)` rather than
+      // backtick code. safeUrl rejects the non-http target (→ '#'), so the
+      // anchor branch is skipped and the link would collapse to plain text —
+      // invisible to scanEventForFileRefs (which only walks <code>/.md-code).
+      // Re-render a path-shaped target as inline <code> so the file-ref
+      // scanner attaches the same [↗ preview][↓ download] buttons it gives
+      // backtick paths. `url` is already esc()'d (esc ran above), so embed it
+      // directly; scanEventForFileRefs reads code.textContent (browser-decoded
+      // back to the real path) when calling the exists API. Display uses the
+      // path itself rather than `text` so the user sees which file resolves —
+      // and so the scanner's textContent is the path, not a friendly label.
+      //
+      // The `url` capture is NOT raw text — earlier inlineMd passes have already
+      // tokenized it. Two classes of contamination must be rejected before the
+      // target can be embedded in <code>:
+      //   1. naozhi-injected markup: the bold/italic passes run before this and
+      //      splice <strong>/<em> spans into the capture when the target itself
+      //      contains `**`/`*` (e.g. `[a](**x**/y.html)`). A real file path
+      //      never contains `<`, so reject any `<`-bearing target.
+      //   2. tokenizer placeholders: the backtick-code and inline-math passes
+      //      replace `` `x` ``/`$x$` with \x00CODE<n>\x00 / \x00KTX<n>\x00
+      //      sentinels. \x00 is non-whitespace/non-colon so it slips through
+      //      isFileRefCandidate, and the restore passes that run AFTER this one
+      //      would rewrite the sentinel into a nested <code>/<span> inside our
+      //      new <code> — malformed HTML plus a corrupted path for the scanner.
+      //      Reject any \x00-bearing target.
+      // Finally require a real extension (the same FILE_REF_HAS_EXT gate
+      // fencedPathList applies) so slash-shaped non-files — dates `2024/01/02`,
+      // fractions `1/2`, doc slugs without an extension — don't hijack the link
+      // into a bogus file ref with the author's label discarded.
+      const target = url.trim();
+      if (target.indexOf('<') === -1 && target.indexOf('\x00') === -1 && isFileRefCandidate(target)) {
+        const { path: bare } = splitPathLine(target);
+        const base = bare.slice(bare.lastIndexOf('/') + 1);
+        if (FILE_REF_HAS_EXT.test(base)) {
+          return fileRefCode(target);
+        }
+      }
+      return text;
+    }
     return '<a href="' + escAttr(safe) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + text + '</a>';
   });
   // Auto-link bare URLs not already inside an <a> tag.
@@ -8691,7 +8811,7 @@ function inlineMd(s) {
   // Restore code tokens last — their contents were esc()'d at capture time.
   if (codeTokens.length > 0) {
     s = s.replace(/\x00CODE(\d+)\x00/g, function(_, idx) {
-      return '<code class="md-code">' + codeTokens[+idx] + '</code>';
+      return fileRefCode(codeTokens[+idx]);
     });
   }
   return s;
@@ -12061,7 +12181,18 @@ function repaintCronLive() {
   }
   const events = wsm.cronLive.events || [];
   const display = processEventsForDisplay(events);
-  el.innerHTML = renderEventsWithDividers(display, 0);
+  const html = renderEventsWithDividers(display, 0);
+  if (html) {
+    el.innerHTML = html;
+  } else if (events.length > 0) {
+    // 事件到了但全被 INTERNAL_EVENT_TYPES 过滤光（典型 parallel agent team：
+    // 整段都是 agent / task_* / tool_use）。若留空 innerHTML，CSS
+    // .cdl-events:empty::before 会误报"暂无事件"，与顶部"已折叠 N 条"自相矛盾。
+    // 渲染占位文案，对齐主面板 appendEvents 的同款兜底。
+    el.innerHTML = CRON_LIVE_AGENT_ONLY_HTML;
+  } else {
+    el.innerHTML = '';
+  }
   el.scrollTop = el.scrollHeight;
   updateCronLiveTruncated();
   setCronLiveStatus(wsm.cronLive.status);
@@ -12073,6 +12204,9 @@ function repaintCronLive() {
 function appendEventsToContainer(el, events) {
   if (!el) return;
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  // 若容器当前只挂着 agent-only 占位（repaintCronLive 渲过），在追加真实
+  // 事件前清掉它，避免占位与事件并存。lastDividerTime 等读取也不会被它干扰。
+  if (el.querySelector('.cdl-agent-only')) el.innerHTML = '';
   let prevT = lastDividerTime(el);
   events.forEach(e => {
     if (isInternalEvent(e)) return;

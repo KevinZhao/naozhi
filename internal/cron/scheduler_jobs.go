@@ -24,24 +24,24 @@ import (
 	robfigcron "github.com/robfig/cron/v3"
 )
 
-// listSnapshotPair pairs a Job value-copy with its robfig/cron entry ID
-// during ListAllJobsWithNextRun's two-phase snapshot. Defined at package
-// scope (not inside the function body) so sync.Pool below can reference
-// the type. R247-PERF-4 (#530).
-type listSnapshotPair struct {
-	job     Job
-	entryID robfigcron.EntryID
-}
-
-// listPairsPool reuses the transient []listSnapshotPair scratch slice
-// allocated once per ListAllJobsWithNextRun call. Dashboard polls at 1Hz
-// across multiple tabs so the call frequency × jobs-per-call dominates
-// the cron CRUD path's allocator pressure. Get returns a zero-length
-// slice with potentially non-zero capacity — callers must reset length
-// (`:0`) when they Put it back. R247-PERF-4 (#530).
-var listPairsPool = sync.Pool{
+// listEntryIDsPool reuses the transient []robfigcron.EntryID scratch slice
+// recorded during ListAllJobsWithNextRun's two-phase snapshot. Dashboard
+// polls at 1Hz across multiple tabs so the call frequency × jobs-per-call
+// dominates the cron CRUD path's allocator pressure. Get returns a
+// zero-length slice with potentially non-zero capacity — callers must
+// reset length (`:0`) when they Put it back. R247-PERF-4 (#530).
+//
+// R250-PERF-15 (#1118): previously this pooled a []listSnapshotPair whose
+// element embedded a full Job value-copy (~300B incl. RunCounters), so the
+// snapshot copied every Job twice — once into the pooled scratch under
+// RLock, then again into the caller-owned result slice. With N jobs × N
+// tabs × 1Hz that wasted ~750KB/s of GC churn on the redundant copy. We
+// now copy each Job exactly once (directly into result under RLock) and the
+// pooled scratch holds only the cheap entryID (8 bytes) needed to patch
+// NextRun after s.cron.Entries() runs lock-free.
+var listEntryIDsPool = sync.Pool{
 	New: func() any {
-		s := make([]listSnapshotPair, 0, 64)
+		s := make([]robfigcron.EntryID, 0, 64)
 		return &s
 	},
 }
@@ -320,6 +320,55 @@ type JobWithNextRun struct {
 	NextRun time.Time
 }
 
+// ListJobsWithNextRun returns the jobs for a specific chat plus each job's
+// next scheduled run — the chat-narrowed twin of ListAllJobsWithNextRun.
+//
+// R249-CR-12 (#956): ListJobs returns chat-scoped []Job WITHOUT NextRun, while
+// ListAllJobsWithNextRun returns NextRun but for EVERY job. A caller wanting
+// "this chat's jobs + their NextRun" previously had to call the all-jobs
+// variant and filter — paying an O(allJobs) walk to render an O(jobs-in-chat)
+// list. This helper closes that asymmetry: it walks the jobsByChat bucket
+// (O(jobs-in-chat)) and patches NextRun in.
+//
+// Lock strategy mirrors ListAllJobsWithNextRun: snapshot (Job copy, entryID)
+// under s.mu.RLock, release s.mu, then read s.cron.Entries() lock-free to
+// avoid inverting the cron dispatcher's lock order (cron-internal → execute →
+// s.mu.Lock). The result slice is always non-nil (empty bucket → `[]`) for
+// wire-format symmetry with ListJobs / ListAllJobsWithNextRun.
+func (s *Scheduler) ListJobsWithNextRun(plat, chatID string) []JobWithNextRun {
+	s.mu.RLock()
+	bucket := s.jobsByChat[chatJobKey{Platform: plat, ChatID: chatID}]
+	result := make([]JobWithNextRun, 0, len(bucket))
+	ids := make([]robfigcron.EntryID, 0, len(bucket))
+	for _, j := range bucket {
+		result = append(result, JobWithNextRun{Job: *j})
+		ids = append(ids, j.entryID)
+	}
+	s.mu.RUnlock()
+
+	if len(result) == 0 {
+		return result
+	}
+
+	// Single Entries() snapshot read outside s.mu (lock-order safe). For the
+	// small per-chat bucket a direct linear lookup is cheaper than building a
+	// map; entryID 0 means the job is not registered with cron (paused) and
+	// keeps the zero NextRun.
+	entries := s.cron.Entries()
+	for i, id := range ids {
+		if id == 0 {
+			continue
+		}
+		for _, e := range entries {
+			if e.ID == id {
+				result[i].NextRun = e.Next
+				break
+			}
+		}
+	}
+	return result
+}
+
 // ListAllJobsWithNextRun returns every job plus its next scheduled run.
 // Lock strategy: snapshot (*Job, entryID) under s.mu.RLock, release s.mu, then
 // call s.cron.Entries() without holding s.mu. Calling cron.Entries inside
@@ -335,33 +384,40 @@ type JobWithNextRun struct {
 // a single mutex acquisition, which matters when the dashboard list API
 // polls at 1 Hz with 50 jobs registered.
 func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
-	// R247-PERF-4 (#530): the dashboard list endpoint polls this at 1Hz
-	// across N open tabs, so we pool the two transient containers
-	// (pairs scratch + EntryID-keyed nextRun map) to keep per-poll
-	// alloc count flat as job count grows. The result slice is owned by
-	// the caller and stays heap-resident, so it is NOT pooled.
-	pairsPtr := listPairsPool.Get().(*[]listSnapshotPair)
-	pairs := (*pairsPtr)[:0]
+	// R247-PERF-4 (#530) / R250-PERF-15 (#1118): the dashboard list endpoint
+	// polls this at 1Hz across N open tabs, so we pool the two transient
+	// containers (entryID scratch + EntryID-keyed nextRun map) to keep
+	// per-poll alloc count flat as job count grows. The result slice is owned
+	// by the caller and stays heap-resident, so it is NOT pooled — and each
+	// Job is copied straight into it under RLock so there is no second copy.
+	idsPtr := listEntryIDsPool.Get().(*[]robfigcron.EntryID)
+	ids := (*idsPtr)[:0]
 	defer func() {
 		// Reset length but keep capacity so the next call skips the make.
-		*pairsPtr = pairs[:0]
-		listPairsPool.Put(pairsPtr)
+		*idsPtr = ids[:0]
+		listEntryIDsPool.Put(idsPtr)
 	}()
 
+	var result []JobWithNextRun
 	s.mu.RLock()
-	if cap(pairs) < len(s.jobs) {
-		pairs = make([]listSnapshotPair, 0, len(s.jobs))
+	if cap(ids) < len(s.jobs) {
+		ids = make([]robfigcron.EntryID, 0, len(s.jobs))
 	}
+	result = make([]JobWithNextRun, 0, len(s.jobs))
 	for _, j := range s.jobs {
-		pairs = append(pairs, listSnapshotPair{job: *j, entryID: j.entryID})
+		// Single Job copy: directly into the caller-owned result. NextRun is
+		// patched in by index below once Entries() has been read lock-free.
+		result = append(result, JobWithNextRun{Job: *j})
+		ids = append(ids, j.entryID)
 	}
 	s.mu.RUnlock()
 
 	// Single Entries() snapshot → entryID-keyed map. The map is pooled and
 	// `clear()`-ed before re-Put so stale keys from a previous larger
 	// snapshot do not leak into a smaller current one. The alternative —
-	// re-walking Entries per pair — is O(N²) and re-acquires runningMu per
-	// Entry() call.
+	// re-walking Entries per job — is O(N²) and re-acquires runningMu per
+	// Entry() call. Called outside s.mu to avoid inverting the lock order
+	// the cron dispatcher takes (cron-internal → execute → s.mu.Lock).
 	entries := s.cron.Entries()
 	nextByIDPtr := listNextByIDPool.Get().(*map[robfigcron.EntryID]time.Time)
 	nextByID := *nextByIDPtr
@@ -374,13 +430,10 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 		nextByID[e.ID] = e.Next
 	}
 
-	result := make([]JobWithNextRun, 0, len(pairs))
-	for _, p := range pairs {
-		var next time.Time
-		if p.entryID != 0 {
-			next = nextByID[p.entryID]
+	for i, id := range ids {
+		if id != 0 {
+			result[i].NextRun = nextByID[id]
 		}
-		result = append(result, JobWithNextRun{Job: p.job, NextRun: next})
 	}
 	return result
 }
@@ -775,15 +828,24 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 	var prevEntryID robfigcron.EntryID
 	var prevCachedPeriod time.Duration
+	var prevCachedSched robfigcron.Schedule
 	var prevPaused bool
 	var captured bool
+	// CR-1 (R250531-CR-1): entryID to remove AFTER withJobByIDOpt returns
+	// (i.e. after s.mu is released). rollback runs under s.mu; calling
+	// s.cron.Remove there causes a lock-order inversion — robfig/cron.Remove
+	// sends on the unbuffered c.remove channel which can only be drained by
+	// the cron-tick goroutine, and that goroutine calls executeJobIDIfLive →
+	// s.mu.RLock. Pattern mirrors PauseJobByID's pauseCleanup hoist (#537).
+	var removeEntryID robfigcron.EntryID
 	op := func(j *Job) error {
 		// Snapshot under s.mu so the rollback restores the exact pre-op
 		// view; resumeJobLocked → registerJob mutates entryID +
-		// cachedPeriod only after this read so a concurrent reader can
-		// never observe a torn write.
+		// cachedPeriod + cachedSched only after this read so a concurrent
+		// reader can never observe a torn write.
 		prevEntryID = j.entryID
 		prevCachedPeriod = j.cachedPeriod
+		prevCachedSched = j.cachedSched // CR-3 (R250531-CR-3): snapshot cachedSched
 		prevPaused = j.Paused
 		captured = true
 		return s.resumeJobLocked(j)
@@ -795,22 +857,29 @@ func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 		if !captured {
 			return
 		}
-		// resumeJobLocked succeeded means registerJob registered a new
-		// cron entry; remove it so the in-memory cron table matches the
-		// "still paused" disk view. Use the freshly-registered entryID
-		// (j.entryID), not prevEntryID — the latter is the pre-resume
-		// value we're about to restore for j.entryID.
-		if j.entryID != 0 {
-			s.cron.Remove(j.entryID)
-		}
+		// CR-1: capture the freshly-registered entryID for removal OUTSIDE
+		// s.mu. Do NOT call s.cron.Remove here — we are under s.mu and
+		// cron.Remove sends on an unbuffered channel drained only by the
+		// cron-tick goroutine that itself acquires s.mu.RLock → deadlock.
+		removeEntryID = j.entryID
 		j.entryID = prevEntryID
 		j.cachedPeriod = prevCachedPeriod
+		j.cachedSched = prevCachedSched // CR-3: restore cachedSched
 		j.Paused = prevPaused
 	}
-	return s.withJobByIDOpt(id, withJobByIDOpts{
+	snap, err := s.withJobByIDOpt(id, withJobByIDOpts{
 		op:                   op,
 		rollbackOnPersistErr: rollback,
 	})
+	// CR-1: remove the orphaned cron entry now that s.mu is released.
+	// removeEntryID is non-zero only when rollback fired (persist failed
+	// after op succeeded and registered a new entry). The zero check is
+	// defensive; robfig/cron.Remove(0) is a no-op, but being explicit
+	// makes the intent clear.
+	if removeEntryID != 0 {
+		s.cron.Remove(removeEntryID)
+	}
+	return snap, err
 }
 
 // JobUpdate captures fields a dashboard user may edit on an existing cron
@@ -944,6 +1013,31 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 			return nil, err
 		}
 	}
+	// R171023-SEC-10: UpdateJob is a public Scheduler entry point. The
+	// dashboard PATCH handler validates NotifyPlatform/NotifyChatID at the
+	// HTTP edge, but a non-dashboard caller (test, CLI, future IM op) can
+	// reach UpdateJob directly and bypass those checks. Mirror the same
+	// length + UTF-8 + containsCronUnsafe guards that validateJobFields
+	// applies on the AddJob path so cron_jobs.json cannot receive oversized
+	// or log-injection bytes via this path.
+	if upd.NotifyPlatform != nil {
+		v := *upd.NotifyPlatform
+		if len(v) > MaxNotifyTargetLen {
+			return nil, fmt.Errorf("cron: notify_platform too long: %d bytes > %d cap", len(v), MaxNotifyTargetLen)
+		}
+		if !utf8.ValidString(v) || containsCronUnsafe(v) {
+			return nil, fmt.Errorf("cron: notify_platform contains invalid bytes")
+		}
+	}
+	if upd.NotifyChatID != nil {
+		v := *upd.NotifyChatID
+		if len(v) > MaxNotifyTargetLen {
+			return nil, fmt.Errorf("cron: notify_chat_id too long: %d bytes > %d cap", len(v), MaxNotifyTargetLen)
+		}
+		if !utf8.ValidString(v) || containsCronUnsafe(v) {
+			return nil, fmt.Errorf("cron: notify_chat_id contains invalid bytes")
+		}
+	}
 
 	// R239-GO-4: critical section uses defer Unlock so any future return
 	// path added inside this block stays correctly unlocked. The closure
@@ -1035,8 +1129,15 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	return &result, nil
 }
 
-// SetJobPrompt updates a job's prompt. If the job was paused with an empty
+// SetJobPrompt sets a job's FIRST prompt. If the job was paused with an empty
 // prompt (created from dashboard), it also unpauses and registers the schedule.
+//
+// Contract: this is an auto-fill-once operation, NOT a general update. If the
+// job already has a non-empty prompt it returns ErrPromptAlreadySet and does
+// not mutate anything — callers that want to CHANGE an existing prompt must use
+// UpdateJob. The sentinel replaces the previous silent `return nil` (#1503) so
+// the no-op is observable; IM auto-save paths treat ErrPromptAlreadySet as
+// benign, HTTP/dashboard callers may map it to 409 Conflict.
 //
 // Both IM (Hub.runTurn / runTurnPassthrough) and dashboard wshub paths land
 // here. The dashboard already validates via server.validateCronPrompt at the
@@ -1071,7 +1172,13 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	}
 	if j.Prompt != "" {
 		s.mu.Unlock()
-		return nil // already has a prompt, no-op
+		// R250531-CR-8 (#1503): the prompt is already set. SetJobPrompt only
+		// auto-fills the first prompt; it never overwrites. Previously this
+		// silently returned nil (200 OK, no change), which misled any caller
+		// trying to edit an existing prompt. Return a sentinel so the no-op is
+		// observable — IM auto-save callers treat it as benign, dashboard /
+		// API callers can map it to 409 and route real edits through UpdateJob.
+		return ErrPromptAlreadySet
 	}
 
 	j.Prompt = prompt
@@ -1197,14 +1304,15 @@ func (s *Scheduler) PreviewScheduleN(schedule string, n int) ([]time.Time, error
 // Safe to call on a nil *Scheduler: returns UTC (matches previewLocation's
 // nil branch so dashboard preview / Location calls stay in agreement during
 // the bootstrap window when scheduler is not yet wired). R219-CR-6.
+//
+// #835 (dup-code): the resolution (nil→UTC, unset→Local, else configured)
+// was previously open-coded identically to previewLocation, so a future
+// change to the nil/unset fallback policy had to be made in two places or
+// the two timezone-decision points would silently diverge — exactly the
+// "dashboard preview / Location stay in agreement" invariant this godoc
+// promises. Delegate to the single source of truth.
 func (s *Scheduler) Location() *time.Location {
-	if s == nil {
-		return time.UTC
-	}
-	if s.location == nil {
-		return time.Local
-	}
-	return s.location
+	return s.previewLocation()
 }
 
 // withJobByPrefix is the IM-prefix counterpart to withJobByID. It collapses
@@ -1227,24 +1335,42 @@ func (s *Scheduler) Location() *time.Location {
 // committed (matches the pre-refactor semantics that runStore.DeleteJob
 // fires even when persist fails — R238-GO-3).
 //
+// rollbackOnPersistErr (optional, pass nil for DeleteJob callers that do not
+// need it): if non-nil and persistJobsLocked returns an error, it is called
+// under s.mu BEFORE the snapshot copy — restoring *j to its pre-op state so
+// disk (un-persisted) and memory stay aligned. postCleanup is skipped on
+// rollback (mirrors withJobByIDOpt's contract — R20260527-COR-1 / #1272).
+//
 // Error precedence (preserved from the originals):
 //   - find miss      → (nil, find err)
 //   - op error       → (nil, op err)        ; persist + postCleanup skipped
 //   - persist error  → (nil, persist err)   ; postCleanup ALREADY ran
+//     (unless rollbackOnPersistErr is set — then postCleanup is skipped)
 //   - success        → (*Job, nil)
 func (s *Scheduler) withJobByPrefix(
 	idPrefix, plat, chatID string,
 	op func(j *Job) error,
 	postCleanup func(j *Job),
+	rollbackOnPersistErr ...func(j *Job),
 ) (*Job, error) {
+	// Unpack optional variadic rollback (at most one element; callers that do
+	// not need rollback omit the argument entirely, keeping the call sites
+	// unchanged).
+	var rollback func(j *Job)
+	if len(rollbackOnPersistErr) > 0 {
+		rollback = rollbackOnPersistErr[0]
+	}
+
 	var save func()
-	var j *Job
+	var snapshot Job
 	var findErr, opErr, perr error
+	var rolledBack bool
 	func() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		j, findErr = s.findByPrefixLocked(idPrefix, plat, chatID)
-		if findErr != nil {
+		j, err := s.findByPrefixLocked(idPrefix, plat, chatID)
+		if err != nil {
+			findErr = err
 			return
 		}
 		if op != nil {
@@ -1254,6 +1380,18 @@ func (s *Scheduler) withJobByPrefix(
 			}
 		}
 		save, perr = s.persistJobsLocked()
+		// R20260531070014-CR-1/CR-2: mirror withJobByIDOpt's rollback contract —
+		// if persistJobsLocked failed after op mutated *j, restore in-memory state
+		// under s.mu so disk (un-persisted) and memory stay aligned.
+		if perr != nil && rollback != nil {
+			rollback(j)
+			rolledBack = true
+		}
+		// R242-GO-3 mirror (#548): value-copy under s.mu so postCleanup and
+		// the caller read a stable Job even if a concurrent UpdateJob /
+		// SetJobPrompt mutates the live *j right after Unlock. Matches
+		// withJobByIDOpt's "snapshot = *j" pattern. [R250531-CR-2]
+		snapshot = *j
 	}()
 
 	if findErr != nil {
@@ -1262,14 +1400,21 @@ func (s *Scheduler) withJobByPrefix(
 	if opErr != nil {
 		return nil, opErr
 	}
+	// R20260531070014-CR-1/CR-2: on rollback skip postCleanup (mirrors
+	// withJobByIDOpt — the cron.Remove hoist must not fire when the in-memory
+	// mutation was reversed). Return perr so the caller surfaces the persist
+	// failure as a 5xx and the operator can retry.
+	if rolledBack {
+		return nil, perr
+	}
 	if postCleanup != nil {
-		postCleanup(j)
+		postCleanup(&snapshot)
 	}
 	if perr != nil {
 		return nil, perr
 	}
 	save()
-	return j, nil
+	return &snapshot, nil
 }
 
 // DeleteJob removes a job by ID prefix (scoped to the given chat).
@@ -1303,9 +1448,26 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 // R236-QA-03 (#537): same lock-order pattern as PauseJobByID — the
 // cron.Remove returned by pauseJobLocked runs in postCleanup so the
 // unbuffered c.remove channel send doesn't happen under s.mu.
+//
+// R20260531070014-CR-1: mirror PauseJobByID's rollbackOnPersistErr contract
+// (#1272). If persistJobsLocked fails after pauseJobLocked already mutated
+// (j.entryID=0, j.Paused=true), restore the pre-op (entryID, Paused) under
+// s.mu so disk (un-persisted Paused=false) and memory stay aligned — preventing
+// the "ghost-paused job that never fires" split-brain on restart.
+// postCleanup (cron.Remove hoist) is skipped on rollback so the cron entry
+// stays alive and the next tick still fires the now-active job.
 func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 	var pauseCleanup func()
+	var prevEntryID robfigcron.EntryID
+	var prevPaused bool
+	var captured bool
 	op := func(j *Job) error {
+		// Snapshot under s.mu so the rollback restores the exact
+		// pre-op view; pauseLocked mutates j.entryID + j.Paused only
+		// after this read.
+		prevEntryID = j.entryID
+		prevPaused = j.Paused
+		captured = true
 		c, err := s.pauseJobLocked(j)
 		pauseCleanup = c
 		return err
@@ -1315,12 +1477,84 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 			pauseCleanup()
 		}
 	}
-	return s.withJobByPrefix(idPrefix, plat, chatID, op, postCleanup)
+	rollback := func(j *Job) {
+		// Only restore if op actually ran and captured the pre-op view.
+		if !captured {
+			return
+		}
+		j.entryID = prevEntryID
+		j.Paused = prevPaused
+		// Drop pauseCleanup so no future code path accidentally fires
+		// the cron.Remove that we are choosing NOT to run (the entry
+		// must stay alive since the pause was not persisted).
+		pauseCleanup = nil
+	}
+	return s.withJobByPrefix(idPrefix, plat, chatID, op, postCleanup, rollback)
 }
 
 // ResumeJob resumes a paused job by ID prefix.
+//
+// R20260531070014-CR-2: mirror ResumeJobByID's rollbackOnPersistErr contract
+// (#1226). resumeJobLocked → registerJob mutates j.entryID + j.cachedPeriod +
+// j.cachedSched and then flips j.Paused=false BEFORE persistJobsLocked runs.
+// A persist failure after that op-success path would leave in-memory state with
+// a live cron entry + Paused=false while disk still shows Paused=true — on
+// restart the scheduler re-registers the schedule on top of the surviving
+// runtime entry, producing a double-fire. Capture the pre-op state under s.mu
+// and install a rollback that removes the cron entry and restores
+// (entryID, cachedPeriod, cachedSched, Paused) so in-memory matches disk.
+//
+// Lock-order: rollback runs under s.mu; calling s.cron.Remove there would
+// send on the unbuffered c.remove channel drained only by the cron-tick
+// goroutine, which itself calls s.mu.RLock → deadlock. Mirror ResumeJobByID's
+// removeEntryID pattern: capture the freshly-registered entryID inside the
+// rollback closure and call s.cron.Remove AFTER withJobByPrefix returns
+// (s.mu released).
 func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
-	return s.withJobByPrefix(idPrefix, plat, chatID, s.resumeJobLocked, nil)
+	var prevEntryID robfigcron.EntryID
+	var prevCachedPeriod time.Duration
+	var prevCachedSched robfigcron.Schedule
+	var prevPaused bool
+	var captured bool
+	// removeEntryID is non-zero only when rollback fired; cron.Remove must
+	// be called after withJobByPrefix returns (s.mu released) to avoid
+	// the lock-order inversion described above.
+	var removeEntryID robfigcron.EntryID
+	op := func(j *Job) error {
+		// Snapshot under s.mu so the rollback restores the exact pre-op
+		// view; resumeJobLocked → registerJob mutates entryID +
+		// cachedPeriod + cachedSched only after this read.
+		prevEntryID = j.entryID
+		prevCachedPeriod = j.cachedPeriod
+		prevCachedSched = j.cachedSched
+		prevPaused = j.Paused
+		captured = true
+		return s.resumeJobLocked(j)
+	}
+	rollback := func(j *Job) {
+		// Only restore if op actually ran and captured the pre-op view.
+		if !captured {
+			return
+		}
+		// Capture the freshly-registered entryID for removal OUTSIDE s.mu.
+		// Do NOT call s.cron.Remove here — we are under s.mu and cron.Remove
+		// sends on an unbuffered channel drained only by the cron-tick goroutine
+		// that itself acquires s.mu.RLock → deadlock.
+		removeEntryID = j.entryID
+		j.entryID = prevEntryID
+		j.cachedPeriod = prevCachedPeriod
+		j.cachedSched = prevCachedSched
+		j.Paused = prevPaused
+	}
+	snap, err := s.withJobByPrefix(idPrefix, plat, chatID, op, nil, rollback)
+	// Remove the orphaned cron entry now that s.mu is released. removeEntryID
+	// is non-zero only when rollback fired (persist failed after op succeeded
+	// and registered a new entry). robfig/cron.Remove(0) is a no-op, but being
+	// explicit about the guard makes the intent clear.
+	if removeEntryID != 0 {
+		s.cron.Remove(removeEntryID)
+	}
+	return snap, err
 }
 
 // NextRun returns the next scheduled run time for a job. R247-GO-9
@@ -1353,14 +1587,31 @@ func (s *Scheduler) NextRun(j *Job) time.Time {
 	if j == nil {
 		return time.Time{}
 	}
+	// R250-PERF-14-adjacent lock-order fix (#1117): resolve entryID under
+	// s.mu.RLock, then RELEASE s.mu before calling s.cron.Entry(). Entry()
+	// is implemented as `for _, e := range c.Entries()` and Entries()
+	// round-trips through the dispatcher's snapshot channel guarded by
+	// robfig/cron's runningMu. Holding s.mu across that call inverts the
+	// lock order the cron dispatch path takes (cron-internal → execute →
+	// recordResult → s.mu.Lock) — the exact discipline
+	// ListAllJobsWithNextRun's godoc documents and follows. NextRun was a
+	// straggler still calling cron.Entry inside s.mu; aligning it with the
+	// release-before-Entries discipline removes the lock-ordering
+	// inconsistency without changing the observable result (entryID is the
+	// source-of-truth snapshot; a concurrent Remove that lands after the
+	// unlock yields a zero Entry.Next, the same "no live schedule" answer
+	// the in-lock path produced). TriggerNow intentionally keeps its
+	// cross-lock (see R250-GO-2 there) because it needs a single consistent
+	// instant for the entry-gone check against a racing DeleteJob; NextRun
+	// only reads Entry.Next so it has no such consistency requirement.
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	entryID := j.entryID
 	if entryID == 0 && j.ID != "" {
 		if live, ok := s.jobs[j.ID]; ok {
 			entryID = live.entryID
 		}
 	}
+	s.mu.RUnlock()
 	if entryID == 0 {
 		return time.Time{}
 	}
@@ -1421,9 +1672,13 @@ func (s *Scheduler) TriggerNow(id string) error {
 	// R250-GO-2: hold s.mu.RLock across s.cron.Entry(entryID) and the
 	// WrappedJob nil check so a concurrent DeleteJob (which calls
 	// s.cron.Remove under s.mu.Lock) cannot observe entryID-in-flight
-	// while we're mid-lookup. NextRun (above) already uses the same
-	// cross-lock pattern; cron's internal lock cannot call back into
-	// scheduler code, so cross-lock holding is safe.
+	// while we're mid-lookup. cron's internal lock cannot call back into
+	// scheduler code, so cross-lock holding is safe here. (NextRun no
+	// longer cross-locks — #1117 moved its cron.Entry read outside s.mu to
+	// align with ListAllJobsWithNextRun's release-before-Entries
+	// discipline; TriggerNow keeps the cross-lock because it needs the
+	// entry-gone check and the s.mu RLock to observe a single consistent
+	// instant against a racing DeleteJob.)
 	if entryID != 0 {
 		// TriggerNow 不再通过 cron chain 的 WrappedJob.Run()——因为我们要跳过
 		// jitter（用户显式 "run now" 期望立刻跑）。改为直接 executeOpt(..., true)。
@@ -1576,6 +1831,22 @@ func (s *Scheduler) newCronTickCallback(jobID string) func() {
 }
 
 // findByPrefixLocked finds a job by ID prefix scoped to a specific chat.
+//
+// RETURNS (R249-CR-6, #950): exactly one of —
+//   - (job, nil)                      the prefix uniquely identifies one job
+//     in the (plat, chatID) scope.
+//   - (nil, ErrJobNotFound)           no job in the scope matches the prefix,
+//     OR a full-length ID exists but in a different chat scope (the foreign
+//     job is masked as NotFound so callers can't probe its existence by ID).
+//   - (nil, ErrAmbiguousPrefix)       a short prefix (typically 1-2 chars from
+//     the IM-typed `naozhi cron pause <prefix>` flow) matches ≥2 jobs in the
+//     scope; the wrapped message lists the colliding IDs so the operator can
+//     disambiguate. Callers should errors.Is-check this and surface a
+//     "please disambiguate" hint rather than treating it as NotFound.
+//
+// COMPLEXITY: the partial-prefix scan is linear in the number of jobs in the
+// target chat (s.jobsByChat[chat]), bounded by maxJobsPerChat — NOT the full
+// s.jobs table. The full-ID fast path below is O(1).
 //
 // LOCK: caller MUST hold s.mu (read or write). The body iterates the
 // per-chat slice from s.jobsByChat directly without taking the mutex;

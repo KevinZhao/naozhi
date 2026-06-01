@@ -175,6 +175,50 @@ func TestGenerateSystemdUnit_MatchesDeployTemplate(t *testing.T) {
 	}
 }
 
+// startLimitSection returns "Unit" or "Service" depending on which section
+// the given StartLimit directive appears under, or "" if absent. systemd
+// v230+ ignores StartLimit* placed in [Service] (logs a warning), silently
+// disabling crash-loop rate-limiting (issue #1496).
+func startLimitSection(unit, directive string) string {
+	section := ""
+	for _, line := range strings.Split(unit, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]"):
+			section = strings.Trim(trimmed, "[]")
+		case strings.HasPrefix(trimmed, directive+"=") || strings.HasPrefix(trimmed, directive+" "):
+			return section
+		}
+	}
+	return ""
+}
+
+// TestStartLimitDirectivesInUnitSection guards against the #1496 regression:
+// StartLimit* must live in [Unit], not [Service], or systemd ignores them and
+// crash-loop rate-limiting never triggers (Restart=always loops forever).
+func TestStartLimitDirectivesInUnitSection(t *testing.T) {
+	deployBytes, err := os.ReadFile(filepath.Join("..", "..", "deploy", "naozhi.service"))
+	if err != nil {
+		t.Fatalf("read deploy/naozhi.service: %v", err)
+	}
+	sources := map[string]string{
+		"generateSystemdUnit":   generateSystemdUnit("/usr/local/bin/naozhi", "/etc/naozhi/config.yaml", "app", "/var/lib/naozhi"),
+		"deploy/naozhi.service": string(deployBytes),
+	}
+	for name, unit := range sources {
+		for _, directive := range []string{"StartLimitIntervalSec", "StartLimitBurst"} {
+			if got := startLimitSection(unit, directive); got != "Unit" {
+				t.Errorf("%s: %s in [%s] section, want [Unit]", name, directive, got)
+			}
+		}
+		// The legacy name must not linger anywhere — it would shadow the
+		// renamed directive and reintroduce the misplacement.
+		if strings.Contains(unit, "StartLimitInterval=") {
+			t.Errorf("%s: uses legacy StartLimitInterval=, want StartLimitIntervalSec=", name)
+		}
+	}
+}
+
 func TestGenerateSystemdUnitQuotesSpaces(t *testing.T) {
 	unit := generateSystemdUnit("/opt/my app/naozhi", "/home/user/my config/config.yaml", "user", "/home/user")
 

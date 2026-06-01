@@ -176,10 +176,12 @@ func waitServiceActive(ctx context.Context, timeout time.Duration) error {
 		if sleep > remaining {
 			sleep = remaining
 		}
+		t := time.NewTimer(sleep)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return fmt.Errorf("restart confirmation interrupted: %w", ctx.Err())
-		case <-time.After(sleep):
+		case <-t.C:
 		}
 	}
 }

@@ -344,3 +344,27 @@
 - [R20260530-ARCH-cosmetic-1] cron_router_adapter init() 手工枚举 8 个 enum 序数等式不可扩展(planner 落地时应提升为共享 leaf enum) — cmd/naozhi/cron_router_adapter.go:41
 - [R20260530-ARCH-cosmetic-2] main() 仍是 580 行 god-function(corpus R260528-ARCH-4 称 1300 行已 stale,可重核数字) — cmd/naozhi/main.go:45
 - [R20260530-ARCH-cosmetic-3] internal/server 仍 12.7K LOC/56 文件单包(corpus R260528-ARCH-6 称 21K/200 文件已 stale,提取进行中) — internal/server
+
+## cron-cr-20260531
+
+- [R250531-GO-3] releaseRun 死代码:被 runinflight_test.go 引用但生产路径已被 runFinalizer 取代 — internal/cron/runinflight.go:377
+- [R250531-GO-6] redactPathsBuilderPool 注释误述 strings.Builder.Reset() 语义(实际保留 backing buffer) — internal/cron/scheduler_finish.go:655
+- [R250531-CR-10] appendMarshalBufPool 与 redactPathsBuilderPool 两处 pool defer 的 Reset 语义注释不一致 — internal/cron/runstore.go:352
+- [R250531-PERF-13] notifySubscribers 有订阅者时每次 Append 取 subMu.RLock(已有 subCount==0 快路径) — internal/cli/eventlog_subscribe.go:95
+- [R250531-PERF-15] SinkFor batchJob.Key 按值复制入队列(key 串 ≤64B) — internal/eventlog/persist/persister.go:489
+- [R250531-ARCH-03] sysession 对 internal/session 仅半解耦(cli 已镜像 session 未镜像) — internal/sysession/auto_titler.go:14
+- [R250531-ARCH-05] registry.Typed[T] 已建但 0 生产采用(按迁移策略为有意) — internal/registry/registry.go
+- [R250531-SEC-8] feishu VerificationToken 比较后 raw token 留在 GC heap(理论内存泄露) — internal/platform/feishu/transport_hook.go:117
+- [R250531-SEC-10] APIError.Error() 的 e.Msg 用 %q 而非 SanitizeForLog(已防日志注入,仅一致性) — internal/platform/feishu/feishu.go:128
+- [R20260531-GO-5] server.go:465 fallback 用 deprecated cli.NewCLIBackendsHandler;已有 ctor 显式分支,churn-only — internal/server/server.go:465
+- [R20260531-GO-7] NotifyCtx parent 参数刻意丢弃(预留未来 trace 传播),签名误导但有意 — internal/dispatch/notify_ctx.go:54
+- [R20260531-QUAL-1] releaseRun 生产死代码,godoc "MUST" 与 runFinalizer 实际路径矛盾(仅测试用) — internal/cron/runinflight.go:342
+- [R20260531-QUAL-3] runstore.go 注释称 CronRunSummary embeds Result []byte,实际无此字段(stale 量化论证) — internal/cron/runstore.go:1430
+- [R20260531-QUAL-6] isSecretTokenByte 用 rune(b) cast 处理任意字节,ASCII token 无误但 intent/impl 不符 — internal/cron/redact_secrets.go:147
+- [R20260531-PERF-6] Snapshot 无条件 proc.TurnAgents() 拷贝,零 subagent 时可先查 count 跳过(Process 未暴露 TurnAgentCount,需先加方法) — internal/session/managed_query.go:217
+- [R20260531-ARCH-3] cron SessionStatus 三值靠 iota 顺序匹配 session,已被 cron_router_adapter init panic 覆盖,仅文档措辞待对齐 — internal/cron/agent_opts.go:36
+- [R20260531-ARCH-5] cron 测试包反向 import session,可改用包内 fakeRouter 强化"生产零依赖"不变量 — internal/cron/scheduler_test.go:12
+- [R20260531070014-GO-4] strings.Builder.Reset() 注释关于 backing slice 释放行为描述不准确 — internal/cron/scheduler_finish.go:660
+- [R20260531070014-GO-9] mayContainSecretPrefix 注释 'g' 分支列举遗漏 github_pat_ — internal/cron/redact_secrets.go:183
+- [R20260531070014-CR-3] ManagedState 方法名与返回类型同名，建议 rename LifecycleState() — internal/session/managed_state.go:76
+- [R20260531070014-CR-8] tuning.go 操作符表 defaultCronSlowThreshold 行 Markdown 单元格对齐错位 — internal/cron/tuning.go:15

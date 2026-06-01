@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -104,9 +105,15 @@ func usePassthrough(ctx context.Context, sess *session.ManagedSession) bool {
 	return dispatch.IsPassthrough(ctx)
 }
 
-// sendWithBroadcast is a nil-safe delegation to Hub.sendWithBroadcast.
-// When the dashboard is not registered (hub is nil, e.g. in tests or headless mode),
-// falls back to a direct sess.Send without broadcasts.
+// sendWithBroadcast delegates to Hub.sendWithBroadcast when a dashboard Hub is
+// wired. When no hub is present it falls back to a direct sess.Send without
+// broadcasts — but only when the Server was constructed with Headless=true
+// (test harnesses, headless tools). A production Server is never headless, so a
+// nil hub there means a wiring regression: rather than silently routing through
+// the no-broadcast fallback (which would drop every dashboard/IM broadcast with
+// no signal), we fail loud. This mirrors dispatch.NoopCapabilities.Send's
+// panic-on-misconfig gate so both wiring layers surface miswiring instead of
+// degrading quietly. R248-ARCH-9 (#379).
 //
 // sess must be non-nil; callers must check the error from GetOrCreate first.
 func (s *Server) sendWithBroadcast(
@@ -122,6 +129,11 @@ func (s *Server) sendWithBroadcast(
 	}
 	if s.hub != nil {
 		return s.hub.sendWithBroadcast(ctx, key, sess, text, images, onEvent)
+	}
+	if !s.headless {
+		// Non-headless Server with no hub == wiring regression. Fail loud
+		// instead of silently dropping broadcasts.
+		panic("server: sendWithBroadcast called with nil hub on a non-headless Server (set ServerOptions.Headless for hub-less wiring)")
 	}
 	// Headless mode (no hub): still route through passthrough when caller
 	// set the ctx marker and session supports it.
@@ -434,10 +446,8 @@ func (h *Hub) runTurn(key, text string, images []cli.ImageData, onAsyncError fun
 
 	if _, err := h.sendWithBroadcast(h.ctx, key, sess, text, images, nil); err != nil {
 		slog.Error("send: send", "key", key, "err", err)
-	} else if h.scheduler != nil && sessionkey.IsCronKey(key) {
-		if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, sessionkey.CronKeyPrefix), text); err != nil {
-			slog.Warn("send: set cron prompt", "key", key, "err", err)
-		}
+	} else {
+		h.autoSaveCronPrompt("send", key, text)
 	}
 	slog.Debug("send: turn complete", "key", key, "elapsed_ms", time.Since(sendStart).Milliseconds())
 }
@@ -476,12 +486,28 @@ func (h *Hub) runTurnPassthrough(key, text string, images []cli.ImageData, prior
 		if onAsyncError != nil {
 			onAsyncError(asyncErrorMessage(err))
 		}
-	} else if h.scheduler != nil && sessionkey.IsCronKey(key) {
-		if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, sessionkey.CronKeyPrefix), text); err != nil {
-			slog.Warn("passthrough: set cron prompt", "key", key, "err", err)
-		}
+	} else {
+		h.autoSaveCronPrompt("passthrough", key, text)
 	}
 	slog.Debug("passthrough: turn complete", "key", key, "elapsed_ms", time.Since(sendStart).Milliseconds())
+}
+
+// autoSaveCronPrompt persists the just-sent text as the cron job's prompt on
+// a successful turn (IM auto-save). It is a no-op for non-cron keys or when no
+// scheduler is wired.
+//
+// ErrPromptAlreadySet is benign here: after the first turn the job already has
+// a prompt, so every later turn would return that sentinel and — without this
+// filter — spam Warn once per turn. R20260531-CR-001: suppress only that
+// sentinel; every other SetJobPrompt failure still logs at Warn.
+func (h *Hub) autoSaveCronPrompt(phase, key, text string) {
+	if h.scheduler == nil || !sessionkey.IsCronKey(key) {
+		return
+	}
+	jobID := strings.TrimPrefix(key, sessionkey.CronKeyPrefix)
+	if err := h.scheduler.SetJobPrompt(jobID, text); err != nil && !errors.Is(err, cron.ErrPromptAlreadySet) {
+		slog.Warn(phase+": set cron prompt", "key", key, "err", err)
+	}
 }
 
 // Deprecated: sessionSend with a configured MessageQueue handles all production

@@ -24,6 +24,12 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
+// remoteNodeProxyTimeout bounds a single proxied interrupt/send RPC to an
+// owning peer node before the dashboard goroutine gives up. R244-ARCH-16
+// (#1054): named so the value is greppable and tunable in one place instead
+// of being a bare `10*time.Second` literal duplicated across the proxy sites.
+const remoteNodeProxyTimeout = 10 * time.Second
+
 // File: wshub_send.go
 //
 // Dashboard-side send / interrupt handling extracted from wshub.go (R243-ARCH-2
@@ -262,7 +268,7 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 					Error: "internal error"})
 			}
 		}()
-		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
+		ctx, cancel := context.WithTimeout(h.ctx, remoteNodeProxyTimeout)
 		defer cancel()
 		interrupted, err := nc.ProxyInterruptSession(ctx, capturedKey)
 		if err != nil {
@@ -283,6 +289,16 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 				errMsg = "remote node needs upgrade to support this action"
 			}
 			c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: errMsg})
+			// R176-ARCH-NX (#433): same parity gap as handleRemoteSend — the
+			// interrupt_ack reaches only the originating tab, so a second
+			// operator who pressed stop on the same remote session sees no
+			// signal that the interrupt never reached the node. Fan the
+			// failure out to every dashboard subscribed to this session over
+			// the shared `event` frame. The remote session's EventLog lives
+			// on the node so we cannot append locally; the summary is
+			// re-sanitised here (same redaction as the slog above) because it
+			// is broadcast verbatim to dashboards.
+			h.broadcastSessionSystemEvent(capturedKey, "中断失败："+osutil.SanitizeForLog(err.Error(), 512))
 			return
 		}
 		status := "ok"
@@ -393,7 +409,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 					Error: "internal error"})
 			}
 		}()
-		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
+		ctx, cancel := context.WithTimeout(h.ctx, remoteNodeProxyTimeout)
 		defer cancel()
 		if err := nc.Send(ctx, capturedKey, msg.Text, msg.Workspace); err != nil {
 			// R217-CR-5 (#641): symmetric sanitisation with the interrupt
@@ -407,6 +423,17 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 			// internal host/port/auth details back to authenticated browser
 			// clients. Operators still see the detail in the slog above.
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: "remote send failed"})
+			// R176-ARCH-NX (#433): parity with the remote→primary direction
+			// (upstream/connector_rpc.go injects LogSystemEvent on send
+			// failure). The send_ack above reaches only the originating tab;
+			// fan the failure out to every dashboard subscribed to this
+			// remote session so a second operator watching the conversation
+			// sees the message did not land instead of a silent stall. The
+			// remote session's EventLog lives on the node, so we cannot append
+			// locally — broadcast over the same `event` frame remote events
+			// already use. The summary is re-sanitised here (same redaction as
+			// the slog above) because it is broadcast verbatim to dashboards.
+			h.broadcastSessionSystemEvent(capturedKey, "发送失败："+osutil.SanitizeForLog(err.Error(), 512))
 		} else {
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "accepted", Key: capturedKey, Node: nodeID})
 			// Refresh the remote subscription so the connector re-creates

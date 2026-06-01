@@ -181,7 +181,7 @@ func (s *Server) registerDashboard() {
 					Subsystem: runtelemetry.SubsystemSysession,
 					OwnerID:   ev.Name,
 					RunID:     ev.RunID,
-					Trigger:   runtelemetry.TriggerKind(ev.Trigger),
+					Trigger:   mapSysessionTrigger(ev.Trigger),
 					StartedAt: ev.StartedAt,
 				})
 			},
@@ -190,10 +190,10 @@ func (s *Server) registerDashboard() {
 					Subsystem:  runtelemetry.SubsystemSysession,
 					OwnerID:    ev.Name,
 					RunID:      ev.RunID,
-					State:      runtelemetry.RunState(ev.State),
+					State:      mapSysessionRunState(ev.State),
 					DurationMS: ev.DurationMS,
-					Trigger:    runtelemetry.TriggerKind(ev.Trigger),
-					ErrorClass: runtelemetry.ErrorClass(ev.ErrorClass),
+					Trigger:    mapSysessionTrigger(ev.Trigger),
+					ErrorClass: mapSysessionErrorClass(ev.ErrorClass),
 				})
 			},
 		)
@@ -206,7 +206,7 @@ func (s *Server) registerDashboard() {
 	// cohesive session-CRUD route group is extracted into its own helper so
 	// registerDashboard shrinks toward the routes.go split the issues call
 	// for. Behaviour is identical — the routes_snapshot AST gate scans
-	// dashboard.go as a whole, so moving these calls into a same-file helper
+	// routes.go as a whole, so moving these calls into a same-file helper
 	// keeps the golden snapshot byte-for-byte stable.
 	s.registerSessionRoutes(auth)
 	// R260528-ARCH-6 (#1367) incremental slice: the discovered-session route
@@ -500,7 +500,21 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	//     to an action target; pinning to 'self' stops an injected form from
 	//     exfiltrating to a foreign origin. Mirrors the login page's
 	//     explicit form-action discipline (R243-SEC-15 / #800).
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font")
+	// R242-SEC-2 (#607): narrow every `cdn.jsdelivr.net` source expression to
+	// the `/npm/` path prefix. A CSP host-source with a trailing-slash path
+	// matches only URLs whose path starts with that prefix (CSP3 §6.6.2.6
+	// path-part matching), so the dashboard can still pull
+	// `…/npm/mermaid@…`, `…/npm/katex@…/dist/katex.min.js`, the KaTeX
+	// stylesheet, and its `@font-face` woff2 files (all under `/npm/`), while
+	// the CDN scope can no longer bootstrap an arbitrary follow-on load from a
+	// non-`/npm/` jsdelivr path (e.g. `/gh/<attacker>/<repo>` user content or
+	// `/combine/` bundle endpoints). This shrinks the script-src CDN surface
+	// without the breaking strict-dynamic+nonce migration that drops
+	// `'unsafe-inline'`, which stays NEEDS-DESIGN (it is mutually exclusive
+	// with the dashboard's inline-handler reliance — browsers ignore
+	// `'unsafe-inline'` once `strict-dynamic` is present). require-sri-for
+	// script continues to pin every CDN script to its integrity hash.
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net/npm/; font-src 'self' https://cdn.jsdelivr.net/npm/; img-src 'self' data: blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; require-sri-for script style font")
 	// HSTS is only meaningful over TLS (RFC 6797 §7.2). Sending it on plain
 	// HTTP would still be honoured by browsers and can brick local HTTP
 	// loopback access for a year. Gate on the same isSecure() helper the
@@ -670,12 +684,14 @@ func buildSessionOpts(key string, resolver *session.KeyResolver, agents map[stri
 	opts := agents[agentID]
 	if project.IsPlannerKey(key) {
 		opts.Exempt = true // planner sessions are always exempt, regardless of project config
-		// Reuse `parts` from the SplitN(key, ":", 4) above: planner keys have
-		// the shape "project:<name>:planner" so parts[1] is the project name.
-		// IsPlannerKey already proved len(key)>len("project::planner") so the
-		// 4-segment SplitN yields ≥3 elements whenever this branch fires.
-		if projectMgr != nil && len(parts) >= 3 {
-			if p := projectMgr.Get(parts[1]); p != nil {
+		// R20260531-QUAL-4: extract the project name by stripping the fixed
+		// "project:" prefix and ":planner" suffix — the exact inverse of
+		// PlannerKeyFor. SplitN(key, ":", 4)[1] would truncate a name that
+		// itself contains ':' (dir "my:proj" → "my"), silently breaking
+		// projectMgr.Get and leaving planner opts unconfigured.
+		name := strings.TrimSuffix(strings.TrimPrefix(key, "project:"), ":planner")
+		if projectMgr != nil {
+			if p := projectMgr.Get(name); p != nil {
 				opts.Workspace = p.Path
 				if m := projectMgr.EffectivePlannerModel(p); m != "" {
 					opts.Model = m

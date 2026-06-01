@@ -85,7 +85,8 @@ cli:
   #    path: "~/.local/bin/kiro-cli"
   #    # Model ID forwarded as `kiro-cli acp --model <id>` at spawn time.
   #    # List available IDs with: kiro-cli chat --list-models
-  #    # Common values (kiro 2.3.0): auto, claude-opus-4.7, claude-sonnet-4.6,
+  #    # Common values (kiro 2.3.0): auto, claude-opus-4.8 (preview),
+  #    # claude-opus-4.7 (preview), claude-opus-4.6, claude-sonnet-4.6,
   #    # claude-haiku-4.5, deepseek-3.2, glm-5, qwen3-coder-next.
   #    # Omit / leave empty => kiro picks its own default ("auto").
   #    model: "claude-sonnet-4.6"
@@ -167,6 +168,39 @@ cron:
   # 默认 2m。"0" 关闭抖动（回退到 v1 行为）。上限硬编码 10m。TriggerNow
   # （dashboard 的 "run now" 按钮）始终跳过抖动立即执行。
   jitter_max: "2m"
+
+# System Session daemons: naozhi 内置后台线程框架 (docs/rfc/system-session.md)。
+# enabled 是总开关; 每个 daemon 还有自己的 enabled。
+sysession:
+  enabled: true
+  tick_timeout: 30s
+  runner:
+    # 留空让 claude CLI 用本部署默认 backend 的模型 (不硬编码 vendor 字符串)。
+    model: ""
+    # 派生的 transient system session 的工作目录; 留空默认 <dataDir>/sys-sessions/。
+    work_dir: ""
+    jsonl_max_age: 168h  # 启动 sweep 保留窗口; "0" 关闭 sweep。
+  daemons:
+    # daemon name 必须与 internal/sysession/registry.go 注册的 kebab-case
+    # name 完全一致, 否则 NewManager 找不到 factory, 静默不跑。
+    auto-titler:
+      enabled: true
+      tick: 30s
+      min_user_turns: 3
+      min_rename_interval: 5m
+      batch_per_tick: 1
+      include_group_chat: false
+    # attachment-gc: 回收超 TTL 且无引用的附件文件 (docs/rfc/attachment-gc-daemon.md)。
+    # 首版默认关闭 + dry_run: 存量部署先观察 would-remove 分桶日志
+    # (naozhi_attachment_gc_would_reap_*), 确认风险后再开真删。
+    attachment-gc:
+      enabled: false
+      tick: 6h            # 低频清理; <1h 会被钉到 1h 下限
+      run_on_start: true  # 启动即跑一次
+      upload_ttl: 168h    # 7d ("0"/留空 = 用默认, 非禁用)
+      ref_ttl: 720h       # 30d
+      per_root_cap: 500   # 每个 workspace 根单 Tick 删除上限
+      dry_run: true       # 只记不删; 观察无误后改 false
 
 platforms:
   feishu:

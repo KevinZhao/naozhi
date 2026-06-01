@@ -1142,6 +1142,18 @@ func httpErrPersistFailed(w http.ResponseWriter, op string) {
 	})
 }
 
+// writeCronErr writes a cron mutation error as the JSON envelope
+// {"error": msg} with the given status. R20260531-SEC-8 (#1518): the cron
+// create/update validation paths previously mixed http.Error (text/plain)
+// with httputil.WriteJSONStatus (JSON) for their 4xx responses, forcing
+// dashboard.js to branch on Content-Type to read the error. Routing every
+// cron mutation error through this helper lets the client read body.error
+// uniformly. Matches the existing {"error": ...} shape already used by the
+// rate-limit and persist-failure replies.
+func writeCronErr(w http.ResponseWriter, status int, msg string) {
+	httputil.WriteJSONStatus(w, status, map[string]string{"error": msg})
+}
+
 // POST /api/cron — create a new cron job from dashboard.
 func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	if h.scheduler == nil {
@@ -1165,15 +1177,15 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64 KB
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 	if req.Schedule == "" {
-		http.Error(w, "schedule is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "schedule is required")
 		return
 	}
 	if err := validateCronTitle(req.Title); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// Cap schedule length before handing to validateSchedule → robfig/cron
@@ -1181,19 +1193,19 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	// envelope a single 63 KB schedule field would still reach the parser
 	// and force per-field regex work. Mirrors HandlePreview (line 381).
 	if len(req.Schedule) > maxCronScheduleBytesDashboard {
-		http.Error(w, "schedule too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "schedule too long")
 		return
 	}
 	if err := validateCronScheduleChars(req.Schedule); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := validateCronPrompt(req.Prompt); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := ValidateCronBackend(req.Backend); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1202,18 +1214,18 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	// status code for boundary violations rather than ambiguous 400s.
 	if req.WorkDir != "" {
 		if err := validateCronWorkDir(req.WorkDir); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if h.validateWS == nil {
-			http.Error(w, "cron work_dir validation not wired", http.StatusInternalServerError)
+			writeCronErr(w, http.StatusInternalServerError, "cron work_dir validation not wired")
 			return
 		}
 		validated, err := h.validateWS(req.WorkDir, h.allowedRoot)
 		if err != nil {
 			status, msg := h.classifyWSErr(err)
 			slog.Debug("cron work_dir validation failed", "err", err)
-			http.Error(w, msg, status)
+			writeCronErr(w, status, msg)
 			return
 		}
 		req.WorkDir = validated
@@ -1232,20 +1244,20 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 	// disk and silently route notifications to the global fallback target.
 	if req.NotifyPlatform != "" || req.NotifyChatID != "" {
 		if req.NotifyPlatform == "" || req.NotifyChatID == "" {
-			http.Error(w, "notify_platform and notify_chat_id must be set together", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "notify_platform and notify_chat_id must be set together")
 			return
 		}
 	}
 	if req.Notify != nil && *req.Notify {
 		perJobSet := req.NotifyPlatform != "" && req.NotifyChatID != ""
 		if !perJobSet && !h.scheduler.NotifyDefault().IsSet() {
-			http.Error(w, "notify=true but no target configured: set cron.notify_default in config or provide notify_platform/notify_chat_id", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "notify=true but no target configured: set cron.notify_default in config or provide notify_platform/notify_chat_id")
 			return
 		}
 	}
 
 	if err := validateNotifyTarget(req.NotifyPlatform, req.NotifyChatID); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -1271,7 +1283,7 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		// gap instead of the dashboard silently treating the create as a
 		// successful 2xx that won't survive a restart. R51-QUAL-001.
 		if errors.Is(err, cronpkg.ErrPersistFailed) {
-			slog.Error("cron AddJob persisted in-memory but store write failed", "err", err, "id", job.ID)
+			slog.Error("cron AddJob persisted in-memory but store write failed", "err", err, "id", osutil.SanitizeForLog(job.ID, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "created")
 			return
 		}
@@ -1279,11 +1291,11 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 		// parsed expressions; log the full detail for operator triage but
 		// return a sanitized message to the dashboard client.
 		slog.Warn("cron AddJob rejected", "err", err, "schedule", job.Schedule)
-		http.Error(w, "invalid schedule or job fields", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid schedule or job fields")
 		return
 	}
 
-	slog.Info("cron job created via dashboard", "id", job.ID, "schedule", job.Schedule)
+	slog.Info("cron job created via dashboard", "id", osutil.SanitizeForLog(job.ID, cronpkg.MaxIDLen), "schedule", job.Schedule)
 	httputil.WriteJSON(w, cronCreateResp{ID: job.ID})
 }
 
@@ -1324,7 +1336,7 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 			// store write failed — a restart would replay the deleted job.
 			// 500 alerts the operator to inspect logs instead of treating
 			// the delete as quietly successful. R51-QUAL-001.
-			slog.Error("cron DeleteJobByID deletion not persisted", "err", err, "id", id)
+			slog.Error("cron DeleteJobByID deletion not persisted", "err", err, "id", osutil.SanitizeForLog(id, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "deleted")
 		default:
 			slog.Debug("cron delete failed", "err", err)
@@ -1333,7 +1345,7 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("cron job deleted via dashboard", "id", j.ID)
+	slog.Info("cron job deleted via dashboard", "id", osutil.SanitizeForLog(j.ID, cronpkg.MaxIDLen))
 	httputil.WriteOK(w)
 }
 
@@ -1371,7 +1383,7 @@ func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, cronpkg.ErrJobAlreadyPaused):
 			http.Error(w, "job already paused", http.StatusConflict)
 		case errors.Is(err, cronpkg.ErrPersistFailed):
-			slog.Error("cron PauseJobByID pause not persisted", "err", err, "id", req.ID)
+			slog.Error("cron PauseJobByID pause not persisted", "err", err, "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "paused")
 		default:
 			slog.Debug("cron pause failed", "err", err)
@@ -1380,7 +1392,7 @@ func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("cron job paused via dashboard", "id", req.ID)
+	slog.Info("cron job paused via dashboard", "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 	httputil.WriteOK(w)
 }
 
@@ -1416,7 +1428,7 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, cronpkg.ErrJobNotPaused):
 			http.Error(w, "job not paused", http.StatusConflict)
 		case errors.Is(err, cronpkg.ErrPersistFailed):
-			slog.Error("cron ResumeJobByID resume not persisted", "err", err, "id", req.ID)
+			slog.Error("cron ResumeJobByID resume not persisted", "err", err, "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "resumed")
 		default:
 			slog.Debug("cron resume failed", "err", err)
@@ -1425,7 +1437,7 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("cron job resumed via dashboard", "id", req.ID)
+	slog.Info("cron job resumed via dashboard", "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 	httputil.WriteOK(w)
 }
 
@@ -1481,7 +1493,7 @@ func (h *Handlers) HandleTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("cron job triggered manually", "id", req.ID)
+	slog.Info("cron job triggered manually", "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 	httputil.WriteJSON(w, map[string]string{"status": "triggered"})
 }
 

@@ -136,6 +136,12 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_attachment_ref_clear_total` | OnSessionRemoved 走 workspace 清 keyhash 的 .meta 重写次数 | 仅在 session 被删时短时涨,平时 0 |
 | `naozhi_attachment_ref_meta_error_total` | tracker UpdateMetaFile 失败数(缺 sidecar / ENOSPC / perm) | 稳态 0;非零 = attachment 将回退到仅 uploaded_at TTL GC |
 | `naozhi_attachment_ref_drop_total` | tracker 非阻塞 enqueue 满 channel 丢弃数 | 稳态 0;非零 = 调用方提交过快或磁盘 latency 异常,同 Persister 运维 |
+| `naozhi_attachment_gc_reaped_total` | attachment-gc daemon 真删的附件 payload 数(dry-run 不计) | 随老附件被回收平稳涨;长期 0 而磁盘涨 = daemon 未开或枚举不到 workspace |
+| `naozhi_attachment_gc_would_reap_legacy_total` | dry-run/live 拟删:无 .meta 走 date-dir TTL 判定(较安全) | 观察 dry-run 风险构成用;开真删前看占比 |
+| `naozhi_attachment_gc_would_reap_no_refs_total` | dry-run/live 拟删:有 .meta 但无引用 —— **可能是 tracker 尚未 bump 的活跃引用** | 高风险桶;占比高时延长 dry-run 观察期再开真删 |
+| `naozhi_attachment_gc_would_reap_expired_total` | dry-run/live 拟删:被引用过但最后引用超 refTTL(较安全) | 观察 dry-run 风险构成用 |
+| `naozhi_attachment_gc_sweep_total` | attachment-gc daemon Tick 执行次数(成功+失败) | 按 tick 周期平稳涨;停滞 = daemon 未跑,核对 enabled / 进程是否重启过频 |
+| `naozhi_attachment_gc_error_total` | workspace 级 GC 错误数(单 root 的 ReadDir 失败;**不含**文件级 remove 失败) | 非零 = 某 workspace 根权限/IO 异常,对照 slog.Warn "attachment-gc: sweep failed" 的 root |
 | `naozhi_cron_execution_slow_total` | cron job 成功执行但耗时超过 `cronSlowThreshold`（当前 30s）的累计次数（R208-OBS1 的 MVP histogram 替身） | 持续增长 = 某些 job 长期压线超时；对照 job id（slog.Warn "cron execution slow"）确认是 prompt 设计问题还是 backend 退化 |
 | `naozhi_cron_send_budget_doubled_total` | spawn 阶段已耗 >50% jobTimeout 后才进入 sendCtx 的次数（R240-GO-4 / R230B-GO-1 wall-clock 翻倍信号） | 持续增长 = GetOrCreate / Spawn 慢路径在挤压 Send 预算，单次 run 实际 wall clock 接近 2×jobTimeout；对照 slog.Warn "cron send budget exceeds job/2" 找具体 job_id 排查 spawn 慢因 |
 | `naozhi_cron_stop_budget_exceeded_gc_total` | Scheduler.Stop() 冷启动 GC 等待超过 `gcWaitBudget`（5s）的累计次数（R250-GO-20 / #1083） | 非零 = trimAll 卡在文件系统层；接近 systemd TimeoutStopSec=30s 时报警，参考 slog.Warn "cron: gc goroutine wait timeout" |

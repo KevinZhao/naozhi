@@ -4216,7 +4216,12 @@ func TestDashboardJS_R110P1_HomePanelStats(t *testing.T) {
 		`new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime()`,
 		`typeof s.last_active === 'number' && s.last_active >= dayStart`,
 		`typeof s.total_cost === 'number' && isFinite(s.total_cost)`,
-		`return { todayActive: todayActive, totalCost: totalCost };`,
+		// #445: prompt count sums per-session message_count (already in the
+		// snapshot) so the "已处理 prompt" card no longer needs the deferred
+		// /api/stats/aggregate backend. Guard >0 so the omitempty-absent (0)
+		// case stays a no-op rather than NaN-poisoning.
+		`typeof s.message_count === 'number' && isFinite(s.message_count) && s.message_count > 0`,
+		`return { todayActive: todayActive, totalCost: totalCost, totalPrompts: totalPrompts };`,
 	} {
 		if !strings.Contains(js, fragment) {
 			t.Errorf("computeHomeStats body missing contract fragment %q", fragment)
@@ -4265,11 +4270,18 @@ func TestDashboardJS_R110P1_HomePanelStats(t *testing.T) {
 	if statsHtmlIdx > 0 && listHtmlIdx > 0 && statsHtmlIdx > listHtmlIdx {
 		t.Error("stats strip must render BEFORE the session list — reverse order would push the list below the fold on short viewports")
 	}
-	// Chinese labels — operators should see Chinese copy.
-	for _, want := range []string{"今日活跃会话", "累计花费"} {
+	// Chinese labels — operators should see Chinese copy. "已处理 prompt"
+	// is the #445 third card sourced from aggregated message_count.
+	for _, want := range []string{"今日活跃会话", "已处理 prompt", "累计花费"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renderRecentSessionsPanel stats strip missing Chinese label %q", want)
 		}
+	}
+	// #445: the prompt-count card must read stats.totalPrompts (the new
+	// aggregate) rather than re-deriving a constant — a regression that
+	// dropped the field would render `undefined`.
+	if !strings.Contains(body, "stats.totalPrompts") {
+		t.Error("renderRecentSessionsPanel must render stats.totalPrompts in the 已处理 prompt card")
 	}
 }
 
@@ -4296,11 +4308,11 @@ func TestDashboardHTML_R110P1_HomePanelStatsStyles(t *testing.T) {
 		}
 	}
 
-	// 2-column grid is the intended layout (today active + cost). Anchor
-	// the declaration inside the .recent-panel-stats rule so a future
-	// single-column reflow would trip the check.
-	if ok, _ := regexp.MatchString(`\.recent-panel-stats\{[^}]*grid-template-columns:1fr 1fr`, css); !ok {
-		t.Error(".recent-panel-stats must be a 2-column grid (today active + total cost)")
+	// 3-column grid is the intended layout (today active + prompt count +
+	// total cost). Anchor the declaration inside the .recent-panel-stats
+	// rule so a future single-column reflow would trip the check.
+	if ok, _ := regexp.MatchString(`\.recent-panel-stats\{[^}]*grid-template-columns:repeat\(3,1fr\)`, css); !ok {
+		t.Error(".recent-panel-stats must be a 3-column grid (today active + prompt count + total cost)")
 	}
 	// Tabular-nums on the stat value so numbers align optically when
 	// count of active sessions crosses digit boundaries (1 → 10).
@@ -5259,6 +5271,68 @@ func TestDashboardJS_LoadEarlierFallbackWhenAllInternal(t *testing.T) {
 	prependBody := js[prependIdx : prependIdx+prependEnd]
 	if !strings.Contains(prependBody, "oldestFetchedEventTime") {
 		t.Error("prependEvents must advance oldestFetchedEventTime — otherwise consecutive load-earlier clicks on fully-internal pages loop against the same cursor")
+	}
+}
+
+// TestDashboardJS_CronLiveAgentOnlyPlaceholder pins the cron-live sibling of
+// the LoadEarlierFallback bug. A "Daily Code Review" cron runs a parallel
+// agent team whose entire event stream is agent / task_* / tool_use — all in
+// INTERNAL_EVENT_TYPES. repaintCronLive used to blindly assign the
+// render output to innerHTML, so a fully-filtered batch left the #cron-live-events
+// container empty. CSS .cdl-events:empty::before then printed "暂无事件"
+// while the "已折叠 N 条更早事件" banner stayed visible — two contradictory
+// states at once. The fix mirrors appendEvents: when events exist but render
+// to nothing, show a placeholder instead of a blank pane.
+func TestDashboardJS_CronLiveAgentOnlyPlaceholder(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// 1) The placeholder constant must exist and carry the .cdl-agent-only
+	//    class that appendEventsToContainer keys off to clear it before
+	//    appending real events.
+	if !strings.Contains(js, "CRON_LIVE_AGENT_ONLY_HTML") {
+		t.Error("dashboard.js missing CRON_LIVE_AGENT_ONLY_HTML — cron live needs the same all-filtered fallback as the main transcript")
+	}
+	if !strings.Contains(js, "cdl-agent-only") {
+		t.Error("CRON_LIVE_AGENT_ONLY_HTML must carry the .cdl-agent-only class so appendEventsToContainer can detect and clear the placeholder before appending real events")
+	}
+
+	// 2) repaintCronLive must branch on the rendered html being empty while
+	//    events.length > 0 — the exact condition the bug reproduced under.
+	//    Scan the function body so unrelated edits don't trip the assertion.
+	rcIdx := strings.Index(js, "function repaintCronLive() {")
+	if rcIdx < 0 {
+		t.Fatal("could not locate repaintCronLive in dashboard.js")
+	}
+	rcEnd := strings.Index(js[rcIdx:], "\n}\n")
+	if rcEnd < 0 || rcEnd > 4096 {
+		t.Fatalf("could not locate repaintCronLive end brace within 4 KiB (endIdx=%d)", rcEnd)
+	}
+	body := js[rcIdx : rcIdx+rcEnd]
+	if !strings.Contains(body, "else if (events.length > 0)") {
+		t.Error("repaintCronLive must render the placeholder when events exist but every one was internal-filtered — otherwise CSS :empty::before contradicts the truncated banner")
+	}
+	if !strings.Contains(body, "CRON_LIVE_AGENT_ONLY_HTML") {
+		t.Error("repaintCronLive must assign CRON_LIVE_AGENT_ONLY_HTML in its all-filtered branch")
+	}
+
+	// 3) appendEventsToContainer must clear a lingering placeholder before
+	//    appending real events, so the two never coexist.
+	apIdx := strings.Index(js, "function appendEventsToContainer(el, events) {")
+	if apIdx < 0 {
+		t.Fatal("could not locate appendEventsToContainer in dashboard.js")
+	}
+	apEnd := strings.Index(js[apIdx:], "\n}\n")
+	if apEnd < 0 || apEnd > 4096 {
+		t.Fatalf("could not locate appendEventsToContainer end brace within 4 KiB (endIdx=%d)", apEnd)
+	}
+	apBody := js[apIdx : apIdx+apEnd]
+	if !strings.Contains(apBody, ".cdl-agent-only") {
+		t.Error("appendEventsToContainer must clear the .cdl-agent-only placeholder before appending real events so placeholder + events never coexist")
 	}
 }
 

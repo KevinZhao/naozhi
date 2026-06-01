@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -180,27 +181,70 @@ func (a *autoTitler) Description() string { return "根据对话内容自动提�
 // Unknown keys are ignored (forward-compat).  Sane defaults apply when
 // the value is missing or zero.
 func (a *autoTitler) Configure(cfg DaemonConfig) error {
-	if v, ok := cfg["min_user_turns"].(int); ok && v > 0 {
-		a.minUserTurns = v
-	}
-	if v, ok := cfg["min_rename_interval"].(time.Duration); ok && v > 0 {
-		a.minRenameInterval = v
-	}
-	if v, ok := cfg["batch_per_tick"].(int); ok && v > 0 {
-		// R236-QA-09: clamp to autoTitlerMaxBatchPerTick so a
-		// misconfigured cfg cannot let a single Tick monopolise the
-		// shared Runner. The slice still pre-allocates batchPerTick*4
-		// for candidate collection, so an unbounded value would also
-		// blow the visit memory budget.
-		if v > autoTitlerMaxBatchPerTick {
-			v = autoTitlerMaxBatchPerTick
+	// R250531-ARCH-01 (#1505): a present-but-mistyped knob used to fall
+	// through the type assertion silently and retain the default, making
+	// "I set batch_per_tick: 50 but nothing changed" undiagnosable without
+	// reading source. We now distinguish key-absent (forward-compat, no
+	// log) from key-present-wrong-type (operator error, slog.Warn). Each
+	// knob still applies its existing validation (>0 / clamp) after the
+	// type check.
+	if raw, present := cfg["min_user_turns"]; present {
+		if v, ok := raw.(int); ok {
+			if v > 0 {
+				a.minUserTurns = v
+			}
+		} else {
+			warnMistypedKnob("min_user_turns", "int", raw)
 		}
-		a.batchPerTick = v
 	}
-	if v, ok := cfg["include_group_chat"].(bool); ok {
-		a.includeGroupChat = v
+	if raw, present := cfg["min_rename_interval"]; present {
+		if v, ok := raw.(time.Duration); ok {
+			if v > 0 {
+				a.minRenameInterval = v
+			}
+		} else {
+			warnMistypedKnob("min_rename_interval", "time.Duration", raw)
+		}
+	}
+	if raw, present := cfg["batch_per_tick"]; present {
+		if v, ok := raw.(int); ok {
+			if v > 0 {
+				// R236-QA-09: clamp to autoTitlerMaxBatchPerTick so a
+				// misconfigured cfg cannot let a single Tick monopolise the
+				// shared Runner. The slice still pre-allocates batchPerTick*4
+				// for candidate collection, so an unbounded value would also
+				// blow the visit memory budget.
+				if v > autoTitlerMaxBatchPerTick {
+					v = autoTitlerMaxBatchPerTick
+				}
+				a.batchPerTick = v
+			}
+		} else {
+			warnMistypedKnob("batch_per_tick", "int", raw)
+		}
+	}
+	if raw, present := cfg["include_group_chat"]; present {
+		if v, ok := raw.(bool); ok {
+			a.includeGroupChat = v
+		} else {
+			warnMistypedKnob("include_group_chat", "bool", raw)
+		}
 	}
 	return nil
+}
+
+// warnMistypedKnob surfaces a daemon-config key that was supplied with the
+// wrong dynamic type. The producer (cmd/naozhi/main_helpers.go) and this
+// consumer coordinate key name + value type only by cross-package
+// convention; a type drift (e.g. int64 vs int) would otherwise silently
+// retain the default. We log the daemon name, key, expected type and the
+// actual %T so the misconfiguration is diagnosable from logs alone.
+func warnMistypedKnob(key, wantType string, got any) {
+	slog.Warn("sysession auto-titler: ignoring mistyped daemon knob (retaining default)",
+		"daemon", "auto-titler",
+		"key", key,
+		"want_type", wantType,
+		"got_type", fmt.Sprintf("%T", got))
 }
 
 // Tick selects up to batchPerTick eligible sessions and renames each
@@ -499,15 +543,16 @@ func buildExcerptFromHistory(entries []SystemEventEntry) string {
 			continue
 		}
 		// Reserve 1 byte for the leading newline (when sb is non-empty)
-		// plus the rune width of the trailing "…" marker so the cap is
-		// never exceeded on the wire.  We compare against the projected
-		// post-write size to avoid the off-by-one where a single
-		// oversized entry would slip through because the pre-write
-		// length was still under the cap.
+		// plus the rune width of the trailing "…" marker (3 bytes, UTF-8
+		// U+2026) so the cap is never exceeded on the wire.  We compare
+		// against the projected post-write size to avoid the off-by-one
+		// where a single oversized entry would slip through because the
+		// pre-write length was still under the cap.
 		need := len(s)
 		if sb.Len() > 0 {
 			need++ // newline
 		}
+		need += utf8.RuneLen('…') // 3 bytes for the truncation marker
 		if sb.Len()+need > autoTitlerExcerptSoftCapBytes {
 			// Tag truncation with a single ellipsis so the LLM sees a
 			// visible cut.  The line-cap pass downstream tolerates the

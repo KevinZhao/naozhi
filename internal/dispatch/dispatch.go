@@ -158,7 +158,14 @@ type Dispatcher struct {
 	// legacy duplicate-routing branches that R-key-resolver collapsed
 	// will quietly come back.  Any new ProjectForChat / EffectivePlanner*
 	// read on the hot path should fail review.
-	projectMgr *project.Manager
+	//
+	// ARCH-DISP-1 (#457): typed as the ProjectStore consumer interface
+	// (consumer.go) rather than *project.Manager so slash-command handler
+	// tests can inject a fake binding store. *project.Manager satisfies it
+	// implicitly; NewDispatcher assigns cfg.ProjectMgr directly. nil when
+	// projects.root is unconfigured — every handler gates on
+	// `d.projectMgr == nil` first (see handleProjectCommand).
+	projectMgr ProjectStore
 	// resolver centralises (key, opts) derivation for the IM and slash-
 	// command paths. NewDispatcher guarantees this field is non-nil — when
 	// callers don't supply a resolver the constructor fabricates a project-
@@ -511,13 +518,22 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 			scheduler = nil
 		}
 	}
+	// ARCH-DISP-1 (#457): same typed-nil-interface trap for ProjectStore.
+	// cfg.ProjectMgr is a concrete *project.Manager; a nil pointer boxed
+	// into the ProjectStore field is != nil, which would defeat every
+	// `d.projectMgr == nil` gate (handleProjectCommand / /cd / /new).
+	// Collapse it to a true nil interface here, mirroring scheduler above.
+	var projectStore ProjectStore
+	if cfg.ProjectMgr != nil {
+		projectStore = cfg.ProjectMgr
+	}
 	d := &Dispatcher{
 		router:                router,
 		platforms:             cfg.Platforms,
 		agents:                cfg.Agents,
 		agentCommands:         cfg.AgentCommands,
 		scheduler:             scheduler,
-		projectMgr:            cfg.ProjectMgr,
+		projectMgr:            projectStore,
 		resolver:              resolver,
 		guard:                 cfg.Guard,
 		queue:                 cfg.Queue,
@@ -581,123 +597,220 @@ func fallbackDedupKey(msg platform.IncomingMessage, now time.Time) string {
 	return "fallback:" + msg.Platform + ":" + msg.ChatID + ":" + msg.MessageID + ":" + strconv.FormatInt(now.Unix()/60, 10)
 }
 
+// preparedInbound carries the resolved per-message state produced by
+// prepareInbound and consumed by the dispatch-strategy tail of BuildHandler.
+// R20260531A-ARCH-3 (#1527): bundling these into one value keeps the front-
+// matter extraction (dedup → group-gate → command → agent-resolve → key/opts
+// → image-convert) in a single named helper without widening the strategy
+// switch's parameter list.
+type preparedInbound struct {
+	lg        *slog.Logger
+	agentID   string
+	cleanText string
+	key       string
+	opts      session.AgentOpts
+	images    []cli.ImageData
+}
+
+// prepareInbound runs the message front-matter common to every dispatch
+// strategy: dedup, group-mention gate, log-attr sanitisation, slash-command
+// dispatch, agent resolution, unknown-command echo, accounting, key/opts
+// resolution, and platform→CLI image conversion. It returns (prepared, true)
+// when the caller should proceed to a dispatch strategy, or (_, false) when the
+// message was fully handled / dropped here (dedup hit, gated, command consumed,
+// empty body, unknown command). Extracted verbatim from BuildHandler
+// (R20260531A-ARCH-3 / #1527) — behaviour-preserving.
+func (d *Dispatcher) prepareInbound(ctx context.Context, msg platform.IncomingMessage) (preparedInbound, bool) {
+	// Dedup check at the top prevents duplicate processing from platform
+	// retries (e.g., Feishu webhook timeout → re-delivery with same event_id).
+	// Note: if guard fails below, the eventID is still consumed. This means
+	// a platform retry during guard contention won't be re-processed. In
+	// practice this is benign — the handler responds fast enough that
+	// platforms don't retry, and the user is told to resend.
+	//
+	// Empty EventID fallback (#1310): some adapters (older Feishu webhook
+	// shapes, raw HTTP test clients) leave EventID empty. platform.Dedup.Seen
+	// treats "" as "not seen" and never records — meaning a platform retry
+	// of the same message_id would call BuildHandler N times: token double-
+	// charge, queue noise ("正在处理上一条消息"), LLM N-fold dispatch. Build
+	// a composite fallback key from (Platform, ChatID, MessageID, minute-
+	// bucketed wall clock). The minute bucket bounds collision risk for the
+	// degenerate "no MessageID either" case to a single replay window.
+	dedupID := msg.EventID
+	if dedupID == "" {
+		dedupID = fallbackDedupKey(msg, time.Now())
+	}
+	if d.dedup.Seen(dedupID) {
+		return preparedInbound{}, false
+	}
+
+	// Group chat gate: in group chats, only respond when explicitly mentioned.
+	// Direct (1:1) chats are unaffected — every message is processed.
+	//
+	// Rationale: bots deployed in multi-user group chats should not reply to
+	// every utterance; standard IM UX (Slack, Discord, Feishu bot guidance)
+	// expects @bot to be the activation signal. Naozhi's primary usage is
+	// 1:1 operator → agent, so groups are the exception.
+	//
+	// MentionMe is populated by each platform's transport layer:
+	//   - slack / discord / weixin: already matched against bot self-ID (accurate)
+	//   - feishu: currently "any mention" (loose) — tightened in a follow-up commit
+	//
+	// Gate is placed BEFORE dispatchCommand so slash commands in groups also
+	// require @bot — consistent with social etiquette and simpler (single decision
+	// point). Gated messages are silently dropped: no reply, no metric increment,
+	// dedup entry stays consumed (platform retry won't re-process).
+	if msg.ChatType == "group" && !msg.MentionMe {
+		return preparedInbound{}, false
+	}
+
+	// Sanitize the IM-originated attrs before they reach slog. Platform,
+	// UserID, and ChatID all flow through adversary-controlled IM webhook
+	// fields; an attacker-chosen chat ID with embedded \n, \t, or ANSI
+	// escape bytes would otherwise fragment log lines and let the
+	// attacker forge entries. session.SanitizeLogAttr mirrors the
+	// session-key component sanitization (strips C0/bidi/zero-width,
+	// replaces colons, bounds length) so the logger's attr view matches
+	// the session-key view in the log. R60-GO-H1.
+	lg := slog.With(
+		"platform", session.SanitizeLogAttr(msg.Platform),
+		"user", session.SanitizeLogAttr(msg.UserID),
+		"chat", session.SanitizeLogAttr(msg.ChatID),
+	)
+	trimmed := strings.TrimSpace(msg.Text)
+
+	// Dispatch slash commands (/help, /new, /cron, /cd, /pwd, /project)
+	if d.dispatchCommand(ctx, msg, trimmed, lg) {
+		return preparedInbound{}, false
+	}
+
+	// Resolve agent from command prefix (e.g. "/review code" -> agent=code-reviewer, text="code")
+	agentID, cleanText := session.ResolveAgent(trimmed, d.agentCommands)
+	if cleanText == "" && len(msg.Images) == 0 {
+		if agentID != "general" {
+			d.replyText(ctx, msg, "请在指令后输入内容。", lg)
+		}
+		return preparedInbound{}, false
+	}
+
+	// Warn about unrecognized slash commands (likely typos)
+	// Skip paths like /home/user/... (contain slash after the leading one)
+	if agentID == "general" && strings.HasPrefix(cleanText, "/") {
+		cmd := cleanText
+		if idx := strings.IndexByte(cleanText, ' '); idx >= 0 {
+			cmd = cleanText[:idx]
+		}
+		if !strings.Contains(cmd[1:], "/") {
+			// R20260527122801-CR-15: sanitize the user-controlled cmd
+			// before echoing — IM renderers may interpret embedded ANSI
+			// escape sequences or control bytes as formatting / injected
+			// log fields. SanitizeForLog scrubs C0/C1, DEL, and the
+			// bidi/LS-PS rune classes; the cap also bounds reply size
+			// against an attacker stuffing a 4KB "/" prefix into chat.
+			safeCmd := osutil.SanitizeForLog(cmd, 64)
+			d.replyText(ctx, msg, "未知命令: "+safeCmd+"\n输入 /help 查看可用命令，或直接发送消息。", lg)
+			return preparedInbound{}, false
+		}
+	}
+
+	// Count accepted messages (post-dedup, post-command-filter). Does not
+	// include slash commands, ignored non-text items, or dedup hits.
+	// Per-Dispatcher counter feeds /health; expvar mirror feeds
+	// /debug/vars. R245-ARCH-36 (#892).
+	d.messageCount.Add(1)
+	dispatchMessageTotal.Add(1)
+
+	// Determine session key and opts via KeyResolver — single source of
+	// truth for project-binding precedence and aliasing-safe ExtraArgs
+	// merge (see docs/rfc/key-resolver.md §3.1 and session/routing.go).
+	// NewDispatcher always builds a resolver, so no nil-branch fallback
+	// is needed.
+	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+
+	// Convert platform images to CLI image data
+	var images []cli.ImageData
+	if len(msg.Images) > 0 {
+		images = make([]cli.ImageData, 0, len(msg.Images))
+		for _, img := range msg.Images {
+			images = append(images, cli.ImageData{Data: img.Data, MimeType: img.MimeType})
+		}
+	}
+
+	return preparedInbound{
+		lg:        lg,
+		agentID:   agentID,
+		cleanText: cleanText,
+		key:       key,
+		opts:      opts,
+		images:    images,
+	}, true
+}
+
+// handleQueuedNonOwner runs the queue non-owner branch: interrupt-mode control
+// request for the active turn, plus the enqueue-vs-disabled acknowledgement.
+// Extracted from BuildHandler (R20260531A-ARCH-3 / #1527) — behaviour-
+// preserving. shouldInterrupt / enqueued come from queue.Enqueue.
+func (d *Dispatcher) handleQueuedNonOwner(ctx context.Context, msg platform.IncomingMessage, p preparedInbound, shouldInterrupt, enqueued bool) {
+	lg, key := p.lg, p.key
+	// Interrupt mode: the first queued follow-up for the active
+	// turn fires a control_request to the CLI so the in-flight
+	// turn aborts within ~300ms. The ongoing owner loop's Send()
+	// will observe the CLI's natural result event, return, then
+	// drain this queued message as the next prompt. All non-Sent
+	// outcomes degrade to Collect semantics: the queued message
+	// is still processed once the turn completes naturally.
+	if shouldInterrupt {
+		switch outcome := d.router.InterruptSessionViaControl(key); outcome {
+		case session.InterruptSent:
+			lg.Info("interrupt mode: aborted active turn to process follow-up",
+				"key", key)
+		case session.InterruptNoTurn:
+			// Session is spawning or idle — the turn isn't active yet,
+			// so nothing to interrupt. The follow-up will be drained
+			// by the owner loop after the first turn completes.
+			lg.Debug("interrupt mode: session idle or spawning, will process follow-up after current turn",
+				"key", key)
+		case session.InterruptNoSession:
+			lg.Debug("interrupt mode: session not found, falling back to collect",
+				"key", key)
+		case session.InterruptUnsupported:
+			lg.Debug("interrupt mode: protocol does not support stdin interrupt, falling back to collect",
+				"key", key)
+		case session.InterruptError:
+			// Warn already emitted inside ManagedSession.InterruptViaControl;
+			// keep a paired trace here to anchor the dispatch side.
+			lg.Warn("interrupt mode: transport error, falling back to collect",
+				"key", key)
+		}
+	}
+	if enqueued {
+		// Prefer an in-place reaction on the user's own message
+		// (non-intrusive) over a new bot chat bubble. Fall back to
+		// the text notice if the platform isn't Reactor-capable,
+		// has no inbound MessageID, or the reaction call fails —
+		// ShouldNotify still rate-limits the fallback.
+		if !d.ackQueuedWithReaction(ctx, msg, lg) {
+			if d.queue.ShouldNotify(key) {
+				d.replyText(ctx, msg, "消息已收到，待当前回复完成后一并处理。", lg)
+			}
+		}
+	} else {
+		// Queue disabled (maxDepth<=0) — degrade to old drop behavior.
+		if d.queue.ShouldNotify(key) {
+			d.replyText(ctx, msg, "正在处理上一条消息，请稍候...", lg)
+		}
+	}
+}
+
 // BuildHandler returns a platform.MessageHandler wired to this Dispatcher.
 func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 	return func(ctx context.Context, msg platform.IncomingMessage) {
-		// Dedup check at the top prevents duplicate processing from platform
-		// retries (e.g., Feishu webhook timeout → re-delivery with same event_id).
-		// Note: if guard fails below, the eventID is still consumed. This means
-		// a platform retry during guard contention won't be re-processed. In
-		// practice this is benign — the handler responds fast enough that
-		// platforms don't retry, and the user is told to resend.
-		//
-		// Empty EventID fallback (#1310): some adapters (older Feishu webhook
-		// shapes, raw HTTP test clients) leave EventID empty. platform.Dedup.Seen
-		// treats "" as "not seen" and never records — meaning a platform retry
-		// of the same message_id would call BuildHandler N times: token double-
-		// charge, queue noise ("正在处理上一条消息"), LLM N-fold dispatch. Build
-		// a composite fallback key from (Platform, ChatID, MessageID, minute-
-		// bucketed wall clock). The minute bucket bounds collision risk for the
-		// degenerate "no MessageID either" case to a single replay window.
-		dedupID := msg.EventID
-		if dedupID == "" {
-			dedupID = fallbackDedupKey(msg, time.Now())
-		}
-		if d.dedup.Seen(dedupID) {
+		p, ok := d.prepareInbound(ctx, msg)
+		if !ok {
 			return
 		}
-
-		// Group chat gate: in group chats, only respond when explicitly mentioned.
-		// Direct (1:1) chats are unaffected — every message is processed.
-		//
-		// Rationale: bots deployed in multi-user group chats should not reply to
-		// every utterance; standard IM UX (Slack, Discord, Feishu bot guidance)
-		// expects @bot to be the activation signal. Naozhi's primary usage is
-		// 1:1 operator → agent, so groups are the exception.
-		//
-		// MentionMe is populated by each platform's transport layer:
-		//   - slack / discord / weixin: already matched against bot self-ID (accurate)
-		//   - feishu: currently "any mention" (loose) — tightened in a follow-up commit
-		//
-		// Gate is placed BEFORE dispatchCommand so slash commands in groups also
-		// require @bot — consistent with social etiquette and simpler (single decision
-		// point). Gated messages are silently dropped: no reply, no metric increment,
-		// dedup entry stays consumed (platform retry won't re-process).
-		if msg.ChatType == "group" && !msg.MentionMe {
-			return
-		}
-
-		// Sanitize the IM-originated attrs before they reach slog. Platform,
-		// UserID, and ChatID all flow through adversary-controlled IM webhook
-		// fields; an attacker-chosen chat ID with embedded \n, \t, or ANSI
-		// escape bytes would otherwise fragment log lines and let the
-		// attacker forge entries. session.SanitizeLogAttr mirrors the
-		// session-key component sanitization (strips C0/bidi/zero-width,
-		// replaces colons, bounds length) so the logger's attr view matches
-		// the session-key view in the log. R60-GO-H1.
-		lg := slog.With(
-			"platform", session.SanitizeLogAttr(msg.Platform),
-			"user", session.SanitizeLogAttr(msg.UserID),
-			"chat", session.SanitizeLogAttr(msg.ChatID),
-		)
-		trimmed := strings.TrimSpace(msg.Text)
-
-		// Dispatch slash commands (/help, /new, /cron, /cd, /pwd, /project)
-		if d.dispatchCommand(ctx, msg, trimmed, lg) {
-			return
-		}
-
-		// Resolve agent from command prefix (e.g. "/review code" -> agent=code-reviewer, text="code")
-		agentID, cleanText := session.ResolveAgent(trimmed, d.agentCommands)
-		if cleanText == "" && len(msg.Images) == 0 {
-			if agentID != "general" {
-				d.replyText(ctx, msg, "请在指令后输入内容。", lg)
-			}
-			return
-		}
-
-		// Warn about unrecognized slash commands (likely typos)
-		// Skip paths like /home/user/... (contain slash after the leading one)
-		if agentID == "general" && strings.HasPrefix(cleanText, "/") {
-			cmd := cleanText
-			if idx := strings.IndexByte(cleanText, ' '); idx >= 0 {
-				cmd = cleanText[:idx]
-			}
-			if !strings.Contains(cmd[1:], "/") {
-				// R20260527122801-CR-15: sanitize the user-controlled cmd
-				// before echoing — IM renderers may interpret embedded ANSI
-				// escape sequences or control bytes as formatting / injected
-				// log fields. SanitizeForLog scrubs C0/C1, DEL, and the
-				// bidi/LS-PS rune classes; the cap also bounds reply size
-				// against an attacker stuffing a 4KB "/" prefix into chat.
-				safeCmd := osutil.SanitizeForLog(cmd, 64)
-				d.replyText(ctx, msg, "未知命令: "+safeCmd+"\n输入 /help 查看可用命令，或直接发送消息。", lg)
-				return
-			}
-		}
-
-		// Count accepted messages (post-dedup, post-command-filter). Does not
-		// include slash commands, ignored non-text items, or dedup hits.
-		// Per-Dispatcher counter feeds /health; expvar mirror feeds
-		// /debug/vars. R245-ARCH-36 (#892).
-		d.messageCount.Add(1)
-		dispatchMessageTotal.Add(1)
-
-		// Determine session key and opts via KeyResolver — single source of
-		// truth for project-binding precedence and aliasing-safe ExtraArgs
-		// merge (see docs/rfc/key-resolver.md §3.1 and session/routing.go).
-		// NewDispatcher always builds a resolver, so no nil-branch fallback
-		// is needed.
-		key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
-
-		// Convert platform images to CLI image data
-		var images []cli.ImageData
-		if len(msg.Images) > 0 {
-			images = make([]cli.ImageData, 0, len(msg.Images))
-			for _, img := range msg.Images {
-				images = append(images, cli.ImageData{Data: img.Data, MimeType: img.MimeType})
-			}
-		}
+		lg, agentID, cleanText := p.lg, p.agentID, p.cleanText
+		key, opts, images := p.key, p.opts, p.images
 
 		// Passthrough mode: direct dispatch — every message gets its own
 		// goroutine. Ordering and merging handled by the CLI's commandQueue
@@ -742,54 +855,7 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 			}
 			isOwner, enqueued, shouldInterrupt, gen := d.queue.Enqueue(key, qm)
 			if !isOwner {
-				// Interrupt mode: the first queued follow-up for the active
-				// turn fires a control_request to the CLI so the in-flight
-				// turn aborts within ~300ms. The ongoing owner loop's Send()
-				// will observe the CLI's natural result event, return, then
-				// drain this queued message as the next prompt. All non-Sent
-				// outcomes degrade to Collect semantics: the queued message
-				// is still processed once the turn completes naturally.
-				if shouldInterrupt {
-					switch outcome := d.router.InterruptSessionViaControl(key); outcome {
-					case session.InterruptSent:
-						lg.Info("interrupt mode: aborted active turn to process follow-up",
-							"key", key)
-					case session.InterruptNoTurn:
-						// Session is spawning or idle — the turn isn't active yet,
-						// so nothing to interrupt. The follow-up will be drained
-						// by the owner loop after the first turn completes.
-						lg.Debug("interrupt mode: session idle or spawning, will process follow-up after current turn",
-							"key", key)
-					case session.InterruptNoSession:
-						lg.Debug("interrupt mode: session not found, falling back to collect",
-							"key", key)
-					case session.InterruptUnsupported:
-						lg.Debug("interrupt mode: protocol does not support stdin interrupt, falling back to collect",
-							"key", key)
-					case session.InterruptError:
-						// Warn already emitted inside ManagedSession.InterruptViaControl;
-						// keep a paired trace here to anchor the dispatch side.
-						lg.Warn("interrupt mode: transport error, falling back to collect",
-							"key", key)
-					}
-				}
-				if enqueued {
-					// Prefer an in-place reaction on the user's own message
-					// (non-intrusive) over a new bot chat bubble. Fall back to
-					// the text notice if the platform isn't Reactor-capable,
-					// has no inbound MessageID, or the reaction call fails —
-					// ShouldNotify still rate-limits the fallback.
-					if !d.ackQueuedWithReaction(ctx, msg, lg) {
-						if d.queue.ShouldNotify(key) {
-							d.replyText(ctx, msg, "消息已收到，待当前回复完成后一并处理。", lg)
-						}
-					}
-				} else {
-					// Queue disabled (maxDepth<=0) — degrade to old drop behavior.
-					if d.queue.ShouldNotify(key) {
-						d.replyText(ctx, msg, "正在处理上一条消息，请稍候...", lg)
-					}
-				}
+				d.handleQueuedNonOwner(ctx, msg, p, shouldInterrupt, enqueued)
 				return
 			}
 			// I am the owner — enter the process-and-drain loop.
@@ -988,11 +1054,12 @@ func resolveReplyCtx(ctx context.Context) (replyCtx context.Context, cleanup fun
 // handleGetOrCreateError maps a router.GetOrCreate failure into the
 // user-facing reply ctx, an optional ctx.cancel cleanup, and a Chinese
 // error message. Pulled out of sendAndReply so the seven-stage main
-// path stays focused on the happy-path turn flow (R245-ARCH-39 / #894);
-// the per-sentinel switch is the part most likely to grow as new
-// session-spawn failure modes are added (e.g. backend-disabled, quota
-// exhausted) and now has a single home that unit tests can target
-// directly without standing up a full Dispatcher.
+// path stays focused on the happy-path turn flow (R245-ARCH-39 / #894).
+// The sentinel → Chinese-message mapping is delegated to
+// usermsg.ForSendError (R20260531-ARCH-1) so it cannot drift from the
+// WS send_ack path; this helper only owns the log-level and reply-ctx
+// (shutdown-swap) policy, which unit tests can target directly without
+// standing up a full Dispatcher.
 //
 // cleanup is non-nil when this returns a fresh background ctx (the
 // shutdown / context.Canceled branch). Callers MUST defer it before
@@ -1011,24 +1078,16 @@ func (d *Dispatcher) handleGetOrCreateError(
 	} else {
 		lg.Error("get session", "err", err)
 	}
-	switch {
-	case errors.Is(err, session.ErrMaxProcs):
-		errMsg = "当前处理已满，请稍后重试。"
-	case errors.Is(err, session.ErrMaxExemptSessions):
-		// R190-WRAP-M1: exempt-session cap means "too many projects/cron
-		// workers"; user /new won't clear it because the exempt counter
-		// is independent of user sessions. Tell the user explicitly so
-		// they contact the operator instead of looping on /new.
-		errMsg = "长时会话（planner/cron）已满，请联系管理员。"
-	case errors.Is(err, session.ErrNoCLIWrapper):
-		// R190-WRAP-M1: permanent config error; /new retry is hopeless.
-		// Surface a clear "ask operator" so IM users don't spin on it.
-		errMsg = "会话后端未配置，请联系管理员。"
-	case errors.Is(err, context.Canceled):
-		errMsg = "系统正在重启，请稍后重试。"
-	default:
-		errMsg = "会话创建失败，请发送 /new 重置后重试。"
-	}
+	// R20260531-ARCH-1 (#754 follow-up): the per-sentinel switch here
+	// duplicated usermsg.ForSendError's mapping for ErrMaxProcs /
+	// ErrMaxExemptSessions / ErrNoCLIWrapper / context.Canceled, drifting
+	// from it over time. Delegate to the shared classifier so a new
+	// session-side sentinel only needs registering once (in usermsg).
+	// The empty key keeps the regular (non-cron) phrasing; GetOrCreate
+	// failures are not the cron-namespace ErrNoActiveProcess case that
+	// would want the key. Unknown errors fall through to ForSendError's
+	// generic "/new 重置" hint (was a near-identical literal here).
+	errMsg = usermsg.ForSendError(err, "")
 	// R242-GO-4 (#550): the shutdown-ctx swap is one helper, not a
 	// per-branch repeat. resolveReplyCtx returns ctx unchanged when no
 	// swap is needed (cheap), and a fresh NotifyCtx + cancel when ctx

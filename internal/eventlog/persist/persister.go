@@ -11,7 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -460,53 +460,70 @@ func (p *Persister) Accept() bool {
 // drops (it is a caller bug to send through a stopped persister, but
 // dropping is the least surprising behaviour).
 func (p *Persister) SinkFor(key string) PersistSink {
-	stem := KeyHash(key)
-	return func(entries []Entry, replayPhase bool) {
-		if p.closed.Load() {
-			return
-		}
-		if replayPhase {
-			p.replayLeakCnt.Add(int64(len(entries)))
-			p.opts.Observer.OnReplayLeak(len(entries))
-			// R242-GO-11 [BREAKING-LOCAL] (closed): previously this branch
-			// panic'd in DevMode to make sink-ordering bugs explode loudly
-			// during tests; the panic was a goroutine-context crash that
-			// took down the whole process and could not be observed cleanly
-			// by callers. We now log at Error level with a `dev_mode=...`
-			// attribute and rely on the `replayLeakCnt` counter +
-			// `OnReplayLeak` Observer hook (both already in place above)
-			// for test assertions and prod alerting. See
-			// TestPersister_DevMode_ReplayLeakObserved for the contract pin.
-			slog.Error("event log persist: replay-phase entries reached sink",
-				"key", key, "count", len(entries),
-				"dev_mode", p.opts.DevMode)
-			return
-		}
-		if len(entries) == 0 {
-			return
-		}
-		job := batchJob{Key: key, Stem: stem, Entries: entries}
-		select {
-		case p.in <- job:
-		default:
-			p.droppedCnt.Add(int64(len(entries)))
-			p.opts.Observer.OnDrop(len(entries))
-			// R250-ARCH-23 (#1184): include channel_used so operators
-			// can distinguish "writer goroutine wedged with N pending
-			// jobs" from "instantaneous burst overrun". Without this
-			// signal the drop log line tells you which key got starved
-			// but not how saturated the queue was at the moment the
-			// drop fired — the single most useful piece of context for
-			// diagnosing whether the writer is making progress at all.
-			// Full per-key fairness (drop additional batches from the
-			// same chatty key first) needs a per-key counter map and
-			// is a follow-up; the observable signal here unblocks
-			// operator triage today.
-			slog.Warn("event log persist: channel full; dropping batch",
-				"key", key, "count", len(entries),
-				"channel_used", len(p.in),
-				"channel_cap", cap(p.in))
-		}
+	// R249-PERF-29 (#997): bind (persister, key, stem) onto a single struct
+	// and return its method value rather than a func literal that captures
+	// three free variables (p, key, stem). The method-value form captures
+	// exactly one receiver pointer, so the per-key sink allocation is a small
+	// fixed-size sessionSink (string header + string header + pointer) rather
+	// than a multi-variable closure environment, and the binding intent is
+	// explicit at the type level.
+	return (&sessionSink{p: p, key: key, stem: KeyHash(key)}).accept
+}
+
+// sessionSink is the per-session binding for a PersistSink. accept implements
+// the PersistSink signature via a method value returned from SinkFor.
+type sessionSink struct {
+	p    *Persister
+	key  string
+	stem string
+}
+
+func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
+	p := s.p
+	if p.closed.Load() {
+		return
+	}
+	if replayPhase {
+		p.replayLeakCnt.Add(int64(len(entries)))
+		p.opts.Observer.OnReplayLeak(len(entries))
+		// R242-GO-11 [BREAKING-LOCAL] (closed): previously this branch
+		// panic'd in DevMode to make sink-ordering bugs explode loudly
+		// during tests; the panic was a goroutine-context crash that
+		// took down the whole process and could not be observed cleanly
+		// by callers. We now log at Error level with a `dev_mode=...`
+		// attribute and rely on the `replayLeakCnt` counter +
+		// `OnReplayLeak` Observer hook (both already in place above)
+		// for test assertions and prod alerting. See
+		// TestPersister_DevMode_ReplayLeakObserved for the contract pin.
+		slog.Error("event log persist: replay-phase entries reached sink",
+			"key", s.key, "count", len(entries),
+			"dev_mode", p.opts.DevMode)
+		return
+	}
+	if len(entries) == 0 {
+		return
+	}
+	job := batchJob{Key: s.key, Stem: s.stem, Entries: entries}
+	select {
+	case p.in <- job:
+	default:
+		p.droppedCnt.Add(int64(len(entries)))
+		p.opts.Observer.OnDrop(len(entries))
+		// R250-ARCH-23 (#1184): include channel_used so operators
+		// can distinguish "writer goroutine wedged with N pending
+		// jobs" from "instantaneous burst overrun". Without this
+		// signal the drop log line tells you which key got starved
+		// but not how saturated the queue was at the moment the
+		// drop fired — the single most useful piece of context for
+		// diagnosing whether the writer is making progress at all.
+		// Full per-key fairness (drop additional batches from the
+		// same chatty key first) needs a per-key counter map and
+		// is a follow-up; the observable signal here unblocks
+		// operator triage today.
+		slog.Warn("event log persist: channel full; dropping batch",
+			"key", s.key, "count", len(entries),
+			"channel_used", len(p.in),
+			"channel_cap", cap(p.in))
 	}
 }
 
@@ -519,12 +536,16 @@ func (p *Persister) DropKey(ctx context.Context, key string) error {
 		return ErrPersisterClosed
 	}
 	done := make(chan error, 1)
-	job := batchJob{Key: key, Stem: KeyHash(key), Entries: nil /* drop signal */}
+	// R250-PERF-18 (#1121): the drop signal travels through opCh, which only
+	// needs the hashed stem (key + done are carried as separate op fields).
+	// Computing the stem into a local avoids materialising a throwaway
+	// batchJob whose Key/Entries fields were never read on this path.
+	stem := KeyHash(key)
 	// Use the pass-through op channel instead of the batch channel so
 	// drops don't get coalesced with pending writes. Implemented as a
 	// dedicated method on the writer goroutine via opCh below.
 	select {
-	case p.opCh <- op{kind: opDrop, key: key, stem: job.Stem, done: done}:
+	case p.opCh <- op{kind: opDrop, key: key, stem: stem, done: done}:
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-p.closeCh:
@@ -1039,8 +1060,9 @@ func (p *Persister) tickFlush() {
 	}
 	now := p.opts.Clock()
 	// Collect-then-sort instead of a true heap: 1-200 typical writers
-	// per tick, sort.Slice is faster in practice than a container/heap
-	// init+pop loop at that N. The slice itself is allocated once per
+	// per tick, slices.SortFunc is faster in practice than a container/heap
+	// init+pop loop at that N, and avoids the closure-boxing alloc that
+	// sort.Slice causes. The slice itself is allocated once per
 	// tick — see flushCandidatePool below if profiling later indicates
 	// this matters.
 	cands := p.collectFlushCandidates(now)
@@ -1103,8 +1125,8 @@ func (p *Persister) collectFlushCandidates(now time.Time) []flushCandidate {
 		cands = append(cands, flushCandidate{key: k, w: w})
 	}
 	if len(cands) > 1 {
-		sort.Slice(cands, func(i, j int) bool {
-			return cands[i].w.firstDirtyAt.Before(cands[j].w.firstDirtyAt)
+		slices.SortFunc(cands, func(a, b flushCandidate) int {
+			return a.w.firstDirtyAt.Compare(b.w.firstDirtyAt)
 		})
 	}
 	// Stash the (possibly grown) backing array back so the next tick
@@ -1196,6 +1218,7 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	// cursor on the underlying slice).
 	encBuf := recordBufPool.Get().(*bytes.Buffer)
 	defer putRecordBuf(encBuf)
+	var written int
 	for _, e := range job.Entries {
 		rec := schema.NewEntry(w.nextSeq, e.JSON)
 		encBuf.Reset()
@@ -1236,8 +1259,11 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 		w.bytes += n
 		w.nextSeq++
 		w.entriesSinceIdxWrite++
-		p.writtenCnt.Add(1)
-		p.opts.Observer.OnWrite(1)
+		written++
+	}
+	if written > 0 {
+		p.writtenCnt.Add(int64(written))
+		p.opts.Observer.OnWrite(written)
 	}
 	if !w.dirty {
 		w.dirty = true
