@@ -317,9 +317,17 @@ func (s *Source) readAllEntries(ctx context.Context) ([]cli.EventEntry, error) {
 // so the framing / skip / UUID-warn contract stays identical across both
 // read paths. R20260530-PERF-1 (#1485).
 func decodeRecords(ctx context.Context, br *bufio.Reader, path string, out *[]cli.EventEntry) error {
+	// R112714-PERF-7: check ctx.Err() every 32 records instead of on every
+	// iteration. ctx.Err() acquires a mutex internally; at decode throughput
+	// the per-record cost is measurable on long files.
+	const ctxCheckInterval = 32
+	var n int
 	for {
-		if err := ctx.Err(); err != nil {
-			return err
+		n++
+		if n%ctxCheckInterval == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 		}
 		rec, err := persist.ReadRecord(br)
 		if err != nil {
