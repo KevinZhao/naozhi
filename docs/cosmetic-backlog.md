@@ -368,3 +368,8 @@
 - [R20260531070014-GO-9] mayContainSecretPrefix 注释 'g' 分支列举遗漏 github_pat_ — internal/cron/redact_secrets.go:183
 - [R20260531070014-CR-3] ManagedState 方法名与返回类型同名，建议 rename LifecycleState() — internal/session/managed_state.go:76
 - [R20260531070014-CR-8] tuning.go 操作符表 defaultCronSlowThreshold 行 Markdown 单元格对齐错位 — internal/cron/tuning.go:15
+- [R20260601-SEC-12] cron notice 未转义 <> 角括号(假设 Feishu markdown 渲染 HTML 标签) — internal/cron/scheduler_run.go:302
+- [R20260601-SEC-9] feishu accessToken 明文驻留内存(Go string 固有限制,无法安全清零) — internal/platform/feishu/feishu.go:223
+- [R20260601-SEC-11] reverseserver msg.NodeID 未在构造期校验字符集(防御性) — internal/node/reverseserver.go:396
+- [R20260601-GO-3] TestCronNotice_LocalizeBeforeSanitise 命名与所测顺序相反(测试名误导) — internal/cron/cron_notice_apierr_localize_test.go:78
+- [R20260601-GO-6] apierr.Localize 隐式 Warn 副作用不可被测试观测(可测性) — internal/apierr/apierr.go:88
