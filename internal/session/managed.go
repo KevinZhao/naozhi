@@ -18,6 +18,26 @@ const (
 	// workspace switch appends one). 32 retains enough chain for multi-day
 	// context recovery while keeping sessions.json size bounded.
 	maxPrevSessionIDs = 32
+
+	// Visible-aware initial-history tuning. The dashboard's initial subscribe
+	// asks for a page that must render at least DefaultVisibleTarget chat
+	// bubbles even when a parallel agent team has flooded the trailing window
+	// with internal (tool_use / task_progress / …) events. See
+	// ManagedSession.EventLastNVisibleCtx.
+	//
+	//   DefaultVisibleTarget — ~one screenful of bubbles; the reader stops
+	//                          once this many visible entries are collected.
+	//   maxVisibleTotal      — hard cap on the returned slice length (== the
+	//                          ring size and HTTP maxEventsPageLimit) so a
+	//                          mostly-internal tail can't return an unbounded
+	//                          payload.
+	//   visibleDiskPageSize  — entries pulled per disk-tier LoadBefore page.
+	//   maxVisibleDiskPages  — disk pages walked before giving up, bounding
+	//                          worst-case JSONL I/O on a slow filesystem.
+	DefaultVisibleTarget = 30
+	maxVisibleTotal      = 500
+	visibleDiskPageSize  = 200
+	maxVisibleDiskPages  = 5
 )
 
 // ProcessSender is the send-path facet of processIface — the first
@@ -200,6 +220,11 @@ type processIface interface {
 	TotalCost() float64
 	EventEntries() []cli.EventEntry
 	EventLastN(n int) []cli.EventEntry
+	// EventLastNVisible returns a contiguous tail carrying at least
+	// visibleTarget visible entries (or up to maxTotal). Backs the
+	// dashboard's visible-aware initial-history read so a parallel agent
+	// team's internal-event flood can't blank the first paint.
+	EventLastNVisible(visibleTarget, maxTotal int) []cli.EventEntry
 	EventEntriesSince(afterMS int64) []cli.EventEntry
 	EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry
 	LastActivitySummary() string
