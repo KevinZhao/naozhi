@@ -523,34 +523,25 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 	// Timeout matches the total retry budget (retryLimit * retryInterval)
 	// so we drop rather than extend the grace window when all slots are busy.
 	if l.resolveSem != nil {
-		t := time.NewTimer(time.Duration(l.retryLimit+1) * l.retryInterval)
+		// Use context.WithTimeout to bound the semaphore-acquire wait
+		// instead of a raw time.NewTimer — the context plumbing handles
+		// timer Stop automatically on cancel/timeout, removing the manual
+		// Stop+drain boilerplate on every exit arm. [R112714-PERF-10]
+		semTimeout := time.Duration(l.retryLimit+1) * l.retryInterval
+		semCtx, cancelSem := context.WithTimeout(ctx, semTimeout)
 		select {
 		case l.resolveSem <- struct{}{}:
-			// Stop returns false when the timer already fired; drain the
-			// channel so a tied select that picked the semaphore arm does
-			// not leak a runtime timer with a non-empty C.
-			if !t.Stop() {
-				select {
-				case <-t.C:
-				default:
-				}
-			}
+			cancelSem()
 			defer func() { <-l.resolveSem }()
-		case <-t.C:
-			slog.Debug("agent_link: resolve semaphore full, dropping", "task_id", taskID)
-			return LinkInfo{}, false
-		case <-ctx.Done():
-			// R218B-GO-3 (#644): Process shutdown collapses the retry
-			// budget to near-zero so the parent goroutine can exit
-			// without waiting on a full sem queue. Stop the timer to
-			// drain its goroutine.
-			if !t.Stop() {
-				select {
-				case <-t.C:
-				default:
-				}
+		case <-semCtx.Done():
+			cancelSem()
+			if ctx.Err() != nil {
+				// Parent ctx canceled (process shutdown).
+				slog.Debug("agent_link: resolve canceled while waiting for semaphore", "task_id", taskID, "err", ctx.Err())
+			} else {
+				// Semaphore timeout.
+				slog.Debug("agent_link: resolve semaphore full, dropping", "task_id", taskID)
 			}
-			slog.Debug("agent_link: resolve canceled while waiting for semaphore", "task_id", taskID, "err", ctx.Err())
 			return LinkInfo{}, false
 		}
 	}
