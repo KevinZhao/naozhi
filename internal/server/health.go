@@ -79,7 +79,14 @@ type healthAuthSection struct {
 	// R229-SEC-7: previously exposed at the top level for unauthenticated
 	// probes; moved into the auth-only section so a public /health cannot
 	// fingerprint the running binary.
-	Version           string                  `json:"version,omitempty"`
+	Version string `json:"version,omitempty"`
+	// APIVersion mirrors the X-Naozhi-API-Version response header so a
+	// consumer that reads the /health body (rather than inspecting headers)
+	// can pin the REST contract version it was built against. RNEW-ARCH-401
+	// (#425): same machine-readable break signal, exposed in the
+	// authenticated section alongside the build Version (R229-SEC-7) so an
+	// unauthenticated probe still can't fingerprint the deployment.
+	APIVersion        string                  `json:"api_version,omitempty"`
 	Sessions          healthSessionStats      `json:"sessions"`
 	WorkspaceID       string                  `json:"workspace_id"`
 	WorkspaceName     string                  `json:"workspace_name"`
@@ -256,6 +263,7 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	active, total := h.router.Stats()
 	auth := &healthAuthSection{
 		Version:       h.version,
+		APIVersion:    APIVersion,
 		Sessions:      healthSessionStats{Active: active, Total: total},
 		WorkspaceID:   h.workspaceID,
 		WorkspaceName: h.workspaceName,

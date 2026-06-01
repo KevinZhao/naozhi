@@ -99,6 +99,40 @@ func TestHandleHealth_Authenticated_ShapeStable(t *testing.T) {
 	}
 }
 
+// TestHandleHealth_APIVersionField pins RNEW-ARCH-401 (#425): the
+// authenticated /health body carries api_version == APIVersion so a consumer
+// reading the JSON (not headers) can pin the REST contract version, AND the
+// field stays in the auth-only section so an unauthenticated probe never sees
+// it (R229-SEC-7 — no deployment fingerprinting for anonymous callers).
+func TestHandleHealth_APIVersionField(t *testing.T) {
+	srv := newTestServerWithToken(&mockPlatform{}, "secret")
+
+	// Authenticated: api_version present and equal to the package constant.
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	w := httptest.NewRecorder()
+	srv.healthH.handleHealth(w, req)
+	var authed map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &authed); err != nil {
+		t.Fatalf("decode authed: %v\nbody=%s", err, w.Body.String())
+	}
+	if got, ok := authed["api_version"]; !ok || got != APIVersion {
+		t.Errorf("authed /health api_version = %v (present=%v), want %q", got, ok, APIVersion)
+	}
+
+	// Unauthenticated: api_version must be absent (auth-only section).
+	unauthReq := httptest.NewRequest(http.MethodGet, "/health", nil)
+	uw := httptest.NewRecorder()
+	srv.healthH.handleHealth(uw, unauthReq)
+	var anon map[string]any
+	if err := json.Unmarshal(uw.Body.Bytes(), &anon); err != nil {
+		t.Fatalf("decode anon: %v\nbody=%s", err, uw.Body.String())
+	}
+	if _, leaked := anon["api_version"]; leaked {
+		t.Errorf("unauthenticated /health leaked api_version (body=%s)", uw.Body.String())
+	}
+}
+
 // TestHandleHealth_WSDroppedField_PresentWhenHubWired verifies that the
 // struct refactor still threads the `ws_dropped` field through when the
 // Hub.DroppedMessages callback is injected. Prior code used `if h.hubDropped
