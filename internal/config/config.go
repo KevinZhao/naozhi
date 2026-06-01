@@ -324,21 +324,32 @@ type SysessionRunnerConfig struct {
 }
 
 // SysessionDaemonConfig holds the common-shape fields every daemon
-// consumes plus a free-form Specific map for daemon-private knobs.
+// consumes plus daemon-private knobs. Decoded into each daemon's
+// DaemonConfig in main_helpers.go's wiring. Concrete fields (not an
+// untyped map) because YAML decoding into Go works better that way;
+// each daemon reads only the keys it understands.
 type SysessionDaemonConfig struct {
 	Enabled bool   `yaml:"enabled,omitempty"`
 	Tick    string `yaml:"tick,omitempty"`
 
-	// AutoTitler-specific fields.  Decoded into the daemon's
-	// DaemonConfig in main.go's wiring.  We don't model them as
-	// untyped map[string]any here because YAML decoding into Go
-	// generally works better with concrete fields — and AutoTitler
-	// is the only daemon for now, so the cost of explicit fields is
-	// trivial.
+	// AutoTitler-specific fields.
 	MinUserTurns      int    `yaml:"min_user_turns,omitempty"`
 	MinRenameInterval string `yaml:"min_rename_interval,omitempty"`
 	BatchPerTick      int    `yaml:"batch_per_tick,omitempty"`
 	IncludeGroupChat  bool   `yaml:"include_group_chat,omitempty"`
+
+	// attachment-gc-specific fields (docs/rfc/attachment-gc-daemon.md).
+	// UploadTTL/RefTTL: "0" or unset → daemon default (NOT "disable" —
+	// contrast Runner.JSONLMaxAge where "0" disables). PerRootCap: 0 →
+	// default 500. DryRun: when true, log would-removes without
+	// deleting. RunOnStart: fire one sweep at startup (recommended for
+	// this low-frequency daemon so a restart-churning process still
+	// makes progress).
+	UploadTTL  string `yaml:"upload_ttl,omitempty"`
+	RefTTL     string `yaml:"ref_ttl,omitempty"`
+	PerRootCap int    `yaml:"per_root_cap,omitempty"`
+	DryRun     bool   `yaml:"dry_run,omitempty"`
+	RunOnStart bool   `yaml:"run_on_start,omitempty"`
 }
 
 type LogConfig struct {

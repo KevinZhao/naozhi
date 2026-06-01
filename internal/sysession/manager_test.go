@@ -287,6 +287,102 @@ func TestManager_TickRunsAndRecords(t *testing.T) {
 	}
 }
 
+// TestManager_RunOnStartFiresWithoutPulse pins the startup-tick
+// contract (docs/rfc/attachment-gc-daemon.md §4.6-3): a daemon with
+// RunOnStart=true must Tick once immediately at startup, BEFORE any
+// ticker pulse. We deliberately never send on `pulse` — the only way
+// calls>0 is the startup tick.
+func TestManager_RunOnStartFiresWithoutPulse(t *testing.T) {
+	pulse, tickFn := pulseTicker()
+	_ = pulse // intentionally never pulsed
+
+	d := &signalDaemon{name: "auto-titler"}
+	withRegistry(t, []builtinDaemonFactory{
+		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
+	})
+
+	router := newFakeRouter()
+	m, err := NewManager(Config{
+		Enabled:     true,
+		TickTimeout: 100 * time.Millisecond,
+		Router:      router,
+		Daemons: map[string]DaemonRuntimeConfig{
+			// Long tick so a scheduled pulse would never arrive in the
+			// test window; RunOnStart is the only path to a Tick.
+			"auto-titler": {Enabled: true, Tick: time.Hour, RunOnStart: true},
+		},
+		NewTicker: tickFn,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx)
+	defer m.Stop(context.Background())
+
+	deadline := time.Now().Add(2 * time.Second)
+	for d.calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := d.calls.Load(); got == 0 {
+		t.Fatal("RunOnStart daemon never ticked at startup")
+	}
+}
+
+// TestManager_NoRunOnStartWaitsForPulse is the negative control: with
+// RunOnStart=false (default) and a long tick, no Tick happens until a
+// pulse arrives.
+func TestManager_NoRunOnStartWaitsForPulse(t *testing.T) {
+	pulse, tickFn := pulseTicker()
+
+	d := &signalDaemon{name: "auto-titler"}
+	withRegistry(t, []builtinDaemonFactory{
+		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) { return d, nil }},
+	})
+
+	router := newFakeRouter()
+	m, err := NewManager(Config{
+		Enabled:     true,
+		TickTimeout: 100 * time.Millisecond,
+		Router:      router,
+		Daemons: map[string]DaemonRuntimeConfig{
+			// Short tick so the [0,tick) startup jitter elapses quickly
+			// and the loop reaches its ticker select; the manual pulse
+			// channel (pulseTicker) never fires on its own, so no pulse
+			// means no tick.
+			"auto-titler": {Enabled: true, Tick: 20 * time.Millisecond, RunOnStart: false},
+		},
+		NewTicker: tickFn,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx)
+	defer m.Stop(context.Background())
+
+	// Give the loop time to clear jitter ([0,20ms)) and reach the ticker
+	// select. No pulse, no RunOnStart ⇒ no tick.
+	time.Sleep(200 * time.Millisecond)
+	if got := d.calls.Load(); got != 0 {
+		t.Fatalf("daemon ticked %d times without pulse or RunOnStart", got)
+	}
+
+	// A pulse now should produce exactly one tick.
+	pulse <- time.Now()
+	deadline := time.Now().Add(2 * time.Second)
+	for d.calls.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := d.calls.Load(); got == 0 {
+		t.Fatal("daemon never ticked after pulse")
+	}
+}
+
 func TestManager_OverlappingTicksAreSkipped(t *testing.T) {
 	pulse, tickFn := pulseTicker()
 
