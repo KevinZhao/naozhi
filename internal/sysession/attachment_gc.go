@@ -156,10 +156,10 @@ func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
 			MetaGrace: a.metaGrace,
 			DryRun:    a.dryRun,
 		})
-		report.Examined++
-		recordWouldReap(res)
 		if err != nil {
 			if ctx.Err() != nil {
+				// Context cancelled mid-sweep: do NOT count the root as
+				// examined — the sweep did not complete. [R20260601-CR-6]
 				firstErr = err
 				break
 			}
@@ -168,8 +168,14 @@ func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
 			if firstErr == nil {
 				firstErr = err
 			}
+			// Still count as examined: we attempted and got a real error
+			// (not a cancel), so the root was processed this tick.
+			report.Examined++
+			recordWouldReap(res)
 			continue
 		}
+		report.Examined++
+		recordWouldReap(res)
 		if !a.dryRun {
 			metrics.AttachmentGCReapedTotal.Add(int64(res.Removed))
 			report.Acted += res.Removed

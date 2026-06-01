@@ -184,6 +184,28 @@ func TestAttachmentGC_ConfigureAppliesKnobs(t *testing.T) {
 	}
 }
 
+// TestAttachmentGC_CtxCancelDoesNotIncrementExamined: when the context
+// is cancelled before any root sweep completes, Examined must be 0.
+// A cancelled partial sweep must not count the root as examined.
+// [R20260601-CR-6]
+func TestAttachmentGC_CtxCancelDoesNotIncrementExamined(t *testing.T) {
+	now := time.Now().UTC()
+	ws := t.TempDir()
+	seedOldAttachment(t, ws, "a", now)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before Tick
+
+	gc := newTestGC(fakeRoots{[]string{ws}}, now)
+	rep, err := gc.Tick(ctx)
+	if err == nil {
+		t.Errorf("expected ctx error, got nil")
+	}
+	if rep.Examined != 0 {
+		t.Errorf("Examined=%d after cancel, want 0 (incomplete sweep must not count)", rep.Examined)
+	}
+}
+
 // TestAttachmentGC_CtxCancelStops: a cancelled context halts the sweep
 // promptly without touching files.
 func TestAttachmentGC_CtxCancelStops(t *testing.T) {
