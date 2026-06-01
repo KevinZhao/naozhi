@@ -369,7 +369,7 @@ func formatCronNotice(label, body string) string {
 // is required the Replacer performs exactly one scan + one output
 // allocation instead of the previous up-to-4-scan / 4-alloc loop.
 func escapeCronMarkdownPunct(s string) string {
-	if strings.IndexAny(s, "[]()") < 0 {
+	if !strings.ContainsAny(s, "[]()") {
 		return s
 	}
 	return cronMarkdownPunctReplacer.Replace(s)
