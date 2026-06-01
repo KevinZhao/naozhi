@@ -16,6 +16,14 @@ func (s *ManagedSession) Workspace() string { return loadAtomicString(&s.workspa
 // all writers already hold r.mu, but we route through the helper so the string
 // is always handed to the atomic.Pointer via one place (matches
 // storeAtomicString convention for backend/cliName/cliVersion).
+//
+// R245-ARCH-32 (#883): this cache is a PASSIVE MIRROR of the router-resolved
+// decision, NOT a fourth independent source of workspace truth. The only
+// legitimate writers are the router lifecycle/discovery/restore paths that
+// have already run resolveSpawnParamsLocked's precedence (opts > per-chat
+// override > old session > default). Do not mutate s.workspace from a
+// ManagedSession self-method; workspace_cache_source_test.go enumerates and
+// pins the sanctioned write surface.
 func (s *ManagedSession) setWorkspace(ws string) { storeAtomicString(&s.workspace, ws) }
 
 // IsExempt returns whether this session is exempt from TTL and eviction.
