@@ -1192,8 +1192,15 @@ func (s *runStore) List(jobID string, limit int, before time.Time) []CronRunSumm
 	if limit <= 0 {
 		limit = 50
 	}
-	if limit > DefaultRunsKeepCount {
-		limit = DefaultRunsKeepCount
+	// R249-ARCH-1 (#969): clamp to the configured retention cap, not the
+	// package default. SchedulerConfig.RunsKeepCount is now plumbed into
+	// s.keepCount (NewScheduler → newRunStore), so an operator who raised
+	// retention above DefaultRunsKeepCount (200) must be able to page the
+	// extra rows; the old hardcoded clamp silently truncated every query at
+	// 200. s.keepCount is always > 0 for an enabled store, so when retention
+	// is left at the default this is identical to the prior behaviour.
+	if limit > s.keepCount {
+		limit = s.keepCount
 	}
 
 	// Cache fast-path: when before is zero (most common — Recent and the
@@ -1567,8 +1574,12 @@ func (s *runStore) RecentSessionIDs(jobID string, n int) []string {
 	if n <= 0 {
 		n = 50
 	}
-	if n > DefaultRunsKeepCount {
-		n = DefaultRunsKeepCount
+	// R249-ARCH-1 (#969): clamp to the configured retention cap (s.keepCount)
+	// rather than the hardcoded DefaultRunsKeepCount, mirroring List. Honours
+	// an operator-raised RunsKeepCount; identical to prior behaviour when
+	// retention is left at the default.
+	if n > s.keepCount {
+		n = s.keepCount
 	}
 	// Cache-warm fast path: read SessionIDs directly off the ring under
 	// entry.mu without materialising a CronRunSummary slice. Mirrors the
