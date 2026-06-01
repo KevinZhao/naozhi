@@ -26,7 +26,7 @@ import (
 // CurrentRun returns the inflight snapshot for jobID, or (zero, false) when
 // the job is not currently executing. Used by the dashboard list API to
 // show "running 12s" badges.
-func (s *Scheduler) CurrentRun(jobID string) (runInflightView, bool) {
+func (s *Scheduler) CurrentRun(jobID string) (RunInflightView, bool) {
 	v, ok := s.runningJobs.Load(jobID)
 	if !ok {
 		return runInflightView{}, false
@@ -41,12 +41,6 @@ func (s *Scheduler) CurrentRun(jobID string) (runInflightView, bool) {
 	}
 	return inf.snapshot()
 }
-
-// RunInflightView is the exported shape for CurrentRun's snapshot,
-// surfaced by server-side handlers building the list / detail JSON
-// response. Kept here (cron package) so the field set stays single-
-// sourced; the server view re-marshals into its own wire shape.
-type RunInflightView = runInflightView
 
 // ListRuns returns up to limit CronRunSummary entries for jobID, newest
 // first. before is a cutoff (only runs with StartedAt < before); zero
