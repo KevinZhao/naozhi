@@ -2161,9 +2161,16 @@ func (s *runStore) trimAllCtx(ctx context.Context, now time.Time) {
 		}
 		return
 	}
+	// R20260601-PERF-8 (#1550): collect the job dirs that survive the
+	// trim pass so their recentCache warm can fan out across a bounded
+	// goroutine pool below. Warming serially in this loop串行化 50job ×
+	// keepCount 个 Stat/ReadFile 在启动路径(50×200=10000 次系统调用),
+	// 拖慢进程冷启动。warmCacheLocked 对每个 jobID 取独立的 jobLock +
+	// entry.mu,跨不同 jobID 并发安全。
+	warmJobs := make([]string, 0, len(entries))
 	for _, e := range entries {
 		// 在每个 job 入口前检查 ctx；scheduler.Stop 触发 stopCancel 后
-		// 当前 job 完成即退出循环，避免 Stop 等到 gcWaitBudget 超时。
+		// 当前 job 完成即退出循环,避免 Stop 等到 gcWaitBudget 超时。
 		if err := ctx.Err(); err != nil {
 			slog.Info("cron run: trimAll cancelled mid-pass", "err", err)
 			return
@@ -2200,23 +2207,64 @@ func (s *runStore) trimAllCtx(ctx context.Context, now time.Time) {
 			continue
 		}
 		s.trimJobUnderLock(jobID, now)
-		// R250-PERF-9 (#1112): pre-warm the recentCache for this job in the
-		// same cold-start goroutine, right after trim settled its on-disk
-		// state. Without this, the FIRST dashboard RecentRuns poll after a
-		// process restart cold-warms every entry serially on the request
-		// path (ReadDir + per-file Lstat + ReadFile + json.Unmarshal up to
-		// keepCount per job) — multi-second first-poll latency operators see
-		// when the dashboard reconnects. warmCacheLocked is idempotent (skips
-		// when entry.warm) so a concurrent Append-driven warm that already
-		// fired is a cheap no-op here. The extra per-job ReadDir at startup
-		// is off the hot path and bounded by maxJobsHardCap. Cancelling the
-		// GC ctx between jobs (checked at loop top) also short-circuits
-		// remaining warms, so Stop stays prompt.
-		if warmCorrupt := s.warmCacheLocked(jobID); warmCorrupt > 0 {
-			slog.Warn("cron runstore: cold-start warm skipped corrupt files",
-				"count", warmCorrupt, "dir", filepath.Join(s.root, jobID))
-		}
+		warmJobs = append(warmJobs, jobID)
 	}
+
+	// R250-PERF-9 (#1112) / R20260601-PERF-8 (#1550): pre-warm the
+	// recentCache for every surviving job, right after trim settled its
+	// on-disk state. Without this, the FIRST dashboard RecentRuns poll after
+	// a process restart cold-warms every entry serially on the request path
+	// (ReadDir + per-file Lstat + ReadFile + json.Unmarshal up to keepCount
+	// per job) — multi-second first-poll latency operators see when the
+	// dashboard reconnects. warmCacheLocked is idempotent (skips when
+	// entry.warm) so a concurrent Append-driven warm that already fired is a
+	// cheap no-op. Each warm takes a per-jobID jobLock + entry.mu, so warming
+	// distinct jobIDs concurrently is safe; a bounded pool (mirrors
+	// diskDecodeWorkers) collapses the serial 50job×keepCount Stat/ReadFile
+	// storm — previously ~10000 serial syscalls on the startup path — into
+	// ~ceil(N/diskDecodeWorkers) waves. ctx.Err() short-circuits between
+	// dequeues so Stop stays prompt.
+	s.warmJobsParallel(ctx, warmJobs)
+}
+
+// warmJobsParallel warms the recentCache for each jobID across a bounded
+// goroutine pool. Safe because warmCacheLocked acquires a per-jobID jobLock
+// and the per-entry mutex internally, so distinct jobIDs never contend. A
+// cancelled ctx stops dequeuing new jobs (in-flight warms finish their short
+// ReadDir+decode window). R20260601-PERF-8 (#1550).
+func (s *runStore) warmJobsParallel(ctx context.Context, jobIDs []string) {
+	if len(jobIDs) == 0 {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	workers := diskDecodeWorkers
+	if workers > len(jobIDs) {
+		workers = len(jobIDs)
+	}
+	work := make(chan string, len(jobIDs))
+	for _, id := range jobIDs {
+		work <- id
+	}
+	close(work)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for jobID := range work {
+				if ctx.Err() != nil {
+					return
+				}
+				if warmCorrupt := s.warmCacheLocked(jobID); warmCorrupt > 0 {
+					slog.Warn("cron runstore: cold-start warm skipped corrupt files",
+						"count", warmCorrupt, "dir", filepath.Join(s.root, jobID))
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // trimJobUnderLock acquires the per-job lock with defer-unlock so a
