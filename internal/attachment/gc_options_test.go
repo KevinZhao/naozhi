@@ -222,6 +222,35 @@ func TestGCWithRefs_RefusesSymlinkedDayDir(t *testing.T) {
 	}
 }
 
+// TestGCWithRefs_ZeroNowFallsBackToRealClock: passing a zero-value
+// opts.Now must not use epoch (which would make uploadCutoff ancient
+// and delete every attachment). The guard substitutes time.Now() so
+// recent attachments are retained. [R20260601-GO-5]
+func TestGCWithRefs_ZeroNowFallsBackToRealClock(t *testing.T) {
+	ws := t.TempDir()
+	// Seed a 1-day-old attachment — well within the 7-day upload TTL.
+	now := time.Now().UTC()
+	day := now.AddDate(0, 0, -1).Format("2006-01-02")
+	payload, _ := fixturePersisted(t, ws, day,
+		"recent", Meta{UploadedAt: now.AddDate(0, 0, -1)})
+
+	res, err := GCWithRefs(context.Background(), ws, GCOptions{
+		UploadTTL: 7 * 24 * time.Hour,
+		RefTTL:    DefaultRefTTL,
+		// Deliberately zero — must fall back to real clock, not epoch.
+		Now: time.Time{},
+	})
+	if err != nil {
+		t.Fatalf("GCWithRefs: %v", err)
+	}
+	if res.Removed != 0 {
+		t.Errorf("Removed=%d with zero Now, want 0 (recent attachment must survive)", res.Removed)
+	}
+	if _, err := os.Stat(payload); err != nil {
+		t.Errorf("recent payload deleted when Now was zero: %v", err)
+	}
+}
+
 // TestGCWithRefs_CorruptMetaRetains: a corrupt .meta makes the
 // keep-decision error out, and the file is retained (err-on-keep).
 func TestGCWithRefs_CorruptMetaRetains(t *testing.T) {

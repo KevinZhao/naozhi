@@ -38,10 +38,12 @@ const (
 	attachmentGCDefaultRefTTL     = attachment.DefaultRefTTL // 30d
 	attachmentGCDefaultPerRootCap = 500
 	attachmentGCDefaultMetaGrace  = 5 * time.Minute
-	// attachmentGCMinTick floors the configured tick so a misconfigured
+	// AttachmentGCMinTick floors the configured tick so a misconfigured
 	// short interval (e.g. 30s) cannot make the daemon re-walk every
 	// attachment dir continuously. GC is low-frequency by nature.
-	attachmentGCMinTick = time.Hour
+	// Wiring layers (e.g. cmd/naozhi/main_helpers.go) should reference
+	// this constant instead of inlining time.Hour.
+	AttachmentGCMinTick = time.Hour
 )
 
 // attachmentGC is the refcount-aware attachment reaper daemon. It owns
@@ -96,7 +98,7 @@ func (a *attachmentGC) Configure(cfg DaemonConfig) error {
 	if v, ok := cfg["per_root_cap"].(int); ok && v > 0 {
 		a.perRootCap = v
 	}
-	if v, ok := cfg["meta_grace"].(time.Duration); ok && v > 0 {
+	if v, ok := cfg["meta_grace"].(time.Duration); ok {
 		a.metaGrace = v
 	}
 	if v, ok := cfg["dry_run"].(bool); ok {
@@ -156,10 +158,10 @@ func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
 			MetaGrace: a.metaGrace,
 			DryRun:    a.dryRun,
 		})
-		report.Examined++
-		recordWouldReap(res)
 		if err != nil {
 			if ctx.Err() != nil {
+				// Context cancelled mid-sweep: do NOT count the root as
+				// examined — the sweep did not complete. [R20260601-CR-6]
 				firstErr = err
 				break
 			}
@@ -168,8 +170,14 @@ func (a *attachmentGC) Tick(ctx context.Context) (TickReport, error) {
 			if firstErr == nil {
 				firstErr = err
 			}
+			// Still count as examined: we attempted and got a real error
+			// (not a cancel), so the root was processed this tick.
+			report.Examined++
+			recordWouldReap(res)
 			continue
 		}
+		report.Examined++
+		recordWouldReap(res)
 		if !a.dryRun {
 			metrics.AttachmentGCReapedTotal.Add(int64(res.Removed))
 			report.Acted += res.Removed
