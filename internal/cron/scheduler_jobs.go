@@ -643,48 +643,69 @@ func (s *Scheduler) withJobByID(
 	return s.withJobByIDOpt(id, withJobByIDOpts{op: op, postCleanup: postCleanup})
 }
 
-func (s *Scheduler) withJobByIDOpt(id string, opts withJobByIDOpts) (*Job, error) {
-	var save func()
-	var snapshot Job
-	var found bool
-	var opErr error
-	var perr error
-	var rolledBack bool
-	func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		j, ok := s.jobs[id]
-		if !ok {
-			perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
-			return
-		}
-		if opts.op != nil {
-			if err := opts.op(j); err != nil {
-				opErr = err
-				return
-			}
-		}
-		found = true
-		save, perr = s.persistJobsLocked()
-		// R20260527-COR-1 (#1272): if the marshal step failed AFTER op
-		// mutated *j, restore the in-memory mutation under s.mu so on-
-		// disk state and in-memory state stay aligned. Run the rollback
-		// before snapshotting so the returned snapshot reflects the
-		// pre-op state — caller observes "no change applied" rather than
-		// the half-applied mutation that motivated the divergence bug.
-		if perr != nil && opts.rollbackOnPersistErr != nil {
-			opts.rollbackOnPersistErr(j)
-			rolledBack = true
-		}
-		// R242-GO-3 (#548): value-copy under s.mu so the caller (and
-		// postCleanup) read a stable Job even if a concurrent
-		// UpdateJob / SetJobPrompt mutates the live *j right after we
-		// unlock. Mirrors UpdateJob's `return *j, save, perr` pattern.
-		snapshot = *j
-	}()
+// withJobByIDResult bundles the values withJobByIDOpt's locked critical
+// section produces so the post-unlock control flow reads as named-field
+// branches rather than five sibling `var` declarations mutated inside an
+// IIFE. R249-CR-7 (#951): the prior shape declared save/snapshot/found/
+// opErr/perr/rolledBack up front and assigned them from a closure, forcing
+// the reader to scan both the IIFE body and the trailing branch ladder to
+// reconstruct the state machine. Folding the locked work into
+// lockedJobOp keeps the s.mu critical section in one named method and lets
+// the caller branch on the returned struct.
+type withJobByIDResult struct {
+	save       func()
+	snapshot   Job
+	found      bool
+	opErr      error
+	perr       error
+	rolledBack bool
+}
 
-	if opErr != nil {
-		return nil, opErr
+// lockedJobOp runs the lookup + op + persist + (optional) rollback steps for
+// withJobByIDOpt entirely under s.mu and returns the outcome. Splitting this
+// out of the IIFE keeps every s.mu-guarded mutation in one named scope; the
+// caller (withJobByIDOpt) is then pure post-unlock control flow.
+func (s *Scheduler) lockedJobOp(id string, opts withJobByIDOpts) withJobByIDResult {
+	var r withJobByIDResult
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, ok := s.jobs[id]
+	if !ok {
+		r.perr = fmt.Errorf("%w: id %q", ErrJobNotFound, id)
+		return r
+	}
+	if opts.op != nil {
+		if err := opts.op(j); err != nil {
+			r.opErr = err
+			return r
+		}
+	}
+	r.found = true
+	r.save, r.perr = s.persistJobsLocked()
+	// R20260527-COR-1 (#1272): if the marshal step failed AFTER op
+	// mutated *j, restore the in-memory mutation under s.mu so on-
+	// disk state and in-memory state stay aligned. Run the rollback
+	// before snapshotting so the returned snapshot reflects the
+	// pre-op state — caller observes "no change applied" rather than
+	// the half-applied mutation that motivated the divergence bug.
+	if r.perr != nil && opts.rollbackOnPersistErr != nil {
+		opts.rollbackOnPersistErr(j)
+		r.rolledBack = true
+	}
+	// R242-GO-3 (#548): value-copy under s.mu so the caller (and
+	// postCleanup) read a stable Job even if a concurrent
+	// UpdateJob / SetJobPrompt mutates the live *j right after we
+	// unlock. Mirrors UpdateJob's `return *j, save, perr` pattern.
+	r.snapshot = *j
+	return r
+}
+
+func (s *Scheduler) withJobByIDOpt(id string, opts withJobByIDOpts) (*Job, error) {
+	r := s.lockedJobOp(id, opts)
+	save, snapshot, found, perr, rolledBack := r.save, r.snapshot, r.found, r.perr, r.rolledBack
+
+	if r.opErr != nil {
+		return nil, r.opErr
 	}
 	if !found {
 		return nil, perr
