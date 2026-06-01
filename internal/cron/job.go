@@ -299,6 +299,47 @@ func generateRunID() (string, error) { return generateHexID() }
 // generateID 返回 cron Job.ID（16-char hex）。
 func generateID() (string, error) { return generateHexID() }
 
+// IsValidID reports whether s is a valid cron / cron-run identifier:
+// a non-empty lowercase hex string of at most 64 bytes. Currently job
+// and run IDs are generated as 16 hex chars; the 64-byte upper bound
+// is held in reserve for a future schema bump.
+//
+// Accepts (returns true):
+//   - "0123456789abcdef"               — canonical 16-char job/run ID
+//   - "abc123"                         — short lowercase hex
+//   - strings.Repeat("a", 64)          — at the 64-byte boundary
+//
+// Rejects (returns false):
+//   - ""                               — empty
+//   - "ABC123"                         — uppercase hex (lowercase only)
+//   - "abc-123" / "abc.tmp" / "abc~"   — non-hex chars (rejects temp
+//     files, backups, .DS_Store, etc. that may appear in runs/<jobID>/)
+//   - "../etc/passwd"                  — path traversal characters
+//   - strings.Repeat("a", 65)          — exceeds the 64-byte ceiling
+//
+// 在 store 入口（parse / list / append / detail handler）做边界校验，
+// 防止 runs/<jobID>/ 下意外文件名（temp file、备份）污染 List 输出，
+// 也允许 HTTP 层在请求入口直接拒绝非法 ID 而不必下沉到磁盘 IO。
+// R221-FIX-P1-2 + R234-CR-10（godoc 改写为输入形态描述，不再引用
+// 私有的 generateRunID / generateID）+ R249-CR-23（补 Accepts/Rejects
+// 示例，明确大写 hex 一律拒绝）。
+//
+// R249-ARCH-26 (#990): co-located with generateID / generateRunID here in
+// job.go (the ID-spec home) rather than runstore.go — store / parse / HTTP
+// callers all consume it, so its home is the ID schema, not the run store.
+func IsValidID(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 // MaxCronTitleLen 是 Job.Title 的字符上限（UTF-8 rune 计）。256 覆盖绝大多数
 // 人类可读名称，且与 dashboard 的 escAttr 线长相容。导出以便 server 包
 // 在 handler 层复用同一上限，避免两处数字不同步漂移。
