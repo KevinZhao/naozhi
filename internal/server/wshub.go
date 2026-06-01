@@ -272,9 +272,13 @@ type Hub struct {
 	// test signature keeps compiling without a getter dependency.
 	cookieMAC func() string
 	guard     *session.Guard
-	// NEEDS-DESIGN R242-GO-10: 与其他 Hub 依赖一致改抽 MessageEnqueuer interface；
-	// 当前直接耦合 *dispatch.MessageQueue 具体类型。
-	queue      *dispatch.MessageQueue // per-key FIFO queue for dashboard sends
+	// R242-GO-10 (#377): Hub depends on the MessageEnqueuer interface, not the
+	// concrete *dispatch.MessageQueue, so the dashboard send path is decoupled
+	// from dispatch internals and swappable in tests. *dispatch.MessageQueue
+	// satisfies it implicitly (var _ binding in wshub_types.go). NewHub guards
+	// the assignment so a nil concrete Queue stays a nil interface — the
+	// `h.queue == nil` legacy-fallback gate in send.go must keep working.
+	queue      MessageEnqueuer // per-key FIFO queue for dashboard sends
 	nodes      map[string]node.Conn
 	nodesMu    *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
 	projectMgr *project.Manager
@@ -546,7 +550,6 @@ func NewHub(opts HubOptions) *Hub {
 		dashToken:        opts.DashToken,
 		cookieMAC:        cookieMACFn,
 		guard:            opts.Guard,
-		queue:            opts.Queue,
 		nodes:            opts.Nodes,
 		nodesMu:          opts.NodesMu,
 		projectMgr:       opts.ProjectMgr,
@@ -612,6 +615,12 @@ func NewHub(opts HubOptions) *Hub {
 	// and sessionSendLegacy can be deleted.
 	if opts.Queue == nil {
 		slog.Error("server: Hub constructed without MessageQueue; falling back to legacy guard path (dispatch queue features disabled, R-LEGACY-SEND blocker)")
+	} else {
+		// Assign through the concrete-nil guard: storing a typed-nil
+		// *dispatch.MessageQueue straight into the interface field would make
+		// `h.queue == nil` (the send.go legacy-fallback gate) read false. Only
+		// wrap a non-nil queue so the gate keeps its original meaning.
+		h.queue = opts.Queue
 	}
 	return h
 }

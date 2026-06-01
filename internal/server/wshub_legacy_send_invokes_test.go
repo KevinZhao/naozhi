@@ -1,6 +1,37 @@
 package server
 
-import "testing"
+import (
+	"sync"
+	"testing"
+
+	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/session"
+)
+
+// TestNewHub_NilQueue_LeavesInterfaceFieldNil pins the typed-nil guard for
+// the R242-GO-10 (#377) change that turned Hub.queue from a concrete
+// *dispatch.MessageQueue into the MessageEnqueuer interface. Assigning a
+// nil concrete pointer straight into an interface field would make
+// `h.queue == nil` read false and silently disable the legacy-fallback
+// gate in send.go. NewHub must only assign a non-nil Queue, so a Hub built
+// without a queue keeps a nil interface field.
+func TestNewHub_NilQueue_LeavesInterfaceFieldNil(t *testing.T) {
+	hub, _ := newTestHub("") // newTestHub wires no Queue
+	t.Cleanup(hub.Shutdown)
+	if hub.queue != nil {
+		t.Fatalf("Hub built without Queue: h.queue = %v, want nil interface", hub.queue)
+	}
+
+	router := session.NewRouter(session.RouterConfig{})
+	guard := session.NewGuard()
+	var nodesMu sync.RWMutex
+	q := dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
+	withQueue := NewHub(HubOptions{Router: router, Guard: guard, NodesMu: &nodesMu, Queue: q})
+	t.Cleanup(withQueue.Shutdown)
+	if withQueue.queue == nil {
+		t.Fatal("Hub built with a real Queue: h.queue is nil, want non-nil interface")
+	}
+}
 
 // TestLegacySendInvokes_AtomicCounter pins the R-LEGACY-SEND (#710) hook.
 // LegacySendInvokes() is the migration handle: production Hubs wire a
