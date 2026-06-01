@@ -31,6 +31,9 @@ var dashboardJS embed.FS
 //go:embed static/agent_view.js
 var agentViewJS embed.FS
 
+//go:embed static/asset_browser.js
+var assetBrowserJS embed.FS
+
 // staticAssetETags holds precomputed strong-form ETags for embedded dashboard
 // assets. cron-dashboard-redesign P0 §6 — combined with the existing
 // `Cache-Control: no-cache, must-revalidate`, ETag enables a 304 fast-path so
@@ -55,6 +58,9 @@ var staticAssetETags = func() map[string]string {
 	}
 	if b, err := agentViewJS.ReadFile("static/agent_view.js"); err == nil {
 		out["agent_view.js"] = hash(b)
+	}
+	if b, err := assetBrowserJS.ReadFile("static/asset_browser.js"); err == nil {
+		out["asset_browser.js"] = hash(b)
 	}
 	return out
 }()
