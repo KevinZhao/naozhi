@@ -497,6 +497,22 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 		r.notifyChange()
 		return
 	}
+	// R242-ARCH-2 (#720): the per-namespace exempt sub-quota gate lives in
+	// spawnSession, but stub registration creates an exempt entry WITHOUT
+	// spawning a process, so it never crosses that gate. A misbehaving cron
+	// scheduler (or a config with many jobs / projects) could therefore grow
+	// r.sessions with exempt stubs past the bucket's intended ceiling and
+	// silently starve the other namespaces' alive-spawn budget. We do not
+	// hard-reject here (dropping a cron/sys stub would lose its history-chain
+	// and break dashboard panels), but we surface the over-quota condition so
+	// the exhaustion the issue flags is observable instead of invisible.
+	if kind := exemptKind(key); kind != "" {
+		if existing := r.countExemptByKind(kind); existing >= exemptCapFor(kind) {
+			slog.Warn("exempt stub registration exceeds namespace sub-quota",
+				"key", key, "namespace", kind,
+				"existing", existing, "cap", exemptCapFor(kind))
+		}
+	}
 	s := &ManagedSession{
 		key:    key,
 		exempt: true,

@@ -2198,8 +2198,15 @@ body.kbd-open .sidebar-footer{display:none}
    together on hover / keyboard focus and stay hidden otherwise. */
 .event-ask-btn.hover-only{opacity:0}
 .event:hover .event-ask-btn.hover-only,.event-ask-btn.hover-only:focus-visible{opacity:1}
+/* Resend button (R110-P3 #449) — same visual language as copy/ask, lives on
+   user bubbles. Kept in sync with .event-ask-btn so all bubble actions share
+   one hover-reveal contract. */
+.event-resend-btn{display:inline-flex;align-items:center;gap:4px;background:none;border:1px solid var(--nz-border);border-radius:4px;color:var(--nz-text-faint);font-size:11px;padding:1px 8px;cursor:pointer;transition:color .15s,border-color .15s,opacity .12s;line-height:1.6;margin-top:8px;margin-left:6px}
+.event-resend-btn:hover{color:var(--nz-accent);border-color:var(--nz-accent)}
+.event-resend-btn.hover-only{opacity:0}
+.event:hover .event-resend-btn.hover-only,.event-resend-btn.hover-only:focus-visible{opacity:1}
 @media (pointer: coarse){
-  .event-ask-btn,.event-copy-btn{font-size:12px;padding:4px 10px;min-height:32px}
+  .event-ask-btn,.event-copy-btn,.event-resend-btn{font-size:12px;padding:4px 10px;min-height:32px}
 }
 
 /* AskUserQuestion interactive card. Rendered as a bubble of type

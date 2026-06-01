@@ -58,19 +58,20 @@ func TestHandleOwnerLoopPanic_NilOnAsyncErrorNoCrash(t *testing.T) {
 
 func TestHandleOwnerLoopPanic_DiscardsQueue(t *testing.T) {
 	hub, _ := newTestHub("")
-	hub.queue = dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
+	q := dispatch.NewMessageQueueWithMode(5, 0, dispatch.ModeCollect)
+	hub.queue = q
 	t.Cleanup(hub.Shutdown)
 
 	key := "key-c"
-	hub.queue.Enqueue(key, dispatch.QueuedMsg{Text: "m1", EnqueueAt: time.Now()})
-	hub.queue.Enqueue(key, dispatch.QueuedMsg{Text: "m2", EnqueueAt: time.Now()})
-	if depth := hub.queue.Depth(key); depth == 0 {
+	q.Enqueue(key, dispatch.QueuedMsg{Text: "m1", EnqueueAt: time.Now()})
+	q.Enqueue(key, dispatch.QueuedMsg{Text: "m2", EnqueueAt: time.Now()})
+	if depth := q.Depth(key); depth == 0 {
 		t.Fatalf("setup: expected nonzero depth, got %d", depth)
 	}
 
 	hub.handleOwnerLoopPanic(key, nil, "synthetic test panic")
 
-	if depth := hub.queue.Depth(key); depth != 0 {
+	if depth := q.Depth(key); depth != 0 {
 		t.Errorf("queue depth after panic recover = %d, want 0", depth)
 	}
 }

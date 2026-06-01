@@ -872,6 +872,66 @@ func TestDashboardHTML_AskButtonHoverOnly(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_ResendButton pins the R110-P3 (#449) message hover toolbar
+// resend action: user bubbles expose a hover-only ↺ 重发 button that refills
+// the composer with the original prompt (does NOT auto-send). The gate is "any
+// non-empty user message" (NOT isLong) because retrying a short prompt is the
+// common case. resendUserMessage must reuse the existing setMsgValue refill
+// contract and must refuse to clobber a non-empty composer.
+func TestDashboardJS_ResendButton(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+	// Button is rendered on user bubbles with a non-empty raw, always hover-only.
+	if !strings.Contains(js, "const resendBtn = e.type === 'user' && !!cleanRaw\n    ? '<button class=\"event-resend-btn hover-only\"") {
+		t.Error("resend button must gate on user-type + non-empty cleanRaw and always carry the .hover-only class")
+	}
+	// Resend must NOT gate on isLong — short prompts are the common retry case.
+	if strings.Contains(js, "const resendBtn = isLong") {
+		t.Error("resend button must NOT gate on isLong; short user prompts must be resendable")
+	}
+	// Handler must be wired into the bubble footer alongside copy/ask.
+	if !strings.Contains(js, "imgHtml + copyBtn + askBtn + resendBtn") {
+		t.Error("resendBtn must be appended to the bubble footer next to copyBtn/askBtn")
+	}
+	// Accessibility + tooltip contract.
+	if !strings.Contains(js, `aria-label="重发这条消息"`) {
+		t.Error("event-resend-btn must carry aria-label='重发这条消息'")
+	}
+	// Handler reuses the existing refill contract and guards against clobber.
+	if !strings.Contains(js, "function resendUserMessage(btn)") {
+		t.Error("resendUserMessage handler must exist")
+	}
+	if !strings.Contains(js, "if (getMsgValue(input)) {") {
+		t.Error("resendUserMessage must refuse to overwrite a non-empty composer")
+	}
+	if !strings.Contains(js, "setMsgValue(input, text);") {
+		t.Error("resendUserMessage must refill via the shared setMsgValue contract")
+	}
+}
+
+// TestDashboardHTML_ResendButtonHoverOnly mirrors the copy/ask hover CSS for
+// the ↺ 重发 button so all three bubble actions reveal together on hover /
+// keyboard focus. If these drift, the resend button would either always show
+// (clutter) or never show (unreachable).
+func TestDashboardHTML_ResendButtonHoverOnly(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(data)
+	if !strings.Contains(html, ".event-resend-btn.hover-only{opacity:0}") {
+		t.Error(".event-resend-btn.hover-only must default to opacity:0")
+	}
+	if !strings.Contains(html, ".event:hover .event-resend-btn.hover-only,.event-resend-btn.hover-only:focus-visible{opacity:1}") {
+		t.Error("hover + focus-visible rules must lift the resend-button opacity for both mouse and keyboard users")
+	}
+}
+
 // TestDashboardHTML_CheatsheetPrimaryIsBlue pins the R110-P2 fix that the
 // cheatsheet modal's confirm button ("好的") uses --nz-blue instead of the
 // green #238636 used for submit/save actions elsewhere. Scoped selector

@@ -49,9 +49,25 @@ func TestSendWithBroadcast_HeadlessNilHubDoesNotPanicOnModeGate(t *testing.T) {
 	_, _ = s.sendWithBroadcast(context.Background(), "k", sess, "hi", nil, nil)
 }
 
-// TestHeadlessOptionPlumbing locks ServerOptions.Headless → Server.headless.
+// TestHeadlessOptionPlumbing locks the R248-ARCH-9 (#379) wiring:
+// ServerOptions.Headless must flow through the public constructor onto
+// Server.headless (server.go buildServer: `headless: opts.Headless`). The
+// earlier version of this test asserted on a hand-built `&Server{headless:
+// true}` literal — a tautology that exercised nothing and would still pass if
+// buildServer dropped the field entirely. We now drive the real constructor so
+// a regression in the opts→field plumbing actually fails. Both true and false
+// are checked so a hardcoded constant (e.g. `headless: true`) is also caught.
 func TestHeadlessOptionPlumbing(t *testing.T) {
-	if got := (&Server{headless: true}).headless; !got {
-		t.Fatal("headless field not set")
+	t.Parallel()
+	router := session.NewRouter(session.RouterConfig{})
+
+	headlessSrv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude", Headless: true})
+	if !headlessSrv.headless {
+		t.Error("ServerOptions{Headless: true} must set Server.headless = true via NewWithOptions")
+	}
+
+	prodSrv := NewWithOptions(ServerOptions{Addr: ":0", Router: router, Backend: "claude", Headless: false})
+	if prodSrv.headless {
+		t.Error("ServerOptions{Headless: false} must leave Server.headless = false (production default)")
 	}
 }

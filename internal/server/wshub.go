@@ -137,6 +137,25 @@ const (
 // 只 WRITE broadcast block + READ shared deps；其余同理）。CI lint
 // rule 3 (field_block) 验证此约束。lifecycle 块跨块写豁免（v0.6.1 §五）：
 // NewHub / Shutdown / Start 用 LIFECYCLE-METHOD godoc 关键词显式标注。
+//
+// NEEDS-DESIGN R248-ARCH-6 (#376) — struct extraction anchor:
+// PR #327 split wshub.go into per-block files but kept the god-struct with
+// every method on *Hub. The next modularization stage extracts three
+// cohesive sub-structs out of the field-block map above (one issue each):
+//
+//	SubscriberRegistry  ← subscriber block (clients / connCount /
+//	                      subscriberCount / clientWG) — register/unregister
+//	                      fanout surface.
+//	BroadcastDispatcher ← broadcast block (debounceMu/Timer/First/Closed/
+//	                      ClosedFast/Fire) + droppedTotal — debounce-throttled
+//	                      sessions:update fanout.
+//	SendCoordinator     ← send block (queue / sendWG / sendTrackMu /
+//	                      sendClosed) — owner-loop + TrackSend lifecycle.
+//
+// Receivers stay on *Hub until each extraction lands; this anchor exists so
+// future PRs widen the same map instead of reinventing the boundary. Do NOT
+// extract opportunistically — each carries its own lock-ordering contract
+// (see shutdown_lock_order_test.go) and must land as a reviewed issue.
 type Hub struct {
 	mu sync.RWMutex
 	// connCount mirrors len(h.clients) for the unauthenticated connection
@@ -272,9 +291,13 @@ type Hub struct {
 	// test signature keeps compiling without a getter dependency.
 	cookieMAC func() string
 	guard     *session.Guard
-	// NEEDS-DESIGN R242-GO-10: 与其他 Hub 依赖一致改抽 MessageEnqueuer interface；
-	// 当前直接耦合 *dispatch.MessageQueue 具体类型。
-	queue      *dispatch.MessageQueue // per-key FIFO queue for dashboard sends
+	// R242-GO-10 (#377): Hub depends on the MessageEnqueuer interface, not the
+	// concrete *dispatch.MessageQueue, so the dashboard send path is decoupled
+	// from dispatch internals and swappable in tests. *dispatch.MessageQueue
+	// satisfies it implicitly (var _ binding in wshub_types.go). NewHub guards
+	// the assignment so a nil concrete Queue stays a nil interface — the
+	// `h.queue == nil` legacy-fallback gate in send.go must keep working.
+	queue      MessageEnqueuer // per-key FIFO queue for dashboard sends
 	nodes      map[string]node.Conn
 	nodesMu    *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
 	projectMgr *project.Manager
@@ -546,7 +569,6 @@ func NewHub(opts HubOptions) *Hub {
 		dashToken:        opts.DashToken,
 		cookieMAC:        cookieMACFn,
 		guard:            opts.Guard,
-		queue:            opts.Queue,
 		nodes:            opts.Nodes,
 		nodesMu:          opts.NodesMu,
 		projectMgr:       opts.ProjectMgr,
@@ -612,6 +634,12 @@ func NewHub(opts HubOptions) *Hub {
 	// and sessionSendLegacy can be deleted.
 	if opts.Queue == nil {
 		slog.Error("server: Hub constructed without MessageQueue; falling back to legacy guard path (dispatch queue features disabled, R-LEGACY-SEND blocker)")
+	} else {
+		// Assign through the concrete-nil guard: storing a typed-nil
+		// *dispatch.MessageQueue straight into the interface field would make
+		// `h.queue == nil` (the send.go legacy-fallback gate) read false. Only
+		// wrap a non-nil queue so the gate keeps its original meaning.
+		h.queue = opts.Queue
 	}
 	return h
 }
