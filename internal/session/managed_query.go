@@ -815,7 +815,16 @@ func costUnitForBackend(backendID string) string {
 		if len(backend.All()) != 0 {
 			return
 		}
-		defer func() { _ = recover() }()
+		defer func() {
+			if r := recover(); r != nil {
+				// Duplicate-registration panic from a concurrent
+				// wireup.RegisterCLIBackends call is benign (registry ends up
+				// populated either way), but log it so unexpected panics are
+				// visible. R112714-GO-6.
+				slog.Debug("costUnitForBackend: recovered panic in RegisterDefaults",
+					"recovered", r)
+			}
+		}()
 		backend.RegisterDefaults()
 	})
 	if p, ok := backend.Get(backendID); ok {
