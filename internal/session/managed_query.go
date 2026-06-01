@@ -164,6 +164,13 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		Model: s.Model(),
 	}
 	snap.DeathReason = loadAtomicString(&s.deathReason)
+	// R176-ARCH-N4 (#432): expose the explicit lifecycle state as a single
+	// derived field so the dashboard stops re-deriving it from
+	// State()+SessionID+exempt. ManagedState() reuses the same atomic reads
+	// this method already performs; the only extra cost is in the rare
+	// stub/dead fallback (proc==nil && no session id), which is not the
+	// active-session hot poll path.
+	snap.Lifecycle = s.ManagedState().String()
 
 	proc := s.loadProcess()
 	sessCost := loadTotalCost(&s.totalCost)

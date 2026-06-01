@@ -629,4 +629,14 @@ type SessionSnapshot struct {
 	// available (kiro). Each entry is one billing dimension, e.g.
 	// {value: 0.024, unit: "credit"}.
 	MeteringUsage []cli.MeteringEntry `json:"metering_usage,omitempty"`
+
+	// Lifecycle is the explicit ManagedState token ("stub"/"alive"/
+	// "suspended"/"dead"/"exempt") derived once at snapshot time from the
+	// single ManagedState() source of truth (R176-ARCH-N4 / #432). It exists
+	// so the dashboard reads one field instead of re-deriving the state
+	// matrix from State()+SessionID+exempt — the field-stitching that #432
+	// flagged as drift-prone. Orthogonal to State(): State reports the live
+	// *process* state ("ready"/"busy") for the high-frequency push path,
+	// while Lifecycle answers "where is this session in its lifecycle".
+	Lifecycle string `json:"lifecycle,omitempty"`
 }

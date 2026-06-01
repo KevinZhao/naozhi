@@ -60,6 +60,36 @@ func TestManagedState_DerivedStates(t *testing.T) {
 	})
 }
 
+// TestSnapshot_LifecycleField pins R176-ARCH-N4 (#432): Snapshot must expose
+// the derived lifecycle token so consumers (dashboard) read one field instead
+// of re-stitching State()+SessionID+exempt. Without this the ManagedState
+// enum had no production consumer and the field-stitching #432 flagged would
+// silently persist.
+func TestSnapshot_LifecycleField(t *testing.T) {
+	t.Run("alive session reports alive", func(t *testing.T) {
+		s := &ManagedSession{key: "dashboard:direct:user:general"}
+		s.storeProcess(newIdleProc())
+		if got := s.Snapshot().Lifecycle; got != "alive" {
+			t.Fatalf("Snapshot().Lifecycle = %q, want %q", got, "alive")
+		}
+	})
+
+	t.Run("suspended session reports suspended", func(t *testing.T) {
+		s := &ManagedSession{key: "dashboard:direct:user:general"}
+		s.setSessionID("sess-1")
+		if got := s.Snapshot().Lifecycle; got != "suspended" {
+			t.Fatalf("Snapshot().Lifecycle = %q, want %q", got, "suspended")
+		}
+	})
+
+	t.Run("exempt session reports exempt", func(t *testing.T) {
+		s := &ManagedSession{key: "dashboard:direct:user:general", exempt: true}
+		if got := s.Snapshot().Lifecycle; got != "exempt" {
+			t.Fatalf("Snapshot().Lifecycle = %q, want %q", got, "exempt")
+		}
+	})
+}
+
 func TestManagedState_String(t *testing.T) {
 	cases := map[ManagedState]string{
 		StateStub:        "stub",
