@@ -382,12 +382,41 @@ func TestRunStore_DeleteJobRemovesSubtree(t *testing.T) {
 	}
 }
 
+// TestRunStore_DeleteJobReclaimsJobLock pins R249-ARCH-3 (#971): DeleteJob
+// must drop the per-job *sync.Mutex from jobLocks so a long-lived deployment
+// that creates and deletes many jobs does not grow the map without bound.
+// Before the fix jobLocks entries were "never reclaimed", contradicting the
+// claimed maxJobsHardCap bound.
+func TestRunStore_DeleteJobReclaimsJobLock(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t, 200, 30*24*time.Hour)
+	jobID := mustGenerateID()
+
+	s.Append(makeRun(jobID, time.Now()))
+	// Appending takes jobLock, so the entry must exist now.
+	if _, ok := s.jobLocks.Load(jobID); !ok {
+		t.Fatalf("expected jobLocks entry after Append")
+	}
+
+	s.DeleteJob(jobID)
+	if _, ok := s.jobLocks.Load(jobID); ok {
+		t.Fatalf("jobLocks entry still present after DeleteJob; per-job mutex leaked")
+	}
+
+	// Also confirm no entries linger in aggregate.
+	count := 0
+	s.jobLocks.Range(func(_, _ any) bool { count++; return true })
+	if count != 0 {
+		t.Fatalf("jobLocks has %d residual entries after deleting the only job; want 0", count)
+	}
+}
+
 // TestRunStore_DeleteJobIdempotent — DeleteJob on a non-existent ID must
 // not panic or return an error.
 func TestRunStore_DeleteJobIdempotent(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
-	// The lock entry will be created; the rmdir is a no-op.
+	// The lock entry is created then reclaimed; the rmdir is a no-op.
 	s.DeleteJob(mustGenerateID())
 	// And again — still fine.
 	s.DeleteJob(mustGenerateID())

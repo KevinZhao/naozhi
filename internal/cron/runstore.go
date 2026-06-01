@@ -511,9 +511,10 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration, maxB
 }
 
 // jobLock returns a *sync.Mutex unique to jobID. Lazily allocated and
-// never reclaimed (entries are bounded by maxJobsHardCap; a deleted job
-// races a concurrent Append on the very same ID is the same edge handled
-// by the runningJobs sync.Map).
+// reclaimed by DeleteJob (R249-ARCH-3 / #971), so the live set tracks the
+// live job set rather than every jobID that has ever existed; a deleted job
+// racing a concurrent Append on the very same ID is the same edge handled
+// by the runningJobs sync.Map.
 func (s *runStore) jobLock(jobID string) *sync.Mutex {
 	if v, ok := s.jobLocks.Load(jobID); ok {
 		return v.(*sync.Mutex)
@@ -1833,6 +1834,17 @@ func (s *runStore) DeleteJob(jobID string) {
 	// silently miss the mkdir).
 	s.jobDirEnsured.Delete(jobID)
 	s.cacheInvalidate(jobID)
+	// R249-ARCH-3 (#971): reclaim the per-job *sync.Mutex too. jobLock's
+	// godoc claimed the jobLocks set is "bounded by maxJobsHardCap", but —
+	// unlike runningJobs which is swept on DeleteJob (R242-ARCH-15) — these
+	// entries were never reclaimed, so a long-lived deployment that creates
+	// and deletes thousands of jobs grows the map without limit. Deleting
+	// under the held lock is safe: a concurrent caller that already loaded
+	// THIS mutex still serialises on it; one that loads after the Delete
+	// gets a fresh mutex, which is the same "deleted job races a concurrent
+	// Append on the same ID" edge the godoc already documents (and which is
+	// benign because the runs/ subtree is gone and the job left s.jobs).
+	s.jobLocks.Delete(jobID)
 }
 
 // trimJobLocked enforces the per-job retention policy. Caller must hold
