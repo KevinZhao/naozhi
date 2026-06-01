@@ -30,11 +30,46 @@ type JobIMContext struct {
 	CreatedBy string
 }
 
+// JobInit bundles every operator-settable field a cron Job can carry at
+// creation time. It is the fuller input to NewJobFull, covering the
+// dashboard-only fields (Title / WorkDir / Notify* / FreshContext / Backend
+// / Paused) that the (schedule, prompt, JobIMContext) NewJob signature
+// cannot express.
+//
+// R250-CR-9 (#1142): NewJob's godoc historically claimed it was the single
+// construction choke point that protected every cross-package caller from a
+// cron.Job{} field rename. That invariant was not actually held — the
+// dashboard create handler bypassed NewJob and spelled out a multi-field
+// cron.Job{} literal directly because NewJob accepted none of the
+// dashboard-specific fields. JobInit + NewJobFull restore the invariant:
+// callers needing the richer field set have a constructor to route through
+// instead of an open-coded literal. Schedule/Prompt + the embedded
+// JobIMContext mirror NewJob so the two constructors stay in lockstep.
+//
+// All fields are optional; the zero value yields a Job equivalent to
+// NewJob(schedule, prompt, ctx) with empty schedule/prompt/context.
+type JobInit struct {
+	Schedule string
+	Prompt   string
+	IM       JobIMContext
+
+	Title          string
+	WorkDir        string
+	Backend        string
+	NotifyPlatform string
+	NotifyChatID   string
+	Notify         *bool
+	FreshContext   bool
+	Paused         bool
+}
+
 // NewJob constructs a Job ready to hand to Scheduler.AddJob from the
 // (schedule, prompt) pair plus the IM-channel context that originated it.
-// Centralising this constructor prevents cross-package callers (dispatch,
-// dashboard, IM command handlers) from spelling out the cron.Job{} struct
-// literal — a Job field rename today breaks every literal call site.
+// It is the narrow constructor for the dispatch / IM command path, which
+// only ever sets those fields; the dashboard path that also needs
+// Title / WorkDir / Notify* / FreshContext / Backend / Paused must use
+// NewJobFull so neither surface hand-rolls a cron.Job{} literal that a
+// field rename could silently break (R250-CR-9 / #1142).
 //
 // CreatedAt is intentionally NOT stamped here: AddJob is the choke point
 // that owns Job persistence and needs a single coherent timestamp source.
@@ -42,13 +77,32 @@ type JobIMContext struct {
 // comparisons, missed-schedule detection) when the constructor is called
 // far ahead of AddJob.
 func NewJob(schedule, prompt string, ctx JobIMContext) *Job {
+	return NewJobFull(JobInit{Schedule: schedule, Prompt: prompt, IM: ctx})
+}
+
+// NewJobFull constructs a Job from the full JobInit field set so the
+// dashboard create handler (and any future surface needing the richer
+// fields) routes through a constructor instead of an open-coded
+// cron.Job{} literal. NewJob delegates here so both constructors share a
+// single field-mapping site — a Job field rename now lands in exactly one
+// place. CreatedAt is left zero for AddJob to stamp, mirroring NewJob.
+// R250-CR-9 (#1142).
+func NewJobFull(in JobInit) *Job {
 	return &Job{
-		Schedule:  schedule,
-		Prompt:    prompt,
-		Platform:  ctx.Platform,
-		ChatID:    ctx.ChatID,
-		ChatType:  ctx.ChatType,
-		CreatedBy: ctx.CreatedBy,
+		Schedule:       in.Schedule,
+		Prompt:         in.Prompt,
+		Platform:       in.IM.Platform,
+		ChatID:         in.IM.ChatID,
+		ChatType:       in.IM.ChatType,
+		CreatedBy:      in.IM.CreatedBy,
+		Title:          in.Title,
+		WorkDir:        in.WorkDir,
+		Backend:        in.Backend,
+		NotifyPlatform: in.NotifyPlatform,
+		NotifyChatID:   in.NotifyChatID,
+		Notify:         in.Notify,
+		FreshContext:   in.FreshContext,
+		Paused:         in.Paused,
 	}
 }
 

@@ -968,6 +968,26 @@ const noTokenOpenWarning = "no dashboard_token configured on a non-loopback bind
 // shouldWarnReverseNodePlaintext / shouldWarnNoTokenOpen / isPlaintextPublicAddr
 // helpers moved to server_warnings.go (Phase 5-prep, 2026-05-28).
 
+// removedProjectNames returns the project names present in old but absent in
+// current — i.e. the projects deleted between two consecutive scans. It is the
+// pure decision rule extracted from startProjectScanLoop (ARCH-SVR-2 / #460):
+// no Router, Hub, or logging is touched, so it can be exercised directly in a
+// unit test rather than only through the 60s ticker goroutine. The caller is
+// responsible for the side effects (orphaned-planner removal, WS broadcast),
+// which remain the server adapter's concern.
+func removedProjectNames(old, current map[string]struct{}) []string {
+	if len(old) == 0 {
+		return nil
+	}
+	var removed []string
+	for name := range old {
+		if _, ok := current[name]; !ok {
+			removed = append(removed, name)
+		}
+	}
+	return removed
+}
+
 // startProjectScanLoop periodically rescans the projects root for added or
 // removed subdirectories and cleans up orphaned planner sessions for removed
 // projects.
@@ -990,15 +1010,20 @@ func (s *Server) startProjectScanLoop(ctx context.Context) {
 				}
 				newNames := s.projectMgr.ProjectNames()
 
-				// Detect removed projects and clean up orphaned planner sessions
+				// Detect removed projects and clean up orphaned planner
+				// sessions. The set-diff is the pure business rule (which
+				// projects disappeared) and lives in removedProjectNames so
+				// it is unit-testable without a Router/Hub — the first
+				// concrete slice of ARCH-SVR-2 (#460) "sink business logic
+				// out of server". The router/hub side effects below stay in
+				// the server layer because they are the HTTP/WS adapter's job.
+				removed := removedProjectNames(oldNames, newNames)
 				changed := len(oldNames) != len(newNames)
-				for name := range oldNames {
-					if _, ok := newNames[name]; !ok {
-						changed = true
-						plannerKey := project.PlannerKeyFor(name)
-						if s.router.Remove(plannerKey) {
-							s.log().Info("removed orphaned planner", "project", name)
-						}
+				for _, name := range removed {
+					changed = true
+					plannerKey := project.PlannerKeyFor(name)
+					if s.router.Remove(plannerKey) {
+						s.log().Info("removed orphaned planner", "project", name)
 					}
 				}
 				if changed {
