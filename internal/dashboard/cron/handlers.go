@@ -1316,27 +1316,28 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 // DELETE /api/cron?id=xxx — delete a cron job by exact ID.
 func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	if h.scheduler == nil {
-		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		// [R112714-SEC-1] Use writeCronErr so all error paths emit JSON.
+		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
 	}
 
 	id := r.URL.Query().Get("id")
 	if id == "" {
-		http.Error(w, "id is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id is required")
 		return
 	}
 	// Reject obviously-oversized ids before reaching the scheduler so slog
 	// attrs in the error path aren't dragged up to multi-MB strings.
 	// maxCronIDLen (64) matches the IM-side guard in dispatch/commands.go.
 	if len(id) > maxCronIDLenDashboard {
-		http.Error(w, "id too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id too long")
 		return
 	}
 	// [R250-SEC-1] Shape gate before id reaches scheduler/slog: keeps log
 	// attributes free of newlines/control bytes that would inject forged
 	// records into the operator log when the lookup misses.
 	if !cronpkg.IsValidID(id) {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 
@@ -1344,7 +1345,7 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, cronpkg.ErrJobNotFound):
-			http.Error(w, "job not found", http.StatusNotFound)
+			writeCronErr(w, http.StatusNotFound, "job not found")
 		case errors.Is(err, cronpkg.ErrPersistFailed):
 			// In-memory + cron entry deletion already happened, but the
 			// store write failed — a restart would replay the deleted job.
@@ -1354,7 +1355,7 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 			httpErrPersistFailed(w, "deleted")
 		default:
 			slog.Debug("cron delete failed", "err", err)
-			http.Error(w, "delete failed", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "delete failed")
 		}
 		return
 	}
@@ -1366,7 +1367,7 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 // POST /api/cron/pause — pause a cron job by exact ID.
 func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
 	if h.scheduler == nil {
-		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
 	}
 
@@ -1375,33 +1376,33 @@ func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KB
 	if err := httputil.DecodeJSONBody(r, &req); err != nil || req.ID == "" {
-		http.Error(w, "id is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id is required")
 		return
 	}
 	// Mirror HandleDelete's guard so oversized IDs don't drag slog attrs up
 	// to KB-scale strings on failure/success paths. R64-SEC-1.
 	if len(req.ID) > maxCronIDLenDashboard {
-		http.Error(w, "id too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id too long")
 		return
 	}
 	// [R250-SEC-1] Shape gate before id reaches scheduler/slog.
 	if !cronpkg.IsValidID(req.ID) {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 
 	if _, err := h.scheduler.PauseJobByID(req.ID); err != nil {
 		switch {
 		case errors.Is(err, cronpkg.ErrJobNotFound):
-			http.Error(w, "job not found", http.StatusNotFound)
+			writeCronErr(w, http.StatusNotFound, "job not found")
 		case errors.Is(err, cronpkg.ErrJobAlreadyPaused):
-			http.Error(w, "job already paused", http.StatusConflict)
+			writeCronErr(w, http.StatusConflict, "job already paused")
 		case errors.Is(err, cronpkg.ErrPersistFailed):
 			slog.Error("cron PauseJobByID pause not persisted", "err", err, "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "paused")
 		default:
 			slog.Debug("cron pause failed", "err", err)
-			http.Error(w, "pause failed", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "pause failed")
 		}
 		return
 	}
@@ -1413,7 +1414,7 @@ func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
 // POST /api/cron/resume — resume a paused cron job by exact ID.
 func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 	if h.scheduler == nil {
-		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
 	}
 
@@ -1422,31 +1423,31 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KB
 	if err := httputil.DecodeJSONBody(r, &req); err != nil || req.ID == "" {
-		http.Error(w, "id is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id is required")
 		return
 	}
 	if len(req.ID) > maxCronIDLenDashboard {
-		http.Error(w, "id too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id too long")
 		return
 	}
 	// [R250-SEC-1] Shape gate before id reaches scheduler/slog.
 	if !cronpkg.IsValidID(req.ID) {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 
 	if _, err := h.scheduler.ResumeJobByID(req.ID); err != nil {
 		switch {
 		case errors.Is(err, cronpkg.ErrJobNotFound):
-			http.Error(w, "job not found", http.StatusNotFound)
+			writeCronErr(w, http.StatusNotFound, "job not found")
 		case errors.Is(err, cronpkg.ErrJobNotPaused):
-			http.Error(w, "job not paused", http.StatusConflict)
+			writeCronErr(w, http.StatusConflict, "job not paused")
 		case errors.Is(err, cronpkg.ErrPersistFailed):
 			slog.Error("cron ResumeJobByID resume not persisted", "err", err, "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "resumed")
 		default:
 			slog.Debug("cron resume failed", "err", err)
-			http.Error(w, "resume failed", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "resume failed")
 		}
 		return
 	}
@@ -1466,7 +1467,7 @@ func (h *Handlers) HandleTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.scheduler == nil {
-		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
 	}
 
@@ -1475,34 +1476,34 @@ func (h *Handlers) HandleTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
 	if err := httputil.DecodeJSONBody(r, &req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 	if req.ID == "" {
-		http.Error(w, "id is required", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id is required")
 		return
 	}
 	if len(req.ID) > maxCronIDLenDashboard {
-		http.Error(w, "id too long", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "id too long")
 		return
 	}
 	// [R250-SEC-1] Shape gate before id reaches scheduler/slog.
 	if !cronpkg.IsValidID(req.ID) {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeCronErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 
 	if err := h.scheduler.TriggerNow(req.ID); err != nil {
 		switch {
 		case errors.Is(err, cronpkg.ErrJobNotFound):
-			http.Error(w, "job not found", http.StatusNotFound)
+			writeCronErr(w, http.StatusNotFound, "job not found")
 		case errors.Is(err, cronpkg.ErrJobPaused):
-			http.Error(w, "job is paused", http.StatusConflict)
+			writeCronErr(w, http.StatusConflict, "job is paused")
 		case errors.Is(err, cronpkg.ErrJobNoPrompt):
-			http.Error(w, "job has no prompt", http.StatusUnprocessableEntity)
+			writeCronErr(w, http.StatusUnprocessableEntity, "job has no prompt")
 		default:
 			slog.Debug("cron trigger failed", "err", err)
-			http.Error(w, "trigger failed", http.StatusBadRequest)
+			writeCronErr(w, http.StatusBadRequest, "trigger failed")
 		}
 		return
 	}
