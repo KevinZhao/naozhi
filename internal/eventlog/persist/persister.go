@@ -56,6 +56,33 @@ func putRecordBuf(buf *bytes.Buffer) {
 	recordBufPool.Put(buf)
 }
 
+// entryArenaPool backs the batch-level copy accept() makes of each
+// borrowed Entry.JSON (R20260531A-PERF-3, #1524). One arena holds every
+// entry's bytes for a single batch; handleBatch returns it after the
+// batch is written. Pooling the arena replaces the bridge's former
+// per-event make([]byte, N) with amortised reuse, eliminating that
+// steady-state heap churn (50 events/s × N sessions).
+var entryArenaPool = sync.Pool{
+	New: func() any {
+		return bytes.NewBuffer(make([]byte, 0, 4*1024))
+	},
+}
+
+// entryArenaMaxCap caps arena reuse so a one-off giant batch does not
+// pin a large heap allocation in the pool.
+const entryArenaMaxCap = 256 * 1024
+
+func putEntryArena(buf *bytes.Buffer) {
+	if buf == nil {
+		return
+	}
+	if buf.Cap() > entryArenaMaxCap {
+		return
+	}
+	buf.Reset()
+	entryArenaPool.Put(buf)
+}
+
 // logWriteBufSize is the capacity of the bufio.Writer wrapped around
 // each perKeyWriter.logFile. 64 KiB matches ReadFramedBody's reader
 // buffer and comfortably absorbs typical EventEntry records (1-20
@@ -299,10 +326,19 @@ type Persister struct {
 // batchJob is the internal queue element. Key is the original
 // (un-hashed) session key. Entries are already schema-marshalled
 // bodies pulled from cli.EventEntry upstream.
+//
+// arena (R20260531A-PERF-3, #1524) is an optional pooled buffer that
+// owns the backing bytes for every Entry.JSON in this batch. When the
+// producer hands over borrowed bytes (the bridge no longer copies — see
+// PersistSink contract), accept() copies them into a pooled arena and
+// stores it here so handleBatch can return it to entryArenaPool once the
+// batch is durably written. nil when the producer supplied owned bytes
+// (e.g. older callers / tests); handleBatch's putEntryArena tolerates nil.
 type batchJob struct {
 	Key     string
 	Stem    string
 	Entries []Entry
+	arena   *bytes.Buffer
 }
 
 // NewPersister validates opts, ensures Dir exists, sweeps rotate
@@ -503,10 +539,36 @@ func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 	if len(entries) == 0 {
 		return
 	}
-	job := batchJob{Key: s.key, Stem: s.stem, Entries: entries}
+	// R20260531A-PERF-3 (#1524): the PersistSink contract now hands us
+	// borrowed bytes — the producer (bridge) may reuse Entry.JSON's
+	// backing array the moment accept returns. Because the batch is
+	// retained across the async channel, we take ownership here by
+	// copying every entry's JSON into a single pooled arena. The entries
+	// slice header is likewise borrowed, so we materialise our own.
+	//
+	// Two passes: first append all bytes (the arena may grow and move its
+	// backing array), then resolve each Entry.JSON sub-slice once the
+	// arena is final. Resolving slices during the append pass would alias
+	// a stale backing array after a grow.
+	arena := entryArenaPool.Get().(*bytes.Buffer)
+	owned := make([]Entry, len(entries))
+	type span struct{ start, end int }
+	spans := make([]span, len(entries))
+	for i, e := range entries {
+		start := arena.Len()
+		arena.Write(e.JSON)
+		spans[i] = span{start: start, end: arena.Len()}
+		owned[i] = Entry{TimeMS: e.TimeMS}
+	}
+	all := arena.Bytes()
+	for i := range owned {
+		owned[i].JSON = all[spans[i].start:spans[i].end]
+	}
+	job := batchJob{Key: s.key, Stem: s.stem, Entries: owned, arena: arena}
 	select {
 	case p.in <- job:
 	default:
+		putEntryArena(arena)
 		p.droppedCnt.Add(int64(len(entries)))
 		p.opts.Observer.OnDrop(len(entries))
 		// R250-ARCH-23 (#1184): include channel_used so operators
@@ -1223,6 +1285,11 @@ func (p *Persister) tickIdleClose() {
 // same clock reading covers both this function's bookkeeping and the
 // caller's lastDrainNS update. R222-PERF-12.
 func (p *Persister) handleBatch(job batchJob, now time.Time) {
+	// R20260531A-PERF-3 (#1524): return the pooled arena that owns this
+	// batch's Entry.JSON bytes once we're done with every entry. The
+	// defer covers the writerFor-error early return below and every
+	// continue/return inside the loop. nil-safe for owned-bytes callers.
+	defer putEntryArena(job.arena)
 	w, err := p.writerFor(job.Key, job.Stem)
 	if err != nil {
 		slog.Error("event log persist: cannot open writer",
