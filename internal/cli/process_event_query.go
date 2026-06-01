@@ -137,6 +137,7 @@ func (p *Process) InjectHistory(entries []EventEntry) {
 // EventEntry so persistHistory flushes a self-contained record.
 func (p *Process) InitLinker(cwd string) {
 	p.cwd = cwd
+	p.cachedProjectDir = resolveProjectDir(cwd)
 	p.linker = NewSubagentLinker()
 	log := p.eventLog
 	p.linker.OnResolve(func(taskID, toolUseID, internalAgentID string) {
@@ -176,6 +177,7 @@ func (p *Process) SetCwdForLinker(cwd string) {
 	}
 	p.cwd = cwd
 	projectDir := resolveProjectDir(cwd)
+	p.cachedProjectDir = projectDir
 	p.linker.mu.RLock()
 	session := p.linker.parentSessionID
 	p.linker.mu.RUnlock()
