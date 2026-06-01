@@ -382,3 +382,23 @@
 - [R20260601-SEC-11] reverseserver msg.NodeID 未在构造期校验字符集(防御性) — internal/node/reverseserver.go:396
 - [R20260601-GO-3] TestCronNotice_LocalizeBeforeSanitise 命名与所测顺序相反(测试名误导) — internal/cron/cron_notice_apierr_localize_test.go:78
 - [R20260601-GO-6] apierr.Localize 隐式 Warn 副作用不可被测试观测(可测性) — internal/apierr/apierr.go:88
+- [R103901-GO-2] setSubscriberCountFast LoadOrStore 加固 (future caller race) — internal/server/wshub_subscribe.go:432
+- [R103901-GO-3] runInflightView 别名字段注释澄清 — internal/cron/runinflight.go:52
+- [R103901-GO-6] setSubscriberCountFast int32 截断防御注释 — internal/server/wshub_subscribe.go:434
+- [R103901-GO-8] preserveCorruptFile 路径日志约定不一致 (server-side only) — internal/session/store.go:63
+- [R103901-SEC-1] dashboard CSP script-src unsafe-inline → strict-dynamic+nonce (NEEDS-DESIGN) — internal/server/routes.go:522
+- [R103901-SEC-2] KaTeX woff2 go:embed 去 CDN font-src (NEEDS-DESIGN) — internal/server/routes.go:522
+- [R103901-SEC-3] transcript Input 字段 WriteJSONEscaped (假设性 future innerHTML) — internal/dashboard/cron/transcript.go:222
+- [R103901-CODE-2] mayContainSecretPrefix 注释补 github_pat_ 消费 'g' — internal/cron/redact_secrets.go:182
+- [R103901-CODE-5] CronInflightDoubleExecutionTotal 指标 (TOCTOU ~2^-32) — internal/cron/scheduler_run.go:183
+- [R103901-CODE-7] replyTracker.onEvent TodoWrite 提前 return 设计注释 — internal/dispatch/reply_tracker.go:282
+- [R103901-CODE-9] applyJitterAndRecheck snapshot 改读 cur 防未来指针替换 — internal/cron/scheduler_run.go:960
+- [R103901-CODE-10] sendWithWatchdog defer sendCancel 注释澄清 — internal/cron/scheduler_run.go:817
+- [R103901-ARCH-2] ErrSchedulerStopped/ErrPromptAlreadySet 补入 ClassifyError (依赖 ARCH-1) — internal/cron/error_class.go:93
+- [R103901-ARCH-5] dispatch agents 裸 map 注释更新 (cron 已 atomic.Pointer) — internal/dispatch/dispatch.go:139
+- [R103901-ARCH-6] agent_opts.go 过时 not-panic-pin 注释修正 — internal/cron/agent_opts.go:36
+- [R103901-ARCH-7] ClassifyError godoc sentinel 清单对齐 — internal/cron/error_class.go:4
+- [R103901-PERF-1] shimMsg.Line string→json.RawMessage 去二次拷贝 (需协议版本 bump) — internal/cli/process_readloop.go:178
+- [R103901-PERF-4] backfillSubscriberEvents 改 EntriesSinceAppend + sync.Pool dst — internal/server/wshub_eventpush.go:270
+- [R103901-PERF-5] readShimLine lineBuf 纳入 sync.Pool 防大 backing array 抛弃 — internal/cli/process_readloop.go:463
+- [R103901-PERF-6] batchRecentRuns 持久 worker pool 替 per-request goroutine — internal/dashboard/cron/handlers.go:878
