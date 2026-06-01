@@ -2,10 +2,24 @@ package server
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
 )
+
+// seedSubscriberCounts populates both the source map and the lock-free
+// subscriberCountFast mirror so hand-built test Hubs exercise the same
+// singleSubscriber read path as production (which always maintains the
+// mirror under h.mu). R20260531A-PERF-1 (#1522).
+func seedSubscriberCounts(h *Hub, counts map[string]int) {
+	h.subscriberCount = counts
+	for k, n := range counts {
+		var ctr atomic.Int32
+		ctr.Store(int32(n))
+		h.subscriberCountFast.Store(k, &ctr)
+	}
+}
 
 // R249-PERF-30 (#944): pins the single-subscriber fast path that skips
 // the marshal cache when only one tab is subscribed to a session key.
@@ -18,8 +32,8 @@ func TestSingleSubscriberFastPath_BypassesCache(t *testing.T) {
 	h := &Hub{
 		mu:                  sync.RWMutex{},
 		historyMarshalCache: newHistoryMarshalCache(),
-		subscriberCount:     map[string]int{"only-tab": 1},
 	}
+	seedSubscriberCounts(h, map[string]int{"only-tab": 1})
 	entries := []cli.EventEntry{{Time: 1, Type: "user"}}
 	if _, err := h.marshalHistoryFrame("only-tab", 0, entries); err != nil {
 		t.Fatalf("marshalHistoryFrame: %v", err)
@@ -44,8 +58,8 @@ func TestSingleSubscriberFastPath_MultiSubStillUsesCache(t *testing.T) {
 	h := &Hub{
 		mu:                  sync.RWMutex{},
 		historyMarshalCache: newHistoryMarshalCache(),
-		subscriberCount:     map[string]int{"two-tabs": 2},
 	}
+	seedSubscriberCounts(h, map[string]int{"two-tabs": 2})
 	entries := []cli.EventEntry{{Time: 1, Type: "user"}}
 	if _, err := h.marshalHistoryFrame("two-tabs", 0, entries); err != nil {
 		t.Fatalf("marshalHistoryFrame: %v", err)
