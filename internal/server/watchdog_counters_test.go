@@ -38,3 +38,29 @@ func TestWatchdogCountersPtrsAlias(t *testing.T) {
 		t.Error("noOutPtr returned different addresses across calls")
 	}
 }
+
+// TestWatchdogCountersSnapshot verifies the unified read-side view matches what
+// the individual loads report, so handlers can migrate off open-coded
+// .Load() pairs (#838) without changing observed values.
+func TestWatchdogCountersSnapshot(t *testing.T) {
+	var w watchdogCounters
+
+	if snap := w.Snapshot(); snap != (watchdogSnapshot{}) {
+		t.Fatalf("fresh Snapshot = %+v, want zero", snap)
+	}
+
+	w.noOutPtr().Add(3)
+	w.totalPtr().Add(7)
+
+	snap := w.Snapshot()
+	if snap.NoOutputKills != 3 {
+		t.Errorf("snap.NoOutputKills = %d, want 3", snap.NoOutputKills)
+	}
+	if snap.TotalKills != 7 {
+		t.Errorf("snap.TotalKills = %d, want 7", snap.TotalKills)
+	}
+	// Snapshot must agree with the per-field loads it replaces.
+	if snap.NoOutputKills != w.noOutPtr().Load() || snap.TotalKills != w.totalPtr().Load() {
+		t.Error("Snapshot disagrees with individual counter loads")
+	}
+}
