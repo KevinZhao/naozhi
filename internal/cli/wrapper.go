@@ -213,12 +213,8 @@ func newWrapperCommon(cliPath string, proto Protocol, backend string) *Wrapper {
 // single source of truth for "what backends this cli build supports".
 // R225-CR-9.
 func isKnownBackendID(id string) bool {
-	for _, b := range knownBackends {
-		if b.ID == id {
-			return true
-		}
-	}
-	return false
+	_, ok := lookupBackend(id)
+	return ok
 }
 
 // backendDisplayName maps a backend config value to its user-facing name.
@@ -238,10 +234,8 @@ func isKnownBackendID(id string) bool {
 // (normalized) value, matching the previous default arm.
 func backendDisplayName(backend string) string {
 	id := normalizeBackendID(backend)
-	for _, b := range knownBackends {
-		if b.ID == id {
-			return b.DisplayName
-		}
+	if b, ok := lookupBackend(id); ok {
+		return b.DisplayName
 	}
 	return id
 }

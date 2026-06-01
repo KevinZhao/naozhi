@@ -75,17 +75,29 @@ var knownBackends = []BackendInfo{
 	{ID: "kiro", DisplayName: "kiro", Protocol: "acp", defaultBinary: "kiro-cli"},
 }
 
+// lookupBackend returns the knownBackends row for the given ID and whether it
+// was found. It is the single scan point over the knownBackends table so the
+// ID-keyed accessors (knownBackendBinary / isKnownBackendID / backendDisplayName)
+// share one source of truth instead of each open-coding the same loop. #408.
+func lookupBackend(id string) (BackendInfo, bool) {
+	for _, b := range knownBackends {
+		if b.ID == id {
+			return b, true
+		}
+	}
+	return BackendInfo{}, false
+}
+
 // knownBackendBinary returns the default executable name detectCLI probes for
 // the given backend ID, sourced from the knownBackends table. The second
 // return reports whether the ID is a known backend; callers fall back to the
 // "claude" launcher for unknown IDs (historical default-launcher behaviour).
 func knownBackendBinary(id string) (string, bool) {
-	for _, b := range knownBackends {
-		if b.ID == id {
-			return b.defaultBinary, true
-		}
+	b, ok := lookupBackend(id)
+	if !ok {
+		return "", false
 	}
-	return "", false
+	return b.defaultBinary, true
 }
 
 // DetectBackendsCtx probes the filesystem and $PATH for each known backend
