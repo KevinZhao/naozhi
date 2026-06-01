@@ -11,6 +11,33 @@ import (
 	"strings"
 )
 
+// envelopeCategory returns a short, non-sensitive label for the already-
+// classified friendly message, used as the slog "category" field so
+// operators can correlate log entries without the raw error text leaking
+// sk-ant- keys, request_ids, or internal hostnames.
+func envelopeCategory(friendly string) string {
+	switch {
+	case strings.HasPrefix(friendly, "⏱️ Claude API 调用过于频繁"):
+		return "rate_limit"
+	case strings.HasPrefix(friendly, "🌊"):
+		return "overloaded"
+	case strings.HasPrefix(friendly, "🔑"):
+		return "invalid_api_key"
+	case strings.HasPrefix(friendly, "💳"):
+		return "insufficient_quota"
+	case strings.HasPrefix(friendly, "📏"):
+		return "context_length"
+	case strings.HasPrefix(friendly, "🚫"):
+		return "permission_error"
+	case strings.HasPrefix(friendly, "⏱️ 连接"):
+		return "timeout"
+	case strings.HasPrefix(friendly, "🌐"):
+		return "network"
+	default:
+		return "unknown"
+	}
+}
+
 // envelopePrefixScanBytes bounds how many leading bytes we lowercase when
 // probing whether a result string looks like an API-error envelope. Keeping
 // the scan small avoids an O(N) copy on every normal assistant reply (tens
@@ -82,9 +109,12 @@ func Localize(text string) string {
 		return text
 	}
 
-	// Keep the raw envelope on the operator side only — never forward it
-	// to IM users. trimmed may contain sensitive substrings (request IDs,
-	// internal hostnames, upstream error headers).
-	slog.Warn("claude api error envelope localized", "raw", trimmed)
+	// Log only non-sensitive diagnostics: error category and envelope length.
+	// The raw envelope is intentionally NOT logged — it may contain sk-ant-
+	// keys, request_ids, or internal hostnames (R20260601-SEC-1).
+	slog.Warn("claude api error envelope localized",
+		"category", envelopeCategory(friendly),
+		"envelope_len", len(trimmed),
+	)
 	return friendly
 }

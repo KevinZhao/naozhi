@@ -184,6 +184,50 @@ func TestAttachmentGC_ConfigureAppliesKnobs(t *testing.T) {
 	}
 }
 
+// TestAttachmentGC_ConfigureMetaGraceZeroDisables: meta_grace:0 must
+// override the default 5-minute grace window and disable it entirely,
+// allowing explicit zero to be distinguished from "not set". [R20260601-GO-3]
+func TestAttachmentGC_ConfigureMetaGraceZeroDisables(t *testing.T) {
+	d, _ := newAttachmentGC(DaemonDeps{})
+	gc := d.(*attachmentGC)
+	// Sanity: default is non-zero.
+	if gc.metaGrace == 0 {
+		t.Fatal("precondition: default metaGrace must be non-zero")
+	}
+	if err := d.(Configurable).Configure(DaemonConfig{
+		"upload_ttl": 7 * 24 * time.Hour,
+		"ref_ttl":    30 * 24 * time.Hour,
+		"meta_grace": time.Duration(0),
+	}); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	if gc.metaGrace != 0 {
+		t.Errorf("metaGrace=%v, want 0 (explicit zero must disable grace)", gc.metaGrace)
+	}
+}
+
+// TestAttachmentGC_CtxCancelDoesNotIncrementExamined: when the context
+// is cancelled before any root sweep completes, Examined must be 0.
+// A cancelled partial sweep must not count the root as examined.
+// [R20260601-CR-6]
+func TestAttachmentGC_CtxCancelDoesNotIncrementExamined(t *testing.T) {
+	now := time.Now().UTC()
+	ws := t.TempDir()
+	seedOldAttachment(t, ws, "a", now)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before Tick
+
+	gc := newTestGC(fakeRoots{[]string{ws}}, now)
+	rep, err := gc.Tick(ctx)
+	if err == nil {
+		t.Errorf("expected ctx error, got nil")
+	}
+	if rep.Examined != 0 {
+		t.Errorf("Examined=%d after cancel, want 0 (incomplete sweep must not count)", rep.Examined)
+	}
+}
+
 // TestAttachmentGC_CtxCancelStops: a cancelled context halts the sweep
 // promptly without touching files.
 func TestAttachmentGC_CtxCancelStops(t *testing.T) {

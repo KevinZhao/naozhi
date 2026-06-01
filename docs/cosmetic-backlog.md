@@ -368,3 +368,10 @@
 - [R20260531070014-GO-9] mayContainSecretPrefix 注释 'g' 分支列举遗漏 github_pat_ — internal/cron/redact_secrets.go:183
 - [R20260531070014-CR-3] ManagedState 方法名与返回类型同名，建议 rename LifecycleState() — internal/session/managed_state.go:76
 - [R20260531070014-CR-8] tuning.go 操作符表 defaultCronSlowThreshold 行 Markdown 单元格对齐错位 — internal/cron/tuning.go:15
+- [R20260601-PERF-2] apierr.Localize 错误信封路径 full-body ToLower 分配 — internal/apierr/apierr.go:56 (仅错误路径触发，非热路径)
+- [R20260601-PERF-3] setSubscriberCountFast 每 key &atomic.Int32 堆逃逸，可 sync.Pool — internal/server/wshub_subscribe.go:391
+- [R20260601-PERF-8] handleBatch schema.NewEntry 每事件分配 *Record，可池化 — internal/eventlog/persist/persister.go:1223
+- [R20260601-PERF-12] trackSessionID 满 maxKnownIDs 时 O(N) slice shift，可换 ring buffer — internal/session/router_discovery.go:334
+- [R20260601-CR-3] meta_grace 未经 YAML 暴露，operator 无法调 — internal/config/config.go:331
+- [R20260601-SEC-2] apierr.Localize default 分支转发原始信封(已 narrow case，cron 路径已脱敏) — internal/apierr/apierr.go:82
+- [R20260601-GO-COSM] attachment-gc Configure error 字符串混中文，惯用 Go error 应英文 — internal/sysession/attachment_gc.go:106
