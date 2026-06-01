@@ -227,6 +227,9 @@ func (l workspaceRootLister) KnownWorkspaceRoots() []string {
 	seen := make(map[string]struct{}, len(raw))
 	out := make([]string, 0, len(raw))
 	for _, p := range raw {
+		if p == "" {
+			continue
+		}
 		canon, err := filepath.Abs(p)
 		if err != nil {
 			canon = p
@@ -354,22 +357,24 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 			}
 		}
 		specific := sysession.DaemonConfig{}
-		if dcfg.MinUserTurns > 0 {
-			specific["min_user_turns"] = dcfg.MinUserTurns
-		}
-		if dcfg.MinRenameInterval != "" {
-			parsed, err := time.ParseDuration(dcfg.MinRenameInterval)
-			if err != nil {
-				slog.Warn("sysession: bad min_rename_interval",
-					"daemon", name, "err", err, "value", dcfg.MinRenameInterval)
-			} else {
-				specific["min_rename_interval"] = parsed
+		if name == "auto-titler" {
+			if dcfg.MinUserTurns > 0 {
+				specific["min_user_turns"] = dcfg.MinUserTurns
 			}
+			if dcfg.MinRenameInterval != "" {
+				parsed, err := time.ParseDuration(dcfg.MinRenameInterval)
+				if err != nil {
+					slog.Warn("sysession: bad min_rename_interval",
+						"daemon", name, "err", err, "value", dcfg.MinRenameInterval)
+				} else {
+					specific["min_rename_interval"] = parsed
+				}
+			}
+			if dcfg.BatchPerTick > 0 {
+				specific["batch_per_tick"] = dcfg.BatchPerTick
+			}
+			specific["include_group_chat"] = dcfg.IncludeGroupChat
 		}
-		if dcfg.BatchPerTick > 0 {
-			specific["batch_per_tick"] = dcfg.BatchPerTick
-		}
-		specific["include_group_chat"] = dcfg.IncludeGroupChat
 
 		// attachment-gc knobs (docs/rfc/attachment-gc-daemon.md §5).
 		if dcfg.UploadTTL != "" {
