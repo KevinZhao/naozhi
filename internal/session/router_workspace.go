@@ -45,6 +45,16 @@ func (r *Router) SetWorkspace(chatKey, path string) {
 func (r *Router) GetWorkspace(chatKey string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.resolveWorkspaceLocked(chatKey)
+}
+
+// resolveWorkspaceLocked is the single chat-level workspace resolution
+// point (R245-ARCH-32 / #883): per-chat override first, router default
+// otherwise. Caller holds r.mu (read or write). Extracted so the priority
+// order lives in exactly one place — the spawn-time resolver in
+// resolveSpawnParamsLocked layers the additional opts/resume tiers ON TOP
+// of this chat-level base rather than re-deriving it independently.
+func (r *Router) resolveWorkspaceLocked(chatKey string) string {
 	if ws, ok := r.workspaceOverrides[chatKey]; ok {
 		return ws
 	}

@@ -1382,52 +1382,68 @@ type withJobByPrefixOpts struct {
 	rollbackOnPersistErr func(j *Job)
 }
 
+// withJobByPrefixResult bundles the locked-section outputs of
+// withJobByPrefix so the post-unlock flow reads as named-field branches
+// rather than five sibling vars mutated inside an IIFE — the prefix-path
+// twin of withJobByIDResult. R249-CR-7 (#951).
+type withJobByPrefixResult struct {
+	save       func()
+	snapshot   Job
+	findErr    error
+	opErr      error
+	perr       error
+	rolledBack bool
+}
+
+// lockedJobPrefixOp runs the find-by-prefix + op + persist + (optional)
+// rollback steps for withJobByPrefix entirely under s.mu, mirroring
+// lockedJobOp on the by-ID path. Splitting it out of the IIFE keeps every
+// s.mu-guarded mutation in one named scope.
+func (s *Scheduler) lockedJobPrefixOp(idPrefix, plat, chatID string, op func(j *Job) error, rollback func(j *Job)) withJobByPrefixResult {
+	var r withJobByPrefixResult
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j, err := s.findByPrefixLocked(idPrefix, plat, chatID)
+	if err != nil {
+		r.findErr = err
+		return r
+	}
+	if op != nil {
+		if err := op(j); err != nil {
+			r.opErr = err
+			return r
+		}
+	}
+	r.save, r.perr = s.persistJobsLocked()
+	// R20260531070014-CR-1/CR-2: mirror withJobByIDOpt's rollback contract —
+	// if persistJobsLocked failed after op mutated *j, restore in-memory state
+	// under s.mu so disk (un-persisted) and memory stay aligned.
+	if r.perr != nil && rollback != nil {
+		rollback(j)
+		r.rolledBack = true
+	}
+	// R242-GO-3 mirror (#548): value-copy under s.mu so postCleanup and
+	// the caller read a stable Job even if a concurrent UpdateJob /
+	// SetJobPrompt mutates the live *j right after Unlock. Matches
+	// withJobByIDOpt's "snapshot = *j" pattern. [R250531-CR-2]
+	r.snapshot = *j
+	return r
+}
+
 func (s *Scheduler) withJobByPrefix(
 	idPrefix, plat, chatID string,
 	op func(j *Job) error,
 	postCleanup func(j *Job),
 	opts withJobByPrefixOpts,
 ) (*Job, error) {
-	rollback := opts.rollbackOnPersistErr
+	r := s.lockedJobPrefixOp(idPrefix, plat, chatID, op, opts.rollbackOnPersistErr)
+	save, snapshot, perr, rolledBack := r.save, r.snapshot, r.perr, r.rolledBack
 
-	var save func()
-	var snapshot Job
-	var findErr, opErr, perr error
-	var rolledBack bool
-	func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		j, err := s.findByPrefixLocked(idPrefix, plat, chatID)
-		if err != nil {
-			findErr = err
-			return
-		}
-		if op != nil {
-			if err := op(j); err != nil {
-				opErr = err
-				return
-			}
-		}
-		save, perr = s.persistJobsLocked()
-		// R20260531070014-CR-1/CR-2: mirror withJobByIDOpt's rollback contract —
-		// if persistJobsLocked failed after op mutated *j, restore in-memory state
-		// under s.mu so disk (un-persisted) and memory stay aligned.
-		if perr != nil && rollback != nil {
-			rollback(j)
-			rolledBack = true
-		}
-		// R242-GO-3 mirror (#548): value-copy under s.mu so postCleanup and
-		// the caller read a stable Job even if a concurrent UpdateJob /
-		// SetJobPrompt mutates the live *j right after Unlock. Matches
-		// withJobByIDOpt's "snapshot = *j" pattern. [R250531-CR-2]
-		snapshot = *j
-	}()
-
-	if findErr != nil {
-		return nil, findErr
+	if r.findErr != nil {
+		return nil, r.findErr
 	}
-	if opErr != nil {
-		return nil, opErr
+	if r.opErr != nil {
+		return nil, r.opErr
 	}
 	// R20260531070014-CR-1/CR-2: on rollback skip postCleanup (mirrors
 	// withJobByIDOpt — the cron.Remove hoist must not fire when the in-memory
