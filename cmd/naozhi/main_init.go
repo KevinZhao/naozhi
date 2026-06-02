@@ -168,9 +168,8 @@ func initBackendWrappers(
 		// the cancellable variant — same field shape, so downstream readers of
 		// w.CLIVersion (the "backend X version Y" banner below at line 123-124)
 		// see identical values.
-		w := cli.NewWrapperLazy(b.Path, proto, b.ID)
+		w := cli.NewWrapperLazy(b.Path, proto, b.ID).WithManager(shimMgr)
 		w.Probe(ctx)
-		w.ShimManager = shimMgr
 		out.Wrappers[w.BackendID] = w
 		if b.Model != "" {
 			out.Models[w.BackendID] = b.Model
