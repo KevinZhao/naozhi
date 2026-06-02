@@ -454,7 +454,7 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	// R245-ARCH-32 (#883): the per-chat-override > default base tier is
 	// resolved through resolveWorkspaceLocked — the single chat-level
 	// resolution point — instead of re-reading r.workspaceOverrides /
-	// r.workspace inline here. This kills the second source of truth that
+	// r.defaultCWD inline here. This kills the second source of truth that
 	// previously derived the same base independently and could drift from
 	// GetWorkspace. The opts and resume tiers still layer ON TOP of that
 	// base, matching the documented priority order above.
@@ -472,7 +472,7 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 			workspaceOverridden = true
 		}
 	} else {
-		workspace = r.workspace
+		workspace = r.defaultCWD
 	}
 	if !workspaceOverridden && resumeID != "" {
 		if old := r.sessions[key]; old != nil {

@@ -332,7 +332,14 @@ type Router struct {
 	// 读写: core (init), lifecycle (resolveSpawnParams)
 	backendExtraArgs map[string][]string
 	// 读写: core (init/DefaultWorkspace), lifecycle (GetWorkspace fallback)
-	workspace string // default cwd for CLI processes
+	//
+	// Named defaultCWD (not "workspace") to disambiguate from the other
+	// three meanings the word "workspace" carries in this codebase —
+	// node identity (Config.Workspace), remote nodes (Config.Workspaces),
+	// and per-chat overrides (workspaceOverrides). This field is purely
+	// the fallback working directory handed to CLI processes when a
+	// session has no per-chat override (R222-ARCH-11, #732).
+	defaultCWD string // default cwd for CLI processes
 	// 读写: core (init), lifecycle (attachHistorySource), discovery (attachHistorySource via RegisterForResume / RegisterCronStubWithChain / Takeover), shim (reconnect)
 	claudeDir string // ~/.claude dir for loading session history
 	// kiroSessionsDir is the kiro session-state root. Plumbed into
@@ -938,7 +945,7 @@ func NewRouter(cfg RouterConfig) *Router {
 		extraArgs:          cfg.ExtraArgs,
 		backendModels:      cfg.BackendModels,
 		backendExtraArgs:   cfg.BackendExtraArgs,
-		workspace:          cfg.Workspace,
+		defaultCWD:         cfg.Workspace,
 		claudeDir:          cfg.ClaudeDir,
 		kiroSessionsDir:    cfg.KiroSessionsDir,
 		workspaceOverrides: make(map[string]string),
@@ -1457,7 +1464,7 @@ func ChatKey(platform, chatType, chatID string) string {
 
 // DefaultWorkspace returns the router's default working directory.
 func (r *Router) DefaultWorkspace() string {
-	return r.workspace
+	return r.defaultCWD
 }
 
 // Version returns a monotonic counter incremented on every session

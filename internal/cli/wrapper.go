@@ -137,6 +137,25 @@ func (w *Wrapper) Manager() *shim.Manager {
 	return w.ShimManager
 }
 
+// WithManager injects the transport (today *shim.Manager) and returns the
+// receiver for fluent construction: `cli.NewWrapperLazy(...).WithManager(m)`.
+//
+// R214-ARCH-9 (#405): the long-term direction is an unexported transport
+// field set only at construction, with the public ShimManager field
+// retired. Until the cli.Transport interface (R242-ARCH-3 / #721) lands and
+// the cross-package readers in internal/session migrate to Manager(), this
+// setter is the forward-compatible write path: new wiring should call
+// WithManager instead of assigning the public field directly, so when the
+// field finally goes unexported only this method body changes. Nil-safe on
+// a nil receiver (returns nil) to compose with the lazy constructors.
+func (w *Wrapper) WithManager(m *shim.Manager) *Wrapper {
+	if w == nil {
+		return nil
+	}
+	w.ShimManager = m
+	return w
+}
+
 // Probe runs `<cli> --version` under the caller's context and stores
 // the parsed result on the receiver. Safe to call multiple times; each
 // call overwrites the cached version. Intended for callers that built

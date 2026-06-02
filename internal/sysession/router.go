@@ -1,7 +1,7 @@
 package sysession
 
 import (
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/api"
 )
 
 // SystemEventEntry is the sysession-local mirror of the ≤4 event-record
@@ -42,14 +42,21 @@ type SystemEventEntry struct {
 // (this interface intentionally doesn't expose them so daemons stay on
 // the streaming path).
 type SystemSessionRouter interface {
-	// VisitSessions streams every session through fn.  fn returning
-	// false stops iteration early.  Used by AutoTitler to filter
-	// candidates without materialising a slice.
+	// VisitSessions streams every session through fn (embedded from
+	// api.SessionVisitor).  fn returning false stops iteration early.
+	// Used by AutoTitler to filter candidates without materialising a
+	// slice.
 	//
 	// fn must NOT call back into Router methods that take r.mu (it
 	// runs under RLock).  The idiomatic pattern is to copy fields the
 	// daemon needs and resume work after the visit returns.
-	VisitSessions(fn func(session.SessionSnapshot) bool)
+	//
+	// Embedding the shared api.SessionVisitor mixin (instead of
+	// re-declaring VisitSessions inline) is the first sysession step of
+	// the R246-ARCH-11 / R240-ARCH-15 consolidation (#791 / #1032): the
+	// streaming-read capability now has a single canonical signature
+	// that all consumers share.
+	api.SessionVisitor
 
 	// SetUserLabelWithOrigin is the daemon-aware label writer.  It
 	// MUST re-read LabelOrigin under r.mu before applying the write,
