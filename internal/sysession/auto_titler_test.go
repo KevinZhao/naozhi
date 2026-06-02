@@ -486,8 +486,7 @@ func TestBuildExcerptFromHistory_SoftCap(t *testing.T) {
 		})
 	}
 	got := buildExcerptFromHistory(entries)
-	// After R171023-CR-004 the "…" byte width is included in the need
-	// calculation, so the result must stay within the soft cap exactly.
+	// The result must stay within the soft cap exactly.
 	if len(got) > autoTitlerExcerptSoftCapBytes {
 		t.Errorf("buildExcerptFromHistory exceeded soft cap: got %d bytes, max %d", len(got), autoTitlerExcerptSoftCapBytes)
 	}
@@ -498,22 +497,64 @@ func TestBuildExcerptFromHistory_SoftCap(t *testing.T) {
 	}
 }
 
-// TestBuildExcerptFromHistory_SoftCapBoundary locks R171023-CR-004: the "…"
-// rune width (3 bytes) must be included in the need calculation so the
-// builder never writes past autoTitlerExcerptSoftCapBytes.  We construct an
-// input whose last entry, if fully appended, would push the buffer to exactly
-// cap+1, triggering truncation.  After truncation the result must be
-// ≤ autoTitlerExcerptSoftCapBytes and end with "…".
+// TestBuildExcerptFromHistory_NoEarlyCap locks #1586: the per-entry "need"
+// must NOT pre-charge the 3-byte "…" marker, which previously fired the cap
+// ~one entry early for every entry that fit on its own.  We fill the buffer
+// with entries whose newline-joined bytes land just under the cap and assert
+// that every fitting entry is appended in full — i.e. truncation does NOT
+// trigger when the real content (entries + joining newlines) fits.
+func TestBuildExcerptFromHistory_NoEarlyCap(t *testing.T) {
+	t.Parallel()
+	const cap = autoTitlerExcerptSoftCapBytes
+	// 100-byte entries, the typical-turn size called out in the issue.
+	const perEntry = 100
+	chunk := strings.Repeat("a", perEntry)
+	// Each appended entry costs perEntry bytes plus one joining newline
+	// (except the first). Pick a count whose total content fits strictly
+	// under the cap so NOTHING should be truncated.
+	//   total = n*perEntry + (n-1) newlines = n*(perEntry+1) - 1
+	// Solve for the largest n with total <= cap, then back off by a few
+	// to stay comfortably inside.
+	count := cap/(perEntry+1) - 4
+	if count <= 0 {
+		t.Fatalf("test misconfigured: count=%d", count)
+	}
+	entries := make([]SystemEventEntry, 0, count)
+	for i := 0; i < count; i++ {
+		entries = append(entries, SystemEventEntry{Type: "user", Summary: chunk})
+	}
+	got := buildExcerptFromHistory(entries)
+	// Expected full content: all entries joined by newlines, no marker.
+	wantLen := count*perEntry + (count - 1)
+	if len(got) != wantLen {
+		t.Errorf("expected all %d entries appended (len %d), got len %d", count, wantLen, len(got))
+	}
+	if strings.HasSuffix(got, "…") {
+		t.Errorf("cap fired early: content fit under cap but result was truncated")
+	}
+	// Sanity: confirm we genuinely exercised the regime where the OLD
+	// per-entry 3-byte reserve would have truncated. The old need formula
+	// added 3 bytes per entry, so old projected size was wantLen + 3*count,
+	// which must exceed the cap for this test to be meaningful.
+	if wantLen+3*count <= cap {
+		t.Fatalf("test not exercising the early-cap regime: wantLen=%d count=%d cap=%d", wantLen, count, cap)
+	}
+}
+
+// TestBuildExcerptFromHistory_SoftCapBoundary locks the hard upper bound: the
+// builder must never write past autoTitlerExcerptSoftCapBytes, and when an
+// entry would push past the cap the result is truncated with a visible "…".
+// First entry fills the buffer to exactly cap; the second entry cannot fit
+// (newline+byte would overflow) so truncation fires.  Because the buffer is
+// already at the cap there is no room for the "\n…" marker, so the builder
+// omits it rather than overshoot — the cap is a hard bound (#1586).
 func TestBuildExcerptFromHistory_SoftCapBoundary(t *testing.T) {
 	t.Parallel()
 
 	const cap = autoTitlerExcerptSoftCapBytes
-	// First entry fills the buffer to cap-4 bytes (leaves exactly 4 bytes
-	// of headroom: 1 newline + 3 for "…").
-	fill := strings.Repeat("x", cap-4)
-	// Second entry is 1 byte — newline + entry would be 2 bytes which,
-	// together with the 3-byte "…", sums to 5, exceeding the 4-byte
-	// headroom and triggering truncation.
+	// First entry fills the buffer to exactly cap bytes.
+	fill := strings.Repeat("x", cap)
+	// Second entry would require newline + byte = 2 more bytes, overflowing.
 	entries := []SystemEventEntry{
 		{Type: "user", Summary: fill},
 		{Type: "user", Summary: "y"},
@@ -522,7 +563,35 @@ func TestBuildExcerptFromHistory_SoftCapBoundary(t *testing.T) {
 	got := buildExcerptFromHistory(entries)
 
 	if len(got) > cap {
-		t.Errorf("result length %d exceeds soft cap %d (R171023-CR-004)", len(got), cap)
+		t.Errorf("result length %d exceeds soft cap %d", len(got), cap)
+	}
+	// Buffer was at the cap, so the marker is correctly omitted to stay
+	// within bounds; only the first entry survives.
+	if len(got) != cap {
+		t.Errorf("expected result pinned at cap %d, got %d", cap, len(got))
+	}
+}
+
+// TestBuildExcerptFromHistory_SoftCapBoundaryWithMarker verifies that when the
+// buffer has room for the "\n…" marker at truncation time, the marker IS
+// written and the result still stays within the cap.
+func TestBuildExcerptFromHistory_SoftCapBoundaryWithMarker(t *testing.T) {
+	t.Parallel()
+
+	const cap = autoTitlerExcerptSoftCapBytes
+	// First entry fills to cap-8, leaving 8 bytes of headroom.
+	fill := strings.Repeat("x", cap-8)
+	// Second entry is 16 bytes: newline+16 = 17 > 8 headroom → truncates.
+	// At truncation sb.Len()=cap-8, marker "\n…" is 4 bytes, fits within cap.
+	entries := []SystemEventEntry{
+		{Type: "user", Summary: fill},
+		{Type: "user", Summary: strings.Repeat("y", 16)},
+	}
+
+	got := buildExcerptFromHistory(entries)
+
+	if len(got) > cap {
+		t.Errorf("result length %d exceeds soft cap %d", len(got), cap)
 	}
 	if !strings.HasSuffix(got, "…") {
 		t.Errorf("expected truncation ellipsis at tail, got %q", got[max(0, len(got)-16):])

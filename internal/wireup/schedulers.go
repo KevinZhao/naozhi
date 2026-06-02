@@ -126,6 +126,17 @@ type Schedulers struct {
 	// SysessionWorkDir is the resolved work dir for sysession daemons.
 	// Empty when sysession is disabled or build failed.
 	SysessionWorkDir string
+	// SysessionBuildErr carries the sysession build failure (if any) back
+	// to the caller as part of the helper's return contract — NOT via a
+	// caller-managed closure side-channel (R20260602141221-ARCH-3 / #1588).
+	// It is non-nil ONLY when sysession was enabled in config but the build
+	// failed; it is nil both when sysession is disabled AND when the build
+	// succeeded. This keeps the failure-vs-disabled distinction (documented
+	// on SysessionBuilder) inside WireSchedulers' return contract so any
+	// caller — not just one that replicated the closure trick — observes it.
+	// Caller should slog.Warn + continue (sysession is degradable; a broken
+	// claude binary must not break naozhi startup).
+	SysessionBuildErr error
 }
 
 // WireSchedulers constructs cron.Scheduler + sysession.Manager in the
@@ -187,15 +198,17 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 
 	// Build sysession Manager when enabled. Failure is degradable:
 	// missing/broken claude binary should not break naozhi startup.
-	// We swallow the error here (caller already logs at slog.Warn)
-	// and return out.Sysession=nil so caller's nil-guard is meaningful.
+	// We surface the build error via out.SysessionBuildErr (part of the
+	// return contract, not a caller closure side-channel — #1588) and
+	// return out.Sysession=nil so caller's nil-guard is meaningful.
 	if deps.BuildSysession != nil {
-		sysMgr, sysWorkDir, _ := deps.BuildSysession()
+		sysMgr, sysWorkDir, sysErr := deps.BuildSysession()
 		if sysMgr != nil {
 			sysMgr.Start(deps.ParentCtx)
 		}
 		out.Sysession = sysMgr
 		out.SysessionWorkDir = sysWorkDir
+		out.SysessionBuildErr = sysErr
 	}
 	return out, nil
 }

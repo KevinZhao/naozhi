@@ -69,3 +69,31 @@ func TestAutoRestart_KeepsBackup(t *testing.T) {
 		t.Error("backup must be KEPT after self-restart trigger (rollback artifact) — no os.Remove(backupPath) on this path")
 	}
 }
+
+// R20260602141221-CR-3: the restart path must NOT gate on an outer
+// ServiceRunning() check before calling RestartServiceNoWait. Such a check is a
+// TOCTOU: a stale "not running" read skips the restart while c.installed is
+// already set, so the next tick silently no-ops (rel.Tag == c.installed) and
+// strands a staged-but-never-restarted binary — no IM notice, no WARN log.
+// RestartServiceNoWait is the single authority; it is already a no-op when the
+// service is not running (restartSystemdNoWait returns nil early), which
+// preserves the "don't start a stopped service" semantics. If a refactor
+// re-introduces the outer guard, this fails loudly.
+func TestAutoRestart_NoOuterServiceRunningGate(t *testing.T) {
+	src := readChecker(t)
+	idx := strings.Index(src, "func (c *Checker) doInstall")
+	if idx < 0 {
+		t.Fatal("doInstall not found")
+	}
+	body := src[idx:]
+	restartIdx := strings.Index(body, "RestartServiceNoWait(ctx)")
+	if restartIdx < 0 {
+		t.Fatal("RestartServiceNoWait(ctx) not found in doInstall")
+	}
+	// No `if !ServiceRunning()` (or `if ServiceRunning()`) branch may guard the
+	// restart trigger inside doInstall. The single authority is the no-op-when-
+	// stopped behaviour inside RestartServiceNoWait itself.
+	if regexp.MustCompile(`if\s+!?ServiceRunning\(\)`).MatchString(body) {
+		t.Error("doInstall must NOT gate the restart on an outer ServiceRunning() check — that re-introduces the CR-3 TOCTOU; RestartServiceNoWait is the single authority")
+	}
+}
