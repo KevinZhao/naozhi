@@ -18,9 +18,11 @@ import (
 //  2. Return cfg.AllowedRoot (the raw string) rather than "" so the
 //     constraint is still enforced via bare string comparison — weaker than
 //     symlink-resolved comparison but strictly better than no constraint.
+//
+// Not t.Parallel: this test swaps the process-global slog default to capture
+// log output; running it in parallel races with other parallel tests whose
+// NewScheduler/slog calls write to the shared default logger's buffer.
 func TestResolveAllowedRoot_EvalSymlinksFailure_LogsAndFallsBack(t *testing.T) {
-	t.Parallel()
-
 	nonExistentPath := "/tmp/naozhi-test-nonexistent-allowedroot-" + mustGenerateID()
 
 	// Confirm the path really does not exist so the test is deterministic.
@@ -72,9 +74,10 @@ func TestResolveAllowedRoot_ExistingPath_ReturnsResolved(t *testing.T) {
 // NewScheduler constructor propagates the raw-path fallback through to
 // s.allowedRoot when EvalSymlinks fails, so the runtime sandbox constraint
 // is still active (even if weaker than symlink-resolved).
+// Not t.Parallel: swaps the process-global slog default (to suppress the
+// resolveAllowedRoot warning), which races with other parallel tests' slog
+// calls under -race.
 func TestNewScheduler_AllowedRootNonExistent_UsesRawFallback(t *testing.T) {
-	t.Parallel()
-
 	nonExistentPath := "/tmp/naozhi-test-nonexistent-nr-" + mustGenerateID()
 	if _, err := os.Stat(nonExistentPath); !os.IsNotExist(err) {
 		t.Skipf("test precondition: path %q unexpectedly exists; skipping", nonExistentPath)

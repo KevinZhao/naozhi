@@ -430,7 +430,15 @@ func TestAgentEvents_JSONLPathOutsideAllowedRoot(t *testing.T) {
 // path check (regression guard against over-rejection).
 func TestAgentEvents_JSONLPathUnderAllowedRoot_Accepted(t *testing.T) {
 	t.Parallel()
-	allowedRoot := t.TempDir()
+	// EvalSymlinks to match production: New() stores the resolved root, and
+	// jsonlPathUnderAllowedRoot resolves the request path before comparing.
+	// On macOS t.TempDir() returns an unresolved /var/... path that the
+	// in-handler EvalSymlinks expands to /private/var/..., so the raw
+	// TempDir would spuriously fail the prefix check.
+	allowedRoot, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks(TempDir): %v", err)
+	}
 
 	// Write a transcript file INSIDE allowedRoot.
 	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"sessionId":"s","timestamp":"2026-05-10T10:00:00Z"}`
