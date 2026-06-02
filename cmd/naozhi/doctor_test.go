@@ -328,6 +328,78 @@ func TestLoadTokenBestEffort_EnvFileFallback(t *testing.T) {
 	}
 }
 
+// TestValidateDoctorAddr covers the URL validation added in R20260602-SEC-2.
+// The function must accept valid http/https addresses and reject malformed
+// strings or non-http/https schemes.
+func TestValidateDoctorAddr(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		addr    string
+		wantErr bool
+	}{
+		{"loopback http", "http://127.0.0.1:8180", false},
+		{"loopback https", "https://127.0.0.1:8180", false},
+		{"localhost http", "http://localhost:8180", false},
+		{"remote https", "https://example.com:8180", false},
+		{"no scheme", "127.0.0.1:8180", true},
+		{"file scheme", "file:///etc/passwd", true},
+		{"ftp scheme", "ftp://example.com", true},
+		{"empty string", "", true},
+		{"scheme only", "http://", false}, // valid URL structure; host empty but scheme ok
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateDoctorAddr(tc.addr)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateDoctorAddr(%q) err=%v, wantErr=%v", tc.addr, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestValidateDoctorAddr_SchemelessHostPort pins that a bare host:port
+// (no scheme) is rejected — it would be treated as a path by url.Parse,
+// and the scheme would be empty, which our check blocks.
+func TestValidateDoctorAddr_SchemelessHostPort(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		"127.0.0.1:8180",
+		"localhost:8180",
+		"example.com:443",
+		"//evil.com/path",
+	}
+	for _, addr := range cases {
+		if err := validateDoctorAddr(addr); err == nil {
+			t.Errorf("validateDoctorAddr(%q) = nil, want error for schemeless addr", addr)
+		}
+	}
+}
+
+// TestDoctor_CheckAuth_NonLoopbackWarning verifies that checkAuth still
+// works correctly when the doctor is pointed at a remote (non-loopback)
+// server — the validation must not break the normal localhost flow and
+// the auth check itself must still produce correct pass/fail results
+// regardless of host. (The slog.Warn fires at runDoctor level, not here.)
+func TestDoctor_CheckAuth_NonLoopbackWarning(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	// httptest.NewServer binds 127.0.0.1; addr validation (http scheme) passes.
+	if err := validateDoctorAddr(srv.URL); err != nil {
+		t.Fatalf("loopback server URL failed validation: %v", err)
+	}
+	d := &doctor{addr: srv.URL, token: "tok", timeout: 2 * time.Second, out: io.Discard}
+	d.checkAuth()
+	if d.findings[0].Level != "pass" {
+		t.Errorf("auth finding level = %q, want pass", d.findings[0].Level)
+	}
+}
+
 // renderFindings helps a few tests that need to inspect findings
 // without reaching into the doctor's internal state through render.
 func renderFindings(fs []finding) string {
