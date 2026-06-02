@@ -1425,7 +1425,8 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 	// Emit a header if this is a fresh file (log empty after
 	// recovery). Header goes at seq=0.
 	if rec.LogSize == 0 && !rec.HeaderValid {
-		hdr := schema.NewHeader(key, p.opts.Clock().UnixMilli(), p.opts.Generator)
+		now := p.opts.Clock()
+		hdr := schema.NewHeader(key, now.UnixMilli(), p.opts.Generator)
 		body, mErr := schema.MarshalRecord(hdr)
 		if mErr != nil {
 			logFile.Close()
@@ -1444,7 +1445,7 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 		w.bytes = n
 		w.nextSeq = 1
 		w.dirty = true
-		w.firstDirtyAt = p.opts.Clock()
+		w.firstDirtyAt = now
 
 		// Directly fsync the header so a crash before any other
 		// write leaves a valid file rather than 0 bytes. Cheap (one
