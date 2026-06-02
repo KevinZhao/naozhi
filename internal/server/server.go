@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
@@ -209,6 +208,29 @@ func (s *Server) log() *slog.Logger {
 		return s.logger
 	}
 	return slog.Default()
+}
+
+// RotateDashboardSessions invalidates every outstanding dashboard auth cookie
+// in real time, without a process restart. It bumps the auth handler's
+// generation counter so the cookie HMAC changes; both the HTTP cookie path and
+// the WS upgrade path read the live MAC (CookieMACFn: s.auth.CookieMAC), so an
+// in-flight rotation propagates to every authenticated surface on the next
+// request/handshake.
+//
+// R217-SEC-6 (#595): closes the "rotation has no explicit session
+// invalidation" gap. Previously the only way to revoke outstanding cookies was
+// to rotate the cookie secret and restart the process (or wait out the 24h
+// MaxAge). This exposes server-side revocation that a future dashboard-token
+// hot-reload / SIGHUP handler — or an operator-facing endpoint — can call to
+// kick every browser back to /api/auth/login immediately. Safe to call from
+// any goroutine (the underlying counter is an atomic increment).
+func (s *Server) RotateDashboardSessions() {
+	if s.auth == nil {
+		return
+	}
+	s.auth.RotateCookieGen()
+	s.log().Info("dashboard auth sessions rotated; outstanding cookies invalidated",
+		"reason", "rotate_dashboard_sessions")
 }
 
 // New creates a new Server.

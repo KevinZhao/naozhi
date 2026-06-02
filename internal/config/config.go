@@ -602,10 +602,10 @@ func parseDurations(cfg *Config) error {
 	}
 	// 硬上限 10m：抖动比大多数任务周期还长就毫无意义，clamp 并 warn，
 	// 不把配置错误升成启动失败。
-	if cfg.cachedJitterMax > 10*time.Minute {
+	if cfg.cachedJitterMax > cronJitterMaxHardCap {
 		slog.Warn("cron.jitter_max exceeds 10m hard cap, clamping",
-			"requested", cfg.cachedJitterMax, "cap", 10*time.Minute)
-		cfg.cachedJitterMax = 10 * time.Minute
+			"requested", cfg.cachedJitterMax, "cap", cronJitterMaxHardCap)
+		cfg.cachedJitterMax = cronJitterMaxHardCap
 	}
 	return nil
 }
