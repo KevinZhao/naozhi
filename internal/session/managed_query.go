@@ -135,6 +135,34 @@ func (s *ManagedSession) DeathReason() string {
 // which is the cheap-rare-call path versus this hot poll path.
 // snapshot_no_history_copy_test.go pins the contract.
 func (s *ManagedSession) Snapshot() SessionSnapshot {
+	return s.snapshot(true)
+}
+
+// snapshotReadOnly returns the same point-in-time view as Snapshot but
+// guarantees no read-side writes: it never calls SetModel to mirror the
+// live proc.Model() back into the persisted field. It still resolves
+// snap.Model from the live process (falling back to the persisted value),
+// so callers see the up-to-date model id — they just don't trigger the
+// atomic store that dirties the cache line.
+//
+// R20260602-PERF-3 (#1577): VisitSessions runs fn under r.mu.RLock for
+// every live session on the AutoTitler tick. Mirroring inside that loop
+// is both an unnecessary write on a read path and makes concurrency
+// reasoning harder. The dashboard poll path (router.Snapshots /
+// wshub / connector_subscribe) keeps the mirroring Snapshot() so the
+// live model still lands in sessions.json (UI Round 5 R5-3); only the
+// daemon-iterator path opts into this pure-read variant.
+func (s *ManagedSession) snapshotReadOnly() SessionSnapshot {
+	return s.snapshot(false)
+}
+
+// snapshot is the shared core for Snapshot / snapshotReadOnly. When
+// mirrorModel is true and the live process reports a model that differs
+// from the persisted value, it mirrors the live value back via SetModel
+// (the one intentional read-side write, see Snapshot godoc / R226-CR-13).
+// When false it skips that store entirely; snap.Model resolution is
+// identical in both modes.
+func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 	s.parseKeyParts()
 	// R215-ARCH-P2-7: pull backend/cliName/cliVersion in one atomic Load
 	// instead of three sequential Loads — Snapshot is the 1 Hz × N tabs ×
@@ -196,8 +224,14 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 			// at 1Hz × N tabs × M sessions costs an avoidable atomic
 			// store per poll on what is otherwise a pure-read path.
 			// Compare the cached value first and only mirror on change.
-			if cached := s.Model(); cached != liveModel {
-				s.SetModel(liveModel)
+			//
+			// R20260602-PERF-3 (#1577): the read-only variant
+			// (snapshotReadOnly, used by VisitSessions) skips the mirror
+			// entirely so the daemon iterator never writes under RLock.
+			if mirrorModel {
+				if cached := s.Model(); cached != liveModel {
+					s.SetModel(liveModel)
+				}
 			}
 			snap.Model = liveModel
 		} else {
