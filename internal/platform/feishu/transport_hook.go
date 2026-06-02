@@ -136,14 +136,11 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		// Nonce dedup: prevent replay attacks within the nonce TTL window.
 		// Any authenticated webhook mode (EncryptKey or VerificationToken)
 		// requires a nonce — a stolen webhook otherwise replays freely inside
-		// the 5min timestamp window. url_verification challenges still pass
-		// the format/length checks below but skip seenNonces insertion: each
-		// challenge is one-shot from Feishu's verification endpoint and
-		// adding them to the dedup map would let an attacker who can
-		// authenticate fill seenNonces with unique-nonce challenge requests
-		// up to maxSeenNonces, after which legitimate event webhooks return
-		// 429 until the TTL sweep catches up. The challenge reflection path
-		// itself is still rate-limited by hookSem.
+		// the 5min timestamp window. url_verification challenges go through the
+		// same seenNonces dedup as event webhooks (R164029-SEC-2 / #1594): the
+		// eviction self-heal below means a leaked-token attacker can no longer
+		// pin the map at cap, so the previous exemption is removed and a
+		// replayed challenge with a fixed ts:nonce is rejected.
 		if ts := r.Header.Get("X-Lark-Request-Timestamp"); ts != "" {
 			nonce := r.Header.Get("X-Lark-Request-Nonce")
 			if nonce != "" {
@@ -176,10 +173,19 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 						return
 					}
 				}
-				// url_verification challenges skip the seenNonces map (see
-				// godoc above the timestamp gate). Format checks above still
-				// run so a malformed nonce is still rejected.
-				if !isURLVerification {
+				// R164029-SEC-2 (#1594): url_verification challenges no longer
+				// skip the seenNonces map. The original exemption existed to stop
+				// an attacker with a leaked verification_token from pinning the
+				// map at maxSeenNonces with unique-nonce challenges, but the
+				// eviction self-heal below (R20260527122801-SEC-8 / #1332) makes
+				// that pin impossible — the oldest entries are evicted on every
+				// cap hit. Including challenges in the dedup set closes the replay
+				// gap: in token-only mode (allowInsecureWebhook), a captured
+				// url_verification challenge with a fixed ts:nonce could otherwise
+				// be replayed for the full nonceTTL window, repeatedly reflecting
+				// the challenge and consuming hookSem with no nonce-level
+				// backpressure. Format checks above still run regardless.
+				{
 					// Global cap: refuse new nonces once the map hits maxSeenNonces
 					// so a flood of unique-nonce requests cannot bloat heap.
 					// Reserve-then-check pattern: increment first, then attempt
