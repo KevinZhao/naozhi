@@ -91,49 +91,60 @@ func TestRunStore_WarmJobsParallel_Empty(t *testing.T) {
 	s.warmJobsParallel(context.Background(), []string{})
 }
 
-// TestRunStore_DecodeRunsParallel_OrderPreserved pins R20260602190132-PERF-9
+// TestRunStore_DecodeRunsParallel_AllSlotsConsumed pins R20260602190132-PERF-9
 // (#1610): after replacing the per-call make(chan int, n) work queue with a
-// shared atomic cursor, the parallel decode path must still return summaries
-// in newest-first order and must read every candidate (no dropped/duplicated
-// index). We seed > diskDecodeParallelThreshold runs with strictly
-// decreasing StartedAt timestamps, drop the cache so List hits disk via
-// decodeRunsParallel, and assert the result is the full set in newest-first
-// order. Run under -race this also guards the atomic distribution against
-// data races on the slots slice.
-func TestRunStore_DecodeRunsParallel_OrderPreserved(t *testing.T) {
+// shared atomic cursor, every candidate slot must be visited exactly once
+// regardless of how many workers race the cursor. We drive a wide fan-out
+// (n far above diskDecodeWorkers) through decodeRunsParallel directly and
+// assert every seeded run is decoded (none dropped, none read twice). Run
+// under -race this also guards the atomic distribution against data races on
+// the shared slots slice. The newest-first ordering / corrupt-skip / limit
+// behaviours are covered by the diskListNewestFirst parallel tests in
+// diskdecode_parallel_test.go.
+func TestRunStore_DecodeRunsParallel_AllSlotsConsumed(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
+	s.enableTrimGC = false
 	jobID := mustGenerateID()
 
-	// n must exceed diskDecodeParallelThreshold (16) so List routes into
-	// decodeRunsParallel, and exceed diskDecodeWorkers (8) so multiple slots
-	// fall to each worker through the atomic cursor.
-	const n = 64
-	base := time.Now()
-	wantOrder := make([]string, n)
+	// n must exceed diskDecodeWorkers (8) by a wide margin so many slots fall
+	// to each worker through the atomic cursor — the regime the old per-call
+	// channel handled and the new cursor must match.
+	const n = 100
+	base := time.Now().Add(-time.Hour)
+	wantIDs := make(map[string]bool, n)
 	for i := 0; i < n; i++ {
-		// newest first: i=0 is the most recent. StartedAt drives the
-		// scanSortedRunDir mtime/order, so space them out clearly.
-		startedAt := base.Add(-time.Duration(i) * time.Minute)
-		run := makeRun(jobID, startedAt)
+		run := makeRun(jobID, base.Add(time.Duration(i)*time.Second))
 		s.Append(run)
-		wantOrder[i] = run.RunID
+		wantIDs[run.RunID] = true
 	}
 
-	// Force the disk path: clear the in-memory cache so List re-reads + decodes.
-	s.cacheInvalidate(jobID)
-
-	got := s.List(jobID, 200, time.Time{})
-	if len(got) != n {
-		t.Fatalf("List len=%d want %d (atomic cursor must read every candidate)", len(got), n)
+	items, _, err := s.scanSortedRunDir(jobID)
+	if err != nil {
+		t.Fatalf("scanSortedRunDir: %v", err)
 	}
-	for i := 0; i < n; i++ {
-		if got[i].RunID != wantOrder[i] {
-			t.Fatalf("order mismatch at %d: got RunID %s want %s (newest-first must survive atomic distribution)",
-				i, got[i].RunID, wantOrder[i])
+	if len(items) != n {
+		t.Fatalf("scanSortedRunDir len=%d want %d", len(items), n)
+	}
+
+	rows, corrupt := s.decodeRunsParallel(items, n)
+	if corrupt != 0 {
+		t.Fatalf("corruptCount=%d want 0", corrupt)
+	}
+	if len(rows) != n {
+		t.Fatalf("decoded %d rows want %d (atomic cursor must visit every slot once)", len(rows), n)
+	}
+	gotIDs := make(map[string]bool, n)
+	for _, r := range rows {
+		if gotIDs[r.RunID] {
+			t.Fatalf("RunID %s decoded twice — cursor handed the same index out twice", r.RunID)
 		}
-		if !got[i].StartedAt.Equal(base.Add(-time.Duration(i) * time.Minute)) {
-			t.Fatalf("StartedAt mismatch at %d: got %s", i, got[i].StartedAt)
+		gotIDs[r.RunID] = true
+		if !wantIDs[r.RunID] {
+			t.Fatalf("decoded unexpected RunID %s", r.RunID)
 		}
+	}
+	if len(gotIDs) != n {
+		t.Fatalf("distinct decoded IDs=%d want %d (some slots skipped)", len(gotIDs), n)
 	}
 }
