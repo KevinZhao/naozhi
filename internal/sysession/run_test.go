@@ -5,7 +5,46 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
+
+// TestDaemonEnumsAliasRuntelemetry pins the R260528-ARCH-2/#1363 unification:
+// DaemonRunState / DaemonTriggerKind are type aliases to the runtelemetry
+// single-source vocabulary, and the sysession-local constants resolve to the
+// same wire values. A regression that re-forks these into a private string
+// type (or drifts the values) fails here at compile/assert time.
+func TestDaemonEnumsAliasRuntelemetry(t *testing.T) {
+	t.Parallel()
+	// Compile-time alias proof: assigning across the alias boundary in both
+	// directions only type-checks when the types are identical.
+	var _ runtelemetry.RunState = DaemonRunSucceeded
+	var _ DaemonRunState = runtelemetry.RunStateFailed
+	var _ runtelemetry.TriggerKind = DaemonTriggerScheduled
+	var _ DaemonTriggerKind = runtelemetry.TriggerManual
+
+	stateWire := map[DaemonRunState]runtelemetry.RunState{
+		DaemonRunSucceeded: runtelemetry.RunStateSucceeded,
+		DaemonRunFailed:    runtelemetry.RunStateFailed,
+		DaemonRunTimedOut:  runtelemetry.RunStateTimedOut,
+		DaemonRunCanceled:  runtelemetry.RunStateCanceled,
+	}
+	for got, want := range stateWire {
+		if got != want {
+			t.Errorf("run state %q != runtelemetry %q", got, want)
+		}
+	}
+
+	triggerWire := map[DaemonTriggerKind]runtelemetry.TriggerKind{
+		DaemonTriggerScheduled: runtelemetry.TriggerScheduled,
+		DaemonTriggerManual:    runtelemetry.TriggerManual,
+	}
+	for got, want := range triggerWire {
+		if got != want {
+			t.Errorf("trigger %q != runtelemetry %q", got, want)
+		}
+	}
+}
 
 func TestClassifyError(t *testing.T) {
 	t.Parallel()

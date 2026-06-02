@@ -6,18 +6,24 @@ import (
 	"encoding/hex"
 	"errors"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
-// DaemonRunState is the terminal state of a single Tick run.  Mirrors
-// cron.RunState semantics so a future Phase 2 dashboard can reuse the
-// same widget for both subsystems.
-type DaemonRunState string
+// DaemonRunState is the terminal state of a single Tick run. It is a type
+// alias to the cross-subsystem runtelemetry.RunState so cron + sysession
+// share one wire vocabulary (R260528-ARCH-2 / #1363, R244-ARCH-18 / #1055
+// direction). The alias keeps the sysession-local Daemon* constant names
+// for call-site readability while the underlying values come from the
+// single runtelemetry source of truth. Adding a new state must happen in
+// runtelemetry/state.go, not here.
+type DaemonRunState = runtelemetry.RunState
 
 const (
-	DaemonRunSucceeded DaemonRunState = "succeeded"
-	DaemonRunFailed    DaemonRunState = "failed"
-	DaemonRunTimedOut  DaemonRunState = "timed_out"
-	DaemonRunCanceled  DaemonRunState = "canceled"
+	DaemonRunSucceeded = runtelemetry.RunStateSucceeded
+	DaemonRunFailed    = runtelemetry.RunStateFailed
+	DaemonRunTimedOut  = runtelemetry.RunStateTimedOut
+	DaemonRunCanceled  = runtelemetry.RunStateCanceled
 )
 
 // DaemonErrorClass classifies the failure mode of a run.  Phase 1
@@ -58,17 +64,18 @@ const (
 
 // DaemonTriggerKind distinguishes scheduled ticks from manual triggers.
 // Phase 1 only produces "scheduled"; "manual" is reserved for the Phase 2
-// dashboard "trigger now" button.
-type DaemonTriggerKind string
+// dashboard "trigger now" button. Type-aliased to runtelemetry.TriggerKind
+// so cron + sysession share one trigger vocabulary (R260528-ARCH-2 / #1363).
+type DaemonTriggerKind = runtelemetry.TriggerKind
 
 const (
-	DaemonTriggerScheduled DaemonTriggerKind = "scheduled"
+	DaemonTriggerScheduled = runtelemetry.TriggerScheduled
 	// DaemonTriggerManual is RESERVED for the Phase 2 dashboard
 	// "trigger now" button. Phase 1 only produces Scheduled; no
 	// production code path emits this value today, and any DaemonRun
 	// observed with Trigger=manual is either a forward-compat schema
 	// bump or a test fixture. Tracked in docs/TODO.md R232-CR-8.
-	DaemonTriggerManual DaemonTriggerKind = "manual"
+	DaemonTriggerManual = runtelemetry.TriggerManual
 )
 
 // DaemonRun is the in-memory record of a completed Tick.  Manager keeps
