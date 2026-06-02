@@ -182,6 +182,17 @@ func loadJobs(path string) (map[string]*Job, error) {
 				"path", path, "cron_id", j.ID, "prompt_bytes", len(j.Prompt))
 			continue
 		}
+		// R20260602-091302-CR-13: mirror the MaxPromptBytes byte-length cap
+		// that the write path (SetJobPrompt) enforces. A hand-edited
+		// cron_jobs.json could carry a prompt far exceeding 8 KiB; without
+		// this guard every cron run would replay a runaway prompt through the
+		// CLI and every /api/cron broadcast would carry the oversized payload.
+		if len(j.Prompt) > MaxPromptBytes {
+			slog.Warn("cron store: dropping job with overlong prompt",
+				"path", path, "cron_id", j.ID,
+				"prompt_bytes", len(j.Prompt), "cap", MaxPromptBytes)
+			continue
+		}
 		// R235-CR-5: same defensive rationale for Title / Backend. AddJob /
 		// dashboard PATCH validate these before accepting; an attacker
 		// hand-editing the JSON could smuggle bidi / control bytes into

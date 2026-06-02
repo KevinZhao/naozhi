@@ -78,8 +78,14 @@ func (l *EventLog) LastNAppend(dst []EventEntry, n int) []EventEntry {
 		dst = make([]EventEntry, count)
 	}
 	start := (l.head - count + l.maxSize) % l.maxSize
-	for i := 0; i < count; i++ {
-		dst[i] = l.entries[(start+i)%l.maxSize]
+	// Branch-on-wrap: avoid per-step modulo on the hot WS polling path.
+	// Mirrors the EntriesSince / LastNVisible branch-on-wrap pattern.
+	if start+count <= l.maxSize {
+		copy(dst, l.entries[start:start+count])
+	} else {
+		n1 := l.maxSize - start
+		copy(dst, l.entries[start:l.maxSize])
+		copy(dst[n1:], l.entries[:count-n1])
 	}
 	return dst
 }
