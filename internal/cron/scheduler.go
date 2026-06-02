@@ -451,6 +451,18 @@ type Scheduler struct {
 	// a callback from robfig/cron whose signature has no ctx parameter, so
 	// the scheduler itself owns the root context so Stop() can cancel in-
 	// flight executions. Callers outside execute() take ctx as an argument.
+	//
+	// R249-ARCH-8 (#974) — single authoritative cancel signal. There appear
+	// to be two ways to cancel cron work (SchedulerConfig.ParentCtx being
+	// cancelled by the host's shutdown, vs an explicit Stop() call), but they
+	// are NOT independent cancel paths: stopCtx is derived from ParentCtx via
+	// context.WithCancel (NewScheduler line ~983), so a ParentCtx cancel
+	// propagates INTO stopCtx, and Stop() cancels stopCtx directly via
+	// stopCancel. Every in-flight read (execute()/trimAllCtx/notifyTarget)
+	// observes exactly one signal — stopCtx.Done() — regardless of which
+	// upstream fired it. stopCtx is therefore the authoritative signal;
+	// ParentCtx is only a derive-time parent and must never be read for
+	// cancellation after NewScheduler returns.
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 	// telemetry receives the cron-run lifecycle events. Phase D (RFC §3.5)
