@@ -10,6 +10,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/shim"
@@ -85,6 +86,23 @@ func startWatchdogLoop(ctx context.Context, hc func() bool) {
 			}
 		}
 	}()
+}
+
+// buildRemoteNodes constructs the multi-node aggregation client map from
+// cfg.Nodes. Returns nil when no nodes are configured (the server treats a
+// nil and an empty map identically). Extracted from main() (R237-ARCH-8 /
+// #590) so the per-node HTTP client construction is testable without the
+// rest of startup; the slog "multi-node configured" line stays in main()
+// to keep startup-log output byte-stable.
+func buildRemoteNodes(cfg *config.Config) map[string]node.Conn {
+	if len(cfg.Nodes) == 0 {
+		return nil
+	}
+	nodes := make(map[string]node.Conn, len(cfg.Nodes))
+	for id, nc := range cfg.Nodes {
+		nodes[id] = node.NewHTTPClient(id, nc.URL, nc.Token, nc.DisplayName)
+	}
+	return nodes
 }
 
 // buildAgentOpts translates cfg.Agents into the two views main() needs: the

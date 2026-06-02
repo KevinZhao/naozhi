@@ -359,13 +359,11 @@ func main() {
 	sysWorkDir := schedulers.SysessionWorkDir
 	metrics.StartupPhaseSchedulerMs.Set(time.Since(t0).Milliseconds())
 
-	// Configure remote nodes for multi-node aggregation
-	var nodes map[string]node.Conn
-	if len(cfg.Nodes) > 0 {
-		nodes = make(map[string]node.Conn, len(cfg.Nodes))
-		for id, nc := range cfg.Nodes {
-			nodes[id] = node.NewHTTPClient(id, nc.URL, nc.Token, nc.DisplayName)
-		}
+	// Configure remote nodes for multi-node aggregation (buildRemoteNodes in
+	// main_init.go). nil when none are configured — server treats nil and
+	// empty identically.
+	nodes := buildRemoteNodes(cfg)
+	if len(nodes) > 0 {
 		slog.Info("multi-node configured", "nodes", len(nodes))
 	}
 
