@@ -111,9 +111,21 @@ func main() {
 
 	// Register the cli/backend.Profile registry with the built-in profiles
 	// (claude + kiro) before any consumer (discovery, main, server) looks
-	// up DisplayName / DefaultTag / DetectInProc by id. Explicit, not init()-
+	// up DisplayName / DefaultTag / DetectInProc by id. Routed through
+	// wireup so the boot-time registration set has one inspectable owner
+	// (#1165): wireup.EnsureCLIBackends drives backend.RegisterDefaults and
+	// records the step in the wireup boot registry. Explicit, not init()-
 	// driven, so missing imports fail loudly. docs/rfc/multi-backend.md §3.
-	backend.RegisterDefaults()
+	wireup.EnsureCLIBackends()
+
+	// Confirm the required wireup boot steps actually ran (#1165 extension
+	// point): a dropped blank-import or a no-op'd helper now aborts startup
+	// here with a clear message instead of degrading to empty history /
+	// missing profiles silently at first runtime use (R249-ARCH-9).
+	if err := wireup.Validate(); err != nil {
+		slog.Error("wireup validation failed", "err", err)
+		os.Exit(1)
+	}
 
 	// CQ1 (#396): config validation diag fan-out extracted to
 	// logConfigValidationDiagnostics so a future format change is
