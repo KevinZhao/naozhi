@@ -96,15 +96,16 @@ func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubj
 	s.mu.RUnlock()
 	// R243-ARCH-13 (#841): bind the {subject, job_id} label pair once via
 	// slog.With instead of re-listing the same two keys at every skip-log
-	// site. Keeps the dispatch gate's two Debug lines from drifting their
-	// label set apart.
-	lg := slog.With("subject", logSubject, "job_id", jobID)
-	if !ok {
-		lg.Debug("job deleted before execute, skipping")
-		return
-	}
-	if paused {
-		lg.Debug("job paused concurrently, skipping")
+	// site. Keeps the two skip-branch Debug lines from drifting their label
+	// set apart. Constructed lazily (only on skip path) to avoid ~500
+	// wasted allocs/sec on the hot live-job path (R093146-PERF-1).
+	if !ok || paused {
+		lg := slog.With("subject", logSubject, "job_id", jobID)
+		if !ok {
+			lg.Debug("job deleted before execute, skipping")
+		} else {
+			lg.Debug("job paused concurrently, skipping")
+		}
 		return
 	}
 	s.executeOpt(cur, viaTriggerNow)
@@ -600,9 +601,11 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 	// Reset(key) here and the caller's subsequent GetOrCreate(key) (executeOpt
 	// line ~1321) are two separate s.router (r.mu) acquisitions. A concurrent
 	// rebuild landing in the gap could resurrect the cron:<jobID> session with
-	// stale opts, bypassing fresh semantics. The router does not (yet) expose
-	// an atomic ResetAndGetOrCreate primitive, so correctness rests on a
-	// documented single-writer invariant rather than a lock:
+	// stale opts, bypassing fresh semantics. The concrete *session.Router DOES
+	// expose an atomic primitive (ResetAndRecreate, router_lifecycle.go) but
+	// the cron consumer interface (SessionRouter, scheduler.go) deliberately
+	// does not surface it — correctness instead rests on a documented
+	// single-writer invariant rather than a lock:
 	//
 	//   (1) cron↔cron: executeOpt is serialized per jobID by the inflight CAS
 	//       gate (inflight.running.CompareAndSwap, executeOpt line ~947). A
@@ -617,8 +620,10 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 	//       never to a cron: key, so no external GetOrCreate races this Reset.
 	//
 	// If a future feature lets users send directly into a cron:<jobID>
-	// session, invariant (2) breaks and this MUST migrate to a router-level
-	// ResetAndGetOrCreate atomic primitive (issue #401 Option A).
+	// session, invariant (2) breaks and this MUST migrate to the existing
+	// router-level ResetAndRecreate primitive by adding it to the SessionRouter
+	// interface and switching the preflight here — not by authoring a new one
+	// (issue #401 Option A).
 	s.router.Reset(args.key)
 	lg.Info("cron fresh context: session reset before run")
 	// R239-PERF-13: refresh 闭包改用 snap 固化值直接调 registerStubByValue，

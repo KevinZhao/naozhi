@@ -48,8 +48,9 @@ type SessionRouter interface {
 // (ARCH-DISP-1, #457) so the slash-command tests can inject a fake binding
 // store without standing up a real project.Manager (projects.root dir +
 // on-disk binding file). *project.Manager satisfies this implicitly via
-// structural typing; internal/project/contract_test.go (or the
-// compile-time pin in NewDispatcher) catches signature drift.
+// structural typing; the compile-time pin `var _ dispatch.ProjectStore =
+// (*project.Manager)(nil)` in internal/session/contract_test.go (alongside
+// the SessionRouter pins, R260528-ARCH-21 / #1380) catches signature drift.
 //
 // Method list derived from `grep 'd\.projectMgr\.' internal/dispatch/`
 // (5 distinct methods). Adding a new projectMgr call from dispatch
