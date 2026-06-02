@@ -529,6 +529,12 @@ func evictOldestHighwater(m map[string]autoTitlerHighwater, keep int) {
 // usage past the daemon's budget.  We stop appending once the cap is
 // reached and tag the truncation with a single "…" marker so a
 // downstream operator reviewing the prompt can tell content was clipped.
+// R20260602-PERF-1 (#1578): in production the routerAdapter already drops
+// non-user / blank-summary entries before this runs, so the type/blank
+// guards below are usually no-ops on a pre-shrunk slice. They are retained
+// because this helper is also called directly with raw mixed-type slices in
+// unit tests, and keeping it self-contained costs only a cheap compare per
+// (already user-only) entry.
 func buildExcerptFromHistory(entries []SystemEventEntry) string {
 	if len(entries) == 0 {
 		return ""
@@ -656,35 +662,58 @@ const (
 // invalid byte sequence yields (RuneError, width=1) and we skip the
 // offending byte without a separate utf8.ValidString pre-scan + re-decode
 // round-trip on the hot path.
+//
+// R20260602-PERF-1 (#1578): the EXCERPT-delimiter neutralisation is folded
+// INTO this single walk instead of the previous 2×Contains + 2×ReplaceAll
+// pre-pass over the whole seed (up to 4 extra full scans of a 1 MiB seed).
+// When the walk reaches a byte position that begins a literal marker, it
+// emits the inert placeholder and advances past the entire marker — so the
+// per-line cap can never split a marker (the R235-GO-4 / #1004 invariant)
+// because a marker is consumed atomically, never byte-by-byte.
 func buildExcerpt(seed string) string {
 	if seed == "" {
 		return ""
-	}
-	// R235-GO-4 (#1004): neutralise the EXCERPT delimiters BEFORE the
-	// per-line truncation pass below. If we deferred this to a
-	// post-truncation ReplaceAll on the output (the previous shape),
-	// the autoTitlerLineCapBytes cap could split a literal
-	// "---BEGIN CONVERSATION EXCERPT---" across two lines:
-	//
-	//   prefix ...---BEGIN CONVERS<cap>…
-	//   ATION EXCERPT---...
-	//
-	// neither half matches the full marker string, so the post-pass
-	// ReplaceAll silently misses both fragments and the LLM sees
-	// what looks like a real BEGIN delimiter spliced into the user
-	// content. Pre-replacing on the raw seed ensures no truncation
-	// boundary can land mid-marker — the placeholder is shorter than
-	// either marker (16 vs 32/30 bytes), so this only ever shrinks
-	// the seed and the cap math below stays conservative.
-	if strings.Contains(seed, excerptBeginMarker) || strings.Contains(seed, excerptEndMarker) {
-		seed = strings.ReplaceAll(seed, excerptBeginMarker, excerptMarkerSafe)
-		seed = strings.ReplaceAll(seed, excerptEndMarker, excerptMarkerSafe)
 	}
 	var b strings.Builder
 	b.Grow(len(seed))
 	lineWritten := 0
 	lineTruncated := false
+	// writeRune applies the per-line cap + truncation-ellipsis accounting
+	// to a single already-sanitised rune (no control-char / newline cases:
+	// callers handle those). Used for both the seed runes and the marker
+	// placeholder runes so both honour the same cap.
+	writeRune := func(r rune, w int) {
+		if lineWritten+w > autoTitlerLineCapBytes {
+			if !lineTruncated {
+				b.WriteString("…")
+				lineTruncated = true
+			}
+			return
+		}
+		b.WriteRune(r)
+		lineWritten += w
+	}
 	for i := 0; i < len(seed); {
+		// R235-GO-4 (#1004): neutralise EXCERPT delimiters in-walk. We
+		// must match BEFORE decoding a single rune so a literal marker is
+		// replaced atomically and no truncation boundary can land
+		// mid-marker. The placeholder is ASCII (no control chars) and
+		// shorter than either marker (16 vs 32/30 bytes), so it only ever
+		// shrinks the output and the cap math stays conservative.
+		if strings.HasPrefix(seed[i:], excerptBeginMarker) {
+			i += len(excerptBeginMarker)
+			for _, pr := range excerptMarkerSafe {
+				writeRune(pr, utf8.RuneLen(pr))
+			}
+			continue
+		}
+		if strings.HasPrefix(seed[i:], excerptEndMarker) {
+			i += len(excerptEndMarker)
+			for _, pr := range excerptMarkerSafe {
+				writeRune(pr, utf8.RuneLen(pr))
+			}
+			continue
+		}
 		r, w := utf8.DecodeRuneInString(seed[i:])
 		if r == utf8.RuneError && w == 1 {
 			// Invalid UTF-8 byte: skip it. Matches the prior
@@ -706,19 +735,7 @@ func buildExcerpt(seed string) string {
 		if r < 0x20 || (r >= 0x7F && r <= 0x9F) {
 			continue
 		}
-		if lineWritten+w > autoTitlerLineCapBytes {
-			// Once a line hits the cap, drop the rest of the line so the
-			// LLM doesn't see a silently-spliced prefix+suffix.  An
-			// ellipsis marks the truncation point so a downstream
-			// reviewer can tell the line was cut.
-			if !lineTruncated {
-				b.WriteString("…")
-				lineTruncated = true
-			}
-			continue
-		}
-		b.WriteRune(r)
-		lineWritten += w
+		writeRune(r, w)
 	}
 	return strings.TrimSpace(b.String())
 }

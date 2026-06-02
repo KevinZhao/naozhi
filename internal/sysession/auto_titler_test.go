@@ -179,6 +179,61 @@ func TestBuildExcerpt_MarkerSplitByLineCap(t *testing.T) {
 	}
 }
 
+// TestBuildExcerpt_MarkerFoldedIntoWalk pins R20260602-PERF-1 (#1578):
+// folding the delimiter neutralisation into the single rune walk (instead
+// of the prior 2×Contains + 2×ReplaceAll pre-pass) must stay
+// behaviour-equivalent — every literal marker becomes the inert
+// placeholder, surrounding content is preserved verbatim, and multiple
+// / adjacent markers are all neutralised.
+func TestBuildExcerpt_MarkerFoldedIntoWalk(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			"inline begin marker with surrounding text",
+			"before " + excerptBeginMarker + " after",
+			"before " + excerptMarkerSafe + " after",
+		},
+		{
+			"inline end marker with surrounding text",
+			"x" + excerptEndMarker + "y",
+			"x" + excerptMarkerSafe + "y",
+		},
+		{
+			"both markers on one line",
+			excerptBeginMarker + "mid" + excerptEndMarker,
+			excerptMarkerSafe + "mid" + excerptMarkerSafe,
+		},
+		{
+			"adjacent identical markers",
+			excerptBeginMarker + excerptBeginMarker,
+			excerptMarkerSafe + excerptMarkerSafe,
+		},
+		{
+			"marker across newlines preserves line structure",
+			"a\n" + excerptBeginMarker + "\nb",
+			"a\n" + excerptMarkerSafe + "\nb",
+		},
+		{
+			"no marker is untouched",
+			"plain content 你好",
+			"plain content 你好",
+		},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := buildExcerpt(c.in); got != c.want {
+				t.Errorf("buildExcerpt(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 // TestAutoTitler_CandidateFilter pins the candidate-selection rules
 // from §7.1.  Each row in the table sets up one snapshot and asserts
 // which "skipped_*" bucket it falls into (or that it gets renamed).
