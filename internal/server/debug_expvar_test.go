@@ -118,13 +118,41 @@ func TestExpvar_LoopbackAuthenticatedServesJSON(t *testing.T) {
 	}
 }
 
+// TestExpvar_NoTokenRefused pins R20260602-SEC-10: with no dashboard token
+// the loopback gate is the sole defense and returns true for UDS-shaped
+// empty RemoteAddr, so /debug/vars must be refused outright in that mode.
+func TestExpvar_NoTokenRefused(t *testing.T) {
+	t.Parallel()
+	srv := newExpvarTestServer(t, "") // no dashboard token
+
+	for _, remote := range []string{"127.0.0.1:55555", "", "@"} {
+		remote := remote
+		t.Run("remote="+remote, func(t *testing.T) {
+			t.Parallel()
+			r := httptest.NewRequest(http.MethodGet, "/api/debug/vars", nil)
+			r.RemoteAddr = remote
+			w := httptest.NewRecorder()
+			srv.mux.ServeHTTP(w, r)
+
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("no-token expvar from %q → status %d, want 403; body=%q",
+					remote, w.Code, w.Body.String())
+			}
+			if strings.Contains(w.Body.String(), "naozhi_") {
+				t.Errorf("403 body leaked expvar counters: %q", w.Body.String())
+			}
+		})
+	}
+}
+
 func newExpvarTestServer(t *testing.T, token string) *Server {
 	t.Helper()
 	auth_ := auth.New(token, []byte("test-cookie-secret"), "", false)
 	auth := auth_
 	s := &Server{
-		mux:  http.NewServeMux(),
-		auth: auth,
+		mux:            http.NewServeMux(),
+		auth:           auth,
+		dashboardToken: token,
 	}
 	s.registerExpvar()
 	return s
