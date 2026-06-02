@@ -445,3 +445,11 @@
 - [R20260602190132-PERF-6] cap(rev)==0 guard misleading, no action — internal/eventlog/eventlog_query.go:241
 - [R20260602190132-PERF-13] ringSeed rebuilds runIDs unchanged set low-freq — internal/cron/runstore.go:357
 - [R20260602190132-PERF-14] errors.Is on hot path vs == sentinel — internal/cli/process_readloop.go:478
+- [R200109-GO-3] writeRune 缺 w<=0 guard，未来非BMP marker 会致 lineWritten 下溢（当前 ASCII marker 不触发） — internal/sysession/auto_titler.go:692
+- [R200109-GO-4] lockedJobPrefixOp 用裸函数类型而非 lockedJobOp/jobSideEffect 命名类型，弱化编译期防混淆 — internal/cron/scheduler_jobs.go:1568
+- [R200109-GO-5] lockedJobOp 同名用于类型与方法，阅读混淆（命名空间合法但易误读） — internal/cron/scheduler_jobs.go:732
+- [R200109-GO-9] buildExcerptFromHistory need 计算未计 TrimSpace 缩减，soft-cap 偏保守（无正确性影响） — internal/sysession/auto_titler.go:558
+- [R200109-GO-11] selfupdate 测试 readChecker 依赖 runtime.Caller 路径，symlink/bind-mount 下脆弱 — internal/selfupdate/checker_restart_guard_test.go:35
+- [R200109-GO-14] withJobByPrefixOpts godoc 与 type 声明相隔数百行，阅读需翻找 — internal/cron/scheduler_jobs.go:643
+- [R200109-GO-15] checkOnce/doInstall 缺 Run 同款 nil-receiver guard（仅测试直调触发） — internal/selfupdate/checker.go:143
+- [R200109-CR-2] SysessionWorkDir 在 build 失败时仍无条件赋值，未来 builder 返回 partial workDir 会违反契约（当前总为空不触发） — internal/wireup/schedulers.go:209
