@@ -352,22 +352,32 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 		prepared = make([]EventEntry, len(entries))
 	}
 	for i := range entries {
+		// R20260602190132-PERF-12: stamp the caller slice in place (the
+		// historical contract — callers observe the UUID on their own
+		// entries[i]), then copy ONCE straight into the destination slot
+		// and mutate it there. The prior shape copied twice per entry
+		// (`e := entries[i]` then `prepared[i] = e`); a ~240B EventEntry ×
+		// 500-entry replays made that the dominant cost of this loop.
 		stampUUID(&entries[i])
-		e := entries[i]
-		if e.Time == 0 {
-			e.Time = defaultTime
+		// Exactly one of sinkCopy / prepared is allocated (see above), so
+		// pick the destination slot before indexing — indexing the nil
+		// buffer would panic.
+		var dst *EventEntry
+		if captureForSink {
+			dst = &sinkCopy[i]
+		} else {
+			dst = &prepared[i]
+		}
+		*dst = entries[i]
+		if dst.Time == 0 {
+			dst.Time = defaultTime
 		}
 		// S15 (Round 174): same enforcement as Append. Replays from
 		// history (InjectHistory → AppendBatch) should never contain
 		// non-image data URIs today, but defense-in-depth is trivially
 		// cheap and locks the contract to a single sink.
-		if len(e.Images) > 0 {
-			e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
-		}
-		if captureForSink {
-			sinkCopy[i] = e
-		} else {
-			prepared[i] = e
+		if len(dst.Images) > 0 {
+			dst.Images, dst.ImagePaths = sanitizeImagesAligned(dst.Images, dst.ImagePaths)
 		}
 	}
 	l.mu.Lock()

@@ -175,6 +175,7 @@ func (r *Router) Cleanup() {
 	// per non-exempt session per tick, regardless of exempt density. The
 	// idle-plan deployment shape (5-minute tick, mostly-suspended sessions)
 	// shows zero observed cost difference vs the older two-pass form.
+	now := time.Now()
 	r.mu.RLock()
 	type cand struct {
 		key        string
@@ -192,10 +193,26 @@ func (r *Router) Cleanup() {
 		// below.
 		state cli.ProcessState
 	}
+	// pruneCand mirrors the shouldPrune criteria captured under RLock so the
+	// write-lock prune phase below deletes only known-orphaned keys instead of
+	// re-scanning the whole map. R20260602190132-PERF-5: drops the write-locked
+	// prune from O(N) to O(prune candidates). shouldPrune reads LastActive()
+	// (atomic) and loadProcess().Alive() (lock-free), both safe under RLock;
+	// the write-lock phase re-verifies each candidate so a session that gets
+	// re-spawned between pass-1 and prune is not wrongly removed.
+	type pruneCand struct {
+		key string
+		s   *ManagedSession
+	}
 	candidates := make([]cand, 0, len(r.sessions)/2+1)
+	var pruneCandidates []pruneCand
 	for key, s := range r.sessions {
 		if s.exempt {
-			continue // planner sessions are never expired by TTL
+			continue // planner sessions are never expired or pruned by TTL
+		}
+		if r.shouldPrune(s, now) {
+			pruneCandidates = append(pruneCandidates, pruneCand{key, s})
+			continue // an orphan eligible for prune is not also a TTL-expiry candidate
 		}
 		proc := s.loadProcess()
 		if proc == nil {
@@ -215,7 +232,6 @@ func (r *Router) Cleanup() {
 	// ── Pass 2: classify outside the lock (may perform PID syscalls) ─
 	var expired []expiredEntry
 	var stuckKill []expiredEntry
-	now := time.Now()
 	for _, c := range candidates {
 		// R220-PERF-4: derive alive/running from the state captured in
 		// pass-1. StateDead is set lazily by Process.markExited via the
@@ -305,29 +321,33 @@ func (r *Router) Cleanup() {
 		r.shutdownCond.Broadcast()
 	}
 	// Prune orphaned sessions: nil process, no session ID, past prune TTL.
-	// Maintain a running newActive counter so we avoid a separate countActive() O(n) pass.
+	// R20260602190132-PERF-5: only walk the candidates snapshotted under RLock
+	// in pass-1 (O(prune candidates)) instead of re-ranging the whole map under
+	// the write lock. Re-verify each candidate still meets shouldPrune now that
+	// we hold the exclusive lock: a concurrent spawnSession / resetLocked
+	// between pass-1 and here could have re-attached a live process (or replaced
+	// the *ManagedSession at this key), and pruning it would terminate a session
+	// the user is actively using.
 	var pruned int
-	var newActive int64
-	for key, s := range r.sessions {
-		if s.exempt {
-			continue // planner sessions are never pruned
+	for _, pc := range pruneCandidates {
+		s, ok := r.sessions[pc.key]
+		if !ok || s != pc.s {
+			continue // key removed or re-bound to a different session since pass-1
 		}
-		if r.shouldPrune(s, now) {
-			// Terminal removal: free the backend override too (previous versions
-			// leaked it; see MED-5 in 2026-04-26 architecture review).
-			r.unregisterSessionLocked(key, s, false)
-			pruned++
-			continue
+		if s.exempt || !r.shouldPrune(s, now) {
+			continue // re-spawned / re-activated since pass-1; leave it alone
 		}
-		if s.isAlive() {
-			newActive++
-		}
+		// Terminal removal: free the backend override too (previous versions
+		// leaked it; see MED-5 in 2026-04-26 architecture review).
+		r.unregisterSessionLocked(pc.key, s, false)
+		pruned++
 	}
-	r.activeCount.Store(newActive)
 	// Multi-Backend RFC §10 (Sprint 6a): same reconciliation rationale
 	// as countActive — bulk path, recompute the labeled gauge in one
 	// pass instead of plumbing per-key Dec calls through the prune loop.
-	r.reconcileSessionActiveByBackendLocked()
+	// Reuse its post-prune alive total for r.activeCount so we avoid a
+	// separate O(N) newActive walk (R20260602190132-PERF-5).
+	r.activeCount.Store(r.reconcileSessionActiveByBackendLocked())
 
 	// Snapshot sessions for periodic save (while still holding the lock).
 	// Skip save if nothing changed since last Cleanup cycle.

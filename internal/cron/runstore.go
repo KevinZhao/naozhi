@@ -1518,17 +1518,25 @@ func (s *runStore) decodeRunsParallel(items []runDirItem, limit int) ([]CronRunS
 	if workers > n {
 		workers = n
 	}
-	idx := make(chan int, n)
-	for i := 0; i < n; i++ {
-		idx <- i
-	}
-	close(idx)
+	// R20260602190132-PERF-9 (#1610): distribute the n decode slots across
+	// workers via a shared atomic cursor rather than a per-call
+	// make(chan int, n) seeded with n sends. n can reach keepCount (≤200) and
+	// decodeRunsParallel runs once per job on a 50-job cold start, so the old
+	// path allocated ~50 channels + 10 000 channel sends of pure scheduling
+	// overhead. The atomic counter needs no heap allocation and each worker
+	// simply grabs the next index until the cursor passes n. Order is still
+	// preserved because results land in slots[i] by index, not arrival.
+	var next int64
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
-			for i := range idx {
+			for {
+				i := int(atomic.AddInt64(&next, 1)) - 1
+				if i >= n {
+					return
+				}
 				run, err := s.readRunNoLstat(items[i].path)
 				if err != nil {
 					if errors.Is(err, ErrCorruptRun) {

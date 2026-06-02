@@ -90,3 +90,50 @@ func TestRunStore_WarmJobsParallel_Empty(t *testing.T) {
 	s.warmJobsParallel(context.Background(), nil)
 	s.warmJobsParallel(context.Background(), []string{})
 }
+
+// TestRunStore_DecodeRunsParallel_OrderPreserved pins R20260602190132-PERF-9
+// (#1610): after replacing the per-call make(chan int, n) work queue with a
+// shared atomic cursor, the parallel decode path must still return summaries
+// in newest-first order and must read every candidate (no dropped/duplicated
+// index). We seed > diskDecodeParallelThreshold runs with strictly
+// decreasing StartedAt timestamps, drop the cache so List hits disk via
+// decodeRunsParallel, and assert the result is the full set in newest-first
+// order. Run under -race this also guards the atomic distribution against
+// data races on the slots slice.
+func TestRunStore_DecodeRunsParallel_OrderPreserved(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t, 200, 30*24*time.Hour)
+	jobID := mustGenerateID()
+
+	// n must exceed diskDecodeParallelThreshold (16) so List routes into
+	// decodeRunsParallel, and exceed diskDecodeWorkers (8) so multiple slots
+	// fall to each worker through the atomic cursor.
+	const n = 64
+	base := time.Now()
+	wantOrder := make([]string, n)
+	for i := 0; i < n; i++ {
+		// newest first: i=0 is the most recent. StartedAt drives the
+		// scanSortedRunDir mtime/order, so space them out clearly.
+		startedAt := base.Add(-time.Duration(i) * time.Minute)
+		run := makeRun(jobID, startedAt)
+		s.Append(run)
+		wantOrder[i] = run.RunID
+	}
+
+	// Force the disk path: clear the in-memory cache so List re-reads + decodes.
+	s.cacheInvalidate(jobID)
+
+	got := s.List(jobID, 200, time.Time{})
+	if len(got) != n {
+		t.Fatalf("List len=%d want %d (atomic cursor must read every candidate)", len(got), n)
+	}
+	for i := 0; i < n; i++ {
+		if got[i].RunID != wantOrder[i] {
+			t.Fatalf("order mismatch at %d: got RunID %s want %s (newest-first must survive atomic distribution)",
+				i, got[i].RunID, wantOrder[i])
+		}
+		if !got[i].StartedAt.Equal(base.Add(-time.Duration(i) * time.Minute)) {
+			t.Fatalf("StartedAt mismatch at %d: got %s", i, got[i].StartedAt)
+		}
+	}
+}

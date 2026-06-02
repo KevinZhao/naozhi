@@ -42,7 +42,11 @@ func (r *Router) countActive() {
 // its last non-zero value.
 //
 // LOCK: caller must hold r.mu for writing.
-func (r *Router) reconcileSessionActiveByBackendLocked() {
+//
+// Returns the freshly counted total of alive non-exempt sessions so callers
+// that also need r.activeCount (e.g. Cleanup's post-prune recount) can reuse
+// this single O(N) walk instead of running a second one. R20260602190132-PERF-5.
+func (r *Router) reconcileSessionActiveByBackendLocked() int64 {
 	var total int64
 	perBackend := make(map[string]int64, 4)
 	for _, s := range r.sessions {
@@ -81,6 +85,7 @@ func (r *Router) reconcileSessionActiveByBackendLocked() {
 		want := perBackend[backend]
 		metrics.SessionActiveByBackend.Add(want-current, backend)
 	}
+	return total
 }
 
 // countExempt returns the total number of alive exempt sessions across
