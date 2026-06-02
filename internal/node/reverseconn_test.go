@@ -12,7 +12,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/config"
 )
 
 // setupReverseConnPair creates a ReverseServer + test HTTP server and dials in

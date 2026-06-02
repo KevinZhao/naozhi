@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/naozhi/naozhi/internal/config"
 )
 
 // dialReverseNode dials the /ws-node endpoint and returns the connection.
