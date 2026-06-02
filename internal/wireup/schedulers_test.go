@@ -37,6 +37,9 @@ func TestWireSchedulers_SysessionDisabled(t *testing.T) {
 		if out.Cron != nil {
 			out.Cron.Stop()
 		}
+		if out.Sysession != nil {
+			out.Sysession.Stop(context.Background())
+		}
 	})
 	if out.Sysession != nil {
 		t.Errorf("expected nil Sysession when disabled, got %v", out.Sysession)
@@ -64,6 +67,9 @@ func TestWireSchedulers_SysessionBuildFailure(t *testing.T) {
 	t.Cleanup(func() {
 		if out.Cron != nil {
 			out.Cron.Stop()
+		}
+		if out.Sysession != nil {
+			out.Sysession.Stop(context.Background())
 		}
 	})
 	if out.Sysession != nil {
@@ -93,6 +99,9 @@ func TestWireSchedulers_SysessionSuccessNoErr(t *testing.T) {
 	t.Cleanup(func() {
 		if out.Cron != nil {
 			out.Cron.Stop()
+		}
+		if out.Sysession != nil {
+			out.Sysession.Stop(context.Background())
 		}
 	})
 	if out.SysessionBuildErr != nil {
