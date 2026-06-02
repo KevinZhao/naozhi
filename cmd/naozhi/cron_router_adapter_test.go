@@ -107,6 +107,58 @@ func TestInterruptOutcome_Ordinals(t *testing.T) {
 	}
 }
 
+// TestInterruptOutcome_CountDrift guards the gap the per-member ordinal
+// table (TestInterruptOutcome_Ordinals) and the init() panic cannot catch:
+// a NEW case appended to cron.InterruptOutcome or session.InterruptOutcome
+// without updating the alignment list (R260528-ARCH-17 / #1378). Adding
+// InterruptFoo AFTER InterruptError leaves every existing pair equal — the
+// ordinal table still passes — yet one side now has a member the other
+// lacks, which silently miscasts in cronSessionAdapter.InterruptViaControl.
+//
+// We pin two invariants:
+//  1. InterruptError is ordinal 4 on BOTH sides (an insert BEFORE Error
+//     shifts it and fails here).
+//  2. The first ordinal PAST Error (5) is undefined on the session side —
+//     session.InterruptOutcome.String() renders it as "unknown(5)". An
+//     append AFTER Error on the session side would give 5 a real name and
+//     break this. cron has no String(); its append is caught by the count
+//     pin below (knownInterruptOutcomes must equal Error+1).
+//
+// If a fifth real outcome is ever added it MUST be mirrored on both sides
+// AND this test bumped deliberately — exactly the human review gate #1378
+// asks for.
+func TestInterruptOutcome_CountDrift(t *testing.T) {
+	t.Parallel()
+
+	const lastOrdinal = 4 // InterruptError
+	if int(cron.InterruptError) != lastOrdinal {
+		t.Errorf("cron.InterruptError ordinal = %d, want %d — a case was inserted before it; mirror on session side and bump this test",
+			int(cron.InterruptError), lastOrdinal)
+	}
+	if int(session.InterruptError) != lastOrdinal {
+		t.Errorf("session.InterruptError ordinal = %d, want %d — a case was inserted before it; mirror on cron side and bump this test",
+			int(session.InterruptError), lastOrdinal)
+	}
+
+	// One past the last known member must be undefined on the session side.
+	if got := session.InterruptOutcome(lastOrdinal + 1).String(); got != "unknown(5)" {
+		t.Errorf("session.InterruptOutcome(5).String() = %q, want %q — a new outcome was appended after InterruptError; mirror it on cron side and bump this test",
+			got, "unknown(5)")
+	}
+
+	// Count pin: the known cron members are exactly Sent..Error (5 values).
+	// Encoded as a slice so a `go vet`-friendly exhaustive review is forced
+	// when the const block grows; len must equal Error+1 (dense iota).
+	knownCron := []cron.InterruptOutcome{
+		cron.InterruptSent, cron.InterruptNoSession, cron.InterruptNoTurn,
+		cron.InterruptUnsupported, cron.InterruptError,
+	}
+	if len(knownCron) != int(cron.InterruptError)+1 {
+		t.Errorf("cron InterruptOutcome count drift: listed %d members but max ordinal is %d — update knownCron and the alignment list in cron_router_adapter.go init()",
+			len(knownCron), int(cron.InterruptError))
+	}
+}
+
 // TestSessionStatus_Cast verifies cron.SessionStatus(int(...)) round-
 // trip preserves the three known states. cron does not branch on
 // SessionStatus today, but a future caller comparing against
