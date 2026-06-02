@@ -275,6 +275,24 @@ type PlatformConfigs struct {
 	Weixin  *WeixinConfig  `yaml:"weixin"`
 }
 
+// hasPlatform reports whether the named platform has a configured section.
+// Returns false for unknown names so new platforms are treated as
+// unconfigured rather than silently accepted. [R20260602-ARCH-1]
+func (c *Config) hasPlatform(name string) bool {
+	switch name {
+	case "feishu":
+		return c.Platforms.Feishu != nil
+	case "slack":
+		return c.Platforms.Slack != nil
+	case "discord":
+		return c.Platforms.Discord != nil
+	case "weixin":
+		return c.Platforms.Weixin != nil
+	default:
+		return false
+	}
+}
+
 type FeishuConfig struct {
 	AppID             string `yaml:"app_id"`
 	AppSecret         string `yaml:"app_secret"`
@@ -900,18 +918,7 @@ func validateConfig(cfg *Config) error {
 	// operators only discover the misconfig once a notification actually
 	// fires. An empty platform disables the default entirely and is legal.
 	if np := cfg.Cron.NotifyDefault.Platform; np != "" {
-		ok := false
-		switch np {
-		case "feishu":
-			ok = cfg.Platforms.Feishu != nil
-		case "slack":
-			ok = cfg.Platforms.Slack != nil
-		case "discord":
-			ok = cfg.Platforms.Discord != nil
-		case "weixin":
-			ok = cfg.Platforms.Weixin != nil
-		}
-		if !ok {
+		if !cfg.hasPlatform(np) {
 			return fmt.Errorf("cron.notify_default.platform %q is not a configured platform (set platforms.%s or clear notify_default)", np, np)
 		}
 	}
@@ -922,18 +929,7 @@ func validateConfig(cfg *Config) error {
 	// silently falls through all delivery attempts and the operator only
 	// discovers the typo when an upgrade occurs.
 	if np := cfg.Update.Notify.Platform; np != "" {
-		ok := false
-		switch np {
-		case "feishu":
-			ok = cfg.Platforms.Feishu != nil
-		case "slack":
-			ok = cfg.Platforms.Slack != nil
-		case "discord":
-			ok = cfg.Platforms.Discord != nil
-		case "weixin":
-			ok = cfg.Platforms.Weixin != nil
-		}
-		if !ok {
+		if !cfg.hasPlatform(np) {
 			return fmt.Errorf("update.notify.platform %q is not a configured platform (set platforms.%s or clear update.notify)", np, np)
 		}
 	}
