@@ -1,7 +1,6 @@
 package cron
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -373,53 +372,21 @@ func (e *recentCacheEntry) ringSeed(rows []CronRunSummary, keepCount int) {
 // skip the entry, GC removes it.
 var ErrCorruptRun = errors.New("cron run: corrupt or oversize record")
 
-// appendMarshalBufPool reuses bytes.Buffer + json.Encoder scratch space
-// across runStore.Append calls so each Append avoids the per-call
-// encodeState alloc that json.Marshal performs internally. Mirrors the
-// MarshalRecord pattern in internal/eventlog/schema/record.go. Cron Append
-// rate is bounded (≤ 1Hz × N jobs) but every persisted record allocates
-// ~2KB of encode scratch otherwise — pooling drops that to amortised zero
-// after the warmup period. R240-PERF-6 / #1043.
-var appendMarshalBufPool = sync.Pool{
-	New: func() any {
-		return bytes.NewBuffer(make([]byte, 0, 4*1024))
-	},
-}
-
-// appendMarshalPoolMaxCap drops oversized buffers from the pool so a
-// one-off near-MaxRunRecordBytes record does not pin memory for the
-// process lifetime. Sized at 2× MaxRunRecordBytes for headroom.
-const appendMarshalPoolMaxCap = 2 * MaxRunRecordBytes
-
-// marshalRunPooled encodes run via a pooled bytes.Buffer + json.Encoder.
-// Returns a freshly-copied []byte (independent of the pooled buffer) so
-// callers may retain it after the buffer is recycled. Behaviourally
-// identical to json.Marshal(run) except for json.Encoder's trailing
-// '\n' which is stripped to match Marshal output.
+// marshalRunPooled encodes run as JSON. Returns a freshly-allocated []byte
+// safe for callers to retain. Behaviourally identical to json.Marshal(run).
+//
+// R20260602190132-PERF-2 (#1605): previously this built a pooled
+// bytes.Buffer + a fresh json.NewEncoder(buf) per call. json.Encoder does
+// NOT reuse the heap-allocated internal encodeState scratch across calls —
+// pooling the bytes.Buffer only recycled the output bytes, not the encode
+// state — and each call still allocated a fresh Encoder struct plus required
+// a trailing-'\n' strip + defensive copy. json.Marshal draws encodeState
+// from the stdlib's own sync.Pool (amortised-zero scratch alloc after
+// warmup), already returns an independent newly-allocated slice with no
+// trailing newline, and needs no buffer pool. Byte output is identical
+// (TestRunStore_MarshalRunPooledMatchesStdlib enforces parity).
 func marshalRunPooled(run *CronRun) ([]byte, error) {
-	buf := appendMarshalBufPool.Get().(*bytes.Buffer)
-	defer func() {
-		if buf.Cap() > appendMarshalPoolMaxCap {
-			return
-		}
-		buf.Reset()
-		appendMarshalBufPool.Put(buf)
-	}()
-	buf.Reset()
-	enc := json.NewEncoder(buf)
-	// json.Marshal default — keep HTML-escape parity so on-disk bytes match
-	// the legacy callers and any future Unmarshal of historical records is
-	// indistinguishable from json.Marshal output.
-	if err := enc.Encode(run); err != nil {
-		return nil, err
-	}
-	body := buf.Bytes()
-	if n := len(body); n > 0 && body[n-1] == '\n' {
-		body = body[:n-1]
-	}
-	out := make([]byte, len(body))
-	copy(out, body)
-	return out, nil
+	return json.Marshal(run)
 }
 
 // newRunStore constructs a runStore rooted at <storePath dir>/runs.
