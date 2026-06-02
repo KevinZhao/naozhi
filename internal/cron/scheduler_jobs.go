@@ -502,6 +502,34 @@ func (s *Scheduler) deleteJobLocked(j *Job) {
 	}
 }
 
+// deleteJobPostCleanup runs the lock-free side effects that must follow a
+// deleteJobLocked, in the exact order both delete entry points
+// (DeleteJobByID and DeleteJob) require. Caller MUST NOT hold s.mu — every
+// step here is documented as a "must-not-hold-s.mu" operation:
+//
+//   - resetRouterStub: router.Reset → notifyChange callbacks may re-enter
+//     s.mu (R240-GO-1 lock-order inversion guard).
+//   - runStore.DeleteJob: fires even when the earlier persistJobsLocked
+//     failed so runs/<jobID>/ does not leak on disk while the in-memory
+//     record is already gone (R238-GO-3). Gated on enabled() so a disabled
+//     store is a no-op.
+//   - cleanupRunningJobIfIdle: reclaims the s.runningJobs guard when the CAS
+//     gate is idle, bounding what would otherwise be an unbounded *runInflight
+//     leak per historical jobID (R242-ARCH-15 / #758).
+//
+// R244-ARCH-13 / R244-ARCH-19 (#1053 / #1056): the two delete entry points
+// previously open-coded this identical three-step closure. Folding it into
+// one helper means a future change to the delete side-effect order (or a new
+// step) lands once instead of drifting between the ID-based and
+// plat+chat-based mutator pipelines.
+func (s *Scheduler) deleteJobPostCleanup(jobID string) {
+	s.resetRouterStub(jobID)
+	if s.runStore.enabled() {
+		s.runStore.DeleteJob(jobID)
+	}
+	s.cleanupRunningJobIfIdle(jobID)
+}
+
 // pauseJobLocked transitions a job to Paused state under s.mu. Returns
 // ErrJobAlreadyPaused without mutation if the job is already paused so
 // the caller can map it to 409 Conflict. R219-CR-4.
@@ -773,26 +801,11 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 			s.deleteJobLocked(j)
 			return nil
 		},
-		// postCleanup：锁外做 router.Reset + runStore.DeleteJob.
-		// R240-GO-1: router.Reset 移出 deleteJobLocked，避免在 s.mu 下
-		// 走 router callback 触发 lock-order inversion。
-		// R238-GO-3: deleteJobLocked 已变内存态，runStore 必须清理，否则
-		// runs/<jobID>/ 子树会泄漏；persist 失败也要清，故放在 perr 检查前。
-		// P1 cron-run-history: 仅删 runs/<jobID>/，不动用户面 jsonl
-		// （RFC §2.3 / §4.4）。
-		// R242-ARCH-15 (#758): cleanupRunningJobIfIdle reclaims the
-		// s.runningJobs entry when the CAS gate is idle, bounding what
-		// was previously an unbounded leak (one *runInflight per
-		// historical jobID) over long-lived deployments. The idle check
-		// preserves the ID-reuse split-CAS guarantee documented on
-		// runningJobs.
-		func(j *Job) {
-			s.resetRouterStub(j.ID)
-			if s.runStore.enabled() {
-				s.runStore.DeleteJob(j.ID)
-			}
-			s.cleanupRunningJobIfIdle(j.ID)
-		},
+		// postCleanup：锁外做 router.Reset + runStore.DeleteJob +
+		// runningJobs reclaim。R244-ARCH-13 (#1053): 共享 helper，与
+		// plat+chat-based DeleteJob 走同一条 side-effect 顺序，详见
+		// deleteJobPostCleanup godoc（R240-GO-1 / R238-GO-3 / R242-ARCH-15）。
+		func(j *Job) { s.deleteJobPostCleanup(j.ID) },
 	)
 }
 
@@ -1566,21 +1579,12 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 			s.deleteJobLocked(j)
 			return nil
 		},
-		// R240-GO-1: router.Reset must run lock-free — notifyChange may
-		// re-enter s.mu. R238-GO-3: runStore.DeleteJob fires even when
-		// persist later fails so runs/<jobID>/ doesn't leak on disk
-		// while the in-memory record is gone.
-		// R242-ARCH-15 (#758): mirror DeleteJobByID's runningJobs reclaim
-		// here — the IM-prefix DeleteJob path is the cron alias side of
-		// the same lifecycle, so the leak fix has to land at both
-		// entry points.
-		func(j *Job) {
-			s.resetRouterStub(j.ID)
-			if s.runStore.enabled() {
-				s.runStore.DeleteJob(j.ID)
-			}
-			s.cleanupRunningJobIfIdle(j.ID)
-		},
+		// R244-ARCH-13 (#1053): the IM-prefix DeleteJob path is the cron
+		// alias side of the same lifecycle as DeleteJobByID, so both share
+		// the deleteJobPostCleanup helper rather than open-coding the
+		// router.Reset + runStore.DeleteJob + runningJobs-reclaim sequence
+		// twice (R240-GO-1 / R238-GO-3 / R242-ARCH-15 all documented there).
+		func(j *Job) { s.deleteJobPostCleanup(j.ID) },
 		withJobByPrefixOpts{},
 	)
 }
