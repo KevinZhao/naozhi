@@ -250,6 +250,73 @@ func TestMayContainSecretPrefix_DapiFirstByte(t *testing.T) {
 	}
 }
 
+// TestRedactSecretsInResult_StripeRestrictedKey verifies that Stripe restricted
+// keys (rk_live_/rk_test_) are scrubbed by RedactSecrets. These keys can
+// initiate Stripe API calls and are equally sensitive to secret keys.
+// [R164029-SEC-5].
+func TestRedactSecretsInResult_StripeRestrictedKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "Stripe restricted live key",
+			in:   "STRIPE_KEY=rk_live_abcdefghij0123456789 used",
+			want: "STRIPE_KEY=[REDACTED] used",
+		},
+		{
+			name: "Stripe restricted test key",
+			in:   "STRIPE_KEY=rk_test_abcdefghij0123456789 used",
+			want: "STRIPE_KEY=[REDACTED] used",
+		},
+		{
+			name: "rk_live_ short tail not redacted",
+			in:   "rk_live_short is not a key",
+			want: "rk_live_short is not a key",
+		},
+		{
+			name: "rk_test_ short tail not redacted",
+			in:   "rk_test_short is not a key",
+			want: "rk_test_short is not a key",
+		},
+		{
+			name: "rk_live_ first-byte fast-path detected",
+			in:   "rk_live_abcdefghij0123456789",
+			want: "[REDACTED]",
+		},
+		{
+			name: "rk_ alongside sk_live_ in one line",
+			in:   "live=sk_live_abcdefghij0123456789 restricted=rk_live_abcdefghij0123456789",
+			want: "live=[REDACTED] restricted=[REDACTED]",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := redactSecretsInResult(tc.in)
+			if got != tc.want {
+				t.Errorf("redactSecretsInResult(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMayContainSecretPrefix_RkFirstByte pins that the 'r' first byte added
+// for Stripe restricted keys is recognised by the fast-path pre-scan.
+// [R164029-SEC-5].
+func TestMayContainSecretPrefix_RkFirstByte(t *testing.T) {
+	t.Parallel()
+	if !mayContainSecretPrefix("rk_live_abcdefghij0123456789") {
+		t.Error("mayContainSecretPrefix('rk_live_...') = false, want true")
+	}
+	if !mayContainSecretPrefix("rk_test_abcdefghij0123456789") {
+		t.Error("mayContainSecretPrefix('rk_test_...') = false, want true")
+	}
+}
+
 // TestSanitiseRunErrMsg_RedactsSecrets is the integration coverage for the
 // error path: sanitiseRunErrMsg must scrub well-known secret prefixes so a
 // leaked token in an error string (LastError) never lands on disk or the

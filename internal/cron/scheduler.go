@@ -595,7 +595,7 @@ type Scheduler struct {
 // output. Set is read-only after publication so callers can hand out
 // the map directly without copying. R250-PERF-7.
 type knownSessionsCache struct {
-	mu          sync.Mutex
+	mu          sync.RWMutex
 	generatedAt time.Time
 	set         map[string]struct{}
 }
@@ -610,8 +610,8 @@ type knownSessionsCache struct {
 // into a method on the cache type keeps the TTL gate in one place and lets the
 // cache own its own mutex instead of exposing c.mu to every Scheduler caller.
 func (c *knownSessionsCache) lookupFresh() (map[string]struct{}, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	if c.set != nil && time.Since(c.generatedAt) < knownSessionsCacheTTL {
 		return c.set, true
 	}
