@@ -79,3 +79,46 @@ func TestReverseUpgrader_InsecureMetric_Monotonic(t *testing.T) {
 		t.Errorf("counter delta after %d insecure upgrades = %d, want %d", n, delta, n)
 	}
 }
+
+// TestIsPrivateHost covers R164029-SEC-1 (#1593): RFC1918, IPv6 unique-local,
+// and link-local literals are classified private; loopback, public, and
+// non-IP hostnames are not. Port suffixes and bracketed IPv6 must be stripped.
+func TestIsPrivateHost(t *testing.T) {
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"192.168.1.10:8080", true},
+		{"10.0.0.5", true},
+		{"172.16.4.4:443", true},
+		{"172.31.255.255", true},
+		{"172.32.0.1", false}, // just outside RFC1918
+		{"169.254.1.1", true}, // link-local
+		{"[fd00::1]:8080", true},
+		{"[fe80::1]", true},
+		{"127.0.0.1:8080", false}, // loopback handled by isLoopbackHost, not private
+		{"8.8.8.8:53", false},
+		{"worker.internal:8080", false}, // hostname, not an IP literal
+		{"example.com", false},
+	}
+	for _, tc := range cases {
+		if got := isPrivateHost(tc.host); got != tc.want {
+			t.Errorf("isPrivateHost(%q) = %v, want %v", tc.host, got, tc.want)
+		}
+	}
+}
+
+// TestReverseUpgrader_PrivateHostStillAccepted confirms a plain-HTTP RFC1918
+// upgrade is still accepted (no behavior break for no-TLS private deployments)
+// and still bumps the cleartext-exposure counter (#1593).
+func TestReverseUpgrader_PrivateHostStillAccepted(t *testing.T) {
+	check := reverseUpgrader.CheckOrigin
+	req := &http.Request{Host: "192.168.50.50:8080", Header: http.Header{}}
+	before := insecureReverseUpgradeTotal.Value()
+	if !check(req) {
+		t.Fatalf("CheckOrigin rejected a plain-http private-LAN request; want accepted")
+	}
+	if delta := insecureReverseUpgradeTotal.Value() - before; delta != 1 {
+		t.Errorf("counter delta for private-LAN upgrade = %d, want 1", delta)
+	}
+}
