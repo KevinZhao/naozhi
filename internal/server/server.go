@@ -775,7 +775,11 @@ func (s *Server) Start(ctx context.Context) error {
 	// trace id needs to be observable to gzip's behaviour and to any
 	// handler panic that fires before the body is written.
 	srv := &http.Server{
-		Handler:           withTraceID(gzipMiddleware(s.mux)),
+		// RNEW-ARCH-401 (#425): withAPIVersionAlias is the innermost wrapper so
+		// a `/api/v1/<rest>` request is rewritten to the existing `/api/<rest>`
+		// route just before mux matching, while trace-id + gzip still observe
+		// the original versioned path the client called.
+		Handler:           withTraceID(gzipMiddleware(withAPIVersionAlias(s.mux))),
 		ReadHeaderTimeout: 5 * time.Second, // Slowloris defense
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      60 * time.Second,
