@@ -110,7 +110,7 @@ func New(dashboardToken string, cookieSecret []byte, cookieGen string, trustedPr
 	// of replaying a fixed value. Callers that supply a gen (production seeds
 	// one from server.go) keep their explicit value.
 	if cookieGen == "" {
-		cookieGen = randomCookieGen()
+		cookieGen = cryptoutil.RandomCookieGen()
 	}
 	return &Handlers{
 		DashboardToken:    dashboardToken,
