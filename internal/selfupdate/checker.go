@@ -154,10 +154,14 @@ func (c *Checker) Run(ctx context.Context) {
 		// Small delay so startup isn't competing with the first check's
 		// network I/O, and a crash-restart loop on a bad release can't
 		// instantly re-trigger work.
+		// R20260602141221-PERF-7: use NewTimer+Stop instead of time.After so
+		// the timer is reclaimed promptly when ctx is cancelled before it fires.
+		startDelay := time.NewTimer(30 * time.Second)
+		defer startDelay.Stop()
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(30 * time.Second):
+		case <-startDelay.C:
 			c.checkOnce(ctx)
 		}
 	}
