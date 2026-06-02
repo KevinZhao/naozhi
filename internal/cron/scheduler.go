@@ -451,6 +451,26 @@ type Scheduler struct {
 	// a callback from robfig/cron whose signature has no ctx parameter, so
 	// the scheduler itself owns the root context so Stop() can cancel in-
 	// flight executions. Callers outside execute() take ctx as an argument.
+	//
+	// R249-ARCH-4 (#972) — ctx-as-arg exception is confined: real reads of
+	// s.stopCtx are allowed ONLY on robfig/cron callback-derived paths
+	// (scheduler_run.go execute/jitter/spawn, scheduler_notify.go reply
+	// ctx, and the cold-start GC here) where no ctx parameter exists to
+	// thread. TestStopCtx_ReadsConfinedToCallbackPaths enforces that an
+	// unrelated method which already receives a ctx must NOT reach for this
+	// field instead.
+	//
+	// R249-ARCH-8 (#974) — single authoritative cancel signal. There appear
+	// to be two ways to cancel cron work (SchedulerConfig.ParentCtx being
+	// cancelled by the host's shutdown, vs an explicit Stop() call), but they
+	// are NOT independent cancel paths: stopCtx is derived from ParentCtx via
+	// context.WithCancel (NewScheduler line ~983), so a ParentCtx cancel
+	// propagates INTO stopCtx, and Stop() cancels stopCtx directly via
+	// stopCancel. Every in-flight read (execute()/trimAllCtx/notifyTarget)
+	// observes exactly one signal — stopCtx.Done() — regardless of which
+	// upstream fired it. stopCtx is therefore the authoritative signal;
+	// ParentCtx is only a derive-time parent and must never be read for
+	// cancellation after NewScheduler returns.
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 	// telemetry receives the cron-run lifecycle events. Phase D (RFC §3.5)
@@ -1296,7 +1316,7 @@ func (s *Scheduler) Start() error {
 	// retention-policy violators that accumulated while this process was
 	// down. 异步执行避免在 jobs 多/历史目录大时阻塞 Start 返回（每个 job
 	// 一次 ReadDir + N 次 Remove）。
-	if s.runStore != nil {
+	if s.runStore.enabled() {
 		s.gcWG.Add(1)
 		go func() {
 			defer s.gcWG.Done()

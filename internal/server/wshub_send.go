@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
@@ -245,12 +244,17 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 	nodeID := msg.Node
-	nc, ok := h.lookupNode(nodeID)
+	conn, ok := h.lookupNode(nodeID)
 	if !ok {
 		slog.Debug("ws interrupt: unknown node", "node", nodeID)
 		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "unknown node"})
 		return
 	}
+	// H6 (#435): this path only forwards a single proxy RPC, so depend on
+	// the narrow node.NodeProxy role rather than the full 26-method Conn.
+	// Documents the exact capability this goroutine exercises and keeps a
+	// future mock for this site minimal.
+	var nc node.NodeProxy = conn
 
 	release, shuttingDown := h.TrackSend()
 	if shuttingDown {
@@ -267,7 +271,7 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 		// reply "error" so the dashboard surfaces the failure.
 		defer func() {
 			if r := recover(); r != nil {
-				metrics.PanicRecoveredTotal.Add(1)
+				serverMetrics.PanicRecovered()
 				// Panic cause at Error, verbose stack at Debug — stack
 				// frames leak internal paths to journald/log aggregators.
 				slog.Error("remote ws interrupt goroutine panic",
@@ -408,7 +412,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		// node) would otherwise take the whole naozhi service down.
 		defer func() {
 			if r := recover(); r != nil {
-				metrics.PanicRecoveredTotal.Add(1)
+				serverMetrics.PanicRecovered()
 				// Same split as handleRemoteInterrupt: cause at Error,
 				// stack at Debug. Stack frames expose internal layout.
 				slog.Error("remote ws send goroutine panic",

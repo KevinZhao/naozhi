@@ -12,7 +12,6 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/time/rate"
 
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 )
 
@@ -246,7 +245,7 @@ func (c *wsClient) readPump() {
 		if r := recover(); r != nil {
 			// OBS1: increment panic counter before logging so observers see
 			// the rate even when stack-dump output is truncated.
-			metrics.PanicRecoveredTotal.Add(1)
+			serverMetrics.PanicRecovered()
 			// Log the panic cause at Error so operators are alerted, but
 			// keep the verbose stack trace at Debug — shipping it to
 			// journald / aggregated log stores would broadcast internal
@@ -407,7 +406,7 @@ func (c *wsClient) writePump() {
 			// even when stack output is truncated, then log the cause at
 			// Error and keep the stack at Debug to avoid leaking internal
 			// paths to aggregated log stores.
-			metrics.PanicRecoveredTotal.Add(1)
+			serverMetrics.PanicRecovered()
 			slog.Error("panic in ws writePump (recovered)",
 				"remote", c.remoteIP, "panic", fmt.Sprintf("%v", r))
 			slog.Debug("panic in ws writePump: stack",

@@ -50,7 +50,7 @@ func (s *Scheduler) CurrentRun(jobID string) (RunInflightView, bool) {
 // nil. The dashboard list endpoint and detail endpoint both go through
 // this method so the runs/ schema stays opaque to server/.
 func (s *Scheduler) ListRuns(jobID string, limit int, before time.Time) []CronRunSummary {
-	if s == nil || s.runStore == nil {
+	if s == nil || !s.runStore.enabled() {
 		return nil
 	}
 	return s.runStore.List(jobID, limit, before)
@@ -59,7 +59,7 @@ func (s *Scheduler) ListRuns(jobID string, limit int, before time.Time) []CronRu
 // RecentRuns is the convenience wrapper for the cron list view's
 // recent_runs field. Cap is enforced inside ListRuns.
 func (s *Scheduler) RecentRuns(jobID string, n int) []CronRunSummary {
-	if s == nil || s.runStore == nil {
+	if s == nil || !s.runStore.enabled() {
 		return nil
 	}
 	return s.runStore.Recent(jobID, n)
@@ -69,7 +69,7 @@ func (s *Scheduler) RecentRuns(jobID string, n int) []CronRunSummary {
 // (nil, fs.ErrNotExist) when missing; (nil, ErrCorruptRun) when present
 // but unusable. Server layer maps these to 404 / 500 respectively.
 func (s *Scheduler) GetRun(jobID, runID string) (*CronRun, error) {
-	if s == nil || s.runStore == nil {
+	if s == nil || !s.runStore.enabled() {
 		return nil, fs.ErrNotExist
 	}
 	return s.runStore.Get(jobID, runID)
@@ -232,7 +232,7 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// Idempotent on already-clean prompts; cheap relative to JSON marshal +
 	// fsync that immediately follow.
 	persistedPrompt := osutil.SanitizeForLog(a.prompt, MaxPromptBytes)
-	if !a.skipPersist && jobPersistOK && s.runStore != nil {
+	if !a.skipPersist && jobPersistOK && s.runStore.enabled() {
 		s.runStore.Append(&CronRun{
 			RunID:       a.runID,
 			JobID:       a.job.ID,
@@ -451,6 +451,29 @@ func (p jobResultSnapshot) restore(j *Job) {
 	j.RunCounters = p.Counters
 }
 
+// snapshotResultState captures the runtime-mutable terminal-result state a
+// Job carries (the LastRunAt / LastResult / LastError / LastErrorClass /
+// LastSessionID / RunCounters cluster) into a jobResultSnapshot. Caller must
+// hold s.mu so the read is serialised against concurrent mutators.
+//
+// R249-ARCH-22 (#986): Job mixes wire-config (Schedule / Prompt / WorkDir)
+// with this runtime-mutable state. Until the full JobConfig/JobState split
+// lands, this method is the single capture point for the state cluster so the
+// snapshot field set is enumerated exactly once (paired with restore) instead
+// of being open-coded at the recordTerminalResult capture site. Adding a new
+// runtime-state field is then a two-site edit on the snapshot type + this
+// method/restore pair rather than a scattered hunt across mutation paths.
+func (j *Job) snapshotResultState() jobResultSnapshot {
+	return jobResultSnapshot{
+		LastRunAt:      j.LastRunAt,
+		LastResult:     j.LastResult,
+		LastError:      j.LastError,
+		LastErrorClass: j.LastErrorClass,
+		LastSessionID:  j.LastSessionID,
+		Counters:       j.RunCounters,
+	}
+}
+
 // recordTerminalResult persists the terminal result (LastResult /
 // LastError / LastErrorClass / Counters) for non-skipPersist paths and
 // returns the post-sanitised (result, errMsg) pair so finishRun can reuse
@@ -515,14 +538,7 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 		s.mu.Unlock()
 		return result, errMsg, false
 	}
-	prev := jobResultSnapshot{
-		LastRunAt:      j.LastRunAt,
-		LastResult:     j.LastResult,
-		LastError:      j.LastError,
-		LastErrorClass: j.LastErrorClass,
-		LastSessionID:  j.LastSessionID,
-		Counters:       j.RunCounters,
-	}
+	prev := j.snapshotResultState()
 
 	j.LastRunAt = endedAt
 	j.LastResult = result
@@ -622,6 +638,21 @@ const redactPathsBuilderPoolMaxCap = 4 * maxRedactErrLen
 // carries the same issue-backed paper trail as the other cron NEEDS-DESIGN
 // items (R241-PERF-9 / #482 etc.), rather than living only as an inline
 // "future enhancement" comment with no tracker. R249-CR-8 (#952).
+// hasNoPathTrigger reports whether s contains none of the three bytes that
+// can begin a redactable path token: a POSIX slash, a Windows backslash, or
+// a tilde-home shorthand. R243-ARCH-18 (#850): the identical three-IndexByte
+// scan was previously inlined twice inside redactPathsInCronError (the
+// short-input fast-path and the post-truncate fast-path), so a future tweak
+// to the trigger-byte set risked desyncing the two gates. Hoisting it keeps
+// both call sites in lockstep and reads at the call site as the intent
+// ("no path-shaped bytes → nothing to redact"). Behaviour is byte-for-byte
+// identical to the prior inline conjunction.
+func hasNoPathTrigger(s string) bool {
+	return strings.IndexByte(s, '/') < 0 &&
+		strings.IndexByte(s, '\\') < 0 &&
+		strings.IndexByte(s, '~') < 0
+}
+
 func redactPathsInCronError(s string) string {
 	if s == "" {
 		return s
@@ -632,10 +663,7 @@ func redactPathsInCronError(s string) string {
 	// cap is a defensive ceiling so an unexpectedly long no-path input
 	// still falls through to the byte-cap branch below; common cron error
 	// classes fit comfortably under this. R250-PERF-12 / #1115.
-	if len(s) <= redactFastPathMaxLen &&
-		strings.IndexByte(s, '/') < 0 &&
-		strings.IndexByte(s, '\\') < 0 &&
-		strings.IndexByte(s, '~') < 0 {
+	if len(s) <= redactFastPathMaxLen && hasNoPathTrigger(s) {
 		return s
 	}
 	// Byte-level cap, but split on a rune boundary — naked s[:maxRedactErrLen]
@@ -652,7 +680,7 @@ func redactPathsInCronError(s string) string {
 	// common error classes ("dispatcher queue full", "session error:
 	// context deadline exceeded") have no embedded paths. R62-PERF-3 +
 	// R234-SEC-9（~/ 用户目录形态补漏）。
-	if strings.IndexByte(s, '/') < 0 && strings.IndexByte(s, '\\') < 0 && strings.IndexByte(s, '~') < 0 {
+	if hasNoPathTrigger(s) {
 		return s
 	}
 	b := redactPathsBuilderPool.Get().(*strings.Builder)

@@ -181,6 +181,22 @@ func (s *runStore) WriteFailedTotals() (diskFull, other int64) {
 	return s.writeFailedDiskFullTotal.Load(), s.writeFailedOtherTotal.Load()
 }
 
+// enabled reports whether this runStore will actually persist / serve run
+// history. It folds the two historically-separate "off" signals — a nil
+// *runStore receiver and the disabled flag (StorePath empty) — into one
+// predicate so callers stop hand-rolling `s.runStore != nil` in some
+// places and relying on the method-internal `s.disabled` guard in others.
+// R249-ARCH-29 (#993): that nil-vs-disabled split meant a no-persist
+// scheduler (disabled runStore, non-nil pointer) still spun up the
+// cold-start GC goroutine / RecentSessionIDs fan-out that an external
+// `!= nil` check could not skip. Every runStore method already short-
+// circuits on `s == nil || s.disabled`, so this is purely the external
+// gate that mirrors that internal contract — null-object semantics
+// without introducing a separate noop type.
+func (s *runStore) enabled() bool {
+	return s != nil && !s.disabled
+}
+
 // recentCacheEntry is the cached newest-first snapshot for one job.
 //
 // R242-GO-8 / R235-PERF-3 / R233-PERF-2: storage is a fixed-capacity ring
