@@ -1452,7 +1452,22 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 	// before-cutoff (pagination) path keeps the serial early-break: it
 	// stops at the first `limit` matches and parallelising would over-read
 	// past the page boundary.
-	if before.IsZero() && len(items) > diskDecodeParallelThreshold {
+	//
+	// R249-PERF-8 (#929): gate on the EFFECTIVE read count min(limit, len)
+	// rather than len(items) alone. decodeRunsParallel only decodes the
+	// newest min(limit, len) candidates, so a query with a small limit over
+	// a large directory (e.g. limit=5 against a 200-run dir) would otherwise
+	// spin up the worker pool + channel plumbing to read just `limit` files —
+	// the exact "decide on full dir size, then trim to limit" smell. Keeping
+	// such small-limit reads on the serial early-break path avoids the
+	// goroutine churn; the warm cold-start path (limit == keepCount) still
+	// crosses the threshold and parallelises as before. Output is identical
+	// either way (both honour newest-first mtime order).
+	effective := len(items)
+	if limit < effective {
+		effective = limit
+	}
+	if before.IsZero() && effective > diskDecodeParallelThreshold {
 		return s.decodeRunsParallel(items, limit)
 	}
 
