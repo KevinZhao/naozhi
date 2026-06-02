@@ -355,16 +355,20 @@ func (r *Router) Cleanup() {
 		r.storeDirty = true
 		r.storeGen.Add(1)
 	}
-	var sessionsCopy map[string]*ManagedSession
-	var knownIDsCopy map[string]bool
+	// R20260602190132-PERF-4: snapshot the persisted maps into slices, not
+	// fresh maps. saveStoreSlice / saveKnownIDsSlice never need the keys, so a
+	// []*ManagedSession / []string append avoids the per-tick map make + N
+	// hashed inserts (~8KB+ per 500-session tick).
+	var sessionsCopy []*ManagedSession
+	var knownIDsCopy []string
 	var wsOverridesCopy map[string]string
 	storePath := r.storePath
 	snapshotGen := r.storeGen.Load()
 	snapshotWsGen := r.wsOverridesGen.Load()
 	if r.storeDirty {
-		sessionsCopy = make(map[string]*ManagedSession, len(r.sessions))
-		for k, v := range r.sessions {
-			sessionsCopy[k] = v
+		sessionsCopy = make([]*ManagedSession, 0, len(r.sessions))
+		for _, v := range r.sessions {
+			sessionsCopy = append(sessionsCopy, v)
 		}
 	}
 	if r.wsOverridesDirty {
@@ -383,9 +387,9 @@ func (r *Router) Cleanup() {
 	// file-level race guard.)
 	var snapshotKnownIDsGen uint64
 	if r.knownIDsDirty && now.Sub(r.knownIDsSavedAt) >= knownIDsSaveInterval {
-		knownIDsCopy = make(map[string]bool, len(r.knownIDs))
+		knownIDsCopy = make([]string, 0, len(r.knownIDs))
 		for id := range r.knownIDs {
-			knownIDsCopy[id] = true
+			knownIDsCopy = append(knownIDsCopy, id)
 		}
 		snapshotKnownIDsGen = r.knownIDsGen
 		r.knownIDsSavedAt = now
@@ -395,7 +399,7 @@ func (r *Router) Cleanup() {
 
 	// Periodic save outside lock to reduce crash-recovery data loss.
 	if sessionsCopy != nil {
-		if err := saveStore(storePath, sessionsCopy); err != nil {
+		if err := saveStoreSlice(storePath, sessionsCopy); err != nil {
 			slog.Warn("periodic session save failed", "err", err)
 		} else {
 			// Only clear dirty flag if no concurrent mutation occurred since snapshot.
@@ -424,7 +428,7 @@ func (r *Router) Cleanup() {
 		// flag; on failure we leave it set so the next tick retries,
 		// accepting one extra interval of delay in exchange for no
 		// torn-write race.
-		if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
+		if err := saveKnownIDsSlice(storePath, knownIDsCopy); err != nil {
 			slog.Warn("periodic known IDs save failed", "err", err)
 		} else {
 			// Generation counter matches the (sessions | ws-overrides) pattern:
@@ -561,11 +565,14 @@ func (r *Router) saveIfDirty() {
 		r.mu.RUnlock()
 		return
 	}
-	var sessionsCopy map[string]*ManagedSession
+	// R20260602190132-PERF-4: slice snapshots, not fresh maps — see the
+	// matching comment in Cleanup. saveStoreSlice / saveKnownIDsSlice ignore
+	// the keys, so a slice append avoids the per-tick map allocation.
+	var sessionsCopy []*ManagedSession
 	if r.storeDirty {
-		sessionsCopy = make(map[string]*ManagedSession, len(r.sessions))
-		for k, v := range r.sessions {
-			sessionsCopy[k] = v
+		sessionsCopy = make([]*ManagedSession, 0, len(r.sessions))
+		for _, v := range r.sessions {
+			sessionsCopy = append(sessionsCopy, v)
 		}
 	}
 	var wsOverridesCopy map[string]string
@@ -575,12 +582,12 @@ func (r *Router) saveIfDirty() {
 			wsOverridesCopy[k] = v
 		}
 	}
-	var knownIDsCopy map[string]bool
+	var knownIDsCopy []string
 	var snapshotKnownIDsGen uint64
 	if knownIDsDue {
-		knownIDsCopy = make(map[string]bool, len(r.knownIDs))
+		knownIDsCopy = make([]string, 0, len(r.knownIDs))
 		for id := range r.knownIDs {
-			knownIDsCopy[id] = true
+			knownIDsCopy = append(knownIDsCopy, id)
 		}
 		snapshotKnownIDsGen = r.knownIDsGen
 	}
@@ -606,7 +613,7 @@ func (r *Router) saveIfDirty() {
 	}
 
 	if sessionsCopy != nil {
-		if err := saveStore(storePath, sessionsCopy); err != nil {
+		if err := saveStoreSlice(storePath, sessionsCopy); err != nil {
 			slog.Warn("periodic session save failed", "err", err)
 		} else {
 			r.mu.Lock()
@@ -630,7 +637,7 @@ func (r *Router) saveIfDirty() {
 	}
 	if knownIDsCopy != nil {
 		// savedAt committed pre-save; only toggle dirty on success.
-		if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
+		if err := saveKnownIDsSlice(storePath, knownIDsCopy); err != nil {
 			slog.Warn("periodic known IDs save failed", "err", err)
 		} else {
 			// Match the storeGen/wsOverridesGen pattern: only clear dirty if

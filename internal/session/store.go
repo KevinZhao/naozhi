@@ -299,34 +299,48 @@ func marshalStoreEntries(sessions map[string]*ManagedSession) ([]byte, error) {
 	buf = append(buf, '[')
 	first := true
 	for _, s := range sessions {
-		data, ok := encodeStoreEntryCached(s)
-		if !ok {
-			continue
-		}
-		if !first {
-			buf = append(buf, ',')
-		}
-		first = false
-		buf = append(buf, data...)
+		first = appendStoreEntry(&buf, s, first)
 	}
 	buf = append(buf, ']')
 	return buf, nil
+}
+
+// marshalStoreEntriesSlice is the slice-fed sibling of marshalStoreEntries.
+// The session map is keyed only for routing; saveStore never reads the key, so
+// the hot Cleanup / saveIfDirty snapshot paths copy r.sessions into a
+// []*ManagedSession slice instead of a fresh map (R20260602190132-PERF-4: a
+// slice append of N pointers is far cheaper than a map make + N hashed
+// inserts, ~8KB+ saved per 500-session tick).
+func marshalStoreEntriesSlice(sessions []*ManagedSession) ([]byte, error) {
+	buf := make([]byte, 0, 256*len(sessions))
+	buf = append(buf, '[')
+	first := true
+	for _, s := range sessions {
+		first = appendStoreEntry(&buf, s, first)
+	}
+	buf = append(buf, ']')
+	return buf, nil
+}
+
+// appendStoreEntry appends one session's cached JSON encoding to buf, inserting
+// the array separator when it is not the first element written. Returns the
+// updated first flag. Shared by the map- and slice-fed marshallers.
+func appendStoreEntry(buf *[]byte, s *ManagedSession, first bool) bool {
+	data, ok := encodeStoreEntryCached(s)
+	if !ok {
+		return first
+	}
+	if !first {
+		*buf = append(*buf, ',')
+	}
+	*buf = append(*buf, data...)
+	return false
 }
 
 func saveStore(path string, sessions map[string]*ManagedSession) error {
 	if path == "" {
 		return nil
 	}
-	if dir := filepath.Dir(path); dir != "" {
-		// R250-ARCH-13 (#1175): shared dir policy (MkdirAll 0700 +
-		// symlink/non-dir guard + perm-tightening chmod) instead of a bare
-		// MkdirAll, so the session store inherits the same hardening the
-		// cron run store already had.
-		if err := datadir.EnsureDir(dir); err != nil {
-			return fmt.Errorf("create store directory: %w", err)
-		}
-	}
-
 	// R20260531A-PERF-2 (#1523): assemble the JSON array from per-session
 	// cached object encodings instead of re-marshalling the whole []storeEntry
 	// every 30s tick. Each session memoizes its last (entry → JSON) pair; a
@@ -337,6 +351,36 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 	data, err := marshalStoreEntries(sessions)
 	if err != nil {
 		return fmt.Errorf("marshal session store: %w", err)
+	}
+	return writeStoreBytes(path, data)
+}
+
+// saveStoreSlice persists a slice snapshot of sessions. The hot Cleanup /
+// saveIfDirty paths use this so they can snapshot r.sessions into a
+// []*ManagedSession (cheap append) instead of a fresh map every tick
+// (R20260602190132-PERF-4).
+func saveStoreSlice(path string, sessions []*ManagedSession) error {
+	if path == "" {
+		return nil
+	}
+	data, err := marshalStoreEntriesSlice(sessions)
+	if err != nil {
+		return fmt.Errorf("marshal session store: %w", err)
+	}
+	return writeStoreBytes(path, data)
+}
+
+// writeStoreBytes durably writes the pre-marshalled session-store JSON and the
+// advisory version sidecar. Shared by saveStore and saveStoreSlice.
+func writeStoreBytes(path string, data []byte) error {
+	if dir := filepath.Dir(path); dir != "" {
+		// R250-ARCH-13 (#1175): shared dir policy (MkdirAll 0700 +
+		// symlink/non-dir guard + perm-tightening chmod) instead of a bare
+		// MkdirAll, so the session store inherits the same hardening the
+		// cron run store already had.
+		if err := datadir.EnsureDir(dir); err != nil {
+			return fmt.Errorf("create store directory: %w", err)
+		}
 	}
 	if err := osutil.WriteFileAtomic(path, data, 0600); err != nil {
 		return fmt.Errorf("save session store: %w", err)
@@ -491,6 +535,18 @@ func loadKnownIDs(storePath string) map[string]bool {
 
 // saveKnownIDs persists the set of all session IDs ever used by naozhi.
 func saveKnownIDs(storePath string, ids map[string]bool) error {
+	list := make([]string, 0, len(ids))
+	for id := range ids {
+		list = append(list, id)
+	}
+	return saveKnownIDsSlice(storePath, list)
+}
+
+// saveKnownIDsSlice is the slice-fed sibling of saveKnownIDs. The hot Cleanup /
+// saveIfDirty paths snapshot r.knownIDs into a []string instead of a fresh
+// map[string]bool (R20260602190132-PERF-4). Takes ownership of list and sorts
+// it in place; callers pass a private snapshot, never r-owned state.
+func saveKnownIDsSlice(storePath string, list []string) error {
 	path := knownIDsPath(storePath)
 	if path == "" {
 		return nil
@@ -500,10 +556,6 @@ func saveKnownIDs(storePath string, ids map[string]bool) error {
 		if err := datadir.EnsureDir(dir); err != nil {
 			return fmt.Errorf("create known IDs directory: %w", err)
 		}
-	}
-	list := make([]string, 0, len(ids))
-	for id := range ids {
-		list = append(list, id)
 	}
 	// R180-GO-P2: Go map iteration is randomised per run; without this
 	// sort each saveKnownIDs write produces different byte output for the
