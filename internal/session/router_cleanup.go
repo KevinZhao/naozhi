@@ -323,17 +323,28 @@ func (r *Router) Cleanup() {
 			newActive++
 		}
 	}
-	r.activeCount.Store(newActive)
-	// Multi-Backend RFC §10 (Sprint 6a): same reconciliation rationale
-	// as countActive — bulk path, recompute the labeled gauge in one
-	// pass instead of plumbing per-key Dec calls through the prune loop.
-	r.reconcileSessionActiveByBackendLocked()
+	prevActive := r.activeCount.Swap(newActive)
 
 	// Snapshot sessions for periodic save (while still holding the lock).
 	// Skip save if nothing changed since last Cleanup cycle.
 	if closedCount > 0 || pruned > 0 {
 		r.storeDirty = true
 		r.storeGen.Add(1)
+	}
+	// Multi-Backend RFC §10 (Sprint 6a): same reconciliation rationale
+	// as countActive — bulk path, recompute the labeled gauge in one
+	// pass instead of plumbing per-key Dec calls through the prune loop.
+	//
+	// R20260602-PERF-1 (#1627): gate the reconcile so the second O(N)
+	// write-locked scan + map alloc + expvar sweep only runs when the live
+	// set could actually have changed this tick. We trigger on a close /
+	// prune OR on a change in the alive count vs the previous tick — the
+	// latter catches a session whose process exited naturally (isAlive()
+	// flips) without being closed/pruned, which still shifts the per-backend
+	// gauge. On the common steady-state no-op tick all three are false and
+	// the reconcile is skipped entirely.
+	if closedCount > 0 || pruned > 0 || newActive != prevActive {
+		r.reconcileSessionActiveByBackendLocked()
 	}
 	var sessionsCopy map[string]*ManagedSession
 	var knownIDsCopy map[string]bool
