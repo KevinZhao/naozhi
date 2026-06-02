@@ -40,12 +40,6 @@ func RedactGitRemoteURL(raw string) string {
 	return u.String()
 }
 
-// maxProjectNameLen bounds the `name` query param on project endpoints.
-// Kept as an alias of project.MaxProjectNameBytes so existing tests /
-// callers compile unchanged; the two constants were always required to
-// stay in lockstep. R183-REFACTOR-L1.
-const maxProjectNameLen = project.MaxProjectNameBytes
-
 // validateProjectName is a thin wrapper over project.ValidateProjectName.
 //
 // Previously this file carried a full duplicate of the policy with the
