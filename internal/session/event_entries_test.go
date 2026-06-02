@@ -309,6 +309,65 @@ func TestEventEntriesSinceDeadSessionShortCircuit(t *testing.T) {
 	}
 }
 
+// TestEventEntriesSinceAppend_EquivalentToSince verifies that the append
+// variant returns the same entries as EventEntriesSince (dead-session path).
+// R112714-PERF-11.
+func TestEventEntriesSinceAppend_EquivalentToSince(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+		{Time: 300, Summary: "c"},
+	}
+	s.persistedHistorySorted = true
+
+	want := s.EventEntriesSince(150)
+	got := s.EventEntriesSinceAppend(nil, 150)
+	if len(got) != len(want) {
+		t.Fatalf("len mismatch: got %d want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Time != want[i].Time || got[i].Summary != want[i].Summary {
+			t.Errorf("entry[%d]: got {Time:%d Summary:%q} want {Time:%d Summary:%q}",
+				i, got[i].Time, got[i].Summary, want[i].Time, want[i].Summary)
+		}
+	}
+}
+
+// TestEventEntriesSinceAppend_ReusesBuffer verifies the append variant
+// appends into a pre-allocated slice so callers can reuse capacity.
+func TestEventEntriesSinceAppend_ReusesBuffer(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+	}
+	s.persistedHistorySorted = true
+
+	pool := make([]cli.EventEntry, 0, 8)
+	got := s.EventEntriesSinceAppend(pool, 0)
+	if len(got) != 2 {
+		t.Fatalf("len = %d want 2", len(got))
+	}
+	// Buffer was reused if cap is still 8 (no new backing allocation needed).
+	if cap(got) != 8 {
+		t.Errorf("cap = %d want 8 (buffer should have been reused)", cap(got))
+	}
+}
+
+// TestEventEntriesSinceAppend_EmptyHistory mirrors the nil-return contract of
+// EventEntriesSince: nil dst + empty history = nil result.
+func TestEventEntriesSinceAppend_EmptyHistory(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistorySorted = true
+	if got := s.EventEntriesSinceAppend(nil, 0); got != nil {
+		t.Errorf("empty history with nil dst: got %v want nil", got)
+	}
+}
+
 // TestHistorySource_ConcurrentSetAndRead pins the race-free contract on the
 // atomic.Pointer hand-off: SetHistorySource and EventEntriesBeforeCtx can
 // execute concurrently without a -race violation. Without atomic storage

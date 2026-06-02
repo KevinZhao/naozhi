@@ -671,8 +671,9 @@ func (p *Process) notifyLinker(ev Event, nowMS int64, isSystemInit bool) {
 		return
 	}
 	if isSystemInit && ev.SessionID != "" {
-		projectDir := resolveProjectDir(p.cwd)
-		p.linker.SetContext(projectDir, ev.SessionID)
+		// Use the pre-computed cachedProjectDir to avoid a rune scan +
+		// os.UserHomeDir syscall on every system/init event. [R112714-PERF-2]
+		p.linker.SetContext(p.cachedProjectDir, ev.SessionID)
 	}
 	// Trigger Resolve for BOTH in-process teammates (TeamCreate's
 	// Agent spawns; task_type="in_process_teammate") AND standalone

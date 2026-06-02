@@ -523,34 +523,25 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 	// Timeout matches the total retry budget (retryLimit * retryInterval)
 	// so we drop rather than extend the grace window when all slots are busy.
 	if l.resolveSem != nil {
-		t := time.NewTimer(time.Duration(l.retryLimit+1) * l.retryInterval)
+		// Use context.WithTimeout to bound the semaphore-acquire wait
+		// instead of a raw time.NewTimer — the context plumbing handles
+		// timer Stop automatically on cancel/timeout, removing the manual
+		// Stop+drain boilerplate on every exit arm. [R112714-PERF-10]
+		semTimeout := time.Duration(l.retryLimit+1) * l.retryInterval
+		semCtx, cancelSem := context.WithTimeout(ctx, semTimeout)
 		select {
 		case l.resolveSem <- struct{}{}:
-			// Stop returns false when the timer already fired; drain the
-			// channel so a tied select that picked the semaphore arm does
-			// not leak a runtime timer with a non-empty C.
-			if !t.Stop() {
-				select {
-				case <-t.C:
-				default:
-				}
-			}
+			cancelSem()
 			defer func() { <-l.resolveSem }()
-		case <-t.C:
-			slog.Debug("agent_link: resolve semaphore full, dropping", "task_id", taskID)
-			return LinkInfo{}, false
-		case <-ctx.Done():
-			// R218B-GO-3 (#644): Process shutdown collapses the retry
-			// budget to near-zero so the parent goroutine can exit
-			// without waiting on a full sem queue. Stop the timer to
-			// drain its goroutine.
-			if !t.Stop() {
-				select {
-				case <-t.C:
-				default:
-				}
+		case <-semCtx.Done():
+			cancelSem()
+			if ctx.Err() != nil {
+				// Parent ctx canceled (process shutdown).
+				slog.Debug("agent_link: resolve canceled while waiting for semaphore", "task_id", taskID, "err", ctx.Err())
+			} else {
+				// Semaphore timeout.
+				slog.Debug("agent_link: resolve semaphore full, dropping", "task_id", taskID)
 			}
-			slog.Debug("agent_link: resolve canceled while waiting for semaphore", "task_id", taskID, "err", ctx.Err())
 			return LinkInfo{}, false
 		}
 	}
@@ -558,15 +549,29 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 	var picked metaEntry
 	var pickedFirst firstLineMeta
 
+	// Step 5 scratch type — hoisted so candidates/filtered slices can be
+	// reused across retry attempts with [:0] instead of re-allocating each
+	// iteration. [R112714-PERF-3]
+	type scored struct {
+		entry   metaEntry
+		first   firstLineMeta
+		modTime time.Time
+		size    int64
+	}
+	var candidates []metaEntry
+	var filtered []scored
+
 	// Steps 2-4: scan, filter by agentType, retry while empty.
 	for attempt := 0; attempt <= l.retryLimit; attempt++ {
 		entries := l.scanMetaFiles(subagentDir)
-		// Allocate fresh — entries is the cached dirCache slice (see
-		// scanMetaFiles); the prior `entries[:0:0]` trick reused its
-		// header but always re-allocated on first append, so it offered
-		// no advantage and obscured the relationship between the cache
-		// slice and the per-attempt working slice.
-		candidates := make([]metaEntry, 0, len(entries))
+		// Reuse the hoisted slices: reset to zero length, keep backing
+		// array from the previous attempt to avoid re-allocating on each
+		// retry. Grow to len(entries) capacity only on the first pass or
+		// when the directory grew since the last scan.
+		candidates = candidates[:0]
+		if cap(candidates) < len(entries) {
+			candidates = make([]metaEntry, 0, len(entries))
+		}
 		for _, e := range entries {
 			if e.agentType == name {
 				candidates = append(candidates, e)
@@ -584,13 +589,10 @@ func (l *SubagentLinker) Resolve(ctx context.Context, taskID, toolUseID, name, d
 		}
 
 		// Step 5: per-candidate stat + first-line sessionId & timestamp cross-check.
-		type scored struct {
-			entry   metaEntry
-			first   firstLineMeta
-			modTime time.Time
-			size    int64
+		filtered = filtered[:0]
+		if cap(filtered) < len(candidates) {
+			filtered = make([]scored, 0, len(candidates))
 		}
-		filtered := make([]scored, 0, len(candidates))
 		for _, cand := range candidates {
 			st, err := os.Stat(cand.jsonlPath)
 			if err != nil || st.Size() == 0 {
@@ -865,12 +867,15 @@ func claudeProjectsRoot() string {
 // mu acquisition, so the dispatch order is well-defined.
 func (l *SubagentLinker) fireCallbacksDropLock(taskID, toolUseID, internalAgentID string) {
 	l.onResolveMu.Lock()
+	// Skip make+copy when no callbacks are registered — the common case
+	// during early startup and in test linkers. [R112714-PERF-5]
+	if len(l.onResolveFns) == 0 {
+		l.onResolveMu.Unlock()
+		return
+	}
 	fns := make([]func(string, string, string), len(l.onResolveFns))
 	copy(fns, l.onResolveFns)
 	l.onResolveMu.Unlock()
-	if len(fns) == 0 {
-		return
-	}
 	l.mu.Unlock()
 	// Re-acquire l.mu via defer so a panicking callback still leaves
 	// l.mu Locked when the stack unwinds — otherwise the caller's own
@@ -898,8 +903,12 @@ func (l *SubagentLinker) fireCallbacksDropLock(taskID, toolUseID, internalAgentI
 // to the write lock and double-check (another goroutine may have
 // populated the cache between our RUnlock and Lock).
 func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
+	// Snapshot now once to avoid two separate time.Now() syscalls for the
+	// TTL check in the RLock fast-path and the write-lock double-check.
+	// [R112714-PERF-9]
+	now := time.Now()
 	l.mu.RLock()
-	if !l.dirCache.at.IsZero() && time.Since(l.dirCache.at) < l.cacheTTL {
+	if !l.dirCache.at.IsZero() && now.Sub(l.dirCache.at) < l.cacheTTL {
 		entries := l.dirCache.entries
 		l.mu.RUnlock()
 		return entries
@@ -911,7 +920,7 @@ func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
 	// Double-check: another goroutine may have populated the cache
 	// between our RUnlock and Lock. The TTL still applies so a stale
 	// entry from before the gap is correctly rejected.
-	if !l.dirCache.at.IsZero() && time.Since(l.dirCache.at) < l.cacheTTL {
+	if !l.dirCache.at.IsZero() && now.Sub(l.dirCache.at) < l.cacheTTL {
 		return l.dirCache.entries
 	}
 	if l.scanHook != nil {

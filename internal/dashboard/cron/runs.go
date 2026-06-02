@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	cronpkg "github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -180,6 +180,11 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 	// hand-edited on disk) can carry runes that would render dangerously
 	// in the dashboard. Result/ErrorMsg are already sanitised inside
 	// recordResultP0WithSanitised before persistence.
+	// [R112714-SEC-5] SanitizeForLog SessionID: a CronRun record persisted
+	// before the validator was tightened (or hand-edited on disk) can carry
+	// control/bidi characters. UUID session IDs are at most 36 chars;
+	// clamp to 64 to give headroom for future formats without amplifying
+	// an injected payload.
 	out := cronRunDetailView{
 		RunID:       run.RunID,
 		JobID:       run.JobID,
@@ -187,7 +192,7 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 		Trigger:     string(run.Trigger),
 		StartedAt:   run.StartedAt.UnixMilli(),
 		DurationMS:  run.DurationMS,
-		SessionID:   run.SessionID,
+		SessionID:   osutil.SanitizeForLog(run.SessionID, 64),
 		Prompt:      osutil.SanitizeForLog(run.Prompt, cronpkg.MaxPromptBytes),
 		WorkDir:     osutil.SanitizeForLog(run.WorkDir, maxCronWorkDirBytesDashboard),
 		Fresh:       run.Fresh,

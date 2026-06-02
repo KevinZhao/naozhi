@@ -375,6 +375,11 @@ func escapeCronMarkdownPunct(s string) string {
 	return cronMarkdownPunctReplacer.Replace(s)
 }
 
+// EscapeMarkdownPunct is the exported variant of escapeCronMarkdownPunct for
+// use by packages (e.g. dispatch) that display cron Job fields in IM replies.
+// R112714-ARCH-1.
+func EscapeMarkdownPunct(s string) string { return escapeCronMarkdownPunct(s) }
+
 // labelOrID returns the IM-notice display label: snap.label when populated,
 // jobID otherwise. R233B-CR-5: keeps the "[Cron <X>] …" prefix readable
 // without crashing on Title-empty + Prompt-empty edge cases.

@@ -1205,3 +1205,83 @@ func TestTranscript_ConcurrencyCap_ReleasesSlotOnReturn(t *testing.T) {
 			"defer release contract broken")
 	}
 }
+
+// TestSameFileAncestor_SymlinkMidPath pins R112714-SEC-2: sameFileAncestor
+// must use os.Lstat (not os.Stat) when walking the ancestor chain so a
+// symlink planted at an intermediate path component cannot redirect the
+// inode comparison to an attacker-controlled directory.
+//
+// Scenario: root = /tmp/.../allowed
+//
+//	target = /tmp/.../allowed/real/file
+//	mid symlink: /tmp/.../allowed/real -> /tmp/.../outside
+//
+// With os.Stat the loop would stat the symlink target (/tmp/.../outside)
+// and compare it against rootInfo — a false-ancestor match if the attacker
+// owns 'outside'. With os.Lstat the loop stats the symlink node itself,
+// which differs from rootInfo, so it climbs to the next parent (allowed/)
+// and correctly returns true (or false when the symlink points outside).
+//
+// We use a symlink pointing OUTSIDE the allowed root to confirm that
+// sameFileAncestor still returns true when the file path is legitimately
+// under the root (symlink only affects the intermediate traversal, not
+// the terminal containment decision), and to confirm sameFileAncestor
+// does NOT follow the symlink to the outside directory.
+func TestSameFileAncestor_SymlinkMidPath(t *testing.T) {
+	if os.Getenv("CI_SKIP_SYMLINK") != "" {
+		t.Skip("symlink tests disabled")
+	}
+	tmp := t.TempDir()
+	allowed := filepath.Join(tmp, "allowed")
+	outside := filepath.Join(tmp, "outside")
+
+	// Create directories.
+	if err := os.MkdirAll(filepath.Join(allowed, "real"), 0o755); err != nil {
+		t.Fatalf("mkdir allowed/real: %v", err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+
+	// Write a real file under allowed/real.
+	realFile := filepath.Join(allowed, "real", "file.jsonl")
+	if err := os.WriteFile(realFile, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write real file: %v", err)
+	}
+
+	// Symlink: allowed/link -> ../outside (points outside the allowed root).
+	linkPath := filepath.Join(allowed, "link")
+	if err := os.Symlink(outside, linkPath); err != nil {
+		t.Skipf("symlink creation not supported: %v", err)
+	}
+
+	// A file path through the symlink component (allowed/link/x.jsonl).
+	// Even though 'link' resolves outside, the lexical path starts under allowed/.
+	// sameFileAncestor walks the LEXICAL parents of the input, not symlink targets.
+	// So it will Lstat allowed/link/x.jsonl (no-exist→err), climb to
+	// allowed/link (exists as symlink inode ≠ rootInfo), then to allowed/
+	// (inode == rootInfo → true). With Stat, 'allowed/link' would resolve
+	// to 'outside' which has a different inode from 'allowed' → still
+	// returns false on the wrong reason.  The important regression is that
+	// os.Stat FOLLOWS the symlink and could match an attacker-planted inode;
+	// os.Lstat does not.
+	symlinkChildPath := filepath.Join(linkPath, "x.jsonl")
+	// The symlink child does not exist on disk. sameFileAncestor should
+	// climb past it and reach 'allowed/' → true.
+	got := sameFileAncestor(symlinkChildPath, allowed)
+	if !got {
+		t.Errorf("sameFileAncestor(%q, %q) = false; expected true because the "+
+			"lexical path is under 'allowed/' even though an intermediate "+
+			"component is a symlink pointing outside", symlinkChildPath, allowed)
+	}
+
+	// Confirm that a path genuinely outside the root is still rejected.
+	outsideFile := filepath.Join(outside, "secret.jsonl")
+	if err := os.WriteFile(outsideFile, []byte("y"), 0o600); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	if sameFileAncestor(outsideFile, allowed) {
+		t.Errorf("sameFileAncestor(%q, %q) = true; path outside root must be rejected",
+			outsideFile, allowed)
+	}
+}

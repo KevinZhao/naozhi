@@ -345,6 +345,11 @@ type Process struct {
 	// projectDir can be (re)derived on shim reconnect without plumbing
 	// SpawnOptions through every call site.
 	cwd string
+	// cachedProjectDir is resolveProjectDir(cwd) computed once in
+	// InitLinker / SetCwdForLinker. cwd is immutable after spawn so the
+	// encoded path never changes; computing it on every system/init event
+	// wastes a full rune scan + os.UserHomeDir syscall. [R112714-PERF-2]
+	cachedProjectDir string
 }
 
 // sendSlot tracks one in-flight passthrough Send call. The slot is appended

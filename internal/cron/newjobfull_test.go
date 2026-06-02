@@ -1,19 +1,36 @@
 package cron
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 // TestNewJob_DelegatesToNewJobFull pins R250-CR-9 (#1142): NewJob is a thin
 // wrapper over NewJobFull, so the (schedule, prompt, JobIMContext) path and
 // the dashboard JobInit path map the shared fields identically. A future
 // field-rename that touches only one of the two constructors would diverge
 // here.
+//
+// R112714-GO-4: the previous `*via != *full` struct comparison was hollow
+// for the Notify *bool field: when both are nil the != comparison passes
+// vacuously without asserting that NewJob intentionally leaves Notify nil.
+// Replace with reflect.DeepEqual (handles pointer fields correctly and
+// remains valid if future fields introduce non-comparable types) and add an
+// explicit assertion for Notify so the nil-by-design invariant is visible.
 func TestNewJob_DelegatesToNewJobFull(t *testing.T) {
 	ctx := JobIMContext{Platform: "feishu", ChatID: "c1", ChatType: "group", CreatedBy: "u1"}
 	via := NewJob("0 * * * *", "hello", ctx)
 	full := NewJobFull(JobInit{Schedule: "0 * * * *", Prompt: "hello", IM: ctx})
 
-	if *via != *full {
+	if !reflect.DeepEqual(via, full) {
 		t.Fatalf("NewJob and NewJobFull diverged for the shared field set:\n NewJob=%+v\n full=%+v", *via, *full)
+	}
+	// NewJob does not accept a Notify argument; the field must be nil so
+	// AddJob / IM dispatch inherits the legacy default (nil = platform
+	// decides). A future change that wires Notify through NewJob would
+	// surface here.
+	if via.Notify != nil {
+		t.Errorf("NewJob: Notify = %v; want nil (NewJob path does not set Notify — use NewJobFull for that)", via.Notify)
 	}
 	// CreatedAt must stay zero — AddJob is the stamping choke point.
 	if !via.CreatedAt.IsZero() {

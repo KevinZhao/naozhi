@@ -1251,7 +1251,16 @@ var shimEnvAllowedPrefixes = []string{
 	//                                   redirectable interpreters)
 	"GOPATH=", "GOROOT=", "GOBIN=",
 	"CARGO_HOME=", "RUSTUP_HOME=",
-	"NODE_ENV=", "NPM_",
+	"NODE_ENV=",
+	// NPM_CONFIG_* can redirect npm's global-root / prefix / cache,
+	// enabling RCE-class module-hijack attacks. Use an explicit allowlist
+	// instead of the bare "NPM_" prefix. [R112714-ARCH-2]
+	//   NPM_CONFIG_REGISTRY — registry URL redirect, no code execution path.
+	//   NPM_TOKEN           — registry authentication token.
+	// Explicitly excluded: NPM_CONFIG_PREFIX, NPM_CONFIG_GLOBALCONFIG,
+	// NPM_CONFIG_CACHE, NPM_CONFIG_TMP — all redirect writable paths that
+	// npm uses to resolve packages or run lifecycle scripts.
+	"NPM_CONFIG_REGISTRY=", "NPM_TOKEN=",
 	"PYTHONDONTWRITEBYTECODE=", "PYTHONUNBUFFERED=",
 	"CONDA_PREFIX=", "CONDA_DEFAULT_ENV=", "CONDA_SHLVL=",
 	"JAVA_HOME=",
@@ -1266,14 +1275,36 @@ var shimEnvAllowedPrefixes = []string{
 // behavior; reject and log instead.
 const maxShimEnvEntryBytes = 4 * 1024
 
+// filterShimEnvOversizeOnce ensures the "oversized entry rejected" warning is
+// emitted at most once per process lifetime. Additional oversized entries are
+// still rejected (the continue fires) but suppressed from the log to prevent
+// a pathological environment from flooding the log. [R112714-ARCH-3]
+var filterShimEnvOversizeOnce sync.Once
+
 // filterShimEnv returns a copy of environ keeping only variables whose key
 // matches one of the allowed prefixes. This is defense-in-depth: the CLI
 // with --skip-permissions can still run `env` via Bash, but at least secrets
 // not needed by the CLI are not exposed by default.
+//
+// Oversized entries (len > maxShimEnvEntryBytes) are rejected and logged
+// (key prefix only, never the value) as documented by the maxShimEnvEntryBytes
+// godoc. [R112714-ARCH-3]
 func filterShimEnv(environ []string) []string {
 	filtered := make([]string, 0, len(environ)/2)
 	for _, kv := range environ {
 		if len(kv) > maxShimEnvEntryBytes {
+			// Log key prefix only — never log the value in case it is a
+			// secret (e.g. a misconfigured PYTHONPATH that happens to
+			// contain credential data). sync.Once caps the log output to
+			// one warning per process lifetime so a pathological
+			// environment (dozens of multi-MB exports) does not flood the
+			// log. [R112714-ARCH-3]
+			filterShimEnvOversizeOnce.Do(func() {
+				slog.Warn("shim env: oversized entry rejected (further oversized entries silently dropped)",
+					"key_prefix", kvKeyPrefix(kv),
+					"len", len(kv),
+					"max", maxShimEnvEntryBytes)
+			})
 			continue
 		}
 		for _, prefix := range shimEnvAllowedPrefixes {
@@ -1284,4 +1315,22 @@ func filterShimEnv(environ []string) []string {
 		}
 	}
 	return filtered
+}
+
+// kvKeyPrefix returns the key part (before '=') of a KEY=value env string,
+// capped at 64 bytes to bound log line length even for pathologically long
+// key names. Never returns the value.
+func kvKeyPrefix(kv string) string {
+	if i := strings.IndexByte(kv, '='); i >= 0 {
+		k := kv[:i]
+		if len(k) > 64 {
+			k = k[:64]
+		}
+		return k
+	}
+	// Malformed (no '='): return a safe prefix.
+	if len(kv) > 64 {
+		return kv[:64]
+	}
+	return kv
 }

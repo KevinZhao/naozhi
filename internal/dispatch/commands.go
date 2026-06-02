@@ -464,6 +464,34 @@ func (d *Dispatcher) handleCronAdd(msg platform.IncomingMessage, parts []string,
 		"schedule", osutil.SanitizeForLog(job.Schedule, 256))
 }
 
+// sanitizeCronDisplay sanitizes a cron job field (Schedule or Prompt) for
+// safe display in IM replies. It strips \n/\t that would break table
+// formatting, truncates to maxRunes runes to prevent layout abuse, applies
+// SanitizeForLog (strips C0/C1/bidi), and replaces markdown link-syntax
+// characters to prevent link-smuggling. R112714-ARCH-1.
+func sanitizeCronDisplay(s string, maxRunes int) string {
+	// Strip newlines and tabs that would break the table row.
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		return r
+	}, s)
+	// Truncate by runes so CJK characters don't cause byte-count overrun.
+	runes := []rune(s)
+	if len(runes) > maxRunes {
+		runes = runes[:maxRunes]
+		s = string(runes) + "…"
+	} else {
+		s = string(runes)
+	}
+	// Strip C0/C1 controls, bidi overrides, zero-width chars.
+	s = osutil.SanitizeForLog(s, len(s)*4+16)
+	// Prevent markdown link-smuggling via [text](url) patterns.
+	s = cron.EscapeMarkdownPunct(s)
+	return s
+}
+
 // handleCronList implements /cron list.
 func (d *Dispatcher) handleCronList(msg platform.IncomingMessage, reply func(string)) {
 	jobs := d.scheduler.ListJobs(msg.Platform, msg.ChatID)
@@ -478,7 +506,9 @@ func (d *Dispatcher) handleCronList(msg platform.IncomingMessage, reply func(str
 		if j.Paused {
 			status = " [暂停]"
 		}
-		fmt.Fprintf(&sb, "  %s  %-20s %s%s\n", j.ID, j.Schedule, j.Prompt, status)
+		safeSchedule := sanitizeCronDisplay(j.Schedule, 30)
+		safePrompt := sanitizeCronDisplay(j.Prompt, 30)
+		fmt.Fprintf(&sb, "  %s  %-20s %s%s\n", j.ID, safeSchedule, safePrompt, status)
 	}
 	reply(sb.String())
 }
