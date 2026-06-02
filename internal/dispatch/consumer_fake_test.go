@@ -2,9 +2,11 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -107,9 +109,10 @@ func TestNewDispatcher_NilProjectMgrStaysUntypedNil(t *testing.T) {
 type fakeSessionRouter struct {
 	getOrCreateCalls atomic.Int64
 
-	getOrCreate func(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
-	getSession  func(key string) *session.ManagedSession
-	notifyIdle  func()
+	getOrCreate               func(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
+	getSession                func(key string) *session.ManagedSession
+	notifyIdle                func()
+	discardPassthroughPending func(key string, reason error)
 }
 
 func (f *fakeSessionRouter) GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error) {
@@ -125,6 +128,12 @@ func (f *fakeSessionRouter) GetSession(key string) *session.ManagedSession {
 		return nil
 	}
 	return f.getSession(key)
+}
+
+func (f *fakeSessionRouter) DiscardPassthroughPending(key string, reason error) {
+	if f.discardPassthroughPending != nil {
+		f.discardPassthroughPending(key, reason)
+	}
 }
 
 func (f *fakeSessionRouter) Reset(string)     { panic("fakeSessionRouter.Reset not configured") }
@@ -174,6 +183,41 @@ func TestDispatcher_AcceptsFakeSessionRouter(t *testing.T) {
 	// Runtime: routing calls reach the fake.
 	if got := d.router.GetSession("any:key:foo:general"); got != nil {
 		t.Errorf("expected nil session from fake, got %v", got)
+	}
+}
+
+// TestDispatcher_DiscardQueueRoutesThroughSeam proves discardQueue clears
+// passthrough pending via the SessionRouter interface seam rather than
+// dereferencing the concrete *session.ManagedSession behind GetSession
+// (R20260602190132-ARCH-4, #1612). A fake router with no getSession closure
+// would have panicked the old GetSession path only on a non-nil session; the
+// seam means the fake observes the (key, reason) call directly.
+func TestDispatcher_DiscardQueueRoutesThroughSeam(t *testing.T) {
+	t.Parallel()
+
+	var gotKey string
+	var gotReason error
+	called := 0
+	fake := &fakeSessionRouter{
+		discardPassthroughPending: func(key string, reason error) {
+			called++
+			gotKey = key
+			gotReason = reason
+		},
+	}
+	var _ SessionRouter = fake
+
+	d := &Dispatcher{router: fake}
+	d.discardQueue("im:direct:u1:general")
+
+	if called != 1 {
+		t.Fatalf("expected DiscardPassthroughPending called once via seam, got %d", called)
+	}
+	if gotKey != "im:direct:u1:general" {
+		t.Errorf("key not forwarded through seam: got %q", gotKey)
+	}
+	if !errors.Is(gotReason, cli.ErrSessionReset) {
+		t.Errorf("reason not forwarded through seam: got %v, want ErrSessionReset", gotReason)
 	}
 }
 

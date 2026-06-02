@@ -888,9 +888,7 @@ func (d *Dispatcher) discardQueue(key string) {
 		d.queue.Discard(key)
 	}
 	if d.router != nil {
-		if sess := d.router.GetSession(key); sess != nil {
-			sess.DiscardPassthroughPending(cli.ErrSessionReset)
-		}
+		d.router.DiscardPassthroughPending(key, cli.ErrSessionReset)
 	}
 }
 
