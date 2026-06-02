@@ -14,6 +14,14 @@ import "time"
 // Each duration default below is declared once as a time.Duration; the string
 // form consumed by applyDefaults is derived via .String() so the two can never
 // drift. New defaults SHOULD be added here rather than inline.
+// CurrentSchemaVersion is the config schema version this binary writes and
+// understands. Config files with SchemaVersion == 0 (absent) are treated as
+// this version for backward compatibility; a file declaring a HIGHER version
+// than this binary supports is a forward-compat hazard the migration entry
+// (R243-ARCH-14 / #843) will reject in a follow-up. Bump when the YAML shape
+// changes incompatibly.
+const CurrentSchemaVersion = 1
+
 const (
 	defaultServerAddr    = ":8080"
 	defaultLogLevel      = "info"

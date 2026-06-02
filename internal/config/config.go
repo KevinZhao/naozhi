@@ -37,6 +37,15 @@ import (
 // Consumers should read Workspace (1) for identity, Nodes (2) for the
 // remote-instance pool, and Session.CWD (3) for the spawn directory.
 type Config struct {
+	// SchemaVersion pins the config schema this file targets. Absent or 0 in
+	// older files is normalized to CurrentSchemaVersion by applyDefaults, so
+	// existing deployments keep loading unchanged. A future breaking change to
+	// the YAML shape bumps CurrentSchemaVersion and a migration pass can branch
+	// on the declared value. R243-ARCH-14 (#843): the config-side half of the
+	// config/v1 migration entry — establishes the version field that the
+	// sysession/scheduler/router migration logic will consult.
+	SchemaVersion int `yaml:"schema_version,omitempty"`
+
 	Server        ServerConfig           `yaml:"server"`
 	CLI           CLIConfig              `yaml:"cli"`
 	Session       SessionConfig          `yaml:"session"`
@@ -504,6 +513,11 @@ func (cfg *Config) Normalize() {
 }
 
 func applyDefaults(cfg *Config) {
+	if cfg.SchemaVersion == 0 {
+		// Absent schema_version means a pre-versioning config file; treat it
+		// as the current schema so existing deployments load unchanged.
+		cfg.SchemaVersion = CurrentSchemaVersion
+	}
 	if cfg.Server.Addr == "" {
 		cfg.Server.Addr = defaultServerAddr
 	}
@@ -611,6 +625,14 @@ func parseDurations(cfg *Config) error {
 }
 
 func validateConfig(cfg *Config) error {
+	// A config declaring a schema newer than this binary understands would be
+	// silently mis-parsed (unknown keys dropped, semantics shifted). Fail loud
+	// so an operator who downgrades the binary after editing config gets a
+	// clear message instead of subtle misbehaviour. R243-ARCH-14 (#843).
+	if cfg.SchemaVersion > CurrentSchemaVersion {
+		return fmt.Errorf("config schema_version %d is newer than this binary supports (max %d); upgrade naozhi or lower schema_version",
+			cfg.SchemaVersion, CurrentSchemaVersion)
+	}
 	if cfg.Platforms.Feishu != nil {
 		if containsEnvPlaceholder(cfg.Platforms.Feishu.AppID) || containsEnvPlaceholder(cfg.Platforms.Feishu.AppSecret) {
 			return fmt.Errorf("feishu app_id or app_secret contains unexpanded ${VAR} — check environment variables")
