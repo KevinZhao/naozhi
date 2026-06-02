@@ -24,7 +24,7 @@ import (
 	robfigcron "github.com/robfig/cron/v3"
 )
 
-// listEntryIDsPool reuses the transient []robfigcron.EntryID scratch slice
+// listEntryIDsPool reuses the transient []cronEntryID scratch slice
 // recorded during ListAllJobsWithNextRun's two-phase snapshot. Dashboard
 // polls at 1Hz across multiple tabs so the call frequency × jobs-per-call
 // dominates the cron CRUD path's allocator pressure. Get returns a
@@ -41,7 +41,7 @@ import (
 // NextRun after s.cron.Entries() runs lock-free.
 var listEntryIDsPool = sync.Pool{
 	New: func() any {
-		s := make([]robfigcron.EntryID, 0, 64)
+		s := make([]cronEntryID, 0, 64)
 		return &s
 	},
 }
@@ -51,7 +51,7 @@ var listEntryIDsPool = sync.Pool{
 // snapshot don't leak into a smaller current one. R247-PERF-4 (#530).
 var listNextByIDPool = sync.Pool{
 	New: func() any {
-		m := make(map[robfigcron.EntryID]time.Time, 64)
+		m := make(map[cronEntryID]time.Time, 64)
 		return &m
 	},
 }
@@ -337,7 +337,7 @@ func (s *Scheduler) ListJobsWithNextRun(plat, chatID string) []JobWithNextRun {
 	s.mu.RLock()
 	bucket := s.jobsByChat[chatKeyFor(plat, chatID)]
 	result := make([]JobWithNextRun, 0, len(bucket))
-	ids := make([]robfigcron.EntryID, 0, len(bucket))
+	ids := make([]cronEntryID, 0, len(bucket))
 	for _, j := range bucket {
 		result = append(result, JobWithNextRun{Job: *j})
 		ids = append(ids, j.entryID)
@@ -388,7 +388,7 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 	// per-poll alloc count flat as job count grows. The result slice is owned
 	// by the caller and stays heap-resident, so it is NOT pooled — and each
 	// Job is copied straight into it under RLock so there is no second copy.
-	idsPtr := listEntryIDsPool.Get().(*[]robfigcron.EntryID)
+	idsPtr := listEntryIDsPool.Get().(*[]cronEntryID)
 	ids := (*idsPtr)[:0]
 	defer func() {
 		// Reset length but keep capacity so the next call skips the make.
@@ -399,7 +399,7 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 	var result []JobWithNextRun
 	s.mu.RLock()
 	if cap(ids) < len(s.jobs) {
-		ids = make([]robfigcron.EntryID, 0, len(s.jobs))
+		ids = make([]cronEntryID, 0, len(s.jobs))
 	}
 	result = make([]JobWithNextRun, 0, len(s.jobs))
 	for _, j := range s.jobs {
@@ -417,7 +417,7 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 	// Entry() call. Called outside s.mu to avoid inverting the lock order
 	// the cron dispatcher takes (cron-internal → execute → s.mu.Lock).
 	entries := s.cron.Entries()
-	nextByIDPtr := listNextByIDPool.Get().(*map[robfigcron.EntryID]time.Time)
+	nextByIDPtr := listNextByIDPool.Get().(*map[cronEntryID]time.Time)
 	nextByID := *nextByIDPtr
 	clear(nextByID)
 	defer func() {
@@ -845,7 +845,7 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 // stays alive and the next tick still fires the now-active job.
 func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 	var pauseCleanup func()
-	var prevEntryID robfigcron.EntryID
+	var prevEntryID cronEntryID
 	var prevPaused bool
 	var captured bool
 	op := func(j *Job) error {
@@ -899,7 +899,7 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 // (entryID, cachedPeriod, Paused) so the in-memory view matches the
 // un-persisted disk view. Mirrors PauseJobByID's rollback contract.
 func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
-	var prevEntryID robfigcron.EntryID
+	var prevEntryID cronEntryID
 	var prevCachedPeriod time.Duration
 	var prevCachedSched robfigcron.Schedule
 	var prevPaused bool
@@ -910,7 +910,7 @@ func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 	// sends on the unbuffered c.remove channel which can only be drained by
 	// the cron-tick goroutine, and that goroutine calls executeJobIDIfLive →
 	// s.mu.RLock. Pattern mirrors PauseJobByID's pauseCleanup hoist (#537).
-	var removeEntryID robfigcron.EntryID
+	var removeEntryID cronEntryID
 	op := func(j *Job) error {
 		// Snapshot under s.mu so the rollback restores the exact pre-op
 		// view; resumeJobLocked → registerJob mutates entryID +
@@ -1147,7 +1147,7 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	// entryID is not persisted (runtime-only field) so persisting with
 	// entryID=0 is safe — the post-unlock registerJob writes it back.
 	var (
-		schedRemoveEntryID robfigcron.EntryID
+		schedRemoveEntryID cronEntryID
 		schedOldSchedule   string
 		schedNewSchedule   string
 		schedNeedsRereg    bool
@@ -1621,7 +1621,7 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 // stays alive and the next tick still fires the now-active job.
 func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 	var pauseCleanup func()
-	var prevEntryID robfigcron.EntryID
+	var prevEntryID cronEntryID
 	var prevPaused bool
 	var captured bool
 	op := func(j *Job) error {
@@ -1676,7 +1676,7 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 // rollback closure and call s.cron.Remove AFTER withJobByPrefix returns
 // (s.mu released).
 func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
-	var prevEntryID robfigcron.EntryID
+	var prevEntryID cronEntryID
 	var prevCachedPeriod time.Duration
 	var prevCachedSched robfigcron.Schedule
 	var prevPaused bool
@@ -1684,7 +1684,7 @@ func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
 	// removeEntryID is non-zero only when rollback fired; cron.Remove must
 	// be called after withJobByPrefix returns (s.mu released) to avoid
 	// the lock-order inversion described above.
-	var removeEntryID robfigcron.EntryID
+	var removeEntryID cronEntryID
 	op := func(j *Job) error {
 		// Snapshot under s.mu so the rollback restores the exact pre-op
 		// view; resumeJobLocked → registerJob mutates entryID +
@@ -1803,7 +1803,7 @@ func (s *Scheduler) NextRun(j *Job) time.Time {
 // lock-order surprises.
 //
 // R242-ARCH-29 (#774).
-func (s *Scheduler) cronEntryGoneLocked(id robfigcron.EntryID) bool {
+func (s *Scheduler) cronEntryGoneLocked(id cronEntryID) bool {
 	if id == 0 {
 		return true
 	}
