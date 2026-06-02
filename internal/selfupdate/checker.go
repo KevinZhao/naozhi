@@ -279,19 +279,17 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
 		return
 	}
 
-	if !ServiceRunning() {
-		// R20260602141221-CR-2: do NOT remove the backup here. ServiceRunning()
-		// returning false during a ModeAuto update may mean the previous restart
-		// is still in-flight (SIGTERM sent, systemd shows "deactivating"). Deleting
-		// the only rollback artifact in that window leaves the system unrecoverable
-		// if the new binary fails to boot. Stale .bak files are harmless and small;
-		// the next successful Replace call overwrites them (O_TRUNC).
-		slog.Info("auto-update: service not running, skipping restart")
-		c.notify(fmt.Sprintf("✅ naozhi %s 已安装。服务未在运行，手动启动以生效。", rel.Tag))
-		_ = backupPath
-		return
-	}
-
+	// R20260602141221-CR-3: do NOT gate the restart on an outer ServiceRunning()
+	// check here. That created a TOCTOU window: ServiceRunning() could read
+	// "active" at this point but flip to false (or the reverse) before the
+	// inner check inside restartSystemdNoWait, and a stale read here that
+	// returned false would skip the restart entirely while c.installed was
+	// already set — the next tick then silently no-ops (rel.Tag == c.installed),
+	// stranding a staged-but-never-restarted binary with no notice, no WARN.
+	// RestartServiceNoWait is the SINGLE authority: it is already a no-op when
+	// the service is not running (restartSystemdNoWait returns nil early), so
+	// the "service not running ⇒ don't start it" semantics are preserved there.
+	//
 	// In-process self-restart: we ARE the process systemd will kill. Use the
 	// fire-and-forget primitive (RestartServiceNoWait), NOT RestartService —
 	// the latter polls `is-active`, which at the instant the restart job is
@@ -300,10 +298,10 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
 	// failed to boot we'd have no rollback artifact. So:
 	//   - trigger the restart and return; systemd Restart=always brings the
 	//     new binary up.
-	//   - DELIBERATELY keep backupPath. A stale .bak is harmless and small,
-	//     and it is the only rollback artifact if the new binary is bad. The
-	//     next successful upgrade's Replace overwrites it (O_TRUNC), so it
-	//     does not accumulate.
+	//   - DELIBERATELY keep backupPath unconditionally. A stale .bak is harmless
+	//     and small, and it is the only rollback artifact if the new binary is
+	//     bad. The next successful upgrade's Replace overwrites it (O_TRUNC), so
+	//     it does not accumulate.
 	slog.Info("auto-update: triggering self-restart", "tag", rel.Tag, "backup_kept", backupPath)
 	c.notify(fmt.Sprintf("🔄 naozhi 正在自动升级到 %s 并重启…", rel.Tag))
 	if err := RestartServiceNoWait(ctx); err != nil {
