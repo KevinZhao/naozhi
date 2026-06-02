@@ -1634,6 +1634,17 @@ func (r *Router) GetSession(key string) *ManagedSession {
 	return r.sessions[key]
 }
 
+// DiscardPassthroughPending fires reason to any in-flight passthrough sends
+// for the keyed session; a no-op when no session exists for the key. Wraps
+// GetSession + ManagedSession.DiscardPassthroughPending so consumers
+// (dispatch.discardQueue) clear pending slots through the router seam rather
+// than dereferencing the concrete *ManagedSession (#1612).
+func (r *Router) DiscardPassthroughPending(key string, reason error) {
+	if sess := r.GetSession(key); sess != nil {
+		sess.DiscardPassthroughPending(reason)
+	}
+}
+
 // runHistoryTask launches fn in a goroutine tracked by r.historyWg,
 // parented on r.historyCtx. Refuses (returns false, no goroutine
 // spawned) when historyCtx is already cancelled — guards the late
