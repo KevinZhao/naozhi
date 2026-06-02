@@ -14,9 +14,18 @@ type EventSink interface {
 	SendRaw(data []byte)
 }
 
-// Conn is the unified interface for both direct (HTTPClient, HTTP) and
-// reverse-connected (ReverseConn, WS) remote nodes.
-type Conn interface {
+// H6 (#435): the 26-method Conn interface mixed four distinct
+// responsibilities (identity, fetch, proxy, pub-sub). It is now composed
+// from four small role interfaces so consumers can depend on the narrow
+// slice they actually use — e.g. wshub's remote send/interrupt paths take a
+// NodeProxySubscriber, not the full Conn. Splitting the surface keeps mocks
+// in tests focused (a fake only needs the methods the consumer calls) and
+// documents which capability set each call site exercises. Conn still embeds
+// all four so every existing implementation and call site compiles unchanged
+// — this is a pure interface decomposition, no behaviour change.
+
+// NodeInfo exposes the register-time identity / status of a remote node.
+type NodeInfo interface {
 	NodeID() string
 	DisplayName() string
 	RemoteAddr() string
@@ -29,14 +38,22 @@ type Conn interface {
 	// primary asks" semantics). Never returns nil; HasCap on the
 	// returned pointer is the canonical lookup.
 	Meta() *NodeMeta
+}
 
+// NodeFetcher pulls read-only snapshots (sessions / projects / discovered /
+// events) plus the fire-once Send from a remote node.
+type NodeFetcher interface {
 	FetchSessions(ctx context.Context) ([]map[string]any, error)
 	FetchProjects(ctx context.Context) ([]map[string]any, error)
 	FetchDiscovered(ctx context.Context) ([]map[string]any, error)
 	FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]cli.EventEntry, error)
 	FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error)
 	Send(ctx context.Context, key, text, workspace string) error
+}
 
+// NodeProxy forwards state-mutating dashboard RPCs (takeover / close /
+// restart / config / favorite / remove / interrupt / label) to a remote node.
+type NodeProxy interface {
 	ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) (string, error)
 	ProxyCloseDiscovered(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) error
 	ProxyRestartPlanner(ctx context.Context, projectName string) error
@@ -55,11 +72,25 @@ type Conn interface {
 	// responded 404 (session not found); (false, err) on transport errors or when
 	// the peer does not implement the RPC yet (older binaries).
 	ProxySetSessionLabel(ctx context.Context, key, label string) (bool, error)
+}
 
+// NodeSubscriber manages per-client event subscriptions against a remote node.
+type NodeSubscriber interface {
 	Subscribe(c EventSink, key string, after int64)
 	Unsubscribe(c EventSink, key string)
 	RefreshSubscription(key string)
 	RemoveClient(c EventSink)
+}
+
+// Conn is the unified interface for both direct (HTTPClient, HTTP) and
+// reverse-connected (ReverseConn, WS) remote nodes. It is now the composition
+// of the four role interfaces above (H6 / #435) plus Close; every existing
+// implementation satisfies it unchanged.
+type Conn interface {
+	NodeInfo
+	NodeFetcher
+	NodeProxy
+	NodeSubscriber
 
 	Close()
 }
