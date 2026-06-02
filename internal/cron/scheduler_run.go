@@ -239,6 +239,33 @@ func (s *Scheduler) jobInflight(id string) *runInflight {
 	return guard
 }
 
+// rangeRunningSessionIDs invokes fn for the Claude session ID of every
+// currently-running inflight run (a run whose SessionID has been populated by
+// setSessionID after GetOrCreate). fn returning false stops the iteration
+// early — like sync.Map.Range — so a caller searching for one ID can bail on
+// the first hit. Empty SessionIDs (run started but session not yet minted)
+// and non-running snapshots are skipped before fn sees them.
+//
+// R249-CR-4 / R260528-ARCH-7 (#948 / #1368): containsSessionID and
+// buildKnownSessionsSet both open-coded the s.runningJobs.Range +
+// *runInflight type-assert + snapshot + running/non-empty guard. Folding the
+// boilerplate here decouples both callers from the s.runningJobs sync.Map
+// representation (one of the fields the god-struct issue flags) and keeps the
+// inflight-view contract in a single place.
+func (s *Scheduler) rangeRunningSessionIDs(fn func(sessionID string) bool) {
+	s.runningJobs.Range(func(_, v any) bool {
+		inf, ok := v.(*runInflight)
+		if !ok || inf == nil {
+			return true
+		}
+		view, running := inf.snapshot()
+		if !running || view.SessionID == "" {
+			return true
+		}
+		return fn(view.SessionID)
+	})
+}
+
 // jobSnapshot captures the mutable Job fields executeOpt reads under s.mu so
 // the long-running send/notify pipeline can run without holding the lock.
 // Snapshot is taken once after the rate-limit/jitter gate and reused for the

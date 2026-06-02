@@ -428,7 +428,7 @@ func main() {
 		// the same source of truth, but wiring through main.go avoids
 		// coupling upstream to the server package.
 		upstreamResolver := session.NewKeyResolver(agents, project.NewDataSource(projectMgr))
-		conn := upstream.New(cfg.Upstream, router, projectMgr, upstreamResolver)
+		conn := upstream.New(buildUpstreamConfig(cfg), router, projectMgr, upstreamResolver)
 		if claudeDir != "" {
 			// Discover/preview closures extracted to main_upstream.go so the
 			// scan-exclude + project-resolve + JSON-fallback logic is testable

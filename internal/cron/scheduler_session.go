@@ -139,13 +139,8 @@ func (s *Scheduler) containsSessionID(sessionID string) bool {
 	s.mu.RUnlock()
 
 	found := false
-	s.runningJobs.Range(func(_, v any) bool {
-		inf, ok := v.(*runInflight)
-		if !ok || inf == nil {
-			return true
-		}
-		view, running := inf.snapshot()
-		if running && view.SessionID == sessionID {
+	s.rangeRunningSessionIDs(func(sid string) bool {
+		if sid == sessionID {
 			found = true
 			return false
 		}
@@ -228,12 +223,8 @@ func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
 
 	// In-flight runs may have a SessionID set even before the run
 	// terminates (set by setSessionID after GetOrCreate returns).
-	s.runningJobs.Range(func(_, v any) bool {
-		if inf, ok := v.(*runInflight); ok && inf != nil {
-			if view, running := inf.snapshot(); running && view.SessionID != "" {
-				out[view.SessionID] = struct{}{}
-			}
-		}
+	s.rangeRunningSessionIDs(func(sid string) bool {
+		out[sid] = struct{}{}
 		return true
 	})
 

@@ -5,6 +5,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/upstream"
 )
 
 // TestBuildReverseNodeAuth pins the cmd-boundary translation that lets
@@ -41,5 +42,36 @@ func TestBuildReverseNodeAuth(t *testing.T) {
 		if g != w {
 			t.Errorf("node %q = %#v, want %#v", id, g, w)
 		}
+	}
+}
+
+// TestBuildUpstreamConfig pins the cmd-boundary translation that lets
+// internal/upstream stay free of an internal/config import (R040034-ARCH-1 /
+// #1411): all five fields map across, and a nil cfg.Upstream yields a nil
+// result so the caller's nil guard stays meaningful.
+func TestBuildUpstreamConfig(t *testing.T) {
+	t.Parallel()
+
+	if got := buildUpstreamConfig(&config.Config{}); got != nil {
+		t.Fatalf("nil cfg.Upstream: got %#v, want nil", got)
+	}
+
+	cfg := &config.Config{Upstream: &config.UpstreamConfig{
+		URL:         "wss://primary",
+		NodeID:      "node-1",
+		Token:       "tok",
+		DisplayName: "Edge",
+		Insecure:    true,
+	}}
+	got := buildUpstreamConfig(cfg)
+	want := &upstream.Config{
+		URL:         "wss://primary",
+		NodeID:      "node-1",
+		Token:       "tok",
+		DisplayName: "Edge",
+		Insecure:    true,
+	}
+	if got == nil || *got != *want {
+		t.Fatalf("buildUpstreamConfig = %#v, want %#v", got, want)
 	}
 }

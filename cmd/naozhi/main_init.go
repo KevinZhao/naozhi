@@ -14,6 +14,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/shim"
+	"github.com/naozhi/naozhi/internal/upstream"
 )
 
 // File: main_init.go
@@ -120,6 +121,23 @@ func buildReverseNodeAuth(cfg *config.Config) map[string]node.ReverseNodeAuth {
 		auth[id] = node.ReverseNodeAuth{Token: e.Token, DisplayName: e.DisplayName}
 	}
 	return auth
+}
+
+// buildUpstreamConfig translates config.UpstreamConfig into the upstream
+// package's zero-dependency upstream.Config value, so internal/upstream no
+// longer imports internal/config (R040034-ARCH-1 / #1411). Returns nil when
+// cfg.Upstream is nil so the caller's nil guard stays meaningful.
+func buildUpstreamConfig(cfg *config.Config) *upstream.Config {
+	if cfg.Upstream == nil {
+		return nil
+	}
+	return &upstream.Config{
+		URL:         cfg.Upstream.URL,
+		NodeID:      cfg.Upstream.NodeID,
+		Token:       cfg.Upstream.Token,
+		DisplayName: cfg.Upstream.DisplayName,
+		Insecure:    cfg.Upstream.Insecure,
+	}
 }
 
 // buildAgentOpts translates cfg.Agents into the two views main() needs: the
