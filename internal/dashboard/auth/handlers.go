@@ -2,7 +2,6 @@ package auth
 
 import (
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -17,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cryptoutil"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/netutil"
 	"github.com/naozhi/naozhi/internal/ratelimit"
@@ -121,19 +121,6 @@ func New(dashboardToken string, cookieSecret []byte, cookieGen string, trustedPr
 		unauthDashLimiter: NewWSUpgradeLimiter(),
 		TrustedProxy:      trustedProxy,
 	}
-}
-
-// randomCookieGen returns 16 bytes of CSPRNG entropy hex-encoded, used as a
-// per-construction cookie-generation seed when the caller does not supply one.
-// On the (practically impossible) rand.Read failure we fall back to a
-// time-derived value so the process still starts; that path is strictly no
-// worse than the previous always-empty-gen behaviour.
-func randomCookieGen() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return strconv.FormatInt(time.Now().UnixNano(), 10)
-	}
-	return hex.EncodeToString(b[:])
 }
 
 // NewLoginLimiter returns the per-IP rate limiter for HTTP /api/auth/login
