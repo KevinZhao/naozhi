@@ -88,15 +88,9 @@ var requiredBootSteps = []string{"cli-backends", "history-backends"}
 // after the wireup steps so a missing import or a no-op'd helper aborts
 // startup with a clear message instead of degrading silently.
 func Validate() error {
-	have := make(map[string]bool, bootRegistry.Len())
-	for _, n := range bootRegistry.Names() {
-		if step, ok := bootRegistry.Get(n); ok {
-			have[step.Kind] = true
-		}
-	}
 	var missing []string
 	for _, req := range requiredBootSteps {
-		if !have[req] {
+		if _, ok := bootRegistry.Get(req); !ok {
 			missing = append(missing, req)
 		}
 	}
