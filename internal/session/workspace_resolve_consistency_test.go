@@ -10,7 +10,7 @@ import "testing"
 func newWorkspaceTestRouter(def string, overrides map[string]string) *Router {
 	r := &Router{
 		sessions:           make(map[string]*ManagedSession),
-		workspace:          def,
+		defaultCWD:         def,
 		workspaceOverrides: make(map[string]string),
 	}
 	for k, v := range overrides {
