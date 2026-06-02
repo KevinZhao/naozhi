@@ -94,12 +94,17 @@ func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubj
 	cur, ok := s.jobs[jobID]
 	paused := ok && cur.Paused
 	s.mu.RUnlock()
+	// R243-ARCH-13 (#841): bind the {subject, job_id} label pair once via
+	// slog.With instead of re-listing the same two keys at every skip-log
+	// site. Keeps the dispatch gate's two Debug lines from drifting their
+	// label set apart.
+	lg := slog.With("subject", logSubject, "job_id", jobID)
 	if !ok {
-		slog.Debug("job deleted before execute, skipping", "subject", logSubject, "job_id", jobID)
+		lg.Debug("job deleted before execute, skipping")
 		return
 	}
 	if paused {
-		slog.Debug("job paused concurrently, skipping", "subject", logSubject, "job_id", jobID)
+		lg.Debug("job paused concurrently, skipping")
 		return
 	}
 	s.executeOpt(cur, viaTriggerNow)
