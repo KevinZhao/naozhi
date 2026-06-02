@@ -680,10 +680,13 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		// both into truncated=true loses the signal that the JSONL
 		// file itself was malformed vs. the disk was sick.
 		if errors.Is(err, bufio.ErrTooLong) {
-			slog.Warn("cron transcript: line too long (returning partial)", "path", resolved, "err", err)
+			// R20260602141221-SEC-13: use basename only — full path leaks
+			// operator home/workspace/session UUID to log aggregators.
+			// The escape-attempt log at line 461 retains full path (security event).
+			slog.Warn("cron transcript: line too long (returning partial)", "file", filepath.Base(resolved), "err", err)
 			setTruncated("line_too_long")
 		} else {
-			slog.Warn("cron transcript: scan io error (returning partial)", "path", resolved, "err", err)
+			slog.Warn("cron transcript: scan io error (returning partial)", "file", filepath.Base(resolved), "err", err)
 			setTruncated("scan_io_error")
 		}
 	}
