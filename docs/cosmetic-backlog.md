@@ -402,3 +402,7 @@
 - [R103901-PERF-4] backfillSubscriberEvents 改 EntriesSinceAppend + sync.Pool dst — internal/server/wshub_eventpush.go:270
 - [R103901-PERF-5] readShimLine lineBuf 纳入 sync.Pool 防大 backing array 抛弃 — internal/cli/process_readloop.go:463
 - [R103901-PERF-6] batchRecentRuns 持久 worker pool 替 per-request goroutine — internal/dashboard/cron/handlers.go:878
+- [R20260602-091302-GO-8] runstore.go 生产代码 import "testing" gate assertJobLockHeld；可换 atomic.Bool by _test.go — internal/cron/runstore.go:20
+- [R20260602-091302-PERF-1] sessionSink.accept 每批 alloc owned+spans 两片，可加 sync.Pool — internal/eventlog/persist/persister.go:554
+- [R20260602-091302-PERF-2] newEventLogSink 多 entry 批每次 alloc spans/times/out 三片，可加 bridgeBatchScratch pool — internal/session/eventlog_bridge.go:183
+- [R20260602-091302-GO-12] slogPrintfLogger.Printf 注释方向写反(Error>Warn)，第二个 Enabled 冗余 — internal/cron/scheduler.go:1935
