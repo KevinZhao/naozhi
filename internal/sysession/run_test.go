@@ -44,6 +44,31 @@ func TestDaemonEnumsAliasRuntelemetry(t *testing.T) {
 			t.Errorf("trigger %q != runtelemetry %q", got, want)
 		}
 	}
+
+	// ErrorClass is aliased too (R260528-ARCH-18 / #1379); 5/6 values map
+	// 1:1 onto runtelemetry, the 6th (Timeout) keeps its divergent
+	// pre-merge wire string by design — server.mapSysessionErrorClass
+	// normalises it to deadline_exceeded before broadcast.
+	var _ runtelemetry.ErrorClass = DaemonErrorClassNone
+	var _ DaemonErrorClass = runtelemetry.ErrClassPanic
+	classWire := map[DaemonErrorClass]runtelemetry.ErrorClass{
+		DaemonErrorClassNone:       runtelemetry.ErrClassNone,
+		DaemonErrorClassValidation: runtelemetry.ErrClassSysessionValidation,
+		DaemonErrorClassUpstream:   runtelemetry.ErrClassSysessionUpstream,
+		DaemonErrorClassPanic:      runtelemetry.ErrClassPanic,
+		DaemonErrorClassCanceled:   runtelemetry.ErrClassCanceled,
+	}
+	for got, want := range classWire {
+		if got != want {
+			t.Errorf("error class %q != runtelemetry %q", got, want)
+		}
+	}
+	if DaemonErrorClassTimeout != "timeout" {
+		t.Errorf("DaemonErrorClassTimeout = %q, want stable pre-merge wire %q", DaemonErrorClassTimeout, "timeout")
+	}
+	if DaemonErrorClass(DaemonErrorClassTimeout) == runtelemetry.ErrClassDeadlineExceeded {
+		t.Error("Timeout must NOT equal canonical deadline_exceeded; server map owns that normalisation")
+	}
 }
 
 func TestClassifyError(t *testing.T) {

@@ -38,14 +38,23 @@ const (
 //     timeouts shouldn't shut the daemon down for hours.
 //   - Panic always trips the breaker after the same limit; a daemon
 //     that panics deterministically is broken.
-type DaemonErrorClass string
+//
+// DaemonErrorClass is type-aliased to runtelemetry.ErrorClass so cron +
+// sysession share one error-class type (R260528-ARCH-18 / #1379). Five of
+// the six sysession values map 1:1 onto runtelemetry constants; the lone
+// exception is DaemonErrorClassTimeout, whose pre-merge wire string
+// "timeout" deliberately differs from runtelemetry's canonical
+// ErrClassDeadlineExceeded ("deadline_exceeded"). server's
+// mapSysessionErrorClass owns that normalisation before broadcast, so the
+// literal stays here verbatim to preserve the existing wire shape.
+type DaemonErrorClass = runtelemetry.ErrorClass
 
 const (
-	DaemonErrorClassNone       DaemonErrorClass = ""
-	DaemonErrorClassValidation DaemonErrorClass = "validation"
-	DaemonErrorClassUpstream   DaemonErrorClass = "upstream"
+	DaemonErrorClassNone                        = runtelemetry.ErrClassNone
+	DaemonErrorClassValidation                  = runtelemetry.ErrClassSysessionValidation
+	DaemonErrorClassUpstream                    = runtelemetry.ErrClassSysessionUpstream
 	DaemonErrorClassTimeout    DaemonErrorClass = "timeout"
-	DaemonErrorClassPanic      DaemonErrorClass = "panic"
+	DaemonErrorClassPanic                       = runtelemetry.ErrClassPanic
 	// DaemonErrorClassCanceled tags runs that returned context.Canceled
 	// (e.g. naozhi shutting down mid-tick or operator-driven Stop).
 	// Distinct from DaemonErrorClassNone so dashboards / log analytics
@@ -59,7 +68,7 @@ const (
 	// daemon bug. recordRun's switch keeps it on the "no counter
 	// change" branch (default case) so we don't reset success counters
 	// either.
-	DaemonErrorClassCanceled DaemonErrorClass = "canceled"
+	DaemonErrorClassCanceled = runtelemetry.ErrClassCanceled
 )
 
 // DaemonTriggerKind distinguishes scheduled ticks from manual triggers.
