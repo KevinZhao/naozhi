@@ -13,6 +13,8 @@
 package ccassets
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -164,7 +166,7 @@ func (p *ClaudeProvider) scanPlugins(home string) ([]assets.Asset, []assets.Plug
 func scanSkillDir(root, relPrefix string, src assets.Source) ([]assets.Asset, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -205,14 +207,14 @@ func (p *ClaudeProvider) ReadRaw(req assets.RawRequest) ([]byte, error) {
 	}
 	resolved, err := resolveUnder(root, rel)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, assets.ErrNotFound
 		}
 		return nil, err
 	}
 	raw, err := readCapped(resolved, maxRawBytes)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, assets.ErrNotFound
 		}
 		return nil, err
