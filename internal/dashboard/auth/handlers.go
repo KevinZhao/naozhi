@@ -110,7 +110,7 @@ func New(dashboardToken string, cookieSecret []byte, cookieGen string, trustedPr
 	// of replaying a fixed value. Callers that supply a gen (production seeds
 	// one from server.go) keep their explicit value.
 	if cookieGen == "" {
-		cookieGen = randomCookieGen()
+		cookieGen = RandomCookieGen()
 	}
 	return &Handlers{
 		DashboardToken:    dashboardToken,
@@ -123,12 +123,15 @@ func New(dashboardToken string, cookieSecret []byte, cookieGen string, trustedPr
 	}
 }
 
-// randomCookieGen returns 16 bytes of CSPRNG entropy hex-encoded, used as a
-// per-construction cookie-generation seed when the caller does not supply one.
-// On the (practically impossible) rand.Read failure we fall back to a
-// time-derived value so the process still starts; that path is strictly no
-// worse than the previous always-empty-gen behaviour.
-func randomCookieGen() string {
+// RandomCookieGen returns 16 bytes of CSPRNG entropy hex-encoded, used as the
+// per-construction cookie-generation seed mixed into the cookie HMAC. It is the
+// single shared implementation for both this package's New (empty-gen fallback)
+// and internal/server's explicit seed at construction — keeping the CSPRNG
+// hardening in one place so neither call site silently lags the other
+// (R20260602190132-SEC-9 / #1604). On the (practically impossible) rand.Read
+// failure we fall back to a time-derived value so the process still starts;
+// that path is strictly no worse than the previous always-empty-gen behaviour.
+func RandomCookieGen() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return strconv.FormatInt(time.Now().UnixNano(), 10)

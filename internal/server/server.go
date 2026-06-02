@@ -344,7 +344,7 @@ func buildServer(opts ServerOptions) *Server {
 	// even when token + secret are stable. RotateDashboardSessions can bump
 	// the in-process seq counter at runtime to invalidate every outstanding
 	// cookie atomically without a restart.
-	cookieGen := randomCookieGen()
+	cookieGen := auth.RandomCookieGen()
 
 	// Construct KeyResolver once and share across dispatcher (wired in
 	// Start), hub, and ProjectHandlers. project.NewDataSource returns
