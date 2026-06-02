@@ -269,9 +269,18 @@ func (h *Handler) lookup(slug string) (memoryResponse, error) {
 	}
 
 	// Nothing found in full scan — record negative cache entry.
+	// Sweep expired entries first (sweep-on-write) so the map cannot grow
+	// without bound when an attacker sprays unique valid slugs.
 	h.negCacheMu.Lock()
 	if h.negCache == nil {
 		h.negCache = make(map[string]time.Time)
+	} else {
+		now := time.Now()
+		for k, dl := range h.negCache {
+			if now.After(dl) {
+				delete(h.negCache, k)
+			}
+		}
 	}
 	h.negCache[slug] = time.Now().Add(negCacheTTL)
 	h.negCacheMu.Unlock()
