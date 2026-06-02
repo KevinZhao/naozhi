@@ -1,6 +1,26 @@
+// static_ux_contract_test.go — UX contract pins for embedded dashboard assets.
+//
+// DO NOT add more regex-based source-grep tests to this file. (#388 / TEST2)
+//
+// This file has grown to thousands of lines of source-grep regex assertions
+// that lock implementation details (DOM structure, literal strings). Every
+// new regex pin raises the review-velocity tax: a benign DOM rearrange trips
+// dozens of unrelated failures, and reviewers learn to rubber-stamp
+// "just-edit-the-test", which hollows out the contract.
+//
+// For NEW UX contracts, prefer in order:
+//  1. test/e2e/ Playwright assertions for anything user-observable in the DOM.
+//  2. httptest behavioural checks for response bodies / headers / status.
+//  3. A source-grep regex here ONLY for invariants that cannot be expressed
+//     behaviourally (e.g. "this dangerous call site exists exactly once"),
+//     and a positive presence assertion needs ≥2 distinct witnesses so a
+//     coincidental substring match cannot satisfy it.
+//
+// Forbid-list (negative) regex assertions are still welcome here.
 package server
 
 import (
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -7109,5 +7129,29 @@ func TestDashboardJS_RenderMdXSSContract(t *testing.T) {
 	// this test before it ships.
 	if !strings.Contains(js, "bold/italic regex must run AFTER esc(s)") {
 		t.Error("inlineMd's SECURITY CONTRACT comment for bold/italic must remain — it documents the invariant that bold/italic .+? captures span already-escaped HTML, and reordering would re-introduce XSS (R172-SEC-H1 / #436)")
+	}
+}
+
+// TestStaticUXContract_FileHasDoNotAddBanner pins the #388 (TEST2) immediate
+// deliverable: a package-doc banner at the top of this file warning that no
+// further regex source-grep tests should be added here, and pointing new UX
+// contracts at test/e2e/ / httptest. The banner is documentation, but it is
+// the contract's only teeth against unbounded growth, so guard its presence
+// here. If you intentionally reword it, update the witnesses below.
+func TestStaticUXContract_FileHasDoNotAddBanner(t *testing.T) {
+	t.Parallel()
+	src, err := os.ReadFile("static_ux_contract_test.go")
+	if err != nil {
+		t.Fatalf("read own source: %v", err)
+	}
+	s := string(src)
+	for _, want := range []string{
+		"DO NOT add more regex-based source-grep tests",
+		"test/e2e/",
+		"#388",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("static_ux_contract_test.go LOST the #388 anti-growth banner witness %q — keep the DO-NOT-ADD warning so the contract-test boundary stays documented", want)
+		}
 	}
 }

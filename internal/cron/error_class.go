@@ -70,6 +70,18 @@ const (
 	// HTTP 400 (input validation).
 	CodeInvalidPrompt ErrCode = "invalid_prompt"
 
+	// CodePromptAlreadySet — SetJobPrompt on a job that already has a
+	// non-empty prompt (use UpdateJob to change it). HTTP 409 (state
+	// conflict: the target already holds a prompt). R103901-ARCH-2: was
+	// previously falling through to CodeUnknown→500.
+	CodePromptAlreadySet ErrCode = "prompt_already_set"
+
+	// CodeSchedulerStopped — a mutation/Start arrived after Stop() latched.
+	// HTTP 503 (service unavailable: the scheduler is shutting down /
+	// gone, retrying against this instance will never succeed).
+	// R103901-ARCH-2: was previously falling through to CodeUnknown→500.
+	CodeSchedulerStopped ErrCode = "scheduler_stopped"
+
 	// CodeUnknown — non-nil error not matching any known sentinel.
 	// HTTP 500: surface the failure and let the caller log the raw
 	// error for triage.
@@ -111,6 +123,10 @@ func ClassifyError(err error) ErrCode {
 		return CodeJobNoPrompt
 	case errors.Is(err, ErrInvalidPrompt):
 		return CodeInvalidPrompt
+	case errors.Is(err, ErrPromptAlreadySet):
+		return CodePromptAlreadySet
+	case errors.Is(err, ErrSchedulerStopped):
+		return CodeSchedulerStopped
 	default:
 		return CodeUnknown
 	}
@@ -138,6 +154,10 @@ func (c ErrCode) HTTPStatus() int {
 		return http.StatusInternalServerError
 	case CodeInvalidPrompt:
 		return http.StatusBadRequest
+	case CodePromptAlreadySet:
+		return http.StatusConflict
+	case CodeSchedulerStopped:
+		return http.StatusServiceUnavailable
 	case CodeUnknown:
 		return http.StatusInternalServerError
 	default:
