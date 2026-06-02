@@ -490,7 +490,15 @@ func loadKnownIDs(storePath string) map[string]bool {
 }
 
 // saveKnownIDs persists the set of all session IDs ever used by naozhi.
-func saveKnownIDs(storePath string, ids map[string]bool) error {
+//
+// The caller passes a slice that is ALREADY sorted ascending (see
+// Router.snapshotKnownIDsSortedLocked, which caches the sort across throttled
+// save ticks — R220123-PERF-19 / #1638). The sort is the R180-GO-P2
+// stable-bytes contract: a deterministic on-disk order keeps backups / audit
+// diffs noise-free across saves of the same logical set. saveKnownIDs does
+// NOT re-sort; it trusts the precondition so the O(N log N) cost is paid once
+// per mutation generation rather than on every 5-minute save tick.
+func saveKnownIDs(storePath string, sortedIDs []string) error {
 	path := knownIDsPath(storePath)
 	if path == "" {
 		return nil
@@ -501,16 +509,7 @@ func saveKnownIDs(storePath string, ids map[string]bool) error {
 			return fmt.Errorf("create known IDs directory: %w", err)
 		}
 	}
-	list := make([]string, 0, len(ids))
-	for id := range ids {
-		list = append(list, id)
-	}
-	// R180-GO-P2: Go map iteration is randomised per run; without this
-	// sort each saveKnownIDs write produces different byte output for the
-	// same logical set, which adds pointless diff noise to backups / audit
-	// tooling and makes on-disk regression testing harder.
-	slices.Sort(list)
-	data, err := json.Marshal(list)
+	data, err := json.Marshal(sortedIDs)
 	if err != nil {
 		return fmt.Errorf("marshal known IDs: %w", err)
 	}
@@ -518,6 +517,35 @@ func saveKnownIDs(storePath string, ids map[string]bool) error {
 		return fmt.Errorf("save known IDs: %w", err)
 	}
 	return nil
+}
+
+// snapshotKnownIDsSortedLocked returns a sorted copy of the known-session-ID
+// set suitable for handing to saveKnownIDs. Caller MUST hold r.mu.
+//
+// R220123-PERF-19 (#1638): the prior save path copied r.knownIDs into a
+// map[string]bool under the lock and saveKnownIDs then re-ranged + sorted it
+// on every throttled tick — O(N log N) per save for an append-only-ish set
+// that rarely changes between the 5-minute save windows. This memoises the
+// sort: the sorted slice is rebuilt only when r.knownIDsGen advanced since
+// the last build (any add/evict bumps the gen), otherwise the cached slice is
+// returned. We always hand back a fresh copy so the returned slice can be
+// serialized outside the lock without aliasing the cache (a concurrent
+// trackSessionID would otherwise mutate it via a future rebuild). The common
+// "nothing changed" tick is now an O(N) copy with no sort.
+func (r *Router) snapshotKnownIDsSortedLocked() []string {
+	if r.knownIDsSortedCache == nil || r.knownIDsSortedGen != r.knownIDsGen {
+		sorted := make([]string, 0, len(r.knownIDs))
+		for id := range r.knownIDs {
+			sorted = append(sorted, id)
+		}
+		// R180-GO-P2: deterministic on-disk order — see saveKnownIDs.
+		slices.Sort(sorted)
+		r.knownIDsSortedCache = sorted
+		r.knownIDsSortedGen = r.knownIDsGen
+	}
+	// Return a copy: callers serialize outside r.mu, and a later rebuild
+	// would otherwise replace the cache slice's backing array under them.
+	return slices.Clone(r.knownIDsSortedCache)
 }
 
 // workspaceOverridesPath returns the path to the workspace overrides file,

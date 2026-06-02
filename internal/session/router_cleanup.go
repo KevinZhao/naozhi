@@ -381,7 +381,7 @@ func (r *Router) Cleanup() {
 		r.reconcileSessionActiveByBackendLocked()
 	}
 	var sessionsCopy map[string]*ManagedSession
-	var knownIDsCopy map[string]bool
+	var knownIDsCopy []string
 	var wsOverridesCopy map[string]string
 	storePath := r.storePath
 	snapshotGen := r.storeGen.Load()
@@ -408,10 +408,9 @@ func (r *Router) Cleanup() {
 	// file-level race guard.)
 	var snapshotKnownIDsGen uint64
 	if r.knownIDsDirty && now.Sub(r.knownIDsSavedAt) >= knownIDsSaveInterval {
-		knownIDsCopy = make(map[string]bool, len(r.knownIDs))
-		for id := range r.knownIDs {
-			knownIDsCopy[id] = true
-		}
+		// R220123-PERF-19 (#1638): sorted snapshot is memoised by gen, so
+		// the O(N log N) sort is skipped when the set is unchanged.
+		knownIDsCopy = r.snapshotKnownIDsSortedLocked()
 		snapshotKnownIDsGen = r.knownIDsGen
 		r.knownIDsSavedAt = now
 	}
@@ -600,13 +599,11 @@ func (r *Router) saveIfDirty() {
 			wsOverridesCopy[k] = v
 		}
 	}
-	var knownIDsCopy map[string]bool
+	var knownIDsCopy []string
 	var snapshotKnownIDsGen uint64
 	if knownIDsDue {
-		knownIDsCopy = make(map[string]bool, len(r.knownIDs))
-		for id := range r.knownIDs {
-			knownIDsCopy[id] = true
-		}
+		// R220123-PERF-19 (#1638): memoised sorted snapshot.
+		knownIDsCopy = r.snapshotKnownIDsSortedLocked()
 		snapshotKnownIDsGen = r.knownIDsGen
 	}
 	storePath := r.storePath
@@ -784,10 +781,9 @@ func (r *Router) shutdown() {
 		sessionsCopy[k] = v
 	}
 	storePath := r.storePath
-	knownIDsCopy := make(map[string]bool, len(r.knownIDs))
-	for id := range r.knownIDs {
-		knownIDsCopy[id] = true
-	}
+	// R220123-PERF-19 (#1638): sorted snapshot for the final flush too, so
+	// saveKnownIDs receives the deterministic ordering it now requires.
+	knownIDsCopy := r.snapshotKnownIDsSortedLocked()
 	wsOverrides := make(map[string]string, len(r.workspaceOverrides))
 	for k, v := range r.workspaceOverrides {
 		wsOverrides[k] = v

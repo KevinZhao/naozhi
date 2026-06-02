@@ -441,6 +441,20 @@ type Router struct {
 	knownIDsDirty bool
 	// 读写: discovery, cleanup
 	knownIDsGen uint64 // incremented on each knownIDs mutation (add/evict)
+	// knownIDsSortedCache caches the deterministic (sorted) serialization
+	// input for saveKnownIDs so the O(N log N) sort is paid once per
+	// mutation generation rather than on every throttled save tick.
+	// R220123-PERF-19 (#1638): the known-IDs set is append-only-ish and the
+	// save is throttled to knownIDsSaveInterval (5 min), so the common case
+	// is "save N unchanged IDs again" — for which a full re-sort is pure
+	// waste. knownIDsSortedGen records the knownIDsGen the cache was built
+	// at; snapshotKnownIDsSortedLocked rebuilds + re-sorts only on a gen
+	// mismatch, otherwise returning the cached sorted slice (which the
+	// caller copies under the lock). The sorted output preserves the
+	// R180-GO-P2 stable-bytes-on-disk contract.
+	// 读写: cleanup (Cleanup/saveIfDirty snapshot), discovery (invalidated via knownIDsGen)
+	knownIDsSortedCache []string
+	knownIDsSortedGen   uint64 // knownIDsGen the cache slice was sorted at; 0 = unbuilt
 	// 读写: cleanup (Cleanup/saveIfDirty)
 	knownIDsSavedAt time.Time // last successful saveKnownIDs; throttles fsync to 5min
 
