@@ -431,3 +431,17 @@
 - [R164029-CR-3] checker.go defer startDelay.Stop() 在 if 块内但实际函数返回才执行，已 fired 无泄漏仅可读性 — internal/selfupdate/checker.go:160
 - [R164029-ARCH-9] dispatch 三个 deprecated *Fn 闭包字段计划内技术债，gated on test migration Q3 — internal/dispatch/dispatch.go:332
 - [R164029-ARCH-10] SessionGuard 1 接口 3 实现已两次 review 判定保留，勿再提折叠 — internal/dispatch/dispatch.go:77
+- [R20260602190132-GO-1] test t.Parallel slog.SetDefault structurally fragile, currently safe — internal/shim/filter_env_endpoint_test.go:97
+- [R20260602190132-CR-1] containsStr reimplements strings.Contains in test — internal/wireup/boot_test.go:99
+- [R20260602190132-CR-3] negative NUL test vacuous when Spawn panics — internal/cli/wrapper_spawn_cwd_nul_test.go:40
+- [R20260602190132-GO-5] ContainsRune(...,0) prefer '\x00' for legibility — internal/cli/wrapper.go:479
+- [R20260602190132-ARCH-1] SessionStatus godoc contradicts active boot pin (godoc) — internal/cron/agent_opts.go:36
+- [R20260602190132-ARCH-2] RegisterSystemStub dead seam reserved-for-future — internal/sysession/router.go:74
+- [R20260602190132-ARCH-3] OnHardFail override could downgrade force-exit (documented) — internal/sysession/manager.go:107
+- [R20260602190132-ARCH-5] auto_titler imports session, asymmetry undocumented — internal/sysession/auto_titler.go:16
+- [R20260602190132-SEC-3] allow_insecure_webhook warn only at startup — internal/platform/feishu/feishu.go:604
+- [R20260602190132-SEC-6] CSRF gate proxy header-strip defense-in-depth — internal/dashboard/auth/csrf.go:76
+- [R20260602190132-SEC-8] stateDir parent world-writable theoretical local-priv — internal/server/server_cookie.go:49
+- [R20260602190132-PERF-6] cap(rev)==0 guard misleading, no action — internal/eventlog/eventlog_query.go:241
+- [R20260602190132-PERF-13] ringSeed rebuilds runIDs unchanged set low-freq — internal/cron/runstore.go:357
+- [R20260602190132-PERF-14] errors.Is on hot path vs == sentinel — internal/cli/process_readloop.go:478

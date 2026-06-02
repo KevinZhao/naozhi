@@ -60,7 +60,7 @@ type Handler struct {
 	// full ReadDir scan finds no match, we record the deadline here so
 	// subsequent requests within the TTL skip the expensive disk scan and
 	// return "not found" immediately, preventing DoS via repeated cache-miss.
-	negCacheMu sync.Mutex
+	negCacheMu sync.RWMutex
 	negCache   map[string]time.Time
 }
 
@@ -225,12 +225,12 @@ func (h *Handler) lookup(slug string) (memoryResponse, error) {
 	// R20260602141221-SEC-10: check negative cache before doing a full ReadDir.
 	// A miss within the TTL means we already scanned all project dirs and found
 	// nothing; skip the expensive scan and return "not found" immediately.
-	h.negCacheMu.Lock()
+	h.negCacheMu.RLock()
 	if deadline, ok := h.negCache[slug]; ok && time.Now().Before(deadline) {
-		h.negCacheMu.Unlock()
+		h.negCacheMu.RUnlock()
 		return memoryResponse{Found: false, Slug: slug}, nil
 	}
-	h.negCacheMu.Unlock()
+	h.negCacheMu.RUnlock()
 
 	entries, err := os.ReadDir(h.projectsDir)
 	if err != nil {

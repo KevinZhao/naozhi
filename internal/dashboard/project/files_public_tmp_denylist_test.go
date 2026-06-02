@@ -26,6 +26,17 @@ func TestIsPublicTmpDeniedName_Unit(t *testing.T) {
 		"/tmp/crash.report",
 		"/tmp/CRASH.dump", // case-insensitive
 		"/tmp/MyAgentSSH", // substring
+		// gpg-agent artefacts (R20260602190132-SEC-4)
+		"/tmp/S.gpg-agent",
+		"/tmp/S.gpg-agent.extra",
+		"/tmp/S.gpg-agent.ssh",
+		"/tmp/GPG-SOCKET", // case-insensitive gpg substring
+		// X11 authority artefacts
+		"/tmp/.Xauthority", // mixed case — isPublicTmpDeniedName lowercases
+		"/tmp/.xauthority",
+		// D-Bus artefacts
+		"/tmp/.dbus-keyrings",
+		"/tmp/.dbus",
 	}
 	for _, name := range denied {
 		if !isPublicTmpDeniedName(name) {
