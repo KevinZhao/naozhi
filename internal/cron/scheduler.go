@@ -276,6 +276,17 @@ type chatJobKey struct {
 	ChatID   string
 }
 
+// chatKeyFor builds the chatJobKey for a (platform, chatID) pair. R249-CR-4 /
+// R260528-ARCH-7 (#948 / #1368): the bare `chatJobKey{Platform: p, ChatID: c}`
+// literal was open-coded at the read sites (JobCountForChat / ListJobs /
+// ListJobsWithNextRun / findByPrefixLocked); a single constructor keeps the
+// (platform, chatID) → key mapping in one place alongside the jobsByChat /
+// chatJobCount trio it indexes, so a future change to the key shape (e.g.
+// folding in a backend dimension) is a one-site edit.
+func chatKeyFor(plat, chatID string) chatJobKey {
+	return chatJobKey{Platform: plat, ChatID: chatID}
+}
+
 // Scheduler manages cron jobs and executes them on schedule.
 //
 // Field-access discipline (mirrors the `// 读写:` annotation pattern from

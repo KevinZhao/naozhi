@@ -155,7 +155,7 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), addJobStubFields, error
 	// in deleteJobLocked / Start so it stays in lock-step with len-by-chat
 	// (s.jobs); s.jobs is still the canonical truth, asserted by
 	// TestChatJobCount_TracksJobsByChat.
-	chatKey := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+	chatKey := chatKeyFor(j.Platform, j.ChatID)
 	if s.chatJobCount[chatKey] >= s.maxJobsPerChat {
 		return nil, addJobStubFields{}, fmt.Errorf("per-chat cron limit reached (%d)", s.maxJobsPerChat)
 	}
@@ -287,7 +287,7 @@ func (s *Scheduler) PerChatJobCount(plat, chatID string) int {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.chatJobCount[chatJobKey{Platform: plat, ChatID: chatID}]
+	return s.chatJobCount[chatKeyFor(plat, chatID)]
 }
 
 // ListJobs returns jobs for a specific chat.
@@ -300,7 +300,7 @@ func (s *Scheduler) ListJobs(plat, chatID string) []Job {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	bucket := s.jobsByChat[chatJobKey{Platform: plat, ChatID: chatID}]
+	bucket := s.jobsByChat[chatKeyFor(plat, chatID)]
 	// R247-GO-3: pre-allocate so an empty result marshals as `[]` instead of
 	// `null` — keeps the JSON wire-format consistent with ListAllJobsWithNextRun
 	// and frontend `.length` defenders unaffected. [BREAKING-LOCAL]
@@ -335,7 +335,7 @@ type JobWithNextRun struct {
 // wire-format symmetry with ListJobs / ListAllJobsWithNextRun.
 func (s *Scheduler) ListJobsWithNextRun(plat, chatID string) []JobWithNextRun {
 	s.mu.RLock()
-	bucket := s.jobsByChat[chatJobKey{Platform: plat, ChatID: chatID}]
+	bucket := s.jobsByChat[chatKeyFor(plat, chatID)]
 	result := make([]JobWithNextRun, 0, len(bucket))
 	ids := make([]robfigcron.EntryID, 0, len(bucket))
 	for _, j := range bucket {
@@ -450,7 +450,7 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 // future third index lands here once instead of drifting across the three
 // insertion sites.
 func (s *Scheduler) addToChatIndexLocked(j *Job) {
-	key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+	key := chatKeyFor(j.Platform, j.ChatID)
 	s.chatJobCount[key]++
 	s.jobsByChat[key] = append(s.jobsByChat[key], j)
 }
@@ -487,7 +487,7 @@ func (s *Scheduler) deleteJobLocked(j *Job) {
 		// the per-chat cap. Drop the entry when count hits zero so the
 		// map's working set tracks the live chat set rather than every
 		// chat that has ever owned a job.
-		key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+		key := chatKeyFor(j.Platform, j.ChatID)
 		if n := s.chatJobCount[key]; n > 1 {
 			s.chatJobCount[key] = n - 1
 		} else {
@@ -2060,7 +2060,7 @@ func (s *Scheduler) findByPrefixLocked(idPrefix, plat, chatID string) (*Job, err
 		// safety net rather than short-circuiting on the map miss.
 	}
 	var matches []*Job
-	for _, j := range s.jobsByChat[chatJobKey{Platform: plat, ChatID: chatID}] {
+	for _, j := range s.jobsByChat[chatKeyFor(plat, chatID)] {
 		if strings.HasPrefix(j.ID, idPrefix) {
 			matches = append(matches, j)
 		}
