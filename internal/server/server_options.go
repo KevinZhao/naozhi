@@ -122,6 +122,13 @@ type ServerOptions struct {
 	// registering /tmp as a real project.
 	PublicTmpEnabled bool
 
+	// ProjectStableKeyEnabled toggles the per-project StableKey field in the
+	// /api/projects list response (RFC docs/rfc/project-stable-session-key.md
+	// §4.2). When false the field is omitted and the dashboard falls back to
+	// the legacy timestamp-key path for "continue". Wired from
+	// cfg.Session.ProjectStableKey.ResolvedEnabled(true).
+	ProjectStableKeyEnabled bool
+
 	// === Core dependencies (previously positional args of New) ===
 	//
 	// These fields were originally positional parameters on New(); they

@@ -23,6 +23,39 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
+// RunHistoryReader is the read-only slice of *Scheduler that dashboard
+// handlers concerned solely with cron run history (transcript / detail /
+// list endpoints) actually need. Today those handlers take the entire
+// *cron.Scheduler even though they only call the four query methods below,
+// which transitively couples a history-read endpoint to the router /
+// platforms / execute path carried by *Scheduler.
+//
+// R250-ARCH-9 (#1172): exporting this interface lets server-side handlers be
+// retyped from `*cron.Scheduler` to `cron.RunHistoryReader`, shrinking their
+// dependency surface to history-read and opening the door to a future
+// runs-only export path that does not wedge through the full scheduler. It is
+// additive and behaviour-preserving: *Scheduler already satisfies it (the
+// methods below are unchanged), so existing callers compile untouched. The
+// underlying runStore stays unexported — the read surface is what callers
+// need, not the storage type.
+type RunHistoryReader interface {
+	// CurrentRun returns the inflight snapshot for jobID, or (zero, false)
+	// when the job is not currently executing.
+	CurrentRun(jobID string) (RunInflightView, bool)
+	// ListRuns returns up to limit CronRunSummary entries for jobID, newest
+	// first, with an optional StartedAt < before cutoff.
+	ListRuns(jobID string, limit int, before time.Time) []CronRunSummary
+	// RecentRuns returns the newest n CronRunSummary entries for jobID.
+	RecentRuns(jobID string, n int) []CronRunSummary
+	// GetRun returns the full CronRun for runID under jobID.
+	GetRun(jobID, runID string) (*CronRun, error)
+}
+
+// Compile-time proof that *Scheduler satisfies the narrow read interface so a
+// future signature change to the query methods can't silently drift the
+// dashboard's coupling reduction out from under RunHistoryReader.
+var _ RunHistoryReader = (*Scheduler)(nil)
+
 // CurrentRun returns the inflight snapshot for jobID, or (zero, false) when
 // the job is not currently executing. Used by the dashboard list API to
 // show "running 12s" badges.

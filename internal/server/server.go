@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
@@ -211,6 +210,29 @@ func (s *Server) log() *slog.Logger {
 	return slog.Default()
 }
 
+// RotateDashboardSessions invalidates every outstanding dashboard auth cookie
+// in real time, without a process restart. It bumps the auth handler's
+// generation counter so the cookie HMAC changes; both the HTTP cookie path and
+// the WS upgrade path read the live MAC (CookieMACFn: s.auth.CookieMAC), so an
+// in-flight rotation propagates to every authenticated surface on the next
+// request/handshake.
+//
+// R217-SEC-6 (#595): closes the "rotation has no explicit session
+// invalidation" gap. Previously the only way to revoke outstanding cookies was
+// to rotate the cookie secret and restart the process (or wait out the 24h
+// MaxAge). This exposes server-side revocation that a future dashboard-token
+// hot-reload / SIGHUP handler — or an operator-facing endpoint — can call to
+// kick every browser back to /api/auth/login immediately. Safe to call from
+// any goroutine (the underlying counter is an atomic increment).
+func (s *Server) RotateDashboardSessions() {
+	if s.auth == nil {
+		return
+	}
+	s.auth.RotateCookieGen()
+	s.log().Info("dashboard auth sessions rotated; outstanding cookies invalidated",
+		"reason", "rotate_dashboard_sessions")
+}
+
 // New creates a new Server.
 // ServerOptions lives in server_options.go (Phase 5-prep, 2026-05-28).
 
@@ -310,15 +332,19 @@ func buildServer(opts ServerOptions) *Server {
 	}
 
 	cookieSecret := loadOrCreateCookieSecret(opts.StateDir)
-	// R247-SEC-17: cookieGen is mixed into the auth-cookie HMAC alongside
-	// the dashboard token so every restart produces a fresh MAC even when
-	// stateDir is shared (the common operator setup). nanoseconds are
-	// unique within the process and cheap to produce — we don't need
-	// crypto-grade entropy because cookieSecret already supplies that;
-	// cookieGen exists only to break MAC equivalence across (re)starts
-	// and future hot-reloads. Future rotation handler can bump this field
-	// at runtime to invalidate every outstanding cookie atomically.
-	cookieGen := strconv.FormatInt(time.Now().UnixNano(), 10)
+	// R217-SEC-6 / R172-SEC-L4 (#595 / #437): cookieGen is mixed into the
+	// auth-cookie HMAC alongside the dashboard token so every restart
+	// produces a fresh MAC even when stateDir is shared (the common operator
+	// setup). The seed was previously time.Now().UnixNano(), which is
+	// predictable: an attacker who learns the process start time (exposed via
+	// /health uptime, journal timestamps, or a banner) can reconstruct the
+	// gen segment and — given the token + secret — forge a cookie that
+	// survives any restart on the same stateDir. Seeding from a CSPRNG closes
+	// that, so a captured cookie cannot be replayed against a future instance
+	// even when token + secret are stable. RotateDashboardSessions can bump
+	// the in-process seq counter at runtime to invalidate every outstanding
+	// cookie atomically without a restart.
+	cookieGen := randomCookieGen()
 
 	// Construct KeyResolver once and share across dispatcher (wired in
 	// Start), hub, and ProjectHandlers. project.NewDataSource returns

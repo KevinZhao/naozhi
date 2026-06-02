@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,11 +15,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/config"
-	"github.com/naozhi/naozhi/internal/cron"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -85,23 +81,8 @@ func main() {
 	}
 	metrics.StartupPhaseConfigMs.Set(time.Since(t0).Milliseconds())
 
-	// Setup logging
-	level := slog.LevelInfo
-	switch cfg.Log.Level {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	var handler slog.Handler
-	if cfg.Log.Format == "text" {
-		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
-	} else {
-		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
-	}
-	slog.SetDefault(slog.New(handler))
+	// Setup logging (resolveLogLevel + newLogHandler in main_init.go).
+	setupLogging(cfg)
 
 	// Context with cancellation for graceful shutdown. Created here (before
 	// applyClaudeEnvSettings) so retry sleeps in readJSONWithRetry respond to
@@ -205,14 +186,10 @@ func main() {
 	if storePath != "" {
 		eventLogDir = filepath.Join(filepath.Dir(storePath), "events")
 	}
-	// Auto-workspace-chain policy: defaults to enabled=true / window=7d /
-	// cap=32 per docs/rfc/auto-workspace-chain.md. Operators can disable
-	// or tune via session.auto_chain in config.yaml.
-	autoChainPolicy := session.GlobalAutoChainPolicy{
-		EnabledFlag: cfg.Session.AutoChain.ResolvedEnabled(true),
-		WindowDur:   time.Duration(cfg.Session.AutoChain.ResolvedWindowHours(7*24)) * time.Hour,
-		CapValue:    cfg.Session.AutoChain.ResolvedCap(32),
-	}
+	// (auto-workspace-chain policy removed — RFC
+	// docs/rfc/project-stable-session-key.md §9.1. Precise continuation is
+	// now carried by the project-stable session key; the old
+	// session.auto_chain config block is deprecated, see config loader.)
 	router := session.NewRouter(session.RouterConfig{
 		Wrapper:          wrapper,
 		Wrappers:         wrappers,
@@ -237,7 +214,6 @@ func main() {
 		KiroSessionsDir:   osutil.ExpandHome("~/.kiro/sessions/cli"),
 		EventLogDir:       eventLogDir,
 		EventLogGenerator: "naozhi",
-		AutoChainPolicy:   autoChainPolicy,
 	})
 	metrics.StartupPhaseRouterMs.Set(time.Since(t0).Milliseconds())
 
@@ -318,28 +294,17 @@ func main() {
 		slog.Warn("no platforms configured, running in dashboard-only mode")
 	}
 
-	// Build agent opts from config — kept as session.AgentOpts so the
-	// router-side spawn path uses the operator-trusted shape; cron's
-	// scheduler receives a translated view via toCronAgentOpts (see
-	// cron_router_adapter.go) so internal/cron does not import session.
-	agents := make(map[string]session.AgentOpts)
-	for id, ac := range cfg.Agents {
-		agents[id] = session.AgentOpts{
-			Model:     ac.Model,
-			ExtraArgs: ac.Args,
-		}
-	}
-	cronAgents := make(map[string]cron.AgentOpts, len(agents))
-	for id, a := range agents {
-		cronAgents[id] = toCronAgentOpts(a)
-	}
+	// Build agent opts from config (buildAgentOpts in main_init.go) — the
+	// session.AgentOpts map is the operator-trusted shape used by the
+	// router-side spawn path; cronAgents is the internal/cron-import-free
+	// translation via toCronAgentOpts (see cron_router_adapter.go).
+	agents, cronAgents := buildAgentOpts(cfg)
 
-	// Validate agent_commands reference existing agents
-	for cmd, agentID := range cfg.AgentCommands {
-		if _, ok := agents[agentID]; !ok {
-			slog.Error("agent_commands references undefined agent", "command", cmd, "agent", agentID)
-			os.Exit(1)
-		}
+	// Validate agent_commands reference existing agents.
+	if cmd, ok := firstUndefinedAgentCommand(cfg.AgentCommands, agents); !ok {
+		slog.Error("agent_commands references undefined agent",
+			"command", cmd, "agent", cfg.AgentCommands[cmd])
+		os.Exit(1)
 	}
 	metrics.StartupPhasePlatformsMs.Set(time.Since(t0).Milliseconds())
 
@@ -389,13 +354,11 @@ func main() {
 	sysWorkDir := schedulers.SysessionWorkDir
 	metrics.StartupPhaseSchedulerMs.Set(time.Since(t0).Milliseconds())
 
-	// Configure remote nodes for multi-node aggregation
-	var nodes map[string]node.Conn
-	if len(cfg.Nodes) > 0 {
-		nodes = make(map[string]node.Conn, len(cfg.Nodes))
-		for id, nc := range cfg.Nodes {
-			nodes[id] = node.NewHTTPClient(id, nc.URL, nc.Token, nc.DisplayName)
-		}
+	// Configure remote nodes for multi-node aggregation (buildRemoteNodes in
+	// main_init.go). nil when none are configured — server treats nil and
+	// empty identically.
+	nodes := buildRemoteNodes(cfg)
+	if len(nodes) > 0 {
 		slog.Info("multi-node configured", "nodes", len(nodes))
 	}
 
@@ -434,6 +397,9 @@ func main() {
 		Version:           version,
 		SysessionManager:  sysMgr,
 		SysWorkDir:        sysWorkDir,
+		// Project-stable session key (RFC docs/rfc/project-stable-session-key.md).
+		// Default-on (opt-out via session.project_stable_key.enabled: false).
+		ProjectStableKeyEnabled: cfg.Session.ProjectStableKey.ResolvedEnabled(true),
 		OnReady: func() {
 			if err := osutil.SdNotify("READY=1"); err != nil {
 				slog.Warn("sd_notify READY failed", "err", err)
@@ -453,37 +419,11 @@ func main() {
 		upstreamResolver := session.NewKeyResolver(agents, project.NewDataSource(projectMgr))
 		conn := upstream.New(cfg.Upstream, router, projectMgr, upstreamResolver)
 		if claudeDir != "" {
-			conn.SetDiscoverFunc(func() (json.RawMessage, error) {
-				pids, sids, cwds := router.ManagedExcludeSets()
-				sessions, err := discovery.Scan(claudeDir, pids, sids, cwds)
-				if err != nil {
-					return json.Marshal([]any{})
-				}
-				if sessions == nil {
-					sessions = []discovery.DiscoveredSession{}
-				}
-				if projectMgr != nil && len(sessions) > 0 {
-					cwds := make([]string, len(sessions))
-					for i, d := range sessions {
-						cwds[i] = d.CWD
-					}
-					cwdMap := projectMgr.ResolveWorkspaces(cwds)
-					for i := range sessions {
-						sessions[i].Project = cwdMap[sessions[i].CWD]
-					}
-				}
-				return json.Marshal(sessions)
-			})
-			conn.SetPreviewFunc(func(sessionID string) (json.RawMessage, error) {
-				entries, err := discovery.LoadHistory(claudeDir, sessionID, "")
-				if err != nil {
-					return json.Marshal([]cli.EventEntry{})
-				}
-				if entries == nil {
-					entries = []cli.EventEntry{}
-				}
-				return json.Marshal(entries)
-			})
+			// Discover/preview closures extracted to main_upstream.go so the
+			// scan-exclude + project-resolve + JSON-fallback logic is testable
+			// in isolation (R237-ARCH-8 / #590).
+			conn.SetDiscoverFunc(newUpstreamDiscoverFunc(claudeDir, router, projectMgr))
+			conn.SetPreviewFunc(newUpstreamPreviewFunc(claudeDir))
 		}
 		go conn.Run(ctx)
 		slog.Info("upstream connector starting", "url", cfg.Upstream.URL, "node_id", cfg.Upstream.NodeID)
@@ -595,26 +535,8 @@ func main() {
 		serverErr <- srv.Start(ctx)
 	}()
 
-	// Systemd watchdog: periodically signal liveness so WatchdogSec can detect hangs.
-	// Always send WATCHDOG=1 unconditionally — its purpose is OS-level liveness.
-	// The HealthCheck (TryRLock) result is logged as a diagnostic signal only;
-	// it must not suppress the heartbeat since normal write-lock activity
-	// (cleanup, spawn) would cause false negatives.
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if !router.HealthCheck() {
-					slog.Warn("router mutex contended at watchdog tick")
-				}
-				_ = osutil.SdNotify("WATCHDOG=1")
-			}
-		}
-	}()
+	// Systemd watchdog heartbeat (startWatchdogLoop in main_init.go).
+	startWatchdogLoop(ctx, router.HealthCheck)
 
 	metrics.StartupPhaseReadyMs.Set(time.Since(t0).Milliseconds())
 

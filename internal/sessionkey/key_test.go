@@ -142,3 +142,54 @@ func TestKeyConstructorRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestIsDashboardProjectKey covers the project-stable dashboard key
+// discriminator: only `dashboard:pj:<id>:...` matches; planner / scratch /
+// cron / sys / malformed inputs do not.
+func TestIsDashboardProjectKey(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"dashboard:pj:abc123:general", true},
+		{"dashboard:pj:deadbeefdeadbeef:sonnet", true},
+		{"dashboard:pj:x", true},          // minimal non-empty id, no agent segment
+		{"dashboard:pj:", false},          // empty id segment
+		{"dashboard:pj", false},           // missing trailing colon
+		{"dashboard:direct:ts-slug:general", false}, // legacy timestamp key
+		{"project:foo:planner", false},    // planner namespace (platform=project)
+		{"dashboard:project:abc:general", false}, // chatType "project" is NOT "pj"
+		{"scratch:abc:general:sonnet", false},
+		{"cron:abc123", false},
+		{"sys:daemon", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := IsDashboardProjectKey(tc.in); got != tc.want {
+			t.Errorf("IsDashboardProjectKey(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestDashboardProjectKeyVsPlannerNoCollision pins the BLOCKING-1 fix: the
+// project-stable dashboard namespace and the planner namespace must never
+// classify the same key. Includes the specific reviewer counterexample —
+// a naive parts[1]=="project" check would misfire, but "pj" shares no token.
+func TestDashboardProjectKeyVsPlannerNoCollision(t *testing.T) {
+	t.Parallel()
+	dashKey := DashboardPlatform + ":" + DashboardProjectChatType + ":hash16:general"
+	if !IsDashboardProjectKey(dashKey) {
+		t.Fatalf("expected %q to be a dashboard project key", dashKey)
+	}
+	if IsPlannerKey(dashKey) {
+		t.Errorf("dashboard project key %q must not be classified as planner", dashKey)
+	}
+	plannerKey := PlannerKeyFor("foo")
+	if IsDashboardProjectKey(plannerKey) {
+		t.Errorf("planner key %q must not be classified as dashboard project", plannerKey)
+	}
+	if !IsPlannerKey(plannerKey) {
+		t.Errorf("planner key %q should be a planner key", plannerKey)
+	}
+}

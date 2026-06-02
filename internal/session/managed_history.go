@@ -176,6 +176,72 @@ func (s *ManagedSession) ReplacePrevSessionIDs(ids []string) {
 	s.prevSessionIDs = slices.Clone(ids)
 }
 
+// RebuildChainFiltered atomically rebuilds prevSessionIDs and
+// prevSessionOrigins under a SINGLE historyMu write hold, keeping only the
+// indices where keepMask is true. Both parallel slices are filtered with the
+// same mask so they stay positionally aligned — no reader can observe an
+// intermediate state where the two slices differ in length.
+//
+// Why a dedicated method (RFC §9.2 v2.1, Go-BLOCKING-2): composing
+// ReplacePrevSessionIDs + SetPrevSessionOrigins cannot achieve this — each
+// takes historyMu independently, so between the two calls a reader running
+// SnapshotPrevSessionOrigins would see len(prevSessionIDs) != len(origins)
+// and synthesise wrong "manual" labels. Doing both mutations in one lock
+// hold closes that window.
+//
+// keepMask must have len == len(prevSessionIDs); a mismatched mask is a
+// caller bug and is treated as "keep nothing changed" (no-op) to avoid
+// corrupting the chain. Returns the number of entries removed.
+//
+// Origins shorter than the ID chain (legacy / untracked prefix) are treated
+// as "manual" for the surviving entries, matching SnapshotPrevSessionOrigins'
+// positional fallback, so the rebuilt origins slice is exactly len(newIDs).
+func (s *ManagedSession) RebuildChainFiltered(keepMask []bool) int {
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+
+	n := len(s.prevSessionIDs)
+	if len(keepMask) != n {
+		// Length mismatch — refuse to touch the chain rather than risk
+		// misaligning the parallel slices.
+		return 0
+	}
+	if n == 0 {
+		return 0
+	}
+
+	newIDs := make([]string, 0, n)
+	newOrigins := make([]string, 0, n)
+	removed := 0
+	for i := 0; i < n; i++ {
+		if !keepMask[i] {
+			removed++
+			continue
+		}
+		newIDs = append(newIDs, s.prevSessionIDs[i])
+		origin := "manual"
+		if i < len(s.prevSessionOrigins) && s.prevSessionOrigins[i] != "" {
+			origin = s.prevSessionOrigins[i]
+		}
+		newOrigins = append(newOrigins, origin)
+	}
+
+	if removed == 0 {
+		// Nothing dropped — leave the slices untouched so we don't perturb
+		// a possibly-shorter origins slice that callers tolerate.
+		return 0
+	}
+
+	if len(newIDs) == 0 {
+		s.prevSessionIDs = nil
+		s.prevSessionOrigins = nil
+		return removed
+	}
+	s.prevSessionIDs = newIDs
+	s.prevSessionOrigins = newOrigins
+	return removed
+}
+
 // SnapshotPersistedHistory returns a defensive copy of the persistedHistory
 // ring. The result is safe to mutate without affecting the session. Returns
 // nil when the ring is empty so callers don't pay a zero-length alloc.

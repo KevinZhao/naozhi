@@ -37,6 +37,15 @@ import (
 // Consumers should read Workspace (1) for identity, Nodes (2) for the
 // remote-instance pool, and Session.CWD (3) for the spawn directory.
 type Config struct {
+	// SchemaVersion pins the config schema this file targets. Absent or 0 in
+	// older files is normalized to CurrentSchemaVersion by applyDefaults, so
+	// existing deployments keep loading unchanged. A future breaking change to
+	// the YAML shape bumps CurrentSchemaVersion and a migration pass can branch
+	// on the declared value. R243-ARCH-14 (#843): the config-side half of the
+	// config/v1 migration entry — establishes the version field that the
+	// sysession/scheduler/router migration logic will consult.
+	SchemaVersion int `yaml:"schema_version,omitempty"`
+
 	Server        ServerConfig           `yaml:"server"`
 	CLI           CLIConfig              `yaml:"cli"`
 	Session       SessionConfig          `yaml:"session"`
@@ -154,9 +163,35 @@ type SessionConfig struct {
 	CWD       string         `yaml:"cwd"` // default working directory for CLI processes
 	// Deprecated: use CWD instead. Preserved for backward compatibility
 	// with existing config files; new fields should write only `cwd`.
-	Workspace string              `yaml:"workspace"`
-	Shim      ShimConfig          `yaml:"shim"`
-	AutoChain AutoChainYAMLConfig `yaml:"auto_chain,omitempty"`
+	Workspace string     `yaml:"workspace"`
+	Shim      ShimConfig `yaml:"shim"`
+	// Deprecated: the auto-workspace-chain feature was retired (RFC
+	// docs/rfc/project-stable-session-key.md §9.1). This block is still
+	// parsed so existing config files do not error, but it no longer has
+	// any effect; precise continuation is now carried by the project-stable
+	// session key. A non-default value triggers a one-line deprecation warn
+	// at load (see WarnDeprecated).
+	AutoChain        AutoChainYAMLConfig        `yaml:"auto_chain,omitempty"`
+	ProjectStableKey ProjectStableKeyYAMLConfig `yaml:"project_stable_key,omitempty"`
+}
+
+// ProjectStableKeyYAMLConfig controls the project-level stable session key
+// feature (RFC docs/rfc/project-stable-session-key.md). Default-on. When
+// disabled, the dashboard frontend falls back to the legacy timestamp-key
+// path for "continue" — existing stable-key sessions age out naturally.
+//
+// Enabled is *bool so an absent key falls back to def-true while preserving
+// the ability to explicitly write enabled: false.
+type ProjectStableKeyYAMLConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"`
+}
+
+// ResolvedEnabled returns the effective on/off flag.
+func (c ProjectStableKeyYAMLConfig) ResolvedEnabled(def bool) bool {
+	if c.Enabled == nil {
+		return def
+	}
+	return *c.Enabled
 }
 
 // AutoChainYAMLConfig represents the auto-workspace-chain feature
@@ -504,33 +539,38 @@ func (cfg *Config) Normalize() {
 }
 
 func applyDefaults(cfg *Config) {
+	if cfg.SchemaVersion == 0 {
+		// Absent schema_version means a pre-versioning config file; treat it
+		// as the current schema so existing deployments load unchanged.
+		cfg.SchemaVersion = CurrentSchemaVersion
+	}
 	if cfg.Server.Addr == "" {
-		cfg.Server.Addr = ":8080"
+		cfg.Server.Addr = defaultServerAddr
 	}
 	if cfg.Session.MaxProcs <= 0 {
 		cfg.Session.MaxProcs = sessionconst.DefaultMaxProcs
 	}
 	if cfg.Session.TTL == "" {
-		cfg.Session.TTL = "30m"
+		cfg.Session.TTL = defaultSessionTTL.String()
 	}
 	if cfg.Session.PruneTTL == "" {
-		cfg.Session.PruneTTL = "72h"
+		cfg.Session.PruneTTL = defaultSessionPruneTTL.String()
 	}
 	if cfg.Log.Level == "" {
-		cfg.Log.Level = "info"
+		cfg.Log.Level = defaultLogLevel
 	}
 	if cfg.Session.Workspace == "" {
-		cfg.Session.Workspace = "~/.naozhi/workspace"
+		cfg.Session.Workspace = defaultSessionCWD
 	}
 	if cfg.Session.Queue.MaxDepth == nil {
-		defaultDepth := 20
+		defaultDepth := defaultQueueMaxDepth
 		cfg.Session.Queue.MaxDepth = &defaultDepth
 	}
 	if cfg.Session.Queue.CollectDelay == "" {
-		cfg.Session.Queue.CollectDelay = "500ms"
+		cfg.Session.Queue.CollectDelay = defaultQueueCollectDelay.String()
 	}
 	if cfg.Session.Queue.Mode == "" {
-		cfg.Session.Queue.Mode = "collect"
+		cfg.Session.Queue.Mode = defaultQueueMode
 	}
 	if cfg.Session.CWD != "" {
 		if cfg.Session.Workspace != "" && cfg.Session.Workspace != cfg.Session.CWD {
@@ -544,6 +584,14 @@ func applyDefaults(cfg *Config) {
 		// promotion forever. R71-CONFIG-M1.
 		slog.Warn("'session.workspace' is deprecated, please rename to 'session.cwd'")
 		cfg.Session.CWD = cfg.Session.Workspace
+	}
+
+	// Deprecation: the auto-workspace-chain feature was retired (RFC
+	// docs/rfc/project-stable-session-key.md §9.1). The config block is
+	// still parsed so old files don't error, but it has no effect — warn
+	// once if an operator explicitly set any field so they know to drop it.
+	if cfg.Session.AutoChain.Enabled != nil || cfg.Session.AutoChain.WindowHours != 0 || cfg.Session.AutoChain.Cap != 0 {
+		slog.Warn("'session.auto_chain' is deprecated and has no effect; the feature was replaced by project-stable session keys — remove this block from config")
 	}
 
 	cfg.Normalize()
@@ -579,38 +627,46 @@ func applyDefaults(cfg *Config) {
 
 func parseDurations(cfg *Config) error {
 	var err error
-	if cfg.cachedTTL, err = parseDurationRequired(cfg.Session.TTL, "session.ttl", 30*time.Minute); err != nil {
+	if cfg.cachedTTL, err = parseDurationRequired(cfg.Session.TTL, "session.ttl", defaultSessionTTL); err != nil {
 		return err
 	}
-	if cfg.cachedPruneTTL, err = parseDurationRequired(cfg.Session.PruneTTL, "session.prune_ttl", 72*time.Hour); err != nil {
+	if cfg.cachedPruneTTL, err = parseDurationRequired(cfg.Session.PruneTTL, "session.prune_ttl", defaultSessionPruneTTL); err != nil {
 		return err
 	}
-	if cfg.cachedNoOutputTimeout, err = parseDurationRequired(cfg.Session.Watchdog.NoOutputTimeout, "session.watchdog.no_output_timeout", 2*time.Minute); err != nil {
+	if cfg.cachedNoOutputTimeout, err = parseDurationRequired(cfg.Session.Watchdog.NoOutputTimeout, "session.watchdog.no_output_timeout", defaultNoOutputTimeout); err != nil {
 		return err
 	}
-	if cfg.cachedTotalTimeout, err = parseDurationRequired(cfg.Session.Watchdog.TotalTimeout, "session.watchdog.total_timeout", 5*time.Minute); err != nil {
+	if cfg.cachedTotalTimeout, err = parseDurationRequired(cfg.Session.Watchdog.TotalTimeout, "session.watchdog.total_timeout", defaultTotalTimeout); err != nil {
 		return err
 	}
-	if cfg.cachedExecTimeout, err = parseDurationRequired(cfg.Cron.ExecutionTimeout, "cron.execution_timeout", 5*time.Minute); err != nil {
+	if cfg.cachedExecTimeout, err = parseDurationRequired(cfg.Cron.ExecutionTimeout, "cron.execution_timeout", defaultCronExecTimeout); err != nil {
 		return err
 	}
-	if cfg.cachedCollectDelay, err = parseDurationRequired(cfg.Session.Queue.CollectDelay, "session.queue.collect_delay", 500*time.Millisecond); err != nil {
+	if cfg.cachedCollectDelay, err = parseDurationRequired(cfg.Session.Queue.CollectDelay, "session.queue.collect_delay", defaultQueueCollectDelay); err != nil {
 		return err
 	}
-	if cfg.cachedJitterMax, err = parseDurationNonNegative(cfg.Cron.JitterMax, "cron.jitter_max", 2*time.Minute); err != nil {
+	if cfg.cachedJitterMax, err = parseDurationNonNegative(cfg.Cron.JitterMax, "cron.jitter_max", defaultCronJitterMax); err != nil {
 		return err
 	}
 	// 硬上限 10m：抖动比大多数任务周期还长就毫无意义，clamp 并 warn，
 	// 不把配置错误升成启动失败。
-	if cfg.cachedJitterMax > 10*time.Minute {
+	if cfg.cachedJitterMax > cronJitterMaxHardCap {
 		slog.Warn("cron.jitter_max exceeds 10m hard cap, clamping",
-			"requested", cfg.cachedJitterMax, "cap", 10*time.Minute)
-		cfg.cachedJitterMax = 10 * time.Minute
+			"requested", cfg.cachedJitterMax, "cap", cronJitterMaxHardCap)
+		cfg.cachedJitterMax = cronJitterMaxHardCap
 	}
 	return nil
 }
 
 func validateConfig(cfg *Config) error {
+	// A config declaring a schema newer than this binary understands would be
+	// silently mis-parsed (unknown keys dropped, semantics shifted). Fail loud
+	// so an operator who downgrades the binary after editing config gets a
+	// clear message instead of subtle misbehaviour. R243-ARCH-14 (#843).
+	if cfg.SchemaVersion > CurrentSchemaVersion {
+		return fmt.Errorf("config schema_version %d is newer than this binary supports (max %d); upgrade naozhi or lower schema_version",
+			cfg.SchemaVersion, CurrentSchemaVersion)
+	}
 	if cfg.Platforms.Feishu != nil {
 		if containsEnvPlaceholder(cfg.Platforms.Feishu.AppID) || containsEnvPlaceholder(cfg.Platforms.Feishu.AppSecret) {
 			return fmt.Errorf("feishu app_id or app_secret contains unexpanded ${VAR} — check environment variables")
