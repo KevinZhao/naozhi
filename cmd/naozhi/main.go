@@ -19,7 +19,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/config"
-	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
@@ -303,28 +302,17 @@ func main() {
 		slog.Warn("no platforms configured, running in dashboard-only mode")
 	}
 
-	// Build agent opts from config — kept as session.AgentOpts so the
-	// router-side spawn path uses the operator-trusted shape; cron's
-	// scheduler receives a translated view via toCronAgentOpts (see
-	// cron_router_adapter.go) so internal/cron does not import session.
-	agents := make(map[string]session.AgentOpts)
-	for id, ac := range cfg.Agents {
-		agents[id] = session.AgentOpts{
-			Model:     ac.Model,
-			ExtraArgs: ac.Args,
-		}
-	}
-	cronAgents := make(map[string]cron.AgentOpts, len(agents))
-	for id, a := range agents {
-		cronAgents[id] = toCronAgentOpts(a)
-	}
+	// Build agent opts from config (buildAgentOpts in main_init.go) — the
+	// session.AgentOpts map is the operator-trusted shape used by the
+	// router-side spawn path; cronAgents is the internal/cron-import-free
+	// translation via toCronAgentOpts (see cron_router_adapter.go).
+	agents, cronAgents := buildAgentOpts(cfg)
 
-	// Validate agent_commands reference existing agents
-	for cmd, agentID := range cfg.AgentCommands {
-		if _, ok := agents[agentID]; !ok {
-			slog.Error("agent_commands references undefined agent", "command", cmd, "agent", agentID)
-			os.Exit(1)
-		}
+	// Validate agent_commands reference existing agents.
+	if cmd, ok := firstUndefinedAgentCommand(cfg.AgentCommands, agents); !ok {
+		slog.Error("agent_commands references undefined agent",
+			"command", cmd, "agent", cfg.AgentCommands[cmd])
+		os.Exit(1)
 	}
 	metrics.StartupPhasePlatformsMs.Set(time.Since(t0).Milliseconds())
 

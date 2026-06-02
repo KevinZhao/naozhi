@@ -9,7 +9,9 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -83,6 +85,44 @@ func startWatchdogLoop(ctx context.Context, hc func() bool) {
 			}
 		}
 	}()
+}
+
+// buildAgentOpts translates cfg.Agents into the two views main() needs: the
+// session.AgentOpts map (operator-trusted shape consumed by the router spawn
+// path) and the cron.AgentOpts map (the internal/cron-import-free projection
+// produced by toCronAgentOpts). Extracted from main() (R237-ARCH-8 / #590)
+// so the model/args copy and the cron translation are unit-testable without
+// booting the router. Both maps are always non-nil (possibly empty).
+func buildAgentOpts(cfg *config.Config) (map[string]session.AgentOpts, map[string]cron.AgentOpts) {
+	agents := make(map[string]session.AgentOpts, len(cfg.Agents))
+	for id, ac := range cfg.Agents {
+		agents[id] = session.AgentOpts{
+			Model:     ac.Model,
+			ExtraArgs: ac.Args,
+		}
+	}
+	cronAgents := make(map[string]cron.AgentOpts, len(agents))
+	for id, a := range agents {
+		cronAgents[id] = toCronAgentOpts(a)
+	}
+	return agents, cronAgents
+}
+
+// firstUndefinedAgentCommand reports the first agent_commands entry whose
+// target agent id is not present in agents. ok=true means every command
+// resolves (cmd is then ""); ok=false surfaces the offending command so
+// main() can emit the operator-actionable os.Exit log unchanged. Extracted
+// from main() (R237-ARCH-8 / #590) so the cross-reference validation is
+// testable independent of process exit. Iteration order over a Go map is
+// unspecified, but the contract only promises "a" failing command, matching
+// the original loop's fail-on-first-seen behavior.
+func firstUndefinedAgentCommand(agentCommands map[string]string, agents map[string]session.AgentOpts) (string, bool) {
+	for cmd, agentID := range agentCommands {
+		if _, ok := agents[agentID]; !ok {
+			return cmd, false
+		}
+	}
+	return "", true
 }
 
 // logConfigValidationDiagnostics surfaces every config.Validate() finding
