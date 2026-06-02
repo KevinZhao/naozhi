@@ -915,19 +915,28 @@ func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
 	}
 	l.mu.RUnlock()
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	// Double-check: another goroutine may have populated the cache
-	// between our RUnlock and Lock. The TTL still applies so a stale
-	// entry from before the gap is correctly rejected.
-	if !l.dirCache.at.IsZero() && now.Sub(l.dirCache.at) < l.cacheTTL {
-		return l.dirCache.entries
-	}
+	// R164029-PERF-3 (#1595): rawScanSubagentsDir does os.ReadDir + an
+	// os.ReadFile per *.meta.json — blocking disk IO that previously ran
+	// while holding l.mu.Lock, stalling every concurrent Resolve fast-path
+	// (which only needs an RLock for its cache double-check). Do the scan
+	// WITHOUT the lock, then take the write lock just long enough to publish
+	// into the cache. The TTL double-check both before and after the scan
+	// keeps a stampede of concurrent misses cheap and preserves the
+	// "freshest snapshot wins" semantics.
 	if l.scanHook != nil {
 		l.scanHook()
 	}
 	entries := rawScanSubagentsDir(dir)
-	l.dirCache.at = time.Now()
+	scannedAt := time.Now()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	// Another goroutine may have published a fresher cache while we scanned
+	// unlocked. If so, prefer it and discard our (now-stale-or-equal) result.
+	if !l.dirCache.at.IsZero() && l.dirCache.at.After(scannedAt) {
+		return l.dirCache.entries
+	}
+	l.dirCache.at = scannedAt
 	l.dirCache.entries = entries
 	return entries
 }
