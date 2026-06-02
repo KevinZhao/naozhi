@@ -43,6 +43,29 @@ func (s *Server) killAndCleanupClaude(ctx context.Context, pid int, procStartTim
 	return nil
 }
 
+// pickTakeoverCandidate selects the most recently active discovered session
+// whose CWD matches workspace. It is the pure decision rule extracted from
+// tryAutoTakeover (ARCH-SVR-2 / #460): no Router, kill, or logging side
+// effects, so the matching policy ("exact CWD match, newest LastActive wins")
+// can be exercised directly in a unit test rather than only through the full
+// scan→kill→resume goroutine path. Returns nil when no candidate matches.
+func pickTakeoverCandidate(discovered []discovery.DiscoveredSession, workspace string) *discovery.DiscoveredSession {
+	if workspace == "" {
+		return nil
+	}
+	var best *discovery.DiscoveredSession
+	for i := range discovered {
+		ds := &discovered[i]
+		if ds.CWD != workspace {
+			continue
+		}
+		if best == nil || ds.LastActive > best.LastActive {
+			best = ds
+		}
+	}
+	return best
+}
+
 // tryAutoTakeover looks for an external Claude CLI session whose CWD matches the
 // chat's effective workspace and transparently adopts it under naozhi management.
 // Must be called inside the sessionGuard critical section (after TryAcquire).
@@ -68,15 +91,9 @@ func (s *Server) tryAutoTakeover(ctx context.Context, chatKey, key string, opts 
 		return false
 	}
 	// Find the most recently active session whose CWD matches the workspace.
-	var best *discovery.DiscoveredSession
-	for i := range discovered {
-		ds := &discovered[i]
-		if ds.CWD == workspace {
-			if best == nil || ds.LastActive > best.LastActive {
-				best = ds
-			}
-		}
-	}
+	// The set-diff lives in pickTakeoverCandidate so the matching policy is
+	// unit-testable without a Router/kill path (ARCH-SVR-2 / #460).
+	best := pickTakeoverCandidate(discovered, workspace)
 	if best == nil {
 		return false
 	}
