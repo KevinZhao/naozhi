@@ -5,8 +5,53 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
+
+// semverGreater returns true when a is strictly greater than b using a simple
+// vX.Y.Z comparison. No external dependency is introduced. Pre-release suffixes
+// (e.g. "-rc.1") are ignored — release tags in this project are always plain
+// vX.Y.Z. If either tag cannot be parsed the function returns false (conservative:
+// do not upgrade on ambiguous version strings).
+func semverGreater(a, b string) bool {
+	pa, ok1 := parseSemver(a)
+	pb, ok2 := parseSemver(b)
+	if !ok1 || !ok2 {
+		return false
+	}
+	if pa[0] != pb[0] {
+		return pa[0] > pb[0]
+	}
+	if pa[1] != pb[1] {
+		return pa[1] > pb[1]
+	}
+	return pa[2] > pb[2]
+}
+
+// parseSemver parses "vX.Y.Z" (with an optional leading "v") into [3]int.
+// Returns (zero, false) on any parse failure.
+func parseSemver(s string) ([3]int, bool) {
+	s = strings.TrimPrefix(s, "v")
+	// Strip pre-release suffix if present (e.g. "1.2.3-rc.1" → "1.2.3").
+	if idx := strings.IndexByte(s, '-'); idx >= 0 {
+		s = s[:idx]
+	}
+	parts := strings.SplitN(s, ".", 3)
+	if len(parts) != 3 {
+		return [3]int{}, false
+	}
+	var out [3]int
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return [3]int{}, false
+		}
+		out[i] = n
+	}
+	return out, true
+}
 
 // Mode selects what the Checker does when it finds a newer release.
 type Mode string
@@ -151,8 +196,18 @@ func (c *Checker) checkOnce(ctx context.Context) {
 		return
 	}
 
-	if rel.Tag == c.cfg.CurrentVersion || rel.Tag == c.installed {
-		slog.Debug("auto-update: already up to date", "tag", rel.Tag)
+	// R20260602141221-SEC-1: require the remote tag to be strictly greater than
+	// the running version. String equality alone would allow a downgrade attack
+	// (an adversary pushing v0.0.1 to trigger a rollback to a vulnerable release).
+	// semverGreater returns false on parse failure, falling back to conservative
+	// "do not upgrade" — same effect as skipping the check.
+	if rel.Tag == c.installed {
+		slog.Debug("auto-update: already installed this release", "tag", rel.Tag)
+		return
+	}
+	if !semverGreater(rel.Tag, c.cfg.CurrentVersion) {
+		slog.Debug("auto-update: latest is not newer than current",
+			"latest", rel.Tag, "current", c.cfg.CurrentVersion)
 		return
 	}
 
