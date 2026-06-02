@@ -622,6 +622,21 @@ const redactPathsBuilderPoolMaxCap = 4 * maxRedactErrLen
 // carries the same issue-backed paper trail as the other cron NEEDS-DESIGN
 // items (R241-PERF-9 / #482 etc.), rather than living only as an inline
 // "future enhancement" comment with no tracker. R249-CR-8 (#952).
+// hasNoPathTrigger reports whether s contains none of the three bytes that
+// can begin a redactable path token: a POSIX slash, a Windows backslash, or
+// a tilde-home shorthand. R243-ARCH-18 (#850): the identical three-IndexByte
+// scan was previously inlined twice inside redactPathsInCronError (the
+// short-input fast-path and the post-truncate fast-path), so a future tweak
+// to the trigger-byte set risked desyncing the two gates. Hoisting it keeps
+// both call sites in lockstep and reads at the call site as the intent
+// ("no path-shaped bytes → nothing to redact"). Behaviour is byte-for-byte
+// identical to the prior inline conjunction.
+func hasNoPathTrigger(s string) bool {
+	return strings.IndexByte(s, '/') < 0 &&
+		strings.IndexByte(s, '\\') < 0 &&
+		strings.IndexByte(s, '~') < 0
+}
+
 func redactPathsInCronError(s string) string {
 	if s == "" {
 		return s
@@ -632,10 +647,7 @@ func redactPathsInCronError(s string) string {
 	// cap is a defensive ceiling so an unexpectedly long no-path input
 	// still falls through to the byte-cap branch below; common cron error
 	// classes fit comfortably under this. R250-PERF-12 / #1115.
-	if len(s) <= redactFastPathMaxLen &&
-		strings.IndexByte(s, '/') < 0 &&
-		strings.IndexByte(s, '\\') < 0 &&
-		strings.IndexByte(s, '~') < 0 {
+	if len(s) <= redactFastPathMaxLen && hasNoPathTrigger(s) {
 		return s
 	}
 	// Byte-level cap, but split on a rune boundary — naked s[:maxRedactErrLen]
@@ -652,7 +664,7 @@ func redactPathsInCronError(s string) string {
 	// common error classes ("dispatcher queue full", "session error:
 	// context deadline exceeded") have no embedded paths. R62-PERF-3 +
 	// R234-SEC-9（~/ 用户目录形态补漏）。
-	if strings.IndexByte(s, '/') < 0 && strings.IndexByte(s, '\\') < 0 && strings.IndexByte(s, '~') < 0 {
+	if hasNoPathTrigger(s) {
 		return s
 	}
 	b := redactPathsBuilderPool.Get().(*strings.Builder)
