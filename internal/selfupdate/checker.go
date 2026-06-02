@@ -276,9 +276,15 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
 	}
 
 	if !ServiceRunning() {
+		// R20260602141221-CR-2: do NOT remove the backup here. ServiceRunning()
+		// returning false during a ModeAuto update may mean the previous restart
+		// is still in-flight (SIGTERM sent, systemd shows "deactivating"). Deleting
+		// the only rollback artifact in that window leaves the system unrecoverable
+		// if the new binary fails to boot. Stale .bak files are harmless and small;
+		// the next successful Replace call overwrites them (O_TRUNC).
 		slog.Info("auto-update: service not running, skipping restart")
 		c.notify(fmt.Sprintf("✅ naozhi %s 已安装。服务未在运行，手动启动以生效。", rel.Tag))
-		_ = os.Remove(backupPath)
+		_ = backupPath
 		return
 	}
 
