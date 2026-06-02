@@ -104,18 +104,24 @@ func TestShutdownComplete_MainSequencesBeforeRouterShutdown(t *testing.T) {
 	body := string(raw)
 
 	// Anchor on the receive expression (the actual blocking wait) so a bare
-	// mention of the method in a comment does not satisfy the contract.
+	// mention of the method in a comment does not satisfy the contract. Since
+	// #1487 the teardown is expressed as an ordered []shutdownStep slice, so the
+	// drain wait now lives inside the "http-drain" step's run closure
+	// (`{name: "http-drain", run: func() { <-srv.ShutdownComplete() }}`) and the
+	// router teardown is the "router" step (`{name: "router", run: router.Shutdown}`).
+	// The happens-before contract is preserved by slice order: http-drain must be
+	// listed before router.
 	waitIdx := strings.Index(body, "<-srv.ShutdownComplete()")
 	if waitIdx < 0 {
 		t.Fatal("main.go: no `<-srv.ShutdownComplete()` wait found — S11 barrier dropped (#390)")
 	}
-	// Match the call as a statement (newline + indentation + call), not the
-	// `scheduler.Stop()/router.Shutdown()` prose in the design comment above.
-	routerIdx := strings.Index(body, "\n\t\t\trouter.Shutdown()")
+	// Match the router step's run binding (method value, no call parens) rather
+	// than the `scheduler.Stop()/router.Shutdown()` prose in the design comment.
+	routerIdx := strings.Index(body, "run: router.Shutdown}")
 	if routerIdx < 0 {
-		t.Fatal("main.go: no router.Shutdown() statement found — shutdown contract changed")
+		t.Fatal("main.go: no `run: router.Shutdown` step found — shutdown contract changed")
 	}
 	if waitIdx >= routerIdx {
-		t.Errorf("main.go: srv.ShutdownComplete() wait (offset %d) must appear BEFORE router.Shutdown() (offset %d) — S11 (#390) regressed: router teardown races the HTTP drain", waitIdx, routerIdx)
+		t.Errorf("main.go: srv.ShutdownComplete() wait (offset %d) must appear BEFORE the router.Shutdown step (offset %d) — S11 (#390) regressed: router teardown races the HTTP drain", waitIdx, routerIdx)
 	}
 }
