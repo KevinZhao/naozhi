@@ -85,6 +85,7 @@ func (r *Router) reconcileSessionActiveByBackendLocked() int64 {
 		want := perBackend[backend]
 		metrics.SessionActiveByBackend.Add(want-current, backend)
 	}
+	return total
 }
 
 // countExempt returns the total number of alive exempt sessions across

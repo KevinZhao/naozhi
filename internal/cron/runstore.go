@@ -380,9 +380,22 @@ var ErrCorruptRun = errors.New("cron run: corrupt or oversize record")
 // rate is bounded (≤ 1Hz × N jobs) but every persisted record allocates
 // ~2KB of encode scratch otherwise — pooling drops that to amortised zero
 // after the warmup period. R240-PERF-6 / #1043.
+// appendMarshalScratch pairs a bytes.Buffer with the json.Encoder bound to
+// it. R20260602190132-PERF-2: a json.Encoder caches its internal encodeState
+// (~2KB) across Encode calls on the same encoder, but constructing a fresh
+// json.NewEncoder(buf) every marshalRunPooled call discarded that cache so the
+// pooled buffer never actually amortised the encoder-side alloc. Pooling the
+// encoder alongside the buffer closes that gap — the encodeState is now reused
+// for the lifetime of the pooled pair.
+type appendMarshalScratch struct {
+	buf *bytes.Buffer
+	enc *json.Encoder
+}
+
 var appendMarshalBufPool = sync.Pool{
 	New: func() any {
-		return bytes.NewBuffer(make([]byte, 0, 4*1024))
+		buf := bytes.NewBuffer(make([]byte, 0, 4*1024))
+		return &appendMarshalScratch{buf: buf, enc: json.NewEncoder(buf)}
 	},
 }
 
@@ -397,20 +410,21 @@ const appendMarshalPoolMaxCap = 2 * MaxRunRecordBytes
 // identical to json.Marshal(run) except for json.Encoder's trailing
 // '\n' which is stripped to match Marshal output.
 func marshalRunPooled(run *CronRun) ([]byte, error) {
-	buf := appendMarshalBufPool.Get().(*bytes.Buffer)
+	sc := appendMarshalBufPool.Get().(*appendMarshalScratch)
+	buf := sc.buf
 	defer func() {
 		if buf.Cap() > appendMarshalPoolMaxCap {
 			return
 		}
 		buf.Reset()
-		appendMarshalBufPool.Put(buf)
+		appendMarshalBufPool.Put(sc)
 	}()
 	buf.Reset()
-	enc := json.NewEncoder(buf)
 	// json.Marshal default — keep HTML-escape parity so on-disk bytes match
 	// the legacy callers and any future Unmarshal of historical records is
-	// indistinguishable from json.Marshal output.
-	if err := enc.Encode(run); err != nil {
+	// indistinguishable from json.Marshal output. The encoder is bound to buf
+	// once at construction and reused from the pool, retaining its encodeState.
+	if err := sc.enc.Encode(run); err != nil {
 		return nil, err
 	}
 	body := buf.Bytes()
