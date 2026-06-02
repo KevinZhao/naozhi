@@ -425,37 +425,6 @@ var (
 	// systemd's START_USEC to cross-check TimeoutStartSec margin.
 	StartupPhaseReadyMs = expvar.NewInt("naozhi_startup_phase_ready_ms")
 
-	// AutoChainSpawnAttachTotal counts spawnSession invocations that
-	// auto-attached one or more prev_session_ids via the workspace
-	// auto-chain feature (docs/rfc/auto-workspace-chain.md). Each
-	// increment is one session newly receiving a chain.
-	AutoChainSpawnAttachTotal = expvar.NewInt("naozhi_auto_chain_spawn_attach_total")
-
-	// AutoChainBackfillAttachTotal counts sessions that received a
-	// chain via the one-shot startup backfill (NewRouter →
-	// runAutoChainBackfillOnce). Steady-state delta should be 0 —
-	// the counter only ticks at startup.
-	AutoChainBackfillAttachTotal = expvar.NewInt("naozhi_auto_chain_backfill_attach_total")
-
-	// AutoChainBackfillSkippedNoWorkspace / NoCandidates / TOCTOUDrop /
-	// AlreadyFilled — per-reason skip breakdown for the startup backfill.
-	// Together they account for every candidate session inspected by
-	// runAutoChainBackfillOnce that did not result in an attach. expvar
-	// has no native label support, so split counters are the idiomatic
-	// alternative (see naozhi_cron_run_<state>_total above).
-	AutoChainBackfillSkippedNoWorkspace   = expvar.NewInt("naozhi_auto_chain_backfill_skipped_no_workspace_total")
-	AutoChainBackfillSkippedNoCandidates  = expvar.NewInt("naozhi_auto_chain_backfill_skipped_no_candidates_total")
-	AutoChainBackfillSkippedTOCTOUDrop    = expvar.NewInt("naozhi_auto_chain_backfill_skipped_toctou_drop_total")
-	AutoChainBackfillSkippedAlreadyFilled = expvar.NewInt("naozhi_auto_chain_backfill_skipped_already_filled_total")
-
-	// AutoChainTOCTOUCollisionTotal counts the number of sessionIDs that
-	// were dropped by the spawn-path or backfill-path phase-3 re-check
-	// (after pickWorkspaceChain returned them but before the lock-held
-	// apply). Steady non-zero values mean cron / sys / sibling spawns
-	// are racing chain attach frequently — investigate scheduler
-	// throughput.
-	AutoChainTOCTOUCollisionTotal = expvar.NewInt("naozhi_auto_chain_toctou_collision_total")
-
 	// AutoChainOriginsLengthMismatch counts ManagedSession.SetPrevSessionOrigins
 	// invocations that observed a length drift between prevSessionIDs and
 	// prevSessionOrigins (RFC v3 Arch-MINOR-1). Steady-state must be 0;
