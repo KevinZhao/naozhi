@@ -348,24 +348,64 @@ func (s *Scheduler) ListJobsWithNextRun(plat, chatID string) []JobWithNextRun {
 		return result
 	}
 
-	// Single Entries() snapshot read outside s.mu (lock-order safe). For the
-	// small per-chat bucket a direct linear lookup is cheaper than building a
-	// map; entryID 0 means the job is not registered with cron (paused) and
-	// keeps the zero NextRun.
+	// Single Entries() snapshot read outside s.mu (lock-order safe). entryID 0
+	// means the job is not registered with cron (paused) and keeps the zero
+	// NextRun.
+	//
+	// R20260602141221-PERF-2 (#1583): the lookup is O(jobs-in-chat × |entries|)
+	// — a linear scan of the full Entries() snapshot per job. For the common
+	// per-chat bucket (1-5 jobs) the scan is cheaper than building a map: a
+	// handful of scans over |entries| beats paying the map's hashing + (even
+	// pooled) bookkeeping, and avoids touching the shared listNextByIDPool. But
+	// when a chat accumulates many jobs the product blows up (jobs × |entries|,
+	// |entries|≤500) and the dashboard's 1Hz poll amplifies it. Above the
+	// threshold we switch to the same pooled entryID→Next map ListAllJobsWithNextRun
+	// uses — O(|entries|) build + O(1) per job — so both the small-bucket and
+	// large-bucket cases stay cheap. The threshold is deliberately small: by a
+	// handful of jobs the map's single Entries() walk already wins on the
+	// comparison count and the constant-factor crossover is well behind us.
 	entries := s.cron.Entries()
-	for i, id := range ids {
-		if id == 0 {
-			continue
-		}
-		for _, e := range entries {
-			if e.ID == id {
-				result[i].NextRun = e.Next
-				break
+	if len(result) <= listNextRunMapThreshold {
+		for i, id := range ids {
+			if id == 0 {
+				continue
 			}
+			for _, e := range entries {
+				if e.ID == id {
+					result[i].NextRun = e.Next
+					break
+				}
+			}
+		}
+		return result
+	}
+
+	nextByIDPtr := listNextByIDPool.Get().(*map[cronEntryID]time.Time)
+	nextByID := *nextByIDPtr
+	clear(nextByID)
+	defer func() {
+		clear(nextByID)
+		listNextByIDPool.Put(nextByIDPtr)
+	}()
+	for _, e := range entries {
+		nextByID[e.ID] = e.Next
+	}
+	for i, id := range ids {
+		if id != 0 {
+			result[i].NextRun = nextByID[id]
 		}
 	}
 	return result
 }
+
+// listNextRunMapThreshold is the per-chat job count at or below which
+// ListJobsWithNextRun uses a direct linear Entries() scan rather than building
+// the pooled entryID→Next map. Below it the scan's small constant factor wins;
+// above it the O(jobs × |entries|) product makes the O(|entries|) map build
+// cheaper. R20260602141221-PERF-2 (#1583). 8 is comfortably past the common
+// 1-5 jobs/chat bucket so the typical dashboard poll keeps the allocation-free
+// linear path, while a chat that hoards jobs no longer scales quadratically.
+const listNextRunMapThreshold = 8
 
 // ListAllJobsWithNextRun returns every job plus its next scheduled run.
 // Lock strategy: snapshot (*Job, entryID) under s.mu.RLock, release s.mu, then
