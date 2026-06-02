@@ -5,8 +5,53 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
+
+// semverGreater returns true when a is strictly greater than b using a simple
+// vX.Y.Z comparison. No external dependency is introduced. Pre-release suffixes
+// (e.g. "-rc.1") are ignored — release tags in this project are always plain
+// vX.Y.Z. If either tag cannot be parsed the function returns false (conservative:
+// do not upgrade on ambiguous version strings).
+func semverGreater(a, b string) bool {
+	pa, ok1 := parseSemver(a)
+	pb, ok2 := parseSemver(b)
+	if !ok1 || !ok2 {
+		return false
+	}
+	if pa[0] != pb[0] {
+		return pa[0] > pb[0]
+	}
+	if pa[1] != pb[1] {
+		return pa[1] > pb[1]
+	}
+	return pa[2] > pb[2]
+}
+
+// parseSemver parses "vX.Y.Z" (with an optional leading "v") into [3]int.
+// Returns (zero, false) on any parse failure.
+func parseSemver(s string) ([3]int, bool) {
+	s = strings.TrimPrefix(s, "v")
+	// Strip pre-release suffix if present (e.g. "1.2.3-rc.1" → "1.2.3").
+	if idx := strings.IndexByte(s, '-'); idx >= 0 {
+		s = s[:idx]
+	}
+	parts := strings.SplitN(s, ".", 3)
+	if len(parts) != 3 {
+		return [3]int{}, false
+	}
+	var out [3]int
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return [3]int{}, false
+		}
+		out[i] = n
+	}
+	return out, true
+}
 
 // Mode selects what the Checker does when it finds a newer release.
 type Mode string
@@ -109,10 +154,14 @@ func (c *Checker) Run(ctx context.Context) {
 		// Small delay so startup isn't competing with the first check's
 		// network I/O, and a crash-restart loop on a bad release can't
 		// instantly re-trigger work.
+		// R20260602141221-PERF-7: use NewTimer+Stop instead of time.After so
+		// the timer is reclaimed promptly when ctx is cancelled before it fires.
+		startDelay := time.NewTimer(30 * time.Second)
+		defer startDelay.Stop()
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(30 * time.Second):
+		case <-startDelay.C:
 			c.checkOnce(ctx)
 		}
 	}
@@ -151,8 +200,18 @@ func (c *Checker) checkOnce(ctx context.Context) {
 		return
 	}
 
-	if rel.Tag == c.cfg.CurrentVersion || rel.Tag == c.installed {
-		slog.Debug("auto-update: already up to date", "tag", rel.Tag)
+	// R20260602141221-SEC-1: require the remote tag to be strictly greater than
+	// the running version. String equality alone would allow a downgrade attack
+	// (an adversary pushing v0.0.1 to trigger a rollback to a vulnerable release).
+	// semverGreater returns false on parse failure, falling back to conservative
+	// "do not upgrade" — same effect as skipping the check.
+	if rel.Tag == c.installed {
+		slog.Debug("auto-update: already installed this release", "tag", rel.Tag)
+		return
+	}
+	if !semverGreater(rel.Tag, c.cfg.CurrentVersion) {
+		slog.Debug("auto-update: latest is not newer than current",
+			"latest", rel.Tag, "current", c.cfg.CurrentVersion)
 		return
 	}
 
@@ -221,9 +280,15 @@ func (c *Checker) doInstall(ctx context.Context, rel *Release, restart bool) {
 	}
 
 	if !ServiceRunning() {
+		// R20260602141221-CR-2: do NOT remove the backup here. ServiceRunning()
+		// returning false during a ModeAuto update may mean the previous restart
+		// is still in-flight (SIGTERM sent, systemd shows "deactivating"). Deleting
+		// the only rollback artifact in that window leaves the system unrecoverable
+		// if the new binary fails to boot. Stale .bak files are harmless and small;
+		// the next successful Replace call overwrites them (O_TRUNC).
 		slog.Info("auto-update: service not running, skipping restart")
 		c.notify(fmt.Sprintf("✅ naozhi %s 已安装。服务未在运行，手动启动以生效。", rel.Tag))
-		_ = os.Remove(backupPath)
+		_ = backupPath
 		return
 	}
 

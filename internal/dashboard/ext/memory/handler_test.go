@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
 )
 
 // memoryTestHandler builds a handler with a temp projects dir + permissive
@@ -389,6 +388,47 @@ func TestMemoryHandler_OversizeFileTruncated(t *testing.T) {
 	// body == raw[:cap]).
 	if got, want := len(resp.Body), maxMemoryFileBytes; got != want {
 		t.Errorf("len(Body) = %d, want %d (cap)", got, want)
+	}
+}
+
+// TestMemoryHandler_NegativeCacheSkipsReadDir verifies R20260602141221-SEC-10:
+// after a full-scan miss, the negative cache entry causes subsequent requests
+// within the TTL to return "not found" without calling os.ReadDir again.
+//
+// We prove the skip by removing the projects dir after the first miss; if the
+// second call hit the disk it would return an I/O error (500), but the negative
+// cache must intercept it and return 200/found=false instead.
+func TestMemoryHandler_NegativeCacheSkipsReadDir(t *testing.T) {
+	dir := t.TempDir()
+	// Create the projects dir but put no memory file for slug "ghost_slug".
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := memoryTestHandler(t, dir, "")
+
+	// First call: full ReadDir scan, nothing found — populates negative cache.
+	w1, resp1, _ := callMemoryHandler(t, h, "ghost_slug")
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first call: status = %d, want 200; body=%s", w1.Code, w1.Body.String())
+	}
+	if resp1.Found {
+		t.Fatalf("first call: resp.Found = true, want false")
+	}
+
+	// Remove the projects dir entirely so any ReadDir attempt would error.
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second call within TTL: must hit negative cache and return 200/found=false
+	// without touching the (now-deleted) dir.
+	w2, resp2, _ := callMemoryHandler(t, h, "ghost_slug")
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second call: status = %d (want 200/not-found via neg cache); body=%s",
+			w2.Code, w2.Body.String())
+	}
+	if resp2.Found {
+		t.Errorf("second call: resp.Found = true, want false")
 	}
 }
 

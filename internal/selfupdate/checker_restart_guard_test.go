@@ -2,7 +2,9 @@ package selfupdate
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -22,7 +24,16 @@ import (
 
 func readChecker(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile("checker.go")
+	// R20260602141221-CR-5: use runtime.Caller to locate the source file
+	// relative to this test file rather than relying on cwd==package directory,
+	// which is not guaranteed when tests are run from a different working
+	// directory (e.g. go test ./... from the repo root).
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed")
+	}
+	checkerPath := filepath.Join(filepath.Dir(thisFile), "checker.go")
+	b, err := os.ReadFile(checkerPath)
 	if err != nil {
 		t.Fatalf("read checker.go: %v", err)
 	}

@@ -51,6 +51,53 @@ func TestNewChecker_DefaultsModeToDownload(t *testing.T) {
 	}
 }
 
+// R20260602141221-SEC-1: table-driven semver comparison tests.
+func TestSemverGreater(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"v0.0.2", "v0.0.1", true},
+		{"v0.1.0", "v0.0.9", true},
+		{"v1.0.0", "v0.9.9", true},
+		{"v0.0.1", "v0.0.2", false},
+		{"v0.0.1", "v0.0.1", false}, // equal → not greater
+		{"v1.0.0", "v1.0.0", false},
+		// pre-release suffix ignored
+		{"v0.0.3", "v0.0.2-rc.1", true},
+		{"v0.0.2-rc.1", "v0.0.1", true},
+		// malformed → conservative false
+		{"invalid", "v0.0.1", false},
+		{"v0.0.1", "invalid", false},
+		{"", "v0.0.1", false},
+		{"v0.0.1", "", false},
+	}
+	for _, tc := range cases {
+		got := semverGreater(tc.a, tc.b)
+		if got != tc.want {
+			t.Errorf("semverGreater(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// Downgrade attempt: remote reports an older tag → no action.
+func TestCheckOnce_NoDowngrade(t *testing.T) {
+	withStubbedLatest(t, func(context.Context) (*Release, error) {
+		return &Release{Tag: "v0.0.1"}, nil // older than current
+	})
+	var notices int
+	c := NewChecker(CheckerConfig{
+		CurrentVersion: "v1.0.0",
+		Mode:           ModeNotify,
+		Interval:       time.Hour,
+		Notify:         func(string) { notices++ },
+	})
+	c.checkOnce(context.Background())
+	if notices != 0 {
+		t.Errorf("downgrade attempt should emit no notice, got %d", notices)
+	}
+}
+
 // notify mode: a newer release fires exactly one notice and does NOT touch
 // the binary (no download stub needed — doInstall is never reached).
 func TestCheckOnce_NotifyMode(t *testing.T) {

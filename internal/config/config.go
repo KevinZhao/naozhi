@@ -913,6 +913,28 @@ func validateConfig(cfg *Config) error {
 		}
 	}
 
+	// R20260602141221-CR-1: mirror the cron.notify_default.platform check for
+	// update.notify.platform — an empty value is legal (disables IM delivery),
+	// but a non-empty value that names a platform without a configured section
+	// silently falls through all delivery attempts and the operator only
+	// discovers the typo when an upgrade occurs.
+	if np := cfg.Update.Notify.Platform; np != "" {
+		ok := false
+		switch np {
+		case "feishu":
+			ok = cfg.Platforms.Feishu != nil
+		case "slack":
+			ok = cfg.Platforms.Slack != nil
+		case "discord":
+			ok = cfg.Platforms.Discord != nil
+		case "weixin":
+			ok = cfg.Platforms.Weixin != nil
+		}
+		if !ok {
+			return fmt.Errorf("update.notify.platform %q is not a configured platform (set platforms.%s or clear update.notify)", np, np)
+		}
+	}
+
 	// CLI argv flows directly to exec.Command; reject NUL / C0 control bytes
 	// here so a compromised or mistaken config file cannot smuggle delimiters
 	// into argv that the OS would misinterpret. Primary argv injection gate

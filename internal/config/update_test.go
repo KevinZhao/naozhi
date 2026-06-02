@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -81,6 +82,11 @@ update:
 func TestUpdateIntervalCustom(t *testing.T) {
 	tmpFile := t.TempDir() + "/config.yaml"
 	os.WriteFile(tmpFile, []byte(`
+platforms:
+  feishu:
+    app_id: cli_x
+    app_secret: s
+    bot_name: bot
 update:
   interval: 12h
   mode: notify
@@ -118,5 +124,84 @@ update:
 
 	if _, err := Load(tmpFile); err == nil {
 		t.Fatal("expected error for invalid update.interval")
+	}
+}
+
+// R20260602141221-CR-1: update.notify.platform typo should return an error
+// when the named platform section is absent, matching the existing
+// cron.notify_default.platform guard.
+func TestUpdateNotifyPlatformValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "empty_platform_is_legal",
+			yaml: `
+update:
+  notify:
+    chat_id: oc_abc
+`,
+			wantErr: false,
+		},
+		{
+			name: "known_platform_with_section_ok",
+			yaml: `
+platforms:
+  feishu:
+    app_id: cli_x
+    app_secret: s
+    bot_name: bot
+update:
+  notify:
+    platform: feishu
+    chat_id: oc_abc
+`,
+			wantErr: false,
+		},
+		{
+			name: "misconfig_platform_no_section",
+			yaml: `
+update:
+  notify:
+    platform: feishu
+    chat_id: oc_abc
+`,
+			wantErr: true,
+			errMsg:  "update.notify.platform",
+		},
+		{
+			name: "typo_platform_name",
+			yaml: `
+update:
+  notify:
+    platform: feshu
+    chat_id: oc_abc
+`,
+			wantErr: true,
+			errMsg:  "update.notify.platform",
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			tmpFile := t.TempDir() + "/config.yaml"
+			os.WriteFile(tmpFile, []byte(tt.yaml), 0600)
+			_, err := Load(tmpFile)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tt.errMsg != "" && !strings.Contains(err.Error(), tt.errMsg) {
+					t.Errorf("error %q does not mention %q", err.Error(), tt.errMsg)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			}
+		})
 	}
 }
