@@ -459,7 +459,10 @@ func (h *Hub) handleRemoteSubscribe(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "error", Key: msg.Key, Error: "unknown node"})
 		return
 	}
-	conn.Subscribe(c, msg.Key, msg.After)
+	// H6 (#435): subscribe only needs the pub-sub role, so narrow the full
+	// Conn down to node.NodeSubscriber at the call boundary.
+	var sub node.NodeSubscriber = conn
+	sub.Subscribe(c, msg.Key, msg.After)
 }
 
 func (h *Hub) handleRemoteUnsubscribe(c *wsClient, msg node.ClientMsg) {
@@ -474,7 +477,9 @@ func (h *Hub) handleRemoteUnsubscribe(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "unsubscribed", Key: msg.Key, Node: msg.Node})
 		return
 	}
-	conn.Unsubscribe(c, msg.Key)
+	// H6 (#435): unsubscribe only needs the pub-sub role.
+	var sub node.NodeSubscriber = conn
+	sub.Unsubscribe(c, msg.Key)
 }
 
 // PurgeNodeSubscriptions notifies all browser clients that a node disconnected,
