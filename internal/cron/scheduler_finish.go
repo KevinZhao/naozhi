@@ -50,7 +50,7 @@ func (s *Scheduler) CurrentRun(jobID string) (RunInflightView, bool) {
 // nil. The dashboard list endpoint and detail endpoint both go through
 // this method so the runs/ schema stays opaque to server/.
 func (s *Scheduler) ListRuns(jobID string, limit int, before time.Time) []CronRunSummary {
-	if s == nil || s.runStore == nil {
+	if s == nil || !s.runStore.enabled() {
 		return nil
 	}
 	return s.runStore.List(jobID, limit, before)
@@ -59,7 +59,7 @@ func (s *Scheduler) ListRuns(jobID string, limit int, before time.Time) []CronRu
 // RecentRuns is the convenience wrapper for the cron list view's
 // recent_runs field. Cap is enforced inside ListRuns.
 func (s *Scheduler) RecentRuns(jobID string, n int) []CronRunSummary {
-	if s == nil || s.runStore == nil {
+	if s == nil || !s.runStore.enabled() {
 		return nil
 	}
 	return s.runStore.Recent(jobID, n)
@@ -69,7 +69,7 @@ func (s *Scheduler) RecentRuns(jobID string, n int) []CronRunSummary {
 // (nil, fs.ErrNotExist) when missing; (nil, ErrCorruptRun) when present
 // but unusable. Server layer maps these to 404 / 500 respectively.
 func (s *Scheduler) GetRun(jobID, runID string) (*CronRun, error) {
-	if s == nil || s.runStore == nil {
+	if s == nil || !s.runStore.enabled() {
 		return nil, fs.ErrNotExist
 	}
 	return s.runStore.Get(jobID, runID)
@@ -232,7 +232,7 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// Idempotent on already-clean prompts; cheap relative to JSON marshal +
 	// fsync that immediately follow.
 	persistedPrompt := osutil.SanitizeForLog(a.prompt, MaxPromptBytes)
-	if !a.skipPersist && jobPersistOK && s.runStore != nil {
+	if !a.skipPersist && jobPersistOK && s.runStore.enabled() {
 		s.runStore.Append(&CronRun{
 			RunID:       a.runID,
 			JobID:       a.job.ID,

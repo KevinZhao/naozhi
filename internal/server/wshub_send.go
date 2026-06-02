@@ -245,12 +245,17 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 	nodeID := msg.Node
-	nc, ok := h.lookupNode(nodeID)
+	conn, ok := h.lookupNode(nodeID)
 	if !ok {
 		slog.Debug("ws interrupt: unknown node", "node", nodeID)
 		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "unknown node"})
 		return
 	}
+	// H6 (#435): this path only forwards a single proxy RPC, so depend on
+	// the narrow node.NodeProxy role rather than the full 26-method Conn.
+	// Documents the exact capability this goroutine exercises and keeps a
+	// future mock for this site minimal.
+	var nc node.NodeProxy = conn
 
 	release, shuttingDown := h.TrackSend()
 	if shuttingDown {

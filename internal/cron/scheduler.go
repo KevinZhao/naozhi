@@ -1296,7 +1296,7 @@ func (s *Scheduler) Start() error {
 	// retention-policy violators that accumulated while this process was
 	// down. 异步执行避免在 jobs 多/历史目录大时阻塞 Start 返回（每个 job
 	// 一次 ReadDir + N 次 Remove）。
-	if s.runStore != nil {
+	if s.runStore.enabled() {
 		s.gcWG.Add(1)
 		go func() {
 			defer s.gcWG.Done()

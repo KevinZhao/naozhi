@@ -788,7 +788,7 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 		// runningJobs.
 		func(j *Job) {
 			s.resetRouterStub(j.ID)
-			if s.runStore != nil {
+			if s.runStore.enabled() {
 				s.runStore.DeleteJob(j.ID)
 			}
 			s.cleanupRunningJobIfIdle(j.ID)
@@ -1576,7 +1576,7 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 		// entry points.
 		func(j *Job) {
 			s.resetRouterStub(j.ID)
-			if s.runStore != nil {
+			if s.runStore.enabled() {
 				s.runStore.DeleteJob(j.ID)
 			}
 			s.cleanupRunningJobIfIdle(j.ID)
