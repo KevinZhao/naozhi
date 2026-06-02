@@ -923,11 +923,14 @@ func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
 	// into the cache. The TTL double-check both before and after the scan
 	// keeps a stampede of concurrent misses cheap and preserves the
 	// "freshest snapshot wins" semantics.
+	// R20260602-GO-002: scannedAt must be captured BEFORE the scan begins so
+	// that a goroutine starting a scan later (with a larger scannedAt) will
+	// win the "freshest snapshot wins" comparison and not be suppressed.
+	scannedAt := time.Now()
 	if l.scanHook != nil {
 		l.scanHook()
 	}
 	entries := rawScanSubagentsDir(dir)
-	scannedAt := time.Now()
 
 	l.mu.Lock()
 	defer l.mu.Unlock()

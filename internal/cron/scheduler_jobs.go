@@ -335,10 +335,22 @@ type JobWithNextRun struct {
 // s.mu.Lock). The result slice is always non-nil (empty bucket → `[]`) for
 // wire-format symmetry with ListJobs / ListAllJobsWithNextRun.
 func (s *Scheduler) ListJobsWithNextRun(plat, chatID string) []JobWithNextRun {
+	// R20260602-CR-3: reuse listEntryIDsPool for the per-chat entryID
+	// scratch slice — the same pool ListAllJobsWithNextRun uses — so 1Hz
+	// dashboard polls pay zero allocs for the transient ids buffer.
+	idsPtr := listEntryIDsPool.Get().(*[]cronEntryID)
+	ids := (*idsPtr)[:0]
+	defer func() {
+		*idsPtr = ids[:0]
+		listEntryIDsPool.Put(idsPtr)
+	}()
+
 	s.mu.RLock()
 	bucket := s.jobsByChat[chatKeyFor(plat, chatID)]
 	result := make([]JobWithNextRun, 0, len(bucket))
-	ids := make([]cronEntryID, 0, len(bucket))
+	if cap(ids) < len(bucket) {
+		ids = make([]cronEntryID, 0, len(bucket))
+	}
 	for _, j := range bucket {
 		result = append(result, JobWithNextRun{Job: *j})
 		ids = append(ids, j.entryID)
@@ -1285,6 +1297,7 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		j := s.jobs[id]
 		var schedRegErr error
 		if j != nil {
+			prevCachedSched := j.cachedSched // R20260602-CR-1: snapshot before registerJob mutates it
 			schedRegErr = s.registerJob(j)
 			if schedRegErr != nil {
 				// Rollback in-memory Schedule so subsequent reads reflect the
@@ -1292,7 +1305,7 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 				j.Schedule = schedOldSchedule
 				j.entryID = 0
 				j.cachedPeriod = 0
-				j.cachedSched = nil
+				j.cachedSched = prevCachedSched // R20260602-CR-1: restore, not nil
 			}
 		}
 		s.mu.Unlock()
