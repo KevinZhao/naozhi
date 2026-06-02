@@ -736,13 +736,12 @@ func TestFlattenAssistantEvent_ToolInputSizeCap(t *testing.T) {
 		t.Errorf("big input: summary=%q, want empty (oversize Input must short-circuit the unmarshal cap)", out2[0].Summary)
 	}
 
-	// A probe-derived label still survives for an Input that exceeds the wire
-	// payload cap but stays within summariseInputCap — the timeline keeps its
-	// one-liner even when the raw Input is [truncated]. Since the cap now sits
-	// below maxToolInputBytes, this case only exists if the wire cap is raised
-	// above summariseInputCap; guard it explicitly so the contract is pinned.
+	// An Input between summariseInputCap and maxToolInputBytes: the wire
+	// payload is preserved (not truncated, since < maxToolInputBytes) but the
+	// summary is dropped (summariseToolInput short-circuits at summariseInputCap
+	// to bound json.Unmarshal amplification — R20260602141221-SEC-9 / #1584).
 	if maxToolInputBytes > summariseInputCap {
-		midPad := strings.Repeat("z", summariseInputCap/2)
+		midPad := strings.Repeat("z", maxToolInputBytes/2)
 		midInput := `{"command":"` + midPad + `"}`
 		midEv := &claudeJSONLEvent{
 			Type: "assistant",
@@ -754,8 +753,13 @@ func TestFlattenAssistantEvent_ToolInputSizeCap(t *testing.T) {
 		if !parsed3 || len(out3) != 1 {
 			t.Fatalf("mid input: parsed=%v len(out)=%d (want true / 1)", parsed3, len(out3))
 		}
-		if out3[0].Summary == "" {
-			t.Errorf("mid input: summary empty; label should survive when Input is within summariseInputCap")
+		// summariseToolInput rejects inputs > summariseInputCap, so summary must be empty.
+		if out3[0].Summary != "" {
+			t.Errorf("mid input: summary=%q; must be empty for Input between summariseInputCap and maxToolInputBytes", out3[0].Summary)
+		}
+		// Wire payload must NOT be replaced (input is still < maxToolInputBytes).
+		if string(out3[0].Input) == `"[truncated]"` {
+			t.Errorf("mid input: Input was truncated; must be preserved when < maxToolInputBytes")
 		}
 	}
 }
