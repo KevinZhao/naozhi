@@ -538,6 +538,14 @@ func main() {
 	// Systemd watchdog heartbeat (startWatchdogLoop in main_init.go).
 	startWatchdogLoop(ctx, router.HealthCheck)
 
+	// Auto-update checker (opt-out; see config.UpdateConfig). Polls GitHub
+	// Releases on cfg.UpdateInterval() and, per mode, notifies / downloads /
+	// downloads+restarts. All work is best-effort and error-swallowing so a
+	// failed check never disturbs the gateway. dev builds self-skip.
+	if cfg.UpdateEnabled() {
+		startUpdateChecker(ctx, cfg, platforms)
+	}
+
 	metrics.StartupPhaseReadyMs.Set(time.Since(t0).Milliseconds())
 
 	select {

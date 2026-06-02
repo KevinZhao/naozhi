@@ -87,6 +87,42 @@ func RestartService(ctx context.Context) error {
 	}
 }
 
+// RestartServiceNoWait triggers a service restart and returns as soon as the
+// restart job is accepted, WITHOUT polling for the unit to become active.
+//
+// This is the correct primitive for an IN-PROCESS auto-update: the caller is
+// the very process being restarted, so waiting for `is-active` is meaningless
+// — at the instant the restart job is queued the old process (us) is still
+// "active", so a poll would falsely confirm success and then we'd be killed
+// mid-confirmation. RestartService's waitServiceActive only makes sense for an
+// EXTERNAL upgrader process (the `naozhi upgrade` CLI) confirming a separate
+// daemon came up. systemd's Restart=always is what actually brings the new
+// binary up here; our job ends at "restart triggered".
+//
+// A non-running service is a no-op (not an error).
+func RestartServiceNoWait(ctx context.Context) error {
+	switch runtime.GOOS {
+	case "linux":
+		return restartSystemdNoWait()
+	case "darwin":
+		return restartLaunchd()
+	default:
+		return fmt.Errorf("service restart not supported on %s — restart manually", runtime.GOOS)
+	}
+}
+
+// restartSystemdNoWait issues `systemctl restart --no-block` and returns once
+// the job is queued. No waitServiceActive — see RestartServiceNoWait.
+func restartSystemdNoWait() error {
+	if !ServiceRunning() {
+		return nil
+	}
+	if out, err := exec.Command(resolveTrustedBin("systemctl"), "restart", "--no-block", "naozhi").CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl restart --no-block naozhi: %w\n%s", err, out)
+	}
+	return nil
+}
+
 // systemdUnitActive reports whether `systemctl is-active --quiet naozhi`
 // exits 0. Indirected through a var so tests can simulate a unit that is
 // "activating" for a while and then flips to "active". Production wiring is
