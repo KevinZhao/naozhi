@@ -158,7 +158,13 @@ func ValidName(full string) bool {
 	if tail == "" {
 		return false
 	}
-	for _, suf := range []string{"total", "inflight", "ms"} {
+	// Strip the optional labeled double-write modifier so the base suffix
+	// check below treats e.g. "..._total_by_backend" the same as "..._total".
+	tail = strings.TrimSuffix(tail, "_"+labelModifier)
+	if tail == "" {
+		return false
+	}
+	for _, suf := range validSuffixes {
 		if tail == suf || strings.HasSuffix(tail, "_"+suf) {
 			return true
 		}
