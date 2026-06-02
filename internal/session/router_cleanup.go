@@ -270,6 +270,22 @@ func (r *Router) Cleanup() {
 		}
 	}
 
+	// R20260602-PERF-4 (#1628): record the keys we actually close/kill this
+	// tick so the prune loop below can skip the redundant shouldPrune()
+	// liveness probe (loadProcess + Alive) on them. We just transitioned
+	// these procs to dead, so for a closed key the only remaining prune
+	// question is the cheap LastActive vs pruneTTL comparison, and they can
+	// never count toward newActive. Sized to the classified set; nil/empty
+	// when nothing closed (the common steady-state tick) so the fast path
+	// pays nothing.
+	var closedKeys map[string]struct{}
+	markClosed := func(key string) {
+		if closedKeys == nil {
+			closedKeys = make(map[string]struct{}, len(stuckKill)+len(expired))
+		}
+		closedKeys[key] = struct{}{}
+	}
+
 	closedCount := 0
 	for _, e := range stuckKill {
 		// R217-CR-3: re-verify the session still holds the proc we
@@ -288,6 +304,11 @@ func (r *Router) Cleanup() {
 		}
 		e.proc.Kill()
 		closedCount++
+		// Only mark when we actually killed the captured proc. A session
+		// skipped by the re-verify guard above may now hold a fresh, live
+		// proc — it must still flow through the full shouldPrune / isAlive
+		// classification in the prune loop.
+		markClosed(e.key)
 	}
 	// TTL-expired sessions are closed but never re-spawned for the same
 	// key by this function, so waitSocketGoneForKey is unnecessary here.
@@ -295,6 +316,7 @@ func (r *Router) Cleanup() {
 	for _, e := range expired {
 		e.proc.Close()
 		closedCount++
+		markClosed(e.key)
 	}
 
 	r.mu.Lock()
@@ -311,6 +333,18 @@ func (r *Router) Cleanup() {
 	for key, s := range r.sessions {
 		if s.exempt {
 			continue // planner sessions are never pruned
+		}
+		// R20260602-PERF-4 (#1628): for a session we just closed/killed this
+		// tick, the proc is already dead, so skip shouldPrune's loadProcess +
+		// Alive() probe. The prune decision collapses to the cheap LastActive
+		// vs pruneTTL comparison, and a freshly-closed session can never be
+		// alive — so it contributes nothing to newActive either.
+		if _, closed := closedKeys[key]; closed {
+			if now.Sub(s.LastActive()) > r.pruneTTL {
+				r.unregisterSessionLocked(key, s, false)
+				pruned++
+			}
+			continue
 		}
 		if r.shouldPrune(s, now) {
 			// Terminal removal: free the backend override too (previous versions
