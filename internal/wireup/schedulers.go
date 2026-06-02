@@ -164,6 +164,12 @@ type Schedulers struct {
 // daemons disabled" slog warn).
 func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 	out := Schedulers{}
+	if deps.Cfg == nil {
+		return out, fmt.Errorf("WireSchedulers: nil Cfg")
+	}
+	if deps.ParentCtx == nil {
+		return out, fmt.Errorf("WireSchedulers: nil ParentCtx")
+	}
 
 	cronLoc := deps.Cfg.ParseCronTimezone()
 	notifyDefault := cron.NotifyTarget{
