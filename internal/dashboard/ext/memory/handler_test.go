@@ -495,3 +495,42 @@ func TestNegCache_SweepOnWrite(t *testing.T) {
 		t.Errorf("new entry missing after write")
 	}
 }
+
+// TestNegCache_ConcurrentReads verifies R20260602190132-GO-3: the negative
+// cache uses sync.RWMutex so multiple goroutines may read concurrently without
+// data races. Run with -race to detect any violation.
+func TestNegCache_ConcurrentReads(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := memoryTestHandler(t, dir, "")
+
+	// Seed the negative cache with a valid entry so the read path (RLock) fires.
+	h.negCacheMu.Lock()
+	h.negCache = map[string]time.Time{
+		"seeded_slug": time.Now().Add(time.Minute),
+	}
+	h.negCacheMu.Unlock()
+
+	// Launch N goroutines that all read the negative cache simultaneously.
+	const N = 20
+	done := make(chan struct{}, N)
+	for i := 0; i < N; i++ {
+		go func() {
+			// callMemoryHandler will hit the RLock read path because the
+			// slug is cached and the deadline is in the future.
+			w, resp, _ := callMemoryHandler(t, h, "seeded_slug")
+			if w.Code != http.StatusOK {
+				t.Errorf("concurrent read: status = %d, want 200", w.Code)
+			}
+			if resp.Found {
+				t.Errorf("concurrent read: resp.Found = true, want false")
+			}
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < N; i++ {
+		<-done
+	}
+}
