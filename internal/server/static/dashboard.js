@@ -3326,20 +3326,11 @@ function eventHtml(e, opts) {
   const askBtn = isLong && e.type === 'text'
     ? '<button class="event-ask-btn hover-only" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" onclick="askAside(this)" title="基于此内容追问">↗ 追问</button>'
     : '';
-  // Resend (R110-P3 #449): user bubbles expose a hover-only 重发 button that
-  // refills the composer with the original prompt (does NOT auto-send) so the
-  // user can tweak-and-resend. Reuses the exact interrupt-refill contract
-  // (setMsgValue + focus) already used by sessionLastSent. Unlike copy/ask the
-  // gate is "any non-empty user message", not isLong — retrying a short typo'd
-  // prompt is the common case.
-  const resendBtn = e.type === 'user' && !!cleanRaw
-    ? '<button class="event-resend-btn hover-only" data-raw="' + escAttr(cleanRaw) + '" onclick="resendUserMessage(this)" title="把这条填回输入框以便修改重发" aria-label="重发这条消息">↺ 重发</button>'
-    : '';
 
   const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';
   return '<div class="event ' + esc(e.type||'') + '"' + timeAttr + '>' +
     '<span class="event-icon">' + icon + '</span>' +
-    '<div class="event-content">' + content + imgHtml + copyBtn + askBtn + resendBtn + '</div></div>';
+    '<div class="event-content">' + content + imgHtml + copyBtn + askBtn + '</div></div>';
 }
 
 // Expose the bubble renderer for agent_view.js (RFC v4 agent-team-ui §3.6).
@@ -6929,34 +6920,6 @@ function downloadCodeBlock(btn) {
 function copyEventContent(btn) {
   const text = btn.dataset.raw || btn.closest('.event').querySelector('.event-content').textContent;
   copyWithFeedback(btn, text);
-}
-
-// resendUserMessage (R110-P3 #449): refill the composer with a past user
-// prompt so it can be edited and re-sent. We intentionally do NOT auto-send —
-// the user almost always wants to tweak the prompt that produced an
-// unsatisfying turn. Mirrors the interrupt-refill contract (setMsgValue +
-// focus + caret to end). Refuses to clobber a non-empty composer so an
-// in-progress draft is never lost; surfaces a toast instead.
-function resendUserMessage(btn) {
-  const text = btn && btn.dataset ? (btn.dataset.raw || '') : '';
-  if (!text) return;
-  const input = document.getElementById('msg-input');
-  if (!input) return;
-  if (getMsgValue(input)) {
-    showToast('输入框已有内容，已取消重发回填', 'warning');
-    return;
-  }
-  setMsgValue(input, text);
-  input.focus();
-  // Move caret to end so the user starts editing after the refilled text.
-  try {
-    const range = document.createRange();
-    range.selectNodeContents(input);
-    range.collapse(false);
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-  } catch (_) { /* selection API best-effort; refill already succeeded */ }
 }
 
 function shortPath(p) {
