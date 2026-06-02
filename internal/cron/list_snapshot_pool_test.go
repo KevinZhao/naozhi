@@ -362,3 +362,56 @@ func TestWithJobByID_ReturnsValueCopy(t *testing.T) {
 			live[0].Title, "original")
 	}
 }
+
+// TestListJobsWithNextRun_PoolReusable pins R20260602-CR-3: ListJobsWithNextRun
+// now takes its transient []cronEntryID scratch from listEntryIDsPool (the same
+// pool ListAllJobsWithNextRun uses) so repeated 1Hz dashboard polls for a given
+// chat pay zero allocs for the ids buffer. Two sequential calls and a burst of
+// concurrent calls must each return a self-consistent snapshot.
+func TestListJobsWithNextRun_PoolReusable(t *testing.T) {
+	t.Parallel()
+
+	s := NewScheduler(SchedulerConfig{MaxJobs: 10, AllowNilRouter: true})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(s.Stop)
+
+	for i := 0; i < 3; i++ {
+		j := &Job{
+			Schedule: "@hourly",
+			Prompt:   "p",
+			Platform: "feishu",
+			ChatID:   "chat",
+			Paused:   true,
+		}
+		if err := s.AddJob(j); err != nil {
+			t.Fatalf("AddJob[%d]: %v", i, err)
+		}
+	}
+
+	// Two sequential polls: if the pool Put left a non-zero length the second
+	// call would return more or fewer entries.
+	got1 := s.ListJobsWithNextRun("feishu", "chat")
+	got2 := s.ListJobsWithNextRun("feishu", "chat")
+	if len(got1) != 3 || len(got2) != 3 {
+		t.Fatalf("snapshot len: got1=%d got2=%d, want 3 / 3", len(got1), len(got2))
+	}
+
+	// Concurrent pollers must see a valid snapshot length.
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 32; j++ {
+				snap := s.ListJobsWithNextRun("feishu", "chat")
+				if len(snap) != 3 {
+					t.Errorf("R20260602-CR-3: concurrent snapshot len = %d, want 3", len(snap))
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
