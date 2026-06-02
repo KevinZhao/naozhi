@@ -3,6 +3,7 @@ package sysession
 import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/session/api"
 )
 
 // RawSystemSessionRouter is the producer-side router shape, satisfied
@@ -17,7 +18,10 @@ import (
 // NewManager immediately wraps it in routerAdapter so every daemon sees
 // the cli-free SystemSessionRouter (R260528-ARCH-9 / #1370).
 type RawSystemSessionRouter interface {
-	VisitSessions(fn func(session.SessionSnapshot) bool)
+	// Embeds the shared streaming-read capability (R246-ARCH-11 /
+	// R240-ARCH-15, #791 / #1032) so both router shapes in this package
+	// reference one canonical VisitSessions signature.
+	api.SessionVisitor
 	SetUserLabelWithOrigin(key, label, origin string) bool
 	ClearUserLabelOrigin(key string) bool
 	RegisterSystemStub(key, workspace, lastPrompt string)
