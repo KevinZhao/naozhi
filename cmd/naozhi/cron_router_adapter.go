@@ -101,7 +101,7 @@ func (a cronRouterAdapter) Reset(key string) { a.r.Reset(key) }
 func (a cronRouterAdapter) GetOrCreate(ctx context.Context, key string, opts cron.AgentOpts) (cron.Session, cron.SessionStatus, error) {
 	sess, st, err := a.r.GetOrCreate(ctx, key, toSessionAgentOpts(opts))
 	if err != nil {
-		return nil, cron.SessionStatus(int(st)), err
+		return nil, 0, err
 	}
 	return cronSessionAdapter{sess}, cron.SessionStatus(int(st)), nil
 }

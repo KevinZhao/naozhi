@@ -445,3 +445,8 @@
 - [R20260602190132-PERF-6] cap(rev)==0 guard misleading, no action — internal/eventlog/eventlog_query.go:241
 - [R20260602190132-PERF-13] ringSeed rebuilds runIDs unchanged set low-freq — internal/cron/runstore.go:357
 - [R20260602190132-PERF-14] errors.Is on hot path vs == sentinel — internal/cli/process_readloop.go:478
+- [R220123-SEC-6] cron secret redactor 未含 Stripe publishable keys (pk_live_/pk_test_) — internal/cron/redact_secrets.go:66 (publishable key 设计上公开,低价值)
+- [R220123-CR-4] eventlog_append 注释 "zero slice alloc" 仅对 SetPersistSinkPair 路径成立,batch-only fallback 仍分配 — internal/cli/eventlog_append.go:510
+- [R220123-CR-5] maxUint64 包级常量命名可能与 cli 包其他文件冲突,可改 jsonMaxUint64 — internal/cli/process_readloop.go:133
+- [R220123-ARCH-3] editLoop EditMessage 用 t.ctx 而 Reply 用 15s 子 ctx,deadline 不一致(纯一致性) — internal/dispatch/reply_tracker.go:460
+- [R220123-PERF-22] writeStoreMeta 重复 time.Now() vDSO 调用可复用 Cleanup 已捕获时间戳 — internal/session/store.go:373

@@ -35,6 +35,15 @@ import (
 // R20260602141221-SEC-10.
 const negCacheTTL = 30 * time.Second
 
+// maxNegCacheEntries caps the total number of entries in the negative cache.
+// R220123-SEC-4: defence-in-depth against slug-spray attacks — an authenticated
+// caller that fires unique valid slugs at rate R fills at most
+// R*negCacheTTL entries before the TTL starts evicting them, but without a
+// hard cap the map could grow to O(rate × TTL) unbounded. When the cap is
+// reached we simply skip insertion (no caching, return not-found immediately)
+// rather than maintaining an LRU, keeping the implementation minimal.
+const maxNegCacheEntries = 4096
+
 type Handler struct {
 	projectsDir    string
 	currentProject string
@@ -282,7 +291,12 @@ func (h *Handler) lookup(slug string) (memoryResponse, error) {
 			}
 		}
 	}
-	h.negCache[slug] = time.Now().Add(negCacheTTL)
+	// R220123-SEC-4: after sweeping expired entries, only insert if the map is
+	// still below the hard cap. This prevents unbounded memory growth when a
+	// caller sprays unique valid slugs faster than the TTL evicts them.
+	if len(h.negCache) < maxNegCacheEntries {
+		h.negCache[slug] = time.Now().Add(negCacheTTL)
+	}
 	h.negCacheMu.Unlock()
 
 	return memoryResponse{Found: false, Slug: slug}, nil
