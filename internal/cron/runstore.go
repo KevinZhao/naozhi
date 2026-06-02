@@ -957,6 +957,12 @@ const appendTrimBatch = 10
 // the O(1) implementation that landed via R243-PERF-4; #556 was the
 // repeat finding before the cluster was wired up.
 func (s *runStore) cacheHeadPush(jobID string, summary CronRunSummary) {
+	// R242-ARCH-12 (#753): the jobLock contract was enforced only by godoc.
+	// Mirror skipAppendTrim / trimJobLocked and run the best-effort runtime
+	// check so a caller that forgot to hold jobLock surfaces in tests instead
+	// of as a silent cache↔disk race. Gated by testing.Testing() inside the
+	// helper, so production pays only the function-call overhead.
+	s.assertJobLockHeld(jobID)
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
 		// Lazy-allocate the placeholder so cacheGet doesn't have to. The
@@ -2032,6 +2038,10 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 // count==keepCount could still hide expired older rows on disk; we keep
 // the strict "<keepCount" guard for safety.
 func (s *runStore) trimSkipFromCache(jobID string, now time.Time) bool {
+	// R242-ARCH-12 (#753): runtime-enforce the documented jobLock contract
+	// (best-effort, test-only) so the lock hierarchy stops living solely in
+	// godoc. See cacheHeadPush.
+	s.assertJobLockHeld(jobID)
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
 		return false
@@ -2083,6 +2093,10 @@ func (s *runStore) trimSkipFromCache(jobID string, now time.Time) bool {
 // (every 10 Appends) and the dashboard 1Hz dispatch path, so a per-call
 // alloc would amplify GC pressure linearly with cron tick rate.
 func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
+	// R242-ARCH-12 (#753): runtime-enforce the documented jobLock contract
+	// (best-effort, test-only) so the lock hierarchy stops living solely in
+	// godoc. See cacheHeadPush.
+	s.assertJobLockHeld(jobID)
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
 		return
