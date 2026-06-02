@@ -350,16 +350,22 @@ func (r *Router) Cleanup() {
 		r.storeDirty = true
 		r.storeGen.Add(1)
 	}
-	var sessionsCopy map[string]*ManagedSession
+	// R20260602190132-PERF-4 (#1606): snapshot the dirty maps into the
+	// smallest shape the save path needs. saveStoreSlice only iterates session
+	// values, so a []*ManagedSession slice avoids re-allocating a whole
+	// map[string]*ManagedSession (hashmap buckets + load-factor slack) on every
+	// tick. The ws-overrides / knownIDs copies stay maps because their save
+	// paths key by string.
+	var sessionsCopy []*ManagedSession
 	var knownIDsCopy map[string]bool
 	var wsOverridesCopy map[string]string
 	storePath := r.storePath
 	snapshotGen := r.storeGen.Load()
 	snapshotWsGen := r.wsOverridesGen.Load()
 	if r.storeDirty {
-		sessionsCopy = make(map[string]*ManagedSession, len(r.sessions))
-		for k, v := range r.sessions {
-			sessionsCopy[k] = v
+		sessionsCopy = make([]*ManagedSession, 0, len(r.sessions))
+		for _, v := range r.sessions {
+			sessionsCopy = append(sessionsCopy, v)
 		}
 	}
 	if r.wsOverridesDirty {
@@ -390,7 +396,7 @@ func (r *Router) Cleanup() {
 
 	// Periodic save outside lock to reduce crash-recovery data loss.
 	if sessionsCopy != nil {
-		if err := saveStore(storePath, sessionsCopy); err != nil {
+		if err := saveStoreSlice(storePath, sessionsCopy); err != nil {
 			slog.Warn("periodic session save failed", "err", err)
 		} else {
 			// Only clear dirty flag if no concurrent mutation occurred since snapshot.
@@ -556,11 +562,13 @@ func (r *Router) saveIfDirty() {
 		r.mu.RUnlock()
 		return
 	}
-	var sessionsCopy map[string]*ManagedSession
+	// R20260602190132-PERF-4 (#1606): slice snapshot, not a map copy — see the
+	// matching note in Cleanup. saveStoreSlice only needs session values.
+	var sessionsCopy []*ManagedSession
 	if r.storeDirty {
-		sessionsCopy = make(map[string]*ManagedSession, len(r.sessions))
-		for k, v := range r.sessions {
-			sessionsCopy[k] = v
+		sessionsCopy = make([]*ManagedSession, 0, len(r.sessions))
+		for _, v := range r.sessions {
+			sessionsCopy = append(sessionsCopy, v)
 		}
 	}
 	var wsOverridesCopy map[string]string
@@ -601,7 +609,7 @@ func (r *Router) saveIfDirty() {
 	}
 
 	if sessionsCopy != nil {
-		if err := saveStore(storePath, sessionsCopy); err != nil {
+		if err := saveStoreSlice(storePath, sessionsCopy); err != nil {
 			slog.Warn("periodic session save failed", "err", err)
 		} else {
 			r.mu.Lock()
