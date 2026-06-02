@@ -416,3 +416,11 @@
 - [R20260602-ARCH-3] 两处 typed-nil-interface collapse 逻辑重复，可抽 collapseTypedNil[T] — internal/dispatch/dispatch.go:514
 - [R20260602-GEN-6] IsDashboardProjectKey 生产声明但仅 test 调用，预留未用 — internal/sessionkey/key.go:98
 - [R20260602-GEN-7] retireAutoChainOnce 每次启动无条件 log complete 即使 cleaned=0 噪音 — internal/session/auto_chain_retire.go:92
+- [R20260602141221-GO-1] Snapshot() godoc 提及已实现的 snapshotReadOnly 为"未来变体" — internal/sysession/managed_query.go:123
+- [R20260602141221-GO-2] auto_titler_test.go `c := c` 在 Go1.22+ 为 no-op 死代码 — internal/sysession/auto_titler_test.go:93
+- [R20260602141221-GO-3] EventEntriesForKey TrimSpace 结果丢弃致下游重复 trim — internal/sysession/router_adapter.go:91
+- [R20260602141221-GO-4] writeRune 用 utf8.RuneLen 可能返回 -1(ASCII 不变式不会触发) — internal/sysession/auto_titler.go:706
+- [R20260602141221-SEC-12] RotateCookieGen 未接入配置热重载(假设性未来 handler) — internal/dashboard/auth/handlers.go:252
+- [R20260602141221-PERF-13] executeOpt slog.With 4-attr 每 tick 分配(已 won't-fix) — internal/cron/scheduler_run.go:1320
+- [R20260602141221-PERF-14] runDeadlineWatchdog done chan 仅超时路径分配(低频) — internal/cron/scheduler_run.go:828
+- [R20260602141221-PERF-15] findByPrefixLocked matches slice 无初始容量 — internal/cron/scheduler_jobs.go:2046

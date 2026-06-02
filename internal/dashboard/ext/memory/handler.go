@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
@@ -27,6 +29,12 @@ import (
 // Path safety: the slug is validated against memorySlugRE (alphanumeric / _ / -,
 // 1-64 chars) and the resolved path is re-checked with strings.HasPrefix on
 // projectsDir; both gates must pass before we read.
+// negCacheTTL is the duration for which a slug that was not found in any
+// project directory is remembered as "not found", avoiding repeated full
+// ReadDir scans within the same TTL window.
+// R20260602141221-SEC-10.
+const negCacheTTL = 30 * time.Second
+
 type Handler struct {
 	projectsDir    string
 	currentProject string
@@ -47,6 +55,13 @@ type Handler struct {
 	// stays accepted exactly as before.
 	resolvedPrefix      string
 	resolvedPrefixNoSep string
+
+	// R20260602141221-SEC-10: short-TTL negative cache keyed on slug. When a
+	// full ReadDir scan finds no match, we record the deadline here so
+	// subsequent requests within the TTL skip the expensive disk scan and
+	// return "not found" immediately, preventing DoS via repeated cache-miss.
+	negCacheMu sync.Mutex
+	negCache   map[string]time.Time
 }
 
 var memorySlugRE = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,64}$`)
@@ -207,6 +222,16 @@ func (h *Handler) lookup(slug string) (memoryResponse, error) {
 		}
 	}
 
+	// R20260602141221-SEC-10: check negative cache before doing a full ReadDir.
+	// A miss within the TTL means we already scanned all project dirs and found
+	// nothing; skip the expensive scan and return "not found" immediately.
+	h.negCacheMu.Lock()
+	if deadline, ok := h.negCache[slug]; ok && time.Now().Before(deadline) {
+		h.negCacheMu.Unlock()
+		return memoryResponse{Found: false, Slug: slug}, nil
+	}
+	h.negCacheMu.Unlock()
+
 	entries, err := os.ReadDir(h.projectsDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -242,6 +267,15 @@ func (h *Handler) lookup(slug string) (memoryResponse, error) {
 			return *hit, nil
 		}
 	}
+
+	// Nothing found in full scan — record negative cache entry.
+	h.negCacheMu.Lock()
+	if h.negCache == nil {
+		h.negCache = make(map[string]time.Time)
+	}
+	h.negCache[slug] = time.Now().Add(negCacheTTL)
+	h.negCacheMu.Unlock()
+
 	return memoryResponse{Found: false, Slug: slug}, nil
 }
 

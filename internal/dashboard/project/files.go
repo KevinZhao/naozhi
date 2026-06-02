@@ -413,7 +413,7 @@ func resolveProjectFileWithRoot(rootResolved, rel string) (string, error) {
 	// prefix check below is defence-in-depth, but collapsing `a/../x` up
 	// front avoids calling os.Stat on obviously hostile paths at all.
 	cleaned := filepath.Clean(rel)
-	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
 		return "", errors.New("path escapes workspace")
 	}
 	full := filepath.Join(rootResolved, cleaned)
