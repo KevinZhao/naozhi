@@ -86,17 +86,19 @@ const (
 	maxToolInputBytes = 64 * 1024
 
 	// summariseInputCap is the upper byte limit for a tool_use.Input we
-	// will feed to json.Unmarshal in summariseToolInput. Sits between
-	// maxToolInputBytes (the wire payload cap, 64 KB) and
-	// maxTranscriptLineBytes (the bufio.Scanner line cap, 256 KB) so
-	// the contract documented on TestFlattenAssistantEvent_ToolInputSizeCap
-	// still holds — a tool_use.Input slightly larger than the wire cap
-	// (where the wire payload becomes "[truncated]") can still surface a
-	// probe-derived one-line summary. Inputs above this cap are rejected
-	// before json.Unmarshal so a hostile transcript line cannot drive the
-	// parser through a 256 KB deeply-nested blob just to populate a
-	// 200-byte label. R242-SEC-13 (#645).
-	summariseInputCap = 2 * maxToolInputBytes
+	// will feed to json.Unmarshal in summariseToolInput. The probe only
+	// surfaces six short string fields (command, file_path, …) and the
+	// fallback is truncated to 200 bytes, so a useful one-line label never
+	// needs more than a few KB of input. Capping well below the wire
+	// payload limit (maxToolInputBytes = 64 KB) shrinks the amount of
+	// attacker-influenced JSON handed to json.Unmarshal: at
+	// maxTranscriptTurns=500 × transcriptSem(8) the worst-case unmarshal
+	// fan-out drops from 500×128 KB ≈ 64 MB to 500×16 KB ≈ 8 MB per
+	// request. Inputs above this cap are rejected before json.Unmarshal so
+	// a hostile transcript line cannot drive the parser through a large
+	// deeply-nested blob just to populate a 200-byte label.
+	// R242-SEC-13 (#645); R20260602141221-SEC-9 (#1584) lowered 128 KB→16 KB.
+	summariseInputCap = 16 * 1024
 
 	// transcriptRunningSlackMS is the slack added to "now" when computing
 	// the upper bound of the time window for a still-running cron run.
@@ -1110,9 +1112,9 @@ type toolInputProbe struct {
 // can still drive json.Unmarshal through a deeply-nested 256 KB blob just
 // to populate six string fields and a fallback that ends up truncated
 // to 200 bytes anyway. Refuse anything beyond summariseInputCap up front
-// so the parser never sees the amplifier shape — the wire payload is
-// already capped at maxToolInputBytes (64 KB) by the call site, so 64 KB
-// is also the largest input we could plausibly need to summarise.
+// so the parser never sees the amplifier shape — the probe only needs a
+// few KB to find a label, so the cap sits well below the wire payload
+// limit (maxToolInputBytes = 64 KB) to minimise unmarshal fan-out.
 func summariseToolInput(name string, input json.RawMessage) string {
 	if len(input) == 0 {
 		return ""
