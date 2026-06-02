@@ -42,3 +42,28 @@ func TestRegisterCLIBackendsIdempotent(t *testing.T) {
 		t.Fatal("RegisterCLIBackends should report registered=true after first call")
 	}
 }
+
+// TestRegisterCLIBackends_RecordsBootStep pins the #1165 "single explicit
+// place for init()-side wireup" promise that used to be half-applied:
+// driving the CLI-backend registration through wireup must now leave an
+// audit trail in the boot registry, and Validate must treat the cli-backends
+// step as satisfied. This is what lets cmd/naozhi route through
+// wireup.EnsureCLIBackends + wireup.Validate instead of calling
+// backend.RegisterDefaults directly and hoping it ran.
+func TestRegisterCLIBackends_RecordsBootStep(t *testing.T) {
+	EnsureCLIBackends()
+
+	var seen bool
+	for _, s := range BootSteps() {
+		if s == "cli-backends" {
+			seen = true
+			break
+		}
+	}
+	if !seen {
+		t.Fatalf("EnsureCLIBackends did not record the cli-backends boot step; got %v", BootSteps())
+	}
+	if err := Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil after cli-backends recorded", err)
+	}
+}
