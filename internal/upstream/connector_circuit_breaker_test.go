@@ -13,8 +13,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/config"
 )
 
 // TestCircuitBreakerVars_PackageLevelVars locks the ARCH-D6 (Round 177)
@@ -108,7 +106,7 @@ func TestConnector_CircuitBreakerTripsAndEmitsSingleWARN(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(cap, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(origLogger) })
 
-	cfg := &config.UpstreamConfig{URL: wsAddr, NodeID: "node-cb", Token: "t"}
+	cfg := &Config{URL: wsAddr, NodeID: "node-cb", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	// Run for long enough to let 3+ failures accumulate (each attempt
@@ -202,7 +200,7 @@ func TestConnector_CircuitBreakerResetsOnSuccess(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(cap, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(origLogger) })
 
-	cfg := &config.UpstreamConfig{URL: wsAddr, NodeID: "node-reset", Token: "t"}
+	cfg := &Config{URL: wsAddr, NodeID: "node-reset", Token: "t"}
 	c := New(cfg, makeRouter(), nil, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

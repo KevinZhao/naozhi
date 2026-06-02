@@ -9,7 +9,24 @@
 // (sysession.Start must run after cron is ready). Pulling it out of
 // main.go makes the entry point a graph
 // of explicit constructor calls (the same pattern wireup.RegisterCLIBackends
-// and wireup.RegisterHistoryBackends already established).
+// and the history_backends.go blank-imports already established).
+//
+// Ownership scope (R260528-ARCH-11 / #1372 — tightened, not expanded):
+// wireup deliberately owns exactly the boot-time CONSTRUCTION + REGISTRATION
+// set, and the boot.go bootRegistry now names that set inspectably:
+//
+//	cli-backends      backends.go     (backend.RegisterDefaults)
+//	history-backends  history_backends.go (blank-import init() factories)
+//	schedulers        this file       (cron + sysession construction/Start)
+//
+// It does NOT own — and was never meant to own — the runtime LIFECYCLE of
+// router / server / platforms / upstream / shim: those are long-lived
+// services constructed and shut down by cmd/naozhi against ctx, not
+// init()-style wiring. The package name stays "wireup" (a boot-wiring sink)
+// rather than a broader "lifecycle"/"runtime" name precisely because the
+// lifecycle.Manager RFC was rejected (see below); conflating the two scopes
+// is what #1372 warns against. Validate() asserts the construction set ran;
+// it makes no claim about service lifecycle.
 //
 // What this DOES NOT do (deliberately):
 //   - it does NOT touch shutdown ordering (still owned by main.go's

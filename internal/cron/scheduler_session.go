@@ -7,10 +7,6 @@
 
 package cron
 
-import (
-	"time"
-)
-
 // R20260527122801-ARCH-1 (#1318): The compile-time guard
 // `var _ session.SessionIDExcluder = (*Scheduler)(nil)` previously lived
 // here, which forced internal/cron to import internal/session — the
@@ -112,14 +108,10 @@ func (s *Scheduler) LookupKnownSessionID(sessionID string) bool {
 // KnownSessionIDs() caller still gets the complete history. R245-GO-4
 // (#844).
 func (s *Scheduler) containsSessionID(sessionID string) bool {
-	s.knownSessionsCache.mu.Lock()
-	if s.knownSessionsCache.set != nil &&
-		time.Since(s.knownSessionsCache.generatedAt) < knownSessionsCacheTTL {
-		_, ok := s.knownSessionsCache.set[sessionID]
-		s.knownSessionsCache.mu.Unlock()
-		return ok
+	if set, ok := s.knownSessionsCache.lookupFresh(); ok {
+		_, hit := set[sessionID]
+		return hit
 	}
-	s.knownSessionsCache.mu.Unlock()
 
 	// Cold cache: cheap fast path before the O(jobs × recentCap) build.
 	// Most spawn-time IsExcluded probes target the *just-written*
@@ -147,13 +139,8 @@ func (s *Scheduler) containsSessionID(sessionID string) bool {
 	s.mu.RUnlock()
 
 	found := false
-	s.runningJobs.Range(func(_, v any) bool {
-		inf, ok := v.(*runInflight)
-		if !ok || inf == nil {
-			return true
-		}
-		view, running := inf.snapshot()
-		if running && view.SessionID == sessionID {
+	s.rangeRunningSessionIDs(func(sid string) bool {
+		if sid == sessionID {
 			found = true
 			return false
 		}
@@ -167,11 +154,7 @@ func (s *Scheduler) containsSessionID(sessionID string) bool {
 	// TTL cache so subsequent callers (KnownSessionIDs at 1Hz from the
 	// dashboard) reuse this work.
 	set := s.buildKnownSessionsSet()
-
-	s.knownSessionsCache.mu.Lock()
-	s.knownSessionsCache.set = set
-	s.knownSessionsCache.generatedAt = time.Now()
-	s.knownSessionsCache.mu.Unlock()
+	s.knownSessionsCache.publish(set)
 
 	_, ok := set[sessionID]
 	return ok
@@ -212,21 +195,12 @@ func (s *Scheduler) KnownSessionIDs() map[string]struct{} {
 		return map[string]struct{}{}
 	}
 
-	s.knownSessionsCache.mu.Lock()
-	if s.knownSessionsCache.set != nil &&
-		time.Since(s.knownSessionsCache.generatedAt) < knownSessionsCacheTTL {
-		cached := s.knownSessionsCache.set
-		s.knownSessionsCache.mu.Unlock()
-		return cached
+	if set, ok := s.knownSessionsCache.lookupFresh(); ok {
+		return set
 	}
-	s.knownSessionsCache.mu.Unlock()
 
 	set := s.buildKnownSessionsSet()
-
-	s.knownSessionsCache.mu.Lock()
-	s.knownSessionsCache.set = set
-	s.knownSessionsCache.generatedAt = time.Now()
-	s.knownSessionsCache.mu.Unlock()
+	s.knownSessionsCache.publish(set)
 
 	return set
 }
@@ -249,12 +223,8 @@ func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
 
 	// In-flight runs may have a SessionID set even before the run
 	// terminates (set by setSessionID after GetOrCreate returns).
-	s.runningJobs.Range(func(_, v any) bool {
-		if inf, ok := v.(*runInflight); ok && inf != nil {
-			if view, running := inf.snapshot(); running && view.SessionID != "" {
-				out[view.SessionID] = struct{}{}
-			}
-		}
+	s.rangeRunningSessionIDs(func(sid string) bool {
+		out[sid] = struct{}{}
 		return true
 	})
 
@@ -288,7 +258,5 @@ func (s *Scheduler) invalidateKnownSessionsCache() {
 	if s == nil {
 		return
 	}
-	s.knownSessionsCache.mu.Lock()
-	s.knownSessionsCache.set = nil
-	s.knownSessionsCache.mu.Unlock()
+	s.knownSessionsCache.invalidate()
 }

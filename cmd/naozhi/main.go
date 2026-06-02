@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
@@ -111,9 +110,21 @@ func main() {
 
 	// Register the cli/backend.Profile registry with the built-in profiles
 	// (claude + kiro) before any consumer (discovery, main, server) looks
-	// up DisplayName / DefaultTag / DetectInProc by id. Explicit, not init()-
+	// up DisplayName / DefaultTag / DetectInProc by id. Routed through
+	// wireup so the boot-time registration set has one inspectable owner
+	// (#1165): wireup.EnsureCLIBackends drives backend.RegisterDefaults and
+	// records the step in the wireup boot registry. Explicit, not init()-
 	// driven, so missing imports fail loudly. docs/rfc/multi-backend.md §3.
-	backend.RegisterDefaults()
+	wireup.EnsureCLIBackends()
+
+	// Confirm the required wireup boot steps actually ran (#1165 extension
+	// point): a dropped blank-import or a no-op'd helper now aborts startup
+	// here with a clear message instead of degrading to empty history /
+	// missing profiles silently at first runtime use (R249-ARCH-9).
+	if err := wireup.Validate(); err != nil {
+		slog.Error("wireup validation failed", "err", err)
+		os.Exit(1)
+	}
 
 	// CQ1 (#396): config validation diag fan-out extracted to
 	// logConfigValidationDiagnostics so a future format change is
@@ -365,7 +376,7 @@ func main() {
 	// Configure reverse-connecting nodes (NAT traversal)
 	var rns *node.ReverseServer
 	if len(cfg.ReverseNodes) > 0 {
-		rns = node.NewReverseServer(cfg.ReverseNodes, cfg.Server.TrustedProxy)
+		rns = node.NewReverseServer(buildReverseNodeAuth(cfg), cfg.Server.TrustedProxy)
 		slog.Info("reverse node auth configured", "nodes", len(cfg.ReverseNodes))
 	}
 
@@ -417,7 +428,7 @@ func main() {
 		// the same source of truth, but wiring through main.go avoids
 		// coupling upstream to the server package.
 		upstreamResolver := session.NewKeyResolver(agents, project.NewDataSource(projectMgr))
-		conn := upstream.New(cfg.Upstream, router, projectMgr, upstreamResolver)
+		conn := upstream.New(buildUpstreamConfig(cfg), router, projectMgr, upstreamResolver)
 		if claudeDir != "" {
 			// Discover/preview closures extracted to main_upstream.go so the
 			// scan-exclude + project-resolve + JSON-fallback logic is testable
@@ -458,43 +469,50 @@ func main() {
 				slog.Warn("sd_notify STOPPING failed", "err", err)
 			}
 			cancel()
-			// Sysession Manager must stop FIRST: daemon Tick paths call into
-			// router (VisitSessions / SetUserLabelWithOrigin); leaving them
-			// running while Scheduler.Stop or Router.Shutdown tear down
-			// downstream state would race.  Manager.Stop is hard wg.Wait
-			// (RFC v2.1 §5.2) — a daemon that ignores ctx will panic the
-			// process at shutdown rather than leak goroutines.  5s budget
-			// is comfortable headroom for Runner subprocess teardown via
-			// exec.CommandContext.
-			sysT0 := time.Now()
-			if sysMgr != nil {
-				sysStopCtx, sysStopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				sysMgr.Stop(sysStopCtx)
-				sysStopCancel()
-			}
-			slog.Info("shutdown phase complete", "phase", "sysmgr", "ms", time.Since(sysT0).Milliseconds())
-			// Scheduler must stop fully before router.Shutdown: in-flight cron
-			// jobs still call into router (GetOrCreate/Send), so tearing the
-			// router down in parallel would race against those calls.
-			schedT0 := time.Now()
-			scheduler.Stop()
-			slog.Info("shutdown phase complete", "phase", "scheduler", "ms", time.Since(schedT0).Milliseconds())
-			// S11 (R194-COR): block on the real HTTP-drain barrier before
-			// tearing down the router. cancel() above triggers Server.Start's
-			// shutdown goroutine (srv.Shutdown 30s drain); ShutdownComplete
-			// closes only after that drain returns, i.e. after every in-flight
-			// GetOrCreate/Send handler has finished. Sequencing router.Shutdown
-			// after this point guarantees no handler observes a half-cleaned
-			// session map. On the server-error/server-exit paths Start has
-			// already returned, so the channel is already closed and this is a
-			// no-op. The drain has its own 30s ctx; this wait inherits that
-			// bound rather than blocking forever.
-			drainT0 := time.Now()
-			<-srv.ShutdownComplete()
-			slog.Info("shutdown phase complete", "phase", "http-drain", "ms", time.Since(drainT0).Milliseconds())
-			routerT0 := time.Now()
-			router.Shutdown()
-			slog.Info("shutdown phase complete", "phase", "router", "ms", time.Since(routerT0).Milliseconds())
+			// Ordered teardown contract (sysmgr → scheduler → http-drain →
+			// router), extracted to runShutdownSteps so the sequence is a
+			// value a behavioral test can assert (#1487 / #1376). Each step's
+			// rationale is documented on shutdownStep / runshutdown.go; the
+			// per-step prose below mirrors what used to be inline. A future
+			// subsystem (planner / Cron Dashboard) MUST be inserted at the
+			// correct slot here — runshutdown_order_test.go pins the order.
+			runShutdownSteps([]shutdownStep{
+				// Sysession Manager must stop FIRST: daemon Tick paths call
+				// into router (VisitSessions / SetUserLabelWithOrigin);
+				// leaving them running while Scheduler.Stop or Router.Shutdown
+				// tear down downstream state would race. Manager.Stop is hard
+				// wg.Wait (RFC v2.1 §5.2) — a daemon that ignores ctx will
+				// panic the process at shutdown rather than leak goroutines.
+				// 5s budget is comfortable headroom for Runner subprocess
+				// teardown via exec.CommandContext. run is nil when no Manager
+				// was built (degraded mode), preserving the contract slot.
+				{name: "sysmgr", run: func() {
+					if sysMgr == nil {
+						return
+					}
+					sysStopCtx, sysStopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					sysMgr.Stop(sysStopCtx)
+					sysStopCancel()
+				}},
+				// Scheduler must stop fully before router.Shutdown: in-flight
+				// cron jobs still call into router (GetOrCreate/Send), so
+				// tearing the router down in parallel would race.
+				{name: "scheduler", run: scheduler.Stop},
+				// S11 (R194-COR): block on the real HTTP-drain barrier before
+				// tearing down the router. cancel() above triggers
+				// Server.Start's shutdown goroutine (srv.Shutdown 30s drain);
+				// ShutdownComplete closes only after that drain returns, i.e.
+				// after every in-flight GetOrCreate/Send handler has finished.
+				// Sequencing router.Shutdown after this point guarantees no
+				// handler observes a half-cleaned session map. On the
+				// server-error/server-exit paths Start has already returned,
+				// so the channel is already closed and this is a no-op. The
+				// drain has its own 30s ctx; this wait inherits that bound
+				// rather than blocking forever.
+				{name: "http-drain", run: func() { <-srv.ShutdownComplete() }},
+				// Router teardown runs LAST.
+				{name: "router", run: router.Shutdown},
+			})
 			slog.Info("shutdown complete", "reason", reason, "total_ms", time.Since(shutdownT0).Milliseconds())
 		})
 	}

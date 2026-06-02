@@ -681,9 +681,11 @@ const redactPathsBuilderPoolMaxCap = 4 * maxRedactErrLen
 // ("no path-shaped bytes → nothing to redact"). Behaviour is byte-for-byte
 // identical to the prior inline conjunction.
 func hasNoPathTrigger(s string) bool {
-	return strings.IndexByte(s, '/') < 0 &&
-		strings.IndexByte(s, '\\') < 0 &&
-		strings.IndexByte(s, '~') < 0
+	// R249-ARCH-17 (#983): the trigger-byte scan + the path-redaction loop
+	// (below) now live in osutil so sysession and other daemons reuse the
+	// same policy without copy-paste drift. The cron wrapper keeps its
+	// Builder pool + byte cap + fast-path return on top of the shared scan.
+	return osutil.HasNoPathTrigger(s)
 }
 
 func redactPathsInCronError(s string) string {
@@ -739,62 +741,12 @@ func redactPathsInCronError(s string) string {
 	}()
 	b.Reset()
 	b.Grow(len(s))
-	i := 0
-	for i < len(s) {
-		c := s[i]
-		// POSIX absolute path: leading '/' followed by a non-space/non-quote
-		// byte. Drive letter path C:\… also counts.
-		//
-		// R20260527-COR-10 (#1292): the `i+1 < len(s)` guard AND the explicit
-		// rejection of '/'-followed-by-' '/'\t'/'\n' are deliberate. They
-		// both treat a lone '/' (root dir reference, never a sensitive path)
-		// as a literal byte rather than a redact trigger. Cases that fall
-		// through unredacted as a result:
-		//   - '/' at end-of-string ("error: /") — bare root, no segments.
-		//   - '/' followed by whitespace/newline ("error: /\nnext" or
-		//     "/ matched") — same: no path segments to leak.
-		// These are not security-relevant because the bare root carries no
-		// per-host or per-user information. A multi-segment path like
-		// "/home/u" still triggers via s[i+1]='h' (non-space).
-		isPosix := c == '/' && i+1 < len(s) && s[i+1] != ' ' && s[i+1] != '\t' && s[i+1] != '\n'
-		isWin := i+2 < len(s) &&
-			((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) &&
-			s[i+1] == ':' && (s[i+2] == '\\' || s[i+2] == '/')
-		// R234-SEC-9: 识别 "~/" 形态的 home-relative 路径，避免泄露用户
-		// 目录层级（容器/ssh 错误中常见）。仅在前置位为分隔符或行首时
-		// 触发，防止把 "weight ~5kg" 这种文本误伤。
-		isTildeHome := c == '~' && i+1 < len(s) && s[i+1] == '/' &&
-			(i == 0 || s[i-1] == ' ' || s[i-1] == '\t' || s[i-1] == '\n' ||
-				s[i-1] == '\'' || s[i-1] == '"' || s[i-1] == '`' ||
-				s[i-1] == ',' || s[i-1] == ';' || s[i-1] == '(' || s[i-1] == '=')
-		if !isPosix && !isWin && !isTildeHome {
-			b.WriteByte(c)
-			i++
-			continue
-		}
-		// Consume the path until a delimiter that cannot appear in a
-		// typical error-embedded path. Stopping at whitespace is the key
-		// rule: error messages from the Go standard library spell paths
-		// as tokens separated by whitespace ("open /tmp/x: reason"), and
-		// the rare legitimate "path with space" in an error string is
-		// vanishingly unlikely to survive redaction cleanly anyway. A
-		// conservative scan errs on the side of over-redacting.
-		j := i
-		for j < len(s) {
-			cc := s[j]
-			if cc == '\n' || cc == ' ' || cc == '\t' || cc == ',' || cc == ';' ||
-				cc == '\'' || cc == '"' || cc == '`' {
-				break
-			}
-			if cc == ':' && j+1 < len(s) && (s[j+1] == ' ' || s[j+1] == '\n') {
-				// `path: reason` — stop before the ':' so the reason tail
-				// survives redaction.
-				break
-			}
-			j++
-		}
-		b.WriteString("<path>")
-		i = j
-	}
+	// R249-ARCH-17 (#983): delegate the path-scan to the shared
+	// osutil.RedactAbsolutePathsInto. Writing into the pooled Builder keeps
+	// cron's per-run alloc profile (R245-PERF-17 / #872) — only the final
+	// String() copy allocates — while the detection policy (POSIX / Windows
+	// drive / ~/ home, bare-root pass-through, whitespace/`:` delimiters)
+	// lives in one cross-cutting place that sysession can reuse.
+	osutil.RedactAbsolutePathsInto(b, s)
 	return b.String()
 }

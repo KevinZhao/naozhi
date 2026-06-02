@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/netutil"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/ratelimit"
@@ -181,11 +180,24 @@ type ReverseServer struct {
 	OnDeregister func(id string)
 }
 
+// ReverseNodeAuth is the node-local, zero-dependency value shape that
+// NewReverseServer consumes for one allowed reverse-connecting node. It
+// mirrors the two fields this package actually needs (token + display
+// name) so internal/node no longer imports internal/config — a config.yaml
+// schema change no longer ripples down into this bottom-of-DAG package
+// (R040034-ARCH-1 / #1411). The cmd boundary translates
+// config.ReverseNodeEntry → ReverseNodeAuth.
+type ReverseNodeAuth struct {
+	Token       string
+	DisplayName string
+}
+
 // NewReverseServer creates a server that accepts /ws-node connections.
-// auth is the reverse_nodes config from config.yaml.
+// auth maps node_id → ReverseNodeAuth (translated from the reverse_nodes
+// config block at the cmd boundary).
 // trustedProxy enables X-Forwarded-For last-hop IP extraction so per-IP
 // rate limiting works correctly when deployed behind ALB/CloudFront.
-func NewReverseServer(auth map[string]config.ReverseNodeEntry, trustedProxy bool) *ReverseServer {
+func NewReverseServer(auth map[string]ReverseNodeAuth, trustedProxy bool) *ReverseServer {
 	tokens := make(map[string]string, len(auth))
 	names := make(map[string]string, len(auth))
 	// 两个 node 拿到同一个 token 等于身份可互换——token 认证靠 ConstantTimeCompare

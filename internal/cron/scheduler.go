@@ -276,6 +276,17 @@ type chatJobKey struct {
 	ChatID   string
 }
 
+// chatKeyFor builds the chatJobKey for a (platform, chatID) pair. R249-CR-4 /
+// R260528-ARCH-7 (#948 / #1368): the bare `chatJobKey{Platform: p, ChatID: c}`
+// literal was open-coded at the read sites (JobCountForChat / ListJobs /
+// ListJobsWithNextRun / findByPrefixLocked); a single constructor keeps the
+// (platform, chatID) → key mapping in one place alongside the jobsByChat /
+// chatJobCount trio it indexes, so a future change to the key shape (e.g.
+// folding in a backend dimension) is a one-site edit.
+func chatKeyFor(plat, chatID string) chatJobKey {
+	return chatJobKey{Platform: plat, ChatID: chatID}
+}
+
 // Scheduler manages cron jobs and executes them on schedule.
 //
 // Field-access discipline (mirrors the `// 读写:` annotation pattern from
@@ -587,6 +598,43 @@ type knownSessionsCache struct {
 	mu          sync.Mutex
 	generatedAt time.Time
 	set         map[string]struct{}
+}
+
+// lookupFresh returns the cached set when it is populated and still within
+// knownSessionsCacheTTL of generatedAt. ok is false on a cold or expired
+// cache. The returned map is the shared read-only snapshot (never mutated in
+// place — publish replaces it wholesale), so callers may hand it out directly.
+//
+// R249-CR-4 / R260528-ARCH-7 (#948 / #1368): the lock + TTL-check + read
+// triple was open-coded at containsSessionID + KnownSessionIDs; folding it
+// into a method on the cache type keeps the TTL gate in one place and lets the
+// cache own its own mutex instead of exposing c.mu to every Scheduler caller.
+func (c *knownSessionsCache) lookupFresh() (map[string]struct{}, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.set != nil && time.Since(c.generatedAt) < knownSessionsCacheTTL {
+		return c.set, true
+	}
+	return nil, false
+}
+
+// publish installs a freshly built set as the current snapshot and stamps
+// generatedAt to now. The set MUST NOT be mutated after publication — readers
+// from lookupFresh share it without copying.
+func (c *knownSessionsCache) publish(set map[string]struct{}) {
+	c.mu.Lock()
+	c.set = set
+	c.generatedAt = time.Now()
+	c.mu.Unlock()
+}
+
+// invalidate drops the snapshot so the next lookupFresh misses and forces a
+// rebuild. Cheap (one mutex + nil assign) so mutator paths call it
+// unconditionally.
+func (c *knownSessionsCache) invalidate() {
+	c.mu.Lock()
+	c.set = nil
+	c.mu.Unlock()
 }
 
 // knownSessionsCacheTTL bounds how stale a cached KnownSessionIDs
@@ -1320,9 +1368,7 @@ func (s *Scheduler) Start() error {
 		}
 		if j.Paused {
 			s.jobs[j.ID] = j
-			key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
-			s.chatJobCount[key]++
-			s.jobsByChat[key] = append(s.jobsByChat[key], j)
+			s.addToChatIndexLocked(j)
 			stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 			continue
 		}
@@ -1331,9 +1377,7 @@ func (s *Scheduler) Start() error {
 			continue
 		}
 		s.jobs[j.ID] = j
-		key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
-		s.chatJobCount[key]++
-		s.jobsByChat[key] = append(s.jobsByChat[key], j)
+		s.addToChatIndexLocked(j)
 		stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 	}
 	jobCount := len(s.jobs)

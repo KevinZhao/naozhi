@@ -313,6 +313,13 @@ type Persister struct {
 	// first call and stay grown for the process lifetime.
 	// R249-PERF-19.
 	flushCands []flushCandidate
+	// tickFlushKeys / tickFlushWs are the parallel (key, writer) scratch
+	// slices tickFlush hands to parallelFsync, reused across ticks to keep
+	// the fan-out allocation-free in steady state. Run-goroutine only —
+	// tickFlush is the sole reader/writer, same as flushCands. R20260602-
+	// 091302-PERF-3 (#1569).
+	tickFlushKeys []string
+	tickFlushWs   []*perKeyWriter
 	// lastFlushCount is the number of slots in flushCands that were
 	// actually populated on the most recent tick. R040034-PERF-7 (#1406):
 	// the prior `clear(p.flushCands)` zeroed every slot up to len, so a
@@ -1150,12 +1157,34 @@ func (p *Persister) tickFlush() {
 	if len(cands) == 0 {
 		return
 	}
+	// R20260602-091302-PERF-3 (#1569): fan the per-candidate flush() (each
+	// of which does fsync(log)+fsync(idx)) over the same bounded worker
+	// pool flushAllLocked/shutdownAll use, instead of a serial loop. In the
+	// 50+ concurrent-session steady state a single slow fsync no longer
+	// stalls every other dirty writer's persistence for the whole tick;
+	// wall time drops from ~2N fsyncs serialised to ~2N/workers. The
+	// candidates are distinct writers, so fn touches no shared per-writer
+	// state — same independence audit as shutdownAll's godoc. parallelFsync
+	// keeps the 1-candidate fast path inline (no goroutine spawn), so the
+	// common single-tab case is unchanged.
+	keys := p.tickFlushKeys[:0]
+	ws := p.tickFlushWs[:0]
 	for _, c := range cands {
-		if err := c.w.flush(p); err != nil {
-			slog.Warn("event log persist: debounced flush failed",
-				"key", c.key, "err", err)
-		}
+		keys = append(keys, c.key)
+		ws = append(ws, c.w)
 	}
+	p.tickFlushKeys = keys
+	p.tickFlushWs = ws
+	p.parallelFsync(keys, ws, func(k string, w *perKeyWriter) {
+		if err := w.flush(p); err != nil {
+			slog.Warn("event log persist: debounced flush failed",
+				"key", k, "err", err)
+		}
+	})
+	// Drop the writer-pointer references so a writer dropped/idle-closed
+	// before the next tick can be GC'd rather than pinned by this scratch
+	// slice. Keys are plain strings; no GC concern, left as-is.
+	clear(ws)
 }
 
 // collectFlushCandidates returns writers whose firstDirtyAt has aged

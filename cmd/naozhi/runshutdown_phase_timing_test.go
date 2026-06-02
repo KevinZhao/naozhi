@@ -8,18 +8,20 @@ import (
 	"testing"
 )
 
-// TestRunShutdown_EmitsPhaseTimings pins R245-ARCH-38 (#893): runShutdown
-// must emit a per-phase timing log line for each ordered teardown stage
-// (sysmgr → scheduler → router) plus a total. Without the pin a refactor
-// that drops a phase log silently regresses operator observability — a
-// hung scheduler.Stop or router.Shutdown becomes invisible in journalctl
-// because the surrounding "shutdown starting" / "shutdown complete" lines
-// look identical to a healthy teardown.
+// TestRunShutdown_EmitsPhaseTimings pins R245-ARCH-38 (#893): the teardown
+// path must emit a per-phase timing log line for each ordered stage (sysmgr →
+// scheduler → router) plus a total. Without the pin a refactor that drops a
+// phase log silently regresses operator observability — a hung scheduler.Stop
+// or router.Shutdown becomes invisible in journalctl because the surrounding
+// "shutdown starting" / "shutdown complete" lines look identical to a healthy
+// teardown.
 //
-// Source-level pin (rather than constructing a real Server, signaling
-// SIGTERM, and parsing slog output) keeps the assertion local to the
-// runShutdown closure — runtime tests would have to plumb a mock slog
-// handler through main(), which is its own architectural mess.
+// Post-#1487/#1376 the per-phase slog moved into runShutdownSteps
+// (runshutdown.go) keyed on the step name, and the ordered step names live in
+// main()'s shutdownStep slice. This pin now verifies (a) runshutdown.go still
+// emits a `phase=` timing line, (b) main.go still summarises with total_ms,
+// and (c) the step names appear in main.go in the contract order. The
+// behavioral call-order guarantee lives in runshutdown_order_test.go.
 func TestRunShutdown_EmitsPhaseTimings(t *testing.T) {
 	t.Parallel()
 
@@ -29,46 +31,49 @@ func TestRunShutdown_EmitsPhaseTimings(t *testing.T) {
 	}
 	dir := filepath.Dir(self)
 
-	src, err := os.ReadFile(filepath.Join(dir, "main.go"))
-	if err != nil {
-		t.Fatalf("read main.go: %v", err)
-	}
-	body := string(src)
+	mainBody := readSrc(t, filepath.Join(dir, "main.go"))
+	stepBody := readSrc(t, filepath.Join(dir, "runshutdown.go"))
 
-	// A simple substring check is enough: each phase log line is unique
-	// because the slog key/value pairs are written verbatim.
-	wants := []struct {
-		fragment string
-		why      string
-	}{
-		{`"phase", "sysmgr"`, "sysession-manager teardown timing"},
-		{`"phase", "scheduler"`, "cron scheduler teardown timing"},
-		{`"phase", "router"`, "session-router teardown timing"},
+	// runshutdown.go owns the per-phase timing emit + the summary key.
+	for _, w := range []struct{ fragment, why string }{
+		{`"shutdown phase complete", "phase", s.name`, "per-phase teardown timing emit"},
+	} {
+		if !strings.Contains(stepBody, w.fragment) {
+			t.Errorf("runshutdown.go: missing %s — expected fragment %q for #893", w.why, w.fragment)
+		}
+	}
+	for _, w := range []struct{ fragment, why string }{
 		{`"shutdown complete"`, "summary log line with total_ms"},
 		{`"total_ms"`, "summary key for total elapsed teardown time"},
-	}
-	for _, w := range wants {
-		if !strings.Contains(body, w.fragment) {
-			t.Errorf("main.go runShutdown: missing %s — expected fragment %q for #893",
-				w.why, w.fragment)
+	} {
+		if !strings.Contains(mainBody, w.fragment) {
+			t.Errorf("main.go runShutdown: missing %s — expected fragment %q for #893", w.why, w.fragment)
 		}
 	}
 
-	// The phase ordering is a contract documented in the in-source
-	// comment; verify the three phase emits appear in order so a future
-	// shuffle that runs router before sysmgr (which would race with
-	// daemon Tick paths) breaks loudly.
-	idxSys := strings.Index(body, `"phase", "sysmgr"`)
-	idxSched := strings.Index(body, `"phase", "scheduler"`)
-	idxRouter := strings.Index(body, `"phase", "router"`)
+	// The phase ordering is a contract; verify the named steps appear in
+	// main()'s step slice in order so a future shuffle that runs router
+	// before sysmgr (which would race with daemon Tick paths) breaks loudly
+	// at the source level too.
+	idxSys := strings.Index(mainBody, `name: "sysmgr"`)
+	idxSched := strings.Index(mainBody, `name: "scheduler"`)
+	idxRouter := strings.Index(mainBody, `name: "router"`)
 	if idxSys < 0 || idxSched < 0 || idxRouter < 0 {
-		// Already covered by the loop above; defensive guard for the
-		// ordering check below.
-		return
+		t.Fatalf("main.go: missing a named shutdown step (sysmgr=%d scheduler=%d router=%d)",
+			idxSys, idxSched, idxRouter)
 	}
 	if !(idxSys < idxSched && idxSched < idxRouter) {
-		t.Errorf("main.go runShutdown: phase log ordering must be sysmgr → scheduler → router "+
+		t.Errorf("main.go runShutdown: step ordering must be sysmgr → scheduler → router "+
 			"(got positions sysmgr=%d scheduler=%d router=%d) — see RFC v2.1 §5.2",
 			idxSys, idxSched, idxRouter)
 	}
+}
+
+func readSrc(t *testing.T, path string) string {
+	t.Helper()
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(src)
 }
