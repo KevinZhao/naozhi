@@ -4,11 +4,10 @@
 //
 // Why this lives in wireup and not cmd/naozhi: the orchestration
 // (cron.NewScheduler config translation, NotifyDefault target build,
-// router.AddSessionIDExcluder, sysession Start, metrics phase tag)
+// sysession Start, metrics phase tag)
 // is pure construction with implicit ordering constraints
-// (router.AddSessionIDExcluder must run after scheduler is constructed
-// but before any session spawn; sysession.Start must run after cron
-// is ready). Pulling it out of main.go makes the entry point a graph
+// (sysession.Start must run after cron is ready). Pulling it out of
+// main.go makes the entry point a graph
 // of explicit constructor calls (the same pattern wireup.RegisterCLIBackends
 // and wireup.RegisterHistoryBackends already established).
 //
@@ -58,9 +57,8 @@ type SchedulersDeps struct {
 	// Cfg is the parsed config.
 	Cfg *config.Config
 
-	// Router is the live session router. cron registers itself as a
-	// SessionIDExcluder via router.AddSessionIDExcluder — see godoc
-	// on auto_chain RFC §4.3.
+	// Router is the live session router. Used by cron for history-panel
+	// filtering via IsExcluded / RecentSessionsFilter.
 	Router *session.Router
 
 	// SessionRouterAdapter is the cmd-side cronRouterAdapter that
@@ -114,12 +112,10 @@ type Schedulers struct {
 }
 
 // WireSchedulers constructs cron.Scheduler + sysession.Manager in the
-// correct order, registers cron as a SessionIDExcluder, and starts
-// both subsystems.
+// correct order and starts both subsystems.
 //
 // Side-effects (matches what the inlined main.go code did):
 //   - cron.Scheduler.Start() is called — cron is ready to tick on return
-//   - router.AddSessionIDExcluder(scheduler) is invoked
 //   - sysession.Manager.Start(ParentCtx) is called when enabled
 //
 // Caller is responsible for the metrics.StartupPhaseSchedulerMs.Set
