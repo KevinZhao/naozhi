@@ -205,14 +205,10 @@ func main() {
 	if storePath != "" {
 		eventLogDir = filepath.Join(filepath.Dir(storePath), "events")
 	}
-	// Auto-workspace-chain policy: defaults to enabled=true / window=7d /
-	// cap=32 per docs/rfc/auto-workspace-chain.md. Operators can disable
-	// or tune via session.auto_chain in config.yaml.
-	autoChainPolicy := session.GlobalAutoChainPolicy{
-		EnabledFlag: cfg.Session.AutoChain.ResolvedEnabled(true),
-		WindowDur:   time.Duration(cfg.Session.AutoChain.ResolvedWindowHours(7*24)) * time.Hour,
-		CapValue:    cfg.Session.AutoChain.ResolvedCap(32),
-	}
+	// (auto-workspace-chain policy removed — RFC
+	// docs/rfc/project-stable-session-key.md §9.1. Precise continuation is
+	// now carried by the project-stable session key; the old
+	// session.auto_chain config block is deprecated, see config loader.)
 	router := session.NewRouter(session.RouterConfig{
 		Wrapper:          wrapper,
 		Wrappers:         wrappers,
@@ -237,7 +233,6 @@ func main() {
 		KiroSessionsDir:   osutil.ExpandHome("~/.kiro/sessions/cli"),
 		EventLogDir:       eventLogDir,
 		EventLogGenerator: "naozhi",
-		AutoChainPolicy:   autoChainPolicy,
 	})
 	metrics.StartupPhaseRouterMs.Set(time.Since(t0).Milliseconds())
 
@@ -434,6 +429,9 @@ func main() {
 		Version:           version,
 		SysessionManager:  sysMgr,
 		SysWorkDir:        sysWorkDir,
+		// Project-stable session key (RFC docs/rfc/project-stable-session-key.md).
+		// Default-on (opt-out via session.project_stable_key.enabled: false).
+		ProjectStableKeyEnabled: cfg.Session.ProjectStableKey.ResolvedEnabled(true),
 		OnReady: func() {
 			if err := osutil.SdNotify("READY=1"); err != nil {
 				slog.Warn("sd_notify READY failed", "err", err)

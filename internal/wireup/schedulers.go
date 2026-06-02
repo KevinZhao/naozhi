@@ -167,11 +167,10 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 	}
 	out.Cron = scheduler
 
-	// Auto-workspace-chain (docs/rfc/auto-workspace-chain.md §4.3):
-	// register cron Scheduler as a SessionIDExcluder so cron-spawned
-	// session IDs are never folded into a user session's
-	// prev_session_ids by the auto-chain spawn / backfill paths.
-	deps.Router.AddSessionIDExcluder(scheduler)
+	// (auto-workspace-chain SessionIDExcluder registration removed — RFC
+	// docs/rfc/project-stable-session-key.md §9.1. The cron Scheduler's
+	// IsExcluded / RecentSessionsFilter is retained because the history
+	// panel still uses it to hide cron-owned sessionIDs.)
 
 	// Build sysession Manager when enabled. Failure is degradable:
 	// missing/broken claude binary should not break naozhi startup.

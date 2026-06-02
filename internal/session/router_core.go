@@ -512,69 +512,6 @@ type Router struct {
 	// 读写: core (init/stopAttachmentTracker), lifecycle (installPersistSink), cleanup (clearAttachmentTrackerRefs / Shutdown stop)
 	attachmentTracker *attachmentTracker
 
-	// autoChainPolicy decides whether and how aggressively to attach
-	// prev_session_ids drawn from the same workspace's other JSONL
-	// files (auto-workspace-chain feature; docs/rfc/auto-workspace-chain.md).
-	// Never nil — defaults to disabledAutoChainPolicy when RouterConfig
-	// leaves the field empty, so the feature is opt-in even on a freshly
-	// constructed Router. Read-only after NewRouter.
-	autoChainPolicy AutoChainPolicy
-
-	// excluders aggregates SessionIDExcluder implementations registered
-	// via AddSessionIDExcluder (cron Scheduler, sysession Manager, future
-	// subsystems that own internal CLI sessionIDs). Read by the auto-chain
-	// spawn / backfill paths to guarantee no internal sessionID is folded
-	// into a user-facing chain (RFC §4.3 Arch-B2). Atomic copy-on-write so
-	// the read path stays lock-free under r.mu.
-	//
-	// NEEDS-DESIGN (R242-ARCH-16): excluders is read-as-nil-pool during
-	// the cmd-startup window between NewRouter and the first call to
-	// AddSessionIDExcluder. Today auto-chain readers fall back to "no
-	// exclusions" — a benign opening because cron Scheduler / sysession
-	// Manager have not yet installed any internal sessionIDs (they
-	// register themselves *after* their stub keys exist), so a Phase-2
-	// candidate scan during that window has nothing to exclude. The
-	// fallback's drift cost is that adding a third subsystem (e.g.
-	// planner) which owns sessionIDs from t=0 would silently leak them
-	// into auto-chain candidates until its registration call lands.
-	// Plan: SetPendingExcluders(true) at NewRouter, flip to false in
-	// the cmd-wire step that awaits cron + sysession + planner
-	// registration; auto-chain reads block on the gate so the leak
-	// window is closed by construction. Deferred until a third
-	// excluder owner ships, since the current two-owner topology has
-	// no exposure.
-	excluders atomic.Pointer[[]SessionIDExcluder]
-
-	// pendingExcluders is the R242-ARCH-16 (#760) startup-window gate.
-	// When set (atomic.Bool == true), auto-chain readers SKIP the
-	// chain-attach decision entirely — both the spawn-path
-	// (maybeAttachAutoChainOnSpawn) and the startup backfill
-	// (runAutoChainBackfillOnce). cmd-side wiring is expected to
-	// SetPendingExcluders(true) at the top of router setup, register
-	// every SessionIDExcluder owner (cron Scheduler, sysession Manager,
-	// any future namespace), then SetPendingExcluders(false) to admit
-	// chain decisions. Default zero-value is `false` so callers that
-	// have not opted into the gate (older cmd wiring, tests) keep the
-	// pre-#760 behaviour: auto-chain reads run the moment the policy
-	// is configured.
-	//
-	// Skip-rather-than-block was chosen over a sync.Cond wait so a
-	// misconfigured cmd that forgets the SetPendingExcluders(false)
-	// call surfaces as "auto-chain didn't run" (visible in metrics
-	// and logs) instead of "every spawn deadlocks waiting for an
-	// event that never arrives". The cost of skipping is at most one
-	// startup-window spawn missing its auto-chain attach; cron /
-	// sysession do not register session IDs that early, so the
-	// observable diff is zero in production.
-	pendingExcluders atomic.Bool
-
-	// autoChainListJSONL is the listJSONL function injected into
-	// pickWorkspaceChain. Production wires discovery.ListWorkspaceJSONL;
-	// tests inject a fixture function that returns synthetic
-	// WorkspaceJSONL slices without touching disk. Read-only after
-	// NewRouter (config-time injection); not subject to lock contention.
-	autoChainListJSONL func(workspace string) []discovery.WorkspaceJSONL
-
 	// historyLoader loads a session's persisted JSONL history tail across
 	// a prev_session_ids chain. Production wires discovery.LoadHistoryChainTailCtx;
 	// tests inject a fixture that returns synthetic entries without touching
@@ -592,15 +529,6 @@ type Router struct {
 	// itself immutable post-construction so concurrent readers are safe.
 	// 读写: core (init), Resolver() (read-only accessor)
 	resolver *KeyResolver
-
-	// testHookBeforeSpawnPhase3 / testHookBeforeBackfillPhase3 are
-	// test-only TOCTOU race-pinning hooks (RFC §5.3.1). Production
-	// builds leave them nil. Trigger contracts and helper methods
-	// live in router_testhooks.go so this struct stays focused on
-	// production state. Tests set the fields directly. R245-ARCH-29
-	// (#882).
-	testHookBeforeSpawnPhase3    func()
-	testHookBeforeBackfillPhase3 func()
 }
 
 // spawnerFunc is the signature panicSafeSpawnFn executes; abstracting it lets
@@ -929,18 +857,6 @@ type RouterConfig struct {
 	// callers.
 	EventLogPersister *persist.Persister
 
-	// AutoChainPolicy drives the workspace auto-chain feature
-	// (docs/rfc/auto-workspace-chain.md). nil disables the feature
-	// (Router falls back to disabledAutoChainPolicy). Production
-	// wires GlobalAutoChainPolicy from cfg.Session.AutoChain.
-	AutoChainPolicy AutoChainPolicy
-
-	// AutoChainListJSONL is the discovery.ListWorkspaceJSONL hook used
-	// by the auto-chain feature. nil falls back to discovery.ListWorkspaceJSONL.
-	// Tests inject a fixture function so unit cases can synthesise
-	// JSONL listings without touching disk.
-	AutoChainListJSONL func(workspace string) []discovery.WorkspaceJSONL
-
 	// HistoryLoader loads a session's persisted JSONL history tail across
 	// a prev_session_ids chain. nil falls back to the production
 	// discovery.LoadHistoryChainTailCtx implementation. Tests inject a
@@ -1035,8 +951,6 @@ func NewRouter(cfg RouterConfig) *Router {
 		noOutputTimeout:    cfg.NoOutputTimeout,
 		totalTimeout:       cfg.TotalTimeout,
 		eventLogDir:        cfg.EventLogDir,
-		autoChainPolicy:    cfg.AutoChainPolicy,
-		autoChainListJSONL: cfg.AutoChainListJSONL,
 		historyLoader:      cfg.HistoryLoader,
 		resolver:           cfg.Resolver,
 	}
@@ -1044,22 +958,6 @@ func NewRouter(cfg RouterConfig) *Router {
 	// rest of the router can call r.historyLoader unconditionally (#458).
 	if r.historyLoader == nil {
 		r.historyLoader = discoveryHistoryLoader{}
-	}
-	// Auto-chain defaults: nil policy → safely-disabled stub so the
-	// rest of the code can call r.autoChainPolicy.Enabled(...) without
-	// nil checks. nil listJSONL → production discovery hook.
-	if r.autoChainPolicy == nil {
-		r.autoChainPolicy = disabledAutoChainPolicy{}
-	}
-	if r.autoChainListJSONL == nil {
-		// Capture claudeDir in a closure so the auto-chain decision
-		// signature stays workspace-only. discovery.ListWorkspaceJSONL
-		// requires both claudeDir and workspace; the router knows
-		// claudeDir from config and pickWorkspaceChain doesn't.
-		claudeDir := r.claudeDir
-		r.autoChainListJSONL = func(workspace string) []discovery.WorkspaceJSONL {
-			return discovery.ListWorkspaceJSONL(claudeDir, workspace)
-		}
 	}
 	// Spin up the event-log persister BEFORE we touch the session
 	// store; the startup load path needs a live sink to attach
@@ -1144,16 +1042,15 @@ func NewRouter(cfg RouterConfig) *Router {
 	// "history" panel so that Remove is a durable delete — the user must
 	// explicitly resume an entry before it re-enters the sidebar.
 
-	// Auto-workspace-chain backfill: synchronously fill prev_session_ids
-	// on every restored session that qualifies BEFORE we launch the Tier 1 /
-	// Tier 2 history-loading goroutines. Tier 2 reads the chain (via
-	// LoadHistoryChainTailCtx) — if the chain were still empty here, the
-	// loader would only see the current sessionID's JSONL, and the
-	// dashboard's "load earlier" button would stop at that boundary even
-	// though older JSONL files exist in the workspace. Pinned by
-	// TestNewRouter_AutoChainPrecedesTier2Loaders. See
-	// docs/rfc/auto-workspace-chain.md §4.4-B.
-	r.runAutoChainBackfillOnce()
+	// Auto-workspace-chain RETIRED (RFC docs/rfc/project-stable-session-key.md
+	// §9.2). The old runAutoChainBackfillOnce machine-guessed prev_session_ids
+	// from "same workspace dir + 7d window" and produced semantically-wrong
+	// chains. We now do the opposite at startup: strip any auto-spawn /
+	// auto-backfill segments left in persisted chains, keeping only the real
+	// sessionID-rotation chain (origin manual / resume). Runs in the same slot
+	// the backfill occupied — BEFORE the Tier 1 / Tier 2 history loaders — so
+	// the loaders observe the already-cleaned chain rather than a polluted one.
+	r.retireAutoChainOnce()
 
 	// Async-load history for all suspended sessions so the dashboard
 	// shows conversation history without waiting for the next message.
@@ -1269,10 +1166,10 @@ func (r *Router) restoreSessionFromEntry(key string, entry *storeEntry) {
 // any. This is fine for the production single-call path; tests that need
 // finer control should construct a Router directly without calling Start.
 //
-// NOTE: runAutoChainBackfillOnce is intentionally NOT moved here because
-// it must execute synchronously BEFORE the Tier 1 / Tier 2 history
-// goroutines spawn (TestNewRouter_AutoChainPrecedesTier2Loaders pins
-// this ordering). Treat it as part of construction, not a side effect.
+// NOTE: retireAutoChainOnce is intentionally NOT moved here because it must
+// execute synchronously BEFORE the Tier 1 / Tier 2 history goroutines spawn,
+// so the loaders observe the cleaned prev_session_ids chain rather than a
+// polluted one. Treat it as part of construction, not a side effect.
 func (r *Router) startBackgroundLifecycle() {
 	r.runOrphanSweep()
 	r.startAttachmentTracker()
