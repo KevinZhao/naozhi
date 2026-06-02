@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"log/slog"
+	"os"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -20,6 +23,67 @@ import (
 // (returns wrappers / logs / etc.) — bigger sub-systems (router init,
 // platform init, scheduler init) keep their existing entry points and
 // will be lifted in follow-up rounds.
+
+// resolveLogLevel maps a config.Log.Level string to a slog.Level. Unknown
+// or empty values fall back to Info. Extracted from main() (R237-ARCH-8 /
+// #590) so the level mapping is unit-testable in isolation.
+func resolveLogLevel(level string) slog.Level {
+	switch level {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// newLogHandler builds the slog.Handler for the configured log format and
+// level, writing to w. "text" selects a TextHandler; everything else (incl.
+// the default "json") selects a JSONHandler. Extracted from main() so the
+// handler-selection branch is testable without touching the process-global
+// default logger (R237-ARCH-8 / #590).
+func newLogHandler(w *os.File, cfg *config.Config) slog.Handler {
+	opts := &slog.HandlerOptions{Level: resolveLogLevel(cfg.Log.Level)}
+	if cfg.Log.Format == "text" {
+		return slog.NewTextHandler(w, opts)
+	}
+	return slog.NewJSONHandler(w, opts)
+}
+
+// setupLogging installs the process-global slog default logger from cfg,
+// writing to stdout. Thin wrapper over newLogHandler kept in main_init so
+// main() stays a single SetDefault call (R237-ARCH-8 / #590).
+func setupLogging(cfg *config.Config) {
+	slog.SetDefault(slog.New(newLogHandler(os.Stdout, cfg)))
+}
+
+// startWatchdogLoop launches the systemd liveness heartbeat goroutine.
+// WATCHDOG=1 is sent unconditionally every 30s (its purpose is OS-level
+// liveness); the router HealthCheck result is logged as a diagnostic only
+// and never suppresses the heartbeat — normal write-lock activity (cleanup,
+// spawn) would otherwise cause false negatives. Returns when ctx is done.
+// Extracted from main() (R237-ARCH-8 / #590) so the heartbeat cadence and
+// HealthCheck-does-not-gate contract are exercisable in isolation.
+func startWatchdogLoop(ctx context.Context, hc func() bool) {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if hc != nil && !hc() {
+					slog.Warn("router mutex contended at watchdog tick")
+				}
+				_ = osutil.SdNotify("WATCHDOG=1")
+			}
+		}
+	}()
+}
 
 // logConfigValidationDiagnostics surfaces every config.Validate() finding
 // to the structured log at the appropriate level. docs/rfc/multi-backend.md

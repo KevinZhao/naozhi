@@ -85,23 +85,8 @@ func main() {
 	}
 	metrics.StartupPhaseConfigMs.Set(time.Since(t0).Milliseconds())
 
-	// Setup logging
-	level := slog.LevelInfo
-	switch cfg.Log.Level {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-	var handler slog.Handler
-	if cfg.Log.Format == "text" {
-		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
-	} else {
-		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
-	}
-	slog.SetDefault(slog.New(handler))
+	// Setup logging (resolveLogLevel + newLogHandler in main_init.go).
+	setupLogging(cfg)
 
 	// Context with cancellation for graceful shutdown. Created here (before
 	// applyClaudeEnvSettings) so retry sleeps in readJSONWithRetry respond to
@@ -595,26 +580,8 @@ func main() {
 		serverErr <- srv.Start(ctx)
 	}()
 
-	// Systemd watchdog: periodically signal liveness so WatchdogSec can detect hangs.
-	// Always send WATCHDOG=1 unconditionally — its purpose is OS-level liveness.
-	// The HealthCheck (TryRLock) result is logged as a diagnostic signal only;
-	// it must not suppress the heartbeat since normal write-lock activity
-	// (cleanup, spawn) would cause false negatives.
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if !router.HealthCheck() {
-					slog.Warn("router mutex contended at watchdog tick")
-				}
-				_ = osutil.SdNotify("WATCHDOG=1")
-			}
-		}
-	}()
+	// Systemd watchdog heartbeat (startWatchdogLoop in main_init.go).
+	startWatchdogLoop(ctx, router.HealthCheck)
 
 	metrics.StartupPhaseReadyMs.Set(time.Since(t0).Milliseconds())
 

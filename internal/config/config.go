@@ -505,32 +505,32 @@ func (cfg *Config) Normalize() {
 
 func applyDefaults(cfg *Config) {
 	if cfg.Server.Addr == "" {
-		cfg.Server.Addr = ":8080"
+		cfg.Server.Addr = defaultServerAddr
 	}
 	if cfg.Session.MaxProcs <= 0 {
 		cfg.Session.MaxProcs = sessionconst.DefaultMaxProcs
 	}
 	if cfg.Session.TTL == "" {
-		cfg.Session.TTL = "30m"
+		cfg.Session.TTL = defaultSessionTTL.String()
 	}
 	if cfg.Session.PruneTTL == "" {
-		cfg.Session.PruneTTL = "72h"
+		cfg.Session.PruneTTL = defaultSessionPruneTTL.String()
 	}
 	if cfg.Log.Level == "" {
-		cfg.Log.Level = "info"
+		cfg.Log.Level = defaultLogLevel
 	}
 	if cfg.Session.Workspace == "" {
-		cfg.Session.Workspace = "~/.naozhi/workspace"
+		cfg.Session.Workspace = defaultSessionCWD
 	}
 	if cfg.Session.Queue.MaxDepth == nil {
-		defaultDepth := 20
+		defaultDepth := defaultQueueMaxDepth
 		cfg.Session.Queue.MaxDepth = &defaultDepth
 	}
 	if cfg.Session.Queue.CollectDelay == "" {
-		cfg.Session.Queue.CollectDelay = "500ms"
+		cfg.Session.Queue.CollectDelay = defaultQueueCollectDelay.String()
 	}
 	if cfg.Session.Queue.Mode == "" {
-		cfg.Session.Queue.Mode = "collect"
+		cfg.Session.Queue.Mode = defaultQueueMode
 	}
 	if cfg.Session.CWD != "" {
 		if cfg.Session.Workspace != "" && cfg.Session.Workspace != cfg.Session.CWD {
@@ -579,25 +579,25 @@ func applyDefaults(cfg *Config) {
 
 func parseDurations(cfg *Config) error {
 	var err error
-	if cfg.cachedTTL, err = parseDurationRequired(cfg.Session.TTL, "session.ttl", 30*time.Minute); err != nil {
+	if cfg.cachedTTL, err = parseDurationRequired(cfg.Session.TTL, "session.ttl", defaultSessionTTL); err != nil {
 		return err
 	}
-	if cfg.cachedPruneTTL, err = parseDurationRequired(cfg.Session.PruneTTL, "session.prune_ttl", 72*time.Hour); err != nil {
+	if cfg.cachedPruneTTL, err = parseDurationRequired(cfg.Session.PruneTTL, "session.prune_ttl", defaultSessionPruneTTL); err != nil {
 		return err
 	}
-	if cfg.cachedNoOutputTimeout, err = parseDurationRequired(cfg.Session.Watchdog.NoOutputTimeout, "session.watchdog.no_output_timeout", 2*time.Minute); err != nil {
+	if cfg.cachedNoOutputTimeout, err = parseDurationRequired(cfg.Session.Watchdog.NoOutputTimeout, "session.watchdog.no_output_timeout", defaultNoOutputTimeout); err != nil {
 		return err
 	}
-	if cfg.cachedTotalTimeout, err = parseDurationRequired(cfg.Session.Watchdog.TotalTimeout, "session.watchdog.total_timeout", 5*time.Minute); err != nil {
+	if cfg.cachedTotalTimeout, err = parseDurationRequired(cfg.Session.Watchdog.TotalTimeout, "session.watchdog.total_timeout", defaultTotalTimeout); err != nil {
 		return err
 	}
-	if cfg.cachedExecTimeout, err = parseDurationRequired(cfg.Cron.ExecutionTimeout, "cron.execution_timeout", 5*time.Minute); err != nil {
+	if cfg.cachedExecTimeout, err = parseDurationRequired(cfg.Cron.ExecutionTimeout, "cron.execution_timeout", defaultCronExecTimeout); err != nil {
 		return err
 	}
-	if cfg.cachedCollectDelay, err = parseDurationRequired(cfg.Session.Queue.CollectDelay, "session.queue.collect_delay", 500*time.Millisecond); err != nil {
+	if cfg.cachedCollectDelay, err = parseDurationRequired(cfg.Session.Queue.CollectDelay, "session.queue.collect_delay", defaultQueueCollectDelay); err != nil {
 		return err
 	}
-	if cfg.cachedJitterMax, err = parseDurationNonNegative(cfg.Cron.JitterMax, "cron.jitter_max", 2*time.Minute); err != nil {
+	if cfg.cachedJitterMax, err = parseDurationNonNegative(cfg.Cron.JitterMax, "cron.jitter_max", defaultCronJitterMax); err != nil {
 		return err
 	}
 	// 硬上限 10m：抖动比大多数任务周期还长就毫无意义，clamp 并 warn，

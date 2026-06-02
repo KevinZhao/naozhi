@@ -310,15 +310,19 @@ func buildServer(opts ServerOptions) *Server {
 	}
 
 	cookieSecret := loadOrCreateCookieSecret(opts.StateDir)
-	// R247-SEC-17: cookieGen is mixed into the auth-cookie HMAC alongside
-	// the dashboard token so every restart produces a fresh MAC even when
-	// stateDir is shared (the common operator setup). nanoseconds are
-	// unique within the process and cheap to produce — we don't need
-	// crypto-grade entropy because cookieSecret already supplies that;
-	// cookieGen exists only to break MAC equivalence across (re)starts
-	// and future hot-reloads. Future rotation handler can bump this field
-	// at runtime to invalidate every outstanding cookie atomically.
-	cookieGen := strconv.FormatInt(time.Now().UnixNano(), 10)
+	// R217-SEC-6 / R172-SEC-L4 (#595 / #437): cookieGen is mixed into the
+	// auth-cookie HMAC alongside the dashboard token so every restart
+	// produces a fresh MAC even when stateDir is shared (the common operator
+	// setup). The seed was previously time.Now().UnixNano(), which is
+	// predictable: an attacker who learns the process start time (exposed via
+	// /health uptime, journal timestamps, or a banner) can reconstruct the
+	// gen segment and — given the token + secret — forge a cookie that
+	// survives any restart on the same stateDir. Seeding from a CSPRNG closes
+	// that, so a captured cookie cannot be replayed against a future instance
+	// even when token + secret are stable. RotateDashboardSessions can bump
+	// the in-process seq counter at runtime to invalidate every outstanding
+	// cookie atomically without a restart.
+	cookieGen := randomCookieGen()
 
 	// Construct KeyResolver once and share across dispatcher (wired in
 	// Start), hub, and ProjectHandlers. project.NewDataSource returns
