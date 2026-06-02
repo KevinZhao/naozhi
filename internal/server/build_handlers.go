@@ -238,6 +238,8 @@ func buildProjectHandlers(
 		FilesExistsLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, opts.TrustedProxy),
 		ConfigPutLimiter:   newIPLimiterWithProxy(rate.Every(200*time.Millisecond), 5, opts.TrustedProxy),
 		PublicTmpEnabled:   opts.PublicTmpEnabled,
+
+		ProjectStableKeyEnabled: opts.ProjectStableKeyEnabled,
 	})
 }
 

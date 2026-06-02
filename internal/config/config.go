@@ -163,9 +163,35 @@ type SessionConfig struct {
 	CWD       string         `yaml:"cwd"` // default working directory for CLI processes
 	// Deprecated: use CWD instead. Preserved for backward compatibility
 	// with existing config files; new fields should write only `cwd`.
-	Workspace string              `yaml:"workspace"`
-	Shim      ShimConfig          `yaml:"shim"`
-	AutoChain AutoChainYAMLConfig `yaml:"auto_chain,omitempty"`
+	Workspace string     `yaml:"workspace"`
+	Shim      ShimConfig `yaml:"shim"`
+	// Deprecated: the auto-workspace-chain feature was retired (RFC
+	// docs/rfc/project-stable-session-key.md §9.1). This block is still
+	// parsed so existing config files do not error, but it no longer has
+	// any effect; precise continuation is now carried by the project-stable
+	// session key. A non-default value triggers a one-line deprecation warn
+	// at load (see WarnDeprecated).
+	AutoChain        AutoChainYAMLConfig        `yaml:"auto_chain,omitempty"`
+	ProjectStableKey ProjectStableKeyYAMLConfig `yaml:"project_stable_key,omitempty"`
+}
+
+// ProjectStableKeyYAMLConfig controls the project-level stable session key
+// feature (RFC docs/rfc/project-stable-session-key.md). Default-on. When
+// disabled, the dashboard frontend falls back to the legacy timestamp-key
+// path for "continue" — existing stable-key sessions age out naturally.
+//
+// Enabled is *bool so an absent key falls back to def-true while preserving
+// the ability to explicitly write enabled: false.
+type ProjectStableKeyYAMLConfig struct {
+	Enabled *bool `yaml:"enabled,omitempty"`
+}
+
+// ResolvedEnabled returns the effective on/off flag.
+func (c ProjectStableKeyYAMLConfig) ResolvedEnabled(def bool) bool {
+	if c.Enabled == nil {
+		return def
+	}
+	return *c.Enabled
 }
 
 // AutoChainYAMLConfig represents the auto-workspace-chain feature
@@ -558,6 +584,14 @@ func applyDefaults(cfg *Config) {
 		// promotion forever. R71-CONFIG-M1.
 		slog.Warn("'session.workspace' is deprecated, please rename to 'session.cwd'")
 		cfg.Session.CWD = cfg.Session.Workspace
+	}
+
+	// Deprecation: the auto-workspace-chain feature was retired (RFC
+	// docs/rfc/project-stable-session-key.md §9.1). The config block is
+	// still parsed so old files don't error, but it has no effect — warn
+	// once if an operator explicitly set any field so they know to drop it.
+	if cfg.Session.AutoChain.Enabled != nil || cfg.Session.AutoChain.WindowHours != 0 || cfg.Session.AutoChain.Cap != 0 {
+		slog.Warn("'session.auto_chain' is deprecated and has no effect; the feature was replaced by project-stable session keys — remove this block from config")
 	}
 
 	cfg.Normalize()

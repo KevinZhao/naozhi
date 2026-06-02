@@ -462,4 +462,12 @@ var (
 	// any increment indicates a code path violated the append-only
 	// invariant on prev_session_ids.
 	AutoChainOriginsLengthMismatch = expvar.NewInt("naozhi_auto_chain_origins_length_mismatch_total")
+
+	// AutoChainRetiredOnStartup counts sessions whose prev_session_ids chain
+	// had auto-spawn / auto-backfill segments stripped by the one-time startup
+	// cleanup that replaced the auto-workspace-chain backfill (RFC
+	// docs/rfc/project-stable-session-key.md §9.2). One increment per session
+	// touched; idempotent across restarts (a cleaned chain has no auto-*
+	// origins left, so a second startup is a no-op and does not increment).
+	AutoChainRetiredOnStartup = expvar.NewInt("naozhi_auto_chain_retired_on_startup_total")
 )
