@@ -406,3 +406,13 @@
 - [R20260602-091302-PERF-1] sessionSink.accept 每批 alloc owned+spans 两片，可加 sync.Pool — internal/eventlog/persist/persister.go:554
 - [R20260602-091302-PERF-2] newEventLogSink 多 entry 批每次 alloc spans/times/out 三片，可加 bridgeBatchScratch pool — internal/session/eventlog_bridge.go:183
 - [R20260602-091302-GO-12] slogPrintfLogger.Printf 注释方向写反(Error>Warn)，第二个 Enabled 冗余 — internal/cron/scheduler.go:1935
+- [R20260602-GO-1] recordTerminalResult 手动 mutex Unlock 配对，未来新增 return 分支有死锁风险 — internal/cron/scheduler_finish.go:569
+- [R20260602-GO-2] unsub 在 subMu 锁外 close(sub.ch)，靠 RLock-around-send 防护仅注释非机械约束 — internal/cli/eventlog_subscribe.go:217
+- [R20260602-GO-10] NotifyCtx(nil) 刻意忽略 parent，SA1012 误报，建议签名 godoc 标 parent may be nil — internal/dispatch/dispatch.go:1017
+- [R20260602-GO-11] redactPathsInCronError 截断后冗余第二次 hasNoPathTrigger 扫描 — internal/cron/scheduler_finish.go:716
+- [R20260602-GO-12] sysession runner BinPath 绝对路径两次 os.Stat 重复校验 — internal/sysession/runner.go:137
+- [R20260602-ARCH-1] RedactSecrets 通用安全 util 错置 cron 域包，可移至 leaf textutil — internal/cron/redact_secrets.go:120
+- [R20260602-ARCH-2] wireup.Registry[T] 泛型零生产消费者，premature generalization — internal/wireup/registry.go:11
+- [R20260602-ARCH-3] 两处 typed-nil-interface collapse 逻辑重复，可抽 collapseTypedNil[T] — internal/dispatch/dispatch.go:514
+- [R20260602-GEN-6] IsDashboardProjectKey 生产声明但仅 test 调用，预留未用 — internal/sessionkey/key.go:98
+- [R20260602-GEN-7] retireAutoChainOnce 每次启动无条件 log complete 即使 cleaned=0 噪音 — internal/session/auto_chain_retire.go:92
