@@ -452,6 +452,14 @@ type Scheduler struct {
 	// the scheduler itself owns the root context so Stop() can cancel in-
 	// flight executions. Callers outside execute() take ctx as an argument.
 	//
+	// R249-ARCH-4 (#972) — ctx-as-arg exception is confined: real reads of
+	// s.stopCtx are allowed ONLY on robfig/cron callback-derived paths
+	// (scheduler_run.go execute/jitter/spawn, scheduler_notify.go reply
+	// ctx, and the cold-start GC here) where no ctx parameter exists to
+	// thread. TestStopCtx_ReadsConfinedToCallbackPaths enforces that an
+	// unrelated method which already receives a ctx must NOT reach for this
+	// field instead.
+	//
 	// R249-ARCH-8 (#974) — single authoritative cancel signal. There appear
 	// to be two ways to cancel cron work (SchedulerConfig.ParentCtx being
 	// cancelled by the host's shutdown, vs an explicit Stop() call), but they
