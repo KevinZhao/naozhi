@@ -60,6 +60,63 @@ func TruncateRunes(s string, maxRunes int) string {
 	return s
 }
 
+// TruncateRunesPair truncates s to two rune caps in a SINGLE UTF-8 scan,
+// returning (lo, hi) where lo has at most loRunes and hi at most hiRunes,
+// each with the same ellipsis behaviour as TruncateRunes. It is the fused
+// equivalent of `TruncateRunes(s, loRunes), TruncateRunes(s, hiRunes)`.
+//
+// Event formatting derives both a short Summary (e.g. 120 runes) and a
+// longer Detail (e.g. 2000 / 16000 runes) from the same assistant text or
+// thinking block. Calling TruncateRunes twice rescans the same runes from
+// the start; for multi-KB blocks at 5–50 events/s that doubles the decode
+// work on a hot path. This walks the runes once, recording the lo cut while
+// continuing to the hi cut. R20260602190132-PERF-11.
+//
+// Caps <= 0 mean "no limit" for that output (s returned unchanged), matching
+// TruncateRunes. loRunes need not be <= hiRunes; each cut is independent.
+func TruncateRunesPair(s string, loRunes, hiRunes int) (lo, hi string) {
+	// Byte length bounds the rune count: if s already fits BOTH caps no
+	// scan is possible to trim it. Each "no limit" (<=0) cap also fits.
+	loFits := loRunes <= 0 || len(s) <= loRunes
+	hiFits := hiRunes <= 0 || len(s) <= hiRunes
+	if loFits && hiFits {
+		return s, s
+	}
+	loIdx, hiIdx := -1, -1
+	i, count := 0, 0
+	for i < len(s) {
+		if !loFits && loIdx < 0 && count == loRunes {
+			loIdx = i
+		}
+		if !hiFits && hiIdx < 0 && count == hiRunes {
+			hiIdx = i
+		}
+		if (loFits || loIdx >= 0) && (hiFits || hiIdx >= 0) {
+			break
+		}
+		_, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		count++
+	}
+	lo = cutWithEllipsis(s, loIdx)
+	hi = cutWithEllipsis(s, hiIdx)
+	return lo, hi
+}
+
+// cutWithEllipsis returns s[:idx] + ellipsis when idx >= 0 (a recorded
+// truncation point), otherwise s unchanged. Mirrors the single-allocation
+// pre-grown Builder fusion used by TruncateRunes.
+func cutWithEllipsis(s string, idx int) string {
+	if idx < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(idx + len(ellipsis))
+	b.WriteString(s[:idx])
+	b.WriteString(ellipsis)
+	return b.String()
+}
+
 // TruncateRunesNoEllipsis truncates s to at most maxRunes runes WITHOUT
 // appending an ellipsis suffix. Used by IM card renderers (Feishu button
 // labels, headers, tool_use_id values) where a trailing "..." would clutter

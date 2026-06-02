@@ -136,8 +136,8 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 			switch block.Type {
 			case "thinking":
 				entry.Type = "thinking"
-				entry.Summary = textutil.TruncateRunes(block.Text, 120)
-				entry.Detail = textutil.TruncateRunes(block.Text, eventDetailMaxRunes)
+				// R20260602190132-PERF-11: one UTF-8 scan for both caps.
+				entry.Summary, entry.Detail = textutil.TruncateRunesPair(block.Text, 120, eventDetailMaxRunes)
 			case "tool_use":
 				entry.Type = "tool_use"
 				entry.Summary = block.Name
@@ -200,8 +200,8 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 				}
 			case "text":
 				entry.Type = "text"
-				entry.Summary = textutil.TruncateRunes(block.Text, 120)
-				entry.Detail = textutil.TruncateRunes(block.Text, 16000)
+				// R20260602190132-PERF-11: one UTF-8 scan for both caps.
+				entry.Summary, entry.Detail = textutil.TruncateRunesPair(block.Text, 120, 16000)
 			}
 			// No default branch: the outer guard switch above already
 			// `continue`s on unknown block.Type, so anything reaching this

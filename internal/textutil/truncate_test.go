@@ -143,3 +143,50 @@ func TestTruncateRunesBytes(t *testing.T) {
 		})
 	}
 }
+
+// TestTruncateRunesPair_MatchesTwoCalls is the core equivalence guarantee:
+// the fused single-scan result must be identical to calling TruncateRunes
+// twice with each cap, across ASCII, multibyte, fit/trim, and no-limit caps.
+func TestTruncateRunesPair_MatchesTwoCalls(t *testing.T) {
+	t.Parallel()
+	inputs := []string{
+		"",
+		"hi",
+		"hello world",
+		"你好世界测试",
+		"🚀abc🚀def🚀",
+		"the quick brown fox jumps over the lazy dog",
+	}
+	caps := []int{-1, 0, 1, 2, 4, 5, 11, 100}
+	for _, s := range inputs {
+		for _, lo := range caps {
+			for _, hi := range caps {
+				gotLo, gotHi := TruncateRunesPair(s, lo, hi)
+				wantLo := TruncateRunes(s, lo)
+				wantHi := TruncateRunes(s, hi)
+				if gotLo != wantLo || gotHi != wantHi {
+					t.Errorf("TruncateRunesPair(%q,%d,%d) = (%q,%q), want (%q,%q)",
+						s, lo, hi, gotLo, gotHi, wantLo, wantHi)
+				}
+			}
+		}
+	}
+}
+
+// TestTruncateRunesPair_TypicalEventCaps mirrors the production call shape
+// (Summary 120, Detail 2000/16000) with a string longer than the small cap
+// but shorter than the large cap: lo trims, hi passes through unchanged.
+func TestTruncateRunesPair_TypicalEventCaps(t *testing.T) {
+	t.Parallel()
+	s := ""
+	for i := 0; i < 200; i++ {
+		s += "x"
+	}
+	lo, hi := TruncateRunesPair(s, 120, 16000)
+	if lo != s[:120]+"..." {
+		t.Errorf("lo = %q, want first 120 + ellipsis", lo)
+	}
+	if hi != s {
+		t.Errorf("hi = %q, want unchanged", hi)
+	}
+}
