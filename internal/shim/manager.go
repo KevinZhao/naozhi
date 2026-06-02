@@ -1339,9 +1339,6 @@ var shimEndpointEnvKeys = map[string]bool{
 	"AWS_BEDROCK_ENDPOINT":       true,
 }
 
-// shimEndpointEnvWarnOnce caps the rejection log to one line per process.
-var shimEndpointEnvWarnOnce sync.Once
-
 // shimEndpointEnvDropped reports whether kv (a "KEY=value" env entry) is an
 // endpoint URL var that must be dropped because its value targets a plain-http
 // non-loopback host. Non-endpoint keys and safe URLs return false. The value
@@ -1359,10 +1356,7 @@ func shimEndpointEnvDropped(kv string) bool {
 		return false
 	}
 	if err := validateShimEndpointURL(val); err != nil {
-		shimEndpointEnvWarnOnce.Do(func() {
-			slog.Warn("shim env: rejecting unsafe endpoint base_url (further rejections silently dropped)",
-				"key", key, "err", err)
-		})
+		slog.Warn("shim env: rejecting unsafe endpoint base_url", "key", key, "err", err)
 		return true
 	}
 	return false

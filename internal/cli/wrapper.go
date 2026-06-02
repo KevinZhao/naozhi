@@ -474,6 +474,12 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 		return nil, fmt.Errorf("shim manager not configured")
 	}
 
+	// R164029-SEC-6: reject cwd containing NUL bytes. The OS silently
+	// truncates at the NUL, which can redirect the working directory.
+	if strings.ContainsRune(opts.WorkingDir, 0) {
+		return nil, fmt.Errorf("cwd contains NUL byte")
+	}
+
 	// R20260527122801-SEC-1: enforce argv hygiene at spawn time. The
 	// construction-time validateCLIPath is warn-only by design (test
 	// fixtures + uninstalled-CLI deployments rely on construction

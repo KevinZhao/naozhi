@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // memoryTestHandler builds a handler with a temp projects dir + permissive
@@ -449,5 +450,48 @@ func TestMemoryHandler_AtCapNotTruncated(t *testing.T) {
 	}
 	if got := len(resp.Body); got != maxMemoryFileBytes {
 		t.Errorf("len(Body) = %d, want %d", got, maxMemoryFileBytes)
+	}
+}
+
+// TestNegCache_SweepOnWrite verifies R164029-CR-2: expired entries are
+// evicted from the negative cache on the next write, preventing unbounded
+// map growth when an attacker sprays unique slugs.
+func TestNegCache_SweepOnWrite(t *testing.T) {
+	dir := t.TempDir()
+	// No memory files — every slug lookup will miss and populate negCache.
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := memoryTestHandler(t, dir, "")
+
+	// Pre-populate negCache with three already-expired entries by writing
+	// them directly (using a deadline in the past).
+	past := time.Now().Add(-time.Second)
+	h.negCacheMu.Lock()
+	h.negCache = map[string]time.Time{
+		"stale_slug_a": past,
+		"stale_slug_b": past,
+		"stale_slug_c": past,
+	}
+	h.negCacheMu.Unlock()
+
+	// A single miss on a new slug must trigger sweep-on-write, removing the
+	// three stale entries and then adding the new one — net size == 1.
+	callMemoryHandler(t, h, "new_slug_x")
+
+	h.negCacheMu.Lock()
+	size := len(h.negCache)
+	_, hasStale := h.negCache["stale_slug_a"]
+	_, hasNew := h.negCache["new_slug_x"]
+	h.negCacheMu.Unlock()
+
+	if size != 1 {
+		t.Errorf("negCache len = %d after sweep, want 1 (stale entries not evicted)", size)
+	}
+	if hasStale {
+		t.Errorf("stale entry still present after sweep")
+	}
+	if !hasNew {
+		t.Errorf("new entry missing after write")
 	}
 }

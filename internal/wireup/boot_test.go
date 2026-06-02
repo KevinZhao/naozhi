@@ -50,31 +50,60 @@ func TestRecordBootStep_Idempotent(t *testing.T) {
 	}
 }
 
-// TestValidate_DetectsMissingStep exercises the failure path on an
-// isolated registry so the assertion does not depend on (or mutate) the
-// package-level bootRegistry. It proves Validate's missing-step detection
-// — the behaviour that turns a silent runtime degrade into a loud boot
-// error — works as documented.
+// TestValidate_DetectsMissingStep exercises the failure path: when
+// history-backends is absent Validate must return a non-nil error that
+// names the missing step.
 func TestValidate_DetectsMissingStep(t *testing.T) {
-	t.Parallel()
+	// Save and restore the real bootRegistry so this test does not mutate
+	// global state. We swap it with a registry that only has cli-backends.
+	orig := bootRegistry
+	t.Cleanup(func() { bootRegistry = orig })
 
-	r := NewRegistry[BootStep]("boot-step")
-	r.Register("cli-backends", BootStep{Kind: "cli-backends"})
+	bootRegistry = NewRegistry[BootStep]("boot-step-test")
+	bootRegistry.Register("cli-backends", BootStep{Kind: "cli-backends"})
 	// history-backends intentionally absent.
 
-	have := make(map[string]bool, r.Len())
-	for _, n := range r.Names() {
-		if step, ok := r.Get(n); ok {
-			have[step.Kind] = true
-		}
+	err := Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil, want error for missing history-backends")
 	}
-	missing := 0
-	for _, req := range requiredBootSteps {
-		if !have[req] {
-			missing++
-		}
+	if !containsStr(err.Error(), "history-backends") {
+		t.Errorf("Validate() error = %q; expected it to mention history-backends", err.Error())
 	}
-	if missing != 1 {
-		t.Fatalf("expected exactly 1 missing required step, got %d", missing)
+}
+
+// TestValidate_KindDoesNotSatisfyName guards the fix for R164029-CR-1:
+// registering a step whose Kind matches a required name but whose
+// registered name does not must still cause Validate to report the
+// required name as missing.
+func TestValidate_KindDoesNotSatisfyName(t *testing.T) {
+	orig := bootRegistry
+	t.Cleanup(func() { bootRegistry = orig })
+
+	bootRegistry = NewRegistry[BootStep]("boot-step-test2")
+	// Register with a different name but Kind == "cli-backends".
+	// Before the fix, the have-map keyed on Kind would mark cli-backends
+	// as present; after the fix it must still be missing.
+	bootRegistry.Register("history-backends", BootStep{Kind: "history-backends"})
+	bootRegistry.Register("alt-cli", BootStep{Kind: "cli-backends"})
+
+	err := Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil, want error: 'cli-backends' step not registered by that exact name")
 	}
+	if !containsStr(err.Error(), "cli-backends") {
+		t.Errorf("Validate() error = %q; expected it to mention cli-backends", err.Error())
+	}
+}
+
+func containsStr(s, sub string) bool {
+	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
+		func() bool {
+			for i := 0; i <= len(s)-len(sub); i++ {
+				if s[i:i+len(sub)] == sub {
+					return true
+				}
+			}
+			return false
+		}())
 }

@@ -251,5 +251,5 @@ projects:
 #upstream:
 #  url: "wss://primary.example.com/ws-node"
 #  node_id: "macbook"
-#  token: "your-secret-token"
+#  token: "${UPSTREAM_TOKEN}"
 #  display_name: "MacBook Pro"

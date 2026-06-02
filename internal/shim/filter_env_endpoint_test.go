@@ -1,6 +1,12 @@
 package shim
 
-import "testing"
+import (
+	"context"
+	"log/slog"
+	"sync"
+	"sync/atomic"
+	"testing"
+)
 
 // TestFilterShimEnv_EndpointSSRFGuard pins R20260602-SEC-1 (#1576, shim
 // sibling): endpoint base-URL env vars pointing at a plain-http non-loopback
@@ -66,3 +72,78 @@ func TestValidateShimEndpointURL(t *testing.T) {
 		}
 	}
 }
+
+// TestShimEndpointEnvDropped_EachRejectionLogged verifies R164029-GO-1: every
+// unsafe endpoint variable is logged individually. Previously a sync.Once
+// caused the second (and further) rejections to be silently swallowed, leaving
+// operators unable to discover that multiple env vars were contaminated.
+func TestShimEndpointEnvDropped_EachRejectionLogged(t *testing.T) {
+	// Install a temporary slog handler that counts Warn records keyed by the
+	// "key" attribute value. We replace the default logger for the duration
+	// of this test and restore it after.
+	var warnCount atomic.Int64
+	keys := make(map[string]int)
+	var mu sync.Mutex // protect keys map
+
+	handler := &countingWarnHandler{
+		onWarn: func(key string) {
+			mu.Lock()
+			keys[key]++
+			mu.Unlock()
+			warnCount.Add(1)
+		},
+	}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	// Two unsafe entries; both must be dropped and each must emit its own Warn.
+	unsafe := []string{
+		"ANTHROPIC_BASE_URL=http://169.254.169.254",
+		"ANTHROPIC_BEDROCK_BASE_URL=http://evil.test",
+	}
+	for _, kv := range unsafe {
+		if !shimEndpointEnvDropped(kv) {
+			t.Errorf("shimEndpointEnvDropped(%q) = false, want true", kv)
+		}
+	}
+
+	if got := warnCount.Load(); got != 2 {
+		t.Errorf("expected 2 Warn log calls (one per rejection), got %d", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, k := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL"} {
+		if keys[k] != 1 {
+			t.Errorf("expected exactly 1 Warn for key %q, got %d", k, keys[k])
+		}
+	}
+}
+
+// countingWarnHandler is a minimal slog.Handler that invokes onWarn for every
+// Warn-level record, passing the value of the "key" attribute.
+type countingWarnHandler struct {
+	onWarn func(key string)
+}
+
+func (h *countingWarnHandler) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= slog.LevelWarn
+}
+
+func (h *countingWarnHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Level == slog.LevelWarn {
+		var k string
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "key" {
+				k = a.Value.String()
+				return false
+			}
+			return true
+		})
+		h.onWarn(k)
+	}
+	return nil
+}
+
+func (h *countingWarnHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *countingWarnHandler) WithGroup(_ string) slog.Handler      { return h }

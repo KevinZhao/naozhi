@@ -424,3 +424,10 @@
 - [R20260602141221-PERF-13] executeOpt slog.With 4-attr 每 tick 分配(已 won't-fix) — internal/cron/scheduler_run.go:1320
 - [R20260602141221-PERF-14] runDeadlineWatchdog done chan 仅超时路径分配(低频) — internal/cron/scheduler_run.go:828
 - [R20260602141221-PERF-15] findByPrefixLocked matches slice 无初始容量 — internal/cron/scheduler_jobs.go:2046
+- [R164029-GO-2] shimEndpointEnvKeys 缺 ANTHROPIC_VERTEX_BASE_URL（仅当未来加入 shimEnvAllowedPrefixes 才成 bypass，防御性） — internal/shim/manager.go:1335
+- [R164029-GO-7] shimEndpointEnvDropped 命名暗示仅 endpoint 返回 true，早退契约略夸大 — internal/shim/manager.go:1349
+- [R164029-PERF-12] SweepOldJSONL 对每个 .jsonl 调 e.Info() syscall，当前规模无真 trigger — internal/sysession/sweep.go:57
+- [R164029-PERF-18] resolveProjectDir 对纯 ASCII cwd 用 rune-range 循环，可改 byte 循环（~2-5ns/char） — internal/cli/subagent_link.go:1049
+- [R164029-CR-3] checker.go defer startDelay.Stop() 在 if 块内但实际函数返回才执行，已 fired 无泄漏仅可读性 — internal/selfupdate/checker.go:160
+- [R164029-ARCH-9] dispatch 三个 deprecated *Fn 闭包字段计划内技术债，gated on test migration Q3 — internal/dispatch/dispatch.go:332
+- [R164029-ARCH-10] SessionGuard 1 接口 3 实现已两次 review 判定保留，勿再提折叠 — internal/dispatch/dispatch.go:77

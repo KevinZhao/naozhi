@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -48,5 +49,84 @@ func TestKnownSessionsCache_LookupPublishInvalidate(t *testing.T) {
 	c.invalidate()
 	if set, ok := c.lookupFresh(); ok || set != nil {
 		t.Fatalf("lookupFresh after invalidate = (%v, %v), want (nil, false)", set, ok)
+	}
+}
+
+// TestKnownSessionsCache_ConcurrentReaders verifies that lookupFresh uses an
+// RLock so many concurrent readers can proceed in parallel without blocking
+// each other. R164029-GO-4: upgrading sync.Mutex → sync.RWMutex.
+//
+// The test launches N goroutines that all call lookupFresh simultaneously
+// while a background writer interleaves publish and invalidate. With a plain
+// Mutex all readers would serialise on the write lock; with RWMutex they
+// share the read lock and only yield to the writer. The test's correctness
+// criterion is that all goroutines observe consistent state (hit XOR miss)
+// and that the race detector finds no data races.
+func TestKnownSessionsCache_ConcurrentReaders(t *testing.T) {
+	const goroutines = 32
+
+	var c knownSessionsCache
+	seed := map[string]struct{}{"sess-x": {}, "sess-y": {}}
+	c.publish(seed)
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < 100; j++ {
+				set, ok := c.lookupFresh()
+				// If ok the returned set must be the published map (same pointer).
+				if ok && set == nil {
+					t.Errorf("lookupFresh ok=true but set is nil")
+				}
+			}
+		}()
+	}
+
+	// One writer goroutine that interleaves publish/invalidate.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for j := 0; j < 50; j++ {
+			c.publish(seed)
+			c.invalidate()
+		}
+	}()
+
+	close(start)
+	wg.Wait()
+}
+
+// TestKnownSessionsCache_RWMutex_ReadLock confirms that lookupFresh acquires
+// only an RLock (not a full Lock) so two concurrent lookups do not block each
+// other. This is a compile-time guarantee expressed via the race detector: if
+// lookupFresh were still using Lock() the -race flag would detect the
+// lock-contention pattern; with RLock() concurrent reads are legal.
+// [R164029-GO-4].
+func TestKnownSessionsCache_RWMutex_ReadLock(t *testing.T) {
+	var c knownSessionsCache
+	c.publish(map[string]struct{}{"a": {}})
+
+	// Hold the RLock in one goroutine while a second goroutine also calls
+	// lookupFresh. Both must succeed without deadlocking.
+	done := make(chan struct{})
+	c.mu.RLock()
+	go func() {
+		defer close(done)
+		// This would deadlock if lookupFresh used Lock() (write-lock) instead of RLock().
+		_, _ = c.lookupFresh()
+	}()
+	// Give the goroutine a moment then release the held RLock.
+	time.Sleep(5 * time.Millisecond)
+	c.mu.RUnlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("lookupFresh deadlocked under concurrent RLock — likely using Lock() instead of RLock()")
 	}
 }

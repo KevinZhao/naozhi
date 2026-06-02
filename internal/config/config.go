@@ -870,6 +870,9 @@ func validateConfig(cfg *Config) error {
 		if containsEnvPlaceholder(cfg.Upstream.Token) {
 			return fmt.Errorf("upstream.token contains unexpanded ${VAR} — check environment variables")
 		}
+		if cfg.Upstream.Token == "your-secret-token" {
+			return fmt.Errorf("upstream.token is set to the example placeholder \"your-secret-token\" — replace it with a real secret")
+		}
 	}
 
 	for id, entry := range cfg.ReverseNodes {

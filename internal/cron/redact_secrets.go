@@ -61,7 +61,8 @@ type secretPrefix struct {
 // (`sk-proj-` / `sk-`), GitHub PAT/OAuth (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`),
 // GitLab (`glpat-`), AWS access keys (`AKIA`/`ASIA`), Slack
 // (`xoxb-`/`xoxp-`/`xoxa-`/`xoxs-`), HuggingFace (`hf_`), npm (`npm_`),
-// GCP / Google OAuth access tokens (`ya29.`).
+// GCP / Google OAuth access tokens (`ya29.`), Stripe restricted keys
+// (`rk_live_`/`rk_test_`).
 var secretPrefixes = []secretPrefix{
 	// Anthropic API keys (`sk-ant-…`). The post-prefix tail is variable
 	// length and may include hyphens, so minTail is generous.
@@ -112,6 +113,12 @@ var secretPrefixes = []secretPrefix{
 	// these use underscores and are unambiguously Stripe-shaped.
 	{prefix: "sk_live_", minTail: 16},
 	{prefix: "sk_test_", minTail: 16},
+	// Stripe restricted keys (`rk_live_…` / `rk_test_…`). Restricted keys
+	// carry a scoped subset of secret-key permissions but can still initiate
+	// Stripe API calls, so leaking them is equally sensitive. Placed adjacent
+	// to the sk_live_/sk_test_ entries for readability.
+	{prefix: "rk_live_", minTail: 16},
+	{prefix: "rk_test_", minTail: 16},
 }
 
 // secretRedactedMarker replaces matched secret bytes. Distinct from
@@ -197,11 +204,11 @@ func isSecretTokenByte(b byte) bool {
 //
 // First-byte set: 's' (sk-…/sk_live_/sk_test_), 'g' (ghp_/gho_/…/glpat-),
 // 'A' (AKIA/ASIA), 'x' (xoxb-/…), 'h' (hf_/hvs.), 'n' (npm_), 'y' (ya29.),
-// 'd' (dapi). Keep in sync with secretPrefixes.
+// 'd' (dapi), 'r' (rk_live_/rk_test_). Keep in sync with secretPrefixes.
 //
 // strings.IndexAny uses a SIMD-backed byteset scan on amd64/arm64 and is
 // semantically equivalent to the previous hand-written byte-switch loop
 // (R20260601-PERF-1 / R20260601-PERF-10).
 func mayContainSecretPrefix(s string) bool {
-	return strings.IndexAny(s, "sgAxhnyd") >= 0
+	return strings.IndexAny(s, "sgAxhnydr") >= 0
 }
