@@ -105,6 +105,23 @@ func buildRemoteNodes(cfg *config.Config) map[string]node.Conn {
 	return nodes
 }
 
+// buildReverseNodeAuth translates cfg.ReverseNodes (config.ReverseNodeEntry)
+// into the node-package's zero-dependency node.ReverseNodeAuth shape, so
+// internal/node no longer imports internal/config (R040034-ARCH-1 / #1411).
+// The translation lives at the cmd boundary — the only place that already
+// depends on both packages. Returns nil when no reverse nodes are configured
+// so the caller's len()>0 guard stays meaningful.
+func buildReverseNodeAuth(cfg *config.Config) map[string]node.ReverseNodeAuth {
+	if len(cfg.ReverseNodes) == 0 {
+		return nil
+	}
+	auth := make(map[string]node.ReverseNodeAuth, len(cfg.ReverseNodes))
+	for id, e := range cfg.ReverseNodes {
+		auth[id] = node.ReverseNodeAuth{Token: e.Token, DisplayName: e.DisplayName}
+	}
+	return auth
+}
+
 // buildAgentOpts translates cfg.Agents into the two views main() needs: the
 // session.AgentOpts map (operator-trusted shape consumed by the router spawn
 // path) and the cron.AgentOpts map (the internal/cron-import-free projection

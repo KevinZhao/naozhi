@@ -21,7 +21,7 @@ import (
 func setupReverseConnPair(t *testing.T) (*ReverseConn, *websocket.Conn, func()) {
 	t.Helper()
 
-	rs := NewReverseServer(map[string]config.ReverseNodeEntry{
+	rs := NewReverseServer(map[string]ReverseNodeAuth{
 		"worker": {Token: "tok", DisplayName: "Worker"},
 	}, false)
 

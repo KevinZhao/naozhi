@@ -376,7 +376,7 @@ func main() {
 	// Configure reverse-connecting nodes (NAT traversal)
 	var rns *node.ReverseServer
 	if len(cfg.ReverseNodes) > 0 {
-		rns = node.NewReverseServer(cfg.ReverseNodes, cfg.Server.TrustedProxy)
+		rns = node.NewReverseServer(buildReverseNodeAuth(cfg), cfg.Server.TrustedProxy)
 		slog.Info("reverse node auth configured", "nodes", len(cfg.ReverseNodes))
 	}
 

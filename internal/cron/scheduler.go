@@ -1357,9 +1357,7 @@ func (s *Scheduler) Start() error {
 		}
 		if j.Paused {
 			s.jobs[j.ID] = j
-			key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
-			s.chatJobCount[key]++
-			s.jobsByChat[key] = append(s.jobsByChat[key], j)
+			s.addToChatIndexLocked(j)
 			stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 			continue
 		}
@@ -1368,9 +1366,7 @@ func (s *Scheduler) Start() error {
 			continue
 		}
 		s.jobs[j.ID] = j
-		key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
-		s.chatJobCount[key]++
-		s.jobsByChat[key] = append(s.jobsByChat[key], j)
+		s.addToChatIndexLocked(j)
 		stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 	}
 	jobCount := len(s.jobs)

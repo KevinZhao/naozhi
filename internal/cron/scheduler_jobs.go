@@ -221,15 +221,13 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), addJobStubFields, error
 		}
 	}
 	s.jobs[j.ID] = j
-	// R237-PERF-5 (#661): increment the per-chat counter synchronously
-	// with s.jobs so the next addJobAcquiringLock observes the up-to-date
-	// count without re-scanning. deleteJobLocked is the paired decrement;
-	// the rollback path (s.deleteJobLocked below on persist failure) goes
-	// through that helper so the counter unwinds correctly.
-	s.chatJobCount[chatKey]++
-	// R242-GO-9 (#558): append to per-chat job index synchronously with
-	// s.jobs so findByPrefixLocked iterates only this chat's jobs.
-	s.jobsByChat[chatKey] = append(s.jobsByChat[chatKey], j)
+	// R237-PERF-5 / R242-GO-9 (#661 / #558): increment the per-chat counter
+	// and append to the per-chat index synchronously with s.jobs so the next
+	// addJobAcquiringLock observes the up-to-date count without re-scanning and
+	// findByPrefixLocked iterates only this chat's jobs. deleteJobLocked is the
+	// paired inverse; the rollback path (s.deleteJobLocked below on persist
+	// failure) unwinds both correctly.
+	s.addToChatIndexLocked(j)
 	save, perr := s.persistJobsLocked()
 	if perr != nil {
 		// R236-GO-10: persist failed *after* registerJob + map insertion.
@@ -436,6 +434,25 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 		}
 	}
 	return result
+}
+
+// addToChatIndexLocked records a job into the two per-chat side indexes that
+// must move in lockstep with s.jobs: the chatJobCount cap counter and the
+// jobsByChat prefix-lookup slice. Caller MUST hold s.mu.Lock() and have
+// already inserted j into s.jobs.
+//
+// R237-PERF-5 / R242-GO-9 (#661 / #558): both indexes are the paired inverse
+// of deleteJobLocked's decrement+swap-shrink. R249-CR-4 / R260528-ARCH-7
+// (#948 / #1368): the identical two-line increment+append was open-coded at
+// the AddJob path and twice in Start's load loop, so the "mutated together so
+// they never drift" invariant the Scheduler godoc promises lived only as a
+// comment. Folding it into one helper makes the invariant structural — a
+// future third index lands here once instead of drifting across the three
+// insertion sites.
+func (s *Scheduler) addToChatIndexLocked(j *Job) {
+	key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+	s.chatJobCount[key]++
+	s.jobsByChat[key] = append(s.jobsByChat[key], j)
 }
 
 // deleteJobLocked performs the in-memory side effects of removing a job:
