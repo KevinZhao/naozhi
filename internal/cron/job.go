@@ -472,10 +472,21 @@ func jobTitleOrFallback(j *Job) string {
 	return truncated
 }
 
+// cronParseOptions is the single source of truth for the field set the cron
+// schedule grammar accepts: standard 5-field (Minute/Hour/Dom/Month/Dow) plus
+// @descriptors (@daily, @every 5m, …). Hoisted out of the cronParser var
+// initialiser (R249-ARCH-24 / #988) so the accepted-field bitmask is a named,
+// documented constant rather than a magic literal buried in a package-var
+// init — the field set is now stated once and any future widening (e.g.
+// adding robfigcron.Second) changes exactly this constant. A full move onto a
+// Scheduler field seeded from cfg still needs design (touches scheduler.go),
+// but this localises and names the binding as the first behaviour-preserving
+// step.
+const cronParseOptions = robfigcron.Minute | robfigcron.Hour | robfigcron.Dom |
+	robfigcron.Month | robfigcron.Dow | robfigcron.Descriptor
+
 // cronParser is the shared parser for all schedule validation and preview.
-var cronParser = robfigcron.NewParser(
-	robfigcron.Minute | robfigcron.Hour | robfigcron.Dom | robfigcron.Month | robfigcron.Dow | robfigcron.Descriptor,
-)
+var cronParser = robfigcron.NewParser(cronParseOptions)
 
 // minCronInterval is the minimum allowed interval between cron runs.
 // Prevents resource exhaustion from overly frequent schedules like "@every 1s".

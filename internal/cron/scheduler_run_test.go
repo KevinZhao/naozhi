@@ -1,10 +1,15 @@
 package cron
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/sessionkey"
 )
 
 // TestRunDeadlineWatchdog_NoIdleGoroutine_R247_GO_12 is the regression test
@@ -70,6 +75,98 @@ func TestRunDeadlineWatchdog_NoIdleGoroutine_R247_GO_12(t *testing.T) {
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatal("AfterFunc callback never published abort on cancel")
+		}
+	}
+}
+
+// stubRefreshCountingRouter records RegisterCronStubWithChain calls so the
+// stubRefresher.run() contract (R249-ARCH-25 #989) can be asserted without a
+// real session router.
+type stubRefreshCountingRouter struct {
+	registers int
+	lastKey   string
+}
+
+func (r *stubRefreshCountingRouter) RegisterCronStubWithChain(key, _, _ string, _ []string) {
+	r.registers++
+	r.lastKey = key
+}
+func (r *stubRefreshCountingRouter) Reset(string) {}
+func (r *stubRefreshCountingRouter) GetOrCreate(context.Context, string, AgentOpts) (Session, SessionStatus, error) {
+	return nil, SessionExisting, nil
+}
+
+// TestStubRefresher_R249_ARCH_25 pins the typed stubRefresher that replaced
+// freshContextPreflightP0's bare closure (#989):
+//   - the zero value (active=false) is a safe no-op — never touches the router;
+//   - an active refresher re-registers the sidebar stub iff the job still
+//     exists in s.jobs at run() time;
+//   - an active refresher for a job deleted between preflight and run() does
+//     NOT re-register (prevents a phantom sidebar row for a gone job).
+func TestStubRefresher_R249_ARCH_25(t *testing.T) {
+	t.Parallel()
+
+	router := &stubRefreshCountingRouter{}
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router})
+
+	// Zero value: no-op.
+	var zero stubRefresher
+	zero.run()
+	if router.registers != 0 {
+		t.Fatalf("zero-value run() must be a no-op; got %d registers", router.registers)
+	}
+
+	// Active + job present: re-registers via the router.
+	s.mu.Lock()
+	s.jobs["job-a"] = &Job{ID: "job-a", Schedule: "@every 5m"}
+	s.mu.Unlock()
+	active := stubRefresher{s: s, jobID: "job-a", workDir: "/tmp", prompt: "p", active: true}
+	active.run()
+	if router.registers != 1 {
+		t.Fatalf("active run() with live job: want 1 register, got %d", router.registers)
+	}
+	if want := sessionkey.CronKey("job-a"); router.lastKey != want {
+		t.Fatalf("register key = %q, want %q", router.lastKey, want)
+	}
+
+	// Active but job deleted between preflight and run(): no re-register.
+	gone := stubRefresher{s: s, jobID: "job-gone", workDir: "/tmp", prompt: "p", active: true}
+	gone.run()
+	if router.registers != 1 {
+		t.Fatalf("run() for a deleted job must not re-register; got %d total", router.registers)
+	}
+}
+
+// TestExecuteJobIDIfLive_SkipLogLabels_R243_ARCH_13 pins that the dispatch
+// gate's skip Debug logs still carry both the {subject, job_id} labels after
+// the slog.With consolidation (#841) — the label set must not drift between
+// the deleted-job and paused-job branches.
+func TestExecuteJobIDIfLive_SkipLogLabels_R243_ARCH_13(t *testing.T) {
+	// NOT t.Parallel(): mutates the process-wide default slog logger.
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	router := &stubRefreshCountingRouter{}
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router})
+
+	// Deleted job: not in s.jobs at all.
+	s.executeJobIDIfLive("missing-job", false, "cron")
+	// Paused job.
+	s.mu.Lock()
+	s.jobs["paused-job"] = &Job{ID: "paused-job", Schedule: "@every 5m", Paused: true}
+	s.mu.Unlock()
+	s.executeJobIDIfLive("paused-job", false, "cron")
+
+	out := buf.String()
+	for _, frag := range []string{
+		`subject=cron job_id=missing-job`,
+		`subject=cron job_id=paused-job`,
+	} {
+		if !strings.Contains(out, frag) {
+			t.Errorf("skip log missing label pair %q\nfull log:\n%s", frag, out)
 		}
 	}
 }

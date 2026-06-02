@@ -190,7 +190,7 @@ func TestP0_PreflightWorkdirUnreachableMapsCorrectErrorClass(t *testing.T) {
 	if ok {
 		t.Fatal("preflight should bail when workdir unreachable")
 	}
-	stubRefresh()
+	stubRefresh.run()
 	if rec.endedCount() != 1 {
 		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
 	}

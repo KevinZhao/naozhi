@@ -957,6 +957,12 @@ const appendTrimBatch = 10
 // the O(1) implementation that landed via R243-PERF-4; #556 was the
 // repeat finding before the cluster was wired up.
 func (s *runStore) cacheHeadPush(jobID string, summary CronRunSummary) {
+	// R242-ARCH-12 (#753): the jobLock contract was enforced only by godoc.
+	// Mirror skipAppendTrim / trimJobLocked and run the best-effort runtime
+	// check so a caller that forgot to hold jobLock surfaces in tests instead
+	// of as a silent cache↔disk race. Gated by testing.Testing() inside the
+	// helper, so production pays only the function-call overhead.
+	s.assertJobLockHeld(jobID)
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
 		// Lazy-allocate the placeholder so cacheGet doesn't have to. The
@@ -1353,7 +1359,16 @@ func (s *runStore) scanSortedRunDir(jobID string) ([]runDirItem, string, error) 
 			mtime: info.ModTime(),
 		})
 	}
-	slices.SortFunc(items, runDirItemNewestFirst)
+	// R260528-PERF-25 (#1361): a job that has only ever run once (or whose
+	// dir is empty after a trim) has 0 or 1 surviving items, for which the
+	// sort is a guaranteed no-op. Skip slices.SortFunc on that case so the
+	// cold cacheGet → warmCache → scanSortedRunDir path for never-/once-run
+	// jobs (common right after a fresh job is created) avoids the comparator
+	// setup. >1 items still take the full mtime-DESC + runID tie-break sort
+	// so the cross-process ordering contract (see godoc) is unchanged.
+	if len(items) > 1 {
+		slices.SortFunc(items, runDirItemNewestFirst)
+	}
 	return items, dir, nil
 }
 
@@ -1437,7 +1452,22 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 	// before-cutoff (pagination) path keeps the serial early-break: it
 	// stops at the first `limit` matches and parallelising would over-read
 	// past the page boundary.
-	if before.IsZero() && len(items) > diskDecodeParallelThreshold {
+	//
+	// R249-PERF-8 (#929): gate on the EFFECTIVE read count min(limit, len)
+	// rather than len(items) alone. decodeRunsParallel only decodes the
+	// newest min(limit, len) candidates, so a query with a small limit over
+	// a large directory (e.g. limit=5 against a 200-run dir) would otherwise
+	// spin up the worker pool + channel plumbing to read just `limit` files —
+	// the exact "decide on full dir size, then trim to limit" smell. Keeping
+	// such small-limit reads on the serial early-break path avoids the
+	// goroutine churn; the warm cold-start path (limit == keepCount) still
+	// crosses the threshold and parallelises as before. Output is identical
+	// either way (both honour newest-first mtime order).
+	effective := len(items)
+	if limit < effective {
+		effective = limit
+	}
+	if before.IsZero() && effective > diskDecodeParallelThreshold {
 		return s.decodeRunsParallel(items, limit)
 	}
 
@@ -2032,6 +2062,10 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 // count==keepCount could still hide expired older rows on disk; we keep
 // the strict "<keepCount" guard for safety.
 func (s *runStore) trimSkipFromCache(jobID string, now time.Time) bool {
+	// R242-ARCH-12 (#753): runtime-enforce the documented jobLock contract
+	// (best-effort, test-only) so the lock hierarchy stops living solely in
+	// godoc. See cacheHeadPush.
+	s.assertJobLockHeld(jobID)
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
 		return false
@@ -2083,6 +2117,10 @@ func (s *runStore) trimSkipFromCache(jobID string, now time.Time) bool {
 // (every 10 Appends) and the dashboard 1Hz dispatch path, so a per-call
 // alloc would amplify GC pressure linearly with cron tick rate.
 func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
+	// R242-ARCH-12 (#753): runtime-enforce the documented jobLock contract
+	// (best-effort, test-only) so the lock hierarchy stops living solely in
+	// godoc. See cacheHeadPush.
+	s.assertJobLockHeld(jobID)
 	v, ok := s.recentCache.Load(jobID)
 	if !ok {
 		return
