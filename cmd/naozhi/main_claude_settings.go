@@ -27,6 +27,8 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -171,9 +173,59 @@ func filterClaudeEnv(in map[string]string) map[string]string {
 			slog.Warn("claude settings env: rejecting unsafe value", "key", k, "len", len(v))
 			continue
 		}
+		// R20260602-SEC-1 (#1576): base-URL vars steer where naozhi (and the
+		// sysession Runner that inherits this env) sends API traffic. A
+		// tampered settings.json could point them at an attacker host or the
+		// IMDS endpoint (http://169.254.169.254) for credential harvesting.
+		// Require https:// for non-loopback hosts, mirroring weixin's SSRF
+		// guard; loopback http stays allowed for local mock gateways.
+		if claudeBaseURLEnvKeys[k] {
+			if err := validateClaudeBaseURLEnv(v); err != nil {
+				slog.Warn("claude settings env: rejecting unsafe base_url", "key", k, "err", err)
+				continue
+			}
+		}
 		out[k] = v
 	}
 	return out
+}
+
+// claudeBaseURLEnvKeys is the set of settings.json env keys whose value is an
+// API endpoint URL that steers naozhi's outbound traffic. validateClaudeBaseURLEnv
+// applies an SSRF/redirect guard to each. R20260602-SEC-1 (#1576).
+var claudeBaseURLEnvKeys = map[string]bool{
+	"ANTHROPIC_BASE_URL":         true,
+	"ANTHROPIC_BEDROCK_BASE_URL": true,
+	"ANTHROPIC_VERTEX_BASE_URL":  true,
+}
+
+// validateClaudeBaseURLEnv enforces that an API base-URL pulled from
+// ~/.claude/settings.json uses https:// unless it targets a loopback host
+// (localhost / 127.0.0.0/8 / ::1) for which plain http is allowed so operators
+// can wire local mock gateways. An empty value is accepted (clears the var).
+// Mirrors weixin.validateBaseURLScheme. R20260602-SEC-1 (#1576).
+func validateClaudeBaseURLEnv(v string) error {
+	if v == "" {
+		return nil
+	}
+	u, err := url.Parse(v)
+	if err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if strings.EqualFold(host, "localhost") {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+		return fmt.Errorf("plain http:// to non-loopback host %q rejected (SSRF/redirect guard); use https://", host)
+	}
+	return fmt.Errorf("scheme %q not allowed; use https://", u.Scheme)
 }
 
 // applyClaudeEnvSettings reads ~/.claude/settings.json and applies any env section
