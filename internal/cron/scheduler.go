@@ -338,6 +338,23 @@ type Scheduler struct {
 	// rejects both via JobUpdate field absence), so an entry never moves
 	// across keys — add appends, delete swaps-and-shrinks. R242-GO-9 (#558).
 	jobsByChat map[chatJobKey][]*Job
+	// sortedJobIDs mirrors the keys of s.jobs in ascending ID order. It is
+	// maintained incrementally (binary-search insert on add, binary-search
+	// delete on remove) at the same s.mu-guarded seams that mutate s.jobs
+	// (addToChatIndexLocked / deleteJobLocked), so the per-mutation persist
+	// path no longer runs an O(N log N) slices.SortFunc inside the s.mu
+	// critical section — it iterates this already-sorted slice instead.
+	// R164029-PERF-9 (#1598).
+	//
+	// CORRECTNESS NOTE: s.jobs remains the single source of truth.
+	// marshalJobsLocked treats sortedJobIDs as a hint: it validates that the
+	// slice still matches s.jobs (same length, every ID present) and falls
+	// back to building+sorting from the map if it drifted. Production
+	// mutations all go through the two seams so the hint is always valid;
+	// the fallback only fires for test helpers that poke s.jobs directly
+	// (e.g. `s.jobs[id] = &Job{...}` without addToChatIndexLocked), which
+	// must never silently drop a job from the on-disk snapshot.
+	sortedJobIDs []string
 	// router is set once in NewScheduler and never reassigned.
 	router SessionRouter
 	// platforms / agents / agentCommands are populated from SchedulerConfig
