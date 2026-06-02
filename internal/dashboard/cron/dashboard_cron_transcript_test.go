@@ -946,6 +946,60 @@ func TestFlattenJSONLEvent_DispatchByType(t *testing.T) {
 		})
 	}
 }
+// TestFlattenSystemEvent_EarlyReturn pins R200109-GO-7 and R200109-GO-10:
+// unmarshal failure must return early (parsed=false, nil slice) rather than
+// falling through to the error-turn branch; non-error subtypes must also
+// return nil (no pre-allocated slice wasted).
+func TestFlattenSystemEvent_EarlyReturn(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		msg       string // raw JSON for ev.Message
+		wantNil   bool   // expect nil (not empty) slice
+		wantParse bool
+	}{
+		{
+			name:      "unmarshal_fail_returns_early",
+			msg:       "not-json",
+			wantNil:   true,
+			wantParse: false,
+		},
+		{
+			name:      "non_error_subtype_nil_slice",
+			msg:       `{"subtype":"init"}`,
+			wantNil:   true,
+			wantParse: false,
+		},
+		{
+			name:      "error_subtype_allocates_slice",
+			msg:       `{"subtype":"error","message":"boom"}`,
+			wantNil:   false,
+			wantParse: true,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ev := &claudeJSONLEvent{
+				Type:    "system",
+				Message: json.RawMessage(tc.msg),
+			}
+			out, _, _, parsed := flattenSystemEvent(ev, 0, 0)
+			if parsed != tc.wantParse {
+				t.Errorf("parsed=%v, want %v", parsed, tc.wantParse)
+			}
+			if tc.wantNil && out != nil {
+				t.Errorf("expected nil slice, got len=%d", len(out))
+			}
+			if !tc.wantNil && out == nil {
+				t.Errorf("expected non-nil slice, got nil")
+			}
+		})
+	}
+}
 
 // BenchmarkSummariseToolInput_TypedProbe locks the R233-PERF-5 / #695
 // perf win: the typed `toolInputProbe` decode replaced the prior
