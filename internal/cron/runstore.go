@@ -1565,17 +1565,24 @@ func (s *runStore) decodeRunsParallel(items []runDirItem, limit int) ([]CronRunS
 	if workers > n {
 		workers = n
 	}
-	idx := make(chan int, n)
-	for i := 0; i < n; i++ {
-		idx <- i
-	}
-	close(idx)
+	// R20260602190132-PERF-9: claim work indices via an atomic cursor rather
+	// than a per-call make(chan int, n) seeded with n sends + close. On a
+	// 50-job cold start (n up to keepCount=200) the buffered channel was a
+	// fresh ~200-int backing array + channel header per job; the atomic
+	// counter is a single stack int64 and each worker steals the next index
+	// with one CAS-free FetchAdd. Order is still preserved by the
+	// position-indexed slots slice, so steal order is irrelevant.
+	var next int64
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
-			for i := range idx {
+			for {
+				i := int(atomic.AddInt64(&next, 1)) - 1
+				if i >= n {
+					return
+				}
 				run, err := s.readRunNoLstat(items[i].path)
 				if err != nil {
 					if errors.Is(err, ErrCorruptRun) {
