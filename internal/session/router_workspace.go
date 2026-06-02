@@ -58,7 +58,7 @@ func (r *Router) resolveWorkspaceLocked(chatKey string) string {
 	if ws, ok := r.workspaceOverrides[chatKey]; ok {
 		return ws
 	}
-	return r.workspace
+	return r.defaultCWD
 }
 
 // WorkspaceRoots returns the deduplicated set of workspace roots this
@@ -82,7 +82,7 @@ func (r *Router) WorkspaceRoots() []string {
 		seen[p] = struct{}{}
 		out = append(out, p)
 	}
-	add(r.workspace)
+	add(r.defaultCWD)
 	for _, ws := range r.workspaceOverrides {
 		add(ws)
 	}

@@ -646,7 +646,7 @@ func TestResetRunningSession(t *testing.T) {
 func TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace(t *testing.T) {
 	r := newTestRouter(3)
 	r.workspaceOverrides = make(map[string]string)
-	r.workspace = "/default"
+	r.defaultCWD = "/default"
 	injectSession(r, "key1", newIdleProc())
 	r.SetWorkspace("key1", "/tmp/override")
 	if got := r.GetWorkspace("key1"); got != "/tmp/override" {
@@ -691,7 +691,7 @@ func TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace(t *testing.T) {
 func TestRouter_SetWorkspace_RejectsEmptyChatKey(t *testing.T) {
 	r := newTestRouter(3)
 	r.workspaceOverrides = make(map[string]string)
-	r.workspace = "/default"
+	r.defaultCWD = "/default"
 
 	r.SetWorkspace("", "/tmp/attacker")
 
@@ -2158,7 +2158,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 			extraArgs:          []string{"--flag-a"},
 			backendModels:      map[string]string{"kiro": "kiro-model"},
 			backendExtraArgs:   map[string][]string{"kiro": {"--kiro-arg"}},
-			workspace:          "/default/ws",
+			defaultCWD:         "/default/ws",
 			workspaceOverrides: make(map[string]string),
 			backendOverrides:   make(map[string]string),
 		}
