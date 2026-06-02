@@ -66,7 +66,7 @@ func TestDrainTriggerWG_SkipsBeyondBudget(t *testing.T) {
 
 	// stopStart=now means the helper has the full stopBudget remaining.
 	start := time.Now()
-	s.drainTriggerWG(start)
+	s.drainTriggerWG(nil, start)
 	elapsed := time.Since(start)
 
 	// 30ms budget; allow 4× slack for scheduler jitter on slow CI.
@@ -85,7 +85,7 @@ func TestDrainTriggerWG_FastDrain(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5})
 
 	start := time.Now()
-	s.drainTriggerWG(start)
+	s.drainTriggerWG(nil, start)
 	elapsed := time.Since(start)
 
 	if elapsed > 200*time.Millisecond {
@@ -100,7 +100,7 @@ func TestWaitGCDrain_DoesNotBlockWhenGCEmpty(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5})
 
 	start := time.Now()
-	s.waitGCDrain()
+	s.waitGCDrain(nil)
 	elapsed := time.Since(start)
 
 	// Empty WaitGroup → close(gcDone) lands before the timer fires.
@@ -129,7 +129,7 @@ func TestWaitGCDrain_BoundedByBudget(t *testing.T) {
 	}
 
 	start := time.Now()
-	s.waitGCDrain()
+	s.waitGCDrain(nil)
 	elapsed := time.Since(start)
 
 	// Allow a wide upper bound — gcWaitBudget is currently 5s; if a future

@@ -1580,6 +1580,30 @@ var stopBudget = defaultStopBudget
 // MUST also be migrated under triggerWG so its lifetime is bounded by
 // the same stopBudget the Send-spawning code is.
 func (s *Scheduler) Stop() {
+	s.stopWithCtx(nil)
+}
+
+// StopContext is the idiomatic Stop(ctx) entry point (golang/go#36363):
+// callers thread a shutdown-scoped context — e.g. one derived from systemd's
+// TimeoutStopSec — so the drain phases short-circuit on ctx cancellation
+// instead of waiting out their internal budgets. This complements
+// StartContext(ctx) so the lifecycle reads Start(ctx) / Stop(ctx) rather than
+// stashing a ParentCtx field.
+//
+// R250-ARCH-5 (#1168): ctx is advisory and additive. A nil ctx behaves exactly
+// like Stop() (each phase honours only its internal per-phase budget). When
+// ctx fires, each drain wait returns promptly with the same Warn + budget
+// counter it logs on its own deadline; the orphaned wrapper goroutines die
+// with the process exactly as the Stop() CONTRACT block documents. The final
+// persistOnShutdown ALWAYS runs (even on a cancelled ctx) so mutations that
+// already returned 2xx are never lost.
+func (s *Scheduler) StopContext(ctx context.Context) {
+	s.stopWithCtx(ctx)
+}
+
+// stopWithCtx is the shared body of Stop / StopContext. ctx may be nil
+// (Stop's path) — the drain helpers treat a nil ctx as "no extra cancel".
+func (s *Scheduler) stopWithCtx(ctx context.Context) {
 	// R20260526-GO-007: idempotent CAS guard. Without this, repeat calls
 	// re-enter the timer-allocating + persist branches below — wasting
 	// time.NewTimer slots, double-running persistJobsLocked, and racing the
@@ -1596,12 +1620,22 @@ func (s *Scheduler) Stop() {
 	// budget; Stop() orchestrates them in order. Each helper logs a Warn +
 	// bumps its CronStopBudgetExceeded* counter on its own deadline; Stop
 	// itself contains no budget arithmetic.
-	s.waitGCDrain()
-	deadlineHit, stopStart := s.drainCronStop()
+	s.waitGCDrain(ctx)
+	deadlineHit, stopStart := s.drainCronStop(ctx)
 	if !deadlineHit {
-		s.drainTriggerWG(stopStart)
+		s.drainTriggerWG(ctx, stopStart)
 	}
 	s.persistOnShutdown()
+}
+
+// ctxDone returns ctx.Done() or a nil channel when ctx is nil. A receive from
+// a nil channel blocks forever, so a nil-ctx select case is inert — letting
+// the drain helpers add an optional ctx-cancel arm without branching.
+func ctxDone(ctx context.Context) <-chan struct{} {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Done()
 }
 
 // waitGCDrain blocks until the cold-start GC goroutine spawned in Start()
@@ -1609,7 +1643,7 @@ func (s *Scheduler) Stop() {
 // tree from trimAll race the upcoming persist + Append-from-triggerWG
 // paths if we don't drain first; the budget keeps a wedged trimAll from
 // pinning systemd TimeoutStopSec. R236-GO-01 (origin) / R247-CR-4 (extract).
-func (s *Scheduler) waitGCDrain() {
+func (s *Scheduler) waitGCDrain(ctx context.Context) {
 	gcDone := make(chan struct{})
 	go func() {
 		s.gcWG.Wait()
@@ -1619,6 +1653,13 @@ func (s *Scheduler) waitGCDrain() {
 	defer gcTimer.Stop()
 	select {
 	case <-gcDone:
+	case <-ctxDone(ctx):
+		// R250-ARCH-5 (#1168): caller's shutdown ctx pre-empts the internal
+		// budget. Account it like a budget breach so dashboards alert
+		// identically whether the cap came from gcWaitBudget or the
+		// operator's TimeoutStopSec ctx.
+		metrics.CronStopBudgetExceededGCTotal.Add(1)
+		slog.Warn("cron: gc goroutine wait cancelled by stop ctx", "budget", gcWaitBudget)
 	case <-gcTimer.C:
 		// R250-GO-20 (#1083): pair the per-phase Warn with a counter so
 		// dashboards can alert on shutdown-budget breaches without
@@ -1635,7 +1676,7 @@ func (s *Scheduler) waitGCDrain() {
 // is true (the budget is shared across both phases). stopStart anchors the
 // remaining-budget arithmetic in drainTriggerWG so both phases account
 // against the same wall clock. R246-GO-13 / R247-CR-4.
-func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
+func (s *Scheduler) drainCronStop(ctx context.Context) (deadlineHit bool, stopStart time.Time) {
 	cronDoneCtx := s.cron.Stop()
 
 	// Single overall deadline shared across both waits. If cron.Stop drains
@@ -1666,6 +1707,15 @@ func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
 
 	select {
 	case <-cronDoneCtx.Done():
+	case <-ctxDone(ctx):
+		// R250-ARCH-5 (#1168): shutdown ctx pre-empts the drain budget. Set
+		// deadlineHit so the caller skips drainTriggerWG — the single overall
+		// ceiling contract (one budget across both phases) extends to the ctx
+		// cancel edge the same way the timer deadline does.
+		deadlineHit = true
+		metrics.CronStopBudgetExceededDrainTotal.Add(1)
+		slog.Warn("cron scheduler: stop cancelled by ctx before cron.Stop drained, proceeding",
+			"budget", budget)
 	case <-deadline.C:
 		deadlineHit = true
 		// R250-GO-20 (#1083): see GC counter rationale above.
@@ -1705,7 +1755,7 @@ func (s *Scheduler) drainCronStop() (deadlineHit bool, stopStart time.Time) {
 // TimeoutStopSec.
 //
 // R247-CR-4: extracted from Stop().
-func (s *Scheduler) drainTriggerWG(stopStart time.Time) {
+func (s *Scheduler) drainTriggerWG(ctx context.Context, stopStart time.Time) {
 	triggerDone := make(chan struct{})
 	go func() {
 		s.triggerWG.Wait()
@@ -1743,6 +1793,11 @@ func (s *Scheduler) drainTriggerWG(stopStart time.Time) {
 	defer triggerTimer.Stop()
 	select {
 	case <-triggerDone:
+	case <-ctxDone(ctx):
+		// R250-ARCH-5 (#1168): shutdown ctx pre-empts the remaining budget.
+		metrics.CronStopBudgetExceededTriggerTotal.Add(1)
+		slog.Warn("cron scheduler: stop cancelled by ctx during triggerWG wait, proceeding",
+			"budget", budget, "remaining_ms", remaining.Milliseconds())
 	case <-triggerTimer.C:
 		// R250-GO-20 (#1083): see GC counter rationale above.
 		metrics.CronStopBudgetExceededTriggerTotal.Add(1)
