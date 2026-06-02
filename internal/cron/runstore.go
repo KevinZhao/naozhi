@@ -1359,7 +1359,16 @@ func (s *runStore) scanSortedRunDir(jobID string) ([]runDirItem, string, error) 
 			mtime: info.ModTime(),
 		})
 	}
-	slices.SortFunc(items, runDirItemNewestFirst)
+	// R260528-PERF-25 (#1361): a job that has only ever run once (or whose
+	// dir is empty after a trim) has 0 or 1 surviving items, for which the
+	// sort is a guaranteed no-op. Skip slices.SortFunc on that case so the
+	// cold cacheGet → warmCache → scanSortedRunDir path for never-/once-run
+	// jobs (common right after a fresh job is created) avoids the comparator
+	// setup. >1 items still take the full mtime-DESC + runID tie-break sort
+	// so the cross-process ordering contract (see godoc) is unchanged.
+	if len(items) > 1 {
+		slices.SortFunc(items, runDirItemNewestFirst)
+	}
 	return items, dir, nil
 }
 
