@@ -1,6 +1,9 @@
 package cli
 
-import "testing"
+import (
+	"testing"
+	"unsafe"
+)
 
 // countVisible counts entries the dashboard would render (non-internal).
 func countVisible(entries []EventEntry) int {
@@ -135,5 +138,102 @@ func TestLastNVisible_ZeroTargetFallsBackToLastN(t *testing.T) {
 	}
 	if got[len(got)-1].Time != 20 {
 		t.Errorf("newest Time = %d, want 20", got[len(got)-1].Time)
+	}
+}
+
+// sliceData returns the backing-array address of a slice for identity
+// comparison in the buffer-reuse test (R20260602-PERF-8, #1631).
+func sliceData(s []EventEntry) uintptr {
+	if cap(s) == 0 {
+		return 0
+	}
+	return uintptr(unsafe.Pointer(&s[:1][0]))
+}
+
+// TestLastNVisibleAppend_ReusesBuffer is the regression test for
+// R20260602-PERF-8 (#1631): a pooled caller passing a pre-grown dst[:0]
+// must get its own backing array back, with no fresh allocation on the
+// dashboard first-render path.
+func TestLastNVisibleAppend_ReusesBuffer(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(500)
+	// All-internal entries so the maxTotal=200 cap trips (not visibleTarget).
+	for i := 0; i < 300; i++ {
+		l.Append(EventEntry{Time: int64(i + 1), Type: "task_progress"})
+	}
+	// Pre-grown buffer with capacity >= maxTotal so no realloc is needed.
+	buf := make([]EventEntry, 0, 200)
+	wantData := sliceData(buf)
+
+	got := l.LastNVisibleAppend(buf[:0], 50, 200)
+	if len(got) != 200 {
+		t.Fatalf("len = %d, want 200 (maxTotal cap)", len(got))
+	}
+	if sliceData(got) != wantData {
+		t.Errorf("LastNVisibleAppend allocated a new backing array; want the caller's pooled buffer reused")
+	}
+	if got[len(got)-1].Time != 300 {
+		t.Errorf("newest Time = %d, want 300", got[len(got)-1].Time)
+	}
+}
+
+// TestLastNVisibleAppend_GrowsWhenTooSmall verifies a short pooled buffer
+// is grown (not silently truncated): the result must still carry the full
+// requested tail even when cap(dst) < maxTotal.
+func TestLastNVisibleAppend_GrowsWhenTooSmall(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(500)
+	for i := 0; i < 300; i++ {
+		l.Append(EventEntry{Time: int64(i + 1), Type: "task_progress"})
+	}
+	got := l.LastNVisibleAppend(make([]EventEntry, 0, 4), 50, 200)
+	if len(got) != 200 {
+		t.Fatalf("len = %d, want 200 (buffer must grow, not truncate)", len(got))
+	}
+	if got[len(got)-1].Time != 300 {
+		t.Errorf("newest Time = %d, want 300", got[len(got)-1].Time)
+	}
+}
+
+// TestLastNVisibleAppend_EmptyRingContract checks the nil-vs-dst[:0] return
+// contract on an empty ring matches the sibling Append methods.
+func TestLastNVisibleAppend_EmptyRingContract(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(10)
+	if got := l.LastNVisibleAppend(nil, 5, 10); got != nil {
+		t.Errorf("nil dst on empty ring = %v, want nil", got)
+	}
+	buf := make([]EventEntry, 0, 8)
+	got := l.LastNVisibleAppend(buf[:0], 5, 10)
+	if got == nil {
+		t.Errorf("dst[:0] on empty ring = nil, want length-zero buffer (caller retains it)")
+	}
+	if len(got) != 0 {
+		t.Errorf("len = %d, want 0 on empty ring", len(got))
+	}
+}
+
+// TestLastNVisibleAppend_MatchesLastNVisible asserts the Append variant is
+// behaviourally identical to LastNVisible (which now delegates to it).
+func TestLastNVisibleAppend_MatchesLastNVisible(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(500)
+	for i := 0; i < 250; i++ {
+		ty := "task_progress"
+		if i%7 == 0 {
+			ty = "text"
+		}
+		l.Append(EventEntry{Time: int64(i + 1), Type: ty})
+	}
+	want := l.LastNVisible(30, 100)
+	got := l.LastNVisibleAppend(make([]EventEntry, 0, 100), 30, 100)
+	if len(got) != len(want) {
+		t.Fatalf("len mismatch: append=%d direct=%d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Time != want[i].Time || got[i].Type != want[i].Type {
+			t.Errorf("entry %d mismatch: append={t:%d ty:%s} direct={t:%d ty:%s}",
+				i, got[i].Time, got[i].Type, want[i].Time, want[i].Type)
+		}
 	}
 }
