@@ -548,25 +548,32 @@ func buildExcerptFromHistory(entries []SystemEventEntry) string {
 		if s == "" {
 			continue
 		}
-		// Reserve 1 byte for the leading newline (when sb is non-empty)
-		// plus the rune width of the trailing "…" marker (3 bytes, UTF-8
-		// U+2026) so the cap is never exceeded on the wire.  We compare
-		// against the projected post-write size to avoid the off-by-one
-		// where a single oversized entry would slip through because the
-		// pre-write length was still under the cap.
+		// Project the post-write size of *this* entry (its bytes plus the
+		// leading newline when sb is non-empty).  We do NOT pre-charge the
+		// "…" marker here: an entry that fits on its own must be appended in
+		// full.  Charging the 3-byte marker against every entry made the cap
+		// fire ~30 entries early on typical 100-byte turns (R20260602141221-CR-4,
+		// #1586).  The marker is only relevant when we actually truncate, and
+		// it is reserved at that point below.
 		need := len(s)
 		if sb.Len() > 0 {
 			need++ // newline
 		}
-		need += utf8.RuneLen('…') // 3 bytes for the truncation marker
 		if sb.Len()+need > autoTitlerExcerptSoftCapBytes {
 			// Tag truncation with a single ellipsis so the LLM sees a
 			// visible cut.  The line-cap pass downstream tolerates the
-			// "…" rune (it's not a control character).
+			// "…" rune (it's not a control character).  The marker is
+			// "\n…" (4 bytes) when sb is non-empty, "…" (3 bytes) otherwise.
+			// Append it only if it still fits; if a prior in-budget entry
+			// filled the buffer to within <markerLen> of the cap, omit the
+			// marker rather than overshoot — the cap is a hard upper bound.
+			marker := "…"
 			if sb.Len() > 0 {
-				sb.WriteByte('\n')
+				marker = "\n…"
 			}
-			sb.WriteString("…")
+			if sb.Len()+len(marker) <= autoTitlerExcerptSoftCapBytes {
+				sb.WriteString(marker)
+			}
 			break
 		}
 		if sb.Len() > 0 {

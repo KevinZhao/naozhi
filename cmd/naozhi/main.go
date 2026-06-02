@@ -336,7 +336,6 @@ func main() {
 			"platform", cfg.Cron.NotifyDefault.Platform,
 			"chat_id_suffix", chatIDSuffix(cfg.Cron.NotifyDefault.ChatID))
 	}
-	var sysBuildErr error
 	schedulers, err := wireup.WireSchedulers(wireup.SchedulersDeps{
 		Cfg:                  cfg,
 		Router:               router,
@@ -348,17 +347,17 @@ func main() {
 		ParentCtx:            ctx,
 		Telemetry:            nil, // wired post-Hub via dashboard.go SetTelemetry
 		BuildSysession: func() (*sysession.Manager, string, error) {
-			m, wd, e := buildSysessionManager(cfg, router, projectMgr, wrapper, storePath)
-			sysBuildErr = e // capture for slog below
-			return m, wd, e
+			return buildSysessionManager(cfg, router, projectMgr, wrapper, storePath)
 		},
 	})
 	if err != nil {
 		slog.Error("start cron scheduler", "err", err)
 		os.Exit(1)
 	}
-	if sysBuildErr != nil {
-		slog.Warn("sysession manager unavailable; daemons disabled", "err", sysBuildErr)
+	// sysession build failure is surfaced via the Schedulers struct field
+	// (#1588), not a closure side-channel. Degradable: warn + continue.
+	if schedulers.SysessionBuildErr != nil {
+		slog.Warn("sysession manager unavailable; daemons disabled", "err", schedulers.SysessionBuildErr)
 	}
 	scheduler := schedulers.Cron
 	sysMgr := schedulers.Sysession
