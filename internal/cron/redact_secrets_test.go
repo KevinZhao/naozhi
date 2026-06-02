@@ -171,6 +171,85 @@ func TestRedactSecretsInResult_GCP(t *testing.T) {
 	}
 }
 
+// TestRedactSecretsInResult_R20260602SEC4 verifies the four prefixes added in
+// R20260602-SEC-4: Databricks (dapi), HCP Vault (hvs.), Stripe live
+// (sk_live_), and Stripe test (sk_test_). Also confirms short tails below
+// minTail are left intact, and that the fast-path mayContainSecretPrefix
+// recognises the new 'd' first byte.
+func TestRedactSecretsInResult_R20260602SEC4(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "Databricks PAT",
+			in:   "token dapi1234567890abcdef1234567890ab done",
+			want: "token [REDACTED] done",
+		},
+		{
+			name: "Databricks short tail not redacted",
+			in:   "see dapishort for details",
+			want: "see dapishort for details",
+		},
+		{
+			name: "HCP Vault service token",
+			in:   "auth hvs.AAAAABBBBBCCCCCDDDDDEEEEEFFFFFF1234 ok",
+			want: "auth [REDACTED] ok",
+		},
+		{
+			name: "HCP Vault short tail not redacted",
+			in:   "see hvs.short here",
+			want: "see hvs.short here",
+		},
+		{
+			name: "Stripe live key",
+			in:   "STRIPE_SECRET_KEY=sk_live_abcdefghij0123456789 used",
+			want: "STRIPE_SECRET_KEY=[REDACTED] used",
+		},
+		{
+			name: "Stripe test key",
+			in:   "STRIPE_TEST_KEY=sk_test_abcdefghij0123456789 used",
+			want: "STRIPE_TEST_KEY=[REDACTED] used",
+		},
+		{
+			name: "Stripe key short tail not redacted",
+			in:   "sk_live_short is not a key",
+			want: "sk_live_short is not a key",
+		},
+		{
+			name: "dapi first-byte fast-path detected",
+			in:   "dapi1234567890abcdef1234567890ab",
+			want: "[REDACTED]",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := redactSecretsInResult(tc.in)
+			if got != tc.want {
+				t.Errorf("redactSecretsInResult(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMayContainSecretPrefix_DapiFirstByte pins that the 'd' first byte
+// added for Databricks tokens is recognised by the fast-path pre-scan.
+func TestMayContainSecretPrefix_DapiFirstByte(t *testing.T) {
+	t.Parallel()
+	if !mayContainSecretPrefix("dapi1234567890abcdef") {
+		t.Error("mayContainSecretPrefix('dapi...') = false, want true")
+	}
+	// Confirm purely 'd'-starting strings without any other trigger byte
+	// are still detected.
+	if !mayContainSecretPrefix("ddddd") {
+		t.Error("mayContainSecretPrefix('ddddd') = false, want true (d is in set)")
+	}
+}
+
 // TestSanitiseRunErrMsg_RedactsSecrets is the integration coverage for the
 // error path: sanitiseRunErrMsg must scrub well-known secret prefixes so a
 // leaked token in an error string (LastError) never lands on disk or the
@@ -258,7 +337,7 @@ func TestMayContainSecretPrefix_FirstBytes(t *testing.T) {
 	}
 	falsy := []string{
 		"",
-		"plai du", // no s/g/A/x/h/n first bytes
+		"plai  u", // no s/g/A/x/h/n/y/d first bytes (was "plai du" pre-R20260602-SEC-4 before 'd' was added)
 		"402",
 	}
 	for _, in := range falsy {

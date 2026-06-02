@@ -156,13 +156,6 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_cron_run_timed_out_total` | timed_out 终态计数（DeadlineExceeded） | 涨 = 接近 jobTimeout 边界；对比 cron_execution_slow_total 看是否同因 |
 | `naozhi_cron_run_canceled_total` | canceled 终态计数（context.Canceled，shutdown / job 删除中途） | 重启高峰短时涨正常；稳态非零 = job 频繁被删/recreate |
 | `naozhi_cron_watchdog_interrupt_timeout_total` | cron deadline-watchdog 触发后 `InterruptViaControl` 在 `watchdogInterruptTimeoutDefault`（3s）内未返回的累计次数（R20260527122801-SEC-3 / #1327） | 非零 = stdin 写入 wedged，inner goroutine 卡到下次 `session.Reset` 才放行；和 `naozhi_shim_restart_total` 对照判断 reconcile 是否清理；持续涨需要排查 shim 健康 |
-| `naozhi_auto_chain_spawn_attach_total` | 新建 session 路径自动接 chain 的次数（docs/rfc/auto-workspace-chain.md） | 上线初期会随每次新会话上涨；稳态后跟随用户开新会话节奏 |
-| `naozhi_auto_chain_backfill_attach_total` | 启动一次性回填给 prev 为空的 session 接 chain 的次数 | 仅在进程启动后短时涨；持续非零 = backfill 被错误重入 |
-| `naozhi_auto_chain_backfill_skipped_no_workspace_total` | 回填阶段因 workspace 字段为空跳过的 session 数 | 高 = sessions.json 大量 legacy 条目缺 workspace；考虑迁移 |
-| `naozhi_auto_chain_backfill_skipped_no_candidates_total` | 回填阶段 pickWorkspaceChain 返回空的 session 数 | 高 = window/exclusion 太严，调整 `session.auto_chain.window_hours` |
-| `naozhi_auto_chain_backfill_skipped_toctou_drop_total` | 回填 Phase 3 二次校验把候选全部丢光的 session 数 | 高 = cron / sys 启动期高频抢 sessionID；查 cron job 配置 |
-| `naozhi_auto_chain_backfill_skipped_already_filled_total` | Phase 3 lock 下发现 prev 已被并发路径填了 | 稳态 0；非零 = 与 cron stub 注册路径同时启动 |
-| `naozhi_auto_chain_toctou_collision_total` | 两次 lock 间隙发现冲突丢弃的 sessionID 累计数（spawn + backfill 合计） | 稳态接近 0；持续涨 = cron / sys session 注册节奏与 spawn 高度并发 |
 | `naozhi_auto_chain_origins_length_mismatch_total` | `prev_session_origins` 与 `prev_session_ids` 长度漂移检测命中（自动兜底重建） | **必须稳态 0**；非零 = 某写路径违反 prev_session_ids append-only 不变量（RFC §4.6） |
 | `naozhi_auto_chain_retired_on_startup_total` | 启动时一次性剥离 auto-spawn / auto-backfill 脏 chain 段的 session 数（RFC docs/rfc/project-stable-session-key.md §9.2，替代旧 backfill） | 首次升级到本版本后会一次性上涨（清理历史脏数据）；之后**稳态 0**，重启幂等不再涨。持续非零 = 仍有路径写入 auto-* origin（不应发生，auto-chain 已下线） |
 

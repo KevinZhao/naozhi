@@ -17,9 +17,9 @@
 // R237-ARCH-13 eventlog rename so the history-source boundary moves only
 // once. Sub-domains today:
 //
-//   - Path utilities — scanner.go (ClaudeProjectSlug, projDirName),
-//     workspace_jsonl.go: pure functions over Claude's CWD-derived
-//     directory naming. No I/O on the hot path beyond a single Stat.
+//   - Path utilities — scanner.go (ClaudeProjectSlug, projDirName):
+//     pure functions over Claude's CWD-derived directory naming.
+//     No I/O on the hot path beyond a single Stat.
 //     Future home: discovery/path. Stable, no behaviour change planned.
 //
 //   - Process inspection — proc_*.go (proc_linux.go,

@@ -6,6 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -49,13 +52,33 @@ func runDoctor(args []string) {
 		os.Exit(2)
 	}
 
+	// R20260602-SEC-2: validate --addr / NAOZHI_BASE_URL before use.
+	cleanAddr := strings.TrimRight(*addr, "/")
+	if err := validateDoctorAddr(cleanAddr); err != nil {
+		fmt.Fprintf(os.Stderr, "doctor: %v\n", err)
+		os.Exit(2)
+	}
+	// Warn when a token is present and the target host is not loopback —
+	// the token would travel to a remote host, which may be intentional
+	// (CI, staging) but warrants operator awareness.
+	if parsedURL, _ := url.Parse(cleanAddr); parsedURL != nil {
+		host := parsedURL.Hostname()
+		if ip := net.ParseIP(host); !(host == "localhost" ||
+			(ip != nil && ip.IsLoopback())) {
+			hasToken := *tokenFlag != "" || loadTokenBestEffort() != ""
+			if hasToken {
+				slog.Warn("doctor: sending token to non-loopback host", "addr", cleanAddr, "host", host)
+			}
+		}
+	}
+
 	token := *tokenFlag
 	if token == "" {
 		token = loadTokenBestEffort()
 	}
 
 	d := &doctor{
-		addr:       strings.TrimRight(*addr, "/"),
+		addr:       cleanAddr,
 		token:      token,
 		timeout:    *timeout,
 		out:        os.Stdout,
@@ -65,6 +88,24 @@ func runDoctor(args []string) {
 	d.run()
 	if d.hasFail {
 		os.Exit(1)
+	}
+}
+
+// validateDoctorAddr parses rawAddr and returns an error if it is not a
+// well-formed http or https URL. url.Parse is lenient (it accepts
+// relative paths, schemeless strings, etc.), so we additionally gate on
+// the scheme after parsing. Returns nil for valid http/https addresses.
+// [R20260602-SEC-2]
+func validateDoctorAddr(rawAddr string) error {
+	parsed, err := url.Parse(rawAddr)
+	if err != nil {
+		return fmt.Errorf("invalid --addr %q: %w", rawAddr, err)
+	}
+	switch parsed.Scheme {
+	case "http", "https":
+		return nil
+	default:
+		return fmt.Errorf("--addr scheme must be http or https, got %q in %q", parsed.Scheme, rawAddr)
 	}
 }
 

@@ -61,9 +61,18 @@ type shimMsgCode struct {
 // (Present=false). R222-PERF-13.
 func (c *shimMsgCode) UnmarshalJSON(data []byte) error {
 	c.Present = true
-	// Delegate to json.Unmarshal for full int parsing semantics (rejects
-	// strings/bools/floats outside int range identically to *int).
-	return json.Unmarshal(data, &c.Value)
+	// Parse the raw JSON integer token with strconv.ParseInt for zero
+	// allocation on the readLoop hot path. json.Unmarshal would allocate a
+	// reflect type-descriptor for int on every call. strconv.ParseInt rejects
+	// strings, bools, and floats identically to json.Unmarshal for *int, and
+	// distinguishes 0 from absent the same way (Present is set above; absent
+	// keys never call UnmarshalJSON). R20260602-PERF-6.
+	v, err := strconv.ParseInt(string(data), 10, 64)
+	if err != nil {
+		return err
+	}
+	c.Value = int(v)
+	return nil
 }
 
 // readLoop reads NDJSON messages from the shim socket and dispatches events.

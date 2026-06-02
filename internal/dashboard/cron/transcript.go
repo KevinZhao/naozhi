@@ -45,21 +45,6 @@ import (
 // pathological JSONL files (long-lived fresh=false sessions accumulate
 // turns from many runs into one file — see internal/cron/run.go:48).
 
-// transcriptSemCap caps concurrent transcript requests across the
-// whole process. R243-SEC-12 (#798): each in-flight transcript holds
-// a 256 KB scanner buffer + 8 MB LimitReader budget; without a
-// process-wide ceiling, N concurrent authenticated operators can each
-// drive their own per-IP bucket and pile up N×8 MB of file-mapped
-// pages. 8 mirrors the dashboard's typical "few operators, occasional
-// detail-drawer fan-out" workload — enough headroom that two users
-// inspecting parallel runs don't 503 each other while still capping
-// the memory amplifier at 8 × 8 MB = 64 MB. Tuned by the same
-// reasoning as transcribeSemCap (which gates ffmpeg runs at 3); the
-// higher cap here reflects that transcript reads are I/O-bound, not
-// CPU-bound, so the bottleneck is buffer memory rather than work
-// throughput.
-const transcriptSemCap = 8
-
 const (
 	// maxTranscriptBytes is the hard cap on bytes read from the JSONL
 	// file. Beyond this we set truncated:true and stop. 8 MB roughly
