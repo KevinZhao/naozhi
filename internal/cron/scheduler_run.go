@@ -1183,24 +1183,25 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		curCAS, stillRegisteredCAS := s.jobs[j.ID]
 		pausedCAS := stillRegisteredCAS && curCAS.Paused
 		s.mu.RUnlock()
-		if !stillRegisteredCAS {
-			slog.Debug("cron: job deleted between dispatch lookup and CAS, aborting run",
-				"job_id", j.ID, "trigger_now", viaTriggerNow)
-			// R040034-CR-1 (#1410): emit synthetic started→ended pair so
-			// dashboard subscribers see a complete lifecycle frame instead
-			// of a 1-2µs gap when Delete lands in the cross-lock window.
-			// Mirrors the router-missing precedent at the top of
-			// executeOpt and the overlap-skipped emit on CAS-lost.
-			s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassDeletedConcurrent, "job deleted between dispatch and CAS", "deleted-during-dispatch")
-			return
-		}
-		if pausedCAS {
-			slog.Debug("cron: job paused between dispatch lookup and CAS, aborting run",
-				"job_id", j.ID, "trigger_now", viaTriggerNow)
-			// R040034-CR-1 (#1410): see DeletedConcurrent above. Pause
-			// landing in the cross-lock window also gets a synthetic pair
-			// so the dashboard "running" counter stays consistent.
-			s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassPausedConcurrent, "job paused between dispatch and CAS", "paused-during-dispatch")
+		if !stillRegisteredCAS || pausedCAS {
+			// R243-ARCH-13 (#841): both cross-lock abort branches log the
+			// same {job_id, trigger_now} pair; bind it once via slog.With.
+			casLg := slog.With("job_id", j.ID, "trigger_now", viaTriggerNow)
+			if !stillRegisteredCAS {
+				casLg.Debug("cron: job deleted between dispatch lookup and CAS, aborting run")
+				// R040034-CR-1 (#1410): emit synthetic started→ended pair so
+				// dashboard subscribers see a complete lifecycle frame instead
+				// of a 1-2µs gap when Delete lands in the cross-lock window.
+				// Mirrors the router-missing precedent at the top of
+				// executeOpt and the overlap-skipped emit on CAS-lost.
+				s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassDeletedConcurrent, "job deleted between dispatch and CAS", "deleted-during-dispatch")
+			} else {
+				casLg.Debug("cron: job paused between dispatch lookup and CAS, aborting run")
+				// R040034-CR-1 (#1410): see DeletedConcurrent above. Pause
+				// landing in the cross-lock window also gets a synthetic pair
+				// so the dashboard "running" counter stays consistent.
+				s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassPausedConcurrent, "job paused between dispatch and CAS", "paused-during-dispatch")
+			}
 			return
 		}
 	}
