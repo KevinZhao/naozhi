@@ -185,3 +185,57 @@ func TestLimitedWriter_StopsCallingFailedInnerWriter(t *testing.T) {
 		t.Errorf("inner writer was called %d times after first failure; want exactly 1", fw.calls)
 	}
 }
+
+// TestRunnerImplBaseArgs_Contract pins the sysession one-shot argv prefix.
+//
+// R241-ARCH-14 (#523): runnerImplBaseArgs is hand-aligned with
+// internal/cli/protocol_claude.go:BuildArgs and the wrapper spawn contract,
+// with the invariants documented only in an inline godoc reminder. Until a
+// shared backend.Profile.OneshotArgs() lands (deliberately deferred until a
+// second backend needs the split), this test is the CI guard that makes the
+// silent-breakage modes the godoc warns about fail loudly:
+//
+//   - "--output-format text": switching to json/stream-json silently breaks
+//     every daemon's Run() string parsing.
+//   - "--setting-sources \"\"" (empty value): disables host hooks so the
+//     AutoTitler cannot dead-loop on naozhi's own learning hooks. A drift to
+//     "user" (BuildArgs' value) would re-enter the hooks.
+//   - "-p": one-shot prompt mode.
+func TestRunnerImplBaseArgs_Contract(t *testing.T) {
+	t.Parallel()
+	want := []string{"-p", "--output-format", "text", "--setting-sources", ""}
+	if len(runnerImplBaseArgs) != len(want) {
+		t.Fatalf("runnerImplBaseArgs = %q, want %q", runnerImplBaseArgs, want)
+	}
+	for i := range want {
+		if runnerImplBaseArgs[i] != want[i] {
+			t.Fatalf("runnerImplBaseArgs[%d] = %q, want %q (full: %q) — "+
+				"this argv prefix is hand-aligned with cli.BuildArgs and the "+
+				"sysession daemon contract; see runner.go godoc before changing",
+				i, runnerImplBaseArgs[i], want[i], runnerImplBaseArgs)
+		}
+	}
+
+	// Belt-and-suspenders on the two highest-risk invariants regardless of
+	// position, so a reorder that keeps the slice the same length but moves
+	// these pairs still surfaces a readable failure.
+	assertFlagValue(t, runnerImplBaseArgs, "--output-format", "text")
+	assertFlagValue(t, runnerImplBaseArgs, "--setting-sources", "")
+}
+
+// assertFlagValue checks that args contains flag immediately followed by want.
+func assertFlagValue(t *testing.T, args []string, flag, want string) {
+	t.Helper()
+	for i, a := range args {
+		if a == flag {
+			if i+1 >= len(args) {
+				t.Fatalf("%s has no value in %q", flag, args)
+			}
+			if args[i+1] != want {
+				t.Fatalf("%s = %q, want %q (in %q)", flag, args[i+1], want, args)
+			}
+			return
+		}
+	}
+	t.Fatalf("%s not found in %q", flag, args)
+}

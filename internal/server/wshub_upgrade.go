@@ -21,7 +21,6 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 )
 
@@ -284,8 +283,8 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		// operators can tell whether the limiter is the dominant source of
 		// auth_fail (e.g. looping client) vs a credential spray pacing under
 		// the limiter threshold.
-		metrics.WSAuthFailTotal.Add(1)
-		metrics.WSAuthFailRateLimitedTotal.Add(1)
+		serverMetrics.WSAuthFail()
+		serverMetrics.WSAuthFailRateLimited()
 		return
 	}
 	// Short-circuit when the connection is already authenticated via cookie —
@@ -342,7 +341,7 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		// R172-ARCH-D10: also bump the dedicated "invalid-token" split so
 		// operators can distinguish credential spray (this counter rising)
 		// from throttling storms (*RateLimitedTotal rising).
-		metrics.WSAuthFailTotal.Add(1)
-		metrics.WSAuthFailInvalidTokenTotal.Add(1)
+		serverMetrics.WSAuthFail()
+		serverMetrics.WSAuthFailInvalidToken()
 	}
 }

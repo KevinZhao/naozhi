@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -181,7 +180,7 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 			// internal paths to aggregated log stores. Tag with the
 			// subscription key so operators can correlate the panic
 			// against a specific session fan-out.
-			metrics.PanicRecoveredTotal.Add(1)
+			serverMetrics.PanicRecovered()
 			slog.Error("panic in ws eventPushLoop (recovered)",
 				"key", key, "panic", fmt.Sprintf("%v", r))
 			slog.Debug("panic in ws eventPushLoop: stack",
