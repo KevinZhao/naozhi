@@ -83,11 +83,29 @@ func TestSinceCursor_WatermarkAdvances(t *testing.T) {
 	if csr.watermark != 200 {
 		t.Fatalf("watermark = %d, want 200", csr.watermark)
 	}
-	if _, ok := csr.sentAtWM["a"]; ok {
+	if csr.containsWM("a") {
 		t.Errorf("dedup set should have been rebuilt for t=200, still holds t=100 UUID")
 	}
-	if _, ok := csr.sentAtWM["d"]; !ok {
+	if !csr.containsWM("d") {
 		t.Errorf("dedup set missing the t=200 UUID")
+	}
+}
+
+// TestSinceCursor_NoDuplicateAccumulation guards the R164029-PERF-4 (#1599)
+// slice rewrite: advancing repeatedly with the same UUID at the trailing
+// millisecond must not grow sentAtWM (the old map deduped implicitly; the
+// slice version must keep the same invariant via containsWM).
+func TestSinceCursor_NoDuplicateAccumulation(t *testing.T) {
+	csr := newSinceCursor()
+	e := []cli.EventEntry{{Time: 300, UUID: "z", Summary: "z"}}
+	csr.advance(e)
+	csr.advance(e)
+	csr.advance(e)
+	if len(csr.sentAtWM) != 1 {
+		t.Fatalf("sentAtWM grew to %d entries on repeated advance, want 1", len(csr.sentAtWM))
+	}
+	if !csr.containsWM("z") {
+		t.Errorf("sentAtWM missing UUID after advance")
 	}
 }
 
