@@ -337,7 +337,7 @@ func TestMayContainSecretPrefix_FirstBytes(t *testing.T) {
 	}
 	falsy := []string{
 		"",
-		"plai du", // no s/g/A/x/h/n first bytes
+		"plai  u", // no s/g/A/x/h/n/y/d first bytes (was "plai du" pre-R20260602-SEC-4 before 'd' was added)
 		"402",
 	}
 	for _, in := range falsy {
