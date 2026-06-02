@@ -26,7 +26,13 @@ import (
 	// specific backend import its package directly. internal/session
 	// is now backend-agnostic at the import graph level — adding a
 	// new backend only requires editing internal/wireup.
-	"github.com/naozhi/naozhi/internal/history/naozhilog"
+	//
+	// The naozhi-native event-log local tier (naozhilog/merged) is the
+	// one history backend the session layer still constructs directly,
+	// because it is generic — written for every backend, not just
+	// claude. Its construction is funnelled through
+	// eventlog_bridge.go's newEventLogLocalSource / mergeWithEventLog
+	// (#403, #567) so this file no longer needs the naozhilog import.
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/sessionconst"
 )
@@ -1328,7 +1334,7 @@ func (r *Router) startBackgroundHistoryLoaders() {
 					return
 				}
 				defer func() { <-sem }()
-				src := naozhilog.New(r.eventLogDir, s.key)
+				src := newEventLogLocalSource(r.eventLogDir, s.key)
 				entries, err := src.LoadLatest(r.historyCtx, maxPersistedHistory)
 				if err != nil || len(entries) == 0 {
 					return

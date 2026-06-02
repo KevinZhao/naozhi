@@ -25,8 +25,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/history"
-	"github.com/naozhi/naozhi/internal/history/merged"
-	"github.com/naozhi/naozhi/internal/history/naozhilog"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
@@ -132,16 +130,13 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 		fallback = history.Noop{}
 	}
 
-	if r.eventLogDir == "" {
-		// Event log persistence opted out — old single-source behaviour.
-		s.SetHistorySource(fallback)
-		return
-	}
-
-	s.SetHistorySource(&merged.Source{
-		Local:    naozhilog.New(r.eventLogDir, s.key),
-		Fallback: fallback,
-	})
+	// mergeWithEventLog returns the fallback unchanged when r.eventLogDir
+	// is empty (event-log persistence opted out → old single-source
+	// behaviour) and otherwise composes the naozhi event-log local tier in
+	// front of it. The naozhilog/merged construction now lives in
+	// eventlog_bridge.go (#403, #567) so this generic path stays free of
+	// concrete history-backend imports.
+	s.SetHistorySource(mergeWithEventLog(r.eventLogDir, s.key, fallback))
 }
 
 // ResetChat resets all sessions belonging to a chat (all agents).
