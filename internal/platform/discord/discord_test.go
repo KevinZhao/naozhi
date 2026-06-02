@@ -208,6 +208,35 @@ func TestOnMessageCreate_EmptyAfterMentionStrip(t *testing.T) {
 	}
 }
 
+// TestDownloadURL_SchemeGuard verifies that downloadURL rejects any non-https
+// URL before attempting a network fetch. The duplicate https check was removed
+// in R20260602190132-SEC-7; this test pins the surviving guard.
+func TestDownloadURL_SchemeGuard(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		rawURL  string
+		wantErr bool
+	}{
+		{"http rejected", "http://cdn.discordapp.com/attachments/1/file.png", true},
+		{"ftp rejected", "ftp://cdn.discordapp.com/attachments/1/file.png", true},
+		{"javascript rejected", "javascript://cdn.discordapp.com/xss", true},
+		{"invalid url rejected", "://bad", true},
+		// https passes the scheme guard but fails on unknown host — that is a
+		// different error, not the scheme error; we just confirm no panic.
+		{"https unknown host errors on host not scheme", "https://evil.example.com/file.png", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, err := downloadURL(tc.rawURL)
+			if tc.wantErr && err == nil {
+				t.Errorf("downloadURL(%q) expected error, got nil", tc.rawURL)
+			}
+		})
+	}
+}
+
 func TestAggregateAttachmentBytesAllow(t *testing.T) {
 	t.Parallel()
 	cap := maxDiscordTotalAttachmentBytes

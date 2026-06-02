@@ -418,18 +418,15 @@ func downloadURL(rawURL string) ([]byte, string, error) {
 	}
 	// Discord legitimate CDN URLs are always https; refuse plaintext so a MITM
 	// or malicious crafted message cannot serve substituted bytes that would
-	// then be forwarded as if they were a trusted Discord attachment.
+	// then be forwarded as if they were a trusted Discord attachment. Also
+	// prevents a future Discord CDN downgrade or a crafted javascript:// URL
+	// from bypassing TLS verification on the attachment download path.
+	// (R227-SEC-13)
 	if u.Scheme != "https" {
 		return nil, "", fmt.Errorf("attachment URL must be https, got %q", u.Scheme)
 	}
 	if !discordCDNHosts[u.Hostname()] {
 		return nil, "", fmt.Errorf("attachment URL host not in whitelist: %s", u.Hostname())
-	}
-	// Refuse non-https schemes so a future Discord CDN downgrade or a
-	// crafted javascript:// URL cannot bypass TLS verification on the
-	// attachment download path. (R227-SEC-13)
-	if u.Scheme != "https" {
-		return nil, "", fmt.Errorf("attachment URL must use https: %s", u.Scheme)
 	}
 	resp, err := discordHTTPClient.Get(rawURL)
 	if err != nil {
