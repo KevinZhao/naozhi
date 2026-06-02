@@ -451,6 +451,29 @@ func (p jobResultSnapshot) restore(j *Job) {
 	j.RunCounters = p.Counters
 }
 
+// snapshotResultState captures the runtime-mutable terminal-result state a
+// Job carries (the LastRunAt / LastResult / LastError / LastErrorClass /
+// LastSessionID / RunCounters cluster) into a jobResultSnapshot. Caller must
+// hold s.mu so the read is serialised against concurrent mutators.
+//
+// R249-ARCH-22 (#986): Job mixes wire-config (Schedule / Prompt / WorkDir)
+// with this runtime-mutable state. Until the full JobConfig/JobState split
+// lands, this method is the single capture point for the state cluster so the
+// snapshot field set is enumerated exactly once (paired with restore) instead
+// of being open-coded at the recordTerminalResult capture site. Adding a new
+// runtime-state field is then a two-site edit on the snapshot type + this
+// method/restore pair rather than a scattered hunt across mutation paths.
+func (j *Job) snapshotResultState() jobResultSnapshot {
+	return jobResultSnapshot{
+		LastRunAt:      j.LastRunAt,
+		LastResult:     j.LastResult,
+		LastError:      j.LastError,
+		LastErrorClass: j.LastErrorClass,
+		LastSessionID:  j.LastSessionID,
+		Counters:       j.RunCounters,
+	}
+}
+
 // recordTerminalResult persists the terminal result (LastResult /
 // LastError / LastErrorClass / Counters) for non-skipPersist paths and
 // returns the post-sanitised (result, errMsg) pair so finishRun can reuse
@@ -515,14 +538,7 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 		s.mu.Unlock()
 		return result, errMsg, false
 	}
-	prev := jobResultSnapshot{
-		LastRunAt:      j.LastRunAt,
-		LastResult:     j.LastResult,
-		LastError:      j.LastError,
-		LastErrorClass: j.LastErrorClass,
-		LastSessionID:  j.LastSessionID,
-		Counters:       j.RunCounters,
-	}
+	prev := j.snapshotResultState()
 
 	j.LastRunAt = endedAt
 	j.LastResult = result
