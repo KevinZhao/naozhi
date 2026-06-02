@@ -158,7 +158,7 @@ func storeMetaPath(storePath string) string {
 // with SetPrevSessionOrigins) and reads all other fields via accessor methods
 // (Workspace / UserLabel / etc.) which each take their own per-field atomic
 // or mutex. Holding r.mu during this call would invert the documented
-// (r.mu → s.historyMu) order from auto_chain_router.go.
+// (r.mu → s.historyMu) order from router_lifecycle.go.
 func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	// Scratch (ephemeral aside) sessions are deliberately volatile: they
 	// must not persist across restarts, or loadStore would resurrect a
