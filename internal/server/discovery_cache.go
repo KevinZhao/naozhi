@@ -143,9 +143,11 @@ func (dc *discoveryCache) refresh() {
 	now := time.Now()
 	const evictGrace = 60 * time.Second
 	dc.mu.Lock()
-	for pid, evictedAt := range dc.evictedPIDs {
-		if now.Sub(evictedAt) > evictGrace {
-			delete(dc.evictedPIDs, pid)
+	if len(dc.evictedPIDs) > 0 {
+		for pid, evictedAt := range dc.evictedPIDs {
+			if now.Sub(evictedAt) > evictGrace {
+				delete(dc.evictedPIDs, pid)
+			}
 		}
 	}
 	if len(dc.evictedPIDs) > 0 {

@@ -71,6 +71,7 @@ func (r *Router) retireAutoChainOnce() {
 			// keepMask length must match the live chain; a concurrent
 			// mutation (none expected at startup) or already-clean chain
 			// means nothing to do.
+			slog.Warn("auto-chain retire: RebuildChainFiltered returned 0 with pending auto-chain origins; possible misaligned keep mask", "key", s.key)
 			continue
 		}
 		retired++
