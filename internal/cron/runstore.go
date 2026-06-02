@@ -2195,10 +2195,26 @@ func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
 		s.cacheStaleEvictionTotal.Add(int64(entry.count - survive))
 	}
 	// Zero out the dropped slots to release any retained string fields.
+	// R20260602190132-PERF-10: replace the O(evicted) per-slot modulo loop
+	// with at most two contiguous clear() calls that follow the same
+	// branch-on-wrap pattern used by ringSnapshot/ringPushHead.
+	//
+	// Physical layout: logical slot i lives at ring[(head+i)%c].
+	// The evicted logical range [survive, count) maps to a physical run
+	// starting at phyStart = (head+survive)%c spanning numEvicted slots.
+	// If phyStart+numEvicted <= c the run fits in one segment; otherwise it
+	// wraps and requires two segments.
 	c := cap(entry.ring)
-	if c > 0 {
-		for i := survive; i < entry.count; i++ {
-			entry.ring[(entry.head+i)%c] = CronRunSummary{}
+	if c > 0 && survive < entry.count {
+		numEvicted := entry.count - survive
+		phyStart := (entry.head + survive) % c
+		if phyStart+numEvicted <= c {
+			// Single contiguous segment — no wrap.
+			clear(entry.ring[phyStart : phyStart+numEvicted])
+		} else {
+			// Two segments: tail of ring then beginning.
+			clear(entry.ring[phyStart:c])
+			clear(entry.ring[0 : numEvicted-(c-phyStart)])
 		}
 	}
 	entry.count = survive
