@@ -641,16 +641,6 @@ func handleAssetBrowserJS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// strOrFallback extracts a string from a map, trying the primary key first then the fallback.
-// Used to handle remote nodes that may send Go-default JSON keys (e.g. "Name") instead of
-// tagged lowercase keys (e.g. "name").
-func strOrFallback(m map[string]any, key, fallback string) string {
-	if v, ok := m[key].(string); ok && v != "" {
-		return v
-	}
-	v, _ := m[fallback].(string)
-	return v
-}
 
 // buildSessionOpts resolves agent config and planner overrides for a
 // session key. When resolver is non-nil, delegates to ResolveForKey for
