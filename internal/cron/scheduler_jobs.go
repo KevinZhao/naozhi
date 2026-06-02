@@ -1815,8 +1815,7 @@ func (s *Scheduler) TriggerNow(id string) error {
 	// Register the trigger goroutine with triggerWG before releasing s.mu.
 	// This prevents a Stop() on another goroutine from observing triggerWG as
 	// empty and returning before our goroutine starts. We pair Add(1) here
-	// with a Done() in each goroutine body below; if we bail out before
-	// spawning (concurrent delete), we Done() the counter inline.
+	// with the single deferred Done() in the spawned goroutine body below.
 	s.triggerWG.Add(1)
 
 	// R250-GO-2: hold s.mu.RLock across s.cron.Entry(entryID) and the
@@ -1829,44 +1828,41 @@ func (s *Scheduler) TriggerNow(id string) error {
 	// discipline; TriggerNow keeps the cross-lock because it needs the
 	// entry-gone check and the s.mu RLock to observe a single consistent
 	// instant against a racing DeleteJob.)
-	if entryID != 0 {
-		// TriggerNow 不再通过 cron chain 的 WrappedJob.Run()——因为我们要跳过
-		// jitter（用户显式 "run now" 期望立刻跑）。改为直接 executeOpt(..., true)。
-		// 去 chain 后失去的保护：
-		//   1) SkipIfStillRunning —— executeOpt 内部的 jobRunningGuard CAS
-		//      同样拒绝重叠，等效覆盖。
-		//   2) Recover（panic） —— execute 自身走 session.Send，session 层
-		//      panic 已经被上层 recover；即便有残留 panic 也只影响此 goroutine，
-		//      不会污染 robfig/cron 调度器。
-		// 但必须保留"entry 已被并发 DeleteJob 清掉"的分支：此时 cron.Entry()
-		// 的 WrappedJob 为 nil，我们应该把这当作"entry gone"静默退出，不再
-		// 走 executeOpt（可能引用已被清理的 session router / job 指针）。
-		// 相关测试：TestTriggerNow_EntryGoneReleasesWG（trigger_now_wg_done_test.go）。
-		// R192-CRON-B: cron-v2-polish §3.2 jitter。
-		// R242-ARCH-29 (#774): route the WrappedJob == nil sentinel through
-		// cronEntryGoneLocked so the robfig/cron internal-struct shape stays
-		// behind one helper — a future lib bump that switches to a
-		// HasEntry / Lookup API lands once.
-		entryGone := s.cronEntryGoneLocked(entryID)
-		s.mu.RUnlock()
+	//
+	// TriggerNow 不再通过 cron chain 的 WrappedJob.Run()——因为我们要跳过
+	// jitter（用户显式 "run now" 期望立刻跑）。改为直接 executeOpt(..., true)。
+	// 去 chain 后失去的保护：
+	//   1) SkipIfStillRunning —— executeOpt 内部的 jobRunningGuard CAS
+	//      同样拒绝重叠，等效覆盖。
+	//   2) Recover（panic） —— execute 自身走 session.Send，session 层
+	//      panic 已经被上层 recover；即便有残留 panic 也只影响此 goroutine，
+	//      不会污染 robfig/cron 调度器。
+	// 但必须保留"entry 已被并发 DeleteJob 清掉"的分支：此时 cron.Entry()
+	// 的 WrappedJob 为 nil，我们应该把这当作"entry gone"静默退出，不再
+	// 走 executeOpt（可能引用已被清理的 session router / job 指针）。
+	// 相关测试：TestTriggerNow_EntryGoneReleasesWG（trigger_now_wg_done_test.go）。
+	// R192-CRON-B: cron-v2-polish §3.2 jitter。
+	// R242-ARCH-29 (#774): route the WrappedJob == nil sentinel through
+	// cronEntryGoneLocked so the robfig/cron internal-struct shape stays
+	// behind one helper — a future lib bump that switches to a
+	// HasEntry / Lookup API lands once.
+	//
+	// R247-CR-29 (#596): the entry-gone check is resolved here (under RLock,
+	// for the single-consistent-instant race guard) and reduced to one bool
+	// so the function spawns exactly ONE goroutine with one `defer Done()`.
+	// entryID==0 means the job is paused / unregistered — never "gone", so it
+	// proceeds to executeIfNotDeletedOrPaused which re-checks live state.
+	entryGone := entryID != 0 && s.cronEntryGoneLocked(entryID)
+	s.mu.RUnlock()
+
+	go func() {
+		defer s.triggerWG.Done()
 		if entryGone {
-			go func() {
-				defer s.triggerWG.Done()
-				slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "job_id", id, "entry_id", entryID)
-			}()
-		} else {
-			go func() {
-				defer s.triggerWG.Done()
-				s.executeIfNotDeletedOrPaused(jobID)
-			}()
+			slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "job_id", id, "entry_id", entryID)
+			return
 		}
-	} else {
-		s.mu.RUnlock()
-		go func() {
-			defer s.triggerWG.Done()
-			s.executeIfNotDeletedOrPaused(jobID)
-		}()
-	}
+		s.executeIfNotDeletedOrPaused(jobID)
+	}()
 	return nil
 }
 
