@@ -8,12 +8,30 @@ package server
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// randomCookieGen returns 16 bytes of CSPRNG entropy hex-encoded, used as the
+// per-construction seed for the auth-cookie generation marker mixed into the
+// cookie HMAC. R217-SEC-6 / R172-SEC-L4 (#595 / #437): an unpredictable seed
+// ensures a captured cookie cannot be replayed against a future process that
+// shares the same dashboard token + cookie secret. On the (practically
+// impossible) rand.Read failure we fall back to a time-derived value so the
+// process still starts — strictly no worse than the previous always-time seed.
+func randomCookieGen() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
+	return hex.EncodeToString(b[:])
+}
 
 // loadOrCreateCookieSecret reads a 32-byte secret from stateDir/cookie_secret,
 // creating it with crypto/rand if absent. Falls back to a fresh ephemeral secret

@@ -12,46 +12,51 @@ import (
 // TestTriggerNow_BothBranchesReleaseWGInGoroutine is a source-level regression
 // gate for CRON4 (Round 174).
 //
-// Prior to this round, the `entryID != 0 && entry.WrappedJob == nil` branch
+// Prior to Round 174, the `entryID != 0 && entry.WrappedJob == nil` branch
 // of TriggerNow called s.triggerWG.Done() synchronously on the caller's
 // goroutine before returning. This was logically correct for the immediate
 // caller, but asymmetric with the sibling branches (WrappedJob != nil,
 // entryID == 0) which both defer Done() inside a spawned goroutine. The
 // asymmetry made it possible in principle for Stop()'s triggerWG.Wait() to
 // observe the counter at zero between TriggerNow's Add(1) and the spawned
-// goroutine of the other branches — a concern that grows every time someone
-// adds a new code path around the WG reservation.
+// goroutine of the other branches.
 //
-// Contract: every release of the reserved WG slot MUST happen via `defer
-// s.triggerWG.Done()` inside a `go func() { ... }()` spawned in the function
-// body. Synchronous `s.triggerWG.Done()` calls are forbidden.
+// R247-CR-29 (#596): the three sibling spawn sites were collapsed into one.
+// The entry-gone check is now resolved to a single bool UNDER s.mu.RLock
+// (preserving the single-consistent-instant race guard against a concurrent
+// DeleteJob) and the function spawns exactly ONE `go func()` with one
+// `defer s.triggerWG.Done()`. The contract is unchanged in spirit — every
+// WG release still happens via `defer s.triggerWG.Done()` inside a spawned
+// goroutine, and a synchronous `s.triggerWG.Done()` is still forbidden — but
+// the expected spawn/defer count is now 1 rather than 3.
 //
 // This test scans the function body textually so a future refactor that
-// removes one of the goroutines re-introduces the asymmetry and fails
-// here explicitly, directing the reader to this godoc.
+// re-introduces a synchronous Done() (or splits the single goroutine in a way
+// that drops a release path) fails here explicitly, directing the reader to
+// this godoc.
 func TestTriggerNow_BothBranchesReleaseWGInGoroutine(t *testing.T) {
 	t.Parallel()
 
 	body := readTriggerNowBody(t)
 
-	// Structural contract: exactly three `go func()` spawn sites inside
-	// TriggerNow. Two in the `entryID != 0` block (WrappedJob != nil, and
-	// the entry-gone fallback), one in the `entryID == 0` block. Any
-	// regression that collapses one of the entryID != 0 branches into a
-	// synchronous Done() will drop this count to two and fail.
+	// Structural contract: exactly one `go func()` spawn site inside
+	// TriggerNow. The entry-gone vs run decision is taken before the spawn
+	// and branched inside the single goroutine. Any regression that
+	// re-introduces a synchronous Done() path (dropping the spawn) or splits
+	// the goroutine back into per-branch copies will move this count off 1.
 	spawnCount := strings.Count(body, "go func()")
-	if spawnCount != 3 {
-		t.Errorf("TriggerNow must spawn exactly 3 `go func()` calls (one per WG release path), got %d.\n"+
-			"See godoc on this test for the CRON4 background.\nBody:\n%s",
+	if spawnCount != 1 {
+		t.Errorf("TriggerNow must spawn exactly 1 `go func()` call (single WG release path), got %d.\n"+
+			"See godoc on this test for the CRON4 / R247-CR-29 background.\nBody:\n%s",
 			spawnCount, body)
 	}
 
 	// Defense against "spawn the goroutine but call Done synchronously":
-	// every release must appear as `defer s.triggerWG.Done()`, never a
+	// the single release must appear as `defer s.triggerWG.Done()`, never a
 	// bare `s.triggerWG.Done()` at top-level.
 	deferDoneCount := strings.Count(body, "defer s.triggerWG.Done()")
-	if deferDoneCount != 3 {
-		t.Errorf("TriggerNow must release triggerWG via `defer s.triggerWG.Done()` in each spawned goroutine (3 expected), got %d.\nBody:\n%s",
+	if deferDoneCount != 1 {
+		t.Errorf("TriggerNow must release triggerWG via `defer s.triggerWG.Done()` in the spawned goroutine (1 expected), got %d.\nBody:\n%s",
 			deferDoneCount, body)
 	}
 

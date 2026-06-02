@@ -5564,6 +5564,37 @@ function buildDashboardSessionKey(timestamp, projectOrFolder, agentID) {
   return 'dashboard:direct:' + timestamp + '-' + slug + ':' + agent;
 }
 
+// resolveSessionKey decides the session key for opening a project
+// (RFC docs/rfc/project-stable-session-key.md §4.4). Two modes:
+//
+//   'continue' — reuse the backend-provided project-stable key
+//     (dashboard:pj:<wshash>:<agent>) so the conversation precisely
+//     continues the same key's sessionID-rotation chain. The hash is
+//     OWNED BY THE BACKEND (stableKey arg); the frontend only swaps the
+//     trailing agent segment for the selected agent — a plain string op
+//     that never touches the hash, so there is no sha256 to drift.
+//
+//   'new' — generate a fresh timestamp key (legacy path) so the user
+//     gets an independent parallel conversation in the same project.
+//
+// Falls back to a timestamp key when continue mode is requested but no
+// stableKey is available (feature disabled server-side, or a remote /
+// path-less project), preserving the pre-feature behaviour. Pure: no
+// side effects, unit-testable.
+function resolveSessionKey(mode, stableKey, projectOrFolder, agentID, timestamp) {
+  const agent = agentID && String(agentID).trim() ? sanitizeKeySlug(agentID) : 'general';
+  if (mode === 'continue' && stableKey) {
+    const parts = String(stableKey).split(':');
+    // Expect dashboard:pj:<hash>:<agent>. Swap parts[3] for the selected
+    // agent; if the shape is unexpected, fall through to a timestamp key
+    // rather than emit a malformed key.
+    if (parts.length === 4 && parts[0] === 'dashboard' && parts[1] === 'pj' && parts[2]) {
+      return 'dashboard:pj:' + parts[2] + ':' + agent;
+    }
+  }
+  return buildDashboardSessionKey(timestamp, projectOrFolder, agent);
+}
+
 // keyTailDisplay returns the most informative human-readable fallback for a
 // session key's trailing display label. Historically dashboard.js used
 // `parts[parts.length - 1]` directly, which made sense when the last segment
@@ -5897,7 +5928,9 @@ function pickPaletteQuick() {
   const node = selectedNode || 'local';
   const workspace = node === 'local' ? (defaultWorkspace || '') : '';
   const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'quick') : 'quick';
-  doCreateInProject(workspace, folderName, node);
+  // Quick sessions are intentionally one-off (RFC §4.4): always a fresh
+  // timestamp key, never a project-stable continuation.
+  doCreateInProject(workspace, folderName, node, undefined, undefined, { mode: 'new' });
 }
 
 function buildCustomRow(query, idx) {
@@ -5963,7 +5996,11 @@ function handlePaletteKey(e, state, input) {
 function pickPaletteProject(p) {
   const backend = getSelectedBackend();
   const agent = getSelectedAgent();
-  doCreateInProject(p.path, p.name, p.node || 'local', backend, agent);
+  // Default project open = continue the project-stable conversation. p.stableKey
+  // is supplied by /api/projects when the feature is enabled (empty otherwise,
+  // in which case resolveSessionKey falls back to a timestamp key).
+  doCreateInProject(p.path, p.name, p.node || 'local', backend, agent,
+    { mode: 'continue', stableKey: p.stableKey || '' });
 }
 
 function pickPaletteCustom(initialValue) {
@@ -6017,22 +6054,28 @@ function pickPaletteCustom(initialValue) {
   }, 50);
 }
 
-function doCreateInProject(projectPath, projectName, nodeId, backend, agent) {
+function doCreateInProject(projectPath, projectName, nodeId, backend, agent, opts) {
   // Read the backend/agent from the still-mounted overlay BEFORE removing it,
   // so callers that omit the explicit argument still get the user's pick.
   if (backend === undefined) backend = getSelectedBackend();
   if (agent === undefined) agent = getSelectedAgent();
+  // opts: { mode: 'continue' | 'new', stableKey: string }. Default 'continue'
+  // so a plain project click resumes the project-stable conversation
+  // (RFC docs/rfc/project-stable-session-key.md §4.4). The "+ 新会话" entry
+  // passes mode:'new' for an independent parallel session.
+  opts = opts || {};
+  const mode = opts.mode || 'continue';
+  const stableKey = opts.stableKey || '';
   const overlay = document.querySelector('.modal-overlay, .cmd-palette-overlay');
   if (overlay) overlay.remove();
   sessionCounter++;
   const now = new Date();
   const ts = now.toISOString().slice(0,10) + '-' +
     now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
-  // R110-P3 key schema: 4 segments (platform:chatType:chatID:agentID).
-  // Merges ts + projectName into the chatID segment so parts[3] is the
-  // agentID (buildSessionOpts reads parts[3]). See buildDashboardSessionKey
-  // godoc for the contract.
-  const key = buildDashboardSessionKey(ts, projectName, agent);
+  // Continue → backend-provided stable key (precise continuation); new →
+  // fresh timestamp key (independent parallel session). resolveSessionKey
+  // also falls back to a timestamp key when no stableKey is available.
+  const key = resolveSessionKey(mode, stableKey, projectName, agent, ts);
 
   sessionWorkspaces[key] = projectPath;
   if (nodeId && nodeId !== 'local') sessionNodes[key] = nodeId;

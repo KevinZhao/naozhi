@@ -37,6 +37,24 @@ const (
 	ProjectKeyPrefix = "project:"
 )
 
+// DashboardPlatform is the platform segment (parts[0]) of dashboard-
+// originated session keys. Used together with DashboardProjectChatType
+// to identify project-stable keys without confusing them with the
+// planner namespace (whose platform segment is "project").
+const DashboardPlatform = "dashboard"
+
+// DashboardProjectChatType is the chatType segment (parts[1]) of a
+// project-level stable dashboard session key. The canonical shape is
+// `dashboard:pj:<workspace-hash>:<agent>` (see internal/session.ProjectStableKey).
+//
+// Deliberately "pj" rather than "project": the planner namespace already
+// uses ProjectKeyPrefix ("project:") with the platform segment equal to
+// "project". A chatType of "project" here would invite a future
+// `parts[1]=="project"` check to misclassify a dashboard stable key as a
+// planner key. "pj" shares no token with the planner namespace, so the
+// two stay unambiguous at both the platform and chatType segments.
+const DashboardProjectChatType = "pj"
+
 // PlannerKeySuffix is the trailing token that distinguishes a planner
 // key from any future `project:{name}:<role>` sub-roles. Today every
 // `project:` key is a planner key, but the constant exists so adding
@@ -66,6 +84,26 @@ func IsSysKey(s string) bool { return strings.HasPrefix(s, SysKeyPrefix) }
 
 // IsScratchKey reports whether s belongs to the dashboard scratch namespace.
 func IsScratchKey(s string) bool { return strings.HasPrefix(s, ScratchKeyPrefix) }
+
+// IsDashboardProjectKey reports whether key is a project-level stable
+// dashboard session key: platform segment (parts[0]) == "dashboard" AND
+// chatType segment (parts[1]) == "pj". Pure string scan, no allocation —
+// keeps the sessionkey leaf package zero-dependency.
+//
+// A key has the shape `{platform}:{chatType}:{id}:{agent}`. We only need
+// the first two segments, so we scan for the second colon rather than
+// splitting the whole key. Returns false for any key with fewer than the
+// `dashboard:pj:` prefix, including the planner namespace (`project:...`,
+// platform != "dashboard") and scratch/cron/sys keys.
+func IsDashboardProjectKey(key string) bool {
+	const prefix = DashboardPlatform + ":" + DashboardProjectChatType + ":"
+	if !strings.HasPrefix(key, prefix) {
+		return false
+	}
+	// Require a non-empty id segment after the prefix so a bare
+	// "dashboard:pj:" (missing workspace hash) is not accepted.
+	return len(key) > len(prefix)
+}
 
 // CronJobIDFromKey returns the trailing job ID of a cron key, or the empty
 // string when s is not a cron key. Convenience for the common pattern

@@ -82,17 +82,10 @@ type cronRouterAdapter struct{ r *session.Router }
 // previously living on *session.Router migrated here.
 var _ cron.SessionRouter = cronRouterAdapter{}
 
-// Compile-time guard: *cron.Scheduler must satisfy
-// session.SessionIDExcluder. R20260527122801-ARCH-1 (#1318): the guard
-// previously lived in internal/cron/scheduler_session.go, which forced
-// cron→session import — the last reverse import in production code
-// (RFC cron-sysession-merge Phase B). Moving it here both pins the
-// contract and lets cron drop its session import. The guard is
-// conceptually wired by deps.Router.AddSessionIDExcluder(scheduler) in
-// internal/wireup/schedulers.go; without this var _ assert that call
-// site would still catch a method-set drift, but the failure would
-// surface in wireup instead of co-located with both types.
-var _ session.SessionIDExcluder = (*cron.Scheduler)(nil)
+// (The session.SessionIDExcluder compile-time guard was removed with the
+// auto-workspace-chain feature — RFC docs/rfc/project-stable-session-key.md
+// §9.1. cron's IsExcluded survives for the history-panel filter but is no
+// longer wired into a session-package interface.)
 
 // Compile-time guard: cronSessionAdapter must satisfy cron.Session
 // (Send + SessionID + InterruptViaControl). Catches drift if the

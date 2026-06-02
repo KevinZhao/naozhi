@@ -164,6 +164,7 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_auto_chain_backfill_skipped_already_filled_total` | Phase 3 lock 下发现 prev 已被并发路径填了 | 稳态 0；非零 = 与 cron stub 注册路径同时启动 |
 | `naozhi_auto_chain_toctou_collision_total` | 两次 lock 间隙发现冲突丢弃的 sessionID 累计数（spawn + backfill 合计） | 稳态接近 0；持续涨 = cron / sys session 注册节奏与 spawn 高度并发 |
 | `naozhi_auto_chain_origins_length_mismatch_total` | `prev_session_origins` 与 `prev_session_ids` 长度漂移检测命中（自动兜底重建） | **必须稳态 0**；非零 = 某写路径违反 prev_session_ids append-only 不变量（RFC §4.6） |
+| `naozhi_auto_chain_retired_on_startup_total` | 启动时一次性剥离 auto-spawn / auto-backfill 脏 chain 段的 session 数（RFC docs/rfc/project-stable-session-key.md §9.2，替代旧 backfill） | 首次升级到本版本后会一次性上涨（清理历史脏数据）；之后**稳态 0**，重启幂等不再涨。持续非零 = 仍有路径写入 auto-* origin（不应发生，auto-chain 已下线） |
 
 这个表的"完整性"由 `internal/metrics/metrics_doc_sync_test.go` 锁定：metrics.go 新增 counter 但未同步文档会在 CI 红。
 

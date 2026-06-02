@@ -94,12 +94,17 @@ func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubj
 	cur, ok := s.jobs[jobID]
 	paused := ok && cur.Paused
 	s.mu.RUnlock()
+	// R243-ARCH-13 (#841): bind the {subject, job_id} label pair once via
+	// slog.With instead of re-listing the same two keys at every skip-log
+	// site. Keeps the dispatch gate's two Debug lines from drifting their
+	// label set apart.
+	lg := slog.With("subject", logSubject, "job_id", jobID)
 	if !ok {
-		slog.Debug("job deleted before execute, skipping", "subject", logSubject, "job_id", jobID)
+		lg.Debug("job deleted before execute, skipping")
 		return
 	}
 	if paused {
-		slog.Debug("job paused concurrently, skipping", "subject", logSubject, "job_id", jobID)
+		lg.Debug("job paused concurrently, skipping")
 		return
 	}
 	s.executeOpt(cur, viaTriggerNow)
@@ -494,6 +499,47 @@ type preflightArgs struct {
 	finalizer *runFinalizer
 }
 
+// stubRefresher carries the snap-time chain anchor (jobID + workDir + prompt
+// + lastSessionID) that the error-path sidebar re-registration needs.
+// R249-ARCH-25 (#989): freshContextPreflightP0 previously returned a bare
+// `func()` closure that implicitly captured `snap`; the closure's lifetime
+// and exactly which snap fields it pinned were invisible at the call site.
+// Promoting it to a typed value with an explicit field set makes the captured
+// state auditable (the four fields below are the entire dependency surface)
+// and the zero value is a safe no-op — run() short-circuits when active is
+// false, so the persistent-mode / early-bail paths need no special-casing.
+//
+// Unlike the R232-CR-7 single-field preflightResult wrapper that was removed,
+// this struct carries the operation's actual value payload (not a lone func
+// field), so it does not reintroduce that anti-pattern.
+type stubRefresher struct {
+	s             *Scheduler
+	jobID         string
+	workDir       string
+	prompt        string
+	lastSessionID string
+	active        bool
+}
+
+// run re-registers the sidebar stub for the snapshotted job iff it still
+// exists. The zero value (active=false) is an intentional no-op so callers
+// invoke run() uniformly after both success-short-circuit and failure
+// branches. stillExists is re-checked under s.mu because the failure callback
+// may fire seconds after preflight returned, by which point DeleteJob could
+// have removed the job — re-registering a stub for a deleted job would leak a
+// phantom sidebar row. See the lock-pair contract at freshContextPreflightP0.
+func (r stubRefresher) run() {
+	if !r.active {
+		return
+	}
+	r.s.mu.RLock()
+	_, exists := r.s.jobs[r.jobID]
+	r.s.mu.RUnlock()
+	if exists {
+		r.s.registerStubByValue(r.jobID, r.workDir, r.prompt, r.lastSessionID)
+	}
+}
+
 // freshContextPreflightP0 handles the fresh-mode prologue: ctx-cancel guard
 // (CRON3), work-dir reachability check (CRON2), Reset, and the post-Reset
 // existence re-check that prevents a leaked CLI process tied to a deleted
@@ -514,10 +560,10 @@ type preflightArgs struct {
 //
 // R232-CR-7：原 preflightResult{stubRefresh: ...} 单字段 wrapper struct
 // 已删除，直接返回二元组。
-func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh func(), ok bool) {
+func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stubRefresher, ok bool) {
 	snap := args.snap
 	lg := args.lg
-	noopRefresh := func() {}
+	noopRefresh := stubRefresher{} // active=false → run() is a no-op
 	if !snap.fresh {
 		return noopRefresh, true
 	}
@@ -596,13 +642,13 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 	// 两次读独立、各自的 RLock 持锁窗口短小，且(a)只在(b)成功后才有机会
 	// 触发，所以"重复读 snap.jobID"是设计意图而非 bug。Reviewer 看到第二
 	// 次 RLock 时不要"合并优化"——会让(a)失去独立的 stillExists 检查。
-	refresh := func() {
-		s.mu.RLock()
-		_, exists := s.jobs[snap.jobID]
-		s.mu.RUnlock()
-		if exists {
-			s.registerStubByValue(snap.jobID, snap.workDir, snap.prompt, snap.lastSessionID)
-		}
+	refresh := stubRefresher{
+		s:             s,
+		jobID:         snap.jobID,
+		workDir:       snap.workDir,
+		prompt:        snap.prompt,
+		lastSessionID: snap.lastSessionID,
+		active:        true,
 	}
 	// (b) post-Reset 存在性检查 — 见上文 lock-pair contract。
 	s.mu.RLock()
@@ -1137,24 +1183,25 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		curCAS, stillRegisteredCAS := s.jobs[j.ID]
 		pausedCAS := stillRegisteredCAS && curCAS.Paused
 		s.mu.RUnlock()
-		if !stillRegisteredCAS {
-			slog.Debug("cron: job deleted between dispatch lookup and CAS, aborting run",
-				"job_id", j.ID, "trigger_now", viaTriggerNow)
-			// R040034-CR-1 (#1410): emit synthetic started→ended pair so
-			// dashboard subscribers see a complete lifecycle frame instead
-			// of a 1-2µs gap when Delete lands in the cross-lock window.
-			// Mirrors the router-missing precedent at the top of
-			// executeOpt and the overlap-skipped emit on CAS-lost.
-			s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassDeletedConcurrent, "job deleted between dispatch and CAS", "deleted-during-dispatch")
-			return
-		}
-		if pausedCAS {
-			slog.Debug("cron: job paused between dispatch lookup and CAS, aborting run",
-				"job_id", j.ID, "trigger_now", viaTriggerNow)
-			// R040034-CR-1 (#1410): see DeletedConcurrent above. Pause
-			// landing in the cross-lock window also gets a synthetic pair
-			// so the dashboard "running" counter stays consistent.
-			s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassPausedConcurrent, "job paused between dispatch and CAS", "paused-during-dispatch")
+		if !stillRegisteredCAS || pausedCAS {
+			// R243-ARCH-13 (#841): both cross-lock abort branches log the
+			// same {job_id, trigger_now} pair; bind it once via slog.With.
+			casLg := slog.With("job_id", j.ID, "trigger_now", viaTriggerNow)
+			if !stillRegisteredCAS {
+				casLg.Debug("cron: job deleted between dispatch lookup and CAS, aborting run")
+				// R040034-CR-1 (#1410): emit synthetic started→ended pair so
+				// dashboard subscribers see a complete lifecycle frame instead
+				// of a 1-2µs gap when Delete lands in the cross-lock window.
+				// Mirrors the router-missing precedent at the top of
+				// executeOpt and the overlap-skipped emit on CAS-lost.
+				s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassDeletedConcurrent, "job deleted between dispatch and CAS", "deleted-during-dispatch")
+			} else {
+				casLg.Debug("cron: job paused between dispatch lookup and CAS, aborting run")
+				// R040034-CR-1 (#1410): see DeletedConcurrent above. Pause
+				// landing in the cross-lock window also gets a synthetic pair
+				// so the dashboard "running" counter stays consistent.
+				s.emitSyntheticSkipped(j, viaTriggerNow, ErrClassPausedConcurrent, "job paused between dispatch and CAS", "paused-during-dispatch")
+			}
 			return
 		}
 	}
@@ -1326,7 +1373,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		finalizer: finalizer,
 	})
 	if !ok {
-		stubRefresh()
+		stubRefresh.run()
 		return
 	}
 
@@ -1356,7 +1403,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 				prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 				finalizer: finalizer,
 			})
-			stubRefresh()
+			stubRefresh.run()
 			return
 		}
 		state, errClass := classifyExecError(err, ErrClassSessionError)
@@ -1372,7 +1419,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			finalizer: finalizer,
 		})
 		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行跳过，请稍后重试。"))
-		stubRefresh()
+		stubRefresh.run()
 		return
 	}
 	// R250-GO-15 (#1078): GetOrCreate consumed spawnCtx; nothing below references
@@ -1506,7 +1553,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 				prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 				finalizer: finalizer,
 			})
-			stubRefresh()
+			stubRefresh.run()
 			return
 		}
 		state, errClass := classifyExecError(err, ErrClassSendError)
@@ -1546,7 +1593,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			finalizer: finalizer,
 		})
 		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行失败，请稍后重试。"))
-		stubRefresh()
+		stubRefresh.run()
 		return
 	}
 	if result.SessionID != "" {
