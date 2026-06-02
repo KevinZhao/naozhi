@@ -50,9 +50,14 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 		},
 		{
 			// R243-ARCH-2 split: handleAuth lives in wshub_upgrade.go.
-			name:    "WSAuthFailTotal fires on both WS auth_fail branches",
+			// R237-ARCH-5 (#582): the server layer no longer reaches into the
+			// metrics globals directly — it increments through the
+			// serverMetricsObserver seam (serverMetrics.WSAuthFail()), whose
+			// expvar default forwards to WSAuthFailTotal in metrics_observer.go.
+			// Pin the seam call site in the branch, not the raw global.
+			name:    "WSAuthFail fires on both WS auth_fail branches",
 			path:    "../server/wshub_upgrade.go",
-			pattern: `metrics\.WSAuthFailTotal\.Add\(1\)`,
+			pattern: `serverMetrics\.WSAuthFail\(\)`,
 		},
 		{
 			name:    "ShimRestartTotal fires at end of StartShimWithBackend",
@@ -117,14 +122,25 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			// the split (a regression).
 			//
 			// R243-ARCH-2 split: handleAuth lives in wshub_upgrade.go.
-			name:    "WSAuthFailRateLimitedTotal fires in rate-limit arm",
+			// R237-ARCH-5 (#582): incremented through the serverMetrics seam.
+			name:    "WSAuthFailRateLimited fires in rate-limit arm",
 			path:    "../server/wshub_upgrade.go",
-			pattern: `metrics\.WSAuthFailRateLimitedTotal\.Add\(1\)`,
+			pattern: `serverMetrics\.WSAuthFailRateLimited\(\)`,
 		},
 		{
-			name:    "WSAuthFailInvalidTokenTotal fires in invalid-token arm",
+			name:    "WSAuthFailInvalidToken fires in invalid-token arm",
 			path:    "../server/wshub_upgrade.go",
-			pattern: `metrics\.WSAuthFailInvalidTokenTotal\.Add\(1\)`,
+			pattern: `serverMetrics\.WSAuthFailInvalidToken\(\)`,
+		},
+		{
+			// R237-ARCH-5 (#582): the serverMetricsObserver default
+			// (expvarServerMetrics) is the single forwarding point from the
+			// seam back to the metrics expvar globals. If this forwarding is
+			// removed/renamed the seam silently stops feeding the real
+			// counters, so pin all four forwards in metrics_observer.go.
+			name:    "expvarServerMetrics forwards WSAuthFail to the metrics global",
+			path:    "../server/metrics_observer.go",
+			pattern: `metrics\.WSAuthFailTotal\.Add\(1\)`,
 		},
 		{
 			// R208-OBS1: CronExecutionSlowTotal increments inside
@@ -169,26 +185,35 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 // currently-wired set so a grep-curious reader can verify coverage. OBS1.
 func TestOBS1_PanicRecoveredWiredIntoTopSites(t *testing.T) {
 	t.Parallel()
-	expected := []string{
-		"../server/wsclient.go", // dashboard WS readPump
+	// R237-ARCH-5 (#582): the server-layer recover() sites now increment
+	// through the serverMetricsObserver seam (serverMetrics.PanicRecovered())
+	// rather than touching metrics.PanicRecoveredTotal directly, while the
+	// dispatch / platform sites still use the raw global (they are outside the
+	// server package's seam). Each expected file is paired with the pattern
+	// that file legitimately uses, so the quorum check survives the seam.
+	type site struct {
+		path    string
+		pattern string
+	}
+	expected := []site{
+		{"../server/wsclient.go", `serverMetrics\.PanicRecovered\(\)`}, // dashboard WS readPump
 		// R243-ARCH-2 split: remote WS interrupt + send goroutines moved
 		// from wshub.go to wshub_send.go alongside handleSend / handleInterrupt.
-		"../server/wshub_send.go",
-		"../dispatch/dispatch.go",      // ownerLoop (core IM turn loop)
-		"../platform/feishu/feishu.go", // cleanupNoncesTick (replay protection)
+		{"../server/wshub_send.go", `serverMetrics\.PanicRecovered\(\)`},
+		{"../dispatch/dispatch.go", `metrics\.PanicRecoveredTotal\.Add\(1\)`},      // ownerLoop (core IM turn loop)
+		{"../platform/feishu/feishu.go", `metrics\.PanicRecoveredTotal\.Add\(1\)`}, // cleanupNoncesTick (replay protection)
 	}
-	re := regexp.MustCompile(`metrics\.PanicRecoveredTotal\.Add\(1\)`)
 	hit := 0
 	var missing []string
-	for _, p := range expected {
-		data, err := os.ReadFile(p)
+	for _, s := range expected {
+		data, err := os.ReadFile(s.path)
 		if err != nil {
-			t.Fatalf("read %s: %v", p, err)
+			t.Fatalf("read %s: %v", s.path, err)
 		}
-		if re.Match(data) {
+		if regexp.MustCompile(s.pattern).Match(data) {
 			hit++
 		} else {
-			missing = append(missing, p)
+			missing = append(missing, s.path)
 		}
 	}
 	if hit < 3 {
@@ -237,10 +262,12 @@ func TestOBS2_WSAuthFailBothBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read wshub_upgrade.go: %v", err)
 	}
-	re := regexp.MustCompile(`metrics\.WSAuthFailTotal\.Add\(1\)`)
+	// R237-ARCH-5 (#582): both branches now increment through the
+	// serverMetrics seam rather than the raw global.
+	re := regexp.MustCompile(`serverMetrics\.WSAuthFail\(\)`)
 	matches := re.FindAll(data, -1)
 	if len(matches) < 2 {
-		t.Errorf("expected ≥2 WSAuthFailTotal.Add sites in wshub_upgrade.go (rate-limit + invalid-token), got %d",
+		t.Errorf("expected ≥2 serverMetrics.WSAuthFail() sites in wshub_upgrade.go (rate-limit + invalid-token), got %d",
 			len(matches))
 	}
 }
@@ -262,9 +289,12 @@ func TestOBS2_WSAuthFailNotInMainHub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read wshub.go: %v", err)
 	}
-	re := regexp.MustCompile(`metrics\.WSAuthFailTotal\.Add`)
+	// R237-ARCH-5 (#582): the seam call (serverMetrics.WSAuthFail()) must stay
+	// in wshub_upgrade.go; the underlying global forward lives in
+	// metrics_observer.go. Neither belongs in wshub.go.
+	re := regexp.MustCompile(`serverMetrics\.WSAuthFail\(\)|metrics\.WSAuthFailTotal\.Add`)
 	if re.Match(src) {
-		t.Error("metrics.WSAuthFailTotal.Add(...) found in wshub.go — after the " +
+		t.Error("WSAuthFail increment found in wshub.go — after the " +
 			"R243-ARCH-2 split, the auth-fail counter increments belong in " +
 			"wshub_upgrade.go (handleAuth's home). Moving them back into wshub.go " +
 			"silently undoes the god-object split. R248-TEST-7.")
