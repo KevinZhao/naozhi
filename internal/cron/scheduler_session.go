@@ -7,10 +7,6 @@
 
 package cron
 
-import (
-	"time"
-)
-
 // R20260527122801-ARCH-1 (#1318): The compile-time guard
 // `var _ session.SessionIDExcluder = (*Scheduler)(nil)` previously lived
 // here, which forced internal/cron to import internal/session — the
@@ -112,14 +108,10 @@ func (s *Scheduler) LookupKnownSessionID(sessionID string) bool {
 // KnownSessionIDs() caller still gets the complete history. R245-GO-4
 // (#844).
 func (s *Scheduler) containsSessionID(sessionID string) bool {
-	s.knownSessionsCache.mu.Lock()
-	if s.knownSessionsCache.set != nil &&
-		time.Since(s.knownSessionsCache.generatedAt) < knownSessionsCacheTTL {
-		_, ok := s.knownSessionsCache.set[sessionID]
-		s.knownSessionsCache.mu.Unlock()
-		return ok
+	if set, ok := s.knownSessionsCache.lookupFresh(); ok {
+		_, hit := set[sessionID]
+		return hit
 	}
-	s.knownSessionsCache.mu.Unlock()
 
 	// Cold cache: cheap fast path before the O(jobs × recentCap) build.
 	// Most spawn-time IsExcluded probes target the *just-written*
@@ -167,11 +159,7 @@ func (s *Scheduler) containsSessionID(sessionID string) bool {
 	// TTL cache so subsequent callers (KnownSessionIDs at 1Hz from the
 	// dashboard) reuse this work.
 	set := s.buildKnownSessionsSet()
-
-	s.knownSessionsCache.mu.Lock()
-	s.knownSessionsCache.set = set
-	s.knownSessionsCache.generatedAt = time.Now()
-	s.knownSessionsCache.mu.Unlock()
+	s.knownSessionsCache.publish(set)
 
 	_, ok := set[sessionID]
 	return ok
@@ -212,21 +200,12 @@ func (s *Scheduler) KnownSessionIDs() map[string]struct{} {
 		return map[string]struct{}{}
 	}
 
-	s.knownSessionsCache.mu.Lock()
-	if s.knownSessionsCache.set != nil &&
-		time.Since(s.knownSessionsCache.generatedAt) < knownSessionsCacheTTL {
-		cached := s.knownSessionsCache.set
-		s.knownSessionsCache.mu.Unlock()
-		return cached
+	if set, ok := s.knownSessionsCache.lookupFresh(); ok {
+		return set
 	}
-	s.knownSessionsCache.mu.Unlock()
 
 	set := s.buildKnownSessionsSet()
-
-	s.knownSessionsCache.mu.Lock()
-	s.knownSessionsCache.set = set
-	s.knownSessionsCache.generatedAt = time.Now()
-	s.knownSessionsCache.mu.Unlock()
+	s.knownSessionsCache.publish(set)
 
 	return set
 }
@@ -288,7 +267,5 @@ func (s *Scheduler) invalidateKnownSessionsCache() {
 	if s == nil {
 		return
 	}
-	s.knownSessionsCache.mu.Lock()
-	s.knownSessionsCache.set = nil
-	s.knownSessionsCache.mu.Unlock()
+	s.knownSessionsCache.invalidate()
 }

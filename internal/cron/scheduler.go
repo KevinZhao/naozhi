@@ -589,6 +589,43 @@ type knownSessionsCache struct {
 	set         map[string]struct{}
 }
 
+// lookupFresh returns the cached set when it is populated and still within
+// knownSessionsCacheTTL of generatedAt. ok is false on a cold or expired
+// cache. The returned map is the shared read-only snapshot (never mutated in
+// place — publish replaces it wholesale), so callers may hand it out directly.
+//
+// R249-CR-4 / R260528-ARCH-7 (#948 / #1368): the lock + TTL-check + read
+// triple was open-coded at containsSessionID + KnownSessionIDs; folding it
+// into a method on the cache type keeps the TTL gate in one place and lets the
+// cache own its own mutex instead of exposing c.mu to every Scheduler caller.
+func (c *knownSessionsCache) lookupFresh() (map[string]struct{}, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.set != nil && time.Since(c.generatedAt) < knownSessionsCacheTTL {
+		return c.set, true
+	}
+	return nil, false
+}
+
+// publish installs a freshly built set as the current snapshot and stamps
+// generatedAt to now. The set MUST NOT be mutated after publication — readers
+// from lookupFresh share it without copying.
+func (c *knownSessionsCache) publish(set map[string]struct{}) {
+	c.mu.Lock()
+	c.set = set
+	c.generatedAt = time.Now()
+	c.mu.Unlock()
+}
+
+// invalidate drops the snapshot so the next lookupFresh misses and forces a
+// rebuild. Cheap (one mutex + nil assign) so mutator paths call it
+// unconditionally.
+func (c *knownSessionsCache) invalidate() {
+	c.mu.Lock()
+	c.set = nil
+	c.mu.Unlock()
+}
+
 // knownSessionsCacheTTL bounds how stale a cached KnownSessionIDs
 // snapshot may be. 30s matches the godoc claim and is well below the
 // auto-workspace-chain spawn cadence (one spawn per user message);

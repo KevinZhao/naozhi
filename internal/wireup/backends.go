@@ -45,6 +45,10 @@ func RegisterCLIBackends() bool {
 	registerOnce.Do(func() {
 		backend.RegisterDefaults()
 		registered = true
+		recordBootStep("cli-backends", BootStep{
+			Kind:   "cli-backends",
+			Detail: "backend.RegisterDefaults (claude+kiro profiles)",
+		})
 	})
 	return registered
 }
