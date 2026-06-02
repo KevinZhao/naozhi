@@ -51,7 +51,45 @@ import (
 	"github.com/naozhi/naozhi/internal/attachment/tracker"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
+	"github.com/naozhi/naozhi/internal/history"
+	"github.com/naozhi/naozhi/internal/history/merged"
+	"github.com/naozhi/naozhi/internal/history/naozhilog"
 )
+
+// newEventLogLocalSource builds the naozhi-native, in-process event-log
+// history source for a session key. This is tier-1 of the history stack
+// and is NOT backend-specific: the naozhilog spool is written for every
+// backend (claude / kiro / future) via the eventlog persist sink above,
+// so the constructor lives here in the bridge — the single place the
+// naozhilog import edge is allowed — rather than scattered across
+// router_core.go (background loader) and router_lifecycle.go
+// (attachHistorySource). Consolidating the two call sites here is the
+// minimal step of R214-ARCH-3 / R215-ARCH-P1-5 (#403, #567): the generic
+// session layer no longer hand-builds backend history sources inline.
+func newEventLogLocalSource(eventLogDir, key string) *naozhilog.Source {
+	return naozhilog.New(eventLogDir, key)
+}
+
+// mergeWithEventLog composes the naozhi event-log local tier in front of
+// a backend-provided fallback source. When eventLogDir is empty the
+// event-log tier is opted out and the fallback is returned unchanged, so
+// callers get a single source without branching on eventLogDir at the
+// call site. fallback may be nil; the caller is responsible for replacing
+// a nil fallback with history.Noop before invoking when it wants the
+// "never nil" guarantee, but mergeWithEventLog itself tolerates nil by
+// substituting history.Noop so the merged source's read path stays safe.
+func mergeWithEventLog(eventLogDir, key string, fallback history.Source) history.Source {
+	if fallback == nil {
+		fallback = history.Noop{}
+	}
+	if eventLogDir == "" {
+		return fallback
+	}
+	return &merged.Source{
+		Local:    newEventLogLocalSource(eventLogDir, key),
+		Fallback: fallback,
+	}
+}
 
 // bridgeEncBuf pools a bytes.Buffer + json.Encoder pair so eventlog
 // bridge hot path (≥5 events/s × N sessions) avoids the encodeState

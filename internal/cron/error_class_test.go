@@ -43,6 +43,8 @@ func TestClassifyError_AllSentinels(t *testing.T) {
 		{"ErrJobNoPrompt", ErrJobNoPrompt, CodeJobNoPrompt, http.StatusUnprocessableEntity},
 		{"ErrPersistFailed", ErrPersistFailed, CodePersistFailed, http.StatusInternalServerError},
 		{"ErrInvalidPrompt", ErrInvalidPrompt, CodeInvalidPrompt, http.StatusBadRequest},
+		{"ErrPromptAlreadySet", ErrPromptAlreadySet, CodePromptAlreadySet, http.StatusConflict},
+		{"ErrSchedulerStopped", ErrSchedulerStopped, CodeSchedulerStopped, http.StatusServiceUnavailable},
 	}
 	for _, tc := range cases {
 		tc := tc

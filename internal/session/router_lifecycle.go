@@ -25,8 +25,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/history"
-	"github.com/naozhi/naozhi/internal/history/merged"
-	"github.com/naozhi/naozhi/internal/history/naozhilog"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
@@ -132,16 +130,13 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 		fallback = history.Noop{}
 	}
 
-	if r.eventLogDir == "" {
-		// Event log persistence opted out — old single-source behaviour.
-		s.SetHistorySource(fallback)
-		return
-	}
-
-	s.SetHistorySource(&merged.Source{
-		Local:    naozhilog.New(r.eventLogDir, s.key),
-		Fallback: fallback,
-	})
+	// mergeWithEventLog returns the fallback unchanged when r.eventLogDir
+	// is empty (event-log persistence opted out → old single-source
+	// behaviour) and otherwise composes the naozhi event-log local tier in
+	// front of it. The naozhilog/merged construction now lives in
+	// eventlog_bridge.go (#403, #567) so this generic path stays free of
+	// concrete history-backend imports.
+	s.SetHistorySource(mergeWithEventLog(r.eventLogDir, s.key, fallback))
 }
 
 // ResetChat resets all sessions belonging to a chat (all agents).
@@ -455,16 +450,29 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	args = append(args, opts.ExtraArgs...)
 
 	// Workspace: opts override > per-chat override > old session workspace > default.
-	workspace := r.workspace
+	//
+	// R245-ARCH-32 (#883): the per-chat-override > default base tier is
+	// resolved through resolveWorkspaceLocked — the single chat-level
+	// resolution point — instead of re-reading r.workspaceOverrides /
+	// r.workspace inline here. This kills the second source of truth that
+	// previously derived the same base independently and could drift from
+	// GetWorkspace. The opts and resume tiers still layer ON TOP of that
+	// base, matching the documented priority order above.
 	workspaceOverridden := false
+	var workspace string
 	if opts.Workspace != "" {
 		workspace = opts.Workspace
 		workspaceOverridden = true
 	} else if chatKey := chatKeyFor(key); chatKey != key {
-		if ws, ok := r.workspaceOverrides[chatKey]; ok {
-			workspace = ws
+		workspace = r.resolveWorkspaceLocked(chatKey)
+		// Only treat as "overridden" (pinning out the resume tier) when an
+		// explicit per-chat override actually exists; a bare default must
+		// still allow the resume-session workspace to win below.
+		if _, ok := r.workspaceOverrides[chatKey]; ok {
 			workspaceOverridden = true
 		}
+	} else {
+		workspace = r.workspace
 	}
 	if !workspaceOverridden && resumeID != "" {
 		if old := r.sessions[key]; old != nil {
