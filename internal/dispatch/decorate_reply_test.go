@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // fixedFooterCaps is a minimal Capabilities stub returning a constant
@@ -68,8 +68,8 @@ func TestDispatcher_DecorateReplyText_Components(t *testing.T) {
 // TestDispatcher_DecorateReplyText_RedactsSecrets covers R103901-CODE-1:
 // a Claude reply that echoes a plaintext credential must be scrubbed
 // before it reaches the IM channel, mirroring the cron notify path. The
-// expected output is asserted against cron.RedactSecrets so the dispatch
-// path stays bit-identical to the shared redactor.
+// expected output is asserted against textutil.RedactSecrets so the dispatch
+// path stays bit-identical to the shared redactor (#1571).
 func TestDispatcher_DecorateReplyText_RedactsSecrets(t *testing.T) {
 	d := &Dispatcher{caps: NoopCapabilities{}}
 
@@ -94,8 +94,8 @@ func TestDispatcher_DecorateReplyText_RedactsSecrets(t *testing.T) {
 			// NoopCapabilities adds no footer, so the dispatch output must
 			// match the shared redactor exactly (localizeAPIError is a
 			// no-op on non-error text).
-			if want := cron.RedactSecrets(raw); got != want {
-				t.Errorf("dispatch redaction diverged from cron.RedactSecrets:\n got=%q\nwant=%q", got, want)
+			if want := textutil.RedactSecrets(raw); got != want {
+				t.Errorf("dispatch redaction diverged from textutil.RedactSecrets:\n got=%q\nwant=%q", got, want)
 			}
 		})
 	}
