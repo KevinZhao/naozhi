@@ -650,7 +650,8 @@ func TestRouter_Resolver_Singleton(t *testing.T) {
 			t.Errorf("Router.Resolver() = %p, want %p (singleton identity)", got, shared)
 		}
 		// Calling twice returns the same pointer — hot path readers cache nothing.
-		if r.Resolver() != r.Resolver() {
+		got1, got2 := r.Resolver(), r.Resolver()
+		if got1 != got2 {
 			t.Error("Router.Resolver() returned different instances on repeated calls")
 		}
 	})
