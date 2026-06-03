@@ -1,9 +1,12 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 )
 
@@ -144,6 +147,44 @@ func TestRouter_ShimStuckFlagClearedOnTerminalRemoval(t *testing.T) {
 
 	if _, found := r.shimStuckOnReset[key]; found {
 		t.Error("shimStuckOnReset[key] must be deleted on terminal removal (keepBackendOverride=false)")
+	}
+}
+
+// TestWarnShimStuckReuse_EmitsOnStuck pins the #1702 fix: when the success
+// path of ResetAndRecreate consumes a set stuck flag (spawnSession reused an
+// alive session via the TOCTOU guard and returned err==nil), the stuck
+// diagnostic must NOT be silently dropped — it must surface as a Warn so
+// operators still learn the shim socket was bound after the gone-wait.
+func TestWarnShimStuckReuse_EmitsOnStuck(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	const key = "feishu:direct:stuck-reuse:general"
+	warnShimStuckReuse(true, key)
+
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("expected a WARN record on the stuck-reuse path, got: %q", out)
+	}
+	if !strings.Contains(out, key) {
+		t.Errorf("warn must include the session key for operator triage, got: %q", out)
+	}
+}
+
+// TestWarnShimStuckReuse_SilentWhenNotStuck confirms the normal success path
+// (flag not set) emits nothing — we must not spam a warn on every reset.
+func TestWarnShimStuckReuse_SilentWhenNotStuck(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(prev)
+
+	warnShimStuckReuse(false, "feishu:direct:clean:general")
+
+	if out := buf.String(); out != "" {
+		t.Errorf("non-stuck success path must not emit any log, got: %q", out)
 	}
 }
 
