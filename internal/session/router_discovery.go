@@ -454,11 +454,11 @@ func (r *Router) RegisterSystemStub(key, workspace, lastPrompt string) {
 // 并重挂 historySource，保证 cron 每次执行完 recordResult 后侧边栏立刻
 // 能查到最新一次的 JSONL（而不是等下次重启）。
 //
-// prevSessionIDs 的所有历史写路径（spawnSession / RenameSession / 本函数
-// new 分支）都在 r.mu 下做，读路径同样在 r.mu 下。managed.go:SnapshotChainIDs
-// 虽然用 historyMu.RLock，但因为写者不拿 historyMu，historyMu 对该字段
-// 而言并不构成真正的同步——真正的 invariant 是"r.mu 写/r.mu 读"。因此
-// chain 刷新直接在 r.mu 临界区内做，与其它写路径一致，不引入混合锁协议；
+// prevSessionIDs 写路径统一走 ReplacePrevSessionIDs（持 historyMu.Lock），
+// 与 SnapshotChainIDs（historyMu.RLock）形成真正的同步。r.mu → historyMu
+// 是已记录的合法锁序（store.go / router_lifecycle.go §Lock release 2 注释）；
+// ReplacePrevSessionIDs 内部只做 slices.Clone + 赋值，不取其他锁，
+// 故不存在 eventLog.mu 三层嵌套风险。
 // attachHistorySource 只读 r 的不可变字段 + 写 s 的 atomic.Pointer，同样
 // 安全可以在 r.mu 下调。
 func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []string) {
@@ -476,7 +476,7 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 				changed = true
 			}
 			if len(chainIDs) > 0 && !slices.Equal(existing.prevSessionIDs, chainIDs) {
-				existing.prevSessionIDs = slices.Clone(chainIDs)
+				existing.ReplacePrevSessionIDs(chainIDs)
 				// workspace 变了 historySource 里也要刷（cwd 变化会导致
 				// projDirName 命中不同的 claude 项目目录）；一并重装最省心。
 				r.attachHistorySource(existing)
