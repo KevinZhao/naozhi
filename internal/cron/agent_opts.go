@@ -36,10 +36,12 @@ type AgentOpts struct {
 // SessionStatus mirrors session.SessionStatus value-for-value. The
 // adapter does cron.SessionStatus(int(session.SessionStatus)); we rely
 // on the iota order matching. session.SessionStatus has three values
-// (Existing / Resumed / New) — the adapter does not panic-pin these
-// because cron does not branch on the value (it only forwards to
-// callers that may compare). If session ever reorders, the only
-// observable break is misreporting in tests.
+// (Existing / Resumed / New). These ordinals ARE panic-pinned at boot
+// by cmd/naozhi/cron_router_adapter.go init() (R260528-GO-18), which
+// asserts cron.SessionExisting/Resumed/New equal their session.*
+// counterparts and panics on divergence — production inflight
+// broadcasts key off the value, so a silent reorder is not safe.
+// Do not drop that pin believing only tests would break.
 type SessionStatus int
 
 const (

@@ -117,3 +117,61 @@ func TestRouter_ShimStuckFlagPerKey(t *testing.T) {
 		t.Error("stuckKey flag must remain after GetOrCreate(cleanKey)")
 	}
 }
+
+// TestRouter_ShimStuckFlagClearedOnTerminalRemoval verifies R090031-CR-5:
+// unregisterSessionLocked with keepBackendOverride=false (terminal removal path)
+// must delete shimStuckOnReset[key] so permanently-deleted sessions do not
+// accumulate stale map entries for the lifetime of the process.
+func TestRouter_ShimStuckFlagClearedOnTerminalRemoval(t *testing.T) {
+	t.Parallel()
+	const key = "dead:session:key"
+	r := &Router{
+		sessions:           make(map[string]*ManagedSession),
+		spawningKeys:       make(map[string]chan struct{}),
+		shimStuckOnReset:   make(map[string]bool),
+		workspaceOverrides: make(map[string]string),
+		backendOverrides:   make(map[string]string),
+		knownIDs:           make(map[string]bool),
+		sessionIDToKey:     make(map[string]string),
+	}
+	s := &ManagedSession{key: key}
+	r.sessions[key] = s
+	r.shimStuckOnReset[key] = true
+
+	r.mu.Lock()
+	r.unregisterSessionLocked(key, s, false)
+	r.mu.Unlock()
+
+	if _, found := r.shimStuckOnReset[key]; found {
+		t.Error("shimStuckOnReset[key] must be deleted on terminal removal (keepBackendOverride=false)")
+	}
+}
+
+// TestRouter_ShimStuckFlagPreservedOnKeepOverride verifies that
+// unregisterSessionLocked with keepBackendOverride=true (ResetAndRecreate /
+// Takeover path) does NOT delete shimStuckOnReset[key] — the key is being
+// recycled so the stuck flag must survive to be consumed by the next spawn.
+func TestRouter_ShimStuckFlagPreservedOnKeepOverride(t *testing.T) {
+	t.Parallel()
+	const key = "recycled:session:key"
+	r := &Router{
+		sessions:           make(map[string]*ManagedSession),
+		spawningKeys:       make(map[string]chan struct{}),
+		shimStuckOnReset:   make(map[string]bool),
+		workspaceOverrides: make(map[string]string),
+		backendOverrides:   make(map[string]string),
+		knownIDs:           make(map[string]bool),
+		sessionIDToKey:     make(map[string]string),
+	}
+	s := &ManagedSession{key: key}
+	r.sessions[key] = s
+	r.shimStuckOnReset[key] = true
+
+	r.mu.Lock()
+	r.unregisterSessionLocked(key, s, true)
+	r.mu.Unlock()
+
+	if !r.shimStuckOnReset[key] {
+		t.Error("shimStuckOnReset[key] must survive unregisterSessionLocked with keepBackendOverride=true")
+	}
+}

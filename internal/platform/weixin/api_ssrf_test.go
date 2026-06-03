@@ -132,4 +132,74 @@ func TestNewAPIClient_GuardGatedByLoopback(t *testing.T) {
 	if dc := dialContextOf(loop); dc != nil {
 		t.Error("loopback dev-mock client must NOT have a DialContext (default dialer)")
 	}
+
+}
+// R090031-GO-1: ssrfDialGuard must forward an IP literal (not the original
+// hostname) to the base dialer, eliminating the DNS-rebinding TOCTOU window.
+func TestSSRFDialGuard_ForwardsIPNotHostname(t *testing.T) {
+	t.Parallel()
+	var gotAddr string
+	base := func(_ context.Context, network, addr string) (net.Conn, error) {
+		gotAddr = addr
+		return nil, nil
+	}
+	publicIP := net.ParseIP("203.0.113.55")
+	guarded := ssrfDialGuardWithResolver(base, func(_ context.Context, _ string, _ string) ([]net.IP, error) {
+		return []net.IP{publicIP}, nil
+	})
+	if _, err := guarded(context.Background(), "tcp", "example.com:443"); err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if gotAddr == "example.com:443" {
+		t.Error("base dialer received original hostname — DNS-rebinding TOCTOU not fixed")
+	}
+	if gotAddr != "203.0.113.55:443" {
+		t.Errorf("base dialer addr = %q, want 203.0.113.55:443", gotAddr)
+	}
+}
+
+// TestSSRFDialGuard_RebindScenario verifies that the addr passed to base is
+// the already-validated IP literal, not a hostname subject to re-resolution.
+func TestSSRFDialGuard_RebindScenario(t *testing.T) {
+	t.Parallel()
+	var dialedAddr string
+	base := func(_ context.Context, _, addr string) (net.Conn, error) {
+		dialedAddr = addr
+		return nil, nil
+	}
+	publicIP := net.ParseIP("8.8.8.8")
+	guarded := ssrfDialGuardWithResolver(base, func(_ context.Context, _ string, _ string) ([]net.IP, error) {
+		return []net.IP{publicIP}, nil
+	})
+	if _, err := guarded(context.Background(), "tcp", "rebind-victim.example.com:80"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dialedAddr != "8.8.8.8:80" {
+		t.Errorf("base received %q instead of validated IP 8.8.8.8:80", dialedAddr)
+	}
+}
+
+// TestSSRFDialGuard_AllIPsRejected checks that when every resolved IP is
+// internal the guard returns a non-nil error and never calls base.
+func TestSSRFDialGuard_AllIPsRejected(t *testing.T) {
+	t.Parallel()
+	var baseCalled bool
+	base := func(_ context.Context, _, _ string) (net.Conn, error) {
+		baseCalled = true
+		return nil, nil
+	}
+	internalIP := net.ParseIP("169.254.169.254")
+	guarded := ssrfDialGuardWithResolver(base, func(_ context.Context, _ string, _ string) ([]net.IP, error) {
+		return []net.IP{internalIP}, nil
+	})
+	_, err := guarded(context.Background(), "tcp", "evil-rebind.example.com:80")
+	if err == nil {
+		t.Fatal("expected SSRF error for all-internal IPs")
+	}
+	if baseCalled {
+		t.Error("base must not be called when all IPs are internal")
+	}
+	if !strings.Contains(err.Error(), "SSRF") {
+		t.Errorf("error should mention SSRF, got %q", err)
+	}
 }
