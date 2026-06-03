@@ -207,6 +207,10 @@ var deniedExtraFlags = map[string]struct{}{
 	"--disallowed-tools":             {}, // permission allowlist override
 	"--permission-mode":              {}, // SpawnOptions.PermissionMode owns this
 	"--permission-prompt-tool":       {}, // permission gate plumbing
+	"--output-format":                {}, // BuildArgs pins stream-json; operator override breaks the NDJSON parser
+	"--input-format":                 {}, // same protocol-framing concern
+	"--verbose":                      {}, // stream-json verbosity is BuildArgs-controlled
+	"--replay-user-messages":         {}, // protocol replay flag owned by BuildArgs
 }
 
 // filterDeniedFlags returns extra with any deniedExtraFlags occurrences (and
