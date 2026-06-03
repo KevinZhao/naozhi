@@ -1273,6 +1273,15 @@ func (s *Scheduler) StartedAt() time.Time {
 //     via the same started/stopped CAS guards.
 func (s *Scheduler) StartContext(ctx context.Context) error {
 	if ctx != nil {
+		// R20260603150052-CR-1: guard against duplicate watcher goroutines on
+		// repeat StartContext calls. Start() is idempotent (CAS), so a second
+		// call after started=true is a no-op return-nil — but without this
+		// guard we would still spawn an extra watcher goroutine each time.
+		// Short-circuit here: if already started, delegate directly to Start()
+		// (which returns nil immediately) without spawning another goroutine.
+		if s.started.Load() {
+			return s.Start()
+		}
 		// Mirror ParentCtx's "cancel propagates into stopCtx" contract
 		// without re-parenting stopCtx (which is created eagerly in
 		// NewScheduler). A lightweight watcher cancels stopCtx when ctx
