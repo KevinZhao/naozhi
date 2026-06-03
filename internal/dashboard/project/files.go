@@ -221,6 +221,27 @@ func isPublicTmpDeniedName(resolved string) bool {
 	return false
 }
 
+// isPublicTmpIrregularType reports whether the file is a non-regular type
+// (Unix socket, named pipe/FIFO, or device node) that must never be served
+// through the __public_tmp__ pseudo-project. R090031-SEC-7 (#1688): the
+// name-based deny-list (isPublicTmpDeniedName) and the foreign-private mode
+// gate (isPublicTmpForeignPrivate) both miss a world-readable Unix socket
+// whose name doesn't match any deny-list entry (e.g. a custom-named agent
+// IPC socket or a non-standard postgres/redis socket alias). Such a file
+// would pass both gates. Linux DAC checks the naozhi *process*, so its UID
+// can read()/connect() those endpoints transparently; reflecting their bytes
+// through the dashboard discloses IPC payload (auth state, query traffic).
+// Device nodes and FIFOs are likewise never legitimate dashboard content and
+// reading them can block or leak kernel/process state. This is a
+// defence-in-depth type check independent of name and permission bits.
+//
+// The mode is read from the FileInfo we already Lstat'd, so this is a
+// zero-syscall check on the hot path.
+func isPublicTmpIrregularType(info os.FileInfo) bool {
+	const irregular = os.ModeSocket | os.ModeNamedPipe | os.ModeDevice | os.ModeCharDevice
+	return info.Mode()&irregular != 0
+}
+
 // textMimePrefixes identifies MIME types safe to return as UTF-8 text in
 // preview mode. http.DetectContentType tags source code as "text/plain" which
 // covers most cases; JSON/YAML/XML/JS are also safe even when the detector
@@ -719,7 +740,11 @@ func (h *Handlers) HandleFilesExists(w http.ResponseWriter, r *http.Request) {
 				// when their mode bits are world-readable.
 				if isPublicTmpDeniedName(abs) {
 					entry = existsEntry{Exists: false}
-				} else if info, lerr := os.Lstat(abs); lerr == nil && isPublicTmpForeignPrivate(info) {
+				} else if info, lerr := os.Lstat(abs); lerr == nil &&
+					(isPublicTmpForeignPrivate(info) || isPublicTmpIrregularType(info)) {
+					// R090031-SEC-7 (#1688): existence-probe parity with
+					// HandleFileGet's non-regular-type gate — a world-readable
+					// Unix socket must not be enumerable via the batch API either.
 					entry = existsEntry{Exists: false}
 				}
 			}
@@ -929,6 +954,15 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 	// sockets reflect IPC payload, core dumps contain process memory,
 	// PID files leak process structure. See publicTmpDeniedSuffixes.
 	if project == publicTmpProject && isPublicTmpDeniedName(resolved) {
+		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	// R090031-SEC-7 (#1688): defence-in-depth type gate. A world-readable
+	// Unix socket whose name matches neither the deny-list nor the
+	// foreign-private mode gate (e.g. a custom-named agent IPC socket)
+	// would otherwise be served. Refuse any non-regular file type.
+	if project == publicTmpProject && isPublicTmpIrregularType(info) {
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
