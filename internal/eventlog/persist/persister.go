@@ -362,6 +362,15 @@ type Persister struct {
 	// 091302-PERF-3 (#1569).
 	tickFlushKeys []string
 	tickFlushWs   []*perKeyWriter
+	// flushAllKeys / flushAllWs are the analogous (key, writer) scratch
+	// slices for flushAllLocked's dirty pre-filter, reused across opFlushAll
+	// calls to keep the explicit Flush path allocation-free in steady state.
+	// flushAllLocked runs on the same run goroutine as tickFlush (both in the
+	// run-loop select, mutually exclusive), so these are run-goroutine-only
+	// and need no synchronisation — same ownership argument as tickFlushKeys.
+	// R20260603030037-PERF-9.
+	flushAllKeys []string
+	flushAllWs   []*perKeyWriter
 	// lastFlushCount is the number of slots in flushCands that were
 	// actually populated on the most recent tick. R040034-PERF-7 (#1406):
 	// the prior `clear(p.flushCands)` zeroed every slot up to len, so a
@@ -1153,8 +1162,13 @@ func (p *Persister) flushAllLocked() error {
 	if len(p.writers) == 0 {
 		return nil
 	}
-	dirtyKeys := make([]string, 0, len(p.writers))
-	dirtyWs := make([]*perKeyWriter, 0, len(p.writers))
+	// R20260603030037-PERF-9: reuse the run-goroutine scratch slices rather
+	// than allocating two fresh ones each opFlushAll. The append below may
+	// grow them; we write the (possibly reallocated) backing arrays back so
+	// the grown capacity persists for the next call. Same single-goroutine
+	// ownership audit as tickFlushKeys (see field decl).
+	dirtyKeys := p.flushAllKeys[:0]
+	dirtyWs := p.flushAllWs[:0]
 	for k, w := range p.writers {
 		if !w.dirty {
 			continue
@@ -1162,6 +1176,8 @@ func (p *Persister) flushAllLocked() error {
 		dirtyKeys = append(dirtyKeys, k)
 		dirtyWs = append(dirtyWs, w)
 	}
+	p.flushAllKeys = dirtyKeys
+	p.flushAllWs = dirtyWs
 	if len(dirtyWs) == 0 {
 		return nil
 	}
@@ -1183,6 +1199,11 @@ func (p *Persister) flushAllLocked() error {
 			errMu.Unlock()
 		}
 	})
+	// Drop the writer-pointer references so a writer dropped/idle-closed
+	// before the next opFlushAll can be GC'd rather than pinned by this
+	// scratch slice — mirrors tickFlush's clear(ws). Keys are plain
+	// strings; left as-is.
+	clear(dirtyWs)
 	return firstErr
 }
 
