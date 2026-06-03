@@ -2368,20 +2368,29 @@ func (s *runStore) warmJobsParallel(ctx context.Context, jobIDs []string) {
 	if workers > len(jobIDs) {
 		workers = len(jobIDs)
 	}
-	work := make(chan string, len(jobIDs))
-	for _, id := range jobIDs {
-		work <- id
-	}
-	close(work)
+	// R20260603-PERF-5: claim work indices via an atomic cursor over the
+	// jobIDs slice rather than a per-call make(chan string, len(jobIDs))
+	// seeded with N sends + close. Mirrors decodeRunsParallel — on a 50-job
+	// cold start the buffered channel was a fresh N-string backing array +
+	// channel header; the atomic counter is a single stack int64 and each
+	// worker steals the next index with one FetchAdd. Concurrency and the
+	// per-jobID warm behaviour are unchanged (warmCacheLocked owns its own
+	// locks, so steal order is irrelevant).
+	var next int64
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
-			for jobID := range work {
+			for {
 				if ctx.Err() != nil {
 					return
 				}
+				i := int(atomic.AddInt64(&next, 1)) - 1
+				if i >= len(jobIDs) {
+					return
+				}
+				jobID := jobIDs[i]
 				if warmCorrupt := s.warmCacheLocked(jobID); warmCorrupt > 0 {
 					slog.Warn("cron runstore: cold-start warm skipped corrupt files",
 						"count", warmCorrupt, "dir", filepath.Join(s.root, jobID))
