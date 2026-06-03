@@ -19,6 +19,7 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/textutil"
 	"github.com/naozhi/naozhi/internal/usermsg"
 )
 
@@ -1341,7 +1342,10 @@ func (d *Dispatcher) decorateReplyText(result *cli.SendResult, sess *session.Man
 	// path (scheduler_run.go: sanitise → localize, privacy-first ordering).
 	// Without this a Claude reply that echoes a plaintext token would land
 	// verbatim on the IM channel.
-	replyText := localizeAPIError(cron.RedactSecrets(result.Text))
+	// R20260602-091302-ARCH-1 (#1571): redactor now lives in the leaf package
+	// internal/textutil; dispatch no longer couples this security-critical
+	// path to the cron domain package for scrubbing.
+	replyText := localizeAPIError(textutil.RedactSecrets(result.Text))
 	// Head slot of a merge group: append a small chip so the user knows the
 	// single bot bubble covers N messages.
 	if result.MergedCount > 1 && replyText != "" {
