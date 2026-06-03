@@ -579,7 +579,15 @@ func handleSW(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Service-Worker-Allowed", "/")
+	// R20260602190132-SEC-2 (#1603): dropped the explicit
+	// `Service-Worker-Allowed: /` grant. The header only ever *broadens* the
+	// max SW scope above the script's own directory; since /sw.js already
+	// lives at root its default scope is "/" with or without the header, so
+	// the header was a redundant explicit root-scope grant that scanners
+	// could read as a registration hint. dashboard.js calls
+	// `navigator.serviceWorker.register('/sw.js')` with no scope option, so
+	// the default "/" scope (the script's location) still applies — anonymous
+	// PWA installability is unaffected.
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("sw write", "err", err)
 	}
@@ -640,7 +648,6 @@ func handleAssetBrowserJS(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("asset_browser js write", "err", err)
 	}
 }
-
 
 // buildSessionOpts resolves agent config and planner overrides for a
 // session key. When resolver is non-nil, delegates to ResolveForKey for

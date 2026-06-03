@@ -235,22 +235,25 @@ type recentCacheEntry struct {
 	// #1335), seeding a RunID ahead of its own late push. nil until the first
 	// ringSeed allocates it.
 	runIDs map[string]struct{}
+	// capZeroWarned is set on the first cap=0 self-heal observation so the
+	// warn fires exactly once per entry rather than once per process.
+	// R20260602-CR-4: per-entry instead of a package-level sync.Once so
+	// parallel tests each get their own warn gate and cannot silence one
+	// another.
+	capZeroWarned atomic.Bool
 }
 
-// ringCapZeroWarnOnce ensures the cap=0 self-heal branch in ringRead /
-// ringSnapshot logs exactly once per process. R249-ARCH-13 (#979): the
-// defensive cap=0 guard previously returned silently, so a future regression
-// that mutated count>0 while leaving cap(ring)==0 (bypassing ringSeed) would
-// surface only as mysteriously-empty dashboard lists with no log trace. A
-// single warn points the next reader straight at the contract violation
-// without spamming the log on a hot read path.
-var ringCapZeroWarnOnce sync.Once
-
-func warnRingCapZero(site string) {
-	ringCapZeroWarnOnce.Do(func() {
+// warnRingCapZero fires a slog.Warn for the cap=0 self-heal path. It is
+// rate-limited per recentCacheEntry via e.capZeroWarned (atomic CAS) so
+// each entry warns at most once, independent of other entries. This is
+// R20260602-CR-4: the previous package-level sync.Once silenced warnings
+// for all subsequent entries once the first triggered, hiding the
+// regression in parallel-test and multi-job scenarios.
+func warnRingCapZero(e *recentCacheEntry, site string) {
+	if e.capZeroWarned.CompareAndSwap(false, true) {
 		slog.Warn("cron runstore: recentCache ring cap=0 on read; self-healing to empty (ringSeed bypass regression?)",
 			"site", site)
-	})
+	}
 }
 
 // ringRead returns the i-th newest entry (0 = newest). Caller holds entry.mu
@@ -262,7 +265,7 @@ func (e *recentCacheEntry) ringRead(i int) CronRunSummary {
 	// ringSeed (e.g. an unwarmed entry mutated by future code). [BREAKING-LOCAL]
 	if cap(e.ring) == 0 {
 		// R249-ARCH-13 (#979): warn once so the silent self-heal is auditable.
-		warnRingCapZero("ringRead")
+		warnRingCapZero(e, "ringRead")
 		return CronRunSummary{}
 	}
 	return e.ring[(e.head+i)%cap(e.ring)]
@@ -278,7 +281,7 @@ func (e *recentCacheEntry) ringSnapshot(limit int) []CronRunSummary {
 		// count — that is the bypass regression. The count==0 case is the
 		// benign empty-cache fast path and stays silent.
 		if cap(e.ring) == 0 && e.count > 0 {
-			warnRingCapZero("ringSnapshot")
+			warnRingCapZero(e, "ringSnapshot")
 		}
 		return nil
 	}
@@ -708,9 +711,9 @@ func (s *runStore) Append(run *CronRun) {
 	summarySrc := run
 	if preflightOverCap {
 		// Skip the speculative first marshal; produce the truncated copy
-		// directly. We still emit the same warn line so existing log-based
-		// alerting on "payload exceeds size cap" stays calibrated.
-		slog.Warn("cron run: payload exceeds size cap; truncating result/prompt and retrying",
+		// directly. R20260602-CR-2: use a distinct message so preflight
+		// over-cap is distinguishable from the post-marshal retry path.
+		slog.Warn("cron run: preflight over-cap: truncating result/prompt directly (skipping full marshal)",
 			"job_id", run.JobID, "run_id", run.RunID,
 			"preflight_bytes", len(run.Result)+len(run.Prompt)+len(run.ErrorMsg),
 			"cap", s.maxRunBytes)
