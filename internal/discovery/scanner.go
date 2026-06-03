@@ -695,6 +695,16 @@ type sessionsIndexEntry struct {
 // extractLastPrompt reads the JSONL file backwards to find the last user message.
 // Results are cached by (path, mtime) to avoid re-reading 512KB every scan cycle.
 func (s *Scanner) extractLastPrompt(claudeDir, cwd, sessionID string) string {
+	prompt, _, _ := s.extractLastPromptWithMtime(claudeDir, cwd, sessionID)
+	return prompt
+}
+
+// extractLastPromptWithMtime is the underlying implementation. It returns the
+// last prompt plus the JSONL mtime (unix ms) and whether the file exists, so a
+// caller that also needs lastActive (RefreshDynamic) can reuse this single Stat
+// instead of paying a second os.Stat via jsonlMtime on the same path —
+// R20260603-PERF-2.
+func (s *Scanner) extractLastPromptWithMtime(claudeDir, cwd, sessionID string) (string, int64, bool) {
 	// Single Stat resolves both existence and mtime. Previously this went
 	// through findJSONLPath (one Stat to confirm the file exists) and then
 	// immediately Stat'd the same path again for the cache key — two
@@ -702,18 +712,19 @@ func (s *Scanner) extractLastPrompt(claudeDir, cwd, sessionID string) string {
 	path := filepath.Join(claudeDir, "projects", projDirName(cwd), sessionID+".jsonl")
 	fi, err := os.Stat(path)
 	if err != nil {
-		return ""
+		return "", 0, false
 	}
 	mtime := fi.ModTime().UnixNano()
+	mtimeMs := fi.ModTime().UnixMilli()
 
 	if cached, ok := s.getCachedPrompt(path, mtime); ok {
-		return cached
+		return cached, mtimeMs, true
 	}
 
 	result := extractLastPromptUncached(path, fi.Size())
 
 	s.setCachedPrompt(path, mtime, result)
-	return result
+	return result, mtimeMs, true
 }
 
 // getCachedPrompt checks the prompt cache. Reads use RLock; only the gen
@@ -1109,8 +1120,13 @@ func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession)
 	}
 	summaryMap := s.LookupSummaries(claudeDir, workspaces)
 
-	// Batch-extract last prompts in parallel.
+	// Batch-extract last prompts in parallel. The same Stat that the prompt
+	// extraction already performs also yields the JSONL mtime, so we capture
+	// it here and reuse it below instead of paying a second os.Stat per
+	// session via jsonlMtime — R20260603-PERF-2.
 	prompts := make([]string, len(sessions))
+	mtimes := make([]int64, len(sessions))
+	mtimeOK := make([]bool, len(sessions))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
 	for i := range sessions {
@@ -1119,7 +1135,8 @@ func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession)
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			prompts[idx] = s.extractLastPrompt(claudeDir, sessions[idx].CWD, sessions[idx].SessionID)
+			prompts[idx], mtimes[idx], mtimeOK[idx] = s.extractLastPromptWithMtime(
+				claudeDir, sessions[idx].CWD, sessions[idx].SessionID)
 		}(i)
 	}
 	wg.Wait()
@@ -1128,7 +1145,13 @@ func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession)
 	nowMs := time.Now().UnixMilli()
 	for i := range sessions {
 		sess := &sessions[i]
-		if la := jsonlMtime(claudeDir, sess.CWD, sess.SessionID, sess.StartedAt); la != sess.LastActive {
+		// Reuse the mtime captured during prompt extraction; fall back to
+		// startedAt when the JSONL did not exist, matching jsonlMtime.
+		la := sess.StartedAt
+		if mtimeOK[i] {
+			la = mtimes[i]
+		}
+		if la != sess.LastActive {
 			sess.LastActive = la
 			changed = true
 		}

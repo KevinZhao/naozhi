@@ -39,6 +39,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
@@ -64,6 +65,18 @@ type Source struct {
 // LoadBefore return (nil, nil) for a disabled source.
 func New(dir, key string) *Source {
 	return &Source{dir: dir, key: key}
+}
+
+// bufReaderPool recycles the 64 KiB bufio.Reader used by the two log-decode
+// paths (decodeFrom / readAllEntries). LoadLatest/LoadBefore previously
+// allocated a fresh 64 KiB backing buffer on every call; pooling amortises
+// that across the hot history-load path. R20260603-PERF-4.
+//
+// Callers MUST Reset(f) before use and Reset(nil) before returning a reader
+// to the pool — the latter drops the *os.File reference so a pooled reader
+// can never pin a closed fd.
+var bufReaderPool = sync.Pool{
+	New: func() any { return bufio.NewReaderSize(nil, 64*1024) },
 }
 
 // LoadLatest returns up to `limit` newest entries from the session's
@@ -268,7 +281,12 @@ func (s *Source) decodeFrom(ctx context.Context, byteOff int64) ([]cli.EventEntr
 		return nil, fmt.Errorf("seek naozhi log %s to %d: %w", path, byteOff, err)
 	}
 
-	br := bufio.NewReaderSize(f, 64*1024)
+	br := bufReaderPool.Get().(*bufio.Reader)
+	br.Reset(f)
+	defer func() {
+		br.Reset(nil) // release the *os.File so the pooled reader pins no fd
+		bufReaderPool.Put(br)
+	}()
 	out := make([]cli.EventEntry, 0, 512)
 	if err := decodeRecords(ctx, br, path, &out); err != nil {
 		return nil, err
@@ -295,7 +313,12 @@ func (s *Source) readAllEntries(ctx context.Context) ([]cli.EventEntry, error) {
 	}
 	defer f.Close()
 
-	br := bufio.NewReaderSize(f, 64*1024)
+	br := bufReaderPool.Get().(*bufio.Reader)
+	br.Reset(f)
+	defer func() {
+		br.Reset(nil) // release the *os.File so the pooled reader pins no fd
+		bufReaderPool.Put(br)
+	}()
 	// Pre-allocate to the in-memory ring upper bound so the per-record
 	// append loop (up to ~500 entries) avoids the repeated doubling
 	// reallocations of a nil-start slice. 512 ≈ persistedHistory ring cap

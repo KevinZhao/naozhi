@@ -539,6 +539,21 @@ func (p *ACPProtocol) Capabilities() Caps {
 	return Caps{Replay: false, Priority: false, SoftInterrupt: true, StreamJSON: false}
 }
 
+// ReadEventInto is the allocation-aware variant of ReadEvent
+// (R20260603-PERF-10, #1676). ACP's per-frame return shapes are diverse (zero,
+// one, or two events), so rather than thread buf through every return site we
+// reuse the caller's backing array on the common path by copying the parsed
+// events into buf when they fit. The two-event turn-end split (cap 2 in the
+// readLoop buffer) and all single-event frames avoid the fresh slice header;
+// only a hypothetical >cap result falls back to the ReadEvent allocation.
+func (p *ACPProtocol) ReadEventInto(line string, buf []Event) ([]Event, bool, error) {
+	events, done, err := p.ReadEvent(line)
+	if err != nil || len(events) == 0 || cap(buf) < len(events) {
+		return events, done, err
+	}
+	return append(buf[:0], events...), done, nil
+}
+
 func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	var msg RPCMessage
 	// stringToBytesUnsafe avoids the per-event []byte(line) heap copy.

@@ -933,6 +933,22 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// R20260603-SEC-4 (#1678): the __public_tmp__ pseudo-project lets any
+	// authenticated dashboard user read non-credential files anywhere under
+	// /tmp. That is acceptable only for single-operator deployments; on a
+	// shared/multi-operator host it can expose another user's artefacts.
+	// Since the flag's threat model assumes a single trusted operator, the
+	// minimum bar is an audit trail: emit one structured log line per served
+	// /tmp file so an operator who later switches to a shared deployment can
+	// reconstruct who read what. RemoteAddr is logged (not request headers)
+	// to avoid echoing attacker-controlled values into the log stream.
+	if project == publicTmpProject {
+		slog.Info("public_tmp file access",
+			"path", resolved,
+			"mode", mode,
+			"remote_addr", r.RemoteAddr)
+	}
+
 	// R230-SEC-5: defence-in-depth re-check that resolved still sits under
 	// the project root. resolveProjectFile already verified this once, but a
 	// concurrent rename(2) between EvalSymlinks (inside resolveProjectFile)
@@ -1541,6 +1557,33 @@ var sensitiveBaseSuffixes = []string{
 	".env.save",
 }
 
+// sensitiveNameSubstrings is a defence-in-depth pattern scan layered on top of
+// the exact-name / extension / suffix rules. R20260603-SEC-5 (#1680): the
+// enumerated tables only catch known filenames, but Claude routinely generates
+// ad-hoc credential dumps with non-canonical names — `db-password.txt`,
+// `aws_credentials.txt` (the underscore form misses the exact `credentials`
+// entry), `api_token.log`, `slack_secret.md`. Any basename containing one of
+// these tokens is treated as credential-bearing regardless of extension.
+//
+// Each token is matched case-insensitively as a substring of the basename.
+// The set is deliberately narrow (only words that almost always denote a
+// secret) to avoid over-blocking legitimate workspace files — e.g. there is no
+// "key" token here because *.key is already handled by sensitiveDownloadExts
+// and a bare "key" substring would block "keyboard.go" / "monkey.png".
+var sensitiveNameSubstrings = []string{
+	"password",
+	"passwd",
+	"secret",
+	"credential", // matches credential / credentials, hyphen/underscore forms
+	"token",
+	"apikey",
+	"api-key",
+	"api_key",
+	"private-key",
+	"private_key",
+	"privatekey",
+}
+
 // sensitiveDownloadExts lists extensions that strongly imply key material.
 var sensitiveDownloadExts = map[string]struct{}{
 	".key": {},
@@ -1635,6 +1678,14 @@ func isSensitiveDownloadName(base string) bool {
 	// archive names that the exact-name + ext scans miss.
 	for _, suffix := range sensitiveBaseSuffixes {
 		if strings.HasSuffix(low, suffix) {
+			return true
+		}
+	}
+	// R20260603-SEC-5 (#1680): defence-in-depth substring scan. Catches
+	// ad-hoc credential dumps (db-password.txt, aws_credentials.txt,
+	// api_token.log) whose names match no enumerated table entry.
+	for _, sub := range sensitiveNameSubstrings {
+		if strings.Contains(low, sub) {
 			return true
 		}
 	}

@@ -367,7 +367,19 @@ func (p *Process) handleShimMessage(msg shimMsg, log *slog.Logger) shimDispatchO
 // teardown path can unwind. R214-CODE-3.
 func (p *Process) handleShimStdout(msg shimMsg, log *slog.Logger) shimDispatchOutcome {
 	p.lastSeq.Store(msg.Seq)
-	events, _, err := p.protocol.ReadEvent(msg.Line)
+	// R20260603-PERF-10 (#1676): prefer the allocation-aware ReadEventInto so
+	// the dominant single-event frame reuses p.readEventBuf instead of
+	// allocating a fresh 1-element []Event per stdout line. Falls back to
+	// ReadEvent for any Protocol that does not implement the optional variant.
+	var (
+		events []Event
+		err    error
+	)
+	if ri, ok := p.protocol.(eventReaderInto); ok {
+		events, _, err = ri.ReadEventInto(msg.Line, p.readEventBuf[:0])
+	} else {
+		events, _, err = p.protocol.ReadEvent(msg.Line)
+	}
 	if err != nil {
 		// ACP RPC errors: kiro returned an error response to a request
 		// we sent (typically session/prompt). The turn is over from

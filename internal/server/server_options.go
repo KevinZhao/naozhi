@@ -120,6 +120,16 @@ type ServerOptions struct {
 	// flip it on via `server.public_tmp_enabled: true` in config.yaml so
 	// chat-mentioned /tmp/... paths still resolve without first
 	// registering /tmp as a real project.
+	//
+	// SECURITY (R20260603-SEC-4, #1678): MUST stay false on any shared or
+	// multi-operator deployment, and on any deployment where the dashboard
+	// token is shared between people. When enabled, every authenticated
+	// dashboard user can read non-credential files anywhere under /tmp —
+	// other users' editor swap files, build artefacts, etc. (the credential
+	// allowlist and foreign-private-UID gate block secrets/sockets, but not
+	// general /tmp content). Access to publicTmpProject files is now audit-
+	// logged (slog.Info "public_tmp file access" with path/mode/remote_addr)
+	// so an operator can reconstruct reads after the fact.
 	PublicTmpEnabled bool
 
 	// ProjectStableKeyEnabled toggles the per-project StableKey field in the

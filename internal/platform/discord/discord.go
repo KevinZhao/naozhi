@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -409,13 +410,66 @@ func isImageContentType(ct string) bool {
 	return false
 }
 
+// discordDialTestBypass disables the private-IP dial guard so httptest servers
+// (which run on loopback) are not rejected. Set ONLY by discord_test.go;
+// production code MUST leave this false so blockPrivateDial enforces the
+// reserved-IP guard. (R20260603-SEC-3)
+var discordDialTestBypass bool
+
+// blockPrivateDial returns a DialContext that resolves the target hostname and
+// refuses any IP in a reserved range (loopback, link-local, private,
+// unspecified). This closes the DNS rebinding / SSRF vector where a host that
+// passed the CDN allowlist check at url.Parse time later resolves to an
+// internal address such as 169.254.169.254 (cloud IMDS). The connection is
+// dialed to the already-validated IP rather than the original host, so the
+// resolver is not consulted a second time. (R20260603-SEC-3)
+func blockPrivateDial() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 15 * time.Second}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("discord: malformed dial address %q: %w", addr, err)
+		}
+		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("discord: DNS lookup %q: %w", host, err)
+		}
+		if len(addrs) == 0 {
+			return nil, fmt.Errorf("discord: no addresses for %q", host)
+		}
+		for _, ia := range addrs {
+			ip := ia.IP
+			if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsPrivate() || ip.IsUnspecified() {
+				if discordDialTestBypass {
+					continue
+				}
+				return nil, fmt.Errorf("discord: refused connection to reserved IP %s (DNS rebinding guard)", ip)
+			}
+		}
+		// Dial the first validated IP directly to avoid a second DNS lookup
+		// (TOCTOU) on the original hostname.
+		return dialer.DialContext(ctx, network, net.JoinHostPort(addrs[0].IP.String(), port))
+	}
+}
+
 // discordHTTPClient disables redirects so the CDN host allowlist cannot be
 // bypassed via a 302 to an internal address (SSRF). Discord's CDN serves
-// attachments directly and never requires cross-host redirects.
+// attachments directly and never requires cross-host redirects. The Transport
+// injects blockPrivateDial so a host that resolves to an internal address
+// (DNS rebinding) is refused after resolution, before any bytes are exchanged.
 var discordHTTPClient = &http.Client{
 	Timeout: 15 * time.Second,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
+	},
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           blockPrivateDial(),
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
 	},
 }
 
