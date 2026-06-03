@@ -1,125 +1,20 @@
 package cron
 
 import (
-	"errors"
 	"fmt"
 	"time"
 	"unicode/utf8"
 
-	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// ErrInvalidPrompt is returned by ValidatePromptStrict when a prompt fails
-// the shared cron-prompt safety policy (size cap / UTF-8 / C0 / DEL / C1 /
-// bidi / LS / PS). Sentinel form so IM dispatch and Scheduler.SetJobPrompt
-// can errors.Is and surface a stable user message instead of string-matching.
-var ErrInvalidPrompt = errors.New("cron: invalid prompt")
-
-// ValidatePromptStrict enforces the same size + character policy that
-// dashboard's validateCronPrompt applies on the HTTP edge, so the IM
-// `/cron …` path (Hub.runTurn / runTurnPassthrough → SetJobPrompt) cannot
-// smuggle log-injection / bidi / oversized prompts onto cron_jobs.json by
-// going around the dashboard validators. R243-SEC-8 (REPEAT-5):
-// previously SetJobPrompt only rejected the empty string, so an IM-side
-// caller could persist arbitrary bytes that the dashboard rejects.
-//
-// Policy (must stay in lockstep with server.validateCronPrompt):
-//   - len ≤ MaxPromptBytes
-//   - utf8.ValidString
-//   - no C0 controls except \t \n \r; no DEL (0x7f)
-//   - no rune flagged by osutil.IsLogInjectionRune (C1 / bidi / LS / PS)
-//
-// Returns a wrapped ErrInvalidPrompt so callers can distinguish from
-// not-found / persist-failure errors. Empty prompt is rejected here as
-// well so SetJobPrompt's pre-existing "must not be empty" guard becomes
-// a single ValidatePromptStrict call.
-func ValidatePromptStrict(prompt string) error {
-	if prompt == "" {
-		return fmt.Errorf("%w: must not be empty", ErrInvalidPrompt)
-	}
-	if len(prompt) > MaxPromptBytes {
-		return fmt.Errorf("%w: exceeds %d-byte limit", ErrInvalidPrompt, MaxPromptBytes)
-	}
-	if !utf8.ValidString(prompt) {
-		return fmt.Errorf("%w: contains invalid UTF-8", ErrInvalidPrompt)
-	}
-	for i := 0; i < len(prompt); i++ {
-		c := prompt[i]
-		if c >= 0x20 && c != 0x7f {
-			continue
-		}
-		if c == '\t' || c == '\n' || c == '\r' {
-			continue
-		}
-		return fmt.Errorf("%w: contains control characters", ErrInvalidPrompt)
-	}
-	for _, r := range prompt {
-		if osutil.IsLogInjectionRune(r) {
-			return fmt.Errorf("%w: contains unicode control characters", ErrInvalidPrompt)
-		}
-	}
-	return nil
-}
-
-// ErrInvalidSchedule is returned by ValidateScheduleChars when a schedule
-// expression fails the shared char policy (size cap / UTF-8 / C0 / DEL / C1 /
-// bidi / LS / PS). Sentinel form so the IM dispatch ParseCronAdd path and the
-// dashboard validateCronScheduleChars edge can errors.Is and surface a stable
-// message instead of string-matching.
-var ErrInvalidSchedule = errors.New("cron: invalid schedule")
-
-// ValidateScheduleChars enforces the shared character + size policy for a cron
-// schedule expression before it reaches robfig/cron's parser. Both the IM
-// `/cron add` slash-command edge (dispatch.ParseCronAdd) and the dashboard
-// HTTP edge (validateCronScheduleChars) call this so the two surfaces cannot
-// silently drift apart when a new forbidden character is added on one side
-// only. R20260527122801-ARCH-3 (#1315).
-//
-// Policy:
-//   - len ≤ MaxScheduleBytes
-//   - utf8.ValidString
-//   - no C0 controls and no DEL (0x7f); unlike prompts, schedules forbid
-//     tab/newline too — robfig/cron expressions are whitespace-separated
-//     single-line tokens, so an embedded \t or \n is always malformed and
-//     could persist verbatim into cron_jobs.json / corrupt NDJSON framing
-//   - no rune flagged by osutil.IsLogInjectionRune (C1 / bidi / LS / PS)
-//
-// Returns a wrapped ErrInvalidSchedule so callers can distinguish from
-// parse-failure errors. Empty schedule is rejected here so a single call
-// replaces the prior hand-written byte+rune loops on both edges.
-func ValidateScheduleChars(schedule string) error {
-	if len(schedule) == 0 {
-		return fmt.Errorf("%w: must not be empty", ErrInvalidSchedule)
-	}
-	if len(schedule) > MaxScheduleBytes {
-		return fmt.Errorf("%w: exceeds %d-byte limit", ErrInvalidSchedule, MaxScheduleBytes)
-	}
-	if !utf8.ValidString(schedule) {
-		return fmt.Errorf("%w: contains invalid UTF-8", ErrInvalidSchedule)
-	}
-	anyHighBit := false
-	for i := 0; i < len(schedule); i++ {
-		c := schedule[i]
-		if c >= 0x80 {
-			anyHighBit = true
-			continue
-		}
-		if c >= 0x20 && c != 0x7f {
-			continue
-		}
-		return fmt.Errorf("%w: contains control characters", ErrInvalidSchedule)
-	}
-	if !anyHighBit {
-		return nil
-	}
-	for _, r := range schedule {
-		if osutil.IsLogInjectionRune(r) {
-			return fmt.Errorf("%w: contains unicode control characters", ErrInvalidSchedule)
-		}
-	}
-	return nil
-}
+// ErrInvalidPrompt / ErrInvalidSchedule / ValidatePromptStrict /
+// ValidateScheduleChars moved to internal/textutil under #1707 (same leaf-
+// package rationale as RedactSecrets, #1571) so the IM slash-command layer
+// (internal/dispatch) and the dashboard HTTP edge stop importing the cron
+// domain package just to reach these pure string validators. Thin aliases
+// live in limits_alias.go to keep cron's in-package call sites and exported
+// symbols stable.
 
 // MaxWorkDirLen caps Job.WorkDir on the AddJob write path. 4 KiB matches the
 // de-facto Linux PATH_MAX × small slack; longer values cannot legitimately
@@ -216,24 +111,10 @@ func truncateWithSuffix(s string, maxRunes int) string {
 // without the other. Both surfaces guard the same on-disk cron_jobs.json
 // schema, so the limits must stay in lockstep. R216-CR-1.
 const (
-	// MaxPromptBytes bounds the prompt body accepted by both the
-	// IM `/cron add` command and the dashboard cron POST/PATCH endpoints.
-	// Every cron run replays the full prompt through the CLI, so runaway
-	// sizes multiply across invocations.
-	MaxPromptBytes = 8 * 1024
-
-	// MaxIDLen bounds cron job IDs flowing in via the IM `/cron <op> <id>`
-	// commands and the dashboard URL/JSON parameters. Generated IDs are
-	// 16-char hex (8 entropy bytes → hex.EncodeToString; see generateHexID
-	// / hexIDEntropyBytes in job.go); 64 bytes leaves slack for future ID
-	// schemes while preventing multi-MB inputs from propagating into
-	// log/error allocations on the miss path.
-	MaxIDLen = 64
-
-	// MaxScheduleBytes caps the schedule expression length. robfig/cron
-	// expressions are short (e.g. "@every 30m", "0 9 * * *"); anything
-	// beyond this is almost certainly abuse.
-	MaxScheduleBytes = 256
+	// MaxPromptBytes / MaxIDLen / MaxScheduleBytes moved to internal/textutil
+	// alongside the validators that enforce them (#1707); re-exported as thin
+	// aliases in limits_alias.go so the many in-package + dashboard call sites
+	// stay unchanged.
 
 	// maxStoredResultRunes bounds CronRun.Result + Job.LastResult after
 	// rune-safe truncation; the persisted record is hard-capped at
