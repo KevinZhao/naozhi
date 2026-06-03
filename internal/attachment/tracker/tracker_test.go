@@ -305,6 +305,44 @@ func TestOnSessionRemoved_ClearsRefs(t *testing.T) {
 	}
 }
 
+// TestHandleClear_AbortsOnClose: once the tracker is closing,
+// handleClear must bail out with ErrTrackerClosed instead of walking
+// the whole workspace — otherwise a large/slow sweep pins run() (and
+// the Stop wg.Wait goroutine) past Stop's ctx deadline (#1690).
+func TestHandleClear_AbortsOnClose(t *testing.T) {
+	ws := t.TempDir()
+	date := time.Now().Format("2006-01-02")
+	seed := attachment.Meta{UploadedAt: time.Now()}
+	seed.AddReference("sessX")
+	_, meta1 := writeAttachment(t, ws, date, "k1", seed)
+
+	obs := &countingObs{}
+	tr := newTracker(t, ws, obs)
+
+	// Stop closes closeCh and drains the worker. A subsequent clear
+	// sweep must short-circuit immediately.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := tr.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	err := tr.handleClear(trackerJob{kind: jobKindClear, keyhash: "sessX", clearWorkspace: ws})
+	if !errors.Is(err, ErrTrackerClosed) {
+		t.Fatalf("handleClear after close = %v, want ErrTrackerClosed", err)
+	}
+	// The aborted sweep must not have rewritten the meta.
+	raw, _ := os.ReadFile(meta1)
+	var m attachment.Meta
+	_ = json.Unmarshal(raw, &m)
+	if !m.HasReference("sessX") {
+		t.Errorf("reference removed despite aborted sweep in %s", meta1)
+	}
+	if obs.clear.Load() != 0 {
+		t.Errorf("OnReferenceClear=%d after aborted sweep, want 0", obs.clear.Load())
+	}
+}
+
 // TestOnSessionRemoved_UnknownSession is a no-op — no meta has the
 // keyhash, so nothing is rewritten.
 func TestOnSessionRemoved_UnknownSession(t *testing.T) {
