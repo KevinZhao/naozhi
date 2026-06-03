@@ -624,6 +624,31 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(), "工作目录不可达，本次执行已跳过。"))
 		return noopRefresh, false
 	}
+	// R20260603140013-CR-3: containment early-check BEFORE the destructive
+	// Reset below. resolveCronWorkspace (executeOpt) already aborts outside-root
+	// runs, but it uses the TTL-cached workDirResolveUnderRootCached view; a
+	// symlink retargeted outside allowedRoot within that TTL would pass there as
+	// a stale-positive, letting us reach this point and blow away a live session
+	// (Reset destroys the cron:<jobID> session + its process + history) for a
+	// run that can never succeed. Re-validate with the uncached workDirUnderRoot
+	// here so a freshly-retargeted symlink fails the run WITHOUT tearing down the
+	// existing session. Mirrors resolveCronWorkspace's outside-root finishRun
+	// (RunStateFailed / ErrClassWorkDirOutsideRoot) and the workDirReachable
+	// branch's deliverNotice. noopRefresh leaves the sidebar stub untouched.
+	if s.allowedRoot != "" && snap.workDir != "" &&
+		!workDirUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved) {
+		lg.Warn("cron fresh spawn aborted: work_dir outside allowed root",
+			"work_dir", snap.workDir)
+		s.finishRun(finishArgs{
+			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
+			state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
+			errMsg: "work_dir outside allowed root",
+			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+			finalizer: args.finalizer,
+		})
+		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(), "工作目录超出允许根目录，本次执行已跳过。"))
+		return noopRefresh, false
+	}
 	// CRON1 / R194 (#401) — fresh-context atomicity invariant.
 	//
 	// Reset(key) here and the caller's subsequent GetOrCreate(key) (executeOpt
