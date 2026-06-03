@@ -191,6 +191,29 @@ func TestReadRaw_Traversal(t *testing.T) {
 	}
 }
 
+// TestScan_ScanMarkdownDirErrorLogged verifies that a non-ErrNotExist error
+// from scanMarkdownDir (e.g. agents dir is a file, not a dir) is tolerated:
+// Scan continues without returning an error and the warn path is exercised.
+// R20260603000023-CR-12.
+func TestScan_ScanMarkdownDirErrorLogged(t *testing.T) {
+	home := t.TempDir()
+	// Plant a regular *file* where the agents directory would be read.
+	// os.ReadDir on a regular file returns a syscall error (not ErrNotExist),
+	// which triggers the slog.Warn branch added by CR-12.
+	writeFile(t, filepath.Join(home, "agents"), "not-a-directory")
+
+	p := NewClaudeProvider()
+	// Scan must not propagate the ReadDir error — it only warns.
+	inv, err := p.Scan(assets.ScanRequest{Home: home})
+	if err != nil {
+		t.Fatalf("Scan must not return error on scanMarkdownDir failure, got: %v", err)
+	}
+	// No agents expected (the scan was skipped due to error).
+	if inv.Totals["agent"] != 0 {
+		t.Errorf("Totals[agent] = %d, want 0", inv.Totals["agent"])
+	}
+}
+
 func contains(s, sub string) bool {
 	return len(s) >= len(sub) && (func() bool {
 		for i := 0; i+len(sub) <= len(s); i++ {
