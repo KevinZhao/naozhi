@@ -135,8 +135,8 @@ func CoalesceMessages(msgs []QueuedMsg) (string, []cli.ImageData) {
 		// fmt template byte-for-byte; strconv.AppendInt writes truncated as
 		// decimal directly into b's backing array (no intermediate string).
 		b.WriteString("\n[系统] 已省略 ")
-		buf := strconv.AppendInt(nil, int64(truncated), 10)
-		b.Write(buf)
+		var tmp [20]byte
+		b.Write(strconv.AppendInt(tmp[:0], int64(truncated), 10))
 		b.WriteString(" 条后续消息（合并超出长度上限）。\n")
 	}
 

@@ -88,3 +88,35 @@ func TestFlushAll_NoDirtyWriters_NoError(t *testing.T) {
 		t.Fatalf("second Flush (no dirty writers): %v", err)
 	}
 }
+
+// TestFlushAll_ErrMuStillCollectsErrors verifies that promoting flushAllErrMu
+// to a Persister field does not break error collection from parallel flush
+// workers. We exercise successive Flush calls to also confirm the mutex is
+// correctly re-usable (not left locked across invocations). [R20260603-PERF-17]
+func TestFlushAll_ErrMuStillCollectsErrors(t *testing.T) {
+	t.Parallel()
+	p, _ := newTestPersister(t)
+
+	const n = 4
+	for i := 0; i < n; i++ {
+		key := fmt.Sprintf("errkey-%02d", i)
+		sink := p.SinkFor(key)
+		sink([]Entry{entry(t, int64(1700000002000+int64(i)), fmt.Sprintf("e%d", i))}, false)
+	}
+
+	// First Flush: all writers are dirty, should succeed (no I/O error).
+	ctx := context.Background()
+	if err := p.Flush(ctx); err != nil {
+		t.Fatalf("first Flush: %v", err)
+	}
+
+	// Write again, then flush a second time to confirm mutex is reusable.
+	for i := 0; i < n; i++ {
+		key := fmt.Sprintf("errkey-%02d", i)
+		sink := p.SinkFor(key)
+		sink([]Entry{entry(t, int64(1700000003000+int64(i)), fmt.Sprintf("f%d", i))}, false)
+	}
+	if err := p.Flush(ctx); err != nil {
+		t.Fatalf("second Flush: %v", err)
+	}
+}

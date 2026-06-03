@@ -856,6 +856,9 @@ func (s *runStore) Append(run *CronRun) {
 	defer lock.Unlock()
 	s.cacheHeadPush(run.JobID, summarySrc.summary())
 	if s.enableTrimGC {
+		// R20260603-PERF-11: capture a single time.Now() so both
+		// skipAppendTrim's window-cutoff check and trimJobLocked share the
+		// same instant, eliminating a redundant vDSO call on the trim path.
 		now := time.Now()
 		if !s.skipAppendTrim(run.JobID, now) {
 			s.trimJobLocked(run.JobID, now)

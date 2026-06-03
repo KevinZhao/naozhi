@@ -381,6 +381,13 @@ type Persister struct {
 	// fields avoid any cross-path aliasing. R20260603-PERF-2.
 	flushAllKeys []string
 	flushAllWs   []*perKeyWriter
+	// flushAllErrMu serialises firstErr updates inside the parallelFsync
+	// closure used by flushAllLocked. Promoted from a local variable to
+	// eliminate the heap escape caused by the closure capturing its address.
+	// Safe to share without additional coordination: flushAllLocked is only
+	// ever called while the run goroutine holds the op-loop (i.e. no two
+	// flushAllLocked calls can be concurrent). [R20260603-PERF-17]
+	flushAllErrMu sync.Mutex
 }
 
 // batchJob is the internal queue element. Key is the original
@@ -1181,19 +1188,19 @@ func (p *Persister) flushAllLocked() error {
 	// R040034-PERF-13 (#1408): parallel-flush dirty writers via a
 	// bounded worker pool. Same independence-of-state argument as
 	// shutdownAll — see godoc above for the audit. firstErr is
-	// recorded under errMu so concurrent writers racing to lose can
-	// still surface a single representative error to the caller.
-	var (
-		errMu    sync.Mutex
-		firstErr error
-	)
+	// recorded under p.flushAllErrMu so concurrent workers racing to
+	// record the first error surface a single representative error.
+	// p.flushAllErrMu is a Persister field (see struct) to avoid the
+	// heap escape caused by a local sync.Mutex being captured by address
+	// in the closure. [R20260603-PERF-17]
+	var firstErr error
 	p.parallelFsync(dirtyKeys, dirtyWs, func(k string, w *perKeyWriter) {
 		if err := w.flush(p); err != nil {
-			errMu.Lock()
+			p.flushAllErrMu.Lock()
 			if firstErr == nil {
 				firstErr = fmt.Errorf("flush %s: %w", k, err)
 			}
-			errMu.Unlock()
+			p.flushAllErrMu.Unlock()
 		}
 	})
 	// Drop writer-pointer references so dropped/idle-closed writers can be

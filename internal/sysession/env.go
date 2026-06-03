@@ -1,7 +1,10 @@
 package sysession
 
 import (
+	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -13,6 +16,49 @@ import (
 // and hyphen, 1-64 characters. Rejects shell metacharacters or path separators
 // that could redirect credential_process lookups.
 var reProfileValue = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// envBaseURLKeys is the set of always-passthrough keys whose value is an API
+// endpoint URL that steers the Runner subprocess's outbound traffic. Their
+// values are validated by validateBaseURLValue before pass-through so a
+// tampered parent env (malicious shell rc / systemctl set-environment / a
+// poisoned host) cannot point the CLI at an internal/IMDS address over plain
+// http and tunnel an SSRF past the settings.json-side guard
+// (validateClaudeBaseURLEnv). R090031-SEC-1 (#1687).
+var envBaseURLKeys = map[string]struct{}{
+	"ANTHROPIC_BASE_URL":         {},
+	"ANTHROPIC_BEDROCK_BASE_URL": {},
+	"ANTHROPIC_VERTEX_BASE_URL":  {},
+}
+
+// validateBaseURLValue enforces that an API base-URL passed through to a Runner
+// subprocess uses https:// unless it targets a loopback host (localhost /
+// 127.0.0.0/8 / ::1), for which plain http is allowed so operators can wire
+// local mock gateways. An empty value is accepted (clears the var). Mirrors
+// cmd/naozhi.validateClaudeBaseURLEnv; kept local because that lives in package
+// main and cannot be imported. R090031-SEC-1 (#1687).
+func validateBaseURLValue(v string) error {
+	if v == "" {
+		return nil
+	}
+	u, err := url.Parse(v)
+	if err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if strings.EqualFold(host, "localhost") {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+		return fmt.Errorf("plain http:// to non-loopback host %q rejected (SSRF/redirect guard); use https://", host)
+	}
+	return fmt.Errorf("scheme %q not allowed; use https://", u.Scheme)
+}
 
 // envProfileKeys is the set of always-passthrough keys that carry an AWS
 // profile *name* (not credentials). Their values are validated by
@@ -66,6 +112,7 @@ var envAlwaysPassthrough = map[string]struct{}{
 	// AWS profile *name* — not the creds the profile resolves to).
 	"ANTHROPIC_BASE_URL":         {},
 	"ANTHROPIC_BEDROCK_BASE_URL": {},
+	"ANTHROPIC_VERTEX_BASE_URL":  {},
 	"AWS_REGION":                 {},
 	"AWS_DEFAULT_REGION":         {},
 	"AWS_PROFILE":                {},
@@ -262,6 +309,18 @@ func filterEnv(allowlist []string) []string {
 				if !isSafeProfileValue(val) {
 					slog.Warn("sysession: AWS profile env var rejected (unsafe value)",
 						"key", key, "value", osutil.SanitizeForLog(val, 128))
+					continue
+				}
+			}
+			// Base-URL keys: validate value before passing through. A
+			// tampered parent env could point these at an IMDS/internal
+			// http endpoint and tunnel an SSRF past the settings.json
+			// guard. R090031-SEC-1 (#1687).
+			if _, isBaseURL := envBaseURLKeys[key]; isBaseURL {
+				val := kv[idx+1:]
+				if err := validateBaseURLValue(val); err != nil {
+					slog.Warn("sysession: base-URL env var rejected (unsafe value)",
+						"key", key, "value", val, "err", err)
 					continue
 				}
 			}
