@@ -923,7 +923,7 @@ func (s *runStore) skipAppendTrim(jobID string, now time.Time) bool {
 	// Plenty of headroom under count cap?  Cache reflects the on-disk
 	// newest-first ring (capped to keepCount), so entry.count is a safe
 	// upper bound on disk rows that survived the last trim.
-	capSafe := entry.count+appendTrimBatch < s.keepCount
+	capSafe := entry.count+appendTrimBatch <= s.keepCount
 	// Oldest cached row still inside keepWindow?  Use EndedAt to mirror
 	// trimJobLocked's mtime-based cutoff (cacheTrimAfterDisk also approximates
 	// mtime via EndedAt — keep these two paths consistent).
