@@ -69,9 +69,15 @@ func TestR220Sec1_SuccessPathBroadcastUsesPersistedErrMsg(t *testing.T) {
 		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
 	}
 	got := rec.endedAtCron(0)
-	// "10.0.0.1" is technically not a path so it stays; check that the
-	// broadcast field equals what the on-disk Job.LastError holds, since
-	// that's the consistency invariant.
+	// R20260603-SEC-1/SEC-4: IP:port is now redacted; the broadcast must
+	// not contain the raw address.
+	if strings.Contains(got.ErrorMsg, "10.0.0.1") {
+		t.Errorf("IP address leaked to broadcast ErrorMsg: %q", got.ErrorMsg)
+	}
+	if !strings.Contains(got.ErrorMsg, "[redacted-addr]") {
+		t.Errorf("expected [redacted-addr] sentinel in broadcast ErrorMsg: %q", got.ErrorMsg)
+	}
+	// Consistency invariant: broadcast must equal on-disk Job.LastError.
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if got.ErrorMsg != j.LastError {

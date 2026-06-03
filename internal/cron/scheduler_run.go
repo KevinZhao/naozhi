@@ -1489,7 +1489,8 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		if errClass == ErrClassDeadlineExceeded {
 			lg.Info("cron session deadline exceeded", "err", err)
 		} else {
-			lg.Error("cron session error", "err", err)
+			// R20260603-SEC-1: sanitise before logging to strip IP:port / paths.
+			lg.Error("cron session error", "err", sanitiseRunErrMsg(err.Error()))
 		}
 		s.finishRun(finishArgs{
 			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
@@ -1663,7 +1664,8 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 					"abort_outcome", abort.outcome)
 			}
 		} else {
-			lg.Error("cron send error", "err", err)
+			// R20260603-SEC-4: sanitise before logging to strip IP:port / paths.
+			lg.Error("cron send error", "err", sanitiseRunErrMsg(err.Error()))
 		}
 		s.finishRun(finishArgs{
 			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
