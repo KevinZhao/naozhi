@@ -948,7 +948,7 @@ func (m *Manager) Discover() ([]State, error) {
 			RemoveStateFile(path)
 			continue
 		}
-		slog.Info("discovered live shim", "key", state.Key, "pid", state.ShimPID)
+		slog.Info("discovered live shim", "keyHash", KeyHash(state.Key), "pid", state.ShimPID)
 		states = append(states, state)
 	}
 	return states, nil

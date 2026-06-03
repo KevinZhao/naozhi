@@ -193,7 +193,7 @@ func Run(cfg Config) error {
 		slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		os.Stderr = f
 	}
-	slog.Info("shim starting", "pid", os.Getpid(), "key", cfg.Key)
+	slog.Info("shim starting", "pid", os.Getpid(), "keyHash", KeyHash(cfg.Key))
 	defer func() {
 		f := shimLogFilePtr.Load()
 		if r := recover(); r != nil {
