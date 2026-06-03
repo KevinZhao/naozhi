@@ -1700,26 +1700,45 @@ func TestFilterDeniedFlags(t *testing.T) {
 	t.Parallel()
 	t.Run("nothing_filtered_returns_input_unchanged", func(t *testing.T) {
 		t.Parallel()
-		in := []string{"--debug", "--verbose"}
+		in := []string{"--debug", "--keep"}
 		out := filterDeniedFlags(in)
-		if len(out) != 2 || out[0] != "--debug" || out[1] != "--verbose" {
+		if len(out) != 2 || out[0] != "--debug" || out[1] != "--keep" {
 			t.Errorf("expected pass-through, got %v", out)
 		}
 	})
 	t.Run("strip_bare_flag_with_value", func(t *testing.T) {
 		t.Parallel()
-		in := []string{"--debug", "--mcp-config", "/tmp/bad.json", "--verbose"}
+		in := []string{"--debug", "--mcp-config", "/tmp/bad.json", "--keep"}
 		out := filterDeniedFlags(in)
-		want := []string{"--debug", "--verbose"}
+		want := []string{"--debug", "--keep"}
 		if !equalSlice(out, want) {
 			t.Errorf("got %v, want %v", out, want)
 		}
 	})
 	t.Run("strip_equals_form", func(t *testing.T) {
 		t.Parallel()
-		in := []string{"--debug", "--mcp-config=/tmp/bad.json", "--verbose"}
+		in := []string{"--debug", "--mcp-config=/tmp/bad.json", "--keep"}
 		out := filterDeniedFlags(in)
-		want := []string{"--debug", "--verbose"}
+		want := []string{"--debug", "--keep"}
+		if !equalSlice(out, want) {
+			t.Errorf("got %v, want %v", out, want)
+		}
+	})
+	t.Run("strip_protocol_framing_flags", func(t *testing.T) {
+		t.Parallel()
+		// R100110-INJ-1: --output-format / --input-format / --verbose /
+		// --replay-user-messages are BuildArgs-owned protocol-framing flags;
+		// an operator override would break the stream-json NDJSON parser.
+		// Bare-with-value and equals forms must both be stripped.
+		in := []string{
+			"--output-format", "json",
+			"--input-format=text",
+			"--verbose",
+			"--replay-user-messages",
+			"--keep",
+		}
+		out := filterDeniedFlags(in)
+		want := []string{"--keep"}
 		if !equalSlice(out, want) {
 			t.Errorf("got %v, want %v", out, want)
 		}
