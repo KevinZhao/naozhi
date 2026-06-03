@@ -599,8 +599,15 @@ func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []cli.Eve
 	if proc != nil {
 		return proc.EventEntriesBefore(beforeMS, limit)
 	}
-	out := s.persistedHistoryBefore(beforeMS, limit)
-	sortEntriesByTimeStable(out)
+	out, descSorted := s.persistedHistoryBefore(beforeMS, limit)
+	if descSorted {
+		// persistedHistory was Time-ascending; the backward walk yielded
+		// Time-descending output. A single O(n) reverse gives ascending order,
+		// skipping the O(n log n) stable sort.
+		slices.Reverse(out)
+	} else {
+		sortEntriesByTimeStable(out)
+	}
 	return out
 }
 
@@ -709,7 +716,11 @@ func (s *ManagedSession) EventLastNVisibleCtx(ctx context.Context, visibleTarget
 	if len(mem) > 0 {
 		before = mem[0].Time
 	}
-	var older []cli.EventEntry
+	// Accumulate pages newest-first; each page is strictly older than the
+	// previous. After the loop we reverse-iterate pages to produce the final
+	// older slice in ascending-Time order, avoiding the O(n²) cost of
+	// prepending each chunk into a growing slice on every iteration.
+	var pages [][]cli.EventEntry
 	for page := 0; page < maxVisibleDiskPages && vis < visibleTarget; page++ {
 		if ctx.Err() != nil {
 			break
@@ -723,17 +734,30 @@ func (s *ManagedSession) EventLastNVisibleCtx(ctx context.Context, visibleTarget
 			break // disk exhausted
 		}
 		sortEntriesByTimeStable(chunk)
-		// chunk is chronological and strictly older than `before`; prepend it
-		// ahead of everything collected so far.
-		older = append(chunk, older...)
+		pages = append(pages, chunk)
 		vis += countVisibleEntries(chunk)
 		before = chunk[0].Time
-		if len(older)+len(mem) >= maxTotal {
+		// Compute running total to honour the ceiling without building older yet.
+		total := len(mem)
+		for _, p := range pages {
+			total += len(p)
+		}
+		if total >= maxTotal {
 			break // total payload ceiling
 		}
 	}
-	if len(older) == 0 {
+	if len(pages) == 0 {
 		return mem
+	}
+	// Build older in ascending-Time order: pages were collected newest-first,
+	// so iterate in reverse (oldest page first).
+	totalOlder := 0
+	for _, p := range pages {
+		totalOlder += len(p)
+	}
+	older := make([]cli.EventEntry, 0, totalOlder)
+	for i := len(pages) - 1; i >= 0; i-- {
+		older = append(older, pages[i]...)
 	}
 	return append(older, mem...)
 }
