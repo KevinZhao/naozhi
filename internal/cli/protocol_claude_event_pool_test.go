@@ -150,3 +150,58 @@ func BenchmarkReadEvent(b *testing.B) {
 		}
 	}
 }
+
+// TestReadEventInto_ParityAndBufReuse pins R20260603-PERF-10 (#1676):
+// ReadEventInto must (a) return the same Event/done/err as ReadEvent, and
+// (b) back the returned slice with the caller-supplied buf so the single-event
+// hot path reuses the array instead of allocating a fresh one per frame.
+func TestReadEventInto_ParityAndBufReuse(t *testing.T) {
+	p := &ClaudeProtocol{}
+	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}`
+
+	want, wantDone, wantErr := p.ReadEvent(line)
+	if wantErr != nil || len(want) != 1 {
+		t.Fatalf("ReadEvent baseline err=%v len=%d", wantErr, len(want))
+	}
+
+	var arr [2]Event
+	buf := arr[:0]
+	got, done, err := p.ReadEventInto(line, buf)
+	if err != nil {
+		t.Fatalf("ReadEventInto err=%v", err)
+	}
+	if done != wantDone {
+		t.Errorf("done = %v, want %v", done, wantDone)
+	}
+	if len(got) != 1 || got[0].Type != "assistant" ||
+		got[0].Message == nil || got[0].Message.Content[0].Text != "hi" {
+		t.Fatalf("ReadEventInto parity mismatch: %+v", got)
+	}
+	// The returned slice must alias the caller's array (no fresh backing alloc).
+	if &got[0] != &arr[0] {
+		t.Error("ReadEventInto returned slice not backed by caller buf")
+	}
+
+	// A skip frame returns nil without touching buf.
+	skip := `{"type":"control_response"}`
+	if ev, _, err := p.ReadEventInto(skip, arr[:0]); err != nil || ev != nil {
+		t.Errorf("skip ReadEventInto = (%v, %v), want (nil, nil)", ev, err)
+	}
+}
+
+// BenchmarkReadEventInto guards the zero-extra-alloc claim: reusing a single
+// backing array across frames must not allocate the 1-element slice header
+// that ReadEvent pays each call. Run with -benchmem.
+func BenchmarkReadEventInto(b *testing.B) {
+	p := &ClaudeProtocol{}
+	line := `{"type":"assistant","session_id":"s","message":{"role":"assistant","content":[{"type":"text","text":"hello world"}]}}`
+	var arr [2]Event
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ev, _, err := p.ReadEventInto(line, arr[:0])
+		if err != nil || len(ev) != 1 {
+			b.Fatalf("ReadEventInto err=%v len=%d", err, len(ev))
+		}
+	}
+}
