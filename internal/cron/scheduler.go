@@ -1494,7 +1494,15 @@ func (s *Scheduler) registerStubFromJob(j *Job) bool {
 // would otherwise hit "session not found" because the WS subscribe path
 // has nothing to attach to. This method is the idempotent recovery hook
 // wired into handleSubscribe and /api/sessions/events.
+// EnsureStub is safe to call on a nil *Scheduler: it returns false, matching
+// the nil-safe pattern of NotifyDefault / StartedAt. This matters because a
+// nil *Scheduler stored in a CronView interface is non-nil at the interface
+// level, so a dashboard handler's `h.scheduler != nil` guard does not prevent
+// calls on a typed-nil receiver. R20260603-ARCH-1.
 func (s *Scheduler) EnsureStub(key string) bool {
+	if s == nil {
+		return false
+	}
 	if !sessionkey.IsCronKey(key) {
 		return false
 	}
