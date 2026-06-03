@@ -1808,8 +1808,8 @@ func (h *Handlers) loadHistorySessions() []discovery.RecentSession {
 		}
 	}
 
+	now := time.Now() // R20260603-PERF-12: compute outside lock to keep vDSO off the critical section
 	h.historyCacheMu.Lock()
-	now := time.Now()
 	h.historyCache = all
 	h.historyCacheTime = now
 	// R040034-PERF-5 (#1404): mirror update under the lock so wait-free
