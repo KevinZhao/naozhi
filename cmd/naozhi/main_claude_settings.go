@@ -49,6 +49,34 @@ var claudeEnvAllowedPrefixes = []string{
 	"http_proxy", "https_proxy", "no_proxy",
 }
 
+// proxyEnvKeys is the set of allowed proxy env keys whose VALUE is a URL that
+// steers ALL of naozhi's outbound traffic (Feishu bearer token, message
+// bodies, upstream connectors). R20260603-SEC-5 (#1660): a tampered
+// ~/.claude/settings.json could set HTTPS_PROXY=http://attacker to intercept
+// everything; unlike the API base-URL vars, the proxy value had no scheme
+// guard. We reuse validateClaudeBaseURLEnv (reject non-loopback http://) so a
+// plaintext-http proxy to a remote host is dropped with a warning, while
+// https proxies and loopback http (local dev proxy) stay allowed. NO_PROXY is
+// not a URL and is intentionally excluded from the value check.
+var proxyEnvKeys = map[string]bool{
+	"HTTP_PROXY":  true,
+	"HTTPS_PROXY": true,
+	"http_proxy":  true,
+	"https_proxy": true,
+}
+
+// claudeEnvDenyList draws the same "refuse to propagate" line for the CLAUDE_
+// prefix that awsEnvDenyList draws for AWS_. R20260603-SEC-8 (#1660): the
+// CLAUDE_ prefix is allowlisted wholesale, so a settings.json (writable by a
+// Claude tool) could inject CLI kill-switches / test-mode flags that change
+// security-relevant behaviour of naozhi's downstream shim and CLI children.
+// Block the known dangerous switches; ordinary CLAUDE_ config (model, region,
+// feature toggles) still flows through.
+var claudeEnvDenyList = map[string]bool{
+	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": true,
+	"CLAUDE_CODE_USE_MOCK_RESPONSES":           true,
+}
+
 // awsEnvDenyList 在 AWS_ 前缀允许之上再画一条"禁止跨入"的线：这些键会
 // 改变 AWS 认证来源（角色切换、凭据文件重定向），~/.claude/settings.json
 // 可以被 Claude tool 写入，放行等于给一个不受控的 env 注入通道对
@@ -164,6 +192,13 @@ func filterClaudeEnv(in map[string]string) map[string]string {
 			slog.Warn("claude settings env: refusing to propagate auth-source AWS var", "key", k)
 			continue
 		}
+		// R20260603-SEC-8 (#1660): CLAUDE_ is allowlisted by prefix, so block
+		// the known kill-switch / mock-mode keys that would alter downstream
+		// CLI security behaviour if injected via settings.json.
+		if claudeEnvDenyList[k] {
+			slog.Warn("claude settings env: refusing to propagate CLAUDE_ kill-switch var", "key", k)
+			continue
+		}
 		// R188-SEC-M1: the prefix allowlist restricts key namespace but puts
 		// no constraint on the value. A malicious ~/.claude/settings.json
 		// could set ANTHROPIC_BASE_URL to an attacker-controlled host or
@@ -182,6 +217,16 @@ func filterClaudeEnv(in map[string]string) map[string]string {
 		if claudeBaseURLEnvKeys[k] {
 			if err := validateClaudeBaseURLEnv(v); err != nil {
 				slog.Warn("claude settings env: rejecting unsafe base_url", "key", k, "err", err)
+				continue
+			}
+		}
+		// R20260603-SEC-5 (#1660): proxy vars redirect ALL outbound traffic;
+		// apply the same SSRF/redirect guard as base-URL vars so a tampered
+		// settings.json cannot point HTTP(S)_PROXY at a remote plaintext-http
+		// interceptor. Loopback http and https proxies stay allowed.
+		if proxyEnvKeys[k] {
+			if err := validateClaudeBaseURLEnv(v); err != nil {
+				slog.Warn("claude settings env: rejecting unsafe proxy", "key", k, "err", err)
 				continue
 			}
 		}

@@ -26,6 +26,41 @@ func TestRunHistoryTask_SkipsAfterCancel(t *testing.T) {
 	}
 }
 
+// TestRunHistoryTask_CancelledPathDoesNotTouchWaitGroup pins the
+// R20260603-CODE-3 (#1655) fix: when historyCtx is already cancelled the
+// helper must NOT do a transient historyWg.Add(1)+Done(). We assert this by
+// re-using the same WaitGroup across an already-drained Wait — under the old
+// add-then-compensate shape the late Add could re-add to a WaitGroup whose
+// Wait had already returned and panic with "WaitGroup is reused before
+// previous Wait has returned". With the fix the cancelled call is a pure
+// no-op on the counter, so the sequence is safe.
+func TestRunHistoryTask_CancelledPathDoesNotTouchWaitGroup(t *testing.T) {
+	r := &Router{}
+	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
+
+	// Drain the WaitGroup once so a stray Add() after this point would be a
+	// reuse-before-Wait violation.
+	r.historyWg.Wait()
+
+	r.historyCancel()
+
+	// Refused spawn must not Add to (and then Done) the freshly-drained WG.
+	// If runHistoryTask did Add(1) here it would either panic on reuse or
+	// leave the counter non-zero; the assertion below catches a leak and the
+	// recover() catches a reuse panic.
+	defer func() {
+		if rec := recover(); rec != nil {
+			t.Fatalf("runHistoryTask touched the drained WaitGroup on the cancelled path: %v", rec)
+		}
+	}()
+
+	if r.runHistoryTask(func(_ context.Context) {}) {
+		t.Fatal("runHistoryTask returned true after historyCtx cancelled — must refuse")
+	}
+	// Must not block: counter must still be zero (no transient Add leaked).
+	r.historyWg.Wait()
+}
+
 // TestRunHistoryTask_RunsAndPropagatesCtx confirms the happy path: the
 // goroutine runs, sees the historyCtx, and historyWg.Wait blocks until
 // it returns.
