@@ -677,7 +677,14 @@ func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, cachedPeriod time
 		return false, time.Time{}
 	}
 	if j.LastRunAt.IsZero() {
-		if !j.CreatedAt.IsZero() && now.Sub(j.CreatedAt) > period {
+		// R20260603140013-CR-5: never-run jobs must use the same slack factor as
+		// the already-run branch below. The bare `> period` threshold left no
+		// jitter headroom, so a healthy job whose first scheduled tick landed
+		// inside its jitter window (default up to 30s) was flagged as missed
+		// before it ever had a fair chance to fire. Mirror the already-run
+		// slack (period*missedScheduleSlackNum/missedScheduleSlackDen) so a
+		// period+jitter delay stays under the threshold.
+		if !j.CreatedAt.IsZero() && now.Sub(j.CreatedAt) > period*missedScheduleSlackNum/missedScheduleSlackDen {
 			return true, prev
 		}
 		return false, time.Time{}
