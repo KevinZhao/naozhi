@@ -841,6 +841,14 @@ func (s *ManagedSession) LogSystemEvent(summary string) {
 // lastPrompt, lastActivity, and lastResponse when they haven't been set yet
 // (e.g. after shim reconnect where events were injected directly into the
 // process, bypassing InjectHistory).
+//
+// R20260603000023-PERF-12: only the tail of the log is needed — scanLastSummaries
+// walks backward and stops as soon as all three summaries are found (at most 3
+// matching entries, bounded by the scan horizon). Using EventLastN avoids the
+// full-ring copy (up to 500 EventEntry slots, ~140 KB) that EventEntries
+// allocates unconditionally.
+const extractLastPromptScanN = 64
+
 func (s *ManagedSession) extractLastPromptFromProcess() {
 	if loadAtomicString(&s.lastPrompt) != "" &&
 		loadAtomicString(&s.lastActivity) != "" &&
@@ -851,7 +859,7 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 	if p == nil {
 		return
 	}
-	prompt, activity, response := scanLastSummaries(p.EventEntries())
+	prompt, activity, response := scanLastSummaries(p.EventLastN(extractLastPromptScanN))
 	if prompt != "" && loadAtomicString(&s.lastPrompt) == "" {
 		storeAtomicString(&s.lastPrompt, prompt)
 	}
