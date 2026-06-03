@@ -36,6 +36,38 @@ func TestValidateDaemonName(t *testing.T) {
 	}
 }
 
+// TestBuiltinDaemonNameConstants pins the daemon-name constants to the
+// registry factory entries AND to each constructed daemon's Name(), so a
+// rename of one site without the others fails compilation/this test
+// rather than silently drifting (#1634). The config-translation wiring in
+// cmd/naozhi references the same constants, closing the third site.
+func TestBuiltinDaemonNameConstants(t *testing.T) {
+	registryTestMu.Lock()
+	defer registryTestMu.Unlock()
+
+	// Constant -> the factory expected to carry it.
+	byName := make(map[string]builtinDaemonFactory, len(builtinDaemons))
+	for _, f := range builtinDaemons {
+		byName[f.Name] = f
+	}
+	for _, want := range []string{DaemonAutoTitler, DaemonAttachmentGC} {
+		if _, ok := byName[want]; !ok {
+			t.Errorf("builtinDaemons missing factory for constant %q", want)
+		}
+	}
+
+	deps := DaemonDeps{Router: wrapRouter(newFakeRouter()), Runner: &capturingRunner{}}
+	for _, f := range builtinDaemons {
+		d, err := f.Build(deps)
+		if err != nil {
+			t.Fatalf("Build(%q): %v", f.Name, err)
+		}
+		if got := d.Name(); got != f.Name {
+			t.Errorf("daemon Name() = %q, factory Name = %q (constant drift)", got, f.Name)
+		}
+	}
+}
+
 // TestValidateBuiltinDaemonNames verifies the compiled-in registry is
 // healthy at process start.  This test failing means a future
 // contributor added a daemon with a malformed or duplicate name; fix

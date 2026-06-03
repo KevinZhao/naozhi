@@ -1,17 +1,16 @@
 package cli
 
-// RNEW-PERF-004 (#455): pin the close-vs-notify safety contract that the
-// godoc on notifySubscribers spells out. The unsub-closure path closes
-// sub.ch OUTSIDE subMu.Lock; the notify path holds subMu.RLock across the
-// per-channel send loop so unsub.Lock cannot run until the iteration ends,
-// preventing the send-on-closed-chan panic. This test runs Subscribe →
-// concurrent unsub + Append-driven notify under -race so any future regression
-// (e.g. an attempt to "optimise" notify by dropping the lock before the send
-// loop) trips either the race detector or a real panic on closed-chan send.
-//
-// Coverage rationale: the godoc warning needs a runtime witness; without it,
-// a future maintainer reading the comment alone could be tempted to ship the
-// snapshot-then-unlock micro-opt described in #455.
+// RNEW-PERF-004 (#455) / R20260603000023-PERF-4 (#1647): pin the
+// close-vs-notify safety contract. notifySubscribers now snapshots the
+// subscribers slice header under a short subMu.RLock and RELEASES subMu
+// before the per-subscriber send loop (#1647 — so same-session multi-tab
+// dispatch no longer serialises on subMu). The send-on-closed-chan race
+// that subMu.RLock used to prevent is now guarded by the per-subscriber
+// (*subscriber).mu: signal() observes `closed` under RLock, close() flips it
+// under Lock, and unsub removes via copy-on-write so a lock-free snapshot is
+// never mutated underneath the reader. This test runs Subscribe → concurrent
+// unsub + Append-driven notify under -race so any regression trips either the
+// race detector or a real panic on closed-chan send.
 
 import (
 	"sync"

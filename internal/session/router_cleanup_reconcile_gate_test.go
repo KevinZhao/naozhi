@@ -7,15 +7,19 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
-// TestCleanup_ReconcileGate_NoOpKeepsGaugeCorrect pins R20260602-PERF-1
-// (#1627): a steady-state Cleanup tick with no close / prune and no change
-// in the alive count must NOT corrupt the per-backend SessionActive gauge.
-// The reconcile is now gated, so this verifies the gauge stays correct (the
-// gate must never leave it stale) on the common no-op path.
+// TestCleanup_ReconcileGate_NoOpKeepsGaugeCorrect: a steady-state Cleanup tick
+// with no close / prune must keep the per-backend SessionActive gauge correct.
+// The earlier #1627 reconcile-gate was superseded by the master PERF-5 (#1607)
+// rewrite, which now runs reconcileSessionActiveByBackendLocked unconditionally
+// to derive the authoritative alive total; this test pins that the
+// unconditional reconcile leaves a still-alive session's gauge untouched.
 func TestCleanup_ReconcileGate_NoOpKeepsGaugeCorrect(t *testing.T) {
-	// Drive the labeled gauge to a known-empty baseline for the "" backend.
-	metrics.SessionActiveByBackend.Add(-metrics.SessionActiveByBackend.Get(""), "")
-	metrics.SessionActive.Add(-metrics.SessionActive.Value())
+	// Use a dedicated backend label so a concurrent test mutating the default
+	// "" bucket of the global SessionActiveByBackend gauge cannot pollute this
+	// assertion. reconcileSessionActiveByBackendLocked only touches the label
+	// of sessions actually present, so an isolated label is fully isolated.
+	const backend = "reconcile-gate-noop"
+	resetBackendGauge(t, backend)
 
 	r := &Router{
 		sessions:     make(map[string]*ManagedSession),
@@ -28,6 +32,7 @@ func TestCleanup_ReconcileGate_NoOpKeepsGaugeCorrect(t *testing.T) {
 	// tick untouched (no close, no prune, alive count unchanged).
 	proc := newIdleProc()
 	s := injectSession(r, "key1", proc)
+	s.SetBackend(backend)
 	s.lastActive.Store(time.Now().UnixNano())
 
 	// Seed the gauge to match the live set so reconcile would be a no-op.
@@ -47,12 +52,12 @@ func TestCleanup_ReconcileGate_NoOpKeepsGaugeCorrect(t *testing.T) {
 	}
 }
 
-// TestCleanup_ReconcileGate_PruneDrivesGaugeToZero pins R20260602-PERF-1
-// (#1627): when a session is actually pruned the gate must fire the
-// reconcile so the per-backend gauge is driven down to the new live count.
+// TestCleanup_ReconcileGate_PruneDrivesGaugeToZero: when a session is actually
+// pruned, the unconditional reconcile (master PERF-5 #1607) drives the
+// per-backend gauge down to the new live count.
 func TestCleanup_ReconcileGate_PruneDrivesGaugeToZero(t *testing.T) {
-	metrics.SessionActiveByBackend.Add(-metrics.SessionActiveByBackend.Get(""), "")
-	metrics.SessionActive.Add(-metrics.SessionActive.Value())
+	const backend = "reconcile-gate-prune"
+	resetBackendGauge(t, backend)
 
 	r := &Router{
 		sessions:     make(map[string]*ManagedSession),
@@ -64,6 +69,7 @@ func TestCleanup_ReconcileGate_PruneDrivesGaugeToZero(t *testing.T) {
 	// Dead process aged past pruneTTL → shouldPrune true → unregister.
 	proc := newDeadProc()
 	s := injectSession(r, "key1", proc)
+	s.SetBackend(backend)
 	s.lastActive.Store(time.Now().Add(-1 * time.Hour).UnixNano())
 
 	// Seed the gauge to a non-zero value so we can observe the drive-to-zero.
@@ -74,7 +80,7 @@ func TestCleanup_ReconcileGate_PruneDrivesGaugeToZero(t *testing.T) {
 	if _, ok := r.sessions["key1"]; ok {
 		t.Fatal("precondition: session should have been pruned")
 	}
-	if got := metrics.SessionActiveByBackend.Get(""); got != 0 {
+	if got := metrics.SessionActiveByBackend.Get(backend); got != 0 {
 		t.Errorf("after prune Cleanup: per-backend gauge = %d, want 0 (reconcile must run on prune)", got)
 	}
 }

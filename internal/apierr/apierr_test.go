@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/apierr"
@@ -158,22 +159,37 @@ func TestLocalize(t *testing.T) {
 // capturingHandler is a minimal slog.Handler that collects all logged
 // key-value pairs so tests can assert on log content without involving
 // real log output.
+// capturingHandler is shared via slog.SetDefault, so concurrent t.Parallel()
+// tests (TestLocalize subtests + TestLocalizeDoesNotLogRawSecret) may log
+// through it simultaneously. Guard the attrs slice with a mutex.
 type capturingHandler struct {
+	mu    sync.Mutex
 	attrs []slog.Attr
 }
 
 func (h *capturingHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
 func (h *capturingHandler) WithGroup(_ string) slog.Handler              { return h }
 func (h *capturingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	n := &capturingHandler{attrs: append(h.attrs[:len(h.attrs):len(h.attrs)], attrs...)}
 	return n
 }
 func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	r.Attrs(func(a slog.Attr) bool {
 		h.attrs = append(h.attrs, a)
 		return true
 	})
 	return nil
+}
+
+// snapshot returns a copy of the captured attrs under lock for safe iteration.
+func (h *capturingHandler) snapshot() []slog.Attr {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]slog.Attr(nil), h.attrs...)
 }
 
 // TestLocalizeDoesNotLogRawSecret verifies that slog.Warn inside Localize
@@ -199,7 +215,7 @@ func TestLocalizeDoesNotLogRawSecret(t *testing.T) {
 	}
 
 	// None of the logged attribute values must contain the secret or raw envelope.
-	for _, attr := range handler.attrs {
+	for _, attr := range handler.snapshot() {
 		v := attr.Value.String()
 		if strings.Contains(v, secret) {
 			t.Errorf("slog attribute %q contains secret key: %q", attr.Key, v)

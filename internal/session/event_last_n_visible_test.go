@@ -174,3 +174,52 @@ func TestEventLastNVisibleCtx_CtxCanceled(t *testing.T) {
 		t.Errorf("visible=%d want 0 (memory all-internal, disk skipped)", visibleCount(got))
 	}
 }
+
+// TestEventLastNVisibleCtx_MultiPageChronological pins the single-concatenation
+// fix (R20260603000023-PERF-2 / #1622): when multiple disk pages are loaded, the
+// final result must be strictly chronological even though pages are accumulated
+// in newest-first order and only assembled once at the end.
+func TestEventLastNVisibleCtx_MultiPageChronological(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	// Memory: 5 internal events, times 901..905.
+	for i := 0; i < 5; i++ {
+		s.persistedHistory = append(s.persistedHistory, cli.EventEntry{
+			Time: int64(901 + i),
+			Type: "tool_use",
+		})
+	}
+	// Disk: 9 visible entries spread across 3 pages of 3.
+	// pagingHistorySource returns chunks in chronological order already.
+	var disk []cli.EventEntry
+	for i := 1; i <= 9; i++ {
+		disk = append(disk, cli.EventEntry{Time: int64(i * 100), Type: "text"})
+	}
+	fake := &pagingHistorySource{all: disk}
+	s.SetHistorySource(fake)
+
+	got := s.EventLastNVisibleCtx(context.Background(), 9, maxVisibleTotal)
+
+	// Must reach at least 9 visible entries from disk.
+	if visibleCount(got) < 9 {
+		t.Errorf("visible=%d want >=9", visibleCount(got))
+	}
+	// Result must be strictly non-decreasing in Time.
+	for i := 1; i < len(got); i++ {
+		if got[i].Time < got[i-1].Time {
+			t.Errorf("not chronological at index %d: Time %d < %d",
+				i, got[i].Time, got[i-1].Time)
+		}
+	}
+	// Memory tail (times 901..905) must appear after all disk entries.
+	// The newest disk entry is time 900; memory starts at 901.
+	diskNewest := int64(0)
+	for _, e := range got {
+		if e.Type != "tool_use" && e.Time > diskNewest {
+			diskNewest = e.Time
+		}
+	}
+	if diskNewest != 900 {
+		t.Errorf("newest disk entry Time=%d want 900", diskNewest)
+	}
+}

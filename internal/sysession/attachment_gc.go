@@ -82,7 +82,7 @@ func newAttachmentGC(deps DaemonDeps) (Daemon, error) {
 	return a, nil
 }
 
-func (a *attachmentGC) Name() string        { return "attachment-gc" }
+func (a *attachmentGC) Name() string        { return DaemonAttachmentGC }
 func (a *attachmentGC) Description() string { return "回收超过 TTL 且无引用的附件文件" }
 
 // Configure reads the attachment-gc knobs. Unknown keys ignored
