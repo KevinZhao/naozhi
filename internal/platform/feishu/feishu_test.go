@@ -1371,3 +1371,30 @@ func TestFetchBotInfo_EmptyOpenID(t *testing.T) {
 		t.Errorf("error = %v, want substring 'empty open_id'", err)
 	}
 }
+
+// TestWebhook_OversizedSignatureRejected verifies R20260603-SEC-1: an
+// X-Lark-Signature header longer than maxWebhookSigLen is rejected with 401
+// before verifySignature is called, preventing allocation amplification.
+func TestWebhook_OversizedSignatureRejected(t *testing.T) {
+	t.Parallel()
+	f := makeWebhookFeishu(Config{
+		AppID:      "id",
+		AppSecret:  "secret",
+		EncryptKey: "my_secret_key",
+	})
+	mux := http.NewServeMux()
+	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {})
+
+	body := buildV2MessageBody("ev_overlong", "oc_chat1", "p2p", "hello")
+	req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(string(body)))
+	req.Header.Set("X-Lark-Request-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
+	req.Header.Set("X-Lark-Request-Nonce", "nonce123")
+	// Signature longer than maxWebhookSigLen (256).
+	req.Header.Set("X-Lark-Signature", strings.Repeat("a", maxWebhookSigLen+1))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 for oversized signature header", w.Code)
+	}
+}
