@@ -886,10 +886,13 @@ func (r *Router) shutdown() {
 		}
 	}
 
-	// Snapshot sessions for saving outside lock
-	sessionsCopy := make(map[string]*ManagedSession, len(r.sessions))
-	for k, v := range r.sessions {
-		sessionsCopy[k] = v
+	// Snapshot sessions for saving outside lock.
+	// R20260603-PERF-1: use a value slice instead of a map copy so we avoid
+	// allocating hashmap buckets + load-factor slack; saveStoreSlice only
+	// iterates values, so the key is never needed here.
+	sessionsCopy := make([]*ManagedSession, 0, len(r.sessions))
+	for _, v := range r.sessions {
+		sessionsCopy = append(sessionsCopy, v)
 	}
 	storePath := r.storePath
 	// R220123-PERF-19 (#1638): sorted snapshot for the final flush too, so
@@ -916,7 +919,7 @@ func (r *Router) shutdown() {
 	// all un-persisted state silently otherwise. Each error chain is walked
 	// once — the three save paths are independent, so sharing a single flag
 	// would mis-attribute a disk-full on saveStore to saveKnownIDs.
-	if err := saveStore(storePath, sessionsCopy); err != nil {
+	if err := saveStoreSlice(storePath, sessionsCopy); err != nil {
 		slog.Error("save session store on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
 	if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
