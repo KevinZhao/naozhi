@@ -855,8 +855,11 @@ func (s *runStore) Append(run *CronRun) {
 	lock.Lock()
 	defer lock.Unlock()
 	s.cacheHeadPush(run.JobID, summarySrc.summary())
-	if s.enableTrimGC && !s.skipAppendTrim(run.JobID) {
-		s.trimJobLocked(run.JobID, time.Now())
+	if s.enableTrimGC {
+		now := time.Now()
+		if !s.skipAppendTrim(run.JobID, now) {
+			s.trimJobLocked(run.JobID, now)
+		}
 	}
 }
 
@@ -893,7 +896,7 @@ func (s *runStore) Append(run *CronRun) {
 // existing jobLock + entry.mu pair runs in <100ns on the warm path
 // already; the remaining cost is dominated by ringRead's modulo, not
 // the lock itself.
-func (s *runStore) skipAppendTrim(jobID string) bool {
+func (s *runStore) skipAppendTrim(jobID string, now time.Time) bool {
 	// Race-detector friendly contract assertion: panics when jobLock is
 	// currently free, the unambiguous signature of a caller that forgot to
 	// lock. False negatives accepted (another goroutine may hold the lock
@@ -931,7 +934,7 @@ func (s *runStore) skipAppendTrim(jobID string) bool {
 		if ts.IsZero() {
 			ts = oldest.StartedAt
 		}
-		cutoff := time.Now().Add(-s.keepWindow)
+		cutoff := now.Add(-s.keepWindow)
 		if !ts.After(cutoff) {
 			windowSafe = false
 		}
