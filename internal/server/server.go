@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
-	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/cryptoutil"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
@@ -90,7 +89,7 @@ type Server struct {
 
 	// ── core deps ──────────────────────────────────────
 	router     *session.Router  // 读写: server.go, dashboard.go, dashboard_system.go, send.go, takeover.go, consumer.go
-	scheduler  *cron.Scheduler  // 读写: server.go, dashboard.go, dashboard_cron.go, dashboard_cron_transcript.go, wshub.go
+	scheduler  cronScheduler    // 读写: server.go, dashboard.go, dashboard_cron.go, dashboard_cron_transcript.go, wshub.go (narrowed to the cronScheduler consumer view, #1648)
 	hub        *Hub             // 读写: server.go, dashboard.go, send.go (WebSocket hub)
 	projectMgr *project.Manager // 读写: server.go, dashboard.go, project_api.go, project_files.go
 
@@ -275,7 +274,15 @@ func buildServer(opts ServerOptions) *Server {
 	platforms := opts.Platforms
 	agents := opts.Agents
 	agentCommands := opts.AgentCommands
-	scheduler := opts.Scheduler
+	// scheduler is boxed into the cronScheduler consumer interface (#1648).
+	// A nil *cron.Scheduler must become a genuinely nil interface, not a
+	// non-nil interface wrapping a nil pointer — otherwise every
+	// `s.scheduler != nil` cron-enabled guard would fire for scheduler-less
+	// deployments (and tests) and panic on the first method call.
+	var scheduler cronScheduler
+	if opts.Scheduler != nil {
+		scheduler = opts.Scheduler
+	}
 	defaultBackend := opts.Backend
 	// defaultTag is the fallback ReplyFooter tag for sessions whose
 	// Backend() is empty (legacy stores predating the multi-backend Backend

@@ -1779,6 +1779,131 @@ func (s *Scheduler) observeSuccessLatency(startedAt time.Time, result SendResult
 	}
 }
 
+// getSessionArgs bundles the inputs to executeGetSession (the spawn phase of
+// executeOpt). A struct literal keeps the call site readable — like
+// preflightArgs — and lets new spawn-phase inputs land here without re-flowing
+// a long positional signature. RNEW-003 (#423).
+type getSessionArgs struct {
+	// ctx is the spawn-only timeout context (s.stopCtx + jobTimeout). It owns
+	// the GetOrCreate call exclusively; executeGetSession cancels it via
+	// spawnCancel on the success path so its *time.Timer frees before Send.
+	ctx         context.Context
+	spawnCancel context.CancelFunc
+	// key / opts feed router.GetOrCreate. opts is the per-run cloned AgentOpts
+	// (Exempt + backend/workspace overrides already applied by executeOpt).
+	key  string
+	opts AgentOpts
+	// job / snap carry the run's identity. Failure branches route job into
+	// finishRun and read snap.prompt/workDir/fresh + labelOrID for the notice.
+	job  *Job
+	snap jobSnapshot
+	// runID / startedAt / trigger pair the synthetic finishRun with the
+	// emitRunStarted frame already broadcast by executeOpt.
+	runID     string
+	startedAt time.Time
+	trigger   TriggerKind
+	// lg is the per-run logger; notifyTo is the resolved IM target for the
+	// session-error notice (canceled path stays silent — shutdown races
+	// should not spam IM).
+	lg       *slog.Logger
+	notifyTo NotifyTarget
+	// finalizer is the per-run cleanup hook threaded into finishRun on the
+	// failure branches; stubRefresh re-registers the sidebar row when a fresh
+	// spawn aborted. inflight receives the early SessionID capture on success.
+	finalizer   *runFinalizer
+	stubRefresh stubRefresher
+	inflight    *runInflight
+}
+
+// executeGetSession runs the spawn phase of a cron execution: GetOrCreate
+// under the spawn-only ctx, classify + terminate on error, then free the
+// spawn timer and capture the session_id into the inflight view on success.
+//
+// Return contract:
+//   - abort=true  → executeGetSession already drove finishRun (+ deliverNotice
+//     on the non-cancel error branch) and ran stubRefresh; the caller MUST
+//     return from executeOpt immediately without touching sess.
+//   - abort=false → sess is the live session and spawnStart is the pre-
+//     GetOrCreate timestamp the caller uses to size the send budget warn.
+//
+// CTX OWNERSHIP (RNEW-003 / #423): this is the single owner of args.ctx — it
+// is consumed by GetOrCreate and cancelled here on the success path (R250-GO-15
+// / #1078) so its underlying *time.Timer does not idle through the Send window.
+// The caller's defer spawnCancel() remains the idempotent safety net for the
+// error branches (which return before reaching the success-path cancel).
+func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStart time.Time, abort bool) {
+	a.inflight.setPhase(PhaseSpawning)
+	// R250-CR-22 (#1155): capture spawnStart immediately before GetOrCreate
+	// so the "send budget exceeds job/2" warn measures actual spawn time, not
+	// (jitter + spawn). startedAt is captured pre-jitter for the dashboard
+	// "running 12s" badge (true wall-clock from CAS), but the warn is
+	// calibrated against jobTimeout/2 to detect when the spawn phase alone
+	// consumed too much of the budget — folding jitter (default up to 30s)
+	// into that measurement triggers false positives on healthy jobs whose
+	// schedule landed unlucky in the jitter window.
+	spawnStart = time.Now()
+	sess, _, err := s.router.GetOrCreate(a.ctx, a.key, a.opts)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			// Parent ctx cancelled mid-flight (graceful shutdown or job
+			// deletion overlapping execute). The job will either be re-run
+			// on the next tick or is intentionally gone; either way an IM
+			// notification would be spam and the stored LastError would
+			// falsely blame the job itself.
+			a.lg.Info("cron session cancelled", "err", err)
+			s.finishRun(finishArgs{
+				job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
+				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
+				skipPersist: true, // 与 historical recordResult skip 一致
+				prompt:      a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
+				finalizer: a.finalizer,
+			})
+			a.stubRefresh.run()
+			return nil, spawnStart, true
+		}
+		state, errClass := classifyExecError(err, ErrClassSessionError)
+		if errClass == ErrClassDeadlineExceeded {
+			a.lg.Info("cron session deadline exceeded", "err", err)
+		} else {
+			a.lg.Error("cron session error", "err", err)
+		}
+		s.finishRun(finishArgs{
+			job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
+			state: state, errClass: errClass, errMsg: "session error: " + err.Error(),
+			prompt: a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
+			finalizer: a.finalizer,
+		})
+		s.deliverNotice(a.notifyTo, formatCronNotice(a.snap.labelOrID(), "执行跳过，请稍后重试。"))
+		a.stubRefresh.run()
+		return nil, spawnStart, true
+	}
+	// R250-GO-15 (#1078): GetOrCreate consumed ctx; nothing below references
+	// it (Send uses sendCtx). Cancel now to free the underlying *time.Timer
+	// instead of waiting for the function-scoped defer at executeOpt return.
+	// On a 500-job-deep deployment with 5min jobTimeout this trims up to
+	// ~500 idle timers off runtime timerproc during the Send window. The
+	// caller's defer remains the idempotent safety net (cancel is a no-op on
+	// second invocation). Placed AFTER the err-return block above so an early
+	// return on session error still trips that defer.
+	a.spawnCancel()
+
+	// R242-ARCH-22 (#766): populate inflight.SessionID as soon as
+	// GetOrCreate returns. Persistent-mode runs reuse a session that
+	// already carries its CLI session_id (set during the original spawn's
+	// init handshake), so sess.SessionID() is non-empty here. Fresh-mode
+	// runs spawn a new CLI whose session_id is only stamped after the
+	// init turn completes — sess.SessionID() returns "" in that window
+	// and the post-Send setSessionID remains the authoritative write.
+	// Without this early capture, KnownSessionIDs / IsExcluded probes during
+	// the Send window miss the in-flight run on persistent-mode jobs.
+	// setSessionID is idempotent and same-value writes fast-path so the
+	// post-Send call is a no-op when the IDs match.
+	if sid := sess.SessionID(); sid != "" {
+		a.inflight.setSessionID(sid)
+	}
+	return sess, spawnStart, false
+}
+
 // applyJitter 在执行 cron job 前引入一段随机延迟，用来把"整点共振起跑"的
 // CPU / API 峰值打散。窗口上界 = min(jitterMax, period/4)：
 //   - 5m 周期 → 最多抖 75s（不蚕食 1m 节奏）
