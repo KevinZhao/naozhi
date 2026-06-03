@@ -1035,9 +1035,6 @@ func (s *shimServer) runCommandLoop(
 			postAuthLR.N = int64(maxClientLineBytes) + 1 // reset per-line limit
 			line, err := reader.ReadBytes('\n')
 			if err != nil {
-				if postAuthLR.N == 0 {
-					slog.Warn("post-auth line limit exceeded, disconnecting")
-				}
 				return
 			}
 			// Enforce line size limit (bufio.NewReaderSize only sets buffer, not max line).
