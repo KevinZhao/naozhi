@@ -154,14 +154,18 @@ func (s *Scheduler) containsSessionID(sessionID string) bool {
 	// caller is rate-limited by user message frequency — paying ~500ns
 	// per probe is acceptable until the broader R250-PERF-7 cache
 	// refactor lands. Tracking via the issue title.
-	s.mu.RLock()
-	for _, j := range s.jobs {
-		if j.LastSessionID == sessionID {
-			s.mu.RUnlock()
-			return true
+	if func() bool {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		for _, j := range s.jobs {
+			if j.LastSessionID == sessionID {
+				return true
+			}
 		}
+		return false
+	}() {
+		return true
 	}
-	s.mu.RUnlock()
 
 	found := false
 	s.rangeRunningSessionIDs(func(sid string) bool {
@@ -240,14 +244,16 @@ func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
 	jobIDsPtr := jobIDsScratchPool.Get().(*[]string)
 	jobIDs := (*jobIDsPtr)[:0]
 
-	s.mu.RLock()
-	for id, j := range s.jobs {
-		jobIDs = append(jobIDs, id)
-		if j.LastSessionID != "" {
-			out[j.LastSessionID] = struct{}{}
+	func() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		for id, j := range s.jobs {
+			jobIDs = append(jobIDs, id)
+			if j.LastSessionID != "" {
+				out[j.LastSessionID] = struct{}{}
+			}
 		}
-	}
-	s.mu.RUnlock()
+	}()
 
 	// In-flight runs may have a SessionID set even before the run
 	// terminates (set by setSessionID after GetOrCreate returns).
