@@ -57,6 +57,78 @@ func TestFilterClaudeEnv_BaseURLGuard(t *testing.T) {
 	}
 }
 
+// TestFilterClaudeEnv_ProxyGuard pins R20260603-SEC-5 (#1660): proxy env vars
+// from settings.json get the same SSRF/redirect guard as base-URL vars, so a
+// remote plaintext-http interceptor is dropped while https / loopback proxies
+// pass. NO_PROXY is not a URL and must pass through unmodified.
+func TestFilterClaudeEnv_ProxyGuard(t *testing.T) {
+	cases := []struct {
+		name string
+		in   map[string]string
+		want map[string]string
+	}{
+		{
+			name: "remote plaintext http proxy rejected",
+			in:   map[string]string{"HTTPS_PROXY": "http://attacker.example.com:3128"},
+			want: map[string]string{},
+		},
+		{
+			name: "lowercase remote http proxy rejected",
+			in:   map[string]string{"https_proxy": "http://evil.test"},
+			want: map[string]string{},
+		},
+		{
+			name: "https proxy allowed",
+			in:   map[string]string{"HTTPS_PROXY": "https://proxy.corp.example.com:443"},
+			want: map[string]string{"HTTPS_PROXY": "https://proxy.corp.example.com:443"},
+		},
+		{
+			name: "loopback http proxy allowed",
+			in:   map[string]string{"HTTP_PROXY": "http://127.0.0.1:8888"},
+			want: map[string]string{"HTTP_PROXY": "http://127.0.0.1:8888"},
+		},
+		{
+			name: "no_proxy passes through untouched",
+			in:   map[string]string{"NO_PROXY": "localhost,.internal"},
+			want: map[string]string{"NO_PROXY": "localhost,.internal"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := filterClaudeEnv(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Fatalf("key %q: got %q, want %q", k, got[k], v)
+				}
+			}
+		})
+	}
+}
+
+// TestFilterClaudeEnv_ClaudeKillSwitchDenied pins R20260603-SEC-8 (#1660):
+// known CLAUDE_CODE_* kill-switch / mock-mode keys are refused even though the
+// CLAUDE_ prefix is allowlisted, while ordinary CLAUDE_ config still flows.
+func TestFilterClaudeEnv_ClaudeKillSwitchDenied(t *testing.T) {
+	in := map[string]string{
+		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+		"CLAUDE_CODE_USE_MOCK_RESPONSES":           "1",
+		"CLAUDE_CONFIG_DIR":                        "/home/x/.claude",
+	}
+	got := filterClaudeEnv(in)
+	if _, ok := got["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]; ok {
+		t.Error("kill-switch CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC was propagated")
+	}
+	if _, ok := got["CLAUDE_CODE_USE_MOCK_RESPONSES"]; ok {
+		t.Error("kill-switch CLAUDE_CODE_USE_MOCK_RESPONSES was propagated")
+	}
+	if got["CLAUDE_CONFIG_DIR"] != "/home/x/.claude" {
+		t.Errorf("ordinary CLAUDE_ var dropped: got %q", got["CLAUDE_CONFIG_DIR"])
+	}
+}
+
 func TestValidateClaudeBaseURLEnv(t *testing.T) {
 	cases := []struct {
 		v       string
