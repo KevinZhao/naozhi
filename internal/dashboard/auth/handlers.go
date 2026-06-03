@@ -324,6 +324,7 @@ func (a *Handlers) ServeLoginPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
 	if _, err := w.Write([]byte(loginPageHTML)); err != nil {
 		slog.Debug("serve login page", "err", err)
@@ -368,7 +369,7 @@ func buildLoginPageCSP() string {
 	if len(styleHashes) > 0 {
 		styleSrc = strings.Join(styleHashes, " ")
 	}
-	return "default-src 'none'; script-src " + scriptSrc + "; style-src " + styleSrc + "; connect-src 'self'"
+	return "default-src 'none'; script-src " + scriptSrc + "; style-src " + styleSrc + "; connect-src 'self'; frame-ancestors 'none'"
 }
 
 // Separate regexes per tag: a single `</(?:script|style)>` alternation would

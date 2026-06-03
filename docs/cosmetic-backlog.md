@@ -486,3 +486,11 @@
 - [R20260603040203-CODE-COS-1] jobIDsScratchCapDrop 内联注释 "2000 string slots" 硬编码，若 maxJobsHardCap 变更会静默漂移，宜改 4*maxJobsHardCap 公式 — internal/cron/scheduler_session.go:64
 - [R20260603040203-ARCH-COS-1] runShutdown 顺序契约散落三处(main.go prose + runshutdown.go godoc + 两个 test)，顺序变更需同步三地 — cmd/naozhi/runshutdown.go:8
 - [R20260603040203-SEC-COS-1] selfupdate.go:419 testHTTPTransport 包级可变变量供测试绕过 TLS，宜加 build tag 或生产路径 panic-guard 防泄漏 — internal/selfupdate/selfupdate.go:419
+- [R20260603-GO-001] snapshotKnownIDsSortedLocked 在 RLock 下写 cache 字段,当前仅单 ticker 调用非 live race,但未来加 RLock reader 会触发 — internal/session/router_cleanup.go:586
+- [R20260603-GO-004] watchdogParkedInterruptGoroutines 用 expvar.NewInt 包级注册,prod 单进程 init 仅一次无害,缺 sync.Once 守卫 — internal/cron/scheduler_run.go:796
+- [R20260603-SEC-11] sysession Runner prompt 经 stdin 未做 NUL 检查(stdin 非 C-string 边界,非真利用面) — internal/sysession/runner.go:280
+- [R20260603-CR-11] jitterSleep 的 int64(window)<=0 二次守卫在 window>0 后不可达(注释自称 defensive) — internal/cron/scheduler_run.go:1810
+- [R20260603-SEC-9] feishu verifySignature 拼接无长度前缀(SHA-256 抗碰撞已缓解) — internal/platform/feishu/signature.go:48
+- [R20260603-SEC-10] memory negCache slug 未归一化大小写,case 变体绕过负缓存(有 cap+限流兜底) — internal/dashboard/ext/memory/handler.go:237
+- [R20260603-ARCH-3] Server struct ~48 字段聚合器含 candidates-for-removal 死字段 — internal/server/server.go:82
+- [R20260603-ARCH-5] runStore.Append over-cap-truncate-retry 块重复两份 — internal/cron/runstore.go:712
