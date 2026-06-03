@@ -266,12 +266,19 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 		// preserved for the next call. Slices wider than batchScratchMaxCap
 		// are dropped (left for GC) instead of pinning an outsized array.
 		putScratch := func() {
-			if cap(out) <= batchScratchMaxCap && cap(spans) <= batchScratchMaxCap && cap(times) <= batchScratchMaxCap {
-				bs.out = out[:0]
-				bs.spans = spans[:0]
-				bs.times = times[:0]
-				batchScratchPool.Put(bs)
+			if cap(out) > batchScratchMaxCap {
+				out = nil
 			}
+			if cap(spans) > batchScratchMaxCap {
+				spans = nil
+			}
+			if cap(times) > batchScratchMaxCap {
+				times = nil
+			}
+			bs.out = out[:0]
+			bs.spans = spans[:0]
+			bs.times = times[:0]
+			batchScratchPool.Put(bs)
 		}
 		if len(spans) == 0 {
 			putScratch()
