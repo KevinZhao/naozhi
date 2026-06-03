@@ -25,13 +25,12 @@ import (
 // imports metrics and references each counter via the structural test
 // below).
 func TestR250GO20_StopBudgetTriggerCounterBumps(t *testing.T) {
-	withShortStopBudget(t, 30*time.Millisecond)
-
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
 		MaxJobs:   5,
 	})
+	withShortStopBudget(t, s, 30*time.Millisecond)
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

@@ -860,7 +860,19 @@ func watchdogInterruptTimeout() time.Duration {
 // goroutine count drops from O(in-flight runs) to ~0. The deadline /
 // cancel semantics are preserved exactly: the callback inspects
 // ctx.Err() the same way the goroutine used to.
-func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan abortResult {
+//
+// R20260603140013-GO-1 (#1705): returns context.AfterFunc's stop fn so
+// the caller can deregister the callback on the success / non-deadline
+// path BEFORE cancelling ctx. Without it, sendCancel() always ends ctx
+// with Canceled, the runtime still spawns the callback goroutine, and it
+// does a wasted chan send of a zero abortResult{} — one extra goroutine
+// spawn + chan send per successful cron Send (and 500 at once on a
+// 500-job shutdown burst). When stop() returns true the callback will
+// NOT run, so the caller MUST NOT block on the channel; stop() returning
+// false means the callback already fired (deadline path or a cancel that
+// raced the deadline) and a value is or will be on the channel. The nil-
+// guard fast path returns a no-op stop (callback already satisfied).
+func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) (<-chan abortResult, func() bool) {
 	// R249-GO-3: defensive nil guard. A nil ctx would panic on
 	// context.AfterFunc; a nil sess would panic on InterruptViaControl
 	// when the deadline path fires. Both are caller bugs (production wires
@@ -875,10 +887,13 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 	if ctx == nil || sess == nil {
 		ch := make(chan abortResult, 1)
 		ch <- abortResult{}
-		return ch
+		// No callback was registered, so the result is already on ch:
+		// return a no-op stop reporting false (== "already satisfied, read
+		// the channel") so the caller's success-path drain still works.
+		return ch, func() bool { return false }
 	}
 	ch := make(chan abortResult, 1)
-	context.AfterFunc(ctx, func() {
+	stop := context.AfterFunc(ctx, func() {
 		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			ch <- abortResult{}
 			return
@@ -952,7 +967,7 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 			ch <- abortResult{outcome: InterruptError, fired: true}
 		}
 	})
-	return ch
+	return ch, stop
 }
 
 // sendWithWatchdog runs sess.Send under a deadline-watchdog and returns
@@ -978,12 +993,29 @@ func sendWithWatchdog(sendCtx context.Context, sendCancel context.CancelFunc, se
 	// runDeadlineWatchdog for the rationale (must fire BEFORE Send
 	// returns, otherwise Process.State has already flipped to Ready and
 	// InterruptViaControl returns ErrNoActiveTurn → no-op).
-	abortCh := runDeadlineWatchdog(sendCtx, sess)
+	abortCh, stopWatchdog := runDeadlineWatchdog(sendCtx, sess)
 
 	// Direct Send without sendWithBroadcast — cron jobs notify via the
 	// IM deliverNotice path (resolveNotifyTarget + platform.Reply) and
 	// the cron_run_ended WS frame.
 	result, err := sess.Send(sendCtx, text)
+
+	// R20260603140013-GO-1 (#1705): deregister the AfterFunc callback
+	// before cancelling ctx. On the success / non-deadline-error path the
+	// deadline never fired, so stopWatchdog() returns true and the runtime
+	// never spawns the callback goroutine — we save a goroutine spawn +
+	// chan send per Send (×500 on a shutdown burst). When stop succeeds the
+	// callback will NOT run, so there is nothing to drain: synthesize the
+	// not-fired result the callback would have published. When it returns
+	// false the callback already fired (deadline path, or a cancel that
+	// raced the deadline) and a value is or will be on abortCh, so we still
+	// cancel + block on it to keep the original ordering guarantee (the
+	// in-flight InterruptViaControl must finish before the next
+	// session.Reset).
+	if stopWatchdog() {
+		sendCancel()
+		return result, abortResult{}, err
+	}
 
 	// Cancel sendCtx so the watchdog returns promptly on the success /
 	// non-deadline error path; on the deadline path it's already done.

@@ -1351,8 +1351,32 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		}
 		return nil, err
 	}
+	// (#1702) TOCTOU guard 1 in spawnSession can return an existing alive
+	// session with err==nil (a concurrent caller won the race). In that case
+	// the err!=nil block above never runs, so a set stuck flag would be
+	// silently consumed and the ErrShimStuck diagnostic lost. We cannot wrap
+	// a successful reuse as an error (the session is usable), but we must not
+	// swallow the signal that the shim socket was still bound after the wait,
+	// so surface it via a Warn instead.
+	warnShimStuckReuse(stuck, key)
 	// spawnSession already called notifyChange on success
 	return s, nil
+}
+
+// warnShimStuckReuse surfaces the #1702 diagnostic: when ResetAndRecreate set
+// the per-key shimStuckOnReset flag (the shim socket was still bound after the
+// gone-wait) but spawnSession nonetheless returned a usable session without
+// error (TOCTOU guard reused a concurrently-spawned session), the stuck flag
+// would otherwise be silently consumed. Emitting a Warn keeps the actionable
+// "socket was stuck" signal visible to operators even on the success path.
+// Extracted as a free function so the decision is unit-testable without driving
+// the full concurrent spawn race.
+func warnShimStuckReuse(stuck bool, key string) {
+	if !stuck {
+		return
+	}
+	slog.Warn("shim socket was still bound after ResetAndRecreate wait, but spawnSession reused an existing session (TOCTOU race); ErrShimStuck not wrapped, surfacing stuck diagnostic via log",
+		"key", key)
 }
 
 // RenameSession moves a session entry from oldKey to newKey, preserving the

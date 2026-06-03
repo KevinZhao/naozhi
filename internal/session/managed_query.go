@@ -558,7 +558,16 @@ func (s *ManagedSession) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS i
 	proc := s.loadProcess()
 	if proc != nil {
 		// Live path: interface has no append variant; fall back to allocating.
-		return append(dst, proc.EventEntriesSince(afterMS)...)
+		// proc.EventEntriesSince already returns a freshly allocated slice the
+		// caller owns, so when dst is empty (single-tab common case) we can hand
+		// it back directly and skip the extra append copy. This stays within the
+		// documented ownership contract: the returned slice does not share dst's
+		// backing array (dst is nil/empty), and the caller must not retain it.
+		ev := proc.EventEntriesSince(afterMS)
+		if len(dst) == 0 {
+			return ev
+		}
+		return append(dst, ev...)
 	}
 	s.historyMu.RLock()
 	if n := len(s.persistedHistory); n == 0 || (s.persistedHistorySorted && s.persistedHistory[n-1].Time <= afterMS) {

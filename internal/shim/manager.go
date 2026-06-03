@@ -1495,6 +1495,13 @@ func shimEndpointEnvDropped(kv string) bool {
 // validateShimEndpointURL enforces https:// unless the host is loopback
 // (localhost / 127.0.0.0/8 / ::1), for which plain http is allowed so local
 // mock gateways still work. Mirrors filterClaudeEnv's validateClaudeBaseURLEnv.
+//
+// R20260603150052-SEC-7 (#1713): even an https:// target must not point at a
+// literal internal IP (loopback excepted for local mocks). Without this, an
+// operator rc that exports ANTHROPIC_BASE_URL=https://169.254.169.254/... would
+// steer the CLI's Anthropic client — API key in hand — at the EC2 IMDS or an
+// internal admin port. We only inspect literal IPs here (no DNS resolution at
+// env-filter time); hostname-based rebinding is out of scope for this guard.
 func validateShimEndpointURL(v string) error {
 	u, err := url.Parse(v)
 	if err != nil {
@@ -1502,6 +1509,10 @@ func validateShimEndpointURL(v string) error {
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "https":
+		host := u.Hostname()
+		if ip := net.ParseIP(host); ip != nil && shimEndpointInternalIP(ip) && !ip.IsLoopback() {
+			return fmt.Errorf("https:// to internal IP %q rejected (SSRF/IMDS guard)", host)
+		}
 		return nil
 	case "http":
 		host := u.Hostname()
@@ -1514,6 +1525,15 @@ func validateShimEndpointURL(v string) error {
 		return fmt.Errorf("plain http:// to non-loopback host %q rejected (SSRF/redirect guard); use https://", host)
 	}
 	return fmt.Errorf("scheme %q not allowed; use https://", u.Scheme)
+}
+
+// shimEndpointInternalIP reports whether ip falls in the SSRF deny-set:
+// loopback, RFC1918/ULA private, link-local (incl. 169.254.0.0/16 IMDS), or the
+// unspecified address. Mirrors weixin's rejectInternalIP deny-set.
+func shimEndpointInternalIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified()
 }
 
 // kvKeyPrefix returns the key part (before '=') of a KEY=value env string,

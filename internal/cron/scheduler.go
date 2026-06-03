@@ -1117,10 +1117,14 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		maxJobs:        cfg.MaxJobs,
 		maxJobsPerChat: maxPerChat,
 		execTimeout:    cfg.ExecTimeout,
-		// R249-CR-3 (#947): snapshot the package-level default into a
-		// per-instance field so tests in t.Parallel can override their
-		// own Scheduler's budget without racing each other on a global.
-		stopBudget:          stopBudget,
+		// R249-CR-3 (#947): seed the per-instance field so tests in
+		// t.Parallel can override their own Scheduler's budget without
+		// racing each other on a global.
+		// R20260603150052-GO-2 (#1712): seed directly from the
+		// defaultStopBudget const instead of a package-level var. Tests
+		// inject a short budget via WithStopBudgetField on the instance,
+		// so the global var (and the Stop() fallback that read it) is gone.
+		stopBudget:          defaultStopBudget,
 		location:            loc,
 		notifyDefault:       cfg.NotifyDefault,
 		allowedRoot:         cfg.AllowedRoot,
@@ -1576,19 +1580,14 @@ const defaultStopBudget = 30 * time.Second
 // a package-level var — package vars under t.Parallel races silently.
 const gcWaitBudget = 5 * time.Second
 
-// stopBudget is the active stop budget used by Scheduler.Stop(). Tests
-// MUST mutate it only through the WithStopBudget seam in
-// scheduler_testutil_test.go so the var swap is paired with a
-// t.Cleanup restore — direct writes from t.Parallel tests would race
-// a concurrent Stop on another Scheduler instance with real
-// wall-clock timeouts.
-var stopBudget = defaultStopBudget
-
-// (R248-DEADCODE-24 / #1216) WithStopBudget moved to
-// scheduler_testutil_test.go: it is test-only and previously living in
-// production scheduler.go pinned dead surface area in the production
-// binary. Same-package _test.go retains access to the unexported
-// stopBudget without changing test call sites.
+// R20260603150052-GO-2 (#1712): the package-level `var stopBudget`
+// (formerly the active budget for Scheduler.Stop) and its WithStopBudget
+// seam are gone. NewScheduler now seeds the per-instance
+// Scheduler.stopBudget field from the defaultStopBudget const, and the
+// Stop() fallback also reads the const — so no production or test path
+// touches a mutable global. Tests inject a short budget via
+// WithStopBudgetField(s, d) on the constructed instance, which keeps the
+// swap local and race-free across t.Parallel Schedulers.
 
 // Stop halts the scheduler and saves state. It waits for both scheduled jobs
 // (drained by s.cron.Stop) and any TriggerNow-spawned goroutines before
@@ -1607,8 +1606,8 @@ var stopBudget = defaultStopBudget
 // Reply webhook that refuses to honour its own timeout) cannot hold us
 // past stopBudget. A stuck trimAll cannot hold us past gcWaitBudget. The
 // final saveJobs runs regardless so a stuck drain does not cost the
-// state file. Tests overriding budgets via WithStopBudget /
-// WithGCWaitBudget on the *Scheduler instance see the same composition.
+// state file. Tests overriding budgets via WithStopBudgetField on the
+// *Scheduler instance see the same composition.
 //
 // CONTRACT: Stop assumes the naozhi process terminates shortly after it
 // returns. When triggerWG.Wait is cut off by the budget, the wrapper
@@ -1765,11 +1764,17 @@ func (s *Scheduler) drainCronStop(ctx context.Context) (deadlineHit bool, stopSt
 	// the NewTimer so we can defer-Stop it on the early-drain path.
 	stopStart = time.Now()
 	// R249-CR-3 (#947): read the per-instance budget. Falls back to the
-	// package-level default when the field is the zero value — e.g. tests
-	// that hand-construct *Scheduler without going through NewScheduler.
+	// const default when the field is the zero value — e.g. tests that
+	// hand-construct *Scheduler without going through NewScheduler.
+	// R20260603150052-GO-2 (#1712): fall back to the defaultStopBudget
+	// const, NOT a package-level var. NewScheduler now seeds the field
+	// from the const directly, so the only var swap (test budget
+	// injection) lives on the per-instance field via WithStopBudgetField;
+	// reading a package var here would re-race a concurrent Stop on a
+	// hand-built Scheduler against that swap.
 	budget := s.stopBudget
 	if budget <= 0 {
-		budget = stopBudget
+		budget = defaultStopBudget
 	}
 	deadline := time.NewTimer(budget)
 	defer deadline.Stop()
@@ -1850,9 +1855,11 @@ func (s *Scheduler) drainTriggerWG(ctx context.Context, stopStart time.Time) {
 	// R249-CR-3 (#947): same per-instance budget read as drainCronStop;
 	// must match — keeping a single overall ceiling across both halves
 	// of Stop is the contract drainCronStop's godoc pins.
+	// R20260603150052-GO-2 (#1712): fall back to the defaultStopBudget
+	// const, mirroring drainCronStop — never the removed package var.
 	budget := s.stopBudget
 	if budget <= 0 {
-		budget = stopBudget
+		budget = defaultStopBudget
 	}
 	remaining := budget - time.Since(stopStart)
 	if remaining < time.Millisecond {

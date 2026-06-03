@@ -74,7 +74,7 @@ func TestRunDeadlineWatchdog_TimeoutOnWedgedInterrupt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
-	ch := runDeadlineWatchdog(ctx, bi)
+	ch, _ := runDeadlineWatchdog(ctx, bi)
 
 	select {
 	case abort := <-ch:
@@ -115,7 +115,8 @@ func TestRunDeadlineWatchdog_TimeoutBumpsMetric(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
-	abort := <-runDeadlineWatchdog(ctx, bi)
+	chBI, _ := runDeadlineWatchdog(ctx, bi)
+	abort := <-chBI
 	if !abort.fired || abort.outcome != InterruptError {
 		t.Fatalf("abort = {fired:%v outcome:%v}, want {fired:true outcome:InterruptError}",
 			abort.fired, abort.outcome)
@@ -157,7 +158,8 @@ func TestRunDeadlineWatchdog_ParkedGaugeTracksLiveLeak(t *testing.T) {
 	// timeout this test used to flake on. Waiting for a stable value pins an
 	// honest baseline.
 	base := settleParkedGauge()
-	abort := <-runDeadlineWatchdog(ctx, bi)
+	chBase, _ := runDeadlineWatchdog(ctx, bi)
+	abort := <-chBase
 	if !abort.fired || abort.outcome != InterruptError {
 		t.Fatalf("abort = {fired:%v outcome:%v}, want {fired:true outcome:InterruptError}",
 			abort.fired, abort.outcome)
@@ -236,7 +238,8 @@ func TestRunDeadlineWatchdog_FastInterruptLeavesGaugeUntouched(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
-	abort := <-runDeadlineWatchdog(ctx, ci)
+	chCI, _ := runDeadlineWatchdog(ctx, ci)
+	abort := <-chCI
 	if !abort.fired || abort.outcome != InterruptSent {
 		t.Fatalf("abort = {fired:%v outcome:%v}, want {fired:true outcome:InterruptSent}",
 			abort.fired, abort.outcome)
@@ -263,7 +266,8 @@ func TestRunDeadlineWatchdog_FastInterruptStillWins(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
-	abort := <-runDeadlineWatchdog(ctx, ci)
+	chUnsup, _ := runDeadlineWatchdog(ctx, ci)
+	abort := <-chUnsup
 	if !abort.fired {
 		t.Fatal("abort.fired = false; want true on DeadlineExceeded")
 	}

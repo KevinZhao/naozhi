@@ -3,6 +3,7 @@ package cron
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -96,5 +97,52 @@ func TestSendWithWatchdog_DeadlineFiresInterrupt(t *testing.T) {
 	}
 	if got := sess.interruptCalls.Load(); got != 1 {
 		t.Fatalf("InterruptViaControl call count = %d, want 1", got)
+	}
+}
+
+// TestSendWithWatchdog_SuccessStopsCallback is the regression test for
+// R20260603140013-GO-1 (#1705): on the success path stopWatchdog()
+// deregisters the context.AfterFunc callback BEFORE sendCancel(), so the
+// runtime never spawns the callback goroutine. Pre-fix every successful
+// Send cancelled ctx with the callback still registered, forcing one
+// wasted goroutine spawn + chan send. We assert no net goroutine growth
+// across a burst of N successful sendWithWatchdog calls — the steady
+// state must stay at the baseline, not baseline+N transient callbacks.
+func TestSendWithWatchdog_SuccessStopsCallback(t *testing.T) {
+	// Not Parallel: NumGoroutine() is process-global and a sibling
+	// t.Parallel test spawning goroutines would skew the delta.
+	const N = 200
+
+	baseline := runtime.NumGoroutine()
+
+	for i := 0; i < N; i++ {
+		sess := &fakeSendSession{
+			send: func(ctx context.Context, text string) (SendResult, error) {
+				return SendResult{Text: "ok"}, nil
+			},
+		}
+		sendCtx, sendCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, abort, err := sendWithWatchdog(sendCtx, sendCancel, sess, "hi")
+		if err != nil {
+			t.Fatalf("send %d: err = %v, want nil", i, err)
+		}
+		if abort.fired {
+			t.Fatalf("send %d: abort.fired = true; want false", i)
+		}
+		if got := sess.interruptCalls.Load(); got != 0 {
+			t.Fatalf("send %d: InterruptViaControl count = %d, want 0", i, got)
+		}
+	}
+
+	// Let any goroutine the buggy path would have spawned get scheduled.
+	runtime.Gosched()
+	time.Sleep(20 * time.Millisecond)
+
+	delta := runtime.NumGoroutine() - baseline
+	// Allow a small slack for unrelated runtime/test-framework goroutines;
+	// the bug would have left up to N transient callback goroutines, so any
+	// threshold well below N catches it while tolerating noise.
+	if delta > N/10 {
+		t.Fatalf("goroutine delta = %d after %d successful sends; want ~0 (callback should be stopped, not spawned)", delta, N)
 	}
 }
