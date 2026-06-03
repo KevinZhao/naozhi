@@ -494,3 +494,7 @@
 - [R20260603-SEC-10] memory negCache slug 未归一化大小写,case 变体绕过负缓存(有 cap+限流兜底) — internal/dashboard/ext/memory/handler.go:237
 - [R20260603-ARCH-3] Server struct ~48 字段聚合器含 candidates-for-removal 死字段 — internal/server/server.go:82
 - [R20260603-ARCH-5] runStore.Append over-cap-truncate-retry 块重复两份 — internal/cron/runstore.go:712
+- [R20260603-COS-1] feishu.go hookSem 硬编码 make(chan struct{},20) 未用具名常量(与 slack/weixin 不一致) — internal/platform/feishu/feishu.go:319
+- [R20260603-COS-2] proxyEnvKeys 注释称 HTTP_PROXY steers ALL outbound，但 Go 对 https:// 目标忽略 HTTP_PROXY，注释夸大范围 — cmd/naozhi/main_claude_settings.go:52
+- [R20260603-COS-3] EscapeMarkdownPunct 作为通用文本工具置于 cron 包(dispatch 需 import cron 调用)，但移至 textutil 后 dispatch→cron 数据模型耦合仍在(见 R250-ARCH-1)，收益有限 — internal/cron/scheduler_run.go:415
+- [R20260603-COS-4] IsExcluded 与 LookupKnownSessionID 方法体逐字节相同，可让前者委托后者保留双公共名 — internal/cron/scheduler_session.go:83

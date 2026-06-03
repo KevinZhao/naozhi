@@ -2029,7 +2029,11 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	// total order or the cap cutoff (i < keepCount) and the list cutoff
 	// (StartedAt < before) disagree about which equal-mtime record to
 	// drop. R235-GO-7 / R236-QA-01.
-	toRemove := make([]string, 0, len(items))
+	//
+	// R20260603-PERF-12: size the slice for the common case (a healthy job
+	// removes only a handful of expired runs) rather than len(items) (up to
+	// keepCount=200). append's growth strategy handles the rare bulk-trim.
+	toRemove := make([]string, 0, 4)
 	for i, it := range items {
 		// Both conditions must hold to keep.
 		keep := i < s.keepCount && it.mtime.After(cutoff)
@@ -2364,20 +2368,29 @@ func (s *runStore) warmJobsParallel(ctx context.Context, jobIDs []string) {
 	if workers > len(jobIDs) {
 		workers = len(jobIDs)
 	}
-	work := make(chan string, len(jobIDs))
-	for _, id := range jobIDs {
-		work <- id
-	}
-	close(work)
+	// R20260603-PERF-5: claim work indices via an atomic cursor over the
+	// jobIDs slice rather than a per-call make(chan string, len(jobIDs))
+	// seeded with N sends + close. Mirrors decodeRunsParallel — on a 50-job
+	// cold start the buffered channel was a fresh N-string backing array +
+	// channel header; the atomic counter is a single stack int64 and each
+	// worker steals the next index with one FetchAdd. Concurrency and the
+	// per-jobID warm behaviour are unchanged (warmCacheLocked owns its own
+	// locks, so steal order is irrelevant).
+	var next int64
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
-			for jobID := range work {
+			for {
 				if ctx.Err() != nil {
 					return
 				}
+				i := int(atomic.AddInt64(&next, 1)) - 1
+				if i >= len(jobIDs) {
+					return
+				}
+				jobID := jobIDs[i]
 				if warmCorrupt := s.warmCacheLocked(jobID); warmCorrupt > 0 {
 					slog.Warn("cron runstore: cold-start warm skipped corrupt files",
 						"count", warmCorrupt, "dir", filepath.Join(s.root, jobID))

@@ -120,6 +120,15 @@ detect_arch() {
 # request is not subject to the 60 req/hr limit.
 resolve_version() {
     if [ -n "${NAOZHI_VERSION:-}" ]; then
+        # R20260603-SEC-14: NAOZHI_VERSION is interpolated into the download
+        # URL ($base/.../${version}). Although pinning a version is
+        # self-inflicted, reject anything outside [A-Za-z0-9._-] as
+        # defense-in-depth so a tag carrying shell metacharacters or path
+        # traversal cannot poison the URL or any later command that echoes it.
+        case "$NAOZHI_VERSION" in
+            *[!A-Za-z0-9._-]*)
+                die "invalid NAOZHI_VERSION '$NAOZHI_VERSION': only [A-Za-z0-9._-] allowed" ;;
+        esac
         echo "$NAOZHI_VERSION"
         return
     fi
