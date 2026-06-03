@@ -1324,6 +1324,8 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 					save2()
 				} else {
 					s.mu.Unlock()
+					slog.Error("cron: re-persist after UpdateJob rollback failed",
+						"job_id", id, "err", perr2)
 				}
 			} else {
 				s.mu.Unlock()

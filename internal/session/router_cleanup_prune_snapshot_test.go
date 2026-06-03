@@ -89,3 +89,61 @@ func TestCleanup_PruneSnapshot_ReVerifiesUnderLock(t *testing.T) {
 		t.Error("aged-but-alive session must not be pruned (alive process)")
 	}
 }
+
+// TestCleanup_PruneSnapshot_ReVerify_ShouldPruneGate directly exercises the
+// shouldPrune re-verify gate that guards the write-locked prune loop
+// (router_cleanup.go, the `if !r.shouldPrune(s, now) { continue }` branch).
+//
+// The existing TestCleanup_PruneSnapshot_ReVerifiesUnderLock does NOT reach
+// that branch: agedButAlive has an alive process, so shouldPrune returns false
+// already in pass-1 and the session never enters pruneCandidates.
+//
+// This test targets the true skip branch scenario:
+//  1. A dead-process session with stale lastActive IS a prune candidate
+//     (shouldPrune returns true before lastActive is refreshed).
+//  2. After touchLastActive refreshes the timestamp (as would happen if a
+//     concurrent Send arrived between the RLock snapshot and the write lock),
+//     shouldPrune returns false — the re-verify guard must see this and skip.
+//
+// Because Cleanup is a synchronous function with no injection point between
+// its RLock and write-lock phases, we test shouldPrune directly (the exact
+// predicate the write-locked loop evaluates). A session freshly added to
+// pruneCandidates that subsequently has its lastActive refreshed must not be
+// deleted: this unit test pins that invariant at the shouldPrune level.
+func TestCleanup_PruneSnapshot_ReVerify_ShouldPruneGate(t *testing.T) {
+	r := &Router{
+		sessions: make(map[string]*ManagedSession),
+		maxProcs: 5,
+		ttl:      1 * time.Minute,
+		pruneTTL: 1 * time.Hour,
+	}
+	now := time.Now()
+
+	// Build a prune candidate: dead process, lastActive well past pruneTTL.
+	// In Cleanup pass-1 (RLock), shouldPrune(s, now) returns true → candidate.
+	s := injectSession(r, "revivable", newDeadProc())
+	s.lastActive.Store(now.Add(-2 * time.Hour).UnixNano())
+
+	// Confirm the session IS a candidate at snapshot time.
+	if !r.shouldPrune(s, now) {
+		t.Fatal("precondition: shouldPrune must return true before lastActive refresh")
+	}
+
+	// Simulate a concurrent Send arriving between pass-1 and the write lock:
+	// touchLastActive stamps the current time, making lastActive < pruneTTL.
+	s.touchLastActive()
+
+	// Re-verify under the "write lock" perspective: shouldPrune must now return
+	// false, triggering the `if !r.shouldPrune(s, now) { continue }` skip.
+	if r.shouldPrune(s, now) {
+		t.Error("shouldPrune must return false after lastActive refresh — " +
+			"the write-lock re-verify skip branch would incorrectly delete this session")
+	}
+
+	// Confirm Cleanup itself respects the same gate: run Cleanup and verify
+	// the session survives even though it was a pass-1 candidate.
+	r.Cleanup()
+	if _, ok := r.sessions["revivable"]; !ok {
+		t.Error("session whose lastActive was refreshed before Cleanup's write lock must not be pruned")
+	}
+}

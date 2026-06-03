@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // parsePositiveSeconds parses a `seconds=` pprof query parameter; returns 0
@@ -61,7 +62,7 @@ func (s *Server) registerPprof() {
 		// smuggle profiles out via forged X-Forwarded-For.
 		if !isLoopbackRemote(r.RemoteAddr) {
 			slog.Warn("rejecting non-loopback pprof request",
-				"remote", r.RemoteAddr, "path", r.URL.Path)
+				"remote", r.RemoteAddr, "path", osutil.SanitizeForLog(r.URL.Path, 256))
 			http.Error(w, "pprof is loopback-only; SSH to the host and curl 127.0.0.1", http.StatusForbidden)
 			return
 		}
