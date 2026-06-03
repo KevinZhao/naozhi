@@ -687,13 +687,21 @@ func (l *EventLog) TurnAgents() []SubagentInfo {
 	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	total := len(l.turnAgents) + len(l.bgAgents)
-	if total == 0 {
+	nTurn := len(l.turnAgents)
+	nBg := len(l.bgAgents)
+	if nTurn == 0 && nBg == 0 {
 		return nil
 	}
-	out := make([]SubagentInfo, total)
+	// Single-side fast paths: only one copy needed, no merge allocation.
+	if nBg == 0 {
+		return append([]SubagentInfo(nil), l.turnAgents...)
+	}
+	if nTurn == 0 {
+		return append([]SubagentInfo(nil), l.bgAgents...)
+	}
+	out := make([]SubagentInfo, nTurn+nBg)
 	copy(out, l.turnAgents)
-	copy(out[len(l.turnAgents):], l.bgAgents)
+	copy(out[nTurn:], l.bgAgents)
 	return out
 }
 
