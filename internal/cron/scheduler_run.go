@@ -1706,35 +1706,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		inflight.setSessionID(result.SessionID)
 	}
 
-	elapsed := time.Since(startedAt)
-	lg.Info("cron job completed",
-		"result_len", len(result.Text),
-		"elapsed_ms", elapsed.Milliseconds())
-	// OBS1 (#392): record the full success-path latency distribution, not
-	// just the slow-tail count below. The histogram buckets straddle
-	// slowThreshold so the two signals stay consistent (anything past 30s
-	// lands in the same tail buckets the slow counter alerts on). Observed
-	// here rather than in finishRun for the same reason as the slow counter:
-	// only success-path latency is meaningful — error/timeout paths are
-	// classified by the CronRun*Total state counters instead.
-	metrics.ObserveCronExecutionDuration(elapsed.Milliseconds())
-	slowThreshold := s.slowThreshold
-	if slowThreshold <= 0 {
-		slowThreshold = defaultCronSlowThreshold
-	}
-	if elapsed > slowThreshold {
-		// R208-OBS1: poor-man's histogram — a single counter that fires
-		// when a successful execution takes longer than slowThreshold.
-		// Wired here (not in finishRun) so only success-path latency
-		// counts; error paths already surface via metrics state counters.
-		// R241-ARCH-11 (#519): threshold reads s.slowThreshold (config-
-		// supplied) with the package default as fallback.
-		metrics.CronExecutionSlowTotal.Add(1)
-		lg.Warn("cron execution slow",
-			"job_id", snap.jobID,
-			"elapsed_ms", elapsed.Milliseconds(),
-			"threshold_ms", slowThreshold.Milliseconds())
-	}
+	// R20260603-ARCH-2 (#1681) / RNEW-003 (#423): the success-path latency
+	// observability (completion log + histogram + slow-tail counter/warn) is a
+	// self-contained concern with no early-return and no ctx use, so it is
+	// extracted to observeSuccessLatency to shave one of executeOpt's mixed
+	// concerns. Behaviour-preserving — the same three signals fire in the same
+	// order against the same startedAt.
+	s.observeSuccessLatency(startedAt, result, snap, lg)
 	// 把本次产生的 Claude session_id 也记下来：fresh_context=true 的
 	// 路径下一次 Reset 会清掉 stub 的 chain，不保留这个 ID 的话
 	// dashboard 点击 cron 侧边栏就看不到上一次的 JSONL 历史。
@@ -1759,6 +1737,46 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// （本地化/隐藏敏感 envelope），顺序以隐私优先。
 	replyText := formatCronNotice(snap.labelOrID(), apierr.Localize(sanitiseRunResult(result.Text)))
 	s.deliverNotice(notifyTo, replyText)
+}
+
+// observeSuccessLatency emits the three success-path latency signals for a
+// completed cron run: the "cron job completed" info log, the execution-
+// duration histogram, and the slow-tail counter + warn when elapsed exceeds
+// the configured slowThreshold. Extracted from executeOpt to localise the
+// success-only observability concern (R20260603-ARCH-2 / #1681, RNEW-003 /
+// #423); the function has no ctx use and no early-return so the move is
+// behaviour-preserving.
+//
+// Observed here (not in finishRun) because only the success path carries a
+// meaningful end-to-end latency — error / timeout / canceled paths are
+// classified by the CronRun*Total state counters instead, and folding their
+// (often deadline-clamped) durations into the histogram would skew the
+// success-latency distribution operators alert on. OBS1 (#392) / R208-OBS1.
+func (s *Scheduler) observeSuccessLatency(startedAt time.Time, result SendResult, snap jobSnapshot, lg *slog.Logger) {
+	elapsed := time.Since(startedAt)
+	lg.Info("cron job completed",
+		"result_len", len(result.Text),
+		"elapsed_ms", elapsed.Milliseconds())
+	// OBS1 (#392): record the full success-path latency distribution, not
+	// just the slow-tail count below. The histogram buckets straddle
+	// slowThreshold so the two signals stay consistent (anything past 30s
+	// lands in the same tail buckets the slow counter alerts on).
+	metrics.ObserveCronExecutionDuration(elapsed.Milliseconds())
+	slowThreshold := s.slowThreshold
+	if slowThreshold <= 0 {
+		slowThreshold = defaultCronSlowThreshold
+	}
+	if elapsed > slowThreshold {
+		// R208-OBS1: poor-man's histogram — a single counter that fires
+		// when a successful execution takes longer than slowThreshold.
+		// R241-ARCH-11 (#519): threshold reads s.slowThreshold (config-
+		// supplied) with the package default as fallback.
+		metrics.CronExecutionSlowTotal.Add(1)
+		lg.Warn("cron execution slow",
+			"job_id", snap.jobID,
+			"elapsed_ms", elapsed.Milliseconds(),
+			"threshold_ms", slowThreshold.Milliseconds())
+	}
 }
 
 // applyJitter 在执行 cron job 前引入一段随机延迟，用来把"整点共振起跑"的

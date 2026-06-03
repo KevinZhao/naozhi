@@ -174,16 +174,17 @@ func buildDiscoveryHandlers(
 	broadcast func(),
 ) *dashdiscovery.Handlers {
 	return dashdiscovery.New(dashdiscovery.Deps{
-		Cache:        cache,
-		NodeAccess:   nodeAccess,
-		NodeCache:    nodeCache,
-		ClaudeDir:    claudeDir,
-		Router:       routerTakeoverAdapter{r: opts.Router},
-		AllowedRoot:  opts.AllowedRoot,
-		DefaultAgent: opts.Agents["general"],
-		Broadcast:    broadcast,
-		ValidateWS:   validateWorkspace,
-		VerifyProcID: verifyProcIdentity,
+		Cache:         cache,
+		NodeAccess:    nodeAccess,
+		NodeCache:     nodeCache,
+		ClaudeDir:     claudeDir,
+		Router:        routerTakeoverAdapter{r: opts.Router},
+		AllowedRoot:   opts.AllowedRoot,
+		DefaultAgent:  opts.Agents["general"],
+		Broadcast:     broadcast,
+		ValidateWS:    validateWorkspace,
+		VerifyProcID:  verifyProcIdentity,
+		ProcStartTime: discovery.ProcStartTime,
 	})
 }
 

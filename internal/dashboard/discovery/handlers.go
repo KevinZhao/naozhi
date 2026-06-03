@@ -127,6 +127,28 @@ func New(d Deps) *Handlers {
 	}
 }
 
+// sendTermVerified routes the SIGTERM through osutil.SendTermVerified, which
+// on Linux pins the target via pidfd so the kill cannot leak to a recycled PID
+// (#1670). The injected procStartTime (discovery.ProcStartTime) supplies the
+// identity guard; when it is nil (older wiring / test doubles) the guard is
+// skipped and SendTermVerified relies on the pidfd pin alone, but the
+// verifyProcIdent pre-check below preserves the previous behaviour so no caller
+// loses defence-in-depth.
+func (h *Handlers) sendTermVerified(pid int, expectedStartTime uint64) error {
+	stFn := h.procStartTime
+	if stFn == nil && h.verifyProcIdent != nil {
+		// Adapt the legacy bool verifier into the (uint64, error) shape the
+		// atomic primitive expects: a passing verify means start_time matches.
+		stFn = func(p int) (uint64, error) {
+			if h.verifyProcIdent(p, expectedStartTime) {
+				return expectedStartTime, nil
+			}
+			return 0, osutil.ErrPidReused
+		}
+	}
+	return osutil.SendTermVerified(pid, expectedStartTime, stFn)
+}
+
 // SetAppContext is called once after the server context is available.
 // Background takeover/close goroutines use this so they outlive the
 // request and only die at process shutdown.
