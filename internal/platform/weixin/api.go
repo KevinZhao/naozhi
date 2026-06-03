@@ -53,8 +53,19 @@ type apiClient struct {
 // local relays) — validateBaseURLScheme already greenlights those, and a
 // blanket guard would refuse to dial 127.0.0.1, breaking local development.
 func ssrfDialGuard(base func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return ssrfDialGuardWithResolver(base, func(ctx context.Context, network, host string) ([]net.IP, error) {
+		return net.DefaultResolver.LookupIP(ctx, network, host)
+	})
+}
+
+// ssrfDialGuardWithResolver is the injectable form used by tests.
+// resolver(ctx, "ip", host) must return the candidate IPs for host.
+func ssrfDialGuardWithResolver(
+	base func(ctx context.Context, network, addr string) (net.Conn, error),
+	resolver func(ctx context.Context, network, host string) ([]net.IP, error),
+) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, _, err := net.SplitHostPort(addr)
+		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, fmt.Errorf("weixin dial: split %q: %w", addr, err)
 		}
@@ -68,16 +79,27 @@ func ssrfDialGuard(base func(ctx context.Context, network, addr string) (net.Con
 			}
 			return base(ctx, network, addr)
 		}
-		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		ips, err := resolver(ctx, "ip", host)
 		if err != nil {
 			return nil, fmt.Errorf("weixin dial: resolve %q: %w", host, err)
 		}
+		// DNS-rebinding defence: pass the already-validated IP literal to base
+		// instead of the original hostname. Without this, the OS resolver runs a
+		// second lookup inside base; a TTL=0 rebind can return 169.254.169.254
+		// on that second query even though our check above saw a public IP.
+		var lastRejectErr error
 		for _, ip := range ips {
 			if err := rejectInternalIP(ip); err != nil {
-				return nil, err
+				lastRejectErr = err
+				continue
 			}
+			// Use the validated IP directly — no second hostname resolution.
+			return base(ctx, network, net.JoinHostPort(ip.String(), port))
 		}
-		return base(ctx, network, addr)
+		if lastRejectErr != nil {
+			return nil, lastRejectErr
+		}
+		return nil, fmt.Errorf("weixin dial: no valid IP for %q", host)
 	}
 }
 

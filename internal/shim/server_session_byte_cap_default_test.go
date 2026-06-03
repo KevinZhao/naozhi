@@ -24,7 +24,7 @@ func TestMaxClientSessionBytes_DefaultIsGenerous(t *testing.T) {
 	defer setMaxClientSessionBytes(prev)
 
 	got := maxClientSessionBytesValue()
-	wantMin := int64(maxClientLineBytes) * 1000
+	wantMin := int64(maxClientLineBytes()) * 1000
 
 	if got < wantMin {
 		t.Fatalf("default cap = %d, want at least %d (%dx maxClientLineBytes)",
