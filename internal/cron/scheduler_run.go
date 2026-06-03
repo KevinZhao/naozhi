@@ -1487,79 +1487,21 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		return
 	}
 
-	inflight.setPhase(PhaseSpawning)
-	// R250-CR-22 (#1155): capture spawnStart immediately before GetOrCreate
-	// so the "send budget exceeds job/2" warn at line ~831 measures actual
-	// spawn time, not (jitter + spawn). startedAt is captured pre-jitter for
-	// the dashboard "running 12s" badge (true wall-clock from CAS), but the
-	// warn is calibrated against jobTimeout/2 to detect when the spawn phase
-	// alone consumed too much of the budget — folding jitter (default up to
-	// 30s) into that measurement triggers false positives on healthy jobs
-	// whose schedule landed unlucky in the jitter window.
-	spawnStart := time.Now()
-	sess, _, err := s.router.GetOrCreate(ctx, key, opts)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			// Parent ctx cancelled mid-flight (graceful shutdown or job
-			// deletion overlapping execute). The job will either be re-run
-			// on the next tick or is intentionally gone; either way an IM
-			// notification would be spam and the stored LastError would
-			// falsely blame the job itself.
-			lg.Info("cron session cancelled", "err", err)
-			s.finishRun(finishArgs{
-				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
-				skipPersist: true, // 与 historical recordResult skip 一致
-				prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-				finalizer: finalizer,
-			})
-			stubRefresh.run()
-			return
-		}
-		state, errClass := classifyExecError(err, ErrClassSessionError)
-		if errClass == ErrClassDeadlineExceeded {
-			lg.Info("cron session deadline exceeded", "err", err)
-		} else {
-			// R20260603-SEC-1: sanitise before logging to strip IP:port / paths.
-			lg.Error("cron session error", "err", sanitiseRunErrMsg(err.Error()))
-		}
-		s.finishRun(finishArgs{
-			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-			state: state, errClass: errClass, errMsg: "session error: " + err.Error(),
-			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-			finalizer: finalizer,
-		})
-		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行跳过，请稍后重试。"))
-		stubRefresh.run()
+	// RNEW-003 (#423): the spawn phase (GetOrCreate + its cancel/error
+	// classification + early inflight SessionID capture) is extracted to
+	// executeGetSession so executeOpt's body has one fewer ctx-owning concern
+	// and the spawnCtx lifecycle (GetOrCreate-only, cancelled at its exit)
+	// reads as a single unit. Behaviour-preserving: the same finishRun +
+	// stubRefresh + deliverNotice fire on each failure branch, and spawnStart
+	// is returned for the downstream send-budget warn.
+	sess, spawnStart, abortSpawn := s.executeGetSession(getSessionArgs{
+		ctx: ctx, spawnCancel: spawnCancel, key: key, opts: opts,
+		job: j, snap: snap, runID: runID, startedAt: startedAt, trigger: trigger,
+		lg: lg, notifyTo: notifyTo, finalizer: finalizer,
+		stubRefresh: stubRefresh, inflight: inflight,
+	})
+	if abortSpawn {
 		return
-	}
-	// R250-GO-15 (#1078): GetOrCreate consumed spawnCtx; nothing below references
-	// it (Send uses sendCtx). Cancel now to free the underlying *time.Timer
-	// instead of waiting for the function-scoped defer at executeOpt return.
-	// On a 500-job-deep deployment with 5min jobTimeout this trims up to
-	// ~500 idle timers off runtime timerproc during the Send window. The
-	// outer defer remains as a safety net (cancel is idempotent: second
-	// invocation is a no-op). Must come AFTER the err-return block above
-	// so an early return on session error still trips the defer (already
-	// covered) — placing here keeps the explicit cancel on the success
-	// path only, mirroring the issue's "after the err handling" guidance.
-	spawnCancel()
-
-	// R242-ARCH-22 (#766): populate inflight.SessionID as soon as
-	// GetOrCreate returns. Persistent-mode runs reuse a session that
-	// already carries its CLI session_id (set during the original spawn's
-	// init handshake), so sess.SessionID() is non-empty here. Fresh-mode
-	// runs spawn a new CLI whose session_id is only stamped after the
-	// init turn completes — sess.SessionID() returns "" in that window
-	// and the post-Send setSessionID below remains the authoritative
-	// write. Without this early capture, KnownSessionIDs / IsExcluded
-	// probes during the Send window miss the in-flight run on
-	// persistent-mode jobs (the auto-workspace-chain feature then
-	// momentarily considers the cron session a candidate for prev_session_ids
-	// until Send completes). setSessionID is idempotent and same-value
-	// writes fast-path so the post-Send call is a no-op when the IDs match.
-	if sid := sess.SessionID(); sid != "" {
-		inflight.setSessionID(sid)
 	}
 
 	// R238-GO-4 / R236-GO-07 (#790, #500): Send is parented on s.stopCtx
@@ -1871,7 +1813,8 @@ func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStar
 		if errClass == ErrClassDeadlineExceeded {
 			a.lg.Info("cron session deadline exceeded", "err", err)
 		} else {
-			a.lg.Error("cron session error", "err", err)
+			// R20260603-SEC-1: sanitise before logging to strip IP:port / paths.
+			a.lg.Error("cron session error", "err", sanitiseRunErrMsg(err.Error()))
 		}
 		s.finishRun(finishArgs{
 			job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
