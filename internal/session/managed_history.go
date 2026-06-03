@@ -259,18 +259,22 @@ func (s *ManagedSession) SnapshotPersistedHistory() []cli.EventEntry {
 }
 
 // persistedHistoryBefore collects up to `limit` entries from persistedHistory
-// strictly older than beforeMS. Returns entries in insertion order — the
-// caller is responsible for the final sort. Only relevant when proc is nil;
-// live-process sessions go through proc.EventEntriesBefore directly.
-func (s *ManagedSession) persistedHistoryBefore(beforeMS int64, limit int) []cli.EventEntry {
+// strictly older than beforeMS. Returns entries in reverse-walk order (newest
+// first). The second return value is true when persistedHistorySorted is set,
+// meaning the history is Time-ascending and the backward walk therefore
+// produces a strictly Time-descending result — the caller can obtain ascending
+// order by a cheap slices.Reverse instead of a full sort. Only relevant when
+// proc is nil; live-process sessions go through proc.EventEntriesBefore directly.
+func (s *ManagedSession) persistedHistoryBefore(beforeMS int64, limit int) ([]cli.EventEntry, bool) {
 	if limit <= 0 {
-		return nil
+		return nil, false
 	}
 	s.historyMu.RLock()
 	defer s.historyMu.RUnlock()
 	if len(s.persistedHistory) == 0 {
-		return nil
+		return nil, false
 	}
+	sorted := s.persistedHistorySorted
 	// Walk backward collecting up to `limit` entries strictly older than
 	// beforeMS. persistedHistory is not guaranteed to be sorted, so a full
 	// linear walk is the conservative choice.
@@ -283,14 +287,11 @@ func (s *ManagedSession) persistedHistoryBefore(beforeMS int64, limit int) []cli
 		out = append(out, e)
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, false
 	}
-	// Order does not matter: the only caller (EventEntriesBefore) pipes
-	// this through sortEntriesByTimeStable, which overrides whatever
-	// order we produce here. The prior code reversed `out` to restore
-	// insertion order, but stable-sort-by-Time then re-orders by Time
-	// making the reversal pure waste. Leave the reverse-walk order.
-	return out
+	// When sorted==true the backward walk produced a Time-descending sequence.
+	// Leave the order as-is; the caller decides whether to Reverse or full-sort.
+	return out, sorted
 }
 
 // InjectHistory pre-populates the event log with historical entries.

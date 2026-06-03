@@ -260,6 +260,69 @@ func TestFilterEnv_CredsGatedByBackend(t *testing.T) {
 	}
 }
 
+// TestIsSafeProfileValue covers the allow/deny boundary for AWS profile names.
+// R20260603000023-SEC-1 (#1617).
+func TestIsSafeProfileValue(t *testing.T) {
+	valid := []string{
+		"default",
+		"my-profile",
+		"my_profile_1",
+		"ALLCAPS",
+		"a",
+		"abcdefghijklmnopqrstuvwxyz0123456789-_ABCDE", // 44 chars
+	}
+	for _, v := range valid {
+		if !isSafeProfileValue(v) {
+			t.Errorf("isSafeProfileValue(%q) = false, want true", v)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"has space",
+		"semi;colon",
+		"new\nline",
+		"../../etc/passwd",
+		"$(cmd)",
+		"profile|pipe",
+		"profile`backtick`",
+		strings.Repeat("a", 65), // too long
+	}
+	for _, v := range invalid {
+		if isSafeProfileValue(v) {
+			t.Errorf("isSafeProfileValue(%q) = true, want false", v)
+		}
+	}
+}
+
+// TestFilterEnv_AWSProfileValidation verifies that a safe AWS_PROFILE passes
+// through while a malformed one is stripped. R20260603000023-SEC-1 (#1617).
+func TestFilterEnv_AWSProfileValidation(t *testing.T) {
+	t.Run("safe profile passes", func(t *testing.T) {
+		t.Setenv("AWS_PROFILE", "my-bedrock-profile")
+		env := filterEnv(nil)
+		if !envContains(env, "AWS_PROFILE", "my-bedrock-profile") {
+			t.Error("safe AWS_PROFILE must pass through")
+		}
+	})
+
+	t.Run("unsafe profile stripped", func(t *testing.T) {
+		t.Setenv("AWS_PROFILE", "../../malicious; rm -rf /")
+		env := filterEnv(nil)
+		if envHasKey(env, "AWS_PROFILE") {
+			t.Error("unsafe AWS_PROFILE must be stripped")
+		}
+	})
+
+	t.Run("empty profile stripped", func(t *testing.T) {
+		t.Setenv("AWS_PROFILE", "")
+		env := filterEnv(nil)
+		if envHasKey(env, "AWS_PROFILE") {
+			t.Error("empty AWS_PROFILE must be stripped")
+		}
+	})
+}
+
 // TestFilterEnv_DropsSecretsByDefault ensures we still strip
 // non-allowlisted secrets — the regression fix must not turn the
 // runner into a wide-open env tunnel.

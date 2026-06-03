@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +69,7 @@ func scanHooksJSON(path, relPath string, src assets.Source) []assets.Asset {
 	}
 	var hf hooksFile
 	if err := json.Unmarshal(data, &hf); err != nil {
+		slog.Warn("ccassets: hooks.json parse failed", "path", path, "err", err)
 		return nil
 	}
 	var out []assets.Asset
