@@ -67,6 +67,7 @@ var envAlwaysPassthrough = map[string]struct{}{
 	"AWS_REGION":                 {},
 	"AWS_DEFAULT_REGION":         {},
 	"AWS_PROFILE":                {},
+	"AWS_DEFAULT_PROFILE":        {},
 
 	// Vertex non-secret plumbing (project id + region; the credentials
 	// file path GOOGLE_APPLICATION_CREDENTIALS is gated separately).

@@ -1029,10 +1029,9 @@ func flattenAssistantEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]trans
 // flattenSystemEvent surfaces system error events (claude CLI lifecycle
 // init / error). init events are dropped because they don't add
 // timeline value; only `subtype == "error"` becomes an "error" turn.
-// Unmarshal failures are logged at Debug — we want operator visibility
-// without changing the downgrade fallback.
+// Unmarshal failures return early (consistent with sibling flatten helpers).
+// The out slice is allocated lazily — only when an error turn is emitted.
 func flattenSystemEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcriptTurn, transcriptTokens, int, bool) {
-	out := make([]transcriptTurn, 0, 1)
 	tok := transcriptTokens{}
 
 	var sys struct {
@@ -1040,21 +1039,19 @@ func flattenSystemEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcri
 		Message string `json:"message"`
 	}
 	if err := json.Unmarshal(ev.Message, &sys); err != nil {
-		// Don't change downgrade behavior — sys stays zero-valued so
-		// the error-turn branch below is skipped naturally. Just surface
-		// the parse failure for ops visibility.
 		slog.Debug("cron transcript: system event unmarshal failed; skipping",
 			"err", err)
+		return nil, tok, 0, false
 	}
 	if sys.Subtype != "error" || sys.Message == "" {
-		return out, tok, 0, false
+		return nil, tok, 0, false
 	}
-	out = append(out, transcriptTurn{
+	out := []transcriptTurn{{
 		Index: nextIdx,
 		Kind:  "error",
 		TS:    ts,
 		Text:  sanitizeWireText(truncateRunes(sys.Message, maxAssistantTextBytes)),
-	})
+	}}
 	return out, tok, 0, true
 }
 

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/assets"
+	"github.com/naozhi/naozhi/internal/discovery"
 )
 
 // scanMarkdownDir scans the direct *.md files in dir (non-recursive), reading
@@ -137,12 +138,14 @@ func scanMCP(home string) []assets.Asset {
 }
 
 // encodeProjectDir maps an absolute repo root to Claude's projects/<encoded>
-// directory name: leading "/" dropped, remaining "/" -> "-" (§3.2 step 5).
+// directory name. Delegates to discovery.ClaudeProjectSlug which is the single
+// source of truth for the encoding (strips control bytes, "/" → "-").
+// R20260603-CODE-2.
 func encodeProjectDir(repoRoot string) string {
 	if repoRoot == "" {
 		return ""
 	}
-	return "-" + strings.ReplaceAll(strings.TrimPrefix(filepath.Clean(repoRoot), "/"), "/", "-")
+	return discovery.ClaudeProjectSlug(repoRoot)
 }
 
 // scanMemory scans ONLY the current repoRoot's project memory dir
