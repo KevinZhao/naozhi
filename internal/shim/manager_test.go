@@ -484,6 +484,35 @@ func TestManager_Remove_NonExistentKey(t *testing.T) {
 	m.Remove("nonexistent:key") // must not panic
 }
 
+// TestManager_Remove_CleansReconnectKM pins [R20260603150052-GO-11]: Remove
+// must delete the per-key mutex from reconnectKM so the map does not grow
+// without bound under high key churn.
+func TestManager_Remove_CleansReconnectKM(t *testing.T) {
+	dir := t.TempDir()
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
+
+	key := "feishu:group:churn-key"
+
+	// Prime reconnectKM with a per-key mutex via reconnectKey.
+	_ = m.reconnectKey(key)
+
+	m.reconnectMu.Lock()
+	_, present := m.reconnectKM[key]
+	m.reconnectMu.Unlock()
+	if !present {
+		t.Fatal("precondition: reconnectKM must contain key before Remove")
+	}
+
+	m.Remove(key)
+
+	m.reconnectMu.Lock()
+	_, present = m.reconnectKM[key]
+	m.reconnectMu.Unlock()
+	if present {
+		t.Error("Remove did not clean up reconnectKM entry; map will grow without bound under key churn")
+	}
+}
+
 func TestManager_CLIPath(t *testing.T) {
 	dir := t.TempDir()
 	m := mustNewManager(t, ManagerConfig{StateDir: dir, CLIPath: "/usr/bin/claude"})

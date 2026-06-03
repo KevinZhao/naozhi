@@ -1144,11 +1144,18 @@ func (m *Manager) DetachAll() {
 // The package-level wrapper here delegates to the platform helper so the
 // StartShimWithBackend hot path stays platform-agnostic.
 
-// Remove removes a shim handle from the manager's tracking.
+// Remove removes a shim handle from the manager's tracking and cleans up the
+// per-key reconnect mutex to bound reconnectKM growth under high key churn.
+// Lock ordering (reconnectKM[key] -> m.mu) is preserved: m.mu is released
+// before reconnectMu is acquired. [R20260603150052-GO-11]
 func (m *Manager) Remove(key string) {
 	m.mu.Lock()
 	delete(m.shims, key)
 	m.mu.Unlock()
+
+	m.reconnectMu.Lock()
+	delete(m.reconnectKM, key)
+	m.reconnectMu.Unlock()
 }
 
 // CLIPath returns the configured CLI binary path.
