@@ -323,6 +323,17 @@ func TestFilterEnv_AWSProfileValidation(t *testing.T) {
 		}
 	})
 
+	// R100110-LEAK-4: a profile value carrying control / bidi-override chars
+	// must still be rejected, and the warn-then-reject path must not panic
+	// when sanitizing the value for the log.
+	t.Run("control-char profile stripped without panic", func(t *testing.T) {
+		t.Setenv("AWS_PROFILE", "evil‮\r\nname")
+		env := filterEnv(nil)
+		if envHasKey(env, "AWS_PROFILE") {
+			t.Error("unsafe AWS_PROFILE with control chars must be stripped")
+		}
+	})
+
 	t.Run("AWS_DEFAULT_PROFILE unsafe stripped", func(t *testing.T) {
 		t.Setenv("AWS_DEFAULT_PROFILE", "../../malicious; rm -rf /")
 		env := filterEnv(nil)

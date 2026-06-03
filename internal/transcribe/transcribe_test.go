@@ -309,6 +309,18 @@ func TestLookupFFmpeg_OverrideEnv(t *testing.T) {
 			"expected an explicit failure rather than silent PATH fallback")
 	}
 
+	// R100110-INJ-7: a relative-path override must be rejected up front rather
+	// than degrading into a PATH search inside exec.LookPath, which would
+	// reintroduce the PATH-injection surface the knob promises to remove.
+	for _, rel := range []string{"ffmpeg", "bin/ffmpeg", "./ffmpeg", "../ffmpeg"} {
+		os.Setenv(ffmpegPathEnv, rel)
+		os.Setenv("PATH", originalPATH)
+		if _, err := lookupFFmpeg(); err == nil {
+			t.Errorf("relative override %q returned nil err; "+
+				"expected rejection requiring an absolute path", rel)
+		}
+	}
+
 	// Empty override falls back to PATH (regression guard for "" handling).
 	os.Setenv(ffmpegPathEnv, "")
 	if _, err := lookupFFmpeg(); err != nil && originalPATH != "" {

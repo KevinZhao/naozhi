@@ -359,6 +359,35 @@ func TestMerged_FastPathBeforeMSFilter(t *testing.T) {
 	}
 }
 
+// TestMerged_AboveCutoffLocalDoesNotEvictFallback [R100110-EDGE-2]:
+// a local entry at/above beforeMS is dropped by the emit filter, so it
+// must NOT seed the dedup set. Otherwise a same-UUID fallback entry that
+// is BELOW the cutoff — a legitimately visible backfill — would be
+// silently deduped away, losing one row of visible history. Inputs are
+// pre-sorted so the fast-path mergeSorted runs.
+func TestMerged_AboveCutoffLocalDoesNotEvictFallback(t *testing.T) {
+	m := &Source{
+		Local: &stubSource{entries: []cli.EventEntry{
+			// Same UUID "x" as the fallback entry, but Time >= beforeMS:
+			// emit drops it, so it must not occupy a `seen` slot.
+			{UUID: "x", Time: 300, Summary: "local-above-cutoff"},
+		}},
+		Fallback: &stubSource{entries: []cli.EventEntry{
+			{UUID: "x", Time: 100, Summary: "fallback-below-cutoff"},
+		}},
+	}
+	got, err := m.LoadBefore(context.Background(), 200, 100)
+	if err != nil {
+		t.Fatalf("LoadBefore: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d, want 1 (below-cutoff fallback must survive)", len(got))
+	}
+	if got[0].UUID != "x" || got[0].Summary != "fallback-below-cutoff" {
+		t.Errorf("expected visible fallback backfill, got %+v", got[0])
+	}
+}
+
 // TestMerged_NilReceiver: methods on nil receiver don't panic. The
 // router's attachHistorySource may install MergedSource as nil on
 // older sessions that opt out.

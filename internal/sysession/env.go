@@ -5,6 +5,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // reProfileValue matches safe AWS profile names: alphanumeric plus underscore
@@ -259,7 +261,7 @@ func filterEnv(allowlist []string) []string {
 				val := kv[idx+1:]
 				if !isSafeProfileValue(val) {
 					slog.Warn("sysession: AWS profile env var rejected (unsafe value)",
-						"key", key, "value", val)
+						"key", key, "value", osutil.SanitizeForLog(val, 128))
 					continue
 				}
 			}

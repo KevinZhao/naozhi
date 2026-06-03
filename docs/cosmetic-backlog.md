@@ -498,3 +498,7 @@
 - [R20260603-COS-2] proxyEnvKeys 注释称 HTTP_PROXY steers ALL outbound，但 Go 对 https:// 目标忽略 HTTP_PROXY，注释夸大范围 — cmd/naozhi/main_claude_settings.go:52
 - [R20260603-COS-3] EscapeMarkdownPunct 作为通用文本工具置于 cron 包(dispatch 需 import cron 调用)，但移至 textutil 后 dispatch→cron 数据模型耦合仍在(见 R250-ARCH-1)，收益有限 — internal/cron/scheduler_run.go:415
 - [R20260603-COS-4] IsExcluded 与 LookupKnownSessionID 方法体逐字节相同，可让前者委托后者保留双公共名 — internal/cron/scheduler_session.go:83
+- [R100110-MUTEX-1] recordTerminalResult 持 s.mu.Lock 无 defer(当前 panic 路径已被 nil 保护,属 future-proof 防御) — internal/cron/scheduler_finish.go:569
+- [R100110-RACE-1] watchdogInterruptTimeoutAtomic package-level var t.Parallel 测试交叉覆写(测试基建,非生产) — internal/cron/scheduler_run.go:779
+- [R100110-CTX-1] NotifyCtx(nil,...) 三处传 nil parent(by-design,parent 故意忽略) — internal/dispatch/dispatch.go:1016
+- [R100110-LOOP-1] recountPersistedUserTurnsLocked 增量调用仍 O(n) 全扫(微优化) — internal/session/managed_query.go:346
