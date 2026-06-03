@@ -1605,6 +1605,10 @@ func (s *runStore) decodeRunsParallel(items []runDirItem, limit int) ([]CronRunS
 	for i := range slots {
 		if slots[i].corrupt {
 			corruptCount++
+		} else if !slots[i].ok {
+			// non-corrupt read failure (e.g. EACCES, EIO, ESTALE): slot is
+			// unreadable; count it so warmCache logging surfaces the signal.
+			corruptCount++
 		}
 		if slots[i].ok {
 			out = append(out, slots[i].summary)
