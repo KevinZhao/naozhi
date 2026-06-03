@@ -192,11 +192,15 @@ func scanSkillDir(root, relPrefix string, src assets.Source) ([]assets.Asset, er
 		}
 		dirName := ent.Name()
 		skillPath := filepath.Join(root, dirName, "SKILL.md")
-		st, err := os.Stat(skillPath)
-		if err != nil || st.IsDir() {
-			continue // no SKILL.md in this subdir — not a skill
+		// readFrontmatter's os.Open IS the existence check: a missing
+		// SKILL.md (or a directory named SKILL.md) returns an error here, so
+		// we skip without a separate os.Stat syscall per subdir (R220123-
+		// PERF-4). A present-but-frontmatter-less file returns nil and we
+		// degrade to name=<dir> below (§1.2-6).
+		meta, err := readFrontmatter(skillPath)
+		if err != nil {
+			continue // no readable SKILL.md in this subdir — not a skill
 		}
-		meta, _ := readFrontmatter(skillPath) // err-tolerant: degrade on miss
 		name := meta.name
 		if name == "" {
 			name = dirName // degrade (§1.2-6)

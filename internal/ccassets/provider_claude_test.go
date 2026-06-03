@@ -130,6 +130,56 @@ func TestScan_MalformedFrontmatterDegrades(t *testing.T) {
 	}
 }
 
+// TestScan_SubdirWithoutSkillMdSkipped pins R220123-PERF-4: scanSkillDir now
+// uses readFrontmatter's os.Open as the existence probe (no per-subdir
+// os.Stat). A subdir lacking SKILL.md, and a subdir where "SKILL.md" is
+// itself a directory, must both be skipped — not surfaced as assets and not
+// abort the scan.
+func TestScan_SubdirWithoutSkillMdSkipped(t *testing.T) {
+	home := t.TempDir()
+	skills := filepath.Join(home, "skills")
+	// Valid skill — must be kept.
+	writeSkill(t, skills, "real", "---\nname: real\ndescription: ok\n---\nbody")
+	// Subdir with no SKILL.md at all.
+	if err := os.MkdirAll(filepath.Join(skills, "notaskill"), 0o755); err != nil {
+		t.Fatalf("mkdir notaskill: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skills, "notaskill", "README.md"), []byte("hi"), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	// Subdir where SKILL.md is a directory (open succeeds, read fails EISDIR).
+	if err := os.MkdirAll(filepath.Join(skills, "weird", "SKILL.md"), 0o755); err != nil {
+		t.Fatalf("mkdir weird/SKILL.md: %v", err)
+	}
+
+	p := NewClaudeProvider()
+	inv, err := p.Scan(assets.ScanRequest{Home: home})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(inv.Assets) != 1 || inv.Assets[0].Name != "real" {
+		t.Fatalf("want only the 'real' skill, got %+v", inv.Assets)
+	}
+}
+
+// TestScan_EmptySkillMdDegrades pins that a zero-byte SKILL.md (open ok, EOF
+// on first read) is treated as present-but-frontmatter-less and degrades to
+// name=<dir>, not skipped as a non-existent file.
+func TestScan_EmptySkillMdDegrades(t *testing.T) {
+	home := t.TempDir()
+	skills := filepath.Join(home, "skills")
+	writeSkill(t, skills, "empty", "")
+
+	p := NewClaudeProvider()
+	inv, err := p.Scan(assets.ScanRequest{Home: home})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(inv.Assets) != 1 || inv.Assets[0].Name != "empty" {
+		t.Fatalf("want degraded 'empty' skill, got %+v", inv.Assets)
+	}
+}
+
 // TestScan_NoSkillsDir: missing dirs are not an error, just empty.
 func TestScan_NoSkillsDir(t *testing.T) {
 	p := NewClaudeProvider()

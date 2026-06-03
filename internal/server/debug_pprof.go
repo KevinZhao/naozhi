@@ -56,6 +56,19 @@ func (s *Server) registerPprof() {
 		slog.Warn("pprof enabled without dashboard token: loopback callers can access profiles without authentication; set server.dashboard_token or disable debug_mode when not profiling")
 	}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Defense-in-depth (R20260602-SEC-10): when no dashboard token is
+		// configured, requireAuth is a no-op and the loopback gate is the
+		// SOLE protection. For UDS deployments isLoopbackRemote returns
+		// true for empty/"@" RemoteAddr, so a future reverse-proxy-over-UDS
+		// misconfig that strips RemoteAddr would expose pprof unauthenticated
+		// to any same-host process. Refuse pprof entirely when there is no
+		// token to enforce — operators must set DashboardToken to profile.
+		if s.dashboardToken == "" {
+			slog.Warn("rejecting pprof request: no dashboard token configured",
+				"path", osutil.SanitizeForLog(r.URL.Path, 256))
+			http.Error(w, "pprof disabled: set a dashboard token to enable profiling", http.StatusForbidden)
+			return
+		}
 		// Defense-in-depth: even inside requireAuth, reject non-loopback
 		// callers. trustedProxy mode (ALB → EC2) does NOT exempt pprof
 		// from the loopback gate — a compromised ALB could otherwise

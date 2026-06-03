@@ -116,19 +116,52 @@ func (l *EventLog) LastNAppend(dst []EventEntry, n int) []EventEntry {
 // continue paginating into the disk tier (EventEntriesBeforeCtx) when the ring
 // alone could not satisfy visibleTarget.
 func (l *EventLog) LastNVisible(visibleTarget, maxTotal int) []EventEntry {
+	return l.LastNVisibleAppend(nil, visibleTarget, maxTotal)
+}
+
+// LastNVisibleAppend is the buffer-reusing variant of LastNVisible.
+// Matched entries are appended into `dst` (re-sliced from `dst[:0]`); when
+// `dst` already has enough capacity — e.g. retrieved from a
+// sync.Pool[*[]EventEntry] rotated across polls (the listRefsPool pattern
+// in router_core) — the dashboard first-render walk of up to maxTotal ring
+// slots no longer allocates a fresh rev slice on every call.
+//
+// R20260602-PERF-8 (#1631): dashboard first render uses
+// visibleTarget=50 / maxTotal=200, so the unpooled LastNVisible allocated
+// a 200-cap []EventEntry under l.mu.RLock on each subscribe. Mirrors the
+// EntriesSinceAppend / LastNAppend convention so a pooled caller can drop
+// that per-call allocation. The slices.Reverse stays OUTSIDE l.mu (same as
+// EntriesSince, R220-PERF-3): the RLock is released the instant the
+// backward scan finishes and the reverse touches only the locally-owned
+// buffer, so a long maxTotal walk never blocks a concurrent Append longer
+// than the scan itself.
+//
+// Lifetime: the returned slice is fully owned by the caller after the call
+// returns; the EventLog never retains a reference. Passing nil falls back
+// to LastNVisible's allocate-and-return behaviour (and returns nil on an
+// empty ring, preserving the original API contract).
+func (l *EventLog) LastNVisibleAppend(dst []EventEntry, visibleTarget, maxTotal int) []EventEntry {
 	l.mu.RLock()
 	count := l.count
 	if count == 0 {
 		l.mu.RUnlock()
-		return nil
+		if dst == nil {
+			return nil
+		}
+		return dst[:0]
 	}
 	limit := maxTotal
 	if limit <= 0 || limit > count {
 		limit = count
 	}
 	// Walk backward from the newest slot, branch-on-wrap (no per-step modulo),
-	// collecting into a reverse buffer until a stop condition trips.
-	rev := make([]EventEntry, 0, limit)
+	// collecting into a reverse buffer until a stop condition trips. Reuse the
+	// caller's pooled backing array when it is large enough; append grows it
+	// organically otherwise.
+	rev := dst[:0]
+	if cap(rev) < limit {
+		rev = make([]EventEntry, 0, limit)
+	}
 	visible := 0
 	idx := l.head - 1
 	if idx < 0 {

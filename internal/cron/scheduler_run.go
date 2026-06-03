@@ -18,6 +18,7 @@ package cron
 import (
 	"context"
 	"errors"
+	"expvar"
 	"fmt"
 	"log/slog"
 	mrand "math/rand/v2"
@@ -777,6 +778,23 @@ const watchdogInterruptTimeoutDefault = 3 * time.Second
 // always restore the previous value via defer.
 var watchdogInterruptTimeoutAtomic atomic.Int64
 
+// watchdogParkedInterruptGoroutines is a LIVE gauge of inner
+// InterruptViaControl goroutines that outlived their watchdog after the
+// interrupt-call timeout fired and are still parked on a wedged stdin
+// write (R20260602-GO-005, #1632). It differs from
+// metrics.CronWatchdogInterruptTimeoutTotal, which only counts cumulative
+// timeout events: a persistent (non-fresh) cron job that never reaches
+// session.Reset can accumulate permanently-parked goroutines, and the
+// cumulative counter cannot distinguish "fired N times, all since
+// drained" from "N still leaked right now". This gauge is incremented
+// when the timeout branch parks the inner goroutine and decremented when
+// that goroutine eventually returns (if ever), so operators can alert on
+// a steadily rising live value rather than inferring it from process
+// goroutine growth. expvar registration is package-global; the var stays
+// in cron's file domain (no internal/metrics edit) since it observes a
+// cron-internal lifecycle.
+var watchdogParkedInterruptGoroutines = expvar.NewInt("naozhi_cron_watchdog_parked_interrupt_goroutines")
+
 func init() {
 	watchdogInterruptTimeoutAtomic.Store(int64(watchdogInterruptTimeoutDefault))
 }
@@ -853,8 +871,27 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 		// InterruptViaControl finishes, even after the timeout branch has
 		// already published an InterruptError outcome.
 		done := make(chan InterruptOutcome, 1)
+		// state coordinates the live leak-gauge accounting between this
+		// inner goroutine and the timeout branch below (R20260602-GO-005,
+		// #1632). It is a 3-state CAS race resolver:
+		//   0 = neither side has acted yet
+		//   1 = inner goroutine returned first (watchdog must NOT park it)
+		//   2 = watchdog fired first and parked the inner goroutine
+		//       (gauge incremented; inner goroutine must decrement on exit)
+		// Exactly one of the two CAS(0→1)/CAS(0→2) wins, so the gauge is
+		// incremented and later decremented at most once per park — no
+		// leak under any interleaving of "inner returns" vs "watchdog
+		// fires".
+		var state atomic.Int32
 		go func() {
-			done <- sess.InterruptViaControl()
+			outcome := sess.InterruptViaControl()
+			if !state.CompareAndSwap(0, 1) {
+				// Lost the race: watchdog already parked us (state==2) and
+				// incremented the gauge. We outlived the watchdog but the
+				// wedged write finally unblocked — undo the increment.
+				watchdogParkedInterruptGoroutines.Add(-1)
+			}
+			done <- outcome
 		}()
 		// R20260527122801-GO-001: NewTimer + defer Stop mirrors
 		// scheduler.go:1337 — time.After leaks a *Timer slot until
@@ -875,6 +912,16 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 			// growth. The metric lives next to other cron counters in
 			// internal/metrics so the dashboard wireup is identical.
 			metrics.CronWatchdogInterruptTimeoutTotal.Add(1)
+			// R20260602-GO-005 (#1632): record the parked goroutine on a
+			// LIVE gauge so a persistent (never-reset) job's permanent
+			// leak is observable as a rising current count, not just a
+			// cumulative timeout total. CAS(0→2) only wins if the inner
+			// goroutine has not already returned; if it lost the race the
+			// goroutine is gone and there is nothing to count. The matching
+			// Add(-1) lives in the inner goroutine's lost-race branch.
+			if state.CompareAndSwap(0, 2) {
+				watchdogParkedInterruptGoroutines.Add(1)
+			}
 			slog.Warn("cron watchdog: InterruptViaControl timeout exceeded; inner goroutine parked until session reset",
 				"timeout", watchdogInterruptTimeout())
 			ch <- abortResult{outcome: InterruptError, fired: true}

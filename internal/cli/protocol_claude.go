@@ -7,8 +7,33 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync"
 	"unsafe"
 )
+
+// readEventPool recycles the scratch *Event that ReadEvent unmarshals each
+// shim stdout frame into. R220123-PERF-13 (#1637): json.Unmarshal forces
+// its `&ev` argument to escape to the heap (reflection retains internal
+// pointer state into the destination), so the obvious `var ev Event` local
+// produced one heap allocation of the ~300-byte Event header per frame —
+// 5-50 events/s × N sessions. Pooling the header eliminates that steady
+// per-frame allocation. The returned []Event{*ev} carries a value COPY, so
+// the pooled struct is safe to reuse the instant ReadEvent returns; its
+// nested pointer fields (Message, Metadata, ...) are owned by the copy and
+// must be cleared on Put so the pool does not pin a turn's content graph.
+//
+// This is the *Event header survivor noted as out of scope by
+// R222-PERF-3 (#700), which only removed the []byte(line) input copy.
+var readEventPool = sync.Pool{New: func() any { return new(Event) }}
+
+// resetEvent zeroes every field of a pooled Event before it re-enters the
+// pool so no stale pointer (which would keep a prior frame's AssistantMessage
+// / Metadata / RawParams graph alive) or stale scalar leaks into the next
+// Unmarshal. A whole-struct assignment is the cheapest correct reset and is
+// resilient to new fields being added to Event.
+func resetEvent(ev *Event) {
+	*ev = Event{}
+}
 
 // stringToBytesUnsafe aliases s's backing storage as a []byte without
 // allocating. The returned slice MUST be treated as read-only — Go strings
@@ -360,12 +385,22 @@ func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		strings.Contains(line, `:"control_response"`) {
 		return nil, false, nil
 	}
-	var ev Event
+	// R220123-PERF-13 (#1637): unmarshal into a pooled *Event so the Event
+	// header is not heap-allocated per frame. The pooled struct is returned
+	// to the pool on EVERY exit path (incl. the skip / cap-error early
+	// returns) and reset so it pins no prior frame's pointer graph. The
+	// success path copies the value out (`*ev`) into the returned slice
+	// before the deferred Put, so callers own an independent Event.
+	ev := readEventPool.Get().(*Event)
+	defer func() {
+		resetEvent(ev)
+		readEventPool.Put(ev)
+	}()
 	// stringToBytesUnsafe avoids the per-event []byte(line) heap copy that
 	// the obvious []byte(line) cast would force. json.Unmarshal only reads
 	// its input, so aliasing the immutable string's storage is safe.
 	// R222-PERF-3 (#700).
-	if err := json.Unmarshal(stringToBytesUnsafe(line), &ev); err != nil {
+	if err := json.Unmarshal(stringToBytesUnsafe(line), ev); err != nil {
 		return nil, false, err
 	}
 	// Defence-in-depth: keep the structural skip in case the substring
@@ -410,7 +445,13 @@ func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 			ev.AskQuestion = aq
 		}
 	}
-	return []Event{ev}, ev.Type == "result", nil
+	// Copy the value out of the pooled *Event so the caller owns an
+	// independent Event; the deferred Put then resets and recycles the
+	// pooled header. The nested pointer fields (Message, AskQuestion, ...)
+	// are freshly allocated by this frame's Unmarshal and travel with the
+	// copy — resetEvent only clears the pooled struct's view of them, not
+	// the graph the returned copy points at.
+	return []Event{*ev}, ev.Type == "result", nil
 }
 
 // askUserQuestionInput matches the `input` field of an AskUserQuestion tool_use

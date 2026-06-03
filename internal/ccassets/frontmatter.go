@@ -34,7 +34,14 @@ func readFrontmatter(path string) (fmMeta, error) {
 	r := bufio.NewReader(io.LimitReader(f, maxFrontmatterBytes))
 	first, err := r.ReadString('\n')
 	if err != nil && first == "" {
-		return fmMeta{}, nil
+		// Empty read with an error: either a genuinely empty file (io.EOF —
+		// degrade) or an unreadable path such as a directory named SKILL.md
+		// (e.g. EISDIR on Linux — propagate so callers using readFrontmatter
+		// as an existence/validity probe can skip it, R220123-PERF-4).
+		if err == io.EOF {
+			return fmMeta{}, nil
+		}
+		return fmMeta{}, err
 	}
 	if strings.TrimRight(first, "\r\n") != "---" {
 		// No frontmatter — degrade.

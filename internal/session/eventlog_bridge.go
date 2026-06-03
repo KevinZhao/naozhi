@@ -119,6 +119,34 @@ var bridgeEncPool = sync.Pool{
 // not permanently pin large heap.
 const bridgeEncMaxCap = 64 * 1024
 
+// span records a [start,end) byte range inside the shared pooled encode
+// buffer for one EventEntry. Hoisted to package scope (was a func-local
+// type) so batchScratch can carry a reusable []span across AppendBatch
+// calls. R20260602-PERF-2 (#1629).
+type span struct{ start, end int }
+
+// batchScratch pools the three per-AppendBatch helper slices the
+// multi-entry sink path used to `make` on every call (out / spans / times).
+// In steady state (≥5 events/s × N sessions) those three heap allocations
+// escaped per call; carrying them in a sync.Pool keeps the backing arrays
+// alive across calls and reuses their capacity. Mirrors the bridgeEncPool
+// idiom right above. R20260602-PERF-2 (#1629).
+type batchScratch struct {
+	out   []persist.Entry
+	spans []span
+	times []int64
+}
+
+var batchScratchPool = sync.Pool{
+	New: func() any { return &batchScratch{} },
+}
+
+// batchScratchMaxCap caps slice reuse so a one-off huge batch does not pin
+// large backing arrays in the pool forever (same rationale as
+// bridgeEncMaxCap for the encode buffer). A batch wider than this is served
+// once and dropped on return instead of being recycled.
+const batchScratchMaxCap = 4096
+
 // newEventLogSink translates a per-key persist.PersistSink (which
 // accepts persist.Entry batches) into the cli.PersistSink contract
 // (which accepts cli.EventEntry batches).
@@ -180,7 +208,16 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 			return
 		}
 
-		out := make([]persist.Entry, 0, len(entries))
+		// R20260602-PERF-2 (#1629): borrow the three helper slices from a
+		// pool instead of make-ing them per call. They are reset to [:0]
+		// (keeping their capacity) and returned at every exit path below.
+		// All three are consumed entirely before persisterSink returns —
+		// `out`'s persist.Entry values alias the pooled encode buffer, but
+		// the slice header itself is fully drained by persisterSink (it
+		// copies the bytes into its own arena, see comment below), so the
+		// backing array is free to recycle once persisterSink returns.
+		bs := batchScratchPool.Get().(*batchScratch)
+		out := bs.out[:0]
 		eb := bridgeEncPool.Get().(*bridgeEncBuf)
 		// R240-PERF-7: explicit Put before each return path avoids the
 		// ~10ns/call defer frame setup cost on the multi-entry hot path
@@ -196,9 +233,8 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 		// eb goes back to the pool. Offsets are resolved after the encode
 		// pass because the buffer may grow (and move) mid-loop.
 		eb.buf.Reset()
-		type span struct{ start, end int }
-		spans := make([]span, 0, len(entries))
-		times := make([]int64, 0, len(entries))
+		spans := bs.spans[:0]
+		times := bs.times[:0]
 		for _, e := range entries {
 			start := eb.buf.Len()
 			if err := eb.enc.Encode(e); err != nil {
@@ -225,7 +261,20 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 				attachTracker.OnPersistedEntry(keyhash, e.ImagePaths, e.Time)
 			}
 		}
+		// putScratch returns the three helper slices to the pool, writing the
+		// (possibly reallocated) headers back first so a grown capacity is
+		// preserved for the next call. Slices wider than batchScratchMaxCap
+		// are dropped (left for GC) instead of pinning an outsized array.
+		putScratch := func() {
+			if cap(out) <= batchScratchMaxCap && cap(spans) <= batchScratchMaxCap && cap(times) <= batchScratchMaxCap {
+				bs.out = out[:0]
+				bs.spans = spans[:0]
+				bs.times = times[:0]
+				batchScratchPool.Put(bs)
+			}
+		}
 		if len(spans) == 0 {
+			putScratch()
 			if eb.buf.Cap() <= bridgeEncMaxCap {
 				bridgeEncPool.Put(eb)
 			}
@@ -236,8 +285,10 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 			out = append(out, persist.Entry{JSON: all[sp.start:sp.end], TimeMS: times[i]})
 		}
 		// persisterSink copies the borrowed bytes synchronously (it owns a
-		// pooled arena), so eb is safe to return only AFTER it returns.
+		// pooled arena), so eb and the scratch slices are safe to return only
+		// AFTER it returns (out's persist.Entry JSON fields alias eb.buf).
 		persisterSink(out, replayPhase)
+		putScratch()
 		if eb.buf.Cap() <= bridgeEncMaxCap {
 			bridgeEncPool.Put(eb)
 		}

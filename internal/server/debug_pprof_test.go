@@ -173,6 +173,36 @@ func TestPprof_LoopbackAuthenticatedNamedProfile(t *testing.T) {
 	}
 }
 
+// TestPprof_NoTokenRefused pins R20260602-SEC-10: when no dashboard token
+// is configured, requireAuth is a no-op and the loopback gate would be the
+// sole defense (and returns true for UDS-shaped empty RemoteAddr). The
+// handler must refuse pprof outright in that mode — even from loopback —
+// so a reverse-proxy-over-UDS misconfig cannot expose profiles to any
+// same-host process unauthenticated.
+func TestPprof_NoTokenRefused(t *testing.T) {
+	t.Parallel()
+	srv := newPprofTestServer(t, "") // no dashboard token
+
+	for _, remote := range []string{"127.0.0.1:55555", "", "@"} {
+		remote := remote
+		t.Run("remote="+remote, func(t *testing.T) {
+			t.Parallel()
+			r := httptest.NewRequest(http.MethodGet, "/api/debug/pprof/", nil)
+			r.RemoteAddr = remote
+			w := httptest.NewRecorder()
+			srv.mux.ServeHTTP(w, r)
+
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("no-token pprof from %q → status %d, want 403; body=%q",
+					remote, w.Code, w.Body.String())
+			}
+			if strings.Contains(strings.ToLower(w.Body.String()), "goroutine profile") {
+				t.Errorf("403 body leaked profile data: %q", w.Body.String())
+			}
+		})
+	}
+}
+
 // TestPprof_NoToken_WarnOnRegister pins R20260603-SEC-3 (#1633): when
 // debug_mode is enabled without a dashboard token, registerPprof must emit a
 // slog.Warn at registration time to alert operators that pprof is accessible
@@ -216,8 +246,9 @@ func newPprofTestServer(t *testing.T, token string) *Server {
 	auth_ := auth.New(token, []byte("test-cookie-secret"), "", false)
 	auth := auth_
 	s := &Server{
-		mux:  http.NewServeMux(),
-		auth: auth,
+		mux:            http.NewServeMux(),
+		auth:           auth,
+		dashboardToken: token,
 	}
 	s.registerPprof()
 	return s
