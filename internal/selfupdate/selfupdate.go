@@ -18,7 +18,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -418,6 +420,84 @@ func assetName() string {
 // — the test transport is the only sanctioned escape hatch.
 var testHTTPTransport http.RoundTripper
 
+// isUnsafeResolvedIP reports whether a post-DNS-resolution dial target is an
+// internal/SSRF-sensitive address that the selfupdate fetch must never reach.
+// R20260603030037-SEC-2 (#1616): CheckRedirect + isGitHubAssetHost pin the
+// *host string* of every hop, but the default net.Dialer applies no filter to
+// the IP that host resolves to. A DNS-poisoning / rebinding attacker who can
+// answer for objects.githubusercontent.com can point it at 169.254.169.254
+// (cloud IMDS), an RFC1918 LAN host, or a link-local address while keeping a
+// valid TLS chain — turning the auto-upgrade into an internal SSRF / RCE
+// pivot. We reject the whole internal-address surface at dial time. Mirrors
+// the predicate in internal/config/config.go and node/httpclient_validate.go.
+func isUnsafeResolvedIP(ip netip.Addr) bool {
+	if !ip.IsValid() {
+		// Unparseable address: fail closed.
+		return true
+	}
+	return ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsPrivate() ||
+		ip.IsUnspecified()
+}
+
+// guardedDialContext wraps a net.Dialer so that, after a successful dial, the
+// resolved remote IP is screened by isUnsafeResolvedIP. A hit closes the
+// connection and returns an error, so a poisoned DNS answer for a github asset
+// host cannot complete the fetch. The post-dial RemoteAddr check is robust to
+// happy-eyeballs / multi-A records: it inspects the address actually connected
+// to rather than re-resolving (which could race the dialer's own resolution).
+func guardedDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	remote := conn.RemoteAddr()
+	if remote == nil {
+		conn.Close()
+		return nil, fmt.Errorf("selfupdate: dial %s: no remote address", addr)
+	}
+	ip, perr := netip.ParseAddr(addrHostOnly(remote.String()))
+	if perr != nil || isUnsafeResolvedIP(ip) {
+		conn.Close()
+		return nil, fmt.Errorf("selfupdate: refused dial to internal/link-local address %s (resolved from %s)", remote.String(), addr)
+	}
+	return conn, nil
+}
+
+// addrHostOnly strips the :port from a host:port string, returning just the
+// host. Unlike net.SplitHostPort it tolerates a bare host (no port) so the
+// caller never has to special-case malformed RemoteAddr strings.
+func addrHostOnly(hostport string) string {
+	if h, _, err := net.SplitHostPort(hostport); err == nil {
+		return h
+	}
+	return hostport
+}
+
+// safeFetchTransport returns the http.RoundTripper fetchFile should use. In
+// production (testHTTPTransport == nil) it clones http.DefaultTransport and
+// installs guardedDialContext so every connection's resolved IP is screened.
+// Tests inject testHTTPTransport (which dials an httptest loopback server with
+// a self-signed cert); that path is left untouched so the sanctioned escape
+// hatch — and loopback test targets the guard would otherwise reject — keep
+// working. R20260603030037-SEC-2 (#1616).
+func safeFetchTransport() http.RoundTripper {
+	if testHTTPTransport != nil {
+		return testHTTPTransport
+	}
+	base, _ := http.DefaultTransport.(*http.Transport)
+	var tr *http.Transport
+	if base != nil {
+		tr = base.Clone()
+	} else {
+		tr = &http.Transport{}
+	}
+	tr.DialContext = guardedDialContext
+	return tr
+}
+
 func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error {
 	// R240-SEC-4 (#1048): symmetric https-only guard for the first leg.
 	// CheckRedirect already pins subsequent hops to https, but the initial
@@ -450,8 +530,11 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 	// load-bearing — both files travel the same path and could be replaced
 	// in lock-step. (R228-SEC-1/SEC-9，覆盖 R227-SEC-5 的 https-only 检查)
 	client := &http.Client{
-		Timeout:   defaultTimeout,
-		Transport: testHTTPTransport, // nil in production → http.DefaultTransport
+		Timeout: defaultTimeout,
+		// R20260603030037-SEC-2 (#1616): production transport screens every
+		// dial's resolved IP (see safeFetchTransport); tests get their
+		// injected loopback transport unchanged.
+		Transport: safeFetchTransport(),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > 5 {
 				return fmt.Errorf("too many redirects")
