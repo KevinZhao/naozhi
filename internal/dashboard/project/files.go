@@ -1541,6 +1541,33 @@ var sensitiveBaseSuffixes = []string{
 	".env.save",
 }
 
+// sensitiveNameSubstrings is a defence-in-depth pattern scan layered on top of
+// the exact-name / extension / suffix rules. R20260603-SEC-5 (#1680): the
+// enumerated tables only catch known filenames, but Claude routinely generates
+// ad-hoc credential dumps with non-canonical names — `db-password.txt`,
+// `aws_credentials.txt` (the underscore form misses the exact `credentials`
+// entry), `api_token.log`, `slack_secret.md`. Any basename containing one of
+// these tokens is treated as credential-bearing regardless of extension.
+//
+// Each token is matched case-insensitively as a substring of the basename.
+// The set is deliberately narrow (only words that almost always denote a
+// secret) to avoid over-blocking legitimate workspace files — e.g. there is no
+// "key" token here because *.key is already handled by sensitiveDownloadExts
+// and a bare "key" substring would block "keyboard.go" / "monkey.png".
+var sensitiveNameSubstrings = []string{
+	"password",
+	"passwd",
+	"secret",
+	"credential", // matches credential / credentials, hyphen/underscore forms
+	"token",
+	"apikey",
+	"api-key",
+	"api_key",
+	"private-key",
+	"private_key",
+	"privatekey",
+}
+
 // sensitiveDownloadExts lists extensions that strongly imply key material.
 var sensitiveDownloadExts = map[string]struct{}{
 	".key": {},
@@ -1635,6 +1662,14 @@ func isSensitiveDownloadName(base string) bool {
 	// archive names that the exact-name + ext scans miss.
 	for _, suffix := range sensitiveBaseSuffixes {
 		if strings.HasSuffix(low, suffix) {
+			return true
+		}
+	}
+	// R20260603-SEC-5 (#1680): defence-in-depth substring scan. Catches
+	// ad-hoc credential dumps (db-password.txt, aws_credentials.txt,
+	// api_token.log) whose names match no enumerated table entry.
+	for _, sub := range sensitiveNameSubstrings {
+		if strings.Contains(low, sub) {
 			return true
 		}
 	}

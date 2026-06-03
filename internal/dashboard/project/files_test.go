@@ -293,6 +293,49 @@ func TestIsSensitiveDownloadName_OpsConventional(t *testing.T) {
 	}
 }
 
+// TestIsSensitiveDownloadName_SubstringPatterns locks R20260603-SEC-5 (#1680):
+// the enumerated tables only match known filenames, but Claude generates ad-hoc
+// credential dumps with non-canonical names. A defence-in-depth substring scan
+// must block them. Underscore forms (aws_credentials.txt) and free-form names
+// (db-password.txt) previously slipped through every exact-match table.
+func TestIsSensitiveDownloadName_SubstringPatterns(t *testing.T) {
+	blocked := []string{
+		"db-password.txt",
+		"db_password.txt",
+		"aws_credentials.txt", // underscore form misses exact "credentials"
+		"my-credential.json",
+		"api_token.log",
+		"slack_secret.md",
+		"SECRET_NOTES.txt", // case-insensitive
+		"app.password.bak",
+		"jwt-token.txt",
+		"service-apikey.json",
+		"my_private_key.txt",
+		"passwd.backup",
+	}
+	for _, name := range blocked {
+		if !isSensitiveDownloadName(name) {
+			t.Errorf("isSensitiveDownloadName(%q) = false, want true (R20260603-SEC-5)", name)
+		}
+	}
+	// Negative cases: the substring set must stay narrow enough not to block
+	// ordinary workspace files. Note "key" is deliberately NOT a token (it
+	// would block keyboard.tsx / monkey.png); only the compound *key forms
+	// (apikey/private_key/…) are matched.
+	allowed := []string{
+		"main.go",
+		"keyboard.tsx",
+		"monkey.png",
+		"README.md",
+		"config.json",
+	}
+	for _, name := range allowed {
+		if isSensitiveDownloadName(name) {
+			t.Errorf("isSensitiveDownloadName(%q) = true, want false", name)
+		}
+	}
+}
+
 func TestIsTextMime(t *testing.T) {
 	if !isTextMime("text/plain; charset=utf-8") {
 		t.Error("text/plain should be text")
