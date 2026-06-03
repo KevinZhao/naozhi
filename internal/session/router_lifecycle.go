@@ -708,14 +708,18 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		// shared pool. Only after the sub-quota passes do we apply the
 		// global maxExemptSessions ceiling as a relief valve for a
 		// future namespace added without explicit sub-quota wiring.
+		// R20260603-PERF-1: single combined walk yields both the per-kind
+		// sub-quota count and the global exempt total, replacing the former
+		// back-to-back countExemptByKind + countExempt double O(N) sweep.
 		kind := exemptKind(key)
+		perKind, totalExempt := r.countExemptCombined(kind)
 		if kind != "" {
-			if perKind := r.countExemptByKind(kind); perKind >= exemptCapFor(kind) {
+			if perKind >= exemptCapFor(kind) {
 				r.mu.Unlock()
 				return nil, fmt.Errorf("%w: %s namespace (%d)", ErrMaxExemptSessions, kind, exemptCapFor(kind))
 			}
 		}
-		if r.countExempt() >= maxExemptSessions {
+		if totalExempt >= maxExemptSessions {
 			r.mu.Unlock()
 			return nil, fmt.Errorf("%w (%d)", ErrMaxExemptSessions, maxExemptSessions)
 		}

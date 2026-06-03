@@ -130,6 +130,30 @@ func (r *Router) countExemptByKind(kind string) int {
 	return count
 }
 
+// countExemptCombined returns both the alive exempt count for a single
+// namespace and the global alive exempt total in ONE walk of r.sessions.
+// Caller must hold r.mu.
+//
+// R20260603-PERF-1: spawnSession's exempt branch previously called
+// countExemptByKind then countExempt back-to-back — two O(N) sweeps of the
+// same map under the write lock on every exempt spawn. Folding them into a
+// single pass halves the work and the lock-held time without introducing the
+// drift risk of standalone atomic counters (which the file's existing comments
+// document as easy to desync). When kind=="" the per-kind result is 0,
+// matching countExemptByKind's defensive contract.
+func (r *Router) countExemptCombined(kind string) (perKind int, total int) {
+	for k, s := range r.sessions {
+		if !s.exempt || !s.isAlive() {
+			continue
+		}
+		total++
+		if kind != "" && exemptKind(k) == kind {
+			perKind++
+		}
+	}
+	return perKind, total
+}
+
 // evictOldest closes the oldest idle (non-Running) session to free a slot.
 // Releases and re-acquires r.mu during Close() to avoid blocking other goroutines.
 // Returns true if a session was evicted.
