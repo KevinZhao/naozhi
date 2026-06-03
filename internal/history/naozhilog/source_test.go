@@ -389,6 +389,88 @@ func TestSource_LoadBefore_BinarySearchBoundary(t *testing.T) {
 	}
 }
 
+// TestLoadBefore_NoSliceAlias_FullScan asserts that loadBeforeFullScan returns a
+// slice that does not share its backing array with the source slice read from
+// disk. Mutating the returned slice must not affect a subsequent full scan
+// result (R20260603-CR-3).
+func TestLoadBefore_NoSliceAlias_FullScan(t *testing.T) {
+	p, src, sink, _ := newPersister(t, "alias-full")
+	for i := 0; i < 5; i++ {
+		persistOne(t, sink, cli.EventEntry{
+			UUID: "u" + rune2hex(i),
+			Time: int64(100 + i),
+			Type: "user",
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = p.Flush(ctx)
+
+	bg := context.Background()
+	// Read a page that filters entries Time < 103 → entries 100,101,102.
+	got1, err := src.loadBeforeFullScan(bg, 103, 10)
+	if err != nil {
+		t.Fatalf("loadBeforeFullScan: %v", err)
+	}
+	if len(got1) == 0 {
+		t.Fatal("expected at least one entry")
+	}
+	// Mutate the returned slice in place.
+	sentinel := int64(9999)
+	got1[0].Time = sentinel
+
+	// A second call must return the original data, unaffected by the mutation.
+	got2, err := src.loadBeforeFullScan(bg, 103, 10)
+	if err != nil {
+		t.Fatalf("loadBeforeFullScan second call: %v", err)
+	}
+	if len(got2) == 0 {
+		t.Fatal("second call returned empty")
+	}
+	if got2[0].Time == sentinel {
+		t.Errorf("loadBeforeFullScan: mutation of returned slice affected source data — slice alias detected (CR-3)")
+	}
+}
+
+// TestLoadBefore_NoSliceAlias_ViaIdx asserts the same no-alias property for
+// loadBeforeViaIdx (R20260603-CR-3).
+func TestLoadBefore_NoSliceAlias_ViaIdx(t *testing.T) {
+	p, src, sink, _ := newPersister(t, "alias-idx")
+	// Write enough entries that the idx has multiple entries (IdxStride=2).
+	for i := 0; i < 30; i++ {
+		persistOne(t, sink, cli.EventEntry{
+			UUID: "v" + rune2hex(i),
+			Time: int64(200 + i),
+			Type: "user",
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = p.Flush(ctx)
+
+	bg := context.Background()
+	got1, ok, err := src.loadBeforeViaIdx(bg, 220, 5)
+	if err != nil {
+		t.Fatalf("loadBeforeViaIdx: %v", err)
+	}
+	if !ok || len(got1) == 0 {
+		t.Skip("idx path declined (too few records or stride too large) — skip alias check")
+	}
+	sentinel := int64(8888)
+	got1[0].Time = sentinel
+
+	got2, ok2, err := src.loadBeforeViaIdx(bg, 220, 5)
+	if err != nil {
+		t.Fatalf("loadBeforeViaIdx second call: %v", err)
+	}
+	if !ok2 || len(got2) == 0 {
+		t.Skip("idx path declined on second call — skip alias check")
+	}
+	if got2[0].Time == sentinel {
+		t.Errorf("loadBeforeViaIdx: mutation of returned slice affected source data — slice alias detected (CR-3)")
+	}
+}
+
 // rune2hex is a tiny helper so test entries can have distinct UUIDs
 // without pulling crypto/rand into the test path.
 func rune2hex(i int) string {
