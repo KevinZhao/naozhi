@@ -363,8 +363,26 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 			s.persistedHistorySorted = false
 		}
 	}
+	// R20260603150052-PERF-5: count user entries in the incoming batch before
+	// appending so we can maintain persistedUserTurns incrementally (O(batch))
+	// instead of rescanning the full history slice (O(N)) on every inject.
+	var newUserEntries int64
+	for i := range entries {
+		if entries[i].Type == "user" {
+			newUserEntries++
+		}
+	}
 	s.persistedHistory = append(s.persistedHistory, entries...)
+	var trimmedUserEntries int64
 	if trimmed := len(s.persistedHistory) - maxPersistedHistory; trimmed > 0 {
+		// Count user entries in the trimmed prefix before reslicing so the
+		// incremental counter stays accurate. The prefix is still addressable
+		// on the pre-trim backing array at this point.
+		for i := 0; i < trimmed; i++ {
+			if s.persistedHistory[i].Type == "user" {
+				trimmedUserEntries++
+			}
+		}
 		s.persistedHistory = s.persistedHistory[trimmed:]
 		// Cap-trim shifts the prefix backwards; clamp seededLen so it keeps
 		// pointing at "tail-end of what proc has already seen" rather than
@@ -439,11 +457,12 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 		s.persistedHistory = sorted
 		s.persistedHistorySorted = true
 	}
-	// #1644: refresh the cached user-turn count so the proc==nil snapshot
-	// branch can feed AutoTitler's min-turn gate. Done under historyMu after
-	// every persistedHistory mutation (append / cap-trim / sort) so the count
-	// stays consistent with the slice the dead-session readers see.
-	s.recountPersistedUserTurnsLocked()
+	// #1644 / R20260603150052-PERF-5: maintain persistedUserTurns incrementally
+	// (O(batch)) rather than rescanning the full slice (O(N)). newUserEntries
+	// and trimmedUserEntries were computed above from the incoming batch and the
+	// trimmed prefix respectively; the sort branch does not add or remove
+	// entries so no adjustment is needed there.
+	s.persistedUserTurns.Add(newUserEntries - trimmedUserEntries)
 	s.historyMu.Unlock()
 
 	if len(tail) > 0 {

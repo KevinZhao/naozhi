@@ -60,6 +60,75 @@ func TestRecountPersistedUserTurns_AfterAppend(t *testing.T) {
 	}
 }
 
+// TestPersistedUserTurns_CapTrimDropsUserEntries verifies R20260603150052-PERF-5:
+// when InjectHistory triggers a cap-trim that removes user entries from the
+// prefix, persistedUserTurns must decrease accordingly.
+func TestPersistedUserTurns_CapTrimDropsUserEntries(t *testing.T) {
+	// Fill the ring to exactly maxPersistedHistory with alternating user/text.
+	// The first half is user entries; the second half is text.
+	// A subsequent inject of 1 user entry triggers a trim of 1 entry from the
+	// front (which is a user entry) → count stays constant.
+	s := &ManagedSession{key: "k"}
+
+	// Inject maxPersistedHistory entries: first half user, second half text.
+	first := make([]cli.EventEntry, maxPersistedHistory)
+	for i := range first {
+		ty := "user"
+		if i >= maxPersistedHistory/2 {
+			ty = "text"
+		}
+		first[i] = cli.EventEntry{Time: int64(i + 1), Type: ty}
+	}
+	s.InjectHistory(first)
+
+	wantBefore := int64(maxPersistedHistory / 2)
+	if got := s.persistedUserTurns.Load(); got != wantBefore {
+		t.Fatalf("before trim: persistedUserTurns=%d, want %d", got, wantBefore)
+	}
+
+	// Inject 1 user entry — triggers trim of 1 entry from front (a user entry).
+	// Count must stay the same: +1 new user, -1 trimmed user = 0 delta.
+	s.InjectHistory([]cli.EventEntry{{Time: int64(maxPersistedHistory + 1), Type: "user"}})
+	if got := s.persistedUserTurns.Load(); got != wantBefore {
+		t.Fatalf("after trim of 1 user: persistedUserTurns=%d, want %d (no change)", got, wantBefore)
+	}
+
+	// Inject 1 text entry — trims another user entry from front.
+	// Count must decrease by 1: +0 new user, -1 trimmed user.
+	s.InjectHistory([]cli.EventEntry{{Time: int64(maxPersistedHistory + 2), Type: "text"}})
+	if got := s.persistedUserTurns.Load(); got != wantBefore-1 {
+		t.Fatalf("after trim of 1 more user: persistedUserTurns=%d, want %d", got, wantBefore-1)
+	}
+}
+
+// TestPersistedUserTurns_LargeReplayFull fills a fresh session with a batch
+// larger than maxPersistedHistory (boot JSONL replay scenario) and checks
+// that persistedUserTurns reflects only the surviving tail, not the full batch.
+func TestPersistedUserTurns_LargeReplayFull(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+
+	// 600 entries: 100 user entries in positions 0..99, then 500 text entries.
+	// After cap-trim to maxPersistedHistory(500), positions 0..99 are dropped
+	// so 0 user entries survive in the ring.
+	batch := make([]cli.EventEntry, 600)
+	for i := range batch {
+		ty := "text"
+		if i < 100 {
+			ty = "user"
+		}
+		batch[i] = cli.EventEntry{Time: int64(i + 1), Type: ty}
+	}
+	s.InjectHistory(batch)
+
+	if got := s.persistedUserTurns.Load(); got != 0 {
+		t.Errorf("persistedUserTurns=%d, want 0 (all user entries trimmed)", got)
+	}
+	if len(s.persistedHistory) != maxPersistedHistory {
+		t.Errorf("persistedHistory len=%d, want %d", len(s.persistedHistory), maxPersistedHistory)
+	}
+}
+
 // TestInstallFreshSessionLocked_RecountsPersistedUserTurns guards
 // R20260603040203-CODE-002: installFreshSessionLocked must seed
 // persistedUserTurns from the restored oldHistory so snapshot().MessageCount
