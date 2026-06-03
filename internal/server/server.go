@@ -892,6 +892,13 @@ func (s *Server) Start(ctx context.Context) error {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			slog.Error("server shutdown error", "err", err)
 		}
+		// srv.Shutdown has returned, so no new requests can spawn discovery
+		// takeover/close goroutines. Drain any that are still parked in
+		// WaitAndCleanup before signalling shutdown complete, so they don't
+		// outlive the server goroutine with no WaitGroup tracking them.
+		if s.discoveryH != nil {
+			s.discoveryH.Wait()
+		}
 		close(shutdownComplete)
 	}()
 

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
@@ -32,6 +33,18 @@ func RedactGitRemoteURL(raw string) string {
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme == "" {
+		// url.Parse failed (e.g. invalid port) or SCP-style (no scheme).
+		// SCP-style URLs (git@host:path) carry no credentials — return as-is.
+		// But a URL-form string with "://" that failed to parse may still
+		// embed userinfo (user:pass@) that would leak; strip it defensively.
+		// [R20260603-SEC-8]
+		if i := strings.Index(raw, "://"); i >= 0 {
+			rest := raw[i+3:]
+			if at := strings.IndexByte(rest, '@'); at >= 0 {
+				// Drop the userinfo segment between "://" and "@".
+				return raw[:i+3] + rest[at+1:]
+			}
+		}
 		return raw
 	}
 	if u.User != nil {

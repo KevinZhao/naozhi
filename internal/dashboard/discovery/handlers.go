@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"sync"
 	"syscall"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -74,6 +75,7 @@ type SessionRouter interface {
 //     ctx but be cancelled at process shutdown
 type Handlers struct {
 	appCtx          context.Context // server lifecycle context, set via SetAppContext
+	bg              sync.WaitGroup  // tracks background takeover/close goroutines for graceful drain
 	cache           CacheView
 	nodeAccess      NodeAccessor
 	nodeCache       *node.CacheManager
@@ -122,6 +124,15 @@ func New(d Deps) *Handlers {
 // request and only die at process shutdown.
 func (h *Handlers) SetAppContext(ctx context.Context) {
 	h.appCtx = ctx
+}
+
+// Wait blocks until all background takeover/close goroutines have exited.
+// Called from the server shutdown sequence after srv.Shutdown returns (no
+// new requests can spawn goroutines at that point), so a graceful shutdown
+// drains in-flight WaitAndCleanup work instead of leaving goroutines parked
+// on FindProcess/exit waits after the HTTP server goroutine has gone away.
+func (h *Handlers) Wait() {
+	h.bg.Wait()
 }
 
 // SetClaudeDirForTest swaps claudeDir for tests that previously poked the
@@ -357,7 +368,9 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 	claudeDir := h.claudeDir
 	router := h.router
 
+	h.bg.Add(1)
 	go func() {
+		defer h.bg.Done()
 		// Wait, SIGKILL, and remove stale session files.
 		discovery.WaitAndCleanup(h.appCtx, pid, procStartTime, claudeDir, reqCWD, sessionID)
 
@@ -479,7 +492,9 @@ func (h *Handlers) HandleClose(w http.ResponseWriter, r *http.Request) {
 	claudeDir := h.claudeDir
 	broadcast := h.broadcast
 
+	h.bg.Add(1)
 	go func() {
+		defer h.bg.Done()
 		discovery.WaitAndCleanup(h.appCtx, pid, procStartTime, claudeDir, cwd, sessionID)
 		slog.Info("discovered session closed", "pid", pid, "session_id", sessionID)
 		if broadcast != nil {

@@ -1723,21 +1723,30 @@ func (r *Router) DiscardPassthroughPending(key string, reason error) {
 // early Start). The historyWg.Add(1) must be visible to Shutdown
 // before the goroutine begins observable work.
 func (r *Router) runHistoryTask(fn func(ctx context.Context)) bool {
-	r.historyWg.Add(1)
 	if r.historyCtx == nil {
 		// Test routers built by struct literal (skip NewRouter) get a
 		// never-cancelled background; production Router always wires
 		// historyCtx in NewRouter before any caller can reach here.
+		r.historyWg.Add(1)
 		go func() {
 			defer r.historyWg.Done()
 			fn(context.Background())
 		}()
 		return true
 	}
+	// R20260603-CODE-3 (#1655): decide spawn-or-refuse BEFORE Add(1). The
+	// previous shape did Add(1) up front and compensated with Done() on the
+	// cancelled path, opening a TOCTOU window where Shutdown's
+	// historyWg.Wait() could observe the transient +1 and return between the
+	// Add and the compensating Done, then a later Add would re-add to a
+	// drained WaitGroup ("WaitGroup is reused before previous Wait has
+	// returned"). Checking Err() first means Add(1) only ever happens when we
+	// are certainly spawning, so the counter never transiently rises after a
+	// cancel.
 	if r.historyCtx.Err() != nil {
-		r.historyWg.Done()
 		return false
 	}
+	r.historyWg.Add(1)
 	go func() {
 		defer r.historyWg.Done()
 		fn(r.historyCtx)

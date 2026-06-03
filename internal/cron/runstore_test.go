@@ -519,6 +519,52 @@ func TestRunStore_ListSkipsCorruptEntries(t *testing.T) {
 	}
 }
 
+// TestRunStore_DecodeParallel_UnreadableCountsAsCorrupt pins R20260603-CR-9:
+// a slot whose file is unreadable (EACCES) must be reflected in corruptCount
+// so warmCache logging surfaces the signal even when the error is not
+// ErrCorruptRun. We use chmod 0000 to simulate a transient IO barrier.
+//
+// diskDecodeParallelThreshold == 16, so we need > 16 candidates to reach
+// decodeRunsParallel. We append 18 runs and make one unreadable.
+func TestRunStore_DecodeParallel_UnreadableCountsAsCorrupt(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: chmod 0000 does not deny access")
+	}
+	t.Parallel()
+	s := newTestStore(t, 200, 30*24*time.Hour)
+	s.enableTrimGC = false
+	jobID := mustGenerateID()
+
+	// Append 18 runs (> diskDecodeParallelThreshold=16) so that
+	// diskListNewestFirst fans out via decodeRunsParallel.
+	const total = 18
+	now := time.Now()
+	runIDs := make([]string, total)
+	for i := 0; i < total; i++ {
+		r := makeRun(jobID, now.Add(time.Duration(i)*time.Second))
+		s.Append(r)
+		runIDs[i] = r.RunID
+	}
+
+	// Make the last (newest) run unreadable — permission error, not corruption.
+	unreadablePath := filepath.Join(s.root, jobID, runIDs[total-1]+".json")
+	if err := os.Chmod(unreadablePath, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unreadablePath, 0o600) })
+
+	// Call diskListNewestFirst directly — bypasses the in-memory cache and
+	// exercises the decodeRunsParallel worker path where the unreadable file
+	// must increment corruptCount.
+	rows, corruptCount := s.diskListNewestFirst(jobID, 100, time.Time{})
+	if corruptCount != 1 {
+		t.Fatalf("corruptCount=%d want 1 (unreadable file must be counted)", corruptCount)
+	}
+	if len(rows) != total-1 {
+		t.Fatalf("rows len=%d want %d (all readable files returned)", len(rows), total-1)
+	}
+}
+
 // TestRunStore_ListBeforeCutoff — stagger StartedAt by 1h, ask for entries
 // strictly before "now-2h", expect only those satisfying StartedAt < cutoff.
 //
