@@ -1,11 +1,39 @@
 package leakcheck
 
 import (
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// waitGoroutinesSettle blocks until runtime.NumGoroutine() reports the
+// same value across several consecutive reads, i.e. no goroutine from a
+// prior test in this package is still winding down. CheckWith captures
+// its baseline at call time; if a previous test's goroutine is still
+// counted then (the runtime decrement lags goexit by a scheduler tick),
+// the baseline is inflated by one. When that straggler then exits while
+// our deliberately-leaked goroutine adds one, the net count is flat and
+// the detector sees no growth — a false negative that flakes
+// TestCheckWith_DetectsLeak. Settling first pins an honest baseline.
+func waitGoroutinesSettle(t *testing.T) {
+	t.Helper()
+	prev := runtime.NumGoroutine()
+	stable := 0
+	for i := 0; i < 200; i++ {
+		time.Sleep(5 * time.Millisecond)
+		n := runtime.NumGoroutine()
+		if n == prev {
+			if stable++; stable >= 3 {
+				return
+			}
+			continue
+		}
+		prev = n
+		stable = 0
+	}
+}
 
 // fakeTB is a minimal TB implementation that captures Errorf calls so
 // the package's own tests can verify the failure path without flunking
@@ -43,6 +71,11 @@ func TestCheck_NoLeak(t *testing.T) {
 func TestCheckWith_DetectsLeak(t *testing.T) {
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
+
+	// Pin an honest baseline: if a goroutine from a prior test is still
+	// winding down when CheckWith snapshots the count, its later exit
+	// cancels out our deliberate +1 leak and the detector sees no growth.
+	waitGoroutinesSettle(t)
 
 	fake := &fakeTB{}
 	done := CheckWith(fake, 0, 50*time.Millisecond)
