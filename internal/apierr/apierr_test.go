@@ -53,6 +53,16 @@ func TestLocalize(t *testing.T) {
 			wantPrefix: "🚫 Claude 拒绝了本次请求",
 		},
 		{
+			name:       "network error envelope localized",
+			input:      "API Error: network error while contacting api.anthropic.com",
+			wantPrefix: "🌐 与 Claude API 的网络连接出现问题",
+		},
+		{
+			name:       "connection refused envelope localized",
+			input:      "API Error: connection refused",
+			wantPrefix: "🌐 与 Claude API 的网络连接出现问题",
+		},
+		{
 			name:        "git tool output with 'forbidden' is NOT mis-localized",
 			input:       "Error: git push: remote rejected — forbidden by branch protection",
 			passThrough: true,
