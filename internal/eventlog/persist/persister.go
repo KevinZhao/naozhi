@@ -1153,8 +1153,11 @@ func (p *Persister) flushAllLocked() error {
 	if len(p.writers) == 0 {
 		return nil
 	}
-	dirtyKeys := make([]string, 0, len(p.writers))
-	dirtyWs := make([]*perKeyWriter, 0, len(p.writers))
+	// R20260603-PERF-6: reuse the tickFlushKeys/tickFlushWs scratch slices
+	// (same run-goroutine ownership as tickFlush — no lock needed). Avoids
+	// two make() allocations on every explicit Flush call.
+	dirtyKeys := p.tickFlushKeys[:0]
+	dirtyWs := p.tickFlushWs[:0]
 	for k, w := range p.writers {
 		if !w.dirty {
 			continue
@@ -1162,6 +1165,10 @@ func (p *Persister) flushAllLocked() error {
 		dirtyKeys = append(dirtyKeys, k)
 		dirtyWs = append(dirtyWs, w)
 	}
+	// Write back possibly-grown headers so the next caller inherits the
+	// larger capacity.
+	p.tickFlushKeys = dirtyKeys
+	p.tickFlushWs = dirtyWs
 	if len(dirtyWs) == 0 {
 		return nil
 	}
@@ -1183,6 +1190,9 @@ func (p *Persister) flushAllLocked() error {
 			errMu.Unlock()
 		}
 	})
+	// Drop writer-pointer references so idle-closed writers can be GC'd
+	// before the next call. Keys are plain strings; no GC concern.
+	clear(dirtyWs)
 	return firstErr
 }
 
