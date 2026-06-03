@@ -460,7 +460,14 @@ func (r *Router) Cleanup() {
 	// authoritative alive total in one pass. reconcile already walks the map
 	// to drive the per-backend gauge; reuse its alive total to set activeCount
 	// instead of maintaining a second counting loop. R20260602190132-PERF-5.
-	aliveTotal := r.reconcileSessionActiveByBackendLocked()
+	// R20260603-PERF-7: skip the O(N) reconcile walk when nothing changed;
+	// reuse the already-accurate activeCount instead.
+	var aliveTotal int64
+	if closedCount > 0 || pruned > 0 {
+		aliveTotal = r.reconcileSessionActiveByBackendLocked()
+	} else {
+		aliveTotal = r.activeCount.Load()
+	}
 	r.activeCount.Store(aliveTotal)
 
 	// Snapshot sessions for periodic save (while still holding the lock).
