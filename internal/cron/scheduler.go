@@ -606,6 +606,14 @@ type Scheduler struct {
 	// TestMarshalJobs_PerSchedulerIsolation in
 	// marshal_jobs_per_scheduler_test.go.
 	marshalJobs atomic.Pointer[marshalJobsFn]
+
+	// clock is the time source for lifecycle timestamps (run finish endedAt,
+	// synthetic-skipped startedAt). Defaults to realClock (time.Now) in
+	// NewScheduler; tests inject a fake to pin a deterministic now without
+	// sleeping. R247-ARCH-11 / R245-ARCH-34 (#643) — minimal injection point;
+	// see clock.go. Read via s.now() so a zero-value Scheduler still falls back
+	// to wall-clock time rather than nil-panicking.
+	clock cronClock
 }
 
 // knownSessionsCache holds a TTL-bounded snapshot of KnownSessionIDs
@@ -1136,6 +1144,10 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		stopCtx:               stopCtx,
 		stopCancel:            stopCancel,
 		runStore:              newRunStore(cfg.StorePath, cfg.RunsKeepCount, cfg.RunsKeepWindow),
+		// R247-ARCH-11 (#643): install the real-time clock by default. Tests
+		// swap a fake via the withClock seam to pin lifecycle timestamps
+		// (run DurationMS, skipped-run startedAt) without sleeping.
+		clock: defaultClock,
 	}
 	// R250-ARCH-14: initialise the per-Scheduler marshal seam so the
 	// hot path in marshalJobsLocked finds defaultMarshalJobs instead of

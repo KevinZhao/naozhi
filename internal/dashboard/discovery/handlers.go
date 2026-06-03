@@ -86,6 +86,10 @@ type Handlers struct {
 	broadcast       func()            // hub.BroadcastSessionsUpdate
 	validateWS      func(ws, root string) (string, error)
 	verifyProcIdent func(pid int, expectedStartTime uint64) bool
+	// procStartTime reads the current /proc start_time for a pid (injected
+	// discovery.ProcStartTime). Feeds the atomic pidfd-based SendTermVerified
+	// identity guard so the SIGTERM cannot leak to a recycled PID. (#1670)
+	procStartTime func(pid int) (uint64, error)
 }
 
 // Deps bundles all wiring. Constructor takes a single struct so future
@@ -101,6 +105,9 @@ type Deps struct {
 	Broadcast    func()
 	ValidateWS   func(ws, root string) (string, error)
 	VerifyProcID func(pid int, expectedStartTime uint64) bool
+	// ProcStartTime reads /proc/<pid> start_time (discovery.ProcStartTime).
+	// Used by the atomic SendTermVerified identity guard. (#1670)
+	ProcStartTime func(pid int) (uint64, error)
 }
 
 // New constructs a Handlers from injected deps.
@@ -116,6 +123,7 @@ func New(d Deps) *Handlers {
 		broadcast:       d.Broadcast,
 		validateWS:      d.ValidateWS,
 		verifyProcIdent: d.VerifyProcID,
+		procStartTime:   d.ProcStartTime,
 	}
 }
 
@@ -337,18 +345,20 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "proc_start_time is required", http.StatusBadRequest)
 		return
 	}
-	alive := osutil.PidAlive(req.PID)
-	if alive {
-		if !h.verifyProcIdent(req.PID, req.ProcStartTime) {
+	// Atomic identity-confirmed SIGTERM (#1670). SendTermVerified pins the
+	// process instance via pidfd before signalling so the old
+	// PidAlive→verify→SendTerm window — through which a recycled PID could be
+	// killed — no longer exists. ESRCH (process already gone) is success;
+	// ErrPidReused is the 409 the frontend expects.
+	if err := h.sendTermVerified(req.PID, req.ProcStartTime); err != nil {
+		if errors.Is(err, osutil.ErrPidReused) {
 			http.Error(w, "process identity changed (PID reused)", http.StatusConflict)
 			return
 		}
-		if err := osutil.SendTerm(req.PID); err != nil {
-			if !errors.Is(err, syscall.ESRCH) {
-				slog.Error("failed to terminate process", "pid", req.PID, "err", err)
-				http.Error(w, "failed to terminate process", http.StatusInternalServerError)
-				return
-			}
+		if !errors.Is(err, syscall.ESRCH) {
+			slog.Error("failed to terminate process", "pid", req.PID, "err", err)
+			http.Error(w, "failed to terminate process", http.StatusInternalServerError)
+			return
 		}
 	}
 
@@ -463,23 +473,22 @@ func (h *Handlers) HandleClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If the process is already dead, skip identity check and signal —
-	// just do cleanup.  Otherwise verify PID identity and send SIGTERM.
-	alive := osutil.PidAlive(req.PID)
-	if alive {
-		if !h.verifyProcIdent(req.PID, req.ProcStartTime) {
+	// Atomic identity-confirmed SIGTERM (#1670). SendTermVerified pins the
+	// process instance via pidfd, re-checks start_time through that pinned
+	// identity, then signals — closing the PID-reuse TOCTOU window that the
+	// old PidAlive→verifyProcIdent→SendTerm sequence left open. A recycled
+	// PID can no longer be killed: pidfd refers to the exact original
+	// instance or fails ESRCH. ESRCH (already dead) falls through to cleanup.
+	if err := h.sendTermVerified(req.PID, req.ProcStartTime); err != nil {
+		if errors.Is(err, osutil.ErrPidReused) {
 			http.Error(w, "process identity changed (PID reused)", http.StatusConflict)
 			return
 		}
-		if err := osutil.SendTerm(req.PID); err != nil {
-			// ESRCH = process disappeared between alive check and kill — treat as success.
-			if !errors.Is(err, syscall.ESRCH) {
-				slog.Error("failed to terminate process", "pid", req.PID, "err", err)
-				http.Error(w, "failed to terminate process", http.StatusInternalServerError)
-				return
-			}
+		if !errors.Is(err, syscall.ESRCH) {
+			slog.Error("failed to terminate process", "pid", req.PID, "err", err)
+			http.Error(w, "failed to terminate process", http.StatusInternalServerError)
+			return
 		}
-	} else {
 		slog.Info("discovered session already dead, cleaning up", "pid", req.PID)
 	}
 

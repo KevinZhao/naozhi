@@ -182,7 +182,10 @@ type finishArgs struct {
 // log scattered across executeOpt's seven branches; adding a new error class
 // is now one mapping plus one finishArgs literal at the call site.
 func (s *Scheduler) finishRun(a finishArgs) {
-	endedAt := time.Now()
+	// R247-ARCH-11 (#643): read endedAt via the injected clock so DurationMS
+	// (endedAt - a.startedAt) is deterministic under a fake clock in tests.
+	// Default clock is time.Now(), byte-identical to the prior inline read.
+	endedAt := s.now()
 	durationMS := endedAt.Sub(a.startedAt).Milliseconds()
 	if durationMS < 0 {
 		durationMS = 0 // monotonic clock skew safety
@@ -439,7 +442,10 @@ func (s *Scheduler) emitSyntheticSkipped(j *Job, viaTriggerNow bool, errClass Er
 			"job_id", j.ID, "trigger_now", viaTriggerNow, "err_class", string(errClass), "tag", logTag, "err", err)
 		return
 	}
-	startedAt := time.Now()
+	// R247-ARCH-11 (#643): synthetic started→ended pair uses the injected
+	// clock so a fake clock can drive a deterministic startedAt/endedAt for
+	// skipped-run lifecycle assertions.
+	startedAt := s.now()
 	trigger := TriggerScheduled
 	if viaTriggerNow {
 		trigger = TriggerManual
