@@ -482,3 +482,8 @@
 - [R200109-GO-14] withJobByPrefixOpts godoc 与 type 声明相隔数百行，阅读需翻找 — internal/cron/scheduler_jobs.go:643
 - [R200109-GO-15] checkOnce/doInstall 缺 Run 同款 nil-receiver guard（仅测试直调触发） — internal/selfupdate/checker.go:143
 - [R200109-CR-2] SysessionWorkDir 在 build 失败时仍无条件赋值，未来 builder 返回 partial workDir 会违反契约（当前总为空不触发） — internal/wireup/schedulers.go:209
+- [R20260603-PERF-1] managed_query.go total 重扫 pages 切片(5×5 bounded,纯简化) — internal/session/managed_query.go:763
+- [R20260603-GO-008] LastNVisibleAppend 在 RLock 内 make 切片延长临界区(注释可补) — internal/cli/eventlog_query.go:161
+- [R20260603-GO-010] registerPprof 在无 token dev 下每次启动 warn 刷日志 — internal/server/debug_pprof.go:55
+- [R20260603-PERF-14] handleBatch 的 recordBufPool 仅摊 buffer 未摊 json encodeState — internal/eventlog/persist/persister.go:1401
+- [R20260603-PERF-17] listRefsPool cap 不足时丢池切片而非渐增 — internal/session/router_core.go:1647
