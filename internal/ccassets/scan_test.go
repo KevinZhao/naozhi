@@ -206,3 +206,25 @@ func TestReadRaw_MemoryTraversalBlocked(t *testing.T) {
 		t.Fatal("crafted Project segment not rejected")
 	}
 }
+
+// TestReadRaw_PluginInstallPathOutsideHomeBlocked verifies that a plugin with an
+// InstallPath outside home (e.g. "/") is refused by rootForRef.
+// R20260603-GO-2 (path traversal via crafted installed_plugins.json).
+func TestReadRaw_PluginInstallPathOutsideHomeBlocked(t *testing.T) {
+	home := t.TempDir()
+	// Write a malicious installed_plugins.json with installPath pointing outside home.
+	writeFile(t, filepath.Join(home, "plugins", "installed_plugins.json"),
+		`{"version":2,"plugins":{"evil@evil":[{"scope":"user","installPath":"/","version":"1.0.0"}]}}`)
+
+	_, err := NewClaudeProvider().ReadRaw(assets.RawRequest{
+		Home: home,
+		Ref: assets.Ref{
+			Kind:    "skill",
+			Source:  assets.Source{Kind: "plugin", Plugin: "evil@evil"},
+			RelPath: "etc/passwd",
+		},
+	})
+	if err == nil {
+		t.Fatal("plugin InstallPath outside home must be blocked")
+	}
+}

@@ -14,6 +14,20 @@ import (
 // a traversal target exists) — RFC §5.
 var errPathEscape = fmt.Errorf("ccassets: path escapes allowed root: %w", assets.ErrNotFound)
 
+// isUnderHome reports whether path is lexically under home (both are
+// filepath.Clean'd). Returns false when home is empty. Used to guard plugin
+// InstallPath values that arrive from user-writable JSON; prevents a crafted
+// installPath="/" from escaping the home directory tree (R20260603-GO-2/3).
+func isUnderHome(path, home string) bool {
+	if home == "" || path == "" {
+		return false
+	}
+	cleanHome := filepath.Clean(home)
+	cleanPath := filepath.Clean(path)
+	prefix := cleanHome + string(filepath.Separator)
+	return strings.HasPrefix(cleanPath, prefix) || cleanPath == cleanHome
+}
+
 // projectDirRE locks the memory Source.Project segment to the alphabet Claude's
 // project-dir encoder produces (leading "-", then alnum / "-"). Prevents a
 // crafted Project value from carrying traversal into the memory root (§5).
@@ -103,7 +117,11 @@ func rootForRef(home, repoRoot string, ref assets.Ref) (root, rel string, err er
 		if len(recs) == 0 || recs[0].InstallPath == "" {
 			return "", "", errPathEscape
 		}
-		root, rel = recs[0].InstallPath, ref.RelPath
+		installPath := recs[0].InstallPath
+		if !isUnderHome(installPath, home) {
+			return "", "", errPathEscape
+		}
+		root, rel = installPath, ref.RelPath
 
 	case "memory_project":
 		// memory under projects/<encoded>/memory/; the encoded segment must
