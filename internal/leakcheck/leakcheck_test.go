@@ -80,10 +80,17 @@ func TestCheckWith_DetectsLeak(t *testing.T) {
 	fake := &fakeTB{}
 	done := CheckWith(fake, 0, 50*time.Millisecond)
 	// Deliberately leak a goroutine: it never exits within the settle
-	// window, so the deferred check should fail.
+	// window, so the deferred check should fail. Block until it is actually
+	// running (started closed) before done() reads the count — a bare `go`
+	// statement may not yet be scheduled, and thus not yet counted by
+	// runtime.NumGoroutine, when done() samples with grace=0.
+	started := make(chan struct{})
 	go func() {
+		close(started)
 		<-stop
 	}()
+	<-started
+
 	done()
 
 	if !fake.failed() {
