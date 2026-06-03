@@ -32,6 +32,7 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
+	"github.com/naozhi/naozhi/internal/textutil"
 
 	robfigcron "github.com/robfig/cron/v3"
 )
@@ -330,16 +331,6 @@ const (
 	cronNoticeMid    = "] "
 )
 
-// cronMarkdownPunctReplacer is a package-level Replacer for escapeCronMarkdownPunct.
-// Constructed once to avoid per-call allocation; Replace performs a single
-// pass over the input string. R164930-PERF-4.
-var cronMarkdownPunctReplacer = strings.NewReplacer(
-	"[", "［", // U+FF3B
-	"]", "］", // U+FF3D
-	"(", "（", // U+FF08
-	")", "）", // U+FF09
-)
-
 // formatCronNotice renders the IM-notice line cron jobs send through
 // deliverNotice. label is the snap.labelOrID() result (job title or
 // fallback ID); body is the human-readable suffix already in the
@@ -392,26 +383,20 @@ func formatCronNotice(label, body string) string {
 }
 
 // escapeCronMarkdownPunct replaces the markdown link-syntax characters
-// `[`, `]`, `(`, `)` with full-width visually-similar codepoints
-// (U+FF3B / U+FF3D / U+FF08 / U+FF09) so an attacker-controlled cron
-// Title or result body cannot smuggle `[text](url)` clickable links
-// into the IM notice. R260528-SEC-8.
+// `[`, `]`, `(`, `)` with full-width visually-similar codepoints so an
+// attacker-controlled cron Title or result body cannot smuggle `[text](url)`
+// clickable links into the IM notice. R260528-SEC-8.
 //
-// R164930-PERF-4/5: single-pass implementation using a package-level
-// strings.Replacer (cronMarkdownPunctReplacer). An IndexAny fast-path
-// avoids any allocation on the common ASCII-clean case; when substitution
-// is required the Replacer performs exactly one scan + one output
-// allocation instead of the previous up-to-4-scan / 4-alloc loop.
+// R20260603140013-ARCH-1 (#1707): the escaping logic + its package-level
+// Replacer moved to the leaf package internal/textutil so the IM dispatch
+// edge can use it without importing this domain package. Thin alias kept so
+// internal cron call sites (formatCronNotice) stay unchanged.
 func escapeCronMarkdownPunct(s string) string {
-	if !strings.ContainsAny(s, "[]()") {
-		return s
-	}
-	return cronMarkdownPunctReplacer.Replace(s)
+	return textutil.EscapeCronMarkdownPunct(s)
 }
 
 // EscapeMarkdownPunct is the exported variant of escapeCronMarkdownPunct for
-// use by packages (e.g. dispatch) that display cron Job fields in IM replies.
-// R112714-ARCH-1.
+// use by packages that display cron Job fields in IM replies. R112714-ARCH-1.
 func EscapeMarkdownPunct(s string) string { return escapeCronMarkdownPunct(s) }
 
 // labelOrID returns the IM-notice display label: snap.label when populated,

@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // trimUnicodeSpace strips all Unicode whitespace (including full-width
@@ -488,7 +489,9 @@ func sanitizeCronDisplay(s string, maxRunes int) string {
 	// Strip C0/C1 controls, bidi overrides, zero-width chars.
 	s = osutil.SanitizeForLog(s, len(s)*4+16)
 	// Prevent markdown link-smuggling via [text](url) patterns.
-	s = cron.EscapeMarkdownPunct(s)
+	// R20260603140013-ARCH-1 (#1707): use the leaf textutil helper directly so
+	// the IM display path no longer couples to the cron domain package.
+	s = textutil.EscapeCronMarkdownPunct(s)
 	return s
 }
 
@@ -783,11 +786,13 @@ var smartQuoteNormalizer = strings.NewReplacer(
 // every existing call site. R216-CR-1.
 //
 // R20260527122801-ARCH-3 (#1315): the prompt/schedule byte caps moved into
-// cron.ValidatePromptStrict / cron.ValidateScheduleChars (which ParseCronAdd
-// now delegates to), so the prior maxCronPromptBytes / maxCronScheduleBytes
-// aliases became dead. Only the ID-length alias survives — it still guards the
-// `/cron <op> <id>` token in validateCronJobIDArg.
-const maxCronIDLen = cron.MaxIDLen
+// textutil.ValidateCronPromptStrict / textutil.ValidateCronScheduleChars (which
+// ParseCronAdd now delegates to), so the prior maxCronPromptBytes /
+// maxCronScheduleBytes aliases became dead. Only the ID-length alias survives —
+// it still guards the `/cron <op> <id>` token in validateCronJobIDArg.
+// R20260603140013-ARCH-1 (#1707): aliased from the leaf textutil package so the
+// `/cron` slash-command edge no longer imports the cron domain package for it.
+const maxCronIDLen = textutil.MaxCronIDLen
 
 // ParseCronAdd parses the args of /cron add: "schedule" prompt
 func ParseCronAdd(args string) (schedule, prompt string, err error) {
@@ -804,12 +809,14 @@ func ParseCronAdd(args string) (schedule, prompt string, err error) {
 	}
 	schedule = rest
 	// R20260527122801-ARCH-3 (#1315): delegate the schedule size + UTF-8 +
-	// C0/DEL/C1/bidi/LS/PS scan to cron.ValidateScheduleChars so the IM
+	// C0/DEL/C1/bidi/LS/PS scan to textutil.ValidateCronScheduleChars so the IM
 	// `/cron add` edge and the dashboard validateCronScheduleChars edge share
 	// one policy. Previously this hand-wrote a byte loop + rune loop that
 	// could silently drift from the dashboard copy when a new forbidden
-	// character was added on one side only.
-	if err := cron.ValidateScheduleChars(schedule); err != nil {
+	// character was added on one side only. R20260603140013-ARCH-1 (#1707):
+	// the validator lives in the leaf textutil package so this edge no longer
+	// couples to the cron domain package for it.
+	if err := textutil.ValidateCronScheduleChars(schedule); err != nil {
 		return "", "", err
 	}
 	// R20260603-GEN-4: ValidateScheduleChars only screens the character set, so
@@ -821,15 +828,16 @@ func ParseCronAdd(args string) (schedule, prompt string, err error) {
 	}
 	prompt = strings.TrimSpace(tail)
 	// R20260527122801-ARCH-3 (#1315): delegate the prompt empty/size/UTF-8/
-	// C0/DEL/C1/bidi/LS/PS scan to cron.ValidatePromptStrict — the same helper
-	// the dashboard validateCronPrompt and Scheduler.SetJobPrompt call — so IM
-	// and dashboard ingress can never diverge. Null bytes are truncated by
+	// C0/DEL/C1/bidi/LS/PS scan to textutil.ValidateCronPromptStrict — the same
+	// helper the dashboard validateCronPrompt and Scheduler.SetJobPrompt call —
+	// so IM and dashboard ingress can never diverge. Null bytes are truncated by
 	// execve, C1/bidi runes corrupt terminal log viewers; LF and Tab stay
 	// allowed for multi-line / indented playbooks (json.Marshal escapes them
 	// on the stream-json wire). Unlike the dashboard, the IM edge does not
 	// additionally reject CR because IM prompts never surface raw to log
-	// pipelines.
-	if err := cron.ValidatePromptStrict(prompt); err != nil {
+	// pipelines. R20260603140013-ARCH-1 (#1707): validator now lives in leaf
+	// textutil so this edge no longer couples to cron for it.
+	if err := textutil.ValidateCronPromptStrict(prompt); err != nil {
 		return "", "", err
 	}
 	return schedule, prompt, nil
