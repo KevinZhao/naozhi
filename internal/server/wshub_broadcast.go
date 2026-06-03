@@ -111,30 +111,41 @@ func releaseBroadcastSnap(snapPtr *[]*wsClient, snap []*wsClient) {
 // cron's run-started/ended fan-out paid one O(N_clients) walk per broadcast
 // wave even when most connections were still pre-auth (no-token mode is the
 // only path that bypasses handleAuth — tokens routes flip authenticated only
-// after the inner auth message exchanges). The mirror is updated under h.mu
-// alongside h.clients (register / markAuthenticated / unregister / Shutdown)
-// so the two stay consistent. Hand-rolled test hubs that bypass NewHub leave
+// after the inner auth message exchanges). The mirror is updated under
+// authMu (nested inside h.mu) by register / markAuthenticated / unregister /
+// Shutdown so it stays consistent with h.clients while letting this fan-out
+// read under authMu alone — R200109-PERF-4 (#1621). Hand-rolled test hubs that bypass NewHub leave
 // h.authClients nil; the nil-guard falls back to the legacy filter loop so
 // pre-existing fixtures observe no behaviour change.
 func (h *Hub) broadcastToAuthenticated(data []byte) {
 	snapPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
 	snap := (*snapPtr)[:0]
 
-	h.mu.RLock()
+	// R200109-PERF-4 (#1621): the authClients mirror has its own authMu so
+	// this fan-out (N sessions × multiple events/s) no longer serialises
+	// behind the Hub-wide h.mu that register / unregister / markAuthenticated
+	// hold. We snapshot under the cheap authMu.RLock and release before the
+	// per-client SendRaw loop. The legacy fallback still walks h.clients —
+	// that map is h.mu-owned, so hand-rolled hubs (nil authClients) keep the
+	// original h.mu.RLock path. authClients-nil is decided once at NewHub and
+	// never flips, so reading it here without a lock is safe.
 	if h.authClients != nil {
+		h.authMu.RLock()
 		for c := range h.authClients {
 			snap = append(snap, c)
 		}
+		h.authMu.RUnlock()
 	} else {
 		// Legacy fallback for hand-rolled hubs that do not initialise
 		// authClients. Production hubs always go through NewHub.
+		h.mu.RLock()
 		for c := range h.clients {
 			if c.authenticated.Load() {
 				snap = append(snap, c)
 			}
 		}
+		h.mu.RUnlock()
 	}
-	h.mu.RUnlock()
 
 	for _, c := range snap {
 		c.SendRaw(data)

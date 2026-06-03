@@ -215,6 +215,23 @@ type Hub struct {
 	// always removes regardless of state. authenticated is monotonic
 	// (only ever true→true; no logout path) so we never need a "remove
 	// on deauth" hook.
+	//
+	// R200109-PERF-4 (#1621): authClients is guarded by its own authMu
+	// (a dedicated RWMutex) rather than the Hub-wide h.mu. broadcastTo-
+	// Authenticated fans out on every session_state / sessions_update /
+	// cron run event — N sessions × multiple events/s — and previously held
+	// h.mu.RLock for the whole snapshot scan, serialising behind every
+	// register / unregister / markAuthenticated h.mu.Lock. Splitting the
+	// mirror onto authMu means the hot read side only contends with the
+	// (cheap) authClients writes, not with the full subscription-lifecycle
+	// lock. Lock-ordering: the three writers (register / markAuthenticated /
+	// unregister) and Shutdown already hold h.mu when they touch authClients
+	// — they nest authMu INSIDE h.mu (acquire h.mu first, then authMu). The
+	// broadcast read side takes authMu ALONE and never reaches for h.mu, so
+	// there is no inverse acquisition and no deadlock. The legacy fallback
+	// loop (hand-rolled hubs with nil authClients) still scans h.clients
+	// under h.mu because that map is h.mu-owned.
+	authMu      sync.RWMutex
 	authClients map[*wsClient]struct{}
 	// subscriberCount tracks per-key subscriber count for the
 	// maxSubscribersPerKey cap (R246-PERF-4 / #716). Without this, the
@@ -720,7 +737,12 @@ func (h *Hub) register(c *wsClient) {
 	// test hubs that allocate &Hub{} directly leave authClients nil; the
 	// nil-guard preserves the legacy behaviour.
 	if h.authClients != nil && c.authenticated.Load() {
+		// R200109-PERF-4 (#1621): authClients writes nest authMu inside
+		// h.mu so the broadcast read side (authMu alone) sees a consistent
+		// mirror without contending on the Hub-wide lock.
+		h.authMu.Lock()
 		h.authClients[c] = struct{}{}
+		h.authMu.Unlock()
 	}
 	h.mu.Unlock()
 }
@@ -742,7 +764,10 @@ func (h *Hub) markAuthenticated(c *wsClient) {
 	// source of truth for "this client is alive enough to broadcast to".
 	if h.authClients != nil {
 		if _, ok := h.clients[c]; ok {
+			// R200109-PERF-4 (#1621): authMu nested inside h.mu.
+			h.authMu.Lock()
 			h.authClients[c] = struct{}{}
+			h.authMu.Unlock()
 		}
 	}
 	h.mu.Unlock()
@@ -772,7 +797,10 @@ func (h *Hub) unregister(c *wsClient) {
 		// well-defined no-op so the unconditional delete handles both the
 		// authenticated and (rare) never-authenticated disconnect paths.
 		if h.authClients != nil {
+			// R200109-PERF-4 (#1621): authMu nested inside h.mu.
+			h.authMu.Lock()
 			delete(h.authClients, c)
+			h.authMu.Unlock()
 		}
 		if n := len(c.subscriptions); n > 0 {
 			unsubs = make([]func(), 0, n)
@@ -1048,9 +1076,14 @@ func (h *Hub) Shutdown() {
 	// nilling) so any straggler markAuthenticated call goes through the
 	// h.clients membership check above and short-circuits on the empty
 	// clients map.
+	// R200109-PERF-4 (#1621): authMu nested inside h.mu (Shutdown holds
+	// h.mu here); broadcast readers blocked on authMu drain to an empty
+	// mirror.
+	h.authMu.Lock()
 	for c := range h.authClients {
 		delete(h.authClients, c)
 	}
+	h.authMu.Unlock()
 	h.mu.Unlock()
 	for _, unsub := range unsubs {
 		unsub()
