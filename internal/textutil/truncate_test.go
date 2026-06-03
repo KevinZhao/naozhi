@@ -143,3 +143,46 @@ func TestTruncateRunesBytes(t *testing.T) {
 		})
 	}
 }
+
+// TestTruncateRunesPair asserts the fused single-scan helper is behaviourally
+// identical to two independent TruncateRunes calls across edge cases, and
+// covers the degraded-contract fallbacks (lo>hi, non-positive caps).
+// R20260602190132-PERF-11.
+func TestTruncateRunesPair(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		in     string
+		lo, hi int
+	}{
+		{"both_fit", "hello", 10, 20},
+		{"lo_trims_hi_fits", "hello world here", 5, 100},
+		{"both_trim", "hello world here we go", 5, 11},
+		{"equal_caps", "hello world", 5, 5},
+		{"unicode_both_trim", "你好世界测试一二三", 2, 5},
+		{"unicode_lo_trim_hi_fit", "你好世界", 2, 100},
+		{"exact_boundary_lo", "abcde", 5, 10},
+		{"empty", "", 3, 8},
+		{"lo_greater_than_hi_fallback", "hello world", 8, 3},
+		{"zero_lo_fallback", "hello world", 0, 5},
+		{"negative_hi_fallback", "hello world", 3, -1},
+		{"single_rune_each", "🚀🛰️x", 1, 2},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotLo, gotHi := TruncateRunesPair(tc.in, tc.lo, tc.hi)
+			wantLo := TruncateRunes(tc.in, tc.lo)
+			wantHi := TruncateRunes(tc.in, tc.hi)
+			if gotLo != wantLo {
+				t.Errorf("TruncateRunesPair(%q,%d,%d) lo = %q, want %q",
+					tc.in, tc.lo, tc.hi, gotLo, wantLo)
+			}
+			if gotHi != wantHi {
+				t.Errorf("TruncateRunesPair(%q,%d,%d) hi = %q, want %q",
+					tc.in, tc.lo, tc.hi, gotHi, wantHi)
+			}
+		})
+	}
+}
