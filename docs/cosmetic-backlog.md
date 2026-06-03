@@ -482,3 +482,7 @@
 - [R200109-GO-14] withJobByPrefixOpts godoc 与 type 声明相隔数百行，阅读需翻找 — internal/cron/scheduler_jobs.go:643
 - [R200109-GO-15] checkOnce/doInstall 缺 Run 同款 nil-receiver guard（仅测试直调触发） — internal/selfupdate/checker.go:143
 - [R200109-CR-2] SysessionWorkDir 在 build 失败时仍无条件赋值，未来 builder 返回 partial workDir 会违反契约（当前总为空不触发） — internal/wireup/schedulers.go:209
+- [R20260603040203-GO-COS-1] managed_query.go:342 recountPersistedUserTurnsLocked 注释 "read or write" 误导——实际只在 historyMu 写锁下调用，read-lock 下 Store 可能读到陈旧 count — internal/session/managed_query.go:342
+- [R20260603040203-CODE-COS-1] jobIDsScratchCapDrop 内联注释 "2000 string slots" 硬编码，若 maxJobsHardCap 变更会静默漂移，宜改 4*maxJobsHardCap 公式 — internal/cron/scheduler_session.go:64
+- [R20260603040203-ARCH-COS-1] runShutdown 顺序契约散落三处(main.go prose + runshutdown.go godoc + 两个 test)，顺序变更需同步三地 — cmd/naozhi/runshutdown.go:8
+- [R20260603040203-SEC-COS-1] selfupdate.go:419 testHTTPTransport 包级可变变量供测试绕过 TLS，宜加 build tag 或生产路径 panic-guard 防泄漏 — internal/selfupdate/selfupdate.go:419

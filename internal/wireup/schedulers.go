@@ -171,6 +171,16 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		return out, fmt.Errorf("WireSchedulers: nil ParentCtx")
 	}
 
+	// deps.SessionRouterAdapter is the cron.SessionRouter passed to
+	// cron.SchedulerConfig.Router. A nil interface here would not panic
+	// at construction time but would panic at first job execution when the
+	// scheduler calls Router methods. Catch it at startup instead.
+	// R20260603040203-GO-6: deps.Router (*session.Router) is unused here;
+	// only SessionRouterAdapter is forwarded to cron. Check that field.
+	if deps.SessionRouterAdapter == nil {
+		return out, fmt.Errorf("WireSchedulers: nil SessionRouterAdapter")
+	}
+
 	cronLoc := deps.Cfg.ParseCronTimezone()
 	notifyDefault := cron.NotifyTarget{
 		Platform: deps.Cfg.Cron.NotifyDefault.Platform,

@@ -890,6 +890,15 @@ func (r *Router) installFreshSessionLocked(
 			r.mu.Unlock()
 		},
 	}
+	// Seed persistedUserTurns from the restored history so the proc==nil
+	// snapshot branch (managed_query.go:206) and AutoTitler min-turn gate see
+	// the correct count immediately. R20260603040203-CODE-002: s is unpublished
+	// so no concurrent readers; historyMu is still required by recount contract.
+	if len(oldHistory) > 0 {
+		s.historyMu.Lock()
+		s.recountPersistedUserTurnsLocked()
+		s.historyMu.Unlock()
+	}
 	storeTotalCost(&s.totalCost, oldTotalCost)
 	// Sidebar order anchor: inherit oldCreatedAt when this spawn replaces a
 	// prior incarnation (resume / ResetAndRecreate / takeover); fall back to
@@ -1404,6 +1413,13 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 			}
 			r.mu.Unlock()
 		},
+	}
+	// Seed persistedUserTurns so snapshot().MessageCount is correct on the
+	// renamed session before any new turns arrive. R20260603040203-CODE-002.
+	if len(freshHistory) > 0 {
+		fresh.historyMu.Lock()
+		fresh.recountPersistedUserTurnsLocked()
+		fresh.historyMu.Unlock()
 	}
 	storeTotalCost(&fresh.totalCost, loadTotalCost(&old.totalCost))
 	fresh.setWorkspace(old.Workspace())
