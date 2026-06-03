@@ -780,6 +780,13 @@ func validateConfig(cfg *Config) error {
 			cfg.Platforms.Feishu.VerificationToken == "" && cfg.Platforms.Feishu.EncryptKey == "" {
 			return fmt.Errorf("feishu webhook mode requires at least one of verification_token or encrypt_key to be set")
 		}
+		// #1656: warn at config-validation time (not just at Start()) when the
+		// insecure token-only webhook escape hatch is enabled without an
+		// encrypt_key. Operators copying a template with allow_insecure_webhook
+		// should learn here that the webhook lacks HMAC verification.
+		if cfg.Platforms.Feishu.AllowInsecureWebhook && cfg.Platforms.Feishu.EncryptKey == "" {
+			slog.Warn("feishu webhook 处于 token-only 不安全模式：allow_insecure_webhook=true 且未配置 encrypt_key，回调缺少 HMAC 校验，token 泄露后易被伪造/重放；建议配置 encrypt_key 启用安全模式")
+		}
 	}
 	if cfg.Platforms.Slack != nil {
 		if containsEnvPlaceholder(cfg.Platforms.Slack.BotToken) {
