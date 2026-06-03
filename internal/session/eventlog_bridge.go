@@ -120,21 +120,28 @@ var bridgeEncPool = sync.Pool{
 const bridgeEncMaxCap = 64 * 1024
 
 // span records a [start,end) byte range inside the shared pooled encode
-// buffer for one EventEntry. Hoisted to package scope (was a func-local
-// type) so batchScratch can carry a reusable []span across AppendBatch
-// calls. R20260602-PERF-2 (#1629).
-type span struct{ start, end int }
+// buffer for one EventEntry plus that entry's TimeMS. Hoisted to package
+// scope (was a func-local type) so batchScratch can carry a reusable []span
+// across AppendBatch calls. R20260602-PERF-2 (#1629).
+//
+// R200109-PERF-3 (#1619): timeMS folded into span so the separate `times`
+// helper slice is gone — one fewer pooled slice and one fewer append per
+// entry. TimeMS is captured at span-record time and read back during the
+// persist.Entry assembly pass.
+type span struct {
+	start, end int
+	timeMS     int64
+}
 
-// batchScratch pools the three per-AppendBatch helper slices the
-// multi-entry sink path used to `make` on every call (out / spans / times).
-// In steady state (≥5 events/s × N sessions) those three heap allocations
-// escaped per call; carrying them in a sync.Pool keeps the backing arrays
-// alive across calls and reuses their capacity. Mirrors the bridgeEncPool
-// idiom right above. R20260602-PERF-2 (#1629).
+// batchScratch pools the two per-AppendBatch helper slices the multi-entry
+// sink path used to `make` on every call (out / spans). In steady state
+// (≥5 events/s × N sessions) those heap allocations escaped per call;
+// carrying them in a sync.Pool keeps the backing arrays alive across calls
+// and reuses their capacity. Mirrors the bridgeEncPool idiom right above.
+// R20260602-PERF-2 (#1629).
 type batchScratch struct {
 	out   []persist.Entry
 	spans []span
-	times []int64
 }
 
 var batchScratchPool = sync.Pool{
@@ -208,10 +215,10 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 			return
 		}
 
-		// R20260602-PERF-2 (#1629): borrow the three helper slices from a
+		// R20260602-PERF-2 (#1629): borrow the helper slices from a
 		// pool instead of make-ing them per call. They are reset to [:0]
 		// (keeping their capacity) and returned at every exit path below.
-		// All three are consumed entirely before persisterSink returns —
+		// Both are consumed entirely before persisterSink returns —
 		// `out`'s persist.Entry values alias the pooled encode buffer, but
 		// the slice header itself is fully drained by persisterSink (it
 		// copies the bytes into its own arena, see comment below), so the
@@ -234,7 +241,6 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 		// pass because the buffer may grow (and move) mid-loop.
 		eb.buf.Reset()
 		spans := bs.spans[:0]
-		times := bs.times[:0]
 		for _, e := range entries {
 			start := eb.buf.Len()
 			if err := eb.enc.Encode(e); err != nil {
@@ -248,8 +254,7 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 			if end > start && eb.buf.Bytes()[end-1] == '\n' {
 				end--
 			}
-			spans = append(spans, span{start: start, end: end})
-			times = append(times, e.Time)
+			spans = append(spans, span{start: start, end: end, timeMS: e.Time})
 
 			// Refcount bump for every attachment path the entry
 			// carries. Replay batches are excluded — replay happens
@@ -266,10 +271,9 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 		// preserved for the next call. Slices wider than batchScratchMaxCap
 		// are dropped (left for GC) instead of pinning an outsized array.
 		putScratch := func() {
-			if cap(out) <= batchScratchMaxCap && cap(spans) <= batchScratchMaxCap && cap(times) <= batchScratchMaxCap {
+			if cap(out) <= batchScratchMaxCap && cap(spans) <= batchScratchMaxCap {
 				bs.out = out[:0]
 				bs.spans = spans[:0]
-				bs.times = times[:0]
 				batchScratchPool.Put(bs)
 			}
 		}
@@ -281,8 +285,8 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 			return
 		}
 		all := eb.buf.Bytes()
-		for i, sp := range spans {
-			out = append(out, persist.Entry{JSON: all[sp.start:sp.end], TimeMS: times[i]})
+		for _, sp := range spans {
+			out = append(out, persist.Entry{JSON: all[sp.start:sp.end], TimeMS: sp.timeMS})
 		}
 		// persisterSink copies the borrowed bytes synchronously (it owns a
 		// pooled arena), so eb and the scratch slices are safe to return only

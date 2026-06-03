@@ -98,6 +98,27 @@ var exemptKeyPrefixes = func() []string {
 	return out
 }()
 
+// exemptInfo scans keyNamespaces once and reports both whether key belongs
+// to an exempt namespace and that namespace's kind label. isExemptKey and
+// exemptKind are thin wrappers over it so the (bounded, 4-entry) prefix scan
+// — including the strings.HasPrefix calls — happens a single time even when
+// a caller needs both answers (spawnSession does). R20260603-PERF-8 (#1654):
+// merges the two previously-independent scans of the same table.
+//
+// R239-ARCH-L: derived from keyNamespaces (key.go) so a new exempt namespace
+// registers its prefix + kind label in one place.
+func exemptInfo(key string) (isExempt bool, kind string) {
+	for _, ns := range keyNamespaces {
+		if !ns.exempt {
+			continue
+		}
+		if strings.HasPrefix(key, ns.prefix) {
+			return true, ns.kind
+		}
+	}
+	return false, ""
+}
+
 // isExemptKey reports whether key belongs to an exempt namespace. Callers
 // that already have a ManagedSession should prefer reading s.exempt —
 // this helper exists for the construction path and for external callers
@@ -108,34 +129,17 @@ var exemptKeyPrefixes = func() []string {
 // eviction policy so an abandoned scratch conversation eventually releases
 // its process slot. ScratchPool manages its own lifetime on top of that.
 func isExemptKey(key string) bool {
-	for _, prefix := range exemptKeyPrefixes {
-		if strings.HasPrefix(key, prefix) {
-			return true
-		}
-	}
-	return false
+	exempt, _ := exemptInfo(key)
+	return exempt
 }
 
 // exemptKind classifies an exempt session key into one of three buckets:
 // "cron", "project", "sys", or "" if the key is not exempt. Used by the
 // per-namespace sub-quota gate in spawnSession so a noisy cron chat
 // can't starve planner / sys exempt sessions (R242-ARCH-2).
-//
-// R239-ARCH-L: derived from keyNamespaces (key.go) so a new exempt
-// namespace registers its kind label in one place. Iteration is bounded
-// by len(keyNamespaces) (4 entries today) so the linear scan stays
-// cheap relative to the strings.HasPrefix calls a switch would make
-// anyway.
 func exemptKind(key string) string {
-	for _, ns := range keyNamespaces {
-		if !ns.exempt {
-			continue
-		}
-		if strings.HasPrefix(key, ns.prefix) {
-			return ns.kind
-		}
-	}
-	return ""
+	_, kind := exemptInfo(key)
+	return kind
 }
 
 // exemptCapFor returns the sub-quota cap for a given exempt kind. Unknown
@@ -421,6 +425,15 @@ type Router struct {
 	// 读写: lifecycle (Reset / ResetAndRecreate write; GetOrCreate read+delete)
 	// (#1324 — R20260527122801-CR-12)
 	shimStuckOnReset map[string]bool
+
+	// removeWg tracks in-flight RemoveAsync teardown goroutines. It exists
+	// ONLY for test observability (tests call removeWg.Wait() directly) —
+	// production teardown never waits on it, and in particular Shutdown
+	// deliberately does NOT join it (the detached teardown follows the
+	// single-shot + bounded-leak contract documented on Shutdown). Each
+	// tracked goroutine self-terminates in ≤15s.
+	// 读写: cleanup (RemoveAsync Add/Done), test helpers (Wait)
+	removeWg sync.WaitGroup
 
 	// 读写: core (init), cleanup (saveIfDirty)
 	storePath string

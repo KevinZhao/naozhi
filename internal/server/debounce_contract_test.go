@@ -151,3 +151,60 @@ func TestDebounceTimer_ShutdownStopSemanticsContract(t *testing.T) {
 		t.Error("AfterFunc 不应回到 wshub.go - 应保留在 wshub_broadcast.go (R248-TEST-8)")
 	}
 }
+
+// TestDebounceTimer_PreallocatedReuseContract is R200109-PERF-14's (#1624)
+// source-level pin. The debounce timer is now allocated ONCE in NewHub and
+// re-armed with Reset(debounceInterval) on every idle→armed transition,
+// instead of calling time.AfterFunc per call (which allocated a fresh
+// runtime *time.Timer on the high-frequency sidebar-refresh path). A refactor
+// that drops the pre-allocation or goes back to per-call AfterFunc on the
+// production path regresses the alloc win silently. Pin the structure:
+//
+//  1. NewHub pre-allocates the timer with AfterFunc bound to debounceFire and
+//     immediately Stop()s it so it starts idle.
+//  2. BroadcastSessionsUpdate's production arm path re-uses it via
+//     h.debounceTimer.Reset(debounceInterval) rather than reassigning a new
+//     timer.
+//  3. The armed/idle sentinel is debounceArmed, not timer==nil.
+func TestDebounceTimer_PreallocatedReuseContract(t *testing.T) {
+	src, err := os.ReadFile("wshub.go")
+	if err != nil {
+		t.Fatalf("read wshub.go: %v", err)
+	}
+	bcastSrc, err := os.ReadFile("wshub_broadcast.go")
+	if err != nil {
+		t.Fatalf("read wshub_broadcast.go: %v", err)
+	}
+	body := string(src)
+	bcastBody := string(bcastSrc)
+
+	// 1) NewHub pre-allocates the timer (AfterFunc bound to debounceFire) and
+	// Stops it. We accept any duration arg in the AfterFunc so a future tweak
+	// to the idle placeholder (math.MaxInt64) doesn't trip the pin.
+	if !regexp.MustCompile(`h\.debounceTimer\s*=\s*time\.AfterFunc\([^,]+,\s*h\.debounceFire\)`).
+		MatchString(body) {
+		t.Error("Hub.NewHub no longer pre-allocates h.debounceTimer via " +
+			"time.AfterFunc(..., h.debounceFire). Per-call AfterFunc allocation " +
+			"would regress R200109-PERF-14 (#1624).")
+	}
+	if !regexp.MustCompile(`h\.debounceTimer\.Stop\(\)`).MatchString(body) {
+		t.Error("Hub.NewHub no longer Stop()s the pre-allocated debounceTimer " +
+			"to start it idle. R200109-PERF-14 (#1624).")
+	}
+
+	// 2) The production arm path re-uses the timer via Reset, not reassignment.
+	if !regexp.MustCompile(`h\.debounceTimer\.Reset\(debounceInterval\)`).
+		MatchString(bcastBody) {
+		t.Error("BroadcastSessionsUpdate no longer re-arms the pre-allocated " +
+			"timer via Reset(debounceInterval) — per-call timer allocation is " +
+			"back. R200109-PERF-14 (#1624).")
+	}
+
+	// 3) The armed/idle sentinel must be debounceArmed (the timer object is now
+	// Hub-lifetime so timer==nil can no longer mean "idle").
+	if !regexp.MustCompile(`h\.debounceArmed`).MatchString(bcastBody) {
+		t.Error("BroadcastSessionsUpdate no longer tracks armed state via " +
+			"debounceArmed. The pre-allocated timer is never nil so the old " +
+			"timer==nil idle sentinel is unsafe. R200109-PERF-14 (#1624).")
+	}
+}
