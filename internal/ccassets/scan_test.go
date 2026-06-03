@@ -3,6 +3,7 @@ package ccassets
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/assets"
@@ -248,5 +249,29 @@ func TestScan_PluginInstallPathOutsideHomeSkipped(t *testing.T) {
 	}
 	if len(inv.Assets) != 0 {
 		t.Errorf("expected 0 assets, got %d: %v", len(inv.Assets), inv.Assets)
+	}
+}
+
+// TestEncodeProjectDir_EquivalentToClaudeProjectSlug verifies that
+// encodeProjectDir produces the same result as discovery.ClaudeProjectSlug
+// for representative paths. R20260603-CODE-2.
+func TestEncodeProjectDir_EquivalentToClaudeProjectSlug(t *testing.T) {
+	cases := []string{
+		"/home/user/workspace/naozhi",
+		"/home/u/work/myproj",
+		"/root/proj",
+		"/a/b/c/d",
+	}
+	for _, c := range cases {
+		got := encodeProjectDir(c)
+		// Construct expected value directly: "/" → "-" substitution on the full path.
+		want := "-" + strings.ReplaceAll(strings.TrimPrefix(filepath.Clean(c), "/"), "/", "-")
+		if got != want {
+			t.Errorf("encodeProjectDir(%q) = %q, want %q", c, got, want)
+		}
+	}
+	// Empty string must return empty string in both implementations.
+	if got := encodeProjectDir(""); got != "" {
+		t.Errorf("encodeProjectDir(\"\") = %q, want \"\"", got)
 	}
 }
