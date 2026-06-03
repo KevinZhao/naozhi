@@ -259,7 +259,7 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 		}
 		remoteKey, err := nc.ProxyTakeover(r.Context(), req.PID, req.SessionID, req.CWD, req.ProcStartTime)
 		if err != nil {
-			slog.Warn("proxy takeover failed", "node", req.Node, "err", err)
+			slog.Warn("proxy takeover failed", "node", osutil.SanitizeForLog(req.Node, 64), "err", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
@@ -411,7 +411,7 @@ func (h *Handlers) HandleClose(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := nc.ProxyCloseDiscovered(r.Context(), req.PID, req.SessionID, req.CWD, req.ProcStartTime); err != nil {
-			slog.Warn("proxy close discovered failed", "node", req.Node, "err", err)
+			slog.Warn("proxy close discovered failed", "node", osutil.SanitizeForLog(req.Node, 64), "err", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}

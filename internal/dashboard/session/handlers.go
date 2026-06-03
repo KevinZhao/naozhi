@@ -1132,7 +1132,7 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		removed, err := nc.ProxyRemoveSession(r.Context(), req.Key)
 		if err != nil {
-			slog.Warn("remote remove session failed", "node", req.Node, "key", req.Key, "err", err)
+			slog.Warn("remote remove session failed", "node", osutil.SanitizeForLog(req.Node, 64), "key", req.Key, "err", err)
 			if isUnknownRPCMethodErr(err) {
 				// Peer is running an older binary without remove_session
 				// support; return 409 + explicit body so the dashboard can
@@ -1378,7 +1378,7 @@ func (h *Handlers) HandleInterrupt(w http.ResponseWriter, r *http.Request) {
 		}
 		interrupted, err := nc.ProxyInterruptSession(r.Context(), req.Key)
 		if err != nil {
-			slog.Warn("remote interrupt session failed", "node", req.Node, "key", req.Key, "err", err)
+			slog.Warn("remote interrupt session failed", "node", osutil.SanitizeForLog(req.Node, 64), "key", req.Key, "err", err)
 			if isUnknownRPCMethodErr(err) {
 				http.Error(w, "remote node needs upgrade to support this action", http.StatusConflict)
 				return
@@ -1387,7 +1387,7 @@ func (h *Handlers) HandleInterrupt(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if interrupted {
-			slog.Info("remote session interrupted via HTTP", "node", req.Node, "key", req.Key)
+			slog.Info("remote session interrupted via HTTP", "node", osutil.SanitizeForLog(req.Node, 64), "key", req.Key)
 			httputil.WriteOK(w)
 		} else {
 			httputil.WriteJSON(w, map[string]string{"status": "not_running"})
