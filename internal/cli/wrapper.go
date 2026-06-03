@@ -335,9 +335,22 @@ func validateCLIPath(cliPath string) {
 // this helper is to refuse the file-type-confusion attack vector
 // (cli.path = /dev/fuse / /tmp/fifo) at the last hop before exec, even
 // when upstream config validation regresses. R20260527122801-SEC-1.
+//
+// R20260603040203-SEC-2: spawn-time also HARD-REJECTS a non-absolute
+// cliPath. By the time we reach here an attacker-controllable IM session
+// key has triggered the spawn, and a relative name (e.g. "claude" or
+// "../bin/evil") would be re-resolved against the live PATH / CWD by
+// exec.Command — a PATH-poisoning argv-injection vector. Construction-time
+// validateCLIPath stays warn-only (test fixtures / uninstalled CLI rely on
+// construction succeeding); the hard refusal belongs at the last hop. Empty
+// path still passes through here — the downstream shim spawn surfaces the
+// uninstalled-CLI error.
 func enforceCLIPathSafe(cliPath string) error {
 	if cliPath == "" {
 		return nil
+	}
+	if !filepath.IsAbs(cliPath) {
+		return fmt.Errorf("cliPath must be absolute, got %q (PATH-injection guard)", cliPath)
 	}
 	fi, err := os.Lstat(cliPath)
 	if err != nil {

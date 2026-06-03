@@ -118,6 +118,31 @@ func TestEnforceCLIPathSafe_SymlinkOK(t *testing.T) {
 	}
 }
 
+// R20260603040203-SEC-2: a non-absolute cliPath must be REJECTED at spawn
+// time. A bare name like "claude" (or "../bin/evil") is re-resolved by
+// exec.Command against the live PATH / CWD — a PATH-poisoning argv-injection
+// vector. The hard refusal lives here, not in warn-only construction.
+func TestEnforceCLIPathSafe_RejectsRelativePath(t *testing.T) {
+	for _, rel := range []string{"claude", "./claude", "../bin/evil", "bin/claude"} {
+		err := enforceCLIPathSafe(rel)
+		if err == nil {
+			t.Errorf("enforceCLIPathSafe(%q) returned nil; expected refusal for relative path", rel)
+			continue
+		}
+		if !strings.Contains(err.Error(), "absolute") {
+			t.Errorf("error for %q should mention 'absolute', got %q", rel, err.Error())
+		}
+	}
+}
+
+// An absolute path that does not exist must still pass (uninstalled-CLI
+// rationale) — the relative-path guard must not regress the ENOENT case.
+func TestEnforceCLIPathSafe_AbsoluteMissingStillOK(t *testing.T) {
+	if err := enforceCLIPathSafe("/nonexistent/abs/claude"); err != nil {
+		t.Fatalf("absolute missing path should not error, got %v", err)
+	}
+}
+
 // Spawn ordering: the existing nil-ShimManager early-return MUST still
 // fire before our new enforcement, so existing test fixtures that
 // construct Wrapper{} with empty CLIPath + nil ShimManager keep their
