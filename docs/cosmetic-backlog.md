@@ -506,3 +506,12 @@
 - [R20260603-SEC-2] dashboard CSP script-src 'unsafe-inline' 已是 accepted/tracked NEEDS-DESIGN(R242-SEC-1/R249-SEC-9) — internal/server/routes.go:522
 - [R20260603-SEC-4] reverseserver Capabilities slice 无元素数上限 (4KB+auth gate 已限) — internal/node/reverseserver.go:413
 - [R20260603-ARCH-5] hub_broadcaster switch 无 default arm 记录未知 subsystem (future-proof) — internal/server/hub_broadcaster.go:27
+- [R20260603-COS-1] ssrfDialGuardWithResolver 未导出却 godoc 称"供测试注入";可移入 _test.go — internal/platform/weixin/api.go:82
+- [R20260603-COS-2] warnCapture/countingWarnHandler/countingHandler 三处近似 slog.Handler stub 可合并 — internal/shim/server_oversize_lr_warn_test.go:1
+- [R20260603-COS-3] mustGenerateHexID 测试文件中定义但从未调用(U1000 dead code) — internal/cron/generateid_must_test.go:14
+- [R20260603-COS-4] SanitizePromptForTransport 对任何 >=0x80 字节走慢 strings.Map,中日韩 prompt 全部误命中 — internal/discovery/scanner.go:859
+- [R20260603-COS-5] PERF-5 subscriberCountFast sync.Map 值用 *atomic.Int32 需类型断言;改 *int32+atomic.LoadInt32 省装箱 — internal/server/wshub_eventpush.go:139
+- [R20260603-COS-6] PERF-6 marshalCacheEntry.mu 用 Mutex,fan-out 命中也串行;改 RWMutex 让读并行 — internal/server/wshub_eventpush_cache.go:45
+- [R20260603-COS-7] PERF-12 shutdown 持锁内对 r.sessions 四次 O(N) 迭代可合并为一次 — internal/session/router_cleanup.go:877
+- [R20260603-COS-8] PERF-13 historyMarshalCache.reset 用 Range+Delete;Shutdown 可整体换新 map — internal/server/wshub_eventpush_cache.go:181
+- [R20260603-COS-9] EnsureStub 类似 typed-nil 守卫亦可在 dashsession.New 镜像 dispatch reflect collapse(已选 nil-safe 接收者方案) — internal/dashboard/session/handlers.go:1866
