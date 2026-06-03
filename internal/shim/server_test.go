@@ -1614,10 +1614,21 @@ func TestHandleClient_StderrForwarded(t *testing.T) {
 		t.Log("note: stderr message may not have arrived within deadline (process timing)")
 	}
 
+	// Deterministic teardown. Without this the test used to return on a
+	// best-effort 3s wait while handleClient was still running; its deferred
+	// s.saveState() then wrote the state file into t.TempDir() concurrently
+	// with the harness's RemoveAll cleanup, intermittently failing with
+	// "directory not empty" (a fresh file appearing between RemoveAll's
+	// readdir and the final rmdir). Closing s.done unblocks runCommandLoop's
+	// <-s.done arm even when the CLI was already dead at attach time
+	// (cliExited==nil), and waiting for handlerDone guarantees the deferred
+	// saveState has completed before this function returns — so no goroutine
+	// writes into the temp dir after cleanup begins.
+	s.initiateShutdown()
 	select {
 	case <-handlerDone:
-	case <-time.After(3 * time.Second):
-		// handleClient may still be waiting; that's OK for this test
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleClient did not return after shutdown")
 	}
 }
 
