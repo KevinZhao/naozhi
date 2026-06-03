@@ -357,3 +357,44 @@ func TestFilterEnv_DropsSecretsByDefault(t *testing.T) {
 		}
 	}
 }
+
+// TestFilterEnv_AWSDefaultProfileValidation verifies that AWS_DEFAULT_PROFILE
+// obeys the same profile-name validation as AWS_PROFILE — the fix for
+// R20260603040203-CODE-001 which added it to envAlwaysPassthrough so the
+// envProfileKeys gate can actually fire for it.
+func TestFilterEnv_AWSDefaultProfileValidation(t *testing.T) {
+	t.Run("safe AWS_DEFAULT_PROFILE passes", func(t *testing.T) {
+		t.Setenv("AWS_DEFAULT_PROFILE", "my-bedrock-profile")
+		env := filterEnv(nil)
+		if !envContains(env, "AWS_DEFAULT_PROFILE", "my-bedrock-profile") {
+			t.Error("safe AWS_DEFAULT_PROFILE must pass through")
+		}
+	})
+
+	t.Run("unsafe AWS_DEFAULT_PROFILE stripped", func(t *testing.T) {
+		t.Setenv("AWS_DEFAULT_PROFILE", "../../malicious; rm -rf /")
+		env := filterEnv(nil)
+		if envHasKey(env, "AWS_DEFAULT_PROFILE") {
+			t.Error("unsafe AWS_DEFAULT_PROFILE must be stripped")
+		}
+	})
+
+	t.Run("empty AWS_DEFAULT_PROFILE stripped", func(t *testing.T) {
+		t.Setenv("AWS_DEFAULT_PROFILE", "")
+		env := filterEnv(nil)
+		if envHasKey(env, "AWS_DEFAULT_PROFILE") {
+			t.Error("empty AWS_DEFAULT_PROFILE must be stripped")
+		}
+	})
+}
+
+// TestFilterEnv_PassesAWSDefaultProfile guards the R20260603040203-CODE-001
+// fix: AWS_DEFAULT_PROFILE must appear in the always-passthrough list so it
+// reaches the profile-validation gate, and a valid value flows through.
+func TestFilterEnv_PassesAWSDefaultProfile(t *testing.T) {
+	t.Setenv("AWS_DEFAULT_PROFILE", "default")
+	got := filterEnv(nil)
+	if !envContains(got, "AWS_DEFAULT_PROFILE", "default") {
+		t.Errorf("AWS_DEFAULT_PROFILE=default must pass through envAlwaysPassthrough")
+	}
+}

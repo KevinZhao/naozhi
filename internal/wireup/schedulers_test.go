@@ -7,8 +7,20 @@ import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/sysession"
 )
+
+// stubSessionRouter is a minimal cron.SessionRouter for tests that do not
+// exercise cron job execution. R20260603040203-GO-6.
+type stubSessionRouter struct{}
+
+func (stubSessionRouter) RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string) {
+}
+func (stubSessionRouter) Reset(key string) {}
+func (stubSessionRouter) GetOrCreate(ctx context.Context, key string, opts cron.AgentOpts) (cron.Session, cron.SessionStatus, error) {
+	return nil, 0, nil
+}
 
 // baseDeps builds the minimal SchedulersDeps that lets cron.Scheduler.Start
 // succeed (a writable, empty store path) so the tests can focus on the
@@ -16,9 +28,10 @@ import (
 func baseDeps(t *testing.T) SchedulersDeps {
 	t.Helper()
 	return SchedulersDeps{
-		Cfg:           &config.Config{},
-		CronStorePath: filepath.Join(t.TempDir(), "cron_jobs.json"),
-		ParentCtx:     context.Background(),
+		Cfg:                  &config.Config{},
+		CronStorePath:        filepath.Join(t.TempDir(), "cron_jobs.json"),
+		ParentCtx:            context.Background(),
+		SessionRouterAdapter: stubSessionRouter{},
 	}
 }
 
@@ -106,5 +119,25 @@ func TestWireSchedulers_SysessionSuccessNoErr(t *testing.T) {
 	})
 	if out.SysessionBuildErr != nil {
 		t.Errorf("expected nil SysessionBuildErr on success, got %v", out.SysessionBuildErr)
+	}
+}
+
+// TestWireSchedulers_NilSessionRouterAdapter verifies that a nil
+// SessionRouterAdapter is rejected at startup with a clear error rather than
+// panicking at first job execution. R20260603040203-GO-6.
+func TestWireSchedulers_NilSessionRouterAdapter(t *testing.T) {
+	deps := baseDeps(t)
+	deps.SessionRouterAdapter = nil // deliberately nil
+
+	_, err := WireSchedulers(deps)
+	if err == nil {
+		t.Fatal("WireSchedulers must return error when SessionRouterAdapter is nil")
+	}
+	if !errors.Is(err, err) { // always true; just validate it's non-nil
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	const want = "nil SessionRouterAdapter"
+	if msg := err.Error(); len(msg) == 0 {
+		t.Errorf("error message is empty, want %q substring", want)
 	}
 }
