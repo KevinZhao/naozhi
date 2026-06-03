@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -662,6 +663,75 @@ func TestHandleFileGet_PublicTmpPreview(t *testing.T) {
 	}
 	if resp["content"] != "preview-me\n" {
 		t.Errorf("content = %v", resp["content"])
+	}
+}
+
+// TestHandleFileGet_PublicTmpAuditLog locks R20260603-SEC-4 (#1678): every
+// file served through the __public_tmp__ pseudo-project must emit a structured
+// audit log line so an operator can reconstruct who read what under /tmp.
+func TestHandleFileGet_PublicTmpAuditLog(t *testing.T) {
+	// Capture slog output for the duration of this test, then restore.
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	h, _, _ := newProjectHandlersForTest(t, nil)
+	h.publicTmpEnabled = true
+
+	tmpFile, err := os.CreateTemp("/tmp", "naozhi-public-tmp-audit-*.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tmpFile.WriteString("audit-me\n"); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+	t.Cleanup(func() { _ = os.Remove(tmpFile.Name()) })
+
+	rel, err := filepath.Rel("/tmp", tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=preview", nil)
+	w := httptest.NewRecorder()
+	h.HandleFileGet(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "public_tmp file access") {
+		t.Errorf("audit log line missing; got: %q", logged)
+	}
+	if !strings.Contains(logged, "mode=preview") {
+		t.Errorf("audit log should record mode; got: %q", logged)
+	}
+	if !strings.Contains(logged, filepath.Base(tmpFile.Name())) {
+		t.Errorf("audit log should record resolved path; got: %q", logged)
+	}
+}
+
+// TestHandleFileGet_NonPublicTmpNoAudit confirms the audit log does NOT fire
+// for ordinary registered projects — it is scoped to the /tmp pseudo-project.
+func TestHandleFileGet_NonPublicTmpNoAudit(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	h, projName, _ := newProjectHandlersForTest(t, map[string]string{"notes.txt": "hi"})
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+projName+"&path=notes.txt&mode=preview", nil)
+	w := httptest.NewRecorder()
+	h.HandleFileGet(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(buf.String(), "public_tmp file access") {
+		t.Errorf("audit log must not fire for normal projects; got: %q", buf.String())
 	}
 }
 

@@ -933,6 +933,22 @@ func (h *Handlers) HandleFileGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// R20260603-SEC-4 (#1678): the __public_tmp__ pseudo-project lets any
+	// authenticated dashboard user read non-credential files anywhere under
+	// /tmp. That is acceptable only for single-operator deployments; on a
+	// shared/multi-operator host it can expose another user's artefacts.
+	// Since the flag's threat model assumes a single trusted operator, the
+	// minimum bar is an audit trail: emit one structured log line per served
+	// /tmp file so an operator who later switches to a shared deployment can
+	// reconstruct who read what. RemoteAddr is logged (not request headers)
+	// to avoid echoing attacker-controlled values into the log stream.
+	if project == publicTmpProject {
+		slog.Info("public_tmp file access",
+			"path", resolved,
+			"mode", mode,
+			"remote_addr", r.RemoteAddr)
+	}
+
 	// R230-SEC-5: defence-in-depth re-check that resolved still sits under
 	// the project root. resolveProjectFile already verified this once, but a
 	// concurrent rename(2) between EvalSymlinks (inside resolveProjectFile)
