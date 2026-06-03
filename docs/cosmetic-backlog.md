@@ -466,3 +466,4 @@
 - [R20260603-010128-GO-1] marshalRunPooled 在 enc.Encode 写错误路径仍把 poisoned encoder 还池(bytes.Buffer.Write 实际永不出错,假设性) — internal/cron/runstore.go:418
 - [R20260603-010128-ARCH-c1] cronRouterAdapter.GetOrCreate 错误路径返回 magic 0 status — cmd/naozhi/cron_router_adapter.go:104
 - [R20260603-010128-ARCH-c2] dispatch.localizeAPIError 近死代码薄包装 — internal/dispatch/apierr.go:10
+- [R20260603030037-SEC-7] peeruid_other.go VerifyPeerUID 在非 Linux/Darwin 平台 fail-open(返回 true)，建议返回 false + 启动告警 — internal/shim/peeruid_other.go:11
