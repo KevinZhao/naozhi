@@ -641,6 +641,16 @@ func copyFile(src, dst string) error {
 // of src's mode bits. Use for the .naozhi-upgrade.bak path on shared
 // install directories so the brief window before the backup is removed
 // does not expose the prior binary copy as world-readable / executable.
+//
+// R20260603-SEC-9: dst is opened with O_CREATE|O_EXCL|O_WRONLY so a hostile
+// UID on a shared install dir cannot pre-place a symlink at the (predictable)
+// .naozhi-upgrade.bak path and have the backup write follow it onto an
+// arbitrary file. A normal upgrade leaves a stale .bak from the previous run,
+// which would make O_EXCL fail spuriously, so we first os.Remove(dst) (a
+// regular unlink that also breaks any pre-placed symlink without following
+// it). O_EXCL then still guards the TOCTOU window between the unlink and the
+// open: an attacker who re-creates a symlink in that gap is rejected rather
+// than followed.
 func copyFileBackup(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -648,7 +658,14 @@ func copyFileBackup(src, dst string) error {
 	}
 	defer in.Close()
 
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	// Clear any leftover backup (or pre-placed symlink) from a prior run.
+	// os.Remove unlinks the path itself; it never follows a symlink to its
+	// target, so a malicious link is severed rather than written through.
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove stale backup %s: %w", dst, err)
+	}
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open destination %s: %w", dst, err)
 	}
