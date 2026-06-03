@@ -209,7 +209,14 @@ func TestRunInflight_ReleaseRun_ContractOrder(t *testing.T) {
 		Trigger:   TriggerScheduled,
 	})
 
-	gauge := expvar.NewInt("test_release_run_gauge_" + t.Name())
+	name := "test_release_run_gauge_" + t.Name()
+	var gauge *expvar.Int
+	if v := expvar.Get(name); v != nil {
+		gauge = v.(*expvar.Int)
+	} else {
+		gauge = expvar.NewInt(name)
+	}
+	gauge.Set(0)
 	gauge.Add(1) // mirror executeOpt's CAS-true Add(+1).
 
 	if v, ok := inf.snapshot(); !ok || v.RunID == "" {
