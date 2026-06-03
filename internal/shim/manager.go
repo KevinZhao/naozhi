@@ -1449,10 +1449,10 @@ func isSafeShimCredPath(v string) bool {
 	if !filepath.IsAbs(v) {
 		return false
 	}
-	// Reject any path containing a ".." segment outright (even if it would
-	// clean away) so a tampered value can never escape its intended root.
+	// Reject any path containing a "." or ".." segment outright (even if it
+	// would clean away) so a tampered value can never escape its intended root.
 	for _, seg := range strings.Split(filepath.ToSlash(v), "/") {
-		if seg == ".." {
+		if seg == ".." || seg == "." {
 			return false
 		}
 	}

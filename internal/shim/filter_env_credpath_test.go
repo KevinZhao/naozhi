@@ -87,6 +87,7 @@ func TestIsSafeShimCredPath(t *testing.T) {
 		{"/a/../b", false},
 		{"../a", false},
 		{"/a/b/..", false},
+		{"/a/./b", false},
 		{"/has\x00null", false},
 		{strings.Repeat("/a", 100), true},
 	}
