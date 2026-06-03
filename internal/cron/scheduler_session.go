@@ -234,13 +234,17 @@ func (s *Scheduler) KnownSessionIDs() map[string]struct{} {
 // KnownSessionIDs serves out of cache. Extracted so the cached and
 // uncached paths share one source of truth. R250-PERF-7.
 func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
-	out := make(map[string]struct{}, 32)
-
 	// Get a pooled scratch slice for job IDs; reset length to 0 before use.
 	jobIDsPtr := jobIDsScratchPool.Get().(*[]string)
 	jobIDs := (*jobIDsPtr)[:0]
 
 	s.mu.RLock()
+	// R20260603-PERF-3: size the map from len(s.jobs) under the lock already
+	// held here, replacing the fixed cap of 32 that caused repeated rehashes
+	// for schedulers with many jobs. Each job contributes at most one
+	// LastSessionID entry in this loop, so len(s.jobs)+8 is a tight upper
+	// bound with a small slack for in-flight and recent-history entries.
+	out := make(map[string]struct{}, len(s.jobs)+8)
 	for id, j := range s.jobs {
 		jobIDs = append(jobIDs, id)
 		if j.LastSessionID != "" {
