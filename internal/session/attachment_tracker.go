@@ -52,10 +52,13 @@ func (attachmentMetricsObserver) OnDrop(n int) {
 // keyed by session key-hash. Matches the tracker's contract: empty
 // string on unknown keyhash → tracker drops the bump silently.
 //
-// The closure iterates r.sessions once per call. Session removal is
-// rare; hot-path bumps are infrequent enough (bounded by the
-// Persister channel drain rate) that the linear scan is cheaper
-// than maintaining a dedicated keyhash → workspace index.
+// #1646: this runs on every persisted image-bearing event (potentially
+// several per Send) on the tracker worker goroutine. It used to hold
+// r.mu.RLock and linearly scan r.sessions, recomputing a SHA-256 KeyHash
+// per session, which is O(N)-hashes per bump on image-rich / cron-heavy
+// stores. It now consults r.keyhashToKey for an O(1) lookup and only falls
+// back to the scan when the index misses or points at a since-removed key
+// (self-healing — the index is a pure fast-path, never the source of truth).
 func (r *Router) workspaceResolverForTracker() tracker.WorkspaceResolver {
 	return func(keyhash string) string {
 		if keyhash == "" {
@@ -63,6 +66,17 @@ func (r *Router) workspaceResolverForTracker() tracker.WorkspaceResolver {
 		}
 		r.mu.RLock()
 		defer r.mu.RUnlock()
+		// Fast path: O(1) index lookup, re-verified against r.sessions so a
+		// stale entry (delete site that bypassed indexDel) degrades to the
+		// scan below rather than returning a workspace for a dead session.
+		if key, ok := r.keyhashToKey[keyhash]; ok {
+			if s := r.sessions[key]; s != nil && persist.KeyHash(key) == keyhash {
+				return s.Workspace()
+			}
+		}
+		// Fallback: linear scan (legacy behaviour). Covers test routers with a
+		// nil index and the rare stale-index case. Read-only — repairing the
+		// index would need the write lock we deliberately don't take here.
 		for k, s := range r.sessions {
 			if persist.KeyHash(k) == keyhash {
 				return s.Workspace()

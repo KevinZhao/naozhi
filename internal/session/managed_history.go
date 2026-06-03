@@ -439,6 +439,11 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 		s.persistedHistory = sorted
 		s.persistedHistorySorted = true
 	}
+	// #1644: refresh the cached user-turn count so the proc==nil snapshot
+	// branch can feed AutoTitler's min-turn gate. Done under historyMu after
+	// every persistedHistory mutation (append / cap-trim / sort) so the count
+	// stays consistent with the slice the dead-session readers see.
+	s.recountPersistedUserTurnsLocked()
 	s.historyMu.Unlock()
 
 	if len(tail) > 0 {
