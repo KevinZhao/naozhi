@@ -108,15 +108,61 @@ func TestAccept_MultiEntryBorrowedBytes(t *testing.T) {
 }
 
 // TestPutEntryArena_OversizeDropped pins the entryArenaMaxCap drop rule:
-// an arena grown past the cap by a one-off giant batch must NOT be pooled.
+// an arena whose buf grew past the cap by a one-off giant batch must NOT
+// be pooled.
 func TestPutEntryArena_OversizeDropped(t *testing.T) {
-	huge := bytes.NewBuffer(make([]byte, 0, entryArenaMaxCap+1))
-	huge.WriteByte('x')
+	huge := &batchArena{buf: bytes.NewBuffer(make([]byte, 0, entryArenaMaxCap+1))}
+	huge.buf.WriteByte('x')
 	putEntryArena(huge)
 	for i := 0; i < 16; i++ {
-		got := entryArenaPool.Get().(*bytes.Buffer)
+		got := entryArenaPool.Get().(*batchArena)
 		if got == huge {
 			t.Fatal("putEntryArena retained an oversize arena; entryArenaMaxCap drop rule regressed")
+		}
+	}
+}
+
+// TestPutEntryArena_OversizeSliceDropped pins the entryArenaSliceMaxCap
+// drop rule: owned/spans scratch grown past the cap by a one-off giant
+// batch must be released (set nil) rather than pooled so the next reuse
+// does not inherit a multi-KB slice backing array for the process life.
+func TestPutEntryArena_OversizeSliceDropped(t *testing.T) {
+	a := &batchArena{
+		buf:   bytes.NewBuffer(make([]byte, 0, 4*1024)),
+		owned: make([]Entry, entryArenaSliceMaxCap+1),
+		spans: make([]arenaSpan, entryArenaSliceMaxCap+1),
+	}
+	putEntryArena(a)
+	if a.owned != nil {
+		t.Errorf("oversize owned scratch not released; got cap=%d", cap(a.owned))
+	}
+	if a.spans != nil {
+		t.Errorf("oversize spans scratch not released; got cap=%d", cap(a.spans))
+	}
+}
+
+// TestPutEntryArena_ResetClearsEntries pins that pooling clears the owned
+// slice's entry-pointer references (so persisted EventEntry payloads are
+// not pinned between batches) while keeping the backing array for reuse.
+func TestPutEntryArena_ResetClearsEntries(t *testing.T) {
+	a := &batchArena{
+		buf:   bytes.NewBuffer(make([]byte, 0, 4*1024)),
+		owned: []Entry{{JSON: []byte("x"), TimeMS: 1}, {JSON: []byte("y"), TimeMS: 2}},
+		spans: []arenaSpan{{0, 1}, {1, 2}},
+	}
+	ownedCap := cap(a.owned)
+	putEntryArena(a)
+	if len(a.owned) != 0 {
+		t.Fatalf("owned not truncated; len=%d", len(a.owned))
+	}
+	if cap(a.owned) != ownedCap {
+		t.Fatalf("owned backing array not retained for reuse; cap %d -> %d", ownedCap, cap(a.owned))
+	}
+	// Inspect the cleared backing array via reslice to full cap.
+	full := a.owned[:cap(a.owned)]
+	for i := range full {
+		if full[i].JSON != nil || full[i].TimeMS != 0 {
+			t.Errorf("owned[%d] not cleared: %+v", i, full[i])
 		}
 	}
 }
