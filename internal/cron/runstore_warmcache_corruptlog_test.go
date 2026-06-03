@@ -10,10 +10,11 @@ import (
 // TestRunStore_WarmCacheLocked_ReturnsCorruptCount pins R236-PERF-09
 // (#527, partial): the slog.Warn for skipped corrupt files moved out
 // of the jobLock + entry.mu critical section. warmCacheLocked is the
-// inner critical-section helper that returns the corruptCount so the
-// public warmCache wrapper can emit the operator-facing slog AFTER
-// the locks drop. Without this test the next refactor that drops the
-// return value would silently regress the lock-window cleanup.
+// inner critical-section helper that returns the corruptCount (and
+// unreadableCount) so the public warmCache wrapper can emit the
+// operator-facing slog AFTER the locks drop. Without this test the
+// next refactor that drops the return value would silently regress the
+// lock-window cleanup.
 func TestRunStore_WarmCacheLocked_ReturnsCorruptCount(t *testing.T) {
 	t.Parallel()
 	s := newTestStore(t, 200, 30*24*time.Hour)
@@ -35,15 +36,18 @@ func TestRunStore_WarmCacheLocked_ReturnsCorruptCount(t *testing.T) {
 	// Force a cold cache so warmCacheLocked actually runs the disk scan.
 	s.cacheInvalidate(jobID)
 
-	got := s.warmCacheLocked(jobID)
-	if got != 1 {
-		t.Fatalf("warmCacheLocked corruptCount = %d, want 1", got)
+	gotCorrupt, gotUnreadable := s.warmCacheLocked(jobID)
+	if gotCorrupt != 1 {
+		t.Fatalf("warmCacheLocked corruptCount = %d, want 1", gotCorrupt)
+	}
+	if gotUnreadable != 0 {
+		t.Fatalf("warmCacheLocked unreadableCount = %d, want 0", gotUnreadable)
 	}
 
-	// Second call must return 0 because the entry is now warm — the
+	// Second call must return 0,0 because the entry is now warm — the
 	// "another goroutine warmed it" early-return path. The slog.Warn
 	// in the public wrapper would otherwise fire spuriously.
-	if got := s.warmCacheLocked(jobID); got != 0 {
-		t.Fatalf("warmCacheLocked second call corruptCount = %d, want 0 (warm fast path)", got)
+	if c, u := s.warmCacheLocked(jobID); c != 0 || u != 0 {
+		t.Fatalf("warmCacheLocked second call corrupt=%d unreadable=%d, want 0,0 (warm fast path)", c, u)
 	}
 }

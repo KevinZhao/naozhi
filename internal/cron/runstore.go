@@ -1132,19 +1132,25 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 // when the operator ships logs over a slow sink — keeping observability
 // out of the lock window is cheaper than auditing every log handler.
 func (s *runStore) warmCache(jobID string) {
-	corruptCount := s.warmCacheLocked(jobID)
-	if corruptCount > 0 {
-		slog.Warn("cron runstore warmCache skipped corrupt files",
-			"count", corruptCount, "dir", filepath.Join(s.root, jobID))
+	corruptCount, unreadableCount := s.warmCacheLocked(jobID)
+	if corruptCount > 0 || unreadableCount > 0 {
+		// R20260603150052-CR-7 (#1693): log corrupt (JSON parse failure) and
+		// unreadable (IO error: EACCES/EIO/ESTALE) separately so operators can
+		// distinguish a real data-integrity problem from a transient permission
+		// or storage error.
+		slog.Warn("cron runstore warmCache skipped corrupt or unreadable files",
+			"corrupt", corruptCount, "unreadable", unreadableCount,
+			"dir", filepath.Join(s.root, jobID))
 	}
 }
 
 // warmCacheLocked is the inner critical section of warmCache. Returns
-// the count of corrupt run files diskListNewestFirst skipped during the
-// scan so the caller can emit a single aggregate slog AFTER the locks
-// drop. Callers MUST NOT hold any runStore lock; this function takes
-// jobLock and entry.mu internally.
-func (s *runStore) warmCacheLocked(jobID string) int {
+// the count of corrupt run files (JSON parse failures) and unreadable run
+// files (IO errors such as EACCES/EIO/ESTALE) that diskListNewestFirst
+// skipped during the scan, so the caller can emit a single aggregate slog
+// AFTER the locks drop. Callers MUST NOT hold any runStore lock; this
+// function takes jobLock and entry.mu internally.
+func (s *runStore) warmCacheLocked(jobID string) (corruptCount, unreadableCount int) {
 	lock := s.jobLock(jobID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -1154,12 +1160,12 @@ func (s *runStore) warmCacheLocked(jobID string) int {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if entry.warm {
-		return 0 // another goroutine warmed it during our wait
+		return 0, 0 // another goroutine warmed it during our wait
 	}
-	rows, corruptCount := s.diskListNewestFirst(jobID, s.keepCount, time.Time{})
+	rows, corruptCount, unreadableCount := s.diskListNewestFirst(jobID, s.keepCount, time.Time{})
 	entry.ringSeed(rows, s.keepCount)
 	entry.warm = true
-	return corruptCount
+	return corruptCount, unreadableCount
 }
 
 // cacheGetBefore is the before-cutoff variant of cacheGet. It serves a
@@ -1266,7 +1272,7 @@ func (s *runStore) List(jobID string, limit int, before time.Time) []CronRunSumm
 			return cached
 		}
 	}
-	rows, _ := s.diskListNewestFirst(jobID, limit, before)
+	rows, _, _ := s.diskListNewestFirst(jobID, limit, before)
 	return rows
 }
 
@@ -1453,13 +1459,25 @@ func runDirItemNewestFirst(a, b runDirItem) int {
 //     TestRunStore_DiskList_BeforeStartedAtMtimeDivergence in
 //     runstore_test.go; any future re-introduction of an mtime gate
 //     must keep that test green.
-func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time) ([]CronRunSummary, int) {
+//
+// diskListNewestFirst is the on-disk variant of List, used by warmCache
+// and as the fall-through when cache is unavailable / before-cutoff is
+// set. Returns the summary list, the count of corrupt (JSON parse failure)
+// run files skipped, and the count of unreadable (IO error) run files
+// skipped (R20260603150052-CR-7 / #1693 — surfaces the distinction
+// between data-integrity problems and transient IO errors in warmCache
+// logging). The single-int overload previously conflated both; callers
+// that only need a combined skip signal can sum the two returns.
+//
+// R239-PERF-5 (#871): scan + sort delegated to scanSortedRunDir so this
+// path stays in lockstep with trimJobLocked.
+func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time) ([]CronRunSummary, int, int) {
 	items, dir, err := s.scanSortedRunDir(jobID)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			slog.Debug("cron run: list readdir", "dir", dir, "err", err)
 		}
-		return nil, 0
+		return nil, 0, 0
 	}
 
 	// R247-PERF-9 (#540) / R249-PERF-7 (#928): the no-cutoff warm path
@@ -1524,6 +1542,11 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 			if errors.Is(err, ErrCorruptRun) {
 				corruptCount++
 			}
+			// Non-corrupt IO errors (EACCES, EIO, ESTALE) are silently
+			// skipped on the serial path; they are rare and occur only on
+			// the before-cutoff pagination branch which already discards the
+			// skip counts at the List call site. The parallel path
+			// (decodeRunsParallel) tracks them separately as unreadableCount.
 			continue
 		}
 		if !before.IsZero() && !run.StartedAt.Before(before) {
@@ -1531,7 +1554,7 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 		}
 		out = append(out, run.summary())
 	}
-	return out, corruptCount
+	return out, corruptCount, 0
 }
 
 // diskDecodeParallelThreshold is the candidate count above which
@@ -1551,12 +1574,15 @@ const diskDecodeWorkers = 8
 
 // decodeRunsParallel reads + decodes the supplied newest-first items across
 // a bounded worker pool and returns the summaries in the SAME newest-first
-// order plus the count of corrupt/unreadable files skipped. Order is
-// preserved by writing each decode into a position-indexed scratch slice
-// (items is already mtime-sorted by scanSortedRunDir), so completion order
-// is irrelevant. Only called from the before.IsZero path where every
+// order plus separate counts for corrupt files (JSON parse failures) and
+// unreadable files (IO errors such as EACCES/EIO/ESTALE). R20260603150052-CR-7
+// (#1693): the two error classes are now reported separately so warmCache
+// logging can distinguish a data-integrity problem from a transient IO error.
+// Order is preserved by writing each decode into a position-indexed scratch
+// slice (items is already mtime-sorted by scanSortedRunDir), so completion
+// order is irrelevant. Only called from the before.IsZero path where every
 // candidate up to limit is wanted, so there is no early-break to honour.
-func (s *runStore) decodeRunsParallel(items []runDirItem, limit int) ([]CronRunSummary, int) {
+func (s *runStore) decodeRunsParallel(items []runDirItem, limit int) ([]CronRunSummary, int, int) {
 	n := len(items)
 	if n > limit {
 		// before.IsZero means no StartedAt filter drops rows, so the first
@@ -1565,9 +1591,10 @@ func (s *runStore) decodeRunsParallel(items []runDirItem, limit int) ([]CronRunS
 		n = limit
 	}
 	type slot struct {
-		summary CronRunSummary
-		ok      bool
-		corrupt bool
+		summary    CronRunSummary
+		ok         bool
+		corrupt    bool
+		unreadable bool
 	}
 	slots := make([]slot, n)
 	workers := diskDecodeWorkers
@@ -1596,6 +1623,11 @@ func (s *runStore) decodeRunsParallel(items []runDirItem, limit int) ([]CronRunS
 				if err != nil {
 					if errors.Is(err, ErrCorruptRun) {
 						slots[i].corrupt = true
+					} else {
+						// Non-corrupt IO error (e.g. EACCES, EIO, ESTALE):
+						// track separately so the caller can surface the right
+						// signal in logs rather than labelling it "corrupt".
+						slots[i].unreadable = true
 					}
 					continue
 				}
@@ -1608,19 +1640,18 @@ func (s *runStore) decodeRunsParallel(items []runDirItem, limit int) ([]CronRunS
 
 	out := make([]CronRunSummary, 0, n)
 	corruptCount := 0
+	unreadableCount := 0
 	for i := range slots {
 		if slots[i].corrupt {
 			corruptCount++
-		} else if !slots[i].ok {
-			// non-corrupt read failure (e.g. EACCES, EIO, ESTALE): slot is
-			// unreadable; count it so warmCache logging surfaces the signal.
-			corruptCount++
+		} else if slots[i].unreadable {
+			unreadableCount++
 		}
 		if slots[i].ok {
 			out = append(out, slots[i].summary)
 		}
 	}
-	return out, corruptCount
+	return out, corruptCount, unreadableCount
 }
 
 // Recent returns the N most recent CronRunSummary entries for jobID
@@ -2397,9 +2428,10 @@ func (s *runStore) warmJobsParallel(ctx context.Context, jobIDs []string) {
 					return
 				}
 				jobID := jobIDs[i]
-				if warmCorrupt := s.warmCacheLocked(jobID); warmCorrupt > 0 {
-					slog.Warn("cron runstore: cold-start warm skipped corrupt files",
-						"count", warmCorrupt, "dir", filepath.Join(s.root, jobID))
+				if warmCorrupt, warmUnreadable := s.warmCacheLocked(jobID); warmCorrupt > 0 || warmUnreadable > 0 {
+					slog.Warn("cron runstore: cold-start warm skipped corrupt or unreadable files",
+						"corrupt", warmCorrupt, "unreadable", warmUnreadable,
+						"dir", filepath.Join(s.root, jobID))
 				}
 			}
 		}()
