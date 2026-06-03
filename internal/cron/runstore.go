@@ -383,9 +383,22 @@ var ErrCorruptRun = errors.New("cron run: corrupt or oversize record")
 // rate is bounded (≤ 1Hz × N jobs) but every persisted record allocates
 // ~2KB of encode scratch otherwise — pooling drops that to amortised zero
 // after the warmup period. R240-PERF-6 / #1043.
+// appendMarshalScratch pairs a bytes.Buffer with the json.Encoder bound to
+// it. R20260602190132-PERF-2: a json.Encoder caches its internal encodeState
+// (~2KB) across Encode calls on the same encoder, but constructing a fresh
+// json.NewEncoder(buf) every marshalRunPooled call discarded that cache so the
+// pooled buffer never actually amortised the encoder-side alloc. Pooling the
+// encoder alongside the buffer closes that gap — the encodeState is now reused
+// for the lifetime of the pooled pair.
+type appendMarshalScratch struct {
+	buf *bytes.Buffer
+	enc *json.Encoder
+}
+
 var appendMarshalBufPool = sync.Pool{
 	New: func() any {
-		return bytes.NewBuffer(make([]byte, 0, 4*1024))
+		buf := bytes.NewBuffer(make([]byte, 0, 4*1024))
+		return &appendMarshalScratch{buf: buf, enc: json.NewEncoder(buf)}
 	},
 }
 
@@ -400,20 +413,21 @@ const appendMarshalPoolMaxCap = 2 * MaxRunRecordBytes
 // identical to json.Marshal(run) except for json.Encoder's trailing
 // '\n' which is stripped to match Marshal output.
 func marshalRunPooled(run *CronRun) ([]byte, error) {
-	buf := appendMarshalBufPool.Get().(*bytes.Buffer)
+	sc := appendMarshalBufPool.Get().(*appendMarshalScratch)
+	buf := sc.buf
 	defer func() {
 		if buf.Cap() > appendMarshalPoolMaxCap {
 			return
 		}
 		buf.Reset()
-		appendMarshalBufPool.Put(buf)
+		appendMarshalBufPool.Put(sc)
 	}()
 	buf.Reset()
-	enc := json.NewEncoder(buf)
 	// json.Marshal default — keep HTML-escape parity so on-disk bytes match
 	// the legacy callers and any future Unmarshal of historical records is
-	// indistinguishable from json.Marshal output.
-	if err := enc.Encode(run); err != nil {
+	// indistinguishable from json.Marshal output. The encoder is bound to buf
+	// once at construction and reused from the pool, retaining its encodeState.
+	if err := sc.enc.Encode(run); err != nil {
 		return nil, err
 	}
 	body := buf.Bytes()
@@ -1554,17 +1568,24 @@ func (s *runStore) decodeRunsParallel(items []runDirItem, limit int) ([]CronRunS
 	if workers > n {
 		workers = n
 	}
-	idx := make(chan int, n)
-	for i := 0; i < n; i++ {
-		idx <- i
-	}
-	close(idx)
+	// R20260602190132-PERF-9: claim work indices via an atomic cursor rather
+	// than a per-call make(chan int, n) seeded with n sends + close. On a
+	// 50-job cold start (n up to keepCount=200) the buffered channel was a
+	// fresh ~200-int backing array + channel header per job; the atomic
+	// counter is a single stack int64 and each worker steals the next index
+	// with one CAS-free FetchAdd. Order is still preserved by the
+	// position-indexed slots slice, so steal order is irrelevant.
+	var next int64
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
-			for i := range idx {
+			for {
+				i := int(atomic.AddInt64(&next, 1)) - 1
+				if i >= n {
+					return
+				}
 				run, err := s.readRunNoLstat(items[i].path)
 				if err != nil {
 					if errors.Is(err, ErrCorruptRun) {

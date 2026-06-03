@@ -372,24 +372,34 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 		prepared = make([]EventEntry, len(entries))
 	}
 	for i := range entries {
+		// R20260602190132-PERF-12: stamp the UUID in place on the caller's
+		// slice (historical contract, see comments above), then copy the
+		// stamped entry ONCE into its prepared destination and apply the
+		// default-Time + image-sanitize preprocessing through a pointer to
+		// that slot. The prior shape did `e := entries[i]` into a loop local
+		// and then `dest[i] = e`, a second full EventEntry struct copy
+		// (~240 B) per entry on top of the in-place stamp.
 		stampUUID(&entries[i])
-		e := entries[i]
-		if e.Time == 0 {
-			e.Time = defaultTime
+		var dst *EventEntry
+		if sinkOneSet {
+			sinkOne = entries[i]
+			dst = &sinkOne
+		} else if captureForSink {
+			sinkCopy[i] = entries[i]
+			dst = &sinkCopy[i]
+		} else {
+			prepared[i] = entries[i]
+			dst = &prepared[i]
+		}
+		if dst.Time == 0 {
+			dst.Time = defaultTime
 		}
 		// S15 (Round 174): same enforcement as Append. Replays from
 		// history (InjectHistory → AppendBatch) should never contain
 		// non-image data URIs today, but defense-in-depth is trivially
 		// cheap and locks the contract to a single sink.
-		if len(e.Images) > 0 {
-			e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
-		}
-		if sinkOneSet {
-			sinkOne = e
-		} else if captureForSink {
-			sinkCopy[i] = e
-		} else {
-			prepared[i] = e
+		if len(dst.Images) > 0 {
+			dst.Images, dst.ImagePaths = sanitizeImagesAligned(dst.Images, dst.ImagePaths)
 		}
 	}
 	l.mu.Lock()

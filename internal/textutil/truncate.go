@@ -60,6 +60,58 @@ func TruncateRunes(s string, maxRunes int) string {
 	return s
 }
 
+// TruncateRunesPair truncates s to two rune limits in a single UTF-8 scan,
+// returning (lo, hi) where lo = TruncateRunes(s, loRunes) and
+// hi = TruncateRunes(s, hiRunes). Callers that derive both a short Summary
+// and a longer Detail from the same source string would otherwise pay two
+// full rune-decode passes over identical bytes; this fuses them into one.
+// Requires 0 < loRunes <= hiRunes (the production Summary/Detail caps satisfy
+// this); falls back to two independent TruncateRunes calls otherwise so the
+// contract degrades safely. R20260602190132-PERF-11.
+func TruncateRunesPair(s string, loRunes, hiRunes int) (lo, hi string) {
+	if loRunes <= 0 || hiRunes <= 0 || loRunes > hiRunes {
+		return TruncateRunes(s, loRunes), TruncateRunes(s, hiRunes)
+	}
+	// Byte length is an upper bound on rune count: when s fits within the
+	// smaller cap it fits within the larger one too — no scan needed.
+	if len(s) <= loRunes {
+		return s, s
+	}
+	loCut, loFound := -1, false
+	i, count := 0, 0
+	for i < len(s) {
+		if !loFound && count == loRunes {
+			loCut = i
+			loFound = true
+		}
+		if count == hiRunes {
+			// Reached the larger cap mid-string: both need trimming.
+			lo = truncateAt(s, loCut)
+			hi = truncateAt(s, i)
+			return lo, hi
+		}
+		_, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		count++
+	}
+	// Consumed the whole string before hitting hiRunes: hi is untrimmed.
+	// lo is trimmed iff we passed loRunes (loFound) before s ended.
+	if loFound {
+		return truncateAt(s, loCut), s
+	}
+	return s, s
+}
+
+// truncateAt returns s[:i]+ellipsis fused into a single allocation, mirroring
+// the strings.Builder pre-grow in TruncateRunes.
+func truncateAt(s string, i int) string {
+	var b strings.Builder
+	b.Grow(i + len(ellipsis))
+	b.WriteString(s[:i])
+	b.WriteString(ellipsis)
+	return b.String()
+}
+
 // TruncateRunesNoEllipsis truncates s to at most maxRunes runes WITHOUT
 // appending an ellipsis suffix. Used by IM card renderers (Feishu button
 // labels, headers, tool_use_id values) where a trailing "..." would clutter

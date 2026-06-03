@@ -41,8 +41,12 @@ func (r *Router) countActive() {
 // driven to zero — without ForEachKey the bucket would stay stuck at
 // its last non-zero value.
 //
+// Returns the freshly counted alive (non-exempt) session total so callers
+// that also need to refresh r.activeCount can reuse this single O(N) walk
+// instead of running a second counting loop. R20260602190132-PERF-5 (#1607).
+//
 // LOCK: caller must hold r.mu for writing.
-func (r *Router) reconcileSessionActiveByBackendLocked() {
+func (r *Router) reconcileSessionActiveByBackendLocked() int64 {
 	var total int64
 	perBackend := make(map[string]int64, 4)
 	for _, s := range r.sessions {
@@ -81,6 +85,7 @@ func (r *Router) reconcileSessionActiveByBackendLocked() {
 		want := perBackend[backend]
 		metrics.SessionActiveByBackend.Add(want-current, backend)
 	}
+	return total
 }
 
 // countExempt returns the total number of alive exempt sessions across
