@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1321,12 +1322,57 @@ func filterShimEnv(environ []string) []string {
 				if shimEndpointEnvDropped(kv) {
 					break
 				}
+				// R20260603-SEC-1: AWS_PROFILE / AWS_DEFAULT_PROFILE select a
+				// named profile from the AWS config. A profile may declare a
+				// `credential_process` that the SDK executes as a shell command.
+				// A poisoned shell rc / tampered profile that exports a profile
+				// name containing path separators or shell metacharacters could
+				// redirect that lookup to an attacker-controlled profile. Reject
+				// values that don't match ^[A-Za-z0-9_-]{1,64}$. Mirrors
+				// sysession/env.go isSafeProfileValue. Log key only, never value.
+				if shimProfileEnvDropped(kv) {
+					break
+				}
 				filtered = append(filtered, kv)
 				break
 			}
 		}
 	}
 	return filtered
+}
+
+// shimProfileEnvKeys is the set of allowlisted env keys whose value is an AWS
+// profile *name*. A malformed value can redirect the SDK's credential_process
+// lookup to an attacker-controlled profile, so the value is validated before
+// pass-through. R20260603-SEC-1.
+var shimProfileEnvKeys = map[string]bool{
+	"AWS_PROFILE":         true,
+	"AWS_DEFAULT_PROFILE": true,
+}
+
+// reShimProfileValue matches safe AWS profile names: alphanumeric plus
+// underscore and hyphen, 1-64 characters. Rejects shell metacharacters or path
+// separators. Mirrors sysession/env.go reProfileValue. R20260603-SEC-1.
+var reShimProfileValue = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// shimProfileEnvDropped reports whether kv (a "KEY=value" env entry) is an AWS
+// profile-name var that must be dropped because its value contains characters
+// outside ^[A-Za-z0-9_-]{1,64}$. Non-profile keys return false. The value is
+// never logged. R20260603-SEC-1.
+func shimProfileEnvDropped(kv string) bool {
+	i := strings.IndexByte(kv, '=')
+	if i < 0 {
+		return false
+	}
+	key, val := kv[:i], kv[i+1:]
+	if !shimProfileEnvKeys[key] {
+		return false
+	}
+	if !reShimProfileValue.MatchString(val) {
+		slog.Warn("shim env: rejecting unsafe AWS profile value (credential_process injection guard)", "key", key)
+		return true
+	}
+	return false
 }
 
 // shimEndpointEnvKeys is the set of allowlisted env keys whose value is an API
