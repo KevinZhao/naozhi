@@ -295,20 +295,44 @@ func encodeStoreEntryCached(s *ManagedSession) ([]byte, bool) {
 // json.Marshal(entries) behaviour where entries were appended in map-range
 // order; loadStore is order-insensitive (keys into a map).
 func marshalStoreEntries(sessions map[string]*ManagedSession) ([]byte, error) {
-	buf := make([]byte, 0, 256*len(sessions))
+	return marshalStoreEntriesFunc(len(sessions), func(yield func(*ManagedSession)) {
+		for _, s := range sessions {
+			yield(s)
+		}
+	})
+}
+
+// marshalStoreEntriesSlice is the slice-input twin of marshalStoreEntries. It
+// lets the periodic save path snapshot r.sessions into a single []*ManagedSession
+// rather than re-allocating a whole map[string]*ManagedSession every tick
+// (R20260602190132-PERF-4 / #1606). The on-the-wire output is identical — both
+// just range the session set and concatenate each session's cached encoding.
+func marshalStoreEntriesSlice(sessions []*ManagedSession) ([]byte, error) {
+	return marshalStoreEntriesFunc(len(sessions), func(yield func(*ManagedSession)) {
+		for _, s := range sessions {
+			yield(s)
+		}
+	})
+}
+
+// marshalStoreEntriesFunc assembles the JSON array from each session's cached
+// object encoding, driven by an iteration closure so both the map- and
+// slice-shaped snapshots share one code path.
+func marshalStoreEntriesFunc(n int, iter func(yield func(*ManagedSession))) ([]byte, error) {
+	buf := make([]byte, 0, 256*n)
 	buf = append(buf, '[')
 	first := true
-	for _, s := range sessions {
+	iter(func(s *ManagedSession) {
 		data, ok := encodeStoreEntryCached(s)
 		if !ok {
-			continue
+			return
 		}
 		if !first {
 			buf = append(buf, ',')
 		}
 		first = false
 		buf = append(buf, data...)
-	}
+	})
 	buf = append(buf, ']')
 	return buf, nil
 }
@@ -317,16 +341,6 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 	if path == "" {
 		return nil
 	}
-	if dir := filepath.Dir(path); dir != "" {
-		// R250-ARCH-13 (#1175): shared dir policy (MkdirAll 0700 +
-		// symlink/non-dir guard + perm-tightening chmod) instead of a bare
-		// MkdirAll, so the session store inherits the same hardening the
-		// cron run store already had.
-		if err := datadir.EnsureDir(dir); err != nil {
-			return fmt.Errorf("create store directory: %w", err)
-		}
-	}
-
 	// R20260531A-PERF-2 (#1523): assemble the JSON array from per-session
 	// cached object encodings instead of re-marshalling the whole []storeEntry
 	// every 30s tick. Each session memoizes its last (entry → JSON) pair; a
@@ -337,6 +351,38 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 	data, err := marshalStoreEntries(sessions)
 	if err != nil {
 		return fmt.Errorf("marshal session store: %w", err)
+	}
+	return writeStoreData(path, data)
+}
+
+// saveStoreSlice persists a slice snapshot of sessions. The periodic Cleanup /
+// saveIfDirty paths use this so they can copy r.sessions into a single
+// []*ManagedSession under the lock instead of re-allocating a whole map every
+// tick (R20260602190132-PERF-4 / #1606). On-disk output is identical to
+// saveStore.
+func saveStoreSlice(path string, sessions []*ManagedSession) error {
+	if path == "" {
+		return nil
+	}
+	data, err := marshalStoreEntriesSlice(sessions)
+	if err != nil {
+		return fmt.Errorf("marshal session store: %w", err)
+	}
+	return writeStoreData(path, data)
+}
+
+// writeStoreData ensures the store directory exists, atomically writes the
+// pre-marshalled bytes, then writes the advisory version sidecar. Shared by
+// saveStore (map input) and saveStoreSlice (slice input).
+func writeStoreData(path string, data []byte) error {
+	if dir := filepath.Dir(path); dir != "" {
+		// R250-ARCH-13 (#1175): shared dir policy (MkdirAll 0700 +
+		// symlink/non-dir guard + perm-tightening chmod) instead of a bare
+		// MkdirAll, so the session store inherits the same hardening the
+		// cron run store already had.
+		if err := datadir.EnsureDir(dir); err != nil {
+			return fmt.Errorf("create store directory: %w", err)
+		}
 	}
 	if err := osutil.WriteFileAtomic(path, data, 0600); err != nil {
 		return fmt.Errorf("save session store: %w", err)

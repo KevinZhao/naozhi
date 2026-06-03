@@ -342,32 +342,64 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	// buffer (rather than mutating `entries[i]` in place) preserves the
 	// historical contract that the caller's slice is untouched beyond the
 	// UUID stamp that stampUUID already applies in place.
+	// R20260602190132-PERF-3: len==1 fast path for the captureForSink branch.
+	// AppendBatch is frequently called with a single entry (e.g. live
+	// dispatch of one-block assistant events). make([]EventEntry, 1) for
+	// sinkCopy allocates a heap slice even though the entry will be passed
+	// to the persist sink immediately after unlock. When len==1 and
+	// captureForSink is true we instead use a stack-allocated EventEntry
+	// (sinkOne) and route through invokePersistSinkOne (pass-by-value, zero
+	// slice alloc) or fall back to []EventEntry{sinkOne} when only the
+	// batch sink is wired. sinkCopy stays nil for this path.
+	//
+	// The historical contract from comments 342-344 is fully preserved:
+	// stampUUID(&entries[i]) still runs in-place on the caller's slice for
+	// every entry before e := entries[i] copies the value — only the
+	// prepared/sinkCopy destination changes for the len==1 path.
 	var (
-		sinkCopy []EventEntry
-		prepared []EventEntry
+		sinkCopy   []EventEntry
+		prepared   []EventEntry
+		sinkOne    EventEntry
+		sinkOneSet bool
 	)
 	if captureForSink {
-		sinkCopy = make([]EventEntry, len(entries))
+		if len(entries) == 1 {
+			sinkOneSet = true // use sinkOne scalar; sinkCopy stays nil
+		} else {
+			sinkCopy = make([]EventEntry, len(entries))
+		}
 	} else {
 		prepared = make([]EventEntry, len(entries))
 	}
 	for i := range entries {
+		// R20260602190132-PERF-12: stamp the UUID in place on the caller's
+		// slice (historical contract, see comments above), then copy the
+		// stamped entry ONCE into its prepared destination and apply the
+		// default-Time + image-sanitize preprocessing through a pointer to
+		// that slot. The prior shape did `e := entries[i]` into a loop local
+		// and then `dest[i] = e`, a second full EventEntry struct copy
+		// (~240 B) per entry on top of the in-place stamp.
 		stampUUID(&entries[i])
-		e := entries[i]
-		if e.Time == 0 {
-			e.Time = defaultTime
+		var dst *EventEntry
+		if sinkOneSet {
+			sinkOne = entries[i]
+			dst = &sinkOne
+		} else if captureForSink {
+			sinkCopy[i] = entries[i]
+			dst = &sinkCopy[i]
+		} else {
+			prepared[i] = entries[i]
+			dst = &prepared[i]
+		}
+		if dst.Time == 0 {
+			dst.Time = defaultTime
 		}
 		// S15 (Round 174): same enforcement as Append. Replays from
 		// history (InjectHistory → AppendBatch) should never contain
 		// non-image data URIs today, but defense-in-depth is trivially
 		// cheap and locks the contract to a single sink.
-		if len(e.Images) > 0 {
-			e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
-		}
-		if captureForSink {
-			sinkCopy[i] = e
-		} else {
-			prepared[i] = e
+		if len(dst.Images) > 0 {
+			dst.Images, dst.ImagePaths = sanitizeImagesAligned(dst.Images, dst.ImagePaths)
 		}
 	}
 	l.mu.Lock()
@@ -381,7 +413,11 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 		// second per-entry struct copy through a range-loop local, and
 		// without running sanitizeImagesAligned (a string scan) inside l.mu.
 		var ePtr *EventEntry
-		if captureForSink {
+		if sinkOneSet {
+			// len==1 fast path: sinkOne holds the pre-prepared entry;
+			// sinkCopy is nil (allocation skipped). R20260602190132-PERF-3.
+			l.entries[l.head] = sinkOne
+		} else if captureForSink {
 			l.entries[l.head] = sinkCopy[idx]
 		} else {
 			l.entries[l.head] = prepared[idx]
@@ -480,8 +516,18 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	// (sinkCopy is nil because captureForSink gates on !isReplay above).
 	// Skip the call outright so a late InjectHistory cannot re-persist
 	// already-written history even if sinkReady has already flipped true.
+	//
+	// R20260602190132-PERF-3: sinkOneSet is the len==1 captureForSink fast
+	// path. Try invokePersistSinkOne first (pass-by-value, zero slice alloc);
+	// fall back to the slice form only when the batch-only sink is wired.
 	if !isReplay {
-		l.invokePersistSink(sinkCopy)
+		if sinkOneSet {
+			if !l.invokePersistSinkOne(sinkOne) {
+				l.invokePersistSink([]EventEntry{sinkOne})
+			}
+		} else {
+			l.invokePersistSink(sinkCopy)
+		}
 	}
 
 	l.notifySubscribers()

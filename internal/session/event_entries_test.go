@@ -368,6 +368,75 @@ func TestEventEntriesSinceAppend_EmptyHistory(t *testing.T) {
 	}
 }
 
+// TestEventEntriesBefore_SortedFlagSkipsSort verifies the R20260603000023-PERF-3
+// / #1623 fast path: when persistedHistorySorted=true, EventEntriesBefore must
+// return entries in strict Time-ascending order using only slices.Reverse (O(n))
+// rather than a full sort. Correctness is the primary invariant tested here.
+func TestEventEntriesBefore_SortedFlagSkipsSort(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+		{Time: 300, Summary: "c"},
+		{Time: 400, Summary: "d"},
+		{Time: 500, Summary: "e"},
+	}
+	s.persistedHistorySorted = true
+
+	// Request entries before Time=450 — should get times 100..400 ascending.
+	got := s.EventEntriesBefore(450, 10)
+	if len(got) != 4 {
+		t.Fatalf("len=%d want 4", len(got))
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i].Time <= got[i-1].Time {
+			t.Errorf("not strictly ascending at index %d: Time %d <= %d",
+				i, got[i].Time, got[i-1].Time)
+		}
+	}
+	if got[0].Time != 100 || got[3].Time != 400 {
+		t.Errorf("wrong range: got [%d..%d] want [100..400]", got[0].Time, got[3].Time)
+	}
+}
+
+// TestEventEntriesBefore_UnsortedFlagFallsBackToSort verifies that when
+// persistedHistorySorted=false, the full stable sort is still applied and
+// the result is correct.
+func TestEventEntriesBefore_UnsortedFlagFallsBackToSort(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	// Out-of-order insertion order.
+	s.persistedHistory = []cli.EventEntry{
+		{Time: 300, Summary: "c"},
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+	}
+	s.persistedHistorySorted = false
+
+	got := s.EventEntriesBefore(350, 10)
+	if len(got) != 3 {
+		t.Fatalf("len=%d want 3", len(got))
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i].Time <= got[i-1].Time {
+			t.Errorf("not strictly ascending at index %d: Time %d <= %d",
+				i, got[i].Time, got[i-1].Time)
+		}
+	}
+}
+
+// TestEventEntriesBefore_SortedEmptyReturnsNil checks the nil-return contract
+// for an empty sorted history.
+func TestEventEntriesBefore_SortedEmptyReturnsNil(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	s.persistedHistorySorted = true
+	if got := s.EventEntriesBefore(500, 10); got != nil {
+		t.Errorf("empty sorted: got %v want nil", got)
+	}
+}
+
 // TestHistorySource_ConcurrentSetAndRead pins the race-free contract on the
 // atomic.Pointer hand-off: SetHistorySource and EventEntriesBeforeCtx can
 // execute concurrently without a -race violation. Without atomic storage

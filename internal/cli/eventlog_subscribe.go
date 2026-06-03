@@ -23,6 +23,47 @@ import "sync"
 type subscriber struct {
 	ch        chan struct{} // buffered(1)
 	closeOnce sync.Once
+
+	// mu guards the send-vs-close race on ch. notifySubscribers takes it
+	// (read) to perform the non-blocking send while observing `closed`;
+	// the unsub / CloseSubscribers close path takes it (write) to flip
+	// `closed` and close ch atomically. This per-subscriber lock lets
+	// notifySubscribers snapshot l.subscribers under subMu.RLock and then
+	// RELEASE subMu before the send loop (R20260603000023-PERF-4 / #1647):
+	// concurrent notify waves across sessions — and multiple tabs on one
+	// session — no longer serialise on the shared subMu for the whole loop.
+	// The previous design held subMu.RLock across the full send loop solely
+	// to block the close from racing the send; that responsibility now lives
+	// on this fine-grained per-subscriber lock instead.
+	mu     sync.RWMutex
+	closed bool
+}
+
+// signal performs the non-blocking wake send under the subscriber's read
+// lock, observing `closed` so it can never send on a closed channel. Returns
+// without sending if the subscriber has already been closed.
+func (s *subscriber) signal() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return
+	}
+	select {
+	case s.ch <- struct{}{}:
+	default:
+	}
+}
+
+// close flips `closed` and closes ch under the write lock, exactly once.
+// Mutually exclusive with signal() so an in-flight notify can never observe
+// closed==false and then race the close into a send-on-closed panic.
+func (s *subscriber) close() {
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		close(s.ch)
+		s.mu.Unlock()
+	})
 }
 
 // eventLogClosedCh is a process-wide pre-closed `chan struct{}` returned by
@@ -42,14 +83,13 @@ var eventLogClosedCh = func() <-chan struct{} {
 
 // notifySubscribers wakes all subscriber channels non-blockingly.
 //
-// Holds subMu as a reader for the full iteration: CloseSubscribers takes the
-// write lock and uses sub.closeOnce to ensure each channel is closed exactly
-// once. The send-on-closed-chan race is avoided by the RWMutex rather than
-// by the channel send itself — Go's channel-send-is-goroutine-safe guarantee
-// does NOT extend to sending on a closed channel, which panics. Multiple
-// concurrent notifySubscribers readers are safe to iterate and signal the
-// same channel set because non-blocking sends on an open channel are allowed
-// to race.
+// Snapshot-then-unlock: subMu.RLock is held only long enough to copy the
+// `l.subscribers` slice header into a local; it is released BEFORE the
+// per-subscriber send loop. Each send goes through (*subscriber).signal,
+// which takes that subscriber's own RWMutex (read) and observes its `closed`
+// flag, so a concurrent close (unsub / CloseSubscribers) can never race the
+// send into a send-on-closed-chan panic. The fine-grained per-subscriber
+// lock replaces the old "hold subMu.RLock across the whole loop" guard.
 //
 // Fast path: idle sessions (no dashboard clients) check an atomic counter
 // and skip subMu entirely. Append is invoked per content block on every
@@ -66,44 +106,28 @@ var eventLogClosedCh = func() <-chan struct{} {
 // on subscriber.ch keeps the "close exactly once" invariant safe across
 // the unsub-vs-CloseSubscribers race.
 //
-// RNEW-PERF-004 (#455) — DO-NOT-DO note: a tempting micro-optimisation
-// is to snapshot `l.subscribers` under RLock then drop the lock before
-// the per-channel send loop, on the theory that the non-blocking sends
-// no longer need lock protection. This is UNSAFE in the current design:
-// the unsub closure (Subscribe's returned cancel func) closes
-// `sub.ch` *outside* l.subMu.Lock — `closeOnce.Do(func() { close(sub.ch) })`
-// runs after the lock release at line ~1556 below. With a snapshot-
-// then-unlock notify, the following sequence panics:
-//
-//	notify: RLock; copy l.subscribers into local; RUnlock
-//	unsub:  Lock; remove sub from slice; Unlock; close(sub.ch)
-//	notify: select { case sub.ch <- struct{}{}: …  ← PANIC: send on closed
-//
-// Today's RLock-around-send blocks unsub.Lock until the iteration ends,
-// so close(sub.ch) cannot run while a notify still holds a reference to
-// the channel. Any future "snapshot then unlock" attempt MUST first move
-// the close into the lock AND ensure no in-flight notify can hold a
-// reference to a *subscriber that has been removed from l.subscribers
-// (e.g. via subscriber refcount drained under Lock, or by switching
-// from close(ch) to a separate atomic "dead" flag observed before send).
-// The current cost — RLock acquire/release per Append — is bounded by
-// the subCount==0 fast path: idle sessions skip subMu entirely, and the
-// reader-only RWMutex makes concurrent Appends across different sessions
-// fan out without serialising on a single Mutex. Issue #455 is filed at
-// MEDIUM/defense-in-depth and remains accepted as-is until the close-
-// timing rework lands.
+// R20260603000023-PERF-4 (#1647): the previous design held subMu.RLock for
+// the ENTIRE send loop, which serialised same-session multi-tab dispatch:
+// every Append on a hot session walked each subscriber in turn while holding
+// the shared lock, blocking unsub.Lock until the loop ended. The slice header
+// is now snapshotted under a short RLock and the lock dropped before the loop;
+// the close-vs-send safety that the RLock used to provide moved onto the
+// per-subscriber (*subscriber).mu (see the DO-NOT note that #455 left here —
+// its prescribed fix, "move the close under a lock observed before send", is
+// exactly what (*subscriber).signal / (*subscriber).close now implement). A
+// local snapshot may include a subscriber that unsub removes from the slice
+// mid-loop; signal() on that subscriber is harmless — it either sends a wake
+// the now-detached reader ignores, or no-ops because close already ran.
 func (l *EventLog) notifySubscribers() {
 	if l.subCount.Load() == 0 {
 		return
 	}
 	l.subMu.RLock()
-	for _, sub := range l.subscribers {
-		select {
-		case sub.ch <- struct{}{}:
-		default:
-		}
-	}
+	subs := l.subscribers
 	l.subMu.RUnlock()
+	for _, sub := range subs {
+		sub.signal()
+	}
 }
 
 // EventSubscription wraps an EventLog notification channel together with the
@@ -216,26 +240,26 @@ func (l *EventLog) Subscribe() (<-chan struct{}, func()) {
 
 	unsub := func() {
 		l.subMu.Lock()
-		// Linear scan + swap-to-end + truncate. Subscribers count is
-		// typically 1-10 (one per dashboard tab subscribed to this
-		// session), so this is O(N) on the cold unsubscribe path. The
-		// hot notifySubscribers path benefits in exchange. R239-PERF-9.
+		// Copy-on-write removal (R20260603000023-PERF-4 / #1647): build a
+		// fresh backing array without `sub` instead of swap-to-end +
+		// truncate in place. notifySubscribers snapshots the slice header
+		// under a short RLock and reads it lock-free during the send loop;
+		// an in-place mutation of the shared backing array would data-race
+		// that snapshot. Allocating a new slice keeps every prior snapshot
+		// immutable. Unsubscribe is the cold path (one per session/tab
+		// lifetime), so the extra O(N) copy is off the hot notify path.
 		for i, s := range l.subscribers {
 			if s == sub {
-				last := len(l.subscribers) - 1
-				l.subscribers[i] = l.subscribers[last]
-				// Clear the trailing slot so the removed *subscriber
-				// is not retained by the backing array; otherwise a
-				// long-lived EventLog holds onto closed subscriber
-				// objects past their useful life.
-				l.subscribers[last] = nil
-				l.subscribers = l.subscribers[:last]
+				next := make([]*subscriber, 0, len(l.subscribers)-1)
+				next = append(next, l.subscribers[:i]...)
+				next = append(next, l.subscribers[i+1:]...)
+				l.subscribers = next
 				l.subCount.Add(-1)
 				break
 			}
 		}
 		l.subMu.Unlock()
-		sub.closeOnce.Do(func() { close(sub.ch) })
+		sub.close()
 	}
 	return sub.ch, unsub
 }
@@ -250,7 +274,7 @@ func (l *EventLog) CloseSubscribers() {
 	l.subMu.Lock()
 	defer l.subMu.Unlock()
 	for _, sub := range l.subscribers {
-		sub.closeOnce.Do(func() { close(sub.ch) })
+		sub.close()
 	}
 	l.subscribers = nil
 	l.subCount.Store(0)

@@ -495,6 +495,52 @@ func TestEventLog_TurnAgents_IsCopy(t *testing.T) {
 	}
 }
 
+// TestEventLog_TurnAgents_SingleSide verifies the R20260603000023-PERF-6 fast
+// paths: when only foreground OR only background agents are active, TurnAgents
+// must return a copy without a second make+copy allocation.
+func TestEventLog_TurnAgents_SingleSide(t *testing.T) {
+	t.Parallel()
+
+	t.Run("turn_only", func(t *testing.T) {
+		t.Parallel()
+		l := NewEventLog(100)
+		l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
+		l.Append(EventEntry{Time: 2000, Type: "agent", Subagent: "Review"})
+
+		got := l.TurnAgents()
+		if len(got) != 2 {
+			t.Fatalf("len = %d, want 2", len(got))
+		}
+		if got[0].Name != "Explore" || got[1].Name != "Review" {
+			t.Errorf("names = %v", got)
+		}
+		// Must be an independent copy.
+		got[0].Name = "mutated"
+		if l.TurnAgents()[0].Name == "mutated" {
+			t.Error("TurnAgents did not return a copy")
+		}
+	})
+
+	t.Run("bg_only", func(t *testing.T) {
+		t.Parallel()
+		l := NewEventLog(100)
+		l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: "bg-task", Background: true})
+
+		got := l.TurnAgents()
+		if len(got) != 1 {
+			t.Fatalf("len = %d, want 1", len(got))
+		}
+		if got[0].Name != "bg-task" {
+			t.Errorf("name = %q, want bg-task", got[0].Name)
+		}
+		// Must be an independent copy.
+		got[0].Name = "mutated"
+		if l.TurnAgents()[0].Name == "mutated" {
+			t.Error("TurnAgents did not return a copy")
+		}
+	})
+}
+
 // TestEventLog_TurnAgentCount mirrors len(turnAgents)+len(bgAgents) for the
 // Snapshot fast-path. R220-PERF-6.
 func TestEventLog_TurnAgentCount(t *testing.T) {

@@ -174,7 +174,7 @@ func newAutoTitler(deps DaemonDeps) (Daemon, error) {
 	return a, nil
 }
 
-func (a *autoTitler) Name() string        { return "auto-titler" }
+func (a *autoTitler) Name() string        { return DaemonAutoTitler }
 func (a *autoTitler) Description() string { return "根据对话内容自动提炼 session 标题" }
 
 // Configure reads the daemon-specific knobs from a DaemonConfig.

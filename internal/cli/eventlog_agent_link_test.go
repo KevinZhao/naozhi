@@ -214,6 +214,63 @@ func TestEventLog_SetAgentInternalID_ConcurrentWithAppend(t *testing.T) {
 	_ = l.Subagents()
 }
 
+// TestEventLog_SetAgentInternalID_Sidecar_FanoutRouting pins R164029-PERF-7
+// (#1597): the O(1) toolUseIndex backfill must route each ToolUseID to its own
+// SubagentInfo slot across a fan-out of foreground + background agents without
+// cross-contaminating, exercising both the turnAgents and bgAgents branches of
+// backfillSubagentInternalID.
+func TestEventLog_SetAgentInternalID_Sidecar_FanoutRouting(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(50)
+
+	// 3 foreground + 1 background agent, distinct ToolUseIDs.
+	l.Append(EventEntry{Type: "agent", Subagent: "fg-0", ToolUseID: "toolu_0"})
+	l.Append(EventEntry{Type: "agent", Subagent: "fg-1", ToolUseID: "toolu_1"})
+	l.Append(EventEntry{Type: "agent", Subagent: "fg-2", ToolUseID: "toolu_2"})
+	l.Append(EventEntry{Type: "agent", Subagent: "bg-0", ToolUseID: "toolu_bg", Background: true})
+
+	l.SetAgentInternalID("toolu_1", "agent-1111111111111111a", "/p/1.jsonl", "p1")
+	l.SetAgentInternalID("toolu_bg", "agent-bbbbbbbbbbbbbbbbb", "/p/bg.jsonl", "pbg")
+
+	want := map[string]string{
+		"toolu_0":  "",
+		"toolu_1":  "agent-1111111111111111a",
+		"toolu_2":  "",
+		"toolu_bg": "agent-bbbbbbbbbbbbbbbbb",
+	}
+	for _, s := range l.Subagents() {
+		if got := want[s.ToolUseID]; s.InternalAgentID != got {
+			t.Errorf("ToolUseID %q InternalAgentID=%q want %q", s.ToolUseID, s.InternalAgentID, got)
+		}
+	}
+}
+
+// TestEventLog_BackfillSubagentInternalID_StaleIndexFallsBack verifies the
+// sidecar guard: when the indexed slot's ToolUseID no longer matches (forced
+// stale entry), backfillSubagentInternalID returns false so the caller's linear
+// scan still writes the correct slot. R164029-PERF-7 (#1597).
+func TestEventLog_BackfillSubagentInternalID_StaleIndexFallsBack(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(20)
+	l.Append(EventEntry{Type: "agent", Subagent: "a", ToolUseID: "toolu_A"})
+
+	// Corrupt the sidecar so the indexed slot mismatches the key.
+	l.mu.Lock()
+	l.toolUseIndex["toolu_A"] = subagentRef{background: false, index: 99}
+	helperOK := l.backfillSubagentInternalID("toolu_A", "agent-deadbeefdeadbeefd")
+	l.mu.Unlock()
+	if helperOK {
+		t.Fatalf("backfillSubagentInternalID returned true on stale index, want false")
+	}
+
+	// Full SetAgentInternalID must still backfill via the linear-scan fallback.
+	l.SetAgentInternalID("toolu_A", "agent-deadbeefdeadbeefd", "/p/a.jsonl", "pa")
+	subs := l.Subagents()
+	if len(subs) != 1 || subs[0].InternalAgentID != "agent-deadbeefdeadbeefd" {
+		t.Errorf("fallback did not backfill: %+v", subs)
+	}
+}
+
 // TestEventLog_AppendBatchReplay_SkipsTaskDoneCallback pins R240-PERF-3
 // (#1042): the replay path must not fire on-task-done callbacks. A live
 // task_done in the same EventLog continues to fire the callback, so the

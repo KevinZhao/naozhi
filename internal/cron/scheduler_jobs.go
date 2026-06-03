@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -334,10 +335,22 @@ type JobWithNextRun struct {
 // s.mu.Lock). The result slice is always non-nil (empty bucket → `[]`) for
 // wire-format symmetry with ListJobs / ListAllJobsWithNextRun.
 func (s *Scheduler) ListJobsWithNextRun(plat, chatID string) []JobWithNextRun {
+	// R20260602-CR-3: reuse listEntryIDsPool for the per-chat entryID
+	// scratch slice — the same pool ListAllJobsWithNextRun uses — so 1Hz
+	// dashboard polls pay zero allocs for the transient ids buffer.
+	idsPtr := listEntryIDsPool.Get().(*[]cronEntryID)
+	ids := (*idsPtr)[:0]
+	defer func() {
+		*idsPtr = ids[:0]
+		listEntryIDsPool.Put(idsPtr)
+	}()
+
 	s.mu.RLock()
 	bucket := s.jobsByChat[chatKeyFor(plat, chatID)]
 	result := make([]JobWithNextRun, 0, len(bucket))
-	ids := make([]cronEntryID, 0, len(bucket))
+	if cap(ids) < len(bucket) {
+		ids = make([]cronEntryID, 0, len(bucket))
+	}
 	for _, j := range bucket {
 		result = append(result, JobWithNextRun{Job: *j})
 		ids = append(ids, j.entryID)
@@ -493,6 +506,32 @@ func (s *Scheduler) addToChatIndexLocked(j *Job) {
 	key := chatKeyFor(j.Platform, j.ChatID)
 	s.chatJobCount[key]++
 	s.jobsByChat[key] = append(s.jobsByChat[key], j)
+	s.insertSortedJobID(j.ID)
+}
+
+// insertSortedJobID keeps s.sortedJobIDs in ascending order via a binary-
+// search insertion so marshalJobsLocked can iterate it without re-sorting on
+// every mutation. O(N) memmove for the shift dominates over the O(log N)
+// search; at maxJobsHardCap=500 this is far cheaper than the prior
+// O(N log N) slices.SortFunc on every persist. Idempotent on a duplicate ID
+// (AddJob rejects collisions before insertion, but the disk-load path could
+// in principle replay a malformed file with dup IDs — a no-op keeps the slice
+// 1:1 with the map). Caller must hold s.mu.Lock(). R164029-PERF-9 (#1598).
+func (s *Scheduler) insertSortedJobID(id string) {
+	i, found := slices.BinarySearch(s.sortedJobIDs, id)
+	if found {
+		return
+	}
+	s.sortedJobIDs = slices.Insert(s.sortedJobIDs, i, id)
+}
+
+// removeSortedJobID drops id from s.sortedJobIDs via binary search, preserving
+// sort order. No-op if absent so a double-delete (rollback path) cannot panic.
+// Caller must hold s.mu.Lock(). R164029-PERF-9 (#1598).
+func (s *Scheduler) removeSortedJobID(id string) {
+	if i, found := slices.BinarySearch(s.sortedJobIDs, id); found {
+		s.sortedJobIDs = slices.Delete(s.sortedJobIDs, i, i+1)
+	}
 }
 
 // deleteJobLocked performs the in-memory side effects of removing a job:
@@ -519,6 +558,10 @@ func (s *Scheduler) deleteJobLocked(j *Job) {
 	}
 	if _, present := s.jobs[j.ID]; present {
 		delete(s.jobs, j.ID)
+		// R164029-PERF-9 (#1598): paired removal from the sorted-ID slice,
+		// mirroring addToChatIndexLocked's insert. Guarded by the same
+		// membership check so a double-delete cannot disturb the slice.
+		s.removeSortedJobID(j.ID)
 		// R237-PERF-5 (#661): paired decrement for the addJobAcquiringLock
 		// increment. Guarded by the s.jobs membership check above so a
 		// double-delete (rollback path calling this on a never-inserted
@@ -1254,6 +1297,7 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		j := s.jobs[id]
 		var schedRegErr error
 		if j != nil {
+			prevCachedSched := j.cachedSched // R20260602-CR-1: snapshot before registerJob mutates it
 			schedRegErr = s.registerJob(j)
 			if schedRegErr != nil {
 				// Rollback in-memory Schedule so subsequent reads reflect the
@@ -1261,7 +1305,7 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 				j.Schedule = schedOldSchedule
 				j.entryID = 0
 				j.cachedPeriod = 0
-				j.cachedSched = nil
+				j.cachedSched = prevCachedSched // R20260602-CR-1: restore, not nil
 			}
 		}
 		s.mu.Unlock()

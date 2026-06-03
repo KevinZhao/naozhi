@@ -449,6 +449,16 @@ type ManagedSession struct {
 	// Populated by InjectHistory and carried over when the process is replaced.
 	persistedHistory []cli.EventEntry
 
+	// persistedUserTurns caches the number of Type=="user" entries currently
+	// present in persistedHistory. Recomputed under historyMu whenever
+	// persistedHistory is mutated (append / cap-trim / sort) so the
+	// proc==nil snapshot branch can populate SessionSnapshot.MessageCount
+	// lock-free without an O(n) scan on every poll. A live proc still wins
+	// (proc.UserTurnCount()); this only covers evicted / suspended / stub
+	// sessions whose MessageCount would otherwise be a constant 0 and starve
+	// AutoTitler's min-turn gate (#1644).
+	persistedUserTurns atomic.Int64
+
 	// persistedSeededLen is the prefix length of persistedHistory that has
 	// already been forwarded into the current proc.EventLog. Reset whenever a
 	// fresh proc is published, so InjectHistory only forwards the unseeded

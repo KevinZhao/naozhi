@@ -239,6 +239,16 @@ func (r *Router) resetSessionLocked(key string, toClose *[]processIface, closedA
 		delete(r.sessionIDToKey, id)
 	}
 	delete(r.sessions, key)
+	// #1646: drop the keyhash → key fast-path entry. The chat index
+	// (sessionsByChat) is dropped in bulk by the ResetChat caller, so we only
+	// clean the keyhash map here. Equality-guarded so a rename collision can't
+	// remove the wrong entry.
+	if r.keyhashToKey != nil {
+		kh := persist.KeyHash(key)
+		if r.keyhashToKey[kh] == key {
+			delete(r.keyhashToKey, kh)
+		}
+	}
 	// Drop any per-session backend pick queued via SetSessionBackend. Without
 	// this, an abandoned dashboard "choose backend" pick for a key that is
 	// then reset leaks an entry into backendOverrides that is only cleared by

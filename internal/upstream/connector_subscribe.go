@@ -23,13 +23,23 @@ import (
 // UUID, so an entry re-returned at the watermark millisecond is delivered only
 // if its UUID was not already sent. sentAtWM holds exactly the UUIDs delivered
 // at Time == watermark.
+//
+// R164029-PERF-4 (#1599): sentAtWM was a map[string]struct{} rebuilt on every
+// watermark advance. At any instant it only holds the UUIDs delivered at the
+// single trailing millisecond (typically 1-3 entries), so a map was pure
+// overhead — each notify wave inserted N short-lived UUID keys and the bucket
+// array was never released by clear(). A reused string slice eliminates the
+// per-wave map allocation: it is truncated (cap retained) on advance and a
+// linear scan over a handful of entries is cheaper than map hashing at this
+// size. A slice (not a fixed array) keeps dedup correctness even in the rare
+// case that more events than expected land in the same millisecond.
 type sinceCursor struct {
 	watermark int64
-	sentAtWM  map[string]struct{}
+	sentAtWM  []string
 }
 
 func newSinceCursor() *sinceCursor {
-	return &sinceCursor{sentAtWM: make(map[string]struct{})}
+	return &sinceCursor{}
 }
 
 // reset rewinds the cursor to the pre-subscribe state. Used on session pointer
@@ -38,7 +48,7 @@ func newSinceCursor() *sinceCursor {
 // first notify after a swap must deliver the full new history.
 func (s *sinceCursor) reset() {
 	s.watermark = 0
-	clear(s.sentAtWM)
+	s.sentAtWM = s.sentAtWM[:0]
 }
 
 // queryAfter returns the afterMS to pass to EventEntriesSince. Subtracting one
@@ -55,14 +65,24 @@ func (s *sinceCursor) queryAfter() int64 {
 func (s *sinceCursor) filter(cand []cli.EventEntry) []cli.EventEntry {
 	out := cand[:0]
 	for _, e := range cand {
-		if e.Time == s.watermark {
-			if _, dup := s.sentAtWM[e.UUID]; dup {
-				continue
-			}
+		if e.Time == s.watermark && s.containsWM(e.UUID) {
+			continue
 		}
 		out = append(out, e)
 	}
 	return out
+}
+
+// containsWM reports whether uuid was already delivered at the trailing
+// watermark millisecond. Linear over sentAtWM, which holds only the handful of
+// UUIDs at that millisecond.
+func (s *sinceCursor) containsWM(uuid string) bool {
+	for _, u := range s.sentAtWM {
+		if u == uuid {
+			return true
+		}
+	}
+	return false
 }
 
 // advance records that the given entries were delivered. Entries are
@@ -76,11 +96,11 @@ func (s *sinceCursor) advance(delivered []cli.EventEntry) {
 	newWM := delivered[len(delivered)-1].Time
 	if newWM != s.watermark {
 		s.watermark = newWM
-		clear(s.sentAtWM)
+		s.sentAtWM = s.sentAtWM[:0]
 	}
 	for _, e := range delivered {
-		if e.Time == s.watermark {
-			s.sentAtWM[e.UUID] = struct{}{}
+		if e.Time == s.watermark && !s.containsWM(e.UUID) {
+			s.sentAtWM = append(s.sentAtWM, e.UUID)
 		}
 	}
 }

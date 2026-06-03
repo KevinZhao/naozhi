@@ -167,6 +167,30 @@ func TestReadRaw_UnknownPlugin404(t *testing.T) {
 	}
 }
 
+// TestScanHooksJSON_MalformedJSON verifies that a corrupt hooks.json returns
+// nil (behaviour preserved) but does not panic. The warn log is exercised via
+// code coverage; capturing slog output is not required for correctness.
+// R20260603000023-CR-5.
+func TestScanHooksJSON_MalformedJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hooks.json")
+	writeFile(t, path, `{not valid json`)
+
+	got := scanHooksJSON(path, "hooks/hooks.json", assets.Source{Kind: "plugin", Plugin: "x"})
+	if got != nil {
+		t.Errorf("expected nil on parse error, got %v", got)
+	}
+}
+
+// TestScanHooksJSON_MissingFile verifies that a missing hooks.json returns nil
+// without error — pre-existing silent behaviour is preserved.
+func TestScanHooksJSON_MissingFile(t *testing.T) {
+	got := scanHooksJSON("/nonexistent/hooks.json", "hooks/hooks.json", assets.Source{Kind: "plugin"})
+	if got != nil {
+		t.Errorf("expected nil for missing file, got %v", got)
+	}
+}
+
 func TestReadRaw_MemoryTraversalBlocked(t *testing.T) {
 	home := t.TempDir()
 	_ = os.WriteFile(filepath.Join(home, "secret.txt"), []byte("SECRET"), 0o644)

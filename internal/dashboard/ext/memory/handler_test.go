@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -493,5 +494,90 @@ func TestNegCache_SweepOnWrite(t *testing.T) {
 	}
 	if !hasNew {
 		t.Errorf("new entry missing after write")
+	}
+}
+
+// TestNegCache_MaxEntries verifies R220123-SEC-4: the negative cache does not
+// grow beyond maxNegCacheEntries even when many unique slugs miss in rapid
+// succession (defence-in-depth against slug-spray attacks).
+func TestNegCache_MaxEntries(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := memoryTestHandler(t, dir, "")
+
+	// Pre-fill the cache to exactly the cap with live (non-expired) entries.
+	h.negCacheMu.Lock()
+	h.negCache = make(map[string]time.Time, maxNegCacheEntries)
+	for i := 0; i < maxNegCacheEntries; i++ {
+		h.negCache[fmt.Sprintf("slug_%d", i)] = time.Now().Add(time.Minute)
+	}
+	h.negCacheMu.Unlock()
+
+	// A miss on a brand-new slug should NOT insert — the cap must be respected.
+	callMemoryHandler(t, h, "overflow_slug")
+
+	h.negCacheMu.Lock()
+	size := len(h.negCache)
+	_, hasOverflow := h.negCache["overflow_slug"]
+	h.negCacheMu.Unlock()
+
+	if size != maxNegCacheEntries {
+		t.Errorf("negCache len = %d after cap-overflow attempt, want %d", size, maxNegCacheEntries)
+	}
+	if hasOverflow {
+		t.Errorf("overflow_slug was inserted despite cap being reached")
+	}
+}
+
+// TestNegCache_ConcurrentReads verifies R20260602190132-GO-3: the negative
+// cache uses sync.RWMutex so multiple goroutines may read concurrently without
+// data races. Run with -race to detect any violation.
+func TestNegCache_ConcurrentReads(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h := memoryTestHandler(t, dir, "")
+
+	// Seed the negative cache with a valid entry so the read path (RLock) fires.
+	h.negCacheMu.Lock()
+	h.negCache = map[string]time.Time{
+		"seeded_slug": time.Now().Add(time.Minute),
+	}
+	h.negCacheMu.Unlock()
+
+	// Launch N goroutines that all read the negative cache simultaneously.
+	// R220123-CR-1: goroutines must not call t.Fatal/t.Errorf — only the test
+	// goroutine may call testing.T methods. Collect (code, found) pairs into a
+	// buffered channel and assert in the main goroutine after all complete.
+	type result struct {
+		code  int
+		found bool
+	}
+	const N = 20
+	results := make(chan result, N)
+	for i := 0; i < N; i++ {
+		go func() {
+			// Build and serve the request directly — no t.* calls inside the goroutine.
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET /api/memory/{slug}", h.HandleGet)
+			req := httptest.NewRequest(http.MethodGet, "/api/memory/seeded_slug", nil)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+			var resp memoryResponse
+			_ = json.NewDecoder(w.Body).Decode(&resp)
+			results <- result{code: w.Code, found: resp.Found}
+		}()
+	}
+	for i := 0; i < N; i++ {
+		r := <-results
+		if r.code != http.StatusOK {
+			t.Errorf("concurrent read %d: status = %d, want 200", i, r.code)
+		}
+		if r.found {
+			t.Errorf("concurrent read %d: resp.Found = true, want false", i)
+		}
 	}
 }

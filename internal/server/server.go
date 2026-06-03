@@ -12,6 +12,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/cryptoutil"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
 	"github.com/naozhi/naozhi/internal/dashboard/discovery"
@@ -344,7 +345,7 @@ func buildServer(opts ServerOptions) *Server {
 	// even when token + secret are stable. RotateDashboardSessions can bump
 	// the in-process seq counter at runtime to invalidate every outstanding
 	// cookie atomically without a restart.
-	cookieGen := randomCookieGen()
+	cookieGen := cryptoutil.RandomCookieGen()
 
 	// Construct KeyResolver once and share across dispatcher (wired in
 	// Start), hub, and ProjectHandlers. project.NewDataSource returns

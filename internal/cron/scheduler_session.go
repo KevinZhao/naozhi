@@ -7,6 +7,8 @@
 
 package cron
 
+import "sync"
+
 // R20260527122801-ARCH-1 (#1318): The compile-time guard
 // `var _ session.SessionIDExcluder = (*Scheduler)(nil)` previously lived
 // here, which forced internal/cron to import internal/session — the
@@ -37,6 +39,29 @@ package cron
 // frequency. The constant stays here so future tuning lives at the
 // boundary it actually controls.
 const knownSessionIDsRecentCap = 200
+
+// jobIDsScratchPool reuses the []string scratch slice that
+// buildKnownSessionsSet allocates under s.mu RLock to collect job IDs,
+// then walks after RUnlock to call runStore.RecentSessionIDs per job.
+// invalidateKnownSessionsCache is called on every runStore.Append and
+// LastSessionID write, so cold rebuilds can be frequent in busy
+// deployments. Pooling the scratch slice removes the per-rebuild
+// backing-array allocation without changing semantics: the slice is
+// only used inside buildKnownSessionsSet and is returned to the pool
+// after all runStore reads are done. R20260603-010128-PERF-1.
+var jobIDsScratchPool = sync.Pool{
+	New: func() any {
+		// Default seed sized for the common 50-job case.
+		s := make([]string, 0, 64)
+		return &s
+	},
+}
+
+// jobIDsScratchCapDrop is the cap threshold above which Put refuses to
+// recycle the scratch slice, mirroring the marshalEntriesCapDrop policy
+// in scheduler_persist.go. Prevents a one-off burst from pinning a
+// large backing array indefinitely.
+const jobIDsScratchCapDrop = 4 * maxJobsHardCap // 2000 string slots
 
 // IsExcluded reports whether the given Claude sessionID belongs to a
 // cron-spawned run. Implements session.SessionIDExcluder so the
@@ -211,8 +236,11 @@ func (s *Scheduler) KnownSessionIDs() map[string]struct{} {
 func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
 	out := make(map[string]struct{}, 32)
 
+	// Get a pooled scratch slice for job IDs; reset length to 0 before use.
+	jobIDsPtr := jobIDsScratchPool.Get().(*[]string)
+	jobIDs := (*jobIDsPtr)[:0]
+
 	s.mu.RLock()
-	jobIDs := make([]string, 0, len(s.jobs))
 	for id, j := range s.jobs {
 		jobIDs = append(jobIDs, id)
 		if j.LastSessionID != "" {
@@ -244,6 +272,16 @@ func (s *Scheduler) buildKnownSessionsSet() map[string]struct{} {
 				out[sid] = struct{}{}
 			}
 		}
+	}
+
+	// Return scratch slice to pool. jobIDs is used above (runStore loop);
+	// Put only after all reads are complete. Drop oversize slices to avoid
+	// pinning a burst-inflated backing array. R20260603-010128-PERF-1.
+	if cap(jobIDs) <= jobIDsScratchCapDrop {
+		// Clear string references to prevent pinning stale job ID strings.
+		clear(jobIDs)
+		*jobIDsPtr = jobIDs[:0]
+		jobIDsScratchPool.Put(jobIDsPtr)
 	}
 
 	return out
