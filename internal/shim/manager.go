@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -1277,11 +1278,19 @@ var shimEnvAllowedPrefixes = []string{
 // behavior; reject and log instead.
 const maxShimEnvEntryBytes = 4 * 1024
 
-// filterShimEnvOversizeOnce ensures the "oversized entry rejected" warning is
-// emitted at most once per process lifetime. Additional oversized entries are
-// still rejected (the continue fires) but suppressed from the log to prevent
-// a pathological environment from flooding the log. [R112714-ARCH-3]
-var filterShimEnvOversizeOnce sync.Once
+// maxShimEnvOversizeWarnings caps how many "oversized entry rejected" warnings
+// are emitted per process lifetime. [R20260603-SEC-5] A single sync.Once
+// previously let the first benign oversized entry exhaust the log budget,
+// masking a subsequent attacker-injected oversized entry (e.g. an
+// ANTHROPIC_BASE_URL pointing at the IMDS endpoint) that would then be dropped
+// silently. A small counter lets the first few of each batch surface while
+// still bounding log volume from a pathological environment.
+const maxShimEnvOversizeWarnings = 5
+
+// filterShimEnvOversizeWarnings counts how many oversized-entry warnings have
+// been emitted. Oversized entries are always rejected (the continue fires);
+// only the *logging* is capped at maxShimEnvOversizeWarnings. [R20260603-SEC-5]
+var filterShimEnvOversizeWarnings atomic.Int64
 
 // filterShimEnv returns a copy of environ keeping only variables whose key
 // matches one of the allowed prefixes. This is defense-in-depth: the CLI
@@ -1297,16 +1306,23 @@ func filterShimEnv(environ []string) []string {
 		if len(kv) > maxShimEnvEntryBytes {
 			// Log key prefix only — never log the value in case it is a
 			// secret (e.g. a misconfigured PYTHONPATH that happens to
-			// contain credential data). sync.Once caps the log output to
-			// one warning per process lifetime so a pathological
-			// environment (dozens of multi-MB exports) does not flood the
-			// log. [R112714-ARCH-3]
-			filterShimEnvOversizeOnce.Do(func() {
-				slog.Warn("shim env: oversized entry rejected (further oversized entries silently dropped)",
+			// contain credential data). A counter caps the log output at
+			// maxShimEnvOversizeWarnings per process lifetime so a
+			// pathological environment (dozens of multi-MB exports) does
+			// not flood the log, while still surfacing the first few —
+			// previously a single sync.Once let one benign oversized entry
+			// mask later attacker-injected ones. [R112714-ARCH-3]
+			// [R20260603-SEC-5]
+			if n := filterShimEnvOversizeWarnings.Add(1); n <= maxShimEnvOversizeWarnings {
+				msg := "shim env: oversized entry rejected"
+				if n == maxShimEnvOversizeWarnings {
+					msg = "shim env: oversized entry rejected (further oversized warnings suppressed)"
+				}
+				slog.Warn(msg,
 					"key_prefix", kvKeyPrefix(kv),
 					"len", len(kv),
 					"max", maxShimEnvEntryBytes)
-			})
+			}
 			continue
 		}
 		for _, prefix := range shimEnvAllowedPrefixes {
