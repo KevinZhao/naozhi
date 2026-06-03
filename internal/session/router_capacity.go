@@ -10,22 +10,19 @@ import (
 // countActive recounts alive processes (corrects drift from undetected exits).
 // Exempt sessions are not counted toward max_procs capacity. Caller must
 // hold r.mu.
+//
+// R20260603-010128-GO-2: reuse the alive total returned by
+// reconcileSessionActiveByBackendLocked instead of running a separate O(N)
+// counting loop. reconcile already walks r.sessions once to rebuild the
+// per-backend gauges and returns the non-exempt alive count, which is
+// identical to what the former loop computed. Dropping the redundant walk
+// keeps activeCount and the per-backend gauges updated in a single pass.
 func (r *Router) countActive() {
-	count := int64(0)
-	for _, s := range r.sessions {
-		if s.exempt {
-			continue
-		}
-		if s.isAlive() {
-			count++
-		}
-	}
+	// reconcileSessionActiveByBackendLocked walks r.sessions once, drives
+	// the per-backend labeled gauge, and returns the non-exempt alive total.
+	// Store that total directly — no second O(N) counting loop needed.
+	count := r.reconcileSessionActiveByBackendLocked()
 	r.activeCount.Store(count)
-	// Multi-Backend RFC §10 (Sprint 6a): keep the per-backend labeled
-	// gauge in sync with the freshly recounted r.sessions snapshot.
-	// Done in the same critical section as activeCount.Store so the
-	// two bookkeeping totals never diverge from each other.
-	r.reconcileSessionActiveByBackendLocked()
 }
 
 // reconcileSessionActiveByBackendLocked rebuilds the metrics.SessionActive
@@ -34,15 +31,22 @@ func (r *Router) countActive() {
 // Used by bulk teardown paths (countActive / cleanupSessionsByChatPrefix /
 // Cleanup prune) where per-key Inc/Dec bookkeeping in the loop would
 // require threading each session's backend through the batched-close
-// machinery. Single-session sites (Reset / Remove / evictOldest) call
+// machinery. Single-session sites (Reset / Remove) call
 // metrics.RecordSessionActive(backend, -1) directly for lower overhead.
+// evictOldest deliberately does NOT — it relies on the post-Close
+// countActive() reconcile instead, because a manual -1 layered on top of an
+// absolute reconcile drifts the gauge (#1645).
 //
 // Backends that previously had sessions but no longer do are explicitly
 // driven to zero — without ForEachKey the bucket would stay stuck at
 // its last non-zero value.
 //
+// Returns the freshly counted alive (non-exempt) session total so callers
+// that also need to refresh r.activeCount can reuse this single O(N) walk
+// instead of running a second counting loop. R20260602190132-PERF-5 (#1607).
+//
 // LOCK: caller must hold r.mu for writing.
-func (r *Router) reconcileSessionActiveByBackendLocked() {
+func (r *Router) reconcileSessionActiveByBackendLocked() int64 {
 	var total int64
 	perBackend := make(map[string]int64, 4)
 	for _, s := range r.sessions {
@@ -81,6 +85,7 @@ func (r *Router) reconcileSessionActiveByBackendLocked() {
 		want := perBackend[backend]
 		metrics.SessionActiveByBackend.Add(want-current, backend)
 	}
+	return total
 }
 
 // countExempt returns the total number of alive exempt sessions across
@@ -149,13 +154,16 @@ func (r *Router) evictOldest() bool {
 	// the subsequent proc.Close() is async-capable and can fail, but the eviction
 	// decision is already committed (deathReason set, storeDirty marked below).
 	metrics.SessionEvictTotal.Add(1)
-	// Multi-Backend RFC §10 (Sprint 6a): evictOldest below relies on
-	// r.countActive() to recompute the legacy total post-Close, but the
-	// labeled gauge needs an explicit decrement keyed on the evictee's
-	// backend. Done now (under the lock, before Unlock for Close) so the
-	// metric reflects the eviction decision instead of the post-Close
-	// recount which only sees the residual sessions.
-	metrics.RecordSessionActive(oldest.Backend(), -1)
+	// #1645: do NOT explicitly decrement the labeled gauge here. The
+	// post-Close r.countActive() below calls reconcileSessionActiveByBackendLocked,
+	// which SETS each backend bucket to the absolute recounted value
+	// (Add(want-current)), not a relative delta. A manual -1 on top of an
+	// absolute reconcile is at best a no-op and at worst causes drift: when
+	// proc.Close() flips Alive() asynchronously, the recount can still observe
+	// oldest as alive, so reconcile drives the gauge back up to include it —
+	// and the earlier manual -1 made the pre-reconcile baseline diverge from
+	// the true count. Relying solely on the reconcile keeps the gauge equal to
+	// whatever the recount sees, which is the single source of truth.
 	storeAtomicString(&oldest.deathReason, "evicted")
 	// Keep oldest.process non-nil so concurrent holders don't get nil-panic.
 	// After Close(), Alive() returns false; countActive() below recounts correctly.

@@ -445,3 +445,24 @@
 - [R20260602190132-PERF-6] cap(rev)==0 guard misleading, no action — internal/eventlog/eventlog_query.go:241
 - [R20260602190132-PERF-13] ringSeed rebuilds runIDs unchanged set low-freq — internal/cron/runstore.go:357
 - [R20260602190132-PERF-14] errors.Is on hot path vs == sentinel — internal/cli/process_readloop.go:478
+- [R220123-SEC-6] cron secret redactor 未含 Stripe publishable keys (pk_live_/pk_test_) — internal/cron/redact_secrets.go:66 (publishable key 设计上公开,低价值)
+- [R220123-CR-4] eventlog_append 注释 "zero slice alloc" 仅对 SetPersistSinkPair 路径成立,batch-only fallback 仍分配 — internal/cli/eventlog_append.go:510
+- [R220123-CR-5] maxUint64 包级常量命名可能与 cli 包其他文件冲突,可改 jsonMaxUint64 — internal/cli/process_readloop.go:133
+- [R220123-ARCH-3] editLoop EditMessage 用 t.ctx 而 Reply 用 15s 子 ctx,deadline 不一致(纯一致性) — internal/dispatch/reply_tracker.go:460
+- [R220123-PERF-22] writeStoreMeta 重复 time.Now() vDSO 调用可复用 Cleanup 已捕获时间戳 — internal/session/store.go:373
+- [R20260602-GO-003] latestRelease 包级 var 缺 race 保护(注释已约束测试不可 Parallel,假设性未来贡献者) — internal/selfupdate/checker.go:114
+- [R20260602-SEC-1] allow_insecure_webhook=true 禁用 HMAC(已有 warn,加二次确认 env 为强化建议) — internal/platform/feishu/feishu.go:604
+- [R20260602-SEC-2] curl|bash 安装脚本无 SRI/签名(README pin tag 为强化建议) — install.sh:1
+- [R20260602-SEC-3] checksums.txt 无签名(cosign 为未来 roadmap,已有 PIN_SHA256 选项) — internal/selfupdate/selfupdate.go:151
+- [R20260602-SEC-4] resolveTrustedBin 回退 LookPath(注释已记录 tradeoff,改为 error 会破坏 /opt 安装) — internal/selfupdate/service.go:46
+- [R20260602-SEC-11] secretPrefixes 不覆盖 JWT/Azure/GCP-JSON(扩充覆盖面为增强非 bug) — internal/cron/redact_secrets.go:66
+- [R20260602-SEC-14] evictOldestNonces 第二趟 recount 在高并发下可能 undercount(bounded by hookSem 20,假设性 drift) — internal/platform/feishu/feishu.go:527
+- [R20260602-PERF-9] effectiveFlushInterval 17-writer 断点偏激进(纯调参意见,无明确 trigger) — internal/eventlog/persist/persister.go:1269
+- [R20260602-PERF-13] Snapshot 每次 alloc 50 槽(加 SnapshotAppend 变体为优化建议) — internal/sysession/runring.go:68
+- [R20260602-PERF-15] candidates cap 启发式在全 exempt 时仍 alloc backing(nil 初始为微优化) — internal/session/router_cleanup.go:195
+- [R20260602-ARCH-3] SysessionDaemonConfig god-struct 混两 daemon 私有 knobs(需 RFC,与 ARCH-2 同根) — internal/config/config.go:412
+- [R20260602-ARCH-4] buildSysessionManager 3x 重复 duration-parse-or-warn(可抽 helper,微重构) — cmd/naozhi/main_helpers.go:295
+- [R20260602-ARCH-5] CronNotifyTarget 校验逻辑应附到类型(折入 ARCH-1 类,类内聚角度) — internal/config/config.go:357
+- [R20260603-010128-GO-1] marshalRunPooled 在 enc.Encode 写错误路径仍把 poisoned encoder 还池(bytes.Buffer.Write 实际永不出错,假设性) — internal/cron/runstore.go:418
+- [R20260603-010128-ARCH-c1] cronRouterAdapter.GetOrCreate 错误路径返回 magic 0 status — cmd/naozhi/cron_router_adapter.go:104
+- [R20260603-010128-ARCH-c2] dispatch.localizeAPIError 近死代码薄包装 — internal/dispatch/apierr.go:10

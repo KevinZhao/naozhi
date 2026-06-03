@@ -1,9 +1,30 @@
 package sysession
 
 import (
+	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 )
+
+// reProfileValue matches safe AWS profile names: alphanumeric plus underscore
+// and hyphen, 1-64 characters. Rejects shell metacharacters or path separators
+// that could redirect credential_process lookups.
+var reProfileValue = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// envProfileKeys is the set of always-passthrough keys that carry an AWS
+// profile *name* (not credentials). Their values are validated by
+// isSafeProfileValue before pass-through. R20260603000023-SEC-1 (#1617).
+var envProfileKeys = map[string]struct{}{
+	"AWS_PROFILE":         {},
+	"AWS_DEFAULT_PROFILE": {},
+}
+
+// isSafeProfileValue reports whether v is a safe AWS profile name.
+// Enforces ^[A-Za-z0-9_-]{1,64}$ to block injection via credential_process.
+func isSafeProfileValue(v string) bool {
+	return reProfileValue.MatchString(v)
+}
 
 // envAlwaysPassthrough is the small set of NON-SECRET variables every
 // Runner subprocess gets, regardless of the daemon-side EnvAllowlist:
@@ -230,6 +251,17 @@ func filterEnv(allowlist []string) []string {
 			continue
 		}
 		if _, ok := envAlwaysPassthrough[key]; ok {
+			// Profile-selector keys: validate value before passing through.
+			// An invalid profile name could redirect credential_process to a
+			// malicious profile. R20260603000023-SEC-1 (#1617).
+			if _, isProfile := envProfileKeys[key]; isProfile {
+				val := kv[idx+1:]
+				if !isSafeProfileValue(val) {
+					slog.Warn("sysession: AWS profile env var rejected (unsafe value)",
+						"key", key, "value", val)
+					continue
+				}
+			}
 			out = append(out, kv)
 			continue
 		}

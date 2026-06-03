@@ -56,12 +56,13 @@ func TestRecordBootStep_Idempotent(t *testing.T) {
 func TestValidate_DetectsMissingStep(t *testing.T) {
 	// Save and restore the real bootRegistry so this test does not mutate
 	// global state. We swap it with a registry that only has cli-backends.
-	orig := bootRegistry
-	t.Cleanup(func() { bootRegistry = orig })
+	orig := getBootRegistry()
+	t.Cleanup(func() { setBootRegistry(orig) })
 
-	bootRegistry = NewRegistry[BootStep]("boot-step-test")
-	bootRegistry.Register("cli-backends", BootStep{Kind: "cli-backends"})
+	reg := NewRegistry[BootStep]("boot-step-test")
+	reg.Register("cli-backends", BootStep{Kind: "cli-backends"})
 	// history-backends intentionally absent.
+	setBootRegistry(reg)
 
 	err := Validate()
 	if err == nil {
@@ -77,15 +78,16 @@ func TestValidate_DetectsMissingStep(t *testing.T) {
 // registered name does not must still cause Validate to report the
 // required name as missing.
 func TestValidate_KindDoesNotSatisfyName(t *testing.T) {
-	orig := bootRegistry
-	t.Cleanup(func() { bootRegistry = orig })
+	orig := getBootRegistry()
+	t.Cleanup(func() { setBootRegistry(orig) })
 
-	bootRegistry = NewRegistry[BootStep]("boot-step-test2")
+	reg := NewRegistry[BootStep]("boot-step-test2")
 	// Register with a different name but Kind == "cli-backends".
 	// Before the fix, the have-map keyed on Kind would mark cli-backends
 	// as present; after the fix it must still be missing.
-	bootRegistry.Register("history-backends", BootStep{Kind: "history-backends"})
-	bootRegistry.Register("alt-cli", BootStep{Kind: "cli-backends"})
+	reg.Register("history-backends", BootStep{Kind: "history-backends"})
+	reg.Register("alt-cli", BootStep{Kind: "cli-backends"})
+	setBootRegistry(reg)
 
 	err := Validate()
 	if err == nil {

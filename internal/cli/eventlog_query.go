@@ -229,7 +229,6 @@ func (l *EventLog) EntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEn
 	// — a DIV per step. Walk backward from the newest slot with a cheap
 	// branch-on-wrap instead. ~5-10ns × notify wave on hot streaming path.
 	rev := dst[:0]
-	allocated := false
 	idx := l.head - 1
 	if idx < 0 {
 		idx += l.maxSize
@@ -238,7 +237,7 @@ func (l *EventLog) EntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEn
 		if l.entries[idx].Time <= afterMS {
 			break
 		}
-		if !allocated && cap(rev) == 0 {
+		if cap(rev) == 0 {
 			// Typical streaming match count is 1-5; cap at entriesSinceInitialCap
 			// so sessions with hundreds of buffered entries don't allocate a
 			// giant backing array on every notify. `append` will grow organically
@@ -248,7 +247,6 @@ func (l *EventLog) EntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEn
 				initialCap = entriesSinceInitialCap
 			}
 			rev = make([]EventEntry, 0, initialCap)
-			allocated = true
 		}
 		rev = append(rev, l.entries[idx])
 		idx--
