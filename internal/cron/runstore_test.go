@@ -986,6 +986,39 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 			wantSkip:    false,
 			wantCounter: 0,
 		},
+		{
+			// R090031-CR-3: capSafe used < instead of <=; when
+			// count+appendTrimBatch == keepCount the cache can still
+			// prove no removal is needed (trimJobLocked only removes
+			// when len(items) > keepCount), so we must skip.
+			name: "count+appendTrimBatch == keepCount: capSafe boundary skip",
+			entry: newEntryFromRows(func() []CronRunSummary {
+				// keepCount=10, appendTrimBatch=10 → count=0: 0+10==10 → capSafe
+				r := make([]CronRunSummary, 0)
+				return r
+			}(), 0),
+			keepCount:   appendTrimBatch,
+			keepWindow:  24 * time.Hour,
+			wantSkip:    true,
+			wantCounter: 0,
+		},
+		{
+			// count+appendTrimBatch exactly == keepCount with rows present.
+			// With <= semantics capSafe=true; windowSafe=true → skip.
+			name: "count+appendTrimBatch == keepCount with fresh rows: skip",
+			entry: newEntryFromRows(func() []CronRunSummary {
+				// keepCount=15, count=5: 5+10==15 → capSafe with <=
+				r := make([]CronRunSummary, 5)
+				for i := range r {
+					r[i] = CronRunSummary{EndedAt: now.Add(-time.Duration(i+1) * time.Minute)}
+				}
+				return r
+			}(), 0),
+			keepCount:   15,
+			keepWindow:  24 * time.Hour,
+			wantSkip:    true,
+			wantCounter: 0,
+		},
 	}
 
 	for _, tc := range cases {
@@ -1000,7 +1033,7 @@ func TestRunStore_SkipAppendTrim_Conditions(t *testing.T) {
 			// here so the assertJobLockHeld guard inside doesn't fire.
 			lock := s.jobLock("job")
 			lock.Lock()
-			got := s.skipAppendTrim("job")
+			got := s.skipAppendTrim("job", now)
 			lock.Unlock()
 			if got != tc.wantSkip {
 				t.Errorf("skipAppendTrim = %v, want %v", got, tc.wantSkip)
@@ -1022,7 +1055,7 @@ func TestRunStore_SkipAppendTrim_MissingEntry(t *testing.T) {
 	lock := s.jobLock("never-seen")
 	lock.Lock()
 	defer lock.Unlock()
-	if s.skipAppendTrim("never-seen") {
+	if s.skipAppendTrim("never-seen", time.Now()) {
 		t.Error("expected false for unknown jobID")
 	}
 }
