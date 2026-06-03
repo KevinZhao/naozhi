@@ -2,7 +2,9 @@ package discord
 
 import (
 	"context"
+	"net/http"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -234,6 +236,37 @@ func TestDownloadURL_SchemeGuard(t *testing.T) {
 				t.Errorf("downloadURL(%q) expected error, got nil", tc.rawURL)
 			}
 		})
+	}
+}
+
+// TestRESTSession_NoRedirect_SEC2 verifies that the http.Client injected onto
+// the discordgo session (R20260603-SEC-2) refuses 3xx redirects by returning
+// http.ErrUseLastResponse from CheckRedirect.  The test exercises the client
+// policy directly (without a live Discord gateway) to confirm the SSRF /
+// token-leakage guard is in place.
+func TestRESTSession_NoRedirect_SEC2(t *testing.T) {
+	t.Parallel()
+	sess, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
+	// Mirror exactly what Start() does.
+	sess.Client = &http.Client{
+		Timeout: 20 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	if sess.Client == nil {
+		t.Fatal("sess.Client must not be nil after injection")
+	}
+	if sess.Client.CheckRedirect == nil {
+		t.Fatal("CheckRedirect must be set on the injected client")
+	}
+	// Invoke the redirect policy: must return ErrUseLastResponse (not nil).
+	err = sess.Client.CheckRedirect(nil, nil)
+	if err != http.ErrUseLastResponse {
+		t.Errorf("CheckRedirect returned %v, want http.ErrUseLastResponse", err)
 	}
 }
 

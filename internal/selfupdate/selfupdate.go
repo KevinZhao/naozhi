@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -395,6 +396,44 @@ func isGitHubAssetHost(host string) bool {
 		strings.HasSuffix(host, ".githubusercontent.com")
 }
 
+// blockPrivateDialContext returns a DialContext function that resolves the
+// target hostname and rejects any IP address that belongs to a reserved range
+// (loopback, link-local, private, unspecified).  This closes the DNS
+// rebinding / SSRF vector where a hostname that passes the github.com
+// allowlist check later resolves to an internal address such as
+// 169.254.169.254 (AWS/GCP IMDS) or an RFC-1918 address.  (R20260603-SEC-1)
+//
+// The function is injected into http.Transport.DialContext so every TCP
+// connection made by fetchFile goes through the IP guard after DNS
+// resolution, before any bytes are exchanged.
+//
+// The guard is skipped (nil is returned) when testHTTPTransport is set,
+// because test servers run on loopback and would be incorrectly rejected.
+func blockPrivateDialContext() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	if testHTTPTransport != nil {
+		// Test mode: do not block loopback so httptest servers work.
+		return nil
+	}
+	dialer := &net.Dialer{}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("selfupdate: malformed dial address %q: %w", addr, err)
+		}
+		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("selfupdate: DNS lookup %q: %w", host, err)
+		}
+		for _, ia := range addrs {
+			ip := ia.IP
+			if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsPrivate() || ip.IsUnspecified() {
+				return nil, fmt.Errorf("selfupdate: refused connection to reserved IP %s (DNS rebinding guard)", ip)
+			}
+		}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(host, port))
+	}
+}
+
 // checkPlatform returns ErrUnsupportedPlatform on operating systems that have
 // no entry in the release matrix (currently Windows only).
 func checkPlatform() error {
@@ -449,9 +488,20 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 	// host. Without this guard the SHA-256 verification is no longer
 	// load-bearing — both files travel the same path and could be replaced
 	// in lock-step. (R228-SEC-1/SEC-9，覆盖 R227-SEC-5 的 https-only 检查)
+	//
+	// R20260603-SEC-1: inject a DialContext that rejects reserved IPs after
+	// DNS resolution to close the DNS rebinding / SSRF path (169.254.169.254,
+	// RFC-1918, loopback).  In test mode blockPrivateDialContext() returns nil
+	// and testHTTPTransport is used as-is so httptest servers on loopback work.
+	var transport http.RoundTripper
+	if dialCtx := blockPrivateDialContext(); dialCtx != nil {
+		transport = &http.Transport{DialContext: dialCtx}
+	} else {
+		transport = testHTTPTransport // nil in production falls back to http.DefaultTransport
+	}
 	client := &http.Client{
 		Timeout:   defaultTimeout,
-		Transport: testHTTPTransport, // nil in production → http.DefaultTransport
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > 5 {
 				return fmt.Errorf("too many redirects")

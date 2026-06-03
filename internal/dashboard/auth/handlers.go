@@ -19,6 +19,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cryptoutil"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/netutil"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/ratelimit"
 	"golang.org/x/time/rate"
 )
@@ -287,8 +288,9 @@ func (a *Handlers) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !IsSafeMethod(r.Method) && !SameOriginOK(r, a.TrustedProxy) {
 			slog.Warn("rejecting cross-origin mutating request",
-				"method", r.Method, "path", r.URL.Path,
-				"origin", r.Header.Get("Origin"), "host", r.Host)
+				"method", r.Method, "path", osutil.SanitizeForLog(r.URL.Path, 256),
+				"origin", osutil.SanitizeForLog(r.Header.Get("Origin"), 256),
+				"host", osutil.SanitizeForLog(r.Host, 256))
 			http.Error(w, "cross-origin request refused", http.StatusForbidden)
 			return
 		}
@@ -490,7 +492,8 @@ func (a *Handlers) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	// R31-SEC1 / R26-SEC1.
 	if !SameOriginOK(r, a.TrustedProxy) {
 		slog.Warn("rejecting cross-origin login attempt",
-			"origin", r.Header.Get("Origin"), "host", r.Host)
+			"origin", osutil.SanitizeForLog(r.Header.Get("Origin"), 256),
+			"host", osutil.SanitizeForLog(r.Host, 256))
 		http.Error(w, "cross-origin request refused", http.StatusForbidden)
 		return
 	}

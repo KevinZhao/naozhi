@@ -7,6 +7,8 @@ import (
 	pprofhandler "net/http/pprof"
 	"strconv"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // parsePositiveSeconds parses a `seconds=` pprof query parameter; returns 0
@@ -43,6 +45,16 @@ func parsePositiveSeconds(s string) int {
 //
 // See docs/ops/pprof.md for the full runbook.
 func (s *Server) registerPprof() {
+	// R20260603-SEC-3 (#1633): warn when pprof is enabled without a dashboard
+	// token. In this mode requireAuth is a pass-through, so any process on the
+	// local host can reach pprof over loopback without authentication. The
+	// isLoopbackRemote gate still blocks non-loopback callers unconditionally,
+	// so the exposure is limited to local processes — but goroutine dumps may
+	// contain tokens and conversation context.
+	// Operators should set a dashboard_token or only enable debug_mode transiently.
+	if s.dashboardToken == "" {
+		slog.Warn("pprof enabled without dashboard token: loopback callers can access profiles without authentication; set server.dashboard_token or disable debug_mode when not profiling")
+	}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Defense-in-depth (R20260602-SEC-10): when no dashboard token is
 		// configured, requireAuth is a no-op and the loopback gate is the
@@ -53,7 +65,7 @@ func (s *Server) registerPprof() {
 		// token to enforce — operators must set DashboardToken to profile.
 		if s.dashboardToken == "" {
 			slog.Warn("rejecting pprof request: no dashboard token configured",
-				"path", r.URL.Path)
+				"path", osutil.SanitizeForLog(r.URL.Path, 256))
 			http.Error(w, "pprof disabled: set a dashboard token to enable profiling", http.StatusForbidden)
 			return
 		}
@@ -63,7 +75,7 @@ func (s *Server) registerPprof() {
 		// smuggle profiles out via forged X-Forwarded-For.
 		if !isLoopbackRemote(r.RemoteAddr) {
 			slog.Warn("rejecting non-loopback pprof request",
-				"remote", r.RemoteAddr, "path", r.URL.Path)
+				"remote", r.RemoteAddr, "path", osutil.SanitizeForLog(r.URL.Path, 256))
 			http.Error(w, "pprof is loopback-only; SSH to the host and curl 127.0.0.1", http.StatusForbidden)
 			return
 		}

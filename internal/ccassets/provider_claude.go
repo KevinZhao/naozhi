@@ -125,6 +125,13 @@ func (p *ClaudeProvider) scanPlugins(home string) ([]assets.Asset, []assets.Plug
 			continue
 		}
 		rec := recs[0]
+		// Security: skip plugins whose installPath is outside home — a crafted
+		// installed_plugins.json could otherwise enumerate arbitrary directory
+		// contents via ReadDir. R20260603-GO-3 (info disclosure).
+		if !isUnderHome(rec.InstallPath, home) {
+			slog.Warn("ccassets: plugin installPath outside home, skipping", "id", id, "installPath", rec.InstallPath)
+			continue
+		}
 		src := assets.Source{Kind: "plugin", Plugin: id}
 		man := readPluginManifest(rec.InstallPath)
 
