@@ -198,6 +198,12 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 	if proc == nil {
 		snap.TotalCost = sessCost
 		snap.State = "ready"
+		// #1644: a live proc reports UserTurnCount; an evicted / suspended /
+		// stub session has no proc, so fall back to the count of persisted
+		// "user" entries. Without this MessageCount stayed 0 forever and
+		// AutoTitler's minUserTurns gate skipped the session unconditionally,
+		// so a fully-conversed-but-idle-evicted session never got auto-named.
+		snap.MessageCount = s.persistedUserTurns.Load()
 	} else {
 		snap.State = proc.GetState().String()
 		snap.Protocol = proc.ProtocolName()
@@ -330,6 +336,21 @@ func (s *ManagedSession) hasInjectedHistory() bool {
 	s.historyMu.RLock()
 	defer s.historyMu.RUnlock()
 	return len(s.persistedHistory) > 0
+}
+
+// recountPersistedUserTurnsLocked recomputes persistedUserTurns from the
+// current persistedHistory slice. Caller MUST hold s.historyMu (read or
+// write — the scan only reads the slice, the result is stored atomically).
+// Invoked after every persistedHistory mutation in InjectHistory so the
+// proc==nil snapshot branch (#1644) can read the count lock-free.
+func (s *ManagedSession) recountPersistedUserTurnsLocked() {
+	var n int64
+	for i := range s.persistedHistory {
+		if s.persistedHistory[i].Type == "user" {
+			n++
+		}
+	}
+	s.persistedUserTurns.Store(n)
 }
 
 // EventEntries returns the event log entries for this session.

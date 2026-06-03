@@ -31,8 +31,11 @@ func (r *Router) countActive() {
 // Used by bulk teardown paths (countActive / cleanupSessionsByChatPrefix /
 // Cleanup prune) where per-key Inc/Dec bookkeeping in the loop would
 // require threading each session's backend through the batched-close
-// machinery. Single-session sites (Reset / Remove / evictOldest) call
+// machinery. Single-session sites (Reset / Remove) call
 // metrics.RecordSessionActive(backend, -1) directly for lower overhead.
+// evictOldest deliberately does NOT — it relies on the post-Close
+// countActive() reconcile instead, because a manual -1 layered on top of an
+// absolute reconcile drifts the gauge (#1645).
 //
 // Backends that previously had sessions but no longer do are explicitly
 // driven to zero — without ForEachKey the bucket would stay stuck at
@@ -151,13 +154,16 @@ func (r *Router) evictOldest() bool {
 	// the subsequent proc.Close() is async-capable and can fail, but the eviction
 	// decision is already committed (deathReason set, storeDirty marked below).
 	metrics.SessionEvictTotal.Add(1)
-	// Multi-Backend RFC §10 (Sprint 6a): evictOldest below relies on
-	// r.countActive() to recompute the legacy total post-Close, but the
-	// labeled gauge needs an explicit decrement keyed on the evictee's
-	// backend. Done now (under the lock, before Unlock for Close) so the
-	// metric reflects the eviction decision instead of the post-Close
-	// recount which only sees the residual sessions.
-	metrics.RecordSessionActive(oldest.Backend(), -1)
+	// #1645: do NOT explicitly decrement the labeled gauge here. The
+	// post-Close r.countActive() below calls reconcileSessionActiveByBackendLocked,
+	// which SETS each backend bucket to the absolute recounted value
+	// (Add(want-current)), not a relative delta. A manual -1 on top of an
+	// absolute reconcile is at best a no-op and at worst causes drift: when
+	// proc.Close() flips Alive() asynchronously, the recount can still observe
+	// oldest as alive, so reconcile drives the gauge back up to include it —
+	// and the earlier manual -1 made the pre-reconcile baseline diverge from
+	// the true count. Relying solely on the reconcile keeps the gauge equal to
+	// whatever the recount sees, which is the single source of truth.
 	storeAtomicString(&oldest.deathReason, "evicted")
 	// Keep oldest.process non-nil so concurrent holders don't get nil-panic.
 	// After Close(), Alive() returns false; countActive() below recounts correctly.
