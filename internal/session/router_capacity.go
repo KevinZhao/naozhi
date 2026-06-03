@@ -10,22 +10,19 @@ import (
 // countActive recounts alive processes (corrects drift from undetected exits).
 // Exempt sessions are not counted toward max_procs capacity. Caller must
 // hold r.mu.
+//
+// R20260603-010128-GO-2: reuse the alive total returned by
+// reconcileSessionActiveByBackendLocked instead of running a separate O(N)
+// counting loop. reconcile already walks r.sessions once to rebuild the
+// per-backend gauges and returns the non-exempt alive count, which is
+// identical to what the former loop computed. Dropping the redundant walk
+// keeps activeCount and the per-backend gauges updated in a single pass.
 func (r *Router) countActive() {
-	count := int64(0)
-	for _, s := range r.sessions {
-		if s.exempt {
-			continue
-		}
-		if s.isAlive() {
-			count++
-		}
-	}
+	// reconcileSessionActiveByBackendLocked walks r.sessions once, drives
+	// the per-backend labeled gauge, and returns the non-exempt alive total.
+	// Store that total directly — no second O(N) counting loop needed.
+	count := r.reconcileSessionActiveByBackendLocked()
 	r.activeCount.Store(count)
-	// Multi-Backend RFC §10 (Sprint 6a): keep the per-backend labeled
-	// gauge in sync with the freshly recounted r.sessions snapshot.
-	// Done in the same critical section as activeCount.Store so the
-	// two bookkeeping totals never diverge from each other.
-	r.reconcileSessionActiveByBackendLocked()
 }
 
 // reconcileSessionActiveByBackendLocked rebuilds the metrics.SessionActive
