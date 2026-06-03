@@ -1354,8 +1354,9 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 			slog.Error("cron DeleteJobByID deletion not persisted", "err", err, "id", osutil.SanitizeForLog(id, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "deleted")
 		default:
+			code := cronpkg.ClassifyError(err)
 			slog.Debug("cron delete failed", "err", err)
-			writeCronErr(w, http.StatusBadRequest, "delete failed")
+			writeCronErr(w, code.HTTPStatus(), "delete failed")
 		}
 		return
 	}
@@ -1401,8 +1402,9 @@ func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
 			slog.Error("cron PauseJobByID pause not persisted", "err", err, "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "paused")
 		default:
+			code := cronpkg.ClassifyError(err)
 			slog.Debug("cron pause failed", "err", err)
-			writeCronErr(w, http.StatusBadRequest, "pause failed")
+			writeCronErr(w, code.HTTPStatus(), "pause failed")
 		}
 		return
 	}
@@ -1446,8 +1448,9 @@ func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
 			slog.Error("cron ResumeJobByID resume not persisted", "err", err, "id", osutil.SanitizeForLog(req.ID, cronpkg.MaxIDLen))
 			httpErrPersistFailed(w, "resumed")
 		default:
+			code := cronpkg.ClassifyError(err)
 			slog.Debug("cron resume failed", "err", err)
-			writeCronErr(w, http.StatusBadRequest, "resume failed")
+			writeCronErr(w, code.HTTPStatus(), "resume failed")
 		}
 		return
 	}
@@ -1502,8 +1505,9 @@ func (h *Handlers) HandleTrigger(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, cronpkg.ErrJobNoPrompt):
 			writeCronErr(w, http.StatusUnprocessableEntity, "job has no prompt")
 		default:
+			code := cronpkg.ClassifyError(err)
 			slog.Debug("cron trigger failed", "err", err)
-			writeCronErr(w, http.StatusBadRequest, "trigger failed")
+			writeCronErr(w, code.HTTPStatus(), "trigger failed")
 		}
 		return
 	}
