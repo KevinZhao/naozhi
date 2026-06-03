@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -236,6 +237,70 @@ func TestDownloadURL_SchemeGuard(t *testing.T) {
 				t.Errorf("downloadURL(%q) expected error, got nil", tc.rawURL)
 			}
 		})
+	}
+}
+
+// TestDownloadURL_BlocksPrivateIP verifies that blockPrivateDial (wired into
+// discordHTTPClient.Transport) refuses any host that resolves to a reserved IP
+// range, closing the DNS-rebinding SSRF path where cdn.discordapp.com is made
+// to resolve to 169.254.169.254 (cloud IMDS) or an RFC-1918 address.
+// (R20260603-SEC-3)
+//
+// Numeric hosts resolve to themselves via net.DefaultResolver.LookupIPAddr, so
+// routing a literal reserved address through the dial func hits the guard
+// before any TCP connection is attempted — no live server required.
+func TestDownloadURL_BlocksPrivateIP(t *testing.T) {
+	// Ensure production mode (bypass disabled) for the duration of the test.
+	prev := discordDialTestBypass
+	discordDialTestBypass = false
+	t.Cleanup(func() { discordDialTestBypass = prev })
+
+	dialCtx := blockPrivateDial()
+	cases := []struct {
+		name string
+		addr string
+	}{
+		{"loopback_v4", "127.0.0.1:443"},
+		{"loopback_v6", "[::1]:443"},
+		{"link_local_IMDS", "169.254.169.254:80"},
+		{"link_local_v6", "[fe80::1]:443"},
+		{"rfc1918_10", "10.0.0.1:443"},
+		{"rfc1918_172", "172.16.0.1:443"},
+		{"rfc1918_192", "192.168.1.1:443"},
+		{"unspecified_v4", "0.0.0.0:443"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			conn, err := dialCtx(ctx, "tcp", tc.addr)
+			if conn != nil {
+				conn.Close()
+			}
+			if err == nil {
+				t.Errorf("dialCtx(%q) expected error (reserved IP), got nil", tc.addr)
+				return
+			}
+			if !strings.Contains(err.Error(), "reserved IP") {
+				t.Errorf("dialCtx(%q) error = %q; want 'reserved IP' in message", tc.addr, err.Error())
+			}
+		})
+	}
+}
+
+// TestBlockPrivateDial_TestBypass verifies that when discordDialTestBypass is
+// set, the reserved-IP guard is skipped (so httptest loopback servers work).
+func TestBlockPrivateDial_TestBypass(t *testing.T) {
+	prev := discordDialTestBypass
+	discordDialTestBypass = true
+	t.Cleanup(func() { discordDialTestBypass = prev })
+
+	// Loopback with no listener: bypass lets the dial proceed, so we expect a
+	// connection-refused style error, NOT the "reserved IP" guard error.
+	dialCtx := blockPrivateDial()
+	_, err := dialCtx(context.Background(), "tcp", "127.0.0.1:1")
+	if err != nil && strings.Contains(err.Error(), "reserved IP") {
+		t.Errorf("bypass enabled but guard still fired: %v", err)
 	}
 }
 

@@ -15,9 +15,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -1276,11 +1278,19 @@ var shimEnvAllowedPrefixes = []string{
 // behavior; reject and log instead.
 const maxShimEnvEntryBytes = 4 * 1024
 
-// filterShimEnvOversizeOnce ensures the "oversized entry rejected" warning is
-// emitted at most once per process lifetime. Additional oversized entries are
-// still rejected (the continue fires) but suppressed from the log to prevent
-// a pathological environment from flooding the log. [R112714-ARCH-3]
-var filterShimEnvOversizeOnce sync.Once
+// maxShimEnvOversizeWarnings caps how many "oversized entry rejected" warnings
+// are emitted per process lifetime. [R20260603-SEC-5] A single sync.Once
+// previously let the first benign oversized entry exhaust the log budget,
+// masking a subsequent attacker-injected oversized entry (e.g. an
+// ANTHROPIC_BASE_URL pointing at the IMDS endpoint) that would then be dropped
+// silently. A small counter lets the first few of each batch surface while
+// still bounding log volume from a pathological environment.
+const maxShimEnvOversizeWarnings = 5
+
+// filterShimEnvOversizeWarnings counts how many oversized-entry warnings have
+// been emitted. Oversized entries are always rejected (the continue fires);
+// only the *logging* is capped at maxShimEnvOversizeWarnings. [R20260603-SEC-5]
+var filterShimEnvOversizeWarnings atomic.Int64
 
 // filterShimEnv returns a copy of environ keeping only variables whose key
 // matches one of the allowed prefixes. This is defense-in-depth: the CLI
@@ -1296,16 +1306,23 @@ func filterShimEnv(environ []string) []string {
 		if len(kv) > maxShimEnvEntryBytes {
 			// Log key prefix only — never log the value in case it is a
 			// secret (e.g. a misconfigured PYTHONPATH that happens to
-			// contain credential data). sync.Once caps the log output to
-			// one warning per process lifetime so a pathological
-			// environment (dozens of multi-MB exports) does not flood the
-			// log. [R112714-ARCH-3]
-			filterShimEnvOversizeOnce.Do(func() {
-				slog.Warn("shim env: oversized entry rejected (further oversized entries silently dropped)",
+			// contain credential data). A counter caps the log output at
+			// maxShimEnvOversizeWarnings per process lifetime so a
+			// pathological environment (dozens of multi-MB exports) does
+			// not flood the log, while still surfacing the first few —
+			// previously a single sync.Once let one benign oversized entry
+			// mask later attacker-injected ones. [R112714-ARCH-3]
+			// [R20260603-SEC-5]
+			if n := filterShimEnvOversizeWarnings.Add(1); n <= maxShimEnvOversizeWarnings {
+				msg := "shim env: oversized entry rejected"
+				if n == maxShimEnvOversizeWarnings {
+					msg = "shim env: oversized entry rejected (further oversized warnings suppressed)"
+				}
+				slog.Warn(msg,
 					"key_prefix", kvKeyPrefix(kv),
 					"len", len(kv),
 					"max", maxShimEnvEntryBytes)
-			})
+			}
 			continue
 		}
 		for _, prefix := range shimEnvAllowedPrefixes {
@@ -1321,12 +1338,57 @@ func filterShimEnv(environ []string) []string {
 				if shimEndpointEnvDropped(kv) {
 					break
 				}
+				// R20260603-SEC-1: AWS_PROFILE / AWS_DEFAULT_PROFILE select a
+				// named profile from the AWS config. A profile may declare a
+				// `credential_process` that the SDK executes as a shell command.
+				// A poisoned shell rc / tampered profile that exports a profile
+				// name containing path separators or shell metacharacters could
+				// redirect that lookup to an attacker-controlled profile. Reject
+				// values that don't match ^[A-Za-z0-9_-]{1,64}$. Mirrors
+				// sysession/env.go isSafeProfileValue. Log key only, never value.
+				if shimProfileEnvDropped(kv) {
+					break
+				}
 				filtered = append(filtered, kv)
 				break
 			}
 		}
 	}
 	return filtered
+}
+
+// shimProfileEnvKeys is the set of allowlisted env keys whose value is an AWS
+// profile *name*. A malformed value can redirect the SDK's credential_process
+// lookup to an attacker-controlled profile, so the value is validated before
+// pass-through. R20260603-SEC-1.
+var shimProfileEnvKeys = map[string]bool{
+	"AWS_PROFILE":         true,
+	"AWS_DEFAULT_PROFILE": true,
+}
+
+// reShimProfileValue matches safe AWS profile names: alphanumeric plus
+// underscore and hyphen, 1-64 characters. Rejects shell metacharacters or path
+// separators. Mirrors sysession/env.go reProfileValue. R20260603-SEC-1.
+var reShimProfileValue = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// shimProfileEnvDropped reports whether kv (a "KEY=value" env entry) is an AWS
+// profile-name var that must be dropped because its value contains characters
+// outside ^[A-Za-z0-9_-]{1,64}$. Non-profile keys return false. The value is
+// never logged. R20260603-SEC-1.
+func shimProfileEnvDropped(kv string) bool {
+	i := strings.IndexByte(kv, '=')
+	if i < 0 {
+		return false
+	}
+	key, val := kv[:i], kv[i+1:]
+	if !shimProfileEnvKeys[key] {
+		return false
+	}
+	if !reShimProfileValue.MatchString(val) {
+		slog.Warn("shim env: rejecting unsafe AWS profile value (credential_process injection guard)", "key", key)
+		return true
+	}
+	return false
 }
 
 // shimEndpointEnvKeys is the set of allowlisted env keys whose value is an API
