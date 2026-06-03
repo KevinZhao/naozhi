@@ -206,6 +206,17 @@ type MessageQueue struct {
 	dropNotifyLRU   *list.List                  // element.Value = *dropNotifyEntry
 	dropNotifyIndex map[string]*dropNotifyEntry // key → entry
 
+	// dropNotifyPool recycles *dropNotifyEntry structs across the steady-state
+	// cold-key churn in ShouldNotify: once dropNotifyLRU is saturated at
+	// dropNotifyMaxKeys, every new cold key evicts one tail entry and inserts
+	// a fresh one. Returning the evicted entry to the pool and reusing it for
+	// the insert avoids a per-cold-key heap allocation (R20260603-PERF-6,
+	// #1694). Entries are reset before reuse; the back-pointer elem is always
+	// reassigned by PushFront so it needs no clearing for correctness, but we
+	// nil it on return so a pooled-but-never-reused entry doesn't pin a removed
+	// list.Element.
+	dropNotifyPool sync.Pool
+
 	// onStranded, when non-nil, is invoked by Release for every message that
 	// was parked in the ring at release time (FIFO order, outside q.mu). It
 	// closes R37-REL1 (#769): the SessionGuard Release path (Dashboard/WS)
@@ -240,6 +251,42 @@ type dropNotifyEntry struct {
 	key  string
 	ts   int64
 	elem *list.Element
+}
+
+// takePooledEntry returns a *dropNotifyEntry ready for reuse. If preferred is
+// non-nil (the entry just evicted from the LRU tail), it is reset and returned
+// directly — the most common steady-state path, recycling in place without
+// touching the pool. Otherwise it draws from dropNotifyPool, falling back to a
+// fresh allocation only when the pool is empty. Callers must hold q.mu.
+func (q *MessageQueue) takePooledEntry(preferred *dropNotifyEntry) *dropNotifyEntry {
+	if preferred != nil {
+		preferred.key = ""
+		preferred.ts = 0
+		preferred.elem = nil
+		return preferred
+	}
+	if v := q.dropNotifyPool.Get(); v != nil {
+		e := v.(*dropNotifyEntry)
+		e.key = ""
+		e.ts = 0
+		e.elem = nil
+		return e
+	}
+	return &dropNotifyEntry{}
+}
+
+// releasePooledEntry returns an entry that has already been spliced out of
+// dropNotifyLRU/dropNotifyIndex to dropNotifyPool for later reuse. It nils the
+// fields so the pooled struct does not pin the removed key string or list
+// element. Callers must hold q.mu and must not touch the entry afterwards.
+func (q *MessageQueue) releasePooledEntry(e *dropNotifyEntry) {
+	if e == nil {
+		return
+	}
+	e.key = ""
+	e.ts = 0
+	e.elem = nil
+	q.dropNotifyPool.Put(e)
 }
 
 // dropNotifyMaxKeys bounds dropNotifyTimes; oldest entry is evicted on insert
@@ -386,6 +433,7 @@ func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 		if e, ok := q.dropNotifyIndex[key]; ok {
 			q.dropNotifyLRU.Remove(e.elem)
 			delete(q.dropNotifyIndex, key)
+			q.releasePooledEntry(e)
 		}
 		return nil
 	}
@@ -425,6 +473,7 @@ func (q *MessageQueue) Discard(key string) {
 	if e, ok := q.dropNotifyIndex[key]; ok {
 		q.dropNotifyLRU.Remove(e.elem)
 		delete(q.dropNotifyIndex, key)
+		q.releasePooledEntry(e)
 	}
 }
 
@@ -442,6 +491,7 @@ func (q *MessageQueue) Cleanup(key string) {
 	if e, ok := q.dropNotifyIndex[key]; ok {
 		q.dropNotifyLRU.Remove(e.elem)
 		delete(q.dropNotifyIndex, key)
+		q.releasePooledEntry(e)
 	}
 }
 
@@ -534,16 +584,25 @@ func (q *MessageQueue) ShouldNotify(key string) bool {
 		q.dropNotifyLRU.MoveToFront(entry.elem)
 		return true
 	}
-	// Insert new entry; evict the LRU tail if at capacity.
+	// Insert new entry; evict the LRU tail if at capacity. The evicted entry
+	// is returned to dropNotifyPool so the insert below can reuse it instead
+	// of allocating a fresh struct on every cold key in steady state (#1694).
+	var reuse *dropNotifyEntry
 	if q.dropNotifyLRU.Len() >= dropNotifyMaxKeys {
 		if oldest := q.dropNotifyLRU.Back(); oldest != nil {
-			delete(q.dropNotifyIndex, oldest.Value.(*dropNotifyEntry).key)
+			evicted := oldest.Value.(*dropNotifyEntry)
+			delete(q.dropNotifyIndex, evicted.key)
 			q.dropNotifyLRU.Remove(oldest)
+			reuse = q.takePooledEntry(evicted)
 		}
 	}
-	entry := &dropNotifyEntry{key: key, ts: now}
-	entry.elem = q.dropNotifyLRU.PushFront(entry)
-	q.dropNotifyIndex[key] = entry
+	if reuse == nil {
+		reuse = q.takePooledEntry(nil)
+	}
+	reuse.key = key
+	reuse.ts = now
+	reuse.elem = q.dropNotifyLRU.PushFront(reuse)
+	q.dropNotifyIndex[key] = reuse
 	return true
 }
 
