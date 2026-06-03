@@ -63,6 +63,12 @@ func NewHTTPClient(id, rawURL, token, displayName string) *HTTPClient {
 				MaxIdleConns:        30,
 				MaxIdleConnsPerHost: 6,
 				IdleConnTimeout:     90 * time.Second,
+				// R20260603-SEC-2 (#1677): screen the *resolved* IP before
+				// opening TCP. validatePeerURL only sees the config string;
+				// a DNS hostname that resolves to 169.254.169.254 (IMDS) or
+				// another link-local address (DNS rebinding) would otherwise
+				// carry the dashboard Bearer token to the metadata service.
+				DialContext: safeDialContext,
 				// Pin a minimum TLS version so a future Go toolchain change
 				// or GODEBUG override cannot silently accept TLS 1.0/1.1.
 				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},

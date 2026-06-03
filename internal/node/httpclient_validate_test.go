@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 )
@@ -94,6 +95,71 @@ func TestNewHTTPClient_AllowsLoopback(t *testing.T) {
 	}
 	if _, err := c.FetchSessions(context.Background()); err != nil {
 		t.Fatalf("FetchSessions over loopback failed: %v", err)
+	}
+}
+
+// TestIsBlockedPeerAddr pins the shared screen used by both validatePeerURL
+// and the dial-time guard: link-local (IMDS) is blocked, loopback / RFC1918 /
+// public stay allowed.
+func TestIsBlockedPeerAddr(t *testing.T) {
+	tests := []struct {
+		addr    string
+		blocked bool
+	}{
+		{"169.254.169.254", true}, // IMDS v4
+		{"169.254.10.20", true},   // link-local v4 range
+		{"fe80::1", true},         // link-local v6
+		{"127.0.0.1", false},      // loopback v4 (allowed)
+		{"::1", false},            // loopback v6 (allowed)
+		{"10.0.0.2", false},       // RFC1918 (allowed)
+		{"192.168.1.5", false},    // RFC1918 (allowed)
+		{"8.8.8.8", false},        // public (allowed)
+	}
+	for _, tt := range tests {
+		t.Run(tt.addr, func(t *testing.T) {
+			got := isBlockedPeerAddr(netip.MustParseAddr(tt.addr))
+			if got != tt.blocked {
+				t.Errorf("isBlockedPeerAddr(%s) = %v; want %v", tt.addr, got, tt.blocked)
+			}
+		})
+	}
+}
+
+// TestSafeDialContext_BlocksRebindToIMDS is the R20260603-SEC-2 (#1677)
+// regression guard: a DNS hostname that resolves to the IMDS link-local
+// address must be refused before any TCP connection opens, even though
+// validatePeerURL passed it at config time (it's not a literal IP). We use a
+// hostname literal that net resolves locally without a network round-trip.
+func TestSafeDialContext_BlocksRebindToIMDS(t *testing.T) {
+	// SplitHostPort path with a literal link-local IP: LookupNetIP returns it
+	// verbatim, so this exercises the screen deterministically offline.
+	_, err := safeDialContext(context.Background(), "tcp", "169.254.169.254:80")
+	if err == nil {
+		t.Fatal("safeDialContext to IMDS address should be refused")
+	}
+	if !strings.Contains(err.Error(), "SSRF") && !strings.Contains(err.Error(), "link-local") {
+		t.Errorf("error %q should mention the SSRF/link-local refusal", err)
+	}
+}
+
+// TestSafeDialContext_BlocksLinkLocalV6 covers the IPv6 fe80::/10 range.
+func TestSafeDialContext_BlocksLinkLocalV6(t *testing.T) {
+	_, err := safeDialContext(context.Background(), "tcp", "[fe80::1]:80")
+	if err == nil {
+		t.Fatal("safeDialContext to link-local v6 should be refused")
+	}
+}
+
+// TestSafeDialContext_AllowsLoopback confirms the dial guard does not break
+// the supported loopback/LAN topology: a loopback dial must reach the server.
+func TestSafeDialContext_AllowsLoopback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"sessions":[]}`))
+	}))
+	defer srv.Close()
+	c := newTestHTTPClient(t, srv, "tok")
+	if _, err := c.FetchSessions(context.Background()); err != nil {
+		t.Fatalf("loopback dial through safeDialContext failed: %v", err)
 	}
 }
 
