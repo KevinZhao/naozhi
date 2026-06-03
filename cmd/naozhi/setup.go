@@ -192,7 +192,11 @@ func setupGetQRCode(ctx context.Context) (*setupQRResp, error) {
 		return nil, err
 	}
 	if qr.Ret != 0 {
-		return nil, fmt.Errorf("API error: ret=%d, body=%s", qr.Ret, string(data))
+		// Sanitize the raw vendor response body before embedding in the error
+		// message: a compromised or MITM'd iLink endpoint could inject ANSI
+		// escape sequences that hijack the operator's terminal.
+		// (R20260603-SEC-4 / R20260603-SEC-7)
+		return nil, fmt.Errorf("API error: ret=%d, body=%s", qr.Ret, osutil.SanitizeForLog(string(data), 256))
 	}
 	if qr.QRCode == "" || qr.QRCodeImgContent == "" {
 		return nil, fmt.Errorf("empty QR code in response")

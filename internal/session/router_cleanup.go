@@ -422,11 +422,13 @@ func (r *Router) Cleanup() {
 	if knownIDsCopy != nil {
 		// knownIDsSavedAt was committed under r.mu above (pre-save) to
 		// gate concurrent saveIfDirty. On success we only clear the dirty
-		// flag; on failure we leave it set so the next tick retries,
-		// accepting one extra interval of delay in exchange for no
-		// torn-write race.
+		// flag; on failure reset savedAt to zero so the throttle gate
+		// re-opens on the next tick (R20260603-CODE-4).
 		if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
 			slog.Warn("periodic known IDs save failed", "err", err)
+			r.mu.Lock()
+			r.knownIDsSavedAt = time.Time{}
+			r.mu.Unlock()
 		} else {
 			// Generation counter matches the (sessions | ws-overrides) pattern:
 			// if a concurrent trackSessionID fired between snapshot and re-lock,
@@ -633,8 +635,13 @@ func (r *Router) saveIfDirty() {
 	}
 	if knownIDsCopy != nil {
 		// savedAt committed pre-save; only toggle dirty on success.
+		// R20260603-CODE-4: reset savedAt on failure so the throttle gate
+		// re-opens on the next tick rather than blocking for a full interval.
 		if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
 			slog.Warn("periodic known IDs save failed", "err", err)
+			r.mu.Lock()
+			r.knownIDsSavedAt = time.Time{}
+			r.mu.Unlock()
 		} else {
 			// Match the storeGen/wsOverridesGen pattern: only clear dirty if
 			// no concurrent trackSessionID fired since the snapshot.

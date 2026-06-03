@@ -1,9 +1,12 @@
 package server
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
@@ -167,6 +170,41 @@ func TestPprof_LoopbackAuthenticatedNamedProfile(t *testing.T) {
 	// goroutine?debug=1 output starts with "goroutine profile:" header.
 	if !strings.Contains(body, "goroutine profile") {
 		t.Errorf("goroutine profile body unexpected shape; head=%q", truncate(body, 120))
+	}
+}
+
+// TestPprof_NoToken_WarnOnRegister pins R20260603-SEC-3 (#1633): when
+// debug_mode is enabled without a dashboard token, registerPprof must emit a
+// slog.Warn at registration time to alert operators that pprof is accessible
+// to any loopback caller without authentication. The loopback gate still
+// blocks remote addresses unconditionally; the warning surfaces the reduced
+// protection in single-user mode.
+//
+// Not t.Parallel: this test swaps slog.Default to capture log output.
+func TestPprof_NoToken_WarnOnRegister(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		buf bytes.Buffer
+	)
+	handler := slog.NewJSONHandler(&lockedWriter{mu: &mu, w: &buf}, &slog.HandlerOptions{Level: slog.LevelWarn})
+	prev := slog.Default()
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	// Build a server with no dashboard token (single-user mode) and call
+	// registerPprof directly — the warning must fire at registration, not at
+	// request time.
+	_ = newPprofTestServer(t, "" /* no token */)
+
+	mu.Lock()
+	out := buf.String()
+	mu.Unlock()
+
+	if !strings.Contains(out, `"level":"WARN"`) {
+		t.Fatalf("R20260603-SEC-3: registerPprof with empty token must emit slog.Warn; captured log:\n%s", out)
+	}
+	if !strings.Contains(out, "pprof enabled without dashboard token") {
+		t.Fatalf("R20260603-SEC-3: warn message must contain 'pprof enabled without dashboard token'; got:\n%s", out)
 	}
 }
 

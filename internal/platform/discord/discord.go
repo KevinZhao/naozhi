@@ -89,6 +89,20 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 		return fmt.Errorf("create discord session: %w", err)
 	}
 
+	// Inject a no-redirect HTTP client for all REST calls made by the session
+	// (ChannelMessageSend, MessageReactionAdd, ChannelMessageEdit, etc.).
+	// discordgo.New sets sess.Client to &http.Client{Timeout:20s} with the
+	// default transport, which follows 3xx redirects while preserving the
+	// Authorization header — enabling SSRF / token-leakage via a hostile
+	// redirect.  Setting CheckRedirect to http.ErrUseLastResponse stops the
+	// redirect chain at the first hop.  (R20260603-SEC-2)
+	sess.Client = &http.Client{
+		Timeout: 20 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
 	sess.Identify.Intents = discordgo.IntentsGuildMessages |
 		discordgo.IntentsDirectMessages |
 		discordgo.IntentMessageContent

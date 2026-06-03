@@ -3,6 +3,7 @@ package ccassets
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/assets"
@@ -204,5 +205,73 @@ func TestReadRaw_MemoryTraversalBlocked(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("crafted Project segment not rejected")
+	}
+}
+
+// TestReadRaw_PluginInstallPathOutsideHomeBlocked verifies that a plugin with an
+// InstallPath outside home (e.g. "/") is refused by rootForRef.
+// R20260603-GO-2 (path traversal via crafted installed_plugins.json).
+func TestReadRaw_PluginInstallPathOutsideHomeBlocked(t *testing.T) {
+	home := t.TempDir()
+	// Write a malicious installed_plugins.json with installPath pointing outside home.
+	writeFile(t, filepath.Join(home, "plugins", "installed_plugins.json"),
+		`{"version":2,"plugins":{"evil@evil":[{"scope":"user","installPath":"/","version":"1.0.0"}]}}`)
+
+	_, err := NewClaudeProvider().ReadRaw(assets.RawRequest{
+		Home: home,
+		Ref: assets.Ref{
+			Kind:    "skill",
+			Source:  assets.Source{Kind: "plugin", Plugin: "evil@evil"},
+			RelPath: "etc/passwd",
+		},
+	})
+	if err == nil {
+		t.Fatal("plugin InstallPath outside home must be blocked")
+	}
+}
+
+// TestScan_PluginInstallPathOutsideHomeSkipped verifies that a plugin with
+// InstallPath outside home is silently skipped during Scan (no info disclosure
+// via ReadDir of arbitrary directories). R20260603-GO-3.
+func TestScan_PluginInstallPathOutsideHomeSkipped(t *testing.T) {
+	home := t.TempDir()
+	// Write a malicious installed_plugins.json with installPath = "/" (outside home).
+	writeFile(t, filepath.Join(home, "plugins", "installed_plugins.json"),
+		`{"version":2,"plugins":{"evil@evil":[{"scope":"user","installPath":"/","version":"1.0.0"}]}}`)
+
+	inv, err := NewClaudeProvider().Scan(assets.ScanRequest{Home: home})
+	if err != nil {
+		t.Fatalf("Scan must not error on malicious installPath, got: %v", err)
+	}
+	// No plugin assets or plugin infos must appear for the evil plugin.
+	if len(inv.Plugins) != 0 {
+		t.Errorf("expected 0 plugin infos, got %d: %v", len(inv.Plugins), inv.Plugins)
+	}
+	if len(inv.Assets) != 0 {
+		t.Errorf("expected 0 assets, got %d: %v", len(inv.Assets), inv.Assets)
+	}
+}
+
+// TestEncodeProjectDir_EquivalentToClaudeProjectSlug verifies that
+// encodeProjectDir produces the same result as discovery.ClaudeProjectSlug
+// for representative paths. R20260603-CODE-2.
+func TestEncodeProjectDir_EquivalentToClaudeProjectSlug(t *testing.T) {
+	cases := []string{
+		"/home/user/workspace/naozhi",
+		"/home/u/work/myproj",
+		"/root/proj",
+		"/a/b/c/d",
+	}
+	for _, c := range cases {
+		got := encodeProjectDir(c)
+		// Construct expected value directly: "/" → "-" substitution on the full path.
+		want := "-" + strings.ReplaceAll(strings.TrimPrefix(filepath.Clean(c), "/"), "/", "-")
+		if got != want {
+			t.Errorf("encodeProjectDir(%q) = %q, want %q", c, got, want)
+		}
+	}
+	// Empty string must return empty string in both implementations.
+	if got := encodeProjectDir(""); got != "" {
+		t.Errorf("encodeProjectDir(\"\") = %q, want \"\"", got)
 	}
 }

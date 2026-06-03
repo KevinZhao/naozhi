@@ -449,6 +449,74 @@ func TestFetchFile_RejectsBadSchemeShapes(t *testing.T) {
 	}
 }
 
+// TestBlockPrivateDialContext_RejectsReservedIPs verifies R20260603-SEC-1:
+// blockPrivateDialContext returns a DialContext function that refuses
+// connections to loopback, link-local, private (RFC-1918), and unspecified
+// addresses after DNS resolution, closing the DNS rebinding / SSRF path
+// targeting 169.254.169.254 (IMDS) and similar reserved ranges.
+//
+// The test forces testHTTPTransport=nil so blockPrivateDialContext operates in
+// production mode (returns a real guard, not nil).  Each reserved IP is tested
+// by routing the dial to a literal address — net.DefaultResolver.LookupIPAddr
+// on a numeric host returns that IP directly, which hits the guard before any
+// TCP connection is attempted.
+func TestBlockPrivateDialContext_RejectsReservedIPs(t *testing.T) {
+	// Ensure production mode (guard enabled) by clearing the test transport.
+	prev := testHTTPTransport
+	testHTTPTransport = nil
+	t.Cleanup(func() { testHTTPTransport = prev })
+
+	dialCtx := blockPrivateDialContext()
+	if dialCtx == nil {
+		t.Fatal("blockPrivateDialContext() returned nil in production mode (testHTTPTransport=nil)")
+	}
+
+	cases := []struct {
+		name string
+		addr string // host:port passed to dialCtx
+	}{
+		{"loopback_v4", "127.0.0.1:443"},
+		{"loopback_v6", "[::1]:443"},
+		{"link_local_IMDS", "169.254.169.254:80"},
+		{"link_local_v6", "[fe80::1]:443"},
+		{"rfc1918_10", "10.0.0.1:443"},
+		{"rfc1918_172", "172.16.0.1:443"},
+		{"rfc1918_192", "192.168.1.1:443"},
+		{"unspecified_v4", "0.0.0.0:443"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			conn, err := dialCtx(ctx, "tcp", tc.addr)
+			if conn != nil {
+				conn.Close()
+			}
+			if err == nil {
+				t.Errorf("dialCtx(%q) expected error (reserved IP), got nil", tc.addr)
+				return
+			}
+			if !strings.Contains(err.Error(), "reserved IP") {
+				t.Errorf("dialCtx(%q) error = %q; want 'reserved IP' in message", tc.addr, err.Error())
+			}
+		})
+	}
+}
+
+// TestBlockPrivateDialContext_NilInTestMode verifies that blockPrivateDialContext
+// returns nil when testHTTPTransport is non-nil (test mode), so httptest
+// servers running on loopback are not blocked.
+func TestBlockPrivateDialContext_NilInTestMode(t *testing.T) {
+	prev := testHTTPTransport
+	testHTTPTransport = http.DefaultTransport // any non-nil value signals test mode
+	t.Cleanup(func() { testHTTPTransport = prev })
+
+	if got := blockPrivateDialContext(); got != nil {
+		t.Error("blockPrivateDialContext() should return nil in test mode (testHTTPTransport != nil)")
+	}
+}
+
 // TestFetchFile_ErrorMessageDistinguishesGuards pins R247-SEC-5 (#497):
 // the prefix and parsed-scheme gates emit DIFFERENT error substrings
 // ("non-https URL" vs "non-https URL after parse") so an operator
