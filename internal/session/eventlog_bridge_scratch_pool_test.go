@@ -13,12 +13,17 @@ import (
 
 // TestEventLogBridge_PooledScratch_MultiBatchPreservesOrderAndContent pins
 // R20260602-PERF-2 (#1629): the multi-entry sink path now borrows its out /
-// spans / times slices from batchScratchPool and resets them to [:0] on the
-// next call. A reuse bug (stale length, leftover entries, or aliasing across
+// spans slices from batchScratchPool and resets them to [:0] on the next
+// call. A reuse bug (stale length, leftover entries, or aliasing across
 // calls) would corrupt the persisted batch. Drive several multi-entry
 // batches of differing widths through ONE sink (so the scratch is recycled)
 // and verify every entry persists exactly once, in order, with its own
-// summary intact.
+// summary AND timestamp intact.
+//
+// R200109-PERF-3 (#1619): the per-entry TimeMS now travels inside the span
+// struct (the standalone `times` helper slice was removed), so the timestamp
+// assertion below also guards that the time-in-span fold preserves the
+// entry⇄time pairing across scratch reuse.
 func TestEventLogBridge_PooledScratch_MultiBatchPreservesOrderAndContent(t *testing.T) {
 	r, dir := newEventLogRouter(t, false)
 	key := "scratch-pool-key"
@@ -28,6 +33,7 @@ func TestEventLogBridge_PooledScratch_MultiBatchPreservesOrderAndContent(t *test
 	// then 5 — recycling the same scratch each time across changing widths.
 	widths := []int{3, 2, 5, 4}
 	var wantSummaries []string
+	var wantTimes []int64
 	ts := int64(1)
 	for _, w := range widths {
 		batch := make([]cli.EventEntry, 0, w)
@@ -40,6 +46,7 @@ func TestEventLogBridge_PooledScratch_MultiBatchPreservesOrderAndContent(t *test
 				Summary: sum,
 			})
 			wantSummaries = append(wantSummaries, sum)
+			wantTimes = append(wantTimes, ts)
 			ts++
 		}
 		sink(batch, false)
@@ -63,6 +70,9 @@ func TestEventLogBridge_PooledScratch_MultiBatchPreservesOrderAndContent(t *test
 	for i, e := range got {
 		if e.Summary != wantSummaries[i] {
 			t.Errorf("entry[%d] summary = %q, want %q (scratch reuse corrupted order/content)", i, e.Summary, wantSummaries[i])
+		}
+		if e.Time != wantTimes[i] {
+			t.Errorf("entry[%d] Time = %d, want %d (timeMS-in-span fold mispaired time with entry)", i, e.Time, wantTimes[i])
 		}
 	}
 }
