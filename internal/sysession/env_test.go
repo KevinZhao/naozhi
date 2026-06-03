@@ -148,6 +148,7 @@ func TestFilterEnv_PassesBackendSelectors(t *testing.T) {
 		"AWS_REGION",
 		"AWS_DEFAULT_REGION",
 		"AWS_PROFILE",
+		"AWS_DEFAULT_PROFILE",
 		"ANTHROPIC_VERTEX_PROJECT_ID",
 		"CLOUD_ML_REGION",
 		"ANTHROPIC_MODEL",
@@ -319,6 +320,22 @@ func TestFilterEnv_AWSProfileValidation(t *testing.T) {
 		env := filterEnv(nil)
 		if envHasKey(env, "AWS_PROFILE") {
 			t.Error("empty AWS_PROFILE must be stripped")
+		}
+	})
+
+	t.Run("AWS_DEFAULT_PROFILE unsafe stripped", func(t *testing.T) {
+		t.Setenv("AWS_DEFAULT_PROFILE", "../../malicious; rm -rf /")
+		env := filterEnv(nil)
+		if envHasKey(env, "AWS_DEFAULT_PROFILE") {
+			t.Error("unsafe AWS_DEFAULT_PROFILE must be stripped")
+		}
+	})
+
+	t.Run("AWS_DEFAULT_PROFILE safe passes", func(t *testing.T) {
+		t.Setenv("AWS_DEFAULT_PROFILE", "my-bedrock-profile")
+		env := filterEnv(nil)
+		if !envContains(env, "AWS_DEFAULT_PROFILE", "my-bedrock-profile") {
+			t.Error("safe AWS_DEFAULT_PROFILE must pass through")
 		}
 	})
 }
