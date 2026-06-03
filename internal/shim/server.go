@@ -1087,11 +1087,9 @@ func (s *shimServer) runCommandLoop(
 			}
 
 		case <-cliExited:
-			if !cliWasAlive {
-				// CLI was already dead at connection time; cli_exited sent during replay.
-				// Closed channel fires immediately — ignore to avoid double delivery.
-				return
-			}
+			// Reachable only when cliWasAlive==true: when CLI was already dead at
+			// attach time cliExited is set to nil (see above), and a nil channel is
+			// never selected, preventing double delivery of cli_exited.
 			// Send cli_exited to the connected client.
 			code := s.cli.exitCode
 			resp := ServerMsg{Type: "cli_exited", Code: intPtr(code)}
