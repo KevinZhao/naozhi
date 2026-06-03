@@ -64,6 +64,14 @@ func TestValidateShimEndpointURL(t *testing.T) {
 		{"http://169.254.169.254", true},
 		{"http://attacker.test", true},
 		{"ftp://host", true},
+		// R20260603150052-SEC-7 (#1713): https:// to internal/IMDS IPs must be
+		// rejected even though the scheme is https.
+		{"https://169.254.169.254/latest/meta-data", true}, // EC2 IMDS
+		{"https://10.0.0.5", true},                         // RFC1918 private
+		{"https://192.168.1.1", true},                      // RFC1918 private
+		{"https://[fd00::1]", true},                        // ULA private
+		{"https://127.0.0.1:8443", false},                  // loopback https mock — keep
+		{"https://gw.corp.example.com", false},             // hostname https — keep
 	}
 	for _, tc := range cases {
 		err := validateShimEndpointURL(tc.v)
