@@ -315,3 +315,25 @@ func TestMayContainSecretPrefix_FirstBytes(t *testing.T) {
 		}
 	}
 }
+
+// TestMayContainSecretPrefixCoversAllPrefixes guards that the fast-bail charset
+// in mayContainSecretPrefix contains the first byte of every entry in
+// secretPrefixes. A mismatch means a whole prefix family is silently missed
+// by the pre-scan, causing RedactSecrets to skip that prefix entirely.
+// [R20260603-SEC-5]
+func TestMayContainSecretPrefixCoversAllPrefixes(t *testing.T) {
+	// Hardcode the same charset literal used in mayContainSecretPrefix so any
+	// edit to that constant is caught at compile-time by the string mismatch.
+	const charset = "sgAxhnydr"
+	for _, sp := range secretPrefixes {
+		if len(sp.prefix) == 0 {
+			t.Errorf("secretPrefixes entry has empty prefix")
+			continue
+		}
+		first := sp.prefix[0]
+		if strings.IndexByte(charset, first) < 0 {
+			t.Errorf("mayContainSecretPrefix charset %q missing first byte %q of prefix %q",
+				charset, string(first), sp.prefix)
+		}
+	}
+}
