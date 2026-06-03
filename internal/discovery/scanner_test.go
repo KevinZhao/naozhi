@@ -840,6 +840,72 @@ func TestRefreshDynamic_LastActiveAndState(t *testing.T) {
 	}
 }
 
+// R20260603-PERF-2: RefreshDynamic reuses the mtime captured during prompt
+// extraction. When the JSONL is missing, LastActive must fall back to
+// StartedAt (matching the old jsonlMtime behaviour).
+func TestRefreshDynamic_MissingJSONLFallsBackToStartedAt(t *testing.T) {
+	t.Parallel()
+	sc := NewScanner()
+	claudeDir := makeClaudeDir(t)
+	sessions := []DiscoveredSession{
+		{
+			SessionID:  "eeeeffff-0000-0000-0000-0000000000ab",
+			CWD:        "/tmp/refresh-dynamic-missing",
+			StartedAt:  424242,
+			LastActive: 0,
+			State:      "ready",
+		},
+	}
+	changed := sc.RefreshDynamic(claudeDir, sessions)
+	if !changed {
+		t.Error("expected changed=true (LastActive moved from 0 to StartedAt)")
+	}
+	if sessions[0].LastActive != 424242 {
+		t.Errorf("LastActive = %d, want StartedAt 424242", sessions[0].LastActive)
+	}
+	if sessions[0].LastPrompt != "" {
+		t.Errorf("LastPrompt = %q, want empty for missing JSONL", sessions[0].LastPrompt)
+	}
+}
+
+// R20260603-PERF-2: extractLastPromptWithMtime returns the JSONL mtime so the
+// caller can avoid a second os.Stat. Verify the mtime matches a direct Stat
+// and that missing files report ok=false.
+func TestExtractLastPromptWithMtime(t *testing.T) {
+	t.Parallel()
+	sc := NewScanner()
+	claudeDir := makeClaudeDir(t)
+	cwd := "/tmp/extract-mtime"
+	sessionID := "eeeeffff-0000-0000-0000-0000000000cd"
+	projDir := filepath.Join(claudeDir, "projects", projDirName(cwd))
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
+	makeJSONLWithUserPrompts(t, jsonlPath, []string{"hello mtime"})
+
+	fi, err := os.Stat(jsonlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMtime := fi.ModTime().UnixMilli()
+
+	prompt, mtime, ok := sc.extractLastPromptWithMtime(claudeDir, cwd, sessionID)
+	if !ok {
+		t.Fatal("expected ok=true for existing JSONL")
+	}
+	if prompt != "hello mtime" {
+		t.Errorf("prompt = %q, want hello mtime", prompt)
+	}
+	if mtime != wantMtime {
+		t.Errorf("mtime = %d, want %d", mtime, wantMtime)
+	}
+
+	if _, _, ok := sc.extractLastPromptWithMtime(claudeDir, "/tmp/nope", "00000000-0000-0000-0000-000000000000"); ok {
+		t.Error("expected ok=false for missing JSONL")
+	}
+}
+
 func TestRefreshDynamic_SummaryUpdated(t *testing.T) {
 	t.Parallel()
 	sc := NewScanner()
