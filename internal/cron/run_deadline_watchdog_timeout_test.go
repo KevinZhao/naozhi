@@ -158,13 +158,15 @@ func TestRunDeadlineWatchdog_ParkedGaugeTracksLiveLeak(t *testing.T) {
 
 	// Inner goroutine is still parked on the blocking interrupter: the
 	// live gauge must reach at least baseline+1 (this run's park).
+	pollTicker := time.NewTicker(2 * time.Millisecond)
+	defer pollTicker.Stop()
 	upDeadline := time.After(2 * time.Second)
 	for watchdogParkedInterruptGoroutines.Value() < base+1 {
 		select {
 		case <-upDeadline:
 			t.Fatalf("parked gauge never reached baseline+1 while wedged; got baseline%+d",
 				watchdogParkedInterruptGoroutines.Value()-base)
-		case <-time.After(2 * time.Millisecond):
+		case <-pollTicker.C:
 		}
 	}
 
@@ -180,7 +182,7 @@ func TestRunDeadlineWatchdog_ParkedGaugeTracksLiveLeak(t *testing.T) {
 		case <-downDeadline:
 			t.Fatalf("parked gauge did not drop back to baseline after release; got baseline%+d",
 				watchdogParkedInterruptGoroutines.Value()-base)
-		case <-time.After(2 * time.Millisecond):
+		case <-pollTicker.C:
 		}
 	}
 
