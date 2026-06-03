@@ -370,6 +370,17 @@ type Persister struct {
 	// Tracking the last-used length lets us clear just the slots we
 	// actually touched. Run-goroutine only — no synchronisation needed.
 	lastFlushCount int
+	// flushAllKeys / flushAllWs are the parallel (key, writer) scratch
+	// slices flushAllLocked hands to parallelFsync, reused across calls
+	// to eliminate the two make() allocations per opFlushAll. Run-goroutine
+	// only — flushAllLocked is called exclusively via the opFlushAll case in
+	// handleOp, which is driven by the same run goroutine as tickFlush.
+	// Kept separate from tickFlushKeys/tickFlushWs: while both run on the
+	// same goroutine, flushAllLocked may be triggered independently of the
+	// tick path (e.g. explicit Flush calls), so conservative independent
+	// fields avoid any cross-path aliasing. R20260603-PERF-2.
+	flushAllKeys []string
+	flushAllWs   []*perKeyWriter
 }
 
 // batchJob is the internal queue element. Key is the original
@@ -1153,8 +1164,8 @@ func (p *Persister) flushAllLocked() error {
 	if len(p.writers) == 0 {
 		return nil
 	}
-	dirtyKeys := make([]string, 0, len(p.writers))
-	dirtyWs := make([]*perKeyWriter, 0, len(p.writers))
+	dirtyKeys := p.flushAllKeys[:0]
+	dirtyWs := p.flushAllWs[:0]
 	for k, w := range p.writers {
 		if !w.dirty {
 			continue
@@ -1162,6 +1173,8 @@ func (p *Persister) flushAllLocked() error {
 		dirtyKeys = append(dirtyKeys, k)
 		dirtyWs = append(dirtyWs, w)
 	}
+	p.flushAllKeys = dirtyKeys
+	p.flushAllWs = dirtyWs
 	if len(dirtyWs) == 0 {
 		return nil
 	}
@@ -1183,6 +1196,10 @@ func (p *Persister) flushAllLocked() error {
 			errMu.Unlock()
 		}
 	})
+	// Drop writer-pointer references so dropped/idle-closed writers can be
+	// GC'd rather than pinned by the scratch slice until the next Flush.
+	// Keys are plain strings; no GC concern, left as-is. Mirrors tickFlush.
+	clear(dirtyWs)
 	return firstErr
 }
 
