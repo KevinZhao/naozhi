@@ -1159,9 +1159,18 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	// edits fail fast with a clear error instead of silently persisting a
 	// path that execute() will later refuse at runtime. AddJob's creation
 	// path applies the same check; UpdateJob previously skipped it.
-	if upd.WorkDir != nil && *upd.WorkDir != "" && s.allowedRoot != "" {
-		if !workDirUnderRoot(*upd.WorkDir, s.allowedRoot, s.allowedRootResolved) {
-			return nil, fmt.Errorf("work_dir outside allowed root")
+	if upd.WorkDir != nil {
+		v := *upd.WorkDir
+		if len(v) > MaxWorkDirLen {
+			return nil, fmt.Errorf("cron: work_dir too long: %d bytes > %d cap", len(v), MaxWorkDirLen)
+		}
+		if !utf8.ValidString(v) || containsCronUnsafe(v) {
+			return nil, fmt.Errorf("cron: work_dir contains invalid bytes")
+		}
+		if v != "" && s.allowedRoot != "" {
+			if !workDirUnderRoot(v, s.allowedRoot, s.allowedRootResolved) {
+				return nil, fmt.Errorf("work_dir outside allowed root")
+			}
 		}
 	}
 	if upd.Title != nil {
