@@ -172,17 +172,22 @@ func (f *fakeSessionRouter) NotifyIdle() {
 func TestDispatcher_AcceptsFakeSessionRouter(t *testing.T) {
 	t.Parallel()
 
+	var notified int
 	fake := &fakeSessionRouter{
-		getSession: func(string) *session.ManagedSession { return nil },
+		notifyIdle: func() { notified++ },
 	}
 	// Compile-time: fake satisfies SessionRouter.
 	var _ SessionRouter = fake
 
 	d := &Dispatcher{router: fake}
 
-	// Runtime: routing calls reach the fake.
-	if got := d.router.GetSession("any:key:foo:general"); got != nil {
-		t.Errorf("expected nil session from fake, got %v", got)
+	// Runtime: a routing call reaches the fake through the interface seam.
+	// (GetSession was dropped from SessionRouter in #1587 once its only
+	// production caller moved to the DiscardPassthroughPending seam, so we
+	// exercise a method that remains on the interface.)
+	d.router.NotifyIdle()
+	if notified != 1 {
+		t.Errorf("expected NotifyIdle to reach fake once, got %d", notified)
 	}
 }
 
