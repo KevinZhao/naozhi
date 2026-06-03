@@ -2029,7 +2029,11 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	// total order or the cap cutoff (i < keepCount) and the list cutoff
 	// (StartedAt < before) disagree about which equal-mtime record to
 	// drop. R235-GO-7 / R236-QA-01.
-	toRemove := make([]string, 0, len(items))
+	//
+	// R20260603-PERF-12: size the slice for the common case (a healthy job
+	// removes only a handful of expired runs) rather than len(items) (up to
+	// keepCount=200). append's growth strategy handles the rare bulk-trim.
+	toRemove := make([]string, 0, 4)
 	for i, it := range items {
 		// Both conditions must hold to keep.
 		keep := i < s.keepCount && it.mtime.After(cutoff)
