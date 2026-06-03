@@ -1349,6 +1349,18 @@ func filterShimEnv(environ []string) []string {
 				if shimProfileEnvDropped(kv) {
 					break
 				}
+				// R20260603-SEC-2: AWS_SHARED_CREDENTIALS_FILE / AWS_CONFIG_FILE /
+				// AWS_WEB_IDENTITY_TOKEN_FILE name files the AWS SDK opens inside
+				// the CLI subprocess. A poisoned shell rc / systemctl
+				// set-environment that points one of these at /proc/self/environ,
+				// /etc/shadow, or a relative-traversal path would make the SDK
+				// read arbitrary host files and ship their contents to STS as a
+				// credential / OIDC token (or leak the path content in SDK error
+				// logs). Require an absolute, traversal-free, null-free path.
+				// Log key only, never value.
+				if shimCredPathEnvDropped(kv) {
+					break
+				}
 				filtered = append(filtered, kv)
 				break
 			}
@@ -1389,6 +1401,62 @@ func shimProfileEnvDropped(kv string) bool {
 		return true
 	}
 	return false
+}
+
+// shimCredPathEnvKeys is the set of allowlisted env keys whose value is a
+// filesystem path the AWS SDK opens inside the CLI subprocess. A malicious
+// value (e.g. /proc/self/environ, /etc/shadow, or a relative ../ traversal)
+// makes the SDK read an arbitrary host file and treat it as a credential /
+// OIDC token, so the value is validated before pass-through. R20260603-SEC-2.
+var shimCredPathEnvKeys = map[string]bool{
+	"AWS_SHARED_CREDENTIALS_FILE": true,
+	"AWS_CONFIG_FILE":             true,
+	"AWS_WEB_IDENTITY_TOKEN_FILE": true,
+}
+
+// shimCredPathEnvDropped reports whether kv (a "KEY=value" env entry) is an AWS
+// credential-file path var that must be dropped because its value is not a
+// safe path: it must be absolute, contain no ".." traversal segment, and carry
+// no embedded null byte. Non-path keys and safe values return false. The value
+// is never logged. R20260603-SEC-2.
+func shimCredPathEnvDropped(kv string) bool {
+	i := strings.IndexByte(kv, '=')
+	if i < 0 {
+		return false
+	}
+	key, val := kv[:i], kv[i+1:]
+	if !shimCredPathEnvKeys[key] {
+		return false
+	}
+	if !isSafeShimCredPath(val) {
+		slog.Warn("shim env: rejecting unsafe AWS credential file path (path traversal guard)", "key", key)
+		return true
+	}
+	return false
+}
+
+// isSafeShimCredPath reports whether v is a safe absolute credential file path:
+// non-empty, no embedded null byte, absolute, and with no "." or ".." path
+// segment after cleaning (so values like /a/../../etc/shadow are rejected even
+// though they begin with a slash). R20260603-SEC-2.
+func isSafeShimCredPath(v string) bool {
+	if v == "" {
+		return false
+	}
+	if strings.IndexByte(v, 0) >= 0 {
+		return false
+	}
+	if !filepath.IsAbs(v) {
+		return false
+	}
+	// Reject any path containing a ".." segment outright (even if it would
+	// clean away) so a tampered value can never escape its intended root.
+	for _, seg := range strings.Split(filepath.ToSlash(v), "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // shimEndpointEnvKeys is the set of allowlisted env keys whose value is an API
