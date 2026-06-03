@@ -1153,7 +1153,13 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.router.Remove(req.Key) {
+	// RemoveAsync (not Remove): the session leaves the router synchronously
+	// under r.mu — so a 200 here truthfully means "the session is gone from
+	// the list and accepts no more messages" — while the slow teardown
+	// (proc.Close up to 8s + socket wait + event-log/attachment cleanup)
+	// runs in a detached goroutine. The dashboard does an optimistic delete
+	// and no longer blocks on the worst-case ~15s teardown.
+	if !h.router.RemoveAsync(req.Key) {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
