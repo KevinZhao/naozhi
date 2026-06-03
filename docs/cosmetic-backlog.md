@@ -502,3 +502,5 @@
 - [R100110-RACE-1] watchdogInterruptTimeoutAtomic package-level var t.Parallel 测试交叉覆写(测试基建,非生产) — internal/cron/scheduler_run.go:779
 - [R100110-CTX-1] NotifyCtx(nil,...) 三处传 nil parent(by-design,parent 故意忽略) — internal/dispatch/dispatch.go:1016
 - [R100110-LOOP-1] recountPersistedUserTurnsLocked 增量调用仍 O(n) 全扫(微优化) — internal/session/managed_query.go:346
+- [R20260603-ARCH-3] wireup package doc "no exported symbols" 已过时(现导出 Registry/BootStep/WireSchedulers) — internal/wireup/history_backends.go:13
+- [R20260603-SEC-2] dashboard CSP script-src 'unsafe-inline' 已是 accepted/tracked NEEDS-DESIGN(R242-SEC-1/R249-SEC-9) — internal/server/routes.go:522

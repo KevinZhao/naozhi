@@ -20,6 +20,7 @@ import (
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // cron-dashboard-redesign P2a §4.4.3 — transcript endpoint.
@@ -803,9 +804,9 @@ func sanitizeWireText(s string) string {
 		}
 	}
 	if !dirty {
-		return s
+		return textutil.RedactSecrets(s)
 	}
-	return strings.Map(func(r rune) rune {
+	cleaned := strings.Map(func(r rune) rune {
 		// Drop C0 control runes (incl. 0x1B ESC) except \t / \n / \r.
 		if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
 			return -1
@@ -815,6 +816,7 @@ func sanitizeWireText(s string) string {
 		}
 		return r
 	}, s)
+	return textutil.RedactSecrets(cleaned)
 }
 
 // flattenJSONLEvent decodes one JSONL line into 0..N transcript turns.
@@ -1137,13 +1139,13 @@ func summariseToolInput(name string, input json.RawMessage) string {
 	}
 	for _, s := range candidates {
 		if s != "" {
-			return osutil.SanitizeForLog(s, 200)
+			return textutil.RedactSecrets(osutil.SanitizeForLog(s, 200))
 		}
 	}
 	// Fallback: reuse the original input bytes (json.Unmarshal does not
 	// mutate its source). The probe struct only validated structure, no
 	// need to Marshal again. R244-GO-P2-2.
-	return osutil.SanitizeForLog(string(input), 200)
+	return textutil.RedactSecrets(osutil.SanitizeForLog(string(input), 200))
 }
 
 // isJSONNull reports whether b is the JSON `null` literal (with optional
