@@ -506,3 +506,16 @@
 - [R20260603-SEC-2] dashboard CSP script-src 'unsafe-inline' 已是 accepted/tracked NEEDS-DESIGN(R242-SEC-1/R249-SEC-9) — internal/server/routes.go:522
 - [R20260603-SEC-4] reverseserver Capabilities slice 无元素数上限 (4KB+auth gate 已限) — internal/node/reverseserver.go:413
 - [R20260603-ARCH-5] hub_broadcaster switch 无 default arm 记录未知 subsystem (future-proof) — internal/server/hub_broadcaster.go:27
+- [R20260603150052-GO-9] slogPrintfLogger.Printf 把 robfig/cron 库 format 串过 fmt.Sprintf(format 为库内硬编码非用户 spec) — internal/cron/scheduler.go:2009
+- [R20260603150052-GO-1] cron runstore.go 生产代码 import testing(已 rolled-into-closed #1516) — internal/cron/runstore.go:20
+- [R20260603150052-CR-2] trimJobLocked "Locked" 后缀误导:内部释放重取锁,建议签名行显式注释 — internal/cron/runstore.go:1966
+- [R20260603150052-CR-3] skipAppendTrim 两分支都重置 appendsSinceTrim,unsafe 路径 batch 语义失效(文档措辞) — internal/cron/runstore.go:925
+- [R20260603150052-CR-4] KnownSessionIDs 返回共享只读 map 无类型级防写,建议加 Contains 包装或回归测试 — internal/cron/scheduler_session.go:218
+- [R20260603150052-GO-5] filterShimEnvOversizeWarnings 进程级计数永不重置,污染测试隔离(建议 per-Manager) — internal/shim/manager.go:1293
+- [R20260603150052-GO-6] runDeadlineWatchdog 持久会话 inner goroutine by-design 泄漏,建议补文档 — internal/cron/scheduler_run.go:922
+- [R20260603150052-GO-7] waitGCDrain 预算超时 wrapper goroutine by-design 孤儿(单次实例契约) — internal/cron/scheduler.go:1709
+- [R20260603150052-PERF-9] ListSessionsWithVersion 每次分配 SessionSnapshot 切片(已文档化可接受),可加 TurnAgentsAppend — internal/session/router_core.go:1672
+- [R20260603150052-PERF-13] Cleanup pass-2 对每候选 PidAlive 系统调用(5min 后台 tick 低频) — internal/session/router_cleanup.go:380
+- [R20260603150052-ARCH-1] cli.EventEntry 系统级 wire/domain 类型锚定 92 文件到 cli 包(tracked R230B-ARCH-17,需 RFC) — internal/node/protocol.go:13
+- [R20260603150052-ARCH-3] internal/wshub 包 godoc "无外部调用方" 已过时,server/consumer.go 已 alias 消费 — internal/wshub/types.go:5
+- [R20260603150052-ARCH-10] ManagedState 报 StateExempt 先于 liveness,掩盖 dead-but-exempt(已文档化 tradeoff) — internal/session/managed_state.go:81
