@@ -1,6 +1,44 @@
 package session
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
+
+// TestCountExemptCombined pins R20260603-PERF-1 (#1673): the single-pass
+// combined counter must return exactly what the former back-to-back
+// countExemptByKind + countExempt sweep produced, including the kind=="" case
+// where perKind is 0 but the global total still counts every exempt session.
+func TestCountExemptCombined(t *testing.T) {
+	t.Parallel()
+	r := newTestRouter(3)
+
+	for i := 0; i < 5; i++ {
+		r.RegisterCronStub("cron:job-"+strconv.Itoa(i), "/w", "p")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// kind set: perKind must equal the standalone per-kind sweep; total must
+	// equal the standalone global sweep.
+	perKind, total := r.countExemptCombined("cron")
+	if want := r.countExemptByKind("cron"); perKind != want {
+		t.Errorf("countExemptCombined(cron) perKind = %d, want %d", perKind, want)
+	}
+	if want := r.countExempt(); total != want {
+		t.Errorf("countExemptCombined(cron) total = %d, want %d", total, want)
+	}
+
+	// kind=="" : perKind is always 0, total still counts all exempt sessions.
+	perKind0, total0 := r.countExemptCombined("")
+	if perKind0 != 0 {
+		t.Errorf("countExemptCombined(\"\") perKind = %d, want 0", perKind0)
+	}
+	if want := r.countExempt(); total0 != want {
+		t.Errorf("countExemptCombined(\"\") total = %d, want %d", total0, want)
+	}
+}
 
 // TestExemptKindClassification pins R242-ARCH-2: each exempt prefix
 // resolves to its own namespace string and non-exempt keys return "".

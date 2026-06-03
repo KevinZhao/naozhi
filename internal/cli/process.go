@@ -276,6 +276,15 @@ type Process struct {
 	lastSeq  atomic.Int64  // last received shim seq, for reconnect
 	pongRecv chan struct{} // signaled by readLoop on pong receipt
 
+	// readEventBuf is a reusable backing array handed to ReadEventInto so the
+	// single-event Claude hot path (the dominant frame) no longer allocates a
+	// fresh 1-element []Event per stdout frame — R20260603-PERF-10 (#1676).
+	// Exclusively owned by handleShimStdout, which runs only on the single
+	// readLoop goroutine, so no synchronisation is needed. Cap 2 covers ACP's
+	// max two-event turn-end split without re-growing. The returned slice is
+	// consumed (iterated) within the same frame before the next reuse.
+	readEventBuf [2]Event
+
 	// onTurnDone is called by readLoop when a result event transitions the
 	// process from Running to Ready without an active Send(). This allows
 	// the session layer to broadcast state changes (e.g., after shim reconnect

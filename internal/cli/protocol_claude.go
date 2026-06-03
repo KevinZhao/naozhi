@@ -360,6 +360,22 @@ func (p *ClaudeProtocol) WriteInterrupt(w io.Writer, requestID string) error {
 // accepted (~200 B-4 KiB per event, dwarfed by the json.Unmarshal value
 // graph it feeds).
 func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
+	return p.ReadEventInto(line, nil)
+}
+
+// ReadEventInto is the allocation-aware variant of ReadEvent. When buf has
+// spare capacity the (single) parsed Event is appended into it, letting the
+// readLoop hand in a reused stack-allocated array instead of forcing a fresh
+// 1-element backing slice on every frame — R20260603-PERF-10 (#1676). Claude
+// stream-json always yields at most one Event per line, so a buf of cap ≥1 is
+// never re-grown on the hot path. Passing buf=nil reproduces the original
+// allocating behaviour for callers that don't care.
+//
+// The returned slice always uses buf[:0] as its base, so the caller's array is
+// the backing store; callers must not retain the slice beyond the next
+// ReadEventInto call sharing the same buf (the readLoop iterates and drops it
+// within the same frame).
+func (p *ClaudeProtocol) ReadEventInto(line string, buf []Event) ([]Event, bool, error) {
 	// R20260527122801-PERF-3 (#1334): substring fast-path skip for the
 	// dominant 99%-share frame types — hook_started / hook_response /
 	// control_response — before paying for the full Event reflect-unmarshal
@@ -451,7 +467,7 @@ func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	// are freshly allocated by this frame's Unmarshal and travel with the
 	// copy — resetEvent only clears the pooled struct's view of them, not
 	// the graph the returned copy points at.
-	return []Event{*ev}, ev.Type == "result", nil
+	return append(buf[:0], *ev), ev.Type == "result", nil
 }
 
 // askUserQuestionInput matches the `input` field of an AskUserQuestion tool_use

@@ -140,6 +140,19 @@ type Protocol interface {
 	HandleEvent(w io.Writer, ev Event) (handled bool)
 }
 
+// eventReaderInto is the optional, allocation-aware ReadEvent variant
+// (R20260603-PERF-10, #1676). A Protocol that implements it lets the readLoop
+// hand in a reused backing array via buf so the common single-event frame does
+// not allocate a fresh 1-element []Event per stdout line. It is an additive
+// extension surfaced via type assertion rather than a new method on Protocol,
+// so the interface contract, all existing implementations, and the test stubs
+// stay unchanged; callers fall back to ReadEvent when the assertion misses.
+// The returned slice is backed by buf and is only valid until the next call
+// sharing that buf, so callers must consume it before reusing buf.
+type eventReaderInto interface {
+	ReadEventInto(line string, buf []Event) (events []Event, done bool, err error)
+}
+
 // ProtocolCore is the protocol-agnostic subset of Protocol that every
 // backend (Claude stream-json, ACP JSON-RPC, a future Gemini protocol)
 // can implement without degrading to a noop or panic. It is an ADDITIVE
