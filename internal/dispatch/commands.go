@@ -812,6 +812,13 @@ func ParseCronAdd(args string) (schedule, prompt string, err error) {
 	if err := cron.ValidateScheduleChars(schedule); err != nil {
 		return "", "", err
 	}
+	// R20260603-GEN-4: ValidateScheduleChars only screens the character set, so
+	// an all-whitespace schedule (e.g. /cron add " " run now) passes it and then
+	// surfaces a confusing generic robfig parse error. Reject it here with a
+	// clear message before prompt parsing.
+	if strings.TrimSpace(schedule) == "" {
+		return "", "", fmt.Errorf("定时表达式不能为空")
+	}
 	prompt = strings.TrimSpace(tail)
 	// R20260527122801-ARCH-3 (#1315): delegate the prompt empty/size/UTF-8/
 	// C0/DEL/C1/bidi/LS/PS scan to cron.ValidatePromptStrict — the same helper
