@@ -69,8 +69,12 @@ func (r *Router) workspaceResolverForTracker() tracker.WorkspaceResolver {
 		// Fast path: O(1) index lookup, re-verified against r.sessions so a
 		// stale entry (delete site that bypassed indexDel) degrades to the
 		// scan below rather than returning a workspace for a dead session.
+		// We do NOT recompute persist.KeyHash(key) here: the index is built as
+		// keyhashToKey[persist.KeyHash(key)] = key, so the hash is tautologically
+		// equal to keyhash for any present entry — the s != nil check is what
+		// actually catches a dangling (since-removed) key.
 		if key, ok := r.keyhashToKey[keyhash]; ok {
-			if s := r.sessions[key]; s != nil && persist.KeyHash(key) == keyhash {
+			if s := r.sessions[key]; s != nil {
 				return s.Workspace()
 			}
 		}
