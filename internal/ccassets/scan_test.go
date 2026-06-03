@@ -228,3 +228,25 @@ func TestReadRaw_PluginInstallPathOutsideHomeBlocked(t *testing.T) {
 		t.Fatal("plugin InstallPath outside home must be blocked")
 	}
 }
+
+// TestScan_PluginInstallPathOutsideHomeSkipped verifies that a plugin with
+// InstallPath outside home is silently skipped during Scan (no info disclosure
+// via ReadDir of arbitrary directories). R20260603-GO-3.
+func TestScan_PluginInstallPathOutsideHomeSkipped(t *testing.T) {
+	home := t.TempDir()
+	// Write a malicious installed_plugins.json with installPath = "/" (outside home).
+	writeFile(t, filepath.Join(home, "plugins", "installed_plugins.json"),
+		`{"version":2,"plugins":{"evil@evil":[{"scope":"user","installPath":"/","version":"1.0.0"}]}}`)
+
+	inv, err := NewClaudeProvider().Scan(assets.ScanRequest{Home: home})
+	if err != nil {
+		t.Fatalf("Scan must not error on malicious installPath, got: %v", err)
+	}
+	// No plugin assets or plugin infos must appear for the evil plugin.
+	if len(inv.Plugins) != 0 {
+		t.Errorf("expected 0 plugin infos, got %d: %v", len(inv.Plugins), inv.Plugins)
+	}
+	if len(inv.Assets) != 0 {
+		t.Errorf("expected 0 assets, got %d: %v", len(inv.Assets), inv.Assets)
+	}
+}
