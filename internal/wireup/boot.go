@@ -27,6 +27,7 @@ package wireup
 import (
 	"fmt"
 	"sort"
+	"sync"
 )
 
 // BootStep describes one boot-time wireup step that ran in this process.
@@ -46,7 +47,33 @@ type BootStep struct {
 // boot-time wireup helper records its step here so operators have a single
 // "what got wired" surface (bootRegistry.Names()) and a double-wireup of
 // the same step panics loudly at boot rather than silently shadowing.
-var bootRegistry = NewRegistry[BootStep]("boot-step")
+//
+// The Registry[T] value is internally concurrency-safe, but the package-level
+// pointer itself is swapped by tests (TestValidate_DetectsMissingStep /
+// TestValidate_KindDoesNotSatisfyName via setBootRegistry). bootRegistryMu
+// guards that pointer so concurrent (e.g. -parallel) readers never race the
+// swap; all access goes through getBootRegistry / setBootRegistry (#1611).
+var (
+	bootRegistryMu sync.RWMutex
+	bootRegistry   = NewRegistry[BootStep]("boot-step")
+)
+
+// getBootRegistry returns the current boot registry under a read lock so a
+// concurrent setBootRegistry swap cannot race the pointer load.
+func getBootRegistry() *Registry[BootStep] {
+	bootRegistryMu.RLock()
+	defer bootRegistryMu.RUnlock()
+	return bootRegistry
+}
+
+// setBootRegistry swaps the boot registry pointer under a write lock. It is
+// the single mutation point (used by tests to inject a fixture registry and
+// restore the original) so the swap is synchronized with all readers.
+func setBootRegistry(r *Registry[BootStep]) {
+	bootRegistryMu.Lock()
+	defer bootRegistryMu.Unlock()
+	bootRegistry = r
+}
 
 // init records the history-backends step. The blank imports in
 // history_backends.go are compiled into this package unconditionally, so
@@ -66,16 +93,17 @@ func init() {
 // the underlying Registry panics on a true duplicate, which would mean two
 // independent helpers claimed the same step name — a wiring bug.
 func recordBootStep(name string, step BootStep) {
-	if _, already := bootRegistry.Get(name); already {
+	reg := getBootRegistry()
+	if _, already := reg.Get(name); already {
 		return
 	}
-	bootRegistry.Register(name, step)
+	reg.Register(name, step)
 }
 
 // BootSteps returns the names of every boot step recorded so far, sorted
 // for deterministic audit output. Exposes the Registry[T] audit surface to
 // callers (cmd/naozhi can log it at startup).
-func BootSteps() []string { return bootRegistry.Names() }
+func BootSteps() []string { return getBootRegistry().Names() }
 
 // requiredBootSteps are the wireup steps that MUST have run before naozhi
 // serves traffic. Validate checks these so a dropped registration fails at
@@ -88,9 +116,10 @@ var requiredBootSteps = []string{"cli-backends", "history-backends"}
 // after the wireup steps so a missing import or a no-op'd helper aborts
 // startup with a clear message instead of degrading silently.
 func Validate() error {
+	reg := getBootRegistry()
 	var missing []string
 	for _, req := range requiredBootSteps {
-		if _, ok := bootRegistry.Get(req); !ok {
+		if _, ok := reg.Get(req); !ok {
 			missing = append(missing, req)
 		}
 	}
