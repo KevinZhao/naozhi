@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -353,6 +354,40 @@ func TestAPIClient_SendMessage(t *testing.T) {
 	}
 	if len(received.Msg.ItemList) != 1 || received.Msg.ItemList[0].TextItem.Text != "hello" {
 		t.Errorf("unexpected item_list: %+v", received.Msg.ItemList)
+	}
+}
+
+// TestAPIClient_SendMessage_SanitizesErrMsg ensures the untrusted relay-supplied
+// errmsg is stripped of control characters before being embedded in the error
+// returned to callers/logs. R100110-LEAK-12.
+func TestAPIClient_SendMessage_SanitizesErrMsg(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// errmsg carries injected control chars (CR, LF, NUL); marshal so the
+		// raw bytes reach sendMessage's error path unsanitized.
+		body, _ := json.Marshal(map[string]any{
+			"ret":     1,
+			"errcode": 42,
+			"errmsg":  "bad\r\ninjected\x00tail",
+		})
+		w.Write(body)
+	}))
+	defer srv.Close()
+
+	api := newAPIClient(srv.URL, "test-token")
+	err := api.sendMessage(context.Background(), "user1", "hello", "ctx-tok")
+	if err == nil {
+		t.Fatal("expected error for ret != 0, got nil")
+	}
+	msg := err.Error()
+	for _, c := range msg {
+		if c < 0x20 || c == 0x7f {
+			t.Fatalf("error message contains unsanitized control char %#x: %q", c, msg)
+		}
+	}
+	if !strings.Contains(msg, "ret=1") || !strings.Contains(msg, "errcode=42") {
+		t.Errorf("error message missing ret/errcode context: %q", msg)
 	}
 }
 

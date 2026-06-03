@@ -16,6 +16,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 const (
@@ -316,7 +318,7 @@ func (c *apiClient) sendMessage(ctx context.Context, to, text, contextToken stri
 		return fmt.Errorf("unmarshal sendMessage response: %w", err)
 	}
 	if resp.Ret != 0 {
-		return fmt.Errorf("sendMessage failed: ret=%d errcode=%d errmsg=%q", resp.Ret, resp.ErrCode, resp.ErrMsg)
+		return fmt.Errorf("sendMessage failed: ret=%d errcode=%d errmsg=%q", resp.Ret, resp.ErrCode, osutil.SanitizeForLog(resp.ErrMsg, 256))
 	}
 	slog.Debug("weixin sendMessage ok")
 	return nil
