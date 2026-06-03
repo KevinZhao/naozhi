@@ -369,7 +369,7 @@ func buildLoginPageCSP() string {
 	if len(styleHashes) > 0 {
 		styleSrc = strings.Join(styleHashes, " ")
 	}
-	return "default-src 'none'; script-src " + scriptSrc + "; style-src " + styleSrc + "; connect-src 'self'"
+	return "default-src 'none'; script-src " + scriptSrc + "; style-src " + styleSrc + "; connect-src 'self'; frame-ancestors 'none'"
 }
 
 // Separate regexes per tag: a single `</(?:script|style)>` alternation would
