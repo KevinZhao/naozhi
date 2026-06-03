@@ -463,3 +463,6 @@
 - [R20260602-ARCH-3] SysessionDaemonConfig god-struct 混两 daemon 私有 knobs(需 RFC,与 ARCH-2 同根) — internal/config/config.go:412
 - [R20260602-ARCH-4] buildSysessionManager 3x 重复 duration-parse-or-warn(可抽 helper,微重构) — cmd/naozhi/main_helpers.go:295
 - [R20260602-ARCH-5] CronNotifyTarget 校验逻辑应附到类型(折入 ARCH-1 类,类内聚角度) — internal/config/config.go:357
+- [R20260603-010128-GO-1] marshalRunPooled 在 enc.Encode 写错误路径仍把 poisoned encoder 还池(bytes.Buffer.Write 实际永不出错,假设性) — internal/cron/runstore.go:418
+- [R20260603-010128-ARCH-c1] cronRouterAdapter.GetOrCreate 错误路径返回 magic 0 status — cmd/naozhi/cron_router_adapter.go:104
+- [R20260603-010128-ARCH-c2] dispatch.localizeAPIError 近死代码薄包装 — internal/dispatch/apierr.go:10
