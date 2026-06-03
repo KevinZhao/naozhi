@@ -24,14 +24,34 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// Remove removes a session from the router and kills its process.
-// Used by the dashboard to hide sessions from the list.
-func (r *Router) Remove(key string) bool {
+// removeSnapshot captures everything finishRemoveCleanup needs from a
+// session AFTER unregisterSessionLocked has dropped it from r.sessions.
+// Every field is a value/pointer snapshot taken under r.mu so the
+// post-unlock teardown (which may run in a detached goroutine via
+// RemoveAsync) never reads router state again — see M3 in the
+// async-remove review: finishRemoveCleanup MUST NOT touch r.sessions,
+// r.activeCount, r.storeDirty or r.storeGen (all finalised in the
+// locked section below).
+type removeSnapshot struct {
+	proc             processIface
+	workspace        string
+	retiredSessionID string
+}
+
+// unregisterAndSnapshot runs the fast, locked half of a session removal:
+// look the session up, unregister it from r.sessions (and all secondary
+// indexes), finalise the active-count and dirty/version bookkeeping, then
+// hand back a value snapshot for the slow teardown. Returns ok=false when
+// the key is absent — a concurrent Remove/RemoveAsync for the same key
+// loses the lookup race here and never proceeds to finishRemoveCleanup
+// (review M1: the lookup+delete is atomic under r.mu so the two callers
+// cannot both capture a non-nil proc).
+func (r *Router) unregisterAndSnapshot(key string) (removeSnapshot, bool) {
 	r.mu.Lock()
 	s, ok := r.sessions[key]
 	if !ok {
 		r.mu.Unlock()
-		return false
+		return removeSnapshot{}, false
 	}
 
 	// Kill process if alive
@@ -60,13 +80,48 @@ func (r *Router) Remove(key string) bool {
 	r.storeGen.Add(1)
 	r.mu.Unlock()
 
+	return removeSnapshot{
+		proc:             proc,
+		workspace:        workspaceSnapshot,
+		retiredSessionID: retiredSessionID,
+	}, true
+}
+
+// finishRemoveCleanup runs the slow, unlocked half of a session removal:
+// close the process, wait for its shim socket to disappear, drop the
+// event log + attachment refs, then fire the lifecycle notifications.
+// Must be called WITHOUT r.mu held. Reads only `snap` — never router
+// state — so it is safe to run in a detached goroutine concurrently with
+// any number of other router operations (the session is already gone
+// from every map by the time this runs).
+//
+// Worst case ~15s: proc.Close (8s) + waitSocketGoneForKey (2s) +
+// dropEventLogForKey (2s) + clearAttachmentTrackerRefs (5s). When invoked
+// async via RemoveAsync the HTTP handler has long since returned, so this
+// latency no longer blocks the dashboard.
+func (r *Router) finishRemoveCleanup(key string, snap removeSnapshot) {
+	proc := snap.proc
 	if proc != nil && proc.Alive() {
-		// Remove is a pure delete, not a re-spawn, so we intentionally do
-		// not call waitSocketGoneForKey. If a caller ever chains Remove
-		// → GetOrCreate for the same key (e.g., a "restart session" UI
-		// button), add the wait there — see Reset/ResetAndRecreate for
-		// the UCCLEP-2026-04-26 pattern.
 		proc.Close()
+		// Async-remove review H2: the dashboard "close session" gesture is
+		// frequently followed by an immediate same-key re-create. With the
+		// teardown now potentially running in a detached goroutine, proc.Close
+		// no longer completes before HandleDelete returns, so the shim socket
+		// can still be bound when the next GetOrCreate dials it — hitting the
+		// "refusing to clobber" dial-first guard. Mirror finishResetUnlocked:
+		// wait up to 2s for the socket to vanish and, on timeout, flag the key
+		// so the next GetOrCreate wraps its spawn error with ErrShimStuck for
+		// an actionable diagnosis instead of the generic session error.
+		if !waitSocketGoneForKey(key, 2*time.Second) {
+			r.mu.Lock()
+			if r.shimStuckOnReset == nil {
+				r.shimStuckOnReset = make(map[string]bool)
+			}
+			r.shimStuckOnReset[key] = true
+			r.mu.Unlock()
+			slog.Warn("shim socket still bound after Remove wait — flagging key for ErrShimStuck wrap on next GetOrCreate",
+				"key", key)
+		}
 	}
 	// Drop the on-disk event log so a future session reusing the same
 	// key starts with an empty history. Best-effort: a DropKey failure
@@ -79,8 +134,14 @@ func (r *Router) Remove(key string) bool {
 	// elapses. Best-effort — a failure leaves stale keyhash entries
 	// behind which do not affect correctness (GC still collects on
 	// uploadTTL expiry).
-	r.clearAttachmentTrackerRefs(key, workspaceSnapshot)
+	r.clearAttachmentTrackerRefs(key, snap.workspace)
 	// R191-CONC-H1-c: Broadcast under r.mu (see evictOldest comment).
+	// Async-remove review H1: this Broadcast is NOT load-bearing for
+	// Shutdown — the session left r.sessions in unregisterAndSnapshot, so
+	// Shutdown's running-detection loop can never see this proc and never
+	// waits on it. Kept under r.mu solely to match the shape of every
+	// other Broadcast site (a bare Broadcast would confuse the race
+	// detector and future readers).
 	if r.shutdownCond != nil {
 		r.mu.Lock()
 		r.shutdownCond.Broadcast()
@@ -88,8 +149,60 @@ func (r *Router) Remove(key string) bool {
 	}
 
 	logSessionLifecycle("removed", key)
-	r.notifyKeyRetired(key, retiredSessionID)
+	r.notifyKeyRetired(key, snap.retiredSessionID)
 	r.notifyChange()
+}
+
+// Remove removes a session from the router and kills its process,
+// blocking until the full teardown completes. Used by Shutdown, Cleanup,
+// and tests that assert post-teardown state synchronously (e.g. the
+// attachment-tracker integration test). Dashboard deletes use RemoveAsync
+// instead so the HTTP handler is not held for the worst-case ~15s
+// teardown.
+func (r *Router) Remove(key string) bool {
+	snap, ok := r.unregisterAndSnapshot(key)
+	if !ok {
+		return false
+	}
+	r.finishRemoveCleanup(key, snap)
+	return true
+}
+
+// RemoveAsync removes a session from the router immediately (synchronous,
+// locked unregister) and runs the slow teardown — proc.Close, socket
+// wait, event-log drop, attachment clear, notifications — in a detached
+// goroutine. Returns true the instant the session is gone from r.sessions
+// so the dashboard DELETE handler can reply 200 without waiting on the
+// worst-case ~15s teardown.
+//
+// The teardown goroutine is intentionally NOT tracked by Shutdown (per
+// the single-shot + bounded-leak contract on Shutdown's godoc). Each
+// goroutine self-terminates in ≤15s — it is bounded, not a permanent
+// leak — so a long-running process accumulates at most a handful of them
+// during a burst of deletes. removeWg exists ONLY so tests can wait for
+// the teardown to finish before asserting; it is never consulted by
+// production teardown paths.
+func (r *Router) RemoveAsync(key string) bool {
+	snap, ok := r.unregisterAndSnapshot(key)
+	if !ok {
+		return false
+	}
+	r.removeWg.Add(1)
+	go func() {
+		defer r.removeWg.Done()
+		// HandleDelete has already returned 200, so a panic in the
+		// teardown chain (Close → Kill → shimSendLocked on a wedged
+		// socket) has no caller to recover it. Swallow + count it, like
+		// the Shutdown detach goroutine (R44).
+		defer func() {
+			if rec := recover(); rec != nil {
+				metrics.PanicRecoveredTotal.Add(1)
+				slog.Error("async session remove: teardown panicked",
+					"key", key, "panic", rec, "stack", string(debug.Stack()))
+			}
+		}()
+		r.finishRemoveCleanup(key, snap)
+	}()
 	return true
 }
 

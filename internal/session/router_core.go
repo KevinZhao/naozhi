@@ -422,6 +422,15 @@ type Router struct {
 	// (#1324 — R20260527122801-CR-12)
 	shimStuckOnReset map[string]bool
 
+	// removeWg tracks in-flight RemoveAsync teardown goroutines. It exists
+	// ONLY for test observability (tests call removeWg.Wait() directly) —
+	// production teardown never waits on it, and in particular Shutdown
+	// deliberately does NOT join it (the detached teardown follows the
+	// single-shot + bounded-leak contract documented on Shutdown). Each
+	// tracked goroutine self-terminates in ≤15s.
+	// 读写: cleanup (RemoveAsync Add/Done), test helpers (Wait)
+	removeWg sync.WaitGroup
+
 	// 读写: core (init), cleanup (saveIfDirty)
 	storePath string
 	// 读写: lifecycle (spawn/Reset/Rename mutations), shim (reconnect post-attach), discovery (label/register/takeover), cleanup (saveIfDirty consume)

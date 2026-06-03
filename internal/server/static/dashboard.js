@@ -25,6 +25,12 @@ let oldestFetchedEventTime = 0;
 let lastCompositionEnd = 0;
 let sessionsData = {};
 let allSessionsCache = [];
+// Keys (sid(key,node)) optimistically removed by dismissSession before the
+// DELETE round-trips. fetchSessions/renderSidebar skip these so an in-flight
+// poll or sessions_update WS event that still lists the session cannot
+// resurrect a card the operator already dismissed. Cleared when DELETE
+// confirms (success/404) or fails — see dismissSession's normal-session branch.
+let _optimisticDeleteKeys = new Set();
 // Collapsed project sections: Set of "node:name" keys. Persisted in
 // localStorage so a user's fold state survives reloads. Toggled via the
 // chevron button in the project section-header; the renderer skips emitting
@@ -303,6 +309,17 @@ async function fetchSessions() {
 
     // Track which keys the backend knows about
     const backendKeys = new Set();
+    // Drop sessions the operator just dismissed but whose DELETE hasn't been
+    // confirmed yet. A lagging poll / sessions_update event would otherwise
+    // re-add the card (and re-populate sessionsData) after we optimistically
+    // removed it. The key is cleared from _optimisticDeleteKeys once DELETE
+    // resolves, so a genuinely-still-present session (failed delete) reappears
+    // on the next fetch.
+    if (_optimisticDeleteKeys.size > 0) {
+      data = Object.assign({}, data, {
+        sessions: (data.sessions || []).filter(s => !_optimisticDeleteKeys.has(sid(s.key, s.node || 'local'))),
+      });
+    }
     (data.sessions || []).forEach(s => {
       const n = s.node || 'local';
       const sKey = sid(s.key, n);
@@ -2057,31 +2074,52 @@ async function dismissSession(key, node, opts) {
     return;
   }
 
-  const headers = {'Content-Type': 'application/json'};
-  const token = getToken();
-  if (token) headers['Authorization'] = 'Bearer ' + token;
-  const body = {key: key};
-  if (node && node !== 'local') body.node = node;
-  try {
-    await fetchJSON('/api/sessions', {timeoutMs: 10000, method: 'DELETE', headers, body: JSON.stringify(body)});
-  } catch (err) {
-    // 404 means session already gone — treat as success so the local cache
-    // catches up with the server without surfacing an error to the operator.
-    if (!err || err.status !== 404) {
-      if (err && err.status) showAPIError('删除会话', err.status, err.message || '');
-      else showNetworkError('删除会话', err);
-      return;
-    }
-  }
-  delete sessionsData[sid(key, node)];
+  // Optimistic delete: the card vanishes immediately rather than freezing
+  // for the server's teardown round-trip. The backend's DELETE /api/sessions
+  // now unregisters the session synchronously and runs the slow teardown
+  // (proc.Close up to 8s + event-log/attachment cleanup) in a detached
+  // goroutine (RemoveAsync), so 200 means "gone from the list" and arrives
+  // fast — but we don't even wait for it to update the UI.
+  const skey = sid(key, node);
+  // Mark dismissed so an in-flight poll / sessions_update event can't
+  // resurrect the card before DELETE confirms (cleared in finally below).
+  _optimisticDeleteKeys.add(skey);
+  delete sessionsData[skey];
   if (selectedKey === key) {
     selectedKey = null;
     if (wsm.subscribedKey === key) wsm.unsubscribe();
     document.getElementById('main').innerHTML = mainEmptyHtml();
     wireQuickAskInput();
   }
-  lastVersion = 0;
-  debouncedFetchSessions();
+  const card = document.querySelector('.session-card[data-key="' + key + '"]');
+  if (card) card.remove();
+
+  const headers = {'Content-Type': 'application/json'};
+  const token = getToken();
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const body = {key: key};
+  if (node && node !== 'local') body.node = node;
+  // Fire-and-forget: do NOT await — the UI is already updated. On failure we
+  // re-sync from the server so a genuinely-undeleted session reappears.
+  fetchJSON('/api/sessions', {timeoutMs: 10000, method: 'DELETE', headers, body: JSON.stringify(body)})
+    .catch(err => {
+      // 404 means the session was already gone — that's the outcome we want,
+      // so swallow it. Any other error means the delete may not have landed:
+      // surface it and let the re-sync below pull the real list back.
+      if (err && err.status !== 404) {
+        if (err.status) showAPIError('删除会话', err.status, err.message || '');
+        else showNetworkError('删除会话', err);
+      }
+    })
+    .finally(() => {
+      // Stop suppressing this key so the next fetch reflects server truth:
+      // if the delete stuck, the session stays gone; if it failed, the card
+      // comes back (operator must re-select it — we intentionally don't
+      // restore the cleared main panel to avoid masking a failed delete).
+      _optimisticDeleteKeys.delete(skey);
+      lastVersion = 0;
+      debouncedFetchSessions();
+    });
 }
 
 // Operator-facing rename flow. Prompts for a new display label; empty input
