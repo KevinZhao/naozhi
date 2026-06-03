@@ -124,11 +124,9 @@ func (h *Hub) broadcastToAuthenticated(data []byte) {
 	// R200109-PERF-4 (#1621): the authClients mirror has its own authMu so
 	// this fan-out (N sessions × multiple events/s) no longer serialises
 	// behind the Hub-wide h.mu that register / unregister / markAuthenticated
-	// hold. We snapshot under the cheap authMu.RLock and release before the
-	// per-client SendRaw loop. The legacy fallback still walks h.clients —
-	// that map is h.mu-owned, so hand-rolled hubs (nil authClients) keep the
-	// original h.mu.RLock path. authClients-nil is decided once at NewHub and
-	// never flips, so reading it here without a lock is safe.
+	// hold. Snapshot under the cheap authMu.RLock, release before the per-
+	// client SendRaw loop. The legacy fallback still walks h.clients (h.mu-
+	// owned). authClients-nil is fixed at NewHub, so the nil check is lock-free.
 	if h.authClients != nil {
 		h.authMu.RLock()
 		for c := range h.authClients {
@@ -214,7 +212,7 @@ func (h *Hub) BroadcastSessionsUpdate() {
 	if h.debounceClosed {
 		return
 	}
-	if h.debounceTimer != nil {
+	if h.debounceArmed {
 		if now.Sub(h.debounceFirst) >= maxDebounceDelay {
 			// Hard cap reached — let the pending timer fire without resetting.
 			return
@@ -225,8 +223,8 @@ func (h *Hub) BroadcastSessionsUpdate() {
 		// producing a negative clientWG count. Stop() returns false if the
 		// callback already ran or is scheduled to run; in that case we treat
 		// the in-flight callback as the one that will do the broadcast and
-		// skip rescheduling. The callback clears debounceTimer under
-		// debounceMu, so subsequent calls will start a fresh timer.
+		// skip rescheduling. The callback clears debounceArmed under
+		// debounceMu, so the next call re-arms via the idle branch below.
 		if h.debounceTimer.Stop() {
 			h.debounceTimer.Reset(debounceInterval)
 		}
@@ -238,27 +236,31 @@ func (h *Hub) BroadcastSessionsUpdate() {
 	// callback still runs even after Stop() if it had already fired and
 	// was scheduled, so the tracking guards against a post-Shutdown race.
 	h.clientWG.Add(1)
-	// R239-PERF-6: reuse the pre-bound closure stored on the Hub instead
-	// of allocating a fresh `func()` literal per call. AfterFunc itself
-	// still allocates a *time.Timer (unavoidable without an internal pool),
-	// but the captured-variable + funcval pair is now amortised across
-	// every refresh on the same Hub. Hand-rolled hubs from old tests that
-	// skip NewHub fall back to building the callback inline. The fallback
-	// keeps the R249-GO-7 closed-check so Shutdown-races stay safe.
-	fire := h.debounceFire
-	if fire == nil {
-		fire = func() {
-			defer h.clientWG.Done()
-			h.debounceMu.Lock()
-			h.debounceTimer = nil
-			closed := h.debounceClosed
-			h.debounceMu.Unlock()
-			if closed {
-				return
-			}
-			h.doBroadcastSessionsUpdate()
-		}
+	// R200109-PERF-14 (#1624): production hubs pre-allocate debounceTimer
+	// once in NewHub (bound to h.debounceFire), so the idle→armed transition
+	// re-uses it via Reset(debounceInterval) — no per-call *time.Timer
+	// allocation. R239-PERF-6 already amortised the closure; this removes the
+	// remaining runtime-timer-struct alloc on the high-frequency refresh path.
+	// Hand-rolled hubs from old tests skip NewHub and leave debounceTimer nil;
+	// they fall back to the original per-call time.AfterFunc with an inline
+	// closure that keeps the R249-GO-7 closed-check so Shutdown-races stay safe.
+	if h.debounceTimer != nil {
+		h.debounceArmed = true
+		h.debounceTimer.Reset(debounceInterval)
+		return
 	}
+	fire := func() {
+		defer h.clientWG.Done()
+		h.debounceMu.Lock()
+		h.debounceArmed = false
+		closed := h.debounceClosed
+		h.debounceMu.Unlock()
+		if closed {
+			return
+		}
+		h.doBroadcastSessionsUpdate()
+	}
+	h.debounceArmed = true
 	h.debounceTimer = time.AfterFunc(debounceInterval, fire)
 }
 

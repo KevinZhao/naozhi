@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"log/slog"
+	"math"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -395,8 +396,24 @@ type Hub struct {
 	auth     *auth.Handlers
 	upgrader websocket.Upgrader
 
-	debounceMu    sync.Mutex
+	debounceMu sync.Mutex
+	// debounceTimer is allocated ONCE in NewHub (via time.AfterFunc bound to
+	// debounceFire, then immediately Stopped so it starts idle). Each arming
+	// re-uses it with Reset(debounceInterval) rather than allocating a fresh
+	// *time.Timer per call — R200109-PERF-14 (#1624). The previous design
+	// recreated the timer with time.AfterFunc on every idle→armed transition,
+	// allocating a runtime timer struct on the high-frequency sidebar-refresh
+	// path. The armed/idle state is now tracked by debounceArmed (below)
+	// instead of timer==nil, since the timer object is now Hub-lifetime.
+	// Hand-rolled hubs that skip NewHub leave debounceTimer nil and fall back
+	// to the per-call time.AfterFunc path in BroadcastSessionsUpdate.
 	debounceTimer *time.Timer
+	// debounceArmed is the idle/armed sentinel that replaced the old
+	// timer==nil check (R200109-PERF-14 #1624): true while a debounce window
+	// is pending (a Reset has scheduled the fire callback and clientWG holds
+	// the matching Add(1)), false once the callback has run or before the
+	// first arm. Written only under debounceMu.
+	debounceArmed bool
 	debounceFirst time.Time // first trigger in the current debounce window
 	// debounceClosed is set under debounceMu during Shutdown so any post-close
 	// BroadcastSessionsUpdate caller does not register a new AfterFunc + Add
@@ -643,7 +660,7 @@ func NewHub(opts HubOptions) *Hub {
 	h.debounceFire = func() {
 		defer h.clientWG.Done()
 		h.debounceMu.Lock()
-		h.debounceTimer = nil
+		h.debounceArmed = false
 		closed := h.debounceClosed
 		h.debounceMu.Unlock()
 		if closed {
@@ -651,6 +668,17 @@ func NewHub(opts HubOptions) *Hub {
 		}
 		h.doBroadcastSessionsUpdate()
 	}
+	// R200109-PERF-14 (#1624): pre-allocate the debounce timer ONCE here,
+	// bound to the pre-bound fire callback, then Stop it so it starts idle.
+	// BroadcastSessionsUpdate arms it with Reset(debounceInterval) on each
+	// idle→armed transition instead of calling time.AfterFunc per call, which
+	// allocated a fresh runtime *time.Timer every time the window reopened.
+	// Stop() may return false if the just-created timer were already pending,
+	// but AfterFunc(MaxInt64) cannot fire within this window, so draining its
+	// channel is unnecessary (AfterFunc timers have no observable C). The
+	// timer stays idle until the first Reset.
+	h.debounceTimer = time.AfterFunc(time.Duration(math.MaxInt64), h.debounceFire)
+	h.debounceTimer.Stop()
 	// R219-CR-11 / R229-CR-4: a nil queue makes every WS send fall through to
 	// sessionSendLegacy (the deprecated guard path). Test harnesses and
 	// headless tools deliberately wire a nil Queue, but a production Hub
@@ -1018,11 +1046,20 @@ func (h *Hub) Shutdown() {
 	// (callers can also observe it lock-free via the atomic-only fast path).
 	h.debounceClosed = true
 	h.debounceClosedFast.Store(true)
-	if h.debounceTimer != nil {
+	// R200109-PERF-14 (#1624): the timer is now Hub-lifetime (pre-allocated
+	// in NewHub), so the "is a broadcast pending?" question is answered by
+	// debounceArmed, not by timer==nil. Only an armed timer holds a clientWG
+	// slot worth releasing. When Stop() returns true the callback was
+	// cancelled before running, so we Done() the slot it reserved; when it
+	// returns false the callback already fired and its deferred Done()
+	// balances the Add(). The timer object itself is left intact (not nilled)
+	// so it can be reused — Stop() leaves it idle. Hand-rolled hubs that
+	// never went through NewHub leave debounceTimer nil; guard for that.
+	if h.debounceArmed && h.debounceTimer != nil {
 		if h.debounceTimer.Stop() {
 			h.clientWG.Done()
 		}
-		h.debounceTimer = nil
+		h.debounceArmed = false
 	}
 	h.debounceMu.Unlock()
 
