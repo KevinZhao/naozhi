@@ -515,3 +515,9 @@
 - [R20260603-COS-7] PERF-12 shutdown 持锁内对 r.sessions 四次 O(N) 迭代可合并为一次 — internal/session/router_cleanup.go:877
 - [R20260603-COS-8] PERF-13 historyMarshalCache.reset 用 Range+Delete;Shutdown 可整体换新 map — internal/server/wshub_eventpush_cache.go:181
 - [R20260603-COS-9] EnsureStub 类似 typed-nil 守卫亦可在 dashsession.New 镜像 dispatch reflect collapse(已选 nil-safe 接收者方案) — internal/dashboard/session/handlers.go:1866
+- [R20260603140013-CR-4] previousTickBeforeFromSched 对返回 zero 的自定义 Schedule 静默返回 zero(robfig 不触发,假设性) — internal/cron/job.go:596
+- [R20260603140013-CR-6] redactPathsInCronError pool 注释与 strings.Builder.Reset 实际行为不符(纯注释) — internal/cron/scheduler_finish.go:619
+- [R20260603140013-SEC-4] pdfMagicSignature 用 var 而非不可变字面量(理论 reflection 篡改) — internal/server/send_attachment_validate.go:225
+- [R20260603140013-SEC-6] uploadOwner ConstantTimeCompare 仅泄漏固定长度 hex MAC 长度(无实际风险) — internal/server/dashboard_send.go:127
+- [R20260603140013-SEC-7] deniedExtraFlags 仅长 flag;claude CLI short-flag 注入为假设性 — internal/cli/protocol_claude.go:197
+- [R20260603140013-GO-4] testing import 生产代码(dup CLOSED #1516,已 rolled-into-closed) — internal/cron/runstore.go:20
