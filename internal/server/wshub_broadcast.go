@@ -374,14 +374,21 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 	// the common no-subscriber case now returns before any allocation.
 	snapPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
 	snap := (*snapPtr)[:0]
-	h.mu.RLock()
+	// R20260603150052-PERF-6: mirror broadcastToAuthenticated's lock strategy —
+	// use the fine-grained authMu when authClients is initialised (production
+	// path via NewHub) so this fan-out does not serialise behind the Hub-wide
+	// h.mu that register / unregister / markAuthenticated hold. Legacy fallback
+	// for hand-rolled hubs that skip NewHub still uses h.mu.
 	if h.authClients != nil {
+		h.authMu.RLock()
 		for c := range h.authClients {
 			if _, ok := c.subscriptions[key]; ok {
 				snap = append(snap, c)
 			}
 		}
+		h.authMu.RUnlock()
 	} else {
+		h.mu.RLock()
 		for c := range h.clients {
 			if !c.authenticated.Load() {
 				continue
@@ -390,8 +397,8 @@ func (h *Hub) broadcastSessionSystemEvent(key, summary string) {
 				snap = append(snap, c)
 			}
 		}
+		h.mu.RUnlock()
 	}
-	h.mu.RUnlock()
 
 	if len(snap) > 0 {
 		ev := cli.EventEntry{
