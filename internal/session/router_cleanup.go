@@ -460,7 +460,14 @@ func (r *Router) Cleanup() {
 	// authoritative alive total in one pass. reconcile already walks the map
 	// to drive the per-backend gauge; reuse its alive total to set activeCount
 	// instead of maintaining a second counting loop. R20260602190132-PERF-5.
-	aliveTotal := r.reconcileSessionActiveByBackendLocked()
+	// R20260603-PERF-7: skip the O(N) reconcile walk when nothing changed;
+	// reuse the already-accurate activeCount instead.
+	var aliveTotal int64
+	if closedCount > 0 || pruned > 0 {
+		aliveTotal = r.reconcileSessionActiveByBackendLocked()
+	} else {
+		aliveTotal = r.activeCount.Load()
+	}
 	r.activeCount.Store(aliveTotal)
 
 	// Snapshot sessions for periodic save (while still holding the lock).
@@ -879,10 +886,13 @@ func (r *Router) shutdown() {
 		}
 	}
 
-	// Snapshot sessions for saving outside lock
-	sessionsCopy := make(map[string]*ManagedSession, len(r.sessions))
-	for k, v := range r.sessions {
-		sessionsCopy[k] = v
+	// Snapshot sessions for saving outside lock.
+	// R20260603-PERF-1: use a value slice instead of a map copy so we avoid
+	// allocating hashmap buckets + load-factor slack; saveStoreSlice only
+	// iterates values, so the key is never needed here.
+	sessionsCopy := make([]*ManagedSession, 0, len(r.sessions))
+	for _, v := range r.sessions {
+		sessionsCopy = append(sessionsCopy, v)
 	}
 	storePath := r.storePath
 	// R220123-PERF-19 (#1638): sorted snapshot for the final flush too, so
@@ -909,7 +919,7 @@ func (r *Router) shutdown() {
 	// all un-persisted state silently otherwise. Each error chain is walked
 	// once — the three save paths are independent, so sharing a single flag
 	// would mis-attribute a disk-full on saveStore to saveKnownIDs.
-	if err := saveStore(storePath, sessionsCopy); err != nil {
+	if err := saveStoreSlice(storePath, sessionsCopy); err != nil {
 		slog.Error("save session store on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
 	if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
