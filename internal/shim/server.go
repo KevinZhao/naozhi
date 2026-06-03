@@ -21,9 +21,31 @@ import (
 	"time"
 )
 
-// maxClientLineBytes limits the size of a single line read from the naozhi client,
-// preventing unbounded memory allocation from malformed or malicious input.
-const maxClientLineBytes = 16 * 1024 * 1024 // 16MB
+// defaultMaxClientLineBytes is the compiled-in per-line size limit.
+// Tests may override via setMaxClientLineBytes; production always sees this value.
+const defaultMaxClientLineBytes = 16 * 1024 * 1024 // 16MB
+
+// maxClientLineBytes is held in an atomic so tests can dial it down
+// without racing the runCommandLoop reader. A zero stored value resolves
+// to defaultMaxClientLineBytes. Mirrors the pattern used by maxWriteLineBytes
+// (R237-CR-4 / #701).
+var maxClientLineBytesAtomic atomic.Int64
+
+// maxClientLineBytes returns the active per-line read limit.
+func maxClientLineBytes() int {
+	v := maxClientLineBytesAtomic.Load()
+	if v == 0 {
+		return defaultMaxClientLineBytes
+	}
+	return int(v)
+}
+
+// setMaxClientLineBytes overrides the per-line limit for tests.
+// Returns the previous value so callers can restore it via defer.
+// A value of zero resets to the compiled-in default.
+func setMaxClientLineBytes(v int) int {
+	return int(maxClientLineBytesAtomic.Swap(int64(v)))
+}
 
 // defaultMaxClientSessionBytes is the cumulative post-auth byte budget per
 // client connection. R216-SEC-3 (#541): without it, a client holding a
@@ -34,7 +56,7 @@ const maxClientLineBytes = 16 * 1024 * 1024 // 16MB
 // CLI, or downstream readers feel it. The cap is generous on purpose —
 // the goal is catching pathological abuse, not throttling well-behaved
 // clients.
-const defaultMaxClientSessionBytes int64 = int64(maxClientLineBytes) * 1000
+const defaultMaxClientSessionBytes int64 = defaultMaxClientLineBytes * 1000
 
 // maxClientSessionBytes is held in an atomic so tests can dial it down
 // without racing the runCommandLoop reader on the hot recv path. Mirrors
@@ -809,7 +831,7 @@ func (s *shimServer) performHandshake(conn net.Conn) (ClientMsg, bool) {
 	}
 
 	// Use LimitedReader to prevent pre-auth memory exhaustion
-	lr := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes) + 1}
+	lr := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes()) + 1}
 	reader := bufio.NewReaderSize(lr, 4096)
 
 	// Read attach message
@@ -853,7 +875,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 
 	// Switch to bounded reader for the authenticated command loop.
 	// LimitedReader prevents a single oversized line from exhausting memory.
-	postAuthLR := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes) + 1}
+	postAuthLR := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes()) + 1}
 	reader := bufio.NewReaderSize(postAuthLR, 64*1024)
 
 	// Send hello directly (before becoming the active client, so no live events interleave)
@@ -1032,16 +1054,23 @@ func (s *shimServer) runCommandLoop(
 		// sustained 16-MB payload churn through the post-auth path.
 		var sessionBytes int64
 		for {
-			postAuthLR.N = int64(maxClientLineBytes) + 1 // reset per-line limit
+			postAuthLR.N = int64(maxClientLineBytes()) + 1 // reset per-line limit
 			line, err := reader.ReadBytes('\n')
 			if err != nil {
+				// Distinguish oversize (per-line limit exhausted) from normal EOF/disconnect.
+				// When postAuthLR.N reaches 0 the LimitedReader stops feeding the bufio
+				// reader, which surfaces as an unexpected error rather than a clean close.
+				if postAuthLR.N <= 0 {
+					slog.Warn("client line exceeded per-line byte limit, disconnecting",
+						"limit", maxClientLineBytes())
+				}
 				return
 			}
 			// Enforce line size limit (bufio.NewReaderSize only sets buffer, not max line).
 			// Disconnect on oversize lines: a misbehaving/malicious client that flood-sends
 			// large lines would otherwise burn CPU in a tight loop while holding the
 			// single-client semaphore slot — better to sever and let them reconnect.
-			if len(line) > maxClientLineBytes {
+			if len(line) > maxClientLineBytes() {
 				slog.Warn("client line too large, disconnecting", "size", len(line))
 				return
 			}
