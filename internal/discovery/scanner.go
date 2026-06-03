@@ -445,7 +445,7 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 	type cwdGroup struct {
 		indices []int // indices into candidates
 	}
-	groups := map[string]*cwdGroup{}
+	groups := make(map[string]*cwdGroup, len(candidates))
 	for i, c := range candidates {
 		g, ok := groups[c.sf.CWD]
 		if !ok {

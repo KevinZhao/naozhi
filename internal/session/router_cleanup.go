@@ -268,9 +268,10 @@ func (r *Router) clearAttachmentTrackerRefs(key, workspace string) {
 // Mutations (prune, activeCount recount) still require the write lock.
 func (r *Router) Cleanup() {
 	type expiredEntry struct {
-		s    *ManagedSession
-		key  string
-		proc processIface
+		s      *ManagedSession
+		key    string
+		proc   processIface
+		reason string // deathReason to stamp; written only after kill re-verify
 	}
 
 	now := time.Now()
@@ -370,8 +371,7 @@ func (r *Router) Cleanup() {
 			if age := now.Sub(effective); age > stuckThreshold {
 				slog.Warn("stuck running session detected, force killing",
 					"key", c.key, "running_for", age, "threshold", stuckThreshold)
-				storeAtomicString(&c.s.deathReason, "stuck_running")
-				stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc})
+				stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc, "stuck_running"})
 			}
 			continue
 		}
@@ -380,8 +380,7 @@ func (r *Router) Cleanup() {
 		if pid := c.proc.PID(); pid > 0 && !osutil.PidAlive(pid) {
 			slog.Warn("CLI process gone but session still alive, force killing",
 				"key", c.key, "pid", pid)
-			storeAtomicString(&c.s.deathReason, "pid_gone")
-			stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc})
+			stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc, "pid_gone"})
 			continue
 		}
 
@@ -389,7 +388,7 @@ func (r *Router) Cleanup() {
 		if now.Sub(effective) > ttl {
 			logSessionLifecycle("expired", c.key, "idle", now.Sub(effective))
 			storeAtomicString(&c.s.deathReason, "idle_timeout")
-			expired = append(expired, expiredEntry{c.s, c.key, c.proc})
+			expired = append(expired, expiredEntry{c.s, c.key, c.proc, ""})
 		}
 	}
 
@@ -401,13 +400,20 @@ func (r *Router) Cleanup() {
 		// s.process between the snapshot and now. Killing the originally-
 		// captured proc would still target a now-orphaned shim conn — a
 		// no-op in the steady state but it pollutes the deathReason
-		// (already stamped to "stuck_running" / "pid_gone" above) on the
+		// (stamped to "stuck_running" / "pid_gone" below, after re-verify) on the
 		// fresh ManagedSession the user is actively using. Skip when the
 		// session has moved on; the new proc gets its own chance next
 		// tick. shouldPrune already handles the orphan-process side; this
 		// just stops the false-positive kill bookkeeping.
 		if cur := e.s.loadProcess(); cur != nil && cur != e.proc {
 			continue
+		}
+		// Stamp deathReason only after re-verify confirms this proc is still
+		// the live process on the session. Premature stamping (before re-verify)
+		// would corrupt the deathReason of a freshly-spawned replacement
+		// session visible on the dashboard. R20260603-GO-8.
+		if e.reason != "" {
+			storeAtomicString(&e.s.deathReason, e.reason)
 		}
 		e.proc.Kill()
 		closedCount++

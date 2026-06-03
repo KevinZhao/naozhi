@@ -504,3 +504,5 @@
 - [R100110-LOOP-1] recountPersistedUserTurnsLocked 增量调用仍 O(n) 全扫(微优化) — internal/session/managed_query.go:346
 - [R20260603-ARCH-3] wireup package doc "no exported symbols" 已过时(现导出 Registry/BootStep/WireSchedulers) — internal/wireup/history_backends.go:13
 - [R20260603-SEC-2] dashboard CSP script-src 'unsafe-inline' 已是 accepted/tracked NEEDS-DESIGN(R242-SEC-1/R249-SEC-9) — internal/server/routes.go:522
+- [R20260603-SEC-4] reverseserver Capabilities slice 无元素数上限 (4KB+auth gate 已限) — internal/node/reverseserver.go:413
+- [R20260603-ARCH-5] hub_broadcaster switch 无 default arm 记录未知 subsystem (future-proof) — internal/server/hub_broadcaster.go:27

@@ -53,7 +53,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
-	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 )
 
@@ -74,9 +73,6 @@ type SchedulersDeps struct {
 	// Cfg is the parsed config.
 	Cfg *config.Config
 
-	// Router is the live session router. Used by cron for history-panel
-	// filtering via IsExcluded / RecentSessionsFilter.
-	Router *session.Router
 
 	// SessionRouterAdapter is the cmd-side cronRouterAdapter that
 	// translates cron.AgentOpts ↔ session.AgentOpts. Caller (cmd/naozhi)
@@ -175,8 +171,7 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 	// cron.SchedulerConfig.Router. A nil interface here would not panic
 	// at construction time but would panic at first job execution when the
 	// scheduler calls Router methods. Catch it at startup instead.
-	// R20260603040203-GO-6: deps.Router (*session.Router) is unused here;
-	// only SessionRouterAdapter is forwarded to cron. Check that field.
+	// Check SessionRouterAdapter (the field that actually reaches cron).
 	if deps.SessionRouterAdapter == nil {
 		return out, fmt.Errorf("WireSchedulers: nil SessionRouterAdapter")
 	}

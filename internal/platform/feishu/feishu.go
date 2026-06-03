@@ -81,6 +81,12 @@ const (
 	// otherwise multiplied by hookSem concurrency).
 	maxWebhookTokenLen = 512
 
+	// maxWebhookSigLen bounds the X-Lark-Signature header length before it
+	// reaches verifySignature. Real Feishu signatures are SHA-256 hex strings
+	// (64 bytes); 256 leaves headroom while preventing oversized headers from
+	// amplifying allocations inside verifySignature (string concat + sha256).
+	maxWebhookSigLen = 256
+
 	// Webhook timestamp freshness window constants (webhookTimestampFutureSkew /
 	// webhookTimestampMaxAge) and the verifySignature / verifyTimestamp helpers
 	// they back live in signature.go (R214-ARCH-13 split).
