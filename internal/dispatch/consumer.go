@@ -34,12 +34,15 @@ import (
 // kept small so growth is visible in review.
 type SessionRouter interface {
 	GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
-	GetSession(key string) *session.ManagedSession
 	// DiscardPassthroughPending clears in-flight passthrough sends for the
 	// keyed session (no-op when the session is absent). Routed through the
 	// interface so discardQueue does not reach the concrete
-	// *session.ManagedSession behind GetSession — keeps the consumer seam
-	// intact for fakes and router-rename guards (R20260602190132-ARCH-4, #1612).
+	// *session.ManagedSession behind a session lookup — keeps the consumer
+	// seam intact for fakes and router-rename guards (R20260602190132-ARCH-4,
+	// #1612). This replaced dispatch's only production GetSession call, so
+	// GetSession is no longer part of this interface: shrinking it trims one
+	// of the two *session.ManagedSession-leaking methods the consumer seam
+	// exposed (R20260602141221-ARCH-2, #1587).
 	DiscardPassthroughPending(key string, reason error)
 	Reset(key string)
 	ResetChat(chatKeyPrefix string)

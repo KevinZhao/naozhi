@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli/backend"
-	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/cryptoutil"
 	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	dashcron "github.com/naozhi/naozhi/internal/dashboard/cron"
@@ -90,7 +89,7 @@ type Server struct {
 
 	// ── core deps ──────────────────────────────────────
 	router     *session.Router  // 读写: server.go, dashboard.go, dashboard_system.go, send.go, takeover.go, consumer.go
-	scheduler  *cron.Scheduler  // 读写: server.go, dashboard.go, dashboard_cron.go, dashboard_cron_transcript.go, wshub.go
+	scheduler  cronScheduler    // 读写: server.go, dashboard.go, dashboard_cron.go, dashboard_cron_transcript.go, wshub.go (narrowed to the cronScheduler consumer view, #1648)
 	hub        *Hub             // 读写: server.go, dashboard.go, send.go (WebSocket hub)
 	projectMgr *project.Manager // 读写: server.go, dashboard.go, project_api.go, project_files.go
 
@@ -154,10 +153,14 @@ type Server struct {
 	// session map. S11 / R194-COR. 读写: server.go (ctor + Start + accessor)
 	shutdownComplete chan struct{}
 
-	// ── candidates for removal (verify no usage, then delete) ──
-	platforms  map[string]platform.Platform // 读写: server.go (likely routes-registration-only)
-	backendTag string                       // 读写: server.go (ctor only; copied into SessionHandlers)
-	knownNodes map[string]string            // 读写: server.go (configured node IDs → display names)
+	// platforms is read at routes-registration time (server.go) to wire each
+	// IM channel's webhook + outbound sender; knownNodes maps configured node
+	// IDs → display names (read at server.go:433/553). R20260603-ARCH-1: the
+	// former sibling `backendTag` field was write-only (ctor-only, no receiver
+	// read) and has been removed — the live reply tag flows through the local
+	// `tag` var into SessionHandlers.BackendTag (server.go ctor).
+	platforms  map[string]platform.Platform
+	knownNodes map[string]string
 }
 
 // Workspace 验证 helpers (validateWorkspace / classifyWorkspaceErr /
@@ -271,14 +274,22 @@ func buildServer(opts ServerOptions) *Server {
 	platforms := opts.Platforms
 	agents := opts.Agents
 	agentCommands := opts.AgentCommands
-	scheduler := opts.Scheduler
+	// scheduler is boxed into the cronScheduler consumer interface (#1648).
+	// A nil *cron.Scheduler must become a genuinely nil interface, not a
+	// non-nil interface wrapping a nil pointer — otherwise every
+	// `s.scheduler != nil` cron-enabled guard would fire for scheduler-less
+	// deployments (and tests) and panic on the first method call.
+	var scheduler cronScheduler
+	if opts.Scheduler != nil {
+		scheduler = opts.Scheduler
+	}
 	defaultBackend := opts.Backend
 	// defaultTag is the fallback ReplyFooter tag for sessions whose
 	// Backend() is empty (legacy stores predating the multi-backend Backend
 	// field). docs/rfc/multi-backend.md §7.
 	defaultTag := replyTagForBackend(defaultBackend)
-	// tag is retained as the legacy server-global value (backendTag field +
-	// SessionStats.Backend). Per-session ReplyFooterFn (wired below) reads
+	// tag is the legacy server-global reply footer value (flows into
+	// SessionHandlers.BackendTag). Per-session ReplyFooterFn (wired below) reads
 	// session.Backend() at IM-reply time so a kiro session in a claude-default
 	// deployment gets [kiro] correctly.
 	tag := defaultTag
@@ -372,7 +383,6 @@ func buildServer(opts ServerOptions) *Server {
 		agents:          agents,
 		agentCommands:   agentCommands,
 		scheduler:       scheduler,
-		backendTag:      tag,
 		claudeDir:       claudeDir,
 		workspaceName:   opts.WorkspaceName,
 		allowedRoot:     opts.AllowedRoot,
