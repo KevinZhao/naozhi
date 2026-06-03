@@ -49,6 +49,14 @@ func (s *Server) registerExpvar() {
 	})
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// #1633: with no dashboard_token, RequireAuth authenticates every
+		// request, leaving only the loopback gate — a compromised on-host
+		// subprocess could scrape memstats/cmdline/internal counters
+		// unauthenticated. Disable expvar entirely in that posture.
+		if s.auth.DashboardToken == "" {
+			http.Error(w, "expvar disabled: no dashboard_token configured (未配置 dashboard_token，已禁用)", http.StatusServiceUnavailable)
+			return
+		}
 		if !isLoopbackRemote(r.RemoteAddr) {
 			// R186-SEC-L1: r.URL.Path is URL-decoded from the client-supplied
 			// request line; it can carry bidi / C1 / LS/PS code points that

@@ -7,7 +7,6 @@ import (
 	pprofhandler "net/http/pprof"
 	"strconv"
 	"strings"
-
 )
 
 // parsePositiveSeconds parses a `seconds=` pprof query parameter; returns 0
@@ -45,6 +44,16 @@ func parsePositiveSeconds(s string) int {
 // See docs/ops/pprof.md for the full runbook.
 func (s *Server) registerPprof() {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// #1633: when no dashboard_token is configured, RequireAuth's
+		// IsAuthenticated returns true for every request — leaving only the
+		// loopback gate. A compromised CLI subprocess / tool execution on the
+		// host could then read full goroutine/heap dumps unauthenticated.
+		// Refuse to serve pprof entirely in that posture rather than rely on
+		// loopback alone.
+		if s.auth.DashboardToken == "" {
+			http.Error(w, "pprof disabled: no dashboard_token configured (未配置 dashboard_token，已禁用)", http.StatusServiceUnavailable)
+			return
+		}
 		// Defense-in-depth: even inside requireAuth, reject non-loopback
 		// callers. trustedProxy mode (ALB → EC2) does NOT exempt pprof
 		// from the loopback gate — a compromised ALB could otherwise
