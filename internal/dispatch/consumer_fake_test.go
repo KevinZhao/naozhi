@@ -110,7 +110,6 @@ type fakeSessionRouter struct {
 	getOrCreateCalls atomic.Int64
 
 	getOrCreate               func(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
-	getSession                func(key string) *session.ManagedSession
 	notifyIdle                func()
 	discardPassthroughPending func(key string, reason error)
 }

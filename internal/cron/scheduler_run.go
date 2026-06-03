@@ -1325,7 +1325,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			"job_id", j.ID, "trigger_now", viaTriggerNow, "err", err)
 		return
 	}
-	startedAt := time.Now()
+	// R247-ARCH-11 (#643): the run's StartedAt anchors both the dashboard
+	// "running 12s" badge and finishRun's DurationMS (endedAt - startedAt).
+	// Read it via the injected clock so a fake clock can pin a deterministic
+	// run duration end-to-end (startedAt here + endedAt in finishRun both flow
+	// through s.now()). Default clock is time.Now(), byte-identical to the
+	// prior inline read.
+	startedAt := s.now()
 	trigger := TriggerScheduled
 	if viaTriggerNow {
 		trigger = TriggerManual
