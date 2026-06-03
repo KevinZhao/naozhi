@@ -1,11 +1,37 @@
 package leakcheck
 
 import (
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// waitGoroutinesSettle blocks until runtime.NumGoroutine() reports the same
+// value across several consecutive reads, i.e. no goroutine from a prior test
+// in this package is still winding down. CheckWith captures its baseline at
+// call time; if a previous test's goroutine is still counted then (the runtime
+// decrement lags goexit by a scheduler tick), the baseline is inflated by one.
+// When that straggler later exits while our deliberately-leaked goroutine adds
+// one, the net count is flat and the detector sees no growth — a false negative
+// that flakes TestCheckWith_DetectsLeak. Settling first pins an honest baseline.
+func waitGoroutinesSettle() {
+	prev := runtime.NumGoroutine()
+	stable := 0
+	for i := 0; i < 200; i++ {
+		time.Sleep(5 * time.Millisecond)
+		n := runtime.NumGoroutine()
+		if n == prev {
+			if stable++; stable >= 3 {
+				return
+			}
+			continue
+		}
+		prev = n
+		stable = 0
+	}
+}
 
 // fakeTB is a minimal TB implementation that captures Errorf calls so
 // the package's own tests can verify the failure path without flunking
@@ -44,13 +70,25 @@ func TestCheckWith_DetectsLeak(t *testing.T) {
 	stop := make(chan struct{})
 	t.Cleanup(func() { close(stop) })
 
+	// Pin an honest baseline before CheckWith snapshots the count: a
+	// straggler goroutine from a prior test may still be winding down,
+	// inflating the baseline so its later exit cancels out our +1 leak.
+	waitGoroutinesSettle()
+
 	fake := &fakeTB{}
 	done := CheckWith(fake, 0, 50*time.Millisecond)
 	// Deliberately leak a goroutine: it never exits within the settle
-	// window, so the deferred check should fail.
+	// window, so the deferred check should fail. Block until it is actually
+	// running (started closed) before done() reads the count — a bare `go`
+	// statement may not yet be scheduled, and thus not yet counted by
+	// runtime.NumGoroutine, when done() samples with grace=0.
+	started := make(chan struct{})
 	go func() {
+		close(started)
 		<-stop
 	}()
+	<-started
+
 	done()
 
 	if !fake.failed() {
