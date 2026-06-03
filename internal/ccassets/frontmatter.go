@@ -2,6 +2,7 @@ package ccassets
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -38,7 +39,7 @@ func readFrontmatter(path string) (fmMeta, error) {
 		// degrade) or an unreadable path such as a directory named SKILL.md
 		// (e.g. EISDIR on Linux — propagate so callers using readFrontmatter
 		// as an existence/validity probe can skip it, R220123-PERF-4).
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return fmMeta{}, nil
 		}
 		return fmMeta{}, err
