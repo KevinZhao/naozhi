@@ -113,7 +113,9 @@ func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
 		AllowedRoot:   srv.allowedRoot,
 		ClaudeDir:     srv.claudeDir,
 		ReplyFooterFn: func(backendID string) string {
-			return srv.backendTag // tests retain legacy global tag for assertions
+			// R20260603-ARCH-1: the server-global backendTag field was removed;
+			// resolve the tag the same way production does.
+			return replyTagForBackend(backendID)
 		},
 		SendFn: func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error) {
 			return sess.Send(ctx, text, images, onEvent)

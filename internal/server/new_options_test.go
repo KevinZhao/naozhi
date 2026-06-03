@@ -21,8 +21,13 @@ func TestNewWithOptions_DefaultBackendIsClaude(t *testing.T) {
 		Router: router,
 		// Backend deliberately empty
 	})
-	if srv.backendTag != "cc" {
-		t.Errorf("empty Backend should yield tag 'cc' (claude); got %q", srv.backendTag)
+	if srv == nil {
+		t.Fatal("NewWithOptions returned nil server for empty-Backend opts")
+	}
+	// R20260603-ARCH-1: the write-only backendTag field was removed; assert the
+	// reply-tag resolution that feeds SessionHandlers.BackendTag directly.
+	if tag := replyTagForBackend(""); tag != "cc" {
+		t.Errorf("empty Backend should yield tag 'cc' (claude); got %q", tag)
 	}
 }
 
@@ -58,9 +63,10 @@ func TestNewWithOptions_FieldsRoundTrip(t *testing.T) {
 		WorkspaceName: "Alpha",
 		Version:       "v0.0.1",
 	})
-	// Backend selection must derive the kiro reply tag.
-	if srv.backendTag != "kiro" {
-		t.Errorf("backendTag = %q, want kiro", srv.backendTag)
+	// Backend selection must derive the kiro reply tag (R20260603-ARCH-1: the
+	// write-only backendTag field was removed; assert the resolver directly).
+	if tag := replyTagForBackend("kiro"); tag != "kiro" {
+		t.Errorf("backendTag = %q, want kiro", tag)
 	}
 	if srv.workspaceName != "Alpha" {
 		t.Errorf("workspaceName = %q, want Alpha", srv.workspaceName)
