@@ -4,6 +4,16 @@ import (
 	"fmt"
 )
 
+// Built-in daemon names. These are the single source of truth for the
+// kebab-case identifiers used in builtinDaemons, each daemon's Name(),
+// and config-translation wiring (cmd/naozhi). Referencing the constant
+// instead of a string literal makes a rename a compile-time concern
+// rather than a silent drift between registry and wiring (#1634).
+const (
+	DaemonAutoTitler   = "auto-titler"
+	DaemonAttachmentGC = "attachment-gc"
+)
+
 // validateDaemonName enforces the kebab-case naming convention RFC §3.2:
 //
 //	^[a-z][a-z0-9-]{1,30}$
@@ -65,13 +75,13 @@ type DaemonDeps struct {
 // future daemons land in Phase 2 (RFC §12).
 var builtinDaemons = []builtinDaemonFactory{
 	{
-		Name: "auto-titler",
+		Name: DaemonAutoTitler,
 		Build: func(deps DaemonDeps) (Daemon, error) {
 			return newAutoTitler(deps)
 		},
 	},
 	{
-		Name: "attachment-gc",
+		Name: DaemonAttachmentGC,
 		Build: func(deps DaemonDeps) (Daemon, error) {
 			return newAttachmentGC(deps)
 		},
