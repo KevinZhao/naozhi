@@ -1106,6 +1106,11 @@ func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBack
 	delete(r.sessions, key)
 	if !keepBackendOverride {
 		delete(r.backendOverrides, key)
+		// R090031-CR-5: shimStuckOnReset is only consumed by GetOrCreate, so
+		// terminal removals (keepBackendOverride=false) must also clear it.
+		// Sessions that are deleted and never reopened would otherwise leave
+		// their entry in the map for the lifetime of the process.
+		delete(r.shimStuckOnReset, key)
 	}
 }
 
