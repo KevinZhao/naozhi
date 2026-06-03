@@ -357,10 +357,12 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 	// every entry before e := entries[i] copies the value — only the
 	// prepared/sinkCopy destination changes for the len==1 path.
 	var (
-		sinkCopy   []EventEntry
-		prepared   []EventEntry
-		sinkOne    EventEntry
-		sinkOneSet bool
+		sinkCopy       []EventEntry
+		prepared       []EventEntry
+		sinkOne        EventEntry
+		sinkOneSet     bool
+		preparedOne    EventEntry
+		preparedOneSet bool
 	)
 	if captureForSink {
 		if len(entries) == 1 {
@@ -368,6 +370,11 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 		} else {
 			sinkCopy = make([]EventEntry, len(entries))
 		}
+	} else if len(entries) == 1 {
+		// R20260603-PERF-4: mirror the sinkOne fast path for the no-sink
+		// case. make([]EventEntry, 1) is a heap alloc even for a single
+		// entry; use a stack scalar instead. prepared stays nil.
+		preparedOneSet = true
 	} else {
 		prepared = make([]EventEntry, len(entries))
 	}
@@ -384,6 +391,9 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 		if sinkOneSet {
 			sinkOne = entries[i]
 			dst = &sinkOne
+		} else if preparedOneSet {
+			preparedOne = entries[i]
+			dst = &preparedOne
 		} else if captureForSink {
 			sinkCopy[i] = entries[i]
 			dst = &sinkCopy[i]
@@ -417,6 +427,10 @@ func (l *EventLog) appendBatch(entries []EventEntry, isReplay bool) {
 			// len==1 fast path: sinkOne holds the pre-prepared entry;
 			// sinkCopy is nil (allocation skipped). R20260602190132-PERF-3.
 			l.entries[l.head] = sinkOne
+		} else if preparedOneSet {
+			// len==1 no-sink fast path: preparedOne holds the pre-prepared
+			// entry; prepared slice alloc skipped. R20260603-PERF-4.
+			l.entries[l.head] = preparedOne
 		} else if captureForSink {
 			l.entries[l.head] = sinkCopy[idx]
 		} else {

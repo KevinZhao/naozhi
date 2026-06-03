@@ -1208,6 +1208,19 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 			return nil, fmt.Errorf("cron: notify_chat_id contains invalid bytes")
 		}
 	}
+	// R20260603-CR-2: UpdateJob lacked Backend validation. Mirror the same
+	// MaxBackendLen + UTF-8 + containsCronUnsafe guards that validateJobFields
+	// applies on the AddJob path so cron_jobs.json cannot receive oversized or
+	// log-injection bytes via non-dashboard callers (tests, future IM ops).
+	if upd.Backend != nil {
+		v := *upd.Backend
+		if len(v) > MaxBackendLen {
+			return nil, fmt.Errorf("cron: backend too long: %d bytes > %d cap", len(v), MaxBackendLen)
+		}
+		if !utf8.ValidString(v) || containsCronUnsafe(v) {
+			return nil, fmt.Errorf("cron: backend contains invalid characters")
+		}
+	}
 
 	// R239-GO-4: critical section uses defer Unlock so any future return
 	// path added inside this block stays correctly unlocked. The closure
