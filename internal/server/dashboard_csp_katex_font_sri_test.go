@@ -47,10 +47,18 @@ func TestDashboardCSP_KatexFontSRIForwardCompat(t *testing.T) {
 	}
 
 	// The font-src directive must continue to allow cdn.jsdelivr.net so
-	// KaTeX renders math; tightening this is the vendoring work, not
-	// this test's scope.
-	if !strings.Contains(csp, "font-src 'self' https://cdn.jsdelivr.net") {
-		t.Errorf("CSP font-src must keep cdn.jsdelivr.net allowance for KaTeX woff2 (#518), got %q", csp)
+	// KaTeX renders math; fully removing it is the //go:embed vendoring
+	// work tracked NEEDS-DESIGN in routes.go, not this test's scope. But
+	// the allowance MUST stay narrowed to the `/npm/` path prefix
+	// (R242-SEC-2 / #607): a bare `https://cdn.jsdelivr.net` host-source
+	// would let a CDN compromise serve attacker-substituted woff2 from any
+	// jsdelivr path (e.g. `/gh/<attacker>/<repo>`), which is the exact
+	// supply-chain surface #518 narrows. Pin the `/npm/`-scoped form so a
+	// future CSP refactor cannot silently widen font-src back to the whole
+	// CDN host.
+	if !strings.Contains(csp, "font-src 'self' https://cdn.jsdelivr.net/npm/") {
+		t.Errorf("CSP font-src must keep the /npm/-scoped cdn.jsdelivr.net "+
+			"allowance for KaTeX woff2 (R247-SEC-23 / R242-SEC-2 / #518), got %q", csp)
 	}
 
 	// require-sri-for must contain the `font` token. Ordering inside the
