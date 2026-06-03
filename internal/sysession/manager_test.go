@@ -698,6 +698,87 @@ func TestManager_StopPreStart_DoesNotBurnStopOnce(t *testing.T) {
 	}
 }
 
+// TestManager_StartPublishesCtxAndCancelAtomically pins the invariant that
+// R20260603-GO-4 (#1653) restored: Start publishes the daemon ctx and its
+// cancel func through a single atomic.Pointer[ctxCancel] store, so there is
+// no observable state where a non-nil pointer carries a live ctx but a nil
+// cancel (the pre-fix window between the plain m.ctx field write and the
+// separate cancel publish). After Start, lifeP.Load() must yield a fully
+// populated, live, cancellable ctxCancel; Stop must then cancel that exact
+// ctx and drain the daemon goroutine.
+func TestManager_StartPublishesCtxAndCancelAtomically(t *testing.T) {
+	withRegistry(t, []builtinDaemonFactory{
+		{Name: "auto-titler", Build: func(deps DaemonDeps) (Daemon, error) {
+			return &signalDaemon{name: "auto-titler"}, nil
+		}},
+	})
+
+	_, tickFn := pulseTicker()
+	m, err := NewManager(Config{
+		Enabled:     true,
+		TickTimeout: 100 * time.Millisecond,
+		Router:      newFakeRouter(),
+		Daemons: map[string]DaemonRuntimeConfig{
+			// Long tick so the daemon parks in its ticker select; only the
+			// ctx-cancel path can make it return.
+			"auto-titler": {Enabled: true, Tick: time.Hour},
+		},
+		NewTicker: tickFn,
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Before Start: lifeP is nil (Stop would early-return as a no-op).
+	if m.lifeP.Load() != nil {
+		t.Fatal("lifeP must be nil before Start")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx)
+
+	// After Start: the single atomic store published a fully populated
+	// ctxCancel — ctx live, cancel non-nil. Pre-fix, a torn read could see
+	// a live ctx with a nil cancel; folding them into one pointer makes that
+	// state unrepresentable.
+	life := m.lifeP.Load()
+	if life == nil {
+		t.Fatal("lifeP must be non-nil after Start")
+	}
+	if life.ctx == nil {
+		t.Fatal("published ctxCancel.ctx must be non-nil")
+	}
+	if life.cancel == nil {
+		t.Fatal("published ctxCancel.cancel must be non-nil")
+	}
+	select {
+	case <-life.ctx.Done():
+		t.Fatal("published ctx must be live (not already cancelled) right after Start")
+	default:
+	}
+
+	// Stop must cancel that exact ctx and drain the daemon goroutine.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer stopCancel()
+	m.Stop(stopCtx)
+
+	select {
+	case <-life.ctx.Done():
+		// ok — Stop cancelled the published ctx.
+	default:
+		t.Fatal("Stop did not cancel the published ctx")
+	}
+
+	done := make(chan struct{})
+	go func() { m.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("m.wg did not drain after Stop — daemon goroutine left uncancelled")
+	}
+}
+
 // withRegistry temporarily replaces builtinDaemons with the supplied
 // list and restores the original on test cleanup.  Used to inject test
 // daemons without polluting other parallel tests' view (each parallel
