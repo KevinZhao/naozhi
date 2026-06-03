@@ -56,6 +56,25 @@ func putRecordBuf(buf *bytes.Buffer) {
 	recordBufPool.Put(buf)
 }
 
+// arenaSpan records one entry's byte range inside batchArena.buf. Held
+// only for the second resolve pass in accept(); never escapes the batch.
+type arenaSpan struct{ start, end int }
+
+// batchArena bundles the pooled JSON byte buffer with the two scratch
+// slices accept() needs per batch: `owned` (the materialised Entry
+// headers, which escape into batchJob.Entries) and `spans` (the
+// transient per-entry byte ranges). Folding owned/spans into the same
+// pooled object as the buffer eliminates the two per-batch slice-header
+// allocs accept() previously paid (R20260602-PERF-7, #1630) without
+// introducing a second global pool: the slices share the arena's
+// lifetime exactly (handleBatch returns the whole batchArena once the
+// batch's Entry.JSON bytes are written and no longer referenced).
+type batchArena struct {
+	buf   *bytes.Buffer
+	owned []Entry
+	spans []arenaSpan
+}
+
 // entryArenaPool backs the batch-level copy accept() makes of each
 // borrowed Entry.JSON (R20260531A-PERF-3, #1524). One arena holds every
 // entry's bytes for a single batch; handleBatch returns it after the
@@ -64,7 +83,7 @@ func putRecordBuf(buf *bytes.Buffer) {
 // steady-state heap churn (50 events/s × N sessions).
 var entryArenaPool = sync.Pool{
 	New: func() any {
-		return bytes.NewBuffer(make([]byte, 0, 4*1024))
+		return &batchArena{buf: bytes.NewBuffer(make([]byte, 0, 4*1024))}
 	},
 }
 
@@ -72,15 +91,38 @@ var entryArenaPool = sync.Pool{
 // pin a large heap allocation in the pool.
 const entryArenaMaxCap = 256 * 1024
 
-func putEntryArena(buf *bytes.Buffer) {
-	if buf == nil {
+// entryArenaSliceMaxCap caps the owned/spans scratch slices so a one-off
+// giant batch (e.g. a 500-entry InjectHistory replay leaking through)
+// does not pin oversized slice backing arrays in the pool for the
+// process lifetime. Sized generously above the typical 50-event batch.
+const entryArenaSliceMaxCap = 1024
+
+func putEntryArena(a *batchArena) {
+	if a == nil {
 		return
 	}
-	if buf.Cap() > entryArenaMaxCap {
+	if a.buf == nil || a.buf.Cap() > entryArenaMaxCap {
+		// Buffer missing or grown too large: drop the whole arena so the
+		// pool never hands back a giant backing array.
 		return
 	}
-	buf.Reset()
-	entryArenaPool.Put(buf)
+	a.buf.Reset()
+	// Drop entry-pointer references so the persisted EventEntry payloads
+	// are not pinned by the pooled scratch between batches, then reset
+	// length keeping capacity for reuse. Oversized scratch slices are
+	// released to GC (set to nil) rather than pooled.
+	if cap(a.owned) > entryArenaSliceMaxCap {
+		a.owned = nil
+	} else {
+		clear(a.owned)
+		a.owned = a.owned[:0]
+	}
+	if cap(a.spans) > entryArenaSliceMaxCap {
+		a.spans = nil
+	} else {
+		a.spans = a.spans[:0]
+	}
+	entryArenaPool.Put(a)
 }
 
 // logWriteBufSize is the capacity of the bufio.Writer wrapped around
@@ -313,6 +355,13 @@ type Persister struct {
 	// first call and stay grown for the process lifetime.
 	// R249-PERF-19.
 	flushCands []flushCandidate
+	// tickFlushKeys / tickFlushWs are the parallel (key, writer) scratch
+	// slices tickFlush hands to parallelFsync, reused across ticks to keep
+	// the fan-out allocation-free in steady state. Run-goroutine only —
+	// tickFlush is the sole reader/writer, same as flushCands. R20260602-
+	// 091302-PERF-3 (#1569).
+	tickFlushKeys []string
+	tickFlushWs   []*perKeyWriter
 	// lastFlushCount is the number of slots in flushCands that were
 	// actually populated on the most recent tick. R040034-PERF-7 (#1406):
 	// the prior `clear(p.flushCands)` zeroed every slot up to len, so a
@@ -338,7 +387,7 @@ type batchJob struct {
 	Key     string
 	Stem    string
 	Entries []Entry
-	arena   *bytes.Buffer
+	arena   *batchArena
 }
 
 // NewPersister validates opts, ensures Dir exists, sweeps rotate
@@ -550,17 +599,38 @@ func (s *sessionSink) accept(entries []Entry, replayPhase bool) {
 	// backing array), then resolve each Entry.JSON sub-slice once the
 	// arena is final. Resolving slices during the append pass would alias
 	// a stale backing array after a grow.
-	arena := entryArenaPool.Get().(*bytes.Buffer)
-	owned := make([]Entry, len(entries))
-	type span struct{ start, end int }
-	spans := make([]span, len(entries))
+	//
+	// R20260602-PERF-7 (#1630): owned/spans are borrowed from the pooled
+	// batchArena (paired with arena.buf) instead of make()'d fresh per
+	// batch, eliminating two slice-header allocs on the hot path. accept
+	// is non-reentrant per arena instance (each Get hands out a distinct
+	// arena, returned only after handleBatch finishes), so the borrowed
+	// slices cannot be aliased across batches. We reslice to the needed
+	// length, growing the backing array only when a batch exceeds the
+	// pooled capacity.
+	arena := entryArenaPool.Get().(*batchArena)
+	n := len(entries)
+	owned := arena.owned
+	if cap(owned) >= n {
+		owned = owned[:n]
+	} else {
+		owned = make([]Entry, n)
+	}
+	spans := arena.spans
+	if cap(spans) >= n {
+		spans = spans[:n]
+	} else {
+		spans = make([]arenaSpan, n)
+	}
+	arena.owned = owned
+	arena.spans = spans
 	for i, e := range entries {
-		start := arena.Len()
-		arena.Write(e.JSON)
-		spans[i] = span{start: start, end: arena.Len()}
+		start := arena.buf.Len()
+		arena.buf.Write(e.JSON)
+		spans[i] = arenaSpan{start: start, end: arena.buf.Len()}
 		owned[i] = Entry{TimeMS: e.TimeMS}
 	}
-	all := arena.Bytes()
+	all := arena.buf.Bytes()
 	for i := range owned {
 		owned[i].JSON = all[spans[i].start:spans[i].end]
 	}
@@ -1150,12 +1220,34 @@ func (p *Persister) tickFlush() {
 	if len(cands) == 0 {
 		return
 	}
+	// R20260602-091302-PERF-3 (#1569): fan the per-candidate flush() (each
+	// of which does fsync(log)+fsync(idx)) over the same bounded worker
+	// pool flushAllLocked/shutdownAll use, instead of a serial loop. In the
+	// 50+ concurrent-session steady state a single slow fsync no longer
+	// stalls every other dirty writer's persistence for the whole tick;
+	// wall time drops from ~2N fsyncs serialised to ~2N/workers. The
+	// candidates are distinct writers, so fn touches no shared per-writer
+	// state — same independence audit as shutdownAll's godoc. parallelFsync
+	// keeps the 1-candidate fast path inline (no goroutine spawn), so the
+	// common single-tab case is unchanged.
+	keys := p.tickFlushKeys[:0]
+	ws := p.tickFlushWs[:0]
 	for _, c := range cands {
-		if err := c.w.flush(p); err != nil {
-			slog.Warn("event log persist: debounced flush failed",
-				"key", c.key, "err", err)
-		}
+		keys = append(keys, c.key)
+		ws = append(ws, c.w)
 	}
+	p.tickFlushKeys = keys
+	p.tickFlushWs = ws
+	p.parallelFsync(keys, ws, func(k string, w *perKeyWriter) {
+		if err := w.flush(p); err != nil {
+			slog.Warn("event log persist: debounced flush failed",
+				"key", k, "err", err)
+		}
+	})
+	// Drop the writer-pointer references so a writer dropped/idle-closed
+	// before the next tick can be GC'd rather than pinned by this scratch
+	// slice. Keys are plain strings; no GC concern, left as-is.
+	clear(ws)
 }
 
 // collectFlushCandidates returns writers whose firstDirtyAt has aged

@@ -137,11 +137,16 @@ func (r *Router) ClearUserLabelOrigin(key string) bool {
 // Note: fn must not call back into Router methods that take r.mu (it runs
 // under RLock). Idiomatic usage is to copy the SessionSnapshot fields the
 // daemon needs and resume work after VisitSessions returns.
+//
+// R20260602-PERF-3 (#1577): this uses snapshotReadOnly, NOT Snapshot, so
+// the per-session view computed under RLock is strictly side-effect free
+// (no SetModel mirror write on the read path). The dashboard poll path
+// keeps the mirroring Snapshot() so live model still reaches sessions.json.
 func (r *Router) VisitSessions(fn func(SessionSnapshot) bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for _, s := range r.sessions {
-		if !fn(s.Snapshot()) {
+		if !fn(s.snapshotReadOnly()) {
 			return
 		}
 	}

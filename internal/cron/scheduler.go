@@ -276,6 +276,17 @@ type chatJobKey struct {
 	ChatID   string
 }
 
+// chatKeyFor builds the chatJobKey for a (platform, chatID) pair. R249-CR-4 /
+// R260528-ARCH-7 (#948 / #1368): the bare `chatJobKey{Platform: p, ChatID: c}`
+// literal was open-coded at the read sites (JobCountForChat / ListJobs /
+// ListJobsWithNextRun / findByPrefixLocked); a single constructor keeps the
+// (platform, chatID) → key mapping in one place alongside the jobsByChat /
+// chatJobCount trio it indexes, so a future change to the key shape (e.g.
+// folding in a backend dimension) is a one-site edit.
+func chatKeyFor(plat, chatID string) chatJobKey {
+	return chatJobKey{Platform: plat, ChatID: chatID}
+}
+
 // Scheduler manages cron jobs and executes them on schedule.
 //
 // Field-access discipline (mirrors the `// 读写:` annotation pattern from
@@ -327,6 +338,23 @@ type Scheduler struct {
 	// rejects both via JobUpdate field absence), so an entry never moves
 	// across keys — add appends, delete swaps-and-shrinks. R242-GO-9 (#558).
 	jobsByChat map[chatJobKey][]*Job
+	// sortedJobIDs mirrors the keys of s.jobs in ascending ID order. It is
+	// maintained incrementally (binary-search insert on add, binary-search
+	// delete on remove) at the same s.mu-guarded seams that mutate s.jobs
+	// (addToChatIndexLocked / deleteJobLocked), so the per-mutation persist
+	// path no longer runs an O(N log N) slices.SortFunc inside the s.mu
+	// critical section — it iterates this already-sorted slice instead.
+	// R164029-PERF-9 (#1598).
+	//
+	// CORRECTNESS NOTE: s.jobs remains the single source of truth.
+	// marshalJobsLocked treats sortedJobIDs as a hint: it validates that the
+	// slice still matches s.jobs (same length, every ID present) and falls
+	// back to building+sorting from the map if it drifted. Production
+	// mutations all go through the two seams so the hint is always valid;
+	// the fallback only fires for test helpers that poke s.jobs directly
+	// (e.g. `s.jobs[id] = &Job{...}` without addToChatIndexLocked), which
+	// must never silently drop a job from the on-disk snapshot.
+	sortedJobIDs []string
 	// router is set once in NewScheduler and never reassigned.
 	router SessionRouter
 	// platforms / agents / agentCommands are populated from SchedulerConfig
@@ -584,9 +612,46 @@ type Scheduler struct {
 // output. Set is read-only after publication so callers can hand out
 // the map directly without copying. R250-PERF-7.
 type knownSessionsCache struct {
-	mu          sync.Mutex
+	mu          sync.RWMutex
 	generatedAt time.Time
 	set         map[string]struct{}
+}
+
+// lookupFresh returns the cached set when it is populated and still within
+// knownSessionsCacheTTL of generatedAt. ok is false on a cold or expired
+// cache. The returned map is the shared read-only snapshot (never mutated in
+// place — publish replaces it wholesale), so callers may hand it out directly.
+//
+// R249-CR-4 / R260528-ARCH-7 (#948 / #1368): the lock + TTL-check + read
+// triple was open-coded at containsSessionID + KnownSessionIDs; folding it
+// into a method on the cache type keeps the TTL gate in one place and lets the
+// cache own its own mutex instead of exposing c.mu to every Scheduler caller.
+func (c *knownSessionsCache) lookupFresh() (map[string]struct{}, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.set != nil && time.Since(c.generatedAt) < knownSessionsCacheTTL {
+		return c.set, true
+	}
+	return nil, false
+}
+
+// publish installs a freshly built set as the current snapshot and stamps
+// generatedAt to now. The set MUST NOT be mutated after publication — readers
+// from lookupFresh share it without copying.
+func (c *knownSessionsCache) publish(set map[string]struct{}) {
+	c.mu.Lock()
+	c.set = set
+	c.generatedAt = time.Now()
+	c.mu.Unlock()
+}
+
+// invalidate drops the snapshot so the next lookupFresh misses and forces a
+// rebuild. Cheap (one mutex + nil assign) so mutator paths call it
+// unconditionally.
+func (c *knownSessionsCache) invalidate() {
+	c.mu.Lock()
+	c.set = nil
+	c.mu.Unlock()
 }
 
 // knownSessionsCacheTTL bounds how stale a cached KnownSessionIDs
@@ -1320,9 +1385,7 @@ func (s *Scheduler) Start() error {
 		}
 		if j.Paused {
 			s.jobs[j.ID] = j
-			key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
-			s.chatJobCount[key]++
-			s.jobsByChat[key] = append(s.jobsByChat[key], j)
+			s.addToChatIndexLocked(j)
 			stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 			continue
 		}
@@ -1331,9 +1394,7 @@ func (s *Scheduler) Start() error {
 			continue
 		}
 		s.jobs[j.ID] = j
-		key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
-		s.chatJobCount[key]++
-		s.jobsByChat[key] = append(s.jobsByChat[key], j)
+		s.addToChatIndexLocked(j)
 		stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 	}
 	jobCount := len(s.jobs)

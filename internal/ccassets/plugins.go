@@ -2,6 +2,8 @@ package ccassets
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,11 +34,6 @@ type pluginManifest struct {
 	Commands []string `json:"commands"`
 }
 
-// knownMarketplaces mirrors ~/.claude/plugins/known_marketplaces.json.
-type knownMarketplaces struct {
-	entries map[string]marketplaceSource
-}
-
 type marketplaceSource struct {
 	Source struct {
 		Source string `json:"source"`
@@ -50,7 +47,7 @@ func readInstalledPlugins(home string) (*installedPlugins, error) {
 	path := filepath.Join(home, "plugins", "installed_plugins.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err

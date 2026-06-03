@@ -1067,11 +1067,7 @@ func parseKiroMetadata(params json.RawMessage) (Event, bool, error) {
 	if len(raw.MeteringUsage) > 0 {
 		meta.MeteringUsage = make([]MeteringEntry, 0, len(raw.MeteringUsage))
 		for _, m := range raw.MeteringUsage {
-			meta.MeteringUsage = append(meta.MeteringUsage, MeteringEntry{
-				Value:      m.Value,
-				Unit:       m.Unit,
-				UnitPlural: m.UnitPlural,
-			})
+			meta.MeteringUsage = append(meta.MeteringUsage, MeteringEntry(m))
 		}
 	}
 	return Event{

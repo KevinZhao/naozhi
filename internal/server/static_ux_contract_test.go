@@ -20,6 +20,8 @@
 package server
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"regexp"
 	"strconv"
@@ -5613,6 +5615,28 @@ func TestServiceWorker_RNEW_UX005_Contract(t *testing.T) {
 	// the SW as controlling — without it, "Add to Home Screen" breaks.
 	if !regexp.MustCompile(`addEventListener\(\s*['"]fetch['"]`).MatchString(src) {
 		t.Error("sw.js missing fetch event listener (required for PWA installability)")
+	}
+}
+
+// TestServiceWorker_R20260602190132_SEC2_NoServiceWorkerAllowed pins the
+// R20260602190132-SEC-2 (#1603) fix: handleSW must NOT emit a
+// `Service-Worker-Allowed` header. The header only broadens the max SW
+// scope above the script's own directory; /sw.js already lives at root so
+// its default scope is "/" regardless, making the header a redundant
+// explicit root-scope grant that an unauthenticated scanner could read as
+// a registration hint. Removing it does not change the effective scope.
+func TestServiceWorker_R20260602190132_SEC2_NoServiceWorkerAllowed(t *testing.T) {
+	t.Parallel()
+	req := httptest.NewRequest(http.MethodGet, "/sw.js", nil)
+	rec := httptest.NewRecorder()
+	handleSW(rec, req)
+	res := rec.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("handleSW status = %d, want %d", res.StatusCode, http.StatusOK)
+	}
+	if got := res.Header.Get("Service-Worker-Allowed"); got != "" {
+		t.Errorf("handleSW set Service-Worker-Allowed=%q; want it absent (R20260602190132-SEC-2 #1603 — header is a redundant root-scope grant)", got)
 	}
 }
 

@@ -176,8 +176,15 @@ var publicTmpDeniedSuffixes = []string{
 // suffix (e.g. `ssh-agent.<pid>`, `core.1234`, `crash.report`). The
 // match is case-insensitive on the basename. See publicTmpDeniedSuffixes
 // for the rationale.
+//
+// "gpg" covers gpg-agent socket artefacts (e.g. `S.gpg-agent`, `S.gpg-agent.extra`).
+// ".xauthority" covers the X11 authority file that holds MIT-MAGIC-COOKIE tokens.
+// ".dbus" covers D-Bus session socket artefacts (e.g. `.dbus-keyrings`).
 var publicTmpDeniedSubstrings = []string{
 	"ssh",
+	"gpg",
+	".xauthority",
+	".dbus",
 }
 
 // publicTmpDeniedPrefixes catches dump/crash artefacts whose names start
@@ -413,7 +420,7 @@ func resolveProjectFileWithRoot(rootResolved, rel string) (string, error) {
 	// prefix check below is defence-in-depth, but collapsing `a/../x` up
 	// front avoids calling os.Stat on obviously hostile paths at all.
 	cleaned := filepath.Clean(rel)
-	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
 		return "", errors.New("path escapes workspace")
 	}
 	full := filepath.Join(rootResolved, cleaned)

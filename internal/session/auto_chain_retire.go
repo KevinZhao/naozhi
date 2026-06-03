@@ -86,8 +86,8 @@ func (r *Router) retireAutoChainOnce() {
 	if retired > 0 {
 		r.mu.Lock()
 		r.storeDirty = true
-		r.mu.Unlock()
 		r.storeGen.Add(1)
+		r.mu.Unlock()
 	}
 
 	slog.Info("auto-chain retire complete",

@@ -301,6 +301,19 @@ type Router struct {
 	// Nil in test-created routers; all helpers below are nil-safe.
 	// 读写: core (indexAdd/Del helpers), lifecycle (ResetChat/install/unregister), cleanup, discovery
 	sessionsByChat map[string]map[string]struct{}
+	// keyhashToKey is a secondary index: persist.KeyHash(sessionKey) → sessionKey.
+	// #1646: the attachment tracker's workspace resolver runs on every
+	// persisted image-bearing event (potentially several per Send) and used to
+	// hold r.mu.RLock while linearly scanning r.sessions, recomputing a SHA-256
+	// KeyHash for every session, to find the one whose hash matched. This index
+	// turns that O(N)-hashes scan into an O(1) lookup. Maintained at the publish
+	// funnel + indexDel; the resolver self-heals on miss (it re-verifies the
+	// hit against r.sessions and falls back to a one-off scan that re-populates
+	// this map), so a delete site that bypasses indexDel only costs one extra
+	// scan rather than returning a wrong workspace.
+	// Nil in test-created routers; helpers are nil-safe.
+	// 读写: core (indexAdd/Del helpers + resolver), lifecycle (install/unregister)
+	keyhashToKey map[string]string
 	// 读写: core (init), backend (wrapperFor), lifecycle (spawn)
 	wrapper *cli.Wrapper // default (legacy single-backend) wrapper
 	// 读写: core (init), backend (wrapperFor/managerFor/BackendIDs), lifecycle, shim
@@ -723,6 +736,11 @@ func resolveResumeID(claudeDir, workspace, key, resumeID string) string {
 // indexAdd adds key to the chat→sessions index. No-op when index is nil.
 // Must be called under r.mu.
 func (r *Router) indexAdd(key string) {
+	// #1646: keyhash → key fast-path for the attachment tracker resolver.
+	// Independent of sessionsByChat (the latter is nil in some test routers).
+	if r.keyhashToKey != nil {
+		r.keyhashToKey[persist.KeyHash(key)] = key
+	}
 	if r.sessionsByChat == nil {
 		return
 	}
@@ -738,6 +756,16 @@ func (r *Router) indexAdd(key string) {
 // indexDel removes key from the chat→sessions index. No-op when index is nil.
 // Must be called under r.mu.
 func (r *Router) indexDel(key string) {
+	// #1646: drop the keyhash → key fast-path entry. Guarded against the
+	// case where a different key happens to map to the same stored hash
+	// (impossible for SHA-256 in practice, but the equality check keeps the
+	// invariant exact): only delete when the stored key matches.
+	if r.keyhashToKey != nil {
+		kh := persist.KeyHash(key)
+		if r.keyhashToKey[kh] == key {
+			delete(r.keyhashToKey, kh)
+		}
+	}
 	if r.sessionsByChat == nil {
 		return
 	}
@@ -935,6 +963,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	r := &Router{
 		sessions:           make(map[string]*ManagedSession),
 		sessionsByChat:     make(map[string]map[string]struct{}),
+		keyhashToKey:       make(map[string]string),
 		wrapper:            defaultWrapper,
 		wrappers:           wrappers,
 		defaultBackend:     defaultBackend,
@@ -1632,6 +1661,17 @@ func (r *Router) GetSession(key string) *ManagedSession {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.sessions[key]
+}
+
+// DiscardPassthroughPending fires reason to any in-flight passthrough sends
+// for the keyed session; a no-op when no session exists for the key. Wraps
+// GetSession + ManagedSession.DiscardPassthroughPending so consumers
+// (dispatch.discardQueue) clear pending slots through the router seam rather
+// than dereferencing the concrete *ManagedSession (#1612).
+func (r *Router) DiscardPassthroughPending(key string, reason error) {
+	if sess := r.GetSession(key); sess != nil {
+		sess.DiscardPassthroughPending(reason)
+	}
 }
 
 // runHistoryTask launches fn in a goroutine tracked by r.historyWg,

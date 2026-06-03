@@ -728,11 +728,35 @@ func TestFlattenAssistantEvent_ToolInputSizeCap(t *testing.T) {
 	if len(out2[0].Input) > maxToolInputBytes {
 		t.Errorf("big input: Input bytes=%d, must be <= maxToolInputBytes=%d after truncation", len(out2[0].Input), maxToolInputBytes)
 	}
-	// Summary derives from a probe-Unmarshal of the original Input bytes
-	// before truncation (capped to 200 chars by SanitizeForLog), so the
-	// timeline label still surfaces even though raw Input was dropped.
-	if out2[0].Summary == "" {
-		t.Errorf("big input: summary empty; expected probe-derived label to survive cap")
+	// R20260602141221-SEC-9 (#1584): an Input this large (> summariseInputCap)
+	// is now rejected before json.Unmarshal, so the timeline label is dropped
+	// rather than driving the parser through the attacker-influenced blob. The
+	// wire payload is independently [truncated] above.
+	if out2[0].Summary != "" {
+		t.Errorf("big input: summary=%q, want empty (oversize Input must short-circuit the unmarshal cap)", out2[0].Summary)
+	}
+
+	// A probe-derived label still survives for an Input that exceeds the wire
+	// payload cap but stays within summariseInputCap — the timeline keeps its
+	// one-liner even when the raw Input is [truncated]. Since the cap now sits
+	// below maxToolInputBytes, this case only exists if the wire cap is raised
+	// above summariseInputCap; guard it explicitly so the contract is pinned.
+	if maxToolInputBytes > summariseInputCap {
+		midPad := strings.Repeat("z", summariseInputCap/2)
+		midInput := `{"command":"` + midPad + `"}`
+		midEv := &claudeJSONLEvent{
+			Type: "assistant",
+			Message: json.RawMessage(`{"role":"assistant","content":[` +
+				`{"type":"tool_use","id":"tu_c","name":"Bash","input":` + midInput + `}` +
+				`]}`),
+		}
+		out3, _, _, parsed3 := flattenAssistantEvent(midEv, 0, 0)
+		if !parsed3 || len(out3) != 1 {
+			t.Fatalf("mid input: parsed=%v len(out)=%d (want true / 1)", parsed3, len(out3))
+		}
+		if out3[0].Summary == "" {
+			t.Errorf("mid input: summary empty; label should survive when Input is within summariseInputCap")
+		}
 	}
 }
 
@@ -792,8 +816,8 @@ func TestSummariseToolInput_FallbackUsesRawBytes(t *testing.T) {
 	//    rejected before json.Unmarshal so a hostile/malformed transcript
 	//    line cannot drive the parser through a deeply-nested megabyte
 	//    blob just to populate a 200-byte label that the wire layer
-	//    truncates anyway. Build a 64 KB+1 byte payload (one byte over
-	//    the cap) shaped as valid JSON with a recognised priority field;
+	//    truncates anyway. Build a summariseInputCap+1 byte payload (one
+	//    byte over the cap) shaped as valid JSON with a recognised priority field;
 	//    the cap must short-circuit BEFORE the priority path runs, so
 	//    even a recognised key returns empty here.
 	oversize := make([]byte, summariseInputCap+1)
@@ -813,7 +837,7 @@ func TestSummariseToolInput_FallbackUsesRawBytes(t *testing.T) {
 	}
 
 	// 6. Inputs exactly at the cap are still summarised (boundary off-by-one
-	//    guard). A 64 KB payload that fits within summariseInputCap should
+	//    guard). A payload that fits exactly within summariseInputCap should
 	//    produce the priority label.
 	atCap := make([]byte, summariseInputCap)
 	atCap[0] = '{'
@@ -824,6 +848,19 @@ func TestSummariseToolInput_FallbackUsesRawBytes(t *testing.T) {
 	atCap[len(atCap)-1] = '}'
 	if got := summariseToolInput("Bash", atCap); !strings.Contains(got, "ls") {
 		t.Errorf("at-cap input (%d bytes == cap): summary=%q, want to contain priority label", len(atCap), got)
+	}
+
+	// 7. R20260602141221-SEC-9 (#1584): the unmarshal cap must stay well
+	//    below the wire payload limit so a hostile transcript cannot
+	//    amplify json.Unmarshal cost. The probe only needs a few KB to
+	//    surface a label, so guard against a future bump that re-inflates
+	//    the attacker-influenced JSON fed to the parser.
+	if summariseInputCap > maxToolInputBytes {
+		t.Errorf("summariseInputCap=%d must be <= maxToolInputBytes=%d to bound json.Unmarshal amplification (#1584)",
+			summariseInputCap, maxToolInputBytes)
+	}
+	if summariseInputCap > 16*1024 {
+		t.Errorf("summariseInputCap=%d exceeds the 16 KB ceiling set by #1584; a one-line label never needs more", summariseInputCap)
 	}
 }
 

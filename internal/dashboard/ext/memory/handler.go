@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	dashproject "github.com/naozhi/naozhi/internal/dashboard/project"
@@ -27,6 +29,21 @@ import (
 // Path safety: the slug is validated against memorySlugRE (alphanumeric / _ / -,
 // 1-64 chars) and the resolved path is re-checked with strings.HasPrefix on
 // projectsDir; both gates must pass before we read.
+// negCacheTTL is the duration for which a slug that was not found in any
+// project directory is remembered as "not found", avoiding repeated full
+// ReadDir scans within the same TTL window.
+// R20260602141221-SEC-10.
+const negCacheTTL = 30 * time.Second
+
+// maxNegCacheEntries caps the total number of entries in the negative cache.
+// R220123-SEC-4: defence-in-depth against slug-spray attacks — an authenticated
+// caller that fires unique valid slugs at rate R fills at most
+// R*negCacheTTL entries before the TTL starts evicting them, but without a
+// hard cap the map could grow to O(rate × TTL) unbounded. When the cap is
+// reached we simply skip insertion (no caching, return not-found immediately)
+// rather than maintaining an LRU, keeping the implementation minimal.
+const maxNegCacheEntries = 4096
+
 type Handler struct {
 	projectsDir    string
 	currentProject string
@@ -47,6 +64,13 @@ type Handler struct {
 	// stays accepted exactly as before.
 	resolvedPrefix      string
 	resolvedPrefixNoSep string
+
+	// R20260602141221-SEC-10: short-TTL negative cache keyed on slug. When a
+	// full ReadDir scan finds no match, we record the deadline here so
+	// subsequent requests within the TTL skip the expensive disk scan and
+	// return "not found" immediately, preventing DoS via repeated cache-miss.
+	negCacheMu sync.RWMutex
+	negCache   map[string]time.Time
 }
 
 var memorySlugRE = regexp.MustCompile(`^[a-zA-Z0-9_\-]{1,64}$`)
@@ -207,6 +231,16 @@ func (h *Handler) lookup(slug string) (memoryResponse, error) {
 		}
 	}
 
+	// R20260602141221-SEC-10: check negative cache before doing a full ReadDir.
+	// A miss within the TTL means we already scanned all project dirs and found
+	// nothing; skip the expensive scan and return "not found" immediately.
+	h.negCacheMu.RLock()
+	if deadline, ok := h.negCache[slug]; ok && time.Now().Before(deadline) {
+		h.negCacheMu.RUnlock()
+		return memoryResponse{Found: false, Slug: slug}, nil
+	}
+	h.negCacheMu.RUnlock()
+
 	entries, err := os.ReadDir(h.projectsDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -242,6 +276,29 @@ func (h *Handler) lookup(slug string) (memoryResponse, error) {
 			return *hit, nil
 		}
 	}
+
+	// Nothing found in full scan — record negative cache entry.
+	// Sweep expired entries first (sweep-on-write) so the map cannot grow
+	// without bound when an attacker sprays unique valid slugs.
+	h.negCacheMu.Lock()
+	if h.negCache == nil {
+		h.negCache = make(map[string]time.Time)
+	} else {
+		now := time.Now()
+		for k, dl := range h.negCache {
+			if now.After(dl) {
+				delete(h.negCache, k)
+			}
+		}
+	}
+	// R220123-SEC-4: after sweeping expired entries, only insert if the map is
+	// still below the hard cap. This prevents unbounded memory growth when a
+	// caller sprays unique valid slugs faster than the TTL evicts them.
+	if len(h.negCache) < maxNegCacheEntries {
+		h.negCache[slug] = time.Now().Add(negCacheTTL)
+	}
+	h.negCacheMu.Unlock()
+
 	return memoryResponse{Found: false, Slug: slug}, nil
 }
 

@@ -13,7 +13,6 @@ import (
 	"strings"
 	"testing"
 
-
 	"github.com/naozhi/naozhi/internal/project"
 )
 
@@ -62,6 +61,9 @@ func TestResolveProjectFile_Traversal(t *testing.T) {
 		{"deep traversal", "a/../../x"},
 		{"abs path", "/etc/passwd"},
 		{"null byte", "foo\x00.go"},
+		// R20260602141221-SEC-8: path="." cleans to "." and joins to rootResolved
+		// itself, leaking root dir metadata via statRel.
+		{"dot leaks root", "."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

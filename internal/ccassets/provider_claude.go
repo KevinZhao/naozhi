@@ -13,6 +13,9 @@
 package ccassets
 
 import (
+	"errors"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -54,8 +57,14 @@ func (p *ClaudeProvider) Scan(req assets.ScanRequest) (*assets.Inventory, error)
 	// 1b) User-level agents / commands (convention dirs under ~/.claude).
 	if req.Home != "" {
 		ua := assets.Source{Kind: "user"}
-		ag, _ := scanMarkdownDir(filepath.Join(req.Home, "agents"), "agent", "agents/", ua)
-		cmd, _ := scanMarkdownDir(filepath.Join(req.Home, "commands"), "command", "commands/", ua)
+		ag, err := scanMarkdownDir(filepath.Join(req.Home, "agents"), "agent", "agents/", ua)
+		if err != nil {
+			slog.Warn("ccassets: failed to scan user agents dir", "dir", filepath.Join(req.Home, "agents"), "err", err)
+		}
+		cmd, err := scanMarkdownDir(filepath.Join(req.Home, "commands"), "command", "commands/", ua)
+		if err != nil {
+			slog.Warn("ccassets: failed to scan user commands dir", "dir", filepath.Join(req.Home, "commands"), "err", err)
+		}
 		inv.Assets = append(inv.Assets, ag...)
 		inv.Assets = append(inv.Assets, cmd...)
 	}
@@ -164,7 +173,7 @@ func (p *ClaudeProvider) scanPlugins(home string) ([]assets.Asset, []assets.Plug
 func scanSkillDir(root, relPrefix string, src assets.Source) ([]assets.Asset, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -205,14 +214,14 @@ func (p *ClaudeProvider) ReadRaw(req assets.RawRequest) ([]byte, error) {
 	}
 	resolved, err := resolveUnder(root, rel)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, assets.ErrNotFound
 		}
 		return nil, err
 	}
 	raw, err := readCapped(resolved, maxRawBytes)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, assets.ErrNotFound
 		}
 		return nil, err

@@ -223,6 +223,22 @@ projects:
   planner_defaults:
     model: "sonnet"
 
+# Auto-update: a background goroutine polls GitHub Releases and reuses the
+# same verified flow as `naozhi upgrade` (download → SHA-256 → atomic swap).
+# Defaults to enabled with mode "download" (stage the new binary, apply on
+# next restart). Set enabled: false to turn it off entirely.
+#update:
+#  enabled: true          # default true; set false to disable the checker
+#  mode: "download"       # notify | download | auto
+#                         #   notify   — log + IM notice only
+#                         #   download — replace binary, apply on next restart
+#                         #   auto     — replace binary AND restart now
+#  interval: "6h"         # check cadence (>=1h floor)
+#  check_on_start: false  # run one check ~30s after startup
+#  notify:                # optional IM target for update notices
+#    platform: "feishu"
+#    chat_id: "oc_xxxxx"
+
 # Reverse-connect nodes: remote machines dial in to this primary (NAT traversal).
 # Each entry is node_id: {token, display_name}. Token must match upstream.token on the remote.
 #reverse_nodes:
@@ -235,5 +251,5 @@ projects:
 #upstream:
 #  url: "wss://primary.example.com/ws-node"
 #  node_id: "macbook"
-#  token: "your-secret-token"
+#  token: "${UPSTREAM_TOKEN}"
 #  display_name: "MacBook Pro"

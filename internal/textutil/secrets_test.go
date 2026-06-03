@@ -171,6 +171,78 @@ func TestRedactSecrets_GCP(t *testing.T) {
 	}
 }
 
+// TestRedactSecrets_R20260602SEC4 verifies the prefixes added in
+// R20260602-SEC-4 / R164029-SEC-5: Databricks (dapi), HCP Vault (hvs.),
+// Stripe secret (sk_live_/sk_test_) and Stripe restricted (rk_live_/rk_test_)
+// keys are redacted, while short tails below minTail and bare-prefix prose
+// stay intact.
+func TestRedactSecrets_R20260602SEC4(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "Databricks PAT",
+			in:   "token dapi1234567890abcdef1234567890ab done",
+			want: "token [REDACTED] done",
+		},
+		{
+			name: "Databricks short tail not redacted",
+			in:   "see dapishort for details",
+			want: "see dapishort for details",
+		},
+		{
+			name: "HCP Vault service token",
+			in:   "auth hvs.AAAAABBBBBCCCCCDDDDDEEEEEFFFFFF1234 ok",
+			want: "auth [REDACTED] ok",
+		},
+		{
+			name: "HCP Vault short tail not redacted",
+			in:   "see hvs.short here",
+			want: "see hvs.short here",
+		},
+		{
+			name: "Stripe live secret key",
+			in:   "STRIPE_SECRET_KEY=sk_live_abcdefghij0123456789 used",
+			want: "STRIPE_SECRET_KEY=[REDACTED] used",
+		},
+		{
+			name: "Stripe test secret key",
+			in:   "STRIPE_TEST_KEY=sk_test_abcdefghij0123456789 used",
+			want: "STRIPE_TEST_KEY=[REDACTED] used",
+		},
+		{
+			name: "Stripe secret short tail not redacted",
+			in:   "sk_live_short is not a key",
+			want: "sk_live_short is not a key",
+		},
+		{
+			name: "Stripe restricted live key",
+			in:   "STRIPE_KEY=rk_live_abcdefghij0123456789 used",
+			want: "STRIPE_KEY=[REDACTED] used",
+		},
+		{
+			name: "Stripe restricted test key",
+			in:   "STRIPE_KEY=rk_test_abcdefghij0123456789 used",
+			want: "STRIPE_KEY=[REDACTED] used",
+		},
+		{
+			name: "rk_ alongside sk_live_ in one line",
+			in:   "live=sk_live_abcdefghij0123456789 restricted=rk_live_abcdefghij0123456789",
+			want: "live=[REDACTED] restricted=[REDACTED]",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := RedactSecrets(tc.in)
+			if got != tc.want {
+				t.Errorf("RedactSecrets(%q)\n  got  = %q\n  want = %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRedactSecrets_Negative ensures benign output is returned aliased (no
 // allocation, no spurious matches). R234-SEC-7 (#1006).
 func TestRedactSecrets_Negative(t *testing.T) {
@@ -223,6 +295,9 @@ func TestMayContainSecretPrefix_FirstBytes(t *testing.T) {
 		"AKIAIOSFODNN7EXAMPLE",
 		"xoxb-1234567890",
 		"ya29.AAAA0123456789abcdef",
+		"dapi1234567890abcdef",         // 'd' — Databricks
+		"hvs.AAAA0123456789",           // 'h' — HCP Vault
+		"rk_live_abcdefghij0123456789", // 'r' — Stripe restricted
 	}
 	for _, in := range truthy {
 		if !mayContainSecretPrefix(in) {
@@ -231,8 +306,8 @@ func TestMayContainSecretPrefix_FirstBytes(t *testing.T) {
 	}
 	falsy := []string{
 		"",
-		"plai du", // no s/g/A/x/h/n first bytes
-		"402",
+		"402 ok",     // none of s/g/A/x/h/n/y/d/r first bytes
+		"quit + lib", // benign tokens, no trigger byte
 	}
 	for _, in := range falsy {
 		if mayContainSecretPrefix(in) {

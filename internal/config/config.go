@@ -76,6 +76,7 @@ type Config struct {
 	Log        LogConfig         `yaml:"log"`
 	Projects   ProjectsConfig    `yaml:"projects"`
 	Sysession  SysessionConfig   `yaml:"sysession,omitempty"`
+	Update     UpdateConfig      `yaml:"update,omitempty"`
 
 	// Cached parsed durations (populated once in Load, avoids repeated ParseDuration)
 	cachedTTL             time.Duration `yaml:"-"`
@@ -85,6 +86,7 @@ type Config struct {
 	cachedExecTimeout     time.Duration `yaml:"-"`
 	cachedCollectDelay    time.Duration `yaml:"-"`
 	cachedJitterMax       time.Duration `yaml:"-"`
+	cachedInterval        time.Duration `yaml:"-"`
 }
 
 // WorkspaceConfig identifies this naozhi instance.
@@ -273,6 +275,24 @@ type PlatformConfigs struct {
 	Weixin  *WeixinConfig  `yaml:"weixin"`
 }
 
+// hasPlatform reports whether the named platform has a configured section.
+// Returns false for unknown names so new platforms are treated as
+// unconfigured rather than silently accepted. [R20260602-ARCH-1]
+func (c *Config) hasPlatform(name string) bool {
+	switch name {
+	case "feishu":
+		return c.Platforms.Feishu != nil
+	case "slack":
+		return c.Platforms.Slack != nil
+	case "discord":
+		return c.Platforms.Discord != nil
+	case "weixin":
+		return c.Platforms.Weixin != nil
+	default:
+		return false
+	}
+}
+
 type FeishuConfig struct {
 	AppID             string `yaml:"app_id"`
 	AppSecret         string `yaml:"app_secret"`
@@ -315,6 +335,50 @@ type CronConfig struct {
 type CronNotifyTarget struct {
 	Platform string `yaml:"platform"` // "feishu" / "slack" / "discord" / "weixin"
 	ChatID   string `yaml:"chat_id"`
+}
+
+// UpdateConfig configures the in-process auto-update checker. When enabled,
+// a background goroutine periodically queries GitHub Releases and, per Mode,
+// notifies / downloads+installs / downloads+installs+restarts.
+//
+// Default is Enabled=true with Mode="download": pick up new releases and
+// stage them, but do NOT surprise-restart and drop live sessions — the new
+// binary takes effect on the next restart. The underlying selfupdate flow
+// (download → SHA-256 verify → atomic replace → backup) is shared with the
+// manual `naozhi upgrade` command.
+type UpdateConfig struct {
+	// Enabled is the master switch. nil (unset) defaults to true; set
+	// `enabled: false` to turn the checker off entirely.
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// Mode selects what happens when a newer release is found:
+	//   "notify"             — log + optional IM notice, no binary change.
+	//   "download" (default) — download, verify, atomically replace the
+	//                          binary; do NOT restart (applies next boot).
+	//   "auto"               — download, verify, replace, AND restart.
+	// Unknown values fall back to "download" (the configured default).
+	Mode string `yaml:"mode,omitempty"`
+
+	// Interval is how often to check for a newer release (Go duration,
+	// e.g. "6h"). Default 6h. A value below the 1h floor is clamped up
+	// to protect GitHub from accidental tight loops.
+	Interval string `yaml:"interval,omitempty"`
+
+	// CheckOnStart runs one check shortly after startup instead of waiting
+	// a full Interval. Default false so a restart loop on a bad release
+	// can't immediately re-trigger an auto-update.
+	CheckOnStart bool `yaml:"check_on_start,omitempty"`
+
+	// Notify is the IM target for update notices (new version found, or
+	// a download/install outcome). Empty fields disable IM delivery
+	// (the check still logs).
+	Notify CronNotifyTarget `yaml:"notify,omitempty"`
+}
+
+// UpdateEnabled reports whether the auto-update checker should run. nil
+// (unset in YAML) defaults to true; an explicit `enabled: false` disables it.
+func (c *Config) UpdateEnabled() bool {
+	return c.Update.Enabled == nil || *c.Update.Enabled
 }
 
 // SysessionConfig configures the system-session daemon framework
@@ -594,6 +658,22 @@ func applyDefaults(cfg *Config) {
 		slog.Warn("'session.auto_chain' is deprecated and has no effect; the feature was replaced by project-stable session keys — remove this block from config")
 	}
 
+	if cfg.UpdateEnabled() {
+		if cfg.Update.Mode == "" {
+			cfg.Update.Mode = "download"
+		}
+		switch cfg.Update.Mode {
+		case "notify", "download", "auto":
+		default:
+			slog.Warn("update.mode unrecognized, falling back to download",
+				"mode", cfg.Update.Mode)
+			cfg.Update.Mode = "download"
+		}
+		if cfg.Update.Interval == "" {
+			cfg.Update.Interval = "6h"
+		}
+	}
+
 	cfg.Normalize()
 
 	if cfg.Workspace.ID == "" {
@@ -655,8 +735,24 @@ func parseDurations(cfg *Config) error {
 			"requested", cfg.cachedJitterMax, "cap", cronJitterMaxHardCap)
 		cfg.cachedJitterMax = cronJitterMaxHardCap
 	}
+	if cfg.UpdateEnabled() {
+		if cfg.cachedInterval, err = parseDurationRequired(cfg.Update.Interval, "update.interval", 6*time.Hour); err != nil {
+			return err
+		}
+		// 1h floor: a tighter loop hammers GitHub for no benefit (releases
+		// don't ship minute-to-minute). Clamp + warn rather than fail.
+		if cfg.cachedInterval < time.Hour {
+			slog.Warn("update.interval below 1h floor, clamping",
+				"requested", cfg.cachedInterval, "floor", time.Hour)
+			cfg.cachedInterval = time.Hour
+		}
+	}
 	return nil
 }
+
+// UpdateInterval returns the parsed, clamped auto-update check interval.
+// Valid only when Update.Enabled; returns 0 otherwise.
+func (c *Config) UpdateInterval() time.Duration { return c.cachedInterval }
 
 func validateConfig(cfg *Config) error {
 	// A config declaring a schema newer than this binary understands would be
@@ -792,6 +888,9 @@ func validateConfig(cfg *Config) error {
 		if containsEnvPlaceholder(cfg.Upstream.Token) {
 			return fmt.Errorf("upstream.token contains unexpanded ${VAR} — check environment variables")
 		}
+		if cfg.Upstream.Token == "your-secret-token" {
+			return fmt.Errorf("upstream.token is set to the example placeholder \"your-secret-token\" — replace it with a real secret")
+		}
 	}
 
 	for id, entry := range cfg.ReverseNodes {
@@ -819,19 +918,19 @@ func validateConfig(cfg *Config) error {
 	// operators only discover the misconfig once a notification actually
 	// fires. An empty platform disables the default entirely and is legal.
 	if np := cfg.Cron.NotifyDefault.Platform; np != "" {
-		ok := false
-		switch np {
-		case "feishu":
-			ok = cfg.Platforms.Feishu != nil
-		case "slack":
-			ok = cfg.Platforms.Slack != nil
-		case "discord":
-			ok = cfg.Platforms.Discord != nil
-		case "weixin":
-			ok = cfg.Platforms.Weixin != nil
-		}
-		if !ok {
+		if !cfg.hasPlatform(np) {
 			return fmt.Errorf("cron.notify_default.platform %q is not a configured platform (set platforms.%s or clear notify_default)", np, np)
+		}
+	}
+
+	// R20260602141221-CR-1: mirror the cron.notify_default.platform check for
+	// update.notify.platform — an empty value is legal (disables IM delivery),
+	// but a non-empty value that names a platform without a configured section
+	// silently falls through all delivery attempts and the operator only
+	// discovers the typo when an upgrade occurs.
+	if np := cfg.Update.Notify.Platform; np != "" {
+		if !cfg.hasPlatform(np) {
+			return fmt.Errorf("update.notify.platform %q is not a configured platform (set platforms.%s or clear update.notify)", np, np)
 		}
 	}
 

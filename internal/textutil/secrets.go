@@ -52,7 +52,9 @@ type secretPrefix struct {
 // (`sk-proj-` / `sk-`), GitHub PAT/OAuth (`ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_`),
 // GitHub fine-grained (`github_pat_`), GitLab (`glpat-`), AWS access keys
 // (`AKIA`/`ASIA`), Slack (`xoxb-`/`xoxp-`/`xoxa-`/`xoxs-`), HuggingFace
-// (`hf_`), npm (`npm_`), GCP / Google OAuth access tokens (`ya29.`).
+// (`hf_`), npm (`npm_`), GCP / Google OAuth access tokens (`ya29.`),
+// Databricks (`dapi`), HashiCorp Vault (`hvs.`), Stripe secret + restricted
+// keys (`sk_live_`/`sk_test_`/`rk_live_`/`rk_test_`).
 var secretPrefixes = []secretPrefix{
 	{prefix: "sk-ant-", minTail: 8},
 	{prefix: "sk-proj-", minTail: 16},
@@ -73,6 +75,23 @@ var secretPrefixes = []secretPrefix{
 	{prefix: "xoxs-", minTail: 16},
 	{prefix: "hf_", minTail: 16},
 	{prefix: "ya29.", minTail: 16},
+	// Databricks personal-access tokens (`dapi…`). Always 32 hex chars
+	// following the 4-byte prefix.
+	{prefix: "dapi", minTail: 16},
+	// HashiCorp Cloud Platform (HCP) Vault service tokens (`hvs.…`). The
+	// `.` is part of the prefix; the base64url body that follows may
+	// contain `-` and `_` which isSecretTokenByte handles.
+	{prefix: "hvs.", minTail: 16},
+	// Stripe live and test secret keys (`sk_live_…` / `sk_test_…`).
+	// Placed after the bare `sk-` family to avoid prefix-order confusion;
+	// these use underscores and are unambiguously Stripe-shaped.
+	{prefix: "sk_live_", minTail: 16},
+	{prefix: "sk_test_", minTail: 16},
+	// Stripe restricted keys (`rk_live_…` / `rk_test_…`). Restricted keys
+	// carry a scoped subset of secret-key permissions but can still initiate
+	// Stripe API calls, so leaking them is equally sensitive.
+	{prefix: "rk_live_", minTail: 16},
+	{prefix: "rk_test_", minTail: 16},
 }
 
 // secretRedactedMarker replaces matched secret bytes. Distinct from
@@ -146,10 +165,10 @@ func isSecretTokenByte(b byte) bool {
 // of any registered prefix appears in s. Lets the common no-secret path skip
 // the full prefix walk + string Builder allocation.
 //
-// First-byte set: 's' (sk-…), 'g' (ghp_/gho_/…/glpat-), 'A' (AKIA/ASIA),
-// 'x' (xoxb-/…), 'h' (hf_), 'n' (npm_), 'y' (ya29.). Keep in sync with
-// secretPrefixes. strings.IndexAny uses a SIMD-backed byteset scan on
-// amd64/arm64.
+// First-byte set: 's' (sk-…/sk_live_/sk_test_), 'g' (ghp_/gho_/…/glpat-),
+// 'A' (AKIA/ASIA), 'x' (xoxb-/…), 'h' (hf_/hvs.), 'n' (npm_), 'y' (ya29.),
+// 'd' (dapi), 'r' (rk_live_/rk_test_). Keep in sync with secretPrefixes.
+// strings.IndexAny uses a SIMD-backed byteset scan on amd64/arm64.
 func mayContainSecretPrefix(s string) bool {
-	return strings.IndexAny(s, "sgAxhny") >= 0
+	return strings.IndexAny(s, "sgAxhnydr") >= 0
 }

@@ -406,3 +406,63 @@
 - [R20260602-091302-PERF-1] sessionSink.accept 每批 alloc owned+spans 两片，可加 sync.Pool — internal/eventlog/persist/persister.go:554
 - [R20260602-091302-PERF-2] newEventLogSink 多 entry 批每次 alloc spans/times/out 三片，可加 bridgeBatchScratch pool — internal/session/eventlog_bridge.go:183
 - [R20260602-091302-GO-12] slogPrintfLogger.Printf 注释方向写反(Error>Warn)，第二个 Enabled 冗余 — internal/cron/scheduler.go:1935
+- [R20260602-GO-1] recordTerminalResult 手动 mutex Unlock 配对，未来新增 return 分支有死锁风险 — internal/cron/scheduler_finish.go:569
+- [R20260602-GO-2] unsub 在 subMu 锁外 close(sub.ch)，靠 RLock-around-send 防护仅注释非机械约束 — internal/cli/eventlog_subscribe.go:217
+- [R20260602-GO-10] NotifyCtx(nil) 刻意忽略 parent，SA1012 误报，建议签名 godoc 标 parent may be nil — internal/dispatch/dispatch.go:1017
+- [R20260602-GO-11] redactPathsInCronError 截断后冗余第二次 hasNoPathTrigger 扫描 — internal/cron/scheduler_finish.go:716
+- [R20260602-GO-12] sysession runner BinPath 绝对路径两次 os.Stat 重复校验 — internal/sysession/runner.go:137
+- [R20260602-ARCH-1] RedactSecrets 通用安全 util 错置 cron 域包，可移至 leaf textutil — internal/cron/redact_secrets.go:120
+- [R20260602-ARCH-2] wireup.Registry[T] 泛型零生产消费者，premature generalization — internal/wireup/registry.go:11
+- [R20260602-ARCH-3] 两处 typed-nil-interface collapse 逻辑重复，可抽 collapseTypedNil[T] — internal/dispatch/dispatch.go:514
+- [R20260602-GEN-6] IsDashboardProjectKey 生产声明但仅 test 调用，预留未用 — internal/sessionkey/key.go:98
+- [R20260602-GEN-7] retireAutoChainOnce 每次启动无条件 log complete 即使 cleaned=0 噪音 — internal/session/auto_chain_retire.go:92
+- [R20260602141221-GO-1] Snapshot() godoc 提及已实现的 snapshotReadOnly 为"未来变体" — internal/sysession/managed_query.go:123
+- [R20260602141221-GO-2] auto_titler_test.go `c := c` 在 Go1.22+ 为 no-op 死代码 — internal/sysession/auto_titler_test.go:93
+- [R20260602141221-GO-3] EventEntriesForKey TrimSpace 结果丢弃致下游重复 trim — internal/sysession/router_adapter.go:91
+- [R20260602141221-GO-4] writeRune 用 utf8.RuneLen 可能返回 -1(ASCII 不变式不会触发) — internal/sysession/auto_titler.go:706
+- [R20260602141221-SEC-12] RotateCookieGen 未接入配置热重载(假设性未来 handler) — internal/dashboard/auth/handlers.go:252
+- [R20260602141221-PERF-13] executeOpt slog.With 4-attr 每 tick 分配(已 won't-fix) — internal/cron/scheduler_run.go:1320
+- [R20260602141221-PERF-14] runDeadlineWatchdog done chan 仅超时路径分配(低频) — internal/cron/scheduler_run.go:828
+- [R20260602141221-PERF-15] findByPrefixLocked matches slice 无初始容量 — internal/cron/scheduler_jobs.go:2046
+- [R164029-GO-2] shimEndpointEnvKeys 缺 ANTHROPIC_VERTEX_BASE_URL（仅当未来加入 shimEnvAllowedPrefixes 才成 bypass，防御性） — internal/shim/manager.go:1335
+- [R164029-GO-7] shimEndpointEnvDropped 命名暗示仅 endpoint 返回 true，早退契约略夸大 — internal/shim/manager.go:1349
+- [R164029-PERF-12] SweepOldJSONL 对每个 .jsonl 调 e.Info() syscall，当前规模无真 trigger — internal/sysession/sweep.go:57
+- [R164029-PERF-18] resolveProjectDir 对纯 ASCII cwd 用 rune-range 循环，可改 byte 循环（~2-5ns/char） — internal/cli/subagent_link.go:1049
+- [R164029-CR-3] checker.go defer startDelay.Stop() 在 if 块内但实际函数返回才执行，已 fired 无泄漏仅可读性 — internal/selfupdate/checker.go:160
+- [R164029-ARCH-9] dispatch 三个 deprecated *Fn 闭包字段计划内技术债，gated on test migration Q3 — internal/dispatch/dispatch.go:332
+- [R164029-ARCH-10] SessionGuard 1 接口 3 实现已两次 review 判定保留，勿再提折叠 — internal/dispatch/dispatch.go:77
+- [R20260602190132-GO-1] test t.Parallel slog.SetDefault structurally fragile, currently safe — internal/shim/filter_env_endpoint_test.go:97
+- [R20260602190132-CR-1] containsStr reimplements strings.Contains in test — internal/wireup/boot_test.go:99
+- [R20260602190132-CR-3] negative NUL test vacuous when Spawn panics — internal/cli/wrapper_spawn_cwd_nul_test.go:40
+- [R20260602190132-GO-5] ContainsRune(...,0) prefer '\x00' for legibility — internal/cli/wrapper.go:479
+- [R20260602190132-ARCH-1] SessionStatus godoc contradicts active boot pin (godoc) — internal/cron/agent_opts.go:36
+- [R20260602190132-ARCH-2] RegisterSystemStub dead seam reserved-for-future — internal/sysession/router.go:74
+- [R20260602190132-ARCH-3] OnHardFail override could downgrade force-exit (documented) — internal/sysession/manager.go:107
+- [R20260602190132-ARCH-5] auto_titler imports session, asymmetry undocumented — internal/sysession/auto_titler.go:16
+- [R20260602190132-SEC-3] allow_insecure_webhook warn only at startup — internal/platform/feishu/feishu.go:604
+- [R20260602190132-SEC-6] CSRF gate proxy header-strip defense-in-depth — internal/dashboard/auth/csrf.go:76
+- [R20260602190132-SEC-8] stateDir parent world-writable theoretical local-priv — internal/server/server_cookie.go:49
+- [R20260602190132-PERF-6] cap(rev)==0 guard misleading, no action — internal/eventlog/eventlog_query.go:241
+- [R20260602190132-PERF-13] ringSeed rebuilds runIDs unchanged set low-freq — internal/cron/runstore.go:357
+- [R20260602190132-PERF-14] errors.Is on hot path vs == sentinel — internal/cli/process_readloop.go:478
+- [R220123-SEC-6] cron secret redactor 未含 Stripe publishable keys (pk_live_/pk_test_) — internal/cron/redact_secrets.go:66 (publishable key 设计上公开,低价值)
+- [R220123-CR-4] eventlog_append 注释 "zero slice alloc" 仅对 SetPersistSinkPair 路径成立,batch-only fallback 仍分配 — internal/cli/eventlog_append.go:510
+- [R220123-CR-5] maxUint64 包级常量命名可能与 cli 包其他文件冲突,可改 jsonMaxUint64 — internal/cli/process_readloop.go:133
+- [R220123-ARCH-3] editLoop EditMessage 用 t.ctx 而 Reply 用 15s 子 ctx,deadline 不一致(纯一致性) — internal/dispatch/reply_tracker.go:460
+- [R220123-PERF-22] writeStoreMeta 重复 time.Now() vDSO 调用可复用 Cleanup 已捕获时间戳 — internal/session/store.go:373
+- [R20260602-GO-003] latestRelease 包级 var 缺 race 保护(注释已约束测试不可 Parallel,假设性未来贡献者) — internal/selfupdate/checker.go:114
+- [R20260602-SEC-1] allow_insecure_webhook=true 禁用 HMAC(已有 warn,加二次确认 env 为强化建议) — internal/platform/feishu/feishu.go:604
+- [R20260602-SEC-2] curl|bash 安装脚本无 SRI/签名(README pin tag 为强化建议) — install.sh:1
+- [R20260602-SEC-3] checksums.txt 无签名(cosign 为未来 roadmap,已有 PIN_SHA256 选项) — internal/selfupdate/selfupdate.go:151
+- [R20260602-SEC-4] resolveTrustedBin 回退 LookPath(注释已记录 tradeoff,改为 error 会破坏 /opt 安装) — internal/selfupdate/service.go:46
+- [R20260602-SEC-11] secretPrefixes 不覆盖 JWT/Azure/GCP-JSON(扩充覆盖面为增强非 bug) — internal/cron/redact_secrets.go:66
+- [R20260602-SEC-14] evictOldestNonces 第二趟 recount 在高并发下可能 undercount(bounded by hookSem 20,假设性 drift) — internal/platform/feishu/feishu.go:527
+- [R20260602-PERF-9] effectiveFlushInterval 17-writer 断点偏激进(纯调参意见,无明确 trigger) — internal/eventlog/persist/persister.go:1269
+- [R20260602-PERF-13] Snapshot 每次 alloc 50 槽(加 SnapshotAppend 变体为优化建议) — internal/sysession/runring.go:68
+- [R20260602-PERF-15] candidates cap 启发式在全 exempt 时仍 alloc backing(nil 初始为微优化) — internal/session/router_cleanup.go:195
+- [R20260602-ARCH-3] SysessionDaemonConfig god-struct 混两 daemon 私有 knobs(需 RFC,与 ARCH-2 同根) — internal/config/config.go:412
+- [R20260602-ARCH-4] buildSysessionManager 3x 重复 duration-parse-or-warn(可抽 helper,微重构) — cmd/naozhi/main_helpers.go:295
+- [R20260602-ARCH-5] CronNotifyTarget 校验逻辑应附到类型(折入 ARCH-1 类,类内聚角度) — internal/config/config.go:357
+- [R20260603-010128-GO-1] marshalRunPooled 在 enc.Encode 写错误路径仍把 poisoned encoder 还池(bytes.Buffer.Write 实际永不出错,假设性) — internal/cron/runstore.go:418
+- [R20260603-010128-ARCH-c1] cronRouterAdapter.GetOrCreate 错误路径返回 magic 0 status — cmd/naozhi/cron_router_adapter.go:104
+- [R20260603-010128-ARCH-c2] dispatch.localizeAPIError 近死代码薄包装 — internal/dispatch/apierr.go:10

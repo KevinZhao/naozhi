@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/naozhi/naozhi/internal/config"
 )
 
 // dialReverseNode dials the /ws-node endpoint and returns the connection.
@@ -45,7 +44,7 @@ func reverseAuth(t *testing.T, conn *websocket.Conn, nodeID, token, hostname str
 
 // newTestReverseServer creates a ReverseServer with a single authorized node.
 func newTestReverseServer(nodeID, token string, trustedProxy bool) *ReverseServer {
-	auth := map[string]config.ReverseNodeEntry{
+	auth := map[string]ReverseNodeAuth{
 		nodeID: {Token: token, DisplayName: "Test Node"},
 	}
 	return NewReverseServer(auth, trustedProxy)
@@ -167,7 +166,7 @@ func TestReverseServer_Register_originRejected(t *testing.T) {
 // ---- AllNodes returns configured nodes ----
 
 func TestReverseServer_AllNodes(t *testing.T) {
-	auth := map[string]config.ReverseNodeEntry{
+	auth := map[string]ReverseNodeAuth{
 		"node-a": {Token: "t1", DisplayName: "Node A"},
 		"node-b": {Token: "t2", DisplayName: "Node B"},
 	}
@@ -187,7 +186,7 @@ func TestReverseServer_AllNodes(t *testing.T) {
 // ---- AllNodes includes disconnected nodes ----
 
 func TestReverseServer_AllNodes_includesDisconnected(t *testing.T) {
-	auth := map[string]config.ReverseNodeEntry{
+	auth := map[string]ReverseNodeAuth{
 		"node-1": {Token: "tok"},
 	}
 	rs := NewReverseServer(auth, false)
@@ -304,7 +303,7 @@ func TestReverseServer_RateLimiter_rejectsRapidConnects(t *testing.T) {
 // ---- Display name capping ----
 
 func TestReverseServer_DisplayNameCapping(t *testing.T) {
-	auth := map[string]config.ReverseNodeEntry{
+	auth := map[string]ReverseNodeAuth{
 		"node-1": {Token: "tok"}, // no configured display name
 	}
 	rs := NewReverseServer(auth, false)

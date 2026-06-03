@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1309,12 +1310,80 @@ func filterShimEnv(environ []string) []string {
 		}
 		for _, prefix := range shimEnvAllowedPrefixes {
 			if strings.HasPrefix(kv, prefix) {
+				// R20260602-SEC-1 (#1576, shim sibling): the endpoint vars
+				// below steer where the CLI subprocess (which has Bash + raw
+				// network access) sends API traffic. A poisoned shell rc / a
+				// tampered profile that exports one of these at an attacker
+				// host or the IMDS endpoint over plain http would silently
+				// redirect / harvest. Require https for non-loopback hosts,
+				// mirroring filterClaudeEnv's guard. Other allowlisted vars
+				// are not URLs and pass through unchanged.
+				if shimEndpointEnvDropped(kv) {
+					break
+				}
 				filtered = append(filtered, kv)
 				break
 			}
 		}
 	}
 	return filtered
+}
+
+// shimEndpointEnvKeys is the set of allowlisted env keys whose value is an API
+// endpoint URL forwarded to the CLI subprocess. shimEndpointEnvDropped applies
+// an SSRF/redirect guard to each. R20260602-SEC-1 (#1576, shim sibling).
+var shimEndpointEnvKeys = map[string]bool{
+	"ANTHROPIC_BASE_URL":         true,
+	"ANTHROPIC_BEDROCK_BASE_URL": true,
+	"AWS_ENDPOINT_URL":           true,
+	"AWS_BEDROCK_ENDPOINT":       true,
+}
+
+// shimEndpointEnvDropped reports whether kv (a "KEY=value" env entry) is an
+// endpoint URL var that must be dropped because its value targets a plain-http
+// non-loopback host. Non-endpoint keys and safe URLs return false. The value
+// is never logged. R20260602-SEC-1 (#1576, shim sibling).
+func shimEndpointEnvDropped(kv string) bool {
+	i := strings.IndexByte(kv, '=')
+	if i < 0 {
+		return false
+	}
+	key, val := kv[:i], kv[i+1:]
+	if !shimEndpointEnvKeys[key] {
+		return false
+	}
+	if val == "" {
+		return false
+	}
+	if err := validateShimEndpointURL(val); err != nil {
+		slog.Warn("shim env: rejecting unsafe endpoint base_url", "key", key, "err", err)
+		return true
+	}
+	return false
+}
+
+// validateShimEndpointURL enforces https:// unless the host is loopback
+// (localhost / 127.0.0.0/8 / ::1), for which plain http is allowed so local
+// mock gateways still work. Mirrors filterClaudeEnv's validateClaudeBaseURLEnv.
+func validateShimEndpointURL(v string) error {
+	u, err := url.Parse(v)
+	if err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if strings.EqualFold(host, "localhost") {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+		return fmt.Errorf("plain http:// to non-loopback host %q rejected (SSRF/redirect guard); use https://", host)
+	}
+	return fmt.Errorf("scheme %q not allowed; use https://", u.Scheme)
 }
 
 // kvKeyPrefix returns the key part (before '=') of a KEY=value env string,

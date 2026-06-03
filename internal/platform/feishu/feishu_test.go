@@ -541,6 +541,43 @@ func TestWebhook_Challenge(t *testing.T) {
 	}
 }
 
+// TestWebhook_Challenge_ReplayRejected asserts R164029-SEC-2 (#1594): a
+// url_verification challenge replayed with the SAME ts:nonce is rejected on the
+// second delivery. Previously url_verification was exempt from seenNonces dedup,
+// so a captured challenge could be replayed for the full nonceTTL window in
+// token-only mode, repeatedly reflecting the challenge and consuming hookSem.
+func TestWebhook_Challenge_ReplayRejected(t *testing.T) {
+	t.Parallel()
+	f := makeWebhookFeishu(Config{AppID: "id", AppSecret: "secret"})
+	mux := http.NewServeMux()
+	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {})
+
+	body := []byte(`{"type":"url_verification","challenge":"replay_me","token":"test_token"}`)
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	nonce := fmt.Sprintf("fixed-nonce-%d", time.Now().UnixNano())
+
+	build := func() *http.Request {
+		req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(string(body)))
+		req.Header.Set("X-Lark-Request-Timestamp", ts)
+		req.Header.Set("X-Lark-Request-Nonce", nonce)
+		return req
+	}
+
+	// First challenge with this ts:nonce succeeds.
+	w1 := httptest.NewRecorder()
+	mux.ServeHTTP(w1, build())
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first challenge status = %d, want 200", w1.Code)
+	}
+
+	// Replay of the identical ts:nonce is rejected by the nonce dedup gate.
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, build())
+	if w2.Code != http.StatusUnauthorized {
+		t.Errorf("replayed challenge status = %d, want 401 (nonce replay must be rejected)", w2.Code)
+	}
+}
+
 func TestWebhook_TokenMismatch(t *testing.T) {
 	t.Parallel()
 	f := makeWebhookFeishu(Config{

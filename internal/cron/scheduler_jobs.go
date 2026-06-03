@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -24,7 +25,7 @@ import (
 	robfigcron "github.com/robfig/cron/v3"
 )
 
-// listEntryIDsPool reuses the transient []robfigcron.EntryID scratch slice
+// listEntryIDsPool reuses the transient []cronEntryID scratch slice
 // recorded during ListAllJobsWithNextRun's two-phase snapshot. Dashboard
 // polls at 1Hz across multiple tabs so the call frequency × jobs-per-call
 // dominates the cron CRUD path's allocator pressure. Get returns a
@@ -41,7 +42,7 @@ import (
 // NextRun after s.cron.Entries() runs lock-free.
 var listEntryIDsPool = sync.Pool{
 	New: func() any {
-		s := make([]robfigcron.EntryID, 0, 64)
+		s := make([]cronEntryID, 0, 64)
 		return &s
 	},
 }
@@ -51,7 +52,7 @@ var listEntryIDsPool = sync.Pool{
 // snapshot don't leak into a smaller current one. R247-PERF-4 (#530).
 var listNextByIDPool = sync.Pool{
 	New: func() any {
-		m := make(map[robfigcron.EntryID]time.Time, 64)
+		m := make(map[cronEntryID]time.Time, 64)
 		return &m
 	},
 }
@@ -155,7 +156,7 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), addJobStubFields, error
 	// in deleteJobLocked / Start so it stays in lock-step with len-by-chat
 	// (s.jobs); s.jobs is still the canonical truth, asserted by
 	// TestChatJobCount_TracksJobsByChat.
-	chatKey := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+	chatKey := chatKeyFor(j.Platform, j.ChatID)
 	if s.chatJobCount[chatKey] >= s.maxJobsPerChat {
 		return nil, addJobStubFields{}, fmt.Errorf("per-chat cron limit reached (%d)", s.maxJobsPerChat)
 	}
@@ -221,15 +222,13 @@ func (s *Scheduler) addJobAcquiringLock(j *Job) (func(), addJobStubFields, error
 		}
 	}
 	s.jobs[j.ID] = j
-	// R237-PERF-5 (#661): increment the per-chat counter synchronously
-	// with s.jobs so the next addJobAcquiringLock observes the up-to-date
-	// count without re-scanning. deleteJobLocked is the paired decrement;
-	// the rollback path (s.deleteJobLocked below on persist failure) goes
-	// through that helper so the counter unwinds correctly.
-	s.chatJobCount[chatKey]++
-	// R242-GO-9 (#558): append to per-chat job index synchronously with
-	// s.jobs so findByPrefixLocked iterates only this chat's jobs.
-	s.jobsByChat[chatKey] = append(s.jobsByChat[chatKey], j)
+	// R237-PERF-5 / R242-GO-9 (#661 / #558): increment the per-chat counter
+	// and append to the per-chat index synchronously with s.jobs so the next
+	// addJobAcquiringLock observes the up-to-date count without re-scanning and
+	// findByPrefixLocked iterates only this chat's jobs. deleteJobLocked is the
+	// paired inverse; the rollback path (s.deleteJobLocked below on persist
+	// failure) unwinds both correctly.
+	s.addToChatIndexLocked(j)
 	save, perr := s.persistJobsLocked()
 	if perr != nil {
 		// R236-GO-10: persist failed *after* registerJob + map insertion.
@@ -289,7 +288,7 @@ func (s *Scheduler) PerChatJobCount(plat, chatID string) int {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.chatJobCount[chatJobKey{Platform: plat, ChatID: chatID}]
+	return s.chatJobCount[chatKeyFor(plat, chatID)]
 }
 
 // ListJobs returns jobs for a specific chat.
@@ -302,7 +301,7 @@ func (s *Scheduler) ListJobs(plat, chatID string) []Job {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	bucket := s.jobsByChat[chatJobKey{Platform: plat, ChatID: chatID}]
+	bucket := s.jobsByChat[chatKeyFor(plat, chatID)]
 	// R247-GO-3: pre-allocate so an empty result marshals as `[]` instead of
 	// `null` — keeps the JSON wire-format consistent with ListAllJobsWithNextRun
 	// and frontend `.length` defenders unaffected. [BREAKING-LOCAL]
@@ -336,10 +335,22 @@ type JobWithNextRun struct {
 // s.mu.Lock). The result slice is always non-nil (empty bucket → `[]`) for
 // wire-format symmetry with ListJobs / ListAllJobsWithNextRun.
 func (s *Scheduler) ListJobsWithNextRun(plat, chatID string) []JobWithNextRun {
+	// R20260602-CR-3: reuse listEntryIDsPool for the per-chat entryID
+	// scratch slice — the same pool ListAllJobsWithNextRun uses — so 1Hz
+	// dashboard polls pay zero allocs for the transient ids buffer.
+	idsPtr := listEntryIDsPool.Get().(*[]cronEntryID)
+	ids := (*idsPtr)[:0]
+	defer func() {
+		*idsPtr = ids[:0]
+		listEntryIDsPool.Put(idsPtr)
+	}()
+
 	s.mu.RLock()
-	bucket := s.jobsByChat[chatJobKey{Platform: plat, ChatID: chatID}]
+	bucket := s.jobsByChat[chatKeyFor(plat, chatID)]
 	result := make([]JobWithNextRun, 0, len(bucket))
-	ids := make([]robfigcron.EntryID, 0, len(bucket))
+	if cap(ids) < len(bucket) {
+		ids = make([]cronEntryID, 0, len(bucket))
+	}
 	for _, j := range bucket {
 		result = append(result, JobWithNextRun{Job: *j})
 		ids = append(ids, j.entryID)
@@ -350,24 +361,64 @@ func (s *Scheduler) ListJobsWithNextRun(plat, chatID string) []JobWithNextRun {
 		return result
 	}
 
-	// Single Entries() snapshot read outside s.mu (lock-order safe). For the
-	// small per-chat bucket a direct linear lookup is cheaper than building a
-	// map; entryID 0 means the job is not registered with cron (paused) and
-	// keeps the zero NextRun.
+	// Single Entries() snapshot read outside s.mu (lock-order safe). entryID 0
+	// means the job is not registered with cron (paused) and keeps the zero
+	// NextRun.
+	//
+	// R20260602141221-PERF-2 (#1583): the lookup is O(jobs-in-chat × |entries|)
+	// — a linear scan of the full Entries() snapshot per job. For the common
+	// per-chat bucket (1-5 jobs) the scan is cheaper than building a map: a
+	// handful of scans over |entries| beats paying the map's hashing + (even
+	// pooled) bookkeeping, and avoids touching the shared listNextByIDPool. But
+	// when a chat accumulates many jobs the product blows up (jobs × |entries|,
+	// |entries|≤500) and the dashboard's 1Hz poll amplifies it. Above the
+	// threshold we switch to the same pooled entryID→Next map ListAllJobsWithNextRun
+	// uses — O(|entries|) build + O(1) per job — so both the small-bucket and
+	// large-bucket cases stay cheap. The threshold is deliberately small: by a
+	// handful of jobs the map's single Entries() walk already wins on the
+	// comparison count and the constant-factor crossover is well behind us.
 	entries := s.cron.Entries()
-	for i, id := range ids {
-		if id == 0 {
-			continue
-		}
-		for _, e := range entries {
-			if e.ID == id {
-				result[i].NextRun = e.Next
-				break
+	if len(result) <= listNextRunMapThreshold {
+		for i, id := range ids {
+			if id == 0 {
+				continue
 			}
+			for _, e := range entries {
+				if e.ID == id {
+					result[i].NextRun = e.Next
+					break
+				}
+			}
+		}
+		return result
+	}
+
+	nextByIDPtr := listNextByIDPool.Get().(*map[cronEntryID]time.Time)
+	nextByID := *nextByIDPtr
+	clear(nextByID)
+	defer func() {
+		clear(nextByID)
+		listNextByIDPool.Put(nextByIDPtr)
+	}()
+	for _, e := range entries {
+		nextByID[e.ID] = e.Next
+	}
+	for i, id := range ids {
+		if id != 0 {
+			result[i].NextRun = nextByID[id]
 		}
 	}
 	return result
 }
+
+// listNextRunMapThreshold is the per-chat job count at or below which
+// ListJobsWithNextRun uses a direct linear Entries() scan rather than building
+// the pooled entryID→Next map. Below it the scan's small constant factor wins;
+// above it the O(jobs × |entries|) product makes the O(|entries|) map build
+// cheaper. R20260602141221-PERF-2 (#1583). 8 is comfortably past the common
+// 1-5 jobs/chat bucket so the typical dashboard poll keeps the allocation-free
+// linear path, while a chat that hoards jobs no longer scales quadratically.
+const listNextRunMapThreshold = 8
 
 // ListAllJobsWithNextRun returns every job plus its next scheduled run.
 // Lock strategy: snapshot (*Job, entryID) under s.mu.RLock, release s.mu, then
@@ -390,7 +441,7 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 	// per-poll alloc count flat as job count grows. The result slice is owned
 	// by the caller and stays heap-resident, so it is NOT pooled — and each
 	// Job is copied straight into it under RLock so there is no second copy.
-	idsPtr := listEntryIDsPool.Get().(*[]robfigcron.EntryID)
+	idsPtr := listEntryIDsPool.Get().(*[]cronEntryID)
 	ids := (*idsPtr)[:0]
 	defer func() {
 		// Reset length but keep capacity so the next call skips the make.
@@ -401,7 +452,7 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 	var result []JobWithNextRun
 	s.mu.RLock()
 	if cap(ids) < len(s.jobs) {
-		ids = make([]robfigcron.EntryID, 0, len(s.jobs))
+		ids = make([]cronEntryID, 0, len(s.jobs))
 	}
 	result = make([]JobWithNextRun, 0, len(s.jobs))
 	for _, j := range s.jobs {
@@ -419,7 +470,7 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 	// Entry() call. Called outside s.mu to avoid inverting the lock order
 	// the cron dispatcher takes (cron-internal → execute → s.mu.Lock).
 	entries := s.cron.Entries()
-	nextByIDPtr := listNextByIDPool.Get().(*map[robfigcron.EntryID]time.Time)
+	nextByIDPtr := listNextByIDPool.Get().(*map[cronEntryID]time.Time)
 	nextByID := *nextByIDPtr
 	clear(nextByID)
 	defer func() {
@@ -436,6 +487,51 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 		}
 	}
 	return result
+}
+
+// addToChatIndexLocked records a job into the two per-chat side indexes that
+// must move in lockstep with s.jobs: the chatJobCount cap counter and the
+// jobsByChat prefix-lookup slice. Caller MUST hold s.mu.Lock() and have
+// already inserted j into s.jobs.
+//
+// R237-PERF-5 / R242-GO-9 (#661 / #558): both indexes are the paired inverse
+// of deleteJobLocked's decrement+swap-shrink. R249-CR-4 / R260528-ARCH-7
+// (#948 / #1368): the identical two-line increment+append was open-coded at
+// the AddJob path and twice in Start's load loop, so the "mutated together so
+// they never drift" invariant the Scheduler godoc promises lived only as a
+// comment. Folding it into one helper makes the invariant structural — a
+// future third index lands here once instead of drifting across the three
+// insertion sites.
+func (s *Scheduler) addToChatIndexLocked(j *Job) {
+	key := chatKeyFor(j.Platform, j.ChatID)
+	s.chatJobCount[key]++
+	s.jobsByChat[key] = append(s.jobsByChat[key], j)
+	s.insertSortedJobID(j.ID)
+}
+
+// insertSortedJobID keeps s.sortedJobIDs in ascending order via a binary-
+// search insertion so marshalJobsLocked can iterate it without re-sorting on
+// every mutation. O(N) memmove for the shift dominates over the O(log N)
+// search; at maxJobsHardCap=500 this is far cheaper than the prior
+// O(N log N) slices.SortFunc on every persist. Idempotent on a duplicate ID
+// (AddJob rejects collisions before insertion, but the disk-load path could
+// in principle replay a malformed file with dup IDs — a no-op keeps the slice
+// 1:1 with the map). Caller must hold s.mu.Lock(). R164029-PERF-9 (#1598).
+func (s *Scheduler) insertSortedJobID(id string) {
+	i, found := slices.BinarySearch(s.sortedJobIDs, id)
+	if found {
+		return
+	}
+	s.sortedJobIDs = slices.Insert(s.sortedJobIDs, i, id)
+}
+
+// removeSortedJobID drops id from s.sortedJobIDs via binary search, preserving
+// sort order. No-op if absent so a double-delete (rollback path) cannot panic.
+// Caller must hold s.mu.Lock(). R164029-PERF-9 (#1598).
+func (s *Scheduler) removeSortedJobID(id string) {
+	if i, found := slices.BinarySearch(s.sortedJobIDs, id); found {
+		s.sortedJobIDs = slices.Delete(s.sortedJobIDs, i, i+1)
+	}
 }
 
 // deleteJobLocked performs the in-memory side effects of removing a job:
@@ -462,6 +558,10 @@ func (s *Scheduler) deleteJobLocked(j *Job) {
 	}
 	if _, present := s.jobs[j.ID]; present {
 		delete(s.jobs, j.ID)
+		// R164029-PERF-9 (#1598): paired removal from the sorted-ID slice,
+		// mirroring addToChatIndexLocked's insert. Guarded by the same
+		// membership check so a double-delete cannot disturb the slice.
+		s.removeSortedJobID(j.ID)
 		// R237-PERF-5 (#661): paired decrement for the addJobAcquiringLock
 		// increment. Guarded by the s.jobs membership check above so a
 		// double-delete (rollback path calling this on a never-inserted
@@ -470,7 +570,7 @@ func (s *Scheduler) deleteJobLocked(j *Job) {
 		// the per-chat cap. Drop the entry when count hits zero so the
 		// map's working set tracks the live chat set rather than every
 		// chat that has ever owned a job.
-		key := chatJobKey{Platform: j.Platform, ChatID: j.ChatID}
+		key := chatKeyFor(j.Platform, j.ChatID)
 		if n := s.chatJobCount[key]; n > 1 {
 			s.chatJobCount[key] = n - 1
 		} else {
@@ -828,7 +928,7 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 // stays alive and the next tick still fires the now-active job.
 func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 	var pauseCleanup func()
-	var prevEntryID robfigcron.EntryID
+	var prevEntryID cronEntryID
 	var prevPaused bool
 	var captured bool
 	op := func(j *Job) error {
@@ -882,7 +982,7 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 // (entryID, cachedPeriod, Paused) so the in-memory view matches the
 // un-persisted disk view. Mirrors PauseJobByID's rollback contract.
 func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
-	var prevEntryID robfigcron.EntryID
+	var prevEntryID cronEntryID
 	var prevCachedPeriod time.Duration
 	var prevCachedSched robfigcron.Schedule
 	var prevPaused bool
@@ -893,7 +993,7 @@ func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 	// sends on the unbuffered c.remove channel which can only be drained by
 	// the cron-tick goroutine, and that goroutine calls executeJobIDIfLive →
 	// s.mu.RLock. Pattern mirrors PauseJobByID's pauseCleanup hoist (#537).
-	var removeEntryID robfigcron.EntryID
+	var removeEntryID cronEntryID
 	op := func(j *Job) error {
 		// Snapshot under s.mu so the rollback restores the exact pre-op
 		// view; resumeJobLocked → registerJob mutates entryID +
@@ -1130,7 +1230,7 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	// entryID is not persisted (runtime-only field) so persisting with
 	// entryID=0 is safe — the post-unlock registerJob writes it back.
 	var (
-		schedRemoveEntryID robfigcron.EntryID
+		schedRemoveEntryID cronEntryID
 		schedOldSchedule   string
 		schedNewSchedule   string
 		schedNeedsRereg    bool
@@ -1197,6 +1297,7 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		j := s.jobs[id]
 		var schedRegErr error
 		if j != nil {
+			prevCachedSched := j.cachedSched // R20260602-CR-1: snapshot before registerJob mutates it
 			schedRegErr = s.registerJob(j)
 			if schedRegErr != nil {
 				// Rollback in-memory Schedule so subsequent reads reflect the
@@ -1204,7 +1305,7 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 				j.Schedule = schedOldSchedule
 				j.entryID = 0
 				j.cachedPeriod = 0
-				j.cachedSched = nil
+				j.cachedSched = prevCachedSched // R20260602-CR-1: restore, not nil
 			}
 		}
 		s.mu.Unlock()
@@ -1604,7 +1705,7 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 // stays alive and the next tick still fires the now-active job.
 func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 	var pauseCleanup func()
-	var prevEntryID robfigcron.EntryID
+	var prevEntryID cronEntryID
 	var prevPaused bool
 	var captured bool
 	op := func(j *Job) error {
@@ -1659,7 +1760,7 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 // rollback closure and call s.cron.Remove AFTER withJobByPrefix returns
 // (s.mu released).
 func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
-	var prevEntryID robfigcron.EntryID
+	var prevEntryID cronEntryID
 	var prevCachedPeriod time.Duration
 	var prevCachedSched robfigcron.Schedule
 	var prevPaused bool
@@ -1667,7 +1768,7 @@ func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
 	// removeEntryID is non-zero only when rollback fired; cron.Remove must
 	// be called after withJobByPrefix returns (s.mu released) to avoid
 	// the lock-order inversion described above.
-	var removeEntryID robfigcron.EntryID
+	var removeEntryID cronEntryID
 	op := func(j *Job) error {
 		// Snapshot under s.mu so the rollback restores the exact pre-op
 		// view; resumeJobLocked → registerJob mutates entryID +
@@ -1786,7 +1887,7 @@ func (s *Scheduler) NextRun(j *Job) time.Time {
 // lock-order surprises.
 //
 // R242-ARCH-29 (#774).
-func (s *Scheduler) cronEntryGoneLocked(id robfigcron.EntryID) bool {
+func (s *Scheduler) cronEntryGoneLocked(id cronEntryID) bool {
 	if id == 0 {
 		return true
 	}
@@ -2043,7 +2144,7 @@ func (s *Scheduler) findByPrefixLocked(idPrefix, plat, chatID string) (*Job, err
 		// safety net rather than short-circuiting on the map miss.
 	}
 	var matches []*Job
-	for _, j := range s.jobsByChat[chatJobKey{Platform: plat, ChatID: chatID}] {
+	for _, j := range s.jobsByChat[chatKeyFor(plat, chatID)] {
 		if strings.HasPrefix(j.ID, idPrefix) {
 			matches = append(matches, j)
 		}

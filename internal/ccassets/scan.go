@@ -2,6 +2,9 @@ package ccassets
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,7 +20,7 @@ import (
 func scanMarkdownDir(dir, kind, relPrefix string, src assets.Source) ([]assets.Asset, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -66,6 +69,7 @@ func scanHooksJSON(path, relPath string, src assets.Source) []assets.Asset {
 	}
 	var hf hooksFile
 	if err := json.Unmarshal(data, &hf); err != nil {
+		slog.Warn("ccassets: hooks.json parse failed", "path", path, "err", err)
 		return nil
 	}
 	var out []assets.Asset

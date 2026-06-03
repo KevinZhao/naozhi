@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
@@ -98,10 +97,24 @@ type discoverFn func() (json.RawMessage, error)
 // Same atomic.Pointer rationale as discoverFn above.
 type previewFn func(sessionID string) (json.RawMessage, error)
 
+// Config is the upstream-local, zero-dependency value shape that New
+// consumes. It mirrors the fields this package actually reads from the
+// upstream config block so internal/upstream no longer imports
+// internal/config — a config.yaml schema change no longer ripples down into
+// this bottom-of-DAG package (R040034-ARCH-1 / #1411). The cmd boundary
+// translates config.UpstreamConfig → upstream.Config.
+type Config struct {
+	URL         string
+	NodeID      string
+	Token       string
+	DisplayName string
+	Insecure    bool
+}
+
 // Connector dials a primary naozhi and serves it as a reverse-connected node.
 // Run on machines behind NAT that cannot be reached by the primary directly.
 type Connector struct {
-	cfg *config.UpstreamConfig
+	cfg *Config
 	// router is the SessionRouter subset used by Connector (consumer.go).
 	// *session.Router satisfies this interface implicitly. Kept as an
 	// interface so future Router sub-aggregation and connector tests
@@ -134,7 +147,7 @@ type Connector struct {
 // pass a non-nil resolver (built from session.NewKeyResolver +
 // project.NewDataSource). Nil resolver keeps the legacy inlined merge
 // for backward compatibility with existing tests.
-func New(cfg *config.UpstreamConfig, router *session.Router, projMgr *project.Manager, resolver *session.KeyResolver) *Connector {
+func New(cfg *Config, router *session.Router, projMgr *project.Manager, resolver *session.KeyResolver) *Connector {
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
 		claudeDir = filepath.Join(home, ".claude")

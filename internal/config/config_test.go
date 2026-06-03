@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -509,5 +510,49 @@ func TestValidateConfig_ModelInjection(t *testing.T) {
 				t.Errorf("validateConfig should reject %s = %q", tc.name, bad)
 			}
 		})
+	}
+}
+
+// TestValidateConfig_UpstreamTokenSentinel pins R164029-SEC-4: an upstream
+// token set to the example placeholder "your-secret-token" must be rejected
+// by validateConfig to prevent operators from accidentally deploying with the
+// well-known default credential.
+func TestValidateConfig_UpstreamTokenSentinel(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		Upstream: &UpstreamConfig{
+			URL:    "wss://primary.example.com/ws-node",
+			NodeID: "testnode",
+			Token:  "your-secret-token",
+		},
+	}
+	err := validateConfig(cfg)
+	if err == nil {
+		t.Fatal("validateConfig() = nil, want error for sentinel upstream token")
+	}
+	if !strings.Contains(err.Error(), "your-secret-token") {
+		t.Errorf("error = %q; expected mention of placeholder value", err.Error())
+	}
+}
+
+// TestValidateConfig_UpstreamTokenReal confirms a non-sentinel upstream
+// token passes the sentinel check.
+func TestValidateConfig_UpstreamTokenReal(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		Upstream: &UpstreamConfig{
+			URL:    "wss://primary.example.com/ws-node",
+			NodeID: "testnode",
+			Token:  "super-secret-real-token",
+		},
+	}
+	// validateConfig may still error for other reasons unrelated to the
+	// sentinel check (e.g. missing server fields) but must not error solely
+	// due to the token value being a sentinel.
+	err := validateConfig(cfg)
+	if err != nil && strings.Contains(err.Error(), "your-secret-token") {
+		t.Errorf("validateConfig() rejected a real token as sentinel: %v", err)
 	}
 }

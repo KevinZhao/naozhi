@@ -15,6 +15,12 @@
 // boot. The duplicate-key panic matches the existing semantics of
 // cli.RegisterHistoryFactory and backend.Register, so accidental
 // double-wireup keeps surfacing at startup rather than at first runtime use.
+//
+// R20260602-ARCH-2 (#1579): Registry[T] is no longer a tested-but-unused
+// generic — boot.go's bootRegistry is its first production consumer,
+// recording each boot-time wireup step (cli-backends, history-backends)
+// so Validate() and the startup audit list (BootSteps) ride on this idiom
+// rather than a bespoke table.
 package wireup
 
 import (

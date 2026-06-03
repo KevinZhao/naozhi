@@ -135,6 +135,34 @@ func (s *ManagedSession) DeathReason() string {
 // which is the cheap-rare-call path versus this hot poll path.
 // snapshot_no_history_copy_test.go pins the contract.
 func (s *ManagedSession) Snapshot() SessionSnapshot {
+	return s.snapshot(true)
+}
+
+// snapshotReadOnly returns the same point-in-time view as Snapshot but
+// guarantees no read-side writes: it never calls SetModel to mirror the
+// live proc.Model() back into the persisted field. It still resolves
+// snap.Model from the live process (falling back to the persisted value),
+// so callers see the up-to-date model id — they just don't trigger the
+// atomic store that dirties the cache line.
+//
+// R20260602-PERF-3 (#1577): VisitSessions runs fn under r.mu.RLock for
+// every live session on the AutoTitler tick. Mirroring inside that loop
+// is both an unnecessary write on a read path and makes concurrency
+// reasoning harder. The dashboard poll path (router.Snapshots /
+// wshub / connector_subscribe) keeps the mirroring Snapshot() so the
+// live model still lands in sessions.json (UI Round 5 R5-3); only the
+// daemon-iterator path opts into this pure-read variant.
+func (s *ManagedSession) snapshotReadOnly() SessionSnapshot {
+	return s.snapshot(false)
+}
+
+// snapshot is the shared core for Snapshot / snapshotReadOnly. When
+// mirrorModel is true and the live process reports a model that differs
+// from the persisted value, it mirrors the live value back via SetModel
+// (the one intentional read-side write, see Snapshot godoc / R226-CR-13).
+// When false it skips that store entirely; snap.Model resolution is
+// identical in both modes.
+func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 	s.parseKeyParts()
 	// R215-ARCH-P2-7: pull backend/cliName/cliVersion in one atomic Load
 	// instead of three sequential Loads — Snapshot is the 1 Hz × N tabs ×
@@ -170,6 +198,12 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 	if proc == nil {
 		snap.TotalCost = sessCost
 		snap.State = "ready"
+		// #1644: a live proc reports UserTurnCount; an evicted / suspended /
+		// stub session has no proc, so fall back to the count of persisted
+		// "user" entries. Without this MessageCount stayed 0 forever and
+		// AutoTitler's minUserTurns gate skipped the session unconditionally,
+		// so a fully-conversed-but-idle-evicted session never got auto-named.
+		snap.MessageCount = s.persistedUserTurns.Load()
 	} else {
 		snap.State = proc.GetState().String()
 		snap.Protocol = proc.ProtocolName()
@@ -196,8 +230,14 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 			// at 1Hz × N tabs × M sessions costs an avoidable atomic
 			// store per poll on what is otherwise a pure-read path.
 			// Compare the cached value first and only mirror on change.
-			if cached := s.Model(); cached != liveModel {
-				s.SetModel(liveModel)
+			//
+			// R20260602-PERF-3 (#1577): the read-only variant
+			// (snapshotReadOnly, used by VisitSessions) skips the mirror
+			// entirely so the daemon iterator never writes under RLock.
+			if mirrorModel {
+				if cached := s.Model(); cached != liveModel {
+					s.SetModel(liveModel)
+				}
 			}
 			snap.Model = liveModel
 		} else {
@@ -296,6 +336,21 @@ func (s *ManagedSession) hasInjectedHistory() bool {
 	s.historyMu.RLock()
 	defer s.historyMu.RUnlock()
 	return len(s.persistedHistory) > 0
+}
+
+// recountPersistedUserTurnsLocked recomputes persistedUserTurns from the
+// current persistedHistory slice. Caller MUST hold s.historyMu (read or
+// write — the scan only reads the slice, the result is stored atomically).
+// Invoked after every persistedHistory mutation in InjectHistory so the
+// proc==nil snapshot branch (#1644) can read the count lock-free.
+func (s *ManagedSession) recountPersistedUserTurnsLocked() {
+	var n int64
+	for i := range s.persistedHistory {
+		if s.persistedHistory[i].Type == "user" {
+			n++
+		}
+	}
+	s.persistedUserTurns.Store(n)
 }
 
 // EventEntries returns the event log entries for this session.
@@ -565,8 +620,15 @@ func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []cli.Eve
 	if proc != nil {
 		return proc.EventEntriesBefore(beforeMS, limit)
 	}
-	out := s.persistedHistoryBefore(beforeMS, limit)
-	sortEntriesByTimeStable(out)
+	out, descSorted := s.persistedHistoryBefore(beforeMS, limit)
+	if descSorted {
+		// persistedHistory was Time-ascending; the backward walk yielded
+		// Time-descending output. A single O(n) reverse gives ascending order,
+		// skipping the O(n log n) stable sort.
+		slices.Reverse(out)
+	} else {
+		sortEntriesByTimeStable(out)
+	}
 	return out
 }
 
@@ -675,7 +737,11 @@ func (s *ManagedSession) EventLastNVisibleCtx(ctx context.Context, visibleTarget
 	if len(mem) > 0 {
 		before = mem[0].Time
 	}
-	var older []cli.EventEntry
+	// Accumulate pages newest-first; each page is strictly older than the
+	// previous. After the loop we reverse-iterate pages to produce the final
+	// older slice in ascending-Time order, avoiding the O(n²) cost of
+	// prepending each chunk into a growing slice on every iteration.
+	var pages [][]cli.EventEntry
 	for page := 0; page < maxVisibleDiskPages && vis < visibleTarget; page++ {
 		if ctx.Err() != nil {
 			break
@@ -689,17 +755,30 @@ func (s *ManagedSession) EventLastNVisibleCtx(ctx context.Context, visibleTarget
 			break // disk exhausted
 		}
 		sortEntriesByTimeStable(chunk)
-		// chunk is chronological and strictly older than `before`; prepend it
-		// ahead of everything collected so far.
-		older = append(chunk, older...)
+		pages = append(pages, chunk)
 		vis += countVisibleEntries(chunk)
 		before = chunk[0].Time
-		if len(older)+len(mem) >= maxTotal {
+		// Compute running total to honour the ceiling without building older yet.
+		total := len(mem)
+		for _, p := range pages {
+			total += len(p)
+		}
+		if total >= maxTotal {
 			break // total payload ceiling
 		}
 	}
-	if len(older) == 0 {
+	if len(pages) == 0 {
 		return mem
+	}
+	// Build older in ascending-Time order: pages were collected newest-first,
+	// so iterate in reverse (oldest page first).
+	totalOlder := 0
+	for _, p := range pages {
+		totalOlder += len(p)
+	}
+	older := make([]cli.EventEntry, 0, totalOlder)
+	for i := len(pages) - 1; i >= 0; i-- {
+		older = append(older, pages[i]...)
 	}
 	return append(older, mem...)
 }
@@ -783,6 +862,14 @@ func (s *ManagedSession) LogSystemEvent(summary string) {
 // lastPrompt, lastActivity, and lastResponse when they haven't been set yet
 // (e.g. after shim reconnect where events were injected directly into the
 // process, bypassing InjectHistory).
+//
+// R20260603000023-PERF-12: only the tail of the log is needed — scanLastSummaries
+// walks backward and stops as soon as all three summaries are found (at most 3
+// matching entries, bounded by the scan horizon). Using EventLastN avoids the
+// full-ring copy (up to 500 EventEntry slots, ~140 KB) that EventEntries
+// allocates unconditionally.
+const extractLastPromptScanN = 64
+
 func (s *ManagedSession) extractLastPromptFromProcess() {
 	if loadAtomicString(&s.lastPrompt) != "" &&
 		loadAtomicString(&s.lastActivity) != "" &&
@@ -793,7 +880,7 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 	if p == nil {
 		return
 	}
-	prompt, activity, response := scanLastSummaries(p.EventEntries())
+	prompt, activity, response := scanLastSummaries(p.EventLastN(extractLastPromptScanN))
 	if prompt != "" && loadAtomicString(&s.lastPrompt) == "" {
 		storeAtomicString(&s.lastPrompt, prompt)
 	}

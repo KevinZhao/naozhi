@@ -106,6 +106,17 @@ func NewJobFull(in JobInit) *Job {
 	}
 }
 
+// cronEntryID is the cron-local name for robfig/cron's per-entry handle.
+// R249-ARCH-11 (#977): the third-party robfigcron.EntryID type name was
+// scattered across the Job field, the two list-snapshot pools, every
+// pause/resume/update rollback-snapshot local, and cronEntryGoneLocked.
+// Aliasing it to one declaration localises the robfig binding so a future
+// cron-engine swap (or wrapping the handle in a richer entry struct) touches
+// this single line instead of ~15 references. As a type alias it is
+// identical to robfigcron.EntryID, so the pool type-assertions and the
+// s.cron.Remove/Entry calls keep compiling unchanged.
+type cronEntryID = robfigcron.EntryID
+
 // Job represents a scheduled cron task.
 type Job struct {
 	ID        string    `json:"id"`
@@ -194,7 +205,7 @@ type Job struct {
 	// 引入背景：docs/rfc/cron-run-history.md §3.2。
 	RunCounters JobRunCounters `json:"run_counters,omitempty"`
 
-	entryID robfigcron.EntryID // runtime only, not persisted
+	entryID cronEntryID // runtime only, not persisted
 
 	// cachedPeriod is the precomputed schedule period (Next-Next delta), populated
 	// once per registerJob alongside entryID. The hot jitter path (#664 / R242-PERF-2)

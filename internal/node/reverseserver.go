@@ -5,13 +5,13 @@ import (
 	"crypto/subtle"
 	"expvar"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/netutil"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/ratelimit"
@@ -118,8 +118,24 @@ var reverseUpgrader = websocket.Upgrader{
 		// Bump the monotonic counter on every such upgrade (not just the
 		// first) so /debug/vars reflects ongoing cleartext-token exposure
 		// even after the once-guarded warn has already fired (#1026).
+		//
+		// R164029-SEC-1 (#1593): split the plain-HTTP warning by host class.
+		// A bearer token sent in cleartext over a private LAN (RFC1918 /
+		// ULA / link-local) is exposed only to passive listeners on that
+		// segment, whereas a public/routable host means the first-frame
+		// token traverses the open internet — a materially higher exposure
+		// that previously shared the same generic loopback-vs-everything-else
+		// message. Both still bump the cleartext counter and still allow the
+		// upgrade (bearer-token first-frame auth remains the primary gate;
+		// hard-rejecting would break existing no-TLS private deployments),
+		// but the log now names which exposure surface is in play so
+		// operators can decide whether TLS is mandatory for their topology.
 		insecureReverseUpgradeTotal.Add(1)
-		warnInsecureReverseUpgradeOnce(r.Host)
+		if isPrivateHost(r.Host) {
+			warnInsecureReversePrivateOnce(r.Host)
+		} else {
+			warnInsecureReverseUpgradeOnce(r.Host)
+		}
 		return true
 	},
 }
@@ -130,9 +146,48 @@ var insecureReverseWarnOnce sync.Once
 
 func warnInsecureReverseUpgradeOnce(host string) {
 	insecureReverseWarnOnce.Do(func() {
-		slog.Warn("reverse upgrade arrived over plain HTTP without Origin and not from loopback; deploy TLS in front of /ws-node to harden against Origin-strip proxies",
+		slog.Warn("reverse upgrade arrived over plain HTTP without Origin from a public/routable host; the bearer token rides the first frame in cleartext over the open network — deploy TLS in front of /ws-node",
 			"host", truncateLabelUTF8(host, 128))
 	})
+}
+
+// insecureReversePrivateWarnOnce mirrors insecureReverseWarnOnce for the
+// RFC1918 / ULA / link-local case, kept separate so the two host classes each
+// surface their own once-per-process line rather than racing for a single
+// sync.Once (whichever fires first would otherwise mask the other).
+var insecureReversePrivateWarnOnce sync.Once
+
+func warnInsecureReversePrivateOnce(host string) {
+	insecureReversePrivateWarnOnce.Do(func() {
+		slog.Warn("reverse upgrade arrived over plain HTTP without Origin from a private LAN address; the bearer token is sent in cleartext and readable by passive listeners on the same segment — put TLS in front of /ws-node if the segment is not fully trusted",
+			"host", truncateLabelUTF8(host, 128))
+	})
+}
+
+// isPrivateHost reports whether host (Host header value, may include port)
+// refers to an RFC1918 private, IPv6 unique-local, or link-local address.
+// Used to classify cleartext-token exposure on /ws-node: a private-segment
+// upgrade is a lower (but non-zero) exposure than a public/routable one.
+// Hostnames that are not IP literals are treated as non-private since their
+// resolution is not known at this layer.
+func isPrivateHost(host string) bool {
+	h := host
+	if i := strings.LastIndexByte(host, ':'); i >= 0 {
+		if strings.HasPrefix(host, "[") {
+			if rb := strings.IndexByte(host, ']'); rb >= 0 {
+				h = host[1:rb]
+			}
+		} else {
+			h = host[:i]
+		}
+	} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		h = host[1 : len(host)-1]
+	}
+	ip := net.ParseIP(h)
+	if ip == nil {
+		return false
+	}
+	return ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
 // isLoopbackHost reports whether host (Host header value, may include
@@ -181,11 +236,24 @@ type ReverseServer struct {
 	OnDeregister func(id string)
 }
 
+// ReverseNodeAuth is the node-local, zero-dependency value shape that
+// NewReverseServer consumes for one allowed reverse-connecting node. It
+// mirrors the two fields this package actually needs (token + display
+// name) so internal/node no longer imports internal/config — a config.yaml
+// schema change no longer ripples down into this bottom-of-DAG package
+// (R040034-ARCH-1 / #1411). The cmd boundary translates
+// config.ReverseNodeEntry → ReverseNodeAuth.
+type ReverseNodeAuth struct {
+	Token       string
+	DisplayName string
+}
+
 // NewReverseServer creates a server that accepts /ws-node connections.
-// auth is the reverse_nodes config from config.yaml.
+// auth maps node_id → ReverseNodeAuth (translated from the reverse_nodes
+// config block at the cmd boundary).
 // trustedProxy enables X-Forwarded-For last-hop IP extraction so per-IP
 // rate limiting works correctly when deployed behind ALB/CloudFront.
-func NewReverseServer(auth map[string]config.ReverseNodeEntry, trustedProxy bool) *ReverseServer {
+func NewReverseServer(auth map[string]ReverseNodeAuth, trustedProxy bool) *ReverseServer {
 	tokens := make(map[string]string, len(auth))
 	names := make(map[string]string, len(auth))
 	// 两个 node 拿到同一个 token 等于身份可互换——token 认证靠 ConstantTimeCompare

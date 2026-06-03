@@ -61,10 +61,88 @@ type shimMsgCode struct {
 // (Present=false). R222-PERF-13.
 func (c *shimMsgCode) UnmarshalJSON(data []byte) error {
 	c.Present = true
-	// Delegate to json.Unmarshal for full int parsing semantics (rejects
-	// strings/bools/floats outside int range identically to *int).
-	return json.Unmarshal(data, &c.Value)
+	// Parse the raw JSON integer token directly from []byte with no
+	// string(data) conversion — that conversion allocates a temporary
+	// string on every cli_exited frame on the readLoop hot path.
+	// Hand-parse: accept optional leading '-', then one or more ASCII
+	// digits, reject empty / non-digit / leading '+' / leading zeros
+	// (except bare "0") to match JSON integer semantics. Supports
+	// negative exit codes (e.g. signal kill returns -1). R20260602190132-PERF-1.
+	v, err := parseJSONInt64Bytes(data)
+	if err != nil {
+		return err
+	}
+	c.Value = int(v)
+	return nil
 }
+
+// parseJSONInt64Bytes parses a JSON integer token directly from a []byte
+// slice without allocating a string. Rules match JSON integer semantics:
+//   - optional leading '-' for negatives
+//   - one or more ASCII decimal digits
+//   - no leading '+', no leading zeros (except bare "0")
+//   - empty input and non-digit characters are rejected
+//   - overflow beyond int64 range returns an error
+func parseJSONInt64Bytes(data []byte) (int64, error) {
+	if len(data) == 0 {
+		return 0, errJSONIntEmpty
+	}
+	neg := false
+	i := 0
+	if data[0] == '-' {
+		neg = true
+		i++
+		if i >= len(data) {
+			return 0, errJSONIntInvalid
+		}
+	}
+	// Reject leading '+'.
+	if data[i] == '+' {
+		return 0, errJSONIntInvalid
+	}
+	// Reject leading zero on multi-digit numbers (e.g. "01").
+	if data[i] == '0' && len(data)-i > 1 {
+		return 0, errJSONIntInvalid
+	}
+	var v uint64
+	for ; i < len(data); i++ {
+		b := data[i]
+		if b < '0' || b > '9' {
+			return 0, errJSONIntInvalid
+		}
+		digit := uint64(b - '0')
+		// Check overflow: uint64 max is 18446744073709551615.
+		if v > (maxUint64-digit)/10 {
+			return 0, errJSONIntOverflow
+		}
+		v = v*10 + digit
+	}
+	if neg {
+		// int64 min magnitude is 9223372036854775808.
+		if v > 1<<63 {
+			return 0, errJSONIntOverflow
+		}
+		return -int64(v), nil
+	}
+	if v > 1<<63-1 {
+		return 0, errJSONIntOverflow
+	}
+	return int64(v), nil
+}
+
+const maxUint64 = ^uint64(0)
+
+var (
+	errJSONIntEmpty    = shimIntParseError("empty JSON integer token")
+	errJSONIntInvalid  = shimIntParseError("invalid JSON integer token")
+	errJSONIntOverflow = shimIntParseError("JSON integer overflows int64")
+)
+
+// shimIntParseError is a plain string error type so these sentinel values
+// are package-level constants with no heap allocation.
+type shimIntParseError string
+
+func (e shimIntParseError) Error() string { return string(e) }
 
 // readLoop reads NDJSON messages from the shim socket and dispatches events.
 func (p *Process) readLoop() {
