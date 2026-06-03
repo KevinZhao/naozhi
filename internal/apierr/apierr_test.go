@@ -180,7 +180,10 @@ func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
 // never records the raw envelope text, which may contain sk-ant- API keys,
 // request_ids, or internal hostnames (R20260601-SEC-1).
 func TestLocalizeDoesNotLogRawSecret(t *testing.T) {
-	t.Parallel()
+	// No t.Parallel: this test installs a per-test handler via
+	// slog.SetDefault, while TestLocalize's parallel subtests call
+	// apierr.Localize -> slog.Warn, which reads slog.Default(). With
+	// t.Parallel the SetDefault write races those reads under -race.
 
 	// Install a capturing handler for the duration of this test.
 	handler := &capturingHandler{}
