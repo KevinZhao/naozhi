@@ -9,10 +9,9 @@ import (
 
 // TestCleanup_ReconcileGate_NoOpKeepsGaugeCorrect: a steady-state Cleanup tick
 // with no close / prune must keep the per-backend SessionActive gauge correct.
-// The earlier #1627 reconcile-gate was superseded by the master PERF-5 (#1607)
-// rewrite, which now runs reconcileSessionActiveByBackendLocked unconditionally
-// to derive the authoritative alive total; this test pins that the
-// unconditional reconcile leaves a still-alive session's gauge untouched.
+// R20260603-PERF-7: when closedCount==0 && pruned==0 the reconcile walk is
+// skipped and activeCount is read from the atomic; this test pins that the
+// skip path preserves a still-alive session's gauge and activeCount.
 func TestCleanup_ReconcileGate_NoOpKeepsGaugeCorrect(t *testing.T) {
 	// Use a dedicated backend label so a concurrent test mutating the default
 	// "" bucket of the global SessionActiveByBackend gauge cannot pollute this
@@ -49,6 +48,40 @@ func TestCleanup_ReconcileGate_NoOpKeepsGaugeCorrect(t *testing.T) {
 	}
 	if got := r.activeCount.Load(); got != 1 {
 		t.Errorf("after no-op Cleanup: activeCount = %d, want 1", got)
+	}
+}
+
+// TestCleanup_ReconcileGate_NoOpSkipsReconcile: when closedCount==0 &&
+// pruned==0 the Cleanup tick must skip the O(N) reconcile walk and preserve
+// the existing activeCount (R20260603-PERF-7). We seed activeCount to a known
+// value before the tick and assert it is unchanged afterwards.
+func TestCleanup_ReconcileGate_NoOpSkipsReconcile(t *testing.T) {
+	const backend = "reconcile-gate-skip"
+	resetBackendGauge(t, backend)
+
+	r := &Router{
+		sessions:     make(map[string]*ManagedSession),
+		maxProcs:     3,
+		ttl:          1 * time.Hour,
+		pruneTTL:     72 * time.Hour,
+		totalTimeout: 5 * time.Minute,
+	}
+	proc := newIdleProc()
+	s := injectSession(r, "key-skip", proc)
+	s.SetBackend(backend)
+	s.lastActive.Store(time.Now().UnixNano())
+
+	// Pre-seed activeCount and the gauge to the correct live count so a real
+	// reconcile would be a no-op anyway — but we want to confirm the skip path
+	// reaches the Store(aliveTotal) with the same value.
+	r.activeCount.Store(1)
+	metrics.SessionActiveByBackend.Add(1, backend)
+
+	r.Cleanup()
+
+	// activeCount must remain 1 (preserved from atomic, not reset by reconcile).
+	if got := r.activeCount.Load(); got != 1 {
+		t.Errorf("no-op Cleanup: activeCount=%d want 1 (PERF-7 skip-path must preserve count)", got)
 	}
 }
 

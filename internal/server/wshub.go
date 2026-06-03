@@ -127,8 +127,7 @@ const (
 //	                                                   wshub_eventpush.go,
 //	                                                   wshub_subscribe.go,
 //	                                                   wshub_eventpush_cache.go
-//	                     userSendLimitersMu            wshub_send.go (per-user rate)
-//	                     userSendLimiters              wshub_send.go
+//	                     userSendLimiters              wshub_send.go (per-user rate; atomic.Pointer)
 //	                     connCountByOwnerMu            wshub_upgrade.go (per-owner cap)
 //	                     connCountByOwner              wshub_upgrade.go
 //
@@ -493,17 +492,17 @@ type Hub struct {
 	// guarded by a single sync.Mutex to a sync.Map so the steady-state
 	// path (limiter already exists for owner) is a lock-free Load. The
 	// previous shape serialised every WS send across all owners through
-	// userSendLimitersMu — at 500 conns × 5 sends/s = 2500 acquisitions/s
+	// userSendLimitersMu (removed) — at 500 conns × 5 sends/s = 2500 acquisitions/s
 	// the map lookup itself was on the hot path under one mutex, blocking
 	// concurrent sends from unrelated users.
 	//
 	// nil pointer == "not enabled" preserves the legacy nil-guard
-	// behaviour for hand-built Hubs that bypass NewHub. Shutdown swaps
-	// the pointer to nil under userSendLimitersStoreMu so in-flight
-	// allowSendForOwner callers either observe the live map or the nil
-	// fall-through; no torn state.
-	userSendLimitersStoreMu sync.RWMutex
-	userSendLimiters        *sync.Map // map[string]*rate.Limiter
+	// behaviour for hand-built Hubs that bypass NewHub. Shutdown stores
+	// nil atomically so in-flight allowSendForOwner callers either observe
+	// the live map or the nil fall-through; no torn state.
+	// R20260603-PERF-1: atomic.Pointer[sync.Map] replaces the RWMutex guard
+	// so the hot send path (allowSendForOwner) is fully lock-free on reads.
+	userSendLimiters atomic.Pointer[sync.Map] // map[string]*rate.Limiter; R20260603-PERF-1
 
 	// connCountByOwnerMu + connCountByOwner enforce a per-uploadOwner WS
 	// connection sub-cap (maxConnsPerOwner) on top of the global
@@ -650,7 +649,7 @@ func NewHub(opts HubOptions) *Hub {
 	// here so allowSendForOwner can lookup-or-create without a sync.Once.
 	// R260528-PERF-18 (#1357): sync.Map keyed by owner string lets the
 	// steady-state Allow() path skip a global mutex on every WS send.
-	h.userSendLimiters = &sync.Map{}
+	h.userSendLimiters.Store(&sync.Map{})
 	// R229-SEC-8 / #1022: per-uploadOwner connection counter so a single
 	// token cannot monopolise the global maxWSConns pool.
 	h.connCountByOwner = make(map[string]int)
@@ -736,9 +735,7 @@ func (h *Hub) allowSendForOwner(owner string) bool {
 	if h == nil || owner == "" {
 		return true
 	}
-	h.userSendLimitersStoreMu.RLock()
-	m := h.userSendLimiters
-	h.userSendLimitersStoreMu.RUnlock()
+	m := h.userSendLimiters.Load()
 	if m == nil {
 		return true
 	}
@@ -1183,12 +1180,10 @@ func (h *Hub) Shutdown() {
 	// rate.Limiter values can be GC'd after Hub teardown (test harnesses
 	// that build and tear down many Hubs in one process).
 	// R260528-PERF-18 (#1357): the map is a sync.Map; nilling the pointer
-	// under userSendLimitersStoreMu serialises with in-flight
-	// allowSendForOwner callers — they observe either the live map or the
-	// nil fall-through, never a torn pointer.
-	h.userSendLimitersStoreMu.Lock()
-	h.userSendLimiters = nil
-	h.userSendLimitersStoreMu.Unlock()
+	// via atomic.Pointer.Store serialises with in-flight allowSendForOwner
+	// callers — they observe either the live map or the nil fall-through,
+	// never a torn pointer. R20260603-PERF-1: RWMutex removed.
+	h.userSendLimiters.Store(nil)
 
 	// Drop the per-uploadOwner conn-count map so test harnesses that
 	// build/teardown many Hubs in one process don't accumulate stale
