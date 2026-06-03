@@ -1500,6 +1500,9 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 	if p.opts.IdxStride > 1 {
 		pendingCap = p.opts.IdxStride * 2
 	}
+	// R20260603-PERF-13: capture clock once; reuse for lastActivity and
+	// hdr.CreatedAt to avoid two vDSO calls when creating a fresh file.
+	now := p.opts.Clock()
 	w := &perKeyWriter{
 		key:          key,
 		stem:         stem,
@@ -1511,13 +1514,12 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 		nextSeq:      rec.NextSeq,
 		bytes:        rec.LogSize,
 		pendingIdx:   make([]schema.IdxEntry, 0, pendingCap),
-		lastActivity: p.opts.Clock(),
+		lastActivity: now,
 	}
 
 	// Emit a header if this is a fresh file (log empty after
 	// recovery). Header goes at seq=0.
 	if rec.LogSize == 0 && !rec.HeaderValid {
-		now := p.opts.Clock()
 		hdr := schema.NewHeader(key, now.UnixMilli(), p.opts.Generator)
 		body, mErr := schema.MarshalRecord(hdr)
 		if mErr != nil {
