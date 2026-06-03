@@ -1065,6 +1065,16 @@ func (s *shimServer) runCommandLoop(
 		}
 	}()
 
+	// cliExited is nil when the CLI was already dead at attach time:
+	// cli_exited was emitted during replay, and a nil channel is never
+	// selectable, so the loop won't busy-return on the perpetually-closed
+	// s.cli.exited. When the CLI was alive, this aliases s.cli.exited so a
+	// real exit still notifies the client. [R20260603-CR-7]
+	cliExited := s.cli.exited
+	if !cliWasAlive {
+		cliExited = nil
+	}
+
 	for {
 		select {
 		case line, ok := <-lineCh:
@@ -1079,7 +1089,7 @@ func (s *shimServer) runCommandLoop(
 				return
 			}
 
-		case <-s.cli.exited:
+		case <-cliExited:
 			if !cliWasAlive {
 				// CLI was already dead at connection time; cli_exited sent during replay.
 				// Closed channel fires immediately — ignore to avoid double delivery.
