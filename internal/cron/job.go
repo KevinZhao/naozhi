@@ -623,7 +623,7 @@ func previousTickBeforeFromSched(sched robfigcron.Schedule, period time.Duration
 //
 // 关联：docs/rfc/cron-v2-polish.md §3.3 Increment C。
 func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
-	return hasMissedScheduleImpl(j, nil, now, startedAt)
+	return hasMissedScheduleImpl(j, nil, 0, now, startedAt)
 }
 
 // HasMissedScheduleCached is the alloc-free variant of HasMissedSchedule for
@@ -641,14 +641,16 @@ func HasMissedScheduleCached(j *Job, now, startedAt time.Time) (bool, time.Time)
 	if j == nil {
 		return false, time.Time{}
 	}
-	return hasMissedScheduleImpl(j, j.cachedSched, now, startedAt)
+	return hasMissedScheduleImpl(j, j.cachedSched, j.cachedPeriod, now, startedAt)
 }
 
 // hasMissedScheduleImpl is the shared body of HasMissedSchedule and
 // HasMissedScheduleCached. cached, when non-nil, lets the caller skip the
 // regex parse; on cold cache the caller passes nil and we fall through to
 // cronParser.Parse so test fixtures keep working.
-func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, now, startedAt time.Time) (bool, time.Time) {
+// cachedPeriod, when >0, skips the 2x sched.Next call inside
+// schedulePeriodFromSched (R20260603040203-PERF-9); pass 0 to recompute.
+func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, cachedPeriod time.Duration, now, startedAt time.Time) (bool, time.Time) {
 	if j == nil {
 		return false, time.Time{}
 	}
@@ -660,7 +662,10 @@ func hasMissedScheduleImpl(j *Job, cached robfigcron.Schedule, now, startedAt ti
 			return false, time.Time{}
 		}
 	}
-	period := schedulePeriodFromSched(sched, now)
+	period := cachedPeriod
+	if period <= 0 {
+		period = schedulePeriodFromSched(sched, now)
+	}
 	if period <= 0 {
 		return false, time.Time{}
 	}
