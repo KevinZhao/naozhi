@@ -424,13 +424,27 @@ func blockPrivateDialContext() func(ctx context.Context, network, addr string) (
 		if err != nil {
 			return nil, fmt.Errorf("selfupdate: DNS lookup %q: %w", host, err)
 		}
+		if len(addrs) == 0 {
+			return nil, fmt.Errorf("selfupdate: DNS lookup %q returned no addresses", host)
+		}
+		// Require every resolved address to be non-reserved (any one private
+		// IP rejects the whole dial).
 		for _, ia := range addrs {
 			ip := ia.IP
 			if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsPrivate() || ip.IsUnspecified() {
 				return nil, fmt.Errorf("selfupdate: refused connection to reserved IP %s (DNS rebinding guard)", ip)
 			}
 		}
-		return dialer.DialContext(ctx, network, net.JoinHostPort(host, port))
+		// R20260603-SEC-13: dial the *validated* IP directly rather than the
+		// hostname. Passing host back to DialContext would trigger a second DNS
+		// resolution that an attacker controlling the authoritative server can
+		// answer with a private IP this time (classic TOCTOU DNS rebinding) —
+		// the bytes-on-wire connection would then reach the rebound address even
+		// though the address we vetted was public. Pinning addrs[0].IP closes
+		// that window. TLS SNI / cert verification still uses the URL host via
+		// the Transport's TLSClientConfig.ServerName, so name-based TLS is
+		// unaffected.
+		return dialer.DialContext(ctx, network, net.JoinHostPort(addrs[0].IP.String(), port))
 	}
 }
 
