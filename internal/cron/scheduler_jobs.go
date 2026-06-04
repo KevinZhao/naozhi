@@ -1271,6 +1271,23 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		// field is a single edit point on the helper. Schedule stays inline
 		// because it requires re-registering the robfig/cron entry under s.mu
 		// with rollback semantics (helper has no *Scheduler access).
+		//
+		// R20260603140013-CR-1: snapshot the live Job by value BEFORE applyTo
+		// (and before the Schedule mutation below) so a persistJobsLocked
+		// failure can restore the in-memory job to its pre-update state. Without
+		// this, applyTo's writes (Prompt/WorkDir/Notify/NotifyPlatform/
+		// NotifyChatID/FreshContext/Title/Backend/LastSessionID) plus any
+		// Schedule field change stay in *j while disk keeps the old values —
+		// a restart replays the stale persisted job and silently reverts the
+		// edit, diverging memory from disk. The value copy captures the Notify
+		// *bool pointer too; applyTo reassigns j.Notify to a fresh &v, so
+		// restoring the old pointer correctly drops the would-be new value.
+		// This mirrors the Schedule rollbackOnPersistErr intent for the
+		// non-Schedule fields. entryID/cachedSched are runtime-only and are
+		// also captured, which is harmless: on this error path we abort before
+		// any re-registration, so the snapshot's pre-update runtime fields are
+		// the correct ones to keep.
+		preUpdate := *j
 		upd.applyTo(j)
 
 		if upd.Schedule != nil && *upd.Schedule != j.Schedule {
@@ -1296,6 +1313,17 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		}
 
 		save, perr := s.persistJobsLocked()
+		if perr != nil {
+			// R20260603140013-CR-1: persist failed — restore the live job to its
+			// pre-update snapshot so memory matches the (unchanged) disk state.
+			// Done under the same lock before unlocking so no reader observes the
+			// half-applied edit. schedNeedsRereg is left as captured but the
+			// post-unlock re-registration block only runs after this IIFE returns
+			// nil error; on perr the caller returns immediately at the err!=nil
+			// guard, so the re-reg block is never reached.
+			*j = preUpdate
+			return Job{}, nil, perr
+		}
 		// Value-copy while still under lock so the caller sees a stable result
 		// even if another goroutine mutates the job right after we unlock.
 		return *j, save, perr

@@ -36,9 +36,12 @@ func TestDiskListNewestFirst_ParallelDecodePreservesOrder(t *testing.T) {
 		runIDsByMtime[count-1-i] = run.RunID // newest-first order
 	}
 
-	rows, corrupt := s.diskListNewestFirst(jobID, 200, time.Time{})
+	rows, corrupt, unreadable := s.diskListNewestFirst(jobID, 200, time.Time{})
 	if corrupt != 0 {
 		t.Fatalf("corruptCount = %d want 0", corrupt)
+	}
+	if unreadable != 0 {
+		t.Fatalf("unreadableCount = %d want 0", unreadable)
 	}
 	if len(rows) != count {
 		t.Fatalf("rows = %d want %d", len(rows), count)
@@ -80,9 +83,12 @@ func TestDiskListNewestFirst_ParallelDecodeSkipsCorrupt(t *testing.T) {
 		}
 	}
 
-	rows, corrupt := s.diskListNewestFirst(jobID, 200, time.Time{})
+	rows, corrupt, unreadable := s.diskListNewestFirst(jobID, 200, time.Time{})
 	if corrupt != 2 {
 		t.Fatalf("corruptCount = %d want 2", corrupt)
+	}
+	if unreadable != 0 {
+		t.Fatalf("unreadableCount = %d want 0", unreadable)
 	}
 	if len(rows) != good {
 		t.Fatalf("rows = %d want %d", len(rows), good)
@@ -112,7 +118,7 @@ func TestDiskListNewestFirst_ParallelLimitTrimsToNewest(t *testing.T) {
 	}
 
 	const limit = diskDecodeParallelThreshold + 1
-	rows, _ := s.diskListNewestFirst(jobID, limit, time.Time{})
+	rows, _, _ := s.diskListNewestFirst(jobID, limit, time.Time{})
 	if len(rows) != limit {
 		t.Fatalf("rows = %d want %d", len(rows), limit)
 	}

@@ -74,7 +74,7 @@ func TestRunDeadlineWatchdog_TimeoutOnWedgedInterrupt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
-	ch := runDeadlineWatchdog(ctx, bi)
+	ch, _ := runDeadlineWatchdog(ctx, bi)
 
 	select {
 	case abort := <-ch:
@@ -115,7 +115,8 @@ func TestRunDeadlineWatchdog_TimeoutBumpsMetric(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
-	abort := <-runDeadlineWatchdog(ctx, bi)
+	chBI, _ := runDeadlineWatchdog(ctx, bi)
+	abort := <-chBI
 	if !abort.fired || abort.outcome != InterruptError {
 		t.Fatalf("abort = {fired:%v outcome:%v}, want {fired:true outcome:InterruptError}",
 			abort.fired, abort.outcome)
@@ -139,18 +140,26 @@ func TestRunDeadlineWatchdog_ParkedGaugeTracksLiveLeak(t *testing.T) {
 	watchdogInterruptTimeoutAtomic.Store(int64(50 * time.Millisecond))
 	defer watchdogInterruptTimeoutAtomic.Store(prev)
 
-	bi := &blockingInterrupter{release: make(chan struct{}), outcome: InterruptSent}
+	// returned + waitDrained guarantee THIS test's parked inner goroutine
+	// (and its gauge -1) drains before the test returns, so it leaves no
+	// residue for the next test's baseline. release is closed below once we
+	// have observed the park.
+	bi := &blockingInterrupter{release: make(chan struct{}), returned: make(chan struct{}), outcome: InterruptSent}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
-	// Capture baseline AFTER the watchdog has parked this run's inner
-	// goroutine so a sibling test's lagging async decrement cannot skew
-	// the delta. The gauge is global, so we assert the +1/-1 swing this
-	// specific run causes, polling up to base+1 to absorb any concurrent
-	// teardown noise rather than reading a single instant.
-	base := watchdogParkedInterruptGoroutines.Value()
-	abort := <-runDeadlineWatchdog(ctx, bi)
+	// Settle the global gauge before capturing the baseline: a sibling
+	// watchdog test's parked goroutine may still be running its async
+	// Add(-1) decrement (it lands AFTER InterruptViaControl returns, so even
+	// that test's waitDrained does not fence it). If that lagging -1 lands
+	// between our base read and our own +1, the net is flat and the up-loop
+	// below never reaches base+1 — the false "never reached baseline+1"
+	// timeout this test used to flake on. Waiting for a stable value pins an
+	// honest baseline.
+	base := settleParkedGauge()
+	chBase, _ := runDeadlineWatchdog(ctx, bi)
+	abort := <-chBase
 	if !abort.fired || abort.outcome != InterruptError {
 		t.Fatalf("abort = {fired:%v outcome:%v}, want {fired:true outcome:InterruptError}",
 			abort.fired, abort.outcome)
@@ -173,6 +182,7 @@ func TestRunDeadlineWatchdog_ParkedGaugeTracksLiveLeak(t *testing.T) {
 	// the gauge to its pre-park value (modulo sibling activity, which only
 	// trends downward as their goroutines drain too).
 	close(bi.release)
+	bi.waitDrained(t) // fence the inner goroutine's return before asserting
 
 	downDeadline := time.After(2 * time.Second)
 	for watchdogParkedInterruptGoroutines.Value() > base {
@@ -187,6 +197,30 @@ func TestRunDeadlineWatchdog_ParkedGaugeTracksLiveLeak(t *testing.T) {
 	if got := bi.calls.Load(); got != 1 {
 		t.Fatalf("InterruptViaControl call count = %d, want 1", got)
 	}
+}
+
+// settleParkedGauge waits until watchdogParkedInterruptGoroutines reports the
+// same value across several consecutive reads and returns it. A sibling
+// watchdog test's parked inner goroutine decrements the gauge asynchronously
+// after InterruptViaControl returns, so a freshly-read baseline can still be
+// inflated by a decrement that has not yet landed. Settling first pins an
+// honest baseline so the +1/-1 swing this test asserts is not cancelled out.
+func settleParkedGauge() int64 {
+	prev := watchdogParkedInterruptGoroutines.Value()
+	stable := 0
+	for i := 0; i < 200; i++ {
+		time.Sleep(5 * time.Millisecond)
+		n := watchdogParkedInterruptGoroutines.Value()
+		if n == prev {
+			if stable++; stable >= 3 {
+				return n
+			}
+			continue
+		}
+		prev = n
+		stable = 0
+	}
+	return prev
 }
 
 // TestRunDeadlineWatchdog_FastInterruptLeavesGaugeUntouched asserts the
@@ -204,7 +238,8 @@ func TestRunDeadlineWatchdog_FastInterruptLeavesGaugeUntouched(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
-	abort := <-runDeadlineWatchdog(ctx, ci)
+	chCI, _ := runDeadlineWatchdog(ctx, ci)
+	abort := <-chCI
 	if !abort.fired || abort.outcome != InterruptSent {
 		t.Fatalf("abort = {fired:%v outcome:%v}, want {fired:true outcome:InterruptSent}",
 			abort.fired, abort.outcome)
@@ -231,7 +266,8 @@ func TestRunDeadlineWatchdog_FastInterruptStillWins(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
 	defer cancel()
 
-	abort := <-runDeadlineWatchdog(ctx, ci)
+	chUnsup, _ := runDeadlineWatchdog(ctx, ci)
+	abort := <-chUnsup
 	if !abort.fired {
 		t.Fatal("abort.fired = false; want true on DeadlineExceeded")
 	}

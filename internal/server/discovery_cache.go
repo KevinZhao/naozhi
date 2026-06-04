@@ -19,6 +19,24 @@ type discoveryCache struct {
 	mu       sync.RWMutex
 	sessions []discovery.DiscoveredSession
 
+	// refreshMu serialises refresh() so the two startLoop goroutines (initial
+	// one-shot + the 10s ticker) cannot run a Scan / tryShortCircuit
+	// concurrently. startLoop launches both independently and nothing
+	// otherwise orders them — a first full Scan that runs longer than the 10s
+	// tick interval (slow disk / huge ~/.claude) would otherwise let the tick
+	// fire a second concurrent refresh. Beyond preventing duplicate Scan work,
+	// this single-flight guarantee is what makes refreshScratch safe to keep
+	// as shared state. R20260603-PERF-2 (#1700).
+	refreshMu sync.Mutex
+
+	// refreshScratch is a reusable buffer owned by the refresh path (guarded
+	// by refreshMu, never published to readers). tryShortCircuit copies the
+	// cached sessions into it and runs RefreshDynamic in place, allocating a
+	// fresh published snapshot only when a dynamic field actually changed.
+	// This drops the steady-state idle tick from one N-element allocation to
+	// zero. R20260603-PERF-2 (#1700).
+	refreshScratch []discovery.DiscoveredSession
+
 	wg sync.WaitGroup // tracks the initial refresh goroutine started by startLoop
 
 	claudeDir  string
@@ -102,6 +120,11 @@ func (dc *discoveryCache) refresh() {
 	if dc.claudeDir == "" {
 		return
 	}
+
+	// R20260603-PERF-2 (#1700): single-flight the refresh path so the two
+	// startLoop goroutines never Scan / mutate refreshScratch concurrently.
+	dc.refreshMu.Lock()
+	defer dc.refreshMu.Unlock()
 
 	if dc.tryShortCircuit() {
 		return
@@ -196,13 +219,34 @@ func (dc *discoveryCache) tryShortCircuit() bool {
 	// (lastActive, state, summary, lastPrompt) may have changed because the
 	// CLI keeps writing to JSONL files.  Do a lightweight refresh that only
 	// stats files and hits the mtime-based caches.
+	//
+	// R20260603-PERF-2 (#1700): we must NOT call RefreshDynamic on dc.sessions
+	// in place — snapshot() hands the same backing array to dashboard readers
+	// (and evictPID's [:0:0] establishes the published-slice-is-immutable
+	// contract), so a concurrent reader copying it while RefreshDynamic
+	// rewrites string headers in place is a data race. The previous code
+	// therefore allocated a full N-element copy EVERY tick (~10s) even when no
+	// dynamic field changed — pure churn on the steady-state idle path.
+	//
+	// RefreshDynamic returns changed, so we can refresh into a refresh-
+	// goroutine-private scratch buffer (refreshScratch, never published) and
+	// only publish a fresh immutable copy when something actually changed. On
+	// the common idle path (no JSONL writes since the last tick) changed=false
+	// and we allocate nothing and never take the write lock. refreshMu
+	// (held by the caller) guarantees refreshScratch has a single user.
 	if len(cached) > 0 {
-		updated := make([]discovery.DiscoveredSession, len(cached))
-		copy(updated, cached)
-		discovery.RefreshDynamic(dc.claudeDir, updated)
-		dc.mu.Lock()
-		dc.sessions = updated
-		dc.mu.Unlock()
+		scratch := dc.refreshScratch[:0]
+		scratch = append(scratch, cached...)
+		dc.refreshScratch = scratch // retain grown capacity for reuse
+		if discovery.RefreshDynamic(dc.claudeDir, scratch) {
+			// Publish a fresh immutable snapshot — never hand readers the
+			// reusable scratch backing array.
+			updated := make([]discovery.DiscoveredSession, len(scratch))
+			copy(updated, scratch)
+			dc.mu.Lock()
+			dc.sessions = updated
+			dc.mu.Unlock()
+		}
 	}
 
 	return true

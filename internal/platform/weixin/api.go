@@ -101,7 +101,7 @@ func ssrfDialGuardWithResolver(
 		if lastRejectErr != nil {
 			return nil, lastRejectErr
 		}
-		return nil, fmt.Errorf("weixin dial: no valid IP for %q", host)
+		return nil, fmt.Errorf("weixin dial: no IPs resolved for %q (SSRF guard)", host)
 	}
 }
 

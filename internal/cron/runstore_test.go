@@ -519,14 +519,15 @@ func TestRunStore_ListSkipsCorruptEntries(t *testing.T) {
 	}
 }
 
-// TestRunStore_DecodeParallel_UnreadableCountsAsCorrupt pins R20260603-CR-9:
-// a slot whose file is unreadable (EACCES) must be reflected in corruptCount
-// so warmCache logging surfaces the signal even when the error is not
-// ErrCorruptRun. We use chmod 0000 to simulate a transient IO barrier.
+// TestRunStore_DecodeParallel_UnreadableCountedSeparately pins R20260603-CR-1
+// (#1693): a slot whose file is unreadable (EACCES) must NOT be reflected in
+// corruptCount — it must be tracked in the separate unreadableCount return so
+// warmCache can log a distinct message for I/O errors vs data corruption.
+// We use chmod 0000 to simulate a transient IO barrier.
 //
 // diskDecodeParallelThreshold == 16, so we need > 16 candidates to reach
 // decodeRunsParallel. We append 18 runs and make one unreadable.
-func TestRunStore_DecodeParallel_UnreadableCountsAsCorrupt(t *testing.T) {
+func TestRunStore_DecodeParallel_UnreadableCountedSeparately(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("running as root: chmod 0000 does not deny access")
 	}
@@ -554,11 +555,13 @@ func TestRunStore_DecodeParallel_UnreadableCountsAsCorrupt(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(unreadablePath, 0o600) })
 
 	// Call diskListNewestFirst directly — bypasses the in-memory cache and
-	// exercises the decodeRunsParallel worker path where the unreadable file
-	// must increment corruptCount.
-	rows, corruptCount := s.diskListNewestFirst(jobID, 100, time.Time{})
-	if corruptCount != 1 {
-		t.Fatalf("corruptCount=%d want 1 (unreadable file must be counted)", corruptCount)
+	// exercises the decodeRunsParallel worker path.
+	rows, corruptCount, unreadableCount := s.diskListNewestFirst(jobID, 100, time.Time{})
+	if corruptCount != 0 {
+		t.Fatalf("corruptCount=%d want 0 (EACCES is not ErrCorruptRun)", corruptCount)
+	}
+	if unreadableCount != 1 {
+		t.Fatalf("unreadableCount=%d want 1 (unreadable file must be counted separately)", unreadableCount)
 	}
 	if len(rows) != total-1 {
 		t.Fatalf("rows len=%d want %d (all readable files returned)", len(rows), total-1)
@@ -1254,7 +1257,7 @@ func TestRunStore_DiskList_BeforeStartedAtFilter(t *testing.T) {
 	}
 
 	before := now.Add(-time.Hour)
-	rows, corruptCount := s.diskListNewestFirst(jobID, 100, before)
+	rows, corruptCount, _ := s.diskListNewestFirst(jobID, 100, before)
 	// The two corrupt newer entries are read+rejected (corruptCount bumps).
 	// Pre-fix this was 0 (coarse gate skipped them); post-fix it's 2 because
 	// the strict StartedAt filter is the sole truth — we MUST read each
@@ -1298,7 +1301,7 @@ func TestRunStore_DiskList_BeforeStartedAtMtimeDivergence(t *testing.T) {
 	}
 
 	before := now.Add(-time.Hour)
-	rows, corruptCount := s.diskListNewestFirst(jobID, 100, before)
+	rows, corruptCount, _ := s.diskListNewestFirst(jobID, 100, before)
 	if corruptCount != 0 {
 		t.Fatalf("unexpected corruptCount=%d", corruptCount)
 	}

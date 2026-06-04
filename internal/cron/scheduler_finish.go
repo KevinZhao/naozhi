@@ -14,6 +14,7 @@ package cron
 import (
 	"io/fs"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -181,7 +182,10 @@ type finishArgs struct {
 // log scattered across executeOpt's seven branches; adding a new error class
 // is now one mapping plus one finishArgs literal at the call site.
 func (s *Scheduler) finishRun(a finishArgs) {
-	endedAt := time.Now()
+	// R247-ARCH-11 (#643): read endedAt via the injected clock so DurationMS
+	// (endedAt - a.startedAt) is deterministic under a fake clock in tests.
+	// Default clock is time.Now(), byte-identical to the prior inline read.
+	endedAt := s.now()
 	durationMS := endedAt.Sub(a.startedAt).Milliseconds()
 	if durationMS < 0 {
 		durationMS = 0 // monotonic clock skew safety
@@ -438,7 +442,10 @@ func (s *Scheduler) emitSyntheticSkipped(j *Job, viaTriggerNow bool, errClass Er
 			"job_id", j.ID, "trigger_now", viaTriggerNow, "err_class", string(errClass), "tag", logTag, "err", err)
 		return
 	}
-	startedAt := time.Now()
+	// R247-ARCH-11 (#643): synthetic started→ended pair uses the injected
+	// clock so a fake clock can drive a deterministic startedAt/endedAt for
+	// skipped-run lifecycle assertions.
+	startedAt := s.now()
 	trigger := TriggerScheduled
 	if viaTriggerNow {
 		trigger = TriggerManual
@@ -611,6 +618,37 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 	return result, errMsg, true
 }
 
+// redactAddrRe matches IPv4 address + optional port in error messages such as
+// "dial tcp 192.168.1.5:4012: connection refused". Hostnames are not matched
+// intentionally — they require a DNS lookup for detection; IP literals are
+// structurally identifiable without external context.
+// R20260603-SEC-1 / R20260603-SEC-4.
+var redactAddrRe = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?\b`)
+
+// hasAddrTrigger is a zero-alloc fast-path check: returns true only when s
+// contains at least one digit immediately followed (or preceded) by a dot,
+// which is necessary (though not sufficient) for a dotted-quad IPv4 address.
+// When this returns false the regex can be skipped entirely — common cron
+// error classes ("context deadline exceeded", "permission denied") never
+// contain digit-dot pairs so they take the zero-alloc return.
+func hasAddrTrigger(s string) bool {
+	for i := 1; i < len(s); i++ {
+		if s[i] == '.' && s[i-1] >= '0' && s[i-1] <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+// redactAddrInCronError replaces IPv4(:port)? patterns with [redacted-addr].
+// Fast-path: returns s unmodified (zero alloc) when hasAddrTrigger is false.
+func redactAddrInCronError(s string) string {
+	if !hasAddrTrigger(s) {
+		return s
+	}
+	return redactAddrRe.ReplaceAllString(s, "[redacted-addr]")
+}
+
 // redactPathsBuilderPool reuses strings.Builder scratch space across
 // redactPathsInCronError slow-path invocations. recordResultP0WithSanitised
 // is the hot caller (every cron tick + every TriggerNow). Empty / no-path
@@ -698,8 +736,11 @@ func redactPathsInCronError(s string) string {
 	// cap is a defensive ceiling so an unexpectedly long no-path input
 	// still falls through to the byte-cap branch below; common cron error
 	// classes fit comfortably under this. R250-PERF-12 / #1115.
+	// R20260603-SEC-1/SEC-4: IP:port redaction runs even on the fast path —
+	// "dial tcp 192.168.1.5:4012: connection refused" contains no slash so
+	// hasNoPathTrigger is true; without this the addr leaks through.
 	if len(s) <= redactFastPathMaxLen && hasNoPathTrigger(s) {
-		return s
+		return redactAddrInCronError(s)
 	}
 	// Byte-level cap, but split on a rune boundary — naked s[:maxRedactErrLen]
 	// can fall mid-codepoint for multibyte runes (CJK error messages from the
@@ -710,13 +751,14 @@ func redactPathsInCronError(s string) string {
 	}
 	// Fast path: if the string contains no POSIX slash, no Windows
 	// backslash, and no '~/' tilde-home shorthand, there is nothing
-	// path-shaped to redact — skip the Builder allocation and return the
-	// input unchanged. recordResult runs on every cron execution, and
-	// common error classes ("dispatcher queue full", "session error:
-	// context deadline exceeded") have no embedded paths. R62-PERF-3 +
-	// R234-SEC-9（~/ 用户目录形态补漏）。
+	// path-shaped to redact — skip the Builder allocation. Still apply
+	// addr redaction for IP:port patterns. recordResult runs on every
+	// cron execution, and common error classes ("dispatcher queue full",
+	// "session error: context deadline exceeded") have no embedded paths.
+	// R62-PERF-3 + R234-SEC-9（~/ 用户目录形态补漏）。
+	// R20260603-SEC-1/SEC-4: addr redaction applied on this path too.
 	if hasNoPathTrigger(s) {
-		return s
+		return redactAddrInCronError(s)
 	}
 	b := redactPathsBuilderPool.Get().(*strings.Builder)
 	// Important: strings.Builder.Reset() drops the internal byte slice
@@ -748,5 +790,7 @@ func redactPathsInCronError(s string) string {
 	// drive / ~/ home, bare-root pass-through, whitespace/`:` delimiters)
 	// lives in one cross-cutting place that sysession can reuse.
 	osutil.RedactAbsolutePathsInto(b, s)
-	return b.String()
+	// R20260603-SEC-1 / R20260603-SEC-4: strip IP:port patterns that survive
+	// the path-redaction pass (they contain no slash/backslash/tilde trigger).
+	return redactAddrInCronError(b.String())
 }

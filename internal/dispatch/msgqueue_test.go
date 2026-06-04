@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -381,6 +382,60 @@ func TestLastNotify_CleanedOnDiscard(t *testing.T) {
 
 	if !q.ShouldNotify("k1") {
 		t.Fatal("lastNotify should be cleaned after Discard")
+	}
+}
+
+// TestShouldNotify_PoolRecyclesEvictedEntry verifies that the dropNotifyEntry
+// pool (#1694) preserves correctness across LRU saturation: once the LRU is
+// full, inserting new cold keys must evict the oldest, recycle its struct, and
+// still maintain per-key cooldown for the surviving keys. A recycled entry
+// must not carry over a stale key/ts.
+func TestShouldNotify_PoolRecyclesEvictedEntry(t *testing.T) {
+	t.Parallel()
+	q := NewMessageQueue(0, 0) // maxDepth<=0 forces the drop/LRU path
+
+	// Saturate the LRU with dropNotifyMaxKeys distinct cold keys. Each first
+	// call fires; immediate second call on the same key is cooled down.
+	for i := 0; i < dropNotifyMaxKeys; i++ {
+		k := fmt.Sprintf("k%d", i)
+		if !q.ShouldNotify(k) {
+			t.Fatalf("first ShouldNotify(%q) should fire", k)
+		}
+		if q.ShouldNotify(k) {
+			t.Fatalf("second ShouldNotify(%q) should be cooled down", k)
+		}
+	}
+
+	// LRU is now full. Insert one more cold key; this evicts the oldest (k0)
+	// and must reuse its struct.
+	overflow := fmt.Sprintf("k%d", dropNotifyMaxKeys)
+	if !q.ShouldNotify(overflow) {
+		t.Fatalf("overflow key %q should fire", overflow)
+	}
+	if q.ShouldNotify(overflow) {
+		t.Fatalf("overflow key %q should be cooled down after first fire", overflow)
+	}
+
+	// The evicted key (k0) has no remaining entry, so it should fire again as
+	// a fresh cold key — proving the recycled struct did not retain k0's ts.
+	if !q.ShouldNotify("k0") {
+		t.Fatal("evicted key k0 should fire again (entry was recycled, not stale)")
+	}
+}
+
+// BenchmarkShouldNotify_ColdKeyChurn measures the steady-state cold-key insert
+// path that #1694 optimizes. After the LRU saturates, each iteration evicts a
+// tail entry and inserts a new one; with the pool this should allocate nothing.
+func BenchmarkShouldNotify_ColdKeyChurn(b *testing.B) {
+	q := NewMessageQueue(0, 0)
+	// Pre-saturate so every benchmarked call hits the evict+recycle path.
+	for i := 0; i < dropNotifyMaxKeys; i++ {
+		q.ShouldNotify(fmt.Sprintf("warm%d", i))
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		q.ShouldNotify(fmt.Sprintf("cold%d", i))
 	}
 }
 

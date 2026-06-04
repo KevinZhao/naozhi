@@ -139,6 +139,10 @@ func (p *Process) InitLinker(cwd string) {
 	p.cwd = cwd
 	p.cachedProjectDir = resolveProjectDir(cwd)
 	p.linker = NewSubagentLinker()
+	// R20260603030037-GO-2 (#1661): bind the resolve worker-pool lifetime to
+	// the process-scoped ctx up front, so it never captures the per-request
+	// ctx of whichever DispatchResolve caller happens to fire first.
+	p.linker.SetPoolContext(p.lifecycleContext())
 	log := p.eventLog
 	p.linker.OnResolve(func(taskID, toolUseID, internalAgentID string) {
 		if toolUseID == "" || log == nil {

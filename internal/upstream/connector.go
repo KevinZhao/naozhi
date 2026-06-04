@@ -306,13 +306,30 @@ func (c *Connector) Run(ctx context.Context) {
 	}
 }
 
+// connectorTLSConfig builds the TLS config used for the wss:// dial. The TLS
+// floor (1.2) is always pinned so a compromised segment cannot force a weaker
+// protocol. When insecure is true the operator has explicitly opted out of
+// certificate verification (config validation requires upstream.insecure=true
+// to even reach a ws:// / self-signed wss:// host), so we honour the flag by
+// setting InsecureSkipVerify. Previously the flag was carried through config
+// and copied into Config.Insecure but never consumed here, silently violating
+// the operator's contract. R20260603150052-GO-3 (#1711).
+func connectorTLSConfig(insecure bool) *tls.Config {
+	return &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: insecure, //nolint:gosec // gated by upstream.insecure config flag (validated)
+	}
+}
+
 func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
 		// Pin TLS floor so downgraded clients can't be forced onto a weaker
 		// protocol via a compromised network segment. wss:// is already
-		// required by config validation.
-		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+		// required by config validation. When operators opt into insecure
+		// mode the floor is kept but certificate verification is skipped —
+		// see connectorTLSConfig. R20260603150052-GO-3 (#1711).
+		TLSClientConfig: connectorTLSConfig(c.cfg.Insecure),
 	}
 	conn, _, dialErr := dialer.DialContext(ctx, c.cfg.URL, nil)
 	if dialErr != nil {
@@ -325,6 +342,12 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	// journal on reconnect loops.
 	if strings.HasPrefix(c.cfg.URL, "ws://") {
 		slog.Warn("upstream connector: transmitting token over plaintext ws:// — set upstream.insecure=false and use wss:// for production")
+	}
+	// R20260603150052-GO-3 (#1711): when insecure mode skips certificate
+	// verification on a wss:// dial, surface it the same way as the ws://
+	// warning so a forgotten insecure flag is visible in ops journals.
+	if c.cfg.Insecure && strings.HasPrefix(c.cfg.URL, "wss://") {
+		slog.Warn("upstream connector: TLS certificate verification disabled (upstream.insecure=true) — set upstream.insecure=false for production")
 	}
 	// Bound inbound frame size so a malicious or buggy primary cannot
 	// exhaust memory with a single huge message. 16 MB matches the primary

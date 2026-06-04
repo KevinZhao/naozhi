@@ -153,7 +153,7 @@ func (s *Source) loadBeforeFullScan(ctx context.Context, beforeMS int64, limit i
 	if err != nil {
 		return nil, err
 	}
-	filtered := all[:0]
+	filtered := make([]cli.EventEntry, 0, len(all))
 	for _, e := range all {
 		if e.Time < beforeMS {
 			filtered = append(filtered, e)
@@ -244,7 +244,7 @@ func (s *Source) loadBeforeViaIdx(ctx context.Context, beforeMS int64, limit int
 		return nil, false, nil
 	}
 
-	filtered := entries[:0]
+	filtered := make([]cli.EventEntry, 0, len(entries))
 	for _, e := range entries {
 		if e.Time < beforeMS {
 			filtered = append(filtered, e)
