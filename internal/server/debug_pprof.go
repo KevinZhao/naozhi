@@ -70,10 +70,13 @@ func (s *Server) registerPprof() {
 			return
 		}
 		// Defense-in-depth: even inside requireAuth, reject non-loopback
-		// callers. trustedProxy mode (ALB → EC2) does NOT exempt pprof
-		// from the loopback gate — a compromised ALB could otherwise
-		// smuggle profiles out via forged X-Forwarded-For.
-		if !isLoopbackRemote(r.RemoteAddr) {
+		// callers. R20260604-SEC-5: in trustedProxy mode r.RemoteAddr is the
+		// proxy's loopback IP for EVERY forwarded request, so gating on
+		// RemoteAddr would wave through anything the proxy relays. Resolve the
+		// real client IP (trusted XFF last hop, not client-spoofable) and gate
+		// on that — an external caller is non-loopback and is rejected; the
+		// on-host SSH+curl-127.0.0.1 runbook has no XFF and stays allowed.
+		if !isLoopbackClient(r, s.auth.TrustedProxy) {
 			slog.Warn("rejecting non-loopback pprof request",
 				"remote", r.RemoteAddr, "path", osutil.SanitizeForLog(r.URL.Path, 256))
 			http.Error(w, "pprof is loopback-only; SSH to the host and curl 127.0.0.1", http.StatusForbidden)

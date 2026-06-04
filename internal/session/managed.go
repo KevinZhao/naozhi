@@ -116,6 +116,14 @@ type ProcessEventReader interface {
 	// EventEntriesSince returns entries with Time > afterMS, used by the
 	// dashboard 1Hz incremental poll path.
 	EventEntriesSince(afterMS int64) []cli.EventEntry
+	// EventEntriesSinceAppend is the buffer-reusing variant of
+	// EventEntriesSince: matched entries are appended into dst (callers pass
+	// dst[:0] from a per-subscription buffer so the common 0-5-entry
+	// incremental poll reuses capacity instead of allocating). Passing nil
+	// preserves EventEntriesSince's "nil when empty" contract. The returned
+	// slice is owned by the caller; the reader retains no reference.
+	// R20260604-PERF-25 (#1740).
+	EventEntriesSinceAppend(dst []cli.EventEntry, afterMS int64) []cli.EventEntry
 	// EventEntriesBefore returns up to `limit` entries with Time < beforeMS
 	// drawn from the live ring (chronological). Used by the dashboard
 	// pagination handler when a tab scrolls back past the in-memory tail.
@@ -226,6 +234,7 @@ type processIface interface {
 	// team's internal-event flood can't blank the first paint.
 	EventLastNVisible(visibleTarget, maxTotal int) []cli.EventEntry
 	EventEntriesSince(afterMS int64) []cli.EventEntry
+	EventEntriesSinceAppend(dst []cli.EventEntry, afterMS int64) []cli.EventEntry
 	EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry
 	LastActivitySummary() string
 	// LastResponseSummary returns the summary of the most recent assistant

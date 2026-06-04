@@ -88,6 +88,18 @@ func capHistoryBatch(entries []cli.EventEntry) []cli.EventEntry {
 // multiple goroutines — SendRaw enqueues a slice header into a per-client
 // channel and the writePump never mutates the underlying buffer.
 func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []cli.EventEntry) ([]byte, error) {
+	// R20260604-SEC-10: scrub credential token shapes (sk-ant-, ghp_, AKIA, …)
+	// from the free-text Summary/Detail fields before the bytes are marshalled
+	// and fanned out to dashboard WS clients (where they would also persist to
+	// IndexedDB history). This mirrors the textutil.RedactSecrets pass that
+	// dispatch.decorateReplyText and cron finishRun already apply on the IM
+	// path; the live dashboard WS stream was the one egress that handed raw
+	// cli.EventEntry text to the browser. marshalHistoryFrame is the single
+	// serialization choke point for both the backfill and live-push paths, so
+	// redacting here covers every WS history frame exactly once — the result is
+	// cached by getOrMarshal so the scan is not repeated across the fan-out
+	// wave.
+	entries = redactEntrySecrets(entries)
 	if h.historyMarshalCache == nil {
 		// Defensive: should not happen for a Hub built via NewHub, but a
 		// hand-constructed test Hub may skip the field. Fall back to the
@@ -194,6 +206,11 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 			c.closeDone()
 		}
 	}()
+	// R20260604-PERF-25 (#1740): one buffer per pushLoop goroutine, reused
+	// across every notify wave by backfillSubscriberEvents. The drain consumes
+	// it synchronously (marshal + SendRaw) and never retains it, so reuse is
+	// race-free — each goroutine owns its own buf.
+	var evBuf []cli.EventEntry
 	for {
 		select {
 		case _, ok := <-notify:
@@ -212,14 +229,16 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 				// extracted into backfillSubscriberEvents so the same
 				// coalesced-marshal path serves both the post-resubscribe
 				// catch-up and the regular notify drain.
-				newLast, alive := h.backfillSubscriberEvents(c, key, sess, lastTime)
+				newLast, alive, b := h.backfillSubscriberEvents(c, key, sess, lastTime, evBuf)
+				evBuf = b
 				if !alive {
 					return
 				}
 				lastTime = newLast
 				continue
 			}
-			newLast, alive := h.backfillSubscriberEvents(c, key, sess, lastTime)
+			newLast, alive, b := h.backfillSubscriberEvents(c, key, sess, lastTime, evBuf)
+			evBuf = b
 			if !alive {
 				return
 			}
@@ -265,29 +284,35 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 // marshal error, which silently dropped events — strictly more correct
 // to retry from the same lastTime on the next notify, which is what the
 // helper now does for both call sites.
-func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.ManagedSession, lastTime int64) (int64, bool) {
-	// R112714-PERF-11: use EventEntriesSinceAppend so the dead-session path
-	// (persistedHistory) can reuse a buffer. Live-session path still allocates
-	// because ProcessEventReader.EventEntriesSince has no append variant
-	// (adding it would touch cli.Process + all fakes — deferred). Passing nil
-	// here matches the prior EventEntriesSince(nil) behaviour; callers that
-	// want per-client buffer reuse can pass a pre-allocated dst instead.
-	entries := sess.EventEntriesSinceAppend(nil, lastTime)
+func (h *Hub) backfillSubscriberEvents(c *wsClient, key string, sess *session.ManagedSession, lastTime int64, buf []cli.EventEntry) (int64, bool, []cli.EventEntry) {
+	// R20260604-PERF-25 (#1740): pass the caller's per-goroutine buffer (sliced
+	// to [:0]) into EventEntriesSinceAppend so BOTH the dead-session
+	// (persistedHistory) and the live-process path reuse capacity instead of
+	// allocating a fresh []cli.EventEntry per notify wave. The entries are
+	// consumed synchronously below (marshal + SendRaw, which copies only the
+	// frame bytes), never retained past this call, so reusing the buffer on the
+	// next notify is safe. The (possibly grown) buffer is returned so the caller
+	// can keep it for the next iteration.
+	entries := sess.EventEntriesSinceAppend(buf[:0], lastTime)
 	if len(entries) == 0 {
-		return lastTime, true
+		return lastTime, true, entries
 	}
 	select {
 	case <-c.done:
-		return lastTime, false
+		return lastTime, false, entries
 	default:
 	}
-	entries = capHistoryBatch(entries)
-	data, err := h.marshalHistoryFrame(key, lastTime, entries)
+	// capHistoryBatch may return a tail sub-slice of entries; marshal/advance
+	// from that view but return the full `entries` slice as the reusable buffer
+	// so its capacity is preserved across notify waves (a tail slice would
+	// shrink cap every call and defeat the reuse).
+	capped := capHistoryBatch(entries)
+	data, err := h.marshalHistoryFrame(key, lastTime, capped)
 	if err != nil {
-		return lastTime, true
+		return lastTime, true, entries
 	}
 	c.SendRaw(data)
-	return entries[len(entries)-1].Time, true
+	return capped[len(capped)-1].Time, true, entries
 }
 
 // resubscribeEvents waits for a new process to be attached to the session and
