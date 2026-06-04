@@ -12,9 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/dashboard/ext/scratch"
 	"github.com/naozhi/naozhi/internal/dashboard/httputil"
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/session"
-	"github.com/naozhi/naozhi/internal/sysession"
 )
 
 // embed.FS 静态资源 5 变量 + staticAssetETags init + serveStaticWithETag
@@ -174,34 +172,14 @@ func (s *Server) registerDashboard() {
 	if s.scheduler != nil {
 		s.scheduler.SetTelemetry(telemetry)
 	}
-	// sysession.Manager keeps its own SetCallbacks API for now (its
-	// atomic.Pointer holder shape would need its own refactor); the
-	// callbacks here translate sysession.DaemonRun*Event into
-	// runtelemetry events and route through the same hubBroadcaster
-	// so the wire shape matches Phase D's unified path.
+	// #1723 Phase 1: sysession.Manager now produces runtelemetry events
+	// directly (SetTelemetry, mirroring cron's seam) instead of the legacy
+	// SetCallbacks shim that translated sysession.DaemonRun*Event into
+	// runtelemetry events here. The enum maps moved into the sysession
+	// package; the wire shape is unchanged — the same hubBroadcaster still
+	// selects the daemon_run_* payload off Subsystem=SubsystemSysession.
 	if s.sysessionMgr != nil {
-		s.sysessionMgr.SetCallbacks(
-			func(ev sysession.DaemonRunStartedEvent) {
-				telemetry.BroadcastRunStarted(runtelemetry.RunStartedEvent{
-					Subsystem: runtelemetry.SubsystemSysession,
-					OwnerID:   ev.Name,
-					RunID:     ev.RunID,
-					Trigger:   mapSysessionTrigger(ev.Trigger),
-					StartedAt: ev.StartedAt,
-				})
-			},
-			func(ev sysession.DaemonRunEndedEvent) {
-				telemetry.BroadcastRunEnded(runtelemetry.RunEndedEvent{
-					Subsystem:  runtelemetry.SubsystemSysession,
-					OwnerID:    ev.Name,
-					RunID:      ev.RunID,
-					State:      mapSysessionRunState(ev.State),
-					DurationMS: ev.DurationMS,
-					Trigger:    mapSysessionTrigger(ev.Trigger),
-					ErrorClass: mapSysessionErrorClass(ev.ErrorClass),
-				})
-			},
-		)
+		s.sysessionMgr.SetTelemetry(telemetry)
 	}
 
 	// Authenticated API routes
