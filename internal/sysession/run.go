@@ -114,26 +114,6 @@ type DaemonRun struct {
 	Stats map[string]int64 `json:"stats,omitempty"`
 }
 
-// DaemonRunStartedEvent is published when a Tick begins (post-CAS gate).
-// Dashboard subscribers update the "in-flight" indicator.
-type DaemonRunStartedEvent struct {
-	Name      string            `json:"name"`
-	RunID     string            `json:"run_id"`
-	Trigger   DaemonTriggerKind `json:"trigger,omitempty"`
-	StartedAt time.Time         `json:"started_at"`
-}
-
-// DaemonRunEndedEvent is published on terminal Tick completion.
-// ErrorMsg is omitted by design; subscribers must look at ErrorClass.
-type DaemonRunEndedEvent struct {
-	Name       string            `json:"name"`
-	RunID      string            `json:"run_id"`
-	State      DaemonRunState    `json:"state"`
-	DurationMS int64             `json:"duration_ms,omitempty"`
-	ErrorClass DaemonErrorClass  `json:"error_class,omitempty"`
-	Trigger    DaemonTriggerKind `json:"trigger,omitempty"`
-}
-
 // newRunID generates a 16-hex-char identifier for a single run.  Not a
 // security boundary — only for log correlation / dashboard linking.
 // Falls back to a deterministic prefix on rand.Read failure (extremely

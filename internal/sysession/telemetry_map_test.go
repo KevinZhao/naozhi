@@ -1,21 +1,20 @@
-package server
+package sysession
 
 import (
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/runtelemetry"
-	"github.com/naozhi/naozhi/internal/sysession"
 )
 
 func TestMapSysessionTrigger(t *testing.T) {
 	cases := []struct {
-		in   sysession.DaemonTriggerKind
+		in   DaemonTriggerKind
 		want runtelemetry.TriggerKind
 	}{
-		{sysession.DaemonTriggerScheduled, runtelemetry.TriggerScheduled},
-		{sysession.DaemonTriggerManual, runtelemetry.TriggerManual},
-		{sysession.DaemonTriggerKind("bogus"), runtelemetry.TriggerScheduled},
-		{sysession.DaemonTriggerKind(""), runtelemetry.TriggerScheduled},
+		{DaemonTriggerScheduled, runtelemetry.TriggerScheduled},
+		{DaemonTriggerManual, runtelemetry.TriggerManual},
+		{DaemonTriggerKind("bogus"), runtelemetry.TriggerScheduled},
+		{DaemonTriggerKind(""), runtelemetry.TriggerScheduled},
 	}
 	for _, c := range cases {
 		if got := mapSysessionTrigger(c.in); got != c.want {
@@ -26,15 +25,15 @@ func TestMapSysessionTrigger(t *testing.T) {
 
 func TestMapSysessionRunState(t *testing.T) {
 	cases := []struct {
-		in   sysession.DaemonRunState
+		in   DaemonRunState
 		want runtelemetry.RunState
 	}{
-		{sysession.DaemonRunSucceeded, runtelemetry.RunStateSucceeded},
-		{sysession.DaemonRunFailed, runtelemetry.RunStateFailed},
-		{sysession.DaemonRunTimedOut, runtelemetry.RunStateTimedOut},
-		{sysession.DaemonRunCanceled, runtelemetry.RunStateCanceled},
-		{sysession.DaemonRunState("bogus"), runtelemetry.RunStateFailed},
-		{sysession.DaemonRunState(""), runtelemetry.RunStateFailed},
+		{DaemonRunSucceeded, runtelemetry.RunStateSucceeded},
+		{DaemonRunFailed, runtelemetry.RunStateFailed},
+		{DaemonRunTimedOut, runtelemetry.RunStateTimedOut},
+		{DaemonRunCanceled, runtelemetry.RunStateCanceled},
+		{DaemonRunState("bogus"), runtelemetry.RunStateFailed},
+		{DaemonRunState(""), runtelemetry.RunStateFailed},
 	}
 	for _, c := range cases {
 		if got := mapSysessionRunState(c.in); got != c.want {
@@ -45,19 +44,19 @@ func TestMapSysessionRunState(t *testing.T) {
 
 func TestMapSysessionErrorClass(t *testing.T) {
 	cases := []struct {
-		in   sysession.DaemonErrorClass
+		in   DaemonErrorClass
 		want runtelemetry.ErrorClass
 	}{
-		{sysession.DaemonErrorClassNone, runtelemetry.ErrClassNone},
-		{sysession.DaemonErrorClassValidation, runtelemetry.ErrClassSysessionValidation},
-		{sysession.DaemonErrorClassUpstream, runtelemetry.ErrClassSysessionUpstream},
+		{DaemonErrorClassNone, runtelemetry.ErrClassNone},
+		{DaemonErrorClassValidation, runtelemetry.ErrClassSysessionValidation},
+		{DaemonErrorClassUpstream, runtelemetry.ErrClassSysessionUpstream},
 		// The load-bearing normalisation: sysession "timeout" must map to
 		// the runtelemetry canonical "deadline_exceeded", which dashboard.js
 		// renders as "超时". A bare cast would have leaked "timeout".
-		{sysession.DaemonErrorClassTimeout, runtelemetry.ErrClassDeadlineExceeded},
-		{sysession.DaemonErrorClassPanic, runtelemetry.ErrClassPanic},
-		{sysession.DaemonErrorClassCanceled, runtelemetry.ErrClassCanceled},
-		{sysession.DaemonErrorClass("bogus"), runtelemetry.ErrClassNone},
+		{DaemonErrorClassTimeout, runtelemetry.ErrClassDeadlineExceeded},
+		{DaemonErrorClassPanic, runtelemetry.ErrClassPanic},
+		{DaemonErrorClassCanceled, runtelemetry.ErrClassCanceled},
+		{DaemonErrorClass("bogus"), runtelemetry.ErrClassNone},
 	}
 	for _, c := range cases {
 		if got := mapSysessionErrorClass(c.in); got != c.want {
@@ -73,11 +72,11 @@ func TestMapSysessionErrorClass(t *testing.T) {
 // constant. This guards against anyone "simplifying" the map back to a
 // passthrough.
 func TestMapSysessionErrorClassTimeoutWireDivergence(t *testing.T) {
-	if string(sysession.DaemonErrorClassTimeout) == string(runtelemetry.ErrClassDeadlineExceeded) {
+	if string(DaemonErrorClassTimeout) == string(runtelemetry.ErrClassDeadlineExceeded) {
 		t.Skip("wire strings converged; bare cast would now be safe and this guard is moot")
 	}
-	bare := runtelemetry.ErrorClass(sysession.DaemonErrorClassTimeout)
-	mapped := mapSysessionErrorClass(sysession.DaemonErrorClassTimeout)
+	bare := runtelemetry.ErrorClass(DaemonErrorClassTimeout)
+	mapped := mapSysessionErrorClass(DaemonErrorClassTimeout)
 	if bare == mapped {
 		t.Fatalf("expected map to differ from bare cast: bare=%q mapped=%q", bare, mapped)
 	}

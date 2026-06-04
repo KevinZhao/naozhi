@@ -624,9 +624,7 @@ func (s *Scheduler) deleteJobLocked(j *Job) {
 // plat+chat-based mutator pipelines.
 func (s *Scheduler) deleteJobPostCleanup(jobID string) {
 	s.resetRouterStub(jobID)
-	if s.runStore.enabled() {
-		s.runStore.DeleteJob(jobID)
-	}
+	s.deleteJobRuns(jobID)
 	s.cleanupRunningJobIfIdle(jobID)
 }
 
