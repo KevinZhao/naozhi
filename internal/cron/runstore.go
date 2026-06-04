@@ -2272,6 +2272,16 @@ func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
 	// wraps and requires two segments.
 	c := cap(entry.ring)
 	if c > 0 && survive < entry.count {
+		// R20260604-CR-7: delete evicted RunIDs from the dedup index before
+		// zeroing the ring slots. ringRead uses logical indices, so we must
+		// call it while entry.count still equals the pre-trim value (before
+		// the entry.count = survive assignment below). ringPushHead mirrors
+		// this with the same nil guard.
+		if entry.runIDs != nil {
+			for i := survive; i < entry.count; i++ {
+				delete(entry.runIDs, entry.ringRead(i).RunID)
+			}
+		}
 		numEvicted := entry.count - survive
 		phyStart := (entry.head + survive) % c
 		if phyStart+numEvicted <= c {

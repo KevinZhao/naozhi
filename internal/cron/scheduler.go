@@ -592,6 +592,14 @@ type Scheduler struct {
 	// notify-budget worth of time. R247-PERF-24.
 	workDirCache workDirResolveCache
 
+	// workDirReachableCache memoises positive workDirReachable() results so
+	// fresh-mode jobs whose allowedRoot=="" (and thus never touch
+	// workDirCache) do not issue a bare os.Stat every tick. Same 30s TTL
+	// and positive-only semantics as workDirCache: a negative (unreachable)
+	// result bypasses the cache so a restored workspace surfaces on the
+	// next tick. Keyed by raw workDir. R20260604064416-PERF-3 (#1731).
+	workDirReachableCache workDirResolveCache
+
 	// knownSessionsCache memoises KnownSessionIDs() output for up to
 	// knownSessionsCacheTTL. The dashboard polls KnownSessionIDs at 1Hz
 	// per tab; rebuilding the set walks every job's runStore.Recent (up
@@ -920,6 +928,30 @@ func (s *Scheduler) workDirResolveUnderRootCached(workDir string) (string, bool)
 		s.workDirCache.store(key, resolved, now)
 	}
 	return resolved, ok
+}
+
+// workDirReachableCached is the Scheduler-scoped variant of workDirReachable
+// that memoises positive results in s.workDirReachableCache so fresh-mode
+// jobs do not repeat the bare os.Stat every tick. Mirrors
+// workDirResolveUnderRootCached: positive-only caching with the same
+// workDirResolveCacheTTL, keyed by raw workDir. A negative result bypasses
+// the cache so an operator who restores a deleted workspace sees the next
+// tick re-stat rather than a pinned "unreachable". Empty workDir is always
+// reachable and is not cached (workDirReachable short-circuits it).
+// R20260604064416-PERF-3 (#1731).
+func (s *Scheduler) workDirReachableCached(workDir string) bool {
+	if s == nil || workDir == "" {
+		return workDirReachable(workDir)
+	}
+	now := time.Now()
+	if _, ok := s.workDirReachableCache.lookup(workDir, now); ok {
+		return true
+	}
+	if workDirReachable(workDir) {
+		s.workDirReachableCache.store(workDir, "", now)
+		return true
+	}
+	return false
 }
 
 // workDirResolveUnderRoot delegates the EvalSymlinks → resolve-root → prefix

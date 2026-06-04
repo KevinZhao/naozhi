@@ -605,7 +605,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 		})
 		return noopRefresh, false
 	}
-	if !workDirReachable(snap.workDir) {
+	if !s.workDirReachableCached(snap.workDir) {
 		lg.Warn("cron fresh spawn aborted: work_dir unreachable",
 			"work_dir", snap.workDir)
 		s.finishRun(finishArgs{

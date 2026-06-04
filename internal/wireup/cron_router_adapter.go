@@ -27,6 +27,25 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
+// Compile-time ordinal pins (R20260604-ARCH-8): if cron.* and session.*
+// iota values diverge the expressions below evaluate to a non-zero int, which
+// when cast to uint produces a large value that overflows uintptr on 32-bit or
+// becomes a giant constant on 64-bit — either way the compiler rejects it.
+// Cost: zero runtime overhead; catches iota reorders before any binary is built.
+// The init() panic below stays as a double guard for dynamic-link edge cases.
+const (
+	// InterruptOutcome (5 values)
+	_ = uint(int(cron.InterruptSent) - int(session.InterruptSent))               // compile-time pin: diverge → negative → uint overflow
+	_ = uint(int(cron.InterruptNoSession) - int(session.InterruptNoSession))     // compile-time pin
+	_ = uint(int(cron.InterruptNoTurn) - int(session.InterruptNoTurn))           // compile-time pin
+	_ = uint(int(cron.InterruptUnsupported) - int(session.InterruptUnsupported)) // compile-time pin
+	_ = uint(int(cron.InterruptError) - int(session.InterruptError))             // compile-time pin
+	// SessionStatus (3 values)
+	_ = uint(int(cron.SessionExisting) - int(session.SessionExisting)) // compile-time pin
+	_ = uint(int(cron.SessionResumed) - int(session.SessionResumed))   // compile-time pin
+	_ = uint(int(cron.SessionNew) - int(session.SessionNew))           // compile-time pin
+)
+
 // init pins cron.InterruptOutcome ordinals against session.InterruptOutcome.
 // Diverging values would silently miscast in cronSessionAdapter.
 // InterruptViaControl below; init() panic crashes the binary at boot instead.
