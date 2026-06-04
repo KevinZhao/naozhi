@@ -529,3 +529,11 @@
 - [R053116-GO-004] watchdogInterruptTimeoutAtomic 包级可变 global,测试串行约束无法静态强制 — internal/cron/scheduler_run.go:798
 - [R053116-GO-007] runstore.go 生产文件 import testing,建议移至 export_test.go — internal/cron/runstore.go:20
 - [R053116-SEC-1] dashboard CSP script-src unsafe-inline,nonce 迁移待完成(已有 NEEDS-DESIGN 注释) — internal/server/routes.go:522
+
+## cron-cr-20260604-064416
+- [R20260604064416-ARCH-4] cron.RedactSecrets 过渡别名无消费者,作者标记 #1571 后一两个 release 删除 — internal/cron/redact_secrets.go:23
+- [R20260604064416-ARCH-5] dispatch.DispatcherConfig 三个 deprecated 闭包字段(SendFn/TakeoverFn/ReplyFooterFn)目标 2026-Q3 删除 — internal/dispatch/dispatch.go:305
+- [R20260604064416-GO-1] jobGates [64]sync.Mutex 内联无 padding,相邻 shard 伪共享 cache line — internal/cron/scheduler.go:552
+- [R20260604064416-CR-5] registerStubFromJob(&result) 传 local copy 指针,与其它逐字段传值的 call site 风格不一致 — internal/cron/scheduler_jobs.go:1389
+- [R20260604064416-GO-3] WireSchedulers 在 sysErr!=nil 时仍可能 Start 部分构造的 sysMgr(契约靠文档约束) — internal/wireup/schedulers.go:222
+- [R20260604064416-PERF-7] parallelFsync n>=2 即进 worker pool,小部署 2-5 writer 可串行 fast path — internal/eventlog/persist/persister.go:1001
