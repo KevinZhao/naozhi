@@ -1016,3 +1016,83 @@ func TestAutoTitler_CorrectlyTypedKnobsApplyNoWarn(t *testing.T) {
 		t.Fatalf("unexpected mistyped-knob warning for valid cfg: %q", buf.String())
 	}
 }
+
+// TestAutoTitler_CtxCancelPreservesFirstErr pins R053116-CR-4: when the first
+// renameOne in a batch fails with an upstream error (firstErr ≠ nil) and ctx
+// is cancelled before the second candidate is processed, Tick MUST return
+// firstErr — not ctx.Err(). The upstream error must reach classifyError so it
+// counts toward the circuit breaker; returning context.Canceled would silently
+// mis-classify the failure as DaemonErrorClassCanceled and hide it from the
+// breaker.
+//
+// Scenario:
+//   - 2 candidates in the batch (2 sessions with enough turns)
+//   - runner.Run returns a non-validation error on the first call (→ firstErr)
+//     and also cancels the context after doing so
+//   - ctx.Err() is non-nil before the second iteration
+//   - Tick must return firstErr, not context.Canceled
+func TestAutoTitler_CtxCancelPreservesFirstErr(t *testing.T) {
+	t.Parallel()
+
+	// errUpstream simulates a real upstream runner failure (not wrapped in
+	// ErrValidation) so classifyError yields DaemonErrorClassUpstream.
+	errUpstream := errors.New("runner: model overloaded")
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// cancelAfterFirstRunner cancels ctx on the first Run call, then
+	// returns errUpstream so the caller records it as firstErr.
+	// On any subsequent call it would return ctx.Err(), but the
+	// ctx.Err() check at the top of the loop fires before a second
+	// Run, so only one call should ever happen.
+	cancellingRunner := &cancelAfterFirstRunnerHelper{
+		cancel:    cancel,
+		errReturn: errUpstream,
+	}
+
+	snap1 := session.SessionSnapshot{
+		Key: "feishu:direct:u1:general", MessageCount: 5,
+		LastPrompt: "first prompt",
+	}
+	snap2 := session.SessionSnapshot{
+		Key: "feishu:direct:u2:general", MessageCount: 5,
+		LastPrompt: "second prompt",
+	}
+	router := newSnapshotFakeRouter([]session.SessionSnapshot{snap1, snap2})
+
+	a, err := newAutoTitler(DaemonDeps{Router: wrapRouter(router), Runner: cancellingRunner})
+	if err != nil {
+		t.Fatalf("newAutoTitler: %v", err)
+	}
+
+	_, tickErr := a.Tick(ctx)
+
+	if tickErr == nil {
+		t.Fatal("Tick returned nil error; expected upstream error")
+	}
+	// The returned error MUST be the upstream error, not context.Canceled.
+	if errors.Is(tickErr, context.Canceled) {
+		t.Fatalf("Tick returned context.Canceled; want upstream firstErr — R053116-CR-4 fix may be missing")
+	}
+	if !errors.Is(tickErr, errUpstream) {
+		t.Fatalf("Tick returned %v; want errUpstream (%v) — R053116-CR-4 fix may be missing", tickErr, errUpstream)
+	}
+}
+
+// cancelAfterFirstRunnerHelper cancels its context on the first Run call and
+// returns a caller-supplied error.  Subsequent calls (should not occur in the
+// test scenario) return context.Canceled to surface any accidental second call.
+type cancelAfterFirstRunnerHelper struct {
+	cancel    context.CancelFunc
+	errReturn error
+	called    atomic.Int32
+}
+
+func (c *cancelAfterFirstRunnerHelper) Run(_ context.Context, _ string) (string, error) {
+	n := c.called.Add(1)
+	if n == 1 {
+		c.cancel()        // cancel the outer ctx so next iteration's ctx.Err() fires
+		return "", c.errReturn
+	}
+	return "", context.Canceled
+}
