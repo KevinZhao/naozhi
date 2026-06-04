@@ -158,6 +158,34 @@ type SessionRouter interface {
 }
 
 // SchedulerConfig holds configuration for the cron scheduler.
+//
+// Config convention (RFC cron-config-and-structs Phase 1, ratified #776):
+// the scheduler stays struct-config rather than functional-options. Fields
+// split into two classes; the split is part of the API contract and is
+// pinned by scheduler_config_construction_test.go.
+//
+//   - REQUIRED (no zero-value fallback): Router. Omitting it (without
+//     AllowNilRouter) makes NewScheduler emit a boot-time slog.Error and
+//     leaves executeOpt/registerStub short-circuiting — there is no default
+//     router. StorePath is "soft-required": empty means in-memory only (no
+//     persistence), which is valid for tests but is a misconfig in prod.
+//
+//   - OPTIONAL (documented zero-value fallback, applied in applyDefaults /
+//     resolveAllowedRoot):
+//     MaxJobs        — <=0 → defaultMaxJobs (50); clamped to maxJobsHardCap (500).
+//     MaxJobsPerChat — <=0 → DefaultMaxJobsPerChat (10); cannot be disabled (R208-BL2).
+//     ExecTimeout    — <=0 → defaultExecTimeout (5m).
+//     Location       — nil → time.Local.
+//     SlowThreshold  — <=0 → defaultCronSlowThreshold (read lazily at the callsite).
+//     AllowedRoot    — "" → no root constraint; NUL-bearing → cleared (loud).
+//     RunsKeepCount / RunsKeepWindow — <=0 → DefaultRunsKeepCount / DefaultRunsKeepWindow.
+//     JitterMax      — 0 → jitter disabled.
+//     Telemetry / NotifyDefault / Agents / Platforms / AgentCommands /
+//     ParentCtx / AllowNilRouter — idiomatic-optional (nil/zero = feature off).
+//
+// applyDefaults() is pure/idempotent and is the single source of truth for
+// the numeric/Location fallbacks above; AllowedRoot resolution lives in
+// resolveAllowedRoot() because it does a syscall.
 type SchedulerConfig struct {
 	// Router is the session router the scheduler talks to. Accepts the
 	// SessionRouter interface so tests can pass a minimal fake; production
@@ -1471,14 +1499,14 @@ func (s *Scheduler) Start() error {
 	// retention-policy violators that accumulated while this process was
 	// down. 异步执行避免在 jobs 多/历史目录大时阻塞 Start 返回（每个 job
 	// 一次 ReadDir + N 次 Remove）。
-	if s.runStore.enabled() {
+	if s.runStoreEnabled() {
 		s.gcWG.Add(1)
 		go func() {
 			defer s.gcWG.Done()
 			slog.Info("cron run history: cold-start GC starting")
 			// R234-GO-3 / #1019: 传 stopCtx 进 trimAll，Stop 可在 job 入口
 			// 之间中断长时间的 GC 扫描，避免 Stop 等到 gcWaitBudget。
-			s.runStore.trimAllCtx(s.stopCtx, time.Now())
+			s.trimAllRuns(s.stopCtx, time.Now())
 			slog.Info("cron run history: cold-start GC done")
 		}()
 	}
