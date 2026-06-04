@@ -167,6 +167,21 @@ func (f *fakeProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	}
 	return nil
 }
+func (f *fakeProcess) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS int64) []cli.EventEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, e := range f.entries {
+		if e.Time > afterMS {
+			return append(dst, f.entries[i:]...)
+		}
+	}
+	// Preserve the "nil when empty" contract for nil dst; append-mode callers
+	// passing a pooled dst[:0] get their buffer back length-zero.
+	if dst == nil {
+		return nil
+	}
+	return dst[:0]
+}
 func (f *fakeProcess) EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry {
 	if limit <= 0 {
 		return nil

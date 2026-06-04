@@ -344,8 +344,11 @@ func TestCronUpdate_RejectsHalfNotifyPatch(t *testing.T) {
 
 			// Seed a job that already carries both notify halves so the
 			// PATCH is exercising the "edit one half" hazard, not a fresh
-			// create.
-			createBody := `{"schedule":"@every 5m","prompt":"x","notify":true,"notify_platform":"feishu","notify_chat_id":"oc_seed"}`
+			// create. chat_id is >8 runes so the list response's
+			// maskNotifyChatID (R20260604064416-SEC-1) keeps a 4-rune
+			// prefix/suffix hint we can still assert drift against; a short
+			// seed would mask to all bullets and lose the signal.
+			createBody := `{"schedule":"@every 5m","prompt":"x","notify":true,"notify_platform":"feishu","notify_chat_id":"oc_seedvalue123"}`
 			cw := postCronCreate(t, srv, createBody)
 			if cw.Code != http.StatusOK {
 				t.Fatalf("seed create status = %d; body=%s", cw.Code, cw.Body.String())
@@ -384,9 +387,12 @@ func TestCronUpdate_RejectsHalfNotifyPatch(t *testing.T) {
 			if len(listResp.Jobs) != 1 {
 				t.Fatalf("jobs = %d, want 1", len(listResp.Jobs))
 			}
-			if listResp.Jobs[0].NotifyPlatform != "feishu" || listResp.Jobs[0].NotifyChatID != "oc_seed" {
-				t.Errorf("seed notify pair drifted after rejected PATCH: platform=%q chat_id=%q",
-					listResp.Jobs[0].NotifyPlatform, listResp.Jobs[0].NotifyChatID)
+			// The list response masks per-job notify_chat_id (SEC-1), so we
+			// assert the masked form of the unchanged seed, not the raw value.
+			const wantMaskedChatID = "oc_s…e123" // maskNotifyChatID("oc_seedvalue123")
+			if listResp.Jobs[0].NotifyPlatform != "feishu" || listResp.Jobs[0].NotifyChatID != wantMaskedChatID {
+				t.Errorf("seed notify pair drifted after rejected PATCH: platform=%q chat_id=%q (want chat_id=%q)",
+					listResp.Jobs[0].NotifyPlatform, listResp.Jobs[0].NotifyChatID, wantMaskedChatID)
 			}
 		})
 	}

@@ -225,6 +225,14 @@ func (p *Process) EventEntriesSince(afterMS int64) []EventEntry {
 	return p.eventLog.EntriesSince(afterMS)
 }
 
+// EventEntriesSinceAppend is the buffer-reusing variant of EventEntriesSince:
+// it forwards to EventLog.EntriesSinceAppend so the live-session WS backfill
+// path can reuse a per-subscription buffer instead of allocating a fresh
+// []EventEntry per notify wave. R20260604-PERF-25 (#1740).
+func (p *Process) EventEntriesSinceAppend(dst []EventEntry, afterMS int64) []EventEntry {
+	return p.eventLog.EntriesSinceAppend(dst, afterMS)
+}
+
 // EventEntriesBefore returns up to `limit` event log entries strictly older
 // than beforeMS, in chronological order. Used by dashboard pagination to
 // load earlier pages of history.

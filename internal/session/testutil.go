@@ -113,6 +113,9 @@ func (p *TestProcess) EventLastNVisible(visibleTarget, maxTotal int) []cli.Event
 func (p *TestProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	return p.EventLog.EntriesSince(afterMS)
 }
+func (p *TestProcess) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS int64) []cli.EventEntry {
+	return p.EventLog.EntriesSinceAppend(dst, afterMS)
+}
 func (p *TestProcess) EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry {
 	return p.EventLog.EntriesBefore(beforeMS, limit)
 }
