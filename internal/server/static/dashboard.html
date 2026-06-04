@@ -2334,10 +2334,10 @@ body.kbd-open .sidebar-footer{display:none}
       <div class="header-row">
         <h1>naozhi</h1>
         <div class="hdr-btns">
-          <button class="hdr-btn" id="btn-sidebar-search" onclick="toggleSidebarSearch()" title="搜索会话 (按 /)" aria-label="搜索会话" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
-          <button class="hdr-btn" id="btn-history" onclick="toggleHistory()" title="历史会话" aria-label="查看会话历史" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="hdr-badge" id="history-badge" style="display:none" aria-label="历史记录数"></span></button>
-          <button class="hdr-btn" onclick="createNewSession()" title="New Session" aria-label="Create new session"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
-          <button class="hdr-btn" id="btn-cron" onclick="openCronPanel()" title="定时任务" aria-label="定时任务面板"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 1.5"/><path d="M5 3L2 6"/><path d="M22 6l-3-3"/><path d="M6.38 18.7L4 21"/><path d="M17.64 18.67L20 21"/></svg><span class="hdr-badge" id="cron-badge" style="display:none" aria-label="定时任务数"></span></button>
+          <button class="hdr-btn" id="btn-sidebar-search" title="搜索会话 (按 /)" aria-label="搜索会话" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
+          <button class="hdr-btn" id="btn-history" title="历史会话" aria-label="查看会话历史" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="hdr-badge" id="history-badge" style="display:none" aria-label="历史记录数"></span></button>
+          <button class="hdr-btn" id="btn-new-session" title="New Session" aria-label="Create new session"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+          <button class="hdr-btn" id="btn-cron" title="定时任务" aria-label="定时任务面板"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 1.5"/><path d="M5 3L2 6"/><path d="M22 6l-3-3"/><path d="M6.38 18.7L4 21"/><path d="M17.64 18.67L20 21"/></svg><span class="hdr-badge" id="cron-badge" style="display:none" aria-label="定时任务数"></span></button>
           <!-- THEME-1 (#453) — theme cycler. One button cycles auto→light→dark
                (3 states, single click each). Inline SVG swapped by
                cycleTheme() in dashboard.js to surface current mode. -->
@@ -2349,14 +2349,14 @@ body.kbd-open .sidebar-footer{display:none}
            re-renders don't blow away the input value or its focus. -->
       <div class="sidebar-search" id="sidebar-search" style="display:none">
         <input type="text" id="sidebar-search-input" class="sidebar-search-input" placeholder="搜索会话、项目或 CLI 名..." autocomplete="off" spellcheck="false" aria-label="搜索会话" />
-        <button type="button" class="sidebar-search-clear" id="sidebar-search-clear" onclick="closeSidebarSearch()" title="关闭搜索" aria-label="关闭搜索">&times;</button>
+        <button type="button" class="sidebar-search-clear" id="sidebar-search-clear" title="关闭搜索" aria-label="关闭搜索">&times;</button>
       </div>
     </div>
     <!-- Node selector: shown only when multiple nodes are connected. Replaces
          the per-card .sc-node badge and the per-node rows in .sidebar-status;
          switching a node filters the list to that node's sessions. -->
     <div class="node-selector" id="node-selector" hidden>
-      <button type="button" class="ns-trigger" id="ns-trigger" aria-haspopup="listbox" aria-expanded="false" aria-controls="ns-dropdown" onclick="toggleNodeSelector(event)">
+      <button type="button" class="ns-trigger" id="ns-trigger" aria-haspopup="listbox" aria-expanded="false" aria-controls="ns-dropdown">
         <span class="ns-dot off" id="ns-trigger-dot"></span>
         <span class="ns-label" id="ns-trigger-label">Local</span>
         <svg class="ns-chev" viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
@@ -2377,7 +2377,7 @@ body.kbd-open .sidebar-footer{display:none}
     </div>
   </nav>
   <div class="resizer" id="resizer" role="separator" aria-orientation="vertical" aria-label="拖动调整侧栏宽度" tabindex="0">
-    <button type="button" class="resizer-handle" id="btn-sidebar-toggle" onclick="toggleSidebarCollapsed()" title="收起/展开侧边栏 (按 [)" aria-label="切换侧边栏" aria-controls="sidebar" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><polyline points="15 18 9 12 15 6"/></svg></button>
+    <button type="button" class="resizer-handle" id="btn-sidebar-toggle" title="收起/展开侧边栏 (按 [)" aria-label="切换侧边栏" aria-controls="sidebar" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><polyline points="15 18 9 12 15 6"/></svg></button>
   </div>
   <main class="main" id="main" aria-label="会话内容">
     <!-- Cold-start empty state. MUST stay in lockstep with mainEmptyHtml() in
@@ -2392,7 +2392,7 @@ body.kbd-open .sidebar-footer{display:none}
     <div class="empty-state empty-cta empty-quick" style="flex-direction:column;gap:14px">
       <span style="font-size:40px;opacity:.35" aria-hidden="true">&gt;_</span>
       <div style="color:var(--nz-text);font-size:17px">问点什么？</div>
-      <form class="quick-ask-form" onsubmit="event.preventDefault();submitQuickAsk(event)">
+      <form class="quick-ask-form" id="quick-ask-form">
         <textarea id="quick-ask-input" class="quick-ask-input" rows="1" placeholder="Enter 发送 · Shift+Enter 换行" autocomplete="off" spellcheck="false" aria-label="快速提问输入框"></textarea>
         <button type="submit" class="quick-ask-send" aria-label="发送"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
       </form>

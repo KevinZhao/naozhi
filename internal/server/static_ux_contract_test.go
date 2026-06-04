@@ -2315,8 +2315,18 @@ func TestDashboardHTML_UXP3_SidebarSearchUI(t *testing.T) {
 	html := string(data)
 
 	// Toggle button in the header-row btns: clicking fires toggleSidebarSearch.
-	if !strings.Contains(html, `id="btn-sidebar-search" onclick="toggleSidebarSearch()"`) {
-		t.Error("dashboard.html must expose the btn-sidebar-search trigger with onclick=toggleSidebarSearch()")
+	// The handler is bound via addEventListener in dashboard.js (#922 / #479
+	// inline-handler migration) rather than an inline onclick=, so the static
+	// HTML only needs the stable #btn-sidebar-search anchor.
+	if !strings.Contains(html, `id="btn-sidebar-search"`) {
+		t.Error("dashboard.html must expose the btn-sidebar-search trigger with id=btn-sidebar-search")
+	}
+	js2, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	if !strings.Contains(string(js2), `bindClick('btn-sidebar-search', function () { toggleSidebarSearch(); });`) {
+		t.Error("dashboard.js must bind btn-sidebar-search click to toggleSidebarSearch() via addEventListener")
 	}
 
 	// The search pane must exist inside .sidebar-header and OUTSIDE
