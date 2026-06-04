@@ -88,6 +88,18 @@ func capHistoryBatch(entries []cli.EventEntry) []cli.EventEntry {
 // multiple goroutines — SendRaw enqueues a slice header into a per-client
 // channel and the writePump never mutates the underlying buffer.
 func (h *Hub) marshalHistoryFrame(key string, lastTime int64, entries []cli.EventEntry) ([]byte, error) {
+	// R20260604-SEC-10: scrub credential token shapes (sk-ant-, ghp_, AKIA, …)
+	// from the free-text Summary/Detail fields before the bytes are marshalled
+	// and fanned out to dashboard WS clients (where they would also persist to
+	// IndexedDB history). This mirrors the textutil.RedactSecrets pass that
+	// dispatch.decorateReplyText and cron finishRun already apply on the IM
+	// path; the live dashboard WS stream was the one egress that handed raw
+	// cli.EventEntry text to the browser. marshalHistoryFrame is the single
+	// serialization choke point for both the backfill and live-push paths, so
+	// redacting here covers every WS history frame exactly once — the result is
+	// cached by getOrMarshal so the scan is not repeated across the fan-out
+	// wave.
+	entries = redactEntrySecrets(entries)
 	if h.historyMarshalCache == nil {
 		// Defensive: should not happen for a Hub built via NewHub, but a
 		// hand-constructed test Hub may skip the field. Fall back to the
