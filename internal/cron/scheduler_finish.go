@@ -259,6 +259,26 @@ type finishArgs struct {
 // log scattered across executeOpt's seven branches; adding a new error class
 // is now one mapping plus one finishArgs literal at the call site.
 func (s *Scheduler) finishRun(a finishArgs) {
+	// R243-ARCH-6 (#837): defensive nil-job guard. Every current call site
+	// passes a non-nil *Job, but finishRun unconditionally dereferences
+	// a.job (recordTerminalResult(a.job, …), a.job.ID in the Append +
+	// emitRunEnded paths). A future call site that synthesises a finishArgs
+	// with a nil job — or a races where the snapshot path leaves job unset —
+	// would panic the cron-tick goroutine. robfig's Recover wrapper turns
+	// that into a swallowed panic ABOVE this frame, which is the worst
+	// outcome for the three-write terminal protocol: a RunStarted frame was
+	// already broadcast, but the panic skips finalize() + emitRunEnded, so
+	// the inflight gate stays running=true and subscribers see a started
+	// frame with no matching ended frame (orphaned "running" badge forever).
+	// Finalize the inflight gate (if any) and bail loudly instead — the same
+	// defensive philosophy as CurrentRun's nil-inflight guard. The finalizer
+	// is per-run stack-local, so this releases exactly this run's gate.
+	if a.job == nil {
+		slog.Error("cron: finishRun called with nil job; finalizing inflight gate and skipping terminal protocol",
+			"run_id", a.runID, "state", string(a.state), "err_class", string(a.errClass))
+		a.finalizer.finalize()
+		return
+	}
 	// R247-ARCH-11 (#643): read endedAt via the injected clock so DurationMS
 	// (endedAt - a.startedAt) is deterministic under a fake clock in tests.
 	// Default clock is time.Now(), byte-identical to the prior inline read.
