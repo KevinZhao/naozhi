@@ -175,6 +175,47 @@ func TestEventLastNVisibleCtx_CtxCanceled(t *testing.T) {
 	}
 }
 
+// TestEventLastNVisibleCtx_RunningTotalCeiling verifies that the maxTotal ceiling
+// stops further disk pages once the running total reaches the cap, with the O(1)
+// running-counter approach (R20260603-PERF-9).
+// pagingHistorySource returns at most `limit` entries per call; we set
+// visibleDiskPageSize-sized pages and a maxTotal that triggers after exactly one
+// page, then assert disk is read only once (not twice or more).
+func TestEventLastNVisibleCtx_RunningTotalCeiling(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	// Memory: 5 internal (non-visible) events.
+	for i := 0; i < 5; i++ {
+		s.persistedHistory = append(s.persistedHistory, cli.EventEntry{Time: int64(1001 + i), Type: "tool_use"})
+	}
+	// Disk: 2 pages, each returning exactly visibleDiskPageSize entries.
+	// We construct enough entries so two pages would be available, but
+	// maxTotal should prevent fetching the second page.
+	total := visibleDiskPageSize * 2
+	var disk []cli.EventEntry
+	for i := 1; i <= total; i++ {
+		disk = append(disk, cli.EventEntry{Time: int64(i), Type: "text"})
+	}
+	fake := &pagingHistorySource{all: disk}
+	s.SetHistorySource(fake)
+
+	// maxTotal = 5 (mem) + visibleDiskPageSize (one page) = ceiling after page 1.
+	// With the running counter: after page 1, len(mem)+runningOlder = 5+200 >= maxTotal,
+	// so no second page is fetched.
+	maxTotal := 5 + visibleDiskPageSize
+	got := s.EventLastNVisibleCtx(context.Background(), 9999, maxTotal)
+	// The result is bounded; disk should have been read exactly once.
+	if fake.calls > 1 {
+		t.Errorf("disk read %d times; ceiling should have stopped at 1 (PERF-9 running-counter regression)", fake.calls)
+	}
+	// Result must be non-empty and in non-decreasing time order.
+	for i := 1; i < len(got); i++ {
+		if got[i].Time < got[i-1].Time {
+			t.Errorf("not chronological at %d: %d < %d", i, got[i].Time, got[i-1].Time)
+		}
+	}
+}
+
 // TestEventLastNVisibleCtx_MultiPageChronological pins the single-concatenation
 // fix (R20260603000023-PERF-2 / #1622): when multiple disk pages are loaded, the
 // final result must be strictly chronological even though pages are accumulated

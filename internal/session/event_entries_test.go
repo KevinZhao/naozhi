@@ -368,6 +368,61 @@ func TestEventEntriesSinceAppend_EmptyHistory(t *testing.T) {
 	}
 }
 
+// TestEventEntriesSinceAppend_LiveProcessNilDstNoExtraCopy verifies the
+// #1701 fast path: on the live-process path with a nil/empty dst, the append
+// variant hands back proc.EventEntriesSince's slice directly (no extra append
+// copy) while still returning the correct entries.
+func TestEventEntriesSinceAppend_LiveProcessNilDstNoExtraCopy(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	proc := NewTestProcess()
+	proc.InjectHistory([]cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+		{Time: 300, Summary: "c"},
+	})
+	s.storeProcess(proc)
+
+	want := proc.EventEntriesSince(150)
+	got := s.EventEntriesSinceAppend(nil, 150)
+	if len(got) != len(want) {
+		t.Fatalf("len mismatch: got %d want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Time != want[i].Time || got[i].Summary != want[i].Summary {
+			t.Errorf("entry[%d]: got {Time:%d Summary:%q} want {Time:%d Summary:%q}",
+				i, got[i].Time, got[i].Summary, want[i].Time, want[i].Summary)
+		}
+	}
+}
+
+// TestEventEntriesSinceAppend_LiveProcessAppendsToNonEmptyDst verifies that
+// on the live-process path a non-empty dst still has the entries appended
+// after its existing contents (#1701 only short-circuits the empty-dst case;
+// a non-empty dst must keep its prefix).
+func TestEventEntriesSinceAppend_LiveProcessAppendsToNonEmptyDst(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	proc := NewTestProcess()
+	proc.InjectHistory([]cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+	})
+	s.storeProcess(proc)
+
+	dst := []cli.EventEntry{{Time: 1, Summary: "prefix"}}
+	got := s.EventEntriesSinceAppend(dst, 0)
+	if len(got) != 3 {
+		t.Fatalf("len = %d want 3 (prefix + 2 entries)", len(got))
+	}
+	if got[0].Summary != "prefix" {
+		t.Errorf("got[0]=%q want prefix (existing dst contents must be preserved)", got[0].Summary)
+	}
+	if got[1].Summary != "a" || got[2].Summary != "b" {
+		t.Errorf("appended entries wrong: got %q,%q want a,b", got[1].Summary, got[2].Summary)
+	}
+}
+
 // TestEventEntriesBefore_SortedFlagSkipsSort verifies the R20260603000023-PERF-3
 // / #1623 fast path: when persistedHistorySorted=true, EventEntriesBefore must
 // return entries in strict Time-ascending order using only slices.Reverse (O(n))

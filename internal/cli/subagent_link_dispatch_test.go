@@ -123,6 +123,74 @@ func TestDispatchResolve_NilCtxSafe(t *testing.T) {
 	}
 }
 
+// TestDispatchResolve_PoolCtxOutlivesFirstCaller_R20260603030037_GO_2 anchors
+// #1661: the worker pool must bind its lifetime to the ctx set via
+// SetPoolContext, NOT the per-request ctx of the first DispatchResolve caller.
+// We set a long-lived pool ctx, then dispatch first with an already-canceled
+// per-request ctx. If the pool wrongly captured the caller's ctx, the workers
+// would exit and a follow-up job would never be consumed.
+func TestDispatchResolve_PoolCtxOutlivesFirstCaller_R20260603030037_GO_2(t *testing.T) {
+	t.Parallel()
+	l := NewSubagentLinker()
+
+	// Long-lived pool ctx, never canceled during the test.
+	poolCtx, poolCancel := context.WithCancel(context.Background())
+	defer poolCancel()
+	l.SetPoolContext(poolCtx)
+
+	// Observe consumption directly via scanHook: a worker that picks up a job
+	// runs Resolve, which (after the fast-path stat miss) scans the dir and
+	// fires scanHook. Tight timings so the scan path is reached in ms.
+	var consumed atomic.Int32
+	l.scanHook = func() { consumed.Add(1) }
+	l.ConfigureForTest(int64(time.Millisecond), 1, 0) // 1ms retry, 1 retry, no cache
+	// Give the linker a projectDir so Resolve does a rawScan (fires scanHook)
+	// rather than bailing on empty context.
+	dir := t.TempDir()
+	l.SetContext(dir, "sess-1")
+
+	// First dispatch uses an ALREADY-CANCELED per-request ctx. Under the old
+	// behaviour this canceled ctx became the worker lifetime → workers exit.
+	deadCtx, deadCancel := context.WithCancel(context.Background())
+	deadCancel()
+	l.DispatchResolve(deadCtx, "task-first", "tu-1", "name", "desc", 0)
+
+	// Second dispatch under the live pool — must still be consumed by a worker.
+	l.DispatchResolve(context.Background(), "task-second", "tu-2", "name", "desc", 0)
+
+	// Wait for the worker pool to drain at least one job (proving workers are
+	// alive despite the first caller's canceled ctx).
+	deadline := time.After(2 * time.Second)
+	for consumed.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("worker pool exited with first caller's canceled ctx — #1661 regression: no job consumed")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// TestSetPoolContext_FirstWins_R20260603030037_GO_2 anchors that SetPoolContext
+// is idempotent: the first non-nil ctx sticks, later calls are no-ops.
+func TestSetPoolContext_FirstWins_R20260603030037_GO_2(t *testing.T) {
+	t.Parallel()
+	l := NewSubagentLinker()
+	first, c1 := context.WithCancel(context.Background())
+	defer c1()
+	second, c2 := context.WithCancel(context.Background())
+	defer c2()
+
+	l.SetPoolContext(first)
+	l.SetPoolContext(second)
+
+	l.mu.RLock()
+	got := l.poolCtx
+	l.mu.RUnlock()
+	if got != first {
+		t.Fatal("SetPoolContext must keep the first ctx; later calls are no-ops")
+	}
+}
+
 // _ keeps atomic imported even if the suite later drops the only user;
 // some test additions in this package's history have churned over this
 // import and we want to avoid a re-add cycle.

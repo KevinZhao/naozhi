@@ -32,6 +32,7 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/sessionkey"
+	"github.com/naozhi/naozhi/internal/textutil"
 
 	robfigcron "github.com/robfig/cron/v3"
 )
@@ -143,6 +144,16 @@ func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubj
 // released — sync.Map.LoadAndDelete needs no scheduler lock. Callers
 // invoke this from postCleanup branches that already run lock-free.
 func (s *Scheduler) cleanupRunningJobIfIdle(jobID string) bool {
+	// R20260603140013-GO-2 (#1706): take the per-jobID gate around the whole
+	// Load → running-check → CompareAndDelete sequence so it is atomic
+	// relative to executeOpt's jobInflight-load→CAS pair (which holds the same
+	// gate). This is what closes the previously-accepted double-execution
+	// window: while we hold the gate, no executeOpt can be mid-load→CAS, so we
+	// never delete an entry that a racing executeOpt is about to CAS-win on.
+	gate := s.jobGateLock(jobID)
+	gate.Lock()
+	defer gate.Unlock()
+
 	v, ok := s.runningJobs.Load(jobID)
 	if !ok {
 		return false
@@ -189,26 +200,25 @@ func (s *Scheduler) cleanupRunningJobIfIdle(jobID string) bool {
 	// succeeds when the map still holds OUR observed inf pointer; if a
 	// fresh entry was stored it leaves the new one alone.
 	//
-	// R040034-CHANGES (#1416 review) — KNOWN narrow remaining window:
-	// CompareAndDelete-on-pointer closes Load+CompareAndDelete TOCTOU
-	// for the case where the map has already been swapped to a fresh
-	// *runInflight by a racing AddJob+jobInflight. It does NOT close the
-	// adjacent window where executeOpt has already done
+	// R040034-CHANGES (#1416 review): CompareAndDelete-on-pointer (not
+	// LoadAndDelete-on-key) closes the Load+delete TOCTOU for the case where
+	// the map has already been swapped to a fresh *runInflight by a racing
+	// AddJob+jobInflight — it only deletes when the map still holds OUR
+	// observed inf pointer.
+	//
+	// R20260603140013-GO-2 (#1706): the adjacent window this comment used to
+	// flag as a KNOWN remaining race — executeOpt having done
 	//   inflight := s.jobInflight(j.ID)          // gets old *runInflight
-	// at scheduler_run.go ~line 867 just before this cleanup runs;
-	// cleanup then deletes the map entry + the still-CAS=false old gate
-	// (releaseRun has executed), and executeOpt's CompareAndSwap on
-	// the orphaned old gate succeeds. A second executeOpt for the same
-	// jobID will then LoadOrStore a fresh *runInflight via jobInflight
-	// and CAS-win on it too → two goroutines hold distinct gates for
-	// one jobID. We accept this remaining window because it requires:
-	//   (i)  DeleteJob racing TriggerNow on the same job ID, AND
-	//   (ii) ID reuse on a fresh AddJob landing within microseconds,
-	// and crypto/rand 8-byte (2^64) ID space makes (ii) ~2^-32 over
-	// the entire process lifetime at maxJobsHardCap=500 working set.
-	// A future tightening would add a per-jobID lock around the
-	// jobInflight Load → CAS pair in executeOpt; deferred until
-	// telemetry indicates the window is operationally reachable.
+	// just before this cleanup deletes the map entry, then CAS-winning on the
+	// orphaned old gate while a second executeOpt LoadOrStores a fresh gate →
+	// double execution — is now closed. This whole function runs under the
+	// per-jobID gate (see top of function), and executeOpt holds the same gate
+	// across its jobInflight-load→CAS pair, so the two sequences are mutually
+	// exclusive: cleanup can only observe the gate as idle (no executeOpt is
+	// mid-load→CAS) or already-running (CAS won → running.Load()==true above →
+	// we returned without deleting). The orphan-in-between state is no longer
+	// reachable, so the fix no longer rests on the crypto/rand ID-reuse
+	// improbability argument.
 	s.runningJobs.CompareAndDelete(jobID, inf)
 	return true
 }
@@ -330,16 +340,6 @@ const (
 	cronNoticeMid    = "] "
 )
 
-// cronMarkdownPunctReplacer is a package-level Replacer for escapeCronMarkdownPunct.
-// Constructed once to avoid per-call allocation; Replace performs a single
-// pass over the input string. R164930-PERF-4.
-var cronMarkdownPunctReplacer = strings.NewReplacer(
-	"[", "［", // U+FF3B
-	"]", "］", // U+FF3D
-	"(", "（", // U+FF08
-	")", "）", // U+FF09
-)
-
 // formatCronNotice renders the IM-notice line cron jobs send through
 // deliverNotice. label is the snap.labelOrID() result (job title or
 // fallback ID); body is the human-readable suffix already in the
@@ -392,26 +392,20 @@ func formatCronNotice(label, body string) string {
 }
 
 // escapeCronMarkdownPunct replaces the markdown link-syntax characters
-// `[`, `]`, `(`, `)` with full-width visually-similar codepoints
-// (U+FF3B / U+FF3D / U+FF08 / U+FF09) so an attacker-controlled cron
-// Title or result body cannot smuggle `[text](url)` clickable links
-// into the IM notice. R260528-SEC-8.
+// `[`, `]`, `(`, `)` with full-width visually-similar codepoints so an
+// attacker-controlled cron Title or result body cannot smuggle `[text](url)`
+// clickable links into the IM notice. R260528-SEC-8.
 //
-// R164930-PERF-4/5: single-pass implementation using a package-level
-// strings.Replacer (cronMarkdownPunctReplacer). An IndexAny fast-path
-// avoids any allocation on the common ASCII-clean case; when substitution
-// is required the Replacer performs exactly one scan + one output
-// allocation instead of the previous up-to-4-scan / 4-alloc loop.
+// R20260603140013-ARCH-1 (#1707): the escaping logic + its package-level
+// Replacer moved to the leaf package internal/textutil so the IM dispatch
+// edge can use it without importing this domain package. Thin alias kept so
+// internal cron call sites (formatCronNotice) stay unchanged.
 func escapeCronMarkdownPunct(s string) string {
-	if !strings.ContainsAny(s, "[]()") {
-		return s
-	}
-	return cronMarkdownPunctReplacer.Replace(s)
+	return textutil.EscapeCronMarkdownPunct(s)
 }
 
 // EscapeMarkdownPunct is the exported variant of escapeCronMarkdownPunct for
-// use by packages (e.g. dispatch) that display cron Job fields in IM replies.
-// R112714-ARCH-1.
+// use by packages that display cron Job fields in IM replies. R112714-ARCH-1.
 func EscapeMarkdownPunct(s string) string { return escapeCronMarkdownPunct(s) }
 
 // labelOrID returns the IM-notice display label: snap.label when populated,
@@ -622,6 +616,31 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh stu
 			finalizer: args.finalizer,
 		})
 		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(), "工作目录不可达，本次执行已跳过。"))
+		return noopRefresh, false
+	}
+	// R20260603140013-CR-3: containment early-check BEFORE the destructive
+	// Reset below. resolveCronWorkspace (executeOpt) already aborts outside-root
+	// runs, but it uses the TTL-cached workDirResolveUnderRootCached view; a
+	// symlink retargeted outside allowedRoot within that TTL would pass there as
+	// a stale-positive, letting us reach this point and blow away a live session
+	// (Reset destroys the cron:<jobID> session + its process + history) for a
+	// run that can never succeed. Re-validate with the uncached workDirUnderRoot
+	// here so a freshly-retargeted symlink fails the run WITHOUT tearing down the
+	// existing session. Mirrors resolveCronWorkspace's outside-root finishRun
+	// (RunStateFailed / ErrClassWorkDirOutsideRoot) and the workDirReachable
+	// branch's deliverNotice. noopRefresh leaves the sidebar stub untouched.
+	if s.allowedRoot != "" && snap.workDir != "" &&
+		!workDirUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved) {
+		lg.Warn("cron fresh spawn aborted: work_dir outside allowed root",
+			"work_dir", snap.workDir)
+		s.finishRun(finishArgs{
+			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
+			state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
+			errMsg: "work_dir outside allowed root",
+			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+			finalizer: args.finalizer,
+		})
+		s.deliverNotice(args.notifyTo, formatCronNotice(snap.labelOrID(), "工作目录超出允许根目录，本次执行已跳过。"))
 		return noopRefresh, false
 	}
 	// CRON1 / R194 (#401) — fresh-context atomicity invariant.
@@ -835,7 +854,19 @@ func watchdogInterruptTimeout() time.Duration {
 // goroutine count drops from O(in-flight runs) to ~0. The deadline /
 // cancel semantics are preserved exactly: the callback inspects
 // ctx.Err() the same way the goroutine used to.
-func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan abortResult {
+//
+// R20260603140013-GO-1 (#1705): returns context.AfterFunc's stop fn so
+// the caller can deregister the callback on the success / non-deadline
+// path BEFORE cancelling ctx. Without it, sendCancel() always ends ctx
+// with Canceled, the runtime still spawns the callback goroutine, and it
+// does a wasted chan send of a zero abortResult{} — one extra goroutine
+// spawn + chan send per successful cron Send (and 500 at once on a
+// 500-job shutdown burst). When stop() returns true the callback will
+// NOT run, so the caller MUST NOT block on the channel; stop() returning
+// false means the callback already fired (deadline path or a cancel that
+// raced the deadline) and a value is or will be on the channel. The nil-
+// guard fast path returns a no-op stop (callback already satisfied).
+func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) (<-chan abortResult, func() bool) {
 	// R249-GO-3: defensive nil guard. A nil ctx would panic on
 	// context.AfterFunc; a nil sess would panic on InterruptViaControl
 	// when the deadline path fires. Both are caller bugs (production wires
@@ -850,10 +881,13 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 	if ctx == nil || sess == nil {
 		ch := make(chan abortResult, 1)
 		ch <- abortResult{}
-		return ch
+		// No callback was registered, so the result is already on ch:
+		// return a no-op stop reporting false (== "already satisfied, read
+		// the channel") so the caller's success-path drain still works.
+		return ch, func() bool { return false }
 	}
 	ch := make(chan abortResult, 1)
-	context.AfterFunc(ctx, func() {
+	stop := context.AfterFunc(ctx, func() {
 		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			ch <- abortResult{}
 			return
@@ -927,7 +961,7 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 			ch <- abortResult{outcome: InterruptError, fired: true}
 		}
 	})
-	return ch
+	return ch, stop
 }
 
 // sendWithWatchdog runs sess.Send under a deadline-watchdog and returns
@@ -953,12 +987,29 @@ func sendWithWatchdog(sendCtx context.Context, sendCancel context.CancelFunc, se
 	// runDeadlineWatchdog for the rationale (must fire BEFORE Send
 	// returns, otherwise Process.State has already flipped to Ready and
 	// InterruptViaControl returns ErrNoActiveTurn → no-op).
-	abortCh := runDeadlineWatchdog(sendCtx, sess)
+	abortCh, stopWatchdog := runDeadlineWatchdog(sendCtx, sess)
 
 	// Direct Send without sendWithBroadcast — cron jobs notify via the
 	// IM deliverNotice path (resolveNotifyTarget + platform.Reply) and
 	// the cron_run_ended WS frame.
 	result, err := sess.Send(sendCtx, text)
+
+	// R20260603140013-GO-1 (#1705): deregister the AfterFunc callback
+	// before cancelling ctx. On the success / non-deadline-error path the
+	// deadline never fired, so stopWatchdog() returns true and the runtime
+	// never spawns the callback goroutine — we save a goroutine spawn +
+	// chan send per Send (×500 on a shutdown burst). When stop succeeds the
+	// callback will NOT run, so there is nothing to drain: synthesize the
+	// not-fired result the callback would have published. When it returns
+	// false the callback already fired (deadline path, or a cancel that
+	// raced the deadline) and a value is or will be on abortCh, so we still
+	// cancel + block on it to keep the original ordering guarantee (the
+	// in-flight InterruptViaControl must finish before the next
+	// session.Reset).
+	if stopWatchdog() {
+		sendCancel()
+		return result, abortResult{}, err
+	}
 
 	// Cancel sendCtx so the watchdog returns promptly on the success /
 	// non-deadline error path; on the deadline path it's already done.
@@ -1205,8 +1256,24 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// which is separately serialized). The per-job *runInflight (containing
 	// the CAS atomic.Bool) keeps a uniform CAS gate while exposing run
 	// metadata to the list API.
+	//
+	// R20260603140013-GO-2 (#1706): the jobInflight load and the CAS below
+	// MUST be one atomic step relative to cleanupRunningJobIfIdle's
+	// Load→CompareAndDelete. Holding the per-jobID gate across both closes the
+	// TOCTOU window where a DeleteJob racing TriggerNow deletes the map entry
+	// after we load the old *runInflight but before we CAS it — which would
+	// leave us CASing an orphaned gate while a second executeOpt LoadOrStores
+	// a fresh one, double-executing the job. The gate is released right after
+	// the CAS — the heavy run body does not need it. cleanup takes the same
+	// gate, so it can only see the gate as idle (we are not in this window) or
+	// running (CAS won → cleanup's running.Load()==true → skip), never the
+	// orphan-in-between.
+	gate := s.jobGateLock(j.ID)
+	gate.Lock()
 	inflight := s.jobInflight(j.ID)
-	if !inflight.running.CompareAndSwap(false, true) {
+	won := inflight.running.CompareAndSwap(false, true)
+	gate.Unlock()
+	if !won {
 		slog.Info("cron: job already running, skipping overlap", "job_id", j.ID)
 		// Overlap is a skipped state (no LastRunAt update). Counters /
 		// broadcast still fire so dashboards can surface the skip.
@@ -1300,7 +1367,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			"job_id", j.ID, "trigger_now", viaTriggerNow, "err", err)
 		return
 	}
-	startedAt := time.Now()
+	// R247-ARCH-11 (#643): the run's StartedAt anchors both the dashboard
+	// "running 12s" badge and finishRun's DurationMS (endedAt - startedAt).
+	// Read it via the injected clock so a fake clock can pin a deterministic
+	// run duration end-to-end (startedAt here + endedAt in finishRun both flow
+	// through s.now()). Default clock is time.Now(), byte-identical to the
+	// prior inline read.
+	startedAt := s.now()
 	trigger := TriggerScheduled
 	if viaTriggerNow {
 		trigger = TriggerManual
@@ -1456,78 +1529,21 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		return
 	}
 
-	inflight.setPhase(PhaseSpawning)
-	// R250-CR-22 (#1155): capture spawnStart immediately before GetOrCreate
-	// so the "send budget exceeds job/2" warn at line ~831 measures actual
-	// spawn time, not (jitter + spawn). startedAt is captured pre-jitter for
-	// the dashboard "running 12s" badge (true wall-clock from CAS), but the
-	// warn is calibrated against jobTimeout/2 to detect when the spawn phase
-	// alone consumed too much of the budget — folding jitter (default up to
-	// 30s) into that measurement triggers false positives on healthy jobs
-	// whose schedule landed unlucky in the jitter window.
-	spawnStart := time.Now()
-	sess, _, err := s.router.GetOrCreate(ctx, key, opts)
-	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			// Parent ctx cancelled mid-flight (graceful shutdown or job
-			// deletion overlapping execute). The job will either be re-run
-			// on the next tick or is intentionally gone; either way an IM
-			// notification would be spam and the stored LastError would
-			// falsely blame the job itself.
-			lg.Info("cron session cancelled", "err", err)
-			s.finishRun(finishArgs{
-				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
-				skipPersist: true, // 与 historical recordResult skip 一致
-				prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-				finalizer: finalizer,
-			})
-			stubRefresh.run()
-			return
-		}
-		state, errClass := classifyExecError(err, ErrClassSessionError)
-		if errClass == ErrClassDeadlineExceeded {
-			lg.Info("cron session deadline exceeded", "err", err)
-		} else {
-			lg.Error("cron session error", "err", err)
-		}
-		s.finishRun(finishArgs{
-			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
-			state: state, errClass: errClass, errMsg: "session error: " + err.Error(),
-			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
-			finalizer: finalizer,
-		})
-		s.deliverNotice(notifyTo, formatCronNotice(snap.labelOrID(), "执行跳过，请稍后重试。"))
-		stubRefresh.run()
+	// RNEW-003 (#423): the spawn phase (GetOrCreate + its cancel/error
+	// classification + early inflight SessionID capture) is extracted to
+	// executeGetSession so executeOpt's body has one fewer ctx-owning concern
+	// and the spawnCtx lifecycle (GetOrCreate-only, cancelled at its exit)
+	// reads as a single unit. Behaviour-preserving: the same finishRun +
+	// stubRefresh + deliverNotice fire on each failure branch, and spawnStart
+	// is returned for the downstream send-budget warn.
+	sess, spawnStart, abortSpawn := s.executeGetSession(getSessionArgs{
+		ctx: ctx, spawnCancel: spawnCancel, key: key, opts: opts,
+		job: j, snap: snap, runID: runID, startedAt: startedAt, trigger: trigger,
+		lg: lg, notifyTo: notifyTo, finalizer: finalizer,
+		stubRefresh: stubRefresh, inflight: inflight,
+	})
+	if abortSpawn {
 		return
-	}
-	// R250-GO-15 (#1078): GetOrCreate consumed spawnCtx; nothing below references
-	// it (Send uses sendCtx). Cancel now to free the underlying *time.Timer
-	// instead of waiting for the function-scoped defer at executeOpt return.
-	// On a 500-job-deep deployment with 5min jobTimeout this trims up to
-	// ~500 idle timers off runtime timerproc during the Send window. The
-	// outer defer remains as a safety net (cancel is idempotent: second
-	// invocation is a no-op). Must come AFTER the err-return block above
-	// so an early return on session error still trips the defer (already
-	// covered) — placing here keeps the explicit cancel on the success
-	// path only, mirroring the issue's "after the err handling" guidance.
-	spawnCancel()
-
-	// R242-ARCH-22 (#766): populate inflight.SessionID as soon as
-	// GetOrCreate returns. Persistent-mode runs reuse a session that
-	// already carries its CLI session_id (set during the original spawn's
-	// init handshake), so sess.SessionID() is non-empty here. Fresh-mode
-	// runs spawn a new CLI whose session_id is only stamped after the
-	// init turn completes — sess.SessionID() returns "" in that window
-	// and the post-Send setSessionID below remains the authoritative
-	// write. Without this early capture, KnownSessionIDs / IsExcluded
-	// probes during the Send window miss the in-flight run on
-	// persistent-mode jobs (the auto-workspace-chain feature then
-	// momentarily considers the cron session a candidate for prev_session_ids
-	// until Send completes). setSessionID is idempotent and same-value
-	// writes fast-path so the post-Send call is a no-op when the IDs match.
-	if sid := sess.SessionID(); sid != "" {
-		inflight.setSessionID(sid)
 	}
 
 	// R238-GO-4 / R236-GO-07 (#790, #500): Send is parented on s.stopCtx
@@ -1663,7 +1679,8 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 					"abort_outcome", abort.outcome)
 			}
 		} else {
-			lg.Error("cron send error", "err", err)
+			// R20260603-SEC-4: sanitise before logging to strip IP:port / paths.
+			lg.Error("cron send error", "err", sanitiseRunErrMsg(err.Error()))
 		}
 		s.finishRun(finishArgs{
 			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
@@ -1679,35 +1696,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		inflight.setSessionID(result.SessionID)
 	}
 
-	elapsed := time.Since(startedAt)
-	lg.Info("cron job completed",
-		"result_len", len(result.Text),
-		"elapsed_ms", elapsed.Milliseconds())
-	// OBS1 (#392): record the full success-path latency distribution, not
-	// just the slow-tail count below. The histogram buckets straddle
-	// slowThreshold so the two signals stay consistent (anything past 30s
-	// lands in the same tail buckets the slow counter alerts on). Observed
-	// here rather than in finishRun for the same reason as the slow counter:
-	// only success-path latency is meaningful — error/timeout paths are
-	// classified by the CronRun*Total state counters instead.
-	metrics.ObserveCronExecutionDuration(elapsed.Milliseconds())
-	slowThreshold := s.slowThreshold
-	if slowThreshold <= 0 {
-		slowThreshold = defaultCronSlowThreshold
-	}
-	if elapsed > slowThreshold {
-		// R208-OBS1: poor-man's histogram — a single counter that fires
-		// when a successful execution takes longer than slowThreshold.
-		// Wired here (not in finishRun) so only success-path latency
-		// counts; error paths already surface via metrics state counters.
-		// R241-ARCH-11 (#519): threshold reads s.slowThreshold (config-
-		// supplied) with the package default as fallback.
-		metrics.CronExecutionSlowTotal.Add(1)
-		lg.Warn("cron execution slow",
-			"job_id", snap.jobID,
-			"elapsed_ms", elapsed.Milliseconds(),
-			"threshold_ms", slowThreshold.Milliseconds())
-	}
+	// R20260603-ARCH-2 (#1681) / RNEW-003 (#423): the success-path latency
+	// observability (completion log + histogram + slow-tail counter/warn) is a
+	// self-contained concern with no early-return and no ctx use, so it is
+	// extracted to observeSuccessLatency to shave one of executeOpt's mixed
+	// concerns. Behaviour-preserving — the same three signals fire in the same
+	// order against the same startedAt.
+	s.observeSuccessLatency(startedAt, result, snap, lg)
 	// 把本次产生的 Claude session_id 也记下来：fresh_context=true 的
 	// 路径下一次 Reset 会清掉 stub 的 chain，不保留这个 ID 的话
 	// dashboard 点击 cron 侧边栏就看不到上一次的 JSONL 历史。
@@ -1732,6 +1727,172 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// （本地化/隐藏敏感 envelope），顺序以隐私优先。
 	replyText := formatCronNotice(snap.labelOrID(), apierr.Localize(sanitiseRunResult(result.Text)))
 	s.deliverNotice(notifyTo, replyText)
+}
+
+// observeSuccessLatency emits the three success-path latency signals for a
+// completed cron run: the "cron job completed" info log, the execution-
+// duration histogram, and the slow-tail counter + warn when elapsed exceeds
+// the configured slowThreshold. Extracted from executeOpt to localise the
+// success-only observability concern (R20260603-ARCH-2 / #1681, RNEW-003 /
+// #423); the function has no ctx use and no early-return so the move is
+// behaviour-preserving.
+//
+// Observed here (not in finishRun) because only the success path carries a
+// meaningful end-to-end latency — error / timeout / canceled paths are
+// classified by the CronRun*Total state counters instead, and folding their
+// (often deadline-clamped) durations into the histogram would skew the
+// success-latency distribution operators alert on. OBS1 (#392) / R208-OBS1.
+func (s *Scheduler) observeSuccessLatency(startedAt time.Time, result SendResult, snap jobSnapshot, lg *slog.Logger) {
+	elapsed := time.Since(startedAt)
+	lg.Info("cron job completed",
+		"result_len", len(result.Text),
+		"elapsed_ms", elapsed.Milliseconds())
+	// OBS1 (#392): record the full success-path latency distribution, not
+	// just the slow-tail count below. The histogram buckets straddle
+	// slowThreshold so the two signals stay consistent (anything past 30s
+	// lands in the same tail buckets the slow counter alerts on).
+	metrics.ObserveCronExecutionDuration(elapsed.Milliseconds())
+	slowThreshold := s.slowThreshold
+	if slowThreshold <= 0 {
+		slowThreshold = defaultCronSlowThreshold
+	}
+	if elapsed > slowThreshold {
+		// R208-OBS1: poor-man's histogram — a single counter that fires
+		// when a successful execution takes longer than slowThreshold.
+		// R241-ARCH-11 (#519): threshold reads s.slowThreshold (config-
+		// supplied) with the package default as fallback.
+		metrics.CronExecutionSlowTotal.Add(1)
+		lg.Warn("cron execution slow",
+			"job_id", snap.jobID,
+			"elapsed_ms", elapsed.Milliseconds(),
+			"threshold_ms", slowThreshold.Milliseconds())
+	}
+}
+
+// getSessionArgs bundles the inputs to executeGetSession (the spawn phase of
+// executeOpt). A struct literal keeps the call site readable — like
+// preflightArgs — and lets new spawn-phase inputs land here without re-flowing
+// a long positional signature. RNEW-003 (#423).
+type getSessionArgs struct {
+	// ctx is the spawn-only timeout context (s.stopCtx + jobTimeout). It owns
+	// the GetOrCreate call exclusively; executeGetSession cancels it via
+	// spawnCancel on the success path so its *time.Timer frees before Send.
+	ctx         context.Context
+	spawnCancel context.CancelFunc
+	// key / opts feed router.GetOrCreate. opts is the per-run cloned AgentOpts
+	// (Exempt + backend/workspace overrides already applied by executeOpt).
+	key  string
+	opts AgentOpts
+	// job / snap carry the run's identity. Failure branches route job into
+	// finishRun and read snap.prompt/workDir/fresh + labelOrID for the notice.
+	job  *Job
+	snap jobSnapshot
+	// runID / startedAt / trigger pair the synthetic finishRun with the
+	// emitRunStarted frame already broadcast by executeOpt.
+	runID     string
+	startedAt time.Time
+	trigger   TriggerKind
+	// lg is the per-run logger; notifyTo is the resolved IM target for the
+	// session-error notice (canceled path stays silent — shutdown races
+	// should not spam IM).
+	lg       *slog.Logger
+	notifyTo NotifyTarget
+	// finalizer is the per-run cleanup hook threaded into finishRun on the
+	// failure branches; stubRefresh re-registers the sidebar row when a fresh
+	// spawn aborted. inflight receives the early SessionID capture on success.
+	finalizer   *runFinalizer
+	stubRefresh stubRefresher
+	inflight    *runInflight
+}
+
+// executeGetSession runs the spawn phase of a cron execution: GetOrCreate
+// under the spawn-only ctx, classify + terminate on error, then free the
+// spawn timer and capture the session_id into the inflight view on success.
+//
+// Return contract:
+//   - abort=true  → executeGetSession already drove finishRun (+ deliverNotice
+//     on the non-cancel error branch) and ran stubRefresh; the caller MUST
+//     return from executeOpt immediately without touching sess.
+//   - abort=false → sess is the live session and spawnStart is the pre-
+//     GetOrCreate timestamp the caller uses to size the send budget warn.
+//
+// CTX OWNERSHIP (RNEW-003 / #423): this is the single owner of args.ctx — it
+// is consumed by GetOrCreate and cancelled here on the success path (R250-GO-15
+// / #1078) so its underlying *time.Timer does not idle through the Send window.
+// The caller's defer spawnCancel() remains the idempotent safety net for the
+// error branches (which return before reaching the success-path cancel).
+func (s *Scheduler) executeGetSession(a getSessionArgs) (sess Session, spawnStart time.Time, abort bool) {
+	a.inflight.setPhase(PhaseSpawning)
+	// R250-CR-22 (#1155): capture spawnStart immediately before GetOrCreate
+	// so the "send budget exceeds job/2" warn measures actual spawn time, not
+	// (jitter + spawn). startedAt is captured pre-jitter for the dashboard
+	// "running 12s" badge (true wall-clock from CAS), but the warn is
+	// calibrated against jobTimeout/2 to detect when the spawn phase alone
+	// consumed too much of the budget — folding jitter (default up to 30s)
+	// into that measurement triggers false positives on healthy jobs whose
+	// schedule landed unlucky in the jitter window.
+	spawnStart = time.Now()
+	sess, _, err := s.router.GetOrCreate(a.ctx, a.key, a.opts)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			// Parent ctx cancelled mid-flight (graceful shutdown or job
+			// deletion overlapping execute). The job will either be re-run
+			// on the next tick or is intentionally gone; either way an IM
+			// notification would be spam and the stored LastError would
+			// falsely blame the job itself.
+			a.lg.Info("cron session cancelled", "err", err)
+			s.finishRun(finishArgs{
+				job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
+				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
+				skipPersist: true, // 与 historical recordResult skip 一致
+				prompt:      a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
+				finalizer: a.finalizer,
+			})
+			a.stubRefresh.run()
+			return nil, spawnStart, true
+		}
+		state, errClass := classifyExecError(err, ErrClassSessionError)
+		if errClass == ErrClassDeadlineExceeded {
+			a.lg.Info("cron session deadline exceeded", "err", err)
+		} else {
+			// R20260603-SEC-1: sanitise before logging to strip IP:port / paths.
+			a.lg.Error("cron session error", "err", sanitiseRunErrMsg(err.Error()))
+		}
+		s.finishRun(finishArgs{
+			job: a.job, runID: a.runID, startedAt: a.startedAt, trigger: a.trigger,
+			state: state, errClass: errClass, errMsg: "session error: " + err.Error(),
+			prompt: a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
+			finalizer: a.finalizer,
+		})
+		s.deliverNotice(a.notifyTo, formatCronNotice(a.snap.labelOrID(), "执行跳过，请稍后重试。"))
+		a.stubRefresh.run()
+		return nil, spawnStart, true
+	}
+	// R250-GO-15 (#1078): GetOrCreate consumed ctx; nothing below references
+	// it (Send uses sendCtx). Cancel now to free the underlying *time.Timer
+	// instead of waiting for the function-scoped defer at executeOpt return.
+	// On a 500-job-deep deployment with 5min jobTimeout this trims up to
+	// ~500 idle timers off runtime timerproc during the Send window. The
+	// caller's defer remains the idempotent safety net (cancel is a no-op on
+	// second invocation). Placed AFTER the err-return block above so an early
+	// return on session error still trips that defer.
+	a.spawnCancel()
+
+	// R242-ARCH-22 (#766): populate inflight.SessionID as soon as
+	// GetOrCreate returns. Persistent-mode runs reuse a session that
+	// already carries its CLI session_id (set during the original spawn's
+	// init handshake), so sess.SessionID() is non-empty here. Fresh-mode
+	// runs spawn a new CLI whose session_id is only stamped after the
+	// init turn completes — sess.SessionID() returns "" in that window
+	// and the post-Send setSessionID remains the authoritative write.
+	// Without this early capture, KnownSessionIDs / IsExcluded probes during
+	// the Send window miss the in-flight run on persistent-mode jobs.
+	// setSessionID is idempotent and same-value writes fast-path so the
+	// post-Send call is a no-op when the IDs match.
+	if sid := sess.SessionID(); sid != "" {
+		a.inflight.setSessionID(sid)
+	}
+	return sess, spawnStart, false
 }
 
 // applyJitter 在执行 cron job 前引入一段随机延迟，用来把"整点共振起跑"的

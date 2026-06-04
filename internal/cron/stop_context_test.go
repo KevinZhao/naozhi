@@ -13,12 +13,11 @@ import (
 // hold the full stopBudget. This is the Stop(ctx) idiom complement to
 // StartContext(ctx).
 func TestStopContext_CancelledCtxShortCircuitsDrain(t *testing.T) {
-	// Use a long stopBudget so the test can only pass if the ctx-cancel arm
-	// (not the budget timer) is what unblocks the drain.
-	withShortStopBudget(t, 30*time.Second)
-
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5})
+	// Use a long stopBudget so the test can only pass if the ctx-cancel arm
+	// (not the budget timer) is what unblocks the drain.
+	withShortStopBudget(t, s, 30*time.Second)
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

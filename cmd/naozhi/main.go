@@ -338,7 +338,6 @@ func main() {
 	}
 	schedulers, err := wireup.WireSchedulers(wireup.SchedulersDeps{
 		Cfg:                  cfg,
-		Router:               router,
 		SessionRouterAdapter: cronRouterAdapter{r: router},
 		Platforms:            platforms,
 		Agents:               cronAgents,

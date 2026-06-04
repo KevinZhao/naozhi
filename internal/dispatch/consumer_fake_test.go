@@ -110,7 +110,6 @@ type fakeSessionRouter struct {
 	getOrCreateCalls atomic.Int64
 
 	getOrCreate               func(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
-	getSession                func(key string) *session.ManagedSession
 	notifyIdle                func()
 	discardPassthroughPending func(key string, reason error)
 }
@@ -121,13 +120,6 @@ func (f *fakeSessionRouter) GetOrCreate(ctx context.Context, key string, opts se
 		panic("fakeSessionRouter.GetOrCreate not configured")
 	}
 	return f.getOrCreate(ctx, key, opts)
-}
-
-func (f *fakeSessionRouter) GetSession(key string) *session.ManagedSession {
-	if f.getSession == nil {
-		return nil
-	}
-	return f.getSession(key)
 }
 
 func (f *fakeSessionRouter) DiscardPassthroughPending(key string, reason error) {
@@ -172,26 +164,31 @@ func (f *fakeSessionRouter) NotifyIdle() {
 func TestDispatcher_AcceptsFakeSessionRouter(t *testing.T) {
 	t.Parallel()
 
+	var notified int
 	fake := &fakeSessionRouter{
-		getSession: func(string) *session.ManagedSession { return nil },
+		notifyIdle: func() { notified++ },
 	}
 	// Compile-time: fake satisfies SessionRouter.
 	var _ SessionRouter = fake
 
 	d := &Dispatcher{router: fake}
 
-	// Runtime: routing calls reach the fake.
-	if got := d.router.GetSession("any:key:foo:general"); got != nil {
-		t.Errorf("expected nil session from fake, got %v", got)
+	// Runtime: a routing call reaches the fake through the interface seam.
+	// (GetSession was dropped from SessionRouter in #1587 once its only
+	// production caller moved to the DiscardPassthroughPending seam, so we
+	// exercise a method that remains on the interface.)
+	d.router.NotifyIdle()
+	if notified != 1 {
+		t.Errorf("expected NotifyIdle to reach fake once, got %d", notified)
 	}
 }
 
 // TestDispatcher_DiscardQueueRoutesThroughSeam proves discardQueue clears
 // passthrough pending via the SessionRouter interface seam rather than
-// dereferencing the concrete *session.ManagedSession behind GetSession
-// (R20260602190132-ARCH-4, #1612). A fake router with no getSession closure
-// would have panicked the old GetSession path only on a non-nil session; the
-// seam means the fake observes the (key, reason) call directly.
+// dereferencing a concrete *session.ManagedSession behind a session lookup
+// (R20260602190132-ARCH-4, #1612). The seam means the fake observes the
+// (key, reason) call directly — and is why GetSession no longer needs to be
+// on the dispatch SessionRouter interface (#1587).
 func TestDispatcher_DiscardQueueRoutesThroughSeam(t *testing.T) {
 	t.Parallel()
 

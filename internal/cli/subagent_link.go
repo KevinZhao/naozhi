@@ -157,9 +157,19 @@ type SubagentLinker struct {
 	resolveJobs chan resolveJob
 
 	// resolvePoolOnce guards lazy creation of the worker pool. The pool
-	// inherits the caller's first ctx as its lifetime so workers exit when
-	// the owning Process dies (via Process.lifecycleContext()).
+	// inherits poolCtx (set via SetPoolContext) as its lifetime so workers
+	// exit when the owning Process dies — never the per-request ctx of
+	// whichever caller happened to dispatch first. R20260603030037-GO-2
+	// (#1661): binding worker lifetime to the first caller's ctx meant a
+	// short-lived per-request ctx could cancel all workers, leaving later
+	// jobs (pushed under Process.lifecycleContext()) with no consumer.
 	resolvePoolOnce sync.Once
+
+	// poolCtx governs worker-pool lifetime, decoupled from per-job ctx.
+	// Set once by SetPoolContext(Process.lifecycleContext()). When unset
+	// (legacy &SubagentLinker{} test fixtures), DispatchResolve falls back
+	// to the first caller's ctx to preserve prior behaviour.
+	poolCtx context.Context
 
 	// inflightTasks tracks taskIDs whose Resolve goroutine is already
 	// running (or about to start). Callers (notifyLinker on the readLoop
@@ -220,6 +230,21 @@ func NewSubagentLinker() *SubagentLinker {
 		retryLimit:    12,
 		cacheTTL:      200 * time.Millisecond,
 	}
+}
+
+// SetPoolContext binds the resolve worker-pool lifetime to a long-lived,
+// process-scoped context (Process.lifecycleContext()). R20260603030037-GO-2
+// (#1661): without this, the pool captured the first DispatchResolve caller's
+// ctx, so a short-lived per-request ctx could cancel the workers while later
+// jobs were still being enqueued. Call once, before the first DispatchResolve;
+// later calls are ignored (the pool starts at most once via resolvePoolOnce).
+// Safe to call with a nil ctx (treated as unset).
+func (l *SubagentLinker) SetPoolContext(ctx context.Context) {
+	l.mu.Lock()
+	if l.poolCtx == nil {
+		l.poolCtx = ctx
+	}
+	l.mu.Unlock()
 }
 
 // SetContext installs the on-disk lookup root. Must be called before Resolve
@@ -336,11 +361,12 @@ func (l *SubagentLinker) TryMarkResolveInflight(taskID string) bool {
 // emitting task_started faster than the pool can drain — which would only
 // happen under a pathological multi-agent burst far beyond observed loads.
 //
-// First call lazily starts resolveWorkerCount workers tied to ctx. Subsequent
-// callers' ctx values are still honored per-job (each job carries its own
-// ctx for the actual Resolve call); the pool-wide ctx only governs worker
-// lifetime. Callers should pass the same long-lived ctx (Process.
-// lifecycleContext()) to avoid the pool outliving the owning process.
+// First call lazily starts resolveWorkerCount workers tied to poolCtx
+// (SetPoolContext) — the process-scoped lifetime, never this caller's ctx.
+// Each job still carries its own per-request ctx for the actual Resolve
+// call; the pool-wide ctx only governs worker lifetime. R20260603030037-GO-2
+// (#1661): decoupling these prevents a short-lived first caller's ctx from
+// cancelling the workers out from under later jobs.
 //
 // Empty taskID is a no-op — the upstream callers already short-circuit on
 // empty taskID before reaching us, so this is defence in depth.
@@ -352,9 +378,19 @@ func (l *SubagentLinker) DispatchResolve(ctx context.Context, taskID, toolUseID,
 		ctx = context.Background()
 	}
 	l.resolvePoolOnce.Do(func() {
+		// Worker lifetime binds to poolCtx (the process-scoped ctx set via
+		// SetPoolContext), NOT the per-request ctx of this first caller —
+		// R20260603030037-GO-2 (#1661). Fall back to the caller's ctx only
+		// when SetPoolContext was never called (legacy test fixtures).
+		l.mu.RLock()
+		lifetime := l.poolCtx
+		l.mu.RUnlock()
+		if lifetime == nil {
+			lifetime = ctx
+		}
 		l.resolveJobs = make(chan resolveJob, resolveQueueDepth)
 		for i := 0; i < resolveWorkerCount; i++ {
-			go l.resolveWorker(ctx)
+			go l.resolveWorker(lifetime)
 		}
 	})
 	job := resolveJob{
