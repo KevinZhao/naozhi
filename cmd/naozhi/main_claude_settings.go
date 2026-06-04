@@ -27,12 +27,12 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/envpolicy"
 )
 
 // claudeEnvAllowedPrefixes restricts which env vars from
@@ -248,29 +248,10 @@ var claudeBaseURLEnvKeys = map[string]bool{
 // ~/.claude/settings.json uses https:// unless it targets a loopback host
 // (localhost / 127.0.0.0/8 / ::1) for which plain http is allowed so operators
 // can wire local mock gateways. An empty value is accepted (clears the var).
-// Mirrors weixin.validateBaseURLScheme. R20260602-SEC-1 (#1576).
+// The implementation moved to internal/envpolicy (#891) so it is shared with
+// the sysession Runner env guard verbatim. R20260602-SEC-1 (#1576).
 func validateClaudeBaseURLEnv(v string) error {
-	if v == "" {
-		return nil
-	}
-	u, err := url.Parse(v)
-	if err != nil {
-		return fmt.Errorf("parse: %w", err)
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "https":
-		return nil
-	case "http":
-		host := u.Hostname()
-		if strings.EqualFold(host, "localhost") {
-			return nil
-		}
-		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-			return nil
-		}
-		return fmt.Errorf("plain http:// to non-loopback host %q rejected (SSRF/redirect guard); use https://", host)
-	}
-	return fmt.Errorf("scheme %q not allowed; use https://", u.Scheme)
+	return envpolicy.ValidateBaseURLValue(v)
 }
 
 // applyClaudeEnvSettings reads ~/.claude/settings.json and applies any env section
