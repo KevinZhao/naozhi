@@ -59,7 +59,11 @@ func (s *Server) registerExpvar() {
 			http.Error(w, "expvar disabled: set a dashboard token to enable", http.StatusForbidden)
 			return
 		}
-		if !isLoopbackRemote(r.RemoteAddr) {
+		// R20260604-SEC-5: gate on the real client IP, not r.RemoteAddr —
+		// in trustedProxy mode RemoteAddr is the proxy's loopback IP for every
+		// forwarded request, which would defeat the loopback-only gate. See
+		// isLoopbackClient.
+		if !isLoopbackClient(r, s.auth.TrustedProxy) {
 			// R186-SEC-L1: r.URL.Path is URL-decoded from the client-supplied
 			// request line; it can carry bidi / C1 / LS/PS code points that
 			// corrupt downstream terminal log viewers. Sanitize before it
