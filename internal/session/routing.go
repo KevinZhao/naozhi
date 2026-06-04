@@ -11,9 +11,11 @@
 // aliasing protection, some missing planner model/prompt inheritance;
 // the Resolver is the single source of truth.
 //
-// Dependency direction: PlannerDataSource is declared here so session
-// never imports project. The project package ships a small adapter
-// (internal/project.NewDataSource) that satisfies PlannerDataSource.
+// Dependency direction: PlannerDataSource / ProjectBinding are aliased from
+// the neutral leaf internal/projectapi (R260528-ARCH-12 / #1373), so session
+// never imports project AND project no longer imports session to name these
+// types. The project package ships a small adapter (internal/project.
+// NewDataSource) that satisfies projectapi.DataSource (= PlannerDataSource).
 package session
 
 import (
@@ -23,6 +25,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/projectapi"
 )
 
 // maxPlannerPromptBytesAtSpawn caps the planner prompt that flows into
@@ -105,32 +108,25 @@ func sanitisePlannerPromptForSpawn(prompt, projectName string) string {
 }
 
 // PlannerDataSource abstracts the project-layer data KeyResolver needs.
-// Concrete implementation lives in the project package; session never
-// imports project directly. All methods return fully-snapshot'd values
-// so callers can treat them as pure reads (no hidden mutex state bleed).
-type PlannerDataSource interface {
-	// ProjectBinding returns the project metadata for the given IM chat,
-	// or zero-value (Bound == false) if the chat is not bound.
-	ProjectBinding(platform, chatType, chatID string) ProjectBinding
+// Concrete implementation lives in the project package; session never imports
+// project directly. All methods return fully-snapshot'd values so callers can
+// treat them as pure reads (no hidden mutex state bleed).
+//
+// R260528-ARCH-12 (#1373): the canonical definition now lives in the neutral
+// leaf internal/projectapi so the project domain layer no longer reverse-
+// imports session to name it. This alias keeps every session-side call site
+// (KeyResolver.data, NewKeyResolver) and external caller (dispatch, which
+// names session.PlannerDataSource) compiling unchanged.
+type PlannerDataSource = projectapi.DataSource
 
-	// ProjectByName returns the project metadata for the given planner
-	// key's embedded project name. Used by the key-reverse path.
-	// ok == false when the project cannot be found (e.g. operator
-	// deleted it between RPC arrival and restart).
-	ProjectByName(name string) (ProjectBinding, bool)
-}
-
-// ProjectBinding is the minimal projection session needs. Populated by
-// the project-package adapter via EffectivePlannerModel /
-// EffectivePlannerPrompt, so the Resolver does NOT re-implement those
-// precedence rules (they stay authoritative in project.Manager).
-type ProjectBinding struct {
-	Bound         bool
-	Name          string
-	WorkspaceDir  string
-	PlannerModel  string // "" = inherit router / AgentDefaults
-	PlannerPrompt string // "" = no --append-system-prompt
-}
+// ProjectBinding is the minimal projection session needs. Populated by the
+// project-package adapter via EffectivePlannerModel / EffectivePlannerPrompt,
+// so the Resolver does NOT re-implement those precedence rules (they stay
+// authoritative in project.Manager).
+//
+// R260528-ARCH-12 (#1373): aliased from internal/projectapi (see
+// PlannerDataSource above for the dependency-direction rationale).
+type ProjectBinding = projectapi.ProjectBinding
 
 // KeyResolver derives a (session key, AgentOpts) pair for a given
 // dispatch context. It encodes the project-binding precedence

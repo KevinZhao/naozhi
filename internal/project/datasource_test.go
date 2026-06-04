@@ -3,7 +3,7 @@ package project
 import (
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/projectapi"
 )
 
 // TestNewDataSource_NilManagerReturnsNilInterface asserts the defense
@@ -56,12 +56,20 @@ func TestPlannerKeyFor_FormatLocked(t *testing.T) {
 	}
 }
 
-// TestNewDataSource_Compiles is a smoke test that the adapter satisfies
-// the session.PlannerDataSource interface. Interface satisfaction is
-// checked at compile time, but this explicit assignment makes the
-// contract obvious to future readers.
+// TestNewDataSource_Compiles is a smoke test that the adapter satisfies the
+// projectapi.DataSource interface. Interface satisfaction is checked at compile
+// time, but this explicit assignment makes the contract obvious to future
+// readers.
+//
+// R260528-ARCH-12 (#1373): asserts against projectapi.DataSource (the neutral
+// leaf contract) rather than session.PlannerDataSource — this test no longer
+// imports session, so the project package's reverse import is gone in
+// production AND test code. session.PlannerDataSource is a type alias for
+// projectapi.DataSource, so callers wiring project.NewDataSource into
+// session.NewKeyResolver still type-check (pinned by the dispatch wiring +
+// session's own package compiling).
 func TestNewDataSource_Compiles(t *testing.T) {
 	t.Parallel()
 	m := &Manager{projects: map[string]*Project{}}
-	var _ session.PlannerDataSource = NewDataSource(m) // compile-time check
+	var _ projectapi.DataSource = NewDataSource(m) // compile-time check
 }
