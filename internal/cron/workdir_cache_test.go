@@ -172,6 +172,80 @@ func TestWorkDirResolveCache_CapEnforced(t *testing.T) {
 	}
 }
 
+// TestWorkDirReachableCached_HitElidesStat verifies the positive-cache
+// path: once a reachable workDir is cached, a subsequent call returns true
+// from the in-memory map even after the directory is removed (within TTL),
+// proving the bare os.Stat was elided. R20260604064416-PERF-3 (#1731).
+func TestWorkDirReachableCached_HitElidesStat(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workDir := filepath.Join(root, "child")
+	if err := os.Mkdir(workDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// allowedRoot=="" mirrors the fresh-mode job that never touches
+	// workDirCache — the exact case #1731 is about.
+	s := &Scheduler{}
+	if !s.workDirReachableCached(workDir) {
+		t.Fatalf("first call: reachable=false, want true")
+	}
+	// Remove the workspace. An uncached stat would now return false; the
+	// cached positive must still answer true until the TTL lapses.
+	if err := os.RemoveAll(workDir); err != nil {
+		t.Fatalf("rmdir: %v", err)
+	}
+	if !s.workDirReachableCached(workDir) {
+		t.Fatalf("second call (removed but TTL alive): reachable=false, want true")
+	}
+}
+
+// TestWorkDirReachableCached_NegativeBypassesCache verifies an unreachable
+// workDir is NOT cached: a workspace an operator restores must be reachable
+// on the very next tick, not after a full TTL window. R20260604064416-PERF-3.
+func TestWorkDirReachableCached_NegativeBypassesCache(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	missing := filepath.Join(root, "not-yet-created")
+	s := &Scheduler{}
+	if s.workDirReachableCached(missing) {
+		t.Fatalf("missing workspace: reachable=true, want false")
+	}
+	if err := os.Mkdir(missing, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if !s.workDirReachableCached(missing) {
+		t.Fatalf("after restore: reachable=false, want true (negative must not be cached)")
+	}
+}
+
+// TestWorkDirReachableCached_EmptyAlwaysReachable verifies empty workDir
+// (router-default) is always reachable and is never cached — it short-
+// circuits to workDirReachable. R20260604064416-PERF-3.
+func TestWorkDirReachableCached_EmptyAlwaysReachable(t *testing.T) {
+	t.Parallel()
+	s := &Scheduler{}
+	if !s.workDirReachableCached("") {
+		t.Fatalf("empty workDir: reachable=false, want true")
+	}
+	if s.workDirReachableCache.count.Load() != 0 {
+		t.Fatalf("empty workDir was cached: count=%d, want 0", s.workDirReachableCache.count.Load())
+	}
+}
+
+// TestWorkDirReachableCached_NilSchedulerSafe verifies a nil scheduler
+// falls back to the pure workDirReachable without panicking.
+func TestWorkDirReachableCached_NilSchedulerSafe(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	var s *Scheduler
+	if !s.workDirReachableCached(root) {
+		t.Fatalf("nil scheduler, existing dir: reachable=false, want true")
+	}
+	if s.workDirReachableCached(filepath.Join(root, "nope")) {
+		t.Fatalf("nil scheduler, missing dir: reachable=true, want false")
+	}
+}
+
 // BenchmarkWorkDirResolveUnderRootCached approximates the syscall savings
 // the cache delivers. Cached path is a sync.Map.Load + time.Now compare;
 // uncached path is an EvalSymlinks chain (Lstat+Readlink per component).
