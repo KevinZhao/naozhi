@@ -1383,6 +1383,19 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 			return nil, fmt.Errorf("re-register cron: %w", schedRegErr)
 		}
 	}
+	// R20260604-CR-05: refresh LastSessionID from live job after schedNeedsRereg
+	// re-registration. The IIFE snapshotted result = *j before registerJob ran
+	// (line 1329); a concurrent recordTerminalResult may have written a newer
+	// j.LastSessionID between that snapshot and here, causing registerStubFromJob
+	// to anchor the sidebar on a stale session. Only the rereg path needs this
+	// refresh — on the non-rereg path result is the latest snapshot.
+	if schedNeedsRereg {
+		s.mu.RLock()
+		if lj := s.jobs[id]; lj != nil {
+			result.LastSessionID = lj.LastSessionID
+		}
+		s.mu.RUnlock()
+	}
 	save()
 	// Pass the snapshotted value (via result) to registerStub so a concurrent
 	// SetJobPrompt cannot tear the Prompt/WorkDir pointers we read.

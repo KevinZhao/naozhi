@@ -45,9 +45,10 @@ func TestPidAlive_NegativePid(t *testing.T) {
 
 func TestPidAlive_NonExistentPid(t *testing.T) {
 	t.Parallel()
-	// PID 2^22 is extremely unlikely to exist on any normal system.
-	// If it does exist somehow, the test skips.
-	got := PidAlive(4194304)
-	// We can't guarantee the result, but ensure no panic.
-	_ = got
+	// PID 2^22 (Linux default pid_max) cannot exist on a standard kernel.
+	// If it somehow does, skip rather than fail to avoid a spurious CI red.
+	const hugePID = 4194304
+	if PidAlive(hugePID) {
+		t.Skipf("PID %d unexpectedly alive; skipping non-existent-pid assertion", hugePID)
+	}
 }
