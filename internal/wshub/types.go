@@ -1,19 +1,15 @@
-// Package wshub: WebSocket Hub 抽包目标包（server-split-phase4-design v0.6.1
-// §6.5 Phase 4a 骨架）.
+// Package wshub holds the consumer interfaces the WebSocket Hub depends on
+// (server-split-phase4-design v0.6.1 §6.5).
 //
-// Phase 4a 状态：骨架并存。
-//   - internal/server/wshub*.go 旧 Hub 仍是生产运行的实现
-//   - internal/wshub/ (本包) 是 Phase 4a 落地的骨架——独立 build / test，
-//     无外部调用方
-//   - Phase 4b 起将 server 包的方法实质搬到本包；server.Hub → wshub.Hub
-//     的 import 切换在 Phase 4b PR 一次完成
+// 现状：本包只保留接口契约。HubRouter 等接口有真实消费者——
+// internal/server/consumer.go 通过 `type HubRouter = wshub.HubRouter`
+// alias 引用，dispatch 侧 var _ 绑定 MessageEnqueuer。
 //
-// File-block contract (server-split-phase4-design v0.6.1 §五):
-//
-//	WRITES:     none (interface declarations + var _ binding only)
-//	READS:      none
-//
-// rule 3a/3b 字段块对账对接口文件不适用，但 marker 仍在。
+// 历史：Phase 4a 曾在本包落地一个 49 字段的 server.Hub 镜像骨架
+// (Hub struct + NewHub/Shutdown + placeholder 方法 + 字段计数测试)，
+// 但 Phase 4b cutover 从未发生、无任何生产 instantiation，已于 #1741
+// 删除（同 #1600 删零消费者骨架的模式）。生产 Hub 实现仍在
+// internal/server/wshub*.go。
 package wshub
 
 import (
