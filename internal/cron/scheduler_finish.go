@@ -625,28 +625,41 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 // R20260603-SEC-1 / R20260603-SEC-4.
 var redactAddrRe = regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?\b`)
 
+// redactAddrIPv6Re matches bracketed IPv6 addresses + optional port in error
+// messages such as "dial tcp [2001:db8::1]:4012: connection refused".
+// Only bracket form is matched — bare IPv6 without brackets is ambiguous in
+// free-form text (colons appear in many other contexts). R20260604-GO-016.
+var redactAddrIPv6Re = regexp.MustCompile(`\[[0-9a-fA-F:]+\](:\d+)?`)
+
 // hasAddrTrigger is a zero-alloc fast-path check: returns true only when s
-// contains at least one digit immediately followed (or preceded) by a dot,
-// which is necessary (though not sufficient) for a dotted-quad IPv4 address.
+// contains at least one digit immediately followed (or preceded) by a dot
+// (necessary for dotted-quad IPv4), or a '[' character (bracket-form IPv6).
 // When this returns false the regex can be skipped entirely — common cron
 // error classes ("context deadline exceeded", "permission denied") never
-// contain digit-dot pairs so they take the zero-alloc return.
+// contain digit-dot pairs or '[' so they take the zero-alloc return.
+// R20260603-SEC-1 / R20260603-SEC-4 / R20260604-GO-016.
 func hasAddrTrigger(s string) bool {
-	for i := 1; i < len(s); i++ {
-		if s[i] == '.' && s[i-1] >= '0' && s[i-1] <= '9' {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '[' {
+			return true
+		}
+		if i >= 1 && s[i] == '.' && s[i-1] >= '0' && s[i-1] <= '9' {
 			return true
 		}
 	}
 	return false
 }
 
-// redactAddrInCronError replaces IPv4(:port)? patterns with [redacted-addr].
+// redactAddrInCronError replaces IPv4(:port)? and [IPv6](:port)? patterns
+// with [redacted-addr].
 // Fast-path: returns s unmodified (zero alloc) when hasAddrTrigger is false.
 func redactAddrInCronError(s string) string {
 	if !hasAddrTrigger(s) {
 		return s
 	}
-	return redactAddrRe.ReplaceAllString(s, "[redacted-addr]")
+	s = redactAddrRe.ReplaceAllString(s, "[redacted-addr]")
+	s = redactAddrIPv6Re.ReplaceAllString(s, "[redacted-addr]")
+	return s
 }
 
 // redactPathsBuilderPool reuses strings.Builder scratch space across
