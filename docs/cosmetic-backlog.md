@@ -521,3 +521,19 @@
 - [R20260603140013-SEC-6] uploadOwner ConstantTimeCompare 仅泄漏固定长度 hex MAC 长度(无实际风险) — internal/server/dashboard_send.go:127
 - [R20260603140013-SEC-7] deniedExtraFlags 仅长 flag;claude CLI short-flag 注入为假设性 — internal/cli/protocol_claude.go:197
 - [R20260603140013-GO-4] testing import 生产代码(dup CLOSED #1516,已 rolled-into-closed) — internal/cron/runstore.go:20
+
+## cron-cr-20260604-053116
+- [R053116-ARCH-1] 13 处 godoc 指向 cmd/naozhi/cron_router_adapter.go 的 init() pin 已失效(移至 internal/wireup) — internal/cron/agent_opts.go:6
+- [R053116-CR-5] attachment_gc cursor++ 对 bad_root 也前进(已有内联注释辩护,fairness 影响极小) — internal/sysession/attachment_gc.go:147
+- [R053116-CR-7] buildExcerpt 对 placeholder rune 用 utf8.RuneLen 未防 -1(excerptMarkerSafe 全 ASCII,当前不可达) — internal/sysession/auto_titler.go:712
+- [R053116-GO-004] watchdogInterruptTimeoutAtomic 包级可变 global,测试串行约束无法静态强制 — internal/cron/scheduler_run.go:798
+- [R053116-GO-007] runstore.go 生产文件 import testing,建议移至 export_test.go — internal/cron/runstore.go:20
+- [R053116-SEC-1] dashboard CSP script-src unsafe-inline,nonce 迁移待完成(已有 NEEDS-DESIGN 注释) — internal/server/routes.go:522
+
+## cron-cr-20260604-064416
+- [R20260604064416-ARCH-4] cron.RedactSecrets 过渡别名无消费者,作者标记 #1571 后一两个 release 删除 — internal/cron/redact_secrets.go:23
+- [R20260604064416-ARCH-5] dispatch.DispatcherConfig 三个 deprecated 闭包字段(SendFn/TakeoverFn/ReplyFooterFn)目标 2026-Q3 删除 — internal/dispatch/dispatch.go:305
+- [R20260604064416-GO-1] jobGates [64]sync.Mutex 内联无 padding,相邻 shard 伪共享 cache line — internal/cron/scheduler.go:552
+- [R20260604064416-CR-5] registerStubFromJob(&result) 传 local copy 指针,与其它逐字段传值的 call site 风格不一致 — internal/cron/scheduler_jobs.go:1389
+- [R20260604064416-GO-3] WireSchedulers 在 sysErr!=nil 时仍可能 Start 部分构造的 sysMgr(契约靠文档约束) — internal/wireup/schedulers.go:222
+- [R20260604064416-PERF-7] parallelFsync n>=2 即进 worker pool,小部署 2-5 writer 可串行 fast path — internal/eventlog/persist/persister.go:1001
