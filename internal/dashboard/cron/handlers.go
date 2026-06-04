@@ -1012,7 +1012,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 			Paused:          j.Paused,
 			WorkDir:         j.WorkDir,
 			NotifyPlatform:  j.NotifyPlatform,
-			NotifyChatID:    j.NotifyChatID,
+			NotifyChatID:    maskNotifyChatID(j.NotifyChatID),
 			LastResult:      j.LastResult,
 			LastError:       j.LastError,
 			LastErrorClass:  string(j.LastErrorClass),
