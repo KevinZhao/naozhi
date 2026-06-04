@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"regexp"
@@ -262,7 +263,7 @@ func readAllInto(r io.Reader, buf []byte) ([]byte, error) {
 		n, err := r.Read(buf[len(buf):cap(buf)])
 		buf = buf[:len(buf)+n]
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				return buf, nil
 			}
 			return buf, err

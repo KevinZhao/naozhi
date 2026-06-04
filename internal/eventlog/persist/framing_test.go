@@ -385,6 +385,56 @@ func TestReadFramedBody_PoolReusesBackingArray(t *testing.T) {
 	}
 }
 
+// TestWriteFramedBody_BodyLengthRoundTrip verifies that writeFramedBody (the
+// hot path changed in R20260604-PERF-18) encodes the length prefix correctly
+// for a range of body sizes: 1 byte, a moderate body (boundary around the
+// decimal digit count change), and a large body. Each case writes via
+// WriteRecordRaw and reads back via ReadFramedBody, asserting byte-for-byte
+// identity and that the returned frame size matches the written size.
+func TestWriteFramedBody_BodyLengthRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{"1_byte", []byte("{}")},
+		{"9_bytes", []byte(`{"a":"b"}`)},
+		{"10_bytes", []byte(`{"a":"bc"}`)},
+		{"99_bytes", []byte(`{"v":1,"seq":0,"type":"entry","entry":{"key":"` + strings.Repeat("x", 48) + `"}}`)},
+		{"100_bytes", []byte(`{"v":1,"seq":0,"type":"entry","entry":{"key":"` + strings.Repeat("x", 49) + `"}}`)},
+		{"999_bytes", []byte(`{"v":1,"seq":0,"type":"entry","entry":{"key":"` + strings.Repeat("x", 948) + `"}}`)},
+		{"1000_bytes", []byte(`{"v":1,"seq":0,"type":"entry","entry":{"key":"` + strings.Repeat("x", 949) + `"}}`)},
+		{"large_64k", []byte(`{"v":1,"seq":0,"type":"entry","entry":{"key":"` + strings.Repeat("x", 65481) + `"}}`)},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			wn, err := WriteRecordRaw(&buf, tc.body)
+			if err != nil {
+				t.Fatalf("WriteRecordRaw: %v", err)
+			}
+			if wn != int64(buf.Len()) {
+				t.Errorf("returned n=%d != buffer len=%d", wn, buf.Len())
+			}
+
+			got, gotFrameN, err := ReadFramedBody(bufio.NewReader(&buf))
+			if err != nil {
+				ReleaseFramedBody(got)
+				t.Fatalf("ReadFramedBody: %v", err)
+			}
+			if !bytes.Equal(got, tc.body) {
+				ReleaseFramedBody(got)
+				t.Errorf("body mismatch: got len=%d want len=%d", len(got), len(tc.body))
+			}
+			if int64(gotFrameN) != wn {
+				ReleaseFramedBody(got)
+				t.Errorf("frame size: got %d want %d", gotFrameN, wn)
+			}
+			ReleaseFramedBody(got)
+		})
+	}
+}
+
 // writeRecord is the test-only marshal+frame combo helper. Production
 // always pre-marshals records via schema.MarshalRecord and feeds the
 // pre-marshalled bytes into WriteRecordRaw, so the combo wrapper has

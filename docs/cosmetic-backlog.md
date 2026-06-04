@@ -537,3 +537,14 @@
 - [R20260604064416-CR-5] registerStubFromJob(&result) 传 local copy 指针,与其它逐字段传值的 call site 风格不一致 — internal/cron/scheduler_jobs.go:1389
 - [R20260604064416-GO-3] WireSchedulers 在 sysErr!=nil 时仍可能 Start 部分构造的 sysMgr(契约靠文档约束) — internal/wireup/schedulers.go:222
 - [R20260604064416-PERF-7] parallelFsync n>=2 即进 worker pool,小部署 2-5 writer 可串行 fast path — internal/eventlog/persist/persister.go:1001
+## cron-cr-20260604-141206
+- [R20260604-GO-013] knownSessionsCache.lookupFresh 在 RLock 内调 time.Since — internal/cron/scheduler.go:656
+- [R20260604-GO-017] wireup.cron_router_adapter init() 重复 compile-time ordinal pin，纯启动开销 — internal/wireup/cron_router_adapter.go:62
+- [R20260604-CR-01] runInflight.releaseRun 是零生产调用的死代码（被 runFinalizer.finalize 取代） — internal/cron/runinflight.go:388
+- [R20260604-CR-02] appendsSinceTrim 字段 + appendTrimBatch 常量是 R20260527-PERF-24 后的 vestigial no-op — internal/cron/runstore.go:227
+- [R20260604-CR-03] StartContext 在 stopped guard 前 spawn ctx-watcher goroutine，post-Stop 调用产生瞬时多余 goroutine — internal/cron/scheduler.go:1336
+- [R20260604-ARCH-3] cron.resolveAgent 是 session.ResolveAgent 的手工 fork，靠 parity test 维持（应下沉 leaf util） — internal/cron/agent_resolve.go:19
+- [R20260604-ARCH-4] server.Server 是 48 字段 god-object，靠 awk 字段计数注释维护 — internal/server/server.go:81
+- [R20260604-ARCH-2] dispatch 直接依赖 cron.Job/NewJob/ClassifyError 域类型（裸耦合） — internal/dispatch/dispatch.go:113
+- [R20260604-PERF-3] discovery_cache.snapshot() 每次 dashboard poll 全量 copy []DiscoveredSession — internal/server/discovery_cache.go:275
+- [R20260604-PERF-21] evictedPIDs map 在无 takeover 时不被 GC（应移入 tryShortCircuit 修剪） — internal/server/discovery_cache.go:167
