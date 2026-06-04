@@ -326,8 +326,8 @@ func (l *EventLog) EntriesBeforeAppend(dst []EventEntry, beforeMS int64, limit i
 		return dst[:0]
 	}
 	l.mu.RLock()
-	defer l.mu.RUnlock()
 	if l.count == 0 {
+		l.mu.RUnlock()
 		if dst == nil {
 			return nil
 		}
@@ -386,6 +386,7 @@ func (l *EventLog) EntriesBeforeAppend(dst []EventEntry, beforeMS int64, limit i
 			idx += l.maxSize
 		}
 	}
+	l.mu.RUnlock()
 	if len(rev) == 0 {
 		if dst == nil {
 			return nil

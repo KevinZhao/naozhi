@@ -397,7 +397,15 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 	for _, c := range candidates {
 		if err := ctx.Err(); err != nil {
 			// ctx cancelled mid-batch — stop, return what we have.
+			// [R053116-CR-4] Prefer firstErr over ctx.Err(): a real upstream
+			// Runner failure captured in firstErr must not be overwritten by
+			// context.Canceled, which classifyError treats as DaemonErrorClassCanceled
+			// (not DaemonErrorClassUpstream) — hiding the true failure from the
+			// circuit breaker.
 			a.commitHighwater(pendingWrites, observed, earlyStop)
+			if firstErr != nil {
+				return report, firstErr
+			}
 			return report, err
 		}
 		entries := a.router.EventEntriesForKey(c.key)

@@ -1170,6 +1170,14 @@ func writeCronErr(w http.ResponseWriter, status int, msg string) {
 
 // POST /api/cron — create a new cron job from dashboard.
 func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
+	// [R053116-SEC-3] Per-IP rate limit: mutations that write cron_jobs.json
+	// and mutate the scheduler map must be gated so a stolen dashboard token
+	// cannot amplify IO damage via high-frequency create/delete/pause/resume.
+	// Nil-guarded for hand-built test handlers (matches HandleTrigger pattern).
+	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
+		return
+	}
 	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
@@ -1315,6 +1323,14 @@ func (h *Handlers) HandleCreate(w http.ResponseWriter, r *http.Request) {
 
 // DELETE /api/cron?id=xxx — delete a cron job by exact ID.
 func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
+	// [R053116-SEC-3] Per-IP rate limit: mutations that write cron_jobs.json
+	// and mutate the scheduler map must be gated so a stolen dashboard token
+	// cannot amplify IO damage via high-frequency create/delete/pause/resume.
+	// Nil-guarded for hand-built test handlers (matches HandleTrigger pattern).
+	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
+		return
+	}
 	if h.scheduler == nil {
 		// [R112714-SEC-1] Use writeCronErr so all error paths emit JSON.
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
@@ -1367,6 +1383,14 @@ func (h *Handlers) HandleDelete(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/cron/pause — pause a cron job by exact ID.
 func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
+	// [R053116-SEC-3] Per-IP rate limit: mutations that write cron_jobs.json
+	// and mutate the scheduler map must be gated so a stolen dashboard token
+	// cannot amplify IO damage via high-frequency create/delete/pause/resume.
+	// Nil-guarded for hand-built test handlers (matches HandleTrigger pattern).
+	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
+		return
+	}
 	if h.scheduler == nil {
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
@@ -1415,6 +1439,14 @@ func (h *Handlers) HandlePause(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/cron/resume — resume a paused cron job by exact ID.
 func (h *Handlers) HandleResume(w http.ResponseWriter, r *http.Request) {
+	// [R053116-SEC-3] Per-IP rate limit: mutations that write cron_jobs.json
+	// and mutate the scheduler map must be gated so a stolen dashboard token
+	// cannot amplify IO damage via high-frequency create/delete/pause/resume.
+	// Nil-guarded for hand-built test handlers (matches HandleTrigger pattern).
+	if h.writeLimiter != nil && !h.writeLimiter.AllowRequest(r) {
+		httputil.WriteJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron write rate limit exceeded"})
+		return
+	}
 	if h.scheduler == nil {
 		writeCronErr(w, http.StatusNotImplemented, "cron not configured")
 		return
