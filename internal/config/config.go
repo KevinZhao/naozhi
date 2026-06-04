@@ -780,20 +780,28 @@ func validateConfig(cfg *Config) error {
 			cfg.Platforms.Feishu.VerificationToken == "" && cfg.Platforms.Feishu.EncryptKey == "" {
 			return fmt.Errorf("feishu webhook mode requires at least one of verification_token or encrypt_key to be set")
 		}
-		// R20260603-SEC-6 (#1656): allow_insecure_webhook downgrades the
-		// feishu webhook to verification_token-only auth (no encrypt_key
-		// HMAC), which is replay/forgery-prone if the token leaks. Start()
-		// already refuses to boot such a config UNLESS this flag is set, but
-		// the flag itself was only surfaced via a Start-time log — an operator
-		// who copies a CI template carrying `allow_insecure_webhook: true`
-		// without an encrypt_key would silently run the weaker posture at
-		// config-validation time. Emit a prominent SECURITY warning here, at
-		// the same gate that rejects unexpanded ${VAR}, so the insecure choice
-		// is audited the moment config is loaded rather than buried later.
+		// R20260604-SEC-2 (#1735): allow_insecure_webhook downgrades the feishu
+		// webhook to verification_token-only auth (no encrypt_key HMAC), so a
+		// leaked static token lets an attacker forge arbitrary feishu events
+		// (impersonate users, trigger session sends) within Feishu's 5-minute
+		// timestamp window. The prior behaviour (R20260603-SEC-6 #1656) only
+		// logged, which an operator copying a CI template could silently run in
+		// production. HARD FAIL instead.
+		//
+		// The gate deliberately does NOT exempt loopback binds: a webhook MUST
+		// be reachable from Feishu's public servers to function, and the
+		// documented home-deployment path puts naozhi on 127.0.0.1 behind a
+		// frp/ngrok/Cloudflare tunnel — so a loopback bind still receives
+		// internet-originating events and is fully exposed to forgery. The only
+		// escape is the explicit NAOZHI_ALLOW_INSECURE_WEBHOOK=true opt-in for
+		// CI/testing, matching the issue's "CI/testing-only" intent.
 		if cfg.Platforms.Feishu.ConnectionMode == "webhook" &&
 			cfg.Platforms.Feishu.AllowInsecureWebhook &&
 			cfg.Platforms.Feishu.EncryptKey == "" {
-			slog.Error("SECURITY: feishu allow_insecure_webhook=true with no encrypt_key — webhook runs in verification_token-only mode (no HMAC); events are replay/forgery-prone if the token leaks. Configure encrypt_key unless this CI/test template was intentional.")
+			if os.Getenv("NAOZHI_ALLOW_INSECURE_WEBHOOK") != "true" {
+				return fmt.Errorf("feishu allow_insecure_webhook=true with no encrypt_key accepts forged events if the verification_token leaks (webhooks are reachable from the public internet, including loopback binds behind a tunnel); configure encrypt_key (recommended) or set NAOZHI_ALLOW_INSECURE_WEBHOOK=true to accept this risk (CI/testing only)")
+			}
+			slog.Error("SECURITY: feishu allow_insecure_webhook=true with no encrypt_key — webhook runs in verification_token-only mode (no HMAC); events are replay/forgery-prone if the token leaks. Running only because NAOZHI_ALLOW_INSECURE_WEBHOOK=true (CI/testing escape hatch).")
 		}
 	}
 	if cfg.Platforms.Slack != nil {
