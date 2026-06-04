@@ -8,22 +8,26 @@ import (
 	"testing"
 )
 
-// TestCleanupRunningJobIfIdle_KnownWindowDoc pins the godoc paragraph that
-// documents the remaining narrow split-CAS window after R20260527-GO-2's
-// CompareAndDelete tightening. PR #1416 review (R040034-CHANGES on
-// internal/cron/scheduler_run.go:932) flagged that the comment before this
-// fix claimed CompareAndDelete-on-pointer closed the gap entirely, but it
-// only closes Load+CompareAndDelete TOCTOU — the adjacent window where
-// executeOpt has already done `inflight := s.jobInflight(j.ID)` and is
-// about to CompareAndSwap on the now-stale pointer remains open under
-// (DeleteJob racing TriggerNow on same ID) + (16-hex-char ID reuse).
+// TestCleanupRunningJobIfIdle_KnownWindowDoc pins the godoc paragraph at the
+// cleanupRunningJobIfIdle CompareAndDelete site that documents the
+// double-execution window's lifecycle.
 //
-// We bake the acknowledgement into the godoc rather than chase the window
-// with a per-jobID lock because the residual probability is ~2^-32 over a
-// process lifetime at maxJobsHardCap=500. The pin guards against a future
-// edit silently dropping the acknowledgement and re-asserting that
-// CompareAndDelete is sufficient — a claim that wouldn't survive a
-// reviewer who actually traces the executeOpt entry.
+// History: R20260527-GO-2 switched cleanup to CompareAndDelete-on-pointer,
+// which closed the Load+delete TOCTOU but left an adjacent window open — where
+// executeOpt has already done `inflight := s.jobInflight(j.ID)` and is about
+// to CompareAndSwap on the now-stale pointer (reachable under DeleteJob racing
+// TriggerNow + 16-hex-char ID reuse). PR #1416 review (R040034-CHANGES) then
+// required that residual window to stay documented rather than silently
+// claimed-closed.
+//
+// R20260603140013-GO-2 (#1706) finally CLOSED that window with the per-jobID
+// gate (job_gate.go): executeOpt holds the gate across its
+// jobInflight-load→CAS pair and cleanup holds the same gate across its
+// Load→running-check→CompareAndDelete, so the orphan-in-between state is no
+// longer reachable. This test now pins the UPDATED documentation so a future
+// edit can neither (a) drop the history anchors a reader needs to trace the
+// fix, nor (b) re-assert the window is still open / that CompareAndDelete
+// alone is sufficient.
 func TestCleanupRunningJobIfIdle_KnownWindowDoc(t *testing.T) {
 	t.Parallel()
 	_, self, _, ok := runtime.Caller(0)
@@ -37,22 +41,38 @@ func TestCleanupRunningJobIfIdle_KnownWindowDoc(t *testing.T) {
 	}
 	body := string(src)
 
-	// The R040034-CHANGES anchor pins the issue identifier so future grep
-	// for the deferred follow-up lands here. Required co-anchors document
-	// the trigger conditions a reader has to know to evaluate severity.
+	// History + fix anchors. The R040034-CHANGES / jobInflight(j.ID) /
+	// "orphaned old gate" anchors keep the window's lineage greppable; the
+	// #1706 anchor and "now closed" phrasing pin that the gate actually shut
+	// the window (not a deferred follow-up).
 	required := []string{
 		"R040034-CHANGES",
 		"jobInflight(j.ID)",
 		"orphaned old gate",
-		"per-jobID lock",
+		"R20260603140013-GO-2",
+		"now closed",
+		"per-jobID gate",
 	}
 	for _, want := range required {
 		if !strings.Contains(body, want) {
-			t.Errorf("scheduler_run.go is missing the known-window godoc anchor %q — "+
-				"the residual split-CAS window must remain documented at the "+
-				"cleanupRunningJobIfIdle call site so future readers don't claim "+
-				"CompareAndDelete-on-pointer is fully sufficient.",
+			t.Errorf("scheduler_run.go is missing the closed-window godoc anchor %q — "+
+				"the cleanupRunningJobIfIdle site must document that #1706's "+
+				"per-jobID gate closed the residual split-CAS window (and keep the "+
+				"history anchors so the lineage stays greppable).",
 				want)
+		}
+	}
+
+	// Guard against a regression that re-asserts the old "we accept this
+	// window / deferred until telemetry" stance the gate replaced.
+	for _, forbidden := range []string{
+		"We accept this remaining window",
+		"deferred until",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf("scheduler_run.go still contains stale accept-the-window phrasing %q — "+
+				"#1706 closed the window with the per-jobID gate; the comment must not "+
+				"claim it is still open/accepted.", forbidden)
 		}
 	}
 }
