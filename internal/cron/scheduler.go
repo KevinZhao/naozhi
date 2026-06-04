@@ -1471,14 +1471,14 @@ func (s *Scheduler) Start() error {
 	// retention-policy violators that accumulated while this process was
 	// down. 异步执行避免在 jobs 多/历史目录大时阻塞 Start 返回（每个 job
 	// 一次 ReadDir + N 次 Remove）。
-	if s.runStore.enabled() {
+	if s.runStoreEnabled() {
 		s.gcWG.Add(1)
 		go func() {
 			defer s.gcWG.Done()
 			slog.Info("cron run history: cold-start GC starting")
 			// R234-GO-3 / #1019: 传 stopCtx 进 trimAll，Stop 可在 job 入口
 			// 之间中断长时间的 GC 扫描，避免 Stop 等到 gcWaitBudget。
-			s.runStore.trimAllCtx(s.stopCtx, time.Now())
+			s.trimAllRuns(s.stopCtx, time.Now())
 			slog.Info("cron run history: cold-start GC done")
 		}()
 	}

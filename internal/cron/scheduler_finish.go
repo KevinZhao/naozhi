@@ -12,6 +12,7 @@
 package cron
 
 import (
+	"context"
 	"io/fs"
 	"log/slog"
 	"regexp"
@@ -84,7 +85,7 @@ func (s *Scheduler) CurrentRun(jobID string) (RunInflightView, bool) {
 // nil. The dashboard list endpoint and detail endpoint both go through
 // this method so the runs/ schema stays opaque to server/.
 func (s *Scheduler) ListRuns(jobID string, limit int, before time.Time) []CronRunSummary {
-	if s == nil || !s.runStore.enabled() {
+	if !s.runStoreEnabled() {
 		return nil
 	}
 	return s.runStore.List(jobID, limit, before)
@@ -93,7 +94,7 @@ func (s *Scheduler) ListRuns(jobID string, limit int, before time.Time) []CronRu
 // RecentRuns is the convenience wrapper for the cron list view's
 // recent_runs field. Cap is enforced inside ListRuns.
 func (s *Scheduler) RecentRuns(jobID string, n int) []CronRunSummary {
-	if s == nil || !s.runStore.enabled() {
+	if !s.runStoreEnabled() {
 		return nil
 	}
 	return s.runStore.Recent(jobID, n)
@@ -103,10 +104,86 @@ func (s *Scheduler) RecentRuns(jobID string, n int) []CronRunSummary {
 // (nil, fs.ErrNotExist) when missing; (nil, ErrCorruptRun) when present
 // but unusable. Server layer maps these to 404 / 500 respectively.
 func (s *Scheduler) GetRun(jobID, runID string) (*CronRun, error) {
-	if s == nil || !s.runStore.enabled() {
+	if !s.runStoreEnabled() {
 		return nil, fs.ErrNotExist
 	}
 	return s.runStore.Get(jobID, runID)
+}
+
+// --- runStore write / lifecycle facade (#509) ---
+//
+// The read-side query methods above (CurrentRun / ListRuns / RecentRuns /
+// GetRun) already routed every dashboard read through *Scheduler instead of
+// touching s.runStore directly. The write / lifecycle side historically still
+// reached into s.runStore.<method> from four scheduler files (Append /
+// RecentSessionIDs / trimAllCtx / DeleteJob), plus an open-coded
+// `s == nil || !s.runStore.enabled()` guard scattered across both sides.
+//
+// The wrappers below complete the half-facade: every package-internal access
+// to the runStore now goes through a *Scheduler method, so the storage type's
+// surface is reachable from exactly one file. This is purely behaviour-
+// preserving forwarding — each wrapper applies the same nil/enabled guard the
+// call sites already used and forwards verbatim, preserving the runStore's own
+// lock discipline (s.mu > jobLock > entry.mu) untouched. The AST gate test
+// TestNoDirectRunStoreAccess pins the invariant: no non-wrapper cron file may
+// reference s.runStore.* again. Sub-package extraction + boundary-type export
+// remain deferred to Phase 2 (RFC cron-runstore-facade; gated on the
+// import-cycle review per runstore.go's R238-ARCH-12 note).
+
+// runStoreEnabled reports whether run-history persistence is live: a non-nil
+// Scheduler whose runStore is enabled (StorePath set). Consolidates the
+// `s == nil || !s.runStore.enabled()` guard that the write/lifecycle call
+// sites previously open-coded. runStore.enabled() already tolerates a nil
+// runStore receiver, so this never panics on a partially-constructed
+// Scheduler.
+func (s *Scheduler) runStoreEnabled() bool {
+	return s != nil && s.runStore.enabled()
+}
+
+// appendRun persists one CronRun via the runStore. No-op when persistence is
+// disabled. Forwards verbatim — Append owns its per-job jobLock internally
+// (the disk write is now hoisted out of the lock; see runstore.go), so this
+// wrapper holds no scheduler lock and changes no lock posture.
+func (s *Scheduler) appendRun(run *CronRun) {
+	if !s.runStoreEnabled() {
+		return
+	}
+	s.runStore.Append(run)
+}
+
+// recentSessionIDs returns up to n distinct non-empty SessionID strings from
+// jobID's newest-first run history. No-op (nil) when persistence is disabled.
+// Forwards to runStore.RecentSessionIDs, which reads off the cache ring under
+// entry.mu (cold path falls back to disk) — no scheduler lock involved.
+func (s *Scheduler) recentSessionIDs(jobID string, n int) []string {
+	if !s.runStoreEnabled() {
+		return nil
+	}
+	return s.runStore.RecentSessionIDs(jobID, n)
+}
+
+// trimAllRuns runs the retention GC pass across every job's runs/ subtree.
+// No-op when persistence is disabled. Forwards to runStore.trimAllCtx, which
+// takes each per-job jobLock internally and honours ctx cancellation at job
+// boundaries (cold-start GC interruptibility, R234-GO-3) — the wrapper neither
+// holds nor reorders any lock.
+func (s *Scheduler) trimAllRuns(ctx context.Context, now time.Time) {
+	if !s.runStoreEnabled() {
+		return
+	}
+	s.runStore.trimAllCtx(ctx, now)
+}
+
+// deleteJobRuns removes jobID's entire runs/ subtree and reclaims its jobLock.
+// No-op when persistence is disabled. Forwards to runStore.DeleteJob, which
+// acquires the per-job jobLock internally; this wrapper is called from
+// deleteJobPostCleanup outside s.mu, preserving the existing call-site lock
+// posture.
+func (s *Scheduler) deleteJobRuns(jobID string) {
+	if !s.runStoreEnabled() {
+		return
+	}
+	s.runStore.DeleteJob(jobID)
 }
 
 // finishArgs bundles the parameters of finishRun so each call site reads
@@ -269,8 +346,8 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	// Idempotent on already-clean prompts; cheap relative to JSON marshal +
 	// fsync that immediately follow.
 	persistedPrompt := osutil.SanitizeForLog(a.prompt, MaxPromptBytes)
-	if !a.skipPersist && jobPersistOK && s.runStore.enabled() {
-		s.runStore.Append(&CronRun{
+	if !a.skipPersist && jobPersistOK && s.runStoreEnabled() {
+		s.appendRun(&CronRun{
 			RunID:       a.runID,
 			JobID:       a.job.ID,
 			State:       a.state,
