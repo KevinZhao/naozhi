@@ -337,14 +337,14 @@ func main() {
 			"chat_id_suffix", chatIDSuffix(cfg.Cron.NotifyDefault.ChatID))
 	}
 	schedulers, err := wireup.WireSchedulers(wireup.SchedulersDeps{
-		Cfg:                  cfg,
-		SessionRouterAdapter: cronRouterAdapter{r: router},
-		Platforms:            platforms,
-		Agents:               cronAgents,
-		Workspace:            workspace,
-		CronStorePath:        osutil.ExpandHome(cfg.Cron.StorePath),
-		ParentCtx:            ctx,
-		Telemetry:            nil, // wired post-Hub via dashboard.go SetTelemetry
+		Cfg:           cfg,
+		Router:        router,
+		Platforms:     platforms,
+		Agents:        cronAgents,
+		Workspace:     workspace,
+		CronStorePath: osutil.ExpandHome(cfg.Cron.StorePath),
+		ParentCtx:     ctx,
+		Telemetry:     nil, // wired post-Hub via dashboard.go SetTelemetry
 		BuildSysession: func() (*sysession.Manager, string, error) {
 			return buildSysessionManager(cfg, router, projectMgr, wrapper, storePath)
 		},
