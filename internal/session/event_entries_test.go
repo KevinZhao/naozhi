@@ -423,6 +423,37 @@ func TestEventEntriesSinceAppend_LiveProcessAppendsToNonEmptyDst(t *testing.T) {
 	}
 }
 
+// TestEventEntriesSinceAppend_LiveProcessReusesBuffer pins R20260604-PERF-25
+// (#1740): on the live-process path an empty (cap>0) dst must have its backing
+// array reused rather than a fresh slice allocated per call. Before the fix the
+// live branch always called proc.EventEntriesSince (fresh alloc); now it
+// forwards into the EventLog append-mode query.
+func TestEventEntriesSinceAppend_LiveProcessReusesBuffer(t *testing.T) {
+	t.Parallel()
+	s := &ManagedSession{key: "k"}
+	proc := NewTestProcess()
+	proc.InjectHistory([]cli.EventEntry{
+		{Time: 100, Summary: "a"},
+		{Time: 200, Summary: "b"},
+		{Time: 300, Summary: "c"},
+	})
+	s.storeProcess(proc)
+
+	// Pre-grow a buffer, then poll with buf[:0]. The returned slice must share
+	// the same backing array (no allocation) AND carry the correct entries.
+	buf := make([]cli.EventEntry, 0, 8)
+	got := s.EventEntriesSinceAppend(buf[:0], 150)
+	if len(got) != 2 {
+		t.Fatalf("len=%d want 2 (entries after Time=150)", len(got))
+	}
+	if got[0].Summary != "b" || got[1].Summary != "c" {
+		t.Errorf("entries wrong: got %q,%q want b,c", got[0].Summary, got[1].Summary)
+	}
+	if &got[:1][0] != &buf[:1][0] {
+		t.Errorf("live path did not reuse the caller's buffer backing array (#1740 regression)")
+	}
+}
+
 // TestEventEntriesBefore_SortedFlagSkipsSort verifies the R20260603000023-PERF-3
 // / #1623 fast path: when persistedHistorySorted=true, EventEntriesBefore must
 // return entries in strict Time-ascending order using only slices.Reverse (O(n))
