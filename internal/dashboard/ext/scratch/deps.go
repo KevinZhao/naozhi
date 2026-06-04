@@ -13,8 +13,8 @@ import (
 // Broadcaster is the subset of *server.Hub the scratch handler uses —
 // just BroadcastSessionsUpdate to nudge the dashboard sidebar after open/
 // delete/promote. Defining the interface here (per "accept interfaces"
-// idiom) lets server inject *server.Hub or *wshub.Hub without the
-// sub-package reverse-importing either.
+// idiom) lets server inject *server.Hub without the sub-package
+// reverse-importing it.
 type Broadcaster interface {
 	BroadcastSessionsUpdate()
 }
