@@ -20,13 +20,22 @@ func captureSlog(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
-// TestValidateConfig_FeishuInsecureWebhookWarns pins R20260603-SEC-6 (#1656)
-// and #1724: a feishu webhook with allow_insecure_webhook=true and no
-// encrypt_key must emit a prominent SECURITY message at config-validation
-// time, not silently pass. #1724 upgrades the severity from WARN to ERROR so
-// the insecure posture is audited at the highest level. Conversely, secure
-// configurations (encrypt_key set, or flag unset) must NOT emit anything.
-func TestValidateConfig_FeishuInsecureWebhookWarns(t *testing.T) {
+// TestValidateConfig_FeishuInsecureWebhook pins R20260603-SEC-6 (#1656),
+// #1724, and R20260604-SEC-2 (#1735):
+//
+//   - allow_insecure_webhook=true with no encrypt_key HARD FAILS regardless of
+//     the server bind address — a feishu webhook is reachable from the public
+//     internet (including loopback binds behind a frp/ngrok/Cloudflare tunnel),
+//     so a leaked verification_token enables event forgery everywhere. There is
+//     no loopback exemption.
+//   - The only escape is NAOZHI_ALLOW_INSECURE_WEBHOOK=true (CI/testing), which
+//     downgrades to a prominent SECURITY message at ERROR level (audit).
+//   - Secure configurations (encrypt_key set, flag unset, non-webhook mode)
+//     neither warn nor fail.
+//
+// envOptIn sets the escape hatch. addr is varied to prove the verdict does not
+// depend on the bind address.
+func TestValidateConfig_FeishuInsecureWebhook(t *testing.T) {
 	base := func() *FeishuConfig {
 		return &FeishuConfig{
 			AppID:          "app",
@@ -37,49 +46,88 @@ func TestValidateConfig_FeishuInsecureWebhookWarns(t *testing.T) {
 
 	tests := []struct {
 		name     string
+		addr     string
+		envOptIn bool
 		mutate   func(*FeishuConfig)
 		wantWarn bool
 		wantErr  bool
 	}{
 		{
-			name: "insecure_flag_no_encrypt_key_warns",
+			name: "insecure_public_bind_hard_fails",
+			addr: ":8080",
+			mutate: func(f *FeishuConfig) {
+				f.AllowInsecureWebhook = true
+				f.VerificationToken = "tok"
+			},
+			wantWarn: false, // returns before the slog.Error
+			wantErr:  true,
+		},
+		{
+			name: "insecure_loopback_bind_also_hard_fails",
+			addr: "127.0.0.1:8080",
+			mutate: func(f *FeishuConfig) {
+				f.AllowInsecureWebhook = true
+				f.VerificationToken = "tok"
+			},
+			wantWarn: false, // loopback is NOT exempt (tunnel reachability)
+			wantErr:  true,
+		},
+		{
+			name:     "insecure_env_opt_in_warns_no_fail",
+			addr:     ":8080",
+			envOptIn: true,
 			mutate: func(f *FeishuConfig) {
 				f.AllowInsecureWebhook = true
 				f.VerificationToken = "tok"
 			},
 			wantWarn: true,
+			wantErr:  false,
 		},
 		{
-			name: "encrypt_key_set_no_warn",
+			name: "encrypt_key_set_no_warn_no_fail",
+			addr: ":8080",
 			mutate: func(f *FeishuConfig) {
 				f.AllowInsecureWebhook = true
 				f.EncryptKey = "ek"
 			},
 			wantWarn: false,
+			wantErr:  false,
 		},
 		{
-			name: "flag_unset_with_token_no_warn",
+			name: "flag_unset_with_token_no_warn_no_fail",
+			addr: ":8080",
 			mutate: func(f *FeishuConfig) {
 				f.VerificationToken = "tok"
 			},
 			wantWarn: false,
+			wantErr:  false,
 		},
 		{
-			name: "websocket_mode_flag_set_no_warn",
+			name: "websocket_mode_flag_set_no_warn_no_fail",
+			addr: ":8080",
 			mutate: func(f *FeishuConfig) {
 				f.ConnectionMode = "websocket"
 				f.AllowInsecureWebhook = true
 			},
 			wantWarn: false,
+			wantErr:  false,
 		},
 	}
 
 	for _, tt := range tests {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.envOptIn {
+				t.Setenv("NAOZHI_ALLOW_INSECURE_WEBHOOK", "true")
+			} else {
+				// Ensure a leaked env from the parent process can't mask a
+				// hard-fail expectation.
+				t.Setenv("NAOZHI_ALLOW_INSECURE_WEBHOOK", "")
+			}
 			fc := base()
 			tt.mutate(fc)
 			cfg := &Config{Platforms: PlatformConfigs{Feishu: fc}}
+			cfg.Server.Addr = tt.addr
 
 			var err error
 			out := captureSlog(t, func() {
