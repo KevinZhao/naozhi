@@ -573,37 +573,58 @@ func (s *Scheduler) recordTerminalResult(j *Job, result, errMsg, sessionID strin
 	result = osutil.SanitizeForLog(result, maxStoredResultRunes+len(truncatedSuffix))
 	errMsg = osutil.SanitizeForLog(errMsg, maxCronErrMsgRunes)
 
-	s.mu.Lock()
-	if _, ok := s.jobs[j.ID]; !ok {
-		s.mu.Unlock()
+	// R20260604-GO-001: the critical section runs under a single
+	// `defer s.mu.Unlock()` inside an IIFE rather than three hand-written
+	// Unlock branches. persistJobsLocked → marshalJobsLocked → (*fn)(entries)
+	// can panic (a buggy injected marshalJobs stub today, or a future Job
+	// field type bug); robfig's Recover wrapper only catches the panic after
+	// finishRun returns — i.e. above this frame — so a manual Unlock that the
+	// panic skips would leave s.mu held forever and deadlock every later tick.
+	// The defer releases the lock on any exit path including panic. save() and
+	// the cache invalidation stay OUTSIDE the lock, so they are recorded into
+	// locals here and acted on after the section returns.
+	var (
+		save           func()
+		sessionChanged bool
+		ok             bool
+	)
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if _, exists := s.jobs[j.ID]; !exists {
+			return
+		}
+		prev := j.snapshotResultState()
+
+		j.LastRunAt = endedAt
+		j.LastResult = result
+		j.LastError = errMsg
+		j.LastErrorClass = errClass
+		if sessionID != "" {
+			j.LastSessionID = sessionID
+		}
+		j.RunCounters.addRun(state)
+
+		saveFn, perr := s.persistJobsLocked()
+		if perr != nil {
+			prev.restore(j)
+			slog.Warn("cron: recordTerminalResult persist failed; in-memory result reverted",
+				"job_id", j.ID, "err", perr)
+			return
+		}
+		save = saveFn
+		// R250-PERF-7: detect whether LastSessionID changed under the lock
+		// so we can invalidate the KnownSessionIDs TTL cache exactly when
+		// the persisted set has shifted. Comparing against the snapshot
+		// taken before the in-place write avoids redundant invalidation
+		// when the same session id repeats.
+		sessionChanged = sessionID != "" && sessionID != prev.LastSessionID
+		ok = true
+	}()
+
+	if !ok {
 		return result, errMsg, false
 	}
-	prev := j.snapshotResultState()
-
-	j.LastRunAt = endedAt
-	j.LastResult = result
-	j.LastError = errMsg
-	j.LastErrorClass = errClass
-	if sessionID != "" {
-		j.LastSessionID = sessionID
-	}
-	j.RunCounters.addRun(state)
-
-	save, perr := s.persistJobsLocked()
-	if perr != nil {
-		prev.restore(j)
-		s.mu.Unlock()
-		slog.Warn("cron: recordTerminalResult persist failed; in-memory result reverted",
-			"job_id", j.ID, "err", perr)
-		return result, errMsg, false
-	}
-	// R250-PERF-7: detect whether LastSessionID changed under the lock
-	// so we can invalidate the KnownSessionIDs TTL cache exactly when
-	// the persisted set has shifted. Comparing against the snapshot
-	// taken before the in-place write avoids redundant invalidation
-	// when the same session id repeats.
-	sessionChanged := sessionID != "" && sessionID != prev.LastSessionID
-	s.mu.Unlock()
 
 	if sessionChanged {
 		s.invalidateKnownSessionsCache()
