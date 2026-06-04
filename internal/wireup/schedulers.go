@@ -53,6 +53,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
+	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/sysession"
 )
 
@@ -73,12 +74,15 @@ type SchedulersDeps struct {
 	// Cfg is the parsed config.
 	Cfg *config.Config
 
-
-	// SessionRouterAdapter is the cmd-side cronRouterAdapter that
-	// translates cron.AgentOpts ↔ session.AgentOpts. Caller (cmd/naozhi)
-	// constructs it because the adapter type itself lives in main pkg
-	// (cron-sysession-merge RFC §3.3.3 keeps subsystem-agnostic boundary).
-	SessionRouterAdapter cron.SessionRouter
+	// Router is the live session router. WireSchedulers wraps it in the
+	// cron.SessionRouter adapter (newCronRouterAdapter) it feeds to
+	// cron.NewScheduler, and cron also uses it for history-panel filtering via
+	// IsExcluded / RecentSessionsFilter. R260528-ARCH-23 (#1382): the adapter
+	// build moved into this package (see cron_router_adapter.go) so the caller
+	// no longer constructs it — the dependency arrow now points down
+	// (main → wireup → {cron, session}) instead of main owning a
+	// cron.SessionRouter implementation.
+	Router *session.Router
 
 	// Platforms is the live IM platform map; cron's NotifyDefault
 	// resolution + cron job IM delivery use it.
@@ -167,13 +171,15 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 		return out, fmt.Errorf("WireSchedulers: nil ParentCtx")
 	}
 
-	// deps.SessionRouterAdapter is the cron.SessionRouter passed to
-	// cron.SchedulerConfig.Router. A nil interface here would not panic
-	// at construction time but would panic at first job execution when the
+	// deps.Router is wrapped in the cron.SessionRouter adapter below and
+	// passed to cron.SchedulerConfig.Router. A nil router would not panic at
+	// construction time but would panic at first job execution when the
 	// scheduler calls Router methods. Catch it at startup instead.
-	// Check SessionRouterAdapter (the field that actually reaches cron).
-	if deps.SessionRouterAdapter == nil {
-		return out, fmt.Errorf("WireSchedulers: nil SessionRouterAdapter")
+	// R260528-ARCH-23 (#1382): the nil check moved from the caller-built
+	// SessionRouterAdapter field to deps.Router now that the adapter is built
+	// here.
+	if deps.Router == nil {
+		return out, fmt.Errorf("WireSchedulers: nil Router")
 	}
 
 	cronLoc := deps.Cfg.ParseCronTimezone()
@@ -183,7 +189,7 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 	}
 
 	scheduler := cron.NewScheduler(cron.SchedulerConfig{
-		Router:        deps.SessionRouterAdapter,
+		Router:        newCronRouterAdapter(deps.Router),
 		Platforms:     deps.Platforms,
 		Agents:        deps.Agents,
 		AgentCommands: deps.Cfg.AgentCommands,
