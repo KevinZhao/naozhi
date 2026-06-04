@@ -310,6 +310,16 @@ type Feishu struct {
 	botInfoMu          sync.RWMutex
 	botOpenID          string
 	lastBotInfoFetchNs int64 // unix nanos of the last (Start or lazy) fetch attempt; rate-limits self-heal
+
+	// insecureWebhookWarnOnce emits one runtime SECURITY error the first time a
+	// webhook request is actually processed while running in the
+	// verification_token-only (no encrypt_key / no HMAC) mode enabled by
+	// allow_insecure_webhook. config.validateConfig already logs at startup, but
+	// that single Warn is easy to lose in boot noise; surfacing an Error at the
+	// first live delivery gives operators a concrete, traffic-correlated signal
+	// that production is running the replay/forgery-prone posture. Gated by Once
+	// so a request flood cannot turn this into a log-amplification DoS. #1724.
+	insecureWebhookWarnOnce sync.Once
 }
 
 // New creates a Feishu platform adapter. transcriber may be nil to disable voice.

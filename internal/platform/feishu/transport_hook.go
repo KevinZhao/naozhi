@@ -50,6 +50,18 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 
 		slog.Debug("feishu webhook received", "body_len", len(body))
 
+		// #1724: when running in token-only mode (encrypt_key absent, opted in
+		// via allow_insecure_webhook), surface a SECURITY error on the FIRST
+		// live delivery rather than relying solely on the startup Warn. A
+		// traffic-correlated signal is far harder for operators to miss than a
+		// single line buried in boot logs. sync.Once bounds this to one emit per
+		// process so a request flood cannot amplify it into a log-spam DoS.
+		if f.cfg.EncryptKey == "" && f.cfg.AllowInsecureWebhook {
+			f.insecureWebhookWarnOnce.Do(func() {
+				slog.Error("SECURITY: feishu webhook is processing live traffic in verification_token-only mode (no encrypt_key/HMAC) — events are replay/forgery-prone if the token leaks. Configure encrypt_key to disable allow_insecure_webhook posture.")
+			})
+		}
+
 		// Parse the outer envelope
 		var envelope struct {
 			Challenge string `json:"challenge"`
