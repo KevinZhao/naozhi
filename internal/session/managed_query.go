@@ -543,31 +543,33 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 }
 
 // EventEntriesSinceAppend is the buffer-reusing variant of EventEntriesSince
-// for the dead-session (persistedHistory) path. When the session has a live
-// process the call falls through to proc.EventEntriesSince which always
-// allocates (ProcessEventReader interface does not expose an append variant —
-// adding it would require updating cli.Process, TestProcess, and all fakes;
-// that cross-layer change is deferred). R112714-PERF-11.
+// for both the live-process and dead-session (persistedHistory) paths.
+//
+// R20260604-PERF-25 (#1740): ProcessEventReader now exposes
+// EventEntriesSinceAppend, so the live path forwards dst straight into the
+// EventLog's append-mode query and reuses the caller's buffer — previously
+// this branch allocated a fresh []cli.EventEntry on every notify wave (5 evt/s
+// × N sessions × per-tab subscribers).
 //
 // Callers that poll at 1Hz per N WS tabs (backfillSubscriberEvents) can pass
-// a per-client dst buffer so the common incremental case (0-5 new entries on
-// a dead session) appends into existing capacity instead of allocating.
-// Ownership: the caller must not retain dst across calls; the returned slice
-// shares backing array with dst.
+// a per-client dst buffer so the common incremental case (0-5 new entries)
+// appends into existing capacity instead of allocating. Ownership: the caller
+// must not retain dst across calls; the returned slice shares backing array
+// with dst.
 func (s *ManagedSession) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS int64) []cli.EventEntry {
 	proc := s.loadProcess()
 	if proc != nil {
-		// Live path: interface has no append variant; fall back to allocating.
-		// proc.EventEntriesSince already returns a freshly allocated slice the
-		// caller owns, so when dst is empty (single-tab common case) we can hand
-		// it back directly and skip the extra append copy. This stays within the
-		// documented ownership contract: the returned slice does not share dst's
-		// backing array (dst is nil/empty), and the caller must not retain it.
-		ev := proc.EventEntriesSince(afterMS)
+		// Empty dst is the hot path (backfillSubscriberEvents always passes
+		// buf[:0]): forward straight into the process's append-mode query so
+		// the EventLog reuses dst's backing capacity — the #1740 win. A
+		// non-empty dst must preserve its prefix, but EventLog.EntriesSinceAppend
+		// re-slices from dst[:0] and appends forward, which would OVERWRITE the
+		// caller's prefix; so fall back to proc.EventEntriesSince + explicit
+		// append, matching the dead-session branch below.
 		if len(dst) == 0 {
-			return ev
+			return proc.EventEntriesSinceAppend(dst, afterMS)
 		}
-		return append(dst, ev...)
+		return append(dst, proc.EventEntriesSince(afterMS)...)
 	}
 	s.historyMu.RLock()
 	if n := len(s.persistedHistory); n == 0 || (s.persistedHistorySorted && s.persistedHistory[n-1].Time <= afterMS) {
