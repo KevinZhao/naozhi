@@ -558,7 +558,16 @@ func (s *ManagedSession) EventEntriesSinceAppend(dst []cli.EventEntry, afterMS i
 	proc := s.loadProcess()
 	if proc != nil {
 		// Live path: interface has no append variant; fall back to allocating.
-		return append(dst, proc.EventEntriesSince(afterMS)...)
+		// proc.EventEntriesSince already returns a freshly allocated slice the
+		// caller owns, so when dst is empty (single-tab common case) we can hand
+		// it back directly and skip the extra append copy. This stays within the
+		// documented ownership contract: the returned slice does not share dst's
+		// backing array (dst is nil/empty), and the caller must not retain it.
+		ev := proc.EventEntriesSince(afterMS)
+		if len(dst) == 0 {
+			return ev
+		}
+		return append(dst, ev...)
 	}
 	s.historyMu.RLock()
 	if n := len(s.persistedHistory); n == 0 || (s.persistedHistorySorted && s.persistedHistory[n-1].Time <= afterMS) {
@@ -742,6 +751,10 @@ func (s *ManagedSession) EventLastNVisibleCtx(ctx context.Context, visibleTarget
 	// older slice in ascending-Time order, avoiding the O(n²) cost of
 	// prepending each chunk into a growing slice on every iteration.
 	var pages [][]cli.EventEntry
+	// runningOlder tracks len(pages[0])+…+len(pages[k]) incrementally so the
+	// total-payload ceiling check is O(1) per iteration instead of O(pages).
+	// R20260603-PERF-9.
+	runningOlder := 0
 	for page := 0; page < maxVisibleDiskPages && vis < visibleTarget; page++ {
 		if ctx.Err() != nil {
 			break
@@ -758,12 +771,8 @@ func (s *ManagedSession) EventLastNVisibleCtx(ctx context.Context, visibleTarget
 		pages = append(pages, chunk)
 		vis += countVisibleEntries(chunk)
 		before = chunk[0].Time
-		// Compute running total to honour the ceiling without building older yet.
-		total := len(mem)
-		for _, p := range pages {
-			total += len(p)
-		}
-		if total >= maxTotal {
+		runningOlder += len(chunk)
+		if len(mem)+runningOlder >= maxTotal {
 			break // total payload ceiling
 		}
 	}

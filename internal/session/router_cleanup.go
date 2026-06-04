@@ -268,9 +268,10 @@ func (r *Router) clearAttachmentTrackerRefs(key, workspace string) {
 // Mutations (prune, activeCount recount) still require the write lock.
 func (r *Router) Cleanup() {
 	type expiredEntry struct {
-		s    *ManagedSession
-		key  string
-		proc processIface
+		s      *ManagedSession
+		key    string
+		proc   processIface
+		reason string // deathReason to stamp; written only after kill re-verify
 	}
 
 	now := time.Now()
@@ -370,8 +371,7 @@ func (r *Router) Cleanup() {
 			if age := now.Sub(effective); age > stuckThreshold {
 				slog.Warn("stuck running session detected, force killing",
 					"key", c.key, "running_for", age, "threshold", stuckThreshold)
-				storeAtomicString(&c.s.deathReason, "stuck_running")
-				stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc})
+				stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc, "stuck_running"})
 			}
 			continue
 		}
@@ -380,8 +380,7 @@ func (r *Router) Cleanup() {
 		if pid := c.proc.PID(); pid > 0 && !osutil.PidAlive(pid) {
 			slog.Warn("CLI process gone but session still alive, force killing",
 				"key", c.key, "pid", pid)
-			storeAtomicString(&c.s.deathReason, "pid_gone")
-			stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc})
+			stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc, "pid_gone"})
 			continue
 		}
 
@@ -389,7 +388,7 @@ func (r *Router) Cleanup() {
 		if now.Sub(effective) > ttl {
 			logSessionLifecycle("expired", c.key, "idle", now.Sub(effective))
 			storeAtomicString(&c.s.deathReason, "idle_timeout")
-			expired = append(expired, expiredEntry{c.s, c.key, c.proc})
+			expired = append(expired, expiredEntry{c.s, c.key, c.proc, ""})
 		}
 	}
 
@@ -401,13 +400,20 @@ func (r *Router) Cleanup() {
 		// s.process between the snapshot and now. Killing the originally-
 		// captured proc would still target a now-orphaned shim conn — a
 		// no-op in the steady state but it pollutes the deathReason
-		// (already stamped to "stuck_running" / "pid_gone" above) on the
+		// (stamped to "stuck_running" / "pid_gone" below, after re-verify) on the
 		// fresh ManagedSession the user is actively using. Skip when the
 		// session has moved on; the new proc gets its own chance next
 		// tick. shouldPrune already handles the orphan-process side; this
 		// just stops the false-positive kill bookkeeping.
 		if cur := e.s.loadProcess(); cur != nil && cur != e.proc {
 			continue
+		}
+		// Stamp deathReason only after re-verify confirms this proc is still
+		// the live process on the session. Premature stamping (before re-verify)
+		// would corrupt the deathReason of a freshly-spawned replacement
+		// session visible on the dashboard. R20260603-GO-8.
+		if e.reason != "" {
+			storeAtomicString(&e.s.deathReason, e.reason)
 		}
 		e.proc.Kill()
 		closedCount++
@@ -454,7 +460,14 @@ func (r *Router) Cleanup() {
 	// authoritative alive total in one pass. reconcile already walks the map
 	// to drive the per-backend gauge; reuse its alive total to set activeCount
 	// instead of maintaining a second counting loop. R20260602190132-PERF-5.
-	aliveTotal := r.reconcileSessionActiveByBackendLocked()
+	// R20260603-PERF-7: skip the O(N) reconcile walk when nothing changed;
+	// reuse the already-accurate activeCount instead.
+	var aliveTotal int64
+	if closedCount > 0 || pruned > 0 {
+		aliveTotal = r.reconcileSessionActiveByBackendLocked()
+	} else {
+		aliveTotal = r.activeCount.Load()
+	}
 	r.activeCount.Store(aliveTotal)
 
 	// Snapshot sessions for periodic save (while still holding the lock).
@@ -873,10 +886,13 @@ func (r *Router) shutdown() {
 		}
 	}
 
-	// Snapshot sessions for saving outside lock
-	sessionsCopy := make(map[string]*ManagedSession, len(r.sessions))
-	for k, v := range r.sessions {
-		sessionsCopy[k] = v
+	// Snapshot sessions for saving outside lock.
+	// R20260603-PERF-1: use a value slice instead of a map copy so we avoid
+	// allocating hashmap buckets + load-factor slack; saveStoreSlice only
+	// iterates values, so the key is never needed here.
+	sessionsCopy := make([]*ManagedSession, 0, len(r.sessions))
+	for _, v := range r.sessions {
+		sessionsCopy = append(sessionsCopy, v)
 	}
 	storePath := r.storePath
 	// R220123-PERF-19 (#1638): sorted snapshot for the final flush too, so
@@ -903,7 +919,7 @@ func (r *Router) shutdown() {
 	// all un-persisted state silently otherwise. Each error chain is walked
 	// once — the three save paths are independent, so sharing a single flag
 	// would mis-attribute a disk-full on saveStore to saveKnownIDs.
-	if err := saveStore(storePath, sessionsCopy); err != nil {
+	if err := saveStoreSlice(storePath, sessionsCopy); err != nil {
 		slog.Error("save session store on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
 	if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {

@@ -478,6 +478,15 @@ func (t *Tracker) handleClear(job trackerJob) error {
 	}
 	cleared := 0
 	for _, de := range dayEntries {
+		// Abort the sweep promptly once the tracker is closing so a
+		// large/slow workspace can't pin run() (and Stop's wg.Wait
+		// goroutine) long past Stop's ctx deadline. RemoveReference is
+		// idempotent, so a half-completed clear is safe.
+		select {
+		case <-t.closeCh:
+			return ErrTrackerClosed
+		default:
+		}
 		if !de.IsDir() {
 			continue
 		}
@@ -489,6 +498,11 @@ func (t *Tracker) handleClear(job trackerJob) error {
 			continue
 		}
 		for _, fe := range files {
+			select {
+			case <-t.closeCh:
+				return ErrTrackerClosed
+			default:
+			}
 			name := fe.Name()
 			if !strings.HasSuffix(name, ".meta") {
 				continue

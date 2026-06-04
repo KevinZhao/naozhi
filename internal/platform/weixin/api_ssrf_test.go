@@ -219,6 +219,7 @@ func TestNewAPIClient_GuardGatedByLoopback(t *testing.T) {
 	}
 
 }
+
 // R090031-GO-1: ssrfDialGuard must forward an IP literal (not the original
 // hostname) to the base dialer, eliminating the DNS-rebinding TOCTOU window.
 func TestSSRFDialGuard_ForwardsIPNotHostname(t *testing.T) {
@@ -261,6 +262,32 @@ func TestSSRFDialGuard_RebindScenario(t *testing.T) {
 	}
 	if dialedAddr != "8.8.8.8:80" {
 		t.Errorf("base received %q instead of validated IP 8.8.8.8:80", dialedAddr)
+	}
+}
+
+// TestSSRFDialGuard_EmptyDNS checks that when the resolver returns an empty
+// slice (DNS success but zero records) the error message contains "SSRF guard"
+// so operators can distinguish "all IPs were internal" from "no DNS records".
+// Covers R20260603-GO-1.
+func TestSSRFDialGuard_EmptyDNS(t *testing.T) {
+	t.Parallel()
+	var baseCalled bool
+	base := func(_ context.Context, _, _ string) (net.Conn, error) {
+		baseCalled = true
+		return nil, nil
+	}
+	guarded := ssrfDialGuardWithResolver(base, func(_ context.Context, _ string, _ string) ([]net.IP, error) {
+		return []net.IP{}, nil
+	})
+	_, err := guarded(context.Background(), "tcp", "no-records.example.com:80")
+	if err == nil {
+		t.Fatal("expected error when DNS returns empty slice")
+	}
+	if baseCalled {
+		t.Error("base must not be called when DNS returns no IPs")
+	}
+	if !strings.Contains(err.Error(), "SSRF") {
+		t.Errorf("error should mention SSRF guard, got %q", err.Error())
 	}
 }
 

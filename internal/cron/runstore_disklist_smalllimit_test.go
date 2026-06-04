@@ -52,7 +52,7 @@ func TestDiskListNewestFirst_SmallLimitOverLargeDir(t *testing.T) {
 	}
 
 	const limit = 5
-	got, _ := s.diskListNewestFirst(jobID, limit, time.Time{})
+	got, _, _ := s.diskListNewestFirst(jobID, limit, time.Time{})
 	if len(got) != limit {
 		t.Fatalf("got %d summaries, want %d", len(got), limit)
 	}

@@ -50,10 +50,9 @@ func TestPersistOnShutdown_WritesPendingMutation(t *testing.T) {
 // past the remaining budget when triggerWG is held open by a stuck
 // notifier. Bound the helper directly with a tight budget.
 func TestDrainTriggerWG_SkipsBeyondBudget(t *testing.T) {
-	withShortStopBudget(t, 30*time.Millisecond)
-
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5})
+	withShortStopBudget(t, s, 30*time.Millisecond)
 
 	// Seed a triggerWG holder that outlives the test budget.
 	hold := make(chan struct{})
@@ -79,10 +78,9 @@ func TestDrainTriggerWG_SkipsBeyondBudget(t *testing.T) {
 // helper returns essentially instantly even though stopBudget would
 // allow it to wait.
 func TestDrainTriggerWG_FastDrain(t *testing.T) {
-	withShortStopBudget(t, 5*time.Second)
-
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{StorePath: filepath.Join(dir, "cron.json"), MaxJobs: 5})
+	withShortStopBudget(t, s, 5*time.Second)
 
 	start := time.Now()
 	s.drainTriggerWG(nil, start)

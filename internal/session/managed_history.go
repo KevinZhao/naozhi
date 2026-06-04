@@ -363,8 +363,28 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 			s.persistedHistorySorted = false
 		}
 	}
+	// #1644 / R20260603140013-PERF-2: maintain persistedUserTurns incrementally
+	// instead of an O(n) full rescan after every InjectHistory. The cached count
+	// equals oldCount + usersInBatch - usersInTrimmedPrefix, computed entirely
+	// from the batch (O(batch)) and the dropped prefix (O(trimmed)) — never the
+	// whole 500-entry slice. The proc==nil sort branch below permutes order only
+	// and leaves the user total unchanged, so it does not touch the count.
+	// Equivalence with recountPersistedUserTurnsLocked is asserted in
+	// persisted_user_turns_incremental_test.go across append/trim/over-cap/mixed
+	// scenarios.
+	userTurns := s.persistedUserTurns.Load()
+	for i := range entries {
+		if entries[i].Type == "user" {
+			userTurns++
+		}
+	}
 	s.persistedHistory = append(s.persistedHistory, entries...)
 	if trimmed := len(s.persistedHistory) - maxPersistedHistory; trimmed > 0 {
+		for i := 0; i < trimmed; i++ {
+			if s.persistedHistory[i].Type == "user" {
+				userTurns--
+			}
+		}
 		s.persistedHistory = s.persistedHistory[trimmed:]
 		// Cap-trim shifts the prefix backwards; clamp seededLen so it keeps
 		// pointing at "tail-end of what proc has already seen" rather than
@@ -439,11 +459,13 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 		s.persistedHistory = sorted
 		s.persistedHistorySorted = true
 	}
-	// #1644: refresh the cached user-turn count so the proc==nil snapshot
-	// branch can feed AutoTitler's min-turn gate. Done under historyMu after
-	// every persistedHistory mutation (append / cap-trim / sort) so the count
-	// stays consistent with the slice the dead-session readers see.
-	s.recountPersistedUserTurnsLocked()
+	// #1644: commit the incrementally-maintained user-turn count so the
+	// proc==nil snapshot branch can feed AutoTitler's min-turn gate. Stored
+	// under historyMu after every persistedHistory mutation (append / cap-trim;
+	// the sort branch does not change the total) so the count stays consistent
+	// with the slice the dead-session readers see — equivalent to a full
+	// recountPersistedUserTurnsLocked but O(batch+trimmed) instead of O(n).
+	s.persistedUserTurns.Store(userTurns)
 	s.historyMu.Unlock()
 
 	if len(tail) > 0 {
