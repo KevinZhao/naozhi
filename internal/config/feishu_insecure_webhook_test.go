@@ -20,11 +20,12 @@ func captureSlog(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
-// TestValidateConfig_FeishuInsecureWebhookWarns pins R20260603-SEC-6 (#1656):
-// a feishu webhook with allow_insecure_webhook=true and no encrypt_key must
-// emit a prominent SECURITY warning at config-validation time, not silently
-// pass. Conversely, secure configurations (encrypt_key set, or flag unset)
-// must NOT warn.
+// TestValidateConfig_FeishuInsecureWebhookWarns pins R20260603-SEC-6 (#1656)
+// and #1724: a feishu webhook with allow_insecure_webhook=true and no
+// encrypt_key must emit a prominent SECURITY message at config-validation
+// time, not silently pass. #1724 upgrades the severity from WARN to ERROR so
+// the insecure posture is audited at the highest level. Conversely, secure
+// configurations (encrypt_key set, or flag unset) must NOT emit anything.
 func TestValidateConfig_FeishuInsecureWebhookWarns(t *testing.T) {
 	base := func() *FeishuConfig {
 		return &FeishuConfig{
@@ -91,6 +92,11 @@ func TestValidateConfig_FeishuInsecureWebhookWarns(t *testing.T) {
 				strings.Contains(out, "SECURITY")
 			if gotWarn != tt.wantWarn {
 				t.Fatalf("warn emitted = %v, want %v; log = %q", gotWarn, tt.wantWarn, out)
+			}
+			// #1724: when emitted, the severity must be ERROR (not WARN) so the
+			// insecure posture is audited at the highest level.
+			if tt.wantWarn && !strings.Contains(out, "level=ERROR") {
+				t.Fatalf("expected level=ERROR in log, got %q", out)
 			}
 		})
 	}

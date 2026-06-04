@@ -793,7 +793,7 @@ func validateConfig(cfg *Config) error {
 		if cfg.Platforms.Feishu.ConnectionMode == "webhook" &&
 			cfg.Platforms.Feishu.AllowInsecureWebhook &&
 			cfg.Platforms.Feishu.EncryptKey == "" {
-			slog.Warn("SECURITY: feishu allow_insecure_webhook=true with no encrypt_key — webhook runs in verification_token-only mode (no HMAC); events are replay/forgery-prone if the token leaks. Configure encrypt_key unless this CI/test template was intentional.")
+			slog.Error("SECURITY: feishu allow_insecure_webhook=true with no encrypt_key — webhook runs in verification_token-only mode (no HMAC); events are replay/forgery-prone if the token leaks. Configure encrypt_key unless this CI/test template was intentional.")
 		}
 	}
 	if cfg.Platforms.Slack != nil {
