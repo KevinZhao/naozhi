@@ -46,8 +46,10 @@ func TestDashboardSidebarCollapseContract(t *testing.T) {
 	if !strings.Contains(html, `id="btn-sidebar-toggle"`) {
 		t.Error("dashboard.html: missing #btn-sidebar-toggle on the resizer")
 	}
-	if !strings.Contains(html, `onclick="toggleSidebarCollapsed()"`) {
-		t.Error("dashboard.html: toggle button must call toggleSidebarCollapsed()")
+	// The handler is bound via addEventListener in dashboard.js (#922 / #479
+	// inline-handler migration) rather than an inline onclick=.
+	if !strings.Contains(js, `bindClick('btn-sidebar-toggle', function () { toggleSidebarCollapsed(); });`) {
+		t.Error("dashboard.js: btn-sidebar-toggle click must bind toggleSidebarCollapsed() via addEventListener")
 	}
 	if !strings.Contains(html, `class="resizer-handle"`) {
 		t.Error("dashboard.html: toggle button must use .resizer-handle for CSS gating")
