@@ -257,8 +257,9 @@ func (l workspaceRootLister) KnownWorkspaceRoots() []string {
 // aborting startup — sysession is opt-in infrastructure, not a
 // release-critical path.
 //
-// Step 11 will replace the nil OnRunStarted/OnRunEnded with WS-hub
-// callbacks; Phase 1 ships without them so the dashboard reads fall
+// Run-lifecycle telemetry is wired post-construction via
+// Manager.SetTelemetry (server routes), routed through the shared
+// runtelemetry.Broadcaster seam (#1723); the dashboard reads also fall
 // back to polling /api/system/daemons.
 func buildSysessionManager(cfg *config.Config, router *session.Router,
 	projectMgr *project.Manager, defaultWrapper *cli.Wrapper, storePath string,
@@ -426,7 +427,7 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		// attachment-gc daemon sweeps these roots (router default +
 		// overrides ∪ project paths). nil-safe inside the lister.
 		WorkspaceRoots: workspaceRootLister{router: router, projectMgr: projectMgr},
-		// OnRunStarted/OnRunEnded are wired in Step 11 (WS broadcast).
+		// Run-lifecycle telemetry is wired via Manager.SetTelemetry (#1723).
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("new manager: %w", err)
