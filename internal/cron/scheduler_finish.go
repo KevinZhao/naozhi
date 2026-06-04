@@ -560,17 +560,32 @@ func (s *Scheduler) emitSyntheticSkipped(j *Job, viaTriggerNow bool, errClass Er
 	})
 }
 
-// jobResultSnapshot captures the terminal-result-relevant Job fields
-// before recordTerminalResult mutates them, so a persistJobsLocked failure
-// can roll the in-memory Job state back to the pre-mutation values without
-// rebuilding the field list at the rollback site. R247-CR-14 (#586): the
-// previous inline anonymous-struct literal duplicated field types between
-// the snapshot capture and the rollback assignment, leaving every future
-// "add a field to LastFoo" change two coupled edits to keep in sync.
+// JobState is the runtime-mutable terminal-result half of the Job
+// god-struct: the LastRunAt / LastResult / LastError / LastErrorClass /
+// LastSessionID / RunCounters cluster that every finishRun rewrites. It is
+// deliberately a SEPARATE type from Job's wire-config fields (Schedule /
+// Prompt / WorkDir / Notify*) so the runtime-state field set is enumerated
+// in exactly one place.
+//
+// R238-ARCH-13 (#764): Job today mixes wire schema + runtime state, so an
+// internal-only state addition mutates the on-disk schema. The full split
+// (Job config struct + JobState persisted separately) is needs-design — it
+// touches store.go marshal/unmarshal and every cross-package reader. This
+// type is the behaviour-preserving first slice: it gives the runtime-state
+// cluster a single named home (the issue's proposed name) that the capture
+// (Job.snapshotResultState) and rollback (restore) both route through,
+// without changing the on-disk JSON shape. R247-CR-14 (#586) introduced the
+// underlying snapshot to kill the duplicated inline anonymous-struct literal
+// between capture and rollback; naming it JobState ties that work to the
+// god-struct split tracker.
+//
+// jobResultSnapshot is kept as an alias so the existing capture/rollback
+// call sites and the tests pinning the round-trip contract compile
+// unchanged.
 //
 // restore re-applies the captured values to j; caller MUST hold s.mu so
 // the in-memory state stays serialised against concurrent readers.
-type jobResultSnapshot struct {
+type JobState struct {
 	LastRunAt      time.Time
 	LastResult     string
 	LastError      string
@@ -579,7 +594,12 @@ type jobResultSnapshot struct {
 	Counters       JobRunCounters
 }
 
-func (p jobResultSnapshot) restore(j *Job) {
+// jobResultSnapshot is the historical name for the runtime-state cluster,
+// retained as an alias of JobState (R238-ARCH-13 / #764) so existing
+// capture / rollback sites and round-trip contract tests keep compiling.
+type jobResultSnapshot = JobState
+
+func (p JobState) restore(j *Job) {
 	j.LastRunAt = p.LastRunAt
 	j.LastResult = p.LastResult
 	j.LastError = p.LastError
@@ -590,18 +610,19 @@ func (p jobResultSnapshot) restore(j *Job) {
 
 // snapshotResultState captures the runtime-mutable terminal-result state a
 // Job carries (the LastRunAt / LastResult / LastError / LastErrorClass /
-// LastSessionID / RunCounters cluster) into a jobResultSnapshot. Caller must
-// hold s.mu so the read is serialised against concurrent mutators.
+// LastSessionID / RunCounters cluster) into a JobState. Caller must hold
+// s.mu so the read is serialised against concurrent mutators.
 //
-// R249-ARCH-22 (#986): Job mixes wire-config (Schedule / Prompt / WorkDir)
-// with this runtime-mutable state. Until the full JobConfig/JobState split
-// lands, this method is the single capture point for the state cluster so the
-// snapshot field set is enumerated exactly once (paired with restore) instead
-// of being open-coded at the recordTerminalResult capture site. Adding a new
-// runtime-state field is then a two-site edit on the snapshot type + this
-// method/restore pair rather than a scattered hunt across mutation paths.
-func (j *Job) snapshotResultState() jobResultSnapshot {
-	return jobResultSnapshot{
+// R249-ARCH-22 (#986) / R238-ARCH-13 (#764): Job mixes wire-config (Schedule
+// / Prompt / WorkDir) with this runtime-mutable state. Until the full
+// JobConfig/JobState split lands, this method is the single capture point for
+// the state cluster so the JobState field set is enumerated exactly once
+// (paired with restore) instead of being open-coded at the
+// recordTerminalResult capture site. Adding a new runtime-state field is then
+// a two-site edit on JobState + this method/restore pair rather than a
+// scattered hunt across mutation paths.
+func (j *Job) snapshotResultState() JobState {
+	return JobState{
 		LastRunAt:      j.LastRunAt,
 		LastResult:     j.LastResult,
 		LastError:      j.LastError,
