@@ -1,21 +1,13 @@
 package sysession
 
 import (
-	"fmt"
 	"log/slog"
-	"net"
-	"net/url"
 	"os"
-	"regexp"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/envpolicy"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
-
-// reProfileValue matches safe AWS profile names: alphanumeric plus underscore
-// and hyphen, 1-64 characters. Rejects shell metacharacters or path separators
-// that could redirect credential_process lookups.
-var reProfileValue = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // envBaseURLKeys is the set of always-passthrough keys whose value is an API
 // endpoint URL that steers the Runner subprocess's outbound traffic. Their
@@ -30,34 +22,11 @@ var envBaseURLKeys = map[string]struct{}{
 	"ANTHROPIC_VERTEX_BASE_URL":  {},
 }
 
-// validateBaseURLValue enforces that an API base-URL passed through to a Runner
-// subprocess uses https:// unless it targets a loopback host (localhost /
-// 127.0.0.0/8 / ::1), for which plain http is allowed so operators can wire
-// local mock gateways. An empty value is accepted (clears the var). Mirrors
-// cmd/naozhi.validateClaudeBaseURLEnv; kept local because that lives in package
-// main and cannot be imported. R090031-SEC-1 (#1687).
+// validateBaseURLValue delegates to envpolicy.ValidateBaseURLValue; the
+// implementation moved to internal/envpolicy (#891) so it is shared with
+// cmd/naozhi's settings.json guard verbatim. R090031-SEC-1 (#1687).
 func validateBaseURLValue(v string) error {
-	if v == "" {
-		return nil
-	}
-	u, err := url.Parse(v)
-	if err != nil {
-		return fmt.Errorf("parse: %w", err)
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "https":
-		return nil
-	case "http":
-		host := u.Hostname()
-		if strings.EqualFold(host, "localhost") {
-			return nil
-		}
-		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-			return nil
-		}
-		return fmt.Errorf("plain http:// to non-loopback host %q rejected (SSRF/redirect guard); use https://", host)
-	}
-	return fmt.Errorf("scheme %q not allowed; use https://", u.Scheme)
+	return envpolicy.ValidateBaseURLValue(v)
 }
 
 // envProfileKeys is the set of always-passthrough keys that carry an AWS
@@ -68,10 +37,11 @@ var envProfileKeys = map[string]struct{}{
 	"AWS_DEFAULT_PROFILE": {},
 }
 
-// isSafeProfileValue reports whether v is a safe AWS profile name.
-// Enforces ^[A-Za-z0-9_-]{1,64}$ to block injection via credential_process.
+// isSafeProfileValue delegates to envpolicy.IsSafeProfileValue; the
+// implementation moved to internal/envpolicy (#891).
+// R20260603000023-SEC-1 (#1617).
 func isSafeProfileValue(v string) bool {
-	return reProfileValue.MatchString(v)
+	return envpolicy.IsSafeProfileValue(v)
 }
 
 // envAlwaysPassthrough is the small set of NON-SECRET variables every
@@ -133,91 +103,30 @@ var envAlwaysPassthrough = map[string]struct{}{
 	"ANTHROPIC_DEFAULT_OPUS_MODEL":   {},
 }
 
-// Per-backend raw-credential key sets. R040034-SEC-4 (#1400). Only the
-// set matching the detected backend is layered onto envAlwaysPassthrough;
-// every other backend's secrets are stripped even if present in the
-// parent env. This shrinks the blast radius if a future system session
-// generalises its prompt source and a CLI Bash tool inherits the runner
-// env.
-var (
-	// envCredsAnthropic — direct-Anthropic API auth.
-	envCredsAnthropic = []string{
-		"ANTHROPIC_API_KEY",
-		"ANTHROPIC_AUTH_TOKEN",
-	}
-	// envCredsAWS — Bedrock static creds. On EC2 instance-role
-	// deployments these are empty in the parent (IMDS supplies creds
-	// inside the SDK) so the passthrough is a no-op there; they matter
-	// for non-EC2 Bedrock setups that export static keys.
-	envCredsAWS = []string{
-		"AWS_ACCESS_KEY_ID",
-		"AWS_SECRET_ACCESS_KEY",
-		"AWS_SESSION_TOKEN",
-	}
-	// envCredsVertex — GCP service-account credential file path.
-	envCredsVertex = []string{
-		"GOOGLE_APPLICATION_CREDENTIALS",
-	}
-)
-
-// backendMode is the credential-gating dimension derived from the parent
-// env's backend selectors. R040034-SEC-4 (#1400).
-type backendMode int
+// Per-backend raw-credential gating. R040034-SEC-4 (#1400). The credential
+// matrix + backend detection moved to internal/envpolicy (#891) so it is
+// shared with cmd/naozhi. backendMode is a local alias of the exported type to
+// minimise churn in filterEnv. Only the set matching the detected backend is
+// layered onto envAlwaysPassthrough; every other backend's secrets are
+// stripped even if present in the parent env. This shrinks the blast radius if
+// a future system session generalises its prompt source and a CLI Bash tool
+// inherits the runner env.
+type backendMode = envpolicy.BackendMode
 
 const (
-	backendAnthropic backendMode = iota // direct Anthropic API (default)
-	backendBedrock                      // CLAUDE_CODE_USE_BEDROCK truthy
-	backendVertex                       // CLAUDE_CODE_USE_VERTEX truthy
+	backendAnthropic = envpolicy.BackendAnthropic
+	backendBedrock   = envpolicy.BackendBedrock
+	backendVertex    = envpolicy.BackendVertex
 )
 
-// envTruthy reports whether a CLAUDE_CODE_USE_* selector value enables
-// that backend. Matches the CLI's own loose truthiness (any non-empty,
-// non-"0"/"false" value). We intentionally treat "0"/"false"/"" as off
-// so an explicitly-disabled selector doesn't mis-route the gate.
-func envTruthy(v string) bool {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "", "0", "false", "no", "off":
-		return false
-	default:
-		return true
-	}
-}
-
-// detectBackendFromEnv inspects the parent env ("KEY=value" slice) for
-// the CLAUDE_CODE_USE_* selectors. Bedrock wins over Vertex if both are
-// somehow set (matches the CLI's precedence: it checks Bedrock first).
-// Absence of both selectors means direct Anthropic.
+// detectBackendFromEnv delegates to envpolicy.DetectBackendFromEnv (#891).
 func detectBackendFromEnv(parent []string) backendMode {
-	var bedrock, vertex string
-	for _, kv := range parent {
-		if v, ok := strings.CutPrefix(kv, "CLAUDE_CODE_USE_BEDROCK="); ok {
-			bedrock = v
-		} else if v, ok := strings.CutPrefix(kv, "CLAUDE_CODE_USE_VERTEX="); ok {
-			vertex = v
-		}
-	}
-	switch {
-	case envTruthy(bedrock):
-		return backendBedrock
-	case envTruthy(vertex):
-		return backendVertex
-	default:
-		return backendAnthropic
-	}
+	return envpolicy.DetectBackendFromEnv(parent)
 }
 
-// envCredsForBackend returns the raw-credential keys that may pass
-// through for the given backend. Keys outside this set are stripped even
-// when present in the parent env. R040034-SEC-4 (#1400).
+// envCredsForBackend delegates to envpolicy.EnvCredsForBackend (#891).
 func envCredsForBackend(mode backendMode) []string {
-	switch mode {
-	case backendBedrock:
-		return envCredsAWS
-	case backendVertex:
-		return envCredsVertex
-	default:
-		return envCredsAnthropic
-	}
+	return envpolicy.EnvCredsForBackend(mode)
 }
 
 // filterEnv returns a "KEY=value" slice suitable for exec.Cmd.Env that
@@ -343,11 +252,5 @@ func filterEnv(allowlist []string) []string {
 
 // allCredKeys is the union of every backend's raw-credential keys. Used
 // by filterEnv to build the per-call deny set for the inactive backends.
-// R040034-SEC-4 (#1400).
-var allCredKeys = func() []string {
-	keys := make([]string, 0, len(envCredsAnthropic)+len(envCredsAWS)+len(envCredsVertex))
-	keys = append(keys, envCredsAnthropic...)
-	keys = append(keys, envCredsAWS...)
-	keys = append(keys, envCredsVertex...)
-	return keys
-}()
+// Sourced from internal/envpolicy (#891). R040034-SEC-4 (#1400).
+var allCredKeys = envpolicy.AllCredKeys
