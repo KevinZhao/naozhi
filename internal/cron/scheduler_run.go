@@ -143,6 +143,16 @@ func (s *Scheduler) executeJobIDIfLive(jobID string, viaTriggerNow bool, logSubj
 // released — sync.Map.LoadAndDelete needs no scheduler lock. Callers
 // invoke this from postCleanup branches that already run lock-free.
 func (s *Scheduler) cleanupRunningJobIfIdle(jobID string) bool {
+	// R20260603140013-GO-2 (#1706): take the per-jobID gate around the whole
+	// Load → running-check → CompareAndDelete sequence so it is atomic
+	// relative to executeOpt's jobInflight-load→CAS pair (which holds the same
+	// gate). This is what closes the previously-accepted double-execution
+	// window: while we hold the gate, no executeOpt can be mid-load→CAS, so we
+	// never delete an entry that a racing executeOpt is about to CAS-win on.
+	gate := s.jobGateLock(jobID)
+	gate.Lock()
+	defer gate.Unlock()
+
 	v, ok := s.runningJobs.Load(jobID)
 	if !ok {
 		return false
@@ -189,26 +199,25 @@ func (s *Scheduler) cleanupRunningJobIfIdle(jobID string) bool {
 	// succeeds when the map still holds OUR observed inf pointer; if a
 	// fresh entry was stored it leaves the new one alone.
 	//
-	// R040034-CHANGES (#1416 review) — KNOWN narrow remaining window:
-	// CompareAndDelete-on-pointer closes Load+CompareAndDelete TOCTOU
-	// for the case where the map has already been swapped to a fresh
-	// *runInflight by a racing AddJob+jobInflight. It does NOT close the
-	// adjacent window where executeOpt has already done
+	// R040034-CHANGES (#1416 review): CompareAndDelete-on-pointer (not
+	// LoadAndDelete-on-key) closes the Load+delete TOCTOU for the case where
+	// the map has already been swapped to a fresh *runInflight by a racing
+	// AddJob+jobInflight — it only deletes when the map still holds OUR
+	// observed inf pointer.
+	//
+	// R20260603140013-GO-2 (#1706): the adjacent window this comment used to
+	// flag as a KNOWN remaining race — executeOpt having done
 	//   inflight := s.jobInflight(j.ID)          // gets old *runInflight
-	// at scheduler_run.go ~line 867 just before this cleanup runs;
-	// cleanup then deletes the map entry + the still-CAS=false old gate
-	// (releaseRun has executed), and executeOpt's CompareAndSwap on
-	// the orphaned old gate succeeds. A second executeOpt for the same
-	// jobID will then LoadOrStore a fresh *runInflight via jobInflight
-	// and CAS-win on it too → two goroutines hold distinct gates for
-	// one jobID. We accept this remaining window because it requires:
-	//   (i)  DeleteJob racing TriggerNow on the same job ID, AND
-	//   (ii) ID reuse on a fresh AddJob landing within microseconds,
-	// and crypto/rand 8-byte (2^64) ID space makes (ii) ~2^-32 over
-	// the entire process lifetime at maxJobsHardCap=500 working set.
-	// A future tightening would add a per-jobID lock around the
-	// jobInflight Load → CAS pair in executeOpt; deferred until
-	// telemetry indicates the window is operationally reachable.
+	// just before this cleanup deletes the map entry, then CAS-winning on the
+	// orphaned old gate while a second executeOpt LoadOrStores a fresh gate →
+	// double execution — is now closed. This whole function runs under the
+	// per-jobID gate (see top of function), and executeOpt holds the same gate
+	// across its jobInflight-load→CAS pair, so the two sequences are mutually
+	// exclusive: cleanup can only observe the gate as idle (no executeOpt is
+	// mid-load→CAS) or already-running (CAS won → running.Load()==true above →
+	// we returned without deleting). The orphan-in-between state is no longer
+	// reachable, so the fix no longer rests on the crypto/rand ID-reuse
+	// improbability argument.
 	s.runningJobs.CompareAndDelete(jobID, inf)
 	return true
 }
@@ -1205,8 +1214,24 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// which is separately serialized). The per-job *runInflight (containing
 	// the CAS atomic.Bool) keeps a uniform CAS gate while exposing run
 	// metadata to the list API.
+	//
+	// R20260603140013-GO-2 (#1706): the jobInflight load and the CAS below
+	// MUST be one atomic step relative to cleanupRunningJobIfIdle's
+	// Load→CompareAndDelete. Holding the per-jobID gate across both closes the
+	// TOCTOU window where a DeleteJob racing TriggerNow deletes the map entry
+	// after we load the old *runInflight but before we CAS it — which would
+	// leave us CASing an orphaned gate while a second executeOpt LoadOrStores
+	// a fresh one, double-executing the job. The gate is released right after
+	// the CAS — the heavy run body does not need it. cleanup takes the same
+	// gate, so it can only see the gate as idle (we are not in this window) or
+	// running (CAS won → cleanup's running.Load()==true → skip), never the
+	// orphan-in-between.
+	gate := s.jobGateLock(j.ID)
+	gate.Lock()
 	inflight := s.jobInflight(j.ID)
-	if !inflight.running.CompareAndSwap(false, true) {
+	won := inflight.running.CompareAndSwap(false, true)
+	gate.Unlock()
+	if !won {
 		slog.Info("cron: job already running, skipping overlap", "job_id", j.ID)
 		// Overlap is a skipped state (no LastRunAt update). Counters /
 		// broadcast still fire so dashboards can surface the skip.

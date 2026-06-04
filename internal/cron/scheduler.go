@@ -543,6 +543,14 @@ type Scheduler struct {
 	// RunID/StartedAt/Phase/SessionID/Trigger to list handlers.
 	runningJobs sync.Map // map[jobID]*runInflight
 
+	// jobGates shards a fixed pool of mutexes (indexed by hashed jobID) that
+	// serialise executeOpt's jobInflight-load→CAS pair against
+	// cleanupRunningJobIfIdle's load→CompareAndDelete pair for the same job.
+	// Closes the TOCTOU window where a DeleteJob racing TriggerNow orphans the
+	// CAS gate and permits double execution. See jobGateLock (job_gate.go) for
+	// the full rationale. R20260603140013-GO-2 (#1706).
+	jobGates [jobGateShards]sync.Mutex
+
 	// storeMu serialises saveSnapshot writes so the last-writer-wins order
 	// matches the order snapshots were marshaled under s.mu. WriteFileAtomic
 	// now uses os.CreateTemp so the underlying .tmp file is unique per call
