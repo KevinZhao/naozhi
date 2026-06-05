@@ -68,6 +68,25 @@ jobs:
       - name: Run lint-fact-table (warn mode)
         run: make lint-fact-table
 
+  # Router field `// 读写:` annotation drift (check-router-fields).
+  # router-split P0 safety net (RFC router-god-object-split): every later
+  # facet-extraction PR (P1-P5) relies on this to catch annotations that
+  # silently rot when a getter moves between router_*.go files.
+  # warn mode during router-split: violations print to logs but exit 0
+  # (continue-on-error). Switch to fail mode after all facets land.
+  lint-router:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run check-router-fields (warn mode)
+        run: make lint-router
+
   vuln:
     runs-on: ubuntu-latest
     timeout-minutes: 10

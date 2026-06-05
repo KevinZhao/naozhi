@@ -839,7 +839,7 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 			// source) so log attrs survive while shutdown still aborts the
 			// send.
 			sendCtx := mergeStopAndValues(d.stopCtx, ctx)
-			go d.sendAndReply(WithPassthrough(sendCtx), key, cleanText, images, agentID, opts, msg, lg, true)
+			d.goSendAndReply(WithPassthrough(sendCtx), key, cleanText, images, agentID, opts, msg, lg, true)
 			// Ack arrival so the IM user sees a reaction/receipt. This is
 			// cheap and does not depend on the turn completing.
 			d.ackQueuedWithReaction(ctx, msg, lg)
@@ -1016,6 +1016,33 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 		notifyCtx, cancel := NotifyCtx(nil, NotifyKindOwnerLoopPanic, platformReplyTimeout)
 		defer cancel()
 		d.replyText(notifyCtx, msg, "处理异常，请稍后重试。", nil)
+	}()
+}
+
+// goSendAndReply spawns sendAndReply in its own goroutine with a deferred
+// panic recover. The passthrough and /urgent paths detach each inbound
+// message into a bare goroutine; without recover, a panic anywhere in
+// sendAndReply (platform SDK, CLI wrapper, reply path) would crash the whole
+// process rather than failing just that one turn. #1773. We reuse
+// handleOwnerLoopPanic so the detached path gets the same log + queue-discard
+// + "请稍后重试" reply behaviour as the ownerLoop recover.
+func (d *Dispatcher) goSendAndReply(
+	ctx context.Context,
+	key, text string,
+	images []cli.ImageData,
+	agentID string,
+	opts session.AgentOpts,
+	msg platform.IncomingMessage,
+	lg *slog.Logger,
+	isFirst bool,
+) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				d.handleOwnerLoopPanic(key, msg, r, lg)
+			}
+		}()
+		d.sendAndReply(ctx, key, text, images, agentID, opts, msg, lg, isFirst)
 	}()
 }
 
@@ -1240,7 +1267,7 @@ func (d *Dispatcher) sendAndReply(
 	// reply on its own bubble; followers should surface a short "合并" hint
 	// on the user's original message instead of echoing the same text again.
 	if result.MergedCount > 1 && result.Text == "" {
-		d.ackMergedFollower(ctx, msg, result.MergedCount, lg)
+		d.ackMergedFollower(ctx, msg, key, result.MergedCount, lg)
 		d.markReplySuccess()
 		return
 	}

@@ -114,7 +114,27 @@ type wsClient struct {
 	done              chan struct{}
 	doneOnce          sync.Once
 	dropped           atomic.Int64 // messages dropped due to full send buffer
-	uploadOwner       string       // upload-store owner key derived from auth cookie (or IP in no-token mode)
+	// uploadOwner is the upload-store owner key derived from auth cookie (or
+	// IP in no-token mode). Accessed concurrently: the readPump's auth handler
+	// writes it (handleAuth token-mode derivation) while writePump's
+	// unregister path reads it (releaseOwnerSlot) and the readPump's send path
+	// reads it (allowSendForOwner). #1776: guard the read/write with an atomic
+	// pointer so a write-in-readPump / read-in-writePump overlap is race-free.
+	// nil pointer reads as "" via uploadOwnerKey. R1776-GO-1.
+	uploadOwner atomic.Pointer[string]
+}
+
+// uploadOwnerKey returns the current upload-store owner key, "" when unset.
+func (c *wsClient) uploadOwnerKey() string {
+	if p := c.uploadOwner.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// setUploadOwner stores the upload-store owner key. #1776.
+func (c *wsClient) setUploadOwner(owner string) {
+	c.uploadOwner.Store(&owner)
 }
 
 func (c *wsClient) closeDone() {
@@ -353,7 +373,7 @@ func (c *wsClient) readPump() {
 			// by N. Per-conn limiter above is still the per-tab floor; we
 			// only consult the per-user bucket once that admits the call,
 			// which preserves legitimate single-tab burst semantics.
-			if !c.hub.allowSendForOwner(c.uploadOwner) {
+			if !c.hub.allowSendForOwner(c.uploadOwnerKey()) {
 				c.SendRaw([]byte(wsErrRateLimitedMsg))
 				continue
 			}

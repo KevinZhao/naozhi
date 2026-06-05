@@ -847,7 +847,7 @@ func (h *Hub) unregister(c *wsClient) {
 		// the counter into negative territory.
 		h.connCount.Add(-1)
 		// R229-SEC-8 / #1022: free the per-uploadOwner sub-cap slot too.
-		h.releaseOwnerSlot(c.uploadOwner)
+		h.releaseOwnerSlot(c.uploadOwnerKey())
 		// Drop any agent_subscribe refs this client was holding so refCount
 		// stays accurate — otherwise an abrupt disconnect (mobile sleep)
 		// would leave the tailer in broadcasting mode forever, wedging a

@@ -67,4 +67,13 @@
 // to internal/eventlog/{ring, persist, replay} so package names
 // match data-flow positions; until that lands, reviewers must not
 // collapse the two PersistSink references.
+//
+// The unified cross-tier contract now lives at internal/eventlog/api
+// (EventStore = Appender + Reader + Subscriber, PR #1755). Persister
+// deliberately implements NONE of those interfaces: it is driven by
+// the per-key PersistSink callback (SinkFor) and read back via the
+// package-level Recover, not by Append(EventEntry)/SubscribeNew/
+// LoadBefore. The adapter that would slot the sink model behind
+// api.Appender is intentionally deferred to the #1570 registry-
+// injection round (see api_backends_test.go for the documented gap).
 package persist

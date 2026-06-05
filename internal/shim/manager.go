@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/envpolicy"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
@@ -1378,11 +1378,6 @@ var shimProfileEnvKeys = map[string]bool{
 	"AWS_DEFAULT_PROFILE": true,
 }
 
-// reShimProfileValue matches safe AWS profile names: alphanumeric plus
-// underscore and hyphen, 1-64 characters. Rejects shell metacharacters or path
-// separators. Mirrors sysession/env.go reProfileValue. R20260603-SEC-1.
-var reShimProfileValue = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
-
 // shimProfileEnvDropped reports whether kv (a "KEY=value" env entry) is an AWS
 // profile-name var that must be dropped because its value contains characters
 // outside ^[A-Za-z0-9_-]{1,64}$. Non-profile keys return false. The value is
@@ -1396,7 +1391,7 @@ func shimProfileEnvDropped(kv string) bool {
 	if !shimProfileEnvKeys[key] {
 		return false
 	}
-	if !reShimProfileValue.MatchString(val) {
+	if !envpolicy.IsSafeProfileValue(val) {
 		slog.Warn("shim env: rejecting unsafe AWS profile value (credential_process injection guard)", "key", key)
 		return true
 	}

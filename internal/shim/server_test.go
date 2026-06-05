@@ -1121,11 +1121,10 @@ func TestHandleClient_KillCommand(t *testing.T) {
 	_, client, cleanup := setupShimServerWithClient(t)
 	defer cleanup()
 
-	// kill the CLI; handleClient will enqueue cli_exited via writeCh and return.
-	// The writer goroutine flushes before the connection is closed, but
-	// there is a small race between flush and conn.Close() in clearClient.
-	// We read with a deadline and accept EOF as well (means it was already flushed
-	// and the connection was closed before we read).
+	// kill the CLI; handleClient must deliver cli_exited on this live
+	// connection before EOF. Since #1783 the frame is written synchronously
+	// after the writer goroutine drains, so it is no longer racy: a clean EOF
+	// without cli_exited is now a regression, not "acceptable".
 	sendClientCmd(t, client, ClientMsg{Type: "kill"})
 
 	client.conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
@@ -1133,7 +1132,6 @@ func TestHandleClient_KillCommand(t *testing.T) {
 	for !gotExited {
 		line, err := client.reader.ReadBytes('\n')
 		if err != nil {
-			// EOF means connection closed; cli_exited may have already been sent
 			break
 		}
 		var msg ServerMsg
@@ -1145,8 +1143,9 @@ func TestHandleClient_KillCommand(t *testing.T) {
 		}
 	}
 	client.conn.SetReadDeadline(time.Time{}) //nolint:errcheck
-	// gotExited may be false if EOF arrived before we could read — that's acceptable.
-	_ = gotExited
+	if !gotExited {
+		t.Fatal("cli_exited was not delivered on the live connection after kill (#1783 regression)")
+	}
 }
 
 // TestHandleClient_CLIAlreadyDeadNilGuard verifies that when a client attaches
@@ -1224,7 +1223,7 @@ func TestHandleClient_CLIAlreadyDeadNilGuard(t *testing.T) {
 	attach := ClientMsg{Type: "attach", Token: base64.StdEncoding.EncodeToString(tokenRaw), Seq: 0}
 	attachData, _ := json.Marshal(attach)
 	conn.SetWriteDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-	writer.Write(append(attachData, '\n'))                //nolint:errcheck
+	writer.Write(append(attachData, '\n'))                 //nolint:errcheck
 	writer.Flush()                                         //nolint:errcheck
 	conn.SetWriteDeadline(time.Time{})                     //nolint:errcheck
 

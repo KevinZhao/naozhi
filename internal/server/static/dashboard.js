@@ -925,7 +925,7 @@ function sectionHeaderFallbackHtml(p) {
   const count = typeof p._sessionCount === 'number' ? p._sessionCount : 0;
   const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
   const cTitle = collapsed ? '展开' : '收起';
-  const collapseBtn = '<button type="button" class="' + cCls + '" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '" onclick="event.stopPropagation();toggleProjectCollapsed(this.dataset.key)">' + CHEVRON_SVG + '</button>';
+  const collapseBtn = '<button type="button" class="' + cCls + '" data-action="project-collapse" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '">' + CHEVRON_SVG + '</button>';
   const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
   const nameTitle = workspace ? escAttr(p.name + ' — ' + workspace) : escAttr(p.name);
   const collapsedCls = collapsed ? ' is-collapsed' : '';
@@ -946,14 +946,14 @@ function sectionHeaderHtml(p) {
   const count = typeof p._sessionCount === 'number' ? p._sessionCount : 0;
   const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
   const cTitle = collapsed ? '展开' : '收起';
-  const collapseBtn = '<button type="button" class="' + cCls + '" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '" onclick="event.stopPropagation();toggleProjectCollapsed(this.dataset.key)">' + CHEVRON_SVG + '</button>';
+  const collapseBtn = '<button type="button" class="' + cCls + '" data-action="project-collapse" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '">' + CHEVRON_SVG + '</button>';
   const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
 
   // No longer pass `data-fav` — the handler derives current state from the
   // authoritative `projectsData` at click time, avoiding a stale DOM attribute
   // that could cause a fast second click (before re-render) to send a
   // redundant or wrong-polarity toggle.
-  const starBtn = '<button type="button" class="' + starCls + '" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" title="' + starTitle + '" aria-label="' + starTitle + ' ' + escAttr(p.name) + '" onclick="event.stopPropagation();toggleFavorite(this.dataset.name,this.dataset.node)">' + STAR_SVG + '</button>';
+  const starBtn = '<button type="button" class="' + starCls + '" data-action="project-favorite" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" title="' + starTitle + '" aria-label="' + starTitle + ' ' + escAttr(p.name) + '">' + STAR_SVG + '</button>';
 
   let ghBtn = '';
   if (p.github) {
@@ -963,7 +963,7 @@ function sectionHeaderHtml(p) {
     // "在 GitHub 打开仓库" so the affordance is explicit; append the URL so
     // operators can still eyeball the remote for the common case where
     // they're verifying the repo match before clicking.
-    ghBtn = '<button type="button" class="sh-btn github-on" data-url="' + escAttr(url) + '" title="在 GitHub 打开仓库：' + escAttr(url) + '" aria-label="在 GitHub 打开仓库 ' + escAttr(p.name) + '" onclick="event.stopPropagation();showGitRemote(this.dataset.url)">' + GITHUB_SVG + '</button>';
+    ghBtn = '<button type="button" class="sh-btn github-on" data-action="project-github" data-url="' + escAttr(url) + '" title="在 GitHub 打开仓库：' + escAttr(url) + '" aria-label="在 GitHub 打开仓库 ' + escAttr(p.name) + '">' + GITHUB_SVG + '</button>';
   }
 
   const collapsedCls = collapsed ? ' is-collapsed' : '';
@@ -984,6 +984,40 @@ function sectionHeaderHtml(p) {
     countBadge +
     ghBtn +
     '</div>';
+}
+
+// SIDEBAR_PROJECT_ACTIONS maps the `data-action` token on a project-header
+// control to the handler it invokes, reading arguments from the button's
+// own dataset. This is the data-action dispatch idiom already used by the
+// cron menu (CRON_MENU_ACTIONS / handleCronMenuClick) — it lets the section
+// header buttons drop their inline click attributes, shrinking the
+// script-src 'unsafe-inline' surface (#922 / #1734) without changing
+// behaviour. Keys must match the data-action values emitted in
+// sectionHeaderHtml / sectionHeaderFallbackHtml.
+const SIDEBAR_PROJECT_ACTIONS = {
+  'project-collapse': (btn) => toggleProjectCollapsed(btn.dataset.key),
+  'project-favorite': (btn) => toggleFavorite(btn.dataset.name, btn.dataset.node),
+  'project-github': (btn) => showGitRemote(btn.dataset.url),
+};
+
+// initSidebarProjectActions attaches ONE delegated click listener to the
+// stable #session-list container (not document — scoped delegation, mirroring
+// the cron-menu listener). It dispatches project-header button clicks via
+// SIDEBAR_PROJECT_ACTIONS. stopPropagation preserves the prior inline
+// `event.stopPropagation()` so a click on a header control never bubbles to
+// an ancestor handler. The capture-phase long-press swallow installed by
+// initSwipeDelete is orthogonal (it only fires on _longPressFired).
+function initSidebarProjectActions() {
+  const list = document.getElementById('session-list');
+  if (!list) return;
+  list.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn || !list.contains(btn)) return;
+    const fn = SIDEBAR_PROJECT_ACTIONS[btn.getAttribute('data-action')];
+    if (!fn) return;
+    e.stopPropagation();
+    fn(btn);
+  });
 }
 
 // toggleProjectCollapsed flips a project section's fold state, persists
@@ -15216,6 +15250,7 @@ wsm.connect();
 initMobile();
 initViewportTracking();
 initSwipeDelete();
+initSidebarProjectActions();
 initSwipeBack();
 initSidebarSearch();
 (function(){
