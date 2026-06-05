@@ -34,43 +34,87 @@ var agentViewJS embed.FS
 //go:embed static/asset_browser.js
 var assetBrowserJS embed.FS
 
-// staticAssetETags holds precomputed strong-form ETags for embedded dashboard
-// assets. cron-dashboard-redesign P0 §6 — combined with the existing
-// `Cache-Control: no-cache, must-revalidate`, ETag enables a 304 fast-path so
-// browsers actually skip body bytes when content hasn't changed (no-cache
-// alone forces every load to re-download, hurting both latency and bandwidth).
-//
-// Because the asset bytes are baked in at build time via //go:embed, the
-// SHA-256 hash never changes during a process's lifetime; computing it once at
-// init is sufficient. Strong ETag form ("hex") is fine since byte equality is
-// the actual semantics (no transformations).
-var staticAssetETags = func() map[string]string {
+// staticAsset is the once-read, immutable view of an embedded dashboard asset:
+// its decompressed bytes and precomputed strong-form ETag. Go's
+// embed.FS.ReadFile returns a *fresh copy* on every call (`[]byte(string)` —
+// a heap alloc + memcpy of the whole file), so reading per request meant every
+// dashboard.js (759 KB) / dashboard.html (207 KB) hit — including the ones that
+// immediately return 304 — paid an allocation and copy of the entire file for
+// no benefit. The bytes are baked in at build time and never change during a
+// process's lifetime, so we read+hash each asset exactly once at init and have
+// handlers reference the shared (read-only) slice. (#1771)
+type staticAsset struct {
+	bytes []byte
+	etag  string
+}
+
+// staticAssets maps the asset key (basename used by handlers and the 304
+// fast-path) to its cached bytes + ETag. Populated once at init.
+var staticAssets = func() map[string]staticAsset {
 	hash := func(b []byte) string {
 		s := sha256.Sum256(b)
 		return `"` + hex.EncodeToString(s[:16]) + `"`
 	}
-	out := map[string]string{}
-	if b, err := dashboardHTML.ReadFile("static/dashboard.html"); err == nil {
-		out["dashboard.html"] = hash(b)
+	read := func(fsys embed.FS, name string) (staticAsset, bool) {
+		b, err := fsys.ReadFile(name)
+		if err != nil {
+			return staticAsset{}, false
+		}
+		return staticAsset{bytes: b, etag: hash(b)}, true
 	}
-	if b, err := dashboardJS.ReadFile("static/dashboard.js"); err == nil {
-		out["dashboard.js"] = hash(b)
-	}
-	if b, err := agentViewJS.ReadFile("static/agent_view.js"); err == nil {
-		out["agent_view.js"] = hash(b)
-	}
-	if b, err := assetBrowserJS.ReadFile("static/asset_browser.js"); err == nil {
-		out["asset_browser.js"] = hash(b)
+	out := map[string]staticAsset{}
+	for _, e := range []struct {
+		key  string
+		fsys embed.FS
+		name string
+	}{
+		{"dashboard.html", dashboardHTML, "static/dashboard.html"},
+		{"dashboard.js", dashboardJS, "static/dashboard.js"},
+		{"agent_view.js", agentViewJS, "static/agent_view.js"},
+		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js"},
+		{"manifest.json", manifestJSON, "static/manifest.json"},
+		{"sw.js", swJS, "static/sw.js"},
+	} {
+		if a, ok := read(e.fsys, e.name); ok {
+			out[e.key] = a
+		}
 	}
 	return out
 }()
 
-// serveStaticWithETag writes the asset, attaching its precomputed ETag and
-// honouring If-None-Match for a 304 fast-path. Returns true when a 304 was
-// served so the caller can skip writing the body. Other security headers
-// (CSP/COOP/etc.) are still set by the caller before this point.
+// staticAssetETags preserves the legacy map[key]ETag shape for callers/tests
+// that only need the ETag. Derived from staticAssets so there is a single
+// source of truth. cron-dashboard-redesign P0 §6 — combined with the existing
+// `Cache-Control: no-cache, must-revalidate`, ETag enables a 304 fast-path so
+// browsers actually skip body bytes when content hasn't changed (no-cache
+// alone forces every load to re-download, hurting both latency and bandwidth).
+// Strong ETag form ("hex") is fine since byte equality is the actual semantics
+// (no transformations).
+var staticAssetETags = func() map[string]string {
+	out := map[string]string{}
+	for k, a := range staticAssets {
+		out[k] = a.etag
+	}
+	return out
+}()
+
+// staticAssetBytes returns the cached, read-only bytes for an embedded asset.
+// Callers MUST NOT mutate the returned slice — it is shared across all
+// requests. Returns nil when the key is unknown (asset failed to embed).
+func staticAssetBytes(key string) []byte {
+	return staticAssets[key].bytes
+}
+
+// serveStaticWithETag attaches the asset's precomputed ETag and, on an
+// If-None-Match hit, writes 304 and returns true so the caller skips the body.
+// It is intended to be called BEFORE the caller touches the (large) body bytes
+// so a 304 costs no allocation. Other security headers (CSP/COOP/etc.) are
+// still set by the caller before this point.
 func serveStaticWithETag(w http.ResponseWriter, r *http.Request, assetKey string) bool {
-	tag := staticAssetETags[assetKey]
+	// Read the ETag straight from the cached-asset registry (single source of
+	// truth) rather than the derived staticAssetETags copy, so the 304
+	// fast-path does one map lookup, not two.
+	tag := staticAssets[assetKey].etag
 	if tag == "" {
 		return false
 	}

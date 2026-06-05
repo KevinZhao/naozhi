@@ -379,8 +379,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		s.auth.ServeLoginPage(w, r)
 		return
 	}
-	data, err := dashboardHTML.ReadFile("static/dashboard.html")
-	if err != nil {
+	data := staticAssetBytes("dashboard.html")
+	if data == nil {
 		http.Error(w, "dashboard not found", http.StatusNotFound)
 		return
 	}
@@ -535,22 +535,25 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 // handle_baseline lint allow-list (8 → 4) without changing routing
 // behaviour. R-static-handlers (2026-05-28).
 func handleManifest(w http.ResponseWriter, r *http.Request) {
-	data, err := manifestJSON.ReadFile("static/manifest.json")
-	if err != nil {
+	data := staticAssetBytes("manifest.json")
+	if data == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "application/manifest+json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "max-age=3600")
+	if serveStaticWithETag(w, r, "manifest.json") {
+		return
+	}
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("manifest write", "err", err)
 	}
 }
 
 func handleSW(w http.ResponseWriter, r *http.Request) {
-	data, err := swJS.ReadFile("static/sw.js")
-	if err != nil {
+	data := staticAssetBytes("sw.js")
+	if data == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -566,14 +569,21 @@ func handleSW(w http.ResponseWriter, r *http.Request) {
 	// `navigator.serviceWorker.register('/sw.js')` with no scope option, so
 	// the default "/" scope (the script's location) still applies — anonymous
 	// PWA installability is unaffected.
+	//
+	// #1771: sw.js is served no-cache, so browsers re-request it on every SW
+	// update check. Attaching the ETag lets those re-checks 304 (empty body)
+	// instead of re-downloading the full script each time.
+	if serveStaticWithETag(w, r, "sw.js") {
+		return
+	}
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("sw write", "err", err)
 	}
 }
 
 func handleDashboardJS(w http.ResponseWriter, r *http.Request) {
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
+	data := staticAssetBytes("dashboard.js")
+	if data == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -592,8 +602,8 @@ func handleDashboardJS(w http.ResponseWriter, r *http.Request) {
 // dashboard module. Mirrors handleDashboardJS for caching/CSP headers so
 // the two scripts behave identically in the browser cache.
 func handleAgentViewJS(w http.ResponseWriter, r *http.Request) {
-	data, err := agentViewJS.ReadFile("static/agent_view.js")
-	if err != nil {
+	data := staticAssetBytes("agent_view.js")
+	if data == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -611,8 +621,8 @@ func handleAgentViewJS(w http.ResponseWriter, r *http.Request) {
 // handleAssetBrowserJS serves static/asset_browser.js — the cc-asset-browser
 // dashboard module (RFC docs/rfc/cc-asset-browser.md). Mirrors handleAgentViewJS.
 func handleAssetBrowserJS(w http.ResponseWriter, r *http.Request) {
-	data, err := assetBrowserJS.ReadFile("static/asset_browser.js")
-	if err != nil {
+	data := staticAssetBytes("asset_browser.js")
+	if data == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
