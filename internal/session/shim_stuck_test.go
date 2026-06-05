@@ -61,11 +61,11 @@ func TestRouter_ShimStuckFlagConsumedByGetOrCreate(t *testing.T) {
 		sessions:         make(map[string]*ManagedSession),
 		spawningKeys:     make(map[string]chan struct{}),
 		shimStuckOnReset: make(map[string]bool),
-		backendOverrides: make(map[string]string),
 		knownIDs:         make(map[string]bool),
 		sessionIDToKey:   make(map[string]string),
 	}
 	r.wsStore.overrides = make(map[string]string)
+	r.bkStore.backendOverrides = make(map[string]string)
 	const key = "stuck:key:test"
 	r.shimStuckOnReset[key] = true
 
@@ -100,11 +100,11 @@ func TestRouter_ShimStuckFlagPerKey(t *testing.T) {
 		sessions:         make(map[string]*ManagedSession),
 		spawningKeys:     make(map[string]chan struct{}),
 		shimStuckOnReset: make(map[string]bool),
-		backendOverrides: make(map[string]string),
 		knownIDs:         make(map[string]bool),
 		sessionIDToKey:   make(map[string]string),
 	}
 	r.wsStore.overrides = make(map[string]string)
+	r.bkStore.backendOverrides = make(map[string]string)
 	const stuckKey = "key:A"
 	const cleanKey = "key:B"
 	r.shimStuckOnReset[stuckKey] = true
@@ -132,11 +132,11 @@ func TestRouter_ShimStuckFlagClearedOnTerminalRemoval(t *testing.T) {
 		sessions:         make(map[string]*ManagedSession),
 		spawningKeys:     make(map[string]chan struct{}),
 		shimStuckOnReset: make(map[string]bool),
-		backendOverrides: make(map[string]string),
 		knownIDs:         make(map[string]bool),
 		sessionIDToKey:   make(map[string]string),
 	}
 	r.wsStore.overrides = make(map[string]string)
+	r.bkStore.backendOverrides = make(map[string]string)
 	s := &ManagedSession{key: key}
 	r.sessions[key] = s
 	r.shimStuckOnReset[key] = true
@@ -199,11 +199,11 @@ func TestRouter_ShimStuckFlagPreservedOnKeepOverride(t *testing.T) {
 		sessions:         make(map[string]*ManagedSession),
 		spawningKeys:     make(map[string]chan struct{}),
 		shimStuckOnReset: make(map[string]bool),
-		backendOverrides: make(map[string]string),
 		knownIDs:         make(map[string]bool),
 		sessionIDToKey:   make(map[string]string),
 	}
 	r.wsStore.overrides = make(map[string]string)
+	r.bkStore.backendOverrides = make(map[string]string)
 	s := &ManagedSession{key: key}
 	r.sessions[key] = s
 	r.shimStuckOnReset[key] = true
