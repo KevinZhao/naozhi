@@ -154,7 +154,7 @@ Go 惯用 getter 不带 `Get` 前缀（`io.Reader.Read`，非 `GetRead`）。nao
 
 三项均为 deferred / 纯 RFC：
 - **#870** sequencing 在 restart RFC 之后——接口形状须由其约束，restart RFC 尚未落盘。
-- **#463** 需先批 ADR + 完成碰撞审计 + 排 PR 序，rename 走 `gopls rename`（非 sed）。本 RFC 评审通过即解锁后续执行型 PR。
+- **#463** 命名 ADR 已批准并固化为 [`docs/adr/0001-getter-fetch-load-naming.md`](../adr/0001-getter-fetch-load-naming.md)（Status: Accepted），它是后续执行型 PR 的权威决策记录（含 `Fetch` 网络动词保留的纠正、`GetSession→SessionFor`/`Lookup` 碰撞规则、`gopls rename`-非-sed 工具强制、PR-1/2/3 切分序）。执行仍走碰撞审计 + `gopls rename`（非 sed）。
 - **#729** 维持 deferred，触发条件：出现真实批量 AutoTitler/sysession use case **且** §6.1 的跨用户 JSONL/串行化问题有解。
 
 ### #870 分阶段（restart RFC 落盘后启动）
