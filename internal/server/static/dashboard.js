@@ -81,6 +81,7 @@ let _lastSidebarHtml = null;
 let sessionPollTimer = null;
 let discoveredPollTimer = null;
 let discoveredItems = []; // discovered sessions, merged into sidebar
+let lastDiscoveredJSON = ''; // #1770: last /api/discovered payload, to skip forced re-render when unchanged
 let previewTimer = null;
 let previewEventCount = 0;
 let pendingDiscovered = null; // {pid, sessionId, cwd, procStartTime, node} when previewing a discovered session
@@ -10410,6 +10411,15 @@ async function scanDiscovered() {
     // stalled disk shouldn't wedge the scan button forever.
     const data = await fetchJSON('/api/discovered', { headers, timeoutMs: 10000 });
     discoveredItems = data || [];
+    // #1770: only force a full sidebar re-render when the discovered set
+    // actually changed. Previously every 30s (connected) / 5s (disconnected)
+    // scan unconditionally set lastVersion=0, defeating fetchSessions' version
+    // short-circuit and rebuilding the whole sidebar DOM even when nothing
+    // changed — wasted CPU/layout on low-end phones. Mirror the
+    // nodesHash/historyHash pattern fetchSessions already uses.
+    const discoveredHash = JSON.stringify(discoveredItems);
+    if (discoveredHash === lastDiscoveredJSON) return;
+    lastDiscoveredJSON = discoveredHash;
     // Trigger sidebar re-render to merge discovered into project groups
     lastVersion = 0;
     debouncedFetchSessions();
@@ -10502,7 +10512,14 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     navRebuild();
     previewEventCount = events.length;
     const capturedSid = sessionId;
+    // #1770: guard against overlapping ticks. Each tick re-fetches the full
+    // preview event list; on a slow link a fetch can outlast the 2s interval,
+    // so without this flag consecutive ticks pile up concurrent requests.
+    // Mirrors _fetchEventsInFlight on the main events poll.
+    let previewInFlight = false;
     previewTimer = setInterval(async () => {
+      if (previewInFlight) return;
+      previewInFlight = true;
       try {
         const headers2 = {};
         const t2 = getToken();
@@ -10532,7 +10549,10 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
         if (wasBottom) el2.scrollTop = el2.scrollHeight;
         navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
         navUpdatePill();
-      } catch (_) {}
+      } catch (_) {
+      } finally {
+        previewInFlight = false;
+      }
     }, 2000);
   } catch (e) {
     showNetworkError('预览会话', e);
@@ -15135,6 +15155,12 @@ wsm.connect();
     if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
     if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
     if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
+    // #1770: also pause the WS keep-alive ping while the tab is hidden. The
+    // 30s app-level ping wakes the mobile radio every 30s for nothing —
+    // connection liveness is independently maintained by the server's
+    // protocol-level Ping/Pong (writePump, wsPingPeriod≈54s), so dropping the
+    // app ping loses no liveness detection. Re-armed in startPollers on resume.
+    if (wsm && wsm.pingTimer) wsm.cleanup();
   };
   const startPollers = () => {
     if (!sessionPollTimer) {
@@ -15150,6 +15176,12 @@ wsm.connect();
     if (!eventTimer && selectedKey && wsm && wsm.state !== WS_STATES.CONNECTED) {
       fetchEvents(false);
       eventTimer = setInterval(() => fetchEvents(false), 1000);
+    }
+    // #1770: re-arm the WS ping we paused in stopPollers, but only when the
+    // socket is actually live — a dropped/offline socket has no ping to keep
+    // and will re-arm via auth_ok on reconnect.
+    if (wsm && !wsm.pingTimer && wsm.conn && wsm.conn.readyState === WebSocket.OPEN) {
+      wsm.startPing();
     }
   };
   document.addEventListener('visibilitychange', () => {
