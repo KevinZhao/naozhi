@@ -785,6 +785,11 @@ function toggleSidebarSearch() {
     // sidebar immediately re-renders without a lingering filter. Render
     // locally against the cached payload (if any) to avoid an extra
     // /api/sessions round-trip — the data is already authoritative.
+    // #1772: cancel any pending debounced keystroke render first, so a timer
+    // queued just before close can't fire after we've already cleared and
+    // re-rendered (which, when _lastSidebarData is null, would also trigger a
+    // spurious debouncedFetchSessions()).
+    if (_sidebarSearchDebounce) { clearTimeout(_sidebarSearchDebounce); _sidebarSearchDebounce = null; }
     const input = document.getElementById('sidebar-search-input');
     if (input) input.value = '';
     if (_lastSidebarData) {
@@ -806,6 +811,7 @@ function closeSidebarSearch() {
 // shortcuts. Call once at startup. The input's oninput handler triggers
 // a debounced sidebar re-fetch so each keystroke re-applies the filter
 // against the canonical sessions data — no client-side cache desync.
+let _sidebarSearchDebounce = null;
 function initSidebarSearch() {
   const input = document.getElementById('sidebar-search-input');
   if (input) {
@@ -814,11 +820,24 @@ function initSidebarSearch() {
       // rapid typing doesn't DoS the server with per-keystroke requests.
       // When no data has landed yet (first load), fall through to a
       // debounced fetch as a degraded bootstrap.
-      if (_lastSidebarData) {
-        renderSidebar(_lastSidebarData);
-      } else {
-        debouncedFetchSessions();
-      }
+      //
+      // #1772: debounce the local re-render too. renderSidebar does a full
+      // sort + filter + sessionCardHtml map+join over every session on each
+      // keystroke; the _lastSidebarHtml guard skips the DOM write only when
+      // the output is byte-identical, which is rare while a filter narrows.
+      // 120ms collapses a typing burst into one render. The periodic
+      // sessions_update repaint reuses the current query via
+      // readSidebarSearchQuery, so debouncing the keystroke render loses no
+      // filter state.
+      if (_sidebarSearchDebounce) clearTimeout(_sidebarSearchDebounce);
+      _sidebarSearchDebounce = setTimeout(() => {
+        _sidebarSearchDebounce = null;
+        if (_lastSidebarData) {
+          renderSidebar(_lastSidebarData);
+        } else {
+          debouncedFetchSessions();
+        }
+      }, 120);
     });
     input.addEventListener('keydown', e => {
       if (e.key === 'Escape') { e.preventDefault(); closeSidebarSearch(); }
@@ -4214,6 +4233,12 @@ function stickEventsBottom() {
 // --- Message navigation ---
 let navUserEls = [];
 let navPopoverCloseHandler = null;
+// #1772: synchronous "is the nav popover mounted" flag. Set true the moment the
+// popover is appended, false when dismissed. Lets the per-scroll-tick handler
+// skip a getElementById on the common (no-popover) path without the race of
+// reading navPopoverCloseHandler, which is only assigned in a deferred
+// setTimeout(0) after mount.
+let navPopoverOpen = false;
 let navIdx = -1; // -1 = not navigating
 
 function navRebuild() {
@@ -4295,6 +4320,7 @@ function navUpdatePill() {
 function navDismissPopover() {
   const pop = document.getElementById('nav-list-popover');
   if (pop) pop.remove();
+  navPopoverOpen = false;
   if (navPopoverCloseHandler) {
     document.removeEventListener('click', navPopoverCloseHandler);
     navPopoverCloseHandler = null;
@@ -4319,6 +4345,7 @@ function navShowList() {
   popover.style.cssText = 'position:absolute;right:44px;bottom:0;width:' + maxW + 'px;max-height:300px;overflow-y:auto;background:rgba(22,27,34,.95);backdrop-filter:blur(8px);border:1px solid var(--nz-border);border-radius:10px;padding:6px 0;z-index:11;font-size:13px;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent';
   popover.innerHTML = items.join('');
   pill.appendChild(popover);
+  navPopoverOpen = true;
   popover.querySelectorAll('.nav-list-item').forEach(item => {
     item.style.cssText += 'padding:8px 12px;cursor:pointer;color:var(--nz-text);transition:background .1s;border-bottom:1px solid var(--nz-bg-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
     item.onmouseenter = () => item.style.background = '#1f2937';
@@ -4359,7 +4386,10 @@ function navShowList() {
     // so the next arrow-key press re-seeds from what the user actually sees.
     let scrollResetTimer = null;
     el.addEventListener('scroll', () => {
-      navDismissPopover();
+      // #1772: only touch the DOM to dismiss the nav popover when one is
+      // actually open, skipping a per-scroll-tick getElementById on the
+      // overwhelmingly common path (no popover) during inertial scrolling.
+      if (navPopoverOpen) navDismissPopover();
       if (scrollResetTimer) clearTimeout(scrollResetTimer);
       scrollResetTimer = setTimeout(() => {
         if (navIdx < 0 || !navUserEls[navIdx]) return;
@@ -10802,7 +10832,7 @@ function openSessionContextMenu(card, x, y) {
 function initSwipeDelete() {
   const list = document.getElementById('session-list');
   if (!list) return;
-  let card = null, startX = 0, startY = 0, tracking = false;
+  let card = null, startX = 0, startY = 0, tracking = false, cardW = 0;
   // cancelLongPress clears the in-flight long-press timer + any visual
   // target state. Called from every exit path so a jittery touch cannot
   // leave the card stuck in the .long-pressing style.
@@ -10850,11 +10880,18 @@ function initSwipeDelete() {
       if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
       if (Math.abs(dy) >= Math.abs(dx)) { card = null; return; }
       tracking = true;
+      // #1772: cache the card width once, here — before any transform write
+      // this gesture. Reading card.offsetWidth inside the per-frame transform
+      // write below is a getter that the browser must keep coherent with
+      // pending style writes; caching it (the width can't change mid-swipe)
+      // keeps the touchmove hot loop free of layout reads. Read now while the
+      // card is still in its untransformed layout position (cheap).
+      cardW = card.offsetWidth || 1;
     }
     if (dx >= 0) return;
     card.classList.add('swiping');
     card.style.transform = 'translateX(' + dx + 'px)';
-    card.style.background = 'rgba(218,54,51,' + Math.min(0.35, -dx / card.offsetWidth * 0.6) + ')';
+    card.style.background = 'rgba(218,54,51,' + Math.min(0.35, -dx / cardW * 0.6) + ')';
   }, {passive:true});
   list.addEventListener('touchend', e => {
     cancelLongPress();

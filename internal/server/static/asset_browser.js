@@ -178,6 +178,14 @@
     if (state.wired) return; state.wired = true;
     buildKindTabs();
 
+    // #1772: pending search-input debounce handle (declared before the tab
+    // handler so a tab switch can cancel it — otherwise a queued keystroke
+    // render could fire ~150ms after the switch and redundantly re-render).
+    var searchDebounce = null;
+    var cancelSearchDebounce = function () {
+      if (searchDebounce) { clearTimeout(searchDebounce); searchDebounce = null; }
+    };
+
     var tabs = $('asset-kindtabs');
     if (tabs) tabs.addEventListener('click', function (e) {
       var t = e.target.closest('.asset-kt'); if (!t) return;
@@ -185,10 +193,22 @@
       t.classList.add('active');
       state.kind = t.dataset.k; state.sel = null;
       var s = $('asset-search'); if (s) s.value = '';
+      cancelSearchDebounce();
       render();
     });
 
-    var s = $('asset-search'); if (s) s.addEventListener('input', render);
+    // #1772: debounce the search input. render() does a full O(N) filter +
+    // group + innerHTML rebuild over state.inv.assets (which can be 1000+
+    // entries in a real ECC env); firing it on every keystroke produces >50ms
+    // long tasks and input lag on mobile soft keyboards. 150ms debounce
+    // collapses a burst of keystrokes into one render.
+    var s = $('asset-search');
+    if (s) {
+      s.addEventListener('input', function () {
+        if (searchDebounce) clearTimeout(searchDebounce);
+        searchDebounce = setTimeout(function () { searchDebounce = null; render(); }, 150);
+      });
+    }
     var rf = $('asset-refresh'); if (rf) rf.addEventListener('click', function () { state.loaded = false; load(true); });
     var bk = $('asset-back'); if (bk) bk.addEventListener('click', backToList);
 
