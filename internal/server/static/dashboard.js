@@ -228,6 +228,27 @@ document.addEventListener('DOMContentLoaded', function () {
   }
   if (navChat) navChat.addEventListener('click', function () { setActivityView('chat'); });
   if (navAssets) navAssets.addEventListener('click', function () { setActivityView('assets'); });
+
+  // Header/sidebar controls (#922 / #479 / #441): migrated from inline
+  // `onclick=`/`onsubmit=` attributes to addEventListener so the dashboard's
+  // script-src no longer needs `'unsafe-inline'` on account of these handlers.
+  // Each bind is guarded so a missing element is a no-op (defensive parity
+  // with the theme/nav binds above). Keeps R236-SEC-02 inline-handler count
+  // trending to 0.
+  const bindClick = function (id, fn) {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('click', fn);
+  };
+  bindClick('btn-sidebar-search', function () { toggleSidebarSearch(); });
+  bindClick('btn-history', function () { toggleHistory(); });
+  bindClick('btn-new-session', function () { createNewSession(); });
+  bindClick('btn-cron', function () { openCronPanel(); });
+  bindClick('sidebar-search-clear', function () { closeSidebarSearch(); });
+  bindClick('ns-trigger', function (e) { toggleNodeSelector(e); });
+  bindClick('btn-sidebar-toggle', function () { toggleSidebarCollapsed(); });
+  // NOTE: the quick-ask form submit is NOT bound here. That form lives in
+  // `#main`, which is repainted via innerHTML (mainEmptyHtml()), so its submit
+  // handler is (re)bound in wireQuickAskInput() — the designated re-wire hook.
 });
 
 function getToken() { return ''; }
@@ -6350,6 +6371,21 @@ function submitQuickAsk(e) {
 // because the user may already be mid-click on the sidebar to switch to
 // another session — grabbing focus 50ms later would intercept keystrokes.
 function wireQuickAskInput(autofocus) {
+  // Submit binding (#922 / #479): the empty-state form was migrated off the
+  // inline `onsubmit=` attribute so script-src no longer needs it. The form is
+  // (re)painted via innerHTML on cold start AND on every mainEmptyHtml()
+  // repaint, so the DOMContentLoaded header-button binder cannot catch it —
+  // wireQuickAskInput is the designated re-wire hook called on all those
+  // paths, so the submit handler is bound here. Guarded by a dataset marker
+  // to stay idempotent across repeated calls on the same node.
+  const form = document.getElementById('quick-ask-form');
+  if (form && form.dataset.wired !== '1') {
+    form.dataset.wired = '1';
+    form.addEventListener('submit', function(e) {
+      e.preventDefault();
+      submitQuickAsk(e);
+    });
+  }
   const ta = document.getElementById('quick-ask-input');
   if (!ta || ta.dataset.wired === '1') return;
   ta.dataset.wired = '1';
@@ -6401,7 +6437,7 @@ function mainEmptyHtml() {
   return '<div class="empty-state empty-cta empty-quick" style="flex-direction:column;gap:14px">' +
     '<span style="font-size:40px;opacity:.35" aria-hidden="true">&gt;_</span>' +
     '<div style="color:var(--nz-text);font-size:17px">问点什么？</div>' +
-    '<form class="quick-ask-form" onsubmit="event.preventDefault();submitQuickAsk(event)">' +
+    '<form class="quick-ask-form" id="quick-ask-form">' +
       '<textarea id="quick-ask-input" class="quick-ask-input" rows="1" ' +
         'placeholder="Enter 发送 · Shift+Enter 换行" autocomplete="off" spellcheck="false" ' +
         'aria-label="快速提问输入框"></textarea>' +

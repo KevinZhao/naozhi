@@ -259,6 +259,26 @@ type finishArgs struct {
 // log scattered across executeOpt's seven branches; adding a new error class
 // is now one mapping plus one finishArgs literal at the call site.
 func (s *Scheduler) finishRun(a finishArgs) {
+	// R243-ARCH-6 (#837): defensive nil-job guard. Every current call site
+	// passes a non-nil *Job, but finishRun unconditionally dereferences
+	// a.job (recordTerminalResult(a.job, …), a.job.ID in the Append +
+	// emitRunEnded paths). A future call site that synthesises a finishArgs
+	// with a nil job — or a races where the snapshot path leaves job unset —
+	// would panic the cron-tick goroutine. robfig's Recover wrapper turns
+	// that into a swallowed panic ABOVE this frame, which is the worst
+	// outcome for the three-write terminal protocol: a RunStarted frame was
+	// already broadcast, but the panic skips finalize() + emitRunEnded, so
+	// the inflight gate stays running=true and subscribers see a started
+	// frame with no matching ended frame (orphaned "running" badge forever).
+	// Finalize the inflight gate (if any) and bail loudly instead — the same
+	// defensive philosophy as CurrentRun's nil-inflight guard. The finalizer
+	// is per-run stack-local, so this releases exactly this run's gate.
+	if a.job == nil {
+		slog.Error("cron: finishRun called with nil job; finalizing inflight gate and skipping terminal protocol",
+			"run_id", a.runID, "state", string(a.state), "err_class", string(a.errClass))
+		a.finalizer.finalize()
+		return
+	}
 	// R247-ARCH-11 (#643): read endedAt via the injected clock so DurationMS
 	// (endedAt - a.startedAt) is deterministic under a fake clock in tests.
 	// Default clock is time.Now(), byte-identical to the prior inline read.
@@ -540,17 +560,32 @@ func (s *Scheduler) emitSyntheticSkipped(j *Job, viaTriggerNow bool, errClass Er
 	})
 }
 
-// jobResultSnapshot captures the terminal-result-relevant Job fields
-// before recordTerminalResult mutates them, so a persistJobsLocked failure
-// can roll the in-memory Job state back to the pre-mutation values without
-// rebuilding the field list at the rollback site. R247-CR-14 (#586): the
-// previous inline anonymous-struct literal duplicated field types between
-// the snapshot capture and the rollback assignment, leaving every future
-// "add a field to LastFoo" change two coupled edits to keep in sync.
+// JobState is the runtime-mutable terminal-result half of the Job
+// god-struct: the LastRunAt / LastResult / LastError / LastErrorClass /
+// LastSessionID / RunCounters cluster that every finishRun rewrites. It is
+// deliberately a SEPARATE type from Job's wire-config fields (Schedule /
+// Prompt / WorkDir / Notify*) so the runtime-state field set is enumerated
+// in exactly one place.
+//
+// R238-ARCH-13 (#764): Job today mixes wire schema + runtime state, so an
+// internal-only state addition mutates the on-disk schema. The full split
+// (Job config struct + JobState persisted separately) is needs-design — it
+// touches store.go marshal/unmarshal and every cross-package reader. This
+// type is the behaviour-preserving first slice: it gives the runtime-state
+// cluster a single named home (the issue's proposed name) that the capture
+// (Job.snapshotResultState) and rollback (restore) both route through,
+// without changing the on-disk JSON shape. R247-CR-14 (#586) introduced the
+// underlying snapshot to kill the duplicated inline anonymous-struct literal
+// between capture and rollback; naming it JobState ties that work to the
+// god-struct split tracker.
+//
+// jobResultSnapshot is kept as an alias so the existing capture/rollback
+// call sites and the tests pinning the round-trip contract compile
+// unchanged.
 //
 // restore re-applies the captured values to j; caller MUST hold s.mu so
 // the in-memory state stays serialised against concurrent readers.
-type jobResultSnapshot struct {
+type JobState struct {
 	LastRunAt      time.Time
 	LastResult     string
 	LastError      string
@@ -559,7 +594,12 @@ type jobResultSnapshot struct {
 	Counters       JobRunCounters
 }
 
-func (p jobResultSnapshot) restore(j *Job) {
+// jobResultSnapshot is the historical name for the runtime-state cluster,
+// retained as an alias of JobState (R238-ARCH-13 / #764) so existing
+// capture / rollback sites and round-trip contract tests keep compiling.
+type jobResultSnapshot = JobState
+
+func (p JobState) restore(j *Job) {
 	j.LastRunAt = p.LastRunAt
 	j.LastResult = p.LastResult
 	j.LastError = p.LastError
@@ -570,18 +610,19 @@ func (p jobResultSnapshot) restore(j *Job) {
 
 // snapshotResultState captures the runtime-mutable terminal-result state a
 // Job carries (the LastRunAt / LastResult / LastError / LastErrorClass /
-// LastSessionID / RunCounters cluster) into a jobResultSnapshot. Caller must
-// hold s.mu so the read is serialised against concurrent mutators.
+// LastSessionID / RunCounters cluster) into a JobState. Caller must hold
+// s.mu so the read is serialised against concurrent mutators.
 //
-// R249-ARCH-22 (#986): Job mixes wire-config (Schedule / Prompt / WorkDir)
-// with this runtime-mutable state. Until the full JobConfig/JobState split
-// lands, this method is the single capture point for the state cluster so the
-// snapshot field set is enumerated exactly once (paired with restore) instead
-// of being open-coded at the recordTerminalResult capture site. Adding a new
-// runtime-state field is then a two-site edit on the snapshot type + this
-// method/restore pair rather than a scattered hunt across mutation paths.
-func (j *Job) snapshotResultState() jobResultSnapshot {
-	return jobResultSnapshot{
+// R249-ARCH-22 (#986) / R238-ARCH-13 (#764): Job mixes wire-config (Schedule
+// / Prompt / WorkDir) with this runtime-mutable state. Until the full
+// JobConfig/JobState split lands, this method is the single capture point for
+// the state cluster so the JobState field set is enumerated exactly once
+// (paired with restore) instead of being open-coded at the
+// recordTerminalResult capture site. Adding a new runtime-state field is then
+// a two-site edit on JobState + this method/restore pair rather than a
+// scattered hunt across mutation paths.
+func (j *Job) snapshotResultState() JobState {
+	return JobState{
 		LastRunAt:      j.LastRunAt,
 		LastResult:     j.LastResult,
 		LastError:      j.LastError,
