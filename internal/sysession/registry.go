@@ -73,6 +73,29 @@ type DaemonDeps struct {
 //
 // Phase 1 is shipped with AutoTitler only.  TransientSweeper / other
 // future daemons land in Phase 2 (RFC §12).
+//
+// R244-ARCH-18 (#1055): this is a static slice literal, NOT cli/history's
+// blank-import + init()-driven registry.  The divergence is deliberate, so
+// record it here rather than have it re-flagged as accidental inconsistency
+// (mirroring our standing precedent of promoting an implicit decision to a
+// documented anchor).  The two reasons cli/history adopts the init() pattern
+// are both absent for sysession:
+//
+//  1. No import cycle to break.  Every built-in daemon (auto-titler,
+//     attachment-gc, ...) is compiled into this same package, so there is no
+//     peer package that would have to import the registry — nothing to
+//     decouple via blank import.
+//  2. No out-of-package daemon contract.  Registering a daemon is an
+//     in-package slice append, exactly the three steps documented on
+//     builtinDaemonFactory above; there is no external plugin surface that
+//     would benefit from self-registration in an init().
+//
+// The holistic "should every subsystem share one unified Registry[T]"
+// question is tracked separately under R244-ARCH-4 (#1058, internal/wireup);
+// sysession deliberately does not pre-commit and stays on this slice literal
+// until that decision lands.  TestBuiltinDaemonsSliceLiteralInvariant pins
+// this so any future move to an init()-based registry is a deliberate edit
+// of both that test and this comment.
 var builtinDaemons = []builtinDaemonFactory{
 	{
 		Name: DaemonAutoTitler,

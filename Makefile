@@ -53,7 +53,8 @@ lint-fact-table-fail:
 # Router 字段 `// 读写:` 注释漂移检测（router-split P0 安全网，RFC
 # router-god-object-split）。AST 解析 Router 结构每个字段的声明访问域，再扫
 # 所有 router_*.go 实际 r.<field> 访问对账，漂移即报。
-# warn mode: 不卡 PR；router-split 全部 facet（P1-P5）落地后切 lint-router-fail。
+# CI 跑 lint-router-fail（P0 安全网已上膛，漂移即 exit 1 卡 PR）；
+# lint-router（warn 模式）保留供本地快速扫描，不卡本地构建。
 lint-router:
 	go run ./tools/check-router-fields -mode warn
 
