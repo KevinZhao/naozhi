@@ -1722,6 +1722,37 @@ func (w *perKeyWriter) flush(p *Persister) error {
 			return fmt.Errorf("append idx batch: %w", err)
 		}
 		idxAppended = true
+	}
+	// Skip the fsync entirely when this flush did not append any idx
+	// bytes — under high session count + short FlushInterval the idx
+	// fsync runs every tick whether or not new data landed, doubling
+	// disk fsync pressure for nothing. Recovery is unaffected: idx is
+	// only valid up to a previously-fsynced suffix anyway.
+	//
+	// R20260605B-CORR-12 (#1816): the idx durability barrier (Sync) MUST
+	// run BEFORE we discard the in-memory retry buffer (pendingIdx) and
+	// advance the stride cursor. AppendBatch above only wrote idx bytes
+	// into the page cache (idx.go's plain Write) — they are NOT durable
+	// until Sync() returns nil. The old code reset pendingIdx to empty and
+	// advanced entriesSinceIdxWrite first; on a transient idx fsync error
+	// flush returned with dirty=true but pendingIdx already empty. The
+	// retry flush then appended nothing (idxAppended=false), never
+	// re-fsynced idx, and cleared dirty — leaving the just-written idx
+	// bytes stranded in page cache. A crash before kernel writeback drove
+	// recovery to truncate log records that were already fsynced in
+	// Phase 1 (recovery.go idx-behind-log branch), destroying durable
+	// data. Syncing first keeps pendingIdx intact on Sync failure so the
+	// next flush re-appends and re-fsyncs the same entries idempotently.
+	if idxAppended {
+		if err := w.idxWriter.Sync(); err != nil {
+			return fmt.Errorf("sync idx: %w", err)
+		}
+		p.fsyncCnt.Add(1)
+		p.opts.Observer.OnFsync()
+
+		// Durability confirmed — only now is it safe to discard the
+		// retry buffer and advance the stride cursor.
+		//
 		// entriesSinceIdxWrite is a cursor into the stride cycle —
 		// reset modulo stride so successive batches stay aligned.
 		w.entriesSinceIdxWrite = (w.entriesSinceIdxWrite + len(w.pendingIdx)) % p.opts.IdxStride
@@ -1756,18 +1787,6 @@ func (w *perKeyWriter) flush(p *Persister) error {
 		if p.opts.IdxStride > 1 && cap(w.idxScratch) > p.opts.IdxStride*4 {
 			w.idxScratch = make([]schema.IdxEntry, 0, p.opts.IdxStride*2)
 		}
-	}
-	// Skip the fsync entirely when this flush did not append any idx
-	// bytes — under high session count + short FlushInterval the idx
-	// fsync runs every tick whether or not new data landed, doubling
-	// disk fsync pressure for nothing. Recovery is unaffected: idx is
-	// only valid up to a previously-fsynced suffix anyway.
-	if idxAppended {
-		if err := w.idxWriter.Sync(); err != nil {
-			return fmt.Errorf("sync idx: %w", err)
-		}
-		p.fsyncCnt.Add(1)
-		p.opts.Observer.OnFsync()
 	}
 
 	w.dirty = false
