@@ -58,14 +58,14 @@ func TestRouter_ShimStuckFlagConsumedByGetOrCreate(t *testing.T) {
 	// quickly. We don't need a real CLI; we just need the error path to
 	// run with the stuck flag set.
 	r := &Router{
-		sessions:           make(map[string]*ManagedSession),
-		spawningKeys:       make(map[string]chan struct{}),
-		shimStuckOnReset:   make(map[string]bool),
-		workspaceOverrides: make(map[string]string),
-		backendOverrides:   make(map[string]string),
-		knownIDs:           make(map[string]bool),
-		sessionIDToKey:     make(map[string]string),
+		sessions:         make(map[string]*ManagedSession),
+		spawningKeys:     make(map[string]chan struct{}),
+		shimStuckOnReset: make(map[string]bool),
+		backendOverrides: make(map[string]string),
+		knownIDs:         make(map[string]bool),
+		sessionIDToKey:   make(map[string]string),
 	}
+	r.wsStore.overrides = make(map[string]string)
 	const key = "stuck:key:test"
 	r.shimStuckOnReset[key] = true
 
@@ -97,14 +97,14 @@ func TestRouter_ShimStuckFlagConsumedByGetOrCreate(t *testing.T) {
 func TestRouter_ShimStuckFlagPerKey(t *testing.T) {
 	t.Parallel()
 	r := &Router{
-		sessions:           make(map[string]*ManagedSession),
-		spawningKeys:       make(map[string]chan struct{}),
-		shimStuckOnReset:   make(map[string]bool),
-		workspaceOverrides: make(map[string]string),
-		backendOverrides:   make(map[string]string),
-		knownIDs:           make(map[string]bool),
-		sessionIDToKey:     make(map[string]string),
+		sessions:         make(map[string]*ManagedSession),
+		spawningKeys:     make(map[string]chan struct{}),
+		shimStuckOnReset: make(map[string]bool),
+		backendOverrides: make(map[string]string),
+		knownIDs:         make(map[string]bool),
+		sessionIDToKey:   make(map[string]string),
 	}
+	r.wsStore.overrides = make(map[string]string)
 	const stuckKey = "key:A"
 	const cleanKey = "key:B"
 	r.shimStuckOnReset[stuckKey] = true
@@ -129,14 +129,14 @@ func TestRouter_ShimStuckFlagClearedOnTerminalRemoval(t *testing.T) {
 	t.Parallel()
 	const key = "dead:session:key"
 	r := &Router{
-		sessions:           make(map[string]*ManagedSession),
-		spawningKeys:       make(map[string]chan struct{}),
-		shimStuckOnReset:   make(map[string]bool),
-		workspaceOverrides: make(map[string]string),
-		backendOverrides:   make(map[string]string),
-		knownIDs:           make(map[string]bool),
-		sessionIDToKey:     make(map[string]string),
+		sessions:         make(map[string]*ManagedSession),
+		spawningKeys:     make(map[string]chan struct{}),
+		shimStuckOnReset: make(map[string]bool),
+		backendOverrides: make(map[string]string),
+		knownIDs:         make(map[string]bool),
+		sessionIDToKey:   make(map[string]string),
 	}
+	r.wsStore.overrides = make(map[string]string)
 	s := &ManagedSession{key: key}
 	r.sessions[key] = s
 	r.shimStuckOnReset[key] = true
@@ -196,14 +196,14 @@ func TestRouter_ShimStuckFlagPreservedOnKeepOverride(t *testing.T) {
 	t.Parallel()
 	const key = "recycled:session:key"
 	r := &Router{
-		sessions:           make(map[string]*ManagedSession),
-		spawningKeys:       make(map[string]chan struct{}),
-		shimStuckOnReset:   make(map[string]bool),
-		workspaceOverrides: make(map[string]string),
-		backendOverrides:   make(map[string]string),
-		knownIDs:           make(map[string]bool),
-		sessionIDToKey:     make(map[string]string),
+		sessions:         make(map[string]*ManagedSession),
+		spawningKeys:     make(map[string]chan struct{}),
+		shimStuckOnReset: make(map[string]bool),
+		backendOverrides: make(map[string]string),
+		knownIDs:         make(map[string]bool),
+		sessionIDToKey:   make(map[string]string),
 	}
+	r.wsStore.overrides = make(map[string]string)
 	s := &ManagedSession{key: key}
 	r.sessions[key] = s
 	r.shimStuckOnReset[key] = true

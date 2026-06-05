@@ -61,12 +61,12 @@ func makeRoutedRouter(t *testing.T, defaultBackend string) (r *Router, claudeSrc
 			"claude-routed": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude-routed"),
 			"kiro-routed":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro-routed"),
 		},
-		defaultBackend:     defaultBackend,
-		claudeDir:          "/claude/dir",
-		kiroSessionsDir:    "/kiro/dir",
-		workspaceOverrides: make(map[string]string),
-		backendOverrides:   make(map[string]string),
+		defaultBackend:   defaultBackend,
+		claudeDir:        "/claude/dir",
+		kiroSessionsDir:  "/kiro/dir",
+		backendOverrides: make(map[string]string),
 	}
+	r.wsStore.overrides = make(map[string]string)
 	r.wrapper = r.wrappers[defaultBackend]
 	return
 }
@@ -142,12 +142,12 @@ func TestAttachHistorySource_FallsBackToDefaultWhenSessionBackendEmpty(t *testin
 func TestAttachHistorySource_NilWrapperUsesNoop(t *testing.T) {
 	t.Parallel()
 	r := &Router{
-		sessions:           make(map[string]*ManagedSession),
-		wrappers:           map[string]*cli.Wrapper{},
-		defaultBackend:     "",
-		workspaceOverrides: make(map[string]string),
-		backendOverrides:   make(map[string]string),
+		sessions:         make(map[string]*ManagedSession),
+		wrappers:         map[string]*cli.Wrapper{},
+		defaultBackend:   "",
+		backendOverrides: make(map[string]string),
 	}
+	r.wsStore.overrides = make(map[string]string)
 	// r.wrapper intentionally nil.
 
 	s := &ManagedSession{key: "feishu:direct:dave:general"}
@@ -252,11 +252,11 @@ func TestRouter_KiroSessionsDirRoundTrip(t *testing.T) {
 		wrappers: map[string]*cli.Wrapper{
 			"kiro-rt-probe": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro-rt-probe"),
 		},
-		defaultBackend:     "kiro-rt-probe",
-		kiroSessionsDir:    "/the/kiro/dir",
-		workspaceOverrides: make(map[string]string),
-		backendOverrides:   make(map[string]string),
+		defaultBackend:   "kiro-rt-probe",
+		kiroSessionsDir:  "/the/kiro/dir",
+		backendOverrides: make(map[string]string),
 	}
+	r.wsStore.overrides = make(map[string]string)
 	r.wrapper = r.wrappers["kiro-rt-probe"]
 
 	s := &ManagedSession{key: "feishu:direct:greta:general"}
@@ -285,12 +285,12 @@ func TestAttachHistorySource_KiroBackendUsesKirojsonl(t *testing.T) {
 			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 			"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
 		},
-		defaultBackend:     "claude",
-		claudeDir:          "/claude/dir",
-		kiroSessionsDir:    "/kiro/sessions/cli",
-		workspaceOverrides: make(map[string]string),
-		backendOverrides:   make(map[string]string),
+		defaultBackend:   "claude",
+		claudeDir:        "/claude/dir",
+		kiroSessionsDir:  "/kiro/sessions/cli",
+		backendOverrides: make(map[string]string),
 	}
+	r.wsStore.overrides = make(map[string]string)
 	r.wrapper = r.wrappers["claude"]
 
 	s := &ManagedSession{key: "feishu:direct:harry:general"}

@@ -102,9 +102,11 @@ func main() {
 }
 
 // check runs the full pipeline against the router_*.go files in dir:
-//  1. parse router_core.go, extract Router fields + their `// 读写:` annotations
-//  2. AST-scan every non-test router_*.go for r.<field> accesses, mapping each
-//     hit to the file's domain
+//  1. parse router_core.go, extract Router fields + their `// 读写:` annotations,
+//     recursing one level into named local sub-struct types so the inner fields
+//     of facets like wsStore (workspaceStore) keep their own drift accounting
+//  2. AST-scan every non-test router_*.go for r.<field> and r.<subStruct>.<inner>
+//     accesses, mapping each hit to the file's domain
 //  3. compare observed domains against declared domains; emit Violations
 func check(dir string) ([]Violation, error) {
 	files, err := routerFiles(dir)
@@ -112,8 +114,16 @@ func check(dir string) ([]Violation, error) {
 		return nil, err
 	}
 
+	// Build a registry of named struct types declared across all router_*.go
+	// files so parseRouterFields can recurse one level into a Router field
+	// whose type is a local sub-struct (e.g. wsStore workspaceStore).
+	structDecls, err := collectStructDecls(files)
+	if err != nil {
+		return nil, fmt.Errorf("collect struct decls: %w", err)
+	}
+
 	corePath := filepath.Join(dir, "router_core.go")
-	fields, err := parseRouterFields(corePath)
+	fields, subStructFields, err := parseRouterFields(corePath, structDecls)
 	if err != nil {
 		return nil, fmt.Errorf("parse Router struct: %w", err)
 	}
@@ -130,7 +140,7 @@ func check(dir string) ([]Violation, error) {
 	observed := make(map[string]map[string]bool)
 	for _, path := range files {
 		domain := fileDomain(path)
-		hits, err := scanFieldAccess(path, fieldNames)
+		hits, err := scanFieldAccess(path, fieldNames, subStructFields)
 		if err != nil {
 			return nil, fmt.Errorf("scan %s: %w", path, err)
 		}
@@ -211,13 +221,51 @@ func fileDomain(path string) string {
 	return base
 }
 
+// collectStructDecls AST-walks every router_*.go file and returns a registry
+// of named struct type declarations (typeName → *ast.StructType). It lets
+// parseRouterFields resolve a Router field whose type is a sub-struct defined
+// in a sibling file (e.g. workspaceStore in router_workspace.go) and recurse
+// one level into its inner fields. Comments are parsed so inner-field
+// `// 读写:` annotations survive the descent.
+func collectStructDecls(files []string) (map[string]*ast.StructType, error) {
+	decls := make(map[string]*ast.StructType)
+	for _, path := range files {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if err != nil {
+			return nil, err
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			ts, ok := n.(*ast.TypeSpec)
+			if !ok {
+				return true
+			}
+			if st, ok := ts.Type.(*ast.StructType); ok {
+				decls[ts.Name.Name] = st
+			}
+			return true
+		})
+	}
+	return decls, nil
+}
+
 // parseRouterFields parses corePath, finds `type Router struct`, and returns
 // one fieldAnnotation per named field (embedded fields are skipped).
-func parseRouterFields(corePath string) ([]fieldAnnotation, error) {
+//
+// When a Router field's type is a named local sub-struct present in
+// structDecls (e.g. wsStore workspaceStore), the tool also recurses ONE level
+// into that sub-struct and emits a fieldAnnotation for each inner field, using
+// the inner field's own `// 读写:` doc. This keeps per-inner-field drift
+// accounting alive after a facet extraction (Router P1, #383): accesses like
+// r.wsStore.overrides are attributed to the inner field "overrides", not just
+// to the outer "wsStore" field. The returned subStructFields maps the outer
+// field name (wsStore) to the set of inner field names so scanFieldAccess can
+// credit r.<outer>.<inner> selector chains.
+func parseRouterFields(corePath string, structDecls map[string]*ast.StructType) ([]fieldAnnotation, map[string]map[string]bool, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, corePath, nil, parser.ParseComments)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var structType *ast.StructType
@@ -233,10 +281,11 @@ func parseRouterFields(corePath string) ([]fieldAnnotation, error) {
 		return true
 	})
 	if structType == nil {
-		return nil, fmt.Errorf("type Router struct not found")
+		return nil, nil, fmt.Errorf("type Router struct not found")
 	}
 
 	var out []fieldAnnotation
+	subStructFields := make(map[string]map[string]bool)
 	for _, field := range structType.Fields.List {
 		// Skip embedded fields (no names).
 		if len(field.Names) == 0 {
@@ -249,9 +298,53 @@ func parseRouterFields(corePath string) ([]fieldAnnotation, error) {
 			fa := anno
 			fa.name = id.Name
 			out = append(out, fa)
+
+			// Recurse one level into a named local sub-struct type.
+			if typeName, ok := namedTypeIdent(field.Type); ok {
+				if inner, ok := structDecls[typeName]; ok {
+					innerFields := parseInnerFields(inner)
+					if len(innerFields) > 0 {
+						names := make(map[string]bool, len(innerFields))
+						for _, ifa := range innerFields {
+							names[ifa.name] = true
+							out = append(out, ifa)
+						}
+						subStructFields[id.Name] = names
+					}
+				}
+			}
 		}
 	}
-	return out, nil
+	return out, subStructFields, nil
+}
+
+// namedTypeIdent reports whether expr is a bare named type identifier (e.g.
+// `workspaceStore`) and returns its name. Pointer/slice/map/qualified types are
+// intentionally not followed — only a directly-embedded value sub-struct facet
+// is recursed.
+func namedTypeIdent(expr ast.Expr) (string, bool) {
+	if id, ok := expr.(*ast.Ident); ok {
+		return id.Name, true
+	}
+	return "", false
+}
+
+// parseInnerFields returns one fieldAnnotation per named field of a sub-struct,
+// carrying each inner field's own `// 读写:` doc annotation.
+func parseInnerFields(st *ast.StructType) []fieldAnnotation {
+	var out []fieldAnnotation
+	for _, field := range st.Fields.List {
+		if len(field.Names) == 0 {
+			continue
+		}
+		anno := parseAnnotation(field.Doc)
+		for _, id := range field.Names {
+			fa := anno
+			fa.name = id.Name
+			out = append(out, fa)
+		}
+	}
+	return out
 }
 
 // knownDomains is the closed set of file-domain tokens that map to a real
@@ -331,7 +424,15 @@ func leadingToken(seg string) string {
 // scanFieldAccess AST-walks path and returns the set of Router field names
 // referenced via a `r.<field>` selector (any receiver identifier — the
 // selector's field name is what matters, and r is the conventional receiver).
-func scanFieldAccess(path string, fieldNames map[string]bool) (map[string]bool, error) {
+//
+// It also recurses one level into Router sub-struct facets: when subStructFields
+// declares that r.<outer> is a sub-struct with inner fields, a chained selector
+// `r.<outer>.<inner>` credits BOTH the outer field <outer> and the inner field
+// <inner>. This is the load-bearing extension for Router P1 (#383): after a
+// field group is moved off Router into a facet (wsStore workspaceStore), an
+// access like r.wsStore.overrides still attributes drift to the moved inner
+// field "overrides", so the P0 lint does not go blind on the relocated field.
+func scanFieldAccess(path string, fieldNames map[string]bool, subStructFields map[string]map[string]bool) (map[string]bool, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, 0)
 	if err != nil {
@@ -341,6 +442,17 @@ func scanFieldAccess(path string, fieldNames map[string]bool) (map[string]bool, 
 	ast.Inspect(file, func(n ast.Node) bool {
 		sel, ok := n.(*ast.SelectorExpr)
 		if !ok {
+			return true
+		}
+		// Chained selector: r.<outer>.<inner>. The outer selector is itself a
+		// SelectorExpr off the bare "r" receiver. Credit the inner field to
+		// its sub-struct's inner-field set.
+		if outerSel, ok := sel.X.(*ast.SelectorExpr); ok {
+			if base, ok := outerSel.X.(*ast.Ident); ok && base.Name == "r" {
+				if inner, ok := subStructFields[outerSel.Sel.Name]; ok && inner[sel.Sel.Name] {
+					hits[sel.Sel.Name] = true
+				}
+			}
 			return true
 		}
 		// Only count selectors off a bare identifier receiver (r.field),

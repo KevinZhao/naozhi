@@ -178,6 +178,83 @@ func testAccess(r *Router) { _ = r.sessions }
 	}
 }
 
+// TestCheck_SubStructInnerFieldDrift: a Router field whose type is a named
+// local sub-struct (facet) is recursed one level; an access via
+// r.<outer>.<inner> is attributed to the inner field, and a domain its inner
+// annotation omits is reported as drift_omitted. This is the load-bearing
+// Router P1 (#383) extension that keeps the P0 lint from going blind on fields
+// moved off Router into a facet sub-struct.
+func TestCheck_SubStructInnerFieldDrift(t *testing.T) {
+	dir := writeFixture(t, map[string]string{
+		"router_core.go": `package session
+type Router struct {
+	// 读写: core, lifecycle
+	wsStore workspaceStore
+}
+func (r *Router) init() { r.wsStore.overrides = nil }
+`,
+		"router_workspace.go": `package session
+type workspaceStore struct {
+	// 读写: core, lifecycle
+	overrides map[string]string
+}
+func (r *Router) set() { r.wsStore.overrides = nil }
+`,
+		"router_cleanup.go": `package session
+func (r *Router) save() { _ = r.wsStore.overrides }
+`,
+	})
+
+	vs, err := check(dir)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	// The inner "overrides" field is accessed in cleanup but its annotation
+	// omits cleanup → drift on the INNER field.
+	if !hasViolation(vs, "drift_omitted", "overrides", "cleanup") {
+		t.Errorf("expected drift_omitted on inner field overrides/cleanup, got %+v", vs)
+	}
+}
+
+// TestCheck_SubStructInnerFieldAttributed: when the inner field's annotation
+// covers every accessing domain, no drift is reported — proving r.<outer>.<inner>
+// is correctly credited to the inner field (not lost) across all router files.
+func TestCheck_SubStructInnerFieldAttributed(t *testing.T) {
+	dir := writeFixture(t, map[string]string{
+		"router_core.go": `package session
+type Router struct {
+	// 读写: core, lifecycle, cleanup, workspace
+	wsStore workspaceStore
+}
+func (r *Router) init() { r.wsStore.overrides = nil }
+`,
+		"router_workspace.go": `package session
+type workspaceStore struct {
+	// 读写: core, lifecycle, cleanup, workspace
+	overrides map[string]string
+}
+func (r *Router) set() { r.wsStore.overrides = nil }
+`,
+		"router_cleanup.go": `package session
+func (r *Router) save() { _ = r.wsStore.overrides }
+`,
+		"router_lifecycle.go": `package session
+func (r *Router) reset() { delete(r.wsStore.overrides, "k") }
+`,
+	})
+
+	vs, err := check(dir)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if hasViolation(vs, "drift_omitted", "overrides", "") {
+		t.Errorf("inner field overrides fully declared must not drift, got %+v", vs)
+	}
+	if hasViolation(vs, "drift_omitted", "wsStore", "") {
+		t.Errorf("outer field wsStore fully declared must not drift, got %+v", vs)
+	}
+}
+
 // TestParseAnnotation_DomainList verifies comma-segment leading-token parsing
 // and wildcard detection directly.
 func TestParseAnnotation_DomainList(t *testing.T) {

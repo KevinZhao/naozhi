@@ -181,13 +181,13 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 		// on chat prefix reset which is rare (user /reset action).
 		r.reconcileSessionActiveByBackendLocked()
 	}
-	if _, existed := r.workspaceOverrides[chatKeyPrefix]; existed {
-		delete(r.workspaceOverrides, chatKeyPrefix)
-		// Without wsOverridesDirty, the delete is only written back when some
+	if _, existed := r.wsStore.overrides[chatKeyPrefix]; existed {
+		delete(r.wsStore.overrides, chatKeyPrefix)
+		// Without wsStore.dirty, the delete is only written back when some
 		// other code path bumps the flag; a crash before that would reload
 		// the override on restart and silently undo the user's reset.
-		r.wsOverridesDirty = true
-		r.wsOverridesGen.Add(1)
+		r.wsStore.dirty = true
+		r.wsStore.gen.Add(1)
 	}
 	r.storeDirty = true
 	r.storeGen.Add(1)
@@ -391,7 +391,7 @@ type spawnParams struct {
 
 // resolveSpawnParamsLocked computes the merged spawn parameters for a new
 // session. The caller MUST hold r.mu (write lock) because this reads
-// r.backendOverrides, r.workspaceOverrides, r.sessions and mutates
+// r.backendOverrides, r.wsStore.overrides, r.sessions and mutates
 // r.backendOverrides (consuming the one-shot dashboard pick).
 //
 // Pure-ish: no I/O except resolveResumeID's jsonl stat. No log output, no
@@ -463,7 +463,7 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	//
 	// R245-ARCH-32 (#883): the per-chat-override > default base tier is
 	// resolved through resolveWorkspaceLocked — the single chat-level
-	// resolution point — instead of re-reading r.workspaceOverrides /
+	// resolution point — instead of re-reading r.wsStore.overrides /
 	// r.defaultCWD inline here. This kills the second source of truth that
 	// previously derived the same base independently and could drift from
 	// GetWorkspace. The opts and resume tiers still layer ON TOP of that
@@ -478,7 +478,7 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 		// Only treat as "overridden" (pinning out the resume tier) when an
 		// explicit per-chat override actually exists; a bare default must
 		// still allow the resume-session workspace to win below.
-		if _, ok := r.workspaceOverrides[chatKey]; ok {
+		if _, ok := r.wsStore.overrides[chatKey]; ok {
 			workspaceOverridden = true
 		}
 	} else {
@@ -1170,10 +1170,10 @@ func (r *Router) Reset(key string) {
 func (r *Router) ResetAndDiscardOverride(key string) {
 	r.mu.Lock()
 	proc, sessionID, hadSession := r.resetLocked(key)
-	if _, existed := r.workspaceOverrides[key]; existed {
-		delete(r.workspaceOverrides, key)
-		r.wsOverridesDirty = true
-		r.wsOverridesGen.Add(1)
+	if _, existed := r.wsStore.overrides[key]; existed {
+		delete(r.wsStore.overrides, key)
+		r.wsStore.dirty = true
+		r.wsStore.gen.Add(1)
 	}
 	r.mu.Unlock()
 	if !hadSession {
