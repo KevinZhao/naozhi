@@ -18,7 +18,7 @@ import (
 //
 // Pre-fix: notifyTarget invokes p.MaxReplyLength + SplitText + chunk
 // loop, then bails on the first replyCtx.Err() check. Post-fix: bail
-// at the function head before touching s.platforms[plat] or any text
+// at the function head before any NotifySender.Lookup or text
 // processing. The platform's Reply MUST NOT fire when stopCtx is
 // already cancelled at entry.
 func TestR20260527122801GO014_NotifyTargetShortCircuitsOnCancelledStopCtx(t *testing.T) {

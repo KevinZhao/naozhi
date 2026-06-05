@@ -20,6 +20,15 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
+// Compile-time interface-satisfaction guards so a method-set drift surfaces
+// here in the adapter file rather than at the newPlatformNotifySender return /
+// Lookup call site — mirroring cron_router_adapter.go's `var _ cron.SessionRouter`
+// precedent.
+var (
+	_ cron.NotifySender    = platformNotifySender{}
+	_ cron.PlatformReplier = platformReplier{}
+)
+
 // platformNotifySender implements cron.NotifySender over the live platform
 // map. The map is the same value handed to the scheduler; it is read-only
 // after boot.

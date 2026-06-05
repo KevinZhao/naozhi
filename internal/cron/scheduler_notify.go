@@ -3,7 +3,7 @@
 // Split out of scheduler.go to keep the dispatch surface (NotifyTarget +
 // resolveNotifyTarget priority ladder + deliverNotice + chunked notifyTarget)
 // in one place. No behaviour change. Methods stay on *Scheduler so the
-// s.platforms / s.notifyDefault fields remain accessible without exporting.
+// notifySender snapshot / s.notifyDefault fields remain accessible without exporting.
 
 package cron
 
