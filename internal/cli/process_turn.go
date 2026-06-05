@@ -48,18 +48,52 @@ const interruptedSettleWindow = 500 * time.Millisecond
 
 // findResultSince checks EventLog for a result entry logged after afterMS.
 // Used as fallback when eventCh may have dropped events due to full buffer.
+//
+// R20260605B-CORR-1 (#1805): the "result" EventEntry deliberately carries
+// only cost + turn-boundary metadata — its Detail/Summary are empty
+// (process_event_format.go intentionally does NOT copy ev.Result into them to
+// avoid a duplicate dashboard bubble). The visible reply text was logged
+// separately as the preceding "text" assistant entry. The old code returned
+// SendResult{Text: result.Detail}, i.e. an EMPTY Text, so any caller that hit
+// this fallback (eventCh-drop / watchdog no-output / total-timeout — all on
+// the legacy ACP/cron Send path) silently surfaced a BLANK reply even though
+// the CLI produced a full answer. We now recover the reply from the most
+// recent "text" entry at or after the result (falling back to the latest
+// "text" entry in the turn) so the answer text is preserved.
 func (p *Process) findResultSince(afterMS int64) *SendResult {
 	entries := p.eventLog.EntriesSince(afterMS)
 	for i := len(entries) - 1; i >= 0; i-- {
-		if entries[i].Type == "result" {
-			return &SendResult{
-				Text:      entries[i].Detail,
-				SessionID: p.GetSessionID(),
-				CostUSD:   entries[i].Cost,
-			}
+		if entries[i].Type != "result" {
+			continue
+		}
+		text := entries[i].Detail
+		if text == "" {
+			// The result entry never carries the reply text (#1805); recover
+			// it from the last assistant "text" entry that precedes this
+			// result within the same turn window. Detail holds the full
+			// (up to 16000-rune) text; Summary is the truncated preview.
+			text = lastTextEntryBefore(entries, i)
+		}
+		return &SendResult{
+			Text:      text,
+			SessionID: p.GetSessionID(),
+			CostUSD:   entries[i].Cost,
 		}
 	}
 	return nil
+}
+
+// lastTextEntryBefore returns the Detail of the most recent assistant "text"
+// entry at an index < resultIdx, or "" when the turn produced no text entry.
+// Used by findResultSince to recover the reply the empty-Detail "result"
+// entry does not carry. R20260605B-CORR-1 (#1805).
+func lastTextEntryBefore(entries []EventEntry, resultIdx int) string {
+	for j := resultIdx - 1; j >= 0; j-- {
+		if entries[j].Type == "text" && entries[j].Detail != "" {
+			return entries[j].Detail
+		}
+	}
+	return ""
 }
 
 // drainStaleEvents clears residual events from previous turns.
