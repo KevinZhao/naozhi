@@ -382,6 +382,15 @@ sysession 各自 narrow 接口）。
    R237-ARCH-4 已标 "Breaking: 是"），不与 P1-P6 的纯结构重排混在一个 PR。
    本 RFC 只负责把 #577 收窄、dedup、定边界，不展开 catalog 详细设计。
 
+**closure 状态（2026-06-05）**：上述 step 1 的 dedup-closure comment 已发布到 #577
+（`gh issue comment 577`），#577 已据此收窄——R234-ARCH-3 的 RouterView/DTO 部分确认
+由 #1600 关闭（`internal/session/api/assert.go` 仅留 `SessionVisitor` 编译期断言），
+#577 现仅覆盖 discovery↔sysession 的 session-catalog 职责边界，标记
+`needs-design`、blocked-on step 2 的 follow-up RFC（尚未立项）。补核：`internal/discovery`
+与 `internal/sysession` 当前**无互相 import**，故 P7 是 net-new breaking 抽象（与 §1.4
+"god-object 拆分会改动…接口"、§8.1 P7"中（须先 dedup）"一致），非安全文件搬迁——本轮
+不落任何 .go 代码，仅完成 dedup/收窄/定边界。
+
 ### 8.5 验收
 
 - 全部 P0-P7 落地后：`Router` 字段按 facet sub-struct 分组、单 `r.mu` 不变、
