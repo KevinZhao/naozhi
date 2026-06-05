@@ -18,7 +18,6 @@ import (
 
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
-	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 	"github.com/naozhi/naozhi/internal/sessionkey"
 )
@@ -180,7 +179,7 @@ type SessionRouter interface {
 //     AllowedRoot    — "" → no root constraint; NUL-bearing → cleared (loud).
 //     RunsKeepCount / RunsKeepWindow — <=0 → DefaultRunsKeepCount / DefaultRunsKeepWindow.
 //     JitterMax      — 0 → jitter disabled.
-//     Telemetry / NotifyDefault / Agents / Platforms / AgentCommands /
+//     Telemetry / NotifyDefault / Agents / NotifySender / AgentCommands /
 //     ParentCtx / AllowNilRouter — idiomatic-optional (nil/zero = feature off).
 //
 // applyDefaults() is pure/idempotent and is the single source of truth for
@@ -190,8 +189,15 @@ type SchedulerConfig struct {
 	// Router is the session router the scheduler talks to. Accepts the
 	// SessionRouter interface so tests can pass a minimal fake; production
 	// passes a *session.Router which satisfies it transparently.
-	Router        SessionRouter
-	Platforms     map[string]platform.Platform
+	Router SessionRouter
+	// NotifySender resolves a platform name to its PlatformReplier for cron
+	// completion notices. #725: replaces the former
+	// Platforms map[string]platform.Platform so internal/cron no longer
+	// imports internal/platform — the wireup layer builds a
+	// platformNotifySender adapter over the live platform map. nil = no
+	// notify delivery (the Lookup miss path keeps notifyTarget's existing
+	// "platform not found" WARN).
+	NotifySender  NotifySender
 	Agents        map[string]AgentOpts
 	AgentCommands map[string]string
 	// Telemetry receives RunStartedEvent / RunEndedEvent for every cron
@@ -323,7 +329,7 @@ func chatKeyFor(plat, chatID string) chatJobKey {
 //   - Lifecycle: cron / stopCtx / stopCancel / started / stopped /
 //     startedAtNanos / triggerWG / gcWG — written once at NewScheduler /
 //     Start / Stop, otherwise read-only or atomic.
-//   - Immutable-after-construction config: router / platforms / agents /
+//   - Immutable-after-construction config: router / notifySender / agents /
 //     agentCommands / location / notifyDefault / allowedRoot* /
 //     jitterMax / slowThreshold / execTimeout / maxJobs / maxJobsPerChat
 //     / storePath / stopBudget — set in NewScheduler, never reassigned, so
@@ -385,30 +391,26 @@ type Scheduler struct {
 	sortedJobIDs []string
 	// router is set once in NewScheduler and never reassigned.
 	router SessionRouter
-	// platforms / agents / agentCommands are populated from SchedulerConfig
+	// notifySender / agents / agentCommands are populated from SchedulerConfig
 	// at NewScheduler and treated as immutable thereafter — notifyTarget
-	// reads platforms without s.mu and executeOpt reads agents without
-	// s.mu. A future caller must NOT mutate these maps in place; if
+	// reads notifySender without s.mu and executeOpt reads agents without
+	// s.mu. A future caller must NOT mutate the maps in place; if
 	// dynamic backend/agent registration ever lands, switch to
 	// atomic.Pointer[map[...]] swap-on-write so reads stay lock-free without
 	// racing the writer.
 	//
-	// R219-ARCH-8 (#670) proposed replacing this map with a `Notifier
-	// interface { Notify(ctx, plat, chatID, text) error }` so cron stops
-	// calling platform.Reply / MaxReplyLength / SplitText directly and
-	// goes through dispatch.replyText's unified error handling. Deferred:
-	// the refactor entangles with deliverNotice's chunked send loop
-	// (SplitText needs MaxReplyLength → per-chunk Reply), the per-target
-	// retry budget, and the four call sites in scheduler_notify.go +
-	// scheduler_run.go that compose the chunk loop with formatCronNotice
-	// + per-target ctx. Wrapping in a Notifier without breaking
-	// per-chunk error reporting requires either pushing chunking into
-	// the Notifier (adds a per-platform-config dependency the dispatch
-	// layer doesn't have today) or surfacing chunk metadata back to cron
-	// (multi-error contract). RFC cron-sysession-merge Phase E covers
-	// this within the larger dispatch unification — leaving #670 to
-	// land alongside that work rather than fragmenting the contract.
-	// R249-ARCH-27 (#991): platforms / agents / agentCommands are bundled
+	// #725: notifyTarget now resolves its send surface through the cron-local
+	// NotifySender / PlatformReplier interfaces (notify_sender.go) instead of
+	// indexing a map[string]platform.Platform and calling platform.SplitText /
+	// platform.ReplyWithRetry directly. This severs the internal/cron →
+	// internal/platform import edge (the wireup layer owns the adapter,
+	// mirroring the cronSessionAdapter precedent R20260527122801-ARCH-1 /
+	// #1318) and supersedes the deferred R219-ARCH-8 (#670) Notifier proposal:
+	// the chunked send loop (SplitText → MaxReplyLength → per-chunk Reply),
+	// the per-target retry budget, and the partial-delivery telemetry stay in
+	// notifyTarget — only the concrete platform calls move behind the
+	// interface, so per-chunk error reporting is unchanged.
+	// R249-ARCH-27 (#991): notifySender / agents / agentCommands are bundled
 	// behind a single atomic.Pointer[cronConfigMaps] instead of three bare
 	// map fields. They are write-once at NewScheduler today and read
 	// lock-free by notifyTarget / executeOpt; the prior shape leaned on a
@@ -1081,7 +1083,14 @@ func (cfg *SchedulerConfig) resolveAllowedRoot() string {
 // reader ever observes a torn cross-map state and no per-field lock is
 // needed.
 type cronConfigMaps struct {
-	platforms     map[string]platform.Platform
+	// notifySender is published inside this same atomic snapshot as
+	// agents/agentCommands (R249-ARCH-27 / #991): notifyTarget reads it via
+	// s.configMaps() without s.mu, so it MUST share the single
+	// atomic.Pointer[cronConfigMaps] rather than living in its own field, or
+	// a reader could observe a torn cross-field snapshot. #725: it is an
+	// interface value (write-once at NewScheduler), so unlike the maps it is
+	// not cloned — there is no backing array to alias.
+	notifySender  NotifySender
 	agents        map[string]AgentOpts
 	agentCommands map[string]string
 }
@@ -1174,21 +1183,23 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		chatJobCount: make(map[chatJobKey]int),
 		jobsByChat:   make(map[chatJobKey][]*Job),
 		router:       cfg.Router,
-		// R241-ARCH-3 (#506) + R249-ARCH-27 (#991): platforms / agents /
+		// R241-ARCH-3 (#506) + R249-ARCH-27 (#991): notifySender / agents /
 		// agentCommands are documented as immutable after NewScheduler so
 		// notifyTarget + executeOpt can read them lock-free. The constructor
 		// previously aliased the caller-supplied maps verbatim — leaving the
 		// immutability contract dependent on the caller's discipline. A
-		// late-binding wireup that re-assigned cfg.Platforms[plat]
+		// late-binding wireup that re-assigned cfg.Agents[name]
 		// (legitimate at boot, dangerous post-Start) would race the lock-free
 		// reads in cron-package hot paths. maps.Clone severs the alias at
 		// construction so the contract is enforced by the receiver, not by
-		// caller trust; the cloned trio is then published as one immutable
-		// *cronConfigMaps via configMapsPtr.Store below so readers Load() a
-		// consistent cross-map snapshot. maps.Clone returns nil for nil input
-		// so callers that omit any of these fields (test fixtures, narrow
-		// integration tests) keep the prior nil-map semantics — indexing a
-		// nil map is a safe zero-value read.
+		// caller trust; the cloned maps + the (interface-valued) NotifySender
+		// are then published as one immutable *cronConfigMaps via
+		// configMapsPtr.Store below so readers Load() a consistent cross-field
+		// snapshot. maps.Clone returns nil for nil input so callers that omit
+		// any map field (test fixtures, narrow integration tests) keep the
+		// prior nil-map semantics — indexing a nil map is a safe zero-value
+		// read. #725: NotifySender carries no backing array, so it is stored
+		// directly (no clone).
 		storePath:      cfg.StorePath,
 		maxJobs:        cfg.MaxJobs,
 		maxJobsPerChat: maxPerChat,
@@ -1231,7 +1242,10 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	// atomic.Pointer makes a future hot-reload swap race-free without
 	// retrofitting every read site. Set once here, never swapped today.
 	s.configMapsPtr.Store(&cronConfigMaps{
-		platforms:     maps.Clone(cfg.Platforms),
+		// #725: NotifySender is an interface value, not a map — write it once
+		// into the snapshot (no maps.Clone: there is no backing array to alias
+		// away from a late-binding wireup writer).
+		notifySender:  cfg.NotifySender,
 		agents:        maps.Clone(cfg.Agents),
 		agentCommands: maps.Clone(cfg.AgentCommands),
 	})
