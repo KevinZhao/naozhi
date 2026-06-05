@@ -660,7 +660,7 @@ func TestResetRunningSession(t *testing.T) {
 // under -race to catch any lock regression.
 func TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace(t *testing.T) {
 	r := newTestRouter(3)
-	r.workspaceOverrides = make(map[string]string)
+	r.wsStore.overrides = make(map[string]string)
 	r.defaultCWD = "/default"
 	injectSession(r, "key1", newIdleProc())
 	r.SetWorkspace("key1", "/tmp/override")
@@ -668,7 +668,7 @@ func TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace(t *testing.T) {
 		t.Fatalf("pre-reset workspace = %q, want /tmp/override", got)
 	}
 	r.ResetAndDiscardOverride("key1")
-	if _, ok := r.workspaceOverrides["key1"]; ok {
+	if _, ok := r.wsStore.overrides["key1"]; ok {
 		t.Error("workspaceOverrides[key1] still present after ResetAndDiscardOverride")
 	}
 	if got := r.GetWorkspace("key1"); got != "/default" {
@@ -705,17 +705,17 @@ func TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace(t *testing.T) {
 // entry point.
 func TestRouter_SetWorkspace_RejectsEmptyChatKey(t *testing.T) {
 	r := newTestRouter(3)
-	r.workspaceOverrides = make(map[string]string)
+	r.wsStore.overrides = make(map[string]string)
 	r.defaultCWD = "/default"
 
 	r.SetWorkspace("", "/tmp/attacker")
 
 	// 1) Empty-key slot must not be installed.
-	if _, ok := r.workspaceOverrides[""]; ok {
+	if _, ok := r.wsStore.overrides[""]; ok {
 		t.Error("workspaceOverrides[\"\"] was installed; expected empty-chatKey reject")
 	}
 	// 2) Map cap must not have been consumed.
-	if got := len(r.workspaceOverrides); got != 0 {
+	if got := len(r.wsStore.overrides); got != 0 {
 		t.Errorf("len(workspaceOverrides) = %d after empty-chatKey SetWorkspace; want 0", got)
 	}
 	// 3) GetWorkspace("") must fall through to the configured default,
@@ -2162,21 +2162,22 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 	// Router with one default backend "claude" plus a secondary "kiro" so
 	// backend-override cases have a real target.
 	mkRouter := func() *Router {
-		return &Router{
+		r := &Router{
 			sessions: make(map[string]*ManagedSession),
 			wrappers: map[string]*cli.Wrapper{
 				"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
 				"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
 			},
-			defaultBackend:     "claude",
-			model:              "sonnet-default",
-			extraArgs:          []string{"--flag-a"},
-			backendModels:      map[string]string{"kiro": "kiro-model"},
-			backendExtraArgs:   map[string][]string{"kiro": {"--kiro-arg"}},
-			defaultCWD:         "/default/ws",
-			workspaceOverrides: make(map[string]string),
-			backendOverrides:   make(map[string]string),
+			defaultBackend:   "claude",
+			model:            "sonnet-default",
+			extraArgs:        []string{"--flag-a"},
+			backendModels:    map[string]string{"kiro": "kiro-model"},
+			backendExtraArgs: map[string][]string{"kiro": {"--kiro-arg"}},
+			defaultCWD:       "/default/ws",
+			backendOverrides: make(map[string]string),
 		}
+		r.wsStore.overrides = make(map[string]string)
+		return r
 	}
 
 	t.Run("backendOverride wins when opts.Backend empty", func(t *testing.T) {
@@ -2210,7 +2211,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 
 	t.Run("workspaceOverride (chatKey) wins when opts.Workspace empty", func(t *testing.T) {
 		r := mkRouter()
-		r.workspaceOverrides["feishu:user:alice"] = "/override/ws"
+		r.wsStore.overrides["feishu:user:alice"] = "/override/ws"
 		sp := r.resolveSpawnParamsLocked("feishu:user:alice:agent1", "", AgentOpts{})
 		if sp.Workspace != "/override/ws" {
 			t.Errorf("Workspace = %q, want /override/ws", sp.Workspace)
@@ -2219,7 +2220,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 
 	t.Run("opts.Workspace beats workspaceOverride", func(t *testing.T) {
 		r := mkRouter()
-		r.workspaceOverrides["feishu:user:alice"] = "/override/ws"
+		r.wsStore.overrides["feishu:user:alice"] = "/override/ws"
 		sp := r.resolveSpawnParamsLocked("feishu:user:alice:agent1", "",
 			AgentOpts{Workspace: "/opts/ws"})
 		if sp.Workspace != "/opts/ws" {

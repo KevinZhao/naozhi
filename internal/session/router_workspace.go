@@ -1,6 +1,33 @@
 package session
 
-import "log/slog"
+import (
+	"log/slog"
+	"sync/atomic"
+)
+
+// workspaceStore groups the three correlated per-chat workspace-override
+// fields (Router P1 facet, #383). It is a value field on Router, carries NO
+// lock of its own, and is read/written ONLY under Router.mu — the lock
+// topology is unchanged (RFC §3 candidate A: single r.mu retained).
+//
+// overrides stores per-chat workspace overrides.
+// Key format: "platform:chatType:chatID" (3-segment chat key —
+// distinct from the 4-segment session key used in r.sessions).
+//
+// Two-key invariant: every chatKey present in sessionsByChat may
+// have an overrides entry; ResetChat clears both maps.
+// SetWorkspace creates only the override entry (no session yet),
+// and Reset(key)/evictOldest must NOT touch this map — it is
+// driven by user intent (SetWorkspace) rather than the session
+// lifecycle.
+type workspaceStore struct {
+	// 读写: core (init/load), lifecycle (SetWorkspace/GetWorkspace), cleanup (save), discovery (Takeover), workspace (resolveWorkspaceLocked/WorkspaceRoots)
+	overrides map[string]string
+	// 读写: lifecycle (ResetChat / RenameSession), discovery (Takeover), cleanup (saveIfDirty consume), workspace (SetWorkspace mutation)
+	dirty bool // true when workspace overrides changed since last save
+	// 读写: lifecycle (ResetChat / RenameSession), discovery (Takeover), cleanup (snapshot/check during save), workspace (SetWorkspace mutation)
+	gen atomic.Uint64 // increments on each ws-override mutation, mirrors storeGen pattern
+}
 
 // as maxBackendOverrides (R55-SEC-001): authenticated callers can POST unique
 // chat keys to /api/sessions/send and each valid call grows the map by one
@@ -31,14 +58,14 @@ func (r *Router) SetWorkspace(chatKey, path string) {
 	// Allow existing keys to be updated without bumping against the cap;
 	// only reject brand-new keys once the limit is hit. Mirrors the
 	// SetSessionBackend gating pattern.
-	if _, existing := r.workspaceOverrides[chatKey]; !existing && len(r.workspaceOverrides) >= maxWorkspaceOverrides {
+	if _, existing := r.wsStore.overrides[chatKey]; !existing && len(r.wsStore.overrides) >= maxWorkspaceOverrides {
 		slog.Warn("workspaceOverrides at capacity; dropping override",
 			"chat_key", chatKey, "cap", maxWorkspaceOverrides)
 		return
 	}
-	r.workspaceOverrides[chatKey] = path
-	r.wsOverridesDirty = true
-	r.wsOverridesGen.Add(1)
+	r.wsStore.overrides[chatKey] = path
+	r.wsStore.dirty = true
+	r.wsStore.gen.Add(1)
 }
 
 // GetWorkspace returns the effective workspace for a chat key.
@@ -55,7 +82,7 @@ func (r *Router) GetWorkspace(chatKey string) string {
 // resolveSpawnParamsLocked layers the additional opts/resume tiers ON TOP
 // of this chat-level base rather than re-deriving it independently.
 func (r *Router) resolveWorkspaceLocked(chatKey string) string {
-	if ws, ok := r.workspaceOverrides[chatKey]; ok {
+	if ws, ok := r.wsStore.overrides[chatKey]; ok {
 		return ws
 	}
 	return r.defaultCWD
@@ -70,8 +97,8 @@ func (r *Router) resolveWorkspaceLocked(chatKey string) string {
 func (r *Router) WorkspaceRoots() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	seen := make(map[string]struct{}, len(r.workspaceOverrides)+1)
-	out := make([]string, 0, len(r.workspaceOverrides)+1)
+	seen := make(map[string]struct{}, len(r.wsStore.overrides)+1)
+	out := make([]string, 0, len(r.wsStore.overrides)+1)
 	add := func(p string) {
 		if p == "" {
 			return
@@ -83,7 +110,7 @@ func (r *Router) WorkspaceRoots() []string {
 		out = append(out, p)
 	}
 	add(r.defaultCWD)
-	for _, ws := range r.workspaceOverrides {
+	for _, ws := range r.wsStore.overrides {
 		add(ws)
 	}
 	return out
