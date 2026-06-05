@@ -14,8 +14,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/dashboard/auth"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -859,13 +859,13 @@ func TestHandleAuth_WSToken_SetsUploadOwner(t *testing.T) {
 	if !c.authenticated.Load() {
 		t.Fatal("expected authenticated=true after valid token")
 	}
-	if c.uploadOwner == "" {
+	if c.uploadOwnerKey() == "" {
 		t.Fatal("uploadOwner is empty — per-owner upload quota cannot be enforced (R67-SEC-1)")
 	}
 	// R247-SEC-16: hex(sha256("secret")[:16]) — 32 hex chars = 16 bytes
 	// (128-bit, was 64-bit). Parity with HTTP ownerKeyFromCookie.
-	if len(c.uploadOwner) != 32 {
-		t.Errorf("uploadOwner length = %d, want 32 (hex of 16-byte prefix; R247-SEC-16)", len(c.uploadOwner))
+	if len(c.uploadOwnerKey()) != 32 {
+		t.Errorf("uploadOwner length = %d, want 32 (hex of 16-byte prefix; R247-SEC-16)", len(c.uploadOwnerKey()))
 	}
 }
 
@@ -884,7 +884,7 @@ func TestHandleAuth_WSToken_OwnerStableAcrossCalls(t *testing.T) {
 			subGen:        make(map[string]uint64),
 		}
 		hub.handleAuth(c, node.ClientMsg{Type: "auth", Token: "secret"})
-		return c.uploadOwner
+		return c.uploadOwnerKey()
 	}
 	if a, b := derive(), derive(); a != b {
 		t.Errorf("uploadOwner not stable: %q vs %q", a, b)

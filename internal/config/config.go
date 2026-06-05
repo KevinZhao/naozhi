@@ -623,9 +623,6 @@ func applyDefaults(cfg *Config) {
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = defaultLogLevel
 	}
-	if cfg.Session.Workspace == "" {
-		cfg.Session.Workspace = defaultSessionCWD
-	}
 	if cfg.Session.Queue.MaxDepth == nil {
 		defaultDepth := defaultQueueMaxDepth
 		cfg.Session.Queue.MaxDepth = &defaultDepth
@@ -636,6 +633,10 @@ func applyDefaults(cfg *Config) {
 	if cfg.Session.Queue.Mode == "" {
 		cfg.Session.Queue.Mode = defaultQueueMode
 	}
+	// Reconcile cwd / deprecated workspace using the operator's raw input —
+	// the default must NOT be pre-filled into either field before this, or a
+	// pure-default deployment would spuriously trip the deprecation warning
+	// below. R71-CONFIG-M1.
 	if cfg.Session.CWD != "" {
 		if cfg.Session.Workspace != "" && cfg.Session.Workspace != cfg.Session.CWD {
 			slog.Warn("both 'session.cwd' and deprecated 'session.workspace' configured; using 'cwd'")
@@ -648,6 +649,12 @@ func applyDefaults(cfg *Config) {
 		// promotion forever. R71-CONFIG-M1.
 		slog.Warn("'session.workspace' is deprecated, please rename to 'session.cwd'")
 		cfg.Session.CWD = cfg.Session.Workspace
+	} else {
+		// Neither set: fall back to the default. Write only to the canonical
+		// `cwd` field, then mirror to the deprecated alias so downstream
+		// readers of either field keep working.
+		cfg.Session.CWD = defaultSessionCWD
+		cfg.Session.Workspace = defaultSessionCWD
 	}
 
 	// Deprecation: the auto-workspace-chain feature was retired (RFC

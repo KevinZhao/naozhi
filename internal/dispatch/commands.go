@@ -219,7 +219,7 @@ func (d *Dispatcher) handleUrgentCommand(ctx context.Context, msg platform.Incom
 	// cancelSrc = d.stopCtx  → goroutine aborts when the service shuts down.
 	// valuesSrc = ctx         → per-request slog attrs / auth values survive.
 	sendCtx := mergeStopAndValues(d.stopCtx, ctx)
-	go d.sendAndReply(WithUrgent(WithPassthrough(sendCtx)), key, text, nil, agentID, opts, msg, log, false)
+	d.goSendAndReply(WithUrgent(WithPassthrough(sendCtx)), key, text, nil, agentID, opts, msg, log, false)
 }
 
 func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.IncomingMessage) {

@@ -251,6 +251,11 @@ func agentIDList(agents map[string]session.AgentOpts) []string {
 	ids := make([]string, 0, len(agents)+1)
 	ids = append(ids, "general")
 	for id := range agents {
+		if id == "general" {
+			// "general" is already prepended unconditionally; skip the
+			// configured copy so it isn't listed twice.
+			continue
+		}
 		ids = append(ids, id)
 	}
 	return ids

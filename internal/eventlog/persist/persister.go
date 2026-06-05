@@ -328,6 +328,17 @@ type Persister struct {
 
 	writers map[string]*perKeyWriter
 
+	// dropping tracks stems whose on-disk files are mid-removal by the
+	// async goroutine spawned in handleOp(opDrop). The mapped channel is
+	// closed by that goroutine once removeKeyFiles returns, so writerFor
+	// can block on it to guarantee a same-key recreation's O_CREATE lands
+	// strictly AFTER the unlink — otherwise a slow os.Remove could race
+	// the recreated file and delete it (#1774). The map is mutated ONLY on
+	// the run goroutine (insert in handleOp, delete in opDropDone); the
+	// channel value is closed by the async goroutine. Nil-safe: an absent
+	// key means no removal is in flight.
+	dropping map[string]chan struct{}
+
 	// fs is the filesystem classification captured at startup. Never
 	// mutated after NewPersister returns — exposing a changing value
 	// would mislead operators whose only reliable intervention is a
@@ -480,12 +491,13 @@ func NewPersister(opts Options) (*Persister, error) {
 	}
 
 	p := &Persister{
-		opts:    opts,
-		in:      make(chan batchJob, opts.ChannelBuffer),
-		opCh:    make(chan op, 8), // small — drop/flush are rare
-		closeCh: make(chan struct{}),
-		writers: make(map[string]*perKeyWriter),
-		fs:      DetectFS(opts.Dir),
+		opts:     opts,
+		in:       make(chan batchJob, opts.ChannelBuffer),
+		opCh:     make(chan op, 8), // small — drop/flush are rare
+		closeCh:  make(chan struct{}),
+		writers:  make(map[string]*perKeyWriter),
+		dropping: make(map[string]chan struct{}),
+		fs:       DetectFS(opts.Dir),
 	}
 	if !p.fs.Supported {
 		// Operators deserve a prominent log line; doctor + /health
@@ -843,6 +855,12 @@ type opKind int
 const (
 	opDrop opKind = iota
 	opFlushAll
+	// opDropDone is posted by the async removeKeyFiles goroutine once the
+	// unlink completes, so the run goroutine can clear the stem from
+	// p.dropping. Carries the same channel that was stored in the map so
+	// the delete only fires when it still matches (a fresh opDrop for the
+	// same stem may have replaced the entry in between). #1774.
+	opDropDone
 )
 
 type op struct {
@@ -850,6 +868,9 @@ type op struct {
 	key  string
 	stem string
 	done chan error
+	// ch is the per-stem completion channel, set only on opDropDone so
+	// the run goroutine can match-and-delete the dropping entry.
+	ch chan struct{}
 }
 
 // run is the single writer goroutine's main loop. It multiplexes
@@ -1062,13 +1083,41 @@ func (p *Persister) handleOp(o op) {
 		// have completed yet — Linux/Darwin allow O_CREAT after
 		// unlink-in-flight, the new inode just replaces the dirent).
 		p.dropInMemoryLocked(o.key)
-		go func(stem string, done chan error) {
+		// R20260605 (#1774): publish a per-stem completion channel BEFORE
+		// spawning the async unlink. writerFor blocks on this channel so a
+		// same-key recreation cannot OpenFile(O_CREATE) until the unlink
+		// has finished — otherwise a slow os.Remove (FUSE/NFS) could land
+		// after the recreated file and delete it. The async goroutine
+		// closes the channel right after removeKeyFiles returns and posts
+		// opDropDone so the run goroutine clears the map entry.
+		dropCh := make(chan struct{})
+		p.dropping[o.stem] = dropCh
+		go func(stem string, done chan error, ch chan struct{}) {
 			err := p.removeKeyFiles(stem)
+			// Unblock any writerFor waiting on this stem (and signal to
+			// every future waiter) before notifying the caller.
+			close(ch)
+			// Clear the dropping entry on the run goroutine; carry ch so
+			// the delete is a no-op if a newer drop replaced the entry.
+			select {
+			case p.opCh <- op{kind: opDropDone, stem: stem, ch: ch}:
+			case <-p.closeCh:
+				// Persister shutting down — the map is goroutine-local to
+				// run, which has stopped consuming opCh; nothing to clear.
+			}
 			if done != nil {
 				done <- err
 			}
-		}(o.stem, o.done)
+		}(o.stem, o.done, dropCh)
 		return // explicit: skip the post-switch o.done write below
+	case opDropDone:
+		// Clear the dropping entry only if it still matches the channel we
+		// closed — a fresh opDrop for the same stem may have installed a
+		// new channel in between, which a later opDropDone will retire.
+		if cur, ok := p.dropping[o.stem]; ok && cur == o.ch {
+			delete(p.dropping, o.stem)
+		}
+		return
 	case opFlushAll:
 		// Same rationale as opDrop: Flush must observe every pending
 		// batchJob before fsyncing. Without this, tests and /health
@@ -1152,16 +1201,21 @@ func (p *Persister) removeKeyFiles(stem string) error {
 	logPath := filepath.Join(p.opts.Dir, stem+logExt)
 	idxPath := filepath.Join(p.opts.Dir, stem+idxExt)
 	var firstErr error
-	if err := os.Remove(logPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := removeFileHook(logPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		firstErr = fmt.Errorf("remove log: %w", err)
 	}
-	if err := os.Remove(idxPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := removeFileHook(idxPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		if firstErr == nil {
 			firstErr = fmt.Errorf("remove idx: %w", err)
 		}
 	}
 	return firstErr
 }
+
+// removeFileHook is the writable seam tests use to inject a slow or
+// instrumented unlink (e.g. to exercise the DropKey-then-recreate race
+// guarded by p.dropping, #1774). Production callers leave it at os.Remove.
+var removeFileHook = os.Remove
 
 func (p *Persister) flushAllLocked() error {
 	// R250-PERF-25 (#1128): pre-filter dirty writers so the fan-out
@@ -1493,6 +1547,16 @@ func (p *Persister) handleBatch(job batchJob, now time.Time) {
 func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 	if w, ok := p.writers[key]; ok {
 		return w, nil
+	}
+
+	// R20260605 (#1774): if this stem is mid-removal, wait for the async
+	// unlink to finish before opening so O_CREATE lands strictly after the
+	// remove. The channel is closed by the removeKeyFiles goroutine; once
+	// closed this receive returns immediately for every future waiter.
+	// Safe to block the run goroutine here: the close is driven by an
+	// independent goroutine, not by an opCh message run must still process.
+	if ch, ok := p.dropping[stem]; ok {
+		<-ch
 	}
 
 	logPath := filepath.Join(p.opts.Dir, stem+logExt)
