@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/netutil"
 	"github.com/naozhi/naozhi/internal/ratelimit"
 	"golang.org/x/time/rate"
 )
@@ -136,43 +137,10 @@ func (l *ipLimiter) AllowRequest(r *http.Request) bool {
 // tail. Exposed at package level so handlers wanting to return 400 (rather
 // than the limiter's 429) on a misconfigured proxy can short-circuit.
 func requestHasResolvableClientIP(r *http.Request, trustedProxy bool) bool {
-	if !trustedProxy {
-		// RemoteAddr is set by http.Server for every accepted connection;
-		// even UDS deployments reach this branch with empty / "@" — the
-		// rate limiter treats those as unknownIPKey, which is acceptable
-		// because the kernel has already filesystem-gated UDS access.
-		return true
-	}
-	xff := r.Header.Get("X-Forwarded-For")
-	if xff == "" {
-		return false
-	}
-	tail := xff
-	if i := lastComma(xff); i >= 0 {
-		tail = xff[i+1:]
-	}
-	tail = trimSpace(tail)
-	return tail != "" && net.ParseIP(tail) != nil
-}
-
-// lastComma / trimSpace are tiny inlinable helpers kept local to avoid
-// pulling strings into ip_limiter.go for one function. Mirrors the
-// netutil.ClientIP zero-alloc XFF parse so behaviour stays identical.
-func lastComma(s string) int {
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] == ',' {
-			return i
-		}
-	}
-	return -1
-}
-
-func trimSpace(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
-		s = s[1:]
-	}
-	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t') {
-		s = s[:len(s)-1]
-	}
-	return s
+	// Delegates to netutil so the loopback-direct-access exemption
+	// (R20260605) lives in one place. In !trustedProxy mode every request
+	// has a key; in trustedProxy mode an XFF-carrying request OR a loopback
+	// direct connection (SSH tunnel / local curl) is resolvable, while an
+	// externally-routable XFF-less request stays unresolvable (R244-SEC-P3-3).
+	return netutil.RequestHasResolvableClientIP(r, trustedProxy)
 }
