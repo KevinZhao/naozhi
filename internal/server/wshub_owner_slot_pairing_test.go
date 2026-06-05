@@ -113,6 +113,104 @@ func TestHandleAuth_TokenRekey_ReserveFailRejects(t *testing.T) {
 	hub.releaseOwnerSlot(c.uploadOwnerKey())
 }
 
+// TestRekeyOwnerSlot_ConcurrentUnregisterNoLeak pins R20260605B-CORR-4
+// (#1808): the handleAuth re-key (release(old) → reserve(new) →
+// setUploadOwner(new)) used to run as three separate steps with no shared
+// lock, so a concurrent writePump-triggered unregister reading
+// c.uploadOwnerKey() in the window after reserve(new) but before
+// setUploadOwner(new) released the wrong owner ("") and leaked newOwner's
+// slot. rekeyOwnerSlot now performs the swap under connCountByOwnerMu and
+// gates on c.done; releaseOwnerSlotForClient reads the owner key under the
+// same lock. For EVERY interleaving the per-owner counter must settle to
+// exactly zero — no phantom slot survives. Run under -race.
+func TestRekeyOwnerSlot_ConcurrentUnregisterNoLeak(t *testing.T) {
+	owner := tokenOwnerKey("secret")
+	for iter := 0; iter < 200; iter++ {
+		hub, _ := newTestHub("secret")
+
+		c := &wsClient{
+			send:          make(chan []byte, 4),
+			done:          make(chan struct{}),
+			subscriptions: make(map[string]func()),
+			subGen:        make(map[string]uint64),
+		}
+		// Upgrade-time reservation against the empty pre-auth owner, then
+		// register so unregister's `removed` gate fires exactly once.
+		if !hub.reserveOwnerSlot(c.uploadOwnerKey()) {
+			t.Fatal("empty-owner reserve must succeed")
+		}
+		hub.register(c)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		// readPump arm: re-key to the token-derived owner.
+		go func() {
+			defer wg.Done()
+			hub.rekeyOwnerSlot(c, "", owner)
+		}()
+		// writePump teardown arm: close done (as the pump defer does) then
+		// unregister, which releases the slot via releaseOwnerSlotForClient.
+		go func() {
+			defer wg.Done()
+			c.closeDone()
+			hub.unregister(c)
+		}()
+		wg.Wait()
+
+		// Whichever order won, no live connection remains, so the per-owner
+		// counter for BOTH the empty and the token owner must be back to zero
+		// (the map drops entries that reach 0).
+		hub.connCountByOwnerMu.Lock()
+		gotNew := hub.connCountByOwner[owner]
+		gotEmpty := hub.connCountByOwner[""]
+		hub.connCountByOwnerMu.Unlock()
+		if gotNew != 0 {
+			hub.Shutdown()
+			t.Fatalf("iter %d: per-owner count for newOwner = %d, want 0 (slot leaked)", iter, gotNew)
+		}
+		if gotEmpty != 0 {
+			hub.Shutdown()
+			t.Fatalf("iter %d: per-owner count for empty owner = %d, want 0", iter, gotEmpty)
+		}
+		hub.Shutdown()
+	}
+}
+
+// TestRekeyOwnerSlot_SkipsWhenConnDone pins the done-gate: if the connection
+// has already torn down (c.done closed and its slot released by unregister)
+// when the delayed handleAuth re-key runs, rekeyOwnerSlot must NOT reserve a
+// fresh slot for the dead conn — that slot would never be released because
+// unregister's once-only `removed` gate has already passed.
+func TestRekeyOwnerSlot_SkipsWhenConnDone(t *testing.T) {
+	hub, _ := newTestHub("secret")
+	defer hub.Shutdown()
+
+	c := &wsClient{
+		send:          make(chan []byte, 4),
+		done:          make(chan struct{}),
+		subscriptions: make(map[string]func()),
+		subGen:        make(map[string]uint64),
+	}
+	if !hub.reserveOwnerSlot(c.uploadOwnerKey()) {
+		t.Fatal("empty-owner reserve must succeed")
+	}
+	hub.register(c)
+	// Full teardown first: closes done and releases the empty-owner slot.
+	c.closeDone()
+	hub.unregister(c)
+
+	owner := tokenOwnerKey("secret")
+	if hub.rekeyOwnerSlot(c, "", owner) {
+		t.Fatal("rekeyOwnerSlot must return false once the conn is done")
+	}
+	hub.connCountByOwnerMu.Lock()
+	got := hub.connCountByOwner[owner]
+	hub.connCountByOwnerMu.Unlock()
+	if got != 0 {
+		t.Fatalf("rekey reserved a phantom slot for a dead conn: count = %d, want 0", got)
+	}
+}
+
 // TestUploadOwnerAtomic_NoRace pins #1776: handleAuth writes c.uploadOwner from
 // the readPump while releaseOwnerSlot/allowSendForOwner read it from the
 // writePump-driven teardown / send path. With the field as a plain string this
