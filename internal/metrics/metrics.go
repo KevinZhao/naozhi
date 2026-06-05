@@ -339,6 +339,20 @@ var (
 	CronRunTimedOutTotal  = expvar.NewInt("naozhi_cron_run_timed_out_total")
 	CronRunCanceledTotal  = expvar.NewInt("naozhi_cron_run_canceled_total")
 
+	// SysessionRunStartedTotal counts sysession daemon run starts (after the
+	// per-daemon CAS gate, before tick IO). Mirrors CronRunStartedTotal for
+	// the sysession subsystem (#1723 RFC §6 Phase 1.5). Bumped unconditionally
+	// inside emitRunStarted — before the nil-broadcaster early return — so the
+	// counter never drifts from the broadcast path (cron R230C-GO-15 rationale).
+	SysessionRunStartedTotal = expvar.NewInt("naozhi_sysession_run_started_total")
+
+	// SysessionRunEndedTotal counts sysession daemon run terminal transitions
+	// across all states. Pairs with SysessionRunStartedTotal — the difference
+	// (modulo inflight) approximates "runs interrupted by panic / process
+	// crash". Mirrors CronRunEndedTotal; bumped unconditionally inside
+	// emitRunEnded before the nil-broadcaster early return.
+	SysessionRunEndedTotal = expvar.NewInt("naozhi_sysession_run_ended_total")
+
 	// CronRunInflight is a gauge of currently executing cron runs. Bumped
 	// on CAS-gate success, decremented on terminal transition. Naming uses
 	// no `_total` suffix so the doc-sync regex treats it as a gauge.
