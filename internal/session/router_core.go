@@ -293,9 +293,9 @@ const (
 type Router struct {
 	// 读写: core (lock primitive itself), all router_*.go (acquired by methods)
 	mu sync.RWMutex
-	// 读写: core, lifecycle, cleanup
+	// 读写: core, lifecycle, cleanup, capacity (waitForCapacity broadcast/wait)
 	shutdownCond *sync.Cond // signaled when process state changes; conditioned on mu (write lock)
-	// 读写: core (init), lifecycle (spawn/reset/rename), shim (reconnect), cleanup (remove/cleanup), discovery (takeover/register)
+	// 读写: core (init), lifecycle (spawn/reset/rename), shim (reconnect), cleanup (remove/cleanup), discovery (takeover/register), capacity (reconcile active-gauge scan)
 	sessions map[string]*ManagedSession
 	// sessionsByChat is a secondary index: chat key → set of session keys.
 	// Enables O(k) ResetChat instead of O(n) full scan (k = agents per chat, typically 1-3).
@@ -318,7 +318,7 @@ type Router struct {
 	// Nil in test-created routers; helpers are nil-safe.
 	// 读写: core (indexAdd/Del helpers + resolver), lifecycle (install/unregister)
 	keyhashToKey map[string]string
-	// 读写: core (init), backend (wrapperFor), lifecycle (spawn)
+	// 读写: core (init), backend (wrapperFor), lifecycle (spawn), shim (shimManagers)
 	wrapper *cli.Wrapper // default (legacy single-backend) wrapper
 	// 读写: core (init), backend (wrapperFor/managerFor/BackendIDs), lifecycle, shim
 	wrappers map[string]*cli.Wrapper // backend ID → wrapper (nil in legacy mode)
@@ -338,17 +338,17 @@ type Router struct {
 	ttl time.Duration
 	// 读写: core (init), cleanup (shouldPrune)
 	pruneTTL time.Duration
-	// 读写: core (init), lifecycle (resolveSpawnParams)
+	// 读写: core (init), lifecycle (resolveSpawnParams), backend (backendDefaultsFor base)
 	model string
-	// 读写: core (init), lifecycle (resolveSpawnParams)
+	// 读写: core (init), lifecycle (resolveSpawnParams), backend (backendDefaultsFor base)
 	extraArgs []string
 	// backendModels / backendExtraArgs optionally override model and args
 	// per backend ID. Read-only after NewRouter.
-	// 读写: core (init), lifecycle (resolveSpawnParams)
+	// 读写: core (init), lifecycle (resolveSpawnParams), backend (backendDefaultsFor override)
 	backendModels map[string]string
-	// 读写: core (init), lifecycle (resolveSpawnParams)
+	// 读写: core (init), lifecycle (resolveSpawnParams), backend (backendDefaultsFor override)
 	backendExtraArgs map[string][]string
-	// 读写: core (init/DefaultWorkspace), lifecycle (GetWorkspace fallback)
+	// 读写: core (init/DefaultWorkspace), lifecycle (GetWorkspace fallback), workspace (resolveWorkspaceLocked/WorkspaceRoots fallback)
 	//
 	// Named defaultCWD (not "workspace") to disambiguate from the other
 	// three meanings the word "workspace" carries in this codebase —
@@ -376,7 +376,7 @@ type Router struct {
 	// and Reset(key)/evictOldest must NOT touch this map — it is
 	// driven by user intent (SetWorkspace) rather than the session
 	// lifecycle.
-	// 读写: core (init/load), lifecycle (SetWorkspace/GetWorkspace), cleanup (save)
+	// 读写: core (init/load), lifecycle (SetWorkspace/GetWorkspace), cleanup (save), discovery (Takeover), workspace (resolveWorkspaceLocked/WorkspaceRoots)
 	workspaceOverrides map[string]string
 
 	// backendOverrides stores per-session backend preferences picked by
@@ -391,11 +391,11 @@ type Router struct {
 	// read lock-free so the dashboard /api/sessions hot path does not
 	// take a second r.mu RLock right after ListSessions() released one.
 	// R58-PERF-F1.
-	// 读写: core (Stats lock-free read), lifecycle (countActive/evict/install)
+	// 读写: core (Stats lock-free read), lifecycle (countActive/evict/install), capacity (reconcile Store), cleanup (remove/reconcile Add/Store), discovery (Takeover orphan Add), shim (reconnect Add)
 	activeCount atomic.Int64
 
 	// pendingSpawns tracks Spawn() calls in progress (lock released during spawn)
-	// 读写: lifecycle (spawnSession)
+	// 读写: lifecycle (spawnSession), core (acquire/release RAII helpers)
 	pendingSpawns int
 
 	// spawningKeys records keys whose spawnSession is in flight. ReconnectShims
@@ -422,7 +422,7 @@ type Router struct {
 	// instead of the generic ErrClassSessionError. The flag is consumed
 	// (deleted) on the very next GetOrCreate for the key — success or
 	// failure — so a subsequent retry gets a clean classification.
-	// 读写: lifecycle (Reset / ResetAndRecreate write; GetOrCreate read+delete)
+	// 读写: lifecycle (Reset / ResetAndRecreate write; GetOrCreate read+delete), cleanup (finishRemoveCleanup write)
 	// (#1324 — R20260527122801-CR-12)
 	shimStuckOnReset map[string]bool
 
@@ -437,18 +437,18 @@ type Router struct {
 
 	// 读写: core (init), cleanup (saveIfDirty)
 	storePath string
-	// 读写: lifecycle (spawn/Reset/Rename mutations), shim (reconnect post-attach), discovery (label/register/takeover), cleanup (saveIfDirty consume)
+	// 读写: lifecycle (spawn/Reset/Rename mutations), shim (reconnect post-attach), discovery (label/register/takeover), cleanup (saveIfDirty consume), capacity (evictOldest mutation)
 	storeDirty bool // true when sessions changed since last save
 	// storeGen increments on each mutation. Writes happen under r.mu (write
 	// lock) but atomic.Uint64 also lets Version() read lock-free — the
 	// dashboard polls Version() every few seconds from the /api/sessions
 	// hot path, and the previous RLock layered on top of ListSessions'
 	// RLock made each poll take two contended trips through r.mu.
-	// 读写: core (Version lock-free), lifecycle / cleanup / discovery (BumpVersion)
+	// 读写: core (Version lock-free), lifecycle (BumpVersion), cleanup (BumpVersion), discovery (BumpVersion), capacity (evictOldest BumpVersion), shim (reconnect BumpVersion)
 	storeGen atomic.Uint64
-	// 读写: lifecycle (SetWorkspace / ResetChat / RenameSession), discovery (Takeover), cleanup (saveIfDirty consume)
+	// 读写: lifecycle (ResetChat / RenameSession), discovery (Takeover), cleanup (saveIfDirty consume), workspace (SetWorkspace mutation)
 	wsOverridesDirty bool // true when workspace overrides changed since last save
-	// 读写: lifecycle (SetWorkspace / ResetChat / RenameSession), discovery (Takeover), cleanup (snapshot/check during save)
+	// 读写: lifecycle (ResetChat / RenameSession), discovery (Takeover), cleanup (snapshot/check during save), workspace (SetWorkspace mutation)
 	wsOverridesGen atomic.Uint64 // increments on each ws-override mutation, mirrors storeGen pattern
 
 	// knownIDs tracks ALL session IDs ever used by naozhi, including
@@ -480,19 +480,20 @@ type Router struct {
 	// R180-GO-P2 stable-bytes-on-disk contract.
 	// 读写: cleanup (Cleanup/saveIfDirty snapshot), discovery (invalidated via knownIDsGen)
 	knownIDsSortedCache []string
-	knownIDsSortedGen   uint64 // knownIDsGen the cache slice was sorted at; 0 = unbuilt
+	// 读写: store.go (snapshotKnownIDsSortedLocked rebuild/compare; invoked from cleanup saveIfDirty)
+	knownIDsSortedGen uint64 // knownIDsGen the cache slice was sorted at; 0 = unbuilt
 	// 读写: cleanup (Cleanup/saveIfDirty)
 	knownIDsSavedAt time.Time // last successful saveKnownIDs; throttles fsync to 5min
 
 	// sessionIDToKey is a reverse index from session ID to session key.
 	// Used by RegisterForResume for O(1) deduplication instead of O(n) scan.
 	// Maintained under r.mu by setSessionIDIndex/clearSessionIDIndex.
-	// 读写: core (init), lifecycle (install/unregister), discovery (RegisterForResume)
+	// 读写: core (init), lifecycle (install/unregister), discovery (RegisterForResume), shim (reconnectShims index write)
 	sessionIDToKey map[string]string
 
-	// 读写: core (init), lifecycle (spawn config)
+	// 读写: core (init), lifecycle (spawn config), shim (reconnect spawn config)
 	noOutputTimeout time.Duration
-	// 读写: core (init), lifecycle (spawn config)
+	// 读写: core (init), lifecycle (spawn config), shim (reconnect spawn config), cleanup (Cleanup grace)
 	totalTimeout time.Duration
 
 	// onChange is stored via atomic.Pointer so notifyChange can load it
@@ -523,14 +524,15 @@ type Router struct {
 	onSessionRetired atomic.Pointer[onSessionRetiredHolder]
 
 	// historyWg tracks startup history-loading goroutines so Shutdown waits for them.
-	// 读写: core (init Add/Done), cleanup (Shutdown Wait)
+	// 读写: core (init Add/Done), cleanup (Shutdown Wait), lifecycle (loadResumeHistoryOnSpawn Add/Done)
 	historyWg sync.WaitGroup
 
 	// historyCtx is cancelled on Shutdown so in-flight LoadHistory*Ctx calls
 	// abort promptly instead of blocking the drain on slow filesystems.
 	// Paired with historyCancel (set by NewRouter, called from Shutdown).
-	// 读写: core (init), lifecycle (attachHistorySource), cleanup (Shutdown cancel)
-	historyCtx    context.Context
+	// 读写: core (init), lifecycle (attachHistorySource), cleanup (Shutdown cancel), shim (ReconnectShims parent ctx)
+	historyCtx context.Context
+	// 读写: core (init), cleanup (Shutdown cancel)
 	historyCancel context.CancelFunc
 
 	// shutdownOnce guards Shutdown against re-entry. Production flow invokes
@@ -565,6 +567,7 @@ type Router struct {
 	// disk, decoupling session unit tests from the full discovery chain
 	// (ARCH-SESS-1, #458). Never nil after NewRouter (defaults to the
 	// discovery implementation). Read-only after NewRouter.
+	// 读写: core (init default), lifecycle (LoadHistoryChainTail reader), shim (reconnect LoadHistoryChainTail reader)
 	historyLoader HistoryLoader
 
 	// resolver is the shared KeyResolver instance, exposed via Resolver()
