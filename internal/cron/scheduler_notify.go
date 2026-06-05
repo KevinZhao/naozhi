@@ -11,9 +11,7 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/metrics"
-	"github.com/naozhi/naozhi/internal/platform"
 )
 
 // NotifyTarget identifies an IM channel for cron completion notifications.
@@ -279,8 +277,13 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	if text == "" {
 		return
 	}
-	p := s.configMaps().platforms[plat]
-	if p == nil {
+	sender := s.configMaps().notifySender
+	if sender == nil {
+		slog.Warn("cron notify: platform not found", "platform", plat)
+		return
+	}
+	r, ok := sender.Lookup(plat)
+	if !ok {
 		slog.Warn("cron notify: platform not found", "platform", plat)
 		return
 	}
@@ -314,11 +317,11 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	// per-target deadline. See the budget table at the top of tuning.go.
 	replyCtx, replyCancel := context.WithTimeout(parent, cronNotifyTimeout)
 	defer replyCancel()
-	maxLen := p.MaxReplyLength()
-	if maxLen <= 0 {
-		maxLen = platform.DefaultMaxReplyLen
-	}
-	chunks := platform.SplitText(text, maxLen)
+	// #725: the PlatformReplier adapter owns the platform.DefaultMaxReplyLen
+	// fallback (MaxReplyLength returns the default when the platform reports
+	// <=0) and the SplitText delegation, so cron no longer imports platform.
+	maxLen := r.MaxReplyLength()
+	chunks := r.Split(text, maxLen)
 	// R236-SEC-15 (#568): cap the chunk count before the loop. The
 	// composite chunks × retries × per-attempt budget can otherwise
 	// exceed cronNotifyTimeout when a chatty job lands on a slow
@@ -353,10 +356,11 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 				"sent", delivered, "remaining", len(chunks)-i+dropped)
 			return
 		}
-		if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
-			ChatID: chatID,
-			Text:   chunk,
-		}, limits.PlatformReplyMaxAttempts); err != nil {
+		// #725: r.Reply passes replyCtx through unchanged to
+		// platform.ReplyWithRetry (with limits.PlatformReplyMaxAttempts),
+		// so the R243-SEC-14 (#799) stopCtx parent chain still short-circuits
+		// a hung webhook the moment Scheduler.Stop cancels stopCtx.
+		if _, err := r.Reply(replyCtx, chatID, chunk); err != nil {
 			// R250-CR-18: abort on first chunk failure. Subsequent sends
 			// would interleave with foreign messages the user receives in
 			// the meantime, so partial delivery is worse than a clean
