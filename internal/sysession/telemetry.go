@@ -23,6 +23,7 @@ package sysession
 import (
 	"time"
 
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
@@ -60,9 +61,11 @@ func (m *Manager) loadTelemetry() runtelemetry.Broadcaster {
 
 // emitRunStarted broadcasts a run-started event through the configured
 // broadcaster, tagged Subsystem=SubsystemSysession. nil broadcaster (tests /
-// no-WS) is silently dropped. Fired post-CAS, pre-IO from runOnce, outside any
-// Manager-internal lock.
+// no-WS) is silently dropped — the metric bump happens unconditionally so the
+// counter cannot drift from the broadcast path (cron R230C-GO-15). Fired
+// post-CAS, pre-IO from runOnce, outside any Manager-internal lock.
 func (m *Manager) emitRunStarted(name, runID string, trigger DaemonTriggerKind, startedAt time.Time) {
+	metrics.SysessionRunStartedTotal.Add(1)
 	b := m.loadTelemetry()
 	if b == nil {
 		return
@@ -80,8 +83,11 @@ func (m *Manager) emitRunStarted(name, runID string, trigger DaemonTriggerKind, 
 // broadcaster, tagged Subsystem=SubsystemSysession. ErrorMsg is deliberately
 // NOT forwarded — the broadcaster drops it anyway (RFC §9.4 / Sec-LOW-2), and
 // keeping it off the producer side too makes the no-leak invariant local.
-// nil broadcaster is silently dropped. Fired from recordRun outside any lock.
+// nil broadcaster is silently dropped — the metric bump happens
+// unconditionally so the counter cannot drift from the broadcast path (cron
+// R230C-GO-15). Fired from recordRun outside any lock.
 func (m *Manager) emitRunEnded(name, runID string, state DaemonRunState, durationMS int64, errorClass DaemonErrorClass, trigger DaemonTriggerKind) {
+	metrics.SysessionRunEndedTotal.Add(1)
 	b := m.loadTelemetry()
 	if b == nil {
 		return
