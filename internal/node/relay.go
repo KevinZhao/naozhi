@@ -500,10 +500,24 @@ func (r *wsRelay) reconnect() {
 		// WARN so operators see the half-state rather than a false success.
 		r.mu.Lock()
 		stillOpen := !r.closed
+		connAlive := r.conn != nil
 		r.mu.Unlock()
 		if !stillOpen {
 			slog.Warn("relay reconnect aborted by close", "node", r.node.ID, "keys", len(resubscribes))
 			return
+		}
+		// R20260605B-CORR-15: connect() spawns a fresh readLoop before this
+		// goroutine writes the resubscribe frames. If that new socket dies
+		// during the resubscribe window, its readLoop nils r.conn and tries
+		// to enqueue another reconnect via CompareAndSwap — but THIS goroutine
+		// still holds the reconnecting flag, so that enqueue is silently
+		// dropped. Returning here would clear the flag with no live conn and
+		// no scheduled retry, leaving the relay permanently disconnected.
+		// Detect the nilled conn and loop to redial instead of returning.
+		if !connAlive {
+			slog.Warn("relay reconnect: new conn died during resubscribe, retrying", "node", r.node.ID, "keys", len(resubscribes))
+			backoff = min(backoff*2, maxBackoff)
+			continue
 		}
 		slog.Info("relay reconnected", "node", r.node.ID, "keys", len(resubscribes))
 		return
