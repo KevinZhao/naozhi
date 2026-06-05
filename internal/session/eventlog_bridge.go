@@ -1,7 +1,6 @@
 // Package session — eventlog_bridge.go
 //
-// NEEDS-DESIGN (R243-ARCH-12, REPEAT-5): three eventlog tiers shadow
-// each other today.
+// R243-ARCH-12 (#737/#1369): four eventlog tiers shadow each other today.
 //
 //   - cli.EventLog.ring — in-memory bounded ring shared with the WS
 //     subscriber tier. Pure RAM, lossy on process exit.
@@ -10,36 +9,44 @@
 //   - naozhilog.Source.replay — read-side replay that re-hydrates the
 //     ring from the spool when sessions reattach (history panel,
 //     dashboard rewind).
+//   - history/merged.Source — the composed-read tier that fronts the
+//     naozhi-native replay over the Claude-JSONL fallback.
 //
-// Each tier owns its own append/read/subscribe primitives; the four
-// concrete backends (memory ring, persist spool, naozhilog source,
-// scratch event store) each expose a slightly different API even
-// though their conceptual contract is identical: "append, read by
-// range, subscribe to tail."
+// Each tier owns its own append/read/subscribe primitives even though
+// their conceptual contract is identical: "append, read by range,
+// subscribe to tail."
 //
-// The unification plan tracked under R243-ARCH-12 is to publish a
-// single `EventStore` interface in (likely) internal/eventlog/api/:
+// The unification plan is now partly landed: internal/eventlog/api
+// publishes the single `EventStore` interface (Appender + Reader +
+// Subscriber), CI-gated by api_backends_test.go (PR #1755). The
+// behaviour-free contract, expressed against cli.EventEntry, is:
 //
 //	type EventStore interface {
-//	    Append(ctx, []EventEntry) error
-//	    Read(ctx, ReadRange) ([]EventEntry, error)
-//	    Subscribe(ctx, SubFilter) (<-chan EventEntry, error)
+//	    Append(e cli.EventEntry)         // Appender
+//	    AppendBatch(entries []cli.EventEntry)
+//	    LoadBefore(...)                  // Reader = cli.HistorySource
+//	    SubscribeNew() cli.EventSubscription // Subscriber
 //	}
 //
-// plus a central registry that the four backends register with. This
-// bridge stays in place — its job is exactly the EventEntry⇄persist
-// .Entry hop — but the cli/persist/naozhilog import edges collapse to
-// "everyone implements EventStore" and the session layer can swap the
-// backend (e.g. for a tests-only no-disk mode) without re-plumbing
-// the spawnSession site. The migration is staged because each tier
-// has accumulated its own performance hot path (see R215-PERF-P1-1
+// Three of the four tiers already satisfy it with no shim: cli.EventLog
+// is Appender+Subscriber, and naozhilog.Source / merged.Source are
+// Reader. persist.Persister deliberately satisfies NONE of the api
+// interfaces — it is fed via a per-key PersistSink callback (sink model)
+// and read back via persist.Recover, so an adapter is intentionally
+// deferred to the #1570 registry-injection round (see
+// api_backends_test.go for the documented gap).
+//
+// A central registry that the backends register with is still future
+// work. This bridge stays in place regardless — its job is exactly the
+// EventEntry⇄persist.Entry hop. The migration is staged because each
+// tier has accumulated its own performance hot path (see R215-PERF-P1-1
 // pooling below, R228-PERF-1 single-entry fast path, R240-PERF-4
 // escape analysis); a naive interface-everywhere refactor would
 // regress those without an evals pass.
 //
-// Until the api/ subpackage lands, the bridge contract here is the
-// only place EventEntry → persist.Entry conversion lives. Adding new
-// backends should follow the registry path, not bolt on alongside.
+// The bridge contract here remains the only place EventEntry →
+// persist.Entry conversion lives. Adding new backends should follow
+// the registry path, not bolt on alongside.
 package session
 
 import (
