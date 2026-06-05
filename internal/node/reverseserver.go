@@ -476,12 +476,23 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		<-rc.done
 		s.mu.Lock()
-		if s.conns[msg.NodeID] == rc {
+		// R20260605B-CORR-14: only this connection's deregister may tear
+		// down shared state. On a quick reconnect under the same node_id,
+		// the registration handler closes the old conn, installs the NEW
+		// rc into s.conns, and calls OnRegister(new). The old conn's done
+		// channel then unblocks here. If OnDeregister(old) ran
+		// unconditionally it could race-win after OnRegister(new) and wipe
+		// the freshly reconnected, live node from Server.nodes + purge its
+		// cache, leaving it invisible until a full disconnect/reconnect.
+		// Gate the side effect with the same ownership check as the map
+		// delete so a stale deregister of a replaced conn is a no-op.
+		owns := s.conns[msg.NodeID] == rc
+		if owns {
 			delete(s.conns, msg.NodeID)
 		}
 		s.mu.Unlock()
 		slog.Info("reverse node disconnected", "node_id", safeNodeID)
-		if s.OnDeregister != nil {
+		if owns && s.OnDeregister != nil {
 			s.OnDeregister(msg.NodeID)
 		}
 	}()
