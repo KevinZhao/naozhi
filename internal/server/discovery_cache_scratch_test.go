@@ -156,6 +156,66 @@ func TestTryShortCircuit_PublishedSliceNeverScratch(t *testing.T) {
 	}
 }
 
+// TestTryShortCircuit_RepublishHonorsEvictedPIDs (R20260605B-CORR-5) pins
+// that the short-circuit republish path filters evictedPIDs, just like the
+// full-scan path in refresh().
+//
+// Scenario: during session takeover, evictPID(pid) removes a killed PID from
+// dc.sessions and records it in dc.evictedPIDs. But tryShortCircuit snapshots
+// `cached := dc.sessions` under RLock at its start, then drops the lock for a
+// disk-bound RefreshDynamic. If evictPID lands in that window, the pre-eviction
+// `cached` still contains the killed PID; republishing it verbatim resurrects
+// the evicted session. We model the window by seeding dc.sessions WITH the PID
+// and dc.evictedPIDs WITH the same PID, then forcing a republish (a stale
+// running->ready state flip makes RefreshDynamic return changed=true). After
+// the fix the published snapshot must NOT contain the evicted PID.
+func TestTryShortCircuit_RepublishHonorsEvictedPIDs(t *testing.T) {
+	t.Parallel()
+	claudeDir, mtime := mkSessionsDir(t)
+
+	dc := newDiscoveryCache(claudeDir, func() (map[int]bool, map[string]bool, map[string]bool) {
+		return nil, nil, nil
+	}, nil)
+
+	self := os.Getpid()
+	// evictedPID must also be alive so tryShortCircuit's PidAlive loop does
+	// not bail to a full scan. The parent process is alive for the duration
+	// of the test run.
+	evictedPID := os.Getppid()
+	if evictedPID == self || evictedPID <= 0 {
+		t.Skip("cannot obtain a distinct live PID for the evicted-session slot")
+	}
+	old := time.Now().Add(-60 * time.Second).UnixMilli()
+
+	// State="running" with an old LastActive (no JSONL on disk → la=StartedAt,
+	// also old) forces RefreshDynamic to flip running->ready → changed=true,
+	// which drives the republish branch of tryShortCircuit.
+	dc.mu.Lock()
+	dc.sessions = []discovery.DiscoveredSession{
+		{PID: self, SessionID: "s1", CWD: "/tmp/a", StartedAt: old, LastActive: old, State: "running"},
+		{PID: evictedPID, SessionID: "s2", CWD: "/tmp/b", StartedAt: old, LastActive: old, State: "running"},
+	}
+	dc.lastDirMtime = mtime
+	// Emulate a concurrent evictPID that already recorded the kill but whose
+	// dc.sessions delete is not reflected in the `cached` snapshot
+	// tryShortCircuit is about to read (the read/write-old race window).
+	dc.evictedPIDs[evictedPID] = time.Now()
+	dc.mu.Unlock()
+
+	dc.refreshMu.Lock()
+	ok := dc.tryShortCircuit()
+	dc.refreshMu.Unlock()
+	if !ok {
+		t.Fatal("tryShortCircuit returned false; expected short-circuit (dir unchanged + alive check uses self PID only)")
+	}
+
+	for _, s := range dc.snapshot() {
+		if s.PID == evictedPID {
+			t.Fatalf("evicted PID %d was resurrected into the published snapshot by the short-circuit republish", evictedPID)
+		}
+	}
+}
+
 // TestRefresh_ConcurrentReadersRace stresses the refresh path against
 // concurrent snapshot() readers. Run under -race it flags any data race on the
 // published backing array or refreshScratch. refreshMu single-flights refresh;

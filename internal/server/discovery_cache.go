@@ -241,9 +241,24 @@ func (dc *discoveryCache) tryShortCircuit() bool {
 		if discovery.RefreshDynamic(dc.claudeDir, scratch) {
 			// Publish a fresh immutable snapshot — never hand readers the
 			// reusable scratch backing array.
-			updated := make([]discovery.DiscoveredSession, len(scratch))
-			copy(updated, scratch)
+			//
+			// R20260605B-CORR-5: `scratch` was built from the `cached`
+			// snapshot read under RLock at the top of this function. evictPID
+			// takes only dc.mu (NOT refreshMu), so a session takeover can call
+			// evictPID in the window between that RUnlock and the Lock below —
+			// removing a killed PID from dc.sessions and recording it in
+			// evictedPIDs. Publishing the pre-eviction copy verbatim would
+			// resurrect the just-evicted session (the stale sidebar card
+			// EvictPID exists to prevent). Filter evictedPIDs here under the
+			// write lock, mirroring the full-scan path in refresh().
 			dc.mu.Lock()
+			updated := make([]discovery.DiscoveredSession, 0, len(scratch))
+			for _, s := range scratch {
+				if _, evicted := dc.evictedPIDs[s.PID]; evicted {
+					continue
+				}
+				updated = append(updated, s)
+			}
 			dc.sessions = updated
 			dc.mu.Unlock()
 		}
