@@ -366,7 +366,7 @@ func TestAggregateAttachmentBytesAllow(t *testing.T) {
 // setTestBotID assigns the bot ID through the atomic field (#1814). Kept in
 // one place so the test suite is decoupled from the field's storage type.
 func setTestBotID(d *Discord, id string) {
-	d.botID = id
+	d.botID.Store(&id)
 }
 
 // TestBotID_ConcurrentStoreAndRead is the regression test for #1814: the
@@ -388,7 +388,7 @@ func TestBotID_ConcurrentStoreAndRead(t *testing.T) {
 		defer func() { done <- struct{}{} }()
 		for i := 0; i < 1000; i++ {
 			id := "bot-identity-string-value"
-			d.botID = id
+			d.botID.Store(&id)
 		}
 		close(stop)
 	}()
