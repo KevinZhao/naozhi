@@ -23,6 +23,22 @@ import (
 	"time"
 )
 
+// evalTempDir returns a t.TempDir() with symlinks resolved. On macOS the temp
+// dir lives under /var/folders/... which is itself reached via the /var ->
+// /private/var symlink, so filepath.EvalSymlinks (used inside
+// resolveCronWorkspace) canonicalises returned paths to /private/var/...
+// Comparing a resolved path against an un-resolved allowedRoot / prefix would
+// then spuriously fail. Canonicalising the test's roots up front keeps the
+// allowedRoot containment checks portable across Linux and macOS.
+func evalTempDir(t *testing.T) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks(tempdir): %v", err)
+	}
+	return resolved
+}
+
 func newResolveWorkspaceFixture(t *testing.T, allowedRoot string) *Scheduler {
 	t.Helper()
 	s := NewScheduler(SchedulerConfig{
@@ -63,14 +79,14 @@ func registerResolveJob(t *testing.T, s *Scheduler, j *Job) {
 // path — even though the cached gate would still say "ok".
 func TestResolveWorkspace1730_RetargetAfterCacheWarmAborts(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := evalTempDir(t)
 	inside := filepath.Join(root, "inside")
 	if err := os.Mkdir(inside, 0o755); err != nil {
 		t.Fatalf("mkdir inside: %v", err)
 	}
-	outside := t.TempDir() // sibling tempdir, reachable but outside root
+	outside := evalTempDir(t) // sibling tempdir, reachable but outside root
 
-	link := filepath.Join(t.TempDir(), "workdir-link")
+	link := filepath.Join(evalTempDir(t), "workdir-link")
 	if err := os.Symlink(inside, link); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
@@ -124,8 +140,8 @@ func TestResolveWorkspace1730_RetargetAfterCacheWarmAborts(t *testing.T) {
 // itself rejects), no subprocess path returned.
 func TestResolveWorkspace1730_OutsideRootAborts(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	outside := t.TempDir()
+	root := evalTempDir(t)
+	outside := evalTempDir(t)
 
 	s := newResolveWorkspaceFixture(t, root)
 	j := &Job{ID: "job-outside", Schedule: "@hourly", Prompt: "hi", Platform: "p", ChatID: "c", WorkDir: outside}
@@ -152,7 +168,7 @@ func TestResolveWorkspace1730_OutsideRootAborts(t *testing.T) {
 // uncached re-check does not over-fire and suppress legitimate runs.
 func TestResolveWorkspace1730_UnderRootResolves(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root := evalTempDir(t)
 	inside := filepath.Join(root, "inside")
 	if err := os.Mkdir(inside, 0o755); err != nil {
 		t.Fatalf("mkdir inside: %v", err)
