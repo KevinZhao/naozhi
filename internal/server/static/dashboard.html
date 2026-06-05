@@ -2488,8 +2488,13 @@ body.kbd-open .sidebar-footer{display:none}
   <button type="button" class="mem-pop-close" id="mem-pop-close" aria-label="关闭预览">&times;</button>
   <div id="mem-pop-content"></div>
 </div>
-<script src="/static/dashboard.js"></script>
-<script src="/static/agent_view.js"></script>
-<script src="/static/asset_browser.js"></script>
+<!-- defer: don't block the parser on 759KB+ of JS. defer preserves execution
+     order (dashboard.js exports window.eventHtml/renderEventsWithDividers that
+     agent_view.js + asset_browser.js consume at runtime) and runs all three
+     before DOMContentLoaded. The inline theme-setter above is self-contained
+     and still runs at parse time. (#1769) -->
+<script defer src="/static/dashboard.js"></script>
+<script defer src="/static/agent_view.js"></script>
+<script defer src="/static/asset_browser.js"></script>
 </body>
 </html>

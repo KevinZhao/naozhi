@@ -379,8 +379,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		s.auth.ServeLoginPage(w, r)
 		return
 	}
-	data := staticAssetBytes("dashboard.html")
-	if data == nil {
+	if staticAssetBytes("dashboard.html") == nil {
 		http.Error(w, "dashboard not found", http.StatusNotFound)
 		return
 	}
@@ -522,9 +521,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if serveStaticWithETag(w, r, "dashboard.html") {
 		return
 	}
-	if _, err := w.Write(data); err != nil {
-		slog.Debug("dashboard write", "err", err)
-	}
+	writeStaticAssetBody(w, r, "dashboard.html")
 }
 
 // handleManifest / handleSW / handleDashboardJS / handleAgentViewJS serve
@@ -582,8 +579,7 @@ func handleSW(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDashboardJS(w http.ResponseWriter, r *http.Request) {
-	data := staticAssetBytes("dashboard.js")
-	if data == nil {
+	if staticAssetBytes("dashboard.js") == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -593,17 +589,14 @@ func handleDashboardJS(w http.ResponseWriter, r *http.Request) {
 	if serveStaticWithETag(w, r, "dashboard.js") {
 		return
 	}
-	if _, err := w.Write(data); err != nil {
-		slog.Debug("dashboard js write", "err", err)
-	}
+	writeStaticAssetBody(w, r, "dashboard.js")
 }
 
 // handleAgentViewJS serves static/agent_view.js — the RFC v4 agent-team-ui
 // dashboard module. Mirrors handleDashboardJS for caching/CSP headers so
 // the two scripts behave identically in the browser cache.
 func handleAgentViewJS(w http.ResponseWriter, r *http.Request) {
-	data := staticAssetBytes("agent_view.js")
-	if data == nil {
+	if staticAssetBytes("agent_view.js") == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -613,16 +606,13 @@ func handleAgentViewJS(w http.ResponseWriter, r *http.Request) {
 	if serveStaticWithETag(w, r, "agent_view.js") {
 		return
 	}
-	if _, err := w.Write(data); err != nil {
-		slog.Debug("agent_view js write", "err", err)
-	}
+	writeStaticAssetBody(w, r, "agent_view.js")
 }
 
 // handleAssetBrowserJS serves static/asset_browser.js — the cc-asset-browser
 // dashboard module (RFC docs/rfc/cc-asset-browser.md). Mirrors handleAgentViewJS.
 func handleAssetBrowserJS(w http.ResponseWriter, r *http.Request) {
-	data := staticAssetBytes("asset_browser.js")
-	if data == nil {
+	if staticAssetBytes("asset_browser.js") == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -632,9 +622,7 @@ func handleAssetBrowserJS(w http.ResponseWriter, r *http.Request) {
 	if serveStaticWithETag(w, r, "asset_browser.js") {
 		return
 	}
-	if _, err := w.Write(data); err != nil {
-		slog.Debug("asset_browser js write", "err", err)
-	}
+	writeStaticAssetBody(w, r, "asset_browser.js")
 }
 
 // buildSessionOpts resolves agent config and planner overrides for a

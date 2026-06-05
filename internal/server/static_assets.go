@@ -9,9 +9,12 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"log/slog"
 	"net/http"
 	"strings"
 )
@@ -46,6 +49,41 @@ var assetBrowserJS embed.FS
 type staticAsset struct {
 	bytes []byte
 	etag  string
+	// gz holds the gzip-compressed form of bytes, precomputed once at init for
+	// compressible text assets. Because the content is immutable for the
+	// process lifetime, we can afford max compression (gzip.BestCompression)
+	// here — paid once, not per request. The shared gzipMiddleware uses
+	// gzip.BestSpeed (level 1) because it compresses dynamic responses on the
+	// fly; for these large, never-changing scripts level 9 cuts ~15% more
+	// bytes off the wire (dashboard.js: level1≈297KB vs level9≈253KB) at zero
+	// per-request CPU. nil when the asset is not precompressed (e.g. manifest
+	// is tiny / sw is trivial). (#1769)
+	gz []byte
+}
+
+// precompressGzip returns the gzip.BestCompression form of b, or nil if it did
+// not actually shrink (tiny inputs can grow under gzip framing — never ship a
+// "compressed" body bigger than the original). Used once at init for immutable
+// embedded assets, so max compression is free; the result is copied out of the
+// scratch buffer so we don't pin its (possibly larger) backing array.
+func precompressGzip(b []byte) []byte {
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return nil
+	}
+	if _, err := zw.Write(b); err != nil {
+		return nil
+	}
+	if err := zw.Close(); err != nil {
+		return nil
+	}
+	if buf.Len() >= len(b) {
+		return nil
+	}
+	out := make([]byte, buf.Len())
+	copy(out, buf.Bytes())
+	return out
 }
 
 // staticAssets maps the asset key (basename used by handlers and the 304
@@ -55,27 +93,32 @@ var staticAssets = func() map[string]staticAsset {
 		s := sha256.Sum256(b)
 		return `"` + hex.EncodeToString(s[:16]) + `"`
 	}
-	read := func(fsys embed.FS, name string) (staticAsset, bool) {
+	read := func(fsys embed.FS, name string, compress bool) (staticAsset, bool) {
 		b, err := fsys.ReadFile(name)
 		if err != nil {
 			return staticAsset{}, false
 		}
-		return staticAsset{bytes: b, etag: hash(b)}, true
+		a := staticAsset{bytes: b, etag: hash(b)}
+		if compress {
+			a.gz = precompressGzip(b)
+		}
+		return a, true
 	}
 	out := map[string]staticAsset{}
 	for _, e := range []struct {
-		key  string
-		fsys embed.FS
-		name string
+		key      string
+		fsys     embed.FS
+		name     string
+		compress bool
 	}{
-		{"dashboard.html", dashboardHTML, "static/dashboard.html"},
-		{"dashboard.js", dashboardJS, "static/dashboard.js"},
-		{"agent_view.js", agentViewJS, "static/agent_view.js"},
-		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js"},
-		{"manifest.json", manifestJSON, "static/manifest.json"},
-		{"sw.js", swJS, "static/sw.js"},
+		{"dashboard.html", dashboardHTML, "static/dashboard.html", true},
+		{"dashboard.js", dashboardJS, "static/dashboard.js", true},
+		{"agent_view.js", agentViewJS, "static/agent_view.js", true},
+		{"asset_browser.js", assetBrowserJS, "static/asset_browser.js", true},
+		{"manifest.json", manifestJSON, "static/manifest.json", false},
+		{"sw.js", swJS, "static/sw.js", false},
 	} {
-		if a, ok := read(e.fsys, e.name); ok {
+		if a, ok := read(e.fsys, e.name, e.compress); ok {
 			out[e.key] = a
 		}
 	}
@@ -103,6 +146,40 @@ var staticAssetETags = func() map[string]string {
 // requests. Returns nil when the key is unknown (asset failed to embed).
 func staticAssetBytes(key string) []byte {
 	return staticAssets[key].bytes
+}
+
+// writeStaticAssetBody writes the asset body, preferring the precomputed
+// gzip.BestCompression form when (a) it exists and (b) the client advertised
+// gzip in Accept-Encoding. It sets Content-Encoding: gzip itself in that case,
+// which gzipMiddleware.decide() honours (it never double-encodes a response
+// that already has Content-Encoding set), so the middleware leaves the bytes
+// untouched. Falls back to the raw bytes (middleware may still level-1 gzip
+// those for non-precompressed assets). Caller must have already set
+// Content-Type and any cache headers, and confirmed this is not a 304.
+//
+// Returns without writing when the client used If-None-Match and got a 304
+// (caller handles that via serveStaticWithETag before calling this).
+func writeStaticAssetBody(w http.ResponseWriter, r *http.Request, key string) {
+	a := staticAssets[key]
+	if a.gz != nil && acceptsGzip(r.Header.Get("Accept-Encoding")) {
+		h := w.Header()
+		h.Set("Content-Encoding", "gzip")
+		// Vary so a shared cache doesn't hand a gzip body to an identity-only
+		// client. Mirrors gzipMiddleware.decide().
+		h.Add("Vary", "Accept-Encoding")
+		// The compressed length differs from any Content-Length a caller may
+		// have set against the raw bytes; drop it for defensive parity with
+		// gzipMiddleware.decide() (no caller sets it today, but a future one
+		// would otherwise ship a wrong length).
+		h.Del("Content-Length")
+		if _, err := w.Write(a.gz); err != nil {
+			slog.Debug("static asset gz write", "key", key, "err", err)
+		}
+		return
+	}
+	if _, err := w.Write(a.bytes); err != nil {
+		slog.Debug("static asset write", "key", key, "err", err)
+	}
 }
 
 // serveStaticWithETag attaches the asset's precomputed ETag and, on an
