@@ -1056,15 +1056,20 @@ func (r *Router) loadResumeHistoryOnSpawn(
 		return
 	}
 
-	// R232-GO-2 / R230-GO-1 / R233-GO-1: hold the WaitGroup ticket across
-	// the historyCtx.Err() check so Shutdown's historyWg.Wait() cannot race
-	// past a late Add(1). The skip branch immediately Done()s; the load
-	// branch keeps the ticket until the IIFE returns.
-	r.historyWg.Add(1)
+	// #1813 / R20260603-CODE-3 (#1655): decide skip-or-load BEFORE Add(1),
+	// mirroring runHistoryTask (router_core.go). The previous "Add(1) then
+	// compensate with Done() on the cancelled path" shape opened a TOCTOU:
+	// once Shutdown has called historyCancel() and launched the detached
+	// historyWg.Wait() goroutine with the counter already drained to 0, this
+	// late Add(1) at counter==0 races that concurrent Wait() — a sync.WaitGroup
+	// misuse that can panic ("WaitGroup is reused before previous Wait has
+	// returned") or let Wait return between the Add and the compensating Done.
+	// Checking Err() first means Add(1) only ever happens when we are certainly
+	// loading, so the counter never transiently rises after a cancel.
 	if r.historyCtx != nil && r.historyCtx.Err() != nil {
-		r.historyWg.Done()
 		return
 	}
+	r.historyWg.Add(1)
 
 	ids := make([]string, 0, len(prevIDs)+1)
 	ids = append(ids, prevIDs...)
