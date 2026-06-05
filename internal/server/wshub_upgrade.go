@@ -140,7 +140,7 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// R20260527122801-SEC-2 / #1326: uploadOwner + initial-authenticated
 	// were resolved before Upgrade so any Set-Cookie minted there could
 	// ride the 101 response. Apply the cached results here.
-	c.uploadOwner = uploadOwnerKey
+	c.setUploadOwner(uploadOwnerKey)
 	if preAuthenticated {
 		c.authenticated.Store(true)
 	}
@@ -153,7 +153,7 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// Owner == "" (legacy single-user no-token path on first connect)
 	// passes through unchanged.
 	ownerSlotHeld := false
-	if !h.reserveOwnerSlot(c.uploadOwner) {
+	if !h.reserveOwnerSlot(c.uploadOwnerKey()) {
 		// Close the upgraded socket so the client sees a clean RST and
 		// can reconnect after another tab disconnects. Do not write a
 		// CloseFrame: the budget is exhausted at the boundary and we are
@@ -164,7 +164,7 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	ownerSlotHeld = true
 	defer func() {
 		if ownerSlotHeld && !slotReleased {
-			h.releaseOwnerSlot(c.uploadOwner)
+			h.releaseOwnerSlot(c.uploadOwnerKey())
 		}
 	}()
 	// Arm clientWG BEFORE registering the client, not after. If Shutdown
@@ -313,6 +313,46 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		if h.dashToken == "" {
 			slog.Debug("ws auth: no-token mode, authenticating unconditionally")
 		}
+		// Derive uploadOwner from the provided token so WS token-auth enforces
+		// the same per-owner upload quota as HTTP Bearer auth. Without this,
+		// a WS-token-authed client could bypass maxUploadPerOwner because
+		// uploadOwner stayed "" (empty string matches every "" owner in the
+		// store). Mirrors the derivation in dashboard_send.go uploadOwner().
+		// R67-SEC-1.
+		//
+		// #1775: the per-owner conn slot was reserved at upgrade time against
+		// the pre-auth owner ("" in token mode, a guaranteed no-op). Re-key the
+		// reservation BEFORE flipping authenticated so reserve/release stay
+		// paired against the SAME owner — otherwise unregister releases a slot
+		// under newOwner that was never reserved, corrupting the per-owner
+		// counter and (over reconnects) wedging the maxConnsPerOwner cap with
+		// phantom slots. release(old="") then reserve(new) re-enters the cap
+		// under the real owner. A reserve failure means newOwner is already at
+		// the per-owner ceiling: refuse the auth (leave the conn unauthenticated
+		// with its original owner) rather than admitting a connection whose slot
+		// we could not account for. Doing this before authenticated.Store keeps
+		// the reject path from leaving a half-authenticated client behind.
+		oldOwner := c.uploadOwnerKey()
+		if oldOwner == "" && msg.Token != "" {
+			// R247-SEC-16: 128-bit owner key, parity with HTTP path
+			// (dashboard_send.go ownerKeyFromCookie / Bearer hash).
+			sum := sha256.Sum256([]byte(msg.Token))
+			newOwner := hex.EncodeToString(sum[:16])
+			h.releaseOwnerSlot(oldOwner)
+			if !h.reserveOwnerSlot(newOwner) {
+				// Re-claim the old slot so teardown's releaseOwnerSlot(oldOwner)
+				// stays balanced, then refuse. Owner stays oldOwner; closing the
+				// conn unwinds the pumps which unregister against oldOwner.
+				h.reserveOwnerSlot(oldOwner)
+				c.SendRaw([]byte(wsAuthFailInvalidMsg))
+				serverMetrics.WSAuthFail()
+				if c.conn != nil {
+					_ = c.conn.Close()
+				}
+				return
+			}
+			c.setUploadOwner(newOwner)
+		}
 		c.authenticated.Store(true)
 		// R040034-PERF-23 (#1409): mirror the auth flip into h.authClients
 		// so broadcastToAuthenticated can iterate the mirror directly
@@ -323,18 +363,6 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		// broadcast no longer reads the flag, but other call sites
 		// covering wsclient.go still do).
 		h.markAuthenticated(c)
-		// Derive uploadOwner from the provided token so WS token-auth enforces
-		// the same per-owner upload quota as HTTP Bearer auth. Without this,
-		// a WS-token-authed client could bypass maxUploadPerOwner because
-		// uploadOwner stayed "" (empty string matches every "" owner in the
-		// store). Mirrors the derivation in dashboard_send.go uploadOwner().
-		// R67-SEC-1.
-		if c.uploadOwner == "" && msg.Token != "" {
-			// R247-SEC-16: 128-bit owner key, parity with HTTP path
-			// (dashboard_send.go ownerKeyFromCookie / Bearer hash).
-			sum := sha256.Sum256([]byte(msg.Token))
-			c.uploadOwner = hex.EncodeToString(sum[:16])
-		}
 		c.SendRaw([]byte(wsAuthOkMsg))
 	} else {
 		c.SendRaw([]byte(wsAuthFailInvalidMsg))

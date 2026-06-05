@@ -387,8 +387,12 @@ func (r *Router) Cleanup() {
 		// Normal idle TTL expiry.
 		if now.Sub(effective) > ttl {
 			logSessionLifecycle("expired", c.key, "idle", now.Sub(effective))
-			storeAtomicString(&c.s.deathReason, "idle_timeout")
-			expired = append(expired, expiredEntry{c.s, c.key, c.proc, ""})
+			// Carry the reason on the entry and stamp it only after the
+			// close-loop re-verify confirms the proc is still current,
+			// mirroring stuckKill. Stamping here (pass-2, no r.mu) would
+			// corrupt the deathReason of a replacement session spawned
+			// between this snapshot and the close loop. R20260605-GO.
+			expired = append(expired, expiredEntry{c.s, c.key, c.proc, "idle_timeout"})
 		}
 	}
 
@@ -422,6 +426,19 @@ func (r *Router) Cleanup() {
 	// key by this function, so waitSocketGoneForKey is unnecessary here.
 	// The next unrelated GetOrCreate will hash to a different socket.
 	for _, e := range expired {
+		// Same re-verify as stuckKill above: pass-2 ran without r.mu, so a
+		// concurrent spawnSession / resetLocked may have replaced s.process
+		// between the snapshot and now. Skip when the session has moved on so
+		// we neither close the replacement's live proc nor stamp idle_timeout
+		// onto the fresh ManagedSession the user is actively using. R217-CR-3.
+		if cur := e.s.loadProcess(); cur != nil && cur != e.proc {
+			continue
+		}
+		// Stamp deathReason only after re-verify confirms this proc is still
+		// the live process on the session (mirrors stuckKill). R20260605-GO.
+		if e.reason != "" {
+			storeAtomicString(&e.s.deathReason, e.reason)
+		}
 		e.proc.Close()
 		closedCount++
 	}

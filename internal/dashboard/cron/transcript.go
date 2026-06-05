@@ -1219,10 +1219,15 @@ func parseISO8601MS(s string) int64 {
 //
 // Any deviation (timezone offset other than 'Z', missing field, non-digit
 // where digit expected, lowercase 't'/'z', etc.) returns (0, false) and
-// the caller falls back to time.Parse(time.RFC3339Nano). We DO NOT
-// attempt to validate calendar correctness (e.g. Feb 30) — time.Date
-// performs the normalisation, matching time.Parse's tolerance for the
-// same canonical shape (which also normalises rather than rejects).
+// the caller falls back to time.Parse(time.RFC3339Nano). We range-check
+// each field (month/day/hour/minute/second) before handing them to
+// time.Date, because time.Date *normalises* out-of-range values
+// (e.g. month 13 → Jan of next year) whereas time.Parse *rejects* them
+// ("month out of range"). Accepting them in the fast path would diverge
+// from the slow path; instead we return (0, false) so the caller falls
+// back to time.Parse, which yields its 0 sentinel for the same input.
+// Note: time.Parse rejects second 60 (it does not honour leap seconds for
+// RFC3339), so we likewise cap seconds at 59 to stay consistent.
 func parseISO8601MSFast(s string) (int64, bool) {
 	// Minimum canonical length is "YYYY-MM-DDTHH:MM:SSZ" = 20 bytes.
 	if len(s) < 20 {
@@ -1255,6 +1260,17 @@ func parseISO8601MSFast(s string) (int64, bool) {
 	}
 	second, ok := parseDigits(s[17:19])
 	if !ok {
+		return 0, false
+	}
+	// Range-check each field so we reject the same out-of-range inputs
+	// time.Parse rejects (rather than silently normalising via time.Date).
+	// day is validated per-month (leap-year aware) so e.g. Feb 30 / Apr 31
+	// are declined to match time.Parse rather than rolling into next month.
+	if month < 1 || month > 12 ||
+		day < 1 || day > daysInMonth(year, month) ||
+		hour > 23 ||
+		minute > 59 ||
+		second > 59 {
 		return 0, false
 	}
 	// After SS we expect either:
@@ -1302,6 +1318,23 @@ func parseISO8601MSFast(s string) (int64, bool) {
 	}
 	t := time.Date(year, time.Month(month), day, hour, minute, second, nanos, time.UTC)
 	return t.UnixMilli(), true
+}
+
+// daysInMonth returns the number of days in the given (year, month). month
+// is assumed to already be in 1..12. February is leap-year aware so the
+// fast path's day range-check matches time.Parse's calendar validation.
+func daysInMonth(year, month int) int {
+	switch month {
+	case 1, 3, 5, 7, 8, 10, 12:
+		return 31
+	case 4, 6, 9, 11:
+		return 30
+	default: // February
+		if year%4 == 0 && (year%100 != 0 || year%400 == 0) {
+			return 29
+		}
+		return 28
+	}
 }
 
 // parseDigits parses a fixed-length all-ASCII-digits string as a non-

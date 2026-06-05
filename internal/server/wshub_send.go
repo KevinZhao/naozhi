@@ -114,7 +114,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "uploads not configured"})
 			return
 		}
-		taken, err := h.uploadStore.TakeAll(msg.FileIDs, c.uploadOwner)
+		taken, err := h.uploadStore.TakeAll(msg.FileIDs, c.uploadOwnerKey())
 		if err != nil {
 			// Never echo fids (user-controlled) back in the error; log internally.
 			slog.Debug("ws send: one or more file_ids not found or expired", "count", len(msg.FileIDs))
@@ -144,7 +144,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "invalid workspace"})
 			return
 		}
-		resolved, rb, perr := persistFileRefs(validatedWS, images, key, c.uploadOwner)
+		resolved, rb, perr := persistFileRefs(validatedWS, images, key, c.uploadOwnerKey())
 		if perr != nil {
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: perr.msg})
 			return

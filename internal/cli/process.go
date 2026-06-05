@@ -579,9 +579,20 @@ func (p *Process) shimStdinWriter() io.Writer {
 }
 
 // startReadLoop begins the shim message reader goroutine and heartbeat.
+//
+// Initial state is StateReady EXCEPT on the reconnect-mid-turn path (#1778):
+// SpawnReconnect arms reconnectedMidTurn + sets StateRunning BEFORE calling
+// this so the flag and state are both in place before readLoop can consume the
+// live socket. Forcing StateReady here would clobber that, reopening the race
+// where the turn's terminating result arrives, the stray-result handler's CAS
+// consumes the flag, but state is Ready (so wasRunning is false) — leaving the
+// session stranded in Running forever once SpawnReconnect later re-set it.
+// We therefore preserve a pre-armed StateRunning.
 func (p *Process) startReadLoop() {
 	p.mu.Lock()
-	p.state = StateReady
+	if !(p.reconnectedMidTurn.Load() && p.state == StateRunning) {
+		p.state = StateReady
+	}
 	p.mu.Unlock()
 	go p.readLoop()
 	go p.heartbeatLoop()
