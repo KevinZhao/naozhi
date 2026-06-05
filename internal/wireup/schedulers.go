@@ -190,7 +190,7 @@ func WireSchedulers(deps SchedulersDeps) (Schedulers, error) {
 
 	scheduler := cron.NewScheduler(cron.SchedulerConfig{
 		Router:        newCronRouterAdapter(deps.Router),
-		Platforms:     deps.Platforms,
+		NotifySender:  newPlatformNotifySender(deps.Platforms),
 		Agents:        deps.Agents,
 		AgentCommands: deps.Cfg.AgentCommands,
 		StorePath:     deps.CronStorePath,
