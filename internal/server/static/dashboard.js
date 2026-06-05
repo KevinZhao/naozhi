@@ -9857,6 +9857,9 @@ const wsm = {
         }
         if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
       });
+      // Bound the live DOM on the incremental WS history path too (#398);
+      // mirror appendEvents — trim before the scrollHeight reads below.
+      trimEventsScroll(el);
       if (sawUser) stickEventsBottom();
       else if (wasBottom) el.scrollTop = el.scrollHeight;
       runPendingAsync();
@@ -9992,6 +9995,13 @@ const wsm = {
       el.insertAdjacentHTML('beforeend', timeDividerHtml(evT));
     }
     el.insertAdjacentHTML('beforeend', html);
+    // Bound the live DOM before scroll/scan so a long streaming session over
+    // the WS push path (the default real-time channel) can't grow
+    // #events-scroll without limit and OOM the tab (#398). Without this the
+    // MAX_LIVE_DOM_EVENTS cap only fired on the HTTP-poll fallback
+    // (appendEvents), so #398 was effectively a no-op while WS was live.
+    // Must run before the scrollHeight reads below, matching appendEvents.
+    trimEventsScroll(el);
     // User events always force-bottom; AI output only sticks when already at bottom.
     if (isUser) stickEventsBottom();
     else if (wasBottom) el.scrollTop = el.scrollHeight;
