@@ -58,9 +58,7 @@ func TestR243SEC14_NotifyTargetCancelsOnStopCtx(t *testing.T) {
 	s := &Scheduler{
 		stopCtx: stopCtx,
 	}
-	s.configMapsPtr.Store(&cronConfigMaps{
-		platforms: map[string]platform.Platform{"fake-block": fp},
-	})
+	storeFakeNotifySender(s, map[string]platform.Platform{"fake-block": fp})
 
 	done := make(chan struct{})
 	go func() {
@@ -104,9 +102,7 @@ func TestR243SEC14_NotifyTargetNilStopCtxFallback(t *testing.T) {
 	s := &Scheduler{
 		// stopCtx intentionally unset
 	}
-	s.configMapsPtr.Store(&cronConfigMaps{
-		platforms: map[string]platform.Platform{"fake-notify": fp},
-	})
+	storeFakeNotifySender(s, map[string]platform.Platform{"fake-notify": fp})
 	s.notifyTarget("fake-notify", "chat-x", "hello world")
 	if fp.uniqueChunks() == 0 {
 		t.Errorf("notifyTarget with nil stopCtx should still send chunks; got 0")
