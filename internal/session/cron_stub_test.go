@@ -3,6 +3,7 @@ package session
 import (
 	"slices"
 	"strconv"
+	"sync"
 	"testing"
 )
 
@@ -250,6 +251,61 @@ func TestRegisterCronStubWithChain_NilChainLeavesExistingChain(t *testing.T) {
 	if !slices.Equal(s.prevSessionIDs, []string{"sess-keep"}) {
 		t.Errorf("nil chain wiped existing prevSessionIDs: got %v", s.prevSessionIDs)
 	}
+}
+
+// TestRegisterCronStubWithChain_ChainRefreshRaceFree is the #1777 regression
+// guard: registerStub used to swap an existing, already-published stub's
+// prevSessionIDs with a bare `existing.prevSessionIDs = slices.Clone(...)`
+// under r.mu alone. SnapshotChainIDs (invoked from cli history-source
+// factories that hold only historyMu.RLock, never r.mu) reads the same
+// field, so the two raced. The fix routes the swap through the
+// historyMu-guarded ReplacePrevSessionIDs setter. With -race this test fails
+// on the old bare-write code and passes once both sides agree on historyMu.
+func TestRegisterCronStubWithChain_ChainRefreshRaceFree(t *testing.T) {
+	t.Parallel()
+	r := newTestRouter(3)
+	const key = "cron:job-race"
+	// Publish the stub up front so the refresh path (existing branch, the
+	// racy line) is exercised rather than the fresh-create branch.
+	r.RegisterCronStubWithChain(key, "/w", "p", []string{"sess-0"})
+
+	r.mu.RLock()
+	s := r.sessions[key]
+	r.mu.RUnlock()
+	if s == nil {
+		t.Fatal("stub not registered")
+	}
+
+	const iters = 500
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Writer: keep refreshing the chain so each iteration hits the
+	// changed-chain branch (distinct value every time so slices.Equal is
+	// false and ReplacePrevSessionIDs actually runs).
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iters; i++ {
+			r.RegisterCronStubWithChain(key, "/w", "p", []string{"sess-" + strconv.Itoa(i+1)})
+		}
+	}()
+
+	// Reader: the cli history-source path — SnapshotChainIDs under
+	// historyMu.RLock with no r.mu held.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iters; i++ {
+			got := s.SnapshotChainIDs()
+			// Every observed snapshot must be a complete, non-torn chain: a
+			// single non-empty ID (current ID is empty for an exempt stub).
+			if len(got) != 1 || got[0] == "" {
+				t.Errorf("torn/empty chain snapshot: %v", got)
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
 }
 
 // TestRegisterCronStub_OverSubQuotaStillRegisters pins the R242-ARCH-2

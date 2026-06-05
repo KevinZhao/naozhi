@@ -281,6 +281,12 @@ type Feishu struct {
 	// R20260531070014-SEC-4 (#1534).
 	nonceEvictMu sync.Mutex
 
+	// evictNoncesFn lets tests inject the eviction step so the cap-hit
+	// recovery path (including the evicted==0 fallback) can be exercised
+	// deterministically without seeding a 50k-entry map. nil means use the
+	// real evictOldestNonces. See evictNonces.
+	evictNoncesFn func() int
+
 	// reactionIDs caches (messageID + emoji_type) -> reactionCacheEntry returned
 	// by the create-reaction API, so RemoveReaction can later target the correct
 	// reaction. Feishu's delete endpoint requires the reaction_id (there's no
@@ -466,6 +472,17 @@ func (f *Feishu) cleanupNoncesTick() {
 		}
 		return true
 	})
+}
+
+// evictNonces dispatches to the injected eviction hook in tests, falling back
+// to evictOldestNonces in production. Centralizing the indirection keeps the
+// serveWebhook cap-hit path testable without threading the hook through call
+// sites.
+func (f *Feishu) evictNonces() int {
+	if f.evictNoncesFn != nil {
+		return f.evictNoncesFn()
+	}
+	return f.evictOldestNonces()
 }
 
 // evictOldestNonces removes up to nonceEvictionBatch entries from

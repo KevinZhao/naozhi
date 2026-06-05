@@ -392,7 +392,6 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 	// Capture locals for the background goroutine.
 	pid := req.PID
 	sessionID := req.SessionID
-	reqCWD := req.CWD
 	procStartTime := req.ProcStartTime
 	agentOpts := h.defaultAgent
 
@@ -403,8 +402,12 @@ func (h *Handlers) HandleTakeover(w http.ResponseWriter, r *http.Request) {
 	h.bg.Add(1)
 	go func() {
 		defer h.bg.Done()
-		// Wait, SIGKILL, and remove stale session files.
-		discovery.WaitAndCleanup(h.appCtx, pid, procStartTime, claudeDir, reqCWD, sessionID)
+		// Wait, SIGKILL, and remove stale session files. Use the cleaned
+		// cwd (filepath.Clean, trailing-slash/"." normalised) so the lock-dir
+		// path WaitAndCleanup derives via projDirName matches the same cwd
+		// router.Takeover spawns under below — passing the raw req.CWD here
+		// would compute a different projDirName slug and miss the cleanup. (#1786)
+		discovery.WaitAndCleanup(h.appCtx, pid, procStartTime, claudeDir, cwd, sessionID)
 
 		// Takeover via router — use Background context so the spawned process
 		// outlives the HTTP request.
