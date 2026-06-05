@@ -697,3 +697,78 @@ func TestPendingSize_TracksMapLen(t *testing.T) {
 		t.Fatalf("Pending=%d after Flush; want 0", got)
 	}
 }
+
+// TestOnSessionRemoved_SecondSelectHonorsClose (R20260605B-CORR-16)
+// reproduces the drain-then-buffer race: OnSessionRemoved passes its
+// closed guard, then Stop closes closeCh and run() drains-and-exits.
+// The first select can still buffer the job into t.in (the buffer has
+// space and closeCh is ready — Go picks uniformly). Once buffered, no
+// worker will ever write `done`. Before the fix, the second select had
+// no closeCh case and blocked for the full ctx budget, returning
+// ctx.Err() after a multi-second stall. The fix adds a closeCh case so
+// the call returns ErrTrackerClosed promptly.
+//
+// We drive the internal state directly to make the window deterministic:
+// Stop the worker (closeCh closed, run() exited), then emulate the
+// in-flight call that passed its guard before Stop by resetting closed.
+func TestOnSessionRemoved_SecondSelectHonorsClose(t *testing.T) {
+	ws := t.TempDir()
+	tr := newTracker(t, ws, &countingObs{})
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopCancel()
+	if err := tr.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	// Emulate the OnSessionRemoved that passed its closed guard BEFORE
+	// Stop set closed=true. closeCh stays closed and the worker is gone.
+	tr.closed.Store(false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err := tr.OnSessionRemoved(ctx, "kh", ws)
+	elapsed := time.Since(start)
+
+	// Restore closed=true so the t.Cleanup Stop's CAS is a no-op and does
+	// not double-close the already-closed closeCh.
+	tr.closed.Store(true)
+
+	if !errors.Is(err, ErrTrackerClosed) {
+		t.Fatalf("OnSessionRemoved = %v, want ErrTrackerClosed", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("OnSessionRemoved blocked %v; should return promptly via closeCh", elapsed)
+	}
+}
+
+// TestFlush_SecondSelectHonorsClose mirrors the above for Flush, which
+// shares the identical second-select shape (R20260605B-CORR-16).
+func TestFlush_SecondSelectHonorsClose(t *testing.T) {
+	ws := t.TempDir()
+	tr := newTracker(t, ws, &countingObs{})
+
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stopCancel()
+	if err := tr.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	tr.closed.Store(false)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err := tr.Flush(ctx)
+	elapsed := time.Since(start)
+
+	tr.closed.Store(true)
+
+	if !errors.Is(err, ErrTrackerClosed) {
+		t.Fatalf("Flush = %v, want ErrTrackerClosed", err)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("Flush blocked %v; should return promptly via closeCh", elapsed)
+	}
+}

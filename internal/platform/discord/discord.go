@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -33,12 +34,19 @@ const discordHookConcurrency = 20
 
 // Discord implements Platform and RunnablePlatform via WebSocket gateway.
 type Discord struct {
-	cfg        Config
-	session    *discordgo.Session
-	handler    platform.MessageHandler
-	startMu    sync.Mutex
-	started    bool
-	botID      string
+	cfg     Config
+	session *discordgo.Session
+	handler platform.MessageHandler
+	startMu sync.Mutex
+	started bool
+	// botID is the bot's own user ID, set once after the gateway connects in
+	// Start() and read concurrently by onMessageCreate goroutines (discordgo
+	// dispatches each MESSAGE_CREATE on its own goroutine, and the listen
+	// goroutine is live before Open() returns). A plain string field would be
+	// a data race — Go string assignment is two words (ptr+len), not atomic —
+	// so we store it through an atomic.Pointer for a torn-read-free handoff.
+	// #1814.
+	botID      atomic.Pointer[string]
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 	handlerWg  sync.WaitGroup
@@ -56,6 +64,16 @@ func New(cfg Config) *Discord {
 		cfg.MaxReplyLen = 2000 // Discord's actual limit
 	}
 	return &Discord{cfg: cfg, hookSem: make(chan struct{}, discordHookConcurrency)}
+}
+
+// getBotID returns the connected bot's user ID, or "" before the gateway
+// handshake has populated it. Race-free read paired with the atomic store in
+// Start(). #1814.
+func (d *Discord) getBotID() string {
+	if p := d.botID.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 func (d *Discord) Name() string { return "discord" }
@@ -120,9 +138,10 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 	}
 
 	if sess.State != nil && sess.State.User != nil {
-		d.botID = sess.State.User.ID
+		botID := sess.State.User.ID
+		d.botID.Store(&botID)
 		slog.Info("discord gateway connected",
-			"bot_id", d.botID,
+			"bot_id", botID,
 			"bot_name", osutil.SanitizeForLog(sess.State.User.Username, 128))
 	} else {
 		slog.Warn("discord gateway connected but bot identity unavailable")
@@ -265,7 +284,8 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 	if m.Author == nil {
 		return
 	}
-	if m.Author.ID == d.botID {
+	botID := d.getBotID()
+	if m.Author.ID == botID {
 		return
 	}
 	if m.Author.Bot {
@@ -276,10 +296,10 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 	mentionMe := false
 
 	for _, u := range m.Mentions {
-		if u.ID == d.botID {
+		if u.ID == botID {
 			mentionMe = true
-			text = strings.ReplaceAll(text, "<@"+d.botID+">", "")
-			text = strings.ReplaceAll(text, "<@!"+d.botID+">", "")
+			text = strings.ReplaceAll(text, "<@"+botID+">", "")
+			text = strings.ReplaceAll(text, "<@!"+botID+">", "")
 			break
 		}
 	}

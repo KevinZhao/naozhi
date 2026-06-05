@@ -1284,13 +1284,13 @@ func (r *Router) startBackgroundHistoryLoaders() {
 				if err != nil || len(entries) == 0 {
 					return
 				}
-				// hasInjectedHistory guards against a concurrent
-				// ReconnectShims having already filled the session —
-				// double-inject otherwise.
-				if s.hasInjectedHistory() {
+				// #1812: InjectHistoryIfEmpty atomically guards against a
+				// concurrent ReconnectShims / Tier 2 loader having already
+				// filled the session — a plain hasInjectedHistory()+Inject
+				// is a check-then-act TOCTOU that double-injects under race.
+				if !s.InjectHistoryIfEmpty(entries) {
 					return
 				}
-				s.InjectHistory(entries)
 				slog.Info("loaded session history from naozhi event log",
 					"key", s.key, "entries", len(entries))
 				r.notifyChange()
@@ -1368,14 +1368,18 @@ func (r *Router) startBackgroundHistoryLoaders() {
 			if len(allEntries) == 0 {
 				return
 			}
-			// Final check for the deferred path: ReconnectShims may
-			// have raced us between the grace timer and LoadHistory
-			// returning. InjectHistory appends, so a double-inject
-			// shows duplicates in the sidebar.
-			if deferred && s.hasInjectedHistory() {
+			// #1812: the earlier hasInjectedHistory() checks (lines above)
+			// only short-circuit the expensive JSONL read; the inject
+			// itself must be atomic. InjectHistoryIfEmpty collapses the
+			// final "still empty?" check and the append into one
+			// historyMu hold so a concurrent Tier 1 loader or
+			// ReconnectShims that lands during LoadHistoryChainTail cannot
+			// race past a separate check and double-inject (duplicate
+			// turns in the sidebar). Subsumes the prior deferred-only
+			// re-check, which had no effect on the non-deferred path.
+			if !s.InjectHistoryIfEmpty(allEntries) {
 				return
 			}
-			s.InjectHistory(allEntries)
 			slog.Info("loaded session history on startup", "key", s.key, "entries", len(allEntries), "chain", len(ids), "deferred", deferred)
 			r.notifyChange()
 		}()

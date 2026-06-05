@@ -338,12 +338,19 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 			// (dashboard_send.go ownerKeyFromCookie / Bearer hash).
 			sum := sha256.Sum256([]byte(msg.Token))
 			newOwner := hex.EncodeToString(sum[:16])
-			h.releaseOwnerSlot(oldOwner)
-			if !h.reserveOwnerSlot(newOwner) {
-				// Re-claim the old slot so teardown's releaseOwnerSlot(oldOwner)
-				// stays balanced, then refuse. Owner stays oldOwner; closing the
+			// R20260605B-CORR-4 (#1808): the release(old) → reserve(new) →
+			// setUploadOwner(new) sequence used to run as three separate steps
+			// with no shared lock, so a concurrent writePump-triggered
+			// unregister could read c.uploadOwnerKey() in the window after
+			// reserve(new) but before setUploadOwner(new) and release the wrong
+			// (old="") owner, leaking newOwner's slot. rekeyOwnerSlot performs
+			// the whole swap under connCountByOwnerMu — the same lock that
+			// unregister's releaseOwnerSlotForClient now holds while reading the
+			// owner key — so the re-key is atomic vs teardown.
+			if !h.rekeyOwnerSlot(c, oldOwner, newOwner) {
+				// newOwner is at the per-owner ceiling; rekeyOwnerSlot left the
+				// slot on oldOwner. Refuse: owner stays oldOwner, closing the
 				// conn unwinds the pumps which unregister against oldOwner.
-				h.reserveOwnerSlot(oldOwner)
 				c.SendRaw([]byte(wsAuthFailInvalidMsg))
 				serverMetrics.WSAuthFail()
 				if c.conn != nil {
@@ -351,7 +358,6 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 				}
 				return
 			}
-			c.setUploadOwner(newOwner)
 		}
 		c.authenticated.Store(true)
 		// R040034-PERF-23 (#1409): mirror the auth flip into h.authClients

@@ -20,6 +20,13 @@ import (
 // Claude JSONL.
 const DefaultKeepRecords = 1000
 
+// rotateAfterCloseHook is a test-only seam. When non-nil, rotate() invokes
+// it immediately after w.close() (and before the renames/reopens); a
+// non-nil error return drives the post-close failure path so tests can
+// verify the poisoned-writer eviction (R20260605B-CORR-11, #1815) without
+// fabricating a real filesystem fault. Always nil in production.
+var rotateAfterCloseHook func() error
+
 // rotate executes the O(1) tail-cut rotate documented in RFC §5.2:
 //
 //  1. Decide the cut: from idx entries, pick the oldest ByteOff we
@@ -108,6 +115,35 @@ func (p *Persister) rotate(key, stem string, w *perKeyWriter) error {
 	// the old fd. Close first so the next write opens the new file.
 	_ = w.close()
 
+	// R20260605B-CORR-11 (#1815): w.close() above unconditionally nils
+	// w.logBuf, w.logFile, and w.idxWriter. Every error path between
+	// here and the successful field reassignment below leaves `w`
+	// poisoned (nil buffers). handleBatch only LOGS a rotate error and
+	// keeps the cached writer in p.writers, so the NEXT batch would call
+	// WriteRecordRaw(w.logBuf, ...) and the next flush w.logBuf.Flush()
+	// on a nil *bufio.Writer — a nil-pointer panic on the run goroutine,
+	// which has no recover() and so crashes the whole process, halting
+	// ALL event-log persistence. Evict the poisoned writer on any such
+	// error so writerFor rebuilds a clean one (via Recover) on next
+	// access; the old files are intact, so recovery is lossless. The
+	// guard clears itself once the reopen below succeeds. Safe: rotate
+	// runs on the single run goroutine that owns p.writers.
+	rotateOK := false
+	defer func() {
+		if !rotateOK {
+			delete(p.writers, key)
+		}
+	}()
+
+	// Test seam: deterministically exercise the eviction path above
+	// without a real I/O fault. Production leaves this nil.
+	if rotateAfterCloseHook != nil {
+		if err := rotateAfterCloseHook(); err != nil {
+			cleanup()
+			return fmt.Errorf("post-close hook: %w", err)
+		}
+	}
+
 	// ----- atomic rename ---------------------------------------
 	if err := os.Rename(tmpLog, w.logPath); err != nil {
 		cleanup()
@@ -156,6 +192,7 @@ func (p *Persister) rotate(key, stem string, w *perKeyWriter) error {
 	w.pendingIdx = w.pendingIdx[:0]
 	w.dirty = false
 	w.entriesSinceIdxWrite = 0
+	rotateOK = true
 	slog.Info("event log persist: rotated",
 		"key", key,
 		"kept_entries", len(newIdx)-1, // minus header
@@ -232,6 +269,19 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 	headerEntry := idxEntries[0]
 	if headerEntry.ByteOff != 0 || headerEntry.Seq != 0 {
 		return 0, nil, fmt.Errorf("bad header idx entry: %+v", headerEntry)
+	}
+	// R20260605B-CORR-13 (#1817): headerEntry.Len is an int32 decoded
+	// straight from the on-disk idx (schema.UnmarshalIdxEntry casts
+	// uint32->int32, idx.go) with no read-time bound. A single bit-flip
+	// in the header Len field that sets the high bit yields a negative
+	// int32; make([]byte, negative) panics ("makeslice: len out of
+	// range") on the run goroutine — which has no recover() — crashing
+	// the process during a routine rotate. Reject a corrupted header Len
+	// so rotate fails safely (old files stay intact, see the func doc)
+	// instead. The upper bound mirrors the write-time record cap
+	// (schema.MaxRecordBytes); the header is itself a framed record.
+	if headerEntry.Len < 0 || int64(headerEntry.Len) > schema.MaxRecordBytes {
+		return 0, nil, fmt.Errorf("bad header idx entry len: %d", headerEntry.Len)
 	}
 	hdr := make([]byte, headerEntry.Len)
 	if _, err := src.ReadAt(hdr, 0); err != nil {

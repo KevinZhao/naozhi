@@ -847,7 +847,12 @@ func (h *Hub) unregister(c *wsClient) {
 		// the counter into negative territory.
 		h.connCount.Add(-1)
 		// R229-SEC-8 / #1022: free the per-uploadOwner sub-cap slot too.
-		h.releaseOwnerSlot(c.uploadOwnerKey())
+		// R20260605B-CORR-4 (#1808): read c.uploadOwnerKey() under
+		// connCountByOwnerMu (via releaseOwnerSlotForClient) so a concurrent
+		// handleAuth re-key (rekeyOwnerSlot) cannot expose the half-applied
+		// window where the field still reads the old owner but the new owner's
+		// slot is already reserved — which used to leak that slot.
+		h.releaseOwnerSlotForClient(c)
 		// Drop any agent_subscribe refs this client was holding so refCount
 		// stays accurate — otherwise an abrupt disconnect (mobile sleep)
 		// would leave the tailer in broadcasting mode forever, wedging a
@@ -956,7 +961,14 @@ func (h *Hub) reserveOwnerSlot(owner string) bool {
 	}
 	h.connCountByOwnerMu.Lock()
 	defer h.connCountByOwnerMu.Unlock()
-	if h.connCountByOwner == nil {
+	return h.reserveOwnerSlotLocked(owner)
+}
+
+// reserveOwnerSlotLocked is the connCountByOwnerMu-held body of
+// reserveOwnerSlot. owner=="" is handled by the callers (it never reaches
+// here from reserveOwnerSlot, and rekeyOwnerSlot guards "" explicitly).
+func (h *Hub) reserveOwnerSlotLocked(owner string) bool {
+	if owner == "" || h.connCountByOwner == nil {
 		return true
 	}
 	if h.connCountByOwner[owner] >= maxConnsPerOwner {
@@ -976,7 +988,13 @@ func (h *Hub) releaseOwnerSlot(owner string) {
 	}
 	h.connCountByOwnerMu.Lock()
 	defer h.connCountByOwnerMu.Unlock()
-	if h.connCountByOwner == nil {
+	h.releaseOwnerSlotLocked(owner)
+}
+
+// releaseOwnerSlotLocked is the connCountByOwnerMu-held body of
+// releaseOwnerSlot.
+func (h *Hub) releaseOwnerSlotLocked(owner string) {
+	if owner == "" || h.connCountByOwner == nil {
 		return
 	}
 	n := h.connCountByOwner[owner]
@@ -985,6 +1003,61 @@ func (h *Hub) releaseOwnerSlot(owner string) {
 		return
 	}
 	h.connCountByOwner[owner] = n - 1
+}
+
+// rekeyOwnerSlot atomically swaps c's per-owner connection slot from oldOwner
+// to newOwner, publishing c.setUploadOwner(newOwner) under the SAME
+// connCountByOwnerMu critical section that mutates the counter. This closes
+// the R20260605B-CORR-4 (#1808) race: a concurrent unregister (writePump
+// teardown) releases its slot via releaseOwnerSlotForClient, which reads
+// c.uploadOwnerKey() under the same lock — so it observes either the pre-rekey
+// owner (with oldOwner's slot still held) or the post-rekey owner (with
+// newOwner's slot held), never the half-applied window where the field still
+// reads oldOwner but newOwner's slot is already reserved.
+//
+// Returns false (no state changed) when newOwner is at the per-owner ceiling,
+// so the caller can refuse the auth with the connection still keyed to
+// oldOwner.
+func (h *Hub) rekeyOwnerSlot(c *wsClient, oldOwner, newOwner string) bool {
+	if h == nil {
+		c.setUploadOwner(newOwner)
+		return true
+	}
+	h.connCountByOwnerMu.Lock()
+	defer h.connCountByOwnerMu.Unlock()
+	// If the connection has already torn down (pump defer closed c.done before
+	// calling unregister, which releases the slot under THIS lock), do not
+	// reserve a fresh slot for it — that slot would never be released because
+	// unregister's `removed` gate fires exactly once and has already passed.
+	// Observing c.done not-yet-closed here, under the lock, guarantees any
+	// later unregister release reads the newOwner we publish below.
+	select {
+	case <-c.done:
+		return false
+	default:
+	}
+	h.releaseOwnerSlotLocked(oldOwner)
+	if !h.reserveOwnerSlotLocked(newOwner) {
+		// Re-claim the old slot so a later releaseOwnerSlotForClient(oldOwner)
+		// stays balanced; leave the field on oldOwner (no setUploadOwner).
+		h.reserveOwnerSlotLocked(oldOwner)
+		return false
+	}
+	c.setUploadOwner(newOwner)
+	return true
+}
+
+// releaseOwnerSlotForClient releases the slot for c's CURRENT upload owner,
+// reading c.uploadOwnerKey() under connCountByOwnerMu so it cannot interleave
+// with a concurrent rekeyOwnerSlot (R20260605B-CORR-4 / #1808). Used by the
+// unregister teardown path in place of releaseOwnerSlot(c.uploadOwnerKey()).
+func (h *Hub) releaseOwnerSlotForClient(c *wsClient) {
+	if h == nil {
+		return
+	}
+	h.connCountByOwnerMu.Lock()
+	defer h.connCountByOwnerMu.Unlock()
+	h.releaseOwnerSlotLocked(c.uploadOwnerKey())
 }
 
 // TrackSend reserves a sendWG slot for a background send goroutine and

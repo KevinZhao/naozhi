@@ -37,6 +37,13 @@ type IdxWriter struct {
 	// fine: each entry is 28 B and a typical idx batch is ≤32 entries
 	// (DefaultIdxStride window) ≈ 896 B. R237-PERF-11.
 	batchBuf []byte
+
+	// syncFailHook is a test-only seam. When non-nil and it returns a
+	// non-nil error, Sync returns that error WITHOUT touching the fd,
+	// letting tests simulate a transient fsync fault (e.g. EIO) to verify
+	// flush's retry-buffer ordering (R20260605B-CORR-12, #1816). Always
+	// nil in production.
+	syncFailHook func() error
 }
 
 // NewIdxWriter opens idx at the given path in append mode. Callers
@@ -107,6 +114,11 @@ func (w *IdxWriter) AppendBatch(entries []schema.IdxEntry) error {
 // flush goroutine calls this AFTER log.Sync to preserve the strict
 // log-then-idx ordering (see recovery.go for why).
 func (w *IdxWriter) Sync() error {
+	if w.syncFailHook != nil {
+		if err := w.syncFailHook(); err != nil {
+			return err
+		}
+	}
 	return w.f.Sync()
 }
 
