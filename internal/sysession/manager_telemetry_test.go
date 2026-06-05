@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
@@ -164,6 +165,48 @@ func TestManager_NilBroadcasterIsSafe(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("no run recorded with nil broadcaster (or it panicked)")
+}
+
+// TestManager_RunCountersBumpBroadcastIndependent pins that the symmetric
+// run-count expvar counters (naozhi_sysession_run_{started,ended}_total) each
+// increment by exactly 1 per driven Tick EVEN WITH A NIL BROADCASTER. This is
+// the whole point of placing the .Add before the nil-broadcaster early return
+// in emitRun{Started,Ended}: the counter must track run lifecycle, not the
+// broadcast path, mirroring cron's R230C-GO-15. Snapshots the global counters
+// before/after rather than asserting absolutes (expvar.Int is process-global).
+func TestManager_RunCountersBumpBroadcastIndependent(t *testing.T) {
+	const name = "auto-titler"
+	startBefore := metrics.SysessionRunStartedTotal.Value()
+	endBefore := metrics.SysessionRunEndedTotal.Value()
+
+	m := newTelemetryManager(t, name, func() (TickReport, error) {
+		return TickReport{Acted: 1}, nil
+	})
+	// Deliberately do NOT call SetTelemetry — telemetry pointer stays nil so
+	// the broadcast path is never taken, isolating the counter bump.
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx)
+	defer m.Stop(context.Background())
+
+	// Wait for the internal run record (recordRun runs even with nil
+	// broadcaster); by then both emit helpers have fired.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		st := m.Inspector()
+		if len(st) == 1 && st[0].LastRun != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	if got := metrics.SysessionRunStartedTotal.Value() - startBefore; got != 1 {
+		t.Errorf("SysessionRunStartedTotal delta = %d, want 1 (must bump with nil broadcaster)", got)
+	}
+	if got := metrics.SysessionRunEndedTotal.Value() - endBefore; got != 1 {
+		t.Errorf("SysessionRunEndedTotal delta = %d, want 1 (must bump with nil broadcaster)", got)
+	}
 }
 
 // TestManager_SetTelemetryNilClears pins that passing nil to SetTelemetry
