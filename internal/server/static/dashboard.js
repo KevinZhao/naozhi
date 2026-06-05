@@ -1133,8 +1133,10 @@ function showGitRemote(url) {
 // --- History Popover ---
 
 let activePopover = null;
+let activePopoverBackdrop = null;
 
 function closeHistoryPopover() {
+  if (activePopoverBackdrop) { activePopoverBackdrop.remove(); activePopoverBackdrop = null; }
   if (activePopover) { activePopover.remove(); activePopover = null; }
 }
 
@@ -1192,6 +1194,17 @@ function toggleHistory() {
   if (isMobile()) {
     popover.innerHTML = '<div class="sheet-handle"></div>' + popover.innerHTML;
   }
+  // Backdrop: captures outside clicks explicitly (so clicking a covered
+  // control like the node switcher dismisses the popover cleanly instead of
+  // being silently swallowed) and gives a "a layer is open" cue. The mobile
+  // sheet gets a dimmed variant; the desktop popover stays transparent so it
+  // reads as a lightweight popover, not a blocking modal. R20260605.
+  const backdrop = document.createElement('div');
+  backdrop.className = isMobile() ? 'history-backdrop is-sheet' : 'history-backdrop';
+  backdrop.addEventListener('click', closeHistoryPopover);
+  activePopoverBackdrop = backdrop;
+  document.body.appendChild(backdrop);
+
   activePopover = popover;
   document.body.appendChild(popover);
 
@@ -15486,6 +15499,16 @@ initSidebarSearch();
   let state = null;            // {scratchId, key, agentId, sourceKey, sourceMsgTime, quote, lastEventTime, pendingUserEchoes}
   let pollTimer = null;
   let sending = false;
+  // Self-scheduling poll cadence. A brand-new scratch session has no
+  // persisted events yet, so /api/sessions/events returns 404 ("session not
+  // found") until the first turn lands. The old fixed setInterval(…,1000)
+  // hammered that 404 at 1Hz forever, flooding the browser network log and
+  // wasting requests. We instead back off 1s→2s→4s→…→POLL_MAX_MS while the
+  // session is still empty/unreachable, and snap back to POLL_BASE_MS the
+  // moment a real poll succeeds. R20260605.
+  const POLL_BASE_MS = 1000;
+  const POLL_MAX_MS = 8000;
+  let pollDelayMs = POLL_BASE_MS;
 
   function authHeaders(extra) {
     const h = Object.assign({}, extra || {});
@@ -15507,7 +15530,7 @@ initSidebarSearch();
   function hideDrawer() { drawer.classList.remove('visible'); }
 
   function stopPolling() {
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   }
 
   async function closeScratch(silent) {
@@ -15660,7 +15683,18 @@ initSidebarSearch();
       if (state.lastEventTime > 0) url += '&after=' + state.lastEventTime;
       else url += '&limit=50';
       const r = await fetch(url, { headers: authHeaders() });
-      if (!r.ok) return;
+      if (!r.ok) {
+        // 404 = the scratch session has no persisted events yet (brand-new,
+        // first turn not landed). That is an expected empty state, not an
+        // error: back off so we stop hammering it at 1Hz. Other non-OK
+        // statuses get the same treatment — a transient server hiccup
+        // shouldn't busy-loop either.
+        pollDelayMs = Math.min(pollDelayMs * 2, POLL_MAX_MS);
+        return;
+      }
+      // A successful poll means the session is reachable; snap cadence back
+      // to the responsive base so newly-arriving events render promptly.
+      pollDelayMs = POLL_BASE_MS;
       const evs = await r.json();
       if (Array.isArray(evs) && evs.length > 0) {
         renderNewEvents(evs);
@@ -15669,12 +15703,26 @@ initSidebarSearch();
           elLoading.classList.remove('visible');
         }
       }
-    } catch (_) { /* swallow */ }
+    } catch (_) {
+      // Network error: back off too, same rationale as a non-OK response.
+      pollDelayMs = Math.min(pollDelayMs * 2, POLL_MAX_MS);
+    }
   }
 
   function startPolling() {
     stopPolling();
-    pollTimer = setInterval(pollOnce, 1000);
+    pollDelayMs = POLL_BASE_MS;
+    // Self-scheduling loop (not setInterval) so each tick's delay can grow
+    // with the backoff set inside pollOnce. stopPolling()'s clearTimeout
+    // cancels the next scheduled tick.
+    const tick = async () => {
+      await pollOnce();
+      // stopPolling() nulls pollTimer; if that happened during the await we
+      // must not reschedule (the drawer closed mid-flight).
+      if (pollTimer === null) return;
+      pollTimer = setTimeout(tick, pollDelayMs);
+    };
+    pollTimer = setTimeout(tick, pollDelayMs);
   }
 
   async function openScratch(quote, agentId, sourceKey, sourceMsgTime) {
@@ -15797,6 +15845,13 @@ initSidebarSearch();
         const txt = await r.text().catch(() => '');
         if (typeof showAPIError === 'function') showAPIError('发送消息', r.status, txt);
         elLoading.classList.remove('visible');
+      } else {
+        // The user just sent a turn, so the session is now live and events
+        // are imminent. Restart polling at the responsive base so the reply
+        // renders fast — without this, a tick already scheduled at the
+        // backed-off delay (up to POLL_MAX_MS from the pre-first-turn 404
+        // phase) could stall the first reply by several seconds.
+        if (pollTimer !== null) startPolling();
       }
     } catch (e) {
       console.error('scratch send', e);
