@@ -318,36 +318,25 @@ type Router struct {
 	// Nil in test-created routers; helpers are nil-safe.
 	// 读写: core (indexAdd/Del helpers + resolver), lifecycle (install/unregister)
 	keyhashToKey map[string]string
-	// 读写: core (init), backend (wrapperFor), lifecycle (spawn), shim (shimManagers)
-	wrapper *cli.Wrapper // default (legacy single-backend) wrapper
-	// 读写: core (init), backend (wrapperFor/managerFor/BackendIDs), lifecycle, shim
-	wrappers map[string]*cli.Wrapper // backend ID → wrapper (nil in legacy mode)
-	// 读写: core (init), backend (DefaultBackend, wrapperFor)
-	defaultBackend string // backend ID used when AgentOpts.Backend is empty
-	// backendIDs caches the dashboard-stable ordering returned by BackendIDs:
-	// default backend first, remaining IDs sorted ascending. wrappers is
-	// constructed once in NewRouter and never mutated, so this slice is
-	// computed once at construction and read-only thereafter — saves a
-	// per-call O(N) sort + 2 small allocations on the dashboard /api/sessions
-	// hot path.
-	// 读写: core (init), backend (BackendIDs)
-	backendIDs []string
+	// bkStore is the backend/policy facet (Router P3, #383): the 8 read-only-
+	// after-NewRouter config fields (wrapper/wrappers/defaultBackend/backendIDs/
+	// model/extraArgs/backendModels/backendExtraArgs) plus the single mutable
+	// backendOverrides map, extracted into backendStore (router_backend.go).
+	// No lock of its own — read/written ONLY under r.mu (RFC §3 candidate A,
+	// single r.mu retained). The 8 config fields are read lock-free; only
+	// backendOverrides mutates (SetSessionBackend write lock, GetSessionBackend
+	// RLock, lifecycle mutations under r.mu write lock). The annotation below
+	// covers the UNION of all inner-field domains; the lint recurses one level
+	// so each inner field ALSO carries its own per-domain annotation on
+	// backendStore.
+	// 读写: core (init), backend (wrapperFor/managerFor/BackendIDs/BackendWrapper/DefaultBackend/CLIName/CLIVersion/CLIPath/backendDefaultsFor/Set/GetSessionBackend), lifecycle (spawn/resolveSpawnParams/unregisterSessionLocked/RenameSession), shim (shimManagers)
+	bkStore backendStore
 	// 读写: core (init), lifecycle (countActive/evictOldest)
 	maxProcs int
 	// 读写: core (init), cleanup (shouldPrune)
 	ttl time.Duration
 	// 读写: core (init), cleanup (shouldPrune)
 	pruneTTL time.Duration
-	// 读写: core (init), lifecycle (resolveSpawnParams), backend (backendDefaultsFor base)
-	model string
-	// 读写: core (init), lifecycle (resolveSpawnParams), backend (backendDefaultsFor base)
-	extraArgs []string
-	// backendModels / backendExtraArgs optionally override model and args
-	// per backend ID. Read-only after NewRouter.
-	// 读写: core (init), lifecycle (resolveSpawnParams), backend (backendDefaultsFor override)
-	backendModels map[string]string
-	// 读写: core (init), lifecycle (resolveSpawnParams), backend (backendDefaultsFor override)
-	backendExtraArgs map[string][]string
 	// 读写: core (init/DefaultWorkspace), lifecycle (GetWorkspace fallback), workspace (resolveWorkspaceLocked/WorkspaceRoots fallback)
 	//
 	// Named defaultCWD (not "workspace") to disambiguate from the other
@@ -376,13 +365,6 @@ type Router struct {
 	// annotation on workspaceStore.
 	// 读写: core (init/load), lifecycle (ResetChat/RenameSession/spawn-resolver), cleanup (save), discovery (Takeover), workspace (SetWorkspace/resolve/Roots)
 	wsStore workspaceStore
-
-	// backendOverrides stores per-session backend preferences picked by
-	// the dashboard at session-creation time. Keyed by full session key
-	// (including agent suffix) so two sessions on the same chat can run
-	// against different backends.
-	// 读写: core (init), backend (Set/GetSessionBackend), lifecycle (unregisterSessionLocked)
-	backendOverrides map[string]string
 
 	// activeCount tracks currently alive processes (non-exempt only).
 	// Writes happen under r.mu (write lock); atomic access lets Stats()
@@ -949,7 +931,7 @@ func NewRouter(cfg RouterConfig) *Router {
 
 	// Normalize wrappers. Accept either a Wrappers map or a single Wrapper;
 	// when both are set, Wrappers wins and Wrapper is kept as a compat alias
-	// for code that still reads r.wrapper directly (mostly tests).
+	// for code that still reads r.bkStore.wrapper directly (mostly tests).
 	wrappers := cfg.Wrappers
 	defaultBackend := cfg.DefaultBackend
 	if len(wrappers) == 0 && cfg.Wrapper != nil {
@@ -988,20 +970,12 @@ func NewRouter(cfg RouterConfig) *Router {
 		sessions:         make(map[string]*ManagedSession),
 		sessionsByChat:   make(map[string]map[string]struct{}),
 		keyhashToKey:     make(map[string]string),
-		wrapper:          defaultWrapper,
-		wrappers:         wrappers,
-		defaultBackend:   defaultBackend,
 		maxProcs:         cfg.MaxProcs,
 		ttl:              cfg.TTL,
 		pruneTTL:         cfg.PruneTTL,
-		model:            cfg.Model,
-		extraArgs:        cfg.ExtraArgs,
-		backendModels:    cfg.BackendModels,
-		backendExtraArgs: cfg.BackendExtraArgs,
 		defaultCWD:       cfg.Workspace,
 		claudeDir:        cfg.ClaudeDir,
 		kiroSessionsDir:  cfg.KiroSessionsDir,
-		backendOverrides: make(map[string]string),
 		storePath:        cfg.StorePath,
 		knownIDs:         make(map[string]bool),
 		sessionIDToKey:   make(map[string]string),
@@ -1017,6 +991,17 @@ func NewRouter(cfg RouterConfig) *Router {
 	// allocated explicitly since composite-literal sub-struct field init is
 	// not used here (Router P1 facet, #383).
 	r.wsStore.overrides = make(map[string]string)
+	// bkStore is a value field (no lock of its own); its config fields and the
+	// backendOverrides map are set post-construction since composite-literal
+	// sub-struct field init is not used here (Router P3 facet, #383).
+	r.bkStore.wrapper = defaultWrapper
+	r.bkStore.wrappers = wrappers
+	r.bkStore.defaultBackend = defaultBackend
+	r.bkStore.model = cfg.Model
+	r.bkStore.extraArgs = cfg.ExtraArgs
+	r.bkStore.backendModels = cfg.BackendModels
+	r.bkStore.backendExtraArgs = cfg.BackendExtraArgs
+	r.bkStore.backendOverrides = make(map[string]string)
 	// nil HistoryLoader → production discovery-backed implementation so the
 	// rest of the router can call r.historyLoader unconditionally (#458).
 	if r.historyLoader == nil {
@@ -1131,7 +1116,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	// without losing the construction-time path used by production.
 	r.startBackgroundLifecycle()
 
-	r.backendIDs = computeBackendIDs(r.wrapper, r.wrappers, r.defaultBackend)
+	r.bkStore.backendIDs = computeBackendIDs(r.bkStore.wrapper, r.bkStore.wrappers, r.bkStore.defaultBackend)
 
 	return r
 }
