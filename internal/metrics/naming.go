@@ -42,6 +42,7 @@ const (
 	SubsystemEventlog   Subsystem = "eventlog"
 	SubsystemAttachment Subsystem = "attachment"
 	SubsystemCron       Subsystem = "cron"
+	SubsystemSysession  Subsystem = "sysession"
 	SubsystemStartup    Subsystem = "startup"
 	SubsystemAutoChain  Subsystem = "auto_chain"
 	SubsystemProtocol   Subsystem = "protocol"
@@ -54,8 +55,8 @@ const (
 var KnownSubsystems = []Subsystem{
 	SubsystemSession, SubsystemCLI, SubsystemWS, SubsystemShim,
 	SubsystemSpawn, SubsystemPanic, SubsystemInterrupt, SubsystemEventlog,
-	SubsystemAttachment, SubsystemCron, SubsystemStartup, SubsystemAutoChain,
-	SubsystemProtocol, SubsystemACP, SubsystemMetrics,
+	SubsystemAttachment, SubsystemCron, SubsystemSysession, SubsystemStartup,
+	SubsystemAutoChain, SubsystemProtocol, SubsystemACP, SubsystemMetrics,
 }
 
 // Kind selects the metric's semantic and the suffix the name must carry.
