@@ -177,9 +177,13 @@ func (s *Scheduler) containsSessionID(sessionID string) bool {
 
 	// Not in the cheap sources — pay the full build and populate the
 	// TTL cache so subsequent callers (KnownSessionIDs at 1Hz from the
-	// dashboard) reuse this work.
+	// dashboard) reuse this work. Snapshot the cache generation BEFORE the
+	// build reads any source data so a concurrent invalidate() cannot be
+	// clobbered by our publish (R20260605B-CORR-7 #1811). The local `set`
+	// is still returned to the probe caller even if publish is rejected.
+	buildGen := s.knownSessionsCache.beginBuild()
 	set := s.buildKnownSessionsSet()
-	s.knownSessionsCache.publish(set)
+	s.knownSessionsCache.publish(set, buildGen)
 
 	_, ok := set[sessionID]
 	return ok
@@ -224,8 +228,14 @@ func (s *Scheduler) KnownSessionIDs() map[string]struct{} {
 		return set
 	}
 
+	// Snapshot the generation before reading source data so a concurrent
+	// invalidate() that lands during the build is not lost to our publish.
+	// The freshly built set is still returned to this caller even when
+	// publish is rejected — the rejection only prevents caching a stale
+	// snapshot. R20260605B-CORR-7 (#1811).
+	buildGen := s.knownSessionsCache.beginBuild()
 	set := s.buildKnownSessionsSet()
-	s.knownSessionsCache.publish(set)
+	s.knownSessionsCache.publish(set, buildGen)
 
 	return set
 }
