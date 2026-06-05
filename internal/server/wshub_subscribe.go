@@ -260,6 +260,21 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	// subscriptions, so ctx.Err() being set here is a strong signal that
 	// Shutdown is mid-flight; decline to start a new pushLoop.
 	if c.subscriptions == nil || h.ctx.Err() != nil {
+		// R20260605B-CORR-2 (#1806): release the placeholder reservation
+		// installed by handleSubscribe, symmetric with the two sibling early
+		// returns (HasProcess==false above and the pre-lock ctx fast-fail).
+		// When c.subscriptions == nil Shutdown already cleared both the map and
+		// the subscriberCount bookkeeping, so the guarded delete is a no-op;
+		// when only ctx is cancelled (cancelled in the window since the
+		// fast-fail check) the placeholder + inflated subscriberCount[key]
+		// would otherwise linger, counting toward maxSubscriptionsPerClient /
+		// maxSubscribersPerKey until the client disconnects.
+		if c.subscriptions != nil {
+			if _, ok := c.subscriptions[key]; ok {
+				delete(c.subscriptions, key)
+				h.decSubscriberCountLocked(key)
+			}
+		}
 		h.mu.Unlock()
 		unsub()
 		return
