@@ -139,6 +139,19 @@ func (g *gzipResponseWriter) decide() {
 }
 
 func (g *gzipResponseWriter) WriteHeader(code int) {
+	// Bodyless responses (304 Not Modified, 204 No Content) must never be
+	// gzipped: there is nothing to compress, and turning gzip on would (a) pull
+	// a gzip.Writer from the pool + Reset it for nothing, (b) attach a
+	// misleading Content-Encoding/Vary to a zero-body response, and (c) make
+	// close() emit ~20 bytes of gzip header/trailer as a phantom body, which
+	// RFC 7232 says a 304 must not carry. The static-asset 304 fast-path
+	// (serveStaticWithETag) is one of the hottest mobile-reload paths, so skip
+	// decide() entirely here and leave useGzip=false. (#1771)
+	if code == http.StatusNotModified || code == http.StatusNoContent {
+		g.wroteHeader = true
+		g.ResponseWriter.WriteHeader(code)
+		return
+	}
 	g.decide()
 	g.ResponseWriter.WriteHeader(code)
 }

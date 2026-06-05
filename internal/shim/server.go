@@ -1000,10 +1000,28 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 		}
 	}()
 
+	// sendCliExited carries the runCommandLoop signal into the teardown defer:
+	// when the live CLI died, the terminal cli_exited frame is written
+	// synchronously to conn AFTER the async writer goroutine has drained and
+	// exited (so there is no interleave with its buffered output and no race
+	// with conn.Close losing the frame). #1783.
+	var sendCliExited bool
+	var cliExitCode int
 	defer func() {
+		// Close clientDone (clearClient) so the writer goroutine flushes its
+		// pending buffer and exits; wait for it before touching conn directly.
 		s.clearClient(conn)
-		conn.Close() // unblock any in-progress write in the writer goroutine
 		<-writerDone
+		// Now that the writer goroutine is gone, conn is exclusively ours:
+		// deliver the terminal cli_exited frame synchronously (writeRaw sets a
+		// 10s write deadline + flushes to the socket) so it cannot be dropped.
+		if sendCliExited {
+			resp := ServerMsg{Type: "cli_exited", Code: intPtr(cliExitCode)}
+			if data, err := resp.MarshalLine(); err == nil {
+				writeRaw(conn, data)
+			}
+		}
+		conn.Close()
 		// Only re-arm watchdog/idle if no new client took over
 		s.mu.Lock()
 		noNewClient := s.clientConn == nil
@@ -1021,7 +1039,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	s.mu.Unlock()
 	s.saveState()
 
-	s.runCommandLoop(reader, postAuthLR, clientDone, cliWasAlive)
+	sendCliExited, cliExitCode = s.runCommandLoop(reader, postAuthLR, clientDone, cliWasAlive)
 }
 
 // runCommandLoop is the post-auth, post-replay client message dispatch loop.
@@ -1037,12 +1055,21 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 //   - cliWasAlive: snapshot of cli.alive() taken at attach time. Drives
 //     the cli.exited dedup so a dead-CLI replay path doesn't re-emit
 //     cli_exited (closed channel is always selectable).
+//
+// Returns sendCliExited=true (with the CLI exit code) when the loop exited
+// because the live CLI died and the terminal cli_exited control frame still
+// needs to reach the client. The caller (handleClient) delivers that frame
+// synchronously AFTER the async writer goroutine has drained and exited, so it
+// cannot be dropped on a transiently-full writeCh nor lost to a conn.Close()
+// racing the writer's flush — the #1783 correctness bug. All other exit paths
+// (client disconnect, command-driven disconnect, shutdown) return
+// sendCliExited=false.
 func (s *shimServer) runCommandLoop(
 	reader *bufio.Reader,
 	postAuthLR *io.LimitedReader,
 	clientDone <-chan struct{},
 	cliWasAlive bool,
-) {
+) (sendCliExited bool, exitCode int) {
 	// Command loop: reads from client, also watches for CLI exit and shutdown
 	lineCh := make(chan []byte, 1)
 	go func() {
@@ -1105,30 +1132,32 @@ func (s *shimServer) runCommandLoop(
 		select {
 		case line, ok := <-lineCh:
 			if !ok {
-				return // client disconnected
+				return false, 0 // client disconnected
 			}
 			msg, err := ParseClientMsg(bytes.TrimSpace(line))
 			if err != nil {
 				continue
 			}
 			if disconnect := s.handleClientCommand(msg); disconnect {
-				return
+				return false, 0
 			}
 
 		case <-cliExited:
 			// Reachable only when cliWasAlive==true: when CLI was already dead at
 			// attach time cliExited is set to nil (see above), and a nil channel is
 			// never selected, preventing double delivery of cli_exited.
-			// Send cli_exited to the connected client.
-			code := s.cli.exitCode
-			resp := ServerMsg{Type: "cli_exited", Code: intPtr(code)}
-			if data, err := resp.MarshalLine(); err == nil {
-				s.enqueueWrite(data)
-			}
-			return
+			//
+			// Do NOT enqueue cli_exited on writeCh here: it is the final control
+			// frame before teardown, and returning immediately closes clientDone
+			// (handleClient defer) and then conn — which races the async writer's
+			// flush and could lose the frame, leaving the client to discover the
+			// death only via a later reconnect+replay (#1783). Instead we hand the
+			// exit code back to handleClient, which delivers cli_exited
+			// synchronously after the writer goroutine has drained and exited.
+			return true, s.cli.exitCode
 
 		case <-s.done:
-			return
+			return false, 0
 		}
 	}
 }

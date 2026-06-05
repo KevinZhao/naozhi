@@ -33,9 +33,7 @@ func TestNotifyTarget_CapDropFoldedIntoFailureWarn(t *testing.T) {
 	}
 	fp := &fakePartialPlatform{failAt: 1, maxLen: 8}
 	s := &Scheduler{}
-	s.configMapsPtr.Store(&cronConfigMaps{
-		platforms: map[string]platform.Platform{"fake-notify": fp},
-	})
+	storeFakeNotifySender(s, map[string]platform.Platform{"fake-notify": fp})
 	long := buildDistinctChunks(produced, 8)
 	chunks := platform.SplitText(long, 8)
 	if len(chunks) <= cronNotifyMaxChunks {

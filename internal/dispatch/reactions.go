@@ -65,11 +65,17 @@ func (d *Dispatcher) ackQueuedWithReaction(ctx context.Context, msg platform.Inc
 // a reaction on the user's message; fall back to a short text reply when
 // the platform is not reactor-capable. Rate-limited via ShouldNotify so a
 // burst of follower acks doesn't spam the chat.
-func (d *Dispatcher) ackMergedFollower(ctx context.Context, msg platform.IncomingMessage, mergedCount int, lg *slog.Logger) {
+//
+// #1784: key is the resolved session key (the same bucket the rest of the
+// dispatch path rate-limits on, e.g. handleQueuedNonOwner's ShouldNotify(key)).
+// The pre-fix code passed msg.ChatID, which keys a different bucket than the
+// per-key MessageQueue tracks — so the cooldown never matched and a follower
+// burst could either over- or under-fire the text fallback.
+func (d *Dispatcher) ackMergedFollower(ctx context.Context, msg platform.IncomingMessage, key string, mergedCount int, lg *slog.Logger) {
 	if d.ackQueuedWithReaction(ctx, msg, lg) {
 		return
 	}
-	if d.queue != nil && !d.queue.ShouldNotify(msg.ChatID) {
+	if d.queue != nil && !d.queue.ShouldNotify(key) {
 		return
 	}
 	_ = mergedCount // reserved for future reaction variant showing count

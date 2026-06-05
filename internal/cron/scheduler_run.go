@@ -1210,6 +1210,29 @@ func (s *Scheduler) resolveCronWorkspace(
 			})
 			return "", true
 		}
+		// #1730: the cached gate above can pass on a stale-positive within
+		// workDirResolveCacheTTL — an operator may point the workDir symlink at
+		// an allowed path, let the cache warm, then retarget it outside
+		// allowedRoot, and the next fresh=false tick would launch the CLI under
+		// the retargeted path before the TTL expires. Re-run the uncached
+		// workDirUnderRoot gate here to close that window, mirroring the
+		// fresh-path containment check (RunStateFailed / ErrClassWorkDirOutsideRoot,
+		// no subprocess launch). The extra EvalSymlinks is bounded to the
+		// about-to-launch tick (minCronInterval >= 5min, not a hot path). On
+		// success we keep the cached-resolved path rather than the uncached
+		// result to avoid double-EvalSymlinks semantic divergence.
+		if !workDirUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved) {
+			lg.Warn("cron job work_dir outside allowed root (uncached recheck); aborting run",
+				"work_dir", snap.workDir)
+			s.finishRun(finishArgs{
+				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+				state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
+				errMsg: "work_dir outside allowed root",
+				prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+				finalizer: finalizer,
+			})
+			return "", true
+		}
 		return resolved, false
 	}
 	if resolved, err := filepath.EvalSymlinks(snap.workDir); err == nil {
