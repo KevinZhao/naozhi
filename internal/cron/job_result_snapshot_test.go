@@ -107,3 +107,50 @@ func TestJobSnapshotResultStateRoundTrip(t *testing.T) {
 		t.Errorf("RunCounters not restored: got %+v want %+v", pre.RunCounters, wantCounters)
 	}
 }
+
+// TestJobStateAliasIdentity pins R238-ARCH-13 (#764): the runtime-state
+// cluster's canonical exported name is JobState, and jobResultSnapshot is
+// retained only as an alias of it so the historical capture/rollback call
+// sites and the round-trip tests above keep compiling. The first slice of
+// the Job god-struct split names the state half (JobState) without changing
+// the on-disk wire schema; this test fails if a future change reintroduces
+// two distinct types (drift between the snapshot used at the capture site
+// and the one asserted by the rollback tests) or renames the canonical type
+// out from under the alias.
+//
+// The assertion is compile-time: snapshotResultState must return a value
+// assignable to JobState, and a JobState value must be assignable to the
+// jobResultSnapshot alias and back, with restore reachable on both spellings.
+func TestJobStateAliasIdentity(t *testing.T) {
+	j := &Job{
+		LastResult:    "x",
+		LastSessionID: "sess",
+		RunCounters:   JobRunCounters{Total: 1, Succeeded: 1},
+	}
+
+	// snapshotResultState's declared return type is JobState — this binding
+	// would not compile if the return type drifted to a distinct struct.
+	var canonical JobState = j.snapshotResultState()
+
+	// jobResultSnapshot is an alias of JobState: cross-assignment compiles
+	// only while they are the identical type.
+	var aliased jobResultSnapshot = canonical
+	canonical = aliased
+
+	// restore is reachable via both spellings and round-trips through the
+	// alias identically.
+	target := &Job{
+		LastResult:    "mutated",
+		LastSessionID: "sess-mutated",
+		RunCounters:   JobRunCounters{Total: 99, Succeeded: 99},
+	}
+	aliased.restore(target)
+	if target.LastResult != "x" || target.LastSessionID != "sess" {
+		t.Errorf("restore via alias did not round-trip: result=%q session=%q",
+			target.LastResult, target.LastSessionID)
+	}
+	wantCounters := JobRunCounters{Total: 1, Succeeded: 1}
+	if target.RunCounters != wantCounters {
+		t.Errorf("restore via alias counters = %+v, want %+v", target.RunCounters, wantCounters)
+	}
+}

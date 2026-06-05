@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/runtelemetry"
 )
 
 // osExit was previously the default Stop deadline-exceeded exit hook,
@@ -84,13 +85,6 @@ type Config struct {
 	// per-chat overrides + project paths (docs/rfc/attachment-gc-daemon.md
 	// §4.4). Kept out of Router because it spans router + project manager.
 	WorkspaceRoots WorkspaceRootLister
-
-	// OnRunStarted / OnRunEnded receive run lifecycle events for
-	// dashboard WS broadcast.  Both nil-safe; either may be nil
-	// independently.  Manager invokes them outside any Manager-internal
-	// lock so handlers may take their own locks freely.
-	OnRunStarted func(DaemonRunStartedEvent)
-	OnRunEnded   func(DaemonRunEndedEvent)
 
 	// NewTicker is an optional injection point for tests.  nil means
 	// time.NewTicker.  Test usage:
@@ -233,24 +227,22 @@ type Manager struct {
 	// Start, Stop, and the daemon goroutines.
 	lifeP atomic.Pointer[ctxCancel]
 
-	// Lifecycle hooks.  Held under atomic.Pointer so SetCallbacks
-	// (called late during startup wiring, after Hub is built) doesn't
-	// race recordRun callers. Reads happen on every Tick (twice — once
-	// at run start, once at run end); writes are once or twice during
-	// init.
+	// telemetry holds the runtelemetry.Broadcaster registered by the host
+	// (server.Hub) so Manager produces run-lifecycle events directly onto
+	// the shared seam cron also uses (#1723 Phase 1). Held under
+	// atomic.Pointer because SetTelemetry (called late during startup
+	// wiring, after the Hub is built) can race the emitRun{Started,Ended}
+	// reads on every Tick. nil pointer ⇒ no broadcaster registered yet
+	// (tests / no-WS) and emit* is a silent no-op.
 	//
-	// R242-GO-16 + R246-ARCH-6 alignment: previously held under a
-	// sync.RWMutex with plain function fields. Switched to
-	// atomic.Pointer[holder] to (a) drop the lock-acquire pair on every
-	// Tick read, (b) match the upstream/connector.go pattern where
-	// SetDiscoverFunc / SetPreviewFunc already use atomic.Pointer for
-	// the identical "wired late, read often" lifecycle, and (c) let
-	// the race detector enforce the invariant rather than relying on a
-	// "main is single-threaded" doc comment. See holder type docs in
-	// hook_holders.go for why we wrap the function values in a struct
-	// (atomic.Pointer needs a concrete pointee type).
-	onRunStarted atomic.Pointer[onRunStartedHolder]
-	onRunEnded   atomic.Pointer[onRunEndedHolder]
+	// R20260527-GO-1 alignment: identical atomic.Pointer[Broadcaster]
+	// shape to cron.Scheduler.telemetry — one pattern across both
+	// schedulers for the "wired late, read often" lifecycle, and the race
+	// detector enforces the invariant rather than a "main is
+	// single-threaded" doc comment. Replaces the previous
+	// atomic.Pointer[onRun*Holder] callback-pair + SetCallbacks API
+	// (deleted with hook_holders.go).
+	telemetry atomic.Pointer[runtelemetry.Broadcaster]
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -292,14 +284,9 @@ func NewManager(cfg Config) (*Manager, error) {
 		cfg:     cfg,
 		tickFn:  cfg.NewTicker,
 	}
-	// Route initial callbacks through SetCallbacks so onRunStarted /
-	// onRunEnded have a single write path (R242-GO-16). The constructor
-	// is the only caller before publication, so the lock acquired by
-	// SetCallbacks is uncontended; the symmetry vs the late re-bind from
-	// main.go (when Hub is finally available) avoids the previous
-	// "constructor writes plain field, runtime writes via mutex" race
-	// shape that left the lock contract one-sided.
-	m.SetCallbacks(cfg.OnRunStarted, cfg.OnRunEnded)
+	// telemetry starts nil (no broadcaster). The host wires it late via
+	// SetTelemetry once the Hub exists (#1723 Phase 1) — same late-inject
+	// shape cron uses. Until then emit* is a silent no-op.
 	if !cfg.Enabled {
 		// Build nothing; Start is a no-op.
 		return m, nil
@@ -557,47 +544,6 @@ func (m *Manager) Inspector() []DaemonStatus {
 	return out
 }
 
-// SetCallbacks installs (or replaces) the OnRunStarted / OnRunEnded
-// hooks.  Safe to call after Start — main.go uses this so the WS hub
-// (which is built after the Manager) can wire daemon_run_* broadcasts.
-//
-// Pass nil to clear a hook.  Either argument may be nil independently.
-//
-// R246-ARCH-6 alignment: implemented via atomic.Pointer.Store so
-// concurrent Set / load sequences are well-defined without a mutex.
-// The two hook fields are stored independently — passing one nil and
-// one non-nil clears one without affecting the other.
-func (m *Manager) SetCallbacks(onRunStarted func(DaemonRunStartedEvent), onRunEnded func(DaemonRunEndedEvent)) {
-	if onRunStarted == nil {
-		m.onRunStarted.Store(nil)
-	} else {
-		m.onRunStarted.Store(&onRunStartedHolder{fn: onRunStarted})
-	}
-	if onRunEnded == nil {
-		m.onRunEnded.Store(nil)
-	} else {
-		m.onRunEnded.Store(&onRunEndedHolder{fn: onRunEnded})
-	}
-}
-
-// loadOnRunStarted returns the currently installed start hook, or nil
-// if none is set. Lock-free; safe from any goroutine.
-func (m *Manager) loadOnRunStarted() func(DaemonRunStartedEvent) {
-	if h := m.onRunStarted.Load(); h != nil {
-		return h.fn
-	}
-	return nil
-}
-
-// loadOnRunEnded returns the currently installed end hook, or nil if
-// none is set. Lock-free; safe from any goroutine.
-func (m *Manager) loadOnRunEnded() func(DaemonRunEndedEvent) {
-	if h := m.onRunEnded.Load(); h != nil {
-		return h.fn
-	}
-	return nil
-}
-
 // DaemonStatus is the public read-only view of a daemon's state.
 // Mirrors the JSON shape the dashboard endpoint emits (see RFC §9.2).
 type DaemonStatus struct {
@@ -691,14 +637,7 @@ func (m *Manager) runOnce(ctx context.Context, rec *daemonRecord, trigger Daemon
 	runID := newRunID()
 	startedAt := time.Now()
 
-	if cb := m.loadOnRunStarted(); cb != nil {
-		cb(DaemonRunStartedEvent{
-			Name:      rec.daemon.Name(),
-			RunID:     runID,
-			Trigger:   trigger,
-			StartedAt: startedAt,
-		})
-	}
+	m.emitRunStarted(rec.daemon.Name(), runID, trigger, startedAt)
 
 	var (
 		report  TickReport
@@ -736,7 +675,7 @@ func (m *Manager) runOnce(ctx context.Context, rec *daemonRecord, trigger Daemon
 }
 
 // recordRun writes the DaemonRun to the per-daemon ring, updates the
-// failure counters, trips the breaker if needed, and fires OnRunEnded.
+// failure counters, trips the breaker if needed, and fires emitRunEnded.
 //
 // Failure-class counters (RFC §7.4):
 //
@@ -806,16 +745,7 @@ func (m *Manager) recordRun(rec *daemonRecord, runID string, trigger DaemonTrigg
 		// success streak is not nuked by an orderly shutdown). R236-QA-05.
 	}
 
-	if cb := m.loadOnRunEnded(); cb != nil {
-		cb(DaemonRunEndedEvent{
-			Name:       rec.daemon.Name(),
-			RunID:      runID,
-			State:      dr.State,
-			DurationMS: dr.DurationMS,
-			ErrorClass: dr.ErrorClass,
-			Trigger:    dr.Trigger,
-		})
-	}
+	m.emitRunEnded(rec.daemon.Name(), runID, dr.State, dr.DurationMS, dr.ErrorClass, dr.Trigger)
 }
 
 // flattenTickReport converts a TickReport into the Stats map shape
