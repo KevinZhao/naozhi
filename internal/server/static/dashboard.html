@@ -792,6 +792,19 @@ body.nz-view-assets .asset-main{display:flex}
 .node-dot.error{background:var(--nz-red)}
 .node-info{color:var(--nz-text-mute);font-size:13px}
 
+/* History popover/sheet backdrop. Before R20260605 the popover had no
+   backdrop, so its fixed box silently sat on top of the node switcher and
+   session list: clicking those covered controls only dismissed the popover
+   (the document-level outside-click handler) without actuating the control,
+   and there was no visual "a layer is open" cue. The backdrop captures that
+   click explicitly (→ closeHistoryPopover) and dims the background a touch.
+   Lighter than .modal-overlay's .75 scrim because a history list is a
+   transient popover, not a blocking modal. z-index 99 sits just under the
+   desktop .history-popover (100); the mobile sheet (200) gets the heavier
+   variant below. */
+.history-backdrop{position:fixed;inset:0;z-index:99;background:transparent;animation:fade-in .15s ease}
+.history-backdrop.is-sheet{z-index:199;background:rgba(0,0,0,.4)}
+@keyframes fade-in{from{opacity:0}to{opacity:1}}
 .history-popover{position:absolute;top:100%;left:0;z-index:100;min-width:280px;max-width:360px;max-height:320px;overflow-y:auto;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:0;animation:pop-in .15s ease}
 @keyframes pop-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 .history-popover-header{padding:8px 12px;font-size:11px;color:var(--nz-text-mute);border-bottom:1px solid var(--nz-bg-2);font-weight:600;letter-spacing:.3px;background:var(--nz-bg-0);border-radius:8px 8px 0 0}

@@ -43,16 +43,54 @@ func clientIPInternal(r *http.Request, trustedProxy bool) (string, bool) {
 		return ip, true
 	}
 	xff := r.Header.Get("X-Forwarded-For")
-	if xff == "" {
-		return ip, false
+	if xff != "" {
+		tail := xff
+		if i := strings.LastIndexByte(xff, ','); i >= 0 {
+			tail = xff[i+1:]
+		}
+		tail = strings.TrimSpace(tail)
+		if tail != "" && net.ParseIP(tail) != nil {
+			return tail, true
+		}
 	}
-	tail := xff
-	if i := strings.LastIndexByte(xff, ','); i >= 0 {
-		tail = xff[i+1:]
+	// R20260605: no usable XFF. In trustedProxy mode that normally means the
+	// request did not traverse the proxy and is treated as unresolvable. But
+	// a loopback RemoteAddr (127.0.0.1/::1) cannot be externally routed — the
+	// kernel guarantees it originated on-host — so it is the legit
+	// direct-access path (SSH tunnel / local curl / port-forward), the same
+	// case isLoopbackClient deliberately allows. Resolve it to its loopback IP
+	// so it gets a real per-IP rate-limit key instead of a hard fail-closed
+	// reject. An externally-routable RemoteAddr without usable XFF stays
+	// unresolvable, preserving R244-SEC-P3-3's shared-bucket DoS guard.
+	if isLoopbackIPString(ip) {
+		return ip, true
 	}
-	tail = strings.TrimSpace(tail)
-	if tail == "" || net.ParseIP(tail) == nil {
-		return ip, false
+	return ip, false
+}
+
+// RequestHasResolvableClientIP reports whether r carries a usable per-client
+// rate-limit key. In !trustedProxy mode every request has a key. In
+// trustedProxy mode the request is resolvable when X-Forwarded-For carries a
+// parseable last hop, OR when the request arrives directly on the loopback
+// interface (no XFF, RemoteAddr is 127.0.0.1/::1) — the kernel-guaranteed
+// on-host direct-access path. Single source of truth for the per-package
+// copies in internal/server and internal/dashboard/auth.
+func RequestHasResolvableClientIP(r *http.Request, trustedProxy bool) bool {
+	_, ok := clientIPInternal(r, trustedProxy)
+	return ok
+}
+
+// isLoopbackIPString parses a bare IP host (no port) and reports whether it is
+// a loopback address. Empty / "@" (UDS RemoteAddr) is treated as loopback so
+// filesystem-gated UDS deployments resolve; an unparseable string is treated
+// as non-loopback so the ambiguous case fails closed.
+func isLoopbackIPString(host string) bool {
+	if host == "" || host == "@" {
+		return true
 	}
-	return tail, true
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }

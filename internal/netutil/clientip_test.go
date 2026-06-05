@@ -109,3 +109,43 @@ func TestClientIP(t *testing.T) {
 		})
 	}
 }
+
+// TestRequestHasResolvableClientIP pins R20260605: in trustedProxy mode an
+// XFF-less request is resolvable iff it arrives on the loopback interface
+// (the kernel-guaranteed direct-access path: SSH tunnel / local curl /
+// port-forward). An externally-routable XFF-less request stays unresolvable
+// so R244-SEC-P3-3's shared-bucket DoS guard is preserved.
+func TestRequestHasResolvableClientIP(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		remoteAddr   string
+		xff          string
+		trustedProxy bool
+		want         bool
+	}{
+		{"untrusted proxy always resolvable", "10.0.0.1:54321", "", false, true},
+		{"untrusted proxy resolvable even without XFF", "203.0.113.7:443", "", false, true},
+		{"trusted proxy with valid XFF resolvable", "10.0.0.1:54321", "203.0.113.7", true, true},
+		{"trusted proxy external IP without XFF unresolvable", "203.0.113.7:443", "", true, false},
+		{"trusted proxy IPv4 loopback without XFF resolvable", "127.0.0.1:54321", "", true, true},
+		{"trusted proxy IPv6 loopback without XFF resolvable", "[::1]:54321", "", true, true},
+		{"trusted proxy 127.x loopback range without XFF resolvable", "127.0.0.53:9999", "", true, true},
+		{"trusted proxy malformed XFF on external IP unresolvable", "203.0.113.7:443", "not-an-ip", true, false},
+		{"trusted proxy malformed XFF on loopback resolves via loopback fallback", "127.0.0.1:54321", "not-an-ip", true, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := httptest.NewRequest("GET", "/", nil)
+			r.RemoteAddr = tc.remoteAddr
+			if tc.xff != "" {
+				r.Header.Set("X-Forwarded-For", tc.xff)
+			}
+			got := RequestHasResolvableClientIP(r, tc.trustedProxy)
+			if got != tc.want {
+				t.Fatalf("RequestHasResolvableClientIP = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

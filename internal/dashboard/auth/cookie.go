@@ -1,9 +1,9 @@
 package auth
 
 import (
-	"net"
 	"net/http"
-	"strings"
+
+	"github.com/naozhi/naozhi/internal/netutil"
 )
 
 // AuthCookieName is the dashboard auth cookie name.
@@ -20,24 +20,11 @@ const AuthCookieName = "naozhi_auth"
 const unknownIPKey = "_unknown_"
 
 // requestHasResolvableClientIP reports whether r carries a usable per-client
-// rate-limit key. In !trustedProxy mode every request has a key (RemoteAddr
-// is set by net/http even for UDS via the listener fallback). In trustedProxy
-// mode the request is only resolvable when X-Forwarded-For carries at least
-// one parseable IP.
-//
-// Phase 3a duplicated from internal/server/ip_limiter.go.
+// rate-limit key. Delegates to netutil so the loopback-direct-access
+// exemption (R20260605) is shared with internal/server: in trustedProxy mode
+// an XFF-carrying request OR a loopback direct connection (SSH tunnel / local
+// curl) is resolvable, while an externally-routable XFF-less request stays
+// unresolvable.
 func requestHasResolvableClientIP(r *http.Request, trustedProxy bool) bool {
-	if !trustedProxy {
-		return true
-	}
-	xff := r.Header.Get("X-Forwarded-For")
-	if xff == "" {
-		return false
-	}
-	tail := xff
-	if i := strings.LastIndexByte(xff, ','); i >= 0 {
-		tail = xff[i+1:]
-	}
-	tail = strings.TrimSpace(tail)
-	return tail != "" && net.ParseIP(tail) != nil
+	return netutil.RequestHasResolvableClientIP(r, trustedProxy)
 }
