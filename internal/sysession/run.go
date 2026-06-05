@@ -44,9 +44,10 @@ const (
 // the six sysession values map 1:1 onto runtelemetry constants; the lone
 // exception is DaemonErrorClassTimeout, whose pre-merge wire string
 // "timeout" deliberately differs from runtelemetry's canonical
-// ErrClassDeadlineExceeded ("deadline_exceeded"). server's
-// mapSysessionErrorClass owns that normalisation before broadcast, so the
-// literal stays here verbatim to preserve the existing wire shape.
+// ErrClassDeadlineExceeded ("deadline_exceeded"). sysession's
+// mapSysessionErrorClass (in telemetry.go) owns that normalisation before
+// broadcast, so the literal stays here verbatim to preserve the existing
+// wire shape.
 type DaemonErrorClass = runtelemetry.ErrorClass
 
 const (

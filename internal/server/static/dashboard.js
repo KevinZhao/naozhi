@@ -81,6 +81,7 @@ let _lastSidebarHtml = null;
 let sessionPollTimer = null;
 let discoveredPollTimer = null;
 let discoveredItems = []; // discovered sessions, merged into sidebar
+let lastDiscoveredJSON = ''; // #1770: last /api/discovered payload, to skip forced re-render when unchanged
 let previewTimer = null;
 let previewEventCount = 0;
 let pendingDiscovered = null; // {pid, sessionId, cwd, procStartTime, node} when previewing a discovered session
@@ -944,7 +945,7 @@ function sectionHeaderFallbackHtml(p) {
   const count = typeof p._sessionCount === 'number' ? p._sessionCount : 0;
   const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
   const cTitle = collapsed ? '展开' : '收起';
-  const collapseBtn = '<button type="button" class="' + cCls + '" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '" onclick="event.stopPropagation();toggleProjectCollapsed(this.dataset.key)">' + CHEVRON_SVG + '</button>';
+  const collapseBtn = '<button type="button" class="' + cCls + '" data-action="project-collapse" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '">' + CHEVRON_SVG + '</button>';
   const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
   const nameTitle = workspace ? escAttr(p.name + ' — ' + workspace) : escAttr(p.name);
   const collapsedCls = collapsed ? ' is-collapsed' : '';
@@ -965,14 +966,14 @@ function sectionHeaderHtml(p) {
   const count = typeof p._sessionCount === 'number' ? p._sessionCount : 0;
   const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
   const cTitle = collapsed ? '展开' : '收起';
-  const collapseBtn = '<button type="button" class="' + cCls + '" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '" onclick="event.stopPropagation();toggleProjectCollapsed(this.dataset.key)">' + CHEVRON_SVG + '</button>';
+  const collapseBtn = '<button type="button" class="' + cCls + '" data-action="project-collapse" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '">' + CHEVRON_SVG + '</button>';
   const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
 
   // No longer pass `data-fav` — the handler derives current state from the
   // authoritative `projectsData` at click time, avoiding a stale DOM attribute
   // that could cause a fast second click (before re-render) to send a
   // redundant or wrong-polarity toggle.
-  const starBtn = '<button type="button" class="' + starCls + '" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" title="' + starTitle + '" aria-label="' + starTitle + ' ' + escAttr(p.name) + '" onclick="event.stopPropagation();toggleFavorite(this.dataset.name,this.dataset.node)">' + STAR_SVG + '</button>';
+  const starBtn = '<button type="button" class="' + starCls + '" data-action="project-favorite" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" title="' + starTitle + '" aria-label="' + starTitle + ' ' + escAttr(p.name) + '">' + STAR_SVG + '</button>';
 
   let ghBtn = '';
   if (p.github) {
@@ -982,7 +983,7 @@ function sectionHeaderHtml(p) {
     // "在 GitHub 打开仓库" so the affordance is explicit; append the URL so
     // operators can still eyeball the remote for the common case where
     // they're verifying the repo match before clicking.
-    ghBtn = '<button type="button" class="sh-btn github-on" data-url="' + escAttr(url) + '" title="在 GitHub 打开仓库：' + escAttr(url) + '" aria-label="在 GitHub 打开仓库 ' + escAttr(p.name) + '" onclick="event.stopPropagation();showGitRemote(this.dataset.url)">' + GITHUB_SVG + '</button>';
+    ghBtn = '<button type="button" class="sh-btn github-on" data-action="project-github" data-url="' + escAttr(url) + '" title="在 GitHub 打开仓库：' + escAttr(url) + '" aria-label="在 GitHub 打开仓库 ' + escAttr(p.name) + '">' + GITHUB_SVG + '</button>';
   }
 
   const collapsedCls = collapsed ? ' is-collapsed' : '';
@@ -1003,6 +1004,40 @@ function sectionHeaderHtml(p) {
     countBadge +
     ghBtn +
     '</div>';
+}
+
+// SIDEBAR_PROJECT_ACTIONS maps the `data-action` token on a project-header
+// control to the handler it invokes, reading arguments from the button's
+// own dataset. This is the data-action dispatch idiom already used by the
+// cron menu (CRON_MENU_ACTIONS / handleCronMenuClick) — it lets the section
+// header buttons drop their inline click attributes, shrinking the
+// script-src 'unsafe-inline' surface (#922 / #1734) without changing
+// behaviour. Keys must match the data-action values emitted in
+// sectionHeaderHtml / sectionHeaderFallbackHtml.
+const SIDEBAR_PROJECT_ACTIONS = {
+  'project-collapse': (btn) => toggleProjectCollapsed(btn.dataset.key),
+  'project-favorite': (btn) => toggleFavorite(btn.dataset.name, btn.dataset.node),
+  'project-github': (btn) => showGitRemote(btn.dataset.url),
+};
+
+// initSidebarProjectActions attaches ONE delegated click listener to the
+// stable #session-list container (not document — scoped delegation, mirroring
+// the cron-menu listener). It dispatches project-header button clicks via
+// SIDEBAR_PROJECT_ACTIONS. stopPropagation preserves the prior inline
+// `event.stopPropagation()` so a click on a header control never bubbles to
+// an ancestor handler. The capture-phase long-press swallow installed by
+// initSwipeDelete is orthogonal (it only fires on _longPressFired).
+function initSidebarProjectActions() {
+  const list = document.getElementById('session-list');
+  if (!list) return;
+  list.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn || !list.contains(btn)) return;
+    const fn = SIDEBAR_PROJECT_ACTIONS[btn.getAttribute('data-action')];
+    if (!fn) return;
+    e.stopPropagation();
+    fn(btn);
+  });
 }
 
 // toggleProjectCollapsed flips a project section's fold state, persists
@@ -9887,6 +9922,9 @@ const wsm = {
         }
         if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
       });
+      // Bound the live DOM on the incremental WS history path too (#398);
+      // mirror appendEvents — trim before the scrollHeight reads below.
+      trimEventsScroll(el);
       if (sawUser) stickEventsBottom();
       else if (wasBottom) el.scrollTop = el.scrollHeight;
       runPendingAsync();
@@ -10022,6 +10060,13 @@ const wsm = {
       el.insertAdjacentHTML('beforeend', timeDividerHtml(evT));
     }
     el.insertAdjacentHTML('beforeend', html);
+    // Bound the live DOM before scroll/scan so a long streaming session over
+    // the WS push path (the default real-time channel) can't grow
+    // #events-scroll without limit and OOM the tab (#398). Without this the
+    // MAX_LIVE_DOM_EVENTS cap only fired on the HTTP-poll fallback
+    // (appendEvents), so #398 was effectively a no-op while WS was live.
+    // Must run before the scrollHeight reads below, matching appendEvents.
+    trimEventsScroll(el);
     // User events always force-bottom; AI output only sticks when already at bottom.
     if (isUser) stickEventsBottom();
     else if (wasBottom) el.scrollTop = el.scrollHeight;
@@ -10440,6 +10485,15 @@ async function scanDiscovered() {
     // stalled disk shouldn't wedge the scan button forever.
     const data = await fetchJSON('/api/discovered', { headers, timeoutMs: 10000 });
     discoveredItems = data || [];
+    // #1770: only force a full sidebar re-render when the discovered set
+    // actually changed. Previously every 30s (connected) / 5s (disconnected)
+    // scan unconditionally set lastVersion=0, defeating fetchSessions' version
+    // short-circuit and rebuilding the whole sidebar DOM even when nothing
+    // changed — wasted CPU/layout on low-end phones. Mirror the
+    // nodesHash/historyHash pattern fetchSessions already uses.
+    const discoveredHash = JSON.stringify(discoveredItems);
+    if (discoveredHash === lastDiscoveredJSON) return;
+    lastDiscoveredJSON = discoveredHash;
     // Trigger sidebar re-render to merge discovered into project groups
     lastVersion = 0;
     debouncedFetchSessions();
@@ -10532,7 +10586,14 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     navRebuild();
     previewEventCount = events.length;
     const capturedSid = sessionId;
+    // #1770: guard against overlapping ticks. Each tick re-fetches the full
+    // preview event list; on a slow link a fetch can outlast the 2s interval,
+    // so without this flag consecutive ticks pile up concurrent requests.
+    // Mirrors _fetchEventsInFlight on the main events poll.
+    let previewInFlight = false;
     previewTimer = setInterval(async () => {
+      if (previewInFlight) return;
+      previewInFlight = true;
       try {
         const headers2 = {};
         const t2 = getToken();
@@ -10562,7 +10623,10 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
         if (wasBottom) el2.scrollTop = el2.scrollHeight;
         navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
         navUpdatePill();
-      } catch (_) {}
+      } catch (_) {
+      } finally {
+        previewInFlight = false;
+      }
     }, 2000);
   } catch (e) {
     showNetworkError('预览会话', e);
@@ -15172,6 +15236,12 @@ wsm.connect();
     if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
     if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
     if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
+    // #1770: also pause the WS keep-alive ping while the tab is hidden. The
+    // 30s app-level ping wakes the mobile radio every 30s for nothing —
+    // connection liveness is independently maintained by the server's
+    // protocol-level Ping/Pong (writePump, wsPingPeriod≈54s), so dropping the
+    // app ping loses no liveness detection. Re-armed in startPollers on resume.
+    if (wsm && wsm.pingTimer) wsm.cleanup();
   };
   const startPollers = () => {
     if (!sessionPollTimer) {
@@ -15187,6 +15257,12 @@ wsm.connect();
     if (!eventTimer && selectedKey && wsm && wsm.state !== WS_STATES.CONNECTED) {
       fetchEvents(false);
       eventTimer = setInterval(() => fetchEvents(false), 1000);
+    }
+    // #1770: re-arm the WS ping we paused in stopPollers, but only when the
+    // socket is actually live — a dropped/offline socket has no ping to keep
+    // and will re-arm via auth_ok on reconnect.
+    if (wsm && !wsm.pingTimer && wsm.conn && wsm.conn.readyState === WebSocket.OPEN) {
+      wsm.startPing();
     }
   };
   document.addEventListener('visibilitychange', () => {
@@ -15243,6 +15319,7 @@ wsm.connect();
 initMobile();
 initViewportTracking();
 initSwipeDelete();
+initSidebarProjectActions();
 initSwipeBack();
 initSidebarSearch();
 (function(){

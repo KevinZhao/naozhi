@@ -34,6 +34,12 @@
 //     R230B-ARCH-17 / R226-ARCH-14 track the eventual move of
 //     the in-memory layer to internal/eventlog so the schema
 //     types are not anchored to a CLI-specific package.
+//     The cross-tier EventStore contract (Appender / Reader /
+//     Subscriber) is now a real, CI-gated package at
+//     internal/eventlog/api (PR #1755); cli.EventLog satisfies
+//     its Appender+Subscriber halves with no shim. The api
+//     contract is consumed by assertion only — nothing in this
+//     package imports it yet (registry injection is #1570).
 //
 //     # "eventlog" is three packages, not one (R237-ARCH-13)
 //

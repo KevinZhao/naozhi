@@ -233,9 +233,23 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 						// Doing the recount inside evict (rather than a racy relative
 						// Add) is what keeps the counter from dipping below the real
 						// map size under concurrent cap-hit goroutines.
-						evicted := f.evictOldestNonces()
+						evicted := f.evictNonces()
+						if evicted == 0 {
+							// evictOldestNonces resynced the counter to the live
+							// map size only when it actually deleted something
+							// (deleted>0); on a zero-eviction return our line-226
+							// speculative +1 is still live, so roll it back here.
+							// Do NOT Add(1) again first — that second reservation
+							// would leak +1 on every evicted==0 request and ratchet
+							// the counter toward the cap permanently.
+							f.seenNoncesCount.Add(-1)
+							slog.Warn("feishu webhook nonce map at cap, dropping request",
+								"cap", maxSeenNonces, "evicted", evicted)
+							w.WriteHeader(http.StatusTooManyRequests)
+							return
+						}
 						postEvict := f.seenNoncesCount.Add(1)
-						if evicted == 0 || postEvict > maxSeenNonces {
+						if postEvict > maxSeenNonces {
 							f.seenNoncesCount.Add(-1)
 							slog.Warn("feishu webhook nonce map at cap, dropping request",
 								"cap", maxSeenNonces, "evicted", evicted)

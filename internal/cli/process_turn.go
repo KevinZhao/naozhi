@@ -163,10 +163,7 @@ drain:
 			// when eventCh is torn down is safe.
 			if isChanAlive(p.done) {
 				for _, ev := range holdback {
-					select {
-					case p.eventCh <- ev:
-					default:
-					}
+					p.safeReenqueue(ev)
 				}
 			}
 			return ctx.Err()
@@ -190,19 +187,43 @@ drain:
 				return nil
 			}
 			for _, ev := range holdback {
-				select {
-				case p.eventCh <- ev:
-				default:
-					// eventCh is full; fresh events are being dropped here.
-					// findResultSince will recover the result from EventLog but
-					// surface the occurrence so operators can enlarge the
-					// channel if it persists under load.
-					slog.Warn("drainStaleEvents: eventCh full, dropped fresh event",
-						"type", ev.Type, "session", ev.SessionID)
-				}
+				p.safeReenqueue(ev)
 			}
 			return nil
 		}
+	}
+}
+
+// safeReenqueue pushes a held-back post-cutoff event back onto p.eventCh for
+// the live consumer, non-blocking. The isChanAlive(p.done) guard at the call
+// site already establishes that readLoop had not closed eventCh when checked,
+// but that check and this send are not atomic: readLoop may close `done` and
+// then `eventCh` in the window between them (#1779). Sending on a closed
+// channel panics even through a `select { ... default }`, because the send
+// case is always ready-to-run on a closed channel and select picks it. We wrap
+// the send in a recover and silently drop on a send-on-closed panic: the
+// holdback events were already logged to EventLog by readLoop before being
+// pushed to eventCh, so the live Send() recovers the result via
+// findResultSince() and nothing is actually lost.
+func (p *Process) safeReenqueue(ev Event) {
+	defer func() {
+		if r := recover(); r != nil {
+			// send-on-closed eventCh: readLoop tore the channel down between
+			// the isChanAlive guard and this send. EventLog is authoritative,
+			// so dropping the re-enqueue is safe. R-#1779.
+			slog.Debug("drainStaleEvents: re-enqueue raced eventCh close, dropped",
+				"type", ev.Type, "session", ev.SessionID)
+		}
+	}()
+	select {
+	case p.eventCh <- ev:
+	default:
+		// eventCh is full; fresh events are being dropped here.
+		// findResultSince will recover the result from EventLog but
+		// surface the occurrence so operators can enlarge the
+		// channel if it persists under load.
+		slog.Warn("drainStaleEvents: eventCh full, dropped fresh event",
+			"type", ev.Type, "session", ev.SessionID)
 	}
 }
 

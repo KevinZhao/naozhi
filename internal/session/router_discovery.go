@@ -476,7 +476,14 @@ func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []stri
 				changed = true
 			}
 			if len(chainIDs) > 0 && !slices.Equal(existing.prevSessionIDs, chainIDs) {
-				existing.prevSessionIDs = slices.Clone(chainIDs)
+				// R230C-GO-1 hardening (#1777): route the chain swap through
+				// the historyMu-guarded setter rather than a bare write under
+				// r.mu alone. existing is already published, so SnapshotChainIDs
+				// (invoked from cli history-source factories that do NOT hold
+				// r.mu, only historyMu.RLock) can race this refresh; writing
+				// under historyMu makes that RLock a real happens-before instead
+				// of the "defensive rope" the SnapshotChainIDs doc describes.
+				existing.ReplacePrevSessionIDs(chainIDs)
 				// workspace 变了 historySource 里也要刷（cwd 变化会导致
 				// projDirName 命中不同的 claude 项目目录）；一并重装最省心。
 				r.attachHistorySource(existing)
