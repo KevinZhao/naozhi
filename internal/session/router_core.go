@@ -353,7 +353,7 @@ type Router struct {
 	// Named defaultCWD (not "workspace") to disambiguate from the other
 	// three meanings the word "workspace" carries in this codebase —
 	// node identity (Config.Workspace), remote nodes (Config.Workspaces),
-	// and per-chat overrides (workspaceOverrides). This field is purely
+	// and per-chat overrides (wsStore.overrides). This field is purely
 	// the fallback working directory handed to CLI processes when a
 	// session has no per-chat override (R222-ARCH-11, #732).
 	defaultCWD string // default cwd for CLI processes
@@ -366,18 +366,16 @@ type Router struct {
 	// 读写: core (init), lifecycle (attachHistorySource), discovery (attachHistorySource via Register* / Takeover)
 	kiroSessionsDir string
 
-	// workspaceOverrides stores per-chat workspace overrides.
-	// Key format: "platform:chatType:chatID" (3-segment chat key —
-	// distinct from the 4-segment session key used in r.sessions).
-	//
-	// Two-key invariant: every chatKey present in sessionsByChat may
-	// have a workspaceOverrides entry; ResetChat clears both maps.
-	// SetWorkspace creates only the override entry (no session yet),
-	// and Reset(key)/evictOldest must NOT touch this map — it is
-	// driven by user intent (SetWorkspace) rather than the session
-	// lifecycle.
-	// 读写: core (init/load), lifecycle (SetWorkspace/GetWorkspace), cleanup (save), discovery (Takeover), workspace (resolveWorkspaceLocked/WorkspaceRoots)
-	workspaceOverrides map[string]string
+	// wsStore is the per-chat workspace-override facet (Router P1, #383):
+	// the overrides map plus its dirty flag and mutation gen, extracted into
+	// workspaceStore (router_workspace.go) which carries the verbatim
+	// two-key-invariant godoc. No lock of its own — read/written only under
+	// r.mu (RFC §3 candidate A, single r.mu retained). The annotation below
+	// must cover ALL 5 accessing domains: the lint recurses one level so each
+	// inner field (overrides/dirty/gen) ALSO carries its own per-domain
+	// annotation on workspaceStore.
+	// 读写: core (init/load), lifecycle (ResetChat/RenameSession/spawn-resolver), cleanup (save), discovery (Takeover), workspace (SetWorkspace/resolve/Roots)
+	wsStore workspaceStore
 
 	// backendOverrides stores per-session backend preferences picked by
 	// the dashboard at session-creation time. Keyed by full session key
@@ -446,10 +444,6 @@ type Router struct {
 	// RLock made each poll take two contended trips through r.mu.
 	// 读写: core (Version lock-free), lifecycle (BumpVersion), cleanup (BumpVersion), discovery (BumpVersion), capacity (evictOldest BumpVersion), shim (reconnect BumpVersion)
 	storeGen atomic.Uint64
-	// 读写: lifecycle (ResetChat / RenameSession), discovery (Takeover), cleanup (saveIfDirty consume), workspace (SetWorkspace mutation)
-	wsOverridesDirty bool // true when workspace overrides changed since last save
-	// 读写: lifecycle (ResetChat / RenameSession), discovery (Takeover), cleanup (snapshot/check during save), workspace (SetWorkspace mutation)
-	wsOverridesGen atomic.Uint64 // increments on each ws-override mutation, mirrors storeGen pattern
 
 	// knownIDs tracks ALL session IDs ever used by naozhi, including
 	// sessions that have been removed/reset/evicted. Used by the
@@ -991,35 +985,38 @@ func NewRouter(cfg RouterConfig) *Router {
 	}
 
 	r := &Router{
-		sessions:           make(map[string]*ManagedSession),
-		sessionsByChat:     make(map[string]map[string]struct{}),
-		keyhashToKey:       make(map[string]string),
-		wrapper:            defaultWrapper,
-		wrappers:           wrappers,
-		defaultBackend:     defaultBackend,
-		maxProcs:           cfg.MaxProcs,
-		ttl:                cfg.TTL,
-		pruneTTL:           cfg.PruneTTL,
-		model:              cfg.Model,
-		extraArgs:          cfg.ExtraArgs,
-		backendModels:      cfg.BackendModels,
-		backendExtraArgs:   cfg.BackendExtraArgs,
-		defaultCWD:         cfg.Workspace,
-		claudeDir:          cfg.ClaudeDir,
-		kiroSessionsDir:    cfg.KiroSessionsDir,
-		workspaceOverrides: make(map[string]string),
-		backendOverrides:   make(map[string]string),
-		storePath:          cfg.StorePath,
-		knownIDs:           make(map[string]bool),
-		sessionIDToKey:     make(map[string]string),
-		spawningKeys:       make(map[string]chan struct{}),
-		shimStuckOnReset:   make(map[string]bool),
-		noOutputTimeout:    cfg.NoOutputTimeout,
-		totalTimeout:       cfg.TotalTimeout,
-		eventLogDir:        cfg.EventLogDir,
-		historyLoader:      cfg.HistoryLoader,
-		resolver:           cfg.Resolver,
+		sessions:         make(map[string]*ManagedSession),
+		sessionsByChat:   make(map[string]map[string]struct{}),
+		keyhashToKey:     make(map[string]string),
+		wrapper:          defaultWrapper,
+		wrappers:         wrappers,
+		defaultBackend:   defaultBackend,
+		maxProcs:         cfg.MaxProcs,
+		ttl:              cfg.TTL,
+		pruneTTL:         cfg.PruneTTL,
+		model:            cfg.Model,
+		extraArgs:        cfg.ExtraArgs,
+		backendModels:    cfg.BackendModels,
+		backendExtraArgs: cfg.BackendExtraArgs,
+		defaultCWD:       cfg.Workspace,
+		claudeDir:        cfg.ClaudeDir,
+		kiroSessionsDir:  cfg.KiroSessionsDir,
+		backendOverrides: make(map[string]string),
+		storePath:        cfg.StorePath,
+		knownIDs:         make(map[string]bool),
+		sessionIDToKey:   make(map[string]string),
+		spawningKeys:     make(map[string]chan struct{}),
+		shimStuckOnReset: make(map[string]bool),
+		noOutputTimeout:  cfg.NoOutputTimeout,
+		totalTimeout:     cfg.TotalTimeout,
+		eventLogDir:      cfg.EventLogDir,
+		historyLoader:    cfg.HistoryLoader,
+		resolver:         cfg.Resolver,
 	}
+	// wsStore is a value field (no lock of its own); its override map must be
+	// allocated explicitly since composite-literal sub-struct field init is
+	// not used here (Router P1 facet, #383).
+	r.wsStore.overrides = make(map[string]string)
 	// nil HistoryLoader → production discovery-backed implementation so the
 	// rest of the router can call r.historyLoader unconditionally (#458).
 	if r.historyLoader == nil {
@@ -1077,7 +1074,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	// Load persisted workspace overrides (/cd settings)
 	if loaded := loadWorkspaceOverrides(r.storePath); loaded != nil {
 		for k, v := range loaded {
-			r.workspaceOverrides[k] = v
+			r.wsStore.overrides[k] = v
 		}
 	}
 

@@ -645,10 +645,10 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 	// flag so the override is persisted; otherwise a crash before another
 	// flushing path fires would lose the takeover's chosen workspace.
 	if chatKey := chatKeyFor(key); chatKey != key {
-		if prev, ok := r.workspaceOverrides[chatKey]; !ok || prev != workspace {
-			r.workspaceOverrides[chatKey] = workspace
-			r.wsOverridesDirty = true
-			r.wsOverridesGen.Add(1)
+		if prev, ok := r.wsStore.overrides[chatKey]; !ok || prev != workspace {
+			r.wsStore.overrides[chatKey] = workspace
+			r.wsStore.dirty = true
+			r.wsStore.gen.Add(1)
 		}
 	}
 	s, err := r.spawnSession(ctx, key, sessionID, opts)
