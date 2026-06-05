@@ -22,6 +22,50 @@ import (
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
+// backendStore groups the 9 backend/policy fields (Router P3 facet, #383). It
+// is a value field on Router, carries NO lock of its own, and is read/written
+// ONLY under Router.mu — the lock topology is unchanged (RFC §3 candidate A:
+// single r.mu retained). The 8 config fields
+// (wrapper/wrappers/defaultBackend/backendIDs/model/extraArgs/backendModels/
+// backendExtraArgs) are read-only after NewRouter and read lock-free;
+// backendOverrides is the only mutable field (SetSessionBackend under write
+// lock, GetSessionBackend under RLock, lifecycle mutations under r.mu write
+// lock). Moving these into a no-lock value sub-struct preserves both classes
+// exactly. The lint recurses one level so each inner field below ALSO carries
+// its own per-domain `// 读写:` annotation.
+type backendStore struct {
+	// 读写: backend (wrapperFor/CLIName/CLIVersion/CLIPath), core (init), lifecycle (spawn), shim (shimManagers)
+	wrapper *cli.Wrapper // default (legacy single-backend) wrapper
+	// 读写: backend (wrapperFor/managerFor/BackendIDs/BackendWrapper), core (init), lifecycle (spawn), shim (shimManagers)
+	wrappers map[string]*cli.Wrapper // backend ID → wrapper (nil in legacy mode)
+	// 读写: backend (DefaultBackend/wrapperFor/BackendWrapper/BackendIDs), core (init), lifecycle (resolveSpawnParams)
+	defaultBackend string // backend ID used when AgentOpts.Backend is empty
+	// backendIDs caches the dashboard-stable ordering returned by BackendIDs:
+	// default backend first, remaining IDs sorted ascending. wrappers is
+	// constructed once in NewRouter and never mutated, so this slice is
+	// computed once at construction and read-only thereafter — saves a
+	// per-call O(N) sort + 2 small allocations on the dashboard /api/sessions
+	// hot path.
+	// 读写: backend (BackendIDs), core (init)
+	backendIDs []string
+	// 读写: backend (backendDefaultsFor base), core (init)
+	model string
+	// 读写: backend (backendDefaultsFor base), core (init)
+	extraArgs []string
+	// backendModels / backendExtraArgs optionally override model and args
+	// per backend ID. Read-only after NewRouter.
+	// 读写: backend (backendDefaultsFor override), core (init)
+	backendModels map[string]string
+	// 读写: backend (backendDefaultsFor override), core (init)
+	backendExtraArgs map[string][]string
+	// backendOverrides stores per-session backend preferences picked by
+	// the dashboard at session-creation time. Keyed by full session key
+	// (including agent suffix) so two sessions on the same chat can run
+	// against different backends.
+	// 读写: backend (Set/GetSessionBackend), core (init), lifecycle (unregisterSessionLocked / resolveSpawnParams consume / RenameSession)
+	backendOverrides map[string]string
+}
+
 // R188-SEC-M2: model identifiers flow into the `--model` argv of the CLI child
 // process. An authenticated dashboard user (or a malicious IM planner reply)
 // could inject additional flags via a whitespace-containing model string. The
@@ -92,8 +136,8 @@ func validateBackend(backend string) error {
 // CLIName exposes the wrapper's CLI display name for status endpoints.
 // Returns empty when no wrapper is wired (tests, early boot).
 func (r *Router) CLIName() string {
-	if r.wrapper != nil {
-		return r.wrapper.CLIName
+	if r.bkStore.wrapper != nil {
+		return r.bkStore.wrapper.CLIName
 	}
 	return ""
 }
@@ -101,8 +145,8 @@ func (r *Router) CLIName() string {
 // CLIVersion exposes the wrapper's detected CLI version for status endpoints.
 // Returns empty when no wrapper is wired.
 func (r *Router) CLIVersion() string {
-	if r.wrapper != nil {
-		return r.wrapper.CLIVersion
+	if r.bkStore.wrapper != nil {
+		return r.bkStore.wrapper.CLIVersion
 	}
 	return ""
 }
@@ -111,29 +155,29 @@ func (r *Router) CLIVersion() string {
 // Empty backend picks the router default. Returns (wrapper, effectiveID).
 // Callers must treat a nil wrapper as "no backend available" and fail fast.
 func (r *Router) wrapperFor(backend string) (*cli.Wrapper, string) {
-	if len(r.wrappers) == 0 {
+	if len(r.bkStore.wrappers) == 0 {
 		id := backend
-		if id == "" && r.wrapper != nil {
-			id = r.wrapper.BackendID
+		if id == "" && r.bkStore.wrapper != nil {
+			id = r.bkStore.wrapper.BackendID
 		}
-		return r.wrapper, id
+		return r.bkStore.wrapper, id
 	}
 	if backend != "" {
-		if w, ok := r.wrappers[backend]; ok {
+		if w, ok := r.bkStore.wrappers[backend]; ok {
 			return w, backend
 		}
 	}
-	if r.defaultBackend != "" {
-		if w, ok := r.wrappers[r.defaultBackend]; ok {
-			return w, r.defaultBackend
+	if r.bkStore.defaultBackend != "" {
+		if w, ok := r.bkStore.wrappers[r.bkStore.defaultBackend]; ok {
+			return w, r.bkStore.defaultBackend
 		}
 	}
-	// Last-resort fallback: return r.wrapper paired with its own
-	// BackendID (not r.defaultBackend) so callers never see a non-empty
+	// Last-resort fallback: return r.bkStore.wrapper paired with its own
+	// BackendID (not r.bkStore.defaultBackend) so callers never see a non-empty
 	// ID paired with a nil wrapper — that combination produced confusing
 	// error messages like `spawn process (backend "claude"): no wrapper`.
-	if r.wrapper != nil {
-		return r.wrapper, r.wrapper.BackendID
+	if r.bkStore.wrapper != nil {
+		return r.bkStore.wrapper, r.bkStore.wrapper.BackendID
 	}
 	return nil, ""
 }
@@ -154,28 +198,28 @@ func (r *Router) managerFor(backend string) *shim.Manager {
 // BackendIDs returns the list of backend IDs the router can spawn against,
 // with the default backend first. Suitable for UI enumeration.
 //
-// Returns a defensive copy of the cached r.backendIDs slice so callers
+// Returns a defensive copy of the cached r.bkStore.backendIDs slice so callers
 // cannot mutate the cache (no caller in the tree mutates today, but the
 // dashboard enumeration handler does iterate without an explicit copy).
 // Test routers built by struct literal skip computeBackendIDs and fall
 // through to the legacy compute path below.
 func (r *Router) BackendIDs() []string {
-	if r.backendIDs != nil {
-		out := make([]string, len(r.backendIDs))
-		copy(out, r.backendIDs)
+	if r.bkStore.backendIDs != nil {
+		out := make([]string, len(r.bkStore.backendIDs))
+		copy(out, r.bkStore.backendIDs)
 		return out
 	}
-	return computeBackendIDs(r.wrapper, r.wrappers, r.defaultBackend)
+	return computeBackendIDs(r.bkStore.wrapper, r.bkStore.wrappers, r.bkStore.defaultBackend)
 }
 
 // DefaultBackend returns the backend ID used when no explicit backend is
 // requested. May be empty for test-only routers without a wrapper.
 func (r *Router) DefaultBackend() string {
-	if r.defaultBackend != "" {
-		return r.defaultBackend
+	if r.bkStore.defaultBackend != "" {
+		return r.bkStore.defaultBackend
 	}
-	if r.wrapper != nil {
-		return r.wrapper.BackendID
+	if r.bkStore.wrapper != nil {
+		return r.bkStore.wrapper.BackendID
 	}
 	return ""
 }
@@ -184,22 +228,22 @@ func (r *Router) DefaultBackend() string {
 // or nil if the router has no matching backend. Intended for callers that
 // need read-only metadata (CLIName, CLIVersion, CLIPath) per backend.
 func (r *Router) BackendWrapper(id string) *cli.Wrapper {
-	if len(r.wrappers) == 0 {
-		if id == "" || r.wrapper == nil || r.wrapper.BackendID == id || (id == "claude" && r.wrapper.BackendID == "") {
-			return r.wrapper
+	if len(r.bkStore.wrappers) == 0 {
+		if id == "" || r.bkStore.wrapper == nil || r.bkStore.wrapper.BackendID == id || (id == "claude" && r.bkStore.wrapper.BackendID == "") {
+			return r.bkStore.wrapper
 		}
 		return nil
 	}
 	if id == "" {
-		id = r.defaultBackend
+		id = r.bkStore.defaultBackend
 	}
-	return r.wrappers[id]
+	return r.bkStore.wrappers[id]
 }
 
 // computeBackendIDs builds the dashboard-stable ordering used by BackendIDs:
 // default backend first, remaining IDs sorted ascending. wrappers is
 // constructed once in NewRouter and never mutated, so the slice is computed
-// here once and cached on r.backendIDs.
+// here once and cached on r.bkStore.backendIDs.
 func computeBackendIDs(wrapper *cli.Wrapper, wrappers map[string]*cli.Wrapper, defaultBackend string) []string {
 	if len(wrappers) == 0 {
 		if wrapper != nil {
@@ -247,41 +291,41 @@ func (r *Router) SetSessionBackend(key, backend string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if backend == "" {
-		delete(r.backendOverrides, key)
+		delete(r.bkStore.backendOverrides, key)
 		return
 	}
 	// Allow existing keys to be updated without bumping against the cap
 	// (operator changing their mind mid-flow) — only reject when inserting
 	// a brand-new key after the limit is hit.
-	if _, existing := r.backendOverrides[key]; !existing && len(r.backendOverrides) >= maxBackendOverrides {
+	if _, existing := r.bkStore.backendOverrides[key]; !existing && len(r.bkStore.backendOverrides) >= maxBackendOverrides {
 		slog.Warn("backendOverrides at capacity; dropping override",
 			"key", key, "cap", maxBackendOverrides)
 		return
 	}
-	r.backendOverrides[key] = backend
+	r.bkStore.backendOverrides[key] = backend
 }
 
 // GetSessionBackend returns the backend override for key, or "" if none.
 func (r *Router) GetSessionBackend(key string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.backendOverrides[key]
+	return r.bkStore.backendOverrides[key]
 }
 
 // CLIPath returns the CLI binary path for health checks.
 func (r *Router) CLIPath() string {
-	if r.wrapper == nil {
+	if r.bkStore.wrapper == nil {
 		return ""
 	}
-	return r.wrapper.CLIPath
+	return r.bkStore.wrapper.CLIPath
 }
 
 // backendDefaultsFor returns the merged (model, extraArgs) the router uses
 // when spawning under backendID. Precedence:
 //
-//	router-level r.model / r.extraArgs (base)
-//	← r.backendModels[backendID]   (replace, when non-empty)
-//	← r.backendExtraArgs[backendID] (replace, when non-empty)
+//	router-level r.bkStore.model / r.bkStore.extraArgs (base)
+//	← r.bkStore.backendModels[backendID]   (replace, when non-empty)
+//	← r.bkStore.backendExtraArgs[backendID] (replace, when non-empty)
 //
 // extraArgs is returned without copying — callers that mutate (append per-
 // request flags) must copy first; callers that only forward the slice may
@@ -293,12 +337,12 @@ func (r *Router) CLIPath() string {
 // single Backend struct can change one helper instead of grep-replacing
 // across two hot paths.
 func (r *Router) backendDefaultsFor(backendID string) (string, []string) {
-	model := r.model
-	if bm, ok := r.backendModels[backendID]; ok && bm != "" {
+	model := r.bkStore.model
+	if bm, ok := r.bkStore.backendModels[backendID]; ok && bm != "" {
 		model = bm
 	}
-	args := r.extraArgs
-	if ba, ok := r.backendExtraArgs[backendID]; ok && len(ba) > 0 {
+	args := r.bkStore.extraArgs
+	if ba, ok := r.bkStore.backendExtraArgs[backendID]; ok && len(ba) > 0 {
 		args = ba
 	}
 	return model, args

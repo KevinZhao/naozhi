@@ -104,16 +104,16 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 	}
 	backend := s.Backend()
 	if backend == "" {
-		backend = r.defaultBackend
+		backend = r.bkStore.defaultBackend
 	}
 
 	// Resolve the wrapper for this backend. wrappers may be nil (legacy
 	// single-wrapper deployments) and an unknown backend ID falls back to
 	// the router's default wrapper so a misconfigured Backend() still
 	// gets a usable source instead of silently routing to Noop.
-	wrapper := r.wrappers[backend]
+	wrapper := r.bkStore.wrappers[backend]
 	if wrapper == nil {
-		wrapper = r.wrapper
+		wrapper = r.bkStore.wrapper
 	}
 
 	deps := cli.HistoryWiring{
@@ -253,7 +253,7 @@ func (r *Router) resetSessionLocked(key string, toClose *[]processIface, closedA
 	// this, an abandoned dashboard "choose backend" pick for a key that is
 	// then reset leaks an entry into backendOverrides that is only cleared by
 	// a later spawnSession for the same key, which may never happen.
-	delete(r.backendOverrides, key)
+	delete(r.bkStore.backendOverrides, key)
 }
 
 // AgentOpts provides per-agent overrides for session creation.
@@ -284,7 +284,7 @@ const (
 // AgentOpts overrides the router defaults for model and args.
 func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, SessionStatus, error) {
 	// R188-SEC-M2: flag-injection guard on the per-request Model override.
-	// Router-global r.model is operator-configured in config.yaml and trusted;
+	// Router-global r.bkStore.model is operator-configured in config.yaml and trusted;
 	// opts.Model originates from dashboard WS messages, upstream RPC, or
 	// planner project config and must be validated at the router boundary.
 	if err := validateModel(opts.Model); err != nil {
@@ -391,8 +391,8 @@ type spawnParams struct {
 
 // resolveSpawnParamsLocked computes the merged spawn parameters for a new
 // session. The caller MUST hold r.mu (write lock) because this reads
-// r.backendOverrides, r.wsStore.overrides, r.sessions and mutates
-// r.backendOverrides (consuming the one-shot dashboard pick).
+// r.bkStore.backendOverrides, r.wsStore.overrides, r.sessions and mutates
+// r.bkStore.backendOverrides (consuming the one-shot dashboard pick).
 //
 // Pure-ish: no I/O except resolveResumeID's jsonl stat. No log output, no
 // process spawn — a test can exercise the merge rules without standing up
@@ -412,9 +412,9 @@ type spawnParams struct {
 func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) spawnParams {
 	// Backend pick precedence (highest to lowest):
 	//  1. AgentOpts.Backend                — explicit per-request choice
-	//  2. one-shot r.backendOverrides[key] — dashboard "pick backend"
+	//  2. one-shot r.bkStore.backendOverrides[key] — dashboard "pick backend"
 	//  3. existing r.sessions[key].Backend — resume continuity
-	//  4. r.defaultBackend (via wrapperFor) — router fallback
+	//  4. r.bkStore.defaultBackend (via wrapperFor) — router fallback
 	//
 	// The override is consumed so a later Reset→spawn for the same key does
 	// not silently carry the old pick. The session-backend fallback closes
@@ -423,17 +423,17 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	// r.sessions would, on the next message, call back through GetOrCreate
 	// → spawnSession with an empty opts.Backend and a one-shot override
 	// already consumed by the first spawn. Without the existing-session
-	// fallback the second spawn picks r.defaultBackend (typically claude),
+	// fallback the second spawn picks r.bkStore.defaultBackend (typically claude),
 	// resolveResumeID then ENOENTs the kiro session_id under
 	// ~/.claude/projects/, downgrades resume to "fresh", and the dashboard
 	// silently flips the backend chip from kiro→cc — losing both the
 	// conversation and the operator's original pick.
 	reqBackend := opts.Backend
-	if len(r.backendOverrides) > 0 {
+	if len(r.bkStore.backendOverrides) > 0 {
 		if reqBackend == "" {
-			reqBackend = r.backendOverrides[key]
+			reqBackend = r.bkStore.backendOverrides[key]
 		}
-		delete(r.backendOverrides, key)
+		delete(r.bkStore.backendOverrides, key)
 	}
 	if reqBackend == "" {
 		if old := r.sessions[key]; old != nil {
@@ -1109,7 +1109,7 @@ func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBack
 	r.indexDel(key)
 	delete(r.sessions, key)
 	if !keepBackendOverride {
-		delete(r.backendOverrides, key)
+		delete(r.bkStore.backendOverrides, key)
 		// R090031-CR-5: shimStuckOnReset is only consumed by GetOrCreate, so
 		// terminal removals (keepBackendOverride=false) must also clear it.
 		// Sessions that are deleted and never reopened would otherwise leave
@@ -1518,9 +1518,9 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	if id := fresh.getSessionID(); id != "" {
 		r.sessionIDToKey[id] = newKey
 	}
-	if b, ok := r.backendOverrides[oldKey]; ok {
-		r.backendOverrides[newKey] = b
-		delete(r.backendOverrides, oldKey)
+	if b, ok := r.bkStore.backendOverrides[oldKey]; ok {
+		r.bkStore.backendOverrides[newKey] = b
+		delete(r.bkStore.backendOverrides, oldKey)
 	}
 	r.storeDirty = true
 	r.storeGen.Add(1)
