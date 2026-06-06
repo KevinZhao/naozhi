@@ -56,7 +56,7 @@ func makeRoutedRouter(t *testing.T, defaultBackend string) (r *Router, claudeSrc
 	})
 
 	r = &Router{
-		sessions:        make(map[string]*ManagedSession),
+		ss:              sessionStore{sessions: make(map[string]*ManagedSession)},
 		claudeDir:       "/claude/dir",
 		kiroSessionsDir: "/kiro/dir",
 	}
@@ -142,7 +142,7 @@ func TestAttachHistorySource_FallsBackToDefaultWhenSessionBackendEmpty(t *testin
 func TestAttachHistorySource_NilWrapperUsesNoop(t *testing.T) {
 	t.Parallel()
 	r := &Router{
-		sessions: make(map[string]*ManagedSession),
+		ss: sessionStore{sessions: make(map[string]*ManagedSession)},
 	}
 	r.bkStore.wrappers = map[string]*cli.Wrapper{}
 	r.bkStore.defaultBackend = ""
@@ -248,7 +248,7 @@ func TestRouter_KiroSessionsDirRoundTrip(t *testing.T) {
 		return cli.NoopHistorySource{}
 	})
 	r := &Router{
-		sessions:        make(map[string]*ManagedSession),
+		ss:              sessionStore{sessions: make(map[string]*ManagedSession)},
 		kiroSessionsDir: "/the/kiro/dir",
 	}
 	r.bkStore.wrappers = map[string]*cli.Wrapper{
@@ -280,7 +280,7 @@ func TestRouter_KiroSessionsDirRoundTrip(t *testing.T) {
 func TestAttachHistorySource_KiroBackendUsesKirojsonl(t *testing.T) {
 	t.Parallel()
 	r := &Router{
-		sessions:        make(map[string]*ManagedSession),
+		ss:              sessionStore{sessions: make(map[string]*ManagedSession)},
 		claudeDir:       "/claude/dir",
 		kiroSessionsDir: "/kiro/sessions/cli",
 	}

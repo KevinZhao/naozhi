@@ -1,7 +1,7 @@
 package session
 
 // R215-ARCH-P2-2 regression tests. attachHistorySource was previously
-// called manually at every site that inserted into r.sessions —
+// called manually at every site that inserted into r.ss.sessions —
 // 5 production paths (router_core.go reload, router_discovery.go
 // register/takeover ×2, router_lifecycle.go spawn / rename). Missing
 // the call at any of them would leave EventEntriesBeforeCtx returning
@@ -29,8 +29,10 @@ func minimalRouter(t *testing.T) *Router {
 	t.Helper()
 	w := &cli.Wrapper{} // zero-value wrapper; NewHistorySource returns Noop
 	r := &Router{
-		sessions:       map[string]*ManagedSession{},
-		sessionIDToKey: map[string]string{},
+		ss: sessionStore{
+			sessions: map[string]*ManagedSession{},
+			idToKey:  map[string]string{},
+		},
 	}
 	r.bkStore.wrapper = w
 	r.bkStore.defaultBackend = "claude"
@@ -56,10 +58,10 @@ func TestPublishSessionLocked_AttachesHistorySource(t *testing.T) {
 		t.Fatal("publishSessionLocked left HistorySource nil — EventEntriesBeforeCtx would return empty and dashboard history drawer would silently blank")
 	}
 	r.mu.RLock()
-	stored := r.sessions[s.key]
+	stored := r.ss.sessions[s.key]
 	r.mu.RUnlock()
 	if stored != s {
-		t.Fatalf("publishSessionLocked did not insert into r.sessions: got %v, want %v", stored, s)
+		t.Fatalf("publishSessionLocked did not insert into r.ss.sessions: got %v, want %v", stored, s)
 	}
 }
 
@@ -90,10 +92,10 @@ func TestPublishSessionLocked_AlreadyAttachedDoesNotOverwrite(t *testing.T) {
 	// The exact identity check is over-specified for some Source
 	// implementations (interface-typed values). Accept any non-nil.
 	r.mu.RLock()
-	stored := r.sessions[s.key]
+	stored := r.ss.sessions[s.key]
 	r.mu.RUnlock()
 	if stored != s {
-		t.Fatalf("publishSessionLocked did not insert into r.sessions: got %v, want %v", stored, s)
+		t.Fatalf("publishSessionLocked did not insert into r.ss.sessions: got %v, want %v", stored, s)
 	}
 }
 
@@ -113,9 +115,9 @@ func TestPublishSessionLocked_IndexAddObserved(t *testing.T) {
 	// indexAdd populates sessionsByChat (lazy init); a follow-up
 	// ResetChat must find the session.
 	r.mu.RLock()
-	if r.sessionsByChat != nil {
+	if r.ss.byChat != nil {
 		chatKey := chatKeyFor(s.key)
-		if _, ok := r.sessionsByChat[chatKey][s.key]; !ok {
+		if _, ok := r.ss.byChat[chatKey][s.key]; !ok {
 			r.mu.RUnlock()
 			t.Fatalf("publishSessionLocked did not call indexAdd: chatKey=%q missing", chatKey)
 		}

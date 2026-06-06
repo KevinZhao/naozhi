@@ -41,13 +41,13 @@ func TestShutdown_SliceStore_MultiSessionRoundTrip(t *testing.T) {
 	storePath := filepath.Join(dir, "sessions.json")
 
 	r := &Router{
-		sessions:  make(map[string]*ManagedSession),
+		ss:        sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs:  3,
 		ttl:       30 * time.Minute,
 		storePath: storePath,
 	}
-	r.sessions["feishu:direct:alice:general"] = newSessionWithID("feishu:direct:alice:general", "sess-alice")
-	r.sessions["feishu:direct:bob:general"] = newSessionWithID("feishu:direct:bob:general", "sess-bob")
+	r.ss.sessions["feishu:direct:alice:general"] = newSessionWithID("feishu:direct:alice:general", "sess-alice")
+	r.ss.sessions["feishu:direct:bob:general"] = newSessionWithID("feishu:direct:bob:general", "sess-bob")
 
 	r.Shutdown()
 

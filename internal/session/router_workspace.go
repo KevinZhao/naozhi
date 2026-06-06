@@ -12,7 +12,7 @@ import (
 //
 // overrides stores per-chat workspace overrides.
 // Key format: "platform:chatType:chatID" (3-segment chat key —
-// distinct from the 4-segment session key used in r.sessions).
+// distinct from the 4-segment session key used in r.ss.sessions).
 //
 // Two-key invariant: every chatKey present in sessionsByChat may
 // have an overrides entry; ResetChat clears both maps.

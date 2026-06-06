@@ -135,8 +135,8 @@ func (r *Router) runOrphanSweep() {
 	// Snapshot known keys under the read lock so we don't race with
 	// concurrent session spawns.
 	r.mu.RLock()
-	known := make(map[string]struct{}, len(r.sessions))
-	for k := range r.sessions {
+	known := make(map[string]struct{}, len(r.ss.sessions))
+	for k := range r.ss.sessions {
 		known[k] = struct{}{}
 	}
 	r.mu.RUnlock()

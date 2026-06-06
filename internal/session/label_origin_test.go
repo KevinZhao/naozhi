@@ -10,14 +10,14 @@ import (
 func TestSetUserLabelWithOrigin_Basic(t *testing.T) {
 	t.Parallel()
 	r := newTestRouter(3)
-	r.sessions["feishu:direct:u1:general"] = &ManagedSession{key: "feishu:direct:u1:general"}
+	r.ss.sessions["feishu:direct:u1:general"] = &ManagedSession{key: "feishu:direct:u1:general"}
 
 	// auto write on a fresh session (origin "") is allowed because UserLabel
 	// is empty — empty origin + empty label means "nobody set it yet".
 	if !r.SetUserLabelWithOrigin("feishu:direct:u1:general", "auto title", "auto") {
 		t.Fatal("first auto write should succeed on empty session")
 	}
-	s := r.sessions["feishu:direct:u1:general"]
+	s := r.ss.sessions["feishu:direct:u1:general"]
 	if got := s.UserLabel(); got != "auto title" {
 		t.Errorf("UserLabel = %q, want %q", got, "auto title")
 	}
@@ -72,7 +72,7 @@ func TestSetUserLabelWithOrigin_LegacyEmptyTreatedAsUser(t *testing.T) {
 	s := &ManagedSession{key: "feishu:direct:u1:general"}
 	s.SetUserLabel("legacy-set-label")
 	// LabelOrigin intentionally left empty (simulates pre-v2.1 store entry).
-	r.sessions[s.key] = s
+	r.ss.sessions[s.key] = s
 
 	if r.SetUserLabelWithOrigin(s.key, "robot", "auto") {
 		t.Error("daemon write should be rejected when legacy non-empty label has empty origin")
@@ -103,7 +103,7 @@ func TestSetUserLabelWithOrigin_RaceWindow(t *testing.T) {
 	t.Parallel()
 	r := newTestRouter(3)
 	key := "feishu:direct:u1:general"
-	r.sessions[key] = &ManagedSession{key: key}
+	r.ss.sessions[key] = &ManagedSession{key: key}
 
 	const iterations = 200
 	var wg sync.WaitGroup
@@ -136,7 +136,7 @@ func TestSetUserLabelWithOrigin_RaceWindow(t *testing.T) {
 	// must be "robot"; if origin is "" the label can be anything (legacy
 	// path Clear just hit). What we MUST NOT see is origin="user" but
 	// label="robot" (= silent daemon overwrite of human edit).
-	s := r.sessions[key]
+	s := r.ss.sessions[key]
 	origin := s.LabelOrigin()
 	label := s.UserLabel()
 	if origin == "user" && label != "human" {
@@ -155,7 +155,7 @@ func TestRegisterSystemStub_HappyPath(t *testing.T) {
 	key := SysKeyPrefix + "test-daemon"
 	r.RegisterSystemStub(key, "/tmp/work", "initial prompt")
 
-	s, ok := r.sessions[key]
+	s, ok := r.ss.sessions[key]
 	if !ok {
 		t.Fatal("RegisterSystemStub did not insert session")
 	}
@@ -205,7 +205,7 @@ func TestVisitSessions_StreamingFilter(t *testing.T) {
 		"sys:auto-titler",
 	}
 	for _, k := range keys {
-		r.sessions[k] = &ManagedSession{key: k}
+		r.ss.sessions[k] = &ManagedSession{key: k}
 	}
 
 	// Visit all

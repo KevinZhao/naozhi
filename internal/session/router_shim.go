@@ -203,7 +203,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 	reconnected := 0
 	for _, state := range states {
 		r.mu.Lock()
-		sess, ok := r.sessions[state.Key]
+		sess, ok := r.ss.sessions[state.Key]
 		var hasLiveProcess bool
 		var sessPrevIDs []string
 		if ok && sess.isAlive() {
@@ -504,7 +504,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// to eliminate the race window where a concurrent GetOrCreate could see
 		// isAlive()==false between check and ReattachProcess.
 		r.mu.Lock()
-		currentSess := r.sessions[state.Key]
+		currentSess := r.ss.sessions[state.Key]
 		if currentSess != sess || (currentSess != nil && currentSess.isAlive()) {
 			r.mu.Unlock()
 			proc.Close()
@@ -546,10 +546,10 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		}
 		if state.SessionID != "" {
 			r.trackSessionID(state.SessionID)
-			r.sessionIDToKey[state.SessionID] = state.Key
+			r.ss.idToKey[state.SessionID] = state.Key
 		}
 		if !sess.exempt {
-			r.activeCount.Add(1)
+			r.ss.activeCount.Add(1)
 		}
 		// Mark store dirty so the next Cleanup/saveIfDirty cycle persists
 		// the reconnected session's backend/CLI identity and active flag.
@@ -557,8 +557,8 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// before the next save would lose the shim-reconnect state even
 		// though the shim itself kept the CLI process alive. Every other
 		// storeGen.Add site pairs with storeDirty = true for this reason.
-		r.storeDirty = true
-		r.storeGen.Add(1)
+		r.ss.dirty = true
+		r.ss.gen.Add(1)
 		r.mu.Unlock()
 
 		// Event-log persist sink goes last so the InjectHistory +

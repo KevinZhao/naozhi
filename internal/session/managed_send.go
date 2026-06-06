@@ -59,7 +59,7 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 		//   2. The inner re-check under sendMu enforces correctness when two
 		//      concurrent passthrough turns both observe empty on the outer
 		//      check: only the first to take sendMu calls onSessionID
-		//      (which writes r.sessionIDToKey under r.mu).
+		//      (which writes r.ss.idToKey under r.mu).
 		//
 		// Without the inner re-check, the second turn could double-invoke
 		// onSessionID with a stale-but-equal ID and (in tests) double-count

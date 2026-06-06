@@ -21,7 +21,7 @@ func TestCleanup_ReconcileGate_NoOpKeepsGaugeCorrect(t *testing.T) {
 	resetBackendGauge(t, backend)
 
 	r := &Router{
-		sessions:     make(map[string]*ManagedSession),
+		ss:           sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs:     3,
 		ttl:          1 * time.Hour, // long TTL so the idle session is NOT expired
 		pruneTTL:     72 * time.Hour,
@@ -46,7 +46,7 @@ func TestCleanup_ReconcileGate_NoOpKeepsGaugeCorrect(t *testing.T) {
 	if got := metrics.SessionActiveByBackend.Get(s.Backend()); got != 1 {
 		t.Errorf("after no-op Cleanup: per-backend gauge = %d, want 1 (gate must not drop a still-alive session)", got)
 	}
-	if got := r.activeCount.Load(); got != 1 {
+	if got := r.ss.activeCount.Load(); got != 1 {
 		t.Errorf("after no-op Cleanup: activeCount = %d, want 1", got)
 	}
 }
@@ -60,7 +60,7 @@ func TestCleanup_ReconcileGate_NoOpSkipsReconcile(t *testing.T) {
 	resetBackendGauge(t, backend)
 
 	r := &Router{
-		sessions:     make(map[string]*ManagedSession),
+		ss:           sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs:     3,
 		ttl:          1 * time.Hour,
 		pruneTTL:     72 * time.Hour,
@@ -74,13 +74,13 @@ func TestCleanup_ReconcileGate_NoOpSkipsReconcile(t *testing.T) {
 	// Pre-seed activeCount and the gauge to the correct live count so a real
 	// reconcile would be a no-op anyway — but we want to confirm the skip path
 	// reaches the Store(aliveTotal) with the same value.
-	r.activeCount.Store(1)
+	r.ss.activeCount.Store(1)
 	metrics.SessionActiveByBackend.Add(1, backend)
 
 	r.Cleanup()
 
 	// activeCount must remain 1 (preserved from atomic, not reset by reconcile).
-	if got := r.activeCount.Load(); got != 1 {
+	if got := r.ss.activeCount.Load(); got != 1 {
 		t.Errorf("no-op Cleanup: activeCount=%d want 1 (PERF-7 skip-path must preserve count)", got)
 	}
 }
@@ -93,7 +93,7 @@ func TestCleanup_ReconcileGate_PruneDrivesGaugeToZero(t *testing.T) {
 	resetBackendGauge(t, backend)
 
 	r := &Router{
-		sessions:     make(map[string]*ManagedSession),
+		ss:           sessionStore{sessions: make(map[string]*ManagedSession)},
 		maxProcs:     3,
 		ttl:          1 * time.Minute,
 		pruneTTL:     1 * time.Minute,
@@ -110,7 +110,7 @@ func TestCleanup_ReconcileGate_PruneDrivesGaugeToZero(t *testing.T) {
 
 	r.Cleanup()
 
-	if _, ok := r.sessions["key1"]; ok {
+	if _, ok := r.ss.sessions["key1"]; ok {
 		t.Fatal("precondition: session should have been pruned")
 	}
 	if got := metrics.SessionActiveByBackend.Get(backend); got != 0 {
