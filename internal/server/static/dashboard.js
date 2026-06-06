@@ -531,15 +531,26 @@ async function fetchSessions() {
     _lastSidebarData = data;
 
     // Reconcile main area state: if the selected session's state changed
-    // (e.g. session_state WS message was missed during reconnect), propagate
-    // the server-side truth to the banner and send/stop buttons.
-    // Only reconcile when WS is not connected — when connected, WS pushes
-    // are authoritative and overwriting them with a stale REST snapshot
-    // would cause UI flicker.
-    if (selectedKey && wsm.state !== WS_STATES.CONNECTED) {
+    // (e.g. session_state WS message was missed), propagate the server-side
+    // truth to the banner and send/stop buttons.
+    //
+    // When WS is disconnected, REST is the only state source — always reconcile.
+    // When WS is connected, reconcile ONLY the "finished" direction: if the
+    // REST snapshot says the turn is over (state !== 'running') and we're not
+    // inside the optimistic-running window, then a terminal WS signal (the
+    // 'result' event and/or the 'ready' session_state broadcast) was dropped on
+    // the still-open connection — without this fallback the "处理中..." banner
+    // stays stuck until the operator switches sessions or reconnects. We never
+    // reconcile toward 'running' over a live WS: that's the push side's job, and
+    // a lagging REST snapshot would flicker the banner (the very reason the
+    // optimistic-running flip at line 469-475 exists).
+    if (selectedKey) {
       const sKey = sid(selectedKey, selectedNode);
       const sd = sessionsData[sKey];
-      if (sd) updateMainState(sd.state, sd.death_reason);
+      const wsConnected = wsm.state === WS_STATES.CONNECTED;
+      if (sd && (!wsConnected || (sd.state !== 'running' && !sessionOptimisticRunning[sKey]))) {
+        updateMainState(sd.state, sd.death_reason);
+      }
     }
     if (selectedKey) updateHeaderCLI();
     return true;
@@ -4320,6 +4331,12 @@ function applyEventToTurnState(ev) {
       turnState.isThinking = false;
       turnState.isWriting = false;
       turnState.thinkingSummary = '';
+      // Also clear the tool tallies so hasContent (refreshBanner) doesn't stay
+      // truthy on a turn boundary — keeps this branch consistent with
+      // resetTurnState, the other turn-reset path.
+      turnState.toolOrder = [];
+      turnState.toolCounts = {};
+      turnState.toolCount = 0;
       updateSidebarAgentBadge();
       break;
   }
@@ -4821,6 +4838,32 @@ function currentProjectSessions() {
   });
 }
 
+// Turn watchdog: while the selected session is "running", periodically pull
+// the authoritative REST snapshot so the banner self-heals if a terminal WS
+// signal (the 'result' event and/or the 'ready' session_state broadcast) is
+// dropped on a still-open connection. Without this the "处理中..." banner stays
+// stuck until the operator switches sessions or reconnects — the bug this fixes.
+// fetchSessions reconciles via updateMainState (see the relaxed gate in
+// fetchSessions); the watchdog just supplies the missing tick, since the
+// session poll is stopped while WS is connected.
+let _turnWatchdogTimer = null;
+const TURN_WATCHDOG_INTERVAL_MS = 15000;
+function startTurnWatchdog() {
+  if (_turnWatchdogTimer) return;
+  _turnWatchdogTimer = setInterval(() => {
+    // Self-heal: if the selected session was cleared without routing through
+    // updateSendButton (dismissSession nulls selectedKey + swaps to the empty
+    // shell in three branches), the fetchSessions reconcile is gated on
+    // `if (selectedKey)` and would never stop us — so retire the watchdog here
+    // instead of polling /api/sessions forever for the page lifetime.
+    if (!selectedKey) { stopTurnWatchdog(); return; }
+    debouncedFetchSessions();
+  }, TURN_WATCHDOG_INTERVAL_MS);
+}
+function stopTurnWatchdog() {
+  if (_turnWatchdogTimer) { clearInterval(_turnWatchdogTimer); _turnWatchdogTimer = null; }
+}
+
 function updateSendButton(state) {
   const banner = document.getElementById('running-banner');
   const sendBtn = document.getElementById('btn-send');
@@ -4832,7 +4875,9 @@ function updateSendButton(state) {
     if (stopBtn) stopBtn.style.display = 'flex';
     initAgentsFromSession();
     refreshBanner();
+    startTurnWatchdog();
   } else {
+    stopTurnWatchdog();
     // resetTurnState → refreshBanner will hide the banner since the session
     // is no longer "running". If background agents are still active (e.g.
     // zero-downtime restart), refreshBanner keeps the banner visible.
