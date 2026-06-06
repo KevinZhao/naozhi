@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,29 @@ import (
 	"github.com/naozhi/naozhi/internal/cli/clievent"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
+
+// ThumbnailFn turns raw image bytes into a small JPEG data URI
+// ("data:image/jpeg;base64,...") capped at maxDim pixels on the long edge,
+// returning "" when the image cannot be decoded or is too large.
+//
+// It is a package-level injection point rather than a direct import of
+// internal/cli so that discovery stays a leaf package (depending only on
+// clievent + textutil). internal/history/claudejsonl.init wires it to
+// cli.MakeThumbnail, reusing that function's OOM pre-check, concurrency
+// semaphore, and panic recovery instead of re-implementing a decoder here.
+//
+// When nil (no backend wired the injection), image blocks in history are
+// silently skipped — behaviour identical to before this hook existed, so
+// discovery unit tests and any un-wired path never panic or lose text.
+var ThumbnailFn func(data []byte, maxDim int) string
+
+// historyThumbMaxDim matches the live-message path (process_send.go's
+// buildUserEntry) so rehydrated history thumbnails render identically.
+const historyThumbMaxDim = 600
+
+// dataURIPrefix gates ThumbnailFn output: only well-formed image data URIs
+// are surfaced to the dashboard, matching the live path's sanitisation.
+const dataURIPrefix = "data:image/"
 
 // historyLine is the minimal schema for a ~/.claude/projects/.../{sessionId}.jsonl line.
 //
@@ -37,10 +61,19 @@ type historyMessage struct {
 }
 
 type historyBlock struct {
-	Type  string          `json:"type"`
-	Text  string          `json:"text"`
-	Name  string          `json:"name"`  // tool_use
-	Input json.RawMessage `json:"input"` // tool_use
+	Type   string          `json:"type"`
+	Text   string          `json:"text"`
+	Name   string          `json:"name"`             // tool_use
+	Input  json.RawMessage `json:"input"`            // tool_use
+	Source *imageSource    `json:"source,omitempty"` // image
+}
+
+// imageSource is the source object of a Claude content image block:
+// {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"..."}}.
+type imageSource struct {
+	Type      string `json:"type"`       // "base64"
+	MediaType string `json:"media_type"` // image/jpeg, image/png, ...
+	Data      string `json:"data"`       // base64-encoded original bytes
 }
 
 // LoadHistory finds and parses the JSONL for sessionID under claudeDir/projects/,
@@ -442,27 +475,68 @@ func intToA(n int) string {
 }
 
 // extractText handles content that is either a plain string or []block.
+// Thin wrapper over extractTextAndImages for callers that only want text
+// (assistant blocks, legacy tests) — signature preserved deliberately.
 func extractText(raw json.RawMessage) string {
+	text, _ := extractTextAndImages(raw)
+	return text
+}
+
+// extractTextAndImages decodes message content (a plain string or a []block)
+// into its concatenated text plus the thumbnail data URIs of any image
+// blocks. Images are decoded from base64 and downsampled via ThumbnailFn
+// (injected as cli.MakeThumbnail) so history responses carry small
+// thumbnails, never the multi-hundred-KB originals. A nil ThumbnailFn, a
+// corrupt base64 payload, or a decode failure each skips just that one
+// image without dropping the surrounding text.
+func extractTextAndImages(raw json.RawMessage) (string, []string) {
 	if len(raw) == 0 {
-		return ""
+		return "", nil
 	}
-	// Try string first
+	// Try string first.
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
+		return s, nil
 	}
-	// Try array of blocks
+	// Try array of blocks.
 	var blocks []historyBlock
-	if err := json.Unmarshal(raw, &blocks); err == nil {
-		var parts []string
-		for _, b := range blocks {
-			if b.Type == "text" && b.Text != "" {
-				parts = append(parts, b.Text)
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return "", nil
+	}
+	var parts []string
+	var images []string
+	for _, b := range blocks {
+		switch {
+		case b.Type == "text" && b.Text != "":
+			parts = append(parts, b.Text)
+		case b.Type == "image" && b.Source != nil &&
+			b.Source.Type == "base64" && b.Source.Data != "":
+			thumb := thumbnailFromBase64(b.Source.Data)
+			if thumb != "" {
+				images = append(images, thumb)
 			}
 		}
-		return strings.Join(parts, "\n")
 	}
-	return ""
+	return strings.Join(parts, "\n"), images
+}
+
+// thumbnailFromBase64 decodes a base64 image payload and downsamples it to a
+// data URI, returning "" if ThumbnailFn is unset, the base64 is malformed,
+// or the image cannot be thumbnailed (e.g. too large — ThumbnailFn's own
+// pixel pre-check returns "" rather than OOM-ing).
+func thumbnailFromBase64(b64 string) string {
+	if ThumbnailFn == nil {
+		return ""
+	}
+	data, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	thumb := ThumbnailFn(data, historyThumbMaxDim)
+	if thumb == "" || !strings.HasPrefix(thumb, dataURIPrefix) {
+		return ""
+	}
+	return thumb
 }
 
 func parseTimestamp(ts string) int64 {
