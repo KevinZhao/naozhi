@@ -35,9 +35,9 @@ func TestCleanupRunningJobIfIdle_KnownWindowDoc(t *testing.T) {
 		t.Fatal("runtime.Caller failed")
 	}
 	dir := filepath.Dir(self)
-	src, err := os.ReadFile(filepath.Join(dir, "scheduler_run.go"))
+	src, err := os.ReadFile(filepath.Join(dir, "scheduler_inflight.go"))
 	if err != nil {
-		t.Fatalf("read scheduler_run.go: %v", err)
+		t.Fatalf("read scheduler_inflight.go: %v", err)
 	}
 	body := string(src)
 
@@ -55,7 +55,7 @@ func TestCleanupRunningJobIfIdle_KnownWindowDoc(t *testing.T) {
 	}
 	for _, want := range required {
 		if !strings.Contains(body, want) {
-			t.Errorf("scheduler_run.go is missing the closed-window godoc anchor %q — "+
+			t.Errorf("scheduler_inflight.go is missing the closed-window godoc anchor %q — "+
 				"the cleanupRunningJobIfIdle site must document that #1706's "+
 				"per-jobID gate closed the residual split-CAS window (and keep the "+
 				"history anchors so the lineage stays greppable).",
@@ -70,7 +70,7 @@ func TestCleanupRunningJobIfIdle_KnownWindowDoc(t *testing.T) {
 		"deferred until",
 	} {
 		if strings.Contains(body, forbidden) {
-			t.Errorf("scheduler_run.go still contains stale accept-the-window phrasing %q — "+
+			t.Errorf("scheduler_inflight.go still contains stale accept-the-window phrasing %q — "+
 				"#1706 closed the window with the per-jobID gate; the comment must not "+
 				"claim it is still open/accepted.", forbidden)
 		}
