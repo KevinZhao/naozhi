@@ -233,14 +233,15 @@ func (p *Process) shimSendLine(line []byte) error {
 	bp := shimSendBufPool.Get().(*shimSendEnc)
 	defer returnShimSendEnc(bp)
 	bp.buf.Reset()
-	// Build the frame in a single pass: prefix + JSON-quoted line + suffix.
-	// appendJSONStringBytes appends through a returned slice; rebuild
-	// bp.buf around it so the buffer's tracked Len() stays consistent
-	// with the new content.
-	tmp := append([]byte(nil), shimWriteLineFramePrefix...)
-	tmp = appendJSONStringBytes(tmp, line)
-	tmp = append(tmp, shimWriteLineFrameSuffix...)
-	bp.buf.Write(tmp)
+	// Build the frame directly into bp.buf using AvailableBuffer() to avoid
+	// a separate tmp allocation. Write prefix first so bp.buf grows to
+	// accommodate the frame, then borrow its spare capacity for the quoted
+	// portion, then append the suffix.
+	bp.buf.Write(shimWriteLineFramePrefix)
+	line2 := bp.buf.AvailableBuffer()
+	line2 = appendJSONStringBytes(line2, line)
+	bp.buf.Write(line2)
+	bp.buf.Write(shimWriteLineFrameSuffix)
 
 	p.shimWMu.Lock()
 	defer p.shimWMu.Unlock()
