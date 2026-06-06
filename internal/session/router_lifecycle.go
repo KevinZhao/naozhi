@@ -183,6 +183,7 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 	}
 	if _, existed := r.wsStore.overrides[chatKeyPrefix]; existed {
 		delete(r.wsStore.overrides, chatKeyPrefix)
+		delete(r.wsStore.seq, chatKeyPrefix) // keep LRU recency map from outliving its override
 		// Without wsStore.dirty, the delete is only written back when some
 		// other code path bumps the flag; a crash before that would reload
 		// the override on restart and silently undo the user's reset.
@@ -1195,6 +1196,7 @@ func (r *Router) ResetAndDiscardOverride(key string) {
 	proc, sessionID, hadSession := r.resetLocked(key)
 	if _, existed := r.wsStore.overrides[key]; existed {
 		delete(r.wsStore.overrides, key)
+		delete(r.wsStore.seq, key) // keep LRU recency map from outliving its override
 		r.wsStore.dirty = true
 		r.wsStore.gen.Add(1)
 	}
