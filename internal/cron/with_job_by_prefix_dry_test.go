@@ -20,9 +20,9 @@ import (
 // pin guards the helper's existence + its three call sites so a revert is
 // a build-time test failure rather than a code-review-only catch.
 func TestWithJobByPrefix_CollapsesDeletePauseResume(t *testing.T) {
-	src, err := os.ReadFile("scheduler_jobs.go")
+	src, err := os.ReadFile("scheduler_jobs_prefix.go")
 	if err != nil {
-		t.Fatalf("read scheduler_jobs.go: %v", err)
+		t.Fatalf("read scheduler_jobs_prefix.go: %v", err)
 	}
 	body := string(src)
 
@@ -44,7 +44,7 @@ func TestWithJobByPrefix_CollapsesDeletePauseResume(t *testing.T) {
 	} {
 		idx := strings.Index(body, fn)
 		if idx < 0 {
-			t.Fatalf("entry point %q missing from scheduler_jobs.go", fn)
+			t.Fatalf("entry point %q missing from scheduler_jobs_prefix.go", fn)
 		}
 		// Pull the function body up to the next "\nfunc " marker.
 		rest := body[idx:]

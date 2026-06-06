@@ -1613,8 +1613,12 @@ test.describe('Theme & styling', () => {
       'meta[name="viewport"]',
       el => el.content
     );
+    // App-like mobile UX: lock the viewport so pinch-zoom / double-tap-zoom
+    // can't accidentally scale the dashboard. Requires both user-scalable=no
+    // and maximum-scale=1.0 (belt-and-suspenders for cross-browser coverage).
     expect(viewport).toContain('user-scalable=no');
     expect(viewport).toContain('maximum-scale=1.0');
+    expect(viewport).toContain('width=device-width');
 
     await ctx.close();
   });

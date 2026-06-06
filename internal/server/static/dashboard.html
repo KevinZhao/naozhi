@@ -2,7 +2,7 @@
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
 <title>naozhi dashboard</title>
 <link rel="manifest" href="/manifest.json">
 <meta name="mobile-web-app-capable" content="yes">
@@ -153,7 +153,11 @@ button:focus-visible,[role="button"]:focus-visible{box-shadow:0 0 0 2px rgba(88,
 /* Respect reduced motion preferences site-wide. */
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}}
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{overflow:hidden;height:100%;width:100%;overscroll-behavior:none;padding:0}
+/* touch-action:pan-x pan-y is the iOS Safari fallback for `user-scalable=no`,
+   which iOS 10+ ignores. It keeps single-finger scroll but blocks pinch-zoom
+   and double-tap-zoom. More specific child rules (e.g. .session-card pan-y)
+   still override this for their gesture needs. */
+html,body{overflow:hidden;height:100%;width:100%;overscroll-behavior:none;padding:0;touch-action:pan-x pan-y}
 /* Font stack: prose first (CJK aware), code paths opt back into mono explicitly.
    Previous stack ended in `monospace`, which Chromium/Firefox on Linux surface
    as DejaVu Sans Mono — a fixed-width latin face that renders CJK glyphs via
@@ -319,8 +323,8 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
    motif. Previously this was the one prominent spot that used the default UI
    font, which read as a generic app header and clashed with the mono login
    brand. R20260606. */
-.sidebar-header h1{font-size:var(--nz-fs-md);color:var(--nz-text-strong);font-weight:600;font-family:var(--nz-font-mono);letter-spacing:-.01em}
-.sidebar-header h1::before{content:"›_";color:var(--nz-rust);margin-right:6px;font-weight:700;opacity:.9}
+.sidebar-header h1{font-size:var(--nz-fs-md);color:var(--nz-rust);font-weight:600;font-style:italic;font-family:var(--nz-font-mono);letter-spacing:-.01em}
+.sidebar-header h1::before{content:"›_";color:var(--nz-rust);margin-right:6px;font-weight:700}
 .session-list{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent}
 
 .sidebar-status{padding:6px 16px;border-top:1px solid var(--nz-border);font-size:var(--nz-fs-sm);color:var(--nz-text-mute);flex-shrink:0;max-height:40%;overflow-y:auto}

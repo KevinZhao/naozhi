@@ -476,7 +476,7 @@ func (a *Handlers) HandleLoginNoScript(w http.ResponseWriter, r *http.Request) {
 const noScriptLoginHTML = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>naozhi — JavaScript required</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <style>body{background:#0a0a0a;color:#e0e0e0;font-family:-apple-system,sans-serif;padding:2rem;max-width:42rem;margin:0 auto}h1{font-size:1.25rem;margin-bottom:1rem}p{line-height:1.6;color:#ccc}a{color:#4a9eff}</style>
 </head><body>
 <h1>JavaScript required</h1>
@@ -598,7 +598,7 @@ func (a *Handlers) HandleLogout(w http.ResponseWriter, r *http.Request) {
 
 const loginPageHTML = `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>naozhi</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}

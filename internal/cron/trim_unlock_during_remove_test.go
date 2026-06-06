@@ -29,16 +29,16 @@ import (
 // ... os.Remove ...) — both preserve the lock-released-during-Remove
 // contract that motivated #712.
 func TestTrimJobLocked_ReleasesLockDuringRemoveBatch(t *testing.T) {
-	src, err := os.ReadFile("runstore.go")
+	src, err := os.ReadFile("runstore_trim.go")
 	if err != nil {
-		t.Fatalf("read runstore.go: %v", err)
+		t.Fatalf("read runstore_trim.go: %v", err)
 	}
 	body := string(src)
 
 	const fnMarker = "func (s *runStore) trimJobLocked("
 	idx := strings.Index(body, fnMarker)
 	if idx < 0 {
-		t.Fatalf("trimJobLocked function not found in runstore.go")
+		t.Fatalf("trimJobLocked function not found in runstore_trim.go")
 	}
 	// Restrict to the function body up to the next top-level "func ".
 	rest := body[idx:]
