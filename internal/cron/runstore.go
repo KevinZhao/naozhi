@@ -973,7 +973,7 @@ func (s *runStore) cacheGetBefore(jobID string, limit int, before time.Time) ([]
 		return nil, false
 	}
 	out := make([]CronRunSummary, 0, limit)
-	for i := 0; i < entry.count && len(out) < limit; i++ {
+	for i := 0; i < entry.count; i++ {
 		r := entry.ringRead(i)
 		// diskListNewestFirst applies StartedAt strict-less-than the
 		// cutoff; mirror that here so cache and disk paths stay in
@@ -982,6 +982,13 @@ func (s *runStore) cacheGetBefore(jobID string, limit int, before time.Time) ([]
 			continue
 		}
 		out = append(out, r)
+		// R20260606-PERF-11: break as soon as limit is reached rather than
+		// continuing to scan the ring. The outer loop condition checked
+		// len(out)<limit only at iteration start, so without this break we
+		// would execute one extra ringRead after the slice is full.
+		if len(out) >= limit {
+			break
+		}
 	}
 	return out, true
 }
