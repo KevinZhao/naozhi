@@ -213,7 +213,7 @@ func resolveAttachmentWorkspace(hub *Hub, sessionKey, reqWorkspace string) (stri
 	// trailing ":general" / ":<agent>" suffix is a per-agent discriminator,
 	// not part of the workspace override key.
 	var ws string
-	if sess := hub.router.GetSession(sessionKey); sess != nil {
+	if sess := hub.router.SessionFor(sessionKey); sess != nil {
 		ws = sess.Workspace()
 	}
 	if ws == "" {
@@ -221,7 +221,7 @@ func resolveAttachmentWorkspace(hub *Hub, sessionKey, reqWorkspace string) (stri
 		if idx := strings.LastIndexByte(sessionKey, ':'); idx > 0 {
 			chatKey = sessionKey[:idx]
 		}
-		ws = hub.router.GetWorkspace(chatKey)
+		ws = hub.router.Workspace(chatKey)
 	}
 	if ws == "" {
 		return "", fmt.Errorf("workspace is not a valid directory")
@@ -835,7 +835,7 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	// associated with the key, so a crafted workspace in the query would
 	// just be ignored.
 	var ws string
-	if sess := h.router.GetSession(key); sess != nil {
+	if sess := h.router.SessionFor(key); sess != nil {
 		ws = sess.Workspace()
 	}
 	if ws == "" {
@@ -843,7 +843,7 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		if idx := strings.LastIndexByte(key, ':'); idx > 0 {
 			chatKey = key[:idx]
 		}
-		ws = h.router.GetWorkspace(chatKey)
+		ws = h.router.Workspace(chatKey)
 	}
 	if ws == "" {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})

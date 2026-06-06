@@ -42,8 +42,8 @@ import (
 // _test.go files are excluded (test fakes may name methods however they like).
 // testutil.go is NOT excluded — it is `//go:build !release` but lacks the
 // _test.go suffix, so it is part of the default production build and its
-// exported TestProcess.GetState / GetSessionID are real surface (hence in the
-// allowlist).
+// exported TestProcess methods State/SessionID (renamed from GetState/GetSessionID
+// by ADR-0001 PR-2) carry no Get prefix, so they are not surface here.
 func TestGetterSurfaceFrozen(t *testing.T) {
 	t.Parallel()
 
@@ -54,9 +54,7 @@ func TestGetterSurfaceFrozen(t *testing.T) {
 	// guard only flags symbols OUTSIDE the allowlist, never missing ones.
 	allow := map[string]bool{
 		"Get":               true, // scratch.go: *ScratchPool (map-style accessor)
-		"GetSession":        true, // router_core.go: *Router (#463 PR-2: SessionFor rename deferred — multi-consumer-interface cluster, see PR notes)
 		"GetOrCreate":       true, // router_lifecycle.go: *Router (get-or-create compound semantics, intentionally retained per ADR-0001 PR-2)
-		"GetWorkspace":      true, // router_workspace.go: *Router (#463 PR-2: rename deferred — multi-consumer-interface cluster)
 		"GetActiveCount":    true, // reserved (#870 lifecycle contract)
 		"GetCurrentBackend": true, // reserved (#870 lifecycle contract)
 	}

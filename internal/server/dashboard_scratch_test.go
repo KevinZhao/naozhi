@@ -198,10 +198,10 @@ func TestScratchPromote_RenamesSession(t *testing.T) {
 	if !strings.HasPrefix(resp.Key, "feishu:direct:alice:aside-") {
 		t.Errorf("promoted key shape unexpected: %q", resp.Key)
 	}
-	if srv.router.GetSession(resp.Key) == nil {
+	if srv.router.SessionFor(resp.Key) == nil {
 		t.Error("promoted session not found under new key")
 	}
-	if srv.router.GetSession(sc.Key) != nil {
+	if srv.router.SessionFor(sc.Key) != nil {
 		t.Error("old scratch key still present after promote")
 	}
 	if srv.scratchPool.Get(sc.ID) != nil {

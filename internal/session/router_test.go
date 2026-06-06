@@ -411,7 +411,7 @@ func TestRouterSetUserLabel(t *testing.T) {
 	if ok := r.SetUserLabel("k1", "我的会话"); !ok {
 		t.Fatalf("SetUserLabel on existing session returned false")
 	}
-	if got := r.GetSession("k1").UserLabel(); got != "我的会话" {
+	if got := r.SessionFor("k1").UserLabel(); got != "我的会话" {
 		t.Errorf("UserLabel = %q, want %q", got, "我的会话")
 	}
 	if gen := r.ss.gen.Load(); gen <= before {
@@ -425,7 +425,7 @@ func TestRouterSetUserLabel(t *testing.T) {
 	if ok := r.SetUserLabel("k1", ""); !ok {
 		t.Fatalf("SetUserLabel clear returned false")
 	}
-	if got := r.GetSession("k1").UserLabel(); got != "" {
+	if got := r.SessionFor("k1").UserLabel(); got != "" {
 		t.Errorf("UserLabel after clear = %q, want empty", got)
 	}
 
@@ -450,7 +450,7 @@ func TestRouterStoreRestoreUserLabel(t *testing.T) {
 	}
 
 	r := NewRouter(RouterConfig{StorePath: storePath})
-	got := r.GetSession(labeled.key)
+	got := r.SessionFor(labeled.key)
 	if got == nil {
 		t.Fatalf("session not restored")
 	}
@@ -665,14 +665,14 @@ func TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace(t *testing.T) {
 	r.defaultCWD = "/default"
 	injectSession(r, "key1", newIdleProc())
 	r.SetWorkspace("key1", "/tmp/override")
-	if got := r.GetWorkspace("key1"); got != "/tmp/override" {
+	if got := r.Workspace("key1"); got != "/tmp/override" {
 		t.Fatalf("pre-reset workspace = %q, want /tmp/override", got)
 	}
 	r.ResetAndDiscardOverride("key1")
 	if _, ok := r.wsStore.overrides["key1"]; ok {
 		t.Error("workspaceOverrides[key1] still present after ResetAndDiscardOverride")
 	}
-	if got := r.GetWorkspace("key1"); got != "/default" {
+	if got := r.Workspace("key1"); got != "/default" {
 		t.Errorf("post-reset workspace = %q, want /default", got)
 	}
 
@@ -690,7 +690,7 @@ func TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace(t *testing.T) {
 	}()
 	r.ResetAndDiscardOverride("key2")
 	<-done
-	_ = r.GetWorkspace("key2")
+	_ = r.Workspace("key2")
 }
 
 // TestRouter_SetWorkspace_RejectsEmptyChatKey pins R20260527122801-CR-16:
@@ -701,7 +701,7 @@ func TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace(t *testing.T) {
 // empty-string key — that single slot is harmless on its own, but the
 // hardening also disarms a class of misuse where every sentinel-keyed
 // caller stomps the same slot, masking the originating call site, and
-// (worse) GetWorkspace("") would then return the attacker-supplied path
+// (worse) Workspace("") would then return the attacker-supplied path
 // instead of the configured workspace fallback. Fail closed at the
 // entry point.
 func TestRouter_SetWorkspace_RejectsEmptyChatKey(t *testing.T) {
@@ -719,17 +719,17 @@ func TestRouter_SetWorkspace_RejectsEmptyChatKey(t *testing.T) {
 	if got := len(r.wsStore.overrides); got != 0 {
 		t.Errorf("len(workspaceOverrides) = %d after empty-chatKey SetWorkspace; want 0", got)
 	}
-	// 3) GetWorkspace("") must fall through to the configured default,
+	// 3) Workspace("") must fall through to the configured default,
 	// not return the attacker-supplied path.
-	if got := r.GetWorkspace(""); got != "/default" {
-		t.Errorf("GetWorkspace(\"\") = %q, want %q (must fall through to default)", got, "/default")
+	if got := r.Workspace(""); got != "/default" {
+		t.Errorf("Workspace(\"\") = %q, want %q (must fall through to default)", got, "/default")
 	}
 
 	// 4) Real chatKeys still work — the guard must not regress the happy
 	// path.
 	r.SetWorkspace("real:user:alice", "/tmp/real")
-	if got := r.GetWorkspace("real:user:alice"); got != "/tmp/real" {
-		t.Errorf("GetWorkspace(real:user:alice) = %q, want /tmp/real", got)
+	if got := r.Workspace("real:user:alice"); got != "/tmp/real" {
+		t.Errorf("Workspace(real:user:alice) = %q, want /tmp/real", got)
 	}
 }
 

@@ -180,7 +180,7 @@ func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
 		})
 		return
 	}
-	sess := h.router.GetSession(msg.Key)
+	sess := h.router.SessionFor(msg.Key)
 	if sess == nil {
 		c.SendJSON(node.ServerMsg{
 			Type:   "agent_subscribe_rejected",

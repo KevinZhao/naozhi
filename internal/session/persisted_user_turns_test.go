@@ -123,7 +123,7 @@ func TestRenameSession_RecountsPersistedUserTurns(t *testing.T) {
 	if !r.RenameSession(oldKey, newKey) {
 		t.Fatal("RenameSession returned false")
 	}
-	got := r.GetSession(newKey)
+	got := r.SessionFor(newKey)
 	if got == nil {
 		t.Fatal("renamed session missing")
 	}

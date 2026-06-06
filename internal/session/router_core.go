@@ -278,7 +278,7 @@ const (
 // while sendMu is held (Send → onSessionID → trackSessionID). Code that
 // holds r.mu (write) must NEVER acquire sendMu — release r.mu first.
 // s.historyMu protects persistedHistory independently; never held with sendMu or r.mu.
-// Read-only operations (ListSessions, GetSession, Stats, Version) use RLock.
+// Read-only operations (ListSessions, SessionFor, Stats, Version) use RLock.
 //
 // Maintenance rule (router-split refactor): every field below carries a
 // `// 读写: <files>` annotation listing which router_*.go files access it.
@@ -1633,8 +1633,8 @@ func (r *Router) ListSessionsWithVersion() ([]SessionSnapshot, uint64) {
 	return snapshots, version
 }
 
-// GetSession returns the session for the given key, or nil.
-func (r *Router) GetSession(key string) *ManagedSession {
+// SessionFor returns the session for the given key, or nil.
+func (r *Router) SessionFor(key string) *ManagedSession {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.ss.sessions[key]
@@ -1642,11 +1642,11 @@ func (r *Router) GetSession(key string) *ManagedSession {
 
 // DiscardPassthroughPending fires reason to any in-flight passthrough sends
 // for the keyed session; a no-op when no session exists for the key. Wraps
-// GetSession + ManagedSession.DiscardPassthroughPending so consumers
+// SessionFor + ManagedSession.DiscardPassthroughPending so consumers
 // (dispatch.discardQueue) clear pending slots through the router seam rather
 // than dereferencing the concrete *ManagedSession (#1612).
 func (r *Router) DiscardPassthroughPending(key string, reason error) {
-	if sess := r.GetSession(key); sess != nil {
+	if sess := r.SessionFor(key); sess != nil {
 		sess.DiscardPassthroughPending(reason)
 	}
 }

@@ -26,15 +26,15 @@ func TestSetWorkspace_EvictsLRUWhenAtCapacity(t *testing.T) {
 	newKey := "dashboard:direct:fresh-JD"
 	r.SetWorkspace(newKey, "/home/ec2-user/workspace/JD")
 
-	if got := r.GetWorkspace(newKey); got != "/home/ec2-user/workspace/JD" {
-		t.Fatalf("new override dropped at capacity: GetWorkspace(%q)=%q want the project dir (regression: silent drop)", newKey, got)
+	if got := r.Workspace(newKey); got != "/home/ec2-user/workspace/JD" {
+		t.Fatalf("new override dropped at capacity: Workspace(%q)=%q want the project dir (regression: silent drop)", newKey, got)
 	}
 	// The least-recently-set key (k0) is the victim.
-	if got := r.GetWorkspace("dashboard:direct:k0"); got != "/default" {
+	if got := r.Workspace("dashboard:direct:k0"); got != "/default" {
 		t.Errorf("expected k0 (oldest) evicted → resolves to default; got %q", got)
 	}
 	// A more-recently-set key survives.
-	if got := r.GetWorkspace("dashboard:direct:k500"); got != "/ws/500" {
+	if got := r.Workspace("dashboard:direct:k500"); got != "/ws/500" {
 		t.Errorf("k500 should survive eviction; got %q", got)
 	}
 	// Size invariant: still bounded.
@@ -65,10 +65,10 @@ func TestSetWorkspace_NeverEvictsLiveSession(t *testing.T) {
 	// (k1), NOT the live chat0.
 	r.SetWorkspace("dashboard:direct:fresh", "/ws/fresh")
 
-	if got := r.GetWorkspace(liveChat); got != "/ws/live" {
+	if got := r.Workspace(liveChat); got != "/ws/live" {
 		t.Errorf("live session's override was evicted: got %q want /ws/live", got)
 	}
-	if got := r.GetWorkspace("dashboard:direct:k1"); got != "/default" {
+	if got := r.Workspace("dashboard:direct:k1"); got != "/default" {
 		t.Errorf("oldest session-less key k1 should be the victim; got %q", got)
 	}
 }
@@ -85,7 +85,7 @@ func TestSetWorkspace_DropsWhenAllLive(t *testing.T) {
 	}
 	r.SetWorkspace("dashboard:direct:overflow", "/ws/overflow")
 
-	if got := r.GetWorkspace("dashboard:direct:overflow"); got != "/default" {
+	if got := r.Workspace("dashboard:direct:overflow"); got != "/default" {
 		t.Errorf("with all overrides live, new key must be dropped (DoS bound): got %q want /default", got)
 	}
 	if got := len(r.wsStore.overrides); got != maxWorkspaceOverrides {
@@ -114,7 +114,7 @@ func TestSetWorkspace_DiskLoadedKeysEvictedFirst(t *testing.T) {
 	// New key forces one eviction — must hit a disk-loaded key, never the
 	// seq-tracked one.
 	r.SetWorkspace("dashboard:direct:fresh", "/ws/fresh")
-	if got := r.GetWorkspace(seqKey); got != "/ws/seqd" {
+	if got := r.Workspace(seqKey); got != "/ws/seqd" {
 		t.Errorf("seq-tracked key evicted before disk-loaded keys: got %q want /ws/seqd", got)
 	}
 }

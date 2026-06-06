@@ -51,11 +51,11 @@ type MessageEnqueuer interface {
 // 向后兼容，server 包内的 *Server 字段 / handler 字段类型不需要改。
 type HubRouter interface {
 	GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
-	GetSession(key string) *session.ManagedSession
+	SessionFor(key string) *session.ManagedSession
 	Remove(key string) bool
 	RenameSession(oldKey, newKey string) bool
 	ResetAndDiscardOverride(key string)
-	GetWorkspace(chatKey string) string
+	Workspace(chatKey string) string
 	SetWorkspace(chatKey, path string)
 	SetSessionBackend(key, backend string)
 	DefaultWorkspace() string
