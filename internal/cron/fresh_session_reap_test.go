@@ -167,6 +167,57 @@ func TestFreshReapSkipsStubReregisterWhenJobDeleted(t *testing.T) {
 	}
 }
 
+// TestFreshReapEmptySessionIDRegistersChainlessStub pins #1845: when a
+// fresh-context cron run succeeds but the result carries an empty session ID
+// (anomalous — process.go normally fills it on the success frame), the reap
+// must still complete cleanly: the run is Succeeded, the stub is re-registered
+// exactly once with NO chain (no clickable history), and nothing panics. The
+// empty-ID branch only adds a diagnostic Warn; it must not change the
+// registerStubByValue call or the run state.
+func TestFreshReapEmptySessionIDRegistersChainlessStub(t *testing.T) {
+	t.Parallel()
+
+	rec := &recordingBroadcaster{}
+	// Empty sid → okSession.Send returns SendResult{SessionID: ""}, so the
+	// success-tail reap sees result.SessionID == "".
+	router := &reapRouter{sid: ""}
+	s := NewScheduler(SchedulerConfig{MaxJobs: 5, Router: router, Telemetry: rec})
+
+	j := &Job{ID: "job-empty-sid", Schedule: "@every 5m", Prompt: "ping", FreshContext: true}
+	s.mu.Lock()
+	s.jobs[j.ID] = j
+	s.mu.Unlock()
+
+	s.executeOpt(j, true /* viaTriggerNow: skip jitter */)
+
+	if rec.endedCount() != 1 {
+		t.Fatalf("want 1 ended event, got %d", rec.endedCount())
+	}
+	if got := rec.endedAtCron(0); got.State != RunStateSucceeded {
+		t.Fatalf("state: want succeeded, got %q (err=%q)", got.State, got.ErrorClass)
+	}
+
+	wantKey := sessionkey.CronKey(j.ID)
+	_, regs := router.snapshot()
+
+	// Exactly one reap stub for this job, and it must be chain-less because
+	// the session ID was empty.
+	var reapStub *stubCall
+	reapStubCount := 0
+	for i := range regs {
+		if regs[i].key == wantKey {
+			reapStubCount++
+			reapStub = &regs[i]
+		}
+	}
+	if reapStubCount != 1 {
+		t.Fatalf("want exactly 1 stub re-register for %q, got %d; regs=%v", wantKey, reapStubCount, regs)
+	}
+	if len(reapStub.chainIDs) != 0 {
+		t.Errorf("empty session ID must yield a chain-less stub; got chainIDs=%v", reapStub.chainIDs)
+	}
+}
+
 // TestPersistentContextNotReapedAfterSuccess pins the negative half of #1829:
 // a persistent-mode (FreshContext=false) cron job must NOT be torn down after
 // a successful run — its session is deliberately reused across ticks to carry
