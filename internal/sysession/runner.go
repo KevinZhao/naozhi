@@ -3,7 +3,6 @@ package sysession
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -309,12 +308,11 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 
 	err := cmd.Run()
 	if err != nil {
-		// Prefer ctx.Err() ONLY when err is the context cancellation
-		// surfacing through exec — otherwise an exec.ExitError that
-		// happened to coincide with ctx cancellation gets clobbered
-		// and the dashboard loses the real failure detail.
-		if ctxErr := ctx.Err(); ctxErr != nil &&
-			(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		// When ctx is cancelled/timed-out, cmd.Run() returns *exec.ExitError
+		// (process killed by signal), not context.Canceled/DeadlineExceeded.
+		// So checking errors.Is on err is always false for the kill path and
+		// the ctx error would be silently dropped. Check ctx.Err() alone.
+		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", ctxErr
 		}
 		// Sec-LOW-2:  stderr from claude -p can echo back portions of
