@@ -32,9 +32,27 @@ type HTTPClient struct {
 	// host toward an unvalidated/unsafe target. R20260601-SEC-2 (#1548).
 	urlErr error
 
+	// localPeer is true when the cleaned peer URL points at a loopback or
+	// RFC1918/ULA private literal IP. Those targets are intentionally allowed
+	// (documented multi-node loopback bridging / private-LAN topology), but a
+	// config-write attacker could repoint the URL at a co-located internal
+	// service (Redis 6379, Elasticsearch 9200, Docker 2375) and use the
+	// Bearer-token-carrying request body as an SSRF write primitive. doRequest
+	// caps the request body for such peers so the body can't be stuffed with a
+	// bulk exfil/inject payload. R20260606-SEC-5 (#1825).
+	localPeer bool
+
 	relayMu sync.Mutex
 	relay   *wsRelay
 }
+
+// maxLocalPeerBodyBytes caps the request body sent to a loopback/private peer
+// (#1825). Every real naozhi proxy payload (send text, takeover, session
+// label, project config update) is small JSON well under this bound; the cap
+// only bites a config-write attacker trying to push a large body into a
+// co-located internal service. Public peers are uncapped — the cap is purely
+// an SSRF-write blast-radius reduction for the always-allowed local ranges.
+const maxLocalPeerBodyBytes = 1 << 20 // 1 MiB
 
 // NewHTTPClient creates an HTTPClient with a 10s timeout. The peer URL is
 // screened by validatePeerURL: an http/https absolute URL whose host is not
@@ -51,12 +69,17 @@ func NewHTTPClient(id, rawURL, token, displayName string) *HTTPClient {
 		slog.Error("node peer URL rejected; client disabled",
 			"node", id, "url", rawURL, "err", urlErr)
 	}
+	// Classify loopback/private targets only when the URL validated — a
+	// rejected URL is already refused wholesale by doRequest's urlErr gate,
+	// and cleanURL then holds the raw operator string (not a clean base).
+	localPeer := urlErr == nil && isLocalPeerURL(cleanURL)
 	return &HTTPClient{
 		ID:          id,
 		URL:         cleanURL,
 		Token:       token,
 		displayName: displayName,
 		urlErr:      urlErr,
+		localPeer:   localPeer,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 			Transport: &http.Transport{
@@ -94,6 +117,17 @@ func (n *HTTPClient) doRequest(ctx context.Context, method, path string, body io
 	req, err := http.NewRequestWithContext(ctx, method, n.URL+path, body)
 	if err != nil {
 		return nil, err
+	}
+	// R20260606-SEC-5 (#1825): for loopback/private peers, refuse to send a
+	// body larger than maxLocalPeerBodyBytes before the Bearer token leaves
+	// the host. All callers pass *bytes.Reader, so http.NewRequestWithContext
+	// has already populated req.ContentLength with the exact body length; this
+	// bounds an SSRF-write attempt (config-write attacker repointing the peer
+	// URL at a co-located internal service) without truncating legitimate
+	// small-JSON proxy payloads. Public peers stay uncapped.
+	if n.localPeer && req.ContentLength > maxLocalPeerBodyBytes {
+		return nil, fmt.Errorf("node %s: request body %d bytes exceeds %d-byte cap for loopback/private peer (SSRF-write guard)",
+			n.ID, req.ContentLength, maxLocalPeerBodyBytes)
 	}
 	if n.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+n.Token)
