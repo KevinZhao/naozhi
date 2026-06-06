@@ -1950,6 +1950,121 @@ func TestDashboardJS_UXP3_UploadReorderHelper(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_ImageOrientationBakedFromEXIF pins the fix that bakes EXIF
+// orientation into the pixels during the canvas re-encode. Re-encoding an
+// image through canvas.toBlob strips the EXIF orientation flag, so without
+// `imageOrientation: 'from-image'` on the createImageBitmap call a portrait
+// iPhone photo (which stores landscape pixels + a rotate flag) arrives at the
+// backend sideways. The option makes the decoder rotate the pixels up-front,
+// and the returned bitmap's width/height are already the corrected
+// dimensions — so the existing scaling math stays correct and we must NOT add
+// any manual ctx.rotate (that would double-correct).
+func TestDashboardJS_ImageOrientationBakedFromEXIF(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// 1) The decode in normalizeImage must request EXIF orientation baking.
+	if !strings.Contains(js, "createImageBitmap(file, { imageOrientation: 'from-image' })") {
+		t.Error("normalizeImage must call createImageBitmap with { imageOrientation: 'from-image' } so EXIF orientation is baked into the re-encoded JPEG; without it portrait phone photos reach the backend sideways")
+	}
+
+	// 2) Guard against double-correction: the bitmap is already upright, so
+	//    normalizeImage must not also rotate the canvas context. If a future
+	//    edit reintroduces a manual rotate, the image would be flipped twice.
+	normStart := strings.Index(js, "async function normalizeImage(file)")
+	if normStart < 0 {
+		t.Fatal("normalizeImage function not found")
+	}
+	// Bound the scan to the function body (next top-level `async function` /
+	// `function` declaration) so an unrelated rotate elsewhere can't trip it.
+	rest := js[normStart+len("async function normalizeImage(file)"):]
+	end := strings.Index(rest, "\nasync function ")
+	if next := strings.Index(rest, "\nfunction "); next >= 0 && (end < 0 || next < end) {
+		end = next
+	}
+	if end < 0 {
+		end = len(rest)
+	}
+	body := rest[:end]
+	for _, banned := range []string{"ctx.rotate", "ctx.translate", "ctx.transform"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("normalizeImage must not call %s — createImageBitmap with imageOrientation:'from-image' already delivers an upright bitmap, so manual canvas rotation would double-correct the orientation", banned)
+		}
+	}
+}
+
+// TestDashboardJS_PreviewUsesNormalizedImage pins the root-cause fix for the
+// sideways preview: uploadEntry must swap entry.blobUrl from the raw picked
+// file to the normalized (canvas re-encoded, EXIF-baked) image, so the
+// thumbnail renders upright on every engine — not just those that honor the
+// CSS image-orientation hint — and matches the bytes actually sent to the
+// backend. The swap must revoke the old object URL to avoid a leak and must
+// only run for images that were actually re-encoded (normalizeImage returns
+// the original File on decode failure; PDFs are never normalized).
+func TestDashboardJS_PreviewUsesNormalizedImage(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	upStart := strings.Index(js, "async function uploadEntry(entry)")
+	if upStart < 0 {
+		t.Fatal("uploadEntry function not found")
+	}
+	rest := js[upStart+len("async function uploadEntry(entry)"):]
+	end := strings.Index(rest, "\nasync function ")
+	if next := strings.Index(rest, "\nfunction "); next >= 0 && (end < 0 || next < end) {
+		end = next
+	}
+	if end < 0 {
+		end = len(rest)
+	}
+	body := rest[:end]
+
+	// 1) Only re-encoded images get their preview swapped (identity guard
+	//    against normalizeImage's fallback-to-original and against PDFs).
+	if !strings.Contains(body, "entry.kind === 'image' && file !== entry.file") {
+		t.Error("uploadEntry must guard the preview swap on `entry.kind === 'image' && file !== entry.file` so PDFs and decode-failure fallbacks keep their original preview")
+	}
+	// 2) The normalized blob must become the new preview source.
+	if !strings.Contains(body, "entry.blobUrl = upright") {
+		t.Error("uploadEntry must point entry.blobUrl at the normalized image so the thumbnail matches what is sent to the backend")
+	}
+	// 3) The stale object URL must be revoked to avoid a memory leak.
+	if !strings.Contains(body, "URL.revokeObjectURL(entry.blobUrl)") {
+		t.Error("uploadEntry must revoke the previous entry.blobUrl before replacing it to avoid leaking the raw-file object URL")
+	}
+}
+
+// TestDashboardHTML_FileThumbHonorsEXIFOrientation pins the companion fix for
+// the upload-preview thumbnail. The thumbnail <img> in renderFilePreviews
+// renders the ORIGINAL picked file via URL.createObjectURL (not the canvas
+// re-encoded blob), so it still carries the EXIF orientation flag. Browsers
+// do not uniformly apply that flag to <img> by default, so a portrait phone
+// photo previewed sideways even though the upload sent to the backend was
+// already upright. `image-orientation: from-image` on .file-thumb img makes
+// the preview honor EXIF. This is a CSS rendering invariant that cannot be
+// expressed behaviourally without a real browser, so a source pin is warranted.
+func TestDashboardHTML_FileThumbHonorsEXIFOrientation(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(data)
+
+	rule := regexp.MustCompile(`\.file-thumb img\{[^}]*image-orientation:\s*from-image`)
+	if !rule.MatchString(html) {
+		t.Error(".file-thumb img must set image-orientation:from-image so the upload preview honors EXIF orientation and a portrait phone photo isn't shown sideways")
+	}
+}
+
 // TestDashboardJS_R110P1_CronStepValueHumanize pins the R110-P1 fix that
 // lets humanizeCron recognize "step-value" cron expressions (e.g.
 // "*\/15 * * * *" every 15 minutes, "0 *\/6 * * *" every 6 hours on the

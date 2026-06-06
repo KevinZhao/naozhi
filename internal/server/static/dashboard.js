@@ -4739,12 +4739,24 @@ function openFilePicker() {
 // above the 1568 px knee where Anthropic's vision models stop gaining
 // accuracy. HEIC is also handled here — createImageBitmap decodes it on
 // Safari 17+ and we re-encode to JPEG.
+//
+// Orientation: phone cameras tag photos with an EXIF orientation flag
+// instead of rotating the pixels. Re-encoding through canvas drops that
+// flag, so we must bake the rotation into the pixels at decode time via
+// `imageOrientation: 'from-image'` — without it a portrait iPhone shot
+// arrives at the backend sideways. With the flag, the returned bitmap's
+// width/height are ALREADY the visually-correct (post-rotation) dimensions,
+// so the scaling math below needs no orientation branching and we must NOT
+// apply any extra ctx.rotate (that would double-correct). The option is the
+// modern default on Chrome/Firefox and is honored by Safari/iOS 16+; older
+// engines silently ignore the unknown member and fall back to their default
+// decode, which is the best we can do client-side.
 // Falls back to the original file if decoding fails so the server's
 // content-type check still produces a real error message.
 async function normalizeImage(file) {
   const MAX_EDGE = 1600;
   try {
-    const bmp = await createImageBitmap(file);
+    const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
     const { width: sw, height: sh } = bmp;
     let dw = sw, dh = sh;
     const m = Math.max(sw, sh);
@@ -4861,6 +4873,22 @@ async function uploadEntry(entry) {
     // via file_ref, not inline base64).
     const file = entry.kind === 'pdf' ? entry.file : await normalizeImage(entry.file);
     entry.normalizedSize = file.size;
+    // Swap the preview thumbnail to the normalized image so what the user
+    // sees matches what the backend receives, pixel-for-pixel. The original
+    // blobUrl points at the raw picked file, which still carries the EXIF
+    // orientation flag — and browsers (notably some WebViews) don't reliably
+    // apply it to <img>, so a portrait phone photo previewed sideways. The
+    // canvas re-encode in normalizeImage bakes the rotation into the pixels
+    // and strips EXIF, so this blob renders upright everywhere. Guard on
+    // identity: normalizeImage falls back to the original File on decode
+    // failure, in which case there's nothing new to show. PDFs keep their
+    // icon card (no blobUrl) untouched.
+    if (entry.kind === 'image' && file !== entry.file) {
+      const upright = URL.createObjectURL(file);
+      if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
+      entry.blobUrl = upright;
+      renderFilePreviews();
+    }
     const fd = new FormData();
     fd.append('file', file);
     const headers = {};
