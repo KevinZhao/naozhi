@@ -1997,6 +1997,29 @@ func TestDashboardJS_ImageOrientationBakedFromEXIF(t *testing.T) {
 	}
 }
 
+// TestDashboardHTML_FileThumbHonorsEXIFOrientation pins the companion fix for
+// the upload-preview thumbnail. The thumbnail <img> in renderFilePreviews
+// renders the ORIGINAL picked file via URL.createObjectURL (not the canvas
+// re-encoded blob), so it still carries the EXIF orientation flag. Browsers
+// do not uniformly apply that flag to <img> by default, so a portrait phone
+// photo previewed sideways even though the upload sent to the backend was
+// already upright. `image-orientation: from-image` on .file-thumb img makes
+// the preview honor EXIF. This is a CSS rendering invariant that cannot be
+// expressed behaviourally without a real browser, so a source pin is warranted.
+func TestDashboardHTML_FileThumbHonorsEXIFOrientation(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(data)
+
+	rule := regexp.MustCompile(`\.file-thumb img\{[^}]*image-orientation:\s*from-image`)
+	if !rule.MatchString(html) {
+		t.Error(".file-thumb img must set image-orientation:from-image so the upload preview honors EXIF orientation and a portrait phone photo isn't shown sideways")
+	}
+}
+
 // TestDashboardJS_R110P1_CronStepValueHumanize pins the R110-P1 fix that
 // lets humanizeCron recognize "step-value" cron expressions (e.g.
 // "*\/15 * * * *" every 15 minutes, "0 *\/6 * * *" every 6 hours on the
