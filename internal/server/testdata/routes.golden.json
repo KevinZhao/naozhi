@@ -286,6 +286,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/cron_view.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/static/dashboard.js",
     "handler_type": "http.HandlerFunc"
   },

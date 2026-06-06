@@ -269,6 +269,7 @@ func (s *Server) registerDashboard() {
 	// does not break the unauthenticated bootstrap.
 	s.mux.HandleFunc("GET /static/nz_util.js", auth(handleNzUtilJS))
 	s.mux.HandleFunc("GET /static/dashboard.js", auth(handleDashboardJS))
+	s.mux.HandleFunc("GET /static/cron_view.js", auth(handleCronViewJS))
 	s.mux.HandleFunc("GET /static/agent_view.js", auth(handleAgentViewJS))
 	s.mux.HandleFunc("GET /static/asset_browser.js", auth(handleAssetBrowserJS))
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
@@ -611,6 +612,23 @@ func handleNzUtilJS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeStaticAssetBody(w, r, "nz_util.js")
+}
+
+// handleCronViewJS serves static/cron_view.js — the cron (定时任务) dashboard
+// view (RFC docs/rfc/dashboard-cron-view-extraction.md, PR-1). Loaded after
+// dashboard.js. Mirrors handleDashboardJS for caching/CSP headers.
+func handleCronViewJS(w http.ResponseWriter, r *http.Request) {
+	if staticAssetBytes("cron_view.js") == nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "cron_view.js") {
+		return
+	}
+	writeStaticAssetBody(w, r, "cron_view.js")
 }
 
 // handleAgentViewJS serves static/agent_view.js — the RFC v4 agent-team-ui

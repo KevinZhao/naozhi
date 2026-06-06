@@ -276,6 +276,7 @@ var packageFuncType = map[string]string{
 	"handleSW":             "http.HandlerFunc",
 	"handleNzUtilJS":       "http.HandlerFunc",
 	"handleDashboardJS":    "http.HandlerFunc",
+	"handleCronViewJS":     "http.HandlerFunc",
 	"handleAgentViewJS":    "http.HandlerFunc",
 	"handleAssetBrowserJS": "http.HandlerFunc",
 }
