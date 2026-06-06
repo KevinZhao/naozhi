@@ -117,7 +117,7 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 
 	case trimmed == "/pwd":
 		chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
-		ws := d.router.GetWorkspace(chatKey)
+		ws := d.router.Workspace(chatKey)
 		if ws == "" {
 			d.replyText(ctx, msg, "当前工作目录: （未设置，使用进程默认）", log)
 			return true
@@ -717,7 +717,7 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 	if filepath.IsAbs(path) {
 		absPath = filepath.Clean(path)
 	} else {
-		currentWS := d.router.GetWorkspace(chatKey)
+		currentWS := d.router.Workspace(chatKey)
 		// R185-GO-L3: relative path requires a prior /cd <abs> to anchor
 		// workspace; without it, filepath.Join("", rel) == rel and EvalSymlinks
 		// resolves against process cwd, which is meaningless to the user.

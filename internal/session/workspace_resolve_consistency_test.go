@@ -3,7 +3,7 @@ package session
 import "testing"
 
 // R245-ARCH-32 (#883): the spawn-time workspace base must be derived from
-// the same resolveWorkspaceLocked path that GetWorkspace uses, so the two
+// the same resolveWorkspaceLocked path that Workspace uses, so the two
 // can no longer drift. These tests pin the equivalence for the chat-level
 // base tier (override-or-default), with opts/resume layered on top.
 
@@ -45,10 +45,10 @@ func TestSpawnWorkspaceBaseMatchesGetWorkspace(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newWorkspaceTestRouter(def, tc.overrides)
 
-			// GetWorkspace (the centralized resolver) view.
-			gotGet := r.GetWorkspace(chatKey)
+			// Workspace (the centralized resolver) view.
+			gotGet := r.Workspace(chatKey)
 			if gotGet != tc.want {
-				t.Fatalf("GetWorkspace = %q, want %q", gotGet, tc.want)
+				t.Fatalf("Workspace = %q, want %q", gotGet, tc.want)
 			}
 
 			// Spawn-time base (no opts.Workspace, no resume) must agree.
@@ -56,7 +56,7 @@ func TestSpawnWorkspaceBaseMatchesGetWorkspace(t *testing.T) {
 			sp := r.resolveSpawnParamsLocked(agentKey, "", AgentOpts{})
 			r.mu.Unlock()
 			if sp.Workspace != tc.want {
-				t.Fatalf("resolveSpawnParamsLocked workspace = %q, want %q (GetWorkspace=%q) — sources of truth drifted",
+				t.Fatalf("resolveSpawnParamsLocked workspace = %q, want %q (Workspace=%q) — sources of truth drifted",
 					sp.Workspace, tc.want, gotGet)
 			}
 		})

@@ -42,8 +42,8 @@ func TestHub_LookupNode(t *testing.T) {
 		t.Fatal("lookupNode(absent) hit; want miss")
 	}
 
-	// hubNodeLookup.GetNode must delegate to the same helper.
-	if _, ok := (hubNodeLookup{h: hub}).GetNode("node-a"); !ok {
-		t.Fatal("hubNodeLookup.GetNode(node-a) miss; want hit")
+	// hubNodeLookup.NodeByID must delegate to the same helper.
+	if _, ok := (hubNodeLookup{h: hub}).NodeByID("node-a"); !ok {
+		t.Fatal("hubNodeLookup.NodeByID(node-a) miss; want hit")
 	}
 }

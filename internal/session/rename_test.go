@@ -33,10 +33,10 @@ func TestRenameSession_HappyPath(t *testing.T) {
 	if !r.RenameSession(oldKey, newKey) {
 		t.Fatal("RenameSession returned false")
 	}
-	if r.GetSession(oldKey) != nil {
+	if r.SessionFor(oldKey) != nil {
 		t.Error("old key should be gone after rename")
 	}
-	got := r.GetSession(newKey)
+	got := r.SessionFor(newKey)
 	if got == nil {
 		t.Fatal("new key missing after rename")
 	}
@@ -85,7 +85,7 @@ func TestRenameSession_CollisionRefused(t *testing.T) {
 	if r.RenameSession(oldKey, newKey) {
 		t.Error("RenameSession should refuse collisions")
 	}
-	if r.GetSession(oldKey) == nil {
+	if r.SessionFor(oldKey) == nil {
 		t.Error("old key dropped on collision")
 	}
 }
@@ -139,7 +139,7 @@ func TestRenameSession_PreservesCreatedAt(t *testing.T) {
 	if !r.RenameSession(oldKey, newKey) {
 		t.Fatal("RenameSession returned false")
 	}
-	got := r.GetSession(newKey)
+	got := r.SessionFor(newKey)
 	if got == nil {
 		t.Fatal("new key missing after rename")
 	}
@@ -173,7 +173,7 @@ func TestRenameSession_StampsCreatedAtWhenSourceUnstamped(t *testing.T) {
 	if !r.RenameSession(oldKey, newKey) {
 		t.Fatal("RenameSession returned false")
 	}
-	got := r.GetSession(newKey)
+	got := r.SessionFor(newKey)
 	if got == nil {
 		t.Fatal("new key missing after rename")
 	}

@@ -74,7 +74,7 @@ func isValidBackendID(s string) bool {
 // interface locally keeps the helper free of an upward dependency on
 // either.
 type nodeLookup interface {
-	GetNode(id string) (node.Conn, bool)
+	NodeByID(id string) (node.Conn, bool)
 }
 
 // ErrUnknownBackend is returned when a caller asks selectNodeForBackend
@@ -122,7 +122,7 @@ func selectNodeForBackend(lookup nodeLookup, targetNode, backendID string) (node
 		return nil, nil
 	}
 
-	nc, ok := lookup.GetNode(targetNode)
+	nc, ok := lookup.NodeByID(targetNode)
 	if !ok {
 		// targetNode quoted via %q because handler logs treat the value
 		// as attacker-controlled (dashboard form field). %q is safe
@@ -166,7 +166,7 @@ func selectNodeForBackend(lookup nodeLookup, targetNode, backendID string) (node
 // downstream RPC.
 type hubNodeLookup struct{ h *Hub }
 
-func (l hubNodeLookup) GetNode(id string) (node.Conn, bool) {
+func (l hubNodeLookup) NodeByID(id string) (node.Conn, bool) {
 	// ARCH4 (#384): defer to Hub.lookupNode so every by-ID read of the
 	// Server-shared nodes map goes through the single mutex-access helper.
 	return l.h.lookupNode(id)

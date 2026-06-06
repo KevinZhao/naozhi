@@ -44,7 +44,7 @@ func TestScheduler_DisabledRunStore_AccessorsReturnEmpty(t *testing.T) {
 	if got := s.RecentRuns("abc", 5); got != nil {
 		t.Errorf("RecentRuns on disabled store = %v, want nil", got)
 	}
-	if run, err := s.GetRun("abc", "def"); run != nil || err == nil {
+	if run, err := s.Run("abc", "def"); run != nil || err == nil {
 		t.Errorf("GetRun on disabled store = (%v, %v), want (nil, non-nil err)", run, err)
 	}
 }

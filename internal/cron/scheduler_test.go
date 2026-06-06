@@ -553,7 +553,7 @@ func TestEnsureStub(t *testing.T) {
 	if !router.Remove(key) {
 		t.Fatalf("expected router to drop the stub registered by AddJob")
 	}
-	if router.GetSession(key) != nil {
+	if router.SessionFor(key) != nil {
 		t.Fatalf("stub should be gone after Remove")
 	}
 
@@ -561,7 +561,7 @@ func TestEnsureStub(t *testing.T) {
 	if !s.EnsureStub(key) {
 		t.Fatalf("EnsureStub should return true for an existing job")
 	}
-	sess := router.GetSession(key)
+	sess := router.SessionFor(key)
 	if sess == nil {
 		t.Fatalf("EnsureStub should have re-registered the stub")
 	}
@@ -570,7 +570,7 @@ func TestEnsureStub(t *testing.T) {
 	if !s.EnsureStub(key) {
 		t.Fatalf("EnsureStub should stay true when stub already present")
 	}
-	if router.GetSession(key) != sess {
+	if router.SessionFor(key) != sess {
 		t.Fatalf("EnsureStub must not create a duplicate stub")
 	}
 

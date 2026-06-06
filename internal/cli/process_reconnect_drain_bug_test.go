@@ -124,12 +124,12 @@ func TestReconnectMidTurn_ResultTransitionsToReady(t *testing.T) {
 	// Allow the readLoop state transition to be observed.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if p.GetState() == StateReady {
+		if p.State() == StateReady {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("State = %v after reconnect result, want StateReady (session stuck Running)", p.GetState())
+	t.Fatalf("State = %v after reconnect result, want StateReady (session stuck Running)", p.State())
 }
 
 // TestIsMidTurn covers the helper SpawnReconnect uses to decide whether to arm

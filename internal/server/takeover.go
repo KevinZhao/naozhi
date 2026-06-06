@@ -75,12 +75,12 @@ func (s *Server) tryAutoTakeover(ctx context.Context, chatKey, key string, opts 
 		return false
 	}
 	// Skip when a managed session already exists for this key.
-	if s.router.GetSession(key) != nil {
+	if s.router.SessionFor(key) != nil {
 		return false
 	}
 	workspace := opts.Workspace
 	if workspace == "" {
-		workspace = s.router.GetWorkspace(chatKey)
+		workspace = s.router.Workspace(chatKey)
 	}
 	if workspace == "" {
 		return false

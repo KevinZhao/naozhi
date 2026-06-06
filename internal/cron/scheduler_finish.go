@@ -49,8 +49,8 @@ type RunHistoryReader interface {
 	ListRuns(jobID string, limit int, before time.Time) []CronRunSummary
 	// RecentRuns returns the newest n CronRunSummary entries for jobID.
 	RecentRuns(jobID string, n int) []CronRunSummary
-	// GetRun returns the full CronRun for runID under jobID.
-	GetRun(jobID, runID string) (*CronRun, error)
+	// Run returns the full CronRun for runID under jobID.
+	Run(jobID, runID string) (*CronRun, error)
 }
 
 // Compile-time proof that *Scheduler satisfies the narrow read interface so a
@@ -100,10 +100,10 @@ func (s *Scheduler) RecentRuns(jobID string, n int) []CronRunSummary {
 	return s.runStore.Recent(jobID, n)
 }
 
-// GetRun returns the full CronRun for runID under jobID. Returns
+// Run returns the full CronRun for runID under jobID. Returns
 // (nil, fs.ErrNotExist) when missing; (nil, ErrCorruptRun) when present
 // but unusable. Server layer maps these to 404 / 500 respectively.
-func (s *Scheduler) GetRun(jobID, runID string) (*CronRun, error) {
+func (s *Scheduler) Run(jobID, runID string) (*CronRun, error) {
 	if !s.runStoreEnabled() {
 		return nil, fs.ErrNotExist
 	}

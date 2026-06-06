@@ -310,7 +310,7 @@ func (h *Handlers) HandleRunTranscript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := h.scheduler.GetRun(jobID, runID)
+	run, err := h.scheduler.Run(jobID, runID)
 	if err != nil {
 		if errors.Is(err, cronpkg.ErrCorruptRun) {
 			slog.Warn("cron transcript: run record corrupt", "job_id", jobID, "run_id", runID, "err", err)

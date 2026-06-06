@@ -227,7 +227,7 @@ func (h *Handlers) HandleList(w http.ResponseWriter, r *http.Request) {
 	for _, p := range projects {
 		plannerKey := p.PlannerSessionKey()
 		plannerState := "none"
-		if sess := h.router.GetSession(plannerKey); sess != nil {
+		if sess := h.router.SessionFor(plannerKey); sess != nil {
 			snap := sess.Snapshot()
 			plannerState = snap.State
 		}

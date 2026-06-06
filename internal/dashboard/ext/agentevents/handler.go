@@ -82,7 +82,7 @@ func (h *Handler) linkerForSession(key string) agentlink.AgentLinker {
 	if h.linkerFor != nil {
 		return h.linkerFor(key)
 	}
-	sess := h.router.GetSession(key)
+	sess := h.router.SessionFor(key)
 	if sess == nil {
 		return nil
 	}

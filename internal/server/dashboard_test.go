@@ -385,7 +385,7 @@ func TestHandleAPISessionEvents_BeforeFallsBackToHistorySource(t *testing.T) {
 	// Memory has entries 1000, 2000, 3000; Source holds hypothetical older
 	// entries at 100, 200 that no longer fit in the live ring.
 	key := seedEventSession(t, srv, 1000, 2000, 3000)
-	sess := srv.router.GetSession(key)
+	sess := srv.router.SessionFor(key)
 	if sess == nil {
 		t.Fatalf("session %q not registered", key)
 	}
@@ -427,7 +427,7 @@ func TestHandleAPISessionEvents_BeforeFallsBackToHistorySource(t *testing.T) {
 func TestHandleAPISessionEvents_BeforeSkipsSourceWhenMemoryCovers(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	key := seedEventSession(t, srv, 1000, 2000, 3000)
-	sess := srv.router.GetSession(key)
+	sess := srv.router.SessionFor(key)
 	if sess == nil {
 		t.Fatalf("session %q not registered", key)
 	}
@@ -803,7 +803,7 @@ func TestHandleAPISend_WorkspaceOverride(t *testing.T) {
 	// /private/var/folders/... and /tmp/... to /private/tmp/... — resolve
 	// the expected value the same way so the assertion is platform-neutral.
 	chatKey := "dashboard:direct:test-session"
-	ws := router.GetWorkspace(chatKey)
+	ws := router.Workspace(chatKey)
 	wantDir, err := filepath.EvalSymlinks(tmpDir)
 	if err != nil {
 		t.Fatalf("EvalSymlinks(%q): %v", tmpDir, err)
@@ -835,7 +835,7 @@ func TestHandleAPISend_WorkspaceInvalidDir(t *testing.T) {
 
 	// Verify workspace was NOT set
 	chatKey := "dashboard:direct:test-session"
-	ws := router.GetWorkspace(chatKey)
+	ws := router.Workspace(chatKey)
 	if ws != "/default/workspace" {
 		t.Errorf("workspace = %q, want /default/workspace (invalid path should be rejected)", ws)
 	}
@@ -979,7 +979,7 @@ func TestHandleSetLabel_OK(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%q)", w.Code, w.Body.String())
 	}
-	if got := srv.router.GetSession(key).UserLabel(); got != "重构会话" {
+	if got := srv.router.SessionFor(key).UserLabel(); got != "重构会话" {
 		t.Errorf("router UserLabel = %q, want 重构会话", got)
 	}
 }
@@ -999,7 +999,7 @@ func TestHandleSetLabel_EmptyClears(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	if got := srv.router.GetSession(key).UserLabel(); got != "" {
+	if got := srv.router.SessionFor(key).UserLabel(); got != "" {
 		t.Errorf("UserLabel = %q, want empty after clear", got)
 	}
 }

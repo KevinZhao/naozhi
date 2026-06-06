@@ -35,7 +35,7 @@ func TestP1_FinishRunPersistsCronRun(t *testing.T) {
 		prompt: "do thing", workDir: "/tmp/wd", fresh: false,
 	})
 
-	got, err := s.GetRun(jobID, runID)
+	got, err := s.Run(jobID, runID)
 	if err != nil {
 		t.Fatalf("GetRun: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestP1_FinishRunSkipPersistDoesNotWriteHistory(t *testing.T) {
 		errMsg: "context canceled", skipPersist: true,
 	})
 
-	if _, err := s.GetRun(jobID, runID); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := s.Run(jobID, runID); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("expected ErrNotExist, got %v", err)
 	}
 	rows := s.ListRuns(jobID, 10, time.Time{})
@@ -112,7 +112,7 @@ func TestP1_FinishRunSanitisationConsistency(t *testing.T) {
 		prompt: "x", workDir: "/wd", fresh: false,
 	})
 
-	got, err := s.GetRun(jobID, runID)
+	got, err := s.Run(jobID, runID)
 	if err != nil {
 		t.Fatalf("GetRun: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestP1_DisabledStoreNoOps(t *testing.T) {
 	if rows := s.ListRuns(jobID, 10, time.Time{}); len(rows) != 0 {
 		t.Errorf("disabled list: want empty, got %+v", rows)
 	}
-	if _, err := s.GetRun(jobID, "abcdef0123456789"); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := s.Run(jobID, "abcdef0123456789"); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("disabled get: want ErrNotExist, got %v", err)
 	}
 }

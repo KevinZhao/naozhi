@@ -26,7 +26,7 @@ func mkProjDir(t *testing.T, root string) string {
 // newBindServer builds a Server whose router defaults to a tmp workspace and
 // whose allowedRoot pins path validation to that root, so /api/sessions/bind
 // can be driven end-to-end and the resulting per-chat override read back via
-// router.GetWorkspace. AllowedRoot is set explicitly: leaving it empty makes
+// router.Workspace. AllowedRoot is set explicitly: leaving it empty makes
 // validateWorkspace accept any absolute path, which would hide the
 // path-traversal rejection assertions.
 func newBindServer(t *testing.T) (*Server, *session.Router, string) {
@@ -70,8 +70,8 @@ func TestHandleBind_PersistsOverride(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d want 200 (body=%s)", w.Code, w.Body.String())
 	}
-	if got := router.GetWorkspace(chatKey); got != projDir {
-		t.Fatalf("GetWorkspace(%q)=%q want %q — override not persisted", chatKey, got, projDir)
+	if got := router.Workspace(chatKey); got != projDir {
+		t.Fatalf("Workspace(%q)=%q want %q — override not persisted", chatKey, got, projDir)
 	}
 }
 
@@ -87,8 +87,8 @@ func TestHandleBind_InvalidWorkspaceRejected(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d want 400 for out-of-root workspace (body=%s)", w.Code, w.Body.String())
 	}
-	if got := router.GetWorkspace(chatKey); got != root {
-		t.Fatalf("GetWorkspace(%q)=%q want default %q — a rejected bind must not leak an override", chatKey, got, root)
+	if got := router.Workspace(chatKey); got != root {
+		t.Fatalf("Workspace(%q)=%q want default %q — a rejected bind must not leak an override", chatKey, got, root)
 	}
 }
 
@@ -127,8 +127,8 @@ func TestHandleBind_RemoteNodeNoop(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d want 200 (remote no-op ack) (body=%s)", w.Code, w.Body.String())
 	}
-	if got := router.GetWorkspace(chatKey); got != root {
-		t.Fatalf("GetWorkspace(%q)=%q want default %q — remote bind must not write a local override", chatKey, got, root)
+	if got := router.Workspace(chatKey); got != root {
+		t.Fatalf("Workspace(%q)=%q want default %q — remote bind must not write a local override", chatKey, got, root)
 	}
 }
 
@@ -144,18 +144,18 @@ func TestHandleBind_ChatKeyDerivation(t *testing.T) {
 	if w := postBind(t, srv, `{"key":"`+key+`","node":"local","workspace":"`+projDir+`"}`); w.Code != http.StatusOK {
 		t.Fatalf("status=%d want 200 (body=%s)", w.Code, w.Body.String())
 	}
-	if got := router.GetWorkspace(chatKey); got != projDir {
-		t.Fatalf("override stored under wrong key: GetWorkspace(%q)=%q want %q", chatKey, got, projDir)
+	if got := router.Workspace(chatKey); got != projDir {
+		t.Fatalf("override stored under wrong key: Workspace(%q)=%q want %q", chatKey, got, projDir)
 	}
 	// The full 4-segment key must NOT itself be an override key.
-	if got := router.GetWorkspace(key); got != root {
+	if got := router.Workspace(key); got != root {
 		t.Fatalf("4-segment key should resolve to default, got %q", got)
 	}
 }
 
 // TestHandleBind_EmptyChatKeyPrefix: a key whose only colon is at index 0
 // (":agent") must be rejected so the empty-string chat key can never carry an
-// override (which would poison every default GetWorkspace lookup).
+// override (which would poison every default Workspace lookup).
 func TestHandleBind_EmptyChatKeyPrefix(t *testing.T) {
 	srv, router, root := newBindServer(t)
 	projDir := mkProjDir(t, root)
@@ -163,8 +163,8 @@ func TestHandleBind_EmptyChatKeyPrefix(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d want 400 for empty chat-key prefix (body=%s)", w.Code, w.Body.String())
 	}
-	if got := router.GetWorkspace(""); got != root {
-		t.Fatalf("empty chat key must not carry an override; GetWorkspace(\"\")=%q want %q", got, root)
+	if got := router.Workspace(""); got != root {
+		t.Fatalf("empty chat key must not carry an override; Workspace(\"\")=%q want %q", got, root)
 	}
 }
 
@@ -235,7 +235,7 @@ func TestHandleBind_SharesSendRateLimiter(t *testing.T) {
 		t.Fatalf("send after bind exhausted the shared limiter: status=%d want 429", sw.Code)
 	}
 	// Sanity: the throttled binds wrote no override.
-	if got := router.GetWorkspace("dashboard:pj:abc0123456789012"); got != projDir {
+	if got := router.Workspace("dashboard:pj:abc0123456789012"); got != projDir {
 		// The FIRST bind (200) did write it; throttled ones must not have changed it.
 		t.Fatalf("override=%q want %q (only the first, accepted bind should persist)", got, projDir)
 	}

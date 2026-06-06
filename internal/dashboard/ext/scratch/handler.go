@@ -96,7 +96,7 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Validate the source key at the trust boundary before it is indexed into
-	// logs or fed to GetSession — mirrors the IM ValidateSessionKey gate.
+	// logs or fed to SessionFor — mirrors the IM ValidateSessionKey gate.
 	if err := session.ValidateSessionKey(req.SourceKey); err != nil {
 		httputil.WriteJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid source_key"})
 		return
@@ -104,7 +104,7 @@ func (h *Handler) HandleOpen(w http.ResponseWriter, r *http.Request) {
 	// Source session must exist. Without this the pool happily spawns a
 	// scratch whose agent/workspace inheritance is based on lookups that
 	// silently miss; the user sees a confused "what was I quoting?" aside.
-	src := h.router.GetSession(req.SourceKey)
+	src := h.router.SessionFor(req.SourceKey)
 	if src == nil {
 		httputil.WriteJSONStatus(w, http.StatusNotFound, map[string]string{"error": "source session not found"})
 		return

@@ -88,7 +88,7 @@ func TestProcess_Send_WriteMessageFail_NoGhostUserEntry(t *testing.T) {
 	}
 
 	// Sanity: process state should have rolled back to Ready by Send's defer.
-	if got := p.GetState(); got != StateReady {
+	if got := p.State(); got != StateReady {
 		t.Errorf("post-fail state = %v; want StateReady", got)
 	}
 }
