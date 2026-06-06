@@ -49,13 +49,24 @@ func TestShutdown_SetsStoppedBeforeSnapshot(t *testing.T) {
 		}(i)
 	}
 
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-start
 		r.Shutdown()
 	}()
 
 	close(start)
 	wg.Wait()
+	// Join the Shutdown goroutine before the deterministic post-conditions
+	// below. wg only tracks the 64 hammer goroutines; without this the final
+	// GetOrCreate could race a Shutdown that has not yet reached
+	// r.stopped.Store(true), so the gate would not fire and the spawn would
+	// fall through to the bogus wrapper ("shim manager not configured")
+	// instead of ErrRouterStopped. That timing window is what made this test
+	// flaky on test-macos (#1822). The set-before-snapshot gate itself is
+	// unchanged — only the test now observes it deterministically.
+	<-shutdownDone
 
 	// Post-condition: no session may survive in r.sessions. Every spawn either
 	// failed (bogus binary) or was gated, and Shutdown detached its snapshot.
