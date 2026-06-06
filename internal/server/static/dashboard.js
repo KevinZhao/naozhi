@@ -4911,11 +4911,50 @@ async function uploadEntry(entry) {
     if (j.kind) entry.serverKind = j.kind;
     if (j.name) entry.serverName = j.name;
     entry.status = 'ready';
+    // Fire-and-forget auto-orientation: for an image with no EXIF flag (a
+    // sideways document photo), ask the backend's vision side-call which way
+    // is up. We DON'T await it — the upload is already 'ready' and sendable;
+    // the rotation, if any, lands silently a few seconds later and refreshes
+    // the thumbnail. Never blocks send. Images only; the server no-ops for
+    // PDFs and when the feature is disabled.
+    if (entry.kind === 'image') maybeAutoOrient(entry);
   } catch (e) {
     entry.status = 'error';
     entry.error = e.message || 'upload failed';
   }
   renderFilePreviews();
+}
+
+// maybeAutoOrient asks the backend to auto-rotate a just-uploaded image that
+// lacks an EXIF orientation flag. Best-effort and silent: any failure leaves
+// the image as-is (it's already 'ready' and sendable). On a confirmed
+// rotation it refetches the corrected bytes via the attachment endpoint and
+// swaps the preview thumbnail so the user sees the upright result that will
+// be sent. The entry's `id` is unchanged by rotation (server replaces bytes
+// in place), so send still references the same file_id.
+async function maybeAutoOrient(entry) {
+  if (!entry || !entry.id || entry.kind !== 'image') return;
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = getToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const r = await fetch('/api/sessions/orient', {
+      method: 'POST', headers, body: JSON.stringify({ id: entry.id }),
+    });
+    if (!r.ok) return; // 404/expired/etc — nothing to do
+    const j = await r.json().catch(() => null);
+    if (!j || !j.rotated || !j.image) return; // no rotation applied
+    // The server rotated the stored bytes in place (same file_id) and echoed
+    // the corrected JPEG inline as a data URL. Swap the preview to it so the
+    // thumbnail matches what gets sent. The entry may have been removed while
+    // the orient call was in flight — guard before touching it.
+    if (!pendingFiles.includes(entry)) return;
+    if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
+    entry.blobUrl = j.image; // data: URL, no object URL to revoke later
+    renderFilePreviews();
+  } catch (_) {
+    // Best-effort: swallow. The image is already sendable as-is.
+  }
 }
 
 function retryUpload(idx) {

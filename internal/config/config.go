@@ -70,13 +70,14 @@ type Config struct {
 	Upstream     *UpstreamConfig             `yaml:"upstream"`
 	// Workspace identifies THIS naozhi instance. Distinct from Workspaces
 	// (remote nodes) and Session.Workspace (deprecated CWD alias).
-	Workspace  WorkspaceConfig   `yaml:"workspace"`
-	Transcribe *TranscribeConfig `yaml:"transcribe"`
-	Cron       CronConfig        `yaml:"cron"`
-	Log        LogConfig         `yaml:"log"`
-	Projects   ProjectsConfig    `yaml:"projects"`
-	Sysession  SysessionConfig   `yaml:"sysession,omitempty"`
-	Update     UpdateConfig      `yaml:"update,omitempty"`
+	Workspace   WorkspaceConfig   `yaml:"workspace"`
+	Transcribe  *TranscribeConfig `yaml:"transcribe"`
+	Cron        CronConfig        `yaml:"cron"`
+	Log         LogConfig         `yaml:"log"`
+	Projects    ProjectsConfig    `yaml:"projects"`
+	Sysession   SysessionConfig   `yaml:"sysession,omitempty"`
+	Update      UpdateConfig      `yaml:"update,omitempty"`
+	ImageOrient ImageOrientConfig `yaml:"image_orient,omitempty"`
 
 	// Cached parsed durations (populated once in Load, avoids repeated ParseDuration)
 	cachedTTL             time.Duration `yaml:"-"`
@@ -379,6 +380,32 @@ type UpdateConfig struct {
 // (unset in YAML) defaults to true; an explicit `enabled: false` disables it.
 func (c *Config) UpdateEnabled() bool {
 	return c.Update.Enabled == nil || *c.Update.Enabled
+}
+
+// ImageOrientConfig configures auto-orientation of uploaded images that
+// carry no EXIF orientation flag (e.g. a sideways document photo). When
+// enabled, the dashboard fires a side vision call (small/Haiku-class model)
+// after upload that decides which way is up; the backend then bakes the
+// rotation into the stored bytes before send. Best-effort and fail-safe —
+// an unclear verdict or any error leaves the image untouched.
+type ImageOrientConfig struct {
+	// Enabled gates the feature. nil (unset in YAML) defaults to TRUE so a
+	// fresh deployment gets auto-orient without config; an explicit
+	// `enabled: false` turns it off. Mirrors UpdateConfig's *bool idiom.
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// Model overrides the --model passed to the side vision call. Empty
+	// leaves it unset so the CLI uses its own default Haiku-class model
+	// (on Bedrock the deployment's ANTHROPIC_DEFAULT_HAIKU_MODEL). Keep it
+	// vendor-neutral here — do NOT hardcode a Bedrock ARN. See the
+	// sysession runner model note (RFC v2.1 §6.4).
+	Model string `yaml:"model,omitempty"`
+}
+
+// ImageOrientEnabled reports whether image auto-orientation should run. nil
+// (unset in YAML) defaults to true; an explicit `enabled: false` disables it.
+func (c *Config) ImageOrientEnabled() bool {
+	return c.ImageOrient.Enabled == nil || *c.ImageOrient.Enabled
 }
 
 // SysessionConfig configures the system-session daemon framework
@@ -999,6 +1026,13 @@ func validateConfig(cfg *Config) error {
 	// projects.planner_defaults.model 同走 BuildArgs（spawnSession 在 planner
 	// 路径覆盖 opts.Model），配置层 allowlist 与 cli.model 对齐。
 	if err := validateModelString("projects.planner_defaults.model", cfg.Projects.PlannerDefaults.Model); err != nil {
+		return err
+	}
+
+	// image_orient.model feeds the same --model argv as the side vision
+	// call; gate it with the shared allowlist so a malformed identifier
+	// can't slip into exec args.
+	if err := validateModelString("image_orient.model", cfg.ImageOrient.Model); err != nil {
 		return err
 	}
 

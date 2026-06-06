@@ -140,6 +140,7 @@ func (s *Server) registerDashboard() {
 		sendLimiter:   newIPLimiterWithProxy(rate.Every(2*time.Second), 30, s.auth.TrustedProxy), // 30 sends/min per IP (burst 30)
 		auth:          s.auth,
 		trustedProxy:  s.auth.TrustedProxy,
+		orient:        s.orient,
 	}
 
 	// Scratch (ephemeral aside) API. Pool was constructed in New() and is now
@@ -288,6 +289,7 @@ func (s *Server) registerSessionRoutes(auth func(http.HandlerFunc) http.HandlerF
 	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.HandleToolResult))
 	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
 	s.mux.HandleFunc("POST /api/sessions/upload", auth(s.sendH.handleUpload))
+	s.mux.HandleFunc("POST /api/sessions/orient", auth(s.sendH.handleOrient))
 	s.mux.HandleFunc("GET /api/sessions/attachment", auth(s.sendH.handleAttachment))
 	s.mux.HandleFunc("DELETE /api/sessions", auth(s.sessionH.HandleDelete))
 	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.HandleResume))

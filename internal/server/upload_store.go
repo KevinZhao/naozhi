@@ -310,6 +310,88 @@ func (s *uploadStore) TakeAll(ids []string, owner string) ([]cli.ImageData, erro
 	return out, nil
 }
 
+// Peek returns a COPY of the image owned by `owner` under `id` WITHOUT
+// removing it — the entry stays live for the eventual send. Returns nil on
+// not-found / expired / wrong-owner, with the same opacity as Take so the
+// existence of another user's upload never leaks. Used by the auto-orient
+// endpoint, which needs to read the bytes, decide a rotation, and write the
+// corrected bytes back via Replace while the user keeps the file pending.
+//
+// The returned ImageData carries a fresh copy of the Data slice so a caller
+// mutating it can't corrupt the stored entry under the lock-free window
+// between Peek and Replace.
+func (s *uploadStore) Peek(id, owner string) *cli.ImageData {
+	if owner == "" {
+		owner = unknownOwner
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[id]
+	if !ok {
+		return nil
+	}
+	if time.Since(e.Created) > uploadTTL {
+		s.removeEntryLocked(id, e)
+		return nil
+	}
+	if e.Owner != owner {
+		return nil
+	}
+	cp := e.Image
+	cp.Data = append([]byte(nil), e.Image.Data...)
+	return &cp
+}
+
+// Replace overwrites the Data/MimeType of an existing live entry in place,
+// preserving its id, owner, and Created timestamp (so auto-orient does NOT
+// extend or reset the entry's TTL). The byte-accounting deltas are applied
+// under the same lock, and the post-replace size is re-checked against the
+// per-owner and global byte caps — a rotation can only change JPEG size
+// modestly, but we never let it push an owner over quota. Returns false on
+// not-found / expired / wrong-owner / would-exceed-cap; the caller then
+// keeps the original (unrotated) bytes, which is the correct fail-safe.
+func (s *uploadStore) Replace(id, owner string, img cli.ImageData) bool {
+	if owner == "" {
+		owner = unknownOwner
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[id]
+	if !ok {
+		return false
+	}
+	if time.Since(e.Created) > uploadTTL {
+		s.removeEntryLocked(id, e)
+		return false
+	}
+	if e.Owner != owner {
+		return false
+	}
+	oldSz := entrySize(e.Image)
+	newSz := entrySize(img)
+	delta := newSz - oldSz
+	if delta > 0 {
+		// Only a growing payload can break a cap; a shrink always fits.
+		if s.totalBytes+delta > maxUploadBytesGlobal {
+			return false
+		}
+		if s.ownerBytes[owner]+delta > maxUploadBytesPerOwner {
+			return false
+		}
+	}
+	e.Image = img
+	s.totalBytes += delta
+	if s.totalBytes < 0 {
+		s.totalBytes = 0
+	}
+	if b := s.ownerBytes[owner] + delta; b <= 0 {
+		delete(s.ownerBytes, owner)
+	} else {
+		s.ownerBytes[owner] = b
+	}
+	return true
+}
+
 // StartCleanup runs periodic eviction of expired entries until ctx is cancelled.
 func (s *uploadStore) StartCleanup(ctx context.Context) {
 	go func() {

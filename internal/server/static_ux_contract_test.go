@@ -2040,6 +2040,60 @@ func TestDashboardJS_PreviewUsesNormalizedImage(t *testing.T) {
 	if !strings.Contains(body, "URL.revokeObjectURL(entry.blobUrl)") {
 		t.Error("uploadEntry must revoke the previous entry.blobUrl before replacing it to avoid leaking the raw-file object URL")
 	}
+	// 4) On ready, images must trigger the fire-and-forget auto-orient call.
+	//    It must NOT be awaited (upload stays fast / send not blocked) and
+	//    must be image-gated (PDFs never orient).
+	if !strings.Contains(body, "if (entry.kind === 'image') maybeAutoOrient(entry)") {
+		t.Error("uploadEntry must fire maybeAutoOrient(entry) for ready images (fire-and-forget, image-gated)")
+	}
+	if strings.Contains(body, "await maybeAutoOrient") {
+		t.Error("maybeAutoOrient must be fire-and-forget — awaiting it would stall the upload queue and delay send")
+	}
+}
+
+// TestDashboardJS_AutoOrientCallsEndpoint pins the maybeAutoOrient helper that
+// drives the backend auto-orientation feature: it POSTs the upload id to
+// /api/sessions/orient and, on a confirmed rotation, swaps the preview to the
+// inline corrected image the server echoes back. The whole helper is wrapped
+// so any failure is swallowed (the image is already sendable as-is).
+func TestDashboardJS_AutoOrientCallsEndpoint(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	start := strings.Index(js, "async function maybeAutoOrient(entry)")
+	if start < 0 {
+		t.Fatal("maybeAutoOrient function not found")
+	}
+	rest := js[start+len("async function maybeAutoOrient(entry)"):]
+	end := strings.Index(rest, "\nasync function ")
+	if next := strings.Index(rest, "\nfunction "); next >= 0 && (end < 0 || next < end) {
+		end = next
+	}
+	if end < 0 {
+		end = len(rest)
+	}
+	body := rest[:end]
+
+	for _, needed := range []string{
+		"/api/sessions/orient",             // hits the right endpoint
+		"JSON.stringify({ id: entry.id })", // sends the upload id
+		"j.rotated",                        // gates on a confirmed rotation
+		"entry.blobUrl = j.image",          // swaps preview to the inline corrected image
+		"pendingFiles.includes(entry)",     // guards against in-flight removal
+	} {
+		if !strings.Contains(body, needed) {
+			t.Errorf("maybeAutoOrient missing required snippet %q", needed)
+		}
+	}
+	// The helper must be defensively wrapped so a network/parse error never
+	// surfaces — the upload is already 'ready'.
+	if !strings.Contains(body, "catch (_)") {
+		t.Error("maybeAutoOrient must swallow errors (catch) — it is best-effort and the image is already sendable")
+	}
 }
 
 // TestDashboardHTML_FileThumbHonorsEXIFOrientation pins the companion fix for

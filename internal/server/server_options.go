@@ -179,4 +179,20 @@ type ServerOptions struct {
 	// global directly, which is what blocks t.Parallel across tests that
 	// swap the default. SetDefault stays in main only for legacy callers.
 	Logger *slog.Logger
+
+	// === Image auto-orientation (docs: image_orient config) ===
+	//
+	// ImageOrientEnabled gates the feature. When true AND ImageOrientRunner
+	// is non-nil, POST /api/sessions/orient asks a vision model which way is
+	// up and the backend rotates the stored upload before send. Default
+	// false leaves the endpoint a benign no-op (returns rotated:false).
+	ImageOrientEnabled bool
+	// ImageOrientModel overrides --model on the side vision call. Empty uses
+	// the CLI's default Haiku-class model. Vendor-neutral; validated by
+	// config.validateModelString before reaching here.
+	ImageOrientModel string
+	// ImageOrientRunner is the image-capable one-off runner (a
+	// sysession.VisionRunner). nil disables the feature regardless of the
+	// Enabled flag — the endpoint stays a no-op.
+	ImageOrientRunner VisionOrienter
 }

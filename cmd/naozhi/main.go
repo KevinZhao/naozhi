@@ -378,6 +378,39 @@ func main() {
 		slog.Info("reverse node auth configured", "nodes", len(cfg.ReverseNodes))
 	}
 
+	// Image auto-orientation: build a dedicated image-capable side runner
+	// (separate from the sysession daemon Runner, which is text-only and may
+	// be disabled). Feature defaults on; a runner build failure degrades to
+	// the feature being off rather than failing startup — auto-orient is
+	// best-effort. WorkDir is the workspace root: the vision call writes no
+	// files, it only needs a valid existing cwd.
+	orientEnabled := cfg.ImageOrientEnabled()
+	var orientRunner server.VisionOrienter
+	if orientEnabled {
+		binPath := ""
+		if wrapper != nil {
+			binPath = wrapper.CLIPath
+		}
+		vr, err := sysession.NewVisionRunner(sysession.RunnerConfig{
+			BinPath: binPath,
+			WorkDir: workspace,
+			Model:   cfg.ImageOrient.Model,
+			EnvAllowlist: []string{
+				"ANTHROPIC_",
+				"CLAUDE_",
+				"AWS_",
+				"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+				"http_proxy", "https_proxy", "no_proxy",
+			},
+		})
+		if err != nil {
+			slog.Warn("image auto-orient disabled: vision runner build failed", "err", err)
+			orientEnabled = false
+		} else {
+			orientRunner = vr
+		}
+	}
+
 	// Server
 	srv := server.NewWithOptions(server.ServerOptions{
 		Addr:              cfg.Server.Addr,
@@ -409,6 +442,9 @@ func main() {
 		// Project-stable session key (RFC docs/rfc/project-stable-session-key.md).
 		// Default-on (opt-out via session.project_stable_key.enabled: false).
 		ProjectStableKeyEnabled: cfg.Session.ProjectStableKey.ResolvedEnabled(true),
+		ImageOrientEnabled:      orientEnabled,
+		ImageOrientModel:        cfg.ImageOrient.Model,
+		ImageOrientRunner:       orientRunner,
 		OnReady: func() {
 			if err := osutil.SdNotify("READY=1"); err != nil {
 				slog.Warn("sd_notify READY failed", "err", err)
