@@ -105,6 +105,17 @@ type msgRing struct {
 	buf  []QueuedMsg
 	head int // index of the oldest live element when used > 0
 	used int // number of live elements; 0 <= used <= cap(buf)
+
+	// scratch is a reusable backing array for drainInto. The owner goroutine
+	// drains one batch per turn (DoneOrDrain) / once at release
+	// (ReleaseWithDrain) and fully consumes the returned slice before the next
+	// drain on the same ring, so a single per-ring scratch can be reused across
+	// turns without copying — this removes the per-turn `make([]QueuedMsg,
+	// r.used)` that ModeCollect paid on every coalesced follow-up turn
+	// (R20260606-PERF-3, #1827). Reuse is sound because each *sessionQueue owns
+	// its ring exclusively under MessageQueue.mu and the gen-cookie/single-owner
+	// invariant forbids two concurrent drains of the same ring.
+	scratch []QueuedMsg
 }
 
 // len returns the current number of queued messages.
@@ -133,16 +144,29 @@ func (r *msgRing) push(m QueuedMsg, capacity int) (evicted bool) {
 	return evicted
 }
 
-// drainAll returns the queued messages in FIFO order and resets the ring
-// to empty (head=used=0). The backing array is retained for reuse but
-// each consumed slot is zeroed so retained image data becomes
+// drainInto returns the queued messages in FIFO order and resets the ring to
+// empty (head=used=0), writing them into dst. The backing array is retained
+// for reuse but each consumed slot is zeroed so retained image data becomes
 // GC-eligible. Returns nil when empty (mirrors the previous nil-vs-slice
 // distinction the queue exposed via sq.msgs == nil).
-func (r *msgRing) drainAll() []QueuedMsg {
+//
+// dst is reused when it has enough capacity (its contents are overwritten and
+// its length re-sliced to r.used); otherwise a fresh slice is allocated. The
+// caller MUST fully consume the returned slice before the next drainInto/drainAll
+// on the same ring — the owner drain loop satisfies this (each batch is
+// coalesced + acknowledged before DoneOrDrain runs again). Passing the previous
+// return value back as dst lets the owner loop reuse one backing array across
+// turns instead of allocating per turn (R20260606-PERF-3, #1827).
+func (r *msgRing) drainInto(dst []QueuedMsg) []QueuedMsg {
 	if r.used == 0 {
 		return nil
 	}
-	out := make([]QueuedMsg, r.used)
+	var out []QueuedMsg
+	if cap(dst) >= r.used {
+		out = dst[:r.used]
+	} else {
+		out = make([]QueuedMsg, r.used)
+	}
 	c := cap(r.buf)
 	for i := 0; i < r.used; i++ {
 		idx := (r.head + i) % c
@@ -152,6 +176,13 @@ func (r *msgRing) drainAll() []QueuedMsg {
 	r.head = 0
 	r.used = 0
 	return out
+}
+
+// drainAll returns the queued messages in a freshly allocated slice (FIFO
+// order) and resets the ring to empty. Equivalent to drainInto(nil); retained
+// for callers/tests that want an independently-owned slice with no scratch.
+func (r *msgRing) drainAll() []QueuedMsg {
+	return r.drainInto(nil)
 }
 
 // reset empties the ring without returning the contents (used by Discard).
@@ -442,7 +473,12 @@ func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 	// once the owner takes the drained batch, the NEXT in-flight turn is a
 	// fresh target for a future interrupt, so subsequent queued messages
 	// during that new turn must be able to trigger another control_request.
-	msgs := sq.ring.drainAll()
+	// Reuse the ring's scratch across turns: the owner fully consumes the
+	// returned batch (coalesce + clear reactions) before the next DoneOrDrain,
+	// so a single backing array can carry every coalesced follow-up turn
+	// without a per-turn alloc (R20260606-PERF-3, #1827).
+	msgs := sq.ring.drainInto(sq.ring.scratch)
+	sq.ring.scratch = msgs
 	sq.interruptRequested = false
 	return msgs
 }
