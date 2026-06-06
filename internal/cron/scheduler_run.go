@@ -404,10 +404,6 @@ func escapeCronMarkdownPunct(s string) string {
 	return textutil.EscapeCronMarkdownPunct(s)
 }
 
-// EscapeMarkdownPunct is the exported variant of escapeCronMarkdownPunct for
-// use by packages that display cron Job fields in IM replies. R112714-ARCH-1.
-func EscapeMarkdownPunct(s string) string { return escapeCronMarkdownPunct(s) }
-
 // labelOrID returns the IM-notice display label: snap.label when populated,
 // jobID otherwise. R233B-CR-5: keeps the "[Cron <X>] …" prefix readable
 // without crashing on Title-empty + Prompt-empty edge cases.
@@ -1726,6 +1722,56 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// concerns. Behaviour-preserving — the same three signals fire in the same
 	// order against the same startedAt.
 	s.observeSuccessLatency(startedAt, result, snap, lg)
+	// #1829: release the fresh-context session now that the run succeeded.
+	// cron sessions are spawned Exempt=true (line ~1517) so the TTL cleanup
+	// loop skips them entirely (router_cleanup.go: `if s.exempt { continue }`).
+	// Without an explicit teardown the just-finished CLI — plus its 5~7 MCP
+	// node subprocesses, ~1.6 GB resident — sits idle-but-unreclaimable until
+	// the NEXT tick's preflight Reset (24h for a @daily job). Reaping here
+	// instead of at next-tick-start closes that idle gap.
+	//
+	// Ordering: Reset MUST happen while we still hold the inflight CAS gate
+	// (i.e. BEFORE finishRun → finalizer.finalize() releases it). A concurrent
+	// TriggerNow that won the CAS could otherwise run its own preflight Reset +
+	// GetOrCreate in the gap, and a late Reset here would tear down THAT run's
+	// fresh session (run-A clobbering run-B). The per-job CAS serialisation
+	// (invariant (1) in freshContextPreflightP0) guarantees no sibling cron run
+	// can be mid-flight while we hold the gate, so Reset here is race-free for
+	// the same reason the preflight Reset is.
+	//
+	// Only fresh-context jobs are reaped: persistent-mode (snap.fresh=false)
+	// sessions are reused across ticks by design to carry conversational
+	// context, so tearing them down would defeat the mode. They also already
+	// receive normal lifecycle handling and are rare.
+	//
+	// re-register a suspended stub immediately so the dashboard sidebar row
+	// stays visible during the idle gap, chained to result.SessionID so the
+	// JSONL history of the run we just finished remains clickable. This mirrors
+	// the preflight Reset → GetOrCreate(stub) shape, minus the live process.
+	//
+	// Job-existence re-check before re-registering the stub: DeleteJobByID's
+	// teardown (deleteJobPostCleanup → resetRouterStub) does NOT take the
+	// inflight CAS gate — Delete is not a cron run — so it can land
+	// concurrently with this success tail. If a Delete's Reset slips between
+	// our Reset and registerStubByValue, an unconditional register would
+	// resurrect a sidebar stub for a job that no longer exists (zombie row).
+	// This is the same orphan the preflight guards against with its post-Reset
+	// stillExists check (~line 712); apply the identical guard here. Reset
+	// itself is always safe (a concurrent Delete Reset is idempotent), so only
+	// the register is gated.
+	if snap.fresh {
+		s.router.Reset(key)
+		s.mu.RLock()
+		_, stillExists := s.jobs[snap.jobID]
+		s.mu.RUnlock()
+		if stillExists {
+			s.registerStubByValue(snap.jobID, snap.workDir, snap.prompt, result.SessionID)
+			lg.Info("cron fresh context: session released after successful run", "session_id", result.SessionID)
+		} else {
+			lg.Info("cron fresh context: session released; job deleted mid-run, skipping stub re-register",
+				"session_id", result.SessionID)
+		}
+	}
 	// 把本次产生的 Claude session_id 也记下来：fresh_context=true 的
 	// 路径下一次 Reset 会清掉 stub 的 chain，不保留这个 ID 的话
 	// dashboard 点击 cron 侧边栏就看不到上一次的 JSONL 历史。
