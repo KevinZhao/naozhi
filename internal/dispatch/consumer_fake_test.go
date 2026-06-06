@@ -131,8 +131,8 @@ func (f *fakeSessionRouter) DiscardPassthroughPending(key string, reason error) 
 func (f *fakeSessionRouter) Reset(string)     { panic("fakeSessionRouter.Reset not configured") }
 func (f *fakeSessionRouter) ResetChat(string) { panic("fakeSessionRouter.ResetChat not configured") }
 
-func (f *fakeSessionRouter) GetWorkspace(string) string {
-	panic("fakeSessionRouter.GetWorkspace not configured")
+func (f *fakeSessionRouter) Workspace(string) string {
+	panic("fakeSessionRouter.Workspace not configured")
 }
 
 func (f *fakeSessionRouter) SetWorkspace(string, string) {

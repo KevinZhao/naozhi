@@ -141,7 +141,7 @@ func (r *Router) evictWorkspaceOverrideLocked() bool {
 }
 
 // GetWorkspace returns the effective workspace for a chat key.
-func (r *Router) GetWorkspace(chatKey string) string {
+func (r *Router) Workspace(chatKey string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.resolveWorkspaceLocked(chatKey)

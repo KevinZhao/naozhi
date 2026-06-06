@@ -19,7 +19,7 @@ func TestScratchRouter_InjectableForTesting(t *testing.T) {
 	// Direct method-call surface check: the three methods we replaced
 	// all dispatch through the field. We don't need to drive the full
 	// HTTP handler — the surface contract is enough.
-	h.router.GetSession("k")
+	h.router.SessionFor("k")
 	h.router.Remove("k")
 	h.router.RenameSession("a", "b")
 	if fake.getSession != 1 || fake.remove != 1 || fake.rename != 1 {
@@ -32,7 +32,7 @@ type recordingScratchRouter struct {
 	getSession, remove, rename int
 }
 
-func (r *recordingScratchRouter) GetSession(string) *session.ManagedSession {
+func (r *recordingScratchRouter) SessionFor(string) *session.ManagedSession {
 	r.getSession++
 	return nil
 }

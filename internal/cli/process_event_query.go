@@ -196,7 +196,7 @@ func (p *Process) SetCwdForLinker(cwd string) {
 	// the bare field so the cross-package locking contract still holds —
 	// wrapper.go's reconnect store path holds p.mu.Lock when populating
 	// sessionID, GetSessionID's RLock pairs with that.
-	if sid := p.GetSessionID(); session == "" && sid != "" {
+	if sid := p.SessionID(); session == "" && sid != "" {
 		session = sid
 	}
 	p.linker.SetContext(projectDir, session)

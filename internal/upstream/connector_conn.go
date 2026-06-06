@@ -227,7 +227,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 			// handleRequest's per-method branches all run ValidateSessionKey,
 			// but the subscribe/unsubscribe main-loop cases previously
 			// accepted any string and piped it straight into slog attrs +
-			// router.GetSession map lookup. A compromised primary could
+			// router.SessionFor map lookup. A compromised primary could
 			// inject bidi/C1/newline bytes via msg.Key.
 			if err := session.ValidateSessionKey(key); err != nil {
 				slog.Debug("connector subscribe: invalid key", "err", err)
@@ -253,7 +253,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 				cancel()
 				delete(activeSubs, key)
 			}
-			sess := c.router.GetSession(key)
+			sess := c.router.SessionFor(key)
 			if sess == nil {
 				if err := writeJSON(node.ReverseMsg{Type: "subscribe_error", Key: key, Error: "session not found"}); err != nil {
 					slog.Debug("connector write subscribe_error", "key", key, "err", err)

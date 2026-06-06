@@ -76,7 +76,7 @@ func (p *Process) findResultSince(afterMS int64) *SendResult {
 		}
 		return &SendResult{
 			Text:      text,
-			SessionID: p.GetSessionID(),
+			SessionID: p.SessionID(),
 			CostUSD:   entries[i].Cost,
 		}
 	}

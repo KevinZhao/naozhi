@@ -27,7 +27,7 @@ func countStreamEventsGoroutines() int {
 // connector guard: the spawnSession stopped gate covers the three reverse-RPC
 // spawn paths but NOT the read-only subscribe path, whose leak is a lingering
 // streamEvents goroutine. The subscribe case now short-circuits with
-// `if connCtx.Err() != nil { break }` before GetSession/SubscribeEvents, so a
+// `if connCtx.Err() != nil { break }` before SessionFor/SubscribeEvents, so a
 // subscribe arriving once the connection's context is already cancelled never
 // spawns a streamEvents goroutine and never emits a "subscribed" ack.
 //
@@ -44,7 +44,7 @@ func TestSubscribe_AfterConnCtxCancel_NoStreamGoroutine(t *testing.T) {
 	// Register a live, subscribable session so that WITHOUT the guard the
 	// subscribe would call SubscribeEvents and spawn a streamEvents goroutine.
 	r.RegisterCronStub(key, "/tmp/arch3-test", "prompt")
-	if r.GetSession(key) == nil {
+	if r.SessionFor(key) == nil {
 		t.Fatal("setup: RegisterCronStub did not install a subscribable session")
 	}
 

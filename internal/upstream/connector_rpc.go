@@ -94,7 +94,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := session.ValidateSessionKey(p.Key); err != nil {
 			return nil, fmt.Errorf("fetch_events key: %w", err)
 		}
-		sess := c.router.GetSession(p.Key)
+		sess := c.router.SessionFor(p.Key)
 		if sess == nil {
 			// R180-SEC-M1 / R180-GO-P1: %q escapes any bidi/C1/newline bytes
 			// that ValidateSessionKey would accept but would break log

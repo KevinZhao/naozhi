@@ -14,7 +14,7 @@ import (
 // time streamEvents observes notify being closed, we still MUST emit a final
 // session_state message so the upstream primary knows the session ended and
 // can trigger a re-subscribe on the next send. Prior code returned silently
-// when GetSession(key) reported nil, leaving the primary believing the node
+// when SessionFor(key) reported nil, leaving the primary believing the node
 // still owned a live stream for the key.
 func TestStreamEvents_NotifyClosedAfterReset_EmitsTerminalState(t *testing.T) {
 	t.Parallel()
@@ -24,7 +24,7 @@ func TestStreamEvents_NotifyClosedAfterReset_EmitsTerminalState(t *testing.T) {
 	r.RegisterCronStub(key, "/tmp/stream-events-test", "prompt")
 
 	// Sanity: session is present before reset.
-	if r.GetSession(key) == nil {
+	if r.SessionFor(key) == nil {
 		t.Fatal("setup: RegisterCronStub did not install session")
 	}
 
@@ -33,9 +33,9 @@ func TestStreamEvents_NotifyClosedAfterReset_EmitsTerminalState(t *testing.T) {
 
 	// Simulate the lifecycle: Reset() removes the session from the router,
 	// then the session's notify channel is closed. streamEvents should
-	// observe GetSession(key)==nil but still emit a terminal session_state.
+	// observe SessionFor(key)==nil but still emit a terminal session_state.
 	r.Reset(key)
-	if r.GetSession(key) != nil {
+	if r.SessionFor(key) != nil {
 		t.Fatal("setup: Reset did not drop session")
 	}
 
@@ -52,10 +52,10 @@ func TestStreamEvents_NotifyClosedAfterReset_EmitsTerminalState(t *testing.T) {
 		return nil
 	}
 
-	// Prime streamEvents by re-registering a stub so the initial GetSession
+	// Prime streamEvents by re-registering a stub so the initial SessionFor
 	// passes; the closed-notify branch is what we are testing.
 	r.RegisterCronStub(key, "/tmp/stream-events-test", "prompt")
-	if r.GetSession(key) == nil {
+	if r.SessionFor(key) == nil {
 		t.Fatal("setup: re-register did not install session")
 	}
 
@@ -65,7 +65,7 @@ func TestStreamEvents_NotifyClosedAfterReset_EmitsTerminalState(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		// After entering the loop, drop the session again and close notify
-		// to steer into the closed-channel branch with GetSession==nil.
+		// to steer into the closed-channel branch with SessionFor==nil.
 		r.Reset(key)
 		close(notify)
 		// give streamEvents a beat to observe the closed notify
@@ -77,7 +77,7 @@ func TestStreamEvents_NotifyClosedAfterReset_EmitsTerminalState(t *testing.T) {
 	<-done
 
 	if cap.gotMsg == nil {
-		t.Fatal("RNEW-005: streamEvents returned without emitting a terminal session_state message when GetSession returned nil")
+		t.Fatal("RNEW-005: streamEvents returned without emitting a terminal session_state message when SessionFor returned nil")
 	}
 	if cap.gotMsg.Type != "session_state" {
 		t.Errorf("terminal msg type = %q, want %q", cap.gotMsg.Type, "session_state")

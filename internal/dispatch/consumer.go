@@ -46,7 +46,7 @@ type SessionRouter interface {
 	DiscardPassthroughPending(key string, reason error)
 	Reset(key string)
 	ResetChat(chatKeyPrefix string)
-	GetWorkspace(chatKey string) string
+	Workspace(chatKey string) string
 	SetWorkspace(chatKey, path string)
 	InterruptSessionViaControl(key string) session.InterruptOutcome
 	NotifyIdle()

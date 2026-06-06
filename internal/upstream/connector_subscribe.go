@@ -106,7 +106,7 @@ func (s *sinceCursor) advance(delivered []cli.EventEntry) {
 }
 
 func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error, key string, notify <-chan struct{}) {
-	sess := c.router.GetSession(key)
+	sess := c.router.SessionFor(key)
 	if sess == nil {
 		return
 	}
@@ -123,13 +123,13 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 				// trigger a re-subscribe when the next send arrives.
 				//
 				// RNEW-005: if Reset removed the session from the router
-				// between the notify close and our GetSession below, the
+				// between the notify close and our SessionFor below, the
 				// previous code returned silently — leaving the primary
 				// unaware that the key no longer has a live stream. Always
 				// emit a terminal session_state so reverseconn.go's
 				// session_state handler can propagate it downstream and the
 				// primary can re-subscribe on the next send.
-				s := c.router.GetSession(key)
+				s := c.router.SessionFor(key)
 				msg := node.ReverseMsg{Type: "session_state", Key: key, State: "dead", Reason: reasonSessionReset}
 				if s != nil {
 					snap := s.Snapshot()
@@ -147,7 +147,7 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 			// fast /new), causing EntriesSince to drop the new session's
 			// first events. Reset the cursor on pointer change so the first
 			// notify after a swap delivers the full new history.
-			if cur := c.router.GetSession(key); cur != nil && cur != sess {
+			if cur := c.router.SessionFor(key); cur != nil && cur != sess {
 				sess = cur
 				lastState = ""
 				csr.reset()

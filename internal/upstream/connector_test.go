@@ -1346,7 +1346,7 @@ func TestHandleRequest_SetSessionLabel_Updates(t *testing.T) {
 	if !resp["updated"] {
 		t.Errorf("updated = false, want true")
 	}
-	if got := router.GetSession("feishu:direct:alice:general").UserLabel(); got != "标记" {
+	if got := router.SessionFor("feishu:direct:alice:general").UserLabel(); got != "标记" {
 		t.Errorf("UserLabel = %q, want 标记", got)
 	}
 }

@@ -21,9 +21,9 @@ func newCountingRunningProc() *countingProc {
 	return &countingProc{fakeProcess: newRunningProc()}
 }
 
-func (c *countingProc) GetState() cli.ProcessState {
+func (c *countingProc) State() cli.ProcessState {
 	c.getStateCalls.Add(1)
-	return c.fakeProcess.GetState()
+	return c.fakeProcess.State()
 }
 
 func (c *countingProc) IsRunning() bool {

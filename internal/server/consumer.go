@@ -55,7 +55,7 @@ type HubRouter = wshub.HubRouter
 // h.hub.router.X). Tests can inject a fake by assigning ScratchHandler.
 // router to a local stub.
 type ScratchRouter interface {
-	GetSession(key string) *session.ManagedSession
+	SessionFor(key string) *session.ManagedSession
 	Remove(key string) bool
 	RenameSession(oldKey, newKey string) bool
 }
@@ -67,8 +67,8 @@ type ScratchRouter interface {
 // declared at its own type rather than borrowed off *Hub.
 // R215-ARCH-P1-4 / #566.
 type SendRouter interface {
-	GetSession(key string) *session.ManagedSession
-	GetWorkspace(chatKey string) string
+	SessionFor(key string) *session.ManagedSession
+	Workspace(chatKey string) string
 }
 
 // HubBroadcaster names the broadcast / fan-out facet of *Hub — the

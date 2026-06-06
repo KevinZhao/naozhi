@@ -161,7 +161,7 @@ func (h *Handlers) HandleRunDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "job_id must be lowercase hex", http.StatusBadRequest)
 		return
 	}
-	run, err := h.scheduler.GetRun(jobID, runID)
+	run, err := h.scheduler.Run(jobID, runID)
 	if err != nil {
 		if errors.Is(err, cronpkg.ErrCorruptRun) {
 			slog.Warn("cron run record corrupt", "job_id", jobID, "run_id", runID, "err", err)

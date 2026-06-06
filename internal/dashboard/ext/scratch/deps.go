@@ -23,7 +23,7 @@ type Broadcaster interface {
 // internal/server/consumer.go's ScratchRouter so the sub-package doesn't
 // reverse-import server. Three methods cover open/promote/delete.
 type ScratchRouter interface {
-	GetSession(key string) *session.ManagedSession
+	SessionFor(key string) *session.ManagedSession
 	Remove(key string) bool
 	RenameSession(oldKey, newKey string) bool
 }

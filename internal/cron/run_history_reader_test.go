@@ -27,7 +27,7 @@ func TestRunHistoryReader_SchedulerSatisfies(t *testing.T) {
 	// Use ONLY the narrow interface from here on.
 	var r RunHistoryReader = s
 
-	got, err := r.GetRun(jobID, run.RunID)
+	got, err := r.Run(jobID, run.RunID)
 	if err != nil {
 		t.Fatalf("GetRun via RunHistoryReader: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestRunHistoryReader_MissingRun(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cron_jobs.json")
 	var r RunHistoryReader = NewScheduler(SchedulerConfig{StorePath: path, MaxJobs: 5})
 
-	_, err := r.GetRun(mustGenerateID(), mustGenerateRunID())
+	_, err := r.Run(mustGenerateID(), mustGenerateRunID())
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("GetRun for missing run = %v, want fs.ErrNotExist", err)
 	}

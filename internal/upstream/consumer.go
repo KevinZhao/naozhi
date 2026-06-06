@@ -55,12 +55,12 @@ import (
 )
 
 // SessionLookup is the read-only lookup sub-capability used by hot
-// RPC paths (subscribe stream filter, ListSessions response, GetSession
+// RPC paths (subscribe stream filter, ListSessions response, SessionFor
 // before send). Pure read access — no allocation of new sessions, no
 // mutation of existing state. A future api/ sub-package would expose
 // this name verbatim.
 type SessionLookup interface {
-	GetSession(key string) *session.ManagedSession
+	SessionFor(key string) *session.ManagedSession
 	ListSessions() []session.SessionSnapshot
 }
 

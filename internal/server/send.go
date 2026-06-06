@@ -87,7 +87,7 @@ func (h *Hub) sendWithBroadcastPriority(
 		result, err = sess.Send(ctx, text, images, onEvent)
 	}
 
-	if rs := h.router.GetSession(key); rs != nil {
+	if rs := h.router.SessionFor(key); rs != nil {
 		snap := rs.Snapshot()
 		h.broadcastState(key, snap.State, snap.DeathReason)
 	}
@@ -215,7 +215,7 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 		// 层 in-flight 的 SendPassthrough goroutine 也通知到，否则它们会继续
 		// 占着 sendSlot 直到自然超时，期间新消息被 ErrTooManyPending 拒绝，
 		// 用户看到"排队已满"而非干净重置。R192-SRV-P0-NewDiscardPassthrough。
-		if sess := h.router.GetSession(key); sess != nil {
+		if sess := h.router.SessionFor(key); sess != nil {
 			sess.DiscardPassthroughPending(cli.ErrSessionReset)
 		}
 		// Round-207 SM1: atomic Reset + workspaceOverride delete closes

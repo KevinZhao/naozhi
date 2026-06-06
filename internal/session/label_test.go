@@ -61,7 +61,7 @@ func TestSetUserLabel_NotifiesChange(t *testing.T) {
 	if notified == 0 {
 		t.Fatalf("expected onChange to fire after SetUserLabel, did not")
 	}
-	if got := r.GetSession(sk).UserLabel(); got != "custom" {
+	if got := r.SessionFor(sk).UserLabel(); got != "custom" {
 		t.Errorf("UserLabel = %q, want %q", got, "custom")
 	}
 }
@@ -149,7 +149,7 @@ func TestSetUserLabel_NoOpOnSameValue(t *testing.T) {
 	if got := r.ss.gen.Load(); got == genAfterFirst {
 		t.Errorf("storeGen did not advance on distinct-value SetUserLabel: got %d, want > %d", got, genAfterFirst)
 	}
-	if got := r.GetSession(sk).UserLabel(); got != "renamed" {
+	if got := r.SessionFor(sk).UserLabel(); got != "renamed" {
 		t.Errorf("UserLabel = %q, want %q", got, "renamed")
 	}
 }

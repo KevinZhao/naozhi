@@ -364,7 +364,7 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 
 		// Re-check the router for the current session — spawnSession may have
 		// created a new ManagedSession, replacing the old one in the map.
-		currentSess := h.router.GetSession(key)
+		currentSess := h.router.SessionFor(key)
 		if currentSess == nil {
 			continue
 		}

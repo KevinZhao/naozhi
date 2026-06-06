@@ -101,7 +101,7 @@ func (s *ManagedSession) State() string {
 	if proc == nil {
 		return "ready"
 	}
-	return proc.GetState().String()
+	return proc.State().String()
 }
 
 // DeathReason returns the recorded death cause string ("" when the
@@ -205,7 +205,7 @@ func (s *ManagedSession) snapshot(mirrorModel bool) SessionSnapshot {
 		// so a fully-conversed-but-idle-evicted session never got auto-named.
 		snap.MessageCount = s.persistedUserTurns.Load()
 	} else {
-		snap.State = proc.GetState().String()
+		snap.State = proc.State().String()
 		snap.Protocol = proc.ProtocolName()
 		// UI Round 5 R5-3: model resolution priority
 		//   1. live proc.Model() (claude system/init or kiro SpawnOptions)

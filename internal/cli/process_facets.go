@@ -64,10 +64,10 @@ type ProcessTurnIO interface {
 // by dashboard Snapshot paths: identity, state and protocol info. None
 // of these mutate the process.
 type ProcessIntrospect interface {
-	// GetState returns the current lifecycle state.
-	GetState() ProcessState
-	// GetSessionID returns the established session id (empty if deferred).
-	GetSessionID() string
+	// State returns the current lifecycle state.
+	State() ProcessState
+	// SessionID returns the established session id (empty if deferred).
+	SessionID() string
 	// ProtocolName returns the backing protocol identifier.
 	ProtocolName() string
 	// Model returns the model identifier reported by the backend.

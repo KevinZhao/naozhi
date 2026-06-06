@@ -1021,12 +1021,12 @@ func (h *Handlers) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Local
-	sess := h.router.GetSession(key)
+	sess := h.router.SessionFor(key)
 	if sess == nil && h.scheduler != nil && h.scheduler.EnsureStub(key) {
 		// Cron stubs are torn down by sidebar "×". The stub is lazily rebuilt
 		// on next click so polling clients (WS-down fallback) can still open
 		// the panel instead of getting a permanent 404 until the next tick.
-		sess = h.router.GetSession(key)
+		sess = h.router.SessionFor(key)
 	}
 	if sess == nil {
 		http.Error(w, "session not found", http.StatusNotFound)
