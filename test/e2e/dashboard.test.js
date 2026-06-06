@@ -1604,7 +1604,7 @@ test.describe('Theme & styling', () => {
     await ctx.close();
   });
 
-  test('viewport meta allows pinch-zoom (WCAG 1.4.4)', async ({ browser }) => {
+  test('viewport meta prevents zoom', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
@@ -1613,11 +1613,11 @@ test.describe('Theme & styling', () => {
       'meta[name="viewport"]',
       el => el.content
     );
-    // Accessibility: users must be able to pinch-zoom. The viewport must NOT
-    // lock scale via user-scalable=no or maximum-scale, which WCAG 1.4.4
-    // (Resize Text) forbids. initial-scale=1 is fine; capping zoom is not.
-    expect(viewport).not.toContain('user-scalable=no');
-    expect(viewport).not.toContain('maximum-scale');
+    // App-like mobile UX: lock the viewport so pinch-zoom / double-tap-zoom
+    // can't accidentally scale the dashboard. Requires both user-scalable=no
+    // and maximum-scale=1.0 (belt-and-suspenders for cross-browser coverage).
+    expect(viewport).toContain('user-scalable=no');
+    expect(viewport).toContain('maximum-scale=1.0');
     expect(viewport).toContain('width=device-width');
 
     await ctx.close();
