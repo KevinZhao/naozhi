@@ -2,6 +2,7 @@ package persist
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -904,5 +905,261 @@ func assertSingleEntryFile(t *testing.T, path, wantKey string) {
 	}
 	if recs[1].Type != schema.TypeEntry {
 		t.Errorf("file %s: record[1] is not an entry: %+v", path, recs[1])
+	}
+}
+
+// TestPersister_DropMidRemoval_DoesNotBlockOtherSessions pins
+// R20260606-PERF-9 (#1848): while one stem's async unlink is in flight, a
+// DIFFERENT session's batches must still be drained and written promptly —
+// the run goroutine must not park on the dropping channel. We gate the
+// removeFileHook on a channel we control so the dropping window is held open
+// deterministically (no flaky sleeps), send an unrelated session's batch
+// during the window, and assert it reaches disk while the drop is still
+// blocked.
+func TestPersister_DropMidRemoval_DoesNotBlockOtherSessions(t *testing.T) {
+	releaseRemove := make(chan struct{})
+	removeEntered := make(chan struct{}, 1)
+	prev := removeFileHook
+	var once sync.Once
+	removeFileHook = func(path string) error {
+		// Only gate the first unlink (the .log); the .idx unlink and any
+		// later test cleanup proceed normally.
+		select {
+		case removeEntered <- struct{}{}:
+			<-releaseRemove
+		default:
+		}
+		return os.Remove(path)
+	}
+	t.Cleanup(func() {
+		once.Do(func() { close(releaseRemove) })
+		removeFileHook = prev
+	})
+
+	p, dir := newTestPersister(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Seed the to-be-dropped key so its files exist on disk.
+	dropKey := "victim:direct:bob:general"
+	sinkDrop := p.SinkFor(dropKey)
+	sinkDrop([]Entry{entry(t, 1, "victim-1")}, false)
+	if err := p.Flush(ctx); err != nil {
+		t.Fatalf("seed Flush: %v", err)
+	}
+
+	// Kick off DropKey in the background; it will block inside the gated
+	// removeFileHook until we release it.
+	dropDone := make(chan error, 1)
+	go func() { dropDone <- p.DropKey(ctx, dropKey) }()
+
+	// Wait until the async unlink has actually entered the hook — now the
+	// stem is registered in p.dropping and the removal is mid-flight.
+	select {
+	case <-removeEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("removeFileHook never entered; drop did not start")
+	}
+
+	// While the drop is held open, an UNRELATED session must still get its
+	// batch written. Send it and Flush — if the run goroutine were parked on
+	// the dropping channel (the old bug) this would time out / never persist.
+	otherKey := "bystander:direct:carol:general"
+	sinkOther := p.SinkFor(otherKey)
+	sinkOther([]Entry{entry(t, 2, "bystander-1")}, false)
+
+	flushDone := make(chan error, 1)
+	go func() { flushDone <- p.Flush(ctx) }()
+	select {
+	case err := <-flushDone:
+		if err != nil {
+			t.Fatalf("Flush of unrelated session: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Flush of unrelated session blocked while another stem mid-removal (regression #1848)")
+	}
+
+	otherLog := LogPath(dir, otherKey)
+	recs := readAllRecords(t, otherLog)
+	foundBystander := false
+	for _, r := range recs {
+		if len(r.Entry) > 0 && bytes.Contains(r.Entry, []byte("bystander-1")) {
+			foundBystander = true
+		}
+	}
+	if !foundBystander {
+		t.Fatalf("unrelated session entry not persisted during mid-removal window; records=%d", len(recs))
+	}
+
+	// Now release the unlink and let DropKey complete.
+	once.Do(func() { close(releaseRemove) })
+	select {
+	case err := <-dropDone:
+		if err != nil {
+			t.Fatalf("DropKey: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("DropKey never completed after releasing unlink")
+	}
+}
+
+// TestPersister_DropMidRemoval_BuffersAndReplaysSameStem pins the other half
+// of #1848: a batch for the SAME stem that arrives while its unlink is in
+// flight must not be dropped — it is buffered and replayed after the unlink
+// completes, so its records still reach the recreated file. We hold the
+// unlink open, send a same-key batch (which must be buffered, not blocking),
+// then release and assert the buffered record lands in the recreated log.
+func TestPersister_DropMidRemoval_BuffersAndReplaysSameStem(t *testing.T) {
+	releaseRemove := make(chan struct{})
+	removeEntered := make(chan struct{}, 1)
+	prev := removeFileHook
+	var once sync.Once
+	removeFileHook = func(path string) error {
+		select {
+		case removeEntered <- struct{}{}:
+			<-releaseRemove
+		default:
+		}
+		return os.Remove(path)
+	}
+	t.Cleanup(func() {
+		once.Do(func() { close(releaseRemove) })
+		removeFileHook = prev
+	})
+
+	p, dir := newTestPersister(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	key := "recreate:direct:dave:general"
+	sink := p.SinkFor(key)
+	sink([]Entry{entry(t, 1, "original-1")}, false)
+	if err := p.Flush(ctx); err != nil {
+		t.Fatalf("seed Flush: %v", err)
+	}
+
+	dropDone := make(chan error, 1)
+	go func() { dropDone <- p.DropKey(ctx, key) }()
+	select {
+	case <-removeEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("removeFileHook never entered")
+	}
+
+	// Same-key batch arrives mid-removal. Must be buffered (not blocking, not
+	// dropped). Send it and ensure the sink call itself returns promptly.
+	sink2 := p.SinkFor(key)
+	sink2([]Entry{entry(t, 2, "buffered-after-drop")}, false)
+
+	// Release the unlink → DropKey completes → opDropDone replays the buffer.
+	once.Do(func() { close(releaseRemove) })
+	select {
+	case err := <-dropDone:
+		if err != nil {
+			t.Fatalf("DropKey: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("DropKey never completed")
+	}
+
+	// Flush so the replayed batch is durable, then assert the recreated log
+	// holds the buffered record (and not the pre-drop original, which was
+	// unlinked).
+	if err := p.Flush(ctx); err != nil {
+		t.Fatalf("post-drop Flush: %v", err)
+	}
+	logPath := LogPath(dir, key)
+	if _, err := os.Stat(logPath); err != nil {
+		t.Fatalf("recreated log missing: %v", err)
+	}
+	recs := readAllRecords(t, logPath)
+	foundBuffered := false
+	for _, r := range recs {
+		if len(r.Entry) > 0 && bytes.Contains(r.Entry, []byte("buffered-after-drop")) {
+			foundBuffered = true
+		}
+	}
+	if !foundBuffered {
+		t.Fatalf("buffered same-stem batch not replayed into recreated log; records=%d", len(recs))
+	}
+}
+
+// TestPersister_PendingDropOverflow_DropsOnlyThatStem verifies the buffer cap:
+// once a single mid-removal stem exceeds pendingDropMaxBatches, its overflow
+// batches are dropped with OnDrop telemetry, but the run goroutine is never
+// blocked and no other session is affected. Driven directly on a Persister
+// whose unlink is gated open so all overflow batches land in the buffer path.
+func TestPersister_PendingDropOverflow_DropsOnlyThatStem(t *testing.T) {
+	releaseRemove := make(chan struct{})
+	removeEntered := make(chan struct{}, 1)
+	prev := removeFileHook
+	var once sync.Once
+	removeFileHook = func(path string) error {
+		select {
+		case removeEntered <- struct{}{}:
+			<-releaseRemove
+		default:
+		}
+		return os.Remove(path)
+	}
+	t.Cleanup(func() {
+		once.Do(func() { close(releaseRemove) })
+		removeFileHook = prev
+	})
+
+	obs := &countingObserver{}
+	p, _ := newTestPersister(t, func(o *Options) { o.Observer = obs })
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	key := "flood:direct:erin:general"
+	sink := p.SinkFor(key)
+	sink([]Entry{entry(t, 1, "seed")}, false)
+	if err := p.Flush(ctx); err != nil {
+		t.Fatalf("seed Flush: %v", err)
+	}
+
+	dropDone := make(chan error, 1)
+	go func() { dropDone <- p.DropKey(ctx, key) }()
+	select {
+	case <-removeEntered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("removeFileHook never entered")
+	}
+
+	// Send more than the cap. Every send must return promptly (non-blocking);
+	// the excess past pendingDropMaxBatches is counted on OnDrop.
+	total := pendingDropMaxBatches + 50
+	for i := 0; i < total; i++ {
+		s := p.SinkFor(key)
+		s([]Entry{entry(t, int64(100+i), "flood")}, false)
+	}
+
+	// Give the run goroutine a moment to process the queued sends into the
+	// pending buffer (they travel through p.in, then handleBatch buffers).
+	// Poll the drop counter until it reflects the overflow rather than
+	// sleeping a fixed amount.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_, dropped, _ := obs.snapshot()
+		if dropped > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	once.Do(func() { close(releaseRemove) })
+	select {
+	case err := <-dropDone:
+		if err != nil {
+			t.Fatalf("DropKey: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("DropKey never completed")
+	}
+
+	_, dropped, _ := obs.snapshot()
+	if dropped == 0 {
+		t.Fatalf("expected overflow drops past cap=%d, got 0", pendingDropMaxBatches)
 	}
 }

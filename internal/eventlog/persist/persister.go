@@ -330,14 +330,30 @@ type Persister struct {
 
 	// dropping tracks stems whose on-disk files are mid-removal by the
 	// async goroutine spawned in handleOp(opDrop). The mapped channel is
-	// closed by that goroutine once removeKeyFiles returns, so writerFor
-	// can block on it to guarantee a same-key recreation's O_CREATE lands
-	// strictly AFTER the unlink — otherwise a slow os.Remove could race
-	// the recreated file and delete it (#1774). The map is mutated ONLY on
-	// the run goroutine (insert in handleOp, delete in opDropDone); the
-	// channel value is closed by the async goroutine. Nil-safe: an absent
-	// key means no removal is in flight.
+	// closed by that goroutine once removeKeyFiles returns, so the run
+	// goroutine can detect the in-flight unlink and defer any same-stem
+	// recreation until O_CREATE can land strictly AFTER the unlink —
+	// otherwise a slow os.Remove could race the recreated file and delete
+	// it (#1774). The map is mutated ONLY on the run goroutine (insert in
+	// handleOp, delete in opDropDone); the channel value is closed by the
+	// async goroutine. Nil-safe: an absent key means no removal is in
+	// flight.
 	dropping map[string]chan struct{}
+
+	// pendingDrop buffers batches that arrived for a stem while it was
+	// mid-removal (present in p.dropping). R20260606-PERF-9 (#1848):
+	// writerFor previously blocked the run goroutine on the dropping
+	// channel, which stalled the single writer goroutine for the whole
+	// os.Remove duration. On FUSE/NFS a multi-hundred-ms unlink could let
+	// p.in saturate and silently drop the batches of EVERY active session,
+	// not just the dropped stem. Instead we stash the dropped stem's
+	// batches here (taking ownership of their arenas) and replay them on
+	// opDropDone once the unlink has completed — the run goroutine never
+	// blocks and unrelated sessions keep draining. Mutated ONLY on the run
+	// goroutine. Capped at pendingDropMaxBatches per stem so a stem whose
+	// unlink never completes cannot grow this without bound; overflow
+	// drops just that stem's excess (telemetry'd), never another session's.
+	pendingDrop map[string][]batchJob
 
 	// fs is the filesystem classification captured at startup. Never
 	// mutated after NewPersister returns — exposing a changing value
@@ -491,13 +507,14 @@ func NewPersister(opts Options) (*Persister, error) {
 	}
 
 	p := &Persister{
-		opts:     opts,
-		in:       make(chan batchJob, opts.ChannelBuffer),
-		opCh:     make(chan op, 8), // small — drop/flush are rare
-		closeCh:  make(chan struct{}),
-		writers:  make(map[string]*perKeyWriter),
-		dropping: make(map[string]chan struct{}),
-		fs:       DetectFS(opts.Dir),
+		opts:        opts,
+		in:          make(chan batchJob, opts.ChannelBuffer),
+		opCh:        make(chan op, 8), // small — drop/flush are rare
+		closeCh:     make(chan struct{}),
+		writers:     make(map[string]*perKeyWriter),
+		dropping:    make(map[string]chan struct{}),
+		pendingDrop: make(map[string][]batchJob),
+		fs:          DetectFS(opts.Dir),
 	}
 	if !p.fs.Supported {
 		// Operators deserve a prominent log line; doctor + /health
@@ -948,6 +965,13 @@ func (p *Persister) run() {
 						o.done <- ErrPersisterClosed
 					}
 				default:
+					// R20260606-PERF-9 (#1848): write out any batches that
+					// were buffered for a mid-removal stem (the in-flight
+					// drain above re-buffers them rather than blocking). Do
+					// this before shutdownAll so their records reach disk and
+					// their arenas are released, rather than being lost on
+					// Stop.
+					p.drainPendingDrop()
 					p.shutdownAll()
 					return
 				}
@@ -1116,6 +1140,15 @@ func (p *Persister) handleOp(o op) {
 		// new channel in between, which a later opDropDone will retire.
 		if cur, ok := p.dropping[o.stem]; ok && cur == o.ch {
 			delete(p.dropping, o.stem)
+			// R20260606-PERF-9 (#1848): the unlink for this stem has
+			// completed and the dropping entry is gone, so any batches we
+			// buffered while it was mid-removal can now be written. Replay
+			// them in arrival order through the normal handleBatch path
+			// (which will recreate the file via writerFor). We only replay
+			// when the channel still matches so a stem that was re-dropped
+			// before this opDropDone landed keeps its buffer for the newer
+			// drop's completion.
+			p.replayPendingDrop(o.stem)
 		}
 		return
 	case opFlushAll:
@@ -1446,6 +1479,81 @@ func (p *Persister) tickIdleClose() {
 	}
 }
 
+// pendingDropMaxBatches caps how many batches a single dropping stem may
+// buffer in p.pendingDrop while its async unlink is in flight. The async
+// removeKeyFiles normally completes in low single-digit milliseconds; on a
+// pathologically slow FUSE/NFS mount it could stall for hundreds of ms. The
+// cap bounds the worst-case memory a stuck unlink can pin to this stem's
+// batches alone — overflow drops just this stem's excess batches (with the
+// same OnDrop telemetry the channel-full path uses), never another active
+// session's. 256 batches × ~50 entries comfortably absorbs a multi-second
+// unlink at the steady-state 5-50 batch/s ingest rate. R20260606-PERF-9
+// (#1848).
+const pendingDropMaxBatches = 256
+
+// bufferDroppedBatch stashes a batch whose stem is mid-removal so the run
+// goroutine does not block waiting for the async unlink. Ownership of the
+// batch's pooled arena transfers to p.pendingDrop; replayPendingDrop (on
+// opDropDone) or the closeCh drain returns it. Overflow past
+// pendingDropMaxBatches drops the batch's records — counted on droppedCnt /
+// OnDrop exactly like the channel-full path — and releases the arena so it
+// is not leaked. Run-goroutine only. R20260606-PERF-9 (#1848).
+func (p *Persister) bufferDroppedBatch(job batchJob) {
+	buf := p.pendingDrop[job.Stem]
+	if len(buf) >= pendingDropMaxBatches {
+		// This stem's unlink is taking unusually long; refuse to grow
+		// unbounded. Drop just this stem's overflow batch (never another
+		// session's) and release its arena so the pooled bytes are reclaimed.
+		n := len(job.Entries)
+		p.droppedCnt.Add(int64(n))
+		p.opts.Observer.OnDrop(n)
+		putEntryArena(job.arena)
+		slog.Warn("event log persist: dropping-stem buffer full; dropping batch",
+			"key", job.Key, "count", n, "buffered", len(buf))
+		return
+	}
+	p.pendingDrop[job.Stem] = append(buf, job)
+}
+
+// replayPendingDrop writes every batch buffered for stem while it was
+// mid-removal, in arrival order, through the normal handleBatch path (which
+// recreates the file via writerFor now that the dropping entry is cleared).
+// Run-goroutine only, invoked from handleOp(opDropDone) AFTER the dropping
+// entry has been deleted. R20260606-PERF-9 (#1848).
+func (p *Persister) replayPendingDrop(stem string) {
+	buf := p.pendingDrop[stem]
+	delete(p.pendingDrop, stem)
+	if len(buf) == 0 {
+		return
+	}
+	now := p.opts.Clock()
+	for _, job := range buf {
+		p.handleBatch(job, now)
+	}
+}
+
+// drainPendingDrop flushes every buffered dropping-stem batch on shutdown so
+// their records are not silently lost and their arenas are released. Called
+// from the closeCh drain in run() after p.in is fully drained. Clears the
+// dropping entry first so writerFor can recreate the file. On a clean Stop the
+// async unlink goroutines have either finished or will lose to process
+// teardown — we prioritise not losing the buffered records over the #1774
+// live-recreation ordering guarantee, which is moot at shutdown. Run-goroutine
+// only. R20260606-PERF-9 (#1848).
+func (p *Persister) drainPendingDrop() {
+	if len(p.pendingDrop) == 0 {
+		return
+	}
+	now := p.opts.Clock()
+	for stem, buf := range p.pendingDrop {
+		delete(p.dropping, stem)
+		delete(p.pendingDrop, stem)
+		for _, job := range buf {
+			p.handleBatch(job, now)
+		}
+	}
+}
+
 // handleBatch is the hot path: find-or-open the writer, append every
 // entry, update the dirty flag for debounce. It NEVER fsyncs here;
 // the debounce ticker owns fsync so a 500-entry batch doesn't cause
@@ -1455,10 +1563,21 @@ func (p *Persister) tickIdleClose() {
 // same clock reading covers both this function's bookkeeping and the
 // caller's lastDrainNS update. R222-PERF-12.
 func (p *Persister) handleBatch(job batchJob, now time.Time) {
-	// R20260531A-PERF-3 (#1524): return the pooled arena that owns this
-	// batch's Entry.JSON bytes once we're done with every entry. The
-	// defer covers the writerFor-error early return below and every
-	// continue/return inside the loop. nil-safe for owned-bytes callers.
+	// R20260606-PERF-9 (#1848): if this stem's on-disk files are mid-removal,
+	// do NOT block the run goroutine waiting for the async unlink (the old
+	// writerFor `<-ch` parked the single writer goroutine for the whole
+	// os.Remove, stalling drain of p.in and risking silent drops across ALL
+	// active sessions). Instead buffer this batch — keeping ownership of its
+	// arena — and replay it on opDropDone once the unlink completes. The run
+	// goroutine returns immediately so unrelated sessions keep draining.
+	if _, dropping := p.dropping[job.Stem]; dropping {
+		p.bufferDroppedBatch(job)
+		return // arena ownership transferred to pendingDrop; do NOT release here
+	}
+	// Return the pooled arena that owns this batch's Entry.JSON bytes once
+	// we're done with every entry. The defer covers the writerFor-error
+	// early return below and every continue/return inside the loop. nil-safe
+	// for owned-bytes callers. R20260531A-PERF-3 (#1524).
 	defer putEntryArena(job.arena)
 	w, err := p.writerFor(job.Key, job.Stem)
 	if err != nil {
@@ -1549,14 +1668,21 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 		return w, nil
 	}
 
-	// R20260605 (#1774): if this stem is mid-removal, wait for the async
-	// unlink to finish before opening so O_CREATE lands strictly after the
-	// remove. The channel is closed by the removeKeyFiles goroutine; once
-	// closed this receive returns immediately for every future waiter.
-	// Safe to block the run goroutine here: the close is driven by an
-	// independent goroutine, not by an opCh message run must still process.
-	if ch, ok := p.dropping[stem]; ok {
-		<-ch
+	// R20260605 (#1774) + R20260606-PERF-9 (#1848): a same-stem recreation
+	// must not OpenFile(O_CREATE) until the in-flight unlink finishes, else a
+	// slow os.Remove (FUSE/NFS) could land after the recreated file and
+	// delete it. The earlier fix blocked the run goroutine here on the
+	// dropping channel, but that stalled the single writer goroutine for the
+	// whole os.Remove and let p.in saturate, silently dropping unrelated
+	// sessions' batches. handleBatch now diverts a dropping stem's batches
+	// into p.pendingDrop and replays them only after opDropDone clears the
+	// entry — so by contract writerFor is never reached while the stem is
+	// dropping. Keep a non-blocking guard as defence in depth: if a future
+	// caller ever reaches here mid-removal, refuse rather than block the run
+	// goroutine. The caller (handleBatch) treats this as a record drop for
+	// just this stem, never a stall.
+	if _, ok := p.dropping[stem]; ok {
+		return nil, fmt.Errorf("writerFor %s: stem mid-removal", key)
 	}
 
 	logPath := filepath.Join(p.opts.Dir, stem+logExt)
