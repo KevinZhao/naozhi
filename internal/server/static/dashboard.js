@@ -383,27 +383,8 @@ function setActivityView(view) {
 // polling + scan sites (sessions, cli/backends, events, cron, discovered,
 // discovered/preview, projects/files/exists) use this helper today; the
 // remaining fetch() sites migrate in later rounds.
-async function fetchJSON(url, opts = {}) {
-  const { timeoutMs = 10000, signal: parentSignal, ...rest } = opts;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(new Error('timeout')), timeoutMs);
-  // Chain caller-provided signal so e.g. component-unmount can abort too.
-  if (parentSignal) {
-    if (parentSignal.aborted) { clearTimeout(timer); ctrl.abort(parentSignal.reason); }
-    else parentSignal.addEventListener('abort', () => ctrl.abort(parentSignal.reason), { once: true });
-  }
-  try {
-    const r = await fetch(url, { ...rest, signal: ctrl.signal });
-    clearTimeout(timer);
-    const text = await r.text();
-    if (!r.ok) { const err = new Error('HTTP ' + r.status + ': ' + text.slice(0, 500)); err.status = r.status; throw err; }
-    return text ? JSON.parse(text) : null;
-  } catch (e) {
-    clearTimeout(timer);
-    if (e.name === 'AbortError') throw new Error('fetch timed out after ' + timeoutMs + 'ms: ' + url);
-    throw e;
-  }
-}
+// fetchJSON moved to nz_util.js (PR-0a). Available as window.nz.util.fetchJSON
+// and the top-level alias window.fetchJSON, loaded before this file.
 
 function removePendingSession(key) {
   delete sessionWorkspaces[key];
@@ -550,15 +531,26 @@ async function fetchSessions() {
     _lastSidebarData = data;
 
     // Reconcile main area state: if the selected session's state changed
-    // (e.g. session_state WS message was missed during reconnect), propagate
-    // the server-side truth to the banner and send/stop buttons.
-    // Only reconcile when WS is not connected — when connected, WS pushes
-    // are authoritative and overwriting them with a stale REST snapshot
-    // would cause UI flicker.
-    if (selectedKey && wsm.state !== WS_STATES.CONNECTED) {
+    // (e.g. session_state WS message was missed), propagate the server-side
+    // truth to the banner and send/stop buttons.
+    //
+    // When WS is disconnected, REST is the only state source — always reconcile.
+    // When WS is connected, reconcile ONLY the "finished" direction: if the
+    // REST snapshot says the turn is over (state !== 'running') and we're not
+    // inside the optimistic-running window, then a terminal WS signal (the
+    // 'result' event and/or the 'ready' session_state broadcast) was dropped on
+    // the still-open connection — without this fallback the "处理中..." banner
+    // stays stuck until the operator switches sessions or reconnects. We never
+    // reconcile toward 'running' over a live WS: that's the push side's job, and
+    // a lagging REST snapshot would flicker the banner (the very reason the
+    // optimistic-running flip at line 469-475 exists).
+    if (selectedKey) {
       const sKey = sid(selectedKey, selectedNode);
       const sd = sessionsData[sKey];
-      if (sd) updateMainState(sd.state, sd.death_reason);
+      const wsConnected = wsm.state === WS_STATES.CONNECTED;
+      if (sd && (!wsConnected || (sd.state !== 'running' && !sessionOptimisticRunning[sKey]))) {
+        updateMainState(sd.state, sd.death_reason);
+      }
     }
     if (selectedKey) updateHeaderCLI();
     return true;
@@ -3412,6 +3404,58 @@ async function sendAskAnswerViaAPI(text, card) {
   }
 }
 
+// LEAKED_TOOLCALL_RE anchors the start of a tool-call block that an LLM
+// emitted as *prose* instead of a structured tool_use content block. The
+// claude/anthropic harness expresses a real tool call as a dedicated
+// content block (type:"tool_use") which naozhi surfaces as its own
+// tool_use event and filters out of the main transcript (isInternalEvent).
+// But the model occasionally regresses and writes the call syntax —
+//   call
+//   <invoke name="Bash">
+//   <parameter name="command">…</parameter>
+//   </invoke>
+// — verbatim into an assistant *text* block. That text flows through the
+// pipeline untouched (process_event_format.go stores it as type:"text")
+// and lands in the bubble as a literal wall of XML, which is noise to the
+// operator (the call was never executed — it's a malformed turn).
+//
+// The anchor REQUIRES a `call` or `<function_calls>` marker alone on its
+// own line immediately preceding `<invoke name="`. This is deliberately
+// strict: a bare `<invoke …>` must NOT trip the detector, because operators
+// legitimately quote tool-call syntax inside backticks when discussing it
+// (e.g. this very bug report). Validated against 667 real text/user events:
+// 9 genuine leaks caught, 0 false positives on quoted-syntax discussions.
+const LEAKED_TOOLCALL_RE = /(?:^|\n)[ \t]*(?:call|<function_calls>)[ \t]*\n[ \t]*<invoke name="/;
+
+// stripLeakedToolCalls splits an assistant text body into the real prose
+// that precedes a leaked tool-call block and the leaked block itself.
+// Returns null when no leak is detected (the overwhelmingly common case —
+// keep this cheap so every text bubble can call it). On a hit it returns
+// { prose, leaked } where `prose` is the body with the leaked region
+// removed (trailing whitespace trimmed) and `leaked` is the raw XML for the
+// fold-away <details>. The region runs from the anchor's `call` /
+// `<function_calls>` line to the final `</invoke>` (plus an optional
+// trailing `</function_calls>`), so multiple chained <invoke> blocks under
+// one marker collapse into a single fold.
+function stripLeakedToolCalls(text) {
+  if (!text || text.indexOf('</invoke>') === -1) return null;
+  const m = LEAKED_TOOLCALL_RE.exec(text);
+  if (!m) return null;
+  // Anchor start = the `call` / `<function_calls>` line, not the regex's
+  // leading \n. m.index points at the char before that line when the
+  // alternation matched `\n`; step over it so the marker stays in `leaked`.
+  let start = m.index;
+  if (text[start] === '\n') start += 1;
+  // The leaked region ends at the LAST </invoke> — a single prose turn that
+  // leaks more than one call writes them consecutively, and everything from
+  // the marker to the last close tag is the malformed payload.
+  let end = text.lastIndexOf('</invoke>') + '</invoke>'.length;
+  const tail = text.slice(end);
+  const fc = /^\s*<\/function_calls>/.exec(tail);
+  if (fc) end += fc[0].length;
+  return { prose: text.slice(0, start).replace(/\s+$/, ''), leaked: text.slice(start, end) };
+}
+
 // eventHtml renders one EventEntry bubble.
 // opts.includeInternal=true keeps tool_use / thinking / task_* / agent / result
 // events that the parent view hides (banner handles them there). The sub-agent
@@ -3451,7 +3495,20 @@ function eventHtml(e, opts) {
   if (e.type === 'system') {
     content = esc(e.summary || e.type);
   } else if (e.type === 'text' || e.type === 'user') {
-    content = renderMd(cleanRaw || e.type);
+    // Guard against a leaked tool-call block (the model wrote <invoke …>
+    // syntax into a text turn instead of emitting a structured tool_use).
+    // Render the real prose normally and fold the malformed XML behind a
+    // collapsed warning so the bubble stays readable; esc() keeps the raw
+    // payload inert (it is displayed as text, never parsed as HTML).
+    const leak = stripLeakedToolCalls(cleanRaw);
+    if (leak) {
+      content = renderMd(leak.prose || e.type) +
+        '<details class="leaked-toolcall"><summary class="leaked-toolcall-summary">' +
+        '⚠ 模型输出了未执行的工具调用（已折叠）</summary>' +
+        '<pre class="leaked-toolcall-body">' + esc(leak.leaked) + '</pre></details>';
+    } else {
+      content = renderMd(cleanRaw || e.type);
+    }
   } else if (e.type === 'todo') {
     content = renderTodoList(e.detail, e.summary);
   } else if (e.type === 'tool_use' && e.tool_call) {
@@ -4274,6 +4331,12 @@ function applyEventToTurnState(ev) {
       turnState.isThinking = false;
       turnState.isWriting = false;
       turnState.thinkingSummary = '';
+      // Also clear the tool tallies so hasContent (refreshBanner) doesn't stay
+      // truthy on a turn boundary — keeps this branch consistent with
+      // resetTurnState, the other turn-reset path.
+      turnState.toolOrder = [];
+      turnState.toolCounts = {};
+      turnState.toolCount = 0;
       updateSidebarAgentBadge();
       break;
   }
@@ -4775,6 +4838,32 @@ function currentProjectSessions() {
   });
 }
 
+// Turn watchdog: while the selected session is "running", periodically pull
+// the authoritative REST snapshot so the banner self-heals if a terminal WS
+// signal (the 'result' event and/or the 'ready' session_state broadcast) is
+// dropped on a still-open connection. Without this the "处理中..." banner stays
+// stuck until the operator switches sessions or reconnects — the bug this fixes.
+// fetchSessions reconciles via updateMainState (see the relaxed gate in
+// fetchSessions); the watchdog just supplies the missing tick, since the
+// session poll is stopped while WS is connected.
+let _turnWatchdogTimer = null;
+const TURN_WATCHDOG_INTERVAL_MS = 15000;
+function startTurnWatchdog() {
+  if (_turnWatchdogTimer) return;
+  _turnWatchdogTimer = setInterval(() => {
+    // Self-heal: if the selected session was cleared without routing through
+    // updateSendButton (dismissSession nulls selectedKey + swaps to the empty
+    // shell in three branches), the fetchSessions reconcile is gated on
+    // `if (selectedKey)` and would never stop us — so retire the watchdog here
+    // instead of polling /api/sessions forever for the page lifetime.
+    if (!selectedKey) { stopTurnWatchdog(); return; }
+    debouncedFetchSessions();
+  }, TURN_WATCHDOG_INTERVAL_MS);
+}
+function stopTurnWatchdog() {
+  if (_turnWatchdogTimer) { clearInterval(_turnWatchdogTimer); _turnWatchdogTimer = null; }
+}
+
 function updateSendButton(state) {
   const banner = document.getElementById('running-banner');
   const sendBtn = document.getElementById('btn-send');
@@ -4786,7 +4875,9 @@ function updateSendButton(state) {
     if (stopBtn) stopBtn.style.display = 'flex';
     initAgentsFromSession();
     refreshBanner();
+    startTurnWatchdog();
   } else {
+    stopTurnWatchdog();
     // resetTurnState → refreshBanner will hide the banner since the session
     // is no longer "running". If background agents are still active (e.g.
     // zero-downtime restart), refreshBanner keeps the banner visible.
@@ -7017,13 +7108,8 @@ function renderBackendsDoctorPanel() {
   '</details>';
 }
 
-function showToast(msg, type, duration) {
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.className = 'toast show' + (type ? ' ' + type : '');
-  clearTimeout(el._tid);
-  el._tid = setTimeout(() => { el.className = 'toast'; }, duration || 3000);
-}
+// showToast moved to nz_util.js (PR-0a). Available as window.nz.util.showToast
+// and the top-level alias window.showToast, loaded before this file.
 
 // RNEW-UX-010 — polite announcement into #sr-announce for screen readers.
 // Used for signals that don't surface as a toast (WS connect/disconnect,
@@ -7370,37 +7456,8 @@ function sessionTimeHint(key) {
   return '\u2014';
 }
 
-/* Focus trap: confine Tab within an overlay, restore focus on dismissal.
-   Called after an overlay is appended to the DOM. Returns nothing — the
-   overlay's MutationObserver tears down listeners when it's removed. */
-function trapFocus(overlay) {
-  if (!overlay || overlay._trapped) return;
-  overlay._trapped = true;
-  const prevActive = document.activeElement;
-  const FOCUSABLE = 'button, [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
-  const onKey = (e) => {
-    if (e.key === 'Escape') {
-      // Let inner handlers pre-empt; otherwise dismiss the overlay.
-      if (!e.defaultPrevented) { overlay.remove(); }
-      return;
-    }
-    if (e.key !== 'Tab') return;
-    const nodes = [...overlay.querySelectorAll(FOCUSABLE)].filter(el => !el.disabled && el.offsetParent !== null);
-    if (nodes.length === 0) { e.preventDefault(); return; }
-    const first = nodes[0], last = nodes[nodes.length - 1];
-    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-  };
-  overlay.addEventListener('keydown', onKey);
-  const obs = new MutationObserver(() => {
-    if (!document.body.contains(overlay)) {
-      overlay.removeEventListener('keydown', onKey);
-      obs.disconnect();
-      if (prevActive && prevActive.focus) { try { prevActive.focus(); } catch(_) {} }
-    }
-  });
-  obs.observe(document.body, { childList: true, subtree: false });
-}
+// trapFocus moved to nz_util.js (PR-0a). Available as window.nz.util.trapFocus
+// and the top-level alias window.trapFocus, loaded before this file.
 
 // confirmDialog renders a styled confirm prompt matching the rest of the
 // dashboard (reuses .modal-overlay / .modal / .modal-btns). Returns a Promise
@@ -7684,43 +7741,13 @@ function timeDividerHtml(ms) {
   return '<div class="event-time-divider" data-time="' + (ms || 0) + '">' + esc(formatTimeShort(ms)) + '</div>';
 }
 
-// R244-SEC-P3-6: pure-string replace chain instead of a shared <div>
-// scratch element. The previous implementation wrote the input to a
-// shared scratch element's textContent and read back its innerHTML,
-// which is correct in straight-line code but fragile under reentrancy:
-// if the rendering pipeline ever invokes esc() recursively (e.g. a
-// custom toString on the input that triggers a render hook, or a future
-// getter on the input that calls esc() on a sub-field) the inner call
-// clobbers the outer's pending scratch state before the outer reads it
-// back, leaking the inner value into the outer scope's HTML output.
-// Pure string replacement has no shared mutable state.
-//
-// The output set (&, <, >) matches the textContent → innerHTML round-trip
-// the previous implementation produced — modern browsers do NOT serialise
-// quote characters via that round-trip, so adding " / ' here would change
-// observable behaviour at every escAttr() call site that already chains a
-// further quote-escape on top. Quote handling stays delegated to escAttr
-// (defined just below) so the behavioural surface for the 171 esc() call
-// sites is unchanged.
-const _escAmpRe = /&/g;
-const _escLtRe = /</g;
-const _escGtRe = />/g;
-function esc(s) {
-  if (!s) return '';
-  return String(s)
-    .replace(_escAmpRe, '&amp;')
-    .replace(_escLtRe, '&lt;')
-    .replace(_escGtRe, '&gt;');
-}
-// Escape for HTML attribute context. We don't know whether the caller used
-// single- or double-quoted attributes, so we escape both to be safe.
-function escAttr(s) {
-  return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-function escJs(s) {
-  if (!s) return '';
-  return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/</g,'\\u003c').replace(/>/g,'\\u003e');
-}
+// esc / escAttr / escJs moved to nz_util.js (PR-0a, RFC
+// dashboard-cron-view-extraction). They are exposed as window.nz.util.* and
+// as top-level aliases (window.esc, window.escAttr, window.escJs) loaded
+// before this file, so the bare call sites below keep working unchanged.
+// SECURITY: the single source of truth for HTML/attr/JS escaping lives there
+// — never re-define a local copy here or in any view module.
+
 // URL schemes that are safe to embed in <a href>.
 // RNEW-SEC-007: Only https?: and fragment-only URLs (#...) are accepted.
 // Previously the allowlist also matched mailto:, absolute paths (/...),
@@ -8439,6 +8466,9 @@ async function openFilePreview(wrapEl) {
 
   drawer.classList.remove('hidden');
   drawer.classList.add('fv-open');
+  // Dock as a right-hand split on desktop so the transcript stays visible
+  // beside the preview (no-op on phone — falls back to the overlay).
+  if (typeof window.nzSplitEnter === 'function') window.nzSplitEnter();
   drawer.dataset.project = project;
   drawer.dataset.node = node;
   drawer.dataset.path = path;
@@ -8694,6 +8724,8 @@ function closeFilePreview() {
   if (!drawer) return;
   drawer.classList.remove('fv-open');
   drawer.classList.add('hidden');
+  // Undock the split (no-op if the 追问 drawer is still open).
+  if (typeof window.nzSplitExit === 'function') window.nzSplitExit();
   delete drawer.dataset.snippetMode;
   delete drawer.dataset.snippetName;
   _pendingSnippet = null;
@@ -15370,6 +15402,132 @@ async function doEditCronJob(id) {
   });
 })();
 
+/* ===== Split-view docking (desktop only) =====
+   The preview (#fv-drawer) and 追问 (#aside-drawer) panes used to overlay the
+   transcript as a fixed slide-over. On desktop we now dock them as a right-hand
+   split: body.nz-split-open reserves `--nz-split-w` on .container so the
+   transcript compresses into the remaining width and stays fully visible
+   beside the pane. nzSplitEnter/nzSplitExit are called from the drawer
+   open/close paths (openFilePreview / closeFilePreview / scratch showDrawer /
+   hideDrawer). Phone (≤768px) keeps the original full-width overlay — every
+   path here bails on a mobile viewport, and the CSS overrides are gated behind
+   the ≥769px breakpoint, so the two layouts never fight.
+
+   The "keep the transcript's latest progress visible" requirement is handled
+   by capturing whether the events pane was bottom-anchored BEFORE the width
+   change, then re-pinning to the bottom AFTER layout settles — narrowing the
+   transcript reflows text taller, which would otherwise leave the newest
+   bubbles scrolled off-screen. */
+(function(){
+  const LS_SPLIT_W = 'split_w';
+  const DEFAULT_W = 480;   // matches --nz-split-w default in dashboard.html
+  const MIN_W = 320;
+  // Reserve at least this much for the activity-bar + sidebar + transcript so
+  // the split can never swallow the whole window.
+  const MIN_LEFT = 420;
+  const resizer = document.getElementById('split-resizer');
+
+  function isMobileVp() {
+    return window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
+  }
+  function clampW(w) {
+    const max = Math.max(MIN_W, window.innerWidth - MIN_LEFT);
+    return Math.min(Math.max(w, MIN_W), max);
+  }
+  function applyW(w) {
+    document.documentElement.style.setProperty('--nz-split-w', clampW(w) + 'px');
+  }
+  // Restore persisted width on cold-load (falls back to the CSS default).
+  const savedW = parseFloat(lsGet(LS_SPLIT_W, 0));
+  if (savedW >= MIN_W) applyW(savedW);
+
+  function anyDrawerOpen() {
+    const fv = document.getElementById('fv-drawer');
+    const ad = document.getElementById('aside-drawer');
+    return (fv && fv.classList.contains('fv-open')) ||
+           (ad && ad.classList.contains('visible'));
+  }
+  // Was the transcript scrolled to (or near) the bottom? 40px slack mirrors
+  // the main-window wasBottom checks elsewhere in this file.
+  function eventsAtBottom() {
+    const el = document.getElementById('events-scroll');
+    if (!el) return false;
+    return el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
+  }
+  // Re-pin to the bottom after a width change, but only if the user was
+  // already there — never drag them away from history they're reading.
+  function preserveBottom(wasBottom) {
+    if (!wasBottom) return;
+    requestAnimationFrame(() => {
+      if (typeof stickEventsBottom === 'function') stickEventsBottom();
+      else {
+        const el = document.getElementById('events-scroll');
+        if (el) el.scrollTop = el.scrollHeight;
+      }
+    });
+  }
+
+  window.nzSplitEnter = function() {
+    if (isMobileVp()) return;  // phone keeps the full-width overlay
+    if (document.body.classList.contains('nz-split-open')) return;
+    const wasBottom = eventsAtBottom();
+    document.body.classList.add('nz-split-open');
+    preserveBottom(wasBottom);
+  };
+  window.nzSplitExit = function() {
+    // Keep the split open while either drawer is still docked (mutually
+    // exclusive today, but cheap to be correct if that ever changes).
+    if (anyDrawerOpen()) return;
+    if (!document.body.classList.contains('nz-split-open')) return;
+    const wasBottom = eventsAtBottom();
+    document.body.classList.remove('nz-split-open');
+    preserveBottom(wasBottom);
+  };
+
+  // --- Drag-to-resize the seam ---
+  if (resizer) {
+    let startX, startW, dragBottom;
+    function onMove(e) {
+      // Strip grows when dragged left (toward smaller clientX). Width is the
+      // distance from the seam to the right viewport edge.
+      const w = clampW(startW + (startX - e.clientX));
+      applyW(w);
+      // Keep the transcript pinned to the bottom live during the drag so the
+      // latest progress doesn't scroll out from under a width reflow.
+      if (dragBottom) {
+        const el = document.getElementById('events-scroll');
+        if (el) el.scrollTop = el.scrollHeight;
+      }
+    }
+    function onUp() {
+      resizer.classList.remove('dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      const cur = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--nz-split-w'));
+      if (cur >= MIN_W) lsSet(LS_SPLIT_W, Math.round(cur));
+    }
+    resizer.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      startX = e.clientX;
+      startW = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--nz-split-w')) || DEFAULT_W;
+      dragBottom = eventsAtBottom();
+      resizer.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+    resizer.addEventListener('dblclick', function() {
+      const wasBottom = eventsAtBottom();
+      applyW(DEFAULT_W);
+      lsRemove(LS_SPLIT_W);
+      preserveBottom(wasBottom);
+    });
+  }
+})();
+
 /* ===== Sidebar fully-collapse (PC only) =====
    Toggle body.sidebar-collapsed so .main occupies the full viewport. State is
    persisted via lsSet so a refresh keeps the user's preference. The mobile
@@ -15834,8 +15992,15 @@ initSidebarSearch();
     elMsgs.appendChild(elEmpty);
   }
 
-  function showDrawer() { drawer.classList.add('visible'); }
-  function hideDrawer() { drawer.classList.remove('visible'); }
+  function showDrawer() {
+    drawer.classList.add('visible');
+    // Dock as a right-hand split on desktop (no-op on phone overlay).
+    if (typeof window.nzSplitEnter === 'function') window.nzSplitEnter();
+  }
+  function hideDrawer() {
+    drawer.classList.remove('visible');
+    if (typeof window.nzSplitExit === 'function') window.nzSplitExit();
+  }
 
   function stopPolling() {
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
