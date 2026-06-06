@@ -829,13 +829,15 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 		v = actual
 	}
 	entry := v.(*recentCacheEntry)
-	entry.mu.Lock()
+	// R20260606-PERF-1 (#1846): warm fast path is read-only (ringSnapshot) —
+	// take the shared RLock so concurrent 1Hz pollers don't serialise.
+	entry.mu.RLock()
 	if entry.warm {
 		out := entry.ringSnapshot(limit)
-		entry.mu.Unlock()
+		entry.mu.RUnlock()
 		return out, true
 	}
-	entry.mu.Unlock()
+	entry.mu.RUnlock()
 
 	// Cold cache: warm from disk under jobLock so concurrent Append's
 	// cacheHeadPush observes the freshly-warmed ring (and would no-op
@@ -864,8 +866,9 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 	if v2, ok := s.recentCache.Load(jobID); ok {
 		entry = v2.(*recentCacheEntry)
 	}
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
+	// R20260606-PERF-1 (#1846): read-only (ringSnapshot) — shared RLock.
+	entry.mu.RLock()
+	defer entry.mu.RUnlock()
 	if !entry.warm {
 		return nil, false
 	}
@@ -961,8 +964,9 @@ func (s *runStore) cacheGetBefore(jobID string, limit int, before time.Time) ([]
 		return nil, false
 	}
 	entry := v.(*recentCacheEntry)
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
+	// R20260606-PERF-1 (#1846): read-only (ringRead) — shared RLock.
+	entry.mu.RLock()
+	defer entry.mu.RUnlock()
 	if !entry.warm {
 		return nil, false
 	}
@@ -1474,7 +1478,8 @@ func (s *runStore) RecentSessionIDs(jobID string, n int) []string {
 	// per-row value copy.
 	if v, ok := s.recentCache.Load(jobID); ok {
 		entry := v.(*recentCacheEntry)
-		entry.mu.Lock()
+		// R20260606-PERF-1 (#1846): read-only (ringRead) — shared RLock.
+		entry.mu.RLock()
 		if entry.warm {
 			limit := n
 			if limit > entry.count {
@@ -1486,10 +1491,10 @@ func (s *runStore) RecentSessionIDs(jobID string, n int) []string {
 					out = append(out, sid)
 				}
 			}
-			entry.mu.Unlock()
+			entry.mu.RUnlock()
 			return out
 		}
-		entry.mu.Unlock()
+		entry.mu.RUnlock()
 	}
 	// Cold path: fall back to the cached/disk Recent walk. We pay the
 	// per-row copy here but cold misses are rare (warmCache lazy-fills on
@@ -1780,8 +1785,11 @@ func (s *runStore) trimSkipFromCache(jobID string, now time.Time) bool {
 		return false
 	}
 	entry := v.(*recentCacheEntry)
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
+	// R20260606-PERF-1 (#1846): read-only (ringRead + count/warm reads) —
+	// shared RLock. Does not mutate the ring; trimJobLocked's actual mutation
+	// runs later under cacheTrimAfterDisk's exclusive Lock.
+	entry.mu.RLock()
+	defer entry.mu.RUnlock()
 	if !entry.warm {
 		return false
 	}
