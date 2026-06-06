@@ -61,7 +61,7 @@ func TestRouter_ShimStuckFlagConsumedByGetOrCreate(t *testing.T) {
 		sessions:         make(map[string]*ManagedSession),
 		spawningKeys:     make(map[string]chan struct{}),
 		shimStuckOnReset: make(map[string]bool),
-		knownIDs:         make(map[string]bool),
+		kid:              knownIDsStore{ids: make(map[string]bool)},
 		sessionIDToKey:   make(map[string]string),
 	}
 	r.wsStore.overrides = make(map[string]string)
@@ -100,7 +100,7 @@ func TestRouter_ShimStuckFlagPerKey(t *testing.T) {
 		sessions:         make(map[string]*ManagedSession),
 		spawningKeys:     make(map[string]chan struct{}),
 		shimStuckOnReset: make(map[string]bool),
-		knownIDs:         make(map[string]bool),
+		kid:              knownIDsStore{ids: make(map[string]bool)},
 		sessionIDToKey:   make(map[string]string),
 	}
 	r.wsStore.overrides = make(map[string]string)
@@ -132,7 +132,7 @@ func TestRouter_ShimStuckFlagClearedOnTerminalRemoval(t *testing.T) {
 		sessions:         make(map[string]*ManagedSession),
 		spawningKeys:     make(map[string]chan struct{}),
 		shimStuckOnReset: make(map[string]bool),
-		knownIDs:         make(map[string]bool),
+		kid:              knownIDsStore{ids: make(map[string]bool)},
 		sessionIDToKey:   make(map[string]string),
 	}
 	r.wsStore.overrides = make(map[string]string)
@@ -199,7 +199,7 @@ func TestRouter_ShimStuckFlagPreservedOnKeepOverride(t *testing.T) {
 		sessions:         make(map[string]*ManagedSession),
 		spawningKeys:     make(map[string]chan struct{}),
 		shimStuckOnReset: make(map[string]bool),
-		knownIDs:         make(map[string]bool),
+		kid:              knownIDsStore{ids: make(map[string]bool)},
 		sessionIDToKey:   make(map[string]string),
 	}
 	r.wsStore.overrides = make(map[string]string)

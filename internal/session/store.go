@@ -565,6 +565,57 @@ func saveKnownIDs(storePath string, sortedIDs []string) error {
 	return nil
 }
 
+// knownIDsStore groups the seven correlated known-session-ID fields (Router P2
+// facet, #600). It is a value field on Router, carries NO lock of its own, and
+// is read/written ONLY under Router.mu — the lock topology is unchanged (RFC §3
+// candidate A: single r.mu retained).
+//
+// The gen-invalidation chain lives entirely inside this struct under one lock:
+// trackSessionID bumps gen (the SOLE mutator) and snapshotKnownIDsSortedLocked
+// rebuilds + re-sorts only when sortedGen != gen, then sets sortedGen = gen.
+// Because all seven fields move together under r.mu, the bump and the recompute
+// stay in the same struct/lock/order and the invalidation cannot tear.
+//
+// CRITICAL: gen and sortedGen are PLAIN uint64, NOT atomic — every access is
+// under r.mu (no lock-free reader), unlike wsStore.gen which Version() reads
+// without the lock. Converting them to atomic.Uint64 would be an unnecessary
+// semantic change.
+type knownIDsStore struct {
+	// ids tracks ALL session IDs ever used by naozhi, including
+	// sessions that have been removed/reset/evicted. Used by the
+	// discovered-session scanner to match CLI processes to naozhi keys,
+	// and as a secondary filter for filesystem-based recent sessions.
+	// 读写: core (init), discovery (trackSessionID/Discovery*), cleanup (saveIfDirty)
+	ids map[string]bool
+	// order preserves insertion order so overflow eviction drops the
+	// oldest (FIFO) rather than picking randomly via map iteration — random
+	// eviction could drop a still-active session ID, causing discovery to
+	// misclassify its CLI process as an external (non-naozhi) session.
+	// 读写: core (init), discovery (trackSessionID)
+	order []string
+	// 读写: discovery, cleanup
+	dirty bool
+	// 读写: discovery, cleanup
+	gen uint64 // incremented on each ids mutation (add/evict)
+	// sortedCache caches the deterministic (sorted) serialization
+	// input for saveKnownIDs so the O(N log N) sort is paid once per
+	// mutation generation rather than on every throttled save tick.
+	// R220123-PERF-19 (#1638): the known-IDs set is append-only-ish and the
+	// save is throttled to knownIDsSaveInterval (5 min), so the common case
+	// is "save N unchanged IDs again" — for which a full re-sort is pure
+	// waste. sortedGen records the gen the cache was built
+	// at; snapshotKnownIDsSortedLocked rebuilds + re-sorts only on a gen
+	// mismatch, otherwise returning the cached sorted slice (which the
+	// caller copies under the lock). The sorted output preserves the
+	// R180-GO-P2 stable-bytes-on-disk contract.
+	// 读写: cleanup (Cleanup/saveIfDirty snapshot), discovery (invalidated via gen)
+	sortedCache []string
+	// 读写: store.go (snapshotKnownIDsSortedLocked rebuild/compare; invoked from cleanup saveIfDirty)
+	sortedGen uint64 // gen the cache slice was sorted at; 0 = unbuilt
+	// 读写: cleanup (Cleanup/saveIfDirty)
+	savedAt time.Time // last successful saveKnownIDs; throttles fsync to 5min
+}
+
 // snapshotKnownIDsSortedLocked returns a sorted copy of the known-session-ID
 // set suitable for handing to saveKnownIDs. Caller MUST hold r.mu.
 //
@@ -579,19 +630,19 @@ func saveKnownIDs(storePath string, sortedIDs []string) error {
 // trackSessionID would otherwise mutate it via a future rebuild). The common
 // "nothing changed" tick is now an O(N) copy with no sort.
 func (r *Router) snapshotKnownIDsSortedLocked() []string {
-	if r.knownIDsSortedCache == nil || r.knownIDsSortedGen != r.knownIDsGen {
-		sorted := make([]string, 0, len(r.knownIDs))
-		for id := range r.knownIDs {
+	if r.kid.sortedCache == nil || r.kid.sortedGen != r.kid.gen {
+		sorted := make([]string, 0, len(r.kid.ids))
+		for id := range r.kid.ids {
 			sorted = append(sorted, id)
 		}
 		// R180-GO-P2: deterministic on-disk order — see saveKnownIDs.
 		slices.Sort(sorted)
-		r.knownIDsSortedCache = sorted
-		r.knownIDsSortedGen = r.knownIDsGen
+		r.kid.sortedCache = sorted
+		r.kid.sortedGen = r.kid.gen
 	}
 	// Return a copy: callers serialize outside r.mu, and a later rebuild
 	// would otherwise replace the cache slice's backing array under them.
-	return slices.Clone(r.knownIDsSortedCache)
+	return slices.Clone(r.kid.sortedCache)
 }
 
 // workspaceOverridesPath returns the path to the workspace overrides file,

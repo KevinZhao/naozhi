@@ -434,39 +434,17 @@ type Router struct {
 	// 读写: core (Version lock-free), lifecycle (BumpVersion), cleanup (BumpVersion), discovery (BumpVersion), capacity (evictOldest BumpVersion), shim (reconnect BumpVersion)
 	storeGen atomic.Uint64
 
-	// knownIDs tracks ALL session IDs ever used by naozhi, including
-	// sessions that have been removed/reset/evicted. Used by the
-	// discovered-session scanner to match CLI processes to naozhi keys,
-	// and as a secondary filter for filesystem-based recent sessions.
-	// 读写: core (init), discovery (trackSessionID/Discovery*), cleanup (saveIfDirty)
-	knownIDs map[string]bool
-	// knownIDsOrder preserves insertion order so overflow eviction drops the
-	// oldest (FIFO) rather than picking randomly via map iteration — random
-	// eviction could drop a still-active session ID, causing discovery to
-	// misclassify its CLI process as an external (non-naozhi) session.
-	// 读写: core (init), discovery (trackSessionID)
-	knownIDsOrder []string
-	// 读写: discovery, cleanup
-	knownIDsDirty bool
-	// 读写: discovery, cleanup
-	knownIDsGen uint64 // incremented on each knownIDs mutation (add/evict)
-	// knownIDsSortedCache caches the deterministic (sorted) serialization
-	// input for saveKnownIDs so the O(N log N) sort is paid once per
-	// mutation generation rather than on every throttled save tick.
-	// R220123-PERF-19 (#1638): the known-IDs set is append-only-ish and the
-	// save is throttled to knownIDsSaveInterval (5 min), so the common case
-	// is "save N unchanged IDs again" — for which a full re-sort is pure
-	// waste. knownIDsSortedGen records the knownIDsGen the cache was built
-	// at; snapshotKnownIDsSortedLocked rebuilds + re-sorts only on a gen
-	// mismatch, otherwise returning the cached sorted slice (which the
-	// caller copies under the lock). The sorted output preserves the
-	// R180-GO-P2 stable-bytes-on-disk contract.
-	// 读写: cleanup (Cleanup/saveIfDirty snapshot), discovery (invalidated via knownIDsGen)
-	knownIDsSortedCache []string
-	// 读写: store.go (snapshotKnownIDsSortedLocked rebuild/compare; invoked from cleanup saveIfDirty)
-	knownIDsSortedGen uint64 // knownIDsGen the cache slice was sorted at; 0 = unbuilt
-	// 读写: cleanup (Cleanup/saveIfDirty)
-	knownIDsSavedAt time.Time // last successful saveKnownIDs; throttles fsync to 5min
+	// kid is the known-session-IDs facet (Router P2, #600): the IDs set, its
+	// insertion-order slice, the dirty flag, the mutation gen, and the
+	// gen-memoised sorted cache (+ its gen and last-saved timestamp), grouped
+	// into knownIDsStore (store.go) which carries the verbatim per-inner-field
+	// godoc. No lock of its own — read/written only under r.mu (RFC §3
+	// candidate A, single r.mu retained). gen / sortedGen stay PLAIN uint64:
+	// they have no lock-free reader, so unlike wsStore.gen they are NOT atomic.
+	// The annotation below must cover ALL accessing domains; the lint recurses
+	// one level so each inner field ALSO carries its own per-domain annotation.
+	// 读写: core (init/load), discovery (trackSessionID), cleanup (Cleanup/saveIfDirty/Shutdown save), store (snapshotKnownIDsSortedLocked)
+	kid knownIDsStore
 
 	// sessionIDToKey is a reverse index from session ID to session key.
 	// Used by RegisterForResume for O(1) deduplication instead of O(n) scan.
@@ -998,7 +976,6 @@ func NewRouter(cfg RouterConfig) *Router {
 		claudeDir:        cfg.ClaudeDir,
 		kiroSessionsDir:  cfg.KiroSessionsDir,
 		storePath:        cfg.StorePath,
-		knownIDs:         make(map[string]bool),
 		sessionIDToKey:   make(map[string]string),
 		spawningKeys:     make(map[string]chan struct{}),
 		shimStuckOnReset: make(map[string]bool),
@@ -1012,6 +989,10 @@ func NewRouter(cfg RouterConfig) *Router {
 	// allocated explicitly since composite-literal sub-struct field init is
 	// not used here (Router P1 facet, #383).
 	r.wsStore.overrides = make(map[string]string)
+	// kid is a value field (no lock of its own); its IDs map must be
+	// allocated explicitly since composite-literal sub-struct field init is
+	// not used here (Router P2 facet, #600).
+	r.kid.ids = make(map[string]bool)
 	// bkStore is a value field (no lock of its own); its config fields and the
 	// backendOverrides map are set post-construction since composite-literal
 	// sub-struct field init is not used here (Router P3 facet, #383).
@@ -1070,10 +1051,10 @@ func NewRouter(cfg RouterConfig) *Router {
 	// On the first overflow post-restart the eviction order is arbitrary,
 	// but subsequent eviction is FIFO again.
 	if loaded := loadKnownIDs(r.storePath); loaded != nil {
-		r.knownIDs = loaded
-		r.knownIDsOrder = make([]string, 0, len(loaded))
+		r.kid.ids = loaded
+		r.kid.order = make([]string, 0, len(loaded))
 		for id := range loaded {
-			r.knownIDsOrder = append(r.knownIDsOrder, id)
+			r.kid.order = append(r.kid.order, id)
 		}
 	}
 
