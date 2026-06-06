@@ -20,7 +20,7 @@ import (
 // + count - 1) % cap(ring)]` is the oldest. ringRead / ringSnapshot
 // translate logical → physical for all consumers.
 type recentCacheEntry struct {
-	mu sync.Mutex
+	mu sync.RWMutex
 	// ring is the fixed-capacity backing array. cap(ring) == runStore.keepCount
 	// after the first warm pass; nil before warm.
 	ring []CronRunSummary
