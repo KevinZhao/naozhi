@@ -12,7 +12,7 @@ import (
 // would keep ID strings + map keys alive indefinitely.
 func TestTrackSessionID_CapsAtMaxKnownIDs(t *testing.T) {
 	r := &Router{
-		knownIDs: make(map[string]bool),
+		kid: knownIDsStore{ids: make(map[string]bool)},
 	}
 
 	// Insert one above the cap to exercise the eviction branch.
@@ -21,10 +21,10 @@ func TestTrackSessionID_CapsAtMaxKnownIDs(t *testing.T) {
 		r.trackSessionID(fmt.Sprintf("sess-%07d", i))
 	}
 
-	if got := len(r.knownIDs); got != maxKnownIDs {
+	if got := len(r.kid.ids); got != maxKnownIDs {
 		t.Errorf("len(knownIDs) = %d, want capped at %d", got, maxKnownIDs)
 	}
-	if got := len(r.knownIDsOrder); got != maxKnownIDs {
+	if got := len(r.kid.order); got != maxKnownIDs {
 		t.Errorf("len(knownIDsOrder) = %d, want capped at %d", got, maxKnownIDs)
 	}
 
@@ -32,12 +32,12 @@ func TestTrackSessionID_CapsAtMaxKnownIDs(t *testing.T) {
 	// freshest insertion must be the slice tail.
 	for i := 0; i < 5; i++ {
 		id := fmt.Sprintf("sess-%07d", i)
-		if r.knownIDs[id] {
+		if r.kid.ids[id] {
 			t.Errorf("oldest ID %q was not evicted", id)
 		}
 	}
 	want := fmt.Sprintf("sess-%07d", total-1)
-	if got := r.knownIDsOrder[len(r.knownIDsOrder)-1]; got != want {
+	if got := r.kid.order[len(r.kid.order)-1]; got != want {
 		t.Errorf("tail = %q, want %q", got, want)
 	}
 }
@@ -48,16 +48,16 @@ func TestTrackSessionID_CapsAtMaxKnownIDs(t *testing.T) {
 // place.
 func TestTrackSessionID_DedupesExisting(t *testing.T) {
 	r := &Router{
-		knownIDs: make(map[string]bool),
+		kid: knownIDsStore{ids: make(map[string]bool)},
 	}
 	r.trackSessionID("dup")
 	r.trackSessionID("dup")
 	r.trackSessionID("dup")
 
-	if got := len(r.knownIDs); got != 1 {
+	if got := len(r.kid.ids); got != 1 {
 		t.Errorf("len(knownIDs) = %d, want 1", got)
 	}
-	if got := len(r.knownIDsOrder); got != 1 {
+	if got := len(r.kid.order); got != 1 {
 		t.Errorf("len(knownIDsOrder) = %d, want 1", got)
 	}
 }

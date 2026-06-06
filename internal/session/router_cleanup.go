@@ -526,12 +526,12 @@ func (r *Router) Cleanup() {
 	// os.CreateTemp, so this throttle is an I/O budget gate, not a
 	// file-level race guard.)
 	var snapshotKnownIDsGen uint64
-	if r.knownIDsDirty && now.Sub(r.knownIDsSavedAt) >= knownIDsSaveInterval {
+	if r.kid.dirty && now.Sub(r.kid.savedAt) >= knownIDsSaveInterval {
 		// R220123-PERF-19 (#1638): sorted snapshot is memoised by gen, so
 		// the O(N log N) sort is skipped when the set is unchanged.
 		knownIDsCopy = r.snapshotKnownIDsSortedLocked()
-		snapshotKnownIDsGen = r.knownIDsGen
-		r.knownIDsSavedAt = now
+		snapshotKnownIDsGen = r.kid.gen
+		r.kid.savedAt = now
 	}
 
 	r.mu.Unlock()
@@ -569,7 +569,7 @@ func (r *Router) Cleanup() {
 		if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
 			slog.Warn("periodic known IDs save failed", "err", err)
 			r.mu.Lock()
-			r.knownIDsSavedAt = time.Time{}
+			r.kid.savedAt = time.Time{}
 			r.mu.Unlock()
 		} else {
 			// Generation counter matches the (sessions | ws-overrides) pattern:
@@ -578,8 +578,8 @@ func (r *Router) Cleanup() {
 			// tick retries. len()-equality alone is insufficient because an
 			// add + evict pair produces identical lengths with different content.
 			r.mu.Lock()
-			if r.knownIDsGen == snapshotKnownIDsGen {
-				r.knownIDsDirty = false
+			if r.kid.gen == snapshotKnownIDsGen {
+				r.kid.dirty = false
 			}
 			r.mu.Unlock()
 		}
@@ -693,7 +693,7 @@ func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, a
 // Cleanup ticks do not discard newly discovered session IDs.
 func (r *Router) saveIfDirty() {
 	// R20260531070014-PERF-9 (#1535): the snapshot phase only READS r.sessions /
-	// r.wsStore.overrides / r.knownIDs and the dirty flags, so take the cheaper
+	// r.wsStore.overrides / r.kid.ids and the dirty flags, so take the cheaper
 	// RLock here instead of the exclusive Lock. The hot GetOrCreate / Send paths
 	// that contend on r.mu can now proceed concurrently with the O(N) map copy
 	// (they only need the write lock briefly to register a session); previously
@@ -701,7 +701,7 @@ func (r *Router) saveIfDirty() {
 	// committing knownIDsSavedAt — is promoted to a short write-locked section
 	// below, only when a knownIDs save is actually due.
 	r.mu.RLock()
-	knownIDsDue := r.knownIDsDirty && time.Since(r.knownIDsSavedAt) >= knownIDsSaveInterval
+	knownIDsDue := r.kid.dirty && time.Since(r.kid.savedAt) >= knownIDsSaveInterval
 	if !r.storeDirty && !r.wsStore.dirty && !knownIDsDue {
 		r.mu.RUnlock()
 		return
@@ -727,7 +727,7 @@ func (r *Router) saveIfDirty() {
 	if knownIDsDue {
 		// R220123-PERF-19 (#1638): memoised sorted snapshot.
 		knownIDsCopy = r.snapshotKnownIDsSortedLocked()
-		snapshotKnownIDsGen = r.knownIDsGen
+		snapshotKnownIDsGen = r.kid.gen
 	}
 	storePath := r.storePath
 	snapshotGen := r.storeGen.Load()
@@ -741,8 +741,8 @@ func (r *Router) saveIfDirty() {
 		// throttle under the exclusive lock so two saveIfDirty/Cleanup ticks
 		// racing past the RLock check do not both stamp + double-write.
 		r.mu.Lock()
-		if r.knownIDsDirty && time.Since(r.knownIDsSavedAt) >= knownIDsSaveInterval {
-			r.knownIDsSavedAt = time.Now()
+		if r.kid.dirty && time.Since(r.kid.savedAt) >= knownIDsSaveInterval {
+			r.kid.savedAt = time.Now()
 		} else {
 			// Lost the race; another tick already claimed this save window.
 			knownIDsCopy = nil
@@ -780,14 +780,14 @@ func (r *Router) saveIfDirty() {
 		if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
 			slog.Warn("periodic known IDs save failed", "err", err)
 			r.mu.Lock()
-			r.knownIDsSavedAt = time.Time{}
+			r.kid.savedAt = time.Time{}
 			r.mu.Unlock()
 		} else {
 			// Match the storeGen/wsStore.gen pattern: only clear dirty if
 			// no concurrent trackSessionID fired since the snapshot.
 			r.mu.Lock()
-			if r.knownIDsGen == snapshotKnownIDsGen {
-				r.knownIDsDirty = false
+			if r.kid.gen == snapshotKnownIDsGen {
+				r.kid.dirty = false
 			}
 			r.mu.Unlock()
 		}
