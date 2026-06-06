@@ -1765,7 +1765,17 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		s.mu.RUnlock()
 		if stillExists {
 			s.registerStubByValue(snap.jobID, snap.workDir, snap.prompt, result.SessionID)
-			lg.Info("cron fresh context: session released after successful run", "session_id", result.SessionID)
+			if result.SessionID == "" {
+				// registerStubByValue chains the stub only when the session ID is
+				// non-empty; an empty ID (process.go normally fills it on the
+				// success frame, so empty here is anomalous) registers a chain-less
+				// stub — the sidebar row survives but has no clickable JSONL
+				// history. Surface it instead of silently registering a dead row.
+				lg.Warn("cron fresh context: session released after successful run but session_id empty; re-registered chain-less stub with no clickable history",
+					"job_id", snap.jobID)
+			} else {
+				lg.Info("cron fresh context: session released after successful run", "session_id", result.SessionID)
+			}
 		} else {
 			lg.Info("cron fresh context: session released; job deleted mid-run, skipping stub re-register",
 				"session_id", result.SessionID)
