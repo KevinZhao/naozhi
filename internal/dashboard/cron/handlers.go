@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -886,15 +887,14 @@ func (h *Handlers) batchRecentRuns(jobs []cronpkg.JobWithNextRun, n int) [][]cro
 		return nil
 	}
 	out := make([][]cronpkg.CronRunSummary, len(jobs))
-	// Tasks queue: each worker pulls the next index and fans out to the
-	// scheduler. Channel-of-int keeps the work distribution self-balancing
-	// — a slow per-job lookup (cold cache, slow disk) does not pin a
-	// single worker on a single job while its peers idle.
-	tasks := make(chan int, len(jobs))
-	for i := range jobs {
-		tasks <- i
-	}
-	close(tasks)
+	// Work distribution: each worker atomically claims the next index and
+	// fans out to the scheduler. An atomic counter keeps the distribution
+	// self-balancing — a slow per-job lookup (cold cache, slow disk) does
+	// not pin a single worker on a single job while its peers idle. Unlike
+	// the previous channel-of-int, no per-call len(jobs)-sized buffer is
+	// allocated (R250-PERF-… / #1847): at 1 Hz on a 50-job install this
+	// drops a fresh 50-int buffered channel every poll.
+	var next atomic.Int64
 	workers := batchRecentRunsWorkers
 	if workers > len(jobs) {
 		workers = len(jobs)
@@ -904,7 +904,11 @@ func (h *Handlers) batchRecentRuns(jobs []cronpkg.JobWithNextRun, n int) [][]cro
 	for w := 0; w < workers; w++ {
 		go func() {
 			defer wg.Done()
-			for idx := range tasks {
+			for {
+				idx := int(next.Add(1)) - 1
+				if idx >= len(jobs) {
+					break
+				}
 				out[idx] = h.scheduler.RecentRuns(jobs[idx].Job.ID, n)
 			}
 		}()
