@@ -14,17 +14,18 @@
 
 ## 为什么选 Naozhi？
 
-大多数 "AI 聊天机器人" 只是 API wrapper。Naozhi 不同 —— 它直接 spawn 本机 Claude Code CLI 作为长生命周期子进程，通过 stdin/stdout 进行原生协议通信，**保留 CLI 的全部能力**：
+大多数 "AI 聊天机器人" 只是 API wrapper。Naozhi 不同 —— 它直接 spawn 本机 AI CLI（Claude Code 或 Kiro）作为长生命周期子进程，通过 stdin/stdout 进行原生协议通信，**保留 CLI 的全部能力**：
 
 - 读写文件、执行 Bash、Git 操作、子 agent 编排
 - 所有已配置的 MCP servers
 - 自定义 system prompt 和 per-agent 模型选择
+- 可插拔 Protocol：Claude `stream-json`（NDJSON）或 Kiro `ACP`（JSON-RPC 2.0）
 
 ```mermaid
 graph TD
     IM["飞书 / Slack / Discord / 微信"]
     GW["Naozhi Gateway<br/>(Go, 单二进制)"]
-    CLI["Claude Code CLI<br/>(长生命周期进程)"]
+    CLI["AI CLI<br/>(Claude / Kiro, 长生命周期进程)"]
     TOOLS["Bash · Read · Edit · Grep<br/>Glob · Agent · MCP servers"]
 
     IM -- "WebSocket / Socket Mode<br/>Gateway / HTTP 长轮询" --> GW
@@ -44,9 +45,11 @@ graph TD
 | **0** | 零基础设施 | 所有平台均支持 WebSocket / 长轮询。无需公网 IP、域名或端口转发 |
 | **1** | 完整 Agent 能力 | 不是 API wrapper，是真正的 Claude Code CLI —— 工具调用、代码编辑、MCP 一个不少 |
 | **2** | 会话自动恢复 | 进程崩溃/回收后自动 `--resume`，对话上下文完整保留 |
-| **3** | 单二进制部署 | Go 编译，无容器、无依赖。6 平台预编译 release |
+| **3** | 单二进制部署 | Go 编译，无容器、无依赖。6 平台预编译 release，内置自动更新 |
 | **4** | 实时 Dashboard | 浏览器实时查看所有会话、事件流、费用统计 |
 | **5** | 多节点 NAT 穿越 | 远程机器反向拨入主节点，统一管理多台工作站 |
+| **6** | 消息队列与抢占 | 忙时消息自动排队/合并，支持 `/stop` 软中断与 `/urgent` 紧急抢占 |
+| **7** | 多 Backend | 同一实例可并存 Claude（stream-json）与 Kiro（ACP），按会话切换 |
 
 ---
 
@@ -94,9 +97,41 @@ graph LR
     style RESUME fill:#fff3cd,stroke:#d4a017
 ```
 
-- **Watchdog 双超时**: 无输出超时 (2min) + 总耗时超时 (5min)，防止进程挂起
-- **容量管理**: 可配置最大并发进程数，满载时自动驱逐最久空闲会话
-- **中断恢复**: 用户发送新消息时自动中断正在运行的 turn (SIGINT)
+- **Watchdog 双超时**: 无输出超时 (默认 2min) + 总耗时超时 (默认 5min)，防止进程挂起
+- **容量管理**: 可配置最大并发进程数 (默认 3)，满载时自动驱逐最久空闲会话
+- **中断恢复**: 用户发送新消息时自动中断正在运行的 turn（软中断 control_request，ACP 回退 SIGINT）
+- **会话自动串联 (auto-chain)**: 同一 workspace 的多个 session 自动接成一条链，Dashboard "load earlier" 可跨 session 边界回溯（默认 7d 窗口 / 32 链长）
+
+### 消息队列与抢占
+
+会话忙碌时，新消息的处理策略可配置（`session.queue.mode`）：
+
+| 模式 | 行为 |
+|------|------|
+| `collect`（默认） | 排队等待当前 turn 完成，settle 延迟后合并为一条后续 prompt |
+| `interrupt` | 每条新消息都自动打断当前 turn，最小化响应延迟（更费 token） |
+| `passthrough` | 每条消息直接转发给 CLI，各自得到独立结果。需 stream-json 后端，ACP 自动回退到 collect |
+
+- **`/stop`**: 软中断当前回复，保留后续排队消息
+- **`/urgent <消息>`**: 紧急打断当前 turn 并优先处理该消息（passthrough 模式下的 `priority:"now"` 抢占）
+
+### 多 Backend
+
+同一个 naozhi 实例可同时挂载多个 CLI flavor：
+
+```yaml
+cli:
+  backend: "claude"          # 默认 backend
+  backends:
+    - id: "claude"           # stream-json 协议
+    - id: "kiro"             # ACP (JSON-RPC 2.0) 协议，自动选择
+      path: "~/.local/bin/kiro-cli"
+      model: "claude-sonnet-4.6"
+```
+
+- Dashboard "new session" 下拉菜单按会话选择 backend
+- API 通过 `/api/sessions/send {"backend": "kiro"}` 覆盖
+- ACP backend 自动处理 `session/new`、`session/cancel` 通知与权限请求
 
 ### 定时任务 (Cron)
 
@@ -142,11 +177,11 @@ graph LR
 
 - 所有会话列表（运行中 / 就绪 / 挂起）+ 实时状态更新
 - 事件流实时推送（thinking、tool_use、agent 调度、结果）
-- 直接在 Dashboard 发送消息、上传文件（图片）
+- 直接在 Dashboard 发送消息、上传文件（图片）、按会话选择 backend
 - 发现并接管外部 Claude CLI 进程（一键 Take Over）
 - 费用统计（per-session 累计 cost）
 - 项目管理（绑定配置、planner 重启）
-- 定时任务管理（创建、暂停、删除）
+- 定时任务管理（顶级视图：创建、暂停、删除、run-now、调度预览）
 
 ### 多节点分布式
 
@@ -177,6 +212,31 @@ graph RL
 - 一键接管：SIGTERM → 等待 → `--resume` 接入 Naozhi 管理
 - 自动首消息接管：检测到外部 session 时自动恢复
 
+### System Session 后台守护
+
+内置后台线程框架（`sysession`），用派生的 transient system session 执行周期性运维任务：
+
+- **auto-titler**: 自动为活跃会话生成标题（达到最小轮次后触发，带重命名节流）
+- **attachment-gc**: 回收超 TTL 且无引用的附件文件（默认 dry-run，先观察 would-remove 日志再开真删）
+
+每个 daemon 独立 `enabled` 开关 + 调度周期，总开关为 `sysession.enabled`。
+
+### 事件日志持久化
+
+除 `sessions.json` 会话目录外，第二层持久化 `~/.naozhi/events/<keyhash>.log`/`.idx` 记录每一条事件 —— 包括 Claude 自身 JSONL 无法恢复的字段：图片缩略图、附件路径、AskQuestion 卡片、agent-team 关联 ID。配合附件引用计数（`.meta` sidecar 记录引用会话哈希 + 最后引用时间），支持基于双 TTL 的精确回收。
+
+### 多语言 (i18n)
+
+用户可见文案支持中英双语（`zh-CN` / `en-US`），按平台 locale 提示 + 消息内容 CJK 比例启发式自动解析（默认 `zh-CN`）。用户锁定的语言不会被自动来源覆盖。
+
+### 自动更新
+
+后台 goroutine 轮询 GitHub Releases，复用 `naozhi upgrade` 的校验流程（下载 → SHA-256 → 原子替换）：
+
+- `notify` — 仅日志 + IM 通知
+- `download`（默认）— 替换二进制，下次重启生效
+- `auto` — 替换并立即重启
+
 ---
 
 ## 快速开始
@@ -201,6 +261,8 @@ curl -fsSL https://raw.githubusercontent.com/KevinZhao/naozhi/master/install.sh 
 ```
 
 卸载：`curl -fsSL ... /install.sh | bash -s -- --uninstall`
+
+升级：`naozhi upgrade`（下载 → SHA-256 校验 → 原子替换；也可在 `config.yaml` 开启后台自动更新）
 
 **其它方式**：从 [Releases](../../releases) 手动下载，或源码编译：
 
@@ -278,6 +340,9 @@ Dashboard: 浏览器打开 `http://localhost:8180`
 | `/research <text>` | 路由到 researcher agent |
 | `/new` | 重置默认 agent 对话 |
 | `/new review` | 重置指定 agent 对话 |
+| `/clear` | 重置会话（同 `/new`） |
+| `/stop` | 中断当前回复，保留后续排队消息 |
+| `/urgent <text>` | 紧急打断并优先处理该消息 |
 | `/cd <path>` | 切换工作目录 |
 | `/pwd` | 显示当前工作目录 |
 | `/project <name>` | 绑定到项目 |
@@ -325,6 +390,14 @@ session:
     no_output_timeout: "2m"               # 无输出超时
     total_timeout: "5m"                   # 单轮总超时
   store_path: "~/.naozhi/sessions.json"
+  queue:                                  # 忙时消息策略
+    mode: "collect"                       # collect | interrupt | passthrough
+    max_depth: 20
+    collect_delay: "500ms"
+  # auto_chain:                           # 同 workspace 会话自动串联（默认开启）
+  #   enabled: true
+  #   window_hours: 168                   # 仅串联 7d 内修改过的 JSONL
+  #   cap: 32
 
 agents:                                   # 自定义 agent
   code-reviewer:
@@ -338,13 +411,30 @@ agent_commands:                           # 命令 → agent 映射
   research: researcher
 
 cron:
-  store_path: "~/.naozhi/cron.json"
+  store_path: "~/.naozhi/cron_jobs.json"
   max_jobs: 50
-  execution_timeout: "5m"
+  execution_timeout: "8h"
+  timezone: "Asia/Shanghai"               # IANA 时区，解释 cron 表达式
+  jitter_max: "2m"                        # 调度抖动上限，拍平并发峰值
+
+sysession:                                # 后台守护进程框架
+  enabled: true
+  daemons:
+    auto-titler:                          # 自动会话标题
+      enabled: true
+    attachment-gc:                        # 附件回收（默认关闭 + dry-run）
+      enabled: false
+      dry_run: true
+
+# update:                                 # 自动更新（轮询 GitHub Releases）
+#   enabled: true
+#   mode: "download"                      # notify | download | auto
+#   interval: "6h"
 
 transcribe:                               # 语音转文字 (Amazon Transcribe)
+  enabled: true
   region: "us-east-1"
-  language: "zh-CN"                       # BCP-47 单语言代码，默认 zh-CN
+  language: "zh-CN,en-US"                 # BCP-47 列表，多语言自动检测
 
 projects:
   root: "/home/user/projects"             # 项目扫描根目录
@@ -446,25 +536,27 @@ git push origin v0.1.0    # GitHub Actions 自动构建 6 平台二进制 + Rele
 ## 项目结构
 
 ```
-cmd/naozhi/              入口 + CLI 命令 (setup, install, version)
+cmd/naozhi/              入口 + CLI 命令 (setup, install, doctor, upgrade, shim)
 internal/
   cli/                   CLI 进程管理 + Protocol 接口 (stream-json / ACP)
   session/               Session 路由 + 并发控制 + TTL 回收 + 持久化
-  server/                HTTP server + Dashboard + WebSocket hub
-  platform/              IM 平台统一接口
-    feishu/              飞书 (WebSocket + Webhook)
-    slack/               Slack (Socket Mode)
-    discord/             Discord (Gateway WebSocket)
-    weixin/              微信 (iLink Bot HTTP 长轮询)
-  cron/                  定时任务调度器
-  project/               项目发现 + Planner 路由
+  dispatch/              消息处理 + slash 命令 + per-session 队列
+  server/                HTTP server + REST API + WebSocket hub
+  dashboard/             Dashboard 视图与资源
+  platform/              IM 平台统一接口 (feishu / slack / discord / weixin)
+  cron/                  定时任务调度器 (robfig/cron)
+  project/ projectapi/   项目发现 + Planner 路由 + 项目 API
+  sysession/             后台守护框架 (auto-titler / attachment-gc)
   discovery/             外部 Claude 进程扫描 + 接管
   transcribe/            语音转文字 (Amazon Transcribe Streaming)
-  connector/             反向连接客户端 (NAT 穿越)
-  reverse/               多节点 WebSocket 协议
-  routing/               命令解析
+  attachment/            附件存储 + 引用计数 GC
+  eventlog/ history/     事件日志持久化 + 历史回放
+  node/ upstream/ wshub/ 多节点协议 + 反向连接 + WebSocket hub
+  selfupdate/            自动更新 (GitHub Releases 轮询 + 校验)
+  shim/                  零停机重启 sidecar 进程
+  i18n/                  多语言文案解析
+  metrics/ runtelemetry/ 指标 + 运行遥测
   config/                YAML 配置 + 环境变量展开
-  pathutil/              路径工具
 deploy/                  systemd service unit
 ```
 
