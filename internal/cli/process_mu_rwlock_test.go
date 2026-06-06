@@ -40,9 +40,9 @@ func TestProcess_ReadsUnderRLock_AllowConcurrency(t *testing.T) {
 	for i := 0; i < readers; i++ {
 		go func() {
 			defer wg.Done()
-			_ = p.GetState()
+			_ = p.State()
 			_ = p.IsRunning()
-			_ = p.GetSessionID()
+			_ = p.SessionID()
 			_ = p.TotalCost()
 			done.Add(1)
 		}()

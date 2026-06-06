@@ -12,7 +12,7 @@ import (
 type NodeAccessor interface {
 	HasNodes() bool
 	NodesSnapshot() map[string]node.Conn
-	GetNode(id string) (node.Conn, bool)
+	NodeByID(id string) (node.Conn, bool)
 	// LookupNode returns the node or writes an HTTP 400 error.
 	LookupNode(w http.ResponseWriter, id string) (node.Conn, bool)
 	KnownNodes() map[string]string // id → displayName, includes disconnected
@@ -46,7 +46,7 @@ func (a *nodeAccessor) NodesSnapshot() map[string]node.Conn {
 	return cp
 }
 
-func (a *nodeAccessor) GetNode(id string) (node.Conn, bool) {
+func (a *nodeAccessor) NodeByID(id string) (node.Conn, bool) {
 	a.mu.RLock()
 	nc, ok := a.nodes[id]
 	a.mu.RUnlock()
@@ -97,7 +97,7 @@ func (a *nodeAccessor) LookupNode(w http.ResponseWriter, id string) (node.Conn, 
 		errResp(w, http.StatusBadRequest, "node_id_invalid", "invalid node id")
 		return nil, false
 	}
-	nc, ok := a.GetNode(id)
+	nc, ok := a.NodeByID(id)
 	if !ok {
 		errResp(w, http.StatusBadRequest, "node_unknown", "unknown node")
 		return nil, false

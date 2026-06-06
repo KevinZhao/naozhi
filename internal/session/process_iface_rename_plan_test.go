@@ -7,10 +7,10 @@ import (
 	"testing"
 )
 
-// TestProcessIfaceGetterRenamePlanned pins the R219-CR-9 (#665) rename
-// plan: processIface currently exposes GetSessionID() / GetState(),
-// which violate the Go convention of dropping the `Get` prefix on
-// accessors. The full rename touches:
+// TestProcessIfaceGetterRenamePlanned pins the R219-CR-9 (#665) rename,
+// completed under ADR-0001 PR-2 (#463): processIface now exposes the
+// idiomatic SessionID() / State() accessors (the `Get` prefix was
+// dropped per the Go convention). The coordinated rename touched:
 //
 //   - internal/session/managed.go (this interface)
 //   - internal/session/testutil.go (TestProcess fake)
@@ -21,12 +21,9 @@ import (
 //   - internal/cli/process.go (the only production *Process implementation)
 //   - internal/cli/process_turn.go, process_event_query.go (cli-internal callers)
 //
-// Until the coordinated breaking-change PR lands, the interface keeps
-// the unidiomatic names. This test asserts the names are still
-// GetState / GetSessionID so a partial / drive-by rename of one half
-// (e.g. just adding new aliases without retiring the old methods)
-// cannot slip in unobserved — when the full rename ships, this test
-// gets flipped (or removed) in the same PR.
+// This test now asserts the new names are present and the old
+// Get-prefixed twins are gone, so a regression that re-introduces a
+// Get* accessor on processIface cannot slip in unobserved.
 func TestProcessIfaceGetterRenamePlanned(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "managed.go", nil, parser.SkipObjectResolution)
@@ -62,31 +59,29 @@ func TestProcessIfaceGetterRenamePlanned(t *testing.T) {
 	}
 
 	want := map[string]bool{
-		"GetSessionID": false,
-		"GetState":     false,
+		"SessionID": false,
+		"State":     false,
 	}
 	for _, m := range iface.Methods.List {
 		for _, n := range m.Names {
 			if _, ok := want[n.Name]; ok {
 				want[n.Name] = true
 			}
-			// If a renamed counterpart appears alongside, the rename
-			// is in flight — flag so the rename PR knows to flip this
-			// test as part of the same change.
-			if n.Name == "SessionID" || n.Name == "State" {
-				t.Errorf("processIface added %q while still keeping the Get-prefixed twin. "+
-					"R219-CR-9 (#665) wants a single coordinated rename; either drop "+
-					"Get* methods in this PR (and update this test to assert SessionID / "+
-					"State are present, GetSessionID / GetState are absent) or do not "+
-					"introduce the new names yet.", n.Name)
+			// The Get-prefixed twins were retired by the ADR-0001 PR-2
+			// (#463) rename. Their reappearance is a regression toward
+			// the unidiomatic naming this guard exists to prevent.
+			if n.Name == "GetSessionID" || n.Name == "GetState" {
+				t.Errorf("processIface re-introduced %q — the ADR-0001 PR-2 (#463) "+
+					"rename dropped the Get prefix (SessionID / State). Keep the "+
+					"idiomatic accessor names; do not re-add Get* twins.", n.Name)
 			}
 		}
 	}
 	for name, found := range want {
 		if !found {
-			t.Errorf("processIface no longer declares %q — was the R219-CR-9 (#665) "+
-				"rename completed? If so, flip this test to assert the new names "+
-				"and remove this check.", name)
+			t.Errorf("processIface no longer declares %q — the ADR-0001 PR-2 (#463) "+
+				"rename established SessionID / State as the canonical accessor "+
+				"names; this guard expects them present.", name)
 		}
 	}
 }

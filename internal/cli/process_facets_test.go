@@ -29,8 +29,8 @@ func TestProcessFacets_SatisfiedByProcess(t *testing.T) {
 	if lc.IsRunning() {
 		t.Error("zero-value Process should not report IsRunning")
 	}
-	if in.GetState() != StateSpawning {
-		t.Errorf("zero-value Process GetState = %v, want StateSpawning", in.GetState())
+	if in.State() != StateSpawning {
+		t.Errorf("zero-value Process GetState = %v, want StateSpawning", in.State())
 	}
 	// io is verified at compile time by the narrowing assignment above;
 	// its methods do shim IO so they are not invoked on a bare Process.

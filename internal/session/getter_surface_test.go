@@ -54,15 +54,11 @@ func TestGetterSurfaceFrozen(t *testing.T) {
 	// guard only flags symbols OUTSIDE the allowlist, never missing ones.
 	allow := map[string]bool{
 		"Get":               true, // scratch.go: *ScratchPool (map-style accessor)
-		"GetSession":        true, // router_core.go: *Router
-		"GetOrCreate":       true, // router_lifecycle.go: *Router
-		"GetWorkspace":      true, // router_workspace.go: *Router
-		"GetSessionBackend": true, // router_backend.go: *Router
+		"GetSession":        true, // router_core.go: *Router (#463 PR-2: SessionFor rename deferred — multi-consumer-interface cluster, see PR notes)
+		"GetOrCreate":       true, // router_lifecycle.go: *Router (get-or-create compound semantics, intentionally retained per ADR-0001 PR-2)
+		"GetWorkspace":      true, // router_workspace.go: *Router (#463 PR-2: rename deferred — multi-consumer-interface cluster)
 		"GetActiveCount":    true, // reserved (#870 lifecycle contract)
 		"GetCurrentBackend": true, // reserved (#870 lifecycle contract)
-		"GetState":          true, // testutil.go TestProcess + cli Process
-		"GetSessionID":      true, // testutil.go TestProcess + cli Process
-		"GetTotalTimeout":   true, // cli Process
 	}
 
 	// repoRoot: this test runs with CWD = internal/session. Walk up to the

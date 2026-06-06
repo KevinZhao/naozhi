@@ -78,7 +78,7 @@ func (f *fakeCapNode) RemoveClient(_ node.EventSink)                 {}
 // or Hub for what is fundamentally a pure dispatch decision.
 type mapLookup map[string]node.Conn
 
-func (m mapLookup) GetNode(id string) (node.Conn, bool) {
+func (m mapLookup) NodeByID(id string) (node.Conn, bool) {
 	nc, ok := m[id]
 	return nc, ok
 }
@@ -265,11 +265,11 @@ func TestHubNodeLookup_Adapter(t *testing.T) {
 		nodesMu: &nodesMu,
 	}
 	lookup := hubNodeLookup{h: h}
-	got, ok := lookup.GetNode("acp")
+	got, ok := lookup.NodeByID("acp")
 	if !ok || got != acp {
 		t.Fatalf("hubNodeLookup miss: ok=%v conn=%v", ok, got)
 	}
-	if _, ok := lookup.GetNode("missing"); ok {
+	if _, ok := lookup.NodeByID("missing"); ok {
 		t.Errorf("hubNodeLookup hit on missing id")
 	}
 }

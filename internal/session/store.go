@@ -191,7 +191,7 @@ func sessionToStoreEntry(s *ManagedSession) (storeEntry, bool) {
 	proc := s.loadProcess()
 	sid := s.getSessionID()
 	if sid == "" && proc != nil {
-		sid = proc.GetSessionID()
+		sid = proc.SessionID()
 	}
 	if sid == "" {
 		return storeEntry{}, false

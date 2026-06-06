@@ -243,7 +243,7 @@ func TestProcess_Send_ResultEvent(t *testing.T) {
 	// Wait for Send goroutine to flip State→Running before injecting the
 	// result; otherwise the stdout arrives while Send is still logging the
 	// user entry / draining stale events and can be mis-sequenced.
-	testhelper.Eventually(t, func() bool { return p.GetState() == StateRunning }, time.Second, "Send did not reach StateRunning")
+	testhelper.Eventually(t, func() bool { return p.State() == StateRunning }, time.Second, "Send did not reach StateRunning")
 	srv.SendStdout(`{"type":"result","result":"answer","session_id":"sess1","total_cost_usd":0.01}`)
 
 	select {
@@ -315,7 +315,7 @@ func TestProcess_Send_ProcessExits(t *testing.T) {
 	}()
 
 	// Wait for Send goroutine to start (State→Running) before faking exit.
-	testhelper.Eventually(t, func() bool { return p.GetState() == StateRunning }, time.Second, "Send did not reach StateRunning")
+	testhelper.Eventually(t, func() bool { return p.State() == StateRunning }, time.Second, "Send did not reach StateRunning")
 	srv.SendCLIExited(1) // exit without result
 
 	select {
@@ -344,7 +344,7 @@ func TestProcess_Send_CapturesSessionID(t *testing.T) {
 	}()
 
 	// Wait for Send goroutine to start before feeding init/result events.
-	testhelper.Eventually(t, func() bool { return p.GetState() == StateRunning }, time.Second, "Send did not reach StateRunning")
+	testhelper.Eventually(t, func() bool { return p.State() == StateRunning }, time.Second, "Send did not reach StateRunning")
 	srv.SendStdout(`{"type":"system","subtype":"init","session_id":"session-abc"}`)
 	srv.SendStdout(`{"type":"result","result":"done","session_id":"session-abc"}`)
 
@@ -357,8 +357,8 @@ func TestProcess_Send_CapturesSessionID(t *testing.T) {
 		t.Fatal("Send timed out")
 	}
 
-	if p.GetSessionID() != "session-abc" {
-		t.Errorf("SessionID = %q, want session-abc", p.GetSessionID())
+	if p.SessionID() != "session-abc" {
+		t.Errorf("SessionID = %q, want session-abc", p.SessionID())
 	}
 }
 
@@ -378,7 +378,7 @@ func TestProcess_Send_UpdatesSessionIDAfterResume(t *testing.T) {
 		_, err := p.Send(context.Background(), "hello", nil, nil)
 		done1 <- err
 	}()
-	testhelper.Eventually(t, func() bool { return p.GetState() == StateRunning }, time.Second,
+	testhelper.Eventually(t, func() bool { return p.State() == StateRunning }, time.Second,
 		"first Send did not reach StateRunning")
 	srv.SendStdout(`{"type":"system","subtype":"init","session_id":"sess-original"}`)
 	srv.SendStdout(`{"type":"result","result":"done","session_id":"sess-original"}`)
@@ -390,7 +390,7 @@ func TestProcess_Send_UpdatesSessionIDAfterResume(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("first Send timed out")
 	}
-	if got := p.GetSessionID(); got != "sess-original" {
+	if got := p.SessionID(); got != "sess-original" {
 		t.Fatalf("after first Send: SessionID = %q, want sess-original", got)
 	}
 
@@ -401,7 +401,7 @@ func TestProcess_Send_UpdatesSessionIDAfterResume(t *testing.T) {
 		_, err := p.Send(context.Background(), "follow-up", nil, nil)
 		done2 <- err
 	}()
-	testhelper.Eventually(t, func() bool { return p.GetState() == StateRunning }, time.Second,
+	testhelper.Eventually(t, func() bool { return p.State() == StateRunning }, time.Second,
 		"second Send did not reach StateRunning")
 	srv.SendStdout(`{"type":"system","subtype":"init","session_id":"sess-resumed"}`)
 	srv.SendStdout(`{"type":"result","result":"done","session_id":"sess-resumed"}`)
@@ -413,7 +413,7 @@ func TestProcess_Send_UpdatesSessionIDAfterResume(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("second Send timed out")
 	}
-	if got := p.GetSessionID(); got != "sess-resumed" {
+	if got := p.SessionID(); got != "sess-resumed" {
 		t.Errorf("after --resume Send: SessionID = %q, want sess-resumed (pre-fix would still be sess-original)", got)
 	}
 }
@@ -441,7 +441,7 @@ func TestProcess_Send_OnEventCallback(t *testing.T) {
 
 	// Wait for Send goroutine to enter the running state before delivering
 	// the thinking/result pair to onEvent.
-	testhelper.Eventually(t, func() bool { return p.GetState() == StateRunning }, time.Second, "Send did not reach StateRunning")
+	testhelper.Eventually(t, func() bool { return p.State() == StateRunning }, time.Second, "Send did not reach StateRunning")
 	srv.SendStdout(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","text":"analyzing"}]}}`)
 	srv.SendStdout(`{"type":"result","result":"done"}`)
 
@@ -479,7 +479,7 @@ func TestProcess_Send_WithImages(t *testing.T) {
 	}()
 
 	// Wait for Send to reach StateRunning before answering.
-	testhelper.Eventually(t, func() bool { return p.GetState() == StateRunning }, time.Second, "Send did not reach StateRunning")
+	testhelper.Eventually(t, func() bool { return p.State() == StateRunning }, time.Second, "Send did not reach StateRunning")
 	srv.SendStdout(`{"type":"result","result":"it is an image"}`)
 
 	select {
@@ -939,11 +939,11 @@ func TestProcess_Accessors(t *testing.T) {
 	p.startReadLoop()
 	defer p.Kill()
 
-	if s := p.GetState(); s != StateReady {
-		t.Errorf("GetState() = %v, want StateReady", s)
+	if s := p.State(); s != StateReady {
+		t.Errorf("State() = %v, want StateReady", s)
 	}
-	if id := p.GetSessionID(); id != "" {
-		t.Errorf("GetSessionID() = %q, want empty", id)
+	if id := p.SessionID(); id != "" {
+		t.Errorf("SessionID() = %q, want empty", id)
 	}
 	if c := p.TotalCost(); c != 0.0 {
 		t.Errorf("TotalCost() = %f, want 0", c)
@@ -954,8 +954,8 @@ func TestProcess_Accessors(t *testing.T) {
 	if pid := p.PID(); pid != 0 {
 		t.Errorf("PID() = %d, want 0", pid)
 	}
-	if tt := p.GetTotalTimeout(); tt != DefaultTotalTimeout {
-		t.Errorf("GetTotalTimeout() = %v, want %v", tt, DefaultTotalTimeout)
+	if tt := p.TotalTimeout(); tt != DefaultTotalTimeout {
+		t.Errorf("TotalTimeout() = %v, want %v", tt, DefaultTotalTimeout)
 	}
 	if seq := p.LastSeq(); seq != 0 {
 		t.Errorf("LastSeq() = %d, want 0", seq)
@@ -968,8 +968,8 @@ func TestProcess_GetTotalTimeout_Custom(t *testing.T) {
 	p.totalTimeout = 3 * time.Minute
 	p.startReadLoop()
 	defer p.Kill()
-	if tt := p.GetTotalTimeout(); tt != 3*time.Minute {
-		t.Errorf("GetTotalTimeout() = %v, want 3m", tt)
+	if tt := p.TotalTimeout(); tt != 3*time.Minute {
+		t.Errorf("TotalTimeout() = %v, want 3m", tt)
 	}
 }
 
@@ -1039,7 +1039,7 @@ func TestProcess_ResultDoesNotFlipStateWithoutReconnect(t *testing.T) {
 		t.Fatal("onTurnDone was called on a non-reconnect result; readLoop must not race Send() for the State transition")
 	case <-time.After(200 * time.Millisecond):
 	}
-	if s := p.GetState(); s != StateRunning {
+	if s := p.State(); s != StateRunning {
 		t.Errorf("State = %v after result without reconnect arm, want StateRunning (Send owns the transition)", s)
 	}
 }

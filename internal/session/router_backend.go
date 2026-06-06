@@ -305,8 +305,8 @@ func (r *Router) SetSessionBackend(key, backend string) {
 	r.bkStore.backendOverrides[key] = backend
 }
 
-// GetSessionBackend returns the backend override for key, or "" if none.
-func (r *Router) GetSessionBackend(key string) string {
+// SessionBackend returns the backend override for key, or "" if none.
+func (r *Router) SessionBackend(key string) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.bkStore.backendOverrides[key]

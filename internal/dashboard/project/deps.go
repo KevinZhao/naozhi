@@ -20,7 +20,7 @@ import (
 type NodeAccessor interface {
 	HasNodes() bool
 	NodesSnapshot() map[string]node.Conn
-	GetNode(id string) (node.Conn, bool)
+	NodeByID(id string) (node.Conn, bool)
 	LookupNode(w http.ResponseWriter, id string) (node.Conn, bool)
 	KnownNodes() map[string]string
 }

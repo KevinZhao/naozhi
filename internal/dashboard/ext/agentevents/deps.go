@@ -16,7 +16,7 @@ import (
 // accept the interface so the sub-package doesn't reverse-import server.
 type NodeAccessor interface {
 	HasNodes() bool
-	GetNode(id string) (node.Conn, bool)
+	NodeByID(id string) (node.Conn, bool)
 	LookupNode(w http.ResponseWriter, id string) (node.Conn, bool)
 	KnownNodes() map[string]string
 }

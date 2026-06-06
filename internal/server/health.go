@@ -272,7 +272,7 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if kn := h.nodeAccess.KnownNodes(); len(kn) > 0 {
 		nodeStatus := make(map[string]string, len(kn))
 		for id := range kn {
-			if nc, ok := h.nodeAccess.GetNode(id); ok {
+			if nc, ok := h.nodeAccess.NodeByID(id); ok {
 				nodeStatus[id] = nc.Status()
 			} else {
 				nodeStatus[id] = "disconnected"

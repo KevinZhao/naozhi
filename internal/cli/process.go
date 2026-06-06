@@ -783,8 +783,8 @@ func (p *Process) closeShimConn() {
 	})
 }
 
-// GetState returns the current process state.
-func (p *Process) GetState() ProcessState {
+// State returns the current process state.
+func (p *Process) State() ProcessState {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.state
@@ -806,8 +806,8 @@ func (p *Process) SetOnTurnDone(fn func()) {
 	p.mu.Unlock()
 }
 
-// GetSessionID returns the session ID in a thread-safe manner.
-func (p *Process) GetSessionID() string {
+// SessionID returns the session ID in a thread-safe manner.
+func (p *Process) SessionID() string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.sessionID
@@ -945,8 +945,8 @@ func (p *Process) PID() int {
 	return p.cliPID
 }
 
-// GetTotalTimeout returns the configured total timeout for a single turn.
-func (p *Process) GetTotalTimeout() time.Duration {
+// TotalTimeout returns the configured total timeout for a single turn.
+func (p *Process) TotalTimeout() time.Duration {
 	if p.totalTimeout > 0 {
 		return p.totalTimeout
 	}
