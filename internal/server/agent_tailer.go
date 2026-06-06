@@ -334,6 +334,17 @@ func (t *agentTailer) finalize(status string) {
 		t.refCount.Store(0)
 		t.mu.Unlock()
 
+		// R20260605B-CORR-3 (#1807): release the persistent transcript fd
+		// eagerly instead of waiting on the *os.File GC finalizer. finalize
+		// is the single teardown funnel for every path (closeTask / idle
+		// reap / Shutdown), and t.closed=true above plus the byTask removal
+		// done by the caller stop the central poller from re-Tailing this
+		// tailer, so the reader will not be reopened. Close() is idempotent
+		// (R233-PERF-4), so a stray late poll that reopens is harmless.
+		if t.reader != nil {
+			_ = t.reader.Close()
+		}
+
 		if status == "" {
 			status = "completed"
 		}

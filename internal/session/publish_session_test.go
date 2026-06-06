@@ -29,12 +29,12 @@ func minimalRouter(t *testing.T) *Router {
 	t.Helper()
 	w := &cli.Wrapper{} // zero-value wrapper; NewHistorySource returns Noop
 	r := &Router{
-		wrapper:        w,
-		defaultBackend: "claude",
-		wrappers:       map[string]*cli.Wrapper{"claude": w},
 		sessions:       map[string]*ManagedSession{},
 		sessionIDToKey: map[string]string{},
 	}
+	r.bkStore.wrapper = w
+	r.bkStore.defaultBackend = "claude"
+	r.bkStore.wrappers = map[string]*cli.Wrapper{"claude": w}
 	return r
 }
 

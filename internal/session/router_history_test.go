@@ -56,18 +56,18 @@ func makeRoutedRouter(t *testing.T, defaultBackend string) (r *Router, claudeSrc
 	})
 
 	r = &Router{
-		sessions: make(map[string]*ManagedSession),
-		wrappers: map[string]*cli.Wrapper{
-			"claude-routed": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude-routed"),
-			"kiro-routed":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro-routed"),
-		},
-		defaultBackend:   defaultBackend,
-		claudeDir:        "/claude/dir",
-		kiroSessionsDir:  "/kiro/dir",
-		backendOverrides: make(map[string]string),
+		sessions:        make(map[string]*ManagedSession),
+		claudeDir:       "/claude/dir",
+		kiroSessionsDir: "/kiro/dir",
 	}
+	r.bkStore.wrappers = map[string]*cli.Wrapper{
+		"claude-routed": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude-routed"),
+		"kiro-routed":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro-routed"),
+	}
+	r.bkStore.defaultBackend = defaultBackend
+	r.bkStore.backendOverrides = make(map[string]string)
 	r.wsStore.overrides = make(map[string]string)
-	r.wrapper = r.wrappers[defaultBackend]
+	r.bkStore.wrapper = r.bkStore.wrappers[defaultBackend]
 	return
 }
 
@@ -142,13 +142,13 @@ func TestAttachHistorySource_FallsBackToDefaultWhenSessionBackendEmpty(t *testin
 func TestAttachHistorySource_NilWrapperUsesNoop(t *testing.T) {
 	t.Parallel()
 	r := &Router{
-		sessions:         make(map[string]*ManagedSession),
-		wrappers:         map[string]*cli.Wrapper{},
-		defaultBackend:   "",
-		backendOverrides: make(map[string]string),
+		sessions: make(map[string]*ManagedSession),
 	}
+	r.bkStore.wrappers = map[string]*cli.Wrapper{}
+	r.bkStore.defaultBackend = ""
+	r.bkStore.backendOverrides = make(map[string]string)
 	r.wsStore.overrides = make(map[string]string)
-	// r.wrapper intentionally nil.
+	// r.bkStore.wrapper intentionally nil.
 
 	s := &ManagedSession{key: "feishu:direct:dave:general"}
 	s.SetBackend("orphan-backend")
@@ -248,16 +248,16 @@ func TestRouter_KiroSessionsDirRoundTrip(t *testing.T) {
 		return cli.NoopHistorySource{}
 	})
 	r := &Router{
-		sessions: make(map[string]*ManagedSession),
-		wrappers: map[string]*cli.Wrapper{
-			"kiro-rt-probe": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro-rt-probe"),
-		},
-		defaultBackend:   "kiro-rt-probe",
-		kiroSessionsDir:  "/the/kiro/dir",
-		backendOverrides: make(map[string]string),
+		sessions:        make(map[string]*ManagedSession),
+		kiroSessionsDir: "/the/kiro/dir",
 	}
+	r.bkStore.wrappers = map[string]*cli.Wrapper{
+		"kiro-rt-probe": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro-rt-probe"),
+	}
+	r.bkStore.defaultBackend = "kiro-rt-probe"
+	r.bkStore.backendOverrides = make(map[string]string)
 	r.wsStore.overrides = make(map[string]string)
-	r.wrapper = r.wrappers["kiro-rt-probe"]
+	r.bkStore.wrapper = r.bkStore.wrappers["kiro-rt-probe"]
 
 	s := &ManagedSession{key: "feishu:direct:greta:general"}
 	s.SetBackend("kiro-rt-probe")
@@ -280,18 +280,18 @@ func TestRouter_KiroSessionsDirRoundTrip(t *testing.T) {
 func TestAttachHistorySource_KiroBackendUsesKirojsonl(t *testing.T) {
 	t.Parallel()
 	r := &Router{
-		sessions: make(map[string]*ManagedSession),
-		wrappers: map[string]*cli.Wrapper{
-			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
-			"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
-		},
-		defaultBackend:   "claude",
-		claudeDir:        "/claude/dir",
-		kiroSessionsDir:  "/kiro/sessions/cli",
-		backendOverrides: make(map[string]string),
+		sessions:        make(map[string]*ManagedSession),
+		claudeDir:       "/claude/dir",
+		kiroSessionsDir: "/kiro/sessions/cli",
 	}
+	r.bkStore.wrappers = map[string]*cli.Wrapper{
+		"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+		"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
+	}
+	r.bkStore.defaultBackend = "claude"
+	r.bkStore.backendOverrides = make(map[string]string)
 	r.wsStore.overrides = make(map[string]string)
-	r.wrapper = r.wrappers["claude"]
+	r.bkStore.wrapper = r.bkStore.wrappers["claude"]
 
 	s := &ManagedSession{key: "feishu:direct:harry:general"}
 	s.SetBackend("kiro")

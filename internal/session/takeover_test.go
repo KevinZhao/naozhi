@@ -29,7 +29,7 @@ import (
 func newTakeoverTestRouter(maxProcs int) *Router {
 	r := newTestRouter(maxProcs)
 	r.wsStore.overrides = map[string]string{}
-	r.backendOverrides = map[string]string{}
+	r.bkStore.backendOverrides = map[string]string{}
 	r.sessionIDToKey = map[string]string{}
 	r.spawningKeys = map[string]chan struct{}{}
 	return r

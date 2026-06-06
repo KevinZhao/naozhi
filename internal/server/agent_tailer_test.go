@@ -334,6 +334,82 @@ func drainChan(out <-chan node.ServerMsg, dur time.Duration) {
 	}
 }
 
+// countOpenFDsForPath returns how many of this process's open file
+// descriptors currently point at the given absolute path, by resolving the
+// /proc/self/fd symlinks. Linux-only; callers should t.Skip elsewhere.
+func countOpenFDsForPath(t *testing.T, target string) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("/proc/self/fd unavailable (%v); fd-leak assertion is Linux-only", err)
+	}
+	want, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		want = target
+	}
+	n := 0
+	for _, e := range entries {
+		link, err := os.Readlink(filepath.Join("/proc/self/fd", e.Name()))
+		if err != nil {
+			continue
+		}
+		if resolved, err := filepath.EvalSymlinks(link); err == nil {
+			link = resolved
+		}
+		if link == want {
+			n++
+		}
+	}
+	return n
+}
+
+// TestTailer_FinalizeClosesReaderFD is the R20260605B-CORR-3 (#1807)
+// regression guard: every teardown path funnels through agentTailer.finalize,
+// which must call reader.Close() to release the persistent transcript fd
+// eagerly instead of leaving it for the *os.File GC finalizer. We open the fd
+// via a poll, then run the teardown and assert no open fd still points at the
+// jsonl path.
+func TestTailer_FinalizeClosesReaderFD(t *testing.T) {
+	if _, err := os.Stat("/proc/self/fd"); err != nil {
+		t.Skip("fd-leak assertion is Linux-only")
+	}
+	dir := t.TempDir()
+	path := writeJSONL(t, dir, "x", false)
+
+	t.Run("closeTask", func(t *testing.T) {
+		r := newTailerRegistry(nil)
+		defer r.Shutdown()
+		tl, ok := r.ensureTailer("k", "t1", "toolu", path)
+		if !ok {
+			t.Fatal("ensureTailer failed")
+		}
+		tl.pollOnce() // opens the persistent fd
+		if got := countOpenFDsForPath(t, path); got == 0 {
+			t.Fatalf("expected the transcript fd to be open after pollOnce, got 0")
+		}
+		r.closeTask("k", "t1", "completed")
+		if got := countOpenFDsForPath(t, path); got != 0 {
+			t.Errorf("closeTask leaked %d open fd(s) for the transcript; finalize must Close the reader", got)
+		}
+	})
+
+	t.Run("shutdown", func(t *testing.T) {
+		r := newTailerRegistry(nil)
+		tl, ok := r.ensureTailer("k", "t2", "toolu", path)
+		if !ok {
+			t.Fatal("ensureTailer failed")
+		}
+		tl.pollOnce()
+		if got := countOpenFDsForPath(t, path); got == 0 {
+			t.Fatalf("expected the transcript fd to be open after pollOnce, got 0")
+		}
+		r.Shutdown()
+		if got := countOpenFDsForPath(t, path); got != 0 {
+			t.Errorf("Shutdown leaked %d open fd(s) for the transcript; finalize must Close the reader", got)
+		}
+	})
+}
+
 // itoaSmall without fmt to keep this file lean (fmt import is already allowed,
 // but this is a micro-helper that's easier to read inline).
 func itoaSmall(n int) string {

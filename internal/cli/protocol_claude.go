@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -282,6 +283,44 @@ func (p *ClaudeProtocol) WriteMessage(w io.Writer, text string, images []ImageDa
 	return p.WriteUserMessageLocked(w, "", text, images, "")
 }
 
+// userMsgEnc bundles a *bytes.Buffer + *json.Encoder so WriteUserMessageLocked
+// can encode each user message into a pooled buffer instead of paying a fresh
+// json.Marshal encodeState + output []byte allocation per send (R20260606-PERF-2
+// / #1826). Mirrors process_shim_io.go's shimSendBufPool, but this encoder keeps
+// the default HTML escaping (escape ON) so the produced bytes are byte-identical
+// to the previous json.Marshal(msg) path — the shimSendBufPool encoder disables
+// HTML escaping and could not be reused here without changing the wire payload
+// for messages containing '<', '>', or '&'.
+type userMsgEnc struct {
+	buf *bytes.Buffer
+	enc *json.Encoder
+}
+
+// userMsgEncPool recycles encoder/buffer pairs across user-message sends. The
+// Encoder holds the *bytes.Buffer by pointer, so a Reset between uses is safe.
+var userMsgEncPool = sync.Pool{
+	New: func() any {
+		buf := new(bytes.Buffer)
+		// Default escaping (HTML escape ON) — matches encoding/json.Marshal so
+		// the output stays byte-for-byte identical to the prior Marshal path.
+		enc := json.NewEncoder(buf)
+		return &userMsgEnc{buf: buf, enc: enc}
+	},
+}
+
+// userMsgEncMaxCap caps the pooled buffer capacity. Image-bearing user messages
+// (base64 thumbnails up to ~400KB) inflate the buffer; oversized entries are
+// dropped on Put so the pool does not retain large backing arrays. Mirrors
+// shimSendBufMaxCap / acpEncBufMaxCap.
+const userMsgEncMaxCap = 64 * 1024
+
+func putUserMsgEnc(e *userMsgEnc) {
+	if e.buf.Cap() > userMsgEncMaxCap {
+		return
+	}
+	userMsgEncPool.Put(e)
+}
+
 // WriteUserMessageLocked writes a user message with optional uuid + priority.
 // Caller must already hold Process.shimWMu (see protocol.go interface doc).
 //
@@ -290,12 +329,21 @@ func (p *ClaudeProtocol) WriteMessage(w io.Writer, text string, images []ImageDa
 // safe for tests and ACP-backed stream-json paths that never set them.
 func (p *ClaudeProtocol) WriteUserMessageLocked(w io.Writer, uuid, text string, images []ImageData, priority string) error {
 	msg := NewUserMessageWithMeta(text, images, uuid, priority)
-	data, err := json.Marshal(msg)
-	if err != nil {
+	// R20260606-PERF-2 (#1826): encode through a pooled json.Encoder +
+	// bytes.Buffer instead of json.Marshal, dropping the per-send encodeState
+	// + output []byte allocation. json.Encoder.Encode appends a trailing '\n'
+	// itself — exactly the newline the old json.Marshal path appended manually
+	// — so the written bytes are unchanged.
+	em := userMsgEncPool.Get().(*userMsgEnc)
+	em.buf.Reset()
+	if err := em.enc.Encode(msg); err != nil {
+		// A failed Encode may leave the encoder/buffer in an undefined state;
+		// drop this entry (let GC reclaim it) rather than returning it to the
+		// pool, matching encodeShimMsg's failure handling.
 		return err
 	}
-	data = append(data, '\n')
-	_, err = w.Write(data)
+	_, err := w.Write(em.buf.Bytes())
+	putUserMsgEnc(em)
 	return err
 }
 
@@ -324,20 +372,14 @@ func (p *ClaudeProtocol) Capabilities() Caps {
 // caller rather than reintroducing orphan types.
 
 func (p *ClaudeProtocol) WriteInterrupt(w io.Writer, requestID string) error {
-	// R228-PERF-1: hand-build the static envelope and only json.Marshal the
-	// variable requestID, mirroring the ACP WriteInterrupt fast-path
-	// (R226-PERF-9). encoding/json takes a fast-path for plain string values
-	// (no struct reflection) and yields a properly escaped JSON string with
-	// surrounding quotes — identical to what the previous struct-based
-	// Marshal produced for the request_id field.
-	idJSON, err := json.Marshal(requestID)
-	if err != nil {
-		return fmt.Errorf("marshal control_request: %w", err)
-	}
+	// R20260606-PERF-10: use appendJSONStringBytes (same package) to quote
+	// requestID directly into a stack buffer, avoiding the json.Marshal heap
+	// alloc. appendJSONStringBytes escapes only `"`, `\`, C0 controls, and
+	// U+2028/U+2029 — identical output to json.Marshal for a UUID string.
 	var buf [256]byte
 	out := buf[:0]
 	out = append(out, `{"type":"control_request","request_id":`...)
-	out = append(out, idJSON...)
+	out = appendJSONStringBytes(out, []byte(requestID))
 	out = append(out, `,"request":{"subtype":"interrupt"}}`...)
 	out = append(out, '\n')
 	if _, err := w.Write(out); err != nil {

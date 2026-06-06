@@ -246,11 +246,19 @@ func (t *Tracker) OnSessionRemoved(ctx context.Context, keyhash, workspace strin
 	case <-t.closeCh:
 		return ErrTrackerClosed
 	}
+	// R20260605B-CORR-16: the first select picks uniformly among ready
+	// cases, so when Stop() has closed closeCh AND t.in still has buffer
+	// space, ~50% of the time the job is buffered into t.in after run()
+	// has already drained-and-exited — nothing will ever write done. The
+	// closeCh case here lets us return ErrTrackerClosed immediately rather
+	// than blocking for the full ctx budget (a 5s shutdown stall).
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-t.closeCh:
+		return ErrTrackerClosed
 	}
 }
 
@@ -270,11 +278,16 @@ func (t *Tracker) Flush(ctx context.Context) error {
 	case <-t.closeCh:
 		return ErrTrackerClosed
 	}
+	// R20260605B-CORR-16: same drain-then-buffer race as OnSessionRemoved —
+	// cover the closed case so a lost job returns ErrTrackerClosed at once
+	// instead of stalling for the full ctx timeout.
 	select {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-t.closeCh:
+		return ErrTrackerClosed
 	}
 }
 
