@@ -71,6 +71,13 @@ var ErrNoCLIWrapper = errors.New("no CLI wrapper configured")
 // "处理失败，请 /new 重置" fallback in dispatch.mapSendError.
 var ErrNoActiveProcess = errors.New("session has no active process")
 
+// ErrRouterStopped is returned by spawnSession (and therefore by GetOrCreate /
+// Takeover / ResetAndRecreate) once Router.Shutdown has set the stopped gate.
+// It signals that the Router is shutting down and refuses to install new
+// sessions, closing the spawn-after-snapshot leak window (#1822, Option B).
+// Callers already propagate spawn errors, so no bespoke Is-handling is needed.
+var ErrRouterStopped = errors.New("router is shutting down")
+
 // exemptKeyPrefixes lists the session-key namespaces that are exempt from
 // TTL expiry, LRU eviction, and the active-process counter. Derived from
 // keyNamespaces (key.go) so the reserved + exempt lists share a single
@@ -518,6 +525,20 @@ type Router struct {
 	// on its own but noisy) and double-detach shim processes. R49-REL-SHUTDOWN-ONCE.
 	// 读写: cleanup (Shutdown)
 	shutdownOnce sync.Once
+
+	// stopped is set true (under r.mu, inside Shutdown) immediately before the
+	// session snapshot is taken, and gates spawnSession: any spawn that arrives
+	// after Shutdown's snapshot observes stopped=true and is rejected with
+	// ErrRouterStopped instead of installing a fresh shim+CLI that the snapshot
+	// already missed (which would leak the subtree and emit events to a
+	// persister Shutdown is about to Stop). The set-before-snapshot-under-the-
+	// same-r.mu ordering makes the gate and the snapshot mutually exclusive,
+	// eliminating the TOCTOU window. Set once, never cleared — a Router is not
+	// reusable after Shutdown. atomic.Bool so the gate read needs no extra
+	// synchronization beyond the r.mu the spawnSession callers already hold.
+	// #1822 (Option B).
+	// 读写: cleanup (Shutdown Store under r.mu), lifecycle (spawnSession Load under r.mu)
+	stopped atomic.Bool
 
 	// eventLogDir is the directory naozhi's per-session event log files
 	// live under. Empty disables the event log persistence entirely —

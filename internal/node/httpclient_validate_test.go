@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidatePeerURL(t *testing.T) {
@@ -122,6 +124,93 @@ func TestIsBlockedPeerAddr(t *testing.T) {
 				t.Errorf("isBlockedPeerAddr(%s) = %v; want %v", tt.addr, got, tt.blocked)
 			}
 		})
+	}
+}
+
+// TestIsLocalPeerURL covers R20260606-SEC-5 (#1825): loopback and RFC1918/ULA
+// literal hosts are classified local (body-capped), public literals and DNS
+// hostnames are not.
+func TestIsLocalPeerURL(t *testing.T) {
+	tests := []struct {
+		url  string
+		want bool
+	}{
+		{"http://127.0.0.1:8180", true},
+		{"http://[::1]:8180", true},
+		{"http://10.0.0.2:8180", true},
+		{"http://192.168.1.5:8180", true},
+		{"http://172.16.4.4:443", true},
+		{"http://[fd00::1]:8180", true},      // ULA
+		{"http://8.8.8.8:53", false},         // public
+		{"https://peer.example:8180", false}, // DNS hostname
+		{"http://172.32.0.1:8180", false},    // just outside RFC1918
+		{"not a url", false},
+	}
+	for _, tt := range tests {
+		if got := isLocalPeerURL(tt.url); got != tt.want {
+			t.Errorf("isLocalPeerURL(%q) = %v; want %v", tt.url, got, tt.want)
+		}
+	}
+}
+
+// TestDoRequest_LocalPeerBodyCap is the #1825 SSRF-write guard: a loopback
+// peer accepts a small body (legitimate proxy payload) but refuses an
+// over-cap body before the Bearer token leaves the host. A public peer is
+// uncapped.
+func TestDoRequest_LocalPeerBodyCap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	c := newTestHTTPClient(t, srv, "tok") // httptest = 127.0.0.1 → local peer
+	if !c.localPeer {
+		t.Fatalf("loopback peer should be classified localPeer")
+	}
+
+	// Small body passes through to the server.
+	small := bytes.NewReader(make([]byte, 1024))
+	resp, err := c.doRequest(context.Background(), http.MethodPost, "/api/sessions/send", small)
+	if err != nil {
+		t.Fatalf("small body to local peer should succeed: %v", err)
+	}
+	resp.Body.Close()
+
+	// Over-cap body is refused before any request is sent.
+	big := bytes.NewReader(make([]byte, maxLocalPeerBodyBytes+1))
+	if _, err := c.doRequest(context.Background(), http.MethodPost, "/api/sessions/send", big); err == nil {
+		t.Fatalf("over-cap body to local peer should be refused")
+	} else if !strings.Contains(err.Error(), "SSRF-write guard") {
+		t.Errorf("error %q should mention the SSRF-write guard", err)
+	}
+
+	// GET with no body is never capped (ContentLength 0).
+	if _, err := c.doRequest(context.Background(), http.MethodGet, "/api/sessions", nil); err != nil {
+		t.Errorf("bodyless GET to local peer should not be capped: %v", err)
+	}
+}
+
+// TestDoRequest_PublicPeerUncapped confirms the body cap is local-only: a
+// public peer (non-loopback/non-private literal) sends an over-cap body
+// without the #1825 refusal. We point at a closed port so the request fails
+// at dial — but crucially NOT with the body-cap error.
+func TestDoRequest_PublicPeerUncapped(t *testing.T) {
+	// 8.8.8.8:1 — public literal, classified non-local. We never actually
+	// want a live connection; a short context deadline makes the dial fail
+	// fast. The assertion is only that the failure is not the cap refusal.
+	c := NewHTTPClient("pub", "http://8.8.8.8:1", "tok", "Pub")
+	if c.urlErr != nil {
+		t.Fatalf("public peer URL unexpectedly rejected: %v", c.urlErr)
+	}
+	if c.localPeer {
+		t.Fatalf("public peer must not be classified localPeer")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	big := bytes.NewReader(make([]byte, maxLocalPeerBodyBytes+1))
+	_, err := c.doRequest(ctx, http.MethodPost, "/api/sessions/send", big)
+	if err != nil && strings.Contains(err.Error(), "SSRF-write guard") {
+		t.Errorf("public peer must not trigger the local body cap; got %v", err)
 	}
 }
 
