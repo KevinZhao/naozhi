@@ -639,6 +639,24 @@ func (r *Router) markSpawnDoneLocked(key string, ch chan struct{}) {
 // goroutines during slow protocol init (e.g. ACP handshake). Callers MUST NOT
 // hold any other lock when invoking; the defer reacquires r.mu only.
 func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, opts AgentOpts) (*ManagedSession, error) {
+	// #1822 (Option B): spawnSession is the single funnel for all reverse-RPC
+	// spawn paths (send/takeover/restart_planner via GetOrCreate / Takeover /
+	// ResetAndRecreate). Reject any spawn once Shutdown has published the
+	// stopped gate, so a spawn arriving after Shutdown's snapshot cannot install
+	// a fresh shim+CLI that the snapshot already missed (leaked subtree + writes
+	// to a persister Shutdown is about to Stop). r.stopped is set under r.mu
+	// immediately before that snapshot, and we read it here with r.mu held on
+	// entry — gate and snapshot are mutually exclusive, eliminating the TOCTOU.
+	//
+	// This check sits BEFORE the spawningKeys lazy-init / done-channel defer so
+	// no guard channel is installed and no markSpawnDone defer is left dangling.
+	// It follows the unlock-on-error convention shared by every error path
+	// below: r.mu is held on entry and must be released before returning.
+	if r.stopped.Load() {
+		r.mu.Unlock()
+		return nil, ErrRouterStopped
+	}
+
 	// Mark this key as spawning so ReconnectShims does not mistake the freshly
 	// started shim's state file for an orphan. Every return path below leaves
 	// r.mu unlocked, so the defer reacquires it to delete the marker. Lazy
