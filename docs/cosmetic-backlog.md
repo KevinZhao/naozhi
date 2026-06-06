@@ -548,3 +548,11 @@
 - [R20260604-ARCH-2] dispatch 直接依赖 cron.Job/NewJob/ClassifyError 域类型（裸耦合） — internal/dispatch/dispatch.go:113
 - [R20260604-PERF-3] discovery_cache.snapshot() 每次 dashboard poll 全量 copy []DiscoveredSession — internal/server/discovery_cache.go:275
 - [R20260604-PERF-21] evictedPIDs map 在无 takeover 时不被 GC（应移入 tryShortCircuit 修剪） — internal/server/discovery_cache.go:167
+- [R20260606-GO-3] testing 包 import 在生产文件 runstore.go — internal/cron/runstore.go:20 (Go 1.21+ 官方支持，design risk)
+- [R20260606-GO-4] containsSessionID range 内非 defer RUnlock 维护脆弱 — internal/cron/scheduler_session.go:157
+- [R20260606-GO-5] lockedJobOp 把 ErrJobNotFound 存进 r.perr 语义重载 — internal/cron/scheduler_jobs.go:864
+- [R20260606-GO-6] knownSessionsCache.publish 用 time.Now 而非 build-start TTL 轻微漂移 — internal/cron/scheduler.go:724
+- [R20260606-CORR-5] runStore.List limit>keepCount 静默截断无 debug 日志 — internal/cron/runstore.go:1256
+- [R20260606-SEC-12] memory handler 构造期 os.Getwd 固定 currentProject 非 session workspace — internal/memory/handler.go:166
+- [R20260606-PERF-13] storeAtomicString 每事件堆分配 string header — internal/cli/eventlog_append.go:167
+- [R20260606-PERF-14] drainInChannel 首批仍无条件调 time.Now — internal/eventlog/persist/persister.go:1157

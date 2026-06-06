@@ -324,20 +324,14 @@ func (p *ClaudeProtocol) Capabilities() Caps {
 // caller rather than reintroducing orphan types.
 
 func (p *ClaudeProtocol) WriteInterrupt(w io.Writer, requestID string) error {
-	// R228-PERF-1: hand-build the static envelope and only json.Marshal the
-	// variable requestID, mirroring the ACP WriteInterrupt fast-path
-	// (R226-PERF-9). encoding/json takes a fast-path for plain string values
-	// (no struct reflection) and yields a properly escaped JSON string with
-	// surrounding quotes — identical to what the previous struct-based
-	// Marshal produced for the request_id field.
-	idJSON, err := json.Marshal(requestID)
-	if err != nil {
-		return fmt.Errorf("marshal control_request: %w", err)
-	}
+	// R20260606-PERF-10: use appendJSONStringBytes (same package) to quote
+	// requestID directly into a stack buffer, avoiding the json.Marshal heap
+	// alloc. appendJSONStringBytes escapes only `"`, `\`, C0 controls, and
+	// U+2028/U+2029 — identical output to json.Marshal for a UUID string.
 	var buf [256]byte
 	out := buf[:0]
 	out = append(out, `{"type":"control_request","request_id":`...)
-	out = append(out, idJSON...)
+	out = appendJSONStringBytes(out, []byte(requestID))
 	out = append(out, `,"request":{"subtype":"interrupt"}}`...)
 	out = append(out, '\n')
 	if _, err := w.Write(out); err != nil {
