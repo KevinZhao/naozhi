@@ -368,6 +368,14 @@ function setActivityView(view) {
   if (sm) sm.hidden = view !== 'settings';
   // Tear down the previous view if it owns external state.
   if (prev === 'assets' && view !== 'assets' && window.nzAssetView) window.nzAssetView.hide();
+  // Leaving chat: close any docked preview / 追问 drawer. They are position:fixed
+  // siblings of .container with no nz-view-* hide rule, so without this they
+  // float over the assets/cron/settings view and leave the split padding
+  // reserved. Both close paths run nzSplitExit, clearing nz-split-open.
+  if (prev === 'chat' && view !== 'chat') {
+    if (typeof closeFilePreview === 'function') closeFilePreview();
+    if (typeof window.__closeScratchDrawer === 'function') window.__closeScratchDrawer();
+  }
   // Enter the target view.
   if (view === 'assets') { if (window.nzAssetView) window.nzAssetView.show(); }
   else if (view === 'cron') { openCronPanel(); }
@@ -15526,6 +15534,25 @@ async function doEditCronJob(id) {
       preserveBottom(wasBottom);
     });
   }
+
+  // Re-clamp the strip when the viewport shrinks. clampW otherwise only runs
+  // on drag/dblclick/cold-load, so narrowing the window with the split open
+  // (or after restoring a width saved on a wider monitor) could leave
+  // --nz-split-w wider than innerWidth-MIN_LEFT — padding-right would then
+  // exceed the viewport and crush the transcript. Only re-apply while the
+  // split is actually open so we never clobber a saved wide value before it
+  // is used. Reads the current var (not the saved one) so an in-session drag
+  // is respected; clampW caps it to the new viewport. Re-pins the bottom if
+  // the user was there. No-op on mobile (split never open there).
+  window.addEventListener('resize', function() {
+    if (!document.body.classList.contains('nz-split-open')) return;
+    const cur = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--nz-split-w')) || DEFAULT_W;
+    const clamped = clampW(cur);
+    if (clamped === cur) return;
+    const wasBottom = eventsAtBottom();
+    applyW(clamped);
+    preserveBottom(wasBottom);
+  });
 })();
 
 /* ===== Sidebar fully-collapse (PC only) =====
@@ -16379,6 +16406,12 @@ initSidebarSearch();
   window.__getActiveScratchKey = function() {
     return (state && state.key) ? state.key : '';
   };
+
+  // Exposed so the view-router (setActivityView) can tear the 追问 drawer down
+  // when leaving the chat view — the drawer is position:fixed and would
+  // otherwise float over assets/cron/settings. closeScratch handles the
+  // no-op-when-closed case internally.
+  window.__closeScratchDrawer = function() { closeScratch(true); };
 
   // Expose the global used by the ↗ button in eventHtml.
   window.askAside = function(btn) {

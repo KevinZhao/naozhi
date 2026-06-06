@@ -719,15 +719,21 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
    every rule here is gated behind the ≥769px breakpoint. */
 :root{--nz-split-w:480px}
 #split-resizer{display:none}
+/* The split docks the preview / 追问 drawers, which only exist in the chat
+   view. The padding-right + seam are therefore scoped to chat (body carries
+   NONE of the nz-view-* classes); without this guard, switching to the
+   assets / cron / settings views while a drawer is open would squeeze those
+   (drawer-less) views into the left strip and reserve an empty right strip.
+   The .nz-split-chat shorthand keeps the long :not() chain in one place. */
 @media(min-width:769px){
-  body.nz-split-open .container{padding-right:var(--nz-split-w)}
+  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) .container{padding-right:var(--nz-split-w)}
   /* Docked drawers fill the reserved strip and drop the floating shadow —
      the border-left now reads as the split seam, not a drawer edge. */
-  body.nz-split-open .fv-drawer.fv-open,
-  body.nz-split-open .aside-drawer.visible{width:var(--nz-split-w);box-shadow:none}
+  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) .fv-drawer.fv-open,
+  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) .aside-drawer.visible{width:var(--nz-split-w);box-shadow:none}
   /* Draggable seam. Sits exactly on the left edge of the reserved strip,
      above the drawer (z-index 200) so the hit area is never occluded. */
-  body.nz-split-open #split-resizer{display:block;position:fixed;top:0;bottom:0;right:var(--nz-split-w);width:6px;margin-right:-3px;cursor:col-resize;z-index:201;background:transparent;transition:background .15s}
+  body.nz-split-open:not(.nz-view-assets):not(.nz-view-cron):not(.nz-view-settings) #split-resizer{display:block;position:fixed;top:0;bottom:0;right:var(--nz-split-w);width:6px;margin-right:-3px;cursor:col-resize;z-index:201;background:transparent;transition:background .15s}
   body.nz-split-open #split-resizer:hover,#split-resizer.dragging{background:var(--nz-accent)}
 }
 
@@ -803,7 +809,10 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
 .event.tool_result .tr-persisted:hover{background:var(--nz-bg-2)}
 
 /* Toast */
-.toast{position:fixed;bottom:20px;right:20px;background:var(--nz-red);color:#fff;padding:8px 16px;border-radius:var(--nz-radius-md);font-size:var(--nz-fs-base);z-index:100;opacity:0;pointer-events:none;transition:opacity .3s}
+/* z-index 210 keeps the toast above a docked split drawer (z-index 200) so
+   feedback (errors, "copied", cron results) stays visible while a preview /
+   追问 pane occupies the right strip; still below ctx-menu (211). */
+.toast{position:fixed;bottom:20px;right:20px;background:var(--nz-red);color:#fff;padding:8px 16px;border-radius:var(--nz-radius-md);font-size:var(--nz-fs-base);z-index:210;opacity:0;pointer-events:none;transition:opacity .3s}
 .toast.show{opacity:1;pointer-events:auto}
 /* RNEW-UX-010 — visually hidden live region for assistive tech. Uses the
    standard "sr-only" recipe: in flow but clipped to 1x1, so screen readers
