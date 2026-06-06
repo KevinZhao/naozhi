@@ -329,15 +329,25 @@ type Persister struct {
 	writers map[string]*perKeyWriter
 
 	// dropping tracks stems whose on-disk files are mid-removal by the
-	// async goroutine spawned in handleOp(opDrop). The mapped channel is
-	// closed by that goroutine once removeKeyFiles returns, so writerFor
-	// can block on it to guarantee a same-key recreation's O_CREATE lands
-	// strictly AFTER the unlink — otherwise a slow os.Remove could race
-	// the recreated file and delete it (#1774). The map is mutated ONLY on
-	// the run goroutine (insert in handleOp, delete in opDropDone); the
-	// channel value is closed by the async goroutine. Nil-safe: an absent
-	// key means no removal is in flight.
-	dropping map[string]chan struct{}
+	// async goroutine spawned in handleOp(opDrop). The per-stem `done`
+	// channel is closed by that goroutine once removeKeyFiles returns; the
+	// run goroutine's opDropDone case then replays any deferred batches and
+	// deletes the entry. This guarantees a same-key recreation's O_CREATE
+	// lands strictly AFTER the unlink — otherwise a slow os.Remove could
+	// race the recreated file and delete it (#1774).
+	//
+	// R20260606 (#1848): handleBatch must NOT block the single writer
+	// goroutine on the per-stem channel while an unlink is in flight (a slow
+	// FUSE/NFS os.Remove would stall every other session's persistence and
+	// drop their batches). Instead, batches that arrive for a dropping stem
+	// are deferred into dropState.pending and replayed in arrival order on
+	// opDropDone, after the unlink completes — preserving the
+	// remove-before-recreate invariant without ever blocking run. The map is
+	// mutated ONLY on the run goroutine (insert in handleOp, pending append
+	// in handleBatch, replay+delete in opDropDone); the `done` channel is
+	// closed by the async goroutine. Nil-safe: an absent key means no
+	// removal is in flight.
+	dropping map[string]*dropState
 
 	// fs is the filesystem classification captured at startup. Never
 	// mutated after NewPersister returns — exposing a changing value
@@ -419,6 +429,32 @@ type batchJob struct {
 	arena   *batchArena
 }
 
+// dropState is the per-stem bookkeeping for an in-flight async unlink
+// (#1774, #1848). It pairs the completion channel (closed by the
+// removeKeyFiles goroutine) with a FIFO of batchJobs that arrived for the
+// stem while the unlink was still running.
+//
+// R20260606 (#1848): replaces the bare `chan struct{}` so handleBatch can
+// defer (rather than block run on) batches landing mid-drop. The pending
+// jobs retain their pooled arena — putEntryArena is deferred until the job
+// is replayed by opDropDone (or dropped/flushed). Mutated ONLY on the run
+// goroutine; the channel is closed by the async unlink goroutine.
+type dropState struct {
+	done    chan struct{}
+	pending []batchJob
+}
+
+// droppingPendingMaxBatches caps how many batches a single dropping stem may
+// defer before handleBatch falls back to the drop telemetry path. A slow
+// FUSE/NFS unlink should not let an unbounded number of in-flight batches
+// (each pinning a pooled arena + EventEntry payloads) accumulate in the
+// pending FIFO and exhaust memory; the cap mirrors the channel-full drop
+// behaviour (count + Observer.OnDrop + return the arena) so overflow is
+// observable rather than silent. Sized generously: a healthy unlink
+// completes in microseconds, so reaching this cap means the filesystem is
+// pathologically slow and dropping is the least-bad outcome.
+const droppingPendingMaxBatches = 256
+
 // NewPersister validates opts, ensures Dir exists, sweeps rotate
 // staging orphans, and spins up the background writer. Returns a
 // fully ready Persister or an error that is safe to surface to the
@@ -496,7 +532,7 @@ func NewPersister(opts Options) (*Persister, error) {
 		opCh:     make(chan op, 8), // small — drop/flush are rare
 		closeCh:  make(chan struct{}),
 		writers:  make(map[string]*perKeyWriter),
-		dropping: make(map[string]chan struct{}),
+		dropping: make(map[string]*dropState),
 		fs:       DetectFS(opts.Dir),
 	}
 	if !p.fs.Supported {
@@ -943,15 +979,74 @@ func (p *Persister) run() {
 			for {
 				select {
 				case o := <-p.opCh:
+					if o.kind == opDropDone {
+						// A still-pending unlink finished during shutdown:
+						// replay its deferred batches (writerFor will recreate
+						// the file) so a clean Stop does not silently lose the
+						// in-flight events. Match-and-delete like the live path.
+						if cur, ok := p.dropping[o.stem]; ok && cur.done == o.ch {
+							pending := cur.pending
+							delete(p.dropping, o.stem)
+							for _, job := range pending {
+								p.handleBatch(job, p.opts.Clock())
+							}
+						}
+						continue
+					}
 					if o.done != nil {
 						// Buffered (cap=1) so this never blocks.
 						o.done <- ErrPersisterClosed
 					}
 				default:
+					// R20260606 (#1848): replay any batches still deferred
+					// behind an in-flight unlink whose opDropDone never landed
+					// (the async goroutine took the <-p.closeCh branch). The
+					// stem's files are being removed concurrently, but
+					// recreating + writing them on a clean Stop preserves the
+					// events; if the unlink races ahead the recreate simply
+					// lands a fresh file, same as the live drop-then-recreate
+					// path. This also returns each deferred job's pooled arena
+					// via handleBatch's defer so Stop leaves no arena pinned.
+					p.replayDroppingPending()
 					p.shutdownAll()
 					return
 				}
 			}
+		}
+	}
+}
+
+// replayDroppingPending drains every dropState.pending FIFO into handleBatch
+// on the run goroutine during Stop's shutdown drain, so batches deferred
+// behind an in-flight unlink (#1848) are persisted (and their pooled arenas
+// returned) rather than silently lost. Called once, after p.in/opCh are
+// drained and before shutdownAll. Run-goroutine only — no synchronisation
+// needed; the entries are removed from p.dropping as they replay so a
+// late-arriving opDropDone for the same stem becomes a no-op.
+func (p *Persister) replayDroppingPending() {
+	if len(p.dropping) == 0 {
+		return
+	}
+	// Snapshot the pending FIFOs first, then delete every dropping entry, so
+	// the subsequent handleBatch replays open/write the recreated files
+	// instead of re-deferring into the same dropState (handleBatch gates on
+	// p.dropping[stem]). A late opDropDone for any of these stems then finds
+	// an absent entry and is a harmless no-op. The map is discarded with the
+	// Persister after run returns regardless.
+	type stemPending struct {
+		stem    string
+		pending []batchJob
+	}
+	snapshot := make([]stemPending, 0, len(p.dropping))
+	for stem, ds := range p.dropping {
+		snapshot = append(snapshot, stemPending{stem: stem, pending: ds.pending})
+	}
+	for _, sp := range snapshot {
+		delete(p.dropping, sp.stem)
+	}
+	for _, sp := range snapshot {
+		for _, job := range sp.pending {
+			p.handleBatch(job, p.opts.Clock())
 		}
 	}
 }
@@ -1083,39 +1178,58 @@ func (p *Persister) handleOp(o op) {
 		// have completed yet — Linux/Darwin allow O_CREAT after
 		// unlink-in-flight, the new inode just replaces the dirent).
 		p.dropInMemoryLocked(o.key)
-		// R20260605 (#1774): publish a per-stem completion channel BEFORE
-		// spawning the async unlink. writerFor blocks on this channel so a
-		// same-key recreation cannot OpenFile(O_CREATE) until the unlink
-		// has finished — otherwise a slow os.Remove (FUSE/NFS) could land
-		// after the recreated file and delete it. The async goroutine
-		// closes the channel right after removeKeyFiles returns and posts
-		// opDropDone so the run goroutine clears the map entry.
-		dropCh := make(chan struct{})
-		p.dropping[o.stem] = dropCh
+		// R20260605 (#1774): publish a per-stem dropState BEFORE spawning the
+		// async unlink. The async goroutine closes ds.done right after
+		// removeKeyFiles returns and posts opDropDone so the run goroutine can
+		// replay any deferred batches and clear the map entry.
+		//
+		// R20260606 (#1848): handleBatch no longer blocks run on ds.done while
+		// the unlink is in flight — instead it defers batches for this stem
+		// into ds.pending, which opDropDone replays in order once the unlink
+		// completes. The remove-before-recreate invariant is preserved because
+		// no writerFor / O_CREATE for this stem runs until opDropDone (and the
+		// replay it drives) has observed the closed channel.
+		ds := &dropState{done: make(chan struct{})}
+		p.dropping[o.stem] = ds
 		go func(stem string, done chan error, ch chan struct{}) {
 			err := p.removeKeyFiles(stem)
-			// Unblock any writerFor waiting on this stem (and signal to
-			// every future waiter) before notifying the caller.
+			// Signal completion before notifying the caller, then post
+			// opDropDone so the run goroutine replays deferred batches and
+			// clears the entry. Carry ch so the replay/delete only fires if
+			// this exact dropState is still installed (a newer opDrop for the
+			// same stem may have replaced it).
 			close(ch)
-			// Clear the dropping entry on the run goroutine; carry ch so
-			// the delete is a no-op if a newer drop replaced the entry.
 			select {
 			case p.opCh <- op{kind: opDropDone, stem: stem, ch: ch}:
 			case <-p.closeCh:
 				// Persister shutting down — the map is goroutine-local to
-				// run, which has stopped consuming opCh; nothing to clear.
+				// run, which has stopped consuming opCh; Stop's drain replays
+				// (or releases) any deferred batches.
 			}
 			if done != nil {
 				done <- err
 			}
-		}(o.stem, o.done, dropCh)
+		}(o.stem, o.done, ds.done)
 		return // explicit: skip the post-switch o.done write below
 	case opDropDone:
-		// Clear the dropping entry only if it still matches the channel we
-		// closed — a fresh opDrop for the same stem may have installed a
-		// new channel in between, which a later opDropDone will retire.
-		if cur, ok := p.dropping[o.stem]; ok && cur == o.ch {
-			delete(p.dropping, o.stem)
+		// Replay deferred batches and clear the dropping entry only if it
+		// still matches the channel we closed — a fresh opDrop for the same
+		// stem may have installed a new dropState in between, which a later
+		// opDropDone will retire.
+		cur, ok := p.dropping[o.stem]
+		if !ok || cur.done != o.ch {
+			return
+		}
+		// Delete BEFORE replaying so the replayed batches' writerFor sees an
+		// absent dropping entry and opens the recreated file normally instead
+		// of re-deferring into the same (now retired) dropState.
+		pending := cur.pending
+		delete(p.dropping, o.stem)
+		for _, job := range pending {
+			p.handleBatch(job, p.opts.Clock())
+		}
+		if len(pending) > 0 {
+			p.lastDrainNS.Store(p.opts.Clock().UnixNano())
 		}
 		return
 	case opFlushAll:
@@ -1455,6 +1569,30 @@ func (p *Persister) tickIdleClose() {
 // same clock reading covers both this function's bookkeeping and the
 // caller's lastDrainNS update. R222-PERF-12.
 func (p *Persister) handleBatch(job batchJob, now time.Time) {
+	// R20260606 (#1848): if this stem is mid-removal, defer the batch into
+	// the per-stem pending FIFO instead of blocking the single writer
+	// goroutine until the (possibly slow FUSE/NFS) unlink finishes. The
+	// deferred batch retains its pooled arena — putEntryArena is the
+	// replaying handleBatch's responsibility on opDropDone — so we return
+	// WITHOUT the defer below. A cap guards against an unbounded pending
+	// FIFO when the unlink is pathologically slow: overflow falls back to
+	// the drop telemetry path (count + Observer + arena return), mirroring
+	// the channel-full behaviour.
+	if ds, ok := p.dropping[job.Stem]; ok {
+		if len(ds.pending) >= droppingPendingMaxBatches {
+			putEntryArena(job.arena)
+			n := len(job.Entries)
+			p.droppedCnt.Add(int64(n))
+			p.opts.Observer.OnDrop(n)
+			slog.Warn("event log persist: dropping-stem pending cap reached; dropping batch",
+				"key", job.Key, "stem", job.Stem, "count", n,
+				"pending", len(ds.pending))
+			return
+		}
+		ds.pending = append(ds.pending, job)
+		return
+	}
+
 	// R20260531A-PERF-3 (#1524): return the pooled arena that owns this
 	// batch's Entry.JSON bytes once we're done with every entry. The
 	// defer covers the writerFor-error early return below and every
@@ -1549,15 +1687,15 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 		return w, nil
 	}
 
-	// R20260605 (#1774): if this stem is mid-removal, wait for the async
-	// unlink to finish before opening so O_CREATE lands strictly after the
-	// remove. The channel is closed by the removeKeyFiles goroutine; once
-	// closed this receive returns immediately for every future waiter.
-	// Safe to block the run goroutine here: the close is driven by an
-	// independent goroutine, not by an opCh message run must still process.
-	if ch, ok := p.dropping[stem]; ok {
-		<-ch
-	}
+	// R20260606 (#1848): writerFor no longer blocks the run goroutine on a
+	// mid-removal stem. handleBatch defers any batch for a dropping stem into
+	// dropState.pending and opDropDone replays it only AFTER deleting the
+	// dropping entry, so by the time writerFor runs for a recreated session
+	// the stem is guaranteed absent from p.dropping. The remove-before-
+	// recreate invariant (#1774) therefore still holds without the blocking
+	// receive that previously stalled every other session on a slow unlink.
+	// (handleBatch is the sole caller and gates on p.dropping before reaching
+	// here; writerFor stays defensive by not assuming a dropping entry.)
 
 	logPath := filepath.Join(p.opts.Dir, stem+logExt)
 	idxPath := filepath.Join(p.opts.Dir, stem+idxExt)
