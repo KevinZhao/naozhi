@@ -233,6 +233,19 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 				slog.Debug("connector subscribe: invalid key", "err", err)
 				break
 			}
+			// #1822 (ARCH-3): if this connection is already draining (connCtx
+			// cancelled by connCancel / the parent shutdown cancel), do not spawn
+			// a new streamEvents goroutine. The spawnSession stopped gate covers
+			// the three reverse-RPC spawn paths but NOT this read-only subscribe,
+			// whose only leak is the streamEvents goroutine bounded by the 15s
+			// handleConn drain. Short-circuiting here keeps a late subscribe from
+			// adding a fresh goroutine that races shutdown. streamEvents itself
+			// also observes connCtx, but the wg.Add happens before it runs, so we
+			// must reject up front to avoid the wg participant entirely.
+			if connCtx.Err() != nil {
+				slog.Debug("connector subscribe: connection draining, rejecting", "key", key)
+				break
+			}
 			// Cancel stale subscription if the previous streamEvents goroutine
 			// exited (e.g. process died). This allows the hub to re-subscribe
 			// after a remote send so events flow for the new process.
