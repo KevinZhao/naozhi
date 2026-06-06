@@ -328,7 +328,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 			}
 			return s, SessionResumed, nil
 		}
-		ch, inflight := r.spawningKeys[key]
+		ch, inflight := r.pp.spawningKeys[key]
 		if !inflight {
 			break
 		}
@@ -358,9 +358,9 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	// Read+delete under r.mu (already held). spawnSession unlocks/relocks
 	// internally so we cannot consume it after spawnSession returns; do it
 	// up front and apply the wrap on the error path below.
-	stuck := r.shimStuckOnReset[key]
+	stuck := r.pp.shimStuckOnReset[key]
 	if stuck {
-		delete(r.shimStuckOnReset, key)
+		delete(r.pp.shimStuckOnReset, key)
 	}
 	s, err := r.spawnSession(ctx, key, "", opts)
 	if err != nil {
@@ -631,7 +631,7 @@ func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resume
 // R248-ARCH-10.
 func (r *Router) markSpawnDoneLocked(key string, ch chan struct{}) {
 	close(ch)
-	delete(r.spawningKeys, key)
+	delete(r.pp.spawningKeys, key)
 }
 
 // spawnSession creates a new process, optionally resuming an existing session.
@@ -671,21 +671,21 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// via the channel reference it already holds (not via map lookup), so
 	// the two ops are commutative. Kept in this order purely as a uniform
 	// convention. R248-GO-3.
-	if r.spawningKeys == nil {
-		r.spawningKeys = make(map[string]chan struct{})
+	if r.pp.spawningKeys == nil {
+		r.pp.spawningKeys = make(map[string]chan struct{})
 	}
 	// R62-GO-3 (#775): if a caller (e.g. ResetAndRecreate) pre-installed a
 	// guard channel before releasing r.mu, reuse that channel so the
 	// "spawn-in-flight" marker is continuous from the caller's unlock
 	// through this defer. Concurrent GetOrCreate parked on the guardCh
-	// will never observe a `inflight=false` window in r.spawningKeys[key]
+	// will never observe a `inflight=false` window in r.pp.spawningKeys[key]
 	// before this function's prologue, so it cannot race in and spawn its
 	// own session with mismatched opts. If no pre-existing entry, install
 	// a fresh per-spawn channel as before.
-	doneCh, reused := r.spawningKeys[key]
+	doneCh, reused := r.pp.spawningKeys[key]
 	if !reused {
 		doneCh = make(chan struct{})
-		r.spawningKeys[key] = doneCh
+		r.pp.spawningKeys[key] = doneCh
 	}
 	defer func() {
 		r.mu.Lock()
@@ -704,7 +704,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		// builds) and avoids re-issuing the atomic read between the rechecks.
 		// R62-PERF-7 / R62-SEC-4.
 		maxProcs64 := int64(r.maxProcs)
-		pending64 := int64(r.pendingSpawns)
+		pending64 := int64(r.pp.pendingSpawns)
 		if r.ss.activeCount.Load()+pending64 >= maxProcs64 {
 			r.countActive()
 		}
@@ -1138,7 +1138,7 @@ func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBack
 		// terminal removals (keepBackendOverride=false) must also clear it.
 		// Sessions that are deleted and never reopened would otherwise leave
 		// their entry in the map for the lifetime of the process.
-		delete(r.shimStuckOnReset, key)
+		delete(r.pp.shimStuckOnReset, key)
 	}
 }
 
@@ -1233,10 +1233,10 @@ func (r *Router) finishResetUnlocked(key, sessionID string, proc processIface) {
 		// error with ErrShimStuck — operator-actionable diagnosis
 		// instead of the generic ErrClassSessionError + "执行跳过，请稍
 		// 后重试。" notice. Cleared by the next GetOrCreate for this key.
-		if r.shimStuckOnReset == nil {
-			r.shimStuckOnReset = make(map[string]bool)
+		if r.pp.shimStuckOnReset == nil {
+			r.pp.shimStuckOnReset = make(map[string]bool)
 		}
-		r.shimStuckOnReset[key] = true
+		r.pp.shimStuckOnReset[key] = true
 		slog.Warn("shim socket still bound after Reset wait — flagging key for ErrShimStuck wrap on next GetOrCreate",
 			"key", key)
 	}
@@ -1276,7 +1276,7 @@ func waitSocketGoneForKey(key string, maxWait time.Duration) bool {
 // message could create a session with wrong opts.
 //
 // R62-GO-3 (#775) FIX: ResetAndRecreate now installs a guard channel in
-// r.spawningKeys[key] BEFORE releasing r.mu for proc.Close(). Concurrent
+// r.pp.spawningKeys[key] BEFORE releasing r.mu for proc.Close(). Concurrent
 // GetOrCreate callers parking in the (key not present, but inflight)
 // window will block on the guardCh until spawnSession's defer closes it
 // (whether spawn succeeded or failed). spawnSession's prologue reuses
@@ -1317,17 +1317,17 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		r.ss.gen.Add(1)
 
 		if proc != nil && proc.Alive() {
-			// R62-GO-3 (#775): install a guardCh in r.spawningKeys[key]
+			// R62-GO-3 (#775): install a guardCh in r.pp.spawningKeys[key]
 			// BEFORE we release r.mu. Concurrent GetOrCreate that
 			// observes (no session, but inflight marker) will park on
 			// guardCh and not race in to spawn its own session with
 			// different opts. spawnSession below reuses this same
 			// channel and its defer closes+removes it.
-			if r.spawningKeys == nil {
-				r.spawningKeys = make(map[string]chan struct{})
+			if r.pp.spawningKeys == nil {
+				r.pp.spawningKeys = make(map[string]chan struct{})
 			}
-			if _, exists := r.spawningKeys[key]; !exists {
-				r.spawningKeys[key] = make(chan struct{})
+			if _, exists := r.pp.spawningKeys[key]; !exists {
+				r.pp.spawningKeys[key] = make(chan struct{})
 			}
 			r.mu.Unlock()
 			proc.Close()
@@ -1343,10 +1343,10 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 				// spawnSession failure path below. spawnSession
 				// will be the consumer here (not GetOrCreate) so
 				// the wrap is applied directly inline.
-				if r.shimStuckOnReset == nil {
-					r.shimStuckOnReset = make(map[string]bool)
+				if r.pp.shimStuckOnReset == nil {
+					r.pp.shimStuckOnReset = make(map[string]bool)
 				}
-				r.shimStuckOnReset[key] = true
+				r.pp.shimStuckOnReset[key] = true
 				slog.Warn("shim socket still bound after ResetAndRecreate wait — flagging key for ErrShimStuck wrap on spawn failure",
 					"key", key)
 			}
@@ -1361,9 +1361,9 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 	// (#1324) Consume the per-key shimStuckOnReset flag set above when the
 	// socket-gone wait timed out. r.mu is currently held; read+delete here
 	// is safe.
-	stuck := r.shimStuckOnReset[key]
+	stuck := r.pp.shimStuckOnReset[key]
 	if stuck {
-		delete(r.shimStuckOnReset, key)
+		delete(r.pp.shimStuckOnReset, key)
 	}
 	s, err := r.spawnSession(ctx, key, "", opts)
 	if err != nil {

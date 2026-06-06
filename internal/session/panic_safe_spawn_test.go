@@ -1,8 +1,8 @@
 package session
 
 // RES1 regression tests. A wrapper.Spawn panic (shim exec crash, broken
-// protocol Init, etc.) used to leave r.pendingSpawns incremented forever
-// because the `r.pendingSpawns--` line after wrapper.Spawn never ran.
+// protocol Init, etc.) used to leave r.pp.pendingSpawns incremented forever
+// because the `r.pp.pendingSpawns--` line after wrapper.Spawn never ran.
 // Every subsequent GetOrCreate then hit the `activeCount+pendingSpawns
 // >= maxProcs` gate and returned ErrMaxProcs until the process restarted.
 //

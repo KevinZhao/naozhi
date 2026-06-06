@@ -34,8 +34,8 @@ func TestSpawnSession_RejectedAfterStopped(t *testing.T) {
 		if len(r.ss.sessions) != 0 {
 			t.Errorf("r.ss.sessions grew to %d after a rejected spawn; gate must run before any map mutation", len(r.ss.sessions))
 		}
-		if len(r.spawningKeys) != 0 {
-			t.Errorf("r.spawningKeys = %d; gate must sit before spawningKeys lazy-init so no guard channel is left dangling", len(r.spawningKeys))
+		if len(r.pp.spawningKeys) != 0 {
+			t.Errorf("r.pp.spawningKeys = %d; gate must sit before spawningKeys lazy-init so no guard channel is left dangling", len(r.pp.spawningKeys))
 		}
 	}
 

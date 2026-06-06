@@ -216,7 +216,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		if ok {
 			sessPrevIDs = slices.Clone(sess.prevSessionIDs)
 		}
-		_, spawning := r.spawningKeys[state.Key]
+		_, spawning := r.pp.spawningKeys[state.Key]
 		r.mu.Unlock()
 
 		// Resolve the wrapper recorded at shim startup so reconnect uses
