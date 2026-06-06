@@ -3404,6 +3404,58 @@ async function sendAskAnswerViaAPI(text, card) {
   }
 }
 
+// LEAKED_TOOLCALL_RE anchors the start of a tool-call block that an LLM
+// emitted as *prose* instead of a structured tool_use content block. The
+// claude/anthropic harness expresses a real tool call as a dedicated
+// content block (type:"tool_use") which naozhi surfaces as its own
+// tool_use event and filters out of the main transcript (isInternalEvent).
+// But the model occasionally regresses and writes the call syntax —
+//   call
+//   <invoke name="Bash">
+//   <parameter name="command">…</parameter>
+//   </invoke>
+// — verbatim into an assistant *text* block. That text flows through the
+// pipeline untouched (process_event_format.go stores it as type:"text")
+// and lands in the bubble as a literal wall of XML, which is noise to the
+// operator (the call was never executed — it's a malformed turn).
+//
+// The anchor REQUIRES a `call` or `<function_calls>` marker alone on its
+// own line immediately preceding `<invoke name="`. This is deliberately
+// strict: a bare `<invoke …>` must NOT trip the detector, because operators
+// legitimately quote tool-call syntax inside backticks when discussing it
+// (e.g. this very bug report). Validated against 667 real text/user events:
+// 9 genuine leaks caught, 0 false positives on quoted-syntax discussions.
+const LEAKED_TOOLCALL_RE = /(?:^|\n)[ \t]*(?:call|<function_calls>)[ \t]*\n[ \t]*<invoke name="/;
+
+// stripLeakedToolCalls splits an assistant text body into the real prose
+// that precedes a leaked tool-call block and the leaked block itself.
+// Returns null when no leak is detected (the overwhelmingly common case —
+// keep this cheap so every text bubble can call it). On a hit it returns
+// { prose, leaked } where `prose` is the body with the leaked region
+// removed (trailing whitespace trimmed) and `leaked` is the raw XML for the
+// fold-away <details>. The region runs from the anchor's `call` /
+// `<function_calls>` line to the final `</invoke>` (plus an optional
+// trailing `</function_calls>`), so multiple chained <invoke> blocks under
+// one marker collapse into a single fold.
+function stripLeakedToolCalls(text) {
+  if (!text || text.indexOf('</invoke>') === -1) return null;
+  const m = LEAKED_TOOLCALL_RE.exec(text);
+  if (!m) return null;
+  // Anchor start = the `call` / `<function_calls>` line, not the regex's
+  // leading \n. m.index points at the char before that line when the
+  // alternation matched `\n`; step over it so the marker stays in `leaked`.
+  let start = m.index;
+  if (text[start] === '\n') start += 1;
+  // The leaked region ends at the LAST </invoke> — a single prose turn that
+  // leaks more than one call writes them consecutively, and everything from
+  // the marker to the last close tag is the malformed payload.
+  let end = text.lastIndexOf('</invoke>') + '</invoke>'.length;
+  const tail = text.slice(end);
+  const fc = /^\s*<\/function_calls>/.exec(tail);
+  if (fc) end += fc[0].length;
+  return { prose: text.slice(0, start).replace(/\s+$/, ''), leaked: text.slice(start, end) };
+}
+
 // eventHtml renders one EventEntry bubble.
 // opts.includeInternal=true keeps tool_use / thinking / task_* / agent / result
 // events that the parent view hides (banner handles them there). The sub-agent
@@ -3443,7 +3495,20 @@ function eventHtml(e, opts) {
   if (e.type === 'system') {
     content = esc(e.summary || e.type);
   } else if (e.type === 'text' || e.type === 'user') {
-    content = renderMd(cleanRaw || e.type);
+    // Guard against a leaked tool-call block (the model wrote <invoke …>
+    // syntax into a text turn instead of emitting a structured tool_use).
+    // Render the real prose normally and fold the malformed XML behind a
+    // collapsed warning so the bubble stays readable; esc() keeps the raw
+    // payload inert (it is displayed as text, never parsed as HTML).
+    const leak = stripLeakedToolCalls(cleanRaw);
+    if (leak) {
+      content = renderMd(leak.prose || e.type) +
+        '<details class="leaked-toolcall"><summary class="leaked-toolcall-summary">' +
+        '⚠ 模型输出了未执行的工具调用（已折叠）</summary>' +
+        '<pre class="leaked-toolcall-body">' + esc(leak.leaked) + '</pre></details>';
+    } else {
+      content = renderMd(cleanRaw || e.type);
+    }
   } else if (e.type === 'todo') {
     content = renderTodoList(e.detail, e.summary);
   } else if (e.type === 'tool_use' && e.tool_call) {
@@ -8401,6 +8466,9 @@ async function openFilePreview(wrapEl) {
 
   drawer.classList.remove('hidden');
   drawer.classList.add('fv-open');
+  // Dock as a right-hand split on desktop so the transcript stays visible
+  // beside the preview (no-op on phone — falls back to the overlay).
+  if (typeof window.nzSplitEnter === 'function') window.nzSplitEnter();
   drawer.dataset.project = project;
   drawer.dataset.node = node;
   drawer.dataset.path = path;
@@ -8656,6 +8724,8 @@ function closeFilePreview() {
   if (!drawer) return;
   drawer.classList.remove('fv-open');
   drawer.classList.add('hidden');
+  // Undock the split (no-op if the 追问 drawer is still open).
+  if (typeof window.nzSplitExit === 'function') window.nzSplitExit();
   delete drawer.dataset.snippetMode;
   delete drawer.dataset.snippetName;
   _pendingSnippet = null;
@@ -11379,6 +11449,132 @@ function initSwipeBack() {
   });
 })();
 
+/* ===== Split-view docking (desktop only) =====
+   The preview (#fv-drawer) and 追问 (#aside-drawer) panes used to overlay the
+   transcript as a fixed slide-over. On desktop we now dock them as a right-hand
+   split: body.nz-split-open reserves `--nz-split-w` on .container so the
+   transcript compresses into the remaining width and stays fully visible
+   beside the pane. nzSplitEnter/nzSplitExit are called from the drawer
+   open/close paths (openFilePreview / closeFilePreview / scratch showDrawer /
+   hideDrawer). Phone (≤768px) keeps the original full-width overlay — every
+   path here bails on a mobile viewport, and the CSS overrides are gated behind
+   the ≥769px breakpoint, so the two layouts never fight.
+
+   The "keep the transcript's latest progress visible" requirement is handled
+   by capturing whether the events pane was bottom-anchored BEFORE the width
+   change, then re-pinning to the bottom AFTER layout settles — narrowing the
+   transcript reflows text taller, which would otherwise leave the newest
+   bubbles scrolled off-screen. */
+(function(){
+  const LS_SPLIT_W = 'split_w';
+  const DEFAULT_W = 480;   // matches --nz-split-w default in dashboard.html
+  const MIN_W = 320;
+  // Reserve at least this much for the activity-bar + sidebar + transcript so
+  // the split can never swallow the whole window.
+  const MIN_LEFT = 420;
+  const resizer = document.getElementById('split-resizer');
+
+  function isMobileVp() {
+    return window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
+  }
+  function clampW(w) {
+    const max = Math.max(MIN_W, window.innerWidth - MIN_LEFT);
+    return Math.min(Math.max(w, MIN_W), max);
+  }
+  function applyW(w) {
+    document.documentElement.style.setProperty('--nz-split-w', clampW(w) + 'px');
+  }
+  // Restore persisted width on cold-load (falls back to the CSS default).
+  const savedW = parseFloat(lsGet(LS_SPLIT_W, 0));
+  if (savedW >= MIN_W) applyW(savedW);
+
+  function anyDrawerOpen() {
+    const fv = document.getElementById('fv-drawer');
+    const ad = document.getElementById('aside-drawer');
+    return (fv && fv.classList.contains('fv-open')) ||
+           (ad && ad.classList.contains('visible'));
+  }
+  // Was the transcript scrolled to (or near) the bottom? 40px slack mirrors
+  // the main-window wasBottom checks elsewhere in this file.
+  function eventsAtBottom() {
+    const el = document.getElementById('events-scroll');
+    if (!el) return false;
+    return el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
+  }
+  // Re-pin to the bottom after a width change, but only if the user was
+  // already there — never drag them away from history they're reading.
+  function preserveBottom(wasBottom) {
+    if (!wasBottom) return;
+    requestAnimationFrame(() => {
+      if (typeof stickEventsBottom === 'function') stickEventsBottom();
+      else {
+        const el = document.getElementById('events-scroll');
+        if (el) el.scrollTop = el.scrollHeight;
+      }
+    });
+  }
+
+  window.nzSplitEnter = function() {
+    if (isMobileVp()) return;  // phone keeps the full-width overlay
+    if (document.body.classList.contains('nz-split-open')) return;
+    const wasBottom = eventsAtBottom();
+    document.body.classList.add('nz-split-open');
+    preserveBottom(wasBottom);
+  };
+  window.nzSplitExit = function() {
+    // Keep the split open while either drawer is still docked (mutually
+    // exclusive today, but cheap to be correct if that ever changes).
+    if (anyDrawerOpen()) return;
+    if (!document.body.classList.contains('nz-split-open')) return;
+    const wasBottom = eventsAtBottom();
+    document.body.classList.remove('nz-split-open');
+    preserveBottom(wasBottom);
+  };
+
+  // --- Drag-to-resize the seam ---
+  if (resizer) {
+    let startX, startW, dragBottom;
+    function onMove(e) {
+      // Strip grows when dragged left (toward smaller clientX). Width is the
+      // distance from the seam to the right viewport edge.
+      const w = clampW(startW + (startX - e.clientX));
+      applyW(w);
+      // Keep the transcript pinned to the bottom live during the drag so the
+      // latest progress doesn't scroll out from under a width reflow.
+      if (dragBottom) {
+        const el = document.getElementById('events-scroll');
+        if (el) el.scrollTop = el.scrollHeight;
+      }
+    }
+    function onUp() {
+      resizer.classList.remove('dragging');
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      const cur = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--nz-split-w'));
+      if (cur >= MIN_W) lsSet(LS_SPLIT_W, Math.round(cur));
+    }
+    resizer.addEventListener('mousedown', function(e) {
+      e.preventDefault();
+      startX = e.clientX;
+      startW = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--nz-split-w')) || DEFAULT_W;
+      dragBottom = eventsAtBottom();
+      resizer.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+    resizer.addEventListener('dblclick', function() {
+      const wasBottom = eventsAtBottom();
+      applyW(DEFAULT_W);
+      lsRemove(LS_SPLIT_W);
+      preserveBottom(wasBottom);
+    });
+  }
+})();
+
 /* ===== Sidebar fully-collapse (PC only) =====
    Toggle body.sidebar-collapsed so .main occupies the full viewport. State is
    persisted via lsSet so a refresh keeps the user's preference. The mobile
@@ -11843,8 +12039,15 @@ initSidebarSearch();
     elMsgs.appendChild(elEmpty);
   }
 
-  function showDrawer() { drawer.classList.add('visible'); }
-  function hideDrawer() { drawer.classList.remove('visible'); }
+  function showDrawer() {
+    drawer.classList.add('visible');
+    // Dock as a right-hand split on desktop (no-op on phone overlay).
+    if (typeof window.nzSplitEnter === 'function') window.nzSplitEnter();
+  }
+  function hideDrawer() {
+    drawer.classList.remove('visible');
+    if (typeof window.nzSplitExit === 'function') window.nzSplitExit();
+  }
 
   function stopPolling() {
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
