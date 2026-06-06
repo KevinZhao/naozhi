@@ -522,7 +522,7 @@ type ManagedSession struct {
 	//
 	// Atomic because SetHistorySource is exported and can race with in-flight
 	// pagination reads: the router attaches the source before publishing the
-	// session to r.sessions, but tests and potential future reconfig paths
+	// session to r.ss.sessions, but tests and potential future reconfig paths
 	// may reset it after the session is reachable. atomic.Pointer makes the
 	// hand-off race-free without requiring historyMu on every read.
 	historySource atomic.Pointer[historySourceBox]

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/datadir"
@@ -303,7 +304,7 @@ func marshalStoreEntries(sessions map[string]*ManagedSession) ([]byte, error) {
 }
 
 // marshalStoreEntriesSlice is the slice-input twin of marshalStoreEntries. It
-// lets the periodic save path snapshot r.sessions into a single []*ManagedSession
+// lets the periodic save path snapshot r.ss.sessions into a single []*ManagedSession
 // rather than re-allocating a whole map[string]*ManagedSession every tick
 // (R20260602190132-PERF-4 / #1606). The on-the-wire output is identical — both
 // just range the session set and concatenate each session's cached encoding.
@@ -356,7 +357,7 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 }
 
 // saveStoreSlice persists a slice snapshot of sessions. The periodic Cleanup /
-// saveIfDirty paths use this so they can copy r.sessions into a single
+// saveIfDirty paths use this so they can copy r.ss.sessions into a single
 // []*ManagedSession under the lock instead of re-allocating a whole map every
 // tick (R20260602190132-PERF-4 / #1606). On-disk output is identical to
 // saveStore.
@@ -563,6 +564,82 @@ func saveKnownIDs(storePath string, sortedIDs []string) error {
 		return fmt.Errorf("save known IDs: %w", err)
 	}
 	return nil
+}
+
+// sessionStore groups the seven correlated session-table fields (Router P4
+// facet, #383): the primary session table, its two secondary indices
+// (chat→keys, keyhash→key), the reverse session-ID→key index, the alive-process
+// counter, the store-dirty flag, and the store mutation generation. It is a
+// value field on Router, carries NO lock of its own, and is read/written ONLY
+// under Router.mu — the lock topology is unchanged (RFC §3 candidate A: single
+// r.mu retained).
+//
+// CRITICAL — TRIPLE-INDEX ATOMIC SYNCHRONIZATION (RFC §5, highest-risk
+// invariant): sessions + byChat + keyhash + idToKey are a four-way correlated
+// index that MUST mutate together inside ONE r.mu write critical section.
+// indexAdd / indexDel remain the keyhash+byChat funnel; the five direct
+// r.ss.sessions[key]=s / delete(r.ss.sessions, key) sites stay paired with
+// indexAdd / indexDel (and with the idToKey set/clear helpers) in UNCHANGED
+// order. Any reordering or split between these mutations would let a reader
+// observe a torn index (e.g. a session present in the primary table but missing
+// from byChat, or a stale keyhash pointing at an evicted key). P4 only renames
+// field references — install/unregister/rename ordering stays byte-identical.
+//
+// CRITICAL — LOCK-FREE READER FIELDS STAY ATOMIC: activeCount (read by Stats())
+// and gen (read by Version()) are accessed lock-free from the dashboard hot
+// path, so they remain atomic.Int64 / atomic.Uint64 INSIDE this sub-struct
+// (access r.ss.activeCount.Load() / r.ss.gen.Add(1) etc). They are deliberately
+// NOT demoted to plain ints. dirty is a plain bool (always under r.mu).
+//
+// The annotation on the Router embed line covers the UNION of all accessing
+// domains; the lint recurses one level so each inner field below ALSO carries
+// its own per-domain `// 读写:` annotation, copied verbatim from the original
+// router_core.go field docs.
+type sessionStore struct {
+	// 读写: core (init), lifecycle (spawn/reset/rename), shim (reconnect), cleanup (remove/cleanup), discovery (takeover/register), capacity (reconcile active-gauge scan)
+	sessions map[string]*ManagedSession
+	// byChat is a secondary index: chat key → set of session keys.
+	// Enables O(k) ResetChat instead of O(n) full scan (k = agents per chat, typically 1-3).
+	// Inner type is a set (map[string]struct{}) so indexAdd does O(1) dedupe
+	// and indexDel does O(1) removal — the prior []string variant scanned the
+	// slice on every Add/Del. R225-PERF-18.
+	// Nil in test-created routers; all helpers below are nil-safe.
+	// 读写: core (indexAdd/Del helpers), lifecycle (ResetChat/install/unregister), cleanup, discovery
+	byChat map[string]map[string]struct{}
+	// keyhash is a secondary index: persist.KeyHash(sessionKey) → sessionKey.
+	// #1646: the attachment tracker's workspace resolver runs on every
+	// persisted image-bearing event (potentially several per Send) and used to
+	// hold r.mu.RLock while linearly scanning r.ss.sessions, recomputing a SHA-256
+	// KeyHash for every session, to find the one whose hash matched. This index
+	// turns that O(N)-hashes scan into an O(1) lookup. Maintained at the publish
+	// funnel + indexDel; the resolver self-heals on miss (it re-verifies the
+	// hit against r.ss.sessions and falls back to a one-off scan that re-populates
+	// this map), so a delete site that bypasses indexDel only costs one extra
+	// scan rather than returning a wrong workspace.
+	// Nil in test-created routers; helpers are nil-safe.
+	// 读写: core (indexAdd/Del helpers + resolver), lifecycle (install/unregister)
+	keyhash map[string]string
+	// idToKey is a reverse index from session ID to session key.
+	// Used by RegisterForResume for O(1) deduplication instead of O(n) scan.
+	// Maintained under r.mu by setSessionIDIndex/clearSessionIDIndex.
+	// 读写: core (init), lifecycle (install/unregister), discovery (RegisterForResume), shim (reconnectShims index write)
+	idToKey map[string]string
+	// activeCount tracks currently alive processes (non-exempt only).
+	// Writes happen under r.mu (write lock); atomic access lets Stats()
+	// read lock-free so the dashboard /api/sessions hot path does not
+	// take a second r.mu RLock right after ListSessions() released one.
+	// R58-PERF-F1.
+	// 读写: core (Stats lock-free read), lifecycle (countActive/evict/install), capacity (reconcile Store), cleanup (remove/reconcile Add/Store), discovery (Takeover orphan Add), shim (reconnect Add)
+	activeCount atomic.Int64
+	// 读写: lifecycle (spawn/Reset/Rename mutations), shim (reconnect post-attach), discovery (label/register/takeover), cleanup (saveIfDirty consume), capacity (evictOldest mutation)
+	dirty bool // true when sessions changed since last save
+	// gen increments on each mutation. Writes happen under r.mu (write
+	// lock) but atomic.Uint64 also lets Version() read lock-free — the
+	// dashboard polls Version() every few seconds from the /api/sessions
+	// hot path, and the previous RLock layered on top of ListSessions'
+	// RLock made each poll take two contended trips through r.mu.
+	// 读写: core (Version lock-free), lifecycle (BumpVersion), cleanup (BumpVersion), discovery (BumpVersion), capacity (evictOldest BumpVersion), shim (reconnect BumpVersion)
+	gen atomic.Uint64
 }
 
 // knownIDsStore groups the seven correlated known-session-ID fields (Router P2

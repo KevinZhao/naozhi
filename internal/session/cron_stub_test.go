@@ -21,8 +21,8 @@ func TestRegisterCronStub_CreatesFreshStub(t *testing.T) {
 		t.Fatalf("onChange fired %d times on first stub, want 1", notified)
 	}
 	r.mu.RLock()
-	_, ok := r.sessions["cron:job-1"]
-	dirty := r.storeDirty
+	_, ok := r.ss.sessions["cron:job-1"]
+	dirty := r.ss.dirty
 	r.mu.RUnlock()
 	if !ok {
 		t.Fatalf("cron stub was not registered")
@@ -50,20 +50,20 @@ func TestRegisterCronStub_NoOpOnIdenticalRefresh(t *testing.T) {
 	// Reset tracking to isolate the second call.
 	r.SetOnChange(func() {})
 	r.mu.Lock()
-	r.storeDirty = false
-	genBefore := r.storeGen.Load()
+	r.ss.dirty = false
+	genBefore := r.ss.gen.Load()
 	r.mu.Unlock()
 
 	// Reload with identical values — must NOT mark dirty / bump version.
 	r.RegisterCronStub("cron:job-2", "/w", "p")
 
 	r.mu.RLock()
-	dirty := r.storeDirty
+	dirty := r.ss.dirty
 	r.mu.RUnlock()
 	if dirty {
 		t.Errorf("storeDirty flipped on identical RegisterCronStub refresh")
 	}
-	if got := r.storeGen.Load(); got != genBefore {
+	if got := r.ss.gen.Load(); got != genBefore {
 		t.Errorf("storeGen advanced on identical refresh: got %d, want %d", got, genBefore)
 	}
 }
@@ -92,8 +92,8 @@ func TestRegisterCronStub_DirtyOnActualChange(t *testing.T) {
 			var notified int
 			r.SetOnChange(func() { notified++ })
 			r.mu.Lock()
-			r.storeDirty = false
-			genBefore := r.storeGen.Load()
+			r.ss.dirty = false
+			genBefore := r.ss.gen.Load()
 			r.mu.Unlock()
 
 			r.RegisterCronStub("cron:job-3", c.newWorkspace, c.newPrompt)
@@ -102,12 +102,12 @@ func TestRegisterCronStub_DirtyOnActualChange(t *testing.T) {
 				t.Errorf("onChange fired %d times on %s, want 1", notified, c.name)
 			}
 			r.mu.RLock()
-			dirty := r.storeDirty
+			dirty := r.ss.dirty
 			r.mu.RUnlock()
 			if !dirty {
 				t.Errorf("storeDirty should be true after %s", c.name)
 			}
-			if got := r.storeGen.Load(); got == genBefore {
+			if got := r.ss.gen.Load(); got == genBefore {
 				t.Errorf("storeGen did not advance on %s", c.name)
 			}
 		})
@@ -125,22 +125,22 @@ func TestRegisterCronStub_EmptyValuesDoNotClobber(t *testing.T) {
 
 	r.SetOnChange(func() {})
 	r.mu.Lock()
-	r.storeDirty = false
+	r.ss.dirty = false
 	r.mu.Unlock()
 
 	// Both empty — no data change expected.
 	r.RegisterCronStub("cron:job-4", "", "")
 
 	r.mu.RLock()
-	dirty := r.storeDirty
+	dirty := r.ss.dirty
 	r.mu.RUnlock()
 	if dirty {
 		t.Errorf("storeDirty flipped on empty-values refresh")
 	}
-	if got := r.sessions["cron:job-4"].Workspace(); got != "/keep" {
+	if got := r.ss.sessions["cron:job-4"].Workspace(); got != "/keep" {
 		t.Errorf("workspace clobbered by empty refresh: got %q", got)
 	}
-	if got := loadAtomicString(&r.sessions["cron:job-4"].lastPrompt); got != "keepme" {
+	if got := loadAtomicString(&r.ss.sessions["cron:job-4"].lastPrompt); got != "keepme" {
 		t.Errorf("lastPrompt clobbered by empty refresh: got %q", got)
 	}
 }
@@ -157,7 +157,7 @@ func TestRegisterCronStubWithChain_SetsChainOnFreshStub(t *testing.T) {
 	r.RegisterCronStubWithChain("cron:job-c1", "/w", "p", chain)
 
 	r.mu.RLock()
-	s := r.sessions["cron:job-c1"]
+	s := r.ss.sessions["cron:job-c1"]
 	r.mu.RUnlock()
 	if s == nil {
 		t.Fatal("stub not registered")
@@ -183,19 +183,19 @@ func TestRegisterCronStubWithChain_NoOpOnIdenticalChain(t *testing.T) {
 
 	r.SetOnChange(func() {})
 	r.mu.Lock()
-	r.storeDirty = false
-	genBefore := r.storeGen.Load()
+	r.ss.dirty = false
+	genBefore := r.ss.gen.Load()
 	r.mu.Unlock()
 
 	r.RegisterCronStubWithChain("cron:job-c2", "/w", "p", []string{"sess-xxx"})
 
 	r.mu.RLock()
-	dirty := r.storeDirty
+	dirty := r.ss.dirty
 	r.mu.RUnlock()
 	if dirty {
 		t.Errorf("storeDirty flipped on identical chain refresh")
 	}
-	if got := r.storeGen.Load(); got != genBefore {
+	if got := r.ss.gen.Load(); got != genBefore {
 		t.Errorf("storeGen advanced on identical chain refresh: got %d, want %d", got, genBefore)
 	}
 }
@@ -211,21 +211,21 @@ func TestRegisterCronStubWithChain_DirtyOnChainChange(t *testing.T) {
 
 	r.SetOnChange(func() {})
 	r.mu.Lock()
-	r.storeDirty = false
-	genBefore := r.storeGen.Load()
+	r.ss.dirty = false
+	genBefore := r.ss.gen.Load()
 	r.mu.Unlock()
 
 	newChain := []string{"sess-new"}
 	r.RegisterCronStubWithChain("cron:job-c3", "/w", "p", newChain)
 
 	r.mu.RLock()
-	dirty := r.storeDirty
-	s := r.sessions["cron:job-c3"]
+	dirty := r.ss.dirty
+	s := r.ss.sessions["cron:job-c3"]
 	r.mu.RUnlock()
 	if !dirty {
 		t.Errorf("storeDirty should be true after chain change")
 	}
-	if got := r.storeGen.Load(); got == genBefore {
+	if got := r.ss.gen.Load(); got == genBefore {
 		t.Errorf("storeGen did not advance on chain change")
 	}
 	if !slices.Equal(s.prevSessionIDs, newChain) {
@@ -246,7 +246,7 @@ func TestRegisterCronStubWithChain_NilChainLeavesExistingChain(t *testing.T) {
 	r.RegisterCronStub("cron:job-c4", "/w", "p") // equivalent to nil chain
 
 	r.mu.RLock()
-	s := r.sessions["cron:job-c4"]
+	s := r.ss.sessions["cron:job-c4"]
 	r.mu.RUnlock()
 	if !slices.Equal(s.prevSessionIDs, []string{"sess-keep"}) {
 		t.Errorf("nil chain wiped existing prevSessionIDs: got %v", s.prevSessionIDs)
@@ -270,7 +270,7 @@ func TestRegisterCronStubWithChain_ChainRefreshRaceFree(t *testing.T) {
 	r.RegisterCronStubWithChain(key, "/w", "p", []string{"sess-0"})
 
 	r.mu.RLock()
-	s := r.sessions[key]
+	s := r.ss.sessions[key]
 	r.mu.RUnlock()
 	if s == nil {
 		t.Fatal("stub not registered")
@@ -329,7 +329,7 @@ func TestRegisterCronStub_OverSubQuotaStillRegisters(t *testing.T) {
 
 	r.mu.RLock()
 	got := 0
-	for k := range r.sessions {
+	for k := range r.ss.sessions {
 		if exemptKind(k) == "cron" {
 			got++
 		}

@@ -38,7 +38,7 @@ func TestRestoreSessionFromEntry_AllFields(t *testing.T) {
 	t.Cleanup(func() { r.Shutdown() })
 
 	r.mu.RLock()
-	got := r.sessions[key]
+	got := r.ss.sessions[key]
 	r.mu.RUnlock()
 	if got == nil {
 		t.Fatal("session not restored")
@@ -94,7 +94,7 @@ func TestRestoreSessionFromEntry_CreatedAtFallback(t *testing.T) {
 	t.Cleanup(func() { r.Shutdown() })
 
 	r.mu.RLock()
-	got := r.sessions[key]
+	got := r.ss.sessions[key]
 	r.mu.RUnlock()
 	if got == nil {
 		t.Fatal("session not restored")

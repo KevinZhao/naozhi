@@ -34,7 +34,7 @@ func TestSessionLifecycleEvents_AreInfo_AuditTrail(t *testing.T) {
 
 	// "session removed" — Remove walks a present, process-less session.
 	rmKey := "feishu:group:t:rm"
-	r.sessions[rmKey] = &ManagedSession{key: rmKey}
+	r.ss.sessions[rmKey] = &ManagedSession{key: rmKey}
 	if !r.Remove(rmKey) {
 		t.Fatalf("Remove(%q) returned false — injected session was not seen", rmKey)
 	}
@@ -42,7 +42,7 @@ func TestSessionLifecycleEvents_AreInfo_AuditTrail(t *testing.T) {
 	// "session reset" — Reset takes the same process-less path; the socket
 	// wait returns immediately because no shim socket was ever bound.
 	rsKey := "feishu:group:t:rs"
-	r.sessions[rsKey] = &ManagedSession{key: rsKey}
+	r.ss.sessions[rsKey] = &ManagedSession{key: rsKey}
 	r.Reset(rsKey)
 
 	got := info.String()
