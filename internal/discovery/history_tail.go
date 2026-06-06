@@ -313,19 +313,31 @@ func parseHistoryLine(line []byte) ([]clievent.EventEntry, bool) {
 		if err := json.Unmarshal(hl.Message, &msg); err != nil {
 			return nil, false
 		}
-		text := extractText(msg.Content)
-		if text == "" || IsClaudeSystemInjectedText(text) {
+		text, images := extractTextAndImages(msg.Content)
+		// Drop only when there is nothing to show at all. An image-only
+		// turn (no text) is still worth surfacing. IsClaudeSystemInjectedText
+		// is checked only when text exists, so it never rejects an
+		// image-only message.
+		if (text == "" && len(images) == 0) || (text != "" && IsClaudeSystemInjectedText(text)) {
 			return nil, false
 		}
 		summary := textutil.TruncateRunes(text, 120)
 		detail := textutil.TruncateRunes(text, 2000)
-		return []clievent.EventEntry{{
+		e := clievent.EventEntry{
 			UUID:    uuidFromClaudeLine(hl, ts, "user", summary, detail),
 			Time:    ts,
 			Type:    "user",
 			Summary: summary,
 			Detail:  detail,
-		}}, true
+		}
+		// ImagePaths stays empty: the Claude JSONL carries no workspace
+		// relative path, so the dashboard lightbox falls back to the
+		// thumbnail data URI. UUID derivation is unchanged (Images is not
+		// part of the key), so MergedSource still prefers the local copy.
+		if len(images) > 0 {
+			e.Images = images
+		}
+		return []clievent.EventEntry{e}, true
 
 	case "assistant":
 		var msg historyMessage
