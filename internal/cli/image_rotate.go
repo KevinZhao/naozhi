@@ -13,6 +13,21 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
+// orientWorkerCap bounds concurrent EXIF-less auto-orient decodes. Orient is
+// a user-triggered, rate-limited path (POST /api/sessions/orient, gated by
+// uploadLimiter at 10/min) that performs exactly one decode per request, so a
+// small ceiling of 2 lets a pair of concurrent orient requests proceed
+// without ever touching the thumbnail budget. It is intentionally NOT
+// thumbnailWorkerCap: that constant is the single source of truth for the
+// thumbnail worker-pool sizing in process_send.go and must not be repurposed.
+const orientWorkerCap = 2
+
+// orientSem is a SEPARATE semaphore from thumbSem so auto-orient decodes and
+// multi-image thumbnail generation no longer contend for the same slots and
+// cannot starve each other. Like thumbSem it is a finite ceiling that bounds
+// aggregate decode memory; orient just gets its own budget.
+var orientSem = make(chan struct{}, orientWorkerCap)
+
 // RotateJPEG decodes raw image bytes, rotates the pixels clockwise by
 // `degCW` (must be 90, 180, or 270), and re-encodes to JPEG. degCW==0
 // returns the input unchanged. Any other value is rejected.
@@ -27,9 +42,11 @@ import (
 //
 // Safety mirrors MakeThumbnail (thumbnail.go): a DecodeConfig pre-check
 // caps pixel count before the full RGBA decode to bound memory, the
-// thumbSem cap serialises concurrent decodes, and a recover() treats a
+// orientSem cap serialises concurrent decodes, and a recover() treats a
 // decoder panic on crafted-malformed input as a failure rather than
-// crashing the process.
+// crashing the process. orientSem is a SEPARATE semaphore from thumbSem so
+// orient and thumbnail generation no longer starve each other on a shared
+// slot pool.
 //
 // On any failure (bad degrees, undecodable input, oversize, encode error,
 // decoder panic) it returns (nil, false) and the caller MUST fall back to
@@ -58,8 +75,8 @@ func RotateJPEG(data []byte, degCW int) (out []byte, ok bool) {
 		return nil, false
 	}
 
-	thumbSem <- struct{}{}
-	defer func() { <-thumbSem }()
+	orientSem <- struct{}{}
+	defer func() { <-orientSem }()
 
 	src, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
