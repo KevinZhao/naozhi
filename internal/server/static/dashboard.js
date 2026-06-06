@@ -347,6 +347,7 @@ function setToken(t) { /* token stored in HttpOnly cookie only */ }
 const ACTIVITY_VIEWS = ['chat', 'assets', 'cron', 'settings'];
 function setActivityView(view) {
   if (ACTIVITY_VIEWS.indexOf(view) === -1) view = 'chat';
+  if (view === activeView) return;
   const prev = activeView;
   activeView = view;
   // Rail button active / aria-pressed state.
@@ -1896,7 +1897,7 @@ async function previewRecentSession(expectedKey, sessionId, cwd) {
 
 const STATUS_LABELS = { off: 'offline', connecting: 'connecting...', authenticating: 'authenticating...', connected: 'connected', disconnected: 'HTTP fallback', disconnected_retry: 'reconnecting...' };
 const REMOTE_LABELS = { ok: 'connected', error: 'error', offline: 'offline', unreachable: 'unreachable' };
-const VALID_DOT_CLASSES = { ok: 'ok', error: 'error', offline: 'offline', connecting: 'connecting', off: 'off', connected: 'connected', disconnected: 'disconnected', authenticating: 'authenticating' };
+const VALID_DOT_CLASSES = { ok: 'ok', error: 'error', offline: 'offline', connecting: 'connecting', off: 'off', connected: 'connected', disconnected: 'disconnected', authenticating: 'authenticating', unreachable: 'unreachable' };
 
 // formatOutageDuration turns an elapsed millisecond count into a Chinese
 // label suitable for the sidebar-status hint. Pure function so a contract
@@ -14791,13 +14792,13 @@ async function fetchCronJobs() {
     }
     cronJobs = data.jobs || [];
     cronNotifyDefault = data.notify_default || null;
+    // Badge surfaces jobs needing attention (paused or last run errored),
+    // not the raw total — avoids a persistent red dot on healthy setups.
+    // cron-v2-polish §3.3: missed jobs（进程重启空窗期跳过的调度）也
+    // 纳入 attention，与 filterCronJobs 判定对齐。
+    const attention = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
     const cronBadge = document.getElementById('cron-badge');
     if (cronBadge) {
-      // Badge surfaces jobs needing attention (paused or last run errored),
-      // not the raw total — avoids a persistent red dot on healthy setups.
-      // cron-v2-polish §3.3: missed jobs（进程重启空窗期跳过的调度）也
-      // 纳入 attention，与 filterCronJobs 判定对齐。
-      const attention = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
       cronBadge.textContent = attention;
       cronBadge.style.display = attention > 0 ? '' : 'none';
       // Attention badge is semantically an alert (paused / errored jobs), so
@@ -14810,7 +14811,6 @@ async function fetchCronJobs() {
     // visible from any view (the header cron-badge is only shown in chat view).
     const railBadge = document.getElementById('abnav-cron-badge');
     if (railBadge) {
-      const attention = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
       railBadge.hidden = attention === 0;
     }
   } catch (e) { console.error('fetch cron:', e); }
