@@ -151,8 +151,11 @@ func (e *recentCacheEntry) ringSeed(rows []CronRunSummary, keepCount int) {
 		e.ring = e.ring[:keepCount]
 		// Zero out trailing slots so old entries beyond count don't pin
 		// strings / sub-slices (avoid leaking RAM through a smaller seed).
-		for i := len(rows); i < keepCount; i++ {
-			e.ring[i] = CronRunSummary{}
+		// R20260606-PERF-6: use clear() (Go 1.21+) instead of a per-element
+		// loop — a single memclr over the tail sub-slice rather than N
+		// separate GC-visible assignments.
+		if len(rows) < keepCount {
+			clear(e.ring[len(rows):])
 		}
 	}
 	n := len(rows)
