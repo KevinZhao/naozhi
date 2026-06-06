@@ -510,6 +510,22 @@ func main() {
 			// per-step prose below mirrors what used to be inline. A future
 			// subsystem (planner / Cron Dashboard) MUST be inserted at the
 			// correct slot here — runshutdown_order_test.go pins the order.
+			//
+			// Host-level Stop-overflow policy (#1169 / Sec-LOW-2): the two
+			// long-lived subsystems deliberately DIVERGE on what happens when a
+			// daemon/job ignores its drain budget, and this ordered seam is the
+			// single place that owns the host invariant. sysession force-exits
+			// (sysession.StopPolicyForceExit — Manager.Stop fires OnHardFail,
+			// default os.Exit(2)) because its daemons run user-prompt-derived
+			// strings through a CLI subprocess and a leaked goroutine touching a
+			// torn-down router could echo conversation excerpts into another
+			// session's reply. cron budget-leaks (cron.StopPolicyBudgetThenLeak —
+			// Stop logs + bumps CronStopBudgetExceeded*, orphans the goroutine for
+			// OS reap) because cron deliveries re-resolve the session through
+			// dispatch's outbound retry, so leaking is safe and force-exiting
+			// would kill legitimately-long jobs. This asymmetry is the security
+			// property: do NOT harmonise the two without reopening Sec-LOW-2. A
+			// future subsystem added below MUST pick one StopPolicy* explicitly.
 			runShutdownSteps([]shutdownStep{
 				// Sysession Manager must stop FIRST: daemon Tick paths call
 				// into router (VisitSessions / SetUserLabelWithOrigin);
