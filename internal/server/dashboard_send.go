@@ -91,6 +91,7 @@ type SendHandler struct {
 	sendLimiter   *ipLimiter     // per-IP send rate limiter (30/min)
 	auth          *auth.Handlers // for isSecure(r) when minting the nz_anon cookie in no-token mode
 	trustedProxy  bool           // whether to trust X-Forwarded-For for client IP
+	orient        *orientConfig  // image auto-orientation; nil = feature off
 }
 
 // uploadOwner derives a stable owner key from auth cookie, Bearer token, or

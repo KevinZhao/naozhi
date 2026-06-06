@@ -131,6 +131,7 @@ type Server struct {
 	discoveryCache *discoveryCache      // 读写: server.go (background-cached local discovery results)
 	scratchPool    *session.ScratchPool // 读写: server.go, dashboard.go, wshub.go (ephemeral aside sessions for preview drawer)
 	sysessionMgr   *sysession.Manager   // 读写: dashboard.go, dashboard_system.go (system-daemon Tick scheduling)
+	orient         *orientConfig        // 读: routes.go (image auto-orientation; nil = feature off)
 
 	// ── modes / resolver / node cache ──────────────────
 	debugMode bool                 // 读写: dashboard.go (gates /api/debug/pprof and /api/debug/vars; R244-SEC-P3-1)
@@ -397,6 +398,7 @@ func buildServer(opts ServerOptions) *Server {
 		nodes:           nodes,
 		knownNodes:      knownNodes,
 		sysessionMgr:    opts.SysessionManager,
+		orient:          buildOrientConfig(opts),
 
 		// Extracted handler groups (literals factored to build_handlers.go;
 		// #738 / R246-CR-004). Helper docstrings carry the limiter rationale

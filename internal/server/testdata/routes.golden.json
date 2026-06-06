@@ -206,6 +206,11 @@
   },
   {
     "method": "POST",
+    "path": "/api/sessions/orient",
+    "handler_type": "*SendHandler"
+  },
+  {
+    "method": "POST",
     "path": "/api/sessions/resume",
     "handler_type": "*dashsession.Handlers"
   },
