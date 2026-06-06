@@ -319,8 +319,8 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
    motif. Previously this was the one prominent spot that used the default UI
    font, which read as a generic app header and clashed with the mono login
    brand. R20260606. */
-.sidebar-header h1{font-size:var(--nz-fs-md);color:var(--nz-text-strong);font-weight:600;font-family:var(--nz-font-mono);letter-spacing:-.01em}
-.sidebar-header h1::before{content:"›_";color:var(--nz-rust);margin-right:6px;font-weight:700;opacity:.9}
+.sidebar-header h1{font-size:var(--nz-fs-md);color:var(--nz-rust);font-weight:600;font-style:italic;font-family:var(--nz-font-mono);letter-spacing:-.01em}
+.sidebar-header h1::before{content:"›_";color:var(--nz-rust);margin-right:6px;font-weight:700}
 .session-list{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent}
 
 .sidebar-status{padding:6px 16px;border-top:1px solid var(--nz-border);font-size:var(--nz-fs-sm);color:var(--nz-text-mute);flex-shrink:0;max-height:40%;overflow-y:auto}
