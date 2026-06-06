@@ -23,6 +23,21 @@ import (
 type workspaceStore struct {
 	// 读写: core (init/load), lifecycle (SetWorkspace/GetWorkspace), cleanup (save), discovery (Takeover), workspace (resolveWorkspaceLocked/WorkspaceRoots)
 	overrides map[string]string
+	// seq records the SetWorkspace insertion order per chatKey, used as the
+	// LRU recency signal for capacity self-healing (#cwd-overflow). A key with
+	// NO seq entry (e.g. loaded from disk on restart, or installed via Takeover)
+	// is treated as oldest — exactly the eviction priority we want, since the
+	// stale historical one-shot keys that fill the map are precisely those
+	// loaded from disk. Maintained only by SetWorkspace; cleared on delete in
+	// the override-delete sites (ResetChat / ResetAndDiscardOverride) and
+	// pruned during eviction (evictWorkspaceOverrideLocked) so it cannot
+	// outgrow `overrides`. (RenameSession carries the workspace on the
+	// ManagedSession, not via wsStore.overrides, so it has no seq to clear.)
+	// 读写: workspace (SetWorkspace / evictWorkspaceOverrideLocked), lifecycle (ResetChat / ResetAndDiscardOverride delete)
+	seq map[string]uint64
+	// seqNext is the monotonic counter handed to the next SetWorkspace write.
+	// 读写: workspace (SetWorkspace)
+	seqNext uint64
 	// 读写: lifecycle (ResetChat / RenameSession), discovery (Takeover), cleanup (saveIfDirty consume), workspace (SetWorkspace mutation)
 	dirty bool // true when workspace overrides changed since last save
 	// 读写: lifecycle (ResetChat / RenameSession), discovery (Takeover), cleanup (snapshot/check during save), workspace (SetWorkspace mutation)
@@ -37,6 +52,15 @@ const maxWorkspaceOverrides = 1024
 
 // SetWorkspace sets the working directory override for a chat. Bounded by
 // maxWorkspaceOverrides to prevent DoS via unique-chat-key flooding (R58-SEC-H1).
+//
+// Capacity self-healing (#cwd-overflow): one-shot dashboard:direct keys are
+// never recycled once their session ends (only /clear, /new discard an
+// override), so the map monotonically grows toward the cap. The old behaviour
+// — silently DROP the NEW override once full — meant every freshly created
+// session past 1024 fell back to defaultCWD (the workspace root) instead of
+// its project dir. We now EVICT the least-recently-set override that has no
+// live session instead of rejecting the new write, so the map self-heals and
+// the DoS bound still holds (size never exceeds the cap).
 func (r *Router) SetWorkspace(chatKey, path string) {
 	// R20260527122801-CR-16: reject empty chatKey before taking the lock.
 	// An unauthenticated or misrouted dashboard request that reaches this
@@ -55,17 +79,65 @@ func (r *Router) SetWorkspace(chatKey, path string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// Allow existing keys to be updated without bumping against the cap;
-	// only reject brand-new keys once the limit is hit. Mirrors the
-	// SetSessionBackend gating pattern.
+	// Existing keys update in place (no growth, no eviction). A brand-new key
+	// at capacity triggers an LRU eviction of a session-less override; only if
+	// nothing is evictable do we drop the new write (every remaining override
+	// belongs to a live chat — a genuine over-cap fleet, the DoS case the
+	// bound is for).
 	if _, existing := r.wsStore.overrides[chatKey]; !existing && len(r.wsStore.overrides) >= maxWorkspaceOverrides {
-		slog.Warn("workspaceOverrides at capacity; dropping override",
-			"chat_key", chatKey, "cap", maxWorkspaceOverrides)
-		return
+		if !r.evictWorkspaceOverrideLocked() {
+			slog.Warn("workspaceOverrides at capacity and no session-less entry to evict; dropping override",
+				"chat_key", chatKey, "cap", maxWorkspaceOverrides)
+			return
+		}
+	}
+	if r.wsStore.seq == nil {
+		r.wsStore.seq = make(map[string]uint64)
 	}
 	r.wsStore.overrides[chatKey] = path
+	r.wsStore.seqNext++
+	r.wsStore.seq[chatKey] = r.wsStore.seqNext
 	r.wsStore.dirty = true
 	r.wsStore.gen.Add(1)
+}
+
+// evictWorkspaceOverrideLocked removes the least-recently-set override whose
+// chat has NO live session, freeing one slot. Returns false when every
+// override belongs to a live chat (nothing safe to evict). Caller holds r.mu.
+//
+// Recency = wsStore.seq (SetWorkspace insertion order); a key absent from seq
+// (disk-loaded / Takeover-installed) sorts as oldest, which is the desired
+// priority — the stale one-shot keys that overflow the map are exactly those.
+// "No live session" is len(r.ss.byChat[chatKey])==0, so an active conversation
+// never loses its cwd. O(n) scan over a bounded map (<=1024) on the rare
+// at-capacity path only.
+func (r *Router) evictWorkspaceOverrideLocked() bool {
+	const noSeq = uint64(0) // keys without a seq entry sort oldest
+	victim := ""
+	var victimSeq uint64
+	found := false
+	for k := range r.wsStore.overrides {
+		if r.ss.byChat != nil && len(r.ss.byChat[k]) > 0 {
+			continue // live session — never evict
+		}
+		s := noSeq
+		if r.wsStore.seq != nil {
+			s = r.wsStore.seq[k] // 0 when absent → oldest
+		}
+		if !found || s < victimSeq {
+			victim, victimSeq, found = k, s, true
+		}
+	}
+	if !found {
+		return false
+	}
+	delete(r.wsStore.overrides, victim)
+	if r.wsStore.seq != nil {
+		delete(r.wsStore.seq, victim)
+	}
+	slog.Info("workspaceOverrides at capacity; evicted least-recently-set session-less override",
+		"evicted_chat_key", victim, "cap", maxWorkspaceOverrides)
+	return true
 }
 
 // GetWorkspace returns the effective workspace for a chat key.

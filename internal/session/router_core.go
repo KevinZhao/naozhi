@@ -317,7 +317,7 @@ type Router struct {
 	// dirty is a plain bool. The annotation below covers the UNION of all
 	// accessing domains; the lint recurses one level so each inner field ALSO
 	// carries its own per-domain annotation on sessionStore.
-	// 读写: core (init/Stats/Version/indexAdd/Del/resolver), lifecycle (spawn/reset/rename/install/unregister/countActive/evict/BumpVersion), shim (reconnect), cleanup (remove/cleanup/saveIfDirty/reconcile/BumpVersion), discovery (takeover/register/RegisterForResume/BumpVersion), capacity (reconcile active-gauge scan/evictOldest)
+	// 读写: core (init/Stats/Version/indexAdd/Del/resolver), lifecycle (spawn/reset/rename/install/unregister/countActive/evict/BumpVersion), shim (reconnect), cleanup (remove/cleanup/saveIfDirty/reconcile/BumpVersion), discovery (takeover/register/RegisterForResume/BumpVersion), capacity (reconcile active-gauge scan/evictOldest), workspace (evictWorkspaceOverrideLocked byChat live-session check)
 	ss sessionStore
 	// bkStore is the backend/policy facet (Router P3, #383): the 8 read-only-
 	// after-NewRouter config fields (wrapper/wrappers/defaultBackend/backendIDs/
