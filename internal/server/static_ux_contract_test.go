@@ -6192,30 +6192,38 @@ func TestDashboardJS_RNEW_UX015_HexBaseline(t *testing.T) {
 // sites migrate in later rounds.
 func TestDashboardJS_RNEW_UX003_FetchJSONHelper(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	// PR-0a (RFC dashboard-cron-view-extraction): fetchJSON moved to the shared
+	// nz_util.js layer. The helper declaration now lives there; call sites stay
+	// in dashboard.js. Assert both halves of the contract across the two files.
+	utilData, err := nzUtilJS.ReadFile("static/nz_util.js")
 	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
+		t.Fatalf("read nz_util.js: %v", err)
 	}
-	js := string(data)
-	idx := strings.Index(js, "async function fetchJSON(url, opts")
+	util := string(utilData)
+	idx := strings.Index(util, "async function fetchJSON(url, opts")
 	if idx < 0 {
-		t.Fatalf("RNEW-UX-003: missing fetchJSON helper declaration")
+		t.Fatalf("RNEW-UX-003: missing fetchJSON helper declaration in nz_util.js")
 	}
 	end := idx + 4096
-	if end > len(js) {
-		end = len(js)
+	if end > len(util) {
+		end = len(util)
 	}
-	body := js[idx:end]
+	body := util[idx:end]
 	if !strings.Contains(body, "AbortController") {
 		t.Errorf("RNEW-UX-003: fetchJSON body missing AbortController reference")
 	}
 	if !strings.Contains(body, "timeoutMs = 10000") && !strings.Contains(body, "10000") {
 		t.Errorf("RNEW-UX-003: fetchJSON missing 10000ms default timeout")
 	}
-	// Helper's own declaration uses `function fetchJSON(`, so counting
-	// `fetchJSON(` occurrences must be >=2 to prove at least one caller.
-	if n := strings.Count(js, "fetchJSON("); n < 2 {
-		t.Errorf("RNEW-UX-003: expected >=1 fetchJSON( caller plus the definition, got %d total occurrences", n)
+	// At least one caller must remain in dashboard.js, proving the migrated
+	// helper is actually consumed (the bare alias window.fetchJSON keeps the
+	// call sites unchanged).
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	if n := strings.Count(string(data), "fetchJSON("); n < 1 {
+		t.Errorf("RNEW-UX-003: expected >=1 fetchJSON( caller in dashboard.js, got %d", n)
 	}
 }
 
@@ -6783,9 +6791,12 @@ func TestDashboardJS_InlineMathAcceptsFunctionRefs(t *testing.T) {
 // silently re-introducing the reentrancy hazard.
 func TestDashboardJS_EscIsPureString(t *testing.T) {
 	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	// PR-0a (RFC dashboard-cron-view-extraction): esc/escAttr/escJs moved to the
+	// shared nz_util.js layer. The pure-string security contract follows the
+	// implementation there.
+	data, err := nzUtilJS.ReadFile("static/nz_util.js")
 	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
+		t.Fatalf("read nz_util.js: %v", err)
 	}
 	js := string(data)
 

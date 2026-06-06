@@ -383,27 +383,8 @@ function setActivityView(view) {
 // polling + scan sites (sessions, cli/backends, events, cron, discovered,
 // discovered/preview, projects/files/exists) use this helper today; the
 // remaining fetch() sites migrate in later rounds.
-async function fetchJSON(url, opts = {}) {
-  const { timeoutMs = 10000, signal: parentSignal, ...rest } = opts;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(new Error('timeout')), timeoutMs);
-  // Chain caller-provided signal so e.g. component-unmount can abort too.
-  if (parentSignal) {
-    if (parentSignal.aborted) { clearTimeout(timer); ctrl.abort(parentSignal.reason); }
-    else parentSignal.addEventListener('abort', () => ctrl.abort(parentSignal.reason), { once: true });
-  }
-  try {
-    const r = await fetch(url, { ...rest, signal: ctrl.signal });
-    clearTimeout(timer);
-    const text = await r.text();
-    if (!r.ok) { const err = new Error('HTTP ' + r.status + ': ' + text.slice(0, 500)); err.status = r.status; throw err; }
-    return text ? JSON.parse(text) : null;
-  } catch (e) {
-    clearTimeout(timer);
-    if (e.name === 'AbortError') throw new Error('fetch timed out after ' + timeoutMs + 'ms: ' + url);
-    throw e;
-  }
-}
+// fetchJSON moved to nz_util.js (PR-0a). Available as window.nz.util.fetchJSON
+// and the top-level alias window.fetchJSON, loaded before this file.
 
 function removePendingSession(key) {
   delete sessionWorkspaces[key];
@@ -7062,13 +7043,8 @@ function renderBackendsDoctorPanel() {
   '</details>';
 }
 
-function showToast(msg, type, duration) {
-  const el = document.getElementById('toast');
-  el.textContent = msg;
-  el.className = 'toast show' + (type ? ' ' + type : '');
-  clearTimeout(el._tid);
-  el._tid = setTimeout(() => { el.className = 'toast'; }, duration || 3000);
-}
+// showToast moved to nz_util.js (PR-0a). Available as window.nz.util.showToast
+// and the top-level alias window.showToast, loaded before this file.
 
 // RNEW-UX-010 — polite announcement into #sr-announce for screen readers.
 // Used for signals that don't surface as a toast (WS connect/disconnect,
@@ -7415,37 +7391,8 @@ function sessionTimeHint(key) {
   return '\u2014';
 }
 
-/* Focus trap: confine Tab within an overlay, restore focus on dismissal.
-   Called after an overlay is appended to the DOM. Returns nothing — the
-   overlay's MutationObserver tears down listeners when it's removed. */
-function trapFocus(overlay) {
-  if (!overlay || overlay._trapped) return;
-  overlay._trapped = true;
-  const prevActive = document.activeElement;
-  const FOCUSABLE = 'button, [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
-  const onKey = (e) => {
-    if (e.key === 'Escape') {
-      // Let inner handlers pre-empt; otherwise dismiss the overlay.
-      if (!e.defaultPrevented) { overlay.remove(); }
-      return;
-    }
-    if (e.key !== 'Tab') return;
-    const nodes = [...overlay.querySelectorAll(FOCUSABLE)].filter(el => !el.disabled && el.offsetParent !== null);
-    if (nodes.length === 0) { e.preventDefault(); return; }
-    const first = nodes[0], last = nodes[nodes.length - 1];
-    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-  };
-  overlay.addEventListener('keydown', onKey);
-  const obs = new MutationObserver(() => {
-    if (!document.body.contains(overlay)) {
-      overlay.removeEventListener('keydown', onKey);
-      obs.disconnect();
-      if (prevActive && prevActive.focus) { try { prevActive.focus(); } catch(_) {} }
-    }
-  });
-  obs.observe(document.body, { childList: true, subtree: false });
-}
+// trapFocus moved to nz_util.js (PR-0a). Available as window.nz.util.trapFocus
+// and the top-level alias window.trapFocus, loaded before this file.
 
 // confirmDialog renders a styled confirm prompt matching the rest of the
 // dashboard (reuses .modal-overlay / .modal / .modal-btns). Returns a Promise
@@ -7729,43 +7676,13 @@ function timeDividerHtml(ms) {
   return '<div class="event-time-divider" data-time="' + (ms || 0) + '">' + esc(formatTimeShort(ms)) + '</div>';
 }
 
-// R244-SEC-P3-6: pure-string replace chain instead of a shared <div>
-// scratch element. The previous implementation wrote the input to a
-// shared scratch element's textContent and read back its innerHTML,
-// which is correct in straight-line code but fragile under reentrancy:
-// if the rendering pipeline ever invokes esc() recursively (e.g. a
-// custom toString on the input that triggers a render hook, or a future
-// getter on the input that calls esc() on a sub-field) the inner call
-// clobbers the outer's pending scratch state before the outer reads it
-// back, leaking the inner value into the outer scope's HTML output.
-// Pure string replacement has no shared mutable state.
-//
-// The output set (&, <, >) matches the textContent → innerHTML round-trip
-// the previous implementation produced — modern browsers do NOT serialise
-// quote characters via that round-trip, so adding " / ' here would change
-// observable behaviour at every escAttr() call site that already chains a
-// further quote-escape on top. Quote handling stays delegated to escAttr
-// (defined just below) so the behavioural surface for the 171 esc() call
-// sites is unchanged.
-const _escAmpRe = /&/g;
-const _escLtRe = /</g;
-const _escGtRe = />/g;
-function esc(s) {
-  if (!s) return '';
-  return String(s)
-    .replace(_escAmpRe, '&amp;')
-    .replace(_escLtRe, '&lt;')
-    .replace(_escGtRe, '&gt;');
-}
-// Escape for HTML attribute context. We don't know whether the caller used
-// single- or double-quoted attributes, so we escape both to be safe.
-function escAttr(s) {
-  return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-function escJs(s) {
-  if (!s) return '';
-  return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/</g,'\\u003c').replace(/>/g,'\\u003e');
-}
+// esc / escAttr / escJs moved to nz_util.js (PR-0a, RFC
+// dashboard-cron-view-extraction). They are exposed as window.nz.util.* and
+// as top-level aliases (window.esc, window.escAttr, window.escJs) loaded
+// before this file, so the bare call sites below keep working unchanged.
+// SECURITY: the single source of truth for HTML/attr/JS escaping lives there
+// — never re-define a local copy here or in any view module.
+
 // URL schemes that are safe to embed in <a href>.
 // RNEW-SEC-007: Only https?: and fragment-only URLs (#...) are accepted.
 // Previously the allowlist also matched mailto:, absolute paths (/...),
