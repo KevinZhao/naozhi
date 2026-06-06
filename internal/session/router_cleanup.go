@@ -903,6 +903,17 @@ func (r *Router) shutdown() {
 		}
 	}
 
+	// #1822 (Option B): publish the stopped gate while still holding r.mu,
+	// immediately before the snapshot below. spawnSession checks r.stopped
+	// under the same r.mu, so the gate and the snapshot are mutually exclusive:
+	// any concurrent spawn either completed (and is in the snapshot) or now
+	// observes stopped=true and is rejected with ErrRouterStopped before it can
+	// install a session the snapshot would miss. This closes the spawn-after-
+	// snapshot leak + write-to-stopped-persister window. Do NOT move this out
+	// of the held-lock region — the set-before-snapshot-under-same-lock ordering
+	// is the load-bearing correctness property. Set once, never cleared.
+	r.stopped.Store(true)
+
 	// Snapshot sessions for saving outside lock.
 	// R20260603-PERF-1: use a value slice instead of a map copy so we avoid
 	// allocating hashmap buckets + load-factor slack; saveStoreSlice only

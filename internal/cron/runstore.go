@@ -1,13 +1,10 @@
 package cron
 
 import (
-	"bytes"
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -197,175 +194,6 @@ func (s *runStore) enabled() bool {
 	return s != nil && !s.disabled
 }
 
-// recentCacheEntry is the cached newest-first snapshot for one job.
-//
-// R242-GO-8 / R235-PERF-3 / R233-PERF-2: storage is a fixed-capacity ring
-// buffer (cap = runStore.keepCount, typically 200). cacheHeadPush is the
-// hot path — every Append calls it, so pre-historical implementations
-// that did `append + copy` shifted up to keepCount-1 entries per push
-// (O(N) per Append). The ring lets us land each push in O(1) by
-// rotating `head` backwards instead of moving data.
-//
-// Logical view: newest-first slice of length `count`, where index 0 is
-// the newest entry. Physically: `ring[head]` is the newest, `ring[(head
-// + count - 1) % cap(ring)]` is the oldest. ringRead / ringSnapshot
-// translate logical → physical for all consumers.
-type recentCacheEntry struct {
-	mu sync.Mutex
-	// ring is the fixed-capacity backing array. cap(ring) == runStore.keepCount
-	// after the first warm pass; nil before warm.
-	ring []CronRunSummary
-	// head is the ring index of the newest entry. Undefined when count == 0.
-	head int
-	// count is the populated length (0 ≤ count ≤ cap(ring)).
-	count int
-	warm  bool // false until first warm() pass; List/Recent will lazy-warm
-	// appendsSinceTrim counts Append calls since the last full trimJobLocked
-	// pass. Used by skipAppendTrim to batch ReadDir-driven trims when the
-	// cache shows we're well under keepCount. Reset to 0 by Append after
-	// calling trimJobLocked. R232-PERF-8.
-	appendsSinceTrim int
-	// runIDs is the set of RunIDs currently present in the ring. cacheHeadPush
-	// consults it for an O(1) duplicate check instead of an O(count) linear
-	// ring scan on every Append (#1517). It is maintained in lockstep with the
-	// ring under entry.mu: ringSeed rebuilds it, ringPushHead inserts the new
-	// RunID (and deletes the evicted oldest when the ring is full). The dedup
-	// is needed because a warmCache ringSeed can interleave between an Append's
-	// WriteFileAtomic and its matching cacheHeadPush (R20260527122801-PERF-4 /
-	// #1335), seeding a RunID ahead of its own late push. nil until the first
-	// ringSeed allocates it.
-	runIDs map[string]struct{}
-	// capZeroWarned is set on the first cap=0 self-heal observation so the
-	// warn fires exactly once per entry rather than once per process.
-	// R20260602-CR-4: per-entry instead of a package-level sync.Once so
-	// parallel tests each get their own warn gate and cannot silence one
-	// another.
-	capZeroWarned atomic.Bool
-}
-
-// warnRingCapZero fires a slog.Warn for the cap=0 self-heal path. It is
-// rate-limited per recentCacheEntry via e.capZeroWarned (atomic CAS) so
-// each entry warns at most once, independent of other entries. This is
-// R20260602-CR-4: the previous package-level sync.Once silenced warnings
-// for all subsequent entries once the first triggered, hiding the
-// regression in parallel-test and multi-job scenarios.
-func warnRingCapZero(e *recentCacheEntry, site string) {
-	if e.capZeroWarned.CompareAndSwap(false, true) {
-		slog.Warn("cron runstore: recentCache ring cap=0 on read; self-healing to empty (ringSeed bypass regression?)",
-			"site", site)
-	}
-}
-
-// ringRead returns the i-th newest entry (0 = newest). Caller holds entry.mu
-// and must ensure 0 ≤ i < entry.count.
-func (e *recentCacheEntry) ringRead(i int) CronRunSummary {
-	// R247-GO-4: defensive against cap(ring)==0 with count>0 — same self-heal
-	// philosophy as cacheHeadPush's `cap(entry.ring) != s.keepCount` reseed.
-	// Avoids integer divide-by-zero panic on a regression path that bypasses
-	// ringSeed (e.g. an unwarmed entry mutated by future code). [BREAKING-LOCAL]
-	if cap(e.ring) == 0 {
-		// R249-ARCH-13 (#979): warn once so the silent self-heal is auditable.
-		warnRingCapZero(e, "ringRead")
-		return CronRunSummary{}
-	}
-	return e.ring[(e.head+i)%cap(e.ring)]
-}
-
-// ringSnapshot returns a fresh newest-first slice of up to limit entries.
-// Caller holds entry.mu. limit ≤ 0 or limit > count returns count entries.
-func (e *recentCacheEntry) ringSnapshot(limit int) []CronRunSummary {
-	// R247-GO-4: see ringRead — guard cap=0 + count>0 regression and the
-	// degenerate count==0 fast path (no allocation needed). [BREAKING-LOCAL]
-	if cap(e.ring) == 0 || e.count == 0 {
-		// R249-ARCH-13 (#979): warn once when cap=0 *despite* a populated
-		// count — that is the bypass regression. The count==0 case is the
-		// benign empty-cache fast path and stays silent.
-		if cap(e.ring) == 0 && e.count > 0 {
-			warnRingCapZero(e, "ringSnapshot")
-		}
-		return nil
-	}
-	if limit <= 0 || limit > e.count {
-		limit = e.count
-	}
-	out := make([]CronRunSummary, limit)
-	c := cap(e.ring)
-	// Two contiguous segments: head..min(head+limit, c) and 0..wrap.
-	first := limit
-	if e.head+first > c {
-		first = c - e.head
-	}
-	copy(out, e.ring[e.head:e.head+first])
-	if first < limit {
-		copy(out[first:], e.ring[:limit-first])
-	}
-	return out
-}
-
-// ringPushHead inserts summary at the newest end in O(1). Caller holds
-// entry.mu and entry.ring is allocated (cap > 0).
-func (e *recentCacheEntry) ringPushHead(summary CronRunSummary) {
-	c := cap(e.ring)
-	// Move head one slot backwards, wrapping around. After this, the
-	// freshly written summary is the newest entry.
-	e.head = (e.head - 1 + c) % c
-	if e.count == 0 {
-		// First push into an empty ring: ensure ring length covers head.
-		// We keep len(ring) == cap(ring) so plain index assignment works
-		// regardless of count.
-		e.ring = e.ring[:c]
-	}
-	if e.count == c {
-		// Ring full: the slot we're about to overwrite holds the oldest
-		// entry, which is being evicted. Drop it from the RunID set so the
-		// O(1) dedup index (#1517) stays in lockstep with the ring.
-		if e.runIDs != nil {
-			delete(e.runIDs, e.ring[e.head].RunID)
-		}
-	}
-	e.ring[e.head] = summary
-	if e.count < c {
-		e.count++
-	}
-	if e.runIDs != nil {
-		e.runIDs[summary.RunID] = struct{}{}
-	}
-}
-
-// ringSeed populates the ring from a newest-first source slice. Caller
-// holds entry.mu. Used by warmCache and cacheTrimAfterDisk to install a
-// fresh snapshot. cap is set to keepCount so future pushes never realloc.
-func (e *recentCacheEntry) ringSeed(rows []CronRunSummary, keepCount int) {
-	if cap(e.ring) != keepCount {
-		e.ring = make([]CronRunSummary, keepCount)
-	} else {
-		e.ring = e.ring[:keepCount]
-		// Zero out trailing slots so old entries beyond count don't pin
-		// strings / sub-slices (avoid leaking RAM through a smaller seed).
-		for i := len(rows); i < keepCount; i++ {
-			e.ring[i] = CronRunSummary{}
-		}
-	}
-	n := len(rows)
-	if n > keepCount {
-		n = keepCount
-	}
-	copy(e.ring[:n], rows[:n])
-	e.head = 0
-	e.count = n
-	// Rebuild the RunID dedup index (#1517) from the freshly-seeded rows so
-	// the next cacheHeadPush can do an O(1) membership test against this
-	// snapshot instead of an O(count) linear scan.
-	if e.runIDs == nil {
-		e.runIDs = make(map[string]struct{}, n)
-	} else {
-		clear(e.runIDs)
-	}
-	for i := 0; i < n; i++ {
-		e.runIDs[e.ring[i].RunID] = struct{}{}
-	}
-}
-
 // User-configurable defaults (DefaultRunsKeepCount / DefaultRunsKeepWindow)
 // and hard schema caps (MaxRunRecordBytes) live in limits.go alongside the
 // other cron-trust-boundary constants — see R247-CR-12 / R247-CR-20 (#598)
@@ -375,69 +203,6 @@ func (e *recentCacheEntry) ringSeed(rows []CronRunSummary, keepCount int) {
 // exceeds the size cap. Treated identically to "missing": list APIs
 // skip the entry, GC removes it.
 var ErrCorruptRun = errors.New("cron run: corrupt or oversize record")
-
-// appendMarshalBufPool reuses bytes.Buffer + json.Encoder scratch space
-// across runStore.Append calls so each Append avoids the per-call
-// encodeState alloc that json.Marshal performs internally. Mirrors the
-// MarshalRecord pattern in internal/eventlog/schema/record.go. Cron Append
-// rate is bounded (≤ 1Hz × N jobs) but every persisted record allocates
-// ~2KB of encode scratch otherwise — pooling drops that to amortised zero
-// after the warmup period. R240-PERF-6 / #1043.
-// appendMarshalScratch pairs a bytes.Buffer with the json.Encoder bound to
-// it. R20260602190132-PERF-2: a json.Encoder caches its internal encodeState
-// (~2KB) across Encode calls on the same encoder, but constructing a fresh
-// json.NewEncoder(buf) every marshalRunPooled call discarded that cache so the
-// pooled buffer never actually amortised the encoder-side alloc. Pooling the
-// encoder alongside the buffer closes that gap — the encodeState is now reused
-// for the lifetime of the pooled pair.
-type appendMarshalScratch struct {
-	buf *bytes.Buffer
-	enc *json.Encoder
-}
-
-var appendMarshalBufPool = sync.Pool{
-	New: func() any {
-		buf := bytes.NewBuffer(make([]byte, 0, 4*1024))
-		return &appendMarshalScratch{buf: buf, enc: json.NewEncoder(buf)}
-	},
-}
-
-// appendMarshalPoolMaxCap drops oversized buffers from the pool so a
-// one-off near-MaxRunRecordBytes record does not pin memory for the
-// process lifetime. Sized at 2× MaxRunRecordBytes for headroom.
-const appendMarshalPoolMaxCap = 2 * MaxRunRecordBytes
-
-// marshalRunPooled encodes run via a pooled bytes.Buffer + json.Encoder.
-// Returns a freshly-copied []byte (independent of the pooled buffer) so
-// callers may retain it after the buffer is recycled. Behaviourally
-// identical to json.Marshal(run) except for json.Encoder's trailing
-// '\n' which is stripped to match Marshal output.
-func marshalRunPooled(run *CronRun) ([]byte, error) {
-	sc := appendMarshalBufPool.Get().(*appendMarshalScratch)
-	buf := sc.buf
-	defer func() {
-		if buf.Cap() > appendMarshalPoolMaxCap {
-			return
-		}
-		buf.Reset()
-		appendMarshalBufPool.Put(sc)
-	}()
-	buf.Reset()
-	// json.Marshal default — keep HTML-escape parity so on-disk bytes match
-	// the legacy callers and any future Unmarshal of historical records is
-	// indistinguishable from json.Marshal output. The encoder is bound to buf
-	// once at construction and reused from the pool, retaining its encodeState.
-	if err := sc.enc.Encode(run); err != nil {
-		return nil, err
-	}
-	body := buf.Bytes()
-	if n := len(body); n > 0 && body[n-1] == '\n' {
-		body = body[:n-1]
-	}
-	out := make([]byte, len(body))
-	copy(out, body)
-	return out, nil
-}
 
 // newRunStore constructs a runStore rooted at <storePath dir>/runs.
 // storePath="" disables the store (List returns empty, Append no-ops);
@@ -1748,63 +1513,6 @@ func (s *runStore) Get(jobID, runID string) (*CronRun, error) {
 	return s.readRun(path)
 }
 
-// readRun parses a single run file. Returns ErrCorruptRun on parse
-// failure or oversize; fs.ErrNotExist propagates unchanged.
-//
-// R235-SEC-5 / R242-GO-17 / R238-SEC-7 (#827): the original implementation
-// did Lstat + (cond) ReadFile, which left a TOCTOU window — between the
-// Lstat result observing a regular file and ReadFile opening the path,
-// an attacker with write access to runs/<jobID>/ could swap the entry
-// for a symlink and have ReadFile dereference a sensitive file. We close
-// the window by using OpenFile with O_NOFOLLOW (kernel refuses to follow
-// a final-component symlink, returning ELOOP) and Fstat'ing the resulting
-// fd: the bytes we read come from exactly the inode whose mode we just
-// validated as a regular file, regardless of any concurrent rename. The
-// guard is the only barrier between Get() and a malicious symlink because
-// Get() takes a caller-supplied runID that has not been ReadDir-filtered.
-// diskListNewestFirst / trimJobLocked already skip symlinks during their
-// directory scans, so they use readRunNoLstat to avoid paying for the
-// redundant fd validation.
-func (s *runStore) readRun(path string) (*CronRun, error) {
-	// openRunFile is platform-specialised: Unix uses O_NOFOLLOW for a
-	// kernel-atomic symlink refusal; Windows falls back to a Lstat-then-
-	// Open two-step (best-effort, since O_NOFOLLOW is Unix-only).
-	f, err := openRunFile(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	// Fstat on the fd returns metadata for the exact inode we have
-	// open — no second path lookup, no race window. Reject anything
-	// that's not a plain file: Open with O_NOFOLLOW already filtered
-	// symlinks, but a fifo/socket/device with the right name would
-	// still get past Open and only Fstat catches it.
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("%w: not a regular file", ErrCorruptRun)
-	}
-	return s.parseRunFromFile(f, fi)
-}
-
-// readRunNoLstat is the loop-friendly variant of readRun for callers that
-// have already filtered the entry through DirEntry.Type() (rejecting symlinks
-// + non-regular modes during the directory scan). It skips the redundant
-// Lstat syscall, halving syscall count for large directory listings —
-// R245-PERF-9 (cluster: R243-PERF-11).
-//
-// SAFETY: must NOT be used as the entry-point for a constructed path (e.g.
-// Get()'s direct path lookup). Get arrives with a caller-supplied runID
-// that has not been ReadDir-filtered, so the Lstat guard in readRun is the
-// only barrier against `runs/<jobID>/<runID>.json` being a symlink to
-// /etc/passwd. diskListNewestFirst is the sole caller because its scan loop
-// already drops symlinks at the e.Type()&fs.ModeSymlink check.
-func (s *runStore) readRunNoLstat(path string) (*CronRun, error) {
-	return s.parseRunBytes(path)
-}
-
 // parseRunBytes is the ReadFile + size-cap + json.Unmarshal tail used by
 // readRunNoLstat — callers that have already filtered the DirEntry by
 // type. Centralising the byte-decode keeps the over-cap and unmarshal-
@@ -1817,89 +1525,11 @@ func (s *runStore) parseRunBytes(path string) (*CronRun, error) {
 	return decodeRunBytes(data, s.maxRunBytes)
 }
 
-// parseRunFromFile reads the open fd's contents (bounded by maxRunBytes+1
-// so we can detect oversize without slurping arbitrary bytes) and decodes
-// the JSON. Used by readRun where the fd is the TOCTOU-safe handle. fi is
-// the Fstat result already validated as a regular file, used to size-hint
-// the buffer.
-func (s *runStore) parseRunFromFile(f *os.File, fi os.FileInfo) (*CronRun, error) {
-	// io.ReadAll grows incrementally; preallocate when fi.Size() is a
-	// reasonable hint. The cap+1 read pattern is irrelevant here because
-	// decodeRunBytes enforces the cap explicitly on the returned slice
-	// length, so even a regular file that grew between Stat and Read
-	// gets rejected by the size check.
-	size := fi.Size()
-	if size < 0 || size > s.maxRunBytes {
-		// Stat already says we're over cap — short-circuit before any
-		// ReadAll alloc. Match parseRunBytes's wrap exactly so callers
-		// can't tell the readRun vs readRunNoLstat path apart by error
-		// shape.
-		return nil, fmt.Errorf("%w: %d bytes > %d cap", ErrCorruptRun, size, s.maxRunBytes)
-	}
-	buf := make([]byte, 0, size)
-	data, err := readAllInto(f, buf)
-	if err != nil {
-		return nil, err
-	}
-	return decodeRunBytes(data, s.maxRunBytes)
-}
-
 // readAllInto reads f to EOF, appending into the supplied prefix-allocated
 // buffer. Mirrors io.ReadAll's loop but lets the caller pre-size based on
 // Fstat to avoid repeated re-grows on the typical ~2KB run record.
 func readAllInto(f *os.File, buf []byte) ([]byte, error) {
 	return readAllIntoReader(f, buf)
-}
-
-// readAllIntoReader is the testable core of readAllInto. It accepts an
-// io.Reader so unit tests can inject a fake reader that repeatedly returns
-// (0, nil) to exercise the zero-progress guard (R171023-CR-007).
-//
-// The guard breaks out of the loop after zeroProgressLimit consecutive
-// (0, nil) reads so the function does not hang on io.Reader implementations
-// that are contractually allowed to return (0, nil) (e.g., certain FUSE
-// file systems). os.File on Linux follows POSIX and will not do this in
-// practice, but defence-in-depth applies here.
-const zeroProgressLimit = 2
-
-func readAllIntoReader(r io.Reader, buf []byte) ([]byte, error) {
-	zeroCount := 0
-	for {
-		if len(buf) == cap(buf) {
-			buf = append(buf, 0)[:len(buf)]
-		}
-		n, err := r.Read(buf[len(buf):cap(buf)])
-		buf = buf[:len(buf)+n]
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return buf, nil
-			}
-			return buf, err
-		}
-		if n == 0 {
-			zeroCount++
-			if zeroCount >= zeroProgressLimit {
-				return buf, io.ErrNoProgress
-			}
-		} else {
-			zeroCount = 0
-		}
-	}
-}
-
-// decodeRunBytes enforces the size cap and json.Unmarshal step shared by
-// both file-based and bytes-based read paths. Extracted from parseRunBytes
-// so parseRunFromFile (the TOCTOU-safe path) can reuse the wrapping shape
-// without an extra ReadFile.
-func decodeRunBytes(data []byte, maxRunBytes int64) (*CronRun, error) {
-	if int64(len(data)) > maxRunBytes {
-		return nil, fmt.Errorf("%w: %d bytes > %d cap", ErrCorruptRun, len(data), maxRunBytes)
-	}
-	var run CronRun
-	if err := json.Unmarshal(data, &run); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrCorruptRun, err)
-	}
-	return &run, nil
 }
 
 // DeleteJob removes the entire runs/<jobID>/ subtree. Called from

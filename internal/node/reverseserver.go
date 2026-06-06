@@ -110,33 +110,34 @@ var reverseUpgrader = websocket.Upgrader{
 		if isLoopbackHost(r.Host) {
 			return true
 		}
-		// Plain-HTTP non-loopback: log once-per-process and allow so
-		// existing private-network deployments don't break, but make the
-		// origin-spoof exposure visible in logs. Operators who want to
-		// silence this should put TLS in front of /ws-node.
-		//
-		// Bump the monotonic counter on every such upgrade (not just the
-		// first) so /debug/vars reflects ongoing cleartext-token exposure
-		// even after the once-guarded warn has already fired (#1026).
-		//
-		// R164029-SEC-1 (#1593): split the plain-HTTP warning by host class.
-		// A bearer token sent in cleartext over a private LAN (RFC1918 /
-		// ULA / link-local) is exposed only to passive listeners on that
-		// segment, whereas a public/routable host means the first-frame
-		// token traverses the open internet — a materially higher exposure
-		// that previously shared the same generic loopback-vs-everything-else
-		// message. Both still bump the cleartext counter and still allow the
-		// upgrade (bearer-token first-frame auth remains the primary gate;
-		// hard-rejecting would break existing no-TLS private deployments),
-		// but the log now names which exposure surface is in play so
-		// operators can decide whether TLS is mandatory for their topology.
+		// Plain-HTTP, non-loopback. Bump the monotonic counter on every such
+		// upgrade (not just the first) so /debug/vars reflects ongoing
+		// cleartext-token exposure even after the once-guarded warn has
+		// already fired (#1026).
 		insecureReverseUpgradeTotal.Add(1)
+		// R20260606-SEC-4 (#1824): split by host class with DIFFERENT outcomes.
+		//
+		// A bearer token sent in cleartext over a private LAN (RFC1918 / ULA /
+		// link-local) is exposed only to passive listeners on that segment —
+		// the documented no-TLS private-network / sidecar topology. Keep
+		// allowing it (bearer-token first-frame auth remains the primary gate)
+		// but warn once so operators know TLS is still recommended.
+		//
+		// A public/routable Host means the first-frame token traverses the open
+		// internet, observable to any passive on-path party who can then
+		// authenticate as the node and drive every session on the hub. There is
+		// no legitimate plain-HTTP-over-public-internet reverse-node topology,
+		// so HARD-REJECT the upgrade rather than log-and-continue: returning
+		// false makes websocket.Upgrade fail with a 403 before any frame (and
+		// thus the token) is read. Operators who terminate TLS in front of
+		// /ws-node are unaffected (r.TLS check above), and private/loopback
+		// wiring is unaffected (handled above / here).
 		if isPrivateHost(r.Host) {
 			warnInsecureReversePrivateOnce(r.Host)
-		} else {
-			warnInsecureReverseUpgradeOnce(r.Host)
+			return true
 		}
-		return true
+		warnInsecureReverseUpgradeOnce(r.Host)
+		return false
 	},
 }
 
@@ -146,7 +147,7 @@ var insecureReverseWarnOnce sync.Once
 
 func warnInsecureReverseUpgradeOnce(host string) {
 	insecureReverseWarnOnce.Do(func() {
-		slog.Warn("reverse upgrade arrived over plain HTTP without Origin from a public/routable host; the bearer token rides the first frame in cleartext over the open network — deploy TLS in front of /ws-node",
+		slog.Warn("reverse upgrade over plain HTTP from a public/routable host REJECTED; the bearer token would ride the first frame in cleartext over the open network — deploy TLS in front of /ws-node (loopback/private-LAN topologies are unaffected)",
 			"host", truncateLabelUTF8(host, 128))
 	})
 }
