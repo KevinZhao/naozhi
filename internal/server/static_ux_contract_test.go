@@ -196,8 +196,10 @@ func TestDashboardHTML_SectionHeaderNotAllCaps(t *testing.T) {
 	if !strings.Contains(html, "text-transform:none") {
 		t.Error("section-header must drop text-transform:uppercase — project names render in natural case now")
 	}
-	if !strings.Contains(html, ".section-header{padding:6px 12px 6px 16px;font-size:12px;") {
-		t.Error("section-header must use font-size:12px on desktop")
+	// font-size migrated to the --nz-fs-sm token (R20260606 design-system
+	// scale); --nz-fs-sm resolves to 12px so the rendered size is unchanged.
+	if !strings.Contains(html, ".section-header{padding:6px 12px 6px 16px;font-size:var(--nz-fs-sm);") {
+		t.Error("section-header must use font-size:var(--nz-fs-sm) (=12px) on desktop")
 	}
 	// Forbid the legacy rule that still includes uppercase + letter-spacing,
 	// to catch accidental reverts that paste the old block back in full.
@@ -242,7 +244,9 @@ func TestDashboardHTML_BodyFontStackSupportsCJK(t *testing.T) {
 	}
 	// Sanity: code-oriented selectors still use monospace internally so this
 	// rollback doesn't accidentally de-fix code rendering.
-	if !strings.Contains(html, ".md-code{background:var(--nz-border);color:#e6edf3;padding:1px 5px;border-radius:4px;font-size:13px;font-family:'SF Mono'") {
+	// border-radius migrated to --nz-radius-sm (=4px, unchanged render);
+	// font-size:13px and the SF Mono stack are intentionally left as-is.
+	if !strings.Contains(html, ".md-code{background:var(--nz-border);color:#e6edf3;padding:1px 5px;border-radius:var(--nz-radius-sm);font-size:13px;font-family:'SF Mono'") {
 		t.Error("dashboard.html inline code `.md-code` must keep its monospace stack")
 	}
 }
