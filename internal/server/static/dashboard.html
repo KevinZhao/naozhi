@@ -452,11 +452,11 @@ body.nz-view-settings .settings-main{display:flex;flex-direction:column;flex:1;m
    dashboard.js). The call was never executed, so it is noise — fold it away
    behind an amber warning, collapsed by default, while keeping the raw XML
    one click away for debugging. Mirrors the .tc-wrap fold affordance. */
-.leaked-toolcall{display:block;border:1px solid var(--nz-amber,#d29922);border-radius:6px;margin:6px 0 2px;background:rgba(210,153,34,.07);overflow:hidden}
-.leaked-toolcall-summary{padding:5px 10px;cursor:pointer;font-size:12px;color:var(--nz-amber,#d29922);user-select:none}
+.leaked-toolcall{display:block;border:1px solid var(--nz-amber,#d29922);border-radius:var(--nz-radius-md);margin:6px 0 2px;background:rgba(210,153,34,.07);overflow:hidden}
+.leaked-toolcall-summary{padding:5px 10px;cursor:pointer;font-size:var(--nz-fs-sm);color:var(--nz-amber,#d29922);user-select:none}
 .leaked-toolcall-summary::-webkit-details-marker{display:none}
 .leaked-toolcall-summary:hover{background:rgba(210,153,34,.12)}
-.leaked-toolcall-body{margin:0;padding:10px;background:var(--nz-bg-0);border-top:1px solid var(--nz-amber,#d29922);font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.5;color:var(--nz-text-dim,var(--nz-text));white-space:pre-wrap;word-break:break-word;max-height:400px;overflow:auto}
+.leaked-toolcall-body{margin:0;padding:10px;background:var(--nz-bg-0);border-top:1px solid var(--nz-amber,#d29922);font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;font-size:var(--nz-fs-sm);line-height:1.5;color:var(--nz-text-dim,var(--nz-text));white-space:pre-wrap;word-break:break-word;max-height:400px;overflow:auto}
 
 /* RFC §8.3 D9-D15 / §8.7 — feature-gated input controls. `feat-disabled`
    is the hard gate (control is unusable on this backend); cursor +
