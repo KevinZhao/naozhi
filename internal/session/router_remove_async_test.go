@@ -77,7 +77,7 @@ func TestRemoveAsync_UnregistersImmediately(t *testing.T) {
 
 	// Release the teardown and let the goroutine finish so Shutdown is clean.
 	close(proc.release)
-	r.removeWg.Wait()
+	r.pp.removeWg.Wait()
 	select {
 	case <-proc.closeDone:
 	case <-time.After(2 * time.Second):
@@ -98,7 +98,7 @@ func TestRemoveAsync_EventuallyClosesProc(t *testing.T) {
 	if !r.RemoveAsync(key) {
 		t.Fatalf("RemoveAsync returned false for present key")
 	}
-	r.removeWg.Wait() // wait for the detached teardown
+	r.pp.removeWg.Wait() // wait for the detached teardown
 
 	if proc.Alive() {
 		t.Fatalf("proc still alive after async teardown; Close was not called")
@@ -148,7 +148,7 @@ func TestRemoveAsync_DoubleRemoveSecondReturnsFalse(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	r.removeWg.Wait()
+	r.pp.removeWg.Wait()
 
 	if trueN != 1 {
 		t.Fatalf("expected exactly one RemoveAsync to win; got %d (results=%v)", trueN, results)
@@ -210,5 +210,5 @@ func TestRemoveAsync_FiresRetiredCallbackWithSessionID(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatalf("RemoveAsync did not fire OnSessionRetired within 3s")
 	}
-	r.removeWg.Wait()
+	r.pp.removeWg.Wait()
 }

@@ -1798,7 +1798,7 @@ func TestSpawnSession_SpawningKeysClearedOnFailure(t *testing.T) {
 	}
 
 	r.mu.Lock()
-	_, stillMarked := r.spawningKeys["key1"]
+	_, stillMarked := r.pp.spawningKeys["key1"]
 	r.mu.Unlock()
 	if stillMarked {
 		t.Error("spawningKeys still contains key1 after failed spawn")
@@ -1817,16 +1817,16 @@ func TestSpawningKeys_ObservableDuringSpawn(t *testing.T) {
 	// Simulate being inside spawnSession: caller enters with r.mu held,
 	// writes the marker, releases the lock for the Spawn() call.
 	r.mu.Lock()
-	if r.spawningKeys == nil {
-		r.spawningKeys = make(map[string]chan struct{})
+	if r.pp.spawningKeys == nil {
+		r.pp.spawningKeys = make(map[string]chan struct{})
 	}
 	doneCh := make(chan struct{})
-	r.spawningKeys["cron:abc"] = doneCh
+	r.pp.spawningKeys["cron:abc"] = doneCh
 	r.mu.Unlock()
 
 	// Reconcile's view: lock, snapshot, unlock.
 	r.mu.Lock()
-	_, spawning := r.spawningKeys["cron:abc"]
+	_, spawning := r.pp.spawningKeys["cron:abc"]
 	r.mu.Unlock()
 	if !spawning {
 		t.Fatal("reconcile should see spawningKeys marker and skip orphan check")
@@ -1836,11 +1836,11 @@ func TestSpawningKeys_ObservableDuringSpawn(t *testing.T) {
 	// delete mirror the production defer order in spawnSession).
 	r.mu.Lock()
 	close(doneCh)
-	delete(r.spawningKeys, "cron:abc")
+	delete(r.pp.spawningKeys, "cron:abc")
 	r.mu.Unlock()
 
 	r.mu.Lock()
-	_, stillMarked := r.spawningKeys["cron:abc"]
+	_, stillMarked := r.pp.spawningKeys["cron:abc"]
 	r.mu.Unlock()
 	if stillMarked {
 		t.Error("spawningKeys leaked after cleanup")
@@ -2547,7 +2547,7 @@ func TestInstallFreshSessionLocked_SignatureGuard(t *testing.T) {
 // guarantee: when the in-flight spawn for a key fails, every concurrent
 // GetOrCreate goroutine parked on the same key wakes immediately rather
 // than tick-polling. The test simulates the in-flight window by manually
-// installing a doneCh in r.spawningKeys (mirroring spawnSession's prologue),
+// installing a doneCh in r.pp.spawningKeys (mirroring spawnSession's prologue),
 // launches N concurrent GetOrCreate callers, and then performs the failure-
 // path defer (close + delete under r.mu) by hand. Every waiter must return
 // within 100ms (the historical poll interval was 20ms; instantaneous wakeup
@@ -2565,11 +2565,11 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 	// the inflight wait path. spawnSession uses the same pattern in its
 	// prologue (router_lifecycle.go ~line 549).
 	r.mu.Lock()
-	if r.spawningKeys == nil {
-		r.spawningKeys = make(map[string]chan struct{})
+	if r.pp.spawningKeys == nil {
+		r.pp.spawningKeys = make(map[string]chan struct{})
 	}
 	doneCh := make(chan struct{})
-	r.spawningKeys[key] = doneCh
+	r.pp.spawningKeys[key] = doneCh
 	r.mu.Unlock()
 
 	const N = 10
@@ -2595,7 +2595,7 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 	start := time.Now()
 	r.mu.Lock()
 	close(doneCh)
-	delete(r.spawningKeys, key)
+	delete(r.pp.spawningKeys, key)
 	r.mu.Unlock()
 
 	// All waiters should observe the close + retry the loop. With
@@ -2623,7 +2623,7 @@ func TestSpawningKeys_FailedSpawnWakesWaiters(t *testing.T) {
 
 // TestSpawningKeys_CloseBeforeDelete_Order pins the documented ordering
 // inside markSpawnDoneLocked: `close(ch)` must run BEFORE
-// `delete(r.spawningKeys, key)`. The helper godoc above the body in
+// `delete(r.pp.spawningKeys, key)`. The helper godoc above the body in
 // router_lifecycle.go (~line 530) explains why: a caller dispatched between
 // "lock acquired" and "delete returned" must observe the closed channel from
 // the still-present map entry, not a fresh nil from a re-arrived
@@ -2648,12 +2648,12 @@ func TestSpawningKeys_CloseBeforeDelete_Order(t *testing.T) {
 	if closeIdx < 0 {
 		t.Fatal("close(ch) not found in router_lifecycle.go — markSpawnDoneLocked refactored")
 	}
-	deleteIdx := strings.Index(body, "delete(r.spawningKeys, key)")
+	deleteIdx := strings.Index(body, "delete(r.pp.spawningKeys, key)")
 	if deleteIdx < 0 {
-		t.Fatal("delete(r.spawningKeys, key) not found in router_lifecycle.go — markSpawnDoneLocked refactored")
+		t.Fatal("delete(r.pp.spawningKeys, key) not found in router_lifecycle.go — markSpawnDoneLocked refactored")
 	}
 	if closeIdx >= deleteIdx {
-		t.Errorf("close(ch) at byte %d is not before delete(r.spawningKeys, key) at byte %d; "+
+		t.Errorf("close(ch) at byte %d is not before delete(r.pp.spawningKeys, key) at byte %d; "+
 			"the order in markSpawnDoneLocked is load-bearing for R243-ARCH-4 / R248-ARCH-10",
 			closeIdx, deleteIdx)
 	}
@@ -2676,16 +2676,16 @@ func TestSpawningKeys_CtxCancelPriorityOverDoneCh(t *testing.T) {
 	// Install an in-flight marker that we never close, so the doneCh arm
 	// stays not-ready. ctx.Done() must therefore be the first ready arm.
 	r.mu.Lock()
-	if r.spawningKeys == nil {
-		r.spawningKeys = make(map[string]chan struct{})
+	if r.pp.spawningKeys == nil {
+		r.pp.spawningKeys = make(map[string]chan struct{})
 	}
 	doneCh := make(chan struct{})
-	r.spawningKeys[key] = doneCh
+	r.pp.spawningKeys[key] = doneCh
 	r.mu.Unlock()
 	defer func() {
 		r.mu.Lock()
 		close(doneCh)
-		delete(r.spawningKeys, key)
+		delete(r.pp.spawningKeys, key)
 		r.mu.Unlock()
 	}()
 

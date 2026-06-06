@@ -8,7 +8,7 @@ import (
 )
 
 // TestSpawnSession_ReusesPreInstalledSpawningKey pins the #775 (R62-GO-3)
-// fix invariant: when r.spawningKeys[key] already contains a channel
+// fix invariant: when r.pp.spawningKeys[key] already contains a channel
 // (typically pre-installed by ResetAndRecreate before releasing r.mu for
 // proc.Close), spawnSession's prologue MUST reuse that channel rather than
 // overwrite it. Overwriting would orphan any GetOrCreate goroutine parked on
@@ -30,10 +30,10 @@ func TestSpawnSession_ReusesPreInstalledSpawningKey(t *testing.T) {
 	// r.mu held.
 	guardCh := make(chan struct{})
 	r.mu.Lock()
-	if r.spawningKeys == nil {
-		r.spawningKeys = make(map[string]chan struct{})
+	if r.pp.spawningKeys == nil {
+		r.pp.spawningKeys = make(map[string]chan struct{})
 	}
-	r.spawningKeys[key] = guardCh
+	r.pp.spawningKeys[key] = guardCh
 
 	// spawnSession will fail because newTestRouter's wrapper points at
 	// /nonexistent/cli-binary, but its defer (markSpawnDoneLocked) still
@@ -50,15 +50,15 @@ func TestSpawnSession_ReusesPreInstalledSpawningKey(t *testing.T) {
 		// ok — fix is in place
 	case <-time.After(2 * time.Second):
 		t.Fatal("guardCh was not closed by spawnSession's defer; " +
-			"prologue likely overwrote r.spawningKeys[key] with a fresh channel " +
+			"prologue likely overwrote r.pp.spawningKeys[key] with a fresh channel " +
 			"(regression of #775 / R62-GO-3 fix)")
 	}
 
 	// And the map entry should be cleared so the next caller can spawn.
 	r.mu.Lock()
-	if _, stillPresent := r.spawningKeys[key]; stillPresent {
+	if _, stillPresent := r.pp.spawningKeys[key]; stillPresent {
 		r.mu.Unlock()
-		t.Fatal("r.spawningKeys[key] still present after spawnSession returned; " +
+		t.Fatal("r.pp.spawningKeys[key] still present after spawnSession returned; " +
 			"markSpawnDoneLocked failed to delete the (possibly reused) entry")
 	}
 	r.mu.Unlock()
@@ -80,8 +80,8 @@ func TestSpawnSession_FreshKeyInstallsOwnChannel(t *testing.T) {
 	// On error path spawnSession unlocks; relock to inspect map state.
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, present := r.spawningKeys[key]; present {
-		t.Fatal("r.spawningKeys[key] leaked after spawnSession failed " +
+	if _, present := r.pp.spawningKeys[key]; present {
+		t.Fatal("r.pp.spawningKeys[key] leaked after spawnSession failed " +
 			"(defer should close+delete)")
 	}
 }
@@ -109,10 +109,10 @@ func TestResetAndRecreate_ConcurrentGetOrCreateBlocksOnGuard(t *testing.T) {
 	// proc.Close.
 	guardCh := make(chan struct{})
 	r.mu.Lock()
-	if r.spawningKeys == nil {
-		r.spawningKeys = make(map[string]chan struct{})
+	if r.pp.spawningKeys == nil {
+		r.pp.spawningKeys = make(map[string]chan struct{})
 	}
-	r.spawningKeys[key] = guardCh
+	r.pp.spawningKeys[key] = guardCh
 	r.mu.Unlock()
 
 	// Launch N concurrent GetOrCreate. With the guard installed, none
@@ -147,7 +147,7 @@ func TestResetAndRecreate_ConcurrentGetOrCreateBlocksOnGuard(t *testing.T) {
 	// fails fast against newTestRouter's nonexistent binary.
 	r.mu.Lock()
 	close(guardCh)
-	delete(r.spawningKeys, key)
+	delete(r.pp.spawningKeys, key)
 	r.mu.Unlock()
 
 	done := make(chan struct{})
