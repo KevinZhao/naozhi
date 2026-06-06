@@ -3,7 +3,6 @@ package sysession
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -90,8 +89,7 @@ func (r *runnerImpl) RunVision(ctx context.Context, stdinLine []byte, model stri
 	cmd.Stdout = &limitedWriter{w: &stdout, max: visionStdoutCapBytes}
 
 	if err := cmd.Run(); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil &&
-			(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
 		// Do NOT fold stderr into the error here: a vision stderr can echo

@@ -131,6 +131,107 @@ func TestDashboardJS_ActivityViewRouter(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_CronAttentionSingleFilter pins R20260606-CODE-1: within
+// fetchCronJobs, the attention count (paused/errored/missed jobs) must be
+// computed exactly once and shared by both cronBadge and railBadge.
+func TestDashboardJS_CronAttentionSingleFilter(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// Extract the body of fetchCronJobs by finding its function boundary.
+	funcStart := strings.Index(js, "async function fetchCronJobs()")
+	if funcStart == -1 {
+		t.Fatal("fetchCronJobs not found in dashboard.js")
+	}
+	// Find the matching closing brace by scanning from the opening '{'.
+	openBrace := strings.Index(js[funcStart:], "{")
+	if openBrace == -1 {
+		t.Fatal("fetchCronJobs opening brace not found")
+	}
+	body := js[funcStart+openBrace:]
+	depth, end := 0, -1
+	for i, ch := range body {
+		if ch == '{' {
+			depth++
+		} else if ch == '}' {
+			depth--
+			if depth == 0 {
+				end = i
+				break
+			}
+		}
+	}
+	if end == -1 {
+		t.Fatal("fetchCronJobs closing brace not found")
+	}
+	fnBody := body[:end+1]
+
+	const filterExpr = `cronJobs.filter(j => j.paused || j.last_error || j.missed).length`
+	// Within fetchCronJobs the expression must appear exactly once — a second
+	// occurrence would recompute on potentially stale data and is the defect we fixed.
+	first := strings.Index(fnBody, filterExpr)
+	if first == -1 {
+		t.Fatalf("attention filter expression not found in fetchCronJobs body")
+	}
+	if second := strings.Index(fnBody[first+len(filterExpr):], filterExpr); second != -1 {
+		t.Error("attention filter computed twice within fetchCronJobs — must be hoisted to a single const shared by cronBadge and railBadge")
+	}
+	// Both badges must reference the shared `attention` variable, not a new filter.
+	if !strings.Contains(fnBody, "railBadge.hidden = attention === 0") {
+		t.Error("railBadge must reference shared `attention` variable, not recompute")
+	}
+}
+
+// TestDashboardJS_SetActivityViewNoOpGuard pins R20260606-CODE-2: clicking an
+// already-active rail button must be a no-op (no WS teardown / re-fetch).
+// The guard must appear after the validity normalisation so an invalid view
+// is corrected to 'chat' before the no-op check runs.
+func TestDashboardJS_SetActivityViewNoOpGuard(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// The validity gate must come before the no-op guard.
+	validityGate := `if (ACTIVITY_VIEWS.indexOf(view) === -1) view = 'chat';`
+	noOpGuard := `if (view === activeView) return;`
+
+	vIdx := strings.Index(js, validityGate)
+	nIdx := strings.Index(js, noOpGuard)
+	if vIdx == -1 {
+		t.Fatal("validity gate not found in setActivityView")
+	}
+	if nIdx == -1 {
+		t.Fatal("no-op guard 'if (view === activeView) return;' not found in setActivityView")
+	}
+	if nIdx < vIdx {
+		t.Error("no-op guard appears before validity normalisation; must come after so invalid→'chat' is corrected first")
+	}
+}
+
+// TestDashboardJS_ValidDotClassesIncludesUnreachable pins R20260606-CODE-3:
+// 'unreachable' must be in VALID_DOT_CLASSES so ab-conn-dot and ns-dot
+// elements receive the correct CSS class (whose rules exist in dashboard.html)
+// instead of falling back to 'offline'.
+func TestDashboardJS_ValidDotClassesIncludesUnreachable(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	if !strings.Contains(js, `unreachable: 'unreachable'`) {
+		t.Error("VALID_DOT_CLASSES must include unreachable: 'unreachable' so the CSS rule is not a dead rule")
+	}
+}
+
 // TestDashboardHTML_RailA11yLabelsLocalized keeps the new rail buttons'
 // aria-labels in Chinese, consistent with the R149 localization contract for
 // top-nav controls.

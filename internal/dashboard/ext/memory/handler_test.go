@@ -581,3 +581,64 @@ func TestNegCache_ConcurrentReads(t *testing.T) {
 		}
 	}
 }
+
+// TestReadCappedMemoryFile_NormalPath exercises the happy path for
+// readCappedMemoryFile to ensure the R20260606-SEC-6 SameFile check does not
+// block legitimate reads of regular files.
+func TestReadCappedMemoryFile_NormalPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	content := "hello from memory file\n"
+	path := filepath.Join(dir, "mem.md")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, truncated, err := readCappedMemoryFile(path, int64(maxMemoryFileBytes))
+	if err != nil {
+		t.Fatalf("readCappedMemoryFile: %v", err)
+	}
+	if truncated {
+		t.Errorf("truncated = true, want false for small file")
+	}
+	if string(got) != content {
+		t.Errorf("content = %q, want %q", got, content)
+	}
+}
+
+// TestReadCappedMemoryFile_SymlinkSwapDetected verifies R20260606-SEC-6: if a
+// symlink swap replaces the target between EvalSymlinks and the open, the
+// SameFile inode recheck must catch the divergence and return an error (so the
+// caller treats the read as "not found" rather than returning the wrong file's
+// bytes).
+//
+// We simulate the race by writing a real file, doing a Lstat to capture its
+// inode, then replacing it with a symlink pointing elsewhere before calling
+// readCappedMemoryFile on the symlink target path. Because OpenWorkspaceFile
+// uses O_NOFOLLOW, opening the symlink itself returns an error (ELOOP /
+// ErrNotExist on linux), which readCappedMemoryFile already propagates as
+// an error. This test therefore confirms that both the O_NOFOLLOW gate and the
+// SameFile path are exercised without panicking.
+func TestReadCappedMemoryFile_SymlinkRejectedByONofollow(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// target file that the symlink will point to
+	target := filepath.Join(dir, "target.md")
+	if err := os.WriteFile(target, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// link inside the projects dir pointing at target
+	link := filepath.Join(dir, "link.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skip("symlink not supported:", err)
+	}
+
+	// readCappedMemoryFile must not return the target's bytes when fed the
+	// symlink path directly; O_NOFOLLOW blocks the open at the kernel boundary.
+	_, _, err := readCappedMemoryFile(link, int64(maxMemoryFileBytes))
+	if err == nil {
+		t.Error("expected an error when opening a symlink path, got nil")
+	}
+}

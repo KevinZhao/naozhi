@@ -408,11 +408,28 @@ func readCappedMemoryFile(path string, capBytes int64) ([]byte, bool, error) {
 	// final-component symlink kernel-atomically. os.ErrNotExist still
 	// propagates unchanged (callers collapse it to "slug not found"); an
 	// ELOOP symlink-swap surfaces as a generic error and fails closed.
+	//
+	// R20260606-SEC-6: Lstat before open so we can do a post-open SameFile
+	// inode recheck. O_NOFOLLOW blocks a symlink swap atomically, but a swap
+	// to a different regular file between EvalSymlinks and OpenWorkspaceFile
+	// is not caught by O_NOFOLLOW alone. SameFile(pre-Lstat, post-Fstat)
+	// verifies the descriptor is bound to the exact inode validated above.
+	li, err := os.Lstat(path)
+	if err != nil {
+		return nil, false, err
+	}
 	f, err := dashproject.OpenWorkspaceFile(path)
 	if err != nil {
 		return nil, false, err
 	}
 	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if !os.SameFile(li, fi) {
+		return nil, false, os.ErrNotExist
+	}
 	// Read capBytes+1 to detect overflow without a separate Stat — Stat may
 	// race with the read on a live FS (file growing/shrinking) and an extra
 	// syscall is wasteful for the common small-file path.
