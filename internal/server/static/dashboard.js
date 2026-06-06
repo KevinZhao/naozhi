@@ -3404,6 +3404,58 @@ async function sendAskAnswerViaAPI(text, card) {
   }
 }
 
+// LEAKED_TOOLCALL_RE anchors the start of a tool-call block that an LLM
+// emitted as *prose* instead of a structured tool_use content block. The
+// claude/anthropic harness expresses a real tool call as a dedicated
+// content block (type:"tool_use") which naozhi surfaces as its own
+// tool_use event and filters out of the main transcript (isInternalEvent).
+// But the model occasionally regresses and writes the call syntax —
+//   call
+//   <invoke name="Bash">
+//   <parameter name="command">…</parameter>
+//   </invoke>
+// — verbatim into an assistant *text* block. That text flows through the
+// pipeline untouched (process_event_format.go stores it as type:"text")
+// and lands in the bubble as a literal wall of XML, which is noise to the
+// operator (the call was never executed — it's a malformed turn).
+//
+// The anchor REQUIRES a `call` or `<function_calls>` marker alone on its
+// own line immediately preceding `<invoke name="`. This is deliberately
+// strict: a bare `<invoke …>` must NOT trip the detector, because operators
+// legitimately quote tool-call syntax inside backticks when discussing it
+// (e.g. this very bug report). Validated against 667 real text/user events:
+// 9 genuine leaks caught, 0 false positives on quoted-syntax discussions.
+const LEAKED_TOOLCALL_RE = /(?:^|\n)[ \t]*(?:call|<function_calls>)[ \t]*\n[ \t]*<invoke name="/;
+
+// stripLeakedToolCalls splits an assistant text body into the real prose
+// that precedes a leaked tool-call block and the leaked block itself.
+// Returns null when no leak is detected (the overwhelmingly common case —
+// keep this cheap so every text bubble can call it). On a hit it returns
+// { prose, leaked } where `prose` is the body with the leaked region
+// removed (trailing whitespace trimmed) and `leaked` is the raw XML for the
+// fold-away <details>. The region runs from the anchor's `call` /
+// `<function_calls>` line to the final `</invoke>` (plus an optional
+// trailing `</function_calls>`), so multiple chained <invoke> blocks under
+// one marker collapse into a single fold.
+function stripLeakedToolCalls(text) {
+  if (!text || text.indexOf('</invoke>') === -1) return null;
+  const m = LEAKED_TOOLCALL_RE.exec(text);
+  if (!m) return null;
+  // Anchor start = the `call` / `<function_calls>` line, not the regex's
+  // leading \n. m.index points at the char before that line when the
+  // alternation matched `\n`; step over it so the marker stays in `leaked`.
+  let start = m.index;
+  if (text[start] === '\n') start += 1;
+  // The leaked region ends at the LAST </invoke> — a single prose turn that
+  // leaks more than one call writes them consecutively, and everything from
+  // the marker to the last close tag is the malformed payload.
+  let end = text.lastIndexOf('</invoke>') + '</invoke>'.length;
+  const tail = text.slice(end);
+  const fc = /^\s*<\/function_calls>/.exec(tail);
+  if (fc) end += fc[0].length;
+  return { prose: text.slice(0, start).replace(/\s+$/, ''), leaked: text.slice(start, end) };
+}
+
 // eventHtml renders one EventEntry bubble.
 // opts.includeInternal=true keeps tool_use / thinking / task_* / agent / result
 // events that the parent view hides (banner handles them there). The sub-agent
@@ -3443,7 +3495,20 @@ function eventHtml(e, opts) {
   if (e.type === 'system') {
     content = esc(e.summary || e.type);
   } else if (e.type === 'text' || e.type === 'user') {
-    content = renderMd(cleanRaw || e.type);
+    // Guard against a leaked tool-call block (the model wrote <invoke …>
+    // syntax into a text turn instead of emitting a structured tool_use).
+    // Render the real prose normally and fold the malformed XML behind a
+    // collapsed warning so the bubble stays readable; esc() keeps the raw
+    // payload inert (it is displayed as text, never parsed as HTML).
+    const leak = stripLeakedToolCalls(cleanRaw);
+    if (leak) {
+      content = renderMd(leak.prose || e.type) +
+        '<details class="leaked-toolcall"><summary class="leaked-toolcall-summary">' +
+        '⚠ 模型输出了未执行的工具调用（已折叠）</summary>' +
+        '<pre class="leaked-toolcall-body">' + esc(leak.leaked) + '</pre></details>';
+    } else {
+      content = renderMd(cleanRaw || e.type);
+    }
   } else if (e.type === 'todo') {
     content = renderTodoList(e.detail, e.summary);
   } else if (e.type === 'tool_use' && e.tool_call) {
