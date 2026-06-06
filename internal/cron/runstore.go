@@ -1274,7 +1274,13 @@ func (s *runStore) List(jobID string, limit int, before time.Time) []CronRunSumm
 			return cached
 		}
 	}
-	rows, _, _ := s.diskListNewestFirst(jobID, limit, before)
+	rows, corruptCount, unreadableCount := s.diskListNewestFirst(jobID, limit, before)
+	if corruptCount > 0 {
+		slog.Warn("cron runstore List skipped corrupt run files", "count", corruptCount, "job_id", jobID)
+	}
+	if unreadableCount > 0 {
+		slog.Warn("cron runstore List skipped unreadable run files", "count", unreadableCount, "job_id", jobID)
+	}
 	return rows
 }
 

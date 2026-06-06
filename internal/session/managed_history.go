@@ -297,6 +297,27 @@ func (s *ManagedSession) persistedHistoryBefore(beforeMS int64, limit int) ([]cl
 // InjectHistory pre-populates the event log with historical entries.
 // Entries are saved to persistedHistory so they survive process restarts.
 func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
+	s.injectHistory(entries, false)
+}
+
+// InjectHistoryIfEmpty atomically injects entries only when persistedHistory is
+// currently empty, returning true if the injection happened. The emptiness
+// check and the append run under a single historyMu hold so concurrent startup
+// loaders (router_core.go Tier1/Tier2, #1812) and ReconnectShims cannot both
+// pass a separate hasInjectedHistory() check and double-append the same
+// conversation. Callers that previously did `if !s.hasInjectedHistory() { … ;
+// s.InjectHistory(…) }` have a check-then-act TOCTOU; this collapses it into
+// one critical section.
+func (s *ManagedSession) InjectHistoryIfEmpty(entries []cli.EventEntry) bool {
+	return s.injectHistory(entries, true)
+}
+
+// injectHistory is the shared implementation behind InjectHistory /
+// InjectHistoryIfEmpty. When onlyIfEmpty is true it returns false without
+// mutating state if persistedHistory already holds entries (checked under the
+// same lock that performs the append). When onlyIfEmpty is false it always
+// injects and returns true.
+func (s *ManagedSession) injectHistory(entries []cli.EventEntry, onlyIfEmpty bool) bool {
 	if len(entries) > maxPersistedHistory {
 		slog.Debug("inject history: batch exceeds cap, truncating oldest",
 			"key", s.key,
@@ -336,6 +357,15 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	// The orphan ring is GC'd when the last reference (this closure)
 	// drops, so the extra append is a harmless no-op rather than a leak.
 	s.historyMu.Lock()
+	// #1812: atomic check-then-act. When onlyIfEmpty is set the caller wants
+	// to inject exclusively — bail under the lock if another loader already
+	// populated persistedHistory, so two concurrent startup goroutines that
+	// both observed an empty session cannot both append (duplicated turns in
+	// the sidebar until restart).
+	if onlyIfEmpty && len(s.persistedHistory) > 0 {
+		s.historyMu.Unlock()
+		return false
+	}
 	// Monotonicity check (R237-PERF-12): when persistedHistory is empty
 	// or already known sorted AND the appended batch is internally sorted
 	// w.r.t. the existing tail, the flag stays/becomes true and
@@ -494,4 +524,5 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	if response != "" && loadAtomicString(&s.lastResponse) == "" {
 		storeAtomicString(&s.lastResponse, response)
 	}
+	return true
 }

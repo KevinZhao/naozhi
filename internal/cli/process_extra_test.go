@@ -1166,9 +1166,62 @@ func TestProcess_FindResultSince(t *testing.T) {
 
 	if r := p.findResultSince(1000); r == nil {
 		t.Error("should find result entry after 1000ms")
+	} else if r.Text != "done" {
+		t.Errorf("Text = %q; want %q (result entry carried Detail)", r.Text, "done")
 	}
 	if r := p.findResultSince(3000); r != nil {
 		t.Errorf("should not find entry at 3000ms, got %v", r)
+	}
+}
+
+// TestProcess_FindResultSince_RecoversTextFromAssistantEntry is the regression
+// test for R20260605B-CORR-1 (#1805). readLoop logs the assistant reply as a
+// "text" entry and the turn-boundary "result" entry with EMPTY Detail (only
+// Cost). When eventCh drops the result event under load, the legacy Send path
+// falls back to findResultSince; the old code returned SendResult{Text:
+// result.Detail} == "", silently blanking the reply on the ACP/cron path. The
+// fix recovers the text from the preceding "text" entry.
+func TestProcess_FindResultSince_RecoversTextFromAssistantEntry(t *testing.T) {
+	p, srv := shimTestPair(&ClaudeProtocol{})
+	go p.readLoop()
+	defer srv.Close()
+
+	// Realistic readLoop shape: an assistant "text" entry carrying the reply,
+	// then a "result" entry that carries cost only (Detail/Summary empty).
+	p.eventLog.Append(EventEntry{Type: "text", Summary: "Hello", Detail: "Hello, full answer.", Time: 1500})
+	p.eventLog.Append(EventEntry{Type: "result", Cost: 0.0042, Time: 2000})
+
+	r := p.findResultSince(1000)
+	if r == nil {
+		t.Fatal("findResultSince returned nil; want a recovered result")
+	}
+	if r.Text != "Hello, full answer." {
+		t.Errorf("Text = %q; want the recovered assistant text %q (#1805)", r.Text, "Hello, full answer.")
+	}
+	if r.CostUSD != 0.0042 {
+		t.Errorf("CostUSD = %v; want 0.0042 (cost must survive)", r.CostUSD)
+	}
+}
+
+// TestProcess_FindResultSince_EmptyWhenNoText pins the no-text-produced case:
+// a bare result entry with no preceding "text" entry recovers an empty Text
+// (no panic, no spurious text), preserving cost. R20260605B-CORR-1 (#1805).
+func TestProcess_FindResultSince_EmptyWhenNoText(t *testing.T) {
+	p, srv := shimTestPair(&ClaudeProtocol{})
+	go p.readLoop()
+	defer srv.Close()
+
+	p.eventLog.Append(EventEntry{Type: "result", Cost: 0.001, Time: 2000})
+
+	r := p.findResultSince(1000)
+	if r == nil {
+		t.Fatal("findResultSince returned nil; want a result with empty Text")
+	}
+	if r.Text != "" {
+		t.Errorf("Text = %q; want empty (turn produced no text entry)", r.Text)
+	}
+	if r.CostUSD != 0.001 {
+		t.Errorf("CostUSD = %v; want 0.001", r.CostUSD)
 	}
 }
 

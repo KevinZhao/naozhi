@@ -10,12 +10,11 @@ import (
 // router-level defaults, and a backend with no entry falls back cleanly.
 func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 	t.Run("falls back to router defaults when no backend entry", func(t *testing.T) {
-		r := &Router{
-			model:            "router-default",
-			extraArgs:        []string{"--router-flag"},
-			backendModels:    map[string]string{},
-			backendExtraArgs: map[string][]string{},
-		}
+		r := &Router{}
+		r.bkStore.model = "router-default"
+		r.bkStore.extraArgs = []string{"--router-flag"}
+		r.bkStore.backendModels = map[string]string{}
+		r.bkStore.backendExtraArgs = map[string][]string{}
 		gotModel, gotArgs := r.backendDefaultsFor("kiro")
 		if gotModel != "router-default" {
 			t.Errorf("model = %q, want router default", gotModel)
@@ -26,15 +25,14 @@ func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 	})
 
 	t.Run("per-backend override wins over router default", func(t *testing.T) {
-		r := &Router{
-			model:     "router-default",
-			extraArgs: []string{"--router-flag"},
-			backendModels: map[string]string{
-				"kiro": "kiro-model",
-			},
-			backendExtraArgs: map[string][]string{
-				"kiro": {"--kiro-flag"},
-			},
+		r := &Router{}
+		r.bkStore.model = "router-default"
+		r.bkStore.extraArgs = []string{"--router-flag"}
+		r.bkStore.backendModels = map[string]string{
+			"kiro": "kiro-model",
+		}
+		r.bkStore.backendExtraArgs = map[string][]string{
+			"kiro": {"--kiro-flag"},
 		}
 		gotModel, gotArgs := r.backendDefaultsFor("kiro")
 		if gotModel != "kiro-model" {
@@ -49,15 +47,14 @@ func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 		// Mirrors the pre-helper inline logic: empty model / nil-or-zero
 		// extraArgs entries did NOT clear router defaults — they were
 		// transparent. Documented elsewhere as `bm != ""` and `len(ba) > 0`.
-		r := &Router{
-			model:     "router-default",
-			extraArgs: []string{"--router-flag"},
-			backendModels: map[string]string{
-				"kiro": "",
-			},
-			backendExtraArgs: map[string][]string{
-				"kiro": nil,
-			},
+		r := &Router{}
+		r.bkStore.model = "router-default"
+		r.bkStore.extraArgs = []string{"--router-flag"}
+		r.bkStore.backendModels = map[string]string{
+			"kiro": "",
+		}
+		r.bkStore.backendExtraArgs = map[string][]string{
+			"kiro": nil,
 		}
 		gotModel, gotArgs := r.backendDefaultsFor("kiro")
 		if gotModel != "router-default" {
@@ -69,12 +66,11 @@ func TestBackendDefaultsFor_PrecedenceAndFallback(t *testing.T) {
 	})
 
 	t.Run("unknown backend ID falls through cleanly", func(t *testing.T) {
-		r := &Router{
-			model:     "router-default",
-			extraArgs: []string{"--router-flag"},
-			backendModels: map[string]string{
-				"kiro": "kiro-model",
-			},
+		r := &Router{}
+		r.bkStore.model = "router-default"
+		r.bkStore.extraArgs = []string{"--router-flag"}
+		r.bkStore.backendModels = map[string]string{
+			"kiro": "kiro-model",
 		}
 		gotModel, gotArgs := r.backendDefaultsFor("nonexistent")
 		if gotModel != "router-default" {

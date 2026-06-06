@@ -275,13 +275,14 @@ func (f *fakeProcess) setRunning(v bool) {
 
 // newTestRouter creates a Router with a failing wrapper so Spawn always errors.
 func newTestRouter(maxProcs int) *Router {
-	return &Router{
+	r := &Router{
 		sessions: make(map[string]*ManagedSession),
-		wrapper:  cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
 		maxProcs: maxProcs,
 		ttl:      30 * time.Minute,
 		pruneTTL: 72 * time.Hour,
 	}
+	r.bkStore.wrapper = cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
+	return r
 }
 
 // injectSession inserts a fake session directly into the router's session map.
@@ -918,34 +919,34 @@ func TestCleanupSkipsDeadProcess(t *testing.T) {
 
 // TestCleanup_PrunesBackendOverride verifies R70-ARCH-MED: a nil-process
 // session that ages past pruneTTL is removed from r.sessions AND its entry
-// in r.backendOverrides is freed. A previous version of shouldPrune-branch
+// in r.bkStore.backendOverrides is freed. A previous version of shouldPrune-branch
 // only touched r.sessions, so a session that was SetSessionBackend'd and
 // then never spawned (e.g. config error at spawn time) would leave a
 // backendOverride live forever. R71-TEST-M1.
 func TestCleanup_PrunesBackendOverride(t *testing.T) {
 	r := &Router{
-		sessions:         make(map[string]*ManagedSession),
-		backendOverrides: map[string]string{},
-		maxProcs:         3,
-		ttl:              1 * time.Minute,
-		pruneTTL:         1 * time.Hour,
+		sessions: make(map[string]*ManagedSession),
+		maxProcs: 3,
+		ttl:      1 * time.Minute,
+		pruneTTL: 1 * time.Hour,
 	}
+	r.bkStore.backendOverrides = map[string]string{}
 	// nil-process session past pruneTTL — shouldPrune returns true.
 	s := &ManagedSession{key: "k1"}
 	s.lastActive.Store(time.Now().Add(-2 * time.Hour).UnixNano())
 	r.sessions["k1"] = s
-	r.backendOverrides["k1"] = "kiro"
-	r.backendOverrides["other"] = "claude" // unrelated, must survive
+	r.bkStore.backendOverrides["k1"] = "kiro"
+	r.bkStore.backendOverrides["other"] = "claude" // unrelated, must survive
 
 	r.Cleanup()
 
 	if _, ok := r.sessions["k1"]; ok {
 		t.Error("pruned session should be gone from r.sessions")
 	}
-	if _, ok := r.backendOverrides["k1"]; ok {
+	if _, ok := r.bkStore.backendOverrides["k1"]; ok {
 		t.Error("pruned session's backendOverride should be freed")
 	}
-	if got := r.backendOverrides["other"]; got != "claude" {
+	if got := r.bkStore.backendOverrides["other"]; got != "claude" {
 		t.Errorf("unrelated backendOverride should survive, got %q", got)
 	}
 }
@@ -973,9 +974,9 @@ func TestUnregisterSessionLocked_KeepBackendOverride(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &Router{
-				sessions:         make(map[string]*ManagedSession),
-				backendOverrides: map[string]string{"k1": "kiro"},
+				sessions: make(map[string]*ManagedSession),
 			}
+			r.bkStore.backendOverrides = map[string]string{"k1": "kiro"}
 			s := &ManagedSession{key: "k1"}
 			s.setSessionID("sess-1")
 			r.sessions["k1"] = s
@@ -987,7 +988,7 @@ func TestUnregisterSessionLocked_KeepBackendOverride(t *testing.T) {
 			if _, ok := r.sessions["k1"]; ok {
 				t.Error("session must be removed from r.sessions regardless of keepBackendOverride")
 			}
-			got, ok := r.backendOverrides["k1"]
+			got, ok := r.bkStore.backendOverrides["k1"]
 			if tc.wantOverride == "" {
 				if ok {
 					t.Errorf("backendOverride must be freed, got %q", got)
@@ -1105,13 +1106,13 @@ func TestGetOrCreate_NilProcessSession_AttemptSpawn(t *testing.T) {
 
 func TestGetOrCreate_AgentOptsOverride(t *testing.T) {
 	r := &Router{
-		sessions:  make(map[string]*ManagedSession),
-		wrapper:   cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
-		maxProcs:  3,
-		ttl:       30 * time.Minute,
-		model:     "default-model",
-		extraArgs: []string{"--base-arg"},
+		sessions: make(map[string]*ManagedSession),
+		maxProcs: 3,
+		ttl:      30 * time.Minute,
 	}
+	r.bkStore.wrapper = cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude")
+	r.bkStore.model = "default-model"
+	r.bkStore.extraArgs = []string{"--base-arg"}
 
 	// Even with overrides, spawn will still fail — we just verify no panic.
 	_, _, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{
@@ -2163,26 +2164,26 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 	// backend-override cases have a real target.
 	mkRouter := func() *Router {
 		r := &Router{
-			sessions: make(map[string]*ManagedSession),
-			wrappers: map[string]*cli.Wrapper{
-				"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
-				"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
-			},
-			defaultBackend:   "claude",
-			model:            "sonnet-default",
-			extraArgs:        []string{"--flag-a"},
-			backendModels:    map[string]string{"kiro": "kiro-model"},
-			backendExtraArgs: map[string][]string{"kiro": {"--kiro-arg"}},
-			defaultCWD:       "/default/ws",
-			backendOverrides: make(map[string]string),
+			sessions:   make(map[string]*ManagedSession),
+			defaultCWD: "/default/ws",
 		}
+		r.bkStore.wrappers = map[string]*cli.Wrapper{
+			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+			"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
+		}
+		r.bkStore.defaultBackend = "claude"
+		r.bkStore.model = "sonnet-default"
+		r.bkStore.extraArgs = []string{"--flag-a"}
+		r.bkStore.backendModels = map[string]string{"kiro": "kiro-model"}
+		r.bkStore.backendExtraArgs = map[string][]string{"kiro": {"--kiro-arg"}}
+		r.bkStore.backendOverrides = make(map[string]string)
 		r.wsStore.overrides = make(map[string]string)
 		return r
 	}
 
 	t.Run("backendOverride wins when opts.Backend empty", func(t *testing.T) {
 		r := mkRouter()
-		r.backendOverrides["feishu:user:bob:agent1"] = "kiro"
+		r.bkStore.backendOverrides["feishu:user:bob:agent1"] = "kiro"
 		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "", AgentOpts{})
 		if sp.BackendID != "kiro" {
 			t.Errorf("BackendID = %q, want kiro", sp.BackendID)
@@ -2194,14 +2195,14 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 			t.Errorf("Args = %v, want [--kiro-arg]", sp.Args)
 		}
 		// Override is consumed (one-shot).
-		if _, still := r.backendOverrides["feishu:user:bob:agent1"]; still {
+		if _, still := r.bkStore.backendOverrides["feishu:user:bob:agent1"]; still {
 			t.Error("backendOverride was not consumed")
 		}
 	})
 
 	t.Run("opts.Backend beats backendOverride", func(t *testing.T) {
 		r := mkRouter()
-		r.backendOverrides["feishu:user:bob:agent1"] = "kiro"
+		r.bkStore.backendOverrides["feishu:user:bob:agent1"] = "kiro"
 		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "",
 			AgentOpts{Backend: "claude"})
 		if sp.BackendID != "claude" {
@@ -2271,7 +2272,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 
 	// Regression: a session whose process exited but whose entry is still
 	// in r.sessions must resume against the SAME backend it ran on. Before
-	// this fix, resolveSpawnParamsLocked fell through to r.defaultBackend
+	// this fix, resolveSpawnParamsLocked fell through to r.bkStore.defaultBackend
 	// when opts.Backend was empty AND backendOverrides[key] was already
 	// consumed (one-shot). For a kiro session that meant the second turn
 	// silently respawned under claude with the kiro session_id, which then
@@ -2325,7 +2326,7 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 		old := &ManagedSession{key: key}
 		old.SetBackend("kiro")
 		r.sessions[key] = old
-		r.backendOverrides[key] = "claude"
+		r.bkStore.backendOverrides[key] = "claude"
 		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{})
 		if sp.BackendID != "claude" {
 			t.Errorf("BackendID = %q, want claude (override wins over session)", sp.BackendID)

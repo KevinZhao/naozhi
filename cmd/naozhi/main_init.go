@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -166,12 +167,18 @@ func buildAgentOpts(cfg *config.Config) (map[string]session.AgentOpts, map[strin
 // resolves (cmd is then ""); ok=false surfaces the offending command so
 // main() can emit the operator-actionable os.Exit log unchanged. Extracted
 // from main() (R237-ARCH-8 / #590) so the cross-reference validation is
-// testable independent of process exit. Iteration order over a Go map is
-// unspecified, but the contract only promises "a" failing command, matching
-// the original loop's fail-on-first-seen behavior.
+// testable independent of process exit. Keys are sorted lexicographically
+// before iteration so that, when multiple commands are misconfigured, the
+// returned command is always the lexicographically smallest one — making
+// the startup abort message deterministic and reproducible across runs.
 func firstUndefinedAgentCommand(agentCommands map[string]string, agents map[string]session.AgentOpts) (string, bool) {
-	for cmd, agentID := range agentCommands {
-		if _, ok := agents[agentID]; !ok {
+	cmds := make([]string, 0, len(agentCommands))
+	for cmd := range agentCommands {
+		cmds = append(cmds, cmd)
+	}
+	sort.Strings(cmds)
+	for _, cmd := range cmds {
+		if _, ok := agents[agentCommands[cmd]]; !ok {
 			return cmd, false
 		}
 	}

@@ -21,7 +21,9 @@ func TestKnownSessionsCache_LookupPublishInvalidate(t *testing.T) {
 
 	// Publish then immediately read back the same shared snapshot.
 	want := map[string]struct{}{"sess-a": {}, "sess-b": {}}
-	c.publish(want)
+	if !c.publish(want, c.beginBuild()) {
+		t.Fatal("publish on a quiescent cache = false, want true")
+	}
 	got, ok := c.lookupFresh()
 	if !ok {
 		t.Fatal("fresh lookupFresh after publish = (_, false), want hit")
@@ -42,13 +44,57 @@ func TestKnownSessionsCache_LookupPublishInvalidate(t *testing.T) {
 	}
 
 	// Re-publish then invalidate: lookupFresh must miss again.
-	c.publish(want)
+	c.publish(want, c.beginBuild())
 	if _, ok := c.lookupFresh(); !ok {
 		t.Fatal("lookupFresh after re-publish = miss, want hit")
 	}
 	c.invalidate()
 	if set, ok := c.lookupFresh(); ok || set != nil {
 		t.Fatalf("lookupFresh after invalidate = (%v, %v), want (nil, false)", set, ok)
+	}
+}
+
+// TestKnownSessionsCache_PublishLosesToConcurrentInvalidate is the
+// regression test for R20260605B-CORR-7 (#1811): an invalidate() that lands
+// between a build's beginBuild() snapshot and its publish() must NOT be
+// clobbered. The set was built from source data older than the invalidate,
+// so publish must refuse to install it and lookupFresh must subsequently miss
+// (forcing a rebuild from current data) rather than serve the stale snapshot
+// for the full TTL.
+func TestKnownSessionsCache_PublishLosesToConcurrentInvalidate(t *testing.T) {
+	var c knownSessionsCache
+
+	// Reader builds a set from OLD data and snapshots the generation first.
+	buildGen := c.beginBuild()
+	stale := map[string]struct{}{"old-sess": {}}
+
+	// A concurrent mutator writes new data and invalidates the cache while
+	// the reader is still "building" (between beginBuild and publish).
+	c.invalidate()
+
+	// Reader publishes its now-stale set. It MUST be rejected.
+	if c.publish(stale, buildGen) {
+		t.Fatal("publish installed a set built before a concurrent invalidate — lost-invalidate race (#1811)")
+	}
+
+	// Cache must miss so the next caller rebuilds from current data rather
+	// than serving the stale snapshot.
+	if set, ok := c.lookupFresh(); ok || set != nil {
+		t.Fatalf("lookupFresh after rejected publish = (%v, %v), want (nil, false)", set, ok)
+	}
+
+	// A fresh build with no intervening invalidate publishes successfully.
+	buildGen = c.beginBuild()
+	fresh := map[string]struct{}{"new-sess": {}}
+	if !c.publish(fresh, buildGen) {
+		t.Fatal("publish on a quiescent cache = false, want true")
+	}
+	got, ok := c.lookupFresh()
+	if !ok {
+		t.Fatal("lookupFresh after clean publish = miss, want hit")
+	}
+	if _, has := got["new-sess"]; !has {
+		t.Fatal("clean publish did not install the fresh set")
 	}
 }
 
@@ -67,7 +113,7 @@ func TestKnownSessionsCache_ConcurrentReaders(t *testing.T) {
 
 	var c knownSessionsCache
 	seed := map[string]struct{}{"sess-x": {}, "sess-y": {}}
-	c.publish(seed)
+	c.publish(seed, c.beginBuild())
 
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -93,7 +139,7 @@ func TestKnownSessionsCache_ConcurrentReaders(t *testing.T) {
 		defer wg.Done()
 		<-start
 		for j := 0; j < 50; j++ {
-			c.publish(seed)
+			c.publish(seed, c.beginBuild())
 			c.invalidate()
 		}
 	}()
@@ -110,7 +156,7 @@ func TestKnownSessionsCache_ConcurrentReaders(t *testing.T) {
 // [R164029-GO-4].
 func TestKnownSessionsCache_RWMutex_ReadLock(t *testing.T) {
 	var c knownSessionsCache
-	c.publish(map[string]struct{}{"a": {}})
+	c.publish(map[string]struct{}{"a": {}}, c.beginBuild())
 
 	// Hold the RLock in one goroutine while a second goroutine also calls
 	// lookupFresh. Both must succeed without deadlocking.
