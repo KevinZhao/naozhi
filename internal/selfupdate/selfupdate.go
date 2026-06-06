@@ -150,6 +150,15 @@ var pinSha256HexRe = regexp.MustCompile(`^[A-Fa-f0-9]{64}$`)
 // against a leaked GitHub token swapping both files in lock-step. The pin
 // is a TOFU stopgap pending a proper signing flow (cosign / Sigstore).
 func Download(ctx context.Context, rel *Release, dir string) (binPath string, err error) {
+	// R20260606-SEC-2 (#1823): if the operator demanded strict integrity
+	// (NAOZHI_UPGRADE_REQUIRE_PIN) but no strong-trust anchor exists — no
+	// embedded signing key and no out-of-band checksums pin — refuse before
+	// touching the network rather than silently trusting the same-channel
+	// checksums.txt that a leaked release token could swap in lock-step.
+	if err := enforceStrongTrust(); err != nil {
+		return "", err
+	}
+
 	asset := assetName()
 	binPath = filepath.Join(dir, asset)
 

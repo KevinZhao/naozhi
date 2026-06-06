@@ -88,6 +88,29 @@ func isBlockedPeerAddr(addr netip.Addr) bool {
 	return addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast()
 }
 
+// isLocalPeerURL reports whether the cleaned peer URL targets a loopback or
+// RFC1918/ULA private literal IP host. These ranges are intentionally allowed
+// by validatePeerURL (documented multi-node loopback bridging / private-LAN
+// topology) but are also where a config-write attacker would point the
+// Bearer-token-carrying client at a co-located internal service. doRequest
+// uses this to apply a request-body cap to local peers only. A DNS hostname
+// (resolution not known at config time) is treated as non-local: the dial-time
+// guard screens its resolved IP for the link-local/IMDS hard-block, and a
+// hostname resolving into a private range is an operator's explicit choice that
+// should not gain the local body cap surprise. R20260606-SEC-5 (#1825).
+func isLocalPeerURL(cleanURL string) bool {
+	u, err := url.Parse(cleanURL)
+	if err != nil {
+		return false
+	}
+	addr, err := netip.ParseAddr(u.Hostname())
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	return addr.IsLoopback() || addr.IsPrivate()
+}
+
 // safeDialContext wraps the default dialer so that a DNS hostname which
 // resolves to a blocked (link-local/IMDS) address is refused before any TCP
 // connection opens. validatePeerURL only sees the config string at construction
