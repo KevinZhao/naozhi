@@ -291,6 +291,11 @@
   },
   {
     "method": "GET",
+    "path": "/static/nz_util.js",
+    "handler_type": "http.HandlerFunc"
+  },
+  {
+    "method": "GET",
     "path": "/sw.js",
     "handler_type": "http.HandlerFunc"
   },
